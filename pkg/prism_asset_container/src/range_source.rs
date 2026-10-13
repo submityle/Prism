@@ -41,9 +41,11 @@ impl std::error::Error for RangeSourceError {}
 
 /// A seekable byte source used by a runtime container.
 ///
-/// Implementations must serve exactly `out.len()` bytes starting at `offset`.
-/// The container reader uses this contract to validate only its header and
-/// directory at mount time, then fetches payload bytes on demand.
+/// Implementations must serve exactly `out.len()` bytes starting at `offset`
+/// and must return stable contents for the lifetime of every mounted reader.
+/// The container reader validates the complete source at mount time, then
+/// fetches payload bytes on demand; full-payload reads recheck the entry hash,
+/// but partial reads rely on this immutability contract.
 pub trait RangeSource: Send + Sync + fmt::Debug {
     /// Returns the immutable source length in bytes.
     fn len(&self) -> u64;

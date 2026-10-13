@@ -41,6 +41,8 @@ pub mod virtual_geometry;
 pub mod virtual_geometry_builder;
 /// QEM-backed static virtual-geometry LOD chain construction.
 pub mod virtual_geometry_lod;
+/// Versioned cluster-local position quantization payload codec.
+pub mod virtual_geometry_payload;
 
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcError, DerivedDataCache, LocalDdc};
@@ -74,4 +76,9 @@ pub use virtual_geometry_builder::{
 pub use virtual_geometry_lod::{
     build_static_virtual_geometry_lod_chain, StaticVirtualGeometryLod,
     StaticVirtualGeometryLodError,
+};
+pub use virtual_geometry_payload::{
+    decode_cluster_payload, encode_cluster_payload, ClusterPayloadError, QuantizedClusterPayload,
+    STATIC_CLUSTER_PAYLOAD_MAGIC as QUANTIZED_CLUSTER_PAYLOAD_MAGIC,
+    STATIC_CLUSTER_PAYLOAD_VERSION as QUANTIZED_CLUSTER_PAYLOAD_VERSION,
 };

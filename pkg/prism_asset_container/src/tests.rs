@@ -1,6 +1,6 @@
 use prism_asset::{AssetReader, StableGuid};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -201,6 +201,28 @@ fn file_range_source_mounts_and_supports_concurrent_payload_ranges() {
         let start = thread_index * 4096;
         assert_eq!(output, payload[start..start + 4096]);
     }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn read_all_rejects_payload_mutation_after_mount() {
+    let bytes = build(&[("mutated-after-mount.asset", b"original payload")]);
+    let path = temporary_container_path("mutated-after-mount");
+    fs::write(&path, &bytes).unwrap();
+
+    let reader =
+        ContainerReader::from_range_source(Arc::new(FileRangeSource::open(&path).unwrap()))
+            .unwrap();
+    let entry = reader.entry(guid("mutated-after-mount.asset")).unwrap();
+    let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+    file.seek(SeekFrom::Start(entry.offset)).unwrap();
+    file.write_all(b"tampered payload").unwrap();
+    file.sync_all().unwrap();
+
+    assert_eq!(
+        reader.read_all(entry.guid),
+        Err(ContainerError::HashMismatch)
+    );
     fs::remove_file(path).unwrap();
 }
 

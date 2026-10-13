@@ -9,7 +9,10 @@
 > - **调度/并发**：对接本仓 `prism_tasks`（work-stealing + 优先级 + 背压）承载加载作业图
 > 本文为纯经典资产系统/内容管线路线，**不含任何 AI/ML 内容**，不含任何 Unreal/Unity 源码或衍生代码。
 
-- 版本： v0.1（现状：M0 身份/存储/依赖核已落地并单测——`AssetIndex`/`AssetId`/`UntypedAssetId`、`AssetPath`、`Handle`/`WeakHandle`/`UntypedHandle`、代际 `Assets<A>` + `AssetEvent` + `remove_unused`、`DependencyGraph`（Kahn 拓扑 + 环检测）、`LoadState`/`RecursiveDependencyLoadState`，`no_std + alloc`、无 `unsafe`。本文为**全量重构蓝图**：不保留旧 API，身份/句柄/存储/依赖核在 M1 起按本文重铸，M1–M6 新增加载器/VFS/调度/流送/热重载/烘焙打包）
+- 版本：v0.2（开发中，允许破坏性调整；状态以本文“实施状态”和代码/测试为准）
+- 本文定位：运行时资产身份、存储、加载、VFS、热重载、流送与消费契约的**目标规格**；已交付能力与目标设计分开记录，不以设计段落冒充实现。
+- 当前基线：核心身份/存储/依赖核、同步 `AssetServer`/VFS/loader、bounded scheduler facade、watch/reload 切片和 raw 容器消费切片已存在；EDL 并行装配、完整流送/GPU 解码、发行容器能力和 ECS/渲染闭环仍未交付。
+- 兼容策略：开发期不承诺旧 API/格式兼容；一旦进入发行，`StableGuid`、容器 ToC、Runtime Manifest 和资产 ABI 必须通过显式 schema 版本与迁移窗口演进。
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_utils`（稳定哈希/句柄位打包/小容器）、`prism_tasks`（异步作业图/优先级/背压）、`prism_reflect`（导入设置/元数据序列化）、`prism_diagnostic`（计数器/trace）、可选 `prism_gdeflate_gpu`（GPU 解压）
 - 层级定位： 内容层 L5；上接场景/渲染/音频/动画/UI，下接 `prism_tasks`/`prism_vfs`/平台 I/O
@@ -18,7 +21,7 @@
 
 ### 实施状态（2026-10-13）
 
-以下状态只记录仓库中已存在、可运行并有测试覆盖的能力，不把设计文字当作实现：
+以下状态只记录仓库中已存在、可运行并有测试覆盖的能力，不把设计文字当作实现。容器安全边界同时以实现的读路径为准：挂载时校验的是当时读取到的完整字节；range source 在 reader 生命周期内必须保持不可变；整 payload `read_all` 再校验 entry digest，局部 `read_range` 不提供密码学子范围认证（详见 §10.5）。
 
 - **已完成**：`prism_asset` M0/M1 核（稳定身份、句柄、代际存储、依赖图、加载状态、错误注册、loader 选择与同步 `AssetServer`/VFS）；`prism_asset_container` 的 v1 原始 payload 容器读写、严格 ToC/哈希校验、范围读取与优先级 overlay；ChunkPlanner/Writer 的起始对齐约束、Runtime Manifest 的 manifest/chunk priority 传递、同名容器 remount 替换旧 mount，以及基于 `RangeSource` 的文件按范围读取（含 positional I/O、并发读取、短读/截断/篡改门禁）均已有测试覆盖。
 - **部分完成**：M2 已有同步装配之上的 bounded scheduler facade；它能做线程池投递、同路径合并、优先级提升、容量背压、消费者取消、waiter 生命周期清理和完成通知竞态防护，并有并发测试，但底层 `AssetServer` 仍由单 mutex 串行，尚不是设计中的 EDL/I/O-CPU 分离调度。
@@ -911,15 +914,17 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 
 ## 21. 路线图（M0–M6）与基准即规格
 
-- **M0 身份/存储/依赖核（已落地）**：`AssetIndex`/`AssetId`/`UntypedAssetId`、`AssetPath`、`Handle`/`WeakHandle`/`UntypedHandle`、代际 `Assets<A>` + `AssetEvent` + `remove_unused`、`DependencyGraph`（Kahn + 环检测）、`LoadState`。`no_std+alloc`、无 `unsafe`、单测绿。
-- **M1 内核重铸（本文核心改动）**：三层身份（+`StableGuid`/`AssetTypeId`）、`SoftHandle`、`AssetTypes` 类型擦除注册、`Asset` trait + `visit_dependencies`、`reserve/fulfill/fail` + 延迟回收 `ReleaseQueue`、依赖图增量就绪 + 失效接口、`AssetErrorId`/`ErrorRegistry`、`AssetPath<'a>` 借用 + `source://`。**废弃旧 insert/remove_unused/Failed(String)。**
-- **M2 加载管线（`std`+`async_io`）**：`AssetServer`（path↔guid↔index interning + load 去重）、`AssetLoader` trait + `LoadContext`（子资产/依赖）、`LoadScheduler` EDL 作业图（跑 `prism_tasks`）、`AssetSource`/`AssetReader`（`FsSource`/`MemSource`）、优先级 + 背压。
-- **M3 热重载（`hot_reload`）**：`watch` + 去抖、失效反向传播、后台重装配 + 原子 swap + `Modified`、依赖结构变更处理。
-- **M4 流送（`gpu_stream` 可选）**：`StreamingManager` 预算驱动 mip/LOD 驻留 + 请求打分 + 滞回 + 预取；`read_range` bulk 流送；DirectStorage 形态队列 + GDeflate GPU 解压（`prism_gdeflate_gpu`）+ CPU 回退。
-- **M5 资产包消费与容器挂载（`process`+`pack`）**：单文件资产包读取契约（内嵌导入设置，布局权威定义见 Asset Build §5.2）、`BakeService` 进程内重烘适配、`ContainerIo`（ToC+压缩分块）+ 挂载优先级 + 内容目录；当前已有 raw 容器/Manifest/overlay、独立确定性 ChunkPlanner 及其驱动的 v2 raw 物理布局，但尚未接入完整 Cook/发行闭包、分组与 patch 生产链，后者归 Asset Build §14。
-- **M6 集成**：ECS 资源/事件接线、渲染驻留事件桥、`prism_scene` 软引用实例化、编辑器/脚本经 `prism_reflect` 暴露、`prism_asset_import` 与 Asset Build 制品（`prism_asset_build_*`/`prism_bake_*`）对接。
+> 下列里程碑是交付顺序与验收目标，不是当前状态标签。当前状态只认本文 §实施状态和代码/测试证据。
 
-**基准即规格**：每里程碑以基准验收——M2 加载吞吐与加载墙、M3 热重载往返时延、M4 流送换入延迟/命中率/无卡顿、M5 容器挂载开销与读放大（增量烘焙耗时与打包体积属 Asset Build 基准）。核心价值在 **M2（异步装配）+ M4（流送）+ M5（资产包消费与挂载）**。
+- **M0 身份/存储/依赖核（已交付）**：`AssetIndex`/`AssetId`/`UntypedAssetId`、`AssetPath`、`Handle`/`WeakHandle`/`UntypedHandle`、代际 `Assets<A>` + `AssetEvent` + `remove_unused`、`DependencyGraph`（Kahn + 环检测）、`LoadState`。`no_std+alloc`、无 `unsafe`、单测绿。
+- **M1 内核重铸（已交付）**：三层身份（+`StableGuid`/`AssetTypeId`）、`SoftHandle`、类型擦除注册、`Asset` trait + `visit_dependencies`、`reserve/fulfill/fail` + 延迟回收、依赖图增量就绪/失效、`ErrorRegistry`、确定性 loader 选择。旧 API 已按开发期策略重铸。
+- **M2 加载管线（部分交付）**：`AssetServer`、`AssetLoader`/`LoadContext`、VFS、同步依赖装配与 bounded scheduler facade 已有；EDL 作业图、I/O-CPU 分离、真正并行装配仍待交付。
+- **M3 热重载（部分交付）**：watch/去抖、失效反向传播、reload plan、失败保留 last-known-good 和 `Modified` 已有；锁外异步重装配、完整 labeled revision 生命周期和跨平台安全打开语义仍待交付。
+- **M4 流送（目标）**：`StreamingManager`、预算/滞回/预取、块级校验、DirectStorage 形态队列和 GDeflate GPU 解压；当前未交付。
+- **M5 资产包消费与容器挂载（部分交付）**：raw 容器/Manifest/overlay、范围读取和 ChunkPlanner 驱动的 v2 raw 布局已有；完整 Chunk wire contract、压缩/加密/签名、Cook/发行闭环仍待交付。
+- **M6 集成（目标）**：ECS、渲染驻留、场景/编辑器和 Asset Build 制品的端到端接线。
+
+**基准即规格**：每个已交付切片先以功能/一致性/故障门禁验收；性能数字只有在固定数据集、硬件、构建模式、预热/冷启动和统计方法写入 benchmark 后才升级为 CI 阻断门槛。
 
 ---
 
@@ -967,9 +972,9 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 区分 `Immediate`（首帧可玩必需）与 `Streaming/Prefetch`（可后补），首帧只等 `Immediate` 闭包就绪即进入可玩，其余后台渐进流入——AAA「秒进游戏」的关键。配合 §23.2 分批与 §11 预取，隐藏加载长尾。
 ---
 
-## 24. 基准即规格：量化目标与验收门槛
+## 24. 基准目标（尚非已验证门槛）
 
-「基准即规格」要有数才算规格。下列目标为**验收门槛**（参考 NVMe SSD + 中端独显 PC 基线；移动/主机档位单独定标），每里程碑由基准守护，回归超阈值即红。数值随硬件基线校准，此处给工程量级而非终值。
+下列数值是**待测目标**，不是当前性能承诺或 CI 阻断条件。只有在仓库提供可复现 benchmark、固定资产集、固定硬件/OS/编译配置、预热与采样方法、统计分位和可接受方差后，才可针对对应实现切片设为验收门槛；未实现的里程碑不适用。NVMe + 中端独显仅是未来桌面基线候选，移动/主机需独立校准。
 
 | 维度 | 指标 | 目标门槛 | 关联里程碑 |
 |---|---|---|---|
@@ -987,7 +992,7 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 | DDC 命中 | 团队/CI 共享命中率 | 常态 > 90% | M5 |
 | 读放大 | 实际读/有效用 | 发行包 < 1.1× | M5 |
 
-**基准即 CI 门槛**：关键路径基准入 CI，设阈值与方差带；超阈值阻断合入。基准场景固定（可复现数据集），与确定性双跑（§25）同一套 CI。
+**CI 转门槛条件**：先提交固定 benchmark 数据集与运行脚本，记录硬件/OS/编译/温控与采样环境，报告 p50/p95/p99 及重复运行方差；至少建立可信基线后再设置告警/阻断阈值。当前表格本身不代表已有 benchmark 或 CI 门禁。
 
 ---
 

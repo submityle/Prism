@@ -23,7 +23,8 @@ enum Backing {
 /// Strict container reader. Mount validates the complete directory and every
 /// payload digest before the container can be mounted. A range-backed reader
 /// retains only the source and validated metadata; it never caches the whole
-/// file.
+/// file. Range sources must keep their byte contents immutable for the reader's
+/// lifetime; `read_all` additionally verifies the bytes it returns.
 #[derive(Clone, Debug)]
 pub struct ContainerReader {
     backing: Backing,
@@ -53,7 +54,10 @@ impl ContainerReader {
     /// Mounts and strictly validates a container through a seekable/range
     /// source. The source length must exactly match the header's `total_len`.
     /// Header, ToC, padding, and every raw payload are verified at mount time
-    /// in bounded chunks; the source is then used for all payload reads.
+    /// in bounded chunks; the source is then used for all payload reads. The
+    /// caller must ensure source contents remain immutable for this reader's
+    /// lifetime; range reads cannot re-verify a whole-payload digest without
+    /// reading the entire payload.
     pub fn from_range_source<S>(source: Arc<S>) -> Result<Self, ContainerError>
     where
         S: crate::RangeSource + 'static,
@@ -96,7 +100,9 @@ impl ContainerReader {
     }
 
     /// Reads a byte range from a raw payload. Payload integrity was verified
-    /// in full when this reader was constructed.
+    /// in full when this reader was constructed, and this operation relies on
+    /// the `RangeSource` remaining immutable. It does not authenticate the
+    /// requested subrange against the full-payload digest.
     pub fn read_range(
         &self,
         guid: StableGuid,
@@ -144,6 +150,9 @@ impl ContainerReader {
         let len = usize::try_from(entry.raw_len).map_err(|_| ContainerError::IntegerOverflow)?;
         let mut out = vec![0; len];
         self.read_range(guid, 0, &mut out)?;
+        if blake3::hash(&out).as_bytes() != &entry.hash {
+            return Err(ContainerError::HashMismatch);
+        }
         Ok(out)
     }
 }

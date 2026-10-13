@@ -8,6 +8,7 @@ use crate::types::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1232,7 +1233,7 @@ fn decode_manifest(
         let alignment = reader.u32()?;
         let dependency_count = reader.usize_count("manifest dependency count")?;
         let dependency_bytes = dependency_count
-            .checked_mul(std::mem::size_of::<ArtifactKey>())
+            .checked_mul(size_of::<ArtifactKey>())
             .ok_or(PublishError::Invalid("manifest dependency count overflows"))?;
         if dependency_bytes > reader.remaining() {
             return Err(PublishError::Invalid("manifest dependencies are truncated"));
