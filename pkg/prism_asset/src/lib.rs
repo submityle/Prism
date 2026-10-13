@@ -80,6 +80,8 @@ mod server;
 mod source;
 mod storage;
 mod stores;
+#[cfg(feature = "std")]
+mod streaming;
 mod type_id;
 #[cfg(feature = "std")]
 mod watch;
@@ -112,6 +114,11 @@ pub use server::AssetServer;
 pub use source::{AssetMeta, AssetReader, AssetSources, FsSource, MemSource, ReadError};
 pub use storage::Assets;
 pub use stores::{AssetStores, ErasedAssetStore, StoreError};
+#[cfg(feature = "std")]
+pub use streaming::{
+    BudgetKind, Hysteresis, Residency, ResidencyLimits, StreamError, StreamFailure, StreamRequest,
+    StreamRequestId, StreamState, StreamingController, SubmitError,
+};
 pub use type_id::AssetTypeId;
 #[cfg(feature = "std")]
 pub use watch::{AssetChange, AssetChangeKind, ChangeBatch, ChangeBatchBuilder};
