@@ -18,16 +18,23 @@ const MAGIC: &[u8; 4] = b"PRST";
 const VERSION: u16 = 1;
 
 /// Bounds applied while decoding an untrusted baked template.
-#[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TemplateDecodeLimits {
+    /// Maximum complete template byte length.
     pub max_bytes: usize,
+    /// Maximum embedded plan byte length.
     pub max_plan_bytes: usize,
+    /// Maximum entries in the local name table.
     pub max_names: usize,
+    /// Maximum UTF-8 bytes in one local name.
     pub max_name_bytes: usize,
+    /// Maximum nested instance slots.
     pub max_nested: usize,
+    /// Maximum explicit residency annotations.
     pub max_tiers: usize,
+    /// Maximum dependency GUIDs.
     pub max_dependencies: usize,
+    /// Limits forwarded to the embedded plan decoder.
     pub plan: PlanDecodeLimits,
 }
 
@@ -47,16 +54,23 @@ impl Default for TemplateDecodeLimits {
 }
 
 /// A malformed or unsafe template wire representation.
-#[allow(missing_docs)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TemplateCodecError {
+    /// The input does not contain the template magic.
     BadMagic,
+    /// The encoded version is not supported.
     UnsupportedVersion(u16),
+    /// The input ended before a complete value was available.
     Truncated,
+    /// Bytes remained after the template was decoded.
     TrailingBytes,
+    /// A count or byte length exceeded a configured limit.
     ResourceLimit(&'static str),
+    /// The wire value is not structurally valid.
     InvalidValue(&'static str),
+    /// The embedded plan failed decoding.
     InvalidPlan(PlanCodecError),
+    /// The complete descriptor failed semantic validation.
     InvalidTemplate(TemplateError),
 }
 
@@ -308,6 +322,29 @@ mod tests {
         assert_eq!(
             decode_template(&trailing, TemplateDecodeLimits::default()),
             Err(TemplateCodecError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn enforces_decode_limits_and_wire_headers() {
+        let encoded = encode_template(&template()).unwrap();
+        let mut tiny = TemplateDecodeLimits::default();
+        tiny.max_bytes = encoded.len() - 1;
+        assert_eq!(
+            decode_template(&encoded, tiny),
+            Err(TemplateCodecError::ResourceLimit("template bytes"))
+        );
+        let mut bad_magic = encoded.clone();
+        bad_magic[0] = b'X';
+        assert_eq!(
+            decode_template(&bad_magic, TemplateDecodeLimits::default()),
+            Err(TemplateCodecError::BadMagic)
+        );
+        let mut bad_version = encoded;
+        bad_version[4..6].copy_from_slice(&2u16.to_le_bytes());
+        assert_eq!(
+            decode_template(&bad_version, TemplateDecodeLimits::default()),
+            Err(TemplateCodecError::UnsupportedVersion(2))
         );
     }
 
