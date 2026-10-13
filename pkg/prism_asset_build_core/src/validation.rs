@@ -27,6 +27,16 @@ pub struct ValidationPolicy {
     pub max_dependency_edges: usize,
     /// Optional maximum size of an individual CAS blob.
     pub max_blob_bytes: Option<u64>,
+    /// Optional maximum declared size of one artifact.
+    ///
+    /// This limit is checked during manifest preflight, before any CAS read.
+    pub max_artifact_bytes: Option<u64>,
+    /// Optional maximum total size of unique artifact bytes in the manifest.
+    ///
+    /// Repeated references to the same content hash count once. The declared
+    /// sizes are checked before CAS reads and the verified CAS sizes are
+    /// checked again after each unique read.
+    pub max_total_manifest_bytes: Option<u64>,
     /// Require every descriptor dependency to be present in this manifest.
     pub require_dependency_closure: bool,
 }
@@ -38,6 +48,8 @@ impl Default for ValidationPolicy {
             max_dependencies_per_artifact: 1_000_000,
             max_dependency_edges: 10_000_000,
             max_blob_bytes: None,
+            max_artifact_bytes: None,
+            max_total_manifest_bytes: None,
             require_dependency_closure: true,
         }
     }
@@ -132,6 +144,26 @@ pub enum ValidationError {
         /// Maximum permitted size.
         max: u64,
     },
+    /// An artifact exceeds the configured per-artifact byte budget.
+    ArtifactBytesTooLarge {
+        /// Logical asset containing the oversized artifact.
+        asset: u128,
+        /// Artifact key associated with the oversized artifact.
+        key: ArtifactKey,
+        /// Declared artifact size.
+        actual: u64,
+        /// Maximum permitted artifact size.
+        max: u64,
+    },
+    /// The unique artifact bytes in a manifest exceed the configured budget.
+    ManifestBytesTooLarge {
+        /// Total unique artifact bytes observed or declared.
+        actual: u64,
+        /// Maximum permitted total size.
+        max: u64,
+    },
+    /// Unique-byte accounting overflowed the representable counter.
+    ManifestBytesOverflow,
     /// CAS could not read or verify an artifact blob.
     Cas {
         /// Logical asset containing the unreadable blob.
@@ -244,6 +276,23 @@ impl fmt::Display for ValidationError {
                 "asset {asset} artifact {} is {actual} bytes, maximum is {max}",
                 key.to_hex()
             ),
+            Self::ArtifactBytesTooLarge {
+                asset,
+                key,
+                actual,
+                max,
+            } => write!(
+                f,
+                "asset {asset} artifact {} is {actual} bytes, artifact maximum is {max}",
+                key.to_hex()
+            ),
+            Self::ManifestBytesTooLarge { actual, max } => write!(
+                f,
+                "manifest contains {actual} unique artifact bytes, maximum is {max}"
+            ),
+            Self::ManifestBytesOverflow => {
+                f.write_str("manifest unique artifact byte accounting overflowed")
+            }
             Self::Cas { asset, key, source } => write!(
                 f,
                 "asset {asset} artifact {} failed CAS validation: {source}",
@@ -387,10 +436,21 @@ impl ArtifactQualityGate {
         }
         validate_acyclic(&descriptors)?;
 
-        let mut checked_bytes = 0u64;
-        let mut checked_blobs = BTreeSet::new();
-        let mut blob_lengths = BTreeMap::<ContentHash, u64>::new();
+        // Preflight all declared byte budgets before touching CAS. The
+        // manifest is BTreeMap-backed, so the first diagnostic and the
+        // aggregate accounting order are stable across runs.
+        let mut declared_unique_bytes = BTreeMap::<ContentHash, u64>::new();
         for (asset, descriptor) in &manifest.entries {
+            if let Some(max) = self.policy.max_artifact_bytes
+                && descriptor.byte_len > max
+            {
+                return Err(ValidationError::ArtifactBytesTooLarge {
+                    asset: asset.0,
+                    key: descriptor.key,
+                    actual: descriptor.byte_len,
+                    max,
+                });
+            }
             if let Some(max) = self.policy.max_blob_bytes
                 && descriptor.byte_len > max
             {
@@ -401,6 +461,33 @@ impl ArtifactQualityGate {
                     max,
                 });
             }
+
+            // A malformed manifest may use one content hash with conflicting
+            // declared lengths. Keep the largest declaration for conservative
+            // preflight accounting; CAS verification still reports the exact
+            // descriptor mismatch after the first read.
+            let entry = declared_unique_bytes
+                .entry(descriptor.content_hash)
+                .or_insert(0);
+            *entry = (*entry).max(descriptor.byte_len);
+        }
+        let declared_total = declared_unique_bytes
+            .values()
+            .try_fold(0u64, |total, length| total.checked_add(*length));
+        let declared_total = declared_total.ok_or(ValidationError::ManifestBytesOverflow)?;
+        if let Some(max) = self.policy.max_total_manifest_bytes
+            && declared_total > max
+        {
+            return Err(ValidationError::ManifestBytesTooLarge {
+                actual: declared_total,
+                max,
+            });
+        }
+
+        let mut checked_bytes = 0u64;
+        let mut checked_blobs = BTreeSet::new();
+        let mut blob_lengths = BTreeMap::<ContentHash, u64>::new();
+        for (asset, descriptor) in &manifest.entries {
             let actual = if let Some(actual) = blob_lengths.get(&descriptor.content_hash) {
                 *actual
             } else {
@@ -414,27 +501,39 @@ impl ArtifactQualityGate {
                 let actual = bytes.len() as u64;
                 blob_lengths.insert(descriptor.content_hash, actual);
                 checked_blobs.insert(descriptor.content_hash);
-                checked_bytes =
-                    checked_bytes
-                        .checked_add(actual)
-                        .ok_or(ValidationError::BlobTooLarge {
-                            asset: asset.0,
-                            key: descriptor.key,
-                            actual,
-                            max: u64::MAX,
-                        })?;
+                if let Some(max) = self.policy.max_artifact_bytes
+                    && actual > max
+                {
+                    return Err(ValidationError::ArtifactBytesTooLarge {
+                        asset: asset.0,
+                        key: descriptor.key,
+                        actual,
+                        max,
+                    });
+                }
+                if let Some(max) = self.policy.max_blob_bytes
+                    && actual > max
+                {
+                    return Err(ValidationError::BlobTooLarge {
+                        asset: asset.0,
+                        key: descriptor.key,
+                        actual,
+                        max,
+                    });
+                }
+                checked_bytes = checked_bytes
+                    .checked_add(actual)
+                    .ok_or(ValidationError::ManifestBytesOverflow)?;
+                if let Some(max) = self.policy.max_total_manifest_bytes
+                    && checked_bytes > max
+                {
+                    return Err(ValidationError::ManifestBytesTooLarge {
+                        actual: checked_bytes,
+                        max,
+                    });
+                }
                 actual
             };
-            if let Some(max) = self.policy.max_blob_bytes
-                && actual > max
-            {
-                return Err(ValidationError::BlobTooLarge {
-                    asset: asset.0,
-                    key: descriptor.key,
-                    actual,
-                    max,
-                });
-            }
             if actual != descriptor.byte_len {
                 return Err(ValidationError::BlobLengthMismatch {
                     asset: asset.0,
@@ -608,6 +707,158 @@ mod tests {
             .validate_manifest(&manifest(vec![(2, output)]), &cas)
             .unwrap_err();
         assert!(matches!(error, ValidationError::MissingDependency { .. }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_policy_keeps_byte_budgets_unbounded() {
+        let policy = ValidationPolicy::default();
+        assert_eq!(policy.max_artifact_bytes, None);
+        assert_eq!(policy.max_total_manifest_bytes, None);
+    }
+
+    #[test]
+    fn rejects_artifact_budget_before_reading_cas() {
+        let root = temp_dir("artifact-budget");
+        let cas = ContentAddressedStore::open(root.join("cas")).unwrap();
+        let artifact = descriptor(1, b"payload", vec![]);
+        let mut policy = ValidationPolicy::default();
+        policy.max_artifact_bytes = Some(3);
+
+        let error = ArtifactQualityGate::new(policy)
+            .validate_manifest(&manifest(vec![(1, artifact)]), &cas)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ValidationError::ArtifactBytesTooLarge {
+                actual: 7,
+                max: 3,
+                ..
+            }
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_total_manifest_budget_before_reading_cas() {
+        let root = temp_dir("manifest-budget");
+        let cas = ContentAddressedStore::open(root.join("cas")).unwrap();
+        let first = descriptor(1, b"first", vec![]);
+        let second = descriptor(2, b"second", vec![]);
+        let mut policy = ValidationPolicy::default();
+        policy.max_total_manifest_bytes = Some(10);
+
+        let error = ArtifactQualityGate::new(policy)
+            .validate_manifest(&manifest(vec![(1, first), (2, second)]), &cas)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ValidationError::ManifestBytesTooLarge {
+                actual: 11,
+                max: 10
+            }
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn total_manifest_budget_counts_shared_content_once() {
+        let root = temp_dir("shared-manifest-budget");
+        let cas = ContentAddressedStore::open(root.join("cas")).unwrap();
+        let shared = descriptor(1, b"shared", vec![]);
+        let mut second = shared.clone();
+        second.key = ArtifactKey([2; 32]);
+        let mut policy = ValidationPolicy::default();
+        policy.max_total_manifest_bytes = Some(6);
+        cas.put(b"shared").unwrap();
+
+        let report = ArtifactQualityGate::new(policy)
+            .validate_manifest(&manifest(vec![(1, shared), (2, second)]), &cas)
+            .unwrap();
+        assert_eq!(report.checked_blobs, 1);
+        assert_eq!(report.checked_bytes, 6);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn total_manifest_budget_accounting_is_deterministic() {
+        let first = descriptor(1, b"first", vec![]);
+        let second = descriptor(2, b"second", vec![]);
+        let mut policy = ValidationPolicy::default();
+        policy.max_total_manifest_bytes = Some(10);
+        let gate = ArtifactQualityGate::new(policy);
+
+        let root = temp_dir("deterministic-manifest-budget");
+        let cas = ContentAddressedStore::open(root.join("cas")).unwrap();
+        let forward = gate
+            .validate_manifest(
+                &manifest(vec![(1, first.clone()), (2, second.clone())]),
+                &cas,
+            )
+            .unwrap_err();
+        let reverse = gate
+            .validate_manifest(&manifest(vec![(2, second), (1, first)]), &cas)
+            .unwrap_err();
+        assert!(matches!(
+            forward,
+            ValidationError::ManifestBytesTooLarge {
+                actual: 11,
+                max: 10
+            }
+        ));
+        assert!(matches!(
+            reverse,
+            ValidationError::ManifestBytesTooLarge {
+                actual: 11,
+                max: 10
+            }
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn actual_artifact_bytes_budget_rejects_after_cas_read() {
+        let root = temp_dir("actual-artifact-budget");
+        let cas = ContentAddressedStore::open(root.join("cas")).unwrap();
+        let bytes = b"payload";
+        let mut artifact = descriptor(1, bytes, vec![]);
+        artifact.byte_len = 1;
+        cas.put(bytes).unwrap();
+        let mut policy = ValidationPolicy::default();
+        policy.max_artifact_bytes = Some(3);
+
+        let error = ArtifactQualityGate::new(policy)
+            .validate_manifest(&manifest(vec![(1, artifact)]), &cas)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ValidationError::ArtifactBytesTooLarge {
+                actual: 7,
+                max: 3,
+                ..
+            }
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn actual_unique_bytes_budget_rejects_underdeclared_blob_after_read() {
+        let root = temp_dir("actual-manifest-budget");
+        let cas = ContentAddressedStore::open(root.join("cas")).unwrap();
+        let bytes = b"payload";
+        let mut artifact = descriptor(1, bytes, vec![]);
+        artifact.byte_len = 1;
+        cas.put(bytes).unwrap();
+        let mut policy = ValidationPolicy::default();
+        policy.max_total_manifest_bytes = Some(3);
+
+        let error = ArtifactQualityGate::new(policy)
+            .validate_manifest(&manifest(vec![(1, artifact)]), &cas)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ValidationError::ManifestBytesTooLarge { actual: 7, max: 3 }
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
