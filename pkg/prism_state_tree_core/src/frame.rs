@@ -123,6 +123,24 @@ impl FrameLayout {
         &self.fields
     }
 
+    /// Returns a deterministic layout fingerprint for snapshot compatibility checks.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        let mut hash = 0xcbf29ce484222325;
+        for field in &self.fields {
+            for value in [
+                field.slot.0 as u64,
+                field.offset as u64,
+                field.size as u64,
+                field.align as u64,
+            ] {
+                hash ^= value;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        hash ^ self.size as u64 ^ self.align as u64
+    }
+
     fn field(&self, slot: BindingSlot) -> Result<FrameField, FrameError> {
         self.fields
             .binary_search_by_key(&slot, |field| field.slot)
@@ -194,6 +212,7 @@ mod tests {
             FrameLayout::compile(vec![(BindingSlot(2), 4, 4), (BindingSlot(0), 1, 1)]).unwrap();
         assert_eq!(layout.fields()[0].slot, BindingSlot(0));
         assert_eq!(layout.fields()[1].offset, 4);
+        assert_ne!(layout.fingerprint(), 0);
         let mut frame = InstanceFrame::new(layout);
         frame.write(BindingSlot(2), 0..4, &[1, 2, 3, 4]).unwrap();
         assert_eq!(frame.read(BindingSlot(2), 1..3).unwrap(), &[2, 3]);

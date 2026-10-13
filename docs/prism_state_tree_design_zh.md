@@ -16,7 +16,7 @@
 > 本文聚焦「**语义正确 + 数据导向 + 可作者化 + 可调试 + 可网络化**」的工程路线；不复刻 UE/Unity 的对象模型与源码，只借其**状态语义边界、任务生命周期、绑定心智与调试形态**；核心抽象 `no_std + alloc` 友好，ECS/资产/编辑器/调试层需 `std`；**不依赖任何 `bevy_*` crate**。
 
 - 版本: v0.2（ST0 核心语义内核与 Schema/Context 基础契约同步版）
-- 状态: **ST0 CORE SHIPPED / ST1 ECS 最小装配切片已实现 / ST2 数据层基础契约、实例帧布局与反射读取切片已实现 / ST2–ST8 其余能力 PLANNED**（ST1 的共享 Plan、逐实体 runtime 组件、CommandQueue 延迟 spawn、显式 tick/event 路径、确定性 ECS gather、显式 Schedule、opt-in `StateTreePlugin`、payload lifecycle Events、typed ECS Context gather 及 core Schema/Context 基础契约已交付；ST2 已交付 host-neutral binding path/slot/dependency contract，以及可选 `reflect` feature 的编译型 `prism_reflect::AccessPlan` 读取与目标类型校验；instance frame、zero-config 自动插件、observer marker 迁移桥接等仍按路线图推进，依赖项落地状态见 §2.1 与 §20）
+- 状态: **ST0 CORE SHIPPED / ST1 ECS 最小装配切片已实现 / ST2 数据层基础契约、实例帧布局与反射读取切片已实现 / ST2–ST8 其余能力 PLANNED**（ST1 的共享 Plan、逐实体 runtime 组件、CommandQueue 延迟 spawn、显式 tick/event 路径、确定性 ECS gather、显式 Schedule、opt-in `StateTreePlugin`、payload lifecycle Events、typed ECS Context gather 及 core Schema/Context 基础契约已交付；ST2 已交付 host-neutral binding path/slot/dependency contract、无 unsafe 的 instance frame 布局与可选 `reflect` feature 的编译型 `prism_reflect::AccessPlan` 读写和目标类型校验；反射值到 frame 的自动桥接、zero-config 自动插件、observer marker 迁移桥接等仍按路线图推进，依赖项落地状态见 §2.1 与 §20）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 层级定位: **通用决策运行时，非 AI 专属**。AI 是首要消费者而非所有者。上承 `prism_gameplay_*`（AI/能力/流程/交互）、动画与 UI 流程；内嵌 `prism_ecs` 调度，**不进内核仿真内循环**（ECS 存储遍历、物理 solver、渲染 RG 永远走原生路径）
 - 关键依赖（均为 `pkg/` 下的 prism 原生 crate，落地状态见 §2.1）: `prism_ecs`（observer/reaction/relation/snapshot：迁移事件的即时响应与回滚底座）、`prism_app`（Plugin/Schedule/`fixed`/`determinism`/`state`：相位与固定步）、`prism_reflect`（`path`/`schema`/`dynamic`/`property_bridge`：动态绑定路径、资产 schema、版本迁移）、`prism_tasks`（off-thread 编译、批量并行执行）、`prism_asset`（树资产加载/mtime 监视/热重载）、`prism_diagnostic`（budget/hitch/profiler/replay：调试器与帧预算）、`prism_time`（timeline/recording/确定性时间源）、`prism_ui*` + `prism_editor_framework`（图编辑器宿主与调试 HUD）
@@ -911,7 +911,7 @@ Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `Sch
 |---|---|---|
 | 状态图语义（并行/历史/微步）实现复杂度高 | 正确性风险 | §15.1 规范对照套件；语义先行；禁止「差不多实现」 |
 | 双运行时（游标 + 批量）语义漂移 | 同一棵树两种行为 | §15.3 parity 测试作为强制门禁 |
-| 实例帧布局变更破坏存档/回滚 | 兼容性风险 | `prism_reflect` schema 版本 + `SaveMigration`；布局哈希进快照 |
+| 实例帧布局变更破坏存档/回滚 | 兼容性风险 | `prism_reflect` schema 版本 + `SaveMigration`；`FrameLayout::fingerprint()` 布局指纹进快照 |
 | 网络版本不一致 | 行为分叉 | `PlanRev` 握手 + 不一致降级 `ServerOnly` |
 | 作者化工具链工作量 | 迭代速度 | 复用 `prism_visual_scripting` 画布与 `prism_ui*`，不自建编辑器 |
 | `graph`/`reactive` 前置未就绪 | 部分 feature 阻塞 | ST0–ST4 不依赖它们；`reactive` 缺失时 Evaluator 退化为轮询 cadence |
