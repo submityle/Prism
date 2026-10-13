@@ -18,6 +18,7 @@ const CHECKSUM_LEN: usize = 32;
 const MAX_ENTRIES: u64 = 1_000_000;
 const MAX_DEPENDENCIES: u64 = 1_000_000;
 const TEMP_PREFIX: &str = ".index.ddc.tmp-";
+const MIN_ENCODED_INDEX_BYTES: usize = MAGIC.len() + 4 + 8 + CHECKSUM_LEN;
 static PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Failure while opening or mutating a local DDC.
@@ -31,6 +32,11 @@ pub enum DdcError {
     HashMismatch {
         expected: ContentHash,
         actual: ContentHash,
+    },
+    InvalidCapacity(&'static str),
+    CapacityInsufficient {
+        max_encoded_bytes: usize,
+        minimum_encoded_bytes: usize,
     },
     KeyConflict {
         key: ArtifactKey,
@@ -51,6 +57,14 @@ impl fmt::Display for DdcError {
                 "DDC index hash mismatch: expected {}, got {}",
                 expected.to_hex(),
                 actual.to_hex()
+            ),
+            Self::InvalidCapacity(reason) => write!(f, "invalid DDC capacity: {reason}"),
+            Self::CapacityInsufficient {
+                max_encoded_bytes,
+                minimum_encoded_bytes,
+            } => write!(
+                f,
+                "DDC encoded-byte capacity {max_encoded_bytes} is below the empty index minimum {minimum_encoded_bytes}"
             ),
             Self::KeyConflict { key, reason } => {
                 write!(f, "DDC key {} conflicts: {reason}", key.to_hex())
@@ -95,6 +109,68 @@ pub type Ddc = DerivedDataCache;
 /// Compatibility-oriented name for [`DerivedDataCache`].
 pub type LocalDdc = DerivedDataCache;
 
+/// Explicit upper bounds used by [`DerivedDataCache::evict_to_capacity`].
+///
+/// At least one bound must be present. `max_entries = Some(0)` is valid and
+/// means that the explicit eviction operation may empty the index. The byte
+/// bound includes the complete encoded index (header and checksum), not CAS
+/// payload bytes. No bound is applied implicitly by [`DerivedDataCache::put`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DdcCapacity {
+    pub max_entries: Option<usize>,
+    pub max_encoded_bytes: Option<usize>,
+}
+
+impl DdcCapacity {
+    pub fn new(
+        max_entries: Option<usize>,
+        max_encoded_bytes: Option<usize>,
+    ) -> Result<Self, DdcError> {
+        let capacity = Self {
+            max_entries,
+            max_encoded_bytes,
+        };
+        capacity.validate()?;
+        Ok(capacity)
+    }
+
+    fn validate(self) -> Result<(), DdcError> {
+        if self.max_entries.is_none() && self.max_encoded_bytes.is_none() {
+            return Err(DdcError::InvalidCapacity(
+                "at least one upper bound is required",
+            ));
+        }
+        if self
+            .max_entries
+            .is_some_and(|value| value as u64 > MAX_ENTRIES)
+        {
+            return Err(DdcError::InvalidCapacity(
+                "max_entries exceeds the DDC format limit",
+            ));
+        }
+        if self
+            .max_encoded_bytes
+            .is_some_and(|value| value < MIN_ENCODED_INDEX_BYTES)
+        {
+            return Err(DdcError::CapacityInsufficient {
+                max_encoded_bytes: self.max_encoded_bytes.unwrap(),
+                minimum_encoded_bytes: MIN_ENCODED_INDEX_BYTES,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Result of one explicit, atomically published capacity-eviction operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DdcEviction {
+    /// Keys removed in the deterministic order in which they were selected.
+    /// The current policy is ascending [`ArtifactKey`] order, not LRU.
+    pub evicted_keys: Vec<ArtifactKey>,
+    /// Byte length of the complete encoded index after the operation.
+    pub encoded_bytes: usize,
+}
+
 impl DerivedDataCache {
     /// Opens (or creates) the DDC directory and restores its index.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, DdcError> {
@@ -132,6 +208,9 @@ impl DerivedDataCache {
     /// A descriptor is immutable for a given semantic key. Re-inserting the
     /// exact same descriptor is an idempotent success; a different descriptor
     /// is rejected as a key conflict instead of silently replacing a result.
+    /// This operation never applies a capacity policy and never implicitly
+    /// evicts another descriptor. Call [`Self::evict_to_capacity`] explicitly
+    /// when deterministic capacity reclamation is wanted.
     pub fn put(
         &mut self,
         key: ArtifactKey,
@@ -159,6 +238,56 @@ impl DerivedDataCache {
     /// Inserts a descriptor using its embedded key.
     pub fn put_descriptor(&mut self, descriptor: ArtifactDescriptor) -> Result<(), DdcError> {
         self.put(descriptor.key, descriptor)
+    }
+
+    /// Explicitly evicts entries until both requested capacity bounds hold.
+    ///
+    /// The current deterministic policy removes the lexicographically lowest
+    /// descriptor key first. This is intentionally a key-order policy rather
+    /// than an implicit recency policy: callers that need recency must encode
+    /// it in a higher-level selection policy and invoke this operation with a
+    /// separately chosen set of entries in a future API.
+    ///
+    /// The operation reloads the latest index while holding the same process
+    /// and cross-process locks as `put`, computes the entire result before
+    /// publishing it, and uses the existing synced temporary-file replacement.
+    /// Therefore a failed capacity check leaves the previously committed index
+    /// untouched, and a successful operation is recoverable by `open` after a
+    /// process restart. `put` does not call this method.
+    pub fn evict_to_capacity(&mut self, capacity: DdcCapacity) -> Result<DdcEviction, DdcError> {
+        capacity.validate()?;
+
+        let _lock = process_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _file_lock = DdcFileLock::acquire(&self.root)?;
+        let mut current = read_index(&self.index_path())?;
+        let mut encoded = encode_index(&current)?;
+        let mut evicted_keys = Vec::new();
+
+        while capacity
+            .max_entries
+            .is_some_and(|max_entries| current.len() > max_entries)
+            || capacity
+                .max_encoded_bytes
+                .is_some_and(|max_bytes| encoded.len() > max_bytes)
+        {
+            let key = current
+                .keys()
+                .next()
+                .copied()
+                .ok_or(DdcError::InvalidCapacity("capacity cannot be satisfied"))?;
+            current.remove(&key);
+            evicted_keys.push(key);
+            encoded = encode_index(&current)?;
+        }
+
+        if !evicted_keys.is_empty() {
+            atomic_write(&self.index_path(), &encoded)?;
+        }
+        self.entries = current;
+        Ok(DdcEviction {
+            evicted_keys,
+            encoded_bytes: encoded.len(),
+        })
     }
 
     /// Removes `key` and durably publishes the resulting index.
@@ -557,6 +686,163 @@ mod tests {
             encode_index(&first).unwrap(),
             encode_index(&second).unwrap()
         );
+    }
+
+    #[test]
+    fn put_does_not_implicitly_evict_when_a_capacity_would_be_exceeded() {
+        let dir = temp_dir();
+        let key_a = ArtifactKey([13; 32]);
+        let key_b = ArtifactKey([14; 32]);
+        let mut ddc = DerivedDataCache::open(&dir).unwrap();
+        ddc.put_descriptor(descriptor(key_a, b"a")).unwrap();
+        ddc.put_descriptor(descriptor(key_b, b"b")).unwrap();
+
+        assert_eq!(ddc.len(), 2);
+        assert!(ddc.get(key_a).is_some());
+        assert!(ddc.get(key_b).is_some());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn rejects_invalid_capacity_and_preserves_the_committed_index() {
+        let dir = temp_dir();
+        let key = ArtifactKey([15; 32]);
+        let value = descriptor(key, b"payload");
+        let mut ddc = DerivedDataCache::open(&dir).unwrap();
+        ddc.put_descriptor(value.clone()).unwrap();
+        let before = fs::read(ddc.index_path()).unwrap();
+
+        assert!(matches!(
+            DdcCapacity::new(None, None),
+            Err(DdcError::InvalidCapacity(_))
+        ));
+        assert!(matches!(
+            DdcCapacity::new(None, Some(0)),
+            Err(DdcError::CapacityInsufficient { .. })
+        ));
+        assert!(matches!(
+            DdcCapacity::new(None, Some(MIN_ENCODED_INDEX_BYTES - 1)),
+            Err(DdcError::CapacityInsufficient { .. })
+        ));
+
+        assert_eq!(fs::read(ddc.index_path()).unwrap(), before);
+        assert_eq!(ddc.get(key), Some(value));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn evicts_in_stable_descriptor_key_order_and_reports_encoded_size() {
+        let dir = temp_dir();
+        let keys = [
+            ArtifactKey([24; 32]),
+            ArtifactKey([22; 32]),
+            ArtifactKey([25; 32]),
+            ArtifactKey([23; 32]),
+        ];
+        let mut ddc = DerivedDataCache::open(&dir).unwrap();
+        for key in keys.iter().rev() {
+            ddc.put_descriptor(descriptor(*key, &[key.0[0]])).unwrap();
+        }
+
+        let result = ddc
+            .evict_to_capacity(DdcCapacity::new(Some(2), None).unwrap())
+            .unwrap();
+        assert_eq!(
+            result.evicted_keys,
+            vec![ArtifactKey([22; 32]), ArtifactKey([23; 32])]
+        );
+        assert_eq!(ddc.len(), 2);
+        assert!(ddc.get(ArtifactKey([22; 32])).is_none());
+        assert!(ddc.get(ArtifactKey([23; 32])).is_none());
+        assert!(ddc.get(ArtifactKey([24; 32])).is_some());
+        assert!(ddc.get(ArtifactKey([25; 32])).is_some());
+        assert_eq!(
+            result.encoded_bytes,
+            fs::read(ddc.index_path()).unwrap().len()
+        );
+        assert_eq!(
+            result.encoded_bytes,
+            encode_index(&ddc.entries).unwrap().len()
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn encoded_byte_capacity_is_inclusive_and_survives_reopen() {
+        let dir = temp_dir();
+        let keys = [ArtifactKey([30; 32]), ArtifactKey([31; 32])];
+        let mut ddc = DerivedDataCache::open(&dir).unwrap();
+        for key in keys {
+            ddc.put_descriptor(descriptor(key, b"same-size")).unwrap();
+        }
+        let one_entry = encode_index(&BTreeMap::from([(
+            keys[1],
+            descriptor(keys[1], b"same-size"),
+        )]))
+        .unwrap()
+        .len();
+
+        let result = ddc
+            .evict_to_capacity(DdcCapacity::new(None, Some(one_entry)).unwrap())
+            .unwrap();
+        assert_eq!(result.evicted_keys, vec![keys[0]]);
+        assert_eq!(result.encoded_bytes, one_entry);
+
+        let reopened = DerivedDataCache::open(&dir).unwrap();
+        assert!(reopened.get(keys[0]).is_none());
+        assert!(reopened.get(keys[1]).is_some());
+        assert_eq!(fs::read(reopened.index_path()).unwrap().len(), one_entry);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn zero_entry_capacity_explicitly_empties_and_persists() {
+        let dir = temp_dir();
+        let key = ArtifactKey([32; 32]);
+        let mut ddc = DerivedDataCache::open(&dir).unwrap();
+        ddc.put_descriptor(descriptor(key, b"payload")).unwrap();
+
+        let result = ddc
+            .evict_to_capacity(DdcCapacity::new(Some(0), None).unwrap())
+            .unwrap();
+        assert_eq!(result.evicted_keys, vec![key]);
+        assert_eq!(result.encoded_bytes, MIN_ENCODED_INDEX_BYTES);
+        assert!(ddc.is_empty());
+        assert!(DerivedDataCache::open(&dir).unwrap().is_empty());
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn concurrent_explicit_evictions_reload_and_preserve_a_valid_index() {
+        let dir = temp_dir();
+        let workers = 8;
+        let seed_key = ArtifactKey([33; 32]);
+        let mut seed = DerivedDataCache::open(&dir).unwrap();
+        seed.put_descriptor(descriptor(seed_key, b"seed")).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+        let handles = (0..workers)
+            .map(|_| {
+                let dir = dir.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let mut ddc = DerivedDataCache::open(&dir).unwrap();
+                    ddc.evict_to_capacity(DdcCapacity::new(Some(2), None).unwrap())
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let reopened = DerivedDataCache::open(&dir).unwrap();
+        assert!(reopened.len() <= 2);
+        assert_eq!(
+            fs::read(reopened.index_path()).unwrap(),
+            encode_index(&reopened.entries).unwrap()
+        );
+        cleanup(&dir);
     }
 
     #[test]
