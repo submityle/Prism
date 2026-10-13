@@ -163,7 +163,7 @@ Idle → PickUp(panel) → Dragging{ghost, hover} → Drop(action) | Cancel
 
 - **几何**:`render_plan::solve` 将 `DockNode` 树映射为 crate 自有的 renderer-independent `RenderPlan`（面板、文档、tab、splitter 与 surface 几何）；`DockView` 独立装配 Element，当前并未直接构造或消费 `prism_ui_layout::LayoutTree`。实际 layout host 接线由上层负责。
 - **面板外观**:每个可见 tab 内容包进 `prism_ui_component_kit::editor::DockPanel`(复用其玻璃面 + 标题栏 + `DockSide`),本层只负责**摆放与装配**。
-- **浮窗 / 拖拽预览**:当前 `DockView` 生成浮窗 Element，`drop_preview_element` 生成视觉提示；portal 层、z 序、FocusTrap、pointer dispatch 和窗口 surface 由上层 host 接线。
+- **浮窗 / 拖拽预览**:当前 `DockView` 生成浮窗 Element，并按 `FloatingWindow.z` 升序组织 child paint order；`drop_preview_element` 生成视觉提示。portal 层、FocusTrap、pointer dispatch 和窗口 surface 由上层 host 接线。
 - **分隔条**:可拖拽把手元素,带命中区 padding(易抓)。
 - **增量（宿主规划）**:Element 装配当前每次生成完整树；宿主未来可对 tab/几何变化做局部 patch。
 
