@@ -945,6 +945,21 @@ impl PublishTransaction {
                 "runtime package contains an unreferenced container",
             ));
         }
+        let mut route_guids = BTreeSet::new();
+        for guid in package.asset_guids.values() {
+            if guid.is_nil() || !route_guids.insert(*guid) || decoded.route(*guid).is_none() {
+                return Err(PublishError::Invalid(
+                    "runtime package asset route is missing, duplicated, or invalid",
+                ));
+            }
+        }
+        if package.asset_guids.len() != decoded.routes().count()
+            || route_guids.len() != decoded.routes().count()
+        {
+            return Err(PublishError::Invalid(
+                "runtime package asset route coverage differs from runtime manifest",
+            ));
+        }
         self.runtime_package = Some(package);
         Ok(())
     }
@@ -988,6 +1003,29 @@ impl PublishTransaction {
             return Err(PublishError::Invalid(
                 "runtime package was built from a different manifest",
             ));
+        }
+        if let Some(package) = self.runtime_package.as_ref() {
+            if package.asset_guids.len() != manifest.entries.len()
+                || manifest
+                    .entries
+                    .keys()
+                    .any(|asset| !package.asset_guids.contains_key(asset))
+                || package
+                    .asset_guids
+                    .keys()
+                    .any(|asset| !manifest.entries.contains_key(asset))
+            {
+                return Err(PublishError::Invalid(
+                    "runtime package does not cover the build manifest assets",
+                ));
+            }
+            for guid in package.asset_guids.values() {
+                if package.runtime_manifest.route(*guid).is_none() {
+                    return Err(PublishError::Invalid(
+                        "runtime package asset route is absent from runtime manifest",
+                    ));
+                }
+            }
         }
         let (publication, publication_bytes) = if let Some(package) = self.runtime_package.as_ref()
         {
@@ -1514,6 +1552,7 @@ mod tests {
         let runtime_manifest_bytes = runtime_manifest.encode().unwrap();
         RuntimePackage {
             source_manifest_hash: ContentHash::digest(&manifest.canonical_bytes()),
+            asset_guids: [(AssetId(1), guid)].into_iter().collect(),
             containers: [("base.container".to_owned(), container)]
                 .into_iter()
                 .collect(),
@@ -1612,6 +1651,39 @@ mod tests {
             ))
         ));
         assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(0)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_runtime_package_that_omits_build_assets() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let payload = b"payload";
+        let manifest = Manifest::new(
+            BuildRevision(0),
+            [ManifestEntry {
+                asset: AssetId(1),
+                descriptor: descriptor(payload),
+            }],
+        )
+        .unwrap();
+        let mut package = runtime_package_for(&manifest, payload);
+        package.asset_guids.clear();
+        package.containers.clear();
+        package.runtime_manifest = RuntimeManifest::new();
+        package.runtime_manifest_bytes = package.runtime_manifest.encode().unwrap();
+
+        let mut tx = store.begin(BuildRevision(0), None);
+        tx.stage(AssetId(1), descriptor(payload), payload.to_vec())
+            .unwrap();
+        tx.stage_runtime_package(package).unwrap();
+        assert!(matches!(
+            tx.commit(),
+            Err(PublishError::Invalid(
+                "runtime package does not cover the build manifest assets"
+            ))
+        ));
+        assert_eq!(store.current_revision().unwrap(), None);
         fs::remove_dir_all(dir).unwrap();
     }
 

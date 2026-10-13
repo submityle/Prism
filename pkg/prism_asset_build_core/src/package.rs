@@ -69,6 +69,13 @@ pub struct RuntimePackage {
     /// Publication refuses to combine a package with a different revision
     /// manifest.
     pub source_manifest_hash: ContentHash,
+    /// Deterministic proof that every build asset has one runtime route.
+    ///
+    /// The runtime manifest keys routes by `StableGuid`, while the build
+    /// manifest keys entries by `AssetId`. Keeping this bridge explicit lets
+    /// the publication boundary reject a package that is internally valid but
+    /// omits build assets.
+    pub asset_guids: BTreeMap<AssetId, StableGuid>,
     pub containers: BTreeMap<String, Vec<u8>>,
     pub runtime_manifest: RuntimeManifest,
     pub runtime_manifest_bytes: Vec<u8>,
@@ -577,6 +584,10 @@ pub fn package_runtime_with_options(
         .map_err(PackageError::RuntimeManifest)?;
     Ok(RuntimePackage {
         source_manifest_hash: ContentHash::digest(&manifest.canonical_bytes()),
+        asset_guids: by_asset
+            .iter()
+            .map(|(asset, mapping)| (*asset, mapping.guid))
+            .collect(),
         containers,
         runtime_manifest,
         runtime_manifest_bytes,
@@ -663,6 +674,15 @@ mod tests {
         assert_eq!(
             package.source_manifest_hash,
             ContentHash::digest(&manifest.canonical_bytes())
+        );
+        assert_eq!(
+            package.asset_guids,
+            [
+                (AssetId(1), StableGuid::from_u128(101)),
+                (AssetId(2), StableGuid::from_u128(202)),
+            ]
+            .into_iter()
+            .collect()
         );
         assert_eq!(
             package.containers.keys().collect::<Vec<_>>(),
