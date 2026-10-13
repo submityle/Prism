@@ -367,7 +367,13 @@ impl RuntimeManifest {
 }
 
 fn validate_name(name: &str) -> Result<(), ManifestError> {
-    if name.is_empty() || name.as_bytes().contains(&0) {
+    if name.is_empty()
+        || name.as_bytes().contains(&0)
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+    {
         return Err(ManifestError::InvalidName);
     }
     if name.len() > u16::MAX as usize {

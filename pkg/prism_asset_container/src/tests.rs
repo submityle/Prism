@@ -796,6 +796,13 @@ fn runtime_manifest_round_trips_deterministically_and_rejects_bad_input() {
     assert_eq!(RuntimeManifest::decode(&encoded).unwrap(), manifest);
     assert_eq!(manifest.encode().unwrap(), encoded);
     assert_eq!(manifest.route(logical).unwrap().container_guid, local);
+    for invalid in ["../escape", "a/b", "a\\b", ".", ".."] {
+        assert_eq!(
+            manifest.bind_container(invalid, identity(&container_bytes)),
+            Err(ManifestError::InvalidName),
+            "invalid container name {invalid:?} must be rejected",
+        );
+    }
     assert_eq!(
         RuntimeManifest::decode(&encoded[..encoded.len() - 1]),
         Err(ManifestError::Truncated)
