@@ -1,11 +1,14 @@
-//! Deterministic residency-budget decisions and synchronous range I/O for
-//! runtime asset streaming.
+//! Deterministic residency-budget decisions and synchronous/asynchronous range
+//! I/O for runtime asset streaming.
 //!
 //! The controller remains the state and budget authority. [`StreamIoExecutor`]
 //! is the deliberately small synchronous adapter that performs a real
 //! [`crate::AssetSources::read_range`] and reports its result back to the
-//! controller. It does not create GPU resources or claim DirectStorage
-//! support; GPU and staging values are budget-ledger entries only.
+//! controller. [`AsyncStreamIoExecutor`] schedules the same operation on an
+//! existing [`prism_tasks::TaskPool`] without holding the controller lock
+//! during the blocking read. Neither adapter creates GPU resources or claims
+//! DirectStorage support; GPU and staging values are budget-ledger entries
+//! only.
 
 use crate::AssetPath;
 use alloc::collections::BTreeMap;
@@ -13,8 +16,10 @@ use alloc::vec::Vec;
 use core::fmt;
 use prism_tasks::Priority;
 
+mod async_io;
 mod io;
 
+pub use async_io::{AsyncStreamIoExecutor, AsyncStreamTask};
 pub use io::{StreamIoError, StreamIoExecutor, SubmitAndExecuteError};
 
 /// The three independently bounded residency pools tracked by the decision
