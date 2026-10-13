@@ -368,7 +368,7 @@ let layout = decode_layout(&bytes, DecodeOptions {
 
 - **DockNode / DockLayout**:描述工作台的纯数据布局树与其根 + 浮窗 + 自动隐藏栏的聚合。
 - **TabStack**:叶子节点,多个面板叠为标签页,记录激活项;单面板也是单 tab 栈。
-- **drop zone**:拖拽悬停时的落区(中心 tabify / 四边 split / 外缘整区停靠 / tab 间重排)。
+- **drop zone**:拖拽悬停时的落区(中心 tabify / 四边 split / tab 间重排；外缘整区停靠为规划能力)。
 - **reducer**:把 action 作用到布局的纯函数,维护所有不变量,确定性可测。
 - **Workspace / Perspective**:命名的多套布局,一键切换(借 Qt ADS/Blender)。
 - **autohide 边栏**:折叠到四边、悬停弹出的工具窗模式(借 VS Code/Fleet)。
