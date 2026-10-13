@@ -8,6 +8,7 @@ pub(crate) mod systems;
 pub mod texture_heap;
 mod texture_upload;
 pub mod virtual_texture;
+mod vt_producer;
 pub(crate) mod vt_source;
 
 pub use bindings::MaterialBindGroup;

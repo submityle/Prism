@@ -84,7 +84,7 @@ fn lit_class_from_closures(mask: u32) -> u32 {
     return CLASS_PRINCIPLED;
 }
 
-fn material_class(header: MaterialHeader) -> u32 {
+fn material_class(header: MaterialHeader, region_illumination: u32) -> u32 {
     // Surface-compatible MaterialRenderClass values: Opaque, OpaqueTwoSided,
     // Masked, MaskedTwoSided, Hair, Water. Transparent/additive/transmissive/
     // volume/decal materials stay on forward/specialized paths. The former
@@ -98,8 +98,13 @@ fn material_class(header: MaterialHeader) -> u32 {
     // Dedicated subsystem render classes bind their bucket directly.
     if header.render_class == 9u { return CLASS_WATER; }
     if header.render_class == 8u { return CLASS_HAIR; }
-    // Illumination axis (Lit=0, Stylized=1, Unlit=2, Custom=3).
-    switch header.illumination {
+    // Illumination axis (Lit=0, Stylized=1, Unlit=2, Custom=3). A region mask
+    // can flip only the Lit/Stylized endpoints; Unlit/Custom stay material-wide.
+    var illumination = header.illumination;
+    if (header.illumination <= 1u && region_illumination <= 1u) {
+        illumination = region_illumination;
+    }
+    switch illumination {
         case 2u: { return CLASS_UNLIT; }
         case 1u: { return CLASS_NPR; }
         // §3.5.4: a custom response needs a program handle. Without one the
@@ -142,7 +147,9 @@ fn classify_count(@builtin(global_invocation_id) id: vec3<u32>) {
         atomicAdd(&diagnostics[1], 1u);
         return;
     }
-    let shading_class = material_class(header);
+    // `metadata.z` is the visibility raster's Lit/Stylized selector
+    // (`0`/`1`), or `0xffffffff` when the material has no region mask.
+    let shading_class = material_class(header, metadata.z);
     if shading_class >= params.class_count {
         pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 8u);
         atomicAdd(&diagnostics[2], 1u);

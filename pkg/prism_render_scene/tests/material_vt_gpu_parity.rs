@@ -52,7 +52,8 @@ use wgpu::{
 };
 
 const MATERIAL_SAMPLE_UUID: u128 = 0x5052_4953_4d5f_4d41_5456_5458_5041;
-const MATERIAL_WRAPPER_UUID: u128 = 0x5052_4953_4d5f_4d41_5456_5458_5042;
+const MATERIAL_BRIDGE_UUID: u128 = 0x5052_4953_4d5f_4d41_5456_5458_5045;
+const MATERIAL_WRAPPER_UUID: u128 = 0x5052_4953_4d5f_4d41_5456_5458_5044;
 
 fn bindless_features() -> Features {
     Features::TEXTURE_BINDING_ARRAY
@@ -71,11 +72,12 @@ struct SampleCase {
 }
 
 const WRAPPER_WESL: &str = r#"
-import prism_render_scene::shaders::material::{PrismMaterialTexture};
-import prism_render_scene::shaders::material_sample::{sample_texture_slot};
+import prism_render_scene::shaders::material_vt_parity_bridge::{sample_texture_slot_words};
+
+enable wgpu_binding_array;
 
 struct SampleCase {
-    texture_record: PrismMaterialTexture,
+    texture_record: array<u32, 8>,
     uv: vec2<f32>,
     lod: f32,
     pad: f32,
@@ -88,7 +90,32 @@ struct SampleCase {
 fn material_vt_parity(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= arrayLength(&cases) { return; }
     let c = cases[id.x];
-    output[id.x] = sample_texture_slot(c.texture_record, c.uv, c.lod);
+    output[id.x] = sample_texture_slot_words(c.texture_record, c.uv, c.lod);
+}
+"#;
+
+const BRIDGE_WESL: &str = r#"
+import prism_render_scene::shaders::material::{PrismMaterialTexture};
+import prism_render_scene::shaders::material_sample::{sample_texture_slot};
+
+enable wgpu_binding_array;
+
+fn sample_texture_slot_words(
+    words: array<u32, 8>,
+    uv: vec2<f32>,
+    lod: f32,
+) -> vec4<f32> {
+    let record = PrismMaterialTexture(
+        words[0],
+        words[1],
+        words[2],
+        words[3],
+        words[4],
+        words[5],
+        words[6],
+        words[7],
+    );
+    return sample_texture_slot(record, uv, lod);
 }
 "#;
 
@@ -114,6 +141,7 @@ fn compile_material_sample_wgsl() -> String {
     let material = shader_id(MATERIAL_SAMPLE_UUID.wrapping_add(1));
     let virtual_texture = shader_id(MATERIAL_SAMPLE_UUID.wrapping_add(2));
     let sample = shader_id(MATERIAL_SAMPLE_UUID);
+    let bridge = shader_id(MATERIAL_BRIDGE_UUID);
     let wrapper = shader_id(MATERIAL_WRAPPER_UUID);
 
     cache.set_shader(
@@ -135,6 +163,13 @@ fn compile_material_sample_wgsl() -> String {
         Shader::from_wesl(
             include_str!("../src/shaders/material_sample.wesl"),
             "embedded://prism_render_scene/shaders/material_sample.wesl",
+        ),
+    );
+    cache.set_shader(
+        bridge,
+        Shader::from_wesl(
+            BRIDGE_WESL,
+            "embedded://prism_render_scene/shaders/material_vt_parity_bridge.wesl",
         ),
     );
     cache.set_shader(
@@ -431,7 +466,7 @@ fn material_vt_sampling_gpu_matches_expected_fallback_contract() {
     let config_buffer = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("material-vt parity config"),
         contents: bytemuck::bytes_of(&config),
-        usage: BufferUsages::UNIFORM,
+        usage: BufferUsages::STORAGE,
     });
     let mut generation_words = vec![1_u32; capacity as usize];
     generation_words[current_slot.index as usize] = current_slot.generation;

@@ -17,6 +17,7 @@ prism_asset = { path = "../prism_asset" }
 prism_render_driver = { path = "../prism_render_driver" }
 # Attribute payloads are POD and are uploaded as raw bytes.
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
+blake3 = { version = "1.8", default-features = false }
 
 [lints]
 workspace = true

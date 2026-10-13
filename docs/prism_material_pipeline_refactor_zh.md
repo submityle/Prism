@@ -633,8 +633,10 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
  只能证明 ABI/搜索契约，不能据此宣称主 `MaterialBindGroup`/resolve 已完成真实 adapter
  端到端硬件验证；这不表示 `shading_resolve` 缺少 Material-VT 页表消费，该消费已经接线。
  仍未接入生产 resolve 的是独立 P3 shade-cache atlas/page-table。
-  当前仍未完成的是由主 render/visibility pass 自动产生并回填 demand 的 GPU feedback
-  readback，以及真实 adapter 上的主材质渲染端到端门禁。
+  当前已接入主 visibility attachments → readback → typed demand registry 的真实 GPU
+  feedback bridge，并由材质 producer 消费；无有效 feedback 时仍保留确定性的受限 bootstrap。
+  尚未完成的是把完整主 render pass（而非 production group-1 + test-owned wrapper）纳入
+  真实 adapter 端到端门禁。
 
 ---
 
@@ -1335,6 +1337,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P3-e 四线/自定义契约 | NPR ramp 输入缓存、混合逐区域、自定义两段式契约 | 四线各自对拍 + 命中率/预算可观测 |
 | P3-f 内存/压缩（可选） | BC6H 低频页压缩、方向性 SH 高光缓存（高价值材质） | 显存预算内；方向性误差阈值 |
 
+> **2026-10-13 状态修订**：P3-a 表格中的“当前 producer 尚未消费可见性 feedback”是旧审计口径；当前代码已由 `material/virtual_texture/feedback.rs` 从 visibility attachments 做异步 GPU readback、校验 scene/geometry/material generation、执行 UV/导数 demand aggregation，并在 `PrepareResources` 前交给 Material-VT producer。尚未完成的边界是完整主 render pass 端到端硬件门禁，以及独立 P3 shade-cache 的 atlas/page-table 消费，不是 Material-VT feedback bridge 本身。
+
 **破坏性说明**：屏幕空间 über 路径（§8）**保留为缓存未命中/视角相关的回退路径**，不是并行栈，不维护旧着色 API；对象空间缓存是其上的加法 pass。弱平台关闭开关即纯 §8 路径。
 
 ### 14.11 风险 → 高性能/高质解决方案总表
@@ -1414,8 +1418,9 @@ impl LayerStack {
 // 目标布局草案；当前代码的 MATERIAL_ABI_VERSION = 6。
 // 当前已有 Material-VT source capture、受限 residency producer、page-table/
 // atlas/config/sampler 上传与 completion-gated publish；typed demand aggregation
-// 可驱动 shared streamer 的 partial residency，但主 render/visibility feedback
-// readback、production parity 与非 bindless 直接纹理路径仍未完成。
+// 可驱动 shared streamer 的 partial residency；主 render/visibility feedback
+// readback 已接线，production shader parity 已覆盖 bind-group 级真实 GPU wrapper，
+// 但完整主 render pass 端到端门禁与非 bindless 直接纹理路径仍需后续补齐。
 pub const MATERIAL_ABI_VERSION: u32 = 6;
 
 #[repr(C)]

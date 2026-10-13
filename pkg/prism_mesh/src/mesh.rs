@@ -4,14 +4,16 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use prism_asset::Asset;
-use prism_render_driver::{
-    PrimitiveTopology, VertexAttribute, VertexBufferLayout, VertexStepMode,
-};
+use prism_render_driver::{PrimitiveTopology, VertexAttribute, VertexBufferLayout, VertexStepMode};
 
 use crate::attribute::{MeshVertexAttribute, VertexAttributeValues};
 use crate::bounds::MeshBounds;
 use crate::error::MeshError;
 use crate::indices::Indices;
+use crate::limits::MeshLimits;
+use crate::streams::StreamLayoutProfile;
+use crate::submesh::{validate_submeshes, validate_submeshes_with_limits, SubMesh};
+use crate::topology::PrimitiveTopologyExt;
 
 /// The semantic name of the attribute mesh bounds are computed from.
 ///
@@ -35,6 +37,7 @@ pub struct Mesh {
     attributes: BTreeMap<u32, (MeshVertexAttribute, VertexAttributeValues)>,
     indices: Option<Indices>,
     primitive_topology: PrimitiveTopology,
+    submeshes: Vec<SubMesh>,
 }
 
 impl Mesh {
@@ -45,6 +48,7 @@ impl Mesh {
             attributes: BTreeMap::new(),
             indices: None,
             primitive_topology,
+            submeshes: Vec::new(),
         }
     }
 
@@ -116,6 +120,24 @@ impl Mesh {
         self.indices.as_ref()
     }
 
+    /// The material-partitioned index ranges, in authored order.
+    #[must_use]
+    pub fn submeshes(&self) -> &[SubMesh] {
+        &self.submeshes
+    }
+
+    /// Replaces the mesh's material-partitioned index ranges.
+    pub fn with_submeshes(&mut self, submeshes: Vec<SubMesh>) {
+        self.submeshes = submeshes;
+    }
+
+    /// Builder form of [`with_submeshes`](Self::with_submeshes).
+    #[must_use]
+    pub fn submeshed(mut self, submeshes: Vec<SubMesh>) -> Self {
+        self.with_submeshes(submeshes);
+        self
+    }
+
     /// The topology this mesh is drawn as.
     #[must_use]
     pub const fn primitive_topology(&self) -> PrimitiveTopology {
@@ -124,12 +146,17 @@ impl Mesh {
 
     /// The attribute at `shader_location`, if the mesh has one.
     #[must_use]
-    pub fn attribute(&self, shader_location: u32) -> Option<&(MeshVertexAttribute, VertexAttributeValues)> {
+    pub fn attribute(
+        &self,
+        shader_location: u32,
+    ) -> Option<&(MeshVertexAttribute, VertexAttributeValues)> {
         self.attributes.get(&shader_location)
     }
 
     /// The mesh's attributes, in shader-location order.
-    pub fn attributes(&self) -> impl Iterator<Item = &(MeshVertexAttribute, VertexAttributeValues)> {
+    pub fn attributes(
+        &self,
+    ) -> impl Iterator<Item = &(MeshVertexAttribute, VertexAttributeValues)> {
         self.attributes.values()
     }
 
@@ -241,6 +268,43 @@ impl Mesh {
                 });
             }
         }
+        let element_count = self
+            .indices
+            .as_ref()
+            .map_or(self.vertex_count(), Indices::len);
+        let element_count = u32::try_from(element_count).unwrap_or(u32::MAX);
+        self.primitive_topology
+            .validate_element_count(element_count)?;
+        if !self.submeshes.is_empty() {
+            let Some(indices) = self.indices.as_ref() else {
+                return Err(MeshError::SubMeshesRequireIndices);
+            };
+            validate_submeshes(
+                &self.submeshes,
+                u32::try_from(indices.len()).unwrap_or(u32::MAX),
+                self.primitive_topology,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Validates the mesh against an explicit device/content profile.
+    pub fn validate_with_limits(&self, limits: &MeshLimits) -> Result<(), MeshError> {
+        self.validate()?;
+        let stream_count = self.stream_layouts(&StreamLayoutProfile::default()).len();
+        limits.validate_counts(self.vertex_count(), self.attribute_count(), stream_count)?;
+        if !self.submeshes.is_empty() {
+            let indices = self
+                .indices
+                .as_ref()
+                .ok_or(MeshError::SubMeshesRequireIndices)?;
+            validate_submeshes_with_limits(
+                &self.submeshes,
+                u32::try_from(indices.len()).unwrap_or(u32::MAX),
+                self.primitive_topology,
+                limits,
+            )?;
+        }
         Ok(())
     }
 }
@@ -248,4 +312,3 @@ impl Mesh {
 impl Asset for Mesh {
     const TYPE_NAME: &'static str = "prism_mesh::Mesh";
 }
-

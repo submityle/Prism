@@ -17,10 +17,10 @@
 //!   reuses the slot of an already-resident image and bumps its refcount;
 //!   [`release`](BindlessTextureHeap::release) drops a reference and only returns
 //!   the slot to the free list once the last material stops using it.
-//! * Freed slots are reused via a free list, and their **generation is bumped on
-//!   release** so any lingering GPU material row that still points at the old
-//!   `(index, generation)` pair is detected as stale rather than silently
-//!   sampling a different texture.
+//! * Freed slots are reused via a free list, and their **generation is bumped
+//!   when the release is reclaimed** so any lingering GPU material row that
+//!   still points at the old `(index, generation)` pair is detected as stale
+//!   rather than silently sampling a different texture.
 //! * The heap is **bounded**. When capacity is exhausted `acquire` degrades
 //!   gracefully to [`WHITE_SLOT`] and increments an overflow counter instead of
 //!   growing without limit or panicking.
@@ -32,6 +32,8 @@
 use bevy_asset::AssetId;
 use bevy_image::Image;
 use bevy_platform::collections::HashMap;
+use core::fmt;
+use prism_render_architecture::gpu_scene::GpuCompletionValue;
 use prism_render_material::TextureSemantic;
 
 /// Reserved slot holding an opaque white (`1, 1, 1, 1`) texel. Fallback for
@@ -93,6 +95,56 @@ struct HeapEntry {
     refcount: u32,
 }
 
+/// One reference waiting for the GPU timeline before its slot may be reused.
+/// The slot identity is retained so a stale completion cannot release a newer
+/// allocation of the same image.
+#[derive(Clone, Copy, Debug)]
+struct PendingRelease {
+    image: AssetId<Image>,
+    slot: BindlessSlot,
+    completion: GpuCompletionValue,
+}
+
+/// Why a bindless slot failed CPU-side index/generation validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BindlessSlotError {
+    /// The index has not been materialised by this heap.
+    OutOfRange { index: u32 },
+    /// The index exists, but the supplied generation is stale.
+    Stale {
+        index: u32,
+        generation: u32,
+        current_generation: u32,
+    },
+    /// The generation matches, but the dynamic slot is not currently live.
+    NotLive(BindlessSlot),
+}
+
+impl fmt::Display for BindlessSlotError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutOfRange { index } => {
+                write!(formatter, "bindless texture slot index {index} is out of range")
+            }
+            Self::Stale {
+                index,
+                generation,
+                current_generation,
+            } => write!(
+                formatter,
+                "bindless texture slot ({index}, generation {generation}) is stale; current generation is {current_generation}"
+            ),
+            Self::NotLive(slot) => write!(
+                formatter,
+                "bindless texture slot ({}, generation {}) is not live",
+                slot.index, slot.generation
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BindlessSlotError {}
+
 /// Snapshot of heap occupancy for diagnostics and soak tests.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BindlessHeapStats {
@@ -102,6 +154,9 @@ pub struct BindlessHeapStats {
     pub live_images: u32,
     /// Dynamic slots sitting on the free list awaiting reuse.
     pub free_slots: u32,
+    /// Image references whose slots are quarantined until their last GPU use
+    /// has completed.
+    pub pending_releases: u32,
     /// Highest dynamic slot index ever allocated plus one (the high-water mark).
     pub high_water: u32,
     /// Count of `acquire` calls that hit the capacity ceiling and fell back to
@@ -117,8 +172,10 @@ pub struct BindlessTextureHeap {
     /// high-water mark advances.
     slot_generations: Vec<u32>,
     free: Vec<u32>,
+    pending_releases: Vec<PendingRelease>,
     next: u32,
     overflow: u32,
+    generation_version: u32,
 }
 
 impl Default for BindlessTextureHeap {
@@ -140,8 +197,10 @@ impl BindlessTextureHeap {
             entries: HashMap::default(),
             slot_generations: vec![RESERVED_GENERATION; FIRST_DYNAMIC_SLOT as usize],
             free: Vec::new(),
+            pending_releases: Vec::new(),
             next: FIRST_DYNAMIC_SLOT,
             overflow: 0,
+            generation_version: 1,
         }
     }
 
@@ -186,7 +245,7 @@ impl BindlessTextureHeap {
     /// invalidate GPU material rows.
     pub fn reset_with_capacity(&mut self, capacity: u32) {
         assert!(
-            self.entries.is_empty(),
+            self.entries.is_empty() && self.pending_releases.is_empty(),
             "bindless texture heap must be empty before its capacity is reconfigured"
         );
         *self = Self::new(capacity);
@@ -223,23 +282,150 @@ impl BindlessTextureHeap {
         }
     }
 
-    /// Drops one reference to `image`. When the last reference is released the
-    /// slot is returned to the free list and its generation is bumped so stale
-    /// GPU references no longer validate. Returns `true` when the slot became
-    /// free, `false` when the image was still referenced or unknown.
+    /// Immediately drops one reference to `image` for an acquire that was never
+    /// published to the GPU. Published references must use [`Self::retire`] so
+    /// the slot cannot be reused before its completion value. Returns `true`
+    /// when the slot became free, `false` when the image was still referenced,
+    /// pending, or unknown.
     pub fn release(&mut self, image: AssetId<Image>) -> bool {
-        let Some(entry) = self.entries.get_mut(&image) else {
+        let Some(entry) = self.entries.get(&image).copied() else {
             return false;
         };
-        entry.refcount -= 1;
-        if entry.refcount > 0 {
+        // A pending reference belongs to published GPU work and cannot be
+        // consumed by the immediate rollback path.
+        if self.pending_count(image) >= entry.refcount {
             return false;
         }
-        let slot = entry.slot;
-        self.entries.remove(&image);
-        self.bump_generation(slot);
-        self.free.push(slot);
+        self.release_live_reference(image)
+    }
+
+    /// Retires one published reference after all GPU work through `completion`
+    /// has completed. The slot remains resident and cannot be reused in the
+    /// meantime. Returns `false` when `image` is not resident or all of its
+    /// references are already waiting for completion.
+    pub fn retire(&mut self, image: AssetId<Image>, completion: GpuCompletionValue) -> bool {
+        let Some(entry) = self.entries.get(&image).copied() else {
+            return false;
+        };
+        if self.pending_count(image) >= entry.refcount {
+            return false;
+        }
+        self.pending_releases.push(PendingRelease {
+            image,
+            slot: BindlessSlot {
+                index: entry.slot,
+                generation: entry.generation,
+            },
+            completion,
+        });
         true
+    }
+
+    /// Compatibility name for callers that describe retirement as a deferred
+    /// release.
+    pub fn release_after(&mut self, image: AssetId<Image>, completion: GpuCompletionValue) -> bool {
+        self.retire(image, completion)
+    }
+
+    /// Retires the live allocation identified by `(index, generation)`.
+    /// Reserved fallback slots cannot be retired and stale/free indices return
+    /// `false`.
+    pub fn retire_slot(&mut self, slot: BindlessSlot, completion: GpuCompletionValue) -> bool {
+        let Some(image) = self.entries.iter().find_map(|(image, entry)| {
+            (entry.slot == slot.index && entry.generation == slot.generation).then_some(*image)
+        }) else {
+            return false;
+        };
+        self.retire(image, completion)
+    }
+
+    /// Applies deferred releases whose completion proof has arrived and
+    /// returns the number of references released. Freed slots become reusable
+    /// only here, after the GPU can no longer observe their previous contents.
+    pub fn reclaim_completed(&mut self, completed: GpuCompletionValue) -> u32 {
+        let mut reclaimed = 0_u32;
+        let mut pending = Vec::with_capacity(self.pending_releases.len());
+        let deferred = core::mem::take(&mut self.pending_releases);
+        for pending_release in deferred {
+            if pending_release.completion <= completed {
+                // Match the exact slot generation. An immediate rollback
+                // followed by a fresh acquire must not let this old completion
+                // consume a reference from the new allocation.
+                let current = self.entries.get(&pending_release.image).copied();
+                if current.is_some_and(|entry| {
+                    entry.slot == pending_release.slot.index
+                        && entry.generation == pending_release.slot.generation
+                }) {
+                    reclaimed = reclaimed.saturating_add(u32::from(
+                        self.release_live_reference(pending_release.image),
+                    ));
+                }
+            } else {
+                pending.push(pending_release);
+            }
+        }
+        self.pending_releases = pending;
+        reclaimed
+    }
+
+    /// Whether `slot` still names the same live allocation. This is a CPU-side
+    /// guard; GPU consumers still need an explicit generation-table comparison
+    /// before treating a material row as valid.
+    pub fn is_current(&self, slot: BindlessSlot) -> bool {
+        self.validate_slot(slot).is_ok()
+    }
+
+    /// Validates a slot's index and generation against the current live heap
+    /// state. Reserved fallback slots are always valid; free and retiring
+    /// dynamic slots are not.
+    pub fn validate_slot(&self, slot: BindlessSlot) -> Result<(), BindlessSlotError> {
+        let Some(&current_generation) = self.slot_generations.get(slot.index as usize) else {
+            return Err(BindlessSlotError::OutOfRange { index: slot.index });
+        };
+        if current_generation != slot.generation {
+            return Err(BindlessSlotError::Stale {
+                index: slot.index,
+                generation: slot.generation,
+                current_generation,
+            });
+        }
+        if slot.index < FIRST_DYNAMIC_SLOT
+            || self
+                .entries
+                .values()
+                .any(|entry| entry.slot == slot.index && entry.generation == slot.generation)
+        {
+            Ok(())
+        } else {
+            Err(BindlessSlotError::NotLive(slot))
+        }
+    }
+
+    /// Validates an explicit `(index, generation)` pair.
+    pub fn validate_index_generation(
+        &self,
+        index: u32,
+        generation: u32,
+    ) -> Result<(), BindlessSlotError> {
+        self.validate_slot(BindlessSlot { index, generation })
+    }
+
+    /// Returns the current generation for a materialised slot index.
+    pub fn generation_at(&self, index: u32) -> Option<u32> {
+        self.slot_generations.get(index as usize).copied()
+    }
+
+    /// Dense generation table published to the GPU bind group. Entries past
+    /// the high-water mark are intentionally absent from this CPU snapshot;
+    /// the fixed-size GPU buffer remains zero-filled for those never-allocated
+    /// slots.
+    pub(crate) fn generation_table(&self) -> &[u32] {
+        &self.slot_generations
+    }
+
+    /// Monotonic version of the generation table contents/length.
+    pub(crate) fn generation_version(&self) -> u32 {
+        self.generation_version
     }
 
     /// Returns the currently resident slot for `image` without changing its
@@ -263,6 +449,7 @@ impl BindlessTextureHeap {
             capacity: self.capacity,
             live_images: self.entries.len() as u32,
             free_slots: self.free.len() as u32,
+            pending_releases: self.pending_releases.len() as u32,
             high_water: self.next,
             overflow: self.overflow,
         }
@@ -280,7 +467,31 @@ impl BindlessTextureHeap {
         let slot = self.next;
         self.next += 1;
         self.slot_generations.push(RESERVED_GENERATION);
+        self.generation_version = self.generation_version.wrapping_add(1).max(1);
         Some(slot)
+    }
+
+    fn pending_count(&self, image: AssetId<Image>) -> u32 {
+        self.pending_releases
+            .iter()
+            .filter(|pending| pending.image == image)
+            .count() as u32
+    }
+
+    /// Releases one live reference known to be safe to consume now.
+    fn release_live_reference(&mut self, image: AssetId<Image>) -> bool {
+        let Some(entry) = self.entries.get_mut(&image) else {
+            return false;
+        };
+        entry.refcount -= 1;
+        if entry.refcount > 0 {
+            return false;
+        }
+        let slot = entry.slot;
+        self.entries.remove(&image);
+        self.bump_generation(slot);
+        self.free.push(slot);
+        true
     }
 
     /// Advances a slot's generation, skipping the wrap-around value `0` which is
@@ -291,6 +502,7 @@ impl BindlessTextureHeap {
         if *generation == 0 {
             *generation = RESERVED_GENERATION;
         }
+        self.generation_version = self.generation_version.wrapping_add(1).max(1);
     }
 }
 
@@ -311,6 +523,33 @@ mod tests {
         assert_eq!(BindlessSlot::FLAT_NORMAL.index, FLAT_NORMAL_SLOT);
         assert_eq!(BindlessSlot::BLACK.index, BLACK_SLOT);
         assert_eq!(BindlessSlot::WHITE.generation, RESERVED_GENERATION);
+    }
+
+    #[test]
+    fn generation_table_tracks_slot_reuse() {
+        let mut heap = BindlessTextureHeap::new(8);
+        assert_eq!(heap.generation_table(), &[1, 1, 1]);
+        let first_version = heap.generation_version();
+
+        let image = image(0xB1);
+        let slot = heap.acquire(image);
+        assert_eq!(
+            slot,
+            BindlessSlot {
+                index: 3,
+                generation: 1
+            }
+        );
+        assert_eq!(
+            heap.generation_table()[slot.index as usize],
+            slot.generation
+        );
+        assert_ne!(heap.generation_version(), first_version);
+
+        assert!(heap.retire(image, GpuCompletionValue(1)));
+        assert_eq!(heap.reclaim_completed(GpuCompletionValue(1)), 1);
+        assert_eq!(heap.generation_table()[slot.index as usize], 2);
+        assert_ne!(heap.generation_version(), first_version);
     }
 
     #[test]
@@ -378,6 +617,98 @@ mod tests {
             "reuse must bump the slot generation so stale references are detectable"
         );
         assert_eq!(heap.stats().free_slots, 0);
+    }
+
+    #[test]
+    fn deferred_release_quarantines_slot_until_completion() {
+        let mut heap = BindlessTextureHeap::new(FIRST_DYNAMIC_SLOT + 1);
+        let first = heap.acquire(image(31));
+        assert!(heap.is_current(first));
+        assert!(heap.retire_slot(first, GpuCompletionValue(9)));
+
+        assert_eq!(heap.reclaim_completed(GpuCompletionValue(8)), 0);
+        assert_eq!(heap.acquire(image(32)).index, BindlessSlot::WHITE.index);
+        assert_eq!(heap.stats().pending_releases, 1);
+        assert!(heap.is_current(first));
+
+        assert_eq!(heap.reclaim_completed(GpuCompletionValue(9)), 1);
+        assert!(!heap.is_current(first));
+        let reused = heap.acquire(image(32));
+        assert_eq!(reused.index, first.index);
+        assert_ne!(reused.generation, first.generation);
+        assert!(heap.is_current(reused));
+        assert_eq!(heap.stats().pending_releases, 0);
+    }
+
+    #[test]
+    fn immediate_release_cannot_bypass_pending_completion() {
+        let mut heap = BindlessTextureHeap::new(FIRST_DYNAMIC_SLOT + 1);
+        let first = heap.acquire(image(35));
+        assert!(heap.retire(image(35), GpuCompletionValue(12)));
+
+        assert!(!heap.release(image(35)));
+        assert_eq!(heap.stats().live_images, 1);
+        assert_eq!(heap.stats().free_slots, 0);
+        assert_eq!(heap.reclaim_completed(GpuCompletionValue(11)), 0);
+        assert_eq!(heap.acquire(image(36)), BindlessSlot::WHITE);
+
+        assert_eq!(heap.reclaim_completed(GpuCompletionValue(12)), 1);
+        assert!(!heap.is_current(first));
+    }
+
+    #[test]
+    fn validation_rejects_stale_out_of_range_and_free_slots() {
+        let mut heap = BindlessTextureHeap::new(16);
+        assert_eq!(heap.validate_slot(BindlessSlot::WHITE), Ok(()));
+        assert_eq!(
+            heap.validate_index_generation(99, RESERVED_GENERATION),
+            Err(BindlessSlotError::OutOfRange { index: 99 })
+        );
+
+        let live = heap.acquire(image(41));
+        assert_eq!(heap.validate_slot(live), Ok(()));
+        assert_eq!(heap.generation_at(live.index), Some(live.generation));
+        assert_eq!(
+            heap.validate_index_generation(live.index, live.generation.wrapping_add(1)),
+            Err(BindlessSlotError::Stale {
+                index: live.index,
+                generation: live.generation.wrapping_add(1),
+                current_generation: live.generation,
+            })
+        );
+
+        assert!(heap.release(image(41)));
+        assert_eq!(
+            heap.validate_slot(live),
+            Err(BindlessSlotError::Stale {
+                index: live.index,
+                generation: live.generation,
+                current_generation: live.generation + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rollback_releases_acquired_reference_without_leaking_or_reusing_reserved_slots() {
+        let mut heap = BindlessTextureHeap::new(FIRST_DYNAMIC_SLOT + 1);
+        let acquired = heap.acquire(image(51));
+
+        // Simulate a failed publish rolling back the reference it acquired.
+        assert!(heap.release(image(51)));
+        assert_eq!(heap.stats().live_images, 0);
+        assert_eq!(heap.stats().pending_releases, 0);
+        assert_eq!(heap.stats().free_slots, 1);
+        assert_eq!(heap.iter_slots().count(), 0);
+
+        let reused = heap.acquire(image(52));
+        assert_eq!(reused.index, acquired.index);
+        assert_eq!(reused.generation, acquired.generation + 1);
+        assert!(heap.validate_slot(BindlessSlot::WHITE).is_ok());
+        assert!(heap.validate_slot(BindlessSlot::FLAT_NORMAL).is_ok());
+        assert!(heap.validate_slot(BindlessSlot::BLACK).is_ok());
+        assert!(heap
+            .iter_slots()
+            .all(|(slot, _)| slot >= FIRST_DYNAMIC_SLOT));
     }
 
     #[test]

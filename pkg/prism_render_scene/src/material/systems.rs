@@ -4,8 +4,8 @@ use super::{
     runtime::{PrismMaterialDiagnostics, RenderMaterialRegistry},
     texture_upload::MaterialTextureArrays,
     vt_source::{
-        MaterialVtMaterialSourceQueries, MaterialVtSourceError, MaterialVtSourceQuery,
-        MaterialVtSourceRegistry,
+        MaterialVtMaterialSourceQueries, MaterialVtSourceChangeQueue, MaterialVtSourceError,
+        MaterialVtSourceQuery, MaterialVtSourceRegistry,
     },
 };
 use crate::completion::GpuCompletionTracker;
@@ -28,6 +28,7 @@ pub(crate) fn extract_material_vt_sources(
     mut events: Extract<MessageReader<AssetEvent<Image>>>,
     images: Extract<Res<Assets<Image>>>,
     mut sources: ResMut<MaterialVtSourceRegistry>,
+    mut changed: ResMut<MaterialVtSourceChangeQueue>,
 ) {
     if !sources.initial_scan_complete() {
         for (id, image) in images.iter() {
@@ -36,6 +37,14 @@ pub(crate) fn extract_material_vt_sources(
         sources.mark_initial_scan_complete();
     }
     for event in events.read() {
+        let id = match *event {
+            AssetEvent::Added { id }
+            | AssetEvent::Modified { id }
+            | AssetEvent::LoadedWithDependencies { id }
+            | AssetEvent::Unused { id }
+            | AssetEvent::Removed { id } => id,
+        };
+        changed.record(id);
         sync_material_vt_source_event(*event, &images, &mut sources);
     }
 }
@@ -81,12 +90,14 @@ pub(crate) fn extract_standard_materials(
     completion: Res<GpuCompletionTracker>,
     mut runtime: ResMut<RenderMaterialRegistry>,
     mut diagnostics: ResMut<PrismMaterialDiagnostics>,
+    mut changed_images: ResMut<MaterialVtSourceChangeQueue>,
 ) {
     runtime.dirty_assets.clear();
     diagnostics.created = 0;
     diagnostics.updated = 0;
     diagnostics.retired = 0;
     diagnostics.errors = 0;
+    let mut published = Vec::new();
     for event in events.read() {
         match *event {
             AssetEvent::Added { id } | AssetEvent::Modified { id } => {
@@ -107,6 +118,7 @@ pub(crate) fn extract_standard_materials(
                     )
                     .is_ok()
                 {
+                    published.push(id);
                     source_queries.update(id, source_query);
                     if exists {
                         diagnostics.updated += 1;
@@ -128,6 +140,32 @@ pub(crate) fn extract_standard_materials(
                 }
             }
             AssetEvent::LoadedWithDependencies { .. } => {}
+        }
+    }
+    for image in changed_images.take() {
+        let material_ids: Vec<_> = runtime.materials_referencing_image(image).collect();
+        for id in material_ids {
+            if published.contains(&id) {
+                continue;
+            }
+            let Some(material) = materials.get(id) else {
+                continue;
+            };
+            let source_query = query_standard_material_vt_sources(material, &sources);
+            if runtime
+                .publish_asset_with_sources(
+                    id,
+                    material,
+                    completion.next_submission_value(),
+                    Some(&sources),
+                )
+                .is_ok()
+            {
+                source_queries.update(id, source_query);
+                diagnostics.updated += 1;
+            } else {
+                diagnostics.errors += 1;
+            }
         }
     }
     let snapshot = runtime.registry.snapshot();

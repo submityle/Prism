@@ -1,10 +1,7 @@
 use bevy_ecs::{prelude::*, world::FromWorld};
 use bevy_material::{
     bind_group_layout_entries::{
-        binding_types::{
-            sampler, storage_buffer_read_only_sized, texture_2d, texture_2d_array,
-            uniform_buffer_sized,
-        },
+        binding_types::{sampler, storage_buffer_read_only_sized, texture_2d, texture_2d_array},
         BindGroupLayoutEntries,
     },
     descriptor::BindGroupLayoutDescriptor,
@@ -77,7 +74,11 @@ impl FromWorld for MaterialBindGroup {
         );
         let virtual_texture_page_table =
             storage_buffer_read_only_sized(false, NonZero::new(size_of::<u32>() as u64));
-        let virtual_texture_config = uniform_buffer_sized(
+        // wgpu disallows a uniform buffer in a bind group that also contains
+        // binding arrays. The fixed 32-byte VT record is read-only, so use
+        // the portable storage-buffer form for both bindless and fallback
+        // layouts.
+        let virtual_texture_config = storage_buffer_read_only_sized(
             false,
             NonZero::new(MaterialVirtualTextureGpuConfig::byte_size()),
         );

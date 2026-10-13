@@ -9,8 +9,15 @@ use super::{
     },
     texture_upload::{prepare_material_texture_arrays, MaterialTextureArrays},
     virtual_texture::MaterialVirtualTextureGpuBundle,
+    virtual_texture::{
+        collect_material_vt_feedback, map_submitted_material_vt_feedback,
+        request_material_vt_feedback_readback, MaterialVtDemandRegistry,
+        MaterialVtFeedbackReadback,
+    },
     vt_producer::{prepare_material_virtual_texture, MaterialVtProducer},
-    vt_source::{MaterialVtMaterialSourceQueries, MaterialVtSourceRegistry},
+    vt_source::{
+        MaterialVtMaterialSourceQueries, MaterialVtSourceChangeQueue, MaterialVtSourceRegistry,
+    },
 };
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
@@ -37,8 +44,11 @@ impl Plugin for PrismMaterialPlugin {
             .init_resource::<crate::completion::GpuCompletionTracker>()
             .init_resource::<RenderMaterialRegistry>()
             .init_resource::<MaterialVtSourceRegistry>()
+            .init_resource::<MaterialVtSourceChangeQueue>()
             .init_resource::<MaterialVtMaterialSourceQueries>()
             .init_resource::<MaterialVtProducer>()
+            .init_resource::<MaterialVtDemandRegistry>()
+            .init_resource::<MaterialVtFeedbackReadback>()
             .init_resource::<PrismMaterialDiagnostics>()
             .add_systems(
                 RenderStartup,
@@ -63,6 +73,9 @@ impl Plugin for PrismMaterialPlugin {
             .add_systems(
                 Render,
                 (
+                    collect_material_vt_feedback
+                        .in_set(RenderSystems::PrepareResources)
+                        .before(prepare_material_virtual_texture),
                     prepare_material_virtual_texture.in_set(RenderSystems::PrepareResources),
                     stage_material_uploads.in_set(RenderSystems::PrepareResources),
                     prepare_material_texture_arrays.in_set(RenderSystems::PrepareResources),
@@ -74,8 +87,12 @@ impl Plugin for PrismMaterialPlugin {
                 ),
             );
         render_app.add_systems(
-            RenderGraph,
-            (
+                RenderGraph,
+                (
+                request_material_vt_feedback_readback
+                    .after(bevy_core_pipeline::schedule::camera_driver)
+                    .in_set(RenderGraphSystems::Render),
+                map_submitted_material_vt_feedback.in_set(RenderGraphSystems::Finish),
                 crate::completion::track_submission.in_set(RenderGraphSystems::Finish),
                 reclaim_completed_materials.in_set(RenderGraphSystems::Finish),
             ),

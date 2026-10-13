@@ -21,10 +21,16 @@
 //! screen-space derivatives, so an explicit LOD is mandatory.  `pow`, `dot` and
 //! `inverseSqrt` are WGSL builtins used directly.
 
-import prism_render_scene::shaders::material::{
+@publish import prism_render_scene::shaders::material::{
     PrismMaterialHeader,
     PrismMaterialTexture,
     PrismSurfaceParameters,
+};
+import prism_render_scene::shaders::material_virtual_texture::{
+    MaterialVirtualTextureConfig,
+    material_vt_page_request,
+    material_vt_resolve,
+    material_vt_sample_resolved,
 };
 
 enable wgpu_binding_array;
@@ -45,12 +51,25 @@ const SEMANTIC_FACE_SDF: u32 = 8u;
 // `NORMAL_EPSILON` on the CPU golden and `normalize_or` across the reference.
 const NORMAL_EPSILON: f32 = 1e-12;
 
-// --- group 1: bindless material texture heap (shared MaterialBindGroup) ---
+// --- group 1: optional bindless material texture heap ---
 // Bindings 0/1/2 are the material header / parameter / texture storage tables
-// (declared by the resolve entry point); the heap arrays extend the same group.
-@group(1) @binding(3) var material_texture_heap: binding_array<texture_2d<f32>>;
-@group(1) @binding(4) var material_sampler_heap: binding_array<sampler>;
+// declared by each consumer. The two heap arrays are emitted only for the
+// bindless specialization. This is important: a non-bindless device has no
+// binding-array entries in MaterialBindGroup, so merely leaving the arrays
+// unused would still make its pipeline layout invalid.
+@if(MATERIAL_BINDLESS) @group(1) @binding(3) var material_texture_heap: binding_array<texture_2d<f32>>;
+@if(MATERIAL_BINDLESS) @group(1) @binding(4) var material_sampler_heap: binding_array<sampler>;
+// Bindless-only slot generation publication. The CPU bind-group owner supplies
+// this dense table at binding 9; keeping it behind the same specialization is
+// what makes the non-bindless layout free of both arrays and binding 9.
+@if(MATERIAL_BINDLESS) @group(1) @binding(9) var<storage, read> material_texture_generation_table: array<u32>;
 
+// Material-VT production ABI. Bindings 5-8 deliberately extend the existing
+// material group without moving the bindless arrays: the parent integration
+// supplies these resources, including valid dummy resources when disabled.
+@group(1) @binding(6) var<storage, read> material_vt_config: MaterialVirtualTextureConfig;
+@group(1) @binding(7) var material_vt_atlas: texture_2d_array<f32>;
+@group(1) @binding(8) var material_vt_sampler: sampler;
 // Texture-modulated surface inputs handed to the analytic BSDF. Mirrors
 // `SampledMaterial` on the CPU golden field for field.
 struct SampledMaterial {
@@ -119,6 +138,34 @@ fn sampled_material_defaults(parameters: PrismSurfaceParameters) -> SampledMater
     return out;
 }
 
+// A material row is valid when it carries a published generation. In the
+// bindless specialization the index, sampler, and generation are additionally
+// checked against the resources published for the current heap epoch before
+// either array can be indexed.
+fn material_texture_record_is_valid(record: PrismMaterialTexture) -> bool {
+    if record.generation == 0u {
+        return false;
+    }
+    @if(MATERIAL_BINDLESS) {
+        // The generation table is allocated with the same device-clamped
+        // capacity as both bindless arrays, so it is the portable runtime
+        // bounds source; naga cannot take `arrayLength` of a binding array.
+        if record.index >= arrayLength(&material_texture_generation_table)
+            || record.sampler_index >= arrayLength(&material_texture_generation_table)
+            || material_texture_generation_table[record.index] != record.generation {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn material_default_texture_texel(semantic: u32) -> vec4<f32> {
+    if semantic == SEMANTIC_NORMAL || semantic == SEMANTIC_CLEAR_COAT_NORMAL {
+        return vec4<f32>(0.5, 0.5, 1.0, 1.0);
+    }
+    return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+}
+
 // Samples one bound texture record from the bindless heap at an explicit level
 // of detail. The slot and sampler indices are the ones the CPU
 // `BindlessTextureHeap` assigned; an unbound semantic points at a reserved
@@ -128,17 +175,126 @@ fn sampled_material_defaults(parameters: PrismSurfaceParameters) -> SampledMater
 // for the hardware to pick a mip with: the caller passes the level it derived
 // analytically (`prism_texture_lod` below, §7.1). Callers that look up a
 // *data* map rather than a filtered albedo pass `0.0` explicitly.
+fn sample_texture_slot_direct(
+    record: PrismMaterialTexture,
+    uv: vec2<f32>,
+    lod: f32,
+) -> vec4<f32> {
+    if !material_texture_record_is_valid(record) {
+        return material_default_texture_texel(record.semantic);
+    }
+    @if(MATERIAL_BINDLESS) {
+        return textureSampleLevel(
+            material_texture_heap[record.index],
+            material_sampler_heap[record.sampler_index],
+            uv,
+            lod,
+        );
+    }
+    @if(!MATERIAL_BINDLESS) {
+        return material_default_texture_texel(record.semantic);
+    }
+}
+
+// Measured BRDF tables share the material heap, but the lobe module must also
+// compile for the non-bindless pipeline. Keep that consumer's symbol stable
+// while making the non-bindless variant a true identity path: it has no
+// binding-array declaration and cannot touch an absent array.
+fn material_texture_load(slot: u32, coord: vec2<i32>) -> vec4<f32> {
+    @if(MATERIAL_BINDLESS) {
+        return textureLoad(material_texture_heap[slot], coord, 0);
+    }
+    @if(!MATERIAL_BINDLESS) {
+        return vec4<f32>(0.0);
+    }
+}
+
+fn material_texture_dimensions(slot: u32) -> vec2<u32> {
+    @if(MATERIAL_BINDLESS) {
+        return textureDimensions(material_texture_heap[slot]);
+    }
+    @if(!MATERIAL_BINDLESS) {
+        return vec2<u32>(1u, 1u);
+    }
+}
+
+// Material-VT consumer used by the production resolve. Bindless pipelines use
+// their direct image only for non-VT rows and VT misses. A non-bindless
+// pipeline has no direct image/sampler bindings by contract, so its only
+// authored-texture route is a valid, resident source-backed VT row; every
+// non-VT, malformed, unavailable, or non-resident row keeps the semantic
+// fallback below.
 fn sample_texture_slot(
     record: PrismMaterialTexture,
     uv: vec2<f32>,
     lod: f32,
 ) -> vec4<f32> {
-    return textureSampleLevel(
-        material_texture_heap[record.index],
-        material_sampler_heap[record.sampler_index],
+    if !material_texture_record_is_valid(record) {
+        return material_default_texture_texel(record.semantic);
+    }
+    let request = material_vt_page_request(
+        record.virtual_texture_id,
+        record.virtual_texture_width,
+        record.virtual_texture_height,
+        record.virtual_texture_page_size,
         uv,
         lod,
     );
+    if !request.valid {
+        @if(MATERIAL_BINDLESS) {
+            return sample_texture_slot_direct(record, uv, lod);
+        }
+        @if(!MATERIAL_BINDLESS) {
+            return material_default_texture_texel(record.semantic);
+        }
+    }
+    // One page table/configuration describes one atlas geometry. A row with a
+    // different page size cannot be resolved safely and remains direct-bound.
+    if material_vt_config.enabled == 0u
+        || record.virtual_texture_page_size != material_vt_config.page_size {
+        @if(MATERIAL_BINDLESS) {
+            return sample_texture_slot_direct(record, uv, lod);
+        }
+        @if(!MATERIAL_BINDLESS) {
+            return material_default_texture_texel(record.semantic);
+        }
+    }
+
+    let resolution = material_vt_resolve(
+        material_vt_config,
+        record.virtual_texture_id,
+        0u,
+        request.mip,
+        request.page_x,
+        request.page_y,
+        request.local_uv,
+    );
+    if !resolution.vt_enabled || !resolution.hit {
+        @if(MATERIAL_BINDLESS) {
+            return sample_texture_slot_direct(record, uv, lod);
+        }
+        @if(!MATERIAL_BINDLESS) {
+            return material_default_texture_texel(record.semantic);
+        }
+    }
+    let atlas_dimensions = textureDimensions(material_vt_atlas);
+    let atlas_layers = textureNumLayers(material_vt_atlas);
+    let configured_extent = material_vt_config.tile_extent_px
+        * material_vt_config.tiles_per_row;
+    if atlas_dimensions.x == 0u
+        || atlas_dimensions.y == 0u
+        || atlas_dimensions.x != configured_extent
+        || atlas_dimensions.y != configured_extent
+        || atlas_layers < material_vt_config.atlas_layers
+        || resolution.atlas_layer >= atlas_layers {
+        @if(MATERIAL_BINDLESS) {
+            return sample_texture_slot_direct(record, uv, lod);
+        }
+        @if(!MATERIAL_BINDLESS) {
+            return material_default_texture_texel(record.semantic);
+        }
+    }
+    return material_vt_sample_resolved(material_vt_atlas, material_vt_sampler, resolution);
 }
 
 // Screen-space triangles at or below this area (px²) are treated as degenerate

@@ -10,6 +10,7 @@
 mod abi;
 mod atlas;
 mod demand;
+mod feedback;
 mod lifecycle;
 mod resources;
 mod staging;
@@ -22,6 +23,10 @@ pub use atlas::{MaterialVirtualTextureAtlasConfig, MaterialVirtualTextureAtlasEr
 pub use demand::{
     aggregate_material_vt_demands, MaterialVtDemandError, MaterialVtDemandMaterial,
     MaterialVtDemandRegistry, MaterialVtVisibilitySample,
+};
+pub(crate) use feedback::{
+    collect_material_vt_feedback, map_submitted_material_vt_feedback,
+    request_material_vt_feedback_readback, MaterialVtFeedbackReadback,
 };
 pub use lifecycle::{
     MaterialVirtualTextureLifecycle, MaterialVirtualTextureLifecycleError,

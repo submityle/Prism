@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use prism_render_driver::{IndexFormat, PrimitiveTopology, VertexFormat, VertexStepMode};
 
 use crate::{
-    Indices, Mesh, MeshBounds, MeshError, MeshVertexAttribute, POSITION_ATTRIBUTE,
-    VertexAttributeValues,
+    Indices, Mesh, MeshBounds, MeshError, MeshVertexAttribute, VertexAttributeValues,
+    POSITION_ATTRIBUTE,
 };
 
 const POSITION: MeshVertexAttribute =
@@ -29,12 +29,7 @@ fn quad() -> Mesh {
         .expect("positions fit")
         .with_attribute(
             UV,
-            VertexAttributeValues::Float32x2(vec![
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [1.0, 1.0],
-                [0.0, 1.0],
-            ]),
+            VertexAttributeValues::Float32x2(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
         )
         .expect("uvs fit")
         .indexed(Indices::Uint16(vec![0, 1, 2, 2, 3, 0]))
@@ -55,7 +50,10 @@ fn the_vertex_layout_declares_the_interleaved_offsets() {
     assert_eq!(layout.attributes[0].offset, 0);
     assert_eq!(layout.attributes[1].shader_location, 1);
     assert_eq!(layout.attributes[1].format, VertexFormat::Float32x2);
-    assert_eq!(layout.attributes[1].offset, 12, "the uv follows the position");
+    assert_eq!(
+        layout.attributes[1].offset, 12,
+        "the uv follows the position"
+    );
     assert!(
         layout.is_within_stride(),
         "every attribute lies inside the stride it declares"
@@ -97,10 +95,8 @@ fn the_vertex_buffer_bytes_match_the_declared_layout() {
 #[test]
 fn an_attribute_that_does_not_match_its_format_is_refused() {
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
-    let mismatch = mesh.insert_attribute(
-        POSITION,
-        VertexAttributeValues::Float32x2(vec![[0.0, 0.0]]),
-    );
+    let mismatch =
+        mesh.insert_attribute(POSITION, VertexAttributeValues::Float32x2(vec![[0.0, 0.0]]));
     assert_eq!(
         mismatch,
         Err(MeshError::FormatMismatch {
@@ -130,7 +126,11 @@ fn attributes_must_agree_on_the_vertex_count() {
             found: 1,
         })
     );
-    assert_eq!(mesh.attribute_count(), 1, "the bad attribute was not stored");
+    assert_eq!(
+        mesh.attribute_count(),
+        1,
+        "the bad attribute was not stored"
+    );
 }
 
 /// Indices stay at the width they were authored in, and the byte encoding
@@ -179,6 +179,40 @@ fn validate_refuses_unusable_meshes() {
     assert_eq!(quad().validate(), Ok(()), "the fixture mesh is valid");
 }
 
+#[test]
+fn mesh_validation_includes_topology_and_submesh_contracts() {
+    let invalid_topology = Mesh::new(PrimitiveTopology::TriangleList)
+        .with_attribute(
+            POSITION,
+            VertexAttributeValues::Float32x3(vec![[0.0, 0.0, 0.0]; 4]),
+        )
+        .expect("positions fit");
+    assert_eq!(
+        invalid_topology.validate(),
+        Err(MeshError::TopologyElementCount {
+            topology: PrimitiveTopology::TriangleList,
+            element_count: 4,
+        })
+    );
+
+    let mut non_indexed = quad();
+    non_indexed.with_indices(Indices::Uint16(vec![0, 1, 2, 2, 3, 0]));
+    non_indexed.with_submeshes(vec![crate::SubMesh::new(0, 0..6)]);
+    assert_eq!(non_indexed.validate(), Ok(()));
+
+    let no_indices = Mesh::new(PrimitiveTopology::TriangleList)
+        .with_attribute(
+            POSITION,
+            VertexAttributeValues::Float32x3(vec![[0.0, 0.0, 0.0]; 3]),
+        )
+        .expect("positions fit")
+        .submeshed(vec![crate::SubMesh::new(0, 0..3)]);
+    assert_eq!(
+        no_indices.validate(),
+        Err(MeshError::SubMeshesRequireIndices)
+    );
+}
+
 /// Bounds come from the positions, ignore non-finite vertices, and report the
 /// center/radius a culling sphere needs.
 #[test]
@@ -211,3 +245,87 @@ fn a_mesh_is_an_asset() {
     assert_eq!(<Mesh as prism_asset::Asset>::TYPE_NAME, "prism_mesh::Mesh");
 }
 
+#[test]
+fn every_rhi_vertex_format_has_a_matching_authoring_variant() {
+    let cases = [
+        (
+            VertexAttributeValues::Float32(vec![1.0]),
+            VertexFormat::Float32,
+        ),
+        (
+            VertexAttributeValues::Float32x2(vec![[1.0, 2.0]]),
+            VertexFormat::Float32x2,
+        ),
+        (
+            VertexAttributeValues::Float32x3(vec![[1.0, 2.0, 3.0]]),
+            VertexFormat::Float32x3,
+        ),
+        (
+            VertexAttributeValues::Float32x4(vec![[1.0, 2.0, 3.0, 4.0]]),
+            VertexFormat::Float32x4,
+        ),
+        (
+            VertexAttributeValues::Float16x2(vec![[0x3c00, 0x4000]]),
+            VertexFormat::Float16x2,
+        ),
+        (
+            VertexAttributeValues::Float16x4(vec![[0x3c00, 0x4000, 0x4200, 0x4400]]),
+            VertexFormat::Float16x4,
+        ),
+        (VertexAttributeValues::Uint32(vec![1]), VertexFormat::Uint32),
+        (
+            VertexAttributeValues::Uint32x2(vec![[1, 2]]),
+            VertexFormat::Uint32x2,
+        ),
+        (
+            VertexAttributeValues::Uint32x4(vec![[1, 2, 3, 4]]),
+            VertexFormat::Uint32x4,
+        ),
+        (
+            VertexAttributeValues::Sint32(vec![-1]),
+            VertexFormat::Sint32,
+        ),
+        (
+            VertexAttributeValues::Unorm8x4(vec![[0, 64, 128, 255]]),
+            VertexFormat::Unorm8x4,
+        ),
+        (
+            VertexAttributeValues::Snorm8x4(vec![[-128, -1, 0, 127]]),
+            VertexFormat::Snorm8x4,
+        ),
+    ];
+
+    for (values, format) in cases {
+        assert_eq!(values.len(), 1);
+        assert_eq!(values.format(), format);
+        assert!(values.matches(format));
+        if format != VertexFormat::Float32 {
+            assert!(!values.matches(VertexFormat::Float32));
+        }
+    }
+}
+
+#[test]
+fn packed_bytes_preserve_integer_and_half_float_bit_patterns() {
+    let mesh = Mesh::new(PrimitiveTopology::PointList)
+        .with_attribute(
+            MeshVertexAttribute::new("Half", VertexFormat::Float16x2, 0),
+            VertexAttributeValues::Float16x2(vec![[0x3c00, 0xbc00]]),
+        )
+        .expect("half values fit")
+        .with_attribute(
+            MeshVertexAttribute::new("Signed", VertexFormat::Sint32, 1),
+            VertexAttributeValues::Sint32(vec![-2]),
+        )
+        .expect("signed values fit")
+        .with_attribute(
+            MeshVertexAttribute::new("Normal", VertexFormat::Snorm8x4, 2),
+            VertexAttributeValues::Snorm8x4(vec![[-128, -1, 0, 127]]),
+        )
+        .expect("normalized values fit");
+
+    assert_eq!(
+        mesh.vertex_buffer_data(),
+        [0x00, 0x3c, 0x00, 0xbc, 0xfe, 0xff, 0xff, 0xff, 0x80, 0xff, 0x00, 0x7f]
+    );
+}

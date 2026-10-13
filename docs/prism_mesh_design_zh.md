@@ -166,10 +166,11 @@ pkg/prism_gdeflate_gpu                页解压的去交错 GPU 孪生
 crates/bevy_mesh                      仅保留给未迁移示例；RHI 路径以 prism_mesh 为准（§20）
 ```
 
-### 5.3 现状基线与差距（2026-10-12）
+### 5.3 现状基线与差距（2026-10-13）
 
 - **已有**：`prism_mesh::Mesh` 提供属性/索引/拓扑/布局/打包/包围体/校验；`VirtualGeometryVersion=1` 的 Cluster 决策层（cull/lod/page_table/raster_path/software_raster/hierarchy/bins/page_request/frame）已存在；`geometry` 有稳定几何表与 LOD 记录；`deformation` 有句柄与预算骨架；OMM、软件光栅、GDeflate 均有 CPU golden + GPU twin 的既有范式。
-- **差距**：`prism_mesh` 尚无 `primitives/`、`morph.rs`、`skin.rs`、`topology.rs`、`streams.rs`；`VertexAttributeValues` 只覆盖 7 种格式，而 `prism_render_driver::VertexFormat` 已有 `Float16x2/4`、`Uint32`、`Sint32`、`Snorm8x4` 等；`Mesh` 只有单流交错布局，无分流；无内容哈希；无子网格/材质槽；虚拟几何无落盘资产格式与页表；无 Deformable Cluster；无 mesh→BLAS/OMM 的几何侧契约。
+- **已补齐（M0 静态契约切片）**：`prism_mesh` 现已包含 `topology.rs`、`submesh.rs`、`limits.rs`、`morph.rs`、`skin.rs`、`streams.rs`、`hash.rs`；RHI 的 12 种当前顶点格式均有类型化授权值；`Mesh::validate()` 已检查拓扑元素数、索引范围、子网格范围/重叠，`validate_with_limits()` 已接入属性/流/顶点/材质槽预算；确定性 hash 覆盖拓扑、属性值、索引与子网格。
+- **仍有差距**：`primitives/` 尚未落地；虚拟几何无落盘资产格式与页表；无 Deformable Cluster；无 mesh→BLAS/OMM 的几何侧契约；GPU 分流上传尚未接入 `RenderMesh` 的生产路径。
 - **本文职责**：把这些差距写成可执行规格，而不是重写已有闭环。
 
 ## 6. 核心数据模型：一件 Mesh 是什么
@@ -887,10 +888,11 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 建议的第一个 PR 只做“契约与对齐”，不碰 GPU：
 
-1. 新增 `pkg/prism_mesh/src/topology.rs`：拓扑种类与图元数计算。
-2. 新增 `pkg/prism_mesh/src/validate.rs`：把现有 `Mesh::validate` 拆出并补齐 §6.8 规则（子网格、索引数量与拓扑、非有限位置计数）。
-3. 扩展 `VertexAttributeValues`：补 `Float16x2/4`、`Uint32`、`Sint32`、`Snorm8x4`，与 `VertexFormat` 一一对齐，并加“格式矩阵全覆盖”单测。
-4. 新增 `pkg/prism_mesh/src/hash.rs`：确定性内容哈希（位模式、固定遍历序）。
+1. 新增 `pkg/prism_mesh/src/topology.rs`：拓扑种类与图元数计算。✅
+2. 新增静态契约模块：`submesh.rs`、`limits.rs`、`morph.rs`、`skin.rs`，并接入 `Mesh::validate()`。✅
+3. 扩展 `VertexAttributeValues`：补 `Float16x2/4`、`Uint32`、`Sint32`、`Snorm8x4`，与 `VertexFormat` 一一对齐，并加“格式矩阵全覆盖”单测。✅
+4. 新增 `pkg/prism_mesh/src/hash.rs`：确定性内容哈希（位模式、固定遍历序）。✅
+5. 新增 `streams.rs`：位置/着色/蒙皮/形变分流布局与实际字节打包；下一步接入渲染准备路径。
 
 理由：这四件事都是设备无关、可独立单测、零 GPU 风险，且立刻为后续构建/DDC 提供键与校验基础。
 

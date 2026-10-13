@@ -48,12 +48,22 @@ pub enum VertexAttributeValues {
     Float32x3(Vec<[f32; 3]>),
     /// Four `f32` per vertex.
     Float32x4(Vec<[f32; 4]>),
+    /// Two IEEE-754 binary16 values per vertex, stored as their raw bits.
+    Float16x2(Vec<[u16; 2]>),
+    /// Four IEEE-754 binary16 values per vertex, stored as their raw bits.
+    Float16x4(Vec<[u16; 4]>),
+    /// One `u32` per vertex.
+    Uint32(Vec<u32>),
     /// Two `u32` per vertex.
     Uint32x2(Vec<[u32; 2]>),
     /// Four `u32` per vertex.
     Uint32x4(Vec<[u32; 4]>),
+    /// One `i32` per vertex.
+    Sint32(Vec<i32>),
     /// Four `u8` normalised to `[0, 1]` per vertex.
     Unorm8x4(Vec<[u8; 4]>),
+    /// Four `i8` normalised to `[-1, 1]` per vertex.
+    Snorm8x4(Vec<[i8; 4]>),
 }
 
 impl VertexAttributeValues {
@@ -65,9 +75,14 @@ impl VertexAttributeValues {
             Self::Float32x2(values) => values.len(),
             Self::Float32x3(values) => values.len(),
             Self::Float32x4(values) => values.len(),
+            Self::Float16x2(values) => values.len(),
+            Self::Float16x4(values) => values.len(),
+            Self::Uint32(values) => values.len(),
             Self::Uint32x2(values) => values.len(),
             Self::Uint32x4(values) => values.len(),
+            Self::Sint32(values) => values.len(),
             Self::Unorm8x4(values) => values.len(),
+            Self::Snorm8x4(values) => values.len(),
         }
     }
 
@@ -85,9 +100,14 @@ impl VertexAttributeValues {
             Self::Float32x2(_) => VertexFormat::Float32x2,
             Self::Float32x3(_) => VertexFormat::Float32x3,
             Self::Float32x4(_) => VertexFormat::Float32x4,
+            Self::Float16x2(_) => VertexFormat::Float16x2,
+            Self::Float16x4(_) => VertexFormat::Float16x4,
+            Self::Uint32(_) => VertexFormat::Uint32,
             Self::Uint32x2(_) => VertexFormat::Uint32x2,
             Self::Uint32x4(_) => VertexFormat::Uint32x4,
+            Self::Sint32(_) => VertexFormat::Sint32,
             Self::Unorm8x4(_) => VertexFormat::Unorm8x4,
+            Self::Snorm8x4(_) => VertexFormat::Snorm8x4,
         }
     }
 
@@ -102,9 +122,14 @@ impl VertexAttributeValues {
                 | (Self::Float32x2(_), VertexFormat::Float32x2)
                 | (Self::Float32x3(_), VertexFormat::Float32x3)
                 | (Self::Float32x4(_), VertexFormat::Float32x4)
+                | (Self::Float16x2(_), VertexFormat::Float16x2)
+                | (Self::Float16x4(_), VertexFormat::Float16x4)
+                | (Self::Uint32(_), VertexFormat::Uint32)
                 | (Self::Uint32x2(_), VertexFormat::Uint32x2)
                 | (Self::Uint32x4(_), VertexFormat::Uint32x4)
+                | (Self::Sint32(_), VertexFormat::Sint32)
                 | (Self::Unorm8x4(_), VertexFormat::Unorm8x4)
+                | (Self::Snorm8x4(_), VertexFormat::Snorm8x4)
         )
     }
 
@@ -131,6 +156,17 @@ impl VertexAttributeValues {
                     out.extend_from_slice(&value.to_le_bytes());
                 }
             }
+            Self::Float16x2(values) => {
+                for value in values[index] {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            Self::Float16x4(values) => {
+                for value in values[index] {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            Self::Uint32(values) => out.extend_from_slice(&values[index].to_le_bytes()),
             Self::Uint32x2(values) => {
                 for value in values[index] {
                     out.extend_from_slice(&value.to_le_bytes());
@@ -141,7 +177,13 @@ impl VertexAttributeValues {
                     out.extend_from_slice(&value.to_le_bytes());
                 }
             }
+            Self::Sint32(values) => out.extend_from_slice(&values[index].to_le_bytes()),
             Self::Unorm8x4(values) => out.extend_from_slice(&values[index]),
+            Self::Snorm8x4(values) => {
+                for value in values[index] {
+                    out.push(value as u8);
+                }
+            }
         }
     }
 
@@ -157,4 +199,3 @@ impl VertexAttributeValues {
         }
     }
 }
-

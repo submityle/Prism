@@ -103,6 +103,10 @@ struct PrismMaterialTexture {
     generation: u32,
     semantic: u32,
     sampler_index: u32,
+    virtual_texture_id: u32,
+    virtual_texture_width: u32,
+    virtual_texture_height: u32,
+    virtual_texture_page_size: u32,
 }
 
 fn prism_material_is_valid(

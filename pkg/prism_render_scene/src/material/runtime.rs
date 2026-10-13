@@ -186,6 +186,16 @@ impl RenderMaterialRegistry {
             .map(|(slot, image)| (image, slot))
     }
 
+    /// Returns material assets that currently retain a reference to `image`.
+    pub(crate) fn materials_referencing_image(
+        &self,
+        image: AssetId<Image>,
+    ) -> impl Iterator<Item = AssetId<StandardMaterial>> + '_ {
+        self.material_textures
+            .iter()
+            .filter_map(move |(material, images)| images.contains(&image).then_some(*material))
+    }
+
     /// Clamps the bindless slot space to `capacity` before any material is
     /// published, so `acquire` can never hand out a slot the bound
     /// `binding_array` cannot address. Only valid while the heap is empty.

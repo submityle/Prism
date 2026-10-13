@@ -1,9 +1,8 @@
 //! Standalone WESL link coverage for the material virtual-texture resolver.
 //!
-//! The fixture storage binding below exists only to instantiate the helper's
-//! `GpuPageTable` pointer parameter while linking a compute entry point. The
-//! production helper declares no group/binding and makes no feedback or upload
-//! ordering claim; those remain caller-owned contracts.
+//! The fixture storage binding below mirrors the helper's production group(1),
+//! binding(5) page-table contract. The resolver owns this binding so its
+//! runtime array never crosses a function boundary as a storage pointer.
 
 use bevy_asset::{uuid::Uuid, AssetId};
 use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
@@ -41,7 +40,9 @@ import prism_render_scene::shaders::material_virtual_texture::{
 };
 
 // Test fixture only; the helper intentionally does not own a production binding.
-@group(0) @binding(0) var<storage, read> fixture_page_table: array<u32>;
+// The imported resolver owns this production slot; keep a fixture resource at
+// the same group/binding so the standalone link exercises the real ABI.
+@group(1) @binding(5) var<storage, read> fixture_page_table: array<u32>;
 @group(0) @binding(1) var<storage, read_write> link_output: array<vec4<u32>>;
 
 @compute @workgroup_size(1)
@@ -49,7 +50,7 @@ fn material_virtual_texture_link_test(@builtin(global_invocation_id) id: vec3<u3
     if id.x != 0u { return; }
 
     let order = material_vt_compare_words(3u, 0x01000200u, 0x00040005u, 3u, 0x01000200u, 0x00040006u);
-    let slot = material_vt_exact_slot(&fixture_page_table, 0u, 3u, 0x01000200u, 0x00040005u);
+    let slot = material_vt_exact_slot(0u, 3u, 0x01000200u, 0x00040005u);
     let shifted = material_vt_shift_page(0xffffu, 16u);
     let coarse_uv = material_vt_coarse_page_uv(3u, 2u, vec2<f32>(0.25, 0.75), 1u);
     let atlas_uv = material_vt_atlas_uv(vec2<f32>(0.5, 0.5), 5u, 136u, 8u, 128u, 4u);
@@ -65,17 +66,17 @@ fn material_virtual_texture_link_test(@builtin(global_invocation_id) id: vec3<u3
     config.gutter_px = 4u;
     config.coarsest_mip = 8u;
     let disabled = material_vt_resolve(
-        &fixture_page_table, config, MATERIAL_VT_NON_VIRTUAL_TEXTURE,
+        config, MATERIAL_VT_NON_VIRTUAL_TEXTURE,
         0u, 0u, 0u, 0u, vec2<f32>(0.5, 0.5),
     );
     config.enabled = 1u;
     config.entry_count = 1u;
     let non_vt = material_vt_resolve(
-        &fixture_page_table, config, MATERIAL_VT_NON_VIRTUAL_TEXTURE,
+        config, MATERIAL_VT_NON_VIRTUAL_TEXTURE,
         0u, 0u, 0u, 0u, vec2<f32>(0.5, 0.5),
     );
     let miss = material_vt_resolve(
-        &fixture_page_table, config, 7u,
+        config, 7u,
         0u, 0u, 0u, 0u, vec2<f32>(0.5, 0.5),
     );
 

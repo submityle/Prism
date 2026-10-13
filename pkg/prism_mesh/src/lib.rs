@@ -32,8 +32,15 @@ extern crate alloc;
 mod attribute;
 mod bounds;
 mod error;
+mod hash;
 mod indices;
+mod limits;
 mod mesh;
+mod morph;
+mod skin;
+mod streams;
+mod submesh;
+mod topology;
 
 #[cfg(test)]
 mod tests;
@@ -41,6 +48,12 @@ mod tests;
 pub use attribute::{MeshVertexAttribute, VertexAttributeValues};
 pub use bounds::MeshBounds;
 pub use error::MeshError;
+pub use hash::{canonical_bytes, content_hash, MeshContentHash, MESH_HASH_SCHEMA};
 pub use indices::Indices;
+pub use limits::{AttributeLimit, MeshLimits, StreamLimit, VertexLimit};
 pub use mesh::{Mesh, POSITION_ATTRIBUTE};
-
+pub use morph::{MorphDelta, MorphError, MorphTarget, MorphTargetData};
+pub use skin::{SkinError, SkinInfluence, SkinningData};
+pub use streams::{StreamAttribute, StreamLayoutProfile, VertexStreamKind, VertexStreamLayout};
+pub use submesh::{validate_submeshes, validate_submeshes_with_limits, SubMesh};
+pub use topology::{elements_per_primitive, primitive_count, PrimitiveTopologyExt};

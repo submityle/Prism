@@ -17,7 +17,7 @@ use bevy_asset::{AssetId, Handle};
 use bevy_ecs::prelude::Resource;
 use bevy_image::Image;
 use bevy_pbr::StandardMaterial;
-use bevy_platform::collections::HashMap;
+use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::render_resource::{TextureDataOrder, TextureDimension, TextureFormat};
 use prism_render_material::{
     MaterialVtError, MaterialVtFormat, MaterialVtSourceDescriptor, MaterialVtSourceSnapshot,
@@ -89,6 +89,13 @@ pub enum MaterialVtSourceError {
         /// Number of layers found in the image.
         layers: u32,
     },
+    /// The current material row ABI selects one 2D layer and has no array
+    /// layer field; accepting an array source would make layers above zero
+    /// unreachable in the shader.
+    UnsupportedLayerCount {
+        /// Number of array layers found in the image.
+        layers: u32,
+    },
     /// The image does not contain the complete pyramid implied by its largest
     /// base dimension.
     MipCountMismatch {
@@ -140,6 +147,10 @@ impl fmt::Display for MaterialVtSourceError {
             Self::LayerCountOverflow { layers } => write!(
                 formatter,
                 "material VT image layer count {layers} exceeds the page-key range"
+            ),
+            Self::UnsupportedLayerCount { layers } => write!(
+                formatter,
+                "material VT image has {layers} layers but the material row ABI currently supports one layer"
             ),
             Self::MipCountMismatch { expected, actual } => write!(
                 formatter,
@@ -195,6 +206,9 @@ pub fn capture_material_vt_source(
             height,
             layers,
         });
+    }
+    if layers != 1 {
+        return Err(MaterialVtSourceError::UnsupportedLayerCount { layers });
     }
     let layers_u16 =
         u16::try_from(layers).map_err(|_| MaterialVtSourceError::LayerCountOverflow { layers })?;
@@ -438,6 +452,25 @@ pub struct MaterialVtSourceRegistry {
     initial_scan_complete: bool,
 }
 
+/// Image identities whose source snapshot changed during this extract pass.
+/// Material extraction consumes this queue to republish rows that reference
+/// the changed image even when the `StandardMaterial` asset itself was not
+/// modified.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct MaterialVtSourceChangeQueue {
+    images: HashSet<AssetId<Image>>,
+}
+
+impl MaterialVtSourceChangeQueue {
+    pub(crate) fn record(&mut self, image: AssetId<Image>) {
+        self.images.insert(image);
+    }
+
+    pub(crate) fn take(&mut self) -> HashSet<AssetId<Image>> {
+        core::mem::take(&mut self.images)
+    }
+}
+
 impl Default for MaterialVtSourceRegistry {
     fn default() -> Self {
         Self {
@@ -582,6 +615,45 @@ impl MaterialVtSourceRegistry {
                 error,
             },
         }
+    }
+
+    /// Returns whether the source belongs to the exact default producer set.
+    ///
+    /// Material rows must not advertise VT merely because a CPU snapshot is
+    /// available: the producer may reject its format/page geometry or the
+    /// complete source set may exceed the fixed atlas budget. Keeping this
+    /// predicate here makes the resolver and producer use the same eligibility
+    /// contract.
+    #[must_use]
+    pub(crate) fn eligible_for_default_producer(&self, asset_id: AssetId<Image>) -> bool {
+        let Some(entry) = self.entries.get(&asset_id) else {
+            return false;
+        };
+        let MaterialVtSourceState::Available(target) = &entry.state else {
+            return false;
+        };
+        if target.descriptor().page_size() != DEFAULT_MATERIAL_VT_PAGE_SIZE
+            || target.descriptor().format() != MaterialVtFormat::Rgba8Unorm
+        {
+            return false;
+        }
+
+        let total_pages = self
+            .entries
+            .values()
+            .filter_map(|entry| match &entry.state {
+                MaterialVtSourceState::Available(snapshot)
+                    if snapshot.descriptor().page_size() == DEFAULT_MATERIAL_VT_PAGE_SIZE
+                        && snapshot.descriptor().format() == MaterialVtFormat::Rgba8Unorm =>
+                {
+                    Some(snapshot.page_count())
+                }
+                _ => None,
+            })
+            .try_fold(0_u64, |total, pages| total.checked_add(pages));
+        total_pages.is_some_and(|pages| {
+            pages <= u64::from(crate::material::vt_producer::DEFAULT_MATERIAL_VT_PAGE_CAPACITY)
+        })
     }
 
     /// Queries image source state without claiming residency or mutating the
@@ -984,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn layer_major_images_are_normalized_to_the_snapshot_layout() {
+    fn array_images_are_rejected_until_the_material_abi_carries_a_layer() {
         let id = image_id(8);
         let mut image = image_4x4_complete(0);
         image.texture_descriptor.size.depth_or_array_layers = 2;
@@ -995,13 +1067,10 @@ mod tests {
             4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6,
         ]);
         image.data_order = TextureDataOrder::LayerMajor;
-        let snapshot = capture_material_vt_source(&image, config()).unwrap();
-        assert_eq!(snapshot.bytes()[0..16], [1; 16]);
-        assert_eq!(snapshot.bytes()[16..32], [4; 16]);
-        assert_eq!(snapshot.bytes()[32..36], [2; 4]);
-        assert_eq!(snapshot.bytes()[36..40], [5; 4]);
-        assert_eq!(snapshot.bytes()[40], 3);
-        assert_eq!(snapshot.bytes()[41], 6);
+        assert!(matches!(
+            capture_material_vt_source(&image, config()),
+            Err(MaterialVtSourceError::UnsupportedLayerCount { layers: 2 })
+        ));
         let _ = id;
     }
 
@@ -1020,5 +1089,68 @@ mod tests {
                 MaterialVtError::ZeroPageSize
             ))
         ));
+    }
+
+    #[test]
+    fn default_producer_eligibility_matches_format_geometry_and_budget() {
+        fn snapshot(
+            texture_id: u32,
+            page_size: u32,
+            format: MaterialVtFormat,
+        ) -> MaterialVtSourceSnapshot {
+            let descriptor =
+                MaterialVtSourceDescriptor::new(texture_id, 128, 128, 1, page_size, 8, format)
+                    .unwrap();
+            let bytes = vec![0_u8; descriptor_payload_len(descriptor)];
+            MaterialVtSourceSnapshot::new(descriptor, bytes).unwrap()
+        }
+
+        fn descriptor_payload_len(descriptor: MaterialVtSourceDescriptor) -> usize {
+            let bytes_per_texel = descriptor.format().bytes_per_texel() as usize;
+            (0..u32::from(descriptor.mip_count()))
+                .map(|mip| {
+                    let width = (descriptor.width() >> mip).max(1) as usize;
+                    let height = (descriptor.height() >> mip).max(1) as usize;
+                    width * height * bytes_per_texel * usize::from(descriptor.layers())
+                })
+                .sum()
+        }
+
+        let mut registry = MaterialVtSourceRegistry::default();
+        let compatible = image_id(0xD1);
+        registry.insert_snapshot(
+            compatible,
+            snapshot(
+                1,
+                DEFAULT_MATERIAL_VT_PAGE_SIZE,
+                MaterialVtFormat::Rgba8Unorm,
+            ),
+        );
+        assert!(registry.eligible_for_default_producer(compatible));
+
+        let wrong_format = image_id(0xD2);
+        registry.insert_snapshot(
+            wrong_format,
+            snapshot(2, DEFAULT_MATERIAL_VT_PAGE_SIZE, MaterialVtFormat::R8Unorm),
+        );
+        assert!(!registry.eligible_for_default_producer(wrong_format));
+
+        let wrong_page = image_id(0xD3);
+        registry.insert_snapshot(wrong_page, snapshot(3, 64, MaterialVtFormat::Rgba8Unorm));
+        assert!(!registry.eligible_for_default_producer(wrong_page));
+
+        for texture_id in 4..37 {
+            let id = image_id(u128::from(texture_id) + 0xD0);
+            registry.insert_snapshot(
+                id,
+                snapshot(
+                    texture_id,
+                    DEFAULT_MATERIAL_VT_PAGE_SIZE,
+                    MaterialVtFormat::Rgba8Unorm,
+                ),
+            );
+        }
+        assert!(!registry.eligible_for_default_producer(compatible));
+        assert!(!registry.eligible_for_default_producer(wrong_format));
     }
 }

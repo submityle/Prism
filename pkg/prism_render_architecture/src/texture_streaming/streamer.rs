@@ -148,6 +148,20 @@ impl VirtualTextureStreamer {
         }
     }
 
+    /// Drops all resident/history state while retaining the streaming policy.
+    ///
+    /// A source revision or texture-removal event must invalidate the old
+    /// physical bindings before a new source snapshot is considered.  This is
+    /// intentionally explicit rather than silently accepting a page key whose
+    /// bytes now belong to a different immutable source revision.
+    pub fn clear(&mut self) {
+        self.pool.clear();
+        self.page_table = GpuPageTable::new();
+        self.tracks.clear();
+        self.pending.clear();
+        self.frame = 0;
+    }
+
     /// The active configuration (after sanitization).
     #[must_use]
     pub const fn config(&self) -> &StreamerConfig {
@@ -522,6 +536,23 @@ mod tests {
     }
 
     #[test]
+    fn clear_invalidates_residency_and_restarts_frame_epoch() {
+        let mut streamer = VirtualTextureStreamer::new(
+            StreamerConfig::new(PAGE_BYTES).with_min_demand_frames(1),
+            1,
+        );
+        let key = key(0);
+        let frame = streamer.stream_demands(&[demand(key, 100)]);
+        assert_eq!(frame.resident_count, 1);
+        assert_eq!(streamer.frame(), 1);
+        streamer.clear();
+        assert_eq!(streamer.frame(), 0);
+        assert_eq!(streamer.pool().resident_count(), 0);
+        assert!(streamer.page_table().is_empty());
+        assert_eq!(streamer.tracked_pages(), 0);
+    }
+
+    #[test]
     fn single_frame_graze_is_debounced_not_loaded() {
         // Default two-frame debounce: a page requested on just one frame must
         // not trigger an upload.
@@ -574,7 +605,11 @@ mod tests {
             StreamerConfig::new(100 * PAGE_BYTES).with_min_demand_frames(1),
             64,
         );
-        let demands = [demand(key(0), 500), demand(key(1), 400), demand(key(2), 300)];
+        let demands = [
+            demand(key(0), 500),
+            demand(key(1), 400),
+            demand(key(2), 300),
+        ];
         let f1 = streamer.stream_demands(&demands);
         assert_eq!(f1.loaded(), 3, "all three fit and load immediately");
         let f2 = streamer.stream_demands(&demands);
@@ -643,7 +678,7 @@ mod tests {
             4,
         );
         streamer.stream_demands(&[demand(key(0), 10)]); // load A, resident_since = 1
-        // Frame 2: B is far more important, but A is still protected.
+                                                        // Frame 2: B is far more important, but A is still protected.
         let f2 = streamer.stream_demands(&[demand(key(0), 10), demand(key(1), 1000)]);
         assert!(f2.plan.evicts.is_empty(), "protected page is not evicted");
         assert_eq!(f2.loaded(), 0, "budget is full, so B cannot load yet");
@@ -682,7 +717,11 @@ mod tests {
             64,
         );
         for _ in 0..3 {
-            streamer.stream_demands(&[demand(key(0), 500), demand(key(5), 300), demand(key(2), 400)]);
+            streamer.stream_demands(&[
+                demand(key(0), 500),
+                demand(key(5), 300),
+                demand(key(2), 400),
+            ]);
         }
         let rebuilt = GpuPageTable::from_pool(streamer.pool());
         assert_eq!(streamer.page_table().words(), rebuilt.words());
@@ -744,7 +783,11 @@ mod tests {
                 StreamerConfig::new(2 * PAGE_BYTES).with_min_demand_frames(1),
                 4,
             );
-            let demands = [demand(key(0), 500), demand(key(1), 400), demand(key(2), 300)];
+            let demands = [
+                demand(key(0), 500),
+                demand(key(1), 400),
+                demand(key(2), 300),
+            ];
             let mut frames = Vec::new();
             for _ in 0..6 {
                 frames.push(streamer.stream_demands(&demands));
@@ -773,7 +816,12 @@ mod tests {
             64,
         );
         // Cell (0,0) wants mip 0; the rest are unrequested.
-        let grid = [0u8, super::super::NOT_REQUESTED, super::super::NOT_REQUESTED, super::super::NOT_REQUESTED];
+        let grid = [
+            0u8,
+            super::super::NOT_REQUESTED,
+            super::super::NOT_REQUESTED,
+            super::super::NOT_REQUESTED,
+        ];
         let f = streamer.stream_feedback(&[FeedbackInput::new(desc, &grid)]);
         assert_eq!(f.demanded_pages, 1);
         assert_eq!(f.loaded(), 1);
@@ -788,7 +836,11 @@ mod tests {
             StreamerConfig::new(100 * PAGE_BYTES).with_min_demand_frames(1),
             64,
         );
-        let f = streamer.stream_demands(&[demand(key(0), 300), demand(key(1), 500), demand(key(2), 400)]);
+        let f = streamer.stream_demands(&[
+            demand(key(0), 300),
+            demand(key(1), 500),
+            demand(key(2), 400),
+        ]);
         assert_eq!(f.loaded(), 3);
         assert_eq!(f.pending_uploads, 0);
         assert_eq!(f.uploaded_bytes, 3 * PAGE_BYTES);
@@ -807,11 +859,19 @@ mod tests {
                 .with_upload_budget(Some(PAGE_BYTES)),
             64,
         );
-        let demands = [demand(key(0), 300), demand(key(1), 500), demand(key(2), 400)];
+        let demands = [
+            demand(key(0), 300),
+            demand(key(1), 500),
+            demand(key(2), 400),
+        ];
 
         let f1 = streamer.stream_demands(&demands);
         assert_eq!(f1.loaded(), 1, "only one page uploads under the budget");
-        assert_eq!(f1.uploads[0].key, key(1), "highest importance uploads first");
+        assert_eq!(
+            f1.uploads[0].key,
+            key(1),
+            "highest importance uploads first"
+        );
         assert_eq!(f1.uploaded_bytes, PAGE_BYTES);
         assert_eq!(f1.pending_uploads, 2);
         assert!(!f1.is_steady(), "a backlog is not steady");
@@ -819,15 +879,29 @@ mod tests {
         assert!(streamer.pool().contains(key(0)));
         assert!(streamer.pool().contains(key(1)));
         assert!(streamer.pool().contains(key(2)));
-        assert_eq!(streamer.page_table().lookup(key(1)), streamer.pool().slot_of(key(1)));
-        assert_eq!(streamer.page_table().lookup(key(0)), None, "pending page withheld");
-        assert_eq!(streamer.page_table().lookup(key(2)), None, "pending page withheld");
+        assert_eq!(
+            streamer.page_table().lookup(key(1)),
+            streamer.pool().slot_of(key(1))
+        );
+        assert_eq!(
+            streamer.page_table().lookup(key(0)),
+            None,
+            "pending page withheld"
+        );
+        assert_eq!(
+            streamer.page_table().lookup(key(2)),
+            None,
+            "pending page withheld"
+        );
 
         let f2 = streamer.stream_demands(&demands);
         assert_eq!(f2.loaded(), 1);
         assert_eq!(f2.uploads[0].key, key(2), "next-highest drains second");
         assert_eq!(f2.pending_uploads, 1);
-        assert!(f2.plan.loads.is_empty(), "no new seats: pool already holds all three");
+        assert!(
+            f2.plan.loads.is_empty(),
+            "no new seats: pool already holds all three"
+        );
 
         let f3 = streamer.stream_demands(&demands);
         assert_eq!(f3.loaded(), 1);
@@ -836,7 +910,10 @@ mod tests {
 
         let f4 = streamer.stream_demands(&demands);
         assert!(f4.is_steady(), "backlog cleared and resident set stable");
-        assert_eq!(streamer.page_table().words(), GpuPageTable::from_pool(streamer.pool()).words());
+        assert_eq!(
+            streamer.page_table().words(),
+            GpuPageTable::from_pool(streamer.pool()).words()
+        );
     }
 
     #[test]
@@ -875,9 +952,15 @@ mod tests {
         // Frame 2: a far more important third page forces key(0) (pending, lowest
         // priority) out of the pool before it ever uploaded.
         let f2 = streamer.stream_demands(&[demand(key(1), 500), demand(key(2), 900)]);
-        assert!(f2.plan.evicts.contains(&key(0)), "the pending page is evicted");
+        assert!(
+            f2.plan.evicts.contains(&key(0)),
+            "the pending page is evicted"
+        );
         assert!(!streamer.pool().contains(key(0)));
-        assert!(f2.uploads.iter().all(|u| u.key != key(0)), "no stale upload for an evicted page");
+        assert!(
+            f2.uploads.iter().all(|u| u.key != key(0)),
+            "no stale upload for an evicted page"
+        );
     }
 
     fn page(mip: u8, x: u16) -> TexturePageKey {
@@ -904,10 +987,16 @@ mod tests {
         );
         let f = streamer.stream_demands(&[demand(fine, 500)]);
         // The fine page itself is debounced on its first sighting.
-        assert!(!streamer.pool().contains(fine), "fine page is still debounced");
+        assert!(
+            !streamer.pool().contains(fine),
+            "fine page is still debounced"
+        );
         assert_eq!(f.deferred_loads, 1);
         // The covering floor page, though never demanded, is forced resident.
-        assert!(streamer.pool().contains(cover), "floor cover is pinned resident");
+        assert!(
+            streamer.pool().contains(cover),
+            "floor cover is pinned resident"
+        );
         // The resolver therefore never holes: it falls back to the floor cover.
         let resolved = streamer
             .page_table()
@@ -934,8 +1023,7 @@ mod tests {
         assert_eq!(r.key, cover);
         assert_eq!(r.mip_bias, floor);
 
-        let mut unpinned =
-            VirtualTextureStreamer::new(StreamerConfig::new(100 * PAGE_BYTES), 64);
+        let mut unpinned = VirtualTextureStreamer::new(StreamerConfig::new(100 * PAGE_BYTES), 64);
         unpinned.stream_demands(&[demand(fine, 500)]);
         // No floor and the fine page is still debounced: resolve finds nothing.
         assert!(unpinned.resolve(fine).is_none());
@@ -957,7 +1045,10 @@ mod tests {
         for _ in 0..4 {
             streamer.stream_demands(&[demand(fine, 900)]);
         }
-        assert!(streamer.pool().contains(cover), "cover held under contention");
+        assert!(
+            streamer.pool().contains(cover),
+            "cover held under contention"
+        );
         assert!(streamer.page_table().resolve(fine, floor).is_some());
     }
 
