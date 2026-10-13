@@ -19,6 +19,7 @@ extern crate alloc;
 mod artifact;
 mod error;
 mod image;
+mod runtime_loader;
 
 #[cfg(test)]
 mod tests;
@@ -26,3 +27,4 @@ mod tests;
 pub use artifact::{ImageArtifact, ImageArtifactError, IMAGE_ARTIFACT_SCHEMA};
 pub use error::ImageError;
 pub use image::Image;
+pub use runtime_loader::{RuntimeImageLoadError, RuntimeImageLoader};
