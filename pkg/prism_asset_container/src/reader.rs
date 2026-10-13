@@ -160,6 +160,7 @@ impl ContainerReader {
         let mut outputs = Vec::with_capacity(requests.len());
         let mut physical = Vec::new();
         for (index, request) in requests.iter().copied().enumerate() {
+            policy.validate_request_len(request.len)?;
             let len = self.validate_range_request(request)?;
             outputs.push(vec![0; len]);
             if len != 0 {

@@ -712,6 +712,41 @@ fn reader_batch_policy_bounds_coalescing_and_validates_before_io() {
 }
 
 #[test]
+fn reader_batch_policy_rejects_single_request_over_limit_before_io() {
+    let payload = b"12345678";
+    let bytes = build(&[("single-request-bound", payload)]);
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    requests.lock().unwrap().clear();
+
+    let exact = reader
+        .read_ranges(
+            &[RangeRequest::new(guid("single-request-bound"), 0, 4)],
+            RangeBatchPolicy {
+                max_batch_bytes: 4,
+                max_gap_bytes: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(exact, vec![b"1234".to_vec()]);
+    assert_eq!(requests.lock().unwrap().as_slice().len(), 1);
+    assert_eq!(requests.lock().unwrap().as_slice()[0].1, 4);
+
+    requests.lock().unwrap().clear();
+    assert_eq!(
+        reader.read_ranges(
+            &[RangeRequest::new(guid("single-request-bound"), 0, 5)],
+            RangeBatchPolicy {
+                max_batch_bytes: 4,
+                max_gap_bytes: 0,
+            },
+        ),
+        Err(ContainerError::InvalidBatchPolicy)
+    );
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[test]
 fn rejects_truncation_version_and_directory_digest_corruption() {
     let canonical = build(&[("one", b"one")]);
     assert_eq!(
