@@ -63,6 +63,7 @@ pub mod property_apply;
 pub mod remap;
 pub mod residency;
 pub mod template;
+pub mod template_codec;
 
 pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
 pub use instance::SceneInstance;
@@ -90,6 +91,9 @@ pub use property_apply::{apply_property_override, apply_property_overrides, Prop
 pub use remap::RemapTable;
 pub use residency::{ResidencyPlan, ResidencyTier};
 pub use template::{NestedSlot, SceneTemplate, TemplateError};
+pub use template_codec::{
+    decode_template, encode_template, TemplateCodecError, TemplateDecodeLimits,
+};
 
 /// The common types most consumers import.
 pub mod prelude {
@@ -118,6 +122,9 @@ pub mod prelude {
     pub use crate::remap::RemapTable;
     pub use crate::residency::{ResidencyPlan, ResidencyTier};
     pub use crate::template::{NestedSlot, SceneTemplate, TemplateError};
+    pub use crate::template_codec::{
+        decode_template, encode_template, TemplateCodecError, TemplateDecodeLimits,
+    };
 }
 
 #[cfg(test)]
