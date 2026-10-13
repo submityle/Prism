@@ -928,7 +928,7 @@ Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `Sch
 |---|---|---|---|---|
 | **性能** | 规划中 | 默认 `Cadence::Never`；事件/定时器/依赖变化唤醒；扁平表寻址；实例帧 blob；定容事件环；`BatchRuntime` SoA（§9/§13） | `benches/` 记录静默实例成本、单步分配数（应 0）、万级吞吐；纳入 `prism_diagnostic::budget` | 真实基准与帧预算数值；GPU 侧评分（未规划） |
 | **效果** | 规划中 | 状态图语义（层级/并行/历史/LCA/微步）对齐 SCXML；§8 三属性对「BT 式 reactive」与「状态机式迁移」的等价覆盖；双运行时 parity（§5/§8/§15） | §15.1 语义套件、§15.3 parity 全绿 | W3C 套件移植覆盖率目标未定；BT 存量资产的转换保真度 |
-| **易用性** | 规划中 | 零配置插件组 + 预置 Schema；文本资产可读可 diff；错误码可定位；doctest 覆盖（§18/§19） | `cargo test --doc` 绿；ST1「零配置可跑」出口标准 | 图编辑器体验（依赖前置） |
+| **易用性** | 部分实现（ST1 显式装配） | ST1 提供 `queue_spawn`、typed Context、显式 Schedule/Plugin 接线；后续再提供零配置插件组与预置 Schema；文本资产可读可 diff；错误码可定位；doctest 覆盖（§18/§19） | 当前：20 个 ECS 集成测试、显式 Schedule/Plugin 回归与 typed Context 用例；后续：`cargo test --doc` 绿及 ST1 零配置出口标准 | 图编辑器体验、零配置运行时（依赖后续里程碑） |
 | **易维护性** | 规划中 | 单一职责分层（语义内核 / ECS / 作者 / 调试 / 批量）；`core` 零 `unsafe`；注释讲 why（§4/§16） | CI：Clippy 零告警、`src/**` 无测试（测试收口 `text/`） | — |
 | **易拓展性** | 规划中 | `Task/Evaluator/Guard/SelectionPolicy/Schema` trait 扩展点；`TaskBackend` 支持 WASM/图；feature 门控（§21.1/§18） | 新 Schema 接入不改内核；新后端不改编译器 | 跨语言 ABI 稳定承诺（依赖 `prism_script`） |
 | **易迭代性** | 规划中 | 文本真相源 + `PlanRev` 热重载 + 稳定 `StateGuid` 重映射；每里程碑 version 文档（§9.5/§20） | 热重载重映射测试；version 文档与 crate 版本一致（仓库 §5.2） | 多版本 plan 并存灰度（未规划） |
