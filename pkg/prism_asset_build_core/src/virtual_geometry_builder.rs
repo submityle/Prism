@@ -68,6 +68,10 @@ pub enum StaticClusterBuildError {
         /// Configured physical page size.
         page_size: u32,
     },
+    /// A generated table count or range cannot be represented by the asset ABI.
+    AbiCountOverflow(&'static str),
+    /// The next page key cannot be represented by the asset ABI.
+    PageKeyOverflow,
     /// The page cluster count cannot be represented by the asset ABI.
     PageClusterCountOverflow,
     /// Generated asset cross-validation failed.
@@ -97,6 +101,10 @@ impl core::fmt::Display for StaticClusterBuildError {
                     "cluster payload is {bytes} bytes, larger than page size {page_size}"
                 )
             }
+            Self::AbiCountOverflow(kind) => {
+                write!(f, "{kind} count exceeds the virtual-geometry ABI")
+            }
+            Self::PageKeyOverflow => f.write_str("page key exceeds the virtual-geometry ABI"),
             Self::PageClusterCountOverflow => f.write_str("page contains too many clusters"),
             Self::InvalidAsset(error) => {
                 write!(f, "generated virtual-geometry asset is invalid: {error}")
@@ -138,7 +146,8 @@ pub fn build_static_virtual_geometry(
     }
 
     let index_values = indices.to_u32();
-    let ranges = submesh_ranges(mesh, index_values.len() as u32)?;
+    let index_count = abi_u32(index_values.len(), "index")?;
+    let ranges = submesh_ranges(mesh, index_count)?;
     let mut nodes = Vec::new();
     let mut clusters = Vec::new();
     let mut pages = Vec::new();
@@ -167,7 +176,6 @@ pub fn build_static_virtual_geometry(
                         > settings.max_vertices_per_cluster as usize)
             {
                 flush_cluster(
-                    asset_id,
                     material_slot,
                     &local_vertices,
                     &local_indices,
@@ -202,7 +210,6 @@ pub fn build_static_virtual_geometry(
         }
         if !local_indices.is_empty() {
             flush_cluster(
-                asset_id,
                 material_slot,
                 &local_vertices,
                 &local_indices,
@@ -223,7 +230,7 @@ pub fn build_static_virtual_geometry(
         page_cluster_start,
         &mut page_payload,
         &mut pages,
-        clusters.len() as u32,
+        abi_u32(clusters.len(), "cluster")?,
         settings.compression,
     )?;
 
@@ -232,6 +239,12 @@ pub fn build_static_virtual_geometry(
         .ok_or(StaticClusterBuildError::MissingPositions)?;
     let center = bounds.center();
     let extents = bounds.extents();
+    let material_slot_count = mesh.submeshes().iter().try_fold(1u32, |count, submesh| {
+        let slot_count = u32::from(submesh.material_slot)
+            .checked_add(1)
+            .ok_or(StaticClusterBuildError::AbiCountOverflow("material slot"))?;
+        Ok::<_, StaticClusterBuildError>(count.max(slot_count))
+    })?;
     let header = VirtualGeometryAssetHeader {
         asset_id,
         schema_version: prism_render_architecture::virtual_geometry::VIRTUAL_GEOMETRY_ASSET_SCHEMA,
@@ -244,18 +257,14 @@ pub fn build_static_virtual_geometry(
             half_extents: [extents[0] * 0.5, extents[1] * 0.5, extents[2] * 0.5],
             _padding: 0.0,
         },
-        material_slot_count: mesh
-            .submeshes()
-            .iter()
-            .map(|submesh| u32::from(submesh.material_slot) + 1)
-            .max()
-            .unwrap_or(1),
+        material_slot_count,
         fallback_mesh_hash: content_hash(mesh).as_bytes(),
     };
+    let cluster_count = abi_u32(clusters.len(), "cluster")?;
     let asset = VirtualGeometryAsset {
         header,
         nodes,
-        roots: (0..clusters.len() as u32).collect(),
+        roots: (0..cluster_count).collect(),
         pages,
         clusters,
     };
@@ -263,6 +272,10 @@ pub fn build_static_virtual_geometry(
         .validate()
         .map_err(StaticClusterBuildError::InvalidAsset)?;
     Ok(asset)
+}
+
+fn abi_u32(value: usize, kind: &'static str) -> Result<u32, StaticClusterBuildError> {
+    u32::try_from(value).map_err(|_| StaticClusterBuildError::AbiCountOverflow(kind))
 }
 
 fn validate_settings(settings: StaticClusterBuildSettings) -> Result<(), StaticClusterBuildError> {
@@ -303,7 +316,10 @@ fn submesh_ranges(
     ranges.sort_by_key(|range| range.0);
     let mut cursor = 0;
     for (start, end, _) in &ranges {
-        if *start != cursor || *end > index_count || (*end - *start) % 3 != 0 {
+        let Some(length) = end.checked_sub(*start) else {
+            return Err(StaticClusterBuildError::SubmeshCoverage);
+        };
+        if *start != cursor || *end > index_count || length % 3 != 0 {
             return Err(StaticClusterBuildError::SubmeshCoverage);
         }
         cursor = *end;
@@ -316,7 +332,6 @@ fn submesh_ranges(
 
 #[allow(clippy::too_many_arguments)]
 fn flush_cluster(
-    asset_id: u32,
     material_slot: u16,
     vertices: &[[f32; 3]],
     indices: &[u16],
@@ -332,42 +347,51 @@ fn flush_cluster(
     let payload = encode_cluster_payload(vertices, indices);
     if payload.len() > settings.page_size as usize {
         return Err(StaticClusterBuildError::ClusterTooLarge {
-            bytes: payload.len() as u32,
+            bytes: abi_u32(payload.len(), "payload byte")?,
             page_size: settings.page_size,
         });
     }
-    if !page_payload.is_empty() && page_payload.len() + payload.len() > settings.page_size as usize
-    {
+    let combined_len = page_payload.len().checked_add(payload.len()).ok_or(
+        StaticClusterBuildError::AbiCountOverflow("page payload byte"),
+    )?;
+    if !page_payload.is_empty() && combined_len > settings.page_size as usize {
         finish_page(
             *page_key,
             settings.page_size,
             *page_cluster_start,
             page_payload,
             pages,
-            clusters.len() as u32,
+            abi_u32(clusters.len(), "cluster")?,
             compression,
         )?;
-        page_key.page += 1;
-        *page_cluster_start = clusters.len() as u32;
+        page_key.page = page_key
+            .page
+            .checked_add(1)
+            .ok_or(StaticClusterBuildError::PageKeyOverflow)?;
+        *page_cluster_start = abi_u32(clusters.len(), "cluster")?;
     }
-    let payload_offset = page_payload.len() as u32;
+    let payload_offset = abi_u32(page_payload.len(), "payload offset")?;
+    let payload_size = abi_u32(payload.len(), "payload byte")?;
+    let vertex_count = u16::try_from(vertices.len())
+        .map_err(|_| StaticClusterBuildError::AbiCountOverflow("cluster vertex"))?;
+    let triangle_count = u16::try_from(indices.len() / 3)
+        .map_err(|_| StaticClusterBuildError::AbiCountOverflow("cluster triangle"))?;
+    let node_index = abi_u32(nodes.len(), "node")?;
     page_payload.extend_from_slice(&payload);
     let bounds = cluster_bounds(vertices);
     let normal_cone = normal_cone(vertices, indices);
-    let node_index = nodes.len() as u32;
     nodes.push(ClusterNode::leaf(bounds, 0.0, *page_key));
     clusters.push(VirtualGeometryClusterRecord {
         node_index,
         page: *page_key,
         material_slot,
-        vertex_count: vertices.len() as u16,
-        triangle_count: (indices.len() / 3) as u16,
+        vertex_count,
+        triangle_count,
         payload_offset,
-        payload_size: payload.len() as u32,
+        payload_size,
         bounds,
         normal_cone,
     });
-    let _ = asset_id;
     Ok(())
 }
 
@@ -383,15 +407,21 @@ fn finish_page(
     if payload.is_empty() {
         return Ok(());
     }
-    let cluster_count = cluster_end.saturating_sub(cluster_start);
+    let cluster_count =
+        cluster_end
+            .checked_sub(cluster_start)
+            .ok_or(StaticClusterBuildError::AbiCountOverflow(
+                "page cluster range",
+            ))?;
     let cluster_count = u16::try_from(cluster_count)
         .map_err(|_| StaticClusterBuildError::PageClusterCountOverflow)?;
     if payload.len() > page_size as usize {
         return Err(StaticClusterBuildError::ClusterTooLarge {
-            bytes: payload.len() as u32,
+            bytes: abi_u32(payload.len(), "payload byte")?,
             page_size,
         });
     }
+    let uncompressed_size = abi_u32(payload.len(), "page payload byte")?;
     let bytes = core::mem::take(payload);
     let stored = match compression {
         VirtualGeometryCompression::None => bytes.clone(),
@@ -403,7 +433,7 @@ fn finish_page(
         record: VirtualGeometryPageRecord {
             key,
             compression,
-            uncompressed_size: bytes.len() as u32,
+            uncompressed_size,
             priority: 0,
             cluster_start,
             cluster_count,
@@ -417,8 +447,17 @@ fn encode_cluster_payload(vertices: &[[f32; 3]], indices: &[u16]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(12 + vertices.len() * 12 + indices.len() * 2);
     bytes.extend_from_slice(&STATIC_CLUSTER_PAYLOAD_MAGIC);
     bytes.extend_from_slice(&STATIC_CLUSTER_PAYLOAD_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&(vertices.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&((indices.len() / 3) as u16).to_le_bytes());
+    // validate_settings and cluster splitting guarantee <=64 vertices and <=128 triangles.
+    bytes.extend_from_slice(
+        &u16::try_from(vertices.len())
+            .expect("cluster vertex limit")
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(
+        &u16::try_from(indices.len() / 3)
+            .expect("cluster triangle limit")
+            .to_le_bytes(),
+    );
     for vertex in vertices {
         for value in vertex {
             bytes.extend_from_slice(&value.to_le_bytes());
