@@ -311,6 +311,7 @@ fn validate_specs(
 mod tests {
     use super::*;
     use crate::job::ProcessorError;
+    use crate::recipe::ImportProcessor;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -472,32 +473,29 @@ mod tests {
         let import_job = JobId(11);
         let mut graph = BuildGraph::new();
         graph.add_job(source.build_job(source_job)).unwrap();
-        graph
-            .add_job(crate::job::BuildJob::new(
-                import_job,
-                [source_job],
-                crate::import::CanonicalPngProcessor,
-            ))
-            .unwrap();
         let recipe = crate::ImportRecipe {
-            importer_id: 0x504e47,
+            importer_id: crate::import::CanonicalPngProcessor::IMPORTER_ID,
             importer_version: 1,
             canonical_settings: b"rgba8".to_vec(),
             profile_hash: [1; 32],
             toolchain_fingerprint: b"png-0.18".to_vec(),
             environment_fingerprint: b"portable".to_vec(),
         };
-        let mut specs = BTreeMap::new();
-        specs.insert(source_job, source.artifact_spec(AssetId(10)));
-        specs.insert(
-            import_job,
-            recipe.artifact_spec(
+        let plan = recipe
+            .plan(
                 AssetId(11),
+                import_job,
+                source_job,
+                crate::import::CanonicalPngProcessor,
                 crate::import::IMAGE_ARTIFACT_KIND,
                 crate::import::IMAGE_ARTIFACT_SCHEMA,
                 4,
-            ),
-        );
+            )
+            .unwrap();
+        graph.add_job(plan.job).unwrap();
+        let mut specs = BTreeMap::new();
+        specs.insert(source_job, source.artifact_spec(AssetId(10)));
+        specs.insert(import_job, plan.spec);
         let store = RevisionStore::open(&root).unwrap();
         let mut ddc = DerivedDataCache::open(root.join("ddc")).unwrap();
         let execution = BuildExecutor {
@@ -512,6 +510,29 @@ mod tests {
         let image = crate::import::ImageArtifact::decode(&bytes).unwrap();
         assert_eq!((image.width, image.height), (1, 1));
         assert_eq!(image.rgba8, vec![9, 8, 7, 255]);
+        assert_eq!(
+            execution.artifact_keys[&import_job],
+            recipe
+                .artifact_key_for_output(
+                    1,
+                    &source,
+                    &[],
+                    crate::import::IMAGE_ARTIFACT_KIND,
+                    crate::import::IMAGE_ARTIFACT_SCHEMA,
+                    4,
+                )
+                .unwrap()
+        );
+
+        let second = BuildExecutor {
+            protocol_version: 1,
+        }
+        .execute(&graph, &specs, &store, &mut ddc, BuildRevision(1))
+        .unwrap();
+        assert_eq!(
+            second.cache_hits,
+            [source_job, import_job].into_iter().collect()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

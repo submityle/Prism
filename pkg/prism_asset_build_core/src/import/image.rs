@@ -1,6 +1,7 @@
 //! PNG import into a strict RGBA8 runtime artifact.
 
 use crate::job::{Processor, ProcessorError};
+use crate::recipe::ImportProcessor;
 use alloc::vec::Vec;
 use prism_image::{ImageArtifact, ImageArtifactError};
 use std::io::Cursor;
@@ -89,6 +90,11 @@ impl Processor for CanonicalPngProcessor {
             .and_then(|artifact| artifact.encode().map_err(ImageImportError::Artifact))
             .map_err(|error| ProcessorError::new(error.to_string()))
     }
+}
+
+impl ImportProcessor for CanonicalPngProcessor {
+    const IMPORTER_ID: u128 = 0x504e47;
+    const IMPORTER_VERSION: u32 = 1;
 }
 
 #[cfg(test)]

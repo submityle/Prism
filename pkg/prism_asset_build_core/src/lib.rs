@@ -55,7 +55,7 @@ pub use package::{
     PackageOptions, PackageRequest, RuntimePackage,
 };
 pub use publication::{PublicationDescriptor, PublishedContainer};
-pub use recipe::ImportRecipe;
+pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError};
 pub use source::{SourceError, SourceSnapshot};
 pub use transaction::{
     PublishError, PublishTransaction, PublishedManifest, RevisionStore, TransactionState,
