@@ -67,6 +67,8 @@
 | 规模 | 实体即对象，百万静态撑爆 archetype | 常驻档位 + proxy + 按需物化，交互内容才进 ECS |
 | 真相定位 | 场景文件为中心、无空间索引 | scene 是逻辑真相，世界系统为其上的流送基座 |
 
+> **实现状态警示（发布前）**：本节描述目标架构与验收标准，不是当前能力清单。当前代码尚未提供完整 `spawn_scene`、统一 OverrideSet replay、嵌套实例运行时、热重载、流送、mmap/预取或资产服务器接线；请以 §22.1 与 §27 的矩阵为准，避免把设计目标误读为已实现能力。
+
 四条总目标（按权重）：
 
 1. **易用（本设计首要权重）**：属性级 override 做满——实例改一个字段，基体后续更新其余内容时实例自动吃到、被改字段纹丝不动；具名局部实体让 override API 用名字而非裸编号；`#[derive]` 不强加于用户（Scene 是数据资产），组件只需 `prism_reflect` 可见即可被覆盖/热改；失败软降级发诊断不 panic。所见即所得的编辑器 live 迭代是第一公民。
@@ -886,7 +888,7 @@ prism_scene/
 
 | 里程碑 | 状态 | 当前可验证范围 | 尚未满足的门槛 / 下一验收 |
 |---|---|---|---|
-| M0 | **部分完成** | `SceneTemplate`、`SceneInstance`、`LocalEntityId`、`spawn_plan`/`despawn_instance`；已有层级重连、失败回滚和双实例隔离测试 | 尚未形成公开 `spawn_scene` 资产入口；需补静态子树端到端基准并验证 §25 |
+| M0 | **部分完成** | `SceneTemplate`、`SceneInstance`、`LocalEntityId`、`spawn_plan`（仅 empty/typed vertical slice）/`despawn_instance`；已有层级重连、失败回滚和双实例隔离测试 | 尚未形成公开 `spawn_scene` 资产入口；需补静态子树端到端基准并验证 §25 |
 | M1 | **部分完成** | `InstantiationPlan` 列布局、`materialize_plan_with_limits`、安全 decoder 注册、预算预检、FieldSlot remap、失败回滚 | 尚未实现列块 memcpy / archetype 预排 / SIMD remap 的完整快路径；1µs/实体仅为未实测 target |
 | M2 | **部分完成** | `OverrideSet` 去重、层叠确定性、plan-aware 组件状态校验、属性标量/字符串 live apply；114 unit + 1 doctest | 实例化入口尚未接收并原子重放完整 `OverrideSet`；Add/RemoveEntity、Add/RemoveComponent 尚未在统一 runtime replay 中闭环；需补真实 ECS 端到端测试 |
 | M3 | **未开始** | `NestedSlot` 元数据和层组合诊断仅提供数据/校验基础 | 尚无递归嵌套实例化、热重载传播、override 保全；需覆盖 A→B→C、环/缺依赖和基体更新 |
