@@ -1,6 +1,6 @@
 # Prism Asset 顶级次世代 AAA 级资产内核设计方案
 
-> 面向 Prism（脱离 Bevy 后的独立引擎）的 **资产身份 + 句柄/引用计数 + 代际存储 + 依赖图 + 异步加载器 + 虚拟文件系统 + 事件驱动加载调度 + 按需流送 + 热重载 + 离线烘焙/打包** 内核设计。它是 `bevy_asset` 的自研替代，是渲染（网格/纹理/材质/着色器）、音频、场景/预制体、动画、UI 的统一内容基座。
+> 面向 Prism（脱离 Bevy 后的独立引擎）的 **资产身份 + 句柄/引用计数 + 代际存储 + 依赖图 + 加载器 + 虚拟文件系统 + 事件驱动加载调度 + 按需流送 + 热重载 + 离线烘焙/打包** 内核设计。它是 `bevy_asset` 的自研替代，是渲染（网格/纹理/材质/着色器）、音频、场景/预制体、动画、UI 的统一内容基座；当前实现的 loader/AssetServer 是同步解码，异步 EDL 仍是目标规格。
 > 借形态不抄码。借鉴：
 > - **Rust 资产人体工学**：Bevy asset（`Handle`/`AssetServer`/`AssetLoader`/`Assets<A>`/`AssetEvent`/标签子资产/`AssetProcessor` 烘焙/热重载）
 > - **容器与事件驱动加载**：Unreal IoStore（`FIoChunkId` 容器化分块 I/O）+ Zen/EDL（Event-Driven Loader 异步装配）+ Asset Registry（不加载即可查元数据）+ `.pak`/cook 管线
@@ -10,13 +10,14 @@
 > 本文为纯经典资产系统/内容管线路线，**不含任何 AI/ML 内容**，不含任何 Unreal/Unity 源码或衍生代码。
 
 - 版本：v0.2（开发中，允许破坏性调整；状态以本文“实施状态”和代码/测试为准）
+- 变更记录：本轮将 loader/AssetServer 的同步现实、RangeSource 的稳定内容前提、raw 容器能力边界和 EDL 目标规格显式分离；任何异步 API 片段均为未来 ABI 草案。
 - 本文定位：运行时资产身份、存储、加载、VFS、热重载、流送与消费契约的**目标规格**；已交付能力与目标设计分开记录，不以设计段落冒充实现。
 - 当前基线：核心身份/存储/依赖核、同步 `AssetServer`/VFS/loader、bounded scheduler facade、watch/reload 切片和 raw 容器消费切片已存在；EDL 并行装配、完整流送/GPU 解码、发行容器能力和 ECS/渲染闭环仍未交付。
 - 兼容策略：开发期不承诺旧 API/格式兼容；一旦进入发行，`StableGuid`、容器 ToC、Runtime Manifest 和资产 ABI 必须通过显式 schema 版本与迁移窗口演进。
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_utils`（稳定哈希/句柄位打包/小容器）、`prism_tasks`（异步作业图/优先级/背压）、`prism_reflect`（导入设置/元数据序列化）、`prism_diagnostic`（计数器/trace）、可选 `prism_gdeflate_gpu`（GPU 解压）
 - 层级定位： 内容层 L5；上接场景/渲染/音频/动画/UI，下接 `prism_tasks`/`prism_vfs`/平台 I/O
-- 明确约束： 身份/存储/依赖/句柄核 `no_std + alloc`；`std`/`async_io`/`hot_reload`/`process`/`pack`/`gpu_stream`/`retain_cache` 为 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**
+- 明确约束：身份/存储/依赖/句柄核 `no_std + alloc`；当前 `prism_asset` 实际 feature 仅提供 `std`、`ecs`、`file_watcher`；异步 EDL、process/pack、GPU streaming 和 retain-cache 等名称属于目标能力分层，不是当前已发布 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**
 - 烘焙/打包归属： 离线烘焙、缓存键、DDC/CAS、Revision、打包与 Patch 的唯一持有者是 `Prism Asset Build`（`docs/prism_asset_build_design_zh.md` §2.7/§4.6/§10/§14）；本 crate 只提供运行时消费契约（§13）与进程内重烘适配。派生数据分类与登记见 `docs/prism_derived_data_contract_zh.md`
 
 ### 实施状态（2026-10-13）
@@ -366,6 +367,8 @@ AAA 资产系统的瓶颈常不在 CPU 而在**内存布局与分配抖动**。�
 
 ## 9. 加载管线：AssetServer / AssetLoader / 事件驱动装配
 
+> **实现契约（必须与目标规格分开阅读）**：当前 `AssetLoader::load(&[u8], &mut LoadContext)` 是同步、纯 CPU 解码函数；`AssetServer` 在同步路径中完成读取、解码和依赖登记。`LoadScheduler` 只提供有界投递、去重、优先级提升、背压和等待者取消等 facade，底层 server 仍可能由单一 mutex 串行化，优先级不能抢占已经开始的同步工作，取消也只取消等待者而不强杀正在执行的 loader。下文 §9.3–§9.4 的 I/O/CPU 分离、可抢占阶段和真正 EDL 是待实现目标，不能作为当前性能或并发保证。
+
 ### 9.1 AssetLoader 协议
 
 ```rust
@@ -374,7 +377,7 @@ pub trait AssetLoader: Send + Sync + 'static {
     type Settings: Default + Send + Sync;      // 来自资产包内嵌设置 / 代码
     type Error: Into<AssetErrorId>;
 
-    /// 异步装配：读字节 + 解码 + 声明依赖。不阻塞调度线程。
+    /// 目标规格：异步装配；当前实现请见 `prism_asset::loader_exec::AssetLoader`，其为同步字节解码。
     async fn load(
         &self,
         reader: &mut dyn AssetReader,          // 流式读，支持部分/分块
@@ -387,6 +390,7 @@ pub trait AssetLoader: Send + Sync + 'static {
 }
 ```
 
+- **当前实现映射**：`AssetLoader` 不携带 `Settings` associated type，也不接受 `AssetReader`；它接收已读取的 `&[u8]`，以 `LoadContext` 声明依赖和 labeled 子资产。上方 `async fn` 是未来 EDL ABI 草案，不可直接作为当前实现示例。
 - `LoadContext` 承载**子资产标签**（`ctx.labeled("Mesh0", mesh)` → `path#Mesh0` 自动获 id/句柄）、**依赖声明**（`ctx.load::<Image>("tex.png")` 返回句柄并自动连依赖边）、**依赖直嵌**（`ctx.add_dependency(guid)`）。对标 Bevy `LoadContext`，但 `load` 是真 `async fn`（跑在 `prism_tasks`），不借 Bevy 的 future 包装。
 - `Settings` 来自资产包内嵌导入设置（§13.1）或代码传入，经 `prism_reflect` 反序列化——同一 loader 对不同资产可有不同导入参数（纹理 sRGB/线性、压缩格式）。
 
@@ -997,6 +1001,14 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 ---
 
 ## 25. 测试与验证策略
+
+### 25.0 当前实现的最小验收门槛
+
+- 同一 `AssetPath` 的并发 load 必须只产生一次实际读取/解码；等待者取消不得伪造成功或中断仍被其他消费者使用的工作。
+- loader 的 malformed、unsupported、dependency failure 和 decode limit 必须保留可诊断错误；loader 不得把未验证的长度/递归/分配请求直接交给下游。
+- `RangeSource` 在 reader 生命周期内必须提供稳定内容；完整 `read_all` 必须复验 entry digest，局部 range 在 Merkle/chunk hash 协议实现前不得宣称具有独立密码学认证。
+- reload 的新 epoch 只能发布最新结果；旧结果不得覆盖新 revision，失败 staging 不得污染当前可消费 revision。
+- 每个“已完成”条目至少绑定一个源码路径、一个回归测试和一条可复现命令；目标规格不计入已完成清单。
 
 资产系统的 bug 多为**并发竞态**与**不可信输入**，普通单测抓不住。分层验证：
 

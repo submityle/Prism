@@ -5,6 +5,7 @@
 > 本文设计从外部源资产进入项目开始，覆盖导入、规范化、派生数据烘焙、平台 Cook、质量验证、内容寻址缓存、打包、签名、Patch/DLC 和运行时交付。`Prism Asset Build` 生成制品；`prism_asset` 运行时负责解析、挂载、异步加载、流送、热重载和回收。
 
 - 文档状态：开发期目标规格（Draft，允许破坏性调整；不是已交付能力声明）
+- 变更记录：本轮进一步冻结“BuildGraph 可并行规划 ≠ BuildExecutor 已并行发布”的边界，并将 raw v2 物理布局、跨平台锁、Source/Recipe 主链和发行安全能力列为独立验收项。
 - 当前基线：本地确定性 build/CAS/DDC/revision 垂直切片、PNG artifact importer、虚拟几何 canonical processor 和 raw package/runtime bridge 已有代码与测试；BuildGraph 另提供按 DAG wave 并行执行的真实线程安全路径，但 BuildExecutor 的 DDC/CAS/事务发布仍是串行闭环；完整 importer/recipe、远程服务、CLI、稳定发行协议和发布安全链仍未完成。
 - 兼容策略：开发期不承诺旧 API/格式兼容；发行前冻结 Artifact Key、Schema、Container、Manifest 与签名策略，并建立兼容矩阵及迁移/拒绝规则。
 - 目标：顶级次世代 AAA 内容规模，同时兼顾中小项目的渐进采用
@@ -28,6 +29,8 @@
 ---
 
 ## 1. 定位与核心结论
+
+> **读者门槛**：本文件把“验收规格”与“仓库当前垂直切片”并列描述。看到“应/必须/目标”时，必须同时查阅 §实施状态与对应测试；没有实现路径、失败测试和可重放产物的条目，不得进入“已完成”清单。
 
 ### 1.1 一句话定位
 
@@ -1178,6 +1181,8 @@ Artifact 与包体成本可归因到 Asset、关卡、团队 Owner、功能和�
 | 确定性 | Shipping 双跑字节一致率 | 100% |
 
 目标数据集候选包括：十万小资产、8K/16K 纹理、电影级角色、开放世界 Cell、百万 Shader 请求、长音频和恶意损坏语料。数据集、运行脚本及固定硬件基线尚需落地；建立重复运行方差与趋势告警后，再决定哪些指标可阻断合入。
+
+**当前验收门槛（可执行，而非性能承诺）**：任何新 Processor 必须通过输入声明完整性、确定性双跑、输出 descriptor/CAS hash 复验、失败不发布和重启恢复测试；任何并行 BuildGraph 实现必须证明同一 DAG 在至少两种 worker 执行顺序下产生相同 Manifest/Artifact bytes；任何 RuntimePackage 发布必须验证来源 Build Manifest 身份、Container 长度和 BLAKE3 内容绑定。跨平台锁语义未实现的平台必须明确返回“不支持协调”，不得静默降级为无锁发布。
 
 ### 21.1 首次全量与增量分别优化
 
