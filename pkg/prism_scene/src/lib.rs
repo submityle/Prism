@@ -69,8 +69,8 @@ pub use instantiate::{
 pub use layers::{compose_layers, OrphanKey, OverrideComposition, OverrideCompositionError};
 #[cfg(feature = "materialize")]
 pub use materialize::{
-    materialize_plan, ComponentMaterializer, MaterializeError, MaterializeFailure,
-    MaterializerRegistry, RemappedEntityField, RowLayout,
+    materialize_plan, materialize_plan_with_limits, ComponentMaterializer, MaterializeError,
+    MaterializeFailure, MaterializeLimits, MaterializerRegistry, RemappedEntityField, RowLayout,
 };
 pub use overrides::{
     ArchetypeSignature, ComponentTypeId, OverrideError, OverrideSet, OverrideValue,
@@ -96,8 +96,9 @@ pub mod prelude {
     };
     #[cfg(feature = "materialize")]
     pub use crate::materialize::{
-        materialize_plan, ComponentMaterializer, MaterializeError, MaterializeFailure,
-        MaterializerRegistry, RemappedEntityField, RowLayout,
+        materialize_plan, materialize_plan_with_limits, ComponentMaterializer, MaterializeError,
+        MaterializeFailure, MaterializeLimits, MaterializerRegistry, RemappedEntityField,
+        RowLayout,
     };
     pub use crate::overrides::{
         ArchetypeSignature, ComponentTypeId, OverrideError, OverrideSet, OverrideValue,

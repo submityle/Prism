@@ -30,6 +30,30 @@ pub struct RowLayout {
     pub alignment: usize,
 }
 
+/// Checked resource budgets for opaque-column materialization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaterializeLimits {
+    /// Maximum reserved entities in one materialization transaction.
+    pub max_entities: usize,
+    /// Maximum component columns in the plan.
+    pub max_columns: usize,
+    /// Maximum total row visits across all columns.
+    pub max_rows: usize,
+    /// Maximum encoded column bytes inspected by one transaction.
+    pub max_blob_bytes: usize,
+}
+
+impl Default for MaterializeLimits {
+    fn default() -> Self {
+        Self {
+            max_entities: 1_000_000,
+            max_columns: 1_000_000,
+            max_rows: 4_000_000,
+            max_blob_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
 impl RowLayout {
     /// Describes a fixed-size row format.
     #[must_use]
@@ -196,6 +220,15 @@ impl MaterializerRegistry {
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterializeError {
+    /// The plan exceeded a caller-controlled preflight budget.
+    ResourceLimit {
+        /// Budget family that was exceeded.
+        kind: &'static str,
+        /// Configured maximum.
+        limit: usize,
+        /// Value declared by the plan.
+        found: usize,
+    },
     /// Structural plan validation failed.
     InvalidPlan(PlanError),
     /// The target world has pending reservations owned by another caller.
@@ -287,7 +320,18 @@ pub fn materialize_plan(
     plan: &InstantiationPlan,
     registry: &MaterializerRegistry,
 ) -> Result<MaterializedScene, MaterializeError> {
+    materialize_plan_with_limits(world, plan, registry, MaterializeLimits::default())
+}
+
+/// Materializes an opaque-column plan after checked budget preflight.
+pub fn materialize_plan_with_limits(
+    world: &mut World,
+    plan: &InstantiationPlan,
+    registry: &MaterializerRegistry,
+    limits: MaterializeLimits,
+) -> Result<MaterializedScene, MaterializeError> {
     plan.validate().map_err(MaterializeError::InvalidPlan)?;
+    preflight_limits(plan, limits)?;
     if world.entities().has_outstanding_reservations() {
         return Err(MaterializeError::OutstandingReservations);
     }
@@ -505,6 +549,76 @@ pub fn materialize_plan(
     })
 }
 
+fn preflight_limits(
+    plan: &InstantiationPlan,
+    limits: MaterializeLimits,
+) -> Result<(), MaterializeError> {
+    let entities = plan.entity_count as usize;
+    if entities > limits.max_entities {
+        return Err(MaterializeError::ResourceLimit {
+            kind: "entities",
+            limit: limits.max_entities,
+            found: entities,
+        });
+    }
+
+    let mut columns = 0usize;
+    let mut rows = 0usize;
+    let mut blob_bytes = 0usize;
+    for group in plan.groups.iter() {
+        columns =
+            columns
+                .checked_add(group.columns.len())
+                .ok_or(MaterializeError::ResourceLimit {
+                    kind: "columns",
+                    limit: limits.max_columns,
+                    found: usize::MAX,
+                })?;
+        rows = rows
+            .checked_add(group.len().saturating_mul(group.columns.len()))
+            .ok_or(MaterializeError::ResourceLimit {
+                kind: "rows",
+                limit: limits.max_rows,
+                found: usize::MAX,
+            })?;
+        let group_blob_bytes = group
+            .columns
+            .iter()
+            .try_fold(0usize, |total, column| total.checked_add(column.blob.len()))
+            .unwrap_or(usize::MAX);
+        blob_bytes =
+            blob_bytes
+                .checked_add(group_blob_bytes)
+                .ok_or(MaterializeError::ResourceLimit {
+                    kind: "blob_bytes",
+                    limit: limits.max_blob_bytes,
+                    found: usize::MAX,
+                })?;
+    }
+    if columns > limits.max_columns {
+        return Err(MaterializeError::ResourceLimit {
+            kind: "columns",
+            limit: limits.max_columns,
+            found: columns,
+        });
+    }
+    if rows > limits.max_rows {
+        return Err(MaterializeError::ResourceLimit {
+            kind: "rows",
+            limit: limits.max_rows,
+            found: rows,
+        });
+    }
+    if blob_bytes > limits.max_blob_bytes {
+        return Err(MaterializeError::ResourceLimit {
+            kind: "blob_bytes",
+            limit: limits.max_blob_bytes,
+            found: blob_bytes,
+        });
+    }
+    Ok(())
+}
+
 fn plan_local_entity(plan: &InstantiationPlan, local: LocalEntityId) -> Option<LocalEntityId> {
     if local.is_reserved() {
         return None;
@@ -654,5 +768,77 @@ mod tests {
             MaterializeError::MissingRegistration { .. }
         ));
         assert_eq!(world.entities().len(), before);
+    }
+
+    #[test]
+    fn budget_preflight_rejects_before_reserving_world_entities() {
+        let mut world = World::new();
+        let registry = registry(&mut world, None);
+        let before = world.entities().len();
+        let error = materialize_plan_with_limits(
+            &mut world,
+            &plan([row(7, 0), row(8, 0)].concat(), 2, Vec::new()),
+            &registry,
+            MaterializeLimits {
+                max_entities: 1,
+                ..MaterializeLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            MaterializeError::ResourceLimit {
+                kind: "entities",
+                limit: 1,
+                found: 2,
+            }
+        );
+        assert_eq!(world.entities().len(), before);
+    }
+
+    #[test]
+    fn row_and_blob_budgets_are_checked_before_decode() {
+        let mut world = World::new();
+        let registry = registry(&mut world, None);
+        let scene_plan = plan([row(7, 0), row(8, 0)].concat(), 2, Vec::new());
+
+        let row_error = materialize_plan_with_limits(
+            &mut world,
+            &scene_plan,
+            &registry,
+            MaterializeLimits {
+                max_rows: 1,
+                ..MaterializeLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            row_error,
+            MaterializeError::ResourceLimit {
+                kind: "rows",
+                limit: 1,
+                found: 2
+            }
+        ));
+
+        let blob_error = materialize_plan_with_limits(
+            &mut world,
+            &scene_plan,
+            &registry,
+            MaterializeLimits {
+                max_blob_bytes: 1,
+                ..MaterializeLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            blob_error,
+            MaterializeError::ResourceLimit {
+                kind: "blob_bytes",
+                limit: 1,
+                found: 16
+            }
+        ));
+        assert_eq!(world.entities().len(), 0);
     }
 }
