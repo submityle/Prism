@@ -11,4 +11,4 @@ StateTree ST1 的最小 ECS 装配 crate。它让共享、不可变 `Plan` 可�
 
 带守卫的迁移可在实例上调用 `set_guard(GuardId, guard)` 安装实现 `Guard + Send + Sync` 的纯谓词；未安装的 guard id 按 core 语义拒绝该迁移。Guard 属于逐实例运行时状态，不会写回共享资产 `Plan`。
 
-迁移属于 core runtime 的数据状态更新，不在迁移回调中改 ECS 结构。`install_tick_system` 只接通确定性 Schedule 驱动与结构化的最后一次批量报告；当前仍不接通生命周期 observer/迁移事件载荷、typed binding、Context gather 或 asset server 集成。`ValidatedContext`/`validate_context` 仍是显式 Schema/Context 校验边界，见 `docs/version/v0.1.0.md`。
+迁移属于 core runtime 的数据状态更新，不在迁移回调中改 ECS 结构。`install_tick_system` 只接通确定性 Schedule 驱动与结构化的最后一次批量报告；`StateTreeInstance::drain_lifecycle_events` 现在保留 enter/exit/transition 回调顺序，但尚未把它们桥接到 `prism_ecs` observer。typed binding、Context gather 或 asset server 集成仍未接通。`ValidatedContext`/`validate_context` 仍是显式 Schema/Context 校验边界，见 `docs/version/v0.1.0.md`。

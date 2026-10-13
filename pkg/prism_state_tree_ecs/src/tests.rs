@@ -9,7 +9,8 @@ use prism_state_tree_core::{
 
 use crate::{
     queue_spawn, tick_all, tick_entities, tick_entity, validate_context, BatchTickFailure,
-    BatchTickMissingReason, BatchTickOutcome, StateTreeAsset, StateTreeInstance, ValidatedContext,
+    BatchTickMissingReason, BatchTickOutcome, StateTreeAsset, StateTreeInstance,
+    StateTreeLifecycleEvent, ValidatedContext,
 };
 
 struct TestContext<'w> {
@@ -111,6 +112,44 @@ fn deferred_spawn_then_event_request_switches_state_on_tick() {
             .unwrap()
             .active_states(),
         &[StateId(0), StateId(2)]
+    );
+}
+
+#[test]
+fn lifecycle_callbacks_are_retained_and_drained_in_core_order() {
+    let mut instance = StateTreeInstance::new(asset(), 8, MicrostepLimit(16)).expect("setup");
+
+    instance.step().expect("initial entry");
+    assert_eq!(
+        instance.lifecycle_events(),
+        &[
+            StateTreeLifecycleEvent::Entered(StateId(0)),
+            StateTreeLifecycleEvent::Entered(StateId(1)),
+        ]
+    );
+    assert_eq!(
+        instance.drain_lifecycle_events(),
+        vec![
+            StateTreeLifecycleEvent::Entered(StateId(0)),
+            StateTreeLifecycleEvent::Entered(StateId(1)),
+        ]
+    );
+    assert!(instance.lifecycle_events().is_empty());
+
+    instance
+        .request_event(Event::new(EventId(7)))
+        .expect("event fits bounded queue");
+    instance.step().expect("transition tick");
+    assert_eq!(
+        instance.drain_lifecycle_events(),
+        vec![
+            StateTreeLifecycleEvent::Exited(StateId(1)),
+            StateTreeLifecycleEvent::Entered(StateId(2)),
+            StateTreeLifecycleEvent::Transitioned {
+                source: StateId(1),
+                target: TransitionTarget::State(StateId(2)),
+            },
+        ]
     );
 }
 

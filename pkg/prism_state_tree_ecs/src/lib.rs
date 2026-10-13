@@ -10,11 +10,13 @@
 
 extern crate alloc;
 
+mod lifecycle;
 mod schedule;
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use core::mem;
 
 use prism_ecs::{
     component::Component,
@@ -23,9 +25,12 @@ use prism_ecs::{
     world::World,
 };
 use prism_state_tree_core::{
-    ContextRef, Event, EventQueueError, Guard, GuardId, Instance, MicrostepLimit, NoopLifecycle,
-    Plan, RuntimeError, Schema, SchemaError, StateId, StepReport,
+    ContextRef, Event, EventQueueError, Guard, GuardId, Instance, MicrostepLimit, Plan,
+    RuntimeError, Schema, SchemaError, StateId, StepReport,
 };
+
+use lifecycle::LifecycleCollector;
+pub use lifecycle::StateTreeLifecycleEvent;
 
 /// A host context validated against a concrete core [`Schema`].
 ///
@@ -107,6 +112,7 @@ impl StateTreeAsset {
 pub struct StateTreeInstance {
     asset: StateTreeAsset,
     runtime: Instance,
+    lifecycle_events: Vec<StateTreeLifecycleEvent>,
 }
 
 pub use schedule::{install_tick_system, StateTreeTickOutcome, StateTreeTickReport};
@@ -124,7 +130,11 @@ impl StateTreeInstance {
             return Err(RuntimeError::EventQueue(EventQueueError::ZeroCapacity));
         }
         let runtime = Instance::new_shared(Arc::clone(&asset.0), event_capacity, microstep_limit)?;
-        Ok(Self { asset, runtime })
+        Ok(Self {
+            asset,
+            runtime,
+            lifecycle_events: Vec::new(),
+        })
     }
 
     /// Returns this instance's shared immutable asset handle.
@@ -140,6 +150,17 @@ impl StateTreeInstance {
     /// Returns the number of queued events that have not been consumed.
     pub fn queued_events(&self) -> usize {
         self.runtime.queued_events()
+    }
+
+    /// Returns lifecycle observations that have not yet been drained.
+    #[must_use]
+    pub fn lifecycle_events(&self) -> &[StateTreeLifecycleEvent] {
+        &self.lifecycle_events
+    }
+
+    /// Removes and returns lifecycle observations in core callback order.
+    pub fn drain_lifecycle_events(&mut self) -> Vec<StateTreeLifecycleEvent> {
+        mem::take(&mut self.lifecycle_events)
     }
 
     /// Queues an input event. It cannot cause a transition until the next tick.
@@ -158,7 +179,8 @@ impl StateTreeInstance {
 
     /// Executes one run-to-completion tick, including initial entry if needed.
     pub fn step(&mut self) -> Result<StepReport, RuntimeError> {
-        self.runtime.run(&mut NoopLifecycle)
+        let mut collector = LifecycleCollector::new(&mut self.lifecycle_events);
+        self.runtime.run(&mut collector)
     }
 }
 
