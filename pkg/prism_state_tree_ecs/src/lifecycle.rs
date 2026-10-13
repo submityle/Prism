@@ -2,6 +2,8 @@
 
 use alloc::vec::Vec;
 
+use prism_ecs::entity::Entity;
+use prism_ecs::event::Event;
 use prism_state_tree_core::{LifecycleCallback, StateId, TransitionTarget};
 
 /// A lifecycle event produced by one `StateTreeInstance` tick.
@@ -19,6 +21,19 @@ pub enum StateTreeLifecycleEvent {
         target: TransitionTarget,
     },
 }
+
+/// Deferred, entity-addressed lifecycle notification emitted by a scheduled
+/// A deferred, entity-addressed lifecycle notification from a scheduled
+/// `StateTree` tick.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateTreeLifecycleNotification {
+    /// ECS entity owning the `StateTree` instance.
+    pub entity: Entity,
+    /// Core lifecycle payload, in callback order.
+    pub event: StateTreeLifecycleEvent,
+}
+
+impl Event for StateTreeLifecycleNotification {}
 
 /// Core callback that appends observations to the owning ECS instance.
 pub(crate) struct LifecycleCollector<'a> {

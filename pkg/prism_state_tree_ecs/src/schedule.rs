@@ -6,9 +6,16 @@
 //! adapters. Lifecycle observers are deliberately not synthesized here: the
 //! current ECS component still uses the core runtime's no-op lifecycle.
 
-use prism_ecs::{resource::Resource, schedule::Schedule, world::World};
+use alloc::vec::Vec;
 
-use crate::{tick_all, BatchTickError, BatchTickReport};
+use prism_ecs::{
+    entity::Entity, event::Events, query::With, resource::Resource, schedule::Schedule,
+    world::World,
+};
+
+use crate::{
+    tick_all, BatchTickError, BatchTickReport, StateTreeInstance, StateTreeLifecycleNotification,
+};
 
 /// The result produced by one installed `StateTree` schedule system.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,20 +83,60 @@ fn run_state_tree_tick(world: &mut World) {
         report.record(outcome);
         world.insert_resource(report);
     }
+
+    publish_lifecycle_notifications(world);
+}
+
+fn publish_lifecycle_notifications(world: &mut World) {
+    let query = world.query_filtered::<Entity, With<StateTreeInstance>>();
+    let mut entities: Vec<Entity> = query.iter(world).collect();
+    entities.sort_unstable();
+
+    let mut notifications = Vec::new();
+    for entity in entities {
+        if let Some(mut instance) = world.get_mut::<StateTreeInstance>(entity) {
+            notifications.extend(
+                instance
+                    .drain_lifecycle_events()
+                    .into_iter()
+                    .map(|event| StateTreeLifecycleNotification { entity, event }),
+            );
+        }
+    }
+    if notifications.is_empty() {
+        return;
+    }
+
+    if let Some(events) = world.get_resource_mut::<Events<StateTreeLifecycleNotification>>() {
+        events.send_batch(notifications);
+    } else {
+        let mut events = Events::new();
+        events.send_batch(notifications);
+        world.insert_resource(events);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use alloc::vec;
+    use alloc::vec::Vec;
 
-    use prism_ecs::{command::CommandQueue, schedule::Schedule, world::World};
+    use prism_ecs::{
+        command::CommandQueue,
+        event::{EventCursor, Events},
+        schedule::Schedule,
+        world::World,
+    };
     use prism_state_tree_core::{
         Event, EventId, MicrostepLimit, NodeKind, StateId, StateNode, Transition, TransitionKind,
         TransitionTarget, TreeDef, Trigger,
     };
 
     use super::{install_tick_system, StateTreeTickOutcome, StateTreeTickReport};
-    use crate::{queue_spawn, StateTreeAsset, StateTreeInstance};
+    use crate::{
+        queue_spawn, StateTreeAsset, StateTreeInstance, StateTreeLifecycleEvent,
+        StateTreeLifecycleNotification,
+    };
 
     fn asset() -> StateTreeAsset {
         let transition = Transition::new(
@@ -201,5 +248,42 @@ mod tests {
                 .kind,
             NodeKind::Compound { .. }
         ));
+    }
+
+    #[test]
+    fn schedule_publishes_entity_addressed_lifecycle_events_in_order() {
+        let mut world = World::new();
+        let mut queue = CommandQueue::new();
+        let entity = {
+            let mut commands = queue.commands(world.entities());
+            queue_spawn(&mut commands, asset(), 8, MicrostepLimit(16)).expect("spawn setup")
+        };
+        queue.apply(&mut world);
+
+        let mut schedule = Schedule::new();
+        install_tick_system(&mut schedule);
+        schedule.run(&mut world);
+
+        let events = world.resource::<Events<StateTreeLifecycleNotification>>();
+        let mut cursor = EventCursor::default();
+        let observed: Vec<_> = cursor.read(events).cloned().collect();
+        assert_eq!(
+            observed,
+            vec![
+                StateTreeLifecycleNotification {
+                    entity,
+                    event: StateTreeLifecycleEvent::Entered(StateId(0)),
+                },
+                StateTreeLifecycleNotification {
+                    entity,
+                    event: StateTreeLifecycleEvent::Entered(StateId(1)),
+                },
+            ]
+        );
+        assert!(world
+            .get::<StateTreeInstance>(entity)
+            .unwrap()
+            .lifecycle_events()
+            .is_empty());
     }
 }

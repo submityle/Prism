@@ -30,7 +30,7 @@ use prism_state_tree_core::{
 };
 
 use lifecycle::LifecycleCollector;
-pub use lifecycle::StateTreeLifecycleEvent;
+pub use lifecycle::{StateTreeLifecycleEvent, StateTreeLifecycleNotification};
 
 /// A host context validated against a concrete core [`Schema`].
 ///
