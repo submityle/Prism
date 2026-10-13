@@ -104,10 +104,31 @@ impl SceneTemplate {
         }
     }
 
+    /// Builds and validates a runtime template in one fallible operation.
+    pub fn try_new(guid: StableGuid, plan: InstantiationPlan) -> Result<Self, TemplateError> {
+        let template = Self::new(guid, plan);
+        template.validate()?;
+        Ok(template)
+    }
+
     /// Builds an entity-less template (a valid empty plan).
     #[must_use]
     pub fn empty(guid: StableGuid) -> Self {
         Self::new(
+            guid,
+            InstantiationPlan {
+                entity_count: 0,
+                groups: Box::new([]),
+                entity_valued_fields: Box::new([]),
+                hierarchy: Box::new([]),
+                reserved_local_base: LocalEntityId::RESERVED_BASE,
+            },
+        )
+    }
+
+    /// Builds and validates an empty runtime template.
+    pub fn try_empty(guid: StableGuid) -> Result<Self, TemplateError> {
+        Self::try_new(
             guid,
             InstantiationPlan {
                 entity_count: 0,
@@ -365,6 +386,15 @@ mod tests {
 
         template.nested = Box::new([NestedSlot::new(LocalEntityId::new(0), guid(1))]);
         assert_eq!(template.validate(), Err(TemplateError::SelfNestedTemplate));
+    }
+
+    #[test]
+    fn fallible_constructors_validate_before_returning() {
+        assert_eq!(
+            SceneTemplate::try_empty(StableGuid::NIL),
+            Err(TemplateError::NilGuid)
+        );
+        assert!(SceneTemplate::try_empty(guid(9)).is_ok());
     }
 
     #[test]
