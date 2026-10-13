@@ -38,6 +38,7 @@ pub mod pipeline;
 pub mod raster_gradients;
 pub mod raster_path;
 pub mod software_raster;
+pub mod stream_adapter;
 pub mod streaming;
 
 pub use asset::{
@@ -61,6 +62,7 @@ pub use software_raster::{
     rasterize_triangle, triangle_of, vis_depth, vis_payload, ScreenVertex, VisBuffer,
     CLUSTER_TRIANGLE_BITS, MAX_CLUSTER_TRIANGLES,
 };
+pub use stream_adapter::{VirtualGeometryPageStream, VirtualGeometryStreamingError};
 pub use streaming::VirtualGeometryPageStore;
 
 /// Version of the virtual-geometry contracts in this module.
