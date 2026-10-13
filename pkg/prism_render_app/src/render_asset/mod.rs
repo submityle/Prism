@@ -16,6 +16,7 @@
 //! The table is keyed by [`AssetId`], so the identity that a render-side phase
 //! item or bind group carries is the same one the simulation uses.
 
+mod context;
 mod extract;
 mod prepare;
 mod stage;
@@ -28,8 +29,12 @@ use prism_asset::Asset;
 use prism_asset::AssetId;
 use prism_render_driver::{RenderDevice, RenderQueue};
 
+pub use context::{GpuPrepareBudget, PrepareCancellation, PrepareContext, PrepareContextError};
 pub use extract::{extract_assets, ExtractedAssets};
-pub use prepare::{prepare_extracted_assets, AssetSyncReport, PrepareAssetError};
+pub use prepare::{
+    prepare_extracted_assets, prepare_extracted_assets_with_context, AssetSyncReport,
+    PrepareAssetError,
+};
 pub use stage::{prepare_assets, register_render_assets, AssetSyncStats};
 pub use table::RenderAssets;
 
@@ -79,6 +84,23 @@ pub trait RenderAsset: Send + Sync + 'static + Sized {
         queue: &dyn RenderQueue,
         previous: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>>;
+
+    /// Contextual variant of [`Self::prepare`] with a transactional allocation
+    /// budget and cancellation checkpoint.
+    ///
+    /// This default keeps existing implementations source-compatible. New
+    /// implementations may override it and allocate through `context`; the
+    /// sync layer then rolls those allocations back on retry/cancellation and
+    /// unloads the old representation exactly once after a marked replacement
+    /// succeeds.
+    fn prepare_with_context(
+        source: &Self::SourceAsset,
+        id: AssetId<Self::SourceAsset>,
+        context: &mut PrepareContext<'_>,
+        previous: Option<&Self>,
+    ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
+        Self::prepare(source, id, context.device(), context.queue(), previous)
+    }
 
     /// Releases the RHI objects `prepared` owns.
     ///

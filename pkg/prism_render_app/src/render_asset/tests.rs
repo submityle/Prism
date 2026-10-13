@@ -2,6 +2,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use prism_asset::{
@@ -15,7 +16,8 @@ use prism_render_driver::{
 use prism_render_driver_null::{NullDevice, NullInstance};
 
 use super::{
-    extract_assets, prepare_extracted_assets, AssetSyncReport, ExtractedAssets, PrepareAssetError,
+    extract_assets, prepare_extracted_assets, prepare_extracted_assets_with_context,
+    AssetSyncReport, ExtractedAssets, GpuPrepareBudget, PrepareAssetError, PrepareContextError,
     RenderAsset, RenderAssets,
 };
 
@@ -89,6 +91,58 @@ impl RenderAsset for RetryOnceGpuBlob {
                 mapped_at_creation: false,
             }),
             bytes,
+        })
+    }
+
+    fn unload(prepared: &Self, device: &dyn RenderDevice) {
+        device.destroy_buffer(prepared.buffer);
+    }
+}
+
+struct TransactionalBlob {
+    buffer: BufferId,
+    bytes: u64,
+}
+
+impl RenderAsset for TransactionalBlob {
+    type SourceAsset = Blob;
+
+    fn prepare(
+        _source: &Blob,
+        _id: AssetId<Blob>,
+        _device: &dyn RenderDevice,
+        _queue: &dyn RenderQueue,
+        _previous: Option<&Self>,
+    ) -> Result<Self, PrepareAssetError<Blob>> {
+        unreachable!("the contextual path is the contract under test")
+    }
+
+    fn prepare_with_context(
+        source: &Blob,
+        id: AssetId<Blob>,
+        context: &mut super::super::render_asset::PrepareContext<'_>,
+        previous: Option<&Self>,
+    ) -> Result<Self, PrepareAssetError<Blob>> {
+        let buffer = match context.create_buffer(&BufferDescriptor {
+            label: Some("transactional-blob".into()),
+            size: source.0.len() as u64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }) {
+            Ok(buffer) => buffer,
+            Err(PrepareContextError::BudgetExceeded { .. } | PrepareContextError::Cancelled) => {
+                return Err(PrepareAssetError::RetryNextUpdate(id));
+            }
+        };
+        if source.0.len() == 2 {
+            return Err(PrepareAssetError::RetryNextUpdate(id));
+        }
+        if previous.is_some() {
+            context.replace_previous();
+        }
+        Ok(Self {
+            buffer,
+            bytes: source.0.len() as u64,
         })
     }
 
@@ -458,6 +512,100 @@ fn duplicate_extractions_use_the_latest_copy_and_one_retry() {
     assert_eq!(extracted.extracted().len(), 1);
     assert_eq!(extracted.extracted()[0].1, Blob(Vec::new()));
     assert!(!prepared.contains(id));
+}
+
+#[test]
+fn contextual_budget_and_cancel_roll_back_and_retry_without_publishing() {
+    let (device, queue) = null_device();
+    let id = AssetId::<Blob>::new(AssetIndex::from_parts(0, 1));
+    let mut extracted = ExtractedAssets::<TransactionalBlob>::new();
+    let mut prepared = RenderAssets::<TransactionalBlob>::new();
+    extracted.push_extracted(id, Blob(vec![1, 2, 3, 4]));
+    let mut budget = GpuPrepareBudget::new(3);
+    let cancellation = AtomicBool::new(false);
+    let report = prepare_extracted_assets_with_context(
+        &mut extracted,
+        &mut prepared,
+        &device,
+        &queue,
+        &mut budget,
+        &cancellation,
+    );
+    assert_eq!(report.retried, 1);
+    assert_eq!(
+        budget.used(),
+        0,
+        "failed allocation reservation is refunded"
+    );
+    assert_eq!(
+        device.live_resource_count(),
+        0,
+        "budget failure created no buffer"
+    );
+    assert!(!prepared.contains(id));
+
+    budget = GpuPrepareBudget::new(8);
+    cancellation.store(true, Ordering::Release);
+    let report = prepare_extracted_assets_with_context(
+        &mut extracted,
+        &mut prepared,
+        &device,
+        &queue,
+        &mut budget,
+        &cancellation,
+    );
+    assert_eq!(report.retried, 1);
+    assert_eq!(budget.used(), 0);
+    assert_eq!(device.live_resource_count(), 0);
+
+    cancellation.store(false, Ordering::Release);
+    let report = prepare_extracted_assets_with_context(
+        &mut extracted,
+        &mut prepared,
+        &device,
+        &queue,
+        &mut budget,
+        &cancellation,
+    );
+    assert_eq!(report.prepared, 1);
+    assert_eq!(device.live_resource_count(), 1);
+}
+
+#[test]
+fn contextual_replacement_unloads_old_representation_once() {
+    let (device, queue) = null_device();
+    let id = AssetId::<Blob>::new(AssetIndex::from_parts(0, 1));
+    let mut extracted = ExtractedAssets::<TransactionalBlob>::new();
+    let mut prepared = RenderAssets::<TransactionalBlob>::new();
+    let cancellation = AtomicBool::new(false);
+    let mut budget = GpuPrepareBudget::new(32);
+    extracted.push_extracted(id, Blob(vec![1]));
+    let first = prepare_extracted_assets_with_context(
+        &mut extracted,
+        &mut prepared,
+        &device,
+        &queue,
+        &mut budget,
+        &cancellation,
+    );
+    assert_eq!(first.prepared, 1);
+    assert_eq!(device.live_resource_count(), 1);
+    extracted.push_extracted(id, Blob(vec![1, 2, 3]));
+    let second = prepare_extracted_assets_with_context(
+        &mut extracted,
+        &mut prepared,
+        &device,
+        &queue,
+        &mut budget,
+        &cancellation,
+    );
+    assert_eq!(second.prepared, 1);
+    assert_eq!(
+        device.live_resource_count(),
+        1,
+        "replacement unloads the old buffer"
+    );
+    assert_eq!(prepared.get(id).expect("replacement").bytes, 3);
 }
 
 /// The extract half: the render world receives an owned copy of what changed,

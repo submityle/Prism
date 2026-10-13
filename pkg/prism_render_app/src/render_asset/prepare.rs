@@ -6,7 +6,7 @@ use prism_asset::{Asset, AssetId};
 use prism_render_driver::{RenderDevice, RenderQueue};
 
 use super::extract::ExtractedAssets;
-use super::{RenderAsset, RenderAssets};
+use super::{GpuPrepareBudget, PrepareCancellation, PrepareContext, RenderAsset, RenderAssets};
 
 /// Why a prepare could not produce a representation (yet).
 ///
@@ -71,6 +71,33 @@ pub fn prepare_extracted_assets<A: RenderAsset>(
     device: &dyn RenderDevice,
     queue: &dyn RenderQueue,
 ) -> AssetSyncReport {
+    let mut budget = GpuPrepareBudget::unlimited();
+    let cancellation = PrepareCancellation::new(false);
+    prepare_extracted_assets_with_context(
+        extracted,
+        prepared,
+        device,
+        queue,
+        &mut budget,
+        &cancellation,
+    )
+}
+
+/// Context-aware form of [`prepare_extracted_assets`].
+///
+/// The old entry point remains unchanged and uses an unlimited, never-cancelled
+/// context. Callers that need a frame allocation budget or cancellation use
+/// this form. A contextual implementation must map [`PrepareContextError`] to
+/// [`PrepareAssetError::RetryNextUpdate`]; the transaction then rolls back its
+/// tracked resources before the source is queued again.
+pub fn prepare_extracted_assets_with_context<A: RenderAsset>(
+    extracted: &mut ExtractedAssets<A>,
+    prepared: &mut RenderAssets<A>,
+    device: &dyn RenderDevice,
+    queue: &dyn RenderQueue,
+    budget: &mut GpuPrepareBudget,
+    cancellation: &PrepareCancellation,
+) -> AssetSyncReport {
     let (assets, removed) = extracted.take();
     let mut report = AssetSyncReport::default();
     let removed_ids: BTreeSet<_> = removed.iter().copied().collect();
@@ -97,16 +124,30 @@ pub fn prepare_extracted_assets<A: RenderAsset>(
         if removed_ids.contains(&id) {
             continue;
         }
-        match A::prepare(&source, id, device, queue, prepared.get(id)) {
+        let mut context = PrepareContext::new(device, queue, budget, cancellation);
+        let result = A::prepare_with_context(&source, id, &mut context, prepared.get(id));
+        match result {
             Ok(value) => {
+                let replaces_previous = context.replaces_previous();
+                context.commit();
+                if replaces_previous {
+                    if let Some(previous) = prepared.remove(id) {
+                        A::unload(&previous, device);
+                        drop(previous);
+                    }
+                }
                 prepared.insert(id, value);
                 report.prepared += 1;
             }
             Err(PrepareAssetError::RetryNextUpdate(_)) => {
+                context.rollback();
                 extracted.push_extracted(id, source);
                 report.retried += 1;
             }
-            Err(PrepareAssetError::Unpreparable { .. }) => report.unpreparable += 1,
+            Err(PrepareAssetError::Unpreparable { .. }) => {
+                context.rollback();
+                report.unpreparable += 1;
+            }
         }
     }
     report
