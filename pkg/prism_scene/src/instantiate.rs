@@ -395,7 +395,12 @@ pub fn spawn_typed_plan(
                 code: error.code,
             });
         }
-        if !world.contains(entity) {
+        if !world.contains(entity)
+            || world
+                .entities()
+                .location(entity)
+                .is_none_or(prism_ecs::entity::EntityLocation::is_empty)
+        {
             rollback(world, &remap, plan);
             return Err(InstantiateError::TypedSpawnFailed {
                 local,
@@ -657,6 +662,26 @@ mod tests {
             Err(InstantiateError::TypedSpawnFailed {
                 local: LocalEntityId::new(0),
                 code: 7,
+            })
+        );
+        assert_eq!(world.entity_count(), 0);
+    }
+
+    #[test]
+    fn constructor_must_materialize_its_owned_entity() {
+        let mut world = World::new();
+        let result = spawn_typed_plan(
+            &mut world,
+            &plan(&[0, 1], &[]),
+            TypedSpawnPlan::new()
+                .with_constructor(LocalEntityId::new(0), |_context, _entity, _remap| Ok(()))
+                .with_bundle(LocalEntityId::new(1), Marker(2)),
+        );
+        assert_eq!(
+            result,
+            Err(InstantiateError::TypedSpawnFailed {
+                local: LocalEntityId::new(0),
+                code: u32::MAX,
             })
         );
         assert_eq!(world.entity_count(), 0);
