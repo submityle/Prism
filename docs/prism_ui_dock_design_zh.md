@@ -150,7 +150,7 @@ Idle → PickUp(panel) → Dragging{ghost, hover} → Drop(action) | Cancel
 
 - **抓取（宿主规划）**:tab/标题栏按下进入拖拽；当前 crate 的状态机只接收 `PickUp/Move/Drop/Cancel/Reset` 与逻辑指针位置，不实现 gesture velocity/swipe 阈值或惯性。
 - **命中（宿主规划）**:`prism_ui_input::hit_test`(z 序 + pointer-events)接线由上层 host 完成；当前 crate 只提供确定性几何与 drop zone 计算。
-- **drop zone（当前已实现）**:悬停面板目标显示中心(tabify)、上/下/左/右(split)以及面板 tab 栏内插入位(tab 间重排)；Document 目标不支持 center/tab-insert，只允许 split。整区外缘停靠仍是规划能力。
+- **drop zone（当前已实现）**:悬停面板目标显示中心(tabify)、上/下/左/右(split)以及面板 tab 栏内插入位(tab 间重排)；Document 目标的 reducer action 仅允许 split；`calculate_drop_zone` 仍可能为 Document 产生 CenterTab，宿主必须在落点映射前过滤该预览（TabInsert 仅适用于 Panel）。整区外缘停靠仍是规划能力。
 - **预览（适配器已实现，接线规划）**:`drop_preview_element` 生成 absolute Element；portal、pointer-events/hit-test 排除和实时事件由上层 host 负责。
 - **落下**:映射为 §4 的 reducer action；当前 `map_drop_action` 覆盖 center/split/tab-insert，Float/Dock 由宿主根据交互上下文编排。
 - **取消**:Esc / 落到非法区 → 回原位,无副作用(呼应确定性)。
