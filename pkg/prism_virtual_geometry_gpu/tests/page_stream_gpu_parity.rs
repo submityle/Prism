@@ -17,7 +17,12 @@ fn stream() -> (VirtualGeometryPageStream, GeometryPageKey) {
         half_extents: [1.0; 3],
         _padding: 0.0,
     };
-    let raw = [7_u8, 8, 9, 10];
+    let raw = prism_render_architecture::virtual_geometry::encode_cluster_payload(
+        bounds,
+        &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        &[0, 1, 2],
+    )
+    .expect("valid CLST fixture");
     let compressed = prism_render_architecture::compression::gdeflate_compress(&raw);
     let asset = VirtualGeometryAsset {
         header: VirtualGeometryAssetHeader {
@@ -72,7 +77,9 @@ fn gpu_page_table_and_storage_match_the_stream_cpu_contract() {
     let (stream, key) = stream();
     let entries = stream.entries();
     let queries = vec![key, GeometryPageKey::new(7, 99)];
-    let resolved = GpuPageTable::new(&ctx).resolve(&ctx, &entries, &queries).unwrap();
+    let resolved = GpuPageTable::new(&ctx)
+        .resolve(&ctx, &entries, &queries)
+        .unwrap();
     assert_eq!(resolved, vec![entries[0].1, UNMAPPED_SLOT]);
 
     let uploads: Vec<_> = entries
