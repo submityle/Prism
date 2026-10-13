@@ -499,6 +499,40 @@ mod tests {
     }
 
     #[test]
+    fn encoder_rejects_default_decoder_resource_overflow() {
+        let mut too_many_workspaces = WorkspaceManager::new();
+        for index in 0..=WorkspaceDecodeLimits::default().max_workspaces {
+            too_many_workspaces
+                .add_workspace(format!("workspace-{index}"))
+                .unwrap();
+        }
+        assert_eq!(
+            encode_workspace(&too_many_workspaces),
+            Err(WorkspacePersistError::ResourceLimit("workspaces"))
+        );
+
+        let mut too_many_perspectives = WorkspaceManager::new();
+        too_many_perspectives.add_workspace("workspace").unwrap();
+        for index in 0..=WorkspaceDecodeLimits::default().max_perspectives {
+            too_many_perspectives
+                .add_perspective(format!("perspective-{index}"), &DockLayout::default())
+                .unwrap();
+        }
+        assert_eq!(
+            encode_workspace(&too_many_perspectives),
+            Err(WorkspacePersistError::ResourceLimit("perspectives"))
+        );
+
+        let long_name = "x".repeat(WorkspaceDecodeLimits::default().max_name_bytes + 1);
+        let mut too_long = WorkspaceManager::new();
+        too_long.add_workspace(long_name).unwrap();
+        assert_eq!(
+            encode_workspace(&too_long),
+            Err(WorkspacePersistError::ResourceLimit("name bytes"))
+        );
+    }
+
+    #[test]
     fn resource_limits_are_checked_before_allocation() {
         let mut manager = WorkspaceManager::new();
         manager.add_workspace("coding").unwrap();
