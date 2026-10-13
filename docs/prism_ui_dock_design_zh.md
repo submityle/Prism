@@ -20,7 +20,7 @@
 >
 > 本文为**设计规格**。地基层(`prism_ui_layout` 确定性 flexbox 解算、`prism_ui_overlay` portal/浮层 + FocusTrap、
 > `prism_ui_store` 响应式状态、`prism_ui_virtual` 虚拟化、`prism_ui_input` hit_test/focus/gesture、
-> `prism_ui_component_kit::DockPanel` 面板外观)和 `prism_ui_dock` 的 M0 核心、M1 render plan + Element 装配、M2 纯数据拖拽、M4 Workspace/host-driven autosave 边界均为**已交付**(SHIPPED); retained draw-list host 已由 `prism_ui_render_backend::ElementRenderer` 提供，窗口/GPU submission、overlay/hit-test 与 schema migration 仍为 PLANNED。
+> `prism_ui_component_kit::DockPanel` 面板外观)和 `prism_ui_dock` 的 M0 核心、M1 render plan + Element 装配、M2 纯数据拖拽、M4 Workspace codec/文件存储/host-driven autosave 边界均为**已交付**(SHIPPED)，schema migration 仍 planned; retained draw-list host 已由 `prism_ui_render_backend::ElementRenderer` 提供，窗口/GPU submission、overlay/hit-test 与 schema migration 仍为 PLANNED。
 > 全文严格区分「已实现并通过测试」与「规划中」。
 >
 > **非目标**:不含 AI/ML/LLM;不做窗口管理器(多显示器/原生窗口由平台/`prism_window` 层承载,本层只给布局模型);
@@ -30,7 +30,7 @@
 - 适用: Prism / Loom UI 生态(编辑器外壳 + 任意 Loom 工具应用)
 - Crate 名: `prism_ui_dock`
 - 关键地基 — 已就绪(SHIPPED): `prism_ui_layout`(确定性 flexbox,`no_std`)、`prism_ui_overlay`(OverlayKind z 序 + FocusTrap,浮动/预览层)、`prism_ui_store`(响应式状态 + select + middleware)、`prism_ui_virtual`(列表虚拟化)、`prism_ui_input`(hit_test z 序/pointer-events、FocusRing、gesture/velocity/swipe)、`prism_ui_scoped`(作用域样式)、`prism_ui_component_kit::editor::DockPanel`(面板外观)、`prism_ui_snapshot`(可逆文本编码,持久化参照)、`prism_ui_anim`/`prism_ui_motion`(拖拽/贴靠动效)
-- 前置待建(本 crate 后续落地): 见 §15 路线图 M1–M5；M0 已完成并在 §18 登记
+- 剩余宿主能力与跨层依赖: 见 §15 路线图和 §18 现状复核；M0–M4 的纯数据、解算、Element 装配与持久化边界按交付标记区分，未把宿主集成误报为 crate 已完成
 - 核心契约:布局是**纯数据树**,一切改动走**确定性 reducer**,持久化输入必须可校验；当前 crate 已提供 active 内容懒构建，虚拟化、增量解算与 schema 迁移属于宿主/后续能力。
 
 ---
@@ -150,7 +150,7 @@ Idle → PickUp(panel) → Dragging{ghost, hover} → Drop(action) | Cancel
 
 - **抓取（宿主规划）**:tab/标题栏按下进入拖拽；当前 crate 的状态机只接收 `PickUp/Move/Drop/Cancel/Reset` 与逻辑指针位置，不实现 gesture velocity/swipe 阈值或惯性。
 - **命中（宿主规划）**:`prism_ui_input::hit_test`(z 序 + pointer-events)接线由上层 host 完成；当前 crate 只提供确定性几何与 drop zone 计算。
-- **drop zone（当前已实现）**:悬停目标显示中心(tabify)、上/下/左/右(在目标旁 split)以及 tab 栏内插入位(tab 间重排)；整区外缘停靠仍是规划能力。
+- **drop zone（当前已实现）**:悬停面板目标显示中心(tabify)、上/下/左/右(split)以及面板 tab 栏内插入位(tab 间重排)；Document 目标不支持 center/tab-insert，只允许 split。整区外缘停靠仍是规划能力。
 - **预览（适配器已实现，接线规划）**:`drop_preview_element` 生成 absolute Element；portal、pointer-events/hit-test 排除和实时事件由上层 host 负责。
 - **落下**:映射为 §4 的 reducer action；当前 `map_drop_action` 覆盖 center/split/tab-insert，Float/Dock 由宿主根据交互上下文编排。
 - **取消**:Esc / 落到非法区 → 回原位,无副作用(呼应确定性)。
@@ -161,7 +161,7 @@ Idle → PickUp(panel) → Dragging{ghost, hover} → Drop(action) | Cancel
 
 ## 6. 渲染:布局解算 → Element
 
-- **几何**:`DockNode` 树映射到 `prism_ui_layout` 的 `LayoutTree`——`Split` → flex 行/列 + 子节点显式比例尺寸;`TabStack` → tab 栏 + 内容区。确定性解算,相同树相同几何。
+- **几何**:`render_plan::solve` 将 `DockNode` 树映射为 crate 自有的 renderer-independent `RenderPlan`（面板、文档、tab、splitter 与 surface 几何）；`DockView` 独立装配 Element，当前并未直接构造或消费 `prism_ui_layout::LayoutTree`。实际 layout host 接线由上层负责。
 - **面板外观**:每个可见 tab 内容包进 `prism_ui_component_kit::editor::DockPanel`(复用其玻璃面 + 标题栏 + `DockSide`),本层只负责**摆放与装配**。
 - **浮窗 / 拖拽预览**:当前 `DockView` 生成浮窗 Element，`drop_preview_element` 生成视觉提示；portal 层、z 序、FocusTrap、pointer dispatch 和窗口 surface 由上层 host 接线。
 - **分隔条**:可拖拽把手元素,带命中区 padding(易抓)。
@@ -174,7 +174,7 @@ Idle → PickUp(panel) → Dragging{ghost, hover} → Drop(action) | Cancel
 - **稳定二进制编码（已交付）**:`encode_layout`/`decode_layout` 及 workspace codec 使用 magic/version、checked 长度、资源上限和模型校验；当前不是 JSON codec。
 - **schema 版本化（规划）**:当前 version=1 对未知版本返回错误，尚无旧版迁移链。
 - **校验(§11)**:加载时执行 registry 过滤、比例/深度/数量/字节上限和不变量校验；非法输入返回结构化错误，默认回落由文件存储或宿主编排。
-- **Workspace / Perspective(借 Qt ADS / Blender)**:命名多套布局(「编码」「调试」「美术」),一键切换;每套独立持久化。
+- **Workspace / Perspective(借 Qt ADS / Blender)**:命名多套布局(「编码」「调试」「美术」),一键切换；Workspace/Perspective 为内存模型，可通过 codec/store 持久化整个 manager 快照，自动保存由 host 编排。
 - **自动保存**:`WorkspaceAutosave` 是 `std` 下由宿主 poll/flush 的 debounce 控制器，不是 store middleware 或后台线程。
 - **重置**:始终可一键回**默认布局**(由面板注册表的默认位置生成)。
 
@@ -299,7 +299,7 @@ features: `std`(文件存储)/ `render`(Element 装配)/ `snapshot_tests`。当�
 | **M0** | model + reduce(split/tabify/close/resize)+ 不变量 + 属性测试 | — |
 | **M1** | renderer-independent 几何解算 + render plan + tab/header/splitter 元数据 | Dock model ✅ / DockPanel ✅ / `render` feature Element 装配 ✅ / retained draw-list host ✅；窗口/GPU submission 仍待完成 |
 | **M2** | 拖拽状态机 + 中心/四边 drop zone + tab 插入 + overlay 预览 | 状态机/drop-zone/reducer action 已交付；renderer overlay 预览仍待集成 |
-| **M3** | 浮窗 + autohide 边栏 + maximize | M1/M2 |
+| **M3** | 浮窗 + autohide 边栏 + maximize | core reducer、RenderPlan 几何与 DockView Element 已交付；原生窗口、portal overlay、pointer/focus 接线仍待宿主完成 |
 | **M4** | 持久化(序列化/校验/迁移)+ Workspace + 自动保存 | persistence core ✅ / Workspace 纯数据与 codec ✅ / host-driven autosave ✅；schema migration 仍待完成 |
 | **M5** | 动效 + 可达性 + 撤销集成 + 多显示器校正 | 平台层 / 命令内核 |
 

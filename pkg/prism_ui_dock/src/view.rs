@@ -270,10 +270,10 @@ impl<'a> DockView<'a> {
     }
 
     fn render_floating(&self) -> Result<Element, DockViewError> {
-        let windows = self
-            .layout
-            .floating
-            .iter()
+        let mut ordered_windows = self.layout.floating.iter().collect::<Vec<_>>();
+        ordered_windows.sort_by_key(|window| window.z);
+        let windows = ordered_windows
+            .into_iter()
             .map(|window| {
                 self.render_node(&window.root, DockSide::Floating)
                     .map(|node| {
@@ -523,6 +523,44 @@ mod tests {
         );
         let element = (views.get("panel").unwrap())();
         assert_eq!(element.kind(), &prism_ui::ElementKind::Box);
+    }
+
+    #[test]
+    fn floating_windows_are_painted_in_ascending_z_order() {
+        let (panels, views, documents) = registries();
+        let layout = DockLayout {
+            root: DockNode::Empty,
+            floating: vec![
+                crate::FloatingWindow {
+                    rect: crate::Rect {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 100,
+                    },
+                    root: DockNode::panel("outliner"),
+                    z: 10,
+                },
+                crate::FloatingWindow {
+                    rect: crate::Rect {
+                        x: 10,
+                        y: 10,
+                        width: 100,
+                        height: 100,
+                    },
+                    root: DockNode::panel("inspector"),
+                    z: 1,
+                },
+            ],
+            ..DockLayout::default()
+        };
+        let element = DockView::new(&layout, &panels, &views, &documents)
+            .render()
+            .unwrap();
+        let windows = element.child_elements()[1].child_elements();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].inline_pairs()[1], (StyleProp::Left, StyleValue::px(10.0)));
+        assert_eq!(windows[1].inline_pairs()[1], (StyleProp::Left, StyleValue::px(0.0)));
     }
 
     #[test]

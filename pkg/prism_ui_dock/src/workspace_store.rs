@@ -235,7 +235,11 @@ impl WorkspaceFileStore {
     /// validation, copy, or write leaves the existing primary untouched.
     pub fn save(&self, manager: &WorkspaceManager) -> Result<(), WorkspaceStoreError> {
         let bytes = encode_workspace(manager)?;
-        if let Some(parent) = self.primary.parent() {
+        if let Some(parent) = self
+            .primary
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)?;
         }
 
@@ -332,13 +336,30 @@ fn copy_and_sync(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        // Windows rename does not replace an existing destination. Removing it
+        // first would lose the atomic-commit guarantee, so fail explicitly
+        // until the platform adapter supplies ReplaceFileW semantics.
+        if destination.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "atomic replacement of an existing workspace snapshot is unsupported on Windows",
+            ));
+        }
+    }
     fs::rename(source, destination)
+}
+
+fn parent_or_current(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 #[cfg(unix)]
 fn sync_parent(path: &Path) -> io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::File::open(parent)?.sync_all()
+    fs::File::open(parent_or_current(path))?.sync_all()
 }
 
 #[cfg(not(unix))]
@@ -486,6 +507,19 @@ mod tests {
             DockNode::panel("first")
         );
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn empty_parent_paths_sync_to_current_directory() {
+        assert_eq!(
+            parent_or_current(Path::new("workspace.prism")),
+            Path::new(".")
+        );
+        assert_eq!(parent_or_current(Path::new("")), Path::new("."));
+        assert_eq!(
+            parent_or_current(Path::new("nested/workspace.prism")),
+            Path::new("nested")
+        );
     }
 
     #[test]
