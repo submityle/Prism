@@ -2,26 +2,11 @@
 
 use crate::job::{Processor, ProcessorError};
 use alloc::vec::Vec;
+use prism_image::{ImageArtifact, ImageArtifactError};
 use std::io::Cursor;
 
 /// Runtime artifact kind for canonical RGBA8 images.
 pub const IMAGE_ARTIFACT_KIND: u128 = 0x5052_4953_4d5f_494d_4147_455f_5238;
-/// Version of the canonical RGBA8 image artifact wire format.
-pub const IMAGE_ARTIFACT_SCHEMA: u32 = 1;
-const MAGIC: &[u8; 8] = b"PRIMG001";
-const HEADER_LEN: usize = 8 + 4 + 4 + 4 + 4;
-
-/// A deterministic, tightly-packed RGBA8 image artifact.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ImageArtifact {
-    /// Image width in texels.
-    pub width: u32,
-    /// Image height in texels.
-    pub height: u32,
-    /// Row-major RGBA8 texels.
-    pub rgba8: Vec<u8>,
-}
-
 /// PNG import or canonical artifact validation failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImageImportError {
@@ -29,12 +14,8 @@ pub enum ImageImportError {
     InvalidPng(String),
     /// The PNG uses a color/depth combination this artifact contract does not support.
     UnsupportedFormat,
-    /// Image dimensions or payload length overflow the artifact contract.
-    InvalidDimensions,
-    /// The canonical artifact ended before all declared bytes were available.
-    Truncated,
-    /// The canonical artifact header or version is invalid.
-    InvalidArtifact,
+    /// Canonical runtime artifact validation failed.
+    Artifact(ImageArtifactError),
 }
 
 impl std::fmt::Display for ImageImportError {
@@ -42,67 +23,12 @@ impl std::fmt::Display for ImageImportError {
         match self {
             Self::InvalidPng(error) => write!(f, "invalid PNG: {error}"),
             Self::UnsupportedFormat => f.write_str("PNG format cannot be normalized to RGBA8"),
-            Self::InvalidDimensions => f.write_str("image dimensions overflow the RGBA8 artifact"),
-            Self::Truncated => f.write_str("RGBA8 image artifact is truncated"),
-            Self::InvalidArtifact => f.write_str("invalid RGBA8 image artifact header"),
+            Self::Artifact(error) => error.fmt(f),
         }
     }
 }
 
 impl std::error::Error for ImageImportError {}
-
-impl ImageArtifact {
-    /// Encodes the canonical artifact wire format.
-    pub fn encode(&self) -> Result<Vec<u8>, ImageImportError> {
-        let expected = pixel_len(self.width, self.height)?;
-        if self.rgba8.len() != expected {
-            return Err(ImageImportError::InvalidDimensions);
-        }
-        let payload_len =
-            u32::try_from(self.rgba8.len()).map_err(|_| ImageImportError::InvalidDimensions)?;
-        let mut bytes = Vec::with_capacity(HEADER_LEN + self.rgba8.len());
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&IMAGE_ARTIFACT_SCHEMA.to_le_bytes());
-        bytes.extend_from_slice(&self.width.to_le_bytes());
-        bytes.extend_from_slice(&self.height.to_le_bytes());
-        bytes.extend_from_slice(&payload_len.to_le_bytes());
-        bytes.extend_from_slice(&self.rgba8);
-        Ok(bytes)
-    }
-
-    /// Decodes and validates one canonical artifact.
-    pub fn decode(bytes: &[u8]) -> Result<Self, ImageImportError> {
-        if bytes.len() < HEADER_LEN || &bytes[..8] != MAGIC {
-            return Err(ImageImportError::InvalidArtifact);
-        }
-        let schema = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        if schema != IMAGE_ARTIFACT_SCHEMA {
-            return Err(ImageImportError::InvalidArtifact);
-        }
-        let width = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-        let height = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
-        let payload_len = usize::try_from(u32::from_le_bytes(bytes[20..24].try_into().unwrap()))
-            .map_err(|_| ImageImportError::InvalidDimensions)?;
-        let expected = pixel_len(width, height)?;
-        if payload_len != expected {
-            return Err(ImageImportError::InvalidDimensions);
-        }
-        let end = HEADER_LEN
-            .checked_add(payload_len)
-            .ok_or(ImageImportError::InvalidDimensions)?;
-        if end > bytes.len() {
-            return Err(ImageImportError::Truncated);
-        }
-        if end != bytes.len() {
-            return Err(ImageImportError::InvalidArtifact);
-        }
-        Ok(Self {
-            width,
-            height,
-            rgba8: bytes[HEADER_LEN..end].to_vec(),
-        })
-    }
-}
 
 /// Decodes PNG with the mature `png` crate and emits the canonical RGBA8 artifact.
 #[derive(Clone, Copy, Debug, Default)]
@@ -118,7 +44,9 @@ impl CanonicalPngProcessor {
             .map_err(|error| ImageImportError::InvalidPng(error.to_string()))?;
         let output_len = reader
             .output_buffer_size()
-            .ok_or(ImageImportError::InvalidDimensions)?;
+            .ok_or(ImageImportError::Artifact(
+                ImageArtifactError::InvalidDimensions,
+            ))?;
         let mut buffer = vec![0; output_len];
         let info = reader
             .next_frame(&mut buffer)
@@ -145,7 +73,7 @@ impl CanonicalPngProcessor {
             height: info.height,
             rgba8,
         };
-        artifact.encode()?;
+        artifact.encode().map_err(ImageImportError::Artifact)?;
         Ok(artifact)
     }
 }
@@ -158,14 +86,9 @@ impl Processor for CanonicalPngProcessor {
             ));
         };
         Self::import(source)
-            .and_then(|artifact| artifact.encode())
+            .and_then(|artifact| artifact.encode().map_err(ImageImportError::Artifact))
             .map_err(|error| ProcessorError::new(error.to_string()))
     }
-}
-
-fn pixel_len(width: u32, height: u32) -> Result<usize, ImageImportError> {
-    usize::try_from(u64::from(width) * u64::from(height) * 4)
-        .map_err(|_| ImageImportError::InvalidDimensions)
 }
 
 #[cfg(test)]
@@ -210,7 +133,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ImageArtifact::decode(&bytes[..bytes.len() - 1]),
-            Err(ImageImportError::Truncated)
+            Err(ImageArtifactError::Truncated)
         );
     }
 }

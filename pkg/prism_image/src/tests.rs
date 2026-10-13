@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use prism_render_driver::{AddressMode, Extent3d, FilterMode, SamplerDescriptor, TextureFormat};
 
-use crate::{Image, ImageError};
+use crate::{Image, ImageArtifact, ImageError};
 
 #[test]
 fn an_image_validates_its_data_against_its_extents_and_format() {
@@ -43,8 +43,8 @@ fn a_format_with_a_different_texel_size_changes_what_is_required() {
         Ok(3)
     );
     assert_eq!(
-        Image::new(extent, TextureFormat::Rgba32Float, vec![0; 9 * 16]).map(|image| image
-            .bytes_per_row()),
+        Image::new(extent, TextureFormat::Rgba32Float, vec![0; 9 * 16])
+            .map(|image| image.bytes_per_row()),
         Ok(48)
     );
     assert_eq!(
@@ -59,11 +59,19 @@ fn a_format_with_a_different_texel_size_changes_what_is_required() {
 #[test]
 fn degenerate_and_depth_images_are_refused() {
     assert_eq!(
-        Image::new(Extent3d::new_2d(0, 4), TextureFormat::Rgba8Unorm, Vec::new()),
+        Image::new(
+            Extent3d::new_2d(0, 4),
+            TextureFormat::Rgba8Unorm,
+            Vec::new()
+        ),
         Err(ImageError::EmptyExtent)
     );
     assert_eq!(
-        Image::new(Extent3d::new_2d(4, 0), TextureFormat::Rgba8Unorm, Vec::new()),
+        Image::new(
+            Extent3d::new_2d(4, 0),
+            TextureFormat::Rgba8Unorm,
+            Vec::new()
+        ),
         Err(ImageError::EmptyExtent)
     );
     assert_eq!(
@@ -105,8 +113,12 @@ fn an_image_carries_the_sampler_it_wants() {
     .expect("valid");
     assert_eq!(image.sampler(), &sampler);
 
-    let default_sampler =
-        Image::new(Extent3d::new_2d(1, 1), TextureFormat::Rgba8Unorm, vec![0; 4]).expect("valid");
+    let default_sampler = Image::new(
+        Extent3d::new_2d(1, 1),
+        TextureFormat::Rgba8Unorm,
+        vec![0; 4],
+    )
+    .expect("valid");
     assert_eq!(default_sampler.sampler(), &SamplerDescriptor::default());
 }
 
@@ -118,3 +130,18 @@ fn an_image_is_an_asset() {
     );
 }
 
+#[test]
+fn canonical_artifact_decodes_into_the_runtime_image_asset() {
+    let artifact = ImageArtifact {
+        width: 2,
+        height: 1,
+        rgba8: vec![1, 2, 3, 255, 4, 5, 6, 255],
+    };
+    let image = ImageArtifact::decode(&artifact.encode().unwrap())
+        .unwrap()
+        .to_image()
+        .unwrap();
+    assert_eq!(image.extent(), Extent3d::new_2d(2, 1));
+    assert_eq!(image.format(), TextureFormat::Rgba8Unorm);
+    assert_eq!(image.data(), artifact.rgba8);
+}

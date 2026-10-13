@@ -16,12 +16,13 @@
 
 extern crate alloc;
 
+mod artifact;
 mod error;
 mod image;
 
 #[cfg(test)]
 mod tests;
 
+pub use artifact::{ImageArtifact, ImageArtifactError, IMAGE_ARTIFACT_SCHEMA};
 pub use error::ImageError;
 pub use image::Image;
-

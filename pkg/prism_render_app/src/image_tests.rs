@@ -3,16 +3,18 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use prism_image::Image;
+use prism_image::{Image, ImageArtifact};
 use prism_render_driver::{
     DeviceDescriptor, Extent3d, Instance, RequestAdapterOptions, TextureFormat,
 };
 use prism_render_driver_null::NullInstance;
 
-use crate::image::{GpuImage, prepare_image};
+use crate::image::{prepare_image, GpuImage};
 
-fn null_device() -> (prism_render_driver_null::NullDevice, impl prism_render_driver::RenderQueue)
-{
+fn null_device() -> (
+    prism_render_driver_null::NullDevice,
+    impl prism_render_driver::RenderQueue,
+) {
     let options = RequestAdapterOptions::default();
     let adapter = NullInstance::new()
         .request_adapter(&options)
@@ -98,19 +100,17 @@ fn unloading_an_image_releases_every_object() {
 /// round-tripped through a copy would prove less).
 #[test]
 fn an_uploaded_image_is_sampleable_on_a_gpu() {
-    use crate::render_asset::{RenderAssets, register_render_assets};
+    use crate::render_asset::{register_render_assets, RenderAssets};
     use crate::RenderAppConfig;
     use prism_render_driver::{
         BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
         BindingResource, BindingType, ColorTargetState, FragmentState, MultisampleState,
         PipelineLayoutDescriptor, PrimitiveState, RenderDevice, RenderPipelineDescriptor,
-        SamplerBindingType, ShaderModuleDescriptor, ShaderStages, TextureFormat,
-        TextureSampleType, TextureUsages, TextureViewDimension, VertexState,
+        SamplerBindingType, ShaderModuleDescriptor, ShaderStages, TextureFormat, TextureSampleType,
+        TextureUsages, TextureViewDimension, VertexState,
     };
     use prism_render_driver_wgpu::WgpuInstance;
-    use prism_render_graph::{
-        ImportedTexture, PassFlags, RenderGraph, TextureDesc,
-    };
+    use prism_render_graph::{ImportedTexture, PassFlags, RenderGraph, TextureDesc};
 
     const WIDTH: u32 = 5;
     const HEIGHT: u32 = 3;
@@ -130,7 +130,14 @@ fn an_uploaded_image_is_sampleable_on_a_gpu() {
     ));
     register_render_assets::<WgpuInstance, GpuImage>(&mut app);
 
-    let image = coordinated_image(WIDTH, HEIGHT);
+    let coordinated = coordinated_image(WIDTH, HEIGHT);
+    let image = ImageArtifact {
+        width: WIDTH,
+        height: HEIGHT,
+        rgba8: coordinated.data().to_vec(),
+    }
+    .to_image()
+    .expect("canonical image artifact must decode to the runtime image");
     let expected = image.data().to_vec();
     let mut images = prism_asset::Assets::new();
     let id = images.insert(image).id();
@@ -139,7 +146,9 @@ fn an_uploaded_image_is_sampleable_on_a_gpu() {
     // The frame uploads the image.
     app.update();
 
-    let render = app.get_sub_app(crate::RenderApp).expect("the render sub-app");
+    let render = app
+        .get_sub_app(crate::RenderApp)
+        .expect("the render sub-app");
     let prepared = render
         .world
         .resource::<RenderAssets<GpuImage>>()
