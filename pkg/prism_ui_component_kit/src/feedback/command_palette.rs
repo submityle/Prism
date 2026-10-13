@@ -162,7 +162,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with_padding_x(tok("space.sm"))
             .with_padding_y(tok("space.xs"))
             .with(StyleProp::BorderRadius, tok("radius.sm"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.secondary"),
+            ),
     );
 
     // Label: primary body text.
@@ -215,22 +219,29 @@ mod tests {
         let el = render(CommandPaletteProps::new().query("deploy"));
         let palette = palette(&el);
         let search = &palette.child_elements()[0];
-        assert!(search.class_names().iter().any(|c| c == "pk-command-palette__search"));
+        assert!(search
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-command-palette__search"));
         assert_eq!(search.text_content(), Some("deploy"));
     }
 
     #[test]
     fn commands_render_label_and_hint() {
-        let el = render(
-            CommandPaletteProps::new()
-                .command(CommandItem::new("Open File").hint("Cmd+O")),
-        );
+        let el =
+            render(CommandPaletteProps::new().command(CommandItem::new("Open File").hint("Cmd+O")));
         let palette = palette(&el);
         let item = &palette.child_elements()[1];
-        assert!(item.class_names().iter().any(|c| c == "pk-command-palette__item"));
+        assert!(item
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-command-palette__item"));
         let parts = item.child_elements();
         assert_eq!(parts[0].text_content(), Some("Open File"));
-        assert!(parts[1].class_names().iter().any(|c| c == "pk-command-palette__hint"));
+        assert!(parts[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-command-palette__hint"));
         assert_eq!(parts[1].text_content(), Some("Cmd+O"));
     }
 }

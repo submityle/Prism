@@ -45,9 +45,7 @@ impl InputEnvelopeQueue {
     /// Creates an empty queue.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-        }
+        Self { buffer: Vec::new() }
     }
 
     /// Creates an empty queue preallocated for `capacity` envelopes, sized for

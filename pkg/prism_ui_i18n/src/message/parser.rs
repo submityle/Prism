@@ -302,7 +302,8 @@ impl Parser {
             return Err(self.err(ParseErrorKind::BadOffset));
         }
         self.skip_ws();
-        self.read_integer().ok_or_else(|| self.err(ParseErrorKind::BadOffset))
+        self.read_integer()
+            .ok_or_else(|| self.err(ParseErrorKind::BadOffset))
     }
 
     fn parse_plural_selector(&mut self) -> Result<PluralSelector, MessageParseError> {

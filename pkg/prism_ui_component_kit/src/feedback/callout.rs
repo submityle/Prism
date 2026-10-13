@@ -168,7 +168,10 @@ mod tests {
         let el = render(CalloutProps::new().body_child(Element::text("note")));
         let kids = el.child_elements();
         assert_eq!(kids.len(), 1);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-callout__body"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-callout__body"));
         assert_eq!(kids[0].child_elements().len(), 1);
     }
 
@@ -181,8 +184,14 @@ mod tests {
         );
         let kids = el.child_elements();
         assert_eq!(kids.len(), 2);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-callout__title"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-callout__title"));
         assert_eq!(kids[0].text_content(), Some("Tip"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-callout__body"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-callout__body"));
     }
 }

@@ -521,17 +521,12 @@ impl WgpuQueue {
     /// This is the backend hook golden-image and headless tests use to observe
     /// what the RHI actually rendered; it is not a hot-path API.
     #[must_use]
-    pub fn read_texture_rgba8(
-        &self,
-        texture: rhi::TextureId,
-        width: u32,
-        height: u32,
-    ) -> Vec<u8> {
+    pub fn read_texture_rgba8(&self, texture: rhi::TextureId, width: u32, height: u32) -> Vec<u8> {
         const BYTES_PER_TEXEL: u32 = 4;
         let unpadded_bytes_per_row = width * BYTES_PER_TEXEL;
-        let padded_bytes_per_row =
-            unpadded_bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-                * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row
+            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
 
         let texture = self.inner.resolve_texture(texture);

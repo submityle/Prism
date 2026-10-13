@@ -204,11 +204,7 @@ pub(crate) fn coat_absorption_rgb(
 /// critical angle). The result is therefore always `≥ 1`. `C == 0` returns the
 /// authored `specular_ior` exactly.
 #[inline]
-pub(crate) fn coat_specular_ior_ratio(
-    specular_ior: f32,
-    coat_ior: f32,
-    coat_weight: f32,
-) -> f32 {
+pub(crate) fn coat_specular_ior_ratio(specular_ior: f32, coat_ior: f32, coat_weight: f32) -> f32 {
     let n_b = specular_ior.clamp(1.0, 3.0);
     let n_c = coat_ior.max(MIN_DIELECTRIC_IOR);
     let n_a = 1.0_f32;
@@ -242,10 +238,7 @@ fn coat_interface_normal(coat_normal: [f32; 3], base_normal: [f32; 3]) -> [f32; 
 /// `OpenPBR` `geometry_coat_tangent`, falling back to the base frame tangent
 /// when unauthored (the all-zero identity sentinel).
 #[inline]
-fn coat_tangent_or(
-    coat_tangent: [f32; 3],
-    base_tangent: [f32; 3],
-) -> [f32; 3] {
+fn coat_tangent_or(coat_tangent: [f32; 3], base_tangent: [f32; 3]) -> [f32; 3] {
     let [x, y, z] = coat_tangent;
     if x * x + y * y + z * z > 0.0 {
         normalize_or(coat_tangent, base_tangent)
@@ -357,8 +350,7 @@ pub fn evaluate_clearcoat_direct(
     // `base_weight` scales the whole base layer (`1.0` = exactly the identity).
     // Both are identity at their defaults, so a material that never authors them
     // keeps the historical coat response bit-for-bit.
-    let diffuse_factor =
-        oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
+    let diffuse_factor = oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
     // `OpenPBR` `EON_comp`: same reciprocal compensation the principled lobe
     // applies, so the Clearcoat class's base conserves energy under a white
     // furnace too (`diffuse_roughness == 0` makes it exactly zero).
@@ -405,23 +397,12 @@ pub fn evaluate_clearcoat_direct(
             let (coat_t, coat_b) = anisotropic_axes(
                 coat_n,
                 coat_tangent_or(surface.coat_tangent, frame.tangent),
-                coat_bitangent_or(
-                    surface.coat_tangent,
-                    coat_n,
-                    frame.tangent,
-                    frame.bitangent,
-                ),
+                coat_bitangent_or(surface.coat_tangent, coat_n, frame.tangent, frame.bitangent),
                 surface.anisotropy_rotation,
             );
             let (ax, ay) = openpbr_anisotropy_to_alpha(coat_alpha, coat_aniso);
             (
-                distribution_ggx_anisotropic(
-                    dot(coat_t, h),
-                    dot(coat_b, h),
-                    coat_n_dot_h,
-                    ax,
-                    ay,
-                ),
+                distribution_ggx_anisotropic(dot(coat_t, h), dot(coat_b, h), coat_n_dot_h, ax, ay),
                 visibility_smith_ggx_anisotropic(
                     dot(coat_t, v),
                     dot(coat_b, v),
@@ -732,7 +713,10 @@ mod tests {
         for cos in [0.0, 0.25, 0.5, 0.75, 1.0] {
             for ior in [1.001, 1.3, 1.5, 2.0, 3.0] {
                 let f = fresnel_dielectric(cos, ior);
-                assert!(f.is_finite() && (0.0..=1.0).contains(&f), "cos={cos} ior={ior} -> {f}");
+                assert!(
+                    f.is_finite() && (0.0..=1.0).contains(&f),
+                    "cos={cos} ior={ior} -> {f}"
+                );
             }
         }
     }
@@ -780,8 +764,14 @@ mod tests {
             light(),
         );
         // The base beneath the red coat loses green and blue.
-        assert!(red[1] < white[1], "red coat must absorb green: {red:?} vs {white:?}");
-        assert!(red[2] < white[2], "red coat must absorb blue: {red:?} vs {white:?}");
+        assert!(
+            red[1] < white[1],
+            "red coat must absorb green: {red:?} vs {white:?}"
+        );
+        assert!(
+            red[2] < white[2],
+            "red coat must absorb blue: {red:?} vs {white:?}"
+        );
         // Isolating the coat with `base_weight = 0` proves the highlight is
         // untouched: white and red `coat_color` give byte-identical results.
         let coat_only = |color: [f32; 3]| {
@@ -809,7 +799,10 @@ mod tests {
         assert_eq!(coat_interface_normal([0.0; 3], base), base);
         // A non-zero coat normal is normalized against the base as a fallback.
         let tilted = coat_interface_normal([0.3, 1.0, 0.0], base);
-        assert!((tilted[0] * tilted[0] + tilted[1] * tilted[1] + tilted[2] * tilted[2] - 1.0).abs() < 1.0e-5);
+        assert!(
+            (tilted[0] * tilted[0] + tilted[1] * tilted[1] + tilted[2] * tilted[2] - 1.0).abs()
+                < 1.0e-5
+        );
         // Degenerate (non-normalizable) input falls back rather than dividing by zero.
         let tiny = coat_interface_normal([1.0e-30, 1.0e-30, 0.0], base);
         assert!(tiny.iter().all(|c| c.is_finite()));
@@ -996,7 +989,10 @@ mod tests {
             emissive: [0.02, 0.03, 0.04],
             ..base_surface()
         };
-        assert_eq!(evaluate_clearcoat_direct(surface, frame(), light()), surface.emissive);
+        assert_eq!(
+            evaluate_clearcoat_direct(surface, frame(), light()),
+            surface.emissive
+        );
 
         // The coat highlight itself is unaffected by `base_weight`.
         let coat_only = evaluate_clearcoat_direct(
@@ -1008,7 +1004,10 @@ mod tests {
             frame(),
             light(),
         );
-        assert!(sum(coat_only) > 0.0, "the coat glint must survive: {coat_only:?}");
+        assert!(
+            sum(coat_only) > 0.0,
+            "the coat glint must survive: {coat_only:?}"
+        );
     }
 
     #[test]

@@ -24,9 +24,9 @@ use wgpu::{
     BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType, BufferDescriptor,
     BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor,
     DeviceDescriptor, Extent3d, Instance, InstanceDescriptor, InstanceFlags, MapMode,
-    PipelineLayoutDescriptor, PollType, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource,
-    ShaderStages, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureDescriptor, TextureDimension,
-    TextureFormat, TextureUsages, TextureViewDescriptor, TextureViewDimension,
+    PipelineLayoutDescriptor, PollType, RequestAdapterOptions, ShaderModuleDescriptor,
+    ShaderSource, ShaderStages, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor, TextureViewDimension,
 };
 
 const MEASURED_LOBE_WESL: &str =
@@ -182,7 +182,11 @@ fn measured_lobe_matches_on_device() {
         "MB_MIN_ROUGHNESS",
         "MB_MIN_POSITIVE",
     ] {
-        shader.push_str(&extract_const(MEASURED_BRDF_WESL, "measured_brdf.wesl", name));
+        shader.push_str(&extract_const(
+            MEASURED_BRDF_WESL,
+            "measured_brdf.wesl",
+            name,
+        ));
         shader.push('\n');
     }
     for name in [
@@ -310,7 +314,10 @@ fn measured_lobe_matches_on_device() {
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        &pixels.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>(),
+        &pixels
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>(),
         TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(width * 16),
@@ -328,7 +335,10 @@ fn measured_lobe_matches_on_device() {
         .iter()
         .flat_map(|light| {
             [
-                light.direction[0], light.direction[1], light.direction[2], 0.0,
+                light.direction[0],
+                light.direction[1],
+                light.direction[2],
+                0.0,
             ]
         })
         .flat_map(f32::to_le_bytes)

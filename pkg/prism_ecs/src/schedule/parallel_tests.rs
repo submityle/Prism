@@ -321,7 +321,6 @@ fn parallel_change_detection_matches_sequential() {
     );
 }
 
-
 // --- §24.1 QoS lane annotation ----------------------------------------------
 //
 // A system declares *how urgent* it is with [`SystemLane`]; the multi-threaded

@@ -86,7 +86,10 @@ fn glass_large_disabled_story() {
             )
             .unwrap(),
         )
-        .with("size", ControlValue::select("lg", ["sm", "md", "lg"].map(String::from)).unwrap())
+        .with(
+            "size",
+            ControlValue::select("lg", ["sm", "md", "lg"].map(String::from)).unwrap(),
+        )
         .with("disabled", ControlValue::Bool(true));
     let result = render_story(&story, &args);
     let classes = result.element().class_names();

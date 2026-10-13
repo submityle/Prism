@@ -692,6 +692,7 @@ impl MovementMode for GrapplingHook { fn solve(&mut self, ctx: MoveCtx) -> MoveR
 - 分层状态机 + 选择器的融合：比纯行为树更高效、更可预测、更易调试。
 - 事件驱动状态转移 + 数据驱动（DataAsset），运行时为轻量游标，适合大规模代理。
 - 与行为树并存：BT 擅长复杂决策，StateTree 擅长清晰的状态生命周期，二者可嵌套。
+- **正式设计**：本系统定位为**通用决策运行时**（AI/玩法流程/交互/动画/UI 共用），独立 crate 族 `pkg/prism_state_tree*`，完整规格见 `prism_state_tree_design_zh.md`；本文 §22 将 StateTree 归入 `prism_gameplay_ai` 的描述以其 §24.1 的偏差说明为准（`prism_gameplay_ai` 改为建于其上的 AI 装配层）。
 
 ### 29.2 Smart Objects（智能物体 / 世界契约）
 - 环境交互点声明"我能提供什么交互"（椅子=坐下、门=开、炮塔=操作），并附带槽位、条件标签、动画契约。
@@ -1112,4 +1113,3 @@ AAA 的难点不在单系统，而在**整帧协同**。确立清晰的一帧时
 - 经 §35 MVVM 双向绑定到设置界面（设置项是双向绑定的典型场景），零手写"每帧刷新 UI"。
 
 > **落地映射**：crate `pkg/prism_gameplay_settings`（建于 `prism_app::settings/cvar` + `prism_reflect` + §35 MVVM）。**边界**：具体选项清单、难度数值、品类专属项属游戏模板层；base 提供模型/持久化/绑定/重绑/档位机制。
-

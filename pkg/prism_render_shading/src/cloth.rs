@@ -344,9 +344,18 @@ mod tests {
         );
         // The Lambertian diffuse is untouched, so a red fuzz keeps red and drops
         // green / blue.
-        assert!(red[0] >= white[0], "red fuzz must keep red: {red:?} vs {white:?}");
-        assert!(red[1] < white[1], "red fuzz must drop green: {red:?} vs {white:?}");
-        assert!(red[2] < white[2], "red fuzz must drop blue: {red:?} vs {white:?}");
+        assert!(
+            red[0] >= white[0],
+            "red fuzz must keep red: {red:?} vs {white:?}"
+        );
+        assert!(
+            red[1] < white[1],
+            "red fuzz must drop green: {red:?} vs {white:?}"
+        );
+        assert!(
+            red[2] < white[2],
+            "red fuzz must drop blue: {red:?} vs {white:?}"
+        );
     }
 
     fn sum3(c: [f32; 3]) -> f32 {

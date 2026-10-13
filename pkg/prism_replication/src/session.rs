@@ -19,8 +19,8 @@
 
 use alloc::vec::Vec;
 
-use crate::delta::{DeltaError, Record, Schema, encode_delta};
-use crate::frame::{FrameDecoder, FrameError, encode_frame};
+use crate::delta::{encode_delta, DeltaError, Record, Schema};
+use crate::frame::{encode_frame, FrameDecoder, FrameError};
 use crate::prediction::{Prediction, PredictionError};
 use crate::snapshot::{SnapshotError, SnapshotStore};
 
@@ -292,7 +292,7 @@ impl<F: Clone> ClientSession<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::{FieldKind, FieldValue, encode_snapshot};
+    use crate::delta::{encode_snapshot, FieldKind, FieldValue};
     use alloc::vec;
     use alloc::vec::Vec;
 

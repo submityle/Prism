@@ -16,11 +16,11 @@
 
 use prism_ecs::prelude::Resource;
 use prism_render_driver::{
-    CacheStats, ContentCache, RenderDevice, RenderPipelineDescriptor, RenderPipelineId,
-    PrimitiveTopology, TextureFormat, VertexBufferLayout,
+    CacheStats, ContentCache, PrimitiveTopology, RenderDevice, RenderPipelineDescriptor,
+    RenderPipelineId, TextureFormat, VertexBufferLayout,
 };
 use std::collections::{BTreeSet, VecDeque};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// The content key of one render pipeline.
@@ -95,7 +95,6 @@ impl PipelineKey {
             shader_id,
         }
     }
-
 }
 
 /// A deterministic 64-bit hash of a vertex layout set (FNV-1a).
@@ -136,7 +135,6 @@ pub fn hash_vertex_layouts(layouts: &[VertexBufferLayout]) -> u64 {
     }
     hash
 }
-
 
 /// Encodes an optional format as `format + 1` (`0` is the "none" sentinel), so
 /// the key is an `Ord` integer even though `TextureFormat` is not.
@@ -395,11 +393,9 @@ impl PipelineCache {
             return PipelineResolution::Ready(id);
         }
 
-        let fallback = self
-            .cache
-            .get_or_create(fallback_key, || {
-                device.create_render_pipeline(&fallback_descriptor)
-            });
+        let fallback = self.cache.get_or_create(fallback_key, || {
+            device.create_render_pipeline(&fallback_descriptor)
+        });
         if fallback_key == key {
             return PipelineResolution::Ready(fallback);
         }
@@ -444,13 +440,8 @@ impl PipelineCache {
         >,
     ) {
         for (key, descriptor, fallback_key, fallback_descriptor) in requests {
-            let _ = self.resolve_or_request(
-                device,
-                key,
-                descriptor,
-                fallback_key,
-                fallback_descriptor,
-            );
+            let _ =
+                self.resolve_or_request(device, key, descriptor, fallback_key, fallback_descriptor);
         }
     }
 

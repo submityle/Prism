@@ -284,7 +284,11 @@ impl SplitMix64 {
 
     /// A value in `0..bound` (`0` when `bound` is zero).
     fn next_below(&mut self, bound: u64) -> u64 {
-        if bound == 0 { 0 } else { self.next_u64() % bound }
+        if bound == 0 {
+            0
+        } else {
+            self.next_u64() % bound
+        }
     }
 }
 

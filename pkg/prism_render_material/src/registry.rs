@@ -317,7 +317,6 @@ mod tests {
         assert_eq!(after.active_materials, 1);
     }
 
-
     #[test]
     fn dynamic_channels_reach_the_uploaded_header_without_a_republish() {
         let mut registry = MaterialRegistry::new(4);
@@ -339,7 +338,10 @@ mod tests {
         registry.set_dynamic_channels(handle, channels).unwrap();
         assert_eq!(registry.take_dirty(), vec![handle.index]);
         assert_eq!(registry.get(handle).unwrap().revision, revision_before);
-        assert_eq!(registry.generation_at(handle.index), Some(generation_before));
+        assert_eq!(
+            registry.generation_at(handle.index),
+            Some(generation_before)
+        );
 
         let (headers, _, _) = registry.gpu_tables();
         let header = &headers[handle.index as usize];

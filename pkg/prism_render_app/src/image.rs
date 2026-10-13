@@ -63,9 +63,8 @@ pub fn prepare_image(
 ) -> GpuImage {
     let extent = source.extent();
     let format = source.format();
-    let reusable = previous.is_some_and(|previous| {
-        previous.extent == extent && previous.format == format
-    });
+    let reusable =
+        previous.is_some_and(|previous| previous.extent == extent && previous.format == format);
 
     let (texture, view) = if reusable {
         let previous = previous.expect("checked above");
@@ -143,4 +142,3 @@ impl RenderAsset for GpuImage {
         device.destroy_texture(prepared.texture);
     }
 }
-

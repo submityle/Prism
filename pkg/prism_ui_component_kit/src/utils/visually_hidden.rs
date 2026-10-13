@@ -100,12 +100,14 @@ mod tests {
 
     #[test]
     fn is_a_box_that_keeps_children() {
-        let el = render(
-            VisuallyHiddenProps::new().children(vec![Element::text("skip to content")]),
-        );
+        let el =
+            render(VisuallyHiddenProps::new().children(vec![Element::text("skip to content")]));
         assert_eq!(el.kind(), &ElementKind::Box);
         assert_eq!(el.child_elements().len(), 1);
-        assert_eq!(el.child_elements()[0].text_content(), Some("skip to content"));
+        assert_eq!(
+            el.child_elements()[0].text_content(),
+            Some("skip to content")
+        );
     }
 
     #[test]
@@ -115,8 +117,14 @@ mod tests {
         let mut sheet = StyleSheet::new();
         register_styles(&mut sheet);
         let class = sheet.get("pk-visually-hidden").expect("class registered");
-        assert_eq!(class.base.get(&StyleProp::Width), Some(&StyleValue::px(1.0)));
-        assert_eq!(class.base.get(&StyleProp::Height), Some(&StyleValue::px(1.0)));
+        assert_eq!(
+            class.base.get(&StyleProp::Width),
+            Some(&StyleValue::px(1.0))
+        );
+        assert_eq!(
+            class.base.get(&StyleProp::Height),
+            Some(&StyleValue::px(1.0))
+        );
         assert_eq!(
             class.base.get(&StyleProp::Opacity),
             Some(&StyleValue::number(0.0))

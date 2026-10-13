@@ -137,10 +137,7 @@ fn get_reflect_mut_marks_the_component_changed() {
             .get_reflect_mut(e, health)
             .expect("entity carries Health");
         // Patch a field through the reflected view.
-        value
-            .downcast_mut::<Health>()
-            .expect("concrete type")
-            .0 += 37;
+        value.downcast_mut::<Health>().expect("concrete type").0 += 37;
     }
     assert_eq!(world.get::<Health>(e), Some(&Health(42)));
 

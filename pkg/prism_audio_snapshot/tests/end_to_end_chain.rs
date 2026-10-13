@@ -62,7 +62,11 @@ const STEALTH: u32 = 3;
 /// Hand-rolled absolute value; avoids the standard float math surface so the
 /// comparison stays deterministic across platforms.
 fn fabs(x: Sample) -> Sample {
-    if x < 0.0 { -x } else { x }
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
 }
 
 /// Approximate equality in a value's own domain using `fabs`.
@@ -145,7 +149,11 @@ fn full_chain_capture_transition_recall_lands_on_destination() {
     assert!(!mixer.is_transitioning());
 
     // Transition: recall COMBAT over two seconds on a linear ramp.
-    assert!(mixer.transition_to(SnapshotId::new(COMBAT), Some(2.0), Some(Interpolation::Linear)));
+    assert!(mixer.transition_to(
+        SnapshotId::new(COMBAT),
+        Some(2.0),
+        Some(Interpolation::Linear)
+    ));
     assert!(mixer.is_transitioning());
 
     // Halfway: each parameter blends in its own domain.
@@ -172,7 +180,11 @@ fn hertz_parameter_interpolates_geometrically_through_the_mixer() {
         SnapshotId::new(EXPLORE),
     );
     // EXPLORE -> STEALTH sweeps the cutoff from 20 kHz down to 2 kHz.
-    assert!(mixer.transition_to(SnapshotId::new(STEALTH), Some(2.0), Some(Interpolation::Linear)));
+    assert!(mixer.transition_to(
+        SnapshotId::new(STEALTH),
+        Some(2.0),
+        Some(Interpolation::Linear)
+    ));
     mixer.advance(1.0);
 
     // Geometric midpoint is sqrt(20000 * 2000) = 6324.555..., not the
@@ -196,8 +208,16 @@ fn interpolation_curve_shapes_the_blended_position() {
         SnapshotConfig::default(),
         SnapshotId::new(EXPLORE),
     );
-    assert!(linear.transition_to(SnapshotId::new(COMBAT), Some(2.0), Some(Interpolation::Linear)));
-    assert!(eased.transition_to(SnapshotId::new(COMBAT), Some(2.0), Some(Interpolation::EaseIn)));
+    assert!(linear.transition_to(
+        SnapshotId::new(COMBAT),
+        Some(2.0),
+        Some(Interpolation::Linear)
+    ));
+    assert!(eased.transition_to(
+        SnapshotId::new(COMBAT),
+        Some(2.0),
+        Some(Interpolation::EaseIn)
+    ));
 
     linear.advance(1.0);
     eased.advance(1.0);
@@ -256,7 +276,10 @@ fn weighted_blend_transition_normalizes_weights_per_domain() {
     );
     // Weights 1 (EXPLORE) and 3 (COMBAT); zero duration lands immediately.
     assert!(mixer.transition_to_blend(
-        &[(SnapshotId::new(EXPLORE), 1.0), (SnapshotId::new(COMBAT), 3.0)],
+        &[
+            (SnapshotId::new(EXPLORE), 1.0),
+            (SnapshotId::new(COMBAT), 3.0)
+        ],
         Some(0.0),
         Some(Interpolation::Linear),
     ));
@@ -309,8 +332,16 @@ fn state_driven_activation_follows_the_state_manager() {
     ));
 
     let mut bindings = prism_audio_snapshot::state_binding::StateSnapshotBindings::new();
-    bindings.bind(StateGroupId::new(1), StateId::new(10), SnapshotId::new(EXPLORE));
-    bindings.bind(StateGroupId::new(1), StateId::new(11), SnapshotId::new(COMBAT));
+    bindings.bind(
+        StateGroupId::new(1),
+        StateId::new(10),
+        SnapshotId::new(EXPLORE),
+    );
+    bindings.bind(
+        StateGroupId::new(1),
+        StateId::new(11),
+        SnapshotId::new(COMBAT),
+    );
 
     let mut mixer = SnapshotMixer::new(scene_registry(), SnapshotConfig::default());
 
@@ -343,8 +374,16 @@ fn state_driven_multiple_groups_blend_with_equal_weight() {
     ));
 
     let mut bindings = prism_audio_snapshot::state_binding::StateSnapshotBindings::new();
-    bindings.bind(StateGroupId::new(1), StateId::new(10), SnapshotId::new(EXPLORE));
-    bindings.bind(StateGroupId::new(2), StateId::new(20), SnapshotId::new(STEALTH));
+    bindings.bind(
+        StateGroupId::new(1),
+        StateId::new(10),
+        SnapshotId::new(EXPLORE),
+    );
+    bindings.bind(
+        StateGroupId::new(2),
+        StateId::new(20),
+        SnapshotId::new(STEALTH),
+    );
 
     let mut mixer = SnapshotMixer::new(scene_registry(), SnapshotConfig::default());
     assert!(mixer.drive_from_states(&manager, &bindings, Some(0.0), Some(Interpolation::Linear)));

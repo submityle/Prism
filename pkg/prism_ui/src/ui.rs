@@ -370,8 +370,12 @@ impl<B: Backend> Ui<B> {
                         new_child_ids.push((child, true));
                     } else {
                         to_remove.push(child);
-                        let fresh =
-                            self.build_node(&new_elements[i], Some(parent_backend), i, parent_color);
+                        let fresh = self.build_node(
+                            &new_elements[i],
+                            Some(parent_backend),
+                            i,
+                            parent_color,
+                        );
                         new_child_ids.push((fresh, false));
                     }
                 }

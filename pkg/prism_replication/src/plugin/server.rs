@@ -241,7 +241,7 @@ fn pump_server<S: ServerStrategy>(mut server: ResMut<ServerReplication<S>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::{FieldKind, FieldValue, encode_snapshot};
+    use crate::delta::{encode_snapshot, FieldKind, FieldValue};
     use crate::plugin::{Replication, ReplicationPlugin, ReplicationStrategy};
     use crate::session::ClientSession;
     use crate::transport::memory::InMemoryTransport;
@@ -321,13 +321,11 @@ mod tests {
         ));
 
         // The client issues one command (no local prediction this time).
-        assert!(
-            client_app
-                .world_mut()
-                .resource_mut::<Replication<AddClient>>()
-                .send(&3i64.to_le_bytes())
-                .is_some()
-        );
+        assert!(client_app
+            .world_mut()
+            .resource_mut::<Replication<AddClient>>()
+            .send(&3i64.to_le_bytes())
+            .is_some());
 
         // Alternate the two frame loops. The first client frame puts the command
         // on the wire; the server frame applies it and replies with the delta; the
@@ -337,8 +335,14 @@ mod tests {
             server_app.update();
         }
 
-        let server = server_app.world().resource::<ServerReplication<AddAuthority>>();
-        assert_eq!(server.revision(), Some(1), "authority advanced exactly once");
+        let server = server_app
+            .world()
+            .resource::<ServerReplication<AddAuthority>>();
+        assert_eq!(
+            server.revision(),
+            Some(1),
+            "authority advanced exactly once"
+        );
         assert_eq!(server.applied(), 1);
         assert_eq!(int(server.record().unwrap()), 3);
 
@@ -369,18 +373,18 @@ mod tests {
             Box::new(server_end),
         ));
 
-        assert!(
-            client_app
-                .world_mut()
-                .resource_mut::<Replication<AddClient>>()
-                .send(b"not eight bytes")
-                .is_some()
-        );
+        assert!(client_app
+            .world_mut()
+            .resource_mut::<Replication<AddClient>>()
+            .send(b"not eight bytes")
+            .is_some());
         for _ in 0..4 {
             client_app.update();
             server_app.update();
         }
-        let server = server_app.world().resource::<ServerReplication<AddAuthority>>();
+        let server = server_app
+            .world()
+            .resource::<ServerReplication<AddAuthority>>();
         assert_eq!(server.revision(), Some(0), "the command was ignored");
         assert_eq!(server.applied(), 0);
         assert_eq!(server.rejected(), 1, "the undecodable command is counted");

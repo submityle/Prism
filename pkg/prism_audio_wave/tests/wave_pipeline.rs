@@ -40,12 +40,12 @@ use bevy_math::{ops, Vec3};
 use prism_audio_governor::governor::lod::PropagationTier;
 use prism_audio_spatial::{SpatialParams, SpreadParams};
 use prism_audio_wave::field::BitDepth;
+use prism_audio_wave::grid::Aabb;
 use prism_audio_wave::{
     bake_field, route, BakeConfig, MultiStateOpening, ParameterField, ParameterLookup,
     PerceptualParams, ProbeGrid, SolveConfig, SourcePlacement, VoxelScene, WaveBackend,
     WaveParamSmoother, WaveParameterSource,
 };
-use prism_audio_wave::grid::Aabb;
 
 /// Voxel edge length in metres for the test scenes.
 const CELL: f32 = 0.5;
@@ -247,7 +247,11 @@ fn the_backend_sample_matches_a_bare_lookup() {
     let via_backend = backend.sample_perceptual(listener_behind_wall());
     let via_trait = WaveParameterSource::sample_spatial(&backend, listener_behind_wall());
 
-    assert!(approx(via_backend.direct_gain, reference.direct_gain, 1.0e-6));
+    assert!(approx(
+        via_backend.direct_gain,
+        reference.direct_gain,
+        1.0e-6
+    ));
     assert!(approx(via_backend.wet_gain, reference.wet_gain, 1.0e-6));
     // The trait projects the same perceptual sample onto the spatial bus.
     assert!(approx(via_trait.direct_gain, reference.direct_gain, 1.0e-6));
@@ -335,8 +339,16 @@ fn a_multi_state_opening_blends_monotonically_with_openness() {
     assert!(shut.wet_gain >= mid.wet_gain);
     assert!(mid.wet_gain >= open.wet_gain);
     // Endpoints clamp exactly to the keyframes.
-    assert!(approx(shut.direct_gain, PerceptualParams::OCCLUDED.direct_gain, 1.0e-6));
-    assert!(approx(open.direct_gain, PerceptualParams::OPEN.direct_gain, 1.0e-6));
+    assert!(approx(
+        shut.direct_gain,
+        PerceptualParams::OCCLUDED.direct_gain,
+        1.0e-6
+    ));
+    assert!(approx(
+        open.direct_gain,
+        PerceptualParams::OPEN.direct_gain,
+        1.0e-6
+    ));
     // Clamping below and above the range is stable.
     assert!(approx(
         door.evaluate(-1.0).direct_gain,

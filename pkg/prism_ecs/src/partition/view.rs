@@ -160,8 +160,7 @@ mod tests {
 
     /// Band 0 (< 100) full rate, band 1 (< 2500) every 4th, dormant beyond.
     fn schedule() -> LodSchedule {
-        LodSchedule::from_sorted_pairs(&[(100.0, 1), (2_500.0, 4)])
-            .with_policy(OutOfRange::Dormant)
+        LodSchedule::from_sorted_pairs(&[(100.0, 1), (2_500.0, 4)]).with_policy(OutOfRange::Dormant)
     }
 
     #[test]
@@ -276,5 +275,4 @@ mod tests {
         assert_eq!(r.slept, alloc::vec![far]);
         assert!(dormancy.is_dormant(far));
     }
-
 }

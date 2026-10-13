@@ -64,7 +64,11 @@ fn drop_collinear(ring: &[(f32, f32)]) -> Option<Vec<(f32, f32)>> {
             out.push(cur);
         }
     }
-    if out.len() < 3 { None } else { Some(out) }
+    if out.len() < 3 {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// Offset a convex polygon by `distance` with **miter** corners: positive grows
@@ -220,12 +224,18 @@ mod tests {
         let out = offset_convex(&sq, 1.0).expect("outset");
         let expect = [(-1.0, -1.0), (2.0, -1.0), (2.0, 2.0), (-1.0, 2.0)];
         for (a, b) in out.iter().zip(expect) {
-            assert!((a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4, "{a:?}");
+            assert!(
+                (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4,
+                "{a:?}"
+            );
         }
         let ins = offset_convex(&sq, -0.25).expect("inset");
         let expect = [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)];
         for (a, b) in ins.iter().zip(expect) {
-            assert!((a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4, "{a:?}");
+            assert!(
+                (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4,
+                "{a:?}"
+            );
         }
     }
 
@@ -253,8 +263,7 @@ mod tests {
         // The definition of a miter offset: each output edge is the input edge
         // line shifted by `d`, and each output corner is `d` from both incident
         // input edge lines.
-        let mut cases: Vec<Vec<(f32, f32)>> =
-            (5..=12).map(|n| regular_polygon(n, 10.0)).collect();
+        let mut cases: Vec<Vec<(f32, f32)>> = (5..=12).map(|n| regular_polygon(n, 10.0)).collect();
         let mut s = 0x5_C11A_u64;
         for _ in 0..40 {
             cases.push(random_convex(&mut s));
@@ -390,7 +399,14 @@ mod tests {
         // All collinear: no area.
         assert!(offset_convex(&[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)], 1.0).is_none());
         // Concave L-shape is refused rather than mis-offset.
-        let l = [(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (1.0, 1.0), (1.0, 2.0), (0.0, 2.0)];
+        let l = [
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ];
         assert!(offset_convex(&l, 0.5).is_none());
         // Non-finite distance.
         let sq = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
@@ -411,10 +427,7 @@ mod tests {
             pentagon[1],
             pentagon[3],
         ];
-        assert!(
-            is_convex(&star),
-            "the star ring is convex-by-turns"
-        );
+        assert!(is_convex(&star), "the star ring is convex-by-turns");
         assert!(!is_simple_polygon(&star));
         assert!(offset_convex(&star, 1.0).is_none());
     }

@@ -79,7 +79,10 @@ impl Component for ProgressBar {
         let fill = Element::box_()
             .class("pk-progress__fill")
             // The only inline value: a dynamic, continuous width.
-            .style(StyleProp::Width, StyleValue::percent(clamp01(props.value) * 100.0));
+            .style(
+                StyleProp::Width,
+                StyleValue::percent(clamp01(props.value) * 100.0),
+            );
         el.child(fill)
     }
 }

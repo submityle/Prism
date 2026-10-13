@@ -16,34 +16,34 @@ use crate::preset::StyleSheet;
 
 pub mod badge;
 pub mod calendar;
+pub mod carousel;
+pub mod data_grid;
 pub mod descriptions;
 pub mod empty_state;
+pub mod image_list;
 pub mod list;
+pub mod number_ticker;
 pub mod rating;
 pub mod section;
 pub mod stat;
-pub mod timeline;
-pub mod carousel;
-pub mod data_grid;
-pub mod image_list;
-pub mod number_ticker;
 pub mod table;
+pub mod timeline;
 pub mod tree_view;
 
 pub use badge::{Badge, BadgeProps};
 pub use calendar::{Calendar, CalendarProps};
+pub use carousel::{Carousel, CarouselProps};
+pub use data_grid::{DataColumn, DataGrid, DataGridProps};
 pub use descriptions::{Descriptions, DescriptionsProps};
 pub use empty_state::{EmptyState, EmptyStateProps};
+pub use image_list::{ImageItem, ImageList, ImageListProps, Masonry};
 pub use list::{List, ListProps, ListRow, ListRowProps};
+pub use number_ticker::{NumberTicker, NumberTickerProps};
 pub use rating::{Rating, RatingProps};
 pub use section::{Section, SectionProps};
 pub use stat::{Kpi, Stat, StatProps};
-pub use timeline::{Timeline, TimelineItem, TimelineProps};
-pub use carousel::{Carousel, CarouselProps};
-pub use data_grid::{DataColumn, DataGrid, DataGridProps};
-pub use image_list::{ImageItem, ImageList, ImageListProps, Masonry};
-pub use number_ticker::{NumberTicker, NumberTickerProps};
 pub use table::{Table, TableProps};
+pub use timeline::{Timeline, TimelineItem, TimelineProps};
 pub use tree_view::{TreeNode, TreeView, TreeViewProps};
 
 /// Registers every `display/` control's token-backed classes into `sheet`.

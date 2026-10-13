@@ -46,7 +46,11 @@ pub fn passes_luhn(input: &str) -> bool {
         };
         let contribution = if double {
             let doubled = digit * 2;
-            if doubled > 9 { doubled - 9 } else { doubled }
+            if doubled > 9 {
+                doubled - 9
+            } else {
+                doubled
+            }
         } else {
             digit
         };
@@ -92,19 +96,19 @@ mod tests {
     /// canonical scheme test numbers (Visa, Mastercard, Amex, Discover, JCB,
     /// Diners).
     const VALID: &[&str] = &[
-        "79927398713",       // classic Luhn example
-        "4111111111111111",  // Visa test
-        "4012888888881881",  // Visa test
-        "5555555555554444",  // Mastercard test
-        "5105105105105100",  // Mastercard test
-        "378282246310005",   // American Express test
-        "371449635398431",   // American Express test
-        "6011111111111117",  // Discover test
-        "6011000990139424",  // Discover test
-        "3530111333300000",  // JCB test
-        "30569309025904",    // Diners Club test
-        "38520000023237",    // Diners Club test
-        "0",                 // trivially valid (sum zero)
+        "79927398713",      // classic Luhn example
+        "4111111111111111", // Visa test
+        "4012888888881881", // Visa test
+        "5555555555554444", // Mastercard test
+        "5105105105105100", // Mastercard test
+        "378282246310005",  // American Express test
+        "371449635398431",  // American Express test
+        "6011111111111117", // Discover test
+        "6011000990139424", // Discover test
+        "3530111333300000", // JCB test
+        "30569309025904",   // Diners Club test
+        "38520000023237",   // Diners Club test
+        "0",                // trivially valid (sum zero)
     ];
 
     #[test]
@@ -121,7 +125,10 @@ mod tests {
         assert!(passes_luhn("4111-1111-1111-1111"));
         assert!(passes_luhn(" 7992 7398 713 "));
         // Grouping must not change the verdict relative to the bare digits.
-        assert_eq!(passes_luhn("4111111111111111"), passes_luhn("4111 1111 1111 1111"));
+        assert_eq!(
+            passes_luhn("4111111111111111"),
+            passes_luhn("4111 1111 1111 1111")
+        );
     }
 
     #[test]
@@ -131,7 +138,7 @@ mod tests {
         assert!(!passes_luhn("notanumber"));
         assert!(!passes_luhn("4111 1111 1111 111a"));
         assert!(!passes_luhn("4111.1111.1111.1111")); // dot is not a separator
-        // Fullwidth digits are not ASCII radix-10 digits.
+                                                      // Fullwidth digits are not ASCII radix-10 digits.
         assert!(!passes_luhn("\u{ff14}111111111111111"));
         let err = luhn().validate(&"notanumber".to_string()).unwrap_err();
         assert_eq!(err.message, "Must pass the Luhn checksum.");
@@ -199,7 +206,10 @@ mod tests {
             let base = gen_digits(&mut rng, len);
             let check = unique_check_digit(&base);
             let full = alloc::format!("{base}{check}");
-            assert!(passes_luhn(&full), "{full:?} should pass with its check digit");
+            assert!(
+                passes_luhn(&full),
+                "{full:?} should pass with its check digit"
+            );
         }
     }
 

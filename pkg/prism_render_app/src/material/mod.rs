@@ -17,20 +17,19 @@
 mod binding;
 mod buffers;
 mod parameter_heap;
+mod stage;
 mod texture_heap;
 #[cfg(test)]
 mod texture_heap_tests;
-mod stage;
 
 #[cfg(test)]
 mod tests;
 
-pub use binding::{FallbackTextures, MaterialTextureSlots};
-pub use buffers::{MaterialParameterBuffers, MaterialSyncReport};
+pub use binding::{FallbackTextures, MaterialBindingLayout, MaterialTextureSlots};
 #[cfg(test)]
 pub(crate) use buffers::{header_row_bytes, texture_row_bytes};
+pub use buffers::{MaterialParameterBuffers, MaterialSyncReport};
+pub use parameter_heap::ParameterHeap;
 pub(crate) use stage::sync_material_buffers;
 pub use stage::{MaterialUploadStats, RenderMaterials, TextureRequest};
 pub use texture_heap::{BindlessSlot, TextureFallback, TextureHeapStats, TextureSlotHeap};
-pub use parameter_heap::ParameterHeap;
-

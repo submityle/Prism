@@ -12,12 +12,12 @@ pub use crate::concurrent::{
     SpscQueue, TreiberStack,
 };
 pub use crate::cow::Cow;
+#[cfg(feature = "concurrent")]
+pub use crate::det::ConcurrentMerge;
 pub use crate::det::{
     mix64, reproducible_hash_ordered, reproducible_hash_unordered, DetId, DetIdError,
     DeterministicIdAllocator, DeterministicMerge, OrderedHashCombiner, UnorderedHashCombiner,
 };
-#[cfg(feature = "concurrent")]
-pub use crate::det::ConcurrentMerge;
 pub use crate::determinism::{OrderedMap, OrderedSet};
 pub use crate::guard::{GuardConfig, GuardError, GuardHandle, GuardedBuffer, GuardedPool};
 pub use crate::hash::{
@@ -25,13 +25,12 @@ pub use crate::hash::{
     HashSet, StableBuildHasher, StableHasher,
 };
 pub use crate::hbitset::HierarchicalBitSet;
+pub use crate::intern::{FName, InternCache, Interned, Interner, Istr};
 pub use crate::layout::{
     AoSoa, ColumnPlan, ColumnShape, ColumnShapes, GroupLayout, HotCold, LayoutPlan, Temperature,
 };
-pub use crate::intern::{FName, InternCache, Interned, Interner, Istr};
 pub use crate::reloc::{
-    OffsetPtr, OffsetSlice, Reloc, RelocError, RelocMap, RelocMapView, RelocVec,
-    RelocVecView,
+    OffsetPtr, OffsetSlice, Reloc, RelocError, RelocMap, RelocMapView, RelocVec, RelocVecView,
 };
 pub use crate::slot_map::{SlotKey, SlotMap};
 pub use crate::small_vec::SmallVec;

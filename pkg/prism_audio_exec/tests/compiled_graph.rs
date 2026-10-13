@@ -82,7 +82,11 @@ fn levels_and_wavefronts_agree_and_are_edge_free() {
     assert_eq!(levels.level_of(src), 0);
     assert_eq!(levels.level_of(eq), 1);
     assert_eq!(levels.level_of(rev), 1);
-    assert_eq!(levels.level_of(mix), 2, "mix sits one past its deepest parent");
+    assert_eq!(
+        levels.level_of(mix),
+        2,
+        "mix sits one past its deepest parent"
+    );
     assert_eq!(levels.level_of(gnode), 0);
     assert_eq!(levels.level_of(sink), 1);
 
@@ -142,7 +146,10 @@ fn pdc_aligns_parallel_branches() {
     // Edge order matches insertion: src->eq, src->rev, eq->mix, rev->mix, gnode->sink.
     assert_eq!(delays[0], 0, "src->eq");
     assert_eq!(delays[1], 0, "src->rev");
-    assert_eq!(delays[2], 32, "eq->mix delayed to align with the reverb path");
+    assert_eq!(
+        delays[2], 32,
+        "eq->mix delayed to align with the reverb path"
+    );
     assert_eq!(delays[3], 0, "rev->mix is the critical path");
     assert_eq!(delays[4], 0, "gnode->sink standalone island");
 }
@@ -188,13 +195,22 @@ fn inplace_chain_shrinks_buffer_pool() {
     // the whole chain collapses onto a single physical slot.
     assert_eq!(alloc.buffers().len(), 4);
     assert_eq!(alloc.pool_size(), 1, "a pure in-place chain needs one slot");
-    assert_eq!(alloc.inplace_pairs().len(), 3, "each stage aliases its input");
+    assert_eq!(
+        alloc.inplace_pairs().len(),
+        3,
+        "each stage aliases its input"
+    );
 
     // Every output buffer resolves to the same physical slot.
     for node in [src, eq, comp, out] {
-        let buf = alloc.buffer_of(node, 0).expect("each node has an output buffer");
+        let buf = alloc
+            .buffer_of(node, 0)
+            .expect("each node has an output buffer");
         assert_eq!(buf.slot, 0);
-        assert!(buf.death >= buf.birth, "a buffer dies no earlier than it is born");
+        assert!(
+            buf.death >= buf.birth,
+            "a buffer dies no earlier than it is born"
+        );
     }
 }
 
@@ -222,8 +238,14 @@ fn shared_buffer_blocks_premature_inplace_reuse() {
     let src_buf = alloc.buffer_of(src, 0).unwrap();
     let a_buf = alloc.buffer_of(a, 0).unwrap();
     let b_buf = alloc.buffer_of(b, 0).unwrap();
-    assert_ne!(src_buf.slot, a_buf.slot, "earlier consumer a cannot alias the shared buffer");
-    assert_eq!(src_buf.slot, b_buf.slot, "last consumer b reuses the freed source slot");
+    assert_ne!(
+        src_buf.slot, a_buf.slot,
+        "earlier consumer a cannot alias the shared buffer"
+    );
+    assert_eq!(
+        src_buf.slot, b_buf.slot,
+        "last consumer b reuses the freed source slot"
+    );
     assert!(alloc.pool_size() >= 2);
 }
 
@@ -246,7 +268,10 @@ fn exec_plan_bundles_stages_consistently() {
     assert_eq!(plan.total_latency(), 64);
 
     // master_slot is the physical slot of the master node's output buffer.
-    let master_buf = plan.allocation().buffer_of(mix, 0).expect("master output buffer");
+    let master_buf = plan
+        .allocation()
+        .buffer_of(mix, 0)
+        .expect("master output buffer");
     assert_eq!(plan.master_slot(), master_buf.slot);
 }
 

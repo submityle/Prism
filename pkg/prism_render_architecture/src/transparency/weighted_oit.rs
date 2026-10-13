@@ -292,8 +292,14 @@ mod tests {
     #[test]
     fn revealage_is_product_of_transparencies() {
         let mut acc = OitAccumulator::new();
-        acc.accumulate(OitFragment::new([1.0, 0.0, 0.0], 0.5, 2.0), WeightFunction::Uniform);
-        acc.accumulate(OitFragment::new([0.0, 1.0, 0.0], 0.25, 2.0), WeightFunction::Uniform);
+        acc.accumulate(
+            OitFragment::new([1.0, 0.0, 0.0], 0.5, 2.0),
+            WeightFunction::Uniform,
+        );
+        acc.accumulate(
+            OitFragment::new([0.0, 1.0, 0.0], 0.25, 2.0),
+            WeightFunction::Uniform,
+        );
         // (1 - 0.5) * (1 - 0.25) = 0.375
         assert!((acc.revealage() - 0.375).abs() <= 1e-6);
         assert!((acc.coverage() - 0.625).abs() <= 1e-6);
@@ -317,14 +323,20 @@ mod tests {
         let near = OitFragment::new([1.0, 0.0, 0.0], 0.5, 2.0);
         let far = OitFragment::new([0.0, 0.0, 1.0], 0.5, 120.0);
         let out = composite(&[near, far], WeightFunction::Equation9, [0.0, 0.0, 0.0]);
-        assert!(out[0] > out[2], "near red should outweigh far blue: {out:?}");
+        assert!(
+            out[0] > out[2],
+            "near red should outweigh far blue: {out:?}"
+        );
     }
 
     #[test]
     fn alpha_is_clamped_on_accumulation() {
         // Out-of-range alpha must not corrupt the revealage product.
         let mut acc = OitAccumulator::new();
-        acc.accumulate(OitFragment::new([1.0, 1.0, 1.0], 1.5, 2.0), WeightFunction::Uniform);
+        acc.accumulate(
+            OitFragment::new([1.0, 1.0, 1.0], 1.5, 2.0),
+            WeightFunction::Uniform,
+        );
         assert_eq!(acc.revealage(), 0.0);
         let out = acc.resolve(BG);
         assert!(approx(out, [1.0, 1.0, 1.0], 1e-6), "{out:?}");

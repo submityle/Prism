@@ -152,7 +152,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.title3")),
     );
@@ -161,8 +165,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderColor, tok("color.label.tertiary")),
     );
     sheet.insert(
-        Class::new("pk-pin-input__cell--active")
-            .with(StyleProp::BorderColor, tok("color.tint")),
+        Class::new("pk-pin-input__cell--active").with(StyleProp::BorderColor, tok("color.tint")),
     );
 
     sheet.insert(
@@ -192,10 +195,22 @@ mod tests {
     fn filled_active_and_empty_cells_are_marked() {
         let el = render(PinInputProps::new().length(4).value("12"));
         let cells = el.child_elements();
-        assert!(cells[0].class_names().iter().any(|c| c == "pk-pin-input__cell--filled"));
-        assert!(cells[1].class_names().iter().any(|c| c == "pk-pin-input__cell--filled"));
-        assert!(cells[2].class_names().iter().any(|c| c == "pk-pin-input__cell--active"));
-        assert!(!cells[3].class_names().iter().any(|c| c == "pk-pin-input__cell--active"));
+        assert!(cells[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-pin-input__cell--filled"));
+        assert!(cells[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-pin-input__cell--filled"));
+        assert!(cells[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-pin-input__cell--active"));
+        assert!(!cells[3]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-pin-input__cell--active"));
         assert_eq!(cells[0].child_elements()[0].text_content(), Some("1"));
     }
 
@@ -210,9 +225,10 @@ mod tests {
     fn full_value_leaves_no_active_cell() {
         let el = render(PinInputProps::new().length(2).value("ab"));
         let cells = el.child_elements();
-        assert!(cells
+        assert!(cells.iter().all(|c| !c
+            .class_names()
             .iter()
-            .all(|c| !c.class_names().iter().any(|n| n == "pk-pin-input__cell--active")));
+            .any(|n| n == "pk-pin-input__cell--active")));
     }
 
     #[test]
@@ -224,14 +240,20 @@ mod tests {
     #[test]
     fn disabled_adds_block_modifier() {
         let el = render(PinInputProps::new().length(1).disabled(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-pin-input--disabled"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-pin-input--disabled"));
     }
 
     #[test]
     fn alias_renders_like_pin_input() {
         let via_alias = OtpInput::default().render(&PinInputProps::new().length(3).value("1"));
         let direct = PinInput.render(&PinInputProps::new().length(3).value("1"));
-        assert_eq!(via_alias.child_elements().len(), direct.child_elements().len());
+        assert_eq!(
+            via_alias.child_elements().len(),
+            direct.child_elements().len()
+        );
     }
 
     #[test]

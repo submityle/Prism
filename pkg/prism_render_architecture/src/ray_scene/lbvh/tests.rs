@@ -9,9 +9,9 @@ use alloc::vec::Vec;
 use crate::ray_scene::bvh::{Bvh, LinearBvhNode, Triangle};
 use crate::ray_scene::traversal::Ray;
 
+use super::morton::{morton3d, MortonQuantizer, MORTON_GRID_MAX};
+use super::radix_sort::{radix_sort, MortonEntry};
 use super::LinearBvh;
-use super::morton::{MORTON_GRID_MAX, MortonQuantizer, morton3d};
-use super::radix_sort::{MortonEntry, radix_sort};
 
 /// Tiny deterministic xorshift generator so tests need no external crate.
 struct Rng(u64);
@@ -193,7 +193,12 @@ fn closest_hits_match_sah_builder() {
             (None, None) => {}
             (Some(ha), Some(hb)) => {
                 assert_eq!(ha.primitive, hb.primitive, "different primitive hit");
-                assert!((ha.t - hb.t).abs() < 1e-3, "t mismatch {} vs {}", ha.t, hb.t);
+                assert!(
+                    (ha.t - hb.t).abs() < 1e-3,
+                    "t mismatch {} vs {}",
+                    ha.t,
+                    hb.t
+                );
             }
             _ => panic!("hit/miss disagreement between linear and SAH builders"),
         }
@@ -233,10 +238,22 @@ fn morton_keys_round_trip_through_sort() {
     // A hand-built key set must come out of the radix sort fully ordered and
     // carrying its payloads, since the tree builder depends on both.
     let mut entries = alloc::vec![
-        MortonEntry { key: morton3d(5, 1, 9), primitive: 0 },
-        MortonEntry { key: morton3d(0, 0, 0), primitive: 1 },
-        MortonEntry { key: morton3d(MORTON_GRID_MAX, MORTON_GRID_MAX, MORTON_GRID_MAX), primitive: 2 },
-        MortonEntry { key: morton3d(3, 7, 2), primitive: 3 },
+        MortonEntry {
+            key: morton3d(5, 1, 9),
+            primitive: 0
+        },
+        MortonEntry {
+            key: morton3d(0, 0, 0),
+            primitive: 1
+        },
+        MortonEntry {
+            key: morton3d(MORTON_GRID_MAX, MORTON_GRID_MAX, MORTON_GRID_MAX),
+            primitive: 2
+        },
+        MortonEntry {
+            key: morton3d(3, 7, 2),
+            primitive: 3
+        },
     ];
     radix_sort(&mut entries);
     assert!(entries.windows(2).all(|w| w[0].key <= w[1].key));

@@ -91,25 +91,37 @@ impl Angle {
     /// Builds an angle in degrees.
     #[must_use]
     pub const fn deg(value: f32) -> Self {
-        Self { value, unit: AngleUnit::Deg }
+        Self {
+            value,
+            unit: AngleUnit::Deg,
+        }
     }
 
     /// Builds an angle in gradians.
     #[must_use]
     pub const fn grad(value: f32) -> Self {
-        Self { value, unit: AngleUnit::Grad }
+        Self {
+            value,
+            unit: AngleUnit::Grad,
+        }
     }
 
     /// Builds an angle in radians.
     #[must_use]
     pub const fn rad(value: f32) -> Self {
-        Self { value, unit: AngleUnit::Rad }
+        Self {
+            value,
+            unit: AngleUnit::Rad,
+        }
     }
 
     /// Builds an angle in turns.
     #[must_use]
     pub const fn turn(value: f32) -> Self {
-        Self { value, unit: AngleUnit::Turn }
+        Self {
+            value,
+            unit: AngleUnit::Turn,
+        }
     }
 
     /// Builds an angle with an explicit unit.
@@ -182,7 +194,10 @@ impl Angle {
     /// The result lies in `[0, full-circle)` for the angle's own unit.
     #[must_use]
     pub fn normalized(self) -> Angle {
-        Angle { value: wrap(self.value, self.unit.full_circle()), unit: self.unit }
+        Angle {
+            value: wrap(self.value, self.unit.full_circle()),
+            unit: self.unit,
+        }
     }
 
     /// Returns `true` if this angle is already in `[0, full-circle)`.
@@ -199,7 +214,11 @@ impl Angle {
 /// possibly-negative `%` result back into range.
 fn wrap(value: f32, modulus: f32) -> f32 {
     let r = value % modulus;
-    if r < 0.0 { r + modulus } else { r }
+    if r < 0.0 {
+        r + modulus
+    } else {
+        r
+    }
 }
 
 #[cfg(test)]
@@ -225,8 +244,12 @@ mod tests {
         }
     }
 
-    const UNITS: [AngleUnit; 4] =
-        [AngleUnit::Deg, AngleUnit::Grad, AngleUnit::Rad, AngleUnit::Turn];
+    const UNITS: [AngleUnit; 4] = [
+        AngleUnit::Deg,
+        AngleUnit::Grad,
+        AngleUnit::Rad,
+        AngleUnit::Turn,
+    ];
 
     #[test]
     fn quarter_turn_is_equivalent_across_units() {

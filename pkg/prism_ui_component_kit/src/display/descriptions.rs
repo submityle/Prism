@@ -133,9 +133,15 @@ mod tests {
         assert_eq!(first.class_names(), ["pk-descriptions__row"]);
         let cells = first.child_elements();
         assert_eq!(cells.len(), 2);
-        assert!(cells[0].class_names().iter().any(|c| c == "pk-descriptions__term"));
+        assert!(cells[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-descriptions__term"));
         assert_eq!(cells[0].text_content(), Some("Status"));
-        assert!(cells[1].class_names().iter().any(|c| c == "pk-descriptions__detail"));
+        assert!(cells[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-descriptions__detail"));
         assert_eq!(cells[1].text_content(), Some("Active"));
     }
 

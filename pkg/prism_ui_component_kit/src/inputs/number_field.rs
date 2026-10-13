@@ -147,10 +147,18 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Focus, StyleProp::BorderColor, tok("color.tint")),
+            .with_state(
+                InteractionState::Focus,
+                StyleProp::BorderColor,
+                tok("color.tint"),
+            ),
     );
     sheet.insert(
         Class::new("pk-number-field--disabled").with(StyleProp::Opacity, StyleValue::number(0.4)),
@@ -180,7 +188,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
                 .with(StyleProp::JustifyContent, kw(Keyword::Center))
                 .with_padding_x(tok("space.xxs"))
                 .with(StyleProp::Color, tok("color.tint"))
-                .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.6)),
+                .with_state(
+                    InteractionState::Pressed,
+                    StyleProp::Opacity,
+                    StyleValue::number(0.6),
+                ),
         );
     }
 
@@ -241,7 +253,10 @@ mod tests {
     #[test]
     fn disabled_adds_block_modifier() {
         let el = render(NumberFieldProps::new().disabled(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-number-field--disabled"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-number-field--disabled"));
     }
 
     #[test]

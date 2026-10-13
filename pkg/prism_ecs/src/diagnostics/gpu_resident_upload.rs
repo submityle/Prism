@@ -293,16 +293,13 @@ impl GpuUploadReport {
     pub fn hottest_upload(&self) -> Option<ColumnUploadEntry> {
         // Entries are already ascending by id, so a strictly-greater test keeps
         // the lowest id on a tie.
-        self.entries
-            .iter()
-            .copied()
-            .reduce(|best, e| {
-                if e.pending_upload_bytes > best.pending_upload_bytes {
-                    e
-                } else {
-                    best
-                }
-            })
+        self.entries.iter().copied().reduce(|best, e| {
+            if e.pending_upload_bytes > best.pending_upload_bytes {
+                e
+            } else {
+                best
+            }
+        })
     }
 
     /// The entry for `component`, or `None` if it is not in the census.
@@ -450,11 +447,8 @@ mod tests {
 
         let mut small = resident(8, 2, 2); // 1 block, 16 bytes
         small.mark_dirty(0); // whole single block dirty => 16 bytes
-        let report = GpuUploadReport::from_columns(&[
-            (cid(9), &big),
-            (cid(2), &clean),
-            (cid(5), &small),
-        ]);
+        let report =
+            GpuUploadReport::from_columns(&[(cid(9), &big), (cid(2), &clean), (cid(5), &small)]);
 
         // Entries sorted ascending by id.
         let ids: Vec<_> = report.entries().iter().map(|e| e.component).collect();

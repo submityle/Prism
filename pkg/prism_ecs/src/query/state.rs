@@ -15,14 +15,14 @@ use crate::archetype::ArchetypeId;
 use crate::change::Tick;
 use crate::entity::Entity;
 use crate::query::access::Access;
+use crate::query::combinations::QueryCombinationsIter;
 use crate::query::fetch::{QueryData, ReadOnlyQueryData};
 use crate::query::filter::QueryFilter;
-use crate::query::slice::{ArchetypalFilter, ColumnSliceData};
-use crate::query::slice_iter::QuerySliceIter;
 use crate::query::iter::QueryIter;
 use crate::query::many::QueryManyIter;
 use crate::query::matched::{MatchedArchetypes, SpinLock};
-use crate::query::combinations::QueryCombinationsIter;
+use crate::query::slice::{ArchetypalFilter, ColumnSliceData};
+use crate::query::slice_iter::QuerySliceIter;
 use crate::world::{World, WorldId};
 
 /// Why [`QueryState::get`] / [`QueryState::get_mut`] could not resolve an
@@ -47,7 +47,10 @@ impl core::fmt::Display for QueryEntityError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NoSuchEntity(entity) => {
-                write!(f, "entity {entity:?} does not exist (never allocated or despawned)")
+                write!(
+                    f,
+                    "entity {entity:?} does not exist (never allocated or despawned)"
+                )
             }
             Self::QueryDoesNotMatch(entity) => {
                 write!(f, "entity {entity:?} does not match the query")
@@ -250,7 +253,8 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // within a generation) so an id tested once never needs retesting.
         let mut appended: Vec<ArchetypeId> = Vec::new();
         for archetype in world.archetypes().iter().skip(checked) {
-            if D::matches(&self.data_state, archetype) && F::matches(&self.filter_state, archetype) {
+            if D::matches(&self.data_state, archetype) && F::matches(&self.filter_state, archetype)
+            {
                 appended.push(archetype.id());
             }
         }
@@ -537,9 +541,9 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         match (first, extra) {
             (Some(item), false) => Ok(item),
             (None, _) => Err(QuerySingleError::NoEntities(core::any::type_name::<D>())),
-            (Some(_), _) => {
-                Err(QuerySingleError::MultipleEntities(core::any::type_name::<D>()))
-            }
+            (Some(_), _) => Err(QuerySingleError::MultipleEntities(
+                core::any::type_name::<D>(),
+            )),
         }
     }
 
@@ -803,9 +807,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             .archetypes()
             .get(location.archetype_id)
             .ok_or(QueryEntityError::NoSuchEntity(entity))?;
-        if !(D::matches(&self.data_state, archetype)
-            && F::matches(&self.filter_state, archetype))
-        {
+        if !(D::matches(&self.data_state, archetype) && F::matches(&self.filter_state, archetype)) {
             return Err(QueryEntityError::QueryDoesNotMatch(entity));
         }
         let sparse_sets = world_ref.sparse_sets();
@@ -831,7 +833,13 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // SAFETY: the same archetype also satisfies `F::matches`, the contract
         // of `F::init_fetch`.
         let filter_fetch = unsafe {
-            F::init_fetch(&self.filter_state, archetype, sparse_sets, last_run, this_run)
+            F::init_fetch(
+                &self.filter_state,
+                archetype,
+                sparse_sets,
+                last_run,
+                this_run,
+            )
         };
         // Per-row gate mirroring `QueryIter::next`: a rejected filter row or a
         // missing sparse data term means the entity does not match this frame.

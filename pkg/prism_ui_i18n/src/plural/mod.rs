@@ -130,9 +130,7 @@ impl PluralRules {
         match self {
             PluralRules::English => CardinalFamily::Germanic.select(ops),
             PluralRules::Slavic => CardinalFamily::EastSlavic.select(ops),
-            PluralRules::Asian | PluralRules::OtherOnly => {
-                CardinalFamily::OtherOnly.select(ops)
-            }
+            PluralRules::Asian | PluralRules::OtherOnly => CardinalFamily::OtherOnly.select(ops),
             PluralRules::Cardinal(family) => family.select(ops),
             PluralRules::Ordinal(family) => family.select(ops),
         }

@@ -224,6 +224,11 @@ impl WaterBody {
             },
             passes: WaterPasses {
                 flip_mac: true,
+                // Reorder the particle pool into cell-major order each substep
+                // before the `MAC` transfer, so `P2G`/`G2P` read a compact face
+                // neighbourhood. The transfer kernels run verbatim over the
+                // reordered pool, so their real-machine parity goldens hold.
+                cell_sort: true,
                 reconstruct: true,
                 ..WaterPasses::default()
             },

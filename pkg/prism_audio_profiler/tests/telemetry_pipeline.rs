@@ -171,7 +171,10 @@ fn voice_status_diagnoses_silence_in_priority_order() {
     );
 
     let quiet = VoiceStatus::playing(5, "quiet", 0.0001);
-    assert_eq!(quiet.silence_reason(FLOOR_DB), Some(SilenceReason::BelowFloor));
+    assert_eq!(
+        quiet.silence_reason(FLOOR_DB),
+        Some(SilenceReason::BelowFloor)
+    );
 
     // Priority: a stopped and muted voice reports NotPlaying first.
     let mut stopped = VoiceStatus::playing(6, "stopped", 1.0);

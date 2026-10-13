@@ -70,9 +70,9 @@ mod change_observers_tests;
 pub mod command;
 pub mod component;
 pub mod component_hooks;
-pub mod culling;
 #[cfg(test)]
 mod component_hooks_tests;
+pub mod culling;
 pub mod diagnostics;
 pub mod entity;
 pub mod event;
@@ -92,14 +92,14 @@ pub mod partition;
 pub mod prefab;
 pub mod query;
 pub mod reaction;
-#[cfg(feature = "reflect")]
-pub mod reflect_bridge;
 #[cfg(feature = "serialize")]
 pub mod reflect_archive;
-#[cfg(all(test, feature = "reflect"))]
-mod reflect_bridge_tests;
 #[cfg(all(test, feature = "serialize"))]
 mod reflect_archive_tests;
+#[cfg(feature = "reflect")]
+pub mod reflect_bridge;
+#[cfg(all(test, feature = "reflect"))]
+mod reflect_bridge_tests;
 pub mod relation;
 pub mod resource;
 pub mod schedule;
@@ -113,6 +113,7 @@ pub mod prelude {
     pub use crate::blob::{BlobHandle, BlobStore};
     pub use crate::bundle::Bundle;
     pub use crate::change::{ComponentTicks, DetectChanges, DetectChangesMut, Mut, Ref, Tick};
+    pub use crate::change_observers::ChangeContext;
     pub use crate::command::{ChildBuilder, CommandQueue, Commands};
     pub use crate::component::Component;
     pub use crate::component_hooks::{ComponentHook, ComponentHooks, HookContext};
@@ -120,9 +121,8 @@ pub mod prelude {
     pub use crate::entity::Entity;
     pub use crate::event::{Event, EventCursor, EventId, Events};
     pub use crate::extract::{
-        ExtractComponent, ExtractResource, extract_components, extract_resource,
+        extract_components, extract_resource, ExtractComponent, ExtractResource,
     };
-    pub use crate::hierarchy::ChildOf;
     #[cfg(feature = "gpu_resident")]
     pub use crate::gpu_batch::{
         build_draw_batches, DrawBatch, GpuBatchBuilder, GpuBatchPlan, InstanceVisibility,
@@ -131,10 +131,10 @@ pub mod prelude {
     pub use crate::gpu_resident::{
         DirtyBlock, GpuReallocation, GpuResidentColumn, GpuResidentColumns, GpuUpload,
     };
+    pub use crate::hierarchy::ChildOf;
     pub use crate::observer::{
         EventContext, LifecycleEvent, ObserverContext, ObserverId, Observers,
     };
-    pub use crate::change_observers::ChangeContext;
     #[cfg(feature = "partition")]
     pub use crate::partition::cell::{
         CellCoord, CellState, CellStreamer, StreamingDelta, WorldPartitionCell,
@@ -142,9 +142,9 @@ pub mod prelude {
     #[cfg(feature = "partition")]
     pub use crate::partition::data_layer::{DataLayerId, DataLayerState, DataLayers};
     #[cfg(feature = "partition")]
-    pub use crate::partition::driver::{StreamDriver, StreamResult};
-    #[cfg(feature = "partition")]
     pub use crate::partition::dormant::{DormancySet, Dormant};
+    #[cfg(feature = "partition")]
+    pub use crate::partition::driver::{StreamDriver, StreamResult};
     #[cfg(feature = "partition")]
     pub use crate::partition::floating_origin::{FloatingOrigin, GridCell, LocalPos, WorldPos};
     #[cfg(feature = "partition")]
@@ -175,20 +175,22 @@ pub mod prelude {
     pub use crate::resource::{FromWorld, Resource, ResourceId, Resources};
     pub use crate::schedule::{
         apply_state_transition, in_state, resource_equals, resource_exists, run_once,
-        IntoSystemConfigs, IntoSystemConfigs as IntoScheduleConfigs, NextState, OnEnter, OnExit,
-        Phase, Schedule, ScheduleLabel, Schedules, SetConfig, State, States, SystemConfigs,
-        ContinueReport, ContinueStop, StepReport, Stepping, SystemLane, SystemSet,
+        ContinueReport, ContinueStop, IntoSystemConfigs, IntoSystemConfigs as IntoScheduleConfigs,
+        NextState, OnEnter, OnExit, Phase, Schedule, ScheduleLabel, Schedules, SetConfig, State,
+        States, StepReport, Stepping, SystemConfigs, SystemLane, SystemSet,
     };
     pub use crate::system::{IntoSystem, Local, Query, Res, ResMut, System, SystemParam};
-    pub use crate::world::snapshot::{FnvHasher, SnapshotDelta, SnapshotRing, WorldSnapshot};
     #[cfg(feature = "determinism")]
     pub use crate::world::snapshot::{
-        FrameHash, FrameHashLog, SnapshotDivergence, TickDivergence, locate_divergence,
+        locate_divergence, FrameHash, FrameHashLog, SnapshotDivergence, TickDivergence,
     };
+    pub use crate::world::snapshot::{FnvHasher, SnapshotDelta, SnapshotRing, WorldSnapshot};
     pub use crate::world::{EntityRef, World, WorldId};
     // Derive macros. These live in the macro namespace and coexist with the
     // same-named traits (`Component`, `Bundle`) re-exported above.
-    pub use prism_ecs_macros::{Bundle, Component, Event, Relation, Resource, SystemParam, SystemSet};
+    pub use prism_ecs_macros::{
+        Bundle, Component, Event, Relation, Resource, SystemParam, SystemSet,
+    };
 }
 
 /// Internal type aliases for the hash maps/sets used throughout the kernel.

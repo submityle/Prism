@@ -135,11 +135,7 @@ impl LodBand {
     }
 
     /// Creates a band with an explicit precision tier (design §23.7).
-    pub const fn with_quality(
-        max_distance_sq: f32,
-        tick_period: u32,
-        quality: LodQuality,
-    ) -> Self {
+    pub const fn with_quality(max_distance_sq: f32, tick_period: u32, quality: LodQuality) -> Self {
         Self {
             max_distance_sq,
             tick_period,

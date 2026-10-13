@@ -196,7 +196,9 @@ impl TextureSlotHeap {
     /// textures, not to any asset. Order is by image identity, which makes a
     /// frame's upload order deterministic.
     pub fn iter_slots(&self) -> impl Iterator<Item = (u32, AssetId<Image>)> + '_ {
-        self.entries.iter().map(|(image, entry)| (entry.slot, *image))
+        self.entries
+            .iter()
+            .map(|(image, entry)| (entry.slot, *image))
     }
 
     /// Rebuilds the heap with a new capacity, discarding all residency.
@@ -340,12 +342,11 @@ impl TextureSlotHeap {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use prism_asset::{AssetId, AssetIndex};
 
-    use super::{FIRST_DYNAMIC_SLOT, RESERVED_GENERATION, TextureSlotHeap};
+    use super::{TextureSlotHeap, FIRST_DYNAMIC_SLOT, RESERVED_GENERATION};
 
     /// The generation skips zero on wrap, so `0` stays available as "never handed
     /// out" for consumers that reserve it. The test pokes the slot's generation
@@ -359,6 +360,9 @@ mod tests {
         assert!(heap.release(image));
         let other = AssetId::<prism_image::Image>::new(AssetIndex::from_parts(2, 1));
         let reused = heap.acquire(other);
-        assert_eq!(reused.generation, RESERVED_GENERATION, "zero is never a live generation");
+        assert_eq!(
+            reused.generation, RESERVED_GENERATION,
+            "zero is never a live generation"
+        );
     }
 }

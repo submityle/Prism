@@ -284,10 +284,7 @@ impl ExtensionRegistry {
     /// Iterate the registered extensions: lowest slot first, then the
     /// identity-only rows in registration order.
     pub fn iter(&self) -> impl Iterator<Item = &ExtensionManifest> {
-        self.slots
-            .iter()
-            .flatten()
-            .chain(self.identity_only.iter())
+        self.slots.iter().flatten().chain(self.identity_only.iter())
     }
 
     /// The bake/pass-time extensions that hold no header-digest address.

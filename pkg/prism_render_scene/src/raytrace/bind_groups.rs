@@ -10,7 +10,9 @@
 use bevy_render::render_resource::{BindGroup, BindGroupEntry, BindGroupLayout, ComputePipeline};
 use bevy_render::renderer::RenderDevice;
 
-use super::resources::{BvhTraversalResources, FootprintResources, TlasTraversalResources};
+use super::resources::{
+    BvhTraversalResources, FootprintResources, TlasDispatchResources, TlasTraversalResources,
+};
 
 /// Binds the single-`BLAS` `ray_traverse` kernel's five `@group(0)` resources.
 ///
@@ -59,6 +61,55 @@ pub(crate) fn tlas_bind_group(
     pipeline: &ComputePipeline,
     resources: &TlasTraversalResources,
 ) -> BindGroup {
+    tlas_group0(
+        device,
+        pipeline,
+        [
+            &resources.tlas_nodes,
+            &resources.instances,
+            &resources.pool_nodes,
+            &resources.pool_triangles,
+            &resources.pool_offsets,
+            &resources.rays,
+            &resources.hits,
+            &resources.params,
+        ],
+    )
+}
+
+/// Binds the GPU-resident (no-readback) [`TlasDispatchResources`] in the same
+/// `tlas_traverse` `@group(0)` order as [`tlas_bind_group`]; only the hit buffer
+/// differs (it stays on device for a consumer instead of being staged back).
+pub(crate) fn tlas_dispatch_bind_group(
+    device: &RenderDevice,
+    pipeline: &ComputePipeline,
+    resources: &TlasDispatchResources,
+) -> BindGroup {
+    tlas_group0(
+        device,
+        pipeline,
+        [
+            &resources.tlas_nodes,
+            &resources.instances,
+            &resources.pool_nodes,
+            &resources.pool_triangles,
+            &resources.pool_offsets,
+            &resources.rays,
+            &resources.hits,
+            &resources.params,
+        ],
+    )
+}
+
+/// Binds the eight `tlas_traverse` `@group(0)` buffers in their frozen binding
+/// order: `tlas_nodes` (0), `instances` (1), `pool_nodes` (2), `pool_triangles`
+/// (3), `pool_offsets` (4), `rays` (5), `hits` (6), `params` (7). Shared by the
+/// readback and GPU-resident dispatch paths so both bind identically.
+fn tlas_group0(
+    device: &RenderDevice,
+    pipeline: &ComputePipeline,
+    buffers: [&bevy_render::render_resource::Buffer; 8],
+) -> BindGroup {
     let layout = BindGroupLayout::from(pipeline.get_bind_group_layout(0));
     device.create_bind_group(
         Some("prism_rt_tlas_group0"),
@@ -66,35 +117,35 @@ pub(crate) fn tlas_bind_group(
         &[
             BindGroupEntry {
                 binding: 0,
-                resource: resources.tlas_nodes.as_entire_binding(),
+                resource: buffers[0].as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 1,
-                resource: resources.instances.as_entire_binding(),
+                resource: buffers[1].as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 2,
-                resource: resources.pool_nodes.as_entire_binding(),
+                resource: buffers[2].as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 3,
-                resource: resources.pool_triangles.as_entire_binding(),
+                resource: buffers[3].as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 4,
-                resource: resources.pool_offsets.as_entire_binding(),
+                resource: buffers[4].as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 5,
-                resource: resources.rays.as_entire_binding(),
+                resource: buffers[5].as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 6,
-                resource: resources.hits.as_entire_binding(),
+                resource: buffers[6].as_entire_binding(),
             },
             BindGroupEntry {
                 binding: 7,
-                resource: resources.params.as_entire_binding(),
+                resource: buffers[7].as_entire_binding(),
             },
         ],
     )

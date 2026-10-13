@@ -4,6 +4,7 @@
 > 定位：AAA / 次世代 **世界与地形系统**（大世界分区 + 多表示地形 + 程序化内容生成 PCG + 海量植被/散布 + 流送 + 侵蚀/地貌 sim + 碰撞），与 PBR/NPR/自定义/混合四前端正交协同，四前端同享共享高级基底（虚拟几何 vis-buffer / Lumen 式混合 GI / ReSTIR DI-GI / VSM / froxel 体积 / RVT 运行时虚拟纹理 / RT 参考 / 时序上采样 / 大气散射服务）。
 > Shader：WESL（naga → WGSL/SPIR-V/Metal/DXIL）；运行时：wgpu（Metal/VK/DX12/WebGPU）
 > 关联文档：`prism_rendering_architecture_zh.md`（总，GPU Scene / 虚拟几何 / 虚拟资源 / 虚拟阴影 / Render Graph）、`prism_material_pipeline_design_zh.md`（§6.2 子系统注册表与档位判据）、`prism_gi_lumen_design_zh.md`（L0 场景表示接入）、`prism_water_engine_design_zh.md`（河流/湖海/岸线耦合）、`prism_volumetric_engine_design_zh.md`（雾/云影/天气耦合）、`prism_particle_engine_design_zh.md`（散布飞沫/尘/落叶委托）、`prism_physics_design_zh.md`（地形碰撞 / heightfield / 体素破坏）、`prism_gameplay_design_zh.md`（导航 / 任务 / 流送触发）
+> 烘焙归属： 本文所述“烘焙”分两类——地形侵蚀、远景底图、RVT 烘底、HLOD 代理、PCG 散布为 `OfflineShipped`（离线 DAG/缓存键/DDC 归 `Prism Asset Build`，`prism_asset_build_design_zh.md` §2.7/§12.8）；编辑器局部编辑与破坏触发的 dirty-cell 重烘为 `RuntimeDerived`，与离线路径共用同一 Bake Kernel（该文 §6.6）。逐项契约登记见 `prism_derived_data_contract_zh.md`（B4–B6 / C1）。
 > 沙盒说明：本机屏蔽 Metal（无 GPU），文档内帧预算/带宽/显存/耗时均为**设计目标（design target），非实测**，如实标注；可验证部分限于 CPU 可计算纯函数（分区索引、LOD 误差、四叉树切分、噪声/侵蚀核）。
 > 数值路线：纯经典数值（高度场/CDLOD/clipmap/四叉树、Transvoxel/Dual Contouring/SDF、Perlin-Worley/domain warp 噪声、水力/热力侵蚀 PDE、泊松盘/蓝噪声散布），不含任何 AI/ML。
 

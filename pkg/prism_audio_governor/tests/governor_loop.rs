@@ -104,7 +104,11 @@ fn sustained_overload_lowers_quality_only_after_the_dwell_window() {
     assert_eq!(loop_.tier(1.5), top, "block 1 holds");
     assert_eq!(loop_.tier(1.5), top, "block 2 holds");
     // The third consecutive hot block fires the first Lower.
-    assert_eq!(loop_.tier(1.5), QualityTier(top.0 - 1), "block 3 steps down");
+    assert_eq!(
+        loop_.tier(1.5),
+        QualityTier(top.0 - 1),
+        "block 3 steps down"
+    );
 }
 
 #[test]
@@ -116,7 +120,10 @@ fn relentless_overload_walks_all_the_way_down_to_the_floor() {
     let mut last = top;
     for _ in 0..60 {
         let report = loop_.step(2.0);
-        assert!(report.tier.0 <= last.0, "tier is monotonically non-increasing");
+        assert!(
+            report.tier.0 <= last.0,
+            "tier is monotonically non-increasing"
+        );
         // Desktop never power-caps, so the reason is purely load-driven: it is
         // `None` only while the loop still sits at full richness (inside the
         // dwell window), and `CpuBudget` for every block it has stepped down.
@@ -231,7 +238,11 @@ fn extreme_and_non_finite_inputs_never_leave_the_valid_range() {
     ];
     for (i, &c) in garbage.iter().cycle().take(200).enumerate() {
         let report = loop_.step(c);
-        assert!(report.tier.0 <= cap, "tier {} exceeded cap on step {i}", report.tier.0);
+        assert!(
+            report.tier.0 <= cap,
+            "tier {} exceeded cap on step {i}",
+            report.tier.0
+        );
         assert!(report.load.is_finite(), "load stayed finite on step {i}");
         assert!(report.profile.aggregate_cost().is_finite());
     }

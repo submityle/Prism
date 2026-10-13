@@ -257,20 +257,18 @@ pub fn build_styles(props: &BTreeMap<StyleProp, StyleValue>) -> (LayoutStyle, Pa
                     shadow_seen = true;
                 }
             }
-            StyleProp::ShadowInset => {
-                match value {
-                    StyleValue::Keyword(Keyword::Inset) => {
-                        shadow_inset = true;
-                        shadow_seen = true;
-                    }
-                    StyleValue::Keyword(Keyword::None) => shadow_inset = false,
-                    StyleValue::Number(n) => {
-                        shadow_inset = *n != 0.0;
-                        shadow_seen = true;
-                    }
-                    _ => {}
+            StyleProp::ShadowInset => match value {
+                StyleValue::Keyword(Keyword::Inset) => {
+                    shadow_inset = true;
+                    shadow_seen = true;
                 }
-            }
+                StyleValue::Keyword(Keyword::None) => shadow_inset = false,
+                StyleValue::Number(n) => {
+                    shadow_inset = *n != 0.0;
+                    shadow_seen = true;
+                }
+                _ => {}
+            },
             StyleProp::GlassBlur => {
                 if let Some(n) = as_f32(value) {
                     glass_blur = n;
@@ -390,7 +388,10 @@ mod tests {
         let (_, paint) = build_styles(&props(&[
             (StyleProp::GlassBlur, StyleValue::px(20.0)),
             (StyleProp::GlassTint, StyleValue::rgba8(255, 255, 255, 160)),
-            (StyleProp::GlassHighlight, StyleValue::rgba8(255, 255, 255, 115)),
+            (
+                StyleProp::GlassHighlight,
+                StyleValue::rgba8(255, 255, 255, 115),
+            ),
         ]));
         let glass = paint.glass.expect("glass assembled");
         assert_eq!(glass.blur, 20.0);
@@ -403,7 +404,10 @@ mod tests {
         // Blur/highlight alone are not enough; the tint is the trigger.
         let (_, paint) = build_styles(&props(&[
             (StyleProp::GlassBlur, StyleValue::px(20.0)),
-            (StyleProp::GlassHighlight, StyleValue::rgba8(255, 255, 255, 115)),
+            (
+                StyleProp::GlassHighlight,
+                StyleValue::rgba8(255, 255, 255, 115),
+            ),
         ]));
         assert!(paint.glass.is_none());
     }

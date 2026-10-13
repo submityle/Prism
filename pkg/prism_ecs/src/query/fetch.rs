@@ -307,7 +307,9 @@ unsafe impl<T: Component> QueryData for &T {
         // A whole-archetype cursor starts at the first chunk; callers that walk
         // a specific chunk use `init_fetch_for_chunk` instead.
         // SAFETY: `chunk == 0` is the archetype's first window.
-        unsafe { Self::init_fetch_for_chunk(state, archetype, sparse_sets, _last_run, _this_run, 0) }
+        unsafe {
+            Self::init_fetch_for_chunk(state, archetype, sparse_sets, _last_run, _this_run, 0)
+        }
     }
 
     unsafe fn init_fetch_for_chunk<'w>(
@@ -324,11 +326,7 @@ unsafe impl<T: Component> QueryData for &T {
                 let column = table
                     .column(*state)
                     .expect("matches() guaranteed the column exists");
-                StorageFetch::Table(Some(TableFetch::new(
-                    column,
-                    chunk,
-                    table.rows_per_chunk(),
-                )))
+                StorageFetch::Table(Some(TableFetch::new(column, chunk, table.rows_per_chunk())))
             }
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
             StorageType::Shared => StorageFetch::Shared(Some(
@@ -417,9 +415,7 @@ unsafe impl<T: Component> QueryData for &mut T {
     ) -> Self::Fetch<'w> {
         // Whole-archetype cursor: start at the first chunk.
         // SAFETY: `chunk == 0` is the archetype's first window.
-        unsafe {
-            Self::init_fetch_for_chunk(state, archetype, sparse_sets, last_run, this_run, 0)
-        }
+        unsafe { Self::init_fetch_for_chunk(state, archetype, sparse_sets, last_run, this_run, 0) }
     }
 
     unsafe fn init_fetch_for_chunk<'w>(
@@ -436,11 +432,7 @@ unsafe impl<T: Component> QueryData for &mut T {
                 let column = table
                     .column(*state)
                     .expect("matches() guaranteed the column exists");
-                StorageFetch::Table(Some(TableFetch::new(
-                    column,
-                    chunk,
-                    table.rows_per_chunk(),
-                )))
+                StorageFetch::Table(Some(TableFetch::new(column, chunk, table.rows_per_chunk())))
             }
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
             // `init_state` already rejected a shared component for this term.
@@ -662,9 +654,7 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
         this_run: Tick,
     ) -> Self::Fetch<'w> {
         // SAFETY: `chunk == 0` is the archetype's first window.
-        unsafe {
-            Self::init_fetch_for_chunk(state, archetype, sparse_sets, last_run, this_run, 0)
-        }
+        unsafe { Self::init_fetch_for_chunk(state, archetype, sparse_sets, last_run, this_run, 0) }
     }
 
     unsafe fn init_fetch_for_chunk<'w>(
@@ -784,9 +774,7 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
         this_run: Tick,
     ) -> Self::Fetch<'w> {
         // SAFETY: `chunk == 0` is the archetype's first window.
-        unsafe {
-            Self::init_fetch_for_chunk(state, archetype, sparse_sets, last_run, this_run, 0)
-        }
+        unsafe { Self::init_fetch_for_chunk(state, archetype, sparse_sets, last_run, this_run, 0) }
     }
 
     unsafe fn init_fetch_for_chunk<'w>(
@@ -803,11 +791,7 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
                 let column = table
                     .column(*state)
                     .expect("matches() guaranteed the column exists");
-                StorageFetch::Table(Some(TableFetch::new(
-                    column,
-                    chunk,
-                    table.rows_per_chunk(),
-                )))
+                StorageFetch::Table(Some(TableFetch::new(column, chunk, table.rows_per_chunk())))
             }
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
             // `init_state` already rejected a shared component for this term.

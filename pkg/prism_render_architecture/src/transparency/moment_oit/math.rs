@@ -51,7 +51,8 @@ pub fn exp(x: f32) -> f32 {
     // exp(r), Horner form, terms through r^6/720.
     let er = 1.0
         + r * (1.0
-            + r * (0.5 + r * (1.0 / 6.0 + r * (1.0 / 24.0 + r * (1.0 / 120.0 + r * (1.0 / 720.0))))));
+            + r * (0.5
+                + r * (1.0 / 6.0 + r * (1.0 / 24.0 + r * (1.0 / 120.0 + r * (1.0 / 720.0))))));
     let k = kf as i32;
     if k > 127 {
         return f32::INFINITY;
@@ -178,7 +179,10 @@ mod tests {
     fn exp_inverts_ln() {
         for &x in &[0.05_f32, 0.3, 0.7, 0.95, 1.0, 3.3, 12.0] {
             let round = exp(ln(x));
-            assert!((round - x).abs() <= x * 1e-3 + 1e-5, "exp(ln({x})) = {round}");
+            assert!(
+                (round - x).abs() <= x * 1e-3 + 1e-5,
+                "exp(ln({x})) = {round}"
+            );
         }
     }
 
@@ -209,7 +213,10 @@ mod tests {
     fn quadratic_roots_are_correct_and_ordered() {
         // (x-2)(x-5) = x^2 -7x +10
         let (r0, r1) = quadratic_roots(1.0, -7.0, 10.0).expect("real");
-        assert!((r0 - 2.0).abs() < 1e-4 && (r1 - 5.0).abs() < 1e-4, "{r0},{r1}");
+        assert!(
+            (r0 - 2.0).abs() < 1e-4 && (r1 - 5.0).abs() < 1e-4,
+            "{r0},{r1}"
+        );
         // No real roots.
         assert!(quadratic_roots(1.0, 0.0, 1.0).is_none());
         // Degenerate leading term.

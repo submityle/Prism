@@ -163,8 +163,14 @@ fn empty_batch_produces_no_results() {
     // An empty batch short-circuits on the host (a storage buffer cannot be
     // zero-sized) and returns empty parameter vectors.
     let got = gpu.evaluate(&ctx, &[]);
-    assert!(got.isovalue.is_empty(), "an empty batch produces no isovalues");
-    assert!(got.narrow_band.is_empty(), "an empty batch produces no bands");
+    assert!(
+        got.isovalue.is_empty(),
+        "an empty batch produces no isovalues"
+    );
+    assert!(
+        got.narrow_band.is_empty(),
+        "an empty batch produces no bands"
+    );
     assert!(
         got.smoothing_iterations.is_empty(),
         "an empty batch produces no smoothing counts"
@@ -246,15 +252,7 @@ fn non_multiple_of_workgroup_matches_oracle() {
         let radius = 0.13 + i as f32 * 0.013_1;
         let distance = 1.0 + (i % 40) as f32 * 0.101_3;
         domains.push(domain(
-            1000.0,
-            frac,
-            radius,
-            0.1,
-            2.0,
-            distance,
-            8,
-            1.0,
-            5.0,
+            1000.0, frac, radius, 0.1, 2.0, distance, 8, 1.0, 5.0,
         ));
     }
     check(&ctx, &gpu, &domains);

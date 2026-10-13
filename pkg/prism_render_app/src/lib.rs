@@ -66,9 +66,9 @@ mod image;
 mod intent;
 mod label;
 mod material;
-mod mesh_pipeline;
 mod mesh;
 mod mesh_draw;
+mod mesh_pipeline;
 mod mesh_pipelines;
 mod mesh_source;
 mod pipeline_cache;
@@ -95,7 +95,7 @@ mod image_tests;
 #[cfg(test)]
 mod tests;
 
-pub use bin_queue::{BinQueueOutcome, bin_indirect_args};
+pub use bin_queue::{bin_indirect_args, BinQueueOutcome};
 pub use config::RenderAppConfig;
 pub use device_loss::DeviceLossSignal;
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
@@ -104,37 +104,36 @@ pub use image::GpuImage;
 pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
 pub use material::{
-    BindlessSlot, FallbackTextures, MaterialParameterBuffers, MaterialSyncReport,
-    MaterialTextureSlots, MaterialUploadStats, ParameterHeap, RenderMaterials, TextureFallback,
-    TextureHeapStats, TextureRequest, TextureSlotHeap,
-};
-pub use mesh_pipeline::{
-    MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer, full_lobe_fallback,
+    BindlessSlot, FallbackTextures, MaterialBindingLayout, MaterialParameterBuffers,
+    MaterialSyncReport, MaterialTextureSlots, MaterialUploadStats, ParameterHeap, RenderMaterials,
+    TextureFallback, TextureHeapStats, TextureRequest, TextureSlotHeap,
 };
 pub use mesh::{RenderMesh, RenderMeshBufferInfo};
-pub use mesh_pipelines::{MeshPipelines, SpineMeshPipeline};
 pub use mesh_draw::{mesh_bin_draw, mesh_draw};
+pub use mesh_pipeline::{
+    full_lobe_fallback, MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer,
+};
+pub use mesh_pipelines::{MeshPipelines, SpineMeshPipeline};
 pub use pipeline_cache::{
-    PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution, hash_vertex_layouts,
+    hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
 };
 pub use plugin::PrismRenderPlugin;
 pub use queue::{
-    DrawRequest, IndirectArgs, PhaseItem, RenderQueues, phase_for_bin_class,
-    phase_for_render_class,
+    phase_for_bin_class, phase_for_render_class, DrawRequest, IndirectArgs, PhaseItem, RenderQueues,
 };
 pub use record::RenderRecord;
 pub use render_asset::{
-    AssetSyncReport, AssetSyncStats, ExtractedAssets, PrepareAssetError, RenderAsset, RenderAssets,
     extract_assets, prepare_assets, prepare_extracted_assets, register_render_assets,
+    AssetSyncReport, AssetSyncStats, ExtractedAssets, PrepareAssetError, RenderAsset, RenderAssets,
 };
 pub use runtime_resource::RenderRuntimeResource;
 pub use scene::{MeshClass, SceneRegistry, VisibilityWorkList};
 pub use sets::{
-    RenderGraphSet, RenderPhase, RenderSystems, configure_render_graph_sets, configure_render_sets,
+    configure_render_graph_sets, configure_render_sets, RenderGraphSet, RenderPhase, RenderSystems,
 };
-pub use startup::{GpuResourceAppExt, RenderStartupState, init_gpu_resource};
+pub use startup::{init_gpu_resource, GpuResourceAppExt, RenderStartupState};
 pub use stats::RenderFrameStats;
-pub use sync_world::{MainEntity, MainEntityHashSet, tag_extracted_entities};
+pub use sync_world::{tag_extracted_entities, MainEntity, MainEntityHashSet};
 pub use target::RenderTarget;
 pub use texture_cache::{GpuTexture, TextureCache, TextureKey};
 pub use view_driver::{for_each_view, with_current_view};
@@ -144,41 +143,41 @@ pub use views::{RenderView, RenderViews};
 /// Commonly used exports: the plugin, its labels, and the resources that cross
 /// the main-world/render-world boundary.
 pub mod prelude {
-    pub use crate::bin_queue::{BinQueueOutcome, bin_indirect_args};
+    pub use crate::bin_queue::{bin_indirect_args, BinQueueOutcome};
     pub use crate::config::RenderAppConfig;
     pub use crate::draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
     pub use crate::intent::{RenderIntent, RenderViewport};
     pub use crate::label::{Render, RenderApp, RenderStartup};
     pub use crate::material::{
-        BindlessSlot, FallbackTextures, MaterialParameterBuffers, MaterialSyncReport,
-        MaterialTextureSlots, MaterialUploadStats, ParameterHeap, RenderMaterials,
-        TextureFallback, TextureHeapStats, TextureRequest, TextureSlotHeap,
+        BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,
+        ParameterHeap, RenderMaterials, TextureFallback, TextureHeapStats, TextureRequest,
+        TextureSlotHeap,
     };
     pub use crate::mesh_pipeline::{
-        MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer, full_lobe_fallback,
+        full_lobe_fallback, MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer,
     };
     pub use crate::pipeline_cache::{
-        PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution, hash_vertex_layouts,
+        hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
     };
     pub use crate::plugin::PrismRenderPlugin;
     pub use crate::queue::{
-        DrawRequest, IndirectArgs, PhaseItem, RenderQueues, phase_for_bin_class,
-        phase_for_render_class,
+        phase_for_bin_class, phase_for_render_class, DrawRequest, IndirectArgs, PhaseItem,
+        RenderQueues,
     };
     pub use crate::record::RenderRecord;
     pub use crate::render_asset::{
+        extract_assets, prepare_assets, prepare_extracted_assets, register_render_assets,
         AssetSyncReport, AssetSyncStats, ExtractedAssets, PrepareAssetError, RenderAsset,
-        RenderAssets, extract_assets, prepare_assets, prepare_extracted_assets,
-        register_render_assets,
+        RenderAssets,
     };
     pub use crate::scene::{MeshClass, SceneRegistry, VisibilityWorkList};
     pub use crate::sets::{
-        RenderGraphSet, RenderPhase, RenderSystems, configure_render_graph_sets,
-        configure_render_sets,
+        configure_render_graph_sets, configure_render_sets, RenderGraphSet, RenderPhase,
+        RenderSystems,
     };
-    pub use crate::startup::{GpuResourceAppExt, RenderStartupState, init_gpu_resource};
+    pub use crate::startup::{init_gpu_resource, GpuResourceAppExt, RenderStartupState};
     pub use crate::stats::RenderFrameStats;
-    pub use crate::sync_world::{MainEntity, MainEntityHashSet, tag_extracted_entities};
+    pub use crate::sync_world::{tag_extracted_entities, MainEntity, MainEntityHashSet};
     pub use crate::target::RenderTarget;
     pub use crate::texture_cache::{GpuTexture, TextureCache, TextureKey};
     pub use crate::view_driver::{for_each_view, with_current_view};

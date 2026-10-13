@@ -168,7 +168,13 @@ impl GraphSnapshot {
         for &id in &order {
             let depth = sources_of
                 .get(&id)
-                .map(|sources| sources.iter().map(|source| layer[source] + 1).max().unwrap_or(0))
+                .map(|sources| {
+                    sources
+                        .iter()
+                        .map(|source| layer[source] + 1)
+                        .max()
+                        .unwrap_or(0)
+                })
                 .unwrap_or(0);
             layer.insert(id, depth);
             max_layer = max_layer.max(depth);
@@ -247,7 +253,10 @@ mod tests {
         let mut flat: BTreeSet<NodeId> = BTreeSet::new();
         for (lvl, ids) in layers.iter().enumerate() {
             assert!(!ids.is_empty(), "layer {lvl} is empty");
-            assert!(ids.windows(2).all(|w| w[0] < w[1]), "layer not sorted/unique");
+            assert!(
+                ids.windows(2).all(|w| w[0] < w[1]),
+                "layer not sorted/unique"
+            );
             for &id in ids {
                 layer_of.insert(id, lvl);
                 assert!(flat.insert(id), "id {id} appeared in two layers");
@@ -263,11 +272,7 @@ mod tests {
                 .collect();
             sources.sort_unstable();
             sources.dedup();
-            let expected = sources
-                .iter()
-                .map(|s| layer_of[s] + 1)
-                .max()
-                .unwrap_or(0);
+            let expected = sources.iter().map(|s| layer_of[s] + 1).max().unwrap_or(0);
             assert_eq!(layer_of[&n.id], expected, "wrong depth for node {}", n.id);
         }
     }

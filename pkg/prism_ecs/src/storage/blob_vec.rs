@@ -131,11 +131,7 @@ impl BlobVec {
     /// blocks and calls [`attach_block`](BlobVec::attach_block) /
     /// [`detach_block`](BlobVec::detach_block) — and dropping the column frees
     /// nothing.
-    pub fn new_borrowed(
-        item_layout: Layout,
-        drop: Option<DropFn>,
-        rows_per_block: usize,
-    ) -> Self {
+    pub fn new_borrowed(item_layout: Layout, drop: Option<DropFn>, rows_per_block: usize) -> Self {
         let mut this = Self::new_with_rows_per_block(item_layout, drop, rows_per_block);
         this.owns_blocks = false;
         this
@@ -182,7 +178,9 @@ impl BlobVec {
         if self.item_layout.size() == 0 {
             return;
         }
-        self.blocks.pop().expect("detach_block on a column with no blocks");
+        self.blocks
+            .pop()
+            .expect("detach_block on a column with no blocks");
     }
 
     /// Number of live elements.
@@ -424,12 +422,7 @@ impl BlobVec {
         // SAFETY: as `as_slice_range`, plus the caller's unique-access guarantee
         // over `[start, end)` makes the `&mut [T]` non-aliasing even when
         // sibling ranges of the same column are borrowed concurrently.
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                self.get_ptr(start).cast::<T>(),
-                end - start,
-            )
-        }
+        unsafe { core::slice::from_raw_parts_mut(self.get_ptr(start).cast::<T>(), end - start) }
     }
 
     /// Assert `[start, end)` does not cross a block boundary (or is empty).
@@ -816,7 +809,11 @@ mod tests {
             unsafe { v.swap_remove_and_drop(v.len() - 1) };
         }
         assert_eq!(v.len(), 3);
-        assert_eq!(v.block_count(), 1, "the second block is freed when it empties");
+        assert_eq!(
+            v.block_count(),
+            1,
+            "the second block is freed when it empties"
+        );
     }
 
     #[test]
@@ -874,7 +871,10 @@ mod tests {
         unsafe { v.push((&four as *const u32).cast::<u8>()) };
         // SAFETY: row 0 is still live.
         let after = unsafe { v.get_ptr(0) };
-        assert_eq!(before, after, "growing a column must not move existing blocks");
+        assert_eq!(
+            before, after,
+            "growing a column must not move existing blocks"
+        );
         // SAFETY: row 0 holds a live u32.
         assert_eq!(unsafe { *after.cast::<u32>() }, 0);
     }
@@ -929,7 +929,12 @@ mod tests {
             for (row, expected) in reference.iter().enumerate() {
                 // SAFETY: `row < len` and the column holds u64.
                 let got = unsafe { *col.get_ptr(row).cast::<u64>() };
-                assert_eq!(got, *expected, "row {row} diverged at len {}", reference.len());
+                assert_eq!(
+                    got,
+                    *expected,
+                    "row {row} diverged at len {}",
+                    reference.len()
+                );
             }
         }
     }

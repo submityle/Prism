@@ -21,17 +21,17 @@
 //! clustering}`. Depends only on the crate's public API plus `bevy_math::Vec3`.
 
 use bevy_math::Vec3;
+use prism_audio_core::math::Sample;
 use prism_audio_governor::clustering::assignment::{assign, merge_to_capacity, ClusterConfig};
 use prism_audio_governor::clustering::cluster::{Cluster, ClusterMember};
-use prism_audio_governor::clustering::timbre::Timbre;
 use prism_audio_governor::clustering::fade::MembershipFades;
+use prism_audio_governor::clustering::timbre::Timbre;
 use prism_audio_governor::masking::critical_bands::CriticalBands;
 use prism_audio_governor::masking::hdr_gate::{gate_voices, HdrWindowEdge};
 use prism_audio_governor::masking::masking_model::{MaskingAnalyzer, MaskingModel, VoiceSpectrum};
 use prism_audio_governor::masking::virtualization::{
     combine, force_virtualize_set, virtualized_count,
 };
-use prism_audio_core::math::Sample;
 
 /// Branch-free absolute value, avoiding `Sample::abs` (std float math is
 /// disallowed in these integration tests by the crate lint policy).
@@ -66,9 +66,18 @@ fn masking_hides_quiet_neighbour_but_spares_separated_loud_voice() {
     let masked = analyzer.analyze(&voices, MaskingModel::default().spread_up); // margin ~0.5
 
     assert_eq!(masked.len(), 3, "one verdict per voice");
-    assert!(!masked[0], "the dominant masker is never masked by weaker voices");
-    assert!(masked[1], "the quiet neighbour hides under the 1 kHz masker");
-    assert!(!masked[2], "a loud, spectrally separated voice survives masking");
+    assert!(
+        !masked[0],
+        "the dominant masker is never masked by weaker voices"
+    );
+    assert!(
+        masked[1],
+        "the quiet neighbour hides under the 1 kHz masker"
+    );
+    assert!(
+        !masked[2],
+        "a loud, spectrally separated voice survives masking"
+    );
 }
 
 /// `gate_voices` must virtualize everything below the HDR window's dynamic
@@ -77,7 +86,10 @@ fn masking_hides_quiet_neighbour_but_spares_separated_loud_voice() {
 fn hdr_gate_virtualizes_below_window_floor() {
     // Reference (loudest) at -6 dB, 24 dB window -> lower edge at -30 dB.
     let edge = HdrWindowEdge::new(-6.0, 24.0);
-    assert!(approx(edge.lower_edge_db(), -30.0, 1e-4), "window floor derivation");
+    assert!(
+        approx(edge.lower_edge_db(), -30.0, 1e-4),
+        "window floor derivation"
+    );
 
     let loudness_db = [-6.0, -28.0, -31.0, -60.0];
     let gated = gate_voices(&loudness_db, edge, 0.0);
@@ -120,8 +132,8 @@ fn full_chain_clusters_surviving_voices_within_budget() {
     // Five voices: a tight pair of similar tones, a lone bright tone, plus two
     // very quiet neighbours that masking/HDR should drop before clustering.
     let spectra = [
-        VoiceSpectrum::tonal(&bands, 500.0, 3.0),  // 0: pair member A
-        VoiceSpectrum::tonal(&bands, 500.0, 3.0),  // 1: pair member B (co-located, same timbre)
+        VoiceSpectrum::tonal(&bands, 500.0, 3.0), // 0: pair member A
+        VoiceSpectrum::tonal(&bands, 500.0, 3.0), // 1: pair member B (co-located, same timbre)
         VoiceSpectrum::tonal(&bands, 9_000.0, 3.0), // 2: lone bright tone
         VoiceSpectrum::tonal(&bands, 540.0, 0.01), // 3: quiet neighbour -> masked
         VoiceSpectrum::tonal(&bands, 505.0, 0.01), // 4: quiet neighbour -> masked
@@ -133,14 +145,20 @@ fn full_chain_clusters_surviving_voices_within_budget() {
     let hdr = gate_voices(&loudness_db, HdrWindowEdge::new(-6.0, 24.0), 0.0);
     let force = force_virtualize_set(&masked, &hdr);
 
-    assert!(force[3], "quiet neighbour 3 is virtualized before clustering");
-    assert!(force[4], "quiet neighbour 4 is virtualized before clustering");
+    assert!(
+        force[3],
+        "quiet neighbour 3 is virtualized before clustering"
+    );
+    assert!(
+        force[4],
+        "quiet neighbour 4 is virtualized before clustering"
+    );
 
     // Build clustering members only for the voices that survive virtualization.
     let positions = [
         Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(1.0, 0.0, 0.0),   // within spatial_radius of voice 0
-        Vec3::new(40.0, 0.0, 0.0),  // far away
+        Vec3::new(1.0, 0.0, 0.0),  // within spatial_radius of voice 0
+        Vec3::new(40.0, 0.0, 0.0), // far away
         Vec3::new(0.5, 0.0, 0.0),
         Vec3::new(0.2, 0.0, 0.0),
     ];
@@ -150,9 +168,18 @@ fn full_chain_clusters_surviving_voices_within_budget() {
             continue;
         }
         let timbre = Timbre::from_spectrum(spec, &bands);
-        members.push(ClusterMember::new(i, positions[i], spec.total_energy(), timbre));
+        members.push(ClusterMember::new(
+            i,
+            positions[i],
+            spec.total_energy(),
+            timbre,
+        ));
     }
-    assert_eq!(members.len(), 3, "two voices virtualized, three remain physical");
+    assert_eq!(
+        members.len(),
+        3,
+        "two voices virtualized, three remain physical"
+    );
 
     let config = ClusterConfig {
         max_clusters: 8,
@@ -162,7 +189,10 @@ fn full_chain_clusters_surviving_voices_within_budget() {
     let set = assign(&members, &config);
 
     assert!(!set.is_empty());
-    assert!(set.len() <= config.max_clusters, "cluster count honours the budget");
+    assert!(
+        set.len() <= config.max_clusters,
+        "cluster count honours the budget"
+    );
     assert_eq!(set.of_member.len(), members.len());
     for &c in &set.of_member {
         assert!(c < set.len(), "every member maps into an existing cluster");
@@ -170,9 +200,18 @@ fn full_chain_clusters_surviving_voices_within_budget() {
 
     // The two close, similar-timbre voices (input ids 0 and 1) share a cluster;
     // the far bright tone (id 2) sits in its own.
-    let idx0 = members.iter().position(|m| m.voice == 0).expect("voice 0 present");
-    let idx1 = members.iter().position(|m| m.voice == 1).expect("voice 1 present");
-    let idx2 = members.iter().position(|m| m.voice == 2).expect("voice 2 present");
+    let idx0 = members
+        .iter()
+        .position(|m| m.voice == 0)
+        .expect("voice 0 present");
+    let idx1 = members
+        .iter()
+        .position(|m| m.voice == 1)
+        .expect("voice 1 present");
+    let idx2 = members
+        .iter()
+        .position(|m| m.voice == 2)
+        .expect("voice 2 present");
     assert_eq!(
         set.of_member[idx0], set.of_member[idx1],
         "the tight similar pair collapses into one representative"
@@ -222,13 +261,19 @@ fn membership_fades_ramp_in_and_out() {
     // Block 1: voice 7 becomes active -> gain starts rising from zero.
     fades.advance_block(&[7]);
     let g1 = fades.gain(7);
-    assert!(g1 > 0.0 && g1 < 1.0, "newly active voice ramps up, not instant: {g1}");
+    assert!(
+        g1 > 0.0 && g1 < 1.0,
+        "newly active voice ramps up, not instant: {g1}"
+    );
 
     // Keep it active for several blocks; it should reach full gain.
     for _ in 0..6 {
         fades.advance_block(&[7]);
     }
-    assert!(approx(fades.gain(7), 1.0, 1e-3), "sustained voice reaches unity");
+    assert!(
+        approx(fades.gain(7), 1.0, 1e-3),
+        "sustained voice reaches unity"
+    );
 
     // Drop it: gain must fall back toward zero over subsequent blocks.
     fades.advance_block(&[]);
@@ -237,7 +282,10 @@ fn membership_fades_ramp_in_and_out() {
     for _ in 0..6 {
         fades.advance_block(&[]);
     }
-    assert!(approx(fades.gain(7), 0.0, 1e-3), "fully faded-out voice rests at zero");
+    assert!(
+        approx(fades.gain(7), 0.0, 1e-3),
+        "fully faded-out voice rests at zero"
+    );
 }
 
 /// Timbre similarity/distance must be self-consistent: a voice is maximally
@@ -250,12 +298,21 @@ fn timbre_distance_orders_spectral_similarity() {
     let low2 = Timbre::from_spectrum(&VoiceSpectrum::tonal(&bands, 320.0, 1.0), &bands);
     let high = Timbre::from_spectrum(&VoiceSpectrum::tonal(&bands, 10_000.0, 1.0), &bands);
 
-    assert!(approx(low.distance(&low), 0.0, 1e-6), "a timbre has zero self-distance");
-    assert!(approx(low.similarity(&low), 1.0, 1e-6), "a timbre is maximally self-similar");
+    assert!(
+        approx(low.distance(&low), 0.0, 1e-6),
+        "a timbre has zero self-distance"
+    );
+    assert!(
+        approx(low.similarity(&low), 1.0, 1e-6),
+        "a timbre is maximally self-similar"
+    );
 
     let near = low.distance(&low2);
     let far = low.distance(&high);
-    assert!(far > near, "a bright tone is farther in timbre than a close low tone: {far} vs {near}");
+    assert!(
+        far > near,
+        "a bright tone is farther in timbre than a close low tone: {far} vs {near}"
+    );
     assert!(
         low.similarity(&high) < low.similarity(&low2),
         "similarity ranks the near pair above the distant pair"

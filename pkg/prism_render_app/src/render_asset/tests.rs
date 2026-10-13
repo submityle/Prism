@@ -2,17 +2,17 @@
 
 use alloc::vec::Vec;
 
-use prism_asset::{Asset, AssetIndex, AssetId, Assets};
+use prism_asset::{Asset, AssetId, AssetIndex, Assets};
+use prism_ecs::world::World;
 use prism_render_driver::{
     BufferDescriptor, BufferId, BufferUsages, DeviceDescriptor, Instance, RenderDevice,
     RenderQueue, RequestAdapterOptions,
 };
 use prism_render_driver_null::{NullDevice, NullInstance};
-use prism_ecs::world::World;
 
 use super::{
-    AssetSyncReport, ExtractedAssets, PrepareAssetError, RenderAsset, RenderAssets, extract_assets,
-    prepare_extracted_assets,
+    extract_assets, prepare_extracted_assets, AssetSyncReport, ExtractedAssets, PrepareAssetError,
+    RenderAsset, RenderAssets,
 };
 
 /// A source asset: raw bytes with no GPU meaning of its own.
@@ -97,7 +97,9 @@ fn run_frame<A: RenderAsset>(
     let mut extracted = render
         .remove_resource::<ExtractedAssets<A>>()
         .unwrap_or_default();
-    let mut table = render.remove_resource::<RenderAssets<A>>().unwrap_or_default();
+    let mut table = render
+        .remove_resource::<RenderAssets<A>>()
+        .unwrap_or_default();
     let report = prepare_extracted_assets::<A>(&mut extracted, &mut table, device, queue);
     render.insert_resource(extracted);
     render.insert_resource(table);
@@ -139,7 +141,11 @@ fn re_preparing_reuses_the_buffer_it_already_has() {
     let id = handle.id();
     main.insert_resource(sources);
     run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
-    let first = render.resource::<RenderAssets<GpuBlob>>().get(id).expect("prepared").buffer;
+    let first = render
+        .resource::<RenderAssets<GpuBlob>>()
+        .get(id)
+        .expect("prepared")
+        .buffer;
 
     // Modify the source: a payload that still fits the existing buffer.
     main.resource_mut::<Assets<Blob>>()
@@ -176,7 +182,10 @@ fn a_removed_source_releases_its_gpu_representation() {
     main.resource_mut::<Assets<Blob>>().remove(id);
     let report = run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
 
-    assert_eq!(report.released, 1, "the removal releases the representation");
+    assert_eq!(
+        report.released, 1,
+        "the removal releases the representation"
+    );
     let table = render.resource::<RenderAssets<GpuBlob>>();
     assert!(table.get(id).is_none(), "the table no longer holds it");
     assert_eq!(
@@ -196,7 +205,11 @@ fn a_deferred_prepare_keeps_the_previous_representation() {
     let id = handle.id();
     main.insert_resource(sources);
     run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
-    let prepared = render.resource::<RenderAssets<GpuBlob>>().get(id).expect("prepared").buffer;
+    let prepared = render
+        .resource::<RenderAssets<GpuBlob>>()
+        .get(id)
+        .expect("prepared")
+        .buffer;
 
     // The source is now un-prepared-able (a dependency went away, say).
     main.resource_mut::<Assets<Blob>>()
@@ -338,7 +351,7 @@ fn extract_without_changes_or_without_an_arena_is_a_no_op() {
 /// removed asset releases its GPU form — all driven by the app's own update.
 #[test]
 fn a_registered_family_prepares_and_releases_across_frames() {
-    use crate::render_asset::{AssetSyncStats, register_render_assets};
+    use crate::render_asset::{register_render_assets, AssetSyncStats};
 
     let mut app = prism_app::App::new();
     app.add_plugins(crate::PrismRenderPlugin::new(NullInstance::new()));
@@ -355,27 +368,42 @@ fn a_registered_family_prepares_and_releases_across_frames() {
         .get_sub_app(crate::RenderApp)
         .expect("the render sub-app");
     assert!(
-        render.world.resource::<RenderAssets<GpuBlob>>().contains(id),
+        render
+            .world
+            .resource::<RenderAssets<GpuBlob>>()
+            .contains(id),
         "the frame prepared the added asset"
     );
-    assert_eq!(render.world.resource::<AssetSyncStats<GpuBlob>>().last.prepared, 1);
+    assert_eq!(
+        render
+            .world
+            .resource::<AssetSyncStats<GpuBlob>>()
+            .last
+            .prepared,
+        1
+    );
 
     // The source goes away: the next frame releases the GPU form.
     drop(handle);
-    app.world_mut()
-        .resource_mut::<Assets<Blob>>()
-        .remove(id);
+    app.world_mut().resource_mut::<Assets<Blob>>().remove(id);
     app.update();
 
     let render = app
         .get_sub_app(crate::RenderApp)
         .expect("the render sub-app");
     assert!(
-        !render.world.resource::<RenderAssets<GpuBlob>>().contains(id),
+        !render
+            .world
+            .resource::<RenderAssets<GpuBlob>>()
+            .contains(id),
         "the released asset is out of the table"
     );
     assert_eq!(
-        render.world.resource::<AssetSyncStats<GpuBlob>>().last.released,
+        render
+            .world
+            .resource::<AssetSyncStats<GpuBlob>>()
+            .last
+            .released,
         1
     );
 }

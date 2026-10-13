@@ -342,7 +342,11 @@ mod tests {
             }
             trace
         };
-        assert_eq!(run(()), run(()), "same inputs produced different trajectories");
+        assert_eq!(
+            run(()),
+            run(()),
+            "same inputs produced different trajectories"
+        );
     }
 
     #[test]
@@ -394,7 +398,11 @@ mod tests {
                 base = spring.step(base, target, dt);
                 scaled = spring.step(scaled, target, dt);
                 assert_eq!(scaled.value, 2.0 * base.value, "value did not scale");
-                assert_eq!(scaled.velocity, 2.0 * base.velocity, "velocity did not scale");
+                assert_eq!(
+                    scaled.velocity,
+                    2.0 * base.velocity,
+                    "velocity did not scale"
+                );
             }
         }
     }
@@ -448,8 +456,14 @@ mod tests {
                 break;
             }
         }
-        assert!(overshot, "an under-damped spring should overshoot the target");
-        assert!(spring.is_settled(state, 10.0), "under-damped spring did not settle");
+        assert!(
+            overshot,
+            "an under-damped spring should overshoot the target"
+        );
+        assert!(
+            spring.is_settled(state, 10.0),
+            "under-damped spring did not settle"
+        );
         assert!((state.value - 10.0).abs() < 0.05);
     }
 

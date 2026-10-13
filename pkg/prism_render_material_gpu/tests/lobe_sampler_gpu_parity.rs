@@ -13,9 +13,7 @@
 //! to make a missing adapter fail instead.
 
 use futures_lite::future::block_on;
-use prism_render_shading::{
-    select_expensive_lobe_factors, LobeSamplingPolicy, ShadingQuality,
-};
+use prism_render_shading::{select_expensive_lobe_factors, LobeSamplingPolicy, ShadingQuality};
 use wgpu::{
     BackendOptions, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
@@ -308,8 +306,7 @@ fn lobe_sampler_factors_match_on_device() {
             _ => ShadingQuality::Low,
         });
         assert_eq!(policy.max_full_lobes(), case.max_full_lobes);
-        let want =
-            select_expensive_lobe_factors(policy, case.weights, case.pixel, case.frame, 0);
+        let want = select_expensive_lobe_factors(policy, case.weights, case.pixel, case.frame, 0);
         let got = [floats[index * 4], floats[index * 4 + 1]];
         if want != prism_render_shading::ExpensiveLobeFactors::FULL {
             stochastic += 1;

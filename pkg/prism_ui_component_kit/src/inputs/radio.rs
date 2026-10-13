@@ -104,7 +104,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Gap, tok("space.xs"))
             .with(StyleProp::FontSize, tok("font.size.body"))
             .with(StyleProp::Color, tok("color.label"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     sheet.insert(

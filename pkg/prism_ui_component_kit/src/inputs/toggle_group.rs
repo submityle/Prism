@@ -113,10 +113,8 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BackgroundColor, tok("color.fill.tertiary")),
     );
 
-    sheet.insert(
-        Class::new("pk-toggle-group--exclusive")
-            .with(StyleProp::Gap, StyleValue::px(0.0)),
-    );
+    sheet
+        .insert(Class::new("pk-toggle-group--exclusive").with(StyleProp::Gap, StyleValue::px(0.0)));
 
     sheet.insert(
         Class::new("pk-toggle-group__item")
@@ -130,7 +128,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Color, tok("color.label.secondary"))
             .with(StyleProp::FontSize, tok("font.size.subheadline"))
             .with(StyleProp::FontWeight, tok("font.weight.medium"))
-            .with_state(InteractionState::Hover, StyleProp::Color, tok("color.label")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Color,
+                tok("color.label"),
+            ),
     );
 
     sheet.insert(
@@ -154,22 +156,41 @@ mod tests {
     fn renders_one_item_per_option() {
         let el = render(ToggleGroupProps::new().options(["Day", "Week", "Month"]));
         assert_eq!(el.child_elements().len(), 3);
-        assert_eq!(el.child_elements()[1].child_elements()[0].text_content(), Some("Week"));
+        assert_eq!(
+            el.child_elements()[1].child_elements()[0].text_content(),
+            Some("Week")
+        );
     }
 
     #[test]
     fn selected_items_get_marker() {
-        let el = render(ToggleGroupProps::new().options(["A", "B", "C"]).selected([0, 2]));
+        let el = render(
+            ToggleGroupProps::new()
+                .options(["A", "B", "C"])
+                .selected([0, 2]),
+        );
         let items = el.child_elements();
-        assert!(items[0].class_names().iter().any(|c| c == "pk-toggle-group__item--selected"));
-        assert!(!items[1].class_names().iter().any(|c| c == "pk-toggle-group__item--selected"));
-        assert!(items[2].class_names().iter().any(|c| c == "pk-toggle-group__item--selected"));
+        assert!(items[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-toggle-group__item--selected"));
+        assert!(!items[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-toggle-group__item--selected"));
+        assert!(items[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-toggle-group__item--selected"));
     }
 
     #[test]
     fn exclusive_adds_block_modifier() {
         let el = render(ToggleGroupProps::new().options(["A"]).exclusive(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-toggle-group--exclusive"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-toggle-group--exclusive"));
     }
 
     #[test]

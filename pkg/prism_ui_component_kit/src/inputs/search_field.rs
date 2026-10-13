@@ -81,8 +81,7 @@ impl Component for SearchField {
 
         if props.value.is_empty() {
             el = el.child(
-                Element::text(props.placeholder.clone())
-                    .class("pk-search-field__placeholder"),
+                Element::text(props.placeholder.clone()).class("pk-search-field__placeholder"),
             );
         } else {
             el = el.child(Element::text(props.value.clone()).class("pk-search-field__value"));
@@ -108,11 +107,23 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with_padding_y(tok("space.xs"))
             .with(StyleProp::Height, tok("size.control.height"))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
-            .with_glass(0.0, tok("color.fill.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.fill.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Focus, StyleProp::BorderColor, tok("color.tint"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Focus,
+                StyleProp::BorderColor,
+                tok("color.tint"),
+            )
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     sheet.insert(
@@ -152,7 +163,10 @@ mod tests {
     fn leads_with_an_icon_slot() {
         let el = render(SearchFieldProps::new());
         assert_eq!(el.class_names()[0], "pk-search-field");
-        assert_eq!(el.child_elements()[0].class_names(), ["pk-search-field__icon"]);
+        assert_eq!(
+            el.child_elements()[0].class_names(),
+            ["pk-search-field__icon"]
+        );
     }
 
     #[test]
@@ -161,7 +175,10 @@ mod tests {
         let text = &el.child_elements()[1];
         assert_eq!(text.kind(), &ElementKind::Text);
         assert_eq!(text.text_content(), Some("Search"));
-        assert!(text.class_names().iter().any(|c| c == "pk-search-field__placeholder"));
+        assert!(text
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-search-field__placeholder"));
     }
 
     #[test]
@@ -169,7 +186,10 @@ mod tests {
         let el = render(SearchFieldProps::new().value("ab"));
         let text = &el.child_elements()[1];
         assert_eq!(text.text_content(), Some("ab"));
-        assert!(text.class_names().iter().any(|c| c == "pk-search-field__value"));
+        assert!(text
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-search-field__value"));
     }
 
     #[test]

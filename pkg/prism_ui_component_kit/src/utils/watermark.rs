@@ -84,9 +84,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
 
     use crate::preset::{kw, tok};
 
-    sheet.insert(
-        Class::new("pk-watermark").with(StyleProp::Display, kw(Keyword::Block)),
-    );
+    sheet.insert(Class::new("pk-watermark").with(StyleProp::Display, kw(Keyword::Block)));
 
     sheet.insert(
         Class::new("pk-watermark__mark")

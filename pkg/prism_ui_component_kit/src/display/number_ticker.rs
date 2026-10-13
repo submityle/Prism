@@ -93,7 +93,11 @@ fn format_fixed(value: f64, precision: u8) -> String {
     if precision > 0 {
         out.push('.');
         // Left-pad the fractional digits to the requested width.
-        out.push_str(&format!("{:0width$}", frac_part, width = precision as usize));
+        out.push_str(&format!(
+            "{:0width$}",
+            frac_part,
+            width = precision as usize
+        ));
     }
     out
 }

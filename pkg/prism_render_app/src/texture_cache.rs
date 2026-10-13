@@ -10,8 +10,8 @@
 
 use prism_ecs::prelude::Resource;
 use prism_render_driver::{
-    CacheStats, ContentCache, Extent3d, ImageDataLayout, RenderDevice, RenderQueue, TextureDescriptor,
-    TextureId, TextureViewDescriptor, TextureViewId, TextureWrite,
+    CacheStats, ContentCache, Extent3d, ImageDataLayout, RenderDevice, RenderQueue,
+    TextureDescriptor, TextureId, TextureViewDescriptor, TextureViewId, TextureWrite,
 };
 
 /// The identity of a cached texture.

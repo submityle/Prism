@@ -285,9 +285,8 @@ impl Schedule {
     #[cfg(feature = "std")]
     pub fn run_budgeted(&mut self, world: &mut World, budget: core::time::Duration) -> usize {
         self.initialize(world);
-        let deferred = crate::schedule::executor::SingleThreadedExecutor::run_with_budget(
-            self, world, budget,
-        );
+        let deferred =
+            crate::schedule::executor::SingleThreadedExecutor::run_with_budget(self, world, budget);
         if !world.change_observers.is_empty() {
             world.flush_changed_observers();
         }

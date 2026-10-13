@@ -62,11 +62,31 @@ impl ShadingWorkPlan {
         materials: &[GpuMaterialHeader],
         capacity: u32,
     ) -> Self {
+        Self::build_with_region(
+            pixels
+                .into_iter()
+                .map(|(pixel_index, pixel)| (pixel_index, pixel, u32::MAX)),
+            materials,
+            capacity,
+        )
+    }
+
+    /// Build a wavefront plan from visibility pixels and their optional
+    /// per-region illumination selectors. The selector is written by the
+    /// visibility raster in metadata.z (`0` = Lit, `1` = Stylized,
+    /// `u32::MAX` = no region mask). Keeping this value in the CPU plan API
+    /// makes diagnostics/replay use the exact same material classifier as the
+    /// GPU classify pass instead of silently falling back to material-wide
+    /// illumination.
+    pub fn build_with_region(
+        pixels: impl IntoIterator<Item = (u32, super::VisibilityPixel, u32)>,
+        materials: &[GpuMaterialHeader],
+        capacity: u32,
+    ) -> Self {
         let mut classified: [Vec<ShadingWorkItem>; MAX_SHADING_CLASSES] = Default::default();
-        for (pixel_index, pixel) in pixels {
-            if !pixel.is_valid()
-                || classified.iter().map(Vec::len).sum::<usize>() >= capacity as usize
-            {
+        let mut accepted = 0usize;
+        for (pixel_index, pixel, region_illumination) in pixels {
+            if !pixel.is_valid() || accepted >= capacity as usize {
                 continue;
             }
             let Some(header) = materials.get(pixel.material_index as usize) else {
@@ -75,7 +95,8 @@ impl ShadingWorkPlan {
             if header.generation != pixel.material_generation {
                 continue;
             }
-            let Ok(class) = classify_material_header(header) else {
+            let Ok(class) = classify_material_header_with_region(header, region_illumination)
+            else {
                 continue;
             };
             classified[class.index()].push(ShadingWorkItem {
@@ -84,6 +105,7 @@ impl ShadingWorkPlan {
                 shading_class: class as u32,
                 flags: header.feature_flags,
             });
+            accepted += 1;
         }
         let mut plan = Self::default();
         for (class, items) in classified.into_iter().enumerate() {
@@ -651,6 +673,20 @@ fn lit_class_from_closures(closure_mask: u32) -> MaterialShadingClass {
 pub fn classify_material_header(
     header: &GpuMaterialHeader,
 ) -> Result<MaterialShadingClass, ClassificationError> {
+    classify_material_header_with_region(header, u32::MAX)
+}
+
+/// Classify a surface with an optional per-region illumination selector.
+///
+/// `region_illumination` is the visibility raster's mask selector:
+/// `0` = `Lit`, `1` = `Stylized`, any other value (including `u32::MAX`) means
+/// "use the material header". The selector only overrides the two physically
+/// meaningful style axes; `Unlit` and `Custom` remain material-level modes and
+/// ignore the region mask, because they are not PBR/NPR blend endpoints.
+pub fn classify_material_header_with_region(
+    header: &GpuMaterialHeader,
+    region_illumination: u32,
+) -> Result<MaterialShadingClass, ClassificationError> {
     if header.is_active == 0 {
         return Err(ClassificationError::Inactive);
     }
@@ -677,7 +713,14 @@ pub fn classify_material_header(
         return Ok(MaterialShadingClass::Hair);
     }
 
-    match Illumination::from_u32(header.illumination) {
+    let illumination = match header.illumination {
+        0 | 1 => match region_illumination {
+            0 | 1 => region_illumination,
+            _ => header.illumination,
+        },
+        _ => header.illumination,
+    };
+    match Illumination::from_u32(illumination) {
         Some(Illumination::Unlit) => Ok(MaterialShadingClass::Unlit),
         Some(Illumination::Stylized) => Ok(MaterialShadingClass::Npr),
         // §3.5.4: a custom response needs a program. With no handle the material
@@ -688,9 +731,7 @@ pub fn classify_material_header(
         }
         Some(Illumination::Custom) => Ok(MaterialShadingClass::Principled),
         Some(Illumination::Lit) => Ok(lit_class_from_closures(header.closure_mask)),
-        None => Err(ClassificationError::UnsupportedIllumination(
-            header.illumination,
-        )),
+        None => Err(ClassificationError::UnsupportedIllumination(illumination)),
     }
 }
 
@@ -739,6 +780,58 @@ mod tests {
         };
         assert_eq!(
             classify_material_header(&bound),
+            Ok(MaterialShadingClass::Custom)
+        );
+    }
+
+    #[test]
+    fn region_illumination_selects_lit_or_stylized_per_pixel() {
+        let base = fallback_material_header(1);
+        let lit = with_illumination(base, Illumination::Lit);
+        assert_eq!(
+            classify_material_header_with_region(&lit, 0),
+            Ok(MaterialShadingClass::Principled)
+        );
+        assert_eq!(
+            classify_material_header_with_region(&lit, 1),
+            Ok(MaterialShadingClass::Npr)
+        );
+        assert_eq!(
+            classify_material_header_with_region(&lit, u32::MAX),
+            Ok(MaterialShadingClass::Principled),
+            "the sentinel keeps the material-level illumination"
+        );
+        for invalid_selector in [2, 7, u32::MAX - 1] {
+            assert_eq!(
+                classify_material_header_with_region(&lit, invalid_selector),
+                Ok(MaterialShadingClass::Principled),
+                "out-of-contract visibility selectors must fall back to material illumination"
+            );
+        }
+
+        let stylized = with_illumination(base, Illumination::Stylized);
+        assert_eq!(
+            classify_material_header_with_region(&stylized, 0),
+            Ok(MaterialShadingClass::Principled)
+        );
+        assert_eq!(
+            classify_material_header_with_region(&stylized, 1),
+            Ok(MaterialShadingClass::Npr)
+        );
+
+        // The mask blends only the PBR/NPR endpoints; Unlit and Custom remain
+        // material-level response modes and ignore the region selector.
+        let unlit = with_illumination(base, Illumination::Unlit);
+        assert_eq!(
+            classify_material_header_with_region(&unlit, 1),
+            Ok(MaterialShadingClass::Unlit)
+        );
+        let custom = GpuMaterialHeader {
+            custom_program: 7,
+            ..with_illumination(base, Illumination::Custom)
+        };
+        assert_eq!(
+            classify_material_header_with_region(&custom, 0),
             Ok(MaterialShadingClass::Custom)
         );
     }
@@ -831,13 +924,41 @@ mod tests {
     }
 
     #[test]
+    fn cpu_work_plan_honors_per_region_illumination() {
+        let mut lit = fallback_material_header(1);
+        lit.generation = 3;
+        lit.illumination = Illumination::Lit as u32;
+        let pixel = || {
+            super::super::VisibilityPixel::new(
+                GenerationalHandle {
+                    index: 0,
+                    generation: 1,
+                },
+                0,
+                0,
+                GenerationalHandle {
+                    index: 0,
+                    generation: 3,
+                },
+                [1.0, 0.0, 0.0],
+                1,
+            )
+            .unwrap()
+        };
+        let plan =
+            ShadingWorkPlan::build_with_region([(4, pixel(), 0), (9, pixel(), 1)], &[lit], 8);
+        assert_eq!(plan.counts[MaterialShadingClass::Principled.index()], 1);
+        assert_eq!(plan.counts[MaterialShadingClass::Npr.index()], 1);
+        assert_eq!(plan.work[0].pixel_index, 4);
+        assert_eq!(plan.work[1].pixel_index, 9);
+    }
+
+    #[test]
     fn the_class_table_is_derived_from_the_registry_and_the_lobe_catalogue() {
         let registry = prism_material_pcm::builtin::builtin_registry();
-        let table = ShadingClassTable::from_registry(
-            &registry,
-            &prism_render_material::SURFACE_LOBES,
-        )
-        .expect("the built-in catalogue is fully implemented");
+        let table =
+            ShadingClassTable::from_registry(&registry, &prism_render_material::SURFACE_LOBES)
+                .expect("the built-in catalogue is fully implemented");
 
         // One row per bucket, plus the second `hair` row (the render class and
         // the closure both own the same bucket).
@@ -870,7 +991,6 @@ mod tests {
         assert_eq!(table.rows().last().unwrap().rule, ShadingClassRule::Default);
     }
 
-
     #[test]
     fn the_wesl_class_constants_match_the_table_row_for_row() {
         // The table is the registration-driven source of truth and the shader's
@@ -901,15 +1021,16 @@ mod tests {
         assert!(!shader.is_empty(), "parsed no class constants");
 
         let registry = prism_material_pcm::builtin::builtin_registry();
-        let table = ShadingClassTable::from_registry(
-            &registry,
-            &prism_render_material::SURFACE_LOBES,
-        )
-        .unwrap();
+        let table =
+            ShadingClassTable::from_registry(&registry, &prism_render_material::SURFACE_LOBES)
+                .unwrap();
         for row in table.rows() {
-            let id = shader
-                .get(row.name)
-                .unwrap_or_else(|| panic!("material_classification.wesl has no CLASS_{}", row.name.to_ascii_uppercase()));
+            let id = shader.get(row.name).unwrap_or_else(|| {
+                panic!(
+                    "material_classification.wesl has no CLASS_{}",
+                    row.name.to_ascii_uppercase()
+                )
+            });
             assert_eq!(*id, row.id, "class `{}`", row.name);
         }
         // …and the shader must not carry a class the table has never heard of.
@@ -924,15 +1045,12 @@ mod tests {
         }
     }
 
-
     #[test]
     fn the_class_count_is_derived_and_the_ids_tile_it() {
         let registry = prism_material_pcm::builtin::builtin_registry();
-        let table = ShadingClassTable::from_registry(
-            &registry,
-            &prism_render_material::SURFACE_LOBES,
-        )
-        .unwrap();
+        let table =
+            ShadingClassTable::from_registry(&registry, &prism_render_material::SURFACE_LOBES)
+                .unwrap();
         // P2-j: the *live* class count comes from the table, not from a magic
         // constant — and today it happens to fill the shader-side capacity.
         assert_eq!(table.class_count(), MAX_SHADING_CLASSES as u32);
@@ -962,20 +1080,16 @@ mod tests {
         // else.
         let mut registry = prism_material_pcm::builtin::builtin_registry();
         registry
-            .register(
-                prism_material_pcm::ExtensionManifest::new(
-                    "org.prism.mode.watercolor",
-                    27,
-                    prism_material_pcm::Namespace::Prism,
-                    prism_material_pcm::Kind::ResponseMode,
-                ),
-            )
+            .register(prism_material_pcm::ExtensionManifest::new(
+                "org.prism.mode.watercolor",
+                27,
+                prism_material_pcm::Namespace::Prism,
+                prism_material_pcm::Kind::ResponseMode,
+            ))
             .expect("the Prism region has room");
-        let error = ShadingClassTable::from_registry(
-            &registry,
-            &prism_render_material::SURFACE_LOBES,
-        )
-        .expect_err("an unhandled response mode must be rejected");
+        let error =
+            ShadingClassTable::from_registry(&registry, &prism_render_material::SURFACE_LOBES)
+                .expect_err("an unhandled response mode must be rejected");
         assert_eq!(
             error,
             ClassTableError::UnhandledResponseMode(String::from("org.prism.mode.watercolor"))
@@ -1095,11 +1209,9 @@ mod tests {
         // only way to keep that claim honest is to sweep every combination the
         // hot path can see.
         let registry = prism_material_pcm::builtin::builtin_registry();
-        let table = ShadingClassTable::from_registry(
-            &registry,
-            &prism_render_material::SURFACE_LOBES,
-        )
-        .unwrap();
+        let table =
+            ShadingClassTable::from_registry(&registry, &prism_render_material::SURFACE_LOBES)
+                .unwrap();
         let mut base = fallback_material_header(1);
         base.is_active = 1;
         for active in [0u32, 1] {
@@ -1114,36 +1226,36 @@ mod tests {
                 MaterialRenderClass::Decal as u32,
             ] {
                 for illumination in [0u32, 1, 2, 3, 4, u32::MAX] {
-                  for custom_program in [0u32, 7, u32::MAX] {
-                    let mut closure_masks = vec![0u32, u32::MAX];
-                    for kind in [
-                        ClosureKind::Hair,
-                        ClosureKind::Subsurface,
-                        ClosureKind::ClearCoat,
-                        ClosureKind::Sheen,
-                    ] {
-                        closure_masks.push(1 << kind as u32);
-                    }
-                    // Every pair of closures, so priority is exercised.
-                    for a in 0..closure_masks.len() {
-                        for b in 0..closure_masks.len() {
-                            closure_masks.push(closure_masks[a] | closure_masks[b]);
+                    for custom_program in [0u32, 7, u32::MAX] {
+                        let mut closure_masks = vec![0u32, u32::MAX];
+                        for kind in [
+                            ClosureKind::Hair,
+                            ClosureKind::Subsurface,
+                            ClosureKind::ClearCoat,
+                            ClosureKind::Sheen,
+                        ] {
+                            closure_masks.push(1 << kind as u32);
+                        }
+                        // Every pair of closures, so priority is exercised.
+                        for a in 0..closure_masks.len() {
+                            for b in 0..closure_masks.len() {
+                                closure_masks.push(closure_masks[a] | closure_masks[b]);
+                            }
+                        }
+                        for closure_mask in closure_masks {
+                            let mut header = base;
+                            header.is_active = active;
+                            header.render_class = render_class;
+                            header.illumination = illumination;
+                            header.custom_program = custom_program;
+                            header.closure_mask = closure_mask;
+                            let hot = classify_material_header(&header)
+                                .map(|class| class as u32)
+                                .map_err(|error| error);
+                            let walked = table.classify(&header);
+                            assert_eq!(hot, walked, "{header:?}");
                         }
                     }
-                    for closure_mask in closure_masks {
-                        let mut header = base;
-                        header.is_active = active;
-                        header.render_class = render_class;
-                        header.illumination = illumination;
-                        header.custom_program = custom_program;
-                        header.closure_mask = closure_mask;
-                        let hot = classify_material_header(&header)
-                            .map(|class| class as u32)
-                            .map_err(|error| error);
-                        let walked = table.classify(&header);
-                        assert_eq!(hot, walked, "{header:?}");
-                    }
-                  }
                 }
             }
         }

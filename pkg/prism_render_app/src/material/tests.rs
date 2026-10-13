@@ -1,19 +1,17 @@
 //! Behavioural tests for the material ABI buffers.
 
-use prism_render_driver::{
-    BufferUsages, DeviceDescriptor, Instance, RequestAdapterOptions,
-};
+use prism_render_driver::{BufferUsages, DeviceDescriptor, Instance, RequestAdapterOptions};
 use prism_render_driver_null::NullInstance;
-use prism_render_material::{
-    ClosureKind, Illumination, MaterialRecord, fallback_material_record,
-};
+use prism_render_material::{fallback_material_record, ClosureKind, Illumination, MaterialRecord};
 
 use prism_render_architecture::abi::GenerationalHandle;
 
 use crate::material::MaterialParameterBuffers;
 
-fn null_device() -> (prism_render_driver_null::NullDevice, impl prism_render_driver::RenderQueue)
-{
+fn null_device() -> (
+    prism_render_driver_null::NullDevice,
+    impl prism_render_driver::RenderQueue,
+) {
     let options = RequestAdapterOptions::default();
     let adapter = NullInstance::new()
         .request_adapter(&options)
@@ -26,12 +24,7 @@ fn null_device() -> (prism_render_driver_null::NullDevice, impl prism_render_dri
 /// A texture reference as the ABI carries it: the image's slot identity plus the
 /// semantic it is bound as.
 fn texture_entry(index: u32, semantic: u32) -> prism_render_material::GpuMaterialTexture {
-    prism_render_material::GpuMaterialTexture {
-        index,
-        generation: 1,
-        semantic,
-        sampler_index: 0,
-    }
+    prism_render_material::GpuMaterialTexture::non_virtual(index, 1, semantic, 0)
 }
 
 /// A record whose packed block is wider than a plain dielectric's, so a test can
@@ -221,7 +214,11 @@ fn releasing_frees_both_buffers() {
     buffers.release(&device);
     assert_eq!(device.live_resource_count(), 0);
     buffers.release(&device);
-    assert_eq!(device.live_resource_count(), 0, "releasing twice is a no-op");
+    assert_eq!(
+        device.live_resource_count(),
+        0,
+        "releasing twice is a no-op"
+    );
 }
 
 #[test]
@@ -242,6 +239,88 @@ fn a_material_with_a_different_illumination_still_lands() {
     );
 }
 
+/// The material binding's layout is the ABI's five bindings, and the two arrays
+/// carry a `count`: an array entry without one would bind a single resource where
+/// the shader indexes dynamically.
+#[test]
+fn the_material_binding_layout_declares_the_abi_and_its_arrays() {
+    use crate::material::MaterialBindingLayout;
+    use prism_render_driver::{
+        BindingType, BufferBindingType, SamplerBindingType, TextureSampleType,
+    };
+
+    let entries = MaterialBindingLayout::entries(64);
+    assert_eq!(entries.len(), 5, "three buffers and two arrays");
+    for (binding, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.binding as usize, binding);
+        assert!(matches!(
+            entry.ty,
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                ..
+            } | BindingType::TextureArray {
+                sample_type: TextureSampleType::Float,
+                ..
+            } | BindingType::SamplerArray(SamplerBindingType::Filtering)
+        ));
+    }
+    assert_eq!(entries[4].count, Some(64), "the sampler array is sized");
+    assert_eq!(entries[3].count, Some(64), "the texture array is sized");
+    assert!(
+        entries[..3].iter().all(|entry| entry.count.is_none()),
+        "the buffers are not arrays"
+    );
+}
+
+/// The binding is accepted by a real device: the layout's array counts and the
+/// resources bound must agree, which only the backend can confirm (a mismatch is
+/// a validation error at group creation).
+#[test]
+fn the_material_binding_creates_on_a_gpu() {
+    use crate::material::texture_heap::FIRST_DYNAMIC_SLOT;
+    use crate::material::{FallbackTextures, MaterialBindingLayout, MaterialTextureSlots};
+    use prism_render_driver::{BufferDescriptor, BufferUsages, Extent3d, Instance, RenderDevice};
+    use prism_render_driver_wgpu::WgpuInstance;
+
+    let extent = Extent3d::new_2d(4, 4);
+    let Ok(runtime) = prism_render_runtime::RenderRuntime::<WgpuInstance>::wgpu(extent) else {
+        assert!(
+            !crate::tests::require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    };
+    let device = runtime.device();
+    let queue = runtime.queue();
+
+    let Some(layout) = MaterialBindingLayout::new(device, FIRST_DYNAMIC_SLOT + 1) else {
+        // A backend without bindless has no business building this group; the
+        // caller takes its non-bindless path instead.
+        return;
+    };
+    assert_eq!(layout.slots, FIRST_DYNAMIC_SLOT + 1);
+
+    let storage = || {
+        device.create_buffer(&BufferDescriptor {
+            label: Some("material abi".into()),
+            size: 256,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    };
+    let fallbacks = FallbackTextures::new(device, queue);
+    let slots = MaterialTextureSlots::build(
+        device,
+        &crate::RenderAssets::<crate::GpuImage>::new(),
+        &fallbacks,
+        &crate::TextureSlotHeap::new(FIRST_DYNAMIC_SLOT + 1),
+    );
+    assert_eq!(slots.len(), (FIRST_DYNAMIC_SLOT + 1) as usize);
+
+    let group = layout.create_group(device, storage(), storage(), Some(storage()), &slots);
+    let _ = group;
+    assert!(runtime.wait_idle());
+}
 
 /// The bindless arrays are *dense* and slot-addressed: a resident image's view
 /// sits at its slot, a reserved slot holds its own fallback texture, and a freed
@@ -249,7 +328,9 @@ fn a_material_with_a_different_illumination_still_lands() {
 #[test]
 fn the_bindless_arrays_place_one_view_and_sampler_per_slot() {
     use crate::material::texture_heap::{FIRST_DYNAMIC_SLOT, WHITE_SLOT};
-    use crate::material::{FallbackTextures, MaterialTextureSlots, RenderMaterials, TextureRequest};
+    use crate::material::{
+        FallbackTextures, MaterialTextureSlots, RenderMaterials, TextureRequest,
+    };
     use crate::render_asset::{RenderAsset, RenderAssets};
     use prism_asset::{AssetId, AssetIndex};
     use prism_image::Image;
@@ -279,7 +360,10 @@ fn the_bindless_arrays_place_one_view_and_sampler_per_slot() {
         1,
         [
             (0, TextureRequest::Image(image_id(10))),
-            (1, TextureRequest::Fallback(crate::TextureFallback::FlatNormal)),
+            (
+                1,
+                TextureRequest::Fallback(crate::TextureFallback::FlatNormal),
+            ),
             (2, TextureRequest::Image(image_id(20))),
         ],
     );
@@ -292,7 +376,10 @@ fn the_bindless_arrays_place_one_view_and_sampler_per_slot() {
         1,
         [
             (0, TextureRequest::Image(image_id(10))),
-            (1, TextureRequest::Fallback(crate::TextureFallback::FlatNormal)),
+            (
+                1,
+                TextureRequest::Fallback(crate::TextureFallback::FlatNormal),
+            ),
             (2, TextureRequest::Image(image_id(20))),
         ],
     );
@@ -320,18 +407,25 @@ fn the_bindless_arrays_place_one_view_and_sampler_per_slot() {
     // Resident images sit at their slots, with their own samplers.
     let first = materials.texture_slot(image_id(10)).expect("resident");
     let second = materials.texture_slot(image_id(20)).expect("resident");
-    assert_eq!(slots.views()[first.index as usize], images.get(image_id(10)).expect("prepared").view);
+    assert_eq!(
+        slots.views()[first.index as usize],
+        images.get(image_id(10)).expect("prepared").view
+    );
     assert_eq!(
         slots.samplers()[first.index as usize],
         images.get(image_id(10)).expect("prepared").sampler
     );
-    assert_eq!(slots.views()[second.index as usize], images.get(image_id(20)).expect("prepared").view);
+    assert_eq!(
+        slots.views()[second.index as usize],
+        images.get(image_id(20)).expect("prepared").view
+    );
 
     // A freed slot falls back rather than keeping the stale view.
     materials.release_textures(1);
     let slots = MaterialTextureSlots::build(&device, &images, &fallbacks, materials.textures());
     assert_eq!(
-        slots.views()[first.index as usize], fallbacks.white.view,
+        slots.views()[first.index as usize],
+        fallbacks.white.view,
         "the freed slot is a fallback again"
     );
 }
@@ -353,14 +447,23 @@ fn resolving_textures_assigns_slots_and_counts_references() {
         1,
         [
             (0, TextureRequest::Image(image(10))),
-            (1, TextureRequest::Fallback(crate::TextureFallback::FlatNormal)),
+            (
+                1,
+                TextureRequest::Fallback(crate::TextureFallback::FlatNormal),
+            ),
             (2, TextureRequest::Image(image(20))),
         ],
     );
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].index, FIRST_DYNAMIC_SLOT, "the first image");
-    assert_eq!(rows[0].semantic, 0, "the ABI's semantic number rides the row");
-    assert_eq!(rows[0].sampler_index, rows[0].index, "sampler shares the slot");
+    assert_eq!(
+        rows[0].semantic, 0,
+        "the ABI's semantic number rides the row"
+    );
+    assert_eq!(
+        rows[0].sampler_index, rows[0].index,
+        "sampler shares the slot"
+    );
     assert_eq!(
         rows[1].index,
         crate::material::texture_heap::FLAT_NORMAL_SLOT,
@@ -399,7 +502,10 @@ fn republish_and_retire_release_exactly_what_was_held() {
 
     // Republish keeping only the second image.
     let rows = materials.resolve_textures(1, [(0, TextureRequest::Image(image(20)))]);
-    assert_eq!(rows[0].index, kept_slot.index, "the kept image keeps its slot");
+    assert_eq!(
+        rows[0].index, kept_slot.index,
+        "the kept image keeps its slot"
+    );
     assert_eq!(
         materials.textures().refcount(image(10)),
         0,
@@ -408,7 +514,11 @@ fn republish_and_retire_release_exactly_what_was_held() {
     assert_eq!(materials.textures().refcount(image(20)), 1);
 
     assert_eq!(materials.release_textures(1), 1, "one reference was held");
-    assert_eq!(materials.textures().refcount(image(20)), 0, "and now released");
+    assert_eq!(
+        materials.textures().refcount(image(20)),
+        0,
+        "and now released"
+    );
     assert_eq!(materials.texture_slot(image(20)), None);
     assert_eq!(
         materials.release_textures(1),
@@ -429,7 +539,10 @@ fn the_slot_capacity_can_be_clamped_before_anything_is_published() {
     assert_eq!(materials.textures().capacity(), 64);
     materials.resolve_textures(
         0,
-        [(0, TextureRequest::Image(AssetId::<Image>::new(AssetIndex::from_parts(1, 1))))],
+        [(
+            0,
+            TextureRequest::Image(AssetId::<Image>::new(AssetIndex::from_parts(1, 1))),
+        )],
     );
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         materials.set_texture_capacity(128);
@@ -453,7 +566,9 @@ fn the_frame_packs_published_materials_into_the_buffers() {
     ));
 
     let handle = {
-        let render = app.sub_app_mut(crate::RenderApp).expect("the render sub-app");
+        let render = app
+            .sub_app_mut(crate::RenderApp)
+            .expect("the render sub-app");
         let materials = render.world.resource_mut::<RenderMaterials>();
         let handle = materials
             .registry_mut()
@@ -467,7 +582,9 @@ fn the_frame_packs_published_materials_into_the_buffers() {
     app.update();
 
     {
-        let render = app.get_sub_app(crate::RenderApp).expect("the render sub-app");
+        let render = app
+            .get_sub_app(crate::RenderApp)
+            .expect("the render sub-app");
         let stats = render.world.resource::<MaterialUploadStats>();
         assert!(
             stats.last.headers_written >= 1,
@@ -504,7 +621,9 @@ fn the_frame_packs_published_materials_into_the_buffers() {
     // Retire it: the next frame's sync must find no record for the dirty index
     // and retire the row.
     {
-        let render = app.sub_app_mut(crate::RenderApp).expect("the render sub-app");
+        let render = app
+            .sub_app_mut(crate::RenderApp)
+            .expect("the render sub-app");
         render
             .world
             .resource_mut::<RenderMaterials>()
@@ -514,7 +633,9 @@ fn the_frame_packs_published_materials_into_the_buffers() {
     }
     app.update();
 
-    let render = app.get_sub_app(crate::RenderApp).expect("the render sub-app");
+    let render = app
+        .get_sub_app(crate::RenderApp)
+        .expect("the render sub-app");
     let buffers = render.world.resource::<MaterialParameterBuffers>();
     assert_eq!(
         buffers.header(handle.index).expect("row").is_active,
@@ -539,7 +660,12 @@ fn texture_rows_are_placed_and_named_by_the_header() {
     let mut second = record_with_lobes(1, 1);
     second.textures = vec![texture_entry(7, 1)];
 
-    let report = buffers.sync(&device, &queue, [(0, first.clone()), (1, second.clone())], 1);
+    let report = buffers.sync(
+        &device,
+        &queue,
+        [(0, first.clone()), (1, second.clone())],
+        1,
+    );
     assert_eq!(report.textures_written, 2, "both materials' rows");
     assert_eq!(buffers.used_texture_rows(), 3, "2 + 1 rows");
 
@@ -643,19 +769,25 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
     // Two materials whose lobe sets differ, so their blocks differ in width and
     // the placement (not just the contents) has to be right.
     let (first, second) = {
-        let render = app.sub_app_mut(crate::RenderApp).expect("the render sub-app");
+        let render = app
+            .sub_app_mut(crate::RenderApp)
+            .expect("the render sub-app");
         let materials = render.world.resource_mut::<RenderMaterials>();
-        let first = materials.registry_mut().allocate().expect("capacity for two");
-        let second = materials.registry_mut().allocate().expect("capacity for two");
+        let first = materials
+            .registry_mut()
+            .allocate()
+            .expect("capacity for two");
+        let second = materials
+            .registry_mut()
+            .allocate()
+            .expect("capacity for two");
         let mut first_record = record_with_lobes(first.index, 1);
         first_record.textures = vec![texture_entry(3, 1), texture_entry(4, 2)];
         materials
             .publish(first_record)
             .expect("the first record publishes");
-        let mut second_record = record_with_lobes(
-            second.index,
-            1 | (1 << ClosureKind::ClearCoat as u32),
-        );
+        let mut second_record =
+            record_with_lobes(second.index, 1 | (1 << ClosureKind::ClearCoat as u32));
         second_record.textures = vec![texture_entry(7, 1)];
         materials
             .publish(second_record)
@@ -664,7 +796,9 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
     };
     {
         // A fresh resource has an empty mirror, so the frame uploads every row.
-        let render = app.sub_app_mut(crate::RenderApp).expect("the render sub-app");
+        let render = app
+            .sub_app_mut(crate::RenderApp)
+            .expect("the render sub-app");
         let runtime = render
             .world
             .resource::<crate::RenderRuntimeResource<WgpuInstance>>();
@@ -685,7 +819,9 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
 
     app.update();
 
-    let render = app.get_sub_app(crate::RenderApp).expect("the render sub-app");
+    let render = app
+        .get_sub_app(crate::RenderApp)
+        .expect("the render sub-app");
     let (headers, parameters, word_len, epoch) = {
         let buffers = render.world.resource::<MaterialParameterBuffers>();
         (
@@ -697,10 +833,7 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
     };
     let (textures, texture_rows) = {
         let buffers = render.world.resource::<MaterialParameterBuffers>();
-        (
-            buffers.textures(),
-            buffers.texture_capacity_rows(),
-        )
+        (buffers.textures(), buffers.texture_capacity_rows())
     };
     let runtime = render
         .world
@@ -728,10 +861,7 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
     };
 
     // Slot zero is the permanent fallback, at the heap's origin.
-    let fallback = fallback_material_record(
-        GenerationalHandle::new(0, 0),
-        epoch,
-    );
+    let fallback = fallback_material_record(GenerationalHandle::new(0, 0), epoch);
     let fallback_words = fallback.packed_parameters().pack();
     assert_eq!(
         row(0),
@@ -774,8 +904,7 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
             .map(|i| texture_row(offset + i))
             .collect();
         assert_eq!(
-            read,
-            record.textures,
+            read, record.textures,
             "the texture rows read back are the ABI's entries"
         );
         let block = record.packed_parameters().pack();
@@ -794,11 +923,7 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
         );
         assert_eq!(
             gpu_row,
-            record.header(
-                gpu_row.parameter_offset,
-                gpu_row.texture_offset,
-                epoch
-            ),
+            record.header(gpu_row.parameter_offset, gpu_row.texture_offset, epoch),
             "the row read from the GPU is the ABI's header for that material"
         );
     }

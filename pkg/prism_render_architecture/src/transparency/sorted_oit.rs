@@ -136,9 +136,9 @@ pub fn composite_sorted(fragments: &[OitFragment], background: [f32; 3]) -> [f32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transparency::weighted_oit::{self, WeightFunction};
     use alloc::vec;
     use alloc::vec::Vec;
-    use crate::transparency::weighted_oit::{self, WeightFunction};
 
     const BG: [f32; 3] = [0.1, 0.2, 0.3];
 
@@ -211,8 +211,14 @@ mod tests {
             ],
             [0.0; 3],
         );
-        assert!(red_front[0] > blue_front[0], "red should lead when in front");
-        assert!(blue_front[2] > red_front[2], "blue should lead when in front");
+        assert!(
+            red_front[0] > blue_front[0],
+            "red should lead when in front"
+        );
+        assert!(
+            blue_front[2] > red_front[2],
+            "blue should lead when in front"
+        );
     }
 
     #[test]

@@ -81,9 +81,7 @@ impl Component for Select {
         }
 
         let value = match props.options.get(props.selected) {
-            Some(option) => {
-                Element::text(option.clone()).class("pk-select__value")
-            }
+            Some(option) => Element::text(option.clone()).class("pk-select__value"),
             None => Element::text(props.placeholder.clone())
                 .class("pk-select__value")
                 .class("pk-select__value--placeholder"),
@@ -114,11 +112,23 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Hover, StyleProp::BorderColor, tok("color.tint"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BorderColor,
+                tok("color.tint"),
+            )
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     sheet.insert(

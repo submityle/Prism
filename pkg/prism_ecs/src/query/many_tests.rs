@@ -148,10 +148,7 @@ fn iter_many_yields_in_list_order_and_reports_errors() {
     assert_eq!(results[0].map(|p| p.0), Ok(1));
     assert_eq!(results[1], Err(QueryEntityError::NoSuchEntity(dead)));
     assert_eq!(results[2].map(|p| p.0), Ok(3));
-    assert_eq!(
-        results[3],
-        Err(QueryEntityError::QueryDoesNotMatch(no_pos))
-    );
+    assert_eq!(results[3], Err(QueryEntityError::QueryDoesNotMatch(no_pos)));
 }
 
 #[test]
@@ -180,10 +177,7 @@ fn iter_many_honours_archetype_filters() {
 
     let state = w.query_filtered::<&Pos, With<Vel>>();
     let results: Vec<_> = state.iter_many(&w, [still, moving]).collect();
-    assert_eq!(
-        results[0],
-        Err(QueryEntityError::QueryDoesNotMatch(still))
-    );
+    assert_eq!(results[0], Err(QueryEntityError::QueryDoesNotMatch(still)));
     assert_eq!(results[1].map(|p| p.0), Ok(1));
 
     let kept: Vec<i32> = state
@@ -214,10 +208,7 @@ fn iter_many_mut_writes_each_listed_entity_in_list_order() {
     let c = w.spawn(Pos(3));
 
     let state = w.query::<&mut Pos>();
-    for (index, item) in state
-        .iter_many_mut(&mut w, [c, a, b])
-        .enumerate()
-    {
+    for (index, item) in state.iter_many_mut(&mut w, [c, a, b]).enumerate() {
         let mut p = item.expect("all three match");
         p.0 += 10 * (index as i32 + 1);
     }

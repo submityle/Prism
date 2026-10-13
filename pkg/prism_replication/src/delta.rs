@@ -433,7 +433,10 @@ fn check_kinds(schema: &Schema) -> Result<(), DeltaError> {
                     // that the per-unit step overflows) makes `Quantizer` collapse
                     // endpoints to `NaN`/`inf`; require a finite, positive step.
                     let inv_step = ((1u64 << bits) - 1) as f32 / (max - min);
-                    min.is_finite() && max.is_finite() && min < max && inv_step.is_finite()
+                    min.is_finite()
+                        && max.is_finite()
+                        && min < max
+                        && inv_step.is_finite()
                         && inv_step > 0.0
                 } else {
                     false
@@ -453,7 +456,14 @@ fn write_value(kind: FieldKind, value: FieldValue, bits: &mut BitWriter) {
         (FieldKind::Int { bits: width }, FieldValue::Int(number)) => {
             bits.write(zigzag(number), width);
         }
-        (FieldKind::Float { min, max, bits: width }, FieldValue::Float(number)) => {
+        (
+            FieldKind::Float {
+                min,
+                max,
+                bits: width,
+            },
+            FieldValue::Float(number),
+        ) => {
             bits.write(Quantizer::new(min, max, width).quantize(number), width);
         }
         // `check_shape` already rejected a mismatched variant.

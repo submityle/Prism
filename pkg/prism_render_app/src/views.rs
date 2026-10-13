@@ -24,9 +24,7 @@
 use alloc::collections::BTreeMap;
 
 use prism_ecs::prelude::{Commands, Component, Entity, Res, ResMut, Resource};
-use prism_render_architecture::view_family::{
-    ViewHandle, ViewImportance, ViewKind, ViewRegistry,
-};
+use prism_render_architecture::view_family::{ViewHandle, ViewImportance, ViewKind, ViewRegistry};
 
 use crate::record::RenderRecord;
 

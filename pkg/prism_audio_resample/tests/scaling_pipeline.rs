@@ -110,7 +110,10 @@ fn central_mean(signal: &[Sample]) -> Sample {
 #[test]
 fn quality_grades_report_and_order_on_the_ladder() {
     assert_eq!(LinearResampler::new().quality(), ResampleQuality::Linear);
-    assert_eq!(PolyphaseSincResampler::new().quality(), ResampleQuality::Sinc);
+    assert_eq!(
+        PolyphaseSincResampler::new().quality(),
+        ResampleQuality::Sinc
+    );
     assert_eq!(
         HighOrderSincResampler::new().quality(),
         ResampleQuality::HighOrderSinc
@@ -268,7 +271,10 @@ fn pitch_shift_preserves_duration() {
     let mut wsola = WsolaStretcher::new();
     wsola.set_time_stretch(1.0);
     wsola.set_pitch_shift(semitones_to_ratio(7.0));
-    assert!(wsola.pitch_shift() > 1.0, "a positive semitone shift raises pitch");
+    assert!(
+        wsola.pitch_shift() > 1.0,
+        "a positive semitone shift raises pitch"
+    );
 
     let shifted = pump_stretcher(&mut wsola, &input, 512);
     assert!(
@@ -298,7 +304,10 @@ fn stretcher_clamps_and_silence_stays_silent() {
     let silence = dc(8192, 0.0);
     let out = pump_stretcher(&mut s, &silence, 512);
     for &x in &out {
-        assert!(fabs(x) < 1.0e-9, "silence in must yield silence out, saw {x}");
+        assert!(
+            fabs(x) < 1.0e-9,
+            "silence in must yield silence out, saw {x}"
+        );
     }
 }
 
@@ -316,5 +325,8 @@ fn stretching_is_deterministic() {
     let out_a = pump_stretcher(&mut a, &input, 256);
     let out_b = pump_stretcher(&mut b, &input, 1024);
 
-    assert_eq!(out_a, out_b, "stretch output must be block-size independent");
+    assert_eq!(
+        out_a, out_b,
+        "stretch output must be block-size independent"
+    );
 }

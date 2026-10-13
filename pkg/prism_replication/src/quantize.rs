@@ -183,5 +183,4 @@ mod tests {
             assert_eq!(q.quantize(max), q.levels(), "max of {min}..{max}");
         }
     }
-
 }

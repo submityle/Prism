@@ -48,8 +48,7 @@ pub fn convex_decompose(polygon: &[(f32, f32)]) -> Vec<Vec<(f32, f32)>> {
                     continue;
                 };
                 let candidate = merge(&pieces[p], &pieces[q], i, j);
-                let coords: Vec<(f32, f32)> =
-                    candidate.iter().map(|&k| polygon[k]).collect();
+                let coords: Vec<(f32, f32)> = candidate.iter().map(|&k| polygon[k]).collect();
                 if is_convex(&coords) && is_simple_polygon(&coords) {
                     pieces[p] = candidate;
                     pieces.remove(q);
@@ -157,13 +156,19 @@ mod tests {
     fn concave_pieces_are_convex_and_cover_the_input() {
         let poly = l_shape();
         let pieces = convex_decompose(&poly);
-        assert!(pieces.len() >= 2, "a concave polygon needs more than one piece");
+        assert!(
+            pieces.len() >= 2,
+            "a concave polygon needs more than one piece"
+        );
 
         let mut total = 0.0_f32;
         for piece in &pieces {
             assert!(is_convex(piece), "piece is not convex: {piece:?}");
             let c = centroid(piece).expect("non-degenerate piece");
-            assert!(point_in_polygon(&poly, c), "piece centroid escapes the input");
+            assert!(
+                point_in_polygon(&poly, c),
+                "piece centroid escapes the input"
+            );
             total += area(piece);
         }
         assert!((total - area(&poly)).abs() < 1e-3, "areas sum to {total}");
@@ -197,7 +202,10 @@ mod tests {
                 total += area(piece);
             }
             let want = area(&poly);
-            assert!((total - want).abs() <= 1e-2 * want.max(1.0), "{total} vs {want}");
+            assert!(
+                (total - want).abs() <= 1e-2 * want.max(1.0),
+                "{total} vs {want}"
+            );
         }
     }
 }

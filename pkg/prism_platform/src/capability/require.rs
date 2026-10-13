@@ -47,7 +47,10 @@ pub struct Selection<T> {
 impl CapabilityDatabase {
     /// Begin a declarative requirement for `capability`.
     pub const fn require(&self, capability: Capability) -> Requirement<'_> {
-        Requirement { db: self, capability }
+        Requirement {
+            db: self,
+            capability,
+        }
     }
 }
 
@@ -89,9 +92,17 @@ impl Requirement<'_> {
     {
         let support = self.support();
         if support.is_native() {
-            Selection { value: native(), degraded: false, support }
+            Selection {
+                value: native(),
+                degraded: false,
+                support,
+            }
         } else {
-            Selection { value: fallback(), degraded: true, support }
+            Selection {
+                value: fallback(),
+                degraded: true,
+                support,
+            }
         }
     }
 
@@ -110,6 +121,10 @@ impl Requirement<'_> {
     where
         N: FnOnce() -> T,
     {
-        if self.is_native() { Some(native()) } else { None }
+        if self.is_native() {
+            Some(native())
+        } else {
+            None
+        }
     }
 }

@@ -79,8 +79,10 @@ fn any_of_never_visits_rows_where_every_element_is_absent() {
     w.spawn(Tag(100));
 
     let state = w.query::<AnyOf<(&Melee, &Ranged)>>();
-    let rows: Vec<(Option<u32>, Option<u32>)> =
-        state.iter(&w).map(|(m, r)| (m.map(|m| m.0), r.map(|r| r.0))).collect();
+    let rows: Vec<(Option<u32>, Option<u32>)> = state
+        .iter(&w)
+        .map(|(m, r)| (m.map(|m| m.0), r.map(|r| r.0)))
+        .collect();
 
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|&(m, r)| m.is_some() || r.is_some()));
@@ -156,8 +158,10 @@ fn any_of_single_element_behaves_like_a_gated_option() {
     w.spawn(Tag(1)); // lacks Melee entirely
 
     let state = w.query::<(Entity, AnyOf<(&Melee,)>)>();
-    let seen: Vec<(Entity, Option<u32>)> =
-        state.iter(&w).map(|(e, (m,))| (e, m.map(|m| m.0))).collect();
+    let seen: Vec<(Entity, Option<u32>)> = state
+        .iter(&w)
+        .map(|(e, (m,))| (e, m.map(|m| m.0)))
+        .collect();
 
     // Only the archetype carrying Melee is matched; its one row is Some.
     assert_eq!(seen, vec![(with, Some(8))]);

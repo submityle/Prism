@@ -187,10 +187,7 @@ impl CardinalFamily {
             CardinalFamily::Romanian => {
                 if ops.i == 1 && ops.v == 0 {
                     One
-                } else if ops.v != 0
-                    || ops.n_eq(0)
-                    || (!ops.n_eq(1) && ops.n_mod_in(100, 1, 19))
-                {
+                } else if ops.v != 0 || ops.n_eq(0) || (!ops.n_eq(1) && ops.n_mod_in(100, 1, 19)) {
                     Few
                 } else {
                     Other

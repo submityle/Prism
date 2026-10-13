@@ -454,10 +454,7 @@ mod tests {
     use alloc::vec::Vec;
 
     fn approx(got: f32, want: f32) {
-        assert!(
-            (got - want).abs() <= 1.0e-3,
-            "expected {want}, got {got}"
-        );
+        assert!((got - want).abs() <= 1.0e-3, "expected {want}, got {got}");
     }
 
     #[test]

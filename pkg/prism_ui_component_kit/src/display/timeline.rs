@@ -202,9 +202,10 @@ mod tests {
 
     #[test]
     fn dot_carries_item_tone() {
-        let el = render(TimelineProps::new().item(
-            TimelineItem::new(Element::text("Failed")).tone(Tone::Danger),
-        ));
+        let el = render(
+            TimelineProps::new()
+                .item(TimelineItem::new(Element::text("Failed")).tone(Tone::Danger)),
+        );
         let dot = &el.child_elements()[0].child_elements()[0];
         assert_eq!(
             dot.class_names(),

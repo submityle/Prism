@@ -295,18 +295,16 @@ pub struct CacheAuxLayout {
 }
 
 /// The object-space cache auxiliaries in registry-slot order.
-pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
-    CacheAuxLayout {
-        id: "surfel",
-        uid: "org.prism.cache_aux.surfel",
-        registry_slot: 26,
-        namespace: "PRISM",
-        vendor: "prism",
-        stability: "candidate",
-        requires_caps: &["object_space_cache"],
-        view_dependent: false,
-    },
-];
+pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [CacheAuxLayout {
+    id: "surfel",
+    uid: "org.prism.cache_aux.surfel",
+    registry_slot: 26,
+    namespace: "PRISM",
+    vendor: "prism",
+    stability: "candidate",
+    requires_caps: &["object_space_cache"],
+    view_dependent: false,
+}];
 
 /// One bake/pass-time extension's generated manifest identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

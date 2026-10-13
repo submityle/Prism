@@ -427,7 +427,7 @@ pkg/prism_transform/
 
 - 静态子树的 `GlobalTransform` 预算好后冻结，运行时零传播、零脏检查。
 - 可进一步把同材质静态网格**预合并到世界空间**（drop 掉各自 Transform），减少绘制调用与实例矩阵上传（对标 UE 静态网格合并 / Unity Static Batching）。
-- 由 `prism_scene`/`prism_asset_bake` 在离线/加载期触发；运行时若需移动，显式「解冻」转回动态集。
+- 由 `prism_scene` 声明静态标记、`Prism Asset Build` 在离线/加载期调度烘焙（`prism_asset_build_design_zh.md` §12.8）；运行时若需移动，显式「解冻」转回动态集。
 
 收益:大世界里 90%+ 实体是静态的,把它们移出热路径是最大的一笔传播省时。
 
@@ -563,7 +563,7 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 
 本章 **24.1 静态烘焙（`bake`）**、**24.3 双缓冲（`double_buffer`）**、**24.2 姿态量化（`quantize`）**、**24.4 变换 Observer（`observer`）**、**24.5 空间加速结构增量同步（`spatial_sync`）**、**24.6 轻量约束（`constraint`）**、**24.7 GPU 侧层级传播（`compute_hierarchy`，可移植调度 + 上传载荷层）**、**24.8 扫掠变换（`sweep`）** 已落地并通过验证（实现 + 单测，`cargo clippy --all-targets` 零告警、`cargo test` 零失败）；其余为 PLANNED 设计目标,无代码。诚实边界：
 
-- **24.1 已交付的边界**：`StaticBaker` 是纯计算核心（并行数组 + 增量 `bake` + 批合并），不含「静态标记来源」——`TransformStatic` 组件语义、离线/加载期触发点仍属 `prism_scene`/`prism_asset_bake`，由消费方接线；静态根挂动态父时的世界种子需调用方显式传入 `parent_globals`。`merge_meshes` 产出 CPU 侧世界顶点缓冲，GPU 常驻/绘制合并由渲染侧消费。
+- **24.1 已交付的边界**：`StaticBaker` 是纯计算核心（并行数组 + 增量 `bake` + 批合并），不含「静态标记来源」——`TransformStatic` 组件语义、离线/加载期触发点仍属 `prism_scene` 与 `Prism Asset Build`（`prism_asset_build_design_zh.md` §12.8；契约登记为 `prism_derived_data_contract_zh.md` B8），由消费方接线；静态根挂动态父时的世界种子需调用方显式传入 `parent_globals`。`merge_meshes` 产出 CPU 侧世界顶点缓冲，GPU 常驻/绘制合并由渲染侧消费。
 - **24.3 已交付的边界**：`MultiBuffer` 是纯数据结构，自身无原子、无线程，只编码所有权纪律；跨线程的原子切换 / copy-on-extract 时序由 ECS §23.5 提取流水线与调度器维持，本 crate 不越界实现线程同步。
 - **24.2 已交付的边界**：`quantize` 是纯编解码核心（smallest-three 旋转 + 盒内/分层平移 + 1 bit 单位缩放旁路 + 整姿态组合），只保证确定性与误差界；网络/快照的位流格式契约、分档策略与 §12 定点一致性由 `prism_replication` 消费方定义，本 crate 不越界定义线格式。
 - **24.4 已交付的边界**：`observer` 是纯数据结构，无原子、无线程、无 ECS Observer 绑定——脏集与世界姿态由调用方（如 `dirty`/传播流水线）提供；本帧合并与升序派发是确定性契约，但精细的 rotation/scale 拆分、以及实际订阅方（空间索引 §24.5、音频、探针缓存失效）的接线留给消费方。
@@ -574,4 +574,3 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 - 其余 PLANNED：**24.7 的世界矩阵 GPU 常驻、免回读直供实例化/间接绘制的渲染接线**随 M6 GPU 驱动落地（真实 compute dispatch + 回读 parity 已由 `prism_transform_gpu` 交付验证如上）。
 
 所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
-

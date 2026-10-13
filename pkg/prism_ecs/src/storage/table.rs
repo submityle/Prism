@@ -494,8 +494,7 @@ impl Table {
         let tick_size = size_of::<Tick>();
         let versions_bytes = ncols * tick_size;
         let meta_offset = versions_bytes.next_multiple_of(align_of::<ChunkMeta>());
-        let values_offset =
-            (meta_offset + size_of::<ChunkMeta>()).next_multiple_of(block_align);
+        let values_offset = (meta_offset + size_of::<ChunkMeta>()).next_multiple_of(block_align);
         let mut rel = 0usize;
         let mut slots = Vec::with_capacity(ncols);
         for (i, (id, layout, _)) in descriptors.iter().enumerate() {
@@ -608,7 +607,10 @@ impl Table {
                     column.detach_chunk();
                 }
             }
-            let block = self.chunks.pop().expect("a block was just checked to exist");
+            let block = self
+                .chunks
+                .pop()
+                .expect("a block was just checked to exist");
             // SAFETY: the block came from `self.arena` and every column has been
             // detached, so no live reference into it remains.
             unsafe { self.arena.free(block.ptr) };
@@ -784,7 +786,8 @@ impl Table {
     /// Panics if `chunk >= chunk_count()`.
     #[inline]
     pub fn chunk_meta(&self, chunk: usize) -> &ChunkMeta {
-        self.chunk_meta_checked(chunk).expect("chunk index out of range")
+        self.chunk_meta_checked(chunk)
+            .expect("chunk index out of range")
     }
 
     /// Mutable access to chunk `chunk`'s metadata, for consumers that cache
@@ -835,7 +838,10 @@ impl Table {
     /// [`recompute_chunk_bounds`](Table::recompute_chunk_bounds) so the bounds are
     /// current, then feed the table to
     /// [`GpuBatchBuilder::build_from_table`](crate::gpu_batch::GpuBatchBuilder::build_from_table).
-    pub fn cull_chunks(&mut self, frustum: &crate::culling::Frustum) -> crate::culling::ChunkCullStats {
+    pub fn cull_chunks(
+        &mut self,
+        frustum: &crate::culling::Frustum,
+    ) -> crate::culling::ChunkCullStats {
         let meta_offset = self.meta_offset;
         let mut stats = crate::culling::ChunkCullStats::default();
         for block in self.chunks.iter_mut() {
@@ -1087,7 +1093,12 @@ mod tests {
         let mut world = World::new();
         let arch = world.prewarm::<Wide>(0);
         assert_eq!(
-            world.archetypes().get(arch).unwrap().table().rows_per_chunk(),
+            world
+                .archetypes()
+                .get(arch)
+                .unwrap()
+                .table()
+                .rows_per_chunk(),
             8,
         );
 
@@ -1121,7 +1132,11 @@ mod tests {
             let t = world.archetypes().get(arch).unwrap().table();
             assert_eq!(t.chunk_count(), 2);
             assert_eq!(t.chunk_meta_iter().count(), 2);
-            assert_eq!(t.chunk_meta(0).structural_epoch(), 8, "first window untouched");
+            assert_eq!(
+                t.chunk_meta(0).structural_epoch(),
+                8,
+                "first window untouched"
+            );
             assert_eq!(t.chunk_meta(1).structural_epoch(), 1);
         }
 
@@ -1247,7 +1262,13 @@ mod tests {
             .table()
             .rows_per_chunk();
         assert_eq!(rows_per_chunk, 6);
-        assert!(world.archetypes().get(arch).unwrap().table().chunks.is_empty());
+        assert!(world
+            .archetypes()
+            .get(arch)
+            .unwrap()
+            .table()
+            .chunks
+            .is_empty());
 
         // Cross three chunk boundaries.
         for _ in 0..(rows_per_chunk * 3) {
@@ -1308,7 +1329,10 @@ mod tests {
         for i in 0..96u64 {
             entities.push(world.spawn(Big(i, [0; 504])));
         }
-        let id = world.components().id_of::<Big>().expect("Big is registered");
+        let id = world
+            .components()
+            .id_of::<Big>()
+            .expect("Big is registered");
 
         // Nothing has been uploaded, so every window is dirty.
         let now = world.change_tick();
@@ -1403,7 +1427,13 @@ mod tests {
         let n = world.recompute_chunk_bounds::<Pt>(arch, now, &mut point, false);
         assert_eq!(n, 1, "only the window whose value moved is recomputed");
         assert_eq!(
-            world.archetypes().get(arch).unwrap().table().chunk_meta(1).bounds,
+            world
+                .archetypes()
+                .get(arch)
+                .unwrap()
+                .table()
+                .chunk_meta(1)
+                .bounds,
             Some(ChunkBounds::new([32.0, -63.0, 0.0], [1000.0, 0.0, 0.0])),
         );
 
@@ -1415,7 +1445,13 @@ mod tests {
         let n = world.recompute_chunk_bounds::<Pt>(arch, now, &mut point, false);
         assert_eq!(n, 1, "the window that gained a row is recomputed");
         assert_eq!(
-            world.archetypes().get(arch).unwrap().table().chunk_meta(3).bounds,
+            world
+                .archetypes()
+                .get(arch)
+                .unwrap()
+                .table()
+                .chunk_meta(3)
+                .bounds,
             Some(ChunkBounds::new([-5.0, 0.0, 0.0], [-5.0, 0.0, 0.0])),
         );
     }

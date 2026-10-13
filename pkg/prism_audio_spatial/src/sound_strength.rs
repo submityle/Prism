@@ -67,7 +67,11 @@ const ENERGY_FLOOR: Sample = 1e-20;
 /// Sanitises a sample, mapping non-finite values to `0`.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Accumulates the energy `sum p[n]^2` of a slice, ignoring non-finite samples.
@@ -98,15 +102,15 @@ fn energy_to_strength_db(energy: Sample, reference_energy: Sample) -> Sample {
     if !reference_energy.is_finite() || reference_energy <= 0.0 {
         return MIN_STRENGTH_DB;
     }
-    #[expect(
-        clippy::neg_cmp_op_on_partial_ord,
-        reason = "negated comparison keeps NaN energies on the safe branch, unlike the suggested direct comparison"
-    )]
-    if !(energy > ENERGY_FLOOR) {
+    if energy <= ENERGY_FLOOR || energy.is_nan() {
         return MIN_STRENGTH_DB;
     }
     let db = 10.0 * ops::ln(energy / reference_energy) / LN_10;
-    if db.is_finite() { db } else { MIN_STRENGTH_DB }
+    if db.is_finite() {
+        db
+    } else {
+        MIN_STRENGTH_DB
+    }
 }
 
 /// Computes the total sound strength `G` in decibels relative to the free-field
@@ -267,7 +271,11 @@ mod tests {
         // Scaling amplitude by sqrt(2) doubles the energy.
         let scaled: Vec<Sample> = rir.iter().map(|&x| x * core::f32::consts::SQRT_2).collect();
         let doubled = sound_strength_db(&scaled, 1.0);
-        assert!(approx(doubled - single, 3.0103, 1e-2), "delta {}", doubled - single);
+        assert!(
+            approx(doubled - single, 3.0103, 1e-2),
+            "delta {}",
+            doubled - single
+        );
     }
 
     #[test]
@@ -338,7 +346,10 @@ mod tests {
         let rir = exp_response(1_000, 500.0);
         assert_eq!(early_sound_strength_db(&rir, 1.0, 0.0), MIN_STRENGTH_DB);
         assert_eq!(late_sound_strength_db(&rir, 1.0, -1.0), MIN_STRENGTH_DB);
-        assert_eq!(early_sound_strength_db(&rir, 1.0, Sample::NAN), MIN_STRENGTH_DB);
+        assert_eq!(
+            early_sound_strength_db(&rir, 1.0, Sample::NAN),
+            MIN_STRENGTH_DB
+        );
     }
 
     #[test]
@@ -347,8 +358,16 @@ mod tests {
         let reference = 1.5;
         let s = SoundStrength::from_impulse_response(&rir, reference, SR);
         assert!(approx(s.g_db, sound_strength_db(&rir, reference), 1e-4));
-        assert!(approx(s.g_early_db, early_sound_strength_db(&rir, reference, SR), 1e-4));
-        assert!(approx(s.g_late_db, late_sound_strength_db(&rir, reference, SR), 1e-4));
+        assert!(approx(
+            s.g_early_db,
+            early_sound_strength_db(&rir, reference, SR),
+            1e-4
+        ));
+        assert!(approx(
+            s.g_late_db,
+            late_sound_strength_db(&rir, reference, SR),
+            1e-4
+        ));
     }
 
     #[test]
@@ -381,8 +400,16 @@ mod tests {
         // Early window [..split] catches index split-1; late window [split..]
         // catches index split. Both have energy 1.
         let reference = 1.0;
-        assert!(approx(early_sound_strength_db(&rir, reference, SR), 0.0, 1e-6));
-        assert!(approx(late_sound_strength_db(&rir, reference, SR), 0.0, 1e-6));
+        assert!(approx(
+            early_sound_strength_db(&rir, reference, SR),
+            0.0,
+            1e-6
+        ));
+        assert!(approx(
+            late_sound_strength_db(&rir, reference, SR),
+            0.0,
+            1e-6
+        ));
     }
 
     #[test]

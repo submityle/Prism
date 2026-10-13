@@ -7,7 +7,9 @@
 //! module paths the crate's embedded-asset registration produces.
 
 use bevy_asset::{uuid::Uuid, AssetId};
-use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
+use bevy_shader::{
+    Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ShaderDefVal, ValidateShader,
+};
 
 fn load_source(
     _: &(),
@@ -149,7 +151,7 @@ fn ssr_hzb_wesl_compiles_standalone() {
 fn ssr_repack_wesl_compiles_and_resolves_imports() {
     let mut cache = ShaderCache::new((), load_source);
 
-    let deps: [(u128, &str, &str); 7] = [
+    let deps: [(u128, &str, &str); 8] = [
         (
             0x5052_4953_4d5f_5353_525f_4d41_5450_0002,
             include_str!("../../shaders/material.wesl"),
@@ -185,6 +187,11 @@ fn ssr_repack_wesl_compiles_and_resolves_imports() {
             include_str!("../../shaders/material_sample.wesl"),
             "embedded://prism_render_scene/shaders/material_sample.wesl",
         ),
+        (
+            0x5052_4953_4d5f_5353_525f_4d56_5400_0001,
+            include_str!("../../shaders/material_virtual_texture.wesl"),
+            "embedded://prism_render_scene/shaders/material_virtual_texture.wesl",
+        ),
     ];
     for (tag, source, path) in deps {
         cache.set_shader(shader_id(tag), Shader::from_wesl(source, path));
@@ -199,9 +206,18 @@ fn ssr_repack_wesl_compiles_and_resolves_imports() {
         ),
     );
 
-    cache.get(0, repack, &[]).unwrap_or_else(|error| {
-        panic!("ssr_repack.wesl failed to compile/resolve imports: {error}")
-    });
+    for (id, defs, label) in [
+        (0, &[][..], "non-bindless"),
+        (
+            1,
+            &[ShaderDefVal::Bool("MATERIAL_BINDLESS".into(), true)][..],
+            "bindless",
+        ),
+    ] {
+        cache.get(id, repack, defs).unwrap_or_else(|error| {
+            panic!("ssr_repack.wesl {label} variant failed to compile/resolve imports: {error}")
+        });
+    }
 }
 
 /// Compiles `ssr_color_mips.wesl`, proving all three colour-pyramid build entry

@@ -51,9 +51,7 @@ pub const SEMANTIC_MEASURED_BRDF: u32 = 9;
 
 // The semantic bytes are an ABI shared with the material crate and every
 // shader; pin the one the measured lobe scans for, so a drift is a build error.
-const _: () = assert!(
-    SEMANTIC_MEASURED_BRDF == prism_render_material::MEASURED_BRDF_SEMANTIC
-);
+const _: () = assert!(SEMANTIC_MEASURED_BRDF == prism_render_material::MEASURED_BRDF_SEMANTIC);
 
 /// Squared-length floor below which a decoded normal is treated as degenerate
 /// and replaced by the geometric `+Z` tangent-space normal.  Mirrors the

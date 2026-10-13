@@ -79,8 +79,18 @@ impl CubicBezier {
         let p123 = lerp(p12, p23, t);
         let p0123 = lerp(p012, p123, t);
         (
-            Self { p0: self.p0, p1: p01, p2: p012, p3: p0123 },
-            Self { p0: p0123, p1: p123, p2: p23, p3: self.p3 },
+            Self {
+                p0: self.p0,
+                p1: p01,
+                p2: p012,
+                p3: p0123,
+            },
+            Self {
+                p0: p0123,
+                p1: p123,
+                p2: p23,
+                p3: self.p3,
+            },
         )
     }
 
@@ -110,7 +120,11 @@ impl CubicBezier {
     /// recursion still terminates at [`MAX_DEPTH`].
     #[must_use]
     pub fn flatten(&self, tolerance: f32) -> Vec<(f32, f32)> {
-        let tol = if tolerance > 0.0 { tolerance } else { f32::EPSILON };
+        let tol = if tolerance > 0.0 {
+            tolerance
+        } else {
+            f32::EPSILON
+        };
         let mut out = vec![self.p0];
         self.flatten_rec(tol, MAX_DEPTH, &mut out);
         out

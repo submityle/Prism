@@ -75,7 +75,12 @@ fn model_validates_and_owns_every_panel_once() {
 fn rejects_duplicate_ownership_bad_ratio_and_document_tabify() {
     let mut l = initial();
     l.floating.push(FloatingWindow {
-        rect: Rect { x: 0, y: 0, width: 100, height: 100 },
+        rect: Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        },
         root: DockNode::panel("tool.a"),
         z: 1,
     });

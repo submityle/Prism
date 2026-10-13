@@ -34,8 +34,9 @@ use prism_audio_core::buffer::ChannelLayout;
 use prism_audio_core::math::Sample;
 
 use prism_audio_conditioning::config::{ConditioningConfig, DecodeHint};
-use prism_audio_conditioning::decode::SourceFormat;
+use prism_audio_conditioning::config::{LoopConfig, ResampleConfig};
 use prism_audio_conditioning::dc_block::{self, DcBlockConfig};
+use prism_audio_conditioning::decode::SourceFormat;
 use prism_audio_conditioning::finalize::{self, FinalizeConfig};
 use prism_audio_conditioning::loop_crossfade::{self, CrossfadeShape};
 use prism_audio_conditioning::loop_point::{self, LoopMode, LoopPoints};
@@ -45,11 +46,14 @@ use prism_audio_conditioning::pcm::{ConditionedPcm, EncoderDelay};
 use prism_audio_conditioning::pipeline;
 use prism_audio_conditioning::resample_offline;
 use prism_audio_conditioning::transient;
-use prism_audio_conditioning::config::{LoopConfig, ResampleConfig};
 
 /// Branch-free absolute value, avoiding `std` float math per the test lints.
 fn fabs(x: Sample) -> Sample {
-    if x < 0.0 { -x } else { x }
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
 }
 
 /// Returns `true` when `a` and `b` agree to within `eps`.
@@ -373,13 +377,21 @@ fn loudness_normalize_enforces_true_peak_ceiling() {
 fn loudness_normalize_bypass_is_bit_transparent() {
     let pcm = noise_mono(0.3, 48_000, 4_000, 0x2222_3333);
     let measured = loudness_offline::analyze(&pcm);
-    let normalized = loudness_normalize::normalize(&pcm, measured, &LoudnessNormalizeConfig::default());
+    let normalized =
+        loudness_normalize::normalize(&pcm, measured, &LoudnessNormalizeConfig::default());
 
-    assert_eq!(normalized.applied_gain_db.to_bits(), (0.0 as Sample).to_bits());
+    assert_eq!(
+        normalized.applied_gain_db.to_bits(),
+        (0.0 as Sample).to_bits()
+    );
     let before = pcm.channel(0).expect("input");
     let after = normalized.pcm.channel(0).expect("output");
     for (x, y) in before.iter().zip(after.iter()) {
-        assert_eq!(x.to_bits(), y.to_bits(), "disabled normalization is byte-identical");
+        assert_eq!(
+            x.to_bits(),
+            y.to_bits(),
+            "disabled normalization is byte-identical"
+        );
     }
 }
 
@@ -397,7 +409,11 @@ fn resample_same_rate_is_bit_identical() {
     let after = out.channel(0).expect("output");
     assert_eq!(before.len(), after.len());
     for (x, y) in before.iter().zip(after.iter()) {
-        assert_eq!(x.to_bits(), y.to_bits(), "same-rate resample clones exactly");
+        assert_eq!(
+            x.to_bits(),
+            y.to_bits(),
+            "same-rate resample clones exactly"
+        );
     }
 }
 
@@ -483,7 +499,11 @@ fn loop_crossfade_pingpong_is_identity() {
     let before = pcm.channel(0).expect("input");
     let after = out.channel(0).expect("output");
     for (x, y) in before.iter().zip(after.iter()) {
-        assert_eq!(x.to_bits(), y.to_bits(), "ping-pong bake is a bit-exact identity");
+        assert_eq!(
+            x.to_bits(),
+            y.to_bits(),
+            "ping-pong bake is a bit-exact identity"
+        );
     }
 }
 
@@ -501,7 +521,10 @@ fn loop_detect_finds_period_in_strongly_periodic_signal_and_skips_short() {
     let periodic = triangle_mono(0.8, 500, rate, 10_000);
     let channel = periodic.channel(0).expect("channel");
     let found = loop_point::detect(channel, &config).expect("periodic signal loops");
-    assert!(found.end <= channel.len(), "loop end stays inside the buffer");
+    assert!(
+        found.end <= channel.len(),
+        "loop end stays inside the buffer"
+    );
     assert!(found.start < found.end, "loop region is non-empty");
     assert!(
         found.length() >= config.min_period_frames,
@@ -561,14 +584,18 @@ fn finalize_default_config_is_bit_exact_identity() {
     let rate = 48_000u32;
     let pcm = noise_mono(0.5, rate, 1_500, 0x7788_99AA);
     let delay = EncoderDelay::new(32, 48);
-    let finalized = finalize::finalize(&pcm, delay, None, &FinalizeConfig::default())
-        .expect("finalize runs");
+    let finalized =
+        finalize::finalize(&pcm, delay, None, &FinalizeConfig::default()).expect("finalize runs");
 
     assert_eq!(finalized.pcm.frames(), pcm.frames());
     let before = pcm.channel(0).expect("input");
     let after = finalized.pcm.channel(0).expect("output");
     for (x, y) in before.iter().zip(after.iter()) {
-        assert_eq!(x.to_bits(), y.to_bits(), "disabled finalize is byte-identical");
+        assert_eq!(
+            x.to_bits(),
+            y.to_bits(),
+            "disabled finalize is byte-identical"
+        );
     }
 }
 
@@ -598,7 +625,10 @@ fn transient_envelope_is_nonnegative_and_onsets_are_ordered() {
     );
 
     let onsets = transient::detect_onsets(&channel, rate, &config);
-    assert!(!onsets.is_empty(), "a loud burst produces at least one onset");
+    assert!(
+        !onsets.is_empty(),
+        "a loud burst produces at least one onset"
+    );
     // Onsets are strictly increasing, in range, and respect the min spacing.
     for pair in onsets.windows(2) {
         assert!(pair[1] > pair[0], "onsets are strictly increasing");

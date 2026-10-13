@@ -237,7 +237,10 @@ mod tests {
         let out = apply_loop_crossfade(&src, &fwd(start, end, cf), CrossfadeShape::EqualPower);
         let b = out.channel(0).unwrap();
         // First blended frame is mostly the (zero) tail; last is mostly lead.
-        assert!(b[end - cf as usize] < 20.0, "seam start should stay near tail");
+        assert!(
+            b[end - cf as usize] < 20.0,
+            "seam start should stay near tail"
+        );
         assert!(b[end - 1] > 80.0, "seam end should morph into lead-in");
     }
 
@@ -266,20 +269,16 @@ mod tests {
     fn multichannel_applies_to_every_channel() {
         let left: Vec<Sample> = (0..40).map(|k| k as Sample).collect();
         let right: Vec<Sample> = (0..40).map(|k| -(k as Sample)).collect();
-        let src = ConditionedPcm::new(
-            48_000,
-            ChannelLayout::Stereo,
+        let src = ConditionedPcm::new(48_000, ChannelLayout::Stereo, {
+            #[cfg(feature = "std")]
             {
-                #[cfg(feature = "std")]
-                {
-                    vec![left, right]
-                }
-                #[cfg(not(feature = "std"))]
-                {
-                    alloc::vec![left, right]
-                }
-            },
-        )
+                vec![left, right]
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                alloc::vec![left, right]
+            }
+        })
         .unwrap();
         let out = apply_loop_crossfade(&src, &fwd(8, 28, 6), CrossfadeShape::EqualPower);
         // Both channels changed somewhere inside the tail window.

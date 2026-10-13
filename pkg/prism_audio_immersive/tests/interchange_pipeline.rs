@@ -61,8 +61,16 @@ const EPS: f32 = 1e-4;
 /// freely-placed objects to the front-right and overhead-left.
 fn authored_scene() -> ObjectScene {
     let mut scene = ObjectScene::new(BedLayout::Surround5_1_4);
-    scene.add_object(AudioObject::new(ObjectId(1), Vec3::new(3.0, 0.0, -4.0), 0.9));
-    scene.add_object(AudioObject::new(ObjectId(2), Vec3::new(-1.5, 2.5, -1.0), 0.6));
+    scene.add_object(AudioObject::new(
+        ObjectId(1),
+        Vec3::new(3.0, 0.0, -4.0),
+        0.9,
+    ));
+    scene.add_object(AudioObject::new(
+        ObjectId(2),
+        Vec3::new(-1.5, 2.5, -1.0),
+        0.6,
+    ));
     scene
 }
 
@@ -150,7 +158,12 @@ fn adm_master_ships_inside_bw64_and_round_trips() {
 
     // The chna table binds the track UID to its one audio track.
     let mut chna = ChnaChunk::new();
-    chna.push(AudioId::new(1, "ATU_00000001", "AC_00031001", "AP_00031001"));
+    chna.push(AudioId::new(
+        1,
+        "ATU_00000001",
+        "AC_00031001",
+        "AP_00031001",
+    ));
 
     // One mono 24-bit object track with a tiny deterministic payload.
     let format = WaveFormat::new(1, 1, 48_000, 24);
@@ -173,11 +186,19 @@ fn serial_adm_live_stream_round_trips_and_interpolates() {
     let mut sequence = SadmSequence::new(10.0);
 
     let mut first = SadmFrame::new(SadmFrameFormat::new(0, 0.0, 0.1, FrameType::Full));
-    first.push(SadmObjectUpdate::new(1, AdmPosition::new(0.0, 0.0, 1.0), 1.0));
+    first.push(SadmObjectUpdate::new(
+        1,
+        AdmPosition::new(0.0, 0.0, 1.0),
+        1.0,
+    ));
     sequence.push(first);
 
     let mut second = SadmFrame::new(SadmFrameFormat::new(1, 0.1, 0.1, FrameType::Divided));
-    second.push(SadmObjectUpdate::new(1, AdmPosition::new(40.0, 0.0, 1.0), 0.5));
+    second.push(SadmObjectUpdate::new(
+        1,
+        AdmPosition::new(40.0, 0.0, 1.0),
+        0.5,
+    ));
     sequence.push(second);
 
     // The live metadata stream survives a byte-exact serialisation round trip.
@@ -209,7 +230,12 @@ fn physical_array() -> ArrayLayout {
         Vec3::new(0.7, 0.7, 0.7),
     ];
     for (i, dir) in heights.iter().enumerate() {
-        layout.push(ArraySpeaker::from_direction(ring + i, *dir, radius, "height"));
+        layout.push(ArraySpeaker::from_direction(
+            ring + i,
+            *dir,
+            radius,
+            "height",
+        ));
     }
     layout
 }

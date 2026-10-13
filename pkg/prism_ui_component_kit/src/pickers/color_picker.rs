@@ -158,7 +158,11 @@ mod tests {
     }
 
     fn palette() -> Vec<StyleValue> {
-        [StyleValue::token("color.red"), StyleValue::token("color.blue")].into()
+        [
+            StyleValue::token("color.red"),
+            StyleValue::token("color.blue"),
+        ]
+        .into()
     }
 
     #[test]
@@ -203,21 +207,28 @@ mod tests {
             })
             .collect();
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].inline_pairs()[0].1, StyleValue::token("color.blue"));
+        assert_eq!(
+            selected[0].inline_pairs()[0].1,
+            StyleValue::token("color.blue")
+        );
     }
 
     #[test]
     fn custom_affordance_is_opt_in() {
         let plain = render(ColorPickerProps::new().swatches(palette()));
-        assert!(plain
-            .child_elements()
+        assert!(plain.child_elements().iter().all(|c| !c
+            .class_names()
             .iter()
-            .all(|c| !c.class_names().iter().any(|n| n == "pk-color-picker__custom")));
-        let custom = render(ColorPickerProps::new().swatches(palette()).allow_custom(true));
-        assert!(custom
-            .child_elements()
+            .any(|n| n == "pk-color-picker__custom")));
+        let custom = render(
+            ColorPickerProps::new()
+                .swatches(palette())
+                .allow_custom(true),
+        );
+        assert!(custom.child_elements().iter().any(|c| c
+            .class_names()
             .iter()
-            .any(|c| c.class_names().iter().any(|n| n == "pk-color-picker__custom")));
+            .any(|n| n == "pk-color-picker__custom")));
     }
 
     #[test]

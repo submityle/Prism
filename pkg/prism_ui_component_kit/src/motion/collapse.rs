@@ -116,11 +116,7 @@ mod tests {
 
     #[test]
     fn wraps_children() {
-        let el = render(
-            CollapseProps::new()
-                .open(true)
-                .child(Element::text("row")),
-        );
+        let el = render(CollapseProps::new().open(true).child(Element::text("row")));
         assert_eq!(el.child_elements().len(), 1);
     }
 }

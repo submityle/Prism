@@ -133,15 +133,15 @@ impl ReliableSender {
         };
         let message = self.in_flight.remove(index).expect("index from position");
         if !message.retransmitted {
-            let sample = now.saturating_sub(message.first_sent).min(u64::from(u32::MAX)) as u32;
+            let sample = now
+                .saturating_sub(message.first_sent)
+                .min(u64::from(u32::MAX)) as u32;
             // `srtt = (7 * srtt + sample) / 8`, computed in `u64` so the
             // intermediate `7 * srtt` cannot saturate (it would bias the estimate
             // once `srtt > u32::MAX / 7`).
             let smoothed = match self.srtt {
-                Some(previous) => {
-                    ((u64::from(previous) * 7 + u64::from(sample)) / 8).min(u64::from(u32::MAX))
-                        as u32
-                }
+                Some(previous) => ((u64::from(previous) * 7 + u64::from(sample)) / 8)
+                    .min(u64::from(u32::MAX)) as u32,
                 None => sample,
             };
             self.srtt = Some(smoothed);

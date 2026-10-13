@@ -115,6 +115,12 @@ pub mod wallclock;
 #[cfg(feature = "std")]
 pub mod process;
 
+/// Advanced asynchronous I/O: a batch submission / completion queue facade for
+/// high-throughput streaming reads (design doc §24.1).
+///
+/// Requires the `std` feature; absent in `no_std` builds.
+#[cfg(feature = "std")]
+pub mod aio;
 /// Standard stream handles (stdin/stdout/stderr) with `is_terminal` probes.
 ///
 /// Requires the `std` feature; absent in `no_std` builds.
@@ -125,12 +131,6 @@ pub mod stdio;
 /// Requires the `std` feature; absent in `no_std` builds.
 #[cfg(feature = "std")]
 pub mod thread;
-/// Advanced asynchronous I/O: a batch submission / completion queue facade for
-/// high-throughput streaming reads (design doc §24.1).
-///
-/// Requires the `std` feature; absent in `no_std` builds.
-#[cfg(feature = "std")]
-pub mod aio;
 
 /// Virtual memory: reserve/commit/decommit/release, aligned reservations,
 /// guard pages, optional large (huge) pages, page protection, and physical
@@ -159,11 +159,11 @@ pub mod topology;
 /// Pure `core`+`alloc`; available in every build configuration.
 pub mod security;
 
+#[cfg(feature = "std")]
+pub use aio::{AioError, AioQueue, Completion, IoPriority, ReadOp, Result as AioResult};
+pub use capability::{Capability, CapabilityDatabase, Category, Selection, Support, SupportLevel};
 pub use clock::{now, MonotonicNanos};
 pub use cpu::CpuInfo;
-pub use capability::{
-    Capability, CapabilityDatabase, Category, Selection, Support, SupportLevel,
-};
 pub use crash::{
     install as install_crash_handler, last_context as last_crash_context,
     supported as crash_capture_supported, uninstall as uninstall_crash_handler, Backtrace,
@@ -176,16 +176,13 @@ pub use fs::{mmap_supported, FsError, Mmap, MmapError, MmapMut, Result as FsResu
 #[cfg(feature = "watch")]
 pub use fs::{Event, EventKind, WatchBackend, WatchError, Watcher};
 pub use platform::{Os, Platform, PlatformCaps};
-pub use topology::power::{PowerPolicy, PowerSource, PowerState, ThermalState};
-pub use topology::qos::{qos_hint, EngineQos, OsQosHint};
-pub use topology::{CoreKind, CpuTopology, TopologyBuilder, TopologyCore, TopologyError};
+#[cfg(feature = "std")]
+pub use process::{Child, Command, ExitStatus, Output, Stdio};
 pub use security::{
     Access, IntegrityPolicy, LoadDecision, Mitigation, MitigationStatus, PostureBuilder,
     RejectReason, SandboxCapabilities, SandboxModel, SecurityPosture, SigningStatus,
     SigningStrictness, MITIGATION_COUNT,
 };
-#[cfg(feature = "std")]
-pub use process::{Child, Command, ExitStatus, Output, Stdio};
 #[cfg(feature = "std")]
 pub use stdio::{StandardError, StandardInput, StandardOutput, Stream};
 #[cfg(feature = "std")]
@@ -195,13 +192,14 @@ pub use thread::{
     Backoff, Builder as ThreadBuilder, JoinHandle, Once, Parker, SpinLock, SpinLockGuard, ThreadId,
     ThreadLocal, Unparker,
 };
+pub use topology::power::{PowerPolicy, PowerSource, PowerState, ThermalState};
+pub use topology::qos::{qos_hint, EngineQos, OsQosHint};
+pub use topology::{CoreKind, CpuTopology, TopologyBuilder, TopologyCore, TopologyError};
 #[cfg(feature = "std")]
 pub use vm::{
     huge_pages_supported, large_page_size, memory_info, page_size, virtual_memory_supported,
     MemoryInfo, MirroredRing, Protection, Reservation, VmError,
 };
-#[cfg(feature = "std")]
-pub use aio::{AioError, AioQueue, Completion, IoPriority, ReadOp, Result as AioResult};
 #[cfg(feature = "std")]
 pub use wallclock::{now as wall_now, sample as wall_sample, WallClock, WallClockSample, WallTime};
 

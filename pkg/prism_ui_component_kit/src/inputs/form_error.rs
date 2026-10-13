@@ -61,9 +61,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::FontSize, tok("font.size.footnote")),
     );
 
-    sheet.insert(
-        Class::new("pk-form-error__message").with(StyleProp::Color, tok("color.red")),
-    );
+    sheet.insert(Class::new("pk-form-error__message").with(StyleProp::Color, tok("color.red")));
 }
 
 #[cfg(test)]

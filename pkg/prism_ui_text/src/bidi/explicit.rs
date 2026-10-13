@@ -78,7 +78,12 @@ pub fn matching_isolates(classes: &[BidiClass]) -> (Vec<Option<usize>>, Vec<Opti
 
 /// Resolves the direction of a First Strong Isolate (X5c) by applying P2/P3 to
 /// the characters it isolates, skipping any nested isolates.
-fn fsi_is_rtl(classes: &[BidiClass], fsi: usize, pdi: Option<usize>, matching_pdi: &[Option<usize>]) -> bool {
+fn fsi_is_rtl(
+    classes: &[BidiClass],
+    fsi: usize,
+    pdi: Option<usize>,
+    matching_pdi: &[Option<usize>],
+) -> bool {
     let end = pdi.unwrap_or(classes.len());
     let mut j = fsi + 1;
     while j < end {
@@ -127,7 +132,11 @@ pub fn resolve_explicit(para_level: u8, orig: &[BidiClass]) -> Explicit {
                 let last = *stack.last().unwrap();
                 levels[i] = last.level;
                 let is_rtl = matches!(orig[i], RLE | RLO);
-                let new_level = if is_rtl { next_odd(last.level) } else { next_even(last.level) };
+                let new_level = if is_rtl {
+                    next_odd(last.level)
+                } else {
+                    next_even(last.level)
+                };
                 if new_level <= MAX_DEPTH && overflow_isolate == 0 && overflow_embedding == 0 {
                     let over = match orig[i] {
                         LRO => Override::Ltr,
@@ -153,7 +162,11 @@ pub fn resolve_explicit(para_level: u8, orig: &[BidiClass]) -> Explicit {
                     LRI => false,
                     _ => fsi_is_rtl(orig, i, matching_pdi[i], &matching_pdi),
                 };
-                let new_level = if is_rtl { next_odd(last.level) } else { next_even(last.level) };
+                let new_level = if is_rtl {
+                    next_odd(last.level)
+                } else {
+                    next_even(last.level)
+                };
                 if new_level <= MAX_DEPTH && overflow_isolate == 0 && overflow_embedding == 0 {
                     valid_isolate += 1;
                     stack.push(Status {
@@ -243,7 +256,11 @@ pub struct Sequence {
 
 /// Maps an embedding level to the boundary class implied by its parity.
 fn level_dir(level: u8) -> BidiClass {
-    if level.is_multiple_of(2) { L } else { R }
+    if level.is_multiple_of(2) {
+        L
+    } else {
+        R
+    }
 }
 
 /// Builds isolating run sequences from the explicit-level result (X10 / BD13).

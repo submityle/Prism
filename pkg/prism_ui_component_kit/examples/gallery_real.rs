@@ -33,7 +33,9 @@ use prism_ui_component_kit::gallery::{self, Showcase};
 use prism_ui_component_kit::stylesheet;
 use prism_ui_render_backend::raster::{rasterize, Framebuffer};
 use prism_ui_render_backend::scene::RetainedScene;
-use prism_ui_style::{Breakpoint, Color, Keyword, Length, StyleProp, StyleValue, Theme, TokenStore};
+use prism_ui_style::{
+    Breakpoint, Color, Keyword, Length, StyleProp, StyleValue, Theme, TokenStore,
+};
 use prism_ui_theme::{compile_theme, ThemeDefinition, ThemeMode};
 
 // --- gallery geometry (logical px) -----------------------------------------
@@ -85,15 +87,24 @@ fn tile(entry: Showcase) -> Element {
         .style(StyleProp::Height, len(CAPTION_H))
         .style(StyleProp::Display, StyleValue::Keyword(Keyword::Flex))
         .style(StyleProp::AlignItems, StyleValue::Keyword(Keyword::Center))
-        .style(StyleProp::JustifyContent, StyleValue::Keyword(Keyword::Center))
+        .style(
+            StyleProp::JustifyContent,
+            StyleValue::Keyword(Keyword::Center),
+        )
         .child(Element::text(entry.name).style(StyleProp::FontSize, len(11.0)));
     let body = Element::box_()
         .style(StyleProp::Width, len(CELL_W))
         .style(StyleProp::Height, len(CELL_H - CAPTION_H))
         .style(StyleProp::Display, StyleValue::Keyword(Keyword::Flex))
-        .style(StyleProp::FlexDirection, StyleValue::Keyword(Keyword::Column))
+        .style(
+            StyleProp::FlexDirection,
+            StyleValue::Keyword(Keyword::Column),
+        )
         .style(StyleProp::AlignItems, StyleValue::Keyword(Keyword::Center))
-        .style(StyleProp::JustifyContent, StyleValue::Keyword(Keyword::Center))
+        .style(
+            StyleProp::JustifyContent,
+            StyleValue::Keyword(Keyword::Center),
+        )
         .style(StyleProp::PaddingTop, len(10.0))
         .style(StyleProp::PaddingBottom, len(6.0))
         .style(StyleProp::PaddingLeft, len(10.0))
@@ -105,7 +116,10 @@ fn tile(entry: Showcase) -> Element {
         .style(StyleProp::MinWidth, len(CELL_W))
         .style(StyleProp::MinHeight, len(CELL_H))
         .style(StyleProp::Display, StyleValue::Keyword(Keyword::Flex))
-        .style(StyleProp::FlexDirection, StyleValue::Keyword(Keyword::Column))
+        .style(
+            StyleProp::FlexDirection,
+            StyleValue::Keyword(Keyword::Column),
+        )
         .child(body)
         .child(caption)
 }
@@ -116,7 +130,10 @@ fn gallery(instances: Vec<Showcase>, background: Color, width: f32, height: f32)
         .style(StyleProp::Width, len(width))
         .style(StyleProp::Height, len(height))
         .style(StyleProp::Display, StyleValue::Keyword(Keyword::Flex))
-        .style(StyleProp::FlexDirection, StyleValue::Keyword(Keyword::Column))
+        .style(
+            StyleProp::FlexDirection,
+            StyleValue::Keyword(Keyword::Column),
+        )
         .style(StyleProp::PaddingTop, len(PAD))
         .style(StyleProp::PaddingLeft, len(PAD))
         .style(StyleProp::PaddingRight, len(PAD))

@@ -344,9 +344,18 @@ mod tests {
         assert_eq!(
             report.entries(),
             &[
-                BatchEntry { batch_key: key(0), instance_count: 3 },
-                BatchEntry { batch_key: key(1), instance_count: 1 },
-                BatchEntry { batch_key: key(2), instance_count: 2 },
+                BatchEntry {
+                    batch_key: key(0),
+                    instance_count: 3
+                },
+                BatchEntry {
+                    batch_key: key(1),
+                    instance_count: 1
+                },
+                BatchEntry {
+                    batch_key: key(2),
+                    instance_count: 2
+                },
             ]
         );
         assert_eq!(report.largest_batch(), Some(report.entries()[0]));
@@ -377,7 +386,10 @@ mod tests {
         assert!(!report.contains(key(25)));
         assert_eq!(
             report.batch(key(10)),
-            Some(BatchEntry { batch_key: key(10), instance_count: 2 })
+            Some(BatchEntry {
+                batch_key: key(10),
+                instance_count: 2
+            })
         );
         assert_eq!(report.batch(key(25)), None);
         assert_eq!(report.instance_count_of(key(40)), 1);

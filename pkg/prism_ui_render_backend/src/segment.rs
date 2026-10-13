@@ -153,13 +153,31 @@ mod tests {
         // Whenever a point is returned, it must sit on both segments.
         let mut state = 0x1357_2468_ACE0_9BDF_u64;
         for _ in 0..2000 {
-            let a0 = (rand_in(&mut state, -10.0, 10.0), rand_in(&mut state, -10.0, 10.0));
-            let a1 = (rand_in(&mut state, -10.0, 10.0), rand_in(&mut state, -10.0, 10.0));
-            let b0 = (rand_in(&mut state, -10.0, 10.0), rand_in(&mut state, -10.0, 10.0));
-            let b1 = (rand_in(&mut state, -10.0, 10.0), rand_in(&mut state, -10.0, 10.0));
+            let a0 = (
+                rand_in(&mut state, -10.0, 10.0),
+                rand_in(&mut state, -10.0, 10.0),
+            );
+            let a1 = (
+                rand_in(&mut state, -10.0, 10.0),
+                rand_in(&mut state, -10.0, 10.0),
+            );
+            let b0 = (
+                rand_in(&mut state, -10.0, 10.0),
+                rand_in(&mut state, -10.0, 10.0),
+            );
+            let b1 = (
+                rand_in(&mut state, -10.0, 10.0),
+                rand_in(&mut state, -10.0, 10.0),
+            );
             if let Some(p) = segment_intersection(a0, a1, b0, b1) {
-                assert!(point_segment_distance(p, a0, a1) < 1e-2, "off segment a: {p:?}");
-                assert!(point_segment_distance(p, b0, b1) < 1e-2, "off segment b: {p:?}");
+                assert!(
+                    point_segment_distance(p, a0, a1) < 1e-2,
+                    "off segment a: {p:?}"
+                );
+                assert!(
+                    point_segment_distance(p, b0, b1) < 1e-2,
+                    "off segment b: {p:?}"
+                );
             }
         }
     }
@@ -170,10 +188,22 @@ mod tests {
         // independent straddle predicate.
         let mut state = 0xACE0_9BDF_1357_2468_u64;
         for _ in 0..4000 {
-            let a0 = (rand_in(&mut state, -8.0, 8.0), rand_in(&mut state, -8.0, 8.0));
-            let a1 = (rand_in(&mut state, -8.0, 8.0), rand_in(&mut state, -8.0, 8.0));
-            let b0 = (rand_in(&mut state, -8.0, 8.0), rand_in(&mut state, -8.0, 8.0));
-            let b1 = (rand_in(&mut state, -8.0, 8.0), rand_in(&mut state, -8.0, 8.0));
+            let a0 = (
+                rand_in(&mut state, -8.0, 8.0),
+                rand_in(&mut state, -8.0, 8.0),
+            );
+            let a1 = (
+                rand_in(&mut state, -8.0, 8.0),
+                rand_in(&mut state, -8.0, 8.0),
+            );
+            let b0 = (
+                rand_in(&mut state, -8.0, 8.0),
+                rand_in(&mut state, -8.0, 8.0),
+            );
+            let b1 = (
+                rand_in(&mut state, -8.0, 8.0),
+                rand_in(&mut state, -8.0, 8.0),
+            );
             // Skip near-parallel and near-touching configs where the open-segment
             // predicate and the closed-segment solver legitimately differ.
             let r = (a1.0 - a0.0, a1.1 - a0.1);
@@ -206,10 +236,22 @@ mod tests {
         // Swapping the two segments yields the same crossing point.
         let mut state = 0x9BDF_1357_2468_ACE0_u64;
         for _ in 0..2000 {
-            let a0 = (rand_in(&mut state, -6.0, 6.0), rand_in(&mut state, -6.0, 6.0));
-            let a1 = (rand_in(&mut state, -6.0, 6.0), rand_in(&mut state, -6.0, 6.0));
-            let b0 = (rand_in(&mut state, -6.0, 6.0), rand_in(&mut state, -6.0, 6.0));
-            let b1 = (rand_in(&mut state, -6.0, 6.0), rand_in(&mut state, -6.0, 6.0));
+            let a0 = (
+                rand_in(&mut state, -6.0, 6.0),
+                rand_in(&mut state, -6.0, 6.0),
+            );
+            let a1 = (
+                rand_in(&mut state, -6.0, 6.0),
+                rand_in(&mut state, -6.0, 6.0),
+            );
+            let b0 = (
+                rand_in(&mut state, -6.0, 6.0),
+                rand_in(&mut state, -6.0, 6.0),
+            );
+            let b1 = (
+                rand_in(&mut state, -6.0, 6.0),
+                rand_in(&mut state, -6.0, 6.0),
+            );
             let ab = segment_intersection(a0, a1, b0, b1);
             let ba = segment_intersection(b0, b1, a0, a1);
             match (ab, ba) {

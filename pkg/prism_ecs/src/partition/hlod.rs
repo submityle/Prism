@@ -228,7 +228,11 @@ fn footprint_distance(viewpoint: CellCoord, origin: CellCoord, extent: i32) -> i
     let dy = axis(viewpoint.y, origin.y, extent);
     let dz = axis(viewpoint.z, origin.z, extent);
     let m = if dx > dy { dx } else { dy };
-    if m > dz { m } else { dz }
+    if m > dz {
+        m
+    } else {
+        dz
+    }
 }
 
 /// Hierarchical LOD proxy scheduler (design §13.1).
@@ -473,22 +477,35 @@ mod tests {
     #[test]
     fn footprint_distance_is_zero_inside_and_grows_outside() {
         // Block of extent 4 anchored at origin (0,0,0): covers 0..=3 per axis.
-        assert_eq!(footprint_distance(CellCoord::new(1, 1, 1), CellCoord::ORIGIN, 4), 0);
-        assert_eq!(footprint_distance(CellCoord::new(5, 1, 1), CellCoord::ORIGIN, 4), 2); // 5 - 3
-        assert_eq!(footprint_distance(CellCoord::new(-2, 0, 0), CellCoord::ORIGIN, 4), 2); // 0 - (-2)
+        assert_eq!(
+            footprint_distance(CellCoord::new(1, 1, 1), CellCoord::ORIGIN, 4),
+            0
+        );
+        assert_eq!(
+            footprint_distance(CellCoord::new(5, 1, 1), CellCoord::ORIGIN, 4),
+            2
+        ); // 5 - 3
+        assert_eq!(
+            footprint_distance(CellCoord::new(-2, 0, 0), CellCoord::ORIGIN, 4),
+            2
+        ); // 0 - (-2)
     }
 
     #[test]
     fn footprint_reports_covered_cells() {
         let mut hlod = Hlod::new();
         hlod.push_layer(4, 8);
-        let fp = hlod.footprint(HlodProxyId::new(0, CellCoord::new(2, -1, 0))).unwrap();
+        let fp = hlod
+            .footprint(HlodProxyId::new(0, CellCoord::new(2, -1, 0)))
+            .unwrap();
         assert_eq!(fp.origin, CellCoord::new(8, -4, 0));
         assert_eq!(fp.extent, 4);
         assert_eq!(fp.max_corner(), CellCoord::new(12, 0, 4));
         assert_eq!(fp.cell_count(), 64);
         // Unregistered layer -> None.
-        assert!(hlod.footprint(HlodProxyId::new(1, CellCoord::ORIGIN)).is_none());
+        assert!(hlod
+            .footprint(HlodProxyId::new(1, CellCoord::ORIGIN))
+            .is_none());
     }
 
     #[test]
@@ -585,7 +602,10 @@ mod tests {
 
         let mut sorted = delta.to_show.clone();
         sorted.sort_unstable();
-        assert_eq!(delta.to_show, sorted, "to_show must be sorted by (level, x, y, z)");
+        assert_eq!(
+            delta.to_show, sorted,
+            "to_show must be sorted by (level, x, y, z)"
+        );
     }
 
     #[test]

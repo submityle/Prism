@@ -60,7 +60,11 @@ fn token(seed: u8) -> AccessToken {
 /// Translates a validated authoring write into the matching live-tuning edit,
 /// reproducing the engine-side command dispatch from the remote command set
 /// onto the smoothed tuning channels. Returns the coarse kind that was applied.
-fn apply_to_tuner(tuner: &mut LiveTuner, cmd: &AuthoringCommand, smoothing: Smoothing) -> CommandKind {
+fn apply_to_tuner(
+    tuner: &mut LiveTuner,
+    cmd: &AuthoringCommand,
+    smoothing: Smoothing,
+) -> CommandKind {
     match *cmd {
         AuthoringCommand::SetParameter { target, value } => {
             tuner.tune(TuningTarget::Rtpc(target.0), value, smoothing);
@@ -93,8 +97,7 @@ fn authorized_command_dispatches_through_transport_to_engine() {
     let secret = token(7);
     let auth = Authenticator::with_gate(true, secret, CapabilitySet::full());
 
-    let (mut tool, mut engine) =
-        InProcessTransport::<AuthoringCommand, TelemetrySnapshot>::pair();
+    let (mut tool, mut engine) = InProcessTransport::<AuthoringCommand, TelemetrySnapshot>::pair();
 
     let cmd = AuthoringCommand::SetParameter {
         target: ParameterTarget(11),
@@ -222,7 +225,10 @@ fn session_negotiation_gates_the_write_capability() {
         bus: BusId(1),
         gain_db: 0.0,
     };
-    assert_eq!(write.validate(&read_only), Err(CommandError::WritesDisabled));
+    assert_eq!(
+        write.validate(&read_only),
+        Err(CommandError::WritesDisabled)
+    );
 
     // When both ends permit writes, the negotiated allow-list admits them.
     let both_write = tool_caps.negotiate(&tool_caps);
@@ -252,14 +258,15 @@ fn full_session_lifecycle_runs_authorized_tuning_pipeline() {
         allow_write: true,
     };
     let agreed = tool_caps.negotiate(&device_caps);
-    session.complete_handshake(agreed).expect("handshake completes");
+    session
+        .complete_handshake(agreed)
+        .expect("handshake completes");
     assert!(session.is_connected());
 
     let secret = token(21);
     let auth = Authenticator::with_gate(true, secret, caps_from_session(&agreed));
 
-    let (mut tool, mut engine) =
-        InProcessTransport::<AuthoringCommand, TelemetrySnapshot>::pair();
+    let (mut tool, mut engine) = InProcessTransport::<AuthoringCommand, TelemetrySnapshot>::pair();
 
     let writes = [
         AuthoringCommand::SetParameter {
@@ -284,7 +291,10 @@ fn full_session_lifecycle_runs_authorized_tuning_pipeline() {
     // First edits seed settled, so the audible values match the requests.
     assert!(tuner.is_settled());
     assert!(close(tuner.current(TuningTarget::Rtpc(1)).unwrap(), 0.8));
-    assert!(close(tuner.current(TuningTarget::BusGain(2)).unwrap(), -3.0));
+    assert!(close(
+        tuner.current(TuningTarget::BusGain(2)).unwrap(),
+        -3.0
+    ));
 
     // Engine publishes one telemetry snapshot; the tool mirrors it read-only.
     let snapshot = TelemetrySnapshot {
@@ -375,9 +385,17 @@ fn live_tuner_glide_is_bit_identical_across_runs() {
     fn run() -> Vec<u32> {
         let mut tuner = LiveTuner::new(1_000);
         tuner.tune(TuningTarget::Rtpc(1), 0.0, Smoothing::Immediate);
-        tuner.tune(TuningTarget::Rtpc(1), 1.0, Smoothing::ExponentialSeconds(0.01));
+        tuner.tune(
+            TuningTarget::Rtpc(1),
+            1.0,
+            Smoothing::ExponentialSeconds(0.01),
+        );
         tuner.tune(TuningTarget::BusGain(2), -12.0, Smoothing::Immediate);
-        tuner.tune(TuningTarget::BusGain(2), -3.0, Smoothing::LinearSeconds(0.02));
+        tuner.tune(
+            TuningTarget::BusGain(2),
+            -3.0,
+            Smoothing::LinearSeconds(0.02),
+        );
 
         let mut trace = Vec::new();
         for _ in 0..64 {

@@ -100,7 +100,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::Color, tok("color.label"))
             .with_glass(0.0, tok("color.fill"), Some(tok("glass.highlight")))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     // Preview chip: a small square showing the resolved color (fill inline).
@@ -152,8 +156,14 @@ mod tests {
         assert_eq!(el.class_names(), ["pk-color-input"]);
         let kids = el.child_elements();
         assert_eq!(kids.len(), 2);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-color-input__swatch"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-color-input__text"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-color-input__swatch"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-color-input__text"));
         assert_eq!(kids[1].kind(), &ElementKind::Custom("input".into()));
     }
 

@@ -118,7 +118,12 @@ pub fn texture_lod(uv_ddx: [f32; 2], uv_ddy: [f32; 2], tex_width: u32, tex_heigh
 /// Returns `1.0` when either axis has zero length (isotropic / degenerate).
 /// Anisotropic sampling clamps this to the hardware's maximum anisotropy.
 #[must_use]
-pub fn texture_anisotropy(uv_ddx: [f32; 2], uv_ddy: [f32; 2], tex_width: u32, tex_height: u32) -> f32 {
+pub fn texture_anisotropy(
+    uv_ddx: [f32; 2],
+    uv_ddy: [f32; 2],
+    tex_width: u32,
+    tex_height: u32,
+) -> f32 {
     let w = texels_to_f32(tex_width);
     let h = texels_to_f32(tex_height);
     let ax = uv_ddx[0] * w;

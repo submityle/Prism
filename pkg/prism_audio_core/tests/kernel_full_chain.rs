@@ -216,16 +216,25 @@ fn voice_pool_steals_lowest_priority_when_oversubscribed() {
         behavior: VirtualBehavior::ContinueVirtual,
     };
 
-    let low = pool.allocate(make(10)).expect("first voice fits physically");
-    let mid = pool.allocate(make(20)).expect("second voice fits physically");
+    let low = pool
+        .allocate(make(10))
+        .expect("first voice fits physically");
+    let mid = pool
+        .allocate(make(20))
+        .expect("second voice fits physically");
     assert_eq!(pool.physical_count(), 2);
 
     // A higher-priority request with no free physical slot steals the lowest.
-    let high = pool.allocate(make(30)).expect("high-priority voice allocates");
+    let high = pool
+        .allocate(make(30))
+        .expect("high-priority voice allocates");
     assert_eq!(pool.physical_count(), 2, "physical budget is respected");
     assert!(pool.is_physical(high), "winner is physical");
     assert!(pool.is_physical(mid), "mid priority survives");
-    assert!(pool.is_virtual(low), "lowest priority is virtualized, not killed");
+    assert!(
+        pool.is_virtual(low),
+        "lowest priority is virtualized, not killed"
+    );
     assert_eq!(
         pool.get(low).expect("virtual voice still tracked").state,
         VoiceState::Virtual

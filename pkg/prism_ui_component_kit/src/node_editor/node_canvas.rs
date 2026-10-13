@@ -103,7 +103,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::MinHeight, StyleValue::px(320.0))
             .with_padding_x(tok("space.lg"))
             .with_padding_y(tok("space.lg"))
-            .with(StyleProp::BackgroundColor, tok("color.background.secondary"))
+            .with(
+                StyleProp::BackgroundColor,
+                tok("color.background.secondary"),
+            )
             .with(StyleProp::BorderRadius, tok("radius.lg"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator")),

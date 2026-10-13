@@ -15,8 +15,8 @@ use crate::inputs::{
     PinInputProps, Radio, RadioGroup, RadioGroupProps, RadioProps, RangeSlider, RangeSliderProps,
     SearchField, SearchFieldProps, Select, SelectProps, Slider, SliderProps, Stepper, StepperProps,
     TagInput, TagInputProps, TextArea, TextAreaProps, TextField, TextFieldProps, Toggle,
-    ToggleGroup, ToggleGroupProps, ToggleProps, Transfer, TransferProps, TreeSelect, TreeSelectNode,
-    TreeSelectProps,
+    ToggleGroup, ToggleGroupProps, ToggleProps, Transfer, TransferProps, TreeSelect,
+    TreeSelectNode, TreeSelectProps,
 };
 use crate::ControlSize;
 
@@ -132,17 +132,17 @@ pub fn instances() -> Vec<Showcase> {
         ),
         Showcase::new(
             "FormError / Message",
-            mount_component(
-                &FormError,
-                FormErrorProps::new("This field is required."),
-            ),
+            mount_component(&FormError, FormErrorProps::new("This field is required."),),
         ),
         Showcase::new(
             "FormField / Full",
             mount_component(
                 &FormField,
                 FormFieldProps::new()
-                    .label(mount_component(&FormLabel, FormLabelProps::new("Email").required(true)))
+                    .label(mount_component(
+                        &FormLabel,
+                        FormLabelProps::new("Email").required(true)
+                    ))
                     .control(mount_component(
                         &TextField,
                         TextFieldProps::new().placeholder("you@example.com"),
@@ -157,10 +157,7 @@ pub fn instances() -> Vec<Showcase> {
         ),
         Showcase::new(
             "FormLabel / Required",
-            mount_component(
-                &FormLabel,
-                FormLabelProps::new("Password").required(true),
-            ),
+            mount_component(&FormLabel, FormLabelProps::new("Password").required(true),),
         ),
         Showcase::new(
             "InputGroup / Prefix+Suffix",
@@ -241,14 +238,11 @@ pub fn instances() -> Vec<Showcase> {
                 &TreeSelect,
                 TreeSelectProps::new()
                     .roots([
-                        TreeSelectNode::new("Fruits")
-                            .expanded(true)
-                            .children([
-                                TreeSelectNode::new("Apple").selected(true),
-                                TreeSelectNode::new("Banana"),
-                            ]),
-                        TreeSelectNode::new("Vegetables")
-                            .children([TreeSelectNode::new("Carrot")]),
+                        TreeSelectNode::new("Fruits").expanded(true).children([
+                            TreeSelectNode::new("Apple").selected(true),
+                            TreeSelectNode::new("Banana"),
+                        ]),
+                        TreeSelectNode::new("Vegetables").children([TreeSelectNode::new("Carrot")]),
                     ])
                     .open(true),
             ),
@@ -291,10 +285,7 @@ pub fn instances() -> Vec<Showcase> {
             "PinInput / Masked",
             mount_component(
                 &PinInput,
-                PinInputProps::new()
-                    .length(6)
-                    .value("1234")
-                    .masked(true),
+                PinInputProps::new().length(6).value("1234").masked(true),
             ),
         ),
         Showcase::new(

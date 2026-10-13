@@ -38,15 +38,26 @@ pub enum TextureSemantic {
     /// shared [`crate::MEASURED_BRDF_SEMANTIC`]; the table's atlas layout is
     /// documented on that constant.
     MeasuredBrdf,
+    /// Region-illumination mask. Its discriminant is the shared
+    /// [`crate::ILLUMINATION_MASK_SEMANTIC`]; the visibility raster consumes it
+    /// to select Lit/Stylized per region without changing the material ABI.
+    IlluminationMask,
 }
 
 // The enum discriminants are the ABI semantic bytes; keep `FaceShadowSdf`
 // pinned to the crate-wide constant its non-bevy producer and every shader
 // consumer share.
 const _: () = assert!(TextureSemantic::FaceShadowSdf as u32 == crate::FACE_SHADOW_SDF_SEMANTIC);
+const _: () = assert!(TextureSemantic::MeasuredBrdf as u32 == crate::MEASURED_BRDF_SEMANTIC);
 const _: () =
-    assert!(TextureSemantic::MeasuredBrdf as u32 == crate::MEASURED_BRDF_SEMANTIC);
+    assert!(TextureSemantic::IlluminationMask as u32 == crate::ILLUMINATION_MASK_SEMANTIC);
 
+/// Resolves authored image handles into material texture rows.
+///
+/// A resolver that has no page-table-backed VT integration must return
+/// [`GpuMaterialTexture::non_virtual`] rows. The production render-scene
+/// resolver follows that rule explicitly; this trait does not imply that an
+/// image has been virtualized merely because the ABI can carry VT metadata.
 pub trait StandardMaterialTextureResolver {
     fn resolve(&mut self, image: AssetId<Image>, semantic: TextureSemantic) -> GpuMaterialTexture;
 }
@@ -83,7 +94,7 @@ pub fn import_openpbr_surface(
     };
     GpuSurfaceParameters {
         base_color: material.base_color.to_linear().to_f32_array(),
-        emission_color: emission_color,
+        emission_color,
         emission_luminance,
         base_metalness: material.metallic,
         specular_roughness: material.perceptual_roughness,

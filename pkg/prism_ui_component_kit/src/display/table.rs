@@ -140,7 +140,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Display, kw(Keyword::Flex))
             .with(StyleProp::FlexDirection, kw(Keyword::Column))
             .with(StyleProp::BorderRadius, tok("radius.md"))
-            .with(StyleProp::BackgroundColor, tok("color.background.secondary")),
+            .with(
+                StyleProp::BackgroundColor,
+                tok("color.background.secondary"),
+            ),
     );
 
     // Bordered: a hairline outer border.
@@ -229,12 +232,7 @@ mod tests {
 
     #[test]
     fn body_rows_follow_head() {
-        let el = render(
-            TableProps::new()
-                .columns(["A"])
-                .row(["1"])
-                .row(["2"]),
-        );
+        let el = render(TableProps::new().columns(["A"]).row(["1"]).row(["2"]));
         let children = el.child_elements();
         assert_eq!(children.len(), 3);
         assert_eq!(children[1].class_names(), ["pk-table__row"]);
@@ -252,9 +250,18 @@ mod tests {
                 .striped(true),
         );
         let rows = &el.child_elements()[1..];
-        assert!(!rows[0].class_names().iter().any(|n| n == "pk-table__row--striped"));
-        assert!(rows[1].class_names().iter().any(|n| n == "pk-table__row--striped"));
-        assert!(!rows[2].class_names().iter().any(|n| n == "pk-table__row--striped"));
+        assert!(!rows[0]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-table__row--striped"));
+        assert!(rows[1]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-table__row--striped"));
+        assert!(!rows[2]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-table__row--striped"));
     }
 
     #[test]

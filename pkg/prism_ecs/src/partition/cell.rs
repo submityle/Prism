@@ -302,8 +302,8 @@ impl CellStreamer {
             if state == CellState::Unloading {
                 continue; // already in flight; don't re-emit.
             }
-            let kept = eligible(coord)
-                && interests.iter().any(|i| i.ring_distance(coord) <= unload_r);
+            let kept =
+                eligible(coord) && interests.iter().any(|i| i.ring_distance(coord) <= unload_r);
             if !kept {
                 evicting.push(coord);
             }
@@ -672,6 +672,9 @@ mod tests {
         let interests = [CellCoord::new(0, 0, 0), CellCoord::new(2, -1, 3)];
         let mut a = CellStreamer::new(1, 2);
         let mut b = CellStreamer::new(1, 2);
-        assert_eq!(a.update(&interests), b.update_filtered(&interests, |_| true));
+        assert_eq!(
+            a.update(&interests),
+            b.update_filtered(&interests, |_| true)
+        );
     }
 }

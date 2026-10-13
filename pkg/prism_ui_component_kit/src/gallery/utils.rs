@@ -8,9 +8,7 @@ use prism_ui::Element;
 use prism_ui_component::mount_component;
 
 use super::Showcase;
-use crate::utils::{
-    CopyButton, CopyButtonProps, QrCode, QrCodeProps, Watermark, WatermarkProps,
-};
+use crate::utils::{CopyButton, CopyButtonProps, QrCode, QrCodeProps, Watermark, WatermarkProps};
 
 /// Real, named instances of every *visible* `utils` control.
 #[must_use]
@@ -33,7 +31,10 @@ pub fn instances() -> Vec<Showcase> {
         ),
         Showcase::new(
             "QrCode / Data",
-            mount_component(&QrCode, QrCodeProps::new("https://example.com").size_px(96.0)),
+            mount_component(
+                &QrCode,
+                QrCodeProps::new("https://example.com").size_px(96.0)
+            ),
         ),
     ]
 }

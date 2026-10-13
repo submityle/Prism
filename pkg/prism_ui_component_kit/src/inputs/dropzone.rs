@@ -138,14 +138,20 @@ mod tests {
     fn renders_label() {
         let el = render(DropzoneProps::new("Drop files here"));
         assert_eq!(el.class_names(), ["pk-dropzone"]);
-        assert_eq!(el.child_elements()[0].text_content(), Some("Drop files here"));
+        assert_eq!(
+            el.child_elements()[0].text_content(),
+            Some("Drop files here")
+        );
     }
 
     #[test]
     fn active_and_disabled_add_modifiers() {
         let el = render(DropzoneProps::new("x").active(true).disabled(true));
         assert!(el.class_names().iter().any(|c| c == "pk-dropzone--active"));
-        assert!(el.class_names().iter().any(|c| c == "pk-dropzone--disabled"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-dropzone--disabled"));
     }
 
     #[test]

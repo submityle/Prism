@@ -98,7 +98,9 @@ impl<S: ReplicationStrategy> Replication<S> {
     /// # Errors
     /// [`SessionError::Prediction`] when the predicted state is not retained.
     pub fn predict(&mut self, input: S::Input) -> Result<u32, SessionError> {
-        let Self { session, strategy, .. } = self;
+        let Self {
+            session, strategy, ..
+        } = self;
         session.predict(input, |record, input| strategy.simulate(record, input))
     }
 
@@ -237,7 +239,7 @@ fn pump_replication<S: ReplicationStrategy>(mut replication: ResMut<Replication<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::{FieldKind, FieldValue, encode_snapshot};
+    use crate::delta::{encode_snapshot, FieldKind, FieldValue};
     use crate::session::ServerSession;
     use crate::transport::memory::InMemoryTransport;
     use alloc::vec;
@@ -290,8 +292,7 @@ mod tests {
         // The authority speaks the same reliable channel as the client, so the
         // datagrams on the wire are real ARQ packets.
         let mut server = ServerSession::new(schema(), 8, &snapshot_at(0, 0)).unwrap();
-        let mut server_channel =
-            ReliableChannel::new(server_end, DEFAULT_MIN_RTO, DEFAULT_WINDOW);
+        let mut server_channel = ReliableChannel::new(server_end, DEFAULT_MIN_RTO, DEFAULT_WINDOW);
 
         let mut app = App::new();
         app.add_plugins(ReplicationPlugin::new(
@@ -307,7 +308,7 @@ mod tests {
             app.world_mut()
                 .resource_mut::<Replication<Add>>()
                 .predict(5)
-            .unwrap(),
+                .unwrap(),
             1
         );
         assert_eq!(
@@ -333,7 +334,11 @@ mod tests {
 
         let replication = app.world().resource::<Replication<Add>>();
         assert_eq!(replication.acked(), 1, "authority confirmed");
-        assert_eq!(int(replication.state().unwrap()), 3, "prediction rolled back");
+        assert_eq!(
+            int(replication.state().unwrap()),
+            3,
+            "prediction rolled back"
+        );
 
         // The client's ACK reached authority: one more tick retires the message.
         server_channel.tick();

@@ -29,8 +29,8 @@
 
 extern crate alloc;
 
-use core::fmt;
 use alloc::sync::Arc;
+use core::fmt;
 use std::sync::{Mutex, MutexGuard};
 
 use prism_render_driver::{
@@ -38,9 +38,7 @@ use prism_render_driver::{
     RenderDevice, RequestAdapterOptions, Surface, SurfaceConfig, SurfaceError, TextureState,
     TextureUsages,
 };
-use prism_render_graph::{
-    CompileError, ImportedTexture, RenderGraph, TextureDesc, TextureHandle,
-};
+use prism_render_graph::{CompileError, ImportedTexture, RenderGraph, TextureDesc, TextureHandle};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 mod capture;

@@ -29,14 +29,12 @@
 use core::cell::Cell;
 use std::rc::Rc;
 
-use prism_window::WindowId;
 use prism_window::envelope::WindowEventEnvelope;
 use prism_window::event::WindowEvent as KernelWindowEvent;
 use prism_window::geometry::PhysicalSize;
+use prism_window::WindowId;
 use prism_window_winit::runner::WinitApp;
-use prism_window_winit::{
-    FrameOutcome, WindowConfig, WinitBackend, WinitRunner as PlatformRunner,
-};
+use prism_window_winit::{FrameOutcome, WindowConfig, WinitBackend, WinitRunner as PlatformRunner};
 
 use crate::app::App;
 use crate::exit::{AppExit, AppExitRequest};
@@ -388,7 +386,11 @@ mod tests {
             .app
             .world()
             .resource::<prism_ecs::event::Events<LowMemory>>();
-        assert_eq!(events.len(), 1, "memory warning buffers one LowMemory event");
+        assert_eq!(
+            events.len(),
+            1,
+            "memory warning buffers one LowMemory event"
+        );
     }
 
     #[test]

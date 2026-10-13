@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use crate::component::Component;
 use crate::entity::Entity;
-use crate::extract::{ExtractComponent, ExtractResource, extract_components, extract_resource};
+use crate::extract::{extract_components, extract_resource, ExtractComponent, ExtractResource};
 use crate::query::{Changed, With};
 use crate::resource::Resource;
 use crate::world::World;
@@ -113,7 +113,10 @@ fn a_missing_or_declining_resource_leaves_the_secondary_world_alone() {
     // And publishes once it stops declining.
     main.insert_resource(Paused(false));
     assert!(extract_resource::<Paused>(&main, &mut secondary));
-    assert_eq!(secondary.get_resource::<PausedView>(), Some(&PausedView(false)));
+    assert_eq!(
+        secondary.get_resource::<PausedView>(),
+        Some(&PausedView(false))
+    );
 }
 
 #[test]
@@ -126,7 +129,11 @@ fn components_spawn_one_secondary_entity_per_extracted_row() {
 
     let mapping = extract_components::<Health>(&mut main, &mut secondary);
 
-    assert_eq!(mapping.len(), 1, "only the extracted row produces an entity");
+    assert_eq!(
+        mapping.len(),
+        1,
+        "only the extracted row produces an entity"
+    );
     assert_eq!(mapping[0].0, full);
     assert_eq!(
         secondary.get::<HealthBar>(mapping[0].1),
@@ -154,10 +161,18 @@ fn extraction_never_mutates_or_dirty_marks_the_simulation() {
     let before = main.get::<Health>(e).copied();
     let _ = extract_components::<Health>(&mut main, &mut secondary);
 
-    assert_eq!(main.get::<Health>(e).copied(), before, "values are untouched");
+    assert_eq!(
+        main.get::<Health>(e).copied(),
+        before,
+        "values are untouched"
+    );
     // A read-only extraction must not look like a write to change detection.
     let changed = main.query_filtered::<&Health, Changed<Health>>();
-    assert_eq!(changed.iter(&main).count(), 0, "extraction must not dirty rows");
+    assert_eq!(
+        changed.iter(&main).count(),
+        0,
+        "extraction must not dirty rows"
+    );
 }
 
 #[test]

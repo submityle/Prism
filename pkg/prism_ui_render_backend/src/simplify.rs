@@ -282,7 +282,10 @@ mod tests {
     fn sharp_corner_is_preserved() {
         // A clear spike well above epsilon must survive.
         let pts = [(0.0, 0.0), (5.0, 10.0), (10.0, 0.0)];
-        assert_eq!(simplify(&pts, 0.5), vec![(0.0, 0.0), (5.0, 10.0), (10.0, 0.0)]);
+        assert_eq!(
+            simplify(&pts, 0.5),
+            vec![(0.0, 0.0), (5.0, 10.0), (10.0, 0.0)]
+        );
     }
 
     #[test]
@@ -322,7 +325,10 @@ mod tests {
             let simp = simplify(&pts, eps);
             for &p in &pts {
                 let d = point_polyline_distance(p, &simp);
-                assert!(d <= eps + 1e-3, "point {p:?} is {d} from simplified (eps {eps})");
+                assert!(
+                    d <= eps + 1e-3,
+                    "point {p:?} is {d} from simplified (eps {eps})"
+                );
             }
         }
     }

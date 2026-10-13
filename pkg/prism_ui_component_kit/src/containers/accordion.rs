@@ -177,8 +177,14 @@ mod tests {
     fn each_item_has_header_then_panel() {
         let el = render(
             AccordionProps::new()
-                .item(AccordionItem::new(Element::text("A"), Element::text("body A")))
-                .item(AccordionItem::new(Element::text("B"), Element::text("body B"))),
+                .item(AccordionItem::new(
+                    Element::text("A"),
+                    Element::text("body A"),
+                ))
+                .item(AccordionItem::new(
+                    Element::text("B"),
+                    Element::text("body B"),
+                )),
         );
         let items = el.child_elements();
         assert_eq!(items.len(), 2);
@@ -186,16 +192,23 @@ mod tests {
             assert_eq!(item.class_names(), ["pk-accordion__item"]);
             let kids = item.child_elements();
             assert_eq!(kids.len(), 2);
-            assert!(kids[0].class_names().iter().any(|c| c == "pk-accordion__header"));
-            assert!(kids[1].class_names().iter().any(|c| c == "pk-accordion__panel"));
+            assert!(kids[0]
+                .class_names()
+                .iter()
+                .any(|c| c == "pk-accordion__header"));
+            assert!(kids[1]
+                .class_names()
+                .iter()
+                .any(|c| c == "pk-accordion__panel"));
         }
     }
 
     #[test]
     fn open_item_carries_marker() {
-        let el = render(AccordionProps::new().item(
-            AccordionItem::new(Element::text("Open"), Element::text("body")).open(true),
-        ));
+        let el = render(
+            AccordionProps::new()
+                .item(AccordionItem::new(Element::text("Open"), Element::text("body")).open(true)),
+        );
         let item = &el.child_elements()[0];
         assert_eq!(item.class_names(), ["pk-accordion__item", "is-open"]);
     }

@@ -225,7 +225,8 @@ impl GpuBatchBuilder {
                 .expect("a chunk batch_key is an interned shared-value id and must fit u32");
             let batch_key = SharedValueId::new(raw);
             for offset in 0..chunk.rows {
-                self.scratch.push((batch_key, (chunk.first_row + offset) as u32));
+                self.scratch
+                    .push((batch_key, (chunk.first_row + offset) as u32));
             }
         }
         self.finish()
@@ -403,7 +404,10 @@ mod tests {
         assert_eq!(builder.plan().visible_instance_count(), 1);
         assert_eq!(builder.plan().batch_count(), 1);
         assert_eq!(builder.plan().batches()[0].batch_key, key(9));
-        assert_eq!(builder.plan().indices_for(&builder.plan().batches()[0]), &[7]);
+        assert_eq!(
+            builder.plan().indices_for(&builder.plan().batches()[0]),
+            &[7]
+        );
 
         // Building from nothing empties it again.
         builder.build(&[]);

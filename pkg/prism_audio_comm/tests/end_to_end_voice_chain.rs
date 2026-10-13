@@ -41,7 +41,11 @@ use prism_audio_comm::{
 
 /// Branch-only absolute value, avoiding the standard-library `f32::abs`.
 fn fabs(x: Sample) -> Sample {
-    if x < 0.0 { -x } else { x }
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
 }
 
 /// Returns `true` when `a` and `b` are within `eps`, used instead of a direct
@@ -330,7 +334,9 @@ fn codec_roundtrip_is_lossless_within_quantization() {
     assert_eq!(payload.len(), frame * 2);
 
     let mut output = Vec::new();
-    let decoded = codec.decode(&payload, &mut output).expect("payload decodes");
+    let decoded = codec
+        .decode(&payload, &mut output)
+        .expect("payload decodes");
     assert_eq!(decoded, frame);
     assert_eq!(output.len(), frame);
     for (a, b) in input.iter().zip(output.iter()) {

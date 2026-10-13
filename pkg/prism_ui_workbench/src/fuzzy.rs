@@ -340,7 +340,10 @@ mod tests {
         // mid-word in the second.
         let anchored = fuzzy_match("b", "a b").expect("anchored").score();
         let interior = fuzzy_match("b", "ab").expect("interior").score();
-        assert!(anchored > interior, "anchored={anchored} interior={interior}");
+        assert!(
+            anchored > interior,
+            "anchored={anchored} interior={interior}"
+        );
     }
 
     #[test]

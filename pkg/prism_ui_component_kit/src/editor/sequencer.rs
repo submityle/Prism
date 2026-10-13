@@ -226,12 +226,14 @@ mod tests {
     #[test]
     fn track_lays_out_label_then_lane_with_keyframes() {
         let el = render(
-            SequencerProps::new()
-                .track(SequencerTrack::new("Opacity").keyframes([0.0, 0.5, 1.0])),
+            SequencerProps::new().track(SequencerTrack::new("Opacity").keyframes([0.0, 0.5, 1.0])),
         );
         let row = &el.child_elements()[0];
         assert_eq!(row.class_names(), ["pk-sequencer__track"]);
-        assert_eq!(row.child_elements()[0].class_names(), ["pk-sequencer__label"]);
+        assert_eq!(
+            row.child_elements()[0].class_names(),
+            ["pk-sequencer__label"]
+        );
         let lane = &row.child_elements()[1];
         assert_eq!(lane.class_names(), ["pk-sequencer__lane"]);
         assert_eq!(lane.child_elements().len(), 3);
@@ -239,9 +241,7 @@ mod tests {
 
     #[test]
     fn keyframe_position_is_inline_margin_percent() {
-        let el = render(
-            SequencerProps::new().track(SequencerTrack::new("x").keyframes([0.25])),
-        );
+        let el = render(SequencerProps::new().track(SequencerTrack::new("x").keyframes([0.25])));
         let marker = &el.child_elements()[0].child_elements()[1].child_elements()[0];
         assert_eq!(
             marker.inline_pairs(),

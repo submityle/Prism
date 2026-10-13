@@ -117,9 +117,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Display, kw(Keyword::Flex))
             .with(StyleProp::FlexDirection, kw(Keyword::Column)),
     );
-    sheet.insert(
-        Class::new("pk-cascader--open").with(StyleProp::Opacity, StyleValue::number(1.0)),
-    );
+    sheet.insert(Class::new("pk-cascader--open").with(StyleProp::Opacity, StyleValue::number(1.0)));
 
     sheet.insert(
         Class::new("pk-cascader__column")
@@ -144,7 +142,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.secondary"),
+            ),
     );
     sheet.insert(
         Class::new("pk-cascader__option--active")

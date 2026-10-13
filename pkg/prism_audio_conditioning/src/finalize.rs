@@ -169,9 +169,9 @@ pub fn finalize(
 mod tests {
     use super::*;
     use crate::loop_point::LoopMode;
-    use prism_audio_core::buffer::ChannelLayout;
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
+    use prism_audio_core::buffer::ChannelLayout;
 
     /// Builds a mono program whose sample at frame `i` is `i as f32`, so trims
     /// and rebases can be checked by value.

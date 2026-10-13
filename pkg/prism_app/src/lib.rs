@@ -220,26 +220,24 @@ pub mod diagnostics;
 pub mod event;
 pub mod exit;
 pub mod fixed;
+#[cfg(feature = "hot-reload")]
+pub mod hot_reload;
 pub mod lifecycle;
 #[cfg(feature = "std")]
 pub mod pacing;
-#[cfg(feature = "hot-reload")]
-pub mod hot_reload;
-#[cfg(feature = "multi_thread")]
-pub mod tasks;
+#[cfg(feature = "determinism")]
+pub mod peer_sync;
 #[cfg(feature = "pipelined")]
 pub mod pipelined;
 pub mod platform_tier;
 pub mod plugin;
 pub mod plugin_graph;
 pub mod plugin_group;
+#[cfg(feature = "reflect")]
+pub mod reflect_config;
 pub mod rollback;
 #[cfg(feature = "determinism")]
 pub mod rollback_replay;
-#[cfg(feature = "determinism")]
-pub mod peer_sync;
-#[cfg(feature = "reflect")]
-pub mod reflect_config;
 pub mod run_mode;
 pub mod runner;
 pub mod schedule;
@@ -247,6 +245,8 @@ pub mod settings;
 pub mod state;
 pub mod sub_app;
 pub mod sub_app_label;
+#[cfg(feature = "multi_thread")]
+pub mod tasks;
 pub mod time;
 #[cfg(feature = "trace")]
 pub mod trace;
@@ -284,20 +284,20 @@ pub use lifecycle::{
 pub use pacing::{
     AdaptiveAction, AdaptiveFrameLimiter, FrameLimit, FramePacer, FrameRateLadder, FrameStats,
 };
+#[cfg(feature = "determinism")]
+pub use peer_sync::{reconcile_with_peer, PeerAuthoritative, ReconcileOutcome};
 #[cfg(feature = "pipelined")]
 pub use pipelined::PipelinedExecutor;
 pub use platform_tier::PlatformTierProfile;
 pub use plugin::{Plugin, PluginDependency};
 pub use plugin_graph::PluginGraphError;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
-pub use run_mode::RunMode;
+#[cfg(feature = "reflect")]
+pub use reflect_config::{clamp_and_validate, schema_for};
 pub use rollback::SnapshotHistory;
 #[cfg(feature = "determinism")]
 pub use rollback_replay::RollbackReplay;
-#[cfg(feature = "determinism")]
-pub use peer_sync::{reconcile_with_peer, PeerAuthoritative, ReconcileOutcome};
-#[cfg(feature = "reflect")]
-pub use reflect_config::{clamp_and_validate, schema_for};
+pub use run_mode::RunMode;
 pub use runner::{run_once, HeadlessRunner, ScheduleRunnerOnce};
 #[cfg(feature = "winit")]
 pub use runner::{run_windowed, window_actions, WindowAction, WindowSettings, WinitRunner};
@@ -308,14 +308,14 @@ pub use schedule::{
     Startup, StateTransition, Update,
 };
 pub use settings::{SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer};
-#[cfg(feature = "trace")]
-pub use trace::{PhaseEvent, PhaseTrace};
 pub use state::{
     ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
 };
 pub use sub_app::{ExtractFn, SubApp, SubApps};
 pub use sub_app_label::{BoxedSubAppLabel, SubAppLabel};
 pub use time::{EngineClocks, TimeUpdateStrategy};
+#[cfg(feature = "trace")]
+pub use trace::{PhaseEvent, PhaseTrace};
 #[cfg(feature = "std")]
 pub use watchdog::{FrameStall, FrameWatchdog, StallHandler, WatchdogConfig};
 
@@ -346,6 +346,8 @@ pub mod prelude {
         AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
         FixedPreUpdate, FixedUpdate,
     };
+    #[cfg(feature = "hot-reload")]
+    pub use crate::hot_reload::{ConfigHotReload, ReloadOutcome};
     pub use crate::lifecycle::{
         AppLifecycle, DeviceLost, DeviceRestored, FocusChanged, LowMemory, Resumed, Suspended,
         WillRenderFirstFrame,
@@ -356,10 +358,6 @@ pub mod prelude {
     };
     #[cfg(feature = "pipelined")]
     pub use crate::pipelined::PipelinedExecutor;
-    #[cfg(feature = "hot-reload")]
-    pub use crate::hot_reload::{ConfigHotReload, ReloadOutcome};
-    #[cfg(feature = "multi_thread")]
-    pub use crate::tasks::TaskPoolResource;
     pub use crate::platform_tier::PlatformTierProfile;
     pub use crate::plugin::{Plugin, PluginDependency};
     pub use crate::plugin_graph::PluginGraphError;
@@ -380,6 +378,8 @@ pub mod prelude {
     };
     pub use crate::sub_app::{ExtractFn, SubApp, SubApps};
     pub use crate::sub_app_label::{BoxedSubAppLabel, SubAppLabel};
+    #[cfg(feature = "multi_thread")]
+    pub use crate::tasks::TaskPoolResource;
     pub use crate::time::{EngineClocks, TimeUpdateStrategy};
     #[cfg(feature = "std")]
     pub use crate::watchdog::{FrameStall, FrameWatchdog, StallHandler, WatchdogConfig};

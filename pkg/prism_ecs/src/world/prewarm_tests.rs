@@ -23,7 +23,10 @@ impl Component for Required {}
 struct Faction(u32);
 impl Component for Faction {
     const STORAGE: StorageType = StorageType::Shared;
-    fn install_storage_glue(components: &mut crate::component::Components, id: crate::component::ComponentId) {
+    fn install_storage_glue(
+        components: &mut crate::component::Components,
+        id: crate::component::ComponentId,
+    ) {
         components.set_shared_box(id, crate::component::shared_box_of::<Self>());
     }
 }
@@ -57,13 +60,17 @@ fn prewarm_creates_the_archetype_and_reserves_capacity_without_spawning() {
     // A later spawn of the same bundle lands in the warmed archetype, so the
     // reservation actually pays off.
     let e = world.spawn((Pos(1), Vel(2)));
-    let landed = world
-        .entities()
-        .location(e)
-        .expect("spawned")
-        .archetype_id;
+    let landed = world.entities().location(e).expect("spawned").archetype_id;
     assert_eq!(landed, archetype);
-    assert!(world.archetypes().get(landed).expect("live").table().capacity() >= 1024);
+    assert!(
+        world
+            .archetypes()
+            .get(landed)
+            .expect("live")
+            .table()
+            .capacity()
+            >= 1024
+    );
 }
 
 #[test]
@@ -80,7 +87,15 @@ fn prewarm_includes_required_components() {
         warmed
     );
     assert!(world.has::<Required>(e), "the required component was added");
-    assert!(world.archetypes().get(warmed).expect("live").table().capacity() >= 64);
+    assert!(
+        world
+            .archetypes()
+            .get(warmed)
+            .expect("live")
+            .table()
+            .capacity()
+            >= 64
+    );
 }
 
 #[test]

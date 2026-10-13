@@ -166,7 +166,8 @@ impl Component for Console {
         el = el.child(toolbar);
 
         for entry in &props.entries {
-            let level = Element::text(String::from(entry.level.suffix())).class("pk-log-view__level");
+            let level =
+                Element::text(String::from(entry.level.suffix())).class("pk-log-view__level");
             let message = Code
                 .render(&CodeProps::new(entry.message.clone()))
                 .class("pk-log-view__message");
@@ -201,7 +202,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Display, kw(Keyword::Flex))
             .with(StyleProp::FlexDirection, kw(Keyword::Column))
             .with(StyleProp::Gap, tok("space.xxs"))
-            .with(StyleProp::BackgroundColor, tok("color.background.secondary"))
+            .with(
+                StyleProp::BackgroundColor,
+                tok("color.background.secondary"),
+            )
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with_padding_x(tok("space.sm"))
             .with_padding_y(tok("space.sm")),
@@ -236,9 +240,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
         sheet.insert(Class::new(name).with(StyleProp::Color, tok(level.color_token())));
     }
 
-    sheet.insert(
-        Class::new("pk-log-view__message").with(StyleProp::Color, tok("color.label")),
-    );
+    sheet.insert(Class::new("pk-log-view__message").with(StyleProp::Color, tok("color.label")));
 }
 
 #[cfg(test)]
@@ -260,9 +262,7 @@ mod tests {
 
     #[test]
     fn row_carries_level_modifier_and_message() {
-        let el = render(
-            ConsoleProps::new().entry(LogEntry::new(LogLevel::Error, "boom")),
-        );
+        let el = render(ConsoleProps::new().entry(LogEntry::new(LogLevel::Error, "boom")));
         let row = &el.child_elements()[1];
         assert_eq!(
             row.class_names(),

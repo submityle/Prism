@@ -100,9 +100,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Bubble: tightens the composed popover surface for a compact caption.
-    sheet.insert(
-        Class::new("pk-tooltip__bubble").with(StyleProp::MaxWidth, tok("space.xxxl")),
-    );
+    sheet.insert(Class::new("pk-tooltip__bubble").with(StyleProp::MaxWidth, tok("space.xxxl")));
 
     // Caption: footnote type on the glass surface.
     sheet.insert(
@@ -128,7 +126,10 @@ mod tests {
         let kids = el.child_elements();
         assert_eq!(kids.len(), 2);
         assert!(kids[0].class_names().iter().any(|c| c == "trigger"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-tooltip__bubble"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-tooltip__bubble"));
     }
 
     #[test]
@@ -136,7 +137,10 @@ mod tests {
         let el = render(TooltipProps::new("Help"));
         let bubble = &el.child_elements()[0];
         assert!(bubble.class_names().iter().any(|c| c == "pk-popover"));
-        assert!(bubble.class_names().iter().any(|c| c == "pk-tooltip__bubble"));
+        assert!(bubble
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-tooltip__bubble"));
     }
 
     #[test]
@@ -150,6 +154,9 @@ mod tests {
             .expect("surface");
         let caption = &surface.child_elements()[0];
         assert_eq!(caption.text_content(), Some("Save file"));
-        assert!(caption.class_names().iter().any(|c| c == "pk-tooltip__caption"));
+        assert!(caption
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-tooltip__caption"));
     }
 }

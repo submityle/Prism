@@ -218,7 +218,10 @@ mod tests {
         let divider = &el.child_elements()[1];
         assert_eq!(
             divider.class_names(),
-            ["pk-split-view__divider", "pk-split-view__divider--resizable"]
+            [
+                "pk-split-view__divider",
+                "pk-split-view__divider--resizable"
+            ]
         );
     }
 

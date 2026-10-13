@@ -14,10 +14,15 @@
 use alloc::vec::Vec;
 
 use prism_image::Image;
-use prism_render_driver::{Extent3d, RenderDevice, RenderQueue, SamplerId, TextureFormat, TextureViewId};
+use prism_render_driver::{
+    BindGroupDescriptor, BindGroupEntry, BindGroupId, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindGroupLayoutId, BindingResource, BindingType, BufferBindingType,
+    BufferId, Extent3d, Features, RenderDevice, RenderQueue, SamplerBindingType, SamplerId,
+    ShaderStages, TextureFormat, TextureSampleType, TextureViewDimension, TextureViewId,
+};
 
 use super::texture_heap::TextureSlotHeap;
-use crate::image::{GpuImage, prepare_image};
+use crate::image::{prepare_image, GpuImage};
 use crate::render_asset::RenderAssets;
 
 /// The three reserved fallback textures every bindless array carries.
@@ -152,3 +157,148 @@ impl MaterialTextureSlots {
     }
 }
 
+/// The material ABI's binding: three storage buffers plus the two bindless
+/// arrays every material texture resolves through.
+///
+/// The bindings mirror what the shading passes read — the header row, the packed
+/// parameter block its offset names, its texture rows, and the slot-addressed
+/// texture/sampler arrays — so a material's data reaches a shader without the
+/// shader knowing which material it is.
+pub struct MaterialBindingLayout {
+    layout: BindGroupLayoutId,
+    /// How many elements the two arrays hold (the slot heap's capacity).
+    pub slots: u32,
+}
+
+impl MaterialBindingLayout {
+    /// Builds the layout against `device`, or `None` when the device cannot bind
+    /// descriptor arrays.
+    ///
+    /// Bindless is a capability, not a given: a backend that cannot index a
+    /// texture array dynamically has nothing to bind here, and the caller must
+    /// take its non-bindless path rather than build a group the shader cannot
+    /// use.
+    #[must_use]
+    pub fn new(device: &dyn RenderDevice, slots: u32) -> Option<Self> {
+        if !device.capabilities().features.contains(Features::BINDLESS) {
+            return None;
+        }
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("prism material".into()),
+            entries: Self::entries(slots),
+        });
+        Some(Self { layout, slots })
+    }
+
+    /// The RHI layout id.
+    #[must_use]
+    pub const fn layout(&self) -> BindGroupLayoutId {
+        self.layout
+    }
+
+    /// Builds the group: the three ABI buffers plus the slot arrays.
+    ///
+    /// `rows` may be absent for an app that has not created the texture table yet;
+    /// the binding then carries a zero-sized view of the header buffer, because a
+    /// group must bind *something* at every slot its layout declares.
+    #[must_use]
+    pub fn create_group(
+        &self,
+        device: &dyn RenderDevice,
+        headers: BufferId,
+        parameters: BufferId,
+        rows: Option<BufferId>,
+        slots: &MaterialTextureSlots,
+    ) -> BindGroupId {
+        let buffer = |buffer: BufferId| BindingResource::Buffer {
+            buffer,
+            offset: 0,
+            size: None,
+        };
+        device.create_bind_group(&BindGroupDescriptor {
+            label: Some("prism material".into()),
+            layout: Some(self.layout),
+            entries: alloc::vec![
+                BindGroupEntry {
+                    binding: 0,
+                    resource: buffer(headers),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: buffer(parameters),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: buffer(rows.unwrap_or(headers)),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::TextureViewArray(slots.views().to_vec()),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: BindingResource::SamplerArray(slots.samplers().to_vec()),
+                },
+            ],
+        })
+    }
+
+    /// The layout's bindings, so a test or a reflection pass can inspect them
+    /// without a device.
+    ///
+    /// Group layout: `0` headers, `1` parameters, `2` texture rows, `3` texture
+    /// array, `4` sampler array. The two arrays carry a `count`, because an array
+    /// binding with `count = None` would silently bind a single resource where
+    /// the shader indexes dynamically.
+    #[must_use]
+    pub fn entries(slots: u32) -> alloc::vec::Vec<BindGroupLayoutEntry> {
+        alloc::vec![
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::TextureArray {
+                    sample_type: TextureSampleType::Float,
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: Some(slots),
+            },
+            BindGroupLayoutEntry {
+                binding: 4,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::SamplerArray(SamplerBindingType::Filtering),
+                count: Some(slots),
+            },
+        ]
+    }
+}

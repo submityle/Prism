@@ -245,7 +245,11 @@ impl TickAgeReport {
     /// The oldest tick age anywhere in the world (`0` for an empty census or a
     /// world whose every tick is current).
     pub fn max_age(&self) -> u32 {
-        self.entries.iter().map(|e| e.oldest_age()).max().unwrap_or(0)
+        self.entries
+            .iter()
+            .map(|e| e.oldest_age())
+            .max()
+            .unwrap_or(0)
     }
 
     /// The archetype carrying the oldest tick (ties, including an all-current
@@ -278,7 +282,11 @@ impl TickAgeReport {
         let age = self.max_age() as u64;
         let bound = Tick::MAX_CHANGE_AGE as u64;
         let permille = age * 1000 / bound;
-        if permille > 1000 { 1000 } else { permille }
+        if permille > 1000 {
+            1000
+        } else {
+            permille
+        }
     }
 
     /// Whether the oldest tick has aged past the clamp bound — a
@@ -324,7 +332,13 @@ mod tests {
     struct Position(f32, f32);
     impl Component for Position {}
 
-    fn entry(id: u32, added: u32, changed: u32, chunk: u32, saturated: usize) -> ArchetypeTickAgeEntry {
+    fn entry(
+        id: u32,
+        added: u32,
+        changed: u32,
+        chunk: u32,
+        saturated: usize,
+    ) -> ArchetypeTickAgeEntry {
         ArchetypeTickAgeEntry {
             id: ArchetypeId::new(id),
             cell_count: 1,
@@ -432,7 +446,11 @@ mod tests {
         // Supplied out of id order; two archetypes share the oldest age.
         let report = TickAgeReport::from_entries(
             Tick::new(0),
-            alloc::vec![entry(7, 0, 100, 0, 0), entry(2, 100, 0, 0, 0), entry(5, 0, 0, 10, 0)],
+            alloc::vec![
+                entry(7, 0, 100, 0, 0),
+                entry(2, 100, 0, 0, 0),
+                entry(5, 0, 0, 10, 0)
+            ],
         );
         let ids: Vec<_> = report.entries().iter().map(|e| e.id.index()).collect();
         assert_eq!(ids, alloc::vec![2, 5, 7]);

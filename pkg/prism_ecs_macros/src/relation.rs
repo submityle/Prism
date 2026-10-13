@@ -220,9 +220,7 @@ mod tests {
         };
         let out = expand_str(di);
         assert!(out.contains("on_delete : prism_ecs :: relation :: CleanupPolicy :: Panic"));
-        assert!(
-            out.contains("on_delete_target : prism_ecs :: relation :: CleanupPolicy :: Delete")
-        );
+        assert!(out.contains("on_delete_target : prism_ecs :: relation :: CleanupPolicy :: Delete"));
     }
 
     #[test]
@@ -232,9 +230,7 @@ mod tests {
             struct ChildOf;
         };
         let out = expand_str(di);
-        assert!(
-            out.contains("on_delete_target : prism_ecs :: relation :: CleanupPolicy :: Delete")
-        );
+        assert!(out.contains("on_delete_target : prism_ecs :: relation :: CleanupPolicy :: Delete"));
     }
 
     #[test]

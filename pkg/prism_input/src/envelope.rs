@@ -265,7 +265,10 @@ mod tests {
     fn sequence_next_saturates() {
         assert_eq!(InputEventSequence::ZERO.next(), InputEventSequence(1));
         assert_eq!(InputEventSequence(5).get(), 5);
-        assert_eq!(InputEventSequence(u64::MAX).next(), InputEventSequence(u64::MAX));
+        assert_eq!(
+            InputEventSequence(u64::MAX).next(),
+            InputEventSequence(u64::MAX)
+        );
     }
 
     #[test]
@@ -286,8 +289,11 @@ mod tests {
         assert!(s1 < s2);
 
         // Earlier timestamp wins regardless of sequence.
-        let earlier =
-            PlatformInputStamp::new(MonotonicTimestamp::from_nanos(50), InputEventSequence(99), InputSource::Gamepad);
+        let earlier = PlatformInputStamp::new(
+            MonotonicTimestamp::from_nanos(50),
+            InputEventSequence(99),
+            InputSource::Gamepad,
+        );
         assert!(earlier < s1);
     }
 
@@ -319,7 +325,8 @@ mod tests {
             InputEventSequence(9),
             InputSource::Keyboard,
         );
-        let env = InputEventEnvelope::new(stamp, InputDeviceId::from_raw(3), key_event(KeyCode::KeyA));
+        let env =
+            InputEventEnvelope::new(stamp, InputDeviceId::from_raw(3), key_event(KeyCode::KeyA));
         // Copy semantics: using `env` after copying must still compile and hold.
         let copied = env;
         assert_eq!(copied, env);
@@ -331,12 +338,20 @@ mod tests {
     #[test]
     fn envelope_stamp_order_matches_stamp() {
         let e_early = InputEventEnvelope::new(
-            PlatformInputStamp::new(MonotonicTimestamp::from_nanos(1), InputEventSequence(0), InputSource::Mouse),
+            PlatformInputStamp::new(
+                MonotonicTimestamp::from_nanos(1),
+                InputEventSequence(0),
+                InputSource::Mouse,
+            ),
             InputDeviceId::from_raw(1),
             key_event(KeyCode::KeyA),
         );
         let e_late = InputEventEnvelope::new(
-            PlatformInputStamp::new(MonotonicTimestamp::from_nanos(2), InputEventSequence(0), InputSource::Mouse),
+            PlatformInputStamp::new(
+                MonotonicTimestamp::from_nanos(2),
+                InputEventSequence(0),
+                InputSource::Mouse,
+            ),
             InputDeviceId::from_raw(1),
             key_event(KeyCode::KeyB),
         );

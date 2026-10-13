@@ -203,9 +203,18 @@ mod tests {
         );
         let children = el.child_elements();
         assert_eq!(children.len(), 3);
-        assert!(children[0].class_names().iter().any(|c| c == "pk-nav-bar__leading"));
-        assert!(children[1].class_names().iter().any(|c| c == "pk-nav-bar__title"));
-        assert!(children[2].class_names().iter().any(|c| c == "pk-nav-bar__trailing"));
+        assert!(children[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-nav-bar__leading"));
+        assert!(children[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-nav-bar__title"));
+        assert!(children[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-nav-bar__trailing"));
         assert_eq!(children[2].child_elements().len(), 2);
     }
 }

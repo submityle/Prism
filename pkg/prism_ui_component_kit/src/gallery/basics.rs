@@ -22,15 +22,24 @@ pub fn instances() -> Vec<Showcase> {
         // Button — a few key variants.
         Showcase::new(
             "Button / Filled",
-            mount_component(&Button, ButtonProps::new("Save").variant(ButtonVariant::Filled)),
+            mount_component(
+                &Button,
+                ButtonProps::new("Save").variant(ButtonVariant::Filled)
+            ),
         ),
         Showcase::new(
             "Button / Tinted",
-            mount_component(&Button, ButtonProps::new("Edit").variant(ButtonVariant::Tinted)),
+            mount_component(
+                &Button,
+                ButtonProps::new("Edit").variant(ButtonVariant::Tinted)
+            ),
         ),
         Showcase::new(
             "Button / Plain",
-            mount_component(&Button, ButtonProps::new("Cancel").variant(ButtonVariant::Plain)),
+            mount_component(
+                &Button,
+                ButtonProps::new("Cancel").variant(ButtonVariant::Plain)
+            ),
         ),
         // Text — a couple of roles/tones.
         Showcase::new(
@@ -41,7 +50,9 @@ pub fn instances() -> Vec<Showcase> {
             "Text / Headline",
             mount_component(
                 &Text,
-                TextProps::new("Headline").role(TextRole::Headline).tone(TextTone::Secondary),
+                TextProps::new("Headline")
+                    .role(TextRole::Headline)
+                    .tone(TextTone::Secondary),
             ),
         ),
         // Heading — two levels.
@@ -112,10 +123,7 @@ pub fn instances() -> Vec<Showcase> {
             ),
         ),
         // Kbd.
-        Showcase::new(
-            "Kbd / Enter",
-            mount_component(&Kbd, KbdProps::new("Enter")),
-        ),
+        Showcase::new("Kbd / Enter", mount_component(&Kbd, KbdProps::new("Enter")),),
         // Code — inline + block.
         Showcase::new(
             "Code / Inline",
@@ -130,7 +138,9 @@ pub fn instances() -> Vec<Showcase> {
             "Image / Contain",
             mount_component(
                 &Image,
-                ImageProps::new("photo.png").alt("A photo").fit(ImageFit::Contain),
+                ImageProps::new("photo.png")
+                    .alt("A photo")
+                    .fit(ImageFit::Contain),
             ),
         ),
         // AsyncImage — loaded phase paints the resolved src.

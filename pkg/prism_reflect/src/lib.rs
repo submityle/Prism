@@ -87,19 +87,19 @@ mod from_reflect;
 mod func;
 mod impls;
 pub mod integration;
-pub mod net_delta;
-pub mod property_bridge;
 mod kinds;
 #[cfg(feature = "math")]
 mod math_impls;
+pub mod net_delta;
 mod path;
+pub mod property_bridge;
 mod reflect;
 mod reflect_trait;
 mod registry;
 mod runtime_type;
 pub mod schema;
-pub mod static_info;
 mod ser;
+pub mod static_info;
 mod type_data;
 mod type_info;
 
@@ -111,6 +111,7 @@ pub mod __macro_exports {
     pub use alloc::boxed::Box;
 }
 
+pub use accessor::{AccessError, AccessPlan, FieldAccess, FieldAccessor};
 pub use apply::ApplyError;
 pub use diff::{diff, merge, DiffError, Patch};
 pub use dynamic::{
@@ -130,7 +131,6 @@ pub use ser::{
     from_binary, from_binary_with_limits, from_ron, to_binary, to_ron, DeserializeError,
     DeserializeLimits, SerializeError, StableTypeId,
 };
-pub use accessor::{AccessError, AccessPlan, FieldAccess, FieldAccessor};
 pub use static_info::{StaticField, StaticKind, StaticTypeInfo, StaticTyped};
 pub use type_data::{ReflectDefault, TypeData};
 pub use type_info::{
@@ -145,10 +145,12 @@ pub use integration::{
     ScriptBridge, ScriptError,
 };
 pub use net_delta::{
-    apply_delta, decode_and_apply, decode_delta, encode_delta, DeltaError, DirtyMask,
-    FieldDelta, ReplicationState,
+    apply_delta, decode_and_apply, decode_delta, encode_delta, DeltaError, DirtyMask, FieldDelta,
+    ReplicationState,
 };
-pub use property_bridge::{properties, PropertyBridge, PropertyDescriptor, PropertyError, PropertyKind};
+pub use property_bridge::{
+    properties, PropertyBridge, PropertyDescriptor, PropertyError, PropertyKind,
+};
 pub use schema::{
     AttributeValue, FieldMetadata, MigrateError, Migration, SchemaRegistry, SchemaVersion,
     TypeMetadata, TypeSchema, ValidationError,
@@ -156,11 +158,11 @@ pub use schema::{
 
 /// Convenient re-exports for downstream crates.
 pub mod prelude {
+    pub use crate::accessor::{AccessError, AccessPlan, FieldAccess, FieldAccessor};
     pub use crate::integration::{
         apply_replicated, inspect, replicated_diff, DynamicScene, InspectorNode, ReplicationPlan,
         ReplicationPolicy, ScriptBridge,
     };
-    pub use crate::accessor::{AccessError, AccessPlan, FieldAccess, FieldAccessor};
     pub use crate::net_delta::{
         apply_delta, decode_and_apply, decode_delta, encode_delta, DeltaError, DirtyMask,
         FieldDelta, ReplicationState,
@@ -169,24 +171,23 @@ pub mod prelude {
         properties, PropertyBridge, PropertyDescriptor, PropertyError, PropertyKind,
     };
     pub use crate::reflect_trait;
-    pub use crate::static_info::{StaticField, StaticKind, StaticTypeInfo, StaticTyped};
     pub use crate::schema::{
         from_versioned_binary, from_versioned_ron, to_versioned_binary, to_versioned_ron, validate,
         validate_version, AttributeValue, FieldMetadata, MigrateError, Migration, SchemaRegistry,
         SchemaVersion, TypeMetadata, TypeSchema, ValidationError,
     };
+    pub use crate::static_info::{StaticField, StaticKind, StaticTypeInfo, StaticTyped};
     pub use crate::{
         diff, from_binary, from_binary_with_limits, from_ron, merge, reflect_path,
         reflect_path_mut, to_binary, to_ron, Access, ApplyError, ArgList, Array, ArrayInfo,
-        DeserializeError, DeserializeLimits, DiffError, DynamicArray,
-        DynamicEnum, DynamicFunction, DynamicList, DynamicMap, DynamicSet, DynamicStruct,
-        DynamicTupleStruct, DynamicVariant, Enum, EnumInfo, EnumTypeBuilder, FromReflect,
-        FunctionError, FunctionInfo, FunctionRegistry, GetTypeRegistration, IntoFunction, List,
-        ListInfo, Map, MapInfo, NamedField, ParsePathError, ParsedPath, Patch, Reflect,
-        ReflectDefault, ReflectMut, ReflectRef, SerializeError, Set, SetInfo, StableTypeId, Struct,
-        StructInfo, StructTypeBuilder, TupleStruct, TupleStructInfo, TypeData, TypeInfo,
-        TypeRegistration, TypeRegistry, Typed, UnnamedField, ValueInfo, VariantInfo, VariantKind,
-        VariantType,
+        DeserializeError, DeserializeLimits, DiffError, DynamicArray, DynamicEnum, DynamicFunction,
+        DynamicList, DynamicMap, DynamicSet, DynamicStruct, DynamicTupleStruct, DynamicVariant,
+        Enum, EnumInfo, EnumTypeBuilder, FromReflect, FunctionError, FunctionInfo,
+        FunctionRegistry, GetTypeRegistration, IntoFunction, List, ListInfo, Map, MapInfo,
+        NamedField, ParsePathError, ParsedPath, Patch, Reflect, ReflectDefault, ReflectMut,
+        ReflectRef, SerializeError, Set, SetInfo, StableTypeId, Struct, StructInfo,
+        StructTypeBuilder, TupleStruct, TupleStructInfo, TypeData, TypeInfo, TypeRegistration,
+        TypeRegistry, Typed, UnnamedField, ValueInfo, VariantInfo, VariantKind, VariantType,
     };
     pub use prism_reflect_macros::{Accessors, StaticTyped};
 }

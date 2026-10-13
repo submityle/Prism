@@ -38,12 +38,12 @@
 mod capture;
 mod column;
 mod delta;
+#[cfg(feature = "determinism")]
+mod determinism;
 mod hash;
 mod resource;
 mod restore;
 mod rollback;
-#[cfg(feature = "determinism")]
-mod determinism;
 
 use alloc::vec::Vec;
 
@@ -55,11 +55,11 @@ use crate::world::World;
 use column::SnapshotColumn;
 use resource::SnapshotResource;
 
+pub use delta::SnapshotDelta;
 #[cfg(feature = "determinism")]
 pub use determinism::{
-    FrameHash, FrameHashLog, SnapshotDivergence, TickDivergence, locate_divergence,
+    locate_divergence, FrameHash, FrameHashLog, SnapshotDivergence, TickDivergence,
 };
-pub use delta::SnapshotDelta;
 pub use hash::FnvHasher;
 pub use rollback::SnapshotRing;
 
@@ -211,10 +211,7 @@ impl WorldSnapshot {
             return false;
         }
         for (a, b) in self.resources.iter().zip(&other.resources) {
-            if a.id() != b.id()
-                || a.type_id() != b.type_id()
-                || a.value_hash() != b.value_hash()
-            {
+            if a.id() != b.id() || a.type_id() != b.type_id() || a.value_hash() != b.value_hash() {
                 return false;
             }
         }

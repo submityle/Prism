@@ -22,7 +22,7 @@
 | P0 | `prism_tasks` | work-stealing + fiber 作业图（设计见 `prism_tasks_design_zh.md`） | `bevy_tasks` |
 | P0 | `prism_app` | App/Plugin/Schedule/固定阶段/主循环（设计见 `prism_app_design_zh.md`） | `bevy_app` |
 | P0 | `prism_reflect` | 反射/序列化/类型注册 | `bevy_reflect` |
-| P1 | `prism_asset` | 资产 ID/加载器/依赖图/热重载/烘焙 | `bevy_asset` |
+| P1 | `prism_asset` | 资产 ID/加载器/依赖图/热重载（离线烘焙/DDC/打包归 `Prism Asset Build`） | `bevy_asset` |
 | P1 | `prism_render_driver`(RHI) | 后端无关图形抽象（Vulkan/Metal/DX12/WebGPU，设计见 `prism_render_driver_design_zh.md`） | `bevy_render` 底层 |
 | P1 | `prism_window` + `prism_input` | 窗口/事件循环/输入设备 | `bevy_winit` + `bevy_input` |
 
@@ -97,7 +97,7 @@
 |---|---|---|
 | 资产内核 `prism_asset` | ❌ | 句柄/异步加载/依赖图/热重载/引用计数/生命周期 |
 | 导入器 `prism_asset_import` | ❌ | glTF/FBX/USD、PNG/KTX2/basis、WAV/OGG、字体 |
-| 烘焙/离线 `prism_asset_bake` | ❌ | 平台相关压缩、mesh 优化、虚拟几何/虚拟纹理预处理 |
+| 烘焙/离线 `prism_bake_*` + `prism_asset_build_*` | ❌ | 归 `Prism Asset Build`（`prism_asset_build_design_zh.md`）：平台压缩 / mesh·VG·VT 预处理 / 材质·动画·音频烘焙 / 派生场景数据（nav·SDF·HLOD·PCG·GI 缓存）；DAG·缓存键·DDC/CAS·打包由该文持有，**原 `prism_asset_bake` 命名废弃**（§2.7/§6.6）。派生数据逐项登记见 `prism_derived_data_contract_zh.md` |
 | 虚拟纹理流送 | 🟡 | 渲染侧有，但缺独立于 Bevy 的流送 I/O 调度 |
 | 材质系统 | 🟡 | `prism_render_material` 绑 `bevy_material/pbr`，需自有材质图/编译 |
 

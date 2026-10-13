@@ -96,13 +96,15 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BackgroundColor, tok("color.fill.secondary"))
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.subheadline"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.9)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.9),
+            ),
     );
 
     // Label: inherits the page color; no extra treatment.
-    sheet.insert(
-        Class::new("pk-pagination__label").with(StyleProp::Color, tok("color.label")),
-    );
+    sheet.insert(Class::new("pk-pagination__label").with(StyleProp::Color, tok("color.label")));
 
     // Shared current state: an accent-tinted surface with an accent label.
     // Shared verbatim with the sibling control so the state class resolves
@@ -144,7 +146,10 @@ mod tests {
         let el = render(PaginationProps::new(3).current(1));
         let pages = el.child_elements();
         assert_eq!(pages[0].class_names(), ["pk-pagination__page"]);
-        assert_eq!(pages[1].class_names(), ["pk-pagination__page", "is-current"]);
+        assert_eq!(
+            pages[1].class_names(),
+            ["pk-pagination__page", "is-current"]
+        );
         assert_eq!(pages[2].class_names(), ["pk-pagination__page"]);
     }
 }

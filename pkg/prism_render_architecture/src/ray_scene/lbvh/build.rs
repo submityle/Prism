@@ -75,16 +75,18 @@ impl LinearBvh {
         // 4. Reordered primitive table and per-leaf bounds in sorted order.
         let order: Vec<u32> = entries.iter().map(|e| e.primitive).collect();
         let keys: Vec<u32> = entries.iter().map(|e| e.key).collect();
-        let primitives: Vec<Triangle> = order
-            .iter()
-            .map(|&i| triangles[i as usize])
-            .collect();
+        let primitives: Vec<Triangle> = order.iter().map(|&i| triangles[i as usize]).collect();
         let leaf_bounds: Vec<Aabb> = primitives.iter().map(Triangle::bounds).collect();
 
         // 5. Build the binary radix tree and fit interior bounds bottom-up.
         let tree = radix_tree::build(&keys);
         let mut internal_bounds = vec![Aabb::empty(); tree.internal.len()];
-        fit_bounds(Child::Internal(0), &tree, &leaf_bounds, &mut internal_bounds);
+        fit_bounds(
+            Child::Internal(0),
+            &tree,
+            &leaf_bounds,
+            &mut internal_bounds,
+        );
 
         // 6. Flatten the tree into the depth-first linear layout.
         let mut nodes = Vec::with_capacity(2 * count - 1);

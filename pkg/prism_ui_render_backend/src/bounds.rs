@@ -61,10 +61,7 @@ pub fn intersection(a: Rect, b: Rect) -> Option<Rect> {
     if x0 > x1 || y0 > y1 {
         return None;
     }
-    Some(Rect::new(
-        Point::new(x0, y0),
-        Size::new(x1 - x0, y1 - y0),
-    ))
+    Some(Rect::new(Point::new(x0, y0), Size::new(x1 - x0, y1 - y0)))
 }
 
 /// Grow `rect` by `margin` on every side.
@@ -206,7 +203,10 @@ mod tests {
     fn clip_of_is_empty_for_no_layers_and_folds_nested_bounds() {
         assert_eq!(clip_of(&[]), None);
         // A single layer clips to exactly its bounds.
-        assert_eq!(clip_of(&[rect(1.0, 2.0, 5.0, 6.0)]), Some(rect(1.0, 2.0, 5.0, 6.0)));
+        assert_eq!(
+            clip_of(&[rect(1.0, 2.0, 5.0, 6.0)]),
+            Some(rect(1.0, 2.0, 5.0, 6.0))
+        );
         // Nested bounds intersect.
         let nested = [rect(0.0, 0.0, 10.0, 10.0), rect(4.0, 4.0, 20.0, 20.0)];
         assert_eq!(clip_of(&nested), Some(rect(4.0, 4.0, 6.0, 6.0)));

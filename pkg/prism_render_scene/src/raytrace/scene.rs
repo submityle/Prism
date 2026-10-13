@@ -78,8 +78,7 @@ impl SceneAcceleration {
     /// Number of packed instances in the top-level structure.
     #[must_use]
     pub(crate) fn instance_count(&self) -> usize {
-        self.tlas.instances.len()
-            / prism_render_architecture::ray_scene::INSTANCE_WORDS
+        self.tlas.instances.len() / prism_render_architecture::ray_scene::INSTANCE_WORDS
     }
 }
 
@@ -136,7 +135,11 @@ pub(crate) fn build_scene_acceleration(
         .iter()
         .filter(|instance| instance.blas < blases.len())
         .filter_map(|instance| {
-            Instance::new(instance.object_to_world, instance.blas, instance.instance_id)
+            Instance::new(
+                instance.object_to_world,
+                instance.blas,
+                instance.instance_id,
+            )
         })
         .collect();
     let tlas = Tlas::build(&placed, &blases);

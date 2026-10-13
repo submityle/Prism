@@ -280,10 +280,7 @@ fn query_param_random_access_get_and_contains() {
             q.get(targets.without_health),
             Err(QueryEntityError::QueryDoesNotMatch(_))
         );
-        probe.dead_is_err = matches!(
-            q.get(targets.dead),
-            Err(QueryEntityError::NoSuchEntity(_))
-        );
+        probe.dead_is_err = matches!(q.get(targets.dead), Err(QueryEntityError::NoSuchEntity(_)));
         probe.contains_present = q.contains(targets.present);
         probe.contains_without = q.contains(targets.without_health);
         // `other` is a distinct live match, proving lookup is not pinned to one row.
@@ -309,7 +306,6 @@ fn query_param_random_access_get_and_contains() {
             contains_without: false,
         }
     );
-
 }
 
 /// `Query::single` / `single_mut` are the cardinality-constrained system-param

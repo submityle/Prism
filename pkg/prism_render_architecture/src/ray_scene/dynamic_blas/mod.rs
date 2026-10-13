@@ -38,8 +38,8 @@
 //! rebuild cost without ever leaving the `BLAS` stale.
 
 use super::acceleration::{
-    AccelerationUpdate, AccelerationUpdatePolicy, GeometryChange, RebuildLedger,
-    update_scratch_bytes,
+    update_scratch_bytes, AccelerationUpdate, AccelerationUpdatePolicy, GeometryChange,
+    RebuildLedger,
 };
 use super::bvh::{Bvh, BvhBuildConfig, Triangle};
 use super::lbvh::LinearBvh;

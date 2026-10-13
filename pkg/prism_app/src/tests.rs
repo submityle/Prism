@@ -378,7 +378,11 @@ fn try_finish_waits_for_ready_and_starts_up_once() {
     assert!(!app.all_plugins_ready());
     assert!(!app.try_finish(), "a not-ready plugin blocks finishing");
     assert_eq!(app.plugins_state(), PluginsState::Adding);
-    assert_eq!(app.world().resource::<Startups>().0, 0, "startup not yet run");
+    assert_eq!(
+        app.world().resource::<Startups>().0,
+        0,
+        "startup not yet run"
+    );
 
     // Opening the gate lets it finish; startup runs once at the transition.
     app.world_mut().resource_mut::<Ready>().0 = true;
@@ -1043,10 +1047,9 @@ fn try_add_plugins_reports_graph_errors_and_adds_nothing_on_failure() {
 
     // A valid group goes through the same entry point.
     let mut ok = App::new();
-    assert!(
-        ok.try_add_plugins(PluginGroupBuilder::new().add(Absent))
-            .is_ok()
-    );
+    assert!(ok
+        .try_add_plugins(PluginGroupBuilder::new().add(Absent))
+        .is_ok());
 }
 
 /// A dependency on a member that was disabled out of the group is also treated
@@ -2611,7 +2614,10 @@ fn add_lifecycle_events_registers_events_and_installs_running_state() {
     assert!(app.world().get_resource::<Events<LowMemory>>().is_some());
     assert!(app.world().get_resource::<Events<FocusChanged>>().is_some());
     assert!(app.world().get_resource::<Events<DeviceLost>>().is_some());
-    assert!(app.world().get_resource::<Events<DeviceRestored>>().is_some());
+    assert!(app
+        .world()
+        .get_resource::<Events<DeviceRestored>>()
+        .is_some());
     assert!(app
         .world()
         .get_resource::<Events<WillRenderFirstFrame>>()
@@ -8325,10 +8331,17 @@ mod cvar_tests {
         .unwrap();
 
         let registry = app.world().resource::<CvarRegistry>();
-        assert!(registry.contains("r.shadow"), "an alias counts as registered");
+        assert!(
+            registry.contains("r.shadow"),
+            "an alias counts as registered"
+        );
         assert_eq!(registry.resolve("r.shadow"), "r.shadows");
         assert_eq!(registry.resolve("r.shadows"), "r.shadows");
-        assert_eq!(registry.resolve("nope"), "nope", "unknown names pass through");
+        assert_eq!(
+            registry.resolve("nope"),
+            "nope",
+            "unknown names pass through"
+        );
         assert_eq!(registry.len(), 1, "an alias is not a second cvar");
 
         // A write through the former name lands in the canonical cascade key.
@@ -8492,7 +8505,8 @@ fn rollback_to_rebases_the_snapshot_cursor() {
     impl Component for Marker2 {}
 
     let mut app = App::new();
-    app.world_mut().register_snapshot_component_hashable::<Health>();
+    app.world_mut()
+        .register_snapshot_component_hashable::<Health>();
     app.world_mut().register_snapshot_component::<Marker2>();
     let e = app.world_mut().spawn((Health(0), Marker2));
     app.init_snapshot_history(8);
@@ -8507,7 +8521,10 @@ fn rollback_to_rebases_the_snapshot_cursor() {
     assert!(app.rollback_to(1), "frame 1 is retained");
     assert_eq!(app.world().get::<Health>(e).unwrap().0, 1);
     let history = app.main().snapshot_history().expect("history installed");
-    assert!(!history.contains(2) && !history.contains(3), "future dropped");
+    assert!(
+        !history.contains(2) && !history.contains(3),
+        "future dropped"
+    );
     assert!(history.contains(1), "the restore point is kept");
 
     // The next capture records the restore point again, not frame 4.

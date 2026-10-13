@@ -11,8 +11,8 @@ use crate::label::{Render, RenderApp};
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::sets::RenderSystems;
 
-use super::extract::{ExtractedAssets, extract_assets};
-use super::prepare::{AssetSyncReport, prepare_extracted_assets};
+use super::extract::{extract_assets, ExtractedAssets};
+use super::prepare::{prepare_extracted_assets, AssetSyncReport};
 use super::table::RenderAssets;
 use super::RenderAsset;
 

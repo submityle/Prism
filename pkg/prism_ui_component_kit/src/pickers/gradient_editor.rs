@@ -139,7 +139,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::FlexShrink, StyleValue::number(0.0))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
             .with(StyleProp::BorderWidth, StyleValue::px(2.0))
-            .with(StyleProp::BorderColor, StyleValue::rgba8(255, 255, 255, 255))
+            .with(
+                StyleProp::BorderColor,
+                StyleValue::rgba8(255, 255, 255, 255),
+            )
             .with_shadow(0.0, 1.0, 3.0, tok("glass.shadow")),
     );
 }
@@ -159,8 +162,14 @@ mod tests {
         assert_eq!(el.class_names(), ["pk-gradient-editor"]);
         let kids = el.child_elements();
         assert_eq!(kids.len(), 2);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-gradient-editor__preview"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-gradient-editor__stops"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-gradient-editor__preview"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-gradient-editor__stops"));
     }
 
     #[test]

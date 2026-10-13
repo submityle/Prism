@@ -86,7 +86,10 @@ pub fn responsive_segments(class: &Class) -> Vec<ResponsiveSegment> {
 /// [`responsive_segments`] at any non-negative width).
 #[must_use]
 pub fn segment_at(segments: &[ResponsiveSegment], width: f32) -> Option<&ResponsiveSegment> {
-    segments.iter().rev().find(|segment| segment.min_width <= width)
+    segments
+        .iter()
+        .rev()
+        .find(|segment| segment.min_width <= width)
 }
 
 #[cfg(test)]
@@ -177,7 +180,9 @@ mod tests {
                 assert!(pair[0].min_width < pair[1].min_width);
             }
             for segment in &segments {
-                assert!(Breakpoint::ALL.iter().any(|bp| bp.min_width() == segment.min_width));
+                assert!(Breakpoint::ALL
+                    .iter()
+                    .any(|bp| bp.min_width() == segment.min_width));
             }
 
             // Independent oracle: dense-grid sample of the step function.

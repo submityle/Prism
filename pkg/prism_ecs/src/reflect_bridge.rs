@@ -79,7 +79,9 @@ impl ReflectComponentOps {
         ) -> Option<&mut dyn Reflect> {
             // `Mut::into_inner` hands back the `'w` borrow (recording the write,
             // as any `Mut` access does), which is what this fn pointer promises.
-            world.get_mut::<T>(entity).map(|value| value.into_inner() as &mut dyn Reflect)
+            world
+                .get_mut::<T>(entity)
+                .map(|value| value.into_inner() as &mut dyn Reflect)
         }
         fn apply<T: Component + Reflect + FromReflect + Clone>(
             world: &mut World,

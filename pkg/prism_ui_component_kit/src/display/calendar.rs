@@ -96,8 +96,7 @@ impl Component for Calendar {
         // Weekday header row.
         let mut header = Element::box_().class("pk-calendar__weekdays");
         for label in WEEKDAY_LABELS {
-            header = header
-                .child(Element::text(String::from(label)).class("pk-calendar__weekday"));
+            header = header.child(Element::text(String::from(label)).class("pk-calendar__weekday"));
         }
         root = root.child(header);
 
@@ -206,7 +205,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::FontSize, tok("font.size.footnote"))
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::BorderRadius, tok("radius.sm"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.secondary"),
+            ),
     );
 
     // Selected: solid accent fill with a white label.
@@ -226,8 +229,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
 
     // Empty padding cells: no surface, no interaction affordance.
     sheet.insert(
-        Class::new("pk-calendar__day--empty")
-            .with(StyleProp::BackgroundColor, transparent()),
+        Class::new("pk-calendar__day--empty").with(StyleProp::BackgroundColor, transparent()),
     );
 }
 
@@ -302,7 +304,11 @@ mod tests {
         let empties = first_week
             .child_elements()
             .iter()
-            .filter(|c| c.class_names().iter().any(|n| n == "pk-calendar__day--empty"))
+            .filter(|c| {
+                c.class_names()
+                    .iter()
+                    .any(|n| n == "pk-calendar__day--empty")
+            })
             .count();
         assert!(empties > 0);
     }
@@ -311,9 +317,11 @@ mod tests {
     fn invalid_month_renders_all_empty() {
         let el = render(CalendarProps::new(2024, 13));
         let all_empty = weeks(&el).iter().all(|row| {
-            row.child_elements()
-                .iter()
-                .all(|c| c.class_names().iter().any(|n| n == "pk-calendar__day--empty"))
+            row.child_elements().iter().all(|c| {
+                c.class_names()
+                    .iter()
+                    .any(|n| n == "pk-calendar__day--empty")
+            })
         });
         assert!(all_empty);
     }

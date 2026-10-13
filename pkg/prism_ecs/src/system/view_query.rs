@@ -236,7 +236,11 @@ where
         // in the resource store, which outlives `'w`.
         // An absent resource (or a pointer to the wrong type, impossible by
         // construction) means the current view is simply not set for this run.
-        let ptr = unsafe { world.resources().get_ptr::<CurrentView>(state.view_resource) }?;
+        let ptr = unsafe {
+            world
+                .resources()
+                .get_ptr::<CurrentView>(state.view_resource)
+        }?;
         // SAFETY: `ptr` points at the live `CurrentView`; the declared read
         // means nothing forms an exclusive borrow of it.
         let entity = unsafe { (*ptr).0 };
@@ -245,12 +249,9 @@ where
         // column the fetch can touch. A non-matching entity is an `Err`, which
         // becomes `None` below rather than a fetch of some other entity.
         let item = unsafe {
-            state.query_state.get_from_ptr(
-                cell.as_ptr(),
-                entity,
-                cell.last_run(),
-                cell.this_run(),
-            )
+            state
+                .query_state
+                .get_from_ptr(cell.as_ptr(), entity, cell.last_run(), cell.this_run())
         };
         // The analogue of Bevy's `SystemParamValidationError::skipped`: the
         // entity is stale, despawned, or filtered out, so this run has no view.

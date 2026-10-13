@@ -68,8 +68,14 @@ impl Component for Minimap {
         for (x, y) in &props.nodes {
             let dot = Element::box_()
                 .class("pk-node-minimap__dot")
-                .style(StyleProp::MarginLeft, StyleValue::Length(Length::Px(x * SCALE)))
-                .style(StyleProp::MarginTop, StyleValue::Length(Length::Px(y * SCALE)));
+                .style(
+                    StyleProp::MarginLeft,
+                    StyleValue::Length(Length::Px(x * SCALE)),
+                )
+                .style(
+                    StyleProp::MarginTop,
+                    StyleValue::Length(Length::Px(y * SCALE)),
+                );
             el = el.child(dot);
         }
         el

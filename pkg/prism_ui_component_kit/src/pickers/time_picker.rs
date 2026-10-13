@@ -176,7 +176,8 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     // Near neighbours (one step from centre): dimmed to the secondary label so
     // the drum reads as receding away from the selection.
     sheet.insert(
-        Class::new("pk-time-picker__cell--near").with(StyleProp::Color, tok("color.label.secondary")),
+        Class::new("pk-time-picker__cell--near")
+            .with(StyleProp::Color, tok("color.label.secondary")),
     );
 
     // Far neighbours (edges of the window): dimmed further to the tertiary
@@ -224,7 +225,11 @@ mod tests {
         let marked: Vec<_> = hours
             .child_elements()
             .iter()
-            .filter(|c| c.class_names().iter().any(|n| n == "pk-time-picker__cell--selected"))
+            .filter(|c| {
+                c.class_names()
+                    .iter()
+                    .any(|n| n == "pk-time-picker__cell--selected")
+            })
             .collect();
         assert_eq!(marked.len(), 1);
         // The centre cell is the selection, zero-padded to two digits.

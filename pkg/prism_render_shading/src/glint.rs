@@ -368,7 +368,12 @@ pub fn glint_ndf(
     bin_solid_angle: f32,
     seed: u32,
 ) -> f32 {
-    glint_ndf_from_density(ggx_ndf(n_dot_h, alpha), microfacet_count, bin_solid_angle, seed)
+    glint_ndf_from_density(
+        ggx_ndf(n_dot_h, alpha),
+        microfacet_count,
+        bin_solid_angle,
+        seed,
+    )
 }
 
 /// Discrete estimator over an **arbitrary** smooth density.
@@ -461,7 +466,14 @@ pub fn glint_specular_brdf(
 ) -> f32 {
     let nv = n_dot_v.clamp(MIN_COS, 1.0);
     let nl = n_dot_l.clamp(MIN_COS, 1.0);
-    let d = glint_ndf_blended(n_dot_h, alpha, microfacet_count, bin_solid_angle, strength, seed);
+    let d = glint_ndf_blended(
+        n_dot_h,
+        alpha,
+        microfacet_count,
+        bin_solid_angle,
+        strength,
+        seed,
+    );
     let g = smith_g2_height_correlated(nv, nl, alpha);
     let f = fresnel.clamp(0.0, 1.0);
     let denom = 4.0 * nv * nl;
@@ -478,7 +490,6 @@ mod tests {
 
     const EPS: f32 = 1.0e-6;
 
-
     #[test]
     fn the_explicit_delta_form_matches_the_blend_helper_bit_for_bit() {
         // §17.4 (P3-e) needs to scale glint's *delta* by `1/p`, which the blend
@@ -493,8 +504,7 @@ mod tests {
                         let d_smooth = ggx_ndf(n_dot_h, alpha);
                         let d_glint = glint_ndf_from_density(d_smooth, 64.0, 0.02, seed);
                         let explicit = d_smooth + (d_glint - d_smooth) * strength;
-                        let helper =
-                            glint_ndf_blended(n_dot_h, alpha, 64.0, 0.02, strength, seed);
+                        let helper = glint_ndf_blended(n_dot_h, alpha, 64.0, 0.02, strength, seed);
                         assert_eq!(explicit, helper, "h={n_dot_h} a={alpha} s={strength}");
                     }
                 }
@@ -708,7 +718,10 @@ mod tests {
             }
             let mean = sum / m as f64;
             let var = sum_sq / m as f64 - mean * mean;
-            assert!((mean - lambda as f64).abs() < 0.6, "lambda={lambda} mean={mean}");
+            assert!(
+                (mean - lambda as f64).abs() < 0.6,
+                "lambda={lambda} mean={mean}"
+            );
             // Poisson variance == lambda; the Gaussian match should be close.
             assert!(
                 (var - lambda as f64).abs() < 0.2 * lambda as f64,
@@ -787,10 +800,7 @@ mod tests {
     fn strength_is_clamped() {
         // Out-of-range strengths clamp to [0,1]; negative behaves like 0.
         let smooth = ggx_ndf(0.9, 0.3);
-        assert_eq!(
-            glint_ndf_blended(0.9, 0.3, 10.0, 1.0e-3, -5.0, 7),
-            smooth
-        );
+        assert_eq!(glint_ndf_blended(0.9, 0.3, 10.0, 1.0e-3, -5.0, 7), smooth);
         let full = glint_ndf_blended(0.9, 0.3, 10.0, 1.0e-3, 1.0, 7);
         let over = glint_ndf_blended(0.9, 0.3, 10.0, 1.0e-3, 5.0, 7);
         assert_eq!(full, over);
@@ -828,9 +838,7 @@ mod tests {
             for li in 1..=10 {
                 let nl = li as f32 / 10.0;
                 for &a in &[0.1_f32, 0.4, 0.9] {
-                    let f = glint_specular_brdf(
-                        nv, nl, 0.97, a, 0.04, 500.0, 1.0e-3, 1.0, 12345,
-                    );
+                    let f = glint_specular_brdf(nv, nl, 0.97, a, 0.04, 500.0, 1.0e-3, 1.0, 12345);
                     assert!(f.is_finite() && f >= 0.0, "f={f}");
                 }
             }
@@ -845,7 +853,10 @@ mod tests {
         let g = smith_g2_height_correlated(nv, nl, a);
         let reference = d * g * fr / (4.0 * nv * nl);
         let got = glint_specular_brdf(nv, nl, noh, a, fr, 100.0, 1.0e-3, 0.0, 99);
-        assert!((got - reference).abs() <= reference * 1.0e-5, "got={got} ref={reference}");
+        assert!(
+            (got - reference).abs() <= reference * 1.0e-5,
+            "got={got} ref={reference}"
+        );
     }
 
     #[test]
@@ -877,7 +888,14 @@ mod tests {
 
     #[test]
     fn no_nans_from_adversarial_inputs() {
-        let bad = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 0.0, 1.0e30];
+        let bad = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -1.0,
+            0.0,
+            1.0e30,
+        ];
         for &c in &bad {
             for &a in &bad {
                 let d = glint_ndf_blended(c, a, 10.0, 1.0e-3, 0.5, 1);

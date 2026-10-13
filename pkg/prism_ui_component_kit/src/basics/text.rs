@@ -139,15 +139,31 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
     for (role, size_token, weight_token) in [
         (TextRole::Body, "font.size.body", "font.weight.regular"),
-        (TextRole::Callout, "font.size.callout", "font.weight.regular"),
+        (
+            TextRole::Callout,
+            "font.size.callout",
+            "font.weight.regular",
+        ),
         (
             TextRole::Subheadline,
             "font.size.subheadline",
             "font.weight.regular",
         ),
-        (TextRole::Footnote, "font.size.footnote", "font.weight.regular"),
-        (TextRole::Caption, "font.size.caption1", "font.weight.regular"),
-        (TextRole::Headline, "font.size.headline", "font.weight.semibold"),
+        (
+            TextRole::Footnote,
+            "font.size.footnote",
+            "font.weight.regular",
+        ),
+        (
+            TextRole::Caption,
+            "font.size.caption1",
+            "font.weight.regular",
+        ),
+        (
+            TextRole::Headline,
+            "font.size.headline",
+            "font.weight.semibold",
+        ),
     ] {
         let mut name = String::from("pk-text--");
         name.push_str(role.suffix());

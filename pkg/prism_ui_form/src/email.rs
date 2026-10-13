@@ -151,14 +151,14 @@ mod tests {
         "user.name+tag@example.co.uk",
         "disposable.style.email.with+symbol@example.com",
         "o'brien@example.com",
-        "x@example",                        // single-label domain is valid
-        "user@sub.domain.example.com",      // many labels
-        "!#$%&'*+/=?^_`{|}~-@example.com",   // full atext punctuation set
-        ".leading.dot@example.com",         // dots anywhere in local part
+        "x@example",                       // single-label domain is valid
+        "user@sub.domain.example.com",     // many labels
+        "!#$%&'*+/=?^_`{|}~-@example.com", // full atext punctuation set
+        ".leading.dot@example.com",        // dots anywhere in local part
         "trailing.dot.@example.com",
-        "a@a",                              // minimal
+        "a@a", // minimal
         "1234567890@example.com",
-        "user@xn--80ak6aa92e.com",          // punycode label
+        "user@xn--80ak6aa92e.com", // punycode label
     ];
 
     /// Golden-negative set: every entry must be rejected.
@@ -177,7 +177,7 @@ mod tests {
         "user@-example.com",       // label may not start with a hyphen
         "user@example-.com",       // label may not end with a hyphen
         "user@example..com",       // empty interior label
-        "us\u{00e9}r@example.com",  // non-ASCII in local part
+        "us\u{00e9}r@example.com", // non-ASCII in local part
         "user@exämple.com",        // non-ASCII in domain
     ];
 
@@ -236,8 +236,7 @@ mod tests {
     const ATEXT: &[u8] =
         b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$%&'*+/=?^_`{|}~-";
     const ALNUM: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    const LABEL_INNER: &[u8] =
-        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-";
+    const LABEL_INNER: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-";
 
     fn pick(rng: &mut SplitMix64, set: &[u8]) -> u8 {
         set[rng.below(set.len())]

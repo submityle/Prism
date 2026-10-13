@@ -146,8 +146,7 @@ pub fn energy_decay_curve(rir: &[Sample]) -> Vec<Sample> {
     }
 
     let total = edc[0];
-    #[expect(clippy::neg_cmp_op_on_partial_ord, reason = "negated comparison keeps NaN totals on the safe branch, unlike the suggested direct comparison")]
-    if !(total > ENERGY_FLOOR) {
+    if total <= ENERGY_FLOOR || total.is_nan() {
         return Vec::new();
     }
 
@@ -172,12 +171,10 @@ fn split_index(split_ms: Sample, sample_rate: Sample, len: usize) -> usize {
 /// Converts an early and late energy pair into a clarity value in decibels,
 /// clamped to `[-MAX_CLARITY_DB, MAX_CLARITY_DB]`.
 fn clarity_from_energies(early: Sample, late: Sample) -> Sample {
-    #[expect(clippy::neg_cmp_op_on_partial_ord, reason = "negated comparison keeps NaN totals on the safe branch, unlike the suggested direct comparison")]
-    if !(early > ENERGY_FLOOR) {
+    if early <= ENERGY_FLOOR || early.is_nan() {
         return -MAX_CLARITY_DB;
     }
-    #[expect(clippy::neg_cmp_op_on_partial_ord, reason = "negated comparison keeps NaN totals on the safe branch, unlike the suggested direct comparison")]
-    if !(late > ENERGY_FLOOR) {
+    if late <= ENERGY_FLOOR || late.is_nan() {
         return MAX_CLARITY_DB;
     }
     (10.0 * ops::ln(early / late) / LN_10).clamp(-MAX_CLARITY_DB, MAX_CLARITY_DB)
@@ -233,8 +230,7 @@ pub fn definition(rir: &[Sample], sample_rate: Sample) -> Sample {
     }
     let split = split_index(EARLY_LATE_SPLIT_50_MS, sample_rate, rir.len());
     let (total, early, _) = energy_summary(rir, sample_rate, split);
-    #[expect(clippy::neg_cmp_op_on_partial_ord, reason = "negated comparison keeps NaN totals on the safe branch, unlike the suggested direct comparison")]
-    if !(total > ENERGY_FLOOR) {
+    if total <= ENERGY_FLOOR || total.is_nan() {
         return 0.0;
     }
     (early / total).clamp(0.0, 1.0)
@@ -251,8 +247,7 @@ pub fn center_time_s(rir: &[Sample], sample_rate: Sample) -> Sample {
         return 0.0;
     }
     let (total, _, moment) = energy_summary(rir, sample_rate, 0);
-    #[expect(clippy::neg_cmp_op_on_partial_ord, reason = "negated comparison keeps NaN totals on the safe branch, unlike the suggested direct comparison")]
-    if !(total > ENERGY_FLOOR) {
+    if total <= ENERGY_FLOOR || total.is_nan() {
         return 0.0;
     }
     moment / total
@@ -262,7 +257,12 @@ pub fn center_time_s(rir: &[Sample], sample_rate: Sample) -> Sample {
 /// and extrapolates its slope to a `-60` decibel drop, returning the time in
 /// seconds. Returns `0` when the window has fewer than two points or the fit is
 /// not decaying.
-fn fit_decay_time(edc_db: &[Sample], sample_rate: Sample, upper_db: Sample, lower_db: Sample) -> Sample {
+fn fit_decay_time(
+    edc_db: &[Sample],
+    sample_rate: Sample,
+    upper_db: Sample,
+    lower_db: Sample,
+) -> Sample {
     let mut n_pts = 0usize;
     let mut sum_t = 0.0;
     let mut sum_y = 0.0;
@@ -291,7 +291,11 @@ fn fit_decay_time(edc_db: &[Sample], sample_rate: Sample, upper_db: Sample, lowe
         return 0.0;
     }
     let rt = -60.0 / slope;
-    if rt.is_finite() && rt >= 0.0 { rt } else { 0.0 }
+    if rt.is_finite() && rt >= 0.0 {
+        rt
+    } else {
+        0.0
+    }
 }
 
 /// Computes the early decay time `EDT`: the `-60` decibel time extrapolated
@@ -429,8 +433,7 @@ impl RoomClarity {
             moment += (i as Sample / sample_rate) * e;
         }
 
-        #[expect(clippy::neg_cmp_op_on_partial_ord, reason = "negated comparison keeps NaN totals on the safe branch, unlike the suggested direct comparison")]
-        if !(total > ENERGY_FLOOR) {
+        if total <= ENERGY_FLOOR || total.is_nan() {
             return Self::default();
         }
 
@@ -510,7 +513,10 @@ mod tests {
         assert_eq!(center_time_s(&rir, SR), 0.0);
         assert_eq!(early_decay_time_s(&rir, SR), 0.0);
         assert_eq!(reverberation_time_t30_s(&rir, SR), 0.0);
-        assert_eq!(RoomClarity::from_impulse_response(&rir, SR), RoomClarity::default());
+        assert_eq!(
+            RoomClarity::from_impulse_response(&rir, SR),
+            RoomClarity::default()
+        );
     }
 
     #[test]
@@ -543,7 +549,10 @@ mod tests {
         assert_eq!(clarity_db(&rir, 0.0, EARLY_LATE_SPLIT_50_MS), 0.0);
         assert_eq!(definition(&rir, 0.0), 0.0);
         assert_eq!(center_time_s(&rir, Sample::NAN), 0.0);
-        assert_eq!(RoomClarity::from_impulse_response(&rir, -1.0), RoomClarity::default());
+        assert_eq!(
+            RoomClarity::from_impulse_response(&rir, -1.0),
+            RoomClarity::default()
+        );
     }
 
     #[test]
@@ -552,7 +561,11 @@ mod tests {
         rir[0] = 1.0;
         assert!(approx(definition(&rir, SR), 1.0, 1e-6));
         // No late energy -> clarity saturates to the positive cap.
-        assert!(approx(clarity_db(&rir, SR, EARLY_LATE_SPLIT_50_MS), MAX_CLARITY_DB, 1e-6));
+        assert!(approx(
+            clarity_db(&rir, SR, EARLY_LATE_SPLIT_50_MS),
+            MAX_CLARITY_DB,
+            1e-6
+        ));
     }
 
     #[test]
@@ -562,7 +575,10 @@ mod tests {
         let t30 = reverberation_time_t30_s(&rir, SR);
         // For h = exp(-n / tau) the exact -60 dB time is 3 * ln(10) * tau / sr.
         let expected = 3.0 * TEST_LN_10 * tau / SR;
-        assert!(approx(t30, expected, expected * 0.03), "t30 {t30} vs {expected}");
+        assert!(
+            approx(t30, expected, expected * 0.03),
+            "t30 {t30} vs {expected}"
+        );
     }
 
     #[test]
@@ -649,8 +665,16 @@ mod tests {
     fn from_impulse_response_matches_free_functions() {
         let rir = exp_rir(48_000, 6_000.0);
         let rc = RoomClarity::from_impulse_response(&rir, SR);
-        assert!(approx(rc.c50_db, clarity_db(&rir, SR, EARLY_LATE_SPLIT_50_MS), 1e-3));
-        assert!(approx(rc.c80_db, clarity_db(&rir, SR, EARLY_LATE_SPLIT_80_MS), 1e-3));
+        assert!(approx(
+            rc.c50_db,
+            clarity_db(&rir, SR, EARLY_LATE_SPLIT_50_MS),
+            1e-3
+        ));
+        assert!(approx(
+            rc.c80_db,
+            clarity_db(&rir, SR, EARLY_LATE_SPLIT_80_MS),
+            1e-3
+        ));
         assert!(approx(rc.d50, definition(&rir, SR), 1e-5));
         assert!(approx(rc.center_time_s, center_time_s(&rir, SR), 1e-5));
         assert!(approx(rc.edt_s, early_decay_time_s(&rir, SR), 1e-5));
@@ -664,5 +688,4 @@ mod tests {
         let rc = RoomClarity::from_impulse_response(&rir, SR);
         assert!(approx(rc.definition_percent(), rc.d50 * 100.0, 1e-5));
     }
-
 }

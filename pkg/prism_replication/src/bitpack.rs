@@ -164,5 +164,4 @@ mod tests {
         assert_eq!(reader.read(3), Some(0b111));
         assert_eq!(reader.remaining(), 5, "the pad bits remain");
     }
-
 }

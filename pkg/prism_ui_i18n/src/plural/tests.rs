@@ -37,26 +37,60 @@ fn check_decimals(family: CardinalFamily, expected: PluralCategory, ds: &[&str])
 #[test]
 fn operands_from_integer() {
     let ops = PluralOperands::from_u64(1234);
-    assert_eq!(ops, PluralOperands { i: 1234, v: 0, w: 0, f: 0, t: 0, e: 0 });
+    assert_eq!(
+        ops,
+        PluralOperands {
+            i: 1234,
+            v: 0,
+            w: 0,
+            f: 0,
+            t: 0,
+            e: 0
+        }
+    );
 }
 
 #[test]
 fn operands_parse_decimal_with_trailing_zeros() {
     // "1.230": i=1, v=3, w=2, f=230, t=23.
     let ops = PluralOperands::parse("1.230").expect("parse");
-    assert_eq!(ops, PluralOperands { i: 1, v: 3, w: 2, f: 230, t: 23, e: 0 });
+    assert_eq!(
+        ops,
+        PluralOperands {
+            i: 1,
+            v: 3,
+            w: 2,
+            f: 230,
+            t: 23,
+            e: 0
+        }
+    );
 }
 
 #[test]
 fn operands_parse_integer_only_and_leading_dot() {
     assert_eq!(
         PluralOperands::parse("12").expect("parse"),
-        PluralOperands { i: 12, v: 0, w: 0, f: 0, t: 0, e: 0 }
+        PluralOperands {
+            i: 12,
+            v: 0,
+            w: 0,
+            f: 0,
+            t: 0,
+            e: 0
+        }
     );
     // ".5" => i=0, v=1, f=5.
     assert_eq!(
         PluralOperands::parse(".5").expect("parse"),
-        PluralOperands { i: 0, v: 1, w: 1, f: 5, t: 5, e: 0 }
+        PluralOperands {
+            i: 0,
+            v: 1,
+            w: 1,
+            f: 5,
+            t: 5,
+            e: 0
+        }
     );
 }
 
@@ -85,7 +119,11 @@ fn operands_parse_rejects_garbage() {
 fn cardinal_germanic() {
     let f = CardinalFamily::Germanic;
     check_ints(f, One, &[1]);
-    check_ints(f, Other, &[0, 2, 3, 10, 11, 20, 100, 1000, 10000, 1_000_000]);
+    check_ints(
+        f,
+        Other,
+        &[0, 2, 3, 10, 11, 20, 100, 1000, 10000, 1_000_000],
+    );
     // one requires v = 0, so every fractional value is other.
     check_decimals(f, Other, &["0.0", "0.5", "1.0", "1.5", "2.0", "100.0"]);
 }
@@ -105,11 +143,17 @@ fn cardinal_french() {
 fn cardinal_east_slavic() {
     let f = CardinalFamily::EastSlavic;
     check_ints(f, One, &[1, 21, 31, 41, 51, 61, 71, 81, 101, 1001]);
-    check_ints(f, Few, &[2, 3, 4, 22, 23, 24, 32, 33, 34, 102, 103, 104, 1002]);
+    check_ints(
+        f,
+        Few,
+        &[2, 3, 4, 22, 23, 24, 32, 33, 34, 102, 103, 104, 1002],
+    );
     check_ints(
         f,
         Many,
-        &[0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 25, 100, 1000],
+        &[
+            0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 25, 100, 1000,
+        ],
     );
     check_decimals(f, Other, &["0.0", "0.5", "1.0", "1.5", "2.0", "5.5"]);
 }
@@ -122,7 +166,9 @@ fn cardinal_polish() {
     check_ints(
         f,
         Many,
-        &[0, 5, 6, 9, 10, 11, 12, 13, 14, 15, 19, 20, 21, 25, 100, 1000, 1_000_000],
+        &[
+            0, 5, 6, 9, 10, 11, 12, 13, 14, 15, 19, 20, 21, 25, 100, 1000, 1_000_000,
+        ],
     );
     check_decimals(f, Other, &["0.0", "0.5", "1.0", "1.5", "2.0"]);
 }
@@ -166,7 +212,11 @@ fn cardinal_lithuanian() {
     let f = CardinalFamily::Lithuanian;
     check_ints(f, One, &[1, 21, 31, 41, 51, 61, 71, 81, 91, 101, 1001]);
     check_ints(f, Few, &[2, 3, 4, 5, 6, 7, 8, 9, 22, 102, 109]);
-    check_ints(f, Other, &[0, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 100, 1000]);
+    check_ints(
+        f,
+        Other,
+        &[0, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 100, 1000],
+    );
     // many: f != 0 (any value with a non-zero fraction).
     check_decimals(f, Many, &["0.1", "0.5", "1.1", "10.9", "11.1"]);
 }
@@ -230,11 +280,19 @@ fn ordinal_one_is_one_and_other_only() {
     let fr = OrdinalFamily::OneIsOne;
     assert_eq!(fr.select(&PluralOperands::from_u64(1)), One);
     for n in [0, 2, 3, 11, 21, 100] {
-        assert_eq!(fr.select(&PluralOperands::from_u64(n)), Other, "fr ordinal n={n}");
+        assert_eq!(
+            fr.select(&PluralOperands::from_u64(n)),
+            Other,
+            "fr ordinal n={n}"
+        );
     }
     let de = OrdinalFamily::OtherOnly;
     for n in [0, 1, 2, 3, 11, 21, 100] {
-        assert_eq!(de.select(&PluralOperands::from_u64(n)), Other, "de ordinal n={n}");
+        assert_eq!(
+            de.select(&PluralOperands::from_u64(n)),
+            Other,
+            "de ordinal n={n}"
+        );
     }
 }
 
@@ -244,25 +302,67 @@ fn ordinal_one_is_one_and_other_only() {
 
 #[test]
 fn locale_resolution_cardinal() {
-    assert_eq!(PluralRules::cardinal("en"), PluralRules::Cardinal(CardinalFamily::Germanic));
-    assert_eq!(PluralRules::cardinal("en-US"), PluralRules::Cardinal(CardinalFamily::Germanic));
-    assert_eq!(PluralRules::cardinal("pt-BR"), PluralRules::Cardinal(CardinalFamily::French));
-    assert_eq!(PluralRules::cardinal("ru"), PluralRules::Cardinal(CardinalFamily::EastSlavic));
-    assert_eq!(PluralRules::cardinal("pl"), PluralRules::Cardinal(CardinalFamily::Polish));
-    assert_eq!(PluralRules::cardinal("cs"), PluralRules::Cardinal(CardinalFamily::CzechSlovak));
-    assert_eq!(PluralRules::cardinal("ar-EG"), PluralRules::Cardinal(CardinalFamily::Arabic));
-    assert_eq!(PluralRules::cardinal("zh_Hant"), PluralRules::Cardinal(CardinalFamily::OtherOnly));
+    assert_eq!(
+        PluralRules::cardinal("en"),
+        PluralRules::Cardinal(CardinalFamily::Germanic)
+    );
+    assert_eq!(
+        PluralRules::cardinal("en-US"),
+        PluralRules::Cardinal(CardinalFamily::Germanic)
+    );
+    assert_eq!(
+        PluralRules::cardinal("pt-BR"),
+        PluralRules::Cardinal(CardinalFamily::French)
+    );
+    assert_eq!(
+        PluralRules::cardinal("ru"),
+        PluralRules::Cardinal(CardinalFamily::EastSlavic)
+    );
+    assert_eq!(
+        PluralRules::cardinal("pl"),
+        PluralRules::Cardinal(CardinalFamily::Polish)
+    );
+    assert_eq!(
+        PluralRules::cardinal("cs"),
+        PluralRules::Cardinal(CardinalFamily::CzechSlovak)
+    );
+    assert_eq!(
+        PluralRules::cardinal("ar-EG"),
+        PluralRules::Cardinal(CardinalFamily::Arabic)
+    );
+    assert_eq!(
+        PluralRules::cardinal("zh_Hant"),
+        PluralRules::Cardinal(CardinalFamily::OtherOnly)
+    );
     // Unknown language -> CLDR root (other-only).
-    assert_eq!(PluralRules::cardinal("xx"), PluralRules::Cardinal(CardinalFamily::OtherOnly));
+    assert_eq!(
+        PluralRules::cardinal("xx"),
+        PluralRules::Cardinal(CardinalFamily::OtherOnly)
+    );
 }
 
 #[test]
 fn locale_resolution_ordinal() {
-    assert_eq!(PluralRules::ordinal("en"), PluralRules::Ordinal(OrdinalFamily::English));
-    assert_eq!(PluralRules::ordinal("fr"), PluralRules::Ordinal(OrdinalFamily::OneIsOne));
-    assert_eq!(PluralRules::ordinal("de"), PluralRules::Ordinal(OrdinalFamily::OtherOnly));
-    assert_eq!(PluralRules::ordinal("en").plural_type(), PluralType::Ordinal);
-    assert_eq!(PluralRules::cardinal("en").plural_type(), PluralType::Cardinal);
+    assert_eq!(
+        PluralRules::ordinal("en"),
+        PluralRules::Ordinal(OrdinalFamily::English)
+    );
+    assert_eq!(
+        PluralRules::ordinal("fr"),
+        PluralRules::Ordinal(OrdinalFamily::OneIsOne)
+    );
+    assert_eq!(
+        PluralRules::ordinal("de"),
+        PluralRules::Ordinal(OrdinalFamily::OtherOnly)
+    );
+    assert_eq!(
+        PluralRules::ordinal("en").plural_type(),
+        PluralType::Ordinal
+    );
+    assert_eq!(
+        PluralRules::cardinal("en").plural_type(),
+        PluralType::Cardinal
+    );
 }
 
 #[test]
@@ -295,7 +395,11 @@ fn legacy_aliases_match_families() {
             "Slavic alias n={n}"
         );
         assert_eq!(PluralRules::Asian.select(n), Other, "Asian alias n={n}");
-        assert_eq!(PluralRules::OtherOnly.select(n), Other, "OtherOnly alias n={n}");
+        assert_eq!(
+            PluralRules::OtherOnly.select(n),
+            Other,
+            "OtherOnly alias n={n}"
+        );
     }
 }
 

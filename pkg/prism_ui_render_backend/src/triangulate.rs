@@ -68,7 +68,11 @@ pub fn triangulate(polygon: &[(f32, f32)]) -> Vec<[usize; 3]> {
 
     // Sign that makes a convex (ear-candidate) vertex test positive, regardless
     // of the polygon's winding.
-    let sign = if signed_area(polygon) >= 0.0 { 1.0_f32 } else { -1.0 };
+    let sign = if signed_area(polygon) >= 0.0 {
+        1.0_f32
+    } else {
+        -1.0
+    };
 
     // A vertex is *reflex* when it turns against the winding. Only a reflex
     // vertex can block an ear — and a reflex vertex lying *on* the candidate
@@ -290,7 +294,10 @@ mod tests {
             let poly = random_star(&mut state, n);
             let tris = triangulate(&poly);
             for _ in 0..60 {
-                let p = (rand_in(&mut state, -14.0, 14.0), rand_in(&mut state, -14.0, 14.0));
+                let p = (
+                    rand_in(&mut state, -14.0, 14.0),
+                    rand_in(&mut state, -14.0, 14.0),
+                );
                 if sd_polygon(p.0, p.1, &poly).abs() <= margin {
                     continue;
                 }

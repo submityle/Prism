@@ -84,7 +84,11 @@ const ENERGY_FLOOR: f64 = 1e-20;
 /// Sanitises a sample, mapping non-finite values to `0`.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Converts a time in milliseconds to a sample index, clamped to `[0, len]`.
@@ -119,18 +123,18 @@ fn window_energy(response: &[Sample], start: usize, end: usize) -> f64 {
 /// Returns [`NO_SUPPORT_DB`] when the direct energy is below [`ENERGY_FLOOR`]
 /// or the ratio is not finite.
 fn ratio_to_db(window_energy: f64, direct_energy: f64) -> Sample {
-    #[expect(
-        clippy::neg_cmp_op_on_partial_ord,
-        reason = "negated comparison keeps NaN energies on the safe branch, unlike the suggested direct comparison"
-    )]
-    if !(direct_energy > ENERGY_FLOOR) {
+    if direct_energy <= ENERGY_FLOOR || direct_energy.is_nan() {
         return NO_SUPPORT_DB;
     }
     if window_energy <= 0.0 {
         return NO_SUPPORT_DB;
     }
     let db = 10.0 * ops::ln((window_energy / direct_energy) as Sample) / LN_10;
-    if db.is_finite() { db } else { NO_SUPPORT_DB }
+    if db.is_finite() {
+        db
+    } else {
+        NO_SUPPORT_DB
+    }
 }
 
 /// Computes the stage support parameter `ST_early` in decibels: the ratio of
@@ -365,8 +369,16 @@ mod tests {
     fn from_ir_matches_free_functions() {
         let ir = staged_ir(0.4, 0.2);
         let support = StageSupport::from_impulse_response(&ir, SR);
-        assert!(approx(support.st_early_db, stage_support_early_db(&ir, SR), 1e-6));
-        assert!(approx(support.st_late_db, stage_support_late_db(&ir, SR), 1e-6));
+        assert!(approx(
+            support.st_early_db,
+            stage_support_early_db(&ir, SR),
+            1e-6
+        ));
+        assert!(approx(
+            support.st_late_db,
+            stage_support_late_db(&ir, SR),
+            1e-6
+        ));
     }
 
     #[test]
@@ -384,6 +396,9 @@ mod tests {
         let mut loud = staged_ir(0.5, 0.0);
         loud[0] = 2.0;
         let louder = stage_support_early_db(&loud, SR);
-        assert!(approx(base - louder, 6.020_6, 1e-3), "base {base} louder {louder}");
+        assert!(
+            approx(base - louder, 6.020_6, 1e-3),
+            "base {base} louder {louder}"
+        );
     }
 }

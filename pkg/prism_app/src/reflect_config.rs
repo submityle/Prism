@@ -12,8 +12,8 @@
 //! on the same metadata ([`FieldMetadata::default_value`](prism_reflect::schema::FieldMetadata))
 //! and migration chain and are layered on top of this primitive.
 
+use prism_reflect::schema::{clamp, validate, Clamped, TypeMetadata, TypeSchema, ValidationError};
 use prism_reflect::Reflect;
-use prism_reflect::schema::{Clamped, TypeMetadata, TypeSchema, ValidationError, clamp, validate};
 
 /// Build the [`TypeSchema`] describing `value`'s reflected type at `version`.
 ///
@@ -103,10 +103,8 @@ mod tests {
         let mut value = 7u32;
         let schema = schema_for(&value, "u32", 1);
         let errors = clamp_and_validate(&mut value, &schema, &TypeMetadata::new()).unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::NotAStruct))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::NotAStruct)));
     }
 }

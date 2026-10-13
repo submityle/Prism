@@ -11,8 +11,8 @@ extern crate alloc;
 mod ao;
 mod bloom;
 mod cas;
-mod chromatic_aberration;
 mod charlie_albedo_table;
+mod chromatic_aberration;
 mod classification;
 mod clearcoat;
 mod cloth;
@@ -22,8 +22,8 @@ mod color_grade;
 mod dielectric_albedo_table;
 mod dof;
 mod dynamic;
-mod eon_albedo_table;
 mod environment;
+mod eon_albedo_table;
 mod exposure;
 mod face_shadow;
 mod film_grain;
@@ -96,9 +96,9 @@ pub use chromatic_aberration::{
     CHROMATIC_ABERRATION_EPSILON,
 };
 pub use classification::{
-    ClassTableError, ShadingClassRow, ShadingClassRule, ShadingClassTable,
-    classify_material_header, ClassificationError, MaterialShadingClass, ShadingWorkItem,
-    ShadingWorkPlan, MAX_SHADING_CLASSES,
+    classify_material_header, ClassTableError, ClassificationError, MaterialShadingClass,
+    ShadingClassRow, ShadingClassRule, ShadingClassTable, ShadingWorkItem, ShadingWorkPlan,
+    MAX_SHADING_CLASSES,
 };
 pub use clearcoat::evaluate_clearcoat_direct;
 pub use cloth::evaluate_cloth_direct;
@@ -117,10 +117,10 @@ pub use dof::{
     dof_blend_factor, far_field_coc, near_field_coc, signed_coc, DofCamera, DofParams,
 };
 pub use dynamic::{
-    apply_dynamic_channels, dissolve_coverage, dissolve_mask, DAMAGE_BASE_DARKEN, DAMAGE_METAL_LOSS, DAMAGE_ROUGHEN,
-    DISSOLVE_EDGE_GAIN, DISSOLVE_EDGE_WIDTH, DISSOLVE_MASK_CELLS, SNOW_ALBEDO,
-    SNOW_DIFFUSE_ROUGHNESS, SNOW_ROUGHNESS, SNOW_SHEEN, SNOW_SPECULAR_WEIGHT, WATER_IOR,
-    WET_BASE_DARKEN, WET_ROUGHNESS_SCALE,
+    apply_dynamic_channels, dissolve_coverage, dissolve_mask, DAMAGE_BASE_DARKEN,
+    DAMAGE_METAL_LOSS, DAMAGE_ROUGHEN, DISSOLVE_EDGE_GAIN, DISSOLVE_EDGE_WIDTH,
+    DISSOLVE_MASK_CELLS, SNOW_ALBEDO, SNOW_DIFFUSE_ROUGHNESS, SNOW_ROUGHNESS, SNOW_SHEEN,
+    SNOW_SPECULAR_WEIGHT, WATER_IOR, WET_BASE_DARKEN, WET_ROUGHNESS_SCALE,
 };
 pub use environment::{
     env_brdf_approx, evaluate_image_based_light, evaluate_image_based_light_specular,
@@ -148,15 +148,14 @@ pub use gamut_map::{
 };
 pub use glint::{
     fresnel_schlick_scalar as glint_fresnel_schlick, ggx_ndf as glint_ggx_ndf,
-    glint_bin_solid_angle, glint_half_slope, glint_is_finite, glint_microfacet_count,
-    glint_ndf, glint_ndf_blended, glint_ndf_blended_from_density, glint_ndf_from_density,
-    glint_seed, glint_specular_brdf,
-    hash_combine as glint_hash_combine, hash_u32 as glint_hash_u32,
+    glint_bin_solid_angle, glint_half_slope, glint_is_finite, glint_microfacet_count, glint_ndf,
+    glint_ndf_blended, glint_ndf_blended_from_density, glint_ndf_from_density, glint_seed,
+    glint_specular_brdf, hash_combine as glint_hash_combine, hash_u32 as glint_hash_u32,
     poisson_gaussian as glint_poisson_gaussian, poisson_knuth as glint_poisson_knuth,
     poisson_sample as glint_poisson_sample, quantize_axis as glint_quantize_axis,
     smith_g1 as glint_smith_g1, smith_g2_height_correlated as glint_smith_g2,
-    uniform_at as glint_uniform_at, uniform_from_hash as glint_uniform_from_hash,
-    GLINT_PI, GLINT_SEED_SALT, MIN_ALPHA as GLINT_MIN_ALPHA, MIN_COS as GLINT_MIN_COS,
+    uniform_at as glint_uniform_at, uniform_from_hash as glint_uniform_from_hash, GLINT_PI,
+    GLINT_SEED_SALT, MIN_ALPHA as GLINT_MIN_ALPHA, MIN_COS as GLINT_MIN_COS,
     MIN_POSITIVE as GLINT_MIN_POSITIVE, POISSON_KNUTH_MAX_LAMBDA, POISSON_MAX_ITERS,
 };
 pub use hair::evaluate_hair_direct;
@@ -189,17 +188,29 @@ pub use light_routing::{
     MAX_LIGHTING_CHANNELS, MAX_LIGHT_LAYERS,
 };
 pub use lighting::{
-    evaluate_principled_direct, evaluate_principled_direct_with, linear_furnace_response,
-    glint_shade_seed, principled_pre, DirectLightSample, PrincipledPre, ShadingFrame,
+    evaluate_principled_direct, evaluate_principled_direct_with, glint_shade_seed,
+    linear_furnace_response, principled_pre, DirectLightSample, PrincipledPre, ShadingFrame,
     SurfaceSample,
 };
-pub use measured_lobe::evaluate_measured_direct;
+pub use lobe_sampling::{
+    lobe_blue_noise_1d, lobe_blue_noise_2d, lobe_clamp_unit, lobe_estimate, lobe_estimator_weight,
+    lobe_full_sum, lobe_hash_combine, lobe_hash_u32, lobe_is_finite, lobe_make_sample,
+    lobe_pixel_seed, lobe_r2_sample_2d, lobe_rotate_left_16, lobe_sample_quality_sum,
+    lobe_sanitize_weight, lobe_select, lobe_select_blue_noise, lobe_temporal_stride,
+    lobe_uniform_at, lobe_uniform_from_hash, lobe_weight_probability, lobe_write_probabilities,
+    select_expensive_lobe_factors, ExpensiveLobeFactors, LobeSample, LobeSamplingMode,
+    LobeSamplingPolicy, LobeSamplingSettings, LOBE_SAMPLING_GOLDEN_STRIDE,
+    LOBE_SAMPLING_MIN_WEIGHT, LOBE_SAMPLING_NO_LOBE, LOBE_SAMPLING_ONE_MINUS_EPSILON,
+    LOBE_SAMPLING_R2_A1, LOBE_SAMPLING_R2_A2, LOBE_SAMPLING_SEED_SALT, LOBE_SAMPLING_SEQUENCE_MASK,
+    LOBE_SAMPLING_SEQUENCE_PERIOD, LOBE_SAMPLING_TEMPORAL_SALT,
+};
 pub use measured_brdf::{
     directions_to_rusinkiewicz, half_vector, is_non_negative, reciprocity_error,
     rusinkiewicz_to_directions, theta_h_to_unit, unit_to_theta_h, MeasuredBrdf, MeasuredBrdfDims,
     MeasuredBrdfError, MeasuredBrdfSample, MeasuredBrdfSampler, RusinkiewiczCoords,
     SyntheticBrdfParams, MB_DEFAULT_PHI_D, MB_DEFAULT_THETA_D, MB_DEFAULT_THETA_H,
 };
+pub use measured_lobe::evaluate_measured_direct;
 pub use motion_blur::{
     clamp_velocity, cone, cylinder, neighbor_max, sample_weight, shutter_velocity,
     soft_depth_compare, tile_max, velocity_length, MotionBlurParams,
@@ -220,19 +231,6 @@ pub use posterize::{
 };
 pub use punctual::PunctualLight;
 pub use quality::{LobeSampleBudget, ShadingQuality};
-pub use lobe_sampling::{
-    lobe_blue_noise_1d, lobe_blue_noise_2d, lobe_clamp_unit, lobe_estimate,
-    lobe_estimator_weight, lobe_full_sum, lobe_hash_combine, lobe_hash_u32, lobe_is_finite,
-    lobe_make_sample, lobe_pixel_seed, lobe_r2_sample_2d, lobe_rotate_left_16,
-    lobe_sample_quality_sum, lobe_sanitize_weight, lobe_select, lobe_select_blue_noise,
-    lobe_temporal_stride, lobe_uniform_at, lobe_uniform_from_hash, lobe_weight_probability,
-    lobe_write_probabilities, select_expensive_lobe_factors, ExpensiveLobeFactors,
-    LobeSamplingSettings, LobeSample, LobeSamplingMode, LobeSamplingPolicy,
-    LOBE_SAMPLING_GOLDEN_STRIDE, LOBE_SAMPLING_MIN_WEIGHT, LOBE_SAMPLING_NO_LOBE,
-    LOBE_SAMPLING_ONE_MINUS_EPSILON, LOBE_SAMPLING_R2_A1, LOBE_SAMPLING_R2_A2,
-    LOBE_SAMPLING_SEED_SALT, LOBE_SAMPLING_SEQUENCE_MASK, LOBE_SAMPLING_SEQUENCE_PERIOD,
-    LOBE_SAMPLING_TEMPORAL_SALT,
-};
 
 // Crate-root re-exports of the expensive-lobe `*_for_budget` adapters, so a
 // host driving `ShadingQuality`/`LobeSampleBudget` can reach every tier-scaled

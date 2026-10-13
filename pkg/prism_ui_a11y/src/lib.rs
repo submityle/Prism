@@ -91,7 +91,7 @@ pub use label::Label;
 pub use live::{LiveRegion, Politeness};
 pub use node::{A11yNode, A11yNodeBuilder};
 pub use role::Role;
-pub use sr::{describe_node, screen_reader_text};
 pub use setpos::{is_set_item_role, screen_reader_text_with_position, set_position, SetPosition};
+pub use sr::{describe_node, screen_reader_text};
 pub use state::AriaState;
 pub use tree::A11yTree;

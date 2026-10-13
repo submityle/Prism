@@ -349,7 +349,11 @@ mod tests {
 
         let report = RelationClosureReport::from_world(&world);
         assert_eq!(report.transitive_kind_count(), 2);
-        let ids: Vec<u32> = report.entries().iter().map(|e| e.relation.index()).collect();
+        let ids: Vec<u32> = report
+            .entries()
+            .iter()
+            .map(|e| e.relation.index())
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted);

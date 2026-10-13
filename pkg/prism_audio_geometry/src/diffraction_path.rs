@@ -45,8 +45,8 @@ use prism_audio_spatial::{BandGains, PROPAGATION_BAND_COUNT};
 
 use crate::config::{DiffractionModel, GeometricConfig};
 use crate::diffraction_edges::{diffracting_edges, distance, least_detour_point, utd_wedge};
-use crate::scene::AcousticScene;
 use crate::receiver_directivity;
+use crate::scene::AcousticScene;
 use crate::source_directivity;
 
 /// Resolves the edge-diffracted arrivals of `emitter` at `listener`.

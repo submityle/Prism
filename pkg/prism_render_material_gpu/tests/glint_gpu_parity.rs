@@ -269,12 +269,7 @@ fn glint_estimator_and_seed_match_on_device() {
         ] {
             params_bytes.extend_from_slice(&value.to_le_bytes());
         }
-        for value in [
-            sample.weight,
-            sample.n_dot_h,
-            sample.alpha,
-            sample.d_smooth,
-        ] {
+        for value in [sample.weight, sample.n_dot_h, sample.alpha, sample.d_smooth] {
             misc_bytes.extend_from_slice(&value.to_le_bytes());
         }
     }
@@ -442,13 +437,7 @@ fn glint_estimator_and_seed_match_on_device() {
             ..SurfaceSample::default()
         };
         let n = [0.0, 1.0, 0.0];
-        let seed = glint_shade_seed(
-            &surface,
-            sample.half,
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0],
-            n,
-        );
+        let seed = glint_shade_seed(&surface, sample.half, [1.0, 0.0, 0.0], [0.0, 0.0, -1.0], n);
         // The seed is an integer hash of quantised bins: it must agree exactly,
         // which is what makes the sparkle pattern identical on both lines.
         assert_eq!(gpu_seeds[index], seed, "case {index}: seed mismatch");
@@ -479,7 +468,8 @@ fn glint_estimator_and_seed_match_on_device() {
                 floats[index]
             );
             assert_eq!(
-                floats[count + index], sample.d_smooth,
+                floats[count + index],
+                sample.d_smooth,
                 "case {index}: weight-0 density bypass"
             );
         }

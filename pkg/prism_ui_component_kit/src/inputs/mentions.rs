@@ -85,7 +85,10 @@ impl Component for Mentions {
             .collect();
         let popover = Popover.render(&PopoverProps::new().open(props.open).children(suggestions));
 
-        Element::box_().class("pk-mentions").child(input).child(popover)
+        Element::box_()
+            .class("pk-mentions")
+            .child(input)
+            .child(popover)
     }
 }
 
@@ -107,10 +110,18 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Focus, StyleProp::BorderColor, tok("color.tint")),
+            .with_state(
+                InteractionState::Focus,
+                StyleProp::BorderColor,
+                tok("color.tint"),
+            ),
     );
 
     sheet.insert(
@@ -127,7 +138,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.secondary"),
+            ),
     );
 }
 
@@ -160,7 +175,11 @@ mod tests {
             .child_elements()
             .iter()
             .flat_map(Element::child_elements)
-            .filter(|c| c.class_names().iter().any(|n| n == "pk-mentions__suggestion"))
+            .filter(|c| {
+                c.class_names()
+                    .iter()
+                    .any(|n| n == "pk-mentions__suggestion")
+            })
             .collect();
         assert_eq!(suggestions.len(), 2);
         assert_eq!(suggestions[0].text_content(), Some("alice"));

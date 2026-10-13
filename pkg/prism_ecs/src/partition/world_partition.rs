@@ -200,7 +200,10 @@ impl WorldPartition {
         let viewpoint = interest.cell_of(camera);
         let streamer = driver.streamer();
         hlod.resolve(viewpoint, |cell| {
-            !matches!(streamer.state(cell), crate::partition::cell::CellState::Unloaded)
+            !matches!(
+                streamer.state(cell),
+                crate::partition::cell::CellState::Unloaded
+            )
         })
     }
 
@@ -237,8 +240,9 @@ impl WorldPartition {
         // determinism (sort + dedup) in `InterestGrid::interests`.
         let interests = self.interests_for(camera, extra);
         let data_layers = &self.data_layers;
-        self.driver
-            .stream_filtered(world, &interests, |cell| data_layers.is_cell_streamable(cell))
+        self.driver.stream_filtered(world, &interests, |cell| {
+            data_layers.is_cell_streamable(cell)
+        })
     }
 
     /// Projects `camera` plus `extra` onto the streaming lattice, returning the
@@ -422,7 +426,8 @@ mod tests {
         assert_eq!(p.driver().streamer().state(home), CellState::Unloaded);
 
         // Activate the layer -> the home cell streams in on the next tick.
-        p.data_layers_mut().set_state(layer, DataLayerState::Activated);
+        p.data_layers_mut()
+            .set_state(layer, DataLayerState::Activated);
         let result = p.advance(&mut world, camera, &[]);
         assert!(result.to_load.contains(&home));
         assert_eq!(p.driver().streamer().state(home), CellState::Loading);

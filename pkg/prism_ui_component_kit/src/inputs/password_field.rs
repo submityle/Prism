@@ -138,16 +138,23 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Focus, StyleProp::BorderColor, tok("color.tint")),
+            .with_state(
+                InteractionState::Focus,
+                StyleProp::BorderColor,
+                tok("color.tint"),
+            ),
     );
 
     // Block-level invalid modifier (no bare `is-invalid` marker here).
     sheet.insert(
-        Class::new("pk-password-field--invalid")
-            .with(StyleProp::BorderColor, tok("color.red")),
+        Class::new("pk-password-field--invalid").with(StyleProp::BorderColor, tok("color.red")),
     );
 
     sheet.insert(
@@ -170,7 +177,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.xs"))
             .with(StyleProp::BackgroundColor, tok("color.fill.secondary"))
             .with(StyleProp::Color, tok("color.label.secondary"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill"),
+            ),
     );
 }
 

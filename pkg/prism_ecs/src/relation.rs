@@ -476,7 +476,10 @@ impl RelationIndex {
     /// graph diagnostics (design §16.6).
     #[inline]
     pub fn edge_count(&self) -> usize {
-        self.forward.values().map(|(_, targets)| targets.len()).sum()
+        self.forward
+            .values()
+            .map(|(_, targets)| targets.len())
+            .sum()
     }
 
     /// Iterate every directed edge as `(relation, source, target)`.
@@ -489,7 +492,9 @@ impl RelationIndex {
         self.forward.iter().flat_map(|(key, (source, targets))| {
             let relation = key.relation().component_id();
             let source = *source;
-            targets.iter().map(move |&target| (relation, source, target))
+            targets
+                .iter()
+                .map(move |&target| (relation, source, target))
         })
     }
 

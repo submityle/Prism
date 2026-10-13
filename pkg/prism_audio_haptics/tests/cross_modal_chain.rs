@@ -184,7 +184,9 @@ fn governor_tiers_scale_the_chain() {
         .expect("reduced keeps a config");
     assert_eq!(full.haptic_rate_hz, 1_000);
     assert_eq!(reduced.haptic_rate_hz, 500);
-    assert!(HapticGovernor::new(HapticTier::Bypass).apply(config).is_none());
+    assert!(HapticGovernor::new(HapticTier::Bypass)
+        .apply(config)
+        .is_none());
 
     // The reduced rate halves the retimed frame count end-to-end.
     let full_run = run_pipeline(200, 0.0, 1.0, HapticTier::Full).expect("full runs");
@@ -213,8 +215,14 @@ fn dual_motor_clamps_overdriven_bands() {
     let mut dual = DualMotorBackend::new(0, 1_000);
     dual.submit(&overdriven);
     let (low, high) = dual.motors();
-    assert!(approx(low, 1.0), "low motor should clamp to unity, got {low}");
-    assert!(approx(high, 1.0), "high motor should clamp to unity, got {high}");
+    assert!(
+        approx(low, 1.0),
+        "low motor should clamp to unity, got {low}"
+    );
+    assert!(
+        approx(high, 1.0),
+        "high motor should clamp to unity, got {high}"
+    );
     assert_eq!(dual.capabilities().actuator_count, 2);
     assert!(!dual.capabilities().wide_band);
 
@@ -331,7 +339,10 @@ fn latency_alignment_compensates_slowest_backend() {
 
     // Retarding the playhead saturates at zero rather than underflowing.
     let comp = aligner.compensation_samples(target, silent_audio);
-    assert_eq!(aligner.compensated_playhead(10_000, comp), 10_000 - u64::from(comp));
+    assert_eq!(
+        aligner.compensated_playhead(10_000, comp),
+        10_000 - u64::from(comp)
+    );
     assert_eq!(aligner.compensated_playhead(100, target), 0);
 
     // Unit conversion round-trips cleanly on evenly divisible rates.

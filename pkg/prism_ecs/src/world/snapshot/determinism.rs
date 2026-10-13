@@ -460,14 +460,8 @@ fn locate_column_divergence(
         return Some(SnapshotDivergence::Holder {
             component,
             index: shared,
-            left: lc
-                .rows
-                .get(shared)
-                .map(|&r| left.entities[r as usize]),
-            right: rc
-                .rows
-                .get(shared)
-                .map(|&r| right.entities[r as usize]),
+            left: lc.rows.get(shared).map(|&r| left.entities[r as usize]),
+            right: rc.rows.get(shared).map(|&r| right.entities[r as usize]),
         });
     }
     None

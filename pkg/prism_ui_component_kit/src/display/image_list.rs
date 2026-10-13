@@ -168,9 +168,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Masonry: a tighter row gap for the staggered variant.
-    sheet.insert(
-        Class::new("pk-image-list--masonry").with(StyleProp::RowGap, tok("space.xs")),
-    );
+    sheet.insert(Class::new("pk-image-list--masonry").with(StyleProp::RowGap, tok("space.xs")));
 
     // Item: a rounded, clipped cell over a placeholder surface.
     sheet.insert(
@@ -233,13 +231,19 @@ mod tests {
         );
         let image = &items[1].child_elements()[0];
         assert_eq!(image.kind(), &ElementKind::Custom(String::from("b.png")));
-        assert!(image.class_names().iter().any(|n| n == "pk-image-list__image"));
+        assert!(image
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-image-list__image"));
     }
 
     #[test]
     fn masonry_adds_container_modifier() {
         let el = render(ImageListProps::new().masonry(true));
-        assert!(el.class_names().iter().any(|n| n == "pk-image-list--masonry"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-image-list--masonry"));
     }
 
     #[test]

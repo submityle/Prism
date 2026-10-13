@@ -37,7 +37,7 @@ mod ron;
 mod stable_id;
 
 pub use binary::{from_binary, from_binary_with_limits, to_binary};
-pub use limits::DeserializeLimits;
 pub use error::{DeserializeError, SerializeError};
+pub use limits::DeserializeLimits;
 pub use ron::{from_ron, to_ron};
 pub use stable_id::StableTypeId;

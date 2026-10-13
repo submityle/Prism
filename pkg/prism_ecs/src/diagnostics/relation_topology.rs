@@ -205,8 +205,7 @@ fn longest_path(acc: &TopoAcc, nodes: &[Entity]) -> (usize, bool) {
     }
 
     // Working in-degree we decrement as edges are "removed".
-    let mut remaining: HashMap<Entity, usize> =
-        HashMap::with_capacity(nodes.len());
+    let mut remaining: HashMap<Entity, usize> = HashMap::with_capacity(nodes.len());
     for &n in nodes {
         remaining.insert(n, acc.indeg.get(&n).copied().unwrap_or(0));
     }
@@ -483,7 +482,10 @@ mod tests {
         assert!(!entry.is_acyclic());
         assert_eq!(entry.edge_count, 3);
         // Every node is on the loop, so none seeds the topological DP.
-        assert_eq!(entry.max_depth, 0, "a pure cycle contributes no finite chain");
+        assert_eq!(
+            entry.max_depth, 0,
+            "a pure cycle contributes no finite chain"
+        );
         assert_eq!(entry.root_count, 0);
         assert_eq!(entry.sink_count, 0);
     }
@@ -509,7 +511,11 @@ mod tests {
 
         assert_eq!(report.relation_count(), 2);
         assert_eq!(report.total_edges, 8, "3 chain edges + 5 star edges");
-        assert_eq!(report.deepest().unwrap().relation, child_of, "chain is deepest");
+        assert_eq!(
+            report.deepest().unwrap().relation,
+            child_of,
+            "chain is deepest"
+        );
         assert_eq!(report.widest().unwrap().relation, targets, "star is widest");
         assert_eq!(report.deepest().unwrap().max_depth, 3);
         assert_eq!(report.widest().unwrap().max_out_degree, 5);

@@ -273,14 +273,20 @@ mod tests {
         // Second press is in progress; a long hold must not time out here.
         r.handle(&ev(PointerKind::Down, 10.0, 10.0, 50));
         assert_eq!(r.tick(10_000), GestureState::Possible);
-        assert_eq!(r.handle(&ev(PointerKind::Up, 10.0, 10.0, 10_050)), GestureState::Accepted);
+        assert_eq!(
+            r.handle(&ev(PointerKind::Up, 10.0, 10.0, 10_050)),
+            GestureState::Accepted
+        );
     }
 
     #[test]
     fn cancel_rejects() {
         let mut r = recognizer(2);
         r.handle(&ev(PointerKind::Down, 10.0, 10.0, 0));
-        assert_eq!(r.handle(&ev(PointerKind::Cancel, 10.0, 10.0, 5)), GestureState::Rejected);
+        assert_eq!(
+            r.handle(&ev(PointerKind::Cancel, 10.0, 10.0, 5)),
+            GestureState::Rejected
+        );
     }
 
     #[test]

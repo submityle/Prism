@@ -7,11 +7,11 @@ use alloc::vec::Vec;
 use prism_asset::AssetId;
 use prism_ecs::prelude::{Res, ResMut, Resource};
 use prism_image::Image;
-use prism_render_driver::{FrameSync, Instance};
 use prism_render_architecture::abi::GenerationalHandle;
+use prism_render_driver::{FrameSync, Instance};
 use prism_render_material::{
-    MaterialRecord, MaterialRegistry, MaterialRegistryError, MaterialSnapshot,
-    fallback_material_record,
+    fallback_material_record, MaterialRecord, MaterialRegistry, MaterialRegistryError,
+    MaterialSnapshot,
 };
 
 /// The index of the permanent fallback material (slot zero).
@@ -116,14 +116,17 @@ impl RenderMaterials {
                 }
                 TextureRequest::Fallback(fallback) => TextureSlotHeap::fallback_slot(fallback),
             };
-            rows.push(prism_render_material::GpuMaterialTexture {
-                index: slot.index,
-                generation: slot.generation,
+            // The sampler heap is bound in parallel with the texture heap, so a
+            // texture's sampler sits at the same bindless slot. The constructor
+            // also explicitly disables virtual-texture metadata for this legacy
+            // image request, keeping the ABI zero-initialized instead of relying
+            // on a struct literal that can drift when the ABI grows.
+            rows.push(prism_render_material::GpuMaterialTexture::non_virtual(
+                slot.index,
+                slot.generation,
                 semantic,
-                // The sampler heap is bound in parallel with the texture heap, so
-                // a texture's sampler sits at the same bindless slot.
-                sampler_index: slot.index,
-            });
+                slot.index,
+            ));
         }
         if !images.is_empty() {
             self.held.insert(index, images);
@@ -241,4 +244,3 @@ pub(crate) fn sync_material_buffers<I>(
     }
     stats.last = report;
 }
-

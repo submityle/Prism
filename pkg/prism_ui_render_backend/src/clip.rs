@@ -66,7 +66,11 @@ pub fn clip_polygon(subject: &[(f32, f32)], clip: &[(f32, f32)]) -> Vec<(f32, f3
 
     // Pick the sign so that `sign * cross(a, b, p) >= 0.0` means "inside",
     // independent of the clip winding.
-    let sign = if signed_area(clip) >= 0.0 { 1.0_f32 } else { -1.0 };
+    let sign = if signed_area(clip) >= 0.0 {
+        1.0_f32
+    } else {
+        -1.0
+    };
     let inside = |a: (f32, f32), b: (f32, f32), p: (f32, f32)| sign * cross(a, b, p) >= 0.0;
 
     let m = clip.len();
@@ -161,7 +165,10 @@ mod tests {
             let result = clip_polygon(&subject, &clip);
 
             for _ in 0..40 {
-                let p = (rand_in(&mut state, -25.0, 25.0), rand_in(&mut state, -25.0, 25.0));
+                let p = (
+                    rand_in(&mut state, -25.0, 25.0),
+                    rand_in(&mut state, -25.0, 25.0),
+                );
                 // Skip points too close to any boundary (classification ambiguous).
                 if sd_polygon(p.0, p.1, &subject).abs() <= margin {
                     continue;
@@ -290,7 +297,10 @@ mod tests {
         let result = clip_polygon(&subject, &clip);
         assert!(result.len() >= 3);
         for &v in &result {
-            assert!(sd_polygon(v.0, v.1, &clip) <= 1e-2, "vertex {v:?} outside clip");
+            assert!(
+                sd_polygon(v.0, v.1, &clip) <= 1e-2,
+                "vertex {v:?} outside clip"
+            );
         }
         let bound = area(&subject).min(area(&clip));
         assert!(area(&result) <= bound + 1e-2);

@@ -27,9 +27,9 @@ use prism_asset::Asset;
 use prism_asset::AssetId;
 use prism_render_driver::{RenderDevice, RenderQueue};
 
-pub use extract::{ExtractedAssets, extract_assets};
-pub use prepare::{AssetSyncReport, PrepareAssetError, prepare_extracted_assets};
-pub use stage::{AssetSyncStats, prepare_assets, register_render_assets};
+pub use extract::{extract_assets, ExtractedAssets};
+pub use prepare::{prepare_extracted_assets, AssetSyncReport, PrepareAssetError};
+pub use stage::{prepare_assets, register_render_assets, AssetSyncStats};
 pub use table::RenderAssets;
 
 /// An asset the renderer keeps a separate GPU form of.

@@ -144,9 +144,16 @@ impl EntityLodProcessor {
     /// without touching any dormancy state. Pure helper exposed for callers
     /// that only want the decision.
     #[inline]
-    pub fn evaluate(&self, viewpoint: [f32; 3], position: [f32; 3], entity: Entity, frame: u64) -> LodDecision {
+    pub fn evaluate(
+        &self,
+        viewpoint: [f32; 3],
+        position: [f32; 3],
+        entity: Entity,
+        frame: u64,
+    ) -> LodDecision {
         let d = distance_sq(viewpoint, position);
-        self.schedule.evaluate_phased(d, frame, self.phase.phase(entity))
+        self.schedule
+            .evaluate_phased(d, frame, self.phase.phase(entity))
     }
 
     /// Drives the whole `population` for one frame (design §13.2).
@@ -248,8 +255,8 @@ mod tests {
         let near = ent(1, 1); // band 0, period 1 → always ticks
         let mid = ent(2, 1); // band 1, period 4
         let pop = [
-            (near, [5.0, 0.0, 0.0]),   // d² 25
-            (mid, [40.0, 0.0, 0.0]),   // d² 1600
+            (near, [5.0, 0.0, 0.0]), // d² 25
+            (mid, [40.0, 0.0, 0.0]), // d² 1600
         ];
 
         // Frame 1: near ticks (period 1), mid does not (1 % 4 != 0).
@@ -318,7 +325,7 @@ mod tests {
         ];
         let r = proc.drive([0.0; 3], &pop, 0, &mut dormancy);
         assert_eq!(r.to_tick, alloc::vec![b, c, a]); // sorted by index 2,5,9
-        // decisions preserve input order.
+                                                     // decisions preserve input order.
         let order: Vec<Entity> = r.decisions.iter().map(|&(e, _)| e).collect();
         assert_eq!(order, alloc::vec![a, b, c]);
     }
@@ -329,8 +336,8 @@ mod tests {
         // must surface each entity's tier in its decision so the owner can pick
         // a full vs. approximate simulation path (design §23.7).
         let sched = LodSchedule::from_sorted_triples(&[
-            (100.0, 1, LodQuality(0)),    // near: full precision
-            (2_500.0, 4, LodQuality(2)),  // mid: coarser
+            (100.0, 1, LodQuality(0)),   // near: full precision
+            (2_500.0, 4, LodQuality(2)), // mid: coarser
             (40_000.0, 16, LodQuality(4)),
         ])
         .with_policy(OutOfRange::Dormant);
@@ -340,20 +347,38 @@ mod tests {
         let near = ent(1, 1);
         let mid = ent(2, 1);
         let pop = [
-            (near, [5.0, 0.0, 0.0]),  // d² 25  → band 0, tier 0
-            (mid, [40.0, 0.0, 0.0]),  // d² 1600 → band 1, tier 2
+            (near, [5.0, 0.0, 0.0]), // d² 25  → band 0, tier 0
+            (mid, [40.0, 0.0, 0.0]), // d² 1600 → band 1, tier 2
         ];
         let r = proc.drive([0.0; 3], &pop, 0, &mut dormancy);
 
         // decisions keep input order; check each entity's reported tier.
-        let near_q = r.decisions.iter().find(|&&(e, _)| e == near).unwrap().1.quality;
-        let mid_q = r.decisions.iter().find(|&&(e, _)| e == mid).unwrap().1.quality;
+        let near_q = r
+            .decisions
+            .iter()
+            .find(|&&(e, _)| e == near)
+            .unwrap()
+            .1
+            .quality;
+        let mid_q = r
+            .decisions
+            .iter()
+            .find(|&&(e, _)| e == mid)
+            .unwrap()
+            .1
+            .quality;
         assert_eq!(near_q, LodQuality(0));
         assert_eq!(mid_q, LodQuality(2));
 
         // The pure evaluate() path agrees.
-        assert_eq!(proc.evaluate([0.0; 3], [5.0, 0.0, 0.0], near, 0).quality, LodQuality(0));
-        assert_eq!(proc.evaluate([0.0; 3], [40.0, 0.0, 0.0], mid, 0).quality, LodQuality(2));
+        assert_eq!(
+            proc.evaluate([0.0; 3], [5.0, 0.0, 0.0], near, 0).quality,
+            LodQuality(0)
+        );
+        assert_eq!(
+            proc.evaluate([0.0; 3], [40.0, 0.0, 0.0], mid, 0).quality,
+            LodQuality(2)
+        );
     }
 
     #[test]
@@ -366,10 +391,7 @@ mod tests {
         // frames are offset, so they do not both fire on the same frame.
         let e0 = ent(4, 1); // phase 4 → ticks when (frame + 4) % 4 == 0 → frame % 4 == 0
         let e1 = ent(5, 1); // phase 5 → ticks when (frame + 5) % 4 == 0 → frame % 4 == 3
-        let pop = [
-            (e0, [40.0, 0.0, 0.0]),
-            (e1, [40.0, 0.0, 0.0]),
-        ];
+        let pop = [(e0, [40.0, 0.0, 0.0]), (e1, [40.0, 0.0, 0.0])];
 
         let f0 = proc.drive([0.0; 3], &pop, 0, &mut dormancy);
         assert_eq!(f0.to_tick, alloc::vec![e0]);

@@ -212,7 +212,9 @@ mod tests {
         assert_eq!(a.lerp(b, 0.0), a);
         assert_eq!(a.lerp(b, 1.0), b);
         let mid = a.lerp(b, 0.5);
-        assert!(close(mid.r, 0.5) && close(mid.g, 0.25) && close(mid.b, 0.125) && close(mid.a, 0.5));
+        assert!(
+            close(mid.r, 0.5) && close(mid.g, 0.25) && close(mid.b, 0.125) && close(mid.a, 0.5)
+        );
         // t is clamped.
         assert_eq!(a.lerp(b, 2.0), b);
         assert_eq!(a.lerp(b, -1.0), a);
@@ -255,7 +257,12 @@ mod tests {
         let mut rng = Rng(0x1234_5678);
         for _ in 0..4000 {
             let src = Color::rgba(rng.next_f32(), rng.next_f32(), rng.next_f32(), 1.0);
-            let bg = Color::rgba(rng.next_f32(), rng.next_f32(), rng.next_f32(), rng.next_f32());
+            let bg = Color::rgba(
+                rng.next_f32(),
+                rng.next_f32(),
+                rng.next_f32(),
+                rng.next_f32(),
+            );
             let out = src.over(bg);
             assert!(close(out.r, src.r) && close(out.g, src.g) && close(out.b, src.b));
             assert!(close(out.a, 1.0));

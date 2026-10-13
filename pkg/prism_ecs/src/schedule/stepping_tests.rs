@@ -61,7 +61,11 @@ fn push_c(mut log: ResMut<Log>) {
 /// Drive `step` across exactly one frame (until the frame boundary), returning
 /// the ordered [`StepReport`]s for the systems processed this frame (the
 /// trailing [`StepReport::FrameBoundary`] is consumed, not returned).
-fn step_one_frame(step: &mut Stepping, schedule: &mut Schedule, world: &mut World) -> Vec<StepReport> {
+fn step_one_frame(
+    step: &mut Stepping,
+    schedule: &mut Schedule,
+    world: &mut World,
+) -> Vec<StepReport> {
     let mut reports = Vec::new();
     loop {
         match step.step_system(schedule, world) {
@@ -184,8 +188,14 @@ fn step_system_reports_ran_skipped_and_boundary() {
     schedule.initialize(&mut world);
 
     let mut step = Stepping::new();
-    assert_eq!(step.step_system(&mut schedule, &mut world), StepReport::Skipped(0));
-    assert_eq!(step.step_system(&mut schedule, &mut world), StepReport::Ran(1));
+    assert_eq!(
+        step.step_system(&mut schedule, &mut world),
+        StepReport::Skipped(0)
+    );
+    assert_eq!(
+        step.step_system(&mut schedule, &mut world),
+        StepReport::Ran(1)
+    );
     assert_eq!(
         step.step_system(&mut schedule, &mut world),
         StepReport::FrameBoundary
@@ -232,7 +242,10 @@ fn breakpoint_on_first_system_stops_before_running_anything() {
     step.add_breakpoint(0);
 
     let report = step.continue_frame(&mut schedule, &mut world);
-    assert!(report.ran.is_empty(), "nothing runs before a leading breakpoint");
+    assert!(
+        report.ran.is_empty(),
+        "nothing runs before a leading breakpoint"
+    );
     assert_eq!(report.stop, ContinueStop::Breakpoint(0));
     assert!(world.resource::<Log>().0.is_empty());
 

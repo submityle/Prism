@@ -159,7 +159,8 @@ impl Class {
             .insert(StyleProp::ShadowOffsetX, StyleValue::px(offset_x));
         self.base
             .insert(StyleProp::ShadowOffsetY, StyleValue::px(offset_y));
-        self.base.insert(StyleProp::ShadowBlur, StyleValue::px(blur));
+        self.base
+            .insert(StyleProp::ShadowBlur, StyleValue::px(blur));
         self.base.insert(StyleProp::ShadowColor, color);
     }
 
@@ -178,13 +179,7 @@ impl Class {
 
     /// Sets an inset (inner) shadow from its longhands. Identical to
     /// [`Class::set_shadow`] but flagged inset.
-    pub fn set_inset_shadow(
-        &mut self,
-        offset_x: f32,
-        offset_y: f32,
-        blur: f32,
-        color: StyleValue,
-    ) {
+    pub fn set_inset_shadow(&mut self, offset_x: f32, offset_y: f32, blur: f32, color: StyleValue) {
         self.set_shadow(offset_x, offset_y, blur, color);
         self.base
             .insert(StyleProp::ShadowInset, StyleValue::keyword(Keyword::Inset));

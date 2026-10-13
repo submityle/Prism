@@ -106,9 +106,9 @@ fn unmet(
             missing: CapabilitySet::EMPTY,
         });
     };
-    let missing = manifest.requires_caps().intersection(
-        CapabilitySet::from_bits(!available.bits()),
-    );
+    let missing = manifest
+        .requires_caps()
+        .intersection(CapabilitySet::from_bits(!available.bits()));
     if manifest.requires_caps().is_subset_of(available) {
         debug_assert!(missing.is_empty());
         None

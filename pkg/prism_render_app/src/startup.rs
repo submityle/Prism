@@ -96,7 +96,11 @@ pub trait GpuResourceAppExt {
 
 impl GpuResourceAppExt for SubApp {
     fn init_gpu_resource<R: Resource + FromWorld>(&mut self) -> &mut Self {
-        if !self.world.resource_mut::<Schedules>().contains(RenderStartup) {
+        if !self
+            .world
+            .resource_mut::<Schedules>()
+            .contains(RenderStartup)
+        {
             self.world
                 .resource_mut::<Schedules>()
                 .insert(RenderStartup, Schedule::new());
@@ -123,5 +127,7 @@ pub(crate) fn ensure_render_startup(world: &mut World) {
         return;
     }
     world.run_schedule(RenderStartup);
-    world.resource_mut::<RenderStartupState>().mark_initialized();
+    world
+        .resource_mut::<RenderStartupState>()
+        .mark_initialized();
 }

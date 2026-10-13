@@ -135,9 +135,11 @@ mod tests {
 
     #[test]
     fn body_wraps_all_children() {
-        let el = render(
-            SectionProps::new().children([Element::box_(), Element::box_(), Element::box_()]),
-        );
+        let el = render(SectionProps::new().children([
+            Element::box_(),
+            Element::box_(),
+            Element::box_(),
+        ]));
         let body = &el.child_elements()[0];
         assert_eq!(body.child_elements().len(), 3);
     }

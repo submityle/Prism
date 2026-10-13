@@ -124,8 +124,7 @@ impl RetainedScene {
             }
             ElementKind::Box | ElementKind::Custom(_) => {
                 let radius = node.paint.border_radius;
-                let has_border =
-                    node.paint.border_width > 0.0 && node.paint.border_color.is_some();
+                let has_border = node.paint.border_width > 0.0 && node.paint.border_color.is_some();
 
                 // Outer drop shadow first, so it sits behind the box. Inset
                 // shadows are a hint the reference backend does not render.
@@ -482,7 +481,12 @@ mod tests {
         });
         let paint = PaintStyle {
             background_color: Some(Color::rgba(1.0, 1.0, 1.0, 1.0)),
-            shadow: Some(Shadow::drop(0.0, 8.0, 24.0, Color::rgba(0.0, 0.0, 0.0, 0.3))),
+            shadow: Some(Shadow::drop(
+                0.0,
+                8.0,
+                24.0,
+                Color::rgba(0.0, 0.0, 0.0, 0.3),
+            )),
             ..PaintStyle::default()
         };
         s.apply(BackendOp::SetPaint {

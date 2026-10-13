@@ -31,7 +31,11 @@ use prism_audio_output::profiles::OutputProfile;
 
 /// Branch-free absolute value, avoiding the std float-math lint in tests.
 fn fabs(x: f32) -> f32 {
-    if x < 0.0 { -x } else { x }
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
 }
 
 /// Approximate float equality within a fixed tolerance.
@@ -201,14 +205,12 @@ fn downmix_surround_to_mono_uses_published_weights() {
 #[test]
 fn downmix_rejects_unsupported_upmix() {
     // Mono -> stereo is an upmix, not a published fold-down: unsupported.
-    assert!(
-        DownmixMatrix::new(
-            ChannelLayout::Mono,
-            ChannelLayout::Stereo,
-            DownmixOptions::default(),
-        )
-        .is_none()
-    );
+    assert!(DownmixMatrix::new(
+        ChannelLayout::Mono,
+        ChannelLayout::Stereo,
+        DownmixOptions::default(),
+    )
+    .is_none());
 }
 
 #[test]

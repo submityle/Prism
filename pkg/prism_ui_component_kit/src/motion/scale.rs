@@ -104,7 +104,11 @@ mod tests {
 
     #[test]
     fn wraps_children() {
-        let el = render(ScaleProps::new().child(Element::box_()).child(Element::box_()));
+        let el = render(
+            ScaleProps::new()
+                .child(Element::box_())
+                .child(Element::box_()),
+        );
         assert_eq!(el.child_elements().len(), 2);
     }
 }

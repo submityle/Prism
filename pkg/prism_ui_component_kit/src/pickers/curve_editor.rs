@@ -126,7 +126,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BackgroundColor, tok("color.tint"))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
             .with(StyleProp::BorderWidth, StyleValue::px(2.0))
-            .with(StyleProp::BorderColor, StyleValue::rgba8(255, 255, 255, 255))
+            .with(
+                StyleProp::BorderColor,
+                StyleValue::rgba8(255, 255, 255, 255),
+            )
             .with_shadow(0.0, 1.0, 3.0, tok("glass.shadow")),
     );
 }
@@ -159,9 +162,10 @@ mod tests {
         let el = render(CurveEditorProps::new().point(0.0, 1.0).point(1.0, 0.0));
         let knobs = el.child_elements();
         assert_eq!(knobs.len(), 2);
-        assert!(knobs
+        assert!(knobs.iter().all(|k| k
+            .class_names()
             .iter()
-            .all(|k| k.class_names().iter().any(|c| c == "pk-curve-editor__point")));
+            .any(|c| c == "pk-curve-editor__point")));
         // First point: x=0 -> left 0%, y=1 -> top 0% (top edge).
         assert_eq!(
             inline(&knobs[0], StyleProp::Left),

@@ -24,7 +24,8 @@ use wgpu::{
 
 const DYNAMIC_WESL: &str = include_str!("../../prism_render_scene/src/shaders/dynamic.wesl");
 const BRDF_WESL: &str = include_str!("../../prism_render_scene/src/shaders/brdf.wesl");
-const DYNAMIC_MASK_WESL: &str = include_str!("../../prism_render_scene/src/shaders/dynamic_mask.wesl");
+const DYNAMIC_MASK_WESL: &str =
+    include_str!("../../prism_render_scene/src/shaders/dynamic_mask.wesl");
 const LOBE_SAMPLING_WESL: &str =
     include_str!("../../prism_render_scene/src/shaders/lobe_sampling.wesl");
 
@@ -185,15 +186,15 @@ fn dynamic_channels_match_on_device() {
     );
     shader.push_str(&extract_struct(BRDF_WESL, "brdf.wesl", "SurfaceSample"));
     shader.push('\n');
-    for name in [
-        "ls_hash_u32",
-        "ls_hash_combine",
-        "ls_uniform_from_hash",
-    ] {
+    for name in ["ls_hash_u32", "ls_hash_combine", "ls_uniform_from_hash"] {
         shader.push_str(&extract_fn(LOBE_SAMPLING_WESL, "lobe_sampling.wesl", name));
         shader.push('\n');
     }
-    for name in ["dyn_quantize_cell", "dyn_dissolve_mask", "dyn_dissolve_coverage"] {
+    for name in [
+        "dyn_quantize_cell",
+        "dyn_dissolve_mask",
+        "dyn_dissolve_coverage",
+    ] {
         shader.push_str(&extract_fn(DYNAMIC_MASK_WESL, "dynamic_mask.wesl", name));
         shader.push('\n');
     }
@@ -302,7 +303,10 @@ fn dynamic_channels_match_on_device() {
     for sample in &samples {
         let s = sample.surface;
         for value in [
-            s.base_color[0], s.base_color[1], s.base_color[2], s.diffuse_roughness,
+            s.base_color[0],
+            s.base_color[1],
+            s.base_color[2],
+            s.diffuse_roughness,
         ] {
             surface_bytes.extend_from_slice(&value.to_le_bytes());
         }

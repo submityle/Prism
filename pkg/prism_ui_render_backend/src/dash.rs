@@ -27,7 +27,11 @@ const MAX_DASHES: usize = 1 << 20;
 
 /// A non-negative, finite pattern entry, or `0.0` for anything else.
 fn sanitize_len(x: f32) -> f32 {
-    if x.is_finite() && x > 0.0 { x } else { 0.0 }
+    if x.is_finite() && x > 0.0 {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Split `points` into the drawn ("on") runs of a dash pattern.
@@ -43,11 +47,7 @@ fn sanitize_len(x: f32) -> f32 {
 /// path as a single run. A path with fewer than two points, or zero length,
 /// yields no runs.
 #[must_use]
-pub fn dash_polyline(
-    points: &[(f32, f32)],
-    pattern: &[f32],
-    phase: f32,
-) -> Vec<Vec<(f32, f32)>> {
+pub fn dash_polyline(points: &[(f32, f32)], pattern: &[f32], phase: f32) -> Vec<Vec<(f32, f32)>> {
     let total = polyline_length(points);
     if points.len() < 2 || total <= 0.0 {
         return Vec::new();

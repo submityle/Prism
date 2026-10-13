@@ -83,7 +83,10 @@ impl<F: Clone> RollbackReplay<F> {
     pub fn commit(&mut self, world: &World, input: F) -> u64 {
         let frame = self.history.next_frame();
         self.history.capture(world);
-        let recorded = RecordedInput { step: frame, frame: input };
+        let recorded = RecordedInput {
+            step: frame,
+            frame: input,
+        };
         let index = frame as usize;
         if index < self.inputs.len() {
             self.inputs[index] = recorded;

@@ -50,5 +50,5 @@ pub mod buffer;
 pub mod context;
 pub mod hierarchy;
 
-pub use context::{GpuContext, block_on};
+pub use context::{block_on, GpuContext};
 pub use hierarchy::GpuHierarchyPropagate;

@@ -124,14 +124,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Left anchor: pushed to the leading edge.
-    sheet.insert(
-        Class::new("pk-drawer--left").with(StyleProp::MarginRight, StyleValue::auto()),
-    );
+    sheet.insert(Class::new("pk-drawer--left").with(StyleProp::MarginRight, StyleValue::auto()));
 
     // Right anchor: pushed to the trailing edge.
-    sheet.insert(
-        Class::new("pk-drawer--right").with(StyleProp::MarginLeft, StyleValue::auto()),
-    );
+    sheet.insert(Class::new("pk-drawer--right").with(StyleProp::MarginLeft, StyleValue::auto()));
 
     // Shared open state: reveal the panel.
     sheet.insert(
@@ -158,7 +154,10 @@ mod tests {
     #[test]
     fn open_adds_is_open() {
         let el = render(DrawerProps::new().open(true));
-        assert_eq!(el.class_names(), ["pk-drawer", "pk-drawer--left", "is-open"]);
+        assert_eq!(
+            el.class_names(),
+            ["pk-drawer", "pk-drawer--left", "is-open"]
+        );
     }
 
     #[test]

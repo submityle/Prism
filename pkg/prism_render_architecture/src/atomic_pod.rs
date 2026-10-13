@@ -169,7 +169,10 @@ macro_rules! impl_atomic_pod {
 
 #[cfg(test)]
 mod tests {
-    use super::{AtomicPod, bytemuck::{Pod, Zeroable}};
+    use super::{
+        bytemuck::{Pod, Zeroable},
+        AtomicPod,
+    };
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
     #[repr(C)]
@@ -182,7 +185,10 @@ mod tests {
 
     #[test]
     fn round_trips_a_record_through_its_blob() {
-        let row = Row { a: 7, b: 0xDEAD_BEEF };
+        let row = Row {
+            a: 7,
+            b: 0xDEAD_BEEF,
+        };
         let blob = RowBlob::from(&row);
         assert_eq!(Row::read_from_blob(&blob), row);
     }

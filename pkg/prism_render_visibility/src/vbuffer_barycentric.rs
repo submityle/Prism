@@ -137,8 +137,8 @@ pub fn barycentric_derivatives(
     // `== 0.0` test misses collinear vertices whose cross product is a tiny
     // but non-zero float, so compare against a relative epsilon.
     let denom = d1[0] * d2[1] - d2[0] * d1[1];
-    let edge_scale = (d1[0] * d1[0] + d1[1] * d1[1]).sqrt()
-        * (d2[0] * d2[0] + d2[1] * d2[1]).sqrt();
+    let edge_scale =
+        (d1[0] * d1[0] + d1[1] * d1[1]).sqrt() * (d2[0] * d2[0] + d2[1] * d2[1]).sqrt();
     if denom.abs() <= 1e-6 * edge_scale.max(f32::MIN_POSITIVE) {
         return None;
     }

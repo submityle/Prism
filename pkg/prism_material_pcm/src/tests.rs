@@ -78,7 +78,8 @@ fn the_prism_face_lobe_sits_at_the_extension_region_base() {
     // Pure-OpenPBR projection uses the bit-region predicate, so the face lobe
     // is outside the specification region and is projected away.
     assert!(!is_specification_region(
-        face.registry_slot().expect("the face lobe is header resident")
+        face.registry_slot()
+            .expect("the face lobe is header resident")
     ));
     assert!(is_specification_region(0));
 }
@@ -121,9 +122,12 @@ fn register_allocates_from_the_namespace_region_and_never_recycles() {
     let first = register_prism_extension(&mut registry, "org.prism.lobe.watercolor", Kind::Lobe)
         .expect("prism region has room");
     assert_eq!(first.registry_slot(), Some(27));
-    let second =
-        register_prism_extension(&mut registry, "org.prism.mode.watercolor", Kind::ResponseMode)
-        .expect("prism region has room");
+    let second = register_prism_extension(
+        &mut registry,
+        "org.prism.mode.watercolor",
+        Kind::ResponseMode,
+    )
+    .expect("prism region has room");
     assert_eq!(second.registry_slot(), Some(28));
     // A bake/pass-time kind needs no address at all, so it cannot exhaust the
     // region and does not move the allocator (§5.2).
@@ -235,7 +239,11 @@ fn identity_only_rows_promote_in_place_without_gaining_a_slot() {
     // Identity and residency are pinned: promotion flips attribution only.
     assert_eq!(promoted.uid(), before.uid());
     assert_eq!(promoted.origin(), Namespace::Prism);
-    assert_eq!(promoted.registry_slot(), None, "promotion never mints a slot");
+    assert_eq!(
+        promoted.registry_slot(),
+        None,
+        "promotion never mints a slot"
+    );
     assert_eq!(promoted.kind(), Kind::Transfer);
     // Attribution flipped.
     assert_eq!(promoted.namespace(), Namespace::Khr);
@@ -545,7 +553,11 @@ fn energy_policies_are_lobe_only_and_roll_up_by_priority() {
         );
     }
     for uid in none {
-        assert_eq!(builtin_energy_policy(Kind::Lobe, uid), EnergyPolicy::None, "{uid}");
+        assert_eq!(
+            builtin_energy_policy(Kind::Lobe, uid),
+            EnergyPolicy::None,
+            "{uid}"
+        );
     }
     for uid in coupled {
         assert_eq!(

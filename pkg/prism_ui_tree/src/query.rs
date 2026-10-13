@@ -115,8 +115,8 @@ impl<K, T> Tree<K, T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::Tree;
     use crate::arena::NodeId;
+    use crate::Tree;
     use alloc::vec::Vec;
 
     struct SplitMix64(u64);
@@ -217,7 +217,10 @@ mod tests {
         // Different trees share no root; the path oracle agrees.
         assert_eq!(tree.lowest_common_ancestor(a, b), None);
         assert_eq!(tree.lowest_common_ancestor(r1, r2), None);
-        assert_eq!(lca_via_paths(&tree, a, b), tree.lowest_common_ancestor(a, b));
+        assert_eq!(
+            lca_via_paths(&tree, a, b),
+            tree.lowest_common_ancestor(a, b)
+        );
 
         // Missing node after removal.
         tree.remove_subtree(r2);

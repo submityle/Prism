@@ -127,7 +127,11 @@ pub fn rect_representative_sample(
     // Clamped-cosine form factor in an orthonormal LTC frame about the normal.
     // The clamped cosine only reads the `+Z` (normal) component, so pick any
     // stable in-plane axis.
-    let helper = if normal.y.abs() < 0.999 { Vec3::Y } else { Vec3::X };
+    let helper = if normal.y.abs() < 0.999 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
     let tangent = helper.cross(normal).normalize_or_zero();
     let bitangent = normal.cross(tangent);
     let to_frame = |world: Vec3| {
@@ -202,12 +206,17 @@ mod tests {
 
     #[test]
     fn overhead_light_illuminates_from_above() {
-        let sample = rect_representative_sample([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], &overhead_light())
-            .expect("overhead light must illuminate");
+        let sample =
+            rect_representative_sample([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], &overhead_light())
+                .expect("overhead light must illuminate");
         assert!(sample.illuminance.iter().all(|c| c.is_finite() && *c > 0.0));
         assert!((sample.visibility - 1.0).abs() < 1.0e-6);
         // Representative direction points toward the emitter (straight up).
-        assert!(sample.direction[2] > 0.9, "direction = {:?}", sample.direction);
+        assert!(
+            sample.direction[2] > 0.9,
+            "direction = {:?}",
+            sample.direction
+        );
     }
 
     #[test]
@@ -235,9 +244,14 @@ mod tests {
     fn off_axis_direction_points_at_closest_point() {
         // Receiver offset along +X; the closest point on the rect is clamped to
         // its +X edge (x = +1), so the representative direction leans toward +X.
-        let sample = rect_representative_sample([5.0, 0.0, 0.0], [0.0, 0.0, 1.0], &overhead_light())
-            .expect("off-axis overhead light must illuminate");
-        assert!(sample.direction[0] < 0.0, "should lean back toward the rect: {:?}", sample.direction);
+        let sample =
+            rect_representative_sample([5.0, 0.0, 0.0], [0.0, 0.0, 1.0], &overhead_light())
+                .expect("off-axis overhead light must illuminate");
+        assert!(
+            sample.direction[0] < 0.0,
+            "should lean back toward the rect: {:?}",
+            sample.direction
+        );
         assert!(sample.direction[2] > 0.0);
     }
 

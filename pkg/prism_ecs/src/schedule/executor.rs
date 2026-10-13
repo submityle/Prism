@@ -73,11 +73,7 @@ impl SingleThreadedExecutor {
     /// deterministic schedule should use [`run`](SingleThreadedExecutor::run)
     /// (the `determinism` tier needs a fixed plan, not a wall-clock gate).
     #[cfg(feature = "std")]
-    pub fn run_with_budget(
-        schedule: &mut Schedule,
-        world: &mut World,
-        budget: Duration,
-    ) -> usize {
+    pub fn run_with_budget(schedule: &mut Schedule, world: &mut World, budget: Duration) -> usize {
         Self::run_inner(schedule, world, &mut (), Some(budget))
     }
 

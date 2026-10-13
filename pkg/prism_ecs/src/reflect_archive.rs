@@ -43,8 +43,8 @@
 //! the concrete type this build registered. Ones with no schema registered
 //! decode straight against the current shape.
 
-use alloc::vec::Vec;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use crate::entity::Entity;
 use crate::world::World;
@@ -95,13 +95,22 @@ impl core::fmt::Display for ReflectArchiveError {
             Self::BadMagic => f.write_str("not a Prism reflect archive (bad magic)"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported archive version {v}"),
             Self::Truncated => f.write_str("archive ended mid-record"),
-            Self::InvalidEntity(bits) => write!(f, "archive entity bits {bits:#x} are not a valid handle"),
+            Self::InvalidEntity(bits) => {
+                write!(f, "archive entity bits {bits:#x} are not a valid handle")
+            }
             Self::NameIdMismatch(name) => {
-                write!(f, "archive record for `{name}` does not match its stable id")
+                write!(
+                    f,
+                    "archive record for `{name}` does not match its stable id"
+                )
             }
             Self::MalformedName => f.write_str("archive record has a malformed type name"),
             Self::UnknownType(id) => {
-                write!(f, "archive names unregistered reflected type {:#x}", id.value())
+                write!(
+                    f,
+                    "archive names unregistered reflected type {:#x}",
+                    id.value()
+                )
             }
             Self::Migrate(e) => write!(f, "schema migration failed: {e}"),
             Self::Encode(e) => write!(f, "component encode failed: {e}"),
@@ -205,8 +214,10 @@ impl World {
         entities: impl IntoIterator<Item = Entity>,
     ) -> Result<Vec<u8>, ReflectArchiveError> {
         // Collect first so the writer can emit the entity count up front.
-        let mut records: Vec<(Entity, Vec<(StableTypeId, &str, &dyn prism_reflect::Reflect)>)> =
-            Vec::new();
+        let mut records: Vec<(
+            Entity,
+            Vec<(StableTypeId, &str, &dyn prism_reflect::Reflect)>,
+        )> = Vec::new();
         for entity in entities {
             let components: Vec<(StableTypeId, &str, &dyn prism_reflect::Reflect)> = self
                 .reflect_entity(entity)
@@ -237,8 +248,8 @@ impl World {
                     return Err(ReflectArchiveError::TooLarge);
                 }
                 let name_bytes = name.as_bytes();
-                let name_len = u16::try_from(name_bytes.len())
-                    .map_err(|_| ReflectArchiveError::TooLarge)?;
+                let name_len =
+                    u16::try_from(name_bytes.len()).map_err(|_| ReflectArchiveError::TooLarge)?;
                 push_u16(&mut out, name_len);
                 out.extend_from_slice(name_bytes);
                 push_u64(&mut out, type_id.value());
@@ -259,7 +270,10 @@ impl World {
     /// # Errors
     /// [`ReflectArchiveError`] for a malformed archive, a type this world has no
     /// reflection registration for, or a value the decoder rejects.
-    pub fn load_reflect_archive(&mut self, bytes: &[u8]) -> Result<Vec<Entity>, ReflectArchiveError> {
+    pub fn load_reflect_archive(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<Vec<Entity>, ReflectArchiveError> {
         let mut reader = Reader::new(bytes);
         if reader.take(4)? != MAGIC {
             return Err(ReflectArchiveError::BadMagic);
@@ -276,7 +290,8 @@ impl World {
         let mut landed = Vec::with_capacity(entity_count.min(bytes.len() / 12 + 1));
         for _ in 0..entity_count {
             let bits = reader.u64()?;
-            let archived = Entity::from_bits(bits).ok_or(ReflectArchiveError::InvalidEntity(bits))?;
+            let archived =
+                Entity::from_bits(bits).ok_or(ReflectArchiveError::InvalidEntity(bits))?;
             let component_count = reader.u32()? as usize;
 
             // Resolve the target *before* decoding, so a malformed component does
@@ -343,11 +358,8 @@ impl World {
                     .ok_or(ReflectArchiveError::UnknownType(type_id))?;
                 // The blob's root id is the *writer's* concrete type name; decode
                 // against exactly that version's shape.
-                let mut decoded = prism_reflect::from_binary(
-                    blob,
-                    self.reflect.types(),
-                    writer_schema.info(),
-                )?;
+                let mut decoded =
+                    prism_reflect::from_binary(blob, self.reflect.types(), writer_schema.info())?;
                 for step in schemas.chain(&logical, wrote_version)? {
                     let value = decoded
                         .downcast_mut::<prism_reflect::DynamicStruct>()
@@ -357,10 +369,7 @@ impl World {
                 let current = schemas
                     .current_schema(&logical)
                     .ok_or(ReflectArchiveError::UnknownType(type_id))?;
-                (
-                    StableTypeId::of_path(current.type_name()),
-                    decoded,
-                )
+                (StableTypeId::of_path(current.type_name()), decoded)
             }
             None => {
                 // No schema: the blob's shape is today's shape.
@@ -369,8 +378,11 @@ impl World {
                     .types()
                     .get_with_name(name)
                     .ok_or(ReflectArchiveError::UnknownType(type_id))?;
-                let decoded =
-                    prism_reflect::from_binary(blob, self.reflect.types(), registration.type_info())?;
+                let decoded = prism_reflect::from_binary(
+                    blob,
+                    self.reflect.types(),
+                    registration.type_info(),
+                )?;
                 (type_id, decoded)
             }
         };

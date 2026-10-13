@@ -31,8 +31,8 @@ pub mod choreography;
 pub mod driver;
 pub mod easing;
 pub mod lerp;
-pub mod spline;
 pub(crate) mod math;
+pub mod spline;
 pub mod spring;
 pub mod timeline;
 

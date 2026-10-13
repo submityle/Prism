@@ -187,9 +187,8 @@ fn find_cycle(adj: &HashMap<Entity, Vec<Entity>>) -> Vec<Entity> {
     }
 
     let empty: &[Entity] = &[];
-    let neighbors = |node: Entity| -> &[Entity] {
-        sorted_adj.get(&node).map(Vec::as_slice).unwrap_or(empty)
-    };
+    let neighbors =
+        |node: Entity| -> &[Entity] { sorted_adj.get(&node).map(Vec::as_slice).unwrap_or(empty) };
 
     let mut color: HashMap<Entity, Color> = HashMap::new();
 
@@ -365,7 +364,11 @@ mod tests {
 
         let report = RelationCycleReport::capture(&world);
         assert_eq!(report.relation_count(), 2);
-        let ids: Vec<u32> = report.per_relation.iter().map(|e| e.relation.index()).collect();
+        let ids: Vec<u32> = report
+            .per_relation
+            .iter()
+            .map(|e| e.relation.index())
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted);

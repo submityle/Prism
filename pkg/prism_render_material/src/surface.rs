@@ -441,9 +441,15 @@ impl LobeMask {
     ///
     /// This mask is the runtime mirror of the schema's `namespace` column; the
     /// schema-parity gate asserts the two never drift.
-    pub const KHR_REGION: Self =
-        Self(Self::EMISSION.0 | Self::CLEARCOAT.0 | Self::ANISOTROPY.0 | Self::SHEEN.0
-            | Self::SUBSURFACE.0 | Self::TRANSMISSION.0 | Self::THIN_FILM.0);
+    pub const KHR_REGION: Self = Self(
+        Self::EMISSION.0
+            | Self::CLEARCOAT.0
+            | Self::ANISOTROPY.0
+            | Self::SHEEN.0
+            | Self::SUBSURFACE.0
+            | Self::TRANSMISSION.0
+            | Self::THIN_FILM.0,
+    );
 
     /// The Prism extension bit region (§4.5 constraint 2).
     ///
@@ -483,9 +489,18 @@ impl LobeMask {
         // Two dense segments (§4.5 constraint 2): canonical `0..6` plus the
         // extension base at bit 16, so this is an OR of the defined bits rather
         // than a contiguous `(1 << COUNT) - 1`.
-        Self(Self::EMISSION.0 | Self::CLEARCOAT.0 | Self::ANISOTROPY.0 | Self::SHEEN.0
-            | Self::SUBSURFACE.0 | Self::TRANSMISSION.0 | Self::THIN_FILM.0 | Self::NPR_FACE.0
-            | Self::GLINT.0 | Self::MEASURED_BRDF.0)
+        Self(
+            Self::EMISSION.0
+                | Self::CLEARCOAT.0
+                | Self::ANISOTROPY.0
+                | Self::SHEEN.0
+                | Self::SUBSURFACE.0
+                | Self::TRANSMISSION.0
+                | Self::THIN_FILM.0
+                | Self::NPR_FACE.0
+                | Self::GLINT.0
+                | Self::MEASURED_BRDF.0,
+        )
     }
 
     /// Keep only the bits inside the `OpenPBR` specification-core region.
@@ -819,9 +834,7 @@ impl SurfaceParameterBlock {
             LobeMask::THIN_FILM => bytemuck::cast_slice(core::slice::from_ref(&self.thin_film)),
             LobeMask::NPR_FACE => bytemuck::cast_slice(core::slice::from_ref(&self.face)),
             LobeMask::GLINT => bytemuck::cast_slice(core::slice::from_ref(&self.glint)),
-            LobeMask::MEASURED_BRDF => {
-                bytemuck::cast_slice(core::slice::from_ref(&self.measured))
-            }
+            LobeMask::MEASURED_BRDF => bytemuck::cast_slice(core::slice::from_ref(&self.measured)),
             _ => &[],
         }
     }
@@ -967,7 +980,9 @@ mod tests {
 
     #[test]
     fn layout_matches_generated_table() {
-        use crate::surface_layout::{SURFACE_LOBES, SURFACE_LOBE_COUNT, SURFACE_LOBE_WORDS_BY_SLOT};
+        use crate::surface_layout::{
+            SURFACE_LOBES, SURFACE_LOBE_COUNT, SURFACE_LOBE_WORDS_BY_SLOT,
+        };
 
         // The hand-written typed enum must agree with the schema-generated
         // table in count, bit order, and per-lobe stride — this is the S2
@@ -1005,7 +1020,10 @@ mod tests {
         let mut extension = LobeMask::default();
         for lobe in SURFACE_LOBES {
             let bit = LobeMask(1 << lobe.registry_slot);
-            assert_eq!(LobeMask::region_of(bit), Some(expected_region(lobe.namespace)));
+            assert_eq!(
+                LobeMask::region_of(bit),
+                Some(expected_region(lobe.namespace))
+            );
             if lobe.namespace == "KHR" {
                 khr = khr.union(bit);
             } else {
@@ -1015,7 +1033,10 @@ mod tests {
         assert_eq!(LobeMask::KHR_REGION, khr);
         assert_eq!(LobeMask::EXTENSION_REGION, extension);
         // The two regions are disjoint and together tile the defined bits.
-        assert_eq!(LobeMask::KHR_REGION.bits() & LobeMask::EXTENSION_REGION.bits(), 0);
+        assert_eq!(
+            LobeMask::KHR_REGION.bits() & LobeMask::EXTENSION_REGION.bits(),
+            0
+        );
         assert_eq!(
             LobeMask::KHR_REGION.union(LobeMask::EXTENSION_REGION),
             LobeMask::all()

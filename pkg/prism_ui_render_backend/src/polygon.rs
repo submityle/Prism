@@ -231,9 +231,18 @@ mod tests {
         let mut state = 0x0123_4567_89AB_CDEF_u64;
         for _ in 0..600 {
             let tri = [
-                (rand_in(&mut state, -10.0, 10.0), rand_in(&mut state, -10.0, 10.0)),
-                (rand_in(&mut state, -10.0, 10.0), rand_in(&mut state, -10.0, 10.0)),
-                (rand_in(&mut state, -10.0, 10.0), rand_in(&mut state, -10.0, 10.0)),
+                (
+                    rand_in(&mut state, -10.0, 10.0),
+                    rand_in(&mut state, -10.0, 10.0),
+                ),
+                (
+                    rand_in(&mut state, -10.0, 10.0),
+                    rand_in(&mut state, -10.0, 10.0),
+                ),
+                (
+                    rand_in(&mut state, -10.0, 10.0),
+                    rand_in(&mut state, -10.0, 10.0),
+                ),
             ];
             for _ in 0..5 {
                 let x = rand_in(&mut state, -14.0, 14.0);

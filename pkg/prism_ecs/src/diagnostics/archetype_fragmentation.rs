@@ -292,7 +292,11 @@ mod tests {
         assert_eq!(report.populated_archetype_count, 3);
         assert_eq!(report.singleton_archetype_count, 3);
         assert_eq!(report.total_live_rows, 3);
-        assert_eq!(report.singleton_ratio(), 1.0, "every populated archetype is a singleton");
+        assert_eq!(
+            report.singleton_ratio(),
+            1.0,
+            "every populated archetype is a singleton"
+        );
         assert_eq!(report.analyzed_count(), 3, "each singleton owns one chunk");
 
         // A singleton leaves its chunk almost entirely empty.
@@ -316,15 +320,17 @@ mod tests {
 
         let report = ArchetypeFragmentationReport::capture(&world);
         assert_eq!(report.populated_archetype_count, 3);
-        assert_eq!(report.singleton_archetype_count, 2, "B and C are singletons");
+        assert_eq!(
+            report.singleton_archetype_count, 2,
+            "B and C are singletons"
+        );
 
         // Ascending occupancy, archetype-id tie-break.
         for pair in report.entries.windows(2) {
             let (lo, hi) = (&pair[0], &pair[1]);
             assert!(
                 lo.occupancy() < hi.occupancy()
-                    || (lo.occupancy().to_bits() == hi.occupancy().to_bits()
-                        && lo.id <= hi.id),
+                    || (lo.occupancy().to_bits() == hi.occupancy().to_bits() && lo.id <= hi.id),
                 "entries must be worst-occupancy-first, id-ascending on ties"
             );
         }

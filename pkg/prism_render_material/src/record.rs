@@ -4,12 +4,25 @@ use crate::surface::{LobeMask, SurfaceParameterBlock};
 use core::ops::{BitOr, BitOrAssign};
 use prism_render_architecture::abi::GenerationalHandle;
 
-/// Material ABI version. Bumped to 5 by the first v5-only layout change: the
+/// Material ABI version. Bumped to 6 when texture rows gained the optional
+/// virtual-texture metadata segment. The metadata is explicitly disabled for
+/// ordinary bindless rows, so existing non-VT materials keep their sampling
+/// identity and behaviour while the row remains self-describing for a future
+/// VT consumer.
+///
+/// The earlier v5-only layout change was the first version in which the
 /// `clearcoat` lobe grew to carry the `OpenPBR` `coat_ior` / `coat_color` fields
 /// (design doc §4.4 / P1-f), so a v4 reader can no longer decode the packed
 /// block. The remaining v5 header/classification work (§8, P1-b/P1-h) lands on
 /// top of this marker rather than re-issuing it.
-pub const MATERIAL_ABI_VERSION: u32 = 5;
+pub const MATERIAL_ABI_VERSION: u32 = 6;
+
+/// Sentinel in [`GpuMaterialTexture::virtual_texture_id`] for a row that is
+/// not backed by a virtual texture. This is deliberately not zero: zero is a
+/// valid texture key for implementations that allocate keys densely.
+pub const NO_VIRTUAL_TEXTURE: u32 = u32::MAX;
+/// Reserved row marker for the normalized non-bindless material atlas.
+pub const PORTABLE_TEXTURE_ATLAS: u32 = u32::MAX - 1;
 pub const FALLBACK_MATERIAL_HANDLE: GenerationalHandle = GenerationalHandle {
     index: 0,
     generation: 0,
@@ -86,6 +99,11 @@ impl MaterialFeatureFlags {
     pub const EMISSIVE: Self = Self(1 << 4);
     pub const COMPLEX_CLOSURE: Self = Self(1 << 5);
     pub const FACE_SHADOW: Self = Self(1 << 6);
+    /// The material carries a region-illumination mask texture. The visibility
+    /// raster samples it per pixel and writes the Lit/Stylized selector into
+    /// the visibility metadata's spare word; classification then bins each
+    /// region into the requested response without changing the material ABI.
+    pub const REGION_ILLUMINATION: Self = Self(1 << 7);
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
@@ -452,12 +470,114 @@ impl Default for GpuSurfaceParameters {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuMaterialTexture {
+    /// Bindless texture heap slot used by the current non-VT sampling path.
     pub index: u32,
+    /// Generation of [`index`] when this row was published.
     pub generation: u32,
+    /// Stable material texture semantic (base color, normal, etc.).
     pub semantic: u32,
+    /// Bindless sampler heap slot paired with [`index`].
     pub sampler_index: u32,
+    /// Stable virtual-texture resource key. [`NO_VIRTUAL_TEXTURE`] means that
+    /// VT is disabled for this row; no VT page lookup is implied by the other
+    /// fields.
+    pub virtual_texture_id: u32,
+    /// Mip-zero width in texels, meaningful only when VT is enabled.
+    pub virtual_texture_width: u32,
+    /// Mip-zero height in texels, meaningful only when VT is enabled.
+    pub virtual_texture_height: u32,
+    /// Square VT page edge in texels, meaningful only when VT is enabled.
+    pub virtual_texture_page_size: u32,
+}
+
+impl Default for GpuMaterialTexture {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            generation: 0,
+            semantic: 0,
+            sampler_index: 0,
+            virtual_texture_id: NO_VIRTUAL_TEXTURE,
+            virtual_texture_width: 0,
+            virtual_texture_height: 0,
+            virtual_texture_page_size: 0,
+        }
+    }
+}
+
+impl GpuMaterialTexture {
+    /// Build an ordinary bindless row with virtual texturing explicitly off.
+    #[must_use]
+    pub const fn non_virtual(
+        index: u32,
+        generation: u32,
+        semantic: u32,
+        sampler_index: u32,
+    ) -> Self {
+        Self {
+            index,
+            generation,
+            semantic,
+            sampler_index,
+            virtual_texture_id: NO_VIRTUAL_TEXTURE,
+            virtual_texture_width: 0,
+            virtual_texture_height: 0,
+            virtual_texture_page_size: 0,
+        }
+    }
+
+    /// Build a row for the normalized non-bindless material atlas. The same
+    /// row remains a normal direct bindless row in the bindless specialization;
+    /// the shader only interprets the marker on the portable variant.
+    #[must_use]
+    pub const fn with_portable_atlas(
+        index: u32,
+        generation: u32,
+        semantic: u32,
+        sampler_index: u32,
+        width: u32,
+        height: u32,
+        page_size: u32,
+    ) -> Self {
+        Self {
+            index,
+            generation,
+            semantic,
+            sampler_index,
+            virtual_texture_id: PORTABLE_TEXTURE_ATLAS,
+            virtual_texture_width: width,
+            virtual_texture_height: height,
+            virtual_texture_page_size: page_size,
+        }
+    }
+
+    /// Build a row carrying VT metadata. This records metadata only; a VT
+    /// page table, residency service, and shader consumer are still required
+    /// before a renderer may sample it as a virtual texture.
+    #[must_use]
+    pub const fn with_virtual_texture(
+        index: u32,
+        generation: u32,
+        semantic: u32,
+        sampler_index: u32,
+        virtual_texture_id: u32,
+        virtual_texture_width: u32,
+        virtual_texture_height: u32,
+        virtual_texture_page_size: u32,
+    ) -> Self {
+        Self {
+            index,
+            generation,
+            semantic,
+            sampler_index,
+            virtual_texture_id,
+            virtual_texture_width,
+            virtual_texture_height,
+            virtual_texture_page_size,
+        }
+    }
 }
 
 pub fn inactive_material_header(generation: u32) -> GpuMaterialHeader {

@@ -258,10 +258,16 @@ mod tests {
         // base 0, step 5: multiples of 5 (either sign) pass.
         let by_five = int_step(0, 5);
         for value in ["0", "5", "-5", "10", "15", " -20 "] {
-            assert!(ok(by_five.validate(&value.to_string())), "{value} should align");
+            assert!(
+                ok(by_five.validate(&value.to_string())),
+                "{value} should align"
+            );
         }
         for value in ["3", "7", "-3", "11"] {
-            assert!(!ok(by_five.validate(&value.to_string())), "{value} should not align");
+            assert!(
+                !ok(by_five.validate(&value.to_string())),
+                "{value} should not align"
+            );
         }
         // Non-integers report the shared whole-number message.
         let err = by_five.validate(&"nan".to_string()).unwrap_err();

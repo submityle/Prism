@@ -113,9 +113,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Label: inherits the segment color.
-    sheet.insert(
-        Class::new("pk-segmented__label").with(StyleProp::Color, tok("color.label")),
-    );
+    sheet.insert(Class::new("pk-segmented__label").with(StyleProp::Color, tok("color.label")));
 
     // Shared selected state: raised surface pill with accent label.
     sheet.insert(
@@ -151,7 +149,10 @@ mod tests {
         let segs = el.child_elements();
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[0].class_names(), ["pk-segmented__segment"]);
-        assert_eq!(segs[2].class_names(), ["pk-segmented__segment", "is-selected"]);
+        assert_eq!(
+            segs[2].class_names(),
+            ["pk-segmented__segment", "is-selected"]
+        );
     }
 
     #[test]

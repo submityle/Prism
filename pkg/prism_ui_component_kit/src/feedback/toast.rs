@@ -103,9 +103,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     }
 
     // Message: body type that inherits the tone color.
-    sheet.insert(
-        Class::new("pk-toast__message").with(StyleProp::FontSize, tok("font.size.body")),
-    );
+    sheet.insert(Class::new("pk-toast__message").with(StyleProp::FontSize, tok("font.size.body")));
 }
 
 #[cfg(test)]

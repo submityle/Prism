@@ -147,9 +147,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Collapsed: a narrow icon-only rail.
-    sheet.insert(
-        Class::new("pk-sidebar--collapsed").with(StyleProp::Width, StyleValue::px(64.0)),
-    );
+    sheet.insert(Class::new("pk-sidebar--collapsed").with(StyleProp::Width, StyleValue::px(64.0)));
 
     // Item: a centered icon + label row with a rounded hit area.
     sheet.insert(
@@ -178,9 +176,8 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Label slot: grows to fill the row.
-    sheet.insert(
-        Class::new("pk-sidebar__label").with(StyleProp::FlexGrow, StyleValue::number(1.0)),
-    );
+    sheet
+        .insert(Class::new("pk-sidebar__label").with(StyleProp::FlexGrow, StyleValue::number(1.0)));
 }
 
 #[cfg(test)]
@@ -228,8 +225,14 @@ mod tests {
         let item = &el.child_elements()[0];
         let kids = item.child_elements();
         assert_eq!(kids.len(), 2);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-sidebar__icon"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-sidebar__label"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-sidebar__icon"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-sidebar__label"));
         assert_eq!(kids[1].text_content(), Some("Home"));
     }
 

@@ -168,10 +168,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Expanded node: a hair more breathing room around the open subtree.
-    sheet.insert(
-        Class::new("pk-tree__node--expanded")
-            .with(StyleProp::RowGap, tok("space.xs")),
-    );
+    sheet.insert(Class::new("pk-tree__node--expanded").with(StyleProp::RowGap, tok("space.xs")));
 
     // Label: a padded, selectable row that highlights on hover.
     sheet.insert(
@@ -181,7 +178,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::FontSize, tok("font.size.body"))
             .with(StyleProp::Color, tok("color.label"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.tertiary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.tertiary"),
+            ),
     );
 }
 
@@ -207,9 +208,8 @@ mod tests {
 
     #[test]
     fn collapsed_node_hides_children() {
-        let el = render(TreeViewProps::new().root(
-            TreeNode::new("root").child(TreeNode::new("child")),
-        ));
+        let el =
+            render(TreeViewProps::new().root(TreeNode::new("root").child(TreeNode::new("child"))));
         let node = &el.child_elements()[0];
         assert_eq!(node.class_names(), ["pk-tree__node"]);
         // Only the label is present; the child subtree is omitted.
@@ -219,17 +219,25 @@ mod tests {
 
     #[test]
     fn expanded_node_renders_children() {
-        let el = render(TreeViewProps::new().root(
-            TreeNode::new("root")
-                .child(TreeNode::new("a"))
-                .child(TreeNode::new("b"))
-                .expanded(true),
-        ));
+        let el = render(
+            TreeViewProps::new().root(
+                TreeNode::new("root")
+                    .child(TreeNode::new("a"))
+                    .child(TreeNode::new("b"))
+                    .expanded(true),
+            ),
+        );
         let node = &el.child_elements()[0];
-        assert!(node.class_names().iter().any(|n| n == "pk-tree__node--expanded"));
+        assert!(node
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-tree__node--expanded"));
         // Label plus two child nodes.
         assert_eq!(node.child_elements().len(), 3);
-        assert_eq!(label_of(&node.child_elements()[1]).text_content(), Some("a"));
+        assert_eq!(
+            label_of(&node.child_elements()[1]).text_content(),
+            Some("a")
+        );
     }
 
     #[test]
@@ -241,18 +249,29 @@ mod tests {
 
     #[test]
     fn depth_increases_label_indent() {
-        let el = render(TreeViewProps::new().root(
-            TreeNode::new("root")
-                .child(TreeNode::new("child"))
-                .expanded(true),
-        ));
+        let el = render(
+            TreeViewProps::new().root(
+                TreeNode::new("root")
+                    .child(TreeNode::new("child"))
+                    .expanded(true),
+            ),
+        );
         let root = &el.child_elements()[0];
         let root_indent = label_of(root).inline_pairs();
-        assert_eq!(root_indent[0], (StyleProp::MarginLeft, StyleValue::Length(Length::Px(0.0))));
+        assert_eq!(
+            root_indent[0],
+            (StyleProp::MarginLeft, StyleValue::Length(Length::Px(0.0)))
+        );
 
         let child = &root.child_elements()[1];
         let child_indent = label_of(child).inline_pairs();
-        assert_eq!(child_indent[0], (StyleProp::MarginLeft, StyleValue::Length(Length::Px(INDENT_PX))));
+        assert_eq!(
+            child_indent[0],
+            (
+                StyleProp::MarginLeft,
+                StyleValue::Length(Length::Px(INDENT_PX))
+            )
+        );
     }
 
     #[test]

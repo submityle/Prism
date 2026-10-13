@@ -16,11 +16,11 @@
 # on any drift. Byte parity vs `surface.rs` is still guarded by the S1 gate.
 
 schema_version = 1
-# Tracks `MATERIAL_ABI_VERSION`. Bumped to 5 by the P1-f `clearcoat` lobe growth
-# (`coat_ior` / `coat_color`, doc §4.4) — the first schema diff that a v4 reader
-# cannot decode. The rest of the v5 work (§8 header/classification) lands on top
-# of this same marker (doc §17.5.7).
-abi_version = 5
+# Tracks `MATERIAL_ABI_VERSION`. v5 introduced the expanded OpenPBR clearcoat
+# block; v6 adds the eight-word material texture row with optional VT metadata.
+# VT sampling is not implied by this ABI metadata: the material resolve consumer
+# and streaming-resource bindings remain a separate implementation step.
+abi_version = 6
 
 # ---------------------------------------------------------------------------
 # Core: the always-present OpenPBR-anchored base every lit/stylized/unlit

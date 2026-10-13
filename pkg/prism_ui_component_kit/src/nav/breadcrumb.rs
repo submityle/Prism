@@ -126,7 +126,10 @@ mod tests {
         let el = render(BreadcrumbProps::new().item(BreadcrumbItem::new("Home")));
         let kids = el.child_elements();
         assert_eq!(kids.len(), 1);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-breadcrumb__item"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-breadcrumb__item"));
     }
 
     #[test]
@@ -140,11 +143,26 @@ mod tests {
         let kids = el.child_elements();
         // 3 items + 2 separators, interleaved item/sep/item/sep/item.
         assert_eq!(kids.len(), 5);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-breadcrumb__item"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-breadcrumb__sep"));
-        assert!(kids[2].class_names().iter().any(|c| c == "pk-breadcrumb__item"));
-        assert!(kids[3].class_names().iter().any(|c| c == "pk-breadcrumb__sep"));
-        assert!(kids[4].class_names().iter().any(|c| c == "pk-breadcrumb__item"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-breadcrumb__item"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-breadcrumb__sep"));
+        assert!(kids[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-breadcrumb__item"));
+        assert!(kids[3]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-breadcrumb__sep"));
+        assert!(kids[4]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-breadcrumb__item"));
         assert_eq!(kids[4].text_content(), Some("Guide"));
     }
 }

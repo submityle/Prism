@@ -575,7 +575,8 @@ pub struct FieldPlacement {
 impl SurfaceSchema {
     /// Parse a schema from TOML and run full structural validation.
     pub fn parse(toml_src: &str) -> Result<Self, SchemaError> {
-        let schema: Self = toml::from_str(toml_src).map_err(|e| SchemaError::Parse(e.to_string()))?;
+        let schema: Self =
+            toml::from_str(toml_src).map_err(|e| SchemaError::Parse(e.to_string()))?;
         schema.validate()?;
         Ok(schema)
     }
@@ -645,7 +646,12 @@ impl SurfaceSchema {
     /// Absolute word offset of a specific lobe field under `mask_bits`, or
     /// `None` if the lobe is absent or the field is unknown.
     #[must_use]
-    pub fn lobe_field_offset(&self, mask_bits: u32, lobe_id: &str, field_name: &str) -> Option<u32> {
+    pub fn lobe_field_offset(
+        &self,
+        mask_bits: u32,
+        lobe_id: &str,
+        field_name: &str,
+    ) -> Option<u32> {
         let mut cursor = self.core.words;
         for lobe in self.canonical_lobes() {
             if mask_bits & (1 << lobe.registry_slot) == 0 {
@@ -954,7 +960,10 @@ impl fmt::Display for SchemaError {
                 write!(f, "two lobes claim the closure bucket {name:?}")
             }
             Self::EmptyResponseModeIllumination(id) => {
-                write!(f, "response mode {id:?} declares an empty illumination name")
+                write!(
+                    f,
+                    "response mode {id:?} declares an empty illumination name"
+                )
             }
             Self::DuplicateResponseModeIllumination(illumination) => {
                 write!(
@@ -969,7 +978,10 @@ impl fmt::Display for SchemaError {
                 write!(f, "two header-resident records claim registry slot {slot}")
             }
             Self::NonContiguousChannelWords => {
-                write!(f, "runtime channel header words must tile 0..channels.len()")
+                write!(
+                    f,
+                    "runtime channel header words must tile 0..channels.len()"
+                )
             }
             Self::ChannelDefaultNotScalar(id) => {
                 write!(f, "runtime channel {id:?} needs a scalar default")

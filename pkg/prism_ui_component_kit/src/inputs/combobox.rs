@@ -159,10 +159,18 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Focus, StyleProp::BorderColor, tok("color.tint")),
+            .with_state(
+                InteractionState::Focus,
+                StyleProp::BorderColor,
+                tok("color.tint"),
+            ),
     );
 
     sheet.insert(
@@ -196,7 +204,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.secondary"),
+            ),
     );
     sheet.insert(
         Class::new("pk-combobox__option--active")
@@ -245,8 +257,14 @@ mod tests {
             .expect("list");
         let options = list.child_elements();
         assert_eq!(options.len(), 2);
-        assert!(!options[0].class_names().iter().any(|n| n == "pk-combobox__option--active"));
-        assert!(options[1].class_names().iter().any(|n| n == "pk-combobox__option--active"));
+        assert!(!options[0]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-combobox__option--active"));
+        assert!(options[1]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-combobox__option--active"));
     }
 
     #[test]
@@ -259,7 +277,10 @@ mod tests {
     #[test]
     fn disabled_adds_block_modifier() {
         let el = render(ComboboxProps::new().disabled(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-combobox--disabled"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-combobox--disabled"));
     }
 
     #[test]

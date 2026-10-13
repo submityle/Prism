@@ -256,10 +256,14 @@ fn blas_refit_with_static_instances_refreshes_tlas() {
     // Move BLAS 1's geometry; the instances referencing it never move.
     let moved = translate_soup(&soups[1], [0.6, -0.4, 0.3]);
     let count = u32::try_from(soups[1].len()).unwrap();
-    let blas_receipt = scene.deform_blas(1, refit_change(4, count), positions_of(&moved), &mut ledger);
+    let blas_receipt =
+        scene.deform_blas(1, refit_change(4, count), positions_of(&moved), &mut ledger);
     assert_eq!(blas_receipt.executed, AccelerationUpdate::Refit);
     soups[1] = moved;
-    assert!(scene.has_dirty_blas(), "BLAS change must mark the pool dirty");
+    assert!(
+        scene.has_dirty_blas(),
+        "BLAS change must mark the pool dirty"
+    );
 
     // Top-level change is a pure Reuse, yet the invariant must upgrade it to a
     // refit so the stale world boxes are re-read from the moved BLAS.
@@ -442,8 +446,15 @@ fn budget_defers_tlas_rebuild_but_stays_correct() {
         fragmentation: 0.2,
     };
     let receipt = scene.sync_tlas(change, &xf, &mut ledger);
-    assert_eq!(receipt.executed, AccelerationUpdate::Refit, "rebuild should defer to refit");
-    assert!(!receipt.admitted, "the deferred rebuild must report not admitted");
+    assert_eq!(
+        receipt.executed,
+        AccelerationUpdate::Refit,
+        "rebuild should defer to refit"
+    );
+    assert!(
+        !receipt.admitted,
+        "the deferred rebuild must report not admitted"
+    );
     assert!(receipt.rebuild_pending, "a rebuild should stay queued");
 
     // A deferred rebuild still leaves a correct (refit) structure.
@@ -467,10 +478,19 @@ fn multi_frame_sequence_stays_consistent() {
     for frame in 0..5u32 {
         // Deform a rotating BLAS each frame.
         let b = (frame % 3) as usize;
-        let delta = [0.05 * f32::from(u16::try_from(frame + 1).unwrap()), 0.0, 0.03];
+        let delta = [
+            0.05 * f32::from(u16::try_from(frame + 1).unwrap()),
+            0.0,
+            0.03,
+        ];
         let moved_soup = translate_soup(&soups[b], delta);
         let c = u32::try_from(soups[b].len()).unwrap();
-        scene.deform_blas(b, refit_change(4, c), positions_of(&moved_soup), &mut ledger);
+        scene.deform_blas(
+            b,
+            refit_change(4, c),
+            positions_of(&moved_soup),
+            &mut ledger,
+        );
         soups[b] = moved_soup;
 
         // Small cumulative instance motion.
@@ -501,7 +521,10 @@ fn dirty_set_tracks_blas_changes() {
     let noop = reuse_change(u32::try_from(soups[0].len()).unwrap());
     let receipt = scene.deform_blas(0, noop, positions_of(&soups[0]), &mut ledger);
     assert_eq!(receipt.executed, AccelerationUpdate::Reuse);
-    assert!(!scene.has_dirty_blas(), "a Reuse frame must not dirty the pool");
+    assert!(
+        !scene.has_dirty_blas(),
+        "a Reuse frame must not dirty the pool"
+    );
 
     // A refit frame dirties it until the next sync.
     let moved = translate_soup(&soups[0], [0.2, 0.0, 0.0]);

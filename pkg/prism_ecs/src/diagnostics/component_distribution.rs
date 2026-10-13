@@ -279,7 +279,10 @@ mod tests {
         let tag = world.components().id_of::<Tag>().unwrap();
 
         let pos_entry = report.entry(pos).unwrap();
-        assert_eq!(pos_entry.archetype_count, 3, "Position in all three archetypes");
+        assert_eq!(
+            pos_entry.archetype_count, 3,
+            "Position in all three archetypes"
+        );
         assert_eq!(pos_entry.populated_archetype_count, 3);
         assert_eq!(pos_entry.live_rows, 3, "one Position per spawned entity");
         assert!(pos_entry.is_spread());
@@ -291,7 +294,11 @@ mod tests {
         // Most spread first.
         assert_eq!(report.most_spread().unwrap().id, pos);
         assert_eq!(report.max_archetype_count, 3);
-        assert_eq!(report.spread_component_count(), 1, "only Position spans >1 archetype");
+        assert_eq!(
+            report.spread_component_count(),
+            1,
+            "only Position spans >1 archetype"
+        );
     }
 
     #[test]
@@ -307,8 +314,7 @@ mod tests {
             let (hi, lo) = (&pair[0], &pair[1]);
             assert!(
                 hi.archetype_count > lo.archetype_count
-                    || (hi.archetype_count == lo.archetype_count
-                        && hi.id.index() <= lo.id.index()),
+                    || (hi.archetype_count == lo.archetype_count && hi.id.index() <= lo.id.index()),
                 "entries must be most-spread-first, id-ascending on ties"
             );
         }
@@ -345,7 +351,10 @@ mod tests {
 
         let report = ComponentDistributionReport::capture(&world);
         let vel = world.components().id_of::<Velocity>().unwrap();
-        assert!(report.entry(vel).is_none(), "unused component has no footprint");
+        assert!(
+            report.entry(vel).is_none(),
+            "unused component has no footprint"
+        );
         assert!(report.unused_component_count() >= 1);
         assert!(report.component_count > report.analyzed_count());
     }
@@ -364,6 +373,9 @@ mod tests {
         assert_eq!(via_world.entries, via_report.entries);
         assert_eq!(via_world.component_count, via_report.component_count);
         assert_eq!(via_world.total_memberships, via_report.total_memberships);
-        assert_eq!(via_world.max_archetype_count, via_report.max_archetype_count);
+        assert_eq!(
+            via_world.max_archetype_count,
+            via_report.max_archetype_count
+        );
     }
 }

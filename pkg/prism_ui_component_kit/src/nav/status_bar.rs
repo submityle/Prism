@@ -175,7 +175,10 @@ mod tests {
             .find(|c| c.kind() == &ElementKind::Text)
             .expect("message child");
         assert_eq!(msg.text_content(), Some("Ready"));
-        assert!(msg.class_names().iter().any(|c| c == "pk-status-bar__message"));
+        assert!(msg
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-status-bar__message"));
     }
 
     #[test]
@@ -189,9 +192,18 @@ mod tests {
         );
         let children = el.child_elements();
         assert_eq!(children.len(), 3);
-        assert!(children[0].class_names().iter().any(|c| c == "pk-status-bar__leading"));
-        assert!(children[1].class_names().iter().any(|c| c == "pk-status-bar__message"));
-        assert!(children[2].class_names().iter().any(|c| c == "pk-status-bar__trailing"));
+        assert!(children[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-status-bar__leading"));
+        assert!(children[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-status-bar__message"));
+        assert!(children[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-status-bar__trailing"));
         assert_eq!(children[2].child_elements().len(), 2);
     }
 }

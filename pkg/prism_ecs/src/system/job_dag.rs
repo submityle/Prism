@@ -268,7 +268,9 @@ impl<'env> JobDag<'env> {
             let mut jobs: Vec<Option<Box<dyn FnOnce() + Send + 'env>>> =
                 self.nodes.into_iter().map(|node| node.job).collect();
             for i in order {
-                let job = jobs[i].take().expect("JobDag: node dispatched more than once");
+                let job = jobs[i]
+                    .take()
+                    .expect("JobDag: node dispatched more than once");
                 job();
             }
             return;

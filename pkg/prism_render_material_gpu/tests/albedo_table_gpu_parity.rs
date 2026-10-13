@@ -20,8 +20,9 @@ use wgpu::{
     BackendOptions, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType, BufferDescriptor,
     BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor,
-    DeviceDescriptor, Instance, InstanceDescriptor, InstanceFlags, MapMode, PipelineLayoutDescriptor,
-    PollType, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    DeviceDescriptor, Instance, InstanceDescriptor, InstanceFlags, MapMode,
+    PipelineLayoutDescriptor, PollType, RequestAdapterOptions, ShaderModuleDescriptor,
+    ShaderSource, ShaderStages,
 };
 
 const BRDF_WESL: &str = include_str!("../../prism_render_scene/src/shaders/brdf.wesl");
@@ -192,8 +193,7 @@ fn albedo_lookups_match_on_device() {
     for (t, case) in CASES.iter().enumerate() {
         shader.push_str(&format!(
             "    out[{}u * arrayLength(&grid) + idx] = {}(s.x, s.y);\n",
-            t,
-            case.lookup
+            t, case.lookup
         ));
     }
     shader.push_str("}\n");
@@ -214,8 +214,8 @@ fn albedo_lookups_match_on_device() {
         eprintln!("skipping albedo GPU parity: no usable adapter");
         return;
     };
-    let (device, queue) = block_on(adapter.request_device(&DeviceDescriptor::default()))
-        .expect("device");
+    let (device, queue) =
+        block_on(adapter.request_device(&DeviceDescriptor::default())).expect("device");
 
     let module = device.create_shader_module(ShaderModuleDescriptor {
         label: Some("prism_albedo_parity"),
@@ -379,9 +379,8 @@ fn bench_const_table_vs_buffer_table() {
 
     // Kernel A: the shipping `const` table + lookup, straight from brdf.wesl.
     let table = parse_wesl_array("GGX_ALBEDO");
-    let mut shader_const = String::from(
-        "@group(0) @binding(0) var<storage, read_write> out: array<f32>;\n",
-    );
+    let mut shader_const =
+        String::from("@group(0) @binding(0) var<storage, read_write> out: array<f32>;\n");
     shader_const.push_str("const GGX_N_MU: i32 = 17;\nconst GGX_N_R: i32 = 9;\n");
     let src = BRDF_WESL;
     let start = src.find("const GGX_ALBEDO:").unwrap();
@@ -514,7 +513,11 @@ fn bench_const_table_vs_buffer_table() {
         }
         let secs = t0.elapsed().as_secs_f64() / reps as f64;
         let lookups = THREADS as f64 * LOOKUPS as f64;
-        println!("{label}: {:.3} ms/dispatch  ({:.2} Glookup/s)", secs * 1e3, lookups / secs / 1e9);
+        println!(
+            "{label}: {:.3} ms/dispatch  ({:.2} Glookup/s)",
+            secs * 1e3,
+            lookups / secs / 1e9
+        );
         secs * 1e3
     };
     run(shader_const, "const table");
@@ -533,9 +536,8 @@ fn bench_per_light_hoisting() {
     const THREADS: u32 = 1 << 18;
     const LIGHTS: u32 = 4;
 
-    let mut shader = String::from(
-        "@group(0) @binding(0) var<storage, read_write> out: array<f32>;\n",
-    );
+    let mut shader =
+        String::from("@group(0) @binding(0) var<storage, read_write> out: array<f32>;\n");
     shader.push_str("const GGX_N_MU: i32 = 17;\nconst GGX_N_R: i32 = 9;\n");
     shader.push_str("const DIEL_N_MU: i32 = 17;\nconst DIEL_N_R: i32 = 9;\n");
     for (array, lookup) in [
@@ -691,7 +693,7 @@ fn buffer_lookup_fn() -> String {
          let bottom = c + (d - c) * fx;\n\
          return clamp(top + (bottom - top) * fy, 0.0, 1.0);\n\
      }\n"
-        .to_string()
+    .to_string()
 }
 
 /// Headless device, or `None` on hosts without a usable adapter.

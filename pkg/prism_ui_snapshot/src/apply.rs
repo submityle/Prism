@@ -69,7 +69,9 @@ pub fn apply_hunks(expected: &str, hunks: &[Hunk]) -> Result<String, ApplyError>
         // `diff` header semantics; a hunk with expected content starts at
         // `expected_start - 1` (zero-based).
         let target = if hunk.expected_len > 0 {
-            hunk.expected_start.checked_sub(1).ok_or(ApplyError::OutOfBounds { hunk: index })?
+            hunk.expected_start
+                .checked_sub(1)
+                .ok_or(ApplyError::OutOfBounds { hunk: index })?
         } else {
             hunk.expected_start
         };
@@ -90,7 +92,9 @@ pub fn apply_hunks(expected: &str, hunks: &[Hunk]) -> Result<String, ApplyError>
         for line in &hunk.lines {
             match line {
                 HunkLine::Context(s) | HunkLine::Delete(s) => {
-                    let base = exp.get(cursor).ok_or(ApplyError::OutOfBounds { hunk: index })?;
+                    let base = exp
+                        .get(cursor)
+                        .ok_or(ApplyError::OutOfBounds { hunk: index })?;
                     if *base != s.as_str() {
                         return Err(ApplyError::ContextMismatch {
                             hunk: index,
@@ -128,7 +132,6 @@ fn join_lines(lines: &[&str]) -> String {
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {

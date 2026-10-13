@@ -144,13 +144,13 @@ fn interpolate_delays_follow_source_laterality() {
     let mut out_r = [0.0f32; HRIR_LEN];
 
     // Far-left source: the left (near) ear should arrive no later than right.
-    let left_info = interpolate(&ds, -PI / 2.0, 0.0, &mut out_l, &mut out_r)
-        .expect("left interpolation");
+    let left_info =
+        interpolate(&ds, -PI / 2.0, 0.0, &mut out_l, &mut out_r).expect("left interpolation");
     assert!(left_info.left_delay <= left_info.right_delay);
 
     // Far-right source: the right (near) ear should arrive no later than left.
-    let right_info = interpolate(&ds, PI / 2.0, 0.0, &mut out_l, &mut out_r)
-        .expect("right interpolation");
+    let right_info =
+        interpolate(&ds, PI / 2.0, 0.0, &mut out_l, &mut out_r).expect("right interpolation");
     assert!(right_info.right_delay <= right_info.left_delay);
 }
 

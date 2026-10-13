@@ -37,7 +37,10 @@ fn in_circle(c: &Circle, p: (f32, f32)) -> bool {
 /// `a..b`.
 fn from_two(a: (f32, f32), b: (f32, f32)) -> Circle {
     let center = ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
-    Circle { center, radius: dist(a, b) * 0.5 }
+    Circle {
+        center,
+        radius: dist(a, b) * 0.5,
+    }
 }
 
 /// Circumcircle of three points. Falls back to the diameter circle of the two
@@ -62,7 +65,10 @@ fn from_three(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> Circle {
     let ux = (a2 * (b.1 - c.1) + b2 * (c.1 - a.1) + c2 * (a.1 - b.1)) / d;
     let uy = (a2 * (c.0 - b.0) + b2 * (a.0 - c.0) + c2 * (b.0 - a.0)) / d;
     let center = (ux, uy);
-    Circle { center, radius: dist(center, a) }
+    Circle {
+        center,
+        radius: dist(center, a),
+    }
 }
 
 /// Returns the smallest circle enclosing every point in `points`, or `None` for
@@ -75,14 +81,20 @@ fn from_three(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> Circle {
 #[must_use]
 pub fn min_enclosing_circle(points: &[(f32, f32)]) -> Option<Circle> {
     let first = *points.first()?;
-    let mut c = Circle { center: first, radius: 0.0 };
+    let mut c = Circle {
+        center: first,
+        radius: 0.0,
+    };
 
     for (i, &pi) in points.iter().enumerate() {
         if in_circle(&c, pi) {
             continue;
         }
         // pi must lie on the boundary of the updated circle.
-        c = Circle { center: pi, radius: 0.0 };
+        c = Circle {
+            center: pi,
+            radius: 0.0,
+        };
         for (j, &pj) in points[..i].iter().enumerate() {
             if in_circle(&c, pj) {
                 continue;
@@ -134,7 +146,12 @@ mod tests {
     fn brute_force(pts: &[(f32, f32)]) -> Option<Circle> {
         match pts.len() {
             0 => return None,
-            1 => return Some(Circle { center: pts[0], radius: 0.0 }),
+            1 => {
+                return Some(Circle {
+                    center: pts[0],
+                    radius: 0.0,
+                })
+            }
             _ => {}
         }
         let mut best: Option<Circle> = None;
@@ -165,7 +182,12 @@ mod tests {
         for _ in 0..500 {
             let n = 1 + (next_rand(&mut state) % 11) as usize;
             let pts: Vec<(f32, f32)> = (0..n)
-                .map(|_| (rand_in(&mut state, -30.0, 30.0), rand_in(&mut state, -30.0, 30.0)))
+                .map(|_| {
+                    (
+                        rand_in(&mut state, -30.0, 30.0),
+                        rand_in(&mut state, -30.0, 30.0),
+                    )
+                })
                 .collect();
             let got = min_enclosing_circle(&pts).unwrap();
             let want = brute_force(&pts).unwrap();
@@ -188,7 +210,12 @@ mod tests {
         for _ in 0..300 {
             let n = 2 + (next_rand(&mut state) % 20) as usize;
             let pts: Vec<(f32, f32)> = (0..n)
-                .map(|_| (rand_in(&mut state, -25.0, 25.0), rand_in(&mut state, -25.0, 25.0)))
+                .map(|_| {
+                    (
+                        rand_in(&mut state, -25.0, 25.0),
+                        rand_in(&mut state, -25.0, 25.0),
+                    )
+                })
                 .collect();
             let c = min_enclosing_circle(&pts).unwrap();
             assert!(encloses_all(&c, &pts));
@@ -207,9 +234,17 @@ mod tests {
         for _ in 0..200 {
             let n = 3 + (next_rand(&mut state) % 15) as usize;
             let pts: Vec<(f32, f32)> = (0..n)
-                .map(|_| (rand_in(&mut state, -20.0, 20.0), rand_in(&mut state, -20.0, 20.0)))
+                .map(|_| {
+                    (
+                        rand_in(&mut state, -20.0, 20.0),
+                        rand_in(&mut state, -20.0, 20.0),
+                    )
+                })
                 .collect();
-            let (tx, ty) = (rand_in(&mut state, -40.0, 40.0), rand_in(&mut state, -40.0, 40.0));
+            let (tx, ty) = (
+                rand_in(&mut state, -40.0, 40.0),
+                rand_in(&mut state, -40.0, 40.0),
+            );
             let shifted: Vec<(f32, f32)> = pts.iter().map(|&(x, y)| (x + tx, y + ty)).collect();
             let a = min_enclosing_circle(&pts).unwrap();
             let b = min_enclosing_circle(&shifted).unwrap();
@@ -225,13 +260,23 @@ mod tests {
         for _ in 0..200 {
             let n = 3 + (next_rand(&mut state) % 15) as usize;
             let pts: Vec<(f32, f32)> = (0..n)
-                .map(|_| (rand_in(&mut state, -15.0, 15.0), rand_in(&mut state, -15.0, 15.0)))
+                .map(|_| {
+                    (
+                        rand_in(&mut state, -15.0, 15.0),
+                        rand_in(&mut state, -15.0, 15.0),
+                    )
+                })
                 .collect();
             let k = rand_in(&mut state, 0.25, 4.0);
             let scaled: Vec<(f32, f32)> = pts.iter().map(|&(x, y)| (x * k, y * k)).collect();
             let a = min_enclosing_circle(&pts).unwrap();
             let b = min_enclosing_circle(&scaled).unwrap();
-            assert!(approx(a.radius * k, b.radius), "{} vs {}", a.radius * k, b.radius);
+            assert!(
+                approx(a.radius * k, b.radius),
+                "{} vs {}",
+                a.radius * k,
+                b.radius
+            );
         }
     }
 
@@ -248,8 +293,8 @@ mod tests {
         assert!(approx(pair.radius, 2.0));
 
         // Unit square: centre at (0,0), radius = half-diagonal = sqrt(2).
-        let square = min_enclosing_circle(&[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)])
-            .unwrap();
+        let square =
+            min_enclosing_circle(&[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]).unwrap();
         assert!(approx(square.center.0, 0.0) && approx(square.center.1, 0.0));
         assert!(approx(square.radius, core::f32::consts::SQRT_2));
     }

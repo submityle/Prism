@@ -152,11 +152,7 @@ impl LobeSamplingPolicy {
             ShadingQuality::Medium => 2,
             ShadingQuality::High | ShadingQuality::Ultra => LOBE_SAMPLING_NO_LOBE,
         };
-        let max_full_lobes = if downscaled {
-            1
-        } else {
-            base_max_full_lobes
-        };
+        let max_full_lobes = if downscaled { 1 } else { base_max_full_lobes };
 
         let temporal_accumulation_frames = if downscaled {
             8
@@ -391,9 +387,8 @@ pub fn lobe_blue_noise_2d(
     let rotation_x = lobe_uniform_from_hash(pixel_seed);
     let rotation_y = lobe_uniform_from_hash(lobe_rotate_left_16(pixel_seed));
     let temporal_stride = lobe_temporal_stride(pixel_seed);
-    let sequence_index = sample
-        .wrapping_add(frame.wrapping_mul(temporal_stride))
-        & LOBE_SAMPLING_SEQUENCE_MASK;
+    let sequence_index =
+        sample.wrapping_add(frame.wrapping_mul(temporal_stride)) & LOBE_SAMPLING_SEQUENCE_MASK;
     lobe_r2_sample_2d(sequence_index, rotation_x, rotation_y)
 }
 
@@ -417,20 +412,12 @@ pub fn lobe_rotate_left_16(x: u32) -> u32 {
 /// Per-pixel odd temporal stride.
 #[inline]
 pub fn lobe_temporal_stride(pixel_seed: u32) -> u32 {
-    (lobe_hash_combine(pixel_seed, LOBE_SAMPLING_TEMPORAL_SALT)
-        ^ LOBE_SAMPLING_GOLDEN_STRIDE)
-        | 1
+    (lobe_hash_combine(pixel_seed, LOBE_SAMPLING_TEMPORAL_SALT) ^ LOBE_SAMPLING_GOLDEN_STRIDE) | 1
 }
 
 /// One-dimensional convenience form of [`lobe_blue_noise_2d`].
 #[inline]
-pub fn lobe_blue_noise_1d(
-    pixel_x: u32,
-    pixel_y: u32,
-    frame: u32,
-    sample: u32,
-    seed: u32,
-) -> f32 {
+pub fn lobe_blue_noise_1d(pixel_x: u32, pixel_y: u32, frame: u32, sample: u32, seed: u32) -> f32 {
     lobe_blue_noise_2d(pixel_x, pixel_y, frame, sample, seed).0
 }
 
@@ -752,13 +739,7 @@ pub fn select_expensive_lobe_factors(
 
     // Blend-shaped: draw the state, never scale it.
     if glint_live {
-        let u = lobe_blue_noise_1d(
-            pixel[0],
-            pixel[1],
-            frame,
-            sample,
-            LOBE_SAMPLING_SEED_SALT,
-        );
+        let u = lobe_blue_noise_1d(pixel[0], pixel[1], frame, sample, LOBE_SAMPLING_SEED_SALT);
         factors.glint_state = f32::from(lobe_sanitize_weight(weights[0]) > u);
     }
 
@@ -827,8 +808,7 @@ mod tests {
             LobeSamplingPolicy::for_quality(ShadingQuality::Ultra).mode(),
             LobeSamplingMode::Full
         );
-        assert!(!LobeSamplingPolicy::for_quality(ShadingQuality::High)
-            .should_use_stochastic(64));
+        assert!(!LobeSamplingPolicy::for_quality(ShadingQuality::High).should_use_stochastic(64));
     }
 
     #[test]
@@ -858,7 +838,14 @@ mod tests {
         for quality in [ShadingQuality::High, ShadingQuality::Ultra] {
             let policy = LobeSamplingPolicy::for_quality(quality);
             let (value, sample) = lobe_sample_quality_sum(
-                policy, &WEIGHTS, &CONTRIBUTIONS, 17, 29, 123, 0, 0xdead_beef,
+                policy,
+                &WEIGHTS,
+                &CONTRIBUTIONS,
+                17,
+                29,
+                123,
+                0,
+                0xdead_beef,
             );
             assert_eq!(sample, LobeSample::NONE);
             assert_eq!(value, FULL_SUM);
@@ -976,7 +963,10 @@ mod tests {
         assert_eq!(sample.index, 1);
         assert_eq!(sample.probability.to_bits(), 0x3eaa_aaab);
         assert_eq!(sample.estimator_weight.to_bits(), 0x4040_0000);
-        assert_eq!(lobe_estimate(sample, CONTRIBUTIONS[1]).to_bits(), 0x3fc0_0000);
+        assert_eq!(
+            lobe_estimate(sample, CONTRIBUTIONS[1]).to_bits(),
+            0x3fc0_0000
+        );
     }
 
     #[test]
@@ -1125,7 +1115,6 @@ mod tests {
         assert_eq!(lobe_write_probabilities(&empty, &mut output), 0);
     }
 
-
     #[test]
     fn full_quality_is_an_exact_identity() {
         // §17.4: the amortised path must never perturb a pixel that did not opt
@@ -1133,8 +1122,7 @@ mod tests {
         // plus the full additive weight.
         for quality in [ShadingQuality::High, ShadingQuality::Ultra] {
             let policy = LobeSamplingPolicy::for_quality(quality);
-            let factors =
-                select_expensive_lobe_factors(policy, [0.9, 0.7], [3, 4], 11, 0);
+            let factors = select_expensive_lobe_factors(policy, [0.9, 0.7], [3, 4], 11, 0);
             assert_eq!(factors, ExpensiveLobeFactors::FULL, "{quality:?}");
         }
         // …and an inert material is never sampled, whatever the tier says.
@@ -1186,11 +1174,9 @@ mod tests {
         // neither lobe needs a special case to say so.
         let policy = LobeSamplingPolicy::for_quality(ShadingQuality::Low);
         for frame in 0..16u32 {
-            let only_measured =
-                select_expensive_lobe_factors(policy, [0.0, 0.8], [1, 2], frame, 0);
+            let only_measured = select_expensive_lobe_factors(policy, [0.0, 0.8], [1, 2], frame, 0);
             assert_eq!(only_measured, ExpensiveLobeFactors::FULL);
-            let only_glint =
-                select_expensive_lobe_factors(policy, [0.6, 0.0], [1, 2], frame, 0);
+            let only_glint = select_expensive_lobe_factors(policy, [0.6, 0.0], [1, 2], frame, 0);
             assert_eq!(only_glint, ExpensiveLobeFactors::FULL);
         }
     }
@@ -1206,13 +1192,7 @@ mod tests {
         let draws = 4096u32;
         for index in 0..draws {
             let pixel = [index % 64, index / 64];
-            let u = lobe_blue_noise_1d(
-                pixel[0],
-                pixel[1],
-                0,
-                1,
-                LOBE_SAMPLING_SEED_SALT,
-            );
+            let u = lobe_blue_noise_1d(pixel[0], pixel[1], 0, 1, LOBE_SAMPLING_SEED_SALT);
             let picked = lobe_select(&weights, u);
             assert!(picked.is_valid());
             let factor = lobe_estimator_weight(picked.probability);
@@ -1231,7 +1211,6 @@ mod tests {
             );
         }
     }
-
 
     #[test]
     fn a_downscaled_budget_samples_where_full_quality_would_not() {

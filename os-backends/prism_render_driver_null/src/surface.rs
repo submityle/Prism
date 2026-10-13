@@ -10,8 +10,8 @@
 use prism_render_driver as rhi;
 use rhi::{
     CompositeAlphaMode, Extent3d, PresentMode, RenderDevice, Surface, SurfaceCapabilities,
-    SurfaceConfig, SurfaceError, SurfaceImage, TextureDescriptor, TextureDimension,
-    TextureFormat, TextureUsages, TextureViewDescriptor,
+    SurfaceConfig, SurfaceError, SurfaceImage, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureUsages, TextureViewDescriptor,
 };
 
 use crate::device::NullDevice;

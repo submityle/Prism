@@ -18,10 +18,10 @@ use futures_lite::future::block_on;
 use prism_render_shading::{texture_lod, texture_uv_gradients};
 use wgpu::{
     BackendOptions, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BufferBindingType, BufferDescriptor,
-    BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor,
-    DeviceDescriptor, Instance, InstanceDescriptor, InstanceFlags, MapMode, PipelineLayoutDescriptor,
-    PollType, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    BindGroupLayoutEntry, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor, DeviceDescriptor,
+    Instance, InstanceDescriptor, InstanceFlags, MapMode, PipelineLayoutDescriptor, PollType,
+    RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages,
 };
 
 const MATERIAL_SAMPLE_WESL: &str =
@@ -216,8 +216,8 @@ fn analytic_texture_lod_matches_on_device() {
         eprintln!("skipping texture-LOD GPU parity: no usable adapter");
         return;
     };
-    let (device, queue) = block_on(adapter.request_device(&DeviceDescriptor::default()))
-        .expect("device");
+    let (device, queue) =
+        block_on(adapter.request_device(&DeviceDescriptor::default())).expect("device");
 
     let module = device.create_shader_module(ShaderModuleDescriptor {
         label: Some("prism_texture_lod_parity"),
@@ -236,7 +236,13 @@ fn analytic_texture_lod_matches_on_device() {
         .collect();
     let dimension_bytes: Vec<u8> = cases
         .iter()
-        .flat_map(|case| [case.dimensions[0].to_le_bytes(), case.dimensions[1].to_le_bytes()].concat())
+        .flat_map(|case| {
+            [
+                case.dimensions[0].to_le_bytes(),
+                case.dimensions[1].to_le_bytes(),
+            ]
+            .concat()
+        })
         .collect();
 
     let make_buffer = |label: &str, bytes: &[u8]| {
@@ -345,13 +351,7 @@ fn analytic_texture_lod_matches_on_device() {
         pass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
     }
     encoder.copy_buffer_to_buffer(&out_grad, 0, &readback, 0, out_grad_bytes);
-    encoder.copy_buffer_to_buffer(
-        &out_lod,
-        0,
-        &readback,
-        out_grad_bytes,
-        out_lod_bytes,
-    );
+    encoder.copy_buffer_to_buffer(&out_lod, 0, &readback, out_grad_bytes, out_lod_bytes);
     queue.submit([encoder.finish()]);
 
     let slice = readback.slice(..);

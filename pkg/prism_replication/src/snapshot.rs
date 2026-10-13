@@ -20,7 +20,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use crate::delta::{
-    DeltaError, Record, Schema, apply_delta, decode_delta, decode_snapshot, encode_snapshot,
+    apply_delta, decode_delta, decode_snapshot, encode_snapshot, DeltaError, Record, Schema,
 };
 
 /// A failure applying a delta to a [`SnapshotStore`].
@@ -135,11 +135,7 @@ impl SnapshotStore {
     /// [`SnapshotError::Delta`] ([`DeltaError::Shape`] / [`DeltaError::KindMismatch`]
     /// / [`DeltaError::InvalidKind`]) when `record` does not match the schema, or
     /// [`SnapshotError::OutOfOrder`].
-    pub fn insert_baseline(
-        &mut self,
-        revision: u32,
-        record: Record,
-    ) -> Result<(), SnapshotError> {
+    pub fn insert_baseline(&mut self, revision: u32, record: Record) -> Result<(), SnapshotError> {
         self.schema.validate(&record)?;
         if let Some(slot) = self.frames.iter_mut().find(|(r, _)| *r == revision) {
             slot.1 = record;
@@ -239,7 +235,7 @@ impl SnapshotStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::{FieldKind, FieldValue, encode_delta};
+    use crate::delta::{encode_delta, FieldKind, FieldValue};
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -344,7 +340,11 @@ mod tests {
 
         // Re-apply 0->1: the newer frames must be dropped, not left stale.
         assert_eq!(store.apply(&d01).unwrap(), 1);
-        assert_eq!(store.latest_revision(), Some(1), "frames above the baseline go");
+        assert_eq!(
+            store.latest_revision(),
+            Some(1),
+            "frames above the baseline go"
+        );
         assert_eq!(store.record(1), Some(&rec1));
         assert_eq!(store.record(2), None, "the stale 1->2 result is gone");
     }

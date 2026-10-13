@@ -73,7 +73,10 @@ mod tests {
     #[test]
     fn step_helpers_saturate() {
         assert_eq!(QualityLevel::new(0).cheaper(), QualityLevel::new(0));
-        assert_eq!(QualityLevel::new(u8::MAX).richer(), QualityLevel::new(u8::MAX));
+        assert_eq!(
+            QualityLevel::new(u8::MAX).richer(),
+            QualityLevel::new(u8::MAX)
+        );
         assert_eq!(QualityLevel::new(2).richer(), QualityLevel::new(3));
         assert_eq!(QualityLevel::new(2).cheaper(), QualityLevel::new(1));
     }

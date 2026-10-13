@@ -39,7 +39,9 @@ pub fn instances() -> Vec<Showcase> {
             "Port / Output",
             mount_component(
                 &Port,
-                PortProps::new("result").kind(PortKind::Output).connected(true),
+                PortProps::new("result")
+                    .kind(PortKind::Output)
+                    .connected(true),
             ),
         ),
         Showcase::new(

@@ -234,9 +234,7 @@ impl DataLayers {
     pub fn is_cell_streamable(&self, cell: CellCoord) -> bool {
         match self.cell_layers.get(&cell) {
             None => true,
-            Some(layers) => layers
-                .iter()
-                .all(|&id| self.state(id).permits_streaming()),
+            Some(layers) => layers.iter().all(|&id| self.state(id).permits_streaming()),
         }
     }
 
@@ -300,7 +298,10 @@ mod tests {
         assert!(dl.is_registered(a));
         assert_eq!(dl.state(a), DataLayerState::Unloaded);
 
-        assert_eq!(dl.set_state(a, DataLayerState::Loaded), DataLayerState::Unloaded);
+        assert_eq!(
+            dl.set_state(a, DataLayerState::Loaded),
+            DataLayerState::Unloaded
+        );
         assert_eq!(dl.state(a), DataLayerState::Loaded);
         assert_eq!(dl.activate(a), DataLayerState::Loaded);
         assert_eq!(dl.state(a), DataLayerState::Activated);
@@ -314,7 +315,10 @@ mod tests {
         assert!(!dl.is_registered(a));
         // Toggling an unknown layer reports its prior effective state (Unloaded)
         // and registers it.
-        assert_eq!(dl.set_state(a, DataLayerState::Loaded), DataLayerState::Unloaded);
+        assert_eq!(
+            dl.set_state(a, DataLayerState::Loaded),
+            DataLayerState::Unloaded
+        );
         assert!(dl.is_registered(a));
     }
 
@@ -328,7 +332,11 @@ mod tests {
         assert!(!dl.assign(c, DataLayerId::new(3))); // redundant
         assert_eq!(
             dl.layers_of(c),
-            &[DataLayerId::new(1), DataLayerId::new(3), DataLayerId::new(5)]
+            &[
+                DataLayerId::new(1),
+                DataLayerId::new(3),
+                DataLayerId::new(5)
+            ]
         );
     }
 

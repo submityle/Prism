@@ -59,11 +59,19 @@ fn save_then_load_into_an_empty_world_round_trips_every_component() {
     // A fresh world with the same registrations reconstructs the records.
     let mut target = World::new();
     register(&mut target);
-    let landed = target.load_reflect_archive(&bytes).expect("archive decodes");
+    let landed = target
+        .load_reflect_archive(&bytes)
+        .expect("archive decodes");
 
     assert_eq!(landed.len(), 3, "one record per encoded entity");
-    assert_eq!(target.get::<Health>(landed[0]), Some(&Health { hp: 10, shield: 1 }));
-    assert_eq!(target.get::<Health>(landed[1]), Some(&Health { hp: 20, shield: 2 }));
+    assert_eq!(
+        target.get::<Health>(landed[0]),
+        Some(&Health { hp: 10, shield: 1 })
+    );
+    assert_eq!(
+        target.get::<Health>(landed[1]),
+        Some(&Health { hp: 20, shield: 2 })
+    );
     assert_eq!(target.get::<Speed>(landed[1]), Some(&Speed(7)));
     assert_eq!(target.get::<Speed>(landed[2]), Some(&Speed(9)));
     assert!(target.get::<Health>(landed[2]).is_none());
@@ -75,7 +83,9 @@ fn loading_reuses_a_live_id_and_spawns_for_a_missing_one() {
     register(&mut source);
     let keep = source.spawn(Health { hp: 1, shield: 1 });
     let missing = source.spawn(Health { hp: 2, shield: 2 });
-    let bytes = source.save_reflect_archive([keep, missing]).expect("encodes");
+    let bytes = source
+        .save_reflect_archive([keep, missing])
+        .expect("encodes");
 
     let mut target = World::new();
     register(&mut target);
@@ -85,10 +95,16 @@ fn loading_reuses_a_live_id_and_spawns_for_a_missing_one() {
 
     let landed = target.load_reflect_archive(&bytes).expect("decodes");
     assert_eq!(landed[0], keep, "an existing id is reused");
-    assert_eq!(target.get::<Health>(keep), Some(&Health { hp: 1, shield: 1 }));
+    assert_eq!(
+        target.get::<Health>(keep),
+        Some(&Health { hp: 1, shield: 1 })
+    );
     // `missing` was not live in the target, so the loader had to create an
     // entity; the allocator may hand back that very id or a different one.
-    assert!(target.contains(landed[1]), "the record landed on a live entity");
+    assert!(
+        target.contains(landed[1]),
+        "the record landed on a live entity"
+    );
     assert_ne!(landed[0], landed[1], "the two records stay distinct");
     assert_eq!(
         target.get::<Health>(landed[1]),
@@ -129,7 +145,10 @@ fn an_unregistered_type_in_the_target_world_is_rejected() {
         .load_reflect_archive(&bytes)
         .expect_err("unknown component type must fail the load");
     assert!(
-        matches!(err, crate::reflect_archive::ReflectArchiveError::UnknownType(_)),
+        matches!(
+            err,
+            crate::reflect_archive::ReflectArchiveError::UnknownType(_)
+        ),
         "expected UnknownType, got {err:?}"
     );
 }
@@ -175,7 +194,7 @@ fn an_absurd_entity_count_is_rejected_without_huge_allocation() {
     blob.extend_from_slice(b"PECA");
     blob.push(2); // current envelope version
     blob.extend_from_slice(&u32::MAX.to_le_bytes()); // entity_count
-    // No records at all: the first read runs out of bytes immediately.
+                                                     // No records at all: the first read runs out of bytes immediately.
     assert!(matches!(
         world.load_reflect_archive(&blob),
         Err(crate::reflect_archive::ReflectArchiveError::Truncated)
@@ -188,7 +207,7 @@ fn an_absurd_entity_count_is_rejected_without_huge_allocation() {
 /// migration chain upgrades it before it meets today's type.
 #[test]
 fn an_older_schema_version_is_migrated_on_load() {
-    use prism_reflect::{DynamicStruct, Migration, Typed, TypeSchema};
+    use prism_reflect::{DynamicStruct, Migration, TypeSchema, Typed};
 
     // ---- the build that wrote the save: only V1 exists ----
     let mut old = World::new();

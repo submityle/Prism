@@ -152,14 +152,22 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::FontSize, tok("font.size.body"))
             .with(StyleProp::Color, tok("color.label"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.secondary"),
+            ),
     );
 
     // Disabled: dimmed and inert.
     sheet.insert(
         Class::new("pk-context-menu__item--disabled")
             .with(StyleProp::Color, tok("color.label.tertiary"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     // Danger: destructive red label.
@@ -211,7 +219,10 @@ mod tests {
         let rows = menu.child_elements();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].text_content(), Some("Open"));
-        assert!(rows[0].class_names().iter().any(|c| c == "pk-context-menu__item"));
+        assert!(rows[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-context-menu__item"));
         assert!(rows[1]
             .class_names()
             .iter()

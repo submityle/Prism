@@ -226,8 +226,15 @@ impl World {
     /// (design §5.3 `ChunkMeta`), or `None` if the archetype is not live or the
     /// window is out of range for its current row count.
     #[inline]
-    pub fn chunk_meta(&self, archetype: ArchetypeId, chunk: usize) -> Option<&crate::storage::ChunkMeta> {
-        self.archetypes.get(archetype)?.table().chunk_meta_checked(chunk)
+    pub fn chunk_meta(
+        &self,
+        archetype: ArchetypeId,
+        chunk: usize,
+    ) -> Option<&crate::storage::ChunkMeta> {
+        self.archetypes
+            .get(archetype)?
+            .table()
+            .chunk_meta_checked(chunk)
     }
 
     /// Mutable access to a chunk window's metadata (design §5.3 `ChunkMeta`), so
@@ -607,7 +614,10 @@ impl World {
 
         let storages = self.classify_storages(&all_ids);
         if storages.iter().any(|s| matches!(s, StorageType::Shared)) {
-            return bundles.into_iter().map(|bundle| self.spawn(bundle)).collect();
+            return bundles
+                .into_iter()
+                .map(|bundle| self.spawn(bundle))
+                .collect();
         }
         self.ensure_sparse_sets(&all_ids, &storages);
 

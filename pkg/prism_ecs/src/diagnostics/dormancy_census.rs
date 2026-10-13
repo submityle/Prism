@@ -120,7 +120,10 @@ pub struct DormancyCensus {
 
 /// Folds a bit-width tally into the sorted, non-empty bucket entries, invoking
 /// `make` to build each entry from its width, range and count.
-fn emit_buckets<T>(tally: &[usize; BIT_WIDTH_BUCKETS], mut make: impl FnMut(u32, u32, u64, usize) -> T) -> Vec<T> {
+fn emit_buckets<T>(
+    tally: &[usize; BIT_WIDTH_BUCKETS],
+    mut make: impl FnMut(u32, u32, u64, usize) -> T,
+) -> Vec<T> {
     let mut out = Vec::new();
     for (w, &count) in tally.iter().enumerate() {
         if count == 0 {
@@ -188,19 +191,21 @@ impl DormancyCensus {
             prev = Some(idx);
         }
 
-        let index_buckets = emit_buckets(&index_tally, |bit_width, lo, hi, count| IndexBucketEntry {
-            bit_width,
-            index_lo: lo,
-            index_hi: hi,
-            count,
-        });
-        let generation_buckets =
-            emit_buckets(&generation_tally, |bit_width, lo, hi, count| GenerationBucketEntry {
+        let index_buckets =
+            emit_buckets(&index_tally, |bit_width, lo, hi, count| IndexBucketEntry {
+                bit_width,
+                index_lo: lo,
+                index_hi: hi,
+                count,
+            });
+        let generation_buckets = emit_buckets(&generation_tally, |bit_width, lo, hi, count| {
+            GenerationBucketEntry {
                 bit_width,
                 generation_lo: lo,
                 generation_hi: hi,
                 count,
-            });
+            }
+        });
 
         Self {
             dormant_count,

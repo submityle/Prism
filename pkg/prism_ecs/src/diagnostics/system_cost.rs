@@ -146,26 +146,20 @@ impl SystemCostProfile {
     /// label (via [`FlameGraph::hotspots`]) and change volume by the schedule
     /// node's `type_name`. Change entries whose node name cannot be resolved
     /// against `schedule` are skipped. Read-only.
-    pub fn join(
-        flame: &FlameGraph,
-        changes: &FrameChangeProfile,
-        schedule: &Schedule,
-    ) -> Self {
+    pub fn join(flame: &FlameGraph, changes: &FrameChangeProfile, schedule: &Schedule) -> Self {
         // Fold change volume by resolved system name.
         let mut change_by_name: HashMap<String, ChangeAcc> = HashMap::new();
         for e in &changes.entries {
             let Some(name) = e.name(schedule) else {
                 continue;
             };
-            let acc = change_by_name
-                .entry(name.to_string())
-                .or_insert(ChangeAcc {
-                    changed_cells: 0,
-                    added_cells: 0,
-                    dirty_chunks: 0,
-                    entity_delta: 0,
-                    archetype_delta: 0,
-                });
+            let acc = change_by_name.entry(name.to_string()).or_insert(ChangeAcc {
+                changed_cells: 0,
+                added_cells: 0,
+                dirty_chunks: 0,
+                entity_delta: 0,
+                archetype_delta: 0,
+            });
             acc.changed_cells += e.changed_cells;
             acc.added_cells += e.added_cells;
             acc.dirty_chunks += e.dirty_chunks;
@@ -180,18 +174,24 @@ impl SystemCostProfile {
         // remain afterwards.
         for (label, duration) in flame.hotspots() {
             let matched = change_by_name.remove(&label);
-            let (changed_cells, added_cells, dirty_chunks, entity_delta, archetype_delta, has_change) =
-                match matched {
-                    Some(acc) => (
-                        acc.changed_cells,
-                        acc.added_cells,
-                        acc.dirty_chunks,
-                        acc.entity_delta,
-                        acc.archetype_delta,
-                        true,
-                    ),
-                    None => (0, 0, 0, 0, 0, false),
-                };
+            let (
+                changed_cells,
+                added_cells,
+                dirty_chunks,
+                entity_delta,
+                archetype_delta,
+                has_change,
+            ) = match matched {
+                Some(acc) => (
+                    acc.changed_cells,
+                    acc.added_cells,
+                    acc.dirty_chunks,
+                    acc.entity_delta,
+                    acc.archetype_delta,
+                    true,
+                ),
+                None => (0, 0, 0, 0, 0, false),
+            };
             entries.push(SystemCostEntry {
                 name: label,
                 duration,
@@ -377,7 +377,10 @@ mod tests {
 
         let profile = SystemCostProfile::join(&flame, &changes, &schedule);
         assert_eq!(profile.len(), 2);
-        assert_eq!(profile.matched_count, 2, "both systems were timed and observed");
+        assert_eq!(
+            profile.matched_count, 2,
+            "both systems were timed and observed"
+        );
         assert_eq!(profile.change_only_count, 0);
 
         // Ranked by self time: spawner first.
@@ -385,14 +388,20 @@ mod tests {
 
         let spawner = profile.entry(&spawner_name).unwrap();
         assert!(spawner.is_matched());
-        assert!(spawner.is_hot_and_churny(), "spawner added cells and took time");
+        assert!(
+            spawner.is_hot_and_churny(),
+            "spawner added cells and took time"
+        );
         assert!(!spawner.is_compute_bound());
         assert!(spawner.added_cells > 0);
         assert_eq!(spawner.entity_delta, 5);
 
         let reader = profile.entry(&reader_name).unwrap();
         assert!(reader.is_matched());
-        assert!(reader.is_compute_bound(), "reader took time but changed nothing");
+        assert!(
+            reader.is_compute_bound(),
+            "reader took time but changed nothing"
+        );
         assert!(!reader.is_hot_and_churny());
         assert_eq!(reader.total_cells(), 0);
         assert!(reader.nanos_per_cell().is_none());
@@ -422,7 +431,10 @@ mod tests {
         assert!(spawner.has_change);
         assert_eq!(spawner.duration, Duration::ZERO);
         assert_eq!(profile.change_only_count, 1);
-        assert_eq!(profile.matched_count, 1, "only the reader was on both sides");
+        assert_eq!(
+            profile.matched_count, 1,
+            "only the reader was on both sides"
+        );
     }
 
     /// A timed system absent from the change profile is timing-only.

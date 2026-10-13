@@ -32,8 +32,8 @@
 //! but no value hashing contributes structure but not its value to the hash.
 
 use prism_ecs::component::ComponentId;
-use prism_ecs::world::World;
 use prism_ecs::world::snapshot::SnapshotRing;
+use prism_ecs::world::World;
 
 /// A bounded, frame-numbered history of [`World`] snapshots.
 ///
@@ -272,7 +272,10 @@ mod tests {
         history.truncate_after(2);
         assert_eq!(history.next_frame(), 2);
         assert!(history.contains(2), "the restore point is kept");
-        assert!(!history.contains(3) && !history.contains(4), "future dropped");
+        assert!(
+            !history.contains(3) && !history.contains(4),
+            "future dropped"
+        );
         assert_eq!(history.oldest_frame(), Some(0));
 
         assert_eq!(history.capture(&w), 2, "the next capture is frame 2 again");
@@ -343,7 +346,8 @@ mod tests {
     #[test]
     fn app_snapshot_rollback_roundtrip() {
         let mut app = App::new();
-        app.world_mut().register_snapshot_component_hashable::<Counter>();
+        app.world_mut()
+            .register_snapshot_component_hashable::<Counter>();
         app.world_mut().register_snapshot_component::<Marker>();
         let e = app.world_mut().spawn((Counter(2), Marker));
         app.init_snapshot_history(4);

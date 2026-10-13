@@ -11,8 +11,8 @@ use prism_ecs::prelude::{Res, ResMut};
 use prism_render_driver::{FrameSync, Instance};
 
 use crate::draw::canonical;
-use crate::mesh_pipelines::MeshPipelines;
 use crate::mesh_pipeline::MeshPipelineSpecializer;
+use crate::mesh_pipelines::MeshPipelines;
 use crate::queue::RenderQueues;
 use crate::render_asset::RenderAssets;
 use crate::runtime_resource::RenderRuntimeResource;
@@ -75,4 +75,3 @@ pub(crate) fn fill_queues<I>(
     queues.sort();
     stats.draws_queued += queued as u64;
 }
-

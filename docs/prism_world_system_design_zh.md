@@ -19,6 +19,7 @@
 - 层级定位： 基座层 L6；下接 `prism_scene`/`prism_asset`/`prism_ecs`，上驱动渲染/物理/GI；与 `prism_terrain_world_design_zh.md`（地形多表示细节）互为上下位
 - 明确约束： 核心 `no_std + alloc`；`std`/`async_io`/`gpu_stream`/`persist`/`pcg`/`sim`/`sdf`/`planet`/`vgeo`/`vtex`/`bake_farm` 为 feature（网络相关 feature `network`/`server_mesh` 移至 `prism_network`）；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**；GPU/IO 吞吐/显存/带宽均为 design target（本机无 GPU，非实测，如实标注），可验证部分限 CPU 纯函数
 - 架构立场： **scene 是单一逻辑真相，世界系统是其上的流送/常驻/持久化基座，不另立平行真相源**；世界持久数据 = 确定性可再生的派生缓存 + override delta 事务日志
+- 烘焙归属： 本文所述“烘焙期”派生数据（空间索引 / HLOD 代理 / 全局 SDF / 导航网格 / 散布 proxy 列 / 烘焙 GI / PCG 产物）为 `OfflineShipped`，其 DAG、缓存键、DDC/CAS 归 `Prism Asset Build`（`prism_asset_build_design_zh.md` §2.7/§4.6/§12.8）；运行时破坏/编辑触发的局部重算为 `RuntimeDerived`，与离线路径共用同一 Bake Kernel（该文 §6.6）。逐项契约登记见 `prism_derived_data_contract_zh.md`（B 组 / C 组）
 
 ---
 

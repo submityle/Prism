@@ -103,7 +103,10 @@ fn push_rows(out: &mut Vec<Element>, nodes: &[TreeSelectNode], depth: usize) {
     for node in nodes {
         let mut row = Element::box_()
             .class("pk-tree-select__node")
-            .style(StyleProp::MarginLeft, StyleValue::px(depth as f32 * INDENT_PX))
+            .style(
+                StyleProp::MarginLeft,
+                StyleValue::px(depth as f32 * INDENT_PX),
+            )
             .child(Element::text(node.label.clone()).class("pk-tree-select__label"));
         if node.expanded {
             row = row.class("pk-tree-select__node--expanded");
@@ -166,7 +169,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.secondary"),
+            ),
     );
     sheet.insert(
         Class::new("pk-tree-select__node--expanded")
@@ -179,9 +186,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::FontWeight, tok("font.weight.semibold")),
     );
 
-    sheet.insert(
-        Class::new("pk-tree-select__label").with(StyleProp::Color, tok("color.label")),
-    );
+    sheet.insert(Class::new("pk-tree-select__label").with(StyleProp::Color, tok("color.label")));
 }
 
 #[cfg(test)]
@@ -223,7 +228,10 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(margin_left(&rows[0]), Some(0.0));
         assert_eq!(margin_left(&rows[1]), Some(16.0));
-        assert!(rows[0].class_names().iter().any(|c| c == "pk-tree-select__node--expanded"));
+        assert!(rows[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-tree-select__node--expanded"));
     }
 
     #[test]

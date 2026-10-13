@@ -218,7 +218,13 @@ mod tests {
         let el = render(PopoverProps::new().anchor(Element::box_().class("trigger")));
         let kids = el.child_elements();
         assert_eq!(kids.len(), 2);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-popover__anchor"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-popover__surface"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-popover__anchor"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-popover__surface"));
     }
 }

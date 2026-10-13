@@ -162,7 +162,12 @@ mod tests {
         loop {
             let n = 6 + (next_rand(state) % 12) as usize;
             let pts: Vec<(f32, f32)> = (0..n)
-                .map(|_| (rand_in(state, -spread, spread), rand_in(state, -spread, spread)))
+                .map(|_| {
+                    (
+                        rand_in(state, -spread, spread),
+                        rand_in(state, -spread, spread),
+                    )
+                })
                 .collect();
             let hull = convex_hull(&pts);
             if hull.len() >= 3 {
@@ -225,10 +230,18 @@ mod tests {
             assert!(contains_all(&obb, &hull), "box does not contain hull");
             let sampled = sampled_min_area(&hull, 2048);
             // Exact optimum is a lower bound on any sampled orientation.
-            assert!(obb.area() <= sampled + 1e-2, "exact {} > sampled {sampled}", obb.area());
+            assert!(
+                obb.area() <= sampled + 1e-2,
+                "exact {} > sampled {sampled}",
+                obb.area()
+            );
             // The dense grid lands near an edge direction, so it cannot be far
             // above the exact optimum.
-            assert!(sampled <= obb.area() * 1.02 + 1e-1, "sampled {sampled} >> exact {}", obb.area());
+            assert!(
+                sampled <= obb.area() * 1.02 + 1e-1,
+                "sampled {sampled} >> exact {}",
+                obb.area()
+            );
         }
     }
 
@@ -239,7 +252,10 @@ mod tests {
         for _ in 0..200 {
             let hull = random_hull(&mut state, 20.0);
             let obb = min_area_obb(&hull).expect("non-empty hull");
-            assert!(obb.area() >= poly_area(&hull) - 1e-2, "box smaller than polygon");
+            assert!(
+                obb.area() >= poly_area(&hull) - 1e-2,
+                "box smaller than polygon"
+            );
         }
     }
 
@@ -261,7 +277,11 @@ mod tests {
                 ymax = ymax.max(y);
             }
             let aabb = (xmax - xmin) * (ymax - ymin);
-            assert!(obb.area() <= aabb + 1e-2, "obb {} > aabb {aabb}", obb.area());
+            assert!(
+                obb.area() <= aabb + 1e-2,
+                "obb {} > aabb {aabb}",
+                obb.area()
+            );
         }
     }
 
@@ -283,7 +303,12 @@ mod tests {
                 .collect();
             let rotated_hull = convex_hull(&rotated);
             let after = min_area_obb(&rotated_hull).expect("non-empty hull");
-            assert!(approx(base.area(), after.area()), "area {} vs {}", base.area(), after.area());
+            assert!(
+                approx(base.area(), after.area()),
+                "area {} vs {}",
+                base.area(),
+                after.area()
+            );
         }
     }
 

@@ -71,9 +71,7 @@ impl Component for EmptyState {
         }
         el = el.child(Element::text(props.title.clone()).class("pk-empty-state__title"));
         if let Some(description) = props.description.clone() {
-            el = el.child(
-                Element::text(description).class("pk-empty-state__description"),
-            );
+            el = el.child(Element::text(description).class("pk-empty-state__description"));
         }
         if let Some(action) = props.action.clone() {
             el = el.child(action.class("pk-empty-state__action"));
@@ -121,9 +119,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Action: a little breathing room above the CTA.
-    sheet.insert(
-        Class::new("pk-empty-state__action").with(StyleProp::MarginTop, tok("space.sm")),
-    );
+    sheet.insert(Class::new("pk-empty-state__action").with(StyleProp::MarginTop, tok("space.sm")));
 }
 
 #[cfg(test)]
@@ -155,13 +151,22 @@ mod tests {
         );
         let children = el.child_elements();
         assert_eq!(children.len(), 4);
-        assert!(children[0].class_names().iter().any(|c| c == "pk-empty-state__icon"));
-        assert!(children[1].class_names().iter().any(|c| c == "pk-empty-state__title"));
+        assert!(children[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-empty-state__icon"));
+        assert!(children[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-empty-state__title"));
         assert!(children[2]
             .class_names()
             .iter()
             .any(|c| c == "pk-empty-state__description"));
-        assert!(children[3].class_names().iter().any(|c| c == "pk-empty-state__action"));
+        assert!(children[3]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-empty-state__action"));
     }
 
     #[test]

@@ -10,9 +10,14 @@
 use prism_material_schema::{surface_schema, FieldType, SurfaceSchema};
 use prism_render_material::{
     openpbr_conformance, project_to_openpbr, GpuSurfaceParameters, LobeMask, LobeRegion,
-    OpenPbrConformance, SurfaceParameterBlock, SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
-    SURFACE_LOBE_WORDS_BY_SLOT,
+    OpenPbrConformance, SurfaceParameterBlock, MATERIAL_ABI_VERSION, SURFACE_CORE_WORDS,
+    SURFACE_LOBE_WORDS, SURFACE_LOBE_WORDS_BY_SLOT,
 };
+
+#[test]
+fn surface_schema_tracks_the_runtime_material_abi_version() {
+    assert_eq!(surface_schema().abi_version, MATERIAL_ABI_VERSION);
+}
 
 /// The same authored fat parameters used by the `surface.rs` unit tests, so the
 /// schema is checked against real packed bytes rather than synthetic data.
@@ -109,11 +114,15 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (Some("subsurface"), "subsurface_color") => p.subsurface_color.to_vec(),
         (Some("subsurface"), "subsurface_radius") => vec![p.subsurface_radius],
         (Some("subsurface"), "subsurface_radius_scale") => p.subsurface_radius_scale.to_vec(),
-        (Some("subsurface"), "subsurface_scatter_anisotropy") => vec![p.subsurface_scatter_anisotropy],
+        (Some("subsurface"), "subsurface_scatter_anisotropy") => {
+            vec![p.subsurface_scatter_anisotropy]
+        }
         (Some("transmission"), "transmission_weight") => vec![p.transmission_weight],
         (Some("transmission"), "transmission_depth") => vec![p.thickness],
         (Some("transmission"), "index_of_refraction") => vec![p.index_of_refraction],
-        (Some("transmission"), "transmission_dispersion_scale") => vec![p.transmission_dispersion_scale],
+        (Some("transmission"), "transmission_dispersion_scale") => {
+            vec![p.transmission_dispersion_scale]
+        }
         (Some("transmission"), "transmission_color") => p.transmission_color.to_vec(),
         (Some("transmission"), "transmission_scatter") => p.transmission_scatter.to_vec(),
         (Some("transmission"), "transmission_scatter_anisotropy") => {
@@ -166,8 +175,7 @@ fn core_and_lobe_word_counts_match_surface_rs() {
         // Per-slot footprint is the packing stride (variable length, §4.4); the
         // schema's per-lobe `words` must match it exactly.
         assert_eq!(
-            lobe.words as usize,
-            SURFACE_LOBE_WORDS_BY_SLOT[lobe.registry_slot as usize],
+            lobe.words as usize, SURFACE_LOBE_WORDS_BY_SLOT[lobe.registry_slot as usize],
             "lobe {} footprint disagrees with the generated per-slot table",
             lobe.id
         );
@@ -345,7 +353,12 @@ fn schema_namespaces_match_lobe_mask_regions() {
         let bit = LobeMask(1 << lobe.registry_slot);
         let block = SurfaceParameterBlock::from_full(&authored, bit);
         let projection = project_to_openpbr(&block);
-        assert_eq!(projection.dropped.len(), 1, "lobe {:?} not reported", lobe.id);
+        assert_eq!(
+            projection.dropped.len(),
+            1,
+            "lobe {:?} not reported",
+            lobe.id
+        );
         assert_eq!(projection.dropped[0].uid, lobe.uid);
         assert!(!projection.is_lossless());
     }

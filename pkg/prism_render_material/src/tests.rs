@@ -130,12 +130,7 @@ fn standard_material_bridge_preserves_surface_classification() {
             _: bevy_asset::AssetId<bevy_image::Image>,
             semantic: TextureSemantic,
         ) -> GpuMaterialTexture {
-            GpuMaterialTexture {
-                index: semantic as u32 + 1,
-                generation: 1,
-                semantic: semantic as u32,
-                sampler_index: 1,
-            }
+            GpuMaterialTexture::non_virtual(semantic as u32 + 1, 1, semantic as u32, 1)
         }
     }
     let material = bevy_pbr::StandardMaterial {
@@ -209,12 +204,7 @@ fn registry_tracks_sparse_rows_and_accepts_an_unbounded_texture_set() {
     let handle = registry.allocate().unwrap();
     let mut value = record(handle, 1);
     value.textures = (0..64)
-        .map(|index| GpuMaterialTexture {
-            index,
-            generation: 1,
-            semantic: 0,
-            sampler_index: index,
-        })
+        .map(|index| GpuMaterialTexture::non_virtual(index, 1, 0, index))
         .collect();
     registry.publish(value).unwrap();
     let (headers, _, textures) = registry.gpu_tables();
@@ -252,13 +242,32 @@ fn gpu_material_rows_match_the_shader_abi() {
     // transmission_scatter) sized the fat authoring view, with trailing pad
     // words keeping it a 16-byte multiple.
     assert_eq!(size_of::<GpuSurfaceParameters>(), 320);
-    assert_eq!(size_of::<GpuMaterialTexture>(), 16);
+    assert_eq!(size_of::<GpuMaterialTexture>(), 32);
     // A storage-buffer array requires only the element's natural alignment
     // (4 for a struct of `u32`s); the header was never padded to 16, and
     // dropping the vestigial closure-graph word made it denser (23 words).
     assert_eq!(size_of::<GpuMaterialHeader>() % 4, 0);
     assert_eq!(size_of::<GpuSurfaceParameters>() % 16, 0);
     assert_eq!(size_of::<GpuMaterialTexture>() % 16, 0);
+}
+
+#[test]
+fn non_virtual_texture_rows_are_explicitly_disabled() {
+    let row = GpuMaterialTexture::non_virtual(4, 7, 2, 4);
+    assert_eq!(row.virtual_texture_id, NO_VIRTUAL_TEXTURE);
+    assert_eq!(row.virtual_texture_width, 0);
+    assert_eq!(row.virtual_texture_height, 0);
+    assert_eq!(row.virtual_texture_page_size, 0);
+}
+
+#[test]
+fn virtual_texture_metadata_has_a_stable_row_layout() {
+    let row = GpuMaterialTexture::with_virtual_texture(4, 7, 2, 4, 19, 4096, 2048, 128);
+    assert_eq!(row.virtual_texture_id, 19);
+    assert_eq!(row.virtual_texture_width, 4096);
+    assert_eq!(row.virtual_texture_height, 2048);
+    assert_eq!(row.virtual_texture_page_size, 128);
+    assert_ne!(row.virtual_texture_id, NO_VIRTUAL_TEXTURE);
 }
 
 /// The importer must split Bevy's authored emission radiance into the

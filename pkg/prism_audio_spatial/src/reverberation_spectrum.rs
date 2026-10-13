@@ -57,7 +57,7 @@
 use crate::material_library::{OCTAVE_BAND_CENTERS, OCTAVE_BAND_COUNT};
 use alloc::{vec, vec::Vec};
 use bevy_math::ops;
-use core::f32::consts::{LN_2, LN_10, PI};
+use core::f32::consts::{LN_10, LN_2, PI};
 use prism_audio_core::math::Sample;
 
 /// Upper decibel bound of the per-band reverberation-time fit window.
@@ -167,11 +167,7 @@ fn energy_decay_curve_in_place(buf: &mut [Sample]) -> bool {
         *slot = acc as Sample;
     }
     let total = acc;
-    #[expect(
-        clippy::neg_cmp_op_on_partial_ord,
-        reason = "negated comparison keeps NaN totals on the safe silent branch"
-    )]
-    if !(total > ENERGY_FLOOR) {
+    if total <= ENERGY_FLOOR || total.is_nan() {
         return false;
     }
     let inv_total = 1.0 / total;
@@ -214,7 +210,11 @@ fn fit_decay_time(edc_db: &[Sample], sample_rate: Sample) -> Sample {
         return 0.0;
     }
     let rt = -60.0 / slope;
-    if rt.is_finite() && rt >= 0.0 { rt } else { 0.0 }
+    if rt.is_finite() && rt >= 0.0 {
+        rt
+    } else {
+        0.0
+    }
 }
 
 /// Computes the per-octave-band reverberation times, in seconds, for the eight
@@ -253,7 +253,11 @@ pub fn octave_band_reverberation_times(
 /// `0` when the denominator is not positive.
 fn safe_ratio(num_a: Sample, num_b: Sample, den_a: Sample, den_b: Sample) -> Sample {
     let denom = den_a + den_b;
-    if denom <= 0.0 { 0.0 } else { (num_a + num_b) / denom }
+    if denom <= 0.0 {
+        0.0
+    } else {
+        (num_a + num_b) / denom
+    }
 }
 
 /// Computes Beranek's bass ratio from a per-band reverberation-time spectrum:

@@ -142,7 +142,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body")),
     );
@@ -171,7 +175,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::FlexShrink, StyleValue::number(0.0))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
             .with(StyleProp::BackgroundColor, tok("color.label.tertiary"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.label.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.label.secondary"),
+            ),
     );
 
     sheet.insert(
@@ -195,7 +203,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.secondary"),
+            ),
     );
     sheet.insert(
         Class::new("pk-multi-select__option--selected")
@@ -236,14 +248,23 @@ mod tests {
         let ph = el
             .child_elements()
             .iter()
-            .find(|c| c.class_names().iter().any(|n| n == "pk-multi-select__placeholder"))
+            .find(|c| {
+                c.class_names()
+                    .iter()
+                    .any(|n| n == "pk-multi-select__placeholder")
+            })
             .expect("placeholder");
         assert_eq!(ph.text_content(), Some("Pick"));
     }
 
     #[test]
     fn menu_marks_selected_options() {
-        let el = render(MultiSelectProps::new().options(["A", "B"]).selected([1]).open(true));
+        let el = render(
+            MultiSelectProps::new()
+                .options(["A", "B"])
+                .selected([1])
+                .open(true),
+        );
         // The menu lives inside the popover (last child).
         let popover = el.child_elements().last().expect("popover");
         let menu = popover

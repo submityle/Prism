@@ -185,9 +185,21 @@ mod tests {
 
     fn ladder() -> PagedPatch {
         PagedPatch::new(vec![
-            PatchPage::new(QualityLevel::new(0), "base".to_string(), PatchDescription::new()),
-            PatchPage::new(QualityLevel::new(2), "high".to_string(), PatchDescription::new()),
-            PatchPage::new(QualityLevel::new(4), "ultra".to_string(), PatchDescription::new()),
+            PatchPage::new(
+                QualityLevel::new(0),
+                "base".to_string(),
+                PatchDescription::new(),
+            ),
+            PatchPage::new(
+                QualityLevel::new(2),
+                "high".to_string(),
+                PatchDescription::new(),
+            ),
+            PatchPage::new(
+                QualityLevel::new(4),
+                "ultra".to_string(),
+                PatchDescription::new(),
+            ),
         ])
         .expect("valid ladder")
     }

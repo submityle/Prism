@@ -123,8 +123,14 @@ impl Component for Node {
 
         // Approximate canvas placement with inline left/top margins.
         el = el
-            .style(StyleProp::MarginLeft, StyleValue::Length(Length::Px(props.pos.0)))
-            .style(StyleProp::MarginTop, StyleValue::Length(Length::Px(props.pos.1)));
+            .style(
+                StyleProp::MarginLeft,
+                StyleValue::Length(Length::Px(props.pos.0)),
+            )
+            .style(
+                StyleProp::MarginTop,
+                StyleValue::Length(Length::Px(props.pos.1)),
+            );
 
         let header = Element::text(props.title.clone()).class("pk-node__header");
 
@@ -132,7 +138,8 @@ impl Component for Node {
             .class("pk-node__ports")
             .class("pk-node__ports--inputs");
         for label in &props.inputs {
-            inputs = inputs.child(Port.render(&PortProps::new(label.clone()).kind(PortKind::Input)));
+            inputs =
+                inputs.child(Port.render(&PortProps::new(label.clone()).kind(PortKind::Input)));
         }
 
         let mut outputs = Element::box_()
@@ -241,12 +248,7 @@ mod tests {
 
     #[test]
     fn header_then_body_structure() {
-        let el = render(
-            NodeProps::new("Add")
-                .input("a")
-                .input("b")
-                .output("sum"),
-        );
+        let el = render(NodeProps::new("Add").input("a").input("b").output("sum"));
         let kids = el.child_elements();
         assert_eq!(kids.len(), 2);
         assert_eq!(kids[0].kind(), &ElementKind::Text);

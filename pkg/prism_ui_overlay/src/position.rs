@@ -213,7 +213,8 @@ pub fn position(
     // Flip: choose whichever of the preferred / opposite side overflows the
     // main axis least. Ties keep the preferred side (deterministic).
     let side = if config.flip {
-        let preferred_overflow = main_overflow(preferred, anchor, floating, boundary, config.offset);
+        let preferred_overflow =
+            main_overflow(preferred, anchor, floating, boundary, config.offset);
         let opposite = preferred.opposite();
         let opposite_overflow = main_overflow(opposite, anchor, floating, boundary, config.offset);
         if opposite_overflow < preferred_overflow {
@@ -324,8 +325,20 @@ fn cross_vertical(align: Align, anchor: Rect, height: f32) -> f32 {
 
 /// Main-axis overflow of a candidate side (how far the surface would spill out
 /// of the boundary along the side's main axis).
-fn main_overflow(side: Side, anchor: Rect, floating: Size<f32>, boundary: Rect, offset: f32) -> f32 {
-    let origin = anchored_origin(Placement::new(side, Align::Start), anchor, floating, offset, 0.0);
+fn main_overflow(
+    side: Side,
+    anchor: Rect,
+    floating: Size<f32>,
+    boundary: Rect,
+    offset: f32,
+) -> f32 {
+    let origin = anchored_origin(
+        Placement::new(side, Align::Start),
+        anchor,
+        floating,
+        offset,
+        0.0,
+    );
     if side.is_horizontal() {
         axis_overflow(origin.x, floating.width, boundary.left(), boundary.right())
     } else {
@@ -358,9 +371,7 @@ fn is_zero(x: f32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        position, Align, Placement, PositionConfig, Side,
-    };
+    use super::{position, Align, Placement, PositionConfig, Side};
     use prism_ui_layout::{Point, Rect, Size};
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
@@ -596,9 +607,15 @@ mod tests {
 
             // Keep the surface small enough that the padded range is valid.
             let floating = if side.is_horizontal() {
-                Size::new(rng.range(4.0, 60.0), rng.range(4.0, bh - 2.0 * padding - 1.0))
+                Size::new(
+                    rng.range(4.0, 60.0),
+                    rng.range(4.0, bh - 2.0 * padding - 1.0),
+                )
             } else {
-                Size::new(rng.range(4.0, bw - 2.0 * padding - 1.0), rng.range(4.0, 60.0))
+                Size::new(
+                    rng.range(4.0, bw - 2.0 * padding - 1.0),
+                    rng.range(4.0, 60.0),
+                )
             };
 
             let config = PositionConfig {

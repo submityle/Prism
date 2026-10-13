@@ -228,7 +228,11 @@ impl GraphModel {
     /// Collects every edge with an endpoint on `node`, preserving order.
     #[must_use]
     pub fn edges_of(&self, node: NodeId) -> Vec<Edge> {
-        self.edges.iter().copied().filter(|e| e.touches(node)).collect()
+        self.edges
+            .iter()
+            .copied()
+            .filter(|e| e.touches(node))
+            .collect()
     }
 }
 
@@ -243,11 +247,7 @@ mod tests {
                 .pos(10.0, 20.0)
                 .output("out"),
         );
-        g.add_node(
-            NodeData::new(NodeId(2), "Sink")
-                .input("a")
-                .input("b"),
-        );
+        g.add_node(NodeData::new(NodeId(2), "Sink").input("a").input("b"));
         g
     }
 
@@ -291,7 +291,10 @@ mod tests {
         g.connect(PortId::new(NodeId(1), 0), PortId::new(NodeId(2), 0));
         assert!(g.remove_node(NodeId(1)));
         assert_eq!(g.nodes.len(), 1);
-        assert!(g.edges.is_empty(), "edges touching a removed node are dropped");
+        assert!(
+            g.edges.is_empty(),
+            "edges touching a removed node are dropped"
+        );
         assert!(!g.remove_node(NodeId(1)), "second removal is a no-op");
     }
 

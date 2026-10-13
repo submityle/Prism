@@ -23,7 +23,8 @@
 //! kernel's own — the hardware must not pre-filter a BRDF table for us.
 
 import prism_render_scene::shaders::material_sample::{
-    material_texture_heap,
+    material_texture_dimensions,
+    material_texture_load,
 };
 import prism_render_scene::shaders::brdf::{
     DirectLightSample,
@@ -55,7 +56,7 @@ const SEMANTIC_MEASURED_BRDF: u32 = 9u;
 /// One table texel as RGB, from the atlas at `(i, j, k)`.
 fn measured_texel(slot: u32, i: i32, j: i32, k: i32, phi_d: i32) -> vec3<f32> {
     let coord = vec2<i32>(i, j * phi_d + k);
-    return textureLoad(material_texture_heap[slot], coord, 0).xyz;
+    return material_texture_load(slot, coord).xyz;
 }
 
 /// Evaluate the measured lobe for one direct light.
@@ -85,7 +86,10 @@ fn measured_direct(
         return vec3<f32>(0.0, 0.0, 0.0);
     }
 
-    let dimensions = vec2<f32>(textureDimensions(material_texture_heap[table_slot]));
+    // The non-bindless specialization returns an identity texel from
+    // `material_texture_load`; its measured lobe is therefore inert without
+    // ever naming or indexing a binding array.
+    let dimensions = vec2<f32>(material_texture_dimensions(table_slot));
     let phi_count = max(floor(phi_d), 2.0);
     let theta_d_count = max(floor(dimensions.y / phi_count), 2.0);
 

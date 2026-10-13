@@ -48,8 +48,7 @@ use crate::world::World;
 /// the dense-row → owning [`Entity`] map plus the *added* and *changed* tick
 /// vectors (design §6 / §10). This is overhead the Table path folds into chunk
 /// metadata, so it is accounted separately here.
-const DENSE_ROW_BOOKKEEPING_BYTES: usize =
-    size_of::<Entity>() + 2 * size_of::<u32>();
+const DENSE_ROW_BOOKKEEPING_BYTES: usize = size_of::<Entity>() + 2 * size_of::<u32>();
 
 /// Bytes per entry in the sparse index array (an entity index → dense row
 /// `u32` slot).
@@ -138,7 +137,11 @@ impl SparseSetOccupancyEntry {
             return 1000;
         }
         let permille = self.live_count as u64 * 1000 / self.index_span as u64;
-        if permille > 1000 { 1000 } else { permille }
+        if permille > 1000 {
+            1000
+        } else {
+            permille
+        }
     }
 
     /// Fraction of [`resident_bytes`](Self::resident_bytes) spent on the sparse
@@ -293,7 +296,13 @@ impl SparseSetOccupancyReport {
         // id on a tie.
         self.entries
             .iter()
-            .reduce(|best, e| if e.live_count > best.live_count { e } else { best })
+            .reduce(|best, e| {
+                if e.live_count > best.live_count {
+                    e
+                } else {
+                    best
+                }
+            })
             .map(|e| e.id)
     }
 
@@ -401,10 +410,7 @@ mod tests {
         assert_eq!(e.live_count, 3);
         assert_eq!(e.element_bytes, size_of::<i32>());
         assert_eq!(e.dense_payload_bytes, 3 * size_of::<i32>());
-        assert_eq!(
-            e.dense_bookkeeping_bytes,
-            3 * DENSE_ROW_BOOKKEEPING_BYTES
-        );
+        assert_eq!(e.dense_bookkeeping_bytes, 3 * DENSE_ROW_BOOKKEEPING_BYTES);
         // Three contiguous low-index entities pack the keyspace densely.
         assert!(e.index_span >= 3);
         assert!(e.keyspace_density_permille() > 0);
@@ -488,15 +494,12 @@ mod tests {
         );
         assert_eq!(report.unmaterialized_count(), 3);
         assert_eq!(report.total_live(), 3);
-        let expect_dense = (2 * 8 + 2 * DENSE_ROW_BOOKKEEPING_BYTES)
-            + (4 + DENSE_ROW_BOOKKEEPING_BYTES);
+        let expect_dense =
+            (2 * 8 + 2 * DENSE_ROW_BOOKKEEPING_BYTES) + (4 + DENSE_ROW_BOOKKEEPING_BYTES);
         assert_eq!(report.total_dense_bytes(), expect_dense);
         let expect_sparse = 4 * SPARSE_SLOT_BYTES + 1001 * SPARSE_SLOT_BYTES;
         assert_eq!(report.total_sparse_index_bytes(), expect_sparse);
-        assert_eq!(
-            report.total_resident_bytes(),
-            expect_dense + expect_sparse
-        );
+        assert_eq!(report.total_resident_bytes(), expect_dense + expect_sparse);
         assert!(report.overall_sparse_overhead_permille() > 0);
     }
 }

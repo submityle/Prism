@@ -154,10 +154,7 @@ pub fn bake_ascii(bake_em: f32, padding: u32, px_range: f32) -> Option<SdfAtlas>
             ch,
             w,
             h,
-            bearing_em: (
-                (cov.left - pad as f32) / em,
-                (cov.top - pad as f32) / em,
-            ),
+            bearing_em: ((cov.left - pad as f32) / em, (cov.top - pad as f32) / em),
             size_em: (w as f32 / em, h as f32 / em),
             field,
         });

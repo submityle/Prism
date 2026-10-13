@@ -227,7 +227,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::FontSize, tok("font.size.subheadline"))
             .with(StyleProp::FontWeight, tok("font.weight.medium"))
             .with(StyleProp::Color, tok("color.label.secondary"))
-            .with_state(InteractionState::Hover, StyleProp::Color, tok("color.label")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Color,
+                tok("color.label"),
+            ),
     );
 
     // Selected tab: accent label and a tinted fill.
@@ -275,7 +279,10 @@ mod tests {
         let tabs = el.child_elements();
         assert_eq!(tabs.len(), 3);
         assert_eq!(tabs[0].class_names(), ["pk-tabs__tab"]);
-        assert_eq!(tabs[2].class_names(), ["pk-tabs__tab", "pk-tabs__tab--selected"]);
+        assert_eq!(
+            tabs[2].class_names(),
+            ["pk-tabs__tab", "pk-tabs__tab--selected"]
+        );
     }
 
     #[test]

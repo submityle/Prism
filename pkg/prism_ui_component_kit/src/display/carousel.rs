@@ -217,9 +217,18 @@ mod tests {
         );
         let items = slides(&el);
         assert_eq!(items.len(), 3);
-        assert!(!items[0].class_names().iter().any(|n| n == "pk-carousel__item--active"));
-        assert!(items[1].class_names().iter().any(|n| n == "pk-carousel__item--active"));
-        assert!(!items[2].class_names().iter().any(|n| n == "pk-carousel__item--active"));
+        assert!(!items[0]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-carousel__item--active"));
+        assert!(items[1]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-carousel__item--active"));
+        assert!(!items[2]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-carousel__item--active"));
     }
 
     #[test]
@@ -242,8 +251,14 @@ mod tests {
         assert_eq!(el.child_elements().len(), 2);
         let dots = el.child_elements()[1].child_elements();
         assert_eq!(dots.len(), 2);
-        assert!(dots[0].class_names().iter().any(|n| n == "pk-carousel__dot--active"));
-        assert!(!dots[1].class_names().iter().any(|n| n == "pk-carousel__dot--active"));
+        assert!(dots[0]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-carousel__dot--active"));
+        assert!(!dots[1]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-carousel__dot--active"));
     }
 
     #[test]

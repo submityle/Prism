@@ -100,9 +100,7 @@ impl Component for Result {
             el = el.child(icon.class("pk-result__icon"));
         }
         el = el.child(Element::text(props.title.clone()).class("pk-result__title"));
-        el = el.child(
-            Element::text(props.description.clone()).class("pk-result__description"),
-        );
+        el = el.child(Element::text(props.description.clone()).class("pk-result__description"));
         if !props.actions.is_empty() {
             el = el.child(
                 Element::box_()
@@ -207,9 +205,15 @@ mod tests {
     fn title_and_description_render() {
         let el = render(ResultProps::new("Not found").description("No such page."));
         let kids = el.child_elements();
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-result__title"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-result__title"));
         assert_eq!(kids[0].text_content(), Some("Not found"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-result__description"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-result__description"));
     }
 
     #[test]
@@ -221,7 +225,12 @@ mod tests {
         );
         let kids = el.child_elements();
         assert!(kids[0].class_names().iter().any(|c| c == "pk-result__icon"));
-        assert!(kids.last().unwrap().class_names().iter().any(|c| c == "pk-result__actions"));
+        assert!(kids
+            .last()
+            .unwrap()
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-result__actions"));
     }
 
     #[test]

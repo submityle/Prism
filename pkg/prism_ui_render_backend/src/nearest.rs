@@ -262,7 +262,10 @@ mod tests {
         let mut state = 0x0C70_5E57_1234_0001_u64;
         for _ in 0..300 {
             let poly = random_polygon(&mut state);
-            let p = (rand_in(&mut state, -45.0, 45.0), rand_in(&mut state, -45.0, 45.0));
+            let p = (
+                rand_in(&mut state, -45.0, 45.0),
+                rand_in(&mut state, -45.0, 45.0),
+            );
             let got = closest_point_on_polygon(&poly, p).unwrap();
             let want = brute_force(&poly, p);
             assert!(
@@ -281,13 +284,21 @@ mod tests {
         let mut state = 0x5DF0_1111_2222_3333_u64;
         for _ in 0..300 {
             let poly = random_polygon(&mut state);
-            let p = (rand_in(&mut state, -45.0, 45.0), rand_in(&mut state, -45.0, 45.0));
+            let p = (
+                rand_in(&mut state, -45.0, 45.0),
+                rand_in(&mut state, -45.0, 45.0),
+            );
             let q = closest_point_on_polygon(&poly, p).unwrap();
             // On the boundary.
             assert!(sd_polygon(q.0, q.1, &poly).abs() <= 5e-2, "off boundary");
             // Distance agrees with the signed-distance magnitude.
             let sdf = sd_polygon(p.0, p.1, &poly).abs();
-            assert!(approx(dist(p, q), sdf), "dist {} vs sdf {}", dist(p, q), sdf);
+            assert!(
+                approx(dist(p, q), sdf),
+                "dist {} vs sdf {}",
+                dist(p, q),
+                sdf
+            );
         }
     }
 
@@ -297,7 +308,10 @@ mod tests {
         let mut state = 0xDEAD_BEEF_0F0F_7777_u64;
         for _ in 0..200 {
             let poly = random_polygon(&mut state);
-            let p = (rand_in(&mut state, -45.0, 45.0), rand_in(&mut state, -45.0, 45.0));
+            let p = (
+                rand_in(&mut state, -45.0, 45.0),
+                rand_in(&mut state, -45.0, 45.0),
+            );
             let q = closest_point_on_polygon(&poly, p).unwrap();
             let q2 = closest_point_on_polygon(&poly, q).unwrap();
             assert!(approx(q.0, q2.0) && approx(q.1, q2.1));
@@ -310,8 +324,14 @@ mod tests {
         let mut state = 0x1234_5678_9ABC_DEF0_u64;
         for _ in 0..200 {
             let poly = random_polygon(&mut state);
-            let p = (rand_in(&mut state, -45.0, 45.0), rand_in(&mut state, -45.0, 45.0));
-            let (tx, ty) = (rand_in(&mut state, -50.0, 50.0), rand_in(&mut state, -50.0, 50.0));
+            let p = (
+                rand_in(&mut state, -45.0, 45.0),
+                rand_in(&mut state, -45.0, 45.0),
+            );
+            let (tx, ty) = (
+                rand_in(&mut state, -50.0, 50.0),
+                rand_in(&mut state, -50.0, 50.0),
+            );
             let shifted: Vec<(f32, f32)> = poly.iter().map(|&(x, y)| (x + tx, y + ty)).collect();
             let q = closest_point_on_polygon(&poly, p).unwrap();
             let qs = closest_point_on_polygon(&shifted, (p.0 + tx, p.1 + ty)).unwrap();
@@ -330,13 +350,19 @@ mod tests {
         // Clamp past the end.
         assert_eq!(closest_point_on_segment((99.0, 2.0), a, b), (10.0, 0.0));
         // Degenerate segment returns the shared endpoint.
-        assert_eq!(closest_point_on_segment((5.0, 5.0), (2.0, 2.0), (2.0, 2.0)), (2.0, 2.0));
+        assert_eq!(
+            closest_point_on_segment((5.0, 5.0), (2.0, 2.0), (2.0, 2.0)),
+            (2.0, 2.0)
+        );
     }
 
     #[test]
     fn trivial_cases() {
         assert_eq!(closest_point_on_polygon(&[], (1.0, 1.0)), None);
-        assert_eq!(closest_point_on_polygon(&[(3.0, -4.0)], (0.0, 0.0)), Some((3.0, -4.0)));
+        assert_eq!(
+            closest_point_on_polygon(&[(3.0, -4.0)], (0.0, 0.0)),
+            Some((3.0, -4.0))
+        );
 
         // Two vertices: nearest point on the single segment.
         let seg = [(0.0, 0.0), (0.0, 10.0)];
@@ -401,9 +427,17 @@ mod tests {
     fn crossing_segments_meet_at_a_point() {
         let (p, q) =
             closest_points_between_segments((0.0, 0.0), (10.0, 10.0), (0.0, 10.0), (10.0, 0.0));
-        assert!((p.0 - 5.0).abs() < 1e-4 && (p.1 - 5.0).abs() < 1e-4, "{p:?}");
-        assert!((q.0 - 5.0).abs() < 1e-4 && (q.1 - 5.0).abs() < 1e-4, "{q:?}");
-        assert!(segment_segment_distance((0.0, 0.0), (10.0, 10.0), (0.0, 10.0), (10.0, 0.0)) < 1e-4);
+        assert!(
+            (p.0 - 5.0).abs() < 1e-4 && (p.1 - 5.0).abs() < 1e-4,
+            "{p:?}"
+        );
+        assert!(
+            (q.0 - 5.0).abs() < 1e-4 && (q.1 - 5.0).abs() < 1e-4,
+            "{q:?}"
+        );
+        assert!(
+            segment_segment_distance((0.0, 0.0), (10.0, 10.0), (0.0, 10.0), (10.0, 0.0)) < 1e-4
+        );
     }
 
     #[test]

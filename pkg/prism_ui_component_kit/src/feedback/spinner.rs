@@ -117,6 +117,9 @@ mod tests {
         let el = render(SpinnerProps::new());
         let kids = el.child_elements();
         assert_eq!(kids.len(), 1);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-spinner__ring"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-spinner__ring"));
     }
 }

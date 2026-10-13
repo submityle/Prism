@@ -182,7 +182,14 @@ impl BidiInfo {
             let mut seq_levels: Vec<u8> = seq.indices.iter().map(|&i| exp.levels[i]).collect();
 
             weak::resolve(&mut seq_classes, seq.sos);
-            neutral::resolve(&seq_chars, &mut seq_classes, &seq_nsm, seq.level, seq.sos, seq.eos);
+            neutral::resolve(
+                &seq_chars,
+                &mut seq_classes,
+                &seq_nsm,
+                seq.level,
+                seq.sos,
+                seq.eos,
+            );
             implicit::resolve(&seq_classes, &mut seq_levels);
 
             for (k, &idx) in seq.indices.iter().enumerate() {

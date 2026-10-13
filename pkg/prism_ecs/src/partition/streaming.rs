@@ -329,7 +329,11 @@ mod tests {
         // Recycling the slot bumps its generation; the stale weak handle must
         // not resolve to the new occupant.
         let b = world.spawn(());
-        assert_eq!(a.index(), b.index(), "slot should be recycled for this test");
+        assert_eq!(
+            a.index(),
+            b.index(),
+            "slot should be recycled for this test"
+        );
         assert_ne!(a.generation(), b.generation());
         assert_eq!(weak.resolve(&world), None);
         assert!(world.contains(b));

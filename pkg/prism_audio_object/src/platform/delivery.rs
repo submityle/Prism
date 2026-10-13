@@ -71,19 +71,15 @@ pub struct DeliveryPlan {
 /// [`RenderOutput::payload`], and apply [`DeliveryPlan::channel_order`] when the
 /// payload is a bed.
 #[must_use]
-pub fn negotiate_delivery(
-    objects: &[AudioObject],
-    capability: PlatformCapability,
-) -> DeliveryPlan {
+pub fn negotiate_delivery(objects: &[AudioObject], capability: PlatformCapability) -> DeliveryPlan {
     let object_count = objects.len();
     let budget = capability.budget();
     let bed = capability.bed;
 
     let (format, channel_order) = match capability.object_mode {
-        ObjectRenderMode::DiscreteObjects | ObjectRenderMode::BedOnly => (
-            OutputFormat::Bed,
-            capability.channel_order.permutation(bed),
-        ),
+        ObjectRenderMode::DiscreteObjects | ObjectRenderMode::BedOnly => {
+            (OutputFormat::Bed, capability.channel_order.permutation(bed))
+        }
         ObjectRenderMode::Binaural => (OutputFormat::Binaural, Vec::new()),
         ObjectRenderMode::Ambisonic => (
             OutputFormat::Ambisonic {
@@ -97,9 +93,7 @@ pub fn negotiate_delivery(
 
     let discrete_count = match capability.object_mode {
         ObjectRenderMode::DiscreteObjects => output.clusters.len(),
-        ObjectRenderMode::BedOnly
-        | ObjectRenderMode::Binaural
-        | ObjectRenderMode::Ambisonic => 0,
+        ObjectRenderMode::BedOnly | ObjectRenderMode::Binaural | ObjectRenderMode::Ambisonic => 0,
     };
 
     let degraded = matches!(capability.object_mode, ObjectRenderMode::DiscreteObjects)
@@ -162,7 +156,10 @@ mod tests {
         assert_eq!(plan.discrete_count, 3);
         assert!(!plan.degraded);
         assert_eq!(plan.format, OutputFormat::Bed);
-        assert_eq!(plan.channel_order.len(), BedLayout::Surround7_1_4.channel_count());
+        assert_eq!(
+            plan.channel_order.len(),
+            BedLayout::Surround7_1_4.channel_count()
+        );
     }
 
     #[test]
@@ -179,7 +176,10 @@ mod tests {
         assert_eq!(plan.object_count, 6);
         assert_eq!(plan.discrete_count, 3);
         assert!(plan.degraded);
-        assert_permutation_valid(&plan.channel_order, BedLayout::Surround7_1_4.channel_count());
+        assert_permutation_valid(
+            &plan.channel_order,
+            BedLayout::Surround7_1_4.channel_count(),
+        );
     }
 
     #[test]

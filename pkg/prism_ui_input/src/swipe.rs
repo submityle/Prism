@@ -152,7 +152,11 @@ pub fn classify_swipe(velocity: Point<f32>, config: &SwipeConfig) -> Option<Swip
 
 /// Absolute value without `f32::abs`, keeping the gesture math obviously pure.
 fn abs(value: f32) -> f32 {
-    if value < 0.0 { -value } else { value }
+    if value < 0.0 {
+        -value
+    } else {
+        value
+    }
 }
 
 #[cfg(test)]
@@ -228,19 +232,27 @@ mod tests {
     fn fixed_cardinal_directions() {
         let config = SwipeConfig::new(100.0);
         assert_eq!(
-            classify_swipe(Point::new(500.0, 0.0), &config).unwrap().direction,
+            classify_swipe(Point::new(500.0, 0.0), &config)
+                .unwrap()
+                .direction,
             SwipeDirection::Right
         );
         assert_eq!(
-            classify_swipe(Point::new(-500.0, 0.0), &config).unwrap().direction,
+            classify_swipe(Point::new(-500.0, 0.0), &config)
+                .unwrap()
+                .direction,
             SwipeDirection::Left
         );
         assert_eq!(
-            classify_swipe(Point::new(0.0, 500.0), &config).unwrap().direction,
+            classify_swipe(Point::new(0.0, 500.0), &config)
+                .unwrap()
+                .direction,
             SwipeDirection::Down
         );
         assert_eq!(
-            classify_swipe(Point::new(0.0, -500.0), &config).unwrap().direction,
+            classify_swipe(Point::new(0.0, -500.0), &config)
+                .unwrap()
+                .direction,
             SwipeDirection::Up
         );
     }
@@ -269,7 +281,9 @@ mod tests {
         assert!(classify_swipe(Point::new(400.0, 390.0), &config).is_none());
         // Make x clearly dominant and it passes.
         assert_eq!(
-            classify_swipe(Point::new(800.0, 390.0), &config).unwrap().direction,
+            classify_swipe(Point::new(800.0, 390.0), &config)
+                .unwrap()
+                .direction,
             SwipeDirection::Right
         );
     }

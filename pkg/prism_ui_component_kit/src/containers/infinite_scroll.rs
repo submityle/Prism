@@ -123,7 +123,8 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
 
     // Loading: dim the sentinel while a fetch is in flight.
     sheet.insert(
-        Class::new("pk-infinite-scroll__sentinel--loading").with(StyleProp::Color, tok("color.label.secondary")),
+        Class::new("pk-infinite-scroll__sentinel--loading")
+            .with(StyleProp::Color, tok("color.label.secondary")),
     );
 
     // End cap: a muted terminal marker when the list is exhausted.

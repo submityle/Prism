@@ -141,12 +141,18 @@ fn end_to_end_oscillator_graph_drives_block_renderer() {
     // A real 0.5-amplitude sine must produce audible, bounded output.
     let p = peak(&out);
     assert!(p > 0.1, "oscillator produced near-silence: peak {p}");
-    assert!(p <= 0.5 + EPS, "oscillator exceeded its amplitude: peak {p}");
+    assert!(
+        p <= 0.5 + EPS,
+        "oscillator exceeded its amplitude: peak {p}"
+    );
 
     // Telemetry from the most recent block reflects the real render.
     let tel = renderer.last_telemetry();
     assert_eq!(tel.frames, 128, "last block rendered a full engine block");
-    assert_eq!(tel.playhead, 256, "two 128-frame blocks advanced the playhead");
+    assert_eq!(
+        tel.playhead, 256,
+        "two 128-frame blocks advanced the playhead"
+    );
     assert!(tel.master_peak > 0.1, "telemetry peak tracks the signal");
     assert!(renderer.runtime().has_graph(), "graph was swapped in");
 }
@@ -171,7 +177,10 @@ fn identical_pipelines_are_bit_for_bit_deterministic() {
         );
     }
     // Guard against the degenerate "both silent" pass.
-    assert!(peak(&out_a) > 0.05, "deterministic signal must be non-trivial");
+    assert!(
+        peak(&out_a) > 0.05,
+        "deterministic signal must be non-trivial"
+    );
 }
 
 #[test]
@@ -231,7 +240,11 @@ fn offline_wav_render_matches_live_pull_path() {
         .expect("all WAV samples decode");
     let _ = std::fs::remove_file(&path);
 
-    assert_eq!(wav.len(), live_out.len(), "offline frame count matches live");
+    assert_eq!(
+        wav.len(),
+        live_out.len(),
+        "offline frame count matches live"
+    );
     // The offline sink shares the exact BlockRenderer path, so a 32-bit float
     // WAV is a lossless container: the readback must be bit-identical.
     for (i, (disk, mem)) in wav.iter().zip(live_out.iter()).enumerate() {
@@ -264,7 +277,10 @@ fn master_gain_command_mutes_the_end_to_end_signal() {
     let muted_out = render_vec(&mut muted, 512);
 
     for (i, &s) in muted_out.iter().enumerate() {
-        assert!(close(s, 0.0), "master mute leaked signal at sample {i}: {s}");
+        assert!(
+            close(s, 0.0),
+            "master mute leaked signal at sample {i}: {s}"
+        );
     }
     assert!(close(muted.last_telemetry().master_peak, 0.0));
 }
@@ -316,7 +332,9 @@ fn planar_engine_block_interleaves_onto_device_channels() {
         Vec::new(),
         vec![ChannelLayout::Stereo],
     );
-    graph.set_master(PortRef::new(osc, 0)).expect("valid master");
+    graph
+        .set_master(PortRef::new(osc, 0))
+        .expect("valid master");
     graph.compile().expect("compiles");
     assert!(client.publish_graph(Box::new(graph)).is_none());
 
@@ -365,7 +383,11 @@ fn capture_loopback_round_trips_engine_audio() {
     assert_eq!(sink.channels(), 2);
     let pushed = sink.push_interleaved(&interleaved);
     assert_eq!(pushed, interleaved.len(), "all frames fit the ring");
-    assert_eq!(sink.dropped_samples(), 0, "no overflow on an exact-fit ring");
+    assert_eq!(
+        sink.dropped_samples(),
+        0,
+        "no overflow on an exact-fit ring"
+    );
     assert_eq!(consumer.buffered_frames(), frames);
 
     let mut recorded = AudioBuffer::new(ChannelLayout::Stereo, frames);
@@ -378,8 +400,14 @@ fn capture_loopback_round_trips_engine_audio() {
     for frame in 0..frames {
         let left = interleaved[frame * 2];
         let right = interleaved[frame * 2 + 1];
-        assert!(close(recorded.channel(0)[frame], left), "left frame {frame}");
-        assert!(close(recorded.channel(1)[frame], right), "right frame {frame}");
+        assert!(
+            close(recorded.channel(0)[frame], left),
+            "left frame {frame}"
+        );
+        assert!(
+            close(recorded.channel(1)[frame], right),
+            "right frame {frame}"
+        );
     }
 }
 
@@ -485,4 +513,3 @@ fn device_error_is_thread_safe_and_formats_each_variant() {
     let msg = handle.join().expect("thread joins");
     assert!(msg.contains("no output device"));
 }
-

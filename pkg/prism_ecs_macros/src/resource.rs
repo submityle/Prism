@@ -51,9 +51,7 @@ mod tests {
         assert!(expand_str(unit).contains("impl prism_ecs :: resource :: Resource for Paused"));
 
         let tuple: DeriveInput = parse_quote! { struct FrameCount(u64); };
-        assert!(
-            expand_str(tuple).contains("impl prism_ecs :: resource :: Resource for FrameCount")
-        );
+        assert!(expand_str(tuple).contains("impl prism_ecs :: resource :: Resource for FrameCount"));
     }
 
     #[test]

@@ -120,8 +120,16 @@ fn move_after_insert_emits_update_with_old_and_new() {
     match cmds[0] {
         SpatialCommand::Update { node: n, old, new } => {
             assert_eq!(n, node(0));
-            assert!(box_approx(old, aabb([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]), 1e-6));
-            assert!(box_approx(new, aabb([9.0, -1.0, -1.0], [11.0, 1.0, 1.0]), 1e-6));
+            assert!(box_approx(
+                old,
+                aabb([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]),
+                1e-6
+            ));
+            assert!(box_approx(
+                new,
+                aabb([9.0, -1.0, -1.0], [11.0, 1.0, 1.0]),
+                1e-6
+            ));
         }
         other => panic!("expected update, got {other:?}"),
     }
@@ -158,7 +166,11 @@ fn remove_emits_remove_then_forgets_proxy() {
     match cmds[0] {
         SpatialCommand::Remove { node: n, old } => {
             assert_eq!(n, node(0));
-            assert!(box_approx(old, aabb([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]), 1e-6));
+            assert!(box_approx(
+                old,
+                aabb([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+                1e-6
+            ));
         }
         other => panic!("expected remove, got {other:?}"),
     }
@@ -193,7 +205,11 @@ fn fat_margin_suppresses_small_moves_until_escape() {
     // Insert stores the fattened box: tight [-1,1] expanded by 1 => [-2,2].
     match cmds[0] {
         SpatialCommand::Insert { bounds, .. } => {
-            assert!(box_approx(bounds, aabb([-2.0, -2.0, -2.0], [2.0, 2.0, 2.0]), 1e-6));
+            assert!(box_approx(
+                bounds,
+                aabb([-2.0, -2.0, -2.0], [2.0, 2.0, 2.0]),
+                1e-6
+            ));
         }
         other => panic!("expected insert, got {other:?}"),
     }
@@ -210,7 +226,11 @@ fn fat_margin_suppresses_small_moves_until_escape() {
     assert_eq!(stats.updates, 1);
     match cmds[0] {
         SpatialCommand::Update { new, .. } => {
-            assert!(box_approx(new, aabb([3.0, -2.0, -2.0], [7.0, 2.0, 2.0]), 1e-6));
+            assert!(box_approx(
+                new,
+                aabb([3.0, -2.0, -2.0], [7.0, 2.0, 2.0]),
+                1e-6
+            ));
         }
         other => panic!("expected update, got {other:?}"),
     }
@@ -231,8 +251,16 @@ fn exact_mode_reports_shrink() {
     assert_eq!(stats.updates, 1, "exact mode must report a shrink");
     match cmds[0] {
         SpatialCommand::Update { old, new, .. } => {
-            assert!(box_approx(old, aabb([-2.0, -2.0, -2.0], [2.0, 2.0, 2.0]), 1e-6));
-            assert!(box_approx(new, aabb([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]), 1e-6));
+            assert!(box_approx(
+                old,
+                aabb([-2.0, -2.0, -2.0], [2.0, 2.0, 2.0]),
+                1e-6
+            ));
+            assert!(box_approx(
+                new,
+                aabb([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]),
+                1e-6
+            ));
         }
         other => panic!("expected update, got {other:?}"),
     }
@@ -291,7 +319,11 @@ fn repeated_observe_in_frame_keeps_latest_pose() {
     assert_eq!(cmds.len(), 1);
     match cmds[0] {
         SpatialCommand::Insert { bounds, .. } => {
-            assert!(box_approx(bounds, aabb([7.0, 0.0, 0.0], [8.0, 1.0, 1.0]), 1e-6));
+            assert!(box_approx(
+                bounds,
+                aabb([7.0, 0.0, 0.0], [8.0, 1.0, 1.0]),
+                1e-6
+            ));
         }
         other => panic!("expected insert, got {other:?}"),
     }
@@ -313,9 +345,16 @@ fn drain_into_appends_without_realloc_churn() {
 fn stored_bounds_tracks_live_box() {
     let mut sync = SpatialSync::with_margin(0.5);
     sync.register(node(0), aabb([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]));
-    assert!(sync.stored_bounds(node(0)).is_none(), "not live before drain");
+    assert!(
+        sync.stored_bounds(node(0)).is_none(),
+        "not live before drain"
+    );
     sync.observe(&[node(0)], &[GlobalTransform::IDENTITY]);
     let _ = sync.drain();
     let stored = sync.stored_bounds(node(0)).expect("live after drain");
-    assert!(box_approx(stored, aabb([-1.5, -1.5, -1.5], [1.5, 1.5, 1.5]), 1e-6));
+    assert!(box_approx(
+        stored,
+        aabb([-1.5, -1.5, -1.5], [1.5, 1.5, 1.5]),
+        1e-6
+    ));
 }

@@ -3,7 +3,9 @@
 use alloc::vec::Vec;
 use core::fmt;
 use prism_reflect::{AccessError, AccessPlan, Reflect};
-use prism_state_tree_core::{BindingPath, BindingPathError, BindingSlot};
+use prism_state_tree_core::{
+    BindingPath, BindingPathError, BindingSlot, FrameError, InstanceFrame,
+};
 
 /// A compiled reflected path assigned to one stable `StateTree` slot.
 #[derive(Debug, Clone)]
@@ -34,6 +36,13 @@ pub enum ReflectBindingError {
         /// The underlying reflected access failure.
         error: AccessError,
     },
+    /// The reflected value cannot be represented by the target frame field.
+    Frame {
+        /// The slot whose frame field rejected the value.
+        slot: BindingSlot,
+        /// The frame layout/access failure.
+        error: FrameError,
+    },
     /// The resolved field has a different reflected type than the contract.
     TypeMismatch {
         /// The slot whose type contract failed.
@@ -58,6 +67,9 @@ impl fmt::Display for ReflectBindingError {
             }
             Self::Write { slot, error } => {
                 write!(f, "slot {} reflected write failed: {error}", slot.0)
+            }
+            Self::Frame { slot, error } => {
+                write!(f, "slot {} frame encoding failed: {error}", slot.0)
             }
             Self::TypeMismatch {
                 slot,
@@ -149,13 +161,47 @@ impl ReflectBindingPlan {
             .set(root, value)
             .map_err(|error| ReflectBindingError::Write { slot, error })
     }
+
+    /// Encodes a reflected value into its declared frame field.
+    pub fn encode_frame(
+        &self,
+        frame: &mut InstanceFrame,
+        slot: BindingSlot,
+        value: &dyn Reflect,
+    ) -> Result<(), ReflectBindingError> {
+        let field = frame
+            .layout()
+            .fields()
+            .binary_search_by_key(&slot, |field| field.slot)
+            .ok()
+            .map(|index| frame.layout().fields()[index])
+            .ok_or(ReflectBindingError::Frame {
+                slot,
+                error: FrameError::MissingSlot(slot),
+            })?;
+        let bytes = value.as_any().downcast_ref::<alloc::vec::Vec<u8>>().ok_or(
+            ReflectBindingError::Frame {
+                slot,
+                error: FrameError::OutOfBounds,
+            },
+        )?;
+        if bytes.len() != field.size {
+            return Err(ReflectBindingError::Frame {
+                slot,
+                error: FrameError::OutOfBounds,
+            });
+        }
+        frame
+            .write(slot, 0..field.size, bytes)
+            .map_err(|error| ReflectBindingError::Frame { slot, error })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use alloc::{vec, vec::Vec};
     use prism_reflect::{Reflect, ReflectRef};
-    use prism_state_tree_core::BindingSlot;
+    use prism_state_tree_core::{BindingSlot, FrameLayout, InstanceFrame};
 
     use super::{ReflectBindingError, ReflectBindingPlan};
 
@@ -206,6 +252,13 @@ mod tests {
             plan.set(&mut target, BindingSlot(8), &replacement),
             Err(ReflectBindingError::MissingSlot(BindingSlot(8)))
         ));
+
+        let layout = FrameLayout::compile(vec![(BindingSlot(4), 4, 4)]).unwrap();
+        let mut frame = InstanceFrame::new(layout);
+        let bytes = vec![9_u8, 8, 7, 6];
+        plan.encode_frame(&mut frame, BindingSlot(4), &bytes)
+            .unwrap();
+        assert_eq!(frame.read(BindingSlot(4), 0..4).unwrap(), &[9, 8, 7, 6]);
     }
 
     #[test]

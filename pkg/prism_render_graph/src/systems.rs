@@ -117,9 +117,7 @@ impl RenderGraphSystems {
 /// configure_render_graph_sets(|before, after| applied.push((before, after)));
 /// assert_eq!(applied.as_slice(), RenderGraphSystems::ORDER_EDGES);
 /// ```
-pub fn configure_render_graph_sets(
-    mut order: impl FnMut(RenderGraphSystems, RenderGraphSystems),
-) {
+pub fn configure_render_graph_sets(mut order: impl FnMut(RenderGraphSystems, RenderGraphSystems)) {
     for (before, after) in RenderGraphSystems::ORDER_EDGES {
         order(before, after);
     }

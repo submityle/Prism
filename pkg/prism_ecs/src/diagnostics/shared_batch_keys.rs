@@ -170,7 +170,9 @@ impl SharedComponentBatchReport {
         for archetype in archetypes.iter() {
             let entities = archetype.len();
             for &(component, value, _) in archetype.shared_bindings() {
-                let slot = keys.entry((component.index(), value.index())).or_insert((0, 0));
+                let slot = keys
+                    .entry((component.index(), value.index()))
+                    .or_insert((0, 0));
                 slot.0 += 1;
                 slot.1 += entities;
             }
@@ -178,12 +180,14 @@ impl SharedComponentBatchReport {
 
         let mut batch_keys: Vec<SharedBatchKeyEntry> = keys
             .into_iter()
-            .map(|((component, value), (archetype_count, entity_count))| SharedBatchKeyEntry {
-                component: ComponentId::new(component),
-                value: SharedValueId::new(value),
-                archetype_count,
-                entity_count,
-            })
+            .map(
+                |((component, value), (archetype_count, entity_count))| SharedBatchKeyEntry {
+                    component: ComponentId::new(component),
+                    value: SharedValueId::new(value),
+                    archetype_count,
+                    entity_count,
+                },
+            )
             .collect();
         batch_keys.sort_unstable_by_key(|key| (key.component.index(), key.value.index()));
 
@@ -308,7 +312,10 @@ impl SharedComponentBatchReport {
     /// batch keys. A high share means most draws amortise a single instance.
     #[inline]
     pub fn singleton_permille(&self) -> u64 {
-        permille(self.singleton_batch_key_count as u64, self.batch_key_count as u64)
+        permille(
+            self.singleton_batch_key_count as u64,
+            self.batch_key_count as u64,
+        )
     }
 
     /// Largest [`distinct_values`](SharedComponentBatchEntry::distinct_values)
@@ -524,7 +531,11 @@ mod tests {
         world.spawn((Position(1), Layer(0)));
         world.spawn((Position(2), BatchKey(1)));
         let report = SharedComponentBatchReport::capture(&world);
-        let ids: Vec<u32> = report.components().iter().map(|e| e.component.index()).collect();
+        let ids: Vec<u32> = report
+            .components()
+            .iter()
+            .map(|e| e.component.index())
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted);

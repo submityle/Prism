@@ -299,7 +299,10 @@ fn midpoint_animation_interpolates_between_keyframes() {
     assert_eq!(mid.len(), 1);
     // Position x interpolates 1 -> -1, so the midpoint sits near the origin on
     // the x axis; gain interpolates 0.4 -> 0.8.
-    assert!(mid[0].position.x.abs() <= EPS, "x should cross zero at t=0.5");
+    assert!(
+        mid[0].position.x.abs() <= EPS,
+        "x should cross zero at t=0.5"
+    );
     assert!((mid[0].gain - 0.6).abs() <= 1e-3, "gain should be the mean");
 }
 

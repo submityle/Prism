@@ -163,7 +163,11 @@ impl<T: Copy> MultiBuffer<T> {
     /// # Panics
     /// Panics if `src.len() != len`.
     pub fn write_all(&mut self, src: &[T]) {
-        assert_eq!(src.len(), self.len, "write_all: slice length must equal len");
+        assert_eq!(
+            src.len(),
+            self.len,
+            "write_all: slice length must equal len"
+        );
         self.buffers[self.write_idx].copy_from_slice(src);
     }
 

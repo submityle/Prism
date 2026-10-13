@@ -132,9 +132,7 @@ impl Component for DataGrid {
                 row_el = row_el.class("pk-data-grid__row--selectable");
             }
             for value in row {
-                row_el = row_el.child(
-                    Element::text(value.clone()).class("pk-data-grid__cell"),
-                );
+                row_el = row_el.child(Element::text(value.clone()).class("pk-data-grid__cell"));
             }
             el = el.child(row_el);
         }
@@ -188,7 +186,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     sheet.insert(
         Class::new("pk-data-grid__col--sortable")
             .with(StyleProp::Color, tok("color.tint"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.8)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.8),
+            ),
     );
 
     // Body row: an equal-width flex row with a hairline separator.
@@ -202,10 +204,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Selectable row: a hover wash to signal it can be picked.
-    sheet.insert(
-        Class::new("pk-data-grid__row--selectable")
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.tertiary")),
-    );
+    sheet.insert(Class::new("pk-data-grid__row--selectable").with_state(
+        InteractionState::Hover,
+        StyleProp::BackgroundColor,
+        tok("color.fill.tertiary"),
+    ));
 
     // Selected row: a persistent accent wash (applied by the runtime layer).
     sheet.insert(
@@ -250,8 +253,14 @@ mod tests {
         ]));
         let cols = el.child_elements()[0].child_elements();
         assert_eq!(cols.len(), 2);
-        assert!(cols[0].class_names().iter().any(|n| n == "pk-data-grid__col--sortable"));
-        assert!(!cols[1].class_names().iter().any(|n| n == "pk-data-grid__col--sortable"));
+        assert!(cols[0]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-data-grid__col--sortable"));
+        assert!(!cols[1]
+            .class_names()
+            .iter()
+            .any(|n| n == "pk-data-grid__col--sortable"));
         assert_eq!(cols[0].text_content(), Some("Name"));
     }
 
@@ -265,7 +274,10 @@ mod tests {
                 .selectable(true),
         );
         for row in &el.child_elements()[1..] {
-            assert!(row.class_names().iter().any(|n| n == "pk-data-grid__row--selectable"));
+            assert!(row
+                .class_names()
+                .iter()
+                .any(|n| n == "pk-data-grid__row--selectable"));
         }
     }
 

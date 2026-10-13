@@ -114,10 +114,7 @@ mod tests {
     /// Strictly-inside test with a margin so boundary-touching samples near the
     /// floating-point edge do not make the oracle flaky.
     fn strictly_inside(p: (f32, f32), lo: (f32, f32), hi: (f32, f32), margin: f32) -> bool {
-        p.0 > lo.0 + margin
-            && p.0 < hi.0 - margin
-            && p.1 > lo.1 + margin
-            && p.1 < hi.1 - margin
+        p.0 > lo.0 + margin && p.0 < hi.0 - margin && p.1 > lo.1 + margin && p.1 < hi.1 - margin
     }
 
     fn in_closed(p: (f32, f32), lo: (f32, f32), hi: (f32, f32), eps: f32) -> bool {
@@ -133,10 +130,22 @@ mod tests {
     fn matches_bruteforce_inside_interval() {
         let mut state = 0x5_C11A_u64;
         for _ in 0..400 {
-            let a = (rand_in(&mut state, -6.0, 6.0), rand_in(&mut state, -6.0, 6.0));
-            let b = (rand_in(&mut state, -6.0, 6.0), rand_in(&mut state, -6.0, 6.0));
-            let c0 = (rand_in(&mut state, -4.0, 4.0), rand_in(&mut state, -4.0, 4.0));
-            let c1 = (rand_in(&mut state, -4.0, 4.0), rand_in(&mut state, -4.0, 4.0));
+            let a = (
+                rand_in(&mut state, -6.0, 6.0),
+                rand_in(&mut state, -6.0, 6.0),
+            );
+            let b = (
+                rand_in(&mut state, -6.0, 6.0),
+                rand_in(&mut state, -6.0, 6.0),
+            );
+            let c0 = (
+                rand_in(&mut state, -4.0, 4.0),
+                rand_in(&mut state, -4.0, 4.0),
+            );
+            let c1 = (
+                rand_in(&mut state, -4.0, 4.0),
+                rand_in(&mut state, -4.0, 4.0),
+            );
             let lo = (c0.0.min(c1.0), c0.1.min(c1.1));
             let hi = (c0.0.max(c1.0), c0.1.max(c1.1));
 

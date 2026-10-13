@@ -23,8 +23,8 @@ use prism_audio_assets::bank::{
     ManifestError, MediaEntry, MediaFormat, Residency,
 };
 use prism_audio_assets::codec::{
-    AudioStreamInfo, CodecTag, DecodeError, DecoderRegistry, ImaAdpcmDecoder, ImaAdpcmEncoder,
-    PcmDecoder, PcmSampleFormat, SourceDecoder, decode_wav,
+    decode_wav, AudioStreamInfo, CodecTag, DecodeError, DecoderRegistry, ImaAdpcmDecoder,
+    ImaAdpcmEncoder, PcmDecoder, PcmSampleFormat, SourceDecoder,
 };
 use prism_audio_assets::dialogue::{
     DecisionNode, DialogueDecisionTree, DialogueKey, DialogueResolution, DialogueResolver,
@@ -35,7 +35,11 @@ use prism_audio_assets::streaming::PrefetchStream;
 /// Absolute-value helper that avoids the std float method (clippy forbids
 /// `f32::abs` in these integration tests) and keeps comparisons readable.
 fn fabs(x: f32) -> f32 {
-    if x < 0.0 { -x } else { x }
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
 }
 
 /// Builds the raw little-endian S16 payload for interleaved `i16` samples.
@@ -119,9 +123,14 @@ fn native_registry_decodes_wav_and_rejects_unknown() {
     let wav = wav_s16le(&samples, 2, 44_100);
     let registry = DecoderRegistry::with_native();
 
-    let mut decoder = registry.decode_bytes(&wav).expect("native registry decodes RIFF");
+    let mut decoder = registry
+        .decode_bytes(&wav)
+        .expect("native registry decodes RIFF");
     assert_eq!(decoder.info().frame_count, Some(64));
-    assert_eq!(decoder.decode_to_end().expect("decode").len(), samples.len());
+    assert_eq!(
+        decoder.decode_to_end().expect("decode").len(),
+        samples.len()
+    );
 
     // Non-RIFF leading bytes have no registered container.
     match registry.decode_bytes(b"OggS not a wav at all") {
@@ -154,7 +163,11 @@ fn ima_adpcm_block_roundtrips_within_tolerance() {
     let amplitude = 8_000i32;
     for i in 0..samples_per_block {
         let phase = i as i32 % period;
-        let tri = if phase < period / 2 { phase } else { period - phase };
+        let tri = if phase < period / 2 {
+            phase
+        } else {
+            period - phase
+        };
         let value = tri * (2 * amplitude) / (period / 2) - amplitude;
         mono.push(value as i16);
     }
@@ -180,7 +193,10 @@ fn ima_adpcm_block_roundtrips_within_tolerance() {
             worst = err;
         }
     }
-    assert!(worst < 0.05, "adpcm reconstruction error too large: {worst}");
+    assert!(
+        worst < 0.05,
+        "adpcm reconstruction error too large: {worst}"
+    );
 }
 
 #[test]
@@ -259,7 +275,9 @@ fn build_two_entry_bank(bank_id: BankId) -> (BankManifest, Vec<u8>, Vec<i16>, Ve
         EntryId(2),
         "music_loop".to_string(),
         MediaFormat::new(CodecTag::Pcm, 2, 48_000, Some(400)),
-        Residency::Streaming { prefetch_frames: 64 },
+        Residency::Streaming {
+            prefetch_frames: 64,
+        },
         music_offset,
         music_len,
     );
@@ -314,7 +332,10 @@ fn bank_loads_resident_and_streaming_media() {
     let usage = bank.memory_usage();
     assert!(usage.resident_pcm_bytes > 0);
     assert!(usage.encoded_bytes > 0);
-    assert_eq!(usage.total(), usage.resident_pcm_bytes + usage.encoded_bytes + usage.metadata_bytes);
+    assert_eq!(
+        usage.total(),
+        usage.resident_pcm_bytes + usage.encoded_bytes + usage.metadata_bytes
+    );
 }
 
 #[test]
@@ -325,7 +346,9 @@ fn bank_registry_load_unload_and_errors() {
 
     let mut banks = BankRegistry::new();
     assert!(banks.is_empty());
-    let id = banks.load(manifest.clone(), &blob, &registry).expect("load");
+    let id = banks
+        .load(manifest.clone(), &blob, &registry)
+        .expect("load");
     assert_eq!(id, bank_id);
     assert!(banks.is_loaded(bank_id));
     assert_eq!(banks.len(), 1);
@@ -387,8 +410,7 @@ fn manifest_validation_rejects_malformed_banks() {
     }
 
     // A bank cannot depend on itself.
-    let self_dep =
-        BankManifest::new(BankId(3), "self".to_string(), 1).with_dependency(BankId(3));
+    let self_dep = BankManifest::new(BankId(3), "self".to_string(), 1).with_dependency(BankId(3));
     match self_dep.validate(0) {
         Err(ManifestError::SelfDependency(id)) => assert_eq!(id, BankId(3)),
         other => panic!("expected SelfDependency, got {other:?}"),
@@ -447,7 +469,10 @@ fn language_bank_set_switches_and_falls_back() {
 
     // Switching to an unregistered language falls back to the default.
     match set.set_active(jp.clone()) {
-        SwitchOutcome::FellBackToDefault { requested, fallback } => {
+        SwitchOutcome::FellBackToDefault {
+            requested,
+            fallback,
+        } => {
             assert_eq!(requested, jp);
             assert_eq!(fallback, en);
         }
@@ -537,7 +562,10 @@ fn end_to_end_dialogue_resolves_to_decoded_bank_media() {
     // The resolver maps a dialogue line to the resident effect entry.
     let mut resolver = DialogueResolver::new();
     let key = DialogueKey::new("hero", "neutral", en, 0);
-    resolver.insert(key.clone(), MediaRef::new(languages.active_bank(), EntryId(1)));
+    resolver.insert(
+        key.clone(),
+        MediaRef::new(languages.active_bank(), EntryId(1)),
+    );
 
     // Resolve the line, then read the decoded PCM back out of the bank.
     let media = match resolver.resolve(&key) {
@@ -547,7 +575,9 @@ fn end_to_end_dialogue_resolves_to_decoded_bank_media() {
     let loaded = banks
         .media(media.bank, media.entry)
         .expect("resolved media is resident in the bank");
-    let pcm = loaded.resident_pcm().expect("dialogue take is memory-resident");
+    let pcm = loaded
+        .resident_pcm()
+        .expect("dialogue take is memory-resident");
 
     // The bytes read through the whole chain match a direct decode of the take.
     let direct = PcmDecoder::new(

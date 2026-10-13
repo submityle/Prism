@@ -291,10 +291,7 @@ mod tests {
         );
         assert_eq!(out, "He liked 1 of your posts.");
 
-        let out = i18n.t(
-            "notify",
-            &Args::new().with("count", 0),
-        );
+        let out = i18n.t("notify", &Args::new().with("count", 0));
         assert_eq!(out, "They liked none of your posts.");
     }
 

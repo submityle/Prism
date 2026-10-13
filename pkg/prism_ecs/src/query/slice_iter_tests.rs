@@ -92,7 +92,10 @@ fn mutable_slices_write_through_and_stamp_change_detection() {
 
     let changed = world.query_filtered::<&Value, Changed<Value>>();
     // `Changed` yields the value itself; count the marked rows.
-    assert!(changed.iter(&world).count() >= 1, "writes must be visible to change detection");
+    assert!(
+        changed.iter(&world).count() >= 1,
+        "writes must be visible to change detection"
+    );
 }
 
 #[test]

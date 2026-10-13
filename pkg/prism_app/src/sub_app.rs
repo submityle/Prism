@@ -24,8 +24,8 @@
 //! frame *N+1* (design §9, §24.3, §25.2) is M3 Inc2 and is honestly absent
 //! here, not stubbed.
 
-use prism_ecs::schedule::{ScheduleLabel, Schedules};
 use crate::rollback::SnapshotHistory;
+use prism_ecs::schedule::{ScheduleLabel, Schedules};
 use prism_ecs::world::World;
 
 use crate::time::{EngineClocks, TimeUpdateStrategy};
@@ -357,8 +357,11 @@ impl SubApp {
                 .get_resource::<crate::diagnostics::FrameDiagnostics>()
                 .is_some();
             #[cfg(feature = "trace")]
-            let instrument =
-                instrument || self.world.get_resource::<crate::trace::PhaseTrace>().is_some();
+            let instrument = instrument
+                || self
+                    .world
+                    .get_resource::<crate::trace::PhaseTrace>()
+                    .is_some();
             if instrument {
                 self.update_instrumented();
                 return;

@@ -453,7 +453,10 @@ mod tests {
             // A contiguous sub-path has exactly the arc span as its length.
             let sl = polyline_length(&sub);
             let span = hi - lo;
-            assert!((sl - span).abs() <= 1e-2 * (1.0 + span), "len {sl} vs {span}");
+            assert!(
+                (sl - span).abs() <= 1e-2 * (1.0 + span),
+                "len {sl} vs {span}"
+            );
             for &p in &sub {
                 assert!(min_dist_to_polyline(p, &pts) < 1e-3);
             }

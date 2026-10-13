@@ -208,7 +208,10 @@ mod tests {
         for _ in 0..200 {
             let poly = random_convex(&mut state);
             for _ in 0..40 {
-                let p = (rand_in(&mut state, -25.0, 25.0), rand_in(&mut state, -25.0, 25.0));
+                let p = (
+                    rand_in(&mut state, -25.0, 25.0),
+                    rand_in(&mut state, -25.0, 25.0),
+                );
                 if sd_polygon(p.0, p.1, &poly).abs() < 0.1 {
                     continue; // skip boundary-ambiguous samples
                 }
@@ -227,11 +230,28 @@ mod tests {
         // polygons, sampled on a dense grid away from the boundary.
         let shapes: [&[(f32, f32)]; 3] = [
             // L-shape
-            &[(0.0, 0.0), (6.0, 0.0), (6.0, 2.0), (2.0, 2.0), (2.0, 6.0), (0.0, 6.0)],
+            &[
+                (0.0, 0.0),
+                (6.0, 0.0),
+                (6.0, 2.0),
+                (2.0, 2.0),
+                (2.0, 6.0),
+                (0.0, 6.0),
+            ],
             // Plus / cross
             &[
-                (2.0, 0.0), (4.0, 0.0), (4.0, 2.0), (6.0, 2.0), (6.0, 4.0), (4.0, 4.0),
-                (4.0, 6.0), (2.0, 6.0), (2.0, 4.0), (0.0, 4.0), (0.0, 2.0), (2.0, 2.0),
+                (2.0, 0.0),
+                (4.0, 0.0),
+                (4.0, 2.0),
+                (6.0, 2.0),
+                (6.0, 4.0),
+                (4.0, 4.0),
+                (4.0, 6.0),
+                (2.0, 6.0),
+                (2.0, 4.0),
+                (0.0, 4.0),
+                (0.0, 2.0),
+                (2.0, 2.0),
             ],
             // Arrowhead (concave at the tail)
             &[(0.0, 0.0), (6.0, 3.0), (0.0, 6.0), (2.0, 3.0)],
@@ -272,7 +292,10 @@ mod tests {
             let samples = 40_000;
             let mut hits = 0_u32;
             for _ in 0..samples {
-                let p = (rand_in(&mut state, minx, maxx), rand_in(&mut state, miny, maxy));
+                let p = (
+                    rand_in(&mut state, minx, maxx),
+                    rand_in(&mut state, miny, maxy),
+                );
                 if point_in_polygon(&poly, p) {
                     hits += 1;
                 }

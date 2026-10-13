@@ -903,7 +903,9 @@ pub use coupling_apply_resolve::{
 pub use coupling_impulse::{
     GpuCouplingImpulse, GpuCouplingImpulseQuery, GpuCouplingImpulseResult, GpuMat3,
 };
-pub use cubic_spline_segment::{CubicSplineSegmentQuery, CubicSplineSegmentResult, GpuCubicSplineSegment};
+pub use cubic_spline_segment::{
+    CubicSplineSegmentQuery, CubicSplineSegmentResult, GpuCubicSplineSegment,
+};
 pub use curl::{CurlQuery, GpuCurl};
 pub use curl_noise::{CurlNoiseSample, GpuCurlNoise};
 pub use curves::{CurveSampleQuery, GpuCurve, GpuKeyframe};
@@ -1553,7 +1555,9 @@ pub use sphere_sphere_contact::{
     GpuSphereSphereContact, SphereSphereContactQuery, SphereSphereContactResult,
 };
 pub use sphere_sweep::{GpuSphereSweep, SphereSweepOp, SphereSweepQuery};
-pub use spherical_harmonics_basis::{GpuSphericalHarmonicsBasis, SphericalHarmonicsBasisQuery, SphericalHarmonicsBasisResult};
+pub use spherical_harmonics_basis::{
+    GpuSphericalHarmonicsBasis, SphericalHarmonicsBasisQuery, SphericalHarmonicsBasisResult,
+};
 pub use spherical_harmonics_rotate::{
     GpuSphericalHarmonicsRotate, ShRotationProbe, ShRotationResult, L2_COEFF_COUNT,
 };

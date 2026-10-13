@@ -312,7 +312,13 @@ impl PerPathDoppler {
     /// Continues an existing arrival with the same `(kind, ordinal)` key —
     /// differencing its delay and easing its factor — or registers a new one at
     /// [`UNISON`]. Returns the factor to report for this arrival.
-    fn track(&mut self, path: &PropagationPath, ordinal: usize, dt: Sample, alpha: Sample) -> Sample {
+    fn track(
+        &mut self,
+        path: &PropagationPath,
+        ordinal: usize,
+        dt: Sample,
+        alpha: Sample,
+    ) -> Sample {
         let limits = self.limits;
         if let Some(slot) = self.slots.iter_mut().find(|slot| {
             slot.active && !slot.matched && slot.kind == path.kind && slot.ordinal == ordinal
@@ -416,7 +422,11 @@ mod tests {
             delay -= 0.0005;
             doppler.update(&[path(PathKind::Direct, delay)], DT, &mut factors);
         }
-        assert!(factors[0] > UNISON, "approaching should raise pitch, got {}", factors[0]);
+        assert!(
+            factors[0] > UNISON,
+            "approaching should raise pitch, got {}",
+            factors[0]
+        );
         assert!(factors[0] <= DEFAULT_MAX_FACTOR + 1.0e-6);
     }
 
@@ -430,7 +440,11 @@ mod tests {
             delay += 0.0005;
             doppler.update(&[path(PathKind::Direct, delay)], DT, &mut factors);
         }
-        assert!(factors[0] < UNISON, "receding should lower pitch, got {}", factors[0]);
+        assert!(
+            factors[0] < UNISON,
+            "receding should lower pitch, got {}",
+            factors[0]
+        );
         assert!(factors[0] >= DEFAULT_MIN_FACTOR - 1.0e-6);
     }
 
@@ -469,7 +483,10 @@ mod tests {
         let mut direct = 0.010;
         let mut reflection = 0.030;
         doppler.update(
-            &[path(PathKind::Direct, direct), path(PathKind::Reflection, reflection)],
+            &[
+                path(PathKind::Direct, direct),
+                path(PathKind::Reflection, reflection),
+            ],
             DT,
             &mut factors,
         );
@@ -477,7 +494,10 @@ mod tests {
         direct -= 0.0005;
         reflection += 0.0005;
         doppler.update(
-            &[path(PathKind::Direct, direct), path(PathKind::Reflection, reflection)],
+            &[
+                path(PathKind::Direct, direct),
+                path(PathKind::Reflection, reflection),
+            ],
             DT,
             &mut factors,
         );
@@ -492,12 +512,18 @@ mod tests {
         let mut factors = [0.0; MAX_PROPAGATION_PATHS];
         // Two reflections: the first approaches, the second recedes.
         doppler.update(
-            &[path(PathKind::Reflection, 0.020), path(PathKind::Reflection, 0.040)],
+            &[
+                path(PathKind::Reflection, 0.020),
+                path(PathKind::Reflection, 0.040),
+            ],
             DT,
             &mut factors,
         );
         doppler.update(
-            &[path(PathKind::Reflection, 0.019), path(PathKind::Reflection, 0.041)],
+            &[
+                path(PathKind::Reflection, 0.019),
+                path(PathKind::Reflection, 0.041),
+            ],
             DT,
             &mut factors,
         );

@@ -225,7 +225,7 @@ impl<F: Clone> Prediction<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::{FieldKind, FieldValue, encode_delta, encode_snapshot};
+    use crate::delta::{encode_delta, encode_snapshot, FieldKind, FieldValue};
     use alloc::vec;
     use alloc::vec::Vec;
 

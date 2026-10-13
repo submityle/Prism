@@ -9,9 +9,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::draw::{DrawCommand, DrawList};
 #[cfg(doc)]
 use crate::draw::TextRef;
+use crate::draw::{DrawCommand, DrawList};
 
 /// A node in the compositing tree. The implicit root layer has `opacity == 1`.
 ///

@@ -7,13 +7,13 @@
 //! RHI, which is exactly the ground the Bevy render stack used to provide.
 
 use prism_render_driver as rhi;
+use prism_render_driver_wgpu::WgpuInstance;
+use prism_render_graph::{ImportedTexture, PassFlags, TextureDesc};
 use rhi::{
     Adapter, ColorTargetState, FragmentState, Instance, MultisampleState, PrimitiveState,
     RenderDevice, RenderQueue, ShaderModuleDescriptor, Surface, TextureState, TextureUsages,
     VertexFormat, VertexState, VertexStepMode,
 };
-use prism_render_driver_wgpu::WgpuInstance;
-use prism_render_graph::{ImportedTexture, PassFlags, TextureDesc};
 
 use crate::RenderRuntime;
 
@@ -55,7 +55,10 @@ fn surface_present_loop_runs_headless_on_the_null_backend() {
         .expect("the null device always comes up");
 
     // Presenting without a surface is a clear error, not a panic.
-    assert_eq!(rt.render_frame(|_, _| {}), Err(crate::FrameError::NoSurface));
+    assert_eq!(
+        rt.render_frame(|_, _| {}),
+        Err(crate::FrameError::NoSurface)
+    );
 
     rt.create_surface(Arc::new(FakeWindow))
         .expect("the null surface is created for any handle");
@@ -90,7 +93,11 @@ fn discarding_a_frame_reclaims_its_image_ids() {
         .expect("the null surface advertises a usable format");
 
     let baseline = rt.device().live_resource_count();
-    let frame = rt.surface().expect("surface exists").acquire().expect("acquire");
+    let frame = rt
+        .surface()
+        .expect("surface exists")
+        .acquire()
+        .expect("acquire");
     assert!(
         rt.device().live_resource_count() > baseline,
         "an acquired frame registers its image on the device"
@@ -318,7 +325,9 @@ fn rhi_graph_draws_a_triangle() {
         fragment: Some(FragmentState {
             module,
             entry_point: "fs".into(),
-            targets: vec![Some(ColorTargetState::opaque(rhi::TextureFormat::Rgba8Unorm))],
+            targets: vec![Some(ColorTargetState::opaque(
+                rhi::TextureFormat::Rgba8Unorm,
+            ))],
         }),
     });
 
@@ -352,7 +361,8 @@ fn rhi_graph_draws_a_triangle() {
             ctx.draw(0..3, 0..1);
         }
     });
-    rt.execute(graph).expect("triangle frame executes on the RHI");
+    rt.execute(graph)
+        .expect("triangle frame executes on the RHI");
     assert!(rt.device().poll_wait(), "the device stays healthy");
 
     // The compiler clears the fresh target to opaque black, then the triangle

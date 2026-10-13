@@ -48,10 +48,10 @@ mod validator;
 
 pub use email::{email, is_valid_email};
 pub use error::ValidationError;
-pub use iban::{iban, is_valid_iban};
-pub use luhn::{luhn, passes_luhn};
 pub use field::{parse_i64, FieldId};
 pub use form::Form;
+pub use iban::{iban, is_valid_iban};
+pub use luhn::{luhn, passes_luhn};
 pub use validator::{
     custom, int_range, int_step, max_len, min_len, pattern, required, BoxedValidator, Validator,
 };

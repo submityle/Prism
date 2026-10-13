@@ -102,10 +102,7 @@ impl Component for Button {
 
     fn render(&self, props: &Self::Props) -> Element {
         let mut el = Element::box_();
-        for name in classes(
-            "pk-button",
-            &[props.variant.suffix(), props.size.suffix()],
-        ) {
+        for name in classes("pk-button", &[props.variant.suffix(), props.size.suffix()]) {
             el = el.class(name);
         }
         if props.disabled {
@@ -124,7 +121,6 @@ impl Component for Button {
         el
     }
 }
-
 
 /// Registers the `pk-button` class family: one base, five variants, three
 /// sizes. The cascade applies `base -> variant -> size` in attachment order,
@@ -148,7 +144,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderWidth, StyleValue::px(0.0))
             .with(StyleProp::FontSize, tok("font.size.body"))
             .with(StyleProp::FontWeight, tok("font.weight.semibold"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     // Sizes map density to the spacing scale and shared control height.
@@ -180,17 +180,37 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BackgroundColor, tok("color.tint"))
             .with(StyleProp::Color, StyleValue::rgba8(255, 255, 255, 255))
             .with_shadow(0.0, 4.0, 12.0, tok("glass.shadow"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.92))
-            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.82)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.92),
+            )
+            .with_state(
+                InteractionState::Pressed,
+                StyleProp::Opacity,
+                StyleValue::number(0.82),
+            ),
     );
 
     // Tinted: translucent accent wash over glass, accent-colored label.
     sheet.insert(
         Class::new("pk-button--tinted")
-            .with_glass(0.0, tok("color.fill.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.fill.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.tint"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.9))
-            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.78)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.9),
+            )
+            .with_state(
+                InteractionState::Pressed,
+                StyleProp::Opacity,
+                StyleValue::number(0.78),
+            ),
     );
 
     // Gray: neutral glass surface, primary label.
@@ -198,8 +218,16 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
         Class::new("pk-button--gray")
             .with_glass(0.0, tok("color.fill"), Some(tok("glass.highlight")))
             .with(StyleProp::Color, tok("color.label"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.9))
-            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.78)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.9),
+            )
+            .with_state(
+                InteractionState::Pressed,
+                StyleProp::Opacity,
+                StyleValue::number(0.78),
+            ),
     );
 
     // Glass: the hero chrome surface — frosted tint, lit rim, drop shadow.
@@ -208,8 +236,16 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with_glass(0.0, tok("glass.tint"), Some(tok("glass.highlight")))
             .with(StyleProp::Color, tok("color.label"))
             .with_shadow(0.0, 8.0, 24.0, tok("glass.shadow"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.94))
-            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.84)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.94),
+            )
+            .with_state(
+                InteractionState::Pressed,
+                StyleProp::Opacity,
+                StyleValue::number(0.84),
+            ),
     );
 
     // Plain: no surface, accent label only.
@@ -217,8 +253,16 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
         Class::new("pk-button--plain")
             .with(StyleProp::BackgroundColor, transparent())
             .with(StyleProp::Color, tok("color.tint"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.7))
-            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.55)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.7),
+            )
+            .with_state(
+                InteractionState::Pressed,
+                StyleProp::Opacity,
+                StyleValue::number(0.55),
+            ),
     );
 }
 

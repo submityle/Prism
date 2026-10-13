@@ -314,7 +314,12 @@ impl PartitionOccupancyReport {
         if self.cells.iter().all(|c| c.streamable.is_none()) {
             return None;
         }
-        Some(self.cells.iter().filter(|c| c.is_blocked_but_tracked()).count())
+        Some(
+            self.cells
+                .iter()
+                .filter(|c| c.is_blocked_but_tracked())
+                .count(),
+        )
     }
 
     /// The most-populated tracked cell, ties broken by lowest `(x, y, z)`, or
@@ -487,10 +492,8 @@ mod tests {
     #[test]
     fn data_layer_context_flags_blocked_cells() {
         let mut world = World::new();
-        let mut partition = WorldPartition::from_parts(
-            FloatingOrigin::new(100.0),
-            CellStreamer::new(0, 0),
-        );
+        let mut partition =
+            WorldPartition::from_parts(FloatingOrigin::new(100.0), CellStreamer::new(0, 0));
         let (open, blocked) = (c(0, 0, 0), c(3, 0, 0));
         partition.driver_mut().streamer_mut().mark_resident(open);
         partition.driver_mut().streamer_mut().mark_resident(blocked);

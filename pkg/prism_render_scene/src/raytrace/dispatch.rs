@@ -26,7 +26,8 @@
 //! without re-porting the kernels.
 
 use bevy_render::render_resource::{
-    Buffer, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, MapMode, PollType,
+    Buffer, CommandEncoder, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline,
+    MapMode, PollType,
 };
 use bevy_render::renderer::{RenderDevice, RenderQueue};
 
@@ -36,12 +37,14 @@ use super::abi::{
     FOOTPRINT_WORKGROUP, MISS_PRIMITIVE, RAYTRACE_MODE_ANY, RAYTRACE_MODE_CLOSEST,
     RAYTRACE_WORKGROUP,
 };
-use super::bind_groups::{bvh_bind_group, footprint_bind_group, tlas_bind_group};
+use super::bind_groups::{
+    bvh_bind_group, footprint_bind_group, tlas_bind_group, tlas_dispatch_bind_group,
+};
 use super::pipeline::RayTraversalPipelines;
 use super::resources::{
     decode_bvh_hits, decode_footprint_results, decode_tlas_hits, pack_footprints, pack_rays,
     BvhTraversalResources, FootprintRequest, FootprintResources, GpuFootprintResult, GpuRayHit,
-    GpuTlasHit, TlasTraversalResources,
+    GpuTlasHit, TlasDispatchResources, TlasTraversalResources,
 };
 
 /// A reusable ray-traversal compute service bound to one render device.
@@ -117,6 +120,42 @@ impl GpuRayTraversal {
             .into_iter()
             .map(|hit| hit.primitive != MISS_PRIMITIVE)
             .collect()
+    }
+
+    /// Records a single no-readback two-level `tlas_traverse` dispatch into the
+    /// caller-owned `encoder`, leaving the hit records in the returned
+    /// [`TlasDispatchResources::hits`] GPU-resident buffer for a same-submission
+    /// render-graph consumer to bind. Unlike [`Self::tlas_closest_hits`] /
+    /// [`Self::tlas_any_hits`], it does not copy back or poll the device, so it
+    /// is the per-frame production path: the on-device twin of
+    /// `GpuTlasBuffers::closest_hit` (`RAYTRACE_MODE_CLOSEST`) or `any_hit`
+    /// (`RAYTRACE_MODE_ANY`) that keeps its results on the `GPU`.
+    ///
+    /// An empty ray batch uploads valid (minimally sized) buffers and records no
+    /// pass, so a consumer can bind the result unconditionally.
+    pub(crate) fn record_tlas_walk(
+        &self,
+        device: &RenderDevice,
+        encoder: &mut CommandEncoder,
+        tlas: &GpuTlasBuffers,
+        pool: &GpuBlasPool,
+        rays: &[Ray],
+        mode: u32,
+    ) -> TlasDispatchResources {
+        let ray_count = rays.len() as u32;
+        let ray_words = pack_rays(rays);
+        let resources = TlasDispatchResources::new(device, tlas, pool, &ray_words, ray_count, mode);
+        if ray_count > 0 {
+            let bind_group = tlas_dispatch_bind_group(device, &self.pipelines.tlas, &resources);
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("prism_rt_tlas_dispatch"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.tlas);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(ray_count.div_ceil(RAYTRACE_WORKGROUP), 1, 1);
+        }
+        resources
     }
 
     /// Returns the ray-cone footprint / texture-`LOD` result for every request,

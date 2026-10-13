@@ -27,9 +27,7 @@ pub mod signing;
 
 pub use mitigation::{Mitigation, MitigationStatus};
 pub use sandbox::{Access, SandboxCapabilities, SandboxModel};
-pub use signing::{
-    IntegrityPolicy, LoadDecision, RejectReason, SigningStatus, SigningStrictness,
-};
+pub use signing::{IntegrityPolicy, LoadDecision, RejectReason, SigningStatus, SigningStrictness};
 
 /// The number of modeled mitigations (see [`Mitigation::ALL`]).
 pub const MITIGATION_COUNT: usize = Mitigation::ALL.len();

@@ -143,8 +143,16 @@ fn n1_n2(classes: &mut [BidiClass], e: BidiClass, sos: BidiClass, eos: BidiClass
         while i < n && classes[i].is_neutral_or_isolate() {
             i += 1;
         }
-        let before = if start == 0 { sos } else { boundary_dir(classes[start - 1]) };
-        let after = if i == n { eos } else { boundary_dir(classes[i]) };
+        let before = if start == 0 {
+            sos
+        } else {
+            boundary_dir(classes[start - 1])
+        };
+        let after = if i == n {
+            eos
+        } else {
+            boundary_dir(classes[i])
+        };
         // N1: identical surrounding strong directions win; otherwise N2 uses the
         // embedding direction.
         let resolved = if before == after { before } else { e };

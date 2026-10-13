@@ -104,9 +104,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with_state(InteractionState::Hover, StyleProp::Color, tok("color.tint")),
     );
 
-    sheet.insert(
-        Class::new("is-copied").with(StyleProp::Color, tok("color.tint")),
-    );
+    sheet.insert(Class::new("is-copied").with(StyleProp::Color, tok("color.tint")));
 }
 
 /// Alias: `Clipboard` names the copy-to-clipboard affordance.

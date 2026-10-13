@@ -276,7 +276,11 @@ mod tests {
         let mut m = PowerMoments::new(0.0, 1.0);
         m.add_fragment(0.5, 0.75);
         // Well in front: almost no absorbance -> transmittance ~ 1.
-        assert!(m.transmittance4(0.05) > 0.9, "front={}", m.transmittance4(0.05));
+        assert!(
+            m.transmittance4(0.05) > 0.9,
+            "front={}",
+            m.transmittance4(0.05)
+        );
         // Well behind: full absorbance -> transmittance ~ (1-alpha)=0.25.
         let behind = m.transmittance4(0.95);
         assert!(approx(behind, 0.25, 0.1), "behind={behind}");

@@ -9,6 +9,9 @@
 use crate::measured_brdf::MeasuredBrdf;
 use prism_render_material::{DynamicChannels, GpuMaterialHeader, GpuSurfaceParameters};
 
+use crate::gi::area_light::ltc_lut::LtcLut;
+use crate::gi::area_light::representative::rect_representative_sample;
+use crate::gi::area_light::resolve::{accumulate_area_lights, AreaLightRect};
 use crate::{
     apply_tangent_space_normal, classify_material_header, evaluate_image_based_light,
     reconstruct_surface, sample_material, ClassificationError, DirectLightSample,
@@ -17,9 +20,6 @@ use crate::{
     SurfaceReconstructionError, SurfaceReconstructionFlags, SurfaceReconstructionInput,
     SurfaceSample, TangentBasis, VisibilityPixel,
 };
-use crate::gi::area_light::ltc_lut::LtcLut;
-use crate::gi::area_light::resolve::{accumulate_area_lights, AreaLightRect};
-use crate::gi::area_light::representative::rect_representative_sample;
 
 /// Identity `world_from_local` (row-major affine) used when an instance carries
 /// no transform; lifting a local-space surface through it is a no-op.
@@ -489,7 +489,10 @@ pub fn resolve_pixel(
     // the full-quality tiers both factors are the exact identity.
     let lobe_factors = crate::lobe_sampling::select_expensive_lobe_factors(
         input.lobe_sampling.policy,
-        [input.parameters.glint_weight, input.parameters.measured_weight],
+        [
+            input.parameters.glint_weight,
+            input.parameters.measured_weight,
+        ],
         input.lobe_sampling.pixel,
         input.lobe_sampling.frame_index,
         0,
@@ -514,8 +517,13 @@ pub fn resolve_pixel(
     // response added once per physically based lobe, mirroring
     // `accumulate_area_lights` in `shading_resolve.wesl`. The default
     // `area: &[]` keeps every existing golden bit-for-bit stable.
-    let area_light_term =
-        accumulate_area_lights(&lit_surface, frame, geometry.position, lights.area, lights.ltc_lut);
+    let area_light_term = accumulate_area_lights(
+        &lit_surface,
+        frame,
+        geometry.position,
+        lights.area,
+        lights.ltc_lut,
+    );
 
     // §17.6 measured (tabulated) BRDF lobe: an additive, table-driven specular
     // response evaluated per light. Zero weight, an unbound table, a
@@ -596,8 +604,7 @@ pub fn resolve_pixel(
             }
         }
         for light in lights.area {
-            if let Some(sample) =
-                rect_representative_sample(geometry.position, frame.normal, light)
+            if let Some(sample) = rect_representative_sample(geometry.position, frame.normal, light)
             {
                 accumulated = add(
                     accumulated,
@@ -673,8 +680,7 @@ pub fn resolve_pixel(
             }
         }
         for light in lights.area {
-            if let Some(sample) =
-                rect_representative_sample(geometry.position, frame.normal, light)
+            if let Some(sample) = rect_representative_sample(geometry.position, frame.normal, light)
             {
                 accumulated = add(
                     accumulated,
@@ -706,8 +712,7 @@ pub fn resolve_pixel(
             }
         }
         for light in lights.area {
-            if let Some(sample) =
-                rect_representative_sample(geometry.position, frame.normal, light)
+            if let Some(sample) = rect_representative_sample(geometry.position, frame.normal, light)
             {
                 accumulated = add(
                     accumulated,
@@ -880,12 +885,9 @@ mod tests {
             area: &[],
             ltc_lut: None,
         };
-        let resolved = resolve_pixel(
-            base_input(&primitives, &vertices, header, parameters),
-            dark,
-        )
-        .unwrap()
-        .color;
+        let resolved = resolve_pixel(base_input(&primitives, &vertices, header, parameters), dark)
+            .unwrap()
+            .color;
         for (channel, want) in [4.0_f32, 2.0, 1.0].iter().enumerate() {
             assert!(
                 (resolved[channel] - want).abs() < 1.0e-6,
@@ -964,9 +966,6 @@ mod tests {
             world_from_local: IDENTITY_WORLD_FROM_LOCAL,
         }
     }
-
-
-
 
     #[test]
     fn single_lobe_sampling_converges_to_the_full_evaluation_under_taa() {
@@ -1122,7 +1121,12 @@ mod tests {
         // is bound and ignored, exactly like a material that never authors it.
         let mut inert_parameters = parameters;
         inert_parameters.measured_weight = 0.0;
-        let mut input = base_input(&primitives, &vertices, principled_header(), inert_parameters);
+        let mut input = base_input(
+            &primitives,
+            &vertices,
+            principled_header(),
+            inert_parameters,
+        );
         input.measured_brdf = Some(&table);
         let inert = resolve_pixel(
             input,
@@ -1241,7 +1245,8 @@ mod tests {
         let intact_emissive = resolve_emissive(principled_header());
         let mut dissolve_header = principled_header();
         // Sit the pixel on the cut line: coverage 0.5 is where the rim peaks.
-        dissolve_header.dynamic_dissolve = (mask - 0.5 * crate::dynamic::DISSOLVE_EDGE_WIDTH).to_bits();
+        dissolve_header.dynamic_dissolve =
+            (mask - 0.5 * crate::dynamic::DISSOLVE_EDGE_WIDTH).to_bits();
         let rimmed = resolve_emissive(dissolve_header);
         assert!(
             rimmed.iter().zip(&intact_emissive).all(|(a, b)| a > b),
@@ -2040,12 +2045,9 @@ mod tests {
             area: &[],
             ltc_lut: None,
         };
-        let baseline = resolve_pixel(
-            base_input(&primitives, &vertices, header, parameters),
-            dark,
-        )
-        .unwrap()
-        .color;
+        let baseline = resolve_pixel(base_input(&primitives, &vertices, header, parameters), dark)
+            .unwrap()
+            .color;
         for c in 0..3 {
             assert!(
                 baseline[c].abs() < 1.0e-6,

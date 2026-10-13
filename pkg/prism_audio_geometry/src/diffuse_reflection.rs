@@ -552,11 +552,15 @@ mod tests {
     }
 
     fn empty_scene() -> AcousticScene {
-        AcousticScene::new(vec![], vec![], MaterialTable::uniform(BandedAcousticMaterial::new(
-            BandGains::SILENT,
-            BandGains::SILENT,
-            0.0,
-        )))
+        AcousticScene::new(
+            vec![],
+            vec![],
+            MaterialTable::uniform(BandedAcousticMaterial::new(
+                BandGains::SILENT,
+                BandGains::SILENT,
+                0.0,
+            )),
+        )
         .expect("empty scene builds")
     }
 
@@ -662,20 +666,10 @@ mod tests {
         let config = GeometricConfig::new(48_000);
         let listener = listener_at(Vec3::new(-4.0, 2.0, 0.0));
         let emitter = emitter_at(Vec3::new(4.0, 2.0, 0.0));
-        let full = resolve_diffuse_reflections(
-            &rough_floor(0.9, 0.5),
-            &listener,
-            &emitter,
-            &config,
-            8.0,
-        );
-        let half = resolve_diffuse_reflections(
-            &half_floor(0.9, 0.5),
-            &listener,
-            &emitter,
-            &config,
-            8.0,
-        );
+        let full =
+            resolve_diffuse_reflections(&rough_floor(0.9, 0.5), &listener, &emitter, &config, 8.0);
+        let half =
+            resolve_diffuse_reflections(&half_floor(0.9, 0.5), &listener, &emitter, &config, 8.0);
         assert!(full.contributing_surfaces >= half.contributing_surfaces);
         assert!(full.broadband_gain >= half.broadband_gain - EPS);
     }
@@ -685,20 +679,10 @@ mod tests {
         let config = GeometricConfig::new(48_000);
         let listener = listener_at(Vec3::new(-4.0, 2.0, 0.0));
         let emitter = emitter_at(Vec3::new(4.0, 2.0, 0.0));
-        let rough = resolve_diffuse_reflections(
-            &rough_floor(0.9, 0.9),
-            &listener,
-            &emitter,
-            &config,
-            8.0,
-        );
-        let smooth = resolve_diffuse_reflections(
-            &rough_floor(0.9, 0.1),
-            &listener,
-            &emitter,
-            &config,
-            8.0,
-        );
+        let rough =
+            resolve_diffuse_reflections(&rough_floor(0.9, 0.9), &listener, &emitter, &config, 8.0);
+        let smooth =
+            resolve_diffuse_reflections(&rough_floor(0.9, 0.1), &listener, &emitter, &config, 8.0);
         assert!(rough.broadband_gain > smooth.broadband_gain);
     }
 
@@ -727,8 +711,7 @@ mod tests {
             + Vec3::new(-10.0, 0.0, 10.0)
             + Vec3::new(10.0, 0.0, 10.0))
             / 3.0;
-        let expected = (listener.position.distance(centroid)
-            + emitter.position.distance(centroid))
+        let expected = (listener.position.distance(centroid) + emitter.position.distance(centroid))
             / SPEED_OF_SOUND_MPS;
         assert!((field.mean_delay_seconds - expected).abs() < 1.0e-4);
     }
@@ -830,8 +813,7 @@ mod tests {
             + Vec3::new(-10.0, 0.0, 10.0)
             + Vec3::new(10.0, 0.0, 10.0))
             / 3.0;
-        let expected = (listener.position.distance(centroid)
-            + emitter.position.distance(centroid))
+        let expected = (listener.position.distance(centroid) + emitter.position.distance(centroid))
             / SPEED_OF_SOUND_MPS;
         assert!((response.onset_seconds - expected).abs() < 1.0e-4);
     }

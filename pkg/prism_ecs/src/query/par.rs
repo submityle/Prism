@@ -159,7 +159,12 @@ unsafe fn run_batch<D, F, Func>(
         // the precondition of `init_fetch_for_chunk`.
         let fetch = unsafe {
             D::init_fetch_for_chunk(
-                data_state, archetype, sparse_sets, last_run, this_run, chunk,
+                data_state,
+                archetype,
+                sparse_sets,
+                last_run,
+                this_run,
+                chunk,
             )
         };
         for (offset, &entity) in entities[start..end].iter().enumerate() {
@@ -393,13 +398,7 @@ pub(crate) unsafe fn par_chunks_raw<D, Func>(
                 // accesses — including the per-chunk version stamps — never
                 // alias any sibling task's.
                 unsafe {
-                    run_chunk_batch::<D, Func>(
-                        send_world.get(),
-                        data_state,
-                        batch,
-                        this_run,
-                        func,
-                    );
+                    run_chunk_batch::<D, Func>(send_world.get(), data_state, batch, this_run, func);
                 }
             });
         }

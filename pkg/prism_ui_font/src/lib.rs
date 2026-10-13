@@ -291,7 +291,10 @@ mod tests {
 
     #[test]
     fn known_letters_resolve_in_range() {
-        assert!(core::ptr::eq(glyph('A'), &FONT[('A' as u8 - FIRST) as usize]));
+        assert!(core::ptr::eq(
+            glyph('A'),
+            &FONT[('A' as u8 - FIRST) as usize]
+        ));
         assert!(core::ptr::eq(glyph(' '), &FONT[0]));
         assert!(core::ptr::eq(glyph('~'), &FONT[FONT.len() - 1]));
     }

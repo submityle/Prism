@@ -340,10 +340,7 @@ mod tests {
         assert_eq!(e.live_bytes(), 4 * 32);
         assert_eq!(e.allocated_bytes(), e.capacity() * 32);
         assert_eq!(e.wasted_bytes(), e.free_slots() * 32);
-        assert_eq!(
-            e.allocated_bytes(),
-            e.live_bytes() + e.wasted_bytes()
-        );
+        assert_eq!(e.allocated_bytes(), e.live_bytes() + e.wasted_bytes());
         assert_eq!(report.total_live_bytes, 4 * 32);
 
         // A 32-byte row fits 512 rows in a 16 KiB target chunk, fully packed.
@@ -385,8 +382,16 @@ mod tests {
 
         // Both widths are represented with their true element sizes, and live
         // payload tracks width even though wasted payload is slot-count driven.
-        let wide = report.entries.iter().find(|e| e.bytes_per_row == 32).unwrap();
-        let narrow = report.entries.iter().find(|e| e.bytes_per_row == 1).unwrap();
+        let wide = report
+            .entries
+            .iter()
+            .find(|e| e.bytes_per_row == 32)
+            .unwrap();
+        let narrow = report
+            .entries
+            .iter()
+            .find(|e| e.bytes_per_row == 1)
+            .unwrap();
         assert_eq!(wide.live_bytes(), 32);
         assert_eq!(narrow.live_bytes(), 1);
 

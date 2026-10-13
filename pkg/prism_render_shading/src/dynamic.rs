@@ -34,8 +34,8 @@
 //!
 //! Mirrored by `shaders/dynamic.wesl`.
 
-use crate::lobe_sampling::{lobe_hash_combine, lobe_hash_u32, lobe_uniform_from_hash};
 use crate::lighting::SurfaceSample;
+use crate::lobe_sampling::{lobe_hash_combine, lobe_hash_u32, lobe_uniform_from_hash};
 use prism_render_material::DynamicChannels;
 
 /// Relative darkening of the base colour under a full water film.
@@ -116,8 +116,11 @@ pub fn apply_dynamic_channels(
             *channel *= mix(1.0, WET_BASE_DARKEN, wetness);
         }
         surface.diffuse_roughness = mix(surface.diffuse_roughness, 0.0, wetness);
-        surface.perceptual_roughness =
-            mix(surface.perceptual_roughness, surface.perceptual_roughness * WET_ROUGHNESS_SCALE, wetness);
+        surface.perceptual_roughness = mix(
+            surface.perceptual_roughness,
+            surface.perceptual_roughness * WET_ROUGHNESS_SCALE,
+            wetness,
+        );
         surface.specular_weight = mix(surface.specular_weight, 1.0, wetness);
         surface.specular_ior = mix(surface.specular_ior, WATER_IOR, wetness);
         surface.sheen *= 1.0 - wetness;
@@ -130,8 +133,7 @@ pub fn apply_dynamic_channels(
         }
         surface.metallic = mix(surface.metallic, 0.0, snow);
         surface.perceptual_roughness = mix(surface.perceptual_roughness, SNOW_ROUGHNESS, snow);
-        surface.diffuse_roughness =
-            mix(surface.diffuse_roughness, SNOW_DIFFUSE_ROUGHNESS, snow);
+        surface.diffuse_roughness = mix(surface.diffuse_roughness, SNOW_DIFFUSE_ROUGHNESS, snow);
         surface.specular_weight = mix(surface.specular_weight, SNOW_SPECULAR_WEIGHT, snow);
         surface.sheen = mix(surface.sheen, SNOW_SHEEN, snow);
     }
@@ -321,7 +323,10 @@ mod tests {
             },
             cell,
         );
-        assert!(rimmed.emissive[0] > base.emissive[0], "the cut line must glow");
+        assert!(
+            rimmed.emissive[0] > base.emissive[0],
+            "the cut line must glow"
+        );
 
         // Fully dissolved: no coverage, so no rim either.
         let mut gone = base;

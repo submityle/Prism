@@ -27,11 +27,7 @@ impl Image {
     ///
     /// Fails when the description and the data disagree (see [`ImageError`]) —
     /// the renderer never sees an image it cannot upload faithfully.
-    pub fn new(
-        extent: Extent3d,
-        format: TextureFormat,
-        data: Vec<u8>,
-    ) -> Result<Self, ImageError> {
+    pub fn new(extent: Extent3d, format: TextureFormat, data: Vec<u8>) -> Result<Self, ImageError> {
         Self::with_sampler(extent, format, data, SamplerDescriptor::default())
     }
 
@@ -117,4 +113,3 @@ pub fn bytes_for(extent: Extent3d, format: TextureFormat) -> usize {
 impl Asset for Image {
     const TYPE_NAME: &'static str = "prism_image::Image";
 }
-

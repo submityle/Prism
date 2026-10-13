@@ -8,29 +8,29 @@ use prism_render_driver::{FrameSync, Instance};
 use prism_render_runtime::RenderRuntime;
 
 use crate::config::RenderAppConfig;
-use crate::device_loss::{DeviceLossSignal, poll_device_loss};
+use crate::device_loss::{poll_device_loss, DeviceLossSignal};
 use crate::intent::RenderIntent;
-use crate::mesh_pipeline::MeshPipelineSpecializer;
-use crate::material::{
-    MaterialParameterBuffers, MaterialUploadStats, RenderMaterials, sync_material_buffers,
-};
-use crate::mesh_pipelines::MeshPipelines;
-use crate::queue_stage::fill_queues;
 use crate::label::{Render, RenderApp, RenderStartup};
+use crate::material::{
+    sync_material_buffers, MaterialParameterBuffers, MaterialUploadStats, RenderMaterials,
+};
+use crate::mesh_pipeline::MeshPipelineSpecializer;
+use crate::mesh_pipelines::MeshPipelines;
 use crate::queue::RenderQueues;
+use crate::queue_stage::fill_queues;
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::scene::{SceneRegistry, VisibilityWorkList};
-use crate::sets::{RenderSystems, configure_render_sets};
-use crate::stats::RenderFrameStats;
+use crate::sets::{configure_render_sets, RenderSystems};
 use crate::startup::ensure_render_startup;
+use crate::stats::RenderFrameStats;
 use crate::systems::{
     clear_queues, drive_render_schedule, execute_frame, extract_render_record,
     pump_pipeline_compiles,
 };
 use crate::target::RenderTarget;
 use crate::texture_cache::TextureCache;
-use crate::views::{RenderViews, build_view_family};
+use crate::views::{build_view_family, RenderViews};
 
 /// Wires the RHI render runtime into a [`prism_app::App`] as a dedicated render
 /// sub-app.
@@ -196,12 +196,10 @@ where
             schedule.add_systems(build_view_family.in_set(RenderSystems::CreateViews));
             // The visible set becomes this frame's queue before anything records.
             // Materials register/retire → the ABI buffers, before anything binds them.
-            schedule.add_systems(
-                sync_material_buffers::<I>.in_set(RenderSystems::PrepareResources),
-            );
-            schedule.add_systems(
-                pump_pipeline_compiles::<I>.in_set(RenderSystems::PrepareResources),
-            );
+            schedule
+                .add_systems(sync_material_buffers::<I>.in_set(RenderSystems::PrepareResources));
+            schedule
+                .add_systems(pump_pipeline_compiles::<I>.in_set(RenderSystems::PrepareResources));
             schedule.add_systems(fill_queues::<I>.in_set(RenderSystems::Queue));
             schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));
             schedule.add_systems(clear_queues.in_set(RenderSystems::Cleanup));

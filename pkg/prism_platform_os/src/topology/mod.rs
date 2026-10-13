@@ -85,11 +85,9 @@ mod macos_arm {
             let mut in_domain: u64 = 0;
             for _ in 0..count {
                 builder = builder.core(TopologyCore::new(
-                    logical_id,
-                    logical_id, // no SMT on Apple Silicon: physical == logical.
+                    logical_id, logical_id, // no SMT on Apple Silicon: physical == logical.
                     0,          // unified memory: single NUMA node.
-                    llc_domain,
-                    kind,
+                    llc_domain, kind,
                 ));
                 logical_id += 1;
                 in_domain += 1;

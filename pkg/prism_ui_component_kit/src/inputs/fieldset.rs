@@ -135,7 +135,10 @@ mod tests {
     #[test]
     fn disabled_adds_modifier() {
         let el = Fieldset.render(&FieldsetProps::new("X").disabled(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-fieldset--disabled"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-fieldset--disabled"));
     }
 
     #[test]

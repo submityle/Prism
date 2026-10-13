@@ -280,7 +280,10 @@ fn contact_voice_render_is_deterministic() {
     let a = render_impact_voice(0xABCD);
     let b = render_impact_voice(0xABCD);
     assert_eq!(a, b, "same seed and input must yield bit-identical output");
-    assert!(peak(&a) > 1.0e-3, "the deterministic strike must be audible");
+    assert!(
+        peak(&a) > 1.0e-3,
+        "the deterministic strike must be audible"
+    );
 }
 
 #[test]
@@ -467,5 +470,8 @@ fn soundscape_gates_output_via_cap_and_spatial_filter() {
             .process(&outdoor_palette, indoors, 4800, &null)
             .len();
     }
-    assert_eq!(indoor_total, 0, "an outdoor-only element must be silent indoors");
+    assert_eq!(
+        indoor_total, 0,
+        "an outdoor-only element must be silent indoors"
+    );
 }

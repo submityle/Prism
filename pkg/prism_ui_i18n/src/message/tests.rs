@@ -34,14 +34,20 @@ fn missing_argument_left_verbatim() {
 #[test]
 fn escaped_braces() {
     let args = Args::new().with("sym", "x");
-    assert_eq!(render("Use {{ and }} like {sym}.", &args), "Use { and } like x.");
+    assert_eq!(
+        render("Use {{ and }} like {sym}.", &args),
+        "Use { and } like x."
+    );
 }
 
 #[test]
 fn select_gender() {
     let pattern = "{gender, select, male {he} female {she} other {they}}";
     assert_eq!(render(pattern, &Args::new().with("gender", "male")), "he");
-    assert_eq!(render(pattern, &Args::new().with("gender", "female")), "she");
+    assert_eq!(
+        render(pattern, &Args::new().with("gender", "female")),
+        "she"
+    );
     assert_eq!(render(pattern, &Args::new().with("gender", "nb")), "they");
     // A missing select argument falls back to the `other` arm.
     assert_eq!(render(pattern, &Args::new()), "they");
@@ -71,19 +77,26 @@ fn plural_offset_adjusts_pound_and_keyword() {
     // =1 matches the original value before offset.
     assert_eq!(render(pattern, &Args::new().with("count", 1)), "You");
     // value 2 → adjusted 1 → `one`, `#` renders 1.
-    assert_eq!(render(pattern, &Args::new().with("count", 2)), "You and 1 other");
+    assert_eq!(
+        render(pattern, &Args::new().with("count", 2)),
+        "You and 1 other"
+    );
     // value 5 → adjusted 4 → `other`, `#` renders 4.
-    assert_eq!(render(pattern, &Args::new().with("count", 5)), "You and 4 others");
+    assert_eq!(
+        render(pattern, &Args::new().with("count", 5)),
+        "You and 4 others"
+    );
 }
 
 #[test]
 fn selectordinal_english() {
-    let pattern =
-        "{place, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}";
+    let pattern = "{place, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}";
     let ord = |n: i64| {
-        MessagePattern::parse(pattern)
-            .expect("parse")
-            .format(&Args::new().with("place", n), PluralRules::English, "en")
+        MessagePattern::parse(pattern).expect("parse").format(
+            &Args::new().with("place", n),
+            PluralRules::English,
+            "en",
+        )
     };
     assert_eq!(ord(1), "1st");
     assert_eq!(ord(2), "2nd");
@@ -123,7 +136,10 @@ fn pound_literal_inside_select() {
 fn non_numeric_plural_argument_falls_back_to_zero() {
     let pattern = "{count, plural, one {# file} other {# files}}";
     // A string value is not a number → treated as 0 → `other`.
-    assert_eq!(render(pattern, &Args::new().with("count", "oops")), "0 files");
+    assert_eq!(
+        render(pattern, &Args::new().with("count", "oops")),
+        "0 files"
+    );
 }
 
 #[test]

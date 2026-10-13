@@ -229,10 +229,7 @@ pub fn configure_render_sets(schedule: &mut Schedule) {
         ] {
             schedule.configure_set(phase, SetConfig::new().after(prepared));
         }
-        schedule.configure_set(
-            phase,
-            SetConfig::new().before(RenderSystems::Cleanup),
-        );
+        schedule.configure_set(phase, SetConfig::new().before(RenderSystems::Cleanup));
     }
 }
 
@@ -303,6 +300,9 @@ impl SystemSet for RenderGraphSet {
 /// schedule that owns the node systems.
 pub fn configure_render_graph_sets(schedule: &mut Schedule) {
     prism_render_graph::configure_render_graph_sets(|before, after| {
-        schedule.configure_set(RenderGraphSet(after), SetConfig::new().after(RenderGraphSet(before)));
+        schedule.configure_set(
+            RenderGraphSet(after),
+            SetConfig::new().after(RenderGraphSet(before)),
+        );
     });
 }

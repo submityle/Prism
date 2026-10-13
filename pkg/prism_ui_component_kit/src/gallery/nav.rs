@@ -8,10 +8,11 @@ use prism_ui_component::mount_component;
 use super::Showcase;
 use crate::nav::{
     Affix, AffixProps, Anchor, AnchorLink, AnchorProps, BackTop, BackTopProps, Breadcrumb,
-    BreadcrumbItem, BreadcrumbProps, Drawer, DrawerProps, DrawerSide, Menu, MenuEntry, MenuProps,
-    NavBar, NavBarProps, Pagination, PaginationProps, SegmentedControl, SegmentedControlProps,
-    Sidebar, SidebarItem, SidebarProps, StatusBar, StatusBarProps, StepItem, Steps, StepsProps,
-    EditMenu, EditMenuItem, EditMenuProps, TabBar, TabBarItem, TabBarProps, Toolbar, ToolbarProps,
+    BreadcrumbItem, BreadcrumbProps, Drawer, DrawerProps, DrawerSide, EditMenu, EditMenuItem,
+    EditMenuProps, Menu, MenuEntry, MenuProps, NavBar, NavBarProps, Pagination, PaginationProps,
+    SegmentedControl, SegmentedControlProps, Sidebar, SidebarItem, SidebarProps, StatusBar,
+    StatusBarProps, StepItem, Steps, StepsProps, TabBar, TabBarItem, TabBarProps, Toolbar,
+    ToolbarProps,
 };
 
 /// Real, named instances of every `nav` control.

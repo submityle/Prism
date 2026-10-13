@@ -88,9 +88,8 @@ pub fn flatten_arc(
         return vec![center];
     }
 
-    let sample = |ang: f64| -> (f32, f32) {
-        ((cx + r * ang.cos()) as f32, (cy + r * ang.sin()) as f32)
-    };
+    let sample =
+        |ang: f64| -> (f32, f32) { ((cx + r * ang.cos()) as f32, (cy + r * ang.sin()) as f32) };
 
     if sweep == 0.0 {
         return vec![sample(a0)];
@@ -155,7 +154,10 @@ mod tests {
     fn vertices_on_circle() {
         let mut state = 0x0_B0B1_u64;
         for _ in 0..300 {
-            let center = (rand_in(&mut state, -20.0, 20.0) as f32, rand_in(&mut state, -20.0, 20.0) as f32);
+            let center = (
+                rand_in(&mut state, -20.0, 20.0) as f32,
+                rand_in(&mut state, -20.0, 20.0) as f32,
+            );
             let radius = rand_in(&mut state, 0.5, 50.0) as f32;
             let start = rand_in(&mut state, -PI, PI) as f32;
             let sweep = rand_in(&mut state, -2.0 * PI, 2.0 * PI) as f32;
@@ -177,7 +179,10 @@ mod tests {
     fn endpoints_exact() {
         let mut state = 0x1234_ABCD_u64;
         for _ in 0..300 {
-            let center = (rand_in(&mut state, -10.0, 10.0) as f32, rand_in(&mut state, -10.0, 10.0) as f32);
+            let center = (
+                rand_in(&mut state, -10.0, 10.0) as f32,
+                rand_in(&mut state, -10.0, 10.0) as f32,
+            );
             let radius = rand_in(&mut state, 0.5, 30.0) as f32;
             let start = rand_in(&mut state, -PI, PI) as f32;
             let sweep = rand_in(&mut state, -2.0 * PI, 2.0 * PI) as f32;
@@ -200,7 +205,10 @@ mod tests {
     fn chord_error_within_tolerance() {
         let mut state = 0xDEAD_BEEF_u64;
         for _ in 0..300 {
-            let center = (rand_in(&mut state, -15.0, 15.0) as f32, rand_in(&mut state, -15.0, 15.0) as f32);
+            let center = (
+                rand_in(&mut state, -15.0, 15.0) as f32,
+                rand_in(&mut state, -15.0, 15.0) as f32,
+            );
             let radius = rand_in(&mut state, 1.0, 40.0) as f32;
             let start = rand_in(&mut state, -PI, PI) as f32;
             let sweep = rand_in(&mut state, -2.0 * PI, 2.0 * PI) as f32;
@@ -252,7 +260,10 @@ mod tests {
                 continue;
             }
             // n chords satisfy the bound (allow a hair of f64 slack).
-            assert!(sagitta(r, span / f64::from(n)) <= t + 1e-9, "n={n} violates bound");
+            assert!(
+                sagitta(r, span / f64::from(n)) <= t + 1e-9,
+                "n={n} violates bound"
+            );
             // n - 1 chords (if any) would violate it: proves minimality.
             if n > 1 {
                 assert!(
@@ -294,8 +305,14 @@ mod tests {
         let pts = flatten_arc((0.0, 0.0), 1.0, 0.0, (PI / 2.0) as f32, 0.1);
         let first = pts.first().copied().unwrap();
         let last = pts.last().copied().unwrap();
-        assert!((first.0 - 1.0).abs() <= 1e-6 && first.1.abs() <= 1e-6, "start {first:?}");
-        assert!(last.0.abs() <= 1e-6 && (last.1 - 1.0).abs() <= 1e-6, "end {last:?}");
+        assert!(
+            (first.0 - 1.0).abs() <= 1e-6 && first.1.abs() <= 1e-6,
+            "start {first:?}"
+        );
+        assert!(
+            last.0.abs() <= 1e-6 && (last.1 - 1.0).abs() <= 1e-6,
+            "end {last:?}"
+        );
     }
 
     /// Degenerate inputs: zero radius -> centre point; zero sweep -> start point.

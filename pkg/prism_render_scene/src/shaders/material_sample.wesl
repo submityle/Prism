@@ -67,6 +67,7 @@ const NORMAL_EPSILON: f32 = 1e-12;
 // Material-VT production ABI. Bindings 5-8 deliberately extend the existing
 // material group without moving the bindless arrays: the parent integration
 // supplies these resources, including valid dummy resources when disabled.
+@group(1) @binding(5) var<storage, read> material_vt_page_table: array<u32>;
 @group(1) @binding(6) var<storage, read> material_vt_config: MaterialVirtualTextureConfig;
 @group(1) @binding(7) var material_vt_atlas: texture_2d_array<f32>;
 @group(1) @binding(8) var material_vt_sampler: sampler;

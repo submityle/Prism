@@ -121,9 +121,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Open: slightly roomier spacing when the dial is expanded.
-    sheet.insert(
-        Class::new("pk-float-button--open").with(StyleProp::Gap, tok("space.md")),
-    );
+    sheet.insert(Class::new("pk-float-button--open").with(StyleProp::Gap, tok("space.md")));
 
     // Trigger: the hero glass circle.
     sheet.insert(
@@ -137,8 +135,16 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Color, tok("color.label"))
             .with_glass(0.0, tok("glass.tint"), Some(tok("glass.highlight")))
             .with_shadow(0.0, 8.0, 24.0, tok("glass.shadow"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.94))
-            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.84)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.94),
+            )
+            .with_state(
+                InteractionState::Pressed,
+                StyleProp::Opacity,
+                StyleValue::number(0.84),
+            ),
     );
 
     // Action: a smaller secondary glass pill revealed on expand.
@@ -175,13 +181,19 @@ mod tests {
         assert!(el.class_names().iter().any(|c| c == "pk-float-button"));
         let trigger = el.child_elements();
         let trigger = trigger.last().unwrap();
-        assert!(trigger.class_names().iter().any(|c| c == "pk-float-button__trigger"));
+        assert!(trigger
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-float-button__trigger"));
     }
 
     #[test]
     fn open_adds_modifier_class() {
         let el = render(FloatButtonProps::new().open(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-float-button--open"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-float-button--open"));
     }
 
     #[test]
@@ -194,9 +206,18 @@ mod tests {
         );
         let kids = el.child_elements();
         assert_eq!(kids.len(), 3);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-float-button__action"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-float-button__action"));
-        assert!(kids[2].class_names().iter().any(|c| c == "pk-float-button__trigger"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-float-button__action"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-float-button__action"));
+        assert!(kids[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-float-button__trigger"));
     }
 
     #[test]
@@ -204,7 +225,10 @@ mod tests {
         let el = render(FloatButtonProps::new().icon(Element::box_().class("plus")));
         let trigger = el.child_elements();
         let trigger = trigger.last().unwrap();
-        assert!(trigger.child_elements()[0].class_names().iter().any(|c| c == "plus"));
+        assert!(trigger.child_elements()[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "plus"));
     }
 
     #[test]

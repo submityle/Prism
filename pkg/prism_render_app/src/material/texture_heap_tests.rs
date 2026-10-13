@@ -1,11 +1,11 @@
 //! Behavioural tests for the bindless texture slot heap.
 
+use crate::material::texture_heap::{
+    BindlessSlot, TextureFallback, TextureSlotHeap, BLACK_SLOT, FIRST_DYNAMIC_SLOT,
+    FLAT_NORMAL_SLOT, RESERVED_GENERATION, WHITE_SLOT,
+};
 use prism_asset::{AssetId, AssetIndex};
 use prism_image::Image;
-use crate::material::texture_heap::{
-    BindlessSlot, BLACK_SLOT, FIRST_DYNAMIC_SLOT, FLAT_NORMAL_SLOT, RESERVED_GENERATION,
-    TextureFallback, TextureSlotHeap, WHITE_SLOT,
-};
 
 fn image(tag: u32) -> AssetId<Image> {
     AssetId::new(AssetIndex::from_parts(tag, 1))
@@ -123,7 +123,10 @@ fn capacity_exhaustion_falls_back_to_white_and_counts_the_overflow() {
     let overflow = heap.acquire(image(2));
     assert_eq!(overflow, BindlessSlot::WHITE);
     assert_eq!(heap.stats().overflow, 1);
-    assert!(!heap.release(image(2)), "the overflowed image is not tracked");
+    assert!(
+        !heap.release(image(2)),
+        "the overflowed image is not tracked"
+    );
     assert_eq!(heap.refcount(image(2)), 0);
 
     assert!(heap.release(image(1)));
@@ -153,7 +156,10 @@ fn iter_slots_yields_every_resident_image_in_a_deterministic_order() {
     let slots: Vec<(u32, AssetId<Image>)> = heap.iter_slots().collect();
     assert_eq!(slots.len(), 3);
     assert!(slots.iter().all(|(slot, _)| *slot >= FIRST_DYNAMIC_SLOT));
-    let images: Vec<u32> = slots.iter().map(|(_, image)| image.index().index()).collect();
+    let images: Vec<u32> = slots
+        .iter()
+        .map(|(_, image)| image.index().index())
+        .collect();
     assert_eq!(images, vec![10, 20, 30], "ordered by image identity");
     // Slots follow *acquisition* order (30 → 3, 10 → 4, 20 → 5), so iterating by
     // image identity yields them out of order — which is what makes the order
@@ -183,6 +189,10 @@ fn resetting_the_capacity_requires_an_empty_heap() {
     heap.release(image(1));
     heap.reset_with_capacity(FIRST_DYNAMIC_SLOT + 32);
     assert_eq!(heap.capacity(), FIRST_DYNAMIC_SLOT + 32);
-    assert_eq!(heap.high_water(), FIRST_DYNAMIC_SLOT, "residency is discarded");
+    assert_eq!(
+        heap.high_water(),
+        FIRST_DYNAMIC_SLOT,
+        "residency is discarded"
+    );
     assert_eq!(heap.stats().live_images, 0);
 }

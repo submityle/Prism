@@ -235,8 +235,16 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
             .with(StyleProp::BackgroundColor, tok("color.fill"))
             .with(StyleProp::Color, tok("color.label"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.9))
-            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.78)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.9),
+            )
+            .with_state(
+                InteractionState::Pressed,
+                StyleProp::Opacity,
+                StyleValue::number(0.78),
+            ),
     );
     // Play/pause glyph swap is a backend concern keyed off these markers.
     sheet.insert(Class::new("pk-video__play--playing"));
@@ -271,8 +279,16 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Width, StyleValue::px(24.0))
             .with(StyleProp::Height, StyleValue::px(24.0))
             .with(StyleProp::Color, tok("color.label.secondary"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.9))
-            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.78)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.9),
+            )
+            .with_state(
+                InteractionState::Pressed,
+                StyleProp::Opacity,
+                StyleValue::number(0.78),
+            ),
     );
 }
 
@@ -333,7 +349,10 @@ mod tests {
         assert_eq!(el.class_names(), ["pk-video", "pk-video--playing"]);
         let controls = controls_bar(&el).expect("control bar");
         let play = &controls.child_elements()[0];
-        assert_eq!(play.class_names(), ["pk-video__play", "pk-video__play--playing"]);
+        assert_eq!(
+            play.class_names(),
+            ["pk-video__play", "pk-video__play--playing"]
+        );
     }
 
     #[test]
@@ -341,7 +360,10 @@ mod tests {
         let el = render(VideoProps::new());
         let controls = controls_bar(&el).expect("control bar");
         let play = &controls.child_elements()[0];
-        assert_eq!(play.class_names(), ["pk-video__play", "pk-video__play--paused"]);
+        assert_eq!(
+            play.class_names(),
+            ["pk-video__play", "pk-video__play--paused"]
+        );
     }
 
     #[test]
@@ -352,13 +374,24 @@ mod tests {
 
     #[test]
     fn progress_width_clamps_and_guards_zero_duration() {
-        assert!((fill_width(&render(VideoProps::new().current(10.0).duration(0.0))) - 0.0).abs() < f32::EPSILON);
-        assert!((fill_width(&render(VideoProps::new().current(99.0).duration(10.0))) - 100.0).abs() < f32::EPSILON);
+        assert!(
+            (fill_width(&render(VideoProps::new().current(10.0).duration(0.0))) - 0.0).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (fill_width(&render(VideoProps::new().current(99.0).duration(10.0))) - 100.0).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
     fn carries_source_and_poster_into_surface() {
-        let el = render(VideoProps::new().source("clip.mp4").poster("frame.png").controls(false));
+        let el = render(
+            VideoProps::new()
+                .source("clip.mp4")
+                .poster("frame.png")
+                .controls(false),
+        );
         let surface = &el.child_elements()[0];
         let kids = surface.child_elements();
         assert_eq!(kids[0].class_names(), ["pk-video__source"]);

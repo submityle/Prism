@@ -82,4 +82,3 @@ impl<A: RenderAsset> RenderAssets<A> {
         self.prepared.is_empty()
     }
 }
-

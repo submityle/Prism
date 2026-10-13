@@ -55,17 +55,29 @@ pub struct Support {
 impl Support {
     /// A natively supported capability.
     pub const fn native(capability: Capability) -> Self {
-        Self { capability, level: SupportLevel::Native, detail: "" }
+        Self {
+            capability,
+            level: SupportLevel::Native,
+            detail: "",
+        }
     }
 
     /// A capability usable only through the documented degraded path `detail`.
     pub const fn degraded(capability: Capability, detail: &'static str) -> Self {
-        Self { capability, level: SupportLevel::Degraded, detail }
+        Self {
+            capability,
+            level: SupportLevel::Degraded,
+            detail,
+        }
     }
 
     /// A capability that is unavailable; `detail` explains why.
     pub const fn unsupported(capability: Capability, detail: &'static str) -> Self {
-        Self { capability, level: SupportLevel::Unsupported, detail }
+        Self {
+            capability,
+            level: SupportLevel::Unsupported,
+            detail,
+        }
     }
 
     /// Whether this capability can be used at all (native or degraded).

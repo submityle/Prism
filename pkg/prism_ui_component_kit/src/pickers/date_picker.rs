@@ -169,7 +169,8 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
 
     // Empty filler: a blank, non-interactive placeholder.
     sheet.insert(
-        Class::new("pk-calendar-grid__cell--empty").with(StyleProp::Opacity, StyleValue::number(0.0)),
+        Class::new("pk-calendar-grid__cell--empty")
+            .with(StyleProp::Opacity, StyleValue::number(0.0)),
     );
 
     // Selected: solid accent fill with a white numeral.
@@ -244,11 +245,19 @@ mod tests {
             .collect();
         let selected = cells
             .iter()
-            .filter(|c| c.class_names().iter().any(|n| n == "pk-calendar-grid__cell--selected"))
+            .filter(|c| {
+                c.class_names()
+                    .iter()
+                    .any(|n| n == "pk-calendar-grid__cell--selected")
+            })
             .count();
         let today = cells
             .iter()
-            .filter(|c| c.class_names().iter().any(|n| n == "pk-calendar-grid__cell--today"))
+            .filter(|c| {
+                c.class_names()
+                    .iter()
+                    .any(|n| n == "pk-calendar-grid__cell--today")
+            })
             .count();
         assert_eq!(selected, 1);
         assert_eq!(today, 1);

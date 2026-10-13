@@ -91,7 +91,10 @@ mod tests {
             let n = 6 + (next_rand(state) % 12) as usize;
             let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n);
             for _ in 0..n {
-                pts.push((rand_in(state, -spread, spread), rand_in(state, -spread, spread)));
+                pts.push((
+                    rand_in(state, -spread, spread),
+                    rand_in(state, -spread, spread),
+                ));
             }
             let hull = convex_hull(&pts);
             if hull.len() >= 4 {
@@ -110,7 +113,10 @@ mod tests {
             assert!(is_convex(&hull), "hull reported non-convex: {hull:?}");
             let mut rev = hull.clone();
             rev.reverse();
-            assert!(is_convex(&rev), "reversed hull reported non-convex: {rev:?}");
+            assert!(
+                is_convex(&rev),
+                "reversed hull reported non-convex: {rev:?}"
+            );
         }
     }
 

@@ -379,7 +379,7 @@ mod tests {
             (0.0, 0.0),
             (1.0, 0.0),
             vec![
-                Stop::new(2.0, Color::WHITE), // clamped to 1.0
+                Stop::new(2.0, Color::WHITE),  // clamped to 1.0
                 Stop::new(-1.0, Color::BLACK), // clamped to 0.0
             ],
         );

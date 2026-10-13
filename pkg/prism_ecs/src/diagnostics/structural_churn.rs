@@ -319,7 +319,10 @@ mod tests {
         assert_eq!(despawner.gross_entity_churn, 5);
 
         // Frame-level: net cancels, gross does not.
-        assert_eq!(profile.total_net_entity_delta, 0, "spawns and despawns cancel");
+        assert_eq!(
+            profile.total_net_entity_delta, 0,
+            "spawns and despawns cancel"
+        );
         assert_eq!(
             profile.total_gross_entity_churn, 10,
             "but ten entities were actually moved"
@@ -360,7 +363,10 @@ mod tests {
         assert_eq!(profile.system_count(), 2, "still two distinct nodes");
 
         let spawner = entry_named(&profile, &schedule, "spawner");
-        assert_eq!(spawner.gross_entity_churn, 10, "five spawned in each of two frames");
+        assert_eq!(
+            spawner.gross_entity_churn, 10,
+            "five spawned in each of two frames"
+        );
         assert_eq!(spawner.net_entity_delta, 10);
         assert_eq!(spawner.run_count, 2);
 

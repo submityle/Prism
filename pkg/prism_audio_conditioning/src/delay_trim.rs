@@ -170,7 +170,11 @@ pub fn adjust_loop_points_to_program(
 ) -> LoopPoints {
     let pre = delay.preroll_frames as usize;
     let start = points.start.saturating_sub(pre).min(program_frames);
-    let end = points.end.saturating_sub(pre).min(program_frames).max(start);
+    let end = points
+        .end
+        .saturating_sub(pre)
+        .min(program_frames)
+        .max(start);
     let length = end - start;
     let crossfade_frames = points.crossfade_frames.min(length as u32);
     LoopPoints {

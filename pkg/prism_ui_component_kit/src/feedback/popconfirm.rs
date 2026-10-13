@@ -198,7 +198,10 @@ mod tests {
         let el = render(PopconfirmProps::new("Delete?").tone(Tone::Danger));
         let bubble = bubble(&el);
         assert!(bubble.class_names().iter().any(|c| c == "pk-popconfirm"));
-        assert!(bubble.class_names().iter().any(|c| c == "pk-popconfirm--danger"));
+        assert!(bubble
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-popconfirm--danger"));
     }
 
     #[test]
@@ -210,13 +213,25 @@ mod tests {
         );
         let bubble = bubble(&el);
         let kids = bubble.child_elements();
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-popconfirm__message"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-popconfirm__message"));
         assert_eq!(kids[0].text_content(), Some("Delete this item?"));
         let actions = &kids[1];
-        assert!(actions.class_names().iter().any(|c| c == "pk-popconfirm__actions"));
+        assert!(actions
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-popconfirm__actions"));
         let buttons = actions.child_elements();
-        assert!(buttons[0].class_names().iter().any(|c| c == "pk-popconfirm__cancel"));
-        assert!(buttons[1].class_names().iter().any(|c| c == "pk-popconfirm__confirm"));
+        assert!(buttons[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-popconfirm__cancel"));
+        assert!(buttons[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-popconfirm__confirm"));
         assert_eq!(buttons[1].text_content(), Some("Delete"));
     }
 }

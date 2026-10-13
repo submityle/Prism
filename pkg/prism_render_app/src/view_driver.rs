@@ -24,7 +24,11 @@ use crate::views::{RenderView, RenderViews};
 /// afterwards: a system that runs between views (or after the loop) sees no
 /// current view at all, rather than a stale one. An existing `CurrentView` is
 /// put back, so these scopes nest.
-pub fn with_current_view<R>(world: &mut World, entity: Entity, f: impl FnOnce(&mut World) -> R) -> R {
+pub fn with_current_view<R>(
+    world: &mut World,
+    entity: Entity,
+    f: impl FnOnce(&mut World) -> R,
+) -> R {
     let previous = world.insert_resource(CurrentView(entity));
     let result = f(world);
     match previous {
@@ -53,4 +57,3 @@ pub fn for_each_view(world: &mut World, mut f: impl FnMut(&mut World, Entity, Re
         with_current_view(world, entity, |world| f(world, entity, view));
     }
 }
-

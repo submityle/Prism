@@ -92,13 +92,8 @@ impl Catalog {
     }
 
     /// Insert or replace a compiled `ICU`-style message pattern in place.
-    pub fn insert_message(
-        &mut self,
-        key: impl Into<String>,
-        pattern: MessagePattern,
-    ) -> &mut Self {
-        self.messages
-            .insert(key.into(), Message::Format(pattern));
+    pub fn insert_message(&mut self, key: impl Into<String>, pattern: MessagePattern) -> &mut Self {
+        self.messages.insert(key.into(), Message::Format(pattern));
         self
     }
 

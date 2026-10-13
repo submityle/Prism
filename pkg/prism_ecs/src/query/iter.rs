@@ -366,5 +366,4 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
             )
         });
     }
-
 }

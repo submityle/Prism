@@ -122,12 +122,12 @@ impl RelationDegreeReport {
 
             let outgoing = out_edges.len();
             let incoming = in_edges.len();
-            let out_kinds = distinct_relation_count(out_edges.iter().map(|&(relation, _)| relation));
+            let out_kinds =
+                distinct_relation_count(out_edges.iter().map(|&(relation, _)| relation));
             let in_kinds = distinct_relation_count(in_edges.iter().map(|&(relation, _)| relation));
 
             // Union breadth of kinds touched in either direction.
-            let mut union: Vec<ComponentId> =
-                Vec::with_capacity(out_edges.len() + in_edges.len());
+            let mut union: Vec<ComponentId> = Vec::with_capacity(out_edges.len() + in_edges.len());
             union.extend(out_edges.iter().map(|&(relation, _)| relation));
             union.extend(in_edges.iter().map(|&(relation, _)| relation));
             union.sort_unstable();
@@ -283,11 +283,10 @@ mod tests {
     struct EquippedBy;
     impl Component for EquippedBy {}
 
-    fn entry_of<'r>(
-        report: &'r RelationDegreeReport,
-        entity: Entity,
-    ) -> &'r RelationDegreeEntry {
-        report.entry(entity).expect("participant must have an entry")
+    fn entry_of<'r>(report: &'r RelationDegreeReport, entity: Entity) -> &'r RelationDegreeEntry {
+        report
+            .entry(entity)
+            .expect("participant must have an entry")
     }
 
     #[test]
@@ -455,7 +454,11 @@ mod tests {
         world.add_relation::<ChildOf>(b, c);
 
         let report = RelationDegreeReport::from_world(&world);
-        let bits: Vec<u64> = report.entries().iter().map(|e| e.entity.to_bits()).collect();
+        let bits: Vec<u64> = report
+            .entries()
+            .iter()
+            .map(|e| e.entity.to_bits())
+            .collect();
         let mut sorted = bits.clone();
         sorted.sort_unstable();
         assert_eq!(bits, sorted);

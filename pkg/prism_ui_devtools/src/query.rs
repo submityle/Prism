@@ -225,7 +225,11 @@ mod tests {
 
     fn random_node(state: &mut u64, depth: usize) -> SnapshotNode {
         // Two kinds, roughly balanced.
-        let kind = if next_rand(state).is_multiple_of(2) { "Box" } else { "Text" };
+        let kind = if next_rand(state).is_multiple_of(2) {
+            "Box"
+        } else {
+            "Text"
+        };
         let child_count = if depth == 0 {
             0
         } else {
@@ -239,7 +243,11 @@ mod tests {
     }
 
     // Independent pre-order enumeration of (path, kind), used as the oracle.
-    fn enumerate(node: &SnapshotNode, prefix: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, String)>) {
+    fn enumerate(
+        node: &SnapshotNode,
+        prefix: &mut Vec<usize>,
+        out: &mut Vec<(Vec<usize>, String)>,
+    ) {
         out.push((prefix.clone(), node.kind.clone()));
         for (index, child) in node.children.iter().enumerate() {
             prefix.push(index);

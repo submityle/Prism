@@ -150,7 +150,7 @@ fn glint_wesl_compiles_and_links_every_helper() {
         ),
     );
 
-    cache.get(0, link_test, &[]).unwrap_or_else(|error| {
-        panic!("glint.wesl failed to compile/link every helper: {error}")
-    });
+    cache
+        .get(0, link_test, &[])
+        .unwrap_or_else(|error| panic!("glint.wesl failed to compile/link every helper: {error}"));
 }

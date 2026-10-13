@@ -45,9 +45,9 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;
+use core::time::Duration;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Mutex;
-use core::time::Duration;
 
 use hashbrown::HashMap;
 use prism_tasks::{PriorityGroup, TaskPool};
@@ -182,7 +182,8 @@ impl MultiThreadedExecutor {
             // Collect a raw pointer to each wave member's system. Distinct
             // indices make the pointers non-aliasing; we only ever hold the raw
             // pointers (not references) across the dispatch.
-            let mut tasks: Vec<(SendSystem, bool, Tick, Tick, SystemLane)> = Vec::with_capacity(wave.len());
+            let mut tasks: Vec<(SendSystem, bool, Tick, Tick, SystemLane)> =
+                Vec::with_capacity(wave.len());
             for (slot, &idx) in wave.iter().enumerate() {
                 let system: *mut (dyn System<Out = ()> + 'static) = {
                     let boxed: &mut BoxedSystem = &mut schedule.nodes[idx].system;
@@ -190,7 +191,13 @@ impl MultiThreadedExecutor {
                 };
                 let (last_run, this_run) = windows[slot];
                 let lane = schedule.nodes[idx].lane;
-                tasks.push((SendSystem(system), should_run[slot], last_run, this_run, lane));
+                tasks.push((
+                    SendSystem(system),
+                    should_run[slot],
+                    last_run,
+                    this_run,
+                    lane,
+                ));
             }
 
             // --- Dispatch the passing bodies in parallel. The `&mut World`
@@ -223,8 +230,8 @@ impl MultiThreadedExecutor {
                         continue;
                     }
                     let rank = lane_rank(*lane);
-                    let group = groups[rank]
-                        .get_or_insert_with(|| pool.priority_group(lane.to_priority()));
+                    let group =
+                        groups[rank].get_or_insert_with(|| pool.priority_group(lane.to_priority()));
 
                     // Retarget the shared base cell to this system's own change
                     // window before wrapping it for the task.
@@ -401,7 +408,6 @@ fn eval_should_run(
 
     should_run
 }
-
 
 /// Dense `0..3` index for the three QoS lanes, in ascending urgency.
 ///

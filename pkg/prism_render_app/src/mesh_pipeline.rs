@@ -16,7 +16,7 @@ use prism_render_driver::{
 use prism_render_material::{LobeMask, SpecializationId};
 
 use crate::pipeline_cache::{
-    PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution, hash_vertex_layouts,
+    hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
 };
 
 /// The variant part of a mesh pipeline key: everything but the vertex layout.
@@ -229,7 +229,9 @@ impl MeshPipelineSpecializer {
         D: RenderDevice,
         P: MeshPipelineProvider,
     {
-        self.specialize_with(device, variant, layout, |variant| provider.descriptor(variant))
+        self.specialize_with(device, variant, layout, |variant| {
+            provider.descriptor(variant)
+        })
     }
 
     /// Queues a batch of hot mesh specializations for background compilation.
@@ -237,12 +239,8 @@ impl MeshPipelineSpecializer {
     /// Archetype/CI warmup supplies the variants and their layouts; `build`
     /// supplies the provider descriptors. Invalid compact classes stay on the
     /// synchronous path because they have no legal full-lobe fallback.
-    pub fn prewarm<D, I, F>(
-        &mut self,
-        device: &D,
-        requests: I,
-        build: F,
-    ) where
+    pub fn prewarm<D, I, F>(&mut self, device: &D, requests: I, build: F)
+    where
         D: RenderDevice,
         I: IntoIterator<Item = (MeshPipelineKey, Vec<VertexBufferLayout>)>,
         F: Fn(&MeshPipelineKey) -> RenderPipelineDescriptor,

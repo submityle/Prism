@@ -558,7 +558,10 @@ mod tests {
         // must actually change (the film is iridescent, not constant).
         let r_a = airy_reflectance(1.0, 1.5, 1.0, 1.0, 0.0, 550.0);
         let r_b = airy_reflectance(1.0, 1.5, 1.0, 1.0, 140.0, 550.0);
-        assert!((r_a - r_b).abs() > 1.0e-3, "no interference: {r_a} vs {r_b}");
+        assert!(
+            (r_a - r_b).abs() > 1.0e-3,
+            "no interference: {r_a} vs {r_b}"
+        );
     }
 
     #[test]
@@ -610,7 +613,10 @@ mod tests {
         let b = Vec3::Y;
         let peak = ggx_aniso_ndf(n, t, b, n, at, ab);
         let expected = 1.0 / (PI * at * ab);
-        assert!((peak - expected).abs() < 1.0e-3, "peak={peak} exp={expected}");
+        assert!(
+            (peak - expected).abs() < 1.0e-3,
+            "peak={peak} exp={expected}"
+        );
         // An off-axis half-vector is strictly dimmer than the peak.
         let off = normalize_or(Vec3::new(0.4, 0.0, 1.0), Vec3::Z);
         let d_off = ggx_aniso_ndf(off, t, b, n, at, ab);
@@ -647,7 +653,10 @@ mod tests {
         // Grazing on a rough surface is partially masked (strictly < 1).
         let graze = normalize_or(Vec3::new(1.0, 0.0, 0.15), Vec3::Z);
         let g_graze = smith_g1_aniso(graze, Vec3::X, Vec3::Y, Vec3::Z, 0.6, 0.6);
-        assert!(g_graze.is_finite() && g_graze > 0.0 && g_graze < 1.0, "g={g_graze}");
+        assert!(
+            g_graze.is_finite() && g_graze > 0.0 && g_graze < 1.0,
+            "g={g_graze}"
+        );
     }
 
     #[test]

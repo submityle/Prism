@@ -119,11 +119,19 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with_padding_y(tok("space.xs"))
             .with(StyleProp::Height, tok("size.control.height"))
             .with(StyleProp::BorderRadius, tok("radius.md"))
-            .with_glass(0.0, tok("color.fill.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.fill.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.tint"))
             .with(StyleProp::FontSize, tok("font.size.body"))
             .with(StyleProp::FontWeight, tok("font.weight.medium"))
-            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.6)),
+            .with_state(
+                InteractionState::Pressed,
+                StyleProp::Opacity,
+                StyleValue::number(0.6),
+            ),
     );
 
     sheet.insert(
@@ -161,7 +169,10 @@ mod tests {
     fn chosen_filename_is_not_placeholder() {
         let el = render(FileFieldProps::new().label("Choose").filename("doc.pdf"));
         let name = &el.child_elements()[1];
-        assert!(name.class_names().iter().any(|c| c == "pk-file-field__filename"));
+        assert!(name
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-file-field__filename"));
         assert!(!name
             .class_names()
             .iter()
@@ -182,7 +193,10 @@ mod tests {
     #[test]
     fn disabled_adds_block_modifier() {
         let el = render(FileFieldProps::new().disabled(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-file-field--disabled"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-file-field--disabled"));
     }
 
     #[test]

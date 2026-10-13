@@ -218,8 +218,10 @@ mod tests {
 
     #[test]
     fn messages_are_delivered_in_order_and_acknowledged() {
-        let mut a: ReliableChannel<MockTransport> = ReliableChannel::new(MockTransport::default(), 2, 8);
-        let mut b: ReliableChannel<MockTransport> = ReliableChannel::new(MockTransport::default(), 2, 8);
+        let mut a: ReliableChannel<MockTransport> =
+            ReliableChannel::new(MockTransport::default(), 2, 8);
+        let mut b: ReliableChannel<MockTransport> =
+            ReliableChannel::new(MockTransport::default(), 2, 8);
         assert!(a.send(b"one").is_some());
         assert!(a.send(b"two").is_some());
 
@@ -249,8 +251,10 @@ mod tests {
     /// gets exactly one copy, in order, and the sender eventually forgets it.
     #[test]
     fn a_lost_datagram_is_retransmitted_and_not_duplicated() {
-        let mut a: ReliableChannel<MockTransport> = ReliableChannel::new(MockTransport::default(), 2, 8);
-        let mut b: ReliableChannel<MockTransport> = ReliableChannel::new(MockTransport::default(), 2, 8);
+        let mut a: ReliableChannel<MockTransport> =
+            ReliableChannel::new(MockTransport::default(), 2, 8);
+        let mut b: ReliableChannel<MockTransport> =
+            ReliableChannel::new(MockTransport::default(), 2, 8);
         assert!(a.send(b"payload").is_some());
 
         // The first transmission is dropped on the floor.
@@ -281,8 +285,10 @@ mod tests {
     /// handed up twice.
     #[test]
     fn a_retransmit_after_a_lost_ack_is_not_delivered_twice() {
-        let mut a: ReliableChannel<MockTransport> = ReliableChannel::new(MockTransport::default(), 2, 8);
-        let mut b: ReliableChannel<MockTransport> = ReliableChannel::new(MockTransport::default(), 2, 8);
+        let mut a: ReliableChannel<MockTransport> =
+            ReliableChannel::new(MockTransport::default(), 2, 8);
+        let mut b: ReliableChannel<MockTransport> =
+            ReliableChannel::new(MockTransport::default(), 2, 8);
         assert!(a.send(b"once").is_some());
 
         let mut got = Vec::new();
@@ -311,13 +317,17 @@ mod tests {
     #[test]
     fn a_truncated_datagram_is_ignored() {
         assert!(decode(&[]).is_none());
-        assert!(decode(&[KIND_DATA, 0, 0, 0]).is_none(), "four bytes is short");
+        assert!(
+            decode(&[KIND_DATA, 0, 0, 0]).is_none(),
+            "four bytes is short"
+        );
         assert!(
             decode(&[KIND_DATA, 1, 0, 0, 0, 0, 0, 0, 0]).is_some(),
             "exactly a header"
         );
 
-        let mut a: ReliableChannel<MockTransport> = ReliableChannel::new(MockTransport::default(), 2, 4);
+        let mut a: ReliableChannel<MockTransport> =
+            ReliableChannel::new(MockTransport::default(), 2, 4);
         a.datagram_mut().inbox.push_back(vec![0xFF; 2]);
         a.tick();
         assert!(a.recv().is_none(), "the junk produced nothing");
@@ -327,7 +337,8 @@ mod tests {
     /// move time backwards and corrupt the RTO math.
     #[test]
     fn the_clock_never_moves_backwards() {
-        let mut a: ReliableChannel<MockTransport> = ReliableChannel::new(MockTransport::default(), 2, 8);
+        let mut a: ReliableChannel<MockTransport> =
+            ReliableChannel::new(MockTransport::default(), 2, 8);
         a.tick_at(10);
         assert_eq!(a.now(), 10);
         a.tick_at(3);

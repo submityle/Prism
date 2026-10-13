@@ -82,7 +82,11 @@ fn triple_buffer_held_snapshot_survives_next_frame_write() {
     // The reader's captured snapshot is still intact and still live.
     assert!(buf.is_token_live(token));
     let a_again: Vec<f32> = buf.columns(token).iter().map(|&g| tx(g)).collect();
-    assert_eq!(a_again, alloc::vec![10.0, 11.0], "frame A was not overwritten");
+    assert_eq!(
+        a_again,
+        alloc::vec![10.0, 11.0],
+        "frame A was not overwritten"
+    );
 
     // The newest read is frame B.
     let b: Vec<f32> = buf.read().iter().map(|&g| tx(g)).collect();
@@ -125,7 +129,11 @@ fn write_and_read_columns_start_disjoint() {
     let mut buf = TransformDoubleBuffer::double(1, GlobalTransform::IDENTITY);
     // Before any publish, writing must not change the initial read snapshot.
     buf.write_at(0, gt(99.0));
-    assert_eq!(tx(buf.read()[0]), 0.0, "initial fill, untouched by back-buffer write");
+    assert_eq!(
+        tx(buf.read()[0]),
+        0.0,
+        "initial fill, untouched by back-buffer write"
+    );
     assert_eq!(buf.version(), 0);
 }
 

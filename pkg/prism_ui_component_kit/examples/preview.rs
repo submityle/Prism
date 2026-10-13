@@ -62,7 +62,10 @@ fn main() {
     );
 
     let sheet = stylesheet();
-    println!("\n=== Registered class families ({} classes) ===", sheet.len());
+    println!(
+        "\n=== Registered class families ({} classes) ===",
+        sheet.len()
+    );
     let mut families: std::collections::BTreeMap<String, usize> = Default::default();
     for (name, _class) in sheet.iter() {
         let base = name.split("--").next().unwrap_or(name);

@@ -32,7 +32,7 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 #[cfg(feature = "vm")]
-use prism_platform::vm::{Reservation, Protection};
+use prism_platform::vm::{Protection, Reservation};
 
 /// Bytes reserved per VM segment (rounded up to the page/large-page size).
 #[cfg(feature = "vm")]
@@ -123,9 +123,7 @@ impl Segment {
     fn slot_ptr(&self, stride: usize, slot: u32) -> NonNull<u8> {
         // SAFETY: `slot < slots` and the reservation holds `slots * stride`
         // bytes, so the offset stays in the committed region.
-        unsafe {
-            NonNull::new_unchecked(self.reservation.as_mut_ptr().add(slot as usize * stride))
-        }
+        unsafe { NonNull::new_unchecked(self.reservation.as_mut_ptr().add(slot as usize * stride)) }
     }
 }
 
@@ -177,7 +175,10 @@ impl ChunkArena {
                     segment.bump += 1;
                     slot
                 };
-                segments.last().expect("segment just ensured").slot_ptr(self.stride, slot)
+                segments
+                    .last()
+                    .expect("segment just ensured")
+                    .slot_ptr(self.stride, slot)
             }
         }
     }
@@ -331,6 +332,10 @@ mod tests {
         let delta = b.as_ptr() as usize - a.as_ptr() as usize;
         // The stride is the 16 KiB block rounded up to 64 bytes, so the two
         // blocks sit adjacent inside one segment.
-        assert_eq!(delta, 16 * 1024, "blocks must be stride-spaced in a segment");
+        assert_eq!(
+            delta,
+            16 * 1024,
+            "blocks must be stride-spaced in a segment"
+        );
     }
 }

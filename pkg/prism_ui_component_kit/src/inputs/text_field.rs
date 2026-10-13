@@ -156,11 +156,23 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Focus, StyleProp::BorderColor, tok("color.tint"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Focus,
+                StyleProp::BorderColor,
+                tok("color.tint"),
+            )
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     // Sizes map density to the spacing scale and shared control height.
@@ -225,7 +237,10 @@ mod tests {
         let child = &el.child_elements()[0];
         assert_eq!(child.kind(), &ElementKind::Text);
         assert_eq!(child.text_content(), Some("Email"));
-        assert!(child.class_names().iter().any(|c| c == "pk-text-field__placeholder"));
+        assert!(child
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-text-field__placeholder"));
     }
 
     #[test]
@@ -233,7 +248,10 @@ mod tests {
         let el = render(TextFieldProps::new().value("hi").placeholder("Email"));
         let child = &el.child_elements()[0];
         assert_eq!(child.text_content(), Some("hi"));
-        assert!(child.class_names().iter().any(|c| c == "pk-text-field__value"));
+        assert!(child
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-text-field__value"));
     }
 
     #[test]
@@ -253,8 +271,14 @@ mod tests {
         );
         let kids = el.child_elements();
         assert_eq!(kids.len(), 3);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-text-field__leading"));
-        assert!(kids[2].class_names().iter().any(|c| c == "pk-text-field__trailing"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-text-field__leading"));
+        assert!(kids[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-text-field__trailing"));
     }
 
     #[test]

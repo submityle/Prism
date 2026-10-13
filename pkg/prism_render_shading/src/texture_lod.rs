@@ -131,8 +131,14 @@ pub fn texture_lod(gradients: [[f32; 2]; 2], dimensions: [f32; 2]) -> f32 {
     {
         return 0.0;
     }
-    let d_x = [gradients[0][0] * dimensions[0], gradients[0][1] * dimensions[1]];
-    let d_y = [gradients[1][0] * dimensions[0], gradients[1][1] * dimensions[1]];
+    let d_x = [
+        gradients[0][0] * dimensions[0],
+        gradients[0][1] * dimensions[1],
+    ];
+    let d_y = [
+        gradients[1][0] * dimensions[0],
+        gradients[1][1] * dimensions[1],
+    ];
     let len_x = ops::sqrt(d_x[0] * d_x[0] + d_x[1] * d_x[1]);
     let len_y = ops::sqrt(d_y[0] * d_y[0] + d_y[1] * d_y[1]);
     let extent = len_x.max(len_y);

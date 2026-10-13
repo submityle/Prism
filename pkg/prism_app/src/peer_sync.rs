@@ -78,9 +78,9 @@ where
         return ReconcileOutcome::Agreed;
     };
 
-    let Some(frame) = (oldest..current).find(|&f| {
-        matches!((local.hash_at(f), peer.hash(f)), (Some(a), Some(b)) if a != b)
-    }) else {
+    let Some(frame) = (oldest..current)
+        .find(|&f| matches!((local.hash_at(f), peer.hash(f)), (Some(a), Some(b)) if a != b))
+    else {
         return ReconcileOutcome::Agreed;
     };
 
@@ -175,8 +175,7 @@ mod tests {
             hashes: (0..3).map(|f| local.hash_at(f).unwrap()).collect(),
             inputs: vec![1, 2, 3],
         };
-        let outcome =
-            reconcile_with_peer(&mut rr, &mut w, &local, &peer, |w, i| sim(w, e, *i));
+        let outcome = reconcile_with_peer(&mut rr, &mut w, &local, &peer, |w, i| sim(w, e, *i));
         assert_eq!(outcome, ReconcileOutcome::Agreed);
         assert_eq!(w.get::<Counter>(e).unwrap().0, 6);
     }
@@ -193,8 +192,7 @@ mod tests {
         // Peer says frame 1 diverged and supplies the authoritative inputs
         // (frame 1 is 10, not the locally-applied 2).
         let peer = diverging_peer(&local, 3, 1, vec![1, 10, 3]);
-        let outcome =
-            reconcile_with_peer(&mut rr, &mut w, &local, &peer, |w, i| sim(w, e, *i));
+        let outcome = reconcile_with_peer(&mut rr, &mut w, &local, &peer, |w, i| sim(w, e, *i));
         assert_eq!(
             outcome,
             ReconcileOutcome::Reconciled {
@@ -225,8 +223,7 @@ mod tests {
             },
             inputs: vec![1, 10], // only frames 0 and 1
         };
-        let outcome =
-            reconcile_with_peer(&mut rr, &mut w, &local, &peer, |w, i| sim(w, e, *i));
+        let outcome = reconcile_with_peer(&mut rr, &mut w, &local, &peer, |w, i| sim(w, e, *i));
         assert_eq!(outcome, ReconcileOutcome::Unreconciled { frame: 1 });
         assert_eq!(w.get::<Counter>(e).unwrap().0, 6);
         assert_eq!(rr.frame(), 3);

@@ -74,7 +74,10 @@ pub trait ExtractComponent: Component {
 /// or when the extractor declined this frame (so the secondary world keeps its
 /// previous value).
 pub fn extract_resource<R: ExtractResource>(main: &World, secondary: &mut World) -> bool {
-    match main.get_resource::<R>().and_then(|value| value.extract(main)) {
+    match main
+        .get_resource::<R>()
+        .and_then(|value| value.extract(main))
+    {
         Some(out) => {
             secondary.insert_resource(out);
             true

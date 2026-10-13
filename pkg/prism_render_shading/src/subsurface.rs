@@ -103,10 +103,9 @@ pub fn evaluate_subsurface_direct(
     for (channel, slot) in diffuse.iter_mut().enumerate() {
         // `subsurface_radius` (scalar) times `subsurface_radius_scale` (color3)
         // gives the per-channel scattering extent.
-        let wrap = (subsurface
-            * surface.subsurface_radius
-            * surface.subsurface_radius_scale[channel])
-            .clamp(0.0, 1.0);
+        let wrap =
+            (subsurface * surface.subsurface_radius * surface.subsurface_radius_scale[channel])
+                .clamp(0.0, 1.0);
         // Normalise the wrap lobe to unit albedo. Its analytic directional
         // albedo is `E(w) = (1 + 2w)/(1 + w)²` (`∫(1/π)·wrap(cos)·dω`), which is
         // 1 at `w = 0` (Lambert) but falls to 0.75 at `w = 1` — so an
@@ -132,8 +131,8 @@ pub fn evaluate_subsurface_direct(
     // `OpenPBR` `scatter_anisotropy` shapes the transmitted lobe: positive
     // (forward) sharpens it, negative (backward) broadens it. It scales the
     // historical constant, so `0.0` reproduces the legacy lobe exactly.
-    let sharpness = (SSS_POWER * (1.0 + surface.scatter_anisotropy.clamp(-1.0, 1.0)))
-        .max(MIN_N_DOT);
+    let sharpness =
+        (SSS_POWER * (1.0 + surface.scatter_anisotropy.clamp(-1.0, 1.0))).max(MIN_N_DOT);
     let back = ops::powf(
         dot(v, mul_scalar(h_transmission, -1.0)).clamp(0.0, 1.0),
         sharpness,
@@ -341,7 +340,10 @@ mod tests {
         );
         assert!(out[0] > out[1], "red must out-bleed green: {out:?}");
         assert!(out[1] > out[2], "green must out-bleed blue: {out:?}");
-        assert_eq!(out[2], 0.0, "a tiny radius must not reach past the terminator");
+        assert_eq!(
+            out[2], 0.0,
+            "a tiny radius must not reach past the terminator"
+        );
     }
 
     #[test]
@@ -370,7 +372,10 @@ mod tests {
             behind,
         );
         // Red is untouched, green and blue are removed: the tint only scales.
-        assert!((red[0] - white[0]).abs() < 1.0e-6, "red={red:?} white={white:?}");
+        assert!(
+            (red[0] - white[0]).abs() < 1.0e-6,
+            "red={red:?} white={white:?}"
+        );
         assert_eq!(red[1], 0.0);
         assert_eq!(red[2], 0.0);
     }

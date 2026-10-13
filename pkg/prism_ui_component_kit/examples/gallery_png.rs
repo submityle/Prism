@@ -24,12 +24,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+use prism_ui::layout::{AvailableSpace, Size};
 use prism_ui::{Element, Ui};
 use prism_ui_component_kit::stylesheet;
-use prism_ui::layout::{AvailableSpace, Size};
 use prism_ui_render_backend::raster::{rasterize, Framebuffer};
 use prism_ui_render_backend::scene::RetainedScene;
-use prism_ui_style::{Breakpoint, Color, Keyword, Length, StyleProp, StyleValue, Theme, TokenStore};
+use prism_ui_style::{
+    Breakpoint, Color, Keyword, Length, StyleProp, StyleValue, Theme, TokenStore,
+};
 use prism_ui_theme::{compile_theme, ThemeDefinition, ThemeMode};
 
 // --- gallery geometry (logical px) -----------------------------------------
@@ -85,15 +87,32 @@ fn family_stacks() -> Vec<(String, Vec<String>)> {
     for name in &names {
         let base = name.split("--").next().unwrap_or(name);
         let base = base.split("__").next().unwrap_or(base);
-        by_family.entry(base.to_string()).or_default().push(name.clone());
+        by_family
+            .entry(base.to_string())
+            .or_default()
+            .push(name.clone());
     }
 
     // Suffixes that typically carry the component's primary visible surface,
     // in preference order.
     const SURFACE_PRIORITY: &[&str] = &[
-        "--filled", "--primary", "--solid", "--accent", "--brand", "--success",
-        "--info", "--default", "--glass", "--tinted", "--gray", "--neutral",
-        "--on", "--selected", "--active", "--elevated", "--surface",
+        "--filled",
+        "--primary",
+        "--solid",
+        "--accent",
+        "--brand",
+        "--success",
+        "--info",
+        "--default",
+        "--glass",
+        "--tinted",
+        "--gray",
+        "--neutral",
+        "--on",
+        "--selected",
+        "--active",
+        "--elevated",
+        "--surface",
     ];
 
     let paints_surface = |class_name: &str| -> bool {
@@ -149,7 +168,6 @@ fn family_stacks() -> Vec<(String, Vec<String>)> {
     out
 }
 
-
 fn len(px: f32) -> StyleValue {
     StyleValue::Length(Length::Px(px))
 }
@@ -179,7 +197,10 @@ fn gallery(stacks: &[Vec<String>], background: Color, width: f32, height: f32) -
         .style(StyleProp::Width, len(width))
         .style(StyleProp::Height, len(height))
         .style(StyleProp::Display, StyleValue::Keyword(Keyword::Flex))
-        .style(StyleProp::FlexDirection, StyleValue::Keyword(Keyword::Column))
+        .style(
+            StyleProp::FlexDirection,
+            StyleValue::Keyword(Keyword::Column),
+        )
         .style(StyleProp::PaddingTop, len(PAD))
         .style(StyleProp::PaddingLeft, len(PAD))
         .style(StyleProp::PaddingRight, len(PAD))

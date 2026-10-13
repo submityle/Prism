@@ -319,9 +319,16 @@ mod tests {
     fn truncation_chain_golden_and_invariants() {
         assert_eq!(
             truncation_chain("zh-Hant-TW"),
-            vec!["zh-Hant-TW".to_string(), "zh-Hant".to_string(), "zh".to_string()],
+            vec![
+                "zh-Hant-TW".to_string(),
+                "zh-Hant".to_string(),
+                "zh".to_string()
+            ],
         );
-        assert_eq!(truncation_chain("en-US"), vec!["en-US".to_string(), "en".to_string()]);
+        assert_eq!(
+            truncation_chain("en-US"),
+            vec!["en-US".to_string(), "en".to_string()]
+        );
         assert!(truncation_chain("*").is_empty());
         assert!(truncation_chain("").is_empty());
 
@@ -332,11 +339,18 @@ mod tests {
             if chain.is_empty() {
                 continue;
             }
-            assert_eq!(chain[0], canonicalize(&tag), "chain head must be canonical range");
+            assert_eq!(
+                chain[0],
+                canonicalize(&tag),
+                "chain head must be canonical range"
+            );
             for window in chain.windows(2) {
                 let longer = &window[0];
                 let shorter = &window[1];
-                assert!(longer.len() > shorter.len(), "chain must strictly shrink: {chain:?}");
+                assert!(
+                    longer.len() > shorter.len(),
+                    "chain must strictly shrink: {chain:?}"
+                );
                 assert!(
                     longer.as_bytes()[shorter.len()] == b'-'
                         && longer.starts_with(shorter.as_str()),
@@ -361,7 +375,10 @@ mod tests {
     #[test]
     fn lookup_golden_cases() {
         let available = ["en", "zh-Hant", "fr"];
-        assert_eq!(lookup(&["zh-Hant-TW"], &available, Some("en")), Some("zh-Hant"));
+        assert_eq!(
+            lookup(&["zh-Hant-TW"], &available, Some("en")),
+            Some("zh-Hant")
+        );
         assert_eq!(lookup(&["fr-CA"], &available, Some("en")), Some("fr"));
         assert_eq!(lookup(&["de"], &available, Some("en")), Some("en"));
         assert_eq!(lookup(&["de"], &available, None), None);
@@ -375,7 +392,15 @@ mod tests {
         // Independent oracle: for a single range, the resolved tag must be the
         // available tag whose canonical form equals the earliest-available
         // truncation prefix of the range, and nothing earlier may match.
-        let pool = ["en", "en-US", "zh", "zh-Hant", "zh-Hant-TW", "fr-FR", "sr-Latn-RS"];
+        let pool = [
+            "en",
+            "en-US",
+            "zh",
+            "zh-Hant",
+            "zh-Hant-TW",
+            "fr-FR",
+            "sr-Latn-RS",
+        ];
         let mut rng = SplitMix64(0xDEAD_BEEF_0BAD_F00D);
         for _ in 0..4000 {
             let range = random_tag(&mut rng);
@@ -388,8 +413,7 @@ mod tests {
             }
             let got = lookup(&[range.as_str()], &available, None);
             let chain = truncation_chain(&range);
-            let canon_available: Vec<String> =
-                available.iter().map(|&t| canonicalize(t)).collect();
+            let canon_available: Vec<String> = available.iter().map(|&t| canonicalize(t)).collect();
 
             // Compute the expected match independently via chain indexing.
             let mut expected: Option<&str> = None;
@@ -405,7 +429,10 @@ mod tests {
 
             if let Some(matched) = got {
                 let canon_matched = canonicalize(matched);
-                assert!(chain.contains(&canon_matched), "match must lie on the chain");
+                assert!(
+                    chain.contains(&canon_matched),
+                    "match must lie on the chain"
+                );
             }
         }
     }
@@ -413,7 +440,10 @@ mod tests {
     #[test]
     fn basic_filter_golden_and_membership() {
         let available = ["de", "de-DE", "de-Latn-DE", "den", "en-de"];
-        assert_eq!(basic_filter("de", &available), vec!["de", "de-DE", "de-Latn-DE"]);
+        assert_eq!(
+            basic_filter("de", &available),
+            vec!["de", "de-DE", "de-Latn-DE"]
+        );
         assert_eq!(basic_filter("*", &available), available.to_vec());
         assert!(basic_filter("fr", &available).is_empty());
 
@@ -427,9 +457,7 @@ mod tests {
             prefix.push('-');
             for &tag in &pool {
                 let canon = canonicalize(tag);
-                let want = canon_range == "*"
-                    || canon == canon_range
-                    || canon.starts_with(&prefix);
+                let want = canon_range == "*" || canon == canon_range || canon.starts_with(&prefix);
                 assert_eq!(
                     result.contains(&tag),
                     want,

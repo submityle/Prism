@@ -13,6 +13,9 @@
 
 use crate::preset::StyleSheet;
 
+pub mod affix;
+pub mod anchor;
+pub mod back_top;
 pub mod breadcrumb;
 pub mod drawer;
 pub mod edit_menu;
@@ -20,15 +23,15 @@ pub mod menu;
 pub mod nav_bar;
 pub mod pagination;
 pub mod segmented;
+pub mod sidebar;
+pub mod status_bar;
 pub mod steps;
 pub mod tab_bar;
 pub mod toolbar;
-pub mod affix;
-pub mod anchor;
-pub mod back_top;
-pub mod sidebar;
-pub mod status_bar;
 
+pub use affix::{Affix, AffixProps};
+pub use anchor::{Anchor, AnchorLink, AnchorProps, ScrollSpy};
+pub use back_top::{BackTop, BackTopProps};
 pub use breadcrumb::{Breadcrumb, BreadcrumbItem, BreadcrumbProps};
 pub use drawer::{Drawer, DrawerProps, DrawerSide};
 pub use edit_menu::{EditMenu, EditMenuItem, EditMenuProps};
@@ -36,14 +39,11 @@ pub use menu::{Menu, MenuEntry, MenuProps};
 pub use nav_bar::{NavBar, NavBarProps};
 pub use pagination::{Pagination, PaginationProps};
 pub use segmented::{SegmentedControl, SegmentedControlProps};
+pub use sidebar::{NavRail, Sidebar, SidebarItem, SidebarProps};
+pub use status_bar::{StatusBar, StatusBarProps};
 pub use steps::{StepItem, Steps, StepsProps, Wizard};
 pub use tab_bar::{TabBar, TabBarItem, TabBarProps};
 pub use toolbar::{Toolbar, ToolbarProps};
-pub use affix::{Affix, AffixProps};
-pub use anchor::{Anchor, AnchorLink, AnchorProps, ScrollSpy};
-pub use back_top::{BackTop, BackTopProps};
-pub use sidebar::{NavRail, Sidebar, SidebarItem, SidebarProps};
-pub use status_bar::{StatusBar, StatusBarProps};
 
 /// Registers every `nav/` control's token-backed classes into `sheet`.
 pub fn register_styles(sheet: &mut StyleSheet) {

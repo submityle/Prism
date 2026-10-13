@@ -231,7 +231,10 @@ impl BlobReferenceHealth {
     /// (resident but unreferenced), `0` when the store is empty.
     #[inline]
     pub fn orphan_permille(&self) -> u64 {
-        permille(self.orphan_blob_count() as u64, self.store_blob_count as u64)
+        permille(
+            self.orphan_blob_count() as u64,
+            self.store_blob_count as u64,
+        )
     }
 
     /// Whether the working set is empty *and* the store holds no live blobs —

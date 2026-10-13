@@ -67,7 +67,12 @@ fn float_literal(v: f32) -> String {
 /// `SURFACE_LOBE_WORDS` / `PRISM_SURFACE_LOBE_WORDS` constant, which documents
 /// the widest lobe rather than a packing stride.
 fn max_lobe_words(schema: &SurfaceSchema) -> u32 {
-    schema.lobes.iter().map(|lobe| lobe.words).max().unwrap_or(0)
+    schema
+        .lobes
+        .iter()
+        .map(|lobe| lobe.words)
+        .max()
+        .unwrap_or(0)
 }
 
 /// All defined lobe bits OR-ed together (`(1 << count) - 1` for contiguous
@@ -163,7 +168,10 @@ pub fn emit_wesl_unpack(schema: &SurfaceSchema) -> String {
     let _ = writeln!(o, "const PRISM_SURFACE_CORE_WORDS: u32 = {core_words}u;");
     o.push_str("/// Widest per-lobe word footprint (a documentation constant; the pack cursor\n");
     o.push_str("/// advances by each lobe's own `PRISM_LOBE_WORDS_*`, never this value).\n");
-    let _ = writeln!(o, "const PRISM_SURFACE_LOBE_WORDS: u32 = {max_lobe_words}u;");
+    let _ = writeln!(
+        o,
+        "const PRISM_SURFACE_LOBE_WORDS: u32 = {max_lobe_words}u;"
+    );
     o.push('\n');
     o.push_str("// Per-lobe word footprints (variable length, §4.4). The decoder advances a\n");
     o.push_str("// cursor by exactly the present lobe's footprint, so lobes may differ in size.\n");
@@ -265,11 +273,7 @@ pub fn emit_wesl_unpack(schema: &SurfaceSchema) -> String {
         for field in &lobe.fields {
             emit_wesl_lobe_read(&mut o, field);
         }
-        let _ = writeln!(
-            o,
-            "        cursor += PRISM_LOBE_WORDS_{};",
-            lobe.mask_const
-        );
+        let _ = writeln!(o, "        cursor += PRISM_LOBE_WORDS_{};", lobe.mask_const);
         o.push_str("    }\n");
     }
     o.push_str("    return s;\n");
@@ -843,7 +847,9 @@ mod tests {
         // The packed-word counter accumulates each present lobe's own footprint
         // rather than a shared uniform stride (§4.4 variable-length packing).
         assert!(wesl.contains("if ((lobe_mask & PRISM_LOBE_CLEARCOAT) != 0u) { words += PRISM_LOBE_WORDS_CLEARCOAT; }"));
-        assert!(!wesl.contains("countOneBits(lobe_mask & PRISM_LOBE_ALL) * PRISM_SURFACE_LOBE_WORDS"));
+        assert!(
+            !wesl.contains("countOneBits(lobe_mask & PRISM_LOBE_ALL) * PRISM_SURFACE_LOBE_WORDS")
+        );
         // The face lobe uses the namespaced fat-struct field.
         assert!(wesl.contains("s.npr_face_softness = bitcast<f32>(w[cursor]);"));
         // Both twins end with a trailing newline.

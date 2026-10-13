@@ -130,9 +130,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
 
     sheet.insert(Class::new("pk-form-field__label"));
     sheet.insert(Class::new("pk-form-field__control"));
-    sheet.insert(
-        Class::new("pk-form-field__error").with(StyleProp::Color, tok("color.red")),
-    );
+    sheet.insert(Class::new("pk-form-field__error").with(StyleProp::Color, tok("color.red")));
     sheet.insert(
         Class::new("pk-form-field__help")
             .with(StyleProp::Color, tok("color.label.secondary"))
@@ -155,10 +153,22 @@ mod tests {
         );
         let kids = el.child_elements();
         assert_eq!(kids.len(), 4);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-form-field__label"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-form-field__control"));
-        assert!(kids[2].class_names().iter().any(|c| c == "pk-form-field__error"));
-        assert!(kids[3].class_names().iter().any(|c| c == "pk-form-field__help"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-form-field__label"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-form-field__control"));
+        assert!(kids[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-form-field__error"));
+        assert!(kids[3]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-form-field__help"));
         assert_eq!(kids[3].text_content(), Some("Hint"));
     }
 
@@ -171,7 +181,10 @@ mod tests {
     #[test]
     fn required_adds_modifier() {
         let el = FormField.render(&FormFieldProps::new().required(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-form-field--required"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-form-field--required"));
     }
 
     #[test]

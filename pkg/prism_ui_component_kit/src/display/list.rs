@@ -136,7 +136,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with(StyleProp::BackgroundColor, tok("color.background.secondary")),
+            .with(
+                StyleProp::BackgroundColor,
+                tok("color.background.secondary"),
+            ),
     );
 
     // Row: a centered flex row with gutter padding and a bottom hairline.
@@ -207,17 +210,24 @@ mod tests {
 
     #[test]
     fn row_slots_render_in_order() {
-        let el = row(
-            ListRowProps::new()
-                .leading(Element::box_())
-                .content(Element::text("Body"))
-                .trailing(Element::box_()),
-        );
+        let el = row(ListRowProps::new()
+            .leading(Element::box_())
+            .content(Element::text("Body"))
+            .trailing(Element::box_()));
         let children = el.child_elements();
         assert_eq!(children.len(), 3);
-        assert!(children[0].class_names().iter().any(|c| c == "pk-list-row__leading"));
-        assert!(children[1].class_names().iter().any(|c| c == "pk-list-row__content"));
+        assert!(children[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-list-row__leading"));
+        assert!(children[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-list-row__content"));
         assert_eq!(children[1].text_content(), Some("Body"));
-        assert!(children[2].class_names().iter().any(|c| c == "pk-list-row__trailing"));
+        assert!(children[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-list-row__trailing"));
     }
 }

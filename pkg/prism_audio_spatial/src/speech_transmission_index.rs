@@ -60,7 +60,7 @@
 
 use alloc::{vec, vec::Vec};
 use bevy_math::ops;
-use core::f32::consts::{LN_2, LN_10, PI};
+use core::f32::consts::{LN_10, LN_2, PI};
 use prism_audio_core::math::Sample;
 
 /// Number of octave bands used by the index (125 Hz to 8 kHz).
@@ -79,12 +79,10 @@ pub const MODULATION_FREQS_HZ: [Sample; MODULATION_COUNT] = [
 ];
 
 /// IEC 60268-16 male-speech band weights `alpha_k` (publicly tabulated).
-pub const MALE_ALPHA: [Sample; OCTAVE_COUNT] =
-    [0.085, 0.127, 0.230, 0.233, 0.309, 0.224, 0.173];
+pub const MALE_ALPHA: [Sample; OCTAVE_COUNT] = [0.085, 0.127, 0.230, 0.233, 0.309, 0.224, 0.173];
 
 /// IEC 60268-16 male-speech redundancy weights `beta_k` (publicly tabulated).
-pub const MALE_BETA: [Sample; OCTAVE_COUNT - 1] =
-    [0.085, 0.078, 0.065, 0.011, 0.047, 0.095];
+pub const MALE_BETA: [Sample; OCTAVE_COUNT - 1] = [0.085, 0.078, 0.065, 0.011, 0.047, 0.095];
 
 /// Apparent signal-to-noise clamp limit in decibels.
 pub const APPARENT_SNR_LIMIT_DB: Sample = 15.0;
@@ -191,17 +189,18 @@ fn noise_factor(snr_db: Sample) -> f64 {
 /// Modulation transfer `m(F)` for one band signal at `modulation_hz`, scaled
 /// by `noise`. Returns `0` for a silent band. The result is clamped to
 /// `[0, MTF_LIMIT]`.
-fn modulation_index(band: &[Sample], sample_rate: f64, modulation_hz: Sample, noise: f64) -> Sample {
+fn modulation_index(
+    band: &[Sample],
+    sample_rate: f64,
+    modulation_hz: Sample,
+    noise: f64,
+) -> Sample {
     let mut total = 0.0_f64;
     for &x in band {
         let e = f64::from(x) * f64::from(x);
         total += e;
     }
-    #[expect(
-        clippy::neg_cmp_op_on_partial_ord,
-        reason = "negated comparison keeps NaN totals on the safe silent branch"
-    )]
-    if !(total > ENERGY_FLOOR) {
+    if total <= ENERGY_FLOOR || total.is_nan() {
         return 0.0;
     }
     let mut re = 0.0_f64;
@@ -498,14 +497,22 @@ mod tests {
         // which requires sum(alpha) - sum(beta) = 1.
         let alpha_sum: Sample = MALE_ALPHA.iter().sum();
         let beta_sum: Sample = MALE_BETA.iter().sum();
-        assert!(approx(alpha_sum - beta_sum, 1.0, 1e-6), "alpha-beta {}", alpha_sum - beta_sum);
+        assert!(
+            approx(alpha_sum - beta_sum, 1.0, 1e-6),
+            "alpha-beta {}",
+            alpha_sum - beta_sum
+        );
     }
 
     #[test]
     fn from_ir_matches_free_function() {
         let ir = reverberant_ir(4_000.0, 24_000);
         let s = SpeechTransmissionIndex::from_ir(&ir, SR, 25.0);
-        assert!(approx(s.sti, speech_transmission_index(&ir, SR, 25.0), 1e-6));
+        assert!(approx(
+            s.sti,
+            speech_transmission_index(&ir, SR, 25.0),
+            1e-6
+        ));
     }
 
     #[test]

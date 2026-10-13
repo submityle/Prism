@@ -402,7 +402,11 @@ mod tests {
         assert_eq!(class_sum, report.registered_components);
 
         // Axis counts agree with per-entry flags.
-        let snap: usize = report.entries.iter().map(|e| e.snapshot_ready as usize).sum();
+        let snap: usize = report
+            .entries
+            .iter()
+            .map(|e| e.snapshot_ready as usize)
+            .sum();
         let hash: usize = report.entries.iter().map(|e| e.hash_ready as usize).sum();
         assert_eq!(snap, report.snapshot_ready_count);
         assert_eq!(hash, report.hash_ready_count);

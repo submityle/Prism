@@ -24,7 +24,16 @@ struct MaterialHeader {
     dynamic_wetness: u32, dynamic_snow: u32,
     dynamic_damage: u32, dynamic_dissolve: u32,
 }
-struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_index: u32 }
+struct MaterialTexture {
+    index: u32,
+    generation: u32,
+    semantic: u32,
+    sampler_index: u32,
+    virtual_texture_id: u32,
+    virtual_texture_width: u32,
+    virtual_texture_height: u32,
+    virtual_texture_page_size: u32,
+}
 struct GeometryHeader {
     generation: u32, revision: u32, lod_offset: u32, lod_count: u32,
     primitive_start: u32, primitive_count: u32, flags: u32, padding: u32,

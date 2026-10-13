@@ -211,9 +211,18 @@ mod tests {
         // the three vertices — an independent closed form.
         let mut state = 0x1111_2222_3333_4444_u64;
         for _ in 0..200 {
-            let a = (rand_in(&mut state, -10.0, 10.0), rand_in(&mut state, -10.0, 10.0));
-            let b = (rand_in(&mut state, -10.0, 10.0), rand_in(&mut state, -10.0, 10.0));
-            let c = (rand_in(&mut state, -10.0, 10.0), rand_in(&mut state, -10.0, 10.0));
+            let a = (
+                rand_in(&mut state, -10.0, 10.0),
+                rand_in(&mut state, -10.0, 10.0),
+            );
+            let b = (
+                rand_in(&mut state, -10.0, 10.0),
+                rand_in(&mut state, -10.0, 10.0),
+            );
+            let c = (
+                rand_in(&mut state, -10.0, 10.0),
+                rand_in(&mut state, -10.0, 10.0),
+            );
             let tri = [a, b, c];
             if area(&tri) < 1e-2 {
                 continue; // skip near-degenerate triangles
@@ -246,7 +255,10 @@ mod tests {
         for _ in 0..200 {
             let poly = random_convex(&mut state);
             let before = area(&poly);
-            let (tx, ty) = (rand_in(&mut state, -50.0, 50.0), rand_in(&mut state, -50.0, 50.0));
+            let (tx, ty) = (
+                rand_in(&mut state, -50.0, 50.0),
+                rand_in(&mut state, -50.0, 50.0),
+            );
             let moved: Vec<_> = poly.iter().map(|&(x, y)| (x + tx, y + ty)).collect();
             let after = area(&moved);
             assert!((before - after).abs() <= 1e-2 * before.max(1.0));
@@ -263,7 +275,10 @@ mod tests {
             let scaled: Vec<_> = poly.iter().map(|&(x, y)| (x * k, y * k)).collect();
             let got = area(&scaled);
             let expect = base * k * k;
-            assert!((got - expect).abs() <= 1e-2 * expect.max(1.0), "k {k}: {got} vs {expect}");
+            assert!(
+                (got - expect).abs() <= 1e-2 * expect.max(1.0),
+                "k {k}: {got} vs {expect}"
+            );
         }
     }
 
@@ -287,7 +302,10 @@ mod tests {
         for _ in 0..200 {
             let poly = random_convex(&mut state);
             let (cx, cy) = centroid(&poly).unwrap();
-            let (tx, ty) = (rand_in(&mut state, -40.0, 40.0), rand_in(&mut state, -40.0, 40.0));
+            let (tx, ty) = (
+                rand_in(&mut state, -40.0, 40.0),
+                rand_in(&mut state, -40.0, 40.0),
+            );
             let moved: Vec<_> = poly.iter().map(|&(x, y)| (x + tx, y + ty)).collect();
             let (mx, my) = centroid(&moved).unwrap();
             assert!((mx - (cx + tx)).abs() <= 1e-2 && (my - (cy + ty)).abs() <= 1e-2);

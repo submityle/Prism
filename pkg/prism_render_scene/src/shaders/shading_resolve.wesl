@@ -94,6 +94,7 @@ import prism_render_scene::shaders::gpu_scene::{
 };
 import prism_render_scene::shaders::material_sample::{
     sampled_material_defaults,
+    material_texture_record_is_valid,
     sample_texture_slot,
     fold_material_texel,
     prism_uv_gradients,
@@ -1444,7 +1445,10 @@ fn measured_table_slot_of(tex_offset: u32, tex_count: u32) -> u32 {
     for (var i = tex_offset; i < tex_end && i < tex_physical; i = i + 1u) {
         let record = material_textures[i];
         if record.semantic == SEMANTIC_MEASURED_BRDF {
-            return record.index;
+            if material_texture_record_is_valid(record) {
+                return record.index;
+            }
+            break;
         }
     }
     return 0xFFFFFFFFu;
@@ -1997,7 +2001,12 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         let record = material_textures[i];
         // Per-record mip: the footprint is shared (one pixel), the texel count
         // is not, so each map converts the same UV gradients with its own size.
-        let texel_dimensions = vec2<f32>(textureDimensions(material_texture_heap[record.index]));
+        var texel_dimensions = vec2<f32>(1.0, 1.0);
+        @if(MATERIAL_BINDLESS) {
+            if material_texture_record_is_valid(record) {
+                texel_dimensions = vec2<f32>(textureDimensions(material_texture_heap[record.index]));
+            }
+        }
         let lod = prism_texture_lod(uv_gradients, texel_dimensions);
         let texel = sample_texture_slot(record, geometry.uv, lod);
         sampled = fold_material_texel(record, texel, parameters.normal_scale, sampled);

@@ -39,8 +39,8 @@ use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::propagation::{PathKind, PropagationPath, FULL_BAND_CUTOFF_HZ};
 
 use crate::config::GeometricConfig;
-use crate::scene::AcousticScene;
 use crate::receiver_directivity;
+use crate::scene::AcousticScene;
 use crate::source_directivity;
 
 /// Barycentric tolerance when testing whether the reflection point lands on the

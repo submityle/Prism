@@ -196,7 +196,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::MinWidth, StyleValue::px(20.0))
             .with(StyleProp::FlexShrink, StyleValue::number(0.0))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
-            .with(StyleProp::BackgroundColor, StyleValue::rgba8(255, 255, 255, 255))
+            .with(
+                StyleProp::BackgroundColor,
+                StyleValue::rgba8(255, 255, 255, 255),
+            )
             .with_shadow(0.0, 1.0, 3.0, tok("glass.shadow")),
     );
     sheet.insert(Class::new("pk-range-slider__thumb--low"));
@@ -225,15 +228,30 @@ mod tests {
 
     #[test]
     fn root_has_track_with_range_and_two_thumbs() {
-        let el = render(RangeSliderProps::new().min(0.0).max(10.0).low(2.0).high(8.0));
+        let el = render(
+            RangeSliderProps::new()
+                .min(0.0)
+                .max(10.0)
+                .low(2.0)
+                .high(8.0),
+        );
         assert_eq!(el.class_names(), ["pk-range-slider"]);
         let track = &el.child_elements()[0];
         assert_eq!(track.class_names(), ["pk-range-slider__track"]);
         let kids = track.child_elements();
         assert_eq!(kids.len(), 3);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-range-slider__range"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-range-slider__thumb--low"));
-        assert!(kids[2].class_names().iter().any(|c| c == "pk-range-slider__thumb--high"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-range-slider__range"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-range-slider__thumb--low"));
+        assert!(kids[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-range-slider__thumb--high"));
     }
 
     #[test]
@@ -241,38 +259,71 @@ mod tests {
         // Powers-of-two bounds keep the normalised percentages exact in f32.
         let el = render(RangeSliderProps::new().min(0.0).max(8.0).low(2.0).high(6.0));
         let range = range_el(&el);
-        assert_eq!(inline(&range, StyleProp::MarginLeft), Some(StyleValue::Length(Length::Percent(25.0))));
-        assert_eq!(inline(&range, StyleProp::Width), Some(StyleValue::Length(Length::Percent(50.0))));
+        assert_eq!(
+            inline(&range, StyleProp::MarginLeft),
+            Some(StyleValue::Length(Length::Percent(25.0)))
+        );
+        assert_eq!(
+            inline(&range, StyleProp::Width),
+            Some(StyleValue::Length(Length::Percent(50.0)))
+        );
     }
 
     #[test]
     fn inverted_ends_are_ordered_so_width_is_non_negative() {
         let el = render(RangeSliderProps::new().min(0.0).max(8.0).low(6.0).high(2.0));
         let range = range_el(&el);
-        assert_eq!(inline(&range, StyleProp::MarginLeft), Some(StyleValue::Length(Length::Percent(25.0))));
-        assert_eq!(inline(&range, StyleProp::Width), Some(StyleValue::Length(Length::Percent(50.0))));
+        assert_eq!(
+            inline(&range, StyleProp::MarginLeft),
+            Some(StyleValue::Length(Length::Percent(25.0)))
+        );
+        assert_eq!(
+            inline(&range, StyleProp::Width),
+            Some(StyleValue::Length(Length::Percent(50.0)))
+        );
     }
 
     #[test]
     fn out_of_range_ends_clamp_to_track_bounds() {
-        let el = render(RangeSliderProps::new().min(0.0).max(10.0).low(-5.0).high(50.0));
+        let el = render(
+            RangeSliderProps::new()
+                .min(0.0)
+                .max(10.0)
+                .low(-5.0)
+                .high(50.0),
+        );
         let range = range_el(&el);
-        assert_eq!(inline(&range, StyleProp::MarginLeft), Some(StyleValue::Length(Length::Percent(0.0))));
-        assert_eq!(inline(&range, StyleProp::Width), Some(StyleValue::Length(Length::Percent(100.0))));
+        assert_eq!(
+            inline(&range, StyleProp::MarginLeft),
+            Some(StyleValue::Length(Length::Percent(0.0)))
+        );
+        assert_eq!(
+            inline(&range, StyleProp::Width),
+            Some(StyleValue::Length(Length::Percent(100.0)))
+        );
     }
 
     #[test]
     fn empty_span_collapses_to_zero_without_panicking() {
         let el = render(RangeSliderProps::new().min(5.0).max(5.0).low(5.0).high(5.0));
         let range = range_el(&el);
-        assert_eq!(inline(&range, StyleProp::MarginLeft), Some(StyleValue::Length(Length::Percent(0.0))));
-        assert_eq!(inline(&range, StyleProp::Width), Some(StyleValue::Length(Length::Percent(0.0))));
+        assert_eq!(
+            inline(&range, StyleProp::MarginLeft),
+            Some(StyleValue::Length(Length::Percent(0.0)))
+        );
+        assert_eq!(
+            inline(&range, StyleProp::Width),
+            Some(StyleValue::Length(Length::Percent(0.0)))
+        );
     }
 
     #[test]
     fn disabled_adds_block_modifier() {
         let el = render(RangeSliderProps::new().disabled(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-range-slider--disabled"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-range-slider--disabled"));
     }
 
     #[test]

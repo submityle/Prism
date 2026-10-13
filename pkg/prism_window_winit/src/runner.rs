@@ -17,8 +17,8 @@
 //! it needs to build a render surface. Everything platform-specific is confined
 //! to this crate.
 
-use std::collections::HashMap;
 use alloc::sync::Arc;
+use std::collections::HashMap;
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;

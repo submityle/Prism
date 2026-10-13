@@ -39,10 +39,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::collections::HashMap;
 use crate::component::ComponentId;
 use crate::resource::ResourceId;
 use crate::schedule::Ambiguity;
-use crate::collections::HashMap;
 
 /// Integer permille (`parts per thousand`) of `num / den`, returning `0` when
 /// `den` is zero.
@@ -185,7 +185,11 @@ impl ScheduleAmbiguityAudit {
             .collect();
         resources.sort_unstable_by_key(|entry| entry.resource.index());
 
-        let max_system_involvement = systems.iter().map(|entry| entry.pair_count).max().unwrap_or(0);
+        let max_system_involvement = systems
+            .iter()
+            .map(|entry| entry.pair_count)
+            .max()
+            .unwrap_or(0);
 
         Self {
             pair_count: pairs.len(),
@@ -383,34 +387,66 @@ mod tests {
         // Component 9 recurs in two pairs; component 4 in one.
         let pairs = vec![
             pair(0, 1, vec![ComponentId::new(9)], vec![], false),
-            pair(2, 3, vec![ComponentId::new(9), ComponentId::new(4)], vec![], false),
+            pair(
+                2,
+                3,
+                vec![ComponentId::new(9), ComponentId::new(4)],
+                vec![],
+                false,
+            ),
         ];
         let audit = ScheduleAmbiguityAudit::from_pairs(&pairs);
         assert_eq!(audit.contended_component_count(), 2);
-        let nine = audit.components().iter().find(|e| e.component == ComponentId::new(9)).unwrap();
-        let four = audit.components().iter().find(|e| e.component == ComponentId::new(4)).unwrap();
+        let nine = audit
+            .components()
+            .iter()
+            .find(|e| e.component == ComponentId::new(9))
+            .unwrap();
+        let four = audit
+            .components()
+            .iter()
+            .find(|e| e.component == ComponentId::new(4))
+            .unwrap();
         assert_eq!(nine.pair_count, 2);
         assert_eq!(four.pair_count, 1);
     }
 
     #[test]
     fn entries_sorted() {
-        let pairs = vec![
-            pair(5, 2, vec![ComponentId::new(8), ComponentId::new(1)], vec![ResourceId::new(6), ResourceId::new(2)], false),
-        ];
+        let pairs = vec![pair(
+            5,
+            2,
+            vec![ComponentId::new(8), ComponentId::new(1)],
+            vec![ResourceId::new(6), ResourceId::new(2)],
+            false,
+        )];
         let audit = ScheduleAmbiguityAudit::from_pairs(&pairs);
         let sys_nodes: Vec<usize> = audit.systems().iter().map(|e| e.node).collect();
         assert_eq!(sys_nodes, vec![2, 5]);
-        let comp_idx: Vec<u32> = audit.components().iter().map(|e| e.component.index()).collect();
+        let comp_idx: Vec<u32> = audit
+            .components()
+            .iter()
+            .map(|e| e.component.index())
+            .collect();
         assert_eq!(comp_idx, vec![1, 8]);
-        let res_idx: Vec<u32> = audit.resources().iter().map(|e| e.resource.index()).collect();
+        let res_idx: Vec<u32> = audit
+            .resources()
+            .iter()
+            .map(|e| e.resource.index())
+            .collect();
         assert_eq!(res_idx, vec![2, 6]);
     }
 
     #[test]
     fn duplicate_component_within_pair_collapsed() {
         // A single pair that lists the same component twice counts it once.
-        let pairs = vec![pair(0, 1, vec![ComponentId::new(3), ComponentId::new(3)], vec![], false)];
+        let pairs = vec![pair(
+            0,
+            1,
+            vec![ComponentId::new(3), ComponentId::new(3)],
+            vec![],
+            false,
+        )];
         let audit = ScheduleAmbiguityAudit::from_pairs(&pairs);
         assert_eq!(audit.contended_component_count(), 1);
         assert_eq!(audit.components()[0].pair_count, 1);

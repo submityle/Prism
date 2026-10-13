@@ -177,11 +177,7 @@ impl ChurnCostProfile {
     /// label (via [`FlameGraph::hotspots`]) and gross churn by the schedule
     /// node's `type_name`. Churn entries whose node name cannot be resolved
     /// against `schedule` are skipped. Read-only.
-    pub fn join(
-        flame: &FlameGraph,
-        churn: &StructuralChurnProfile,
-        schedule: &Schedule,
-    ) -> Self {
+    pub fn join(flame: &FlameGraph, churn: &StructuralChurnProfile, schedule: &Schedule) -> Self {
         // Fold gross churn by resolved system name. Several nodes sharing a
         // name sum together, matching how the flame graph aggregates labels.
         let mut churn_by_name: HashMap<String, ChurnAcc> = HashMap::new();
@@ -425,7 +421,11 @@ mod tests {
         // Synthetic flame graph: spawner slower than despawner.
         let flame = FlameGraph::from_roots(alloc::vec![
             SpanNode::new(spawner_name.clone(), Duration::from_micros(90), Vec::new()),
-            SpanNode::new(despawner_name.clone(), Duration::from_micros(40), Vec::new()),
+            SpanNode::new(
+                despawner_name.clone(),
+                Duration::from_micros(40),
+                Vec::new()
+            ),
         ]);
 
         let profile = ChurnCostProfile::join(&flame, &churn, &schedule);
@@ -528,11 +528,7 @@ mod tests {
 
         // Spawns five on `true` frames, despawns every Marker on `false`
         // frames, flipping each run. Over two frames: +5 then -5.
-        fn churner(
-            mut phase: ResMut<Phase>,
-            q: Query<(Entity, &Marker)>,
-            mut commands: Commands,
-        ) {
+        fn churner(mut phase: ResMut<Phase>, q: Query<(Entity, &Marker)>, mut commands: Commands) {
             if phase.0 {
                 for _ in 0..5 {
                     commands.spawn(Marker);

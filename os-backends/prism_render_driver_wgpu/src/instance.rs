@@ -4,8 +4,8 @@
 //! The frozen RHI traits are synchronous, so every wgpu async call here is
 //! driven to completion with [`futures_lite::future::block_on`].
 
-use alloc::vec::Vec;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::fmt;
 
 use prism_render_driver as rhi;
@@ -211,7 +211,12 @@ impl WgpuInstance {
         limits: rhi::Limits,
     ) -> Result<(WgpuDevice, WgpuQueue), DeviceCreationError> {
         let required_features = convert::features_to_wgpu(features) & adapter.features();
-        self.bring_up(adapter, required_features, convert::limits_to_wgpu(limits), None)
+        self.bring_up(
+            adapter,
+            required_features,
+            convert::limits_to_wgpu(limits),
+            None,
+        )
     }
 
     /// Shared device/queue bring-up: issues the blocking `request_device`,
@@ -309,8 +314,8 @@ impl rhi::Instance for WgpuInstance {
     ) -> Result<(WgpuDevice, WgpuQueue), rhi::DeviceError> {
         // Intersect the request with what the adapter supports so an
         // over-specified descriptor degrades instead of failing the request.
-        let features = convert::features_to_wgpu(descriptor.required_features)
-            & adapter.adapter.features();
+        let features =
+            convert::features_to_wgpu(descriptor.required_features) & adapter.adapter.features();
         let limits = convert::limits_to_wgpu(descriptor.required_limits);
         self.bring_up(
             &adapter.adapter,
@@ -330,7 +335,13 @@ impl rhi::Instance for WgpuInstance {
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
-        WgpuSurface::create(self, window, device.inner(), queue.wgpu_queue().clone(), None)
-            .map_err(|_| rhi::SurfaceError::Unsupported)
+        WgpuSurface::create(
+            self,
+            window,
+            device.inner(),
+            queue.wgpu_queue().clone(),
+            None,
+        )
+        .map_err(|_| rhi::SurfaceError::Unsupported)
     }
 }

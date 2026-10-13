@@ -210,11 +210,7 @@ pub fn preintegrated_diffuse_for_budget(
     curvature: f32,
     budget: &crate::LobeSampleBudget,
 ) -> Vec3 {
-    preintegrated_diffuse_with_steps(
-        ndotl,
-        curvature,
-        budget.sss_preintegration_steps as usize,
-    )
+    preintegrated_diffuse_with_steps(ndotl, curvature, budget.sss_preintegration_steps as usize)
 }
 
 /// Scalar Penner pre-integrated diffuse lookup using [`skin_profile_scalar`].

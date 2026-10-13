@@ -50,7 +50,7 @@ use bevy_render::{
     renderer::{RenderContext, RenderDevice, ViewQuery},
     view::ExtractedView,
 };
-use bevy_shader::Shader;
+use bevy_shader::{Shader, ShaderDefVal};
 
 use crate::{GpuSceneBuffers, MaterialBindGroup, RenderShadingGeometryBuffers};
 
@@ -141,6 +141,10 @@ pub(crate) fn init_ssr_repack_pipeline(
         ],
         immediate_size: size_of::<GpuSsrRepackParams>() as u32,
         shader,
+        shader_defs: vec![ShaderDefVal::Bool(
+            "MATERIAL_BINDLESS".into(),
+            material_bindings.bindless(),
+        )],
         entry_point: Some("ssr_repack".into()),
         ..Default::default()
     });

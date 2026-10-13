@@ -522,7 +522,10 @@ pub struct MeasuredBrdfSample {
 /// the sum is degenerate (back-to-back directions).
 #[must_use]
 pub fn half_vector(wi: [f32; 3], wo: [f32; 3]) -> [f32; 3] {
-    normalize_or([wi[0] + wo[0], wi[1] + wo[1], wi[2] + wo[2]], [0.0, 0.0, 1.0])
+    normalize_or(
+        [wi[0] + wo[0], wi[1] + wo[1], wi[2] + wo[2]],
+        [0.0, 0.0, 1.0],
+    )
 }
 
 /// Converts a local-frame `(wi, wo)` pair to Rusinkiewicz `(theta_h, theta_d,
@@ -830,7 +833,6 @@ fn normalize_or_zero(v: [f32; 3]) -> [f32; 3] {
     normalize_or(v, [0.0, 0.0, 0.0])
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,7 +953,10 @@ mod tests {
                 }
             }
         }
-        assert!(tested > 100, "expected a broad roundtrip sweep, got {tested}");
+        assert!(
+            tested > 100,
+            "expected a broad roundtrip sweep, got {tested}"
+        );
     }
 
     #[test]
@@ -1075,10 +1080,7 @@ mod tests {
             for ot in 1..6 {
                 for op in 0..4 {
                     let wi = dir(it as f32 / 7.0 * MB_FRAC_PI_2, 0.0);
-                    let wo = dir(
-                        ot as f32 / 7.0 * MB_FRAC_PI_2,
-                        op as f32 / 4.0 * MB_TAU,
-                    );
+                    let wo = dir(ot as f32 / 7.0 * MB_FRAC_PI_2, op as f32 / 4.0 * MB_TAU);
                     pairs.push((wi, wo));
                 }
             }
@@ -1116,7 +1118,11 @@ mod tests {
         for i in 0..512 {
             let (u1, u2) = hammersley(i, 512);
             let s = sampler.sample(wi, u1, u2);
-            assert!(s.direction[2] > 0.0, "sample below horizon: {:?}", s.direction);
+            assert!(
+                s.direction[2] > 0.0,
+                "sample below horizon: {:?}",
+                s.direction
+            );
             assert!((vlen(s.direction) - 1.0).abs() < 1.0e-3);
             assert!(s.pdf > 0.0, "non-positive pdf {}", s.pdf);
             assert!(s.pdf.is_finite());

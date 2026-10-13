@@ -21,8 +21,8 @@ use prism_audio_core::math::Sample;
 use crate::codec_tier::UsageClass;
 use crate::dc_block::DcBlockConfig;
 use crate::finalize::FinalizeConfig;
-use crate::loudness_normalize::LoudnessNormalizeConfig;
 use crate::loop_point::LoopMode;
+use crate::loudness_normalize::LoudnessNormalizeConfig;
 
 /// Hints that disambiguate headerless or ambiguous source bytes.
 #[derive(Debug, Clone, PartialEq, Default)]

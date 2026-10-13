@@ -71,12 +71,7 @@ pub enum JustifyMode {
 pub fn is_word_separator(ch: char) -> bool {
     matches!(
         ch,
-        '\u{0020}'
-            | '\u{00A0}'
-            | '\u{1361}'
-            | '\u{10100}'
-            | '\u{10101}'
-            | '\u{1039F}'
+        '\u{0020}' | '\u{00A0}' | '\u{1361}' | '\u{10100}' | '\u{10101}' | '\u{1039F}'
     )
 }
 
@@ -281,12 +276,27 @@ mod tests {
     #[test]
     fn align_offset_follows_direction() {
         // 40px line in a 100px box leaves 60px of slack.
-        assert!(close(align_offset(40.0, 100.0, Align::Start, Direction::Ltr), 0.0));
-        assert!(close(align_offset(40.0, 100.0, Align::End, Direction::Ltr), 60.0));
-        assert!(close(align_offset(40.0, 100.0, Align::Center, Direction::Ltr), 30.0));
+        assert!(close(
+            align_offset(40.0, 100.0, Align::Start, Direction::Ltr),
+            0.0
+        ));
+        assert!(close(
+            align_offset(40.0, 100.0, Align::End, Direction::Ltr),
+            60.0
+        ));
+        assert!(close(
+            align_offset(40.0, 100.0, Align::Center, Direction::Ltr),
+            30.0
+        ));
         // RTL mirrors start/end.
-        assert!(close(align_offset(40.0, 100.0, Align::Start, Direction::Rtl), 60.0));
-        assert!(close(align_offset(40.0, 100.0, Align::End, Direction::Rtl), 0.0));
+        assert!(close(
+            align_offset(40.0, 100.0, Align::Start, Direction::Rtl),
+            60.0
+        ));
+        assert!(close(
+            align_offset(40.0, 100.0, Align::End, Direction::Rtl),
+            0.0
+        ));
         // Justify's leading edge equals Start's.
         assert!(close(
             align_offset(40.0, 100.0, Align::Justify, Direction::Ltr),
@@ -297,7 +307,10 @@ mod tests {
     #[test]
     fn align_offset_overflow_is_negative_for_center() {
         // A 120px line in a 100px box overflows; centring pulls it left by 10px.
-        assert!(close(align_offset(120.0, 100.0, Align::Center, Direction::Ltr), -10.0));
+        assert!(close(
+            align_offset(120.0, 100.0, Align::Center, Direction::Ltr),
+            -10.0
+        ));
     }
 
     #[test]

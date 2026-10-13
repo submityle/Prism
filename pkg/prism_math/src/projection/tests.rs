@@ -12,7 +12,11 @@ use core::f32::consts::FRAC_PI_2;
 const EPS: f32 = 1e-5;
 
 fn close(a: f32, b: f32, eps: f32) {
-    assert!((a - b).abs() <= eps, "expected {a} ~= {b} (|d|={})", (a - b).abs());
+    assert!(
+        (a - b).abs() <= eps,
+        "expected {a} ~= {b} (|d|={})",
+        (a - b).abs()
+    );
 }
 
 fn close_v3(a: Vec3, b: Vec3, eps: f32) {
@@ -89,7 +93,10 @@ fn perspective_reverse_z_endpoints_and_monotonicity() {
     // Reverse-Z depth decreases monotonically with distance.
     let a = ndc(m, vec3(0.0, 0.0, -1.0)).z;
     let b = ndc(m, vec3(0.0, 0.0, -500.0)).z;
-    assert!(a > b, "reverse-Z depth should decrease with distance: {a} !> {b}");
+    assert!(
+        a > b,
+        "reverse-Z depth should decrease with distance: {a} !> {b}"
+    );
 }
 
 // ----- infinite far --------------------------------------------------------
@@ -101,7 +108,10 @@ fn perspective_infinite_near_and_asymptote() {
     close(ndc(m, vec3(0.0, 0.0, -near)).z, 0.0, EPS);
     // Depth approaches but never reaches 1 as distance grows.
     let far_depth = ndc(m, vec3(0.0, 0.0, -1.0e6)).z;
-    assert!(far_depth < 1.0 && far_depth > 0.999, "asymptotic depth {far_depth}");
+    assert!(
+        far_depth < 1.0 && far_depth > 0.999,
+        "asymptotic depth {far_depth}"
+    );
 }
 
 #[test]
@@ -110,7 +120,10 @@ fn perspective_infinite_reverse_z_near_and_asymptote() {
     let m = super::perspective_infinite_reverse_z_rh(FRAC_PI_2, 1.0, near);
     close(ndc(m, vec3(0.0, 0.0, -near)).z, 1.0, EPS);
     let far_depth = ndc(m, vec3(0.0, 0.0, -1.0e6)).z;
-    assert!(far_depth > 0.0 && far_depth < 0.001, "asymptotic reverse depth {far_depth}");
+    assert!(
+        far_depth > 0.0 && far_depth < 0.001,
+        "asymptotic reverse depth {far_depth}"
+    );
 }
 
 // ----- left-handed perspective --------------------------------------------
@@ -164,7 +177,11 @@ fn look_at_rh_places_eye_at_origin_and_target_in_front() {
     let t_view = v.transform_point3(target);
     close(t_view.x, 0.0, 1e-4);
     close(t_view.y, 0.0, 1e-4);
-    assert!(t_view.z < 0.0, "target should be in front (-Z): {}", t_view.z);
+    assert!(
+        t_view.z < 0.0,
+        "target should be in front (-Z): {}",
+        t_view.z
+    );
     // Distance is preserved by the rigid view transform.
     close(-t_view.z, (eye - target).length(), 1e-4);
 }
@@ -175,7 +192,11 @@ fn look_at_lh_places_target_in_front_positive_z() {
     let target = vec3(0.0, 0.0, 0.0);
     let v = super::look_at_lh(eye, target, vec3(0.0, 1.0, 0.0));
     let t_view = v.transform_point3(target);
-    assert!(t_view.z > 0.0, "LH target should be in front (+Z): {}", t_view.z);
+    assert!(
+        t_view.z > 0.0,
+        "LH target should be in front (+Z): {}",
+        t_view.z
+    );
     close(t_view.z, (eye - target).length(), 1e-4);
 }
 
@@ -193,5 +214,9 @@ fn view_projection_round_trip() {
     let ndc = vec3(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w);
     close(ndc.x, 0.0, 1e-4);
     close(ndc.y, 0.0, 1e-4);
-    assert!((0.0..=1.0).contains(&ndc.z), "clip depth in range: {}", ndc.z);
+    assert!(
+        (0.0..=1.0).contains(&ndc.z),
+        "clip depth in range: {}",
+        ndc.z
+    );
 }

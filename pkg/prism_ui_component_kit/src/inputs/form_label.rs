@@ -81,9 +81,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     sheet.insert(Class::new("pk-form-label--required"));
 
     sheet.insert(Class::new("pk-form-label__text").with(StyleProp::Color, tok("color.label")));
-    sheet.insert(
-        Class::new("pk-form-label__required").with(StyleProp::Color, tok("color.red")),
-    );
+    sheet.insert(Class::new("pk-form-label__required").with(StyleProp::Color, tok("color.red")));
 }
 
 #[cfg(test)]
@@ -106,7 +104,10 @@ mod tests {
     #[test]
     fn required_adds_modifier_and_asterisk() {
         let el = render(FormLabelProps::new("Email").required(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-form-label--required"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-form-label--required"));
         let kids = el.child_elements();
         assert_eq!(kids.len(), 2);
         assert_eq!(kids[1].text_content(), Some("*"));

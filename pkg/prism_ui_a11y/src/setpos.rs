@@ -90,10 +90,7 @@ pub fn set_position(tree: &A11yTree, key: &Key) -> Option<SetPosition> {
 
     // The visible (non-hidden) document-ordered sequence; hidden nodes are
     // absent from the accessibility tree and so neither count nor split a run.
-    let visible = tree
-        .iter()
-        .filter(|n| !n.state.hidden)
-        .collect::<Vec<_>>();
+    let visible = tree.iter().filter(|n| !n.state.hidden).collect::<Vec<_>>();
 
     let here = visible.iter().position(|n| &n.key == key)?;
 
@@ -230,11 +227,17 @@ mod tests {
         }
         assert_eq!(
             set_position(&tree, &Key::Int(1)),
-            Some(SetPosition { pos_in_set: 1, set_size: 4 })
+            Some(SetPosition {
+                pos_in_set: 1,
+                set_size: 4
+            })
         );
         assert_eq!(
             set_position(&tree, &Key::Int(4)),
-            Some(SetPosition { pos_in_set: 4, set_size: 4 })
+            Some(SetPosition {
+                pos_in_set: 4,
+                set_size: 4
+            })
         );
     }
 
@@ -248,12 +251,18 @@ mod tests {
 
         assert_eq!(
             set_position(&tree, &Key::Int(2)),
-            Some(SetPosition { pos_in_set: 2, set_size: 2 })
+            Some(SetPosition {
+                pos_in_set: 2,
+                set_size: 2
+            })
         );
         // The group splits the run, so the trailing item starts a new set.
         assert_eq!(
             set_position(&tree, &Key::Int(4)),
-            Some(SetPosition { pos_in_set: 1, set_size: 1 })
+            Some(SetPosition {
+                pos_in_set: 1,
+                set_size: 1
+            })
         );
         // The group itself is not a set item.
         assert_eq!(set_position(&tree, &Key::Int(3)), None);
@@ -273,11 +282,17 @@ mod tests {
         // The hidden radio is removed: 1 and 3 are adjacent, a set of two.
         assert_eq!(
             set_position(&tree, &Key::Int(1)),
-            Some(SetPosition { pos_in_set: 1, set_size: 2 })
+            Some(SetPosition {
+                pos_in_set: 1,
+                set_size: 2
+            })
         );
         assert_eq!(
             set_position(&tree, &Key::Int(3)),
-            Some(SetPosition { pos_in_set: 2, set_size: 2 })
+            Some(SetPosition {
+                pos_in_set: 2,
+                set_size: 2
+            })
         );
         // The hidden item itself has no position.
         assert_eq!(set_position(&tree, &Key::Int(2)), None);
@@ -295,7 +310,10 @@ mod tests {
         tree.insert(A11yNode::builder(Key::Int(3), Role::ListItem).build());
         assert_eq!(
             set_position(&tree, &Key::Int(3)),
-            Some(SetPosition { pos_in_set: 3, set_size: 3 })
+            Some(SetPosition {
+                pos_in_set: 3,
+                set_size: 3
+            })
         );
     }
 
@@ -309,7 +327,10 @@ mod tests {
 
     #[test]
     fn phrase_formats_n_of_m() {
-        let pos = SetPosition { pos_in_set: 2, set_size: 5 };
+        let pos = SetPosition {
+            pos_in_set: 2,
+            set_size: 5,
+        };
         assert_eq!(pos.phrase(), "2 of 5");
     }
 

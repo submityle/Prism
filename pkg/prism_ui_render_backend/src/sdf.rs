@@ -412,9 +412,8 @@ mod tests {
         for _ in 0..600 {
             let x = rand_in(&mut state, -24.0, 24.0);
             let y = rand_in(&mut state, -24.0, 24.0);
-            let f = |px: f32, py: f32| {
-                sd_rounded_box_per_corner(px, py, 8.0, 6.0, 4.0, 1.0, 3.0, 2.0)
-            };
+            let f =
+                |px: f32, py: f32| sd_rounded_box_per_corner(px, py, 8.0, 6.0, 4.0, 1.0, 3.0, 2.0);
             if f(x, y) > 1.0 {
                 assert!(
                     (grad_mag(f, x, y) - 1.0).abs() < 2e-2,
@@ -433,6 +432,9 @@ mod tests {
         // And rounding the owning (bottom-left) corner does change it.
         let rounded = sd_rounded_box_per_corner(-8.0, -6.0, 8.0, 6.0, 0.0, 0.0, 0.0, 4.0);
         let sharp = sd_rounded_box_per_corner(-8.0, -6.0, 8.0, 6.0, 0.0, 0.0, 0.0, 0.0);
-        assert!(rounded > sharp, "bottom-left rounding must push the corner out");
+        assert!(
+            rounded > sharp,
+            "bottom-left rounding must push the corner out"
+        );
     }
 }

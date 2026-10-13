@@ -99,11 +99,7 @@ fn instance_brings_up_null_device_and_recycles_slots() {
     // Re-creating a buffer reuses the freed slot with a bumped generation, so
     // the destroyed id can never alias the new resource.
     let recycled = device.create_buffer(&BufferDescriptor::new(16, BufferUsages::COPY_SRC));
-    assert_eq!(
-        recycled.index(),
-        buffer.index(),
-        "the freed slot is reused"
-    );
+    assert_eq!(recycled.index(), buffer.index(), "the freed slot is reused");
     assert_ne!(
         recycled.generation(),
         buffer.generation(),

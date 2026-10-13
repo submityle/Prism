@@ -50,7 +50,11 @@ const EPS: f32 = 1.0e-4;
 /// the forbidden std float-math surface.
 #[inline]
 fn fabs(value: f32) -> f32 {
-    if value < 0.0 { -value } else { value }
+    if value < 0.0 {
+        -value
+    } else {
+        value
+    }
 }
 
 /// Whether two floats agree within [`EPS`].
@@ -197,7 +201,10 @@ fn player_to_runtime_voice_round_trip() {
     let frame = pump(&mut app, &mut out);
 
     assert_eq!(runtime_active(&mut app), 1, "runtime should hold one voice");
-    assert_eq!(frame.physical_voices, 1, "telemetry should report one voice");
+    assert_eq!(
+        frame.physical_voices, 1,
+        "telemetry should report one voice"
+    );
     assert!(
         close(runtime_importance(&mut app, handle), 0.75),
         "runtime importance should equal the authored volume",
@@ -474,7 +481,11 @@ fn physical_budget_caps_audible_voices() {
     let mut out = AudioBuffer::new(ChannelLayout::Stereo, 64);
     let frame = pump(&mut app, &mut out);
 
-    assert_eq!(runtime_active(&mut app), 5, "all five voices should allocate");
+    assert_eq!(
+        runtime_active(&mut app),
+        5,
+        "all five voices should allocate"
+    );
     assert_eq!(
         runtime_physical(&mut app),
         2,

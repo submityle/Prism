@@ -110,11 +110,7 @@ mod tests {
 
     #[test]
     fn one_radio_per_option_with_selected_marked() {
-        let el = render(
-            RadioGroupProps::new()
-                .options(["A", "B", "C"])
-                .selected(1),
-        );
+        let el = render(RadioGroupProps::new().options(["A", "B", "C"]).selected(1));
         let kids = el.child_elements();
         assert_eq!(kids.len(), 3);
         // Selection is carried by the radio dot (`pk-radio__box--selected`),

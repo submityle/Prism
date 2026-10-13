@@ -199,5 +199,8 @@ fn single_error_reports_the_query_name() {
         name.contains("Pos"),
         "query name should mention the data term: {name}"
     );
-    assert_eq!(format!("{err}"), format!("no entities fit the query {name}"));
+    assert_eq!(
+        format!("{err}"),
+        format!("no entities fit the query {name}")
+    );
 }

@@ -51,7 +51,9 @@ pub mod streamer_config;
 pub mod streamer_frame;
 
 pub use atlas::{
-    plan_atlas_copies, AtlasCopy, AtlasCopyPlan, AtlasGeometry, AtlasTileFormat, SlotPlacement,
+    build_clamp_edge_gutter, build_neighbor_guttered_page, plan_atlas_copies,
+    plan_atlas_page_copies, AtlasCopy, AtlasCopyPlan, AtlasGeometry, AtlasGutteredPage,
+    AtlasPageCopyPlan, AtlasPageLayout, AtlasPageNeighborhood, AtlasTileFormat, SlotPlacement,
     COPY_BYTES_PER_ROW_ALIGNMENT,
 };
 pub use feedback::{PageDemand, SemanticWeights, MAX_SCREEN_IMPORTANCE, MIP_URGENCY};

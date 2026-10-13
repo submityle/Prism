@@ -135,9 +135,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Shared done state: completed steps read in the success tone.
-    sheet.insert(
-        Class::new("is-done").with(StyleProp::Color, tok("color.green")),
-    );
+    sheet.insert(Class::new("is-done").with(StyleProp::Color, tok("color.green")));
 
     // Shared current state: an accent-tinted surface with an accent label.
     // Shared verbatim with the sibling control so the state class resolves

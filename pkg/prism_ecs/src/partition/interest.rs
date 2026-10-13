@@ -139,11 +139,7 @@ impl InterestGrid {
     /// deterministic (design §14).
     pub fn interests(&self, sources: &[WorldPos]) -> Vec<CellCoord> {
         let mut cells: Vec<CellCoord> = sources.iter().map(|&p| self.cell_of(p)).collect();
-        cells.sort_unstable_by(|a, b| {
-            a.x.cmp(&b.x)
-                .then(a.y.cmp(&b.y))
-                .then(a.z.cmp(&b.z))
-        });
+        cells.sort_unstable_by(|a, b| a.x.cmp(&b.x).then(a.y.cmp(&b.y)).then(a.z.cmp(&b.z)));
         cells.dedup();
         cells
     }
@@ -200,22 +196,37 @@ mod tests {
     fn cell_of_floors_positive_coords() {
         let grid = InterestGrid::new(100.0);
         // 0..100 -> 0, 100..200 -> 1, boundary belongs to the upper cell.
-        assert_eq!(grid.cell_of(WorldPos::new(0.0, 50.0, 99.9)), CellCoord::new(0, 0, 0));
-        assert_eq!(grid.cell_of(WorldPos::new(100.0, 250.0, 100.0)), CellCoord::new(1, 2, 1));
+        assert_eq!(
+            grid.cell_of(WorldPos::new(0.0, 50.0, 99.9)),
+            CellCoord::new(0, 0, 0)
+        );
+        assert_eq!(
+            grid.cell_of(WorldPos::new(100.0, 250.0, 100.0)),
+            CellCoord::new(1, 2, 1)
+        );
     }
 
     #[test]
     fn cell_of_floors_negative_coords_toward_neg_infinity() {
         let grid = InterestGrid::new(100.0);
         // -0.1 is in cell -1, not 0; -100 is exactly the start of cell -1.
-        assert_eq!(grid.cell_of(WorldPos::new(-0.1, -100.0, -100.1)), CellCoord::new(-1, -1, -2));
-        assert_eq!(grid.cell_of(WorldPos::new(-250.0, -1.0, -0.0)), CellCoord::new(-3, -1, 0));
+        assert_eq!(
+            grid.cell_of(WorldPos::new(-0.1, -100.0, -100.1)),
+            CellCoord::new(-1, -1, -2)
+        );
+        assert_eq!(
+            grid.cell_of(WorldPos::new(-250.0, -1.0, -0.0)),
+            CellCoord::new(-3, -1, 0)
+        );
     }
 
     #[test]
     fn cell_of_grid_narrows_directly() {
         let grid = InterestGrid::new(100.0);
-        assert_eq!(grid.cell_of_grid(GridCell::new(5, -3, 42)), CellCoord::new(5, -3, 42));
+        assert_eq!(
+            grid.cell_of_grid(GridCell::new(5, -3, 42)),
+            CellCoord::new(5, -3, 42)
+        );
     }
 
     #[test]
@@ -241,7 +252,10 @@ mod tests {
         let ally = WorldPos::new(180.0, 5.0, -20.0); //    (1, 0, -1) duplicate
         let anchor = WorldPos::new(-10.0, 0.0, 900.0); //  (-1, 0, 9)
         let interests = grid.interests(&[camera, ally, anchor]);
-        assert_eq!(interests, [CellCoord::new(-1, 0, 9), CellCoord::new(1, 0, -1)]);
+        assert_eq!(
+            interests,
+            [CellCoord::new(-1, 0, 9), CellCoord::new(1, 0, -1)]
+        );
     }
 
     #[test]
@@ -253,10 +267,14 @@ mod tests {
     #[test]
     fn floor_div_saturates_extreme_inputs() {
         let grid = InterestGrid::new(1.0);
-        assert_eq!(grid.cell_of(WorldPos::new(f64::INFINITY, f64::NEG_INFINITY, 0.0)),
-            CellCoord::new(i32::MAX, i32::MIN, 0));
+        assert_eq!(
+            grid.cell_of(WorldPos::new(f64::INFINITY, f64::NEG_INFINITY, 0.0)),
+            CellCoord::new(i32::MAX, i32::MIN, 0)
+        );
         // A magnitude beyond i32 range clamps to the bound.
-        assert_eq!(grid.cell_of(WorldPos::new(5e18, -5e18, 0.0)),
-            CellCoord::new(i32::MAX, i32::MIN, 0));
+        assert_eq!(
+            grid.cell_of(WorldPos::new(5e18, -5e18, 0.0)),
+            CellCoord::new(i32::MAX, i32::MIN, 0)
+        );
     }
 }

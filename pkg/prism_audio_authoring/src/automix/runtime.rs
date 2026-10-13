@@ -185,7 +185,7 @@ impl CompiledAutoMix {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automix::rule::{DuckingRule, decibels_to_linear};
+    use crate::automix::rule::{decibels_to_linear, DuckingRule};
     use crate::automix::ruleset::AutoMixRuleset;
 
     const SR: u32 = 48_000;

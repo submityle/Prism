@@ -11,11 +11,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use prism_render_driver as rhi;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use rhi::{
     Adapter, AdapterInfo, Backend, DeviceCapabilities, DeviceDescriptor, DeviceError, DeviceType,
     Features, Instance, Limits, RequestAdapterOptions, SurfaceError,
 };
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::device::NullDevice;
 use crate::queue::NullQueue;

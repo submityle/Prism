@@ -98,7 +98,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Height, StyleValue::px(4.0))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
             .with(StyleProp::BackgroundColor, tok("color.fill.secondary"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     // Fill: accent portion from the start to the value (width set inline).
@@ -117,7 +121,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::MinWidth, StyleValue::px(20.0))
             .with(StyleProp::FlexShrink, StyleValue::number(0.0))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
-            .with(StyleProp::BackgroundColor, StyleValue::rgba8(255, 255, 255, 255))
+            .with(
+                StyleProp::BackgroundColor,
+                StyleValue::rgba8(255, 255, 255, 255),
+            )
             .with_shadow(0.0, 1.0, 3.0, tok("glass.shadow")),
     );
 }
@@ -151,15 +158,24 @@ mod tests {
     #[test]
     fn fill_width_is_value_percent() {
         let el = render(SliderProps::new().value(0.25));
-        assert_eq!(fill_width(&el), Some(StyleValue::Length(Length::Percent(25.0))));
+        assert_eq!(
+            fill_width(&el),
+            Some(StyleValue::Length(Length::Percent(25.0)))
+        );
     }
 
     #[test]
     fn value_is_clamped_to_unit_range() {
         let hi = render(SliderProps::new().value(4.0));
-        assert_eq!(fill_width(&hi), Some(StyleValue::Length(Length::Percent(100.0))));
+        assert_eq!(
+            fill_width(&hi),
+            Some(StyleValue::Length(Length::Percent(100.0)))
+        );
         let lo = render(SliderProps::new().value(-2.0));
-        assert_eq!(fill_width(&lo), Some(StyleValue::Length(Length::Percent(0.0))));
+        assert_eq!(
+            fill_width(&lo),
+            Some(StyleValue::Length(Length::Percent(0.0)))
+        );
     }
 
     #[test]

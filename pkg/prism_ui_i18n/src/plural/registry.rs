@@ -13,9 +13,7 @@ use super::{CardinalFamily, OrdinalFamily};
 ///
 /// Accepts `-` or `_` as subtag separators (e.g. `"pt-BR"`, `"zh_Hant"`).
 fn language_subtag(locale: &str) -> &str {
-    let end = locale
-        .find(['-', '_'])
-        .unwrap_or(locale.len());
+    let end = locale.find(['-', '_']).unwrap_or(locale.len());
     &locale[..end]
 }
 
@@ -31,8 +29,8 @@ fn lang_eq(locale_lang: &str, candidate: &str) -> bool {
 pub fn cardinal_family(locale: &str) -> CardinalFamily {
     let lang = language_subtag(locale);
     const GERMANIC: &[&str] = &[
-        "en", "de", "nl", "sv", "da", "no", "nb", "nn", "fo", "af", "et", "fi",
-        "it", "es", "ca", "gl", "eu",
+        "en", "de", "nl", "sv", "da", "no", "nb", "nn", "fo", "af", "et", "fi", "it", "es", "ca",
+        "gl", "eu",
     ];
     const FRENCH: &[&str] = &["fr", "pt"];
     const EAST_SLAVIC: &[&str] = &["ru", "uk", "be"];

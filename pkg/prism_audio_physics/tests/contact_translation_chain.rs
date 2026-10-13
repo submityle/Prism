@@ -37,7 +37,11 @@ use prism_audio_physics::translator::ContactAudioTranslator;
 
 /// Absolute value without pulling in `f32::abs` (kept off std float math).
 fn fabs(x: f32) -> f32 {
-    if x < 0.0 { -x } else { x }
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
 }
 
 /// Builds a dynamic/static body snapshot from scalar facts.
@@ -94,7 +98,10 @@ fn impact_chain_is_sample_accurate() {
     // Sub-step 0.5 of a 128-frame block lands on sample 64.
     assert_eq!(impact.sample_offset, 64);
     // The identity is the stable, order-independent procedural id of the pair.
-    assert_eq!(impact.contact, procedural_id(ContactKey::new(BodyAudioId(1), BodyAudioId(2))));
+    assert_eq!(
+        impact.contact,
+        procedural_id(ContactKey::new(BodyAudioId(1), BodyAudioId(2)))
+    );
     // The material pair matches an independent fallback resolution of (10, 20).
     let expected_pair = MaterialResolver::new().resolve(AudioMaterialId(10), AudioMaterialId(20));
     assert_eq!(impact.material_pair, expected_pair);
@@ -144,11 +151,23 @@ fn persisting_contact_reports_tangential_sustain() {
     let mut t = make_translator();
 
     t.begin_block(BlockClock::new(48_000, 128));
-    t.ingest(&make_manifold(1, 2, Vec3::ZERO, 0.02), &a, &b, ContactPhase::Started, 0.0);
+    t.ingest(
+        &make_manifold(1, 2, Vec3::ZERO, 0.02),
+        &a,
+        &b,
+        ContactPhase::Started,
+        0.0,
+    );
     let _ = t.drain();
 
     t.begin_block(BlockClock::new(48_000, 128));
-    t.ingest(&make_manifold(1, 2, Vec3::ZERO, 0.02), &a, &b, ContactPhase::Persisting, 0.0);
+    t.ingest(
+        &make_manifold(1, 2, Vec3::ZERO, 0.02),
+        &a,
+        &b,
+        ContactPhase::Persisting,
+        0.0,
+    );
     let drive = t.drain();
 
     assert_eq!(drive.sustains.len(), 1);
@@ -169,12 +188,24 @@ fn separation_forgets_contact() {
     let mut t = make_translator();
 
     t.begin_block(BlockClock::new(48_000, 128));
-    t.ingest(&make_manifold(1, 2, Vec3::ZERO, 0.01), &a, &b, ContactPhase::Started, 0.0);
+    t.ingest(
+        &make_manifold(1, 2, Vec3::ZERO, 0.01),
+        &a,
+        &b,
+        ContactPhase::Started,
+        0.0,
+    );
     let _ = t.drain();
     assert_eq!(t.tracked_contacts(), 1);
 
     t.begin_block(BlockClock::new(48_000, 128));
-    t.ingest(&make_manifold(1, 2, Vec3::ZERO, 0.0), &a, &b, ContactPhase::Ended, 0.0);
+    t.ingest(
+        &make_manifold(1, 2, Vec3::ZERO, 0.0),
+        &a,
+        &b,
+        ContactPhase::Ended,
+        0.0,
+    );
     let drive = t.drain();
 
     assert_eq!(drive.separations.len(), 1);
@@ -195,7 +226,13 @@ fn near_coincident_impacts_merge_to_one() {
     let mut t = make_translator();
     t.begin_block(BlockClock::new(48_000, 512));
     for _ in 0..4 {
-        t.ingest(&make_manifold(1, 2, Vec3::ZERO, 0.01), &a, &b, ContactPhase::Started, 0.0);
+        t.ingest(
+            &make_manifold(1, 2, Vec3::ZERO, 0.01),
+            &a,
+            &b,
+            ContactPhase::Started,
+            0.0,
+        );
     }
     let drive = t.drain();
     assert_eq!(drive.impacts.len(), 1);
@@ -215,7 +252,13 @@ fn far_crowd_clusters_but_near_detail_survives() {
         let a = make_body(i * 2 + 1, drop, 1.0, 10);
         let b = make_body(i * 2 + 2, Vec3::ZERO, 0.0, 20);
         let point = Vec3::new(100.0 + i as f32, 0.0, 0.0);
-        t.ingest(&make_manifold(i * 2 + 1, i * 2 + 2, point, 0.01), &a, &b, ContactPhase::Started, 0.0);
+        t.ingest(
+            &make_manifold(i * 2 + 1, i * 2 + 2, point, 0.01),
+            &a,
+            &b,
+            ContactPhase::Started,
+            0.0,
+        );
     }
     // One near contact at x = 1 (well inside the radius): must survive alone.
     let near_a = make_body(101, drop, 1.0, 10);
@@ -258,7 +301,13 @@ fn per_block_budget_keeps_loudest() {
         let a = make_body(i * 2 + 1, Vec3::new(0.0, 1.0 + i as f32, 0.0), 1.0, 10);
         let b = make_body(i * 2 + 2, Vec3::ZERO, 0.0, 20);
         let point = Vec3::new(i as f32 * 100.0, 0.0, 0.0);
-        t.ingest(&make_manifold(i * 2 + 1, i * 2 + 2, point, 0.01), &a, &b, ContactPhase::Started, 0.0);
+        t.ingest(
+            &make_manifold(i * 2 + 1, i * 2 + 2, point, 0.01),
+            &a,
+            &b,
+            ContactPhase::Started,
+            0.0,
+        );
     }
     let drive = t.drain();
     assert_eq!(drive.impacts.len(), 2);
@@ -275,7 +324,13 @@ fn static_pair_is_silent() {
 
     let mut t = make_translator();
     t.begin_block(BlockClock::new(48_000, 128));
-    t.ingest(&make_manifold(1, 2, Vec3::ZERO, 0.01), &a, &b, ContactPhase::Started, 0.0);
+    t.ingest(
+        &make_manifold(1, 2, Vec3::ZERO, 0.01),
+        &a,
+        &b,
+        ContactPhase::Started,
+        0.0,
+    );
     let drive = t.drain();
 
     assert_eq!(drive.impacts.len(), 1);

@@ -212,6 +212,24 @@ fn output_and_stage(
     (output, stage, bytes)
 }
 
+/// Allocates a GPU-resident `STORAGE | COPY_SRC` hit buffer with no paired
+/// staging buffer, for the no-readback dispatch path whose records stay on
+/// device for a same-submission render-graph consumer to bind. `COPY_SRC` is
+/// retained so a consumer (or the parity test) may still copy the records out
+/// without re-dispatching. The allocation is clamped to at least one record so
+/// the buffer stays bindable even for an empty ray batch.
+fn hit_storage(device: &RenderDevice, label: &str, word_count: usize) -> (Buffer, u64) {
+    let words = word_count.max(TLAS_HIT_WORDS);
+    let bytes = (words * size_of::<u32>()) as u64;
+    let hits = device.create_buffer(&BufferDescriptor {
+        label: Some(label),
+        size: bytes,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    (hits, bytes)
+}
+
 /// Uploads a [`GpuRayTraverseParams`] `UNIFORM` buffer.
 fn traverse_params(device: &RenderDevice, ray_count: u32, mode: u32) -> Buffer {
     let params = GpuRayTraverseParams {
@@ -321,6 +339,70 @@ impl TlasTraversalResources {
             hits,
             params: traverse_params(device, ray_count, mode),
             stage,
+            ray_count,
+            hit_bytes,
+        }
+    }
+}
+
+/// GPU-resident two-level `tlas_traverse` dispatch resources (no-readback path).
+///
+/// The uploads mirror [`TlasTraversalResources`], but the hit records stay in a
+/// GPU-resident [`Self::hits`] buffer with no paired staging buffer: the
+/// no-readback dispatch records its compute pass into a caller-owned command
+/// encoder and leaves the results on device for a same-submission render-graph
+/// consumer (screen-/world-space reflections, ray-traced shadows) to bind,
+/// avoiding the per-frame map/poll stall the [`TlasTraversalResources`] readback
+/// path pays.
+pub(crate) struct TlasDispatchResources {
+    /// Packed top-level `TLAS` nodes bound read-only at `@binding(0)`.
+    pub(crate) tlas_nodes: Buffer,
+    /// Packed instance records bound read-only at `@binding(1)`.
+    pub(crate) instances: Buffer,
+    /// Pooled `BLAS` nodes bound read-only at `@binding(2)`.
+    pub(crate) pool_nodes: Buffer,
+    /// Pooled `BLAS` triangles bound read-only at `@binding(3)`.
+    pub(crate) pool_triangles: Buffer,
+    /// Per-`BLAS` offset records bound read-only at `@binding(4)`.
+    pub(crate) pool_offsets: Buffer,
+    /// Packed rays bound read-only at `@binding(5)`.
+    pub(crate) rays: Buffer,
+    /// GPU-resident read-write hit output bound at `@binding(6)`.
+    pub(crate) hits: Buffer,
+    /// Traversal parameter `UNIFORM` bound at `@binding(7)`.
+    pub(crate) params: Buffer,
+    /// Number of rays in the batch.
+    pub(crate) ray_count: u32,
+    /// Byte length of the GPU-resident hit buffer.
+    pub(crate) hit_bytes: u64,
+}
+
+impl TlasDispatchResources {
+    /// Uploads the packed `TLAS`, the shared `BLAS` pool, the ray batch and the
+    /// traversal parameters for a `mode` dispatch over `ray_count` rays, leaving
+    /// the hit records in a GPU-resident buffer (no staging copy).
+    pub(crate) fn new(
+        device: &RenderDevice,
+        tlas: &GpuTlasBuffers,
+        pool: &GpuBlasPool,
+        ray_words: &[u32],
+        ray_count: u32,
+        mode: u32,
+    ) -> Self {
+        let (hits, hit_bytes) = hit_storage(
+            device,
+            "tlas_dispatch_hits",
+            ray_count as usize * TLAS_HIT_WORDS,
+        );
+        Self {
+            tlas_nodes: storage_buffer(device, "tlas_nodes", &tlas.nodes),
+            instances: storage_buffer(device, "tlas_instances", &tlas.instances),
+            pool_nodes: storage_buffer(device, "tlas_pool_nodes", &pool.nodes),
+            pool_triangles: storage_buffer(device, "tlas_pool_triangles", &pool.triangles),
+            pool_offsets: storage_buffer(device, "tlas_pool_offsets", &pool.offsets),
+            rays: storage_buffer(device, "tlas_rays", ray_words),
+            hits,
+            params: traverse_params(device, ray_count, mode),
             ray_count,
             hit_bytes,
         }

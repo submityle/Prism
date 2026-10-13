@@ -200,8 +200,14 @@ mod tests {
         let item = &el.child_elements()[0];
         let kids = item.child_elements();
         assert_eq!(kids.len(), 2);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-tab-bar__icon"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-tab-bar__label"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-tab-bar__icon"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-tab-bar__label"));
         assert_eq!(kids[1].text_content(), Some("Home"));
     }
 

@@ -42,7 +42,11 @@ impl Rng {
 fn random_triangles(rng: &mut Rng, n: u32) -> Vec<Triangle> {
     let mut tris = Vec::with_capacity(n as usize);
     for primitive in 0..n {
-        let base = [rng.signed() * 10.0, rng.signed() * 10.0, rng.signed() * 10.0];
+        let base = [
+            rng.signed() * 10.0,
+            rng.signed() * 10.0,
+            rng.signed() * 10.0,
+        ];
         let jitter = |rng: &mut Rng| {
             [
                 base[0] + rng.signed(),
@@ -73,7 +77,11 @@ fn assert_hits_match(blas: &DynamicBlas, expected: &[Triangle], rays: u32, seed:
     let golden = Bvh::build(expected);
     let mut rng = Rng::new(seed);
     for _ in 0..rays {
-        let origin = [rng.signed() * 15.0, rng.signed() * 15.0, rng.signed() * 15.0];
+        let origin = [
+            rng.signed() * 15.0,
+            rng.signed() * 15.0,
+            rng.signed() * 15.0,
+        ];
         let dir = [rng.signed(), rng.signed(), rng.signed()];
         if dir == [0.0, 0.0, 0.0] {
             continue;
@@ -239,7 +247,11 @@ fn exhausted_budget_defers_motion_rebuild_to_refit() {
     };
     let report = blas.deform(change, translate(&tris, delta), &mut ledger);
     assert_eq!(report.requested, AccelerationUpdate::Rebuild);
-    assert_eq!(report.executed, AccelerationUpdate::Refit, "rebuild deferred");
+    assert_eq!(
+        report.executed,
+        AccelerationUpdate::Refit,
+        "rebuild deferred"
+    );
     assert!(!report.admitted);
     assert!(report.rebuild_pending, "rebuild stays queued");
     assert!(blas.rebuild_pending());
@@ -276,7 +288,11 @@ fn pending_rebuild_fires_next_frame_with_budget() {
         fragmentation: 0.0,
     };
     let r2 = blas.deform(small, translate(&tris, delta), &mut ample);
-    assert_eq!(r2.executed, AccelerationUpdate::Rebuild, "pending rebuild fires");
+    assert_eq!(
+        r2.executed,
+        AccelerationUpdate::Rebuild,
+        "pending rebuild fires"
+    );
     assert!(!blas.rebuild_pending());
     assert_hits_match(&blas, &moved(&tris, delta), 1200, 23);
 }

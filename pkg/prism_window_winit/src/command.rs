@@ -6,9 +6,9 @@
 //! rather than in unit tests (a real window needs a display connection).
 
 use prism_window::command::WindowCommand;
+use prism_window::command::{AttentionKind, ResizeDirection};
 use prism_window::cursor::{CursorGrabMode, CursorIcon, CursorOptions};
 use prism_window::mode::{WindowLevel, WindowMode, WindowTheme};
-use prism_window::command::{AttentionKind, ResizeDirection};
 
 use crate::convert;
 use crate::sync::WindowConfig;
@@ -119,9 +119,9 @@ pub fn to_winit_cursor_icon(icon: CursorIcon) -> winit::window::CursorIcon {
 pub fn to_winit_fullscreen(mode: WindowMode) -> Option<winit::window::Fullscreen> {
     match mode {
         WindowMode::Windowed => None,
-        WindowMode::BorderlessFullscreen
-        | WindowMode::Fullscreen
-        | WindowMode::SizedFullscreen => Some(winit::window::Fullscreen::Borderless(None)),
+        WindowMode::BorderlessFullscreen | WindowMode::Fullscreen | WindowMode::SizedFullscreen => {
+            Some(winit::window::Fullscreen::Borderless(None))
+        }
     }
 }
 
@@ -151,7 +151,9 @@ pub fn build_attributes(config: &WindowConfig) -> winit::window::WindowAttribute
 /// missing grab must not abort command application.
 pub fn apply_cursor(window: &winit::window::Window, cursor: CursorOptions) {
     window.set_cursor_visible(cursor.visible);
-    window.set_cursor(winit::window::Cursor::Icon(to_winit_cursor_icon(cursor.icon)));
+    window.set_cursor(winit::window::Cursor::Icon(to_winit_cursor_icon(
+        cursor.icon,
+    )));
     let _ = window.set_cursor_grab(to_winit_grab(cursor.grab_mode));
     let _ = window.set_cursor_hittest(cursor.hit_test);
 }

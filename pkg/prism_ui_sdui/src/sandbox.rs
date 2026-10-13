@@ -276,8 +276,7 @@ impl Sandbox {
 
         for (index, child) in node.child_nodes().iter().enumerate() {
             path.push(index);
-            let sanitized_child =
-                self.sanitize_node(child, depth + 1, budget, path, diagnostics);
+            let sanitized_child = self.sanitize_node(child, depth + 1, budget, path, diagnostics);
             match sanitized_child {
                 Some(sanitized_child) => safe = safe.child(sanitized_child),
                 None => {
@@ -454,8 +453,7 @@ mod tests {
     fn output_never_exceeds_node_budget() {
         // Core budget invariant: for any input and any limit, the sanitized
         // tree holds at most `limit` nodes, and the limit is never breached.
-        let caps = CapabilitySet::new()
-            .allow_kinds(["box", "text", "card", "sdui.fallback"]);
+        let caps = CapabilitySet::new().allow_kinds(["box", "text", "card", "sdui.fallback"]);
         for seed in 0..40u64 {
             let tree = fuzz_tree(seed, 60);
             let total = count_nodes(&tree);
@@ -491,10 +489,8 @@ mod tests {
             .child(RemoteNode::text("a"))
             .child(RemoteNode::new("box").child(RemoteNode::text("b")));
         let total = count_nodes(&remote);
-        let sandbox = Sandbox::new(
-            CapabilitySet::new().allow_kinds(["box", "text"]),
-        )
-        .with_max_nodes(total);
+        let sandbox =
+            Sandbox::new(CapabilitySet::new().allow_kinds(["box", "text"])).with_max_nodes(total);
         let result = sandbox.sanitize(&remote);
         assert_eq!(result.root, remote);
         assert!(result
@@ -512,8 +508,7 @@ mod tests {
             .child(RemoteNode::new("box"))
             .child(RemoteNode::new("box"))
             .child(RemoteNode::new("box"));
-        let sandbox =
-            Sandbox::new(CapabilitySet::new().allow_kind("box")).with_max_nodes(3);
+        let sandbox = Sandbox::new(CapabilitySet::new().allow_kind("box")).with_max_nodes(3);
         let result = sandbox.sanitize(&remote);
         assert_eq!(count_nodes(&result.root), 3);
         assert_eq!(result.root.child_nodes().len(), 2);
@@ -531,8 +526,7 @@ mod tests {
     fn max_nodes_is_clamped_to_at_least_one() {
         // A zero budget would otherwise leave no room for the root; the clamp
         // guarantees a single safe fallback instead of an empty result.
-        let sandbox =
-            Sandbox::new(CapabilitySet::new().allow_kind("box")).with_max_nodes(0);
+        let sandbox = Sandbox::new(CapabilitySet::new().allow_kind("box")).with_max_nodes(0);
         assert_eq!(sandbox.max_nodes(), 1);
         let result = sandbox.sanitize(&RemoteNode::new("box").child(RemoteNode::new("box")));
         assert_eq!(count_nodes(&result.root), 1);
@@ -543,8 +537,7 @@ mod tests {
         let remote = RemoteNode::new("box")
             .child(RemoteNode::new("box"))
             .child(RemoteNode::new("box"));
-        let sandbox =
-            Sandbox::new(CapabilitySet::new().allow_kind("box")).with_max_nodes(2);
+        let sandbox = Sandbox::new(CapabilitySet::new().allow_kind("box")).with_max_nodes(2);
         let result = sandbox.sanitize(&remote);
         let diag = result
             .diagnostics

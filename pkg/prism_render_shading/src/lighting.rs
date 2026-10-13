@@ -40,7 +40,7 @@ pub struct SurfaceSample {
     /// `OpenPBR` `specular_color`: per-channel tint of the dielectric specular
     /// (white = identity; metals use `base_color`).
     pub specular_color: [f32; 3],
-/// `OpenPBR` `specular_ior`: relative index of the dielectric specular
+    /// `OpenPBR` `specular_ior`: relative index of the dielectric specular
     /// interface. `1.5` reproduces the historical `F0 = 0.04`.
     pub specular_ior: f32,
     /// `OpenPBR` transmission weight in `[0, 1]`: how much of the light is
@@ -559,8 +559,7 @@ pub fn evaluate_principled_direct_with(
     // than Lambert when the surface is microscopically rough. `sigma == 0`
     // collapses the factor to exactly `1.0`, so the legacy Lambert path is
     // preserved bit-for-bit.
-    let diffuse_factor =
-        oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
+    let diffuse_factor = oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
     // `OpenPBR` equations `EON_brdf` / `EON_comp`: the energy-preserving
     // Oren-Nayar diffuse is the Fujii term plus a reciprocal multiple-scattering
     // compensation that restores the energy the plain Oren-Nayar lobe loses as
@@ -576,7 +575,10 @@ pub fn evaluate_principled_direct_with(
     );
     let diffuse = mul(add(diffuse_on, diffuse_comp), diffuse_weight);
     // `OpenPBR` `base_weight` scales the whole base layer; `1.0` is exact.
-    let base = mul_scalar(add(diffuse, specular), n_dot_l * surface.base_weight.clamp(0.0, 1.0));
+    let base = mul_scalar(
+        add(diffuse, specular),
+        n_dot_l * surface.base_weight.clamp(0.0, 1.0),
+    );
 
     let coat = surface.clearcoat.clamp(0.0, 1.0);
     let coat_roughness = surface.clearcoat_roughness.clamp(MIN_ROUGHNESS, 1.0);
@@ -757,8 +759,7 @@ pub fn evaluate_principled_direct_with(
             let denom = (1.0 - f_view * f_light).max(1.0e-4);
             let t_slab = (1.0 - f_view) * (1.0 - f_light) / denom;
             let one_minus_light = 1.0 - f_light;
-            let r_slab = f_light
-                + one_minus_light * one_minus_light * f_view / denom;
+            let r_slab = f_light + one_minus_light * one_minus_light * f_view / denom;
             *slot = transmission * (r_slab + t_slab * ops::powf(sigma_factor[channel], path_scale));
         }
         // Lambertian (diffuse) transmission: the term is a BRDF, so it carries
@@ -1055,7 +1056,10 @@ pub(crate) fn base_dielectric_fresnel_rgb(
     specular_weight: f32,
     specular_color: [f32; 3],
 ) -> [f32; 3] {
-    let eta = modulated_ior(specular_ior.clamp(1.0, 3.0), specular_weight.clamp(0.0, 1.0));
+    let eta = modulated_ior(
+        specular_ior.clamp(1.0, 3.0),
+        specular_weight.clamp(0.0, 1.0),
+    );
     // `η' == 1` is a non-interface: `fresnel_dielectric` would clamp such an
     // index to a tiny positive one and report a spurious grazing reflection.
     let f = if (eta - 1.0).abs() <= f32::EPSILON {
@@ -1370,7 +1374,6 @@ mod tests {
         };
         assert_ne!(value(surface, tilted), baseline);
     }
-
 
     #[test]
     fn glint_state_samples_the_mixture_without_ever_going_negative() {
@@ -1780,9 +1783,8 @@ mod tests {
                 let one_minus = 1.0 - a;
                 let expected_t = (alpha * (2.0 / (1.0 + one_minus * one_minus)).sqrt())
                     .max(MIN_ANISOTROPIC_ALPHA);
-                let expected_b =
-                    (one_minus * alpha * (2.0 / (1.0 + one_minus * one_minus)).sqrt())
-                        .max(MIN_ANISOTROPIC_ALPHA);
+                let expected_b = (one_minus * alpha * (2.0 / (1.0 + one_minus * one_minus)).sqrt())
+                    .max(MIN_ANISOTROPIC_ALPHA);
                 assert_eq!(ax, expected_t, "α_t mismatch at α={alpha}, a={a}");
                 assert_eq!(ay, expected_b, "α_b mismatch at α={alpha}, a={a}");
                 // Monotone in `a`: more anisotropy always stretches the tangent
@@ -1916,7 +1918,10 @@ mod tests {
             for cos_i in [0.0, 0.1, 0.5, 1.0] {
                 for v_dot_l in [-1.0, 0.0, 0.5, 1.0] {
                     let f = oren_nayar_factor(cos_o, cos_i, v_dot_l, 1.0);
-                    assert!(f.is_finite() && f >= 0.0, "{cos_o} {cos_i} {v_dot_l} -> {f}");
+                    assert!(
+                        f.is_finite() && f >= 0.0,
+                        "{cos_o} {cos_i} {v_dot_l} -> {f}"
+                    );
                 }
             }
         }
@@ -2006,7 +2011,10 @@ mod tests {
             specular_ior: 1.05,
             ..Default::default()
         })[0];
-        assert!(dense > 0.24 && sparse < 0.001, "dense={dense} sparse={sparse}");
+        assert!(
+            dense > 0.24 && sparse < 0.001,
+            "dense={dense} sparse={sparse}"
+        );
         assert_eq!(
             dielectric_f0(&SurfaceSample {
                 specular_weight: 0.0,
@@ -2050,7 +2058,10 @@ mod tests {
             frame(),
             light(),
         );
-        assert!(full[0] > none[0] && none[0] >= 0.0, "full={full:?} none={none:?}");
+        assert!(
+            full[0] > none[0] && none[0] >= 0.0,
+            "full={full:?} none={none:?}"
+        );
     }
 
     #[test]
@@ -2142,13 +2153,19 @@ mod tests {
             frame(),
             light(),
         );
-        assert!(sum3(thick) < sum3(glassy), "thick={thick:?} zero-depth={glassy:?}");
+        assert!(
+            sum3(thick) < sum3(glassy),
+            "thick={thick:?} zero-depth={glassy:?}"
+        );
         assert!(
             sum3(deeper) > sum3(thick),
             "a larger transmission_depth must absorb less over the unit path: \
              deeper={deeper:?} unit={thick:?}"
         );
-        assert!(sum3(deeper) < sum3(glassy), "deeper={deeper:?} zero-depth={glassy:?}");
+        assert!(
+            sum3(deeper) < sum3(glassy),
+            "deeper={deeper:?} zero-depth={glassy:?}"
+        );
     }
 
     #[test]
@@ -2314,8 +2331,14 @@ mod tests {
             light(),
         );
         assert!(red[0] >= white[0] * 0.999, "red={red:?} white={white:?}");
-        assert!(red[1] < white[1] * 0.5, "green must be absorbed: {red:?} vs {white:?}");
-        assert!(red[2] < white[2] * 0.5, "blue must be absorbed: {red:?} vs {white:?}");
+        assert!(
+            red[1] < white[1] * 0.5,
+            "green must be absorbed: {red:?} vs {white:?}"
+        );
+        assert!(
+            red[2] < white[2] * 0.5,
+            "blue must be absorbed: {red:?} vs {white:?}"
+        );
     }
 
     #[test]

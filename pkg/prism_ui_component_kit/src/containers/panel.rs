@@ -114,10 +114,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Glass variant: frosted tint and lit rim.
-    sheet.insert(
-        Class::new("pk-panel--glass")
-            .with_glass(0.0, tok("glass.tint"), Some(tok("glass.highlight"))),
-    );
+    sheet.insert(Class::new("pk-panel--glass").with_glass(
+        0.0,
+        tok("glass.tint"),
+        Some(tok("glass.highlight")),
+    ));
 
     // Title: headline typography.
     sheet.insert(
@@ -161,7 +162,10 @@ mod tests {
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].kind(), &ElementKind::Text);
         assert_eq!(children[0].text_content(), Some("Settings"));
-        assert!(children[0].class_names().iter().any(|c| c == "pk-panel__title"));
+        assert!(children[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-panel__title"));
         assert_eq!(children[1].class_names(), ["pk-panel__body"]);
     }
 

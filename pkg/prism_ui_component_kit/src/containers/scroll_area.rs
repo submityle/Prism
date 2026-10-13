@@ -109,7 +109,8 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
 
     // Horizontal: stack viewport over the (now horizontal) track.
     sheet.insert(
-        Class::new("pk-scroll-area--horizontal").with(StyleProp::FlexDirection, kw(Keyword::Column)),
+        Class::new("pk-scroll-area--horizontal")
+            .with(StyleProp::FlexDirection, kw(Keyword::Column)),
     );
 
     // Viewport: grows to fill, scrolls its own content column.

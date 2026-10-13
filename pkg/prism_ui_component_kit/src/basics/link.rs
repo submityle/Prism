@@ -73,7 +73,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Color, tok("color.tint"))
             .with(StyleProp::FontSize, tok("font.size.body"))
             .with_state(InteractionState::Hover, StyleProp::Color, tok("color.tint"))
-            .with_state(InteractionState::Disabled, StyleProp::Color, tok("color.label.tertiary")),
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Color,
+                tok("color.label.tertiary"),
+            ),
     );
 }
 

@@ -310,24 +310,26 @@ pub fn capped_cylinder_gradient(point: [f32; 3], half_height: f32, radius: f32) 
 /// smaller, and signs it negative when the point lies inside both the lateral
 /// and the cap slabs. Setting `top_radius == bottom_radius` recovers a
 /// cylinder; a zero cap radius recovers a true cone tip.
-pub fn capped_cone(
-    point: [f32; 3],
-    half_height: f32,
-    bottom_radius: f32,
-    top_radius: f32,
-) -> f32 {
+pub fn capped_cone(point: [f32; 3], half_height: f32, bottom_radius: f32, top_radius: f32) -> f32 {
     let q = [(point[0] * point[0] + point[2] * point[2]).sqrt(), point[1]];
     let k1 = [top_radius, half_height];
     let k2 = [top_radius - bottom_radius, 2.0 * half_height];
     // Snap the radius to whichever cap the point faces for the rim distance.
-    let cap_radius = if q[1] < 0.0 { bottom_radius } else { top_radius };
+    let cap_radius = if q[1] < 0.0 {
+        bottom_radius
+    } else {
+        top_radius
+    };
     let ca = [q[0] - q[0].min(cap_radius), q[1].abs() - half_height];
     // Project onto the slanted side segment, parameter clamped to the caps.
     let k1_minus_q = [k1[0] - q[0], k1[1] - q[1]];
-    let proj =
-        ((k1_minus_q[0] * k2[0] + k1_minus_q[1] * k2[1]) / dot2_2(k2)).clamp(0.0, 1.0);
+    let proj = ((k1_minus_q[0] * k2[0] + k1_minus_q[1] * k2[1]) / dot2_2(k2)).clamp(0.0, 1.0);
     let cb = [q[0] - k1[0] + k2[0] * proj, q[1] - k1[1] + k2[1] * proj];
-    let sign = if cb[0] < 0.0 && ca[1] < 0.0 { -1.0 } else { 1.0 };
+    let sign = if cb[0] < 0.0 && ca[1] < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
     sign * dot2_2(ca).min(dot2_2(cb)).sqrt()
 }
 
@@ -378,12 +380,12 @@ pub fn box_frame(point: [f32; 3], half_extent: [f32; 3], thickness: f32) -> f32 
         (p[2] + thickness).abs() - thickness,
     ];
     // One bar family per axis: keep that axis sharp while rounding the others.
-    let bar_x = length([p[0].max(0.0), q[1].max(0.0), q[2].max(0.0)])
-        + p[0].max(q[1].max(q[2])).min(0.0);
-    let bar_y = length([q[0].max(0.0), p[1].max(0.0), q[2].max(0.0)])
-        + q[0].max(p[1].max(q[2])).min(0.0);
-    let bar_z = length([q[0].max(0.0), q[1].max(0.0), p[2].max(0.0)])
-        + q[0].max(q[1].max(p[2])).min(0.0);
+    let bar_x =
+        length([p[0].max(0.0), q[1].max(0.0), q[2].max(0.0)]) + p[0].max(q[1].max(q[2])).min(0.0);
+    let bar_y =
+        length([q[0].max(0.0), p[1].max(0.0), q[2].max(0.0)]) + q[0].max(p[1].max(q[2])).min(0.0);
+    let bar_z =
+        length([q[0].max(0.0), q[1].max(0.0), p[2].max(0.0)]) + q[0].max(q[1].max(p[2])).min(0.0);
     bar_x.min(bar_y).min(bar_z)
 }
 
@@ -477,7 +479,11 @@ pub fn octahedron_gradient(point: [f32; 3], radius: f32) -> [f32; 3] {
 /// be non-zero. Suitable for sphere tracing and `CSG`, where a slight
 /// underestimate of distance only costs extra marching steps.
 pub fn ellipsoid_sdf(point: [f32; 3], radii: [f32; 3]) -> f32 {
-    let scaled = [point[0] / radii[0], point[1] / radii[1], point[2] / radii[2]];
+    let scaled = [
+        point[0] / radii[0],
+        point[1] / radii[1],
+        point[2] / radii[2],
+    ];
     let k0 = length(scaled);
     let k1 = length([
         scaled[0] / radii[0],
@@ -689,7 +695,10 @@ pub fn capped_torus(
         length2([px, py])
     };
     let p_dot_p = px * px + py * py + pz * pz;
-    (p_dot_p + major_radius * major_radius - 2.0 * major_radius * k).max(0.0).sqrt() - tube_radius
+    (p_dot_p + major_radius * major_radius - 2.0 * major_radius * k)
+        .max(0.0)
+        .sqrt()
+        - tube_radius
 }
 
 /// Signed distance from `point` to a solid equilateral triangular prism
@@ -835,7 +844,12 @@ pub fn cut_hollow_sphere(point: [f32; 3], radius: f32, cut_height: f32, thicknes
 /// The rim `sqrt` is guarded with `.max(0.0)`, so degenerate configurations
 /// where the biting sphere no longer clips the body collapse to a plain sphere
 /// boundary instead of producing `NaN`.
-pub fn death_star(point: [f32; 3], large_radius: f32, small_radius: f32, bite_distance: f32) -> f32 {
+pub fn death_star(
+    point: [f32; 3],
+    large_radius: f32,
+    small_radius: f32,
+    bite_distance: f32,
+) -> f32 {
     let ra = large_radius;
     let rb = small_radius;
     let d = bite_distance;
@@ -914,7 +928,12 @@ pub fn line_sdf(point: [f32; 3], direction: [f32; 3]) -> f32 {
 /// of half-extents `(outer_radius - rounding, half_height - rounding)` offset
 /// outward by `rounding`. Built from `abs`, `min`, `max`, and vector lengths,
 /// so it stays transcendental-free.
-pub fn rounded_cylinder(point: [f32; 3], outer_radius: f32, rounding: f32, half_height: f32) -> f32 {
+pub fn rounded_cylinder(
+    point: [f32; 3],
+    outer_radius: f32,
+    rounding: f32,
+    half_height: f32,
+) -> f32 {
     // Meridian rounded-rectangle offsets: radial reach and vertical reach of
     // the inset profile, measured against the fillet radius.
     let dx = length2([point[0], point[2]]) - (outer_radius - rounding);
@@ -1448,7 +1467,11 @@ pub fn horseshoe_2d(
     let ry = c_sin * px + c_cos * point[1];
     // Piecewise select: outside the arc keep the rotated pair; inside the bend
     // fall back to the radial magnitude so the prongs join the ring smoothly.
-    let qx = if ry > 0.0 || rx > 0.0 { rx } else { l * (-c_cos).signum() };
+    let qx = if ry > 0.0 || rx > 0.0 {
+        rx
+    } else {
+        l * (-c_cos).signum()
+    };
     let qy = if rx > 0.0 { ry } else { l };
     // Half-infinite rounded strip offset by prong length and ring thickness.
     let bx = qx - arm;
@@ -1482,7 +1505,10 @@ pub fn segment_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
 pub fn oriented_box_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2], thickness: f32) -> f32 {
     let l = length2([b[0] - a[0], b[1] - a[1]]);
     let d = [(b[0] - a[0]) / l, (b[1] - a[1]) / l];
-    let c = [point[0] - 0.5 * (a[0] + b[0]), point[1] - 0.5 * (a[1] + b[1])];
+    let c = [
+        point[0] - 0.5 * (a[0] + b[0]),
+        point[1] - 0.5 * (a[1] + b[1]),
+    ];
     // Rotate into the box frame: local x along `d`, local y along the normal.
     let q0 = (d[0] * c[0] + d[1] * c[1]).abs() - 0.5 * l;
     let q1 = (-d[1] * c[0] + d[0] * c[1]).abs() - 0.5 * thickness;
@@ -1501,7 +1527,11 @@ pub fn oriented_box_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2], thickness: f32
 /// Built from `abs`, `clamp`, `min` and `sqrt`, so it stays transcendental-free.
 pub fn parallelogram(point: [f32; 2], half_width: f32, half_height: f32, skew: f32) -> f32 {
     let e = [skew, half_height];
-    let mut p = if point[1] < 0.0 { [-point[0], -point[1]] } else { point };
+    let mut p = if point[1] < 0.0 {
+        [-point[0], -point[1]]
+    } else {
+        point
+    };
     // Distance to the horizontal (top) edge.
     let mut w = [p[0] - e[0], p[1] - e[1]];
     w[0] -= w[0].clamp(-half_width, half_width);
@@ -1551,7 +1581,12 @@ pub fn rhombus_2d(point: [f32; 2], half_diag: [f32; 2]) -> f32 {
 /// side direction `k2` clamped to the segment). The interior sign is set when
 /// the point lies left of the slanted edge and below the top. Built from `abs`,
 /// `clamp`, `min` and `sqrt`, so it stays transcendental-free.
-pub fn trapezoid_isosceles(point: [f32; 2], bottom_half: f32, top_half: f32, half_height: f32) -> f32 {
+pub fn trapezoid_isosceles(
+    point: [f32; 2],
+    bottom_half: f32,
+    top_half: f32,
+    half_height: f32,
+) -> f32 {
     let (r1, r2, he) = (bottom_half, top_half, half_height);
     let k1 = [r2, he];
     let k2 = [r2 - r1, 2.0 * he];
@@ -1561,8 +1596,14 @@ pub fn trapezoid_isosceles(point: [f32; 2], bottom_half: f32, top_half: f32, hal
     let t = (((k1[0] - p[0]) * k2[0] + (k1[1] - p[1]) * k2[1]) / (k2[0] * k2[0] + k2[1] * k2[1]))
         .clamp(0.0, 1.0);
     let cb = [p[0] - k1[0] + k2[0] * t, p[1] - k1[1] + k2[1] * t];
-    let s = if cb[0] < 0.0 && ca[1] < 0.0 { -1.0 } else { 1.0 };
-    s * (ca[0] * ca[0] + ca[1] * ca[1]).min(cb[0] * cb[0] + cb[1] * cb[1]).sqrt()
+    let s = if cb[0] < 0.0 && ca[1] < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    s * (ca[0] * ca[0] + ca[1] * ca[1])
+        .min(cb[0] * cb[0] + cb[1] * cb[1])
+        .sqrt()
 }
 
 /// Signed distance to a two-dimensional circular arc band: a stroke of
@@ -1681,7 +1722,10 @@ pub fn regular_hexagon_2d(point: [f32; 2], apothem: f32) -> f32 {
     let mut p = [point[0].abs(), point[1].abs()];
     let fold = 2.0 * (KX * p[0] + KY * p[1]).min(0.0);
     p = [p[0] - fold * KX, p[1] - fold * KY];
-    p = [p[0] - p[0].clamp(-KZ * apothem, KZ * apothem), p[1] - apothem];
+    p = [
+        p[0] - p[0].clamp(-KZ * apothem, KZ * apothem),
+        p[1] - apothem,
+    ];
     length2(p) * p[1].signum()
 }
 
@@ -1955,7 +1999,11 @@ pub fn rounded_box_2d_gradient(
 /// test. The result is therefore exact and uses only `dot`, `sqrt` (through
 /// `length`), division, `min`/`max` and comparisons.
 pub fn vesica_segment(point: [f32; 3], a: [f32; 3], b: [f32; 3], width: f32) -> f32 {
-    let c = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
+    let c = [
+        (a[0] + b[0]) * 0.5,
+        (a[1] + b[1]) * 0.5,
+        (a[2] + b[2]) * 0.5,
+    ];
     let ba = sub3(b, a);
     let l = length(ba);
     let v = [ba[0] / l, ba[1] / l, ba[2] / l];
@@ -2273,10 +2321,18 @@ pub fn tunnel_2d(point: [f32; 2], half_width: f32, height: f32) -> f32 {
     let mut qx = px - half_width;
     let qy = py - height;
     let d1 = dot2_2([qx.max(0.0), qy]);
-    qx = if py > 0.0 { qx } else { length2([px, py]) - half_width };
+    qx = if py > 0.0 {
+        qx
+    } else {
+        length2([px, py]) - half_width
+    };
     let d2 = dot2_2([qx, qy.max(0.0)]);
     let d = d1.min(d2).sqrt();
-    if qx.max(qy) < 0.0 { -d } else { d }
+    if qx.max(qy) < 0.0 {
+        -d
+    } else {
+        d
+    }
 }
 
 /// Exact unsigned distance from `point` to the finite 3D line segment
@@ -2302,14 +2358,26 @@ pub fn segment_3d(point: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-only independent reference oracles need true transcendental functions (sin/cos/acos/atan2/powi) to cross-validate the transcendental-free SDF primitives; using the crate approximations here would make the checks circular"
+)]
 mod tests {
     use super::{
-        annulus_2d, arc, box_2d, box_2d_gradient, box_frame, box_frame_2d, box_gradient, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_cylinder_gradient, capped_torus, capsule, capsule_2d, capsule_gradient, circle_2d, circle_2d_gradient, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
-        cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, horseshoe_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
-        octagon_prism, octahedron, octahedron_gradient, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, plane_gradient, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
-        round_cone_segment, rounded_box_2d, rounded_box_2d_gradient, rounded_cross_2d, rounded_cylinder, rounded_x,
-        segment_2d, segment_3d, solid_angle, sphere, sphere_gradient, star5_2d, torus, torus_gradient, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
-        uneven_capsule_2d, vertical_capsule, vertical_capsule_gradient, vesica, vesica_2d, vesica_segment,
+        annulus_2d, arc, box_2d, box_2d_gradient, box_frame, box_frame_2d, box_gradient, box_sdf,
+        capped_cone, capped_cone_segment, capped_cylinder, capped_cylinder_gradient, capped_torus,
+        capsule, capsule_2d, capsule_gradient, circle_2d, circle_2d_gradient, cone_sdf, cross_2d,
+        cut_disk_2d, cut_hollow_sphere, cut_sphere, cylinder_segment, death_star, egg_2d,
+        ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, horseshoe_2d,
+        infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
+        octagon_prism, octahedron, octahedron_gradient, oriented_box_2d, oriented_vesica_2d,
+        parallelogram, pentagram_2d, pie, plane, plane_gradient, polygon_2d, pyramid, quad_sdf,
+        regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d,
+        round_box, round_cone_sdf, round_cone_segment, rounded_box_2d, rounded_box_2d_gradient,
+        rounded_cross_2d, rounded_cylinder, rounded_x, segment_2d, segment_3d, solid_angle, sphere,
+        sphere_gradient, star5_2d, torus, torus_gradient, trapezoid_isosceles, triangle_2d,
+        triangle_sdf, triangular_prism, tunnel_2d, uneven_capsule_2d, vertical_capsule,
+        vertical_capsule_gradient, vesica, vesica_2d, vesica_segment,
     };
 
     // Independent brute-force reference: densely sample the segment and take
@@ -2381,12 +2449,12 @@ mod tests {
         let b = [0.0, 1.5, 0.0];
         let r = 0.75;
         let samples = [
-            [0.0, 0.0, 0.0],   // interior centre
-            [0.5, 0.0, 0.0],   // interior, off axis
-            [2.0, 0.0, 0.0],   // outside the side wall
-            [0.0, 3.0, 0.0],   // outside past the top cap
-            [0.75, 1.5, 0.0],  // on the top rim
-            [1.2, 2.1, 0.4],   // outside the rim corner
+            [0.0, 0.0, 0.0],  // interior centre
+            [0.5, 0.0, 0.0],  // interior, off axis
+            [2.0, 0.0, 0.0],  // outside the side wall
+            [0.0, 3.0, 0.0],  // outside past the top cap
+            [0.75, 1.5, 0.0], // on the top rim
+            [1.2, 2.1, 0.4],  // outside the rim corner
         ];
         for p in samples {
             let general = cylinder_segment(p, a, b, r);
@@ -2444,7 +2512,11 @@ mod tests {
             let t = t.clamp(0.0, 1.0);
             let b = [w[0] - e[0] * t, w[1] - e[1] * t];
             d = d.min(b[0] * b[0] + b[1] * b[1]);
-            let c = [py >= verts[i][1], py < verts[j][1], e[0] * w[1] > e[1] * w[0]];
+            let c = [
+                py >= verts[i][1],
+                py < verts[j][1],
+                e[0] * w[1] > e[1] * w[0],
+            ];
             if (c[0] && c[1] && c[2]) || (!c[0] && !c[1] && !c[2]) {
                 s = -s;
             }
@@ -2499,8 +2571,7 @@ mod tests {
             let radius = (half * half + w * w) / (2.0 * w);
             let offset = (half * half - w * w) / (2.0 * w);
             let phi0 = (offset / radius).acos();
-            let to_world =
-                |lx: f32, ly: f32| [cx + nx * lx + vx * ly, cy + ny * lx + vy * ly];
+            let to_world = |lx: f32, ly: f32| [cx + nx * lx + vx * ly, cy + ny * lx + vy * ly];
             let m = 1200usize;
             let mut pts: Vec<[f32; 2]> = Vec::with_capacity(2 * (m + 1));
             for i in 0..=m {
@@ -2517,8 +2588,8 @@ mod tests {
                 let [x2, y2] = pts[i + 1];
                 let ex = x2 - x1;
                 let ey = y2 - y1;
-                let t = (((p[0] - x1) * ex + (p[1] - y1) * ey) / (ex * ex + ey * ey))
-                    .clamp(0.0, 1.0);
+                let t =
+                    (((p[0] - x1) * ex + (p[1] - y1) * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
                 let qx = p[0] - (x1 + ex * t);
                 let qy = p[1] - (y1 + ey * t);
                 d = d.min((qx * qx + qy * qy).sqrt());
@@ -2527,7 +2598,11 @@ mod tests {
             let c2 = [cx + nx * offset, cy + ny * offset];
             let inside = ((p[0] - c1[0]).powi(2) + (p[1] - c1[1]).powi(2)).sqrt() <= radius
                 && ((p[0] - c2[0]).powi(2) + (p[1] - c2[1]).powi(2)).sqrt() <= radius;
-            if inside { -d } else { d }
+            if inside {
+                -d
+            } else {
+                d
+            }
         }
 
         let a = [-0.7_f32, 0.4];
@@ -2567,19 +2642,14 @@ mod tests {
         fn dist_seg(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
             let ex = b[0] - a[0];
             let ey = b[1] - a[1];
-            let t = (((p[0] - a[0]) * ex + (p[1] - a[1]) * ey) / (ex * ex + ey * ey))
-                .clamp(0.0, 1.0);
+            let t =
+                (((p[0] - a[0]) * ex + (p[1] - a[1]) * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
             let qx = p[0] - (a[0] + ex * t);
             let qy = p[1] - (a[1] + ey * t);
             (qx * qx + qy * qy).sqrt()
         }
         fn reference(p: [f32; 2], b: [f32; 2], t: f32) -> f32 {
-            let c = [
-                [b[0], b[1]],
-                [-b[0], b[1]],
-                [-b[0], -b[1]],
-                [b[0], -b[1]],
-            ];
+            let c = [[b[0], b[1]], [-b[0], b[1]], [-b[0], -b[1]], [b[0], -b[1]]];
             let d = dist_seg(p, c[0], c[1])
                 .min(dist_seg(p, c[1], c[2]))
                 .min(dist_seg(p, c[2], c[3]))
@@ -2607,7 +2677,7 @@ mod tests {
         assert!(tunnel_2d([0.0, w], w, h).abs() < 1e-6); // arch apex
         assert!(tunnel_2d([0.0, -h], w, h).abs() < 1e-6); // bottom centre
         assert!(tunnel_2d([-w, -0.5], w, h).abs() < 1e-6); // on left wall
-        // Interior centre: nearest wall is whichever of (w, h) is smaller.
+                                                           // Interior centre: nearest wall is whichever of (w, h) is smaller.
         assert!((tunnel_2d([0.0, 0.0], w, h) - (-h.min(w))).abs() < 1e-6);
         assert!((tunnel_2d([0.0, -h - 0.3], w, h) - 0.3).abs() < 1e-6); // below floor
         assert!((tunnel_2d([0.0, w + 0.4], w, h) - 0.4).abs() < 1e-6); // above apex
@@ -2621,8 +2691,8 @@ mod tests {
         fn dist_seg(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
             let ex = b[0] - a[0];
             let ey = b[1] - a[1];
-            let t = (((p[0] - a[0]) * ex + (p[1] - a[1]) * ey) / (ex * ex + ey * ey))
-                .clamp(0.0, 1.0);
+            let t =
+                (((p[0] - a[0]) * ex + (p[1] - a[1]) * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
             let qx = p[0] - (a[0] + ex * t);
             let qy = p[1] - (a[1] + ey * t);
             (qx * qx + qy * qy).sqrt()
@@ -2644,7 +2714,11 @@ mod tests {
             }
             let inside = (p[0].abs() <= w && p[1] >= -h && p[1] <= 0.0)
                 || (p[0] * p[0] + p[1] * p[1] <= w * w && p[1] >= 0.0);
-            if inside { -d } else { d }
+            if inside {
+                -d
+            } else {
+                d
+            }
         };
         let mut maxerr = 0.0_f32;
         for gy in -24..=24 {
@@ -2705,12 +2779,18 @@ mod tests {
         let v = 2.5_f32;
         let got = infinite_cone([0.0, v, 0.0], sc);
         let want = -v * alpha.sin();
-        assert!((got - want).abs() < 1e-5, "axis interior: got={got} want={want}");
+        assert!(
+            (got - want).abs() < 1e-5,
+            "axis interior: got={got} want={want}"
+        );
 
         // Below the apex the whole cone retreats behind, so the closest feature
         // is the apex itself at exactly the depth, with the exterior sign.
         let got_below = infinite_cone([0.0, -v, 0.0], sc);
-        assert!((got_below - v).abs() < 1e-5, "apex distance: got={got_below} want={v}");
+        assert!(
+            (got_below - v).abs() < 1e-5,
+            "apex distance: got={got_below} want={v}"
+        );
 
         // The apex is exactly on the surface.
         assert!(infinite_cone([0.0, 0.0, 0.0], sc).abs() < 1e-6);
@@ -2766,7 +2846,10 @@ mod tests {
         let h = 1.2_f32;
         let got = pie([0.0, h], [s, c], r);
         let want = -(r - h).min(h * s);
-        assert!((got - want).abs() < 1e-5, "axis interior: got={got} want={want}");
+        assert!(
+            (got - want).abs() < 1e-5,
+            "axis interior: got={got} want={want}"
+        );
 
         // The apex (origin) is a vertex of the sector, hence on the surface.
         assert!(pie([0.0, 0.0], [s, c], r).abs() < 1e-6);
@@ -2774,7 +2857,10 @@ mod tests {
         // A point just outside the arc straight along +y is (dist = depth - r).
         let far = 3.0_f32;
         let got_arc = pie([0.0, far], [s, c], r);
-        assert!((got_arc - (far - r)).abs() < 1e-5, "beyond arc: got={got_arc}");
+        assert!(
+            (got_arc - (far - r)).abs() < 1e-5,
+            "beyond arc: got={got_arc}"
+        );
     }
 
     #[test]
@@ -2792,8 +2878,8 @@ mod tests {
         let n = 2000;
         for k in 0..=n {
             let t = r * k as f32 / n as f32;
-            boundary.push([s * t, c * t]);   // +edge
-            boundary.push([-s * t, c * t]);  // -edge (mirror)
+            boundary.push([s * t, c * t]); // +edge
+            boundary.push([-s * t, c * t]); // -edge (mirror)
         }
         for k in 0..=n {
             let theta = -alpha + 2.0 * alpha * k as f32 / n as f32;
@@ -2945,7 +3031,10 @@ mod tests {
         // Just outside an arm tip along the diagonal: distance grows past -r.
         let got = rounded_x([w * 0.5 + 0.5, w * 0.5 + 0.5], w, r);
         let want = (0.5_f32 * 0.5 + 0.5 * 0.5).sqrt() - r;
-        assert!((got - want).abs() < 1e-5, "beyond tip: got={got} want={want}");
+        assert!(
+            (got - want).abs() < 1e-5,
+            "beyond tip: got={got} want={want}"
+        );
     }
 
     #[test]
@@ -2956,9 +3045,18 @@ mod tests {
         let th = 0.5_f32;
         // Outline vertices walked counter-clockwise.
         let verts: [[f32; 2]; 12] = [
-            [arm, th], [th, th], [th, arm], [-th, arm],
-            [-th, th], [-arm, th], [-arm, -th], [-th, -th],
-            [-th, -arm], [th, -arm], [th, -th], [arm, -th],
+            [arm, th],
+            [th, th],
+            [th, arm],
+            [-th, arm],
+            [-th, th],
+            [-arm, th],
+            [-arm, -th],
+            [-th, -th],
+            [-th, -arm],
+            [th, -arm],
+            [th, -th],
+            [arm, -th],
         ];
         let seg_dist = |p: [f32; 2], a: [f32; 2], b: [f32; 2]| -> f32 {
             let pa = [p[0] - a[0], p[1] - a[1]];
@@ -2998,17 +3096,29 @@ mod tests {
     fn cross_2d_rounding_insets_the_sharp_field() {
         // Rounding by r grows the shape uniformly, i.e. subtracts r everywhere.
         let (arm, th, r) = (1.2_f32, 0.4_f32, 0.2_f32);
-        for &p in &[[0.0_f32, 0.0_f32], [1.0, 0.3], [0.3, 1.0], [2.0, 2.0], [0.5, 0.5]] {
+        for &p in &[
+            [0.0_f32, 0.0_f32],
+            [1.0, 0.3],
+            [0.3, 1.0],
+            [2.0, 2.0],
+            [0.5, 0.5],
+        ] {
             let sharp = cross_2d(p, arm, th, 0.0);
             let rounded = cross_2d(p, arm, th, r);
-            assert!((rounded - (sharp - r)).abs() < 1e-6, "offset wrong at {p:?}");
+            assert!(
+                (rounded - (sharp - r)).abs() < 1e-6,
+                "offset wrong at {p:?}"
+            );
         }
         // The nearest boundary to the centre is the reentrant corner at
         // (thickness, thickness), a distance thickness*sqrt(2) away, then inset
         // by r. A naive 'nearest wall' guess of thickness would be wrong here.
         let centre = cross_2d([0.0, 0.0], arm, th, r);
         let want_centre = -th * std::f32::consts::SQRT_2 - r;
-        assert!((centre - want_centre).abs() < 1e-6, "centre: got={centre} want={want_centre}");
+        assert!(
+            (centre - want_centre).abs() < 1e-6,
+            "centre: got={centre} want={want_centre}"
+        );
     }
 
     #[test]
@@ -3026,12 +3136,18 @@ mod tests {
             }
             let origin = rounded_cross_2d([0.0, 0.0], h);
             let want = k - (1.0 + k * k).sqrt();
-            assert!((origin - want).abs() < 1e-6, "origin h={h}: {origin} vs {want}");
+            assert!(
+                (origin - want).abs() < 1e-6,
+                "origin h={h}: {origin} vs {want}"
+            );
             // Reflection symmetry across both axes.
             for &p in &[[0.37_f32, 0.52], [0.8, 0.1], [1.3, 0.9]] {
                 let base = rounded_cross_2d(p, h);
                 for &q in &[[-p[0], p[1]], [p[0], -p[1]], [-p[0], -p[1]]] {
-                    assert!((rounded_cross_2d(q, h) - base).abs() < 1e-6, "symmetry h={h} p={p:?}");
+                    assert!(
+                        (rounded_cross_2d(q, h) - base).abs() < 1e-6,
+                        "symmetry h={h} p={p:?}"
+                    );
                 }
             }
         }
@@ -3050,7 +3166,10 @@ mod tests {
             let s = 1.0 - k / cmag;
             let pt = [1.0 * s, k * s];
             // Confirm the sample really falls in the fillet wedge.
-            assert!(pt[0] < 1.0 && pt[1] < pt[0] * (k - h) + h, "fillet wedge h={h}");
+            assert!(
+                pt[0] < 1.0 && pt[1] < pt[0] * (k - h) + h,
+                "fillet wedge h={h}"
+            );
             assert!(
                 rounded_cross_2d(pt, h).abs() < 1e-5,
                 "fillet-arc point off surface h={h}: {}",
@@ -3067,14 +3186,23 @@ mod tests {
         for &h in &[1.0_f32, 1.4, 2.0, 0.7] {
             // Straight out the +x axis past the tip (1, 0).
             let dx = 0.75_f32;
-            assert!((rounded_cross_2d([1.0 + dx, 0.0], h) - dx).abs() < 1e-6, "x tip h={h}");
+            assert!(
+                (rounded_cross_2d([1.0 + dx, 0.0], h) - dx).abs() < 1e-6,
+                "x tip h={h}"
+            );
             // Straight up past the +y tip (0, h).
             let dy = 0.6_f32;
-            assert!((rounded_cross_2d([0.0, h + dy], h) - dy).abs() < 1e-6, "y tip h={h}");
+            assert!(
+                (rounded_cross_2d([0.0, h + dy], h) - dy).abs() < 1e-6,
+                "y tip h={h}"
+            );
             // Diagonally beyond the +x tip: exact corner distance.
             let off = [1.0 + 0.4, 0.3_f32];
             let want = (0.4_f32 * 0.4 + 0.3 * 0.3).sqrt();
-            assert!((rounded_cross_2d(off, h) - want).abs() < 1e-6, "x corner h={h}");
+            assert!(
+                (rounded_cross_2d(off, h) - want).abs() < 1e-6,
+                "x corner h={h}"
+            );
         }
     }
 
@@ -3102,7 +3230,10 @@ mod tests {
                     - rounded_cross_2d([p[0], p[1] - eps], h))
                     / (2.0 * eps);
                 let grad = (fx * fx + fy * fy).sqrt();
-                assert!((grad - 1.0).abs() < 5e-3, "eikonal h={h} p={p:?}: |grad|={grad}");
+                assert!(
+                    (grad - 1.0).abs() < 5e-3,
+                    "eikonal h={h} p={p:?}: |grad|={grad}"
+                );
             }
         }
     }
@@ -3119,20 +3250,39 @@ mod tests {
         // ring walls at the bend lie on the surface, a radial step beyond the
         // outer wall reads back exactly, and the field is mirror-symmetric in x.
         for &theta in &[1.0_f32, 0.6, 1.3] {
-            for &(r, arm, th) in &[(1.0_f32, 0.4_f32, 0.15_f32), (1.3, 0.5, 0.2), (0.8, 0.3, 0.1)] {
+            for &(r, arm, th) in &[
+                (1.0_f32, 0.4_f32, 0.15_f32),
+                (1.3, 0.5, 0.2),
+                (0.8, 0.3, 0.1),
+            ] {
                 let bend = horseshoe([0.0, -r], theta, r, arm, th);
-                assert!((bend + th).abs() < 1e-6, "bend depth theta={theta} r={r}: {bend}");
+                assert!(
+                    (bend + th).abs() < 1e-6,
+                    "bend depth theta={theta} r={r}: {bend}"
+                );
                 let outer = horseshoe([0.0, -(r + th)], theta, r, arm, th);
-                assert!(outer.abs() < 1e-6, "outer wall theta={theta} r={r}: {outer}");
+                assert!(
+                    outer.abs() < 1e-6,
+                    "outer wall theta={theta} r={r}: {outer}"
+                );
                 let inner = horseshoe([0.0, -(r - th)], theta, r, arm, th);
-                assert!(inner.abs() < 1e-6, "inner wall theta={theta} r={r}: {inner}");
+                assert!(
+                    inner.abs() < 1e-6,
+                    "inner wall theta={theta} r={r}: {inner}"
+                );
                 let step = 0.3_f32;
                 let out = horseshoe([0.0, -(r + th + step)], theta, r, arm, th);
-                assert!((out - step).abs() < 1e-6, "radial step theta={theta} r={r}: {out}");
+                assert!(
+                    (out - step).abs() < 1e-6,
+                    "radial step theta={theta} r={r}: {out}"
+                );
                 for &p in &[[0.5_f32, 0.7], [0.9, -0.2], [1.4, 1.1]] {
                     let a = horseshoe(p, theta, r, arm, th);
                     let b = horseshoe([-p[0], p[1]], theta, r, arm, th);
-                    assert!((a - b).abs() < 1e-6, "mirror theta={theta} p={p:?}: {a} vs {b}");
+                    assert!(
+                        (a - b).abs() < 1e-6,
+                        "mirror theta={theta} p={p:?}: {a} vs {b}"
+                    );
                 }
             }
         }
@@ -3161,7 +3311,10 @@ mod tests {
                     - horseshoe([p[0], p[1] - eps], theta, r, arm, th))
                     / (2.0 * eps);
                 let grad = (fx * fx + fy * fy).sqrt();
-                assert!((grad - 1.0).abs() < 5e-3, "eikonal theta={theta} p={p:?}: |grad|={grad}");
+                assert!(
+                    (grad - 1.0).abs() < 5e-3,
+                    "eikonal theta={theta} p={p:?}: |grad|={grad}"
+                );
             }
         }
     }
@@ -3205,17 +3358,22 @@ mod tests {
         let b = [0.7_f32, 1.0, 0.5];
         // Points chosen away from faces/edges (the measure-zero creases).
         for &p in &[
-            [1.4_f32, 0.2, -0.1],   // exterior, +x face region
-            [0.1, 1.6, 0.2],        // exterior, +y face region
-            [-1.3, -1.4, -1.1],     // exterior corner octant
-            [0.2, -0.3, 0.1],       // deep interior, dominant -nearest face
-            [0.55, 0.1, 0.1],       // interior near +x face (x least-negative)
+            [1.4_f32, 0.2, -0.1], // exterior, +x face region
+            [0.1, 1.6, 0.2],      // exterior, +y face region
+            [-1.3, -1.4, -1.1],   // exterior corner octant
+            [0.2, -0.3, 0.1],     // deep interior, dominant -nearest face
+            [0.55, 0.1, 0.1],     // interior near +x face (x least-negative)
         ] {
             let g = box_gradient(p, b);
             assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
             let fd = central_grad3(&|q| box_sdf(q, b), p);
             for k in 0..3 {
-                assert!((g[k] - fd[k]).abs() < 1e-3, "box grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+                assert!(
+                    (g[k] - fd[k]).abs() < 1e-3,
+                    "box grad p={p:?} axis {k}: {} vs {}",
+                    g[k],
+                    fd[k]
+                );
             }
         }
         // Interior point closest to the +x face points along +x.
@@ -3235,12 +3393,23 @@ mod tests {
             assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
             let fd = central_grad3(&|q| torus(q, major, minor), p);
             for k in 0..3 {
-                assert!((g[k] - fd[k]).abs() < 2e-3, "torus grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+                assert!(
+                    (g[k] - fd[k]).abs() < 2e-3,
+                    "torus grad p={p:?} axis {k}: {} vs {}",
+                    g[k],
+                    fd[k]
+                );
             }
         }
         // On the central y axis the planar direction is undefined -> +y axis.
-        assert_eq!(torus_gradient([0.0, 0.5, 0.0], major, minor), [0.0, 1.0, 0.0]);
-        assert_eq!(torus_gradient([0.0, -0.5, 0.0], major, minor), [0.0, -1.0, 0.0]);
+        assert_eq!(
+            torus_gradient([0.0, 0.5, 0.0], major, minor),
+            [0.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            torus_gradient([0.0, -0.5, 0.0], major, minor),
+            [0.0, -1.0, 0.0]
+        );
     }
 
     #[test]
@@ -3277,7 +3446,12 @@ mod tests {
             assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
             let fd = central_grad3(&|q| capsule(q, a, b, r), p);
             for k in 0..3 {
-                assert!((g[k] - fd[k]).abs() < 2e-3, "capsule grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+                assert!(
+                    (g[k] - fd[k]).abs() < 2e-3,
+                    "capsule grad p={p:?} axis {k}: {} vs {}",
+                    g[k],
+                    fd[k]
+                );
             }
         }
         // On the skeleton (point == a) the radial direction is undefined.
@@ -3299,11 +3473,19 @@ mod tests {
             assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
             let fd = central_grad3(&|q| vertical_capsule(q, height, r), p);
             for k in 0..3 {
-                assert!((g[k] - fd[k]).abs() < 2e-3, "vcap grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+                assert!(
+                    (g[k] - fd[k]).abs() < 2e-3,
+                    "vcap grad p={p:?} axis {k}: {} vs {}",
+                    g[k],
+                    fd[k]
+                );
             }
         }
         // On the axis segment the radial direction is undefined -> zero.
-        assert_eq!(vertical_capsule_gradient([0.0, 0.5, 0.0], height), [0.0, 0.0, 0.0]);
+        assert_eq!(
+            vertical_capsule_gradient([0.0, 0.5, 0.0], height),
+            [0.0, 0.0, 0.0]
+        );
     }
 
     // Central-difference gradient of a 2D scalar field, the independent
@@ -3343,17 +3525,22 @@ mod tests {
         let b = [0.7_f32, 0.4];
         // Points away from faces/corners (the measure-zero creases).
         for &p in &[
-            [1.2_f32, 0.1],   // exterior, +x edge region
-            [0.1, 0.9],       // exterior, +y edge region
-            [-1.3, -1.0],     // exterior corner quadrant
-            [0.3, -0.1],      // interior, nearest -y edge
-            [0.55, 0.1],      // interior, nearest +x edge
+            [1.2_f32, 0.1], // exterior, +x edge region
+            [0.1, 0.9],     // exterior, +y edge region
+            [-1.3, -1.0],   // exterior corner quadrant
+            [0.3, -0.1],    // interior, nearest -y edge
+            [0.55, 0.1],    // interior, nearest +x edge
         ] {
             let g = box_2d_gradient(p, b);
             assert!((unit_len2(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
             let fd = central_grad2(&|q| box_2d(q, b), p);
             for k in 0..2 {
-                assert!((g[k] - fd[k]).abs() < 1e-3, "box2d grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+                assert!(
+                    (g[k] - fd[k]).abs() < 1e-3,
+                    "box2d grad p={p:?} axis {k}: {} vs {}",
+                    g[k],
+                    fd[k]
+                );
             }
         }
         // Interior point closest to the +x edge points along +x.
@@ -3365,23 +3552,34 @@ mod tests {
         let (half_height, radius) = (0.6_f32, 0.5);
         // Points away from the rim/wall/cap creases (measure-zero).
         for &p in &[
-            [1.0_f32, 0.2, 0.3],   // exterior lateral wall
-            [0.1, 1.2, 0.2],       // exterior cap
-            [0.9, 1.1, 0.6],       // exterior rim corner
-            [0.2, 0.1, 0.1],       // interior, lateral wall nearer
-            [0.1, 0.55, 0.05],     // interior, cap nearer
-            [-0.8, -0.3, 0.4],     // exterior, negative octant
+            [1.0_f32, 0.2, 0.3], // exterior lateral wall
+            [0.1, 1.2, 0.2],     // exterior cap
+            [0.9, 1.1, 0.6],     // exterior rim corner
+            [0.2, 0.1, 0.1],     // interior, lateral wall nearer
+            [0.1, 0.55, 0.05],   // interior, cap nearer
+            [-0.8, -0.3, 0.4],   // exterior, negative octant
         ] {
             let g = capped_cylinder_gradient(p, half_height, radius);
             assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
             let fd = central_grad3(&|q| capped_cylinder(q, half_height, radius), p);
             for k in 0..3 {
-                assert!((g[k] - fd[k]).abs() < 2e-3, "cc grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+                assert!(
+                    (g[k] - fd[k]).abs() < 2e-3,
+                    "cc grad p={p:?} axis {k}: {} vs {}",
+                    g[k],
+                    fd[k]
+                );
             }
         }
         // On the central axis above the cap the normal is the pure +y cap normal.
-        assert_eq!(capped_cylinder_gradient([0.0, 1.0, 0.0], half_height, radius), [0.0, 1.0, 0.0]);
-        assert_eq!(capped_cylinder_gradient([0.0, -1.0, 0.0], half_height, radius), [0.0, -1.0, 0.0]);
+        assert_eq!(
+            capped_cylinder_gradient([0.0, 1.0, 0.0], half_height, radius),
+            [0.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            capped_cylinder_gradient([0.0, -1.0, 0.0], half_height, radius),
+            [0.0, -1.0, 0.0]
+        );
     }
 
     #[test]
@@ -3390,19 +3588,28 @@ mod tests {
         // Points off the fold creases: slanted-face regions in several
         // octants plus central-slab (near-face-centre) samples.
         for &p in &[
-            [1.3_f32, 0.1, 0.05],   // face near +x vertex
-            [0.2, 1.2, 0.1],        // face near +y vertex
-            [0.1, 0.05, 1.25],      // face near +z vertex
-            [0.5, 0.45, 0.4],       // central slab
-            [0.7, 0.5, 0.3],        // central slab
-            [-1.1, -0.2, -0.15],    // face, negative octant
-            [0.9, 0.6, 0.05],       // near the face/slab transition
+            [1.3_f32, 0.1, 0.05], // face near +x vertex
+            [0.2, 1.2, 0.1],      // face near +y vertex
+            [0.1, 0.05, 1.25],    // face near +z vertex
+            [0.5, 0.45, 0.4],     // central slab
+            [0.7, 0.5, 0.3],      // central slab
+            [-1.1, -0.2, -0.15],  // face, negative octant
+            [0.9, 0.6, 0.05],     // near the face/slab transition
         ] {
             let g = octahedron_gradient(p, r);
-            assert!((unit_len3(g) - 1.0).abs() < 1e-5, "unit p={p:?}: {}", unit_len3(g));
+            assert!(
+                (unit_len3(g) - 1.0).abs() < 1e-5,
+                "unit p={p:?}: {}",
+                unit_len3(g)
+            );
             let fd = central_grad3(&|q| octahedron(q, r), p);
             for k in 0..3 {
-                assert!((g[k] - fd[k]).abs() < 2e-3, "octa grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+                assert!(
+                    (g[k] - fd[k]).abs() < 2e-3,
+                    "octa grad p={p:?} axis {k}: {} vs {}",
+                    g[k],
+                    fd[k]
+                );
             }
         }
         // Central slab normal is the uniform face normal with octant signs.
@@ -3414,20 +3621,25 @@ mod tests {
     fn rounded_box_2d_gradient_matches_central_difference_off_creases() {
         let b = [0.8_f32, 0.5];
         let radii = [0.2_f32, 0.15, 0.1, 0.25]; // tr, br, tl, bl
-        // Points off the quadrant-boundary creases (x==0 / y==0).
+                                                // Points off the quadrant-boundary creases (x==0 / y==0).
         for &p in &[
-            [1.0_f32, 0.3],    // exterior +x wall
-            [0.3, 0.9],        // exterior +y wall
-            [-1.1, -0.8],      // exterior bottom-left fillet corner
-            [0.2, 0.1],        // interior, nearest +y wall
-            [0.7, 0.1],        // interior, nearest +x wall
-            [-0.75, 0.42],     // top-left fillet corner region (r=0.1)
+            [1.0_f32, 0.3], // exterior +x wall
+            [0.3, 0.9],     // exterior +y wall
+            [-1.1, -0.8],   // exterior bottom-left fillet corner
+            [0.2, 0.1],     // interior, nearest +y wall
+            [0.7, 0.1],     // interior, nearest +x wall
+            [-0.75, 0.42],  // top-left fillet corner region (r=0.1)
         ] {
             let g = rounded_box_2d_gradient(p, b, radii);
             assert!((unit_len2(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
             let fd = central_grad2(&|q| rounded_box_2d(q, b, radii), p);
             for k in 0..2 {
-                assert!((g[k] - fd[k]).abs() < 2e-3, "rbox grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+                assert!(
+                    (g[k] - fd[k]).abs() < 2e-3,
+                    "rbox grad p={p:?} axis {k}: {} vs {}",
+                    g[k],
+                    fd[k]
+                );
             }
         }
     }
@@ -3506,9 +3718,17 @@ mod tests {
         let ht = 0.5 * th;
         // Corners wound CCW in the box's local frame.
         let corner = |sl: f32, st: f32| {
-            [c[0] + d[0] * (sl * hl) + n[0] * (st * ht), c[1] + d[1] * (sl * hl) + n[1] * (st * ht)]
+            [
+                c[0] + d[0] * (sl * hl) + n[0] * (st * ht),
+                c[1] + d[1] * (sl * hl) + n[1] * (st * ht),
+            ]
         };
-        let verts = [corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0), corner(-1.0, -1.0)];
+        let verts = [
+            corner(1.0, -1.0),
+            corner(1.0, 1.0),
+            corner(-1.0, 1.0),
+            corner(-1.0, -1.0),
+        ];
         let samples: [[f32; 2]; 7] = [
             c,
             [c[0] + n[0] * 1.5, c[1] + n[1] * 1.5],
@@ -3681,7 +3901,10 @@ mod tests {
         let (half_base, height) = (0.6f32, 1.2f32);
         // The three vertices lie on the surface.
         for v in [[0.0f32, 0.0], [half_base, height], [-half_base, height]] {
-            assert!(isosceles_triangle_2d(v, half_base, height).abs() < 1e-6, "vertex {v:?}");
+            assert!(
+                isosceles_triangle_2d(v, half_base, height).abs() < 1e-6,
+                "vertex {v:?}"
+            );
         }
         let verts = [[0.0, 0.0], [half_base, height], [-half_base, height]];
         let samples: [[f32; 2]; 8] = [
@@ -3724,7 +3947,8 @@ mod tests {
             let mut best = f32::INFINITY;
             let n = 4000;
             for i in 0..=n {
-                let a = -std::f32::consts::PI + 2.0 * std::f32::consts::PI * (i as f32) / (n as f32);
+                let a =
+                    -std::f32::consts::PI + 2.0 * std::f32::consts::PI * (i as f32) / (n as f32);
                 let (cx, cy) = (r * a.cos(), r * a.sin());
                 if cy <= h + 1e-6 {
                     best = best.min(((px - cx).powi(2) + (py - cy).powi(2)).sqrt());
@@ -3733,7 +3957,11 @@ mod tests {
                 best = best.min(((px - t).powi(2) + (py - h).powi(2)).sqrt());
             }
             let inside = (px * px + py * py).sqrt() < r && py < h;
-            if inside { -best } else { best }
+            if inside {
+                -best
+            } else {
+                best
+            }
         };
         let samples: [[f32; 2]; 8] = [
             [0.0, 0.0],
@@ -3918,7 +4146,7 @@ mod tests {
         const K: f32 = 1.732_050_8f32; // sqrt(3)
         let r_out = 2.0 * r; // outer tip radius
         let r_in = 2.0 * r / K; // inner vertex radius
-        // Twelve alternating vertices: inner at 60*k deg, outer at 30 + 60*k deg.
+                                // Twelve alternating vertices: inner at 60*k deg, outer at 30 + 60*k deg.
         let mut verts = [[0.0f32; 2]; 12];
         for (k, v) in verts.iter_mut().enumerate() {
             let ang = (30.0 * k as f32).to_radians();
@@ -3985,7 +4213,11 @@ mod tests {
             let e = [b[0] - a[0], b[1] - a[1]];
             let w = [px - a[0], py - a[1]];
             let len2 = e[0] * e[0] + e[1] * e[1];
-            let t = if len2 > 0.0 { ((e[0] * w[0] + e[1] * w[1]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let t = if len2 > 0.0 {
+                ((e[0] * w[0] + e[1] * w[1]) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let dx = w[0] - e[0] * t;
             let dy = w[1] - e[1] * t;
             best = best.min(dx * dx + dy * dy);
@@ -4043,7 +4275,13 @@ mod tests {
         let k = 3.0f32.sqrt();
         let rs = 2.0 * r + rb; // cheek radius
         let mut right: Vec<[f32; 2]> = Vec::new();
-        let push_arc = |v: &mut Vec<[f32; 2]>, c: [f32; 2], rad: f32, a0: f32, a1: f32, n: usize, skip_first: bool| {
+        let push_arc = |v: &mut Vec<[f32; 2]>,
+                        c: [f32; 2],
+                        rad: f32,
+                        a0: f32,
+                        a1: f32,
+                        n: usize,
+                        skip_first: bool| {
             for i in 0..=n {
                 if skip_first && i == 0 {
                     continue;
@@ -4053,11 +4291,35 @@ mod tests {
             }
         };
         // Bottom arc: centre origin, radius ra, from -90deg (tip) to 0deg (widest).
-        push_arc(&mut right, [0.0, 0.0], ra, (-90.0f32).to_radians(), 0.0, 120, false);
+        push_arc(
+            &mut right,
+            [0.0, 0.0],
+            ra,
+            (-90.0f32).to_radians(),
+            0.0,
+            120,
+            false,
+        );
         // Cheek arc: centre (-r,0), radius rs, from 0deg to 60deg.
-        push_arc(&mut right, [-r, 0.0], rs, 0.0, 60.0f32.to_radians(), 120, true);
+        push_arc(
+            &mut right,
+            [-r, 0.0],
+            rs,
+            0.0,
+            60.0f32.to_radians(),
+            120,
+            true,
+        );
         // Top cap: centre (0, k*r), radius rb, from 60deg to 90deg.
-        push_arc(&mut right, [0.0, k * r], rb, 60.0f32.to_radians(), 90.0f32.to_radians(), 80, true);
+        push_arc(
+            &mut right,
+            [0.0, k * r],
+            rb,
+            60.0f32.to_radians(),
+            90.0f32.to_radians(),
+            80,
+            true,
+        );
         // Close by mirroring the right boundary down the left side.
         let mut poly = right.clone();
         for q in right.iter().rev() {
@@ -4071,7 +4333,11 @@ mod tests {
             let e = [b[0] - a[0], b[1] - a[1]];
             let w = [px - a[0], py - a[1]];
             let len2 = e[0] * e[0] + e[1] * e[1];
-            let t = if len2 > 0.0 { ((e[0] * w[0] + e[1] * w[1]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let t = if len2 > 0.0 {
+                ((e[0] * w[0] + e[1] * w[1]) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let dx = w[0] - e[0] * t;
             let dy = w[1] - e[1] * t;
             best = best.min(dx * dx + dy * dy);
@@ -4206,19 +4472,43 @@ mod tests {
         poly.push([bx, -(by - rbr)]);
         poly.push([bx, by - rtr]);
         // Top-right arc 0 -> 90.
-        push_arc(&mut poly, [bx - rtr, by - rtr], rtr, 0.0, 90.0f32.to_radians());
+        push_arc(
+            &mut poly,
+            [bx - rtr, by - rtr],
+            rtr,
+            0.0,
+            90.0f32.to_radians(),
+        );
         // Top edge.
         poly.push([-(bx - rtl), by]);
         // Top-left arc 90 -> 180.
-        push_arc(&mut poly, [-(bx - rtl), by - rtl], rtl, 90.0f32.to_radians(), std::f32::consts::PI);
+        push_arc(
+            &mut poly,
+            [-(bx - rtl), by - rtl],
+            rtl,
+            90.0f32.to_radians(),
+            std::f32::consts::PI,
+        );
         // Left edge.
         poly.push([-bx, -(by - rbl)]);
         // Bottom-left arc 180 -> 270.
-        push_arc(&mut poly, [-(bx - rbl), -(by - rbl)], rbl, std::f32::consts::PI, 270.0f32.to_radians());
+        push_arc(
+            &mut poly,
+            [-(bx - rbl), -(by - rbl)],
+            rbl,
+            std::f32::consts::PI,
+            270.0f32.to_radians(),
+        );
         // Bottom edge.
         poly.push([bx - rbr, -by]);
         // Bottom-right arc 270 -> 360.
-        push_arc(&mut poly, [bx - rbr, -(by - rbr)], rbr, 270.0f32.to_radians(), 360.0f32.to_radians());
+        push_arc(
+            &mut poly,
+            [bx - rbr, -(by - rbr)],
+            rbr,
+            270.0f32.to_radians(),
+            360.0f32.to_radians(),
+        );
         let n = poly.len();
         let mut best = f32::INFINITY;
         for i in 0..n {
@@ -4227,7 +4517,11 @@ mod tests {
             let e = [b[0] - a[0], b[1] - a[1]];
             let w = [px - a[0], py - a[1]];
             let len2 = e[0] * e[0] + e[1] * e[1];
-            let t = if len2 > 0.0 { ((e[0] * w[0] + e[1] * w[1]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let t = if len2 > 0.0 {
+                ((e[0] * w[0] + e[1] * w[1]) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let dx = w[0] - e[0] * t;
             let dy = w[1] - e[1] * t;
             best = best.min(dx * dx + dy * dy);
@@ -4252,14 +4546,17 @@ mod tests {
     fn rounded_box_2d_matches_boundary_reference() {
         let (bx, by) = (1.2f32, 0.8f32);
         let radii = [0.3f32, 0.2, 0.4, 0.1]; // TR, BR, TL, BL
-        // With zero radii it collapses to a plain box distance.
+                                             // With zero radii it collapses to a plain box distance.
         let box_ref = |p: [f32; 2]| {
             let qx = p[0].abs() - bx;
             let qy = p[1].abs() - by;
             (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0)
         };
         for p in [[0.0, 0.0], [1.5, 0.0], [0.0, 1.1], [0.5, 0.5], [-1.3, -0.9]] {
-            assert!((rounded_box_2d(p, [bx, by], [0.0; 4]) - box_ref(p)).abs() < 1e-6, "box collapse at {p:?}");
+            assert!(
+                (rounded_box_2d(p, [bx, by], [0.0; 4]) - box_ref(p)).abs() < 1e-6,
+                "box collapse at {p:?}"
+            );
         }
         // Centre is one short half-extent inside (0.8), minus nothing (corner far).
         assert!((rounded_box_2d([0.0, 0.0], [bx, by], radii) - (-by)).abs() < 1e-5);
@@ -4306,7 +4603,11 @@ mod tests {
     // distance to the lens cross-section built from first principles as two
     // circular arcs. Shares no branch structure with the closed form.
     fn vesica_segment_reference(p: [f32; 3], a: [f32; 3], b: [f32; 3], w: f32) -> f32 {
-        let c = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
+        let c = [
+            (a[0] + b[0]) * 0.5,
+            (a[1] + b[1]) * 0.5,
+            (a[2] + b[2]) * 0.5,
+        ];
         let ba = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
         let l = (ba[0] * ba[0] + ba[1] * ba[1] + ba[2] * ba[2]).sqrt();
         let v = [ba[0] / l, ba[1] / l, ba[2] / l];
@@ -4343,7 +4644,11 @@ mod tests {
             let wx = px - s[0];
             let wy = py - s[1];
             let len2 = ex * ex + ey * ey;
-            let t = if len2 > 0.0 { ((ex * wx + ey * wy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let t = if len2 > 0.0 {
+                ((ex * wx + ey * wy) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let dx = wx - ex * t;
             let dy = wy - ey * t;
             best = best.min(dx * dx + dy * dy);
@@ -4408,7 +4713,13 @@ mod tests {
                 [r * a.cos(), r * a.sin()]
             })
             .collect();
-        for p in [[0.3f32, 0.2], [1.0, -0.9], [-1.6, 0.4], [0.0, 1.9], [-0.5, -0.5]] {
+        for p in [
+            [0.3f32, 0.2],
+            [1.0, -0.9],
+            [-1.6, 0.4],
+            [0.0, 1.9],
+            [-0.5, -0.5],
+        ] {
             let mut best = f32::INFINITY;
             for i in 0..n {
                 let s = ring[i];
@@ -4422,7 +4733,11 @@ mod tests {
                 let dy = wy - ey * t;
                 best = best.min(dx * dx + dy * dy);
             }
-            let sign = if p[0] * p[0] + p[1] * p[1] < r * r { -1.0 } else { 1.0 };
+            let sign = if p[0] * p[0] + p[1] * p[1] < r * r {
+                -1.0
+            } else {
+                1.0
+            };
             let want = best.sqrt() * sign;
             let got = circle_2d(p, r);
             assert!((got - want).abs() < 2e-3, "p={p:?} got={got} want={want}");
@@ -4578,8 +4893,8 @@ mod tests {
         fn seg(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
             let pa = [p[0] - a[0], p[1] - a[1]];
             let ba = [b[0] - a[0], b[1] - a[1]];
-            let h = ((pa[0] * ba[0] + pa[1] * ba[1]) / (ba[0] * ba[0] + ba[1] * ba[1]))
-                .clamp(0.0, 1.0);
+            let h =
+                ((pa[0] * ba[0] + pa[1] * ba[1]) / (ba[0] * ba[0] + ba[1] * ba[1])).clamp(0.0, 1.0);
             ((pa[0] - ba[0] * h).powi(2) + (pa[1] - ba[1] * h).powi(2)).sqrt()
         }
         let d = seg(p, a, b).min(seg(p, b, c)).min(seg(p, c, a));
@@ -4589,9 +4904,12 @@ mod tests {
         let c0 = cr(a, b, p);
         let c1 = cr(b, c, p);
         let c2 = cr(c, a, p);
-        let inside = (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0)
-            || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0);
-        if inside { -d } else { d }
+        let inside = (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0);
+        if inside {
+            -d
+        } else {
+            d
+        }
     }
 
     #[test]
@@ -4666,7 +4984,10 @@ mod tests {
                 let p = [i as f32 * 0.1, j as f32 * 0.1];
                 let got = box_2d(p, b);
                 let want = rounded_box_2d(p, b, [0.0; 4]);
-                assert!((got - want).abs() < 1e-6, "box mismatch at {p:?}: {got} vs {want}");
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "box mismatch at {p:?}: {got} vs {want}"
+                );
                 j += 1;
             }
             i += 1;
@@ -4702,7 +5023,10 @@ mod tests {
                     let p = [i as f32 * 0.2, j as f32 * 0.2, k as f32 * 0.2];
                     let got = vertical_capsule(p, h, r);
                     let want = capsule(p, [0.0, 0.0, 0.0], [0.0, h, 0.0], r);
-                    assert!((got - want).abs() < 1e-5, "mismatch at {p:?}: {got} vs {want}");
+                    assert!(
+                        (got - want).abs() < 1e-5,
+                        "mismatch at {p:?}: {got} vs {want}"
+                    );
                     k += 10;
                 }
                 j += 1;
@@ -4745,8 +5069,8 @@ mod tests {
         let seg = |p: [f32; 2], a: [f32; 2], b: [f32; 2]| -> f32 {
             let pa = [p[0] - a[0], p[1] - a[1]];
             let ba = [b[0] - a[0], b[1] - a[1]];
-            let h = ((pa[0] * ba[0] + pa[1] * ba[1]) / (ba[0] * ba[0] + ba[1] * ba[1]))
-                .clamp(0.0, 1.0);
+            let h =
+                ((pa[0] * ba[0] + pa[1] * ba[1]) / (ba[0] * ba[0] + ba[1] * ba[1])).clamp(0.0, 1.0);
             ((pa[0] - ba[0] * h).powi(2) + (pa[1] - ba[1] * h).powi(2)).sqrt()
         };
         let outer = circle(r + t);
@@ -4759,7 +5083,11 @@ mod tests {
                 }
             }
             let rho = (p[0] * p[0] + p[1] * p[1]).sqrt();
-            if rho >= r - t && rho <= r + t { -d } else { d }
+            if rho >= r - t && rho <= r + t {
+                -d
+            } else {
+                d
+            }
         };
         let mut i = -24i32;
         while i <= 24 {
@@ -4768,7 +5096,10 @@ mod tests {
                 let p = [i as f32 * 0.25, j as f32 * 0.25];
                 let got = annulus_2d(p, r, t);
                 let want = reference(p);
-                assert!((got - want).abs() < 5e-3, "annulus mismatch at {p:?}: {got} vs {want}");
+                assert!(
+                    (got - want).abs() < 5e-3,
+                    "annulus mismatch at {p:?}: {got} vs {want}"
+                );
                 j += 1;
             }
             i += 1;
@@ -4795,7 +5126,10 @@ mod tests {
             let mut i = 0i32;
             while i <= m {
                 let t = i as f32 / m as f32;
-                let q = [seg_a[0] + (seg_b[0] - seg_a[0]) * t, seg_a[1] + (seg_b[1] - seg_a[1]) * t];
+                let q = [
+                    seg_a[0] + (seg_b[0] - seg_a[0]) * t,
+                    seg_a[1] + (seg_b[1] - seg_a[1]) * t,
+                ];
                 d = d.min(((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt());
                 i += 1;
             }
@@ -4808,7 +5142,10 @@ mod tests {
                 let p = [gi as f32 * 0.3, gj as f32 * 0.3];
                 let got = capsule_2d(p, seg_a, seg_b, r);
                 let want = reference(p);
-                assert!((got - want).abs() < 2e-3, "capsule_2d mismatch at {p:?}: {got} vs {want}");
+                assert!(
+                    (got - want).abs() < 2e-3,
+                    "capsule_2d mismatch at {p:?}: {got} vs {want}"
+                );
                 gj += 1;
             }
             gi += 1;
@@ -5167,8 +5504,8 @@ mod tests {
             let b = verts[(i + 1) % 3];
             let ab = [b[0] - a[0], b[1] - a[1]];
             let ap = [point[0] - a[0], point[1] - a[1]];
-            let t = ((ap[0] * ab[0] + ap[1] * ab[1]) / (ab[0] * ab[0] + ab[1] * ab[1]))
-                .clamp(0.0, 1.0);
+            let t =
+                ((ap[0] * ab[0] + ap[1] * ab[1]) / (ab[0] * ab[0] + ab[1] * ab[1])).clamp(0.0, 1.0);
             let c = [a[0] + ab[0] * t, a[1] + ab[1] * t];
             let d = length2([point[0] - c[0], point[1] - c[1]]);
             best = best.min(d);
@@ -5223,13 +5560,7 @@ mod tests {
 
     // Brute-force reference: minimum distance from `p` to a dense sampling of a
     // convex quad, splitting it into triangles (a,b,c) and (a,c,d).
-    fn quad_brute_force(
-        p: [f32; 3],
-        a: [f32; 3],
-        b: [f32; 3],
-        c: [f32; 3],
-        d: [f32; 3],
-    ) -> f32 {
+    fn quad_brute_force(p: [f32; 3], a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]) -> f32 {
         tri_brute_force(p, a, b, c).min(tri_brute_force(p, a, c, d))
     }
 
@@ -5295,20 +5626,18 @@ mod tests {
 
     // Brute-force reference for a capped-cone frustum: minimum distance from `p`
     // to a dense sampling of the lateral surface and both circular caps.
-    fn frustum_brute_force(
-        p: [f32; 3],
-        a: [f32; 3],
-        b: [f32; 3],
-        ra: f32,
-        rb: f32,
-    ) -> f32 {
+    fn frustum_brute_force(p: [f32; 3], a: [f32; 3], b: [f32; 3], ra: f32, rb: f32) -> f32 {
         // Orthonormal basis perpendicular to the axis a->b.
         let axis = {
             let v = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
             let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
             [v[0] / l, v[1] / l, v[2] / l]
         };
-        let seed = if axis[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let seed = if axis[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
         let u = {
             let c = [
                 axis[1] * seed[2] - axis[2] * seed[1],
@@ -5517,7 +5846,8 @@ mod tests {
                     a[1] * u + b[1] * v + c[1] * w,
                     a[2] * u + b[2] * v + c[2] * w,
                 ];
-                let d = ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
+                let d =
+                    ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
                 if d < best {
                     best = d;
                 }

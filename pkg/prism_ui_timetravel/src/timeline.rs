@@ -383,13 +383,7 @@ mod tests {
     fn set_capacity_evicts_and_clamps_cursor() {
         let mut timeline = Timeline::new();
         assert_eq!(timeline.capacity(), None);
-        for (label, text) in [
-            ("a", "1"),
-            ("b", "2"),
-            ("c", "3"),
-            ("d", "4"),
-            ("e", "5"),
-        ] {
+        for (label, text) in [("a", "1"), ("b", "2"), ("c", "3"), ("d", "4"), ("e", "5")] {
             timeline.record(frame(label, text));
         }
         // Point the cursor at "b"; it sits inside the prefix we are about to

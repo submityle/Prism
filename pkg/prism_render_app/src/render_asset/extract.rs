@@ -66,7 +66,12 @@ impl<A: RenderAsset> ExtractedAssets<A> {
     }
 
     /// Takes both lists, leaving the frame empty.
-    pub fn take(&mut self) -> (Vec<(AssetId<A::SourceAsset>, A::SourceAsset)>, Vec<AssetId<A::SourceAsset>>) {
+    pub fn take(
+        &mut self,
+    ) -> (
+        Vec<(AssetId<A::SourceAsset>, A::SourceAsset)>,
+        Vec<AssetId<A::SourceAsset>>,
+    ) {
         (
             core::mem::take(&mut self.extracted),
             core::mem::take(&mut self.removed),
@@ -105,11 +110,12 @@ impl<A: RenderAsset> ExtractedAssets<A> {
 /// already drained from the simulation's queue, so dropping them here would lose
 /// the change for good.
 pub fn extract_assets<A: RenderAsset>(main: &mut World, render: &mut World) {
-    let events: Vec<AssetEvent<A::SourceAsset>> = match main.get_resource_mut::<Assets<A::SourceAsset>>() {
-        Some(assets) => assets.drain_events(),
-        // No arena in the main world: nothing of this family exists yet.
-        None => return,
-    };
+    let events: Vec<AssetEvent<A::SourceAsset>> =
+        match main.get_resource_mut::<Assets<A::SourceAsset>>() {
+            Some(assets) => assets.drain_events(),
+            // No arena in the main world: nothing of this family exists yet.
+            None => return,
+        };
     if events.is_empty() {
         return;
     }

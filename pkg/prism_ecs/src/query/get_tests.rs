@@ -77,7 +77,10 @@ fn get_errors_no_such_entity_for_despawned_and_never_spawned() {
     assert_eq!(state.get(&w, a), Err(QueryEntityError::NoSuchEntity(a)));
     // A plausible-looking handle that was never allocated.
     let bogus = Entity::from_bits(0xDEAD_0000_0000_0001).expect("valid bit pattern");
-    assert_eq!(state.get(&w, bogus), Err(QueryEntityError::NoSuchEntity(bogus)));
+    assert_eq!(
+        state.get(&w, bogus),
+        Err(QueryEntityError::NoSuchEntity(bogus))
+    );
 }
 
 #[test]
@@ -88,7 +91,10 @@ fn get_errors_query_does_not_match_when_component_absent() {
 
     let state = w.query::<&Vel>();
     assert_eq!(state.get(&w, has).map(|v| v.0), Ok(1));
-    assert_eq!(state.get(&w, lacks), Err(QueryEntityError::QueryDoesNotMatch(lacks)));
+    assert_eq!(
+        state.get(&w, lacks),
+        Err(QueryEntityError::QueryDoesNotMatch(lacks))
+    );
 }
 
 #[test]
@@ -100,7 +106,10 @@ fn get_honours_with_and_without_filters() {
 
     let with_vel = w.query_filtered::<&Pos, With<Vel>>();
     assert_eq!(with_vel.get(&w, moving).map(|p| p.0), Ok(1));
-    assert_eq!(with_vel.get(&w, still), Err(QueryEntityError::QueryDoesNotMatch(still)));
+    assert_eq!(
+        with_vel.get(&w, still),
+        Err(QueryEntityError::QueryDoesNotMatch(still))
+    );
 
     let without_frozen = w.query_filtered::<&Pos, (With<Vel>, Without<Frozen>)>();
     assert_eq!(without_frozen.get(&w, moving).map(|p| p.0), Ok(1));
@@ -133,7 +142,10 @@ fn get_resolves_sparse_backed_terms_per_entity() {
     assert_eq!(state.get(&w, buffed).map(|b| b.0), Ok(7));
     // `plain` shares no archetype carrying `Buff`, so the archetype gate rejects
     // it as a non-match rather than a missing entity.
-    assert_eq!(state.get(&w, plain), Err(QueryEntityError::QueryDoesNotMatch(plain)));
+    assert_eq!(
+        state.get(&w, plain),
+        Err(QueryEntityError::QueryDoesNotMatch(plain))
+    );
 }
 
 #[test]
@@ -146,7 +158,10 @@ fn get_resolves_shared_backed_terms() {
     let state = w.query::<&Faction>();
     assert_eq!(state.get(&w, a).map(|f| f.0), Ok(3));
     assert_eq!(state.get(&w, b).map(|f| f.0), Ok(3));
-    assert_eq!(state.get(&w, none), Err(QueryEntityError::QueryDoesNotMatch(none)));
+    assert_eq!(
+        state.get(&w, none),
+        Err(QueryEntityError::QueryDoesNotMatch(none))
+    );
 }
 
 #[test]
@@ -158,7 +173,10 @@ fn get_applies_the_per_row_changed_gate() {
 
     // No write this frame: `Changed<Pos>` must reject the row.
     let changed = w.query_filtered::<Entity, Changed<Pos>>();
-    assert_eq!(changed.get(&w, e), Err(QueryEntityError::QueryDoesNotMatch(e)));
+    assert_eq!(
+        changed.get(&w, e),
+        Err(QueryEntityError::QueryDoesNotMatch(e))
+    );
 
     // Touch `Pos` this frame, then the same filter must accept it.
     {
@@ -183,8 +201,7 @@ fn get_agrees_with_iteration_over_every_entity() {
 
     // Build the expected (entity -> pos) map by iterating the Vel-filtered query.
     let state = w.query_filtered::<(Entity, &Pos), With<Vel>>();
-    let mut iterated: Vec<(Entity, i32)> =
-        state.iter(&w).map(|(e, p)| (e, p.0)).collect();
+    let mut iterated: Vec<(Entity, i32)> = state.iter(&w).map(|(e, p)| (e, p.0)).collect();
     iterated.sort_by_key(|&(e, _)| e.index());
 
     // `get` must return exactly those, and reject the rest.
@@ -198,6 +215,9 @@ fn get_agrees_with_iteration_over_every_entity() {
             Err(other) => panic!("unexpected error for a live entity: {other:?}"),
         }
     }
-    let matched = entities.iter().filter(|&&e| state.get(&w, e).is_ok()).count();
+    let matched = entities
+        .iter()
+        .filter(|&&e| state.get(&w, e).is_ok())
+        .count();
     assert_eq!(matched, iterated.len());
 }

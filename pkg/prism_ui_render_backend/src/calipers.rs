@@ -124,7 +124,12 @@ mod tests {
         loop {
             let n = 6 + (next_rand(state) % 12) as usize;
             let pts: Vec<(f32, f32)> = (0..n)
-                .map(|_| (rand_in(state, -spread, spread), rand_in(state, -spread, spread)))
+                .map(|_| {
+                    (
+                        rand_in(state, -spread, spread),
+                        rand_in(state, -spread, spread),
+                    )
+                })
                 .collect();
             let hull = convex_hull(&pts);
             if hull.len() >= 3 {
@@ -181,7 +186,10 @@ mod tests {
         let mut state = 0x2B3C4_u64;
         for _ in 0..300 {
             let hull = random_hull(&mut state, 18.0);
-            let (tx, ty) = (rand_in(&mut state, -40.0, 40.0), rand_in(&mut state, -40.0, 40.0));
+            let (tx, ty) = (
+                rand_in(&mut state, -40.0, 40.0),
+                rand_in(&mut state, -40.0, 40.0),
+            );
             let moved: Vec<(f32, f32)> = hull.iter().map(|&(x, y)| (x + tx, y + ty)).collect();
             assert!(approx(convex_diameter(&hull), convex_diameter(&moved)));
         }
@@ -197,7 +205,10 @@ mod tests {
             let scaled: Vec<(f32, f32)> = hull.iter().map(|&(x, y)| (x * k, y * k)).collect();
             // `convex_hull` keeps counter-clockwise winding under positive scale.
             let scaled_hull = convex_hull(&scaled);
-            assert!(approx(convex_diameter(&scaled_hull), k * convex_diameter(&hull)));
+            assert!(approx(
+                convex_diameter(&scaled_hull),
+                k * convex_diameter(&hull)
+            ));
         }
     }
 
@@ -218,7 +229,10 @@ mod tests {
                 })
                 .collect();
             let rotated_hull = convex_hull(&rotated);
-            assert!(approx(convex_diameter(&rotated_hull), convex_diameter(&hull)));
+            assert!(approx(
+                convex_diameter(&rotated_hull),
+                convex_diameter(&hull)
+            ));
         }
     }
 

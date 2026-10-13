@@ -80,7 +80,11 @@ const ENERGY_FLOOR: Sample = 1e-20;
 /// Sanitises a sample, mapping non-finite values to `0`.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Accumulates the energy `sum pL[n]^2` over a slice as an `f64` accumulator,
@@ -114,16 +118,16 @@ fn energy_to_db(late_energy: f64, reference_energy: Sample) -> Sample {
     if !reference_energy.is_finite() || reference_energy <= 0.0 {
         return NO_LATE_LATERAL_DB;
     }
-    #[expect(
-        clippy::neg_cmp_op_on_partial_ord,
-        reason = "negated comparison keeps NaN energies on the safe branch, unlike the suggested direct comparison"
-    )]
-    if !(late_energy > f64::from(ENERGY_FLOOR)) {
+    if late_energy <= f64::from(ENERGY_FLOOR) || late_energy.is_nan() {
         return NO_LATE_LATERAL_DB;
     }
     let ratio = (late_energy / f64::from(reference_energy)) as Sample;
     let db = 10.0 * ops::ln(ratio) / LN_10;
-    if db.is_finite() { db } else { NO_LATE_LATERAL_DB }
+    if db.is_finite() {
+        db
+    } else {
+        NO_LATE_LATERAL_DB
+    }
 }
 
 /// Computes the late lateral sound level `LJ` in decibels from a lateral
@@ -243,8 +247,7 @@ mod tests {
     fn larger_reference_lowers_lj() {
         let pl = late_lateral_ir(0.5);
         assert!(
-            late_lateral_sound_level_db(&pl, 10.0, SR)
-                < late_lateral_sound_level_db(&pl, 1.0, SR)
+            late_lateral_sound_level_db(&pl, 10.0, SR) < late_lateral_sound_level_db(&pl, 1.0, SR)
         );
     }
 
@@ -282,7 +285,10 @@ mod tests {
     #[test]
     fn zero_sample_rate_is_sentinel() {
         let pl = late_lateral_ir(0.5);
-        assert_eq!(late_lateral_sound_level_db(&pl, 1.0, 0.0), NO_LATE_LATERAL_DB);
+        assert_eq!(
+            late_lateral_sound_level_db(&pl, 1.0, 0.0),
+            NO_LATE_LATERAL_DB
+        );
         assert_eq!(
             late_lateral_sound_level_db(&pl, 1.0, -1.0),
             NO_LATE_LATERAL_DB
@@ -296,8 +302,14 @@ mod tests {
     #[test]
     fn non_positive_reference_is_sentinel() {
         let pl = late_lateral_ir(0.5);
-        assert_eq!(late_lateral_sound_level_db(&pl, 0.0, SR), NO_LATE_LATERAL_DB);
-        assert_eq!(late_lateral_sound_level_db(&pl, -1.0, SR), NO_LATE_LATERAL_DB);
+        assert_eq!(
+            late_lateral_sound_level_db(&pl, 0.0, SR),
+            NO_LATE_LATERAL_DB
+        );
+        assert_eq!(
+            late_lateral_sound_level_db(&pl, -1.0, SR),
+            NO_LATE_LATERAL_DB
+        );
         assert_eq!(
             late_lateral_sound_level_db(&pl, Sample::NAN, SR),
             NO_LATE_LATERAL_DB
@@ -322,7 +334,10 @@ mod tests {
         for x in pl.iter_mut().take(split / 2) {
             *x = 1.0;
         }
-        assert_eq!(late_lateral_sound_level_db(&pl, 1.0, SR), NO_LATE_LATERAL_DB);
+        assert_eq!(
+            late_lateral_sound_level_db(&pl, 1.0, SR),
+            NO_LATE_LATERAL_DB
+        );
     }
 
     #[test]
@@ -332,21 +347,28 @@ mod tests {
         let mut pl = vec![0.0; split + 100];
         pl[split - 1] = 1.0; // early side, excluded
         pl[split] = 1.0; // late side, included
-        // Only the index at split contributes to the late window (energy 1).
+                         // Only the index at split contributes to the late window (energy 1).
         assert!(approx(late_lateral_sound_level_db(&pl, 1.0, SR), 0.0, 1e-6));
     }
 
     #[test]
     fn short_ir_within_early_window_is_sentinel() {
         let pl = vec![1.0, 0.5, 0.25];
-        assert_eq!(late_lateral_sound_level_db(&pl, 1.0, SR), NO_LATE_LATERAL_DB);
+        assert_eq!(
+            late_lateral_sound_level_db(&pl, 1.0, SR),
+            NO_LATE_LATERAL_DB
+        );
     }
 
     #[test]
     fn from_responses_matches_free_function() {
         let pl = late_lateral_ir(0.4);
         let lj = LateLateralSoundLevel::from_responses(&pl, 1.5, SR);
-        assert!(approx(lj.lj_db, late_lateral_sound_level_db(&pl, 1.5, SR), 1e-6));
+        assert!(approx(
+            lj.lj_db,
+            late_lateral_sound_level_db(&pl, 1.5, SR),
+            1e-6
+        ));
     }
 
     #[test]

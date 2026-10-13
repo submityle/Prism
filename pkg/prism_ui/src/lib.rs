@@ -87,7 +87,7 @@ pub mod ui;
 
 pub use backend::{Backend, BackendId, BackendOp, RecordingBackend};
 pub use element::{Element, ElementKind, Key};
-pub use paint::PaintStyle;
+pub use paint::{Glass, PaintStyle, Shadow};
 pub use reactive_view::ReactiveView;
 pub use stable_id::StableId;
 pub use style_map::build_styles;

@@ -191,10 +191,7 @@ impl<'a, 'w, 's> EntityCommands<'a, 'w, 's> {
     ///     children.spawn(Head);
     /// });
     /// ```
-    pub fn with_children(
-        &mut self,
-        f: impl FnOnce(&mut ChildBuilder<'_, 'w, 's>),
-    ) -> &mut Self {
+    pub fn with_children(&mut self, f: impl FnOnce(&mut ChildBuilder<'_, 'w, 's>)) -> &mut Self {
         let parent = self.entity;
         let mut builder = ChildBuilder {
             parent,

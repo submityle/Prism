@@ -50,8 +50,6 @@ pub mod runtime;
 
 pub use activity::ActivityEnvelope;
 pub use category::{Category, CategoryId, CategorySet};
-pub use rule::{
-    decibels_to_linear, DuckingRule, DEFAULT_ATTACK_SECONDS, DEFAULT_RELEASE_SECONDS,
-};
+pub use rule::{decibels_to_linear, DuckingRule, DEFAULT_ATTACK_SECONDS, DEFAULT_RELEASE_SECONDS};
 pub use ruleset::{AutoMixError, AutoMixRuleset};
 pub use runtime::CompiledAutoMix;

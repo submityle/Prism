@@ -227,7 +227,11 @@ mod tests {
     #[test]
     fn far_ahead_frames_are_out_of_window() {
         let mut window = DeliveryWindow::new(3);
-        assert_eq!(window.insert(2, "c"), Delivery::Buffered, "depth 2 accepted");
+        assert_eq!(
+            window.insert(2, "c"),
+            Delivery::Buffered,
+            "depth 2 accepted"
+        );
         assert_eq!(window.insert(3, "d"), Delivery::OutOfWindow, "depth 3 past");
         assert_eq!(window.buffered(), 1, "the rejected item is not buffered");
 

@@ -104,7 +104,10 @@ mod tests {
             let n = 6 + (next_rand(state) % 12) as usize;
             let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n);
             for _ in 0..n {
-                pts.push((rand_in(state, -spread, spread), rand_in(state, -spread, spread)));
+                pts.push((
+                    rand_in(state, -spread, spread),
+                    rand_in(state, -spread, spread),
+                ));
             }
             let hull = convex_hull(&pts);
             if hull.len() >= 3 {
@@ -121,7 +124,10 @@ mod tests {
         for _ in 0..200 {
             let hull = random_convex(&mut state, 10.0);
             for _ in 0..40 {
-                let p = (rand_in(&mut state, -14.0, 14.0), rand_in(&mut state, -14.0, 14.0));
+                let p = (
+                    rand_in(&mut state, -14.0, 14.0),
+                    rand_in(&mut state, -14.0, 14.0),
+                );
                 let sd = sd_polygon(p.0, p.1, &hull);
                 let got = point_in_convex(&hull, p);
                 if sd < -1e-3 {
@@ -140,7 +146,10 @@ mod tests {
         for _ in 0..200 {
             let hull = random_convex(&mut state, 8.0);
             for _ in 0..40 {
-                let p = (rand_in(&mut state, -12.0, 12.0), rand_in(&mut state, -12.0, 12.0));
+                let p = (
+                    rand_in(&mut state, -12.0, 12.0),
+                    rand_in(&mut state, -12.0, 12.0),
+                );
                 let sd = sd_polygon(p.0, p.1, &hull);
                 if sd.abs() <= 1e-3 {
                     continue;
@@ -163,8 +172,15 @@ mod tests {
             let mut rev = hull.clone();
             rev.reverse();
             for _ in 0..30 {
-                let p = (rand_in(&mut state, -13.0, 13.0), rand_in(&mut state, -13.0, 13.0));
-                assert_eq!(point_in_convex(&hull, p), point_in_convex(&rev, p), "at {p:?}");
+                let p = (
+                    rand_in(&mut state, -13.0, 13.0),
+                    rand_in(&mut state, -13.0, 13.0),
+                );
+                assert_eq!(
+                    point_in_convex(&hull, p),
+                    point_in_convex(&rev, p),
+                    "at {p:?}"
+                );
             }
         }
     }
@@ -206,7 +222,10 @@ mod tests {
                 let b = hull[(i + 1) % n];
                 let mid = ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
                 let p = (mid.0 + (c.0 - mid.0) * 1e-3, mid.1 + (c.1 - mid.1) * 1e-3);
-                assert!(point_in_convex(&hull, p), "near-edge interior point {p:?} outside");
+                assert!(
+                    point_in_convex(&hull, p),
+                    "near-edge interior point {p:?} outside"
+                );
             }
         }
     }

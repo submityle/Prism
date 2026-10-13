@@ -115,7 +115,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body")),
     );
@@ -137,9 +141,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.footnote")),
     );
-    sheet.insert(
-        Class::new("pk-tag-input__tag-label").with(StyleProp::Color, tok("color.label")),
-    );
+    sheet.insert(Class::new("pk-tag-input__tag-label").with(StyleProp::Color, tok("color.label")));
     sheet.insert(
         Class::new("pk-tag-input__tag-remove")
             .with(StyleProp::Width, StyleValue::px(12.0))
@@ -148,7 +150,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::FlexShrink, StyleValue::number(0.0))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
             .with(StyleProp::BackgroundColor, tok("color.label.tertiary"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.label.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.label.secondary"),
+            ),
     );
 
     sheet.insert(
@@ -170,7 +176,11 @@ mod tests {
 
     #[test]
     fn tags_render_before_the_input_slot() {
-        let el = render(TagInputProps::new().tags(["red", "green"]).placeholder("Add"));
+        let el = render(
+            TagInputProps::new()
+                .tags(["red", "green"])
+                .placeholder("Add"),
+        );
         assert_eq!(el.class_names(), ["pk-tag-input"]);
         let kids = el.child_elements();
         assert_eq!(kids.len(), 3);
@@ -202,14 +212,20 @@ mod tests {
     #[test]
     fn disabled_adds_block_modifier() {
         let el = render(TagInputProps::new().disabled(true));
-        assert!(el.class_names().iter().any(|c| c == "pk-tag-input--disabled"));
+        assert!(el
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-tag-input--disabled"));
     }
 
     #[test]
     fn alias_renders_like_tag_input() {
         let via_alias = TokenField::default().render(&TagInputProps::new().tags(["x"]));
         let direct = TagInput.render(&TagInputProps::new().tags(["x"]));
-        assert_eq!(via_alias.child_elements().len(), direct.child_elements().len());
+        assert_eq!(
+            via_alias.child_elements().len(),
+            direct.child_elements().len()
+        );
     }
 
     #[test]

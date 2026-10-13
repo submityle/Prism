@@ -160,7 +160,10 @@ fn signal_chain_oscillator_gain_lowpass_produces_bounded_audio() {
 
     // Signal is audible yet bounded by the amplitude * gain budget (0.8 * 0.5).
     assert!(observed > 0.02, "expected audible output, got {observed}");
-    assert!(observed <= 0.4 + EPS, "exceeded gain budget, got {observed}");
+    assert!(
+        observed <= 0.4 + EPS,
+        "exceeded gain budget, got {observed}"
+    );
 }
 
 #[test]
@@ -208,7 +211,10 @@ fn exposed_parameter_drives_output_value() {
     let desc = b.build();
 
     let mut compiled = compile(&desc, SR, BLOCK).expect("compiles");
-    let level = compiled.param("level").expect("exposed param present").clone();
+    let level = compiled
+        .param("level")
+        .expect("exposed param present")
+        .clone();
     assert_eq!(level.name(), "level");
     level.set(0.75);
 
@@ -239,7 +245,10 @@ fn gate_trigger_opens_adsr_envelope() {
     let desc = b.build();
 
     let mut compiled = compile(&desc, SR, BLOCK).expect("compiles");
-    let gate = compiled.trigger("gate").expect("exposed gate present").clone();
+    let gate = compiled
+        .trigger("gate")
+        .expect("exposed gate present")
+        .clone();
     assert_eq!(gate.name(), "gate");
 
     // With the gate shut the envelope is idle: the output is exact silence.
@@ -259,7 +268,10 @@ fn gate_trigger_opens_adsr_envelope() {
         }
         playhead += BLOCK as u64;
     }
-    assert!(observed > 0.01, "gate open should produce signal, got {observed}");
+    assert!(
+        observed > 0.01,
+        "gate open should produce signal, got {observed}"
+    );
 }
 
 #[test]
@@ -484,10 +496,16 @@ fn automix_ducking_recovers_and_ducks_to_floor() {
     }
     let floor = decibels_to_linear(-12.0);
     let ducked = mix.gain(music);
-    assert!(approx(ducked, floor, EPS), "floor mismatch: {ducked} vs {floor}");
+    assert!(
+        approx(ducked, floor, EPS),
+        "floor mismatch: {ducked} vs {floor}"
+    );
     assert!(approx(mix.gain(dialogue), 1.0, EPS));
     let reduction = mix.reduction(music);
-    assert!((0.0..1.0).contains(&reduction), "reduction out of range: {reduction}");
+    assert!(
+        (0.0..1.0).contains(&reduction),
+        "reduction out of range: {reduction}"
+    );
 
     // Release recovers back toward unity once the trigger stops.
     mix.set_active(dialogue, false);
@@ -520,16 +538,30 @@ fn automix_strongest_duck_wins() {
     let deep = decibels_to_linear(-12.0);
     let shallow = decibels_to_linear(-6.0);
     let music_gain = mix.gain(music);
-    assert!(approx(music_gain, deep, EPS), "expected 12 dB floor, got {music_gain}");
-    assert!(music_gain < shallow, "deeper duck did not win: {music_gain}");
+    assert!(
+        approx(music_gain, deep, EPS),
+        "expected 12 dB floor, got {music_gain}"
+    );
+    assert!(
+        music_gain < shallow,
+        "deeper duck did not win: {music_gain}"
+    );
 }
 
 #[test]
 fn pages_resolve_select_and_compile_resolved_page() {
     // A quality ladder: a cheap base page and a rich high page, each a real
     // compilable Patch description keyed by quality level.
-    let base = PatchPage::new(QualityLevel::LOWEST, "base".to_string(), constant_patch(0.1));
-    let high = PatchPage::new(QualityLevel::new(3), "high".to_string(), constant_patch(0.9));
+    let base = PatchPage::new(
+        QualityLevel::LOWEST,
+        "base".to_string(),
+        constant_patch(0.1),
+    );
+    let high = PatchPage::new(
+        QualityLevel::new(3),
+        "high".to_string(),
+        constant_patch(0.9),
+    );
     let paged = PagedPatch::new(vec![base, high]).expect("valid ladder");
 
     // Resolution picks the richest page not exceeding the requested level.

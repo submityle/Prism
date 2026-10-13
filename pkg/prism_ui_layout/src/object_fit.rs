@@ -96,12 +96,20 @@ impl Default for ObjectPosition {
 
 /// Smaller of two finite `f32` values (no_std-safe, avoids `f32::min`).
 fn min_f(a: f32, b: f32) -> f32 {
-    if a < b { a } else { b }
+    if a < b {
+        a
+    } else {
+        b
+    }
 }
 
 /// Larger of two finite `f32` values (no_std-safe, avoids `f32::max`).
 fn max_f(a: f32, b: f32) -> f32 {
-    if a > b { a } else { b }
+    if a > b {
+        a
+    } else {
+        b
+    }
 }
 
 /// Scales an intrinsic size into a `container` while preserving aspect ratio.
@@ -199,7 +207,12 @@ mod tests {
     #[test]
     fn fill_matches_container_exactly() {
         let c = container();
-        let r = fit(ObjectFit::Fill, Size::new(37.0, 999.0), c, ObjectPosition::TOP_LEFT);
+        let r = fit(
+            ObjectFit::Fill,
+            Size::new(37.0, 999.0),
+            c,
+            ObjectPosition::TOP_LEFT,
+        );
         assert_eq!(r.size, c.size);
         assert_eq!(r.location, c.location);
     }
@@ -207,7 +220,12 @@ mod tests {
     #[test]
     fn none_keeps_intrinsic_size() {
         let intrinsic = Size::new(37.0, 52.0);
-        let r = fit(ObjectFit::None, intrinsic, container(), ObjectPosition::CENTER);
+        let r = fit(
+            ObjectFit::None,
+            intrinsic,
+            container(),
+            ObjectPosition::CENTER,
+        );
         assert_eq!(r.size, intrinsic);
     }
 
@@ -220,7 +238,10 @@ mod tests {
             let out = fitted_size(ObjectFit::Contain, intrinsic, c.size);
             assert!(ratio_preserved(intrinsic, out), "{intrinsic:?} -> {out:?}");
             assert!(out.width <= c.size.width + 1e-2, "{out:?} wider than box");
-            assert!(out.height <= c.size.height + 1e-2, "{out:?} taller than box");
+            assert!(
+                out.height <= c.size.height + 1e-2,
+                "{out:?} taller than box"
+            );
             let touches = (out.width - c.size.width).abs() < 1e-2
                 || (out.height - c.size.height).abs() < 1e-2;
             assert!(touches, "contain must touch an edge: {out:?}");
@@ -235,8 +256,14 @@ mod tests {
             let intrinsic = Size::new(rng.range(1.0, 400.0), rng.range(1.0, 400.0));
             let out = fitted_size(ObjectFit::Cover, intrinsic, c.size);
             assert!(ratio_preserved(intrinsic, out), "{intrinsic:?} -> {out:?}");
-            assert!(out.width >= c.size.width - 1e-2, "{out:?} narrower than box");
-            assert!(out.height >= c.size.height - 1e-2, "{out:?} shorter than box");
+            assert!(
+                out.width >= c.size.width - 1e-2,
+                "{out:?} narrower than box"
+            );
+            assert!(
+                out.height >= c.size.height - 1e-2,
+                "{out:?} shorter than box"
+            );
             let touches = (out.width - c.size.width).abs() < 1e-2
                 || (out.height - c.size.height).abs() < 1e-2;
             assert!(touches, "cover must touch an edge: {out:?}");
@@ -262,7 +289,12 @@ mod tests {
     fn center_position_splits_free_space_evenly() {
         let c = container();
         // Contain of a wide image: width-limited, free vertical space.
-        let out = fit(ObjectFit::Contain, Size::new(240.0, 80.0), c, ObjectPosition::CENTER);
+        let out = fit(
+            ObjectFit::Contain,
+            Size::new(240.0, 80.0),
+            c,
+            ObjectPosition::CENTER,
+        );
         // 240x80 into 120x80 => scale 0.5 => 120x40, 40 free vertical.
         assert!((out.size.width - 120.0).abs() < 1e-3);
         assert!((out.size.height - 40.0).abs() < 1e-3);
@@ -274,9 +306,19 @@ mod tests {
     fn position_fractions_align_to_edges() {
         let c = container();
         let intrinsic = Size::new(240.0, 80.0); // contain => 120x40
-        let start = fit(ObjectFit::Contain, intrinsic, c, ObjectPosition::new(0.0, 0.0));
+        let start = fit(
+            ObjectFit::Contain,
+            intrinsic,
+            c,
+            ObjectPosition::new(0.0, 0.0),
+        );
         assert!((start.top() - c.top()).abs() < 1e-3);
-        let end = fit(ObjectFit::Contain, intrinsic, c, ObjectPosition::new(1.0, 1.0));
+        let end = fit(
+            ObjectFit::Contain,
+            intrinsic,
+            c,
+            ObjectPosition::new(1.0, 1.0),
+        );
         assert!((end.bottom() - c.bottom()).abs() < 1e-3);
     }
 
@@ -291,7 +333,10 @@ mod tests {
         assert!((out.size.height - 360.0).abs() < 1e-3);
         let top_overflow = c.top() - out.top();
         let bottom_overflow = out.bottom() - c.bottom();
-        assert!((top_overflow - bottom_overflow).abs() < 1e-3, "centered overflow symmetric");
+        assert!(
+            (top_overflow - bottom_overflow).abs() < 1e-3,
+            "centered overflow symmetric"
+        );
     }
 
     #[test]

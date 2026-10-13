@@ -56,9 +56,7 @@ pub struct QueryCombinationsIter<'w, 's, D: QueryData, F: QueryFilter, const K: 
     _marker: PhantomData<(&'w World, fn() -> (D, F))>,
 }
 
-impl<'w, 's, D: QueryData, F: QueryFilter, const K: usize>
-    QueryCombinationsIter<'w, 's, D, F, K>
-{
+impl<'w, 's, D: QueryData, F: QueryFilter, const K: usize> QueryCombinationsIter<'w, 's, D, F, K> {
     /// Build a combination iterator over an already-collected row set.
     ///
     /// # Safety

@@ -70,7 +70,7 @@ pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header, DynamicChannels,
     GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
     MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, FALLBACK_MATERIAL_HANDLE,
-    MATERIAL_ABI_VERSION, NO_VIRTUAL_TEXTURE,
+    MATERIAL_ABI_VERSION, NO_VIRTUAL_TEXTURE, PORTABLE_TEXTURE_ATLAS,
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};

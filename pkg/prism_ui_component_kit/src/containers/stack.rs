@@ -156,12 +156,8 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     // Base: a flex container; direction/gap/align come from modifiers.
     sheet.insert(Class::new("pk-stack").with(StyleProp::Display, kw(Keyword::Flex)));
 
-    sheet.insert(
-        Class::new("pk-stack--row").with(StyleProp::FlexDirection, kw(Keyword::Row)),
-    );
-    sheet.insert(
-        Class::new("pk-stack--col").with(StyleProp::FlexDirection, kw(Keyword::Column)),
-    );
+    sheet.insert(Class::new("pk-stack--row").with(StyleProp::FlexDirection, kw(Keyword::Row)));
+    sheet.insert(Class::new("pk-stack--col").with(StyleProp::FlexDirection, kw(Keyword::Column)));
 
     sheet.insert(Class::new("pk-stack--gap-sm").with(StyleProp::Gap, tok("space.xs")));
     sheet.insert(Class::new("pk-stack--gap-md").with(StyleProp::Gap, tok("space.sm")));
@@ -173,15 +169,12 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     sheet.insert(
         Class::new("pk-stack--align-center").with(StyleProp::AlignItems, kw(Keyword::Center)),
     );
-    sheet.insert(
-        Class::new("pk-stack--align-end").with(StyleProp::AlignItems, kw(Keyword::End)),
-    );
+    sheet.insert(Class::new("pk-stack--align-end").with(StyleProp::AlignItems, kw(Keyword::End)));
     sheet.insert(
         Class::new("pk-stack--align-stretch").with(StyleProp::AlignItems, kw(Keyword::Stretch)),
     );
     sheet.insert(
-        Class::new("pk-stack--align-baseline")
-            .with(StyleProp::AlignItems, kw(Keyword::Baseline)),
+        Class::new("pk-stack--align-baseline").with(StyleProp::AlignItems, kw(Keyword::Baseline)),
     );
 }
 
@@ -228,7 +221,8 @@ mod tests {
 
     #[test]
     fn children_are_direct_children() {
-        let el = render(StackProps::new().children([Element::box_(), Element::box_(), Element::box_()]));
+        let el =
+            render(StackProps::new().children([Element::box_(), Element::box_(), Element::box_()]));
         assert_eq!(el.child_elements().len(), 3);
     }
 }

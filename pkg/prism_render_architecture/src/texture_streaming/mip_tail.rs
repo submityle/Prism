@@ -120,11 +120,7 @@ mod tests {
 
     #[test]
     fn covers_are_sorted_ascending() {
-        let keys = vec![
-            key(3, 0, 0, 40, 0),
-            key(1, 0, 0, 0, 0),
-            key(2, 0, 0, 8, 0),
-        ];
+        let keys = vec![key(3, 0, 0, 40, 0), key(1, 0, 0, 0, 0), key(2, 0, 0, 8, 0)];
         let covers = mip_tail_covers(keys, 2);
         let mut sorted = covers.clone();
         sorted.sort_unstable();
@@ -141,11 +137,7 @@ mod tests {
 
     #[test]
     fn distinct_textures_and_layers_stay_separate() {
-        let keys = vec![
-            key(1, 0, 0, 0, 0),
-            key(1, 0, 1, 0, 0),
-            key(2, 0, 0, 0, 0),
-        ];
+        let keys = vec![key(1, 0, 0, 0, 0), key(1, 0, 1, 0, 0), key(2, 0, 0, 0, 0)];
         let covers = mip_tail_covers(keys, 2);
         assert_eq!(
             covers,

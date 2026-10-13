@@ -12,7 +12,7 @@
 
 use prism_math::{Quat, Vec3};
 use prism_transform::compute_hierarchy::{
-    ComputeHierarchyInput, LevelSchedule, propagate_by_levels,
+    propagate_by_levels, ComputeHierarchyInput, LevelSchedule,
 };
 use prism_transform::gpu_upload::MatrixLayout;
 use prism_transform::hierarchy::Hierarchy;
@@ -63,12 +63,8 @@ impl Lcg {
     /// A non-trivial local transform: random translation, a rotation about a
     /// random axis, and a mildly non-uniform positive scale.
     fn transform(&mut self) -> Transform {
-        let axis = Vec3::new(
-            self.signed(1.0),
-            self.signed(1.0),
-            self.signed(1.0) + 0.001,
-        )
-        .normalize();
+        let axis =
+            Vec3::new(self.signed(1.0), self.signed(1.0), self.signed(1.0) + 0.001).normalize();
         let angle = self.signed(core::f32::consts::PI);
         let scale = Vec3::new(
             0.5 + (self.next_u32() >> 8) as f32 / 16_777_216.0,
@@ -92,8 +88,18 @@ fn close(a: f32, b: f32) -> bool {
 fn assert_world_close(cpu: GlobalTransform, gpu: GlobalTransform, node: usize) {
     let a = cpu.affine();
     let b = gpu.affine();
-    let cpu_cols = [a.matrix3.x_axis, a.matrix3.y_axis, a.matrix3.z_axis, a.translation];
-    let gpu_cols = [b.matrix3.x_axis, b.matrix3.y_axis, b.matrix3.z_axis, b.translation];
+    let cpu_cols = [
+        a.matrix3.x_axis,
+        a.matrix3.y_axis,
+        a.matrix3.z_axis,
+        a.translation,
+    ];
+    let gpu_cols = [
+        b.matrix3.x_axis,
+        b.matrix3.y_axis,
+        b.matrix3.z_axis,
+        b.translation,
+    ];
     for (c, (ca, cb)) in cpu_cols.iter().zip(gpu_cols.iter()).enumerate() {
         assert!(
             close(ca.x, cb.x) && close(ca.y, cb.y) && close(ca.z, cb.z),
@@ -111,7 +117,8 @@ fn check(ctx: &GpuContext, hierarchy: &Hierarchy, locals: &[Transform]) {
     let mut cpu = vec![GlobalTransform::IDENTITY; n];
     propagate_by_levels(hierarchy, &schedule, locals, &mut cpu).expect("cpu reference runs");
 
-    let input = ComputeHierarchyInput::pack(hierarchy, &schedule, locals, MatrixLayout::RowMajor3x4);
+    let input =
+        ComputeHierarchyInput::pack(hierarchy, &schedule, locals, MatrixLayout::RowMajor3x4);
     let kernel = GpuHierarchyPropagate::new(ctx);
     let gpu = kernel.propagate(ctx, &input);
 

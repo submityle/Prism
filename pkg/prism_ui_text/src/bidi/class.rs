@@ -136,17 +136,21 @@ pub fn bidi_class(ch: char) -> BidiClass {
 
     // --- Exact: C0/C1 controls, separators, whitespace -------------------
     match c {
-        0x0009 | 0x000B => return S,     // TAB, VT
-        0x000A | 0x000D => return B,     // LF, CR
-        0x001C..=0x001E => return B,     // FS, GS, RS
-        0x001F => return S,              // US
-        0x000C | 0x0020 => return WS,    // FF, SPACE
-        0x0085 => return B,              // NEL
-        0x00A0 => return CS,             // NO-BREAK SPACE
-        0x001A..=0x001B => return BN,    // SUB, ESC
+        0x0009 | 0x000B => return S,  // TAB, VT
+        0x000A | 0x000D => return B,  // LF, CR
+        0x001C..=0x001E => return B,  // FS, GS, RS
+        0x001F => return S,           // US
+        0x000C | 0x0020 => return WS, // FF, SPACE
+        0x0085 => return B,           // NEL
+        0x00A0 => return CS,          // NO-BREAK SPACE
+        0x001A..=0x001B => return BN, // SUB, ESC
         _ => {}
     }
-    if c <= 0x0008 || (0x000E..=0x0019).contains(&c) || (0x007F..=0x0084).contains(&c) || (0x0086..=0x009F).contains(&c) {
+    if c <= 0x0008
+        || (0x000E..=0x0019).contains(&c)
+        || (0x007F..=0x0084).contains(&c)
+        || (0x0086..=0x009F).contains(&c)
+    {
         return BN;
     }
 
@@ -169,84 +173,84 @@ pub fn bidi_class(ch: char) -> BidiClass {
 
     // --- Exact: boundary neutrals (zero-width / BOM / soft hyphen) --------
     match c {
-        0x00AD => return BN,                 // SOFT HYPHEN
-        0x200B..=0x200D => return BN,        // ZWSP, ZWNJ, ZWJ
-        0x2060..=0x2064 => return BN,        // WORD JOINER .. INVISIBLE PLUS
-        0xFEFF => return BN,                 // ZERO WIDTH NO-BREAK SPACE (BOM)
-        0xFFF9..=0xFFFB => return ON,        // interlinear annotation anchors
+        0x00AD => return BN,          // SOFT HYPHEN
+        0x200B..=0x200D => return BN, // ZWSP, ZWNJ, ZWJ
+        0x2060..=0x2064 => return BN, // WORD JOINER .. INVISIBLE PLUS
+        0xFEFF => return BN,          // ZERO WIDTH NO-BREAK SPACE (BOM)
+        0xFFF9..=0xFFFB => return ON, // interlinear annotation anchors
         _ => {}
     }
 
     // --- Exact: whitespace ----------------------------------------------
     match c {
-        0x1680 => return WS,                 // OGHAM SPACE MARK
-        0x2000..=0x200A => return WS,        // EN QUAD .. HAIR SPACE
-        0x2028 => return WS,                 // LINE SEPARATOR
-        0x2029 => return B,                  // PARAGRAPH SEPARATOR
-        0x202F => return CS,                 // NARROW NO-BREAK SPACE
-        0x205F => return WS,                 // MEDIUM MATHEMATICAL SPACE
-        0x3000 => return WS,                 // IDEOGRAPHIC SPACE
+        0x1680 => return WS,          // OGHAM SPACE MARK
+        0x2000..=0x200A => return WS, // EN QUAD .. HAIR SPACE
+        0x2028 => return WS,          // LINE SEPARATOR
+        0x2029 => return B,           // PARAGRAPH SEPARATOR
+        0x202F => return CS,          // NARROW NO-BREAK SPACE
+        0x205F => return WS,          // MEDIUM MATHEMATICAL SPACE
+        0x3000 => return WS,          // IDEOGRAPHIC SPACE
         _ => {}
     }
 
     // --- European numbers (EN) ------------------------------------------
     match c {
-        0x0030..=0x0039 => return EN,        // DIGIT ZERO..NINE
+        0x0030..=0x0039 => return EN,          // DIGIT ZERO..NINE
         0x00B2 | 0x00B3 | 0x00B9 => return EN, // superscript 2,3,1
-        0x06F0..=0x06F9 => return EN,        // EXTENDED ARABIC-INDIC DIGITS
+        0x06F0..=0x06F9 => return EN,          // EXTENDED ARABIC-INDIC DIGITS
         0x2070 | 0x2074..=0x2079 => return EN, // superscripts
-        0x2080..=0x2089 => return EN,        // subscripts
-        0x2488..=0x249B => return EN,        // digit-with-period/paren forms
-        0xFF10..=0xFF19 => return EN,        // FULLWIDTH DIGITS
+        0x2080..=0x2089 => return EN,          // subscripts
+        0x2488..=0x249B => return EN,          // digit-with-period/paren forms
+        0xFF10..=0xFF19 => return EN,          // FULLWIDTH DIGITS
         _ => {}
     }
 
     // --- European separators / terminators (ES / ET) --------------------
     match c {
-        0x002B | 0x002D => return ES,        // PLUS, HYPHEN-MINUS
-        0x207A | 0x207B => return ES,        // superscript +,-
-        0x208A | 0x208B => return ES,        // subscript +,-
-        0x2212 => return ES,                 // MINUS SIGN
-        0xFB29 => return ES,                 // HEBREW LETTER ALTERNATIVE PLUS SIGN
-        0xFE62 | 0xFE63 => return ES,        // small plus / hyphen-minus
-        0xFF0B | 0xFF0D => return ES,        // fullwidth plus / hyphen-minus
+        0x002B | 0x002D => return ES, // PLUS, HYPHEN-MINUS
+        0x207A | 0x207B => return ES, // superscript +,-
+        0x208A | 0x208B => return ES, // subscript +,-
+        0x2212 => return ES,          // MINUS SIGN
+        0xFB29 => return ES,          // HEBREW LETTER ALTERNATIVE PLUS SIGN
+        0xFE62 | 0xFE63 => return ES, // small plus / hyphen-minus
+        0xFF0B | 0xFF0D => return ES, // fullwidth plus / hyphen-minus
         _ => {}
     }
     match c {
-        0x0023..=0x0025 => return ET,        // # $ %
-        0x00A2..=0x00A5 => return ET,        // cent, pound, currency, yen
-        0x00B0 | 0x00B1 => return ET,        // degree, plus-minus
-        0x0609 | 0x060A => return ET,        // arabic-indic per mille/ten thousand
-        0x066A => return ET,                 // ARABIC PERCENT SIGN
-        0x2030..=0x2034 => return ET,        // per mille .. triple prime
-        0x20A0..=0x20CF => return ET,        // CURRENCY SYMBOLS block (default ET)
-        0x212E => return ET,                 // ESTIMATED SYMBOL
-        0x2213 => return ET,                 // MINUS-OR-PLUS SIGN
-        0xFE69 | 0xFF04 => return ET,        // small / fullwidth dollar
-        0xFF05 => return ET,                 // fullwidth percent
-        0xFFE0..=0xFFE1 => return ET,        // fullwidth cent/pound
-        0xFFE5..=0xFFE6 => return ET,        // fullwidth yen/won
+        0x0023..=0x0025 => return ET, // # $ %
+        0x00A2..=0x00A5 => return ET, // cent, pound, currency, yen
+        0x00B0 | 0x00B1 => return ET, // degree, plus-minus
+        0x0609 | 0x060A => return ET, // arabic-indic per mille/ten thousand
+        0x066A => return ET,          // ARABIC PERCENT SIGN
+        0x2030..=0x2034 => return ET, // per mille .. triple prime
+        0x20A0..=0x20CF => return ET, // CURRENCY SYMBOLS block (default ET)
+        0x212E => return ET,          // ESTIMATED SYMBOL
+        0x2213 => return ET,          // MINUS-OR-PLUS SIGN
+        0xFE69 | 0xFF04 => return ET, // small / fullwidth dollar
+        0xFF05 => return ET,          // fullwidth percent
+        0xFFE0..=0xFFE1 => return ET, // fullwidth cent/pound
+        0xFFE5..=0xFFE6 => return ET, // fullwidth yen/won
         _ => {}
     }
 
     // --- Common separators (CS) -----------------------------------------
     match c {
-        0x002C => return CS,                 // COMMA
-        0x002E | 0x002F => return CS,         // FULL STOP, SOLIDUS
-        0x003A => return CS,                 // COLON
-        0x060C => return CS,                 // ARABIC COMMA (CS, not AN)
-        0xFE50 | 0xFE52 | 0xFE55 => return CS, // small comma/stop/colon
+        0x002C => return CS,                            // COMMA
+        0x002E | 0x002F => return CS,                   // FULL STOP, SOLIDUS
+        0x003A => return CS,                            // COLON
+        0x060C => return CS,                            // ARABIC COMMA (CS, not AN)
+        0xFE50 | 0xFE52 | 0xFE55 => return CS,          // small comma/stop/colon
         0xFF0C | 0xFF0E | 0xFF0F | 0xFF1A => return CS, // fullwidth , . / :
         _ => {}
     }
 
     // --- Arabic numbers (AN) --------------------------------------------
     match c {
-        0x0600..=0x0605 => return AN,        // ARABIC NUMBER SIGN .. NUMBER MARK
-        0x0660..=0x0669 => return AN,        // ARABIC-INDIC DIGITS
-        0x066B | 0x066C => return AN,        // arabic decimal / thousands separator
-        0x06DD => return AN,                 // ARABIC END OF AYAH
-        0x08E2 => return AN,                 // ARABIC DISPUTED END OF AYAH
+        0x0600..=0x0605 => return AN, // ARABIC NUMBER SIGN .. NUMBER MARK
+        0x0660..=0x0669 => return AN, // ARABIC-INDIC DIGITS
+        0x066B | 0x066C => return AN, // arabic decimal / thousands separator
+        0x06DD => return AN,          // ARABIC END OF AYAH
+        0x08E2 => return AN,          // ARABIC DISPUTED END OF AYAH
         _ => {}
     }
 

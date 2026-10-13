@@ -305,10 +305,7 @@ mod tests {
         assert_eq!(e.live_rows, 3);
         assert_eq!(e.live_bytes(), 3 * 32);
         assert_eq!(e.reserved_bytes(), e.reserved_rows * 32);
-        assert_eq!(
-            e.reserved_bytes(),
-            e.live_bytes() + e.wasted_bytes()
-        );
+        assert_eq!(e.reserved_bytes(), e.live_bytes() + e.wasted_bytes());
         assert_eq!(report.total_live_bytes, 3 * 32);
     }
 
@@ -350,9 +347,7 @@ mod tests {
 
         // Same archetype → same reserved_rows, so Wide (32 B) outweighs Narrow (1 B).
         assert_eq!(report.heaviest().unwrap().element_size, 32);
-        assert!(
-            report.entries[0].reserved_bytes() >= report.entries[1].reserved_bytes()
-        );
+        assert!(report.entries[0].reserved_bytes() >= report.entries[1].reserved_bytes());
 
         // Totals equal the sum of entries.
         let sum_reserved: usize = report.entries.iter().map(|e| e.reserved_bytes()).sum();
@@ -389,10 +384,7 @@ mod tests {
             by_component.total_reserved_bytes,
             by_archetype.total_allocated_bytes
         );
-        assert_eq!(
-            by_component.total_live_bytes,
-            by_archetype.total_live_bytes
-        );
+        assert_eq!(by_component.total_live_bytes, by_archetype.total_live_bytes);
         assert_eq!(
             by_component.total_wasted_bytes,
             by_archetype.total_wasted_bytes

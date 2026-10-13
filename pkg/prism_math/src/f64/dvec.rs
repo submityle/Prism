@@ -539,10 +539,8 @@ mod tests {
         let v = DVec3::new(5.0e-320, -5.0e-320, 0.0).normalize();
         assert!(v.is_finite());
         assert!((v.length() - 1.0).abs() < 1.0e-15);
-        assert_eq!(
-            DVec3::new(5.0e-320, -5.0e-320, 0.0).normalize_or_zero(),
-            DVec3::ZERO
-        );
+        let normalized = DVec3::new(5.0e-320, -5.0e-320, 0.0).normalize_or_zero();
+        assert_eq!(normalized, DVec3::ZERO);
     }
 
     #[test]

@@ -15,8 +15,8 @@ use prism_render_material::capability::{
     lobe_registry, parse_capabilities, SPECIFICATION_NAMESPACE,
 };
 use prism_render_material::{
-    DynamicChannels, Illumination, LobeMask, SURFACE_CACHE_AUX, SURFACE_CHANNELS, SURFACE_LOBES,
-    SURFACE_IDENTITY_EXTENSIONS, SURFACE_RESPONSE_MODES,
+    DynamicChannels, Illumination, LobeMask, SURFACE_CACHE_AUX, SURFACE_CHANNELS,
+    SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES, SURFACE_RESPONSE_MODES,
 };
 
 /// Every schema lobe is registered in the committed catalogue with the same
@@ -326,7 +326,10 @@ fn the_registry_response_modes_mirror_the_illumination_axis() {
     // The raw `u32` the header carries and the spelling the registry uses are the
     // same fact, and the decode is total over the axis and rejects the rest.
     for illumination in Illumination::ALL {
-        assert_eq!(Illumination::from_u32(illumination.as_u32()), Some(illumination));
+        assert_eq!(
+            Illumination::from_u32(illumination.as_u32()),
+            Some(illumination)
+        );
     }
     assert!(Illumination::from_u32(Illumination::ALL.len() as u32).is_none());
 }
@@ -401,7 +404,12 @@ fn the_schema_cache_aux_matches_the_catalogue() {
             .manifest_by_uid(aux.uid)
             .unwrap_or_else(|| panic!("catalogue is missing cache aux {}", aux.uid));
         assert_eq!(row.kind(), Kind::CacheAux, "{} kind", aux.id);
-        assert_eq!(row.registry_slot(), Some(aux.registry_slot), "{} slot", aux.id);
+        assert_eq!(
+            row.registry_slot(),
+            Some(aux.registry_slot),
+            "{} slot",
+            aux.id
+        );
         assert_eq!(
             row.namespace(),
             Namespace::parse(aux.namespace).expect("schema namespace spelling"),
@@ -459,7 +467,11 @@ fn the_schema_identity_extensions_match_the_catalogue() {
         assert!(
             matches!(
                 kind,
-                Kind::Provider | Kind::Transfer | Kind::Downgrade | Kind::AuthorNode | Kind::Composite
+                Kind::Provider
+                    | Kind::Transfer
+                    | Kind::Downgrade
+                    | Kind::AuthorNode
+                    | Kind::Composite
             ),
             "{} must be a bake/pass-time kind",
             extension.id

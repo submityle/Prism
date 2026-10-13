@@ -35,9 +35,9 @@ use alloc::vec::Vec;
 
 use bytemuck::{Pod, Zeroable};
 use prism_math::{Affine3, Mat3, Vec3};
-use prism_transform::GlobalTransform;
 use prism_transform::compute_hierarchy::ComputeHierarchyInput;
 use prism_transform::gpu_upload::MatrixLayout;
+use prism_transform::GlobalTransform;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferBindingType, CommandEncoderDescriptor,
@@ -243,7 +243,11 @@ impl GpuHierarchyPropagate {
     /// Panics if `input`'s matrix layout is not
     /// [`MatrixLayout::RowMajor3x4`] (the only encoding this kernel decodes).
     #[must_use]
-    pub fn propagate(&self, ctx: &GpuContext, input: &ComputeHierarchyInput) -> Vec<GlobalTransform> {
+    pub fn propagate(
+        &self,
+        ctx: &GpuContext,
+        input: &ComputeHierarchyInput,
+    ) -> Vec<GlobalTransform> {
         assert_eq!(
             input.layout(),
             MatrixLayout::RowMajor3x4,

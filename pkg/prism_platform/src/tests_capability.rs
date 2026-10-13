@@ -1,8 +1,6 @@
 //! Tests for the §24.6 capability database, degradation API, and report.
 
-use crate::capability::{
-    Capability, CapabilityDatabase, Category, Selection, SupportLevel,
-};
+use crate::capability::{Capability, CapabilityDatabase, Category, Selection, SupportLevel};
 use crate::platform::{Os, PlatformCaps};
 
 /// A capability-flag snapshot for a fully-featured desktop build.
@@ -115,7 +113,10 @@ fn desktop_macos_degrades_huge_pages_and_drops_affinity() {
     assert!(!db.is_native(Capability::HugePages));
     assert!(!db.support(Capability::HugePages).detail.is_empty());
 
-    assert_eq!(db.level(Capability::ThreadAffinity), SupportLevel::Unsupported);
+    assert_eq!(
+        db.level(Capability::ThreadAffinity),
+        SupportLevel::Unsupported
+    );
     assert!(!db.is_usable(Capability::ThreadAffinity));
 
     // Everything else on a full macOS build is native.
@@ -123,8 +124,7 @@ fn desktop_macos_degrades_huge_pages_and_drops_affinity() {
     assert_eq!(db.count_at(SupportLevel::Degraded), 1);
     assert_eq!(db.count_at(SupportLevel::Unsupported), 1);
     // The degradation matrix lists exactly huge pages + affinity.
-    let mut flagged: Vec<Capability> =
-        db.degraded().map(|s| s.capability).collect();
+    let mut flagged: Vec<Capability> = db.degraded().map(|s| s.capability).collect();
     flagged.sort();
     let mut expected = alloc::vec![Capability::HugePages, Capability::ThreadAffinity];
     expected.sort();
@@ -136,11 +136,20 @@ fn portable_std_degrades_mmap_and_watch() {
     let db = CapabilityDatabase::from_platform(Os::Linux, portable_std_caps());
     // mmap and file watch degrade to the buffered / polling fallbacks.
     assert_eq!(db.level(Capability::Mmap), SupportLevel::Degraded);
-    assert_eq!(db.level(Capability::NativeFileWatch), SupportLevel::Degraded);
+    assert_eq!(
+        db.level(Capability::NativeFileWatch),
+        SupportLevel::Degraded
+    );
     assert!(db.is_usable(Capability::Mmap));
     // dynlib + crash have no fallback here.
-    assert_eq!(db.level(Capability::DynlibUnload), SupportLevel::Unsupported);
-    assert_eq!(db.level(Capability::CrashCapture), SupportLevel::Unsupported);
+    assert_eq!(
+        db.level(Capability::DynlibUnload),
+        SupportLevel::Unsupported
+    );
+    assert_eq!(
+        db.level(Capability::CrashCapture),
+        SupportLevel::Unsupported
+    );
     // Linux + std ⇒ huge pages and affinity are native.
     assert_eq!(db.level(Capability::HugePages), SupportLevel::Native);
     assert_eq!(db.level(Capability::ThreadAffinity), SupportLevel::Native);
@@ -152,7 +161,11 @@ fn bare_no_std_is_all_unsupported() {
     for &cap in Capability::ALL {
         assert_eq!(db.level(cap), SupportLevel::Unsupported, "{}", cap.key());
         assert!(!db.is_usable(cap));
-        assert!(!db.support(cap).detail.is_empty(), "{} missing reason", cap.key());
+        assert!(
+            !db.support(cap).detail.is_empty(),
+            "{} missing reason",
+            cap.key()
+        );
     }
     assert_eq!(db.count_at(SupportLevel::Unsupported), 10);
 }
@@ -173,7 +186,10 @@ fn web_build_truth_table() {
     };
     let db = CapabilityDatabase::from_platform(Os::Web, caps);
     assert_eq!(db.level(Capability::Subprocess), SupportLevel::Unsupported);
-    assert_eq!(db.level(Capability::ThreadAffinity), SupportLevel::Unsupported);
+    assert_eq!(
+        db.level(Capability::ThreadAffinity),
+        SupportLevel::Unsupported
+    );
     assert_eq!(db.level(Capability::HugePages), SupportLevel::Degraded);
     assert_eq!(db.level(Capability::Mmap), SupportLevel::Degraded);
     assert_eq!(db.level(Capability::MonotonicClock), SupportLevel::Native);
@@ -183,15 +199,19 @@ fn web_build_truth_table() {
 fn require_select_takes_native_branch_only() {
     let db = CapabilityDatabase::from_platform(Os::Linux, desktop_caps());
     let mut fallback_ran = false;
-    let sel: Selection<&str> = db
-        .require(Capability::HugePages)
-        .select(|| "huge", || {
+    let sel: Selection<&str> = db.require(Capability::HugePages).select(
+        || "huge",
+        || {
             fallback_ran = true;
             "normal"
-        });
+        },
+    );
     assert_eq!(sel.value, "huge");
     assert!(!sel.degraded);
-    assert!(!fallback_ran, "fallback must not run when native is available");
+    assert!(
+        !fallback_ran,
+        "fallback must not run when native is available"
+    );
     assert_eq!(sel.support.level, SupportLevel::Native);
 }
 
@@ -222,7 +242,9 @@ fn require_value_and_native_only_helpers() {
     assert!(sel.degraded);
 
     // Native wall clock ⇒ or_fallback picks the native value.
-    let sel = db.require(Capability::WallClock).or_fallback("real", "stub");
+    let sel = db
+        .require(Capability::WallClock)
+        .or_fallback("real", "stub");
     assert_eq!(sel.value, "real");
     assert!(!sel.degraded);
 
@@ -277,9 +299,17 @@ fn current_build_is_self_consistent() {
     for entry in db.entries() {
         // Native entries never carry a detail; non-native entries always do.
         if entry.is_native() {
-            assert!(entry.detail.is_empty(), "{} native w/ detail", entry.capability.key());
+            assert!(
+                entry.detail.is_empty(),
+                "{} native w/ detail",
+                entry.capability.key()
+            );
         } else {
-            assert!(!entry.detail.is_empty(), "{} non-native w/o reason", entry.capability.key());
+            assert!(
+                !entry.detail.is_empty(),
+                "{} non-native w/o reason",
+                entry.capability.key()
+            );
         }
     }
     // Counts partition the catalog.

@@ -154,7 +154,9 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
         let mut name = String::from("pk-dock-panel--");
         name.push_str(side.suffix());
         let class = match side {
-            DockSide::Floating => Class::new(name).with_shadow(0.0, 12.0, 32.0, tok("glass.shadow")),
+            DockSide::Floating => {
+                Class::new(name).with_shadow(0.0, 12.0, 32.0, tok("glass.shadow"))
+            }
             _ => Class::new(name).with(StyleProp::MinWidth, StyleValue::px(180.0)),
         };
         sheet.insert(class);

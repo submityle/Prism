@@ -73,10 +73,7 @@ pub fn derive_reflect(input: TokenStream) -> TokenStream {
 }
 
 /// Emit the `GetTypeRegistration` impl shared by every derived kind.
-fn get_type_registration(
-    ident: &syn::Ident,
-    metadata: Option<TokenStream2>,
-) -> TokenStream2 {
+fn get_type_registration(ident: &syn::Ident, metadata: Option<TokenStream2>) -> TokenStream2 {
     let body = match metadata {
         Some(metadata) => quote! {
             let mut __registration = ::prism_reflect::TypeRegistration::of::<#ident>();
@@ -573,7 +570,6 @@ fn derive_enum(
         #registration
     }
 }
-
 
 /// Derive [`StaticTyped`] for a named-field struct — design §24.1.
 ///

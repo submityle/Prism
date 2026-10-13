@@ -27,10 +27,10 @@ mod many;
 mod matched;
 #[cfg(feature = "multi_thread")]
 mod par;
-mod slice;
-mod slice_iter;
 #[cfg(feature = "simd")]
 mod simd;
+mod slice;
+mod slice_iter;
 mod state;
 
 pub use access::Access;
@@ -51,25 +51,25 @@ mod any_of_tests;
 #[cfg(all(test, feature = "std"))]
 mod cache_concurrency_tests;
 #[cfg(test)]
+mod change_detection_tests;
+#[cfg(test)]
 mod combinations_tests;
 #[cfg(test)]
+mod dirty_tests;
+#[cfg(test)]
 mod get_tests;
+#[cfg(test)]
+mod has_tests;
 #[cfg(test)]
 mod identity_tests;
 #[cfg(test)]
 mod many_tests;
+#[cfg(all(test, feature = "multi_thread"))]
+mod par_tests;
 #[cfg(test)]
 mod single_tests;
 #[cfg(test)]
 mod slice_iter_tests;
-#[cfg(test)]
-mod change_detection_tests;
-#[cfg(test)]
-mod dirty_tests;
-#[cfg(test)]
-mod has_tests;
-#[cfg(all(test, feature = "multi_thread"))]
-mod par_tests;
 #[cfg(all(test, feature = "multi_thread"))]
 mod slice_tests;
 #[cfg(test)]

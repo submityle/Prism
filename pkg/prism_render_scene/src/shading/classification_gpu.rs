@@ -40,11 +40,9 @@ fn builtin_shading_class_count() -> u32 {
     static COUNT: OnceLock<u32> = OnceLock::new();
     *COUNT.get_or_init(|| {
         let registry = prism_material_pcm::builtin::builtin_registry();
-        let table = ShadingClassTable::from_registry(
-            &registry,
-            &prism_render_material::SURFACE_LOBES,
-        )
-        .expect("the built-in response-mode catalogue must be fully implemented");
+        let table =
+            ShadingClassTable::from_registry(&registry, &prism_render_material::SURFACE_LOBES)
+                .expect("the built-in response-mode catalogue must be fully implemented");
         table
             .validate(MAX_SHADING_CLASSES)
             .expect("the built-in class set must fit the shader-side capacity");

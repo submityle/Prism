@@ -449,11 +449,7 @@ mod tests {
         let layout = Layout::from_size_align(12, 8).unwrap();
         let id = components.register_dynamic("Padded", layout, StorageType::Table, None);
         let report = ComponentAlignmentReport::from_components(&components);
-        let entry = report
-            .entries()
-            .iter()
-            .find(|e| e.component == id)
-            .unwrap();
+        let entry = report.entries().iter().find(|e| e.component == id).unwrap();
         assert_eq!(entry.size, 12);
         assert_eq!(entry.align, 8);
         assert_eq!(entry.stride, 16);
@@ -468,7 +464,11 @@ mod tests {
         components.register::<Small>();
         components.register::<Simd16>();
         let report = ComponentAlignmentReport::from_components(&components);
-        let ids: Vec<u32> = report.entries().iter().map(|e| e.component.index()).collect();
+        let ids: Vec<u32> = report
+            .entries()
+            .iter()
+            .map(|e| e.component.index())
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted);

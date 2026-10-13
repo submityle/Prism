@@ -341,9 +341,8 @@ fn scale_spawn_batch_vs_individual_1m() {
 
     let batched = best_of(|| {
         let mut world = World::new();
-        let spawned = world.spawn_batch(
-            (0..ENTITIES).map(|i| (Pos(i as f32, 0.0, 0.0), Vel(1.0, 2.0, 3.0))),
-        );
+        let spawned =
+            world.spawn_batch((0..ENTITIES).map(|i| (Pos(i as f32, 0.0, 0.0), Vel(1.0, 2.0, 3.0))));
         black_box(spawned.len());
     });
 
@@ -369,9 +368,8 @@ fn scale_dirty_chunks_vs_changed_scan_1m() {
 
     fn run_scenario(clustered: bool) -> (Duration, Duration, usize, usize) {
         let mut world = World::new();
-        let entities: Vec<Entity> = world.spawn_batch(
-            (0..ENTITIES).map(|i| (Pos(i as f32, 0.0, 0.0), Vel(1.0, 2.0, 3.0))),
-        );
+        let entities: Vec<Entity> =
+            world.spawn_batch((0..ENTITIES).map(|i| (Pos(i as f32, 0.0, 0.0), Vel(1.0, 2.0, 3.0))));
 
         // Baseline the change window, then touch the selected rows.
         let last_run = world.change_tick();

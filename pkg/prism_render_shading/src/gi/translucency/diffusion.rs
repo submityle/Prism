@@ -483,8 +483,14 @@ mod tests {
         for &(d, albedo) in &[(0.5f32, 1.0f32), (1.0, 0.8), (2.5, 0.35)] {
             let coarse = (profile_radial_energy(d, albedo, 16) - albedo).abs();
             let fine = (profile_radial_energy(d, albedo, 4096) - albedo).abs();
-            assert!(fine < 2.0e-3, "fine error {fine} too large (d={d}, A={albedo})");
-            assert!(fine <= coarse + 1e-6, "refining budget worsened the estimate");
+            assert!(
+                fine < 2.0e-3,
+                "fine error {fine} too large (d={d}, A={albedo})"
+            );
+            assert!(
+                fine <= coarse + 1e-6,
+                "refining budget worsened the estimate"
+            );
         }
     }
 

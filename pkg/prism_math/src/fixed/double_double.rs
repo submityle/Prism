@@ -81,10 +81,7 @@ impl DoubleDouble {
     #[inline]
     #[must_use]
     pub const fn from_f64(value: f64) -> Self {
-        Self {
-            hi: value,
-            lo: 0.0,
-        }
+        Self { hi: value, lo: 0.0 }
     }
 
     /// Construct from two lanes, renormalizing so the result satisfies the
@@ -133,7 +130,11 @@ impl DoubleDouble {
     #[inline]
     #[must_use]
     pub fn abs(self) -> Self {
-        if self.hi < 0.0 { self.neg() } else { self }
+        if self.hi < 0.0 {
+            self.neg()
+        } else {
+            self
+        }
     }
 
     /// `true` if both lanes are zero.

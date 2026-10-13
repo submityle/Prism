@@ -79,9 +79,7 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
 
     use crate::preset::tok;
 
-    sheet.insert(
-        Class::new("pk-divider").with(StyleProp::BackgroundColor, tok("color.separator")),
-    );
+    sheet.insert(Class::new("pk-divider").with(StyleProp::BackgroundColor, tok("color.separator")));
     sheet.insert(
         Class::new("pk-divider--horizontal")
             .with(StyleProp::Width, StyleValue::percent(100.0))
@@ -108,7 +106,11 @@ mod tests {
     fn register_adds_classes() {
         let mut sheet = StyleSheet::new();
         register_styles(&mut sheet);
-        for name in ["pk-divider", "pk-divider--horizontal", "pk-divider--vertical"] {
+        for name in [
+            "pk-divider",
+            "pk-divider--horizontal",
+            "pk-divider--vertical",
+        ] {
             assert!(sheet.get(name).is_some(), "missing {name}");
         }
     }

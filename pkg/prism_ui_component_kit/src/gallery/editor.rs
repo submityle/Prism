@@ -7,11 +7,11 @@ use prism_ui_component::mount_component;
 
 use super::Showcase;
 use crate::editor::{
-    AssetBrowser, AssetBrowserProps, AssetItem, Chart, ChartKind, ChartProps, Console, ConsoleProps,
-    DockPanel, DockPanelProps, DockSide, Gauge, GaugeProps, Knob, KnobProps, LogEntry, LogLevel,
-    PropertyGrid, PropertyGridProps, PropertyRow, Ruler, RulerOrientation, RulerProps, Sequencer,
-    SequencerProps, SequencerTrack, TransformField, TransformFieldProps, VectorField,
-    VectorFieldProps,
+    AssetBrowser, AssetBrowserProps, AssetItem, Chart, ChartKind, ChartProps, Console,
+    ConsoleProps, DockPanel, DockPanelProps, DockSide, Gauge, GaugeProps, Knob, KnobProps,
+    LogEntry, LogLevel, PropertyGrid, PropertyGridProps, PropertyRow, Ruler, RulerOrientation,
+    RulerProps, Sequencer, SequencerProps, SequencerTrack, TransformField, TransformFieldProps,
+    VectorField, VectorFieldProps,
 };
 
 /// Real, named instances of every `editor` control.
@@ -45,10 +45,7 @@ pub fn instances() -> Vec<Showcase> {
                     .scale(VectorFieldProps::xyz().values(["1.0", "1.0", "1.0"])),
             ),
         ),
-        Showcase::new(
-            "Knob / Value",
-            mount_component(&Knob, KnobProps::new(0.6)),
-        ),
+        Showcase::new("Knob / Value", mount_component(&Knob, KnobProps::new(0.6)),),
         Showcase::new(
             "Gauge / Value",
             mount_component(&Gauge, GaugeProps::new(0.72).text("72%")),

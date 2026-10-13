@@ -106,7 +106,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Gap, tok("space.xs"))
             .with(StyleProp::FontSize, tok("font.size.body"))
             .with(StyleProp::Color, tok("color.label"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     sheet.insert(
@@ -169,7 +173,10 @@ mod tests {
         assert_eq!(kids.len(), 2);
         assert_eq!(kids[1].kind(), &ElementKind::Text);
         assert_eq!(kids[1].text_content(), Some("Accept"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-checkbox__label"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-checkbox__label"));
     }
 
     #[test]

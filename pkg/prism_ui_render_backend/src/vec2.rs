@@ -59,10 +59,7 @@ pub(crate) fn distance(a: (f32, f32), b: (f32, f32)) -> f32 {
 /// `[0, 1]`).
 #[inline]
 pub(crate) fn lerp(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
-    (
-        a.0 + (b.0 - a.0) * t,
-        a.1 + (b.1 - a.1) * t,
-    )
+    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
 }
 
 #[cfg(test)]

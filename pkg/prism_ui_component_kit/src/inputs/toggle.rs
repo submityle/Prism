@@ -81,7 +81,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with_padding_y(StyleValue::px(2.0))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
             .with(StyleProp::BackgroundColor, tok("color.fill"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     // On: accent track, thumb pushed to the trailing edge.
@@ -99,7 +103,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::MinWidth, StyleValue::px(22.0))
             .with(StyleProp::FlexShrink, StyleValue::number(0.0))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
-            .with(StyleProp::BackgroundColor, StyleValue::rgba8(255, 255, 255, 255))
+            .with(
+                StyleProp::BackgroundColor,
+                StyleValue::rgba8(255, 255, 255, 255),
+            )
             .with_shadow(0.0, 1.0, 3.0, tok("glass.shadow")),
     );
 }

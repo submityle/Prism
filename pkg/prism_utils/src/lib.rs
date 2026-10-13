@@ -151,12 +151,12 @@ pub use concurrent::{
     SpscProducer, SpscQueue, TreiberStack,
 };
 pub use cow::Cow;
+#[cfg(feature = "concurrent")]
+pub use det::ConcurrentMerge;
 pub use det::{
     mix64, reproducible_hash_ordered, reproducible_hash_unordered, DetId, DetIdError,
     DeterministicIdAllocator, DeterministicMerge, OrderedHashCombiner, UnorderedHashCombiner,
 };
-#[cfg(feature = "concurrent")]
-pub use det::ConcurrentMerge;
 pub use determinism::{OrderedMap, OrderedSet};
 pub use guard::{GuardConfig, GuardError, GuardHandle, GuardedBuffer, GuardedPool};
 pub use hash::{

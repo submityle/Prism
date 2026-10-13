@@ -45,7 +45,11 @@ use prism_audio_accessibility::visual_cue::{CueKind, VisualCue};
 /// branch-only implementation.
 #[inline]
 fn fabs(x: Sample) -> Sample {
-    if x < 0.0 { -x } else { x }
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
 }
 
 /// Returns `true` when `a` and `b` are within `eps` of each other.
@@ -65,7 +69,9 @@ fn fully_assisted_profile() -> AccessibilityProfile {
         .with_visual_cues(true)
         .with_downmix(MonoDownmix::new(true))
         .with_dialogue_boost(DialogueBoost::new(BoostStrength::High))
-        .with_compression(CompressionProfile::from_preset(CompressionPreset::HardOfHearing))
+        .with_compression(CompressionProfile::from_preset(
+            CompressionPreset::HardOfHearing,
+        ))
 }
 
 /// The complete main chain: compose a profile, then derive every downstream
@@ -106,7 +112,11 @@ fn full_chain_end_to_end_produces_consistent_settings() {
     let base_duck = DuckingParams::default();
     let ducked = profile.apply_ducking(base_duck);
     assert!(close(ducked.range_db, base_duck.range_db + 10.0, EPS));
-    assert!(close(ducked.threshold_db, base_duck.threshold_db - 12.0, EPS));
+    assert!(close(
+        ducked.threshold_db,
+        base_duck.threshold_db - 12.0,
+        EPS
+    ));
 
     let base_comp = CompressorParams::default();
     let compressed = profile.apply_compressor(base_comp);
@@ -141,7 +151,11 @@ fn full_chain_is_bit_deterministic() {
     assert_eq!(comp_a.makeup_db.to_bits(), comp_b.makeup_db.to_bits());
 
     assert_eq!(matrix_a.coefficients().len(), matrix_b.coefficients().len());
-    for (ca, cb) in matrix_a.coefficients().iter().zip(matrix_b.coefficients().iter()) {
+    for (ca, cb) in matrix_a
+        .coefficients()
+        .iter()
+        .zip(matrix_b.coefficients().iter())
+    {
         assert_eq!(ca.to_bits(), cb.to_bits());
     }
 }
@@ -248,8 +262,14 @@ fn dialogue_boost_strengthens_ducking_monotonically() {
             assert!(close(out.range_db, base.range_db, EPS));
             assert!(close(out.threshold_db, base.threshold_db, EPS));
         } else {
-            assert!(out.range_db > prev_range, "range not increasing at {strength:?}");
-            assert!(out.threshold_db < prev_threshold, "threshold not lowering at {strength:?}");
+            assert!(
+                out.range_db > prev_range,
+                "range not increasing at {strength:?}"
+            );
+            assert!(
+                out.threshold_db < prev_threshold,
+                "threshold not lowering at {strength:?}"
+            );
         }
         prev_range = out.range_db;
         prev_threshold = out.threshold_db;
@@ -363,8 +383,14 @@ fn compose_merges_to_strongest_accommodation() {
         merged_rev.dialogue_boost().strength(),
         merged.dialogue_boost().strength()
     );
-    assert_eq!(merged_rev.compression().preset(), merged.compression().preset());
-    assert_eq!(merged_rev.downmix().is_enabled(), merged.downmix().is_enabled());
+    assert_eq!(
+        merged_rev.compression().preset(),
+        merged.compression().preset()
+    );
+    assert_eq!(
+        merged_rev.downmix().is_enabled(),
+        merged.downmix().is_enabled()
+    );
 }
 
 /// Boundary: the dialogue boost clamps the lowered key threshold to a `-80 dB`
@@ -395,7 +421,10 @@ fn profile_apply_helpers_match_component_apply() {
     let base_duck = DuckingParams::default();
     let via_profile_duck = profile.apply_ducking(base_duck);
     let via_component_duck = boost.apply(base_duck);
-    assert_eq!(via_profile_duck.range_db.to_bits(), via_component_duck.range_db.to_bits());
+    assert_eq!(
+        via_profile_duck.range_db.to_bits(),
+        via_component_duck.range_db.to_bits()
+    );
     assert_eq!(
         via_profile_duck.threshold_db.to_bits(),
         via_component_duck.threshold_db.to_bits()
@@ -404,11 +433,20 @@ fn profile_apply_helpers_match_component_apply() {
     let base_comp = CompressorParams::default();
     let via_profile_comp = profile.apply_compressor(base_comp);
     let via_component_comp = compression.apply(base_comp);
-    assert_eq!(via_profile_comp.ratio.to_bits(), via_component_comp.ratio.to_bits());
+    assert_eq!(
+        via_profile_comp.ratio.to_bits(),
+        via_component_comp.ratio.to_bits()
+    );
     assert_eq!(
         via_profile_comp.threshold_db.to_bits(),
         via_component_comp.threshold_db.to_bits()
     );
-    assert_eq!(via_profile_comp.knee_db.to_bits(), via_component_comp.knee_db.to_bits());
-    assert_eq!(via_profile_comp.makeup_db.to_bits(), via_component_comp.makeup_db.to_bits());
+    assert_eq!(
+        via_profile_comp.knee_db.to_bits(),
+        via_component_comp.knee_db.to_bits()
+    );
+    assert_eq!(
+        via_profile_comp.makeup_db.to_bits(),
+        via_component_comp.makeup_db.to_bits()
+    );
 }

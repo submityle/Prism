@@ -181,7 +181,11 @@ impl StorageDistributionReport {
             }
         }
 
-        let order = [StorageType::Table, StorageType::SparseSet, StorageType::Shared];
+        let order = [
+            StorageType::Table,
+            StorageType::SparseSet,
+            StorageType::Shared,
+        ];
         let mut buckets = Vec::new();
         for storage in order {
             let acc = &accs[storage_rank(storage) as usize];
@@ -343,7 +347,11 @@ mod tests {
         world.register_component::<Wide>();
 
         let report = StorageDistributionReport::capture(&world);
-        let ranks: Vec<u8> = report.buckets.iter().map(|b| storage_rank(b.storage)).collect();
+        let ranks: Vec<u8> = report
+            .buckets
+            .iter()
+            .map(|b| storage_rank(b.storage))
+            .collect();
         let mut sorted = ranks.clone();
         sorted.sort_unstable();
         assert_eq!(ranks, sorted);

@@ -160,8 +160,12 @@ mod tests {
 
     #[test]
     fn discrete_capability_budgets_its_ceiling() {
-        let cap =
-            PlatformCapability::discrete_objects(16, BedLayout::Surround7_1_4, ChannelOrder::EngineCanonical, true);
+        let cap = PlatformCapability::discrete_objects(
+            16,
+            BedLayout::Surround7_1_4,
+            ChannelOrder::EngineCanonical,
+            true,
+        );
         assert_eq!(cap.object_mode, ObjectRenderMode::DiscreteObjects);
         assert_eq!(cap.budget().max_objects(), 16);
         assert!(cap.head_tracked);
@@ -177,7 +181,9 @@ mod tests {
             0
         );
         assert_eq!(
-            PlatformCapability::binaural(bed, true).budget().max_objects(),
+            PlatformCapability::binaural(bed, true)
+                .budget()
+                .max_objects(),
             0
         );
         assert_eq!(

@@ -52,10 +52,9 @@ impl UdpTransport {
     /// # Errors
     /// [`io::ErrorKind::InvalidInput`] when `peer` resolves to no address.
     pub fn connect_to(&mut self, peer: impl ToSocketAddrs) -> io::Result<()> {
-        self.peer = peer
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "peer resolved to nothing"))?;
+        self.peer = peer.to_socket_addrs()?.next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "peer resolved to nothing")
+        })?;
         Ok(())
     }
 

@@ -31,7 +31,11 @@ fn scoped_children_spawn_and_attach_in_one_scope() {
     queue.apply(&mut world);
 
     let children = world.relation_sources::<ChildOf>(root);
-    assert_eq!(children.len(), 2, "both scoped spawns are attached to the parent");
+    assert_eq!(
+        children.len(),
+        2,
+        "both scoped spawns are attached to the parent"
+    );
     for child in children {
         assert_eq!(
             world.relation_targets::<ChildOf>(*child),
@@ -88,7 +92,10 @@ fn despawn_recursive_removes_the_whole_subtree() {
     for entity in [root, child, grandchild, sibling] {
         assert!(!world.contains(entity), "the subtree must be gone");
     }
-    assert!(world.contains(unrelated), "nothing outside the subtree is touched");
+    assert!(
+        world.contains(unrelated),
+        "nothing outside the subtree is touched"
+    );
 }
 
 #[test]
@@ -118,7 +125,11 @@ fn despawn_recursive_is_cycle_safe_and_idempotent() {
     world.add_relation::<ChildOf>(a, b);
     world.add_relation::<ChildOf>(b, a);
 
-    assert_eq!(world.despawn_recursive(a), 2, "the walk visits each entity once");
+    assert_eq!(
+        world.despawn_recursive(a),
+        2,
+        "the walk visits each entity once"
+    );
     assert!(!world.contains(a) && !world.contains(b));
 
     // A second call on a dead root is a no-op, not a panic.

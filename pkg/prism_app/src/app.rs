@@ -667,7 +667,8 @@ impl App {
     #[cfg(feature = "multi_thread")]
     #[must_use]
     pub fn task_pool(&self) -> Option<&crate::tasks::TaskPoolResource> {
-        self.world().get_resource::<crate::tasks::TaskPoolResource>()
+        self.world()
+            .get_resource::<crate::tasks::TaskPoolResource>()
     }
 
     /// Install (or replace) the `prism_tasks` pool the main sub-app's schedules
@@ -699,7 +700,8 @@ impl App {
     #[cfg(feature = "hot-reload")]
     #[must_use]
     pub fn config_hot_reload(&self) -> Option<&crate::hot_reload::ConfigHotReload> {
-        self.world().get_resource::<crate::hot_reload::ConfigHotReload>()
+        self.world()
+            .get_resource::<crate::hot_reload::ConfigHotReload>()
     }
 
     /// Poll the installed

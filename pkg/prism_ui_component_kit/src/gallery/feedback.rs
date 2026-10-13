@@ -10,8 +10,9 @@ use crate::feedback::{
     Alert, AlertProps, Banner, BannerProps, Callout, CalloutProps, CommandItem, CommandPalette,
     CommandPaletteProps, ContextMenu, ContextMenuItem, ContextMenuProps, Dialog, DialogProps,
     FloatButton, FloatButtonProps, HoverCard, HoverCardProps, Placement, Popconfirm,
-    PopconfirmProps, Popover, PopoverProps, ProgressBar, ProgressBarProps, ResultView, ResultProps, Skeleton, SkeletonProps, Spinner, SpinnerProps, Toast, ToastProps, Tooltip,
-    TooltipProps, Tour, TourProps, TourStep,
+    PopconfirmProps, Popover, PopoverProps, ProgressBar, ProgressBarProps, ResultProps, ResultView,
+    Skeleton, SkeletonProps, Spinner, SpinnerProps, Toast, ToastProps, Tooltip, TooltipProps, Tour,
+    TourProps, TourStep,
 };
 use crate::{ControlSize, Tone};
 
@@ -77,10 +78,7 @@ pub fn instances() -> Vec<Showcase> {
         // ProgressBar — determinate at 60%.
         Showcase::new(
             "ProgressBar / 60%",
-            mount_component(
-                &ProgressBar,
-                ProgressBarProps::new(0.6).tone(Tone::Accent),
-            ),
+            mount_component(&ProgressBar, ProgressBarProps::new(0.6).tone(Tone::Accent),),
         ),
         // Skeleton — three shimmering placeholder lines.
         Showcase::new(

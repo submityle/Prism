@@ -137,14 +137,12 @@ impl Component for EditMenu {
             el = el.child(entry);
         }
         if props.overflow {
-            el = el
-                .child(Element::box_().class("pk-edit-menu__sep"))
-                .child(
-                    Element::box_()
-                        .class("pk-edit-menu__item")
-                        .class("pk-edit-menu__overflow")
-                        .child(Element::text(String::from(">")).class("pk-edit-menu__label")),
-                );
+            el = el.child(Element::box_().class("pk-edit-menu__sep")).child(
+                Element::box_()
+                    .class("pk-edit-menu__item")
+                    .class("pk-edit-menu__overflow")
+                    .child(Element::text(String::from(">")).class("pk-edit-menu__label")),
+            );
         }
         el
     }
@@ -276,10 +274,7 @@ mod tests {
             last.class_names(),
             ["pk-edit-menu__item", "pk-edit-menu__overflow"]
         );
-        assert_eq!(
-            last.child_elements()[0].text_content(),
-            Some(">")
-        );
+        assert_eq!(last.child_elements()[0].text_content(), Some(">"));
     }
 
     #[test]

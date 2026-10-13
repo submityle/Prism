@@ -106,7 +106,11 @@ mod tests {
     fn register_adds_classes() {
         let mut sheet = StyleSheet::new();
         register_styles(&mut sheet);
-        for name in ["pk-blockquote", "pk-blockquote__body", "pk-blockquote__cite"] {
+        for name in [
+            "pk-blockquote",
+            "pk-blockquote__body",
+            "pk-blockquote__cite",
+        ] {
             assert!(sheet.get(name).is_some(), "missing {name}");
         }
     }

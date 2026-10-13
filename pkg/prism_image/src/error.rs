@@ -43,4 +43,3 @@ impl fmt::Display for ImageError {
         }
     }
 }
-

@@ -122,7 +122,10 @@ mod tests {
     #[test]
     fn loading_shows_placeholder() {
         let el = AsyncImage.render(&AsyncImageProps::new("a.png"));
-        assert_eq!(el.class_names(), ["pk-async-image", "pk-async-image--loading"]);
+        assert_eq!(
+            el.class_names(),
+            ["pk-async-image", "pk-async-image--loading"]
+        );
         assert_eq!(
             el.child_elements()[0].class_names(),
             ["pk-async-image__placeholder"]

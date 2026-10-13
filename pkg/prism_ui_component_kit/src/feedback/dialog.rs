@@ -204,8 +204,14 @@ mod tests {
         assert!(el.class_names().iter().any(|c| c == "is-open"));
         let kids = el.child_elements();
         assert_eq!(kids.len(), 2);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-dialog__backdrop"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-dialog__panel"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-dialog__backdrop"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-dialog__panel"));
     }
 
     #[test]
@@ -233,9 +239,18 @@ mod tests {
         let sections = surface.child_elements();
         assert_eq!(sections.len(), 3);
         assert_eq!(sections[0].text_content(), Some("Delete?"));
-        assert!(sections[0].class_names().iter().any(|c| c == "pk-dialog__title"));
-        assert!(sections[1].class_names().iter().any(|c| c == "pk-dialog__body"));
-        assert!(sections[2].class_names().iter().any(|c| c == "pk-dialog__actions"));
+        assert!(sections[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-dialog__title"));
+        assert!(sections[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-dialog__body"));
+        assert!(sections[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-dialog__actions"));
     }
 
     #[test]

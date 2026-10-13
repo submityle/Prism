@@ -102,9 +102,7 @@ impl Inner {
             // Compiled ICU-style patterns select their own arms per
             // argument, so the outer cardinal/ordinal `select` is unused
             // here; `#` resolves against each inline plural internally.
-            Message::Format(pattern) => {
-                Some(pattern.format(args, data.rules, locale.as_str()))
-            }
+            Message::Format(pattern) => Some(pattern.format(args, data.rules, locale.as_str())),
             Message::Plural(variants) => {
                 let category = match select {
                     // Cardinal selection uses the locale's registered rules.
@@ -112,9 +110,7 @@ impl Inner {
                     // Ordinal selection resolves the ordinal family from the
                     // locale identifier (ordinals are language-wide, not tied
                     // to the catalog's cardinal rules).
-                    Some(Select::Ordinal(n)) => {
-                        PluralRules::ordinal(locale.as_str()).select(n)
-                    }
+                    Some(Select::Ordinal(n)) => PluralRules::ordinal(locale.as_str()).select(n),
                     // A non-plural lookup against a plural message: pick the
                     // zero-count cardinal category as a stable fallback.
                     None => data.rules.select(0),

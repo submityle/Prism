@@ -300,7 +300,11 @@ mod tests {
         };
         let out = apply(&pcm, &config);
 
-        assert!((out.removed_dc[0] - bias).abs() < 1.0e-3, "{}", out.removed_dc[0]);
+        assert!(
+            (out.removed_dc[0] - bias).abs() < 1.0e-3,
+            "{}",
+            out.removed_dc[0]
+        );
         assert!(mean(out.pcm.channel(0).unwrap()).abs() < 1.0e-4);
     }
 

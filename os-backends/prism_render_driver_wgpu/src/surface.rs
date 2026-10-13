@@ -16,8 +16,8 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use prism_render_driver as rhi;
-use rhi::Surface;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use rhi::Surface;
 
 use crate::convert;
 use crate::device::DeviceInner;

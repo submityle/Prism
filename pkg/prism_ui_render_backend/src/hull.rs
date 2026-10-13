@@ -241,7 +241,10 @@ mod tests {
             let mut pts: Vec<(f32, f32)> = base.to_vec();
             let before = convex_hull(&pts);
             for _ in 0..20 {
-                pts.push((rand_in(&mut state, -9.0, 9.0), rand_in(&mut state, -9.0, 9.0)));
+                pts.push((
+                    rand_in(&mut state, -9.0, 9.0),
+                    rand_in(&mut state, -9.0, 9.0),
+                ));
             }
             let after = convex_hull(&pts);
             assert_eq!(before, after);

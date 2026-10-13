@@ -113,9 +113,7 @@ impl MeshPipelineProvider for SpineMeshPipeline {
             // The pass a variant names decides whether there is depth; a variant
             // with no depth format must not declare depth state, or the pipeline
             // would not match its pass.
-            depth_stencil: variant
-                .depth_format
-                .map(DepthStencilState::reverse_z),
+            depth_stencil: variant.depth_format.map(DepthStencilState::reverse_z),
             multisample: MultisampleState {
                 count: variant.sample_count,
                 ..Default::default()
@@ -128,4 +126,3 @@ impl MeshPipelineProvider for SpineMeshPipeline {
         }
     }
 }
-

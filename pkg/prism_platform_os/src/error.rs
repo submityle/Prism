@@ -16,9 +16,7 @@ pub enum ProbeError {
 impl core::fmt::Display for ProbeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            ProbeError::Unsupported => {
-                f.write_str("no verified real OS probe for this target")
-            }
+            ProbeError::Unsupported => f.write_str("no verified real OS probe for this target"),
             ProbeError::Os(e) => write!(f, "OS probe query failed: {e}"),
             ProbeError::Invalid(msg) => write!(f, "probed values rejected: {msg}"),
         }

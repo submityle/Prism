@@ -106,7 +106,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight"))),
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            ),
     );
 
     for button in ["pk-stepper__dec", "pk-stepper__inc"] {
@@ -120,7 +124,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
                 .with(StyleProp::Color, tok("color.tint"))
                 .with(StyleProp::FontSize, tok("font.size.headline"))
                 .with(StyleProp::FontWeight, tok("font.weight.semibold"))
-                .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.6)),
+                .with_state(
+                    InteractionState::Pressed,
+                    StyleProp::Opacity,
+                    StyleValue::number(0.6),
+                ),
         );
     }
 

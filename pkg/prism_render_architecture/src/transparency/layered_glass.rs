@@ -123,8 +123,7 @@ pub fn slab_response(layer: &GlassLayer, cos_i: f32) -> ReflectTransmit {
         let denom = 1.0 - f * f * tau * tau;
         let denom = if denom.abs() <= 1.0e-6 { 1.0e-6 } else { denom };
         transmit[c] = (one_minus_f * one_minus_f * tau / denom).clamp(0.0, 1.0);
-        reflect[c] =
-            (f + one_minus_f * one_minus_f * f * tau * tau / denom).clamp(0.0, 1.0);
+        reflect[c] = (f + one_minus_f * one_minus_f * f * tau * tau / denom).clamp(0.0, 1.0);
     }
     ReflectTransmit { reflect, transmit }
 }
@@ -240,7 +239,11 @@ mod tests {
         // n=1.5 pane at normal: two 4% interfaces -> T ~ 0.92-0.93.
         let pane = GlassLayer::clear(1.5, 0.006);
         let rt = slab_response(&pane, 1.0);
-        assert!(rt.transmit[0] > 0.9 && rt.transmit[0] < 0.94, "T={}", rt.transmit[0]);
+        assert!(
+            rt.transmit[0] > 0.9 && rt.transmit[0] < 0.94,
+            "T={}",
+            rt.transmit[0]
+        );
     }
 
     #[test]
@@ -253,7 +256,10 @@ mod tests {
         };
         let tc = slab_response(&clear, 1.0);
         let tt = slab_response(&tinted, 1.0);
-        assert!(tt.transmit[0] < tc.transmit[0], "tinted should transmit less red");
+        assert!(
+            tt.transmit[0] < tc.transmit[0],
+            "tinted should transmit less red"
+        );
         // Red absorbed hardest -> less red than blue through the tint.
         assert!(tt.transmit[0] < tt.transmit[2], "red < blue transmit");
     }

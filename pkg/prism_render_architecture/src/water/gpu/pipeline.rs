@@ -50,6 +50,12 @@ pub struct WaterGpuExtract {
     /// (`P2G` scatter, face normalize, compact divergence, `Jacobi` pressure,
     /// orthogonal projection, `G2P` gather).
     pub flip_mac: bool,
+    /// Whether the `FLIP`/`APIC` counting-sort chain runs before the `MAC`
+    /// transfer each substep (histogram -> exclusive scan -> scatter ->
+    /// particle reorder). It reorders the particle pool into cell-major order
+    /// so the validated `P2G`/`G2P` transfers read a compact face
+    /// neighbourhood; only meaningful when [`Self::flip_mac`] is also set.
+    pub cell_sort: bool,
     /// Whether the renderable-surface reconstruction runs.
     pub reconstruct: bool,
     /// Whether the caustics projection runs.
@@ -259,6 +265,7 @@ pub fn extract(
         swe: passes.swe,
         pbf: passes.pbf,
         flip_mac: passes.flip_mac,
+        cell_sort: passes.cell_sort,
         reconstruct: passes.reconstruct,
         caustics: passes.caustics,
         foam: passes.foam,
@@ -314,6 +321,10 @@ pub struct WaterPasses {
     /// Face-centered staggered `MAC` `FLIP`/`APIC` chain (`P2G`, face normalize,
     /// compact divergence, `Jacobi` pressure, orthogonal projection, `G2P`).
     pub flip_mac: bool,
+    /// `FLIP`/`APIC` counting-sort chain (histogram -> scan -> scatter ->
+    /// reorder) that reorders particles into cell-major order ahead of the
+    /// `MAC` transfer. Only meaningful alongside [`Self::flip_mac`].
+    pub cell_sort: bool,
     /// Renderable-surface reconstruction.
     pub reconstruct: bool,
     /// Caustics projection.
@@ -374,6 +385,43 @@ pub fn prepare(extract: &WaterGpuExtract) -> WaterGpuPrepare {
         // configured iterations, project the faces orthogonally, then gather
         // the projected faces back to particles.
         if extract.flip_mac {
+            // Optional counting-sort acceleration: reorder the particle pool
+            // into cell-major order (histogram -> exclusive scan -> scatter ->
+            // reorder) so the real-machine-validated `MAC` transfers below read
+            // a compact face neighbourhood per workgroup. The transfer kernels
+            // run verbatim over the reordered pool, so their parity goldens
+            // stay valid. Particles move each substep, so the sort re-runs per
+            // substep immediately ahead of `P2G`.
+            if extract.cell_sort {
+                push(
+                    &mut dispatches,
+                    extract,
+                    WaterKernel::FlipCellHistogram,
+                    step,
+                    None,
+                );
+                push(
+                    &mut dispatches,
+                    extract,
+                    WaterKernel::FlipCellScan,
+                    step,
+                    None,
+                );
+                push(
+                    &mut dispatches,
+                    extract,
+                    WaterKernel::FlipCellScatter,
+                    step,
+                    None,
+                );
+                push(
+                    &mut dispatches,
+                    extract,
+                    WaterKernel::FlipParticleReorder,
+                    step,
+                    None,
+                );
+            }
             push(
                 &mut dispatches,
                 extract,
@@ -754,6 +802,86 @@ mod tests {
         assert!(pos(WaterKernel::FlipMacDivergence) < pos(WaterKernel::FlipMacPressure));
         assert!(pos(WaterKernel::FlipMacPressure) < pos(WaterKernel::FlipMacProject));
         assert!(pos(WaterKernel::FlipMacProject) < pos(WaterKernel::FlipMacG2P));
+    }
+
+    #[test]
+    fn cell_sort_chain_precedes_the_mac_transfer_each_substep() {
+        let ex = extract(
+            WaterBufferCounts {
+                flip_particles: 40_000,
+                flip_grid_cells: 32 * 32 * 32,
+                ..WaterBufferCounts::default()
+            },
+            WaterPasses {
+                flip_mac: true,
+                cell_sort: true,
+                ..WaterPasses::default()
+            },
+            0,
+            2, // substeps
+            4, // pressure iterations
+            0,
+            0,
+            32 * 32 * 32,
+            super::mac_face_count(32, 32, 32),
+            40_000,
+            0,
+            0, // vertex_count
+        );
+        let plan = prepare(&ex);
+        let count = |k: WaterKernel| plan.dispatches.iter().filter(|d| d.kernel == k).count();
+        // The four counting-sort passes run once per substep, so two substeps
+        // record each one twice.
+        assert_eq!(count(WaterKernel::FlipCellHistogram), 2);
+        assert_eq!(count(WaterKernel::FlipCellScan), 2);
+        assert_eq!(count(WaterKernel::FlipCellScatter), 2);
+        assert_eq!(count(WaterKernel::FlipParticleReorder), 2);
+        // Within the first substep the chain is histogram -> scan -> scatter ->
+        // reorder -> P2G: the sort fully precedes the transfer it accelerates.
+        let pos = |k: WaterKernel| {
+            plan.dispatches
+                .iter()
+                .position(|d| d.kernel == k)
+                .expect("kernel present")
+        };
+        assert!(pos(WaterKernel::FlipCellHistogram) < pos(WaterKernel::FlipCellScan));
+        assert!(pos(WaterKernel::FlipCellScan) < pos(WaterKernel::FlipCellScatter));
+        assert!(pos(WaterKernel::FlipCellScatter) < pos(WaterKernel::FlipParticleReorder));
+        assert!(pos(WaterKernel::FlipParticleReorder) < pos(WaterKernel::FlipMacP2G));
+    }
+
+    #[test]
+    fn cell_sort_is_inert_without_the_mac_transfer() {
+        // The counting-sort chain only accelerates the `MAC` transfer, so it
+        // records nothing when `flip_mac` is off even if `cell_sort` is set.
+        let ex = extract(
+            WaterBufferCounts {
+                flip_particles: 40_000,
+                flip_grid_cells: 32 * 32 * 32,
+                ..WaterBufferCounts::default()
+            },
+            WaterPasses {
+                flip_mac: false,
+                cell_sort: true,
+                ..WaterPasses::default()
+            },
+            0,
+            1,
+            1,
+            0,
+            0,
+            32 * 32 * 32,
+            0,
+            40_000,
+            0,
+            0,
+        );
+        let plan = prepare(&ex);
+        let count = |k: WaterKernel| plan.dispatches.iter().filter(|d| d.kernel == k).count();
+        assert_eq!(count(WaterKernel::FlipCellHistogram), 0);
+        assert_eq!(count(WaterKernel::FlipCellScan), 0);
+        assert_eq!(count(WaterKernel::FlipCellScatter), 0);
+        assert_eq!(count(WaterKernel::FlipParticleReorder), 0);
     }
 
     #[test]

@@ -135,11 +135,23 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight")))
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            )
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Focus, StyleProp::BorderColor, tok("color.tint"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Focus,
+                StyleProp::BorderColor,
+                tok("color.tint"),
+            )
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 
     sheet.insert(
@@ -175,7 +187,10 @@ mod tests {
         let child = &el.child_elements()[0];
         assert_eq!(child.kind(), &ElementKind::Text);
         assert_eq!(child.text_content(), Some("Notes"));
-        assert!(child.class_names().iter().any(|c| c == "pk-text-area__placeholder"));
+        assert!(child
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-text-area__placeholder"));
     }
 
     #[test]
@@ -186,7 +201,10 @@ mod tests {
             .iter()
             .find(|(p, _)| *p == StyleProp::MinHeight)
             .map(|(_, v)| v.clone());
-        assert_eq!(min_h, Some(StyleValue::Length(Length::Px(4.0 * ROW_HEIGHT_PX))));
+        assert_eq!(
+            min_h,
+            Some(StyleValue::Length(Length::Px(4.0 * ROW_HEIGHT_PX)))
+        );
     }
 
     #[test]

@@ -201,7 +201,13 @@ fn pipeline_writes(
         apply_message(message, &mut channels, &mut per_note);
     }
 
-    let voice = build_voice(voice_id, channel, note, &channels[channel as usize], &per_note);
+    let voice = build_voice(
+        voice_id,
+        channel,
+        note,
+        &channels[channel as usize],
+        &per_note,
+    );
     let mut writes = Vec::new();
     router.route(&voice, 0, &mut writes);
     writes
@@ -385,9 +391,7 @@ fn all_midi2_channel_voice_variants_decode() {
 
     // The group and channel fields are surfaced on the envelope.
     match decode_midi2(UmpWord::new(0x4295_3C00), 0x9000_0000) {
-        Some(MidiMessage::ChannelVoice {
-            group, channel, ..
-        }) => {
+        Some(MidiMessage::ChannelVoice { group, channel, .. }) => {
             assert_eq!(group, 2);
             assert_eq!(channel, 5);
         }
@@ -510,7 +514,10 @@ fn utility_and_system_messages_decode() {
         sys(0x10F2_1234),
         (0, SystemMessage::SongPositionPointer { position: 0x1A12 })
     );
-    assert_eq!(sys(0x10F3_0012), (0, SystemMessage::SongSelect { song: 0x12 }));
+    assert_eq!(
+        sys(0x10F3_0012),
+        (0, SystemMessage::SongSelect { song: 0x12 })
+    );
     assert_eq!(sys(0x10F6_0000), (0, SystemMessage::TuneRequest));
     // Group field is extracted independently of the status byte.
     assert_eq!(sys(0x13F8_0000), (3, SystemMessage::TimingClock));
@@ -895,7 +902,10 @@ fn router_transform_and_sample_offsets_preserved() {
         assert_eq!(writes[base].target, ModulationTarget::Pitch);
         assert_eq!(writes[base + 1].target, ModulationTarget::Gain);
         assert_eq!(writes[base + 2].target, ModulationTarget::Cutoff);
-        assert_eq!(writes[base + 3].target, ModulationTarget::Custom { slot: 0 });
+        assert_eq!(
+            writes[base + 3].target,
+            ModulationTarget::Custom { slot: 0 }
+        );
         assert_eq!(writes[base].sample_offset, offset);
     }
     // Full channel bend with a centred per-note bend is about +2 semitones.

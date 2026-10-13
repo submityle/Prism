@@ -150,7 +150,10 @@ mod tests {
         let kids = el.child_elements();
         assert_eq!(kids.len(), 1);
         assert_eq!(kids[0].text_content(), Some("Heads up"));
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-alert__message"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-alert__message"));
     }
 
     #[test]
@@ -160,6 +163,9 @@ mod tests {
         assert_eq!(kids.len(), 2);
         assert!(kids[0].class_names().iter().any(|c| c == "pk-alert__title"));
         assert_eq!(kids[0].text_content(), Some("Heading"));
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-alert__message"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-alert__message"));
     }
 }

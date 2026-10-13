@@ -20,10 +20,7 @@ use crate::vec2::cross3;
 /// Whether `p`, known to be collinear with `a` and `b`, lies within the
 /// segment `a..=b` (bounding-box containment).
 fn on_segment(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> bool {
-    p.0 >= a.0.min(b.0)
-        && p.0 <= a.0.max(b.0)
-        && p.1 >= a.1.min(b.1)
-        && p.1 <= a.1.max(b.1)
+    p.0 >= a.0.min(b.0) && p.0 <= a.0.max(b.0) && p.1 >= a.1.min(b.1) && p.1 <= a.1.max(b.1)
 }
 
 /// Whether segment `a..b` and segment `c..d` intersect (proper crossing, endpoint

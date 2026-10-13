@@ -138,7 +138,11 @@ mod tests {
 
     #[test]
     fn corners_keep_their_size_and_the_center_stretches() {
-        let slice = nine_slice(rect(0.0, 0.0, 90.0, 90.0), insets(30.0), rect(0.0, 0.0, 150.0, 150.0));
+        let slice = nine_slice(
+            rect(0.0, 0.0, 90.0, 90.0),
+            insets(30.0),
+            rect(0.0, 0.0, 150.0, 150.0),
+        );
         // Corners are 30x30 on both sides.
         assert_eq!(slice.dest[TOP_LEFT].size, Size::new(30.0, 30.0));
         assert_eq!(slice.dest[BOTTOM_RIGHT].size, Size::new(30.0, 30.0));

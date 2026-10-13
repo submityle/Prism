@@ -163,11 +163,7 @@ mod tests {
     #[test]
     fn multiple_materials_sorted_and_disjoint() {
         // instance->material: 0->5, 1->2, 2->5, 3->2, 4->9.
-        let vb = buffer_from(
-            3,
-            2,
-            &[Some(0), Some(1), Some(2), Some(3), Some(4), None],
-        );
+        let vb = buffer_from(3, 2, &[Some(0), Some(1), Some(2), Some(3), Some(4), None]);
         let material_of = |inst: u32| match inst {
             0 | 2 => 5,
             1 | 3 => 2,
@@ -196,7 +192,10 @@ mod tests {
         for w in bins.offsets.windows(2) {
             assert!(w[1] >= w[0]);
         }
-        assert_eq!(*bins.offsets.last().unwrap() as usize, bins.covered_pixels());
+        assert_eq!(
+            *bins.offsets.last().unwrap() as usize,
+            bins.covered_pixels()
+        );
     }
 
     #[test]

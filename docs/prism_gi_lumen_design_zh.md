@@ -5,6 +5,7 @@
 > 定位：AAA / 次世代 **动态全局光照 + 统一反射 + 采样/降噪** 引擎（软件光追优先、硬件 Ray Query 可选），实时无烘焙，与 PBR/NPR/自定义/混合四前端正交协同，作为四前端共享的高级光照基底。
 > Shader：WESL（naga → WGSL/SPIR-V/Metal/DXIL）；运行时：wgpu（Metal/VK/DX12/WebGPU）。
 > 关联文档：\`prism_rendering_architecture_zh.md\`（总，Phase 5 多后端 GI/反射）、\`prism_material_pipeline_design_zh.md\`（材质语义/Surface Cache 烘焙）、\`prism_volumetric_engine_design_zh.md\`（froxel 参与介质 GI 衔接）、\`prism_aaa_advanced_features_zh.md\`（共享高级基底）、\`prism_particle_engine_design_zh.md\`（自发光粒子作为 GI 光源）、\`prism_hair_engine_design_zh.md\`（毛发 GI）。
+> 烘焙归属： 本子系统主路径为**实时无烘焙**，不产生派生数据；可选的离线 GI / 光照缓存为 `OfflineShipped`，bake-on-dirty 的表面缓存 / 探针更新为 `RuntimeDerived`——两者共用同一 Bake Kernel，离线 DAG/缓存键/DDC 归 `Prism Asset Build`（`prism_asset_build_design_zh.md` §2.7/§12.8）。现有 World 文档的「烘焙 GI」即指该可选缓存，与本主路径不冲突；逐项登记见 `prism_derived_data_contract_zh.md`（B1 / E1）。
 > 沙盒说明：本机 agent 沙盒屏蔽 Metal，文档内帧预算/带宽/耗时均为**设计目标（design target），非实测**；可验证部分限于 CPU golden 纯函数与 WESL 编译。真机 parity 在沙盒外执行。
 > 数值路线：**纯经典数值**（蒙特卡洛/准蒙特卡洛积分 / SH / reservoir 重采样 / SDF 步进 / 时空双边降噪 / 时空蓝噪声），**不含任何神经网络 / AI / ML / LLM 路径**——降噪、上采样、重要性采样全部为确定性经典算法。
 

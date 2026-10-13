@@ -174,12 +174,18 @@ impl TrackSizingFunction {
             }
             TrackSizingFunction::Breadth(b) => (b, b, None),
             TrackSizingFunction::MinMax { min, max } => {
-                let min = if min.is_flex() { TrackBreadth::Auto } else { min };
+                let min = if min.is_flex() {
+                    TrackBreadth::Auto
+                } else {
+                    min
+                };
                 (min, max, None)
             }
-            TrackSizingFunction::FitContent(limit) => {
-                (TrackBreadth::Auto, TrackBreadth::MaxContent, Some(limit.max(0.0)))
-            }
+            TrackSizingFunction::FitContent(limit) => (
+                TrackBreadth::Auto,
+                TrackBreadth::MaxContent,
+                Some(limit.max(0.0)),
+            ),
         }
     }
 }
@@ -268,9 +274,7 @@ fn resolve_min_base(min: TrackBreadth, content: TrackContent, avail: Option<f32>
         TrackBreadth::MaxContent => content.max_content,
         // `Fr` is an invalid minimum and already mapped to `auto`, so it
         // resolves identically to `auto`/`min-content`.
-        TrackBreadth::Auto | TrackBreadth::MinContent | TrackBreadth::Fr(_) => {
-            content.min_content
-        }
+        TrackBreadth::Auto | TrackBreadth::MinContent | TrackBreadth::Fr(_) => content.min_content,
     }
 }
 
@@ -426,7 +430,11 @@ pub fn resolve_track_sizes(
         .iter()
         .enumerate()
         .map(|(i, &func)| {
-            let c = content.get(i).copied().unwrap_or(TrackContent::ZERO).normalized();
+            let c = content
+                .get(i)
+                .copied()
+                .unwrap_or(TrackContent::ZERO)
+                .normalized();
             build_track(func, c, avail)
         })
         .collect();
@@ -473,7 +481,11 @@ mod tests {
     }
 
     fn approx_slice(got: &[f32], want: &[f32]) {
-        assert_eq!(got.len(), want.len(), "length mismatch: {got:?} vs {want:?}");
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "length mismatch: {got:?} vs {want:?}"
+        );
         for (g, w) in got.iter().zip(want.iter()) {
             approx(*g, *w);
         }
@@ -496,7 +508,10 @@ mod tests {
 
     #[test]
     fn fixed_plus_single_fr_fills_remainder() {
-        let tracks = [TrackSizingFunction::points(100.0), TrackSizingFunction::fr(1.0)];
+        let tracks = [
+            TrackSizingFunction::points(100.0),
+            TrackSizingFunction::fr(1.0),
+        ];
         let sizes = resolve_track_sizes(
             &tracks,
             &[TrackContent::ZERO; 2],
@@ -663,10 +678,7 @@ mod tests {
 
     #[test]
     fn min_and_max_content_available_space() {
-        let tracks = [
-            TrackSizingFunction::auto(),
-            TrackSizingFunction::fr(1.0),
-        ];
+        let tracks = [TrackSizingFunction::auto(), TrackSizingFunction::fr(1.0)];
         let content = [TrackContent::new(30.0, 120.0), TrackContent::ZERO];
 
         let min = resolve_track_sizes(&tracks, &content, AvailableSpace::MinContent, 0.0);
@@ -743,7 +755,9 @@ mod tests {
     /// returns the implied fr size. Independent of the iterative demotion
     /// order used by the production code.
     fn oracle_fr(space: f32, tracks: &[Track]) -> f32 {
-        let flex_idx: Vec<usize> = (0..tracks.len()).filter(|&i| tracks[i].flex.is_some()).collect();
+        let flex_idx: Vec<usize> = (0..tracks.len())
+            .filter(|&i| tracks[i].flex.is_some())
+            .collect();
         let m = flex_idx.len();
         if m == 0 {
             return 0.0;
@@ -811,7 +825,10 @@ mod tests {
 
     impl Lcg {
         fn next_u32(&mut self) -> u32 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (self.0 >> 32) as u32
         }
 

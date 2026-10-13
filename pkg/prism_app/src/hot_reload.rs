@@ -181,7 +181,8 @@ mod tests {
         app.enable_config_hot_reload(&path);
         assert_eq!(app.poll_config_hot_reload(), ReloadOutcome::Unavailable);
         assert_eq!(
-            app.config_hot_reload().and_then(ConfigHotReload::last_applied),
+            app.config_hot_reload()
+                .and_then(ConfigHotReload::last_applied),
             None,
             "nothing was applied"
         );

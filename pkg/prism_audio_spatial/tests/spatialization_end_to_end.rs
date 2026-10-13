@@ -31,8 +31,8 @@
 use bevy_math::{Quat, Vec3};
 use core::f32::consts::FRAC_PI_2;
 use prism_audio_spatial::ambisonics::{
-    decode_foa, encode_foa_gains, encode_foa_sample, rotate_foa, FOA_CHANNELS, IDX_W, IDX_X,
-    IDX_Y, IDX_Z,
+    decode_foa, encode_foa_gains, encode_foa_sample, rotate_foa, FOA_CHANNELS, IDX_W, IDX_X, IDX_Y,
+    IDX_Z,
 };
 use prism_audio_spatial::attenuation::{Attenuation, DistanceModel};
 use prism_audio_spatial::geometry::{Emitter, Listener};
@@ -77,7 +77,11 @@ fn front_source_is_centred_and_audible() {
         SR,
     );
 
-    assert!(approx(params.azimuth, 0.0, 1e-4), "azimuth {}", params.azimuth);
+    assert!(
+        approx(params.azimuth, 0.0, 1e-4),
+        "azimuth {}",
+        params.azimuth
+    );
     assert!(
         approx(params.elevation, 0.0, 1e-4),
         "elevation {}",
@@ -135,8 +139,16 @@ fn azimuth_sign_follows_left_right() {
     let r = resolve(&listener, &right, &descriptor, OcclusionFactors::OPEN, SR);
     let l = resolve(&listener, &left, &descriptor, OcclusionFactors::OPEN, SR);
 
-    assert!(r.azimuth > 0.0, "right azimuth should be positive: {}", r.azimuth);
-    assert!(l.azimuth < 0.0, "left azimuth should be negative: {}", l.azimuth);
+    assert!(
+        r.azimuth > 0.0,
+        "right azimuth should be positive: {}",
+        r.azimuth
+    );
+    assert!(
+        l.azimuth < 0.0,
+        "left azimuth should be negative: {}",
+        l.azimuth
+    );
     // Mirror sources are symmetric in azimuth magnitude.
     assert!(approx(r.azimuth, -l.azimuth, 1e-4));
 }
@@ -152,8 +164,16 @@ fn elevation_sign_follows_up_down() {
     let u = resolve(&listener, &up, &descriptor, OcclusionFactors::OPEN, SR);
     let d = resolve(&listener, &down, &descriptor, OcclusionFactors::OPEN, SR);
 
-    assert!(u.elevation > 0.0, "up elevation should be positive: {}", u.elevation);
-    assert!(d.elevation < 0.0, "down elevation should be negative: {}", d.elevation);
+    assert!(
+        u.elevation > 0.0,
+        "up elevation should be positive: {}",
+        u.elevation
+    );
+    assert!(
+        d.elevation < 0.0,
+        "down elevation should be negative: {}",
+        d.elevation
+    );
     // Directly overhead is a quarter turn up.
     assert!(approx(u.elevation, FRAC_PI_2, 1e-3));
     assert!(approx(d.elevation, -FRAC_PI_2, 1e-3));
@@ -169,11 +189,31 @@ fn doppler_raises_pitch_on_approach_and_lowers_on_recession() {
     let approaching = Emitter::point(Vec3::new(0.0, 0.0, -10.0), Vec3::new(0.0, 0.0, 30.0));
     let receding = Emitter::point(Vec3::new(0.0, 0.0, -10.0), Vec3::new(0.0, 0.0, -30.0));
 
-    let a = resolve(&listener, &approaching, &descriptor, OcclusionFactors::OPEN, SR);
-    let r = resolve(&listener, &receding, &descriptor, OcclusionFactors::OPEN, SR);
+    let a = resolve(
+        &listener,
+        &approaching,
+        &descriptor,
+        OcclusionFactors::OPEN,
+        SR,
+    );
+    let r = resolve(
+        &listener,
+        &receding,
+        &descriptor,
+        OcclusionFactors::OPEN,
+        SR,
+    );
 
-    assert!(a.pitch_ratio > 1.0, "approach should raise pitch: {}", a.pitch_ratio);
-    assert!(r.pitch_ratio < 1.0, "recession should lower pitch: {}", r.pitch_ratio);
+    assert!(
+        a.pitch_ratio > 1.0,
+        "approach should raise pitch: {}",
+        a.pitch_ratio
+    );
+    assert!(
+        r.pitch_ratio < 1.0,
+        "recession should lower pitch: {}",
+        r.pitch_ratio
+    );
     assert!(a.pitch_ratio.is_finite() && r.pitch_ratio.is_finite());
 }
 

@@ -257,9 +257,9 @@ pub mod prefab_inheritance;
 pub mod profiler;
 pub mod relation_cascade;
 pub mod relation_closure;
+pub mod relation_cycles;
 pub mod relation_degree;
 pub mod relation_graph;
-pub mod relation_cycles;
 pub mod relation_topology;
 pub mod required_closure;
 pub mod schedule_ambiguity_audit;
@@ -313,11 +313,14 @@ pub use owning_group_packing::{OwningGroupPackingEntry, OwningGroupPackingReport
 #[cfg(feature = "partition")]
 pub use partition_occupancy::{CellOccupancyEntry, PartitionOccupancyReport};
 pub use prefab_inheritance::{PrefabInheritanceReport, PrefabInstanceEntry, PrefabTemplateEntry};
+#[cfg(feature = "std")]
+pub use profiler::SpanRecorder;
+pub use profiler::{FlameGraph, SpanNode, SystemInstrument};
 pub use relation_cascade::{CascadeBlastEntry, RelationCascadeReport, RelationPolicyEntry};
 pub use relation_closure::{RelationClosureReport, TransitiveClosureEntry};
+pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_degree::{RelationDegreeEntry, RelationDegreeReport};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
-pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
 pub use required_closure::{RequiredClosureEntry, RequiredClosureReport};
 pub use schedule_ambiguity_audit::{
@@ -332,15 +335,12 @@ pub use storage_distribution::{StorageBucketEntry, StorageDistributionReport};
 pub use structural_churn::{StructuralChurnProfile, SystemChurnEntry};
 pub use system_cost::{SystemCostEntry, SystemCostProfile};
 #[cfg(feature = "std")]
-pub use profiler::SpanRecorder;
-pub use profiler::{FlameGraph, SpanNode, SystemInstrument};
-#[cfg(feature = "std")]
 pub use time_travel::TimeTravel;
-#[cfg(feature = "trace")]
-pub use trace::{
-    EventPhase, TraceArg, TraceArgValue, TraceBuffer, TraceEvent, TrackId, to_chrome_json,
-};
 #[cfg(all(feature = "trace", feature = "std"))]
 pub use trace::TraceRecorder;
+#[cfg(feature = "trace")]
+pub use trace::{
+    to_chrome_json, EventPhase, TraceArg, TraceArgValue, TraceBuffer, TraceEvent, TrackId,
+};
 #[cfg(feature = "partition")]
 pub use weak_reference_health::{WeakReferenceHealth, WeakTargetEntry};

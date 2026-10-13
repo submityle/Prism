@@ -23,8 +23,8 @@
 )]
 
 use std::hint::black_box;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use prism_app::prelude::{App, FixedUpdate, TimeUpdateStrategy};
@@ -88,9 +88,9 @@ fn fixed_step_substeps() -> u64 {
     });
 
     for micros in JITTER_MICROS {
-        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(
-            Duration::from_micros(micros),
-        ));
+        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_micros(
+            micros,
+        )));
         app.update();
     }
     steps.load(Ordering::Relaxed)

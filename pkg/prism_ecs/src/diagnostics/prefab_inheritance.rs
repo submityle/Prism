@@ -213,9 +213,9 @@ impl PrefabInheritanceReport {
 
             // Cyclic iff any direct prefab reaches this instance back (or is it).
             let direct = world.prefabs_of(instance);
-            let cyclic = direct.iter().any(|&p| {
-                p == instance || world.prefab_chain(p).contains(&instance)
-            });
+            let cyclic = direct
+                .iter()
+                .any(|&p| p == instance || world.prefab_chain(p).contains(&instance));
             if cyclic {
                 cyclic_count += 1;
             }
@@ -349,9 +349,11 @@ impl PrefabInheritanceReport {
     /// The instance with the deepest resolution chain (ties break on the lowest
     /// [`Entity`]), or `None` when there are no instances.
     pub fn deepest_instance(&self) -> Option<&PrefabInstanceEntry> {
-        self.instances
-            .iter()
-            .max_by(|a, b| a.depth.cmp(&b.depth).then_with(|| b.instance.cmp(&a.instance)))
+        self.instances.iter().max_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then_with(|| b.instance.cmp(&a.instance))
+        })
     }
 
     /// The most-reused template by direct fan-in (ties break on the lowest
@@ -373,13 +375,19 @@ impl PrefabInheritanceReport {
     /// Every instance that stores no components of its own (pure inheritors),
     /// in ascending [`Entity`] order.
     pub fn pure_instances(&self) -> Vec<&PrefabInstanceEntry> {
-        self.instances.iter().filter(|e| e.is_pure_instance()).collect()
+        self.instances
+            .iter()
+            .filter(|e| e.is_pure_instance())
+            .collect()
     }
 
     /// Every root template (a template that does not itself inherit), in
     /// ascending [`Entity`] order.
     pub fn root_templates(&self) -> Vec<&PrefabTemplateEntry> {
-        self.templates.iter().filter(|e| e.is_root_template()).collect()
+        self.templates
+            .iter()
+            .filter(|e| e.is_root_template())
+            .collect()
     }
 }
 

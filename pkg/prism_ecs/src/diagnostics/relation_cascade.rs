@@ -452,7 +452,11 @@ mod tests {
         assert_eq!(report.cascade_delete_kind_count(), 1);
         assert_eq!(report.panic_policy_kind_count(), 1);
         // Policies are sorted ascending by component id.
-        let ids: Vec<u32> = report.policies().iter().map(|p| p.relation.index()).collect();
+        let ids: Vec<u32> = report
+            .policies()
+            .iter()
+            .map(|p| p.relation.index())
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted);

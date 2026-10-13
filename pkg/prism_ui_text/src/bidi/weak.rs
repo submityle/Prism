@@ -25,7 +25,11 @@ fn w1(classes: &mut [BidiClass], sos: BidiClass) {
     let mut prev = sos;
     for c in classes.iter_mut() {
         if *c == NSM {
-            *c = if prev.is_isolate_initiator() || prev == PDI { ON } else { prev };
+            *c = if prev.is_isolate_initiator() || prev == PDI {
+                ON
+            } else {
+                prev
+            };
         }
         prev = *c;
     }

@@ -25,14 +25,14 @@ use crate::dc_block;
 use crate::decode::{self, DecodeError, SourceFormat};
 use crate::finalize::{self, FinalizeError};
 use crate::loop_point::{self, LoopPoints};
-use crate::loudness_offline::{self, LoudnessStats};
 use crate::loudness_normalize;
+use crate::loudness_offline::{self, LoudnessStats};
 use crate::marker::MarkerTimeline;
 use crate::pcm::{ConditionedPcm, EncoderDelay};
-use prism_audio_core::math::Sample;
 use crate::resample_offline;
 use crate::tempo::{self, TempoEstimate};
 use crate::transient;
+use prism_audio_core::math::Sample;
 
 /// Errors returned by [`run`].
 #[derive(Debug, Clone, PartialEq)]
@@ -178,8 +178,7 @@ pub fn run(
     let codec = codec_tier::recommend(&profile, config.usage);
 
     let (pcm, loop_points) = if config.finalize.is_enabled() {
-        let finalized =
-            finalize::finalize(&pcm, encoder_delay, loop_points, &config.finalize)?;
+        let finalized = finalize::finalize(&pcm, encoder_delay, loop_points, &config.finalize)?;
         (finalized.pcm, finalized.loop_points)
     } else {
         (pcm, loop_points)
@@ -353,7 +352,11 @@ mod tests {
         let scrubbed = run(&wav, SourceFormat::Wav, &config).unwrap();
 
         // A positive DC offset near +0.1 was detected and removed per channel.
-        assert!((scrubbed.removed_dc[0] - 0.1).abs() < 5.0e-3, "{}", scrubbed.removed_dc[0]);
+        assert!(
+            (scrubbed.removed_dc[0] - 0.1).abs() < 5.0e-3,
+            "{}",
+            scrubbed.removed_dc[0]
+        );
         // Scrubbing the delivered program moves the content hash.
         assert_ne!(raw.hash, scrubbed.hash);
         assert_eq!(raw.pcm.frames(), scrubbed.pcm.frames());
@@ -391,6 +394,9 @@ mod tests {
         // Normalization is deterministic.
         let again = run(&wav, SourceFormat::Wav, &config).unwrap();
         assert_eq!(normalized.hash, again.hash);
-        assert_eq!(normalized.applied_loudness_gain_db, again.applied_loudness_gain_db);
+        assert_eq!(
+            normalized.applied_loudness_gain_db,
+            again.applied_loudness_gain_db
+        );
     }
 }

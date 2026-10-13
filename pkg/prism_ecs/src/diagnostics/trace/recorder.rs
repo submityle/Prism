@@ -142,8 +142,7 @@ impl SystemInstrument for TraceRecorder {
         // The executor nests perfectly; if `open` is empty we still emit a
         // best-effort unnamed close rather than panic in a diagnostics path.
         let name = self.open.pop().unwrap_or_default();
-        self.buffer.push(
-            super::event::TraceEvent::end(self.track, ts, name).with_category(self.category),
-        );
+        self.buffer
+            .push(super::event::TraceEvent::end(self.track, ts, name).with_category(self.category));
     }
 }

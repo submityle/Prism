@@ -132,17 +132,35 @@ mod tests {
     #[test]
     fn bounding_box_offsets_and_sizes_from_endpoints() {
         let el = EdgeView.render(&EdgeViewProps::new((30.0, 40.0), (10.0, 100.0)));
-        assert_eq!(find(&el, StyleProp::MarginLeft), Some(StyleValue::Length(Length::Px(10.0))));
-        assert_eq!(find(&el, StyleProp::MarginTop), Some(StyleValue::Length(Length::Px(40.0))));
-        assert_eq!(find(&el, StyleProp::Width), Some(StyleValue::Length(Length::Px(20.0))));
-        assert_eq!(find(&el, StyleProp::Height), Some(StyleValue::Length(Length::Px(60.0))));
+        assert_eq!(
+            find(&el, StyleProp::MarginLeft),
+            Some(StyleValue::Length(Length::Px(10.0)))
+        );
+        assert_eq!(
+            find(&el, StyleProp::MarginTop),
+            Some(StyleValue::Length(Length::Px(40.0)))
+        );
+        assert_eq!(
+            find(&el, StyleProp::Width),
+            Some(StyleValue::Length(Length::Px(20.0)))
+        );
+        assert_eq!(
+            find(&el, StyleProp::Height),
+            Some(StyleValue::Length(Length::Px(60.0)))
+        );
     }
 
     #[test]
     fn degenerate_edge_keeps_hairline_extent() {
         let el = EdgeView.render(&EdgeViewProps::new((5.0, 5.0), (5.0, 5.0)));
-        assert_eq!(find(&el, StyleProp::Width), Some(StyleValue::Length(Length::Px(1.0))));
-        assert_eq!(find(&el, StyleProp::Height), Some(StyleValue::Length(Length::Px(1.0))));
+        assert_eq!(
+            find(&el, StyleProp::Width),
+            Some(StyleValue::Length(Length::Px(1.0)))
+        );
+        assert_eq!(
+            find(&el, StyleProp::Height),
+            Some(StyleValue::Length(Length::Px(1.0)))
+        );
     }
 
     #[test]

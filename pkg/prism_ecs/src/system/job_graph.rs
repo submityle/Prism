@@ -41,9 +41,11 @@
 //!   the per-row change filters and sparse/shared storage are rejected at
 //!   compile time (see [`crate::query::slice`]).
 
-use crate::query::{Access, ArchetypalFilter, ColumnSliceData, QueryData, QueryFilter, ReadOnlyQueryData};
-use crate::system::job_dag::JobDag;
+use crate::query::{
+    Access, ArchetypalFilter, ColumnSliceData, QueryData, QueryFilter, ReadOnlyQueryData,
+};
 use crate::resource::{Resource, ResourceId};
+use crate::system::job_dag::JobDag;
 use crate::system::param::SystemParam;
 use crate::system::query_param::Query;
 use crate::system::world_cell::UnsafeWorldCell;

@@ -63,7 +63,11 @@ fn diamond_dataflow_respects_every_edge() {
     dag.dispatch(&pool);
 
     for (i, r) in runs.iter().enumerate() {
-        assert_eq!(r.load(Ordering::Relaxed), 1, "node {i} did not run exactly once");
+        assert_eq!(
+            r.load(Ordering::Relaxed),
+            1,
+            "node {i} did not run exactly once"
+        );
     }
     let tl = timeline.lock().unwrap();
     assert_eq!(tl.len(), 5);

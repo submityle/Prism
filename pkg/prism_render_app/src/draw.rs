@@ -50,7 +50,11 @@ pub mod canonical {
             functions.register(super::super::mesh_draw),
             functions.register(super::super::mesh_bin_draw),
         ]);
-        debug_assert_eq!(ids.as_slice(), [MESH, MESH_BIN], "the canonical ids are stable");
+        debug_assert_eq!(
+            ids.as_slice(),
+            [MESH, MESH_BIN],
+            "the canonical ids are stable"
+        );
     }
 }
 

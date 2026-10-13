@@ -140,7 +140,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::FontSize, tok("font.size.footnote"))
             .with(StyleProp::Color, tok("color.label.secondary"))
-            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.8)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::Opacity,
+                StyleValue::number(0.8),
+            ),
     );
 
     // Active: accent the entry for the visible section.

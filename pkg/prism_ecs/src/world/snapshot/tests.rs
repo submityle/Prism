@@ -363,7 +363,10 @@ fn unregistered_resources_are_untouched_by_snapshot_and_restore() {
     // Score reverts; the unregistered handle keeps its *current* (post-capture)
     // value — restore must not reach it.
     assert_eq!(w.get_resource::<Score>(), Some(&Score(1)));
-    assert_eq!(w.get_resource::<DeviceHandle>(), Some(&DeviceHandle(0x1234)));
+    assert_eq!(
+        w.get_resource::<DeviceHandle>(),
+        Some(&DeviceHandle(0x1234))
+    );
 }
 
 #[test]

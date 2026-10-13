@@ -312,7 +312,11 @@ mod tests {
                 }
                 steps += 1;
             }
-            assert_eq!(session.first_bad(), Some(threshold), "wrong first-bad frame");
+            assert_eq!(
+                session.first_bad(),
+                Some(threshold),
+                "wrong first-bad frame"
+            );
             assert_eq!(session.first_bad(), linear_first_true_from(len, threshold));
             // Logarithmic step budget over the initial span.
             assert!(
@@ -341,7 +345,10 @@ mod tests {
                 session.mark_good(candidate);
             }
             // Each step strictly shrinks the unclassified window.
-            assert!(session.remaining() < prev_remaining, "window did not shrink");
+            assert!(
+                session.remaining() < prev_remaining,
+                "window did not shrink"
+            );
             prev_remaining = session.remaining();
             // Good bound stays good, bad bound stays bad.
             assert!(!broken(session.good()), "good bound became bad");
@@ -355,16 +362,23 @@ mod tests {
         let mut timeline = Timeline::new();
         for i in 0..16 {
             let text = if i >= 11 { "broken" } else { "ok" };
-            timeline.record(Frame::capture("f", &Element::box_().child(Element::text(text))));
+            timeline.record(Frame::capture(
+                "f",
+                &Element::box_().child(Element::text(text)),
+            ));
         }
         let got = first_matching(&timeline, |f| {
-            f.snapshot().find(|n| n.text.as_deref() == Some("broken")).is_some()
+            f.snapshot()
+                .find(|n| n.text.as_deref() == Some("broken"))
+                .is_some()
         });
         assert_eq!(got, Some(11));
 
         // No matching frame -> None.
         let none = first_matching(&timeline, |f| {
-            f.snapshot().find(|n| n.text.as_deref() == Some("nope")).is_some()
+            f.snapshot()
+                .find(|n| n.text.as_deref() == Some("nope"))
+                .is_some()
         });
         assert_eq!(none, None);
     }

@@ -96,9 +96,7 @@ impl<'w, 's, D: ColumnSliceData, F: ArchetypalFilter> QuerySliceIter<'w, 's, D, 
     }
 }
 
-impl<'w, 's, D: ColumnSliceData, F: ArchetypalFilter> Iterator
-    for QuerySliceIter<'w, 's, D, F>
-{
+impl<'w, 's, D: ColumnSliceData, F: ArchetypalFilter> Iterator for QuerySliceIter<'w, 's, D, F> {
     type Item = D::Slice<'w>;
 
     #[inline]

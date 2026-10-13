@@ -154,11 +154,16 @@ fn chrome_json_serialises_typed_args() {
 fn chrome_json_escapes_control_and_quote_characters() {
     let mut buf = TraceBuffer::new();
     buf.push(
-        TraceEvent::instant(TrackId::MAIN, 0, "quote\"back\\slash\nnewline\ttab")
-            .with_arg("note", TraceArgValue::Str(alloc::string::String::from("bell\u{07}"))),
+        TraceEvent::instant(TrackId::MAIN, 0, "quote\"back\\slash\nnewline\ttab").with_arg(
+            "note",
+            TraceArgValue::Str(alloc::string::String::from("bell\u{07}")),
+        ),
     );
     let json = to_chrome_json(&buf);
-    assert!(json.contains("quote\\\"back\\\\slash\\nnewline\\ttab"), "{json}");
+    assert!(
+        json.contains("quote\\\"back\\\\slash\\nnewline\\ttab"),
+        "{json}"
+    );
     assert!(json.contains("\\u0007"), "{json}");
 }
 
@@ -184,7 +189,9 @@ mod std_recorder {
 
     #[test]
     fn recorder_captures_nested_spans_as_begin_end_stream() {
-        let mut rec = TraceRecorder::new().on_track(TrackId(3)).with_category("sys");
+        let mut rec = TraceRecorder::new()
+            .on_track(TrackId(3))
+            .with_category("sys");
         rec.begin("outer");
         rec.begin("inner");
         rec.end();
@@ -193,8 +200,7 @@ mod std_recorder {
         assert!(rec.is_balanced());
 
         let buf: TraceBuffer = rec.into_buffer();
-        let phases: alloc::vec::Vec<EventPhase> =
-            buf.events().iter().map(|e| e.phase()).collect();
+        let phases: alloc::vec::Vec<EventPhase> = buf.events().iter().map(|e| e.phase()).collect();
         assert_eq!(
             phases,
             alloc::vec![
@@ -225,7 +231,10 @@ mod std_recorder {
         let buf = rec.into_buffer();
         let mut last = 0u64;
         for ev in buf.events() {
-            assert!(ev.timestamp_ns() >= last, "timestamps must not go backwards");
+            assert!(
+                ev.timestamp_ns() >= last,
+                "timestamps must not go backwards"
+            );
             last = ev.timestamp_ns();
         }
     }

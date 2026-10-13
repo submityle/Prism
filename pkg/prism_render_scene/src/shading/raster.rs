@@ -133,6 +133,9 @@ pub(crate) struct VisibilityRasterPipeline {
     scene_layout: BindGroupLayoutDescriptor,
     material_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
+    /// Whether the material group exposes the bindless texture/sampler arrays
+    /// the region-illumination mask samples.
+    bindless_materials: bool,
 }
 
 pub(crate) fn init_visibility_raster(
@@ -147,6 +150,7 @@ pub(crate) fn init_visibility_raster(
         scene_layout: scene.layout_descriptor.clone(),
         material_layout: material.layout_descriptor.clone(),
         shader: load_embedded_asset!(asset_server.as_ref(), "../shaders/visibility_raster.wesl"),
+        bindless_materials: material.bindless(),
     });
 }
 
@@ -166,9 +170,19 @@ impl SpecializedMeshPipeline for VisibilityRasterPipeline {
         {
             shader_defs.push("VERTEX_POSITIONS_COMPRESSED".into());
         }
-        let vertex_layout = layout
-            .0
-            .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])?;
+        let has_uvs = layout.0.contains(Mesh::ATTRIBUTE_UV_0);
+        if has_uvs {
+            shader_defs.push("VERTEX_UVS".into());
+        }
+        if self.bindless_materials {
+            shader_defs.push("MATERIAL_BINDLESS".into());
+            shader_defs.push("REGION_ILLUMINATION".into());
+        }
+        let mut attributes = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)];
+        if has_uvs {
+            attributes.push(Mesh::ATTRIBUTE_UV_0.at_shader_location(2));
+        }
+        let vertex_layout = layout.0.get_layout(&attributes)?;
         let view = self
             .mesh_pipeline
             .get_view_layout(MeshPipelineViewLayoutKey::from(key.mesh));

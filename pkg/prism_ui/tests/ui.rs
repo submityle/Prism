@@ -268,9 +268,8 @@ fn keyed_insert_and_remove() {
 /// actually paint.
 #[test]
 fn color_inherits_to_text_children() {
-    let sheet = StyleSheet::new().with_class(
-        Class::new("fg").with(StyleProp::Color, StyleValue::rgba8(10, 20, 30, 255)),
-    );
+    let sheet = StyleSheet::new()
+        .with_class(Class::new("fg").with(StyleProp::Color, StyleValue::rgba8(10, 20, 30, 255)));
 
     let mut ui = Ui::new(RecordingBackend::new()).with_stylesheet(sheet);
     // Parent declares the color; the text child declares none.

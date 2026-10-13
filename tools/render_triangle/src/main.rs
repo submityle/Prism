@@ -17,12 +17,12 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use prism_render_driver as rhi;
+use prism_render_graph::PassFlags;
+use prism_render_runtime::WgpuRuntime;
 use rhi::{
     ColorTargetState, FragmentState, MultisampleState, PrimitiveState, RenderDevice, RenderQueue,
     ShaderModuleDescriptor, VertexFormat, VertexState, VertexStepMode,
 };
-use prism_render_graph::PassFlags;
-use prism_render_runtime::WgpuRuntime;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -64,14 +64,13 @@ impl Demo {
 
         let mut runtime =
             WgpuRuntime::wgpu(rhi::Extent3d::new_2d(width, height)).expect("wgpu runtime");
-        runtime.create_surface(window.clone()).expect("create surface");
+        runtime
+            .create_surface(window.clone())
+            .expect("create surface");
         runtime
             .configure_surface_default(width, height)
             .expect("configure surface");
-        let format = runtime
-            .surface_config()
-            .expect("just configured")
-            .format;
+        let format = runtime.surface_config().expect("just configured").format;
 
         let device = runtime.device();
         let queue = runtime.queue();
@@ -167,8 +166,8 @@ impl ApplicationHandler for Demo {
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 if let Some(state) = self.state.as_mut()
                     && let Err(error) = state
-                    .runtime
-                    .configure_surface_default(size.width, size.height)
+                        .runtime
+                        .configure_surface_default(size.width, size.height)
                 {
                     eprintln!("resize failed: {error}");
                 }

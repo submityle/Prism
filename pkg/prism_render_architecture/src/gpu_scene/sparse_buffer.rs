@@ -204,7 +204,13 @@ mod tests {
         };
 
         let mut v = vec();
-        v.grow_and_set(3, Row { a: 0x1122_3344, b: 0x5566_7788 });
+        v.grow_and_set(
+            3,
+            Row {
+                a: 0x1122_3344,
+                b: 0x5566_7788,
+            },
+        );
         v.write_buffer(&device, &queue);
         assert!(device.poll_wait(), "the device stays healthy");
 

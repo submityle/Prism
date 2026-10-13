@@ -225,15 +225,36 @@ mod tests {
                 AsyncState::Failed(v)
             }
         };
-        assert_eq!(AsyncState::<i32, i32>::Ready(3).and_then(step), AsyncState::Ready(30));
-        assert_eq!(AsyncState::<i32, i32>::Ready(-1).and_then(step), AsyncState::Failed(-1));
-        assert_eq!(AsyncState::<i32, i32>::Pending.and_then(step), AsyncState::Pending);
-        assert_eq!(AsyncState::<i32, i32>::Failed(2).and_then(step), AsyncState::Failed(2));
+        assert_eq!(
+            AsyncState::<i32, i32>::Ready(3).and_then(step),
+            AsyncState::Ready(30)
+        );
+        assert_eq!(
+            AsyncState::<i32, i32>::Ready(-1).and_then(step),
+            AsyncState::Failed(-1)
+        );
+        assert_eq!(
+            AsyncState::<i32, i32>::Pending.and_then(step),
+            AsyncState::Pending
+        );
+        assert_eq!(
+            AsyncState::<i32, i32>::Failed(2).and_then(step),
+            AsyncState::Failed(2)
+        );
 
         let recover = |e: i32| AsyncState::<i32, i32>::Ready(e + 100);
-        assert_eq!(AsyncState::<i32, i32>::Failed(1).or_else(recover), AsyncState::Ready(101));
-        assert_eq!(AsyncState::<i32, i32>::Ready(1).or_else(recover), AsyncState::Ready(1));
-        assert_eq!(AsyncState::<i32, i32>::Pending.or_else(recover), AsyncState::Pending);
+        assert_eq!(
+            AsyncState::<i32, i32>::Failed(1).or_else(recover),
+            AsyncState::Ready(101)
+        );
+        assert_eq!(
+            AsyncState::<i32, i32>::Ready(1).or_else(recover),
+            AsyncState::Ready(1)
+        );
+        assert_eq!(
+            AsyncState::<i32, i32>::Pending.or_else(recover),
+            AsyncState::Pending
+        );
     }
 
     #[test]

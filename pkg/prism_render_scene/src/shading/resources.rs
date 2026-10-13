@@ -77,6 +77,20 @@ impl ViewVisibilityBuffer {
         (&self.ids.default_view, &self.metadata.default_view)
     }
 
+    /// The actual raster attachments used by the visibility pass.  The
+    /// feedback bridge copies these textures after the render graph has
+    /// recorded the raster work; it never treats the CPU `VisibilityBuffer`
+    /// helper as a producer.
+    pub(crate) fn feedback_sources(
+        &self,
+    ) -> (
+        &bevy_render::render_resource::Texture,
+        &bevy_render::render_resource::Texture,
+        bevy_math::UVec2,
+    ) {
+        (&self.ids.texture, &self.metadata.texture, self.size)
+    }
+
     /// Storage/sampling view of the linear HDR radiance target.
     pub(crate) fn scene_color_view(&self) -> &bevy_render::render_resource::TextureView {
         &self.scene_color.default_view
@@ -250,7 +264,8 @@ pub(crate) fn prepare_visibility_buffers(
                 format: VISIBILITY_ID_FORMAT,
                 usage: TextureUsages::RENDER_ATTACHMENT
                     | TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::STORAGE_BINDING,
+                    | TextureUsages::STORAGE_BINDING
+                    | TextureUsages::COPY_SRC,
                 view_formats: &[],
             },
         );
@@ -265,7 +280,8 @@ pub(crate) fn prepare_visibility_buffers(
                 format: VISIBILITY_ID_FORMAT,
                 usage: TextureUsages::RENDER_ATTACHMENT
                     | TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::STORAGE_BINDING,
+                    | TextureUsages::STORAGE_BINDING
+                    | TextureUsages::COPY_SRC,
                 view_formats: &[],
             },
         );
@@ -475,7 +491,7 @@ mod tests {
             )
             .replace(
                 "@builtin(barycentric) barycentrics: vec3<f32>",
-                "@location(5) barycentrics: vec3<f32>",
+                "@location(6) barycentrics: vec3<f32>",
             );
         let stubs = r#"
 fn affine3_to_square(value: mat3x4<f32>) -> mat4x4<f32> {
@@ -493,7 +509,7 @@ fn decompress_vertex_position(position: vec4<f32>, center: vec3<f32>, half_exten
         cache.set_shader(
             shader_id,
             Shader::from_wesl(
-                format!("{stubs}{source}"),
+                format!("enable wgpu_binding_array;\n{stubs}{source}"),
                 "shaders/prism_visibility_raster.wesl",
             ),
         );

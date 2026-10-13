@@ -174,9 +174,7 @@ mod tests {
 
     #[test]
     fn label_renders_as_text() {
-        let el = render(
-            PropertyGridProps::new().row(PropertyRow::new("Opacity", Element::box_())),
-        );
+        let el = render(PropertyGridProps::new().row(PropertyRow::new("Opacity", Element::box_())));
         let label = &el.child_elements()[0].child_elements()[0];
         assert_eq!(label.text_content(), Some("Opacity"));
     }

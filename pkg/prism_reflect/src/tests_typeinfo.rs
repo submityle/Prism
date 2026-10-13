@@ -91,7 +91,10 @@ fn static_info_is_a_stable_zero_registration_pointer() {
     let b = core::ptr::from_ref(Translation::static_type_info());
     assert!(core::ptr::eq(a, b));
     // The associated const and the borrowed static agree.
-    assert_eq!(Translation::static_type_info(), &Translation::STATIC_TYPE_INFO);
+    assert_eq!(
+        Translation::static_type_info(),
+        &Translation::STATIC_TYPE_INFO
+    );
 }
 
 #[test]

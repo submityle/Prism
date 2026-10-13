@@ -18,20 +18,18 @@ use alloc::vec::Vec;
 
 use prism_render_driver::{BufferDescriptor, BufferId, BufferUsages, RenderDevice, RenderQueue};
 use prism_render_material::{
-    GpuMaterialHeader, GpuMaterialTexture, MaterialRecord, inactive_material_header,
+    inactive_material_header, GpuMaterialHeader, GpuMaterialTexture, MaterialRecord,
 };
 
 use super::ParameterHeap;
 
 /// The usages the header buffer is created with: a shader reads the rows.
-pub(crate) const HEADER_USAGES: BufferUsages =
-    BufferUsages::STORAGE.union(BufferUsages::COPY_DST);
+pub(crate) const HEADER_USAGES: BufferUsages = BufferUsages::STORAGE.union(BufferUsages::COPY_DST);
 /// The usages the parameter word heap is created with: a shader reads the words.
 pub(crate) const PARAMETER_USAGES: BufferUsages =
     BufferUsages::STORAGE.union(BufferUsages::COPY_DST);
 /// The usages the texture row buffer is created with: a shader reads the rows.
-pub(crate) const TEXTURE_USAGES: BufferUsages =
-    BufferUsages::STORAGE.union(BufferUsages::COPY_DST);
+pub(crate) const TEXTURE_USAGES: BufferUsages = BufferUsages::STORAGE.union(BufferUsages::COPY_DST);
 
 /// One material's run in the word heap.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -300,11 +298,7 @@ impl MaterialParameterBuffers {
                 }
             }
 
-            let row = record.header(
-                placement.offset,
-                texture_placement.offset,
-                epoch,
-            );
+            let row = record.header(placement.offset, texture_placement.offset, epoch);
             let slot = &mut self.rows[index as usize];
             if *slot != row {
                 *slot = row;
@@ -561,9 +555,5 @@ fn word_bytes(words: &[u32]) -> Vec<u8> {
 
 /// The inclusive `(first, last)` indices a dirty list covers.
 fn span(dirty: &[u32]) -> Option<(u32, u32)> {
-    Some((
-        dirty.iter().copied().min()?,
-        dirty.iter().copied().max()?,
-    ))
+    Some((dirty.iter().copied().min()?, dirty.iter().copied().max()?))
 }
-

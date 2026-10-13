@@ -62,7 +62,6 @@
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from that publicly documented standard.
 
-
 use bevy_math::ops;
 
 use prism_audio_core::math::Sample;
@@ -84,7 +83,11 @@ const ENERGY_FLOOR: Sample = 1e-20;
 /// of every sum without poisoning it.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Converts a millisecond offset to a non-negative sample index, returning `0`
@@ -99,10 +102,19 @@ fn ms_to_samples(ms: Sample, sample_rate: Sample) -> usize {
 
 /// Clamps a `[start_ms, end_ms]` window to `[0, len]` sample indices, returning
 /// an empty `(start, start)` range when the window is degenerate.
-fn window_bounds(start_ms: Sample, end_ms: Sample, sample_rate: Sample, len: usize) -> (usize, usize) {
+fn window_bounds(
+    start_ms: Sample,
+    end_ms: Sample,
+    sample_rate: Sample,
+    len: usize,
+) -> (usize, usize) {
     let start = ms_to_samples(start_ms, sample_rate).min(len);
     let end = ms_to_samples(end_ms, sample_rate).min(len);
-    if end > start { (start, end) } else { (start, start) }
+    if end > start {
+        (start, end)
+    } else {
+        (start, start)
+    }
 }
 
 /// Sums the squared (finite) samples of `slice`.
@@ -126,18 +138,23 @@ fn energy(slice: &[Sample]) -> Sample {
 /// Empty responses, a non-positive or non-finite sample rate, or a silent
 /// omnidirectional early window return `0`.
 #[must_use]
-pub fn lateral_energy_fraction(omni: &[Sample], figure_eight: &[Sample], sample_rate: Sample) -> Sample {
-    if omni.is_empty() || figure_eight.is_empty() || !sample_rate.is_finite() || sample_rate <= 0.0 {
+pub fn lateral_energy_fraction(
+    omni: &[Sample],
+    figure_eight: &[Sample],
+    sample_rate: Sample,
+) -> Sample {
+    if omni.is_empty() || figure_eight.is_empty() || !sample_rate.is_finite() || sample_rate <= 0.0
+    {
         return 0.0;
     }
     let n = omni.len().min(figure_eight.len());
-    let (lat_start, lat_end) = window_bounds(LF_EARLY_START_MS, EARLY_WINDOW_END_MS, sample_rate, n);
+    let (lat_start, lat_end) =
+        window_bounds(LF_EARLY_START_MS, EARLY_WINDOW_END_MS, sample_rate, n);
     let (_, early_end) = window_bounds(0.0, EARLY_WINDOW_END_MS, sample_rate, n);
 
     let numerator = energy(&figure_eight[lat_start..lat_end]);
     let denominator = energy(&omni[..early_end]);
-    #[expect(clippy::neg_cmp_op_on_partial_ord, reason = "negated comparison keeps NaN totals on the safe branch, unlike the suggested direct comparison")]
-    if !(denominator > ENERGY_FLOOR) {
+    if denominator <= ENERGY_FLOOR || denominator.is_nan() {
         return 0.0;
     }
     (numerator / denominator).clamp(0.0, 1.0)
@@ -152,21 +169,29 @@ pub fn lateral_energy_fraction(omni: &[Sample], figure_eight: &[Sample], sample_
 /// Empty responses, a non-positive or non-finite sample rate, or a silent
 /// omnidirectional early window return `0`.
 #[must_use]
-pub fn lateral_energy_fraction_cosine(omni: &[Sample], figure_eight: &[Sample], sample_rate: Sample) -> Sample {
-    if omni.is_empty() || figure_eight.is_empty() || !sample_rate.is_finite() || sample_rate <= 0.0 {
+pub fn lateral_energy_fraction_cosine(
+    omni: &[Sample],
+    figure_eight: &[Sample],
+    sample_rate: Sample,
+) -> Sample {
+    if omni.is_empty() || figure_eight.is_empty() || !sample_rate.is_finite() || sample_rate <= 0.0
+    {
         return 0.0;
     }
     let n = omni.len().min(figure_eight.len());
-    let (lat_start, lat_end) = window_bounds(LF_EARLY_START_MS, EARLY_WINDOW_END_MS, sample_rate, n);
+    let (lat_start, lat_end) =
+        window_bounds(LF_EARLY_START_MS, EARLY_WINDOW_END_MS, sample_rate, n);
     let (_, early_end) = window_bounds(0.0, EARLY_WINDOW_END_MS, sample_rate, n);
 
     let mut numerator = 0.0;
-    for (&a, &b) in omni[lat_start..lat_end].iter().zip(&figure_eight[lat_start..lat_end]) {
+    for (&a, &b) in omni[lat_start..lat_end]
+        .iter()
+        .zip(&figure_eight[lat_start..lat_end])
+    {
         numerator += (finite(a) * finite(b)).abs();
     }
     let denominator = energy(&omni[..early_end]);
-    #[expect(clippy::neg_cmp_op_on_partial_ord, reason = "negated comparison keeps NaN totals on the safe branch, unlike the suggested direct comparison")]
-    if !(denominator > ENERGY_FLOOR) {
+    if denominator <= ENERGY_FLOOR || denominator.is_nan() {
         return 0.0;
     }
     (numerator / denominator).clamp(0.0, 1.0)
@@ -201,8 +226,7 @@ pub fn interaural_cross_correlation(
     let energy_left = energy(&left[start..end]);
     let energy_right = energy(&right[start..end]);
     let norm = energy_left * energy_right;
-    #[expect(clippy::neg_cmp_op_on_partial_ord, reason = "negated comparison keeps NaN totals on the safe branch, unlike the suggested direct comparison")]
-    if !(norm > ENERGY_FLOOR) {
+    if norm <= ENERGY_FLOOR || norm.is_nan() {
         return 0.0;
     }
     let denom = ops::sqrt(norm);
@@ -211,13 +235,13 @@ pub fn interaural_cross_correlation(
     let mut best = 0.0;
     for lag in -max_lag..=max_lag {
         let mut cross = 0.0;
-        #[expect(clippy::needless_range_loop, reason = "the index t drives left[t] while right is read at the lag-offset index j, so a single-slice iterator does not apply")]
-        for t in start..end {
+        for (offset, &sample_left) in left[start..end].iter().enumerate() {
+            let t = start + offset;
             let j = t as isize + lag;
             if j < 0 || j as usize >= n {
                 continue;
             }
-            cross += finite(left[t]) * finite(right[j as usize]);
+            cross += finite(sample_left) * finite(right[j as usize]);
         }
         let coeff = (cross / denom).abs();
         if coeff > best {
@@ -307,9 +331,15 @@ impl SpatialImpression {
             0.0
         };
 
-        let iacc_early = interaural_cross_correlation(left, right, sample_rate, 0.0, EARLY_WINDOW_END_MS);
-        let iacc_late =
-            interaural_cross_correlation(left, right, sample_rate, EARLY_WINDOW_END_MS, duration_ms);
+        let iacc_early =
+            interaural_cross_correlation(left, right, sample_rate, 0.0, EARLY_WINDOW_END_MS);
+        let iacc_late = interaural_cross_correlation(
+            left,
+            right,
+            sample_rate,
+            EARLY_WINDOW_END_MS,
+            duration_ms,
+        );
         let iacc_all = interaural_cross_correlation(left, right, sample_rate, 0.0, duration_ms);
 
         Self {
@@ -401,7 +431,10 @@ mod tests {
         let some = exp_response(4_000, 1_000.0);
         assert_eq!(lateral_energy_fraction(&empty, &some, SR), 0.0);
         assert_eq!(lateral_energy_fraction_cosine(&empty, &some, SR), 0.0);
-        assert_eq!(interaural_cross_correlation(&empty, &some, SR, 0.0, 80.0), 0.0);
+        assert_eq!(
+            interaural_cross_correlation(&empty, &some, SR, 0.0, 80.0),
+            0.0
+        );
         let si = SpatialImpression::from_responses(&empty, &empty, &empty, &empty, SR);
         assert_eq!(si, SpatialImpression::default());
     }
@@ -515,8 +548,16 @@ mod tests {
         let left = lcg_noise(16_000, 5);
         let right = lcg_noise(16_000, 6);
         let si = SpatialImpression::from_responses(&omni, &figure_eight, &left, &right, SR);
-        assert!(approx(si.lf, lateral_energy_fraction(&omni, &figure_eight, SR), 1e-6));
-        assert!(approx(si.lfc, lateral_energy_fraction_cosine(&omni, &figure_eight, SR), 1e-6));
+        assert!(approx(
+            si.lf,
+            lateral_energy_fraction(&omni, &figure_eight, SR),
+            1e-6
+        ));
+        assert!(approx(
+            si.lfc,
+            lateral_energy_fraction_cosine(&omni, &figure_eight, SR),
+            1e-6
+        ));
         assert!(approx(
             si.iacc_early,
             interaural_cross_correlation(&left, &right, SR, 0.0, EARLY_WINDOW_END_MS),

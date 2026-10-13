@@ -162,11 +162,11 @@ pub fn tag_extracted_entities(
 mod tests {
     use alloc::vec::Vec;
 
-    use prism_ecs::extract::{ExtractComponent, extract_components};
+    use prism_ecs::extract::{extract_components, ExtractComponent};
     use prism_ecs::prelude::{Component, Entity, With};
     use prism_ecs::world::World;
 
-    use super::{MainEntity, MainEntityHashSet, tag_extracted_entities};
+    use super::{tag_extracted_entities, MainEntity, MainEntityHashSet};
 
     #[test]
     fn main_entity_round_trips_the_simulation_entity() {

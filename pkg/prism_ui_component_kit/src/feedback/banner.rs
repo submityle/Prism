@@ -159,7 +159,10 @@ mod tests {
         assert!(!el.class_names().iter().any(|c| c == "is-dismissible"));
         let kids = el.child_elements();
         assert_eq!(kids.len(), 1);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-banner__message"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-banner__message"));
     }
 
     #[test]
@@ -168,6 +171,9 @@ mod tests {
         assert!(el.class_names().iter().any(|c| c == "is-dismissible"));
         let kids = el.child_elements();
         assert_eq!(kids.len(), 2);
-        assert!(kids[1].class_names().iter().any(|c| c == "pk-banner__dismiss"));
+        assert!(kids[1]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-banner__dismiss"));
     }
 }

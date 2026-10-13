@@ -43,7 +43,10 @@ fn dist_to_segment(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
 /// Recursively flattens the parameter span `[t0, t1]`, appending the end point
 /// of each accepted chord to `out`. `p0`/`p1` are the already-sampled curve
 /// points at `t0`/`t1`.
-#[expect(clippy::too_many_arguments, reason = "internal recursion carries its working state")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal recursion carries its working state"
+)]
 fn subdivide(
     sample: &impl Fn(f64) -> (f64, f64),
     t0: f64,
@@ -275,8 +278,20 @@ mod tests {
             let ry = rand_in(&mut state, 2.0, 14.0);
             let start = rand_in(&mut state, -PI, PI);
             let sweep = rand_in(&mut state, 0.5, 2.0 * PI);
-            let coarse = flatten_ellipse((0.0, 0.0), (rx as f32, ry as f32), start as f32, sweep as f32, 0.4);
-            let fine = flatten_ellipse((0.0, 0.0), (rx as f32, ry as f32), start as f32, sweep as f32, 0.02);
+            let coarse = flatten_ellipse(
+                (0.0, 0.0),
+                (rx as f32, ry as f32),
+                start as f32,
+                sweep as f32,
+                0.4,
+            );
+            let fine = flatten_ellipse(
+                (0.0, 0.0),
+                (rx as f32, ry as f32),
+                start as f32,
+                sweep as f32,
+                0.02,
+            );
             assert!(
                 fine.len() >= coarse.len(),
                 "finer tolerance gave fewer points: {} < {}",
@@ -309,14 +324,20 @@ mod tests {
         // tracks it within tolerance.
         for &(x, y) in &arc {
             let d = dist_to_polyline((f64::from(x), f64::from(y)), &ell);
-            assert!(d <= f64::from(tol) + 2e-3, "arc point {d} from ellipse polyline");
+            assert!(
+                d <= f64::from(tol) + 2e-3,
+                "arc point {d} from ellipse polyline"
+            );
         }
     }
 
     /// Degenerate inputs collapse cleanly.
     #[test]
     fn degenerate_inputs() {
-        assert_eq!(flatten_ellipse((1.0, 2.0), (0.0, 0.0), 0.0, 1.0, 0.1), vec![(1.0, 2.0)]);
+        assert_eq!(
+            flatten_ellipse((1.0, 2.0), (0.0, 0.0), 0.0, 1.0, 0.1),
+            vec![(1.0, 2.0)]
+        );
         let zero_sweep = flatten_ellipse((0.0, 0.0), (3.0, 4.0), 0.5, 0.0, 0.1);
         assert_eq!(zero_sweep.len(), 1);
     }

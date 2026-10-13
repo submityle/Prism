@@ -63,9 +63,9 @@
 extern crate alloc;
 
 pub mod angle;
+pub mod calc;
 pub mod cascade;
 pub mod class;
-pub mod calc;
 pub mod color;
 pub mod error;
 pub mod selector;
@@ -74,11 +74,11 @@ pub mod token;
 pub mod value;
 
 pub use angle::{Angle, AngleUnit};
+pub use calc::{CalcError, CalcType, CalcValue};
 pub use cascade::{resolve, Cascade, ComputedStyle};
 pub use class::{Class, PropMap, StyleSheet};
 pub use error::StyleError;
 pub use selector::{Breakpoint, InteractionState, InteractionStateFlags, MatchContext};
 pub use theme::Theme;
 pub use token::{DesignToken, TokenStore};
-pub use calc::{CalcError, CalcType, CalcValue};
 pub use value::{Color, Keyword, Length, StyleProp, StyleValue};

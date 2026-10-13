@@ -276,7 +276,12 @@ mod tests {
 
     /// Spawns `n` entities, registers them all into `cell`, and marks the cell
     /// loaded so the streamer tracks it as resident.
-    fn populate(driver: &mut StreamDriver, world: &mut World, c: CellCoord, n: usize) -> Vec<Entity> {
+    fn populate(
+        driver: &mut StreamDriver,
+        world: &mut World,
+        c: CellCoord,
+        n: usize,
+    ) -> Vec<Entity> {
         let mut out = Vec::new();
         for _ in 0..n {
             out.push(world.spawn(()));

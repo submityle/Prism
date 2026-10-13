@@ -137,18 +137,18 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.secondary"),
+            ),
     );
 
     // Label: inherits the item color.
-    sheet.insert(
-        Class::new("pk-menu__label").with(StyleProp::Color, tok("color.label")),
-    );
+    sheet.insert(Class::new("pk-menu__label").with(StyleProp::Color, tok("color.label")));
 
     // Shared disabled state: dim and non-committal.
-    sheet.insert(
-        Class::new("is-disabled").with(StyleProp::Opacity, StyleValue::number(0.4)),
-    );
+    sheet.insert(Class::new("is-disabled").with(StyleProp::Opacity, StyleValue::number(0.4)));
 }
 
 #[cfg(test)]

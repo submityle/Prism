@@ -381,11 +381,16 @@ pub fn extrude_round(d2d: f32, z: f32, half_height: f32, rounding: f32) -> f32 {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::manual_clamp,
+    reason = "test-only independent reference oracles need true transcendental functions (sin/cos/acos/atan2/powi) to cross-validate the transcendental-free SDF primitives, and intentionally mirror the production .max().min() NaN-safe pattern instead of clamp (which panics on NaN); using the crate approximations or clamp here would make the checks circular or diverge from the code under test"
+)]
 mod tests {
     use super::{
-        elongate, elongate_2d, elongate_2d_correction, elongate_correction, extrude, extrude_round, fold_plane, fold_plane_offset, limited_repeat, mirror, mirror_repeat, onion,
-        repeat, revolution, rotate_2d, rotate_axis, round_distance, scale_distance, scale_point,
-        translate,
+        elongate, elongate_2d, elongate_2d_correction, elongate_correction, extrude, extrude_round,
+        fold_plane, fold_plane_offset, limited_repeat, mirror, mirror_repeat, onion, repeat,
+        revolution, rotate_2d, rotate_axis, round_distance, scale_distance, scale_point, translate,
     };
     use crate::ray_scene::sdf_primitives::{
         box_2d, capped_cylinder, circle_2d, round_box, rounded_box_2d, rounded_cylinder, sphere,
@@ -400,12 +405,12 @@ mod tests {
         let r = 0.8_f32;
         let h = 1.3_f32;
         let samples: [[f32; 3]; 6] = [
-            [0.0, 0.0, 0.0],   // interior centre
-            [0.3, 0.2, 0.5],   // interior, off centre
-            [1.5, 0.0, 0.0],   // outside the side wall
-            [0.0, 0.0, 2.0],   // outside past the end cap
-            [0.8, 0.0, 1.3],   // on the rim edge
-            [1.1, 0.2, 1.9],   // outside the rim corner
+            [0.0, 0.0, 0.0], // interior centre
+            [0.3, 0.2, 0.5], // interior, off centre
+            [1.5, 0.0, 0.0], // outside the side wall
+            [0.0, 0.0, 2.0], // outside past the end cap
+            [0.8, 0.0, 1.3], // on the rim edge
+            [1.1, 0.2, 1.9], // outside the rim corner
         ];
         for p in samples {
             let d2d = (p[0] * p[0] + p[1] * p[1]).sqrt() - r;
@@ -448,14 +453,14 @@ mod tests {
         let h = 1.3_f32;
         let fillet = 0.35_f32;
         let samples: [[f32; 3]; 8] = [
-            [0.0, 0.0, 0.0],   // interior centre
-            [0.3, 0.2, 0.5],   // interior, off centre
-            [1.8, 0.0, 0.0],   // outside the side wall
-            [0.0, 0.0, 2.1],   // outside past the end cap
-            [1.1, 0.0, 1.3],   // near the rounded rim corner
-            [0.9, 0.1, 1.1],   // inside, close to the fillet
-            [1.4, 0.3, 1.6],   // outside the rounded corner
-            [0.5, 0.5, 0.9],   // generic interior
+            [0.0, 0.0, 0.0], // interior centre
+            [0.3, 0.2, 0.5], // interior, off centre
+            [1.8, 0.0, 0.0], // outside the side wall
+            [0.0, 0.0, 2.1], // outside past the end cap
+            [1.1, 0.0, 1.3], // near the rounded rim corner
+            [0.9, 0.1, 1.1], // inside, close to the fillet
+            [1.4, 0.3, 1.6], // outside the rounded corner
+            [0.5, 0.5, 0.9], // generic interior
         ];
         for p in samples {
             let d2d = (p[0] * p[0] + p[1] * p[1]).sqrt() - big_r;
@@ -563,12 +568,12 @@ mod tests {
         let offset = 1.4_f32;
         let r = 0.5_f32;
         let samples: [[f32; 3]; 6] = [
-            [2.0, 0.0, 0.0],   // outside the tube on the +x spoke
-            [1.4, 0.5, 0.0],   // on the top of the tube
-            [1.4, 0.0, 0.0],   // on the ring centreline (interior, -r)
-            [0.0, 0.0, 1.9],   // outside on the +z spoke
-            [1.0, 0.3, 1.0],   // generic off-axis point
-            [0.0, 2.0, 0.0],   // on the y axis, far above
+            [2.0, 0.0, 0.0], // outside the tube on the +x spoke
+            [1.4, 0.5, 0.0], // on the top of the tube
+            [1.4, 0.0, 0.0], // on the ring centreline (interior, -r)
+            [0.0, 0.0, 1.9], // outside on the +z spoke
+            [1.0, 0.3, 1.0], // generic off-axis point
+            [0.0, 2.0, 0.0], // on the y axis, far above
         ];
         for p in samples {
             let q = revolution(p, offset);
@@ -613,7 +618,10 @@ mod tests {
 
     #[test]
     fn translate_shifts_the_query_point() {
-        assert_eq!(translate([1.0, 2.0, 3.0], [0.5, -1.0, 2.0]), [0.5, 3.0, 1.0]);
+        assert_eq!(
+            translate([1.0, 2.0, 3.0], [0.5, -1.0, 2.0]),
+            [0.5, 3.0, 1.0]
+        );
     }
 
     #[test]
@@ -731,7 +739,11 @@ mod tests {
         for p in [[-1.0, -2.0, 0.5], [3.0, 1.0, -1.0], [0.0, 0.0, 0.0]] {
             let a = fold_plane_offset(p, n, 0.0);
             let b = fold_plane(p, n);
-            assert!((a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6 && (a[2] - b[2]).abs() < 1e-6);
+            assert!(
+                (a[0] - b[0]).abs() < 1e-6
+                    && (a[1] - b[1]).abs() < 1e-6
+                    && (a[2] - b[2]).abs() < 1e-6
+            );
         }
     }
 
@@ -744,14 +756,21 @@ mod tests {
         // A point on the positive side is left untouched.
         let keep = [2.0, 2.0, 2.0];
         let kf = fold_plane_offset(keep, n, offset);
-        assert!((kf[0] - keep[0]).abs() < 1e-6 && (kf[1] - keep[1]).abs() < 1e-6 && (kf[2] - keep[2]).abs() < 1e-6);
+        assert!(
+            (kf[0] - keep[0]).abs() < 1e-6
+                && (kf[1] - keep[1]).abs() < 1e-6
+                && (kf[2] - keep[2]).abs() < 1e-6
+        );
         // A point on the negative side is mirrored: its signed distance to the
         // plane flips sign while the tangential part is preserved.
         let p = [-1.0, 0.5, -0.3];
         let f = fold_plane_offset(p, n, offset);
         let side_p = p[0] * n[0] + p[1] * n[1] + p[2] * n[2] - offset;
         let side_f = f[0] * n[0] + f[1] * n[1] + f[2] * n[2] - offset;
-        assert!((side_f + side_p).abs() < 1e-6, "signed distance should negate");
+        assert!(
+            (side_f + side_p).abs() < 1e-6,
+            "signed distance should negate"
+        );
         for axis in 0..3 {
             let tp = p[axis] - side_p * n[axis];
             let tf = f[axis] - side_f * n[axis];
@@ -759,7 +778,11 @@ mod tests {
         }
         // Folding twice lands on the kept side and is then idempotent.
         let f2 = fold_plane_offset(f, n, offset);
-        assert!((f2[0] - f[0]).abs() < 1e-6 && (f2[1] - f[1]).abs() < 1e-6 && (f2[2] - f[2]).abs() < 1e-6);
+        assert!(
+            (f2[0] - f[0]).abs() < 1e-6
+                && (f2[1] - f[1]).abs() < 1e-6
+                && (f2[2] - f[2]).abs() < 1e-6
+        );
     }
 
     #[test]
@@ -791,7 +814,8 @@ mod tests {
         let fa = fold_plane(a, n);
         let fb = fold_plane(b, n);
         let d0 = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
-        let d1 = ((fa[0] - fb[0]).powi(2) + (fa[1] - fb[1]).powi(2) + (fa[2] - fb[2]).powi(2)).sqrt();
+        let d1 =
+            ((fa[0] - fb[0]).powi(2) + (fa[1] - fb[1]).powi(2) + (fa[2] - fb[2]).powi(2)).sqrt();
         assert!((d0 - d1).abs() < 1e-6, "d0={d0} d1={d1}");
     }
 
@@ -842,7 +866,10 @@ mod tests {
             let want = round_box(p, h, r);
             maxerr = maxerr.max((got - want).abs());
         }
-        assert!(maxerr < 1e-5, "elongate-exact vs round_box maxerr = {maxerr}");
+        assert!(
+            maxerr < 1e-5,
+            "elongate-exact vs round_box maxerr = {maxerr}"
+        );
     }
 
     #[test]
@@ -883,7 +910,10 @@ mod tests {
             let want = rounded_box_2d(p, [h[0] + r, h[1] + r], [r, r, r, r]);
             maxerr = maxerr.max((got - want).abs());
         }
-        assert!(maxerr < 1e-5, "elongate_2d-exact vs rounded_box_2d maxerr = {maxerr}");
+        assert!(
+            maxerr < 1e-5,
+            "elongate_2d-exact vs rounded_box_2d maxerr = {maxerr}"
+        );
     }
 
     #[test]
@@ -918,9 +948,12 @@ mod tests {
                 let rp = [c * p[0] + s * p[1], -s * p[0] + c * p[1]];
                 let qx = rp[0].abs() - he[0];
                 let qy = rp[1].abs() - he[1];
-                let want = ((qx.max(0.0)).powi(2) + (qy.max(0.0)).powi(2)).sqrt()
-                    + qx.max(qy).min(0.0);
-                assert!((got - want).abs() < 1e-6, "a={a} p={p:?} got={got} want={want}");
+                let want =
+                    ((qx.max(0.0)).powi(2) + (qy.max(0.0)).powi(2)).sqrt() + qx.max(qy).min(0.0);
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "a={a} p={p:?} got={got} want={want}"
+                );
             }
         }
     }

@@ -183,10 +183,18 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     use prism_ui_style::{Class, StyleProp, StyleValue};
 
     sheet.insert(Class::new("pk-transition").with(StyleProp::Opacity, StyleValue::number(1.0)));
-    sheet.insert(Class::new("pk-transition--enter").with(StyleProp::Opacity, StyleValue::number(0.0)));
-    sheet.insert(Class::new("pk-transition--entered").with(StyleProp::Opacity, StyleValue::number(1.0)));
-    sheet.insert(Class::new("pk-transition--leave").with(StyleProp::Opacity, StyleValue::number(1.0)));
-    sheet.insert(Class::new("pk-transition--left").with(StyleProp::Opacity, StyleValue::number(0.0)));
+    sheet.insert(
+        Class::new("pk-transition--enter").with(StyleProp::Opacity, StyleValue::number(0.0)),
+    );
+    sheet.insert(
+        Class::new("pk-transition--entered").with(StyleProp::Opacity, StyleValue::number(1.0)),
+    );
+    sheet.insert(
+        Class::new("pk-transition--leave").with(StyleProp::Opacity, StyleValue::number(1.0)),
+    );
+    sheet.insert(
+        Class::new("pk-transition--left").with(StyleProp::Opacity, StyleValue::number(0.0)),
+    );
 }
 
 #[cfg(test)]
@@ -201,7 +209,10 @@ mod tests {
     #[test]
     fn attaches_base_and_phase_modifier() {
         let el = render(TransitionProps::new().phase(TransitionPhase::Entered));
-        assert_eq!(el.class_names(), ["pk-transition", "pk-transition--entered"]);
+        assert_eq!(
+            el.class_names(),
+            ["pk-transition", "pk-transition--entered"]
+        );
     }
 
     #[test]

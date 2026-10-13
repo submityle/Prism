@@ -38,8 +38,8 @@ use prism_audio_spatial::propagation::{PathKind, PropagationPath, FULL_BAND_CUTO
 use prism_audio_spatial::BandGains;
 
 use crate::config::GeometricConfig;
-use crate::scene::AcousticScene;
 use crate::receiver_directivity;
+use crate::scene::AcousticScene;
 use crate::source_directivity;
 
 /// The resolved direct arrival plus the blocking it implies.

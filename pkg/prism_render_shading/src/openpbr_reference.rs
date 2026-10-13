@@ -78,7 +78,11 @@ pub fn fon_b(sigma: f32) -> f32 {
 #[inline]
 #[must_use]
 pub fn fon_unit_brdf(cos_i: f32, cos_o: f32, s: f32, sigma: f32) -> f32 {
-    let t = if s > 0.0 { cos_i.max(cos_o).max(1.0e-6) } else { 1.0 };
+    let t = if s > 0.0 {
+        cos_i.max(cos_o).max(1.0e-6)
+    } else {
+        1.0
+    };
     (fon_a(sigma) + fon_b(sigma) * s / t).max(0.0) / PI
 }
 
@@ -413,12 +417,7 @@ pub fn coat_roughened_base_roughness(r_base: f32, r_coat: f32, coat_weight: f32)
 /// therefore contributes no transmittance (`0`).
 #[inline]
 #[must_use]
-pub fn coat_absorption_rgb(
-    coat_color: [f32; 3],
-    mu_i: f32,
-    mu_o: f32,
-    eta_ca: f32,
-) -> [f32; 3] {
+pub fn coat_absorption_rgb(coat_color: [f32; 3], mu_i: f32, mu_o: f32, eta_ca: f32) -> [f32; 3] {
     let mu_t = |mu: f32| -> f32 {
         let m = mu.clamp(0.0, 1.0);
         let s = 1.0 - (1.0 - m * m) / (eta_ca * eta_ca);
@@ -479,13 +478,7 @@ pub fn anisotropy_to_alpha(r: f32, a: f32) -> (f32, f32) {
 /// anisotropic form), normalised so `∫ D(h) (n·h) dω = 1`.
 #[inline]
 #[must_use]
-pub fn ggx_d(
-    x_dot_h: f32,
-    y_dot_h: f32,
-    n_dot_h: f32,
-    alpha_t: f32,
-    alpha_b: f32,
-) -> f32 {
+pub fn ggx_d(x_dot_h: f32, y_dot_h: f32, n_dot_h: f32, alpha_t: f32, alpha_b: f32) -> f32 {
     let x = x_dot_h / alpha_t;
     let y = y_dot_h / alpha_b;
     let denom = x * x + y * y + n_dot_h * n_dot_h;
@@ -1031,10 +1024,7 @@ mod conformance {
                 pure_diffuse(1.0),
             ),
             ("dielectric base, Lambertian", coupled(0.0)),
-            (
-                "dielectric base, maximum diffuse roughness",
-                coupled(1.0),
-            ),
+            ("dielectric base, maximum diffuse roughness", coupled(1.0)),
             ("translucent base (transmission_weight=1)", translucent),
             ("dielectric base under a white coat", coated),
         ];
@@ -1242,9 +1232,8 @@ mod conformance {
             for mu_o in [1.0_f32, 0.8, 0.5, 0.2, 0.05] {
                 for r_b in [0.0_f32, 0.35, 0.7, 1.0] {
                     // Prism's real-time Clearcoat helpers.
-                    let k_rt = crate::clearcoat::coat_internal_reflection_coefficient(
-                        eta_c, mu_o, r_b,
-                    );
+                    let k_rt =
+                        crate::clearcoat::coat_internal_reflection_coefficient(eta_c, mu_o, r_b);
                     let k_ref = internal_reflection_general(eta_c, mu_o, r_b);
                     for base_albedo in [0.05_f32, 0.25, 0.5, 0.9] {
                         let d_rt = crate::clearcoat::coat_darkening_delta(base_albedo, k_rt);
@@ -1256,11 +1245,8 @@ mod conformance {
                                     coat_darkening,
                                     d_rt,
                                 );
-                                let m_ref = modulated_darkening_factor(
-                                    coat_weight,
-                                    coat_darkening,
-                                    d_ref,
-                                );
+                                let m_ref =
+                                    modulated_darkening_factor(coat_weight, coat_darkening, d_ref);
                                 let d = (m_rt - m_ref).abs();
                                 if d > worst {
                                     worst = d;
@@ -1303,7 +1289,10 @@ mod conformance {
                 }
             }
         }
-        assert!(worst_r <= 1.0e-6, "base roughness estimate deviates by {worst_r}");
+        assert!(
+            worst_r <= 1.0e-6,
+            "base roughness estimate deviates by {worst_r}"
+        );
     }
 
     /// `OpenPBR` §Coat *Roughening*: the real-time base roughness under the coat
@@ -1340,8 +1329,7 @@ mod conformance {
             for eta in [1.0_f32, 1.3, 1.6, 2.0] {
                 for mu_i in [1.0_f32, 0.8, 0.5, 0.2, 0.05] {
                     for mu_o in [1.0_f32, 0.6, 0.1] {
-                        let rt =
-                            crate::clearcoat::coat_absorption_rgb(coat_color, mu_i, mu_o, eta);
+                        let rt = crate::clearcoat::coat_absorption_rgb(coat_color, mu_i, mu_o, eta);
                         let rf = coat_absorption_rgb(coat_color, mu_i, mu_o, eta);
                         for c in 0..3 {
                             worst = worst.max((rt[c] - rf[c]).abs());
@@ -1356,7 +1344,10 @@ mod conformance {
         let color = [0.8_f32, 0.5, 0.2];
         let normal = coat_absorption_rgb(color, 1.0, 1.0, 1.6);
         for c in 0..3 {
-            assert!((normal[c] - color[c]).abs() < 1.0e-5, "{normal:?} vs {color:?}");
+            assert!(
+                (normal[c] - color[c]).abs() < 1.0e-5,
+                "{normal:?} vs {color:?}"
+            );
         }
         // A grazing view travels a longer path through the medium, so it can only
         // darken further (never brighten), and white is the exact identity.
@@ -1378,8 +1369,7 @@ mod conformance {
         for specular_ior in [1.0_f32, 1.2, 1.5, 2.0, 3.0] {
             for coat_ior in [1.0_f32, 1.3, 1.5, 1.6, 2.4] {
                 for c in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
-                    let rt =
-                        crate::clearcoat::coat_specular_ior_ratio(specular_ior, coat_ior, c);
+                    let rt = crate::clearcoat::coat_specular_ior_ratio(specular_ior, coat_ior, c);
                     let rf = coat_specular_ior_ratio(specular_ior, coat_ior, c);
                     worst = worst.max((rt - rf).abs());
                 }
@@ -1444,7 +1434,6 @@ mod table_gen {
         println!("AVG: {}", avg.join(", "));
     }
 }
-
 
 /// Generator for the GGX single-scatter albedo table (run with
 /// `--ignored --nocapture`). Uses the repository's own GGX importance-sampled
@@ -1595,7 +1584,6 @@ mod dielectric_albedo_gen {
     }
 }
 
-
 /// Generator for `B(µ, r)`: the GGX lobe's albedo with the Schlick *bias* weight
 /// `(1 − v·h)^5`. Together with the white-lobe albedo `E_white` it gives the
 /// **exact** Schlick-Fresnel lobe albedo `F0·E_white + (1−F0)·B`, which the coat
@@ -1633,7 +1621,6 @@ mod schlick_bias_gen {
         }
     }
 }
-
 
 /// Generator for the Charlie (fuzz) lobe's directional albedo `E_fuzz(µ, r)`,
 /// needed by the specification's `fuzz-layering-approx`
@@ -1696,4 +1683,3 @@ mod charlie_albedo_gen {
         }
     }
 }
-

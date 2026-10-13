@@ -147,7 +147,12 @@ mod tests {
         loop {
             let n = 6 + (next_rand(state) % 10) as usize;
             let pts: Vec<(f32, f32)> = (0..n)
-                .map(|_| (rand_in(state, -spread, spread), rand_in(state, -spread, spread)))
+                .map(|_| {
+                    (
+                        rand_in(state, -spread, spread),
+                        rand_in(state, -spread, spread),
+                    )
+                })
                 .collect();
             let hull = convex_hull(&pts);
             if hull.len() >= 3 {
@@ -205,12 +210,23 @@ mod tests {
             let b = random_polygon(&mut state, 15.0);
             let sum = minkowski_sum(&a, &b);
             let oracle = pairwise_hull(&a, &b);
-            assert!(approx(area(&sum), area(&oracle)), "area {} vs {}", area(&sum), area(&oracle));
+            assert!(
+                approx(area(&sum), area(&oracle)),
+                "area {} vs {}",
+                area(&sum),
+                area(&oracle)
+            );
             for &v in &sum {
-                assert!(sd_polygon(v.0, v.1, &oracle).abs() <= 1e-1, "sum vertex off oracle");
+                assert!(
+                    sd_polygon(v.0, v.1, &oracle).abs() <= 1e-1,
+                    "sum vertex off oracle"
+                );
             }
             for &v in &oracle {
-                assert!(sd_polygon(v.0, v.1, &sum).abs() <= 1e-1, "oracle vertex off sum");
+                assert!(
+                    sd_polygon(v.0, v.1, &sum).abs() <= 1e-1,
+                    "oracle vertex off sum"
+                );
             }
         }
     }
@@ -240,7 +256,10 @@ mod tests {
         for _ in 0..150 {
             let a = random_polygon(&mut state, 17.0);
             let b = random_polygon(&mut state, 13.0);
-            let (tx, ty) = (rand_in(&mut state, -30.0, 30.0), rand_in(&mut state, -30.0, 30.0));
+            let (tx, ty) = (
+                rand_in(&mut state, -30.0, 30.0),
+                rand_in(&mut state, -30.0, 30.0),
+            );
             let a_shift: Vec<(f32, f32)> = a.iter().map(|&(x, y)| (x + tx, y + ty)).collect();
             let base = minkowski_sum(&a, &b);
             let shifted = minkowski_sum(&a_shift, &b);
@@ -286,7 +305,10 @@ mod tests {
         let translated = minkowski_sum(&unit, &point);
         assert!(approx(area(&translated), 1.0));
         for &c in &[(5.0, -3.0), (6.0, -3.0), (6.0, -2.0), (5.0, -2.0)] {
-            assert!(sd_polygon(c.0, c.1, &translated).abs() <= 1e-3, "corner {c:?} off");
+            assert!(
+                sd_polygon(c.0, c.1, &translated).abs() <= 1e-3,
+                "corner {c:?} off"
+            );
         }
 
         // Empty operand yields an empty sum.

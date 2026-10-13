@@ -382,7 +382,10 @@ mod tests {
     fn clamp_and_profile_handle_out_of_range() {
         let ladder = ResampleLodLadder::standard();
         assert_eq!(ladder.clamp_tier(QualityTier(200)), QualityTier(4));
-        assert_eq!(ladder.profile(QualityTier(200)), ladder.profile(QualityTier(4)));
+        assert_eq!(
+            ladder.profile(QualityTier(200)),
+            ladder.profile(QualityTier(4))
+        );
     }
 
     #[test]

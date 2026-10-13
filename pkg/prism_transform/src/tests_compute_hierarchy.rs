@@ -21,13 +21,13 @@ use crate::{GlobalTransform, Transform};
 /// Depths: 0,5 -> 0; 1,2,6 -> 1; 3,4 -> 2.
 fn two_root_forest() -> Hierarchy {
     let parents = [
-        None,                   // 0 root
-        Some(NodeId::new(0)),   // 1 <- 0
-        Some(NodeId::new(0)),   // 2 <- 0
-        Some(NodeId::new(1)),   // 3 <- 1
-        Some(NodeId::new(1)),   // 4 <- 1
-        None,                   // 5 root
-        Some(NodeId::new(5)),   // 6 <- 5
+        None,                 // 0 root
+        Some(NodeId::new(0)), // 1 <- 0
+        Some(NodeId::new(0)), // 2 <- 0
+        Some(NodeId::new(1)), // 3 <- 1
+        Some(NodeId::new(1)), // 4 <- 1
+        None,                 // 5 root
+        Some(NodeId::new(5)), // 6 <- 5
     ];
     Hierarchy::from_parents(&parents).expect("valid forest")
 }
@@ -120,7 +120,10 @@ fn level_propagation_matches_serial_bit_for_bit() {
     let mut by_levels = alloc::vec![GlobalTransform::IDENTITY; hier.len()];
     propagate_by_levels(&hier, &schedule, &locals, &mut by_levels).expect("by levels");
 
-    assert_eq!(serial, by_levels, "level grouping must not change the result");
+    assert_eq!(
+        serial, by_levels,
+        "level grouping must not change the result"
+    );
 }
 
 #[test]
@@ -167,7 +170,10 @@ fn input_payload_matrix_bytes_are_row_major() {
         *f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     // rows: [bx.x, by.x, bz.x, t.x,  bx.y, by.y, bz.y, t.y,  bx.z, by.z, bz.z, t.z]
-    assert_eq!(floats, [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+    assert_eq!(
+        floats,
+        [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    );
 }
 
 #[test]

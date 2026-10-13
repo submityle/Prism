@@ -193,7 +193,10 @@ impl Kind {
     pub const fn header_resident(self) -> bool {
         match self {
             Self::Lobe | Self::Channel | Self::ResponseMode | Self::CacheAux => true,
-            Self::Transfer | Self::Provider | Self::Downgrade | Self::AuthorNode
+            Self::Transfer
+            | Self::Provider
+            | Self::Downgrade
+            | Self::AuthorNode
             | Self::Composite => false,
         }
     }

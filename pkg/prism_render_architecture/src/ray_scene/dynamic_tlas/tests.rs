@@ -69,7 +69,11 @@ fn blas_soup(rng: &mut Rng, n: u32) -> Bvh {
 /// `instance_id`, which equals the instance's index here).
 fn scene(seed: u64, count: u32) -> (Vec<Bvh>, Vec<Instance>, Vec<[f32; 3]>) {
     let mut rng = Rng::new(seed);
-    let blases = alloc::vec![blas_soup(&mut rng, 16), blas_soup(&mut rng, 24), blas_soup(&mut rng, 12)];
+    let blases = alloc::vec![
+        blas_soup(&mut rng, 16),
+        blas_soup(&mut rng, 24),
+        blas_soup(&mut rng, 12)
+    ];
     let mut instances = Vec::with_capacity(count as usize);
     let mut offsets = Vec::with_capacity(count as usize);
     for id in 0..count {
@@ -88,11 +92,7 @@ fn scene(seed: u64, count: u32) -> (Vec<Bvh>, Vec<Instance>, Vec<[f32; 3]>) {
 
 /// Builds the golden instance table by re-placing every base instance with
 /// `transforms(instance_id)`, preserving its `BLAS` index, id, and mask.
-fn golden_tlas(
-    base: &[Instance],
-    transforms: &impl Fn(u32) -> Affine3,
-    blases: &[Bvh],
-) -> Tlas {
+fn golden_tlas(base: &[Instance], transforms: &impl Fn(u32) -> Affine3, blases: &[Bvh]) -> Tlas {
     let placed: Vec<Instance> = base
         .iter()
         .map(|inst| {
@@ -113,7 +113,11 @@ fn golden_tlas(
 fn assert_hits_match(dyn_tlas: &DynamicTlas, golden: &Tlas, blases: &[Bvh], rays: u32, seed: u64) {
     let mut rng = Rng::new(seed);
     for _ in 0..rays {
-        let origin = [rng.signed() * 20.0, rng.signed() * 20.0, rng.signed() * 20.0];
+        let origin = [
+            rng.signed() * 20.0,
+            rng.signed() * 20.0,
+            rng.signed() * 20.0,
+        ];
         let dir = [rng.signed(), rng.signed(), rng.signed()];
         if dir == [0.0, 0.0, 0.0] {
             continue;
@@ -265,7 +269,11 @@ fn reinstance_rebuilds_from_new_table() {
     // Append new instances (grow the set) with low fragmentation → plain Rebuild.
     let mut grown = instances.clone();
     for id in 32..48 {
-        let xf = Affine3::from_translation([f32::from(u16::try_from(id).unwrap()) * 0.7 - 6.0, 3.0, -4.0]);
+        let xf = Affine3::from_translation([
+            f32::from(u16::try_from(id).unwrap()) * 0.7 - 6.0,
+            3.0,
+            -4.0,
+        ]);
         grown.push(Instance::new(xf, (id % 3) as usize, id).expect("non-singular"));
     }
     let change = GeometryChange {

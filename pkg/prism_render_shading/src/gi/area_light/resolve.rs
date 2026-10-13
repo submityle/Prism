@@ -178,7 +178,11 @@ pub fn principled_area_contribution(
     let tangent = if projected.dot(projected) > 1.0e-12 {
         projected.normalize_or_zero()
     } else {
-        let helper = if normal.y.abs() < 0.999 { Vec3::Y } else { Vec3::X };
+        let helper = if normal.y.abs() < 0.999 {
+            Vec3::Y
+        } else {
+            Vec3::X
+        };
         helper.cross(normal).normalize_or_zero()
     };
     let bitangent = normal.cross(tangent);
@@ -208,7 +212,8 @@ pub fn principled_area_contribution(
     let diffuse_color = to_vec3(surface.base_color) * (1.0 - metallic);
     let radiance = to_vec3(light.color) * light.intensity;
 
-    let contribution = radiance * (f0 * specular_response + diffuse_color * diffuse_response) * atten;
+    let contribution =
+        radiance * (f0 * specular_response + diffuse_color * diffuse_response) * atten;
     sanitize(contribution)
 }
 
@@ -224,7 +229,9 @@ pub fn accumulate_area_lights(
 ) -> [f32; 3] {
     let mut total = Vec3::ZERO;
     for light in lights {
-        total += to_vec3(principled_area_contribution(surface, frame, position, light, lut));
+        total += to_vec3(principled_area_contribution(
+            surface, frame, position, light, lut,
+        ));
     }
     sanitize(total)
 }
@@ -285,7 +292,10 @@ mod tests {
             Some(&lut),
         );
         assert!(is_finite3(out));
-        assert!(out.iter().all(|c| *c > 0.0), "expected positive radiance, got {out:?}");
+        assert!(
+            out.iter().all(|c| *c > 0.0),
+            "expected positive radiance, got {out:?}"
+        );
     }
 
     #[test]
@@ -303,7 +313,10 @@ mod tests {
             &light,
             Some(&lut),
         );
-        assert_eq!(culled, [0.0; 3], "single-sided emitter facing away must not illuminate");
+        assert_eq!(
+            culled, [0.0; 3],
+            "single-sided emitter facing away must not illuminate"
+        );
 
         // Flipping to two-sided bypasses the plane cull while keeping the
         // correct (+Y) winding, so the same quad now illuminates from behind.
@@ -315,7 +328,10 @@ mod tests {
             &light,
             Some(&lut),
         );
-        assert!(lit.iter().any(|c| *c > 0.0), "two-sided emitter must illuminate from behind");
+        assert!(
+            lit.iter().any(|c| *c > 0.0),
+            "two-sided emitter must illuminate from behind"
+        );
     }
 
     #[test]
@@ -355,7 +371,10 @@ mod tests {
             &far,
             Some(&lut),
         );
-        assert!(near_out[0] > far_out[0], "nearer light must dominate: {near_out:?} vs {far_out:?}");
+        assert!(
+            near_out[0] > far_out[0],
+            "nearer light must dominate: {near_out:?} vs {far_out:?}"
+        );
     }
 
     #[test]
@@ -383,7 +402,10 @@ mod tests {
             None,
         );
         assert!(is_finite3(out));
-        assert!(out.iter().all(|c| *c > 0.0), "diffuse-only term must still illuminate");
+        assert!(
+            out.iter().all(|c| *c > 0.0),
+            "diffuse-only term must still illuminate"
+        );
     }
 
     #[test]

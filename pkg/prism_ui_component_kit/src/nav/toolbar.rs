@@ -122,11 +122,8 @@ mod tests {
 
     #[test]
     fn items_replaces_contents() {
-        let el = render(ToolbarProps::new().items([
-            Element::box_(),
-            Element::box_(),
-            Element::box_(),
-        ]));
+        let el =
+            render(ToolbarProps::new().items([Element::box_(), Element::box_(), Element::box_()]));
         assert_eq!(el.child_elements().len(), 3);
     }
 }

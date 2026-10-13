@@ -41,8 +41,8 @@ use alloc::vec::Vec;
 
 use prism_material_pcm::negotiate::negotiate;
 use prism_material_pcm::{
-    CapabilitySet, EnergyPolicy, ExtensionManifest, ExtensionRegistry, ExtensionSet, Kind, Namespace,
-    Negotiation, NegotiationError, Stability,
+    CapabilitySet, EnergyPolicy, ExtensionManifest, ExtensionRegistry, ExtensionSet, Kind,
+    Namespace, Negotiation, NegotiationError, Stability,
 };
 
 use crate::surface_layout::SURFACE_LOBES;

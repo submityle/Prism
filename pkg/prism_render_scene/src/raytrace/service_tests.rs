@@ -39,9 +39,13 @@ use prism_render_architecture::ray_scene::{
     Instance as SceneInstance, Ray, RayFootprint, Tlas, Triangle,
 };
 
-use super::abi::{MISS_PRIMITIVE, POSITIVE_INF_BITS};
+use bevy_render::render_resource::{
+    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode, PollType,
+};
+
+use super::abi::{MISS_PRIMITIVE, POSITIVE_INF_BITS, RAYTRACE_MODE_ANY, RAYTRACE_MODE_CLOSEST};
 use super::dispatch::GpuRayTraversal;
-use super::resources::FootprintRequest;
+use super::resources::{decode_tlas_hits, FootprintRequest};
 
 /// Absolute per-scalar tolerance for the `GPU`-versus-`CPU` comparison.
 ///
@@ -594,4 +598,171 @@ fn service_footprint_mips_match_cpu_golden() {
         exact_floor_count > 0,
         "batch must exercise the discrete floor bucket"
     );
+}
+
+/// Service parity: the no-readback [`GpuRayTraversal::record_tlas_walk`] must
+/// leave GPU-resident hit records that reproduce [`GpuTlasBuffers::closest_hit`]
+/// for every ray, proving the production per-frame path (record into a
+/// caller-owned encoder, no map/poll stall) matches the staged readback path and
+/// the `CPU` golden. The test copies the on-device buffer back only to verify;
+/// a real consumer binds [`TlasDispatchResources::hits`] directly.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn service_record_tlas_walk_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!("skipping service record-tlas-walk parity: no wgpu adapter");
+        return;
+    };
+
+    let scene = build_tlas_scene();
+    let rays = build_tlas_rays(&scene);
+
+    let service = GpuRayTraversal::new(&device);
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("prism_rt_record_tlas_walk_test"),
+    });
+    let resources = service.record_tlas_walk(
+        &device,
+        &mut encoder,
+        &scene.tlas_buffers,
+        &scene.pool,
+        &rays,
+        RAYTRACE_MODE_CLOSEST,
+    );
+    assert_eq!(
+        resources.ray_count as usize,
+        rays.len(),
+        "one hit record per ray"
+    );
+
+    // Copy the GPU-resident hits back purely for verification.
+    let stage = device.create_buffer(&BufferDescriptor {
+        label: Some("prism_rt_record_tlas_walk_stage"),
+        size: resources.hit_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    encoder.copy_buffer_to_buffer(&resources.hits, 0, &stage, 0, resources.hit_bytes);
+    queue.submit([encoder.finish()]);
+    stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the recorded ray-traversal work");
+    let view = stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let raw: Vec<u32> = bytemuck::cast_slice::<u8, u32>(&view).to_vec();
+    drop(view);
+    stage.unmap();
+
+    let gpu = decode_tlas_hits(&raw, rays.len());
+    assert_eq!(gpu.len(), rays.len(), "one decoded hit per ray");
+
+    let mut hit_count = 0usize;
+    let mut miss_count = 0usize;
+    for (i, ray) in rays.iter().enumerate() {
+        let g = gpu[i];
+        match scene.tlas_buffers.closest_hit(ray, &scene.pool) {
+            Some(hit) => {
+                hit_count += 1;
+                assert_eq!(g.primitive, hit.primitive, "ray {i}: primitive mismatch");
+                assert_eq!(
+                    g.instance_id, hit.instance_id,
+                    "ray {i}: instance_id mismatch"
+                );
+                assert_eq!(
+                    g.instance_index, hit.instance_index,
+                    "ray {i}: instance_index mismatch"
+                );
+                assert!((g.t - hit.t).abs() <= PARITY_EPS, "ray {i}: t mismatch");
+                assert!(
+                    (g.u - hit.u).abs() <= PARITY_EPS && (g.v - hit.v).abs() <= PARITY_EPS,
+                    "ray {i}: uv mismatch"
+                );
+            }
+            None => {
+                miss_count += 1;
+                assert_eq!(g.primitive, MISS_PRIMITIVE, "ray {i}: spurious hit");
+                assert_eq!(
+                    g.t.to_bits(),
+                    POSITIVE_INF_BITS,
+                    "ray {i}: miss must be +inf"
+                );
+            }
+        }
+    }
+    assert!(hit_count > 0, "batch must exercise the hit path");
+    assert!(miss_count > 0, "batch must exercise the miss path");
+}
+
+/// Service parity: the no-readback occlusion path
+/// ([`GpuRayTraversal::record_tlas_walk`] with `RAYTRACE_MODE_ANY`) must agree
+/// with [`GpuTlasBuffers::any_hit`] on whether each ray is blocked, with the
+/// result left GPU-resident for a contact-shadow consumer to mask a light with.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn service_record_tlas_walk_any_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!("skipping service record-tlas-walk any-hit parity: no wgpu adapter");
+        return;
+    };
+
+    let scene = build_tlas_scene();
+    let rays = build_tlas_rays(&scene);
+
+    let service = GpuRayTraversal::new(&device);
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("prism_rt_record_tlas_walk_any_test"),
+    });
+    let resources = service.record_tlas_walk(
+        &device,
+        &mut encoder,
+        &scene.tlas_buffers,
+        &scene.pool,
+        &rays,
+        RAYTRACE_MODE_ANY,
+    );
+
+    let stage = device.create_buffer(&BufferDescriptor {
+        label: Some("prism_rt_record_tlas_walk_any_stage"),
+        size: resources.hit_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    encoder.copy_buffer_to_buffer(&resources.hits, 0, &stage, 0, resources.hit_bytes);
+    queue.submit([encoder.finish()]);
+    stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the recorded occlusion work");
+    let view = stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let raw: Vec<u32> = bytemuck::cast_slice::<u8, u32>(&view).to_vec();
+    drop(view);
+    stage.unmap();
+
+    let gpu = decode_tlas_hits(&raw, rays.len());
+    let mut blocked_count = 0usize;
+    let mut clear_count = 0usize;
+    for (i, ray) in rays.iter().enumerate() {
+        let blocked = gpu[i].primitive != MISS_PRIMITIVE;
+        let cpu = scene.tlas_buffers.any_hit(ray, &scene.pool);
+        assert_eq!(blocked, cpu, "ray {i}: occlusion mismatch");
+        if cpu {
+            blocked_count += 1;
+        } else {
+            clear_count += 1;
+        }
+    }
+    assert!(blocked_count > 0, "batch must exercise the blocked path");
+    assert!(clear_count > 0, "batch must exercise the clear path");
 }

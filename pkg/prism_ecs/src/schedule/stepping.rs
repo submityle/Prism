@@ -256,7 +256,11 @@ impl Stepping {
     /// breakpoint, and return the node indices that ran (in order). Afterwards
     /// the cursor is parked at the boundary and the set cache cleared, ready for
     /// the next frame. Useful to "finish this frame" from a breakpoint.
-    pub fn run_remaining_frame(&mut self, schedule: &mut Schedule, world: &mut World) -> Vec<usize> {
+    pub fn run_remaining_frame(
+        &mut self,
+        schedule: &mut Schedule,
+        world: &mut World,
+    ) -> Vec<usize> {
         schedule.initialize(world);
         self.pending_breakpoint = None;
         let mut ran = Vec::new();

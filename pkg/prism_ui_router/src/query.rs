@@ -163,7 +163,10 @@ mod tests {
     fn serializes_golden_pairs() {
         let qs = serialize_query_pairs([("a", "1"), ("b", "x y"), ("c", "a&b"), ("d", "1+2")]);
         assert_eq!(qs, "a=1&b=x+y&c=a%26b&d=1%2B2");
-        assert_eq!(serialize_query_pairs(core::iter::empty::<(&str, &str)>()), "");
+        assert_eq!(
+            serialize_query_pairs(core::iter::empty::<(&str, &str)>()),
+            ""
+        );
     }
 
     #[test]
@@ -250,9 +253,8 @@ mod tests {
             for _ in 0..count {
                 pairs.push((gen_text(&mut rng, 6), gen_text(&mut rng, 6)));
             }
-            let encoded = serialize_query_pairs(
-                pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-            );
+            let encoded =
+                serialize_query_pairs(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
             assert_eq!(parse_query_pairs(&encoded), pairs);
         }
     }
@@ -280,7 +282,10 @@ mod tests {
             for key in expected.keys() {
                 got.insert(
                     key.clone(),
-                    location.query(key).map(ToString::to_string).unwrap_or_default(),
+                    location
+                        .query(key)
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
                 );
             }
             assert_eq!(got, expected);

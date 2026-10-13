@@ -94,7 +94,10 @@ impl fmt::Display for ManifestError {
         match self {
             Self::EmptyOrMalformedUid(uid) => write!(f, "malformed extension uid {uid:?}"),
             Self::SlotOutOfDigest { slot, width } => {
-                write!(f, "registry slot {slot} outside the {width}-slot header digest")
+                write!(
+                    f,
+                    "registry slot {slot} outside the {width}-slot header digest"
+                )
             }
             Self::SlotOutsideOriginRegion {
                 slot,
@@ -460,9 +463,7 @@ impl ExtensionManifest {
             && !self.uid.chars().any(char::is_whitespace)
             && self.uid.contains('.');
         if !uid_ok {
-            return Err(ManifestError::EmptyOrMalformedUid(
-                String::from(self.uid),
-            ));
+            return Err(ManifestError::EmptyOrMalformedUid(String::from(self.uid)));
         }
         if self.version == 0 {
             return Err(ManifestError::ZeroVersion);
@@ -474,9 +475,7 @@ impl ExtensionManifest {
                 return Err(ManifestError::SlotForIdentityOnlyKind { kind: self.kind });
             }
             (true, None) => {
-                return Err(ManifestError::MissingSlotForHeaderResidentKind {
-                    kind: self.kind,
-                });
+                return Err(ManifestError::MissingSlotForHeaderResidentKind { kind: self.kind });
             }
             _ => {}
         }

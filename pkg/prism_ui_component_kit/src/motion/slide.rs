@@ -123,7 +123,8 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     // Direction hints: a spacing-token offset on the origin edge. A capable
     // backend may replace this with a real translation along the named axis.
     sheet.insert(Class::new("pk-slide--from-top").with(StyleProp::MarginTop, tok("space.sm")));
-    sheet.insert(Class::new("pk-slide--from-bottom").with(StyleProp::MarginBottom, tok("space.sm")));
+    sheet
+        .insert(Class::new("pk-slide--from-bottom").with(StyleProp::MarginBottom, tok("space.sm")));
     sheet.insert(Class::new("pk-slide--from-left").with(StyleProp::MarginLeft, tok("space.sm")));
     sheet.insert(Class::new("pk-slide--from-right").with(StyleProp::MarginRight, tok("space.sm")));
 }

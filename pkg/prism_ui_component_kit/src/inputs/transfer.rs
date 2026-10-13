@@ -121,7 +121,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.md"))
             .with(StyleProp::BorderWidth, StyleValue::px(1.0))
             .with(StyleProp::BorderColor, tok("color.separator"))
-            .with_glass(0.0, tok("color.surface.secondary"), Some(tok("glass.highlight"))),
+            .with_glass(
+                0.0,
+                tok("color.surface.secondary"),
+                Some(tok("glass.highlight")),
+            ),
     );
 
     sheet.insert(
@@ -131,7 +135,11 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::Color, tok("color.label"))
             .with(StyleProp::FontSize, tok("font.size.body"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.fill.secondary")),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.fill.secondary"),
+            ),
     );
 
     sheet.insert(
@@ -152,8 +160,16 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.sm"))
             .with(StyleProp::BackgroundColor, tok("color.fill.secondary"))
             .with(StyleProp::Color, tok("color.label.secondary"))
-            .with_state(InteractionState::Hover, StyleProp::BackgroundColor, tok("color.tint"))
-            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+            .with_state(
+                InteractionState::Hover,
+                StyleProp::BackgroundColor,
+                tok("color.tint"),
+            )
+            .with_state(
+                InteractionState::Disabled,
+                StyleProp::Opacity,
+                StyleValue::number(0.4),
+            ),
     );
 }
 
@@ -190,7 +206,10 @@ mod tests {
         let el = render(TransferProps::new());
         let actions = &el.child_elements()[1];
         assert_eq!(actions.child_elements().len(), 2);
-        assert!(actions.child_elements()[0].class_names().iter().any(|c| c == "pk-transfer__action"));
+        assert!(actions.child_elements()[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-transfer__action"));
     }
 
     #[test]

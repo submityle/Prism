@@ -294,7 +294,11 @@ mod tests {
         let anchor = rect(400.0, 500.0, 20.0, 20.0); // centre x = 410
         let size = 10.0;
         let padding = 5.0;
-        let got = arrow(anchor, &placed, &ArrowConfig::new(size).with_padding(padding));
+        let got = arrow(
+            anchor,
+            &placed,
+            &ArrowConfig::new(size).with_padding(padding),
+        );
         assert!(got.clamped);
         // Pinned to the trailing bound (right corner).
         let hi = 200.0 - size - padding;
@@ -302,7 +306,11 @@ mod tests {
 
         // Mirror case: anchor centre far to the left pins to the leading corner.
         let anchor_left = rect(-60.0, 500.0, 20.0, 20.0); // centre x = -50
-        let got_left = arrow(anchor_left, &placed, &ArrowConfig::new(size).with_padding(padding));
+        let got_left = arrow(
+            anchor_left,
+            &placed,
+            &ArrowConfig::new(size).with_padding(padding),
+        );
         assert!(got_left.clamped);
         assert!((got_left.offset - padding).abs() < 1e-3);
     }
@@ -323,7 +331,11 @@ mod tests {
         let placed = position(anchor, floating, viewport, &config);
         let size = 12.0;
         let padding = 6.0; // 12 + 12 = 24 > 14 => degenerate
-        let got = arrow(anchor, &placed, &ArrowConfig::new(size).with_padding(padding));
+        let got = arrow(
+            anchor,
+            &placed,
+            &ArrowConfig::new(size).with_padding(padding),
+        );
         assert!(got.clamped);
         assert!((got.offset - (placed.rect.size.width - size) / 2.0).abs() < 1e-3);
     }

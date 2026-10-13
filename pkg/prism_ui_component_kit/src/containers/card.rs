@@ -185,9 +185,15 @@ mod tests {
         );
         let children = el.child_elements();
         assert_eq!(children.len(), 3);
-        assert!(children[0].class_names().iter().any(|c| c == "pk-card__header"));
+        assert!(children[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-card__header"));
         assert_eq!(children[1].class_names(), ["pk-card__body"]);
-        assert!(children[2].class_names().iter().any(|c| c == "pk-card__footer"));
+        assert!(children[2]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-card__footer"));
     }
 
     #[test]

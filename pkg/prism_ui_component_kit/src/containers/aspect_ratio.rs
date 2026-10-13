@@ -90,7 +90,10 @@ mod tests {
     fn wraps_single_child() {
         let el = render(AspectRatioProps::new(16.0 / 9.0).child(Element::box_().class("inner")));
         assert_eq!(el.child_elements().len(), 1);
-        assert!(el.child_elements()[0].class_names().iter().any(|c| c == "inner"));
+        assert!(el.child_elements()[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "inner"));
     }
 
     #[test]

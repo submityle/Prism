@@ -89,9 +89,7 @@ impl Component for Rating {
             } else {
                 "pk-rating__star--empty"
             };
-            let star = Element::text("★")
-                .class("pk-rating__star")
-                .class(modifier);
+            let star = Element::text("★").class("pk-rating__star").class(modifier);
             el = el.child(star);
         }
         el
@@ -114,14 +112,10 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 
     // Star base: body-sized glyph.
-    sheet.insert(
-        Class::new("pk-rating__star").with(StyleProp::FontSize, tok("font.size.body")),
-    );
+    sheet.insert(Class::new("pk-rating__star").with(StyleProp::FontSize, tok("font.size.body")));
 
     // Filled: the accent tint.
-    sheet.insert(
-        Class::new("pk-rating__star--filled").with(StyleProp::Color, tok("color.tint")),
-    );
+    sheet.insert(Class::new("pk-rating__star--filled").with(StyleProp::Color, tok("color.tint")));
 
     // Empty: a quaternary/tertiary gray.
     sheet.insert(
@@ -141,7 +135,11 @@ mod tests {
     fn modifiers(el: &Element) -> Vec<bool> {
         el.child_elements()
             .iter()
-            .map(|star| star.class_names().iter().any(|c| c == "pk-rating__star--filled"))
+            .map(|star| {
+                star.class_names()
+                    .iter()
+                    .any(|c| c == "pk-rating__star--filled")
+            })
             .collect()
     }
 

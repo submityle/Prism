@@ -157,7 +157,6 @@ fn apply_gain(mut pcm: ConditionedPcm, gain: Sample) -> ConditionedPcm {
     pcm
 }
 
-
 /// Normalizes `pcm` toward `config.target_lufs` under the configured true-peak
 /// ceiling, using `measured` loudness statistics.
 ///
@@ -262,7 +261,11 @@ mod tests {
             enabled: true,
             ..LoudnessNormalizeConfig::default()
         };
-        let out = normalize(&pcm, stats(Sample::NEG_INFINITY, Sample::NEG_INFINITY), &config);
+        let out = normalize(
+            &pcm,
+            stats(Sample::NEG_INFINITY, Sample::NEG_INFINITY),
+            &config,
+        );
         assert_eq!(out.applied_gain_db, 0.0);
         assert_eq!(out.pcm, pcm);
     }
@@ -301,7 +304,11 @@ mod tests {
             ..LoudnessNormalizeConfig::default()
         };
         let out = normalize(&pcm, stats(-30.0, -20.0), &config);
-        assert!((out.applied_gain_db - 6.0).abs() < 1.0e-3, "{}", out.applied_gain_db);
+        assert!(
+            (out.applied_gain_db - 6.0).abs() < 1.0e-3,
+            "{}",
+            out.applied_gain_db
+        );
         assert!(peak_of(&out.pcm) > peak_of(&pcm));
     }
 
@@ -314,7 +321,11 @@ mod tests {
             ..LoudnessNormalizeConfig::default()
         };
         let out = normalize(&pcm, stats(-18.0, -6.0), &config);
-        assert!((out.applied_gain_db - (-6.0)).abs() < 1.0e-3, "{}", out.applied_gain_db);
+        assert!(
+            (out.applied_gain_db - (-6.0)).abs() < 1.0e-3,
+            "{}",
+            out.applied_gain_db
+        );
         assert!(peak_of(&out.pcm) < peak_of(&pcm));
     }
 
@@ -331,7 +342,11 @@ mod tests {
         };
         let out = normalize(&pcm, stats(-30.0, linear_to_db(0.9)), &config);
         let ceiling = db_to_linear(-1.0);
-        assert!(peak_of(&out.pcm) <= ceiling + 1.0e-4, "{}", peak_of(&out.pcm));
+        assert!(
+            peak_of(&out.pcm) <= ceiling + 1.0e-4,
+            "{}",
+            peak_of(&out.pcm)
+        );
         assert!(out.applied_gain_db < 0.0, "{}", out.applied_gain_db);
     }
 
@@ -347,7 +362,11 @@ mod tests {
             ..LoudnessNormalizeConfig::default()
         };
         let out = normalize(&pcm, stats(-60.0, -60.0), &config);
-        assert!((out.applied_gain_db - 12.0).abs() < 1.0e-3, "{}", out.applied_gain_db);
+        assert!(
+            (out.applied_gain_db - 12.0).abs() < 1.0e-3,
+            "{}",
+            out.applied_gain_db
+        );
     }
 
     #[test]
@@ -360,7 +379,11 @@ mod tests {
         };
         let out = normalize(&pcm, stats(-26.0, -14.0), &config);
         let expected = 0.2 * db_to_linear(out.applied_gain_db);
-        assert!((peak_of(&out.pcm) - expected).abs() < 1.0e-5, "{}", peak_of(&out.pcm));
+        assert!(
+            (peak_of(&out.pcm) - expected).abs() < 1.0e-5,
+            "{}",
+            peak_of(&out.pcm)
+        );
     }
 
     #[test]

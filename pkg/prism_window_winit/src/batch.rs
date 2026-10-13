@@ -9,8 +9,8 @@
 //! Coalescing is deterministic: the output preserves input order, dropping
 //! only the superseded earlier copies of each mergeable `(window, kind)`.
 
-use prism_window::WindowEventEnvelope;
 use prism_window::event::WindowEvent;
+use prism_window::WindowEventEnvelope;
 
 /// The class a window event falls into for coalescing. `None` means the event
 /// is discrete and must never be merged.
@@ -142,9 +142,13 @@ mod tests {
         let mut events = vec![
             env(0, 1, WindowEvent::Resized(PhysicalSize::new(100, 100))),
             env(1, 1, WindowEvent::Moved(PhysicalPosition::new(1, 1))),
-            env(2, 1, WindowEvent::CursorMoved {
-                position: PhysicalPosition::new(2, 2),
-            }),
+            env(
+                2,
+                1,
+                WindowEvent::CursorMoved {
+                    position: PhysicalPosition::new(2, 2),
+                },
+            ),
         ];
         coalesce(&mut events);
         assert_eq!(events.len(), 3);

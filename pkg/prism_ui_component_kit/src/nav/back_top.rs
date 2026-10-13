@@ -132,7 +132,10 @@ mod tests {
         let el = render(BackTopProps::new().icon(Element::box_().class("ic")));
         let kids = el.child_elements();
         assert_eq!(kids.len(), 1);
-        assert!(kids[0].class_names().iter().any(|c| c == "pk-back-top__icon"));
+        assert!(kids[0]
+            .class_names()
+            .iter()
+            .any(|c| c == "pk-back-top__icon"));
     }
 
     #[test]

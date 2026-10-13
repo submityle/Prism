@@ -420,8 +420,7 @@ mod tests {
         world.spawn(Position(2));
 
         let via_capture = EntityResidencyReport::capture(&world);
-        let via_parts =
-            EntityResidencyReport::from_parts(world.archetypes(), world.entities());
+        let via_parts = EntityResidencyReport::from_parts(world.archetypes(), world.entities());
         assert_eq!(via_capture.live_entities(), via_parts.live_entities());
         assert_eq!(via_capture.placed_entities(), via_parts.placed_entities());
         assert_eq!(via_capture.slot_capacity(), via_parts.slot_capacity());

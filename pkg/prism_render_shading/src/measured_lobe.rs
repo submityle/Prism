@@ -69,10 +69,7 @@ mod tests {
     use crate::measured_brdf::{MeasuredBrdfDims, SyntheticBrdfParams};
 
     fn table() -> MeasuredBrdf {
-        MeasuredBrdf::from_analytic(
-            MeasuredBrdfDims::MERL,
-            SyntheticBrdfParams::default(),
-        )
+        MeasuredBrdf::from_analytic(MeasuredBrdfDims::MERL, SyntheticBrdfParams::default())
     }
 
     fn frame() -> ShadingFrame {
