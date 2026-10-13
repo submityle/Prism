@@ -431,6 +431,28 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_preserves_empty_manager_and_empty_workspace() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_workspace("empty").unwrap();
+        let decoded = decode_workspace(&encode_workspace(&manager).unwrap(), options()).unwrap();
+        assert_eq!(decoded.active_workspace_name(), Some("empty"));
+        assert_eq!(decoded.active_layout(), None);
+        assert_eq!(
+            decoded
+                .workspace("empty")
+                .unwrap()
+                .active_perspective_name(),
+            None
+        );
+
+        let empty_manager = WorkspaceManager::new();
+        let decoded =
+            decode_workspace(&encode_workspace(&empty_manager).unwrap(), options()).unwrap();
+        assert_eq!(decoded.active_workspace_name(), None);
+        assert_eq!(decoded.workspaces().count(), 0);
+    }
+
+    #[test]
     fn roundtrip_preserves_order_and_active_selection() {
         let mut manager = WorkspaceManager::new();
         manager.add_workspace("coding").unwrap();
