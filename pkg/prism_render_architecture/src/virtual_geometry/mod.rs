@@ -63,7 +63,7 @@ pub use software_raster::{
     CLUSTER_TRIANGLE_BITS, MAX_CLUSTER_TRIANGLES,
 };
 pub use stream_adapter::{VirtualGeometryPageStream, VirtualGeometryStreamingError};
-pub use streaming::VirtualGeometryPageStore;
+pub use streaming::{VirtualGeometryPageStore, VirtualGeometryPageStoreError};
 
 /// Version of the virtual-geometry contracts in this module.
 pub const VIRTUAL_GEOMETRY_VERSION: u32 = 1;

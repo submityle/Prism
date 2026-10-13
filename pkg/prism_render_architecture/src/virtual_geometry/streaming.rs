@@ -6,12 +6,23 @@ use alloc::vec::Vec;
 use super::asset::{VirtualGeometryAsset, VirtualGeometryAssetError, VirtualGeometryPage};
 use super::page_table::{GeometryPageTable, PageResidency};
 use super::GeometryPageKey;
+use crate::compression::gdeflate::{gdeflate_decompress, GDeflateError};
 
 /// A validated virtual-geometry page store with deterministic residency state.
 #[derive(Clone, Debug)]
 pub struct VirtualGeometryPageStore {
     pages: BTreeMap<GeometryPageKey, VirtualGeometryPage>,
+    decoded_pages: BTreeMap<GeometryPageKey, Vec<u8>>,
     residency: GeometryPageTable,
+}
+
+/// Failure while making a requested virtual-geometry page resident.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VirtualGeometryPageStoreError {
+    /// The stored GDeflate payload failed integrity or decode validation.
+    Decompression(GDeflateError),
+    /// Decoded bytes disagree with the page metadata.
+    UncompressedSizeMismatch { expected: u32, actual: u32 },
 }
 
 impl VirtualGeometryPageStore {
@@ -25,6 +36,7 @@ impl VirtualGeometryPageStore {
             .collect();
         Ok(Self {
             pages,
+            decoded_pages: BTreeMap::new(),
             residency: GeometryPageTable::new(),
         })
     }
@@ -39,21 +51,40 @@ impl VirtualGeometryPageStore {
     }
 
     /// Completes a backend upload for a requested page.
-    pub fn mark_resident(&mut self, key: GeometryPageKey) -> bool {
+    pub fn mark_resident(
+        &mut self,
+        key: GeometryPageKey,
+    ) -> Result<bool, VirtualGeometryPageStoreError> {
         if !self.pages.contains_key(&key)
             || self.residency.residency(key) == PageResidency::Unloaded
         {
-            return false;
+            return Ok(false);
         }
+        let page = self.pages.get(&key).expect("page existence checked");
+        let decoded = match page.record.compression {
+            super::asset::VirtualGeometryCompression::None => page.payload.clone(),
+            super::asset::VirtualGeometryCompression::GDeflate => {
+                gdeflate_decompress(&page.payload)
+                    .map_err(VirtualGeometryPageStoreError::Decompression)?
+            }
+        };
+        let actual = u32::try_from(decoded.len()).unwrap_or(u32::MAX);
+        if actual != page.record.uncompressed_size {
+            return Err(VirtualGeometryPageStoreError::UncompressedSizeMismatch {
+                expected: page.record.uncompressed_size,
+                actual,
+            });
+        }
+        self.decoded_pages.insert(key, decoded);
         self.residency.mark_resident(key);
-        true
+        Ok(true)
     }
 
     /// Returns the stored bytes only after the page is resident.
     #[must_use]
     pub fn resident_payload(&self, key: GeometryPageKey) -> Option<&[u8]> {
         (self.residency.residency(key) == PageResidency::Resident)
-            .then(|| self.pages.get(&key).map(|page| page.payload.as_slice()))
+            .then(|| self.decoded_pages.get(&key).map(|page| page.as_slice()))
             .flatten()
     }
 
@@ -74,6 +105,7 @@ impl VirtualGeometryPageStore {
             .select_evictions(resident_budget, protect_frame);
         for key in &victims {
             self.residency.evict(*key);
+            self.decoded_pages.remove(key);
         }
         victims
     }
@@ -156,7 +188,7 @@ mod tests {
         assert_eq!(store.resident_payload(key), None);
         assert!(store.request(key, 2.0, 10));
         assert_eq!(store.resident_payload(key), None);
-        assert!(store.mark_resident(key));
+        assert!(store.mark_resident(key).unwrap());
         assert_eq!(store.resident_payload(key), Some(&[7, 8, 9][..]));
     }
 
@@ -167,8 +199,22 @@ mod tests {
         let mut store = VirtualGeometryPageStore::from_asset(asset()).expect("valid asset");
         assert!(!store.request(unknown, 1.0, 1));
         store.request(key, 1.0, 1);
-        store.mark_resident(key);
+        store.mark_resident(key).unwrap();
         assert_eq!(store.evict_to_budget(0, 2), vec![key]);
         assert_eq!(store.resident_count(), 0);
+    }
+
+    #[test]
+    fn compressed_page_is_decoded_before_becoming_resident() {
+        let mut asset = asset();
+        let raw = asset.pages[0].payload.clone();
+        asset.pages[0].record.compression = VirtualGeometryCompression::GDeflate;
+        asset.pages[0].record.uncompressed_size = raw.len() as u32;
+        asset.pages[0].payload = crate::compression::gdeflate::gdeflate_compress(&raw);
+        let key = GeometryPageKey::new(4, 0);
+        let mut store = VirtualGeometryPageStore::from_asset(asset).expect("valid asset");
+        store.request(key, 1.0, 1);
+        assert!(store.mark_resident(key).unwrap());
+        assert_eq!(store.resident_payload(key), Some(&raw[..]));
     }
 }
