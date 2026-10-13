@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 /// A deliberately non-`Clone`, non-`Default` payload: storage only requires
 /// the lightweight [`Asset`] marker (needed to mint type-tagged ids), never
 /// `Clone`/`Default`/`Send` on the stored value.
+#[derive(Clone)]
 struct Mesh {
     verts: u32,
 }
@@ -86,6 +87,24 @@ fn get_mut_mutates_and_emits_modified() {
     assert_eq!(assets.get(handle.id()).map(|m| m.verts), Some(99));
     let events = assets.drain_events();
     assert_eq!(events, vec![AssetEvent::Modified { id: handle.id() }]);
+}
+
+#[test]
+fn drain_events_with_snapshots_is_atomic_and_only_snapshots_ready_changes() {
+    let mut assets = Assets::<Mesh>::new();
+    let handle = assets.insert(Mesh { verts: 7 });
+    let id = handle.id();
+
+    let (events, snapshots) = assets.drain_events_with_snapshots();
+    assert_eq!(events, vec![AssetEvent::Added { id }]);
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].0, id);
+    assert_eq!(snapshots[0].1.verts, 7);
+
+    let _ = assets.remove(id);
+    let (events, snapshots) = assets.drain_events_with_snapshots();
+    assert_eq!(events, vec![AssetEvent::Removed { id }]);
+    assert!(snapshots.is_empty());
 }
 
 #[test]
@@ -1678,6 +1697,7 @@ mod server {
 
     /// Primary asset: a mesh produced from a `scene` or `cyc` source.
     #[derive(Debug, PartialEq, Eq)]
+    #[derive(Clone)]
     struct Mesh {
         verts: u32,
     }
@@ -1816,6 +1836,20 @@ mod server {
             .with_asset::<Mesh, _>(mesh.id(), |m| m.verts)
             .expect("mesh resident");
         assert_eq!(verts, 4);
+    }
+
+    #[test]
+    fn server_event_drain_keeps_original_id_and_snapshots_under_one_lock() {
+        let server = server();
+        let mesh = server.load::<Mesh>("hero.scene");
+        let id = mesh.id();
+
+        let (events, snapshots) = server
+            .drain_events_with_snapshots::<Mesh>()
+            .expect("the typed server arena is registered");
+        assert_eq!(events, vec![crate::AssetEvent::Added { id }]);
+        assert_eq!(snapshots, vec![(id, Mesh { verts: 4 })]);
+        assert_eq!(mesh.id(), id, "the bridge must not mint a second identity");
     }
 
     #[test]

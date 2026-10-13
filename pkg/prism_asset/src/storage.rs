@@ -410,6 +410,33 @@ impl<A: Asset> Assets<A> {
         core::mem::take(&mut self.events)
     }
 
+    /// Drains the pending events and captures the current ready value for each
+    /// added or modified event while holding the arena's exclusive borrow.
+    ///
+    /// Keeping the drain and snapshot in one operation prevents a consumer
+    /// from observing an event from one generation and a value from another.
+    /// Removed, unused, failed, and dependency-complete events do not carry a
+    /// value because there is no source payload that a renderer can prepare.
+    pub fn drain_events_with_snapshots(&mut self) -> (Vec<AssetEvent<A>>, Vec<(AssetId<A>, A)>)
+    where
+        A: Clone,
+    {
+        let events = core::mem::take(&mut self.events);
+        let snapshots = events
+            .iter()
+            .filter_map(|event| match event {
+                AssetEvent::Added { id } | AssetEvent::Modified { id } => {
+                    self.get(*id).cloned().map(|asset| (*id, asset))
+                }
+                AssetEvent::Unused { .. }
+                | AssetEvent::Removed { .. }
+                | AssetEvent::Failed { .. }
+                | AssetEvent::LoadedWithDependencies { .. } => None,
+            })
+            .collect();
+        (events, snapshots)
+    }
+
     /// The number of events currently queued (not yet drained).
     #[must_use]
     pub fn pending_event_count(&self) -> usize {

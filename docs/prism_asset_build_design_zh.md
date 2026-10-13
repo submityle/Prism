@@ -5,7 +5,7 @@
 > 本文设计从外部源资产进入项目开始，覆盖导入、规范化、派生数据烘焙、平台 Cook、质量验证、内容寻址缓存、打包、签名、Patch/DLC 和运行时交付。`Prism Asset Build` 生成制品；`prism_asset` 运行时负责解析、挂载、异步加载、流送、热重载和回收。
 
 - 文档状态：开发期目标规格（Draft，允许破坏性调整；不是已交付能力声明）
-- 变更记录：本轮补充本地 DDC 显式容量驱逐、构建 artifact/Manifest 字节预算、运行时同步与锁外异步 range I/O、异步短读拒绝、异步 streaming gate 终态清理、容器单请求 range 预算门禁、确定性 range batching 和 GDeflate stored-block GPU 快速路径的验收边界；继续冻结“BuildGraph 可并行规划 ≠ BuildExecutor 已并行发布”的边界，并将 raw v2 物理布局、跨平台锁、Source/Recipe 主链和发行安全能力列为独立验收项。
+- 变更记录：本轮补充本地 DDC 显式容量驱逐、构建 artifact/Manifest 字节预算、运行时同步与锁外异步 range I/O、异步短读拒绝、异步 streaming gate 终态清理、容器单请求 range 预算门禁、确定性 range batching、GDeflate stored-block GPU 快速路径，以及 Runtime AssetServer→RenderAsset 窄桥接的验收边界；继续冻结“BuildGraph 可并行规划 ≠ BuildExecutor 已并行发布”的边界，并将 raw v2 物理布局、跨平台锁、Source/Recipe 主链和发行安全能力列为独立验收项。
 - 当前基线：本地确定性 build/CAS/DDC/revision 垂直切片、PNG artifact importer、虚拟几何 canonical processor 和 raw package/runtime bridge 已有代码与测试；BuildGraph 与 BuildExecutor 都提供按稳定 DAG ready wave 并行执行的真实线程安全路径，DDC/CAS 工作并行而缓存更新、Manifest staging 和 Revision 发布保持确定性；质量门已支持单 artifact 与唯一内容字节总预算；运行时容器已有有界 deterministic range batching，`prism_asset` 已有锁外异步 range executor；CLI 已补齐受限的 `package`/`validate` 发行命令，但它们只覆盖当前单 PNG 垂直切片，不是通用 Cook；完整 importer/recipe、远程服务、稳定发行协议和发布安全链仍未完成。
 - 运行时异步 I/O 验收边界：`AsyncStreamIoExecutor` 的请求 gate 已在成功、取消、失败等终态回收，并对重复执行/重复取消返回明确错误；这只证明有界 range I/O 的生命周期安全，不等于 Build/Cook、解码、GPU 上传或 DirectStorage 发行链已经完成。
 - 兼容策略：开发期不承诺旧 API/格式兼容；发行前冻结 Artifact Key、Schema、Container、Manifest 与签名策略，并建立兼容矩阵及迁移/拒绝规则。
@@ -27,7 +27,7 @@
 
 本文的 M0/M1…路线图是验收目标，不代表这些能力已经存在；只有有代码、测试和运行时对接的切片才可标为完成。
 
-### 可执行验收矩阵（2026-10-13）
+### 可执行验收矩阵（2026-10-14）
 
 矩阵中的“已实现”仅表示表列出的本地切片有实现路径及回归测试，不代表 AAA 生产成熟度、跨平台保证或性能达标。`部分实现` 表示存在可验证子集；`未实现` 表示当前没有可作为产品能力验收的端到端实现。代码/测试路径是复核入口，不把本节设计要求当成证据。
 

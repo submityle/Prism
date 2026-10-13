@@ -4,7 +4,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use prism_asset::{Asset, AssetId, AssetIndex, Assets};
+use prism_asset::{
+    Asset, AssetId, AssetIndex, AssetLoader, AssetServer, Assets, LoadContext, LoadError, MemSource,
+};
 use prism_ecs::world::World;
 use prism_render_driver::{
     BufferDescriptor, BufferId, BufferUsages, DeviceDescriptor, Instance, RenderDevice,
@@ -23,6 +25,20 @@ struct Blob(Vec<u8>);
 
 impl Asset for Blob {
     const TYPE_NAME: &'static str = "prism_render_app::Blob";
+}
+
+struct BlobLoader;
+
+impl AssetLoader for BlobLoader {
+    type Asset = Blob;
+
+    fn extensions(&self) -> &'static [&'static str] {
+        &["blob"]
+    }
+
+    fn load(&self, bytes: &[u8], _ctx: &mut LoadContext) -> Result<Blob, LoadError> {
+        Ok(Blob(bytes.to_vec()))
+    }
 }
 
 /// The GPU form: one real RHI buffer, so the table's lifecycle is observable
@@ -178,6 +194,36 @@ fn preparing_an_asset_creates_its_gpu_representation() {
         1,
         "exactly one GPU buffer was created"
     );
+}
+
+#[test]
+fn extract_and_prepare_uses_asset_server_identity_and_source_snapshot() {
+    let (device, queue) = null_device();
+    let server = AssetServer::new();
+    server.register_loader(BlobLoader);
+    let mut source = MemSource::new();
+    source.insert("value.blob", vec![9, 8, 7]);
+    server.mount("mem", Arc::new(source), 0);
+    let handle = server.load::<Blob>("value.blob");
+    let id = handle.id();
+
+    let mut main = World::new();
+    let mut render = World::new();
+    main.insert_resource(server);
+
+    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
+    assert_eq!(report.prepared, 1);
+    let prepared = render
+        .resource::<RenderAssets<GpuBlob>>()
+        .get(id)
+        .expect("server asset was prepared");
+    assert_eq!(prepared.bytes, 3);
+
+    drop(handle);
+    main.resource::<AssetServer>().collect_releases();
+    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
+    assert_eq!(report.released, 1);
+    assert!(!render.resource::<RenderAssets<GpuBlob>>().contains(id));
 }
 
 #[test]

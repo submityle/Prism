@@ -1,7 +1,8 @@
 //! Render assets: the GPU representation of a simulation-side asset.
 //!
-//! An asset lives once, in the main world's [`Assets`] arena, and its GPU form
-//! lives in the render world. Bevy splits that into `RenderAsset` (how to
+//! An asset lives once, in the main world's [`Assets`] arena or an
+//! [`prism_asset::AssetServer`] typed arena, and its GPU form lives in the render world.
+//! Bevy splits that into `RenderAsset` (how to
 //! prepare one), `RenderAssets<A>` (the prepared table), and a prepare stage
 //! that keeps the table in step with the source. Prism keeps the same three
 //! pieces, with two deliberate differences documented on [`RenderAsset`]:

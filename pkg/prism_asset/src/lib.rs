@@ -110,6 +110,9 @@ pub use reload_plan::{plan_reload, ReloadPlan, ReloadPlanError};
 pub use scheduler::{LoadFailure, LoadScheduler, LoadTicket, ScheduleError, ScheduleOutcome};
 #[cfg(feature = "std")]
 pub use server::AssetServer;
+
+#[cfg(all(feature = "std", feature = "ecs"))]
+impl prism_ecs::resource::Resource for AssetServer {}
 #[cfg(feature = "std")]
 pub use source::{AssetMeta, AssetReader, AssetSources, FsSource, MemSource, ReadError};
 pub use storage::Assets;

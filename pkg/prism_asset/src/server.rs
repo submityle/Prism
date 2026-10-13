@@ -61,7 +61,7 @@ use crate::type_id::AssetTypeId;
 use crate::watch::{AssetChangeKind, ChangeBatch};
 #[cfg(feature = "file_watcher")]
 use crate::watch::{AssetWatchHandle, WatchStartError};
-use crate::{Asset, LoaderId, SuffixConflict};
+use crate::{Asset, Assets, LoaderId, SuffixConflict};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
@@ -429,6 +429,28 @@ impl AssetServer {
     ) -> Option<R> {
         let inner = self.lock();
         inner.stores.get::<A>(id).map(f)
+    }
+
+    /// Atomically drains one typed arena's events and snapshots its current
+    /// ready values for added/modified events.
+    ///
+    /// The returned ids are the server arena's original generational ids; no
+    /// second render-side asset identity is minted. The event queue and the
+    /// source snapshots are obtained while the server mutex is held, so a
+    /// reload cannot interleave between the two operations. `None` means the
+    /// server has not registered an arena for `A`.
+    #[must_use]
+    pub fn drain_events_with_snapshots<A: Asset>(
+        &self,
+    ) -> Option<(Vec<crate::AssetEvent<A>>, Vec<(crate::AssetId<A>, A)>)>
+    where
+        A: Clone,
+    {
+        let mut inner = self.lock();
+        inner
+            .stores
+            .arena_mut::<A>()
+            .map(Assets::drain_events_with_snapshots)
     }
 
     /// Runs the reclamation fixpoint: advances every arena's grace frame,

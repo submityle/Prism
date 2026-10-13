@@ -8,7 +8,7 @@
 
 use alloc::vec::Vec;
 
-use prism_asset::{AssetEvent, AssetId, Assets};
+use prism_asset::{AssetEvent, AssetId, AssetServer, Assets};
 use prism_ecs::prelude::Resource;
 use prism_ecs::world::World;
 
@@ -93,11 +93,11 @@ impl<A: RenderAsset> ExtractedAssets<A> {
 
 /// Drains the main world's changed assets into the render world's frame.
 ///
-/// The extract step for one render-asset family: it reads (and empties) the main
-/// world arena's event queue and copies every added/modified asset into the
-/// render world's [`ExtractedAssets`]. Removed ids cross as ids only — there is
-/// nothing left to copy, and the prepare stage needs the id to release the GPU
-/// form.
+/// The extract step for one render-asset family: it reads (and empties) either
+/// the main world's `AssetServer` typed arena or the compatibility `Assets<A>`
+/// arena, and copies every added/modified asset into the render world's
+/// [`ExtractedAssets`]. Removed ids cross as ids only — there is nothing left
+/// to copy, and the prepare stage needs the id to release the GPU form.
 ///
 /// `Clone` is what makes the copy possible without taking ownership away from
 /// the simulation: the main world keeps its asset, and the render world prepares
@@ -110,12 +110,17 @@ impl<A: RenderAsset> ExtractedAssets<A> {
 /// already drained from the simulation's queue, so dropping them here would lose
 /// the change for good.
 pub fn extract_assets<A: RenderAsset>(main: &mut World, render: &mut World) {
-    let events: Vec<AssetEvent<A::SourceAsset>> =
-        match main.get_resource_mut::<Assets<A::SourceAsset>>() {
-            Some(assets) => assets.drain_events(),
+    let server_batch = main
+        .get_resource::<AssetServer>()
+        .and_then(AssetServer::drain_events_with_snapshots::<A::SourceAsset>);
+    let (events, snapshots) = match server_batch {
+        Some(batch) => batch,
+        None => match main.get_resource_mut::<Assets<A::SourceAsset>>() {
+            Some(assets) => assets.drain_events_with_snapshots(),
             // No arena in the main world: nothing of this family exists yet.
             None => return,
-        };
+        },
+    };
     if events.is_empty() {
         return;
     }
@@ -128,12 +133,10 @@ pub fn extract_assets<A: RenderAsset>(main: &mut World, render: &mut World) {
         let id = event.id();
         match event {
             AssetEvent::Added { .. } | AssetEvent::Modified { .. } => {
-                let copied = main
-                    .get_resource::<Assets<A::SourceAsset>>()
-                    .and_then(|assets| assets.get(id))
-                    .cloned();
-                if let Some(asset) = copied {
-                    frame.push_extracted(id, asset);
+                if let Some((_, asset)) =
+                    snapshots.iter().find(|(snapshot_id, _)| *snapshot_id == id)
+                {
+                    frame.push_extracted(id, asset.clone());
                 }
             }
             AssetEvent::Removed { .. } => frame.push_removed(id),
