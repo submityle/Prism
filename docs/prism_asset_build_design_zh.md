@@ -16,9 +16,9 @@
 
 - **已完成（核心切片）**：`pkg/prism_asset_build_core` 已实现显式输入的确定性 `ArtifactKey`、内容哈希、BLAKE3 本地 CAS、确定性串行 `BuildGraph`/`Processor` 契约（节点依赖、拓扑、环/缺失依赖诊断、失败传播），以及本地 revision 事务。`BuildExecutor` 将这些组件接成单机串行闭环：按显式 Processor/设置/Profile/工具链/环境/输出契约生成 key，校验 DDC descriptor 与 CAS 字节，缓存损坏时失效并重建，全部节点成功后才发布新 Revision。发布前现验证 Artifact dependency closure（缺失、自依赖、重复边、环）且拒绝重复 AssetId；Unix 上使用安全封装的 advisory file lock 串行化独立 store handle，并在替换 `CURRENT` 前再次核对期望 Revision。
 - **部分完成**：本地 DDC 已提供持久化 `ArtifactKey -> ArtifactDescriptor` 索引、确定性编码/校验和原子文件替换，与 CAS 分离；Unix DDC 索引已用 advisory `flock` 保护跨进程 read-modify-write，避免独立句柄互相覆盖更新。仍无 DDC 分层/驱逐策略、真实跨进程测试、非 Unix 跨进程协调、并行图调度与完整失效分析。发布事务已接入 Unix 跨进程锁、append-only journal、Prepare/Commit/Abort marker、可选 RuntimePackage 的 descriptor/hash 绑定、启动恢复、孤儿 manifest/runtime 输出清理、部分 journal 尾帧截断恢复、`UnknownCommit` 状态识别、事务状态查询和提交 Revision 重放；RevisionStore 已提供基于已提交 Manifest roots、带宽限期并在 pending transaction 时延期的本地 CAS 可达性 sweep，但完整磁盘故障注入、非 Unix 跨进程协调、持久化 transaction_id 和显式 reconcile API 仍未完成。
-- **部分完成**：`pkg/prism_asset_container` 已实现 v1 raw 容器 writer/reader、严格 ToC/范围/哈希校验、文件 `RangeSource`（positional I/O、短读/截断门禁、并发 range read）、overlay、确定性 Runtime Manifest、`ManifestAssetReader`，以及独立确定性 `ChunkPlanner`（硬依赖闭包、环/缺失依赖、对齐、容量、优先级和跨 Chunk 依赖先后顺序）。`prism_asset_build_core::package_runtime` 已将 Build Manifest/CAS 字节桥接为 Runtime Manifest 与 raw 容器，并将 `ChunkPlanner` 接入实际容器布局（支持 v2 计划布局的写入与严格回读）；本轮已修复并测试 chunk 起始对齐、manifest/chunk priority 传递和同名容器 remount 替换旧 mount。当前 v2 仍是内部 raw 物理布局切片，不是已冻结的完整 wire contract：ChunkPlan 元数据、依赖/流送表、平台/build flags、压缩块表、加密和签名元数据尚未持久化或实现；Manifest 路由尚未绑定不可变容器内容摘要或 generation。容器层已有文件按范围读取，但还没有 CDN/DirectStorage 按 Chunk 流送调度。压缩/加密/签名、Provenance、Patch/DLC 和发布回滚仍未实现。
+- **部分完成**：`pkg/prism_asset_container` 已实现 v1 raw 容器 writer/reader、严格 ToC/范围/哈希校验、文件 `RangeSource`（positional I/O、短读/截断门禁、并发 range read）、overlay、确定性 Runtime Manifest v2（独立 Container Table 绑定长度、BLAKE3 内容 hash 和稳定 generation token）、`ManifestAssetReader`，以及独立确定性 `ChunkPlanner`（硬依赖闭包、环/缺失依赖、对齐、容量、优先级和跨 Chunk 依赖先后顺序）。`prism_asset_build_core::package_runtime` 已将 Build Manifest/CAS 字节桥接为 Runtime Manifest 与 raw 容器，并将 `ChunkPlanner` 接入实际容器布局（支持 v2 计划布局的写入与严格回读）；本轮已修复并测试 chunk 起始对齐、manifest/chunk priority 传递、同名容器 remount 替换旧 mount，以及同名同 GUID 换包的身份拒绝。当前 v2 仍是内部 raw 物理布局切片，不是已冻结的完整 wire contract：ChunkPlan 元数据、依赖/流送表、平台/build flags、压缩块表、加密和签名元数据尚未持久化或实现。容器层已有文件按范围读取，但还没有 CDN/DirectStorage 按 Chunk 流送调度。压缩/加密/签名、Provenance、Patch/DLC 和发布回滚仍未实现。
 - **未完成的构建主链**：Source/Importer 插件、IR、完整 Recipe/Processor 规划、字段级失效、并行单机调度、DDC L0–L3、远程 CAS/worker、CLI（plan/import/build/inspect）、双跑确定性门禁、完整崩溃恢复与质量报告。当前 executor 是受显式 ArtifactSpec 驱动的串行核心，不是生产导入/Cook 系统。
-- **未完成的发行链**：构建侧 Runtime Manifest 生产协议仍需稳定化，Manifest 当前尚未完整表达硬/可选依赖、初始驻留 Chunk、流送层级、codec/schema 和安装能力条件；压缩/加密/签名、Provenance、patch/DLC、平台 profile/能力矩阵及发布回滚仍未完成。当前 ChunkPlanner 到 raw 容器写入的垂直切片已接通，但还不是完整 Cook/发行链。
+- **未完成的发行链**：构建侧 Runtime Manifest 已有 v2 容器内容身份绑定，但尚未完整表达硬/可选依赖、初始驻留 Chunk、流送层级、codec/schema 和安装能力条件；压缩/加密/签名、Provenance、patch/DLC、平台 profile/能力矩阵及发布回滚仍未完成。当前 ChunkPlanner 到 raw 容器写入的垂直切片已接通，但还不是完整 Cook/发行链。
 - **未完成的 AAA 规模能力**：VT/VG/HLOD/World Partition/长音频分块、遥测回灌、Build Farm、百万资产 Registry、插件隔离/准入和多项目 Artifact 治理。
 
 本文的 M0/M1…路线图是验收目标，不代表这些能力已经存在；只有有代码、测试和运行时对接的切片才可标为完成。
@@ -963,7 +963,7 @@ Patch = New Manifest
 
 ### 15.1 Runtime Manifest
 
-> **当前实现边界**：当前 Runtime Manifest 主要是稳定身份到容器名、优先级和容器内范围的路由索引。硬/可选依赖、初始驻留与流送层级、codec/schema、安装组/能力条件，以及容器内容摘要或 generation 尚未形成完整运行时契约；当前 BLAKE3 摘要也不等同于认证签名。
+> **当前实现边界**：当前 Runtime Manifest v2 已是稳定身份到容器名、优先级、容器内 GUID 和容器内容身份（长度、BLAKE3 hash、稳定 generation token）的路由索引，并在运行时拒绝同名换包。硬/可选依赖、初始驻留与流送层级、codec/schema、安装组/能力条件仍未形成完整运行时契约；当前 BLAKE3 摘要也不等同于认证签名。
 
 Manifest 至少回答：
 

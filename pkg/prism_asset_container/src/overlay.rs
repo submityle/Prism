@@ -3,8 +3,8 @@ use alloc::collections::BTreeMap;
 use prism_asset::StableGuid;
 
 use crate::{
-    ContainerError, ContainerReader, ManifestError, ManifestReadError, ManifestReader,
-    ManifestRoute, RuntimeManifest,
+    ContainerError, ContainerIdentity, ContainerReader, ManifestError, ManifestReadError,
+    ManifestReader, ManifestRoute, RuntimeManifest,
 };
 
 /// A mounted container with explicit higher-wins priority.
@@ -100,6 +100,15 @@ impl OverlaySet {
                 priority: mount.priority,
                 container_guid: *guid,
             })?;
+            let info = mount.reader.info();
+            manifest.bind_container(
+                mount.name.clone(),
+                ContainerIdentity {
+                    byte_len: info.total_len,
+                    content_hash: info.content_hash,
+                    generation: info.generation,
+                },
+            )?;
         }
         Ok(manifest)
     }

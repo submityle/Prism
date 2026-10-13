@@ -643,6 +643,21 @@ impl RevisionStore {
             };
             let reader = ContainerReader::new(Arc::<[u8]>::from(bytes.as_slice()))
                 .map_err(|_| PublishError::Invalid("published runtime container is invalid"))?;
+            let Some(identity) = runtime_manifest.container_identity(route.container_name.as_str())
+            else {
+                return Err(PublishError::Invalid(
+                    "published runtime manifest is missing container identity",
+                ));
+            };
+            let info = reader.info();
+            if identity.byte_len != info.total_len
+                || identity.content_hash != info.content_hash
+                || identity.generation != info.generation
+            {
+                return Err(PublishError::Invalid(
+                    "published runtime manifest container identity differs from bytes",
+                ));
+            }
             if !reader.contains(route.container_guid) {
                 return Err(PublishError::Invalid(
                     "published runtime manifest references a missing record",
@@ -748,6 +763,20 @@ impl PublishTransaction {
             };
             let reader = ContainerReader::new(Arc::<[u8]>::from(bytes.as_slice()))
                 .map_err(|_| PublishError::Invalid("runtime container is invalid"))?;
+            let info = reader.info();
+            let Some(identity) = decoded.container_identity(&route.container_name) else {
+                return Err(PublishError::Invalid(
+                    "runtime manifest is missing container identity",
+                ));
+            };
+            if identity.byte_len != info.total_len
+                || identity.content_hash != info.content_hash
+                || identity.generation != info.generation
+            {
+                return Err(PublishError::Invalid(
+                    "runtime manifest container identity differs from bytes",
+                ));
+            }
             if !reader.contains(route.container_guid) {
                 return Err(PublishError::Invalid(
                     "runtime manifest references a missing container record",
@@ -1262,7 +1291,9 @@ mod tests {
     use crate::package::RuntimePackage;
     use crate::types::{ArtifactKey, ContentHash};
     use prism_asset::StableGuid;
-    use prism_asset_container::{ContainerWriter, ManifestRoute, RuntimeManifest};
+    use prism_asset_container::{
+        ContainerIdentity, ContainerReader, ContainerWriter, ManifestRoute, RuntimeManifest,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -1311,6 +1342,17 @@ mod tests {
                 priority: 0,
                 container_guid: guid,
             })
+            .unwrap();
+        let info = ContainerReader::new(container.clone()).unwrap().info();
+        runtime_manifest
+            .bind_container(
+                "base.container",
+                ContainerIdentity {
+                    byte_len: info.total_len,
+                    content_hash: info.content_hash,
+                    generation: info.generation,
+                },
+            )
             .unwrap();
         let runtime_manifest_bytes = runtime_manifest.encode().unwrap();
         RuntimePackage {

@@ -6,10 +6,10 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    ChunkInput, ChunkPlanner, ChunkPolicy, ContainerError, ContainerReader, ContainerWriter,
-    FileRangeSource, ManifestAssetReader, ManifestError, ManifestReadError, ManifestRoute,
-    MemoryRangeSource, OverlaySet, RangeSource, RangeSourceError, RuntimeManifest, FORMAT_VERSION,
-    MAGIC,
+    ChunkInput, ChunkPlanner, ChunkPolicy, ContainerError, ContainerIdentity, ContainerReader,
+    ContainerWriter, FileRangeSource, ManifestAssetReader, ManifestError, ManifestReadError,
+    ManifestRoute, MemoryRangeSource, OverlaySet, RangeSource, RangeSourceError, RuntimeManifest,
+    FORMAT_VERSION, MAGIC,
 };
 
 fn guid(name: &str) -> StableGuid {
@@ -22,6 +22,15 @@ fn build(entries: &[(&str, &[u8])]) -> Vec<u8> {
         writer.add(guid(name), bytes.to_vec()).unwrap();
     }
     writer.finish().unwrap()
+}
+
+fn identity(bytes: &[u8]) -> ContainerIdentity {
+    let info = ContainerReader::new(bytes.to_vec()).unwrap().info();
+    ContainerIdentity {
+        byte_len: info.total_len,
+        content_hash: info.content_hash,
+        generation: info.generation,
+    }
 }
 
 #[derive(Debug)]
@@ -729,9 +738,26 @@ fn remounting_a_container_name_replaces_its_previous_guid_set() {
 }
 
 #[test]
+fn manifest_rejects_same_name_and_guid_with_different_container_bytes() {
+    let asset = guid("stable-record");
+    let old_bytes = build(&[("stable-record", b"old payload")]);
+    let new_bytes = build(&[("stable-record", b"new payload")]);
+    let mut overlays = OverlaySet::new();
+    overlays.mount("shipping", 1, ContainerReader::new(old_bytes).unwrap());
+    let manifest = RuntimeManifest::from_overlay(&overlays).unwrap();
+    overlays.mount("shipping", 1, ContainerReader::new(new_bytes).unwrap());
+    assert!(matches!(
+        manifest.bind(&overlays),
+        Err(ManifestReadError::ContainerIdentityMismatch { .. })
+    ));
+    assert!(overlays.contains(asset));
+}
+
+#[test]
 fn runtime_manifest_round_trips_deterministically_and_rejects_bad_input() {
     let logical = guid("logical");
     let local = guid("container-local");
+    let container_bytes = build(&[("container-local", b"payload")]);
     let mut manifest = RuntimeManifest::new();
     manifest
         .insert(ManifestRoute {
@@ -740,6 +766,9 @@ fn runtime_manifest_round_trips_deterministically_and_rejects_bad_input() {
             priority: 7,
             container_guid: local,
         })
+        .unwrap();
+    manifest
+        .bind_container("patch.container", identity(&container_bytes))
         .unwrap();
     let encoded = manifest.encode().unwrap();
     assert_eq!(RuntimeManifest::decode(&encoded).unwrap(), manifest);
@@ -765,11 +794,12 @@ fn runtime_manifest_round_trips_deterministically_and_rejects_bad_input() {
     );
 }
 
-const HEADER_NAME_OFFSET: usize = 16 + 38;
+const HEADER_NAME_OFFSET: usize = 20 + 50 + "patch.container".len() + 38;
 
 #[test]
 fn runtime_manifest_rejects_duplicate_guid_records_even_with_valid_hash() {
     let mut manifest = RuntimeManifest::new();
+    let container_bytes = build(&[("identity", b"payload")]);
     for name in ["a", "b"] {
         manifest
             .insert(ManifestRoute {
@@ -779,12 +809,20 @@ fn runtime_manifest_rejects_duplicate_guid_records_even_with_valid_hash() {
                 container_guid: guid(name),
             })
             .unwrap();
+        manifest
+            .bind_container(name, identity(&container_bytes))
+            .unwrap();
     }
     let mut bytes = manifest.encode().unwrap();
-    let first_guid = bytes[16..32].to_vec();
+    let route_table = 20 + 2 * (50 + 1);
+    let first_guid = bytes[route_table..route_table + 16].to_vec();
     // Locate the second variable-size record and replace its logical GUID.
-    let first_name_len = u16::from_le_bytes(bytes[52..54].try_into().unwrap()) as usize;
-    let second_guid_at = 16 + 38 + first_name_len;
+    let first_name_len = u16::from_le_bytes(
+        bytes[route_table + 36..route_table + 38]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let second_guid_at = route_table + 38 + first_name_len;
     bytes[second_guid_at..second_guid_at + 16].copy_from_slice(&first_guid);
     let body_end = bytes.len() - 32;
     let digest = blake3::hash(&bytes[..body_end]);
@@ -825,10 +863,11 @@ fn manifest_reader_routes_logical_guid_to_container_guid() {
     let logical = guid("logical.asset");
     let local = guid("container-local.asset");
     let mut overlays = OverlaySet::new();
+    let container_bytes = build(&[("container-local.asset", b"mapped bytes")]);
     overlays.mount(
         "patch",
         7,
-        ContainerReader::new(build(&[("container-local.asset", b"mapped bytes")])).unwrap(),
+        ContainerReader::new(container_bytes.clone()).unwrap(),
     );
 
     let mut manifest = RuntimeManifest::new();
@@ -839,6 +878,9 @@ fn manifest_reader_routes_logical_guid_to_container_guid() {
             priority: 7,
             container_guid: local,
         })
+        .unwrap();
+    manifest
+        .bind_container("patch", identity(&container_bytes))
         .unwrap();
     let reader = manifest.bind(&overlays).unwrap();
     assert_eq!(reader.read_all(logical).unwrap(), b"mapped bytes");
@@ -876,10 +918,11 @@ fn manifest_reader_distinguishes_route_container_guid_and_range_errors() {
     ));
 
     let mut overlays = OverlaySet::new();
+    let mounted_bytes = build(&[("other.asset", b"other")]);
     overlays.mount(
         "mounted",
         0,
-        ContainerReader::new(build(&[("other.asset", b"other")])).unwrap(),
+        ContainerReader::new(mounted_bytes.clone()).unwrap(),
     );
     let mut missing_guid = RuntimeManifest::new();
     missing_guid
@@ -903,6 +946,9 @@ fn manifest_reader_distinguishes_route_container_guid_and_range_errors() {
             priority: 0,
             container_guid: guid("other.asset"),
         })
+        .unwrap();
+    valid
+        .bind_container("mounted", identity(&mounted_bytes))
         .unwrap();
     let reader = valid.bind(&overlays).unwrap();
     let mut output = [0xA5; 2];
@@ -966,6 +1012,14 @@ fn manifest_asset_reader_implements_vfs_path_and_subasset_contract() {
     writer.add(parent, b"scene bytes".to_vec()).unwrap();
     writer.add(child, b"mesh bytes".to_vec()).unwrap();
     let container = ContainerReader::new(writer.finish().unwrap()).unwrap();
+    let container_identity = {
+        let info = container.info();
+        ContainerIdentity {
+            byte_len: info.total_len,
+            content_hash: info.content_hash,
+            generation: info.generation,
+        }
+    };
 
     let mut overlays = OverlaySet::new();
     overlays.mount("shipping", 3, container);
@@ -977,6 +1031,9 @@ fn manifest_asset_reader_implements_vfs_path_and_subasset_contract() {
             priority: 3,
             container_guid: parent,
         })
+        .unwrap();
+    manifest
+        .bind_container("shipping", container_identity)
         .unwrap();
     manifest
         .insert(ManifestRoute {

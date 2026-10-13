@@ -205,6 +205,9 @@ fn parse_source(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Cont
         return Err(ContainerError::InvalidHeader);
     }
 
+    let content_hash = digest_range(source, 0, total_len)?;
+    let generation = u64::from_le_bytes(content_hash[..8].try_into().unwrap());
+
     let directory_len = usize::try_from(dir_len).map_err(|_| ContainerError::IntegerOverflow)?;
     let mut directory = vec![0_u8; directory_len];
     read_from_source(source, dir_off, &mut directory)?;
@@ -290,6 +293,8 @@ fn parse_source(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Cont
             version,
             entry_count: count,
             total_len,
+            content_hash,
+            generation,
         },
         entries,
     })
@@ -333,6 +338,19 @@ fn validate_hash_range(
         return Err(ContainerError::HashMismatch);
     }
     Ok(())
+}
+
+fn digest_range(
+    source: &dyn crate::RangeSource,
+    start: u64,
+    end: u64,
+) -> Result<[u8; 32], ContainerError> {
+    let mut hasher = blake3::Hasher::new();
+    validate_range(source, start, end, |chunk| {
+        hasher.update(chunk);
+        Ok(())
+    })?;
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn validate_range<F>(

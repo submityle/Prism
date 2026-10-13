@@ -11,8 +11,8 @@ use std::io::ErrorKind;
 
 use prism_asset::StableGuid;
 use prism_asset_container::{
-    ChunkInput, ChunkPlanError, ChunkPlanner, ChunkPolicy, ContainerError, ContainerWriter,
-    ManifestError, ManifestRoute, RuntimeManifest,
+    ChunkInput, ChunkPlanError, ChunkPlanner, ChunkPolicy, ContainerError, ContainerIdentity,
+    ContainerReader, ContainerWriter, ManifestError, ManifestRoute, RuntimeManifest,
 };
 
 use crate::cas::{CasError, ContentAddressedStore};
@@ -412,19 +412,6 @@ pub fn package_runtime_with_options(
         });
     }
 
-    // Validate all routes (including container names) before touching CAS.
-    let mut runtime_manifest = RuntimeManifest::new();
-    for mapping in by_asset.values() {
-        runtime_manifest
-            .insert(ManifestRoute {
-                guid: mapping.guid,
-                container_name: mapping.container_name.clone(),
-                priority: mapping.priority,
-                container_guid: mapping.guid,
-            })
-            .map_err(PackageError::RuntimeManifest)?;
-    }
-
     let mut writers = BTreeMap::<String, ContainerWriter>::new();
     let mut chunk_inputs = BTreeMap::<String, Vec<ChunkInput>>::new();
     let mut payload_cache = BTreeMap::<ContentHash, Vec<u8>>::new();
@@ -550,6 +537,40 @@ pub fn package_runtime_with_options(
                 source,
             })?;
         containers.insert(name, bytes);
+    }
+
+    // The route identity is derived only after the final container bytes are
+    // fixed. This prevents a manifest from accepting a same-named replacement
+    // whose length, content hash, or generation differs from the package.
+    let mut runtime_manifest = RuntimeManifest::new();
+    for mapping in by_asset.values() {
+        let container = containers
+            .get(&mapping.container_name)
+            .expect("every mapping has a finalized container");
+        let info = ContainerReader::new(container.clone())
+            .map_err(|source| PackageError::Container {
+                name: mapping.container_name.clone(),
+                source,
+            })?
+            .info();
+        runtime_manifest
+            .insert(ManifestRoute {
+                guid: mapping.guid,
+                container_name: mapping.container_name.clone(),
+                priority: mapping.priority,
+                container_guid: mapping.guid,
+            })
+            .map_err(PackageError::RuntimeManifest)?;
+        runtime_manifest
+            .bind_container(
+                mapping.container_name.clone(),
+                ContainerIdentity {
+                    byte_len: info.total_len,
+                    content_hash: info.content_hash,
+                    generation: info.generation,
+                },
+            )
+            .map_err(PackageError::RuntimeManifest)?;
     }
     let runtime_manifest_bytes = runtime_manifest
         .encode()

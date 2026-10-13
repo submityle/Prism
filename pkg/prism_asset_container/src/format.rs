@@ -34,6 +34,13 @@ pub struct ContainerInfo {
     pub entry_count: u32,
     /// Exact container byte length.
     pub total_len: u64,
+    /// BLAKE3 digest of the exact immutable container bytes.
+    pub content_hash: [u8; 32],
+    /// Stable generation token derived from `content_hash`.
+    ///
+    /// This is content identity, not a process-local mount counter, so a
+    /// packaged manifest remains portable across machines and restarts.
+    pub generation: u64,
 }
 
 /// Public information for a single GUID-addressed chunk.

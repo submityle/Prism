@@ -52,6 +52,32 @@ pub enum ManifestReadError {
         /// GUID expected inside the named container.
         container_guid: StableGuid,
     },
+    /// The named mount has the right route but different immutable content.
+    ContainerIdentityMismatch {
+        /// Logical GUID represented by the route.
+        logical_guid: StableGuid,
+        /// Container name recorded by the route.
+        container_name: String,
+        /// Length recorded by the manifest.
+        expected_len: u64,
+        /// Length observed from the mounted container.
+        actual_len: u64,
+        /// Hash recorded by the manifest.
+        expected_hash: [u8; 32],
+        /// Hash observed from the mounted container.
+        actual_hash: [u8; 32],
+        /// Generation recorded by the manifest.
+        expected_generation: u64,
+        /// Generation observed from the mounted container.
+        actual_generation: u64,
+    },
+    /// A route has no immutable container identity binding.
+    MissingContainerIdentity {
+        /// Logical GUID represented by the route.
+        logical_guid: StableGuid,
+        /// Container name recorded by the route.
+        container_name: String,
+    },
     /// The requested byte range is outside the routed payload.
     InvalidRange {
         /// Logical GUID requested by the caller.
@@ -92,6 +118,28 @@ impl fmt::Display for ManifestReadError {
                 container_name,
                 container_guid,
             } => write!(f, "manifest route for {logical_guid:?} cannot find container GUID {container_guid:?} in {container_name:?}"),
+            Self::ContainerIdentityMismatch {
+                logical_guid,
+                container_name,
+                expected_len,
+                actual_len,
+                expected_hash,
+                actual_hash,
+                expected_generation,
+                actual_generation,
+            } => write!(
+                f,
+                "manifest route for {logical_guid:?} has container identity mismatch in {container_name:?}: len {expected_len}/{actual_len}, hash {:02x?}/{:02x?}, generation {expected_generation}/{actual_generation}",
+                expected_hash,
+                actual_hash,
+            ),
+            Self::MissingContainerIdentity {
+                logical_guid,
+                container_name,
+            } => write!(
+                f,
+                "manifest route for {logical_guid:?} has no identity for container {container_name:?}"
+            ),
             Self::InvalidRange {
                 logical_guid,
                 offset,
@@ -208,6 +256,29 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
                 container_name: route.container_name.clone(),
                 manifest_priority: route.priority,
                 mounted_priority: winner.priority,
+            });
+        }
+
+        let info = winner.reader.info();
+        let Some(expected) = self.manifest.container_identity(&route.container_name) else {
+            return Err(ManifestReadError::MissingContainerIdentity {
+                logical_guid: route.guid,
+                container_name: route.container_name.clone(),
+            });
+        };
+        if info.total_len != expected.byte_len
+            || info.content_hash != expected.content_hash
+            || info.generation != expected.generation
+        {
+            return Err(ManifestReadError::ContainerIdentityMismatch {
+                logical_guid: route.guid,
+                container_name: route.container_name.clone(),
+                expected_len: expected.byte_len,
+                actual_len: info.total_len,
+                expected_hash: expected.content_hash,
+                actual_hash: info.content_hash,
+                expected_generation: expected.generation,
+                actual_generation: info.generation,
             });
         }
 
