@@ -279,11 +279,16 @@ impl Instance {
                     Err(RuntimeError::MicrostepLimit(self.microstep_limit))
                 } else {
                     report.events_processed += 1;
-                    self.apply(transition, &mut report, callback)
-                        .and_then(|()| self.run_eventless(callback, &mut report))
+                    let result = self.apply(transition, &mut report, callback);
+                    // The event is visible while selecting/applying its own
+                    // transition, but never leaks into the eventless cascade
+                    // that follows it.
+                    self.current_event = None;
+                    result.and_then(|()| self.run_eventless(callback, &mut report))
                 }
             } else {
                 report.events_processed += 1;
+                self.current_event = None;
                 Ok(())
             };
             self.current_event = None;

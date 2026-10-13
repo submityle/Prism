@@ -471,6 +471,56 @@ fn compiler_rejects_duplicate_regions_and_invalid_history_owner() {
     );
 }
 
+struct EventlessOnlyGuard;
+
+impl Guard for EventlessOnlyGuard {
+    fn evaluate(&self, context: GuardContext) -> bool {
+        context.event.is_none()
+    }
+}
+
+#[test]
+fn eventless_cascade_clears_the_consumed_event_context() {
+    let root = StateNode::compound(
+        StateId(0),
+        None,
+        vec![StateId(1), StateId(2), StateId(3)],
+        StateId(1),
+        None,
+    );
+    let first = StateNode::atomic(StateId(1), Some(StateId(0))).with_transition(Transition::new(
+        StateId(1),
+        TransitionTarget::State(StateId(2)),
+        Trigger::Event(EventId(11)),
+        None,
+        0,
+        TransitionKind::External,
+    ));
+    let second = StateNode::atomic(StateId(2), Some(StateId(0))).with_transition(Transition::new(
+        StateId(2),
+        TransitionTarget::State(StateId(3)),
+        Trigger::Eventless,
+        Some(GuardId(0)),
+        0,
+        TransitionKind::External,
+    ));
+    let third = StateNode::atomic(StateId(3), Some(StateId(0)));
+    let plan = TreeDef {
+        root: StateId(0),
+        nodes: vec![root, first, second, third],
+    }
+    .compile()
+    .unwrap();
+    let mut instance = Instance::new(plan, 1, MicrostepLimit(4)).unwrap();
+    instance.set_guard(GuardId(0), EventlessOnlyGuard);
+    instance.start(&mut NoopLifecycle).unwrap();
+    instance.send(Event::new(EventId(11))).unwrap();
+
+    instance.run(&mut NoopLifecycle).unwrap();
+
+    assert_eq!(instance.active_states(), &[StateId(0), StateId(3)]);
+}
+
 #[test]
 fn eventless_cascade_is_bounded_and_events_do_not_insert() {
     let root = StateNode::compound(
