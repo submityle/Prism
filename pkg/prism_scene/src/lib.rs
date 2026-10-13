@@ -85,7 +85,7 @@ pub use plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits}
 pub use property_apply::{apply_property_override, apply_property_overrides, PropertyApplyError};
 pub use remap::RemapTable;
 pub use residency::{ResidencyPlan, ResidencyTier};
-pub use template::{NestedSlot, SceneTemplate};
+pub use template::{NestedSlot, SceneTemplate, TemplateError};
 
 /// The common types most consumers import.
 pub mod prelude {
@@ -113,7 +113,7 @@ pub mod prelude {
     pub use crate::plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits};
     pub use crate::remap::RemapTable;
     pub use crate::residency::{ResidencyPlan, ResidencyTier};
-    pub use crate::template::{NestedSlot, SceneTemplate};
+    pub use crate::template::{NestedSlot, SceneTemplate, TemplateError};
 }
 
 #[cfg(test)]

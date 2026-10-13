@@ -13,7 +13,7 @@ use prism_asset::StableGuid;
 
 use crate::identity::{LocalEntityId, NameTable};
 use crate::overrides::{OverrideError, OverrideSet};
-use crate::plan::InstantiationPlan;
+use crate::plan::{InstantiationPlan, PlanError};
 use crate::residency::{ResidencyPlan, ResidencyTier};
 
 /// A nested instance slot inside a template (design §9.1).
@@ -28,6 +28,29 @@ pub struct NestedSlot {
     pub root: LocalEntityId,
     /// The nested sub-template's asset identity.
     pub template: StableGuid,
+}
+
+/// Structural failure in a runtime-resident scene template descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemplateError {
+    /// The template or a dependency used the reserved nil GUID.
+    NilGuid,
+    /// The flattened instantiation plan is invalid.
+    InvalidPlan(PlanError),
+    /// A name was empty or targeted a non-base local entity.
+    InvalidNameTarget(LocalEntityId),
+    /// A residency annotation targeted a non-base local entity.
+    InvalidTierTarget(LocalEntityId),
+    /// A nested slot used a nil child template GUID.
+    NilNestedTemplate,
+    /// A nested slot root was not a base entity in this template.
+    InvalidNestedRoot(LocalEntityId),
+    /// Two nested slots claimed the same root entity.
+    DuplicateNestedRoot(LocalEntityId),
+    /// A dependency entry used the reserved nil GUID.
+    NilDependency,
+    /// The dependency closure contained the same GUID twice.
+    DuplicateDependency(StableGuid),
 }
 
 impl NestedSlot {
@@ -133,6 +156,47 @@ impl SceneTemplate {
         self.deps.len()
     }
 
+    /// Validates all runtime descriptor invariants before asset publication or
+    /// instantiation.
+    pub fn validate(&self) -> Result<(), TemplateError> {
+        if self.guid.is_nil() {
+            return Err(TemplateError::NilGuid);
+        }
+        self.plan.validate().map_err(TemplateError::InvalidPlan)?;
+        for (name, local) in self.names.iter() {
+            if name.is_empty() || !self.contains_local(local) {
+                return Err(TemplateError::InvalidNameTarget(local));
+            }
+        }
+        for (local, _) in self.tiers.iter() {
+            if !self.contains_local(local) {
+                return Err(TemplateError::InvalidTierTarget(local));
+            }
+        }
+        let mut nested_roots = alloc::collections::BTreeSet::new();
+        for slot in self.nested.iter() {
+            if slot.template.is_nil() {
+                return Err(TemplateError::NilNestedTemplate);
+            }
+            if !self.contains_local(slot.root) {
+                return Err(TemplateError::InvalidNestedRoot(slot.root));
+            }
+            if !nested_roots.insert(slot.root) {
+                return Err(TemplateError::DuplicateNestedRoot(slot.root));
+            }
+        }
+        let mut deps = alloc::collections::BTreeSet::new();
+        for dependency in self.deps.iter().copied() {
+            if dependency.is_nil() {
+                return Err(TemplateError::NilDependency);
+            }
+            if !deps.insert(dependency) {
+                return Err(TemplateError::DuplicateDependency(dependency));
+            }
+        }
+        Ok(())
+    }
+
     /// Validates an instance/variant override against this template's complete
     /// base hierarchy.
     ///
@@ -147,7 +211,7 @@ impl SceneTemplate {
 
 #[cfg(test)]
 mod tests {
-    use super::{NestedSlot, SceneTemplate};
+    use super::{NestedSlot, SceneTemplate, TemplateError};
     use crate::identity::LocalEntityId;
     use crate::overrides::ArchetypeSignature;
     use crate::plan::{ArchetypeGroup, InstantiationPlan};
@@ -231,6 +295,44 @@ mod tests {
                 parent: LocalEntityId::new(0),
                 child: LocalEntityId::new(1),
             })
+        );
+    }
+
+    #[test]
+    fn validates_descriptor_identity_and_nested_closure() {
+        let template_guid = guid(1);
+        let mut template = SceneTemplate::new(template_guid, plan_of(2));
+        template.names.insert("root", LocalEntityId::new(0));
+        template = template.with_tier(LocalEntityId::new(1), ResidencyTier::Proxy);
+        template.nested = Box::new([NestedSlot::new(LocalEntityId::new(1), guid(2))]);
+        template.deps = Box::new([guid(2)]);
+        assert!(template.validate().is_ok());
+
+        template.names.insert("dangling", LocalEntityId::new(2));
+        assert_eq!(
+            template.validate(),
+            Err(TemplateError::InvalidNameTarget(LocalEntityId::new(2)))
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_nested_roots_and_dependencies() {
+        let template_guid = guid(1);
+        let mut template = SceneTemplate::new(template_guid, plan_of(2));
+        template.nested = Box::new([
+            NestedSlot::new(LocalEntityId::new(0), guid(2)),
+            NestedSlot::new(LocalEntityId::new(0), guid(3)),
+        ]);
+        assert_eq!(
+            template.validate(),
+            Err(TemplateError::DuplicateNestedRoot(LocalEntityId::new(0)))
+        );
+
+        template.nested = Box::new([]);
+        template.deps = Box::new([guid(2), guid(2)]);
+        assert_eq!(
+            template.validate(),
+            Err(TemplateError::DuplicateDependency(guid(2)))
         );
     }
 
