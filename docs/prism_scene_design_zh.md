@@ -891,7 +891,7 @@ prism_scene/
 | M0 | **部分完成** | `SceneTemplate`、`SceneInstance`、`LocalEntityId`、`spawn_plan`（仅 empty/typed vertical slice）/`despawn_instance`；已有层级重连、失败回滚和双实例隔离测试 | 尚未形成公开 `spawn_scene` 资产入口；需补静态子树端到端基准并验证 §25 |
 | M1 | **部分完成** | `InstantiationPlan` 列布局、`materialize_plan_with_limits`、安全 decoder 注册、预算预检、FieldSlot remap、失败回滚 | 尚未实现列块 memcpy / archetype 预排 / SIMD remap 的完整快路径；1µs/实体仅为未实测 target |
 | M2 | **部分完成** | `OverrideSet` 去重、层叠确定性、plan-aware 组件状态校验、属性标量/字符串 live apply；114 unit + 1 doctest | 实例化入口尚未接收并原子重放完整 `OverrideSet`；Add/RemoveEntity、Add/RemoveComponent 尚未在统一 runtime replay 中闭环；需补真实 ECS 端到端测试 |
-| M3 | **部分（M3a）** | 新增 `nested_runtime`：有界递归 typed 嵌套实例化、SceneTreeSpawn 所有权、子根 ChildOf 挂接、反向递归 teardown 与失败回滚；`NestedSceneProvider` 明确要求模板和 TypedSpawnPlan | 尚无 opaque/materializer 嵌套、热重载传播、override 保全；需覆盖 A→B→C、环/缺依赖和基体更新 |
+| M3 | **部分（M3a）** | 新增 `nested_runtime`：有界递归 typed 嵌套实例化、SceneTreeSpawn 所有权、子根 ChildOf 挂接、反向递归 teardown 与失败回滚；`NestedSceneProvider` 明确要求模板和 TypedSpawnPlan | 尚无 opaque/materializer 嵌套、热重载传播、override 保全；需覆盖 A→B→C、环/缺依赖和基体更新；当前模块仅在 `materialize` feature 下导出 |
 | M4 | **部分完成** | version-1 plan codec + `SceneTemplate` codec：magic/version、资源预算、严格 wire 校验、完整 plan/template validation、确定性 round-trip | 不等于 `.scene.prism`/`.prefab.prism` 单文件包、bake manifest、依赖闭包、schema 迁移或 mmap 零解析；需 bake→load→migrate→instantiate E2E |
 | M5 | **未开始** | `ResidencyTier` / `ResidencyPlan` 的确定性数据模型 | 尚无 proxy⇄ECS 调度、预算分帧、additive 接缝或百万 proxy 基准 |
 | M6 | **未开始** | 无持久化 delta / migration runtime 实现 | 需存档往返、跨平台确定性、迁移与回滚 E2E |
@@ -1101,7 +1101,7 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 | `instantiate` | §8.2、§21.2 | `spawn_plan`/`spawn_typed_plan`/`despawn_instance`；批量预留、确定性 remap、rooted `LocalEntityId(0)` 层级校验、`ChildOf` 重连、typed Bundle/受限 `SpawnContext` constructor（仅当前 owner 可 materialize、拒绝动态环）、返回错误时回收实例自有实体、base/reserved 实体回收、防止外部子实体级联删除，以及经过 root/stale 校验的 `SceneSpawn::attach_instance` anchor 接线；**当前不接收或统一重放 `OverrideSet`，不等于 M2 runtime replay 已完成** |
 | `materialize` | §8.1、§8.2 M1 | `MaterializerRegistry` 按 `ComponentTypeId` 确定性注册安全 decoder；逐列校验 row layout/长度，逐 slot 校验 bounds/重复项/目标 local，解码后通过 `World::insert_reflect` 写入 reserved entity；完整 decode 阶段失败会回收本次实体，禁止静默丢 payload；`MaterializeLimits` 在 reservation/decode 前 checked 约束 entity/column/row/blob 预算 |
 | `property_apply` | §7、§8.2 M1 | 独立提供 `World::get_reflect_mut` + reflect path 的精确类型标量/字符串应用，并标记 ECS changed；同一 component 的批量 replay 先 clone/预演后一次提交，保证后项失败不留下部分写入；opaque `Bytes`、数值强制转换和结构 override 明确返回不支持/类型错误。 |
-| `nested_runtime` | §9、M3a（部分） | `spawn_nested_typed` 仅接受 typed constructors；按 `NestedSpawnLimits` 限制递归和实例数，检测 active GUID cycle，所有子树由 `SceneTreeSpawn` 持有并在失败时反向 teardown；子根挂到父实例 slot 的 mapped entity。没有 opaque column decode 或 hot reload。 |
+| `nested_runtime` | §9、M3a（部分，`materialize` feature） | `spawn_nested_typed` 仅接受 typed constructors；按 `NestedSpawnLimits` 限制递归和实例数，检测 active GUID cycle，所有子树由 `SceneTreeSpawn` 持有并在失败时反向 teardown；子根挂到父实例 slot 的 mapped entity；attach 失败直接保留具体 `SceneAttachError`，空模板不会触发 panic。没有 opaque column decode 或 hot reload。 |
 
 | `override_replay` | §7、§8.2 M2（部分） | `replay_overrides` 通过 `SceneSpawn` remap 解析目标，按 `(Entity, ComponentTypeId)` 分组，在首次 ECS 写入前对所有属性 clone/预演，再按组提交；预检失败保持值不变，提交拒绝时恢复已提交组。结构操作先行显式拒绝，opaque payload 尚无安全 decoder；值恢复不回滚 ECS changed tick、observer 或外部副作用。 |
 

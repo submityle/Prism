@@ -157,18 +157,13 @@ fn spawn_tree<P: NestedSceneProvider>(
     let spawn =
         spawn_typed_plan(world, &template.plan, typed).map_err(NestedInstantiateError::Spawn)?;
     *count += 1;
-    if spawn
-        .attach_instance(
-            world,
-            template.guid,
-            crate::residency::ResidencyTier::Interactive,
-        )
-        .is_err()
-    {
+    if let Err(error) = spawn.attach_instance(
+        world,
+        template.guid,
+        crate::residency::ResidencyTier::Interactive,
+    ) {
         despawn_instance(world, &spawn);
-        return Err(NestedInstantiateError::Attach(
-            SceneAttachError::InsertRejected(spawn.root.expect("non-empty typed plan root")),
-        ));
+        return Err(NestedInstantiateError::Attach(error));
     }
     let mut children: Vec<SceneTreeChild> = Vec::new();
     for slot in template.nested.iter().copied() {
