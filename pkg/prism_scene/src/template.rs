@@ -260,7 +260,7 @@ impl SceneTemplate {
     /// template-owned entry point supplies the authoritative hierarchy from
     /// the validated instantiation plan.
     pub fn validate_overrides(&self, overrides: &OverrideSet) -> Result<(), OverrideError> {
-        overrides.validate_for_template_with_hierarchy(self.plan.entity_count, &self.plan.hierarchy)
+        overrides.validate_for_plan(&self.plan)
     }
 }
 

@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 
 use crate::identity::LocalEntityId;
 use crate::path::FieldPath;
+use crate::plan::{InstantiationPlan, PlanError};
 
 /// FNV-1a 64-bit constants.
 const FNV64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -276,12 +277,31 @@ impl OverrideSet {
     ///
     /// [`validate_for_template`](Self::validate_for_template) retains its
     /// compact count-only API for callers that have not loaded the hierarchy.
-    /// Runtime/template loaders should use this method so removing a base
-    /// parent cannot leave one of its still-live base children dangling.
+    /// Runtime/template loaders should use [`validate_for_plan`](Self::validate_for_plan)
+    /// so component operations can also be checked against the base archetypes.
     pub fn validate_for_template_with_hierarchy(
         &self,
         entity_count: u32,
         hierarchy: &[(LocalEntityId, LocalEntityId)],
+    ) -> Result<(), OverrideError> {
+        self.validate_impl(entity_count, hierarchy, None)
+    }
+
+    /// Validates against the authoritative plan, including each base entity's
+    /// component signature and each structurally-added entity's declared
+    /// archetype. Component operations must perform real state transitions:
+    /// adding an existing component or removing an absent component is rejected.
+    pub fn validate_for_plan(&self, plan: &InstantiationPlan) -> Result<(), OverrideError> {
+        plan.validate()
+            .map_err(|error| OverrideError::InvalidBasePlan { error })?;
+        self.validate_impl(plan.entity_count, &plan.hierarchy, Some(plan))
+    }
+
+    fn validate_impl(
+        &self,
+        entity_count: u32,
+        hierarchy: &[(LocalEntityId, LocalEntityId)],
+        plan: Option<&InstantiationPlan>,
     ) -> Result<(), OverrideError> {
         let mut declared_added = BTreeSet::new();
         for op in &self.structural {
@@ -304,6 +324,23 @@ impl OverrideSet {
         let mut removed = BTreeSet::new();
         let mut added_components = BTreeSet::new();
         let mut removed_components = BTreeSet::new();
+        let mut component_state = plan.map(|base| {
+            let mut state = BTreeMap::new();
+            for group in &base.groups {
+                for &local in &group.locals {
+                    state.insert(
+                        local,
+                        group
+                            .signature
+                            .components()
+                            .iter()
+                            .copied()
+                            .collect::<BTreeSet<_>>(),
+                    );
+                }
+            }
+            state
+        });
         let mut parents = BTreeMap::new();
 
         for &(child, parent) in hierarchy {
@@ -318,7 +355,12 @@ impl OverrideSet {
 
         for op in &self.structural {
             match op {
-                StructuralOp::AddEntity { local, parent, .. } => {
+                StructuralOp::AddEntity {
+                    local,
+                    parent,
+                    archetype,
+                    ..
+                } => {
                     if !local.is_reserved() {
                         return Err(OverrideError::AddedEntityIdNotReserved { local: *local });
                     }
@@ -351,6 +393,9 @@ impl OverrideSet {
                     }
                     added.insert(*local);
                     parents.insert(*local, *parent);
+                    if let Some(state) = &mut component_state {
+                        state.insert(*local, archetype.components().iter().copied().collect());
+                    }
                 }
                 StructuralOp::RemoveEntity { local } => {
                     if removed.contains(local) {
@@ -369,6 +414,9 @@ impl OverrideSet {
                         });
                     }
                     removed.insert(*local);
+                    if let Some(state) = &mut component_state {
+                        state.remove(local);
+                    }
                 }
                 StructuralOp::AddComponent {
                     target, component, ..
@@ -376,7 +424,17 @@ impl OverrideSet {
                     if !entity_is_live(*target, entity_count, &added, &removed) {
                         return Err(OverrideError::ComponentTargetMissing { target: *target });
                     }
-                    if !added_components.insert((*target, *component)) {
+                    if let Some(state) = &mut component_state {
+                        let components = state
+                            .get_mut(target)
+                            .expect("live entity has component state");
+                        if !components.insert(*component) {
+                            return Err(OverrideError::DuplicateAddComponent {
+                                target: *target,
+                                component: *component,
+                            });
+                        }
+                    } else if !added_components.insert((*target, *component)) {
                         return Err(OverrideError::DuplicateAddComponent {
                             target: *target,
                             component: *component,
@@ -387,7 +445,17 @@ impl OverrideSet {
                     if !entity_is_live(*target, entity_count, &added, &removed) {
                         return Err(OverrideError::ComponentTargetMissing { target: *target });
                     }
-                    if !removed_components.insert((*target, *component)) {
+                    if let Some(state) = &mut component_state {
+                        let components = state
+                            .get_mut(target)
+                            .expect("live entity has component state");
+                        if !components.remove(component) {
+                            return Err(OverrideError::DuplicateRemoveComponent {
+                                target: *target,
+                                component: *component,
+                            });
+                        }
+                    } else if !removed_components.insert((*target, *component)) {
                         return Err(OverrideError::DuplicateRemoveComponent {
                             target: *target,
                             component: *component,
@@ -512,6 +580,11 @@ impl OverrideSet {
 /// A structural defect in an [`OverrideSet`] relative to a base template.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverrideError {
+    /// The authoritative base plan is structurally invalid.
+    InvalidBasePlan {
+        /// The plan validation defect.
+        error: PlanError,
+    },
     /// A property override targets neither a base entity nor a declared addition.
     PropertyTargetMissing {
         /// The invalid property target.
@@ -925,6 +998,44 @@ mod tests {
                 target: LocalEntityId::new(2)
             })
         );
+    }
+
+    #[test]
+    fn plan_validation_rejects_add_of_existing_component_and_remove_of_absent() {
+        use crate::plan::{ArchetypeGroup, InstantiationPlan};
+        let component = ComponentTypeId::from_raw(7);
+        let plan = InstantiationPlan {
+            entity_count: 1,
+            groups: vec![ArchetypeGroup::new(
+                ArchetypeSignature::new(vec![component]),
+                vec![LocalEntityId::new(0)].into_boxed_slice(),
+                vec![crate::plan::Column::new(component, vec![0u8])].into_boxed_slice(),
+            )]
+            .into_boxed_slice(),
+            entity_valued_fields: vec![].into_boxed_slice(),
+            hierarchy: vec![].into_boxed_slice(),
+            reserved_local_base: LocalEntityId::RESERVED_BASE,
+        };
+        let mut add = OverrideSet::new();
+        add.push_structural(StructuralOp::AddComponent {
+            target: LocalEntityId::new(0),
+            component,
+            data: vec![],
+        });
+        assert!(matches!(
+            add.validate_for_plan(&plan),
+            Err(super::OverrideError::DuplicateAddComponent { .. })
+        ));
+
+        let mut remove = OverrideSet::new();
+        remove.push_structural(StructuralOp::RemoveComponent {
+            target: LocalEntityId::new(0),
+            component: ComponentTypeId::from_raw(99),
+        });
+        assert!(matches!(
+            remove.validate_for_plan(&plan),
+            Err(super::OverrideError::DuplicateRemoveComponent { .. })
+        ));
     }
 
     #[test]

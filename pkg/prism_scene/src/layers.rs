@@ -209,6 +209,7 @@ pub fn compose_layers(layers: &[OverrideSet]) -> OverrideComposition {
                         });
                         true
                     } else {
+                        removed_components.remove(&key);
                         added_components.insert(key, layer_index);
                         false
                     }
@@ -231,6 +232,7 @@ pub fn compose_layers(layers: &[OverrideSet]) -> OverrideComposition {
                         });
                         true
                     } else {
+                        added_components.remove(&key);
                         removed_components.insert(key, layer_index);
                         false
                     }
@@ -402,6 +404,36 @@ mod tests {
                 layer: 1,
             }]
         );
+    }
+
+    #[test]
+    fn inverse_component_operations_across_layers_are_preserved() {
+        let component = ComponentTypeId::from_raw(7);
+        let mut add = OverrideSet::new();
+        add.push_structural(StructuralOp::AddComponent {
+            target: LocalEntityId::new(0),
+            component,
+            data: vec![1],
+        });
+        let mut remove = OverrideSet::new();
+        remove.push_structural(StructuralOp::RemoveComponent {
+            target: LocalEntityId::new(0),
+            component,
+        });
+        let mut add_again = OverrideSet::new();
+        add_again.push_structural(StructuralOp::AddComponent {
+            target: LocalEntityId::new(0),
+            component,
+            data: vec![2],
+        });
+
+        let composed = compose_layers(&[add, remove, add_again]);
+        assert!(composed.errors.is_empty());
+        assert_eq!(composed.effective.structural_count(), 3);
+        assert!(matches!(
+            &composed.effective.structural()[2],
+            StructuralOp::AddComponent { data, .. } if data == &vec![2]
+        ));
     }
 
     #[test]
