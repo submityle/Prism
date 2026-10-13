@@ -405,6 +405,12 @@ impl ShadePageStore {
         }
     }
 
+    /// Iterates only the active published generation. Staging and submitted
+    /// writes are intentionally invisible to page-table consumers.
+    pub fn active_entries(&self) -> impl Iterator<Item = (ShadePageKey, ShadePageHandle)> + '_ {
+        self.active.iter().map(|(&key, &handle)| (key, handle))
+    }
+
     /// Number of active published pages.
     #[must_use]
     pub fn active_len(&self) -> usize {

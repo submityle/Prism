@@ -18,7 +18,7 @@ use prism_render_driver_wgpu::WgpuQueue;
 use crate::GpuCompletionTracker;
 
 use super::super::key::ShadePageKey;
-use super::super::store::ShadePageHandle;
+use super::super::store::{ShadePageHandle, ShadePageStore};
 use super::atlas::ShadeAtlasLayout;
 
 /// One record used to build an immutable shade page-table snapshot.
@@ -96,6 +96,8 @@ pub enum ShadePageTableError {
     EpochMismatch,
     /// The GPU writer ABI stores generation and epoch as `u32` values.
     GpuProofOutOfRange,
+    /// A published store handle cannot be mapped into the configured atlas.
+    AtlasSlotOutOfRange,
     /// The snapshot contains more entries than can be indexed by a `u32` page index.
     TooManyPages,
 }
@@ -115,6 +117,23 @@ pub struct ShadePageTableSnapshot {
 }
 
 impl ShadePageTableSnapshot {
+    /// Builds a snapshot directly from the store's active published
+    /// generation. No staging or submitted write is visible through this
+    /// bridge, and every slot must resolve through the shared atlas layout.
+    pub fn try_from_store(
+        epoch: u64,
+        store: &ShadePageStore,
+        layout: ShadeAtlasLayout,
+    ) -> Result<Self, ShadePageTableError> {
+        let mut records = Vec::new();
+        for (key, handle) in store.active_entries() {
+            let record = ShadePageTableRecord::from_handle(key, handle, layout)
+                .ok_or(ShadePageTableError::AtlasSlotOutOfRange)?;
+            records.push(record);
+        }
+        Self::try_from_records(epoch, records)
+    }
+
     /// Validates and snapshots published shade records for one GPU epoch.
     ///
     /// Records are sorted by [`ShadePageKey`] before assigning page indices, so
@@ -934,6 +953,33 @@ mod tests {
             epoch: 7,
         };
         assert!(ShadePageTableRecord::from_handle(key, handle, layout).is_none());
+    }
+
+    #[test]
+    fn snapshot_from_store_reads_only_the_published_generation() {
+        let epoch = 7;
+        let key = record(1, 0, 0).key;
+        let mut store = ShadePageStore::new(1);
+        let frame = store.begin_frame(epoch).unwrap();
+        let write = store.begin_write(frame, key, 10).unwrap();
+        let submission = store.submit_write(write, GpuCompletionValue(1)).unwrap();
+        store
+            .complete_write(
+                submission,
+                super::super::super::store::test_completion_proof(GpuCompletionValue(1)),
+            )
+            .unwrap();
+        store
+            .publish_after(
+                frame,
+                super::super::super::store::test_completion_proof(GpuCompletionValue(1)),
+            )
+            .unwrap();
+
+        let layout = ShadeAtlasLayout::new([16, 8], [4, 4]).unwrap();
+        let snapshot = ShadePageTableSnapshot::try_from_store(epoch, &store, layout).unwrap();
+        assert_eq!(snapshot.page_index(key), Some(0));
+        assert_eq!(snapshot.gpu_words(), [0, 0, 10, 7]);
     }
 
     fn material_key(texture: u32, mip: u8, layer: u16, x: u16, y: u16) -> TexturePageKey {
