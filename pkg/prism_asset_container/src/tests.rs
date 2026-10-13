@@ -1,9 +1,15 @@
 use prism_asset::{AssetReader, StableGuid};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     ChunkInput, ChunkPlanner, ChunkPolicy, ContainerError, ContainerReader, ContainerWriter,
-    ManifestAssetReader, ManifestError, ManifestReadError, ManifestRoute, OverlaySet,
-    RuntimeManifest, FORMAT_VERSION, MAGIC,
+    FileRangeSource, ManifestAssetReader, ManifestError, ManifestReadError, ManifestRoute,
+    MemoryRangeSource, OverlaySet, RangeSource, RangeSourceError, RuntimeManifest, FORMAT_VERSION,
+    MAGIC,
 };
 
 fn guid(name: &str) -> StableGuid {
@@ -16,6 +22,250 @@ fn build(entries: &[(&str, &[u8])]) -> Vec<u8> {
         writer.add(guid(name), bytes.to_vec()).unwrap();
     }
     writer.finish().unwrap()
+}
+
+#[derive(Debug)]
+struct TrackingRangeSource {
+    bytes: Arc<[u8]>,
+    requests: Arc<Mutex<Vec<(u64, usize)>>>,
+}
+
+impl TrackingRangeSource {
+    fn new(bytes: Vec<u8>) -> (Self, Arc<Mutex<Vec<(u64, usize)>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                bytes: Arc::from(bytes),
+                requests: Arc::clone(&requests),
+            },
+            requests,
+        )
+    }
+}
+
+impl RangeSource for TrackingRangeSource {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError> {
+        self.requests.lock().unwrap().push((offset, out.len()));
+        let start = usize::try_from(offset).map_err(|_| RangeSourceError::OutOfBounds)?;
+        let end = start
+            .checked_add(out.len())
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        let bytes = self
+            .bytes
+            .get(start..end)
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        out.copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct ShortReadSource {
+    bytes: Arc<[u8]>,
+    maximum_read: usize,
+}
+
+impl RangeSource for ShortReadSource {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError> {
+        let start = usize::try_from(offset).map_err(|_| RangeSourceError::OutOfBounds)?;
+        let end = start
+            .checked_add(out.len())
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        let bytes = self
+            .bytes
+            .get(start..end)
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        if out.len() > self.maximum_read {
+            let actual = self.maximum_read.min(out.len());
+            out[..actual].copy_from_slice(&bytes[..actual]);
+            return Err(RangeSourceError::ShortRead {
+                expected: out.len(),
+                actual,
+            });
+        }
+        out.copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct DeclaredLengthSource {
+    bytes: Arc<[u8]>,
+    declared_len: u64,
+}
+
+impl RangeSource for DeclaredLengthSource {
+    fn len(&self) -> u64 {
+        self.declared_len
+    }
+
+    fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError> {
+        let start = usize::try_from(offset).map_err(|_| RangeSourceError::OutOfBounds)?;
+        let end = start
+            .checked_add(out.len())
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        let bytes = self
+            .bytes
+            .get(start..end)
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        out.copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+fn temporary_container_path(label: &str) -> std::path::PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "prism_asset_container_{label}_{}_{}",
+        std::process::id(),
+        nonce
+    ))
+}
+
+#[test]
+fn range_mount_reads_header_toc_and_payload_in_bounded_requests() {
+    let payload = vec![0xA5; 256 * 1024];
+    let bytes = build(&[("large-range.asset", &payload)]);
+    let total_len = bytes.len();
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let source = Arc::new(source);
+    let reader = ContainerReader::from_range_source(Arc::clone(&source)).unwrap();
+    let mount_requests = requests.lock().unwrap().clone();
+
+    assert!(!mount_requests.is_empty());
+    assert!(mount_requests
+        .iter()
+        .all(|(_, length)| *length <= 64 * 1024));
+    assert!(mount_requests.iter().all(|(_, length)| *length < total_len));
+    assert!(mount_requests
+        .iter()
+        .any(|(offset, length)| *offset == 0 && *length == 96));
+    assert!(mount_requests
+        .iter()
+        .any(|(_, length)| *length == 64 * 1024));
+
+    let entry = reader.entry(guid("large-range.asset")).unwrap();
+    let mut output = [0_u8; 17];
+    reader
+        .read_range(guid("large-range.asset"), 123, &mut output)
+        .unwrap();
+    assert_eq!(output, [0xA5; 17]);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.last(), Some(&(entry.offset + 123, 17)));
+}
+
+#[test]
+fn file_range_source_mounts_and_supports_concurrent_payload_ranges() {
+    let payload: Vec<u8> = (0..(128 * 1024)).map(|index| (index % 251) as u8).collect();
+    let bytes = build(&[("file-range.asset", &payload)]);
+    let path = temporary_container_path("concurrent");
+    fs::write(&path, &bytes).unwrap();
+
+    let source = Arc::new(FileRangeSource::open(&path).unwrap());
+    let reader = Arc::new(ContainerReader::from_range_source(source).unwrap());
+    let asset = guid("file-range.asset");
+    let handles: Vec<_> = (0..8)
+        .map(|thread_index| {
+            let reader = Arc::clone(&reader);
+            thread::spawn(move || {
+                let offset = (thread_index * 4096) as u64;
+                let mut output = vec![0_u8; 4096];
+                reader.read_range(asset, offset, &mut output).unwrap();
+                output
+            })
+        })
+        .collect();
+
+    for (thread_index, handle) in handles.into_iter().enumerate() {
+        let output = handle.join().unwrap();
+        let start = thread_index * 4096;
+        assert_eq!(output, payload[start..start + 4096]);
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn range_backend_reports_short_read_truncation_and_backend_bounds() {
+    let bytes = build(&[("range-errors.asset", b"payload")]);
+    let short = Arc::new(ShortReadSource {
+        bytes: Arc::from(bytes.clone()),
+        maximum_read: 8,
+    });
+    assert!(matches!(
+        ContainerReader::from_range_source(short),
+        Err(ContainerError::Source(error)) if error.contains("short read")
+    ));
+
+    let truncated = Arc::new(MemoryRangeSource::new(Arc::<[u8]>::from(
+        bytes[..bytes.len() - 1].to_vec(),
+    )));
+    assert_eq!(
+        ContainerReader::from_range_source(truncated).unwrap_err(),
+        ContainerError::Truncated
+    );
+
+    let declared = Arc::new(DeclaredLengthSource {
+        bytes: Arc::from(bytes[..bytes.len() - 1].to_vec()),
+        declared_len: bytes.len() as u64,
+    });
+    assert!(matches!(
+        ContainerReader::from_range_source(declared),
+        Err(ContainerError::Source(error)) if error.contains("out of bounds")
+    ));
+}
+
+#[test]
+fn file_range_source_rejects_out_of_bounds_and_detects_external_short_read() {
+    let path = temporary_container_path("short-read");
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"12345678").unwrap();
+    file.sync_all().unwrap();
+    let source = FileRangeSource::from_file(file.try_clone().unwrap()).unwrap();
+
+    let mut output = [0_u8; 1];
+    assert_eq!(
+        source.read_range(8, &mut output),
+        Err(RangeSourceError::OutOfBounds)
+    );
+    file.set_len(3).unwrap();
+    let mut output = [0_u8; 8];
+    assert_eq!(
+        source.read_range(0, &mut output),
+        Err(RangeSourceError::ShortRead {
+            expected: 8,
+            actual: 3,
+        })
+    );
+    drop(file);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn range_mount_rejects_payload_tampering_before_exposing_reader() {
+    let mut bytes = build(&[("tampered-range.asset", b"trusted")]);
+    let payload_offset = u64::from_le_bytes(bytes[36..44].try_into().unwrap()) as usize;
+    bytes[payload_offset] ^= 0xFF;
+    let source = Arc::new(MemoryRangeSource::new(Arc::<[u8]>::from(bytes)));
+    assert_eq!(
+        ContainerReader::from_range_source(source).unwrap_err(),
+        ContainerError::HashMismatch
+    );
 }
 
 fn update_directory_hash(bytes: &mut [u8]) {

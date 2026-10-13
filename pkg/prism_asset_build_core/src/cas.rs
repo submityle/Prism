@@ -1,8 +1,10 @@
 use crate::types::ContentHash;
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -33,6 +35,20 @@ impl From<io::Error> for CasError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
     }
+}
+
+/// Result of a conservative local CAS reachability sweep.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CasSweepReport {
+    /// Valid, hash-shaped blob files inspected.
+    pub scanned: usize,
+    /// Unreachable blobs removed after the grace period.
+    pub deleted: usize,
+    /// Blobs retained because they are reachable or still within the grace
+    /// period (or because the sweep was deferred).
+    pub retained: usize,
+    /// True when an in-flight publication prevented a safe sweep.
+    pub deferred_due_to_pending_transaction: bool,
 }
 
 /// Local immutable content-addressed storage. It verifies on both insertion
@@ -130,9 +146,105 @@ impl ContentAddressedStore {
         Ok(bytes)
     }
 
+    /// Removes old blobs that are not in `roots`.
+    ///
+    /// The caller is responsible for deriving roots from durable publication
+    /// state and for serializing the sweep with writers. This method only
+    /// visits the two-level immutable CAS layout and never follows symlinks.
+    pub fn sweep_unreachable(
+        &self,
+        roots: &BTreeSet<ContentHash>,
+        grace: Duration,
+    ) -> Result<CasSweepReport, CasError> {
+        let mut report = CasSweepReport::default();
+        let mut dirty_shards = BTreeSet::new();
+
+        for shard in fs::read_dir(&self.root)? {
+            let shard = shard?;
+            let shard_type = shard.file_type()?;
+            if !shard_type.is_dir() {
+                continue;
+            }
+            let shard_name = shard.file_name();
+            let Some(shard_text) = shard_name.to_str() else {
+                continue;
+            };
+            if shard_text.len() != 2 || decode_hex_byte(shard_text.as_bytes()).is_none() {
+                continue;
+            }
+
+            for entry in fs::read_dir(shard.path())? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if name.len() != 62 {
+                    continue;
+                }
+                let Some(hash) = decode_hash(shard_text, name) else {
+                    continue;
+                };
+                report.scanned += 1;
+                if roots.contains(&hash) {
+                    report.retained += 1;
+                    continue;
+                }
+                let modified = entry.metadata()?.modified()?;
+                let old_enough = modified.elapsed().map(|age| age >= grace).unwrap_or(false);
+                if !old_enough {
+                    report.retained += 1;
+                    continue;
+                }
+                fs::remove_file(entry.path())?;
+                dirty_shards.insert(shard.path());
+                report.deleted += 1;
+            }
+        }
+
+        for shard in dirty_shards {
+            sync_directory(&shard)?;
+        }
+        if report.deleted != 0 {
+            sync_directory(&self.root)?;
+        }
+        Ok(report)
+    }
+
     fn temp_path(&self, parent: &Path) -> PathBuf {
         let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
         parent.join(format!(".tmp-{}-{id}", std::process::id()))
+    }
+}
+
+fn decode_hex_byte(bytes: &[u8]) -> Option<u8> {
+    if bytes.len() != 2 {
+        return None;
+    }
+    Some((hex_nibble(bytes[0])? << 4) | hex_nibble(bytes[1])?)
+}
+
+fn decode_hash(shard: &str, tail: &str) -> Option<ContentHash> {
+    let mut bytes = [0u8; 32];
+    let full = format!("{shard}{tail}");
+    if full.len() != 64 {
+        return None;
+    }
+    for (index, slot) in bytes.iter_mut().enumerate() {
+        *slot = decode_hex_byte(full.as_bytes().get(index * 2..index * 2 + 2)?)?;
+    }
+    Some(ContentHash(bytes))
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -206,6 +318,25 @@ mod tests {
         let hash = cas.put(b"original bytes").unwrap();
         fs::write(cas.blob_path(hash), b"corrupted bytes").unwrap();
         assert!(matches!(cas.read(hash), Err(CasError::Corrupt { .. })));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sweeps_only_old_unreachable_blobs() {
+        let dir = temp_dir();
+        let cas = ContentAddressedStore::open(&dir).unwrap();
+        let reachable = cas.put(b"reachable").unwrap();
+        let orphan = cas.put(b"orphan").unwrap();
+        let report = cas
+            .sweep_unreachable(&BTreeSet::from([reachable]), Duration::from_secs(0))
+            .unwrap();
+        assert_eq!(report.scanned, 2);
+        assert_eq!(report.deleted, 1);
+        assert_eq!(report.retained, 1);
+        assert!(cas.read(reachable).is_ok());
+        assert!(
+            matches!(cas.read(orphan), Err(CasError::Io(error)) if error.kind() == io::ErrorKind::NotFound)
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

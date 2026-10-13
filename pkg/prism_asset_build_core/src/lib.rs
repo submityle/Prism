@@ -30,7 +30,7 @@ pub mod types;
 /// Independent release validation for manifests and CAS blobs.
 pub mod validation;
 
-pub use cas::{CasError, ContentAddressedStore};
+pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcError, DerivedDataCache, LocalDdc};
 pub use executor::{ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor};
 pub use graph::{BuildError, BuildGraph, BuildOutputs};

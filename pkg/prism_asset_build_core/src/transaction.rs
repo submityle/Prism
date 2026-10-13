@@ -1,4 +1,4 @@
-use crate::cas::{CasError, ContentAddressedStore};
+use crate::cas::{CasError, CasSweepReport, ContentAddressedStore};
 use crate::journal::{JournalRecord, TransactionJournal};
 use crate::package::RuntimePackage;
 use crate::publication::PublicationDescriptor;
@@ -11,6 +11,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use prism_asset_container::{ContainerReader, RuntimeManifest};
 
@@ -177,6 +178,67 @@ impl RevisionStore {
 
     pub fn cas(&self) -> &ContentAddressedStore {
         &self.cas
+    }
+
+    /// Removes unreachable local CAS blobs after `grace`.
+    ///
+    /// Roots are derived only from committed journal revisions and CURRENT.
+    /// A live prepare is treated as an active publisher and defers the whole
+    /// sweep, because its CAS writes may precede its manifest write.
+    pub fn sweep_unreachable_cas(&self, grace: Duration) -> Result<CasSweepReport, PublishError> {
+        let _publish_guard = self
+            .publish_lock
+            .lock()
+            .map_err(|_| PublishError::Invalid("publish lock poisoned"))?;
+        let _cross_process_guard = FilePublishLock::acquire(&self.root)?;
+        let records = self.journal.scan()?;
+        let mut pending = BTreeSet::new();
+        let mut committed = BTreeSet::new();
+        for record in records {
+            match record {
+                JournalRecord::Prepare { revision, .. } => {
+                    pending.insert(revision);
+                }
+                JournalRecord::Commit { revision, .. } => {
+                    pending.remove(&revision);
+                    committed.insert(revision);
+                }
+                JournalRecord::Abort { revision, .. } => {
+                    pending.remove(&revision);
+                }
+            }
+        }
+        if !pending.is_empty() {
+            return Ok(CasSweepReport {
+                deferred_due_to_pending_transaction: true,
+                ..CasSweepReport::default()
+            });
+        }
+
+        if let Some(current) = self.current_revision()? {
+            committed.insert(current);
+        }
+        let mut roots = BTreeSet::new();
+        for revision in committed {
+            let path = self
+                .root
+                .join("revisions")
+                .join(format!("{}.manifest", revision.0));
+            let bytes = fs::read(&path).map_err(|error| {
+                PublishError::Io(io::Error::new(
+                    error.kind(),
+                    format!("committed manifest is unavailable for CAS GC: {error}"),
+                ))
+            })?;
+            let manifest = decode_manifest(&bytes, revision)?;
+            roots.extend(
+                manifest
+                    .entries
+                    .values()
+                    .map(|descriptor| descriptor.content_hash),
+            );
+        }
+        Ok(self.cas.sweep_unreachable(&roots, grace)?)
     }
 
     pub fn current_revision(&self) -> Result<Option<BuildRevision>, PublishError> {
@@ -1287,6 +1349,29 @@ mod tests {
             .unwrap();
         next.commit().unwrap();
         assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(1)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cas_gc_keeps_committed_manifest_roots_and_removes_orphans() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let payload = b"committed payload";
+        let mut tx = store.begin(BuildRevision(0), None);
+        tx.stage(AssetId(1), descriptor(payload), payload.to_vec())
+            .unwrap();
+        tx.commit().unwrap();
+        let orphan = store.cas().put(b"orphan payload").unwrap();
+
+        let report = store.sweep_unreachable_cas(Duration::from_secs(0)).unwrap();
+        assert_eq!(report.scanned, 2);
+        assert_eq!(report.deleted, 1);
+        assert_eq!(report.retained, 1);
+        assert!(store.cas().read(ContentHash::digest(payload)).is_ok());
+        assert!(matches!(
+            store.cas().read(orphan),
+            Err(CasError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
         fs::remove_dir_all(dir).unwrap();
     }
 
