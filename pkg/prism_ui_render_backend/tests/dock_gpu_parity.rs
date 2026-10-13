@@ -5,16 +5,15 @@
 //! feature emits a drawable tree whose CPU and GPU draw streams agree.
 #![cfg(feature = "gpu")]
 
-use prism_ui::layout::{AvailableSpace, Size};
-use prism_ui::{Element, Ui};
+use prism_ui::Element;
 use prism_ui_component_kit::stylesheet;
 use prism_ui_dock::{
     Axis, DockLayout, DockNode, DockView, DocumentViewRegistry, PanelDescriptor, PanelRegistry,
     PanelViewRegistry, Ratio, SplitChild,
 };
+use prism_ui_layout::Size;
 use prism_ui_render_backend::raster::rasterize;
-use prism_ui_render_backend::scene::RetainedScene;
-use prism_ui_render_backend::{Framebuffer, GpuRasterizer};
+use prism_ui_render_backend::{ElementRenderer, Framebuffer, GpuRasterizer};
 use prism_ui_style::{Breakpoint, Theme, TokenStore};
 use prism_ui_theme::{compile_theme, ThemeDefinition, ThemeMode};
 
@@ -78,16 +77,8 @@ fn dock_element() -> Element {
 
 fn draw_list() -> prism_ui_render_backend::DrawList {
     let element = dock_element();
-    let mut ui = Ui::new(RetainedScene::new())
-        .with_theme(glass_theme())
-        .with_stylesheet(stylesheet());
-    ui.set_viewport_width(WIDTH as f32);
-    ui.mount(&element);
-    ui.compute_layout(Size::new(
-        AvailableSpace::Definite(WIDTH as f32),
-        AvailableSpace::Definite(HEIGHT as f32),
-    ));
-    ui.backend().to_draw_list()
+    let mut renderer = ElementRenderer::new(glass_theme(), stylesheet());
+    renderer.update(&element, Size::new(WIDTH as f32, HEIGHT as f32))
 }
 
 #[test]
