@@ -1,5 +1,6 @@
 //! QEM-backed static virtual-geometry LOD chain construction.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use prism_mesh::{Mesh, MeshError, POSITION_ATTRIBUTE};
@@ -32,7 +33,7 @@ pub enum StaticVirtualGeometryLodError {
     InvalidMesh(MeshError),
     /// The source must have indexed triangle-list topology.
     UnsupportedSource,
-    /// Simplification across material partitions is not allowed by this slice.
+    /// Reserved for callers using an older boundary policy.
     MaterialSubmeshesUnsupported,
     /// The target is zero or greater than the source triangle count.
     InvalidTarget,
@@ -67,15 +68,12 @@ pub fn build_static_virtual_geometry_lod_chain(
     if mesh.primitive_topology() != PrimitiveTopology::TriangleList || mesh.indices().is_none() {
         return Err(StaticVirtualGeometryLodError::UnsupportedSource);
     }
-    if !mesh.submeshes().is_empty() {
-        return Err(StaticVirtualGeometryLodError::MaterialSubmeshesUnsupported);
-    }
     mesh.validate()
         .map_err(StaticVirtualGeometryLodError::InvalidMesh)?;
     if targets.is_empty() {
         return Err(StaticVirtualGeometryLodError::InvalidTarget);
     }
-    let positions = positions(mesh)?;
+    let source_positions = positions(mesh)?;
     let source_indices = mesh.indices().expect("checked above").to_u32();
     let source_triangles = source_indices.len() / 3;
     if targets
@@ -84,27 +82,22 @@ pub fn build_static_virtual_geometry_lod_chain(
     {
         return Err(StaticVirtualGeometryLodError::InvalidTarget);
     }
-    let source = TriangleMesh::new(
-        positions.to_vec(),
-        Vec::new(),
-        Vec::new(),
-        source_indices
-            .chunks_exact(3)
-            .map(|triangle| [triangle[0], triangle[1], triangle[2]])
-            .collect(),
-    )
-    .map_err(|_| StaticVirtualGeometryLodError::UnsupportedSource)?;
     let mut output = Vec::with_capacity(targets.len());
     for (level, target) in targets.iter().copied().enumerate() {
-        let simplified = decimate(&source, target as usize)
-            .map_err(StaticVirtualGeometryLodError::Decimation)?;
-        let simplified_mesh = to_runtime_mesh(&simplified)?;
+        let simplified_mesh = simplify_partitions(
+            mesh,
+            source_positions,
+            &source_indices,
+            target as usize,
+            source_triangles,
+        )?;
         let asset = build_static_virtual_geometry(asset_id, &simplified_mesh, settings)
             .map_err(StaticVirtualGeometryLodError::Build)?;
+        let simplified_positions = positions(&simplified_mesh)?;
         output.push(StaticVirtualGeometryLod {
             level: level as u32,
             target_triangles: target,
-            vertex_error: vertex_sample_error(positions, simplified.positions()),
+            vertex_error: vertex_sample_error(source_positions, simplified_positions),
             asset,
         });
     }
@@ -120,19 +113,89 @@ fn positions(mesh: &Mesh) -> Result<&[[f32; 3]], StaticVirtualGeometryLodError> 
         ))
 }
 
-fn to_runtime_mesh(mesh: &TriangleMesh) -> Result<Mesh, StaticVirtualGeometryLodError> {
+fn simplify_partitions(
+    source: &Mesh,
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    target_triangles: usize,
+    source_triangles: usize,
+) -> Result<Mesh, StaticVirtualGeometryLodError> {
+    let mut ranges: Vec<(u16, u32, u32)> = if source.submeshes().is_empty() {
+        vec![(0, 0, indices.len() as u32)]
+    } else {
+        source
+            .submeshes()
+            .iter()
+            .map(|submesh| {
+                (
+                    submesh.material_slot,
+                    submesh.index_range.start,
+                    submesh.index_range.end,
+                )
+            })
+            .collect()
+    };
+    ranges.sort_by_key(|range| range.1);
+    let mut output_positions = Vec::new();
+    let mut output_indices: Vec<u32> = Vec::new();
+    let mut output_submeshes = Vec::new();
+    for (material_slot, start, end) in ranges {
+        let mut remap = BTreeMap::new();
+        let mut local_positions = Vec::new();
+        let mut local_indices = Vec::new();
+        for &global in &indices[start as usize..end as usize] {
+            let local = if let Some(local) = remap.get(&global) {
+                *local
+            } else {
+                let local = local_positions.len() as u32;
+                remap.insert(global, local);
+                local_positions.push(positions[global as usize]);
+                local
+            };
+            local_indices.push(local);
+        }
+        let local_triangles = local_indices.len() / 3;
+        let local_target = if target_triangles >= source_triangles {
+            local_triangles
+        } else {
+            ((target_triangles * local_triangles) / source_triangles)
+                .max(1)
+                .min(local_triangles)
+        };
+        let local_mesh = TriangleMesh::new(
+            local_positions,
+            Vec::new(),
+            Vec::new(),
+            local_indices
+                .chunks_exact(3)
+                .map(|triangle| [triangle[0], triangle[1], triangle[2]])
+                .collect(),
+        )
+        .map_err(|_| StaticVirtualGeometryLodError::UnsupportedSource)?;
+        let simplified = decimate(&local_mesh, local_target)
+            .map_err(StaticVirtualGeometryLodError::Decimation)?;
+        let vertex_base = output_positions.len() as u32;
+        output_positions.extend_from_slice(simplified.positions());
+        let index_start = output_indices.len() as u32;
+        output_indices.extend(
+            simplified
+                .indices()
+                .iter()
+                .flat_map(|triangle| triangle.iter().map(|index| vertex_base + *index)),
+        );
+        output_submeshes.push(prism_mesh::SubMesh::new(
+            material_slot,
+            index_start..output_indices.len() as u32,
+        ));
+    }
     let mut output = Mesh::new(PrimitiveTopology::TriangleList)
         .with_attribute(
             prism_mesh::MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 0),
-            prism_mesh::VertexAttributeValues::Float32x3(mesh.positions().to_vec()),
+            prism_mesh::VertexAttributeValues::Float32x3(output_positions),
         )
         .map_err(StaticVirtualGeometryLodError::InvalidMesh)?;
-    let indices = mesh
-        .indices()
-        .iter()
-        .flat_map(|triangle| triangle.iter().copied())
-        .collect();
-    output.with_indices(prism_mesh::Indices::Uint32(indices));
+    output.with_indices(prism_mesh::Indices::Uint32(output_indices));
+    output.with_submeshes(output_submeshes);
     output
         .validate()
         .map_err(StaticVirtualGeometryLodError::InvalidMesh)?;
@@ -159,6 +222,8 @@ fn vertex_sample_error(source: &[[f32; 3]], simplified: &[[f32; 3]]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
     use prism_mesh::primitives::cube;
 
@@ -180,17 +245,21 @@ mod tests {
     }
 
     #[test]
-    fn qem_chain_refuses_material_partitions_until_boundary_locks_exist() {
+    fn qem_chain_simplifies_material_partitions_independently() {
         let mut source = cube([2.0, 2.0, 2.0]).expect("cube");
-        source = source.submeshed(vec![prism_mesh::SubMesh::new(0, 0..18)]);
-        assert_eq!(
-            build_static_virtual_geometry_lod_chain(
-                1,
-                &source,
-                StaticClusterBuildSettings::default(),
-                &[4]
-            ),
-            Err(StaticVirtualGeometryLodError::MaterialSubmeshesUnsupported)
-        );
+        source = source.submeshed(vec![
+            prism_mesh::SubMesh::new(0, 0..18),
+            prism_mesh::SubMesh::new(1, 18..36),
+        ]);
+        let lods = build_static_virtual_geometry_lod_chain(
+            1,
+            &source,
+            StaticClusterBuildSettings::default(),
+            &[4],
+        )
+        .expect("material partitions simplify independently");
+        assert_eq!(lods.len(), 1);
+        assert!(lods[0].asset.clusters.iter().any(|cluster| cluster.material_slot == 0));
+        assert!(lods[0].asset.clusters.iter().any(|cluster| cluster.material_slot == 1));
     }
 }
