@@ -35,6 +35,27 @@ pub struct ArtifactSpec {
     pub alignment: u32,
 }
 
+impl ArtifactSpec {
+    /// Derives the same key used by [`BuildExecutor`] for this output contract.
+    pub fn artifact_key(
+        &self,
+        protocol_version: u32,
+        ordered_inputs: &[ArtifactKey],
+    ) -> Result<ArtifactKey, HashError> {
+        let canonical_settings = output_contract_settings(self);
+        derive_artifact_key(&ArtifactKeyInputs {
+            protocol_version,
+            processor_id: self.processor_id,
+            processor_version: self.processor_version,
+            ordered_inputs,
+            canonical_settings: &canonical_settings,
+            profile_hash: &self.profile_hash,
+            toolchain_fingerprint: &self.toolchain_fingerprint,
+            environment_fingerprint: &self.environment_fingerprint,
+        })
+    }
+}
+
 /// Outcome and cache evidence for a fully published build.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuildExecution {
@@ -160,17 +181,7 @@ impl BuildExecutor {
             // Runtime interpretation is part of artifact identity too. Keeping
             // it in the canonical setting envelope prevents one semantic key
             // from aliasing two incompatible output contracts.
-            let canonical_settings = output_contract_settings(spec);
-            let key = derive_artifact_key(&ArtifactKeyInputs {
-                protocol_version: self.protocol_version,
-                processor_id: spec.processor_id,
-                processor_version: spec.processor_version,
-                ordered_inputs: &input_keys,
-                canonical_settings: &canonical_settings,
-                profile_hash: &spec.profile_hash,
-                toolchain_fingerprint: &spec.toolchain_fingerprint,
-                environment_fingerprint: &spec.environment_fingerprint,
-            })?;
+            let key = spec.artifact_key(self.protocol_version, &input_keys)?;
             let expected_dependencies = input_keys.clone();
             let cached = ddc.get(key);
             let mut bytes = None;
@@ -379,6 +390,69 @@ mod tests {
         assert_eq!(second_count.load(Ordering::Relaxed), 0);
         assert_eq!(second_result.published.manifest.revision, BuildRevision(1));
         assert_eq!(first_result.artifact_keys, second_result.artifact_keys);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_snapshot_and_recipe_drive_a_real_build_executor_chain() {
+        let root = temp_dir("source-recipe-chain");
+        let source = crate::SourceSnapshot::new("source.bin", b"source bytes".to_vec()).unwrap();
+        let source_job = JobId(1);
+        let import_job = JobId(2);
+        let mut graph = BuildGraph::new();
+        graph.add_job(source.build_job(source_job)).unwrap();
+        graph
+            .add_job(crate::job::BuildJob::new(
+                import_job,
+                [source_job],
+                |inputs: &[&[u8]]| {
+                    let [source] = inputs else {
+                        return Err(ProcessorError::new("importer expects one source input"));
+                    };
+                    let mut output = source.to_vec();
+                    output.extend_from_slice(b"|imported");
+                    Ok(output)
+                },
+            ))
+            .unwrap();
+
+        let recipe = crate::ImportRecipe {
+            importer_id: 0x494d504f52544552,
+            importer_version: 1,
+            canonical_settings: b"{\"mode\":\"test\"}".to_vec(),
+            profile_hash: [3; 32],
+            toolchain_fingerprint: b"toolchain-v1".to_vec(),
+            environment_fingerprint: b"test-platform".to_vec(),
+        };
+        let mut specs = BTreeMap::new();
+        specs.insert(source_job, source.artifact_spec(AssetId(1)));
+        let import_spec = recipe.artifact_spec(AssetId(2), 0x494d504f5254, 1, 16);
+        specs.insert(import_job, import_spec.clone());
+
+        let store = RevisionStore::open(&root).unwrap();
+        let mut ddc = DerivedDataCache::open(root.join("ddc")).unwrap();
+        let execution = BuildExecutor {
+            protocol_version: 1,
+        }
+        .execute(&graph, &specs, &store, &mut ddc, BuildRevision(0))
+        .unwrap();
+
+        assert_eq!(execution.published.manifest.revision, BuildRevision(0));
+        assert_eq!(execution.published.manifest.entries.len(), 2);
+        assert_eq!(execution.artifact_keys[&source_job], source.artifact_key());
+        assert_eq!(
+            execution.artifact_keys[&import_job],
+            import_spec
+                .artifact_key(1, &[execution.artifact_keys[&source_job]])
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .cas()
+                .read(execution.published.manifest.entries[&AssetId(2)].content_hash)
+                .unwrap(),
+            b"source bytes|imported"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

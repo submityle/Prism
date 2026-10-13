@@ -1,6 +1,8 @@
 //! Immutable source snapshots used by import and cook orchestration.
 
-use crate::types::{ArtifactKey, ContentHash};
+use crate::executor::ArtifactSpec;
+use crate::job::{BuildJob, JobId, ProcessorError};
+use crate::types::{ArtifactKey, AssetId, ContentHash};
 use std::fmt;
 
 /// A canonical, immutable source file snapshot.
@@ -10,6 +12,15 @@ pub struct SourceSnapshot {
     bytes: Vec<u8>,
     content_hash: ContentHash,
 }
+
+/// Processor identity for source-root jobs in the deterministic build graph.
+pub const SOURCE_PROCESSOR_ID: u128 = 0x5052_4953_4d5f_534f_5552_4345_0001;
+/// Schema version for source-root outputs.
+pub const SOURCE_PROCESSOR_VERSION: u32 = 1;
+/// Artifact kind for immutable source-root outputs.
+pub const SOURCE_ARTIFACT_KIND: u128 = 0x5052_4953_4d5f_534f_5552_4345;
+/// Artifact schema for immutable source-root outputs.
+pub const SOURCE_ARTIFACT_SCHEMA: u32 = 1;
 
 /// Errors raised while constructing a source snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,11 +75,49 @@ impl SourceSnapshot {
     /// Stable semantic key for this source snapshot.
     #[must_use]
     pub fn artifact_key(&self) -> ArtifactKey {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"Prism.AssetBuild.SourceKey\0");
-        put_bytes(&mut hasher, self.logical_path.as_bytes());
-        hasher.update(&self.content_hash.0);
-        ArtifactKey(*hasher.finalize().as_bytes())
+        self.artifact_spec(AssetId(0))
+            .artifact_key(1, &[])
+            .expect("source key fields fit the artifact-key protocol")
+    }
+
+    /// Creates the root output spec used by the build executor.
+    #[must_use]
+    pub fn artifact_spec(&self, asset: AssetId) -> ArtifactSpec {
+        ArtifactSpec {
+            asset,
+            processor_id: SOURCE_PROCESSOR_ID,
+            processor_version: SOURCE_PROCESSOR_VERSION,
+            canonical_settings: self.canonical_settings(),
+            profile_hash: [0; 32],
+            toolchain_fingerprint: Vec::new(),
+            environment_fingerprint: Vec::new(),
+            kind: SOURCE_ARTIFACT_KIND,
+            schema: SOURCE_ARTIFACT_SCHEMA,
+            alignment: 1,
+        }
+    }
+
+    fn canonical_settings(&self) -> Vec<u8> {
+        let path = self.logical_path.as_bytes();
+        let mut settings = Vec::with_capacity(8 + path.len() + self.content_hash.0.len());
+        settings.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        settings.extend_from_slice(path);
+        settings.extend_from_slice(&self.content_hash.0);
+        settings
+    }
+
+    /// Creates a graph root job that emits this exact captured source.
+    #[must_use]
+    pub fn build_job(&self, id: JobId) -> BuildJob {
+        let bytes = self.bytes.clone();
+        BuildJob::new(id, Vec::<JobId>::new(), move |inputs: &[&[u8]]| {
+            if !inputs.is_empty() {
+                return Err(ProcessorError::new(
+                    "source root job cannot have dependencies",
+                ));
+            }
+            Ok(bytes.clone())
+        })
     }
 }
 
@@ -97,11 +146,6 @@ fn canonicalize_path(path: &str) -> Result<String, SourceError> {
         return Err(SourceError::InvalidPath);
     }
     Ok(segments.join("/"))
-}
-
-fn put_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    hasher.update(&(bytes.len() as u64).to_le_bytes());
-    hasher.update(bytes);
 }
 
 #[cfg(test)]

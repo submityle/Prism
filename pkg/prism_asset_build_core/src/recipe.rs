@@ -1,6 +1,7 @@
 //! Explicit importer/cook recipe identity.
 
-use crate::hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
+use crate::executor::ArtifactSpec;
+use crate::hash::HashError;
 use crate::source::SourceSnapshot;
 use crate::types::ArtifactKey;
 
@@ -32,16 +33,31 @@ impl ImportRecipe {
         let mut ordered_inputs = Vec::with_capacity(imported_inputs.len() + 1);
         ordered_inputs.push(source.artifact_key());
         ordered_inputs.extend_from_slice(imported_inputs);
-        derive_artifact_key(&ArtifactKeyInputs {
-            protocol_version,
+        self.artifact_spec(crate::types::AssetId(0), 0, 1, 1)
+            .artifact_key(protocol_version, &ordered_inputs)
+    }
+
+    /// Creates an output spec for a concrete imported artifact.
+    #[must_use]
+    pub fn artifact_spec(
+        &self,
+        asset: crate::types::AssetId,
+        kind: u128,
+        schema: u32,
+        alignment: u32,
+    ) -> ArtifactSpec {
+        ArtifactSpec {
+            asset,
             processor_id: self.importer_id,
             processor_version: self.importer_version,
-            ordered_inputs: &ordered_inputs,
-            canonical_settings: &self.canonical_settings,
-            profile_hash: &self.profile_hash,
-            toolchain_fingerprint: &self.toolchain_fingerprint,
-            environment_fingerprint: &self.environment_fingerprint,
-        })
+            canonical_settings: self.canonical_settings.clone(),
+            profile_hash: self.profile_hash,
+            toolchain_fingerprint: self.toolchain_fingerprint.clone(),
+            environment_fingerprint: self.environment_fingerprint.clone(),
+            kind,
+            schema,
+            alignment,
+        }
     }
 }
 
