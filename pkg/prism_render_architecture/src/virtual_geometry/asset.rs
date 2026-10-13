@@ -22,7 +22,7 @@ pub const VIRTUAL_GEOMETRY_ASSET_SCHEMA: u32 = 1;
 pub const MIN_VIRTUAL_GEOMETRY_PAGE_SIZE: u32 = 1024;
 /// Recommended page size for shipped assets.
 pub const DEFAULT_VIRTUAL_GEOMETRY_PAGE_SIZE: u32 = 64 * 1024;
-const MAX_DECODE_RECORDS: u32 = 16 * 1024 * 1024;
+const MAX_DECODE_RECORDS: u32 = 1_000_000;
 
 /// Compression applied to one stored page payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
