@@ -2,9 +2,10 @@
 //!
 //! This module owns the host-facing system boundary. It runs the existing
 //! query-gathered [`crate::tick_all`] exactly once per schedule invocation and
-//! keeps the last result in a world resource for diagnostics or later event
-//! adapters. Lifecycle observers are deliberately not synthesized here: the
-//! current ECS component still uses the core runtime's no-op lifecycle.
+//! keeps the last result in a world resource for diagnostics. Lifecycle
+//! callbacks are collected by the ECS instance and published here as
+//! entity-addressed events; this is an event adapter, not observer/reaction
+//! integration.
 
 use alloc::vec::Vec;
 
@@ -86,9 +87,9 @@ fn rotate_lifecycle_events(world: &mut World) {
 }
 
 fn run_state_tree_tick(world: &mut World) {
-    let outcome = match tick_all(world) {
-        Ok(report) => StateTreeTickOutcome::Completed(report),
-        Err(error) => StateTreeTickOutcome::GatherFailed(error),
+    let (outcome, tick_completed) = match tick_all(world) {
+        Ok(report) => (StateTreeTickOutcome::Completed(report), true),
+        Err(error) => (StateTreeTickOutcome::GatherFailed(error), false),
     };
 
     if let Some(report) = world.get_resource_mut::<StateTreeTickReport>() {
@@ -99,7 +100,9 @@ fn run_state_tree_tick(world: &mut World) {
         world.insert_resource(report);
     }
 
-    publish_lifecycle_notifications(world);
+    if tick_completed {
+        publish_lifecycle_notifications(world);
+    }
 }
 
 fn publish_lifecycle_notifications(world: &mut World) {

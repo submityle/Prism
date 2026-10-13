@@ -25,6 +25,7 @@ impl<'w> ContextRef<'w> for TestContext<'w> {
 }
 
 struct TestSchema;
+struct OwnerIndependentSchema;
 const TEST_SCHEMA_ID: SchemaId = SchemaId::new(0x1234);
 const WRONG_SCHEMA_ID: SchemaId = SchemaId::new(0x9999);
 
@@ -39,6 +40,30 @@ impl Schema for TestSchema {
 
     fn descriptor() -> SchemaDescriptor {
         SchemaDescriptor::new(TEST_SCHEMA_ID, SchemaVersion::new(1, 0), Default::default())
+    }
+}
+
+impl Schema for OwnerIndependentSchema {
+    type Context<'w> = TestContext<'w>;
+
+    fn descriptor() -> SchemaDescriptor {
+        SchemaDescriptor::new(TEST_SCHEMA_ID, SchemaVersion::new(1, 0), Default::default())
+    }
+}
+
+impl EcsSchema for OwnerIndependentSchema {
+    fn gather<'w>(
+        _world: &'w World,
+        _owner: prism_ecs::entity::Entity,
+    ) -> Result<Self::Context<'w>, EcsContextError>
+    where
+        Self: 'w,
+    {
+        static VALUE: u32 = 7;
+        Ok(TestContext {
+            schema: TEST_SCHEMA_ID,
+            value: &VALUE,
+        })
     }
 }
 
@@ -636,6 +661,10 @@ fn gathers_typed_context_from_the_owner_without_hidden_world_access() {
     let stale = world.entities().reserve_entity();
     assert!(matches!(
         gather_context::<TestSchema>(&world, stale),
+        Err(EcsContextError::MissingOwner(entity)) if entity == stale
+    ));
+    assert!(matches!(
+        gather_context::<OwnerIndependentSchema>(&world, stale),
         Err(EcsContextError::MissingOwner(entity)) if entity == stale
     ));
 }

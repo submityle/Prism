@@ -717,10 +717,10 @@ C_step = Σ_active Task.tick + Σ_evaluated Guard.eval
 ```rust
 #[derive(Component)] pub struct StateTreeInstance { pub asset: Handle<TreeAsset>, plan: Arc<TreePlan>, /* blob… */ }
 // 关系：RunningTree / SupervisedBy / SmartObjectClaim
-// 事件：OnStateEntered / OnStateExited / OnTaskCompleted / OnTransitionRejected（observer 即时响应）
+// 事件：OnStateEntered / OnStateExited / OnTaskCompleted / OnTransitionRejected
 ```
 
-迁移事件用 `prism_ecs` observer 即时派发（同帧响应），跨帧统计走双缓冲事件；与 `reaction` 的推模式一致。
+当前 ST1 通过确定性 Entity 顺序发布带 payload 的双缓冲 `Events<StateTreeLifecycleNotification>`；它不是 `prism_ecs` 无载荷 marker observer，也不承诺迁移回调期间的即时 reaction。observer/reaction 桥接保留为后续里程碑。
 
 ### 17.2 不设独立行为树：BT 语义归约为激活模式
 
@@ -851,7 +851,7 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 | 里程碑 | 内容 | 出口标准 |
 |---|---|---|
 | **ST0 语义内核** | `TreeDef`/`TreePlan`/游标运行时的 `no_std` 内核；层级 + 并行 region + 历史 + 微步 | §15.1 语义套件绿；`cargo test --doc` 绿 |
-| **ST1 ECS 装配** | `StateTreeInstance` 组件、Schema/Context、CommandQueue、observer 迁移事件、调度挂接 | 零配置可跑：spawn + 资产 → 状态可切换 |
+| **ST1 ECS 装配** | `StateTreeInstance` 组件、Schema/Context、CommandQueue、带 payload 的生命周期 Event stream、调度挂接 | 显式注册后可跑：spawn + 资产 → 状态可切换；无载荷 observer marker 与 zero-config 仍为后续里程碑 |
 | **ST2 数据层** | 静态绑定 + `prism_reflect` 路径编译为 slot；Evaluator 依赖驱动；实例帧布局 | `ST0003/ST0009` 校验生效；静默实例零 tick 基准 |
 | **ST3 作者层与调试** | RON 资产 + schema 迁移 + 校验器 + Debugger（活跃配置/因果/断点） | 一份完整敌人树可作者化、可调试、热重载生效 |
 | **ST4 AI 域闭环** | 感知 → 黑板 → 树 → 与玩家一致的输入意图（含 §8 的 `Eventless` + `Internal` 抢占语义） | 敌人「巡逻→警戒→追击→战斗→脱战」全链路 Demo |

@@ -34,6 +34,9 @@ pub fn gather_context<'w, S: EcsSchema>(
     world: &'w World,
     owner: Entity,
 ) -> Result<ValidatedContext<'w, S>, EcsContextError> {
+    if !world.contains(owner) {
+        return Err(EcsContextError::MissingOwner(owner));
+    }
     let context = S::gather(world, owner)?;
     ValidatedContext::new(context).map_err(EcsContextError::Schema)
 }

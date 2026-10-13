@@ -22,7 +22,6 @@ pub enum StateTreeLifecycleEvent {
     },
 }
 
-/// Deferred, entity-addressed lifecycle notification emitted by a scheduled
 /// A deferred, entity-addressed lifecycle notification from a scheduled
 /// `StateTree` tick.
 #[derive(Clone, Debug, Eq, PartialEq)]
