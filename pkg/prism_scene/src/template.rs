@@ -47,6 +47,8 @@ pub enum TemplateError {
     InvalidNestedRoot(LocalEntityId),
     /// Two nested slots claimed the same root entity.
     DuplicateNestedRoot(LocalEntityId),
+    /// A nested template was omitted from the dependency closure.
+    MissingNestedDependency(StableGuid),
     /// A dependency entry used the reserved nil GUID.
     NilDependency,
     /// The dependency closure contained the same GUID twice.
@@ -194,6 +196,11 @@ impl SceneTemplate {
                 return Err(TemplateError::DuplicateDependency(dependency));
             }
         }
+        for slot in self.nested.iter() {
+            if !deps.contains(&slot.template) {
+                return Err(TemplateError::MissingNestedDependency(slot.template));
+            }
+        }
         Ok(())
     }
 
@@ -333,6 +340,13 @@ mod tests {
         assert_eq!(
             template.validate(),
             Err(TemplateError::DuplicateDependency(guid(2)))
+        );
+
+        template.deps = Box::new([]);
+        template.nested = Box::new([NestedSlot::new(LocalEntityId::new(0), guid(2))]);
+        assert_eq!(
+            template.validate(),
+            Err(TemplateError::MissingNestedDependency(guid(2)))
         );
     }
 
