@@ -9,11 +9,15 @@
 #![deny(missing_docs)]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 #[cfg(feature = "app")]
 mod app_plugin;
 mod context;
 mod lifecycle;
+#[cfg(feature = "reflect")]
+mod reflect_binding;
 mod schedule;
 
 use alloc::sync::Arc;
@@ -37,6 +41,8 @@ pub use app_plugin::StateTreePlugin;
 pub use context::{gather_context, EcsContextError, EcsSchema};
 use lifecycle::LifecycleCollector;
 pub use lifecycle::{StateTreeLifecycleEvent, StateTreeLifecycleNotification};
+#[cfg(feature = "reflect")]
+pub use reflect_binding::{ReflectBindingError, ReflectBindingPlan};
 
 /// A host context validated against a concrete core [`Schema`].
 ///
