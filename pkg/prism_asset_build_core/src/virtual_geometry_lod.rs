@@ -1,6 +1,7 @@
 //! QEM-backed static virtual-geometry LOD chain construction.
 
 use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use prism_mesh::{Mesh, MeshError, POSITION_ATTRIBUTE};
@@ -22,6 +23,8 @@ pub struct StaticVirtualGeometryLod {
     pub level: u32,
     /// Triangle target passed to the QEM decimator.
     pub target_triangles: u32,
+    /// Derived artifact identity used by page keys for this LOD.
+    pub asset_id: u32,
     /// Maximum distance from an authored vertex to the simplified triangle
     /// surface. This is a one-sided vertex-sample metric, not a full Hausdorff
     /// bound.
@@ -50,7 +53,9 @@ pub struct StaticVirtualGeometryLodPick<'a> {
 
 impl StaticVirtualGeometryLodSet {
     /// Validates and indexes a built chain by level.
-    pub fn new(mut levels: Vec<StaticVirtualGeometryLod>) -> Result<Self, StaticVirtualGeometryLodError> {
+    pub fn new(
+        mut levels: Vec<StaticVirtualGeometryLod>,
+    ) -> Result<Self, StaticVirtualGeometryLodError> {
         if levels.is_empty() {
             return Err(StaticVirtualGeometryLodError::InvalidTarget);
         }
@@ -91,7 +96,10 @@ impl StaticVirtualGeometryLodSet {
             policy,
             previous,
         )?;
-        let display = self.levels.iter().find(|level| level.level == selection.level)?;
+        let display = self
+            .levels
+            .iter()
+            .find(|level| level.level == selection.level)?;
         let prefetch = self
             .levels
             .iter()
@@ -125,19 +133,26 @@ pub enum StaticVirtualGeometryLodError {
     Decimation(DecimationError),
     /// The resulting mesh could not be turned into paged geometry.
     Build(StaticClusterBuildError),
+    /// Two requested levels derived the same page-key asset identity.
+    IdentityCollision(u32),
 }
 
 impl core::fmt::Display for StaticVirtualGeometryLodError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidMesh(error) => write!(f, "invalid source mesh: {error}"),
-            Self::UnsupportedSource => f.write_str("LOD source must be indexed TriangleList geometry"),
+            Self::UnsupportedSource => {
+                f.write_str("LOD source must be indexed TriangleList geometry")
+            }
             Self::MaterialSubmeshesUnsupported => {
                 f.write_str("LOD simplification cannot cross material submesh boundaries")
             }
             Self::InvalidTarget => f.write_str("LOD target is outside the source triangle range"),
             Self::Decimation(error) => write!(f, "QEM decimation failed: {error}"),
             Self::Build(error) => write!(f, "LOD page build failed: {error}"),
+            Self::IdentityCollision(asset_id) => {
+                write!(f, "LOD page-key asset identity collision for {asset_id}")
+            }
         }
     }
 }
@@ -167,6 +182,7 @@ pub fn build_static_virtual_geometry_lod_chain(
         return Err(StaticVirtualGeometryLodError::InvalidTarget);
     }
     let mut output = Vec::with_capacity(targets.len());
+    let mut identities = BTreeSet::new();
     for (level, target) in targets.iter().copied().enumerate() {
         let simplified_mesh = simplify_partitions(
             mesh,
@@ -175,17 +191,50 @@ pub fn build_static_virtual_geometry_lod_chain(
             target as usize,
             source_triangles,
         )?;
-        let asset = build_static_virtual_geometry(asset_id, &simplified_mesh, settings)
+        let level_asset_id = derive_lod_asset_id(asset_id, level as u32, target, settings);
+        if !identities.insert(level_asset_id) {
+            return Err(StaticVirtualGeometryLodError::IdentityCollision(
+                level_asset_id,
+            ));
+        }
+        let asset = build_static_virtual_geometry(level_asset_id, &simplified_mesh, settings)
             .map_err(StaticVirtualGeometryLodError::Build)?;
         let simplified_positions = positions(&simplified_mesh)?;
         output.push(StaticVirtualGeometryLod {
             level: level as u32,
             target_triangles: target,
-            vertex_error: vertex_surface_error(source_positions, &simplified_mesh, simplified_positions),
+            asset_id: level_asset_id,
+            vertex_error: vertex_surface_error(
+                source_positions,
+                &simplified_mesh,
+                simplified_positions,
+            ),
             asset,
         });
     }
     Ok(output)
+}
+
+fn derive_lod_asset_id(
+    source_asset_id: u32,
+    level: u32,
+    target_triangles: u32,
+    settings: StaticClusterBuildSettings,
+) -> u32 {
+    let mut bytes = Vec::with_capacity(4 + 4 + 4 + 9);
+    bytes.extend_from_slice(b"PVGLOD01");
+    bytes.extend_from_slice(&source_asset_id.to_le_bytes());
+    bytes.extend_from_slice(&level.to_le_bytes());
+    bytes.extend_from_slice(&target_triangles.to_le_bytes());
+    bytes.extend_from_slice(&settings.page_size.to_le_bytes());
+    bytes.extend_from_slice(&settings.max_vertices_per_cluster.to_le_bytes());
+    bytes.extend_from_slice(&settings.max_triangles_per_cluster.to_le_bytes());
+    bytes.push(settings.compression as u8);
+    let mut asset_id = u32::from_le_bytes(blake3::hash(&bytes).as_bytes()[..4].try_into().unwrap());
+    if asset_id == 0 {
+        asset_id = 1;
+    }
+    asset_id
 }
 
 fn positions(mesh: &Mesh) -> Result<&[[f32; 3]], StaticVirtualGeometryLodError> {
@@ -286,7 +335,11 @@ fn simplify_partitions(
     Ok(output)
 }
 
-fn vertex_surface_error(source: &[[f32; 3]], simplified_mesh: &Mesh, simplified: &[[f32; 3]]) -> f32 {
+fn vertex_surface_error(
+    source: &[[f32; 3]],
+    simplified_mesh: &Mesh,
+    simplified: &[[f32; 3]],
+) -> f32 {
     let triangles = simplified_mesh
         .indices()
         .map(|indices| {
@@ -406,6 +459,15 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].level, 0);
         assert_eq!(result[1].target_triangles, 4);
+        assert_ne!(result[0].asset_id, result[1].asset_id);
+        assert!(result.iter().all(|lod| {
+            lod.asset.header.asset_id == lod.asset_id
+                && lod
+                    .asset
+                    .pages
+                    .iter()
+                    .all(|page| page.record.key.asset == lod.asset_id)
+        }));
         assert!(result.iter().all(|lod| lod.vertex_error.is_finite()));
         assert!(result.iter().all(|lod| lod.asset.encode().is_ok()));
     }
@@ -425,8 +487,16 @@ mod tests {
         )
         .expect("material partitions simplify independently");
         assert_eq!(lods.len(), 1);
-        assert!(lods[0].asset.clusters.iter().any(|cluster| cluster.material_slot == 0));
-        assert!(lods[0].asset.clusters.iter().any(|cluster| cluster.material_slot == 1));
+        assert!(lods[0]
+            .asset
+            .clusters
+            .iter()
+            .any(|cluster| cluster.material_slot == 0));
+        assert!(lods[0]
+            .asset
+            .clusters
+            .iter()
+            .any(|cluster| cluster.material_slot == 1));
     }
 
     #[test]
