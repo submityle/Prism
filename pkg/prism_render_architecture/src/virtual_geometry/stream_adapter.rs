@@ -3,6 +3,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use crate::compression::gdeflate::{gdeflate_decompress, GDeflateError};
 use crate::paging::{PageSource, PageStorage, PageStreamManager, ReconcileReport, RequestBatch};
 
 use super::asset::{VirtualGeometryAsset, VirtualGeometryAssetError, VirtualGeometryCompression};
@@ -41,10 +42,8 @@ pub struct VirtualGeometryPageStream {
 }
 
 impl VirtualGeometryPageStream {
-    /// Creates a stream from a validated asset.
-    ///
-    /// GDeflate pages are rejected until a decompressor backend is explicitly
-    /// connected; compressed bytes are never silently treated as geometry words.
+    /// Creates a stream from a validated asset and decodes stored page payloads
+    /// before exposing them to the word-storage ABI.
     pub fn from_asset(
         asset: VirtualGeometryAsset,
         physical_capacity: u32,
@@ -58,12 +57,20 @@ impl VirtualGeometryPageStream {
         }
         let mut pages = BTreeMap::new();
         for page in asset.pages {
-            if page.record.compression != VirtualGeometryCompression::None {
-                return Err(VirtualGeometryStreamingError::CompressedPageUnsupported(
-                    page.record.key,
-                ));
+            let decoded = match page.record.compression {
+                VirtualGeometryCompression::None => page.payload,
+                VirtualGeometryCompression::GDeflate => gdeflate_decompress(&page.payload)
+                    .map_err(VirtualGeometryStreamingError::Decompression)?,
+            };
+            let actual = u32::try_from(decoded.len()).unwrap_or(u32::MAX);
+            if actual != page.record.uncompressed_size {
+                return Err(VirtualGeometryStreamingError::UncompressedSizeMismatch {
+                    key: page.record.key,
+                    expected: page.record.uncompressed_size,
+                    actual,
+                });
             }
-            pages.insert(page.record.key, page.payload);
+            pages.insert(page.record.key, decoded);
         }
         let page_words = asset.header.page_size / 4;
         Ok(Self {
@@ -107,8 +114,17 @@ pub enum VirtualGeometryStreamingError {
     InvalidAsset(VirtualGeometryAssetError),
     /// Physical storage uses 32-bit words, so page size must be word aligned.
     PageSizeNotWordAligned(u32),
-    /// A decompression backend is required for this page.
-    CompressedPageUnsupported(GeometryPageKey),
+    /// GDeflate decode failed before the page entered physical storage.
+    Decompression(GDeflateError),
+    /// Decoded payload length differs from the page table metadata.
+    UncompressedSizeMismatch {
+        /// Page identity.
+        key: GeometryPageKey,
+        /// Declared decoded length.
+        expected: u32,
+        /// Observed decoded length.
+        actual: u32,
+    },
 }
 
 impl core::fmt::Display for VirtualGeometryStreamingError {
@@ -116,12 +132,17 @@ impl core::fmt::Display for VirtualGeometryStreamingError {
         match self {
             Self::InvalidAsset(error) => write!(f, "invalid virtual-geometry asset: {error}"),
             Self::PageSizeNotWordAligned(size) => write!(f, "page size {size} is not word aligned"),
-            Self::CompressedPageUnsupported(key) => {
-                write!(
-                    f,
-                    "compressed virtual-geometry page {key:?} needs a decompressor backend"
-                )
+            Self::Decompression(error) => {
+                write!(f, "virtual-geometry page decompression failed: {error:?}")
             }
+            Self::UncompressedSizeMismatch {
+                key,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "virtual-geometry page {key:?} decoded to {actual} bytes, expected {expected}"
+            ),
         }
     }
 }
@@ -202,5 +223,24 @@ mod tests {
         let words = stream.storage().slot_words(slot).expect("resident words");
         assert_eq!(words[0], 0x0009_0807);
         assert!(words[1..].iter().all(|word| *word == 0));
+    }
+
+    #[test]
+    fn adapter_decodes_gdeflate_before_word_storage() {
+        let mut compressed = asset();
+        let raw = compressed.pages[0].payload.clone();
+        compressed.pages[0].record.compression = VirtualGeometryCompression::GDeflate;
+        compressed.pages[0].record.uncompressed_size = raw.len() as u32;
+        compressed.pages[0].payload = crate::compression::gdeflate::gdeflate_compress(&raw);
+
+        let key = GeometryPageKey::new(4, 0);
+        let mut stream = VirtualGeometryPageStream::from_asset(compressed, 2, 2)
+            .expect("compressed page should be decoded");
+        let mut requests = RequestBatch::new();
+        requests.record(key, 5.0);
+        stream.reconcile(&requests, 1);
+        let slot = stream.entries()[0].1;
+        let words = stream.storage().slot_words(slot).expect("resident words");
+        assert_eq!(words[0], 0x0009_0807);
     }
 }
