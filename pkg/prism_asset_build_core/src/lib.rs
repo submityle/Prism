@@ -27,6 +27,8 @@ pub mod package;
 pub mod publication;
 /// Explicit importer/cook recipe identity.
 pub mod recipe;
+/// Final release integrity and anti-rollback gate.
+pub mod release;
 /// Immutable source snapshots and source identity.
 pub mod source;
 /// Revision manifests and atomic local publication.
@@ -56,6 +58,7 @@ pub use package::{
 };
 pub use publication::{PublicationDescriptor, PublishedContainer};
 pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError};
+pub use release::{ReleaseDescriptor, ReleaseError, ReleaseGate, ReleaseVerification};
 pub use source::{SourceError, SourceSnapshot};
 pub use transaction::{
     PublishError, PublishTransaction, PublishedManifest, RevisionStore, TransactionState,
