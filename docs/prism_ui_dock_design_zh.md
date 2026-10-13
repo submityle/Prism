@@ -20,7 +20,7 @@
 >
 > 本文为**设计规格**。地基层(`prism_ui_layout` 确定性 flexbox 解算、`prism_ui_overlay` portal/浮层 + FocusTrap、
 > `prism_ui_store` 响应式状态、`prism_ui_virtual` 虚拟化、`prism_ui_input` hit_test/focus/gesture、
-> `prism_ui_component_kit::DockPanel` 面板外观)和 `prism_ui_dock` 的 M0 核心、M1 render plan + Element 装配、M2 纯数据拖拽、M4 Workspace codec/文件存储/host-driven autosave 边界均为**已交付**(SHIPPED)，schema migration 仍 planned; retained draw-list host 已由 `prism_ui_render_backend::ElementRenderer` 提供，窗口/GPU submission、overlay/hit-test 与 schema migration 仍为 PLANNED。
+> `prism_ui_component_kit::DockPanel` 面板外观)和 `prism_ui_dock` 的 M0 核心、M1 render plan + Element 装配、M2 纯数据拖拽、M3 core reducer/RenderPlan/DockView Element、M4 Workspace codec/文件存储/host-driven autosave 边界均为**已交付**(SHIPPED)，schema migration 仍 planned; retained draw-list host 已由 `prism_ui_render_backend::ElementRenderer` 提供，窗口/GPU submission、overlay/hit-test 与 schema migration 仍为 PLANNED。
 > 全文严格区分「已实现并通过测试」与「规划中」。
 >
 > **非目标**:不含 AI/ML/LLM;不做窗口管理器(多显示器/原生窗口由平台/`prism_window` 层承载,本层只给布局模型);
@@ -174,7 +174,7 @@ Idle → PickUp(panel) → Dragging{ghost, hover} → Drop(action) | Cancel
 - **稳定二进制编码（已交付）**:`encode_layout`/`decode_layout` 及 workspace codec 使用 magic/version、checked 长度、资源上限和模型校验；当前不是 JSON codec。
 - **schema 版本化（规划）**:当前 version=1 对未知版本返回错误，尚无旧版迁移链。
 - **校验(§11)**:加载时执行 registry 过滤、比例/深度/数量/字节上限和不变量校验；非法输入返回结构化错误，默认回落由文件存储或宿主编排。
-- **Workspace / Perspective(借 Qt ADS / Blender)**:命名多套布局(「编码」「调试」「美术」),一键切换；Workspace/Perspective 为内存模型，可通过 codec/store 持久化整个 manager 快照，自动保存由 host 编排。
+- **Workspace / Perspective(借 Qt ADS / Blender)**:命名多套布局(「编码」「调试」「美术」),一键切换；Workspace/Perspective 为内存模型，可通过 codec/store 持久化整个 manager 快照，自动保存由 host 编排。浮窗层叠在 Element 装配时按 `z` 升序生成（低层先绘制、高层后绘制）。
 - **自动保存**:`WorkspaceAutosave` 是 `std` 下由宿主 poll/flush 的 debounce 控制器，不是 store middleware 或后台线程。
 - **重置**:始终可一键回**默认布局**(由面板注册表的默认位置生成)。
 
