@@ -203,7 +203,8 @@ impl VirtualGeometryAsset {
             page_by_key.insert(page.record.key, page);
         }
         for (index, node) in self.nodes.iter().enumerate() {
-            if !node.self_error.is_finite() || node.self_error < 0.0 {
+            if !bounds_finite(&node.bounds) || !node.self_error.is_finite() || node.self_error < 0.0
+            {
                 return Err(VirtualGeometryAssetError::InvalidNode(index as u32));
             }
             let end = node
@@ -229,7 +230,9 @@ impl VirtualGeometryAsset {
             }
         }
 
+        let mut cluster_coverage = vec![false; self.clusters.len()];
         for page in &self.pages {
+            let cluster_start = page.record.cluster_start as usize;
             let cluster_end = page
                 .record
                 .cluster_start
@@ -238,14 +241,20 @@ impl VirtualGeometryAsset {
             if cluster_end as usize > self.clusters.len() {
                 return Err(VirtualGeometryAssetError::InvalidValue("cluster range"));
             }
-            for cluster in &self.clusters[page.record.cluster_start as usize..cluster_end as usize]
+            for (index, cluster) in self.clusters[cluster_start..cluster_end as usize]
+                .iter()
+                .enumerate()
             {
+                cluster_coverage[cluster_start + index] = true;
                 if cluster.page != page.record.key {
                     return Err(VirtualGeometryAssetError::InvalidValue("page clusters"));
                 }
             }
         }
 
+        if cluster_coverage.iter().any(|covered| !covered) {
+            return Err(VirtualGeometryAssetError::InvalidValue("orphan cluster"));
+        }
         for cluster in &self.clusters {
             if cluster.node_index as usize >= self.nodes.len()
                 || !page_by_key.contains_key(&cluster.page)
@@ -740,6 +749,23 @@ mod tests {
             Err(VirtualGeometryAssetError::MissingPage(
                 GeometryPageKey::new(7, 1)
             ))
+        );
+    }
+
+    #[test]
+    fn validation_rejects_invalid_node_bounds_and_orphan_clusters() {
+        let mut invalid_node = asset();
+        invalid_node.nodes[0].bounds.half_extents[0] = -1.0;
+        assert_eq!(
+            invalid_node.validate(),
+            Err(VirtualGeometryAssetError::InvalidNode(0))
+        );
+
+        let mut orphan = asset();
+        orphan.pages[0].record.cluster_count = 0;
+        assert_eq!(
+            orphan.validate(),
+            Err(VirtualGeometryAssetError::InvalidValue("orphan cluster"))
         );
     }
 
