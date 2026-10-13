@@ -329,8 +329,11 @@ dock.dispatch(DockAction::Move { panel: "inspector".into(), dest, pos: DropPos::
 // 渲染
 let view = DockView::new(&dock, &registry).render(); // → prism_ui::Element
 
-// 加载(不可信输入,自动校验/迁移/回落)
-let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例钳制,损坏回落默认
+// 加载(不可信输入,校验/过滤；迁移与回落由 host/store 编排)
+let layout = decode_layout(&bytes, DecodeOptions {
+    known_panels: Some(registry.ids()),
+    ..DecodeOptions::default()
+})?;
 ```
 
 ---
@@ -366,7 +369,7 @@ let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例�
 - ✅ **Registry 基础契约已交付**:`PanelDescriptor`/`PanelRegistry` 提供 no_std + alloc 的纯数据贡献点、确定性注册顺序、空白/重复 ID 拒绝、查询和迭代；不包含 Element/factory/renderer。
 - ✅ **Registry → 默认布局物化已交付**:`PanelRegistry::default_layout(DefaultLayoutPolicy)` 按注册顺序把可见面板映射到 Left/Right/Bottom/Document/Floating 槽位；同槽位稳定合并为 tab stack，空槽位不产生非法空节点，浮窗 z 序确定，并在返回前执行完整布局校验。`Instancing::Multi` 在此只生成一个默认实例，不伪造多实例语义。
 - ✅ **Workspace 默认布局重置接线已交付**:`WorkspaceManager::reset_active_perspective_to_default` 与 `reset_perspective_to_default` 在提交前完整物化并校验 Registry 默认布局，成功后以深拷贝替换目标 perspective；策略错误、无活动 perspective 或未知名称均返回结构化错误且不留下半成品状态。
-- ⬜ **M3–M5 其余能力仍 PLANNED**:`store`、`a11y` 以及动画/多显示器/撤销集成；workspace stale-lock 的跨进程可靠回收仍需 OS advisory lock 或可验证持有者协议。完整 UI 装配和 renderer 集成仍属于后续工作，不因 M1 计划数据或 persistence core 已存在而视为完成。
+- ⬜ **M3–M5 其余能力仍 PLANNED**:`store`、`a11y` 以及动画/多显示器/撤销集成；workspace stale-lock 的跨进程可靠回收仍需 OS advisory lock 或可验证持有者协议。完整 UI 装配和 renderer 集成仍属于后续工作，不因 M1 计划数据或 persistence core 已存在而视为完成。当前已修复 layout encoder 与默认 decoder 的字符串/集合/深度资源限制不对称，并拒绝未知 inactive panel 与不一致 maximize snapshot 归属。
 - ⬜ **依赖未落地项**:撤销集成需编辑器命令内核;多显示器校正需平台/`prism_window` 层;动效档位依赖性能分级。
 - 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核与 drop-preview 几何接缝、M1 renderer-independent render plan、`render` feature 下的 Element 装配、`ElementRenderer` retained draw-list host、Dock Element 的真实 GPU parity、M4 persistence core、Workspace/Perspective 纯数据管理、codec、`std` 文件存储边界、host-driven autosave、Registry 基础契约及 Registry → 默认布局物化；布局校验会在 renderer 消费前拒绝非法 maximize 恢复态。窗口/GPU submission host、portal overlay/pointer dispatch、schema 迁移和上层 focus/a11y 接线仍未交付。
 
