@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+mod default_layout;
 mod drag;
 mod model;
 mod persist;
@@ -21,6 +22,7 @@ mod workspace_persist;
 #[cfg(feature = "std")]
 mod workspace_store;
 
+pub use default_layout::{DefaultLayoutError, DefaultLayoutPolicy};
 pub use drag::{
     calculate_drop_zone, map_drop_action, tab_insertion_index, transition, DragError, DragEvent,
     DragState, DropMapError, DropZone, PointerPosition,
