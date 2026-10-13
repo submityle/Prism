@@ -11,7 +11,6 @@
 //! meshes, so a mesh that was created, re-uploaded, or re-laid-out this frame is
 //! what the queue draws — without the queue knowing anything about assets.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use prism_asset::AssetId;
@@ -66,7 +65,7 @@ impl SceneRegistry {
                 continue;
             };
             let class = record.vertex_buffer_class;
-            let updated = MeshClass::new(vec![prepared.layout.clone()], prepared.topology);
+            let updated = MeshClass::new(prepared.layout.clone(), prepared.topology);
             if self.mesh_classes.get(&class) != Some(&updated) {
                 self.mesh_classes.insert(class, updated);
                 written += 1;
@@ -80,9 +79,9 @@ impl SceneRegistry {
 mod tests {
     use alloc::vec;
 
+    use alloc::vec::Vec;
     use prism_asset::AssetIndex;
     use prism_render_architecture::abi::GenerationalHandle;
-    use alloc::vec::Vec;
 
     use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
     use prism_render_architecture::geometry::{
@@ -98,8 +97,10 @@ mod tests {
 
     use super::SceneRegistry;
 
-    fn null_device() -> (prism_render_driver_null::NullDevice, impl prism_render_driver::RenderQueue)
-    {
+    fn null_device() -> (
+        prism_render_driver_null::NullDevice,
+        impl prism_render_driver::RenderQueue,
+    ) {
         let options = RequestAdapterOptions::default();
         let adapter = NullInstance::new()
             .request_adapter(&options)
@@ -163,24 +164,18 @@ mod tests {
         assert_eq!(registry.sync_mesh_classes(&meshes), 0);
         assert!(registry.mesh_class(5).is_none());
 
-        let prepared = RenderMesh::prepare(
-            &quad_mesh(),
-            mesh_id,
-            &device,
-            &queue,
-            None,
-        )
-        .expect("the quad prepares");
+        let prepared = RenderMesh::prepare(&quad_mesh(), mesh_id, &device, &queue, None)
+            .expect("the quad prepares");
         let expected_layout = prepared.layout.clone();
         meshes.insert(mesh_id, prepared);
 
-        assert_eq!(registry.sync_mesh_classes(&meshes), 1, "the class is written");
-        let class = registry.mesh_class(5).expect("class 5 is registered");
         assert_eq!(
-            class.layout,
-            vec![expected_layout],
-            "the layout is the mesh's"
+            registry.sync_mesh_classes(&meshes),
+            1,
+            "the class is written"
         );
+        let class = registry.mesh_class(5).expect("class 5 is registered");
+        assert_eq!(class.layout, expected_layout, "the layout is the mesh's");
         assert_eq!(
             class.topology,
             PrimitiveTopology::TriangleList,
@@ -205,43 +200,39 @@ mod tests {
         let (device, queue) = null_device();
         let mut registry = SceneRegistry::new();
         // The class is *derived* by the sync from the first mesh bound to it.
-        let mesh_record = |handle: GenerationalHandle| {
-            GeometryRecord {
-                handle,
-                revision: 1,
-                vertex_buffer_class: 5,
-                index_buffer_class: 0,
-                primitive_start: 0,
-                primitive_count: 1,
-                lods: vec![GeometryLodRecord {
-                    level: 0,
-                    primitive_kind: GeometryPrimitiveKind::Indexed,
-                    element_count: 6,
-                    first_element: 0,
-                    base_vertex: 0,
-                    vertex_count: 4,
-                    screen_error: 0.0,
-                    resident: true,
-                    fallback: false,
-                }],
-            }
+        let mesh_record = |handle: GenerationalHandle| GeometryRecord {
+            handle,
+            revision: 1,
+            vertex_buffer_class: 5,
+            index_buffer_class: 0,
+            primitive_start: 0,
+            primitive_count: 1,
+            lods: vec![GeometryLodRecord {
+                level: 0,
+                primitive_kind: GeometryPrimitiveKind::Indexed,
+                element_count: 6,
+                first_element: 0,
+                base_vertex: 0,
+                vertex_count: 4,
+                screen_error: 0.0,
+                resident: true,
+                fallback: false,
+            }],
         };
-        let material = prism_render_material::fallback_material_record(
-            GenerationalHandle::new(9, 1),
-            1,
-        );
+        let material =
+            prism_render_material::fallback_material_record(GenerationalHandle::new(9, 1), 1);
         let mut meshes = RenderAssets::<RenderMesh>::new();
         let mut buffers = Vec::new();
         for index in 0..2_u32 {
-            let geometry =
-                GenerationalHandle::new(1 + index, 1);
+            let geometry = GenerationalHandle::new(1 + index, 1);
             let mesh_id = prism_asset::AssetId::new(AssetIndex::from_parts(index, 1));
             registry.insert_geometry(mesh_record(geometry));
             registry.bind_geometry_mesh(geometry, mesh_id);
             // Two meshes that differ in their buffers (different vertex counts).
-            let vertices = if index == 0 { 3 } else { 7 };
-            let positions: Vec<[f32; 3]> =
-                (0..vertices).map(|v| [v as f32, 0.0, 0.0]).collect();
+            // Both fixtures must assemble complete triangle-list primitives;
+            // the differing counts still exercise per-geometry buffer binding.
+            let vertices = if index == 0 { 3 } else { 6 };
+            let positions: Vec<[f32; 3]> = (0..vertices).map(|v| [v as f32, 0.0, 0.0]).collect();
             let source = Mesh::new(PrimitiveTopology::TriangleList)
                 .with_attribute(
                     MeshVertexAttribute::new("Vertex_Position", VertexFormat::Float32x3, 0),
@@ -250,15 +241,18 @@ mod tests {
                 .expect("positions fit");
             let prepared =
                 RenderMesh::prepare(&source, mesh_id, &device, &queue, None).expect("prepares");
-            buffers.push(prepared.buffers.vertices);
+            buffers.push(prepared.buffers.vertices.clone());
             meshes.insert(mesh_id, prepared);
         }
         registry.insert_material(material);
-        assert_eq!(registry.sync_mesh_classes(&meshes), 1, "one class, two meshes");
+        assert_eq!(
+            registry.sync_mesh_classes(&meshes),
+            1,
+            "one class, two meshes"
+        );
 
         let resolve = |index: u32| {
-            let geometry =
-                GenerationalHandle::new(1 + index, 1);
+            let geometry = GenerationalHandle::new(1 + index, 1);
             registry
                 .resolve(
                     &GpuRenderWorkItem {
@@ -333,4 +327,3 @@ mod tests {
         assert!(registry.mesh_class(5).is_none());
     }
 }
-

@@ -3,7 +3,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use prism_render_driver::{VertexFormat, VertexStepMode};
+use prism_render_driver::{VertexAttribute, VertexBufferLayout, VertexFormat, VertexStepMode};
 
 use crate::{Mesh, MeshVertexAttribute, POSITION_ATTRIBUTE};
 
@@ -72,6 +72,25 @@ impl VertexStreamLayout {
         self.attributes
             .iter()
             .all(|attribute| attribute.offset + attribute.format.size() <= self.array_stride)
+    }
+
+    /// Converts the device-independent stream description into the RHI layout
+    /// consumed by a render pipeline.
+    #[must_use]
+    pub fn rhi_layout(&self) -> VertexBufferLayout {
+        VertexBufferLayout {
+            array_stride: self.array_stride,
+            step_mode: VertexStepMode::Vertex,
+            attributes: self
+                .attributes
+                .iter()
+                .map(|attribute| VertexAttribute {
+                    format: attribute.format,
+                    offset: attribute.offset,
+                    shader_location: attribute.shader_location,
+                })
+                .collect(),
+        }
     }
 }
 

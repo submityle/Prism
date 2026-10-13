@@ -170,7 +170,7 @@ crates/bevy_mesh                      仅保留给未迁移示例；RHI 路径�
 
 - **已有**：`prism_mesh::Mesh` 提供属性/索引/拓扑/布局/打包/包围体/校验；`VirtualGeometryVersion=1` 的 Cluster 决策层（cull/lod/page_table/raster_path/software_raster/hierarchy/bins/page_request/frame）已存在；`geometry` 有稳定几何表与 LOD 记录；`deformation` 有句柄与预算骨架；OMM、软件光栅、GDeflate 均有 CPU golden + GPU twin 的既有范式。
 - **已补齐（M0 静态契约切片）**：`prism_mesh` 现已包含 `topology.rs`、`submesh.rs`、`limits.rs`、`morph.rs`、`skin.rs`、`streams.rs`、`hash.rs`；RHI 的 12 种当前顶点格式均有类型化授权值；`Mesh::validate()` 已检查拓扑元素数、索引范围、子网格范围/重叠，`validate_with_limits()` 已接入属性/流/顶点/材质槽预算；确定性 hash 覆盖拓扑、属性值、索引与子网格。
-- **仍有差距**：`primitives/` 已提供平面、立方体、UV 球、胶囊和采样地形片；虚拟几何的 v1 落盘编解码契约已经存在，但尚无真正的 Cluster/LOD/分页构建器与生产流送接入；无 Deformable Cluster；无 mesh→BLAS/OMM 的几何侧契约；GPU 分流上传尚未接入 `RenderMesh` 的生产路径。
+- **仍有差距**：`primitives/` 已提供平面、立方体、UV 球、胶囊和采样地形片；虚拟几何的 v1 落盘编解码契约已经存在，但尚无真正的 Cluster/LOD/分页构建器与生产流送接入；无 Deformable Cluster；无 mesh→BLAS/OMM 的几何侧契约；分流上传已接入 `RenderMesh`、queue、frame graph 和 draw slot，但尚无深度 pass 带宽基准。
 - **本文职责**：把这些差距写成可执行规格，而不是重写已有闭环。
 
 ## 6. 核心数据模型：一件 Mesh 是什么
@@ -851,10 +851,10 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 - 退出标准：格式矩阵、拓扑、校验、哈希全部有单测；文档与代码一致。
 
 ### M1：静态网格完整化（4–6 周）
-- 分流 `stream_layouts`（位置/着色/蒙皮/形变四流）+ 构建期 profile。
+- 分流 `stream_layouts`（位置/着色/蒙皮/形变四流）+ 构建期 profile。✅ `RenderMesh` 多 buffer 与 draw slot 已接入
 - `primitives/`（立方、球、胶囊、平面、网格、地形片）与 `submeshes`。
 - 与 `prism_render_scene::geometry` 打通：几何资产 → `GeometryRecord` → 标准 draw。
-- 退出标准：标准网格在 `Compatible` 档可渲染并进入 Golden 图测试；分流使深度 pass 带宽下降可测。
+- 退出标准：标准网格在 `Compatible` 档可渲染并进入 Golden 图测试；分流使深度 pass 带宽下降可测。当前已具备多流 GPU draw 验证，带宽基准仍待补齐。
 
 ### M2：虚拟几何资产格式落盘（6–10 周）
 - 定义 `VirtualGeometryAsset` 二进制格式与页 ABI；与 `prism_virtual_geometry_gpu` 对齐。✅ v1 编解码契约已落地
@@ -894,7 +894,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 2. 新增静态契约模块：`submesh.rs`、`limits.rs`、`morph.rs`、`skin.rs`，并接入 `Mesh::validate()`。✅
 3. 扩展 `VertexAttributeValues`：补 `Float16x2/4`、`Uint32`、`Sint32`、`Snorm8x4`，与 `VertexFormat` 一一对齐，并加“格式矩阵全覆盖”单测。✅
 4. 新增 `pkg/prism_mesh/src/hash.rs`：确定性内容哈希（位模式、固定遍历序）。✅
-5. 新增 `streams.rs`：位置/着色/蒙皮/形变分流布局与实际字节打包；下一步接入渲染准备路径。
+5. 新增 `streams.rs`：位置/着色/蒙皮/形变分流布局与实际字节打包，并接入 `RenderMesh` 多 buffer、queue、frame graph 和 draw slot。✅
 
 理由：这四件事都是设备无关、可独立单测、零 GPU 风险，且立刻为后续构建/DDC 提供键与校验基础。
 
@@ -933,7 +933,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 - 虚拟几何已有 v1 落盘编解码契约和 CPU 决策层，但尚不是完整 Cluster 构建/流送管线；页表仍未消费真实资产文件。
 - HW Mesh Shader 后端未实现；现有可见性光栅只接入标准 Mesh 的 bootstrap。
 - 无 Deformable Cluster；蒙皮仍是标准 GPU skinning 规划。
-- `prism_mesh` 已有设备无关的分流布局与实际字节打包 API，但 `RenderMesh` 生产上传仍是单流交错。
+- `prism_mesh` 的分流布局和实际字节打包已接入 `RenderMesh` 生产上传、queue、frame graph 与多 slot draw；深度 pass 带宽基准尚未完成。
 - Morph/Skin/SubMesh/内容哈希/内置图元已落地。
 - 形变缓存只是一组类型骨架（`DeformationHandle`/`Kind`/`Budget`），无实际调度。
 - 本文的性能数字是目标，不是实测；实现后必须替换为本机基线。

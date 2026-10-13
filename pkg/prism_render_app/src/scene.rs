@@ -17,7 +17,9 @@ use alloc::collections::BTreeMap;
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::geometry::{GeometryPrimitiveKind, GeometryRecord};
 use prism_render_architecture::gpu_scene::{GeometryHandle, SceneMaterialHandle};
-use prism_render_driver::{BufferId, IndexFormat, PrimitiveTopology, TextureFormat, VertexBufferLayout};
+use prism_render_driver::{
+    BufferId, IndexFormat, PrimitiveTopology, TextureFormat, VertexBufferLayout,
+};
 use prism_render_material::MaterialRecord;
 use prism_render_visibility::{DrawBinCandidate, DrawBinKey, GpuRenderWorkItem};
 
@@ -25,8 +27,8 @@ use crate::draw::DrawFunctionId;
 use crate::frame::RENDER_TARGET_FORMAT;
 use crate::mesh::RenderMesh;
 use crate::mesh_pipeline::MeshPipelineKey;
+use crate::queue::{phase_for_render_class, DrawRequest};
 use crate::render_asset::RenderAssets;
-use crate::queue::{DrawRequest, phase_for_render_class};
 
 /// The frame's visible draw work, published by the visibility stage.
 ///
@@ -109,10 +111,10 @@ impl MeshClass {
 }
 
 /// The GPU buffers a mesh draw binds.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct MeshBuffers {
-    /// The vertex buffer bound at slot `0`.
-    pub vertices: BufferId,
+    /// The vertex buffers bound at slots `0..vertex_streams.len()`.
+    pub vertices: Vec<BufferId>,
     /// The index buffer and its format, or `None` for a non-indexed class.
     pub indices: Option<(BufferId, IndexFormat)>,
 }
@@ -229,7 +231,7 @@ impl SceneRegistry {
             scene: item.scene,
             order: item.sort_key.0,
             draw,
-            vertices: prepared.buffers.vertices,
+            vertices: prepared.buffers.vertices.clone(),
             indices: prepared.buffers.indices,
             first: lod.first_element,
             count: lod.element_count,
@@ -304,7 +306,10 @@ impl SceneRegistry {
             // Both must exist for the item to be drawable: the class is the
             // vertex stage, and the geometry's own mesh holds the buffers — a
             // class says nothing about a particular mesh's buffers.
-            if !self.mesh_classes.contains_key(&geometry.vertex_buffer_class) {
+            if !self
+                .mesh_classes
+                .contains_key(&geometry.vertex_buffer_class)
+            {
                 continue;
             }
             let Some(prepared) = self

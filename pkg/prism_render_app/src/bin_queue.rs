@@ -23,15 +23,13 @@
 //! non-bindless fallback and diagnostics use.
 
 use prism_render_architecture::gpu_scene::CpuRenderScene;
-use prism_render_driver::{
-    DRAW_INDEXED_INDIRECT_ARGS_SIZE, RenderDevice, TextureFormat,
-};
+use prism_render_driver::{RenderDevice, TextureFormat, DRAW_INDEXED_INDIRECT_ARGS_SIZE};
 use prism_render_graph::BufferHandle;
 use prism_render_visibility::{DrawBinRange, ViewDrawBins};
 
 use crate::draw::DrawFunctionId;
 use crate::mesh_pipeline::{MeshPipelineProvider, MeshPipelineSpecializer};
-use crate::queue::{IndirectArgs, PhaseItem, RenderQueues, phase_for_bin_class};
+use crate::queue::{phase_for_bin_class, IndirectArgs, PhaseItem, RenderQueues};
 use crate::scene::SceneRegistry;
 
 /// The indirect argument range one packed bin owns.
@@ -126,7 +124,7 @@ impl RenderQueues {
             let Some(buffers) = registry
                 .geometry_mesh(range.key.geometry)
                 .and_then(|mesh| meshes.get(mesh))
-                .map(|prepared| prepared.buffers)
+                .map(|prepared| prepared.buffers.clone())
             else {
                 outcome.unresolved += 1;
                 continue;
@@ -154,7 +152,8 @@ impl RenderQueues {
                     material: instance.material,
                     scene: range.representative_scene,
                     order: u64::from(
-                        bins.command_buffer_start.saturating_add(range.command_start),
+                        bins.command_buffer_start
+                            .saturating_add(range.command_start),
                     ),
                 },
             );

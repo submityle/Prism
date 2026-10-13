@@ -18,7 +18,6 @@ use prism_render_driver::{IndexFormat, PrimitiveTopology, VertexBufferLayout};
 
 use crate::scene::MeshBuffers;
 
-
 /// How a mesh's elements are addressed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RenderMeshBufferInfo {
@@ -61,15 +60,15 @@ pub struct RenderMesh {
     pub buffer_info: RenderMeshBufferInfo,
     /// The number of vertices the vertex buffer holds.
     pub vertex_count: u32,
-    /// The layout the pipeline binds at slot `0`.
-    pub layout: VertexBufferLayout,
+    /// The layouts the pipeline binds at vertex-buffer slots in order.
+    pub layout: Vec<VertexBufferLayout>,
     /// The topology the draw uses.
     pub topology: PrimitiveTopology,
     /// The mesh's model-space bounds, when its positions gave them.
     pub bounds: Option<MeshBounds>,
     /// The vertex buffer's byte capacity, so a re-prepare knows whether it can
     /// reuse the buffer it already has.
-    vertex_capacity: u64,
+    vertex_capacity: Vec<u64>,
     /// The index buffer's byte capacity (`0` when the mesh is not indexed).
     index_capacity: u64,
 }
@@ -93,4 +92,3 @@ impl RenderMesh {
         self.buffer_info.element_count(self.vertex_count)
     }
 }
-

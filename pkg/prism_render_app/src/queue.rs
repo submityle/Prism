@@ -41,8 +41,8 @@ pub struct DrawRequest {
     pub lod_level: u32,
     /// The geometry to draw.
     pub geometry: GeometryHandle,
-    /// The vertex buffer bound at slot `0`.
-    pub vertices: BufferId,
+    /// The vertex buffers bound at slots `0..vertices.len()`.
+    pub vertices: Vec<BufferId>,
     /// The index buffer and format, or `None` for a non-indexed draw.
     pub indices: Option<(BufferId, IndexFormat)>,
     /// The first element (index or vertex) to draw.
@@ -109,7 +109,7 @@ pub fn phase_for_bin_class(bin_class: u32) -> Option<RenderPhase> {
 }
 
 /// One queued draw: the pipeline to bind plus the mesh/material it draws.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PhaseItem {
     /// The specialized pipeline this draw binds.
     pub pipeline: RenderPipelineId,
@@ -117,8 +117,8 @@ pub struct PhaseItem {
     pub draw: DrawFunctionId,
     /// The geometry (mesh) to draw.
     pub geometry: GeometryHandle,
-    /// The vertex buffer bound at slot `0`.
-    pub vertices: BufferId,
+    /// The vertex buffers bound at slots `0..vertices.len()`.
+    pub vertices: Vec<BufferId>,
     /// The index buffer and format, or `None` for a non-indexed draw.
     pub indices: Option<(BufferId, IndexFormat)>,
     /// The first element to draw.
@@ -295,7 +295,8 @@ impl RenderQueues {
     ) -> usize {
         let mut queued = 0;
         for item in work {
-            let Some(request) = registry.resolve(item, meshes, depth_format, sample_count, draw) else {
+            let Some(request) = registry.resolve(item, meshes, depth_format, sample_count, draw)
+            else {
                 continue;
             };
             let pipeline = specializer

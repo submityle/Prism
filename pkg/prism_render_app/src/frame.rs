@@ -92,7 +92,9 @@ pub(crate) fn target_graph(
             imported.insert(id, handle);
             handle
         };
-        let _ = bind(&mut graph, item.vertices, BufferUsages::VERTEX);
+        for buffer in &item.vertices {
+            let _ = bind(&mut graph, *buffer, BufferUsages::VERTEX);
+        }
         if let Some((indices, _)) = item.indices {
             let _ = bind(&mut graph, indices, BufferUsages::INDEX);
         }
@@ -136,8 +138,10 @@ pub(crate) fn target_graph(
         let mut index_reads = Vec::new();
         let mut indirect_reads = Vec::new();
         for item in queues.phase(phase) {
-            if let Some(handle) = imported.get(&item.vertices) {
-                vertex_reads.push(*handle);
+            for buffer in &item.vertices {
+                if let Some(handle) = imported.get(buffer) {
+                    vertex_reads.push(*handle);
+                }
             }
             if let Some((indices, _)) = item.indices
                 && let Some(handle) = imported.get(&indices)
@@ -176,4 +180,3 @@ pub(crate) fn target_graph(
     }
     graph
 }
-

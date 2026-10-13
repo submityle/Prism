@@ -16,15 +16,13 @@ use crate::queue::PhaseItem;
 /// Records one item's mesh draw: bind the pipeline, bind the geometry, draw.
 pub fn mesh_draw(item: &PhaseItem, ctx: &mut dyn MeshRecorder) {
     ctx.set_pipeline(item.pipeline);
-    ctx.set_vertex_buffer(0, item.vertices, 0);
+    for (slot, buffer) in item.vertices.iter().copied().enumerate() {
+        ctx.set_vertex_buffer(slot as u32, buffer, 0);
+    }
     match item.indices {
         Some((indices, format)) => {
             ctx.set_index_buffer(indices, format, 0);
-            ctx.draw_indexed(
-                item.first..item.first + item.count,
-                item.base_vertex,
-                0..1,
-            );
+            ctx.draw_indexed(item.first..item.first + item.count, item.base_vertex, 0..1);
         }
         None => {
             ctx.draw(item.first..item.first + item.count, 0..1);
@@ -45,7 +43,9 @@ pub fn mesh_bin_draw(item: &PhaseItem, ctx: &mut dyn MeshRecorder) {
         return;
     };
     ctx.set_pipeline(item.pipeline);
-    ctx.set_vertex_buffer(0, item.vertices, 0);
+    for (slot, buffer) in item.vertices.iter().copied().enumerate() {
+        ctx.set_vertex_buffer(slot as u32, buffer, 0);
+    }
     if let Some((indices, format)) = item.indices {
         ctx.set_index_buffer(indices, format, 0);
     }

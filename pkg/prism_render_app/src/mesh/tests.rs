@@ -3,12 +3,12 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use prism_asset::AssetId;
 use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
 use prism_render_driver::{
     DeviceDescriptor, IndexFormat, Instance, PrimitiveTopology, RequestAdapterOptions, VertexFormat,
 };
 use prism_render_driver_null::{NullDevice, NullInstance};
-use prism_asset::AssetId;
 
 use crate::render_asset::{PrepareAssetError, RenderAsset};
 
@@ -48,8 +48,14 @@ fn null_device() -> (NullDevice, impl prism_render_driver::RenderQueue) {
 fn preparing_a_mesh_creates_its_buffers() {
     let (device, queue) = null_device();
     let mesh = quad(4, true);
-    let prepared = RenderMesh::prepare(&mesh, AssetId::new(prism_asset::AssetIndex::from_parts(0, 1)), &device, &queue, None)
-        .expect("a valid mesh prepares");
+    let prepared = RenderMesh::prepare(
+        &mesh,
+        AssetId::new(prism_asset::AssetIndex::from_parts(0, 1)),
+        &device,
+        &queue,
+        None,
+    )
+    .expect("a valid mesh prepares");
 
     assert_eq!(prepared.vertex_count, 4);
     assert!(prepared.is_indexed());
@@ -61,16 +67,61 @@ fn preparing_a_mesh_creates_its_buffers() {
         }
     );
     assert_eq!(prepared.element_count(), 6, "the draw covers the indices");
-    assert_eq!(prepared.primitive_topology(), PrimitiveTopology::TriangleList);
     assert_eq!(
-        prepared.layout.array_stride, 12,
+        prepared.primitive_topology(),
+        PrimitiveTopology::TriangleList
+    );
+    assert_eq!(
+        prepared.layout[0].array_stride, 12,
         "the layout is the mesh's"
     );
-    assert!(prepared.bounds.is_some(), "the quad's positions gave bounds");
+    assert!(
+        prepared.bounds.is_some(),
+        "the quad's positions gave bounds"
+    );
     assert_eq!(
         device.live_resource_count(),
         2,
         "one vertex buffer and one index buffer"
+    );
+}
+
+#[test]
+fn preparing_position_and_uv_uses_distinct_vertex_streams() {
+    let (device, queue) = null_device();
+    let mesh = Mesh::new(PrimitiveTopology::TriangleList)
+        .with_attribute(
+            MeshVertexAttribute::new("Vertex_Position", VertexFormat::Float32x3, 0),
+            VertexAttributeValues::Float32x3(vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        )
+        .expect("positions fit")
+        .with_attribute(
+            MeshVertexAttribute::new("Vertex_Uv0", VertexFormat::Float32x2, 2),
+            VertexAttributeValues::Float32x2(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+        )
+        .expect("uvs fit")
+        .indexed(Indices::Uint16(vec![0, 1, 2]));
+    let prepared = RenderMesh::prepare(
+        &mesh,
+        AssetId::new(prism_asset::AssetIndex::from_parts(0, 1)),
+        &device,
+        &queue,
+        None,
+    )
+    .expect("split mesh prepares");
+
+    assert_eq!(prepared.layout.len(), 2);
+    assert_eq!(prepared.buffers.vertices.len(), 2);
+    assert_eq!(prepared.layout[0].attributes[0].shader_location, 0);
+    assert_eq!(prepared.layout[1].attributes[0].shader_location, 2);
+    assert_eq!(
+        device.live_resource_count(),
+        3,
+        "two vertex streams plus index"
     );
 }
 
@@ -79,9 +130,14 @@ fn preparing_a_mesh_creates_its_buffers() {
 fn a_non_indexed_mesh_has_no_index_buffer() {
     let (device, queue) = null_device();
     let mesh = quad(3, false);
-    let prepared =
-        RenderMesh::prepare(&mesh, AssetId::new(prism_asset::AssetIndex::from_parts(0, 1)), &device, &queue, None)
-            .expect("a valid mesh prepares");
+    let prepared = RenderMesh::prepare(
+        &mesh,
+        AssetId::new(prism_asset::AssetIndex::from_parts(0, 1)),
+        &device,
+        &queue,
+        None,
+    )
+    .expect("a valid mesh prepares");
 
     assert!(!prepared.is_indexed());
     assert_eq!(prepared.buffer_info, RenderMeshBufferInfo::NonIndexed);
@@ -97,7 +153,7 @@ fn a_re_prepare_reuses_buffers_that_still_fit() {
     let (device, queue) = null_device();
     let id = AssetId::new(prism_asset::AssetIndex::from_parts(0, 1));
     let first = RenderMesh::prepare(&quad(4, true), id, &device, &queue, None).expect("prepares");
-    let first_vertices = first.buffers.vertices;
+    let first_vertices = first.buffers.vertices.clone();
     let first_indices = first.buffers.indices;
 
     // Same vertex count, different positions: the buffers still fit.
@@ -105,8 +161,14 @@ fn a_re_prepare_reuses_buffers_that_still_fit() {
     let second =
         RenderMesh::prepare(&moved, id, &device, &queue, Some(&first)).expect("re-prepares");
 
-    assert_eq!(second.buffers.vertices, first_vertices, "the vertex buffer is reused");
-    assert_eq!(second.buffers.indices, first_indices, "the index buffer is reused");
+    assert_eq!(
+        second.buffers.vertices, first_vertices,
+        "the vertex buffer is reused"
+    );
+    assert_eq!(
+        second.buffers.indices, first_indices,
+        "the index buffer is reused"
+    );
     assert_eq!(
         device.live_resource_count(),
         2,
@@ -126,6 +188,7 @@ fn a_re_prepare_releases_what_it_no_longer_uses() {
     // Grow: the vertex buffer is replaced (and the old one destroyed), while the
     // index buffer still fits and is kept — only what outgrew is reallocated.
     let grown = quad(8, true);
+    assert_eq!(grown.validate(), Ok(()));
     let second =
         RenderMesh::prepare(&grown, id, &device, &queue, Some(&first)).expect("re-prepares");
     assert_ne!(second.buffers.vertices, first.buffers.vertices);
@@ -142,7 +205,9 @@ fn a_re_prepare_releases_what_it_no_longer_uses() {
     );
 
     // Drop the indices: the index buffer goes with them.
-    let unindexed = quad(8, false);
+    // Keep the unindexed fixture triangle-aligned while remaining smaller than
+    // the grown vertex allocation, so this isolates index-buffer retirement.
+    let unindexed = quad(6, false);
     let third =
         RenderMesh::prepare(&unindexed, id, &device, &queue, Some(&second)).expect("re-prepares");
     assert_eq!(third.buffers.indices, None);
@@ -182,7 +247,8 @@ fn an_invalid_mesh_is_unpreparable_not_retried() {
 fn unload_releases_every_buffer() {
     let (device, queue) = null_device();
     let id = AssetId::new(prism_asset::AssetIndex::from_parts(0, 1));
-    let prepared = RenderMesh::prepare(&quad(4, true), id, &device, &queue, None).expect("prepares");
+    let prepared =
+        RenderMesh::prepare(&quad(4, true), id, &device, &queue, None).expect("prepares");
     assert_eq!(device.live_resource_count(), 2);
 
     RenderMesh::unload(&prepared, &device);
@@ -194,7 +260,7 @@ fn unload_releases_every_buffer() {
 /// into the render world's table.
 #[test]
 fn a_mesh_family_prepares_through_the_frame() {
-    use crate::render_asset::{RenderAssets, register_render_assets};
+    use crate::render_asset::{register_render_assets, RenderAssets};
 
     let mut app = prism_app::App::new();
     app.add_plugins(crate::PrismRenderPlugin::new(NullInstance::new()));
@@ -283,7 +349,7 @@ fn a_prepared_mesh_draws_with_its_layout_on_a_gpu() {
             entry_point: "vs".into(),
             // The layout the *mesh* derived, not one the test wrote: this is what
             // makes the draw depend on the mesh's interleaving being right.
-            buffers: vec![prepared.layout.clone()],
+            buffers: prepared.layout.clone(),
         },
         primitive: PrimitiveState::default(),
         depth_stencil: None,
@@ -305,7 +371,7 @@ fn a_prepared_mesh_draws_with_its_layout_on_a_gpu() {
         prepared.buffers.vertices,
         prepared.buffers.indices.expect("the quad is indexed").0,
     );
-    let vertex_bytes = mesh.vertex_buffer_data().len() as u64;
+    let vertex_bytes = prepared.vertex_count as u64 * prepared.layout[0].array_stride;
     let index_bytes = mesh.indices().expect("indexed").to_bytes().len() as u64;
 
     let mut graph = RenderGraph::new(extent);
@@ -325,7 +391,7 @@ fn a_prepared_mesh_draws_with_its_layout_on_a_gpu() {
         "mesh-vertices",
         BufferDesc::new(vertex_bytes, prism_render_driver::BufferUsages::VERTEX),
         ImportedBuffer {
-            buffer: vertices,
+            buffer: vertices[0],
             entry_state: BufferState::initial(),
         },
     );

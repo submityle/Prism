@@ -16,7 +16,7 @@ pub struct MeshBuffersAllocation {
     /// The buffers themselves.
     pub buffers: MeshBuffers,
     /// The vertex buffer's byte capacity.
-    pub vertex_capacity: u64,
+    pub vertex_capacity: Vec<u64>,
     /// The index buffer's byte capacity (`0` when non-indexed).
     pub index_capacity: u64,
 }
@@ -31,22 +31,38 @@ pub struct MeshBuffersAllocation {
 pub fn prepare_mesh_buffers(
     device: &dyn RenderDevice,
     queue: &dyn RenderQueue,
-    vertex_bytes: &[u8],
+    vertex_streams: &[Vec<u8>],
     index_bytes: Option<(&[u8], IndexFormat)>,
     previous: Option<&RenderMesh>,
 ) -> MeshBuffersAllocation {
-    let vertex_bytes_len = vertex_bytes.len() as u64;
-    let vertices = match previous {
-        Some(previous) if previous.vertex_capacity >= vertex_bytes_len => {
-            previous.buffers.vertices
+    let mut vertices = Vec::with_capacity(vertex_streams.len());
+    let mut vertex_capacity = Vec::with_capacity(vertex_streams.len());
+    for (stream_index, bytes) in vertex_streams.iter().enumerate() {
+        let byte_len = bytes.len() as u64;
+        let reusable = previous
+            .and_then(|mesh| mesh.buffers.vertices.get(stream_index).copied())
+            .filter(|_| {
+                previous
+                    .and_then(|mesh| mesh.vertex_capacity.get(stream_index))
+                    .is_some_and(|capacity| *capacity >= byte_len)
+            });
+        let buffer = reusable.unwrap_or_else(|| {
+            if let Some(previous) = previous {
+                if let Some(old) = previous.buffers.vertices.get(stream_index).copied() {
+                    device.destroy_buffer(old);
+                }
+            }
+            create_buffer(device, "mesh vertex stream", byte_len, BufferUsages::VERTEX)
+        });
+        queue.write_buffer(buffer, 0, bytes);
+        vertices.push(buffer);
+        vertex_capacity.push(byte_len);
+    }
+    if let Some(previous) = previous {
+        for old in previous.buffers.vertices.iter().skip(vertex_streams.len()) {
+            device.destroy_buffer(*old);
         }
-        Some(previous) => {
-            device.destroy_buffer(previous.buffers.vertices);
-            create_buffer(device, "mesh vertex buffer", vertex_bytes_len, BufferUsages::VERTEX)
-        }
-        None => create_buffer(device, "mesh vertex buffer", vertex_bytes_len, BufferUsages::VERTEX),
-    };
-    queue.write_buffer(vertices, 0, vertex_bytes);
+    }
 
     let reusable_index = match (index_bytes, previous.and_then(|p| p.buffers.indices)) {
         (Some((bytes, format)), Some((id, previous_format)))
@@ -79,7 +95,7 @@ pub fn prepare_mesh_buffers(
 
     MeshBuffersAllocation {
         buffers: MeshBuffers { vertices, indices },
-        vertex_capacity: vertex_bytes_len,
+        vertex_capacity,
         index_capacity,
     }
 }
@@ -118,20 +134,21 @@ impl RenderAsset for RenderMesh {
         if source.validate().is_err() {
             return Err(PrepareAssetError::Unpreparable { id });
         }
-        let Some(layout) = source.vertex_layout() else {
-            // `validate` already rejects an attribute-less mesh; the check is
-            // repeated so the layout is never assumed to exist.
-            return Err(PrepareAssetError::Unpreparable { id });
-        };
-
-        let vertex_bytes = source.vertex_buffer_data();
+        let stream_layouts = source.stream_layouts(&prism_mesh::StreamLayoutProfile::default());
+        let mut vertex_streams = Vec::with_capacity(stream_layouts.len());
+        for layout in &stream_layouts {
+            let Some(bytes) = source.stream_buffer_data(layout) else {
+                return Err(PrepareAssetError::Unpreparable { id });
+            };
+            vertex_streams.push(bytes);
+        }
         let index_bytes = source
             .indices()
             .map(|indices| (indices.to_bytes(), indices.format()));
         let allocation = prepare_mesh_buffers(
             device,
             queue,
-            &vertex_bytes,
+            &vertex_streams,
             index_bytes
                 .as_ref()
                 .map(|(bytes, format)| (bytes.as_slice(), *format)),
@@ -151,7 +168,10 @@ impl RenderAsset for RenderMesh {
             buffers: allocation.buffers,
             buffer_info,
             vertex_count: u32::try_from(source.vertex_count()).unwrap_or(u32::MAX),
-            layout,
+            layout: stream_layouts
+                .iter()
+                .map(prism_mesh::VertexStreamLayout::rhi_layout)
+                .collect(),
             topology: source.primitive_topology(),
             bounds: source.bounds(),
             vertex_capacity: allocation.vertex_capacity,
@@ -160,10 +180,11 @@ impl RenderAsset for RenderMesh {
     }
 
     fn unload(prepared: &Self, device: &dyn RenderDevice) {
-        device.destroy_buffer(prepared.buffers.vertices);
+        for buffer in &prepared.buffers.vertices {
+            device.destroy_buffer(*buffer);
+        }
         if let Some((indices, _)) = prepared.buffers.indices {
             device.destroy_buffer(indices);
         }
     }
 }
-

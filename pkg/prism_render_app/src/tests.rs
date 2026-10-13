@@ -21,23 +21,23 @@ use crate::runtime_resource::RenderRuntimeResource;
 use crate::stats::RenderFrameStats;
 use crate::target::RenderTarget;
 
-use crate::sets::{RenderPhase, RenderSystems};
-use crate::views::RenderViews;
-use crate::pipeline_cache::{
-    PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution, hash_vertex_layouts,
-};
-use crate::queue::{PhaseItem, RenderQueues};
-use crate::queue::DrawRequest;
-use crate::queue::phase_for_render_class;
-use prism_render_material::{Illumination, LobeMask, MaterialRenderClass, SpecializationId};
 use crate::draw::{DrawFunctionId, DrawFunctions};
-use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineSpecializer, full_lobe_fallback};
+use crate::mesh_pipeline::{full_lobe_fallback, MeshPipelineKey, MeshPipelineSpecializer};
+use crate::pipeline_cache::{
+    hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
+};
+use crate::queue::phase_for_render_class;
+use crate::queue::DrawRequest;
+use crate::queue::{PhaseItem, RenderQueues};
+use crate::sets::{RenderPhase, RenderSystems};
 use crate::texture_cache::{TextureCache, TextureKey};
+use crate::views::RenderViews;
 use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
-use prism_render_architecture::view_family::ViewKind;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
+use prism_render_architecture::view_family::ViewKind;
+use prism_render_material::{Illumination, LobeMask, MaterialRenderClass, SpecializationId};
 use prism_render_visibility::GpuRenderWorkItem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -208,7 +208,10 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
     let layout = prism_render_driver::VertexBufferLayout::packed(
         prism_render_driver::VertexStepMode::Vertex,
         0,
-        &[prism_render_driver::VertexFormat::Float32x3, prism_render_driver::VertexFormat::Float32x2],
+        &[
+            prism_render_driver::VertexFormat::Float32x3,
+            prism_render_driver::VertexFormat::Float32x2,
+        ],
     );
     let layout_hash = hash_vertex_layouts(core::slice::from_ref(&layout));
 
@@ -268,7 +271,10 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
     let same_stride_other_attrs = prism_render_driver::VertexBufferLayout::packed(
         prism_render_driver::VertexStepMode::Vertex,
         0,
-        &[prism_render_driver::VertexFormat::Float32x2, prism_render_driver::VertexFormat::Float32x3],
+        &[
+            prism_render_driver::VertexFormat::Float32x2,
+            prism_render_driver::VertexFormat::Float32x3,
+        ],
     );
     assert_eq!(
         same_stride_other_attrs.array_stride, layout.array_stride,
@@ -334,7 +340,10 @@ fn texture_cache_dedups_and_evicts_by_key() {
         !cache.release(&device, &TextureKey(1)),
         "one of the two references still holds the texture"
     );
-    assert!(cache.release(&device, &TextureKey(1)), "the last release evicts");
+    assert!(
+        cache.release(&device, &TextureKey(1)),
+        "the last release evicts"
+    );
     assert_eq!(cache.len(), 1);
 
     cache.clear(&device);
@@ -376,7 +385,7 @@ fn render_queues_are_phased_and_sort_deterministically() {
         pipeline,
         draw: DrawFunctionId(0),
         geometry,
-        vertices,
+        vertices: vec![vertices],
         indices: None,
         first: 0,
         count: 3,
@@ -456,13 +465,7 @@ fn recording_a_phase_invokes_each_draw_function() {
         fn set_vertex_buffer(&mut self, _: u32, _: BufferId, _: u64) {}
         fn set_index_buffer(&mut self, _: BufferId, _: prism_render_driver::IndexFormat, _: u64) {}
         fn draw(&mut self, _: core::ops::Range<u32>, _: core::ops::Range<u32>) {}
-        fn draw_indexed(
-            &mut self,
-            _: core::ops::Range<u32>,
-            _: i32,
-            _: core::ops::Range<u32>,
-        ) {
-        }
+        fn draw_indexed(&mut self, _: core::ops::Range<u32>, _: i32, _: core::ops::Range<u32>) {}
         fn draw_indexed_indirect(&mut self, _: prism_render_graph::BufferHandle, _: u64) {}
         fn multi_draw_indirect(
             &mut self,
@@ -489,7 +492,7 @@ fn recording_a_phase_invokes_each_draw_function() {
                 pipeline,
                 draw,
                 geometry,
-                vertices,
+                vertices: vec![vertices],
                 indices: None,
                 first: 0,
                 count: 3,
@@ -513,7 +516,11 @@ fn recording_a_phase_invokes_each_draw_function() {
     );
 
     // An unknown id is a no-op, never a panic.
-    functions.call(DrawFunctionId(99), &queues.phase(RenderPhase::Opaque)[0], &mut recorded);
+    functions.call(
+        DrawFunctionId(99),
+        &queues.phase(RenderPhase::Opaque)[0],
+        &mut recorded,
+    );
     assert_eq!(recorded.0.len(), 2, "an unknown id records nothing");
 }
 
@@ -593,7 +600,10 @@ fn fill_from_visibility_resolves_and_queues() {
         }],
     });
     registry.insert_material(prism_render_material::fallback_material_record(material, 1));
-    registry.insert_mesh_class(5, MeshClass::new(vec![layout], PrimitiveTopology::TriangleList));
+    registry.insert_mesh_class(
+        5,
+        MeshClass::new(vec![layout], PrimitiveTopology::TriangleList),
+    );
     let mut meshes = crate::RenderAssets::<crate::RenderMesh>::new();
     bind_prepared_mesh(
         &mut registry,
@@ -690,7 +700,10 @@ fn scene_registry_resolves_a_work_item() {
         }],
     });
     registry.insert_material(prism_render_material::fallback_material_record(material, 1));
-    registry.insert_mesh_class(5, MeshClass::new(vec![layout.clone()], PrimitiveTopology::TriangleList));
+    registry.insert_mesh_class(
+        5,
+        MeshClass::new(vec![layout.clone()], PrimitiveTopology::TriangleList),
+    );
     let mut meshes = crate::RenderAssets::<crate::RenderMesh>::new();
     bind_prepared_mesh(
         &mut registry,
@@ -713,7 +726,11 @@ fn scene_registry_resolves_a_work_item() {
     let draw = registry
         .resolve(&item, &meshes, None, 1, DrawFunctionId(0))
         .expect("a resident geometry + material resolves");
-    assert_eq!(draw.phase, RenderPhase::Opaque, "the opaque family phases here");
+    assert_eq!(
+        draw.phase,
+        RenderPhase::Opaque,
+        "the opaque family phases here"
+    );
     assert_eq!(draw.order, 7, "the work item's sort key carries through");
     assert_eq!(draw.lod_level, 0, "the resolved LOD level is carried");
     assert_eq!(draw.variant.topology, PrimitiveTopology::TriangleList);
@@ -784,7 +801,7 @@ fn filling_the_queue_specializes_and_appends() {
         phase: RenderPhase::Opaque,
         variant,
         layout: vec![layout],
-        vertices,
+        vertices: vec![vertices],
         indices: None,
         first: 0,
         count: 3,
@@ -802,11 +819,19 @@ fn filling_the_queue_specializes_and_appends() {
     queues.fill(
         &device,
         &mut specializer,
-        [request(layout_a.clone(), 0), request(layout_a, 1), request(layout_b, 2)],
+        [
+            request(layout_a.clone(), 0),
+            request(layout_a, 1),
+            request(layout_b, 2),
+        ],
         |_| descriptor.clone(),
     );
 
-    assert_eq!(queues.phase(RenderPhase::Opaque).len(), 3, "every draw queues");
+    assert_eq!(
+        queues.phase(RenderPhase::Opaque).len(),
+        3,
+        "every draw queues"
+    );
     assert_eq!(
         specializer.pipeline_count(),
         4,
@@ -926,12 +951,27 @@ fn mesh_specialization_dedups_by_variant_and_layout() {
     );
 
     let mut specializer = MeshPipelineSpecializer::new();
-    let a1 = specializer.specialize(&device, variant, core::slice::from_ref(&layout_a), descriptor.clone());
-    let a2 = specializer.specialize(&device, variant, core::slice::from_ref(&layout_a), descriptor.clone());
+    let a1 = specializer.specialize(
+        &device,
+        variant,
+        core::slice::from_ref(&layout_a),
+        descriptor.clone(),
+    );
+    let a2 = specializer.specialize(
+        &device,
+        variant,
+        core::slice::from_ref(&layout_a),
+        descriptor.clone(),
+    );
     assert_eq!(a1, a2, "the same variant + layout reuses the pipeline");
     assert_eq!(specializer.pipeline_count(), 1);
 
-    let b = specializer.specialize(&device, variant, core::slice::from_ref(&layout_b), descriptor.clone());
+    let b = specializer.specialize(
+        &device,
+        variant,
+        core::slice::from_ref(&layout_b),
+        descriptor.clone(),
+    );
     assert_ne!(a1, b, "a different layout specializes a new pipeline");
     assert_eq!(specializer.pipeline_count(), 2);
 
@@ -1204,13 +1244,7 @@ fn pipeline_prewarm_queues_hot_variants() {
     assert_eq!(compiler.calls(), 3);
     for key in keys {
         assert_eq!(
-            cache.resolve_or_request(
-                &device,
-                key,
-                descriptor.clone(),
-                key,
-                descriptor.clone(),
-            ),
+            cache.resolve_or_request(&device, key, descriptor.clone(), key, descriptor.clone(),),
             PipelineResolution::Ready(compiler.result)
         );
     }
@@ -1370,14 +1404,19 @@ fn render_view_family_tracks_the_frame() {
         .expect("the plugin installs the view family");
     assert_eq!(views.registry().len(), 1, "one primary view");
     let handle = views.primary_view().expect("the primary view was built");
-    let entry = views.registry().get(handle).expect("the view is registered");
-    assert_eq!(entry.kind, ViewKind::Main, "the primary view is the Main kind");
+    let entry = views
+        .registry()
+        .get(handle)
+        .expect("the view is registered");
+    assert_eq!(
+        entry.kind,
+        ViewKind::Main,
+        "the primary view is the Main kind"
+    );
     assert!(entry.enabled, "a non-empty frame enables the view");
 
     // A zero-sized frame disables the view but keeps its handle.
-    app.world_mut()
-        .resource_mut::<RenderIntent>()
-        .viewport = RenderViewport::new(0, 0);
+    app.world_mut().resource_mut::<RenderIntent>().viewport = RenderViewport::new(0, 0);
     app.update();
 
     let views = app
@@ -1490,7 +1529,7 @@ fn mark_graph_finish(mut log: ResMut<OrderLog>) {
 /// gets the order without wiring edges by hand.
 #[test]
 fn render_graph_sets_order_node_systems() {
-    use crate::sets::{RenderGraphSet, configure_render_graph_sets};
+    use crate::sets::{configure_render_graph_sets, RenderGraphSet};
     use prism_ecs::schedule::IntoSystemConfigs;
 
     let mut world = prism_ecs::world::World::new();
@@ -1498,25 +1537,30 @@ fn render_graph_sets_order_node_systems() {
     let mut schedule = prism_ecs::schedule::Schedule::new();
     configure_render_graph_sets(&mut schedule);
     // Registered in reverse, so only the set policy can produce the order.
-    schedule.add_systems(
-        mark_graph_finish.in_set(RenderGraphSet(prism_render_graph::RenderGraphSystems::Finish)),
-    );
-    schedule.add_systems(
-        mark_graph_submit.in_set(RenderGraphSet(prism_render_graph::RenderGraphSystems::Submit)),
-    );
-    schedule.add_systems(
-        mark_graph_render.in_set(RenderGraphSet(prism_render_graph::RenderGraphSystems::Render)),
-    );
-    schedule.add_systems(
-        mark_graph_begin.in_set(RenderGraphSet(prism_render_graph::RenderGraphSystems::Begin)),
-    );
+    schedule.add_systems(mark_graph_finish.in_set(RenderGraphSet(
+        prism_render_graph::RenderGraphSystems::Finish,
+    )));
+    schedule.add_systems(mark_graph_submit.in_set(RenderGraphSet(
+        prism_render_graph::RenderGraphSystems::Submit,
+    )));
+    schedule.add_systems(mark_graph_render.in_set(RenderGraphSet(
+        prism_render_graph::RenderGraphSystems::Render,
+    )));
+    schedule.add_systems(mark_graph_begin.in_set(RenderGraphSet(
+        prism_render_graph::RenderGraphSystems::Begin,
+    )));
 
     schedule.run(&mut world);
 
     let log = world.resource::<OrderLog>();
     assert_eq!(
         log.0,
-        ["graph-begin", "graph-render", "graph-submit", "graph-finish"],
+        [
+            "graph-begin",
+            "graph-render",
+            "graph-submit",
+            "graph-finish"
+        ],
         "the graph's begin → render → submit → finish order is imposed by the sets"
     );
 }
@@ -1627,10 +1671,7 @@ fn per_view_work_sees_its_own_view_and_clears_it_afterwards() {
     assert_eq!(log.0.len(), 2, "the system ran once per view");
     log.0.iter().for_each(|handle| {
         assert!(
-            world
-                .resource::<RenderViews>()
-                .registry()
-                .contains(*handle),
+            world.resource::<RenderViews>().registry().contains(*handle),
             "each recorded handle is a live view"
         );
     });
@@ -1901,13 +1942,7 @@ impl CapturingQueue {
 impl RenderQueue for CapturingQueue {
     fn write_buffer(&self, _: BufferId, _: u64, _: &[u8]) {}
 
-    fn write_texture(
-        &self,
-        _: TextureWrite,
-        _: &[u8],
-        _: ImageDataLayout,
-    ) {
-    }
+    fn write_texture(&self, _: TextureWrite, _: &[u8], _: ImageDataLayout) {}
 
     fn submit(&self, command_buffers: &[CommandBuffer]) {
         self.buffers.borrow_mut().extend_from_slice(command_buffers);
@@ -1970,7 +2005,7 @@ fn mesh_draw_records_into_a_graph_pass() {
             pipeline,
             draw,
             geometry: GenerationalHandle::new(1, 1),
-            vertices,
+            vertices: vec![vertices],
             indices: Some((indices, IndexFormat::Uint16)),
             first: 0,
             count: 3,
@@ -2002,7 +2037,9 @@ fn mesh_draw_records_into_a_graph_pass() {
     });
 
     let capture = CapturingQueue::default();
-    graph.execute(&device, &capture).expect("the graph executes");
+    graph
+        .execute(&device, &capture)
+        .expect("the graph executes");
 
     let buffers: Vec<CommandBuffer> = capture.take();
     let commands = buffers
@@ -2017,7 +2054,10 @@ fn mesh_draw_records_into_a_graph_pass() {
         "the item's pipeline is bound first"
     );
     assert!(
-        matches!(commands.get(1), Some(RenderCommand::SetVertexBuffer { slot: 0, .. })),
+        matches!(
+            commands.get(1),
+            Some(RenderCommand::SetVertexBuffer { slot: 0, .. })
+        ),
         "the vertex buffer is bound at slot 0"
     );
     assert!(
@@ -2117,7 +2157,7 @@ fn mesh_bin_draw_records_a_multi_draw() {
             pipeline,
             draw,
             geometry: GenerationalHandle::new(1, 1),
-            vertices,
+            vertices: vec![vertices],
             indices: Some((indices, IndexFormat::Uint16)),
             first: 0,
             count: 0,
@@ -2142,7 +2182,9 @@ fn mesh_bin_draw_records_a_multi_draw() {
     });
 
     let capture = CapturingQueue::default();
-    graph.execute(&device, &capture).expect("the graph executes");
+    graph
+        .execute(&device, &capture)
+        .expect("the graph executes");
 
     let buffers: Vec<CommandBuffer> = capture.take();
     let commands = buffers
@@ -2166,7 +2208,9 @@ fn mesh_bin_draw_records_a_multi_draw() {
 
 /// An argument buffer declared in a throwaway graph, for tests that need a
 /// graph-owned [`BufferHandle`] without recording a frame.
-fn declared_args_buffer(device: &prism_render_driver_null::NullDevice) -> prism_render_graph::BufferHandle {
+fn declared_args_buffer(
+    device: &prism_render_driver_null::NullDevice,
+) -> prism_render_graph::BufferHandle {
     use prism_render_graph::{BufferDesc, ImportedBuffer, RenderGraph};
     let buffer = device.create_buffer(&BufferDescriptor {
         label: Some("declared-args".into()),
@@ -2209,8 +2253,10 @@ fn bin_fixture(
     use prism_render_architecture::gpu_scene::{
         InstanceRecord, SceneOperation, SceneTransactionBuilder,
     };
-    use prism_render_material::{MaterialRenderClass, fallback_material_record};
-    use prism_render_visibility::{GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey};
+    use prism_render_material::{fallback_material_record, MaterialRenderClass};
+    use prism_render_visibility::{
+        GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey,
+    };
 
     let geometry: GeometryHandle = GenerationalHandle::new(1, 1);
     let opaque_material = GenerationalHandle::new(2, 1);
@@ -2243,7 +2289,10 @@ fn bin_fixture(
             fallback: false,
         }],
     });
-    registry.insert_mesh_class(5, MeshClass::new(vec![layout], PrimitiveTopology::TriangleList));
+    registry.insert_mesh_class(
+        5,
+        MeshClass::new(vec![layout], PrimitiveTopology::TriangleList),
+    );
     // The geometry's own mesh owns the buffers the draws bind.
     let mesh_source = prism_mesh::Mesh::new(PrimitiveTopology::TriangleList)
         .with_attribute(
@@ -2276,7 +2325,10 @@ fn bin_fixture(
     registry.insert_material(clear);
 
     let mut builder = SceneTransactionBuilder::new(0, 1);
-    for (handle, material) in [(opaque, opaque_material), (transparent, transparent_material)] {
+    for (handle, material) in [
+        (opaque, opaque_material),
+        (transparent, transparent_material),
+    ] {
         builder.push(SceneOperation::Create {
             handle,
             record: InstanceRecord {
@@ -2300,7 +2352,10 @@ fn bin_fixture(
         visibility_stages: VisibilityStageMask::EARLY,
         sort_key: WorkSortKey::new(0, 0, 0, 0, 3),
     };
-    let work = vec![item(opaque, opaque_material), item(transparent, transparent_material)];
+    let work = vec![
+        item(opaque, opaque_material),
+        item(transparent, transparent_material),
+    ];
 
     BinFixture {
         registry,
@@ -2334,13 +2389,11 @@ fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
     let fixture = bin_fixture(&device, &queue);
     let provider = StubProvider::new(&device);
 
-    let candidates = fixture.registry.bin_candidates(&fixture.meshes, &fixture.work);
+    let candidates = fixture
+        .registry
+        .bin_candidates(&fixture.meshes, &fixture.work);
     assert_eq!(candidates.len(), 2, "both instances are drawable");
-    let bins = build_view_draw_bins(
-        GenerationalHandle::new(0, 1),
-        8,
-        candidates,
-    );
+    let bins = build_view_draw_bins(GenerationalHandle::new(0, 1), 8, candidates);
     assert_eq!(bins.bins.len(), 2, "two permutation classes bin separately");
     assert_eq!(bins.command_count, 2, "one command slot per instance");
 
@@ -2450,7 +2503,9 @@ fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
     });
 
     let capture = CapturingQueue::default();
-    graph.execute(&device, &capture).expect("the graph executes");
+    graph
+        .execute(&device, &capture)
+        .expect("the graph executes");
     let buffers: Vec<CommandBuffer> = capture.take();
     let commands = buffers
         .iter()
@@ -2462,9 +2517,7 @@ fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
     let multi: Vec<(u32, u64)> = commands
         .iter()
         .filter_map(|command| match command {
-            RenderCommand::MultiDrawIndirect {
-                offset, count, ..
-            } => Some((*count, *offset)),
+            RenderCommand::MultiDrawIndirect { offset, count, .. } => Some((*count, *offset)),
             _ => None,
         })
         .collect();
@@ -2512,7 +2565,9 @@ fn direct_and_bin_paths_specialize_one_pipeline_per_material() {
     let bins = build_view_draw_bins(
         GenerationalHandle::new(0, 1),
         8,
-        fixture.registry.bin_candidates(&fixture.meshes, &fixture.work),
+        fixture
+            .registry
+            .bin_candidates(&fixture.meshes, &fixture.work),
     );
     let outcome = queues.fill_bins(
         &device,
@@ -2556,12 +2611,16 @@ fn packed_bin_streams_offset_the_indirect_arguments() {
     let mut first = build_view_draw_bins(
         GenerationalHandle::new(0, 1),
         8,
-        fixture.registry.bin_candidates(&fixture.meshes, &fixture.work),
+        fixture
+            .registry
+            .bin_candidates(&fixture.meshes, &fixture.work),
     );
     let mut second = build_view_draw_bins(
         GenerationalHandle::new(1, 1),
         8,
-        fixture.registry.bin_candidates(&fixture.meshes, &fixture.work),
+        fixture
+            .registry
+            .bin_candidates(&fixture.meshes, &fixture.work),
     );
     pack_draw_bin_streams([&mut first, &mut second]);
     assert_eq!(second.command_buffer_start, first.command_count);
@@ -2610,7 +2669,9 @@ fn undecodable_and_unresolved_bins_are_counted() {
     let fixture = bin_fixture(&device, &queue);
     let provider = StubProvider::new(&device);
 
-    let mut candidates = fixture.registry.bin_candidates(&fixture.meshes, &fixture.work);
+    let mut candidates = fixture
+        .registry
+        .bin_candidates(&fixture.meshes, &fixture.work);
     // A foreign permutation class: bits outside the packed field width.
     let mut foreign = candidates[0];
     foreign.key.pipeline_class = 1 << prism_render_material::BIN_CLASS_BITS;
@@ -2620,11 +2681,7 @@ fn undecodable_and_unresolved_bins_are_counted() {
     candidates.push(foreign);
     candidates.push(orphan);
 
-    let bins = build_view_draw_bins(
-        GenerationalHandle::new(0, 1),
-        8,
-        candidates,
-    );
+    let bins = build_view_draw_bins(GenerationalHandle::new(0, 1), 8, candidates);
     let mut queues = RenderQueues::new();
     let mut specializer = MeshPipelineSpecializer::new();
     let outcome = queues.fill_bins(
@@ -2821,7 +2878,7 @@ fn the_frame_records_the_queued_draws() {
         pipeline,
         draw: crate::draw::canonical::MESH,
         geometry: GenerationalHandle::new(1, 1),
-        vertices,
+        vertices: vec![vertices],
         indices: Some((indices, prism_render_driver::IndexFormat::Uint16)),
         first: 0,
         count: 3,
@@ -2833,9 +2890,7 @@ fn the_frame_records_the_queued_draws() {
         order: index,
     };
     {
-        let render = app
-            .sub_app_mut(RenderApp)
-            .expect("the render sub-app");
+        let render = app.sub_app_mut(RenderApp).expect("the render sub-app");
         let queues = render.world.resource_mut::<RenderQueues>();
         queues.push(RenderPhase::Opaque, item(pipeline, 0));
         queues.push(RenderPhase::Transparent, item(pipeline, 1));
@@ -2970,7 +3025,7 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
             vertex: VertexState {
                 module,
                 entry_point: "vs".into(),
-                buffers: vec![prepared.layout.clone()],
+                buffers: prepared.layout.clone(),
             },
             primitive: PrimitiveState::default(),
             // The frame has a depth attachment, so a pipeline recorded into it
@@ -2988,7 +3043,7 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
             }),
         });
         let (vertices, indices) = (
-            prepared.buffers.vertices,
+            prepared.buffers.vertices.clone(),
             prepared.buffers.indices.expect("the quad is indexed").0,
         );
         (pipeline, vertices, indices, prepared.element_count())
@@ -3027,7 +3082,10 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
         1,
         "the frame recorded the queued mesh"
     );
-    assert!(runtime.runtime().wait_idle(), "the draw completes on the GPU");
+    assert!(
+        runtime.runtime().wait_idle(),
+        "the draw completes on the GPU"
+    );
 
     let target = *render.world.resource::<RenderTarget>();
     let pixels = runtime
@@ -3062,11 +3120,17 @@ fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
     use prism_render_architecture::geometry::{
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
     };
-    use prism_render_visibility::{GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey};
+    use prism_render_visibility::{
+        GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey,
+    };
 
     let mesh = Mesh::new(PrimitiveTopology::TriangleList)
         .with_attribute(
-            MeshVertexAttribute::new("Vertex_Position", prism_render_driver::VertexFormat::Float32x3, 0),
+            MeshVertexAttribute::new(
+                "Vertex_Position",
+                prism_render_driver::VertexFormat::Float32x3,
+                0,
+            ),
             VertexAttributeValues::Float32x3(vec![
                 [-0.5, -0.5, 0.0],
                 [0.5, -0.5, 0.0],
@@ -3178,7 +3242,10 @@ fn the_spine_draws_the_visible_set_on_a_gpu() {
     let runtime = render
         .world
         .resource::<RenderRuntimeResource<prism_render_driver_wgpu::WgpuInstance>>();
-    assert!(runtime.runtime().wait_idle(), "the draw completes on the GPU");
+    assert!(
+        runtime.runtime().wait_idle(),
+        "the draw completes on the GPU"
+    );
 
     let target = *render.world.resource::<RenderTarget>();
     let pixels = runtime
@@ -3365,9 +3432,9 @@ fn depth_resolves_occlusion_on_a_gpu() {
                  }}"
             );
             let module = device.create_shader_module(&ShaderModuleDescriptor {
-                    label: Some("depth-test".into()),
-                    source: prism_render_driver::ShaderSource::Wgsl(alloc::borrow::Cow::Owned(source)),
-                });
+                label: Some("depth-test".into()),
+                source: prism_render_driver::ShaderSource::Wgsl(alloc::borrow::Cow::Owned(source)),
+            });
             RenderPipelineDescriptor {
                 label: Some("depth-test".into()),
                 layout: None,
