@@ -134,6 +134,43 @@ impl From<WorkspaceError> for WorkspacePersistError {
 
 /// Encodes the ordered workspace collection in a stable version-1 format.
 pub fn encode_workspace(manager: &WorkspaceManager) -> Result<Vec<u8>, WorkspacePersistError> {
+    let limits = WorkspaceDecodeLimits::default();
+    if manager.workspace_count() > limits.max_workspaces {
+        return Err(WorkspacePersistError::ResourceLimit("workspaces"));
+    }
+    for workspace in manager.workspaces() {
+        if workspace.name().len() > limits.max_name_bytes
+            || workspace.perspective_count() > limits.max_perspectives
+        {
+            return Err(WorkspacePersistError::ResourceLimit(
+                if workspace.name().len() > limits.max_name_bytes {
+                    "name bytes"
+                } else {
+                    "perspectives"
+                },
+            ));
+        }
+        if workspace
+            .active_perspective_name()
+            .is_some_and(|name| name.len() > limits.max_name_bytes)
+        {
+            return Err(WorkspacePersistError::ResourceLimit("name bytes"));
+        }
+        for perspective in workspace.perspectives() {
+            if perspective.name().len() > limits.max_name_bytes {
+                return Err(WorkspacePersistError::ResourceLimit("name bytes"));
+            }
+            if encode_layout(&perspective.layout())?.len() > limits.max_layout_bytes {
+                return Err(WorkspacePersistError::ResourceLimit("layout bytes"));
+            }
+        }
+    }
+    if manager
+        .active_workspace_name()
+        .is_some_and(|name| name.len() > limits.max_name_bytes)
+    {
+        return Err(WorkspacePersistError::ResourceLimit("name bytes"));
+    }
     let mut writer = Writer(Vec::new());
     writer.bytes(MAGIC);
     writer.u16(VERSION);

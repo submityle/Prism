@@ -295,28 +295,39 @@ impl<'a> DockView<'a> {
     }
 
     fn render_autohide(&self) -> Result<Element, DockViewError> {
-        let entries = self
-            .layout
-            .autohide
-            .entries
-            .iter()
-            .map(|entry| {
-                let descriptor = self
-                    .panels
-                    .resolve(&entry.panel)
-                    .ok_or_else(|| DockViewError::UnknownPanel(entry.panel.clone()))?;
-                let side = match entry.side {
-                    Side::Left => "left",
-                    Side::Right => "right",
-                    Side::Top => "top",
-                    Side::Bottom => "bottom",
-                };
-                Ok(Element::text(descriptor.title.clone())
-                    .class("pk-dock-autohide-tab")
-                    .key_str(entry.panel.clone())
-                    .class(format_key("pk-dock-autohide-tab--", side)))
-            })
-            .collect::<Result<Vec<_>, DockViewError>>()?;
+        let entries =
+            self.layout
+                .autohide
+                .entries
+                .iter()
+                .map(|entry| {
+                    let descriptor = self
+                        .panels
+                        .resolve(&entry.panel)
+                        .ok_or_else(|| DockViewError::UnknownPanel(entry.panel.clone()))?;
+                    let side = match entry.side {
+                        Side::Left => "left",
+                        Side::Right => "right",
+                        Side::Top => "top",
+                        Side::Bottom => "bottom",
+                    };
+                    let tab = Element::text(descriptor.title.clone())
+                        .class("pk-dock-autohide-tab")
+                        .key_str(entry.panel.clone())
+                        .class(format_key("pk-dock-autohide-tab--", side));
+                    if self.layout.autohide.active.as_deref() == Some(entry.panel.as_str()) {
+                        let factory = self.panel_views.get(&entry.panel).ok_or_else(|| {
+                            DockViewError::MissingPanelFactory(entry.panel.clone())
+                        })?;
+                        Ok(Element::box_()
+                            .class("pk-dock-autohide-reveal")
+                            .child(tab)
+                            .child(factory().key_str(format_key("autohide", &entry.panel))))
+                    } else {
+                        Ok(tab)
+                    }
+                })
+                .collect::<Result<Vec<_>, DockViewError>>()?;
         Ok(Element::box_().class("pk-dock-autohide").children(entries))
     }
 }
