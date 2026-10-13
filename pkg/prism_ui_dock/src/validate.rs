@@ -1,4 +1,4 @@
-use crate::{DockLayout, DockNode, MaximizeRestore, Ratio};
+use crate::{DockLayout, DockNode, Ratio};
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
 
 /// Resource limits applied while validating untrusted layout data.
@@ -143,42 +143,13 @@ impl DockLayout {
                 autohide: snapshot.autohide.clone(),
                 maximized: None,
             };
-            if snap.validate_with(limits).is_err()
-                || count_panel_surfaces(snapshot, &snapshot.panel) != 1
-            {
+            if snap.validate_with(limits).is_err() {
                 return state.fail(ValidationIssue::MaximizeSnapshotInvalid);
             }
             let _ = &mut snap;
         }
         Ok(())
     }
-}
-
-fn count_panel_surfaces(layout: &MaximizeRestore, panel: &str) -> usize {
-    fn count_node(node: &DockNode, panel: &str) -> usize {
-        match node {
-            DockNode::TabStack { tabs, .. } => {
-                tabs.iter().filter(|id| id.as_str() == panel).count()
-            }
-            DockNode::Document { .. } | DockNode::Empty => 0,
-            DockNode::Split { children, .. } => children
-                .iter()
-                .map(|child| count_node(&child.node, panel))
-                .sum(),
-        }
-    }
-    count_node(&layout.root, panel)
-        + layout
-            .floating
-            .iter()
-            .map(|window| count_node(&window.root, panel))
-            .sum::<usize>()
-        + layout
-            .autohide
-            .entries
-            .iter()
-            .filter(|entry| entry.panel == panel)
-            .count()
 }
 
 struct State {
