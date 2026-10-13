@@ -858,13 +858,13 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 ### M2：虚拟几何资产格式落盘（6–10 周）
 - 定义 `VirtualGeometryAsset` 二进制格式与页 ABI；与 `prism_virtual_geometry_gpu` 对齐。✅ 资产/页 ABI 与 CLST v2 量化 payload 编解码契约已落地
-- 资产构建 Processor：baseline Cluster 化、固定页分页、共享溢出安全 bounds、normal cone、量化 payload 与 ABI checked conversion 已落地；DAG 多级简化、独立 fallback mesh 仍待实现。
+- 资产构建 Processor：baseline Cluster 化、固定页分页、共享溢出安全 bounds、normal cone、量化 payload 与 ABI checked conversion 已落地；离散、调用方指定目标三角形的 QEM LOD 链和屏幕空间/滞回/预取选择已落地；自动多级 Cluster 简化 DAG、独立 fallback mesh 仍待实现。
 - 构建器拒绝低于单三角形 3 顶点的 cluster 上限，并以共享 payload codec 作为唯一产出路径，避免构建产物与运行时解码器漂移。
 - 页表与流送最小闭环（先本地文件，后容器）。
 - 退出标准：同一高模在 `Standard` 档以虚拟几何渲染；缺页渲染祖先无洞。
 
 ### M3：形变与 LOD 收口（6–10 周）
-- 离散 LOD 链（标准/蒙皮）+ 屏幕空间误差选择 + dither 过渡。
+- 离散 LOD 链（标准/蒙皮）+ 屏幕空间误差选择 + dither 过渡。✅ 标准静态网格的调用方指定 QEM LOD 链与屏幕空间/滞回/预取选择已接入；蒙皮链和 dither 过渡仍待补齐。
 - GPU skinning（4/8 影响）+ Morph（属性与 delta 纹理两种模式）+ 形变缓存与速度向量。
 - 形变缓存接入深度/阴影/速度/可见性。
 - 退出标准：蒙皮角色在主视图与阴影中位置一致；LOD 过渡无可见跳变。
@@ -933,7 +933,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 ### 25.2 诚实边界（当前未完成）
 
-- 虚拟几何已有 v1 落盘编解码契约、baseline 静态 Cluster/page builder、CPU 决策层、可选 GDeflate page decode 和 `PageStreamManager` 驻留/word-storage adapter；builder 的 bounds 与 normal-cone 派生使用有限值保护和 `f64` 中间计算；层次校验现已拒绝自引用与间接环，资产校验还会拒绝非法节点包围体和孤立 Cluster；LOD 简化/量化、GPU page feedback 和真实 GPU page upload 调度仍待实现。
+- 虚拟几何已有 v1 落盘编解码契约、baseline 静态 Cluster/page builder、调用方指定目标三角形的离散 QEM LOD 链、CPU 屏幕空间/滞回/预取决策层、可选 GDeflate page decode 和 `PageStreamManager` 驻留/word-storage adapter；builder 的 bounds 与 normal-cone 派生使用有限值保护和 `f64` 中间计算；层次校验现已拒绝自引用与间接环，资产校验还会拒绝非法节点包围体和孤立 Cluster；自动多级 Cluster 简化 DAG、量化集成、GPU page feedback 和真实 GPU page upload 调度仍待实现。
 - HW Mesh Shader 后端未实现；现有可见性光栅只接入标准 Mesh 的 bootstrap。
 - 无 Deformable Cluster；蒙皮仍是标准 GPU skinning 规划。
 - `prism_mesh` 的分流布局和实际字节打包已接入 `RenderMesh` 生产上传、queue、frame graph 与多 slot draw；深度 pass 带宽基准尚未完成。
