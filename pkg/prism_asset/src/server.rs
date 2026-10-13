@@ -101,6 +101,11 @@ struct AssetServerInner {
     /// successfully wired dependencies, transitively). Replacing an entry on
     /// reload drops the previous closure's strong refs.
     retained: BTreeMap<UntypedAssetId, Vec<UntypedHandle>>,
+    /// Labels whose lifetime has been promoted from their source revision to
+    /// the label itself. This records promotions that happen recursively while
+    /// the source is still assembling, before its retained closure is
+    /// published.
+    promoted_labels: BTreeMap<UntypedAssetId, UntypedAssetId>,
     /// Epoch arbitration for reload results. It is also useful to async
     /// callers that decode outside this server's state mutex.
     reload_epoch: ReloadEpoch,
@@ -133,6 +138,7 @@ impl AssetServer {
                 interned: BTreeMap::new(),
                 catalog: BTreeMap::new(),
                 retained: BTreeMap::new(),
+                promoted_labels: BTreeMap::new(),
                 reload_epoch: ReloadEpoch::new(),
             }),
         }
@@ -477,20 +483,51 @@ impl AssetServerInner {
             .get(&path)
             .and_then(UntypedWeakHandle::upgrade)
         {
-            return requested
-                .is_none_or(|type_id| handle.id().type_id() == type_id)
-                .then_some(handle);
+            // A label is a revision output, not an independently persistent
+            // asset.  Once a source revision removed it, the old slot is
+            // deliberately failed so existing consumers can observe the
+            // invalidation.  Do not let a later `load_soft`/`load_untyped`
+            // request keep returning that failed historical slot: remove the
+            // weak catalog entry and let the source revision decide whether a
+            // replacement label exists.
+            if path.has_label() && self.stores.load_state(handle.id()).is_failed() {
+                self.interned.remove(&path);
+                let guid = StableGuid::from_path(&path.to_string());
+                if self.catalog.get(&guid) == Some(&path) {
+                    self.catalog.remove(&guid);
+                }
+            } else {
+                let handle = requested
+                    .is_none_or(|type_id| handle.id().type_id() == type_id)
+                    .then_some(handle)?;
+                if path.has_label() {
+                    if let Some(source) = self
+                        .interned
+                        .get(&path.clone().without_label())
+                        .and_then(UntypedWeakHandle::upgrade)
+                    {
+                        self.promote_label_ownership(&handle, &source);
+                    }
+                }
+                return Some(handle);
+            }
         }
         if path.has_label() {
             let source_path = path.clone().without_label();
-            self.load_path(source_path, None)?;
+            // Keep the source handle alive while transferring ownership to the
+            // label. The source loader may have been reached only recursively;
+            // dropping this temporary before promotion would make the weak
+            // intern entry look dead and lose the source->label hand-off.
+            let source_handle = self.load_path(source_path, None)?;
             let handle = self
                 .interned
                 .get(&path)
                 .and_then(UntypedWeakHandle::upgrade)?;
-            return requested
+            let handle = requested
                 .is_none_or(|type_id| handle.id().type_id() == type_id)
-                .then_some(handle);
+                .then_some(handle)?;
+            self.promote_label_ownership(&handle, &source_handle);
+            return Some(handle);
         }
 
         // Resolve the requested type before deduplication. A path may be
@@ -526,6 +563,25 @@ impl AssetServerInner {
         Some(handle)
     }
 
+    /// Transfers the temporary source-owned reference for a labeled output to
+    /// the label once a caller actually requests that output. The source keeps
+    /// labels alive until they are first resolved so nested loads can observe
+    /// them; after transfer the label keeps its source revision alive instead.
+    /// This avoids both a weak-label race during initial assembly and a
+    /// permanent source <-> label strong-reference cycle.
+    fn promote_label_ownership(&mut self, label: &UntypedHandle, source: &UntypedHandle) {
+        let source_id = source.id();
+        let label_id = label.id();
+        if let Some(retained) = self.retained.get_mut(&source_id) {
+            retained.retain(|handle| handle.id() != label_id);
+        }
+        self.promoted_labels.insert(label_id, source_id);
+        let label_retained = self.retained.entry(label_id).or_default();
+        if !label_retained.iter().any(|handle| handle.id() == source_id) {
+            label_retained.push(source.clone());
+        }
+    }
+
     /// Executes format/plugin code behind a panic boundary. A panic is a load
     /// failure, never a reason to poison the server mutex or leave a reserved
     /// slot looking permanently in-flight.
@@ -543,6 +599,7 @@ impl AssetServerInner {
     /// failure keeps the existing ready payload and restores `Loaded` state.
     fn finalize(&mut self, path: AssetPath, id: UntypedAssetId, type_id: AssetTypeId) {
         let had_ready_value = matches!(self.stores.load_state(id), LoadState::Loaded);
+        let previous_labels = self.labels_for_source(&path);
         let bytes = match self.sources.read(&path) {
             Ok(bytes) => bytes,
             Err(err) => {
@@ -606,10 +663,12 @@ impl AssetServerInner {
         // particular, a type change at `path#label` must reject the complete
         // parent revision instead of silently retaining the old typed handle.
         let mut staged_labels = Vec::with_capacity(labeled.len());
+        let mut provisional_labels: Vec<(AssetPath, UntypedAssetId)> = Vec::new();
         let mut label_paths = BTreeSet::new();
         for sub in labeled {
             let sub_path = path.clone().with_label(sub.label.clone());
             if !label_paths.insert(sub_path.clone()) {
+                self.rollback_staged_labels(&provisional_labels);
                 self.fail(id, &path, "loader emitted a duplicate labeled asset");
                 return;
             }
@@ -619,6 +678,7 @@ impl AssetServerInner {
                 .and_then(UntypedWeakHandle::upgrade)
             {
                 if existing.id().type_id() != sub.type_id {
+                    self.rollback_staged_labels(&provisional_labels);
                     self.fail(
                         id,
                         &path,
@@ -630,6 +690,7 @@ impl AssetServerInner {
             } else {
                 self.stores.register_erased(sub.type_id, sub.make_store);
                 let Some(handle) = self.stores.reserve_by_type(sub.type_id) else {
+                    self.rollback_staged_labels(&provisional_labels);
                     self.fail(id, &path, "labeled asset arena unavailable");
                     return;
                 };
@@ -638,6 +699,7 @@ impl AssetServerInner {
                     StableGuid::from_path(&sub_path.to_string()),
                     sub_path.clone(),
                 );
+                provisional_labels.push((sub_path.clone(), handle.id()));
                 handle
             };
 
@@ -645,6 +707,7 @@ impl AssetServerInner {
             let mut label_dependency_ids = Vec::new();
             for dep in sub.dependencies {
                 let Some(dep_handle) = self.load_path(dep.path.clone(), dep.expected_type) else {
+                    self.rollback_staged_labels(&provisional_labels);
                     self.fail(
                         id,
                         &path,
@@ -653,6 +716,7 @@ impl AssetServerInner {
                     return;
                 };
                 if self.stores.load_state(dep_handle.id()).is_failed() {
+                    self.rollback_staged_labels(&provisional_labels);
                     self.fail(
                         id,
                         &path,
@@ -679,6 +743,7 @@ impl AssetServerInner {
         match candidate_graph.replace_dependencies(id, dependency_ids.clone()) {
             Ok(()) => retained.extend(dependency_handles),
             Err(DependencyError::Cycle { participants }) if had_ready_value => {
+                self.rollback_staged_labels(&provisional_labels);
                 self.fail(
                     id,
                     &path,
@@ -705,9 +770,19 @@ impl AssetServerInner {
             }
         }
         for staged in &staged_labels {
-            if let Err(DependencyError::Cycle { participants }) = candidate_graph
-                .replace_dependencies(staged.id, staged.dependencies.iter().map(UntypedHandle::id))
+            // A labeled output is owned by this source revision. Represent
+            // that ownership in the dependency graph so invalidating the
+            // source also reaches consumers of the label, and the reload
+            // plan orders the source before the label's consumers.
+            let label_dependencies = staged
+                .dependencies
+                .iter()
+                .map(UntypedHandle::id)
+                .chain(core::iter::once(id));
+            if let Err(DependencyError::Cycle { participants }) =
+                candidate_graph.replace_dependencies(staged.id, label_dependencies)
             {
+                self.rollback_staged_labels(&provisional_labels);
                 self.fail(
                     id,
                     &path,
@@ -736,7 +811,12 @@ impl AssetServerInner {
             }
             let _ = self.graph.set_self_state(staged.id, LoadState::Loaded);
             retained.extend(staged.dependencies);
-            retained.push(staged.handle);
+            // Keep the label alive through its source until a real label
+            // consumer takes ownership via `promote_label_ownership`. This is
+            // required because the intern table is intentionally weak.
+            if self.promoted_labels.get(&staged.id) != Some(&id) {
+                retained.push(staged.handle);
+            }
         }
 
         match self.stores.fulfill_erased(id, value) {
@@ -745,8 +825,96 @@ impl AssetServerInner {
                 // Replace (not merge): on reload this drops the previous
                 // closure's strong references deterministically.
                 self.retained.insert(id, retained);
+                self.retire_removed_labels(&path, &previous_labels, &label_paths);
             }
             Err(err) => self.fail(id, &path, err.to_string()),
+        }
+    }
+
+    /// Discards labels created while assembling a source revision that never
+    /// reached the graph/storage commit point.  A failed revision must not
+    /// publish ghost paths through either the weak interning table or the soft
+    /// reference catalog.  The failed slots remain observable through any
+    /// temporary handles until the normal release collector reclaims them.
+    fn rollback_staged_labels(&mut self, labels: &[(AssetPath, UntypedAssetId)]) {
+        for (path, id) in labels {
+            let same_id = self
+                .interned
+                .get(path)
+                .and_then(UntypedWeakHandle::upgrade)
+                .is_some_and(|handle| handle.id() == *id);
+            if same_id {
+                self.interned.remove(path);
+            }
+            let guid = StableGuid::from_path(&path.to_string());
+            if self.catalog.get(&guid) == Some(path) {
+                self.catalog.remove(&guid);
+            }
+            let error = self.errors.record(AssetError::new(
+                path.path(),
+                "labeled asset staging rolled back",
+            ));
+            let _ = self.stores.fail_erased(*id, error);
+            self.promoted_labels.remove(id);
+        }
+    }
+
+    /// Returns the currently interned labeled outputs of `source`, including
+    /// their stable slot ids. The weak intern table is the source of truth for
+    /// labels that belong to the previous source revision.
+    fn labels_for_source(&self, source: &AssetPath) -> Vec<(AssetPath, UntypedAssetId)> {
+        self.interned
+            .iter()
+            .filter(|(candidate, _)| {
+                candidate.has_label() && (*candidate).clone().without_label() == *source
+            })
+            .filter_map(|(candidate, weak)| {
+                weak.upgrade()
+                    .map(|handle| (candidate.clone(), handle.id()))
+            })
+            .collect()
+    }
+
+    /// Invalidates labels that disappeared from a successfully committed
+    /// source revision. Existing external handles keep their identity, but
+    /// they must no longer expose the old ready value or remain resolvable via
+    /// the soft-reference catalog.
+    fn retire_removed_labels(
+        &mut self,
+        source: &AssetPath,
+        previous: &[(AssetPath, UntypedAssetId)],
+        current: &BTreeSet<AssetPath>,
+    ) {
+        let Some(source_handle) = self
+            .interned
+            .get(source)
+            .and_then(UntypedWeakHandle::upgrade)
+        else {
+            return;
+        };
+        let source_id = source_handle.id();
+        for (label_path, label_id) in previous {
+            if current.contains(label_path) {
+                continue;
+            }
+            if let Some(retained) = self.retained.get_mut(&source_id) {
+                retained.retain(|handle| handle.id() != *label_id);
+            }
+            self.retained.remove(label_id);
+            self.promoted_labels.remove(label_id);
+            let guid = StableGuid::from_path(&label_path.to_string());
+            if self.catalog.get(&guid) == Some(label_path) {
+                self.catalog.remove(&guid);
+            }
+            self.interned.remove(label_path);
+            let error = self.errors.record(AssetError::new(
+                label_path.path(),
+                "labeled asset was removed from the source revision",
+            ));
+            let _ = self.stores.fail_erased(*label_id, error);
+            let _ = self
+                .graph
+                .set_self_state(*label_id, LoadState::Failed(error));
         }
     }
 
@@ -807,6 +975,9 @@ impl AssetServerInner {
             self.retained.remove(id);
             self.graph.remove_asset(*id);
         }
+
+        self.promoted_labels
+            .retain(|label, source| self.stores.contains(*label) && self.stores.contains(*source));
 
         !dead_paths.is_empty() || !dead_owners.is_empty()
     }

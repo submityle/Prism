@@ -202,6 +202,91 @@ fn planned_layout_is_consumed_and_round_trips_in_version_two() {
 }
 
 #[test]
+fn planned_layout_honors_payload_alignment_above_chunk_alignment() {
+    let id = guid("high-alignment");
+    let policy = ChunkPolicy {
+        max_chunk_size: 16 * 1024,
+        chunk_alignment: 4096,
+        max_chunks: 1,
+    };
+    let plan = ChunkPlanner::new(policy)
+        .plan([ChunkInput {
+            guid: id,
+            size: 3,
+            alignment: 8192,
+            dependencies: vec![],
+            priority: 0,
+        }])
+        .unwrap();
+    assert_eq!(plan.chunks[0].start_alignment, 8192);
+
+    let mut writer = ContainerWriter::new();
+    writer.add_aligned(id, b"abc".to_vec(), 8192).unwrap();
+    let reader = ContainerReader::new(
+        writer
+            .finish_with_chunk_plan(&plan, policy.chunk_alignment)
+            .unwrap(),
+    )
+    .unwrap();
+    let entry = reader.entry(id).unwrap();
+    assert_eq!(entry.offset % 8192, 0);
+    assert_eq!(reader.read_all(id).unwrap(), b"abc");
+}
+
+#[test]
+fn planned_layout_keeps_cross_chunk_dependencies_before_dependents() {
+    let root = StableGuid::from_u128(1);
+    let dependency = StableGuid::from_u128(2);
+    let dependent = StableGuid::from_u128(3);
+    let policy = ChunkPolicy {
+        max_chunk_size: 8,
+        chunk_alignment: 1,
+        max_chunks: 2,
+    };
+    let plan = ChunkPlanner::new(policy)
+        .plan([
+            ChunkInput {
+                guid: root,
+                size: 5,
+                alignment: 1,
+                dependencies: vec![],
+                priority: 0,
+            },
+            ChunkInput {
+                guid: dependency,
+                size: 4,
+                alignment: 4,
+                dependencies: vec![root],
+                priority: 0,
+            },
+            ChunkInput {
+                guid: dependent,
+                size: 1,
+                alignment: 1,
+                dependencies: vec![dependency],
+                priority: 0,
+            },
+        ])
+        .unwrap();
+
+    assert_eq!(plan.assignments[&root], 0);
+    assert_eq!(plan.assignments[&dependency], 1);
+    assert_eq!(plan.assignments[&dependent], 1);
+    assert_eq!(
+        plan.chunks[1]
+            .placements
+            .iter()
+            .map(|placement| placement.guid)
+            .collect::<Vec<_>>(),
+        vec![dependency, dependent]
+    );
+    assert!(
+        plan.chunks[plan.assignments[&dependency]].offset
+            <= plan.chunks[plan.assignments[&dependent]].offset
+    );
+}
+
+#[test]
 fn planned_writer_rejects_a_plan_that_does_not_cover_exactly_its_payloads() {
     let id = guid("planned-only");
     let plan = ChunkPlanner::new(ChunkPolicy {
@@ -358,6 +443,39 @@ fn overlay_priority_ties_latest_mount_wins_and_unmount_falls_back() {
     assert!(overlays.unmount("patch"));
     assert_eq!(overlays.read_all(id).unwrap(), b"base");
     assert!(!overlays.unmount("missing"));
+}
+
+#[test]
+fn remounting_a_container_name_replaces_its_previous_guid_set() {
+    let old_guid = guid("remount-old");
+    let new_guid = guid("remount-new");
+    let mut overlays = OverlaySet::new();
+    overlays.mount(
+        "shipping",
+        1,
+        ContainerReader::new(build(&[("remount-old", b"old")])).unwrap(),
+    );
+    overlays.mount(
+        "shipping",
+        1,
+        ContainerReader::new(build(&[("remount-new", b"new")])).unwrap(),
+    );
+    assert!(!overlays.contains(old_guid));
+    assert_eq!(overlays.read_all(new_guid).unwrap(), b"new");
+
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert(ManifestRoute {
+            guid: old_guid,
+            container_name: "shipping".into(),
+            priority: 1,
+            container_guid: old_guid,
+        })
+        .unwrap();
+    assert!(matches!(
+        manifest.bind(&overlays),
+        Err(ManifestReadError::MissingContainerGuid { .. })
+    ));
 }
 
 #[test]
@@ -624,6 +742,22 @@ fn manifest_asset_reader_implements_vfs_path_and_subasset_contract() {
     assert_eq!(
         source.read_range("scene.asset#Mesh0", 5, 5).unwrap(),
         b"bytes"
+    );
+    assert_eq!(
+        source.read_range("scene.asset#Mesh0", u64::MAX, u64::MAX),
+        Err(prism_asset::ReadError::OutOfRange {
+            offset: u64::MAX,
+            len: u64::MAX,
+            size: 10,
+        })
+    );
+    assert_eq!(
+        source.read_range("scene.asset#Mesh0", 9, 2),
+        Err(prism_asset::ReadError::OutOfRange {
+            offset: 9,
+            len: 2,
+            size: 10,
+        })
     );
     assert_eq!(source.metadata("scene.asset#Mesh0").unwrap().size, 10);
     assert_eq!(

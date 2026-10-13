@@ -1,4 +1,7 @@
 use crate::cas::{CasError, ContentAddressedStore};
+use crate::journal::{JournalRecord, TransactionJournal};
+use crate::package::RuntimePackage;
+use crate::publication::PublicationDescriptor;
 use crate::types::{
     ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, Manifest, ManifestEntry,
 };
@@ -8,6 +11,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use prism_asset_container::{ContainerReader, RuntimeManifest};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -19,6 +24,15 @@ pub enum PublishError {
     Io(io::Error),
     Cas(CasError),
     Invalid(&'static str),
+    /// `CURRENT` was replaced, but the durable commit marker could not be
+    /// written. The revision may already be visible; callers must reconcile
+    /// it instead of retrying the same revision as a fresh transaction.
+    UnknownCommit {
+        revision: BuildRevision,
+        manifest_hash: crate::types::ContentHash,
+        publication_hash: Option<crate::types::ContentHash>,
+        source: io::Error,
+    },
     Conflict {
         expected: Option<BuildRevision>,
         actual: Option<BuildRevision>,
@@ -52,16 +66,37 @@ impl From<CasError> for PublishError {
 pub struct PublishedManifest {
     pub manifest: Manifest,
     pub manifest_hash: crate::types::ContentHash,
+    /// Immutable binding for runtime package outputs, when this is a packaged
+    /// publication. Build-only revisions intentionally have no runtime package.
+    pub publication: Option<PublicationDescriptor>,
+}
+
+/// Durable state observed for one local publication revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionState {
+    /// No journal record exists for this revision.
+    Unknown,
+    /// A prepare record exists but publication has not reached a durable commit
+    /// marker.  [`RevisionStore::open`] resolves this state before returning.
+    Prepared,
+    /// `CURRENT` names a prepared revision but its commit marker is absent.
+    UnknownCommit,
+    /// The revision reached the publication boundary and has a commit marker.
+    Committed,
+    /// Recovery discarded an uncommitted prepare and recorded the decision.
+    Aborted,
 }
 
 /// Local revision store. Publication becomes visible at atomic replacement of
-/// CURRENT. A failure while syncing the containing directory after that rename
-/// has an indeterminate durability outcome: the new pointer may already be
-/// visible even though `commit` returns an I/O error.
+/// CURRENT. The append-only journal records the prepare/commit boundary so a
+/// failure while syncing the containing directory after that rename can be
+/// resolved on the next open instead of being silently classified as a failed
+/// or successful build.
 #[derive(Clone, Debug)]
 pub struct RevisionStore {
     root: PathBuf,
     cas: ContentAddressedStore,
+    journal: TransactionJournal,
     /// Serializes optimistic check-and-publish within this process. Cross-process
     /// coordination is intentionally not implied by this local store.
     publish_lock: Arc<Mutex<()>>,
@@ -118,12 +153,22 @@ impl RevisionStore {
         create_dir_all_durable(&root.join("revisions"))?;
         let cas_root = root.join("cas");
         create_dir_all_durable(&cas_root)?;
+        let transactions_root = root.join("transactions");
+        create_dir_all_durable(&transactions_root)?;
+        // Serialize journal initialization and recovery with publishers in
+        // other Unix processes.  The root exists by this point, so the lock
+        // itself is also a durable store entry.
+        #[cfg(unix)]
+        let _recovery_guard = FilePublishLock::acquire(&root)?;
         let cas = ContentAddressedStore::open(cas_root)?;
+        let journal = TransactionJournal::open(transactions_root.join("journal.bin"))?;
         let store = Self {
             root,
             cas,
+            journal,
             publish_lock: Arc::new(Mutex::new(())),
         };
+        store.recover_transactions()?;
         // CURRENT is the publication boundary. Never open a store that points
         // at a missing, malformed, or differently-numbered manifest.
         store.current_revision()?;
@@ -135,18 +180,254 @@ impl RevisionStore {
     }
 
     pub fn current_revision(&self) -> Result<Option<BuildRevision>, PublishError> {
-        let current = match fs::read(self.root.join("CURRENT")) {
+        let current = self.read_current_pointer()?;
+        if let Some(revision) = current {
+            self.validate_current_manifest(revision)?;
+        }
+        Ok(current)
+    }
+
+    /// Returns the last durable journal state for `revision`.
+    pub fn transaction_state(
+        &self,
+        revision: BuildRevision,
+    ) -> Result<TransactionState, PublishError> {
+        let records = self.journal.scan()?;
+        let mut state = TransactionState::Unknown;
+        for record in records {
+            match record {
+                JournalRecord::Prepare {
+                    revision: candidate,
+                    ..
+                }
+                | JournalRecord::Commit {
+                    revision: candidate,
+                    ..
+                }
+                | JournalRecord::Abort {
+                    revision: candidate,
+                    ..
+                } if candidate == revision => {
+                    state = match record {
+                        JournalRecord::Prepare { .. } => TransactionState::Prepared,
+                        JournalRecord::Commit { .. } => TransactionState::Committed,
+                        JournalRecord::Abort { .. } => TransactionState::Aborted,
+                    };
+                }
+                _ => {}
+            }
+        }
+        if state == TransactionState::Prepared && self.read_current_pointer()? == Some(revision) {
+            return Ok(TransactionState::UnknownCommit);
+        }
+        Ok(state)
+    }
+
+    /// Returns committed revisions after `after`, suitable for replaying a
+    /// notification stream after a frontend reconnects.
+    pub fn committed_revisions_since(
+        &self,
+        after: Option<BuildRevision>,
+    ) -> Result<Vec<BuildRevision>, PublishError> {
+        let records = self.journal.scan()?;
+        let mut revisions = BTreeSet::new();
+        for record in records {
+            if let JournalRecord::Commit { revision, .. } = record
+                && after.is_none_or(|previous| revision > previous)
+            {
+                revisions.insert(revision);
+            }
+        }
+        Ok(revisions.into_iter().collect())
+    }
+
+    fn read_current_pointer(&self) -> Result<Option<BuildRevision>, PublishError> {
+        match fs::read(self.root.join("CURRENT")) {
             Ok(bytes) if bytes.len() == 8 => Ok(Some(BuildRevision(u64::from_le_bytes(
                 bytes.try_into().unwrap(),
             )))),
             Ok(_) => Err(PublishError::Invalid("CURRENT pointer has invalid length")),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
-        }?;
-        if let Some(revision) = current {
-            self.validate_current_manifest(revision)?;
         }
-        Ok(current)
+    }
+
+    fn recover_transactions(&self) -> Result<(), PublishError> {
+        let records = self.journal.scan()?;
+        let mut pending = BTreeMap::new();
+        let mut states = BTreeMap::new();
+        for record in records {
+            match record {
+                JournalRecord::Prepare {
+                    revision,
+                    expected_current,
+                    manifest_hash,
+                    publication_hash,
+                } => {
+                    if matches!(states.get(&revision), Some(TransactionState::Committed)) {
+                        return Err(PublishError::Invalid(
+                            "transaction journal prepares a committed revision",
+                        ));
+                    }
+                    if matches!(states.get(&revision), Some(TransactionState::Prepared)) {
+                        return Err(PublishError::Invalid(
+                            "transaction journal contains duplicate prepare",
+                        ));
+                    }
+                    pending.insert(
+                        revision,
+                        (expected_current, manifest_hash, publication_hash),
+                    );
+                    states.insert(revision, TransactionState::Prepared);
+                }
+                JournalRecord::Commit {
+                    revision,
+                    manifest_hash,
+                    publication_hash,
+                } => {
+                    let Some((_, prepared_hash, prepared_publication_hash)) =
+                        pending.remove(&revision)
+                    else {
+                        return Err(PublishError::Invalid(
+                            "transaction journal commits without a prepare",
+                        ));
+                    };
+                    if prepared_hash != manifest_hash {
+                        return Err(PublishError::Invalid(
+                            "transaction journal commit hash differs from prepare",
+                        ));
+                    }
+                    if prepared_publication_hash != publication_hash {
+                        return Err(PublishError::Invalid(
+                            "transaction journal commit publication hash differs from prepare",
+                        ));
+                    }
+                    states.insert(revision, TransactionState::Committed);
+                }
+                JournalRecord::Abort {
+                    revision,
+                    manifest_hash,
+                    publication_hash,
+                } => {
+                    let Some((_, prepared_hash, prepared_publication_hash)) =
+                        pending.remove(&revision)
+                    else {
+                        return Err(PublishError::Invalid(
+                            "transaction journal aborts without a prepare",
+                        ));
+                    };
+                    if prepared_hash != manifest_hash {
+                        return Err(PublishError::Invalid(
+                            "transaction journal abort hash differs from prepare",
+                        ));
+                    }
+                    if prepared_publication_hash != publication_hash {
+                        return Err(PublishError::Invalid(
+                            "transaction journal abort publication hash differs from prepare",
+                        ));
+                    }
+                    states.insert(revision, TransactionState::Aborted);
+                }
+            }
+        }
+
+        let current = self.read_current_pointer()?;
+        for (revision, (_, manifest_hash, publication_hash)) in pending {
+            let manifest_path = self
+                .root
+                .join("revisions")
+                .join(format!("{}.manifest", revision.0));
+            if current == Some(revision) {
+                let bytes = fs::read(&manifest_path).map_err(|error| {
+                    PublishError::Io(io::Error::new(
+                        error.kind(),
+                        format!("prepared current manifest is unavailable: {error}"),
+                    ))
+                })?;
+                if crate::types::ContentHash::digest(&bytes) != manifest_hash {
+                    return Err(PublishError::Invalid(
+                        "CURRENT manifest differs from transaction journal",
+                    ));
+                }
+                if let Some(publication_hash) = publication_hash {
+                    let publication_path = self
+                        .root
+                        .join("revisions")
+                        .join(format!("{}.publication", revision.0));
+                    let publication_bytes = fs::read(&publication_path).map_err(|error| {
+                        PublishError::Io(io::Error::new(
+                            error.kind(),
+                            format!("prepared current publication is unavailable: {error}"),
+                        ))
+                    })?;
+                    if crate::types::ContentHash::digest(&publication_bytes) != publication_hash {
+                        return Err(PublishError::Invalid(
+                            "CURRENT publication differs from transaction journal",
+                        ));
+                    }
+                }
+                // A pointer replacement may have succeeded immediately before
+                // the commit marker write.  Validate the complete payload
+                // closure before converting that ambiguous state to committed.
+                self.validate_current_manifest(revision)?;
+                self.journal.append(JournalRecord::Commit {
+                    revision,
+                    manifest_hash,
+                    publication_hash,
+                })?;
+            } else {
+                if manifest_path.exists() {
+                    let bytes = fs::read(&manifest_path)?;
+                    if crate::types::ContentHash::digest(&bytes) != manifest_hash {
+                        return Err(PublishError::Invalid(
+                            "orphaned transaction manifest differs from journal",
+                        ));
+                    }
+                    fs::remove_file(&manifest_path)?;
+                    sync_directory(
+                        manifest_path
+                            .parent()
+                            .ok_or(PublishError::Invalid("manifest path has no parent"))?,
+                    )?;
+                }
+                let publication_path = self
+                    .root
+                    .join("revisions")
+                    .join(format!("{}.publication", revision.0));
+                if let Some(publication_hash) = publication_hash {
+                    if publication_path.exists() {
+                        let bytes = fs::read(&publication_path)?;
+                        if crate::types::ContentHash::digest(&bytes) != publication_hash {
+                            return Err(PublishError::Invalid(
+                                "orphaned transaction publication differs from journal",
+                            ));
+                        }
+                        fs::remove_file(&publication_path)?;
+                        sync_directory(
+                            publication_path
+                                .parent()
+                                .ok_or(PublishError::Invalid("publication path has no parent"))?,
+                        )?;
+                    }
+                }
+                let runtime_root = self.root.join("runtime").join(revision.0.to_string());
+                if publication_hash.is_some() && runtime_root.exists() {
+                    fs::remove_dir_all(&runtime_root)?;
+                    sync_directory(
+                        runtime_root
+                            .parent()
+                            .ok_or(PublishError::Invalid("runtime path has no parent"))?,
+                    )?;
+                }
+                self.journal.append(JournalRecord::Abort {
+                    revision,
+                    manifest_hash,
+                    publication_hash,
+                })?;
+            }
+        }
+        cleanup_transaction_temps(&self.root)?;
+        Ok(())
     }
 
     pub fn begin(
@@ -159,6 +440,7 @@ impl RevisionStore {
             revision,
             expected_current,
             staged: BTreeMap::new(),
+            runtime_package: None,
         }
     }
 
@@ -167,6 +449,15 @@ impl RevisionStore {
             self.root
                 .join("revisions")
                 .join(format!("{}.manifest", revision.0)),
+        )?)
+    }
+
+    /// Reads and validates the immutable publication descriptor for a revision.
+    pub fn publication_bytes(&self, revision: BuildRevision) -> Result<Vec<u8>, PublishError> {
+        Ok(fs::read(
+            self.root
+                .join("revisions")
+                .join(format!("{}.publication", revision.0)),
         )?)
     }
 
@@ -202,7 +493,137 @@ impl RevisionStore {
                 ));
             }
         }
+        self.validate_publication_if_present(revision, &bytes)?;
         Ok(())
+    }
+
+    fn validate_publication_if_present(
+        &self,
+        revision: BuildRevision,
+        build_manifest_bytes: &[u8],
+    ) -> Result<(), PublishError> {
+        let publication_required = self.publication_requirement(revision)?;
+        let descriptor_path = self
+            .root
+            .join("revisions")
+            .join(format!("{}.publication", revision.0));
+        let descriptor_bytes = match fs::read(&descriptor_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if publication_required == Some(true) {
+                    return Err(PublishError::Invalid(
+                        "CURRENT package publication descriptor is missing",
+                    ));
+                }
+                // Legacy build-only stores and current build-only revisions do
+                // not have a runtime publication descriptor.
+                return Ok(());
+            }
+            Err(error) => return Err(PublishError::Io(error)),
+        };
+        if publication_required == Some(false) {
+            return Err(PublishError::Invalid(
+                "build-only revision unexpectedly has a runtime publication",
+            ));
+        }
+        let publication =
+            PublicationDescriptor::decode(&descriptor_bytes).map_err(PublishError::Invalid)?;
+        if publication.revision != revision
+            || publication.build_manifest_hash
+                != crate::types::ContentHash::digest(build_manifest_bytes)
+        {
+            return Err(PublishError::Invalid(
+                "publication descriptor does not bind CURRENT manifest",
+            ));
+        }
+        let runtime_root = self.root.join("runtime").join(revision.0.to_string());
+        let runtime_manifest_path = runtime_root.join("manifest.bin");
+        let runtime_manifest = fs::read(&runtime_manifest_path).map_err(|error| {
+            PublishError::Io(io::Error::new(
+                error.kind(),
+                format!("published runtime manifest is unavailable: {error}"),
+            ))
+        })?;
+        if crate::types::ContentHash::digest(&runtime_manifest) != publication.runtime_manifest_hash
+        {
+            return Err(PublishError::Invalid(
+                "published runtime manifest hash differs from publication descriptor",
+            ));
+        }
+        let runtime_manifest = RuntimeManifest::decode(&runtime_manifest)
+            .map_err(|_| PublishError::Invalid("published runtime manifest is invalid"))?;
+        let mut container_bytes = BTreeMap::new();
+        for container in &publication.containers {
+            let path = runtime_root.join("containers").join(&container.name);
+            let bytes = fs::read(path).map_err(|error| {
+                PublishError::Io(io::Error::new(
+                    error.kind(),
+                    format!("published runtime container is unavailable: {error}"),
+                ))
+            })?;
+            if u64::try_from(bytes.len()).ok() != Some(container.byte_len)
+                || crate::types::ContentHash::digest(&bytes) != container.content_hash
+            {
+                return Err(PublishError::Invalid(
+                    "published runtime container does not match publication descriptor",
+                ));
+            }
+            ContainerReader::new(Arc::<[u8]>::from(bytes.as_slice()))
+                .map_err(|_| PublishError::Invalid("published runtime container is invalid"))?;
+            container_bytes.insert(container.name.as_str(), bytes);
+        }
+        let mut referenced = BTreeSet::new();
+        for route in runtime_manifest.routes() {
+            let Some(bytes) = container_bytes.get(route.container_name.as_str()) else {
+                return Err(PublishError::Invalid(
+                    "published runtime manifest references a missing container",
+                ));
+            };
+            let reader = ContainerReader::new(Arc::<[u8]>::from(bytes.as_slice()))
+                .map_err(|_| PublishError::Invalid("published runtime container is invalid"))?;
+            if !reader.contains(route.container_guid) {
+                return Err(PublishError::Invalid(
+                    "published runtime manifest references a missing record",
+                ));
+            }
+            referenced.insert(route.container_name.as_str());
+        }
+        if referenced.len() != publication.containers.len()
+            || publication
+                .containers
+                .iter()
+                .any(|container| !referenced.contains(container.name.as_str()))
+        {
+            return Err(PublishError::Invalid(
+                "published runtime package contains an unreferenced container",
+            ));
+        }
+        Ok(())
+    }
+
+    fn publication_requirement(
+        &self,
+        revision: BuildRevision,
+    ) -> Result<Option<bool>, PublishError> {
+        let mut requirement = None;
+        for record in self.journal.scan()? {
+            match record {
+                JournalRecord::Prepare {
+                    revision: candidate,
+                    publication_hash,
+                    ..
+                }
+                | JournalRecord::Commit {
+                    revision: candidate,
+                    publication_hash,
+                    ..
+                } if candidate == revision => {
+                    requirement = Some(publication_hash.is_some());
+                }
+                _ => {}
+            }
+        }
+        Ok(requirement)
     }
 }
 
@@ -211,6 +632,7 @@ pub struct PublishTransaction {
     revision: BuildRevision,
     expected_current: Option<BuildRevision>,
     staged: BTreeMap<AssetId, (ArtifactDescriptor, Vec<u8>)>,
+    runtime_package: Option<RuntimePackage>,
 }
 
 impl PublishTransaction {
@@ -230,6 +652,58 @@ impl PublishTransaction {
             return Err(PublishError::Invalid("duplicate staged AssetId"));
         }
         self.staged.insert(asset, (descriptor, bytes));
+        Ok(())
+    }
+
+    /// Stages a complete runtime package for publication with this build revision.
+    /// The package is persisted under the same revision boundary as the build manifest.
+    pub fn stage_runtime_package(&mut self, package: RuntimePackage) -> Result<(), PublishError> {
+        if self.runtime_package.is_some() {
+            return Err(PublishError::Invalid("runtime package already staged"));
+        }
+        let canonical = package
+            .runtime_manifest
+            .encode()
+            .map_err(|_| PublishError::Invalid("runtime manifest cannot be encoded"))?;
+        if canonical != package.runtime_manifest_bytes {
+            return Err(PublishError::Invalid(
+                "runtime manifest bytes are not canonical",
+            ));
+        }
+        let decoded = RuntimeManifest::decode(&package.runtime_manifest_bytes)
+            .map_err(|_| PublishError::Invalid("runtime manifest bytes cannot be decoded"))?;
+        if decoded != package.runtime_manifest {
+            return Err(PublishError::Invalid(
+                "runtime manifest object differs from its encoded bytes",
+            ));
+        }
+        let mut referenced = BTreeSet::new();
+        for route in decoded.routes() {
+            let Some(bytes) = package.containers.get(&route.container_name) else {
+                return Err(PublishError::Invalid(
+                    "runtime manifest references a missing container",
+                ));
+            };
+            let reader = ContainerReader::new(Arc::<[u8]>::from(bytes.as_slice()))
+                .map_err(|_| PublishError::Invalid("runtime container is invalid"))?;
+            if !reader.contains(route.container_guid) {
+                return Err(PublishError::Invalid(
+                    "runtime manifest references a missing container record",
+                ));
+            }
+            referenced.insert(route.container_name.as_str());
+        }
+        if referenced.len() != package.containers.len()
+            || package
+                .containers
+                .keys()
+                .any(|name| !referenced.contains(name.as_str()))
+        {
+            return Err(PublishError::Invalid(
+                "runtime package contains an unreferenced container",
+            ));
+        }
+        self.runtime_package = Some(package);
         Ok(())
     }
 
@@ -257,11 +731,7 @@ impl PublishTransaction {
         validate_dependency_closure(&self.staged)?;
 
         let mut entries = Vec::with_capacity(self.staged.len());
-        for (asset, (descriptor, bytes)) in &self.staged {
-            let hash = self.store.cas.put(bytes)?;
-            if hash != descriptor.content_hash {
-                return Err(PublishError::DescriptorMismatch(*asset));
-            }
+        for (asset, (descriptor, _)) in &self.staged {
             entries.push(ManifestEntry {
                 asset: *asset,
                 descriptor: descriptor.clone(),
@@ -270,6 +740,50 @@ impl PublishTransaction {
         let manifest = Manifest::new(self.revision, entries).map_err(PublishError::Invalid)?;
         let bytes = manifest.canonical_bytes();
         let manifest_hash = crate::types::ContentHash::digest(&bytes);
+        if let Some(package) = self.runtime_package.as_ref()
+            && package.source_manifest_hash != manifest_hash
+        {
+            return Err(PublishError::Invalid(
+                "runtime package was built from a different manifest",
+            ));
+        }
+        let (publication, publication_bytes) = if let Some(package) = self.runtime_package.as_ref()
+        {
+            let publication = PublicationDescriptor::new(
+                self.revision,
+                manifest_hash,
+                &package.runtime_manifest_bytes,
+                &package.containers,
+            )
+            .map_err(PublishError::Invalid)?;
+            let bytes = publication.encode().map_err(PublishError::Invalid)?;
+            (Some(publication), Some(bytes))
+        } else {
+            (None, None)
+        };
+        let publication_hash = publication
+            .as_ref()
+            .map(PublicationDescriptor::content_hash);
+
+        // From this point onward recovery can distinguish an interrupted
+        // publication from an ordinary unused CAS blob.
+        self.store.journal.append(JournalRecord::Prepare {
+            revision: self.revision,
+            expected_current: self.expected_current,
+            manifest_hash,
+            publication_hash,
+        })?;
+
+        // CAS writes happen after Prepare.  If the process stops during the
+        // immutable blob phase, recovery can identify the orphaned output as a
+        // transaction and leave it to reachability GC instead of losing the
+        // publication's intent.
+        for (asset, (descriptor, bytes)) in &self.staged {
+            let hash = self.store.cas.put(bytes)?;
+            if hash != descriptor.content_hash {
+                return Err(PublishError::DescriptorMismatch(*asset));
+            }
+        }
 
         let revision_path = self
             .store
@@ -277,6 +791,17 @@ impl PublishTransaction {
             .join("revisions")
             .join(format!("{}.manifest", self.revision.0));
         write_immutable(&revision_path, &bytes)?;
+        if let (Some(publication_bytes), Some(package)) =
+            (publication_bytes.as_deref(), self.runtime_package.as_ref())
+        {
+            let publication_path = self
+                .store
+                .root
+                .join("revisions")
+                .join(format!("{}.publication", self.revision.0));
+            write_immutable(&publication_path, publication_bytes)?;
+            self.write_runtime_outputs(&package.runtime_manifest_bytes, &package.containers)?;
+        }
 
         // Re-read immediately before pointer replacement. The file lock makes
         // this a compare-and-publish window across cooperating processes; the
@@ -293,10 +818,44 @@ impl PublishTransaction {
         // Last mutating operation is atomic pointer replacement. If anything above
         // fails, CURRENT still names the prior complete revision.
         atomic_replace(&self.store.root, "CURRENT", &self.revision.0.to_le_bytes())?;
+        if let Err(source) = self.store.journal.append(JournalRecord::Commit {
+            revision: self.revision,
+            manifest_hash,
+            publication_hash,
+        }) {
+            return Err(PublishError::UnknownCommit {
+                revision: self.revision,
+                manifest_hash,
+                publication_hash,
+                source,
+            });
+        }
         Ok(PublishedManifest {
             manifest,
             manifest_hash,
+            publication,
         })
+    }
+
+    fn write_runtime_outputs(
+        &self,
+        runtime_manifest_bytes: &[u8],
+        containers: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), PublishError> {
+        let runtime_root = self
+            .store
+            .root
+            .join("runtime")
+            .join(self.revision.0.to_string());
+        let containers_root = runtime_root.join("containers");
+        create_dir_all_durable(&containers_root)?;
+        write_immutable(&runtime_root.join("manifest.bin"), runtime_manifest_bytes)?;
+        for (name, bytes) in containers {
+            write_immutable(&containers_root.join(name), bytes)?;
+        }
+        sync_directory(&containers_root)?;
+        sync_directory(&runtime_root)?;
+        Ok(())
     }
 }
 
@@ -609,10 +1168,39 @@ fn temp_path(parent: &Path) -> PathBuf {
     parent.join(format!(".txn-{}-{id}", std::process::id()))
 }
 
+fn cleanup_transaction_temps(root: &Path) -> Result<(), PublishError> {
+    for directory in [root.to_path_buf(), root.join("revisions")] {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(PublishError::Io(error)),
+        };
+        let mut removed = false;
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(".txn-") {
+                let metadata = entry.metadata()?;
+                if metadata.is_file() {
+                    fs::remove_file(entry.path())?;
+                    removed = true;
+                }
+            }
+        }
+        if removed {
+            sync_directory(&directory)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package::RuntimePackage;
     use crate::types::{ArtifactKey, ContentHash};
+    use prism_asset::StableGuid;
+    use prism_asset_container::{ContainerWriter, ManifestRoute, RuntimeManifest};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -648,6 +1236,31 @@ mod tests {
         ArtifactDescriptor::for_bytes(ArtifactKey([key; 32]), 4, 1, 16, dependencies, bytes)
     }
 
+    fn runtime_package_for(manifest: &Manifest, payload: &[u8]) -> RuntimePackage {
+        let guid = StableGuid::from_u128(0x55);
+        let mut writer = ContainerWriter::new();
+        writer.add(guid, payload.to_vec()).unwrap();
+        let container = writer.finish().unwrap();
+        let mut runtime_manifest = RuntimeManifest::new();
+        runtime_manifest
+            .insert(ManifestRoute {
+                guid,
+                container_name: "base.container".to_owned(),
+                priority: 0,
+                container_guid: guid,
+            })
+            .unwrap();
+        let runtime_manifest_bytes = runtime_manifest.encode().unwrap();
+        RuntimePackage {
+            source_manifest_hash: ContentHash::digest(&manifest.canonical_bytes()),
+            containers: [("base.container".to_owned(), container)]
+                .into_iter()
+                .collect(),
+            runtime_manifest,
+            runtime_manifest_bytes,
+        }
+    }
+
     #[test]
     fn publishes_and_failed_transaction_keeps_previous_revision() {
         let dir = temp_dir();
@@ -656,7 +1269,9 @@ mod tests {
         first
             .stage(AssetId(1), descriptor(b"good"), b"good".to_vec())
             .unwrap();
-        first.commit().unwrap();
+        let published = first.commit().unwrap();
+        assert!(published.publication.is_none());
+        assert!(!dir.join("runtime/0").exists());
         let previous = store.manifest_bytes(BuildRevision(0)).unwrap();
 
         let mut failed = store.begin(BuildRevision(1), Some(BuildRevision(0)));
@@ -672,6 +1287,47 @@ mod tests {
             .unwrap();
         next.commit().unwrap();
         assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(1)));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn runtime_package_is_published_only_when_bound_to_this_manifest() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let payload = b"runtime payload";
+        let mut tx = store.begin(BuildRevision(0), None);
+        tx.stage(AssetId(1), descriptor(payload), payload.to_vec())
+            .unwrap();
+        let manifest = Manifest::new(
+            BuildRevision(0),
+            [ManifestEntry {
+                asset: AssetId(1),
+                descriptor: descriptor(payload),
+            }],
+        )
+        .unwrap();
+        tx.stage_runtime_package(runtime_package_for(&manifest, payload))
+            .unwrap();
+        let published = tx.commit().unwrap();
+        assert!(published.publication.is_some());
+        assert!(dir.join("revisions/0.publication").exists());
+        assert!(dir.join("runtime/0/manifest.bin").exists());
+        assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(0)));
+
+        let mut wrong = store.begin(BuildRevision(1), Some(BuildRevision(0)));
+        wrong
+            .stage(AssetId(1), descriptor(b"changed"), b"changed".to_vec())
+            .unwrap();
+        wrong
+            .stage_runtime_package(runtime_package_for(&manifest, payload))
+            .unwrap();
+        assert!(matches!(
+            wrong.commit(),
+            Err(PublishError::Invalid(
+                "runtime package was built from a different manifest"
+            ))
+        ));
+        assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(0)));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -694,6 +1350,141 @@ mod tests {
             reopened.cas().read(ContentHash::digest(payload)).unwrap(),
             payload
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reopening_after_pointer_publish_recovers_missing_commit_marker() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let payload = b"commit marker recovery";
+        let mut tx = store.begin(BuildRevision(0), None);
+        tx.stage(AssetId(1), descriptor(payload), payload.to_vec())
+            .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            store.transaction_state(BuildRevision(0)).unwrap(),
+            TransactionState::Committed
+        );
+
+        // Remove the final Commit frame while leaving the durable manifest and
+        // CURRENT pointer intact, modelling a crash between pointer rename and
+        // the journal append.
+        let journal_path = dir.join("transactions/journal.bin");
+        let journal_len = fs::metadata(&journal_path).unwrap().len();
+        let frame_len = crate::journal::FRAME_SIZE as u64;
+        OpenOptions::new()
+            .write(true)
+            .open(&journal_path)
+            .unwrap()
+            .set_len(journal_len - frame_len)
+            .unwrap();
+        drop(store);
+
+        let reopened = RevisionStore::open(&dir).unwrap();
+        assert_eq!(reopened.current_revision().unwrap(), Some(BuildRevision(0)));
+        assert_eq!(
+            reopened.transaction_state(BuildRevision(0)).unwrap(),
+            TransactionState::Committed
+        );
+        assert_eq!(
+            reopened.committed_revisions_since(None).unwrap(),
+            vec![BuildRevision(0)]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reopening_aborts_prepared_manifest_without_advancing_current() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let payload = b"orphaned journal prepare";
+        let descriptor = descriptor(payload);
+        let manifest = Manifest::new(
+            BuildRevision(0),
+            [ManifestEntry {
+                asset: AssetId(1),
+                descriptor: descriptor.clone(),
+            }],
+        )
+        .unwrap();
+        store.cas.put(payload).unwrap();
+        let manifest_bytes = manifest.canonical_bytes();
+        let manifest_hash = ContentHash::digest(&manifest_bytes);
+        store
+            .journal
+            .append(JournalRecord::Prepare {
+                revision: BuildRevision(0),
+                expected_current: None,
+                manifest_hash,
+                publication_hash: None,
+            })
+            .unwrap();
+        fs::write(dir.join("revisions/0.manifest"), manifest_bytes).unwrap();
+        drop(store);
+
+        let reopened = RevisionStore::open(&dir).unwrap();
+        assert_eq!(reopened.current_revision().unwrap(), None);
+        assert!(!dir.join("revisions/0.manifest").exists());
+        assert_eq!(
+            reopened.transaction_state(BuildRevision(0)).unwrap(),
+            TransactionState::Aborted
+        );
+        // CAS is immutable and intentionally left for later reachability GC.
+        assert_eq!(
+            reopened.cas().read(ContentHash::digest(payload)).unwrap(),
+            payload
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reopening_truncates_a_partial_journal_tail() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let payload = b"partial journal tail";
+        let mut tx = store.begin(BuildRevision(0), None);
+        tx.stage(AssetId(1), descriptor(payload), payload.to_vec())
+            .unwrap();
+        tx.commit().unwrap();
+        let journal_path = dir.join("transactions/journal.bin");
+        let mut journal = OpenOptions::new().append(true).open(&journal_path).unwrap();
+        journal.write_all(b"TXN1\x01").unwrap();
+        journal.sync_all().unwrap();
+        drop(store);
+
+        let reopened = RevisionStore::open(&dir).unwrap();
+        assert_eq!(
+            reopened.transaction_state(BuildRevision(0)).unwrap(),
+            TransactionState::Committed
+        );
+        let journal_len = fs::metadata(journal_path).unwrap().len();
+        assert_eq!(
+            journal_len,
+            crate::journal::FILE_HEADER_LEN as u64 + 2 * crate::journal::FRAME_SIZE as u64
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reopening_fails_closed_on_a_corrupt_journal_frame() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let payload = b"corrupt journal frame";
+        let mut tx = store.begin(BuildRevision(0), None);
+        tx.stage(AssetId(1), descriptor(payload), payload.to_vec())
+            .unwrap();
+        tx.commit().unwrap();
+        let journal_path = dir.join("transactions/journal.bin");
+        let mut journal_bytes = fs::read(&journal_path).unwrap();
+        journal_bytes[crate::journal::FILE_HEADER_LEN + crate::journal::FRAME_HEADER_LEN] ^= 0x80;
+        fs::write(&journal_path, journal_bytes).unwrap();
+        drop(store);
+
+        assert!(matches!(
+            RevisionStore::open(&dir),
+            Err(PublishError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
+        ));
         fs::remove_dir_all(dir).unwrap();
     }
 

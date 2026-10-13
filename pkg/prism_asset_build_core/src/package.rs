@@ -29,6 +29,11 @@ pub struct AssetPackageMapping {
     pub asset: AssetId,
     pub guid: StableGuid,
     pub container_name: String,
+    /// Priority recorded in the runtime manifest. Higher values win overlay
+    /// resolution; it is part of the package contract, not writer metadata.
+    pub priority: i32,
+    /// Scheduling priority used by the deterministic chunk planner.
+    pub chunk_priority: u32,
 }
 
 /// Inputs consumed by [`package_runtime`].
@@ -60,6 +65,10 @@ impl Default for PackageOptions {
 /// Each value is exactly the output of one [`ContainerWriter::finish`] call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePackage {
+    /// Digest of the canonical build manifest used to produce this package.
+    /// Publication refuses to combine a package with a different revision
+    /// manifest.
+    pub source_manifest_hash: ContentHash,
     pub containers: BTreeMap<String, Vec<u8>>,
     pub runtime_manifest: RuntimeManifest,
     pub runtime_manifest_bytes: Vec<u8>,
@@ -410,7 +419,7 @@ pub fn package_runtime_with_options(
             .insert(ManifestRoute {
                 guid: mapping.guid,
                 container_name: mapping.container_name.clone(),
-                priority: 0,
+                priority: mapping.priority,
                 container_guid: mapping.guid,
             })
             .map_err(PackageError::RuntimeManifest)?;
@@ -513,7 +522,7 @@ pub fn package_runtime_with_options(
                 size: descriptor.byte_len,
                 alignment: u64::from(descriptor.alignment),
                 dependencies: local_dependencies,
-                priority: 0,
+                priority: mapping.chunk_priority,
             });
 
         writers
@@ -546,6 +555,7 @@ pub fn package_runtime_with_options(
         .encode()
         .map_err(PackageError::RuntimeManifest)?;
     Ok(RuntimePackage {
+        source_manifest_hash: ContentHash::digest(&manifest.canonical_bytes()),
         containers,
         runtime_manifest,
         runtime_manifest_bytes,
@@ -604,11 +614,15 @@ mod tests {
                 asset: AssetId(1),
                 guid: StableGuid::from_u128(101),
                 container_name: "z.container".into(),
+                priority: 0,
+                chunk_priority: 0,
             },
             AssetPackageMapping {
                 asset: AssetId(2),
                 guid: StableGuid::from_u128(202),
                 container_name: "a.container".into(),
+                priority: 0,
+                chunk_priority: 0,
             },
         ];
         (manifest, cas, mappings)
@@ -625,6 +639,10 @@ mod tests {
         .unwrap();
         let decoded = RuntimeManifest::decode(&package.runtime_manifest_bytes).unwrap();
         assert_eq!(decoded, package.runtime_manifest);
+        assert_eq!(
+            package.source_manifest_hash,
+            ContentHash::digest(&manifest.canonical_bytes())
+        );
         assert_eq!(
             package.containers.keys().collect::<Vec<_>>(),
             vec!["a.container", "z.container"]

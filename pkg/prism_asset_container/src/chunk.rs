@@ -70,6 +70,10 @@ pub struct PlannedChunk {
     pub id: usize,
     /// Absolute offset once chunks are concatenated.
     pub offset: u64,
+    /// Required alignment of the chunk's absolute start. This is at least
+    /// the policy alignment and may be higher when the first payload has a
+    /// stricter absolute alignment requirement.
+    pub start_alignment: u64,
     /// Extent including internal alignment padding.
     pub raw_size: u64,
     /// Highest priority among members, useful for boot scheduling.
@@ -241,8 +245,22 @@ impl ChunkPlanner {
         for guid in order {
             let input = &by_guid[&guid];
             let alignment = policy.chunk_alignment.max(input.alignment);
+            // First-fit is intentionally deterministic, but it must not be
+            // allowed to place a dependent into an earlier chunk merely
+            // because that chunk still has room. Topological processing only
+            // orders the planning pass; physical chunk order is the order in
+            // which the chunks are emitted. Therefore a payload may start in
+            // the latest chunk containing any direct dependency (or later).
+            // Dependencies in the same chunk are already before this payload
+            // because `order` is topological.
+            let first_allowed_chunk = input
+                .dependencies
+                .iter()
+                .map(|dependency| assignments[dependency])
+                .max()
+                .unwrap_or(0);
             let mut placed = false;
-            for chunk in &mut chunks {
+            for chunk in chunks.iter_mut().skip(first_allowed_chunk) {
                 let offset = align_up(chunk.raw_size, alignment)?;
                 let end = offset
                     .checked_add(input.size)
@@ -268,10 +286,12 @@ impl ChunkPlanner {
                 }
                 let id = chunks.len();
                 let offset = 0;
+                let start_alignment = alignment;
                 let raw_size = input.size;
                 chunks.push(PlannedChunk {
                     id,
                     offset: 0,
+                    start_alignment,
                     raw_size,
                     priority: input.priority,
                     placements: vec![ChunkPlacement {
@@ -286,7 +306,7 @@ impl ChunkPlanner {
 
         let mut absolute = 0;
         for chunk in &mut chunks {
-            absolute = align_up(absolute, policy.chunk_alignment)?;
+            absolute = align_up(absolute, chunk.start_alignment)?;
             chunk.offset = absolute;
             absolute = absolute
                 .checked_add(chunk.raw_size)

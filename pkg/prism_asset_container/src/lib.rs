@@ -13,6 +13,7 @@ mod format;
 mod manifest;
 mod manifest_reader;
 mod overlay;
+mod range_source;
 mod reader;
 mod writer;
 
@@ -25,6 +26,7 @@ pub use manifest::{
 };
 pub use manifest_reader::{ManifestReadError, ManifestReader};
 pub use overlay::{MountedContainer, OverlaySet};
+pub use range_source::{FileRangeSource, MemoryRangeSource, RangeSource, RangeSourceError};
 pub use reader::ContainerReader;
 pub use writer::{ContainerWriter, WriteEntry};
 
@@ -101,6 +103,27 @@ impl prism_asset::AssetReader for ManifestAssetReader {
             len,
             size: 0,
         })?;
+        // Validate the caller's range against the manifest entry before
+        // allocating.  A remote or malformed caller must not be able to turn
+        // an invalid u64 request into an unbounded Vec allocation.
+        let entry = self
+            .bound()?
+            .entry_info(guid)
+            .map_err(|error| prism_asset::ReadError::Io(error.to_string()))?;
+        let end = offset
+            .checked_add(len)
+            .ok_or(prism_asset::ReadError::OutOfRange {
+                offset,
+                len,
+                size: entry.raw_len,
+            })?;
+        if end > entry.raw_len {
+            return Err(prism_asset::ReadError::OutOfRange {
+                offset,
+                len,
+                size: entry.raw_len,
+            });
+        }
         let mut out = vec![0; len_usize];
         self.bound()?
             .read_range(guid, offset, &mut out)

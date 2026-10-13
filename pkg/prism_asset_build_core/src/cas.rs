@@ -45,7 +45,7 @@ pub struct ContentAddressedStore {
 impl ContentAddressedStore {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, CasError> {
         let root = root.into();
-        fs::create_dir_all(&root)?;
+        create_dir_all_durable(&root)?;
         Ok(Self { root })
     }
 
@@ -144,6 +144,41 @@ fn sync_directory(path: &Path) -> Result<(), CasError> {
     #[cfg(not(unix))]
     {
         let _ = path;
+    }
+    Ok(())
+}
+
+/// Creates the CAS root and persists each newly-created directory entry in
+/// its parent. Syncing only the shard and CAS root during `put` is not enough
+/// when this public store is opened outside `RevisionStore`: after a crash,
+/// the files could be durable while the CAS root's own parent entry is not.
+fn create_dir_all_durable(path: &Path) -> Result<(), CasError> {
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        cursor = cursor.parent().ok_or_else(|| {
+            CasError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "CAS path has no existing ancestor",
+            ))
+        })?;
+    }
+    if !cursor.is_dir() {
+        return Err(CasError::Io(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "existing CAS ancestor is not a directory",
+        )));
+    }
+    fs::create_dir_all(path)?;
+    for created in missing {
+        let parent = created.parent().ok_or_else(|| {
+            CasError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "created CAS directory has no parent",
+            ))
+        })?;
+        sync_directory(parent)?;
     }
     Ok(())
 }

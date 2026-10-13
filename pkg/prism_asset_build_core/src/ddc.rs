@@ -7,7 +7,7 @@
 use crate::types::{ArtifactDescriptor, ArtifactKey, ContentHash};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -73,9 +73,10 @@ impl From<io::Error> for DdcError {
 /// handles in this process, reloads the latest index, then publishes a synced
 /// temporary file through [`tempfile::NamedTempFile::persist`]. On POSIX, the
 /// containing directory is synced after replacement. The index is deliberately
-/// not advertised as a cross-process transaction store: use one owner process
-/// (or an external workspace lease) when multiple build workers share a
-/// directory. `get`, `len`, and `is_empty` report this handle's last snapshot
+/// uses a stable advisory file lock to coordinate read-modify-write updates
+/// across Unix processes. Other platforms retain the single-owner-process
+/// contract unless an external workspace lease is used. `get`, `len`, and
+/// `is_empty` report this handle's last snapshot
 /// until it mutates or is reopened. The cache is independent from the CAS.
 ///
 /// Temporary files are never reaped here, because deleting another process's
@@ -100,6 +101,7 @@ impl DerivedDataCache {
         let root = root.into();
         fs::create_dir_all(&root)?;
         let _lock = process_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _file_lock = DdcFileLock::acquire(&root)?;
         let entries = read_index(&root.join("index.ddc"))?;
         Ok(Self { root, entries })
     }
@@ -137,6 +139,7 @@ impl DerivedDataCache {
     ) -> Result<(), DdcError> {
         validate_entry(key, &descriptor)?;
         let _lock = process_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _file_lock = DdcFileLock::acquire(&self.root)?;
         let mut current = read_index(&self.index_path())?;
         if let Some(existing) = current.get(&key) {
             if existing == &descriptor {
@@ -164,6 +167,7 @@ impl DerivedDataCache {
     /// no-op, which makes invalidation safe to repeat.
     pub fn invalidate(&mut self, key: ArtifactKey) -> Result<bool, DdcError> {
         let _lock = process_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _file_lock = DdcFileLock::acquire(&self.root)?;
         let mut current = read_index(&self.index_path())?;
         if !current.contains_key(&key) {
             self.entries = current;
@@ -187,6 +191,43 @@ impl DerivedDataCache {
 
 fn process_lock() -> &'static Mutex<()> {
     PROCESS_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Cross-process lease for DDC index mutations. Each process opens the same
+/// stable lock file, while the process-local mutex above also orders handles
+/// in this process (flock semantics are tied to open file descriptions).
+#[cfg(unix)]
+struct DdcFileLock(File);
+
+#[cfg(unix)]
+impl DdcFileLock {
+    fn acquire(root: &Path) -> Result<Self, DdcError> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(root.join(".index.ddc.lock"))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(|error| DdcError::Io(io::Error::from(error)))?;
+        Ok(Self(file))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DdcFileLock {
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
+}
+
+#[cfg(not(unix))]
+struct DdcFileLock;
+
+#[cfg(not(unix))]
+impl DdcFileLock {
+    fn acquire(_root: &Path) -> Result<Self, DdcError> {
+        Ok(Self)
+    }
 }
 
 fn read_index(path: &Path) -> Result<BTreeMap<ArtifactKey, ArtifactDescriptor>, DdcError> {

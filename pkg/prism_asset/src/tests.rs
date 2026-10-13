@@ -7,6 +7,7 @@ use crate::{
     AssetError, AssetErrorId, AssetEvent, AssetId, AssetIndex, AssetPath, Assets, DependencyError,
     DependencyGraph, ErrorRegistry, LoadState, RecursiveDependencyLoadState, UntypedAssetId,
 };
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -1673,6 +1674,7 @@ mod server {
     };
     use alloc::string::ToString;
     use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     /// Primary asset: a mesh produced from a `scene` or `cyc` source.
     #[derive(Debug, PartialEq, Eq)]
@@ -1720,6 +1722,26 @@ mod server {
         }
     }
 
+    /// Emits a different labeled output on each source revision. This makes
+    /// removed-label semantics observable without changing the primary type.
+    struct RevisionedSceneLoader;
+    impl AssetLoader for RevisionedSceneLoader {
+        type Asset = Mesh;
+        fn extensions(&self) -> &'static [&'static str] {
+            &["revisioned"]
+        }
+        fn load(&self, bytes: &[u8], ctx: &mut LoadContext) -> Result<Mesh, LoadError> {
+            if bytes.is_empty() {
+                return Err(LoadError::Malformed("empty revisioned scene".to_string()));
+            }
+            let label = if bytes[0] == b'A' { "chunk0" } else { "chunk1" };
+            ctx.add_labeled_asset(label, Chunk { tag: bytes[0] });
+            Ok(Mesh {
+                verts: bytes.len() as u32,
+            })
+        }
+    }
+
     /// Produces an [`Image`] leaf with no dependencies.
     struct ImageLoader;
     impl AssetLoader for ImageLoader {
@@ -1728,6 +1750,24 @@ mod server {
             &["img"]
         }
         fn load(&self, _bytes: &[u8], _ctx: &mut LoadContext) -> Result<Image, LoadError> {
+            Ok(Image)
+        }
+    }
+
+    /// Consumer that records each assembly and depends on a source-owned
+    /// labeled output. Reloading the source must therefore reassemble it.
+    struct LabelConsumerLoader(Arc<AtomicUsize>);
+    impl AssetLoader for LabelConsumerLoader {
+        type Asset = Image;
+        fn extensions(&self) -> &'static [&'static str] {
+            &["consumer"]
+        }
+        fn load(&self, _bytes: &[u8], ctx: &mut LoadContext) -> Result<Image, LoadError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            ctx.add_typed_dependency(
+                AssetPath::parse("hero.scene#chunk0"),
+                AssetTypeId::of::<Chunk>(),
+            );
             Ok(Image)
         }
     }
@@ -1859,6 +1899,74 @@ mod server {
             Some(b'Z')
         );
         assert_eq!(server.with_asset(mesh.id(), |mesh| mesh.verts), Some(1));
+    }
+
+    #[test]
+    fn source_reload_reassembles_consumers_of_its_labeled_outputs() {
+        let decodes = Arc::new(AtomicUsize::new(0));
+        let server = AssetServer::new();
+        server.register_loader(SceneLoader);
+        server.register_loader(ImageLoader);
+        server.register_loader(LabelConsumerLoader(Arc::clone(&decodes)));
+        let mut initial = MemSource::new();
+        initial.insert("hero.scene", b"A".to_vec());
+        initial.insert("tex.img", b"img".to_vec());
+        initial.insert("consumer.consumer", b"consumer".to_vec());
+        server.mount("mem", Arc::new(initial), 0);
+
+        let consumer = server.load::<Image>("consumer.consumer");
+        assert_eq!(decodes.load(Ordering::SeqCst), 1);
+
+        let mut revised = MemSource::new();
+        revised.insert("hero.scene", b"Z".to_vec());
+        revised.insert("tex.img", b"img".to_vec());
+        revised.insert("consumer.consumer", b"consumer".to_vec());
+        server.mount("mem", Arc::new(revised), 0);
+
+        assert!(server.reload("hero.scene").is_some());
+        assert_eq!(decodes.load(Ordering::SeqCst), 2);
+        assert_eq!(server.load_state(consumer.untyped_id()), LoadState::Loaded);
+    }
+
+    #[test]
+    fn reload_retires_labels_removed_by_the_new_source_revision() {
+        let server = AssetServer::new();
+        server.register_loader(RevisionedSceneLoader);
+        let mut initial = MemSource::new();
+        initial.insert("hero.revisioned", b"A".to_vec());
+        server.mount("mem", Arc::new(initial), 0);
+
+        let source = server.load::<Mesh>("hero.revisioned");
+        let old_label = server
+            .load_untyped("hero.revisioned#chunk0")
+            .expect("initial label should exist");
+        assert_eq!(server.load_state(old_label.id()), LoadState::Loaded);
+        assert_eq!(
+            server.with_asset(old_label.id().typed::<Chunk>().unwrap(), |chunk| chunk.tag),
+            Some(b'A')
+        );
+
+        let mut revised = MemSource::new();
+        revised.insert("hero.revisioned", b"B".to_vec());
+        server.mount("mem", Arc::new(revised), 0);
+
+        assert_eq!(
+            server.reload("hero.revisioned").map(|handle| handle.id()),
+            Some(source.untyped_id())
+        );
+        assert!(matches!(
+            server.load_state(old_label.id()),
+            LoadState::Failed(_)
+        ));
+        assert_eq!(
+            server.with_asset(old_label.id().typed::<Chunk>().unwrap(), |chunk| chunk.tag),
+            None
+        );
+        assert!(server.load_untyped("hero.revisioned#chunk0").is_none());
+        let new_label = server
+            .load_untyped("hero.revisioned#chunk1")
+            .expect("new revision label should exist");
+        assert_eq!(server.load_state(new_label.id()), LoadState::Loaded);
     }
 
     #[test]

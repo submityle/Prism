@@ -12,7 +12,8 @@ use crate::{
 pub struct MountedContainer {
     /// Larger values take precedence over smaller values.
     pub priority: i32,
-    /// Caller-provided name. `unmount` removes every mount with this name.
+    /// Caller-provided name. Mounting the same name replaces the previous
+    /// generation, so a remount cannot leave stale GUID winners reachable.
     pub name: String,
     /// Immutable reader whose bytes and TOC have been validated.
     pub reader: ContainerReader,
@@ -35,9 +36,11 @@ impl OverlaySet {
 
     /// Mounts a container. Higher priority wins; ties go to the latest mount.
     pub fn mount(&mut self, name: impl Into<String>, priority: i32, reader: ContainerReader) {
+        let name = name.into();
+        self.mounts.retain(|mount| mount.name != name);
         self.mounts.push(MountedContainer {
             priority,
-            name: name.into(),
+            name,
             reader,
         });
         self.rebuild();

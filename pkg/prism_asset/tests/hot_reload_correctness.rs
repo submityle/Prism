@@ -4,6 +4,8 @@
 //! public loading contract with a source overlay and proves that a failed
 //! reload does not destroy the last known-good payload.
 
+#![cfg(feature = "std")]
+
 extern crate alloc;
 
 use alloc::sync::Arc;

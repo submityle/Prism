@@ -163,7 +163,13 @@ impl ContainerWriter {
         let mut placements = BTreeMap::new();
         let mut previous_chunk_end = 0_u64;
         for (index, chunk) in plan.chunks.iter().enumerate() {
-            let expected_chunk_offset = align_up(previous_chunk_end, chunk_alignment)?;
+            if chunk.start_alignment == 0 || !chunk.start_alignment.is_power_of_two() {
+                return Err(ContainerError::InvalidDirectory);
+            }
+            let expected_chunk_offset = align_up(
+                previous_chunk_end,
+                chunk_alignment.max(chunk.start_alignment),
+            )?;
             if chunk.id != index || chunk.offset != expected_chunk_offset {
                 return Err(ContainerError::InvalidDirectory);
             }
@@ -220,9 +226,15 @@ impl ContainerWriter {
         let directory_end = HEADER_SIZE
             .checked_add(directory_len)
             .ok_or(ContainerError::IntegerOverflow)?;
+        let payload_alignment = plan
+            .chunks
+            .iter()
+            .fold(chunk_alignment, |alignment, chunk| {
+                alignment.max(chunk.start_alignment)
+            });
         let payload_start = align_up(
             u64::try_from(directory_end).map_err(|_| ContainerError::IntegerOverflow)?,
-            chunk_alignment,
+            payload_alignment,
         )?;
 
         let mut records = Vec::with_capacity(directory_len);

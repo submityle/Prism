@@ -86,6 +86,8 @@ pub enum ContainerError {
     InvalidAlignment,
     /// The caller-provided output buffer has an invalid length.
     LengthMismatch,
+    /// The backing range source failed while serving a request.
+    Source(String),
 }
 
 impl fmt::Display for ContainerError {
@@ -105,6 +107,7 @@ impl fmt::Display for ContainerError {
             Self::InvalidRange => f.write_str("requested asset range is invalid"),
             Self::InvalidAlignment => f.write_str("payload alignment is invalid"),
             Self::LengthMismatch => f.write_str("output buffer length does not match range"),
+            Self::Source(error) => write!(f, "container range source failed: {error}"),
         }
     }
 }

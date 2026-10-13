@@ -5,6 +5,8 @@
 
 extern crate alloc;
 
+mod journal;
+
 /// Immutable, content-addressed artifact byte storage.
 pub mod cas;
 /// Persistent local derived-data descriptor index.
@@ -19,6 +21,8 @@ pub mod hash;
 pub mod job;
 /// Deterministic bridge from build manifests/CAS blobs to runtime containers.
 pub mod package;
+/// Immutable binding between a build revision and its runtime package outputs.
+pub mod publication;
 /// Revision manifests and atomic local publication.
 pub mod transaction;
 /// Stable IDs, hashes, descriptors, and manifest protocol types.
@@ -36,7 +40,10 @@ pub use package::{
     package_runtime, package_runtime_with_options, AssetPackageMapping, PackageError,
     PackageOptions, PackageRequest, RuntimePackage,
 };
-pub use transaction::{PublishError, PublishTransaction, PublishedManifest, RevisionStore};
+pub use publication::{PublicationDescriptor, PublishedContainer};
+pub use transaction::{
+    PublishError, PublishTransaction, PublishedManifest, RevisionStore, TransactionState,
+};
 pub use types::{
     ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, ContentHash, Manifest, ManifestEntry,
 };
