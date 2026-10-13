@@ -148,28 +148,29 @@ fn region_illumination_selector(material_index: u32, uv: vec2<f32>) -> u32 {
                             if record.generation != 0u
                                 && record.index < arrayLength(&material_texture_generation_table)
                                 && record.sampler_index < arrayLength(&material_texture_generation_table) {
-                                if material_texture_generation_table[record.index] != record.generation {
+                                if material_texture_generation_table[record.index] == record.generation {
+                                    // A level-zero, linearly filtered sample is
+                                    // intentional: this categorical mask has no
+                                    // derivatives in visibility, and filtering
+                                    // gives stable sub-texel region boundaries.
+                                    // The producer's sampler controls address mode.
+                                    let mask = textureSampleLevel(
+                                        material_texture_heap[record.index],
+                                        material_sampler_heap[record.sampler_index],
+                                        uv,
+                                        0.0,
+                                    ).r;
+                                    selector = select(
+                                        REGION_ILLUMINATION_LIT,
+                                        REGION_ILLUMINATION_NPR,
+                                        mask >= 0.5,
+                                    );
+                                    // Only a validated row is terminal. A stale
+                                    // mask must not hide a later valid mask row.
                                     break;
                                 }
-                                // A level-zero, linearly filtered sample is
-                                // intentional: this categorical mask has no
-                                // derivatives in visibility, and filtering
-                                // gives stable sub-texel region boundaries.
-                                // The producer's sampler controls address mode.
-                                let mask = textureSampleLevel(
-                                    material_texture_heap[record.index],
-                                    material_sampler_heap[record.sampler_index],
-                                    uv,
-                                    0.0,
-                                ).r;
-                                selector = select(
-                                    REGION_ILLUMINATION_LIT,
-                                    REGION_ILLUMINATION_NPR,
-                                    mask >= 0.5,
-                                );
                             }
                         }
-                        break;
                     }
                 }
             }

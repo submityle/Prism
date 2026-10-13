@@ -1349,6 +1349,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > **Visibility demand seam 修订**：`visibility_demand.rs` 现在提供显式 `UV + ddx/ddy + object/material/face + chart extent` 到 `ShadePageRequest` 的确定性转换，沿用 visibility LOD 公式并拒绝非有限输入；它是 producer seam，不代表主 visibility pass 已自动接入。
 >
 > **Material-VT feedback 精度修订（2026-10-13）**：`material/virtual_texture/feedback.rs` 现在按 visibility raster 写入的 `pack2x16unorm` barycentric 元数据，先恢复真实屏幕采样点，再复用 `prism_render_visibility` 的 DAIS 透视校正 barycentric 求解，同时得到透视正确的 UV、`ddx/ddy` 与 VT mip/page demand。这样避免把透视三角形误当 affine 三角形而造成错误缺页或过度请求；回归覆盖透视三角形、UV/导数和退化/缺 UV 拒绝路径。该修复只影响反馈 demand，不改变 VT ABI 或主渲染绑定。
+>
+> **P2-e 区域 illumination 修订（本轮）**：visibility raster 的区域遮罩扫描现在仅在记录通过 generation、texture index、sampler index 校验并完成采样后终止；过期、越界或尚未发布的 mask 行会继续扫描同一材质的后续记录，避免 stale 行把有效区域遮罩错误降级为 material-wide 分类。WESL 编译门禁覆盖该终止语义。
 
 > **共享 readback 修订**：Material-VT feedback decode 现在同时填充 `ShadeDemandRegistry`，仅对 Lit/Stylized 的真实可见 face 生成请求；Unlit/Custom 不会伪造 view-independent shade page。该 registry 尚未绕过 `ShadeWriteProducer` 自动提交 GPU 工作。readback 还会校验 offset/row pitch/尺寸乘法与 ID/metadata 范围，截断或错位的 GPU buffer 会丢弃而不触发渲染线程 panic。
 
