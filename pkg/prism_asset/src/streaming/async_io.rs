@@ -158,11 +158,22 @@ impl AsyncStreamIoExecutor {
             }
 
             match result {
-                Ok(bytes) => {
+                Ok(bytes) if u64::try_from(bytes.len()).ok() == Some(request.len) => {
                     controller
                         .complete_load(id)
                         .map_err(StreamIoError::Controller)?;
                     Ok(bytes)
+                }
+                Ok(bytes) => {
+                    let error = crate::ReadError::Io(format!(
+                        "short read: requested {} bytes, received {}",
+                        request.len,
+                        bytes.len()
+                    ));
+                    controller
+                        .fail(id, StreamFailure::Read)
+                        .map_err(StreamIoError::Controller)?;
+                    Err(StreamIoError::Read { id, error })
                 }
                 Err(error) => {
                     controller
@@ -315,6 +326,28 @@ mod tests {
         reads: Arc<AtomicUsize>,
     }
 
+    struct ShortReadSource {
+        bytes: &'static [u8],
+    }
+
+    impl AssetReader for ShortReadSource {
+        fn read(&self, _path: &str) -> Result<Vec<u8>, ReadError> {
+            Ok(self.bytes.to_vec())
+        }
+
+        fn read_range(&self, _path: &str, _offset: u64, _len: u64) -> Result<Vec<u8>, ReadError> {
+            Ok(self.bytes.to_vec())
+        }
+
+        fn metadata(&self, _path: &str) -> Result<AssetMeta, ReadError> {
+            Ok(AssetMeta {
+                size: self.bytes.len() as u64,
+                modified_ms: None,
+                is_dir: false,
+            })
+        }
+    }
+
     impl AssetReader for BlockingSource {
         fn read(&self, _path: &str) -> Result<Vec<u8>, ReadError> {
             self.reads.fetch_add(1, Ordering::SeqCst);
@@ -415,6 +448,30 @@ mod tests {
         assert_eq!(executor.pool().block_on(task).unwrap(), b"cde");
         assert_eq!(executor.state(id), Some(StreamState::Resident));
         assert_eq!(executor.used(), Residency::new(3, 3, 3));
+    }
+
+    #[test]
+    fn short_async_range_read_fails_and_releases_all_residency() {
+        let mut sources = AssetSources::new();
+        sources.mount("short", Arc::new(ShortReadSource { bytes: b"abc" }), 0);
+        let executor = AsyncStreamIoExecutor::new(
+            Arc::new(sources),
+            StreamingController::new(ResidencyLimits::new(16, 16, 16)),
+            TaskPool::with_threads(2),
+        );
+        let id = executor.submit(request("short://hero.bin", 5)).unwrap();
+        let task = executor.execute(id).unwrap();
+
+        let error = executor.pool().block_on(task).unwrap_err();
+        assert!(matches!(
+            error,
+            StreamIoError::Read {
+                id: actual,
+                error: ReadError::Io(message),
+            } if actual == id && message == "short read: requested 5 bytes, received 3"
+        ));
+        assert_eq!(executor.state(id), Some(StreamState::Failed));
+        assert_eq!(executor.used(), Residency::default());
     }
 
     #[test]
