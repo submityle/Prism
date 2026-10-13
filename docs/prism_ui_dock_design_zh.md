@@ -356,6 +356,7 @@ let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例�
 - ⬜ **窗口/GPU submission host 仍未交付**:GPU rasterizer 与真实 parity 已验证，但窗口 surface、overlay portal、命中测试接线、focus/a11y 和应用级 frame submission 仍由上层 UI host 完成。
 - ✅ **Dock Element 的真实 GPU parity 验证已交付**:`pkg/prism_ui_render_backend/tests/dock_gpu_parity.rs` 将 `DockView` 产出的 Element 经过 Loom layout 和 draw list，比较 CPU golden 与真实 wgpu rasterizer；320×220 Dock（含玻璃面板、标题 glyph、split）在授权的真实设备运行中通过，最大通道差在 `2e-3` 阈值内。GPU feature 下 CPU golden 自动使用与 shader 相同的 SDF 文本 tier；默认 CPU-only 构建仍保留 vector tier。
 - ✅ **M2 纯数据拖拽内核已交付**:`drag` 提供确定性拖拽状态机、五向 drop zone、tab 插入边界和 reducer action 映射；当前测试覆盖状态机与边界行为。overlay 预览和真实 UI hit-test/render 集成尚未交付。
+- ✅ **M2 drop-preview 几何接缝已交付**:`resolve_drop_preview` 将 `DropZone` 与已求解的 `RenderPlan` panel/document/tab rect 连接为 deterministic `DropPreview`，覆盖 center/split/tab-insert、目标缺失和索引越界错误；portal Element、pointer dispatch 与实际 reducer commit 仍由上层 host 接线。
 - ✅ **M4 persistence core 已交付**:`pkg/prism_ui_dock::encode_layout`/`decode_layout` 提供带 magic/version 的确定性二进制布局编码、checked 长度/深度/节点预算、UTF-8 与枚举校验、解码后模型不变量校验，以及带已知 panel/document 注册表的未知 ID 过滤和安全分支折叠；主树、浮窗、autohide、maximize restore 均可 round-trip。最大化状态要求当前可见面严格收敛为快照中的唯一面板，并由 model/persistence validation 在进入 renderer 前拒绝非法恢复态。该切片不提供文件 IO、schema 迁移链或自动保存。
 - ✅ **Workspace / Perspective 纯数据管理已交付**:`WorkspaceManager`、`Workspace` 与 `Perspective` 按确定性插入顺序管理命名布局；拒绝空白/重复名称，并以 `DockLayout` 深拷贝隔离保存与切换边界。该切片只负责内存中的选择与快照，不提供文件 IO、自动保存、factory 或 renderer。
 - ✅ **Workspace 持久化 codec 已交付**:`encode_workspace`/`decode_workspace` 提供带 magic/version 的稳定 Workspace/Perspective 快照，逐个复用布局 codec，执行 active 引用、资源上限、UTF-8、枚举、截断和尾随字节校验；`decode_workspace_with_registry` 将 `PanelRegistry` 作为嵌套布局的 panel allow-list。该切片只处理内存字节。
@@ -366,7 +367,7 @@ let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例�
 - ✅ **Workspace 默认布局重置接线已交付**:`WorkspaceManager::reset_active_perspective_to_default` 与 `reset_perspective_to_default` 在提交前完整物化并校验 Registry 默认布局，成功后以深拷贝替换目标 perspective；策略错误、无活动 perspective 或未知名称均返回结构化错误且不留下半成品状态。
 - ⬜ **M3–M5 其余能力仍 PLANNED**:`store`、`a11y` 以及动画/多显示器/撤销集成。完整 UI 装配和 renderer 集成仍属于后续工作，不因 M1 计划数据或 persistence core 已存在而视为完成。
 - ⬜ **依赖未落地项**:撤销集成需编辑器命令内核;多显示器校正需平台/`prism_window` 层;动效档位依赖性能分级。
-- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核、M1 renderer-independent render plan、`render` feature 下的 Element 装配、`ElementRenderer` retained draw-list host、Dock Element 的真实 GPU parity、M4 persistence core、Workspace/Perspective 纯数据管理、codec、`std` 文件存储边界、host-driven autosave、Registry 基础契约及 Registry → 默认布局物化；布局校验会在 renderer 消费前拒绝非法 maximize 恢复态。窗口/GPU submission host、overlay 预览、schema 迁移和上层 focus/a11y 接线仍未交付。
+- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核与 drop-preview 几何接缝、M1 renderer-independent render plan、`render` feature 下的 Element 装配、`ElementRenderer` retained draw-list host、Dock Element 的真实 GPU parity、M4 persistence core、Workspace/Perspective 纯数据管理、codec、`std` 文件存储边界、host-driven autosave、Registry 基础契约及 Registry → 默认布局物化；布局校验会在 renderer 消费前拒绝非法 maximize 恢复态。窗口/GPU submission host、portal overlay/pointer dispatch、schema 迁移和上层 focus/a11y 接线仍未交付。
 
 ---
 

@@ -14,6 +14,7 @@ extern crate alloc;
 mod autosave;
 mod default_layout;
 mod drag;
+mod drop_preview;
 mod model;
 mod persist;
 mod reducer;
@@ -35,6 +36,7 @@ pub use drag::{
     calculate_drop_zone, map_drop_action, tab_insertion_index, transition, DragError, DragEvent,
     DragState, DropMapError, DropZone, PointerPosition,
 };
+pub use drop_preview::{resolve_drop_preview, DropPreview, DropPreviewError};
 pub use model::{
     AutoHideBars, AutoHideEntry, Axis, DockLayout, DockNode, DocumentId, FloatingWindow,
     MaximizeRestore, PanelId, Ratio, Rect, Side, SplitChild,
