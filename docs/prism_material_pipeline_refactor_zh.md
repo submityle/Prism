@@ -1156,7 +1156,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 > **汇总口径更正**：本段上方较早的“未开始”总览尚未完全同步（其中 P1-d 引擎侧已完成、P2-a 已部分完成）；进度以本节审计表及逐项实现记录为准。
 >
-> **P2-a 状态修订（2026-10-13）**：`pkg/prism_render_material_authoring` 已不再是空 crate。首片已实现受限 MaterialX IR、OpenPBR/Standard Surface 到 `prism_render_material::GpuSurfaceParameters` 的 loss-aware adapter，以及“支持字段 / 未支持字段 / 不安全任意图连接”三类边界；16 项定向测试通过。完整任意图求值、节点图 bake/VT、`author_node`/`nodedef` 实例、archetype 模板和编辑器集成仍未完成，不能将本首片记为完整 P2-a。
+> **P2-a 状态修订（2026-10-13）**：`pkg/prism_render_material_authoring` 已不再是空 crate。当前已实现受限 MaterialX IR、OpenPBR/Standard Surface 到 `prism_render_material::GpuSurfaceParameters` 的 loss-aware adapter，以及显式导出的 `evaluate_connection` 纯数值求值器（add/subtract/multiply/divide/mix/clamp/convert、图引用、环检测、维度与有限值校验）；不支持的程序化节点返回 `UnsafeConnection`，不会静默回退。adapter 仍只接受有明确材质字段契约的常量输入，任意图连接继续拒绝；19 项定向测试通过。完整节点图 bake/VT、`author_node`/`nodedef` 实例、archetype 模板和编辑器集成仍未完成，不能将本首片记为完整 P2-a。
 
 
 #### 13.a.1 code-truth 审计（剩余路线图项 · 逐项证据）
@@ -1350,7 +1350,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 >
 > **Material-VT feedback 精度修订（2026-10-13）**：`material/virtual_texture/feedback.rs` 现在按 visibility raster 写入的 `pack2x16unorm` barycentric 元数据，先恢复真实屏幕采样点，再复用 `prism_render_visibility` 的 DAIS 透视校正 barycentric 求解，同时得到透视正确的 UV、`ddx/ddy` 与 VT mip/page demand。这样避免把透视三角形误当 affine 三角形而造成错误缺页或过度请求；回归覆盖透视三角形、UV/导数和退化/缺 UV 拒绝路径。该修复只影响反馈 demand，不改变 VT ABI 或主渲染绑定。
 
-> **共享 readback 修订**：Material-VT feedback decode 现在同时填充 `ShadeDemandRegistry`，仅对 Lit/Stylized 的真实可见 face 生成请求；Unlit/Custom 不会伪造 view-independent shade page。该 registry 尚未绕过 `ShadeWriteProducer` 自动提交 GPU 工作。
+> **共享 readback 修订**：Material-VT feedback decode 现在同时填充 `ShadeDemandRegistry`，仅对 Lit/Stylized 的真实可见 face 生成请求；Unlit/Custom 不会伪造 view-independent shade page。该 registry 尚未绕过 `ShadeWriteProducer` 自动提交 GPU 工作。readback 还会校验 offset/row pitch/尺寸乘法与 ID/metadata 范围，截断或错位的 GPU buffer 会丢弃而不触发渲染线程 panic。
 
 > **Shade demand provenance 修订**：registry 现在保留 `geometry_index + FaceChart + ShadePageRequest`，后续 job builder 可以使用真实 geometry/chart；directional-light selection 仍是独立显式策略，不会由 feedback 路径猜测。
 

@@ -1,0 +1,14 @@
+[package]
+name = "prism_render_material_authoring"
+version = "0.1.0"
+edition = "2024"
+description = "MaterialX authoring frontend and structured IR for Prism materials"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+roxmltree = "0.21.1"
+prism_render_material = { path = "../prism_render_material" }
+
+[lints]
+workspace = true

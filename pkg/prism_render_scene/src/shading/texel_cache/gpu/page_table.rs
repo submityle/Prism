@@ -295,6 +295,26 @@ impl ShadePageTableSnapshot {
         self.indices.get(&key).copied()
     }
 
+    /// Resolves a page using the same coarse-mip fallback promised to the
+    /// resolve consumer. The returned key is the resident key that was found,
+    /// which lets the caller derive the corresponding coarser UV footprint
+    /// instead of accidentally sampling a fine page with stale coordinates.
+    ///
+    /// Fallback never crosses object/material/face/channel identity because
+    /// [`ShadePageKey::coarsen`] only changes mip and page coordinates. A
+    /// `max_delta` of zero is therefore an exact-only lookup.
+    #[must_use]
+    pub fn page_index_with_fallback(
+        &self,
+        key: ShadePageKey,
+        max_delta: u8,
+    ) -> Option<(ShadePageKey, u32)> {
+        (0..=max_delta).find_map(|delta| {
+            let candidate = key.coarsen(delta);
+            self.page_index(candidate).map(|index| (candidate, index))
+        })
+    }
+
     /// Revalidates the CPU/GPU alignment invariants of this snapshot.
     #[must_use]
     pub fn validate(&self) -> Result<(), ShadePageTableError> {
@@ -1042,6 +1062,35 @@ mod tests {
             epoch: 7,
         };
         assert!(ShadePageTableRecord::from_handle(key, handle, layout).is_none());
+    }
+
+    #[test]
+    fn lookup_falls_back_only_to_same_identity_at_a_coarser_mip() {
+        let mut fine = record(1, 0, 0);
+        fine.key.mip = 2;
+        fine.key.page_x = 3;
+        fine.key.page_y = 1;
+        let mut coarse = fine;
+        coarse.handle.slot = 1;
+        coarse.handle.generation = 11;
+        coarse.atlas_x = 4;
+        coarse.key.mip = 3;
+        coarse.key.page_x = 1;
+        coarse.key.page_y = 0;
+        let snapshot = ShadePageTableSnapshot::try_from_records(7, [coarse]).unwrap();
+
+        assert_eq!(snapshot.page_index(fine.key), None);
+        assert_eq!(
+            snapshot.page_index_with_fallback(fine.key, 1),
+            Some((coarse.key, 0))
+        );
+
+        let mut different_material = fine.key;
+        different_material.material_id += 1;
+        assert_eq!(
+            snapshot.page_index_with_fallback(different_material, 8),
+            None
+        );
     }
 
     #[test]

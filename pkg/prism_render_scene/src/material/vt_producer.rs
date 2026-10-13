@@ -369,7 +369,10 @@ fn source_page_map(
     let mut map = BTreeMap::new();
     for (_, _, snapshot) in entries {
         let Some(source) = snapshot else { continue };
-        if source.descriptor().page_size() != atlas.page_size()
+        // Keep every VT producer entry point aligned with the row ABI: the
+        // current shader can address only source layer zero.
+        if source.descriptor().layers() != 1
+            || source.descriptor().page_size() != atlas.page_size()
             || source.descriptor().format() != atlas.format()
         {
             continue;
@@ -458,7 +461,10 @@ fn build_residency(
     let mut pages = Vec::new();
     for (_, _, snapshot) in entries {
         let Some(source) = snapshot else { continue };
-        if source.descriptor().page_size() != atlas.page_size()
+        // The scene material row ABI carries no source-array layer, and the
+        // shader requests layer zero. Do not publish unreachable layer>0 pages.
+        if source.descriptor().layers() != 1
+            || source.descriptor().page_size() != atlas.page_size()
             || source.descriptor().format() != atlas.format()
         {
             continue;
@@ -547,6 +553,35 @@ mod tests {
         assert_eq!(records[0].slot, 0);
         assert_eq!(records[5].slot, 5);
         assert!(build_residency(&entries, atlas, 5).is_none());
+    }
+
+    #[test]
+    fn array_sources_do_not_publish_unreachable_layer_pages() {
+        let atlas = super::super::virtual_texture::MaterialVirtualTextureAtlasConfig::new(
+            4,
+            0,
+            2,
+            8,
+            MaterialVtFormat::Rgba8Unorm,
+        )
+        .expect("valid atlas");
+        let descriptor =
+            MaterialVtSourceDescriptor::new(9, 4, 4, 2, 4, 3, MaterialVtFormat::Rgba8Unorm)
+                .expect("valid two-layer source");
+        let bytes = vec![0_u8; (4 * 4 + 2 * 2 + 1) * 4 * 2];
+        let source = Arc::new(
+            MaterialVtSourceSnapshot::new(descriptor, bytes).expect("valid source payload"),
+        );
+        let entries = vec![(
+            Handle::<bevy_image::Image>::from(Uuid::from_u128(1)).id(),
+            1,
+            Some(source),
+        )];
+
+        let (records, pages) = build_residency(&entries, atlas, 8)
+            .expect("unsupported array source is skipped, not partially published");
+        assert!(records.is_empty());
+        assert!(pages.is_empty());
     }
 
     #[test]

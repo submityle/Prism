@@ -297,6 +297,36 @@ pub(crate) fn collect_material_vt_feedback(
     shade_demands.replace_records(shade_page_requests);
 }
 
+fn feedback_word_planes<'a>(
+    bytes: &'a [u8],
+    ids_offset: u64,
+    metadata_offset: u64,
+    row_pitch: u64,
+    height: u32,
+) -> Option<(usize, &'a [u32], &'a [u32])> {
+    let row_words = usize::try_from(row_pitch / 4).ok()?;
+    let row_bytes = usize::try_from(row_pitch).ok()?;
+    let image_bytes = row_bytes.checked_mul(usize::try_from(height).ok()?)?;
+    let ids_start = usize::try_from(ids_offset).ok()?;
+    let metadata_start = usize::try_from(metadata_offset).ok()?;
+    let ids_end = ids_start.checked_add(image_bytes)?;
+    let metadata_end = metadata_start.checked_add(image_bytes)?;
+    if row_words == 0
+        || row_pitch % 4 != 0
+        || ids_start % 4 != 0
+        || metadata_start % 4 != 0
+        || ids_end > bytes.len()
+        || metadata_end > bytes.len()
+    {
+        return None;
+    }
+    Some((
+        row_words,
+        bytemuck::cast_slice(&bytes[ids_start..ids_end]),
+        bytemuck::cast_slice(&bytes[metadata_start..metadata_end]),
+    ))
+}
+
 fn decode_view_feedback(
     bytes: &[u8],
     capture: &PendingView,
@@ -308,10 +338,17 @@ fn decode_view_feedback(
     output: &mut Vec<prism_render_architecture::texture_streaming::PageDemand>,
     shade_output: &mut Vec<ShadeDemandRecord>,
 ) {
-    let row_words = usize::try_from(capture.row_pitch / 4).unwrap_or(0);
-    let ids_words = bytemuck::cast_slice::<u8, u32>(&bytes[capture.ids_offset as usize..]);
-    let metadata_words =
-        bytemuck::cast_slice::<u8, u32>(&bytes[capture.metadata_offset as usize..]);
+    // Readback bytes are GPU-owned input. Treat offsets and dimensions as
+    // untrusted so a stale/partial map cannot panic the render thread.
+    let Some((row_words, ids_words, metadata_words)) = feedback_word_planes(
+        bytes,
+        capture.ids_offset,
+        capture.metadata_offset,
+        capture.row_pitch,
+        capture.size.y,
+    ) else {
+        return;
+    };
     for y in 0..capture.size.y as usize {
         for x in 0..capture.size.x as usize {
             let word = y
@@ -608,6 +645,16 @@ mod tests {
     use prism_render_architecture::gpu_scene::{
         GeometryHandle, SceneMaterialHandle, SceneTransform,
     };
+
+    #[test]
+    fn feedback_word_planes_rejects_truncated_or_misaligned_buffers() {
+        let bytes = [0_u8; 32];
+        assert!(feedback_word_planes(&bytes, 0, 16, 16, 1).is_some());
+        assert!(feedback_word_planes(&bytes[..15], 0, 16, 16, 1).is_none());
+        assert!(feedback_word_planes(&bytes, 1, 16, 16, 1).is_none());
+        assert!(feedback_word_planes(&bytes, 0, 16, 14, 1).is_none());
+        assert!(feedback_word_planes(&bytes, 0, 16, 16, 2).is_none());
+    }
 
     fn instance() -> InstanceRecord {
         InstanceRecord {
