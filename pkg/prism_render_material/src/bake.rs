@@ -180,9 +180,7 @@ impl Group {
             Self::Anisotropy => bytemuck::cast_slice(core::slice::from_ref(&block.anisotropy)),
             Self::Sheen => bytemuck::cast_slice(core::slice::from_ref(&block.sheen)),
             Self::Subsurface => bytemuck::cast_slice(core::slice::from_ref(&block.subsurface)),
-            Self::Transmission => {
-                bytemuck::cast_slice(core::slice::from_ref(&block.transmission))
-            }
+            Self::Transmission => bytemuck::cast_slice(core::slice::from_ref(&block.transmission)),
             Self::ThinFilm => bytemuck::cast_slice(core::slice::from_ref(&block.thin_film)),
             Self::Face => bytemuck::cast_slice(core::slice::from_ref(&block.face)),
             Self::Glint => bytemuck::cast_slice(core::slice::from_ref(&block.glint)),
@@ -211,9 +209,7 @@ impl Group {
             Self::ThinFilm => bytemuck::cast_slice_mut(core::slice::from_mut(&mut block.thin_film)),
             Self::Face => bytemuck::cast_slice_mut(core::slice::from_mut(&mut block.face)),
             Self::Glint => bytemuck::cast_slice_mut(core::slice::from_mut(&mut block.glint)),
-            Self::Measured => {
-                bytemuck::cast_slice_mut(core::slice::from_mut(&mut block.measured))
-            }
+            Self::Measured => bytemuck::cast_slice_mut(core::slice::from_mut(&mut block.measured)),
         }
     }
 }
@@ -259,7 +255,7 @@ pub fn bake_layer_stack(
     layers: &[SurfaceParameterBlock],
     weights: &[f32],
 ) -> (SurfaceParameterBlock, LobeMask) {
-    debug_assert_eq!(
+    assert_eq!(
         layers.len(),
         weights.len(),
         "bake_layer_stack requires one weight per layer"
@@ -659,8 +655,7 @@ mod tests {
     /// lane (padding included), so an omitted field can never go unnoticed.
     fn filled(seed: f32) -> GpuSurfaceParameters {
         let mut params = GpuSurfaceParameters::default();
-        let lanes: &mut [f32] =
-            bytemuck::cast_slice_mut(core::slice::from_mut(&mut params));
+        let lanes: &mut [f32] = bytemuck::cast_slice_mut(core::slice::from_mut(&mut params));
         for (index, lane) in lanes.iter_mut().enumerate() {
             *lane = seed + index as f32;
         }
@@ -726,10 +721,8 @@ mod tests {
         };
 
         let coat = SurfaceParameterBlock::from_full(&painted, LobeMask::CLEARCOAT);
-        let under = SurfaceParameterBlock::from_full(
-            &GpuSurfaceParameters::default(),
-            LobeMask::default(),
-        );
+        let under =
+            SurfaceParameterBlock::from_full(&GpuSurfaceParameters::default(), LobeMask::default());
         let (out, mask) = bake_layer_stack(&[coat, under], &[1.0, 1.0]);
 
         assert!(mask.contains(LobeMask::CLEARCOAT));
@@ -739,7 +732,10 @@ mod tests {
         assert_eq!(out.clearcoat.coat_roughness, 0.4);
         assert_eq!(out.clearcoat.coat_color, [0.5, 0.6, 0.7, 1.0]);
         assert_eq!(out.clearcoat.coat_weight, 0.8);
-        assert_eq!(out.core.base_color, [mid(0.9, 0.8), mid(0.1, 0.8), mid(0.1, 0.8), 1.0]);
+        assert_eq!(
+            out.core.base_color,
+            [mid(0.9, 0.8), mid(0.1, 0.8), mid(0.1, 0.8), 1.0]
+        );
     }
 
     #[test]
@@ -788,6 +784,13 @@ mod tests {
             GpuSurfaceParameters::default(),
             "the uncovered texel is the OpenPBR default surface"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "bake_layer_stack requires one weight per layer")]
+    fn mismatched_layer_weights_fail_in_release_too() {
+        let layer = SurfaceParameterBlock::default();
+        let _ = bake_layer_stack(&[layer], &[]);
     }
 
     #[test]
@@ -898,7 +901,11 @@ mod tests {
         struct LeftHalf;
         impl MaskSource for LeftHalf {
             fn shade(&self, layer: usize, texel: TexelCoord) -> f32 {
-                if layer == 0 || texel.x < 4 { 1.0 } else { 0.0 }
+                if layer == 0 || texel.x < 4 {
+                    1.0
+                } else {
+                    0.0
+                }
             }
         }
 
@@ -955,9 +962,7 @@ mod tests {
         });
         let (out, _) = stack.bake_texel(&ConstantMask::FULL, TexelCoord::new(0, 0, [1, 1]));
 
-        let expected = |a: f32, b: f32| {
-            ((0.5 * f64::from(a) + f64::from(b)) * (1.0 / 1.5)) as f32
-        };
+        let expected = |a: f32, b: f32| ((0.5 * f64::from(a) + f64::from(b)) * (1.0 / 1.5)) as f32;
         for channel in 0..4 {
             assert_eq!(
                 out.core.base_color[channel],
