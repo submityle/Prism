@@ -618,6 +618,12 @@ impl RevisionStore {
         )?)
     }
 
+    /// Reads and strictly decodes one persisted revision manifest.
+    pub fn manifest(&self, revision: BuildRevision) -> Result<Manifest, PublishError> {
+        let bytes = self.manifest_bytes(revision)?;
+        decode_manifest(&bytes, revision)
+    }
+
     /// Reads and validates the immutable publication descriptor for a revision.
     pub fn publication_bytes(&self, revision: BuildRevision) -> Result<Vec<u8>, PublishError> {
         Ok(fs::read(
