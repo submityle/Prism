@@ -53,6 +53,8 @@ pub mod layers;
 #[cfg(feature = "materialize")]
 pub mod materialize;
 #[cfg(feature = "materialize")]
+pub mod nested_runtime;
+#[cfg(feature = "materialize")]
 pub mod override_replay;
 pub mod overrides;
 pub mod path;
@@ -76,6 +78,11 @@ pub use layers::{compose_layers, OrphanKey, OverrideComposition, OverrideComposi
 pub use materialize::{
     materialize_plan, materialize_plan_with_limits, ComponentMaterializer, MaterializeError,
     MaterializeFailure, MaterializeLimits, MaterializerRegistry, RemappedEntityField, RowLayout,
+};
+#[cfg(feature = "materialize")]
+pub use nested_runtime::{
+    spawn_nested_typed, NestedInstantiateError, NestedProviderError, NestedSceneProvider,
+    NestedSpawnLimits, SceneTreeChild, SceneTreeSpawn,
 };
 #[cfg(feature = "materialize")]
 pub use override_replay::{replay_overrides, OverrideReplayError};
