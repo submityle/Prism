@@ -259,10 +259,11 @@ fn raster_glyph(fb: &mut Framebuffer, cmd: GlyphCmd, text: &str) {
     }
     #[cfg(feature = "std")]
     {
-        // Opt-in signed-distance-field text path (tier C). Gated behind an env
-        // flag so the default build keeps the analytic vector tier (B); this
-        // lets the SDF reconstruction be eyeballed and diffed at any scale.
-        if sdf_text_enabled() && raster_glyph_sdf(fb, cmd, text) {
+        // The GPU feature consumes the same atlas in its shader, so the CPU
+        // golden must use the SDF tier too; otherwise a parity test would
+        // compare different text algorithms. The default CPU-only build keeps
+        // the analytic vector tier unless the author explicitly opts in.
+        if (cfg!(feature = "gpu") || sdf_text_enabled()) && raster_glyph_sdf(fb, cmd, text) {
             return;
         }
         if raster_glyph_vector(fb, cmd, text) {

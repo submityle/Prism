@@ -22,3 +22,8 @@ gpu = ["dep:wgpu", "dep:bytemuck", "dep:futures-lite", "std"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+prism_ui_component_kit = { path = "../prism_ui_component_kit" }
+prism_ui_dock = { path = "../prism_ui_dock", features = ["render"] }
+prism_ui_theme = { path = "../prism_ui_theme" }

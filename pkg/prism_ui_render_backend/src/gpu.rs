@@ -6,6 +6,8 @@
 //! straight-alpha-over compositing as [`crate::raster::rasterize`]. Keeping the
 //! algorithm identical is what lets a parity test assert the two backends agree
 //! to within GPU floating-point rounding (see `tests/gpu_parity.rs`).
+//! With the `gpu` feature enabled, the CPU reference also selects the shared
+//! SDF text tier so glyphs are compared against the same atlas algorithm.
 //!
 //! The design follows the "CPU golden twin" pattern already used by
 //! `prism_physics_gpu`: acquisition is best-effort ([`GpuRasterizer::try_new`]
@@ -30,11 +32,10 @@ use wgpu::{
     BufferDescriptor, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
     ComputePipelineDescriptor, Device, DeviceDescriptor, Extent3d, FilterMode, Instance,
     InstanceDescriptor, InstanceFlags, MapMode, Origin3d, PipelineCompilationOptions,
-    PipelineLayoutDescriptor, PollType, Queue, RequestAdapterOptions, Sampler,
-    SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
-    TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
-    TextureViewDescriptor, TextureViewDimension,
+    PipelineLayoutDescriptor, PollType, Queue, RequestAdapterOptions, Sampler, SamplerBindingType,
+    SamplerDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, TexelCopyBufferLayout,
+    TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
 };
 
 use crate::draw::{DrawCommand, DrawList, GlyphCmd};
