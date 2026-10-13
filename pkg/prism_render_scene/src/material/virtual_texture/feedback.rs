@@ -25,7 +25,9 @@ use prism_render_material::{
     GpuMaterialTexture, Illumination, MaterialVtFormat, MaterialVtSourceSnapshot,
     TextureSemantic as MaterialTextureSemantic, NO_VIRTUAL_TEXTURE,
 };
-use prism_render_visibility::GpuViewRecord;
+use prism_render_visibility::{
+    barycentric_derivatives, interpolate_vec2, ClipVertex, GpuViewRecord, Viewport,
+};
 
 use crate::{
     geometry::{RenderShadingGeometry, RenderShadingGeometryRegistry},
@@ -34,7 +36,7 @@ use crate::{
     shading::{
         texel_cache::{
             build_shade_dispatch_chart, shade_page_request_from_visibility, ShadeDemandConfig,
-            ShadeDemandRegistry, ShadeVisibilitySample,
+            ShadeDemandRecord, ShadeDemandRegistry, ShadeVisibilitySample,
         },
         PrismShadingSettings, ViewVisibilityBuffer,
     },
@@ -292,7 +294,7 @@ pub(crate) fn collect_material_vt_feedback(
         // keep or synthesize a partial demand set.
         demands.clear();
     }
-    shade_demands.replace(shade_page_requests);
+    shade_demands.replace_records(shade_page_requests);
 }
 
 fn decode_view_feedback(
@@ -304,7 +306,7 @@ fn decode_view_feedback(
     materials: &RenderMaterialRegistry,
     sources: &MaterialVtSourceRegistry,
     output: &mut Vec<prism_render_architecture::texture_streaming::PageDemand>,
-    shade_output: &mut Vec<crate::shading::texel_cache::ShadePageRequest>,
+    shade_output: &mut Vec<ShadeDemandRecord>,
 ) {
     let row_words = usize::try_from(capture.row_pitch / 4).unwrap_or(0);
     let ids_words = bytemuck::cast_slice::<u8, u32>(&bytes[capture.ids_offset as usize..]);
@@ -387,7 +389,11 @@ fn decode_view_feedback(
                     u64::from(material.revision),
                 )
             {
-                shade_output.push(request);
+                shade_output.push(ShadeDemandRecord {
+                    request,
+                    geometry_index: instance.geometry.index,
+                    chart,
+                });
             }
 
             for texture in &material.textures {
@@ -485,41 +491,73 @@ fn decode_visibility_sample(
     let a = *geometry.vertices.get(primitive.indices[0] as usize)?;
     let b = *geometry.vertices.get(primitive.indices[1] as usize)?;
     let c = *geometry.vertices.get(primitive.indices[2] as usize)?;
-    let bary_x = (metadata[3] & 0xffff) as f32 / 65_535.0;
-    let bary_y = (metadata[3] >> 16) as f32 / 65_535.0;
+    let bary_x = f32::from((metadata[3] & 0xffff) as u16) / 65_535.0;
+    let bary_y = f32::from((metadata[3] >> 16) as u16) / 65_535.0;
     let weights = [bary_x, bary_y, (1.0 - bary_x - bary_y).max(0.0)];
-    let uv = add3(
-        add2(scale2(a.uv, weights[0]), scale2(b.uv, weights[1])),
-        scale2(c.uv, weights[2]),
-    );
-    if !uv.into_iter().all(f32::is_finite) {
+    if !weights.into_iter().all(f32::is_finite) {
         return None;
     }
 
-    let pa = screen_position(view, transform_point(instance, a.position))?;
-    let pb = screen_position(view, transform_point(instance, b.position))?;
-    let pc = screen_position(view, transform_point(instance, c.position))?;
-    let determinant = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0]);
-    if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
+    // The raster stores perspective-correct barycentrics. Recover the pixel
+    // position from those weights, then use the shared DAIS solver so both the
+    // interpolated UV and its gradients follow the rasterizer's perspective
+    // correction. Treating these weights as affine (the old implementation)
+    // over- or under-requests pages on triangles spanning depth.
+    let world = [
+        transform_point(instance, a.position),
+        transform_point(instance, b.position),
+        transform_point(instance, c.position),
+    ];
+    let clip = [
+        clip_vertex(view, world[0]),
+        clip_vertex(view, world[1]),
+        clip_vertex(view, world[2]),
+    ];
+    let screen = [
+        screen_position(view, world[0])?,
+        screen_position(view, world[1])?,
+        screen_position(view, world[2])?,
+    ];
+    let affine_scale = [
+        weights[0] * clip[0].position[3],
+        weights[1] * clip[1].position[3],
+        weights[2] * clip[2].position[3],
+    ];
+    let affine_sum = affine_scale.into_iter().sum::<f32>();
+    if !affine_sum.is_finite() || affine_sum.abs() <= f32::EPSILON {
         return None;
     }
-    let dl1dx = (pc[1] - pa[1]) / determinant;
-    let dl1dy = -(pc[0] - pa[0]) / determinant;
-    let dl2dx = -(pb[1] - pa[1]) / determinant;
-    let dl2dy = (pb[0] - pa[0]) / determinant;
-    let uv_b = sub2(b.uv, a.uv);
-    let uv_c = sub2(c.uv, a.uv);
-    let uv_ddx = add2(scale2(uv_b, dl1dx), scale2(uv_c, dl2dx));
-    let uv_ddy = add2(scale2(uv_b, dl1dy), scale2(uv_c, dl2dy));
-    if !uv_ddx.into_iter().chain(uv_ddy).all(f32::is_finite) {
+    let pixel = [
+        (affine_scale[0] * screen[0][0]
+            + affine_scale[1] * screen[1][0]
+            + affine_scale[2] * screen[2][0])
+            / affine_sum
+            - view.viewport[0] as f32,
+        (affine_scale[0] * screen[0][1]
+            + affine_scale[1] * screen[1][1]
+            + affine_scale[2] * screen[2][1])
+            / affine_sum
+            - view.viewport[1] as f32,
+    ];
+    let bary = barycentric_derivatives(
+        &clip,
+        Viewport::new(view.viewport[2], view.viewport[3]),
+        pixel,
+    )?;
+    let uv = interpolate_vec2(&bary, [a.uv, b.uv, c.uv]);
+    if !uv.value.into_iter().all(f32::is_finite)
+        || !uv.ddx.into_iter().chain(uv.ddy).all(f32::is_finite)
+    {
         return None;
     }
+    let uv_ddx = uv.ddx;
+    let uv_ddy = uv.ddy;
 
     Some(MaterialVtVisibilitySample {
         object_id: ids[0],
         face_id: ids[2],
         material_id: metadata[0],
-        uv,
+        uv: uv.value,
         uv_ddx,
         uv_ddy,
         // One unit is one actual covered raster pixel.  It is intentionally
@@ -536,6 +574,11 @@ fn transform_point(instance: &InstanceRecord, point: [f32; 3]) -> Vec3 {
         rows[1][0] * point[0] + rows[1][1] * point[1] + rows[1][2] * point[2] + rows[1][3],
         rows[2][0] * point[0] + rows[2][1] * point[1] + rows[2][2] * point[2] + rows[2][3],
     )
+}
+
+fn clip_vertex(view: &GpuViewRecord, world: Vec3) -> ClipVertex {
+    let clip = Mat4::from_cols_array_2d(&view.clip_from_world) * world.extend(1.0);
+    ClipVertex::new([clip.x, clip.y, clip.z, clip.w])
 }
 
 fn screen_position(view: &GpuViewRecord, world: Vec3) -> Option<[f32; 2]> {
@@ -555,22 +598,6 @@ fn screen_position(view: &GpuViewRecord, world: Vec3) -> Option<[f32; 2]> {
 fn aligned_row_pitch(width: u32) -> u64 {
     let bytes = u64::from(width).saturating_mul(VISIBILITY_TEXEL_BYTES);
     bytes.div_ceil(COPY_ROW_ALIGNMENT) * COPY_ROW_ALIGNMENT
-}
-
-fn scale2(value: [f32; 2], scale: f32) -> [f32; 2] {
-    [value[0] * scale, value[1] * scale]
-}
-
-fn add2(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
-    [a[0] + b[0], a[1] + b[1]]
-}
-
-fn sub2(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
-    [a[0] - b[0], a[1] - b[1]]
-}
-
-fn add3(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
-    add2(a, b)
 }
 
 #[cfg(test)]
@@ -612,6 +639,36 @@ mod tests {
             layer_mask: 1,
             flags: Default::default(),
             history_epoch: 0,
+        }
+    }
+
+    fn perspective_triangle(flags: u32) -> RenderShadingGeometry {
+        RenderShadingGeometry {
+            vertices: vec![
+                RenderShadingVertex {
+                    position: [-0.5, -0.5, 0.5],
+                    uv: [0.0, 0.0],
+                    flags,
+                    ..Default::default()
+                },
+                RenderShadingVertex {
+                    position: [0.5, -0.5, -0.5],
+                    uv: [1.0, 0.0],
+                    flags,
+                    ..Default::default()
+                },
+                RenderShadingVertex {
+                    position: [0.0, 0.5, -0.5],
+                    uv: [0.0, 1.0],
+                    flags,
+                    ..Default::default()
+                },
+            ],
+            primitives: vec![RenderShadingPrimitive {
+                indices: [0, 1, 2],
+                flags,
+            }],
+            flags,
         }
     }
 
@@ -661,6 +718,102 @@ mod tests {
         assert!((sample.uv_ddx[0] - 0.02).abs() < 0.001);
         assert!(sample.uv_ddx[1].abs() < 0.001);
         assert_eq!(sample.screen_importance, 1);
+    }
+
+    #[test]
+    fn perspective_feedback_uses_perspective_correct_uv_and_gradients() {
+        let metadata_bary = 16_384_u32 | (16_384_u32 << 16);
+        let mut perspective_view = view();
+        perspective_view.clip_from_world = Mat4::from_cols_array_2d(&[
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ])
+        .to_cols_array_2d();
+        let geometry = perspective_triangle(0);
+        let sample = decode_visibility_sample(
+            &[3, 1, 0, 0],
+            &[7, 1, 0, metadata_bary],
+            &instance(),
+            &geometry,
+            &perspective_view,
+        )
+        .expect("perspective-visible sample should decode");
+
+        let bary_x = f32::from(16_384_u16) / 65_535.0;
+        let bary_y = f32::from(16_384_u16) / 65_535.0;
+        let weights = [bary_x, bary_y, 1.0 - bary_x - bary_y];
+        let expected_uv = [weights[1], weights[2]];
+        assert!((sample.uv[0] - expected_uv[0]).abs() < 0.001);
+        assert!((sample.uv[1] - expected_uv[1]).abs() < 0.001);
+
+        let affine_gradient_x = 0.034_285_713_f32;
+        assert!(
+            (sample.uv_ddx[0] - affine_gradient_x).abs() > 0.005,
+            "perspective-correct gradient {:?} unexpectedly matches affine gradient",
+            sample.uv_ddx,
+        );
+
+        let clip = geometry.vertices[..3]
+            .iter()
+            .map(|vertex| {
+                clip_vertex(
+                    &perspective_view,
+                    transform_point(&instance(), vertex.position),
+                )
+            })
+            .collect::<Vec<_>>();
+        let clip: [ClipVertex; 3] = clip.try_into().expect("triangle has three vertices");
+        let screen = geometry.vertices[..3]
+            .iter()
+            .map(|vertex| {
+                screen_position(
+                    &perspective_view,
+                    transform_point(&instance(), vertex.position),
+                )
+            })
+            .collect::<Option<Vec<_>>>()
+            .expect("triangle projects to the screen");
+        let affine_weights = [
+            weights[0] * clip[0].position[3],
+            weights[1] * clip[1].position[3],
+            weights[2] * clip[2].position[3],
+        ];
+        let denominator = affine_weights.into_iter().sum::<f32>();
+        let pixel = [
+            (affine_weights[0] * screen[0][0]
+                + affine_weights[1] * screen[1][0]
+                + affine_weights[2] * screen[2][0])
+                / denominator,
+            (affine_weights[0] * screen[0][1]
+                + affine_weights[1] * screen[1][1]
+                + affine_weights[2] * screen[2][1])
+                / denominator,
+        ];
+        let uv_at = |pixel| {
+            let bary = barycentric_derivatives(&clip, Viewport::new(100, 100), pixel)
+                .expect("nondegenerate perspective triangle");
+            interpolate_vec2(
+                &bary,
+                [
+                    geometry.vertices[0].uv,
+                    geometry.vertices[1].uv,
+                    geometry.vertices[2].uv,
+                ],
+            )
+            .value
+        };
+        let h = 0.01;
+        let plus = uv_at([pixel[0] + h, pixel[1]]);
+        let minus = uv_at([pixel[0] - h, pixel[1]]);
+        let finite_difference = [
+            (plus[0] - minus[0]) / (2.0 * h),
+            (plus[1] - minus[1]) / (2.0 * h),
+        ];
+        for (actual, expected) in sample.uv_ddx.into_iter().zip(finite_difference) {
+            assert!((actual - expected).abs() < 0.001);
+        }
     }
 
     #[test]

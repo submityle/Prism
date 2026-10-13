@@ -3,6 +3,7 @@ mod buffers;
 mod consumer;
 mod parameter_heap;
 mod plugin;
+pub mod portable_atlas;
 pub(crate) mod runtime;
 pub(crate) mod systems;
 pub mod texture_heap;

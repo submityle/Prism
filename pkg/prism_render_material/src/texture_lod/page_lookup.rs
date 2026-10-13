@@ -16,7 +16,11 @@ use super::{PageRequest, VirtualTexture};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MaterialPageReference {
     /// Original finest page requested by the material sample.
-    pub requested: TexturePageKey,
+    ///
+    /// `None` means that the request cannot be represented by the packed
+    /// streaming key ABI. Such a request is rejected and is never saturated
+    /// into a fabricated key.
+    pub requested: Option<TexturePageKey>,
     /// Resident page that backs the lookup, including a coarse mip fallback.
     pub resolved: Option<PageResolution>,
 }
@@ -55,12 +59,13 @@ impl VirtualTexture {
         let second = resolve_page(texture, layer, requested[1], page_table, mip_tail_floor);
         let mut feedback = Vec::with_capacity(2);
         for reference in [first, second] {
-            if reference
-                .resolved
-                .is_none_or(|resolved| resolved.mip_bias != 0)
-                && !feedback.contains(&reference.requested)
+            if let Some(requested) = reference.requested
+                && reference
+                    .resolved
+                    .is_none_or(|resolved| resolved.mip_bias != 0)
+                && !feedback.contains(&requested)
             {
-                feedback.push(reference.requested);
+                feedback.push(requested);
             }
         }
         MaterialPageLookup {
@@ -77,21 +82,34 @@ fn resolve_page(
     table: &GpuPageTable,
     mip_tail_floor: Option<u8>,
 ) -> MaterialPageReference {
+    let Some(mip) = u8::try_from(page.mip).ok() else {
+        return MaterialPageReference {
+            requested: None,
+            resolved: None,
+        };
+    };
+    let Some(x) = u16::try_from(page.page_x).ok() else {
+        return MaterialPageReference {
+            requested: None,
+            resolved: None,
+        };
+    };
+    let Some(y) = u16::try_from(page.page_y).ok() else {
+        return MaterialPageReference {
+            requested: None,
+            resolved: None,
+        };
+    };
     let requested = TexturePageKey {
         texture,
-        mip: u8::try_from(page.mip).unwrap_or(u8::MAX),
+        mip,
         layer,
-        x: u16::try_from(page.page_x).unwrap_or(u16::MAX),
-        y: u16::try_from(page.page_y).unwrap_or(u16::MAX),
+        x,
+        y,
     };
-    let representable = page.mip <= u8::MAX.into()
-        && page.page_x <= u16::MAX.into()
-        && page.page_y <= u16::MAX.into();
-    let resolved = representable
-        .then(|| table.resolve(requested, mip_tail_floor.unwrap_or(requested.mip)))
-        .flatten();
+    let resolved = table.resolve(requested, mip_tail_floor.unwrap_or(requested.mip));
     MaterialPageReference {
-        requested,
+        requested: Some(requested),
         resolved,
     }
 }
@@ -146,5 +164,60 @@ mod tests {
         let vt = VirtualTexture::new(256, 256, 128);
         let result = vt.lookup_pages(7, 3, [0.5, 0.5], 0.25, &table, Some(1));
         assert!(result.pages.iter().all(|page| page.resolved.is_none()));
+    }
+
+    #[test]
+    fn unrepresentable_page_indices_are_rejected_without_saturation() {
+        let table = GpuPageTable::from_bindings(&[(key(u8::MAX, u16::MAX, u16::MAX), 99)]);
+        let max_valid = resolve_page(
+            7,
+            2,
+            PageRequest {
+                mip: u32::from(u8::MAX),
+                page_x: u32::from(u16::MAX),
+                page_y: u32::from(u16::MAX),
+            },
+            &table,
+            Some(u8::MAX),
+        );
+        assert_eq!(max_valid.requested, Some(key(u8::MAX, u16::MAX, u16::MAX)));
+        assert_eq!(max_valid.resolved.unwrap().slot, 99);
+
+        let requests = [
+            PageRequest {
+                mip: u32::from(u8::MAX) + 1,
+                page_x: 0,
+                page_y: 0,
+            },
+            PageRequest {
+                mip: 0,
+                page_x: u32::from(u16::MAX) + 1,
+                page_y: 0,
+            },
+            PageRequest {
+                mip: 0,
+                page_x: 0,
+                page_y: u32::from(u16::MAX) + 1,
+            },
+        ];
+
+        for request in requests {
+            let reference = resolve_page(7, 2, request, &table, Some(0));
+            assert_eq!(reference.requested, None);
+            assert_eq!(reference.resolved, None);
+        }
+    }
+
+    #[test]
+    fn unrepresentable_xy_requests_do_not_enter_feedback() {
+        let table = GpuPageTable::new();
+        let vt = VirtualTexture::new(u32::MAX, u32::MAX, 1);
+        let result = vt.lookup_pages(7, 2, [1.0, 1.0], 0.0, &table, Some(0));
+
+        assert!(result
+            .pages
+            .iter()
+            .all(|page| { page.requested.is_none() && page.resolved.is_none() }));
+        assert!(result.feedback.is_empty());
     }
 }

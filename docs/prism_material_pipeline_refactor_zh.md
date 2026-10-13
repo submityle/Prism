@@ -1347,8 +1347,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > **Shade write transaction 修订**：`begin_shade_writes` 现在把 deterministic budget plan、residency ticket、store allocation、submit、completion proof 和 publish 组织成可回滚事务；prepare/submit 失败会恢复 requested/stale 状态，不会遗留永久 `Writing` 页面。该 API 仍要求上游提供真实 page requests，不会自动猜测 visibility。
 
 > **Visibility demand seam 修订**：`visibility_demand.rs` 现在提供显式 `UV + ddx/ddy + object/material/face + chart extent` 到 `ShadePageRequest` 的确定性转换，沿用 visibility LOD 公式并拒绝非有限输入；它是 producer seam，不代表主 visibility pass 已自动接入。
+>
+> **Material-VT feedback 精度修订（2026-10-13）**：`material/virtual_texture/feedback.rs` 现在按 visibility raster 写入的 `pack2x16unorm` barycentric 元数据，先恢复真实屏幕采样点，再复用 `prism_render_visibility` 的 DAIS 透视校正 barycentric 求解，同时得到透视正确的 UV、`ddx/ddy` 与 VT mip/page demand。这样避免把透视三角形误当 affine 三角形而造成错误缺页或过度请求；回归覆盖透视三角形、UV/导数和退化/缺 UV 拒绝路径。该修复只影响反馈 demand，不改变 VT ABI 或主渲染绑定。
 
 > **共享 readback 修订**：Material-VT feedback decode 现在同时填充 `ShadeDemandRegistry`，仅对 Lit/Stylized 的真实可见 face 生成请求；Unlit/Custom 不会伪造 view-independent shade page。该 registry 尚未绕过 `ShadeWriteProducer` 自动提交 GPU 工作。
+
+> **Shade demand provenance 修订**：registry 现在保留 `geometry_index + FaceChart + ShadePageRequest`，后续 job builder 可以使用真实 geometry/chart；directional-light selection 仍是独立显式策略，不会由 feedback 路径猜测。
 
 **破坏性说明**：屏幕空间 über 路径（§8）**保留为缓存未命中/视角相关的回退路径**，不是并行栈，不维护旧着色 API；对象空间缓存是其上的加法 pass。弱平台关闭开关即纯 §8 路径。
 
