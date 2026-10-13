@@ -56,6 +56,8 @@ pub mod overrides;
 pub mod path;
 pub mod plan;
 pub mod plan_codec;
+#[cfg(feature = "materialize")]
+pub mod property_apply;
 pub mod remap;
 pub mod residency;
 pub mod template;
@@ -79,6 +81,8 @@ pub use overrides::{
 pub use path::{FieldPath, FieldSegment};
 pub use plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
 pub use plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits};
+#[cfg(feature = "materialize")]
+pub use property_apply::{apply_property_override, PropertyApplyError};
 pub use remap::RemapTable;
 pub use residency::{ResidencyPlan, ResidencyTier};
 pub use template::{NestedSlot, SceneTemplate};
