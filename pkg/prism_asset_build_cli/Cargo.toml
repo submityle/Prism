@@ -1,0 +1,18 @@
+[package]
+name = "prism_asset_build_cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Deterministic Prism asset build CLI backed by prism_asset_build_core"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+argh = "0.1.12"
+prism_asset_build_core = { path = "../prism_asset_build_core" }
+
+[dev-dependencies]
+png = "0.18.1"
+
+[lints]
+workspace = true
