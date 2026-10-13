@@ -163,6 +163,26 @@ pub enum PlanError {
         /// The offending component.
         component: ComponentTypeId,
     },
+    /// A group does not contain exactly one payload column per signature entry.
+    ColumnCountMismatch {
+        /// The group index.
+        group: u32,
+        /// The number of components in the signature.
+        expected: u32,
+        /// The number of payload columns present.
+        found: u32,
+    },
+    /// Columns are not in the same canonical order as the sorted signature.
+    ColumnOrderMismatch {
+        /// The group index.
+        group: u32,
+        /// The column position.
+        column: u32,
+        /// The component required by the signature at this position.
+        expected: ComponentTypeId,
+        /// The component found in the column.
+        found: ComponentTypeId,
+    },
     /// A field slot references a group or column that does not exist.
     FieldSlotOutOfRange {
         /// The offending slot.
@@ -231,6 +251,24 @@ impl InstantiationPlan {
                     return Err(PlanError::ColumnNotInSignature {
                         group: group_index as u32,
                         component: column.component,
+                    });
+                }
+            }
+            if group.columns.len() != group.signature.len() {
+                return Err(PlanError::ColumnCountMismatch {
+                    group: group_index as u32,
+                    expected: group.signature.len() as u32,
+                    found: group.columns.len() as u32,
+                });
+            }
+            for (column_index, column) in group.columns.iter().enumerate() {
+                let expected = group.signature.components()[column_index];
+                if column.component != expected {
+                    return Err(PlanError::ColumnOrderMismatch {
+                        group: group_index as u32,
+                        column: column_index as u32,
+                        expected,
+                        found: column.component,
                     });
                 }
             }
@@ -456,6 +494,38 @@ mod tests {
             Err(PlanError::ColumnNotInSignature {
                 group: 0,
                 component: comp(99)
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_missing_column_for_declared_component() {
+        let mut plan = base_plan();
+        plan.groups[0].columns = Box::new([Column::new(comp(1), vec![0u8; 4].into_boxed_slice())]);
+        assert_eq!(
+            plan.validate(),
+            Err(PlanError::ColumnCountMismatch {
+                group: 0,
+                expected: 2,
+                found: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_column_order() {
+        let mut plan = base_plan();
+        plan.groups[0].columns = Box::new([
+            Column::new(comp(2), vec![0u8; 4].into_boxed_slice()),
+            Column::new(comp(1), vec![0u8; 4].into_boxed_slice()),
+        ]);
+        assert_eq!(
+            plan.validate(),
+            Err(PlanError::ColumnOrderMismatch {
+                group: 0,
+                column: 0,
+                expected: comp(1),
+                found: comp(2),
             })
         );
     }
