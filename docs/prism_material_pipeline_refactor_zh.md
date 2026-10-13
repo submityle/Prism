@@ -1343,6 +1343,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 > **Atlas layout contract 修订**：`ShadeAtlasLayout` 现在以固定 tile extent 提供 row-major slot→atlas-origin 映射，`ShadePageTableRecord::from_handle` 只能从可寻址的 `ShadePageHandle` 构造 GPU record；越界 slot、零尺寸和不适配 tile 都明确拒绝，避免 producer 手写物理坐标。
 
+> **Shade write transaction 修订**：`begin_shade_writes` 现在把 deterministic budget plan、residency ticket、store allocation、submit、completion proof 和 publish 组织成可回滚事务；prepare/submit 失败会恢复 requested/stale 状态，不会遗留永久 `Writing` 页面。该 API 仍要求上游提供真实 page requests，不会自动猜测 visibility。
+
 **破坏性说明**：屏幕空间 über 路径（§8）**保留为缓存未命中/视角相关的回退路径**，不是并行栈，不维护旧着色 API；对象空间缓存是其上的加法 pass。弱平台关闭开关即纯 §8 路径。
 
 ### 14.11 风险 → 高性能/高质解决方案总表

@@ -63,7 +63,7 @@ pub struct ShadeSubmission {
 ///
 /// let _forged = ShadeCompletionProof { completed: GpuCompletionValue(u64::MAX) };
 /// ```
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShadeCompletionProof {
     completed: GpuCompletionValue,
 }

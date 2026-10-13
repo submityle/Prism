@@ -9,6 +9,7 @@
 mod chart;
 mod key;
 mod plan;
+mod producer;
 mod production;
 mod production_resources;
 mod residency;
@@ -35,6 +36,10 @@ pub use gpu::page_table::{
 pub use gpu::shade::{ShadeJob, ShadeJobError, ShadeJobFromDensityError};
 pub use key::{ShadeChannel, ShadePageKey};
 pub use plan::{build_shade_plan, ShadePlan, ShadePlanItem};
+pub use producer::{
+    begin_shade_writes, is_write_pending, PreparedShadeWrites, ShadeWriteProducerError,
+    SubmittedShadeWrites,
+};
 pub(crate) use production::{build_shade_dispatch_batch, ShadeDispatchBuildError};
 pub use production::{build_shade_dispatch_chart, ShadeDispatchInputs, ShadeDispatchJobInput};
 pub(crate) use production_resources::{
