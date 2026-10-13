@@ -115,7 +115,87 @@ pub fn encode_layout(layout: &DockLayout) -> Result<Vec<u8>, PersistError> {
     if out.0.len() > DecodeLimits::default().max_bytes {
         return Err(PersistError::ResourceLimit("bytes"));
     }
+    // Keep encoding symmetric with the default decoder's per-field limits.
+    enforce_encode_limits(layout, DecodeLimits::default())?;
     Ok(out.0)
+}
+
+fn enforce_encode_limits(layout: &DockLayout, limits: DecodeLimits) -> Result<(), PersistError> {
+    fn check_node(
+        value: &DockNode,
+        depth: usize,
+        limits: DecodeLimits,
+    ) -> Result<usize, PersistError> {
+        if depth > limits.layout.max_depth {
+            return Err(PersistError::ResourceLimit("depth"));
+        }
+        match value {
+            DockNode::Empty => Ok(1),
+            DockNode::TabStack { tabs, .. } | DockNode::Document { tabs, .. } => {
+                if tabs.len() > limits.max_collection_len {
+                    return Err(PersistError::ResourceLimit("collection"));
+                }
+                for id in tabs {
+                    if id.len() > limits.max_string_bytes {
+                        return Err(PersistError::ResourceLimit("string bytes"));
+                    }
+                }
+                Ok(1)
+            }
+            DockNode::Split { children, .. } => {
+                if children.len() > limits.max_collection_len {
+                    return Err(PersistError::ResourceLimit("collection"));
+                }
+                let mut count = 1usize;
+                for child in children {
+                    count = count
+                        .checked_add(check_node(&child.node, depth + 1, limits)?)
+                        .ok_or(PersistError::LengthOverflow)?;
+                }
+                Ok(count)
+            }
+        }
+    }
+    fn windows(windows: &[FloatingWindow], limits: DecodeLimits) -> Result<(), PersistError> {
+        if windows.len() > limits.max_collection_len {
+            return Err(PersistError::ResourceLimit("collection"));
+        }
+        for window in windows {
+            check_node(&window.root, 0, limits)?;
+        }
+        Ok(())
+    }
+    check_node(&layout.root, 0, limits)?;
+    windows(&layout.floating, limits)?;
+    if layout.autohide.entries.len() > limits.max_collection_len {
+        return Err(PersistError::ResourceLimit("collection"));
+    }
+    for entry in &layout.autohide.entries {
+        if entry.panel.len() > limits.max_string_bytes {
+            return Err(PersistError::ResourceLimit("string bytes"));
+        }
+    }
+    if let Some(active) = &layout.autohide.active {
+        if active.len() > limits.max_string_bytes {
+            return Err(PersistError::ResourceLimit("string bytes"));
+        }
+    }
+    if let Some(snapshot) = &layout.maximized {
+        if snapshot.panel.len() > limits.max_string_bytes {
+            return Err(PersistError::ResourceLimit("string bytes"));
+        }
+        check_node(&snapshot.root, 0, limits)?;
+        windows(&snapshot.floating, limits)?;
+        if snapshot.autohide.entries.len() > limits.max_collection_len {
+            return Err(PersistError::ResourceLimit("collection"));
+        }
+        for entry in &snapshot.autohide.entries {
+            if entry.panel.len() > limits.max_string_bytes {
+                return Err(PersistError::ResourceLimit("string bytes"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Decodes a layout, filters unregistered IDs when registries are supplied,
