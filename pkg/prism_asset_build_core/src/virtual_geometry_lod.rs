@@ -22,8 +22,9 @@ pub struct StaticVirtualGeometryLod {
     pub level: u32,
     /// Triangle target passed to the QEM decimator.
     pub target_triangles: u32,
-    /// Maximum distance from an authored vertex to its nearest simplified
-    /// vertex. This is a vertex-sample metric, not a full Hausdorff bound.
+    /// Maximum distance from an authored vertex to the simplified triangle
+    /// surface. This is a one-sided vertex-sample metric, not a full Hausdorff
+    /// bound.
     pub vertex_error: f32,
     /// Paged static virtual-geometry asset for this level.
     pub asset: VirtualGeometryAsset,
@@ -180,7 +181,7 @@ pub fn build_static_virtual_geometry_lod_chain(
         output.push(StaticVirtualGeometryLod {
             level: level as u32,
             target_triangles: target,
-            vertex_error: vertex_sample_error(source_positions, simplified_positions),
+            vertex_error: vertex_surface_error(source_positions, &simplified_mesh, simplified_positions),
             asset,
         });
     }
@@ -285,22 +286,104 @@ fn simplify_partitions(
     Ok(output)
 }
 
-fn vertex_sample_error(source: &[[f32; 3]], simplified: &[[f32; 3]]) -> f32 {
+fn vertex_surface_error(source: &[[f32; 3]], simplified_mesh: &Mesh, simplified: &[[f32; 3]]) -> f32 {
+    let triangles = simplified_mesh
+        .indices()
+        .map(|indices| {
+            indices
+                .to_u32()
+                .chunks_exact(3)
+                .map(|triangle| [triangle[0], triangle[1], triangle[2]])
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     source
         .iter()
         .map(|point| {
-            simplified
+            triangles
                 .iter()
-                .map(|candidate| {
-                    let dx = point[0] - candidate[0];
-                    let dy = point[1] - candidate[1];
-                    let dz = point[2] - candidate[2];
-                    dx * dx + dy * dy + dz * dz
+                .map(|triangle| {
+                    point_triangle_distance_sq(
+                        *point,
+                        simplified[triangle[0] as usize],
+                        simplified[triangle[1] as usize],
+                        simplified[triangle[2] as usize],
+                    )
                 })
                 .fold(f32::INFINITY, f32::min)
         })
         .fold(0.0, f32::max)
         .sqrt()
+}
+
+fn point_triangle_distance_sq(p: [f32; 3], a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let ap = sub(p, a);
+    let d1 = dot(ab, ap);
+    let d2 = dot(ac, ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return dot(ap, ap);
+    }
+    let bp = sub(p, b);
+    let d3 = dot(ab, bp);
+    let d4 = dot(ac, bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return dot(bp, bp);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let t = d1 / (d1 - d3);
+        return dot(sub(p, add(a, scale(ab, t))), sub(p, add(a, scale(ab, t))));
+    }
+    let cp = sub(p, c);
+    let d5 = dot(ab, cp);
+    let d6 = dot(ac, cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return dot(cp, cp);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let t = d2 / (d2 - d6);
+        let q = add(a, scale(ac, t));
+        let delta = sub(p, q);
+        return dot(delta, delta);
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let edge = sub(c, b);
+        let t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        let q = add(b, scale(edge, t));
+        let delta = sub(p, q);
+        return dot(delta, delta);
+    }
+    let normal = cross(ab, ac);
+    let distance = dot(ap, normal);
+    distance * distance / dot(normal, normal).max(f32::EPSILON)
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn scale(value: [f32; 3], scalar: f32) -> [f32; 3] {
+    [value[0] * scalar, value[1] * scalar, value[2] * scalar]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 #[cfg(test)]
