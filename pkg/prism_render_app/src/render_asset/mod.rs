@@ -18,10 +18,13 @@
 
 mod context;
 mod extract;
+mod page_pool;
 mod prepare;
 mod stage;
 mod table;
 
+#[cfg(test)]
+mod page_pool_tests;
 #[cfg(test)]
 mod tests;
 
@@ -31,6 +34,10 @@ use prism_render_driver::{RenderDevice, RenderQueue};
 
 pub use context::{GpuPrepareBudget, PrepareCancellation, PrepareContext, PrepareContextError};
 pub use extract::{extract_assets, ExtractedAssets};
+pub use page_pool::{
+    FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageUpload, PageAllocation,
+    PagePoolError, PageReleaseTransaction, PageReplaceTransaction, PageUploadTransaction,
+};
 pub use prepare::{
     prepare_extracted_assets, prepare_extracted_assets_with_context, AssetSyncReport,
     PrepareAssetError,
