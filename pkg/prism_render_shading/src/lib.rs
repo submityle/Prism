@@ -58,6 +58,7 @@ mod posterize;
 mod punctual;
 mod quality;
 mod resolve;
+pub mod response_output;
 mod schlick_bias_table;
 mod screen_space;
 mod shadow;
@@ -231,6 +232,13 @@ pub use posterize::{
 };
 pub use punctual::PunctualLight;
 pub use quality::{LobeSampleBudget, ShadingQuality};
+pub use response_output::{
+    blend_responses, evaluate_response_pair, validate_response_composition_inputs, AlphaMergeRule,
+    Auxiliary, AuxiliaryMergeRule, AuxiliaryMergeRules, AuxiliaryValue, CompositionError,
+    CompositionOptions, ConservationCaseResult, ConservationGate, ConservationSuite,
+    ConservationSuiteCounts, EvaluatedResponse, LightingContext, ResponseOutput,
+    SharedSurfaceAlpha,
+};
 
 // Crate-root re-exports of the expensive-lobe `*_for_budget` adapters, so a
 // host driving `ShadingQuality`/`LobeSampleBudget` can reach every tier-scaled
