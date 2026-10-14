@@ -17,7 +17,9 @@ mod app_plugin;
 mod authoring;
 mod batch;
 mod context;
+mod gpu_contract;
 mod lifecycle;
+mod lod;
 #[cfg(feature = "reflect")]
 mod reflect_binding;
 mod schedule;
@@ -44,8 +46,22 @@ pub use app_plugin::StateTreePlugin;
 pub use authoring::{parse_tree_def, serialize_tree_def, TreeDefTextError, TEXT_FORMAT_VERSION};
 pub use batch::BatchRuntime;
 pub use context::{gather_context, EcsContextError, EcsSchema};
+pub use gpu_contract::{
+    compare_parity, dequantize_score, evaluate_cpu, evaluate_cpu_buffer, quantize_bias,
+    quantize_unit, GpuBatchBufferError, GpuBatchContract, GpuBatchError, GpuBatchInput,
+    GpuBatchInputBuffer, GpuBatchInputKey, GpuBatchInputRow, GpuBatchOutputBuffer,
+    GpuBatchOutputKey, GpuBatchResult, GpuBatchValidationError, GpuFallbackReason, GpuParityError,
+    GpuQuantizationError, GpuResultStatus, DEFAULT_MAX_ROWS, GPU_INPUT_STRIDE_BYTES,
+    GPU_OUTPUT_STRIDE_BYTES, SCORE_FRACTION_BITS,
+};
 use lifecycle::LifecycleCollector;
 pub use lifecycle::{StateTreeLifecycleEvent, StateTreeLifecycleNotification};
+pub use lod::{
+    select_utility, CadenceError, DecisionLod, DecisionLodCadence, DecisionLodController,
+    DecisionLodPeriods, DecisionObservation, DecisionVisibility, FixedFrameCadence,
+    LodStabilityError, LodThresholdError, LodThresholds, LodUpdate, UtilityCandidate,
+    UtilitySelection,
+};
 #[cfg(feature = "reflect")]
 pub use reflect_binding::{ReflectBindingError, ReflectBindingPlan};
 pub use snapshot_bridge::{

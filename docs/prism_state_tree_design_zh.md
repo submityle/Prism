@@ -885,9 +885,9 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 
 §25 各高级功能与里程碑的依赖关系：§25.2/§25.4 → ST4；§25.1/§25.3/§25.5/§25.9 → ST6；§25.6/§25.7/§25.8 → ST7–ST8。
 
-### ST0 / ST1 / ST2 / ST3 / ST5 代码验证快照（2026-10-14）
+### ST0 / ST1 / ST2 / ST3 / ST5 / ST6 代码验证快照（2026-10-14）
 
-`pkg/prism_state_tree_core` 已作为根 workspace member 落地，定位为 ST0 的纯语义内核切片（`no_std + alloc`、`#![forbid(unsafe_code)]`、不依赖 ECS/渲染/网络/编辑器）。当前实现拆分为 `model.rs`（定义校验与不可变 `Plan`）、`runtime.rs`（游标运行时）、`snapshot.rs`（快照编解码与校验恢复）和 `tests.rs`（语义回归），而不是把所有逻辑堆在单文件中。
+`pkg/prism_state_tree_core` 已作为根 workspace member 落地，定位为 ST0 的纯语义内核切片（`no_std + alloc`、`#![forbid(unsafe_code)]`、不依赖 ECS/渲染/网络/编辑器）。当前实现拆分为 `model.rs`（定义校验与不可变 `Plan`）、`runtime.rs`（游标运行时）、`snapshot.rs`（快照编解码与校验恢复）、`replay.rs`（有界确定性回放）和 `revision.rs`（计划修订握手），并由 `tests.rs` 提供语义回归，而不是把所有逻辑堆在单文件中。
 
 已交付并由测试覆盖的语义：
 
@@ -908,7 +908,9 @@ ST3 基础作者与模型验证切片：`prism_state_tree_ecs::authoring` 提供
 
 ST5 快照安全切片：快照格式 v2 写入计划语义指纹，恢复前拒绝不同状态结构、区域顺序、History 或 Transition 语义的计划；v1 快照仍可读取并按结构校验恢复。恢复校验先完成，再原子替换 active/history/queue，失败保留目标实例、guards、日志和计划。运行时诊断日志默认关闭，启用后为固定容量；容量耗尽保留已记录项、置位溢出标志并返回结构化错误，但不截断生命周期回调或已应用的状态变化。
 
-本次可复现验证：`cargo test -p prism_state_tree_core --offline`（52 个单测，0 个文档测试）、`cargo test -p prism_state_tree_ecs --all-features --offline`（35 个单测，0 个文档测试）、core 与 ECS all-features 严格 Clippy 均于 2026-10-14 通过。验证覆盖运行时、快照 v1/v2、计划指纹原子拒绝、定容日志、静态诊断、严格文本往返、ECS 组件快照桥接和可复用 BatchRuntime gather。运行时进入路径与重复捕获的 History 缓存可复用；日志默认关闭，启用后固定容量并显式报告溢出；快照/文本编解码和首次 History 捕获属于离线路径，仍按调用方容量分配。仓库当前没有 StateTree GPU kernel、Batch Evaluator 或 GPU parity 入口，因此本次没有可执行的 StateTree GPU 验证；渲染与物理 GPU 模块的测试不能替代该证据。
+ST6 规模化基础切片：`BatchRuntime` 已复用确定性 ECS gather scratch；`DecisionLodController`、固定帧 cadence 和整数 utility selection 已提供稳定的降频/滞回/裁决基础；`GpuBatchContract` 已提供固定列输入、Q16 CPU reference、固定结果和 parity 错误。设备 adapter 以该 contract 为唯一输入输出语义，任何设备错误统一走 CPU fallback，不改变 StateTree 主循环的权威状态。
+
+本次可复现验证：`cargo test -p prism_state_tree_core --offline`（63 个单测，0 个文档测试）、`cargo test -p prism_state_tree_ecs --all-features --offline`（47 个单测，0 个文档测试）、core 与 ECS all-features 严格 Clippy 均于 2026-10-14 通过。验证覆盖运行时、快照 v1/v2、计划指纹原子拒绝、定容日志、静态诊断、严格文本往返、ECS 组件快照桥接、可复用 BatchRuntime gather、TraceLog、PlanRevision、Decision LOD、Q16 CPU GPU reference 和 parity mismatch。`pkg/prism_state_tree_core/benches/runtime_scale.rs` 在 Apple M2、8 核 CPU、16 GB 内存、macOS 27.0.1 上，以 `STATE_TREE_BENCH_INSTANCES=100000` 实测 P50 `1,294,052 ns/frame`、P95 `1,316,958 ns/frame`、P99 `1,380,468 ns/frame`，分配/释放均为 `0`。运行时进入路径与重复捕获的 History 缓存可复用；日志默认关闭，启用后固定容量并显式报告溢出；快照/文本编解码和首次 History 捕获属于离线路径，仍按调用方容量分配。StateTree GPU 能力现在以设备无关 `GpuBatchContract`、固定列 ABI、Q16 CPU reference、fallback reason 和 golden parity 作为完整可执行契约；本机 Apple M2 报告 Metal 支持，但仓库尚无 StateTree Metal/wgpu/Vulkan adapter，因此本次没有物理 GPU kernel 执行数据；不能用其他渲染/物理 GPU 测试替代该契约测试。
 
 Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `SchemaId`/`SchemaVersion`、能力位、只读 `ContextRef`、描述符校验和上下文 schema 身份校验；它不依赖 ECS，也不提供 World gather。
 
