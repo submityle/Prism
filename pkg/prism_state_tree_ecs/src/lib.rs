@@ -15,6 +15,7 @@ extern crate std;
 #[cfg(feature = "app")]
 mod app_plugin;
 mod authoring;
+mod batch;
 mod context;
 mod lifecycle;
 #[cfg(feature = "reflect")]
@@ -42,6 +43,7 @@ use prism_state_tree_core::{
 pub use app_plugin::StateTreePlugin;
 pub use context::{gather_context, EcsContextError, EcsSchema};
 pub use authoring::{parse_tree_def, serialize_tree_def, TreeDefTextError, TEXT_FORMAT_VERSION};
+pub use batch::BatchRuntime;
 use lifecycle::LifecycleCollector;
 pub use lifecycle::{StateTreeLifecycleEvent, StateTreeLifecycleNotification};
 #[cfg(feature = "reflect")]
