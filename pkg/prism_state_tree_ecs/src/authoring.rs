@@ -18,7 +18,10 @@
 //! the core structural compiler before returning, making the returned
 //! definition suitable for immediate compilation.
 
-use alloc::{string::{String, ToString}, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::{fmt, fmt::Write as _};
 
 use prism_state_tree_core::{
@@ -125,12 +128,24 @@ pub fn serialize_tree_def(def: &TreeDef) -> Result<String, TreeDefTextError> {
                 children,
                 initial,
                 history,
-            } => ("compound", children.clone(), Vec::new(), Some(*initial), *history),
+            } => (
+                "compound",
+                children.clone(),
+                Vec::new(),
+                Some(*initial),
+                *history,
+            ),
             NodeKind::Parallel {
                 children,
                 regions,
                 history,
-            } => ("parallel", children.clone(), regions.clone(), None, *history),
+            } => (
+                "parallel",
+                children.clone(),
+                regions.clone(),
+                None,
+                *history,
+            ),
         };
         write_record(
             &mut text,
@@ -184,12 +199,8 @@ pub fn parse_tree_def(text: &str) -> Result<TreeDef, TreeDefTextError> {
     let mut lines = text.lines().enumerate();
     let (header_index, header) = lines.next().ok_or(TreeDefTextError::Empty)?;
     let header_line = header_index + 1;
-    let header_values = parse_record(
-        header,
-        "prism_state_tree",
-        &["version", "root", "nodes"],
-    )
-    .ok_or(TreeDefTextError::InvalidHeader { line: header_line })?;
+    let header_values = parse_record(header, "prism_state_tree", &["version", "root", "nodes"])
+        .ok_or(TreeDefTextError::InvalidHeader { line: header_line })?;
     let version = parse_u32(header_values[0], header_line, "version")?;
     if version != TEXT_FORMAT_VERSION {
         return Err(TreeDefTextError::InvalidHeader { line: header_line });
@@ -228,7 +239,10 @@ pub fn parse_tree_def(text: &str) -> Result<TreeDef, TreeDefTextError> {
         let transition_count = parse_usize(values[7], line_no, "transitions")?;
         let kind = match kind_name {
             "atomic" => {
-                if !children.is_empty() || !regions.is_empty() || initial.is_some() || history.is_some()
+                if !children.is_empty()
+                    || !regions.is_empty()
+                    || initial.is_some()
+                    || history.is_some()
                 {
                     return Err(TreeDefTextError::InvalidValue {
                         line: line_no,
@@ -277,9 +291,8 @@ pub fn parse_tree_def(text: &str) -> Result<TreeDef, TreeDefTextError> {
             transitions: Vec::with_capacity(transition_count),
         };
         for _ in 0..transition_count {
-            let (transition_index, transition_line) = lines
-                .next()
-                .ok_or(TreeDefTextError::UnexpectedEnd {
+            let (transition_index, transition_line) =
+                lines.next().ok_or(TreeDefTextError::UnexpectedEnd {
                     expected: "transition",
                 })?;
             let transition_line_no = transition_index + 1;
@@ -390,11 +403,7 @@ fn format_value(prefix: &str, value: u32) -> String {
     text
 }
 
-fn parse_record<'a>(
-    line: &'a str,
-    name: &str,
-    keys: &[&str],
-) -> Option<Vec<&'a str>> {
+fn parse_record<'a>(line: &'a str, name: &str, keys: &[&str]) -> Option<Vec<&'a str>> {
     let mut tokens = line.split(' ');
     if tokens.next()? != name {
         return None;
@@ -486,14 +495,12 @@ fn parse_target(value: &str, line: usize) -> Result<TransitionTarget, TreeDefTex
             field: "target",
         })?;
     match kind {
-        "state" => Ok(TransitionTarget::State(StateId(parse_u32(id, line, "target")?))),
+        "state" => Ok(TransitionTarget::State(StateId(parse_u32(
+            id, line, "target",
+        )?))),
         "history" => {
             let mut parts = id.split(':');
-            let owner = StateId(parse_u32(
-                parts.next().unwrap_or(""),
-                line,
-                "target",
-            )?);
+            let owner = StateId(parse_u32(parts.next().unwrap_or(""), line, "target")?);
             let depth = match parts.next() {
                 Some("shallow") => HistoryMode::Shallow,
                 Some("deep") => HistoryMode::Deep,
@@ -649,11 +656,7 @@ mod tests {
             parse_tree_def(&unknown),
             Err(TreeDefTextError::InvalidHeader { .. })
         ));
-        let reordered = text.replacen(
-            "version=1 root=0 nodes=5",
-            "root=0 version=1 nodes=5",
-            1,
-        );
+        let reordered = text.replacen("version=1 root=0 nodes=5", "root=0 version=1 nodes=5", 1);
         assert!(matches!(
             parse_tree_def(&reordered),
             Err(TreeDefTextError::InvalidHeader { .. })
@@ -662,9 +665,11 @@ mod tests {
 
     #[test]
     fn parser_rejects_semantically_invalid_tree() {
-        let text = serialize_tree_def(&definition())
-            .unwrap()
-            .replacen("id=4 parent=1", "id=4 parent=99", 1);
+        let text = serialize_tree_def(&definition()).unwrap().replacen(
+            "id=4 parent=1",
+            "id=4 parent=99",
+            1,
+        );
         assert!(matches!(
             parse_tree_def(&text),
             Err(TreeDefTextError::InvalidDefinition {

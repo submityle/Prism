@@ -75,11 +75,7 @@ impl BatchRuntime {
     }
 
     /// Ticks an explicit ordered list without changing the retained gather.
-    pub fn tick_entities(
-        &mut self,
-        world: &mut World,
-        entities: &[Entity],
-    ) -> BatchTickReport {
+    pub fn tick_entities(&mut self, world: &mut World, entities: &[Entity]) -> BatchTickReport {
         tick_entities(world, entities)
     }
 }
@@ -94,8 +90,8 @@ impl Default for BatchRuntime {
 mod tests {
     use alloc::vec;
 
-    use prism_state_tree_core::{MicrostepLimit, StateId, StateNode, TreeDef};
     use prism_ecs::world::World;
+    use prism_state_tree_core::{MicrostepLimit, StateId, StateNode, TreeDef};
 
     use super::*;
 
@@ -115,16 +111,8 @@ mod tests {
     #[test]
     fn reuses_gather_capacity_and_keeps_deterministic_order() {
         let mut world = World::new();
-        let a = world.spawn(StateTreeInstance::new(
-            asset(),
-            2,
-            MicrostepLimit(4),
-        ).unwrap());
-        let b = world.spawn(StateTreeInstance::new(
-            asset(),
-            2,
-            MicrostepLimit(4),
-        ).unwrap());
+        let a = world.spawn(StateTreeInstance::new(asset(), 2, MicrostepLimit(4)).unwrap());
+        let b = world.spawn(StateTreeInstance::new(asset(), 2, MicrostepLimit(4)).unwrap());
         let mut batch = BatchRuntime::with_capacity(1).unwrap();
         let first = batch.tick_all(&mut world).unwrap();
         let capacity = batch.capacity();

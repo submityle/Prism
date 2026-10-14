@@ -33,12 +33,8 @@ impl fmt::Display for SnapshotComponentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StaleEntity => f.write_str("state-tree snapshot entity is stale"),
-            Self::NotMaterialized => {
-                f.write_str("state-tree snapshot entity is not materialized")
-            }
-            Self::MissingComponent => {
-                f.write_str("state-tree snapshot component is missing")
-            }
+            Self::NotMaterialized => f.write_str("state-tree snapshot entity is not materialized"),
+            Self::MissingComponent => f.write_str("state-tree snapshot component is missing"),
         }
     }
 }
