@@ -10,3 +10,7 @@ publish = false
 [features]
 default = []
 std = []
+
+[[bench]]
+name = "runtime_scale"
+harness = false

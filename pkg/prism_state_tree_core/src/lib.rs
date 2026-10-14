@@ -15,6 +15,8 @@ mod binding;
 mod codec;
 mod frame;
 mod model;
+mod replay;
+mod revision;
 mod runtime;
 mod schema;
 mod snapshot;
@@ -31,6 +33,14 @@ pub use frame::{FrameError, FrameField, FrameLayout, InstanceFrame};
 pub use model::{
     EventId, GuardId, HistoryMode, NodeKind, Plan, PlanError, StateId, StateNode, Transition,
     TransitionKind, TransitionTarget, TreeDef, Trigger,
+};
+pub use replay::{
+    active_state_digest, ActiveStateDigest, DivergenceReport, PlanDigest, ReplayError,
+    ReplayReport, TraceInput, TraceLog, TraceLogError, TraceRecord,
+};
+pub use revision::{
+    CompatibilityClass, MigrationAction, MigrationDecision, MigrationDecisionSet, MigrationKey,
+    MigrationRejection, MigrationVerdict, PlanRevision, RevisionError, MAX_MIGRATION_DECISIONS,
 };
 pub use runtime::{
     AlwaysGuard, Event, EventQueueError, Guard, GuardContext, Instance, LifecycleCallback,
