@@ -634,6 +634,19 @@ NVMe ──(批量队列, DirectStorage 形态)──▶ 显存暂存 ──(GPU
 
 `prism_asset` 负责「字节到达 + 层级决策 + 解压」，**GPU 资源对象的创建/销毁**归渲染侧（`prism_render_*`）：流送管理器发「层级 N 的字节已就绪」事件，渲染侧据此建/换 `wgpu` 纹理视图。两者经句柄 + 事件解耦，`prism_asset` 不依赖任何渲染 crate（保持 L5→L4 单向）。
 
+**2026-10-14 渲染侧窄切片已交付**：`prism_render_app::render_asset` 新增
+`FixedPagePool`，以 `FixedPagePoolDescriptor` 创建单一固定页 RHI buffer；资产或
+streaming producer 只需提交 typed `FixedPageUpload`，不需要依赖 `AssetId` 或
+`AssetServer`。`PageUploadTransaction`、`PageReplaceTransaction` 和
+`PageReleaseTransaction` 分别覆盖分配/真实 `RenderQueue::write_buffer` 上传、旧页保留
+直到新页提交、以及延迟释放；成功提交返回 `FixedPagePoolEvent`，未提交事务由 Drop
+回滚。backing buffer 通过现有 `PrepareContext`/`GpuPrepareBudget` 创建，失败会回到
+上下文的资源回滚路径，所属 `RenderAsset::unload` 应调用 `FixedPagePool::destroy`。
+该切片只证明固定页 buffer 的渲染侧事务，不是 asset 层 GPU streaming、DirectStorage、
+GDeflate 完整 GPU 解压、timeline-safe deferred reclaim 或 page-table/feedback 闭环。
+Null RHI 回归和 wgpu readback 测试均已接入；无 adapter 时测试显式跳过，设置
+`PRISM_REQUIRE_GPU=1` 则明确失败，不把 Null RHI 当作硬件可见性证明。
+
 ---
 
 ### 11.4 流送评分、GPU 反馈与驻留状态机
