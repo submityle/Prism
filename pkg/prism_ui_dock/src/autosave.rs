@@ -117,7 +117,8 @@ mod tests {
 
     fn fixture() -> (WorkspaceAutosave, WorkspaceManager, PathBuf) {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let directory = std::env::temp_dir().join(format!("prism-dock-autosave-{id}"));
+        let process = std::process::id();
+        let directory = std::env::temp_dir().join(format!("prism-dock-autosave-{process}-{id}"));
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("workspace.prism");
         let store = WorkspaceFileStore::new(&path);
@@ -168,7 +169,8 @@ mod tests {
     #[test]
     fn failed_save_keeps_dirty_marker_for_retry() {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
-        let directory = std::env::temp_dir().join(format!("prism-dock-save-error-{id}"));
+        let process = std::process::id();
+        let directory = std::env::temp_dir().join(format!("prism-dock-save-error-{process}-{id}"));
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("workspace.prism");
         fs::create_dir_all(&path).unwrap();
