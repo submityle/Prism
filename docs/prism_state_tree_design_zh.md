@@ -904,7 +904,7 @@ ST1 代码切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句
 
 ST2 代码切片：`binding.rs` 提供规范 `BindingPath`、稳定 `BindingSlot`、`EvaluatorDependency` 和稀疏反向索引的 `DependencyPlan`（不按最大 slot ID 分配内存）；`dirty_evaluators_into` 使用调用方预留的输出缓存，容量不足清空结果并返回结构化错误。`frame.rs` 提供无 unsafe 的 `FrameLayout`/`InstanceFrame`、对齐计算、布局指纹、slot 存在性与长度校验。`codec.rs` 提供固定宽度 little-endian 标量、GUID/类型/版本/默认值校验、无分配的单槽读写、规范 padding 的帧快照、长度/哈希/布局校验后的原子恢复，以及按 GUID 对齐兼容字段并初始化新增字段的离线迁移；改变类型或版本的同 GUID 字段被拒绝，需在作者层显式转换。`reflect_binding.rs` 提供一次编译的 `prism_reflect::AccessPlan`、稳定 slot 排序、路径/重复 slot/目标类型错误、typed get/set 与标量到帧的双向编解码。`ST0003/ST0009` 诊断、完整 Schema/Context 绑定与静默实例分配门槛仍仅按 §7.5、§14.2、§13.2 的设计契约描述，不计入 ST2 整体验收。
 
-本次可复现的局部验证：`cargo test -p prism_state_tree_core --offline`（43 个单测，0 个文档测试）与 `cargo test -p prism_state_tree_ecs --all-features --offline`（25 个单测，0 个文档测试），均于 2026-10-14 通过；core `cargo clippy -p prism_state_tree_core --all-features --offline -- -D warnings` 通过。运行时复用进入路径与重复捕获的 history 缓存，迁移/退出/并行修复不再克隆临时状态数组；首次 history 捕获和无界日志仍可能分配。上述局部结果不代表 ST0–ST8 全部达标。运行时尚无 GPU kernel，GPU 吞吐或 parity 不在本次证据内。
+本次可复现的局部验证：`cargo test -p prism_state_tree_core --offline`（44 个单测，0 个文档测试）与 `cargo test -p prism_state_tree_ecs --all-features --offline`（25 个单测，0 个文档测试），均于 2026-10-14 通过；core `cargo clippy -p prism_state_tree_core --all-features --offline -- -D warnings` 通过。运行时复用进入路径与重复捕获的 history 缓存，迁移/退出/并行修复不再克隆临时状态数组；诊断日志默认关闭，启用后固定容量并显式报告溢出，生命周期回调不受截断影响；首次 history 捕获仍可能分配。上述局部结果不代表 ST0–ST8 全部达标。运行时尚无 GPU kernel，GPU 吞吐或 parity 不在本次证据内。
 
 Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `SchemaId`/`SchemaVersion`、能力位、只读 `ContextRef`、描述符校验和上下文 schema 身份校验；它不依赖 ECS，也不提供 World gather。
 

@@ -72,6 +72,31 @@ fn lifecycle_uses_lca_and_event_queue_is_fifo() {
 }
 
 #[test]
+fn diagnostic_log_is_bounded_and_reports_loss_without_suppressing_callbacks() {
+    let mut instance = Instance::new(basic_plan(), 2, MicrostepLimit(8)).unwrap();
+    instance.configure_log_capacity(2);
+    let mut recorder = Recorder::default();
+    instance.start(&mut recorder).unwrap();
+    assert_eq!(instance.log().len(), 2);
+    instance.send(Event::new(EventId(1))).unwrap();
+    assert_eq!(
+        instance.run(&mut recorder),
+        Err(RuntimeError::LogCapacityExceeded)
+    );
+    assert!(instance.log_overflowed());
+    assert_eq!(instance.log().len(), 2);
+    assert_eq!(recorder.0, ["root+", "a+", "a-", "b+"]);
+    assert_eq!(instance.active_states(), &[StateId(0), StateId(2)]);
+
+    instance.clear_log();
+    assert!(!instance.log_overflowed());
+    assert_eq!(instance.run(&mut recorder).unwrap().microsteps, 0);
+    instance.configure_log_capacity(0);
+    assert!(instance.log().is_empty());
+    assert_eq!(instance.run(&mut recorder).unwrap().microsteps, 0);
+}
+
+#[test]
 fn ancestor_transition_is_inherited_by_active_descendants() {
     let root = StateNode::compound(
         StateId(0),

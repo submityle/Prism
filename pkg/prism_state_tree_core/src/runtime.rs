@@ -111,6 +111,8 @@ pub enum RuntimeError {
     MicrostepLimit(MicrostepLimit),
     /// A runtime operation referenced a state outside its plan.
     InvalidState(StateId),
+    /// An enabled diagnostic log filled during the call; state changes remain applied.
+    LogCapacityExceeded,
 }
 
 /// Result of a successful run-to-completion call.
@@ -132,6 +134,8 @@ pub struct Instance {
     pub(crate) queue: VecDeque<Event>,
     pub(crate) guards: Vec<Option<Box<dyn Guard>>>,
     pub(crate) log: Vec<LogEntry>,
+    log_capacity: usize,
+    log_overflowed: bool,
     path_scratch: Vec<StateId>,
     pub(crate) event_capacity: usize,
     pub(crate) microstep_limit: MicrostepLimit,
@@ -170,6 +174,8 @@ impl Instance {
             queue: VecDeque::with_capacity(event_capacity),
             guards: Vec::new(),
             log: Vec::new(),
+            log_capacity: 0,
+            log_overflowed: false,
             path_scratch: Vec::with_capacity(count),
             event_capacity,
             microstep_limit,
@@ -198,13 +204,44 @@ impl Instance {
     pub const fn event_capacity(&self) -> usize {
         self.event_capacity
     }
-    /// Returns the transition/lifecycle log, in emission order.
+    /// Returns retained diagnostic entries in emission order. Logging is off by default.
     pub fn log(&self) -> &[LogEntry] {
         &self.log
     }
-    /// Clears the observable log without changing runtime state.
+    /// Enables diagnostics with a fixed preallocated capacity, or disables it with zero.
+    /// Changing capacity clears prior entries and overflow status.
+    pub fn configure_log_capacity(&mut self, capacity: usize) {
+        self.log = Vec::with_capacity(capacity);
+        self.log_capacity = capacity;
+        self.log_overflowed = false;
+    }
+    /// Whether an enabled log lost records since its last clear.
+    pub const fn log_overflowed(&self) -> bool {
+        self.log_overflowed
+    }
+    /// Clears the observable log and overflow status without changing runtime state.
     pub fn clear_log(&mut self) {
         self.log.clear();
+        self.log_overflowed = false;
+    }
+
+    fn record(&mut self, entry: LogEntry) {
+        if self.log_capacity == 0 {
+            return;
+        }
+        if self.log.len() == self.log_capacity {
+            self.log_overflowed = true;
+        } else {
+            self.log.push(entry);
+        }
+    }
+
+    fn finish_report(&self, report: StepReport) -> Result<StepReport, RuntimeError> {
+        if self.log_overflowed {
+            Err(RuntimeError::LogCapacityExceeded)
+        } else {
+            Ok(report)
+        }
     }
     /// Installs or replaces a pure guard at a numeric identity.
     pub fn set_guard<G: Guard + 'static>(&mut self, id: GuardId, guard: G) {
@@ -235,7 +272,7 @@ impl Instance {
         };
         self.start_into(callback, &mut report)?;
         report.queued_events = self.queue.len();
-        Ok(report)
+        self.finish_report(report)
     }
 
     fn start_into<C: LifecycleCallback>(
@@ -298,7 +335,7 @@ impl Instance {
         }
         self.run_eventless(callback, &mut report)?;
         report.queued_events = self.queue.len();
-        Ok(report)
+        self.finish_report(report)
     }
 
     fn run_eventless<C: LifecycleCallback>(
@@ -428,7 +465,7 @@ impl Instance {
             );
             self.complete_parallel_configuration(report.microsteps, callback);
         }
-        self.log.push(LogEntry {
+        self.record(LogEntry {
             kind: LogKind::Transition,
             microstep: report.microsteps,
             state: source,
@@ -505,7 +542,7 @@ impl Instance {
                 continue;
             }
             callback.on_exit(state);
-            self.log.push(LogEntry {
+            self.record(LogEntry {
                 kind: LogKind::Exit,
                 microstep,
                 state,
@@ -529,7 +566,7 @@ impl Instance {
                 continue;
             }
             callback.on_exit(state);
-            self.log.push(LogEntry {
+            self.record(LogEntry {
                 kind: LogKind::Exit,
                 microstep,
                 state,
@@ -622,7 +659,7 @@ impl Instance {
     ) {
         self.active.push(state);
         callback.on_enter(state);
-        self.log.push(LogEntry {
+        self.record(LogEntry {
             kind: LogKind::Enter,
             microstep,
             state,
