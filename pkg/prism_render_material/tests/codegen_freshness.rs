@@ -49,6 +49,33 @@ fn committed_rust_layout_matches_generator() {
 }
 
 #[test]
+fn generated_field_directory_covers_exactly_non_padding_schema_fields() {
+    use prism_material_schema::FieldType;
+    use prism_render_material::SURFACE_FIELDS;
+
+    let schema = surface_schema();
+    let expected = schema
+        .core
+        .fields
+        .iter()
+        .filter(|field| field.ty != FieldType::Pad)
+        .map(|field| (None, field.name.as_str()))
+        .chain(schema.canonical_lobes().into_iter().flat_map(|lobe| {
+            lobe.fields
+                .iter()
+                .filter(|field| field.ty != FieldType::Pad)
+                .map(move |field| (Some(lobe.id.as_str()), field.name.as_str()))
+        }))
+        .collect::<Vec<_>>();
+    let actual = SURFACE_FIELDS
+        .iter()
+        .map(|field| (field.lobe, field.name))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    assert!(actual.iter().all(|(_, name)| !name.starts_with("_pad")));
+}
+
+#[test]
 fn lobe_mask_derived_layout_is_generated() {
     let fresh = emit_rust_layout(&surface_schema());
     for generated_fact in [

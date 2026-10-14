@@ -917,6 +917,61 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         o.push_str("    },\n");
     }
     o.push_str("];\n");
+
+    // Response contracts use the same authoritative schema field identities as
+    // the GPU decoder. Padding is storage, not a surface input. Keeping this
+    // directory generated prevents a second, incomplete hand-written catalogue
+    // from accidentally making field-coverage validation vacuous.
+    let field_count = schema
+        .core
+        .fields
+        .iter()
+        .filter(|field| field.ty != FieldType::Pad)
+        .count()
+        + lobes
+            .iter()
+            .map(|lobe| {
+                lobe.fields
+                    .iter()
+                    .filter(|field| field.ty != FieldType::Pad)
+                    .count()
+            })
+            .sum::<usize>();
+    o.push_str("\n/// One non-padding input field of the surface ABI.\n");
+    o.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
+    o.push_str("pub struct SurfaceFieldLayout {\n");
+    o.push_str("    /// `None` for the always-present core, otherwise the schema lobe id.\n");
+    o.push_str("    pub lobe: Option<&'static str>,\n");
+    o.push_str("    /// Field name within the owning record.\n");
+    o.push_str("    pub name: &'static str,\n");
+    o.push_str("}\n\n");
+    let _ = writeln!(o, "/// Every non-padding field, in core-then-registry-slot order.\npub const SURFACE_FIELDS: [SurfaceFieldLayout; {field_count}] = [");
+    for field in schema
+        .core
+        .fields
+        .iter()
+        .filter(|field| field.ty != FieldType::Pad)
+    {
+        let _ = writeln!(
+            o,
+            "    SurfaceFieldLayout {{\n        lobe: None,\n        name: {:?},\n    }},",
+            field.name
+        );
+    }
+    for lobe in lobes {
+        for field in lobe
+            .fields
+            .iter()
+            .filter(|field| field.ty != FieldType::Pad)
+        {
+            let _ = writeln!(
+                o,
+                "    SurfaceFieldLayout {{\n        lobe: Some({:?}),\n        name: {:?},\n    }},",
+                lobe.id, field.name
+            );
+        }
+    }
+    o.push_str("];\n");
     o
 }
 

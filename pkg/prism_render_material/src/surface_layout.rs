@@ -525,3 +525,216 @@ pub const SURFACE_RESPONSE_MODES: [ResponseModeLayout; 3] = [
         view_dependent: true,
     },
 ];
+
+/// One non-padding input field of the surface ABI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SurfaceFieldLayout {
+    /// `None` for the always-present core, otherwise the schema lobe id.
+    pub lobe: Option<&'static str>,
+    /// Field name within the owning record.
+    pub name: &'static str,
+}
+
+/// Every non-padding field, in core-then-registry-slot order.
+pub const SURFACE_FIELDS: [SurfaceFieldLayout; 50] = [
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "base_color",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "base_metalness",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "specular_roughness",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "specular_weight",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "ambient_occlusion",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "normal_scale",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "alpha_cutoff",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "base_weight",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "base_diffuse_roughness",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "specular_color",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "specular_ior",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "geometry_thin_walled",
+    },
+    SurfaceFieldLayout {
+        lobe: None,
+        name: "geometry_opacity",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("emission"),
+        name: "emission_color",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("emission"),
+        name: "emission_luminance",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_weight",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_roughness",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_ior",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_color",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_roughness_anisotropy",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_darkening",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("anisotropy"),
+        name: "specular_roughness_anisotropy",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("anisotropy"),
+        name: "anisotropy_rotation",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_weight",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_roughness",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_color",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_weight",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_radius",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_color",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_radius_scale",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_scatter_anisotropy",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_weight",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_depth",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("transmission"),
+        name: "index_of_refraction",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_dispersion_scale",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_color",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_scatter",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_scatter_anisotropy",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_dispersion_abbe_number",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("thin_film"),
+        name: "thin_film_weight",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("thin_film"),
+        name: "thin_film_thickness",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("thin_film"),
+        name: "thin_film_ior",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("npr_face"),
+        name: "softness",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_weight",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_roughness",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_density",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_bin_half_width",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_weight",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_phi_d",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_scale",
+    },
+];
