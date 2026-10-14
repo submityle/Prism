@@ -23,8 +23,8 @@ pub use chunk::{
 };
 pub use format::{Codec, ContainerError, ContainerInfo, EntryInfo, FORMAT_VERSION, MAGIC};
 pub use manifest::{
-    ContainerIdentity, ManifestError, ManifestRoute, RuntimeManifest, MANIFEST_MAGIC,
-    MANIFEST_VERSION,
+    ContainerIdentity, ManifestError, ManifestMetadata, ManifestRoute, RuntimeManifest,
+    MANIFEST_MAGIC, MANIFEST_VERSION,
 };
 pub use manifest_reader::{ManifestRangeRequest, ManifestReadError, ManifestReader};
 pub use overlay::{MountedContainer, OverlaySet};

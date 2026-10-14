@@ -6,10 +6,11 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    ChunkInput, ChunkPlanner, ChunkPolicy, ContainerError, ContainerIdentity, ContainerReader,
-    ContainerWriter, FileRangeSource, ManifestAssetReader, ManifestError, ManifestRangeRequest,
-    ManifestReadError, ManifestRoute, MemoryRangeSource, OverlaySet, RangeBatchPolicy,
-    RangeRequest, RangeSource, RangeSourceError, RuntimeManifest, FORMAT_VERSION, MAGIC,
+    ChunkInput, ChunkPlanner, ChunkPolicy, Codec, ContainerError, ContainerIdentity,
+    ContainerReader, ContainerWriter, FileRangeSource, ManifestAssetReader, ManifestError,
+    ManifestMetadata, ManifestRangeRequest, ManifestReadError, ManifestRoute, MemoryRangeSource,
+    OverlaySet, RangeBatchPolicy, RangeRequest, RangeSource, RangeSourceError, RuntimeManifest,
+    FORMAT_VERSION, MAGIC,
 };
 
 fn guid(name: &str) -> StableGuid {
@@ -1206,6 +1207,90 @@ fn runtime_manifest_round_trips_deterministically_and_rejects_bad_input() {
     );
 }
 
+#[test]
+fn runtime_manifest_persists_route_dependencies_and_delivery_metadata() {
+    let root = guid("metadata-root");
+    let hard = guid("metadata-hard");
+    let optional = guid("metadata-optional");
+    let bytes = build(&[
+        ("metadata-root", b"root"),
+        ("metadata-hard", b"hard"),
+        ("metadata-optional", b"optional"),
+    ]);
+    let mut manifest = RuntimeManifest::new();
+    for (guid, name) in [(root, "root"), (hard, "hard"), (optional, "optional")] {
+        manifest
+            .insert(ManifestRoute {
+                guid,
+                container_name: name.into(),
+                priority: 1,
+                container_guid: guid,
+            })
+            .unwrap();
+        manifest.bind_container(name, identity(&bytes)).unwrap();
+    }
+    manifest
+        .set_metadata(
+            root,
+            ManifestMetadata {
+                hard_dependencies: vec![hard],
+                optional_dependencies: vec![optional],
+                initial_residency: 2,
+                streaming_level: 4,
+                codec: Codec::Raw,
+                schema: 9,
+                install_capabilities: 0x25,
+            },
+        )
+        .unwrap();
+    let encoded = manifest.encode().unwrap();
+    let decoded = RuntimeManifest::decode(&encoded).unwrap();
+    assert_eq!(decoded, manifest);
+    assert_eq!(decoded.metadata(root).unwrap().schema, 9);
+    assert_eq!(
+        decoded.metadata(root).unwrap().hard_dependencies,
+        vec![hard]
+    );
+}
+
+#[test]
+fn runtime_manifest_rejects_dependency_cycles() {
+    let first = guid("dependency-cycle-first");
+    let second = guid("dependency-cycle-second");
+    let bytes = build(&[("first", b"first"), ("second", b"second")]);
+    let mut manifest = RuntimeManifest::new();
+    for (guid, name) in [(first, "first"), (second, "second")] {
+        manifest
+            .insert(ManifestRoute {
+                guid,
+                container_name: name.into(),
+                priority: 0,
+                container_guid: guid,
+            })
+            .unwrap();
+        manifest.bind_container(name, identity(&bytes)).unwrap();
+    }
+    manifest
+        .set_metadata(
+            first,
+            ManifestMetadata {
+                hard_dependencies: vec![second],
+                ..ManifestMetadata::default()
+            },
+        )
+        .unwrap();
+    manifest
+        .set_metadata(
+            second,
+            ManifestMetadata {
+                hard_dependencies: vec![first],
+                ..ManifestMetadata::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(manifest.encode(), Err(ManifestError::InvalidFormat));
+}
+
 const HEADER_NAME_OFFSET: usize = 20 + 50 + "patch.container".len() + 38;
 
 #[test]
@@ -1234,7 +1319,7 @@ fn runtime_manifest_rejects_duplicate_guid_records_even_with_valid_hash() {
             .try_into()
             .unwrap(),
     ) as usize;
-    let second_guid_at = route_table + 38 + first_name_len;
+    let second_guid_at = route_table + 38 + first_name_len + 24;
     bytes[second_guid_at..second_guid_at + 16].copy_from_slice(&first_guid);
     let body_end = bytes.len() - 32;
     let digest = blake3::hash(&bytes[..body_end]);

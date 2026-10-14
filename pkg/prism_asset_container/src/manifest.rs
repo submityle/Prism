@@ -5,7 +5,7 @@
 //! and the GUID used by that container. It does not load containers or perform
 //! I/O.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use core::fmt;
 
 use prism_asset::StableGuid;
@@ -15,10 +15,11 @@ use crate::{ManifestReadError, ManifestReader, OverlaySet};
 /// Eight-byte discriminator for runtime manifests.
 pub const MANIFEST_MAGIC: [u8; 8] = *b"PRSMAN\0\0";
 /// Current runtime manifest wire version.
-pub const MANIFEST_VERSION: u16 = 2;
+pub const MANIFEST_VERSION: u16 = 3;
 const HEADER_LEN: usize = 20;
 const CONTAINER_FIXED_LEN: usize = 50;
 const ROUTE_FIXED_LEN: usize = 38;
+const ROUTE_METADATA_FIXED_LEN: usize = 24;
 const HASH_LEN: usize = 32;
 
 /// One asset routing record. `container_guid` may differ from `guid` when an
@@ -33,6 +34,43 @@ pub struct ManifestRoute {
     pub priority: i32,
     /// GUID of the record inside `container_name`.
     pub container_guid: StableGuid,
+}
+
+/// Runtime metadata persisted for one logical route.
+///
+/// The dependency lists are route GUIDs, not build keys, so the runtime never
+/// has to reconstruct build-time identity. Zero residency/streaming/capability
+/// values mean that the package has no additional admission requirement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManifestMetadata {
+    /// Required route dependencies that must be available before this route.
+    pub hard_dependencies: Vec<StableGuid>,
+    /// Optional route dependencies that may be prefetched or installed later.
+    pub optional_dependencies: Vec<StableGuid>,
+    /// Initial residency tier requested by the package.
+    pub initial_residency: u8,
+    /// Streaming quality/LOD tier available at startup.
+    pub streaming_level: u8,
+    /// Payload codec declared for this route.
+    pub codec: crate::Codec,
+    /// Runtime schema version for the route payload.
+    pub schema: u32,
+    /// Platform installation capability bitset.
+    pub install_capabilities: u64,
+}
+
+impl Default for ManifestMetadata {
+    fn default() -> Self {
+        Self {
+            hard_dependencies: Vec::new(),
+            optional_dependencies: Vec::new(),
+            initial_residency: 0,
+            streaming_level: 0,
+            codec: crate::Codec::Raw,
+            schema: 0,
+            install_capabilities: 0,
+        }
+    }
 }
 
 /// Immutable identity of one runtime container referenced by a manifest.
@@ -50,6 +88,7 @@ pub struct ContainerIdentity {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeManifest {
     routes: BTreeMap<StableGuid, ManifestRoute>,
+    metadata: BTreeMap<StableGuid, ManifestMetadata>,
     containers: BTreeMap<String, ContainerIdentity>,
 }
 
@@ -118,12 +157,43 @@ impl RuntimeManifest {
 
     /// Adds a unique logical GUID route. Duplicate identities are rejected.
     pub fn insert(&mut self, route: ManifestRoute) -> Result<(), ManifestError> {
+        self.insert_with_metadata(route, ManifestMetadata::default())
+    }
+
+    /// Adds a route and its persisted runtime metadata.
+    pub fn insert_with_metadata(
+        &mut self,
+        route: ManifestRoute,
+        metadata: ManifestMetadata,
+    ) -> Result<(), ManifestError> {
         validate_name(&route.container_name)?;
+        validate_metadata(&metadata)?;
         if self.routes.contains_key(&route.guid) {
             return Err(ManifestError::DuplicateGuid(route.guid));
         }
+        self.metadata.insert(route.guid, metadata);
         self.routes.insert(route.guid, route);
         Ok(())
+    }
+
+    /// Replaces the metadata for an existing route.
+    pub fn set_metadata(
+        &mut self,
+        guid: StableGuid,
+        metadata: ManifestMetadata,
+    ) -> Result<(), ManifestError> {
+        if !self.routes.contains_key(&guid) {
+            return Err(ManifestError::InvalidFormat);
+        }
+        validate_metadata(&metadata)?;
+        self.metadata.insert(guid, metadata);
+        Ok(())
+    }
+
+    /// Returns the persisted runtime metadata for a route.
+    #[must_use]
+    pub fn metadata(&self, guid: StableGuid) -> Option<&ManifestMetadata> {
+        self.metadata.get(&guid)
     }
 
     /// Binds one immutable container identity to the routes that reference it.
@@ -181,6 +251,7 @@ impl RuntimeManifest {
     /// Encodes canonical little-endian bytes with a BLAKE3 digest over the
     /// complete header and route body.
     pub fn encode(&self) -> Result<Vec<u8>, ManifestError> {
+        validate_dependency_graph(&self.routes, &self.metadata)?;
         let container_count =
             u32::try_from(self.containers.len()).map_err(|_| ManifestError::InvalidFormat)?;
         let route_count =
@@ -216,6 +287,33 @@ impl RuntimeManifest {
             out.extend_from_slice(&route.priority.to_le_bytes());
             out.extend_from_slice(&name_len.to_le_bytes());
             out.extend_from_slice(name);
+            let metadata = self
+                .metadata
+                .get(&route.guid)
+                .ok_or(ManifestError::InvalidFormat)?;
+            validate_metadata(metadata)?;
+            let hard_count = u32::try_from(metadata.hard_dependencies.len())
+                .map_err(|_| ManifestError::InvalidFormat)?;
+            let optional_count = u32::try_from(metadata.optional_dependencies.len())
+                .map_err(|_| ManifestError::InvalidFormat)?;
+            out.extend_from_slice(&hard_count.to_le_bytes());
+            out.extend_from_slice(&optional_count.to_le_bytes());
+            out.push(metadata.initial_residency);
+            out.push(metadata.streaming_level);
+            out.push(metadata.codec as u8);
+            out.push(0);
+            out.extend_from_slice(&metadata.schema.to_le_bytes());
+            out.extend_from_slice(&metadata.install_capabilities.to_le_bytes());
+            for dependency in metadata
+                .hard_dependencies
+                .iter()
+                .chain(&metadata.optional_dependencies)
+            {
+                if !self.routes.contains_key(dependency) {
+                    return Err(ManifestError::InvalidFormat);
+                }
+                out.extend_from_slice(&dependency.to_u128().to_le_bytes());
+            }
         }
         for name in self.containers.keys() {
             if !self
@@ -240,7 +338,7 @@ impl RuntimeManifest {
             return Err(ManifestError::BadMagic);
         }
         let version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
-        if version != MANIFEST_VERSION {
+        if version != 2 && version != MANIFEST_VERSION {
             return Err(ManifestError::UnsupportedVersion(version));
         }
         if bytes[10..12] != [0, 0] {
@@ -299,6 +397,7 @@ impl RuntimeManifest {
             cursor = name_end;
         }
         let mut routes = BTreeMap::new();
+        let mut metadata_map = BTreeMap::new();
         let mut previous = None;
         for _ in 0..route_count {
             let fixed_end = cursor
@@ -339,6 +438,53 @@ impl RuntimeManifest {
                 },
             );
             cursor = name_end;
+            let metadata = if version == 2 {
+                ManifestMetadata::default()
+            } else {
+                let metadata_end = cursor
+                    .checked_add(ROUTE_METADATA_FIXED_LEN)
+                    .ok_or(ManifestError::InvalidFormat)?;
+                let fixed = bytes
+                    .get(cursor..metadata_end)
+                    .filter(|_| metadata_end <= body_end)
+                    .ok_or(ManifestError::Truncated)?;
+                let hard_count = u32::from_le_bytes(fixed[..4].try_into().unwrap()) as usize;
+                let optional_count = u32::from_le_bytes(fixed[4..8].try_into().unwrap()) as usize;
+                let total = hard_count
+                    .checked_add(optional_count)
+                    .ok_or(ManifestError::InvalidFormat)?;
+                let dep_bytes = total.checked_mul(16).ok_or(ManifestError::InvalidFormat)?;
+                let deps_end = metadata_end
+                    .checked_add(dep_bytes)
+                    .ok_or(ManifestError::InvalidFormat)?;
+                if deps_end > body_end {
+                    return Err(ManifestError::Truncated);
+                }
+                let mut dependencies = Vec::with_capacity(total);
+                let mut dep_cursor = metadata_end;
+                for _ in 0..total {
+                    dependencies.push(StableGuid::from_u128(u128::from_le_bytes(
+                        bytes[dep_cursor..dep_cursor + 16].try_into().unwrap(),
+                    )));
+                    dep_cursor += 16;
+                }
+                cursor = deps_end;
+                let metadata = ManifestMetadata {
+                    hard_dependencies: dependencies[..hard_count].to_vec(),
+                    optional_dependencies: dependencies[hard_count..].to_vec(),
+                    initial_residency: fixed[8],
+                    streaming_level: fixed[9],
+                    codec: match fixed[10] {
+                        0 => crate::Codec::Raw,
+                        _ => return Err(ManifestError::InvalidFormat),
+                    },
+                    schema: u32::from_le_bytes(fixed[12..16].try_into().unwrap()),
+                    install_capabilities: u64::from_le_bytes(fixed[16..24].try_into().unwrap()),
+                };
+                validate_metadata(&metadata)?;
+                metadata
+            };
+            metadata_map.insert(guid, metadata);
         }
         if cursor > body_end {
             return Err(ManifestError::Truncated);
@@ -357,13 +503,92 @@ impl RuntimeManifest {
                 ));
             }
         }
+        for metadata in metadata_map.values() {
+            for dependency in metadata
+                .hard_dependencies
+                .iter()
+                .chain(&metadata.optional_dependencies)
+            {
+                if !routes.contains_key(dependency) {
+                    return Err(ManifestError::InvalidFormat);
+                }
+            }
+        }
+        validate_dependency_graph(&routes, &metadata_map)?;
         for name in containers.keys() {
             if !routes.values().any(|route| route.container_name == *name) {
                 return Err(ManifestError::UnreferencedContainerIdentity(name.clone()));
             }
         }
-        Ok(Self { routes, containers })
+        Ok(Self {
+            routes,
+            metadata: metadata_map,
+            containers,
+        })
     }
+}
+
+fn validate_dependency_graph(
+    routes: &BTreeMap<StableGuid, ManifestRoute>,
+    metadata: &BTreeMap<StableGuid, ManifestMetadata>,
+) -> Result<(), ManifestError> {
+    let mut indegree = routes
+        .keys()
+        .copied()
+        .map(|guid| (guid, 0usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut dependents = BTreeMap::<StableGuid, BTreeSet<StableGuid>>::new();
+    for (guid, route_metadata) in metadata {
+        for dependency in route_metadata
+            .hard_dependencies
+            .iter()
+            .chain(&route_metadata.optional_dependencies)
+        {
+            if *dependency == *guid || !routes.contains_key(dependency) {
+                return Err(ManifestError::InvalidFormat);
+            }
+            if dependents.entry(*dependency).or_default().insert(*guid) {
+                *indegree.get_mut(guid).ok_or(ManifestError::InvalidFormat)? += 1;
+            }
+        }
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(guid, degree)| (*degree == 0).then_some(*guid))
+        .collect::<BTreeSet<_>>();
+    let mut visited = 0usize;
+    while let Some(guid) = ready.pop_first() {
+        visited += 1;
+        if let Some(children) = dependents.get(&guid) {
+            for child in children {
+                let degree = indegree
+                    .get_mut(child)
+                    .ok_or(ManifestError::InvalidFormat)?;
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.insert(*child);
+                }
+            }
+        }
+    }
+    (visited == routes.len())
+        .then_some(())
+        .ok_or(ManifestError::InvalidFormat)
+}
+
+fn validate_metadata(metadata: &ManifestMetadata) -> Result<(), ManifestError> {
+    let mut seen = BTreeMap::new();
+    for dependency in &metadata.hard_dependencies {
+        if dependency.is_nil() || seen.insert(*dependency, ()).is_some() {
+            return Err(ManifestError::InvalidFormat);
+        }
+    }
+    for dependency in &metadata.optional_dependencies {
+        if dependency.is_nil() || seen.insert(*dependency, ()).is_some() {
+            return Err(ManifestError::InvalidFormat);
+        }
+    }
+    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<(), ManifestError> {

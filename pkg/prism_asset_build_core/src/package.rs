@@ -12,7 +12,8 @@ use std::io::ErrorKind;
 use prism_asset::StableGuid;
 use prism_asset_container::{
     ChunkInput, ChunkPlanError, ChunkPlanner, ChunkPolicy, ContainerError, ContainerIdentity,
-    ContainerReader, ContainerWriter, ManifestError, ManifestRoute, RuntimeManifest,
+    ContainerReader, ContainerWriter, ManifestError, ManifestMetadata, ManifestRoute,
+    RuntimeManifest,
 };
 
 use crate::cas::{CasError, ContentAddressedStore};
@@ -551,6 +552,10 @@ pub fn package_runtime_with_options(
     // whose length, content hash, or generation differs from the package.
     let mut runtime_manifest = RuntimeManifest::new();
     for mapping in by_asset.values() {
+        let descriptor = manifest
+            .entries
+            .get(&mapping.asset)
+            .expect("mapping assets were validated above");
         let container = containers
             .get(&mapping.container_name)
             .expect("every mapping has a finalized container");
@@ -560,13 +565,48 @@ pub fn package_runtime_with_options(
                 source,
             })?
             .info();
+        let hard_dependencies =
+            descriptor
+                .dependencies
+                .iter()
+                .try_fold(BTreeSet::new(), |mut routes, dependency| {
+                    let dependency_assets = artifact_assets.get(dependency).ok_or(
+                        PackageError::UnmappedDependency {
+                            asset: mapping.asset,
+                            dependency: *dependency,
+                        },
+                    )?;
+                    for dependency_asset in dependency_assets {
+                        let dependency_mapping = by_asset.get(dependency_asset).ok_or(
+                            PackageError::UnmappedDependency {
+                                asset: mapping.asset,
+                                dependency: *dependency,
+                            },
+                        )?;
+                        routes.insert(dependency_mapping.guid);
+                    }
+                    Ok::<_, PackageError>(routes)
+                })?
+                .into_iter()
+                .collect::<Vec<_>>();
         runtime_manifest
-            .insert(ManifestRoute {
-                guid: mapping.guid,
-                container_name: mapping.container_name.clone(),
-                priority: mapping.priority,
-                container_guid: mapping.guid,
-            })
+            .insert_with_metadata(
+                ManifestRoute {
+                    guid: mapping.guid,
+                    container_name: mapping.container_name.clone(),
+                    priority: mapping.priority,
+                    container_guid: mapping.guid,
+                },
+                ManifestMetadata {
+                    hard_dependencies,
+                    optional_dependencies: Vec::new(),
+                    initial_residency: 0,
+                    streaming_level: 0,
+                    codec: prism_asset_container::Codec::Raw,
+                    schema: descriptor.schema,
+                    install_capabilities: 0,
+                },
+            )
             .map_err(PackageError::RuntimeManifest)?;
         runtime_manifest
             .bind_container(
@@ -684,6 +724,14 @@ mod tests {
             .into_iter()
             .collect()
         );
+        let root_metadata = decoded
+            .metadata(StableGuid::from_u128(101))
+            .expect("package emits route metadata");
+        assert_eq!(
+            root_metadata.hard_dependencies,
+            vec![StableGuid::from_u128(202)]
+        );
+        assert_eq!(root_metadata.schema, 1);
         assert_eq!(
             package.containers.keys().collect::<Vec<_>>(),
             vec!["a.container", "z.container"]
@@ -707,6 +755,35 @@ mod tests {
             assert_eq!(route.container_name, name);
             assert_eq!(route.container_guid, guid);
         }
+    }
+
+    #[test]
+    fn package_preserves_all_routes_for_a_shared_artifact_dependency() {
+        let (mut manifest, cas, mut mappings) = manifest_and_cas();
+        let shared = manifest.entries.get(&AssetId(2)).unwrap().clone();
+        manifest.entries.insert(AssetId(3), shared);
+        mappings.push(AssetPackageMapping {
+            asset: AssetId(3),
+            guid: StableGuid::from_u128(303),
+            container_name: "a.container".into(),
+            priority: 0,
+            chunk_priority: 0,
+        });
+
+        let package = package_runtime(PackageRequest {
+            manifest: &manifest,
+            cas: &cas,
+            mappings,
+        })
+        .unwrap();
+        let root = package
+            .runtime_manifest
+            .metadata(StableGuid::from_u128(101))
+            .unwrap();
+        assert_eq!(
+            root.hard_dependencies,
+            vec![StableGuid::from_u128(202), StableGuid::from_u128(303)]
+        );
     }
 
     #[test]
