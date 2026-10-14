@@ -1,6 +1,6 @@
 use crate::{
     AutoHideEntry, DockLayout, DockNode, FloatingWindow, LayoutError, MaximizeRestore, PanelId,
-    Ratio, Rect, Side, SplitChild, ValidationIssue,
+    Ratio, Rect, Side, SplitChild, TabId, ValidationIssue,
 };
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
@@ -106,6 +106,60 @@ pub enum Action {
         /// Panel to reveal, or `None` to hide the currently revealed panel.
         panel: Option<PanelId>,
     },
+}
+
+/// Builds an activation action for a tab in the current layout.
+///
+/// The returned index is the tab's index in the containing panel or document
+/// stack.  The search covers the main tree and every floating tree, matching
+/// the reducer's own [`Action::ActivateTab`] lookup rules.  This function is
+/// pure and does not mutate `layout`, so callers can safely use it as an
+/// adapter from input or accessibility events before dispatching the action.
+pub fn activate_tab_action(layout: &DockLayout, tab: &TabId) -> Result<Action, LayoutError> {
+    layout.validate()?;
+
+    let (target, index) = match tab {
+        TabId::Panel(panel) => {
+            let index = find_tab_index(&layout.root, tab).or_else(|| {
+                layout
+                    .floating
+                    .iter()
+                    .find_map(|window| find_tab_index(&window.root, tab))
+            });
+            (Target::Panel(panel.clone()), index)
+        }
+        TabId::Document(document) => {
+            let index = find_tab_index(&layout.root, tab).or_else(|| {
+                layout
+                    .floating
+                    .iter()
+                    .find_map(|window| find_tab_index(&window.root, tab))
+            });
+            (Target::Document(document.clone()), index)
+        }
+    };
+
+    index
+        .map(|index| Action::ActivateTab { target, index })
+        .ok_or_else(|| LayoutError {
+            issue: ValidationIssue::TargetNotFound,
+            path: Vec::new(),
+        })
+}
+
+fn find_tab_index(node: &DockNode, tab: &TabId) -> Option<usize> {
+    match (node, tab) {
+        (DockNode::TabStack { tabs, .. }, TabId::Panel(panel)) => {
+            tabs.iter().position(|candidate| candidate == panel)
+        }
+        (DockNode::Document { tabs, .. }, TabId::Document(document)) => {
+            tabs.iter().position(|candidate| candidate == document)
+        }
+        (DockNode::Split { children, .. }, _) => children
+            .iter()
+            .find_map(|child| find_tab_index(&child.node, tab)),
+        _ => None,
+    }
 }
 
 /// Applies an action atomically. On failure the input layout is untouched.
@@ -563,11 +617,38 @@ fn normalize(layout: &mut DockLayout) {
     }
 }
 fn normalize_node(node: &mut DockNode, root: bool) {
-    if let DockNode::Split { children, .. } = node {
+    if let DockNode::Split { axis, children } = node {
+        let axis = *axis;
         for child in children.iter_mut() {
             normalize_node(&mut child.node, false);
         }
         children.retain(|c| c.node != DockNode::Empty);
+        let mut flattened = Vec::with_capacity(children.len());
+        for child in core::mem::take(children) {
+            match child.node {
+                DockNode::Split {
+                    axis: nested_axis,
+                    children: nested,
+                } if nested_axis == axis => {
+                    for nested_child in nested {
+                        let combined = ((u64::from(child.ratio.millionths())
+                            * u64::from(nested_child.ratio.millionths())
+                            + u64::from(Ratio::SCALE / 2))
+                            / u64::from(Ratio::SCALE))
+                        .max(1) as u32;
+                        flattened.push(SplitChild {
+                            ratio: Ratio::from_millionths(combined),
+                            node: nested_child.node,
+                        });
+                    }
+                }
+                node => flattened.push(SplitChild {
+                    ratio: child.ratio,
+                    node,
+                }),
+            }
+        }
+        *children = flattened;
         if children.is_empty() {
             *node = DockNode::Empty;
         } else if children.len() == 1 {
@@ -726,5 +807,111 @@ mod tests {
                 active: 1,
             }
         );
+    }
+
+    #[test]
+    fn activate_tab_action_finds_panel_and_document_indexes_in_current_layout() {
+        let layout = DockLayout {
+            root: DockNode::Split {
+                axis: crate::Axis::Horizontal,
+                children: vec![
+                    SplitChild {
+                        ratio: Ratio::HALF,
+                        node: DockNode::TabStack {
+                            tabs: vec!["panel.a".into(), "panel.b".into()],
+                            active: 0,
+                        },
+                    },
+                    SplitChild {
+                        ratio: Ratio::HALF,
+                        node: DockNode::Document {
+                            tabs: vec!["doc.a".into(), "doc.b".into()],
+                            active: 0,
+                        },
+                    },
+                ],
+            },
+            ..DockLayout::default()
+        };
+
+        assert_eq!(
+            activate_tab_action(&layout, &TabId::Panel("panel.b".into())).unwrap(),
+            Action::ActivateTab {
+                target: Target::Panel("panel.b".into()),
+                index: 1,
+            }
+        );
+        assert_eq!(
+            activate_tab_action(&layout, &TabId::Document("doc.b".into())).unwrap(),
+            Action::ActivateTab {
+                target: Target::Document("doc.b".into()),
+                index: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_flattens_adjacent_splits_with_the_same_axis() {
+        let layout = DockLayout {
+            root: DockNode::Split {
+                axis: crate::Axis::Horizontal,
+                children: vec![
+                    SplitChild {
+                        ratio: Ratio::HALF,
+                        node: DockNode::Split {
+                            axis: crate::Axis::Horizontal,
+                            children: vec![
+                                SplitChild {
+                                    ratio: Ratio::HALF,
+                                    node: DockNode::panel("a"),
+                                },
+                                SplitChild {
+                                    ratio: Ratio::HALF,
+                                    node: DockNode::panel("b"),
+                                },
+                            ],
+                        },
+                    },
+                    SplitChild {
+                        ratio: Ratio::HALF,
+                        node: DockNode::panel("c"),
+                    },
+                ],
+            },
+            ..DockLayout::default()
+        };
+        let reduced = reduce(
+            &layout,
+            Action::ActivateTab {
+                target: Target::Panel("a".into()),
+                index: 0,
+            },
+        )
+        .unwrap();
+        let DockNode::Split { axis, children } = reduced.root else {
+            panic!("expected a normalized split");
+        };
+        assert_eq!(axis, crate::Axis::Horizontal);
+        assert_eq!(children.len(), 3);
+        assert_eq!(
+            children.iter().map(|child| child.ratio).collect::<Vec<_>>(),
+            vec![
+                Ratio::from_millionths(250_000),
+                Ratio::from_millionths(250_000),
+                Ratio::from_millionths(500_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn activate_tab_action_rejects_missing_tab_without_mutating_layout() {
+        let layout = DockLayout {
+            root: DockNode::panel("panel.a"),
+            ..DockLayout::default()
+        };
+
+        let error = activate_tab_action(&layout, &TabId::Panel("missing".into())).unwrap_err();
+        assert_eq!(error.issue, ValidationIssue::TargetNotFound);
+        assert_eq!(layout.root, DockNode::panel("panel.a"));
     }
 }

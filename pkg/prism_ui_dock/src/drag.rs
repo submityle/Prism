@@ -220,6 +220,8 @@ pub enum DragEvent {
     },
     /// Abort the drag and restore the source to its pre-drag location.
     Cancel,
+    /// Abort the drag when the owning window loses focus.
+    WindowLostFocus,
     /// Return a terminal state to idle.
     Reset,
 }
@@ -313,7 +315,7 @@ pub fn transition(state: &DragState, event: DragEvent) -> Result<DragState, Drag
         }
         (
             DragState::PickUp { source, .. } | DragState::Dragging { source, .. },
-            DragEvent::Cancel,
+            DragEvent::Cancel | DragEvent::WindowLostFocus,
         ) => Ok(DragState::Cancel {
             source: source.clone(),
         }),
@@ -508,6 +510,24 @@ mod tests {
         assert_eq!(
             transition(&state, DragEvent::Reset).unwrap(),
             DragState::Idle
+        );
+    }
+
+    #[test]
+    fn window_focus_loss_cancels_an_active_drag() {
+        let state = transition(
+            &DragState::Idle,
+            DragEvent::PickUp {
+                source: "source".into(),
+                position: PointerPosition { x: 1, y: 2 },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            transition(&state, DragEvent::WindowLostFocus).unwrap(),
+            DragState::Cancel {
+                source: "source".into()
+            }
         );
     }
 

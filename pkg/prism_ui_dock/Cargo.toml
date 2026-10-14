@@ -8,7 +8,7 @@ publish = false
 
 [features]
 default = ["std"]
-std = ["dep:fs4"]
+std = ["dep:fs4", "dep:tempfile"]
 render = [
   "std",
   "dep:prism_ui",
@@ -16,13 +16,16 @@ render = [
   "dep:prism_ui_component_kit",
 ]
 a11y = ["render", "dep:prism_ui_a11y"]
+input = ["render", "dep:prism_ui_input"]
 
 [dependencies]
 fs4 = { version = "0.13", optional = true }
+tempfile = { version = "3.27", optional = true }
 prism_ui = { path = "../prism_ui", optional = true }
 prism_ui_component = { path = "../prism_ui_component", optional = true }
 prism_ui_component_kit = { path = "../prism_ui_component_kit", optional = true }
 prism_ui_a11y = { path = "../prism_ui_a11y", optional = true }
+prism_ui_input = { path = "../prism_ui_input", optional = true }
 
 [lints]
 workspace = true

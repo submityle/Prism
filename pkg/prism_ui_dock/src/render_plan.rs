@@ -343,6 +343,135 @@ pub struct RenderPlan {
     pub focus: FocusMetadata,
 }
 
+/// A semantic target returned by [`hit_test`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HitTarget {
+    /// A panel tab or active panel content.
+    Panel(PanelId),
+    /// A document tab or active document content.
+    Document(String),
+    /// A tab header, preserving its typed identity.
+    Tab(TabId),
+    /// A splitter hit region.
+    Splitter {
+        /// Split surface.
+        surface: SurfaceId,
+        /// Split node path.
+        node: NodePath,
+        /// Child before the splitter.
+        before_child: usize,
+        /// Child after the splitter.
+        after_child: usize,
+    },
+    /// An auto-hide button.
+    AutoHide(PanelId),
+}
+
+/// Geometry and semantic identity returned by [`hit_test`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DockHit {
+    /// Semantic object under the pointer.
+    pub target: HitTarget,
+    /// Surface containing the object.
+    pub surface: SurfaceId,
+    /// Exact hit rectangle used for the match.
+    pub rect: crate::Rect,
+}
+
+/// Performs deterministic dock hit testing over a solved plan.
+///
+/// Floating surfaces are tested in descending `z`, splitters precede content,
+/// and tab headers precede their containing panel rectangles. Coordinates use
+/// the same logical-pixel space as [`Viewport`].
+pub fn hit_test(plan: &RenderPlan, x: i32, y: i32) -> Option<DockHit> {
+    let point = (x, y);
+    let mut floating = plan.floating.iter().collect::<Vec<_>>();
+    floating.sort_by(|left, right| right.z.cmp(&left.z).then(right.index.cmp(&left.index)));
+    for window in floating {
+        if contains(window.rect, point)
+            && let Some(hit) = hit_surface(plan, window.surface, point)
+        {
+            return Some(hit);
+        }
+    }
+
+    if let Some(reveal) = &plan.autohide.revealed
+        && contains(reveal.rect, point)
+    {
+        return Some(DockHit {
+            target: HitTarget::Panel(reveal.panel.clone()),
+            surface: SurfaceId::AutoHide(reveal.side),
+            rect: reveal.rect,
+        });
+    }
+    for bar in &plan.autohide.bars {
+        for button in &bar.buttons {
+            if contains(button.rect, point) {
+                return Some(DockHit {
+                    target: HitTarget::AutoHide(button.panel.clone()),
+                    surface: SurfaceId::AutoHide(button.side),
+                    rect: button.rect,
+                });
+            }
+        }
+    }
+    hit_surface(plan, SurfaceId::Main, point)
+}
+
+fn hit_surface(plan: &RenderPlan, surface: SurfaceId, point: (i32, i32)) -> Option<DockHit> {
+    for splitter in plan.splitters.iter().rev() {
+        if splitter.surface == surface && contains(splitter.hit_rect, point) {
+            return Some(DockHit {
+                target: HitTarget::Splitter {
+                    surface,
+                    node: splitter.node.clone(),
+                    before_child: splitter.before_child,
+                    after_child: splitter.after_child,
+                },
+                surface,
+                rect: splitter.hit_rect,
+            });
+        }
+    }
+    for tab in plan.tabs.iter().rev() {
+        if tab.surface == surface && contains(tab.rect, point) {
+            return Some(DockHit {
+                target: HitTarget::Tab(tab.id.clone()),
+                surface,
+                rect: tab.rect,
+            });
+        }
+    }
+    for panel in plan.panels.iter().rev() {
+        if panel.surface != surface || !panel.active || !contains(panel.rect, point) {
+            continue;
+        }
+        return Some(DockHit {
+            target: HitTarget::Panel(panel.id.clone()),
+            surface,
+            rect: panel.rect,
+        });
+    }
+    for document in plan.documents.iter().rev() {
+        if document.surface != surface || !document.active || !contains(document.rect, point) {
+            continue;
+        }
+        return Some(DockHit {
+            target: HitTarget::Document(document.id.clone()),
+            surface,
+            rect: document.rect,
+        });
+    }
+    None
+}
+
+fn contains(rect: crate::Rect, point: (i32, i32)) -> bool {
+    let (x, y) = (i64::from(point.0), i64::from(point.1));
+    let left = i64::from(rect.x);
+    let top = i64::from(rect.y);
+    x >= left && y >= top && x < left + i64::from(rect.width) && y < top + i64::from(rect.height)
+}
+
 /// A size requirement failure with enough context for diagnostics/UI logging.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SizeRequirement {
@@ -1647,5 +1776,51 @@ mod tests {
             i64::from(splitter.hit_rect.x) + i64::from(splitter.hit_rect.width)
                 <= i64::from(plan.main_rect.x) + i64::from(plan.main_rect.width)
         );
+    }
+
+    #[test]
+    fn hit_test_prefers_tabs_splitters_and_topmost_floating_window() {
+        let mut layout = split_layout();
+        layout.floating = vec![
+            FloatingWindow {
+                rect: crate::Rect {
+                    x: 100,
+                    y: 100,
+                    width: 300,
+                    height: 240,
+                },
+                root: DockNode::panel("low"),
+                z: 1,
+            },
+            FloatingWindow {
+                rect: crate::Rect {
+                    x: 150,
+                    y: 140,
+                    width: 300,
+                    height: 240,
+                },
+                root: DockNode::panel("high"),
+                z: 2,
+            },
+        ];
+        let plan = solve(&layout, Viewport::new(1_200, 800)).unwrap();
+        assert_eq!(
+            hit_test(&plan, 200, 180).unwrap().target,
+            HitTarget::Panel("high".into())
+        );
+        let tab = plan.tabs.iter().find(|tab| tab.active).unwrap();
+        assert!(matches!(
+            hit_test(&plan, tab.rect.x + 1, tab.rect.y + 1)
+                .unwrap()
+                .target,
+            HitTarget::Tab(_)
+        ));
+        let splitter = &plan.splitters[0];
+        assert!(matches!(
+            hit_test(&plan, splitter.hit_rect.x, splitter.hit_rect.y)
+                .unwrap()
+                .target,
+            HitTarget::Splitter { .. }
+        ));
     }
 }

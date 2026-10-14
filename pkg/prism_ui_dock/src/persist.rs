@@ -175,10 +175,10 @@ fn enforce_encode_limits(layout: &DockLayout, limits: DecodeLimits) -> Result<()
             return Err(PersistError::ResourceLimit("string bytes"));
         }
     }
-    if let Some(active) = &layout.autohide.active {
-        if active.len() > limits.max_string_bytes {
-            return Err(PersistError::ResourceLimit("string bytes"));
-        }
+    if let Some(active) = &layout.autohide.active
+        && active.len() > limits.max_string_bytes
+    {
+        return Err(PersistError::ResourceLimit("string bytes"));
     }
     if let Some(snapshot) = &layout.maximized {
         if snapshot.panel.len() > limits.max_string_bytes {

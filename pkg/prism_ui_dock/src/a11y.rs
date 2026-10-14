@@ -1,6 +1,6 @@
 //! Accessibility projection for a solved dock plan.
 
-use crate::{RenderPlan, TabId};
+use crate::{activate_tab_action, Action, DockLayout, RenderPlan, TabId};
 use alloc::{format, string::String};
 use prism_ui::{Key, Key as UiKey};
 use prism_ui_a11y::{
@@ -90,6 +90,27 @@ impl DockA11ySnapshot {
         }
     }
 
+    /// Resolves keyboard input into a reducer action for tab activation.
+    ///
+    /// `KeyboardNav` and the a11y tree remain owned by the caller's a11y
+    /// integration.  The supplied layout is consulted only when the focused
+    /// node is activated, which lets this method locate the tab's current
+    /// panel/document stack and produce the corresponding
+    /// [`Action::ActivateTab`].  A stale snapshot, a non-tab target, or a tab
+    /// that is no longer present in `layout` returns `None` and emits no
+    /// reducer action.
+    pub fn resolve_reducer_action(
+        &self,
+        layout: &DockLayout,
+        current: &UiKey,
+        input: KeyInput,
+    ) -> Option<Action> {
+        match self.resolve(current, input) {
+            DockA11yAction::Activate(tab) => activate_tab_action(layout, &tab).ok(),
+            DockA11yAction::MoveFocus(_) | DockA11yAction::Dismiss | DockA11yAction::None => None,
+        }
+    }
+
     /// Returns the tab represented by a semantic key.
     pub fn tab_for_key(&self, key: &Key) -> Option<TabId> {
         self.tree.get(key)?;
@@ -141,7 +162,7 @@ fn tab_label(tab: &TabId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DockLayout, DockNode, Viewport};
+    use crate::{DockLayout, DockNode, Target, Viewport};
 
     #[test]
     fn tabs_are_focusable_and_enter_activates_them() {
@@ -159,6 +180,64 @@ mod tests {
         assert_eq!(
             snapshot.resolve(&key, KeyInput::Enter),
             DockA11yAction::Activate(TabId::Panel("two".into()))
+        );
+        assert_eq!(
+            snapshot.resolve_reducer_action(&layout, &key, KeyInput::Enter),
+            Some(Action::ActivateTab {
+                target: Target::Panel("two".into()),
+                index: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn enter_activation_locates_document_stack_index() {
+        let layout = DockLayout {
+            root: DockNode::Document {
+                tabs: vec!["main.rs".into(), "lib.rs".into()],
+                active: 0,
+            },
+            ..DockLayout::default()
+        };
+        let plan = crate::solve(&layout, Viewport::new(640, 480)).unwrap();
+        let snapshot = DockA11ySnapshot::build(&plan);
+        let key = key_for_document_tab("lib.rs");
+
+        assert_eq!(
+            snapshot.resolve_reducer_action(&layout, &key, KeyInput::Enter),
+            Some(Action::ActivateTab {
+                target: Target::Document("lib.rs".into()),
+                index: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn stale_or_unknown_activation_target_produces_no_reducer_action() {
+        let original = DockLayout {
+            root: DockNode::TabStack {
+                tabs: vec!["one".into(), "two".into()],
+                active: 0,
+            },
+            ..DockLayout::default()
+        };
+        let plan = crate::solve(&original, Viewport::new(640, 480)).unwrap();
+        let snapshot = DockA11ySnapshot::build(&plan);
+        let current_layout = DockLayout {
+            root: DockNode::panel("one"),
+            ..DockLayout::default()
+        };
+
+        let stale_key = key_for_panel_tab("two");
+        assert_eq!(
+            snapshot.resolve_reducer_action(&current_layout, &stale_key, KeyInput::Enter),
+            None
+        );
+
+        let unknown_key = key_for_panel_tab("missing");
+        assert_eq!(
+            snapshot.resolve_reducer_action(&original, &unknown_key, KeyInput::Enter),
+            None
         );
     }
 }

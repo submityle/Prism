@@ -4,7 +4,7 @@ use crate::{
     decode_layout, decode_workspace, encode_layout, encode_workspace, DecodeOptions, DockLayout,
     PersistError, WorkspaceDecodeOptions, WorkspaceManager, WorkspacePersistError,
 };
-use alloc::vec::Vec;
+use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
 /// Canonical layout wire version emitted by this crate.
 pub const CURRENT_LAYOUT_VERSION: u16 = 1;
@@ -61,6 +61,18 @@ impl MigrationRegistry {
         Self { steps: Vec::new() }
     }
 
+    /// Creates a registry containing the shipped version-0 single-panel
+    /// migration used by early Prism dock snapshots.
+    pub fn with_legacy_v0() -> Result<Self, MigrationError> {
+        let mut registry = Self::new();
+        registry.register(MigrationStep {
+            from: 0,
+            to: CURRENT_LAYOUT_VERSION,
+            migrate: migrate_legacy_layout_v0,
+        })?;
+        Ok(registry)
+    }
+
     /// Adds one forward version edge, rejecting duplicates and self-edges.
     pub fn register(&mut self, step: MigrationStep) -> Result<(), MigrationError> {
         if step.from >= step.to
@@ -91,6 +103,21 @@ impl MigrationRegistry {
 
     /// Migrates bytes to the current version and validates the result.
     pub fn migrate(&self, bytes: &[u8]) -> Result<Vec<u8>, MigrationError> {
+        self.migrate_with_options(bytes, DecodeOptions::default())
+    }
+
+    /// Migrates and validates with caller-supplied parser limits and
+    /// registry filters.
+    pub fn migrate_with_options(
+        &self,
+        bytes: &[u8],
+        options: DecodeOptions<'_>,
+    ) -> Result<Vec<u8>, MigrationError> {
+        if bytes.len() > options.limits.max_bytes {
+            return Err(MigrationError::InvalidOutput(PersistError::ResourceLimit(
+                "bytes",
+            )));
+        }
         let mut version = read_version(bytes)?;
         if version > CURRENT_LAYOUT_VERSION {
             return Err(MigrationError::MissingStep {
@@ -109,6 +136,11 @@ impl MigrationRegistry {
                     to: CURRENT_LAYOUT_VERSION,
                 })?;
             current = (step.migrate)(&current)?;
+            if current.len() > options.limits.max_bytes {
+                return Err(MigrationError::InvalidOutput(PersistError::ResourceLimit(
+                    "bytes",
+                )));
+            }
             let migrated_version = read_version(&current)?;
             if migrated_version != step.to {
                 return Err(MigrationError::InvalidOutput(
@@ -117,7 +149,7 @@ impl MigrationRegistry {
             }
             version = step.to;
         }
-        decode_layout(&current, DecodeOptions::default())
+        decode_layout(&current, options)
             .map_err(MigrationError::InvalidOutput)
             .map(|_| current)
     }
@@ -143,6 +175,18 @@ impl WorkspaceMigrationRegistry {
         Self { steps: Vec::new() }
     }
 
+    /// Creates a registry containing the shipped version-0 single-workspace
+    /// migration used by early Prism workspace snapshots.
+    pub fn with_legacy_v0() -> Result<Self, MigrationError> {
+        let mut registry = Self::new();
+        registry.register(MigrationStep {
+            from: 0,
+            to: CURRENT_WORKSPACE_VERSION,
+            migrate: migrate_legacy_workspace_v0,
+        })?;
+        Ok(registry)
+    }
+
     /// Registers one forward workspace version edge.
     pub fn register(&mut self, step: MigrationStep) -> Result<(), MigrationError> {
         if step.from >= step.to
@@ -163,6 +207,20 @@ impl WorkspaceMigrationRegistry {
 
     /// Migrates and validates a workspace snapshot to the canonical version.
     pub fn migrate(&self, bytes: &[u8]) -> Result<Vec<u8>, MigrationError> {
+        self.migrate_with_options(bytes, WorkspaceDecodeOptions::default())
+    }
+
+    /// Migrates and validates with caller-supplied workspace limits.
+    pub fn migrate_with_options(
+        &self,
+        bytes: &[u8],
+        options: WorkspaceDecodeOptions<'_>,
+    ) -> Result<Vec<u8>, MigrationError> {
+        if bytes.len() > options.limits.max_bytes {
+            return Err(MigrationError::InvalidWorkspaceOutput(
+                WorkspacePersistError::ResourceLimit("bytes"),
+            ));
+        }
         let mut version = read_magic_version(bytes, b"PRWS")?;
         let mut current = bytes.to_vec();
         while version < CURRENT_WORKSPACE_VERSION {
@@ -175,6 +233,11 @@ impl WorkspaceMigrationRegistry {
                     to: CURRENT_WORKSPACE_VERSION,
                 })?;
             current = (step.migrate)(&current)?;
+            if current.len() > options.limits.max_bytes {
+                return Err(MigrationError::InvalidWorkspaceOutput(
+                    WorkspacePersistError::ResourceLimit("bytes"),
+                ));
+            }
             version = read_magic_version(&current, b"PRWS")?;
             if version != step.to {
                 return Err(MigrationError::InvalidWorkspaceOutput(
@@ -182,7 +245,7 @@ impl WorkspaceMigrationRegistry {
                 ));
             }
         }
-        decode_workspace(&current, WorkspaceDecodeOptions::default())
+        decode_workspace(&current, options)
             .map_err(MigrationError::InvalidWorkspaceOutput)
             .map(|_| current)
     }
@@ -218,6 +281,101 @@ pub fn rewrite_version(bytes: &[u8], version: u16) -> Result<Vec<u8>, MigrationE
 /// Rewrites a Workspace header version for a registered migration step.
 pub fn rewrite_workspace_version(bytes: &[u8], version: u16) -> Result<Vec<u8>, MigrationError> {
     rewrite_magic_version(bytes, b"PRWS", version)
+}
+
+/// Migrates the shipped v0 layout format: one workspace-independent panel ID
+/// stored as `PRDK`, version `0`, `u32 length`, UTF-8 bytes.
+pub fn migrate_legacy_layout_v0(bytes: &[u8]) -> Result<Vec<u8>, MigrationError> {
+    let mut offset = expect_legacy_header(bytes, b"PRDK")?;
+    let panel = read_legacy_string(bytes, &mut offset)?;
+    if offset != bytes.len() {
+        return Err(MigrationError::InvalidOutput(PersistError::TrailingBytes));
+    }
+    encode_layout(&DockLayout {
+        root: crate::DockNode::panel(panel),
+        ..DockLayout::default()
+    })
+    .map_err(MigrationError::InvalidOutput)
+}
+
+/// Migrates the shipped v0 workspace format: one workspace, one perspective,
+/// and one panel ID, each encoded as a checked UTF-8 string.
+pub fn migrate_legacy_workspace_v0(bytes: &[u8]) -> Result<Vec<u8>, MigrationError> {
+    let mut offset = expect_legacy_header(bytes, b"PRWS")?;
+    let workspace = read_legacy_workspace_string(bytes, &mut offset)?;
+    let perspective = read_legacy_workspace_string(bytes, &mut offset)?;
+    let panel = read_legacy_workspace_string(bytes, &mut offset)?;
+    if offset != bytes.len() {
+        return Err(MigrationError::InvalidWorkspaceOutput(
+            WorkspacePersistError::TrailingBytes,
+        ));
+    }
+    let mut manager = WorkspaceManager::new();
+    manager.add_workspace(workspace).map_err(|error| {
+        MigrationError::InvalidWorkspaceOutput(WorkspacePersistError::Workspace(error))
+    })?;
+    manager
+        .add_perspective(
+            perspective,
+            &DockLayout {
+                root: crate::DockNode::panel(panel),
+                ..DockLayout::default()
+            },
+        )
+        .map_err(|error| {
+            MigrationError::InvalidWorkspaceOutput(WorkspacePersistError::Workspace(error))
+        })?;
+    encode_workspace(&manager).map_err(MigrationError::InvalidWorkspaceOutput)
+}
+
+fn expect_legacy_header(bytes: &[u8], magic: &[u8; 4]) -> Result<usize, MigrationError> {
+    if bytes.len() < 6 {
+        return Err(MigrationError::TruncatedHeader);
+    }
+    if &bytes[..4] != magic {
+        return Err(MigrationError::BadMagic);
+    }
+    if u16::from_le_bytes([bytes[4], bytes[5]]) != 0 {
+        return Err(MigrationError::InvalidStep { from: 0, to: 1 });
+    }
+    Ok(6)
+}
+
+fn read_legacy_string(bytes: &[u8], offset: &mut usize) -> Result<String, MigrationError> {
+    let end = offset
+        .checked_add(4)
+        .ok_or(MigrationError::TruncatedHeader)?;
+    if end > bytes.len() {
+        return Err(MigrationError::TruncatedHeader);
+    }
+    let length = u32::from_le_bytes(bytes[*offset..end].try_into().unwrap()) as usize;
+    *offset = end;
+    let end = offset
+        .checked_add(length)
+        .ok_or(MigrationError::TruncatedHeader)?;
+    if end > bytes.len() {
+        return Err(MigrationError::TruncatedHeader);
+    }
+    let value = core::str::from_utf8(&bytes[*offset..end])
+        .map_err(|_| MigrationError::InvalidOutput(PersistError::InvalidUtf8))?
+        .to_owned();
+    *offset = end;
+    Ok(value)
+}
+
+fn read_legacy_workspace_string(
+    bytes: &[u8],
+    offset: &mut usize,
+) -> Result<String, MigrationError> {
+    read_legacy_string(bytes, offset).map_err(|error| match error {
+        MigrationError::InvalidOutput(PersistError::InvalidUtf8) => {
+            MigrationError::InvalidWorkspaceOutput(WorkspacePersistError::InvalidUtf8)
+        }
+        MigrationError::TruncatedHeader => {
+            MigrationError::InvalidWorkspaceOutput(WorkspacePersistError::Truncated)
+        }
+        other => other,
+    })
 }
 
 fn rewrite_magic_version(
@@ -305,5 +463,75 @@ mod tests {
             })
             .unwrap();
         assert_eq!(registry.migrate(&legacy).unwrap(), canonical);
+    }
+
+    fn legacy_layout_bytes(panel: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::from(*b"PRDK");
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&(panel.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(panel);
+        bytes
+    }
+
+    fn legacy_workspace_bytes(workspace: &[u8], perspective: &[u8], panel: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::from(*b"PRWS");
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        for value in [workspace, perspective, panel] {
+            bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(value);
+        }
+        bytes
+    }
+
+    #[test]
+    fn shipped_legacy_layout_migration_rejects_malformed_inputs_and_limits() {
+        let registry = MigrationRegistry::with_legacy_v0().unwrap();
+        assert_eq!(
+            registry.migrate(&legacy_layout_bytes(b"panel\xFF")),
+            Err(MigrationError::InvalidOutput(PersistError::InvalidUtf8))
+        );
+        let mut trailing = legacy_layout_bytes(b"panel");
+        trailing.push(0);
+        assert_eq!(
+            registry.migrate(&trailing),
+            Err(MigrationError::InvalidOutput(PersistError::TrailingBytes))
+        );
+        let bytes = legacy_layout_bytes(b"panel");
+        let mut options = DecodeOptions::default();
+        options.limits.max_bytes = bytes.len() - 1;
+        assert_eq!(
+            registry.migrate_with_options(&bytes, options),
+            Err(MigrationError::InvalidOutput(PersistError::ResourceLimit(
+                "bytes"
+            )))
+        );
+    }
+
+    #[test]
+    fn shipped_legacy_workspace_migration_rejects_malformed_inputs_and_limits() {
+        let registry = WorkspaceMigrationRegistry::with_legacy_v0().unwrap();
+        assert_eq!(
+            registry.migrate(&legacy_workspace_bytes(b"main\xFF", b"default", b"panel")),
+            Err(MigrationError::InvalidWorkspaceOutput(
+                WorkspacePersistError::InvalidUtf8
+            ))
+        );
+        let mut trailing = legacy_workspace_bytes(b"main", b"default", b"panel");
+        trailing.push(0);
+        assert_eq!(
+            registry.migrate(&trailing),
+            Err(MigrationError::InvalidWorkspaceOutput(
+                WorkspacePersistError::TrailingBytes
+            ))
+        );
+        let bytes = legacy_workspace_bytes(b"main", b"default", b"panel");
+        let mut options = WorkspaceDecodeOptions::default();
+        options.limits.max_bytes = bytes.len() - 1;
+        assert_eq!(
+            registry.migrate_with_options(&bytes, options),
+            Err(MigrationError::InvalidWorkspaceOutput(
+                WorkspacePersistError::ResourceLimit("bytes")
+            ))
+        );
     }
 }

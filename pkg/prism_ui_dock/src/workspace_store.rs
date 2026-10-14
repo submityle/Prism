@@ -15,11 +15,13 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tempfile::TempPath;
 
 use crate::{
-    decode_workspace, decode_workspace_with_registry, encode_workspace, MigrationError,
-    PanelRegistry, WorkspaceDecodeLimits, WorkspaceDecodeOptions, WorkspaceManager,
-    WorkspaceMigrationRegistry, WorkspacePersistError,
+    decode_instance_registry, decode_workspace, decode_workspace_with_registry,
+    encode_instance_registry, encode_workspace, InstancePersistError, MigrationError,
+    PanelInstanceRegistry, PanelRegistry, WorkspaceDecodeLimits, WorkspaceDecodeOptions,
+    WorkspaceManager, WorkspaceMigrationRegistry, WorkspacePersistError,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -49,6 +51,19 @@ pub struct LoadedWorkspace {
     pub last_good_error: Option<WorkspaceStoreError>,
 }
 
+/// A panel-instance registry loaded from the primary or last-good snapshot.
+#[derive(Debug)]
+pub struct LoadedInstances {
+    /// The decoded stable instance identities.
+    pub registry: PanelInstanceRegistry,
+    /// The source that supplied the returned registry.
+    pub source: WorkspaceLoadSource,
+    /// The primary I/O/decode error, if primary loading failed.
+    pub primary_error: Option<WorkspaceStoreError>,
+    /// The last-good I/O/decode error, if that fallback was attempted.
+    pub last_good_error: Option<WorkspaceStoreError>,
+}
+
 /// Filesystem or codec failure at the workspace storage boundary.
 #[derive(Debug)]
 pub enum WorkspaceStoreError {
@@ -58,6 +73,8 @@ pub enum WorkspaceStoreError {
     Codec(WorkspacePersistError),
     /// Snapshot bytes failed the explicit schema migration registry.
     Migration(MigrationError),
+    /// Snapshot bytes failed the panel-instance registry codec.
+    Instance(InstancePersistError),
 }
 
 impl From<io::Error> for WorkspaceStoreError {
@@ -75,6 +92,12 @@ impl From<WorkspacePersistError> for WorkspaceStoreError {
 impl From<MigrationError> for WorkspaceStoreError {
     fn from(error: MigrationError) -> Self {
         Self::Migration(error)
+    }
+}
+
+impl From<InstancePersistError> for WorkspaceStoreError {
+    fn from(error: InstancePersistError) -> Self {
+        Self::Instance(error)
     }
 }
 
@@ -120,6 +143,18 @@ impl WorkspaceFileStore {
             .unwrap_or_else(|| String::from("last-good"));
         path.set_extension(suffix);
         path
+    }
+
+    /// Returns the sibling file used for the stable panel-instance registry.
+    #[must_use]
+    pub fn instances_path(&self) -> PathBuf {
+        sibling_with_suffix(&self.primary, "instances")
+    }
+
+    /// Returns the last-good panel-instance registry path.
+    #[must_use]
+    pub fn instances_last_good_path(&self) -> PathBuf {
+        sibling_with_suffix(&self.instances_path(), "last-good")
     }
 
     /// Returns the sibling temporary path used during the next save.
@@ -172,7 +207,7 @@ impl WorkspaceFileStore {
         options: WorkspaceDecodeOptions<'_>,
         default: WorkspaceManager,
     ) -> LoadedWorkspace {
-        self.load_with(default, |bytes| {
+        self.load_with(options.limits.max_bytes, default, |bytes| {
             decode_workspace(bytes, options).map_err(WorkspaceStoreError::Codec)
         })
     }
@@ -189,7 +224,7 @@ impl WorkspaceFileStore {
         limits: WorkspaceDecodeLimits,
         default: WorkspaceManager,
     ) -> LoadedWorkspace {
-        self.load_with(default, |bytes| {
+        self.load_with(limits.max_bytes, default, |bytes| {
             decode_workspace_with_registry(bytes, registry, known_documents, limits)
                 .map_err(WorkspaceStoreError::Codec)
         })
@@ -203,8 +238,9 @@ impl WorkspaceFileStore {
         options: WorkspaceDecodeOptions<'_>,
         default: WorkspaceManager,
     ) -> LoadedWorkspace {
-        self.load_with(default, |bytes| {
-            let migrated = migration.migrate(bytes)?;
+        self.load_with(options.limits.max_bytes, default, |bytes| {
+            let migrated =
+                migration.migrate_with_options(bytes, WorkspaceDecodeOptions { ..options })?;
             decode_workspace(&migrated, options).map_err(WorkspaceStoreError::Codec)
         })
     }
@@ -218,18 +254,74 @@ impl WorkspaceFileStore {
         limits: WorkspaceDecodeLimits,
         default: WorkspaceManager,
     ) -> LoadedWorkspace {
-        self.load_with(default, |bytes| {
-            let migrated = migration.migrate(bytes)?;
+        self.load_with(limits.max_bytes, default, |bytes| {
+            let migrated = migration.migrate_with_options(
+                bytes,
+                WorkspaceDecodeOptions {
+                    known_documents,
+                    limits,
+                    ..WorkspaceDecodeOptions::default()
+                },
+            )?;
             decode_workspace_with_registry(&migrated, registry, known_documents, limits)
                 .map_err(WorkspaceStoreError::Codec)
         })
     }
 
-    fn load_with<F>(&self, default: WorkspaceManager, mut decode: F) -> LoadedWorkspace
+    /// Loads the host-owned panel-instance registry with primary/last-good
+    /// recovery. The registry is intentionally a separate `PRIN` snapshot so
+    /// workspace layout bytes remain compatible with descriptor-only IDs.
+    pub fn load_instances(&self, default: PanelInstanceRegistry) -> LoadedInstances {
+        let primary = self.instances_path();
+        let last_good = self.instances_last_good_path();
+        let primary_error = match read_bounded(&primary, INSTANCE_MAX_BYTES) {
+            Ok(bytes) => match decode_instance_registry(&bytes) {
+                Ok(registry) => {
+                    return LoadedInstances {
+                        registry,
+                        source: WorkspaceLoadSource::Primary,
+                        primary_error: None,
+                        last_good_error: None,
+                    };
+                }
+                Err(error) => Some(WorkspaceStoreError::Instance(error)),
+            },
+            Err(WorkspaceStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => Some(error),
+        };
+        let last_good_error = match read_bounded(&last_good, INSTANCE_MAX_BYTES) {
+            Ok(bytes) => match decode_instance_registry(&bytes) {
+                Ok(registry) => {
+                    return LoadedInstances {
+                        registry,
+                        source: WorkspaceLoadSource::LastGood,
+                        primary_error,
+                        last_good_error: None,
+                    };
+                }
+                Err(error) => Some(WorkspaceStoreError::Instance(error)),
+            },
+            Err(WorkspaceStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => Some(error),
+        };
+        LoadedInstances {
+            registry: default,
+            source: WorkspaceLoadSource::Default,
+            primary_error,
+            last_good_error,
+        }
+    }
+
+    fn load_with<F>(
+        &self,
+        max_bytes: usize,
+        default: WorkspaceManager,
+        mut decode: F,
+    ) -> LoadedWorkspace
     where
         F: FnMut(&[u8]) -> Result<WorkspaceManager, WorkspaceStoreError>,
     {
-        let primary_error = match fs::read(&self.primary) {
+        let primary_error = match read_bounded(&self.primary, max_bytes) {
             Ok(bytes) => match decode(&bytes) {
                 Ok(manager) => {
                     return LoadedWorkspace {
@@ -241,12 +333,12 @@ impl WorkspaceFileStore {
                 }
                 Err(error) => Some(error),
             },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => Some(WorkspaceStoreError::Io(error)),
+            Err(WorkspaceStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => Some(error),
         };
 
         let last_good = self.last_good_path();
-        let last_good_error = match fs::read(last_good) {
+        let last_good_error = match read_bounded(&last_good, max_bytes) {
             Ok(bytes) => match decode(&bytes) {
                 Ok(manager) => {
                     return LoadedWorkspace {
@@ -258,8 +350,8 @@ impl WorkspaceFileStore {
                 }
                 Err(error) => Some(error),
             },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => Some(WorkspaceStoreError::Io(error)),
+            Err(WorkspaceStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => Some(error),
         };
 
         LoadedWorkspace {
@@ -279,7 +371,6 @@ impl WorkspaceFileStore {
     /// returns an error even though the new snapshot may already be committed;
     /// callers must treat that result as commit status unknown and reload.
     pub fn save(&self, manager: &WorkspaceManager) -> Result<(), WorkspaceStoreError> {
-        let bytes = encode_workspace(manager)?;
         if let Some(parent) = self
             .primary
             .parent()
@@ -289,8 +380,8 @@ impl WorkspaceFileStore {
         }
 
         let _lock = StoreLock::acquire(&self.stable_lock_path())?;
+        let bytes = encode_workspace(manager)?;
         let temporary = self.unique_sibling("tmp");
-        let temporary_guard = TempPath::new(temporary.clone());
         let mut file = fs::File::create(&temporary)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
@@ -303,40 +394,88 @@ impl WorkspaceFileStore {
             let primary_bytes = fs::read(&self.primary)?;
             decode_workspace(&primary_bytes, WorkspaceDecodeOptions::default())?;
             let last_good_temporary = self.unique_sibling("last-good-tmp");
-            let last_good_guard = TempPath::new(last_good_temporary.clone());
             copy_and_sync(&self.primary, &last_good_temporary)?;
             replace_file(&last_good_temporary, &self.last_good_path())?;
-            last_good_guard.disarm();
             sync_parent(&self.last_good_path())?;
         }
         replace_file(&temporary, &self.primary)?;
-        temporary_guard.disarm();
         sync_parent(&self.primary)?;
+        Ok(())
+    }
+
+    /// Saves the host-owned panel-instance registry using the same lock and
+    /// atomic last-good protocol as workspace snapshots.
+    pub fn save_instances(
+        &self,
+        registry: &PanelInstanceRegistry,
+    ) -> Result<(), WorkspaceStoreError> {
+        let primary = self.instances_path();
+        let last_good = self.instances_last_good_path();
+        if let Some(parent) = primary.parent().filter(|path| !path.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        let _lock = StoreLock::acquire(&self.stable_lock_path())?;
+        let bytes = encode_instance_registry(registry)?;
+        let temporary = unique_sibling(&primary, "tmp");
+        write_and_sync(&temporary, &bytes)?;
+        if primary.exists() {
+            let previous = fs::read(&primary)?;
+            decode_instance_registry(&previous)?;
+            let last_good_temporary = unique_sibling(&primary, "last-good-tmp");
+            copy_and_sync(&primary, &last_good_temporary)?;
+            replace_file(&last_good_temporary, &last_good)?;
+            sync_parent(&last_good)?;
+        }
+        replace_file(&temporary, &primary)?;
+        sync_parent(&primary)?;
         Ok(())
     }
 }
 
-struct TempPath {
-    path: PathBuf,
-    armed: bool,
+const INSTANCE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, WorkspaceStoreError> {
+    let metadata = fs::metadata(path).map_err(WorkspaceStoreError::Io)?;
+    if metadata.len() > max_bytes as u64 {
+        return Err(WorkspaceStoreError::Codec(
+            WorkspacePersistError::ResourceLimit("bytes"),
+        ));
+    }
+    fs::read(path).map_err(WorkspaceStoreError::Io)
 }
 
-impl TempPath {
-    fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
-    }
-
-    fn disarm(mut self) {
-        self.armed = false;
-    }
+fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut result = path.to_path_buf();
+    let extension = result
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!("{extension}.{suffix}"))
+        .unwrap_or_else(|| suffix.to_owned());
+    result.set_extension(extension);
+    result
 }
 
-impl Drop for TempPath {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+fn unique_sibling(path: &Path, suffix: &str) -> PathBuf {
+    let nonce = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let process = std::process::id();
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut result = path.to_path_buf();
+    let extension = result
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!("{extension}.{suffix}.{process}.{time}.{nonce}"))
+        .unwrap_or_else(|| format!("{suffix}.{process}.{time}.{nonce}"));
+    result.set_extension(extension);
+    result
+}
+
+fn write_and_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 struct StoreLock {
@@ -349,6 +488,7 @@ impl StoreLock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
         let deadline = Instant::now() + Duration::from_millis(LOCK_WAIT_ATTEMPTS as u64);
         while Instant::now() < deadline {
@@ -381,19 +521,12 @@ fn copy_and_sync(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        // Windows rename does not replace an existing destination. Removing it
-        // first would lose the atomic-commit guarantee, so fail explicitly
-        // until the platform adapter supplies ReplaceFileW semantics.
-        if destination.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "atomic replacement of an existing workspace snapshot is unsupported on Windows",
-            ));
-        }
-    }
-    fs::rename(source, destination)
+    // `TempPath::persist` uses the platform's atomic overwrite primitive,
+    // including MoveFileExW on Windows, while keeping the source path scoped
+    // for cleanup if persistence fails.
+    TempPath::try_from_path(source.to_path_buf())?
+        .persist(destination)
+        .map_err(|error| error.error)
 }
 
 fn parent_or_current(path: &Path) -> &Path {
@@ -415,7 +548,9 @@ fn sync_parent(_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DockLayout, DockNode};
+    use crate::{
+        DockLayout, DockNode, Instancing, PanelDescriptor, PanelInstanceRegistry, PanelRegistry,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_store() -> (WorkspaceFileStore, PathBuf) {
@@ -443,6 +578,18 @@ mod tests {
         manager
     }
 
+    fn instances(panel_count: usize) -> PanelInstanceRegistry {
+        let mut panels = PanelRegistry::new();
+        panels
+            .register(PanelDescriptor::new("logs", "Logs").with_instancing(Instancing::Multi))
+            .unwrap();
+        let mut registry = PanelInstanceRegistry::new();
+        for _ in 0..panel_count {
+            registry.create(&panels, "logs").unwrap();
+        }
+        registry
+    }
+
     #[test]
     fn save_replaces_primary_and_preserves_last_good() {
         let (store, directory) = temp_store();
@@ -467,6 +614,24 @@ mod tests {
             .unwrap()
             .root,
             DockNode::panel("first")
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn instance_snapshots_use_primary_and_last_good_recovery() {
+        let (store, directory) = temp_store();
+        let first = instances(1);
+        let second = instances(2);
+        store.save_instances(&first).unwrap();
+        store.save_instances(&second).unwrap();
+
+        let loaded = store.load_instances(PanelInstanceRegistry::new());
+        assert_eq!(loaded.source, WorkspaceLoadSource::Primary);
+        assert_eq!(loaded.registry, second);
+        assert_eq!(
+            decode_instance_registry(&fs::read(store.instances_last_good_path()).unwrap()).unwrap(),
+            first
         );
         let _ = fs::remove_dir_all(directory);
     }
@@ -515,7 +680,7 @@ mod tests {
         store.save(&manager("unknown")).unwrap();
         let mut registry = PanelRegistry::new();
         registry
-            .register(crate::PanelDescriptor::new("known", "Known"))
+            .register(PanelDescriptor::new("known", "Known"))
             .unwrap();
 
         let loaded = store.load_with_registry(

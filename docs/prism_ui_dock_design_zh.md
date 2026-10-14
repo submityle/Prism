@@ -68,7 +68,7 @@ pub struct FloatingWindow {
 - `Document` 是文档叶子；普通 panel 不能与 document tabify。
 - `Empty` 只作为空主根或过滤过程中的中间值，提交、编码、解算前会收敛。
 - panel/document ID 在主树、浮窗和 autohide 中只出现一次。
-- floating 按 `z` 升序绘制；同 z 使用数组顺序稳定排序。
+- floating 按唯一 `z` 值升序绘制；hit-test 按逆序命中。
 - maximize 保存完整旧布局；最大化状态下当前可见面严格只有目标 panel。
 
 `Ratio` 使用百万分固定点。整数像素使用最大余数法分配，顺序稳定；最小尺寸无法满足时返回 `RenderPlanError`，不静默钳制。
@@ -101,12 +101,15 @@ Idle -> PickUp -> Dragging -> Drop -> Idle
 
 - 中心生成 `CenterTab`；上、下、左、右生成 split zone。
 - tab header 生成 `TabInsert(index)`，索引范围为 `[0, tabs.len]`。
-- Document 目标只接受 split；Panel 目标接受中心、四边和 tab insertion。
+- Document 目标只接受四边 split；Panel 目标接受中心、四边和 tab insertion。
 - floating 目标按 z 逆序命中，再在窗口内部按 RenderPlan 命中。
+- `hit_test` 按 floating z 降序、splitter、tab header、active content、autohide、main 的固定顺序返回 `DockHit`。
 - `resolve_drop_preview` 与 `map_drop_action` 使用相同的目标几何和 zone 数据。
 - `drop_preview_element` 只绘制 absolute preview，不注册事件、不抢焦点、不修改布局。
 - preview host 必须在输入树中设置 `pointer-events:none` 或从 hit-test 树排除；`prism_ui_input::PointerEvents::None` 可直接表达该语义。
 - Esc、非法区域和窗口失焦都回到原状态。
+
+`DockHost::handle_input` 接收 `DockInputEvent`，维护 pointer capture 和拖拽状态，依次执行 `hit_test -> DropZone -> DropPreview -> Action -> dispatch -> RenderPlan`。输入适配器只保存交互状态，不持有平台窗口、Element 或 GPU 资源。
 
 ## 6. DockHost、历史和 frame pipeline
 
@@ -117,6 +120,8 @@ Idle -> PickUp -> Dragging -> Drop -> Idle
 3. 成功提交后递增 revision 并清理 RenderPlan cache；
 4. 通过 `RenderPlanCache` 求解 exact layout/viewport/metrics 输入；
 5. 向 Element、a11y、window 和 renderer adapter 提供只读结果。
+
+`DockHost::render_element` 完成 `DockHost → RenderPlan → DockView → Element`；外部 renderer host 负责 Element retained update、`DrawList` lowering、CPU/wgpu rasterizer 选择和 window present。GPU parity 集成测试把两段宿主调用串联起来，核心 crate 不持有 renderer。这样保持 dock core 与 renderer 的单向依赖，同时让 renderer host 可以替换实现而不复制布局状态。
 
 历史采用固定容量 snapshot：新 action 清空 redo 分支；undo/redo 不访问 factory、文件或 GPU；容量为零直接返回结构化错误。
 
@@ -148,7 +153,7 @@ input snapshot
 - unknown ID、missing factory、重复注册和非法布局返回 `DockViewError`；
 - factory 失败不返回部分 Element。
 
-Render backend 的 `ElementRenderer` 将 Element 更新、布局和 DrawList 生成统一到 retained host；CPU rasterizer 和可选 wgpu rasterizer 共享 DrawList 契约。
+Render backend 的 `ElementRenderer` 将 Element 更新、布局和 DrawList 生成统一到 retained host；CPU rasterizer 和可选 wgpu rasterizer 共享 DrawList 契约。Dock 集成测试把两段宿主调用串联起来，并比较相同 DrawList 的 CPU/wgpu framebuffer。
 
 ## 8. 持久化与 schema migration
 
@@ -164,9 +169,9 @@ registry-aware decode 的顺序为：移除未知 ID、修复 active、移除空
 
 ## 9. Registry 与扩展
 
-core registry 只保存 `PanelDescriptor`：stable ID、标题、图标、实例策略、默认槽位。render registry 保存 factory。factory 只能通过只读 context 读取布局、主题、instance ID 和诊断信息，不能直接修改布局。
+core registry 只保存 `PanelDescriptor`：stable ID、标题、图标、实例策略、默认槽位。render registry 保存 factory。context-aware factory 通过只读 `ViewFactoryContext` 接收 panel/document ID、generation 和 layout revision，不能直接修改布局。
 
-扩展约束：注册幂等、ID 稳定、descriptor 可版本化、factory 生命周期可回收、卸载前关闭实例并重新运行 registry filter/default layout。`Instancing::Multi` 允许宿主建立多实例；默认布局为每个 descriptor 生成一个默认实例。
+扩展约束：ID 稳定、descriptor 带有扩展自有 schema version、factory 可注销、卸载前关闭实例并重新运行 registry filter/default layout；重复注册明确返回错误，不覆盖既有 descriptor。`Instancing::Multi` 通过 `PanelInstanceRegistry` 提供稳定 ID、创建、关闭和恢复；`WorkspaceFileStore::save_instances` 与 `load_instances` 使用独立的 `PRIN` primary/last-good 文件保存和恢复实例记录，宿主据此重建运行时对象；布局 codec 继续保存稳定 descriptor panel ID，保持 reducer 的唯一归属不变量。
 
 ## 10. 性能与容量
 
@@ -175,21 +180,21 @@ core registry 只保存 `PanelDescriptor`：stable ID、标题、图标、实例
 - `RenderPlanCache` 以 layout fingerprint、viewport、LayoutMetrics 为完整 key；layout、viewport、metrics 任意变化都会 miss。
 - `DockHost` 在 action 提交后清除 cache，避免 stale plan。
 - tab header 可使用 `prism_ui_virtual` 窗口化；active、keyboard neighbor、drag source、drop target 保留优先级。
-- factory 可使用 generation token 异步构建；旧 generation 的结果不得覆盖新布局。
-- 宿主记录 solve ns、Element update ns、DrawList command count、visible count、factory count、GPU submission ns、present latency 和 dropped frames，并输出 P50/P95/P99。
+- factory 支持只读 `ViewFactoryContext`、结构化失败和 generation 校验；`DockHost::render_element` 将当前 revision 传入 factory，旧 generation 的结果不得覆盖新布局。
+- 宿主通过有序 `DockFrameSample` 注入 solve、Element update、DrawList command count、visible count、factory count、GPU submission、present latency 和 dropped frames；`DockRuntimeMetrics` 固定保留 256 帧，并为阶段耗时及三类计数输出 P50/P95/P99。
 - 同一 manager 的提交顺序串行；不同 Workspace 的 encode/validate 可并行。
 
 ## 11. 视觉、动画和主题
 
 `DockPanel` 使用主题 token；drop preview 使用中心/边缘区分和对比度合格的边框；split、dock、maximize、restore、reveal 动画只插值 RenderPlan 几何，不修改模型。
 
-动画档位包含 disabled、reduced-motion、normal 和 high-quality。新 action 到达时，当前插值状态成为新时间线起点，避免动画对象累积。HDR、主题和 DPI 只影响渲染输入，不改变布局 ratio。
+动画档位包含 disabled、reduced-motion、normal 和 high-quality。新 action 到达时，当前插值状态成为新时间线起点，避免动画对象累积；transition 连续插值主区、浮窗、auto-hide bar/reveal 和 maximize/restore 几何，模型状态仍只由 reducer 提交。HDR、主题和 DPI 只影响渲染输入，不改变布局 ratio。
 
 ## 12. 可达性与窗口恢复
 
 启用 `a11y` feature 后，`DockA11ySnapshot::build` 生成 stable tab、panel、document 和 autohide semantic keys，并计算 `FocusOrder`。`resolve` 使用 `KeyboardNav`：Tab/Shift-Tab 移焦，Enter 激活 tab，Escape 返回 dismiss action，tab 的 selected 状态与 RenderPlan 同步。
 
-tab activation 转换为 `Action::ActivateTab`；FocusTrap 由 overlay host 用于 modal/floating context。语义树不持有 Element 或布局可变引用。
+`DockA11ySnapshot::resolve_reducer_action` 将 tab activation 定位到当前 panel/document stack，并转换为 `Action::ActivateTab`；FocusTrap 由 overlay host 用于 modal/floating context。语义树不持有 Element 或布局可变引用。
 
 `FloatingPlacement` 记录 monitor ID、逻辑 rect 和 scale milli。`restore_placement` 按首选 monitor → 第一可用 monitor 选择目标，按新旧 scale 缩放，并将窗口 clamp 到 work area，同时保证最小可见像素。显示器消失不会改变 dock tree。
 
@@ -210,14 +215,14 @@ tab activation 转换为 `Action::ActivateTab`；FocusTrap 由 overlay host 用�
 pkg/prism_ui_dock/src/
 ├── model.rs / validate.rs / reducer.rs
 ├── drag.rs / drop_preview.rs / drop_preview_view.rs
-├── render_plan.rs / render_cache.rs / frame.rs
-├── view.rs / registry.rs / default_layout.rs
-├── history.rs / display.rs / migration.rs
+├── render_plan.rs / render_cache.rs / frame.rs / input.rs
+├── view.rs / registry.rs / default_layout.rs / workspace_default.rs
+├── history.rs / display.rs / migration.rs / motion.rs / tab_window.rs
 ├── persist.rs / workspace.rs / workspace_persist.rs
-└── workspace_store.rs / autosave.rs
+└── workspace_store.rs / autosave.rs / instance_persist.rs
 ```
 
-features：`std` 提供 fs4 文件存储和 autosave；`render` 提供 Element 装配；`a11y` 依赖 `render` 并提供 DockA11ySnapshot。关闭 default features 后，model、validate、reducer、drag、solver、codec、workspace、history、display、migration 和 cache 保持 `no_std + alloc`。
+features：`std` 提供 fs4 文件存储和 autosave；`render` 提供 Element 装配；`input` 提供 preview 的 `PointerEvents::None` hit-node helper；`a11y` 依赖 `render` 并提供 DockA11ySnapshot 及 reducer action adapter。输入编排、命中测试、实例 codec、motion、model、validate、reducer、drag、solver、layout/workspace codec、history、display、migration 和 cache 均保持 `no_std + alloc`。
 
 ## 15. 验收矩阵与验证记录
 
@@ -226,17 +231,26 @@ features：`std` 提供 fs4 文件存储和 autosave；`render` 提供 Element �
 | model/validate/reducer | ratio、唯一归属、Document、浮窗、maximize、ActivateTab 和错误不变性测试通过 |
 | drag/drop/preview | 状态机、五向 zone、tab insertion、preview geometry 测试通过 |
 | render plan/view | 固定点舍入、最小尺寸、z 顺序、active factory、floating、autohide 测试通过 |
-| persistence/store | layout/workspace round-trip、截断、尾随、未知 ID、migration、lock、last-good、并发保存测试通过 |
+| persistence/store | layout/workspace round-trip、截断、尾随、未知 ID、migration、lock、last-good、并发保存测试通过；实例注册表生命周期测试通过，布局 codec 保存稳定 opaque panel ID |
 | history/host/cache | undo/redo、branch clearing、revision、cache hit/miss 测试通过 |
 | a11y/display | tab semantic、keyboard activation、DPI 缩放、monitor fallback、可见区域 clamp 测试通过 |
 | CPU/GPU | Dock Element DrawList 与真实 wgpu rasterizer parity 测试通过 |
 
-2026 年 10 月 14 日本机记录：
+2026 年 10 月 15 日 macOS 本机记录：
 
 - `cargo check -p prism_ui_dock --no-default-features`：通过；
-- `cargo test -p prism_ui_dock --features render`：116 passed；
-- `cargo test -p prism_ui_dock --features a11y`：117 passed；
-- `cargo test -p prism_ui_render_backend --features gpu --test dock_gpu_parity -- --nocapture`：1 passed，真实 GPU adapter 执行。
+- `cargo check -p prism_ui_dock --features input`：通过；
+- `cargo test -p prism_ui_dock --no-default-features --lib`：120 passed；
+- `cargo test -p prism_ui_dock --features input --lib`：149 passed；
+- `cargo test -p prism_ui_dock --features render --lib`：149 passed；
+- `cargo test -p prism_ui_dock --features a11y --lib`：152 passed；
+- `cargo test -p prism_ui_dock --all-features`：152 library tests and 4 persistence integration tests passed；
+- `cargo clippy -p prism_ui_dock --all-features --lib -- -D warnings`：通过；
+- `cargo fmt -p prism_ui_dock -- --check`：通过；
+- `cargo test -p prism_ui_render_backend --features gpu --test dock_gpu_parity -- --nocapture`：1 passed，真实 Metal/wgpu adapter 执行；无法取得真实 adapter 时测试失败，不会静默跳过。
+- `git diff --check -- docs/prism_ui_dock_design_zh.md pkg/prism_ui_dock`：通过。
+
+Workspace 文件替换使用 `TempPath::persist` 的平台原子替换实现；本次可复现验证在 macOS 完成，Windows/Linux 的构建与运行由对应平台 CI 或实机矩阵执行。
 
 ## 16. 版本与维护规则
 
