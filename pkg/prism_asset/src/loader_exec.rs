@@ -36,6 +36,7 @@ use crate::type_id::AssetTypeId;
 use crate::{Asset, Assets, LoaderId, LoaderRegistry, SuffixConflict};
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::fmt;
@@ -316,10 +317,10 @@ impl<L: AssetLoader> ErasedAssetLoader for L {
 /// loader objects keyed by [`LoaderId`](crate::LoaderId). This is what the
 /// [`AssetServer`](crate::AssetServer) holds to go from an
 /// [`AssetPath`] to decoded bytes.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AssetLoaders {
     policy: LoaderRegistry,
-    loaders: Vec<Box<dyn ErasedAssetLoader>>,
+    loaders: Vec<Arc<dyn ErasedAssetLoader>>,
 }
 
 impl AssetLoaders {
@@ -340,7 +341,7 @@ impl AssetLoaders {
             .policy
             .register(produced, exts.iter().copied(), priority);
         debug_assert_eq!(id.index() as usize, self.loaders.len());
-        self.loaders.push(Box::new(loader));
+        self.loaders.push(Arc::new(loader));
         (id, conflicts)
     }
 

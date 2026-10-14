@@ -80,6 +80,20 @@ pub struct AssetServer {
     inner: Mutex<AssetServerInner>,
 }
 
+pub(crate) enum AsyncLoadPreparation {
+    Existing(UntypedHandle),
+    New(AsyncLoadPlan),
+}
+
+pub(crate) struct AsyncLoadPlan {
+    pub(crate) path: AssetPath,
+    pub(crate) id: UntypedAssetId,
+    pub(crate) type_id: AssetTypeId,
+    pub(crate) handle: UntypedHandle,
+    pub(crate) sources: AssetSources,
+    pub(crate) loaders: AssetLoaders,
+}
+
 /// The lock-guarded interior of an [`AssetServer`]. Every public method locks
 /// the mutex and delegates to a `&mut self` method here, so the invariants
 /// (intern/catalog consistency, graph wiring, retained liveness) are maintained
@@ -124,6 +138,110 @@ struct StagedLabeledAsset {
 }
 
 impl AssetServer {
+    pub(crate) fn inferred_asset_type(&self, path: &AssetPath) -> Option<AssetTypeId> {
+        let inner = self.lock();
+        inner
+            .loaders
+            .policy()
+            .resolve_untyped(path)
+            .and_then(|id| inner.loaders.policy().produced_type(id))
+    }
+
+    pub(crate) fn prepare_async_load(
+        &self,
+        path: AssetPath,
+        requested: Option<AssetTypeId>,
+    ) -> Result<AsyncLoadPreparation, String> {
+        let mut inner = self.lock();
+        if path.has_label() {
+            return Err("async assembly does not yet support labeled assets".into());
+        }
+        let type_id = match requested {
+            Some(ty) => ty,
+            None => inner
+                .loaders
+                .policy()
+                .resolve_untyped(&path)
+                .and_then(|id| inner.loaders.policy().produced_type(id))
+                .ok_or_else(|| format!("no loader for {path}"))?,
+        };
+        if let Some(handle) = inner
+            .interned
+            .get(&path)
+            .and_then(UntypedWeakHandle::upgrade)
+        {
+            if handle.id().type_id() != type_id {
+                return Err(format!(
+                    "asset path is already interned with another type: {path}"
+                ));
+            }
+            return Ok(AsyncLoadPreparation::Existing(handle));
+        }
+        let handle = inner
+            .stores
+            .reserve_by_type(type_id)
+            .ok_or_else(|| format!("asset arena unavailable for {path}"))?;
+        let id = handle.id();
+        inner.interned.insert(path.clone(), handle.downgrade());
+        inner
+            .catalog
+            .insert(StableGuid::from_path(&path.to_string()), path.clone());
+        inner.graph.add_asset(id);
+        let _ = inner.graph.set_self_state(id, LoadState::Loading);
+        Ok(AsyncLoadPreparation::New(AsyncLoadPlan {
+            path,
+            id,
+            type_id,
+            handle,
+            sources: inner.sources.clone(),
+            loaders: inner.loaders.clone(),
+        }))
+    }
+
+    pub(crate) fn commit_async_load(
+        &self,
+        plan: AsyncLoadPlan,
+        output: FullLoadOutput,
+        dependencies: Vec<UntypedHandle>,
+    ) -> Result<UntypedHandle, String> {
+        if !output.labeled.is_empty() {
+            self.fail_async_load(&plan, "labeled assets are not supported by async assembly");
+            return Err("labeled assets are not supported by async assembly".into());
+        }
+        if output.primary.type_id != plan.type_id {
+            self.fail_async_load(&plan, "loader produced an unexpected asset type");
+            return Err("loader produced an unexpected asset type".into());
+        }
+        let mut inner = self.lock();
+        if !matches!(inner.stores.load_state(plan.id), LoadState::Loading) {
+            let reason = format!("async load slot is no longer loading: {}", plan.path);
+            drop(inner);
+            self.fail_async_load(&plan, &reason);
+            return Err(reason);
+        }
+        let dependency_ids: Vec<_> = dependencies.iter().map(UntypedHandle::id).collect();
+        let mut candidate = inner.graph.clone();
+        if let Err(error) = candidate.replace_dependencies(plan.id, dependency_ids) {
+            drop(inner);
+            self.fail_async_load(&plan, &format!("dependency cycle: {error:?}"));
+            return Err(format!("dependency cycle: {error:?}"));
+        }
+        if let Err(error) = inner.stores.fulfill_erased(plan.id, output.primary.value) {
+            let reason = error.to_string();
+            inner.fail(plan.id, &plan.path, reason.clone());
+            return Err(reason);
+        }
+        inner.graph = candidate;
+        let _ = inner.graph.set_self_state(plan.id, LoadState::Loaded);
+        inner.retained.insert(plan.id, dependencies);
+        Ok(plan.handle)
+    }
+
+    pub(crate) fn fail_async_load(&self, plan: &AsyncLoadPlan, reason: &str) {
+        let mut inner = self.lock();
+        inner.fail(plan.id, &plan.path, reason.to_string());
+    }
+
     /// Creates an empty server with no loaders registered and no sources
     /// mounted.
     #[must_use]

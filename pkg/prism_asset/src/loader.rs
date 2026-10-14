@@ -81,6 +81,7 @@ fn normalize_suffix(ext: &str) -> String {
 }
 
 /// One registered loader's selection metadata.
+#[derive(Clone)]
 struct LoaderEntry {
     id: LoaderId,
     produced_type: AssetTypeId,
@@ -103,7 +104,7 @@ impl LoaderEntry {
 /// Registration order and the `(priority, seq)` tie-break make every
 /// resolution reproducible across runs, which the networked/consistency tests
 /// rely on.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct LoaderRegistry {
     entries: Vec<LoaderEntry>,
     /// Alias suffix → canonical suffix (both normalized), e.g. `jpeg → jpg`.

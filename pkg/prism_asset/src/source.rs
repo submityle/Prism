@@ -561,6 +561,7 @@ impl AssetReader for FsSource {
 }
 
 /// One named, prioritized mount in the [`AssetSources`] table.
+#[derive(Clone)]
 struct Mount {
     name: String,
     reader: Arc<dyn AssetReader>,
@@ -578,7 +579,7 @@ struct Mount {
 ///   `priority` first, later registration breaking ties — and returns the first
 ///   mount that has the asset. This is how a patch/DLC overlay shadows a base
 ///   mount without the loader knowing.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AssetSources {
     mounts: Vec<Mount>,
     next_seq: u64,
