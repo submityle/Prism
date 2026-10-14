@@ -166,8 +166,7 @@ pub(crate) fn draw_water_surface(
         if draw.grid.vertex_count() != draw.vertex_count {
             continue;
         }
-        let Some(pipeline) =
-            cache.get_render_pipeline(view_pipelines.id_for(draw.shading.plan))
+        let Some(pipeline) = cache.get_render_pipeline(view_pipelines.id_for(draw.shading.plan))
         else {
             continue;
         };

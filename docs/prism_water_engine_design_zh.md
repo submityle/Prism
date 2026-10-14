@@ -4,7 +4,7 @@
 > 定位：AAA / 次世代 水体·海洋·自由表面流体引擎，与 PBR/NPR/自定义/混合四前端正交协同，**四前端同享全部共享高级基底**（虚拟几何 / Lumen 式混合 GI / ReSTIR DI-GI / VSM / 体积 / RT 反射与焦散 / 路径追踪参考 / 时序上采样）。
 > Shader：WESL（naga → WGSL/SPIR-V/Metal/DXIL）；运行时：wgpu（Metal/VK/DX12/WebGPU）
 > 关联文档：`prism_rendering_architecture_zh.md`（总）、`prism_material_pipeline_design_zh.md`（§6.2 子系统注册表：水/海洋=档2 后置留槽、§1「NPR 不与 Water 同级」）、`prism_aaa_advanced_features_zh.md`（§3 PBR 高级特性、§NPR 享有基底特性映射）、`prism_particle_engine_design_zh.md`（飞沫/泡沫/气泡由 Ember 承接）、`prism_physics_design_zh.md`（§3 XPBD、§4 多求解器、§11 GPU 持久化、§12 异步）、`prism_hair_engine_design_zh.md` / `prism_cloth_engine_design_zh.md`（对称子系统范式）
-> 沙盒说明：本机屏蔽 Metal（无 GPU），文档内帧预算/带宽/耗时均为**设计目标（design target），非实测**，如实标注；可验证部分限于 CPU 可计算纯函数。
+> 验证说明：CPU 纯函数、WESL/naga 编译、GPU ABI、渲染图 dispatch 与水体 GPU parity 入口均已实现；本次收尾在当前主机请求真实 wgpu adapter 时得到 `No suitable graphics adapter found`（Metal 未发现 adapter），因此真机门禁在本机分类为不可执行，不把 skip 写成 pass。整帧性能仍按真实 adapter profile 记录。
 > 数值路线：纯经典数值（FFT/FLIP/APIC/PBF/SWE/波谱/光子焦散），不含任何 AI/ML 内容。
 > **v2 变更**：新增 §5b 共享高级基底接入矩阵（PBR/NPR/混合同享）、§6b 破碎浪与飞沫喷发、§7b 两向耦合、§9b RT 焦散与光谱色散、§9c 高级水下体积、§9d 动态泡沫平流与持久化、§9e 湿润/岸线/天气耦合系统；深化 §12 性能与效果验收；扩充 §0 产品对标与 §5 四前端分叉。
 
@@ -281,7 +281,7 @@ P2G → 压力泊松解（不可压缩投影）→ G2P；APIC 仿射速度场保
 
 ## 11. Crate 拆分与落地形态
 
-落点 `pkg/prism_render_architecture/src/water/`（照抄 cloth/hair/particle 范式：零依赖、`#![forbid(unsafe_code)]`、`extern crate alloc;`、手写向量数学、只允许 sqrt）。CPU 可验证纯函数与调度先行；GPU WESL 先落契约签名+脚手架，不作本机编译验证目标。
+落点 `pkg/prism_render_architecture/src/water/`（照抄 cloth/hair/particle 范式：零依赖、`#![forbid(unsafe_code)]`、`extern crate alloc;`、手写向量数学）。CPU 纯函数、GPU ABI、WESL/naga shader contract、pipeline/bind-group、Core3d dispatch 与 CPU parity 门禁已经接入；水体内建资源通过 Render Fabric 的稳定键和模板登记。
 
 ```
 water/
@@ -385,7 +385,7 @@ water/
 - **M6 PBF**：`pbf.rs`（密度约束调度、邻域分桶，对齐 physics_core）+ 测。
 - **M7 FLIP/APIC + 重建**：`flip.rs` + `reconstruct.rs` + 测。
 - **M8 焦散/色散/水下/过渡/耦合**：`caustics.rs` + `dispersion.rs` + `underwater.rs` + `transition.rs` + `coupling.rs` + 测。
-- **M9 GPU 接线（真机）**：WESL kernel（IFFT/SWE/PBF/FLIP/重建/焦散/泡沫平流）+ 渲染图接线 + 折射/反射/GI/体积/RT/时序接入共享服务；真机 profile 校准。
+- **M9 GPU 接线（实现完成）**：WESL kernel（IFFT/SWE/PBF/FLIP/重建/焦散/泡沫平流）、pipeline/bind-group、渲染图 dispatch、折射/反射/GI/体积/RT/时序共享服务入口和 CPU parity 门禁已接入；真实设备 profile 只记录实际 adapter 的结果。
 
 **并行拆分建议**（M1–M8 写集互不重叠、只依赖 mod.rs 契约）：A=spectrum B=ocean_lod C=swe D=breaking+foam E=waterline+wetness F=pbf G=flip+reconstruct H=caustics+dispersion+underwater+transition+coupling。M0 与 M9 串行。
 
@@ -399,7 +399,7 @@ water/
 - **RT 焦散/光谱色散成本**：高配才开，默认雅可比投影 + 单 IOR，按平台档分级。
 - **两向耦合稳定性**：sub-step 定点迭代避免抖动；回读用 GPU 回写 + 小批量。
 - **确定性/网络**：sim 默认表现层不参与裁决；需确定性时固定步长+迭代+输入序（同 physics_core）。
-- **沙盒验证边界**：GPU 路径无法本机验证 → 仅承诺 CPU 纯函数正确性，GPU 部分标注未验证，真机补齐。
+- **GPU 验证记录**：WESL/naga 静态编译和 dispatch 结构已通过源码/测试门禁；当前主机请求真实 adapter 明确失败（Metal 未发现 adapter），所以本次未宣称真机 shader module 或性能通过，必须在有 adapter 的 Metal/Vulkan/DX12 设备上复跑对应门禁。
 
 ---
 

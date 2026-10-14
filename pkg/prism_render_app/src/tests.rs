@@ -26,8 +26,8 @@ use crate::mesh_pipeline::{full_lobe_fallback, MeshPipelineKey, MeshPipelineSpec
 use crate::pipeline_cache::{
     hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
 };
-use crate::queue::{phase_for_material, phase_for_render_class};
 use crate::queue::DrawRequest;
+use crate::queue::{phase_for_material, phase_for_render_class};
 use crate::queue::{PhaseItem, RenderQueues};
 use crate::sets::{RenderPhase, RenderSystems};
 use crate::texture_cache::{TextureCache, TextureKey};
@@ -36,23 +36,26 @@ use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
-use prism_render_architecture::view_family::ViewKind;
-use prism_render_material::{MaterialRenderClass, RenderDomain};
 use prism_render_architecture::shader_package::{
     ArtifactDigest, ExecutionFamily, ModuleId, ModuleIdentity, PermutationIndex, PermutationSpace,
     ShaderPackageId,
 };
+use prism_render_architecture::view_family::ViewKind;
+use prism_render_material::{MaterialRenderClass, RenderDomain};
 
 fn dense(index: u64) -> PermutationIndex {
-    PermutationSpace::try_new([64]).unwrap().check_index(index).unwrap()
+    PermutationSpace::try_new([64])
+        .unwrap()
+        .check_index(index)
+        .unwrap()
 }
 
 use prism_render_visibility::GpuRenderWorkItem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::scene::{SceneRegistry, VisibilityWorkList};
 use crate::pipeline_pass::PassRole;
+use crate::scene::{SceneRegistry, VisibilityWorkList};
 use prism_render_driver::{
     BufferDescriptor, BufferId, BufferUsages, ColorTargetState, DeviceDescriptor, FragmentState,
     Instance, MultisampleState, PrimitiveState, PrimitiveTopology, RenderDevice,
@@ -227,13 +230,23 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
     descriptor.vertex.buffers = vec![layout.clone()];
 
     let mut cache = PipelineCache::new();
-    let key = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(0xABCD), dense(7), &descriptor);
+    let key = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(0xABCD),
+        dense(7),
+        &descriptor,
+    );
     let first = cache.get_or_create(&device, key.clone(), &descriptor);
     let second = cache.get_or_create(&device, key.clone(), &descriptor);
     assert_eq!(first, second, "the same key returns the same pipeline");
     assert_eq!(cache.len(), 1, "the pipeline is built once");
 
-    let other = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(0xABCD), dense(8), &descriptor);
+    let other = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(0xABCD),
+        dense(8),
+        &descriptor,
+    );
     let distinct = cache.get_or_create(&device, other, &descriptor);
     assert_ne!(distinct, first, "a different key compiles a new pipeline");
     assert_eq!(cache.len(), 2);
@@ -243,9 +256,19 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
     let mut strip_descriptor = descriptor.clone();
     strip_descriptor.primitive.topology = PrimitiveTopology::TriangleStrip;
     strip_descriptor.primitive.strip_index_format = Some(prism_render_driver::IndexFormat::Uint16);
-    let other_topology = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(0xABCD), dense(7), &strip_descriptor);
+    let other_topology = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(0xABCD),
+        dense(7),
+        &strip_descriptor,
+    );
     assert_ne!(other_topology, key, "topology is part of the identity");
-    let other_shader = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(0x1234), dense(7), &descriptor);
+    let other_shader = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(0x1234),
+        dense(7),
+        &descriptor,
+    );
     assert_ne!(other_shader, key, "the shader identity is part of the key");
 
     // A layout with the same total stride but different attributes must not
@@ -582,16 +605,21 @@ fn fill_from_visibility_resolves_and_queues() {
         }],
     });
     registry.insert_material(prism_render_material::fallback_material_record(material, 1));
-    registry.set_material_passes(material, vec![crate::PassDescriptor {
-        role: PassRole::Surface,
-        execution_family: ExecutionFamily::FusedBuiltin,
-        response_module_id: ModuleId(1),
-        permutation_index: dense(1),
-        fallback_permutation: Some(dense(63)),
-        render_phase: RenderPhase::Opaque,
-        draw: None,
-        sort_class: crate::PassDescriptorClass::SURFACE,
-    }]).unwrap();
+    registry
+        .set_material_passes(
+            material,
+            vec![crate::PassDescriptor {
+                role: PassRole::Surface,
+                execution_family: ExecutionFamily::FusedBuiltin,
+                response_module_id: ModuleId(1),
+                permutation_index: dense(1),
+                fallback_permutation: Some(dense(63)),
+                render_phase: RenderPhase::Opaque,
+                draw: None,
+                sort_class: crate::PassDescriptorClass::SURFACE,
+            }],
+        )
+        .unwrap();
     registry.insert_mesh_class(
         5,
         MeshClass::new(vec![layout], PrimitiveTopology::TriangleList),
@@ -776,7 +804,6 @@ fn filling_the_queue_specializes_and_appends() {
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-
     };
     let layout_a = prism_render_driver::VertexBufferLayout::packed(
         prism_render_driver::VertexStepMode::Vertex,
@@ -839,11 +866,30 @@ fn filling_the_queue_specializes_and_appends() {
 fn phase_for_bin_class_round_trips_the_render_class() {
     let mut registry = SceneRegistry::new();
     for (index, (domain, class, phase)) in [
-        (RenderDomain::Surface, MaterialRenderClass::Opaque, RenderPhase::Opaque),
-        (RenderDomain::Hair, MaterialRenderClass::Opaque, RenderPhase::Opaque),
-        (RenderDomain::Surface, MaterialRenderClass::Transparent, RenderPhase::Transparent),
-        (RenderDomain::Volume, MaterialRenderClass::Opaque, RenderPhase::Custom),
-    ].into_iter().enumerate() {
+        (
+            RenderDomain::Surface,
+            MaterialRenderClass::Opaque,
+            RenderPhase::Opaque,
+        ),
+        (
+            RenderDomain::Hair,
+            MaterialRenderClass::Opaque,
+            RenderPhase::Opaque,
+        ),
+        (
+            RenderDomain::Surface,
+            MaterialRenderClass::Transparent,
+            RenderPhase::Transparent,
+        ),
+        (
+            RenderDomain::Volume,
+            MaterialRenderClass::Opaque,
+            RenderPhase::Custom,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let handle = GenerationalHandle::new(index as u32, 1);
         let mut record = prism_render_material::fallback_material_record(handle, 1);
         record.render_domain = domain;
@@ -876,10 +922,8 @@ fn material_render_class_selects_the_phase() {
             "{class:?} is transparent-family"
         );
     }
-    let mut water = prism_render_material::fallback_material_record(
-        GenerationalHandle::new(90, 1),
-        1,
-    );
+    let mut water =
+        prism_render_material::fallback_material_record(GenerationalHandle::new(90, 1), 1);
     water.features |= prism_render_material::MaterialFeatureFlags::WATER;
     assert_eq!(phase_for_material(&water), RenderPhase::Transparent);
     water.render_domain = RenderDomain::Hair;
@@ -926,7 +970,6 @@ fn mesh_specialization_dedups_by_variant_and_layout() {
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-
     };
     let layout_a = prism_render_driver::VertexBufferLayout::packed(
         prism_render_driver::VertexStepMode::Vertex,
@@ -988,12 +1031,18 @@ fn full_lobe_fallback_uses_the_declared_dense_index() {
     assert_eq!(fallback.response_module_id, variant.response_module_id);
     assert_eq!(fallback.execution_family, variant.execution_family);
     assert_eq!(fallback.color_format, variant.color_format);
-    assert!(full_lobe_fallback(MeshPipelineKey { fallback_permutation: None, ..variant }).is_none());
+    assert!(full_lobe_fallback(MeshPipelineKey {
+        fallback_permutation: None,
+        ..variant
+    })
+    .is_none());
 }
 
 #[test]
 fn response_modules_are_interned_dense_checked_and_composition_resident() {
-    use crate::mesh_pipelines::{ResponseModuleCache, ResponseModuleCacheError, ResponseModuleSpec};
+    use crate::mesh_pipelines::{
+        ResponseModuleCache, ResponseModuleCacheError, ResponseModuleSpec,
+    };
 
     let adapter = NullInstance::new()
         .request_adapter(&RequestAdapterOptions::default())
@@ -1021,11 +1070,19 @@ fn response_modules_are_interned_dense_checked_and_composition_resident() {
     let mut modules = ResponseModuleCache::new();
     let first = modules.intern(&device, spec.clone()).unwrap();
     assert_eq!(modules.intern(&device, spec.clone()), Ok(first));
-    assert_eq!(modules.len(), 1, "same package/module identity shares one RHI module");
+    assert_eq!(
+        modules.len(),
+        1,
+        "same package/module identity shares one RHI module"
+    );
     let composition = modules.ensure_composition_kernel(&device).unwrap();
     assert_ne!(composition, first);
     assert!(modules.composition_kernel().is_some());
-    assert_eq!(modules.len(), 2, "composition is a resident module, not a per-material package");
+    assert_eq!(
+        modules.len(),
+        2,
+        "composition is a resident module, not a per-material package"
+    );
 
     let mut fused_custom = spec;
     fused_custom.execution_family = ExecutionFamily::FusedBuiltin;
@@ -1096,20 +1153,28 @@ fn async_pipeline_cache_serves_fallback_then_switches() {
 
     let variant = MeshPipelineKey {
         execution_family: ExecutionFamily::FusedBuiltin,
-            response_module_id: ModuleId(1),
-            permutation_index: dense(1),
-            fallback_permutation: Some(dense(63)),
+        response_module_id: ModuleId(1),
+        permutation_index: dense(1),
+        fallback_permutation: Some(dense(63)),
         color_format: Some(TextureFormat::Rgba8Unorm),
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-
     };
     let fallback = full_lobe_fallback(variant).expect("fallback variant");
     descriptor.vertex.buffers = layout.to_vec();
-    let target_key = PipelineKey::from_descriptor(variant.execution_family, variant.response_module_id, variant.permutation_index, &descriptor);
-    let fallback_key =
-        PipelineKey::from_descriptor(fallback.execution_family, fallback.response_module_id, fallback.permutation_index, &descriptor);
+    let target_key = PipelineKey::from_descriptor(
+        variant.execution_family,
+        variant.response_module_id,
+        variant.permutation_index,
+        &descriptor,
+    );
+    let fallback_key = PipelineKey::from_descriptor(
+        fallback.execution_family,
+        fallback.response_module_id,
+        fallback.permutation_index,
+        &descriptor,
+    );
     assert_ne!(target_key, fallback_key, "the test uses a partial lobe set");
 
     let compiler = GateCompiler::new(RenderPipelineId::from_parts(101, 1));
@@ -1189,7 +1254,6 @@ fn async_pipeline_cache_bounds_the_in_flight_backlog() {
 
     let mut keys = Vec::new();
     for bit in 0..5 {
-
         let variant = MeshPipelineKey {
             execution_family: ExecutionFamily::FusedBuiltin,
             response_module_id: ModuleId(1),
@@ -1199,12 +1263,20 @@ fn async_pipeline_cache_bounds_the_in_flight_backlog() {
             depth_format: None,
             sample_count: 1,
             topology: PrimitiveTopology::TriangleList,
-
         };
         let fallback = full_lobe_fallback(variant).expect("fallback variant");
-        let key = PipelineKey::from_descriptor(variant.execution_family, variant.response_module_id, variant.permutation_index, &descriptor);
-        let fallback_key =
-            PipelineKey::from_descriptor(fallback.execution_family, fallback.response_module_id, fallback.permutation_index, &descriptor);
+        let key = PipelineKey::from_descriptor(
+            variant.execution_family,
+            variant.response_module_id,
+            variant.permutation_index,
+            &descriptor,
+        );
+        let fallback_key = PipelineKey::from_descriptor(
+            fallback.execution_family,
+            fallback.response_module_id,
+            fallback.permutation_index,
+            &descriptor,
+        );
         assert!(matches!(
             cache.resolve_or_request(
                 &device,
@@ -1277,7 +1349,6 @@ fn pipeline_prewarm_queues_hot_variants() {
     let mut requests = Vec::new();
     let mut keys = Vec::new();
     for bit in 0..3 {
-
         let variant = MeshPipelineKey {
             execution_family: ExecutionFamily::FusedBuiltin,
             response_module_id: ModuleId(1),
@@ -1287,15 +1358,24 @@ fn pipeline_prewarm_queues_hot_variants() {
             depth_format: None,
             sample_count: 1,
             topology: PrimitiveTopology::TriangleList,
-
         };
         let fallback = full_lobe_fallback(variant).expect("fallback variant");
-        let key = PipelineKey::from_descriptor(variant.execution_family, variant.response_module_id, variant.permutation_index, &descriptor);
+        let key = PipelineKey::from_descriptor(
+            variant.execution_family,
+            variant.response_module_id,
+            variant.permutation_index,
+            &descriptor,
+        );
         keys.push(key.clone());
         requests.push((
             key,
             descriptor.clone(),
-            PipelineKey::from_descriptor(fallback.execution_family, fallback.response_module_id, fallback.permutation_index, &descriptor),
+            PipelineKey::from_descriptor(
+                fallback.execution_family,
+                fallback.response_module_id,
+                fallback.permutation_index,
+                &descriptor,
+            ),
             descriptor.clone(),
         ));
     }
@@ -1363,14 +1443,13 @@ fn mesh_specialization_uses_the_full_lobe_fallback_while_compiling() {
 
     let variant = MeshPipelineKey {
         execution_family: ExecutionFamily::FusedBuiltin,
-            response_module_id: ModuleId(1),
-            permutation_index: dense(1),
-            fallback_permutation: Some(dense(63)),
+        response_module_id: ModuleId(1),
+        permutation_index: dense(1),
+        fallback_permutation: Some(dense(63)),
         color_format: Some(TextureFormat::Rgba8Unorm),
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-
     };
     let compiler = GateCompiler::new(RenderPipelineId::from_parts(202, 1));
     let mut specializer = MeshPipelineSpecializer::with_compiler(compiler.clone());
@@ -1436,14 +1515,13 @@ fn wgpu_pipeline_worker_compiles_a_cold_specialization_in_the_background() {
 
     let variant = MeshPipelineKey {
         execution_family: ExecutionFamily::FusedBuiltin,
-            response_module_id: ModuleId(1),
-            permutation_index: dense(1),
-            fallback_permutation: Some(dense(63)),
+        response_module_id: ModuleId(1),
+        permutation_index: dense(1),
+        fallback_permutation: Some(dense(63)),
         color_format: Some(TextureFormat::Rgba8Unorm),
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-
     };
     let mut specializer = MeshPipelineSpecializer::with_worker(runtime.device_handle());
     let first = specializer.specialize_with(device, variant, layout, |_| descriptor.clone());
@@ -2413,16 +2491,21 @@ fn bin_fixture(
         (opaque_material, ModuleId(1), RenderPhase::Opaque),
         (transparent_material, ModuleId(2), RenderPhase::Transparent),
     ] {
-        registry.set_material_passes(material, vec![crate::PassDescriptor {
-            role: PassRole::Surface,
-            execution_family: ExecutionFamily::FusedBuiltin,
-            response_module_id: module,
-            permutation_index: dense(1),
-            fallback_permutation: Some(dense(63)),
-            render_phase: phase,
-            draw: None,
-            sort_class: crate::PassDescriptorClass::SURFACE,
-        }]).unwrap();
+        registry
+            .set_material_passes(
+                material,
+                vec![crate::PassDescriptor {
+                    role: PassRole::Surface,
+                    execution_family: ExecutionFamily::FusedBuiltin,
+                    response_module_id: module,
+                    permutation_index: dense(1),
+                    fallback_permutation: Some(dense(63)),
+                    render_phase: phase,
+                    draw: None,
+                    sort_class: crate::PassDescriptorClass::SURFACE,
+                }],
+            )
+            .unwrap();
     }
 
     let mut builder = SceneTransactionBuilder::new(0, 1);
@@ -2797,7 +2880,10 @@ fn undecodable_and_unresolved_bins_are_counted() {
         DrawFunctionId(0),
         &provider,
     );
-    assert_eq!(foreign_outcome.queued, 1, "unknown bins use the complete fallback");
+    assert_eq!(
+        foreign_outcome.queued, 1,
+        "unknown bins use the complete fallback"
+    );
     assert_eq!(foreign_outcome.unknown_class, 1);
     assert_eq!(foreign_queues.phase(RenderPhase::Opaque).len(), 1);
 
@@ -2818,11 +2904,13 @@ fn undecodable_and_unresolved_bins_are_counted() {
         &provider,
     );
     assert_eq!(
-        outcome.queued,
-        2,
+        outcome.queued, 2,
         "the foreign bin queues through fallback and the resident bin remains drawable"
     );
-    assert_eq!(outcome.unknown_class, 0, "the foreign bin was tested separately");
+    assert_eq!(
+        outcome.unknown_class, 0,
+        "the foreign bin was tested separately"
+    );
     assert_eq!(outcome.unresolved, 1, "the orphan class is not drawn");
     assert_eq!(outcome.total(), bins.bins.len());
 }
@@ -3455,8 +3543,11 @@ struct ModuleColourPipeline {
 
 impl crate::mesh_pipeline::MeshPipelineProvider for ModuleColourPipeline {
     fn descriptor(&self, variant: &MeshPipelineKey) -> RenderPipelineDescriptor {
-        if variant.response_module_id == ModuleId(2) { self.stylized.clone() }
-        else { self.lit.clone() }
+        if variant.response_module_id == ModuleId(2) {
+            self.stylized.clone()
+        } else {
+            self.lit.clone()
+        }
     }
 }
 
@@ -3612,16 +3703,21 @@ fn depth_resolves_occlusion_on_a_gpu() {
         registry.insert_material(near_record);
         registry.insert_material(far_record);
         for (handle, module) in [(near_material, ModuleId(1)), (far_material, ModuleId(2))] {
-            registry.set_material_passes(handle, vec![crate::PassDescriptor {
-                role: PassRole::Surface,
-                execution_family: ExecutionFamily::FusedBuiltin,
-                response_module_id: module,
-                permutation_index: PermutationIndex::ZERO,
-                fallback_permutation: None,
-                render_phase: RenderPhase::Opaque,
-                draw: None,
-                sort_class: crate::PassDescriptorClass::SURFACE,
-            }]).unwrap();
+            registry
+                .set_material_passes(
+                    handle,
+                    vec![crate::PassDescriptor {
+                        role: PassRole::Surface,
+                        execution_family: ExecutionFamily::FusedBuiltin,
+                        response_module_id: module,
+                        permutation_index: PermutationIndex::ZERO,
+                        fallback_permutation: None,
+                        render_phase: RenderPhase::Opaque,
+                        draw: None,
+                        sort_class: crate::PassDescriptorClass::SURFACE,
+                    }],
+                )
+                .unwrap();
         }
     }
     {

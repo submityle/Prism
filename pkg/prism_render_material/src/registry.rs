@@ -1,8 +1,7 @@
 use crate::{
     DynamicChannels, GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters,
     MaterialCapacityError, MaterialExecutionBinding, MaterialExecutionTables,
-    MaterialHandleAllocator, MaterialHandleError,
-    MaterialRecord,
+    MaterialHandleAllocator, MaterialHandleError, MaterialRecord,
 };
 use alloc::{collections::BTreeSet, vec::Vec};
 use prism_render_architecture::{abi::GenerationalHandle, gpu_scene::GpuCompletionValue};
@@ -399,10 +398,7 @@ impl MaterialRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags,
-        MaterialRenderClass,
-    };
+    use crate::{GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags, MaterialRenderClass};
     use prism_render_architecture::render_fabric::RenderDomain;
 
     fn record(handle: GenerationalHandle, revision: u32) -> MaterialRecord {

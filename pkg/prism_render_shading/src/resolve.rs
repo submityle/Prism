@@ -7,9 +7,7 @@
 //! resolve shader must match bit-for-bit within tolerance.
 
 use crate::measured_brdf::MeasuredBrdf;
-use prism_render_material::{
-    DynamicChannels, GpuMaterialHeader, GpuSurfaceParameters, ProgramRef,
-};
+use prism_render_material::{DynamicChannels, GpuMaterialHeader, GpuSurfaceParameters, ProgramRef};
 
 use crate::gi::area_light::ltc_lut::LtcLut;
 use crate::gi::area_light::representative::rect_representative_sample;
@@ -368,6 +366,17 @@ fn modulation_params_from(parameters: &GpuSurfaceParameters) -> MaterialModulati
     }
 }
 
+fn stylized_params_for_material(
+    base: StylizedParams,
+    parameters: &GpuSurfaceParameters,
+) -> StylizedParams {
+    let mut result = base;
+    result.ramp_softness *= parameters.npr_stylized_ramp_softness;
+    result.specular_intensity *= parameters.npr_stylized_specular_scale;
+    result.rim_intensity *= parameters.npr_stylized_rim_scale;
+    result
+}
+
 /// Resolves one pixel into linear HDR scene color.
 ///
 /// Emissive and ambient are added exactly once; the per-light BSDF evaluations
@@ -596,6 +605,7 @@ pub fn resolve_pixel(
     // `lights.stylized` selects the cel ramp / stepped shadow / stylized
     // specular / rim response (its default reproduces the banded toon lobe).
     let shade_toon = || {
+        let material_stylized = stylized_params_for_material(lights.stylized, &input.parameters);
         let mut accumulated = [0.0; 3];
         for light in lights.directional {
             accumulated = add(
@@ -604,7 +614,7 @@ pub fn resolve_pixel(
                     lit_surface,
                     frame,
                     direct_sample(*light),
-                    &lights.stylized,
+                    &material_stylized,
                 ),
             );
         }
@@ -612,7 +622,7 @@ pub fn resolve_pixel(
             if let Some(sample) = light.sample(geometry.position) {
                 accumulated = add(
                     accumulated,
-                    crate::evaluate_stylized_direct(lit_surface, frame, sample, &lights.stylized),
+                    crate::evaluate_stylized_direct(lit_surface, frame, sample, &material_stylized),
                 );
             }
         }
@@ -621,7 +631,7 @@ pub fn resolve_pixel(
             {
                 accumulated = add(
                     accumulated,
-                    crate::evaluate_stylized_direct(lit_surface, frame, sample, &lights.stylized),
+                    crate::evaluate_stylized_direct(lit_surface, frame, sample, &material_stylized),
                 );
             }
         }
@@ -857,6 +867,28 @@ mod tests {
         assert_eq!(sample.iridescence, 0.8);
         assert!((sample.iridescence_thickness_nm - 350.0).abs() < 1.0e-3);
         assert_eq!(sample.iridescence_ior, 1.55);
+    }
+
+    #[test]
+    fn per_material_stylized_modifiers_scale_only_their_declared_lobes() {
+        let base = StylizedParams {
+            ramp_softness: 0.2,
+            specular_intensity: 0.8,
+            rim_intensity: 0.6,
+            ..StylizedParams::with_bands(4)
+        };
+        let parameters = GpuSurfaceParameters {
+            npr_stylized_ramp_softness: 1.5,
+            npr_stylized_specular_scale: 0.25,
+            npr_stylized_rim_scale: 2.0,
+            ..Default::default()
+        };
+        let actual = stylized_params_for_material(base, &parameters);
+        assert_eq!(actual.ramp_softness, 0.3);
+        assert_eq!(actual.specular_intensity, 0.2);
+        assert_eq!(actual.rim_intensity, 1.2);
+        assert_eq!(actual.bands, base.bands);
+        assert_eq!(actual.shadow_threshold, base.shadow_threshold);
     }
 
     /// `OpenPBR` emission is `emission_color * emission_luminance`, and the

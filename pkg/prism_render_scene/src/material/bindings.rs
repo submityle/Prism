@@ -239,9 +239,29 @@ impl MaterialBindGroup {
             let plans = runtime.registry.execution_plan_rows();
             let programs = runtime.registry.execution_program_rows();
             let packages = [runtime.registry.execution_package_count()];
-            queue.write_buffer(&self.execution_plan_buffer, 0, bytemuck::cast_slice(if plans.is_empty() { &[[u32::MAX; 2]] } else { plans }));
-            queue.write_buffer(&self.execution_program_buffer, 0, bytemuck::cast_slice(if programs.is_empty() { &[[0_u32; 4]] } else { programs }));
-            queue.write_buffer(&self.execution_package_buffer, 0, bytemuck::cast_slice(&packages));
+            queue.write_buffer(
+                &self.execution_plan_buffer,
+                0,
+                bytemuck::cast_slice(if plans.is_empty() {
+                    &[[u32::MAX; 2]]
+                } else {
+                    plans
+                }),
+            );
+            queue.write_buffer(
+                &self.execution_program_buffer,
+                0,
+                bytemuck::cast_slice(if programs.is_empty() {
+                    &[[0_u32; 4]]
+                } else {
+                    programs
+                }),
+            );
+            queue.write_buffer(
+                &self.execution_package_buffer,
+                0,
+                bytemuck::cast_slice(&packages),
+            );
         }
         self.bind_group = Some(if self.bindless {
             // The bindless arrays extend the same bind group with the texture

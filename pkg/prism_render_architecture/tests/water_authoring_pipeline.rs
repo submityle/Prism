@@ -19,9 +19,7 @@ use prism_render_architecture::water::pipeline::{
 };
 use prism_render_architecture::water::reconstruct::ReconstructionThresholds;
 use prism_render_architecture::water::transition::TransitionBands;
-use prism_render_architecture::water::{
-    SolverKind, Vec3, WaterBodyHandle, WaterBudget, WaterKind,
-};
+use prism_render_architecture::water::{SolverKind, Vec3, WaterBodyHandle, WaterBudget, WaterKind};
 
 const CONFIG: WaterFrameConfig = WaterFrameConfig {
     reconstruction: ReconstructionThresholds {

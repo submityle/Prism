@@ -225,9 +225,8 @@ mod tests {
     #[test]
     fn frontend_is_carried_through() {
         let mut asset = WaterBodyAsset::river_default(extent());
-        asset.shading.shading_plan = super::super::WaterShadingPlan::single(
-            super::super::ResponseProgram::Npr,
-        );
+        asset.shading.shading_plan =
+            super::super::WaterShadingPlan::single(super::super::ResponseProgram::Npr);
         let compiled = asset.compile().expect("river preset compiles");
         let out = compiled.assemble(WaterBodyHandle(0), DeformationHandle(0));
 

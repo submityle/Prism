@@ -981,7 +981,10 @@ mod tests {
         assert!(glint.requires_caps.is_empty());
 
         assert_eq!(schema.response_programs.len(), 3);
-        let lit = schema.response_programs.iter().find(|program| program.id == "lit")
+        let lit = schema
+            .response_programs
+            .iter()
+            .find(|program| program.id == "lit")
             .expect("lit response program declared");
         assert_eq!(lit.uid, "org.prism.response_program.lit");
         assert_eq!(lit.registry_slot, 23);
@@ -1193,21 +1196,30 @@ words = 0
     fn rejects_two_response_programs_claiming_one_slot() {
         let mut schema = surface_schema();
         schema.response_programs[1].registry_slot = schema.response_programs[0].registry_slot;
-        assert!(matches!(schema.validate(), Err(SchemaError::DuplicateHeaderSlot(_))));
+        assert!(matches!(
+            schema.validate(),
+            Err(SchemaError::DuplicateHeaderSlot(_))
+        ));
     }
 
     #[test]
     fn response_program_cannot_alias_a_lobe_slot() {
         let mut schema = surface_schema();
         schema.response_programs[0].registry_slot = schema.lobes[0].registry_slot;
-        assert!(matches!(schema.validate(), Err(SchemaError::DuplicateHeaderSlot(_))));
+        assert!(matches!(
+            schema.validate(),
+            Err(SchemaError::DuplicateHeaderSlot(_))
+        ));
     }
 
     #[test]
     fn rejects_duplicate_builtin_programs() {
         let mut schema = surface_schema();
         schema.response_programs[1].builtin = schema.response_programs[0].builtin;
-        assert!(matches!(schema.validate(), Err(SchemaError::ResponseContract(_))));
+        assert!(matches!(
+            schema.validate(),
+            Err(SchemaError::ResponseContract(_))
+        ));
     }
 
     #[test]
@@ -1219,23 +1231,37 @@ words = 0
         field.responses.clear();
         schema.core.words += field.ty.words();
         schema.core.fields.push(field);
-        assert!(matches!(schema.validate(), Err(SchemaError::ResponseContract(_))));
+        assert!(matches!(
+            schema.validate(),
+            Err(SchemaError::ResponseContract(_))
+        ));
     }
 
     #[test]
     fn deleting_a_mapping_or_its_consumer_is_rejected() {
         let mut schema = surface_schema();
         schema.core.fields[0].responses.remove("lit");
-        assert!(matches!(schema.validate(), Err(SchemaError::ResponseContract(_))));
+        assert!(matches!(
+            schema.validate(),
+            Err(SchemaError::ResponseContract(_))
+        ));
         let mut schema = surface_schema();
-        schema.core.fields[0].consumed_by.retain(|s| *s != ConsumedStep::Lit);
-        assert!(matches!(schema.validate(), Err(SchemaError::ResponseContract(_))));
+        schema.core.fields[0]
+            .consumed_by
+            .retain(|s| *s != ConsumedStep::Lit);
+        assert!(matches!(
+            schema.validate(),
+            Err(SchemaError::ResponseContract(_))
+        ));
     }
 
     #[test]
     fn padding_is_not_a_semantic_response_input() {
         let schema = surface_schema();
-        assert!(schema.response_fields().iter().all(|(_, f)| f.ty != FieldType::Pad));
+        assert!(schema
+            .response_fields()
+            .iter()
+            .all(|(_, f)| f.ty != FieldType::Pad));
     }
 
     #[test]

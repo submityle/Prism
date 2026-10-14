@@ -427,7 +427,9 @@ fn shading_diagnostics(
             continue;
         };
         let classification = match execution {
-            Some(execution) => classify_material_header_with_execution(&header, execution, u32::MAX),
+            Some(execution) => {
+                classify_material_header_with_execution(&header, execution, u32::MAX)
+            }
             None => classify_material_header(&header),
         };
         match classification {

@@ -37,7 +37,9 @@ use std::thread::JoinHandle;
 pub type PipelineKey = prism_render_architecture::shader_package::PipelineIdentity<PipelineState>;
 
 impl From<&RenderPipelineDescriptor> for PipelineState {
-    fn from(descriptor: &RenderPipelineDescriptor) -> Self { Self::from_descriptor(descriptor) }
+    fn from(descriptor: &RenderPipelineDescriptor) -> Self {
+        Self::from_descriptor(descriptor)
+    }
 }
 
 trait ValidatePipelineKey {

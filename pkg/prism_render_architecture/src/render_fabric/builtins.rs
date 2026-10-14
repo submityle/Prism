@@ -6,10 +6,13 @@
 //! templates and the authoritative frame graph.
 
 use super::{
-    FeatureCatalog, FeatureDefinition, FeatureId, FeatureVariant, RenderDomain,
-    RenderQualityTier, ServiceId, ServiceOutput, ServiceSet, VariantId,
+    AccessKind, FeatureCatalog, FeatureDefinition, FeatureId, FeatureVariant, FrameLag, PassKey,
+    PassTemplate, QueueClass, RenderDomain, RenderQualityTier, ResourceKey, ResourceLayout,
+    ResourceScope, ResourceTemplate, ResourceUse, ServiceId, ServiceOutput, ServiceSet, VariantId,
 };
 use crate::backend::capability::CapabilitySet;
+use crate::frame_graph::ResourceLifetime;
+use prism_render_driver::BufferUsages;
 
 pub const WATER_SERVICE_IDS: [ServiceId; 9] = [
     ServiceId(1),
@@ -35,9 +38,155 @@ pub const VOLUME_SERVICE_IDS: [ServiceId; 7] = [
 
 pub const WATER_FEATURE_ID: FeatureId = FeatureId(0x1000);
 pub const VOLUME_FEATURE_ID: FeatureId = FeatureId(0x1001);
+pub const PARTICLE_FEATURE_ID: FeatureId = FeatureId(0x1002);
+pub const HAIR_FEATURE_ID: FeatureId = FeatureId(0x1003);
+pub const DECAL_FEATURE_ID: FeatureId = FeatureId(0x1004);
 pub const LIT_FEATURE_ID: FeatureId = FeatureId(0x1100);
 pub const NPR_FEATURE_ID: FeatureId = FeatureId(0x1101);
 pub const CUSTOM_FEATURE_ID: FeatureId = FeatureId(0x1102);
+
+pub const WATER_SURFACE_RESOURCE: ResourceKey = ResourceKey::of(WATER_FEATURE_ID, 0);
+pub const WATER_SPRAY_RESOURCE: ResourceKey = ResourceKey::of(WATER_FEATURE_ID, 1);
+pub const WATER_FOAM_RESOURCE: ResourceKey = ResourceKey::of(WATER_FEATURE_ID, 2);
+pub const VOLUME_DENSITY_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 0);
+pub const VOLUME_FROXEL_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 1);
+pub const VOLUME_VELOCITY_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 2);
+pub const PARTICLE_STREAM_RESOURCE: ResourceKey = ResourceKey::of(PARTICLE_FEATURE_ID, 0);
+pub const PARTICLE_SPRAY_RESOURCE: ResourceKey = ResourceKey::of(PARTICLE_FEATURE_ID, 1);
+pub const PARTICLE_ALIVE_RESOURCE: ResourceKey = ResourceKey::of(PARTICLE_FEATURE_ID, 2);
+pub const HAIR_STRAND_RESOURCE: ResourceKey = ResourceKey::of(HAIR_FEATURE_ID, 0);
+pub const HAIR_VISIBILITY_RESOURCE: ResourceKey = ResourceKey::of(HAIR_FEATURE_ID, 1);
+pub const HAIR_DEEP_OPACITY_RESOURCE: ResourceKey = ResourceKey::of(HAIR_FEATURE_ID, 2);
+pub const DECAL_INSTANCE_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 0);
+pub const DECAL_INDIRECT_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 1);
+pub const DECAL_RESOLVE_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID, 2);
+
+const WATER_ACCESSES: &[ResourceUse] = &[
+    ResourceUse {
+        key: WATER_SURFACE_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        key: WATER_FOAM_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        key: WATER_SPRAY_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: FrameLag::new(1),
+    },
+];
+const VOLUME_ACCESSES: &[ResourceUse] = &[
+    ResourceUse {
+        key: VOLUME_DENSITY_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        key: VOLUME_FROXEL_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        key: VOLUME_VELOCITY_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+];
+const PARTICLE_ACCESSES: &[ResourceUse] = &[
+    ResourceUse {
+        key: PARTICLE_STREAM_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        key: PARTICLE_SPRAY_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        key: PARTICLE_ALIVE_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+];
+const HAIR_ACCESSES: &[ResourceUse] = &[
+    ResourceUse {
+        key: HAIR_STRAND_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        key: HAIR_VISIBILITY_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        key: HAIR_DEEP_OPACITY_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+];
+const DECAL_ACCESSES: &[ResourceUse] = &[
+    ResourceUse {
+        key: DECAL_INSTANCE_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        key: DECAL_INDIRECT_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+    ResourceUse {
+        key: DECAL_RESOLVE_RESOURCE,
+        access: AccessKind::StorageWrite,
+        scope: ResourceScope::Whole,
+        frame_lag: None,
+    },
+];
+
+const WATER_PASSES: &[PassTemplate] = &[PassTemplate {
+    id: PassKey(0x5000),
+    accesses: WATER_ACCESSES,
+    queue: QueueClass::Compute,
+}];
+const VOLUME_PASSES: &[PassTemplate] = &[PassTemplate {
+    id: PassKey(0x5001),
+    accesses: VOLUME_ACCESSES,
+    queue: QueueClass::Compute,
+}];
+const PARTICLE_PASSES: &[PassTemplate] = &[PassTemplate {
+    id: PassKey(0x5005),
+    accesses: PARTICLE_ACCESSES,
+    queue: QueueClass::Compute,
+}];
+const HAIR_PASSES: &[PassTemplate] = &[PassTemplate {
+    id: PassKey(0x5006),
+    accesses: HAIR_ACCESSES,
+    queue: QueueClass::Compute,
+}];
+const DECAL_PASSES: &[PassTemplate] = &[PassTemplate {
+    id: PassKey(0x5007),
+    accesses: DECAL_ACCESSES,
+    queue: QueueClass::Compute,
+}];
 
 const WATER_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     id: VariantId(0x5000),
@@ -45,7 +194,7 @@ const WATER_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     min_quality: RenderQualityTier::Low,
     required_caps: CapabilitySet::EMPTY,
     requires_services_extra: ServiceSet::EMPTY,
-    passes: &[],
+    passes: WATER_PASSES,
     shader_permutation: None,
 }];
 const VOLUME_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
@@ -54,7 +203,34 @@ const VOLUME_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     min_quality: RenderQualityTier::Low,
     required_caps: CapabilitySet::EMPTY,
     requires_services_extra: ServiceSet::EMPTY,
-    passes: &[],
+    passes: VOLUME_PASSES,
+    shader_permutation: None,
+}];
+const PARTICLE_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
+    id: VariantId(0x5005),
+    rank: 0,
+    min_quality: RenderQualityTier::Low,
+    required_caps: CapabilitySet::EMPTY,
+    requires_services_extra: ServiceSet::EMPTY,
+    passes: PARTICLE_PASSES,
+    shader_permutation: None,
+}];
+const HAIR_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
+    id: VariantId(0x5006),
+    rank: 0,
+    min_quality: RenderQualityTier::Low,
+    required_caps: CapabilitySet::EMPTY,
+    requires_services_extra: ServiceSet::EMPTY,
+    passes: HAIR_PASSES,
+    shader_permutation: None,
+}];
+const DECAL_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
+    id: VariantId(0x5007),
+    rank: 0,
+    min_quality: RenderQualityTier::Low,
+    required_caps: CapabilitySet::EMPTY,
+    requires_services_extra: ServiceSet::EMPTY,
+    passes: DECAL_PASSES,
     shader_permutation: None,
 }];
 const LIT_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
@@ -87,13 +263,22 @@ const CUSTOM_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
 
 macro_rules! service_definition {
     ($feature:expr, $variant:expr, $service:expr) => {{
-        // These built-ins establish the stable semantic provider closure. The
-        // concrete frame resources are declared by the feature pass templates
-        // that consume the selected closure; leaving this bootstrap layer
-        // resource-empty prevents it from inventing a second frame-graph ABI.
+        const RESOURCE: ResourceKey = ResourceKey::of($feature, 0);
+        const OUTPUT_RESOURCES: &[ResourceKey] = &[RESOURCE];
+        const ACCESSES: &[ResourceUse] = &[ResourceUse {
+            key: RESOURCE,
+            access: AccessKind::StorageWrite,
+            scope: ResourceScope::Whole,
+            frame_lag: None,
+        }];
+        const PASSES: &[PassTemplate] = &[PassTemplate {
+            id: PassKey($variant.0),
+            accesses: ACCESSES,
+            queue: QueueClass::Compute,
+        }];
         const OUTPUTS: &[ServiceOutput] = &[ServiceOutput {
             service: $service,
-            resources: &[],
+            resources: OUTPUT_RESOURCES,
         }];
         FeatureDefinition::service(
             $feature,
@@ -105,7 +290,7 @@ macro_rules! service_definition {
                 min_quality: $crate::render_fabric::RenderQualityTier::Low,
                 required_caps: $crate::backend::capability::CapabilitySet::EMPTY,
                 requires_services_extra: $crate::render_fabric::ServiceSet::EMPTY,
-                passes: &[],
+                passes: PASSES,
                 shader_permutation: None,
             }],
         )
@@ -131,20 +316,116 @@ const SERVICE_FEATURES: [FeatureDefinition; 16] = [
     service_definition!(FeatureId(0x2016), VariantId(0x6016), VOLUME_SERVICE_IDS[6]),
 ];
 
+const BUILTIN_RESOURCE_KEYS: [ResourceKey; 31] = [
+    WATER_SURFACE_RESOURCE,
+    WATER_SPRAY_RESOURCE,
+    WATER_FOAM_RESOURCE,
+    VOLUME_DENSITY_RESOURCE,
+    VOLUME_FROXEL_RESOURCE,
+    VOLUME_VELOCITY_RESOURCE,
+    PARTICLE_STREAM_RESOURCE,
+    PARTICLE_SPRAY_RESOURCE,
+    PARTICLE_ALIVE_RESOURCE,
+    HAIR_STRAND_RESOURCE,
+    HAIR_VISIBILITY_RESOURCE,
+    HAIR_DEEP_OPACITY_RESOURCE,
+    DECAL_INSTANCE_RESOURCE,
+    DECAL_INDIRECT_RESOURCE,
+    DECAL_RESOLVE_RESOURCE,
+    ResourceKey::of(FeatureId(0x2000), 0),
+    ResourceKey::of(FeatureId(0x2001), 0),
+    ResourceKey::of(FeatureId(0x2002), 0),
+    ResourceKey::of(FeatureId(0x2003), 0),
+    ResourceKey::of(FeatureId(0x2004), 0),
+    ResourceKey::of(FeatureId(0x2005), 0),
+    ResourceKey::of(FeatureId(0x2006), 0),
+    ResourceKey::of(FeatureId(0x2007), 0),
+    ResourceKey::of(FeatureId(0x2008), 0),
+    ResourceKey::of(FeatureId(0x2010), 0),
+    ResourceKey::of(FeatureId(0x2011), 0),
+    ResourceKey::of(FeatureId(0x2012), 0),
+    ResourceKey::of(FeatureId(0x2013), 0),
+    ResourceKey::of(FeatureId(0x2014), 0),
+    ResourceKey::of(FeatureId(0x2015), 0),
+    ResourceKey::of(FeatureId(0x2016), 0),
+];
+
+const fn resource_template(key: ResourceKey) -> ResourceTemplate {
+    ResourceTemplate {
+        key,
+        lifetime: ResourceLifetime::Persistent,
+        layout: ResourceLayout::Buffer {
+            bytes: 256,
+            usage: BufferUsages::STORAGE,
+        },
+        alignment: 16,
+    }
+}
+
+pub const BUILTIN_RESOURCE_TEMPLATES: &[ResourceTemplate] = &[
+    resource_template(WATER_SURFACE_RESOURCE),
+    resource_template(WATER_SPRAY_RESOURCE),
+    resource_template(WATER_FOAM_RESOURCE),
+    resource_template(VOLUME_DENSITY_RESOURCE),
+    resource_template(VOLUME_FROXEL_RESOURCE),
+    resource_template(VOLUME_VELOCITY_RESOURCE),
+    resource_template(PARTICLE_STREAM_RESOURCE),
+    resource_template(PARTICLE_SPRAY_RESOURCE),
+    resource_template(PARTICLE_ALIVE_RESOURCE),
+    resource_template(HAIR_STRAND_RESOURCE),
+    resource_template(HAIR_VISIBILITY_RESOURCE),
+    resource_template(HAIR_DEEP_OPACITY_RESOURCE),
+    resource_template(DECAL_INSTANCE_RESOURCE),
+    resource_template(DECAL_INDIRECT_RESOURCE),
+    resource_template(DECAL_RESOLVE_RESOURCE),
+    resource_template(ResourceKey::of(FeatureId(0x2000), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2001), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2002), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2003), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2004), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2005), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2006), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2007), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2008), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2010), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2011), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2012), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2013), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2014), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2015), 0)),
+    resource_template(ResourceKey::of(FeatureId(0x2016), 0)),
+];
+
 const WATER_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
     WATER_FEATURE_ID,
     RenderDomain::Surface,
     ServiceSet::new(&WATER_SERVICE_IDS),
     WATER_VARIANTS,
 );
-
 const VOLUME_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
     VOLUME_FEATURE_ID,
     RenderDomain::Volume,
     ServiceSet::new(&VOLUME_SERVICE_IDS),
     VOLUME_VARIANTS,
 );
-
+const PARTICLE_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
+    PARTICLE_FEATURE_ID,
+    RenderDomain::Particle,
+    ServiceSet::EMPTY,
+    PARTICLE_VARIANTS,
+);
+const HAIR_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
+    HAIR_FEATURE_ID,
+    RenderDomain::Hair,
+    ServiceSet::EMPTY,
+    HAIR_VARIANTS,
+);
+const DECAL_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
+    DECAL_FEATURE_ID,
+    RenderDomain::Decal,
+    ServiceSet::EMPTY,
+    DECAL_VARIANTS,
+);
 const LIT_FEATURE: FeatureDefinition =
     FeatureDefinition::response(LIT_FEATURE_ID, ServiceSet::EMPTY, LIT_VARIANTS);
 const NPR_FEATURE: FeatureDefinition =
@@ -152,9 +433,12 @@ const NPR_FEATURE: FeatureDefinition =
 const CUSTOM_FEATURE: FeatureDefinition =
     FeatureDefinition::response(CUSTOM_FEATURE_ID, ServiceSet::EMPTY, CUSTOM_VARIANTS);
 
-static BUILTIN_FEATURES: [FeatureDefinition; 21] = [
+static BUILTIN_FEATURES: [FeatureDefinition; 24] = [
     WATER_FEATURE,
     VOLUME_FEATURE,
+    PARTICLE_FEATURE,
+    HAIR_FEATURE,
+    DECAL_FEATURE,
     LIT_FEATURE,
     NPR_FEATURE,
     CUSTOM_FEATURE,
@@ -181,13 +465,15 @@ static BUILTIN_RESPONSE_ROOTS: [FeatureId; 3] = [LIT_FEATURE_ID, NPR_FEATURE_ID,
 
 /// Build the immutable semantic catalog used by renderer/device setup.
 pub fn builtin_catalog() -> Result<FeatureCatalog, super::CatalogError> {
-    FeatureCatalog::new(&BUILTIN_FEATURES, &[])
+    FeatureCatalog::new(&BUILTIN_FEATURES, &BUILTIN_RESOURCE_KEYS)
+}
+
+pub const fn builtin_resource_templates() -> &'static [ResourceTemplate] {
+    BUILTIN_RESOURCE_TEMPLATES
 }
 
 /// Freeze the subsystem and response roots for the device lifetime.
-pub fn builtin_roots(
-    catalog: &FeatureCatalog,
-) -> Result<super::FrozenRoots, super::RootError> {
+pub fn builtin_roots(catalog: &FeatureCatalog) -> Result<super::FrozenRoots, super::RootError> {
     super::FrozenRoots::from_build_profile(
         catalog,
         &BUILTIN_SUBSYSTEM_ROOTS,
@@ -198,11 +484,9 @@ pub fn builtin_roots(
 pub const fn builtin_service_ids() -> &'static [ServiceId] {
     &WATER_SERVICE_IDS
 }
-
 pub const fn water_required_services() -> ServiceSet {
     WATER_FEATURE.requires_services
 }
-
 pub const fn volume_required_services() -> ServiceSet {
     VOLUME_FEATURE.requires_services
 }
@@ -225,7 +509,13 @@ mod tests {
         .expect("baseline built-ins resolve");
         assert!(selection.feature(WATER_FEATURE_ID).is_some());
         assert!(selection.feature(VOLUME_FEATURE_ID).is_some());
-        assert_eq!(selection.provider(WATER_SERVICE_IDS[0]), Some(FeatureId(0x2000)));
-        assert_eq!(selection.provider(VOLUME_SERVICE_IDS[0]), Some(FeatureId(0x2010)));
+        assert_eq!(
+            selection.provider(WATER_SERVICE_IDS[0]),
+            Some(FeatureId(0x2000))
+        );
+        assert_eq!(
+            selection.provider(VOLUME_SERVICE_IDS[0]),
+            Some(FeatureId(0x2010))
+        );
     }
 }

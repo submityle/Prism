@@ -273,9 +273,12 @@ pub fn plan_shading_plan(
 ) -> WaterShadingResponse {
     match plan {
         WaterShadingPlan::Single { program } => plan_shading(program, profile, inputs),
-        WaterShadingPlan::MaskBlend { .. } => WaterShadingResponse::MaskBlend(
-            hybrid::plan_hybrid(profile.hybrid, profile.pbr, profile.npr, inputs),
-        ),
+        WaterShadingPlan::MaskBlend { .. } => WaterShadingResponse::MaskBlend(hybrid::plan_hybrid(
+            profile.hybrid,
+            profile.pbr,
+            profile.npr,
+            inputs,
+        )),
     }
 }
 

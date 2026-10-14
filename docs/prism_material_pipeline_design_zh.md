@@ -2,7 +2,7 @@
 
 > **状态**：架构基准（Architecture Baseline）。允许破坏性重构；本文同时描述「实现已经成立的部分」与「架构已定、尚未落地的部分」，两者分列，不混写。
 > **版本**：v3 · 2026-10-15。上一版 v2 内部标注 2026-09-30，其材质 ABI、闭包图、前端与调度描述已与实现不符；本次同步补上 `ShadingPlan` / `FeatureCatalog` / 水体 GPU 能力门禁的现状。
-> **代码基准**：`pkg/` 工作区实测，HEAD = `753f6fa3b`（2026-10-14）。凡标注 `code-truth` 的论断均给出 `文件:行`，可直接复核；文件级索引见 **附录 C**。
+> **代码基准**：`pkg/` 工作区实测，HEAD = `679c476b8`（2026-10-15）。凡标注 `code-truth` 的论断均给出 `文件:行`，可直接复核；文件级索引见 **附录 C**。
 > **后端**：运行时 API 层 = **wgpu**；着色语言层 = **WESL → naga → WGSL / SPIR-V / MSL / DXIL**。没有独立的原生 Vulkan 后端（§0.5）。
 > **数值红线**：不引入任何神经 / ML 推理路径；布局逐字节相等、算术 ≤1 ULP（§3.5、§13.5），运行时只有一条执行路径（§1.1）。
 > **本文不重复**：材质侧的破坏性重构细节 → `docs/prism_material_pipeline_refactor_zh.md`（v10）；OpenPBR 参数逐条功能对照 → `docs/prism_openpbr_pipeline_function_zh.md`；完成度核验 → `docs/prism_material_pipeline_refactor_verification_zh.md`；四层收口方案 → `docs/refactoring-dev/00-overview_refactor_zh.md`。
@@ -334,6 +334,8 @@ v2 把"PBR / NPR / 自定义"写成一个互斥的 `MaterialShadingModel` 枚举
 GPU-driven 基底只计算一次：光源集合与图元、阴影图/虚拟阴影页、探针与环境、速度场、可见性缓冲、簇划分。**响应函数**（怎么把这份数据变成像素颜色）由 `ResponseProgram` 分叉；**组合**由 `WaterShadingPlan::MaskBlend` 表达，组合不产生新的响应程序。
 
 水体共享服务的 9 个语义身份，以及体积共享服务的 7 个语义身份，统一由 `render_fabric::builtin_catalog` 声明并由 provider 闭包校验；不再存在按子系统复制的位掩码事实源。
+
+服务身份使用显式 `ServiceId` 与集合类型 `ServiceSet`，不是旧式位掩码：水体使用 `ServiceId(1..=9)`，体积使用 `ServiceId(101..=107)`；`FeatureDefinition::requires_services` 表示特性级硬需求，`FeatureVariant::requires_services_extra` 只参与候选准入，不扩张闭包。provider 由 `FeatureKind::Service { provides }` 唯一声明，所有 variant 必须发布同一组 `ServiceOutput.resources`，并由静态门禁校验每个资源确实被每个 provider variant 写入。
 
 ### 4.2 三档响应分类（保留 v2 的分类法，补上代码落点）
 

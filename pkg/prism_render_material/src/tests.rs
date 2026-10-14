@@ -232,7 +232,7 @@ fn gpu_material_rows_match_the_shader_abi() {
     // …plus the four runtime dynamic channel words of §17.1
     // (`dynamic_wetness/snow/damage/dissolve`), which a runtime state change
     // rewrites in place.
-    assert_eq!(size_of::<GpuMaterialHeader>(), 112);
+    assert_eq!(size_of::<GpuMaterialHeader>(), 116);
     // The v5 OpenPBR field completion (coat/fuzz/base/specular/subsurface/
     // transmission groups, including coat_darkening, scatter_anisotropy and
     // transmission_scatter) sized the fat authoring view, with trailing pad
@@ -241,7 +241,7 @@ fn gpu_material_rows_match_the_shader_abi() {
     assert_eq!(size_of::<GpuMaterialTexture>(), 32);
     // A storage-buffer array requires only the element's natural alignment
     // (4 for a struct of `u32`s); the header was never padded to 16, and
-    // the header is a dense 28-word u32 array.
+    // the header is a dense 29-word u32 array.
     assert_eq!(size_of::<GpuMaterialHeader>() % 4, 0);
     assert_eq!(size_of::<GpuSurfaceParameters>() % 16, 0);
     assert_eq!(size_of::<GpuMaterialTexture>() % 16, 0);

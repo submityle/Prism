@@ -1,7 +1,7 @@
 //! Driver-local pass sets shared by direct work and draw-bin resolution.
 
-use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
 use crate::{DrawFunctionId, MeshPipelineKey, RenderPhase};
+use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
 use prism_render_driver::{PrimitiveTopology, TextureFormat};
 
 /// Sorting category, deliberately unrelated to a u32 pass-set table index.
@@ -11,10 +11,16 @@ pub struct PassDescriptorClass(u8);
 impl PassDescriptorClass {
     /// 255 is reserved as an exhaustion sentinel, never silently wrapped.
     pub fn new(value: u8) -> Result<Self, PassSetError> {
-        if value == u8::MAX { Err(PassSetError::SortClassExhausted) } else { Ok(Self(value)) }
+        if value == u8::MAX {
+            Err(PassSetError::SortClassExhausted)
+        } else {
+            Ok(Self(value))
+        }
     }
     /// Returns the compact class used only for coarse sorting.
-    pub const fn get(self) -> u8 { self.0 }
+    pub const fn get(self) -> u8 {
+        self.0
+    }
     /// Builds a class from a table-owned ordinal without allowing the reserved
     /// sentinel to wrap into the sort key.
     pub fn from_ordinal(ordinal: usize) -> Result<Self, PassSetError> {
@@ -59,8 +65,23 @@ pub struct PassDescriptor {
 }
 
 impl PassDescriptor {
-    pub fn mesh_variant(self, topology: PrimitiveTopology, color_format: Option<TextureFormat>, depth_format: Option<TextureFormat>, sample_count: u32) -> MeshPipelineKey {
-        MeshPipelineKey { execution_family: self.execution_family, response_module_id: self.response_module_id, permutation_index: self.permutation_index, fallback_permutation: self.fallback_permutation, color_format, depth_format, sample_count, topology }
+    pub fn mesh_variant(
+        self,
+        topology: PrimitiveTopology,
+        color_format: Option<TextureFormat>,
+        depth_format: Option<TextureFormat>,
+        sample_count: u32,
+    ) -> MeshPipelineKey {
+        MeshPipelineKey {
+            execution_family: self.execution_family,
+            response_module_id: self.response_module_id,
+            permutation_index: self.permutation_index,
+            fallback_permutation: self.fallback_permutation,
+            color_format,
+            depth_format,
+            sample_count,
+            topology,
+        }
     }
 }
 
@@ -75,34 +96,55 @@ pub enum PassSetError {
 }
 
 #[derive(Default)]
-pub(crate) struct PassDescriptorTable { sets: Vec<Vec<PassDescriptor>> }
+pub(crate) struct PassDescriptorTable {
+    sets: Vec<Vec<PassDescriptor>>,
+}
 
 impl PassDescriptorTable {
     pub fn intern(&mut self, passes: Vec<PassDescriptor>) -> Result<u32, PassSetError> {
-        if passes.is_empty() { return Err(PassSetError::Empty); }
+        if passes.is_empty() {
+            return Err(PassSetError::Empty);
+        }
         match passes.as_slice() {
-            [single] if single.execution_family != ExecutionFamily::Composition && single.role == PassRole::Surface => (),
+            [single]
+                if single.execution_family != ExecutionFamily::Composition
+                    && single.role == PassRole::Surface =>
+            {
+                ()
+            }
             [left, right, composition]
                 if left.execution_family == ExecutionFamily::SplitResponse
                     && right.execution_family == ExecutionFamily::SplitResponse
                     && composition.execution_family == ExecutionFamily::Composition
                     && left.role == PassRole::ResponseLeft
                     && right.role == PassRole::ResponseRight
-                    && composition.role == PassRole::Composition => {
-                if composition.draw.is_none() { return Err(PassSetError::CompositionNeedsDraw); }
-                if left.draw.is_none() || right.draw.is_none() { return Err(PassSetError::InvalidShape); }
+                    && composition.role == PassRole::Composition =>
+            {
+                if composition.draw.is_none() {
+                    return Err(PassSetError::CompositionNeedsDraw);
+                }
+                if left.draw.is_none() || right.draw.is_none() {
+                    return Err(PassSetError::InvalidShape);
+                }
             }
             _ => return Err(PassSetError::InvalidShape),
         }
-        if let Some(index) = self.sets.iter().position(|set| *set == passes) { return u32::try_from(index).map_err(|_| PassSetError::TableExhausted); }
+        if let Some(index) = self.sets.iter().position(|set| *set == passes) {
+            return u32::try_from(index).map_err(|_| PassSetError::TableExhausted);
+        }
         let index = u32::try_from(self.sets.len()).map_err(|_| PassSetError::TableExhausted)?;
         self.sets.push(passes);
         Ok(index)
     }
-    pub fn get(&self, index: u32) -> Option<&[PassDescriptor]> { self.sets.get(index as usize).map(Vec::as_slice) }
+    pub fn get(&self, index: u32) -> Option<&[PassDescriptor]> {
+        self.sets.get(index as usize).map(Vec::as_slice)
+    }
 
     pub fn has_composition(&self) -> bool {
-        self.sets.iter().flatten().any(|pass| pass.role == PassRole::Composition)
+        self.sets
+            .iter()
+            .flatten()
+            .any(|pass| pass.role == PassRole::Composition)
     }
 }
 
@@ -110,7 +152,11 @@ impl PassDescriptorTable {
 mod tests {
     use super::*;
 
-    fn pass(role: PassRole, family: ExecutionFamily, draw: Option<DrawFunctionId>) -> PassDescriptor {
+    fn pass(
+        role: PassRole,
+        family: ExecutionFamily,
+        draw: Option<DrawFunctionId>,
+    ) -> PassDescriptor {
         PassDescriptor {
             role,
             execution_family: family,
@@ -128,9 +174,21 @@ mod tests {
         let mut table = PassDescriptorTable::default();
         let index = table
             .intern(vec![
-                pass(PassRole::ResponseLeft, ExecutionFamily::SplitResponse, Some(DrawFunctionId(0))),
-                pass(PassRole::ResponseRight, ExecutionFamily::SplitResponse, Some(DrawFunctionId(0))),
-                pass(PassRole::Composition, ExecutionFamily::Composition, Some(DrawFunctionId(1))),
+                pass(
+                    PassRole::ResponseLeft,
+                    ExecutionFamily::SplitResponse,
+                    Some(DrawFunctionId(0)),
+                ),
+                pass(
+                    PassRole::ResponseRight,
+                    ExecutionFamily::SplitResponse,
+                    Some(DrawFunctionId(0)),
+                ),
+                pass(
+                    PassRole::Composition,
+                    ExecutionFamily::Composition,
+                    Some(DrawFunctionId(1)),
+                ),
             ])
             .unwrap();
         assert_eq!(table.get(index).unwrap().len(), 3);
@@ -139,8 +197,14 @@ mod tests {
 
     #[test]
     fn sort_class_reserves_255_and_table_index_is_independent() {
-        assert_eq!(PassDescriptorClass::new(u8::MAX), Err(PassSetError::SortClassExhausted));
-        assert_eq!(PassDescriptorClass::from_ordinal(255), Err(PassSetError::SortClassExhausted));
+        assert_eq!(
+            PassDescriptorClass::new(u8::MAX),
+            Err(PassSetError::SortClassExhausted)
+        );
+        assert_eq!(
+            PassDescriptorClass::from_ordinal(255),
+            Err(PassSetError::SortClassExhausted)
+        );
         assert!(PassDescriptorClass::from_ordinal(254).is_ok());
     }
 }

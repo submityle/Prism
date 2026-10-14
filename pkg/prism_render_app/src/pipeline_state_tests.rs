@@ -1,6 +1,6 @@
-use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
 use super::*;
 use crate::pipeline_cache::{PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution};
+use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
 use prism_render_driver::{Instance, RenderDevice};
 use prism_render_driver_null::{NullDevice, NullInstance};
 use std::collections::BTreeSet;
@@ -371,13 +371,23 @@ fn canonical_state_bytes_match_hash_and_cover_every_fixed_function_field() {
 #[test]
 fn state_struct_fields_are_all_hashed() {
     let baseline = PipelineState::from_descriptor(&descriptor());
-    let baseline_key = PipelineKey::new(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, baseline.clone());
+    let baseline_key = PipelineKey::new(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(42),
+        PermutationIndex::ZERO,
+        baseline.clone(),
+    );
     let mut hashes = BTreeSet::from([baseline.to_hash()]);
     for (name, descriptor) in mutations() {
         let state = PipelineState::from_descriptor(&descriptor);
         assert_ne!(state, baseline, "state forgot {name}");
         assert_ne!(
-            PipelineKey::new(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, state.clone()),
+            PipelineKey::new(
+                ExecutionFamily::FusedBuiltin,
+                ModuleId(42),
+                PermutationIndex::ZERO,
+                state.clone()
+            ),
             baseline_key,
             "hot key forgot {name}"
         );
@@ -436,13 +446,28 @@ fn pipeline_state_preserves_layout_order_and_optional_stage_boundaries() {
             &[rhi::VertexFormat::Float32x4],
         ),
     ];
-    let original_key = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, &original);
+    let original_key = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(42),
+        PermutationIndex::ZERO,
+        &original,
+    );
     let mut changed = original.clone();
     changed.vertex.buffers.swap(0, 1);
-    let buffer_order = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, &changed);
+    let buffer_order = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(42),
+        PermutationIndex::ZERO,
+        &changed,
+    );
     changed = original.clone();
     changed.vertex.buffers[0].attributes.swap(0, 1);
-    let attribute_order = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, &changed);
+    let attribute_order = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(42),
+        PermutationIndex::ZERO,
+        &changed,
+    );
     for key in [buffer_order, attribute_order] {
         assert_ne!(original_key, key);
         assert_ne!(
@@ -454,8 +479,18 @@ fn pipeline_state_preserves_layout_order_and_optional_stage_boundaries() {
     empty_targets.fragment.as_mut().unwrap().targets.clear();
     let mut no_fragment = empty_targets.clone();
     no_fragment.fragment = None;
-    let empty = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, &empty_targets);
-    let absent = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, &no_fragment);
+    let empty = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(42),
+        PermutationIndex::ZERO,
+        &empty_targets,
+    );
+    let absent = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(42),
+        PermutationIndex::ZERO,
+        &no_fragment,
+    );
     assert_ne!(empty, absent);
     assert_ne!(
         empty.typed_pipeline_state.to_hash(),
@@ -478,8 +513,18 @@ fn descriptor_runtime_handles_and_labels_are_not_fixed_function_state() {
     assert_eq!(state, changed_state);
     assert_eq!(state.to_hash(), changed_state.to_hash());
     assert_ne!(
-        PipelineKey::new(ExecutionFamily::FusedBuiltin, ModuleId(11), PermutationIndex::ZERO, state),
-        PipelineKey::new(ExecutionFamily::FusedBuiltin, ModuleId(12), PermutationIndex::ZERO, changed_state)
+        PipelineKey::new(
+            ExecutionFamily::FusedBuiltin,
+            ModuleId(11),
+            PermutationIndex::ZERO,
+            state
+        ),
+        PipelineKey::new(
+            ExecutionFamily::FusedBuiltin,
+            ModuleId(12),
+            PermutationIndex::ZERO,
+            changed_state
+        )
     );
 }
 
@@ -499,7 +544,12 @@ fn pipeline_cache_uses_complete_descriptor_state_for_lookup() {
     let device = device();
     let mut cache = PipelineCache::new();
     let descriptor = descriptor();
-    let key = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, &descriptor);
+    let key = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(42),
+        PermutationIndex::ZERO,
+        &descriptor,
+    );
     let first = cache.get_or_create(&device, key.clone(), &descriptor);
     assert_eq!(
         first,
@@ -507,7 +557,12 @@ fn pipeline_cache_uses_complete_descriptor_state_for_lookup() {
     );
     let mut ids = BTreeSet::from([first]);
     for (name, descriptor) in mutations() {
-        let other_key = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, &descriptor);
+        let other_key = PipelineKey::from_descriptor(
+            ExecutionFamily::FusedBuiltin,
+            ModuleId(42),
+            PermutationIndex::ZERO,
+            &descriptor,
+        );
         let id = cache.get_or_create(&device, other_key.clone(), &descriptor);
         assert!(ids.insert(id), "aliased fixed-function override {name}");
         assert!(
@@ -525,7 +580,12 @@ fn pipeline_cache_uses_complete_descriptor_state_for_lookup() {
 fn pipeline_key_is_used_for_lookup_and_not_for_writeback() {
     let device = device();
     let descriptor = descriptor();
-    let key = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, &descriptor);
+    let key = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(42),
+        PermutationIndex::ZERO,
+        &descriptor,
+    );
     let unchanged = key.clone();
     let mut cache = PipelineCache::new();
     cache.get_or_create(&device, key.clone(), &descriptor);
@@ -559,7 +619,12 @@ fn pipeline_cache_rejects_stale_state_before_cold_requests_and_prewarm() {
     let device = Arc::new(device());
     let mut cache = PipelineCache::with_worker(device.clone());
     let descriptor = descriptor();
-    let key = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, &descriptor);
+    let key = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(42),
+        PermutationIndex::ZERO,
+        &descriptor,
+    );
     let mut mismatched = descriptor.clone();
     mismatched.multisample.alpha_to_coverage_enabled = true;
     let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -616,12 +681,22 @@ fn async_pipeline_cache_tracks_fixed_state_in_pending_and_fallback() {
     });
     let mut cache = PipelineCache::with_compiler(compiler.clone());
     let fallback_descriptor = descriptor();
-    let fallback_key = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(100), PermutationIndex::ZERO, &fallback_descriptor);
+    let fallback_key = PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(100),
+        PermutationIndex::ZERO,
+        &fallback_descriptor,
+    );
     let mut requests = Vec::new();
     for bias in [1, 2] {
         let mut descriptor = fallback_descriptor.clone();
         descriptor.depth_stencil.as_mut().unwrap().bias.constant = bias;
-        let key = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(42), PermutationIndex::ZERO, &descriptor);
+        let key = PipelineKey::from_descriptor(
+            ExecutionFamily::FusedBuiltin,
+            ModuleId(42),
+            PermutationIndex::ZERO,
+            &descriptor,
+        );
         assert!(matches!(
             cache.resolve_or_request(
                 device.as_ref(),

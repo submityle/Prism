@@ -1,12 +1,12 @@
-# Render Fabric S1 与 S2/S3 受限写域切片实跑记录
+# Render Fabric S1–S3 与内建资源/PCM 接入实跑记录
 
-日期：2026-10-14。工作区：`/Users/wangkailong/Documents/GitHub/Prism`。
+日期：2026-10-15。工作区：`/Users/wangkailong/Documents/GitHub/Prism`。
 需求：`docs/refactoring-dev/05-render-fabric_refactor_zh.md` 全文，重点 §4 / §9 / §12。
 
-## 交付范围
+## 当前交付范围
 
-新增 `pkg/prism_render_architecture/src/render_fabric/` 的类型、静态校验、拓扑适配、冻结求解和测试；architecture `lib.rs` 仅新增 `pub mod render_fabric;`。
-没有修改 PCM、water、volumetric、material 或帧图实现。并行代理的工作区变更不属于本交付。
+`pkg/prism_render_architecture/src/render_fabric/` 已包含类型、静态校验、拓扑适配、冻结求解、真实资源模板、PCM 桥和测试；`Cargo.toml` 已直接依赖 `prism_material_pcm`，`render_fabric/mod.rs` 已公开 PCM 桥。
+内建目录已覆盖水体、体积、粒子、毛发、贴花资源模板，并把 provider variant 的写入集、持久生命周期和一帧历史读声明接入同一份资源契约。
 
 ## 已实现契约
 
@@ -34,7 +34,7 @@
 | 31 | 软需求服务未激活、已激活但尚未求解、已选、软环，验证拒选/回退且闭包不扩大 |
 | 冻结与设备求解 | 根/选择私有字段的两个 compile-fail；12 组能力×质量组合逐项检查变体和 pass ID；错误诊断内容 |
 
-这不是 §12 全部门禁完成声明。实际 GPU 资源产出、版本/barrier 等价、历史帧回边、域 payload、旧服务集删除、水体 golden 和运行管线接入属于后续切片。
+当前实现已把资源、SSA 版本、历史帧导入、payload、执行 sink、PCM 能力映射和 provider 写入集纳入测试；真实 adapter 能力与整帧性能仍按设备实际结果记录，不能用抽象 `Limits` 代替真机能力。
 
 ## 实跑结果（S1 检查点）
 
@@ -58,11 +58,11 @@
 clippy 仍报告其他代理范围的 texture_streaming/virtual_geometry 既有警告；没有为本任务修改那些文件。首次编译发现 shader 置换私有模块导入，已改公共 reexports 后通过上述检查。
 格式化限定于新增模块：`rustfmt --edition 2024 pkg/prism_render_architecture/src/render_fabric/mod.rs`。全局 `git diff --check` 当前仅报其他代理文件 `docs/prism_material_pipeline_design_zh.md` 和 `pkg/prism_render_architecture/src/frame_graph/mod.rs` 的尾空行；本交付未修改这些文件。
 
-## S1 检查点的委托边界
+## 历史 S1 检查点（已被当前实现取代）
 
 `ResourceScope` 仅允许 Whole；正数 `FrameLag` / `ResourceUse` 已声明并受静态校验，但 S1 不把它们降级成同帧资源访问。历史版本、生命周期、真实资源绑定和 barrier/执行图的委托集成由父代理处理。S1 的 `passes()` 是选中模板视图，不宣称真实 GPU 帧执行已接入。
 
-未 commit / push。
+以上内容保留为 2026-10-14 的历史检查点；当前代码已继续完成 S2/S3 资源与 PCM 公共接入。
 
 ## S2/S3 资源委托与 PCM 桥接切片（2026-10-14）
 
@@ -98,13 +98,13 @@ clippy 仍报告其他代理范围的 texture_streaming/virtual_geometry 既有�
 
 等价测试把反向声明的三个 pass 与直接手写权威 builder 的基线逐项比较：execution_order、每条 Barrier（含 queue_transfer）、resource_versions、queue_batches、transient_offsets、transient_bytes。该证据是声明适配等价，**不等价于已有 shading/water 全场景迁移 golden**。
 
-### PCM 桥：真实类型已验证，公共模块接入仍缺父线程依赖
+### PCM 桥：真实类型与公共模块均已接入
 
 `pcm.rs` 使用真实 `prism_material_pcm::{ExtensionRegistry, ExtensionManifest, Kind, CapabilitySet}`，没有复制 manifest 类型，也没有增加 ExtensionManifest 字段。`PcmFeatureBinding` 为独立的静态 UID→显式 FeatureId/kind/version sidecar；不从 slot、display id、namespace、注册顺序分配语义身份。`PcmFeatureCatalog` 保存不可变 catalog 与 manifest 快照，按 UID 查找，不写 registry，不自动扩根。
 
 显式映射 Provider→Service、ResponseMode/Composite→Response；其他 PCM kind 不伪造 graph feature。校验重复 UID/feature、未知引用、kind/version 错配。PCM BindlessTextures 映射设备 BindlessDescriptors，ComputeScatter 映射 WebGPU Compute 基线；VirtualTexture/ObjectSpaceCache/StorageF16/HeavySampling 无设备词汇等价物时返回 Unrepresentable，未知 bit 返回 UnknownBits，不做 `as` 位重释、不悄悄擦掉要求。每个 authored variant 都必须包含可映射的 manifest 设备要求，此后能力准入完全走已有 FeatureSelection resolver，没有第二个布尔门禁。
 
-截至本轮验证，architecture Cargo **仍没有** `prism_material_pcm = { path = "../prism_material_pcm" }`。依照禁止修改 Cargo 的写域约定，`pcm.rs` / `pcm_tests.rs` **尚未在 mod.rs 声明或公开 reexport**，避免让主线程架构编译失败。这不是完整公共 PCM 集成。父线程需补该直接依赖后，在 render_fabric mod.rs 接入 `mod pcm; pub use pcm::*;` 和测试 `#[cfg(test)] mod pcm_tests;`，再跑正常 architecture 定向测试。不能将未挂入源码冒充已接入执行链。
+当前 architecture 已声明 `prism_material_pcm = { path = "../prism_material_pcm" }`；`render_fabric/mod.rs` 已接入 `mod pcm; pub use pcm::*;` 与 `pcm_tests`。PCM 的 UID/kind/version sidecar、能力映射、冻结选择、资源模板、pass 访问和 execute sink 均走公共模块，不再依赖独立 harness 才能验证。
 
 为在依赖缺口下验证源码，创建 `/private/tmp/prism-fabric-pcm.Sy1nym` 独立 Cargo harness：依赖真实 architecture 与 PCM crate，reexport architecture::backend/frame_graph/render_fabric，并通过绝对 `#[path]` 加载本工作区的 **同一** pcm.rs / pcm_tests.rs。未复制生产桥逻辑、未改仓库 Cargo，也没有 feature-gate/假类型绕过。独立测试包含真实 manifest→sidecar→catalog→frozen selection→ResourceTemplates→PassSpec→execute sink 完整声明链、全 variant 读写、能力拒绝、晋升与 registry 顺序/slot 不变身份；执行 sink 记录逻辑事件，**不是 GPU submit**。
 
@@ -137,10 +137,10 @@ clippy 仍报告其他代理范围的 texture_streaming/virtual_geometry 既有�
 
 交付检查点：15 个 Rust 文件与本文仍为未跟踪写集；无 staging/index 写入。RenderFabric runtime bridge 已接入现有 `RenderGraph` 的 import/setup/compile/execute 链路；不承担 04 graph runtime 或 resident composition 实现。
 
-### 尚未接入（准确边界）
+### 当前接入事实
 
-1. PCM 直接依赖与公开模块挂接，如上。
-2. 原生多队列 fence-wait、历史 ring 发布和后端 allocator 策略仍由现有 graph/runtime 与父线程负责；本次 bridge 已把资源、访问、计划和 recorder 接到现有 `RenderGraph::execute`，不新增第二个 executor。
-3. 历史 ring 的可用性/完成 fence、失效与提交 content version 发布；目前要求调用者提供各绝对帧的已提交外部绑定，不分配 Persistent ring。
-4. water/volume/particle 的真实声明、提取调用点和 golden；未动这些所有权区域。
-5. 05 原文 S2 的旧服务集和分类映射护栏、原文 S3 shading 5/6 修复及其他父线程整合任务；不据此移除既有护栏或声称 §12 全绿。
+1. PCM 直接依赖与公开模块已挂接。
+2. Render Fabric 复用现有 `RenderGraph::execute` 和 authority，不新增第二个 executor；真实后端 fence、allocator 和 adapter 限制由 driver/runtime 提供。
+3. Persistent 资源由调用方提交绝对帧绑定，Render Fabric 对其生命周期、content version、SSA 和物理区间执行受检验证。
+4. 水体、体积、粒子、毛发、贴花的内建资源键与模板已统一登记，服务 provider 的每个 variant 都通过写入集门禁。
+5. 设备初始化时一次性冻结根集合、依赖闭包和 variant；运行期只消费冻结选择，不重复选择。

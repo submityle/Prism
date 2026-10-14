@@ -26,7 +26,12 @@ impl<State> PipelineIdentity<State> {
         permutation_index: PermutationIndex,
         typed_pipeline_state: State,
     ) -> Self {
-        Self { execution_family, response_module_id, permutation_index, typed_pipeline_state }
+        Self {
+            execution_family,
+            response_module_id,
+            permutation_index,
+            typed_pipeline_state,
+        }
     }
 
     pub fn from_descriptor<'a, Descriptor: 'a>(
@@ -34,7 +39,15 @@ impl<State> PipelineIdentity<State> {
         response_module_id: ModuleId,
         permutation_index: PermutationIndex,
         descriptor: &'a Descriptor,
-    ) -> Self where State: From<&'a Descriptor> {
-        Self::new(execution_family, response_module_id, permutation_index, State::from(descriptor))
+    ) -> Self
+    where
+        State: From<&'a Descriptor>,
+    {
+        Self::new(
+            execution_family,
+            response_module_id,
+            permutation_index,
+            State::from(descriptor),
+        )
     }
 }

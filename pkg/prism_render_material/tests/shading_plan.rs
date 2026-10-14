@@ -9,10 +9,126 @@ use prism_render_architecture::{
     },
 };
 use prism_render_material::shading_plan::*;
-use prism_render_material::{LobeMask, SURFACE_CHANNELS, SURFACE_LOBES};
+use prism_render_material::{
+    LobeMask, MaterialExecutionTables, SURFACE_CHANNELS, SURFACE_LOBES,
+};
 
 fn catalog() -> SurfaceFieldCatalog {
     SurfaceFieldCatalog::generated().unwrap()
+}
+
+#[test]
+fn generated_builtin_manifests_cover_every_contract_without_hand_lists() {
+    for program in [
+        BuiltinProgram::Lit,
+        BuiltinProgram::Npr,
+        BuiltinProgram::Unlit,
+    ] {
+        let manifest = ResponseManifest::from_builtin(program).unwrap();
+        manifest.validate(&catalog()).unwrap();
+        assert!(!manifest.surface.optional_fields.is_empty() || program == BuiltinProgram::Unlit);
+        assert!(!manifest.surface.ignored_fields_with_reason.is_empty());
+        assert!(!manifest.surface.ignored_lobes_with_reason.is_empty());
+        assert!(manifest.output.produced_channels.0 != 0);
+        assert!(manifest.execution.supports_split || manifest.execution.supports_fused);
+    }
+}
+
+#[test]
+fn generated_builtin_contracts_partition_every_field_and_lobe() {
+    let all_fields = catalog().fields().cloned().collect::<Vec<_>>();
+    let all_lobes = SURFACE_LOBES
+        .iter()
+        .map(|lobe| lobe.id)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for program in [BuiltinProgram::Lit, BuiltinProgram::Npr, BuiltinProgram::Unlit] {
+        let manifest = ResponseManifest::from_builtin(program).unwrap();
+        manifest.validate(&catalog()).unwrap();
+
+        let mapped = manifest
+            .surface
+            .field_mappings
+            .iter()
+            .map(|mapping| mapping.field.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let ignored = manifest
+            .surface
+            .ignored_fields_with_reason
+            .iter()
+            .map(|(field, _)| field.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(mapped.is_disjoint(&ignored), "{program:?} maps and ignores a field");
+        assert_eq!(mapped.len() + ignored.len(), all_fields.len(), "{program:?}");
+        assert!(all_fields
+            .iter()
+            .all(|field| mapped.contains(field) || ignored.contains(field)));
+
+        let supported = manifest
+            .surface
+            .supported_lobes
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let ignored_lobes = manifest
+            .surface
+            .ignored_lobes_with_reason
+            .iter()
+            .map(|(lobe, _)| lobe.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(supported.is_disjoint(&ignored_lobes), "{program:?} lobe overlap");
+        assert_eq!(supported.len() + ignored_lobes.len(), all_lobes.len(), "{program:?}");
+        assert_eq!(supported.union(&ignored_lobes).count(), all_lobes.len());
+    }
+}
+
+#[test]
+fn unlit_contract_and_execution_row_are_decode_only_and_unlit_typed() {
+    let manifest = ResponseManifest::from_builtin(BuiltinProgram::Unlit).unwrap();
+    assert!(manifest.surface.field_mappings.is_empty());
+    assert_eq!(manifest.surface.ignored_fields_with_reason.len(), catalog().fields().count());
+    assert!(manifest.surface.supported_lobes.is_empty());
+    assert_eq!(manifest.surface.ignored_lobes_with_reason.len(), SURFACE_LOBES.len());
+    assert!(!manifest.lighting.direct_light);
+    assert!(!manifest.lighting.shadows);
+    assert!(!manifest.lighting.indirect_diffuse);
+    assert!(!manifest.lighting.reflection);
+    assert!(!manifest.lighting.transmission);
+    assert_eq!(manifest.output.produced_channels, ChannelMask::one(ResponseChannel::Emission)
+        .union(ChannelMask::one(ResponseChannel::Alpha)));
+    assert_eq!(manifest.output.blendable_channels, ChannelMask::one(ResponseChannel::Emission));
+    assert!(!manifest.execution.supports_fused);
+    assert!(manifest.execution.supports_split);
+    assert_eq!(manifest.execution.max_cost_class, CostClass::Low);
+    assert!(manifest.cache.reads.is_empty());
+    assert_eq!(manifest.cache.writes, vec![CacheChannel::Response(ResponseChannel::Emission)]);
+    assert_eq!(manifest.cache.temporal, TemporalRequirement::None);
+
+    let entry = compiled();
+    let packages = packages();
+    let mut tables = MaterialExecutionTables::new();
+    let package = tables.register_package(&entry, &packages).unwrap();
+    let program = tables
+        .register_program(
+            ProgramRef::Builtin(BuiltinProgram::Unlit),
+            &entry,
+            package,
+            prism_render_architecture::shader_package::ModuleId(7),
+            prism_render_architecture::shader_package::PermutationSpace::try_new([1]).unwrap(),
+        )
+        .unwrap();
+    let plan = tables
+        .register_plan(
+            ShadingPlan::single_builtin(BuiltinProgram::Unlit),
+            program,
+            None,
+            ExecutionFamily::FusedBuiltin,
+            ChannelMask::default(),
+        )
+        .unwrap();
+    assert_eq!(tables.gpu_program_rows(), vec![[2, package.get(), 1, 0]]);
+    assert_eq!(tables.gpu_plan_rows(), vec![[program.get(), u32::MAX]]);
+    assert_eq!(tables.bind_raw(plan.get(), program.get(), package.get(), 0).unwrap().to_words(), [0, 0, 0, 0, 0]);
 }
 
 // This test program intentionally ignores everything; it is NOT a Lit/NPR
@@ -437,6 +553,24 @@ fn id_zero_legal_max_reserved_and_stale_is_hard_error() {
         Err(RegistryError::RetiredProgramId(ProgramId(0)))
     );
 }
+
+#[test]
+fn stale_registered_id_fails_plan_validation_instead_of_falling_back() {
+    let stale = registered(7);
+    let mut r = registry(&[stale], false);
+    let packages = packages();
+    r.unregister(stale).unwrap();
+
+    let error = r
+        .validate_plan(
+            &ShadingPlan::Single { program: stale },
+            &context(),
+            &packages,
+        )
+        .unwrap_err();
+    assert_eq!(error, RegistryError::StaleProgram(stale));
+}
+
 #[test]
 fn builtin_trio_is_available_only_after_explicit_binding() {
     for builtin in [

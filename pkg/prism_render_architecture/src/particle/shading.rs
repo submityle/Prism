@@ -161,15 +161,12 @@ pub const PARTICLE_LIGHTING_SERVICES: ServiceSet = ServiceSet::new(&[
 ]);
 
 const CLUSTERED: ServiceSet = ServiceSet::new(&[PARTICLE_CLUSTERED_LIGHTS]);
-const CLUSTERED_SHADOW: ServiceSet = ServiceSet::new(&[
-    PARTICLE_CLUSTERED_LIGHTS,
-    PARTICLE_SHADOW_MAPS,
-]);
-const CLUSTERED_GI: ServiceSet = ServiceSet::new(&[
-    PARTICLE_CLUSTERED_LIGHTS,
-    PARTICLE_GLOBAL_ILLUMINATION,
-]);
-const CLUSTERED_RAY: ServiceSet = ServiceSet::new(&[PARTICLE_CLUSTERED_LIGHTS, PARTICLE_RAY_TRACING]);
+const CLUSTERED_SHADOW: ServiceSet =
+    ServiceSet::new(&[PARTICLE_CLUSTERED_LIGHTS, PARTICLE_SHADOW_MAPS]);
+const CLUSTERED_GI: ServiceSet =
+    ServiceSet::new(&[PARTICLE_CLUSTERED_LIGHTS, PARTICLE_GLOBAL_ILLUMINATION]);
+const CLUSTERED_RAY: ServiceSet =
+    ServiceSet::new(&[PARTICLE_CLUSTERED_LIGHTS, PARTICLE_RAY_TRACING]);
 const CLUSTERED_SHADOW_GI: ServiceSet = ServiceSet::new(&[
     PARTICLE_CLUSTERED_LIGHTS,
     PARTICLE_SHADOW_MAPS,
@@ -631,10 +628,7 @@ mod tests {
             overlay: ShadingBasis::Unlit,
             weight: 0.5,
         };
-        assert_eq!(
-            lighting_services(model, all_caps()),
-            ServiceSet::EMPTY
-        );
+        assert_eq!(lighting_services(model, all_caps()), ServiceSet::EMPTY);
     }
 
     fn oit_decision(blend: BlendMode, count: u32, prefer_oit: bool) -> SortDecision {

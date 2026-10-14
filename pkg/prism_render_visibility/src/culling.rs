@@ -7,7 +7,9 @@ use alloc::{
     vec::Vec,
 };
 use prism_render_architecture::gpu_scene::{CpuRenderScene, SceneHandle};
-use prism_render_material::{MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, RenderDomain};
+use prism_render_material::{
+    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, RenderDomain,
+};
 
 pub struct VisibilityInput<'a> {
     pub scene: &'a CpuRenderScene,
@@ -171,9 +173,7 @@ mod tests {
     use prism_render_architecture::gpu_scene::{
         CpuRenderScene, InstanceRecord, SceneBounds, SceneOperation, SceneTransaction,
     };
-    use prism_render_material::{
-        MaterialDomain, MaterialRecord, MaterialRenderClass,
-    };
+    use prism_render_material::{MaterialDomain, MaterialRecord, MaterialRenderClass};
 
     fn handle(index: u32) -> GenerationalHandle {
         GenerationalHandle {

@@ -48,6 +48,7 @@ struct MaterialTexture {
 }
 
 const FEATURE_REGION_ILLUMINATION: u32 = 1u << 7u;
+const FEATURE_ILLUMINATION_BLEND: u32 = 1u << 9u;
 const SEMANTIC_ILLUMINATION_MASK: u32 = 10u;
 const REGION_ILLUMINATION_SENTINEL: u32 = 0xffffffffu;
 const REGION_ILLUMINATION_LIT: u32 = 0u;
@@ -182,6 +183,42 @@ fn region_illumination_selector(material_index: u32, uv: vec2<f32>) -> u32 {
     return selector;
 }
 
+// Continuous composition deliberately has its own entry point and feature
+// gate. It returns a 16-bit UNORM weight in the metadata word; the binary
+// selector above remains strictly {Lit, NPR, sentinel}.
+fn illumination_blend_weight(material_index: u32, uv: vec2<f32>) -> u32 {
+    var weight = REGION_ILLUMINATION_SENTINEL;
+    @if(MATERIAL_BINDLESS && ILLUMINATION_BLEND && VERTEX_UVS) {
+        if material_index != 0xffffffffu && material_index < arrayLength(&material_headers) {
+            let header = material_headers[material_index];
+            if header.is_active != 0u
+                && (header.feature_flags & FEATURE_ILLUMINATION_BLEND) != 0u {
+                let physical = arrayLength(&material_textures);
+                for (var i = header.texture_offset;
+                    i < physical && i - header.texture_offset < header.texture_count;
+                    i = i + 1u) {
+                    let record = material_textures[i];
+                    if record.semantic == SEMANTIC_ILLUMINATION_MASK
+                        && record.generation != 0u
+                        && record.index < arrayLength(&material_texture_generation_table)
+                        && record.sampler_index < arrayLength(&material_texture_generation_table)
+                        && material_texture_generation_table[record.index] == record.generation {
+                        let mask = textureSampleLevel(
+                            material_texture_heap[record.index],
+                            material_sampler_heap[record.sampler_index],
+                            uv,
+                            0.0,
+                        ).r;
+                        weight = u32(clamp(mask, 0.0, 1.0) * 65535.0 + 0.5);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return weight;
+}
+
 @fragment
 fn fragment(
     in: VertexOutput,
@@ -198,6 +235,9 @@ fn fragment(
     var selector = REGION_ILLUMINATION_SENTINEL;
     @if(MATERIAL_BINDLESS && REGION_ILLUMINATION && VERTEX_UVS) {
         selector = region_illumination_selector(in.material_index, in.uv);
+    }
+    @if(MATERIAL_BINDLESS && ILLUMINATION_BLEND && VERTEX_UVS) {
+        selector = illumination_blend_weight(in.material_index, in.uv);
     }
     out.metadata = vec4<u32>(
         in.material_index,

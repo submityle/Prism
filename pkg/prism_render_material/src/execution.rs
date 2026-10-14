@@ -767,7 +767,7 @@ mod tests {
                 &entry,
                 package,
                 ModuleId(7),
-                PermutationSpace::try_new([2, 3]).unwrap(),
+                PermutationSpace::try_new([2]).unwrap(),
             )
             .unwrap();
         let plan = tables
@@ -783,15 +783,15 @@ mod tests {
         assert_eq!(tables.gpu_plan_rows(), vec![[program.get(), u32::MAX]]);
         assert_eq!(
             tables.gpu_program_rows(),
-            vec![[RESPONSE_PROGRAM_KIND_LIT, package.get(), 6, 0]]
+            vec![[RESPONSE_PROGRAM_KIND_LIT, package.get(), 2, 0]]
         );
         assert_eq!(tables.gpu_package_count(), 1);
         assert_eq!(
             tables
-                .bind_raw(plan.get(), program.get(), package.get(), 5)
+                .bind_raw(plan.get(), program.get(), package.get(), 1)
                 .unwrap()
                 .to_words(),
-            [0, 0, 0, 5, 0]
+            [0, 0, 0, 1, 0]
         );
     }
 }

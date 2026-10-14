@@ -22,8 +22,8 @@ use alloc::vec::Vec;
 
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::shader_package::{
-    ArtifactDigest, ExecutionFamily, ModuleId, ModuleIdentity, ModuleInternError,
-    ModuleInterner, PermutationIndex, PermutationSpace, ShaderPackageId,
+    ArtifactDigest, ExecutionFamily, ModuleId, ModuleIdentity, ModuleInternError, ModuleInterner,
+    PermutationIndex, PermutationSpace, ShaderPackageId,
 };
 use prism_render_driver::{
     ColorTargetState, DepthStencilState, FragmentState, MultisampleState, PrimitiveState,
@@ -99,7 +99,9 @@ pub struct ResponseModuleCache {
 impl ResponseModuleCache {
     /// Creates an empty cache.
     #[must_use]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Interns and makes one response shader module resident.
     pub fn intern<D: RenderDevice + ?Sized>(
@@ -149,7 +151,11 @@ impl ResponseModuleCache {
         module_id: ModuleId,
         spec: ResponseModuleSpec,
     ) -> Result<ModuleId, ResponseModuleCacheError> {
-        assert_eq!(module_id, ModuleId::SPINE, "only the spine may use the reserved module id");
+        assert_eq!(
+            module_id,
+            ModuleId::SPINE,
+            "only the spine may use the reserved module id"
+        );
         if let Some(existing) = self.modules.get(&module_id) {
             if existing.descriptor != spec.descriptor {
                 return Err(ResponseModuleCacheError::DescriptorChanged(module_id));
@@ -218,11 +224,15 @@ impl ResponseModuleCache {
 
     /// Number of resident response modules, including the composition kernel.
     #[must_use]
-    pub fn len(&self) -> usize { self.modules.len() }
+    pub fn len(&self) -> usize {
+        self.modules.len()
+    }
 
     /// Whether no response module is resident.
     #[must_use]
-    pub fn is_empty(&self) -> bool { self.modules.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty()
+    }
 
     /// Destroys all shader modules owned by this cache.
     pub fn clear<D: RenderDevice + ?Sized>(&mut self, device: &D) {
@@ -293,7 +303,9 @@ impl MeshPipelines {
 
     /// The response module declarations resident in this render-world provider.
     #[must_use]
-    pub fn response_modules(&self) -> &ResponseModuleCache { &self.response_modules }
+    pub fn response_modules(&self) -> &ResponseModuleCache {
+        &self.response_modules
+    }
 
     /// Releases resident shader modules after all dependent PSOs are gone.
     pub fn clear_response_modules<D: RenderDevice + ?Sized>(&mut self, device: &D) {
@@ -340,7 +352,10 @@ impl SpineMeshPipeline {
     }
 
     fn from_module(module: ShaderModuleId, color_format: TextureFormat) -> Self {
-        Self { module, color_format }
+        Self {
+            module,
+            color_format,
+        }
     }
 }
 

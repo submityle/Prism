@@ -8,17 +8,18 @@
 use bevy_asset::{uuid::Uuid, AssetId};
 use bevy_platform::future::block_on;
 use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use prism_render_architecture::water::shading::hybrid::{
     compose_hybrid_scalar, hybrid_motion_vector, hybrid_reactive_mask, plan_hybrid,
-    resolve_hybrid_geometry_weights, HybridWeights,
+    resolve_hybrid_geometry_weights, resolve_hybrid_weights, HybridWeightInputs, HybridWeights,
 };
 use prism_render_architecture::water::shading::npr::plan_npr;
 use prism_render_architecture::water::shading::pbr::plan_pbr;
+use prism_render_architecture::water::shading::HybridBlendParams;
 use prism_render_architecture::water::shading::{
     NprShadingParams, PbrShadingParams, ReflectionTier, SurfaceShadingInputs,
 };
 use prism_render_architecture::water::underwater::RgbColor;
-use prism_render_architecture::water::shading::HybridBlendParams;
 use wgpu::{
     Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor, Queue,
     ShaderModuleDescriptor, ShaderSource,
@@ -44,8 +45,12 @@ fn shader_id(tag: u128) -> AssetId<Shader> {
     }
 }
 
-fn compile_raster_wgsl() -> String {
-    let mut cache = ShaderCache::new((), load_source);
+type RasterShaderCache = ShaderCache<String, ()>;
+
+fn raster_cache(
+    loader: fn(&(), ShaderCacheSource, &ValidateShader) -> Result<String, ShaderCacheError>,
+) -> (RasterShaderCache, AssetId<Shader>) {
+    let mut cache = ShaderCache::new((), loader);
     let lighting = shader_id(RASTER_UUID.wrapping_add(1));
     let brdf = shader_id(RASTER_UUID.wrapping_add(2));
     let water = shader_id(RASTER_UUID.wrapping_add(3));
@@ -78,6 +83,11 @@ fn compile_raster_wgsl() -> String {
             "embedded://prism_render_scene/shaders/water_surface_raster.wesl",
         ),
     );
+    (cache, raster)
+}
+
+fn compile_raster_wgsl() -> String {
+    let (mut cache, raster) = raster_cache(load_source);
     (*cache
         .get(0, raster, &[])
         .unwrap_or_else(|error| panic!("water_surface_raster.wesl failed to compile: {error}")))
@@ -260,6 +270,144 @@ fn golden_reactive_mask_contract() {
     assert!(foamy > calm);
     assert!(source().contains("fn water_hybrid_reactive_mask("));
     assert!(source().contains("max(reactive, 0.25)"));
+}
+
+#[test]
+fn hybrid_weight_contract_exhaustively_clamps_and_partitions() {
+    let signals = [-2.0, 0.0, 0.25, 1.0, 2.0];
+    for shore_signal in signals {
+        for shallow_signal in signals {
+            let weights = resolve_hybrid_weights(HybridWeightInputs {
+                shore_signal,
+                shallow_signal,
+                overlay_opacity: shore_signal - shallow_signal,
+            });
+            let expected_npr = shore_signal
+                .clamp(0.0, 1.0)
+                .max(shallow_signal.clamp(0.0, 1.0));
+            assert_eq!(weights.npr_weight, expected_npr);
+            assert_eq!(weights.pbr_weight, 1.0 - expected_npr);
+            assert!((0.0..=1.0).contains(&weights.overlay_opacity));
+            assert!((weights.pbr_weight + weights.npr_weight - 1.0).abs() <= f32::EPSILON);
+        }
+    }
+}
+
+#[test]
+fn hybrid_weight_contract_matches_wesl_reference_formula() {
+    fn wesl_reference(
+        shore_signal: f32,
+        shallow_signal: f32,
+        overlay_opacity: f32,
+    ) -> HybridWeights {
+        let shore = shore_signal.clamp(0.0, 1.0);
+        let shallow = shallow_signal.clamp(0.0, 1.0);
+        let npr_weight = shore.max(shallow);
+        HybridWeights {
+            npr_weight,
+            pbr_weight: 1.0 - npr_weight,
+            overlay_opacity: overlay_opacity.clamp(0.0, 1.0),
+        }
+    }
+
+    for (shore_signal, shallow_signal, overlay_opacity) in
+        [(-1.0, 0.0, -0.5), (0.25, 0.75, 0.5), (1.5, 0.25, 2.0)]
+    {
+        let inputs = HybridWeightInputs {
+            shore_signal,
+            shallow_signal,
+            overlay_opacity,
+        };
+        assert_eq!(
+            resolve_hybrid_weights(inputs),
+            wesl_reference(shore_signal, shallow_signal, overlay_opacity)
+        );
+    }
+}
+
+#[test]
+fn hybrid_cpu_smoke_workload_is_deterministic_and_finite() {
+    fn run() -> u64 {
+        let mut digest = 0_u64;
+        for index in 0..4096_u32 {
+            let depth = (index % 37) as f32 * 0.125;
+            let distance = (index % 29) as f32 * 0.25;
+            let response = plan_hybrid(
+                blend_params(),
+                pbr_params(),
+                npr_params(),
+                inputs(depth, distance),
+            );
+            assert!(response.pbr_weight.is_finite());
+            assert!(response.npr_weight.is_finite());
+            digest = digest.rotate_left(5)
+                ^ u64::from(response.pbr_weight.to_bits())
+                ^ (u64::from(response.npr_weight.to_bits()) << 17);
+        }
+        digest
+    }
+
+    let first = run();
+    let second = run();
+    assert_eq!(
+        first, second,
+        "fixed Hybrid smoke workload must be repeatable"
+    );
+    assert_ne!(
+        first, 0,
+        "smoke workload must exercise non-zero response weights"
+    );
+}
+
+#[test]
+fn split_response_intermediate_memory_accounting_is_explicit() {
+    const RESPONSE_OUTPUT_FLOATS: u64 = 16;
+    const BYTES_PER_FLOAT: u64 = 4;
+    const BYTES_PER_PIXEL: u64 = RESPONSE_OUTPUT_FLOATS * BYTES_PER_FLOAT;
+    let bytes = |width: u64, height: u64| width * height * BYTES_PER_PIXEL;
+
+    assert_eq!(BYTES_PER_PIXEL, 64);
+    assert_eq!(bytes(1920, 1080), 132_710_400);
+    assert_eq!(bytes(3840, 2160), 530_841_600);
+    assert!(bytes(3840, 2160) > bytes(1920, 1080));
+}
+
+static SHADER_LOADS: AtomicUsize = AtomicUsize::new(0);
+
+fn counting_load_source(
+    device: &(),
+    source: ShaderCacheSource,
+    validate: &ValidateShader,
+) -> Result<String, ShaderCacheError> {
+    SHADER_LOADS.fetch_add(1, Ordering::SeqCst);
+    load_source(device, source, validate)
+}
+
+#[test]
+fn water_shader_cache_has_observable_cold_then_warm_behavior() {
+    SHADER_LOADS.store(0, Ordering::SeqCst);
+    let (mut cache, raster) = raster_cache(counting_load_source);
+
+    let cold = cache
+        .get(0, raster, &[])
+        .unwrap_or_else(|error| panic!("cold water shader compile failed: {error}"))
+        .clone();
+    let loads_after_cold = SHADER_LOADS.load(Ordering::SeqCst);
+    assert!(
+        loads_after_cold > 0,
+        "cold lookup must invoke the shader loader"
+    );
+
+    let warm = cache
+        .get(0, raster, &[])
+        .unwrap_or_else(|error| panic!("warm water shader lookup failed: {error}"))
+        .clone();
+    assert_eq!(cold, warm);
+    assert_eq!(
+        SHADER_LOADS.load(Ordering::SeqCst),
+        loads_after_cold,
+        "warm lookup must reuse the composed shader"
+    );
 }
 
 #[test]

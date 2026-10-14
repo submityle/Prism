@@ -27,11 +27,13 @@ use crate::draw::DrawFunctionId;
 use crate::frame::RENDER_TARGET_FORMAT;
 use crate::mesh::RenderMesh;
 use crate::mesh_pipeline::MeshPipelineKey;
-use crate::pipeline_pass::{PassDescriptor, PassDescriptorClass, PassDescriptorTable, PassRole, PassSetError};
-use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
+use crate::pipeline_pass::{
+    PassDescriptor, PassDescriptorClass, PassDescriptorTable, PassRole, PassSetError,
+};
 use crate::queue::{phase_for_material, DrawRequest};
 use crate::render_asset::RenderAssets;
 use crate::sets::RenderPhase;
+use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
 
 /// The frame's visible draw work, published by the visibility stage.
 ///
@@ -164,27 +166,42 @@ impl SceneRegistry {
             draw: None,
             sort_class: PassDescriptorClass::SURFACE,
         };
-        let index = self.pass_descriptors.intern(vec![pass]).expect("valid spine pass");
+        let index = self
+            .pass_descriptors
+            .intern(vec![pass])
+            .expect("valid spine pass");
         self.material_passes.insert(record.handle, index);
         self.materials.insert(record.handle, record);
     }
 
     /// Binds an already resolved DriverLocal pass set. Both direct and bin
     /// paths subsequently use this same immutable, deduplicated table entry.
-    pub fn set_material_passes(&mut self, handle: SceneMaterialHandle, passes: Vec<PassDescriptor>) -> Result<u32, PassSetError> {
-        if !self.materials.contains_key(&handle) { return Err(PassSetError::MissingMaterial); }
+    pub fn set_material_passes(
+        &mut self,
+        handle: SceneMaterialHandle,
+        passes: Vec<PassDescriptor>,
+    ) -> Result<u32, PassSetError> {
+        if !self.materials.contains_key(&handle) {
+            return Err(PassSetError::MissingMaterial);
+        }
         let index = self.pass_descriptors.intern(passes)?;
         self.material_passes.insert(handle, index);
         Ok(index)
     }
 
-    pub fn material_pass_index(&self, handle: SceneMaterialHandle) -> Option<u32> { self.material_passes.get(&handle).copied() }
-    pub fn pass_descriptors(&self, index: u32) -> Option<&[PassDescriptor]> { self.pass_descriptors.get(index) }
+    pub fn material_pass_index(&self, handle: SceneMaterialHandle) -> Option<u32> {
+        self.material_passes.get(&handle).copied()
+    }
+    pub fn pass_descriptors(&self, index: u32) -> Option<&[PassDescriptor]> {
+        self.pass_descriptors.get(index)
+    }
 
     /// Whether at least one split material has registered the resident
     /// composition pass shape.
     #[must_use]
-    pub fn composition_pass_is_resident(&self) -> bool { self.pass_descriptors.has_composition() }
+    pub fn composition_pass_is_resident(&self) -> bool {
+        self.pass_descriptors.has_composition()
+    }
 
     /// The loud, drawable fallback used when a packed bin references an
     /// unknown descriptor-table index. It is deliberately a complete query,
@@ -255,13 +272,24 @@ impl SceneRegistry {
         draw: DrawFunctionId,
     ) -> Option<DrawRequest> {
         let mut requests = self.resolve_passes(item, meshes, depth_format, sample_count, draw)?;
-        assert_eq!(requests.len(), 1, "multi-pass material must use resolve_passes, never truncate to one surface draw");
+        assert_eq!(
+            requests.len(),
+            1,
+            "multi-pass material must use resolve_passes, never truncate to one surface draw"
+        );
         requests.pop()
     }
 
     /// Resolves every pass, in declaration order. No pass is recovered from
     /// compact class bits; a missing table entry is an invariant violation.
-    pub fn resolve_passes(&self, item: &GpuRenderWorkItem, meshes: &RenderAssets<RenderMesh>, depth_format: Option<TextureFormat>, sample_count: u32, draw: DrawFunctionId) -> Option<Vec<DrawRequest>> {
+    pub fn resolve_passes(
+        &self,
+        item: &GpuRenderWorkItem,
+        meshes: &RenderAssets<RenderMesh>,
+        depth_format: Option<TextureFormat>,
+        sample_count: u32,
+        draw: DrawFunctionId,
+    ) -> Option<Vec<DrawRequest>> {
         let geometry = self.geometries.get(&item.geometry)?;
         let lod = geometry.resolve_lod(item.lod_or_cluster)?;
         self.materials.get(&item.material)?;
@@ -271,24 +299,38 @@ impl SceneRegistry {
         let mesh = self.geometry_mesh(item.geometry)?;
         let prepared = meshes.get(mesh)?;
 
-        let index = self.material_pass_index(item.material).expect("resident material has no pass binding");
-        let passes = self.pass_descriptors(index).expect("material pass table index out of range");
-        Some(passes.iter().map(|pass| DrawRequest {
-            phase: pass.render_phase,
-            variant: pass.mesh_variant(mesh_class.topology, Some(RENDER_TARGET_FORMAT), depth_format, sample_count),
-            layout: mesh_class.layout.clone(),
-            lod_level: lod.level,
-            geometry: item.geometry,
-            material: item.material,
-            scene: item.scene,
-            order: coarse_sort_key(item.sort_key, pass.sort_class).0,
-            draw: pass.draw.unwrap_or(draw),
-            vertices: prepared.buffers.vertices.clone(),
-            indices: prepared.buffers.indices,
-            first: lod.first_element,
-            count: lod.element_count,
-            base_vertex: lod.base_vertex,
-        }).collect())
+        let index = self
+            .material_pass_index(item.material)
+            .expect("resident material has no pass binding");
+        let passes = self
+            .pass_descriptors(index)
+            .expect("material pass table index out of range");
+        Some(
+            passes
+                .iter()
+                .map(|pass| DrawRequest {
+                    phase: pass.render_phase,
+                    variant: pass.mesh_variant(
+                        mesh_class.topology,
+                        Some(RENDER_TARGET_FORMAT),
+                        depth_format,
+                        sample_count,
+                    ),
+                    layout: mesh_class.layout.clone(),
+                    lod_level: lod.level,
+                    geometry: item.geometry,
+                    material: item.material,
+                    scene: item.scene,
+                    order: coarse_sort_key(item.sort_key, pass.sort_class).0,
+                    draw: pass.draw.unwrap_or(draw),
+                    vertices: prepared.buffers.vertices.clone(),
+                    indices: prepared.buffers.indices,
+                    first: lod.first_element,
+                    count: lod.element_count,
+                    base_vertex: lod.base_vertex,
+                })
+                .collect(),
+        )
     }
 
     /// The mesh pipeline variant a packed draw bin specializes to.
@@ -311,10 +353,19 @@ impl SceneRegistry {
     ) -> Option<Vec<MeshPipelineKey>> {
         let passes = self.pass_descriptors(key.pipeline_class)?;
         let mesh_class = self.mesh_classes.get(&key.vertex_buffer_class)?;
-        Some(passes
-            .iter()
-            .map(|pass| pass.mesh_variant(mesh_class.topology, Some(RENDER_TARGET_FORMAT), depth_format, sample_count))
-            .collect())
+        Some(
+            passes
+                .iter()
+                .map(|pass| {
+                    pass.mesh_variant(
+                        mesh_class.topology,
+                        Some(RENDER_TARGET_FORMAT),
+                        depth_format,
+                        sample_count,
+                    )
+                })
+                .collect(),
+        )
     }
 
     /// Single-pass compatibility wrapper. Multi-pass bins return `None` so a
@@ -380,7 +431,9 @@ impl SceneRegistry {
                 key: DrawBinKey {
                     geometry: item.geometry,
                     lod_or_cluster: item.lod_or_cluster,
-                    pipeline_class: self.material_pass_index(item.material).expect("resident material has no pass binding"),
+                    pipeline_class: self
+                        .material_pass_index(item.material)
+                        .expect("resident material has no pass binding"),
                     vertex_buffer_class: geometry.vertex_buffer_class,
                     index_buffer_class: geometry.index_buffer_class,
                     indexed,
@@ -400,6 +453,11 @@ impl SceneRegistry {
 
 /// Replace only the coarse sorting category. The u32 descriptor table index
 /// never enters this u8 field, even after the table grows beyond 255 entries.
-pub fn coarse_sort_key(key: prism_render_visibility::WorkSortKey, class: PassDescriptorClass) -> prism_render_visibility::WorkSortKey {
-    prism_render_visibility::WorkSortKey((key.0 & !(0xffu64 << 48)) | (u64::from(class.get()) << 48))
+pub fn coarse_sort_key(
+    key: prism_render_visibility::WorkSortKey,
+    class: PassDescriptorClass,
+) -> prism_render_visibility::WorkSortKey {
+    prism_render_visibility::WorkSortKey(
+        (key.0 & !(0xffu64 << 48)) | (u64::from(class.get()) << 48),
+    )
 }

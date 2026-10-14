@@ -18,7 +18,9 @@ use prism_render_driver::{
     BufferId, IndexFormat, RenderDevice, RenderPipelineDescriptor, RenderPipelineId,
     VertexBufferLayout,
 };
-use prism_render_material::{MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, RenderDomain};
+use prism_render_material::{
+    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, RenderDomain,
+};
 
 use crate::draw::{DrawFunctionId, DrawFunctions};
 use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineSpecializer};
@@ -301,33 +303,34 @@ impl RenderQueues {
     ) -> usize {
         let mut queued = 0;
         for item in work {
-            let Some(requests) = registry.resolve_passes(item, meshes, depth_format, sample_count, draw)
+            let Some(requests) =
+                registry.resolve_passes(item, meshes, depth_format, sample_count, draw)
             else {
                 continue;
             };
             for request in requests {
-            let pipeline = specializer
-                .specialize_with_provider(device, request.variant, &request.layout, provider)
-                .id();
-            self.push(
-                request.phase,
-                PhaseItem {
-                    pipeline,
-                    draw: request.draw,
-                    geometry: request.geometry,
-                    vertices: request.vertices,
-                    indices: request.indices,
-                    first: request.first,
-                    count: request.count,
-                    base_vertex: request.base_vertex,
-                    indirect: None,
-                    lod_level: request.lod_level,
-                    material: request.material,
-                    scene: request.scene,
-                    order: request.order,
-                },
-            );
-            queued += 1;
+                let pipeline = specializer
+                    .specialize_with_provider(device, request.variant, &request.layout, provider)
+                    .id();
+                self.push(
+                    request.phase,
+                    PhaseItem {
+                        pipeline,
+                        draw: request.draw,
+                        geometry: request.geometry,
+                        vertices: request.vertices,
+                        indices: request.indices,
+                        first: request.first,
+                        count: request.count,
+                        base_vertex: request.base_vertex,
+                        indirect: None,
+                        lod_level: request.lod_level,
+                        material: request.material,
+                        scene: request.scene,
+                        order: request.order,
+                    },
+                );
+                queued += 1;
             }
         }
         queued

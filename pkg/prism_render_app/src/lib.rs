@@ -118,10 +118,10 @@ pub use mesh_pipelines::{
     MeshPipelines, ResidentResponseModule, ResponseModuleCache, ResponseModuleCacheError,
     ResponseModuleSpec, SpineMeshPipeline,
 };
-pub use pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
 pub use pipeline_cache::{
     hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
 };
+pub use pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
 pub use plugin::PrismRenderPlugin;
 pub use queue::{
     phase_for_bin_class, phase_for_render_class, DrawRequest, IndirectArgs, PhaseItem, RenderQueues,

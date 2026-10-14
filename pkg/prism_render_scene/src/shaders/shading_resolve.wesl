@@ -66,6 +66,7 @@ import prism_render_scene::shaders::lighting::{
     DirectionalLight,
     PunctualLight,
     LightEnvironment,
+    StylizedParams,
     LightSample,
     INV_PI,
     environment_has_image_based,
@@ -1549,6 +1550,14 @@ fn face_shadow_sample_sdf(tex_offset: u32, tex_count: u32, uv: vec2<f32>) -> f32
 
 // Non-photoreal integrator: the quantized toon lobe over every analytic light,
 // plus indirect and emissive. Mirrors the CPU `MaterialShadingClass::Npr` arm.
+fn stylized_for_material(base: StylizedParams, parameters: PrismSurfaceParameters) -> StylizedParams {
+    var result = base;
+    result.ramp_softness = result.ramp_softness * parameters.npr_stylized_ramp_softness;
+    result.specular_intensity = result.specular_intensity * parameters.npr_stylized_specular_scale;
+    result.rim_intensity = result.rim_intensity * parameters.npr_stylized_rim_scale;
+    return result;
+}
+
 fn shade_toon(
     lit: SurfaceSample,
     frame: ShadingFrame,
@@ -1557,10 +1566,11 @@ fn shade_toon(
     emissive: vec3<f32>,
     env: LightEnvironment,
     slice: ClusterSlice,
+    parameters: PrismSurfaceParameters,
     face: FaceShadow,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
-    let stylized = env.stylized;
+    let stylized = stylized_for_material(env.stylized, parameters);
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
@@ -2565,7 +2575,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
                 face.tex_count = material_header.texture_count;
                 face.uv = geometry.uv;
             }
-            color = shade_toon(lit, frame, geometry.position, indirect, emissive, env, slice, face);
+            color = shade_toon(lit, frame, geometry.position, indirect, emissive, env, slice, parameters, face);
         }
         case SHADING_CLASS_CUSTOM: {
             color = shade_principled(

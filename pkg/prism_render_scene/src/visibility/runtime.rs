@@ -72,7 +72,7 @@ pub(crate) struct UnifiedVisibilityState {
 
 #[derive(Resource)]
 pub(crate) struct VisibilityFrameGraph {
-    pub compiled: prism_render_architecture::frame_graph::CompiledGpuFrameGraph,
+    pub compiled: prism_render_graph::frame_graph::CompiledGpuFrameGraph,
 }
 
 impl UnifiedVisibilityState {

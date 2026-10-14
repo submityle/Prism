@@ -392,12 +392,12 @@ fn decode_view_feedback(
             };
 
             let shade_channel = match material.response_plan {
-                ShadingPlan::Single { program: ProgramRef::Builtin(BuiltinProgram::Lit) } => {
-                    Some(crate::shading::texel_cache::ShadeChannel::LitDiffuse)
-                }
-                ShadingPlan::Single { program: ProgramRef::Builtin(BuiltinProgram::Npr) } => {
-                    Some(crate::shading::texel_cache::ShadeChannel::StylizedDiffuse)
-                }
+                ShadingPlan::Single {
+                    program: ProgramRef::Builtin(BuiltinProgram::Lit),
+                } => Some(crate::shading::texel_cache::ShadeChannel::LitDiffuse),
+                ShadingPlan::Single {
+                    program: ProgramRef::Builtin(BuiltinProgram::Npr),
+                } => Some(crate::shading::texel_cache::ShadeChannel::StylizedDiffuse),
                 _ => None,
             };
             if let Some(channel) = shade_channel

@@ -9,11 +9,13 @@
 //! [`crate::PipelineCache`], so a layout/variant pair compiles once and is
 //! reused.
 
+use prism_render_architecture::shader_package::{
+    ExecutionFamily, ModuleId, PermutationIndex, PermutationSpace,
+};
 use prism_render_driver::{
     PrimitiveTopology, RenderDevice, RenderPipelineDescriptor, RenderPipelineId, TextureFormat,
     VertexBufferLayout,
 };
-use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex, PermutationSpace};
 use std::collections::{BTreeMap, HashMap};
 
 use crate::pipeline_cache::{PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution};
@@ -54,7 +56,12 @@ impl MeshPipelineKey {
     }
 
     fn key_from_descriptor(self, descriptor: &RenderPipelineDescriptor) -> PipelineKey {
-        PipelineKey::from_descriptor(self.execution_family, self.response_module_id, self.permutation_index, descriptor)
+        PipelineKey::from_descriptor(
+            self.execution_family,
+            self.response_module_id,
+            self.permutation_index,
+            descriptor,
+        )
     }
 }
 
@@ -218,8 +225,14 @@ impl MeshPipelineSpecializer {
                 .expect("response module fallback is outside its permutation space");
         }
         if let Some((existing, existing_fallback)) = self.module_spaces.get(&module) {
-            assert_eq!(existing, &permutations, "response module declaration changed");
-            assert_eq!(existing_fallback, &fallback, "response module fallback changed");
+            assert_eq!(
+                existing, &permutations,
+                "response module declaration changed"
+            );
+            assert_eq!(
+                existing_fallback, &fallback,
+                "response module fallback changed"
+            );
             return;
         }
         self.module_spaces.insert(module, (permutations, fallback));
@@ -237,15 +250,20 @@ impl MeshPipelineSpecializer {
     }
 
     fn assert_valid_variant(&self, variant: &MeshPipelineKey) {
-        let Some((space, declared_fallback)) = self.module_spaces.get(&variant.response_module_id) else {
+        let Some((space, declared_fallback)) = self.module_spaces.get(&variant.response_module_id)
+        else {
             return;
         };
         space
             .check_index(variant.permutation_index.get())
-            .unwrap_or_else(|error| panic!("invalid dense permutation for module {:?}: {error:?}", variant.response_module_id));
+            .unwrap_or_else(|error| {
+                panic!(
+                    "invalid dense permutation for module {:?}: {error:?}",
+                    variant.response_module_id
+                )
+            });
         assert_eq!(
-            variant.fallback_permutation,
-            *declared_fallback,
+            variant.fallback_permutation, *declared_fallback,
             "mesh variant fallback does not match the response module declaration"
         );
     }

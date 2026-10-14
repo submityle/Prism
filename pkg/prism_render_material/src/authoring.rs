@@ -94,12 +94,35 @@ impl MaterialRecord {
         ));
         self
     }
+
+    /// Marks this record as a continuous Lit/NPR response-composition
+    /// producer. The texture row is shared with the binary region mask, but
+    /// the feature bit is intentionally distinct so the raster/classification
+    /// path cannot silently treat a continuous weight as a binary selector.
+    pub fn enable_illumination_blend(
+        &mut self,
+        mask_slot: u32,
+        mask_generation: u32,
+        sampler_index: u32,
+    ) -> &mut Self {
+        self.features |= MaterialFeatureFlags::ILLUMINATION_BLEND;
+        self.textures.push(GpuMaterialTexture::non_virtual(
+            mask_slot,
+            mask_generation,
+            ILLUMINATION_MASK_SEMANTIC,
+            sampler_index,
+        ));
+        self
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{fallback_material_record, LobeMask};
+    use crate::{
+        decode_illumination_blend_weight, fallback_material_record, LobeMask,
+        ILLUMINATION_BLEND_SENTINEL, ILLUMINATION_BLEND_UNORM_MAX,
+    };
     use prism_render_architecture::abi::GenerationalHandle;
 
     fn base_record() -> MaterialRecord {
@@ -166,5 +189,44 @@ mod tests {
         assert_eq!(row.index, 17);
         assert_eq!(row.generation, 4);
         assert_eq!(row.sampler_index, 3);
+    }
+
+    #[test]
+    fn continuous_illumination_blend_has_a_distinct_feature_bit() {
+        let mut record = base_record();
+        record.enable_illumination_blend(17, 4, 3);
+        assert!(record
+            .features
+            .contains(MaterialFeatureFlags::ILLUMINATION_BLEND));
+        assert!(!record
+            .features
+            .contains(MaterialFeatureFlags::REGION_ILLUMINATION));
+        assert_ne!(
+            MaterialFeatureFlags::ILLUMINATION_BLEND.0,
+            MaterialFeatureFlags::REGION_ILLUMINATION.0
+        );
+    }
+
+    #[test]
+    fn continuous_illumination_metadata_has_a_bounded_unorm_and_sentinel() {
+        assert_eq!(decode_illumination_blend_weight(0), Some(0.0));
+        assert_eq!(
+            decode_illumination_blend_weight(ILLUMINATION_BLEND_UNORM_MAX),
+            Some(1.0)
+        );
+        assert_eq!(
+            decode_illumination_blend_weight(ILLUMINATION_BLEND_SENTINEL),
+            None
+        );
+        assert_eq!(decode_illumination_blend_weight(1 << 16), None);
+    }
+
+    #[test]
+    fn stylized_modifiers_activate_the_npr_lobe_without_face_shadow() {
+        let mut record = base_record();
+        record.surface.npr_stylized_specular_scale = 0.5;
+        assert!(record.lobe_mask().contains(LobeMask::NPR_FACE));
+        assert_eq!(record.packed_parameters().face.specular_scale, 0.5);
+        assert!(!record.features.contains(MaterialFeatureFlags::FACE_SHADOW));
     }
 }

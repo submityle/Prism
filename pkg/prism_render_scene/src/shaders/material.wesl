@@ -88,6 +88,10 @@ struct PrismSurfaceParameters {
     coat_darkening: f32,
     subsurface_scatter_anisotropy: f32,
     npr_face_softness: f32,
+    // Per-material NPR modifiers; 1.0 is the frame-global identity.
+    npr_stylized_ramp_softness: f32,
+    npr_stylized_specular_scale: f32,
+    npr_stylized_rim_scale: f32,
     // Prism glint lobe (§17.6): a discrete microfacet estimator blended into the
     // specular lobe. `glint_weight == 0` (the default) keeps it inert, so the
     // fields cost 4 words of übers only for materials that declare the lobe.

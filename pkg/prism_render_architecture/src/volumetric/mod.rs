@@ -611,8 +611,8 @@ impl WeatherSample {
     }
 }
 
-use crate::render_fabric::{ServiceId, VOLUME_SERVICE_IDS};
 pub use crate::render_fabric::ResponseProgram;
+use crate::render_fabric::{ServiceId, VOLUME_SERVICE_IDS};
 
 /// Stable semantic service identity for volumetric feature declarations.
 pub const VOLUMETRIC_HYBRID_GI: ServiceId = VOLUME_SERVICE_IDS[0];

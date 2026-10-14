@@ -463,30 +463,796 @@ pub const SURFACE_IDENTITY_EXTENSIONS: [IdentityExtensionLayout; 5] = [
     },
 ];
 
-/// One runtime response program's generated manifest identity.
-///
-/// `builtin` identifies the closed engine-provided response family.
+/// One lobe's generated response coverage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResponseLobeLayout {
+    pub id: &'static str,
+    pub supported: bool,
+    pub ignored_reason: Option<&'static str>,
+}
+
+/// A mapped field in a generated response contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResponseFieldMappingLayout {
+    pub lobe: Option<&'static str>,
+    pub name: &'static str,
+    pub semantic: &'static str,
+    pub test: &'static str,
+}
+
+/// An intentionally unmapped field in a generated response contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResponseIgnoredFieldLayout {
+    pub lobe: Option<&'static str>,
+    pub name: &'static str,
+    pub reason: &'static str,
+}
+
+/// One runtime response program's complete generated manifest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResponseProgramLayout {
-    /// Human-facing response-program id (schema `id`).
     pub id: &'static str,
-    /// Globally unique capability id (schema `uid`).
     pub uid: &'static str,
-    /// Header-digest slot (immutable; §5.4).
     pub registry_slot: u32,
-    /// Governance namespace (schema `namespace`).
     pub namespace: &'static str,
-    /// Vendor tag (schema `vendor`).
     pub vendor: &'static str,
-    /// Stability level (schema `stability`).
     pub stability: &'static str,
-    /// Built-in response family (`lit`, `npr`, or `unlit`).
     pub builtin: &'static str,
-    /// Platform capabilities required beyond the baseline.
     pub requires_caps: &'static [&'static str],
-    /// Whether the response changes with the view direction.
     pub view_dependent: bool,
+    pub lobes: &'static [ResponseLobeLayout],
+    pub field_mappings: &'static [ResponseFieldMappingLayout],
+    pub ignored_fields: &'static [ResponseIgnoredFieldLayout],
+    pub direct_light: bool,
+    pub shadows: bool,
+    pub indirect_diffuse: bool,
+    pub reflection: bool,
+    pub transmission: bool,
+    pub temporal_history: bool,
+    pub produced_channels: &'static [&'static str],
+    pub blendable_channels: &'static [&'static str],
+    pub supports_fused: bool,
+    pub supports_split: bool,
+    pub max_cost_class: &'static str,
+    pub cache_reads: &'static [&'static str],
+    pub cache_writes: &'static [&'static str],
+    pub cache_temporal: &'static str,
 }
+
+const RESPONSE_LIT_LOBES: [ResponseLobeLayout; 10] = [
+    ResponseLobeLayout { id: "emission", supported: false, ignored_reason: Some("Emission is composed as a separate output channel, not evaluated by the principled direct adapter.") },
+    ResponseLobeLayout { id: "clearcoat", supported: true, ignored_reason: None },
+    ResponseLobeLayout { id: "anisotropy", supported: true, ignored_reason: None },
+    ResponseLobeLayout { id: "sheen", supported: false, ignored_reason: Some("The current principled adapter does not read the sheen/fuzz lobe.") },
+    ResponseLobeLayout { id: "subsurface", supported: false, ignored_reason: Some("The current principled adapter does not read the subsurface lobe.") },
+    ResponseLobeLayout { id: "transmission", supported: true, ignored_reason: None },
+    ResponseLobeLayout { id: "thin_film", supported: true, ignored_reason: None },
+    ResponseLobeLayout { id: "npr_face", supported: false, ignored_reason: Some("The NPR face lobe belongs to the separate NPR adapter.") },
+    ResponseLobeLayout { id: "glint", supported: true, ignored_reason: None },
+    ResponseLobeLayout { id: "measured_brdf", supported: false, ignored_reason: Some("Measured BRDF requires a distinct registered response path.") },
+];
+const RESPONSE_LIT_MAPPED_FIELDS: [ResponseFieldMappingLayout; 32] = [
+    ResponseFieldMappingLayout { lobe: None, name: "base_color", semantic: "base albedo controls the principled direct response", test: "pkg/prism_render_shading/src/lighting.rs::white_furnace_stays_bounded_across_roughness_and_metalness" },
+    ResponseFieldMappingLayout { lobe: None, name: "base_metalness", semantic: "metalness selects the conductor/base energy branch", test: "pkg/prism_render_shading/src/lighting.rs::white_furnace_stays_bounded_across_roughness_and_metalness" },
+    ResponseFieldMappingLayout { lobe: None, name: "specular_roughness", semantic: "roughness controls the principled GGX width", test: "pkg/prism_render_shading/src/lighting.rs::white_furnace_stays_bounded_across_roughness_and_metalness" },
+    ResponseFieldMappingLayout { lobe: None, name: "specular_weight", semantic: "specular weight scales the dielectric highlight", test: "pkg/prism_render_shading/src/lighting.rs::specular_weight_changes_the_highlight" },
+    ResponseFieldMappingLayout { lobe: None, name: "base_weight", semantic: "base weight scales the coupled base layer", test: "pkg/prism_render_shading/src/lighting.rs::base_weight_zero_removes_the_base_layer" },
+    ResponseFieldMappingLayout { lobe: None, name: "base_diffuse_roughness", semantic: "diffuse roughness changes the Oren-Nayar base response", test: "pkg/prism_render_shading/src/lighting.rs::diffuse_roughness_changes_the_diffuse_response" },
+    ResponseFieldMappingLayout { lobe: None, name: "specular_color", semantic: "specular color tints the dielectric highlight", test: "pkg/prism_render_shading/src/lighting.rs::specular_color_tints_the_dielectric_specular" },
+    ResponseFieldMappingLayout { lobe: None, name: "specular_ior", semantic: "specular IOR determines dielectric F0", test: "pkg/prism_render_shading/src/lighting.rs::specular_ior_drives_f0_and_reproduces_the_legacy_default" },
+    ResponseFieldMappingLayout { lobe: None, name: "geometry_thin_walled", semantic: "thin-walled geometry selects the single-interface transmission path", test: "pkg/prism_render_shading/src/lighting.rs::thin_walled_skips_the_volume_absorption" },
+    ResponseFieldMappingLayout { lobe: Some("clearcoat"), name: "coat_weight", semantic: "clearcoat parameters shape the coupled coat lobe", test: "pkg/prism_render_shading/src/clearcoat.rs::clearcoat_is_finite_and_non_negative_across_parameters" },
+    ResponseFieldMappingLayout { lobe: Some("clearcoat"), name: "coat_roughness", semantic: "clearcoat parameters shape the coupled coat lobe", test: "pkg/prism_render_shading/src/clearcoat.rs::clearcoat_is_finite_and_non_negative_across_parameters" },
+    ResponseFieldMappingLayout { lobe: Some("clearcoat"), name: "coat_ior", semantic: "clearcoat parameters shape the coupled coat lobe", test: "pkg/prism_render_shading/src/clearcoat.rs::clearcoat_is_finite_and_non_negative_across_parameters" },
+    ResponseFieldMappingLayout { lobe: Some("clearcoat"), name: "coat_color", semantic: "clearcoat parameters shape the coupled coat lobe", test: "pkg/prism_render_shading/src/clearcoat.rs::clearcoat_is_finite_and_non_negative_across_parameters" },
+    ResponseFieldMappingLayout { lobe: Some("clearcoat"), name: "coat_roughness_anisotropy", semantic: "clearcoat parameters shape the coupled coat lobe", test: "pkg/prism_render_shading/src/clearcoat.rs::clearcoat_is_finite_and_non_negative_across_parameters" },
+    ResponseFieldMappingLayout { lobe: Some("clearcoat"), name: "coat_darkening", semantic: "clearcoat parameters shape the coupled coat lobe", test: "pkg/prism_render_shading/src/clearcoat.rs::clearcoat_is_finite_and_non_negative_across_parameters" },
+    ResponseFieldMappingLayout { lobe: Some("anisotropy"), name: "specular_roughness_anisotropy", semantic: "anisotropy parameters stretch and rotate the conductor lobe", test: "pkg/prism_render_shading/src/lighting.rs::positive_anisotropy_stretches_the_tangent_lobe" },
+    ResponseFieldMappingLayout { lobe: Some("anisotropy"), name: "anisotropy_rotation", semantic: "anisotropy parameters stretch and rotate the conductor lobe", test: "pkg/prism_render_shading/src/lighting.rs::positive_anisotropy_stretches_the_tangent_lobe" },
+    ResponseFieldMappingLayout { lobe: Some("transmission"), name: "transmission_weight", semantic: "transmission parameters control slab transport", test: "pkg/prism_render_shading/src/lighting.rs::transmission_carries_light_through_the_slab" },
+    ResponseFieldMappingLayout { lobe: Some("transmission"), name: "transmission_depth", semantic: "transmission parameters control slab transport", test: "pkg/prism_render_shading/src/lighting.rs::transmission_carries_light_through_the_slab" },
+    ResponseFieldMappingLayout { lobe: Some("transmission"), name: "index_of_refraction", semantic: "transmission parameters control slab transport", test: "pkg/prism_render_shading/src/lighting.rs::transmission_carries_light_through_the_slab" },
+    ResponseFieldMappingLayout { lobe: Some("transmission"), name: "transmission_dispersion_scale", semantic: "transmission parameters control slab transport", test: "pkg/prism_render_shading/src/lighting.rs::transmission_carries_light_through_the_slab" },
+    ResponseFieldMappingLayout { lobe: Some("transmission"), name: "transmission_color", semantic: "transmission parameters control slab transport", test: "pkg/prism_render_shading/src/lighting.rs::transmission_carries_light_through_the_slab" },
+    ResponseFieldMappingLayout { lobe: Some("transmission"), name: "transmission_scatter", semantic: "transmission parameters control slab transport", test: "pkg/prism_render_shading/src/lighting.rs::transmission_carries_light_through_the_slab" },
+    ResponseFieldMappingLayout { lobe: Some("transmission"), name: "transmission_scatter_anisotropy", semantic: "transmission parameters control slab transport", test: "pkg/prism_render_shading/src/lighting.rs::transmission_carries_light_through_the_slab" },
+    ResponseFieldMappingLayout { lobe: Some("transmission"), name: "transmission_dispersion_abbe_number", semantic: "transmission parameters control slab transport", test: "pkg/prism_render_shading/src/lighting.rs::transmission_carries_light_through_the_slab" },
+    ResponseFieldMappingLayout { lobe: Some("thin_film"), name: "thin_film_weight", semantic: "thin-film parameters control bounded iridescent Fresnel response", test: "pkg/prism_render_shading/src/gi/material/thin_film.rs::iridescent_fresnel_nonzero_thickness_tints_and_stays_bounded" },
+    ResponseFieldMappingLayout { lobe: Some("thin_film"), name: "thin_film_thickness", semantic: "thin-film parameters control bounded iridescent Fresnel response", test: "pkg/prism_render_shading/src/gi/material/thin_film.rs::iridescent_fresnel_nonzero_thickness_tints_and_stays_bounded" },
+    ResponseFieldMappingLayout { lobe: Some("thin_film"), name: "thin_film_ior", semantic: "thin-film parameters control bounded iridescent Fresnel response", test: "pkg/prism_render_shading/src/gi/material/thin_film.rs::iridescent_fresnel_nonzero_thickness_tints_and_stays_bounded" },
+    ResponseFieldMappingLayout { lobe: Some("glint"), name: "glint_weight", semantic: "glint parameters control deterministic discrete microfacet response", test: "pkg/prism_render_shading/src/lighting.rs::glint_is_deterministic_and_decorrelates_in_space_and_direction" },
+    ResponseFieldMappingLayout { lobe: Some("glint"), name: "glint_roughness", semantic: "glint parameters control deterministic discrete microfacet response", test: "pkg/prism_render_shading/src/lighting.rs::glint_is_deterministic_and_decorrelates_in_space_and_direction" },
+    ResponseFieldMappingLayout { lobe: Some("glint"), name: "glint_density", semantic: "glint parameters control deterministic discrete microfacet response", test: "pkg/prism_render_shading/src/lighting.rs::glint_is_deterministic_and_decorrelates_in_space_and_direction" },
+    ResponseFieldMappingLayout { lobe: Some("glint"), name: "glint_bin_half_width", semantic: "glint parameters control deterministic discrete microfacet response", test: "pkg/prism_render_shading/src/lighting.rs::glint_is_deterministic_and_decorrelates_in_space_and_direction" },
+];
+const RESPONSE_LIT_IGNORED_FIELDS: [ResponseIgnoredFieldLayout; 21] = [
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "ambient_occlusion",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "normal_scale",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "alpha_cutoff",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "geometry_opacity",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("emission"),
+        name: "emission_color",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("emission"),
+        name: "emission_luminance",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_weight",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_roughness",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_color",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_weight",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_radius",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_color",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_radius_scale",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_scatter_anisotropy",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("npr_face"),
+        name: "softness",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("npr_face"),
+        name: "ramp_softness",
+        reason: "The Lit adapter does not interpret the stylized response modifier.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("npr_face"),
+        name: "specular_scale",
+        reason: "The Lit adapter does not interpret the stylized response modifier.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("npr_face"),
+        name: "rim_scale",
+        reason: "The Lit adapter does not interpret the stylized response modifier.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_weight",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_phi_d",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_scale",
+        reason: "The Lit adapter does not interpret this field in the tested response path.",
+    },
+];
+
+const RESPONSE_NPR_LOBES: [ResponseLobeLayout; 10] = [
+    ResponseLobeLayout {
+        id: "emission",
+        supported: false,
+        ignored_reason: Some(
+            "Emission is handled by the response-output path, not the stylized direct adapter.",
+        ),
+    },
+    ResponseLobeLayout {
+        id: "clearcoat",
+        supported: false,
+        ignored_reason: Some("The stylized adapter has no clearcoat contract."),
+    },
+    ResponseLobeLayout {
+        id: "anisotropy",
+        supported: false,
+        ignored_reason: Some("The stylized adapter has no anisotropic conductor contract."),
+    },
+    ResponseLobeLayout {
+        id: "sheen",
+        supported: false,
+        ignored_reason: Some("The stylized adapter has no sheen contract."),
+    },
+    ResponseLobeLayout {
+        id: "subsurface",
+        supported: false,
+        ignored_reason: Some("The stylized adapter has no subsurface contract."),
+    },
+    ResponseLobeLayout {
+        id: "transmission",
+        supported: false,
+        ignored_reason: Some("The stylized adapter has no transmission contract."),
+    },
+    ResponseLobeLayout {
+        id: "thin_film",
+        supported: false,
+        ignored_reason: Some("The stylized adapter has no thin-film contract."),
+    },
+    ResponseLobeLayout {
+        id: "npr_face",
+        supported: true,
+        ignored_reason: None,
+    },
+    ResponseLobeLayout {
+        id: "glint",
+        supported: false,
+        ignored_reason: Some("The stylized adapter has no glint contract."),
+    },
+    ResponseLobeLayout {
+        id: "measured_brdf",
+        supported: false,
+        ignored_reason: Some("Measured BRDF requires a distinct registered response path."),
+    },
+];
+const RESPONSE_NPR_MAPPED_FIELDS: [ResponseFieldMappingLayout; 6] = [
+    ResponseFieldMappingLayout { lobe: None, name: "base_color", semantic: "base color modulates the tested stylized direct response", test: "pkg/prism_render_shading/src/stylized.rs::stylized_specular_adds_a_bounded_hot_spot" },
+    ResponseFieldMappingLayout { lobe: None, name: "specular_roughness", semantic: "roughness controls the tested stylized highlight width", test: "pkg/prism_render_shading/src/stylized.rs::stylized_specular_adds_a_bounded_hot_spot" },
+    ResponseFieldMappingLayout { lobe: Some("npr_face"), name: "softness", semantic: "the material-local face-shadow terminator reads this softness value", test: "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" },
+    ResponseFieldMappingLayout { lobe: Some("npr_face"), name: "ramp_softness", semantic: "the material-local stylized ramp modifier scales the default NPR band transition", test: "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" },
+    ResponseFieldMappingLayout { lobe: Some("npr_face"), name: "specular_scale", semantic: "the material-local stylized specular modifier scales the default NPR highlight", test: "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" },
+    ResponseFieldMappingLayout { lobe: Some("npr_face"), name: "rim_scale", semantic: "the material-local stylized rim modifier scales the default NPR edge response", test: "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" },
+];
+const RESPONSE_NPR_IGNORED_FIELDS: [ResponseIgnoredFieldLayout; 47] = [
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "base_metalness",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "specular_weight",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "ambient_occlusion",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "normal_scale",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "alpha_cutoff",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "base_weight",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "base_diffuse_roughness",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "specular_color",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "specular_ior",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "geometry_thin_walled",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "geometry_opacity",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("emission"),
+        name: "emission_color",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("emission"),
+        name: "emission_luminance",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_weight",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_roughness",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_ior",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_color",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_roughness_anisotropy",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_darkening",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("anisotropy"),
+        name: "specular_roughness_anisotropy",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("anisotropy"),
+        name: "anisotropy_rotation",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_weight",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_roughness",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_color",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_weight",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_radius",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_color",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_radius_scale",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_scatter_anisotropy",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_weight",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_depth",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "index_of_refraction",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_dispersion_scale",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_color",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_scatter",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_scatter_anisotropy",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_dispersion_abbe_number",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("thin_film"),
+        name: "thin_film_weight",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("thin_film"),
+        name: "thin_film_thickness",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("thin_film"),
+        name: "thin_film_ior",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_weight",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_roughness",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_density",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_bin_half_width",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_weight",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_phi_d",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_scale",
+        reason: "The NPR adapter does not interpret this field in the tested response path.",
+    },
+];
+
+const RESPONSE_UNLIT_LOBES: [ResponseLobeLayout; 10] = [
+    ResponseLobeLayout { id: "emission", supported: false, ignored_reason: Some("Emission is supplied through the response output contract rather than this field matrix.") },
+    ResponseLobeLayout { id: "clearcoat", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
+    ResponseLobeLayout { id: "anisotropy", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
+    ResponseLobeLayout { id: "sheen", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
+    ResponseLobeLayout { id: "subsurface", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
+    ResponseLobeLayout { id: "transmission", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
+    ResponseLobeLayout { id: "thin_film", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
+    ResponseLobeLayout { id: "npr_face", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
+    ResponseLobeLayout { id: "glint", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
+    ResponseLobeLayout { id: "measured_brdf", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
+];
+const RESPONSE_UNLIT_MAPPED_FIELDS: [ResponseFieldMappingLayout; 0] = [];
+const RESPONSE_UNLIT_IGNORED_FIELDS: [ResponseIgnoredFieldLayout; 53] = [
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "base_color",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "base_metalness",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "specular_roughness",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "specular_weight",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "ambient_occlusion",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "normal_scale",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "alpha_cutoff",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "base_weight",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "base_diffuse_roughness",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "specular_color",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "specular_ior",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "geometry_thin_walled",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: None,
+        name: "geometry_opacity",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("emission"),
+        name: "emission_color",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("emission"),
+        name: "emission_luminance",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_weight",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_roughness",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_ior",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_color",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_roughness_anisotropy",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("clearcoat"),
+        name: "coat_darkening",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("anisotropy"),
+        name: "specular_roughness_anisotropy",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("anisotropy"),
+        name: "anisotropy_rotation",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_weight",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_roughness",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("sheen"),
+        name: "fuzz_color",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_weight",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_radius",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_color",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_radius_scale",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("subsurface"),
+        name: "subsurface_scatter_anisotropy",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_weight",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_depth",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "index_of_refraction",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_dispersion_scale",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_color",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_scatter",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_scatter_anisotropy",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("transmission"),
+        name: "transmission_dispersion_abbe_number",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("thin_film"),
+        name: "thin_film_weight",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("thin_film"),
+        name: "thin_film_thickness",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("thin_film"),
+        name: "thin_film_ior",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("npr_face"),
+        name: "softness",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("npr_face"),
+        name: "ramp_softness",
+        reason: "The Unlit contract does not evaluate stylized response modifiers.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("npr_face"),
+        name: "specular_scale",
+        reason: "The Unlit contract does not evaluate stylized response modifiers.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("npr_face"),
+        name: "rim_scale",
+        reason: "The Unlit contract does not evaluate stylized response modifiers.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_weight",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_roughness",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_density",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("glint"),
+        name: "glint_bin_half_width",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_weight",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_phi_d",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+    ResponseIgnoredFieldLayout {
+        lobe: Some("measured_brdf"),
+        name: "measured_scale",
+        reason: "The Unlit contract does not claim decode-only field evidence for this field.",
+    },
+];
 
 /// The runtime response programs in registry-slot order.
 pub const SURFACE_RESPONSE_PROGRAMS: [ResponseProgramLayout; 3] = [
@@ -500,6 +1266,35 @@ pub const SURFACE_RESPONSE_PROGRAMS: [ResponseProgramLayout; 3] = [
         builtin: "lit",
         requires_caps: &[],
         view_dependent: true,
+        lobes: &RESPONSE_LIT_LOBES,
+        field_mappings: &RESPONSE_LIT_MAPPED_FIELDS,
+        ignored_fields: &RESPONSE_LIT_IGNORED_FIELDS,
+        direct_light: true,
+        shadows: true,
+        indirect_diffuse: true,
+        reflection: true,
+        transmission: true,
+        temporal_history: false,
+        produced_channels: &[
+            "direct",
+            "indirect_diffuse",
+            "reflection",
+            "transmission",
+            "emission",
+        ],
+        blendable_channels: &[
+            "direct",
+            "indirect_diffuse",
+            "reflection",
+            "transmission",
+            "emission",
+        ],
+        supports_fused: true,
+        supports_split: true,
+        max_cost_class: "high",
+        cache_reads: &["indirect_diffuse", "reflection"],
+        cache_writes: &["direct"],
+        cache_temporal: "optional",
     },
     ResponseProgramLayout {
         id: "npr",
@@ -511,6 +1306,23 @@ pub const SURFACE_RESPONSE_PROGRAMS: [ResponseProgramLayout; 3] = [
         builtin: "npr",
         requires_caps: &[],
         view_dependent: true,
+        lobes: &RESPONSE_NPR_LOBES,
+        field_mappings: &RESPONSE_NPR_MAPPED_FIELDS,
+        ignored_fields: &RESPONSE_NPR_IGNORED_FIELDS,
+        direct_light: true,
+        shadows: true,
+        indirect_diffuse: false,
+        reflection: false,
+        transmission: false,
+        temporal_history: false,
+        produced_channels: &["direct", "emission"],
+        blendable_channels: &["direct", "emission"],
+        supports_fused: false,
+        supports_split: true,
+        max_cost_class: "medium",
+        cache_reads: &[],
+        cache_writes: &["direct"],
+        cache_temporal: "none",
     },
     ResponseProgramLayout {
         id: "unlit",
@@ -522,6 +1334,23 @@ pub const SURFACE_RESPONSE_PROGRAMS: [ResponseProgramLayout; 3] = [
         builtin: "unlit",
         requires_caps: &[],
         view_dependent: false,
+        lobes: &RESPONSE_UNLIT_LOBES,
+        field_mappings: &RESPONSE_UNLIT_MAPPED_FIELDS,
+        ignored_fields: &RESPONSE_UNLIT_IGNORED_FIELDS,
+        direct_light: false,
+        shadows: false,
+        indirect_diffuse: false,
+        reflection: false,
+        transmission: false,
+        temporal_history: false,
+        produced_channels: &["emission", "alpha"],
+        blendable_channels: &["emission"],
+        supports_fused: false,
+        supports_split: true,
+        max_cost_class: "low",
+        cache_reads: &[],
+        cache_writes: &["emission"],
+        cache_temporal: "none",
     },
 ];
 
@@ -535,7 +1364,7 @@ pub struct SurfaceFieldLayout {
 }
 
 /// Every non-padding field, in core-then-registry-slot order.
-pub const SURFACE_FIELDS: [SurfaceFieldLayout; 50] = [
+pub const SURFACE_FIELDS: [SurfaceFieldLayout; 53] = [
     SurfaceFieldLayout {
         lobe: None,
         name: "base_color",
@@ -707,6 +1536,18 @@ pub const SURFACE_FIELDS: [SurfaceFieldLayout; 50] = [
     SurfaceFieldLayout {
         lobe: Some("npr_face"),
         name: "softness",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("npr_face"),
+        name: "ramp_softness",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("npr_face"),
+        name: "specular_scale",
+    },
+    SurfaceFieldLayout {
+        lobe: Some("npr_face"),
+        name: "rim_scale",
     },
     SurfaceFieldLayout {
         lobe: Some("glint"),

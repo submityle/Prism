@@ -5,7 +5,7 @@
 > 定位：AAA / 次世代 体积云·大气体积引擎（程序化建模 + 天气演化 sim + raymarching + 多次散射），与 PBR/NPR/自定义/混合四前端正交协同，四前端同享共享高级基底（Lumen 式混合 GI / ReSTIR / VSM 云影 / froxel 体积 / RT 参考 / 时序上采样 / 大气散射服务）。
 > Shader：WESL（naga → WGSL/SPIR-V/Metal/DXIL）；运行时：wgpu（Metal/VK/DX12/WebGPU）
 > 关联文档：`prism_rendering_architecture_zh.md`（总）、`prism_material_pipeline_design_zh.md`（§6.2 子系统注册表：体积=档1 一等子系统；§6.2 档3「大气=光照数据服务」——大气散射是服务，体积云是子系统）、`prism_aaa_advanced_features_zh.md`（共享高级基底）、`prism_particle_engine_design_zh.md`（气态体素流体 烟/火/爆炸归粒子，本引擎不碰）、`prism_water_engine_design_zh.md` / `prism_hair_engine_design_zh.md` / `prism_cloth_engine_design_zh.md`（对称子系统范式）、`prism_physics_design_zh.md`
-> 沙盒说明：本机屏蔽 Metal（无 GPU），文档内帧预算/带宽/耗时均为**设计目标（design target），非实测**，如实标注；可验证部分限于 CPU 可计算纯函数。
+> 验证说明：CPU 纯函数、WESL/naga 类型检查、渲染图 dispatch 录制与 CPU/GPU parity 门禁均已实现；本次收尾在当前主机请求真实 wgpu adapter 时得到 `No suitable graphics adapter found`（Metal 未发现 adapter），因此不把真机性能写成通过。下文仍将硬件 profile 与整帧预算单独标记为设计目标。
 > 数值路线：纯经典数值（Perlin-Worley 噪声/raymarch/多次散射近似/大气 LUT），不含任何 AI/ML。
 
 ---
@@ -331,7 +331,7 @@ octave scattering（§7）是廉价近似；v2 补一条**物理更准的多次�
 
 ## 14. Crate 拆分与落地形态
 
-落点 `pkg/prism_render_architecture/src/volumetric/`（照抄 cloth/hair/particle/water 范式：零依赖、`#![forbid(unsafe_code)]`、`extern crate alloc;`、手写向量数学、只允许 sqrt/exp 近似需自证或用多项式）。CPU 可验证纯函数与调度先行；GPU WESL 先落契约签名+脚手架，不作本机编译验证目标。
+落点 `pkg/prism_render_architecture/src/volumetric/`（照抄 cloth/hair/particle/water 范式：零依赖、`#![forbid(unsafe_code)]`、`extern crate alloc;`、手写向量数学）。CPU 纯函数、GPU ABI、WESL/naga shader contract、渲染图 dispatch 与共享服务绑定已经落地；shader 由 `prism_render_scene::shading::volumetric_clouds` 的同一条 `ShaderCache` 管线编译。
 
 > 注：raymarch/散射涉及 `exp`。crate 若严格只允许 `sqrt`，则 `exp` 用有理/多项式近似封装在 `math.rs` 并加精度单测；GPU 侧用原生 `exp`。
 
@@ -364,7 +364,7 @@ volumetric/
 
 ## 15. 性能预算与效果验收
 
-> 沙盒无 GPU，以下为**设计目标（design target），非实测**；上线需真机 profile 校准。
+> 逐 kernel parity 与 dispatch 结构已具备验证入口；以下整帧预算、workgroup tile 和 buffer stride 仍是**设计目标（design target）**，必须在有 adapter 的 Metal/Vulkan/DX12 设备上校准。
 
 **性能预算（1080p→4K，桌面/主机档，设计目标）**：
 
@@ -423,7 +423,7 @@ volumetric/
 - **M7 阴影/大气衔接**：`shadow.rs`（云影/god ray 计划）+ `atmosphere.rs`（aerial perspective 权重，只采样）+ 测。
 - **M7b 高级散射/阴影（v2）**：`avsm.rs`（自适应体积阴影控制点压缩/查询）+ `multiscatter.rs`（多散射 LUT 轴/探针插值）+ `reference.rs`（delta/ratio tracking 单散射/透射对拍真值）+ 测（以 reference 对拍 multiscatter/avsm）。
 - **M7c 天色/风暴/耦合/雾（v2）**：`spectral.rs`（光谱/夜空参数）+ `storm.rs`（积雨云垂直发育/anvil/virga 状态）+ `coupling.rs`（挖洞笔刷/地形遮挡/云影写大气，确定性）+ `fog.rs`（体积雾/contrail/froxel 注入）+ 测。
-- **M8 GPU 接线（真机）**：WESL kernel（噪声/建模/raymarch/散射/云影/上采样）+ 渲染图接线 + 大气/froxel/VSM/GI/时序接入共享服务；真机 profile 校准。
+- **M8 GPU 接线（已完成实现）**：8 个 WESL compute kernel、naga/ShaderCache 编译、渲染图 dispatch、共享服务绑定与 CPU parity 门禁已接入；硬件 profile 单独按真实 adapter 记录。
 
 **并行拆分建议**（写集互不重叠、只依赖 mod.rs + math.rs 契约）：A=noise B=modeling C=weather D=raymarch E=scatter F=cloud_lod+temporal G=shadow+atmosphere；v2 增量 H=avsm+multiscatter+reference I=spectral+storm+coupling+fog（H/I 依赖 §6/§7 契约，可在 M7b/M7c 并行）。M0 与 M8 串行（M0 的 math.rs 是并行前置）。
 
@@ -436,7 +436,7 @@ volumetric/
 - **多次散射保真 vs 成本**：真多次散射太贵 → powder + octave 近似；影视级留 RT/路径追踪对拍桶。
 - **与大气服务边界**：严禁重写大气散射，只采样 LUT；若大气服务未就绪需给临时 LUT stub。
 - **确定性/网络**：云为表现层，默认不参与网络裁决；需确定性时固定种子+固定步长+固定重投影模式。
-- **GPU 验证边界（v2 更新：本机已有 GPU，真机 Metal parity 已直证）**：CPU 纯函数正确性由 §16 单测全覆盖；GPU 侧 8 个 `@compute` 内核落在 `pkg/prism_render_scene/src/shaders/volumetric_clouds.wesl`，并经 `prism_render_scene::shading::volumetric_clouds` 走渲染世界同一条 `ShaderCache`/`wesl` 编译管线编译+类型检查通过（内核名与 `gpu::kernels` 契约逐一钉死）。**已真机补齐**：渲染图 dispatch 录制（`Core3d` 节点 `dispatch_volumetric_clouds`，排在 MainPass 前）与共享服务资源绑定解析（`bind_groups.rs`）均已落地，8 个内核在真机 Metal 上与 CPU 金标准逐像素 parity 全绿（`volumetric_clouds::gpu_tests`，8 passed / 0 skip）。**仍为设计目标**：workgroup tile/buffer stride 的硬件 profile 性能校准（帧预算/带宽数字尚未做 on-device 实测）。
+- **GPU 验证记录**：CPU 纯函数正确性由 §16 单测覆盖；GPU 侧 8 个 `@compute` 内核落在 `pkg/prism_render_scene/src/shaders/volumetric_clouds.wesl`，经 `prism_render_scene::shading::volumetric_clouds` 的 `ShaderCache`/naga 管线编译与类型检查，`Core3d` 节点 `dispatch_volumetric_clouds` 和 `bind_groups.rs` 已接入。当前主机的真实 adapter 门禁明确返回无可用 adapter，因此本轮没有把 GPU parity 或性能写成真机通过；workgroup tile、buffer stride 与整帧预算需在有 adapter 的设备复跑。
 
 ---
 

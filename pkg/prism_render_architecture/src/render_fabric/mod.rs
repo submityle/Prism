@@ -19,8 +19,14 @@ mod types;
 
 pub use accesses::VariantResourceUse;
 pub use builtins::{
-    builtin_catalog, builtin_roots, builtin_service_ids, volume_required_services,
-    water_required_services, VOLUME_SERVICE_IDS, WATER_SERVICE_IDS,
+    builtin_catalog, builtin_resource_templates, builtin_roots, builtin_service_ids,
+    volume_required_services, water_required_services, BUILTIN_RESOURCE_TEMPLATES,
+    DECAL_FEATURE_ID, DECAL_INDIRECT_RESOURCE, DECAL_INSTANCE_RESOURCE, DECAL_RESOLVE_RESOURCE,
+    HAIR_DEEP_OPACITY_RESOURCE, HAIR_FEATURE_ID, HAIR_STRAND_RESOURCE, HAIR_VISIBILITY_RESOURCE,
+    PARTICLE_ALIVE_RESOURCE, PARTICLE_FEATURE_ID, PARTICLE_SPRAY_RESOURCE,
+    PARTICLE_STREAM_RESOURCE, VOLUME_DENSITY_RESOURCE, VOLUME_FEATURE_ID, VOLUME_FROXEL_RESOURCE,
+    VOLUME_SERVICE_IDS, VOLUME_VELOCITY_RESOURCE, WATER_FEATURE_ID, WATER_FOAM_RESOURCE,
+    WATER_SERVICE_IDS, WATER_SPRAY_RESOURCE, WATER_SURFACE_RESOURCE,
 };
 pub use catalog::{CatalogError, FeatureCatalog, RequirementKind};
 pub use compile::*;

@@ -70,12 +70,14 @@ pub const UID_CHANNEL_SNOW: &str = "org.prism.channel.snow";
 pub const UID_CHANNEL_DAMAGE: &str = "org.prism.channel.damage";
 /// `uid` of the dissolve dynamic channel (`PRISM`).
 pub const UID_CHANNEL_DISSOLVE: &str = "org.prism.channel.dissolve";
-/// `uid` of the stylized (`NPR`) light-response mode (`PRISM`).
-pub const UID_MODE_STYLIZED: &str = "org.prism.response_mode.stylized";
-/// `uid` of the emissive-only response mode (`PRISM`).
-pub const UID_MODE_UNLIT: &str = "org.prism.response_mode.unlit";
-/// `uid` of the project-injected custom response mode (`PRISM`).
-pub const UID_MODE_CUSTOM: &str = "org.prism.response_mode.custom";
+/// Canonical `uid` of the lit response program.
+pub const UID_MODE_LIT: &str = "org.prism.response_program.lit";
+/// Canonical `uid` of the non-photorealistic response program.
+pub const UID_MODE_NPR: &str = "org.prism.response_program.npr";
+/// Canonical `uid` of the unlit response program.
+pub const UID_MODE_UNLIT: &str = "org.prism.response_program.unlit";
+/// Source-compatibility alias for the former stylized spelling.
+pub const UID_MODE_STYLIZED: &str = UID_MODE_NPR;
 /// `uid` of the object-space cache auxiliary output (`PRISM`).
 pub const UID_CACHE_AUX_SURFEL: &str = "org.prism.cache_aux.surfel";
 /// `uid` of the baked face-shadow SDF page provider (`PRISM`).
@@ -197,16 +199,12 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 7] =
 /// dynamic channels: the response modes (the §5.2 classification input) and the
 /// object-space cache auxiliary set (§14.3).
 ///
-/// `stylized`/`unlit` are `candidate` — the enums and their shaders have shipped
-/// and their layout is frozen; the class-table registration is now derived from
-/// the schema's `response_mode` records and parity-checked below (§5.2, P2-i/
-/// P2-j). `custom` stays `experimental` because the injected closure is
-/// author-supplied. `unlit` is view independent (it ignores scene lighting
-/// entirely, so the object-space cache may store it); every other row here
-/// changes with the view.
+/// The three closed response programs are the only response-mode rows in the
+/// PCM catalogue. Project responses are `ProgramRef::Registered` values and do
+/// not masquerade as a built-in response identity.
 const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
     (
-        UID_MODE_STYLIZED,
+        UID_MODE_LIT,
         23,
         Kind::ResponseMode,
         Stability::Candidate,
@@ -214,20 +212,20 @@ const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
         true,
     ),
     (
-        UID_MODE_UNLIT,
+        UID_MODE_NPR,
         24,
         Kind::ResponseMode,
         Stability::Candidate,
         CapabilitySet::EMPTY,
-        false,
+        true,
     ),
     (
-        UID_MODE_CUSTOM,
+        UID_MODE_UNLIT,
         25,
         Kind::ResponseMode,
-        Stability::Experimental,
+        Stability::Candidate,
         CapabilitySet::EMPTY,
-        true,
+        false,
     ),
     (
         UID_CACHE_AUX_SURFEL,

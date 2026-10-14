@@ -86,6 +86,26 @@ impl MaterialRenderClass {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MaterialFeatureFlags(pub u32);
 
+/// Maximum value used when a continuous illumination mask is quantized into
+/// the visibility metadata word. The binary region selector remains a separate
+/// contract and never consumes this encoding.
+pub const ILLUMINATION_BLEND_UNORM_MAX: u32 = u16::MAX as u32;
+/// Sentinel written when no continuous illumination mask was sampled.
+pub const ILLUMINATION_BLEND_SENTINEL: u32 = u32::MAX;
+
+/// Decode the visibility raster's continuous Lit/NPR mask word.
+///
+/// The word is a 16-bit UNORM in the low bits. Any other upper bits are
+/// rejected instead of silently accepting a forged or stale metadata value;
+/// the all-ones word is the explicit no-mask sentinel.
+#[must_use]
+pub fn decode_illumination_blend_weight(word: u32) -> Option<f32> {
+    if word == ILLUMINATION_BLEND_SENTINEL || word > ILLUMINATION_BLEND_UNORM_MAX {
+        return None;
+    }
+    Some(word as f32 / ILLUMINATION_BLEND_UNORM_MAX as f32)
+}
+
 impl MaterialFeatureFlags {
     pub const DOUBLE_SIDED: Self = Self(1 << 0);
     pub const ALPHA_MASK: Self = Self(1 << 1);
@@ -102,6 +122,10 @@ impl MaterialFeatureFlags {
     /// The surface belongs to the dedicated water feature family. Water is a
     /// surface domain; this bit selects its response bucket.
     pub const WATER: Self = Self(1 << 8);
+    /// The material carries a continuous Lit/NPR response mask. This is
+    /// deliberately independent from [`Self::REGION_ILLUMINATION`], whose
+    /// visibility metadata is a binary Lit-versus-NPR selector.
+    pub const ILLUMINATION_BLEND: Self = Self(1 << 9);
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
@@ -409,12 +433,14 @@ pub struct GpuSurfaceParameters {
     pub transmission_scatter_anisotropy: f32,
     /// `OpenPBR` `transmission_dispersion_abbe_number` (`V_d`).
     pub transmission_dispersion_abbe_number: f32,
-    /// Stylized face-shadow terminator softness (FACE lobe). Padding keeps the
-    /// fat authoring view 16-byte aligned; only `npr_face_softness` is packed.
+    /// Stylized face-shadow terminator softness (FACE lobe).
     pub npr_face_softness: f32,
-    pub _pad_face0: f32,
-    pub _pad_face1: f32,
-    pub _pad_face2: f32,
+    /// Per-material relative modifier for the default stylized ramp softness.
+    pub npr_stylized_ramp_softness: f32,
+    /// Per-material relative modifier for the default stylized specular.
+    pub npr_stylized_specular_scale: f32,
+    /// Per-material relative modifier for the default stylized rim.
+    pub npr_stylized_rim_scale: f32,
     /// Prism glint lobe (§17.6): blends a discrete (counting) microfacet NDF
     /// into the specular lobe. `glint_weight == 0` is an exact identity.
     pub glint_weight: f32,
@@ -482,9 +508,9 @@ impl Default for GpuSurfaceParameters {
             transmission_scatter_anisotropy: 0.0,
             transmission_dispersion_abbe_number: 20.0,
             npr_face_softness: 0.1,
-            _pad_face0: 0.0,
-            _pad_face1: 0.0,
-            _pad_face2: 0.0,
+            npr_stylized_ramp_softness: 1.0,
+            npr_stylized_specular_scale: 1.0,
+            npr_stylized_rim_scale: 1.0,
             // Glint defaults: weight 0 keeps the lobe inert, density 4/unit² and
             // a ~2.9° acceptance bin are the values the shading-module tests are
             // baselined against.
@@ -727,7 +753,12 @@ impl MaterialRecord {
         if self.surface.anisotropy != 0.0 || self.surface.anisotropy_rotation != 0.0 {
             mask = mask.union(LobeMask::ANISOTROPY);
         }
-        if self.features.contains(MaterialFeatureFlags::FACE_SHADOW) {
+        if self.features.contains(MaterialFeatureFlags::FACE_SHADOW)
+            || self.surface.npr_face_softness != 0.1
+            || self.surface.npr_stylized_ramp_softness != 1.0
+            || self.surface.npr_stylized_specular_scale != 1.0
+            || self.surface.npr_stylized_rim_scale != 1.0
+        {
             mask = mask.union(LobeMask::NPR_FACE);
         }
         mask

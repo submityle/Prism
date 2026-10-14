@@ -329,9 +329,9 @@ impl Default for GpuThinFilmLobe {
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuNprFaceLobe {
     pub softness: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
-    pub _pad2: f32,
+    pub ramp_softness: f32,
+    pub specular_scale: f32,
+    pub rim_scale: f32,
 }
 
 /// Glint lobe: the discrete (counting) microfacet estimator of §17.6.
@@ -611,9 +611,9 @@ impl SurfaceParameterBlock {
             },
             face: GpuNprFaceLobe {
                 softness: params.npr_face_softness,
-                _pad0: 0.0,
-                _pad1: 0.0,
-                _pad2: 0.0,
+                ramp_softness: params.npr_stylized_ramp_softness,
+                specular_scale: params.npr_stylized_specular_scale,
+                rim_scale: params.npr_stylized_rim_scale,
             },
             glint: GpuGlintLobe {
                 glint_weight: params.glint_weight,
@@ -698,6 +698,9 @@ impl SurfaceParameterBlock {
         }
         if self.lobe_mask.contains(LobeMask::NPR_FACE) {
             full.npr_face_softness = self.face.softness;
+            full.npr_stylized_ramp_softness = self.face.ramp_softness;
+            full.npr_stylized_specular_scale = self.face.specular_scale;
+            full.npr_stylized_rim_scale = self.face.rim_scale;
         }
         if self.lobe_mask.contains(LobeMask::GLINT) {
             full.glint_weight = self.glint.glint_weight;
@@ -877,9 +880,9 @@ mod tests {
             thin_film_thickness: 0.35,
             thin_film_ior: 1.55,
             npr_face_softness: 0.25,
-            _pad_face0: 0.0,
-            _pad_face1: 0.0,
-            _pad_face2: 0.0,
+            npr_stylized_ramp_softness: 1.25,
+            npr_stylized_specular_scale: 0.75,
+            npr_stylized_rim_scale: 1.5,
             glint_weight: 0.6,
             glint_roughness: 0.22,
             glint_density: 12.0,

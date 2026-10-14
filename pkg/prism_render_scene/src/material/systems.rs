@@ -204,7 +204,9 @@ mod tests {
     use bevy_image::Image;
     use bevy_pbr::StandardMaterial;
     use bevy_render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-    use prism_render_material::{BuiltinProgram, ProgramRef, ShadingPlan, FALLBACK_MATERIAL_HANDLE};
+    use prism_render_material::{
+        BuiltinProgram, ProgramRef, ShadingPlan, FALLBACK_MATERIAL_HANDLE,
+    };
 
     use super::*;
 
@@ -448,7 +450,9 @@ mod tests {
                 .get(first)
                 .unwrap()
                 .response_plan,
-            ShadingPlan::Single { program: ProgramRef::Builtin(BuiltinProgram::Lit) }
+            ShadingPlan::Single {
+                program: ProgramRef::Builtin(BuiltinProgram::Lit)
+            }
         );
 
         let completion = prism_render_architecture::gpu_scene::GpuCompletionValue(7);

@@ -30,7 +30,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use crate::{EnergyPolicy, FieldType, Lobe, SurfaceSchema};
+use crate::{EnergyPolicy, FieldResponse, FieldType, Lobe, SurfaceSchema};
 
 /// A machine-readable banner marking a file as generated. Both emitters start
 /// with it so humans and tooling can detect a hand edit at a glance.
@@ -863,43 +863,179 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     }
     o.push_str("];\n");
 
-    // Runtime response programs (§5.2): compiled response identities and
-    // their schema-owned contract metadata. The dense compiled-entry index is
-    // assigned by the runtime registry; this table only carries stable schema
-    // identity and attribution.
-    o.push_str("\n/// One runtime response program's generated manifest identity.\n");
-    o.push_str("///\n");
-    o.push_str("/// `builtin` identifies the closed engine-provided response family.\n");
+    // Runtime response programs (§5.2): emit the complete five-contract
+    // manifest, not only identity metadata. The generated tables are the
+    // bridge consumed by `prism_render_material::ResponseManifest`.
+    o.push_str("\n/// One lobe's generated response coverage.\n");
+    o.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
+    o.push_str("pub struct ResponseLobeLayout {\n");
+    o.push_str("    pub id: &'static str,\n");
+    o.push_str("    pub supported: bool,\n");
+    o.push_str("    pub ignored_reason: Option<&'static str>,\n");
+    o.push_str("}\n\n");
+    o.push_str("/// A mapped field in a generated response contract.\n");
+    o.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
+    o.push_str("pub struct ResponseFieldMappingLayout {\n");
+    o.push_str("    pub lobe: Option<&'static str>,\n");
+    o.push_str("    pub name: &'static str,\n");
+    o.push_str("    pub semantic: &'static str,\n");
+    o.push_str("    pub test: &'static str,\n");
+    o.push_str("}\n\n");
+    o.push_str("/// An intentionally unmapped field in a generated response contract.\n");
+    o.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
+    o.push_str("pub struct ResponseIgnoredFieldLayout {\n");
+    o.push_str("    pub lobe: Option<&'static str>,\n");
+    o.push_str("    pub name: &'static str,\n");
+    o.push_str("    pub reason: &'static str,\n");
+    o.push_str("}\n\n");
+    o.push_str("/// One runtime response program's complete generated manifest.\n");
     o.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
     o.push_str("pub struct ResponseProgramLayout {\n");
-    o.push_str("    /// Human-facing response-program id (schema `id`).\n");
     o.push_str("    pub id: &'static str,\n");
-    o.push_str("    /// Globally unique capability id (schema `uid`).\n");
     o.push_str("    pub uid: &'static str,\n");
-    o.push_str("    /// Header-digest slot (immutable; §5.4).\n");
     o.push_str("    pub registry_slot: u32,\n");
-    o.push_str("    /// Governance namespace (schema `namespace`).\n");
     o.push_str("    pub namespace: &'static str,\n");
-    o.push_str("    /// Vendor tag (schema `vendor`).\n");
     o.push_str("    pub vendor: &'static str,\n");
-    o.push_str("    /// Stability level (schema `stability`).\n");
     o.push_str("    pub stability: &'static str,\n");
-    o.push_str("    /// Built-in response family (`lit`, `npr`, or `unlit`).\n");
     o.push_str("    pub builtin: &'static str,\n");
-    o.push_str("    /// Platform capabilities required beyond the baseline.\n");
     o.push_str("    pub requires_caps: &'static [&'static str],\n");
-    o.push_str("    /// Whether the response changes with the view direction.\n");
     o.push_str("    pub view_dependent: bool,\n");
+    o.push_str("    pub lobes: &'static [ResponseLobeLayout],\n");
+    o.push_str("    pub field_mappings: &'static [ResponseFieldMappingLayout],\n");
+    o.push_str("    pub ignored_fields: &'static [ResponseIgnoredFieldLayout],\n");
+    o.push_str("    pub direct_light: bool,\n");
+    o.push_str("    pub shadows: bool,\n");
+    o.push_str("    pub indirect_diffuse: bool,\n");
+    o.push_str("    pub reflection: bool,\n");
+    o.push_str("    pub transmission: bool,\n");
+    o.push_str("    pub temporal_history: bool,\n");
+    o.push_str("    pub produced_channels: &'static [&'static str],\n");
+    o.push_str("    pub blendable_channels: &'static [&'static str],\n");
+    o.push_str("    pub supports_fused: bool,\n");
+    o.push_str("    pub supports_split: bool,\n");
+    o.push_str("    pub max_cost_class: &'static str,\n");
+    o.push_str("    pub cache_reads: &'static [&'static str],\n");
+    o.push_str("    pub cache_writes: &'static [&'static str],\n");
+    o.push_str("    pub cache_temporal: &'static str,\n");
     o.push_str("}\n\n");
+
     let mut response_programs = schema.response_programs.clone();
     response_programs.sort_by_key(|program| program.registry_slot);
+    for program in &response_programs {
+        let prefix = format!("RESPONSE_{}", program.builtin.as_str().to_ascii_uppercase());
+        let _ = writeln!(
+            o,
+            "const {prefix}_LOBES: [ResponseLobeLayout; {}] = [",
+            lobes.len()
+        );
+        for lobe in &lobes {
+            let reason = program.surface.ignored_lobes.get(&lobe.id);
+            if let Some(reason) = reason {
+                let _ = writeln!(
+                    o,
+                    "    ResponseLobeLayout {{ id: {:?}, supported: false, ignored_reason: Some({:?}) }},",
+                    lobe.id, reason
+                );
+            } else {
+                let _ = writeln!(
+                    o,
+                    "    ResponseLobeLayout {{ id: {:?}, supported: true, ignored_reason: None }},",
+                    lobe.id
+                );
+            }
+        }
+        o.push_str("];\n");
+
+        let fields: Vec<_> = schema.response_fields();
+        let mapped = fields
+            .iter()
+            .filter_map(|(owner, field)| match field.responses.get(&program.id) {
+                Some(FieldResponse::Mapped { semantic, test }) => {
+                    Some((*owner, *field, semantic, test))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let ignored = fields
+            .iter()
+            .filter_map(|(owner, field)| match field.responses.get(&program.id) {
+                Some(FieldResponse::IntentionallyUnmapped { reason }) => {
+                    Some((*owner, *field, reason))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let _ = writeln!(
+            o,
+            "const {prefix}_MAPPED_FIELDS: [ResponseFieldMappingLayout; {}] = [",
+            mapped.len()
+        );
+        for (owner, field, semantic, test) in mapped {
+            let owner = owner
+                .map(|value| format!("Some({value:?})"))
+                .unwrap_or_else(|| "None".into());
+            let _ = writeln!(
+                o,
+                "    ResponseFieldMappingLayout {{ lobe: {owner}, name: {:?}, semantic: {:?}, test: {:?} }},",
+                field.name, semantic, test
+            );
+        }
+        o.push_str("];\n");
+        let _ = writeln!(
+            o,
+            "const {prefix}_IGNORED_FIELDS: [ResponseIgnoredFieldLayout; {}] = [",
+            ignored.len()
+        );
+        for (owner, field, reason) in ignored {
+            let owner = owner
+                .map(|value| format!("Some({value:?})"))
+                .unwrap_or_else(|| "None".into());
+            let _ = writeln!(
+                o,
+                "    ResponseIgnoredFieldLayout {{ lobe: {owner}, name: {:?}, reason: {:?} }},",
+                field.name, reason
+            );
+        }
+        o.push_str("];\n\n");
+    }
+
     let _ = writeln!(
         o,
         "/// The runtime response programs in registry-slot order.\npub const SURFACE_RESPONSE_PROGRAMS: [ResponseProgramLayout; {}] = [",
         response_programs.len()
     );
     for program in &response_programs {
-        o.push_str("    ResponseProgramLayout {\n");
+        let prefix = format!("RESPONSE_{}", program.builtin.as_str().to_ascii_uppercase());
+        let caps: Vec<String> = program
+            .requires_caps
+            .iter()
+            .map(|capability| format!("{capability:?}"))
+            .collect();
+        let produced: Vec<String> = program
+            .output
+            .produced_channels
+            .iter()
+            .map(|channel| format!("{:?}", channel.as_str()))
+            .collect();
+        let blendable: Vec<String> = program
+            .output
+            .blendable_channels
+            .iter()
+            .map(|channel| format!("{:?}", channel.as_str()))
+            .collect();
+        let reads: Vec<String> = program
+            .cache
+            .reads
+            .iter()
+            .map(|channel| format!("{:?}", channel.as_str()))
+            .collect();
+        let writes: Vec<String> = program
+            .cache
+            .writes
+            .iter()
+            .map(|channel| format!("{:?}", channel.as_str()))
+            .collect();
+        let _ = writeln!(o, "    ResponseProgramLayout {{");
         let _ = writeln!(o, "        id: {:?},", program.id);
         let _ = writeln!(o, "        uid: {:?},", program.uid);
         let _ = writeln!(o, "        registry_slot: {},", program.registry_slot);
@@ -907,13 +1043,61 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         let _ = writeln!(o, "        vendor: {:?},", program.vendor);
         let _ = writeln!(o, "        stability: {:?},", program.stability.as_str());
         let _ = writeln!(o, "        builtin: {:?},", program.builtin.as_str());
-        let caps: Vec<String> = program
-            .requires_caps
-            .iter()
-            .map(|capability| format!("{capability:?}"))
-            .collect();
         let _ = writeln!(o, "        requires_caps: &[{}],", caps.join(", "));
         let _ = writeln!(o, "        view_dependent: {},", program.view_dependent);
+        let _ = writeln!(o, "        lobes: &{prefix}_LOBES,");
+        let _ = writeln!(o, "        field_mappings: &{prefix}_MAPPED_FIELDS,");
+        let _ = writeln!(o, "        ignored_fields: &{prefix}_IGNORED_FIELDS,");
+        let _ = writeln!(
+            o,
+            "        direct_light: {},",
+            program.lighting.direct_light
+        );
+        let _ = writeln!(o, "        shadows: {},", program.lighting.shadows);
+        let _ = writeln!(
+            o,
+            "        indirect_diffuse: {},",
+            program.lighting.indirect_diffuse
+        );
+        let _ = writeln!(o, "        reflection: {},", program.lighting.reflection);
+        let _ = writeln!(
+            o,
+            "        transmission: {},",
+            program.lighting.transmission
+        );
+        let _ = writeln!(
+            o,
+            "        temporal_history: {},",
+            program.lighting.temporal_history
+        );
+        let _ = writeln!(o, "        produced_channels: &[{}],", produced.join(", "));
+        let _ = writeln!(
+            o,
+            "        blendable_channels: &[{}],",
+            blendable.join(", ")
+        );
+        let _ = writeln!(
+            o,
+            "        supports_fused: {},",
+            program.execution.supports_fused
+        );
+        let _ = writeln!(
+            o,
+            "        supports_split: {},",
+            program.execution.supports_split
+        );
+        let _ = writeln!(
+            o,
+            "        max_cost_class: {:?},",
+            program.execution.max_cost_class.as_str()
+        );
+        let _ = writeln!(o, "        cache_reads: &[{}],", reads.join(", "));
+        let _ = writeln!(o, "        cache_writes: &[{}],", writes.join(", "));
+        let _ = writeln!(
+            o,
+            "        cache_temporal: {:?},",
+            program.cache.temporal.as_str()
+        );
         o.push_str("    },\n");
     }
     o.push_str("];\n");

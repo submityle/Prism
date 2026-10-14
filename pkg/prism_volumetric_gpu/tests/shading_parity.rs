@@ -48,9 +48,9 @@ use prism_render_architecture::particle::shading::{
     SixWayLuminance, PARTICLE_GLOBAL_ILLUMINATION, PARTICLE_LIGHTING_SERVICES,
     PARTICLE_RAY_TRACING, PARTICLE_SHADOW_MAPS,
 };
-use prism_render_architecture::render_fabric::ServiceSet;
 use prism_render_architecture::particle::sort_cull::{BlendMode, SortDecision};
 use prism_render_architecture::particle::{EmberShadingModel, ShadingBasis, SortStrategy, Vec3};
+use prism_render_architecture::render_fabric::ServiceSet;
 use prism_volumetric_gpu::shading::{cpu_reference, GpuShading, GpuShadingQuery};
 use prism_volumetric_gpu::GpuContext;
 

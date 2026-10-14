@@ -952,36 +952,54 @@ type = "f32"
 bit_region = "PRISM"
 pack_slot = 0
 spec_subfield = "closure_mask"
-consumed_by = ["unpack", "classify", "sample", "golden"]
-responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret this field in the tested response path." }, npr = { state = "intentionally_unmapped", reason = "The NPR adapter does not interpret this field in the tested response path." }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
+consumed_by = ["unpack", "classify", "sample", "golden", "npr"]
+responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret this field in the tested response path." }, npr = { state = "mapped", semantic = "the material-local face-shadow terminator reads this softness value", test = "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not claim decode-only field evidence for this field." } }
 default = 0.1
 valid = "0.0..=1.0"
 energy_policy = "none"
 view = "invariant"
 
 [[lobe.field]]
-name = "_pad0"
-type = "pad"
+name = "ramp_softness"
+surface_field = "npr_stylized_ramp_softness"
+type = "f32"
 bit_region = "PRISM"
 pack_slot = 1
-consumed_by = []
-default = 0.0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "sample", "golden", "npr"]
+responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret the stylized response modifier." }, npr = { state = "mapped", semantic = "the material-local stylized ramp modifier scales the default NPR band transition", test = "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not evaluate stylized response modifiers." } }
+default = 1.0
+valid = "0.0..=4.0"
+energy_policy = "none"
+view = "invariant"
 
 [[lobe.field]]
-name = "_pad1"
-type = "pad"
+name = "specular_scale"
+surface_field = "npr_stylized_specular_scale"
+type = "f32"
 bit_region = "PRISM"
 pack_slot = 2
-consumed_by = []
-default = 0.0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "sample", "golden", "npr"]
+responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret the stylized response modifier." }, npr = { state = "mapped", semantic = "the material-local stylized specular modifier scales the default NPR highlight", test = "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not evaluate stylized response modifiers." } }
+default = 1.0
+valid = "0.0..=4.0"
+energy_policy = "none"
+view = "invariant"
 
 [[lobe.field]]
-name = "_pad2"
-type = "pad"
+name = "rim_scale"
+surface_field = "npr_stylized_rim_scale"
+type = "f32"
 bit_region = "PRISM"
 pack_slot = 3
-consumed_by = []
-default = 0.0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "sample", "golden", "npr"]
+responses = { lit = { state = "intentionally_unmapped", reason = "The Lit adapter does not interpret the stylized response modifier." }, npr = { state = "mapped", semantic = "the material-local stylized rim modifier scales the default NPR edge response", test = "pkg/prism_render_shading/src/resolve.rs::per_material_stylized_lobe_changes_npr_response" }, unlit = { state = "intentionally_unmapped", reason = "The Unlit contract does not evaluate stylized response modifiers." } }
+default = 1.0
+valid = "0.0..=4.0"
+energy_policy = "none"
+view = "invariant"
 
 [[lobe]]
 id = "glint"
@@ -1260,8 +1278,8 @@ requires_caps = []
 view_dependent = true
 
 [response_program.surface]
-supported_lobes = []
-ignored_lobes = { emission = "Emission is handled by the response-output path, not the stylized direct adapter.", clearcoat = "The stylized adapter has no clearcoat contract.", anisotropy = "The stylized adapter has no anisotropic conductor contract.", sheen = "The stylized adapter has no sheen contract.", subsurface = "The stylized adapter has no subsurface contract.", transmission = "The stylized adapter has no transmission contract.", thin_film = "The stylized adapter has no thin-film contract.", npr_face = "The NPR face lobe has no landed CPU adapter evidence in this schema sidecar.", glint = "The stylized adapter has no glint contract.", measured_brdf = "Measured BRDF requires a distinct registered response path." }
+supported_lobes = ["npr_face"]
+ignored_lobes = { emission = "Emission is handled by the response-output path, not the stylized direct adapter.", clearcoat = "The stylized adapter has no clearcoat contract.", anisotropy = "The stylized adapter has no anisotropic conductor contract.", sheen = "The stylized adapter has no sheen contract.", subsurface = "The stylized adapter has no subsurface contract.", transmission = "The stylized adapter has no transmission contract.", thin_film = "The stylized adapter has no thin-film contract.", glint = "The stylized adapter has no glint contract.", measured_brdf = "Measured BRDF requires a distinct registered response path." }
 
 [response_program.lighting]
 direct_light = true

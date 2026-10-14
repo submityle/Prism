@@ -13,14 +13,13 @@
 //! `sqrt` is used. There are no `f32` equality tests and no AI/ML.
 
 use super::EPS;
-use crate::render_fabric::{FeatureId, FrameLag, ResourceKey, ResourceScope, ResourceUse};
 use crate::frame_graph::AccessKind;
+use crate::render_fabric::{FeatureId, FrameLag, ResourceKey, ResourceScope, ResourceUse};
 
 /// Stable semantic owner for the water simulation feature declarations.
-pub const WATER_SIMULATION_FEATURE: FeatureId = FeatureId(0x1001);
+pub const WATER_SIMULATION_FEATURE: FeatureId = FeatureId(0x1000);
 /// The persistent foam result consumed by the next frame's particle feedback.
-pub const WATER_FOAM_RESOURCE: ResourceKey =
-    ResourceKey::of(WATER_SIMULATION_FEATURE, 0);
+pub const WATER_FOAM_RESOURCE: ResourceKey = ResourceKey::of(WATER_SIMULATION_FEATURE, 2);
 
 /// Describes the particle-to-water foam feedback edge.
 ///

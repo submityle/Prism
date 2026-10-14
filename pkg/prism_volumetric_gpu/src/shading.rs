@@ -85,16 +85,16 @@
 use bytemuck::{Pod, Zeroable};
 use prism_render_architecture::particle::lod::ParticleQuality;
 use prism_render_architecture::particle::shading::{
-    attribute_footprint, lighting_services, motion_vector_request, quantize_cel_bands,
-    render_phase_for, resolve_deep_shadow, resolve_oit_route, resolve_shading_program,
-    lighting_services_from_bits, six_way_response, DeepShadowMode, MotionVectorInput,
+    attribute_footprint, lighting_services, lighting_services_from_bits, motion_vector_request,
+    quantize_cel_bands, render_phase_for, resolve_deep_shadow, resolve_oit_route,
+    resolve_shading_program, six_way_response, DeepShadowMode, MotionVectorInput,
     MotionVectorRequest, OitRoute, ParticleRenderPhase, PhaseParams, ShadingAttributeFootprint,
     ShadingProgram, ShadingProgramInput, SixWayLuminance, PARTICLE_GLOBAL_ILLUMINATION,
     PARTICLE_RAY_TRACING, PARTICLE_SHADOW_MAPS,
 };
-use prism_render_architecture::render_fabric::ServiceSet;
 use prism_render_architecture::particle::sort_cull::{BlendMode, SortDecision};
 use prism_render_architecture::particle::{EmberShadingModel, ShadingBasis, SortStrategy, Vec3};
+use prism_render_architecture::render_fabric::ServiceSet;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,

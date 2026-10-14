@@ -20,15 +20,27 @@ pub enum BuiltinResponse {
 impl BuiltinResponse {
     /// Canonical schema ID.
     pub const fn as_str(self) -> &'static str {
-        match self { Self::Lit => "lit", Self::Npr => "npr", Self::Unlit => "unlit" }
+        match self {
+            Self::Lit => "lit",
+            Self::Npr => "npr",
+            Self::Unlit => "unlit",
+        }
     }
     /// Generated runtime variant, checked by the Rust compiler.
     pub const fn rust_variant(self) -> &'static str {
-        match self { Self::Lit => "Lit", Self::Npr => "Npr", Self::Unlit => "Unlit" }
+        match self {
+            Self::Lit => "Lit",
+            Self::Npr => "Npr",
+            Self::Unlit => "Unlit",
+        }
     }
     /// Associated `consumed_by` program marker.
     pub const fn consumed_step(self) -> ConsumedStep {
-        match self { Self::Lit => ConsumedStep::Lit, Self::Npr => ConsumedStep::Npr, Self::Unlit => ConsumedStep::Unlit }
+        match self {
+            Self::Lit => ConsumedStep::Lit,
+            Self::Npr => ConsumedStep::Npr,
+            Self::Unlit => ConsumedStep::Unlit,
+        }
     }
 }
 
@@ -133,12 +145,29 @@ pub enum ProgramChannel {
 }
 
 impl ProgramChannel {
+    /// Canonical schema spelling used by generated runtime metadata.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::IndirectDiffuse => "indirect_diffuse",
+            Self::Reflection => "reflection",
+            Self::Transmission => "transmission",
+            Self::Emission => "emission",
+            Self::Alpha => "alpha",
+            Self::Auxiliary => "auxiliary",
+        }
+    }
+
     /// Runtime variant spelling.
     pub const fn rust_variant(self) -> &'static str {
         match self {
-            Self::Direct => "Direct", Self::IndirectDiffuse => "IndirectDiffuse",
-            Self::Reflection => "Reflection", Self::Transmission => "Transmission",
-            Self::Emission => "Emission", Self::Alpha => "Alpha", Self::Auxiliary => "Auxiliary",
+            Self::Direct => "Direct",
+            Self::IndirectDiffuse => "IndirectDiffuse",
+            Self::Reflection => "Reflection",
+            Self::Transmission => "Transmission",
+            Self::Emission => "Emission",
+            Self::Alpha => "Alpha",
+            Self::Auxiliary => "Auxiliary",
         }
     }
 }
@@ -164,6 +193,17 @@ pub enum ProgramCostClass {
     High,
 }
 
+impl ProgramCostClass {
+    /// Canonical schema spelling used by generated runtime metadata.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 /// Permitted execution paths.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -187,6 +227,17 @@ pub enum ProgramTemporalRequirement {
     Required,
 }
 
+impl ProgramTemporalRequirement {
+    /// Canonical schema spelling used by generated runtime metadata.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Optional => "optional",
+            Self::Required => "required",
+        }
+    }
+}
+
 /// Cache dependencies. Built-ins use fixed response channels; project manifests
 /// may additionally register typed surface auxiliary channels at runtime.
 #[derive(Debug, Clone, Deserialize)]
@@ -207,10 +258,18 @@ fn invalid(message: impl Into<String>) -> SchemaError {
 impl SurfaceSchema {
     /// Non-padding fields in deterministic core then canonical lobe order.
     pub fn response_fields(&self) -> Vec<(Option<&str>, &Field)> {
-        self.core.fields.iter().filter(|f| f.ty != FieldType::Pad).map(|f| (None, f))
+        self.core
+            .fields
+            .iter()
+            .filter(|f| f.ty != FieldType::Pad)
+            .map(|f| (None, f))
             .chain(self.canonical_lobes().into_iter().flat_map(|lobe| {
-                lobe.fields.iter().filter(|f| f.ty != FieldType::Pad).map(move |f| (Some(lobe.id.as_str()), f))
-            })).collect()
+                lobe.fields
+                    .iter()
+                    .filter(|f| f.ty != FieldType::Pad)
+                    .map(move |f| (Some(lobe.id.as_str()), f))
+            }))
+            .collect()
     }
 
     pub(crate) fn validate_responses(&self) -> Result<(), SchemaError> {
@@ -218,71 +277,151 @@ impl SurfaceSchema {
         let mut builtins = BTreeSet::new();
         let lobe_ids: BTreeSet<&str> = self.lobes.iter().map(|l| l.id.as_str()).collect();
         for program in &self.response_programs {
-            if program.id != program.builtin.as_str() || !identities.insert(program.id.as_str()) || !builtins.insert(program.builtin) {
-                return Err(invalid(format!("invalid or duplicate response program {}", program.id)));
+            if program.id != program.builtin.as_str()
+                || !identities.insert(program.id.as_str())
+                || !builtins.insert(program.builtin)
+            {
+                return Err(invalid(format!(
+                    "invalid or duplicate response program {}",
+                    program.id
+                )));
             }
-            let supported: BTreeSet<&str> = program.surface.supported_lobes.iter().map(String::as_str).collect();
-            let ignored: BTreeSet<&str> = program.surface.ignored_lobes.keys().map(String::as_str).collect();
-            if supported.len() != program.surface.supported_lobes.len() || !supported.is_disjoint(&ignored)
+            let supported: BTreeSet<&str> = program
+                .surface
+                .supported_lobes
+                .iter()
+                .map(String::as_str)
+                .collect();
+            let ignored: BTreeSet<&str> = program
+                .surface
+                .ignored_lobes
+                .keys()
+                .map(String::as_str)
+                .collect();
+            if supported.len() != program.surface.supported_lobes.len()
+                || !supported.is_disjoint(&ignored)
                 || supported.union(&ignored).copied().collect::<BTreeSet<_>>() != lobe_ids
-                || program.surface.ignored_lobes.values().any(|r| r.trim().is_empty()) {
-                return Err(invalid(format!("{} must classify every lobe exactly once with nonempty ignore reasons", program.id)));
+                || program
+                    .surface
+                    .ignored_lobes
+                    .values()
+                    .any(|r| r.trim().is_empty())
+            {
+                return Err(invalid(format!(
+                    "{} must classify every lobe exactly once with nonempty ignore reasons",
+                    program.id
+                )));
             }
             let produced: BTreeSet<_> = program.output.produced_channels.iter().copied().collect();
-            let blendable: BTreeSet<_> = program.output.blendable_channels.iter().copied().collect();
-            if produced.is_empty() || produced.len() != program.output.produced_channels.len()
-                || blendable.len() != program.output.blendable_channels.len() || !blendable.is_subset(&produced)
-                || blendable.contains(&ProgramChannel::Alpha) || blendable.contains(&ProgramChannel::Auxiliary)
-                || (!program.execution.supports_fused && !program.execution.supports_split) {
-                return Err(invalid(format!("{} has invalid output or execution contract", program.id)));
+            let blendable: BTreeSet<_> =
+                program.output.blendable_channels.iter().copied().collect();
+            if produced.is_empty()
+                || produced.len() != program.output.produced_channels.len()
+                || blendable.len() != program.output.blendable_channels.len()
+                || !blendable.is_subset(&produced)
+                || blendable.contains(&ProgramChannel::Alpha)
+                || blendable.contains(&ProgramChannel::Auxiliary)
+                || (!program.execution.supports_fused && !program.execution.supports_split)
+            {
+                return Err(invalid(format!(
+                    "{} has invalid output or execution contract",
+                    program.id
+                )));
             }
             for channels in [&program.cache.reads, &program.cache.writes] {
                 if channels.iter().copied().collect::<BTreeSet<_>>().len() != channels.len() {
-                    return Err(invalid(format!("{} has duplicate cache channels", program.id)));
+                    return Err(invalid(format!(
+                        "{} has duplicate cache channels",
+                        program.id
+                    )));
                 }
             }
             if !program.cache.writes.iter().all(|c| produced.contains(c)) {
-                return Err(invalid(format!("{} caches a channel it does not produce", program.id)));
+                return Err(invalid(format!(
+                    "{} caches a channel it does not produce",
+                    program.id
+                )));
             }
-            if matches!(program.cache.temporal, ProgramTemporalRequirement::Required) && !program.lighting.temporal_history {
-                return Err(invalid(format!("{} requires undeclared temporal lighting", program.id)));
+            if matches!(program.cache.temporal, ProgramTemporalRequirement::Required)
+                && !program.lighting.temporal_history
+            {
+                return Err(invalid(format!(
+                    "{} requires undeclared temporal lighting",
+                    program.id
+                )));
             }
             let mut mapped_lobes = BTreeSet::new();
             for (owner, field) in self.response_fields() {
                 let key = format!("{}.{}", owner.unwrap_or("core"), field.name);
                 let Some(response) = field.responses.get(&program.id) else {
-                    return Err(invalid(format!("{key} has no {} response declaration", program.id)));
+                    return Err(invalid(format!(
+                        "{key} has no {} response declaration",
+                        program.id
+                    )));
                 };
                 let mapped = matches!(response, FieldResponse::Mapped { .. });
                 if field.consumed_by.contains(&program.builtin.consumed_step()) != mapped {
-                    return Err(invalid(format!("{key} consumed_by disagrees with {} semantic coverage", program.id)));
+                    return Err(invalid(format!(
+                        "{key} consumed_by disagrees with {} semantic coverage",
+                        program.id
+                    )));
                 }
                 match response {
                     FieldResponse::Mapped { semantic, test } => {
-                        if semantic.trim().is_empty() || !test.split_once("::").is_some_and(|(path, name)| path.starts_with("pkg/") && path.ends_with(".rs") && !name.trim().is_empty()) {
-                            return Err(invalid(format!("{key}/{} needs semantic and executable test evidence", program.id)));
+                        if semantic.trim().is_empty()
+                            || !test.split_once("::").is_some_and(|(path, name)| {
+                                path.starts_with("pkg/")
+                                    && path.ends_with(".rs")
+                                    && !name.trim().is_empty()
+                            })
+                        {
+                            return Err(invalid(format!(
+                                "{key}/{} needs semantic and executable test evidence",
+                                program.id
+                            )));
                         }
                         if let Some(lobe) = owner {
-                            if !supported.contains(lobe) { return Err(invalid(format!("{key} maps an ignored lobe in {}", program.id))); }
+                            if !supported.contains(lobe) {
+                                return Err(invalid(format!(
+                                    "{key} maps an ignored lobe in {}",
+                                    program.id
+                                )));
+                            }
                             mapped_lobes.insert(lobe);
                         }
                     }
                     FieldResponse::IntentionallyUnmapped { reason } if reason.trim().is_empty() => {
-                        return Err(invalid(format!("{key}/{} has an empty ignore reason", program.id)));
+                        return Err(invalid(format!(
+                            "{key}/{} has an empty ignore reason",
+                            program.id
+                        )));
                     }
                     FieldResponse::IntentionallyUnmapped { .. } => {}
                 }
             }
             if mapped_lobes != supported {
-                return Err(invalid(format!("{} claims a supported lobe without mapped fields", program.id)));
+                return Err(invalid(format!(
+                    "{} claims a supported lobe without mapped fields",
+                    program.id
+                )));
             }
         }
         for (owner, field) in self.response_fields() {
-            if field.responses.keys().any(|key| !identities.contains(key.as_str())) {
-                return Err(invalid(format!("{}.{} refers to an unknown response", owner.unwrap_or("core"), field.name)));
+            if field
+                .responses
+                .keys()
+                .any(|key| !identities.contains(key.as_str()))
+            {
+                return Err(invalid(format!(
+                    "{}.{} refers to an unknown response",
+                    owner.unwrap_or("core"),
+                    field.name
+                )));
             }
             let unique: BTreeSet<_> = field.consumed_by.iter().collect();
-            if unique.len() != field.consumed_by.len() { return Err(invalid(format!("{} has duplicate consumers", field.name))); }
+            if unique.len() != field.consumed_by.len() {
+                return Err(invalid(format!("{} has duplicate consumers", field.name)));
+            }
         }
         Ok(())
     }

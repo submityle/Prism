@@ -263,7 +263,7 @@ fn frontend_ordinal(plan: WaterShadingPlan) -> u32 {
 /// The compiled runtime parameters of a water body.
 ///
 /// A flat, validated snapshot: routing (`kind`/`solver`/`frontend`), the
-    /// resolved grid and cascade counts, the clamped physics and shading scalars,
+/// resolved grid and cascade counts, the clamped physics and shading scalars,
 /// and the [`WaterSpecializationKey`]. The sibling solver/shading planners read
 /// these directly; nothing here needs re-derivation.
 #[derive(Clone, Copy, Debug, PartialEq)]

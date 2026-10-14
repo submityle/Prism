@@ -2,7 +2,9 @@
 
 use prism_render_driver::{BufferUsages, DeviceDescriptor, Instance, RequestAdapterOptions};
 use prism_render_driver_null::NullInstance;
-use prism_render_material::{fallback_material_record, BuiltinProgram, ClosureKind, MaterialRecord, ShadingPlan};
+use prism_render_material::{
+    fallback_material_record, BuiltinProgram, ClosureKind, MaterialRecord, ShadingPlan,
+};
 
 use prism_render_architecture::abi::GenerationalHandle;
 

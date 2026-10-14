@@ -265,6 +265,7 @@ pub enum ContractError {
     InvalidBlendDomain,
     IncompatibleBlendOutput,
     SplitRequired,
+    GeneratedContract(String),
 }
 
 /// Identity-only projection of the authoritative, non-padding field directory.
@@ -332,6 +333,128 @@ fn lobe_bit(id: &str) -> Result<u32, ContractError> {
 }
 
 impl ResponseManifest {
+    /// Build a built-in response manifest from the schema-generated contract
+    /// table. No field, lobe, channel or cache identity is duplicated here.
+    pub fn from_builtin(program: BuiltinProgram) -> Result<Self, ContractError> {
+        let builtin = match program {
+            BuiltinProgram::Lit => "lit",
+            BuiltinProgram::Npr => "npr",
+            BuiltinProgram::Unlit => "unlit",
+        };
+        let layout = crate::SURFACE_RESPONSE_PROGRAMS
+            .iter()
+            .find(|layout| layout.builtin == builtin)
+            .ok_or_else(|| ContractError::GeneratedContract(builtin.to_string()))?;
+
+        let channel = |name: &str| match name {
+            "direct" => Ok(ResponseChannel::Direct),
+            "indirect_diffuse" => Ok(ResponseChannel::IndirectDiffuse),
+            "reflection" => Ok(ResponseChannel::Reflection),
+            "transmission" => Ok(ResponseChannel::Transmission),
+            "emission" => Ok(ResponseChannel::Emission),
+            "alpha" => Ok(ResponseChannel::Alpha),
+            "auxiliary" => Ok(ResponseChannel::Auxiliary),
+            _ => Err(ContractError::GeneratedContract(name.to_string())),
+        };
+        let channels = |names: &[&str]| {
+            names.iter().try_fold(ChannelMask::default(), |mask, name| {
+                Ok(mask.union(ChannelMask::one(channel(name)?)))
+            })
+        };
+        let cache_channels = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| Ok(CacheChannel::Response(channel(name)?)))
+                .collect::<Result<Vec<_>, ContractError>>()
+        };
+        let cost = match layout.max_cost_class {
+            "low" => CostClass::Low,
+            "medium" => CostClass::Medium,
+            "high" => CostClass::High,
+            other => return Err(ContractError::GeneratedContract(other.to_string())),
+        };
+        let temporal = match layout.cache_temporal {
+            "none" => TemporalRequirement::None,
+            "optional" => TemporalRequirement::Optional,
+            "required" => TemporalRequirement::Required,
+            other => return Err(ContractError::GeneratedContract(other.to_string())),
+        };
+        let mut surface = SurfaceContract::default();
+        surface.supported_lobes = layout
+            .lobes
+            .iter()
+            .filter(|lobe| lobe.supported)
+            .map(|lobe| lobe.id.to_string())
+            .collect();
+        surface.ignored_lobes_with_reason = layout
+            .lobes
+            .iter()
+            .filter_map(|lobe| {
+                lobe.ignored_reason
+                    .map(|reason| (lobe.id.to_string(), reason.to_string()))
+            })
+            .collect();
+        surface.optional_fields = layout
+            .field_mappings
+            .iter()
+            .map(|field| FieldId {
+                lobe: field.lobe.map(str::to_string),
+                name: field.name.to_string(),
+            })
+            .collect();
+        surface.ignored_fields_with_reason = layout
+            .ignored_fields
+            .iter()
+            .map(|field| {
+                (
+                    FieldId {
+                        lobe: field.lobe.map(str::to_string),
+                        name: field.name.to_string(),
+                    },
+                    field.reason.to_string(),
+                )
+            })
+            .collect();
+        surface.field_mappings = layout
+            .field_mappings
+            .iter()
+            .map(|field| FieldMapping {
+                field: FieldId {
+                    lobe: field.lobe.map(str::to_string),
+                    name: field.name.to_string(),
+                },
+                semantic: field.semantic.to_string(),
+                test: field.test.to_string(),
+            })
+            .collect();
+
+        Ok(Self {
+            surface,
+            lighting: LightingContract {
+                direct_light: layout.direct_light,
+                shadows: layout.shadows,
+                indirect_diffuse: layout.indirect_diffuse,
+                reflection: layout.reflection,
+                transmission: layout.transmission,
+                temporal_history: layout.temporal_history,
+            },
+            output: OutputContract {
+                produced_channels: channels(layout.produced_channels)?,
+                blendable_channels: channels(layout.blendable_channels)?,
+            },
+            execution: ExecutionContract {
+                supports_fused: layout.supports_fused,
+                supports_split: layout.supports_split,
+                max_cost_class: cost,
+            },
+            cache: CacheContract {
+                reads: cache_channels(layout.cache_reads)?,
+                writes: cache_channels(layout.cache_writes)?,
+                temporal,
+            },
+        })
+    }
+
     /// Checks all declarations, including fields belonging to inactive lobes.
     pub fn validate(&self, fields: &SurfaceFieldCatalog) -> Result<(), ContractError> {
         let surface = &self.surface;

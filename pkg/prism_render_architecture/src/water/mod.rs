@@ -86,8 +86,8 @@ pub mod waterline;
 pub mod wetness;
 
 use crate::deformation::DeformationHandle;
-use crate::render_fabric::{FeatureId, ResourceKey, ServiceId, WATER_SERVICE_IDS};
 pub use crate::render_fabric::ResponseProgram;
+use crate::render_fabric::{FeatureId, ResourceKey, ServiceId, WATER_SERVICE_IDS};
 
 /// The water-specific response/composition plan.
 ///

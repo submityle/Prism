@@ -108,9 +108,15 @@ const FRONTENDS: [WaterShadingPlan; 4] = [
 /// The slot a frontend occupies in [`ViewWaterSurfacePipelines::ids`].
 const fn frontend_slot(frontend: WaterShadingPlan) -> usize {
     match frontend {
-        WaterShadingPlan::Single { program: ResponseProgram::Pbr } => 0,
-        WaterShadingPlan::Single { program: ResponseProgram::Npr } => 1,
-        WaterShadingPlan::Single { program: ResponseProgram::Custom } => 2,
+        WaterShadingPlan::Single {
+            program: ResponseProgram::Pbr,
+        } => 0,
+        WaterShadingPlan::Single {
+            program: ResponseProgram::Npr,
+        } => 1,
+        WaterShadingPlan::Single {
+            program: ResponseProgram::Custom,
+        } => 2,
         WaterShadingPlan::MaskBlend { .. } => 3,
     }
 }

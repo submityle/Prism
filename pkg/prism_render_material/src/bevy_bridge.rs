@@ -15,8 +15,8 @@ use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::render_fabric::RenderDomain;
 
 use crate::{
-    GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags,
-    MaterialRecord, MaterialRenderClass, ShadingPlan,
+    GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags, MaterialRecord,
+    MaterialRenderClass, ShadingPlan,
 };
 
 #[repr(u32)]

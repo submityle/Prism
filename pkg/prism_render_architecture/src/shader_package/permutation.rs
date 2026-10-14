@@ -19,7 +19,9 @@ pub struct PermutationIndex(u64);
 
 impl PermutationIndex {
     pub const ZERO: Self = Self(0);
-    pub const fn get(self) -> u64 { self.0 }
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -40,7 +42,9 @@ pub struct PermutationSpace {
 
 impl PermutationSpace {
     /// New runtime declarations reject zero axes and any u64 product overflow.
-    pub fn try_new(axis_option_counts: impl IntoIterator<Item = u32>) -> Result<Self, PermutationError> {
+    pub fn try_new(
+        axis_option_counts: impl IntoIterator<Item = u32>,
+    ) -> Result<Self, PermutationError> {
         let axes: Vec<_> = axis_option_counts.into_iter().collect();
         if let Some(axis) = axes.iter().position(|count| *count == 0) {
             return Err(PermutationError::EmptyAxis(axis));
@@ -51,21 +55,37 @@ impl PermutationSpace {
     }
 
     pub fn checked_total(&self) -> Result<u64, PermutationError> {
-        self.axes.iter().try_fold(1u64, |total, count| total.checked_mul(u64::from(*count)).ok_or(PermutationError::Overflow))
+        self.axes.iter().try_fold(1u64, |total, count| {
+            total
+                .checked_mul(u64::from(*count))
+                .ok_or(PermutationError::Overflow)
+        })
     }
 
     pub fn check_index(&self, raw: u64) -> Result<PermutationIndex, PermutationError> {
-        if raw >= self.checked_total()? { return Err(PermutationError::IndexOutOfRange(raw)); }
+        if raw >= self.checked_total()? {
+            return Err(PermutationError::IndexOutOfRange(raw));
+        }
         Ok(PermutationIndex(raw))
     }
 
-    pub fn checked_index_of(&self, key: &PermutationKey) -> Result<PermutationIndex, PermutationError> {
+    pub fn checked_index_of(
+        &self,
+        key: &PermutationKey,
+    ) -> Result<PermutationIndex, PermutationError> {
         self.checked_total()?;
-        if key.coords.len() != self.axes.len() { return Err(PermutationError::WrongArity); }
+        if key.coords.len() != self.axes.len() {
+            return Err(PermutationError::WrongArity);
+        }
         let mut index = 0u64;
         for (axis, (&coord, &count)) in key.coords.iter().zip(&self.axes).enumerate() {
-            if coord >= count { return Err(PermutationError::CoordinateOutOfRange(axis)); }
-            index = index.checked_mul(u64::from(count)).and_then(|index| index.checked_add(u64::from(coord))).ok_or(PermutationError::Overflow)?;
+            if coord >= count {
+                return Err(PermutationError::CoordinateOutOfRange(axis));
+            }
+            index = index
+                .checked_mul(u64::from(count))
+                .and_then(|index| index.checked_add(u64::from(coord)))
+                .ok_or(PermutationError::Overflow)?;
         }
         Ok(PermutationIndex(index))
     }
@@ -207,20 +227,38 @@ mod tests {
         let index = space.checked_index_of(&key).unwrap();
         assert_eq!(index.get(), (1u64 << 40) - 1);
         assert_eq!(space.key_from_index(index.get()), Some(key));
-        assert_eq!(space.check_index(1u64 << 40), Err(PermutationError::IndexOutOfRange(1u64 << 40)));
+        assert_eq!(
+            space.check_index(1u64 << 40),
+            Err(PermutationError::IndexOutOfRange(1u64 << 40))
+        );
     }
 
     #[test]
     fn checked_space_rejects_overflow_even_for_zero_index() {
-        assert_eq!(PermutationSpace::try_new([0, 2]), Err(PermutationError::EmptyAxis(0)));
-        assert_eq!(PermutationSpace::try_new([u32::MAX; 3]), Err(PermutationError::Overflow));
+        assert_eq!(
+            PermutationSpace::try_new([0, 2]),
+            Err(PermutationError::EmptyAxis(0))
+        );
+        assert_eq!(
+            PermutationSpace::try_new([u32::MAX; 3]),
+            Err(PermutationError::Overflow)
+        );
         let legacy = PermutationSpace::new([u32::MAX; 3]);
-        assert_eq!(legacy.checked_index_of(&PermutationKey::new([0; 3])), Err(PermutationError::Overflow));
+        assert_eq!(
+            legacy.checked_index_of(&PermutationKey::new([0; 3])),
+            Err(PermutationError::Overflow)
+        );
         assert_eq!(legacy.index_of(&PermutationKey::new([0; 3])), None);
         assert_eq!(legacy.key_from_index(0), None);
         let space = PermutationSpace::try_new([2, 3]).unwrap();
-        assert_eq!(space.checked_index_of(&PermutationKey::new([0])), Err(PermutationError::WrongArity));
-        assert_eq!(space.checked_index_of(&PermutationKey::new([0, 3])), Err(PermutationError::CoordinateOutOfRange(1)));
+        assert_eq!(
+            space.checked_index_of(&PermutationKey::new([0])),
+            Err(PermutationError::WrongArity)
+        );
+        assert_eq!(
+            space.checked_index_of(&PermutationKey::new([0, 3])),
+            Err(PermutationError::CoordinateOutOfRange(1))
+        );
     }
 
     #[test]

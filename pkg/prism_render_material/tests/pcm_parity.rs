@@ -15,8 +15,8 @@ use prism_render_material::capability::{
     lobe_registry, parse_capabilities, SPECIFICATION_NAMESPACE,
 };
 use prism_render_material::{
-    BuiltinProgram, DynamicChannels, LobeMask, SURFACE_CACHE_AUX,
-    SURFACE_CHANNELS, SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES, SURFACE_RESPONSE_PROGRAMS,
+    BuiltinProgram, DynamicChannels, LobeMask, SURFACE_CACHE_AUX, SURFACE_CHANNELS,
+    SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES, SURFACE_RESPONSE_PROGRAMS,
 };
 
 /// Every schema lobe is registered in the committed catalogue with the same
@@ -267,7 +267,11 @@ fn generated_response_programs_mirror_runtime_builtins() {
             "unlit" => BuiltinProgram::Unlit,
             other => panic!("{} names unknown built-in response {other}", mode.id),
         };
-        assert_eq!(mode.id, mode.builtin, "{} id must name its built-in", mode.id);
+        assert_eq!(
+            mode.id, mode.builtin,
+            "{} id must name its built-in",
+            mode.id
+        );
         assert_eq!(mode.registry_slot, 23 + declared.len() as u32);
         assert!(mode.uid.starts_with("org.prism.response_program."));
         assert_eq!(mode.namespace, "PRISM");
@@ -278,7 +282,11 @@ fn generated_response_programs_mirror_runtime_builtins() {
     }
     assert_eq!(
         declared,
-        vec![BuiltinProgram::Lit, BuiltinProgram::Npr, BuiltinProgram::Unlit]
+        vec![
+            BuiltinProgram::Lit,
+            BuiltinProgram::Npr,
+            BuiltinProgram::Unlit
+        ]
     );
 
     // The response table is the identity source; no material-side bit axis is
@@ -397,7 +405,11 @@ fn the_schema_cache_aux_matches_the_catalogue() {
     let mut expected: Vec<u32> = SURFACE_CHANNELS
         .iter()
         .map(|channel| channel.registry_slot)
-        .chain(SURFACE_RESPONSE_PROGRAMS.iter().map(|mode| mode.registry_slot))
+        .chain(
+            SURFACE_RESPONSE_PROGRAMS
+                .iter()
+                .map(|mode| mode.registry_slot),
+        )
         .chain(slots)
         .collect();
     expected.sort_unstable();

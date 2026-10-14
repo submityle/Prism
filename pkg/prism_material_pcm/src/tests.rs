@@ -8,9 +8,8 @@ use crate::builtin::{
     UID_CACHE_AUX_SURFEL, UID_CHANNEL_DAMAGE, UID_CHANNEL_DISSOLVE, UID_CHANNEL_SNOW,
     UID_CHANNEL_WETNESS, UID_COMPOSITE_OUTLINE, UID_DOWNGRADE_SAMPLE_BUDGET, UID_LOBE_ANISOTROPY,
     UID_LOBE_CLEARCOAT, UID_LOBE_EMISSION, UID_LOBE_FACE, UID_LOBE_GLINT, UID_LOBE_SHEEN,
-    UID_LOBE_SUBSURFACE, UID_LOBE_THIN_FILM, UID_LOBE_TRANSMISSION, UID_MODE_CUSTOM,
-    UID_MODE_STYLIZED, UID_MODE_UNLIT, UID_PROVIDER_FACE_SHADOW_SDF, UID_PROVIDER_MEASURED_BRDF,
-    UID_TRANSFER_SRGB,
+    UID_LOBE_SUBSURFACE, UID_LOBE_THIN_FILM, UID_LOBE_TRANSMISSION, UID_MODE_LIT, UID_MODE_NPR,
+    UID_MODE_UNLIT, UID_PROVIDER_FACE_SHADOW_SDF, UID_PROVIDER_MEASURED_BRDF, UID_TRANSFER_SRGB,
 };
 use crate::namespace::Region;
 use crate::negotiate::negotiate;
@@ -634,9 +633,9 @@ fn the_catalogue_covers_every_kind_that_has_an_implementation() {
         assert!(registry.slot_of_uid(uid).is_none());
     }
     for uid in [
-        UID_MODE_STYLIZED,
+        UID_MODE_LIT,
+        UID_MODE_NPR,
         UID_MODE_UNLIT,
-        UID_MODE_CUSTOM,
         UID_CACHE_AUX_SURFEL,
         UID_CHANNEL_WETNESS,
         UID_CHANNEL_SNOW,
@@ -655,7 +654,7 @@ fn the_catalogue_covers_every_kind_that_has_an_implementation() {
         .filter(|m| m.kind() == Kind::ResponseMode)
         .map(ExtensionManifest::uid)
         .collect();
-    assert_eq!(modes, [UID_MODE_STYLIZED, UID_MODE_UNLIT, UID_MODE_CUSTOM]);
+    assert_eq!(modes, [UID_MODE_LIT, UID_MODE_NPR, UID_MODE_UNLIT]);
 }
 
 /// A bake/pass-time row still negotiates its capabilities — just by name,

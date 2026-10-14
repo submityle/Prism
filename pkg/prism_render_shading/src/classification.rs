@@ -1,8 +1,8 @@
 use alloc::vec::Vec;
 use prism_render_material::{
-    BuiltinProgram, ClosureKind, GpuMaterialHeader, LobeLayout,
-    MaterialExecutionTables, MaterialFeatureFlags, MaterialRenderClass, ProgramRef, RenderDomain,
-    ResponseProgramLayout, SURFACE_RESPONSE_PROGRAMS,
+    BuiltinProgram, ClosureKind, GpuMaterialHeader, LobeLayout, MaterialExecutionTables,
+    MaterialFeatureFlags, MaterialRenderClass, ProgramRef, RenderDomain, ResponseProgramLayout,
+    SURFACE_RESPONSE_PROGRAMS,
 };
 
 /// Response family derived from the verified program table. This is a shading
@@ -353,12 +353,6 @@ fn response_mode_rows(
     for mode in modes {
         let manifest = registry
             .manifest_by_uid(mode.uid)
-            .or_else(|| {
-                registry.iter().find(|manifest| {
-                    manifest.kind() == prism_material_pcm::Kind::ResponseMode
-                        && manifest.registry_slot() == Some(mode.registry_slot)
-                })
-            })
             .ok_or_else(|| ClassTableError::UnregisteredResponseMode(mode.uid.to_owned()))?;
         if manifest.kind() != prism_material_pcm::Kind::ResponseMode {
             return Err(ClassTableError::UnregisteredResponseMode(
@@ -641,18 +635,14 @@ impl ShadingClassTable {
         let illumination = response.illumination();
         let illumination = match (illumination, region_illumination) {
             (Some(Illumination::Lit | Illumination::Stylized), 0) => Some(Illumination::Lit),
-            (Some(Illumination::Lit | Illumination::Stylized), 1) => {
-                Some(Illumination::Stylized)
-            }
+            (Some(Illumination::Lit | Illumination::Stylized), 1) => Some(Illumination::Stylized),
             (value, _) => value,
         };
         for row in &self.rows {
             let matched = match row.rule {
                 ShadingClassRule::RenderClass(class) => header.render_class == class as u32,
                 ShadingClassRule::Domain(domain) => header.render_domain == domain as u32,
-                ShadingClassRule::Feature(feature) => {
-                    header.feature_flags & feature.0 == feature.0
-                }
+                ShadingClassRule::Feature(feature) => header.feature_flags & feature.0 == feature.0,
                 ShadingClassRule::Illumination(axis) => {
                     let Some(actual) = illumination else {
                         return Err(ClassificationError::UnsupportedIllumination(
@@ -739,7 +729,12 @@ fn response_identity(
         return Err(ClassificationError::ExecutionContextRequired);
     };
     let binding = execution
-        .bind_raw(words[0], words[1], words[2], u64::from(words[3]) | (u64::from(words[4]) << 32))
+        .bind_raw(
+            words[0],
+            words[1],
+            words[2],
+            u64::from(words[3]) | (u64::from(words[4]) << 32),
+        )
         .map_err(|_| ClassificationError::InvalidExecutionBinding)?;
     let program = execution
         .program(binding.response_program_index)
@@ -885,7 +880,11 @@ fn classify_response(
         (Some(Illumination::Lit | Illumination::Stylized), 0) => Illumination::Lit,
         (Some(Illumination::Lit | Illumination::Stylized), 1) => Illumination::Stylized,
         (Some(value), _) => value,
-        (None, _) => return Err(ClassificationError::UnsupportedIllumination(response.raw_value())),
+        (None, _) => {
+            return Err(ClassificationError::UnsupportedIllumination(
+                response.raw_value(),
+            ))
+        }
     };
     match illumination {
         Illumination::Unlit => Ok(MaterialShadingClass::Unlit),
@@ -1031,7 +1030,11 @@ mod tests {
     fn hair_domain_and_water_feature_bind_their_bucket_directly() {
         for (domain, features, expected) in [
             (RenderDomain::Hair, 0, MaterialShadingClass::Hair),
-            (RenderDomain::Surface, MaterialFeatureFlags::WATER.0, MaterialShadingClass::Water),
+            (
+                RenderDomain::Surface,
+                MaterialFeatureFlags::WATER.0,
+                MaterialShadingClass::Water,
+            ),
         ] {
             let mut header = fallback_material_header(1);
             header.render_domain = domain as u32;
@@ -1280,7 +1283,7 @@ mod tests {
     fn response_mode(
         uid: &'static str,
         registry_slot: u32,
-            builtin: &'static str,
+        builtin: &'static str,
     ) -> ResponseProgramLayout {
         ResponseProgramLayout {
             id: "test",
@@ -1292,6 +1295,23 @@ mod tests {
             builtin,
             requires_caps: &[],
             view_dependent: true,
+            lobes: &[],
+            field_mappings: &[],
+            ignored_fields: &[],
+            direct_light: false,
+            shadows: false,
+            indirect_diffuse: false,
+            reflection: false,
+            transmission: false,
+            temporal_history: false,
+            produced_channels: &[],
+            blendable_channels: &[],
+            supports_fused: false,
+            supports_split: true,
+            max_cost_class: "low",
+            cache_reads: &[],
+            cache_writes: &[],
+            cache_temporal: "none",
         }
     }
 
@@ -1302,7 +1322,7 @@ mod tests {
             &registry,
             &[response_mode(
                 prism_material_pcm::builtin::UID_MODE_STYLIZED,
-                23,
+                24,
                 "not_a_builtin",
             )],
         )
@@ -1339,7 +1359,7 @@ mod tests {
         let error = response_mode_rows(
             &registry,
             &[response_mode(
-                prism_material_pcm::builtin::UID_MODE_STYLIZED,
+                prism_material_pcm::builtin::UID_MODE_LIT,
                 99,
                 "stylized",
             )],
@@ -1348,7 +1368,7 @@ mod tests {
         assert_eq!(
             error,
             ClassTableError::ResponseModeSlotMismatch {
-                uid: String::from(prism_material_pcm::builtin::UID_MODE_STYLIZED),
+                uid: String::from(prism_material_pcm::builtin::UID_MODE_LIT),
                 schema: 99,
                 registry: 23,
             }

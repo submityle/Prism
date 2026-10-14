@@ -114,6 +114,9 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.thin_film_thickness = 0.5;
     s.thin_film_ior = 1.4;
     s.npr_face_softness = 0.1;
+    s.npr_stylized_ramp_softness = 1.0;
+    s.npr_stylized_specular_scale = 1.0;
+    s.npr_stylized_rim_scale = 1.0;
     s.glint_weight = 0.0;
     s.glint_roughness = 0.1;
     s.glint_density = 4.0;
@@ -246,6 +249,9 @@ fn prism_unpack_surface(words: array<u32, 104>, lobe_mask: u32) -> PrismSurfaceP
     }
     if (lobe_mask & PRISM_LOBE_NPR_FACE) != 0u {
         s.npr_face_softness = bitcast<f32>(w[cursor]);
+        s.npr_stylized_ramp_softness = bitcast<f32>(w[cursor + 1u]);
+        s.npr_stylized_specular_scale = bitcast<f32>(w[cursor + 2u]);
+        s.npr_stylized_rim_scale = bitcast<f32>(w[cursor + 3u]);
         cursor += PRISM_LOBE_WORDS_NPR_FACE;
     }
     if (lobe_mask & PRISM_LOBE_GLINT) != 0u {

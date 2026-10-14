@@ -50,8 +50,8 @@ use super::{
         prepare_shading_composite_pipelines, ShadingCompositePipeline,
     },
     composition::{
-        init_response_composition, prepare_response_composition_targets,
-        response_composition_pass, ResponseCompositionSystems,
+        init_response_composition, prepare_response_composition_targets, response_composition_pass,
+        ResponseCompositionSystems,
     },
     ddgi::{
         ddgi_composite_pass, ddgi_probe_update_pass, ddgi_sample_pass,

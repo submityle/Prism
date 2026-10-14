@@ -121,9 +121,7 @@ mod tests {
         CpuRenderScene, GeometryHandle, InstanceRecord, SceneBounds, SceneHandle,
         SceneMaterialHandle, SceneOperation, SceneTransaction,
     };
-    use prism_render_material::{
-        MaterialDomain, MaterialRecord, MaterialRenderClass,
-    };
+    use prism_render_material::{MaterialDomain, MaterialRecord, MaterialRenderClass};
 
     fn reverse_z_clip() -> [[f32; 4]; 4] {
         [

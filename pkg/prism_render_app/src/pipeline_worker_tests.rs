@@ -38,7 +38,12 @@ fn descriptor() -> RenderPipelineDescriptor {
 }
 
 fn key(class: u32) -> PipelineKey {
-    PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(u64::from(class)), PermutationIndex::ZERO, &descriptor())
+    PipelineKey::from_descriptor(
+        ExecutionFamily::FusedBuiltin,
+        ModuleId(u64::from(class)),
+        PermutationIndex::ZERO,
+        &descriptor(),
+    )
 }
 
 struct ControlledCompiler {

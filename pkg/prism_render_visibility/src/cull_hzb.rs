@@ -105,9 +105,7 @@ mod tests {
     use prism_render_architecture::gpu_scene::{
         InstanceRecord, SceneBounds, SceneOperation, SceneTransaction,
     };
-    use prism_render_material::{
-        MaterialDomain, MaterialRecord, MaterialRenderClass,
-    };
+    use prism_render_material::{MaterialDomain, MaterialRecord, MaterialRenderClass};
 
     /// Reversed-Z clip matrix (column-major): `clip.w = z`, `clip.z = 1`, so
     /// `ndc.z = 1 / z` — nearer points read a larger reversed-Z depth.

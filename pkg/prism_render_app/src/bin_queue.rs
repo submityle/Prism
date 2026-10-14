@@ -28,9 +28,9 @@ use prism_render_graph::BufferHandle;
 use prism_render_visibility::{DrawBinRange, ViewDrawBins};
 
 use crate::draw::DrawFunctionId;
+use crate::frame::RENDER_TARGET_FORMAT;
 use crate::mesh_pipeline::{MeshPipelineProvider, MeshPipelineSpecializer};
 use crate::queue::{IndirectArgs, PhaseItem, RenderQueues};
-use crate::frame::RENDER_TARGET_FORMAT;
 use crate::scene::SceneRegistry;
 
 /// The indirect argument range one packed bin owns.
@@ -144,32 +144,37 @@ impl RenderQueues {
                 continue;
             };
             for pass in passes {
-            let variant = pass.mesh_variant(mesh_class.topology, Some(RENDER_TARGET_FORMAT), depth_format, sample_count);
-            let pipeline = specializer
-                .specialize_with_provider(device, variant, &mesh_class.layout, provider)
-                .id();
-            self.push(
-                pass.render_phase,
-                PhaseItem {
-                    pipeline,
-                    draw: pass.draw.unwrap_or(draw),
-                    geometry: range.key.geometry,
-                    vertices: buffers.vertices.clone(),
-                    indices: buffers.indices,
-                    first: 0,
-                    count: 0,
-                    base_vertex: 0,
-                    indirect: Some(bin_indirect_args(args, range, bins.command_buffer_start)),
-                    lod_level: range.key.lod_or_cluster,
-                    material: instance.material,
-                    scene: range.representative_scene,
-                    order: u64::from(
-                        bins.command_buffer_start
-                            .saturating_add(range.command_start),
-                    ),
-                },
-            );
-            outcome.work_items += 1;
+                let variant = pass.mesh_variant(
+                    mesh_class.topology,
+                    Some(RENDER_TARGET_FORMAT),
+                    depth_format,
+                    sample_count,
+                );
+                let pipeline = specializer
+                    .specialize_with_provider(device, variant, &mesh_class.layout, provider)
+                    .id();
+                self.push(
+                    pass.render_phase,
+                    PhaseItem {
+                        pipeline,
+                        draw: pass.draw.unwrap_or(draw),
+                        geometry: range.key.geometry,
+                        vertices: buffers.vertices.clone(),
+                        indices: buffers.indices,
+                        first: 0,
+                        count: 0,
+                        base_vertex: 0,
+                        indirect: Some(bin_indirect_args(args, range, bins.command_buffer_start)),
+                        lod_level: range.key.lod_or_cluster,
+                        material: instance.material,
+                        scene: range.representative_scene,
+                        order: u64::from(
+                            bins.command_buffer_start
+                                .saturating_add(range.command_start),
+                        ),
+                    },
+                );
+                outcome.work_items += 1;
             }
             outcome.queued += 1;
         }

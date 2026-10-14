@@ -177,6 +177,7 @@ impl SpecializedMeshPipeline for VisibilityRasterPipeline {
         if self.bindless_materials {
             shader_defs.push("MATERIAL_BINDLESS".into());
             shader_defs.push("REGION_ILLUMINATION".into());
+            shader_defs.push("ILLUMINATION_BLEND".into());
         }
         let mut attributes = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)];
         if has_uvs {

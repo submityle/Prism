@@ -710,8 +710,8 @@ pub fn plan_frame(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ResponseProgram;
+    use super::*;
     use crate::deformation::DeformationHandle;
 
     const CONFIG: WaterFrameConfig = WaterFrameConfig {
