@@ -58,14 +58,9 @@
 //!   pipeline plan and the shared-service wiring — pure integer bookkeeping,
 //!   not machine-verified.
 //!
-//! **Frontend orthogonality.** The `PBR`, `NPR`, custom, and hybrid frontends
-//! diverge *only* in their lighting response (see [`ShadingFrontend`]). Every
-//! frontend — `NPR` included — consumes the exact same shared advanced base:
-//! `Lumen`-style hybrid `GI`, `ReSTIR` `DI`/`GI`, virtual shadow-map cloud
-//! shadows, froxel volumetrics, the atmosphere-scattering `LUT` service, the
-//! path-tracing reference, and temporal upsampling. This is encoded in
-//! [`SharedBaseServices`] and asserted by [`ShadingFrontend::shared_base`], so
-//! "does `NPR` miss any next-gen capability?" has a compile-checked answer: no.
+//! **Response orthogonality.** `PBR`, `NPR`, and custom are response
+//! programs. Active volume roots consume services through the built-in
+//! `FeatureCatalog` closure; that closure is the only shared-service authority.
 //! Virtual geometry is intentionally *not* in the base — clouds have no triangle
 //! mesh and use the density field + ray-march instead — which is why this
 //! subsystem does not touch `DeformationKind` either.
@@ -255,7 +250,7 @@ pub struct CloudWeatherParams {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CloudShading {
     /// Lighting-response frontend.
-    pub frontend: ShadingFrontend,
+    pub frontend: ResponseProgram,
     /// Silver-lining strength `0..=1` for grazing-sun edge brightening.
     pub silver_lining: f32,
     /// Powder-effect strength `0..=1` for dense-cloud dark-edge darkening.
@@ -263,12 +258,12 @@ pub struct CloudShading {
     /// Ambient (sky/ground) light ratio `0..=1` mixed into scattering.
     pub ambient_ratio: f32,
     /// Top-tier next-gen `NPR` stylization vector (design section 9e).
-    /// Consulted only when [`Self::frontend`] resolves to the `NPR` or
-    /// hybrid path; `PBR` and custom frontends ignore it. It is always
+    /// Consulted only when [`Self::frontend`] resolves to the `NPR` response or
+    /// the hybrid composition path; `PBR` and custom responses ignore it. It is always
     /// present so a layer can switch frontends at runtime without
     /// reshaping its shading contract.
     pub npr: NprStyle,
-    /// Per-height `PBR`↔`NPR` blend mask for the hybrid frontend
+    /// Per-height `PBR`↔`NPR` blend mask for the hybrid composition
     /// (design section 5.3/5.4). Ignored by the non-hybrid frontends.
     pub hybrid_mix: HybridLayerMix,
 }
@@ -279,7 +274,7 @@ pub struct CloudShading {
 /// stylized clouds to capability parity with the `PBR` frontend. The geometry,
 /// simulation, `AVSM` self-shadowing, multiple scattering, `GI`, atmosphere,
 /// and temporal upsampling feeding an `NPR` layer are byte-for-byte identical
-/// to the `PBR` path (see [`ShadingFrontend`]); only the final lighting
+/// to the `PBR` path (see [`ResponseProgram`]); only the final lighting
 /// interpretation and screen-space stylization differ. Every axis is a pure,
 /// deterministic, artist-facing scalar (or a small integer cadence), so the
 /// whole struct is `CPU`-testable with no `GPU` state.
@@ -616,115 +611,23 @@ impl WeatherSample {
     }
 }
 
-/// The set of shared advanced base services a volumetric frontend consumes.
-///
-/// These services live in sibling crates/modules (`lighting`, `virtual_shadow`,
-/// the atmosphere service, `ray_scene`, `temporal_upscale`); the volumetric
-/// subsystem only *consumes* them and never reimplements them. Virtual geometry
-/// is deliberately absent — clouds have no triangle mesh — which is the one
-/// expected difference from the mesh subsystems. Bit operations are integer
-/// comparisons, never `f32` equality.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct SharedBaseServices(u16);
+use crate::render_fabric::{ServiceId, VOLUME_SERVICE_IDS};
+pub use crate::render_fabric::ResponseProgram;
 
-impl SharedBaseServices {
-    /// `Lumen`-style hybrid global illumination (ambient sky/ground light).
-    pub const HYBRID_GI: Self = Self(1 << 0);
-    /// `ReSTIR` direct/indirect resampling for many lights (sun/moon/lightning).
-    pub const RESTIR: Self = Self(1 << 1);
-    /// Virtual shadow-map cloud shadows onto the world.
-    pub const VSM_SHADOW: Self = Self(1 << 2);
-    /// Froxel volumetrics for god rays / crepuscular light-shaft injection.
-    pub const FROXEL_VOLUME: Self = Self(1 << 3);
-    /// Atmosphere-scattering `LUT` service (transmittance / multi-scatter /
-    /// aerial perspective) — consumed, never rewritten.
-    pub const ATMOSPHERE_LUT: Self = Self(1 << 4);
-    /// Offline ray-traced / path-tracing reference for calibration only.
-    pub const RT_REFERENCE: Self = Self(1 << 5);
-    /// Temporal upsampling / anti-aliasing history.
-    pub const TEMPORAL_UPSAMPLE: Self = Self(1 << 6);
-
-    /// The empty set.
-    pub const NONE: Self = Self(0);
-
-    /// The full shared advanced base — the seven services above.
-    pub const ALL: Self =
-        Self((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6));
-
-    /// Number of distinct services in the full base.
-    pub const COUNT: u32 = 7;
-
-    /// Raw bit pattern.
-    #[must_use]
-    pub const fn bits(self) -> u16 {
-        self.0
-    }
-
-    /// Union of two service sets.
-    #[must_use]
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    /// `true` when `self` contains every service in `other`.
-    #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        (self.0 & other.0) == other.0
-    }
-
-    /// Count of services present in this set.
-    #[must_use]
-    pub const fn len(self) -> u32 {
-        self.0.count_ones()
-    }
-
-    /// `true` when no service is present.
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-}
-
-/// The four shading frontends. They diverge only in the lighting response;
-/// geometry, simulation, `AVSM` self-shadowing, multiple scattering, and the
-/// entire shared advanced base ([`SharedBaseServices`]) are identical across
-/// all four — so top-tier `NPR` clouds are at capability parity with `PBR`
-/// (design section 5 / 9e).
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ShadingFrontend {
-    /// Physically based: Henyey-Greenstein dual-lobe + Draine phase, single +
-    /// multiple scattering, powder, silver lining, spectral sunset, aerial
-    /// perspective; calibrated against the path-tracing reference.
-    Pbr,
-    /// Stylized (illumination axis): ramp-quantized lighting, toon layer blocks,
-    /// hand-drawn cloud outlines, painterly strokes, ink diffusion, 2.5D
-    /// parallax puffiness, stylized crepuscular shafts (design section 9e).
-    Npr,
-    /// Author-injected phase/lighting closure compiled into a `WESL`
-    /// specialization, without changing the kernel.
-    Custom,
-    /// Per-layer / per-region blend of the above across a stacked cloud domain.
-    Hybrid,
-}
-
-impl ShadingFrontend {
-    /// The shared advanced base this frontend consumes.
-    ///
-    /// Every frontend consumes the full base: `NPR` is *not* a reduced path.
-    /// The frontends differ only in how they interpret the resulting lighting,
-    /// so this returns [`SharedBaseServices::ALL`] unconditionally.
-    #[must_use]
-    pub fn shared_base(self) -> SharedBaseServices {
-        SharedBaseServices::ALL
-    }
-
-    /// `true` when this frontend consumes the entire shared advanced base.
-    /// Holds for all four frontends by construction.
-    #[must_use]
-    pub fn shares_full_base(self) -> bool {
-        self.shared_base().contains(SharedBaseServices::ALL)
-    }
-}
+/// Stable semantic service identity for volumetric feature declarations.
+pub const VOLUMETRIC_HYBRID_GI: ServiceId = VOLUME_SERVICE_IDS[0];
+/// Stable semantic service identity for `ReSTIR` light resampling.
+pub const VOLUMETRIC_RESTIR: ServiceId = VOLUME_SERVICE_IDS[1];
+/// Stable semantic service identity for virtual shadow maps.
+pub const VOLUMETRIC_VSM_SHADOW: ServiceId = VOLUME_SERVICE_IDS[2];
+/// Stable semantic service identity for froxel volumetrics.
+pub const VOLUMETRIC_FROXEL_VOLUME: ServiceId = VOLUME_SERVICE_IDS[3];
+/// Stable semantic service identity for atmosphere scattering LUTs.
+pub const VOLUMETRIC_ATMOSPHERE_LUT: ServiceId = VOLUME_SERVICE_IDS[4];
+/// Stable semantic service identity for the path-tracing reference.
+pub const VOLUMETRIC_RT_REFERENCE: ServiceId = VOLUME_SERVICE_IDS[5];
+/// Stable semantic service identity for temporal upsampling.
+pub const VOLUMETRIC_TEMPORAL_UPSAMPLE: ServiceId = VOLUME_SERVICE_IDS[6];
 
 /// Per-frame caps arbitrated by [`budget::plan_volumetric`], the volumetric
 /// analogue of [`crate::deformation::DeformationBudget`]. Each quota is
@@ -799,37 +702,32 @@ mod tests {
     }
 
     #[test]
-    fn shared_base_set_algebra() {
-        let a = SharedBaseServices::HYBRID_GI.union(SharedBaseServices::RESTIR);
-        assert!(a.contains(SharedBaseServices::HYBRID_GI));
-        assert!(!a.contains(SharedBaseServices::VSM_SHADOW));
-        assert_eq!(a.len(), 2);
-        assert!(SharedBaseServices::NONE.is_empty());
-        assert_eq!(SharedBaseServices::ALL.len(), SharedBaseServices::COUNT);
+    fn shared_base_declaration_is_complete() {
+        let required = crate::render_fabric::volume_required_services();
+        assert_eq!(required.as_slice().len(), 7);
+        assert!(required.contains(VOLUMETRIC_HYBRID_GI));
+        assert!(!crate::render_fabric::ServiceSet::EMPTY.contains(VOLUMETRIC_VSM_SHADOW));
     }
 
     #[test]
     fn every_frontend_shares_the_full_advanced_base() {
-        // The core contract: NPR is not a reduced path. All four frontends
+        // The core contract: NPR is not a reduced path. All response programs
         // consume the entire shared advanced base.
-        for frontend in [
-            ShadingFrontend::Pbr,
-            ShadingFrontend::Npr,
-            ShadingFrontend::Custom,
-            ShadingFrontend::Hybrid,
+        for _frontend in [
+            ResponseProgram::Pbr,
+            ResponseProgram::Npr,
+            ResponseProgram::Custom,
         ] {
-            assert!(frontend.shares_full_base());
-            assert_eq!(frontend.shared_base(), SharedBaseServices::ALL);
             for service in [
-                SharedBaseServices::HYBRID_GI,
-                SharedBaseServices::RESTIR,
-                SharedBaseServices::VSM_SHADOW,
-                SharedBaseServices::FROXEL_VOLUME,
-                SharedBaseServices::ATMOSPHERE_LUT,
-                SharedBaseServices::RT_REFERENCE,
-                SharedBaseServices::TEMPORAL_UPSAMPLE,
+                VOLUMETRIC_HYBRID_GI,
+                VOLUMETRIC_RESTIR,
+                VOLUMETRIC_VSM_SHADOW,
+                VOLUMETRIC_FROXEL_VOLUME,
+                VOLUMETRIC_ATMOSPHERE_LUT,
+                VOLUMETRIC_RT_REFERENCE,
+                VOLUMETRIC_TEMPORAL_UPSAMPLE,
             ] {
-                assert!(frontend.shared_base().contains(service));
+                assert!(crate::render_fabric::volume_required_services().contains(service));
             }
         }
     }

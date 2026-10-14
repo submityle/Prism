@@ -21,6 +21,7 @@ fn services(values: &[ServiceId]) -> ServiceSet {
 fn service_set_equality_ignores_declaration_order() {
     assert_eq!(services(&[SA, SB]), services(&[SB, SA]));
     assert_ne!(services(&[SA, SB]), services(&[SA, SA]));
+    assert_ne!(services(&[SA, SA]), services(&[SA, SB]));
 }
 fn usage(key: ResourceKey, access: AccessKind) -> ResourceUse {
     ResourceUse {
@@ -468,12 +469,56 @@ fn all_write_access_kinds_satisfy_output_contract() {
         AccessKind::DepthAttachment,
         AccessKind::TransferWrite,
     ] {
+        let mut output_pass = pass(100, vec![usage(KA, access)]);
+        output_pass.queue = match access {
+            AccessKind::ColorAttachment | AccessKind::DepthAttachment => QueueClass::Graphics,
+            AccessKind::StorageWrite | AccessKind::TransferWrite => QueueClass::Compute,
+            _ => unreachable!(),
+        };
         let feature = replace_variants(
             provider(A, SA, KA, &[]),
-            vec![variant(100, 0, vec![pass(100, vec![usage(KA, access)])])],
+            vec![variant(100, 0, vec![output_pass])],
         );
         assert!(catalog(vec![feature], vec![KA]).is_ok());
     }
+}
+
+#[test]
+fn queue_access_combinations_are_rejected_before_runtime_lowering() {
+    let key = ResourceKey::of(ROOT, 0);
+    let mut transfer_storage = pass(100, vec![usage(key, AccessKind::StorageWrite)]);
+    transfer_storage.queue = QueueClass::Transfer;
+    assert_eq!(
+        error(
+            vec![replace_variants(
+                root(&[]),
+                vec![variant(100, 0, vec![transfer_storage])]
+            )],
+            vec![key]
+        ),
+        CatalogError::UnsupportedQueueAccess {
+            pass: PassKey(100),
+            queue: QueueClass::Transfer,
+            access: AccessKind::StorageWrite,
+        }
+    );
+
+    let mut compute_attachment = pass(101, vec![usage(key, AccessKind::ColorAttachment)]);
+    compute_attachment.queue = QueueClass::Compute;
+    assert_eq!(
+        error(
+            vec![replace_variants(
+                root(&[]),
+                vec![variant(101, 0, vec![compute_attachment])]
+            )],
+            vec![key]
+        ),
+        CatalogError::UnsupportedQueueAccess {
+            pass: PassKey(101),
+            queue: QueueClass::Compute,
+            access: AccessKind::ColorAttachment,
+        }
+    );
 }
 
 #[test]
@@ -813,11 +858,15 @@ fn capability_quality_matrix_selects_minimum_admissible_rank() {
     );
     mid.required_caps = CapabilitySet::from_slice(&[Capability::Compute]);
     mid.min_quality = RenderQualityTier::Medium;
-    let low = variant(
+    let mut low = variant(
         102,
         2,
         vec![pass(102, vec![usage(KA, AccessKind::ColorAttachment)])],
     );
+    low.passes = table(vec![PassTemplate {
+        queue: QueueClass::Graphics,
+        ..low.passes[0]
+    }]);
     let valid = catalog(
         vec![
             root(&[SA]),

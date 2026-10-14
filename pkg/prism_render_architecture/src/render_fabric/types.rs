@@ -27,7 +27,8 @@ pub struct ServiceSet(&'static [ServiceId]);
 
 impl PartialEq for ServiceSet {
     fn eq(&self, other: &Self) -> bool {
-        self.0.len() == other.0.len() && self.0.iter().all(|service| other.0.contains(service))
+        self.0.iter().all(|service| other.0.contains(service))
+            && other.0.iter().all(|service| self.0.contains(service))
     }
 }
 
@@ -46,6 +47,14 @@ impl ServiceSet {
 
     pub fn contains(self, service: ServiceId) -> bool {
         self.0.contains(&service)
+    }
+
+    pub fn len(self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0.is_empty()
     }
 
     pub fn is_superset(self, other: Self) -> bool {
@@ -121,6 +130,7 @@ pub struct ResourceUse {
     pub frame_lag: Option<FrameLag>,
 }
 
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenderDomain {
     Surface,
@@ -128,6 +138,16 @@ pub enum RenderDomain {
     Volume,
     Hair,
     Decal,
+}
+
+/// Response axis shared by domain renderers. It is orthogonal to
+/// [`RenderDomain`] and to blend/raster state; a domain chooses where it is
+/// drawn, while this value chooses how its lighting response is evaluated.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ResponseProgram {
+    Pbr,
+    Npr,
+    Custom,
 }
 
 /// Device/configuration quality, not a per-frame budget or measurement.

@@ -191,7 +191,7 @@ mod tests {
         CpuRenderScene, SceneOperation, SceneTransactionBuilder,
     };
     use prism_render_material::{
-        GpuSurfaceParameters, Illumination, MaterialDomain, MaterialFeatureFlags, MaterialRecord,
+        GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags, MaterialRecord,
         MaterialRenderClass,
     };
 
@@ -294,13 +294,13 @@ mod tests {
             handle: handle(1),
             revision: 1,
             domain: MaterialDomain::default(),
+            render_domain: prism_render_material::RenderDomain::Surface,
             render_class: MaterialRenderClass::Opaque,
-            illumination: Illumination::default(),
+            response_plan: prism_render_material::ShadingPlan::default(),
             features: MaterialFeatureFlags::default(),
             closure_mask: 0,
             surface: GpuSurfaceParameters::default(),
             textures: alloc::vec::Vec::new(),
-            custom_program: None,
         }
     }
 

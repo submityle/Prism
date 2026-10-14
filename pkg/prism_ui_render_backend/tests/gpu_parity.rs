@@ -19,12 +19,29 @@ use prism_ui_style::Color;
 /// magnitude larger than this.
 const TOL: f32 = 2.0e-3;
 
+fn require_gpu() -> bool {
+    std::env::var_os("PRISM_REQUIRE_GPU").is_some()
+}
+
+/// Keep CPU-only CI usable, but make an explicitly required GPU run fail loud.
+fn try_gpu(test_name: &str) -> Option<GpuRasterizer> {
+    let gpu = GpuRasterizer::try_new();
+    if gpu.is_none() {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU set but {test_name} could not acquire a usable WGPU device"
+        );
+        eprintln!("{test_name}: no usable WGPU device, skipping");
+    }
+    gpu
+}
+
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
     Rect::new(Point::new(x, y), Size::new(w, h))
 }
 
 fn assert_parity(list: &DrawList, w: u32, h: u32) {
-    let Some(gpu) = GpuRasterizer::try_new() else {
+    let Some(gpu) = try_gpu("GPU/CPU raster parity") else {
         return;
     };
     let cpu: Framebuffer = rasterize(list, w, h);

@@ -1,8 +1,8 @@
-//! The four-frontend lighting-response fork (design §5).
+//! The response-program lighting fork (design §5).
 //!
 //! Geometry, simulation, refraction routing, and the entire shared advanced
-//! base ([`super::SharedBaseServices`]) are identical across every frontend;
-//! the frontends diverge *only* in how they interpret the resolved lighting.
+//! service closure is identical across every response arm;
+//! the response programs diverge *only* in how they interpret the resolved lighting.
 //! This module owns that divergence and nothing else.
 //!
 //! - [`pbr`] — physically based: `Schlick` `Fresnel` from the water `IOR`, the
@@ -12,9 +12,9 @@
 //! - [`npr`] — stylized (illumination axis): ramp-quantized water color, toon
 //!   specular blocks, hand-drawn shoreline foam edges, `halftone` caustics, and
 //!   flow-aligned stylization lines. Mirrors `Zelda`/`Genshin`/`Okami` water.
-//! - [`hybrid`] — per-region blend of the two by depth and shore proximity plus
-//!   an orthogonal stylized overlay (`Arcane`-style hand-paint over a physical
-//!   base). All four frontends remain first-class citizens.
+//! - [`hybrid`] — the implementation behind the `MaskBlend` composition plan,
+//!   blending the physical and stylized response arms by depth and shore
+//!   proximity plus an orthogonal stylized overlay.
 //!
 //! Every planner here is a pure, deterministic function of a static
 //! [`ShadingProfile`] slice and per-view [`SurfaceShadingInputs`]: identical
@@ -22,7 +22,7 @@
 //! across frames. This mirrors the [`super::optics`] planning contract.
 
 use super::underwater::RgbColor;
-use super::ShadingFrontend;
+use super::{ResponseProgram, WaterShadingPlan};
 
 pub mod hybrid;
 pub mod npr;
@@ -47,7 +47,7 @@ pub enum ReflectionTier {
 /// Per-view lighting inputs shared by every frontend.
 ///
 /// These are the resolved, frontend-agnostic quantities the renderer samples
-/// each frame. The frontends read the subset they need and respond
+/// each frame. The response programs read the subset they need and respond
 /// differently; the inputs themselves never encode a frontend decision.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceShadingInputs {
@@ -238,34 +238,44 @@ pub enum WaterShadingResponse {
     Npr(NprResponse),
     /// Custom-closure response over a physical base.
     Custom(CustomResponse),
-    /// Per-region hybrid blend response.
-    Hybrid(HybridResponse),
+    /// Per-region composition response. The composition is not a response
+    /// program and is therefore named after its plan variant.
+    MaskBlend(HybridResponse),
 }
 
 /// Dispatch the lighting-response fork for one body.
 ///
 /// Selects the frontend planner and returns its frontend-tagged response. Pure
 /// and deterministic: geometry/simulation/base services are untouched here, so
-/// this is the single point where the four frontends diverge.
+/// this is the single point where response programs diverge.
 #[must_use]
 pub fn plan_shading(
-    frontend: ShadingFrontend,
+    frontend: ResponseProgram,
     profile: ShadingProfile,
     inputs: SurfaceShadingInputs,
 ) -> WaterShadingResponse {
     match frontend {
-        ShadingFrontend::Pbr => WaterShadingResponse::Pbr(pbr::plan_pbr(profile.pbr, inputs)),
-        ShadingFrontend::Npr => WaterShadingResponse::Npr(npr::plan_npr(profile.npr, inputs)),
-        ShadingFrontend::Custom => WaterShadingResponse::Custom(CustomResponse {
+        ResponseProgram::Pbr => WaterShadingResponse::Pbr(pbr::plan_pbr(profile.pbr, inputs)),
+        ResponseProgram::Npr => WaterShadingResponse::Npr(npr::plan_npr(profile.npr, inputs)),
+        ResponseProgram::Custom => WaterShadingResponse::Custom(CustomResponse {
             hook_id: profile.custom_hook_id,
             base: pbr::plan_pbr(profile.pbr, inputs),
         }),
-        ShadingFrontend::Hybrid => WaterShadingResponse::Hybrid(hybrid::plan_hybrid(
-            profile.hybrid,
-            profile.pbr,
-            profile.npr,
-            inputs,
-        )),
+    }
+}
+
+/// Resolve a complete water response/composition plan.
+#[must_use]
+pub fn plan_shading_plan(
+    plan: WaterShadingPlan,
+    profile: ShadingProfile,
+    inputs: SurfaceShadingInputs,
+) -> WaterShadingResponse {
+    match plan {
+        WaterShadingPlan::Single { program } => plan_shading(program, profile, inputs),
+        WaterShadingPlan::MaskBlend { .. } => WaterShadingResponse::MaskBlend(
+            hybrid::plan_hybrid(profile.hybrid, profile.pbr, profile.npr, inputs),
+        ),
     }
 }
 
@@ -306,20 +316,20 @@ mod tests {
         let profile = ShadingProfile::physical_water();
         let inputs = fixture_inputs();
         assert!(matches!(
-            plan_shading(ShadingFrontend::Pbr, profile, inputs),
+            plan_shading(ResponseProgram::Pbr, profile, inputs),
             WaterShadingResponse::Pbr(_)
         ));
         assert!(matches!(
-            plan_shading(ShadingFrontend::Npr, profile, inputs),
+            plan_shading(ResponseProgram::Npr, profile, inputs),
             WaterShadingResponse::Npr(_)
         ));
         assert!(matches!(
-            plan_shading(ShadingFrontend::Custom, profile, inputs),
+            plan_shading(ResponseProgram::Custom, profile, inputs),
             WaterShadingResponse::Custom(_)
         ));
         assert!(matches!(
-            plan_shading(ShadingFrontend::Hybrid, profile, inputs),
-            WaterShadingResponse::Hybrid(_)
+            plan_shading_plan(WaterShadingPlan::hybrid(), profile, inputs),
+            WaterShadingResponse::MaskBlend(_)
         ));
     }
 
@@ -329,7 +339,7 @@ mod tests {
         profile.custom_hook_id = 42;
         let inputs = fixture_inputs();
         let WaterShadingResponse::Custom(custom) =
-            plan_shading(ShadingFrontend::Custom, profile, inputs)
+            plan_shading(ResponseProgram::Custom, profile, inputs)
         else {
             panic!("expected a custom response");
         };
@@ -343,10 +353,9 @@ mod tests {
         let profile = ShadingProfile::physical_water();
         let inputs = fixture_inputs();
         for frontend in [
-            ShadingFrontend::Pbr,
-            ShadingFrontend::Npr,
-            ShadingFrontend::Custom,
-            ShadingFrontend::Hybrid,
+            ResponseProgram::Pbr,
+            ResponseProgram::Npr,
+            ResponseProgram::Custom,
         ] {
             assert_eq!(
                 plan_shading(frontend, profile, inputs),

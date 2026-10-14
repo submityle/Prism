@@ -6,14 +6,14 @@
 //! `water_render_fx`); none of them draw. This module is the missing raster
 //! half contracted by
 //! `prism_render_architecture::water::gpu::surface_pass`: a single shared
-//! vertex stage displaces the surface grid, and a per-frontend fragment stage
+//! vertex stage displaces the surface grid, and a response-plan fragment stage
 //! shades it through the §5 lighting-response fork. The entry-point names are
 //! byte-identical to that `CPU` contract
 //! (`SurfaceDrawDescriptor::{vertex_entry, fragment_entry}`):
 //! `water_surface_vs` plus `water_surface_fs_{pbr,npr,custom,hybrid}`.
 //!
-//! The geometry stage is frontend-agnostic (the displaced mesh is identical for
-//! every frontend); only the fragment stage forks. The physically based path
+//! The geometry stage is response-agnostic (the displaced mesh is identical for
+//! every response plan); only the fragment stage forks. The physically based path
 //! reuses the shared single-layer-water `BSDF` lobe `water_direct` from
 //! `water.wesl` (the device twin of
 //! `prism_render_shading::water::evaluate_water_direct`), so the `PBR` highlight
@@ -87,7 +87,7 @@ struct WaterSurfaceView {
 
 // Shared engine lighting base (`@group(1)`): byte-identical bindings to the
 // opaque `shading_resolve` path. All analytic directional + punctual lights
-// plus the image-based `SH` environment, so every §5 water frontend consumes
+// plus the image-based `SH` environment, so every §5 water response consumes
 // the exact same light table as the rest of the scene instead of a single
 // hard-coded key light.
 @group(1) @binding(0) var<storage, read> directional_lights: array<DirectionalLight>;
@@ -1019,7 +1019,7 @@ struct FragmentOutput {
 }
 
 // Shared geometry stage: displace the base grid vertex by the solved field and
-// project it. Identical for every frontend (§5).
+// project it. Identical for every response plan (§5).
 @vertex
 fn water_surface_vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let i = vertex_index;
@@ -1036,7 +1036,7 @@ fn water_surface_vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// Build the frontend-agnostic surface description from the authored water
+// Build the response-agnostic surface description from the authored water
 // parameters and the per-vertex foam coverage (foam raises roughness and
 // whitens the body, matching the Jacobian foam mask).
 fn surface_from(foam: f32) -> SurfaceSample {
@@ -1061,7 +1061,6 @@ fn surface_from(foam: f32) -> SurfaceSample {
     s.index_of_refraction = 1.5;
     s.dispersion = 0.0;
     s.thin_walled = 0.0;
-    s.geometry_opacity = 1.0;
     s.transmission_color = vec3<f32>(1.0);
     s.transmission_scatter = vec3<f32>(0.0);
     s.transmission_scatter_anisotropy = 0.0;
@@ -1123,7 +1122,7 @@ fn frame_at(world_position: vec3<f32>, normal: vec3<f32>) -> ShadingFrame {
 // Image-based ambient term, mirroring the opaque `shading_resolve` indirect
 // path: a split-sum specular reflection plus `SH` irradiance diffuse when the
 // environment carries image-based data, falling back to the flat ambient
-// radiance otherwise. Shared verbatim by every §5 frontend.
+// radiance otherwise. Shared verbatim by every §5 response.
 // Lagarde & de Rousiers specular-occlusion remap (SIGGRAPH 2014 `Frostbite`).
 // Recovers a view- and roughness-dependent specular occlusion from the scalar
 // diffuse ambient occlusion so the narrow glossy lobe is not double-darkened by
@@ -1605,7 +1604,7 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
     let ssr = water_ssr_reflection(in.world_position, frame.normal, surface.perceptual_roughness);
     // Occlude the image-based ambient term with the surface's own horizon GTAO,
     // marched over the shared @group(3) Hi-Z pyramid. Shared by every §5
-    // frontend (NPR/custom/hybrid all route through this core).
+    // response (NPR/custom/MaskBlend all route through this core).
     let gtao_uv = in.clip_position.xy / max(view.viewport.xy, vec2<f32>(1.0));
     let gtao = water_gtao(in.world_position, frame.normal, gtao_uv);
     surface.ambient_occlusion = gtao.ao;
@@ -1660,6 +1659,62 @@ fn shade_npr_core(in: VertexOutput) -> vec4<f32> {
     return vec4<f32>(color * alpha, alpha);
 }
 
+// CPU/GPU hybrid behavior contract. The host-side twin is
+// `water::shading::hybrid::resolve_hybrid_weights`: both inputs are normalized
+// region signals, the stylized weight is their maximum, and the physical
+// weight is its complement. The current raster ABI exposes the resolved foam
+// signal plus one authored hybrid scalar in `style_params.w`; the latter is
+// consumed as the shallow-region signal and the overlay opacity so the
+// existing 144-byte view uniform remains stable.
+struct WaterHybridWeights {
+    npr_weight: f32,
+    pbr_weight: f32,
+    overlay_opacity: f32,
+}
+
+fn water_hybrid_weight_contract(
+    shore_signal: f32,
+    shallow_signal: f32,
+    overlay_opacity: f32,
+) -> WaterHybridWeights {
+    let shore = clamp(shore_signal, 0.0, 1.0);
+    let shallow = clamp(shallow_signal, 0.0, 1.0);
+    var weights: WaterHybridWeights;
+    weights.npr_weight = max(shore, shallow);
+    weights.pbr_weight = 1.0 - weights.npr_weight;
+    weights.overlay_opacity = clamp(overlay_opacity, 0.0, 1.0);
+    return weights;
+}
+
+// Reactive coverage follows the CPU golden: foam, screen motion, and low
+// transparency all increase history rejection. It gates the overlay response
+// rather than adding a third MRT target to the existing two-target pass.
+fn water_hybrid_reactive_mask(foam: f32, motion: vec2<f32>, transparency: f32) -> f32 {
+    let motion_strength = length(motion);
+    return max(
+        clamp(foam, 0.0, 1.0),
+        max(
+            clamp(motion_strength * 32.0, 0.0, 1.0),
+            clamp(1.0 - transparency, 0.0, 1.0),
+        ),
+    );
+}
+
+// Apply the orthogonal stylized layer after the PBR/NPR region blend. The
+// overlay opacity is therefore an observable output control, not a value that
+// is merely carried through the response record.
+fn water_hybrid_apply_overlay(
+    blended: vec4<f32>,
+    npr: vec4<f32>,
+    weights: WaterHybridWeights,
+    foam: f32,
+    motion: vec2<f32>,
+) -> vec4<f32> {
+    let reactive = water_hybrid_reactive_mask(foam, motion, blended.a);
+    let overlay = clamp(weights.overlay_opacity * max(reactive, 0.25), 0.0, 1.0);
+    return mix(blended, npr, overlay);
+}
+
 @fragment
 fn water_surface_fs_custom(in: VertexOutput) -> FragmentOutput {
     // Author-hook default: the physical base plus a tunable emissive tint so a
@@ -1674,8 +1729,9 @@ fn water_surface_fs_custom(in: VertexOutput) -> FragmentOutput {
 fn water_surface_fs_hybrid(in: VertexOutput) -> FragmentOutput {
     let pbr = shade_pbr_core(in);
     let npr = shade_npr_core(in);
-    // Blend physical body into stylized shallows by a shore factor driven by
-    // foam coverage and the authored bias.
-    let shore = clamp(in.foam + view.style_params.w, 0.0, 1.0);
-    return FragmentOutput(mix(pbr, npr, shore), water_motion_vector(in));
+    let motion = water_motion_vector(in);
+    let weights = water_hybrid_weight_contract(in.foam, view.style_params.w, view.style_params.w);
+    let blended = mix(pbr, npr, weights.npr_weight);
+    let color = water_hybrid_apply_overlay(blended, npr, weights, in.foam, motion);
+    return FragmentOutput(color, motion);
 }

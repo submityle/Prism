@@ -36,7 +36,7 @@
 //!   [`ShadingAttributeFootprint::union`](prism_render_architecture::particle::shading::ShadingAttributeFootprint::union)
 //!   of two operand footprints;
 //! - the lighting services a model subscribes to under a
-//!   [`LightingServiceCaps`](prism_render_architecture::particle::shading::LightingServiceCaps)
+//!   `ServiceSet` capability declaration
 //!   mask, plus the model's `needs_lighting` flag;
 //! - the `OIT` route for a
 //!   [`SortDecision`](prism_render_architecture::particle::sort_cull::SortDecision);
@@ -87,10 +87,12 @@ use prism_render_architecture::particle::lod::ParticleQuality;
 use prism_render_architecture::particle::shading::{
     attribute_footprint, lighting_services, motion_vector_request, quantize_cel_bands,
     render_phase_for, resolve_deep_shadow, resolve_oit_route, resolve_shading_program,
-    six_way_response, DeepShadowMode, LightingServiceCaps, LightingServices, MotionVectorInput,
+    lighting_services_from_bits, six_way_response, DeepShadowMode, MotionVectorInput,
     MotionVectorRequest, OitRoute, ParticleRenderPhase, PhaseParams, ShadingAttributeFootprint,
-    ShadingProgram, ShadingProgramInput, SixWayLuminance,
+    ShadingProgram, ShadingProgramInput, SixWayLuminance, PARTICLE_GLOBAL_ILLUMINATION,
+    PARTICLE_RAY_TRACING, PARTICLE_SHADOW_MAPS,
 };
+use prism_render_architecture::render_fabric::ServiceSet;
 use prism_render_architecture::particle::sort_cull::{BlendMode, SortDecision};
 use prism_render_architecture::particle::{EmberShadingModel, ShadingBasis, SortStrategy, Vec3};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -178,21 +180,12 @@ const FP_RAMP: u32 = 8;
 /// `ShadingAttributeFootprint::custom_params` bit.
 const FP_CUSTOM: u32 = 16;
 
-/// `LightingServiceCaps::shadow_maps` input bit.
+/// `ServiceSet` shadow-map input bit.
 const CAP_SHADOW: u32 = 1;
-/// `LightingServiceCaps::global_illumination` input bit.
+/// `ServiceSet` global-illumination input bit.
 const CAP_GI: u32 = 2;
-/// `LightingServiceCaps::ray_tracing` input bit.
+/// `ServiceSet` ray-tracing input bit.
 const CAP_RT: u32 = 4;
-
-/// `LightingServices::clustered_lights` output bit.
-const SVC_CLUSTERED: u32 = 1;
-/// `LightingServices::shadow_maps` output bit.
-const SVC_SHADOW: u32 = 2;
-/// `LightingServices::global_illumination` output bit.
-const SVC_GI: u32 = 4;
-/// `LightingServices::ray_traced` output bit.
-const SVC_RT: u32 = 8;
 
 /// The portable core-`WGSL` shading-router kernel, embedded inline so the twin
 /// ships as a single source file. Mirrors the `CPU` golden
@@ -567,7 +560,7 @@ pub struct GpuShadingQuery {
     /// The renderer's blend mode driving the render phase and program.
     pub blend: BlendMode,
     /// The platform's available shared lighting services.
-    pub caps: LightingServiceCaps,
+    pub caps: ServiceSet,
     /// Whether the renderer is volumetric (drives the deep-shadow lane).
     pub volumetric: bool,
     /// The resolved quality tier (drives the deep-shadow ladder).
@@ -606,7 +599,7 @@ pub struct GpuShadingResult {
     /// The union of `footprint_a` and `footprint_b`.
     pub footprint_union: ShadingAttributeFootprint,
     /// The shared lighting services `model` subscribes to under `caps`.
-    pub lighting: LightingServices,
+    pub lighting: ServiceSet,
     /// Whether `model` consumes lighting at all.
     pub needs_lighting: bool,
     /// The `OIT` route for `oit`.
@@ -846,17 +839,16 @@ fn quality_code(quality: ParticleQuality) -> u32 {
 }
 
 /// Packs the platform
-/// [`LightingServiceCaps`](prism_render_architecture::particle::shading::LightingServiceCaps)
-/// into the capability input bits.
-fn caps_bits(caps: LightingServiceCaps) -> u32 {
+/// Packs the unified service declaration into the capability input bits.
+fn caps_bits(caps: ServiceSet) -> u32 {
     let mut bits = 0;
-    if caps.shadow_maps {
+    if caps.contains(PARTICLE_SHADOW_MAPS) {
         bits |= CAP_SHADOW;
     }
-    if caps.global_illumination {
+    if caps.contains(PARTICLE_GLOBAL_ILLUMINATION) {
         bits |= CAP_GI;
     }
-    if caps.ray_tracing {
+    if caps.contains(PARTICLE_RAY_TRACING) {
         bits |= CAP_RT;
     }
     bits
@@ -898,16 +890,9 @@ fn footprint_from_bits(bits: u32) -> ShadingAttributeFootprint {
     }
 }
 
-/// Rebuilds a
-/// [`LightingServices`](prism_render_architecture::particle::shading::LightingServices)
-/// from its bit field.
-fn lighting_from_bits(bits: u32) -> LightingServices {
-    LightingServices {
-        clustered_lights: (bits & SVC_CLUSTERED) != 0,
-        shadow_maps: (bits & SVC_SHADOW) != 0,
-        global_illumination: (bits & SVC_GI) != 0,
-        ray_traced: (bits & SVC_RT) != 0,
-    }
+/// Rebuilds a unified service declaration from its bit field.
+fn lighting_from_bits(bits: u32) -> ServiceSet {
+    lighting_services_from_bits(bits)
 }
 
 /// Rebuilds a

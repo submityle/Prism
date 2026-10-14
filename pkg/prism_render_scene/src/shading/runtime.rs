@@ -1,5 +1,7 @@
 use bevy_ecs::prelude::*;
-use prism_render_shading::{classify_material_header, MAX_SHADING_CLASSES};
+use prism_render_shading::{
+    classify_material_header, classify_material_header_with_execution, MAX_SHADING_CLASSES,
+};
 
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct PrismShadingSettings {
@@ -394,6 +396,7 @@ pub(crate) fn prepare_shading_work(
     *diagnostics = shading_diagnostics(
         &settings,
         diagnostics.native_barycentrics,
+        materials.registry.execution_tables(),
         visibility.frame.work_items.iter().map(|work| {
             materials
                 .registry
@@ -407,6 +410,7 @@ pub(crate) fn prepare_shading_work(
 fn shading_diagnostics(
     settings: &PrismShadingSettings,
     native_barycentrics: bool,
+    execution: Option<&prism_render_material::MaterialExecutionTables>,
     materials: impl IntoIterator<Item = Option<prism_render_material::GpuMaterialHeader>>,
 ) -> PrismShadingDiagnostics {
     let mut diagnostics = PrismShadingDiagnostics {
@@ -422,7 +426,11 @@ fn shading_diagnostics(
             diagnostics.stale_materials = diagnostics.stale_materials.saturating_add(1);
             continue;
         };
-        match classify_material_header(&header) {
+        let classification = match execution {
+            Some(execution) => classify_material_header_with_execution(&header, execution, u32::MAX),
+            None => classify_material_header(&header),
+        };
+        match classification {
             Ok(class) => {
                 diagnostics.classified_materials =
                     diagnostics.classified_materials.saturating_add(1);
@@ -502,13 +510,13 @@ mod tests {
     fn diagnostics_classify_models_and_reject_stale_or_non_surface_work() {
         let mut principled = prism_render_material::fallback_material_header(1);
         principled.generation = 2;
-        let mut npr = prism_render_material::fallback_material_header(1);
-        npr.illumination = prism_render_material::Illumination::Stylized as u32;
+        let npr = prism_render_material::fallback_material_header(1);
         let mut transparent = prism_render_material::fallback_material_header(1);
         transparent.render_class = prism_render_material::MaterialRenderClass::Transparent as u32;
         let diagnostics = shading_diagnostics(
             &PrismShadingSettings::default(),
             true,
+            None,
             [Some(principled), Some(npr), Some(transparent), None],
         );
 
@@ -516,11 +524,7 @@ mod tests {
         assert_eq!(diagnostics.classified_materials, 2);
         assert_eq!(
             diagnostics.class_counts[MaterialShadingClass::Principled.index()],
-            1
-        );
-        assert_eq!(
-            diagnostics.class_counts[MaterialShadingClass::Npr.index()],
-            1
+            2
         );
         assert_eq!(diagnostics.unsupported_materials, 1);
         assert_eq!(diagnostics.stale_materials, 1);

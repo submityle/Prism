@@ -7,7 +7,7 @@ use alloc::{
     vec::Vec,
 };
 use prism_render_architecture::gpu_scene::{CpuRenderScene, SceneHandle};
-use prism_render_material::{MaterialRecord, MaterialRenderClass};
+use prism_render_material::{MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, RenderDomain};
 
 pub struct VisibilityInput<'a> {
     pub scene: &'a CpuRenderScene,
@@ -93,7 +93,7 @@ pub fn cull_view(
         if lod.used_fallback {
             stats.lod_fallbacks += 1;
         }
-        let pass_mask = pass_mask(material.render_class, instance.flags, view.flags);
+        let pass_mask = pass_mask(material, instance.flags, view.flags);
         stats.shadow_casters += u32::from(pass_mask.0 & RenderPassMask::SHADOW.0 != 0);
         stats.ray_scene_instances += u32::from(pass_mask.0 & RenderPassMask::RAY_SCENE.0 != 0);
         work.push(GpuRenderWorkItem {
@@ -104,8 +104,8 @@ pub fn cull_view(
             pass_mask,
             visibility_stages: VisibilityStageMask::EARLY,
             sort_key: WorkSortKey::new(
-                pass_class(material.render_class),
-                material.illumination as u8,
+                pass_class(material),
+                material.response_sort_key(),
                 material.render_class as u8,
                 instance.geometry.index as u16,
                 depth_bucket(distance),
@@ -135,15 +135,20 @@ fn squared_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 fn depth_bucket(distance: f32) -> u16 {
     distance.min(u16::MAX as f32) as u16
 }
-fn pass_class(class: MaterialRenderClass) -> u8 {
-    match class {
-        MaterialRenderClass::Opaque | MaterialRenderClass::OpaqueTwoSided => 0,
-        MaterialRenderClass::Masked | MaterialRenderClass::MaskedTwoSided => 1,
-        _ => 2,
+fn pass_class(material: &MaterialRecord) -> u8 {
+    match material.render_domain {
+        RenderDomain::Hair | RenderDomain::Particle => 0,
+        RenderDomain::Volume | RenderDomain::Decal => 2,
+        RenderDomain::Surface if material.features.contains(MaterialFeatureFlags::WATER) => 2,
+        RenderDomain::Surface => match material.render_class {
+            MaterialRenderClass::Opaque | MaterialRenderClass::OpaqueTwoSided => 0,
+            MaterialRenderClass::Masked | MaterialRenderClass::MaskedTwoSided => 1,
+            _ => 2,
+        },
     }
 }
-fn pass_mask(class: MaterialRenderClass, flags: u32, view: crate::ViewFlags) -> RenderPassMask {
-    let mut mask = match pass_class(class) {
+fn pass_mask(material: &MaterialRecord, flags: u32, view: crate::ViewFlags) -> RenderPassMask {
+    let mut mask = match pass_class(material) {
         0 => RenderPassMask::OPAQUE,
         1 => RenderPassMask::MASKED,
         _ => RenderPassMask::TRANSPARENT,
@@ -167,7 +172,7 @@ mod tests {
         CpuRenderScene, InstanceRecord, SceneBounds, SceneOperation, SceneTransaction,
     };
     use prism_render_material::{
-        Illumination, MaterialDomain, MaterialRecord, MaterialRenderClass,
+        MaterialDomain, MaterialRecord, MaterialRenderClass,
     };
 
     fn handle(index: u32) -> GenerationalHandle {
@@ -227,13 +232,13 @@ mod tests {
             handle: material_handle,
             revision: 1,
             domain: MaterialDomain::Surface,
+            render_domain: RenderDomain::Surface,
             render_class: MaterialRenderClass::Opaque,
-            illumination: Illumination::Lit,
+            response_plan: prism_render_material::ShadingPlan::default(),
             features: Default::default(),
             closure_mask: 1,
             surface: Default::default(),
             textures: Vec::new(),
-            custom_program: None,
         }
     }
 

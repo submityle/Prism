@@ -1,595 +1,647 @@
-# Prism 渲染引擎 — 材质与管线完整架构设计（v2 / wgpu + WESL 版，放弃 Slang）
+# Prism 渲染引擎 — 材质与管线完整架构设计（v3 / 与实现对齐版）
 
-> 状态：架构提案（Draft，允许破坏性重构）
-> 面向版本：Bevy/Prism 下一代渲染底座
-> Shader 语言：**WESL**（现状，经 naga → WGSL/SPIR-V/Metal/DXIL）—— **放弃引入 Slang**（决策记录见 §2）
-> 运行时后端：**wgpu**（已在用，经 Bevy）—— 跨平台的**运行时 API 层**抽象，Metal/Vulkan/D3D12/WebGPU 全覆盖
-> 跨平台结论（2026-09-29 定案）：跨平台**只需一层**——运行时层 wgpu 已达成；着色器层维持 WESL，**不再引入 Slang 作为独立语言层**。原"Vulkan 优先"的真实目标是跨平台，已由 wgpu 满足。详见 §0.5 / §2。
-> 本文依据：对 `pkg/` 下渲染 crate 的静态阅读（`wc -l` 实测）+ 架构讨论收敛结论；未运行示例/测试/基准
-> 关联文档：`docs/prism_rendering_architecture_zh.md`（较早 draft，本文在其之上收敛材质/管线/子系统决策）
-> 最后更新：2026-09-30（本版：vis-buffer 逐顶点前端 GPU twin 补齐——三角梯度 setup `GpuTriangleGradients`（commit `2447af1eb`）+ 世界→屏幕顶点投影 `GpuProjectVertex`（commit `1ca0d0397`）均 Metal 实跑位精确对拍，至此金标准「顶点投影→梯度 setup→屏幕填充/payload」vis-buffer 逐顶点全链在 GPU 侧均有对拍 twin，见 §11 第 9 项；上版：reactive mask 解析入口 `upscale::upscale_pixel` 贯通落地（commit `d1c9827c4`），至此 CPU 金标准三处消费端（`resolve_taa` `e4790e0c6` / `disocclusion_history_weight` `1b1c61080` / `upscale_pixel` `d1c9827c4`）全闭合，出血点②仅剩 GPU twin+生产端；上版新增：§12 顶级产品对标矩阵、§13 PBR / §13.1 NPR 高级特性享有对照 / §14 NPR / §15 混合 三线 AAA 次世代高级特性清单、§16 性能/效果/易用性权衡总表；上版核心变更：放弃 Slang，收敛到 wgpu + WESL 单语言层）
-
----
+> **状态**：架构基准（Architecture Baseline）。允许破坏性重构；本文同时描述「实现已经成立的部分」与「架构已定、尚未落地的部分」，两者分列，不混写。
+> **版本**：v3 · 2026-10-15。上一版 v2 内部标注 2026-09-30，其材质 ABI、闭包图、前端与调度描述已与实现不符；本次同步补上 `ShadingPlan` / `FeatureCatalog` / 水体 GPU 能力门禁的现状。
+> **代码基准**：`pkg/` 工作区实测，HEAD = `753f6fa3b`（2026-10-14）。凡标注 `code-truth` 的论断均给出 `文件:行`，可直接复核；文件级索引见 **附录 C**。
+> **后端**：运行时 API 层 = **wgpu**；着色语言层 = **WESL → naga → WGSL / SPIR-V / MSL / DXIL**。没有独立的原生 Vulkan 后端（§0.5）。
+> **数值红线**：不引入任何神经 / ML 推理路径；布局逐字节相等、算术 ≤1 ULP（§3.5、§13.5），运行时只有一条执行路径（§1.1）。
+> **本文不重复**：材质侧的破坏性重构细节 → `docs/prism_material_pipeline_refactor_zh.md`（v10）；OpenPBR 参数逐条功能对照 → `docs/prism_openpbr_pipeline_function_zh.md`；完成度核验 → `docs/prism_material_pipeline_refactor_verification_zh.md`；四层收口方案 → `docs/refactoring-dev/00-overview_refactor_zh.md`。
 
 ## 0. 设计目标与非目标
 
-### 目标（硬约束）
+### 0.1 目标（硬约束）
 
-- 同一引擎**同时**是顶级 AAA 的 PBR / NPR / 混合 / 自定义引擎；四者皆一等公民，无谁是底座、无谁是补丁。赛道由具体项目/场景选择，不由引擎替用户选。
-- **跨平台**（硬目标）：运行时经 **wgpu** 覆盖 Metal/Vulkan/D3D12/WebGPU/主机/移动；着色器经 **WESL → naga** 落到 WGSL/SPIR-V/Metal/DXIL。原文"Vulkan 优先"修订为此目标，见 §0.5。**不引入 Slang**（见 §2）。
-- 吃满高级特性：GI/RT、虚拟阴影（VSM）、虚拟几何、时序上采样、动态光照、粒子、透明、毛发、布料、体积。
-
-### 非目标（主动不做，避免撞墙）
-
-- 不做完整无界 Substrate（性能重、撞弱平台、对"混合"无用——混合靠逐像素多材质，不靠单材质无限瓣）。
-- 不追求 RT 里对 NPR 的物理正确（NPR 在次级光线里本就是降级的，见 §10）。
-- 不追求"物理外观一致"的 PBR/NPR 统一（这是错误目标，见 §4）。
-
----
-
-## 0.5 后端策略修订：跨平台的正确拆法（2026-09-29）
-
-原文写"Vulkan 优先"，事后澄清：**真实意图是跨平台，Vulkan 只是当时误选的载体**。裸 Vulkan 并非天然跨平台——苹果平台无原生 VK（只能靠 MoltenVK 转译，功能是子集），Web 平台 VK 完全覆盖不到。以原生 VK 作跨平台地基，反而把苹果/Web 变成短板。
-
-**跨平台需要两层各自独立的抽象，Prism 一层已经有了：**
-
-| 抽象层 | 作用 | 正解 | Prism 现状 |
-|---|---|---|---|
-| **运行时 API 层** | 统一 Metal/VK/D3D12/WebGPU | **wgpu** | ✅ 已在用（Bevy→wgpu），Metal/VK/DX12/**Web** 天然全覆盖，比裸 VK 更跨平台 |
-| **着色器语言层** | 一份 shader 编到各后端 | **WESL → naga**（现状即够） | ✅ 现有 68 个 `.wesl` 经 naga 落 WGSL/SPIR-V/Metal/DXIL，wgpu 全后端消费；曾拟引入 Slang，**已放弃**（§2） |
-
-**修订结论（2026-09-29 定案）**：
-
-- 运行时跨平台**已由 wgpu 达成**，不需要、也不应该为原生 VK 折腾（那是跨平台的倒退）。
-- 着色器层**维持 WESL**：WESL 经 naga 已能落 WGSL/SPIR-V/Metal/DXIL，wgpu 在各后端消费——"一份代码编全平台"这条**现有链路已经具备**，无需再叠一层 Slang。曾把 WESL 判为"跨平台缺口"，复评后认定该缺口**本不存在**（naga 已补齐目标面；RT 也吃 WGSL）。详见 §2 决策记录。
-- 因此本文所有"Vulkan 优先/VK 先"应读作 **"wgpu（已有运行时）+ WESL（已有语言层）"**。**不存在独立的原生 Vulkan 后端**——只有一个 wgpu 后端；超出 `WebGPU` baseline 的能力（bindless / mesh shader / ray query / 多重间接 count / RT）都是 **opt-in 的 wgpu 扩展 feature**（wgpu 内部映射到底层 Vulkan/Metal/D3D12 扩展）。adapter 报告支持哪些 feature，device 启用请求的子集，上层特性声明所需 capability。**能力协商是三档，不是二档**：① wgpu baseline（全平台）；② wgpu 类型化扩展 feature（`wgpu/vulkan` 等映射到底层 VK/Metal/D3D12 扩展，adapter 给不出则走 **fallback**，绝不切后端）；③ **`raw_vulkan_init` HAL 逃生舱**——对 wgpu 连类型化 feature 都没暴露的裸 VK 扩展，Bevy 上游 `raw_vulkan_init`（`crates/bevy_render` `raw_vulkan_init = ["wgpu/vulkan"]`）经 `wgpu::hal::vulkan::Instance::init_with_callback` + `Adapter::open_with_callback` → `create_device_from_hal` 注入 instance/device 创建回调，在**同一个 wgpu 设备**上启用额外 VK 扩展（能力记进 `AdditionalVulkanFeatures`，用时 `adapter.as_hal::<Vulkan>()` 下探裸句柄）。这**不是第二个原生后端**，也不是通用兜底——它是 Vulkan-only、丢跨平台+丢 CPU golden 的最窄一条路，非 VK 平台（Metal/Web）直接 fallback 回普通 wgpu。三桶判据与"什么该跌进逃生舱"见 §8.1。
-- 开发机是 Apple Silicon macOS，Metal（经 wgpu）本就在跑，且能就地测 Metal + Web 两条跨平台线——是验证跨平台最合适的机器，而非障碍。
-
----
-
-## 1. 顶层架构：共享 GPU-driven 基底 + 多并存前端 + 正交风格轴
-
-```
-                        ┌─────────────────────────────────────────────┐
-                        │   资产 / 材质图 (node graph → closure IR)     │
-                        └───────────────┬─────────────────────────────┘
-                                        │ normalize → closure IR
-        ┌───────────────────────────────┼───────────────────────────────┐
-        │                    支柱一：材质 ABI (正交轴)                     │
-        │   domain × closure(IR) × illumination × blend + specialization │
-        └───────────────────────────────┼───────────────────────────────┘
-                                        │
-   ┌────────────────────────────────────┼────────────────────────────────────┐
-   │              共 享 G P U - d r i v e n  基 底 (算一次, 全前端消费)          │
-   │  支柱四: 可变形几何/模拟(蒙皮父级 → 布料/毛发/粒子/体积/水 sim) → gpu_scene │
-   │  → 可见性(vis-buffer / virtual_geometry) → material id                   │
-   │  支柱二: 光照/阴影"数据"服务(光源SoA+cluster / VSM页 / RT阴影反射 /       │
-   │          GI·IBL·GTAO irradiance / BVH)  ——只出数据, 不出响应             │
-   │  支柱三: 跨切面基底(motion+reactive mask / OIT / RT去噪 / capability)     │
-   └────────────────────────────────────┼────────────────────────────────────┘
-                                        │  material id + tile 分类路由
-   ┌──────────────┬──────────────────────┼───────────────────┬────────────────┐
-   │ 延迟 PBR 前端 │  forward+ 前端        │  NPR 风格化前端    │  自定义前端槽   │
-   │ (虚拟几何/RT/ │ (一等:透明+粒子+可选  │ (描边/ramp/SDF面阴 │ (项目注入)      │
-   │  GI/VSM)      │  NPR 承载)           │  影/风格化高光/post)│                │
-   └──────────────┴──────────────────────┴───────────────────┴────────────────┘
-        正交风格轴 illumination = Lit / Stylized / Unlit / Custom (叠在任意前端)
-        混合 = 逐像素 material id, tile 分类到对应前端, 因共享光/影/GI而连贯
-```
-
-**一句话**：基底装满、算一次；每个前端从基底取自己要的数据、叠自己独有的响应和通道。这是"四者皆顶级 + 可混合 + 多平台"的唯一解——单独管线会让每条前端各自重造高级特性，没一条能到 AAA。
-
----
-
-## 2. 决策记录：为什么放弃 Slang（本版核心变更）
-
-> **结论（2026-09-29 定案）**：**不引入 Slang**。着色器层维持 WESL（经 naga → WGSL/SPIR-V/Metal/DXIL），跨平台交由 wgpu 运行时层。曾有的 `prism_render_slang`（885 行）、`prism_render_slang_abi`（1166 行）两个 crate **已删除**（commit `211f15988`，删除前实测零外部依赖）；文档命名与注释残留也已在 commit `abb661911` 清理完毕，当前全仓 `rg -i slang` 仅命中本决策记录（§2）。
-
-### 2.1 曾经的四条理由，逐条失效
-
-引入 Slang 的原始动机是四个"硬需求"。复评后逐条塌掉：
-
-| 原动机 | 曾以为只有 Slang 能做 | 复评：为什么 WESL/现状已够 |
+| # | 目标 | 当前落点（code-truth） |
 |---|---|---|
-| 闭包 IR 要被延迟 pass **和** RT hit shader 共用 | Slang `interface`+泛型一份定义两处实例化 | WESL 有 `import` 能共享 closure 模块；wgpu 的 RT（ray query）本就吃 WGSL，同一份 WESL 编出的 WGSL 两处都能 import |
-| 后端中立、真跨平台（含苹果/Web） | 同源 → WGSL/SPIR-V/DXIL/Metal/CPU | **naga 已做 WGSL→SPIR-V/Metal/DXIL**；运行时 wgpu 覆盖 Metal/VK/DX12/Web。目标面**本就齐**，不是缺口 |
-| CPU golden reference 不漂移 | Slang CPU host target 从同一份 shader 出 CPU 参考 | **这是唯一 Slang 独占项**，但见 §2.2——它买的东西现在并不存在真实需求 |
-| specialization 排列编译 | link-time specialization + 类型参数 | WGSL `override` 常量 + WESL 条件编译能近似；组合管理是构建脚本问题，非语言问题 |
+| G1 | **PBR / NPR / 自定义响应与 MaskBlend 组合同时是一等公民**，不是"一条主线 + 特例" | 响应由 `ResponseProgram::{Pbr,Npr,Custom}` 表达，组合由 `WaterShadingPlan::MaskBlend` 表达（`pkg/prism_render_architecture/src/water/mod.rs`） |
+| G2 | **跨平台**：macOS / Windows / Linux / Web 用同一套代码与同一套着色器 | 单层 wgpu + WESL；能力以 `Capability` 位集建模（§0.5、§8） |
+| G3 | **高级特性不留白**：GI/RT、虚拟阴影、虚拟几何、时序超分、动态光、粒子、透明、毛发、布料、体积、水面 | 共享服务由 `FeatureCatalog` 的硬需求闭包派生；水体 9 项、体积 7 项服务 ID 由 `render_fabric::builtin_catalog` 统一声明 |
+| G4 | **NPR 不是降级路径**：NPR 必须与 PBR 享有同一份几何/光照/阴影/时序基底 | `ResponseProgram::Npr` 与 PBR 使用同一个水体服务闭包；闭包来自 `FeatureDefinition.requires_services`，不由响应枚举缩减 |
+| G5 | **单一事实源**：布局/掩码/默认值/键不允许多处手写 | `pkg/prism_material_schema/schema/surface.toml` → `prism-material-codegen` → Rust 布局 + WESL 解包器（§3.5） |
+| G6 | **不设全局硬顶**：瓣数、纹理槽、闭包层数不用常数封顶 | 闭包 slab 上限与纹理槽上限已删除（§2.3）；`SURFACE_MAX_WORDS = 104` 是解码缓冲尺寸，不是"最多能表达多少" |
+| G7 | **能力协商确定性降级**：缺能力时行为可预测，不静默串台 | 载入期 `used` / `required` 摘要 + 硬错误（§3.6）；运行时能力位集 `Capability`（§8.1） |
+| G8 | **可测试性可分层**：跨平台可测的部分与不可测的部分显式分桶 | 三桶模型（§8.2）：compute 可移植 / RT / raw-VK-only |
 
-四条里，前两条**本就不缺**，第四条**可替代**，真正 Slang 独占的只剩第三条"CPU 同源 golden"。
+### 0.2 非目标（主动不做）
 
-### 2.2 唯一独占项也不值：CPU golden 只是测试脚手架，不是真实路径
+1. **不做无界 Substrate 式闭包图**：作者层可以任意分层/混合，但**运行时**只携带一个定宽参数块与一个位掩码，不做运行期图遍历（§2.2）。
+2. **不为 NPR 承诺 RT 物理正确性**：NPR 只"收"共享光照/阴影结构，不"发"新的物理光照；在路径追踪参考里 NPR 退化为风格化反照率（§4.2）。
+3. **不强制 PBR 与 NPR 外观统一**：风格化是正交轴（`Illumination`），不是"PBR 的近似"。
+4. **不引入神经渲染 / ML 推理**：全部为经典数值方法。
+5. **不做离线烘焙管线**：另有专文（Phase 6）。
+6. **不做"每个前端一套管线"**：不接受为 NPR/自定义复制几何、阴影、GI、时序代码。
+7. **不做 raw Vulkan 独占特性的跨平台承诺**：见 §8.2 第三桶——用了就放弃跨平台与 CPU golden，属于显式逃生舱。
 
-Slang 的净价值最终收敛为一件事：**把"shader 与 CPU golden 两份手写孪生"塌成单源**。但这条价值的前提是"存在一条需要长期对齐的真实 CPU 渲染路径"——**实测不存在**：
+## 0.5 后端策略：单一 wgpu + 单一着色语言，能力三档协商
 
-- 现状 **0 个 `.slang` / 68 个 `.wesl` / 0 个 `.wgsl`**，功能全在 WESL 上跑，golden 全在（20+ 个 `#[cfg(test)]` 手写 Rust 参考，如 `ssr/abi.rs:14` 注释 "agree with the CPU golden"）。
-- 这些 CPU 参考**只是单元测试的对数脚手架**，不是引擎运行时会走的 CPU 渲染后端。它们数量有限、变更不频繁，"人肉对齐"的漂移成本**远低于**引入一整套 Slang 构建子系统的成本。
-- 换句话说：Slang 花大代价消除的是一个**当前很小、且只在测试里存在**的漂移风险，收益/成本严重倒挂。
+**结论（2026-09-29 修正，之后未变）**：本项目的目标是**跨平台**，不是 "Vulkan 优先"。早期文档里的"Vulkan 优先 / Vulkan 专用后端"来自一个错误假设——以为 macOS 原生支持 Vulkan。macOS 没有原生 Vulkan，只能经 MoltenVK 在 Metal 之上翻译，因此 Vulkan 不应被当作首要或唯一后端。正确抽象是**两个彼此独立的层**：
 
-### 2.3 成本侧（放弃 Slang 直接省掉）
+- **运行时 API 层**：wgpu。所有平台同一份提交代码。
+- **着色语言层**：WESL（单一源码）→ naga → 各目标（WGSL / SPIR-V / MSL / DXIL）。
 
-- slangc 进工具链、`build.rs` reflection→Rust codegen、variant 缓存 = **建一整套 shader 构建子系统**的一次性成本。
-- 本机网络受限，**slangc 装不上**（需 `require_escalated` 联网拉二进制），直接卡住迭代。
-- 现有 naga/WESL 对齐测试要全部改造成"Slang CPU target 对齐"，是纯迁移开销、零功能增量。
+在此之上，能力协商分三档：
 
-### 2.4 放弃后的着色器层长相（维持现状即架构）
-
-- **语言 = WESL**：`pkg/prism_render_scene/src/shaders/*.wesl`，靠 WESL `import` 做 closure 复用，靠预处理/`override` 常量做特化。
-- **ABI = 手写 `#[repr(C)]` + 校验测试**：`GpuMaterialHeader`/`GpuSurfaceParameters` 保持手写，但用**结构哈希驱动的 `MATERIAL_ABI_VERSION`** + CI 对齐测试兜住漂移（不需要反射生成器）。
-- **跨平台落地 = naga + wgpu**：一份 WESL → naga 编各后端 → wgpu 运行时消费，Metal/VK/DX12/Web 全覆盖。
-- 若将来 compute 核心真出现"大量 shader/CPU 孪生难维护"的痛点，再评估——但那是**可维护性投资**，不是功能/跨平台 blocker，且届时 Slang 也非唯一选项（可先考虑 naga 侧工具或宏生成）。
-
----
-
-## 3. 支柱一：材质 ABI（破坏性重构）
-
-### 3.1 正交轴取代互斥枚举
-
-删掉 `MaterialShadingModel`（`pkg/prism_render_material/src/record.rs`，9 值单标量互斥枚举）这个**性能+易用性双病根**。改为四条正交轴：
-
-```
-Material = {
-    domain:        Surface | Decal | Volume | PostProcess       // 保留, 现有已对
-    closure:       ClosureGraph (IR, 见 3.2)                     // 取代 shading_model
-    illumination:  Lit | Stylized | Unlit | Custom              // 新增, 正交风格轴
-    blend:         Opaque | Masked | Transmissive | Transparent | Additive
-}
-specialization_id: u64   // 由上面轴的合法排列特化产出
-```
-
-- **`illumination` 是"风格轴"**，正交于 closure。`Stylized` 不再挤在 shading_model 里，而是"用什么方式解读同一份光照数据"（BRDF 积分 vs ramp 量化）。这解决了一个关键直觉——**NPR 不该和 Water 同级**：Water 是 closure/子系统，NPR 是 illumination 轴。
-- `MaterialRenderClass` 里的 `NprOpaque/NprTransparent/CustomOpaque/CustomTransparent` **全删**——它们是 `blend × illumination` 的笛卡尔积被错误地拍平进一个枚举。拆回两条正交轴后自然消失。
-
-### 3.2 闭包 IR：über-BSDF 一等 + 有界 slab 可选
-
-`pkg/prism_render_material/src/ir.rs` 的 `ClosureKind` 保留大部分，但语义改变：
-
-- **地基 = OpenPBR 锚定的 über-BSDF 一等 closure**。metallic/roughness/clearcoat/sheen/subsurface/transmission/anisotropy 全是它的**参数/瓣**，不是独立 shading model。`Cloth sheen`、`ClearCoat` 降级为 über 的瓣（不再是顶层 model）。
-- **有界 slab 栈（封顶 3–4 瓣）作可选升级**：`Layer`/`Mix` 节点保留，但**编译期强制封顶**。超过上限 → validation error，不进无界 Substrate。
-- **`normalize()` 必须改**：现在它把闭包压成单 `shading_model`（`ir.rs` 里 `if kind==Npr { shading_model = Npr }`）——**这是把正交信息毁掉的元凶**。新 `normalize` 产出 `ClosureGraph`（保留多瓣结构）+ `illumination` 轴 + `specialization_id`，**不再塌缩**。
-- **毛发是真例外**：`ClosureKind::Hair` = 专用重 closure（Marschner/Chiang R/TT/TRT + dual-scattering），**不是** über 的瓣。NPR 头发 = `illumination=Stylized` 下的各向异性高光带（可与物理切线解耦，做"天使环"），是另一条 closure 实现。见 §6.3。
-
-### 3.3 GPU 数据结构：ABI v4 变长打包堆（对标 UE Substrate 每像素预算裁剪）
-
-> 本节据实描述已落地代码：`pkg/prism_render_material/src/record.rs`（`MATERIAL_ABI_VERSION = 4`）+ `surface.rs` + WESL 孪生 `pkg/prism_render_scene/src/shaders/material_unpack.wesl`。设计动机（拆胖结构）保留，但形态已从"定长数组下标 + 定长 blob"演进为**变长字堆 + LobeMask 解码**。
-
-**动机（未变）**：旧 `GpuSurfaceParameters` 是 18 字段胖结构，每像素无差别携带 clearcoat/sheen/subsurface/transmission 等它可能永远用不到的瓣——既是性能坑（每像素都为不存在的瓣付带宽/寄存器），又是建模谎言（暗示每个面都有全部瓣）。ABI v4 把它拆成 **OpenPBR 锚定的紧凑 über 核心 + 按瓣可选 blob**，只为真正存在的瓣付代价。
-
-**`GpuMaterialHeader`（`#[repr(C)]` + `bytemuck::Pod`，20 个 u32 字段）**：旧 `shading_model` 字段已删除，风格由 `illumination` 承载，编译期 permutation 身份由 `specialization_low`/`specialization_high`（切分的 `SpecializationId`）承载。关键字段：
-
-- `parameter_offset`：**变长字堆里本材质打包 surface block 的 u32 字地址**（不再是定长 `GpuSurfaceParameters` 数组的元素下标）——因为块是变长的，场景只打包 über 核心 + 存在的瓣。
-- `parameter_size`：该块字节长度 = `(SURFACE_CORE_WORDS + Σ(存在瓣字长)) * 4`（`packed_size_bytes()`）；瓣为变长（见下），当前每个瓣均为 4 字时即 `(12 + present_lobes*4) * 4`。
-- `lobe_mask`：本材质携带哪些可选 über 瓣（`LobeMask` 位），驱动打包参数解码——shader 在 `parameter_offset` 读 `parameter_size/4` 个字，用此 mask 把核心+存在瓣展开回完整 surface。
-- `closure_graph_offset`：指向序列化闭包 IR，供 RT/延迟消费；`closure_mask` 保留（RT/分类用）。
-- 其余：generation/revision/illumination/render_class/feature_flags/texture_offset/texture_count/sampler_offset/sampler_count/custom_program/active/material_epoch_{low,high}；`specialization()` 由 low|high 重组回 u64。
-
-**变长打包核心（`surface.rs`）**：
-
-- `SURFACE_CORE_WORDS = 12`：`GpuSurfaceCore`（base_color[4]/metallic/perceptual_roughness/reflectance/ambient_occlusion/normal_scale/alpha_cutoff + 2 pad），每个 lit/stylized/unlit 面都带的 OpenPBR 基座，**不含** clearcoat/sheen/subsurface/transmission/anisotropy。
-- `SURFACE_LOBE_WORDS = 4`：**最宽瓣 footprint**（当前所有瓣恰好都是 4 字 / 16 字节）。瓣本身**变长**——每瓣实际字长由 schema 的 `words` 声明，生成到 `SURFACE_LOBE_WORDS_BY_SLOT[registry_slot]`；打包/解包按**每个存在瓣自身的字长**推进游标，而非统一步长（§4.4 变长打包，P1-f 补 OpenPBR 全字段的前提）。
-- `LobeMask`（6 个瓣，`COUNT = 6`）：`EMISSION=1<<0` / `CLEARCOAT=1<<1` / `ANISOTROPY=1<<2` / `SHEEN=1<<3` / `SUBSURFACE=1<<4` / `TRANSMISSION=1<<5`。瓣结构分别为 `GpuEmissionLobe`(emissive[4]) / `GpuClearCoatLobe` / `GpuAnisotropyLobe` / `GpuSheenLobe` / `GpuSubsurfaceLobe` / `GpuTransmissionLobe`(transmission/thickness/ior/dispersion)。
-- `SurfaceParameterBlock::pack()`：先写 12 字核心，再**按 canonical 低位优先顺序只写存在的瓣**（每瓣写其自身字长）；`unpack(lobe_mask, words)` 逆向读回，缺席瓣解码为各自中性 `Default`（如 IOR 回到 1.5，绝不泄漏陈旧字段）。`packed_len_words() = CORE + Σ(存在瓣字长)`。
-- **示例**：纯电介质（无瓣）= 12 字，而非旧的 24 字（18 字段 f32 对齐）。
-
-**WESL 孪生（字节精确镜像）**：`material_unpack.wesl::prism_unpack_surface` 是 `SurfaceParameterBlock::unpack` 的字节精确 GPU 镜像——同样的核心 12 字 + canonical 低位优先瓣顺序。CPU 打包 / GPU 解包必须逐字节一致，否则材质错读。
-
-**漂移守护（未变）**：结构手写 `#[repr(C)]`，由 `MATERIAL_ABI_VERSION`（当前 = 4）+ 对齐测试兜漂移（改结构 → 版本 bump → 测试红）。不引入反射生成器（见 §2）。回归测试已覆盖：`size_of::<GpuSurfaceCore>() == SURFACE_CORE_WORDS*4`、逐瓣子集 round-trip、错误长度 `unpack` 拒绝（`SurfaceUnpackError::WrongLength`）。
-
-**与 §3.4 的连接**：§3.4 的 `specialization_id` 打包（illumination `0..8` / closure_mask `8..40` / render_class `40..48`）落进本结构的 `specialization_{low,high}`；`closure_mask`（哪些 closure 瓣存在）与 `lobe_mask`（哪些 über 瓣 blob 被打包）配合，GPU 侧据此选 permutation 并只读存在的瓣 blob。
-
-### 3.4 有界 slab 闭包图：对标 UE5 Substrate 的深化规格
-
-本节把 §3.2 的"有界 slab"从口号钉成可实现规格，直接映射到已落地的 `pkg/prism_render_material/src/ir.rs` / `axis.rs`（非纸面设计，代码已在）。
-
-**数据模型**：材质是一张 `MaterialGraph`（DAG，节点 `MaterialNode`），`normalize()` 编译成 `NormalizedMaterial{ closure_mask, illumination, specialization_id, .. }`。闭包由三类节点组成：
-
-- `MaterialNode::Closure{kind: ClosureKind, inputs}` —— 单个 BSDF 瓣 / slab。
-- `ClosureKind::Mix` —— **水平混合**（coverage/weight 在两个子闭包间 lerp），对标 Substrate *Horizontal Mix*。用于"锈斑覆盖金属"、"泥点盖车漆"这类同一像素多材质按面积占比混合。
-- `ClosureKind::Layer` —— **垂直镀层**（coat-over-base，按能量守恒把透射 throughput 传给底层），对标 Substrate *Vertical Layer / coat*。用于清漆、薄膜、湿膜、脏污叠层。
-
-**`ClosureKind` 14 值 → `closure_mask` 位分配**（`closure_mask |= 1 << (kind as u32)`，`#[repr(u32)]` 判别式即位号；`specialization_id` 里 `closure_mask` 占 bit `8..40`）：
-
-| bit | ClosureKind | 归属 | 说明 |
+| 档 | 内容 | 缺能力时的行为 | 现状（code-truth） |
 |---|---|---|---|
-| 0 | Diffuse | über 瓣 | 朗伯/OpenPBR base |
-| 1 | Conductor | über 瓣 | 金属 GGX |
-| 2 | Dielectric | über 瓣 | 电介质镜面 |
-| 3 | ClearCoat | über 瓣 | 车漆清漆（可由 Layer 承载，亦保留瓣位） |
-| 4 | Sheen | über 瓣 | 布料绒毛边缘 |
-| 5 | Subsurface | über 瓣 | 皮肤/蜡/叶片 SSS |
-| 6 | Transmission | über 瓣 | 玻璃/透射 |
-| 7 | Emission | über 瓣 | 自发光 |
-| 8 | Hair | **专用重 closure** | Marschner/Chiang R/TT/TRT + dual-scatter，**不进 slab**（见 §6.3） |
-| 9 | Volume | 域闭包 | 参与介质 |
-| 10 | Npr | 风格标记 | 推 `illumination=Stylized`（正交轴，非塌缩） |
-| 11 | Custom | 风格标记 | 推 `illumination=Custom` |
-| 12 | Mix | 混合算子 | 水平，计入 slab 深度 |
-| 13 | Layer | 混合算子 | 垂直，计入 slab 深度 |
+| ① 基线 | WebGPU 保证的 compute + storage buffer | 永远可用 | `CapabilitySet::WEBGPU_BASELINE = Capability::Compute.bit()`（`pkg/prism_render_architecture/src/backend/capability.rs:87`） |
+| ② 类型化扩展 | bindless、multi-draw indirect count、mesh shade、ray query、RT pipeline —— 都是 **wgpu 扩展 feature**，由适配器决定是否可用 | **不换后端**，按声明降级；缺 `required` 能力 → 载入期硬错误（§3.6） | `Capability` 六值 + `FeatureRequirement` 校验（`backend/capability.rs:31-48`、`backend/negotiation.rs`） |
+| ③ 原生逃生舱 | Bevy `raw_vulkan_init`：`wgpu::hal::vulkan` 直连（`create_device_from_hal`，能力记录到 `AdditionalVulkanFeatures`） | 只在明确需要 Vulkan 独占能力时启用；**代价是失去跨平台与 CPU golden** | Prism 侧**未接线**：`pkg/prism_render_architecture/src/backend/` 只有 `capability.rs` / `negotiation.rs` / `fake.rs` / `mod.rs`，`pkg/` 下 `raw_vulkan_init` / `create_device_from_hal` / `AdditionalVulkanFeatures` **0 命中**。它依赖的 Bevy 能力在本仓 fork 里**存在且可达**（`crates/bevy_render/src/renderer/raw_vulkan_init.rs:71,123,138`，由 `bevy_anti_alias` 的 DLSS 路径消费，feature 非默认开启 `crates/bevy_render/Cargo.toml:26`、根 `Cargo.toml:613`） |
 
-- **über-BSDF = 单 slab 的多瓣参数化**（bit 0–7 的组合），对标 OpenPBR surface / Substrate 单 slab。metallic/roughness/anisotropy 是它的参数，不占独立 slab 深度。
-- **只有 `Mix`/`Layer` 计入 slab 深度**。`slab_depth()` 在 DAG 上做记忆化最长链求解，`> MAX_CLOSURE_SLAB_DEPTH(=4)` → `MaterialValidationError`，永不进入无界 Substrate 树。
+第③档刻意只保留契约、不落代码：一旦落地，它就是"第二个后端"，会同时破坏 G2（跨平台）与 §8.2 的可测性分桶。任何使用它的特性必须登记在 §8.2 第三桶里。
 
-**封顶 4 的取舍（对齐"性能/稳定优先"）**：UE5 Substrate 是无界 slab 树 + 运行时 slab 预算裁剪；我们取其 slab 语义与 Mix/Layer 算子，但**编译期封顶 depth=4**。4 层足以覆盖 AAA 主力场景（base + clearcoat 车漆、湿表面镀膜、薄膜干涉、2–3 层污渍/锈蚀叠加）。以"拒绝无界"换取：固定每像素寄存器预算、permutation 可静态特化、着色器无递归、VGPR 占用可预测——即 objective 的性能与稳定性硬约束。需要第 5 层的极端资产按"降一层近似 + 美术告警"处理，不放开上限。
+## 1. 顶层架构
 
-**`specialization_id` 打包**（`axis.rs`，LSB→MSB）：bit `0..8`=illumination、`8..40`=closure_mask、`40..48`=render_class(blend/domain 族)。`low()/high()` 切成两个 `u32` 落进 `GpuMaterialHeader`，GPU 侧据此选 permutation 与读哪些瓣 blob（§3.3）。
-
-**normalize 不变式**（回归测试守）：① 单输出锥；② slab 深度 ≤ 4；③ `illumination` 由 `Npr`/`Custom` closure 推出正交轴值而**非**塌缩成单 model；④ 改任一 GPU 结构 → 哈希变 → `MATERIAL_ABI_VERSION` bump → 对齐测试红（§3.3）。
-
----
-
-## 4. 支柱二：光照/阴影 数据服务 + 各前端响应（比材质更关键）
-
-**核心原则：共享的是数据/加速结构，不是响应。** "一致"的正确定义 = **同一批授权光源驱动，外观按各自风格解读**（NPR 本就该长得不一样），不是物理外观相同。
-
-### 4.1 基底共享（算一次，全前端消费）
-
-**核心：这些是与「响应风格无关」的数据/加速结构，PBR/NPR/混合/自定义前端都读同一份，各自解读（§4.2）。** 下表钉到已落地的 `pkg/prism_render_shading/src/` 模块（非纸面），对齐 UE 的 clustered-forward+ / VSM clipmap / Lumen 世界空间 GI 形态：
-
-| 基底服务 | 落地模块 | 关键类型 / 契约 | 对标 |
-|---|---|---|---|
-| **光源 SoA** | scene 侧光源缓冲 | 光源打包为 SoA，cluster/RT/GI 共用同一份索引空间 | UE `FLightSceneInfo` SoA |
-| **Cluster 剔光（froxel）** | `cluster/{grid,assign,bounds}.rs` | `ClusterGrid`（`[x,y,z]` 维度 + `z_slice` 对数深度切片 + `linear_index`）；`assign_lights_to_clusters(grid, view_from_world, projection, lights, cfg)` → `ClusterLightAssignment{offsets_and_counts, light_indices}`（每 froxel `[offset,count]` 表 + 扁平升序光索引）；`ClusterAssignmentConfig{max_lights_per_cluster=256, intensity_cutoff=0.01}` | UE clustered-forward+ 光剔 |
-| **VSM 深度页** | `shadow/virtual_sm/{clipmap,page_table,allocator,invalidation,request,slot,receiver_gen}.rs` | `VirtualShadowMap` 帧驱动 `drive_frame(FrameInput{light,camera_light_space,receivers,caster_movements})` → `FrameResult{resident,to_render,evicted,invalidation,budget,windows}`；`ClipmapConfig` 分级、`VirtualPageTable` 驻留、`PhysicalPageAllocator` 预算驱逐；`BudgetStats`(requested/hits/misses/allocations/evictions/over_budget/hit_rate)。**相机移动只做 clipmap window 快照、绝不失效页**；caster 移动脏其扫过的页 | UE5 VSM（clipmap + 页驻留 + 预算裁剪） |
-| **世界空间 GI（辐照缓存）** | `gi/world_space/{probe_placement,probe_interpolation,octahedral,radiance_cache}.rs` | 探针放置 + `InterpolationConfig`/`ProbeNeighbor` 邻域插值 + 八面体编码 + `radiance_cache` | Lumen 世界空间辐射缓存/探针 |
-| **屏幕空间 GI（fallback）** | `screen_space/gi.rs` | `SsgiParams` / `build_hemisphere_ray` / `gather_indirect_diffuse` → `SsgiGather`；无 RT/探针不足时的降级路径 | Lumen SSGI 兜底 |
-| **RT 阴影·反射结果** | `screen_space/*`（SS 兜底）+ RT 桶（§8.1） | RT closure 着色可 CPU golden、traversal/BVH 不可（§8.1 三桶） | UE Lumen/RT 反射 |
-| **IBL / 环境** | `environment/{cubemap,prefilter,brdf_lut}.rs` | 预滤环境 + split-sum BRDF LUT | UE 反射捕获 + split-sum |
-| **AO** | `ao/{mod,temporal,denoise}.rs` | 空间 AO + 时序累积 + 去噪 | GTAO/时序 AO |
-| **光通道 / light layer 路由** | `light_routing.rs` | `LightingChannelMask` / `LightLayerMask` / `LightRouting::contributes_to_layer` / `cull_lights_by_channel`——**这是 NPR 「分层打光」的共享地基**（§4.2 C 类专属响应的底座） | UE lighting channels |
-
-**为什么这样拆算一次**：光剔（froxel）、阴影页驻留、GI 辐照、IBL、AO 全是**视图/场景函数、与像素着色风格无关**——算一次喂所有前端最省。风格差异只发生在「怎么响应这些数据」（§4.2），不在「数据本身」。VSM 的「相机动不失效页」「按 receiver 请求 + 预算驱逐」是把阴影带宽与场景规模解耦的关键，NPR 硬阴影同样白嫖这份页缓存（只是采样时换阈值/染色）。
-
-### 4.2 各前端响应分家（A/B/C 三类）
-
-| 基底数据 | A 类·同能力不同实现 | B 类·能用但固有降级 | C 类·各自专属 |
-|---|---|---|---|
-| 光源+cluster | PBR: BRDF 积分 / NPR: ramp 量化 | — | NPR: light layer 分层打光 |
-| VSM 深度页 | PBR: PCF 软阴影 / NPR: 阈值硬阴影+染色 | — | NPR: **SDF 面部阴影**(独立数据源叠加) |
-| GI/IBL | PBR: 物理环境光 / NPR: 收进来做风格化底光 | **NPR 对 GI 只收不发**(防能量爆炸) | — |
-| RT 反射 | PBR: 物理反射 | RT 里 **NPR 降级为风格化 albedo 近似** | — |
-| RT 去噪 | 共享去噪器 | **NPR 需单独调锐利分段**参数 | — |
-
-- **A 类占大头**——"同能力不同实现"在这里成立。
-- **B 类必须认**：RT×NPR 是"数据喂风格化响应"，不是物理追 NPR，换任何设计绕不掉。
-- **NPR 专属通道**（SDF 面阴影 / shadow ramp / light layer）挂基底，**只 NPR 前端消费**。
-
-### 4.3 WESL/WGSL 表达（钉到已落地着色器）
-
-抽象的 `ILightResponse.shade(ctx, LightSample, Closure)` 在 WESL 里**不是一个 trait，而是"共享数据 import + 按 shading class 分派响应函数"**。下表钉到 `pkg/prism_render_scene/src/shaders/` 现存文件（非纸面），与 Rust 侧 `prism_render_shading` 一一对孪生（CPU golden 逐像素对齐）：
-
-| 层 | WESL 落地 | 关键符号 | 消费方 | Rust 孪生 |
-|---|---|---|---|---|
-| **共享光源/阴影数据** | `lighting.wesl` | `LightSample`/`sample_directional_light`/`sample_punctual_light`/`sh_irradiance`/`env_brdf_approx` | 全前端 | `lighting.rs`/`punctual.rs` |
-| **共享 surface/frame 桥** | `surface.wesl`/`brdf.wesl`/`material_unpack.wesl` | `SurfaceSample`/`ShadingFrame`/`DirectLightSample`/`to_direct_sample` | 全前端 | `surface.rs`/`resolve.rs` |
-| **A 类响应·PBR** | `brdf.wesl` | `principled_direct`（+ GGX/anisotropic/fresnel/vis-smith） | Principled/Subsurface/ClearCoat/Cloth/Hair/Water 桶 | `resolve.rs`/`punctual.rs` |
-| **A 类响应·NPR** | `brdf.wesl` | `stylized_direct`/`stylized_ramp`/`stylized_shadow`/`toon_direct`（legacy 兼容） | NPR 桶 | `stylized.rs`(`evaluate_stylized_direct`) |
-| **C 类·描边（NPR 专属）** | `outline.wesl` | `outline_id_edge`/`outline_depth_edge`/`outline_normal_edge`/`evaluate_outline` + `outline_main`(@compute 8×8) | NPR 前端独占 | `outline.rs` |
-| **C 类·光分层地基** | `light_routing.wesl` | `channel_mask_affects`/`light_routing_contributes_to_layer`/`cull_lights_by_channel_word`（`MAX_LIGHTING_CHANNELS=8`/`MAX_LIGHT_LAYERS=4`） | NPR 分层打光 + 全前端剔光 | `light_routing.rs` |
-| **分派器** | `shading_resolve.wesl` | `switch params.shading_class`（9 arm，`SHADING_CLASS_PRINCIPLED..CUSTOM`）；`class_counts`/`class_offsets` 按桶分 bin（wavefront 一致） | —— | `classification.rs`(`classify_material_header`/`ShadingWorkPlan`) |
-
-**前端切换 = 换 `switch` arm 里的响应函数，光源/阴影/surface 数据结构零改动**：`shading_resolve.wesl` 的每个 class arm 对同一份 `to_direct_sample(sample)`（来自共享 `lighting.wesl`）分别喂 `principled_direct`（PBR arm）或 `stylized_direct`（NPR arm）。9 值 `SHADING_CLASS_*` 常量是 §9-item3 正交轴派生投影的 WESL 端镜像，`class_offsets/class_counts` 保证同桶像素同 permutation（对齐 UE wavefront/tile 分类着色）。NPR 专属通道（`outline.wesl`/`light_routing.wesl` 分层）挂在共享基底上、只被 NPR arm 消费——正是 §4.2 C 类"各自专属"的着色器实体。
-
----
-
-## 5. 支柱三：跨切面基底（解一次，全前端共享）
-
-**这些是"多个前端/子系统都要，但谁都不该各造一份"的公共设施。** 下表钉到已落地 `pkg/prism_render_shading/src/` 模块并诚实标注落地/待建，对齐 FSR2/UE 的对应形态：
-
-| 基底设施 | 落地模块 | 关键符号 / 契约 | 状态 | 对标 |
-|---|---|---|---|---|
-| **motion vector** | `prism_render_shading/src/screen_space/{motion,temporal}.rs`（着色侧）＋ `prism_render_architecture/src/motion/`（已 committed 一等模块，`lib.rs` 挂载：`encode`/`dilation`/`disocclusion`/`reproject`/`tiles`） | `motion_vector`/`MotionSample`/`project_world_to_screen`/`reproject_prev_uv_motion`；架构侧 `VelocityEncoding`（snorm16 速度量化 encode/decode）、`EncodedMotion`（velocity+masks 紧凑 texel）、`encode_sample`（透明像素自动置 `TRANSPARENT` flag） | ✅ 已落地（速度 G-buffer 有正式 wire 格式 + tile/膨胀/去遮挡/重投影全套） | UE velocity G-buffer + FSR2 dilated depth/velocity |
-| **TAA / 时序上采样** | `taa/{jitter,resolve}.rs`、`upscale/{history,robust,reproject}.rs` | `taa_jitter`/`halton`/`resolve_taa`（YCoCg 邻域裁剪 + tonemap 权重）；`HistoryLock`/`update_lock`/`clip_history_neighbourhood`/`disocclusion_history_weight`（history lock 遇 disocclusion 融化 + 薄特征保护） | ✅ 已落地（FSR2 式） | FSR2 / UE TSR |
-| **reactive / stencil mask** | 生产端：`transparency/routing.rs`（`writes_reactive_mask`）、`particle/shading.rs`（`reactive_mask`/`temporally_unstable`）、`motion/mod.rs`（`MotionSample.reactive`）＋ **已 committed 的正式 wire 格式** `motion/encode.rs`：`PackedMasks(u32)` 把 reactive/transparency/confidence（各 unorm8）＋ flags（`DISOCCLUDED`/`TRANSPARENT`/`STREAMING_REVEAL`）打进一个 32-bit 通道，随 `EncodedMotion` 与 snorm16 速度同存速度 G-buffer；消费端：两处 `taa/`（`prism_render_scene/src/shading/taa/` GPU dispatch 节点、`prism_render_shading/src/taa/` 算法层） | 粒子/透明/NPR/毛发标"别被 TAA 吃掉"的响应权重，喂给 `resolve_taa`/`disocclusion_history_weight` 做逐像素放宽 | 🟢 **CPU 金标准三处消费端全闭合，生产端已收口，剩 GPU twin+生产端**：`resolve_taa`（`history_blend*(1-reactive)`，`e4790e0c6`）、`disocclusion_history_weight`（`base·(1-d)·(1-reactive)`，`1b1c61080`）、解析入口 `upscale_pixel`（`UpscaleInput.reactive`，`history_weight=(1-current_weight)*(1-reactive)`，`d1c9827c4`）均接入 `reactive∈[0,1]`——reactive=1 高频面落当前帧、reactive=0 逐位等同 shipping（含 `reactive_zero_is_bit_for_bit` 守护），共 7 项金标准测试绿；剩 GPU 侧 —— ① `taa_resolve.wesl`/`upscale_reconstruct.wesl` twin + `shading/taa/` 加 reactive 遮罩绑定并镜像该数学，② 逐像素**生产端**把 `PackedMasks.reactive()` 写进速度 G-buffer（归粒子/透明 lane） | FSR2 reactive/transparency mask / UE responsive AA |
-| **OIT** | `oit.rs` | `OitFragment`/`oit_weight(view_depth, alpha)`/`OitAccumulation`/`composite_transparency`（Weighted-Blended OIT，深度加权） | ✅ 已落地（WBOIT，公共设施非子系统） | McGuire-Bavoil WBOIT |
-| **RT / SS 去噪** | `screen_space/gi_denoise.rs`、`ao/{temporal,denoise}.rs` | `denoise_ssgi`/`SsgiDenoiseConfig`/`denoise_ssgi_pixel`；`reproject_prev_uv_gtao` | ✅ SS 侧已落地（RT 去噪共享此器，NPR 单独调参见 §4.2 B 类） | 时空联合去噪 |
-| **能力分层 / fallback** | `prism_render_architecture/src/backend/` | 见 §8 三档协商 + fallback 矩阵 | ✅ 已落地 | UE RHI feature level |
-
-**为什么这些必须"解一次"**：motion/OIT/去噪/TAA history 都是**逐像素跨前端共享的时序或合成资源**，任一前端各造一份就会算法漂移 + 显存翻倍 + 互相打架（尤其 TAA×粒子/透明）。**reactive mask 的消费端已在算法层落地**——motion（含 `motion/encode.rs` 的 `PackedMasks` 正式打包 ABI）、FSR2 式 history-lock、透明/粒子/motion 的 reactive **生产端**均已 committed，且 CPU 金标准三处消费端 `resolve_taa`（`e4790e0c6`）、`disocclusion_history_weight`（`1b1c61080`）、解析入口 `upscale_pixel`（`d1c9827c4`）现均已接入 reactive 做逐像素 history 放宽（doc §282 要求的两处叶子 + 实际累积入口全闭合，测试绿）。**剩 GPU 侧收尾两步**：① 把 reactive 遮罩绑定进 `taa_resolve.wesl`+`shading/taa/` 并镜像金标准数学，② 逐像素**生产端**把 `PackedMasks.reactive()` 写进速度 G-buffer（§11 粒子竖切收尾会逼出这条线；归 TAA/上采样 + 粒子/透明 lane，见 §9 第 10 项）。OIT/去噪已是可复用公共设施，不得被误建成并列子系统。
-
----
-
-## 6. 支柱四：可变形几何 / 模拟阶段 + 子系统注册表
-
-### 6.1 蒙皮父级（所有形变子系统的根）
+### 1.1 三层，只有一个运行时执行路径
 
 ```
-可变形几何阶段 (骨骼蒙皮 / morph / 形变输出)
-   ├── 布料 sim (XPBD)        → 形变顶点
-   ├── 毛发 sim (guide strand)→ 形变顶点
-   ├── 粒子 sim (GPU)         → 实例/条带
-   └── 普通蒙皮角色           → 形变顶点
-          ↓ 全部汇入 gpu_scene → 可见性 → 各前端
+作者层 (authoring)      OpenPBR / MaterialX / 节点图 / archetype 模板
+                        └─ pkg/prism_render_material_authoring
+                                   │  分层解析：任意层数 → 纹理空间混合（无 N 层硬顶）
+烘焙层 (bake)           └─ pkg/prism_render_material (bake) + pkg/prism_material_schema
+                                   │  产出：一个定宽 über 参数块 + 位掩码 + 特化键
+运行层 (runtime)        ┌─ 解包一次 (material_unpack.wesl，由 schema 生成)
+                        ├─ 分类一次 (per-pixel / per-tile material id → pipeline)
+                        └─ 响应分家 (PBR / NPR / 混合 / 自定义 = 同一个基底的四种解读)
 ```
 
-落 `prism_physics_core / prism_physics_geometry`。**任何角色都要蒙皮**，所以这是 wgpu 竖切（§11）绕不过的第一个真子系统。
+三层的边界就是**信息损失点**，必须显式：
 
-**`prism_physics_core` 现状远超“一句 XPBD”（已落地 ~24k 行，milestone 化）**——它就是“可变形几何/模拟阶段”的实体，下表钉到真实模块树 + 里程碑注释，对齐 UE Chaos / Houdini / 前沿论文：
+- 作者层是**开放**的：可以有任意多层、任意混合、任意自定义节点。
+- 烘焙层的产出是**定宽**的：一个参数块（§3.4）+ 一个瓣位掩码（§3.3）+ 一个特化键（§3.1）。开放性的代价在烘焙期一次付清。
+- 运行层**不做图遍历**、不做运行期分层：`record.rs:129-132` 明确写下 *"The runtime is graph-free … there is no serialized closure IR"*。
 
-| 求解器 / 子模块 | 落地模块 | 方法 | 里程碑 | 覆盖形变类 | 对标 |
+### 1.2 三个正交维度（替代 v2 的互斥枚举）
+
+v2 把"PBR / NPR / 自定义"写成一个互斥的 `MaterialShadingModel` 枚举。这必然膨胀成 `NprOpaque / NprMasked / NprTransmissive …` 的组合爆炸，且让"透明 NPR"无法表达。现在的模型是**三个彼此独立的维度**：
+
+| 维度 | 类型 | 取值 | 状态（code-truth） |
+|---|---|---|---|
+| **照明轴** | `Illumination` (`#[repr(u32)]`) | `Lit=0` / `Stylized=1` / `Unlit=2` / `Custom=3` | `pkg/prism_render_material/src/axis.rs:24-37,46` |
+| **渲染类**（混合/光栅路由） | `MaterialRenderClass` | `Opaque, OpaqueTwoSided, Masked, MaskedTwoSided, Transmissive, Transparent, Additive, Volume, Hair, Water, Decal`（**11 值**） | `pkg/prism_render_material/src/record.rs:51-64`，反查 `from_u32` `record.rs:72` |
+| **响应与组合计划** | `ResponseProgram` + `WaterShadingPlan` | `Pbr` / `Npr` / `Custom`；`Single` / `MaskBlend` | `pkg/prism_render_architecture/src/water/mod.rs` |
+
+`MaterialShadingModel` **已删除**。`Npr*` / `Custom*` 渲染类也**已从枚举里删除**——`record.rs:45-49` 的注释给出理由：它们是"混合 × 照明"两个正交轴被压平后的产物，压平后就无法表达"NPR + 透明"这类合法组合。风格属于照明轴，不属于渲染类。
+
+推论（也是设计契约）：
+- "NPR 材质" = `Illumination::Stylized` + 任意 `MaterialRenderClass`；
+- "混合计划" = 同一像素对两条响应臂做连续 `MaskBlend`，由常驻组合 pass 或 fused 内建入口执行；二值区域选择仍由 `Illumination` 掩码路由（§4.3、§7.2）；
+- 特化键里**同时**携带这三轴，因此不存在"NPR 版本缺少某个渲染类"的缺口。
+
+### 1.3 共享的是数据与加速结构，不是响应
+
+最容易走错的一步是把"共享基底"理解成"共享着色代码"。共享的正确对象是**数据、加速结构、时序历史与可见性**——它们对所有前端逐字节相同；差异只允许出现在"拿到光照之后怎么解读"。当前实现把它写成了**可编译检查的数据**：
+
+| 共享基底服务（9 项） | 含义 | 位 |
+|---|---|---|
+| `VIRTUAL_GEOMETRY` | 虚拟几何 cluster LOD / 软光栅 | 1<<0 |
+| `HYBRID_GI` | Lumen 式混合全局光照 | 1<<1 |
+| `RESTIR` | ReSTIR 直接/间接光重采样 | 1<<2 |
+| `VIRTUAL_SHADOW` | 虚拟阴影贴图 VSM | 1<<3 |
+| `FROXEL_VOLUME` | Froxel 体积（水下散射、god ray） | 1<<4 |
+| `RT_REFLECTION` | 光追反射（SSR miss 回退） | 1<<5 |
+| `RT_CAUSTICS` | 光追/光子焦散 | 1<<6 |
+| `PATH_TRACING_REF` | 离线路径追踪参考（标定用） | 1<<7 |
+| `TEMPORAL_UPSAMPLE` | 时序超分 / 抗锯齿历史 | 1<<8 |
+
+服务闭包由 `pkg/prism_render_architecture/src/render_fabric/builtins.rs` 的 `FeatureCatalog` 派生：水体根需要 9 个稳定服务 ID，体积根需要另一组全局不冲突的 7 个服务 ID；`FeatureSelection::resolve` 为根集合冻结 provider 选择。资源/访问/生命周期仍由选中的 pass 模板和权威帧图拥有，内建目录不伪造尚未绑定的资源写入。
+
+于是"**NPR 是不是漏了某个高级特性**"这个问题有编译期答案：不会漏，因为 PBR/NPR/Custom 响应与 `MaskBlend` 计划都从同一个水体根闭包读取服务集合。
+
+### 1.4 与"多条管线"的差别
+
+| 做法 | 几何/阴影/GI/时序 | 着色 | 结论 |
+|---|---|---|---|
+| 多条管线 | 复制多份 | 各写一套 | 不接受：NPR 永远落后、特性同步成本随响应数增长 |
+| 一条管线 + 特例分支 | 1 份 | if/else 散落 | 不接受：不可特化、分支成本常驻 |
+| **一条执行路径 + 正交响应**（本文） | **1 份** | **同一入口，按特化键选择响应函数** | 采用 |
+
+### 1.5 crate 地图（`pkg/`，2026-10-14 实测）
+
+| 层 | crate（`src` 行数） | 职责 |
+|---|---|---|
+| 材质 | `prism_render_material` (40894) | 运行时 ABI：`record.rs` / `surface.rs` / `axis.rs` / `ir.rs` / 纹理编解码族 / `bake` / `openpbr` |
+| 材质 | `prism_material_schema` (2431) | **单一事实源**：`schema/surface.toml` + `prism-material-codegen`（Rust 布局 & WESL 生成） |
+| 材质 | `prism_material_pcm` (3319) | **PCM**：扩展点统一注册表（9 类 Kind）+ 载入期协商 |
+| 材质 | `prism_render_material_authoring` (1895) | 作者层图的解析 / 求值 / 导入导出 |
+| 材质 | `prism_render_material_gpu` (431) | 压缩纹理硬解 oracle（BC/ETC2/ASTC 的 GPU 真值），**不是** 材质头 ABI |
+| 着色 | `prism_render_shading` (131510) | 材质求值、分类、NPR/风格化、GI(257 文件)、阴影(19)、AO、后处理族 |
+| 场景 | `prism_render_scene` (152228) | GPU Scene 与渲染集成（`shading/` 438 文件为最大子目录） |
+| 地基 | `prism_render_architecture` (401871) | 后端无关契约：frame graph、PSO 缓存、可见性、虚拟资源、各子系统契约 |
+| 地基 | `prism_render_app` / `prism_render_driver` / `prism_render_graph` / `prism_render_gpudriven` / `prism_render_visibility` / `prism_render_runtime` | 应用装配、RHI 驱动、帧图、GPU-driven 提交、可见性、运行时 |
+| 子系统 | `prism_hair_gpu` (28382) / `prism_volumetric_gpu` (347165) / `prism_virtual_geometry_gpu` (7453) / `prism_virtual_texture_gpu` (1329) / `prism_water_render` (1476) | 各自带几何+模拟+专用渲染 |
+| 物理 | `prism_physics_core` (129271) / `prism_physics_gpu` (97521) / `prism_physics_geometry` (9148) | 引擎无关物理内核 + GPU 求解；**注意**其依赖接入现状见 §6.4 |
+| 已删除 | `prism_render_slang`、`prism_render_slang_abi` | 见 §2.1 |
+
+## 2. 决策记录
+
+### 2.1 放弃 Slang（2026-09-29 定案）
+
+**决策**：不引入 Slang；着色语言层只用 WESL + naga。
+
+- `prism_render_slang`（约 885 行）与 `prism_render_slang_abi`（约 1166 行）**已删除**（commit `211f15988`），零外部依赖；`pkg/` 下 `rg -i slang` 无命中，残留只在文档里。
+- 四个当初的动机全部塌缩：反射信息可由手写 `#[repr(C)]` + 测试 + schema 覆盖；变体缓存不需要第三方编译器；工具链（`slangc`）在受限网络机器上不可得。
+- 唯一"Slang 独占"的价值是"着色器与 CPU golden 单一源码"。但**真实的 CPU 渲染路径并不存在**，CPU 侧只有 `#[cfg(test)]` 骨架，因此这个价值为零。
+- 替代方案已落地：WESL 手写 + schema 生成 + CI 对齐测试（§3.5）+ naga + wgpu。
+
+### 2.2 运行时不做闭包图（commit `f5172023c`）
+
+**决策**：作者层保留闭包图，运行时**不序列化**图。
+
+- `normalize()` 保留图（`pkg/prism_render_material/src/ir.rs:63-137`），供校验/烘焙/诊断；
+- 运行头里没有 `closure_graph_offset`，`pkg/` 下 0 命中；运行时只留 `closure_mask`（`record.rs:129-132` 注释为准）；
+- 理由：运行期图遍历意味着不确定的寄存器压力、无法定长的特化键、以及每个后端各自一套遍历器。
+
+### 2.3 删除闭包 slab 与纹理槽硬上限（commit `1e9d1812b`）
+
+**决策**：`MAX_CLOSURE_SLAB_DEPTH`、`slab_depth()`、`MaterialValidationError::ClosureSlabTooDeep`、纹理槽上限全部删除。
+
+- 旧模型"最多 3–4 瓣"是一个**会静默改变外观**的封顶；超出即报错或截断，与 G6 冲突。
+- 现在：瓣由 `LobeMask` 位表达（10 个已定义瓣，`surface.rs:411-465`），参数块按"每个在位的瓣"变长打包（§3.4），openpbr 侧由 `project_to_openpbr`（`openpbr.rs:118`）给出"投影后丢了哪些瓣"（`DroppedLobe`，`openpbr.rs:43`）而不是硬失败。
+- 残留的注释级提及（`pkg/prism_render_scene/src/material/buffers.rs:33`、`pkg/prism_render_material/src/tests.rs:83,200`）属于文档债。
+
+### 2.4 单一事实源：`schema/surface.toml` + codegen（G5）
+
+**决策**：布局/掩码/默认值/取值范围/能量策略/可见性，只在 `pkg/prism_material_schema/schema/surface.toml` 声明一次，由 `prism-material-codegen` 生成 Rust 常量与 WESL 解包器。
+
+- 生成物 `pkg/prism_render_material/src/surface_layout.rs` 首行即 `// DO NOT EDIT — generated by 'prism-material-codegen' …`；
+- 再生成命令：`cargo run -p prism_material_schema --bin prism-material-codegen -- write`；
+- 漂移门禁：`codegen_freshness` 测试 + `pkg/prism_render_material/tests/schema_parity.rs`（校验 `abi_version` 一致）；
+- 存在的理由：v2 时代同一份布局被手写在**六处**（Rust `surface.rs`/`record.rs`、WESL `material_unpack`/`material_sample`、CPU golden、文档表格），任何一处漏改都表现为"渲染结果莫名不对"。
+
+### 2.5 PCM：九类扩展点统一注册（"超集"的完整模型）
+
+**决策**：新增一个扩展点不再各自发明机制，而是登记进 **Prism Capability Model**（`pkg/prism_material_pcm`）。
+
+- 统一了此前九个各自封闭的机制：加瓣 / 加参数通道 / 加响应模式 / 传输重映射 / 缓存辅助 / 数据提供者 / 降级策略 / 作者节点 / 合成 pass。
+- `Kind` 九值：`Lobe, Channel, ResponseMode, Transfer, CacheAux, Provider, Downgrade, AuthorNode, Composite`（`pkg/prism_material_pcm/src/namespace.rs:213-232`）；
+- `Region { Specification=0, Prism=1, CrossVendor=2, Studio=3 }`，每区 16 槽（`namespace.rs:89-96,112`）；
+- **性能红线**：全部治理（命名空间解析、协商、used/required 集合、位/区分配）在烘焙/载入期完成然后**蒸发**；运行时只有单态化的 WESL + 头部里定宽的 64 槽 / 4 字摘要（`pkg/prism_material_pcm/src/lib.rs:75-79`），热路径无分发、无查表。
+
+### 2.6 键的正交性（I2）与两种键视图（I5）
+
+**决策**：特化键只由「瓣集合 + 特性标志」决定；`bin_class` 与 `SpecializationId` 是同一个键的两种视图。
+
+- `SpecializationId(u64)`：照明 `0..8` / 闭包 `8..40` / 渲染类 `40..48`（`axis.rs:102-116`）；
+- `bin_class`：29 位投影，供 GPU-driven 路径使用（`axis.rs:90,162-166`），`from_bin_class` 保证往返（`axis.rs:183-192`）；
+- 质量档、缓存命中、降级**永远不进键**（I2），否则同一材质会因距离/画质档而重编译 PSO；
+- 由于两种视图同源，GPU-driven bin 路径与 CPU direct 路径必须命中同一个 PSO（I5）。
+- ⚠ 已知缺口：`bin_class` 的瓣窗口是**手写的 19 位**，而瓣词汇表已到 bit 18；第 4 个扩展瓣（bit 19）会被静默丢弃。收口方案：**取消位打包身份，改用密集索引** —— 见 `docs/refactoring-dev/01-surface-abi_refactor_zh.md` §3 与 `docs/refactoring-dev/03-shader-package_refactor_zh.md` §2。
+
+## 3. 支柱一：材质 ABI 与特化键（code-truth）
+
+> 本节描述**运行时**契约。作者层与烘焙层的开放性见 §1.1；材质侧的完整重构方案见 `docs/prism_material_pipeline_refactor_zh.md`。
+
+### 3.1 特化键：`SpecializationId(u64)` 三轴 + `bin_class` 投影
+
+位布局（LSB → MSB），`pkg/prism_render_material/src/axis.rs:98-116`：
+
+| 位段 | 字段 | 语义 |
+|---|---|---|
+| `0..8` | `illumination` | 照明轴：`Lit=0` / `Stylized=1` / `Unlit=2` / `Custom=3`（`axis.rs:24-37`，名称 `"lit"/"stylized"/"unlit"/"custom"` `axis.rs:55`） |
+| `8..40` | `closure_mask` | **活跃瓣集合**（不是作者原始位），32 位 |
+| `40..48` | `render_class` | `MaterialRenderClass`（11 值，§3.8） |
+
+- `new(illumination, closure_mask, render_class)`（`axis.rs:111`）、`illumination()/closure_mask()/render_class_bits()`、`low()/high()`（`axis.rs:139-146`，供 64 位头拆成两个 u32）。
+- **GPU-driven 投影**：`bin_class(self) -> u32`，29 位（`BIN_CLASS_BITS = 29`，`axis.rs:90`），布局 `照明 0..2 | 渲染类 2..10 | 活跃瓣集合 10..29`（`axis.rs:162-166`）；`from_bin_class() -> Option<Self>` 为精确逆映射（`axis.rs:183-192`），因此 **GPU bin 路径与 CPU direct 路径落同一个 PSO**（不变式 I5）。
+- **已知缺口（必须修）**：`bin_class` 的瓣窗口是**手写 19 位**（`0..29` 减去 10 位前缀），而瓣词汇表已到 `MEASURED_BRDF = 1<<18`；再增加第 4 个扩展瓣（bit 19）会被静默截断，"丢一个瓣"不报错。且 `bin_class` 是 u32 共享预算（`2(照明) + 8(渲染类) + W`），W=22 即到 u32 极限、W=23 溢出 —— 最多再加 3 个瓣。收口方案：身份改用可枚举的密集索引 `(ShaderPackageId, PermutationIndex, PipelineStateHash)`，见 `docs/refactoring-dev/01-surface-abi_refactor_zh.md` §3 与 `docs/refactoring-dev/03-shader-package_refactor_zh.md` §2。
+- **不变式 I2**：键只由「瓣集合 + 特性标志」决定。质量档、缓存命中、距离降级**不得**进入键，否则同一个材质会因画质档/距离而重新编译 PSO。
+
+### 3.2 闭包 IR：作者层保图，运行层只留掩码
+
+- `ClosureKind` **14 值**（`pkg/prism_render_material/src/ir.rs:15-32`）：`Diffuse, Conductor, Dielectric, ClearCoat, Sheen, Subsurface, Transmission, Emission, Hair, Volume, Npr, Custom, Mix, Layer`；掩码位 = `1 << kind as u32`（`ir.rs:93`）。
+- `normalize()` 产出 `NormalizedMaterial { nodes, output, features, render_class, illumination, closure_mask, specialization_id }`（`ir.rs:63-137`）——**保留图**，供校验/烘焙/诊断。
+- 运行时**不序列化**该图：`GpuMaterialHeader` 没有 `closure_graph_offset`，`pkg/` 下 0 命中（§2.2，commit `f5172023c`）。运行时只保留 `closure_mask` + 变长参数块。
+- 无 `MAX_CLOSURE_SLAB_DEPTH` / `slab_depth()` / `ClosureSlabTooDeep`（§2.3，commit `1e9d1812b`）。
+
+### 3.3 运行时头部 `GpuMaterialHeader`（ABI v6，27 × u32 = 108 B）
+
+`pub const MATERIAL_ABI_VERSION: u32 = 6;`（`pkg/prism_render_material/src/record.rs:18`）
+`#[repr(C)] #[derive(…, bytemuck::Pod, bytemuck::Zeroable)] pub struct GpuMaterialHeader`（`record.rs:133-218`），字段顺序即布局：
+
+| 组 | 字段（顺序） | 说明 |
+|---|---|---|
+| 身份 | `generation`, `revision` | 代际 + 修订（内容寻址 / 增量更新用） |
+| 分类 | `illumination`, `render_class`, `feature_flags`, `closure_mask`, `lobe_mask` | 与 `SpecializationId` 三轴对应；`lobe_mask` 是**表面瓣**集合（§3.4），与 `closure_mask`（闭包种类）分属两层 |
+| 参数堆 | `parameter_offset`(u32 字偏移), `parameter_size`(字节), `texture_offset`, `texture_count`, `sampler_offset`, `sampler_count`, `custom_program` | 变长参数块在共享堆中的位置；解码必须配合 `lobe_mask` |
+| 活跃 | `is_active` | 拼写带 `is_`：WGSL 保留字 `active`；由 `tests/material_header_abi.rs` 钉住 |
+| 纪元 | `material_epoch_low`, `material_epoch_high` | 材质图/烘焙纪元，用于缓存失效判定 |
+| 键 | `specialization_low`, `specialization_high` | `SpecializationId` 的 64 位拆分（§3.1） |
+| PCM 摘要 | `extensions_used_low/high`, `extensions_required_low/high` | 4 字 = 64 槽定宽摘要（`HEADER_DIGEST_SLOTS = 64`、`HEADER_DIGEST_WORDS = 4`，`pkg/prism_material_pcm/src/lib.rs:75-79`）；纯 OpenPBR 材质全 0 |
+| 动态通道 | `dynamic_wetness`, `dynamic_snow`, `dynamic_damage`, `dynamic_dissolve` | f32 位模式；**头部里唯一允许运行时改写**的字，`0.0` 表示精确恒等 |
+
+- 尺寸以关系式断言而非字面量：`tests/material_header_abi.rs:107-108` 校验 `rust.len() * 4 == size_of::<GpuMaterialHeader>()`。
+- `DynamicChannels`（`record.rs:240-276`）：`NONE` 常量、`to_words()/from_words()`、`sanitize()`（非有限值 → 0，其余夹到 `[0,1]`）；`NO_VIRTUAL_TEXTURE = u32::MAX`、`PORTABLE_TEXTURE_ATLAS = u32::MAX-1`、`FALLBACK_MATERIAL_HANDLE = {index:0,generation:0}`（`record.rs:23-29`）。
+- **没有**结构哈希机制：版本由手写常量 + 测试 + schema 的 `abi_version` 三者共同维护（v2 文档里"结构哈希驱动版本"只是提案）。
+
+### 3.4 表面参数块：20 字核心 + 按瓣变长
+
+核心常量**全部由 schema 生成**（`pkg/prism_render_material/src/surface_layout.rs`，首行 `DO NOT EDIT`）：
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `SURFACE_CORE_WORDS` | **20** | OpenPBR 核心参数（元数据）字数 |
+| `SURFACE_LOBE_WORDS` | **16** | 最宽瓣的尺寸；注释明确 *"never a packing stride"* |
+| `SURFACE_LOBE_WORDS_BY_SLOT` | `[usize; 19]` = `[8,16,4,8,16,16,4, 0×9, 4,4,4]` | 逐槽字数；两段密集区（KHR 从 0，扩展从 `EXTENSION_SLOT_BASE`），中间留保留段 |
+| `SURFACE_LOBE_COUNT` | **10** | 已定义瓣数 |
+| `SURFACE_MAX_WORDS` | **104** | 解码缓冲上界 = 核心 + 全瓣；WESL 侧 `array<u32, 104>` |
+
+瓣注册表（`surface_layout.rs:73-184`，`LobeLayout { id, uid, mask_const, registry_slot, words, namespace, stability, requires_caps, energy_policy }`），**低位优先进位**：
+
+| 槽 | 瓣 | `LobeMask` 位 | 字数 | 命名空间 | 能量策略 |
 |---|---|---|---|---|---|
-| **统一软体 / 布料 / 绳 / 毛发** | `soft/{body,build,constraint,particle,solver}`（~3.1k 行）+ `solver/xpbd` | substep XPBD，“一切=粒子+约束”：布料=三角网、绳/毛发=1D 约束链 | M4 | 布料·毛发 guide·绳 | UE Chaos Cloth / PBD |
-| **刚体** | `solver/xpbd/{rigid,contact_constraint,joint_constraint,island_solve,sleep_solve,velocity_solve,parallel_solve}`（~3.6k 行）+ `island`/`sleep`/`joint`/`ccd` | 子步位置动力学 + 顺应接触/静摩擦 + island 并行 + CCD sweep | M-rigid | 刚体角色/道具 | PhysX/Chaos rigid |
-| **VBD 软体** | `vbd/{body,element,solver,system}`（~1k 行） | Vertex Block Descent（Chen 2024 SIGGRAPH），块坐标下降解隐式欧拉能量，**无条件稳定** | M7 | 高刚度软体/厚布 | 前沿 VBD |
-| **MLS-MPM** | `mpm/{constitutive,grid,svd,transfer,weights,particle,solver,expf}`（~1.9k 行） | 物质点 P2G/G2P + 本构（弹/塑/雪/沙），SVD 形变梯度 | M5.5 | 雪·沙·泥·可碎 | Disney/Houdini MPM |
-| **FLIP/APIC 液体** | `fluid/{mac_grid,pressure,transfer,particle,solver}`（~1.7k 行） | MAC 交错网格 + 压力泊松投影 + 标记粒子平流（自由表面） | M5.5 | 液体（液体引擎子系统底座） | FLIP/APIC 流体 |
-| **降阶模态软体** | `reduced/{modes,subspace,integrate}`（~1k 行） | 低频振动模态子空间 `u=U·q`，千自由度→个位数 | M7 | 海量廉价软体 | 模态/子空间动力学 |
-| **公共层** | `collide`/`collider`/`constraint`/`dynamics/integrator`/`pipeline`/`driver`/`island`/`sleep`/`state`/`snapshot`/`cache`/`query`/`lod`/`command`/`events`/`config` | 接触/碰撞/积分/管线/快照/LOD/命令流——各求解器共享 | —— | 全部 | Chaos 求解框架 |
+| 0 | emission | `1<<0` | 8 | `org.khronos.openpbr.emission` (KHR) | independent |
+| 1 | clearcoat | `1<<1` | 16 | `org.khronos.openpbr.coat` (KHR) | coupled |
+| 2 | anisotropy | `1<<2` | 4 | `org.khronos.openpbr.specular_anisotropy` | — |
+| 3 | sheen | `1<<3` | 8 | KHR | — |
+| 4 | subsurface | `1<<4` | 16 | KHR | — |
+| 5 | transmission | `1<<5` | 16 | KHR | — |
+| 6 | thin_film | `1<<6` | 4 | KHR | — |
+| 16 | npr_face | `1<<16` | 4 | Prism 扩展 | — |
+| 17 | glint | `1<<17` | 4 | Prism 扩展 | — |
+| 18 | measured_brdf | `1<<18` | 4 | Prism 扩展 | — |
 
-**含义修正（2026-09-29 复核代码后校准，勿再误读为「已共享」）**：上表准确描述 `prism_physics_core` 这一 ~24k 行**独立统一模拟核**的内部结构，但必须诚实指出当前 committed 代码里的**两栈并存 + 未接线**现状——
+- 区划分隔：`KHR_REGION`（7 个规范瓣，`pkg/prism_render_material/src/surface.rs:444`）与 `EXTENSION_REGION`（3 个 Prism 瓣，`surface.rs:460`）；辅助函数 `canonical_region()` / `extension_region()` / `is_pure_openpbr()` / `region_of(bit)`（`surface.rs:510-533`）。`LobeMask::COUNT = 10`（`surface.rs:465`）。位 7..15 留白，给规范后续增瓣。
+- 打包：`SurfaceParameterBlock`（`surface.rs:577`），`pack() -> Vec<u32>`（`surface.rs:843`）、`unpack(lobe_mask, words) -> Result<Self, SurfaceUnpackError>`（`surface.rs:856`）；长度公式 `packed_len_words = SURFACE_CORE_WORDS + Σ(在位瓣的 BY_SLOT 字数)`，**变长步长**（不是 20 + 10×16）。
+- 门禁测试：`size_of::<GpuSurfaceCore>() == SURFACE_CORE_WORDS * 4`（`surface.rs:1073`）、空块长度 == 核心（`:1101-1103`）、逐瓣 `words <= SURFACE_LOBE_WORDS`（`:984-1001`）、`LobeMask` 与生成表一致（`layout_matches_generated_table`）。
 
-- **实测依赖图**：`prism_render_architecture/Cargo.toml` **不依赖** `prism_physics_core`（`rg prism_physics_core pkg/prism_render_architecture/Cargo.toml` 无命中）；全仓仅 workspace 根 `Cargo.toml` 与 `benches/Cargo.toml` 引用它。即 physics_core 目前**尚未被渲染管线消费**。
-- **渲染侧子系统各自自持 sim**：`prism_render_architecture/src/` 下 `cloth/`（`dynamics.rs::solve_cloth`+`vbd.rs`+`ccd.rs`+`tearing.rs`+`pressure.rs`+`collision.rs`+`sleep.rs`+`lod.rs`）、`hair/`（§6.3 的 XPBD/VBD solver）、`particle/`（`simulation.rs`+`emitter.rs`+`stages.rs`）、`water/`（`flip.rs`+`pbf.rs`+`swe.rs`+`spectrum.rs`）、`volumetric/`（`raymarch.rs`+`avsm.rs`+`multiscatter.rs`）都**就地实现了自己的求解器**，并未调用 physics_core。
-- **设计意图 vs 现状的裂缝**：`cloth/coupling.rs` 的注释明确「authoritative rigid-body integrator lives in `prism_physics_core`，render-side module must not reimplement the solver」——即**意图**是 physics_core 当权威刚体/软体积分器、渲染侧只做接触的渲染半边。但**现状**是渲染侧自持了完整 sim，physics_core 未接线，形成两套并行模拟栈。**这是一条真实的待收敛重构线（非本文档 lane 可独改，须由 physics/architecture owner agent 决策接线方向）**。
+### 3.5 生成式布局：单一事实源 `schema/surface.toml` → Rust + WESL
 
-**因此子系统边界的准确表述是**：每个一等子系统（粒子/毛发/布料/体积/水）当前**自持几何生产 + sim + 特殊渲染**三件套（§6.2 判据据此成立）；physics_core 是**平行的权威模拟核候选**，其与渲染侧的接线（复用 vs 保持渲染侧轻量代理 + physics_core 当权威）是**未定案的架构决策**，不应在设计文档里预先断言为「已共享」。§6.3“共享基底 + 分叉响应”仍成立，但那讲的是**渲染响应侧**（PBR/NPR 分家、跨切面服务共享），**不等于 sim 核已统一**。
+`pkg/prism_material_schema/schema/surface.toml`（1255 行）声明：`schema_version = 1`、`abi_version = 6`（`surface.toml:18,23`）、`[core] words = 20`；每个字段带 `name / type / bit_region(KHR|extension) / pack_slot / consumed_by(["unpack","classify","sample","golden"]) / default / valid / energy_policy / view`。例：`base_color: vec4f` slot 0 默认 `[0.8,0.8,0.8,1.0]`；`base_metalness` slot 4；`specular_roughness` slot 5 默认 `0.3`；`specular_weight` slot 6 默认 `1.0`（取代旧 `reflectance` 代理）。
 
-### 6.2 子系统注册表（四档，钉死）
+生成物两件，都带 `DO NOT EDIT`：
 
-> 现状校准（2026-09-29，实测 `pkg/prism_render_architecture/src/` 模块树 + 行数）：档 1 五个一等子系统**均已落地**，且原列「档 2 后置留槽」的**水/海洋已提升为一等子系统**（`water/` 25 文件 ~9.2k 行，含 flip/pbf/swe/spectrum/foam/caustics/dispersion/coupling + GPU WESL 计算内核）。真正仍留槽的只剩植被/贴花。
-
-| 档 | 成员 | 判据 | 落地现状 |
-|---|---|---|---|
-| **0 地基** | 可变形几何(蒙皮/morph) | 所有形变子系统父级 | 竖切第一子系统 |
-| **1 一等子系统** | 粒子(`particle/` 19 文件 ~15.4k 行)·毛发(`hair/` 20 模块 ~7.8k 行)·布料(`cloth/` 23 文件 ~12.1k 行)·体积(`volumetric/` 25 文件 ~11.2k 行)·**水/海洋**(`water/` 25 文件 ~9.2k 行) | 自己的几何+sim+特殊渲染 | **均已落地**（各自持 sim，见 §6.1；粒子最先，带起 reactive mask） |
-| **2 后置留槽** | 植被·贴花 | 是子系统但重/非通用 | 未建（真留槽） |
-| **3 陷阱·别做子系统** | SSS/sheen/清漆(=closure)、大气(=光照数据服务)、OIT/motion(=基底服务) | 无几何无sim / 是公共设施 | — |
-
-**判据**：需要自己的「几何+sim+特殊渲染(透射/OIT/RT代理)」才是子系统；只是着色变化 → closure；大家都消费 → 基底服务。**布料要拆**：sim 是子系统、sheen 是 über 一个瓣。**液体不单列子系统**——液体 sim 由 `water/`（FLIP/PBF/SWE 自由表面）+ `prism_physics_core` 的 `fluid/`(FLIP/APIC)/`mpm/` 承载（§6.1），渲染半边归 water 子系统 + 透明/OIT 基底服务，符合判据。
-
-### 6.3 毛发 mini 支柱（子系统内部同构范例，已落地为 7.8k 行毛发引擎）
-
-```
-共享基底(PBR/NPR 都吃): strand几何(连续LOD→card, 禁硬切换) + guide-strand sim
-                       + 共享 deep-transmittance 自阴影服务 + 插进共享 OIT
-分叉响应(C类, 真分家):  PBR: Marschner/Chiang R/TT/TRT + dual-scattering
-                       NPR: 风格化各向异性高光带 + ramp + 阴影偏移(可与切线解耦=天使环)
-fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy 或排除
-```
-
-**这不是纸面 mini 支柱**——它已落地为 `pkg/prism_render_architecture/src/hair/`（20 模块、~7819 行的毛发子系统）+ `pkg/prism_render_shading/src/hair*.rs`（4 套响应模型），恰好逐条印证「共享基底 + PBR/NPR 分叉响应」这套子系统同构范式。下表把范式钉到 committed 代码，对齐 UE Groom / Chiang-Marschner / Deep Opacity Maps：
-
-| 范式层 | 落地模块 | 关键符号 / 契约 | 对标 |
-|---|---|---|---|
-| **模拟（子系统私有 sim）** | `hair/solver.rs`、`hair/dynamics.rs`、`hair/self_collision.rs`、`hair/sdf_collision.rs`、`hair/collision.rs`、`hair/wind.rs`、`hair/sleep.rs` | `HairSolverKind{Xpbd,Vbd}` + `SolverSelection::choose`（按 authored stretch stiffness 单阈值择解：软/中走 XPBD、硬定型走 VBD）；`simulate_strand_vbd`；SDF/解析碰撞 `push_out_of_field`/`resolve_strand_collisions`；`WindField`/`apply_wind`；`GroomSleepState`（motion-energy 阈值休眠省算） | UE Chaos 毛发 XPBD + VBD 定型 / Houdini Vellum |
-| **几何生产（连续 LOD，禁硬切换）** | `hair/lod.rs`、`hair/transition.rs`、`hair/interpolation.rs`、`hair/ribbon.rs`、`hair/frames.rs` | `HairLodTier{Strands→ReducedStrands→Cards→Mesh}`（`is_strand_based`/`coarseness`/`coarser_of`）；`HairLodTransition`（`is_cross_fading`/`proxy_alpha` 交叉淡入，杜绝 LOD 跳变）；guide→render `interpolation`；`RibbonMesh` card/ribbon 生成；`build_strand_frames`（RMF 相干帧供 ribbon 定向） | UE Groom guide→strand 插值 + card LOD |
-| **光栅路由（软/硬分派）** | `hair/raster.rs` | `HairRasterPath{SubpixelSoftware,ThickHardware,Culled}`（细 strand 走 compute 软光栅解析累进 vis-buffer 覆盖、近粗 strand/card 走硬件三角、背面/亚可见/零长剔除）；`DEFAULT_HAIR_SOFTWARE_WIDTH_PX`/`DEFAULT_HAIR_MIN_COVERAGE` | UE Nanite 毛发软光栅 / vis-buffer |
-| **共享自阴影服务** | `hair/deep_transmittance.rs`、`hair/deep_opacity_layout.rs` | `build_deep_opacity`/`DeepOpacityLayers`/`sample_transmittance`；`DeepOpacityMap`/`build_deep_opacity_map`/`map_transmittance`（分层深度不透明累积，PBR/NPR 前端共吃同一透射服务，不各造一份） | UE Deep Opacity Maps / Yuksel-Keyser |
-| **RT 代理策略** | `hair/rt_proxy.rs` | `RtReflectionRole`/`RtProxyPolicy`（`participates_in_rt`/`traces_strands`：RT 反射里毛发按 proxy 或排除，兑现 §10「RT×毛发降级」） | UE RT 毛发 proxy |
-| **导入 / 分组** | `hair/groom.rs`、`hair/groom_import.rs`、`hair/mod.rs` | `step_groom`/`GroomStepConfig` 每帧驱动；`HairGroupHandle`；groom 资产导入 | UE Groom asset |
-| **PBR 响应（真分家）** | `prism_render_shading/src/hair_chiang.rs`、`hair_kajiya.rs`、`hair_fiber.rs`、`hair.rs` | `evaluate_hair_chiang_direct`（Chiang R/TT/TRT + dual-scattering）、`evaluate_hair_kajiya_direct`（Kajiya-Kay 廉价路径）、`evaluate_hair_fiber_direct`（fiber-level）、`evaluate_hair_direct`（统一入口，配 CPU golden） | Chiang(Disney) / Marschner / Kajiya-Kay |
-| **NPR 响应（真分家）** | `prism_render_shading/src/stylized_hair.rs` | `StylizedHairParams`/`evaluate_stylized_hair_direct`（风格化各向异性高光带 + ramp + 可与切线解耦的阴影偏移＝天使环） | miHoYo / Arc System Works 毛发 |
-
-**注意共享分界（对齐 §6.1 校准后的现状）**：毛发 sim 落在 `prism_render_architecture/src/hair/`（子系统私有几何+动力学，`solver.rs` 自持 XPBD/VBD），与 `prism_physics_core` 的通用 soft/XPBD 是「同族算法、不同落点」。**关键澄清**：如 §6.1 复核所述，渲染侧子系统（含毛发）当前**均自持 sim、未接线 physics_core**（`prism_render_architecture` 不依赖该 crate）；physics_core 是平行的权威模拟核候选。毛发因 strand 拓扑特化 + deep-opacity/软光栅深度耦合，即便将来接线也很可能**保持子系统就地 sim**（strand 特化远离通用软体）。这条边界在 §6.2 判据下自洽（子系统 = 自己的几何+sim+特殊渲染）。
-
-**所有一等子系统内部都应长这个样**（共享基底 + PBR/NPR 分叉响应 + 连续 LOD + 软/硬光栅路由 + 共享跨切面服务）——毛发是已落地的同构样板，布料/粒子/液体/体积按此范式对齐，架构一致性拉满。
-
----
-
-## 7. 前端（并存，皆一等）
-
-- **延迟 PBR 前端**：承载虚拟几何(Nanite 级)/RT/GI/VSM。虚拟几何与 forward+ 互斥，**这才是逼向延迟的真原因，不是 PBR 本身**。
-- **forward+ 前端（一等公民）**：透明**强制** forward，所以这条路本就必建；NPR 复用它、粒子挂它，**不是额外成本**。
-- **NPR 风格化前端**：描边 / ramp / SDF 面阴影 / 风格化高光 / rim / 风格化 post。**vis-buffer 的 material id 边界白送描边**。
-- **自定义前端槽**：项目注入 `illumination=Custom`，走自定义 WESL closure + 自定义 pass。
-- **混合 = 逐像素 material id + tile 分类路由**：GPU 把像素按 material id 分 tile，路由到对应前端。因共享光/影/GI 而连贯——这是"管线级混合"的具体机制，也是它比"各前端各算高级特性"优越的地方。
-
-**落地锚点（对齐 committed 代码）**："逐像素 material id + tile 分类路由"不是设想，已两侧落地——
-- **CPU 分桶**：`prism_render_shading/src/classification.rs` 的 `classify_material_header` 把每个材质头投影到 9 值 `MaterialShadingClass`（Water/Hair 由 `render_class` 直绑；Unlit/Npr(=Stylized)/Custom 由 `illumination` 定；其余 Lit 由主导 closure 经 `lit_class_from_closures` 投影 Hair/Subsurface/ClearCoat/Cloth/Principled），`ShadingWorkPlan::build` 据此把像素分成 `ShadingWorkItem` bin（同桶同 permutation，wavefront 一致）。
-- **GPU 路由**：`prism_render_scene/src/shaders/shading_resolve.wesl` 里 9 个 `SHADING_CLASS_*`(PRINCIPLED=0 … CUSTOM=8) 常量 + `switch params.shading_class` 的 9 条 case，分派到 `shade_principled`/`shade_toon`(NPR)/`shade_subsurface`/`shade_clearcoat`/`shade_cloth`/`shade_hair`/`shade_water` 等前端着色函数——**同一 resolve pass、同一套光/影/GI 输入，仅着色分支按桶切换**，这正是「管线级混合」优于「各前端各建一套高级特性」之处。
-- **描边白送**：NPR 前端的 material-id 边界描边直接消费 vis-buffer 的 id（`outline.rs::outline_id_edge`，§9 第 4 项），无需额外 id pass。
-
----
-
-## 8. 后端抽象（破坏性重构）
-
-> 修订（2026-09-29 定案）：跨平台的**运行时抽象已由 wgpu 提供**（Bevy 现状）。本节是在 wgpu 之上的**能力协商层**，**不是**要绕开 wgpu 自己写多后端，也**不存在第二个原生 Vulkan 后端可供升级**。收敛为**单一 wgpu 后端**：能力 = `WebGPU` baseline + 按需启用的 wgpu 扩展 feature；给不出的能力走 fallback，绝不切后端。见 §0.5。
-
-- 删 `BackendMode{VulkanFirst,WgpuCompatibility}` 二值枚举、删 `BackendId{Wgpu,NativeVulkan}` 两后端模型、删 `VulkanTier/BackendTier` 分级 → **单 wgpu 后端 + wgpu 扩展 feature 协商**。
-- 能力用 `Capability` 位集表达（`Compute`=baseline，其余 `BindlessDescriptors/IndirectDrawCount/MeshShading/RayQuery/RayTracingPipeline` 皆为 opt-in 扩展 feature，文档标注对应 wgpu feature 名，如 `EXPERIMENTAL_MESH_SHADER`）。`negotiate_features(adapter_supported, requested)` 产出 `EnabledFeatures{enabled, unavailable}`：`enabled = WEBGPU_BASELINE ∪ (adapter ∩ requested)`，`unavailable = requested − adapter`（请求了但 adapter 不支持的扩展，驱动 fallback）。
-- **fallback 矩阵**：每个高级特性声明所需 capability + 降级路径（无 RT → SSR/SSGI；无 mesh shader → 传统 index draw；无 bindless → 描述符表）。
-- "一份 shader、多平台"由 **WESL → naga** 达成（一份 WESL 编到 WGSL/SPIR-V/Metal/DXIL）；跨平台差异收敛为"补 capability 分支"，运行时由 wgpu 落到 Metal/VK/D3D12/WebGPU/Web。
-
-### 8.1 可测性三桶边界（2026-09-29）
-
-`raw_vulkan_init`（Bevy 上游 feature）本质是**在同一个 wgpu 设备上、经 wgpu 的 Vulkan HAL 回调启用 wgpu 类型化 feature 未暴露的额外 VK 扩展**——它**不是第二个后端**，非 Vulkan 平台（Metal/Web）直接 fallback 回普通 wgpu。它是"扩展注入路径而非独立后端"，且是这套扩展协商里最窄、最危险的一条：**不是"补齐特性"的万能补丁**——它用**两个设计承诺换一个平台特性**：跌进这条路的特性同时丢掉「跨平台」（裸 VK 在 Mac/Web 没有）和「CPU golden 可测」（写不出同源 CPU 参考）。据此把高级特性分三桶：
-
-| 桶 | 覆盖路径 | 跨平台 | CPU golden 可测（测试脚手架） |
-|---|---|---|---|
-| compute-可移植（VSM/GI/OIT/粒子/froxel 体积/时序上采样/毛发布料 sim） | wgpu compute（含 EXPERIMENTAL） | ✅ | ✅ 数组进数组出，手写 Rust 参考可逐像素对数 |
-| RT | wgpu ray query/pipeline（主 VK/DX12，**Metal RT 弱**） | 部分 | 半（**closure 着色可 golden；traversal/驱动 BVH 不可**） |
-| raw-VK-only（SPARSE/TILED、SHADING_RATE/VRS、WORK_GRAPH，实测 wgpu 30=缺） | 仅 `raw_vulkan_init` | ❌ | ❌（驱动/硬件黑盒，无数值输出可对） |
-
-**为什么 raw-VK 桶"没 cpu"**：CPU golden 成立的前提是算法能用同源 shader 编到 CPU target 逐像素复现。compute 效果本质数组进数组出，能复现；而 RT 遍历/驱动建 BVH、sparse 页驻留、VRS 采样率、work graph 调度都是**驱动/硬件黑盒，没有可对齐的数值输出**——要 golden 就得手写第二份实现，那本身就是漂移，违背 golden 初衷。
-
-**结论**：`raw_vulkan_init` 必须被关进"明确非可移植、明确无 CPU golden 覆盖"的小笼子，单独配 GPU-only 抓帧 diff 的验证策略，**不得当通用兜底污染主线**。要不要为某个 raw-VK 特性付这笔"双失"代价，取决于它是否为核心野心——**大多数野心效果是 compute，落在第一桶，根本用不到这个逃生舱**。
-
-**实装现状（对齐 committed 代码，勿误读为已接线）**：第三桶 `raw_vulkan_init` / hal 注入路径在 Prism 的 `pkg/prism_render_architecture/src/backend/` 里**零代码**——`capability.rs::Capability` 只枚举第一、二桶的 6 个能力位（`Compute` baseline + 5 个类型化 wgpu 扩展：`BindlessDescriptors`/`IndirectDrawCount`/`MeshShading`/`RayQuery`/`RayTracingPipeline`），**没有 SPARSE/TILED、SHADING_RATE/VRS、WORK_GRAPH 的能力位，也没有 `as_hal`/`create_device_from_hal`/`AdditionalVulkanFeatures` 任何 hal 下探**（实测 `git grep raw_vulkan|as_hal|create_device_from_hal|AdditionalVulkan pkg/` 零命中）。即：能力协商层已 committed 落地的是**第一、二桶**（baseline + 类型化扩展 fallback，§9 第 5 项）；第三桶是**记录在案但刻意不实装**的逃生舱设计——仅当某个 raw-VK 野心真的立项时才经 Bevy/wgpu 上游 hal 回调接入，届时须同时接受「丢跨平台 + 丢 CPU golden」并单配抓帧 diff 验证。当前无此需求，故 backend crate 不含任何 hal 代码，符合「大多数野心是 compute、用不到逃生舱」的判断。
-
----
-
-## 9. 代码层破坏性重构清单（可编译可测每步）
-
-1. **（已完成）** `pkg/prism_render_material/src/record.rs`：`MaterialShadingModel` 已删除（仅注释保留"former"字样）；`MaterialRenderClass` 已去 `Npr*/Custom*`（保留 Opaque/OpaqueTwoSided/Masked/MaskedTwoSided/Transmissive/Transparent/Additive/Volume/Hair/Water/Decal）；`GpuMaterialHeader` 已去 `shading_model`、加 `illumination`/`closure_graph_offset`/`specialization_{low,high}`/`lobe_mask`；`GpuSurfaceParameters` 已拆为 `GpuSurfaceCore`（12 字）+ 按 `LobeMask` 可选瓣 blob（`surface.rs`，见 §3.3，ABI v4）。
-2. **（已完成）** `pkg/prism_render_material/src/ir.rs`：`normalize()` 不再塌缩成单 `shading_model`，产出 `NormalizedMaterial{ closure_mask, illumination, specialization_id }`；`slab_depth()` 在 DAG 上记忆化最长链求解，`> MAX_CLOSURE_SLAB_DEPTH(=4)` → `MaterialValidationError::ClosureSlabTooDeep`（Mix/Layer 封顶校验，见 §3.4）。
-3. **（已完成，口径修正：择更优方案）** `pkg/prism_render_shading/src/classification.rs`：原计划"9 桶 → 按 specialization_id 动态分桶"，实施时择更务实方案——**保留 9 值 `MaterialShadingClass` 枚举**（Principled/Unlit/Subsurface/ClearCoat/Cloth/Hair/Water/Npr/Custom），但它不再是存储字段而是**正交轴的派生投影**：`classify_material_header` 据 `illumination`+`closure_mask`+`render_class` 现算桶（Water/Hair render_class 直绑，Unlit/Stylized/Custom 由 illumination 定，Lit 由主导 closure 经 `lit_class_from_closures` 投影）。保留固定枚举让着色 pass 保持 wavefront 一致（同桶像素同 permutation），材质侧则完全正交。`ShadingWorkPlan::build` 按桶分 bin 产出 `ShadingWorkItem`。
-4. **（已完成）** `pkg/prism_render_shading/src/resolve.rs`：`evaluate_toon_direct` 已从"一个特例分支"提升为 `ILightResponse(Stylized)`（`evaluate_stylized_direct`，旧 toon 作为 `StylizedParams::legacy_toon` 兼容层）；描边/ramp/SDF 面阴影/rim 分别落到 `stylized.rs`（`evaluate_stylized_direct`）、`outline.rs`（`outline_id_edge`/`outline_depth_edge`/`outline_normal_edge`/`evaluate_outline`）、`face_shadow.rs`（`face_shadow_light_cosines`/`evaluate_face_shadow`）。
-5. **（已完成）** `pkg/prism_render_architecture/src/backend/`：删两后端模型（`BackendId::NativeVulkan`/`BackendTier`/`registry`），收敛为单一 wgpu 后端——`capability.rs`（`Capability` 位集 + `WEBGPU_BASELINE` + `FeatureRequirement`）、`negotiation.rs`（`negotiate_features` → `EnabledFeatures`）、`fake.rs`（`FakeBackend` 仅持有 `enabled` capability 集）、`RenderBackend` trait 仅留 `capabilities()`/`supports()`/`wait_idle_for_shutdown()`。
-6. **（已完成）删除 `prism_render_slang` + `prism_render_slang_abi`**（commit `211f15988`，共 ~2051 行，删除前零外部依赖）。放弃 Slang（见 §2）。
-7. **（口径修正）NPR 前端已就地落在 `prism_render_shading`**：原计划的独立 crate `prism_render_npr` 被就地实现取代——`evaluate_stylized_direct`（ramp/stepped shadow/stylized specular/rim）、`outline.rs`（material-id/深度/法线三路描边）、`face_shadow.rs`（SDF 面阴影）均已在着色 crate 内落地并配 CPU golden；着色 WESL、ABI 手写 `#[repr(C)]`（§2.4）。抽取为独立 `prism_render_npr` crate 降级为可选后续项（当前不做，避免与在建 NPR 着色工作冲突）。
-8. 着色器继续用 **WESL**；ABI 用手写 `#[repr(C)]` + 哈希版本 + 对齐测试兜漂移（§2.4）。不做 `.slang` 迁移。
-9. **（已落地 · backend lane，非材质 ABI 重构）** `pkg/prism_render_architecture/src/virtual_geometry/`：CPU 层 11 文件已 committed（cull/lod/page_table/raster_path/pipeline/hierarchy/bins/page_request/frame + software_raster + mod，确定性、后端无关、可单测）。**vis-buffer 软光栅数学金标准已落地 CPU 侧**（`software_raster.rs`：64-bit depth/payload 打包 + reversed-Z `max` 合成 + top-left 规则水密覆盖 + 屏幕空间线性深度插值 + 世界→屏幕投影层，19 项单测含水密无双覆盖/近赢/背面剔除/越界不 panic/payload 打包/cluster 与逐三角 dispatch 等价）。**已对齐 shipping vis-buffer ABI 逐位可对拍**：depth = `bitcast<u32>(reversed-Z NDC z)`（非缩放整数，与 GPU compute twin 完全一致）、payload = `(cluster_id<<7)|triangle_id`（7 位三角+高位 cluster，对齐 meshlet 软光栅布局）；提供 `rasterize_triangle`（单三角）与 `rasterize_cluster`（索引三角簇、每簇 ≤128 三角不变式、越界索引跳过不 panic）两级参考，后者对齐 GPU per-cluster dispatch 便于**逐簇抓帧对拍**；并补**世界→屏幕投影层 `project_vertex`**（column-major `clip_from_world` 矩阵乘 + 透视除 + `ndc_to_uv` y 翻转 + viewport 缩放，逐位对齐 shipping meshlet 顶点路径，`clip.w<=0` 近平面外返回 `None`），使金标准覆盖**顶点投影→光栅填充完整路径**、可与 GPU twin 顶点阶段端到端对拍（19 项单测含 project→rasterize 端到端）；另补**三角梯度设置 `raster_gradients::TriangleGradients`**（`w_x/w_y` 边函数逐列/逐行增量 + `vertices_z` 归一 + `z_x/z_y` 深度平面梯度，逐位对齐 shipping compute twin 的增量扫描 setup），以整数坐标精确对拍证明「梯度=边函数有限差分/深度平面=重算重心/深度梯度逐位步进」（4 项单测），使 twin 的增量遍历有 CPU 参考可 diff（recompute 路径仍为水密权威）；又补**扫描线区间 `TriangleGradients::row_span`**（对齐 shipping compute twin 宽行 `subgroupAny(max_x-min_x>4)` 快路径的闭式 `[x0,x1]` span：把三条边不等式 `w_row[i]+k·w_x[i]>=0` 沿行求交得单一连续区间，`ceil/floor` 端点钳到 `[0,steps]`），以 generic-position 整数坐标逐像素 `all(w_i>=0)` 扫描对拍证明「区间端点=覆盖首末像素且中间无洞」、并证全覆盖行端点被正确钳制（2 项单测），为 twin 的宽行 span 遍历钉死等价基线；再以 **dyadic 坐标（`double_area=256=2^8`，`vertices_z`/`z_x` 位精确）证 twin 内循环快路径深度步进等价**——沿 `row_span` 区间用 `z += z_x` 增量深度平面（而非逐像素重算重心）与逐像素边函数重算 bit-for-bit 一致（z_x 步进/边三元步进/逐像素采样三路对拍，1 项单测），使**扫描线区间 + 深度平面梯度合体**的完整 twin 快路径有位精确 CPU 参考；且 top-left 水密规则正是 shipping compute shader 仍标 TODO 的正确终态，金标准据此钉死 twin 验收基线。`mod.rs` 边界声明明确「物理页存储、vis-buffer 光栅、流式 I/O 均落在 backend、本层保持确定性与后端无关」，而该 backend 现已落地为独立 crate `prism_virtual_geometry_gpu`（Metal 实跑对拍，见下）。**GPU 软光栅 twin 已落地并 Metal 实跑对拍**（新 crate `pkg/prism_virtual_geometry_gpu/`，commit `1d67f2fa1`）：可移植核心 WGSL —— `atomic<u32>` storage buffer + `atomicMax`（**不依赖 r64 纹理原子扩展**，Metal/Vulkan/DX12 直跑），depth-only 复现上游逐三角 scatter+atomicMax 模型；逐线程 `(pixel,triangle)` dispatch 以真 atomicMax 竞争合成，忠实复现金标准 `edge`/winding-swap/top-left `covers`/reversed-Z `bitcast<u32>(clamp(z,0,1))` encode；整数坐标使**覆盖判定位精确**（`gpu_parity.rs` 断言 cleared iff cleared），三项重心深度和受后端浮点重结合（FMA/点积）扰动故深度键取 **1-ULP 容差**（同 `prism_physics_gpu` XPBD twin 浮点口径），Metal 实跑 2 passed 无 skip、零警告。**64-bit payload 键已落地并 Metal 实跑对拍**（commit `98029f2f7`，crate 内 `GpuPayloadRaster` + `vis_buffer_payload_raster.wesl`）：以 `storage`-buffer `atomic<u64>` 单次 `atomicMax` 合成 shipping 的完整 `(depth<<32)|payload` 可见性字（reversed-Z 最近深度胜出并携带 winner payload，复现 Nanite 式单原子模型），**用 64-bit buffer 原子而非 `r64uint` 纹理原子**故 Apple M2 Metal 实测可跑（`GpuContext` 探测并按需启用 `SHADER_INT64`+`SHADER_INT64_ATOMIC_MIN_MAX`，不支持时 `new` 返 `None` 优雅跳过）；对拍 payload_parity 3 passed 无 skip：覆盖集位精确、winner payload 位精确、深度字 1-ULP 容差。**物理页存储已落地 CPU 金标准 + GPU twin 并 Metal 实跑对拍**（commit `4fc25c2dc`）：CPU 侧 `paging/page_pool.rs` 新增泛型 `PagePool<K>`（有界物理槽池——最低空闲槽优先分配、freed 槽 min-heap 复用、`allocate` 幂等、`entries` 按 key 序导出 `(key,slot)` 表，与 `ResidencyTable` 同以页键 `K` 参数化，几何/阴影页共用），7 项单测覆盖密集分配/幂等/freed 复用/最低 freed 优先/满池拒新纳旧/批量释放/key 序导出；GPU twin `GpuPageTable`（crate 内 `page_pool.rs` + `page_table_resolve.wesl`）对 `PagePool::entries` 有序表做**逐 query 并行下界二分**解析页键→物理槽（`asset`/`page` 两 `u32` 词典序比较，纯可移植整型 WGSL 无需 64-bit 特性，Metal/Vulkan/DX12 直跑），命中返回槽、未命中写 `UNMAPPED_SLOT` 哨兵、未排序表拒绝解析；对拍 page_table_parity 4 passed 无 skip——槽位逐 query 对拍 `PagePool::slot_of` **位精确（纯整型无浮点容差）**，覆盖复用槽/空表全 miss/空 query/未排序拒绝。**流式 I/O 已落地 CPU 金标准 + GPU twin 并 Metal 实跑对拍**（commit `616e24b03`）：CPU 侧 `paging/page_storage.rs` 新增 `PageStorage`（扁平定长物理页缓冲——`capacity` 槽 × `page_words` u32/槽，slot s 占 `[s*page_words,(s+1)*page_words)`，`upload` 写槽跨度/`clear_slot` 归零/`fetch` 逐字读/`slot_words`/`as_words` 导出 slot-major 扁平镜像，越界槽与页尺寸不匹配拒绝、`new` 零初始化对齐 GPU 缓冲零初值），5 项单测覆盖零初始化/上传落槽跨度/clear 仅归零本槽/越界与尺寸拒绝/越界读 None；GPU twin `GpuPageStorage`（crate 内 `page_storage.rs` + `page_pool_scatter.wesl`/`page_pool_gather.wesl` 两 WESL）以**一 scatter pass 逐 `(record,word)` 散射上传 + 一 gather pass 逐 query 索引读回**复现物理页放置/读取（纯可移植整型 WGSL 无需 64-bit 特性，Metal/Vulkan/DX12 直跑，pool 缓冲零初始化对齐金标准 `new`/`clear_slot`，越界目标槽跳过、越界读定义为零），`round_trip` 对拍 `fetch` **位精确（纯 u32 无浮点容差）**；对拍 page_storage_parity 4 passed 无 skip——覆盖多槽上传跨槽读/未写槽读零/越界目标跳过/空 upload 空 fetch。**至此虚拟几何 GPU 三大出血点（① vis-buffer 键 ② 物理页存储 ③ 流式 I/O）全闭合**，端到端「解析页键→物理槽→放置/读取页数据」均有 CPU 金标准 + Metal 实跑位精确对拍的 GPU twin。**流式编排端到端集成 twin 已落地并 Metal 实跑对拍**（commit `c03e204c1`，`tests/stream_integration_parity.rs`）：以真实 CPU 流式编排器 `PageStreamManager`（`paging/streaming.rs`：`reconcile` 折叠 `RequestBatch`→按优先级流入/满池 displacement 逐最低优先未用页/超预算 defer）驱动两个 GPU twin，而非手搭 `PagePool`，闭合「请求批 → 编排 residency → 解析页键→槽 / 放置→取回页数据」完整链路。resolve 腿：`PageStreamManager::entries()`（key-sorted）喂 `GpuPageTable`，逐 query 位精确对拍 `slot_of`（miss→`UNMAPPED_SLOT`），hits/misses 双非空防退化；storage 腿：resident 页确定性 payload 上传到 manager 指派槽经 `GpuPageStorage::round_trip`，全池 slot-major 取回与独立金标准缓冲位精确对拍；并含跨帧 displacement eviction（新高优先页流入、最低优先页被逐）使两腿跑在真正 churn 过的 residency 上。Apple M2 Metal 实跑 2 passed 无 skip、零警告。**GPU-driven 光栅路径分类 twin 已落地并 Metal 实跑对拍**（commit `8eb012269`，crate 内 `raster_classify.rs`（`GpuRasterClassifier`）+ `raster_path_classify.wesl`）：逐 cluster 并行把 `ClusterRasterStats{max_triangle_pixels,triangle_count}` + 能力位（mesh_shader/hardware_indirect）+ 软光栅阈值分类为四路径索引（0=MeshShader/1=ComputeSoftware/2=IndirectHardware/3=FallbackMesh，逐位对齐 `GeometryRasterPath as u32` 声明序），逐位镜像 CPU 金标准 `select_raster_path`（`virtual_geometry/raster_path.rs`）——空 cluster→FallbackMesh、`max_triangle_pixels<=max(threshold,0)`→ComputeSoftware、否则按能力择优 MeshShader→IndirectHardware→FallbackMesh。kernel 无浮点算术（仅 `max(threshold,0)` 夹取 + 单次 `<=` 比较，两侧操作数同、结果位精确），portable core-WGSL 无需可选特性，Metal/Vulkan/DX12 直跑；对拍 raster_path_parity **3 passed 无 skip 纯整数位精确无容差**——覆盖四路径 + 空场景 + 恰在阈值 `<=` 边界 + 负阈值夹取，跨全部四种能力组合逐位对拍并以 `BTreeSet{0,1,2,3}` 断言四路径全覆盖防退化。此为三大出血点闭合后 GPU-driven cull/分类前端的下一步深化（Nanite 式 cluster 分类）。**GPU-driven 集群剔除 twin 已落地并 Metal 实跑对拍**（commit `4b68cb54a`，crate 内 `cluster_cull.rs`（`GpuClusterCuller`）+ `cluster_cull.wesl`）：逐 cluster 并行对六个内向 frustum 平面做投影半径测试（`signed_distance=nx·px+ny·py+nz·pz+d`、`projected_extent=|nx|·hx+|ny|·hy+|nz|·hz`，任一平面 `signed_distance<-projected_extent` 即出局），随后按可选 `OcclusionProbe`（`closest_depth>occluder_depth` 严格）做 Hi-Z 遮挡判定，输出 verdict 索引逐位对齐 `CullVerdict as u32` 声明序（0=Visible/1=FrustumCulled/2=OcclusionCulled），逐位镜像 CPU 金标准 `cluster_cull`（`virtual_geometry/cull.rs`）——frustum 优先短路、遮挡仅对存活 cluster 咨询、`None` probe 跳过遮挡相。kernel 镜像金标准项序（乘加/绝对值和）以在远离平面刀口处 verdict 对任何合法浮点重结合稳定；portable core-WGSL 无需可选特性，Metal/Vulkan/DX12 直跑；对拍 cluster_cull_parity **3 passed 无 skip、verdict 逐位对拍无容差**——覆盖三 verdict + 六面各自剔除 + 有/无 occlusion probe + 空场景，`BTreeSet{0,1,2}` 断言三 verdict 全覆盖防退化。至此 GPU-driven 前端 cull→raster-path-classify 两级（管线序 cull→LOD→classify→bin 的上下游）均有 CPU 金标准 + Metal 实跑位精确对拍的 twin。**LOD 选择 twin 已落地并 Metal 实跑对拍**（commit `a5c9af471`，crate 内 `lod_select.rs`（`GpuLodSelector`）+ `lod_select.wesl`）：全 dispatch 共享一条 LOD 链（一个 mesh 的链被其所有 cluster 共享，仅 view_distance/closing_speed/previous 不同），逐 cluster 并行镜像金标准 `select_lod`（`virtual_geometry/lod.rs`）——`projected_error=max(geo,0)·focal/max(dist,EPSILON)` 项序对齐、`coarsest_within`（预算内最大 level，否则 finest）、`error_of`（按存储 level 而非数组下标查链）、`pick_level`（hysteresis：desired==prev 保持 / desired<prev 仅当 prev_err>target+hyst 才 refine / desired>prev 仅当 desired_err<=max(target-hyst,0) 才 coarsen）、以及速度缩放 prefetch（`prefetch_distance=max(view_distance-max(closing_speed,0)·prefetch_velocity_scale,0)`，previous=display，`prefetch_level=min(prefetch,display)` 不粗于 display）。选择结果为离散 level 索引对，kernel 分支均为整数 level 比较或同操作数浮点预算比较，故远离刀口预算边界时逐位对齐金标准 `(level,prefetch_level)`；portable core-WGSL 无需可选特性，Metal/Vulkan/DX12 直跑；对拍 lod_select_parity **5 passed 无 skip、level 逐位对拍无容差**——覆盖四级链全 level（`BTreeSet{0,1,2,3}` 防退化）+ hold/refine/coarsen 三分支 + prefetch 不粗于 display + 空链/空 cluster 早返。**光栅分桶 bin_cut twin 已落地并 Metal 实跑对拍**（commit `2e691d8fb`，crate 内 `bin_cut.rs`（`GpuCutBinner`）+ `bin_cut.wesl`）：把一帧选中的 cluster cut 稳定分派到四个光栅路径桶，逐位镜像 CPU 金标准 `bin_cut`（`virtual_geometry/bins.rs`）。忠实复现「保序多桶分区」故走**三段式**共享 storage——① `classify`（逐 cut 元素一线程）用与 `raster_path` 分类同一套整数分支 + 单次 `<=` 比较解出桶 ∈{0,1,2,3}，node 索引越界则记 `SKIP`（不 panic、不路由）；② `scan`（单串行 invocation）按 cut 顺序走一遍算每元素桶内 rank + 四桶 count，忠实对齐金标准顺序 `push`；③ `scatter`（逐元素）按固定桶序前缀和把每个非-skip元素落到 `base[bucket]+rank`，输出输入索引的置换。三段用独立 compute pass 使 wgpu 插入 storage 读写屏障保证可见性；`CutCluster`/page 数据不进 shader，host 据置换 + 四桶 count 重建 `RasterBins`。桶分派无浮点算术（仅 `max(threshold,0)`夹取 + 单次 `<=`，两侧操作数同）且置换为离散索引数组，故**逐位无容差**；portable core-WGSL 无需可选特性，Metal/Vulkan/DX12 直跑；对拍 bin_cut_parity **3 passed 无 skip 逐桶逐元素位精确**——覆盖四桶全填（交错 cut 验桶内保序）+ 越界 node 跳过 + 无 mesh_shader 降级 indirect + 空 cut/全越界早返 default，跨全部四种能力组合逐桶对拍并以 `BTreeSet{0,1,2,3}` 断言四桶全覆盖防退化。**至此管线序 cull→LOD→classify→bin 四级 GPU-driven 前端全部落地**，均有 CPU 金标准 + Metal 实跑位精确对拍 twin。**割选择 select_cut twin 已落地并 Metal 实跑对拍**（commit `0bdc49b28`，crate 内 `select_cut.rs`（`GpuCutSelector`）+ `select_cut.wesl`），补齐 bin 之前的最前端一级：把 DAG 层级自顶向下选出「本帧要画的 cut」，逐位镜像 CPU 金标准 `ClusterHierarchy::select_cut`（`virtual_geometry/hierarchy.rs`）。忠实复现「自顶向下栈遍历」故走**两 entry 共享 4-binding 布局**——① `classify`（逐 node 一线程）算 `frustum_visible`（复用 cluster_cull 同款项序 `nx·px+ny·py+nz·pz+d` 与 `|nx|·hx+|ny|·hy+|nz|·hz`）+ **平方形预算测试**（`projected·projected <= budget·budget·distance_sq`，`projected=max(self_error,0)·focal`，免 sqrt 对齐金标准 `fits_budget`），写 `state[i]` 位 `DESCEND/DRAW_LOCAL/REACHED`（REACHED 仅 root 初始化）；② `relax`（逐 node 一线程，host 驱动到定点）当 `parent≠SENTINEL` 且 `state[parent]` 同含 REACHED+DESCEND 时置本 node REACHED 并 `atomicStore(changed,1)`——单调 0→1 故定点与 intra-dispatch 序无关，host 侧循环 ≤node_count 次读回 `changed` 收敛即停。draw 集 = `{i: REACHED[i] && DRAW_LOCAL[i]}`，精确等价金标准栈遍历输出（cut 为集合，两侧 `sort_by_key(node)` 后逐元素相等）；host 从 children 区间反演唯一父（森林不变式）+ `roots()` 初始化。predicate 全为整数位比较或同操作数浮点预算比较，portable core-WGSL 无需可选特性，Metal/Vulkan/DX12 直跑；对拍 select_cut_parity **6 passed 无 skip**——mixed 三级混合分辨率（cut={2,3,4}）/ 松预算画 root（{0}）/ 5 节点线性链验 relax 多趟定点（cut={4}）/ frustum 全剔空 / malformed 空 / empty 空。**至此 GPU-driven 前端由 cull→LOD→classify→bin 四级扩为 select_cut→cull→LOD→classify→bin 五级（割选择为最前端）**，全部有 CPU 金标准 + Metal 实跑位精确对拍 twin。 **vis-buffer 逐顶点前端亦已补齐 GPU twin 并 Metal 实跑对拍**：① 三角梯度 setup twin （crate 内 `triangle_gradients.rs` + `triangle_gradients.wesl`，`GpuTriangleGradients`，commit `2447af1eb`）一线程一三角复现金标准 `TriangleGradients::new` 的仿射设置（双面积 `edge(v0,v1,v2)`≤0 剔除为 `None`、`w_x`/`w_y` 逐列逐行边增量、`vertices_z=depth·inv_area`、`z_x`/`z_y` 深度平面梯度左到右求和），dyadic 坐标（`double_area=256=2^8`）令倒数/乘积/点积全 fma-免疫故 `TriangleGradients` 逐字段位精确断言无容差，含 200 三角形多工作组/背面·退化剔除/空输入，triangle_gradients_parity 4 passed 无 skip；② 世界→屏幕顶点投影 twin（crate 内 `project_vertex.rs` + `project_vertex.wesl`，`GpuProjectVertex`，commit `1ca0d0397`）一线程一顶点复现金标准 `project_vertex` 的 column-major `clip_from_world` 矩阵乘 + 透视除 + `ndc_to_uv` y 翻转 + viewport 缩放，`clip.w<=0` 近/背平面顶点剔除为 `None`（与金标准一致），dyadic 世界/矩阵操作数 + 2 的幂 `clip.w`/viewport 令 pos/depth 位精确故 `ScreenVertex` 逐字段断言无容差，含常 w 正射批/透视 `clip.w=z` 的 z≤0 剔除/>64 顶点多工作组/空输入，project_vertex_parity 4 passed 无 skip。**至此金标准的「顶点投影→梯度 setup→屏幕填充/payload 合成」vis-buffer 逐顶点全链在 GPU 侧均有 Metal 实跑位精确对拍 twin。**
-10. **（算法层已落地，剩 GPU 收尾 · TAA/上采样 + 粒子/透明 lane）** reactive mask 消费端**已在算法层接通（doc §282 要求的两处均落地）**：① `prism_render_shading::taa::resolve_taa` 接受 `reactive∈[0,1]` 并按 `effective_blend = history_blend*(1-reactive)` 逐像素放宽 history（commit `e4790e0c6`，`taa:: 10/10` 绿）；② `upscale::robust::disocclusion_history_weight` 加第三入参 `reactive` 以 `base·(1-d)·(1-reactive)` 乘性合成（commit `1b1c61080`）；③ 实际累积解析入口 `upscale::upscale_pixel` 贯通 `UpscaleInput.reactive`，以 `history_weight=(1-current_weight)*(1-reactive)` 折进 history 权重（reactive=1 落当前重建样本、reactive=0 逐位等同 shipping，含 `reactive_zero_is_bit_for_bit` 守护，commit `d1c9827c4`，`upscale:: 70/70` 绿）。生产端亦已 committed 收口（transparency/particle/motion 标注 + `motion/encode.rs` 的 `PackedMasks` 打包 ABI，随 `EncodedMotion` 存速度 G-buffer）。**剩 GPU 侧两步**：① `pkg/prism_render_scene/src/shaders/taa_resolve.wesl` 与 `upscale_reconstruct.wesl`（upscale_pixel 的 GPU twin） + `shading/taa/{pipeline,bind_groups,dispatch}.rs` 加一条 reactive 遮罩绑定并镜像上述三处金标准数学；② 逐像素生产端把 `PackedMasks.reactive()` 真正写进速度 G-buffer 的 reactive 通道（归粒子/透明 lane）。属渲染管线接线，非材质 ABI 重构。（注：reactive=0 下现有 WESL twin 与金标准逐位一致，故未绑定前无回归。）
-
-> **重构收敛状态（2026-09-29）**：材质 / ABI / 后端 / Slang / NPR 侧的破坏性重构（第 1–8 项）已**全部完成并 committed**（逐条经 committed 代码复核，见各项内联证据）。剩余第 9–10 项为**跨 lane 的 GPU 后端落地 / 接线收口**，由对应子系统 agent 在其 lane 推进；本材质设计文档只如实登记状态，不越界代改并发 agent 的后端代码。
-
----
-
-## 10. 诚实的固有摩擦与风险（不糊）
-
-- **B 类降级不可消除**：RT×NPR、NPR 对 GI 只收不发、RT 反射里 NPR 降级 albedo、去噪器 NPR 单独调参。
-- **NPR 一等公民无成熟范式**：PBR 侧有 UE/业界抄作业，**NPR 一等前端这条基本得自己趟**——这是全设计风险最高、参考最少的部分（顶级二次元 NPR 大作多为自研或魔改引擎，不用 UE 招牌管线）。
-- **已放弃 Slang（2026-09-29 定案，见 §2）**：其唯一独占价值（shader/CPU-golden 单源）建立在"存在需长期对齐的真实 CPU 路径"上，而实测 CPU 参考只是测试脚手架、漂移面很小；成本却是一整套 shader 构建子系统 + 联网装 slangc（本机装不上）。收益/成本倒挂，直接砍掉。着色器维持 WESL，跨平台交 wgpu。将来若 compute 核心 shader/CPU 孪生真的维护痛，再评估（且 Slang 非唯一选项）。
-- **strand 毛发是 AAA 最重特性之一**：card 基线务实、strand 高配可选，别一上来就 strand。
-- **真正的 blocker 不在材质模型**（业界已收敛），也不在运行时后端（**wgpu 已提供跨平台运行时**），也不在着色器语言（**WESL 已够，Slang 已放弃**，见 §2）。真·出血点已随并发施工大幅收敛：**① vis-buffer GPU 光栅后端已落地并 Metal 实跑对拍（软光栅 `atomic<u32>` + 64-bit payload `atomic<u64>` + 页表解析 + 物理页存储 scatter/gather + 流式 I/O 全套 WESL twin，commit `1d67f2fa1`/`98029f2f7`/`4fc25c2dc`/`616e24b03`，三大出血点全闭合，见 §11 第 9 项）；仅剩 ② reactive mask GPU 收尾（算法层消费端已在 `resolve_taa` 落地，commit `e4790e0c6`；剩 WESL twin+bind-group 遮罩绑定与逐像素生产端）**。原先「大量效果仍是桩、未上 frame graph」已大幅缓解——outline/halftone/kuwahara/hatching/ssgi/world_space_gi/virtual_shadow 等已成全套 Core3d dispatch 节点上图（见 §11 第 1 步）。`virtual_geometry` 已从早期 22 行 stub 演进为 11 文件的 CPU 侧层（cull/lod/page_table/raster_path/pipeline/hierarchy/bins/page_request/frame + software_raster，确定性、后端无关、可单测），**其中 vis-buffer 软光栅数学已落地 CPU 金标准**（`software_raster.rs`，见 §5 第 1 项），**GPU 软光栅 compute twin 对拍、物理页存储、流式 I/O 均已落地并 Metal 实跑对拍**（三大出血点全闭合，见 §11 第 9 项）。历史上先误判为"Vulkan 后端"、再误判为"Slang 工具链"，实为**桩接管线 + vis-buffer GPU 后端**。
-
-### 与 UE 的关系（定位参考）
-
-- **对齐部分**（PBR 骨架，业界共识）：GPU-driven 基底 + 后端中立（≈ UE RHI）、延迟为主 + 虚拟几何逼向延迟、透明走 forward、材质从互斥枚举转向可组合（≈ UE Substrate 的方向）。
-- **主动分歧**：① 把 NPR 从补丁抬成一等前端（UE 不做）；② 把 Substrate 从近乎无界收敛成**有界 slab** 以吃满多平台。
-- 结论：PBR 骨架"是同一标准"，NPR 一等 + 材质封顶策略"刻意不同"，且不同得有道理。
-
----
-
-## 11. 落地路线图（跨平台 = wgpu 运行时 + WESL 着色器，每步可编译+测试绿）
-
-**破除分析瘫痪的关键：先一条极薄端到端竖切，让竖切反过来钉死 ABI。**
-**跨平台策略（2026-09-29 定案）：竖切跑在 wgpu 上（Metal/Web 就地可测），不等原生 Vulkan；着色器用 WESL（经 naga 编各后端）。已放弃 Slang（§2）。**
-**优先级：真·第一优先是把已有桩效果接上 frame graph（0 行新语言层依赖）（vis-buffer GPU 光栅后端已落地并 Metal 实跑对拍：软光栅/payload/页表/物理页存储/流式 I/O 全套 WESL twin，三大出血点全闭合，见 §11 第 9 项），不是任何 shader 语言工作。**
-
-1. **（大部已完成）桩接管线（纯 WESL）**：把桩效果接成活管线——**outline 已落地**（`pkg/prism_render_scene/src/shading/outline/`：abi/settings/pipeline/bind_groups/resources/dispatch 共 ~767 行，Core3d compute pass 消费 vis-buffer + SSR 深度/法线，输出拷回 `scene_color`）；**halftone/kuwahara/hatching 亦已落地**（各自成 abi/pipeline/dispatch/settings 全套 Core3d 节点）。**剩余**：`light_routing` 目前只有 `mod.rs`（数据服务逻辑 + WESL + 测试），尚未包装成独立 Core3d dispatch 节点——若需作为可视 pass 呈现则补一个 dispatch，否则维持数据服务被上层消费即可。
-2. **极薄竖切**：wgpu → 蒙皮(支柱四地基) → vis-buffer → material id → **一个 PBR 延迟着色 + 一个 NPR forward 着色**，点亮光照/阴影**数据服务最小版**（一盏方向光 + 一张 VSM）。
-3. **材质 ABI 破坏性重构**（§9 第 1–3 步），用竖切验证正交轴 + specialization；ABI 用手写 `#[repr(C)]` + 哈希版本 + 对齐测试。
-4. **粒子子系统**：优先，因为它带起 reactive mask（§5 最该早做的基底）。
-5. **NPR 前端（已就地落在 `prism_render_shading`）**：描边（material id 边界白送，`outline.rs`）+ ramp/rim/SDF 面阴影（`stylized.rs`/`face_shadow.rs`）+ `evaluate_stylized_direct`；着色 WESL，CPU golden 已随附。独立 `prism_render_npr` crate 抽取为可选后续项，非阻塞。
-6. **frame graph 装配节点**，逐节点在 wgpu 上实装（超 baseline 能力经 wgpu 扩展 feature 按需启用，adapter 给不出则走 fallback；无独立原生后端）。
-7. **（已完成）清理 Slang 残留**：两 crate 已于 commit `211f15988` 从 workspace 删除；文档命名/注释残留已于 commit `abb661911` 清理，`rg -i slang` 现仅命中 §2 决策记录（§2 / §9.6）。
-8. 毛发(card)/布料/froxel 体积按 §6.2 优先级跟进；水/植被/贴花后置。
-
----
-
-## 12. 顶级产品对标矩阵（借鉴算法/形态，不抄代码）
-
-> 三条赛道各有其"抄作业对象"。PBR 侧业界已收敛、可大量对标 UE5/主机大作；NPR 侧参考分散在二次元与影视风格化各家自研引擎；混合侧对标"风格化 PBR"与影视混合管线。**只借鉴公开算法与形态，不本地拉取任何产品源码。**
-
-| 能力域 | PBR 对标（借什么） | NPR 对标（借什么） | 混合 / 风格化对标 |
-|---|---|---|---|
-| 虚拟几何 | UE5 **Nanite**：cluster DAG LOD + 软光栅微三角 + vis-buffer | 同基底复用（NPR 也吃 vis-buffer，material id 边界白送描边） | Fortnite（风格化外观 + 全 Nanite） |
-| 全局光照 | UE5 **Lumen**（SDF/mesh-card 软件 RT + 硬件 RT 混合 + surface cache + 屏幕探针）、**RTXGI/DDGI** 探针 | miHoYo：GI 只收不发做**风格化底光**（防能量爆炸） | Fortnite/Valorant：风格化材质吃真 GI |
-| 多光源 / 采样 | NVIDIA **ReSTIR DI/GI**（RTXDI）、**NRD**（ReBLUR/ReLAX）去噪 | NPR: **light layer 分层打光** + 主光方向驱动 | 混合场景同一 ReSTIR 预算共享 |
-| 阴影 | UE5 **VSM**（虚拟页 + clipmap）、RT 阴影 | miHoYo/HoYo：**SDF 面部阴影**（独立数据、方向阈值）+ 阈值硬阴影染色 | 共享 VSM 深度页，响应分家 |
-| 材质分层 | UE5 **Substrate**（无界 slab）→ 本引擎收敛成**有界 slab** | Arc Sys **Guilty Gear Xrd**：ID map + 顶点色控制、手编法线 | 风格化 PBR = über 少瓣 + Stylized illumination |
-| 描边 | —（PBR 通常无描边） | Arc Sys：**inverted-hull 背面挤出**（顶点色控宽度）；miHoYo：屏幕空间深度/法线边 + material id 边；Borderlands：墨线 | 混合按物体开关描边 |
-| 高光 | OpenPBR/UE über-BSDF | miHoYo/Arc：**天使环各向异性高光带**（与真实切线解耦）、MatCap、阶梯 Blinn | Team Fortress 2（Valve 论文：view-dependent + light-warp ramp + rim） |
-| 后处理风格 | ACES tonemap + 物理 bloom/DoF/motion blur | Spider-Verse：**halftone/Ben-Day 点**、色差、墨线；Okami：水墨/宣纸；Kuwahara 油画 | Arcane（Fortiche）：3D 上叠 2D 手绘 FX |
-| 时间步进 | TSR/DLSS/FSR/XeSS 连续时序 | Spider-Verse/Arcane：**降帧步进（on 2s/3s）**风格化 | 混合可逐物体设步进节拍 |
-| 上采样 | UE5 **TSR** / DLSS / FSR2 / XeSS | 复用同一时序上采样（NPR 需 reactive mask 保锐利分段） | 同基底 |
-| 参考渲染 | RED Engine **Cyberpunk RT Overdrive**（ReSTIR GI 路径追踪 + NRD）、离线路径追踪对拍 | — | — |
-
-**借鉴纪律**：PBR 线"抄作业"到位即达 AAA；NPR 线**没有一套现成招牌管线**（顶级二次元多为自研/魔改），本设计把散落各家的算法收进"共享基底 + Stylized 前端响应"范式，这是最大增量也是最高风险（见 §10）。
-
----
-
-## 13. PBR 前端 AAA 次世代高级特性清单（含性能 / 效果取舍）
-
-> 前端 = 延迟 PBR（承载虚拟几何/RT/GI/VSM）。以下均挂 §1 共享基底，前端只取数据、叠响应。
-
-> **关键澄清（勿误读）**：本节标题写"PBR 前端"，指的是这些高级特性由**延迟 PBR 前端以最高保真度驱动/承载**，**不是说 NPR 没有**。§1 的铁律是"基底算一次、全前端消费"——虚拟几何/GI/ReSTIR/VSM/体积/上采样等几乎全是**共享基底服务（支柱一~四）**，NPR 前端同样取用，差异只在"怎么解读这份数据"的**响应**处（§4 的 A/B/C 分类）。下面 §13.1 逐条给出 NPR 的享有程度。
-
-### 13.1 NPR 是否享有这些高级特性？（逐条对照 §4 A/B/C）
-
-| 特性 | NPR 享有？ | 形态 / 为什么 |
+| 生成物 | 位置 | 校验 |
 |---|---|---|
-| 虚拟几何 / vis-buffer | ✅ 完全共享 | 同一份 vis-buffer；**material id 边界还给 NPR 白送描边**，NPR 反而额外获益 |
-| Lumen 混合 GI | ✅ 共享（B 类降级消费） | NPR **只收不发**——收 GI 做风格化底光，不向外弹射（防能量爆炸），见 §4.2 |
-| ReSTIR DI/GI | ✅ 完全共享 | 同一批授权光源与储层；NPR 用 **ramp 量化**解读，PBR 用 BRDF 积分（§4.2 A 类） |
-| VSM 虚拟阴影 | ✅ 共享数据 | 同一份深度页；NPR 用**阈值硬阴影 + 染色**，另叠 **SDF 面部阴影**专属通道（§4.2 C 类） |
-| 体积雾 / froxel / 体积云 | ✅ 完全共享 | 基底服务；NPR 还能做风格化体积（染色/阶梯） |
-| 时序上采样（TSR/DLSS/FSR） | ⚠️ 共享但有摩擦 | 同一上采样器；NPR 的锐利分段 + 降帧步进与 TAA 打架，**必须 reactive mask 保护**（§5，头号坑） |
-| RT 反射 | ⚠️ 共享但降级 | 同一 BVH；RT 里 **NPR 降级为风格化 albedo 近似**（B 类，物理追 NPR 无意义） |
-| 路径追踪参考 | ➖ 偏 PBR | 次级光线里 NPR 本就降级（§0 非目标）；参考模式主要用于校准 PBR |
-| 有界 slab（多瓣材质） | ➖ closure 轴，正交 | slab 是 **closure 轴**、NPR 是 **illumination 轴**，二者正交——NPR 可叠 slab，但通常用 ramp 响应而非多瓣 |
-| SSS 次表面散射 | ➖ 偏 PBR（可选） | SSS 是 über 一个瓣；NPR 皮肤多用 **ramp 假 SSS**（更省更可控），需要时也能吃真 SSS |
+| Rust 布局常量与注册表 | `pkg/prism_render_material/src/surface_layout.rs`（445 行） | `codegen_freshness` 测试 + `surface.rs::layout_matches_generated_table` |
+| WESL 解包器 | `pkg/prism_render_scene/src/shaders/material_unpack.wesl`（`prism_unpack_surface`） | `codegen_freshness`；与 Rust `unpack()` 逐字对齐 |
 
-**一句话**：**几乎全部高级特性 NPR 都享有**——基底数据是共享的，绝大多数是"同能力不同实现（A 类）"或"能用但固有降级（B 类）"；只有 slab/SSS/路径追踪这几项偏 PBR，且原因是它们本质属 closure 轴或物理正确性（对 NPR 无意义），**不是 NPR 被架构排除**。这正是"共享基底 + 前端分叉"范式的价值：NPR 不用自己重造这些高级特性，白嫖基底、只写风格化响应。
+- 再生成命令：`cargo run -p prism_material_schema --bin prism-material-codegen -- write`
+- ABI 版本一致性门禁：`pkg/prism_render_material/tests/schema_parity.rs:19`（TOML `abi_version` ⇄ `MATERIAL_ABI_VERSION`）。
+- 除瓣以外，schema 还生成：`SURFACE_CHANNELS`（4，槽 19–22）、`SURFACE_RESPONSE_MODES`（3，槽 23–25）、`SURFACE_CACHE_AUX`（1，槽 26）、`SURFACE_IDENTITY_EXTENSIONS`（5）、`SURFACE_LOBE_CLOSURES`（3）。
+- 阶段：S1 = 声明并与手写布局做 parity 检查；**S2（当前）** = 成为唯一生成器（Rust 常量 + WESL 解包器），手写副本消失。
+- **文档债（需修）**：`surface.toml:31` 的注释仍写 `SURFACE_CORE_WORDS = 12`，而同文件 `[core] words = 20`；v2 文档的"12 字核心"很可能就是从这里抄错的。
 
+### 3.6 PCM：九类扩展点的统一注册与载入期协商
 
-1. **虚拟几何（Nanite 级）**：cluster DAG 连续 LOD + 软件光栅（compute 画微三角，避硬件光栅小三角浪费）+ vis-buffer 延迟着色。**性能**：几何吞吐与屏幕像素解耦，海量 instance 近似常数级；代价是软光栅 compute 占用 + vis-buffer 带宽。**效果**：零 LOD 突变、亿级三角。CPU 侧已落 `virtual_geometry`（cluster DAG cut/连续 LOD/页驻留/软硬光栅分类/帧计划 + **软光栅数学金标准 `software_raster.rs`**：水密 top-left + reversed-Z `max` 合成），**GPU compute twin 对拍 + 物理页存储 + 流式 I/O 均已落地并 Metal 实跑对拍**（§11 第 9 项，三大出血点全闭合）。
-2. **Lumen 式混合 GI**：近场 SDF/mesh-card 软件 RT + 有硬件 RT 时切硬件；surface cache 缓存表面辐照度；屏幕空间探针 final gather。**性能**：surface cache + 探针把每像素多次弹射摊薄到缓存更新；**效果**：动态间接光/软反射，无需烘焙。无 RT 平台降级 SSGI/SSR + 探针。落 §4.1 基底 + 前端 final gather。
-3. **ReSTIR DI/GI**：储层时空重采样，几千动态光 + GI 一次积分。`lighting/mod.rs` 已有 `ReservoirBudget`，culling clustered 已就位（commit `d7dfa5fc1`）可接候选层。**性能**：把"每像素遍历所有光"降到"重采样少量储层"；**效果**：多光源无偏低方差。
-4. **虚拟阴影 VSM**：16k 虚拟页 + directional clipmap，只渲驻留页。`virtual_shadow` 已有 residency loop（集成测试绿）。**性能**：只画可见页；**效果**：接触硬阴影到远景一致密度。
-5. **有界 Substrate slab**：über-BSDF 一等 + 封顶 3–4 瓣的 layer/mix（§3.2）。**性能**：封顶避免无界 Substrate 的 shader 爆炸与弱平台撞墙；**效果**：清漆/车漆/多层皮肤够用。
-6. **次表面散射 SSS**：预积分皮肤（Penner）+ 可分离 SSS（Jimenez）/ Burley 归一化扩散。**性能**：屏幕空间可分离卷积 << 真体积；**效果**：皮肤/蜡/玉。属 über 瓣，非子系统（§6.2 档 3）。
-7. **RT / SSR 反射**：有 RT 走硬件反射 + NRD 去噪；否则 SSR + 屏外探针兜底。**效果**：镜面/湿地/金属。
-8. **体积雾 + froxel + 体积云**：froxel 光照体（compute 可移植桶，§8.1）。**性能**：froxel 分辨率可调；**效果**：光轴/大气/云层。
-9. **时序上采样**：TSR/DLSS/FSR2/XeSS，配 motion vector + reactive mask（§5，最该早做的基底）。**性能**：内部低分辨率 + 时序重建；**效果**：4K 级清晰度。
-10. **路径追踪参考模式**：ReSTIR GI + NRD 的离线对拍模式（对标 Cyberpunk RT Overdrive），用于校准实时管线偏差。RT 桶（§8.1），不可 CPU golden。
+`pkg/prism_material_pcm`（3319 行 / 10 文件）= **Prism Capability Model**。它把此前**九个各自封闭**的机制收进一份声明式能力契约（加瓣 / 加参数通道 / 加响应模式 / 传输重映射 / 缓存辅助 / 数据提供者 / 降级策略 / 作者节点 / 合成 pass）。
 
----
+| 概念 | 定义 | 位置 |
+|---|---|---|
+| `Kind`（九类扩展点） | `Lobe, Channel, ResponseMode, Transfer, CacheAux, Provider, Downgrade, AuthorNode, Composite` | `namespace.rs:213-232` |
+| `Region` + 槽 | `Specification=0, Prism=1, CrossVendor=2, Studio=3`，每区 `SLOTS_PER_REGION = 16` | `namespace.rs:89-96,112` |
+| `ExtensionManifest` | 不可变身份（`uid/registry_slot/origin`）+ 可变归属（`namespace/vendor/stability`）+ 派生显示 id | `manifest.rs:238` |
+| `ExtensionRegistry` | 表结构 + 命名空间分区槽分配器 + 提升状态机 + 可机器校验的字段谓词 | `registry.rs:79` |
+| 协商 | 载入期握手：缺 `required` ⇒ **硬错误**；缺 `used` ⇒ **优雅降级/投影** | `capability.rs` / `negotiate.rs` |
+| `ExtensionSet` | 定宽 used/required 摘要（进头部 4 字 / 64 槽） | `lib.rs:75-79` |
 
-## 14. NPR 前端 AAA 次世代高级特性清单（顶级二次元 / 风格化）
+- **性能红线**：命名空间解析、协商、位/区分配全部在烘焙/载入期完成**然后蒸发**；运行时只有单态化 WESL + 头部里定宽摘要，热路径无分发、无查表。
+- **缺口（code-truth）**：`Composite` 这一 Kind 目前把合成 pass 折进"烘焙期置换键**或** pass 图"（`hooks.rs:38-42`），但**没有运行时 pass 注册扩展点**，也没有 frame-graph 代码把 PCM 当作 pass 来源；PCM 目前只被 `prism_render_scene/src/shading/classification_gpu.rs:42` 与 `prism_render_shading/src/classification.rs` 消费。该缺口由 §9 的四层收口覆盖。
 
-> 前端 = NPR 风格化前端（描边/ramp/SDF 面阴影/风格化高光/rim/风格化 post）。核心立场：**NPR 是 illumination=Stylized 轴 + 专属通道**，不是独立管线；与 PBR 共享几何/光照数据/VSM/GI，只在"怎么解读光照数据"处分家（§4）。
+### 3.7 OpenPBR 合规投影（把"超集"变成可判定谓词）
 
-### 14.1 着色（对标 miHoYo / Arc System Works / Valve TF2）
+- `project_to_openpbr()`（`pkg/prism_render_material/src/openpbr.rs:118`）把任意材质投影到纯 OpenPBR；`OpenPbrProjection`（`:65`）给出投影结果，`DroppedLobe`（`:43`）逐条列出被丢掉的瓣（而不是静默截断）。
+- 判定三值：`OpenPbrConformance { Conformant, NotApplicable, Breached }`（`openpbr.rs:162`）。
+- 规范区与扩展区的隔离由 §3.4 的 `KHR_REGION` / `EXTENSION_REGION` 强制（不变式 I4）：规范区内容必须符合规范，扩展位必须落在扩展区，二者不混用。
+- OpenPBR 每个参数在 PBR / NPR / MaskBlend / 自定义响应里的功能，逐条见 `docs/prism_openpbr_pipeline_function_zh.md`。
 
-1. **Ramp 量化漫反射**：per-material shadow ramp 贴图（明→暗分段），NdotL 采样 ramp 而非积分。**性能**：一次贴图采样 << BRDF 积分；**效果**：干净二分/三分调子（原神/星穹铁道）。
-2. **SDF 面部阴影**：独立单通道 SDF 图存"该像素在光转到某角度时进阴影"的阈值，主光方位角驱动——解决传统法线阴影在脸上"脏"的老问题。**独立数据源叠加**（§4.2 C 类专属通道）。**效果**：鼻侧/刘海阴影随光平滑扫过，永远干净。
-3. **风格化高光（天使环）**：各向异性高光带**可与真实切线解耦**，手动摆位做发丝"天使环"；MatCap 补金属/宝石；阶梯化 Blinn。**效果**：二次元发/眼高光。
-4. **Rim / fresnel 边光**：视角驱动描亮轮廓，可按光方向偏置。**效果**：角色与背景分离。
-5. **手编法线 + 顶点色控制**（对标 Guilty Gear Xrd）：平滑法线稳定描边与高光走向；顶点色/ID map 驱动描边宽度、区域高光开关、"假"高光摆位。**效果**：手绘级可控性。
+### 3.8 渲染类、域与特性标志
 
-### 14.2 描边（对标 Arc Sys / miHoYo / Borderlands）
+- `MaterialDomain`：`Surface`(默认) / `Decal` / `Volume` / `PostProcess`（`record.rs:33-41`）。
+- `MaterialRenderClass`：11 值（§1.2），`from_u32` 反查（`record.rs:72-88`）。
+- `MaterialFeatureFlags`（`record.rs:90-110`）：
 
-6. **Inverted-hull 背面挤出**：沿法线外扩背面成描边壳，顶点色控每处宽度、随距离/FOV 补偿。**性能**：一趟额外 draw；**效果**：稳定粗描边（卡通/格斗）。
-7. **屏幕空间边缘检测**：深度 + 法线 + **vis-buffer material id 边界（白送）** 提边。**性能**：一趟后处理 compute；**效果**：内部结构线、材质分界线。
-8. **混合描边**：外轮廓走 inverted-hull、内部线走屏幕空间，二者互补。
+| 位 | 名称 | 语义 |
+|---|---|---|
+| `1<<0` | `DOUBLE_SIDED` | 双面 |
+| `1<<1` | `ALPHA_MASK` | 掩码透明 |
+| `1<<2` | `TRANSMISSION` | 透射 |
+| `1<<3` | `NORMAL_MAP` | 法线贴图存在 |
+| `1<<4` | `EMISSIVE` | 自发光存在 |
+| `1<<5` | `COMPLEX_CLOSURE` | 多瓣/复杂闭包（触发更贵的路径） |
+| `1<<6` | `FACE_SHADOW` | 面部 SDF 阴影（NPR） |
+| `1<<7` | `REGION_ILLUMINATION` | **逐像素照明区域掩码**：可见性光栅采样后写进可见性元数据的备用字，分类按区域各自分箱（§4.3），**不改变材质 ABI** |
 
-### 14.3 风格化后处理（对标 Spider-Verse / Arcane / Okami）
+### 3.9 架构侧的材质执行契约（与 GPU 布局区分）
 
-9. **Halftone / Ben-Day 点 / 网点**：按亮度控点密度做印刷风阴影（蜘蛛侠）。
-10. **降帧步进（on 2s/3s）**：角色动画/特效按 12/8 fps 步进，与 60fps 背景混排（蜘蛛侠/Arcane 影视感）。**实现**：逐物体设步进节拍，需 motion vector 特判防 TAA 抹掉。
-11. **Kuwahara / 油画滤镜**：保边匀色做手绘油画感。
-12. **墨线 / 笔刷 / 水墨**（Okami 宣纸、Borderlands 墨线）：沿边缘叠笔刷 alpha、纸纹叠加。
-13. **风格化 bloom / 色差 / 分级**：夸张辉光 + 边缘色散 + 风格化 LUT。
+`pkg/prism_render_architecture/src/material/`（3 文件 / 551 行）持有一份 **CPU 侧**材质执行/分箱契约：`MaterialDomain`（`mod.rs:11`）、`MaterialExecutionPath`（`mod.rs:20`）、`MaterialRecord`（`mod.rs:28`）、`MaterialRegistry`（`registry.rs:32`）、`MaterialResolveBins` 与 `RESOLVE_PASS_ORDER: [MaterialExecutionPath; 4]`（`resolve.rs:42,103`）。
 
-### 14.4 NPR 性能 / 效果总纲
+它**不定义 GPU 布局**——布局的唯一事实源是 §3.4/§3.5。二者关系：架构侧决定"材质进哪个解析批次/哪条执行路径"，材质 crate 决定"这批数据在 GPU 内存里长什么样"。
 
-- **省**：ramp/SDF/描边多为一次贴图采样或一趟后处理，**比物理积分更省**；NPR 天然是"廉价但要美术精调"。
-- **贵在带宽与美术管线**：SDF 面图、ID map、per-material ramp 是额外资产；顶点色/手编法线需 DCC 侧配套。
-- **与 TAA/上采样的固有摩擦**（§5）：锐利分段与步进动画和时序累积打架，必须 reactive mask 保护——这是 NPR 上时序管线的头号坑。
+## 4. 支柱二：光照 / 阴影数据服务与响应计划
 
----
+### 4.1 共享的是数据与加速结构，不是响应
 
-## 15. 混合前端高级特性（管线级混合，非叠加各算）
+GPU-driven 基底只计算一次：光源集合与图元、阴影图/虚拟阴影页、探针与环境、速度场、可见性缓冲、簇划分。**响应函数**（怎么把这份数据变成像素颜色）由 `ResponseProgram` 分叉；**组合**由 `WaterShadingPlan::MaskBlend` 表达，组合不产生新的响应程序。
 
-> 混合的价值在**管线级**：同一帧不同像素/物体走不同前端，却共享同一套光/影/GI/RT——所以风格切换处不断裂。这是"各前端各自重算高级特性"给不了的。
+水体共享服务的 9 个语义身份，以及体积共享服务的 7 个语义身份，统一由 `render_fabric::builtin_catalog` 声明并由 provider 闭包校验；不再存在按子系统复制的位掩码事实源。
 
-1. **逐像素 material id + tile 分类路由**（§7）：GPU 把像素按 material id 分 tile，路由到延迟 PBR / forward+ / NPR / 自定义前端。**性能**：tile 分类 + 前端 specialization，避免全屏跑所有前端。
-2. **共享 GI / 阴影跨风格连贯**：NPR 角色与 PBR 场景吃**同一份** Lumen 间接光 + VSM 阴影 → 卡通角色落在写实场景里阴影方向/底光一致，不"贴纸感"。
-3. **选择性 NPR**：写实世界里对特定角色/道具开 Stylized，其余 PBR（对标影视混合、卡通角色进实景）。
-4. **风格化 PBR 中间态**（对标 Fortnite / Valorant / Overwatch / Sea of Thieves）：über-BSDF 少瓣 + `illumination=Stylized` 的 ramp/rim 轻叠加 + 真 GI/Nanite/Lumen——既非纯物理也非纯 toon，是产量最大的商业中间带。本架构天然覆盖（正交轴自由组合）。
-5. **影视级混合**（对标 Spider-Verse/Arcane）：3D 基底 + 2D 手绘 FX/线 + 降帧步进，逐物体调节拍。
+### 4.2 三档响应分类（保留 v2 的分类法，补上代码落点）
 
-**为什么管线级混合优于单独管线**：单独管线会让 NPR/PBR 各自重造 GI、阴影、RT、上采样——没一条能到 AAA 且风格接缝断裂。共享基底 + 前端分叉是"四者皆顶级 + 可混合 + 多平台"的唯一解（§1 一句话）。
+| 档 | 含义 | 实例 | 代码落点 |
+|---|---|---|---|
+| **A** | 同能力，实现不同 | 直射光积分、阴影采样、GI 收集、时序累积 | PBR：`prism_render_shading/src/lighting.rs:369` `evaluate_principled_direct`；NPR：`stylized.rs:185` `evaluate_stylized_direct`（同一 `DirectLightSample` 输入） |
+| **B** | 能用，但本质退化 | NPR 在 RT/GI 里只取反照率；体积内的 NPR 取平均色 | NPR 收共享探针，但不向 GI 发新能量（见 §4.5 缺口） |
+| **C** | 每条线自己的 | 光照通道/图层（NPR）、面部 SDF 阴影、描边 | `light_routing.rs`（`MAX_LIGHTING_CHANNELS=8` `:29`、`MAX_LIGHT_LAYERS=4` `:34`）、`face_shadow.rs:144`、`outline.rs:218` |
 
----
+**把 v2 的一句话钉死到实现上**："共享光照/阴影**数据**，不共享**响应**"——`SurfaceSample`（40+ 字段，`lighting.rs:24-111`）是共享的输入契约，响应函数是分叉点。
+
+### 4.3 逐像素照明区域（`REGION_ILLUMINATION`）
+
+同一材质可以在同一帧里按区域走不同照明轴：可见性光栅采样一个逐像素的 Lit/Stylized 掩码，写进可见性元数据的备用字，分类器按区域各自分箱（`MaterialFeatureFlags::REGION_ILLUMINATION = 1<<7`，`record.rs`）——**不改变材质 ABI**，也不新增渲染类。
+
+### 4.4 光照 / 阴影数据服务的当前版图（code-truth）
+
+| 服务 | 位置 | 关键入口 |
+|---|---|---|
+| 光簇 | `prism_render_shading/src/cluster/` | `assign_lights_to_clusters`（`assign.rs`）、`ClusterGrid`、`ClusterAabb` |
+| 直射光源类型 | `resolve.rs` / `punctual.rs:28` | `DirectionalLight :99`、`LightingEnvironment :120`、`resolve_pixel :370` |
+| 面积光 | `gi/area_light/` | `ltc_lut`、`polygon`、`representative`、`resolve` |
+| 多重重要性 / RIS | `gi/nee/`、`gi/spec_gi/` | `light_sampling.rs:57`（`LightSample`）、`mis`、`ris`、`spec_gi/reservoir` |
+| IBL / 环境 | `environment/`（顶层） | `brdf_lut`、`cubemap`、`prefilter.rs`、`evaluate_image_based_light :198`、`SphericalHarmonicsL2 :67` |
+| 阴影 | `shadow/` | `csm.rs`（`compute_cascade_matrices`）、`atlas`、`bias`、`filter`、`point/spot/directional` |
+| 虚拟阴影 | `shadow/virtual_sm/` | `drive_frame :203`、`drive_frame_with_requests :230`、`page_table.rs:118`、`allocator.rs:76` |
+| AO | `ao/`（顶层） | `gtao_pixel :115`、`compute_gtao :240`、`denoise_gtao` |
+| 屏幕空间 GI/SSR | `screen_space/`（顶层） | `march_hierarchical`、`trace_screen_space_reflection :88`、`screen_space/gi.rs:231` |
+| 世界空间 GI / ReSTIR | `gi/world_space/`、`world_restir*.wesl` | `probe_placement`、`radiance_cache`、`spherical_gaussian`、`visibility` |
+| 降噪 | `gi/denoise/` | `reblur`、`variance`、`firefly` |
+| 大气 / 天空 | `gi/atmosphere`、`sky_*_lut.wesl` | `sky_transmittance_lut` / `sky_multiscatter_lut` / `sky_view_lut` |
+
+### 4.5 已知缺口（诚实清单）
+
+1. **NPR 只消费 3 个 OpenPBR 参数**（`base_color` `stylized.rs:206`、`perceptual_roughness` `:213`、`emissive` `:242`）——40+ 个其余参数对 NPR 不可见。收口方案：NPR 作为**完整 OpenPBR Surface 上的一条响应**直接读取瓣与字段（不新增 `NprParams`、不重表为 closure），覆盖率由**三值断言**守住（`mapped` / `intentionally_unmapped(reason)` / 未声明 = 构建期报错），并先产出「字段 × 响应程序」覆盖矩阵。见 `docs/refactoring-dev/02-response-composition_refactor_zh.md` §2。注意：早期的两个方案 ——「逐参数映射表」与 `npr = stylize(pbr_lite)` 通道变换 —— **均已排除**，理由见 `docs/refactoring-dev/00-overview_refactor_zh.md` §8。
+2. **class 表与 `shading_resolve.wesl` 的 switch 之间没有机器门禁**：唯一的 Rust↔WESL 同步测试只读 `material_classification.wesl` 的 `CLASS_*`（`classification.rs:995-1046`）；`shading_resolve.wesl:131-139` 的 `SHADING_CLASS_*` 与 9 个 `case` 标签由人工保持。
+3. **WESL 侧多一个 `default:` 臂**（`shading_resolve.wesl:2588` → `shade_principled`），而 Rust 侧刻意保持 9 臂无通配（`resolve.rs:750-759`）——违反不变式 I6 的精神，目前靠分类阶段的提前丢弃掩盖（`material_classification.wesl:153`）。
+4. **reactive mask 的 GPU 侧未接**：CPU 三个入口已闭合（§5.3），但 `taa_resolve.wesl`(172 行) 与 `upscale_reconstruct.wesl`(388 行) 中 `reactive` 出现 **0** 次。
+
+## 5. 支柱三：跨切面基底
+
+### 5.1 运动 / 速度编码（消费方契约）
+
+`pkg/prism_render_scene/src/motion/encode.rs`：`VelocityEncoding`（`:26`）、`PackedMasks(u32)`（`:123`，位 `DISOCCLUDED` / `TRANSPARENT` / `STREAMING_REVEAL`，`:182-188`）、`EncodedMotion`（`:174`）、`encode_sample`（`:193`）、去遮挡分类（`:215`）；膨胀在 `dilation.rs:75,296`（`VelocityField` / `TileVelocityField`）。
+
+### 5.2 时序超分（arch 与 shading 双驻）
+
+- 架构侧：`prism_render_architecture/src/temporal_upscale/`（9 文件 / 2588 行）`JitterSequence`、`LockState`（`lock.rs:332`）、`NeighborhoodStats`（`neighborhood.rs:304`）、`ResolveOutput`。
+- 着色侧：`prism_render_shading/src/{taa,upscale}/`（1927 行）`resolve_taa`（`taa/resolve.rs:103`）、`upscale_pixel`（`upscale/mod.rs:161`）、`apply_rcas`（`upscale/sharpen.rs`）。
+- 双驻是**尚未收口**的事实，不是设计意图（§9 第三层）。
+
+### 5.3 反应掩码（reactive mask）：CPU 已闭合，GPU 待接
+
+| 入口 | 位置 | 公式 |
+|---|---|---|
+| TAA 解析 | `taa/resolve.rs:137` | `effective_blend = history_blend · (1 − reactive)` |
+| 稳健超分 | `upscale/robust.rs:119` | 文档式：`base · (1 − d) · (1 − reactive)` |
+| 超分主路径 | `upscale/mod.rs:206-207` | `history_weight = (1 − current_weight) · (1 − reactive)` |
+
+三个 commit（`e4790e0c6` / `1b1c61080` / `d1c9827c4`）各只改一个文件；测试 `reactive_zero_is_bit_for_bit_the_shipping_resolve`（`upscale/mod.rs:543`）等保证 reactive=0 时逐位不变。
+
+### 5.4 OIT / 透明
+
+三处并存（§9 待收口）：`prism_render_shading/src/oit.rs`（`OitFragment :19`、`oit_weight :52`、`OitAccumulation :68`、`composite_transparency :155`）、架构侧 `transparency/`（2538 行）、粒子 `particle/oit.rs`；另有第二族矩 OIT（`gi/oit/mod.rs:155` `MomentOit`）。
+
+### 5.5 降噪与能力分层
+
+- 降噪：`gi/denoise/{reblur,variance,firefly}`（时域重投影 + 方差引导空间滤波）。
+- 能力分层：`Capability` 六位（§8.1），`CapabilitySet::WEBGPU_BASELINE` 是**必须**满足的下限。
+
+## 6. 支柱四：可变形几何 / 模拟与子系统
+
+### 6.1 关于"子系统注册表"的更正
+
+v2 文档 §6.2 描述的"四档子系统注册表"是**文档产物，不是代码**：全仓库 0 命中 `SubsystemTier` / `SubsystemRegistry` / `SubsystemKind`。实际存在的是**按目录划分的子系统 crate/模块 + 一份共享基底位集（§4.1）**。子系统之所以是子系统，判据仍成立：**自有几何 + 自有模拟 + 自有专用渲染阶段**。
+
+### 6.2 子系统现状（LOC = `pkg/**/src/*.rs`）
+
+| 子系统 | 位置（`prism_render_architecture/src/` 或独立 crate） | 规模 | GPU 孪生 |
+|---|---|---|---|
+| 粒子 | `particle/`（263 个 `mod`） | 265 文件 / 165 790 行 | — |
+| 毛发 | `hair/` | 77 / 35 913 | `prism_hair_gpu` 89 / 28 382（87 `.wesl`） |
+| 布料 | `cloth/` | 33 / 18 038 | —（`cloth_*.wesl` 在 `prism_render_scene`） |
+| 水面 | `water/` | 78 / 31 515 | `prism_water_render` 11 / 1710（真机 wgpu 光栅 + 回读） |
+| 体积 | `volumetric/`（自持模拟，不依赖 physics_core） | 25 / 12 862 | `prism_volumetric_gpu` 639 / 347 165（80 `.wesl`，规模异常，含 600+ `Gpu*` 类型） |
+| 虚拟几何 | `virtual_geometry/` | 16 / 4924 | `prism_virtual_geometry_gpu` 25 / 7453（24 `.wesl`） |
+| 虚拟纹理 | — | — | `prism_virtual_texture_gpu` 5 / 1329（3 `.wgsl`） |
+| 光线场景 / RT | `ray_scene/` | 137 / 72 339 | — |
+| 路径追踪参考 | `reference_pt/` | 42 / 15 657 | — |
+| 形变 / 几何 | `deformation/`、`geometry/` | 2 / 321、3 / 674 | — |
+
+**共享模拟核心**：`pkg/prism_physics_core`（411 文件 / 129 271 行）是 `prism_render_architecture` 的**硬依赖、非可选**（`Cargo.toml:13`）；26 个文件导入它（布料 17、毛发 6、水面 2、粒子 1；体积 0）。**未接线**：`pkg/prism_physics_gpu`（368 文件 / 97 521 行 / 110 `.wgsl`）目前**没有任何消费方 crate**，未接入渲染图——这是独立的待接线项，不是子系统设计问题。
+
+### 6.3 毛发：同构 mini 支柱（保留 v2 的示范意义）
+
+毛发拥有自己的求解器、LOD、光栅路径与 RT 代理：`HairSolverKind`（`hair/solver.rs:40`）、`HairLodTier`（`hair/mod.rs:143`）、`HairLodTransition`（`transition.rs:33`）、`HairRasterPath`（`raster.rs:63`）、`build_deep_opacity` / `sample_transmittance`（`deep_transmittance.rs:95,161`）、`RtReflectionRole` / `RtProxyPolicy`（`rt_proxy.rs:28,69`）、`step_groom`（`groom.rs:71`）。它照样消费共享基底（GI/阴影/时序），因此是"子系统 ≠ 另一条管线"的样板。
+
+### 6.4 着色语言与验证现实
+
+`pkg/` 下 WESL 共 **400** 个文件：`prism_render_scene` 175、`prism_hair_gpu` 87、`prism_volumetric_gpu` 80、`prism_render_architecture` 29、`prism_virtual_geometry_gpu` 24、`prism_render_shading` 5。另有 `.wgsl` 约 130 个（`prism_physics_gpu` 110、`motion_gpu` 5、`prism_render_gpudriven` 4 等）——**v2 头部"68 .wesl / 0 .wgsl"已不成立**。
+
+验证分层是本项目最重要的工程现实：GPU 孪生 crate 依赖 `prism_render_architecture`（CPU golden 在后者），因此**同一个算法可以 CPU 逐位对照 GPU**。虚拟几何的 CPU golden 在 `virtual_geometry/software_raster.rs`（64 位深度/负载、reversed-Z、top-left 规则），GPU 孪生把同一份 WESL 编进 `prism_virtual_geometry_gpu/src/raster.rs:3,30`，并以 `gpu_parity.rs:84` 做对拍；无适配器时 `GpuContext::try_headless` 静默跳过。这是 §8.2 三桶模型的实践基础。
+
+## 7. 响应计划：多种响应如何在一次绘制里共存
+
+### 7.1 现行机制（code-truth）
+
+1. **分箱**：`ShadingWorkPlan { offsets: [u32; 9], counts: [u32; 9], work: Vec<ShadingWorkItem> }`（`classification.rs:45-60`）把像素按 9 个渲染类分箱；GPU 侧同构：`material_classification.wesl` 的 `material_class`(:87) → `prefix_classes`(:163) → `scatter_work`(:178)。
+2. **派发**：`resolve.rs:760-771` 九臂显式 `match`（`Unlit / Npr / Principled / Subsurface / ClearCoat / Cloth / Hair / Water / Custom`），无通配；WESL 孪生 `shading_resolve.wesl:2524`。
+3. **渲染阶段**：`prism_render_app/src/sets.rs:126` 的 `ORDER = [Opaque, Transparent, Stylized, Custom]`（上限 4）——**这就是 v2 所称"逐像素 material id + tile 路由"的落地形态**：不是新管线，是同一批 pass 上的分箱 + 四阶段排序。
+4. **执行路径契约**：架构侧 `MaterialExecutionPath` + `RESOLVE_PASS_ORDER: [MaterialExecutionPath; 4]`（`prism_render_architecture/src/material/resolve.rs:42,103`）把"材质进哪个解析批次"固定下来。
+5. **子系统级声明**：`ResponseProgram` 选择响应，`WaterShadingPlan` 选择 `Single` 或 `MaskBlend`；二者与共享服务闭包解耦。
+
+### 7.2 混合计划（MaskBlend）不是第四种响应程序
+
+`MaskBlend` = **同一像素上多响应共存**：它有独立的组合契约和常驻组合 pass，但不新增响应程序、材质 ABI 或几何路径。连续遮罩与二值区域选择是两种不同语义，不能互相替代。
+
+## 8. 后端抽象与可测性分桶
+
+### 8.1 能力模型（唯一的事实源）
+
+`pkg/prism_render_architecture/src/backend/capability.rs`（298 行）：
+
+| 项 | 定义 | 位置 |
+|---|---|---|
+| `Capability`（6 值） | `Compute=0`（wgpu 基线，必定可用）、`BindlessDescriptors=1`、`IndirectDrawCount=2`、`MeshShading=3`、`RayQuery=4`、`RayTracingPipeline=5` | `:31-49`，`ALL` `:52` |
+| `CapabilitySet(u32)` | `EMPTY` `:81`、`WEBGPU_BASELINE = Compute` `:87`、`from_slice` `:91`、`contains_all` / `union` / `intersection` / `difference` / `missing_from` `:103-160` | `:77` |
+| `FeatureRequirement` | `validate() -> Result<(), MissingCapabilities>` | `:167,188,201` |
+| 协商 | `negotiate_features`：`enabled = WEBGPU_BASELINE ∪ (adapter ∩ requested)`；`unavailable = requested − adapter`；`EnabledFeatures { enabled, unavailable }` | `negotiation.rs:26,63` |
+| 后端接口 | `trait RenderBackend { capabilities, wait_idle_for_shutdown, supports }` | `backend/mod.rs:46-56` |
+| 测试替身 | `FakeBackend::baseline()` / `with_all_extensions()` / `is_shut_down()` | `fake.rs:20-137` |
+
+**确定性与降级**：扩展能力缺失时**丢位**（`unavailable`），换更便宜的路径，**绝不切换后端**（`negotiation.rs`）。全仓库 0 命中 `BackendId` / `BackendTier` / `VulkanTier`——没有"多后端分层"这回事。
+
+### 8.2 可测性三桶
+
+| 桶 | 内容 | 验证手段 | 代码现实 |
+|---|---|---|---|
+| **1. compute 可移植** | AO、GI 探针、降噪、时序、体积、粒子、水面、虚拟几何、虚拟阴影 | CPU golden ↔ GPU 对拍（同 crate 依赖图：孪生依赖 `prism_render_architecture`） | 绝大多数；`prism_virtual_geometry_gpu/src/gpu_parity.rs:84` 是范式 |
+| **2. RT** | 反射/阴影/GI 的 RT 路径、TLAS 遍历 | 能力位门控 + 软件参考（`reference_pt/`、`ray_scene/`） | `Capability::RayQuery` / `RayTracingPipeline` |
+| **3. raw-VK-only** | 只有裸 Vulkan 才有的特性（如部分 DLSS/DXR 交互） | **无 CI**；用即放弃跨平台与 CPU golden | `pkg/` 内 **0** 命中；唯一入口在 Bevy 侧：`raw_vulkan_init`（`crates/bevy_render`，`create_device_from_hal::<Vulkan>`、`AdditionalVulkanFeatures`） |
+
+**请求侧的能力声明**：`prism_render_scene/src/primitives/support.rs`（206 行）`GpuSceneSupport::try_new`（`:33`）——核心位 0..9（`:76` `CORE_BITS = 10`）、16 项扩展位（`:106-131`）、`REQUESTABLE.extend`（`:139`）。这是"缺能力 ⇒ 确定性降级"在场景侧的入口。
+
+## 9. 破坏性变更台账与四层收口
+
+### 9.1 已完成（v2 描述已作废，此处只列结果）
+
+| 变更 | 证据 |
+|---|---|
+| 放弃 Slang，删除 `prism_render_slang` / `prism_render_slang_abi` | 全仓库 `slang` 0 命中（仅历史决策记录） |
+| 删除运行时闭包图（`closure_graph_offset` / WESL 图遍历） | commit `f5172023c`；头部字段与 §2.2 现状一致 |
+| 删除闭包 slab 深度上限与纹理槽硬顶 | commit `1e9d1812b`（P1-c） |
+| 删除互斥枚举 `MaterialShadingModel`，改为轴组合 | `axis.rs`；`MaterialRenderClass` 不再含 `Npr*` / `Custom*`（`record.rs:49-64`） |
+| 材质布局改为生成式（S2：Rust + WESL 双生成 + freshness 门禁） | §3.5 |
+| 材质扩展点九类统一进 PCM 注册表 | commit `3090956db`（P2-j）；§3.6 |
+| reactive mask CPU 三入口闭合 | §5.3 |
+
+### 9.2 待收口（四层，方案见 `docs/refactoring-dev/00`–`04`）
+
+| 层 | 病根（同一模式：正确抽象已存在且被测试保护，却不是唯一入口） | 现状证据 | 收口判据 |
+|---|---|---|---|
+| ① Surface ABI / 数据布局 | `PermutationSpace`（可枚举混合基数空间，`permutation.rs:1-75`）**已存在**；但材质身份仍是手写位打包的 `bin_class` —— 19 位窗口使第 4 个扩展瓣（bit 19）被静默丢弃，且 u32 是共享预算（`2 + 8 + W`，W=22 即极限）**最多再加 3 个瓣** | `axis.rs:162-192` | 身份改用 `(ShaderPackageId, PermutationIndex, PipelineStateHash)` 密集索引；瓣数与响应程序数**不设位宽上限**（`docs/refactoring-dev/01-surface-abi_refactor_zh.md` §3、`03-shader-package_refactor_zh.md` §2） |
+| ② 着色响应 | 9 类表已是注册驱动（`ShadingClassTable::from_registry` `classification.rs:453`、loud error `:170-217`）；但 9 臂 `match` 与 WESL switch 仍手工同步，NPR 只吃 3 个参数 | §4.5 缺口 1–3 | 加一个响应模式 = 1 行 PCM 注册 + 1 次 codegen，Rust/WESL 自动同步；缺实现则构建失败 |
+| ③ 管线缓存 | `PsoCacheKey { package, permutation_index, state: PipelineStateHash }`（`shader_package/pso_cache/mod.rs:61`）、`WarmRuntime`（`warm_runtime.rs:120`）、`DeviceFingerprint`（`fingerprint.rs:41`）齐备；`prism_render_app::PipelineKey`（`pipeline_cache.rs:47`）**没有 state 维度**，blend/depth/cull 折进 `class` 一个 u32，启动时 0 预热 | `pipeline_cache.rs:43-45,79,509` | 预热后冷编译 = 0（`warm_runtime.rs:35-37`）；每个影响 PSO 身份的状态都是具名键字段 |
+| ④ 调度 | 声明式 `GpuFrameGraphBuilder`（`frame_graph/builder.rs:6-29`）只覆盖 **9 个** pass（`shading/graph.rs:76,91,104,115,129,139`、`visibility/graph.rs:98,145,160`）；其余约 69 个 `*_pass` 系统手工排程（`prism_render_scene/src/shading/plugin.rs`，1655 行，41 个 `.add_systems`） | §9.2 行的证据 | 加一个 pass = 1 个 `PassDescriptor` + 1 个 WESL + 1 个 settings 结构，不在 `plugin.rs` 手写顺序 |
+
+**同一场景里并存三套"图"概念**（v2 未澄清）：`prism_render_graph`（**被执行**：`RenderGraph` / `PassNode` / `PassFlags` / `ExecutionPlan`，经 `add_raster_pass` 等组装，作者是 `prism_render_app/src/frame.rs:121,155` 与 `prism_render_gpudriven/src/scene_draw.rs:407,421,456`，合计 ≤8 个 pass）、架构侧 `frame_graph`（**只用于校验/诊断**：编译结果仅被 `debug_assert` 与诊断读取）、以及 Bevy 的 `RenderGraph` 调度标签。收口时需要一张能力并集表，而不是再造第四套。
+
+**已知缺陷（已确认）**：`prism_render_scene/src/shading/runtime.rs:386` 断言编译序长度 == 5，而 `shading/graph.rs` 注册了 6 个 pass（其自带测试断言 6，`:188`）；编译器不做裁剪（`frame_graph/compiler.rs:42-62`，实测 `validate → dependencies → topological_order`，无裁剪步骤），`prepare_shading_work`（`plugin.rs:626`）在 debug 构建下**必然 panic**。收口方向见 `docs/refactoring-dev/04-frame-graph_refactor_zh.md` §2-P5（pass 计数必须有单一事实源）。
+
+## 10. 诚实的固有摩擦与风险
+
+1. **B 档降级不可移除**。NPR 在 RT/GI 里只取反照率是**设计选择**，不是待办；写清它，才能避免下游误以为"再努力一点就能物理正确"。
+2. **没有成熟的"一等 NPR"范式**。产业界多数 NPR 是后处理或独立管线；本项目的赌注是"同一 über + 不同响应函数"。第一条线（§4.5）就是这个赌注尚未兑现的证据：NPR 目前只吃 3 个 OpenPBR 参数。
+3. **ALU 上涨是可预期的代价**。要 NPR 消费全部通道，瓣必须声明 `requires_caps`，采样预算按画质档缩放，且**画质档不进置换键**（I2）。
+4. **置换爆炸的治理是工程问题，不是架构问题**：内容哈希去重 + archetype 聚类 + 按需异步编译 + 全瓣 über 回退，**不设全局硬顶**（`refactor_zh` §8.4）。
+5. **同一能力在多处并存**是当前最大的结构性风险：两套 PSO 缓存（§9.2 ③）、两套帧图（§9.2 ④）、TAA/upscale 双驻（§5.2）、OIT 三驻（§5.4）。收口必须按"一个模型 + 一个键 + 两个层级"推进，禁止再造第三套。
+6. **Bevy 耦合边界**：迁移后每个 pass 仍是 ECS 系统，只把**顺序**改成声明式；`plugin.rs` 的 20 元组上限是当前被迫的 workaround 来源。
+7. **验证盲区**：(a) 真机 GPU 对拍需要 `PRISM_REQUIRE_GPU=1` 且脱离沙盒，当前无法在 CI 跑（7 个 GPU target 存在但"未执行"）；(b) `shading_resolve.wesl` 的 switch 无门禁（§4.5 缺口 2）；(c) 第 6 份 `MaterialHeader` 镜像在 `visibility_raster.wesl:24-35`，**不在** `MIRRORS` 清单内（`tests/material_header_abi.rs:126,148`）。
+8. **工作树存在一条红色门禁**：`codegen_freshness` 因未提交的 rustfmt 折叠失败（纯格式差异）；执行 `cargo run -p prism_material_schema --bin prism-material-codegen -- write` 即恢复（`prism_material_pipeline_refactor_verification_zh.md:38,50-67`）。
+
+## 11. 落地路线图（状态以 2026-10-14 工作树为准）
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| P0-a | 多散射 GGX 能量补偿 + furnace 一致 | ✅ CPU 线；白炉配置仍有 1 处缺 `metal(0.1)` |
+| P0-b | 高光抗锯齿（法线方差 Toksvig/LEAN） | ◐ 消费端已落，生产端 `normal_variance` 仍恒 0（SSR 除外） |
+| P1-a | 逐像素纹理 LOD / VT 采样路径 | ◐ 采样路径已接线；缺"喂真实 VT 行 + 头部 `vt_page_offset/count`" |
+| P1-b | 头部/分类 WESL 镜像逐字段同步 | ✅（`tests/material_header_abi.rs`） |
+| P1-c | 删闭包 slab 与纹理槽硬顶 | ✅（`1e9d1812b`） |
+| P1-d | 置换治理（去重/按需编译/über 回退） | ✅ 引擎侧 |
+| P1-e | 贵瓣采样数按画质档缩放 | ◐ CPU 全链落地；GPU `lobe_budget.wesl` 仅测试引用 |
+| P1-f | über 参数块规范化到 OpenPBR 瓣序 | ✅（含默认值 8 项对齐） |
+| P1-g | 自描述反射瓣 schema | ◐ S1+S2 完成；S3/S4（`material_classification.wesl` 与 `SpecializationId` 打包仍手写）未做 |
+| P1-h | PCM 地基（九类 kind + 64 槽摘要） | ✅ |
+| P2-c/d/g/j | 开放瓣词汇（glint / measured BRDF / thin-film）、超集合规门禁 + 投影导出器、动态参数通道、响应模式注册化 | ✅ |
+| P2-a/b/e/h/i | 作者前端与 archetype、节点图烘焙到 VT、`respond_custom`、原理化分层、全 kind manifest + MaterialX nodedef 往返 | ◐ 部分（`respond_custom` 缺失；`coat_darkening` 在 über 路径未消费；`author_node` 零实例） |
+| P3-a..f | 解耦着色（texel-space 缓存）、视角无关项解耦、失效摊销、光谱提升、随机单瓣采样、内存压缩 | ◐ 地基与独立 slice 已落，生产闭环未接 |
+| **四层收口** | ① Surface ABI / 数据布局 → ② Response 与 Composition → ③ Shader Package 与 Pipeline → ④ 帧图与 pass 调度（总览 00） | 方案已定（`docs/refactoring-dev/00`–`04`），**未实施**；建议第一批：① 的布局常量改 codegen 派生（门禁 1）+ ④ 的 S5（挑 `posterize` 做声明化可行性验证）——两者互不依赖 |
+
+## 12. 顶级产品对标矩阵（只取算法与形态，不取源码）
+
+| 对标 | 借鉴什么 | 本项目落点 | 状态 |
+|---|---|---|---|
+| UE Nanite | 虚拟几何 + 簇剔除 + 软件光栅 | `virtual_geometry/` + `prism_virtual_geometry_gpu`（CPU golden ↔ GPU 对拍） | ◐ |
+| UE Lumen / DDGI | 探针辐照度 + 屏幕空间回退 | `gi/world_space/` + `ddgi_*.wesl` + `ssgi.wesl` | ◐ |
+| ReSTIR | 蓄水池时空复用 | `world_restir_*.wesl`（inject/fill/resolve/reuse/spatial） | ◐ |
+| 虚拟阴影图（VSM） | 页表 + 按需驻留 | `shadow/virtual_sm/`（`drive_frame` / `page_table` / `allocator`） | ✅ CPU 线 |
+| UE Substrate | 分层 BSDF 的表达力 | PCM 瓣 + 开放 über（但**不做**运行期图遍历，§2.2） | ✅ 表达 / ✅ 运行时受限 |
+| GGF Xrd / miHoYo | 多通道 NPR + 面部 SDF | `light_routing.rs` + `face_shadow.rs` | ✅ |
+| Spider-Verse / Okami | 描边与风格化后处理 | `outline.rs` + 17 个风格化后处理模块（§14.3） | ✅ |
+| Kuwahara / 有序抖动 | 绘画感 | `kuwahara.rs` / `ordered_dither.rs` | ✅ |
+| TSR / FSR2 | 时序超分 + 历史钳制 | `taa/` + `upscale/`（含 RCAS） | ✅ CPU 线 |
+| Cyberpunk RT Overdrive | 全 RT 路径 | `ray_scene/` + `reference_pt/`（参考实现） | ◐ |
+
+## 13. PBR 前端：次世代高级特性清单
+
+13.1 **表面**：OpenPBR 全参数（`SurfaceSample` 40+ 字段）+ 10 瓣（emission / clearcoat / anisotropy / sheen / subsurface / transmission / thin_film / npr_face / glint / measured_brdf）+ 色散 + 薄膜虹彩 + 涂层级联 + glint + 实测 BRDF。
+13.2 **光照/阴影**：光簇、LTC 面积光、CSM + 图集、点/聚光阴影、虚拟阴影页、接触阴影、DDGI 探针、ReSTIR、SSGI/SSR、spec GI、环境 BRDF LUT 与预滤波、天空 LUT 三重（transmittance / multiscatter / view）、体积云与体积雾、光轴。
+13.3 **几何/材质**：虚拟几何（软件光栅 golden）+ 虚拟纹理（逐像素 LOD 解析求导）+ 形变/蒙皮 + 毛发/布料/水面/粒子子系统。
+13.4 **时序/后处理**：TAA + 历史钳制、稳健超分 + RCAS、reactive mask（CPU 闭合）、运动模糊、景深、泛光、镜头光晕、色度、色调映射（Reinhard / ACES）、色彩分级、色域映射、曝光、暗角、CAS、耀斑抑制。
+13.5 **确定性**：布局逐字节相等、算术 ≤1 ULP、白炉能量守恒（1.00±2%）。
+
+## 14. NPR 前端：清单与现状
+
+14.1 **着色**：ramp（`stylized_ramp`）/ 阴影（`stylized_shadow`）/ 高光斑 / 视角 Fresnel 边缘（`evaluate_stylized_direct`，`stylized.rs:185`），WESL 孪生在 `brdf.wesl:1095-1167` 与 `shading_resolve.wesl:1552`（`shade_toon`）。**当前只读 `base_color` / `perceptual_roughness` / `emissive` 三个参数**。
+14.2 **描边**：三条边（id / depth / normal，`outline.rs:114,139,176`）+ `evaluate_outline:218`，WESL `outline.wesl`。
+14.3 **风格化后处理**（全部为真实模块，不是规划）：`posterize.rs`、`halftone.rs`、`hatching.rs`、`kuwahara.rs`、`ordered_dither.rs`、`chromatic_aberration.rs`、`film_grain.rs`、`color_grade.rs`（+ PBR 共享的 `bloom/dof/lens_flare/motion_blur/vignette/cas/exposure/tonemap/gamut_map`）。
+14.4 **NPR 专属数据**：光照通道 8 / 光照图层 4（`light_routing.rs`）、面部 SDF（`face_shadow.rs`）、风格化毛发（`stylized_hair.rs` 的 band 与天使环）、matcap（`hair_matcap.rs`）。
+14.5 **缺口**：无逐材质风格化（风格量住在全局 `StylizedParams`，`stylized.rs:71-100`）；无 `stylize` 规则类型；40+ 参数未消费；`SHADING_CLASS_*` 与 9 臂无 codegen 门禁。
+
+## 15. MaskBlend 组合计划
+
+混合**不是**第四套着色器：它是 (§4.3) 的逐像素照明区域掩码 + 9 类分箱的联合表达，已落地（`material_classification.wesl:87,104-106,152`；`classification.rs:686,716-722`；`visibility_raster.wesl:47,127`）。同一帧内 PBR 区域与 NPR 区域共用几何、阴影、GI、时序基底，只切换响应函数。
 
 ## 16. 性能 / 效果 / 易用性权衡总表
 
-| 特性 | 桶（§8.1） | 性能要点 | 效果上限 | 易用性 / 风险 |
-|---|---|---|---|---|
-| 虚拟几何 Nanite | compute-可移植 | 几何与像素解耦；软光栅 + vis-buffer 带宽 | 亿级三角、零 LOD pop | CPU 决策层 + 软光栅数学金标准 + GPU compute twin/物理页/流式 I/O 均已落地并 Metal 实跑对拍（软/硬光栅、payload、页表解析、物理页 scatter/gather、集群剔除/光栅分类 twin 全套，见 §11 第 9 项） |
-| Lumen 混合 GI | compute + RT | surface cache 摊薄弹射；RT 加速可选 | 动态无烘焙 GI | 高复杂度；无 RT 降级 SSGI |
-| ReSTIR DI/GI | compute + RT | 储层重采样代替全光遍历 | 千级动态光低方差 | 需去噪配套；基底已就位 |
-| VSM | compute-可移植 | 只渲驻留页 | 全程一致密度阴影 | residency 已落 |
-| 有界 slab | shader 特化 | 封顶防 variant 爆炸 | 清漆/车漆/多层皮 | 封顶是刻意取舍（vs UE 无界） |
-| SSS | compute-可移植 | 屏幕空间可分离卷积 | 皮肤/蜡/玉 | über 瓣，非子系统 |
-| 体积雾/云 | compute-可移植 | froxel 分辨率可调 | 光轴/大气/云 | froxel 内存 |
-| 时序上采样 | compute-可移植 | 低分辨率内部渲染 | 4K 级 | 依赖 motion+reactive mask |
-| NPR ramp/SDF/描边 | compute-可移植 | 贴图采样/单趟后处理，**比 PBR 省** | 顶级二次元 | 美术资产 + DCC 管线成本高；无成熟范式（最高风险） |
-| 降帧步进/halftone/墨线 | compute-可移植 | 后处理开销小 | 影视风格化 | 与 TAA 摩擦，需 reactive mask |
-| 混合 tile 路由 | compute-可移植 | tile 分类 + 前端特化 | 风格无缝共存 | 依赖 material id 基底 |
-| RT 反射/路径追踪参考 | RT | 硬件 BVH；Metal RT 弱 | 物理镜面/离线对拍 | 跨平台部分覆盖，不可 CPU golden |
-| SPARSE/VRS/work graph | raw-VK-only | 平台特化收益 | 特定场景增益 | **双失**（无跨平台 + 无 CPU golden），关小笼子（§8.1） |
+| 决策 | 性能 | 效果 | 易用性 |
+|---|---|---|---|
+| 单一 über + 9 类分箱 + 常驻组合 pass | 一次几何/阴影/时序；分类是 O(n) 前缀和 | 多响应可同屏 | 作者只面对一份材质 |
+| 无全局硬顶 + 置换治理 | 冷编译成本可控（去重 + 按需 + 回退） | 表达力不塌缩 | 需要 archetype 引导 |
+| 生成式布局（schema → Rust + WESL） | 零运行时开销 | 手写漂移被门禁挡住 | 加字段 = 改 TOML + codegen |
+| PCM 载入期协商 | 热路径零分发 | 缺失能力可预测降级 | 扩展点有统一登记 |
+| 声明式帧图（当前 9/69） | 屏障/别名/队列可自动推导 | 顺序成为契约 | pass 骨架约 680 行 → 目标 1 描述符 |
+| 解耦视角无关着色（P3-a） | 摊销重光照 | 画质取决于缓存分辨率 | 需要失效策略 |
 
-**总原则**：野心效果绝大多数落 compute-可移植桶（跨平台 + 可 CPU golden 对拍），RT 桶部分可测，raw-VK 桶严格隔离。NPR 整体比 PBR 省算力但吃美术管线；混合的开销主要在 tile 路由与前端特化，换来风格接缝连贯——这是三线皆 AAA 的性价比最优点。
+## 附录 A. 术语与轴速查
+
+| 术语 | 含义 | 权威位置 |
+|---|---|---|
+| 响应程序 / 组合计划 | 响应函数：PBR / NPR / Custom；组合：Single / MaskBlend | `ResponseProgram` / `WaterShadingPlan` |
+| 照明轴 `Illumination` | 正交轴：`Lit=0 / Stylized=1 / Unlit=2 / Custom=3` | `axis.rs:24-37` |
+| 瓣（lobe） | 一个注册在案的表面闭包/BSDF 片段 | `SURFACE_LOBES`（`surface_layout.rs:73`） |
+| 通道（channel） | **两种含义，勿混**：① PCM `Kind::Channel` = 可逐帧调制的材质参数通道（动态四轴 wetness/snow/damage/dissolve）；② 着色缓存通道 `ShadeChannel{LitDiffuse, StylizedDiffuse, Subsurface, …}`（`shading/texel_cache/key.rs:5-24`），由字段 `view=invariant|dependent` 元数据选择 | `record.rs:240-276`；`key.rs:5-24` |
+| PCM | **Prism Capability Model**（能力基座）：全管线九类扩展点的统一注册与载入期协商 | §3.6；`pkg/prism_material_pcm` |
+| 九类扩展点 | lobe / channel / response_mode / transfer / cache_aux / provider / downgrade / author_node / composite | `namespace.rs:213-232` |
+| `SpecializationId` | 64 位特化身份：illumination 0..8、closure_mask 8..40、render_class 40..48、48..64 保留 | `axis.rs:98-116` |
+| `bin_class` | 29 位紧凑投影：illumination 2b、render_class 8b、活跃瓣集 17b(10..29) | `axis.rs:90,162-192` |
+| `PermutationSpace` | 混合基数可枚举置换空间（目标态：以密集索引取代手写位打包） | `shader_package/permutation.rs:1-75` |
+| `LobeMask` | 10 位瓣掩码（KHR 区 7 + 扩展区 3） | `surface.rs:411-465` |
+| KHR / EXTENSION 双密集段 | 规范瓣槽 0..6，Prism 扩展槽自 `EXTENSION_SLOT_BASE=16` 起，bits 7..15 预留给未来规范瓣 | §3.4；`refactor_zh` §4.5 约束② |
+| `DerivationClass` | `OfflineShipped / OfflineEditorOnly / RuntimeDerived / DriverLocal`（PSO 缓存属 DriverLocal，永不进 DDC） | `prism_derived_data_contract_zh.md:89-94`；`prism_asset_build_design_zh.md:146-156` |
+| 一条执行路径 / 开放 über / 无全局硬顶 / 无塌缩降级 / 响应与组合正交 / 传递无关缓存 / 统一执行模型 | 七条 headline 不变量 | `docs/refactoring-dev/00-overview_refactor_zh.md` |
+| 补瓣 / 向下投影 / identity-only / header 常驻 | 加法式扩展瓣 / `project_to_openpbr` 有损投影 / 只在烘焙或 pass 期解析、零头部槽 / 占用 64 槽摘要的 kind | §3.6、§3.7 |
+| `StylizedParams` / `LobeSampleBudget` / `ShadingQuality` | 全局风格量 / 瓣采样预算 / 画质档 | `stylized.rs:70`；`quality.rs:109,43` |
+
+## 附录 B. v2 → v3 差异台账
+
+| # | v2 说法 | v3（code-truth） | 证据 |
+|---|---|---|---|
+| 1 | `MATERIAL_ABI_VERSION = 4` | **6** | `record.rs:18`；`surface.toml:23`；`schema_parity.rs:19` |
+| 2 | 头部含 `closure_graph_offset`，运行期按需遍历闭包图 | 头部 27×u32 = **108 B**，**无**闭包图字段；运行时 graph-free | `record.rs:135-218`；commit `f5172023c` |
+| 3 | 闭包 slab 深度上限 4 + `ClosureSlabTooDeep`；纹理槽硬顶 | 全部删除 | commit `1e9d1812b`；`tests.rs:83,200` 仅存历史注释 |
+| 4 | `SURFACE_CORE_WORDS = 12`、`SURFACE_LOBE_WORDS = 4`、`LobeMask::COUNT = 6` | **20 / 16 / 10**；`BY_SLOT=[8,16,4,8,16,16,4,0×9,4,4,4]`（19 项） | `surface_layout.rs:11,20,28-34` |
+| 5 | 以互斥枚举 `MaterialShadingModel` 为机制；含 `Npr*` / `Custom*` 渲染类 | 照明轴 × 瓣集正交组合；渲染类 11 值且不含 Npr*/Custom* | `axis.rs`；`record.rs:49-64` |
+| 6 | 结构哈希驱动 ABI 版本 | 不存在结构哈希；手写常量 + 测试 + schema `abi_version` | 本文件 §3.5 |
+| 7 | 质量档/缓存命中参与置换键 | 禁止：键 = 瓣集 + 特征 flags（不变式 I2） | `refactor_zh:568` |
+| 8 | NPR 作为独立管线/crate（`prism_render_npr` 计划） | 原地实现在 `prism_render_shading`，无独立 crate | §14；`stylized.rs:185` |
+| 9 | `evaluate_toon_direct` 被重命名 | 新函数 `evaluate_stylized_direct` **追加**；旧名保留为一行包装 | `stylized.rs:185,251` |
+| 10 | `StylizedParams.legacy_toon` 是字段 | 是 `const fn` 预设构造器 | `stylized.rs:112` |
+| 11 | §6.2 子系统注册表 | 已由 `FeatureCatalog` 与 `render_fabric::builtin_catalog` 提供机器可检验目录；服务闭包与 provider 唯一性有测试 | `pkg/prism_render_architecture/src/render_fabric/` |
+| 12 | `prism_physics_core` ≈ 24k 行、未被渲染依赖 | 129 271 行 / 411 文件，且是 `prism_render_architecture` 的硬依赖 | §6.2；`Cargo.toml:13` |
+| 13 | "68 个 .wesl / 0 .wgsl" | **400** 个 `.wesl` + 约 130 个 `.wgsl` | §6.4 |
+| 14 | 约 40 个 pass 手排在 `plugin.rs`（1655 行） | 手排点在 `pkg/prism_render_scene/src/shading/plugin.rs`（1655 行）；`prism_render_scene/src/plugin.rs` 仅 165 行；声明式帧图覆盖 9 个 pass，全场景约 69 个 `*_pass` | §9.2 ④ |
+| 15 | 虚拟纹理未接线 | 采样路径已接线，缺真实 VT 行与头部 `vt_page_offset/count` | `bindings.rs:174,195`；`material_sample.wesl:264` |
+| 16 | 逐区域照明"未完成" | 已落地（CPU + WESL + 可见性光栅） | `classification.rs:686,716-722`；`visibility_raster.wesl:47,127` |
+| 17 | reactive mask 三入口闭合（v2 自述已完成） | CPU 闭合成立，但 GPU 孪生 0 命中 `reactive` | §5.3、§4.5 缺口 4 |
+| 18 | 头部尺寸在文内两处自相矛盾 | 统一为 27w/108B，并给出字节链 20w→19w→+4 PCM→+4 动态 | §3.3 |
+
+## 附录 C. 代码索引（crate → 角色 → 锚点）
+
+| crate / 目录 | 角色 | 关键锚点 |
+|---|---|---|
+| `pkg/prism_render_material` | 材质 ABI：身份、闭包 IR、紧凑记录、校验 | `record.rs:18,135-218`；`axis.rs:90,162-192`；`surface.rs:411-465,577`；`ir.rs`；`openpbr.rs:118` |
+| `pkg/prism_material_schema` | 单一事实源 + 生成器 | `schema/surface.toml`（`abi_version=6`、`[core] words=20`）；`src/codegen.rs`；`--bin prism-material-codegen` |
+| `pkg/prism_material_pcm` | 能力基座（九类 kind、四区 × 16 槽、载入期协商） | `namespace.rs:89-96,213-232`；`registry.rs:79`；`manifest.rs:238`；`negotiate.rs` |
+| `pkg/prism_render_material_authoring` | 作者层（archetype/节点图，1895 行） | `authoring`：语义常量 `FACE_SHADOW_SDF_SEMANTIC` 等 |
+| `pkg/prism_render_material_gpu` | 块压缩纹理硬件解码 oracle（**不是**材质 ABI crate） | `BlockOracle::try_new` |
+| `pkg/prism_render_architecture` | 共享基底：能力协商、帧图、着色包/PSO 缓存、GPU 场景、描述符堆、分页、子系统 | §8.1、§9.2；`shader_package/pso_cache/mod.rs:61`；`frame_graph/builder.rs:6-29`；`gpu_scene/`；`descriptor_heap/` |
+| `pkg/prism_render_shading` | 响应函数与光照/阴影/后处理算法（131 510 行） | `classification.rs:433,453,673`；`resolve.rs:760-771`；`lighting.rs:24,369`；`stylized.rs:185`；`gi/`、`shadow/virtual_sm/`、`ao/` |
+| `pkg/prism_render_scene` | 场景编排、pass、WESL 主体（175 个 `.wesl`） | `shading/plugin.rs`（1655 行）；`shading/graph.rs:76-139`；`motion/encode.rs:26`；`shaders/material_unpack.wesl` |
+| `pkg/prism_render_app` | 管线缓存、帧编排、Bevy 集成 | `pipeline_cache.rs:47,509`；`frame.rs:121,155`；`sets.rs:126` |
+| `pkg/prism_render_graph` / `prism_render_driver` | 被执行帧图 / RHI 契约与缓存 | `graph.rs:162-202`；`pass.rs:63,90`；`driver` 的 `ContentCache` |
+| `pkg/prism_render_gpudriven` | GPU 驱动绘制与间接参数 | `scene_draw.rs:407,421,456` |
+| `pkg/prism_virtual_geometry_gpu` / `prism_virtual_texture_gpu` / `prism_hair_gpu` / `prism_volumetric_gpu` / `prism_water_render` | GPU 孪生与真机验证 | `prism_virtual_geometry_gpu/src/raster.rs:3,30`、`gpu_parity.rs:84`；`prism_water_render/src/ocean.rs:34-37` |
+| `pkg/prism_physics_core` / `prism_physics_gpu` | 共享模拟核心 / **未接线**的 GPU 物理 | `prism_render_architecture/Cargo.toml:13`；`prism_physics_gpu`（110 `.wgsl`，无消费方） |
 
 ---
 
-## 附录 A：术语与轴速查
-
-- **前端 (frontend)**：延迟 PBR / forward+ / NPR / 自定义。决定"怎么组织 pass 与着色"。
-- **illumination 轴**：Lit / Stylized / Unlit / Custom。决定"用什么方式解读光照数据"。正交于前端与 closure。
-- **closure**：über-BSDF（一等）/ 有界 slab / 毛发专用。决定"表面 BSDF 长什么样"。
-- **子系统**：有自己几何+sim+特殊渲染的横切模块（毛发/粒子/体积/水/布料sim）。
-- **基底服务**：大家都消费的公共设施（OIT/motion+mask/透射/去噪/光照数据）。**不是**子系统。
+**变更历史**：v1（初稿）→ v2（2026-09-30，wgpu + WESL 版，含 ABI v4 与闭包图描述）→ **v3（2026-10-14，与实现对齐：ABI v6、生成式布局、PCM、注册驱动分类、四层收口台账）**。

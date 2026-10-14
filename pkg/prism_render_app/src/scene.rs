@@ -27,10 +27,11 @@ use crate::draw::DrawFunctionId;
 use crate::frame::RENDER_TARGET_FORMAT;
 use crate::mesh::RenderMesh;
 use crate::mesh_pipeline::MeshPipelineKey;
-use crate::pipeline_pass::{PassDescriptor, PassDescriptorClass, PassDescriptorTable, PassSetError};
+use crate::pipeline_pass::{PassDescriptor, PassDescriptorClass, PassDescriptorTable, PassRole, PassSetError};
 use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
-use crate::queue::{phase_for_render_class, DrawRequest};
+use crate::queue::{phase_for_material, DrawRequest};
 use crate::render_asset::RenderAssets;
+use crate::sets::RenderPhase;
 
 /// The frame's visible draw work, published by the visibility stage.
 ///
@@ -154,11 +155,12 @@ impl SceneRegistry {
         // a claim to implement the material's response plan. Real renderers
         // replace this binding via set_material_passes after module resolution.
         let pass = PassDescriptor {
+            role: PassRole::Surface,
             execution_family: ExecutionFamily::FusedBuiltin,
             response_module_id: ModuleId::SPINE,
             permutation_index: PermutationIndex::ZERO,
             fallback_permutation: None,
-            render_phase: phase_for_render_class(record.render_class),
+            render_phase: phase_for_material(&record),
             draw: None,
             sort_class: PassDescriptorClass::SURFACE,
         };
@@ -178,6 +180,29 @@ impl SceneRegistry {
 
     pub fn material_pass_index(&self, handle: SceneMaterialHandle) -> Option<u32> { self.material_passes.get(&handle).copied() }
     pub fn pass_descriptors(&self, index: u32) -> Option<&[PassDescriptor]> { self.pass_descriptors.get(index) }
+
+    /// Whether at least one split material has registered the resident
+    /// composition pass shape.
+    #[must_use]
+    pub fn composition_pass_is_resident(&self) -> bool { self.pass_descriptors.has_composition() }
+
+    /// The loud, drawable fallback used when a packed bin references an
+    /// unknown descriptor-table index. It is deliberately a complete query,
+    /// not a fabricated class decode, so an invalid bin still produces a draw
+    /// and diagnostics can count the loss of specialization fidelity.
+    #[must_use]
+    pub fn fallback_pass(&self) -> PassDescriptor {
+        PassDescriptor {
+            role: PassRole::Surface,
+            execution_family: ExecutionFamily::FusedBuiltin,
+            response_module_id: ModuleId::SPINE,
+            permutation_index: PermutationIndex::ZERO,
+            fallback_permutation: None,
+            render_phase: RenderPhase::Opaque,
+            draw: None,
+            sort_class: PassDescriptorClass::SURFACE,
+        }
+    }
 
     /// Inserts or replaces the pipeline inputs for a vertex-buffer class.
     pub fn insert_mesh_class(&mut self, class: u32, mesh_class: MeshClass) {
@@ -278,16 +303,31 @@ impl SceneRegistry {
     /// when the bin's vertex-buffer class is not resident.
     ///
     #[must_use]
+    pub fn bin_variants(
+        &self,
+        key: &DrawBinKey,
+        depth_format: Option<TextureFormat>,
+        sample_count: u32,
+    ) -> Option<Vec<MeshPipelineKey>> {
+        let passes = self.pass_descriptors(key.pipeline_class)?;
+        let mesh_class = self.mesh_classes.get(&key.vertex_buffer_class)?;
+        Some(passes
+            .iter()
+            .map(|pass| pass.mesh_variant(mesh_class.topology, Some(RENDER_TARGET_FORMAT), depth_format, sample_count))
+            .collect())
+    }
+
+    /// Single-pass compatibility wrapper. Multi-pass bins return `None` so a
+    /// caller cannot accidentally truncate a split response to one arm.
+    #[must_use]
     pub fn bin_variant(
         &self,
         key: &DrawBinKey,
         depth_format: Option<TextureFormat>,
         sample_count: u32,
     ) -> Option<MeshPipelineKey> {
-        let passes = self.pass_descriptors(key.pipeline_class)?;
-        assert_eq!(passes.len(), 1, "multi-pass bin must iterate the complete descriptor set");
-        let mesh_class = self.mesh_classes.get(&key.vertex_buffer_class)?;
-        Some(passes[0].mesh_variant(mesh_class.topology, Some(RENDER_TARGET_FORMAT), depth_format, sample_count))
+        let variants = self.bin_variants(key, depth_format, sample_count)?;
+        (variants.len() == 1).then(|| variants[0])
     }
 
     /// Derives the frame's draw-bin candidates from the visible work list.

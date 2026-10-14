@@ -28,7 +28,7 @@
 //! this module uses none. There are no `f32` equality tests (magnitudes are
 //! compared against [`EPS`]) and no AI/ML.
 
-use super::{ShadingFrontend, SolverKind, Vec3, WaterKind, EPS};
+use super::{ResponseProgram, SolverKind, Vec3, WaterKind, WaterShadingPlan, EPS};
 
 /// Ocean spectral model selector (authoring value).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -120,8 +120,8 @@ pub struct InteractionSpec {
 /// Shading authoring block (design doc section 2: shading).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShadingSpec {
-    /// Lighting-response frontend (`PBR`/`NPR`/custom/hybrid).
-    pub frontend: ShadingFrontend,
+    /// Response/composition plan (`Single` or `MaskBlend`).
+    pub shading_plan: WaterShadingPlan,
     /// Foam coverage threshold in `0..=1`.
     pub foam_threshold: f32,
     /// Foam persistence (decay time scale); `0` disables foam.
@@ -249,19 +249,21 @@ fn solver_ordinal(solver: SolverKind) -> u32 {
     }
 }
 
-fn frontend_ordinal(frontend: ShadingFrontend) -> u32 {
-    match frontend {
-        ShadingFrontend::Pbr => 0,
-        ShadingFrontend::Npr => 1,
-        ShadingFrontend::Custom => 2,
-        ShadingFrontend::Hybrid => 3,
+fn frontend_ordinal(plan: WaterShadingPlan) -> u32 {
+    match plan {
+        WaterShadingPlan::Single { program } => match program {
+            ResponseProgram::Pbr => 0,
+            ResponseProgram::Npr => 1,
+            ResponseProgram::Custom => 2,
+        },
+        WaterShadingPlan::MaskBlend { .. } => 3,
     }
 }
 
 /// The compiled runtime parameters of a water body.
 ///
 /// A flat, validated snapshot: routing (`kind`/`solver`/`frontend`), the
-/// resolved grid and cascade counts, the clamped physics and shading scalars,
+    /// resolved grid and cascade counts, the clamped physics and shading scalars,
 /// and the [`WaterSpecializationKey`]. The sibling solver/shading planners read
 /// these directly; nothing here needs re-derivation.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -270,8 +272,8 @@ pub struct CompiledWaterParams {
     pub kind: WaterKind,
     /// Resolved solver bucket.
     pub solver: SolverKind,
-    /// Lighting-response frontend.
-    pub frontend: ShadingFrontend,
+    /// Response/composition plan.
+    pub shading_plan: WaterShadingPlan,
     /// Grid resolution per side.
     pub grid_resolution: u32,
     /// Cascade levels after solver gating (`0` for non-spectral bodies).
@@ -388,7 +390,7 @@ impl WaterBodyAsset {
         let spec_key = Self::build_key(
             self.kind,
             self.solver,
-            self.shading.frontend,
+            self.shading.shading_plan,
             cascade_count,
             foam_persistence,
             foam_threshold,
@@ -402,7 +404,7 @@ impl WaterBodyAsset {
         Some(CompiledWaterParams {
             kind: self.kind,
             solver: self.solver,
-            frontend: self.shading.frontend,
+            shading_plan: self.shading.shading_plan,
             grid_resolution: self.geometry.grid_resolution,
             cascade_count,
             particle_cap,
@@ -431,7 +433,7 @@ impl WaterBodyAsset {
     fn build_key(
         kind: WaterKind,
         solver: SolverKind,
-        frontend: ShadingFrontend,
+        shading_plan: WaterShadingPlan,
         cascade_count: u32,
         foam_persistence: f32,
         foam_threshold: f32,
@@ -442,7 +444,7 @@ impl WaterBodyAsset {
         wetness_gradient: f32,
     ) -> WaterSpecializationKey {
         let mut bits = solver_ordinal(solver) << WaterSpecializationKey::SOLVER_SHIFT;
-        bits |= frontend_ordinal(frontend) << WaterSpecializationKey::FRONTEND_SHIFT;
+        bits |= frontend_ordinal(shading_plan) << WaterSpecializationKey::FRONTEND_SHIFT;
         if cascade_count > 0 {
             bits |= WaterSpecializationKey::CASCADES;
         }
@@ -511,7 +513,7 @@ impl WaterBodyAsset {
                 boundary: BoundaryCondition::Periodic,
             },
             shading: ShadingSpec {
-                frontend: ShadingFrontend::Pbr,
+                shading_plan: WaterShadingPlan::single(ResponseProgram::Pbr),
                 foam_threshold: 0.5,
                 foam_persistence: 2.0,
                 caustic_intensity: 0.4,
@@ -558,7 +560,7 @@ impl WaterBodyAsset {
                 boundary: BoundaryCondition::Open,
             },
             shading: ShadingSpec {
-                frontend: ShadingFrontend::Pbr,
+                shading_plan: WaterShadingPlan::single(ResponseProgram::Pbr),
                 foam_threshold: 0.4,
                 foam_persistence: 1.0,
                 caustic_intensity: 0.6,
@@ -605,7 +607,7 @@ impl WaterBodyAsset {
                 boundary: BoundaryCondition::SolidWall,
             },
             shading: ShadingSpec {
-                frontend: ShadingFrontend::Pbr,
+                shading_plan: WaterShadingPlan::single(ResponseProgram::Pbr),
                 foam_threshold: 0.3,
                 foam_persistence: 0.8,
                 caustic_intensity: 0.5,
@@ -722,11 +724,14 @@ mod tests {
     fn npr_frontend_shares_full_base_and_changes_key() {
         let mut asset = WaterBodyAsset::ocean_default(extent());
         let pbr = asset.compile().expect("pbr compiles");
-        asset.shading.frontend = ShadingFrontend::Npr;
+        asset.shading.shading_plan = WaterShadingPlan::single(ResponseProgram::Npr);
         let npr = asset.compile().expect("npr compiles");
         // NPR is a different shader permutation but the same feature set.
         assert_ne!(pbr.spec_key.bits(), npr.spec_key.bits());
-        assert!(asset.shading.frontend.shares_full_base());
+        assert_eq!(
+            asset.shading.shading_plan,
+            WaterShadingPlan::single(ResponseProgram::Npr)
+        );
     }
 
     #[test]

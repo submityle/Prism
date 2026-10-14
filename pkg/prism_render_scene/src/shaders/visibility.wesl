@@ -10,11 +10,10 @@ struct GpuSceneInstance {
 struct GpuSceneTransform { world_from_local: mat3x4<f32> }
 struct GpuSceneBounds { center_radius: vec4<f32>, half_extents: vec4<f32> }
 struct MaterialHeader {
-    generation: u32, revision: u32, illumination: u32, render_class: u32,
+    generation: u32, revision: u32, render_class: u32, render_domain: u32,
     feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
     texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
-    custom_program: u32, is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
-    specialization_low: u32, specialization_high: u32,
+    is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
     lobe_mask: u32,
     // PCM extension digest (§5.3): used/required, each split low/high.
     extensions_used_low: u32, extensions_used_high: u32,
@@ -23,6 +22,10 @@ struct MaterialHeader {
     // each an `f32` bitcast into the word (`0.0` = exact identity).
     dynamic_wetness: u32, dynamic_snow: u32,
     dynamic_damage: u32, dynamic_dissolve: u32,
+    // ABI v8 execution binding; all five words use 0xffffffff when unbound.
+    execution_plan_index: u32, execution_program_index: u32,
+    execution_package_index: u32, execution_permutation_low: u32,
+    execution_permutation_high: u32,
 }
 struct MaterialTexture {
     index: u32,
@@ -99,9 +102,16 @@ struct VisibilityDispatch {
 }
 var<immediate> dispatch: VisibilityDispatch;
 
-fn pass_mask(render_class: u32, flags: u32) -> u32 {
-    var mask = select(4u, 1u, render_class <= 1u || render_class == 11u || render_class == 13u);
-    mask = select(mask, 2u, render_class == 2u || render_class == 3u);
+fn pass_mask(material: MaterialHeader, flags: u32) -> u32 {
+    // Domain and water feature are resolved before the blend family. This is
+    // the GPU counterpart of `phase_for_material`.
+    var mask = 4u;
+    if material.render_domain == 1u || material.render_domain == 3u { mask = 1u; }
+    else if material.render_domain == 2u || material.render_domain == 4u { mask = 4u; }
+    else if material.render_domain == 0u && (material.feature_flags & (1u << 8u)) == 0u {
+        mask = select(4u, 1u, material.render_class <= 1u);
+        mask = select(mask, 2u, material.render_class == 2u || material.render_class == 3u);
+    }
     if (flags & 1u) == 0u { mask |= 8u; }
     return mask | 16u | 32u | 64u;
 }
@@ -239,7 +249,7 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         candidate, instance.generation,
         instance.geometry_index, instance.geometry_generation,
         material_index, instance.material_generation,
-        geometry_lods[lod_index].level, pass_mask(material.render_class, instance.flags),
+        geometry_lods[lod_index].level, pass_mask(material, instance.flags),
         visibility_stages, instance.geometry_index, material.render_class, 0u,
     );
     let lod = geometry_lods[lod_index];

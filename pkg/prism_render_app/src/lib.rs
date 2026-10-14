@@ -114,8 +114,11 @@ pub use mesh_draw::{mesh_bin_draw, mesh_draw};
 pub use mesh_pipeline::{
     full_lobe_fallback, MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer,
 };
-pub use mesh_pipelines::{MeshPipelines, SpineMeshPipeline};
-pub use pipeline_pass::{PassDescriptor, PassDescriptorClass, PassSetError};
+pub use mesh_pipelines::{
+    MeshPipelines, ResidentResponseModule, ResponseModuleCache, ResponseModuleCacheError,
+    ResponseModuleSpec, SpineMeshPipeline,
+};
+pub use pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
 pub use pipeline_cache::{
     hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
 };
@@ -162,9 +165,14 @@ pub mod prelude {
     pub use crate::mesh_pipeline::{
         full_lobe_fallback, MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer,
     };
+    pub use crate::mesh_pipelines::{
+        MeshPipelines, ResidentResponseModule, ResponseModuleCache, ResponseModuleCacheError,
+        ResponseModuleSpec, SpineMeshPipeline,
+    };
     pub use crate::pipeline_cache::{
         hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
     };
+    pub use crate::pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
     pub use crate::plugin::PrismRenderPlugin;
     pub use crate::queue::{
         phase_for_bin_class, phase_for_render_class, DrawRequest, IndirectArgs, PhaseItem,

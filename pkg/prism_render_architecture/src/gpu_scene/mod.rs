@@ -89,6 +89,7 @@ pub enum SceneChangeKind {
     Geometry,
     Material,
     Flags,
+    RenderLayers,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

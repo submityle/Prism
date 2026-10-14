@@ -133,7 +133,6 @@ mod tests {
     use super::*;
     use crate::material::MaterialDomain;
     use crate::shader_package::ShaderPackageId;
-    use alloc::string::String;
     use alloc::vec;
 
     fn record(execution: MaterialExecutionPath) -> MaterialRecord {

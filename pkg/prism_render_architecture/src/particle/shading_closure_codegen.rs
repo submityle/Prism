@@ -42,7 +42,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::modules::{CodegenCtx, ResourceDecl};
-use super::shading::{DeepShadowMode, LightingServices, ShadingAttributeFootprint, ShadingProgram};
+use super::shading::{
+    DeepShadowMode, ShadingAttributeFootprint, ShadingProgram, PARTICLE_CLUSTERED_LIGHTS,
+    PARTICLE_GLOBAL_ILLUMINATION, PARTICLE_RAY_TRACING, PARTICLE_SHADOW_MAPS,
+};
 use super::{EmberShadingModel, ShadingBasis};
 
 /// The `WESL` bind-group index for the per-particle attribute inputs a shading
@@ -153,17 +156,17 @@ impl ShadingClosure {
         if footprint.custom_params {
             out.push(BIND_CUSTOM);
         }
-        let lighting: LightingServices = self.program.lighting;
-        if lighting.clustered_lights {
+        let lighting = self.program.lighting;
+        if lighting.contains(PARTICLE_CLUSTERED_LIGHTS) {
             out.push(BIND_CLUSTERS);
         }
-        if lighting.shadow_maps {
+        if lighting.contains(PARTICLE_SHADOW_MAPS) {
             out.push(BIND_SHADOW_MAPS);
         }
-        if lighting.global_illumination {
+        if lighting.contains(PARTICLE_GLOBAL_ILLUMINATION) {
             out.push(BIND_GI_PROBES);
         }
-        if lighting.ray_traced {
+        if lighting.contains(PARTICLE_RAY_TRACING) {
             out.push(BIND_RAY_SCENE);
         }
         if !matches!(self.program.deep_shadow, DeepShadowMode::None) {
@@ -300,17 +303,13 @@ mod tests {
     use super::*;
     use crate::particle::lod::ParticleQuality;
     use crate::particle::shading::{
-        resolve_shading_program, LightingServiceCaps, ShadingProgramInput,
+        resolve_shading_program, ShadingProgramInput, PARTICLE_LIGHTING_SERVICES,
     };
     use crate::particle::sort_cull::BlendMode;
 
     /// Full lighting capabilities so lit closures subscribe to every service.
-    fn all_caps() -> LightingServiceCaps {
-        LightingServiceCaps {
-            shadow_maps: true,
-            global_illumination: true,
-            ray_tracing: true,
-        }
+    fn all_caps() -> crate::render_fabric::ServiceSet {
+        PARTICLE_LIGHTING_SERVICES
     }
 
     /// Resolves a program for a model with full caps, non-volumetric, high quality.

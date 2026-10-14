@@ -1,21 +1,26 @@
-use crate::axis::{Illumination, SpecializationId};
+use crate::execution::MaterialExecutionBinding;
 use crate::ir::ClosureKind;
+use crate::shading_plan::ShadingPlan;
 use crate::surface::{LobeMask, SurfaceParameterBlock};
 use core::ops::{BitOr, BitOrAssign};
 use prism_render_architecture::abi::GenerationalHandle;
+pub use prism_render_architecture::render_fabric::RenderDomain;
 
-/// Material ABI version. Bumped to 6 when texture rows gained the optional
-/// virtual-texture metadata segment. The metadata is explicitly disabled for
-/// ordinary bindless rows, so existing non-VT materials keep their sampling
-/// identity and behaviour while the row remains self-describing for a future
-/// VT consumer.
+/// Material ABI version. Bumped to 8 when the header gained an explicit
+/// render-domain word alongside the five-word
+/// dense material execution binding (plan, response program, package and the
+/// full 64-bit permutation index). The binding is a table identity, never a
+/// hash or a truncated specialization surrogate.
 ///
 /// The earlier v5-only layout change was the first version in which the
 /// `clearcoat` lobe grew to carry the `OpenPBR` `coat_ior` / `coat_color` fields
 /// (design doc §4.4 / P1-f), so a v4 reader can no longer decode the packed
 /// block. The remaining v5 header/classification work (§8, P1-b/P1-h) lands on
 /// top of this marker rather than re-issuing it.
-pub const MATERIAL_ABI_VERSION: u32 = 6;
+pub const MATERIAL_ABI_VERSION: u32 = 8;
+
+/// Sentinel for every unbound material-execution word.
+pub const MATERIAL_EXECUTION_BINDING_SENTINEL: u32 = u32::MAX;
 
 /// Sentinel in [`GpuMaterialTexture::virtual_texture_id`] for a row that is
 /// not backed by a virtual texture. This is deliberately not zero: zero is a
@@ -28,8 +33,8 @@ pub const FALLBACK_MATERIAL_HANDLE: GenerationalHandle = GenerationalHandle {
     generation: 0,
 };
 
-/// The material domain axis. Orthogonal to `Illumination` and to the closure
-/// graph; decides which pipeline family consumes the material.
+/// The material domain axis. Orthogonal to the response plan and closure graph;
+/// it decides which pipeline family consumes the material.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MaterialDomain {
@@ -42,10 +47,8 @@ pub enum MaterialDomain {
 
 /// The blend / raster family axis.
 ///
-/// This intentionally no longer carries `Npr*` / `Custom*` variants: those were
-/// the Cartesian product of `blend × illumination` flattened into one enum.
-/// Style now lives on the orthogonal [`Illumination`] axis, so a stylized
-/// opaque material is simply `render_class = Opaque, illumination = Stylized`.
+/// This intentionally does not carry response-program variants: response
+/// execution is selected by [`ShadingPlan`], not by raster/blend classification.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MaterialRenderClass {
@@ -57,10 +60,6 @@ pub enum MaterialRenderClass {
     Transmissive,
     Transparent,
     Additive,
-    Volume,
-    Hair,
-    Water,
-    Decal,
 }
 
 impl MaterialRenderClass {
@@ -78,10 +77,6 @@ impl MaterialRenderClass {
             4 => Self::Transmissive,
             5 => Self::Transparent,
             6 => Self::Additive,
-            7 => Self::Volume,
-            8 => Self::Hair,
-            9 => Self::Water,
-            10 => Self::Decal,
             _ => return None,
         })
     }
@@ -104,6 +99,9 @@ impl MaterialFeatureFlags {
     /// the visibility metadata's spare word; classification then bins each
     /// region into the requested response without changing the material ABI.
     pub const REGION_ILLUMINATION: Self = Self(1 << 7);
+    /// The surface belongs to the dedicated water feature family. Water is a
+    /// surface domain; this bit selects its response bucket.
+    pub const WATER: Self = Self(1 << 8);
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
@@ -121,10 +119,10 @@ impl BitOrAssign for MaterialFeatureFlags {
     }
 }
 
-/// GPU-visible material header. The former `shading_model` field is gone;
-/// style is carried by `illumination`, and the compiled permutation identity is
-/// carried by `specialization_low`/`specialization_high` (a split
-/// [`SpecializationId`]).
+/// GPU-visible material header. Response and pipeline identity is carried only
+/// by the verified dense execution binding at the tail of this record; the
+/// legacy illumination/custom/specialization header words are intentionally not
+/// part of ABI8.
 ///
 /// The runtime is **graph-free** (design §6.2): there is no serialized closure
 /// IR. Deferred/RT consumers evaluate the same packed über
@@ -135,8 +133,9 @@ impl BitOrAssign for MaterialFeatureFlags {
 pub struct GpuMaterialHeader {
     pub generation: u32,
     pub revision: u32,
-    pub illumination: u32,
     pub render_class: u32,
+    /// Runtime object domain, orthogonal to the seven blend/raster classes.
+    pub render_domain: u32,
     pub feature_flags: u32,
     pub closure_mask: u32,
     /// Word offset of this material's packed surface block inside the shared
@@ -155,7 +154,6 @@ pub struct GpuMaterialHeader {
     pub texture_count: u32,
     pub sampler_offset: u32,
     pub sampler_count: u32,
-    pub custom_program: u32,
     /// `1` for a live material, `0` for a dormant placeholder.
     ///
     /// Spelled `is_active`, not `active`: WGSL reserves `active`, so the
@@ -166,8 +164,6 @@ pub struct GpuMaterialHeader {
     pub is_active: u32,
     pub material_epoch_low: u32,
     pub material_epoch_high: u32,
-    pub specialization_low: u32,
-    pub specialization_high: u32,
     /// Which optional über-BSDF lobes this material carries
     /// ([`LobeMask`](crate::LobeMask) bits). Drives packed-parameter decode:
     /// shaders read `parameter_size / 4` words at `parameter_offset` and
@@ -215,6 +211,18 @@ pub struct GpuMaterialHeader {
     pub dynamic_damage: u32,
     /// Runtime dynamic channel `dissolve` (§17.1), an `f32` bitcast into the word.
     pub dynamic_dissolve: u32,
+    /// Dense index into the material execution plan table, or the all-ones
+    /// sentinel when no verified execution binding is attached.
+    pub execution_plan_index: u32,
+    /// Dense index into the response-program table, or the all-ones sentinel.
+    pub execution_program_index: u32,
+    /// Dense index into the verified shader-package table, or the all-ones
+    /// sentinel.
+    pub execution_package_index: u32,
+    /// Low word of the complete checked permutation index.
+    pub execution_permutation_low: u32,
+    /// High word of the complete checked permutation index.
+    pub execution_permutation_high: u32,
 }
 
 /// The four runtime dynamic channels of §17.1 — the axes the PCM catalogue
@@ -304,9 +312,31 @@ fn sanitize_channel(value: f32) -> f32 {
 }
 
 impl GpuMaterialHeader {
-    /// Recover the packed specialization key.
-    pub const fn specialization(&self) -> SpecializationId {
-        SpecializationId(((self.specialization_high as u64) << 32) | self.specialization_low as u64)
+    /// Sentinel used by the ABI for an unbound execution identity.
+    pub const EXECUTION_BINDING_SENTINEL: u32 = MATERIAL_EXECUTION_BINDING_SENTINEL;
+
+    /// Returns the five ABI words in the same order as
+    /// [`MaterialExecutionBinding::to_words`].
+    #[must_use]
+    pub const fn execution_binding_words(&self) -> [u32; 5] {
+        [
+            self.execution_plan_index,
+            self.execution_program_index,
+            self.execution_package_index,
+            self.execution_permutation_low,
+            self.execution_permutation_high,
+        ]
+    }
+
+    /// Whether this header carries a complete execution binding rather than
+    /// the all-ones unbound sentinel.
+    #[must_use]
+    pub const fn has_execution_binding(&self) -> bool {
+        self.execution_plan_index != MATERIAL_EXECUTION_BINDING_SENTINEL
+            && self.execution_program_index != MATERIAL_EXECUTION_BINDING_SENTINEL
+            && self.execution_package_index != MATERIAL_EXECUTION_BINDING_SENTINEL
+            && self.execution_permutation_low != MATERIAL_EXECUTION_BINDING_SENTINEL
+            && self.execution_permutation_high != MATERIAL_EXECUTION_BINDING_SENTINEL
     }
 }
 
@@ -583,7 +613,12 @@ impl GpuMaterialTexture {
 pub fn inactive_material_header(generation: u32) -> GpuMaterialHeader {
     GpuMaterialHeader {
         generation,
-        custom_program: u32::MAX,
+        render_domain: RenderDomain::Surface as u32,
+        execution_plan_index: MATERIAL_EXECUTION_BINDING_SENTINEL,
+        execution_program_index: MATERIAL_EXECUTION_BINDING_SENTINEL,
+        execution_package_index: MATERIAL_EXECUTION_BINDING_SENTINEL,
+        execution_permutation_low: MATERIAL_EXECUTION_BINDING_SENTINEL,
+        execution_permutation_high: MATERIAL_EXECUTION_BINDING_SENTINEL,
         ..Default::default()
     }
 }
@@ -591,10 +626,9 @@ pub fn inactive_material_header(generation: u32) -> GpuMaterialHeader {
 /// Slot zero is a permanent, generation-zero principled fallback. Consumers
 /// can safely use it while an asynchronously loaded material is unavailable.
 pub fn fallback_material_header(epoch: u64) -> GpuMaterialHeader {
-    let spec = SpecializationId::new(Illumination::Lit, 1, MaterialRenderClass::Opaque as u32);
     GpuMaterialHeader {
         generation: 0,
-        illumination: Illumination::Lit as u32,
+        render_domain: RenderDomain::Surface as u32,
         render_class: MaterialRenderClass::Opaque as u32,
         closure_mask: 1,
         parameter_size: SurfaceParameterBlock::from_full(
@@ -602,12 +636,14 @@ pub fn fallback_material_header(epoch: u64) -> GpuMaterialHeader {
             LobeMask::default(),
         )
         .packed_size_bytes() as u32,
-        custom_program: u32::MAX,
+        execution_plan_index: MATERIAL_EXECUTION_BINDING_SENTINEL,
+        execution_program_index: MATERIAL_EXECUTION_BINDING_SENTINEL,
+        execution_package_index: MATERIAL_EXECUTION_BINDING_SENTINEL,
+        execution_permutation_low: MATERIAL_EXECUTION_BINDING_SENTINEL,
+        execution_permutation_high: MATERIAL_EXECUTION_BINDING_SENTINEL,
         is_active: 1,
         material_epoch_low: epoch as u32,
         material_epoch_high: (epoch >> 32) as u32,
-        specialization_low: spec.low(),
-        specialization_high: spec.high(),
         ..Default::default()
     }
 }
@@ -617,13 +653,13 @@ pub fn fallback_material_record(handle: GenerationalHandle, revision: u64) -> Ma
         handle,
         revision: revision as u32,
         domain: MaterialDomain::Surface,
+        render_domain: RenderDomain::Surface,
         render_class: MaterialRenderClass::Opaque,
-        illumination: Illumination::Lit,
+        response_plan: ShadingPlan::default(),
         features: MaterialFeatureFlags::default(),
         closure_mask: 1,
         surface: GpuSurfaceParameters::default(),
         textures: Vec::new(),
-        custom_program: None,
     }
 }
 
@@ -632,32 +668,33 @@ pub struct MaterialRecord {
     pub handle: GenerationalHandle,
     pub revision: u32,
     pub domain: MaterialDomain,
+    /// Runtime object domain used by pipeline-state selection.
+    pub render_domain: RenderDomain,
     pub render_class: MaterialRenderClass,
-    pub illumination: Illumination,
+    /// The response/composition plan selected by material lowering. It is
+    /// authoring data; verified dense execution identities live in the registry
+    /// binding and in the ABI8 execution words.
+    pub response_plan: ShadingPlan,
     pub features: MaterialFeatureFlags,
     pub closure_mask: u32,
     pub surface: GpuSurfaceParameters,
     pub textures: Vec<GpuMaterialTexture>,
-    pub custom_program: Option<u32>,
 }
 
 impl MaterialRecord {
-    /// The deterministic specialization identity for this record's axes.
-    ///
-    /// Keyed on the **derived** [`lobe_mask`](Self::lobe_mask), not the raw
-    /// authored `closure_mask`: feature flags fold extra lobes into the live set
-    /// (`EMISSIVE` / `TRANSMISSION` / `FACE_SHADOW`), and the shader permutation
-    /// must follow the live lobes. Keying on the raw closure bits let two
-    /// materials that differ only in such a flag collide on one permutation
-    /// (e.g. one with a face-shadow lobe and one without), which is exactly what
-    /// the "key = lobe set + feature flags" invariant forbids
-    /// (`prism_material_pipeline_refactor_zh.md` §8.5).
-    pub fn specialization(&self) -> SpecializationId {
-        SpecializationId::new(
-            self.illumination,
-            self.lobe_mask().bits(),
-            self.render_class as u32,
-        )
+    /// Stable coarse ordering for visibility work. This is only a sort hint;
+    /// pipeline identity comes from the resolved execution/pass tables.
+    #[must_use]
+    pub const fn response_sort_key(&self) -> u8 {
+        match self.response_plan {
+            ShadingPlan::Single { program } => match program {
+                crate::ProgramRef::Builtin(crate::BuiltinProgram::Lit) => 0,
+                crate::ProgramRef::Builtin(crate::BuiltinProgram::Npr) => 1,
+                crate::ProgramRef::Builtin(crate::BuiltinProgram::Unlit) => 2,
+                crate::ProgramRef::Registered(_) => 3,
+            },
+            ShadingPlan::MaskBlend { .. } => 4,
+        }
     }
 
     /// Which optional über-BSDF lobes this record carries.
@@ -709,13 +746,29 @@ impl MaterialRecord {
         texture_offset: u32,
         epoch: u64,
     ) -> GpuMaterialHeader {
-        let spec = self.specialization();
+        self.header_with_execution(parameter_offset, texture_offset, epoch, None)
+    }
+
+    /// Builds a header and copies a verified execution binding without
+    /// re-encoding its identities. `None` preserves the ABI's all-ones
+    /// unbound sentinel in all five execution words.
+    pub fn header_with_execution(
+        &self,
+        parameter_offset: u32,
+        texture_offset: u32,
+        epoch: u64,
+        execution: Option<MaterialExecutionBinding>,
+    ) -> GpuMaterialHeader {
         let digest = crate::capability::digest_for(self.lobe_mask());
+        let [execution_plan_index, execution_program_index, execution_package_index, execution_permutation_low, execution_permutation_high] =
+            execution
+                .map(MaterialExecutionBinding::to_words)
+                .unwrap_or([MATERIAL_EXECUTION_BINDING_SENTINEL; 5]);
         GpuMaterialHeader {
             generation: self.handle.generation,
             revision: self.revision,
-            illumination: self.illumination as u32,
             render_class: self.render_class as u32,
+            render_domain: self.render_domain as u32,
             feature_flags: self.features.0,
             closure_mask: self.closure_mask,
             parameter_offset,
@@ -724,12 +777,9 @@ impl MaterialRecord {
             texture_count: self.textures.len() as u32,
             sampler_offset: texture_offset,
             sampler_count: self.textures.len() as u32,
-            custom_program: self.custom_program.unwrap_or(u32::MAX),
             is_active: 1,
             material_epoch_low: epoch as u32,
             material_epoch_high: (epoch >> 32) as u32,
-            specialization_low: spec.low(),
-            specialization_high: spec.high(),
             lobe_mask: self.lobe_mask().bits(),
             // PCM (§5.3): `extensions_used` is the non-`KHR` subset of
             // `lobe_mask`, `extensions_required` the subset of that the schema
@@ -749,6 +799,11 @@ impl MaterialRecord {
             dynamic_snow: 0,
             dynamic_damage: 0,
             dynamic_dissolve: 0,
+            execution_plan_index,
+            execution_program_index,
+            execution_package_index,
+            execution_permutation_low,
+            execution_permutation_high,
         }
     }
 }
@@ -766,13 +821,13 @@ mod tests {
             handle,
             revision: 3,
             domain: MaterialDomain::Surface,
+            render_domain: RenderDomain::Surface,
             render_class: MaterialRenderClass::Opaque,
-            illumination: Illumination::Lit,
+            response_plan: ShadingPlan::default(),
             features: MaterialFeatureFlags::default(),
             closure_mask,
             surface: GpuSurfaceParameters::default(),
             textures: vec![GpuMaterialTexture::default(); textures],
-            custom_program: None,
         }
     }
 
@@ -813,19 +868,15 @@ mod tests {
             face_shadow.lobe_mask(),
             "the feature flag adds a live lobe"
         );
-        assert_ne!(
-            plain.specialization(),
-            face_shadow.specialization(),
-            "a differing live lobe set yields a different permutation key"
-        );
+        assert_ne!(plain.lobe_mask(), face_shadow.lobe_mask());
 
         // A feature-driven lobe that also has a closure bit keys the same way.
         let mut emissive = record(handle, 0, 0);
         emissive.features |= MaterialFeatureFlags::EMISSIVE;
         let by_closure = record(handle, closure_bit(ClosureKind::Emission), 0);
         assert_eq!(
-            emissive.specialization(),
-            by_closure.specialization(),
+            emissive.lobe_mask(),
+            by_closure.lobe_mask(),
             "the same live lobe keys identically however it was authored"
         );
     }
@@ -849,12 +900,15 @@ mod tests {
         assert_eq!(header.texture_count, 2);
         assert_eq!(header.parameter_offset, 64);
         assert_eq!(header.texture_offset, 128);
-        assert_eq!(header.custom_program, u32::MAX);
+        assert_eq!(
+            header.execution_binding_words(),
+            [MATERIAL_EXECUTION_BINDING_SENTINEL; 5]
+        );
+        assert!(!header.has_execution_binding());
         // The split epoch and specialization key survive the round trip.
         let rebuilt_epoch =
             (u64::from(header.material_epoch_high) << 32) | u64::from(header.material_epoch_low);
         assert_eq!(rebuilt_epoch, epoch);
-        assert_eq!(header.specialization(), value.specialization());
     }
 
     #[test]
@@ -863,7 +917,7 @@ mod tests {
         let value = fallback_material_record(handle, 42);
         assert_eq!(value.revision, 42);
         assert_eq!(value.domain, MaterialDomain::Surface);
-        assert_eq!(value.illumination, Illumination::Lit);
+        assert_eq!(value.response_plan, ShadingPlan::default());
         assert_eq!(value.render_class, MaterialRenderClass::Opaque);
         assert_eq!(value.closure_mask, 1);
         assert!(value.textures.is_empty());
@@ -874,7 +928,10 @@ mod tests {
         let header = inactive_material_header(5);
         assert_eq!(header.generation, 5);
         assert_eq!(header.is_active, 0);
-        assert_eq!(header.custom_program, u32::MAX);
+        assert_eq!(
+            header.execution_binding_words(),
+            [MATERIAL_EXECUTION_BINDING_SENTINEL; 5]
+        );
     }
 
     #[test]
@@ -887,10 +944,6 @@ mod tests {
             MaterialRenderClass::Transmissive,
             MaterialRenderClass::Transparent,
             MaterialRenderClass::Additive,
-            MaterialRenderClass::Volume,
-            MaterialRenderClass::Hair,
-            MaterialRenderClass::Water,
-            MaterialRenderClass::Decal,
         ];
         for (value, class) in classes.into_iter().enumerate() {
             assert_eq!(
@@ -916,11 +969,13 @@ mod tests {
     }
 
     #[test]
-    fn fallback_header_specialization_matches_axes() {
+    fn fallback_header_keeps_execution_identity_unbound() {
         let header = fallback_material_header(9);
-        let expected =
-            SpecializationId::new(Illumination::Lit, 1, MaterialRenderClass::Opaque as u32);
-        assert_eq!(header.specialization(), expected);
         assert_eq!(header.is_active, 1);
+        assert!(!header.has_execution_binding());
+        assert_eq!(
+            header.execution_binding_words(),
+            [MATERIAL_EXECUTION_BINDING_SENTINEL; 5]
+        );
     }
 }

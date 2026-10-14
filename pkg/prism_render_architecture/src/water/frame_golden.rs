@@ -44,8 +44,8 @@ use super::profile::WaterSimProfile;
 use super::reconstruct::ReconstructionThresholds;
 use super::transition::TransitionBands;
 use super::{
-    ShadingFrontend, SharedBaseServices, SolverKind, Vec3, WaterBody, WaterBodyHandle, WaterBudget,
-    WaterKind,
+    ResponseProgram, SolverKind, Vec3, WaterBody, WaterBodyHandle, WaterBudget, WaterKind,
+    WaterShadingPlan,
 };
 
 /// Tolerance for the "blend weights sum to one" invariant. The three weights are
@@ -56,7 +56,7 @@ const BLEND_SUM_EPS: f32 = 1.0e-4;
 /// The pinned digest of the canonical frame plan. Regenerated only by a
 /// deliberate, reviewed change to the planning pipeline; a mismatch means the
 /// aggregate frame drifted and must be explained before the constant is moved.
-const GOLDEN_FRAME_DIGEST: u64 = 0xe258_fb08_efbd_695e;
+const GOLDEN_FRAME_DIGEST: u64 = 0xf5a2_a1c1_4e24_0224;
 
 /// Shared per-frame routing thresholds, budget layout, and clipmap rings for the
 /// golden scene. Fixed values so the plan is reproducible frame to frame.
@@ -105,14 +105,14 @@ fn body(
     handle: u32,
     kind: WaterKind,
     solver: SolverKind,
-    frontend: ShadingFrontend,
+    shading_plan: WaterShadingPlan,
     grid_resolution: u32,
 ) -> WaterBody {
     WaterBody {
         handle: WaterBodyHandle(handle),
         kind,
         solver,
-        frontend,
+        shading_plan,
         deformation: DeformationHandle(handle),
         grid_resolution,
         cascade_count: 4,
@@ -142,7 +142,7 @@ fn golden_scene() -> [WaterFrameInput; 5] {
                 0,
                 WaterKind::Ocean,
                 SolverKind::SpectralIfft,
-                ShadingFrontend::Pbr,
+                WaterShadingPlan::single(ResponseProgram::Pbr),
                 64,
             ),
             sample: sample(20.0, 0.6, 0),
@@ -153,7 +153,7 @@ fn golden_scene() -> [WaterFrameInput; 5] {
                 1,
                 WaterKind::Ocean,
                 SolverKind::SpectralIfft,
-                ShadingFrontend::Hybrid,
+                WaterShadingPlan::hybrid(),
                 64,
             ),
             sample: sample(500.0, 0.2, 0),
@@ -164,7 +164,7 @@ fn golden_scene() -> [WaterFrameInput; 5] {
                 2,
                 WaterKind::Surface,
                 SolverKind::ShallowWater,
-                ShadingFrontend::Npr,
+                WaterShadingPlan::single(ResponseProgram::Npr),
                 48,
             ),
             sample: sample(15.0, 0.4, 0),
@@ -175,7 +175,7 @@ fn golden_scene() -> [WaterFrameInput; 5] {
                 3,
                 WaterKind::Volume,
                 SolverKind::FlipApic,
-                ShadingFrontend::Custom,
+                WaterShadingPlan::single(ResponseProgram::Custom),
                 32,
             ),
             sample: sample(8.0, 0.8, 50_000),
@@ -186,7 +186,7 @@ fn golden_scene() -> [WaterFrameInput; 5] {
                 4,
                 WaterKind::Volume,
                 SolverKind::Pbf,
-                ShadingFrontend::Pbr,
+                WaterShadingPlan::single(ResponseProgram::Pbr),
                 32,
             ),
             sample: sample(30.0, 0.3, 20_000),
@@ -234,15 +234,7 @@ fn whole_frame_plan_matches_the_golden_digest() {
         "every extracted body must be prepared, in order"
     );
 
-    // Design §5 guarantee: every frontend — NPR included — consumes the full
-    // shared advanced base, never a reduced one.
     for prepare in &plan.prepares {
-        assert_eq!(
-            prepare.shared_base,
-            SharedBaseServices::ALL,
-            "frontend {:?} must share the full advanced base",
-            prepare.frontend
-        );
         let blend = prepare.blend;
         let sum = blend.particle + blend.shallow_water + blend.spectral;
         assert!(

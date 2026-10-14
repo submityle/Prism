@@ -65,6 +65,11 @@ pub enum CatalogError {
         pass: PassKey,
         resource: ResourceKey,
     },
+    UnsupportedQueueAccess {
+        pass: PassKey,
+        queue: QueueClass,
+        access: AccessKind,
+    },
     InvalidShaderPermutation(VariantId),
     CyclicHardDependencies,
     TopologyCapacityExceeded,
@@ -178,6 +183,22 @@ impl FeatureCatalog {
                         pass_keys.insert(pass.id, (feature.id, pass));
                     }
                     for usage in pass.accesses {
+                        if (pass.queue == QueueClass::Transfer
+                            && !matches!(
+                                usage.access,
+                                AccessKind::TransferRead | AccessKind::TransferWrite
+                            ))
+                            || (matches!(
+                                usage.access,
+                                AccessKind::ColorAttachment | AccessKind::DepthAttachment
+                            ) && pass.queue != QueueClass::Graphics)
+                        {
+                            return Err(CatalogError::UnsupportedQueueAccess {
+                                pass: pass.id,
+                                queue: pass.queue,
+                                access: usage.access,
+                            });
+                        }
                         catalog.validate_resource(usage.key)?;
                         if usage.access.writes() {
                             if usage.frame_lag.is_some() {

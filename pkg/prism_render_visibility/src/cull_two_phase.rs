@@ -122,7 +122,7 @@ mod tests {
         SceneMaterialHandle, SceneOperation, SceneTransaction,
     };
     use prism_render_material::{
-        Illumination, MaterialDomain, MaterialRecord, MaterialRenderClass,
+        MaterialDomain, MaterialRecord, MaterialRenderClass,
     };
 
     fn reverse_z_clip() -> [[f32; 4]; 4] {
@@ -170,13 +170,13 @@ mod tests {
             handle: handle(1),
             revision: 1,
             domain: MaterialDomain::Surface,
+            render_domain: prism_render_material::RenderDomain::Surface,
             render_class: MaterialRenderClass::Opaque,
-            illumination: Illumination::Lit,
+            response_plan: prism_render_material::ShadingPlan::default(),
             features: Default::default(),
             closure_mask: 1,
             surface: Default::default(),
             textures: Vec::new(),
-            custom_program: None,
         }
     }
 

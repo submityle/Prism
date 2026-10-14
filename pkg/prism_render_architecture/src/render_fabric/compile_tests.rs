@@ -446,6 +446,51 @@ fn history_missing_underflow_and_overlapping_storage_fail() {
 }
 
 #[test]
+fn external_bindings_must_match_the_current_graph_footprint() {
+    let catalog = history_fixture();
+    let b = buffer(B, ResourceLifetime::Persistent);
+    let resources =
+        ResourceTemplates::new(&catalog, &[buffer(A, ResourceLifetime::Transient), b]).unwrap();
+
+    assert_eq!(
+        resources
+            .compile(
+                &select(&catalog),
+                10,
+                &[binding(b, 8, 8), binding(b, 9, 9), binding(b, 10, 10)],
+                &[],
+                GraphLimits::default()
+            )
+            .unwrap_err(),
+        FabricCompileError::UnexpectedBinding {
+            resource: B,
+            frame: 8,
+        }
+    );
+
+    let unused = buffer(ResourceKey::engine(77), ResourceLifetime::Persistent);
+    assert_eq!(
+        resources
+            .compile(
+                &select(&catalog),
+                10,
+                &[
+                    binding(unused, 10, 77),
+                    binding(b, 9, 9),
+                    binding(b, 10, 10)
+                ],
+                &[],
+                GraphLimits::default()
+            )
+            .unwrap_err(),
+        FabricCompileError::UnexpectedBinding {
+            resource: ResourceKey::engine(77),
+            frame: 10,
+        }
+    );
+}
+
+#[test]
 fn history_requires_persistent_metadata_in_every_variant() {
     let catalog = history_fixture();
     assert!(matches!(

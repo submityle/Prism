@@ -5,7 +5,6 @@
 extern crate alloc;
 
 mod authoring;
-mod axis;
 pub mod bake;
 #[cfg(feature = "bevy")]
 mod bevy_bridge;
@@ -37,7 +36,6 @@ mod texture_upsample;
 mod validation;
 
 pub use authoring::{FACE_SHADOW_SDF_SEMANTIC, ILLUMINATION_MASK_SEMANTIC, MEASURED_BRDF_SEMANTIC};
-pub use axis::{Illumination, SpecializationId, BIN_CLASS_BITS};
 pub use bake::{
     bake_layer_stack, sanitize_weight, ConstantMask, LayerParams, LayerStack, LayerWeights,
     MaskSource, PageBake, TexelCoord,
@@ -76,7 +74,8 @@ pub use openpbr::{
 pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header, DynamicChannels,
     GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
-    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, FALLBACK_MATERIAL_HANDLE,
+    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, RenderDomain,
+    FALLBACK_MATERIAL_HANDLE,
     MATERIAL_ABI_VERSION, NO_VIRTUAL_TEXTURE, PORTABLE_TEXTURE_ATLAS,
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};

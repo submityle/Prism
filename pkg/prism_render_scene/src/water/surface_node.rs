@@ -3,7 +3,7 @@
 //! Mirroring the compute half ([`dispatch`](super::dispatch), whose ordering
 //! and sizing all live in the float-free arch plan), the raster draw is split
 //! into a pure planner here and a dumb device executor (the draw system that
-//! lands in the following slice). This module owns the planner: it resolves one
+//! records into the raster draw node. This module owns the planner: it resolves one
 //! resident [`WaterBody`](super::body::WaterBody) into the complete set of facts
 //! the draw system needs — which shading frontend to key the pipeline on, the
 //! lattice resolution to size the index buffer from, and how many displaced
@@ -25,7 +25,7 @@ use super::surface_shading::WaterSurfaceShading;
 /// displaced surface, resolved once from the body on the `CPU`.
 ///
 /// Produced by [`plan_surface_draw`] and consumed by the raster draw system
-/// (following slice): the system keys its pipeline on
+/// the system keys its pipeline on
 /// [`shading.frontend`](WaterSurfaceShading::frontend), packs the per-view
 /// uniform from `shading`, sizes and fills the index buffer from `grid`
 /// ([`surface_index_data`](super::surface_mesh::surface_index_data) +
@@ -81,13 +81,15 @@ pub(crate) fn plan_surface_draw(body: &WaterBody) -> Option<SurfaceDraw> {
 mod tests {
     use super::*;
     use crate::water::abi::GpuWaterSurfaceMeshParams;
-    use prism_render_architecture::water::ShadingFrontend;
+    use prism_render_architecture::water::{ResponseProgram, WaterShadingPlan};
 
     /// A body with a swept 4x3 surface and `PBR` shading: the normal "draws a
     /// surface" case every assertion starts from, then mutates one field.
     fn drawable_body() -> WaterBody {
         WaterBody {
-            surface_shading: Some(WaterSurfaceShading::new(ShadingFrontend::Pbr)),
+            surface_shading: Some(WaterSurfaceShading::new(WaterShadingPlan::single(
+                ResponseProgram::Pbr,
+            ))),
             surface_vertex_count: 12,
             surface_mesh_params: GpuWaterSurfaceMeshParams {
                 grid_dims: [4, 3, 12, 1],
@@ -103,7 +105,10 @@ mod tests {
 
         let draw = plan_surface_draw(&body).expect("a swept, shaded body draws a surface");
 
-        assert_eq!(draw.shading.frontend, ShadingFrontend::Pbr);
+        assert_eq!(
+            draw.shading.plan,
+            WaterShadingPlan::single(ResponseProgram::Pbr)
+        );
         assert_eq!(draw.vertex_count, 12);
         assert_eq!(draw.grid.verts_x, 4);
         assert_eq!(draw.grid.verts_z, 3);
@@ -114,17 +119,17 @@ mod tests {
     #[test]
     fn carries_the_requested_frontend_through() {
         for frontend in [
-            ShadingFrontend::Pbr,
-            ShadingFrontend::Npr,
-            ShadingFrontend::Custom,
-            ShadingFrontend::Hybrid,
+            WaterShadingPlan::single(ResponseProgram::Pbr),
+            WaterShadingPlan::single(ResponseProgram::Npr),
+            WaterShadingPlan::single(ResponseProgram::Custom),
+            WaterShadingPlan::hybrid(),
         ] {
             let mut body = drawable_body();
             body.surface_shading = Some(WaterSurfaceShading::new(frontend));
 
             let draw = plan_surface_draw(&body).expect("a swept, shaded body draws a surface");
 
-            assert_eq!(draw.shading.frontend, frontend);
+            assert_eq!(draw.shading.plan, frontend);
         }
     }
 

@@ -21,7 +21,7 @@ use super::lod::{
 };
 use super::pool::{CapacityPolicy, ParticlePool};
 use super::shading::{
-    resolve_shading_program, LightingServiceCaps, ParticleRenderPhase, ShadingProgramInput,
+    resolve_shading_program, ParticleRenderPhase, ShadingProgramInput, PARTICLE_LIGHTING_SERVICES,
 };
 use super::simulation::{gravity, integrate, rand_unit, Kinematics};
 use super::sort_cull::{
@@ -282,7 +282,7 @@ fn shading_program_and_sort_route_agree_for_alpha_blend() {
     let program = resolve_shading_program(ShadingProgramInput {
         model: EmberShadingModel::Pbr,
         blend: BlendMode::AlphaBlend,
-        caps: LightingServiceCaps::default(),
+        caps: PARTICLE_LIGHTING_SERVICES,
         volumetric: false,
         quality: ParticleQuality::High,
     });

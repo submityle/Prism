@@ -8,8 +8,8 @@
 use prism_ui::Element;
 use prism_ui_component_kit::stylesheet;
 use prism_ui_dock::{
-    Axis, DockLayout, DockNode, DockView, DocumentViewRegistry, PanelDescriptor, PanelRegistry,
-    PanelViewRegistry, Ratio, SplitChild,
+    Axis, DockHost, DockLayout, DockNode, DocumentViewRegistry, LayoutMetrics, PanelDescriptor,
+    PanelRegistry, PanelViewRegistry, Ratio, SplitChild, Viewport,
 };
 use prism_ui_layout::Size;
 use prism_ui_render_backend::raster::rasterize;
@@ -17,7 +17,7 @@ use prism_ui_render_backend::{ElementRenderer, Framebuffer, GpuRasterizer};
 use prism_ui_style::{Breakpoint, Theme, TokenStore};
 use prism_ui_theme::{compile_theme, ThemeDefinition, ThemeMode};
 
-const WIDTH: u32 = 320;
+const WIDTH: u32 = 400;
 const HEIGHT: u32 = 220;
 const GPU_TOLERANCE: f32 = 2.0e-3;
 
@@ -70,9 +70,16 @@ fn dock_element() -> Element {
         },
         ..DockLayout::default()
     };
-    DockView::new(&layout, &panels, &views, &DocumentViewRegistry::new())
-        .render()
-        .expect("dock layout should assemble")
+    let documents = DocumentViewRegistry::new();
+    let mut host = DockHost::new(layout, 8).expect("dock host should validate");
+    host.render_element(
+        Viewport::new(WIDTH, HEIGHT),
+        LayoutMetrics::default(),
+        &panels,
+        &views,
+        &documents,
+    )
+    .expect("dock plan should assemble")
 }
 
 fn draw_list() -> prism_ui_render_backend::DrawList {
@@ -86,9 +93,8 @@ fn dock_element_gpu_matches_cpu_reference() {
     let list = draw_list();
     assert!(!list.is_empty(), "Dock Element produced no draw commands");
     let cpu: Framebuffer = rasterize(&list, WIDTH, HEIGHT);
-    let Some(gpu) = GpuRasterizer::try_new() else {
-        return;
-    };
+    let gpu = GpuRasterizer::try_new()
+        .expect("dock GPU parity requires a real wgpu adapter; refusing to skip validation");
     let gpu_frame = gpu.rasterize(&list, WIDTH, HEIGHT);
     let diff = cpu.max_diff(&gpu_frame);
     let (worst_x, worst_y, cpu_pixel, gpu_pixel) = (0..WIDTH)

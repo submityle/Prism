@@ -738,7 +738,7 @@ mod tests {
         let block = [0u8; 16];
         // 13x12 = 156 texels exceeds the 144-texel MAX_TEXELS footprint and is
         // rejected before any block-mode parse.
-        let mut out = [[0.0f32; 4]; super::MAX_TEXELS];
+        let mut out = [[0.0f32; 4]; MAX_TEXELS];
         assert_eq!(
             decode_single_partition_hdr(&block, 13, 12, &mut out),
             Err(AstcError::Reserved)

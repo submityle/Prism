@@ -106,7 +106,7 @@ mod tests {
         InstanceRecord, SceneBounds, SceneOperation, SceneTransaction,
     };
     use prism_render_material::{
-        Illumination, MaterialDomain, MaterialRecord, MaterialRenderClass,
+        MaterialDomain, MaterialRecord, MaterialRenderClass,
     };
 
     /// Reversed-Z clip matrix (column-major): `clip.w = z`, `clip.z = 1`, so
@@ -157,13 +157,13 @@ mod tests {
             handle: handle(1),
             revision: 1,
             domain: MaterialDomain::Surface,
+            render_domain: prism_render_material::RenderDomain::Surface,
             render_class: MaterialRenderClass::Opaque,
-            illumination: Illumination::Lit,
+            response_plan: prism_render_material::ShadingPlan::default(),
             features: Default::default(),
             closure_mask: 1,
             surface: Default::default(),
             textures: Vec::new(),
-            custom_program: None,
         }
     }
 

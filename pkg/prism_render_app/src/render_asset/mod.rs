@@ -19,6 +19,7 @@
 mod context;
 mod extract;
 mod page_pool;
+mod page_residency_bridge;
 mod prepare;
 mod stage;
 mod table;
@@ -38,6 +39,7 @@ pub use page_pool::{
     FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageUpload, PageAllocation,
     PagePoolError, PageReleaseTransaction, PageReplaceTransaction, PageUploadTransaction,
 };
+pub use page_residency_bridge::{FixedPageResidencyBridge, PageResidencyBridgeError};
 pub use prepare::{
     prepare_extracted_assets, prepare_extracted_assets_with_context, AssetSyncReport,
     PrepareAssetError,

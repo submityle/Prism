@@ -1,16 +1,18 @@
 //! Contract tests for the fixed-page GPU pool.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicBool;
 
+use prism_asset::{AssetSources, MemSource, PageBudget, PageKey, PageResidency, PageSize};
 use prism_render_driver::{
     BufferUsages, DeviceDescriptor, Instance, RenderQueue, RequestAdapterOptions,
 };
 use prism_render_driver_null::{NullDevice, NullInstance, NullQueue};
 
 use super::{
-    FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageUpload, GpuPrepareBudget,
-    PagePoolError, PrepareContext,
+    FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageResidencyBridge,
+    FixedPageUpload, GpuPrepareBudget, PagePoolError, PrepareContext,
 };
 
 fn null_device() -> (NullDevice, NullQueue) {
@@ -178,6 +180,69 @@ fn null_rhi_prepare_context_rollback_releases_pool_buffer() {
         );
     }
     assert_eq!(budget.used(), 0);
+    assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn resident_cpu_page_uploads_through_the_render_bridge() {
+    let (device, queue) = null_device();
+    let mut source = MemSource::new();
+    source.insert("payload.bin", (0u8..16).collect::<Vec<u8>>());
+    let mut sources = AssetSources::new();
+    sources.mount("memory", Arc::new(source), 0);
+
+    let mut residency = PageResidency::new(
+        PageSize::new(16).expect("power-of-two page"),
+        PageBudget::new(16, 1).expect("one page budget"),
+    )
+    .expect("aligned page budget");
+    let page = residency
+        .request(
+            PageKey::from_sources(&sources, "memory://payload.bin", 0),
+            prism_tasks::Priority::Normal,
+            0,
+        )
+        .expect("page request");
+    residency.load(&sources, page).expect("range read");
+
+    let cancellation = AtomicBool::new(false);
+    let mut budget = GpuPrepareBudget::new(64);
+    let mut context = PrepareContext::new(&device, &queue, &mut budget, &cancellation);
+    let mut bridge = FixedPageResidencyBridge::new(
+        &mut context,
+        &FixedPagePoolDescriptor::new(16, 2, BufferUsages::COPY_DST),
+    )
+    .expect("GPU pool");
+    context.commit();
+
+    let recording_queue = RecordingQueue::default();
+    let event = bridge
+        .upload_page(&residency, page, 3, &recording_queue)
+        .expect("resident page upload");
+    assert!(matches!(
+        event,
+        FixedPagePoolEvent::Allocated { revision: 3, .. }
+    ));
+    assert_eq!(recording_queue.writes.lock().unwrap().len(), 1);
+    let first_allocation = bridge.allocation(page).expect("published GPU allocation");
+
+    let replaced = bridge
+        .upload_page(&residency, page, 4, &recording_queue)
+        .expect("resident page replacement");
+    let second_allocation = bridge.allocation(page).expect("replacement allocation");
+    assert_ne!(first_allocation, second_allocation);
+    assert!(matches!(
+        replaced,
+        FixedPagePoolEvent::Replaced { revision: 4, .. }
+    ));
+    assert_eq!(recording_queue.writes.lock().unwrap().len(), 2);
+
+    let released = bridge.release_page(page, 4).expect("GPU page release");
+    assert!(matches!(
+        released,
+        FixedPagePoolEvent::Released { revision: 4, .. }
+    ));
+    bridge.destroy(&device);
     assert_eq!(device.live_resource_count(), 0);
 }
 

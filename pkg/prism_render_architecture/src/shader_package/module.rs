@@ -78,6 +78,7 @@ impl ModuleInterner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::mem::size_of;
 
     fn identity() -> ModuleIdentity {
         ModuleIdentity { package: ShaderPackageId::new("module-test"), digest: ArtifactDigest([1; 32]), entry_point: "main".into(), binding_layout_digest: [2; 32] }
@@ -108,6 +109,6 @@ mod tests {
         assert_eq!(first, second);
         assert!(core::ptr::eq(first.as_str(), second.as_str()));
         assert_ne!(first, ShaderPackageId::new("different-package"));
-        assert_eq!(core::mem::size_of::<ShaderPackageId>(), core::mem::size_of::<usize>());
+        assert_eq!(size_of::<ShaderPackageId>(), size_of::<usize>());
     }
 }

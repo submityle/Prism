@@ -1,6 +1,7 @@
 use crate::*;
 use alloc::collections::BTreeMap;
 use prism_render_architecture::gpu_scene::GpuCompletionValue;
+use prism_render_architecture::render_fabric::RenderDomain;
 
 fn record(
     handle: prism_render_architecture::abi::GenerationalHandle,
@@ -10,13 +11,13 @@ fn record(
         handle,
         revision,
         domain: MaterialDomain::Surface,
+        render_domain: RenderDomain::Surface,
         render_class: MaterialRenderClass::Opaque,
-        illumination: Illumination::Lit,
+        response_plan: ShadingPlan::default(),
         features: MaterialFeatureFlags::default(),
         closure_mask: 1,
         surface: GpuSurfaceParameters::default(),
         textures: Vec::new(),
-        custom_program: None,
     }
 }
 
@@ -140,9 +141,8 @@ fn standard_material_bridge_preserves_surface_classification() {
     };
     let record = import_standard_material(handle, 4, &material, &mut Resolver);
     assert_eq!(record.render_class, MaterialRenderClass::MaskedTwoSided);
-    // Clearcoat is a closure lobe, not a shading model: illumination stays Lit
-    // and the clearcoat closure bit is set.
-    assert_eq!(record.illumination, Illumination::Lit);
+    // Clearcoat is a closure lobe, not a response-program identity.
+    assert_eq!(record.response_plan, ShadingPlan::default());
     assert_ne!(
         record.closure_mask & (1 << ClosureKind::ClearCoat as u32),
         0
@@ -218,20 +218,21 @@ fn slot_zero_is_a_live_principled_fallback() {
     let (headers, parameters, _) = registry.gpu_tables();
     assert_eq!(headers[0].generation, 0);
     assert_eq!(headers[0].is_active, 1);
-    assert_eq!(headers[0].illumination, Illumination::Lit as u32);
+    assert_eq!(headers[0].render_class, MaterialRenderClass::Opaque as u32);
     assert_eq!(parameters[0], GpuSurfaceParameters::default());
 }
 
 #[test]
 fn gpu_material_rows_match_the_shader_abi() {
-    // 20 v5 words + the 4-word PCM extension digest (§5.3, P1-h):
+    // ABI8 retains the data/dynamic words, adds the explicit domain, and keeps
+    // five dense execution words; legacy specialization words are removed.
     // `extensions_{used,required}_{low,high}`, so the header carries the
     // material's whole registry digest and a load-time negotiator can project it
     // against a target's capabilities without re-deriving the catalogue.
     // …plus the four runtime dynamic channel words of §17.1
     // (`dynamic_wetness/snow/damage/dissolve`), which a runtime state change
     // rewrites in place.
-    assert_eq!(size_of::<GpuMaterialHeader>(), 108);
+    assert_eq!(size_of::<GpuMaterialHeader>(), 112);
     // The v5 OpenPBR field completion (coat/fuzz/base/specular/subsurface/
     // transmission groups, including coat_darkening, scatter_anisotropy and
     // transmission_scatter) sized the fat authoring view, with trailing pad
@@ -240,7 +241,7 @@ fn gpu_material_rows_match_the_shader_abi() {
     assert_eq!(size_of::<GpuMaterialTexture>(), 32);
     // A storage-buffer array requires only the element's natural alignment
     // (4 for a struct of `u32`s); the header was never padded to 16, and
-    // dropping the vestigial closure-graph word made it denser (23 words).
+    // the header is a dense 28-word u32 array.
     assert_eq!(size_of::<GpuMaterialHeader>() % 4, 0);
     assert_eq!(size_of::<GpuSurfaceParameters>() % 16, 0);
     assert_eq!(size_of::<GpuMaterialTexture>() % 16, 0);

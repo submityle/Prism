@@ -1,9 +1,9 @@
 //! Authored, per-body water-surface shading state and its per-view packing.
 //!
-//! The raster draw ([`super::surface_node`], the following slice) renders one
+//! The raster draw ([`super::surface_node`]) renders one
 //! displaced water surface per [`WaterBody`](super::body::WaterBody) that
 //! carries a [`WaterSurfaceShading`]. This module owns the *authored* half of
-//! that draw's uniform: the frontend selection plus the body-constant lighting
+//! that draw's uniform: the response/composition plan plus the body-constant lighting
 //! and style scalars a game sets once when it spawns the water.
 //!
 //! The per-frame, per-view camera state (which changes every frame as the
@@ -22,26 +22,26 @@
 //! `PartialEq`) while the node supplies only the volatile camera state each
 //! frame; the shared light table is bound by the node, not packed here.
 
-use prism_render_architecture::water::ShadingFrontend;
+use prism_render_architecture::water::WaterShadingPlan;
 
 use super::surface_mesh::SurfaceViewParams;
 
 /// The authored, body-constant water-surface shading state.
 ///
 /// This is the per-body half of the raster draw's view uniform: the lighting
-/// response frontend plus the style and body scalars a game authors once. The
+/// response/composition plan plus the style and body scalars a game authors once. The
 /// per-view camera state is supplied separately each frame by
 /// [`SurfaceViewInputs`] and merged in [`WaterSurfaceShading::view_params`].
 ///
 /// `Copy` and `PartialEq` so a body can carry it inline and the extract stage
-/// can diff it cheaply; it deliberately has no `Default` because the frontend
-/// is a required authoring decision ([`ShadingFrontend`] has no default), so
+/// can diff it cheaply; it deliberately has no `Default` because the response
+/// is a required authoring decision ([`ResponseProgram`] has no default), so
 /// use [`WaterSurfaceShading::new`] to start from physically-plausible defaults
-/// for a chosen frontend.
+/// for a chosen response plan.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct WaterSurfaceShading {
-    /// Lighting-response frontend; selects the raster pipeline variant.
-    pub(crate) frontend: ShadingFrontend,
+    /// Response/composition plan; selects the raster pipeline variant.
+    pub(crate) plan: WaterShadingPlan,
     /// Base water albedo (`rgb`, linear).
     pub(crate) water_albedo: [f32; 3],
     /// Minimum surface alpha floor, so still water keeps some opacity.
@@ -69,23 +69,23 @@ pub(crate) struct WaterSurfaceShading {
 }
 
 impl WaterSurfaceShading {
-    /// Physically-plausible default style for `frontend`.
+    /// Physically-plausible default style for `plan`.
     ///
     /// The defaults describe a mid-roughness blue-green body with a thin
     /// `Beer-Lambert` tint, a modest refraction offset, and neutral stylization
-    /// scalars. A game overrides any field after construction; the frontend is
+    /// scalars. A game overrides any field after construction; the response plan is
     /// the one required decision, which is why there is no `Default`.
     #[must_use]
     #[cfg_attr(
         not(test),
         expect(
             dead_code,
-            reason = "constructed by the water-surface authoring presets and raster draw node (the following slices); exercised now by the unit tests in this module"
+            reason = "constructed by the water-surface authoring presets and raster draw node; exercised by the unit tests in this module"
         )
     )]
-    pub(crate) fn new(frontend: ShadingFrontend) -> Self {
+    pub(crate) fn new(plan: WaterShadingPlan) -> Self {
         Self {
-            frontend,
+            plan,
             water_albedo: [0.02, 0.08, 0.12],
             min_alpha: 0.08,
             roughness: 0.08,
@@ -146,6 +146,7 @@ pub(crate) struct SurfaceViewInputs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prism_render_architecture::water::ResponseProgram;
 
     fn fixture_view() -> SurfaceViewInputs {
         SurfaceViewInputs {
@@ -163,18 +164,18 @@ mod tests {
     #[test]
     fn new_sets_the_requested_frontend() {
         for frontend in [
-            ShadingFrontend::Pbr,
-            ShadingFrontend::Npr,
-            ShadingFrontend::Custom,
-            ShadingFrontend::Hybrid,
+            WaterShadingPlan::single(ResponseProgram::Pbr),
+            WaterShadingPlan::single(ResponseProgram::Npr),
+            WaterShadingPlan::single(ResponseProgram::Custom),
+            WaterShadingPlan::hybrid(),
         ] {
-            assert_eq!(WaterSurfaceShading::new(frontend).frontend, frontend);
+            assert_eq!(WaterSurfaceShading::new(frontend).plan, frontend);
         }
     }
 
     #[test]
     fn new_defaults_are_physically_plausible() {
-        let s = WaterSurfaceShading::new(ShadingFrontend::Pbr);
+        let s = WaterSurfaceShading::new(WaterShadingPlan::single(ResponseProgram::Pbr));
         // Roughness and reflectance are valid closure inputs.
         assert!((0.0..=1.0).contains(&s.roughness));
         assert!((0.0..=1.0).contains(&s.reflectance));
@@ -189,7 +190,7 @@ mod tests {
     #[test]
     fn view_params_takes_style_from_body_and_camera_from_view() {
         let shading = WaterSurfaceShading {
-            frontend: ShadingFrontend::Hybrid,
+            plan: WaterShadingPlan::hybrid(),
             water_albedo: [0.1, 0.2, 0.3],
             min_alpha: 0.25,
             roughness: 0.4,
@@ -232,7 +233,7 @@ mod tests {
     fn view_params_feeds_build_surface_view_consistently() {
         // The packing is the single-sourced concern of build_surface_view; this
         // guards that view_params produces params that round-trip through it.
-        let shading = WaterSurfaceShading::new(ShadingFrontend::Npr);
+        let shading = WaterSurfaceShading::new(WaterShadingPlan::single(ResponseProgram::Npr));
         let view = fixture_view();
 
         let gpu = super::super::surface_mesh::build_surface_view(&shading.view_params(&view));

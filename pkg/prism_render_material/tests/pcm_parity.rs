@@ -15,8 +15,8 @@ use prism_render_material::capability::{
     lobe_registry, parse_capabilities, SPECIFICATION_NAMESPACE,
 };
 use prism_render_material::{
-    DynamicChannels, Illumination, LobeMask, SURFACE_CACHE_AUX, SURFACE_CHANNELS,
-    SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES, SURFACE_RESPONSE_PROGRAMS,
+    BuiltinProgram, DynamicChannels, LobeMask, SURFACE_CACHE_AUX,
+    SURFACE_CHANNELS, SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES, SURFACE_RESPONSE_PROGRAMS,
 };
 
 /// Every schema lobe is registered in the committed catalogue with the same
@@ -253,85 +253,37 @@ fn the_specification_core_requires_no_platform_capability() {
     }
 }
 
-/// §5.2: the registry's response modes *are* the runtime's illumination axis —
-/// one extension per non-default variant, and none for `Lit`, which is the
-/// specification response a material gets when it uses no response-mode
-/// extension at all.
+/// The generated response-program rows are the runtime's closed built-in
+/// response set. They no longer alias PCM response-mode extensions: ABI8
+/// carries a verified dense program index, while PCM keeps authoring/catalogue
+/// extension identities separate.
 #[test]
-fn the_registry_response_modes_mirror_the_illumination_axis() {
-    let committed = builtin_registry();
+fn generated_response_programs_mirror_runtime_builtins() {
     let mut declared = Vec::new();
     for mode in &SURFACE_RESPONSE_PROGRAMS {
-        let manifest = committed
-            .manifest_by_uid(mode.uid)
-            .unwrap_or_else(|| panic!("catalogue is missing response mode {}", mode.uid));
-        assert_eq!(manifest.kind(), Kind::ResponseMode, "{} kind", mode.id);
-        assert_eq!(
-            manifest.registry_slot(),
-            Some(mode.registry_slot),
-            "{} slot",
-            mode.id
-        );
-        assert_eq!(
-            manifest.namespace(),
-            Namespace::parse(mode.namespace).expect("schema namespace spelling"),
-            "{} namespace",
-            mode.id
-        );
-        assert_eq!(manifest.vendor(), mode.vendor, "{} vendor", mode.id);
-        assert_eq!(
-            manifest.stability(),
-            Stability::parse(mode.stability).expect("schema stability spelling"),
-            "{} stability",
-            mode.id
-        );
-        assert_eq!(
-            manifest.view_dependent(),
-            mode.view_dependent,
-            "{} view dependence",
-            mode.id
-        );
-        let requires = parse_capabilities(mode.requires_caps.iter().copied())
-            .unwrap_or_else(|unknown| panic!("{} requires unknown {unknown}", mode.id));
-        assert_eq!(manifest.requires_caps(), requires, "{} caps", mode.id);
-        let illumination =
-            Illumination::from_name(mode.illumination).expect("schema illumination spelling");
-        assert_ne!(
-            illumination,
-            Illumination::Lit,
-            "{} must select a non-default illumination",
-            mode.id
-        );
-        declared.push(illumination);
+        let builtin = match mode.builtin {
+            "lit" => BuiltinProgram::Lit,
+            "npr" => BuiltinProgram::Npr,
+            "unlit" => BuiltinProgram::Unlit,
+            other => panic!("{} names unknown built-in response {other}", mode.id),
+        };
+        assert_eq!(mode.id, mode.builtin, "{} id must name its built-in", mode.id);
+        assert_eq!(mode.registry_slot, 23 + declared.len() as u32);
+        assert!(mode.uid.starts_with("org.prism.response_program."));
+        assert_eq!(mode.namespace, "PRISM");
+        assert_eq!(mode.vendor, "prism");
+        assert_eq!(mode.stability, "candidate");
+        assert!(mode.requires_caps.is_empty());
+        declared.push(builtin);
     }
-    // Every non-default illumination variant has exactly one schema row, in the
-    // axis order the old hard-coded table used.
     assert_eq!(
         declared,
-        Illumination::ALL
-            .into_iter()
-            .filter(|illumination| *illumination != Illumination::Lit)
-            .collect::<Vec<_>>()
+        vec![BuiltinProgram::Lit, BuiltinProgram::Npr, BuiltinProgram::Unlit]
     );
-    // The other direction: no registered response mode without a schema row.
-    for manifest in committed.iter().filter(|m| m.kind() == Kind::ResponseMode) {
-        assert!(
-            SURFACE_RESPONSE_PROGRAMS
-                .iter()
-                .any(|mode| mode.uid == manifest.uid()),
-            "{} has no schema response-mode row",
-            manifest.uid()
-        );
-    }
-    // The raw `u32` the header carries and the spelling the registry uses are the
-    // same fact, and the decode is total over the axis and rejects the rest.
-    for illumination in Illumination::ALL {
-        assert_eq!(
-            Illumination::from_u32(illumination.as_u32()),
-            Some(illumination)
-        );
-    }
-    assert!(Illumination::from_u32(Illumination::ALL.len() as u32).is_none());
+
+    // The response table is the identity source; no material-side bit axis is
+    // involved in selecting a built-in program.
+    assert_eq!(declared.len(), 3);
 }
 
 /// P2-i: the runtime dynamic channels are declared by the *schema* and

@@ -49,6 +49,10 @@ use super::{
         composite_shading, init_shading_composite_pipeline, prepare_shading_composite_bind_groups,
         prepare_shading_composite_pipelines, ShadingCompositePipeline,
     },
+    composition::{
+        init_response_composition, prepare_response_composition_targets,
+        response_composition_pass, ResponseCompositionSystems,
+    },
     ddgi::{
         ddgi_composite_pass, ddgi_probe_update_pass, ddgi_sample_pass,
         init_ddgi_composite_pipeline, init_ddgi_pipeline, prepare_ddgi_bind_groups,
@@ -360,6 +364,23 @@ impl Plugin for PrismShadingPlugin {
         let compiled_graph = shading_frame_graph()
             .compile()
             .expect("Prism shading frame graph must be valid");
+        // The pass is installed once, irrespective of scene/split contents.
+        // These constraints express actual resource dependencies, independent
+        // of the tuple grouping used by the older stages below.
+        render_app
+            .add_systems(RenderStartup, init_response_composition)
+            .add_systems(
+                Render,
+                prepare_response_composition_targets.in_set(RenderSystems::PrepareBindGroups),
+            )
+            .add_systems(
+                bevy_core_pipeline::Core3d,
+                response_composition_pass
+                    .in_set(ResponseCompositionSystems::Compose)
+                    .after(dispatch_shading_resolve)
+                    .before(ssr_color_mips_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+            );
         render_app
             .init_resource::<bevy_render::render_phase::ViewBinnedRenderPhases<Visibility3d>>()
             .init_resource::<bevy_render::render_phase::DrawFunctions<Visibility3d>>()

@@ -13,6 +13,30 @@
 //! `sqrt` is used. There are no `f32` equality tests and no AI/ML.
 
 use super::EPS;
+use crate::render_fabric::{FeatureId, FrameLag, ResourceKey, ResourceScope, ResourceUse};
+use crate::frame_graph::AccessKind;
+
+/// Stable semantic owner for the water simulation feature declarations.
+pub const WATER_SIMULATION_FEATURE: FeatureId = FeatureId(0x1001);
+/// The persistent foam result consumed by the next frame's particle feedback.
+pub const WATER_FOAM_RESOURCE: ResourceKey =
+    ResourceKey::of(WATER_SIMULATION_FEATURE, 0);
+
+/// Describes the particle-to-water foam feedback edge.
+///
+/// Spray is published by the current frame's particle simulation and consumed
+/// by water on the next frame. Keeping the lag on the semantic access prevents
+/// the feature graph from creating a same-frame cycle while preserving the
+/// feedback signal as a persistent resource.
+#[must_use]
+pub fn spray_foam_feedback_use() -> ResourceUse {
+    ResourceUse {
+        key: WATER_FOAM_RESOURCE,
+        access: AccessKind::StorageRead,
+        scope: ResourceScope::Whole,
+        frame_lag: FrameLag::new(1),
+    }
+}
 
 /// `Archimedes` buoyancy force magnitude on a submerged volume.
 ///
@@ -167,5 +191,14 @@ mod tests {
         let a = plan_coupling(50, 10.0, 0.016, 0.5, 8, 64);
         let b = plan_coupling(50, 10.0, 0.016, 0.5, 8, 64);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn spray_feedback_is_a_one_frame_lagged_persistent_read() {
+        let usage = spray_foam_feedback_use();
+        assert_eq!(usage.key, WATER_FOAM_RESOURCE);
+        assert_eq!(usage.access, AccessKind::StorageRead);
+        assert_eq!(usage.scope, ResourceScope::Whole);
+        assert_eq!(usage.frame_lag.map(|lag| lag.frames()), Some(1));
     }
 }

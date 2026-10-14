@@ -6,6 +6,7 @@
 //! Consumers read one frozen [`FeatureSelection`], rather than selecting again.
 
 mod accesses;
+mod builtins;
 mod catalog;
 mod compile;
 mod payload;
@@ -17,6 +18,10 @@ mod topology;
 mod types;
 
 pub use accesses::VariantResourceUse;
+pub use builtins::{
+    builtin_catalog, builtin_roots, builtin_service_ids, volume_required_services,
+    water_required_services, VOLUME_SERVICE_IDS, WATER_SERVICE_IDS,
+};
 pub use catalog::{CatalogError, FeatureCatalog, RequirementKind};
 pub use compile::*;
 pub use payload::*;

@@ -11,11 +11,10 @@ struct ClassificationParams {
 }
 
 struct MaterialHeader {
-    generation: u32, revision: u32, illumination: u32, render_class: u32,
+    generation: u32, revision: u32, render_class: u32, render_domain: u32,
     feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
     texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
-    custom_program: u32, is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
-    specialization_low: u32, specialization_high: u32,
+    is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
     lobe_mask: u32,
     // PCM extension digest (§5.3): used/required, each split low/high.
     extensions_used_low: u32, extensions_used_high: u32,
@@ -24,6 +23,10 @@ struct MaterialHeader {
     // each an `f32` bitcast into the word (`0.0` = exact identity).
     dynamic_wetness: u32, dynamic_snow: u32,
     dynamic_damage: u32, dynamic_dissolve: u32,
+    // ABI v8 execution binding; all five words use 0xffffffff when unbound.
+    execution_plan_index: u32, execution_program_index: u32,
+    execution_package_index: u32, execution_permutation_low: u32,
+    execution_permutation_high: u32,
 }
 
 struct PixelClass {
@@ -40,9 +43,24 @@ struct WorkItem {
     flags: u32,
 }
 
+struct ExecutionPlanRow {
+    left_program: u32,
+    right_program: u32,
+}
+
+struct ExecutionProgramRow {
+    response_kind: u32,
+    package_index: u32,
+    permutation_count_low: u32,
+    permutation_count_high: u32,
+}
+
 @group(0) @binding(0) var visibility_ids: texture_2d<u32>;
 @group(0) @binding(1) var visibility_metadata: texture_2d<u32>;
 @group(1) @binding(0) var<storage, read> materials: array<MaterialHeader>;
+@group(1) @binding(10) var<storage, read> execution_plans: array<ExecutionPlanRow>;
+@group(1) @binding(11) var<storage, read> execution_programs: array<ExecutionProgramRow>;
+@group(1) @binding(12) var<storage, read> execution_packages: array<u32>;
 @group(2) @binding(0) var<storage, read_write> pixels: array<PixelClass>;
 @group(2) @binding(1) var<storage, read_write> work: array<WorkItem>;
 @group(2) @binding(2) var<storage, read_write> class_counts: array<atomic<u32>>;
@@ -85,38 +103,62 @@ fn lit_class_from_closures(mask: u32) -> u32 {
 }
 
 fn material_class(header: MaterialHeader, region_illumination: u32) -> u32 {
-    // Surface-compatible MaterialRenderClass values: Opaque, OpaqueTwoSided,
-    // Masked, MaskedTwoSided, Hair, Water. Transparent/additive/transmissive/
-    // volume/decal materials stay on forward/specialized paths. The former
-    // Npr*/Custom* render classes are gone; style is the illumination axis now.
-    let surface = header.render_class == 0u || header.render_class == 1u
-        || header.render_class == 2u || header.render_class == 3u
-        || header.render_class == 8u || header.render_class == 9u;
+    // Only the seven blend/raster classes are surface-compatible. Runtime
+    // domains are carried by render_domain; water stays Surface and is marked
+    // by FEATURE_WATER.
+    let surface = (header.render_class == 0u || header.render_class == 1u
+        || header.render_class == 2u || header.render_class == 3u)
+        && (header.render_domain == 0u || header.render_domain == 3u);
     if header.is_active == 0u || !surface {
         return 0xffffffffu;
     }
-    // Dedicated subsystem render classes bind their bucket directly.
-    if header.render_class == 9u { return CLASS_WATER; }
-    if header.render_class == 8u { return CLASS_HAIR; }
-    // Illumination axis (Lit=0, Stylized=1, Unlit=2, Custom=3). A region mask
-    // can flip only the Lit/Stylized endpoints; Unlit/Custom stay material-wide.
-    var illumination = header.illumination;
-    if (header.illumination <= 1u && region_illumination <= 1u) {
-        illumination = region_illumination;
-    }
-    switch illumination {
-        case 2u: { return CLASS_UNLIT; }
-        case 1u: { return CLASS_NPR; }
-        // §3.5.4: a custom response needs a program handle. Without one the
-        // material degrades to the shared über path (the same integrator the
-        // custom bucket would run), so it classifies as principled.
-        case 3u: {
-            if (header.custom_program != 0xffffffffu) { return CLASS_CUSTOM; }
-            return CLASS_PRINCIPLED;
+    // Dedicated domain/feature paths bind their bucket directly.
+    if header.render_domain == 3u { return CLASS_HAIR; }
+    if (header.feature_flags & (1u << 8u)) != 0u { return CLASS_WATER; }
+    let sentinel = 0xffffffffu;
+    let words_all_sentinel = header.execution_plan_index == sentinel
+        && header.execution_program_index == sentinel
+        && header.execution_package_index == sentinel
+        && header.execution_permutation_low == sentinel
+        && header.execution_permutation_high == sentinel;
+    let words_partial = header.execution_plan_index == sentinel
+        || header.execution_program_index == sentinel
+        || header.execution_package_index == sentinel
+        || header.execution_permutation_low == sentinel
+        || header.execution_permutation_high == sentinel;
+    if words_partial && !words_all_sentinel { return sentinel; }
+    var response_kind = 0u;
+    if !words_all_sentinel {
+        if header.execution_plan_index >= arrayLength(&execution_plans)
+            || header.execution_program_index >= arrayLength(&execution_programs)
+            || header.execution_package_index >= arrayLength(&execution_packages) {
+            return sentinel;
         }
-        case 0u: { return lit_class_from_closures(header.closure_mask); }
-        default: { return 0xffffffffu; }
+        let plan = execution_plans[header.execution_plan_index];
+        if plan.left_program != header.execution_program_index
+            && plan.right_program != header.execution_program_index {
+            return sentinel;
+        }
+        let program = execution_programs[header.execution_program_index];
+        if program.package_index != header.execution_package_index {
+            return sentinel;
+        }
+        let perm_after_limit = header.execution_permutation_high > program.permutation_count_high
+            || (header.execution_permutation_high == program.permutation_count_high
+                && header.execution_permutation_low >= program.permutation_count_low);
+        if perm_after_limit { return sentinel; }
+        response_kind = program.response_kind;
+        if response_kind > 3u { return sentinel; }
     }
+    // A region mask only blends the Lit/NPR endpoints. Unlit and custom
+    // response programs remain material-level choices.
+    if (response_kind == 0u || response_kind == 1u) && region_illumination == 1u {
+        return CLASS_NPR;
+    }
+    if response_kind == 1u { return CLASS_NPR; }
+    if response_kind == 2u { return CLASS_UNLIT; }
+    if response_kind == 3u { return CLASS_CUSTOM; }
+    return lit_class_from_closures(header.closure_mask);
 }
 
 @compute @workgroup_size(64)

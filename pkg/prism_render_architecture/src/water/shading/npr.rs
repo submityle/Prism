@@ -1,7 +1,7 @@
 //! Stylized (`NPR`) water lighting response (design §5.2).
 //!
 //! The stylized frontend consumes the exact same shared advanced base as `PBR`
-//! (see [`super::super::SharedBaseServices`]); it only reinterprets the resolved
+//! service closure); it only reinterprets the resolved
 //! lighting. It ramp-quantizes the water color (`Zelda`/toon), turns the
 //! specular highlight into a hard toon block, draws a hand-painted shoreline
 //! foam edge (`Zelda` shallows), stylizes caustics as a `halftone` dot pattern,

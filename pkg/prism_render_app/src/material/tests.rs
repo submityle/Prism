@@ -2,7 +2,7 @@
 
 use prism_render_driver::{BufferUsages, DeviceDescriptor, Instance, RequestAdapterOptions};
 use prism_render_driver_null::NullInstance;
-use prism_render_material::{fallback_material_record, ClosureKind, Illumination, MaterialRecord};
+use prism_render_material::{fallback_material_record, BuiltinProgram, ClosureKind, MaterialRecord, ShadingPlan};
 
 use prism_render_architecture::abi::GenerationalHandle;
 
@@ -222,16 +222,20 @@ fn releasing_frees_both_buffers() {
 }
 
 #[test]
-fn a_material_with_a_different_illumination_still_lands() {
+fn authoring_illumination_is_preserved_without_polluting_the_gpu_header() {
     let (device, queue) = null_device();
     let mut buffers = MaterialParameterBuffers::new(&device, 1, 32, 16, BufferUsages::NONE);
     let mut record = fallback_material_record(GenerationalHandle::new(0, 1), 1);
-    record.illumination = Illumination::Stylized;
+    record.response_plan = ShadingPlan::single_builtin(BuiltinProgram::Npr);
 
     buffers.sync(&device, &queue, [(0, record.clone())], 3);
 
     let row = buffers.header(0).expect("row");
-    assert_eq!(row.illumination, Illumination::Stylized as u32);
+    assert_eq!(
+        row.execution_binding_words(),
+        [u32::MAX; 5],
+        "an unbound authoring record must use the ABI8 fallback tuple"
+    );
     assert_eq!(
         buffers.parameters_of(0).expect("block"),
         record.packed_parameters().pack().as_slice(),

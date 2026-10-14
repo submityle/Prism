@@ -5,7 +5,7 @@
 //! other one-lobe modules (`cloth`, `hair`, `clearcoat`, ...) so the stylized
 //! response is a first-class front end rather than a single special-case branch
 //! buried in the lighting integrator.  It backs the `Stylized` illumination
-//! axis (`prism_render_material::Illumination::Stylized`).
+//! response program (`BuiltinProgram::Npr`).
 //!
 //! # Feature set
 //!

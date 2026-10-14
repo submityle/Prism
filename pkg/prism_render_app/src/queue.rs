@@ -18,7 +18,7 @@ use prism_render_driver::{
     BufferId, IndexFormat, RenderDevice, RenderPipelineDescriptor, RenderPipelineId,
     VertexBufferLayout,
 };
-use prism_render_material::MaterialRenderClass;
+use prism_render_material::{MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, RenderDomain};
 
 use crate::draw::{DrawFunctionId, DrawFunctions};
 use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineSpecializer};
@@ -77,15 +77,31 @@ pub fn phase_for_render_class(class: MaterialRenderClass) -> RenderPhase {
         MaterialRenderClass::Opaque
         | MaterialRenderClass::OpaqueTwoSided
         | MaterialRenderClass::Masked
-        | MaterialRenderClass::MaskedTwoSided
-        | MaterialRenderClass::Hair
-        | MaterialRenderClass::Water => RenderPhase::Opaque,
+        | MaterialRenderClass::MaskedTwoSided => RenderPhase::Opaque,
         MaterialRenderClass::Transmissive
         | MaterialRenderClass::Transparent
-        | MaterialRenderClass::Additive
-        | MaterialRenderClass::Decal => RenderPhase::Transparent,
-        // A volume is not a surface mesh draw; it is a project-injected pass.
-        MaterialRenderClass::Volume => RenderPhase::Custom,
+        | MaterialRenderClass::Additive => RenderPhase::Transparent,
+    }
+}
+
+/// Resolve the complete pipeline-state family from the domain, blend class,
+/// and feature flags. Domain-specific paths are deliberately explicit so a
+/// domain migration cannot silently change phase ordering.
+#[must_use]
+pub fn phase_for_material(record: &MaterialRecord) -> RenderPhase {
+    match record.render_domain {
+        RenderDomain::Surface => {
+            if record.features.contains(MaterialFeatureFlags::WATER) {
+                // Water writes premultiplied alpha into the transparent HDR
+                // target; it must sort with transparent work.
+                RenderPhase::Transparent
+            } else {
+                phase_for_render_class(record.render_class)
+            }
+        }
+        RenderDomain::Particle | RenderDomain::Hair => RenderPhase::Opaque,
+        RenderDomain::Volume => RenderPhase::Custom,
+        RenderDomain::Decal => RenderPhase::Transparent,
     }
 }
 

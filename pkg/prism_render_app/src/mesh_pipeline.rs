@@ -13,8 +13,8 @@ use prism_render_driver::{
     PrimitiveTopology, RenderDevice, RenderPipelineDescriptor, RenderPipelineId, TextureFormat,
     VertexBufferLayout,
 };
-use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
-use std::collections::HashMap;
+use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex, PermutationSpace};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::pipeline_cache::{PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution};
 
@@ -128,6 +128,7 @@ pub fn full_lobe_fallback(variant: MeshPipelineKey) -> Option<MeshPipelineKey> {
 pub struct MeshPipelineSpecializer {
     cache: PipelineCache,
     key_index: HashMap<MeshSpecializationId, PipelineKey>,
+    module_spaces: BTreeMap<ModuleId, (PermutationSpace, Option<PermutationIndex>)>,
 }
 
 /// Supplies the pipeline descriptor for a mesh variant.
@@ -169,6 +170,7 @@ impl MeshPipelineSpecializer {
         Self {
             cache: PipelineCache::new(),
             key_index: HashMap::new(),
+            module_spaces: BTreeMap::new(),
         }
     }
 
@@ -181,6 +183,7 @@ impl MeshPipelineSpecializer {
         Self {
             cache: PipelineCache::with_worker(device),
             key_index: HashMap::new(),
+            module_spaces: BTreeMap::new(),
         }
     }
 
@@ -190,7 +193,61 @@ impl MeshPipelineSpecializer {
         Self {
             cache: PipelineCache::with_compiler(compiler),
             key_index: HashMap::new(),
+            module_spaces: BTreeMap::new(),
         }
+    }
+
+    /// Registers the declaration that owns a module's dense permutation space.
+    ///
+    /// The declaration is optional for the legacy spine/test provider, but once
+    /// present every exact and fallback request is checked before it reaches
+    /// the cache. A raw `u64` can therefore never silently become a different
+    /// module permutation.
+    pub fn register_response_module(
+        &mut self,
+        module: ModuleId,
+        permutations: PermutationSpace,
+        fallback: Option<PermutationIndex>,
+    ) {
+        permutations
+            .checked_total()
+            .expect("response module permutation declaration overflows");
+        if let Some(index) = fallback {
+            permutations
+                .check_index(index.get())
+                .expect("response module fallback is outside its permutation space");
+        }
+        if let Some((existing, existing_fallback)) = self.module_spaces.get(&module) {
+            assert_eq!(existing, &permutations, "response module declaration changed");
+            assert_eq!(existing_fallback, &fallback, "response module fallback changed");
+            return;
+        }
+        self.module_spaces.insert(module, (permutations, fallback));
+    }
+
+    /// Registers all module declarations from an app-owned response cache.
+    pub fn sync_response_modules(&mut self, modules: &crate::mesh_pipelines::ResponseModuleCache) {
+        for module in modules.iter() {
+            self.register_response_module(
+                module.module_id,
+                module.permutations.clone(),
+                module.full_lobe_fallback,
+            );
+        }
+    }
+
+    fn assert_valid_variant(&self, variant: &MeshPipelineKey) {
+        let Some((space, declared_fallback)) = self.module_spaces.get(&variant.response_module_id) else {
+            return;
+        };
+        space
+            .check_index(variant.permutation_index.get())
+            .unwrap_or_else(|error| panic!("invalid dense permutation for module {:?}: {error:?}", variant.response_module_id));
+        assert_eq!(
+            variant.fallback_permutation,
+            *declared_fallback,
+            "mesh variant fallback does not match the response module declaration"
+        );
     }
 
     /// Drains completed background compiles. Runs once per frame before the
@@ -224,6 +281,7 @@ impl MeshPipelineSpecializer {
         layout: &[VertexBufferLayout],
         descriptor: RenderPipelineDescriptor,
     ) -> RenderPipelineId {
+        self.assert_valid_variant(&variant);
         let descriptor = with_mesh_layout(descriptor, layout);
         let key = variant.key_from_descriptor(&descriptor);
         self.key_index
@@ -247,6 +305,7 @@ impl MeshPipelineSpecializer {
         D: RenderDevice,
         F: Fn(&MeshPipelineKey) -> RenderPipelineDescriptor,
     {
+        self.assert_valid_variant(&variant);
         let Some(fallback_variant) = full_lobe_fallback(variant) else {
             let descriptor = with_mesh_layout(build(&variant), layout);
             let key = variant.key_from_descriptor(&descriptor);
@@ -297,6 +356,7 @@ impl MeshPipelineSpecializer {
     {
         let mut warm = Vec::new();
         for (variant, layout) in requests {
+            self.assert_valid_variant(&variant);
             let Some(fallback_variant) = full_lobe_fallback(variant) else {
                 let descriptor = with_mesh_layout(build(&variant), &layout);
                 let key = variant.key_from_descriptor(&descriptor);

@@ -6,7 +6,7 @@
 //! missing raster half contracted by
 //! [`prism_render_architecture::water::gpu::surface_pass`] and
 //! [`prism_render_architecture::water::gpu::surface_bindings`]: one shared
-//! vertex stage that displaces the surface grid and four per-frontend fragment
+//! vertex stage that displaces the surface grid and response-plan fragment
 //! stages that shade it through the design §5 lighting-response fork
 //! (`PBR`/`NPR`/custom/hybrid). The `WESL` source is
 //! `shaders/water_surface_raster.wesl`; its entry-point names are byte-identical
@@ -22,17 +22,18 @@
 //! must be byte-compatible with the attachment it writes, so — exactly like the
 //! [`super::super::shading::composite`] pass — the pipeline is a
 //! [`SpecializedRenderPipeline`] keyed on
-//! ([`ShadingFrontend`], [`ExtractedView::target_format`]). The frontend selects
+//! ([`ResponseProgram`], [`ExtractedView::target_format`]). The response plan selects
 //! the fragment entry point (the §5 lighting fork); the target format keeps the
 //! single `@location(0)` colour target compatible with the view it draws into.
 //!
 //! Specialization happens in [`prepare_water_surface_pipelines`] during
 //! [`RenderSystems::Prepare`](bevy_render::RenderSystems::Prepare), following
-//! Bevy's own fullscreen passes and the Prism composite: it specializes all four
-//! frontends for each visibility-path view and stashes the concrete
+//! Bevy's own fullscreen passes and the Prism composite: it specializes the
+//! three response programs plus the MaskBlend plan for each visibility-path view
+//! and stashes the concrete
 //! [`CachedRenderPipelineId`]s on the view as [`ViewWaterSurfacePipelines`], so
 //! the raster draw system (following slice) stays a thin recorder that only
-//! fetches the pipeline for a body's frontend.
+//! fetches the pipeline for a body's response plan.
 //!
 //! ## Pass state (mirrors the `CPU` contract)
 //!
@@ -88,29 +89,29 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use prism_render_architecture::water::gpu::plan_surface_draw;
-use prism_render_architecture::water::ShadingFrontend;
+use prism_render_architecture::water::gpu::surface_pass::plan_surface_plan;
+use prism_render_architecture::water::{ResponseProgram, WaterShadingPlan};
 
 use super::super::shading::{ViewVisibilityBuffer, MOTION_VECTOR_FORMAT};
 use crate::lighting::LightBindGroup;
 
-/// The four shading frontends in a stable order; the index into
+/// The three response programs plus the MaskBlend plan in a stable order; the index into
 /// [`ViewWaterSurfacePipelines::ids`] is this slot. `PBR` first keeps the
 /// default-frontend pipeline at slot zero.
-const FRONTENDS: [ShadingFrontend; 4] = [
-    ShadingFrontend::Pbr,
-    ShadingFrontend::Npr,
-    ShadingFrontend::Custom,
-    ShadingFrontend::Hybrid,
+const FRONTENDS: [WaterShadingPlan; 4] = [
+    WaterShadingPlan::single(ResponseProgram::Pbr),
+    WaterShadingPlan::single(ResponseProgram::Npr),
+    WaterShadingPlan::single(ResponseProgram::Custom),
+    WaterShadingPlan::hybrid(),
 ];
 
 /// The slot a frontend occupies in [`ViewWaterSurfacePipelines::ids`].
-const fn frontend_slot(frontend: ShadingFrontend) -> usize {
+const fn frontend_slot(frontend: WaterShadingPlan) -> usize {
     match frontend {
-        ShadingFrontend::Pbr => 0,
-        ShadingFrontend::Npr => 1,
-        ShadingFrontend::Custom => 2,
-        ShadingFrontend::Hybrid => 3,
+        WaterShadingPlan::Single { program: ResponseProgram::Pbr } => 0,
+        WaterShadingPlan::Single { program: ResponseProgram::Npr } => 1,
+        WaterShadingPlan::Single { program: ResponseProgram::Custom } => 2,
+        WaterShadingPlan::MaskBlend { .. } => 3,
     }
 }
 
@@ -177,7 +178,7 @@ const fn premultiplied_alpha_blend() -> BlendState {
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
 pub(crate) struct WaterSurfaceKey {
     /// Lighting-response frontend; selects the fragment entry point.
-    pub(crate) frontend: ShadingFrontend,
+    pub(crate) frontend: WaterShadingPlan,
     /// Format of the view target this pass renders into.
     pub(crate) target_format: TextureFormat,
 }
@@ -186,7 +187,7 @@ pub(crate) struct WaterSurfaceKey {
 /// water-surface raster draw.
 ///
 /// Built once at `RenderStartup` by [`init_water_surface_pipelines`]; read by
-/// [`prepare_water_surface_pipelines`] (which specializes the four frontends per
+/// [`prepare_water_surface_pipelines`] (which specializes the response plans per
 /// view) and by the raster draw system (following slice), which resolves the
 /// concrete bind-group layout from the [`PipelineCache`] via [`Self::layout`] to
 /// build each body's per-body bind group.
@@ -268,7 +269,7 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
         // The entry points come straight from the deterministic `CPU` contract,
         // so the host pipeline and the device shader can never drift on names.
-        let draw = plan_surface_draw(key.frontend);
+        let draw = plan_surface_plan(key.frontend);
         RenderPipelineDescriptor {
             label: Some(format!("prism water surface {:?}", key.frontend).into()),
             layout: vec![
@@ -343,11 +344,11 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
 }
 
 /// The four specialized water-surface pipelines chosen for one view, one per
-/// [`ShadingFrontend`] (indexed by [`frontend_slot`]), all keyed on the view's
+/// [`ResponseProgram`] (indexed by [`frontend_slot`]), all keyed on the view's
 /// target format.
 ///
 /// Present only on views the surface draw should run for (the Prism visibility
-/// path is live for them this frame). The raster draw system (following slice)
+/// path is live for them this frame). The raster draw system
 /// reads it to fetch the concrete render pipeline for each body's frontend.
 #[derive(Component)]
 pub(crate) struct ViewWaterSurfacePipelines {
@@ -359,7 +360,7 @@ pub(crate) struct ViewWaterSurfacePipelines {
 impl ViewWaterSurfacePipelines {
     /// The specialized pipeline id that shades the given frontend for this view.
     #[must_use]
-    pub(crate) fn id_for(&self, frontend: ShadingFrontend) -> CachedRenderPipelineId {
+    pub(crate) fn id_for(&self, frontend: WaterShadingPlan) -> CachedRenderPipelineId {
         self.ids[frontend_slot(frontend)]
     }
 }
@@ -472,9 +473,9 @@ pub(crate) fn init_water_surface_pipelines(
 /// Only views that carry a [`ViewVisibilityBuffer`] (the Prism visibility path
 /// is live for them this frame) get pipelines: MSAA / disabled views never
 /// allocate the buffer, so they are skipped here and the raster draw system
-/// finds no [`ViewWaterSurfacePipelines`] to run. All four frontends are
+/// finds no [`ViewWaterSurfacePipelines`] to run. All response plans are
 /// specialized up front — a view may host several bodies with different
-/// frontends — and keyed on [`ExtractedView::target_format`] so each colour
+/// response plans — and keyed on [`ExtractedView::target_format`] so each colour
 /// target stays byte-compatible with the attachment the view renders into.
 pub(crate) fn prepare_water_surface_pipelines(
     mut commands: Commands,
@@ -616,7 +617,7 @@ mod tests {
         // with its attachment, not pinned to the on-screen `HDR` format.
         let pipelines = fixture();
         let desc = pipelines.specialize(WaterSurfaceKey {
-            frontend: ShadingFrontend::Pbr,
+            frontend: WaterShadingPlan::single(ResponseProgram::Pbr),
             target_format: TextureFormat::Rgba8UnormSrgb,
         });
 
@@ -658,7 +659,7 @@ mod tests {
                 target_format: TextureFormat::Rgba16Float,
             });
             let fragment = desc.fragment.expect("a fragment stage per frontend");
-            let expected = plan_surface_draw(frontend).fragment_entry();
+            let expected = plan_surface_plan(frontend).fragment_entry();
             assert_eq!(
                 fragment.entry_point.as_deref(),
                 Some(expected),
@@ -667,7 +668,7 @@ mod tests {
             // The vertex stage is shared across every frontend.
             assert_eq!(
                 desc.vertex.entry_point.as_deref(),
-                Some(plan_surface_draw(frontend).vertex_entry())
+                Some(plan_surface_plan(frontend).vertex_entry())
             );
         }
     }

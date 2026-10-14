@@ -44,9 +44,11 @@
 
 use prism_render_architecture::particle::lod::ParticleQuality;
 use prism_render_architecture::particle::shading::{
-    DeepShadowMode, LightingServiceCaps, MotionVectorInput, OitRoute, ParticleRenderPhase,
-    ShadingAttributeFootprint, SixWayLuminance,
+    DeepShadowMode, MotionVectorInput, OitRoute, ParticleRenderPhase, ShadingAttributeFootprint,
+    SixWayLuminance, PARTICLE_GLOBAL_ILLUMINATION, PARTICLE_LIGHTING_SERVICES,
+    PARTICLE_RAY_TRACING, PARTICLE_SHADOW_MAPS,
 };
+use prism_render_architecture::render_fabric::ServiceSet;
 use prism_render_architecture::particle::sort_cull::{BlendMode, SortDecision};
 use prism_render_architecture::particle::{EmberShadingModel, ShadingBasis, SortStrategy, Vec3};
 use prism_volumetric_gpu::shading::{cpu_reference, GpuShading, GpuShadingQuery};
@@ -74,11 +76,20 @@ fn close(a: f32, b: f32) -> bool {
 }
 
 /// All lighting capabilities enabled.
-fn all_caps() -> LightingServiceCaps {
-    LightingServiceCaps {
-        shadow_maps: true,
-        global_illumination: true,
-        ray_tracing: true,
+fn all_caps() -> ServiceSet {
+    PARTICLE_LIGHTING_SERVICES
+}
+
+fn caps_for_mask(mask: u32) -> ServiceSet {
+    match mask & 7 {
+        0 => ServiceSet::EMPTY,
+        1 => ServiceSet::new(&[PARTICLE_SHADOW_MAPS]),
+        2 => ServiceSet::new(&[PARTICLE_GLOBAL_ILLUMINATION]),
+        3 => ServiceSet::new(&[PARTICLE_SHADOW_MAPS, PARTICLE_GLOBAL_ILLUMINATION]),
+        4 => ServiceSet::new(&[PARTICLE_RAY_TRACING]),
+        5 => ServiceSet::new(&[PARTICLE_SHADOW_MAPS, PARTICLE_RAY_TRACING]),
+        6 => ServiceSet::new(&[PARTICLE_GLOBAL_ILLUMINATION, PARTICLE_RAY_TRACING]),
+        _ => PARTICLE_LIGHTING_SERVICES,
     }
 }
 
@@ -90,7 +101,7 @@ fn base_query() -> GpuShadingQuery {
     GpuShadingQuery {
         model: EmberShadingModel::Unlit,
         blend: BlendMode::Opaque,
-        caps: LightingServiceCaps::default(),
+        caps: ServiceSet::EMPTY,
         volumetric: false,
         quality: ParticleQuality::Low,
         footprint_a: ShadingAttributeFootprint::default(),
@@ -379,11 +390,7 @@ fn lighting_services_over_capability_combinations() {
     let mut queries = Vec::new();
     // All eight capability combinations, once lit (Pbr) and once unlit.
     for mask in 0_u32..8 {
-        let caps = LightingServiceCaps {
-            shadow_maps: mask & 1 != 0,
-            global_illumination: mask & 2 != 0,
-            ray_tracing: mask & 4 != 0,
-        };
+        let caps = caps_for_mask(mask);
         queries.push(GpuShadingQuery {
             model: EmberShadingModel::Pbr,
             caps,
@@ -704,7 +711,7 @@ fn composite_program_cases() {
                 weight: 0.5,
             },
             blend: BlendMode::Premultiplied,
-            caps: LightingServiceCaps::default(),
+            caps: ServiceSet::EMPTY,
             volumetric: true,
             quality: ParticleQuality::Medium,
             ..base_query()
@@ -725,11 +732,7 @@ fn random_batch_lane_for_lane() {
     for _ in 0..2_048 {
         let model = pick_model(&mut state);
         let blend = pick_blend(&mut state);
-        let caps = LightingServiceCaps {
-            shadow_maps: lcg(&mut state) > 0.5,
-            global_illumination: lcg(&mut state) > 0.5,
-            ray_tracing: lcg(&mut state) > 0.5,
-        };
+        let caps = caps_for_mask((lcg(&mut state) * 8.0) as u32);
         let volumetric = lcg(&mut state) > 0.5;
         let quality = pick_quality(&mut state);
 

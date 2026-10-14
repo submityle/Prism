@@ -20,7 +20,7 @@ use prism_render_architecture::water::pipeline::{
 use prism_render_architecture::water::reconstruct::ReconstructionThresholds;
 use prism_render_architecture::water::transition::TransitionBands;
 use prism_render_architecture::water::{
-    SharedBaseServices, SolverKind, Vec3, WaterBodyHandle, WaterBudget, WaterKind,
+    SolverKind, Vec3, WaterBodyHandle, WaterBudget, WaterKind,
 };
 
 const CONFIG: WaterFrameConfig = WaterFrameConfig {
@@ -95,8 +95,6 @@ fn authored_ocean_plans_a_spectral_frame() {
 
     assert_eq!(plan.extracts.len(), 1);
     assert_eq!(plan.prepares.len(), 1);
-    // Spectral oceans run the full shared advanced base regardless of frontend.
-    assert_eq!(plan.prepares[0].shared_base, SharedBaseServices::ALL);
     // An ocean body does solver + displacement + foam work, so the budget must
     // admit at least one job.
     assert!(!plan.queue.plan.scheduled.is_empty());
@@ -202,10 +200,6 @@ fn mixed_authored_scene_is_deterministic() {
     assert_eq!(first.extracts[0].body, WaterBodyHandle(1));
     assert_eq!(first.extracts[1].body, WaterBodyHandle(2));
     assert_eq!(first.extracts[2].body, WaterBodyHandle(3));
-    // Every frontend-agnostic body shares the full advanced base.
-    for prepare in &first.prepares {
-        assert_eq!(prepare.shared_base, SharedBaseServices::ALL);
-    }
     // The generous budget admits work for the scene.
     assert!(first.queue.plan.steps_used > 0);
 }

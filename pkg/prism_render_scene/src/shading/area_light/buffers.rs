@@ -65,7 +65,7 @@ impl AreaLightGpuBuffer {
     /// Monotonic version bumped on every rebuild, for bind-group caching.
     #[expect(
         dead_code,
-        reason = "exposed for bind-group cache invalidation wired in a later slice"
+        reason = "exposed for bind-group cache invalidation diagnostics"
     )]
     pub(crate) fn version(&self) -> u32 {
         self.version

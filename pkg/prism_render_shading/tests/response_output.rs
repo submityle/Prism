@@ -404,10 +404,6 @@ fn shared_alpha_ignores_arm_alpha_and_mask_for_all_render_classes() {
         MaterialRenderClass::Transmissive,
         MaterialRenderClass::Transparent,
         MaterialRenderClass::Additive,
-        MaterialRenderClass::Volume,
-        MaterialRenderClass::Hair,
-        MaterialRenderClass::Water,
-        MaterialRenderClass::Decal,
     ];
     for class in classes {
         let shared = SharedSurfaceAlpha::new(0.75, class).unwrap();

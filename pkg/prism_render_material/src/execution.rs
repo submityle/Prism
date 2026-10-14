@@ -12,7 +12,13 @@ use prism_render_architecture::shader_package::{
     PermutationSpace, ShaderPackageManifest, ShaderPackageRegistry,
 };
 
-use crate::{ChannelMask, CompiledEntry, ProgramId, ProgramRef, ShadingPlan};
+use crate::{BuiltinProgram, ChannelMask, CompiledEntry, ProgramId, ProgramRef, ShadingPlan};
+
+/// GPU response-program kind written by the execution-table upload.
+pub const RESPONSE_PROGRAM_KIND_LIT: u32 = 0;
+pub const RESPONSE_PROGRAM_KIND_NPR: u32 = 1;
+pub const RESPONSE_PROGRAM_KIND_UNLIT: u32 = 2;
+pub const RESPONSE_PROGRAM_KIND_CUSTOM: u32 = 3;
 
 /// The kind of dense table index that failed validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -492,6 +498,52 @@ impl MaterialExecutionTables {
         self.packages.len()
     }
 
+    /// Returns the compact GPU plan rows. The row contains the program indices
+    /// accepted by the plan; the shader uses it to reject a forged plan/program
+    /// tuple before it classifies a pixel.
+    #[must_use]
+    pub fn gpu_plan_rows(&self) -> Vec<[u32; 2]> {
+        self.plans
+            .iter()
+            .map(|plan| {
+                [
+                    plan.left.get(),
+                    plan.right.map_or(u32::MAX, |index| index.get()),
+                ]
+            })
+            .collect()
+    }
+
+    /// Returns compact GPU program rows: response kind, owning package and the
+    /// full 64-bit permutation-space count split into two words.
+    #[must_use]
+    pub fn gpu_program_rows(&self) -> Vec<[u32; 4]> {
+        self.programs
+            .iter()
+            .map(|program| {
+                let kind = match program.program {
+                    ProgramRef::Builtin(BuiltinProgram::Lit) => RESPONSE_PROGRAM_KIND_LIT,
+                    ProgramRef::Builtin(BuiltinProgram::Npr) => RESPONSE_PROGRAM_KIND_NPR,
+                    ProgramRef::Builtin(BuiltinProgram::Unlit) => RESPONSE_PROGRAM_KIND_UNLIT,
+                    ProgramRef::Registered(_) => RESPONSE_PROGRAM_KIND_CUSTOM,
+                };
+                let count = program.permutations.checked_total().unwrap_or(0);
+                [
+                    kind,
+                    program.package.get(),
+                    count as u32,
+                    (count >> 32) as u32,
+                ]
+            })
+            .collect()
+    }
+
+    /// Number of verified package rows exposed to the GPU bounds check.
+    #[must_use]
+    pub const fn gpu_package_count(&self) -> u32 {
+        self.packages.len() as u32
+    }
+
     #[must_use]
     pub fn package(
         &self,
@@ -673,7 +725,7 @@ mod tests {
         let package = tables.register_package(&entry, &packages).unwrap();
         let program = tables
             .register_program(
-                ProgramRef::Builtin(crate::BuiltinProgram::Lit),
+                ProgramRef::Builtin(BuiltinProgram::Lit),
                 &entry,
                 package,
                 ModuleId(7),
@@ -682,7 +734,7 @@ mod tests {
             .unwrap();
         let plan = tables
             .register_plan(
-                ShadingPlan::single_builtin(crate::BuiltinProgram::Lit),
+                ShadingPlan::single_builtin(BuiltinProgram::Lit),
                 program,
                 None,
                 ExecutionFamily::FusedBuiltin,
@@ -701,5 +753,45 @@ mod tests {
             tables.bind_raw(plan.get(), program.get(), u32::MAX, 0),
             Err(MaterialExecutionError::ReservedIndex { .. })
         ));
+    }
+
+    #[test]
+    fn gpu_descriptor_rows_encode_the_verified_dense_tables() {
+        let entry = compiled();
+        let packages = ready_packages(&entry);
+        let mut tables = MaterialExecutionTables::new();
+        let package = tables.register_package(&entry, &packages).unwrap();
+        let program = tables
+            .register_program(
+                ProgramRef::Builtin(BuiltinProgram::Lit),
+                &entry,
+                package,
+                ModuleId(7),
+                PermutationSpace::try_new([2, 3]).unwrap(),
+            )
+            .unwrap();
+        let plan = tables
+            .register_plan(
+                ShadingPlan::single_builtin(BuiltinProgram::Lit),
+                program,
+                None,
+                ExecutionFamily::FusedBuiltin,
+                ChannelMask::default(),
+            )
+            .unwrap();
+
+        assert_eq!(tables.gpu_plan_rows(), vec![[program.get(), u32::MAX]]);
+        assert_eq!(
+            tables.gpu_program_rows(),
+            vec![[RESPONSE_PROGRAM_KIND_LIT, package.get(), 6, 0]]
+        );
+        assert_eq!(tables.gpu_package_count(), 1);
+        assert_eq!(
+            tables
+                .bind_raw(plan.get(), program.get(), package.get(), 5)
+                .unwrap()
+                .to_words(),
+            [0, 0, 0, 5, 0]
+        );
     }
 }

@@ -145,7 +145,7 @@ impl Plugin for WaterPlugin {
                 Render,
                 prepare_water_bodies.in_set(RenderSystems::PrepareResources),
             )
-            // Specialize the four surface frontends for every visibility-path
+            // Specialize the three response programs plus the MaskBlend plan for every visibility-path
             // view and stash the concrete pipeline ids on the view, in the
             // standard `Prepare` set Bevy's own fullscreen passes use.
             .add_systems(

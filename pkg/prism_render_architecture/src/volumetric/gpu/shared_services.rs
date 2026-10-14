@@ -12,7 +12,7 @@
 //! map) — but they never re-implement them.
 //!
 //! This module owns the *signature* of that coupling: which
-//! [`SharedBaseServices`] each [`VolumetricKernel`] binds and whether the
+//! [`ServiceSet`] services each [`VolumetricKernel`] binds and whether the
 //! binding is a read-only sample or a write into the shared resource. It is
 //! pure integer/enum bookkeeping, so the wiring table is a deterministic,
 //! `CPU`-testable function of a kernel tag.
@@ -24,7 +24,13 @@
 //! bind-group resources and the eight kernels pass on-device Metal parity, so
 //! this access table is the contract the wired dispatch pass already fulfils.
 
-use super::super::SharedBaseServices;
+use crate::render_fabric::{ServiceId, ServiceSet};
+
+use super::super::{
+    VOLUMETRIC_ATMOSPHERE_LUT, VOLUMETRIC_FROXEL_VOLUME,
+    VOLUMETRIC_HYBRID_GI, VOLUMETRIC_RT_REFERENCE,
+    VOLUMETRIC_TEMPORAL_UPSAMPLE, VOLUMETRIC_VSM_SHADOW,
+};
 use super::kernels::VolumetricKernel;
 
 /// How a kernel touches a shared service resource.
@@ -62,9 +68,8 @@ impl ServiceAccess {
 /// it is accessed.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SharedServiceBinding {
-    /// The single shared service this binding names (a one-bit
-    /// [`SharedBaseServices`] set).
-    pub service: SharedBaseServices,
+    /// The single shared semantic service this binding names.
+    pub service: ServiceId,
     /// How the kernel touches it.
     pub access: ServiceAccess,
 }
@@ -73,15 +78,15 @@ pub struct SharedServiceBinding {
 /// injects its scattering into the shared froxel volume for god rays.
 const RAYMARCH_BINDINGS: [SharedServiceBinding; 3] = [
     SharedServiceBinding {
-        service: SharedBaseServices::ATMOSPHERE_LUT,
+        service: VOLUMETRIC_ATMOSPHERE_LUT,
         access: ServiceAccess::SampleReadOnly,
     },
     SharedServiceBinding {
-        service: SharedBaseServices::HYBRID_GI,
+        service: VOLUMETRIC_HYBRID_GI,
         access: ServiceAccess::SampleReadOnly,
     },
     SharedServiceBinding {
-        service: SharedBaseServices::FROXEL_VOLUME,
+        service: VOLUMETRIC_FROXEL_VOLUME,
         access: ServiceAccess::InjectWrite,
     },
 ];
@@ -90,11 +95,11 @@ const RAYMARCH_BINDINGS: [SharedServiceBinding; 3] = [
 /// calibrated against the offline path-traced reference.
 const SCATTER_BINDINGS: [SharedServiceBinding; 2] = [
     SharedServiceBinding {
-        service: SharedBaseServices::HYBRID_GI,
+        service: VOLUMETRIC_HYBRID_GI,
         access: ServiceAccess::SampleReadOnly,
     },
     SharedServiceBinding {
-        service: SharedBaseServices::RT_REFERENCE,
+        service: VOLUMETRIC_RT_REFERENCE,
         access: ServiceAccess::SampleReadOnly,
     },
 ];
@@ -102,13 +107,13 @@ const SCATTER_BINDINGS: [SharedServiceBinding; 2] = [
 /// The cloud-shadow march writes the cloud contribution into the shared virtual
 /// shadow map.
 const SHADOW_BINDINGS: [SharedServiceBinding; 1] = [SharedServiceBinding {
-    service: SharedBaseServices::VSM_SHADOW,
+    service: VOLUMETRIC_VSM_SHADOW,
     access: ServiceAccess::ShadowWrite,
 }];
 
 /// The temporal upsample reads and writes the shared upsampling history.
 const UPSAMPLE_BINDINGS: [SharedServiceBinding; 1] = [SharedServiceBinding {
-    service: SharedBaseServices::TEMPORAL_UPSAMPLE,
+    service: VOLUMETRIC_TEMPORAL_UPSAMPLE,
     access: ServiceAccess::HistoryReadWrite,
 }];
 
@@ -136,28 +141,53 @@ pub fn shared_service_bindings(kernel: VolumetricKernel) -> &'static [SharedServ
 
 /// The union of every shared service a kernel consumes or produces.
 #[must_use]
-pub fn touched_services(kernel: VolumetricKernel) -> SharedBaseServices {
-    shared_service_bindings(kernel)
-        .iter()
-        .fold(SharedBaseServices::NONE, |acc, b| acc.union(b.service))
+pub fn touched_services(kernel: VolumetricKernel) -> ServiceSet {
+    match kernel {
+        VolumetricKernel::WeatherAdvect
+        | VolumetricKernel::NoiseBake
+        | VolumetricKernel::Modeling
+        | VolumetricKernel::MultiscatterLutBake => ServiceSet::EMPTY,
+        VolumetricKernel::Raymarch => ServiceSet::new(&[
+            VOLUMETRIC_ATMOSPHERE_LUT,
+            VOLUMETRIC_HYBRID_GI,
+            VOLUMETRIC_FROXEL_VOLUME,
+        ]),
+        VolumetricKernel::ScatterResolve => {
+            ServiceSet::new(&[VOLUMETRIC_HYBRID_GI, VOLUMETRIC_RT_REFERENCE])
+        }
+        VolumetricKernel::ShadowMarch => ServiceSet::new(&[VOLUMETRIC_VSM_SHADOW]),
+        VolumetricKernel::Upsample => ServiceSet::new(&[VOLUMETRIC_TEMPORAL_UPSAMPLE]),
+    }
 }
 
 /// The union of the shared services a kernel *writes into* (froxel injection,
 /// virtual-shadow write, history write-back), so the render graph can order it
 /// as a producer of those services.
 #[must_use]
-pub fn produced_services(kernel: VolumetricKernel) -> SharedBaseServices {
-    shared_service_bindings(kernel)
-        .iter()
-        .filter(|b| b.access.is_write())
-        .fold(SharedBaseServices::NONE, |acc, b| acc.union(b.service))
+pub fn produced_services(kernel: VolumetricKernel) -> ServiceSet {
+    match kernel {
+        VolumetricKernel::Raymarch => ServiceSet::new(&[VOLUMETRIC_FROXEL_VOLUME]),
+        VolumetricKernel::ShadowMarch => ServiceSet::new(&[VOLUMETRIC_VSM_SHADOW]),
+        VolumetricKernel::Upsample => ServiceSet::new(&[VOLUMETRIC_TEMPORAL_UPSAMPLE]),
+        VolumetricKernel::WeatherAdvect
+        | VolumetricKernel::NoiseBake
+        | VolumetricKernel::Modeling
+        | VolumetricKernel::MultiscatterLutBake
+        | VolumetricKernel::ScatterResolve => ServiceSet::EMPTY,
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::render_fabric::ServiceSet;
+    use crate::volumetric::{
+        VOLUMETRIC_ATMOSPHERE_LUT, VOLUMETRIC_FROXEL_VOLUME, VOLUMETRIC_HYBRID_GI,
+        VOLUMETRIC_TEMPORAL_UPSAMPLE, VOLUMETRIC_VSM_SHADOW,
+    };
+
     use super::{
         produced_services, shared_service_bindings, touched_services, ServiceAccess,
-        SharedBaseServices, VolumetricKernel,
+        VolumetricKernel,
     };
 
     #[test]
@@ -169,8 +199,8 @@ mod tests {
             VolumetricKernel::MultiscatterLutBake,
         ] {
             assert!(shared_service_bindings(kernel).is_empty());
-            assert!(touched_services(kernel).is_empty());
-            assert!(produced_services(kernel).is_empty());
+            assert!(touched_services(kernel).as_slice().is_empty());
+            assert!(produced_services(kernel).as_slice().is_empty());
         }
     }
 
@@ -178,13 +208,8 @@ mod tests {
     fn every_binding_names_exactly_one_service_within_the_base() {
         for kernel in VolumetricKernel::ALL {
             for binding in shared_service_bindings(kernel) {
-                assert_eq!(
-                    binding.service.len(),
-                    1,
-                    "{kernel:?} binding not a single bit"
-                );
                 assert!(
-                    SharedBaseServices::ALL.contains(binding.service),
+                    crate::render_fabric::volume_required_services().contains(binding.service),
                     "{kernel:?} binding outside the shared base"
                 );
             }
@@ -194,13 +219,13 @@ mod tests {
     #[test]
     fn raymarch_samples_atmosphere_and_gi_and_injects_froxel() {
         let touched = touched_services(VolumetricKernel::Raymarch);
-        assert!(touched.contains(SharedBaseServices::ATMOSPHERE_LUT));
-        assert!(touched.contains(SharedBaseServices::HYBRID_GI));
-        assert!(touched.contains(SharedBaseServices::FROXEL_VOLUME));
+        assert!(touched.contains(VOLUMETRIC_ATMOSPHERE_LUT));
+        assert!(touched.contains(VOLUMETRIC_HYBRID_GI));
+        assert!(touched.contains(VOLUMETRIC_FROXEL_VOLUME));
         // Only the froxel injection is a write.
         assert_eq!(
             produced_services(VolumetricKernel::Raymarch),
-            SharedBaseServices::FROXEL_VOLUME
+            ServiceSet::new(&[VOLUMETRIC_FROXEL_VOLUME])
         );
     }
 
@@ -208,7 +233,7 @@ mod tests {
     fn shadow_march_writes_the_virtual_shadow_map() {
         assert_eq!(
             produced_services(VolumetricKernel::ShadowMarch),
-            SharedBaseServices::VSM_SHADOW
+            ServiceSet::new(&[VOLUMETRIC_VSM_SHADOW])
         );
         let bindings = shared_service_bindings(VolumetricKernel::ShadowMarch);
         assert_eq!(bindings.len(), 1);
@@ -222,13 +247,15 @@ mod tests {
         assert_eq!(bindings[0].access, ServiceAccess::HistoryReadWrite);
         assert_eq!(
             produced_services(VolumetricKernel::Upsample),
-            SharedBaseServices::TEMPORAL_UPSAMPLE
+            ServiceSet::new(&[VOLUMETRIC_TEMPORAL_UPSAMPLE])
         );
     }
 
     #[test]
     fn scatter_resolve_only_samples_never_writes() {
-        assert!(produced_services(VolumetricKernel::ScatterResolve).is_empty());
+        assert!(produced_services(VolumetricKernel::ScatterResolve)
+            .as_slice()
+            .is_empty());
         for b in shared_service_bindings(VolumetricKernel::ScatterResolve) {
             assert_eq!(b.access, ServiceAccess::SampleReadOnly);
             assert!(!b.access.is_write());
@@ -241,7 +268,7 @@ mod tests {
             let produced = produced_services(kernel);
             let touched = touched_services(kernel);
             assert!(
-                touched.contains(produced),
+                touched.is_superset(produced),
                 "{kernel:?} produces outside touched"
             );
         }

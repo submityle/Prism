@@ -1,6 +1,8 @@
 use crate::{
     DynamicChannels, GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters,
-    MaterialCapacityError, MaterialHandleAllocator, MaterialHandleError, MaterialRecord,
+    MaterialCapacityError, MaterialExecutionBinding, MaterialExecutionTables,
+    MaterialHandleAllocator, MaterialHandleError,
+    MaterialRecord,
 };
 use alloc::{collections::BTreeSet, vec::Vec};
 use prism_render_architecture::{abi::GenerationalHandle, gpu_scene::GpuCompletionValue};
@@ -17,6 +19,7 @@ pub enum MaterialRegistryError {
     CapacityExceeded,
     InvalidHandle(GenerationalHandle),
     StaleRevision { current: u32, incoming: u32 },
+    InvalidExecutionBinding,
 }
 
 #[derive(Clone)]
@@ -37,6 +40,14 @@ pub struct MaterialRegistry {
     /// contract, and a state change must be re-uploadable without touching the
     /// published revision or the compiled permutation.
     dynamic: Vec<DynamicChannels>,
+    /// Verified dense execution identities live beside the baked record. They
+    /// are runtime table bindings and must not be reconstructed from a hash.
+    execution_bindings: Vec<Option<MaterialExecutionBinding>>,
+    execution_plan_rows: Vec<[u32; 2]>,
+    execution_program_rows: Vec<[u32; 4]>,
+    execution_package_count: u32,
+    execution_table_version: u32,
+    execution_tables: Option<MaterialExecutionTables>,
 }
 
 impl MaterialRegistry {
@@ -49,6 +60,12 @@ impl MaterialRegistry {
             dirty: BTreeSet::from([0]),
             generations: vec![0],
             dynamic: vec![DynamicChannels::NONE],
+            execution_bindings: vec![None],
+            execution_plan_rows: Vec::new(),
+            execution_program_rows: Vec::new(),
+            execution_package_count: 0,
+            execution_table_version: 1,
+            execution_tables: None,
         }
     }
     pub fn allocate(&mut self) -> Result<GenerationalHandle, MaterialCapacityError> {
@@ -78,6 +95,9 @@ impl MaterialRegistry {
         self.dynamic
             .resize(self.dynamic.len().max(index + 1), DynamicChannels::NONE);
         self.dynamic[index] = DynamicChannels::NONE;
+        self.execution_bindings
+            .resize(self.execution_bindings.len().max(index + 1), None);
+        self.execution_bindings[index] = None;
         self.slots
             .resize_with(self.slots.len().max(index + 1), || None);
         self.slots[index] = Some(Slot {
@@ -103,6 +123,9 @@ impl MaterialRegistry {
         self.allocator.retire(handle, completion)?;
         if let Some(slot) = self.slots.get_mut(handle.index as usize) {
             *slot = None;
+        }
+        if let Some(binding) = self.execution_bindings.get_mut(handle.index as usize) {
+            *binding = None;
         }
         self.dirty.insert(handle.index);
         self.epoch += 1;
@@ -178,6 +201,150 @@ impl MaterialRegistry {
             .unwrap_or(DynamicChannels::NONE)
     }
 
+    /// Attach a binding that has already been checked against the dense plan,
+    /// program, package and permutation tables.
+    pub fn set_execution_binding(
+        &mut self,
+        handle: GenerationalHandle,
+        binding: MaterialExecutionBinding,
+    ) -> Result<(), MaterialRegistryError> {
+        if !self.allocator.validate(handle)
+            || self
+                .slots
+                .get(handle.index as usize)
+                .and_then(Option::as_ref)
+                .is_none()
+        {
+            return Err(MaterialRegistryError::InvalidHandle(handle));
+        }
+        let plan = self
+            .execution_plan_rows
+            .get(binding.shading_plan_index.get() as usize)
+            .ok_or(MaterialRegistryError::InvalidExecutionBinding)?;
+        let program = self
+            .execution_program_rows
+            .get(binding.response_program_index.get() as usize)
+            .ok_or(MaterialRegistryError::InvalidExecutionBinding)?;
+        if plan[0] != binding.response_program_index.get()
+            && plan[1] != binding.response_program_index.get()
+        {
+            return Err(MaterialRegistryError::InvalidExecutionBinding);
+        }
+        if program[1] != binding.package_index.get()
+            || binding.package_index.get() >= self.execution_package_count
+        {
+            return Err(MaterialRegistryError::InvalidExecutionBinding);
+        }
+        let permutation = binding.permutation_index.get();
+        let limit = u64::from(program[2]) | (u64::from(program[3]) << 32);
+        if permutation >= limit {
+            return Err(MaterialRegistryError::InvalidExecutionBinding);
+        }
+        let index = handle.index as usize;
+        self.execution_bindings
+            .resize(self.execution_bindings.len().max(index + 1), None);
+        if self.execution_bindings[index] == Some(binding) {
+            return Ok(());
+        }
+        self.execution_bindings[index] = Some(binding);
+        self.dirty.insert(handle.index);
+        Ok(())
+    }
+
+    /// Remove the execution binding and restore the five-word ABI sentinel.
+    pub fn clear_execution_binding(
+        &mut self,
+        handle: GenerationalHandle,
+    ) -> Result<(), MaterialRegistryError> {
+        if !self.allocator.validate(handle)
+            || self
+                .slots
+                .get(handle.index as usize)
+                .and_then(Option::as_ref)
+                .is_none()
+        {
+            return Err(MaterialRegistryError::InvalidHandle(handle));
+        }
+        let index = handle.index as usize;
+        self.execution_bindings
+            .resize(self.execution_bindings.len().max(index + 1), None);
+        if self.execution_bindings[index].take().is_some() {
+            self.dirty.insert(handle.index);
+        }
+        Ok(())
+    }
+
+    /// Return the verified execution identity attached to row `index`.
+    #[must_use]
+    pub fn execution_binding_at(&self, index: u32) -> Option<MaterialExecutionBinding> {
+        self.execution_bindings
+            .get(index as usize)
+            .copied()
+            .flatten()
+    }
+
+    /// Installs the verified dense execution tables used by both CPU
+    /// classification and the GPU material bind group. Existing material
+    /// bindings are revalidated before the new rows become visible.
+    pub fn install_execution_tables(
+        &mut self,
+        tables: &MaterialExecutionTables,
+    ) -> Result<(), MaterialRegistryError> {
+        let plan_rows = tables.gpu_plan_rows();
+        let program_rows = tables.gpu_program_rows();
+        let package_count = tables.gpu_package_count();
+        for binding in self.execution_bindings.iter().flatten().copied() {
+            let Some(plan) = plan_rows.get(binding.shading_plan_index.get() as usize) else {
+                return Err(MaterialRegistryError::InvalidExecutionBinding);
+            };
+            let Some(program) = program_rows.get(binding.response_program_index.get() as usize)
+            else {
+                return Err(MaterialRegistryError::InvalidExecutionBinding);
+            };
+            if !plan.contains(&binding.response_program_index.get())
+                || program[1] != binding.package_index.get()
+                || binding.package_index.get() >= package_count
+            {
+                return Err(MaterialRegistryError::InvalidExecutionBinding);
+            }
+            let limit = u64::from(program[2]) | (u64::from(program[3]) << 32);
+            if binding.permutation_index.get() >= limit {
+                return Err(MaterialRegistryError::InvalidExecutionBinding);
+            }
+        }
+        self.execution_plan_rows = plan_rows;
+        self.execution_program_rows = program_rows;
+        self.execution_package_count = package_count;
+        self.execution_tables = Some(tables.clone());
+        self.execution_table_version = self.execution_table_version.wrapping_add(1).max(1);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn execution_tables(&self) -> Option<&MaterialExecutionTables> {
+        self.execution_tables.as_ref()
+    }
+
+    #[must_use]
+    pub fn execution_plan_rows(&self) -> &[[u32; 2]] {
+        &self.execution_plan_rows
+    }
+
+    #[must_use]
+    pub fn execution_program_rows(&self) -> &[[u32; 4]] {
+        &self.execution_program_rows
+    }
+
+    #[must_use]
+    pub const fn execution_package_count(&self) -> u32 {
+        self.execution_package_count
+    }
+
+    #[must_use]
+    pub const fn execution_table_version(&self) -> u32 {
+        self.execution_table_version
+    }
+
     pub fn record_at(&self, index: u32) -> Option<&MaterialRecord> {
         self.slots
             .get(index as usize)?
@@ -208,9 +375,12 @@ impl MaterialRegistry {
         headers[0] = crate::fallback_material_header(self.epoch);
         for (index, slot) in self.slots.iter().enumerate() {
             if let Some(slot) = slot {
-                let mut header =
-                    slot.record
-                        .header(index as u32, textures.len() as u32, self.epoch);
+                let mut header = slot.record.header_with_execution(
+                    index as u32,
+                    textures.len() as u32,
+                    self.epoch,
+                    self.execution_binding_at(index as u32),
+                );
                 let [wetness, snow, damage, dissolve] =
                     self.dynamic_channels_at(index as u32).to_words();
                 header.dynamic_wetness = wetness;
@@ -230,22 +400,23 @@ impl MaterialRegistry {
 mod tests {
     use super::*;
     use crate::{
-        GpuSurfaceParameters, Illumination, MaterialDomain, MaterialFeatureFlags,
+        GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags,
         MaterialRenderClass,
     };
+    use prism_render_architecture::render_fabric::RenderDomain;
 
     fn record(handle: GenerationalHandle, revision: u32) -> MaterialRecord {
         MaterialRecord {
             handle,
             revision,
             domain: MaterialDomain::Surface,
+            render_domain: RenderDomain::Surface,
             render_class: MaterialRenderClass::Opaque,
-            illumination: Illumination::Lit,
+            response_plan: crate::ShadingPlan::default(),
             features: MaterialFeatureFlags::default(),
             closure_mask: 1,
             surface: GpuSurfaceParameters::default(),
             textures: Vec::new(),
-            custom_program: None,
         }
     }
 
@@ -359,7 +530,7 @@ mod tests {
         let unknown = GenerationalHandle::new(5, 2);
         let value = registry.record_or_fallback(unknown);
         assert_eq!(value.handle, unknown);
-        assert_eq!(value.illumination, Illumination::Lit);
+        assert_eq!(value.response_plan, crate::ShadingPlan::default());
         assert_eq!(value.closure_mask, 1);
     }
 
@@ -435,7 +606,7 @@ mod tests {
         );
 
         // Unknown handles are rejected rather than silently ignored.
-        let stale = prism_render_architecture::abi::GenerationalHandle {
+        let stale = GenerationalHandle {
             index: handle.index,
             generation: handle.generation + 1,
         };
@@ -443,6 +614,20 @@ mod tests {
             registry.set_dynamic_channels(stale, channels),
             Err(MaterialRegistryError::InvalidHandle(_))
         ));
+    }
+
+    #[test]
+    fn gpu_upload_preserves_the_unbound_execution_sentinel() {
+        let mut registry = MaterialRegistry::new(4);
+        let handle = registry.allocate().unwrap();
+        registry.publish(record(handle, 1)).unwrap();
+        let (headers, _, _) = registry.gpu_tables();
+
+        assert_eq!(
+            headers[handle.index as usize].execution_binding_words(),
+            [GpuMaterialHeader::EXECUTION_BINDING_SENTINEL; 5]
+        );
+        assert!(!headers[handle.index as usize].has_execution_binding());
     }
 
     #[test]

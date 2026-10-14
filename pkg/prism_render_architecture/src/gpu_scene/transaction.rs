@@ -1,7 +1,8 @@
 use alloc::collections::BTreeMap;
 
 use super::{
-    GeometryHandle, InstanceRecord, SceneBounds, SceneHandle, SceneMaterialHandle, SceneTransform,
+    GeometryHandle, InstanceRecord, SceneBounds, SceneChangeKind, SceneHandle, SceneMaterialHandle,
+    SceneTransform,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,6 +42,20 @@ pub enum SceneOperation {
 }
 
 impl SceneOperation {
+    /// Exhaustive delta classification; both transform rows follow Transform.
+    pub const fn change_kind(&self) -> SceneChangeKind {
+        match self {
+            Self::Create { .. } => SceneChangeKind::Create,
+            Self::Destroy { .. } => SceneChangeKind::Destroy,
+            Self::SetTransform { .. } => SceneChangeKind::Transform,
+            Self::SetBounds { .. } => SceneChangeKind::Bounds,
+            Self::SetGeometry { .. } => SceneChangeKind::Geometry,
+            Self::SetMaterial { .. } => SceneChangeKind::Material,
+            Self::SetFlags { .. } => SceneChangeKind::Flags,
+            Self::SetRenderLayers { .. } => SceneChangeKind::RenderLayers,
+        }
+    }
+
     pub const fn handle(&self) -> SceneHandle {
         match *self {
             Self::Create { handle, .. }

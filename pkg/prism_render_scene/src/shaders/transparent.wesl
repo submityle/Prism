@@ -46,11 +46,10 @@ struct GpuSceneInstance {
 struct GpuSceneTransform { world_from_local: mat3x4<f32> }
 struct GpuSceneBounds { center_radius: vec4<f32>, half_extents: vec4<f32> }
 struct MaterialHeader {
-    generation: u32, revision: u32, illumination: u32, render_class: u32,
+    generation: u32, revision: u32, render_class: u32, render_domain: u32,
     feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
     texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
-    custom_program: u32, is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
-    specialization_low: u32, specialization_high: u32,
+    is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
     lobe_mask: u32,
     // PCM extension digest (§5.3): used/required, each split low/high.
     extensions_used_low: u32, extensions_used_high: u32,
@@ -59,6 +58,10 @@ struct MaterialHeader {
     // each an `f32` bitcast into the word (`0.0` = exact identity).
     dynamic_wetness: u32, dynamic_snow: u32,
     dynamic_damage: u32, dynamic_dissolve: u32,
+    // ABI v8 execution binding; all five words use 0xffffffff when unbound.
+    execution_plan_index: u32, execution_program_index: u32,
+    execution_package_index: u32, execution_permutation_low: u32,
+    execution_permutation_high: u32,
 }
 struct MaterialTexture {
     index: u32,

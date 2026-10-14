@@ -20,7 +20,7 @@ schema_version = 2
 # block; v6 adds the eight-word material texture row with optional VT metadata.
 # VT sampling is not implied by this ABI metadata: the material resolve consumer
 # and streaming-resource bindings remain a separate implementation step.
-abi_version = 7
+abi_version = 8
 
 # ---------------------------------------------------------------------------
 # Core: the always-present OpenPBR-anchored base every lit/stylized/unlit

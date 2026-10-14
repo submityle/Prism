@@ -7,7 +7,9 @@
 //! resolve shader must match bit-for-bit within tolerance.
 
 use crate::measured_brdf::MeasuredBrdf;
-use prism_render_material::{DynamicChannels, GpuMaterialHeader, GpuSurfaceParameters};
+use prism_render_material::{
+    DynamicChannels, GpuMaterialHeader, GpuSurfaceParameters, ProgramRef,
+};
 
 use crate::gi::area_light::ltc_lut::LtcLut;
 use crate::gi::area_light::representative::rect_representative_sample;
@@ -166,6 +168,10 @@ pub struct ResolveInput<'a> {
     /// Generation the resolving view expects; guards against recycled slots.
     pub expected_geometry_generation: u32,
     pub header: GpuMaterialHeader,
+    /// Response program resolved from the ABI8 execution binding. `None` is
+    /// the explicit unbound/fallback path; a bound header without this context
+    /// is rejected by classification rather than guessed from header words.
+    pub response_program: Option<ProgramRef>,
     pub parameters: GpuSurfaceParameters,
     /// Sampled texels for every texture the material binds, in the same
     /// `texture_offset..texture_offset + texture_count` order the GPU heap
@@ -377,8 +383,15 @@ pub fn resolve_pixel(
     if input.header.generation != input.pixel.material_generation {
         return Err(ResolveError::StaleMaterial);
     }
-    let shading_class =
-        classify_material_header(&input.header).map_err(ResolveError::Classification)?;
+    let shading_class = match input.response_program {
+        Some(program) => crate::classification::classify_material_header_with_program(
+            &input.header,
+            program,
+            u32::MAX,
+        ),
+        None => classify_material_header(&input.header),
+    }
+    .map_err(ResolveError::Classification)?;
     let geometry = reconstruct_surface(
         SurfaceReconstructionInput {
             primitive_id: input.pixel.primitive_id,
@@ -823,7 +836,7 @@ mod tests {
     use super::*;
     use crate::{encode_barycentrics, MaterialShadingClass};
     use prism_render_material::{
-        fallback_material_header, GpuMaterialHeader, Illumination, MaterialRenderClass,
+        fallback_material_header, BuiltinProgram, GpuMaterialHeader, MaterialRenderClass,
     };
 
     /// The `OpenPBR` thin-film lobe must reach the Airy BSDF: the ABI carries the
@@ -939,7 +952,6 @@ mod tests {
         header.generation = 4;
         header.is_active = 1;
         header.render_class = MaterialRenderClass::Opaque as u32;
-        header.illumination = Illumination::Lit as u32;
         header
     }
 
@@ -956,6 +968,7 @@ mod tests {
             geometry_generation: 9,
             expected_geometry_generation: 9,
             header,
+            response_program: None,
             parameters,
             textures: &[],
             view_position: [0.0, 0.0, 4.0],
@@ -1267,8 +1280,7 @@ mod tests {
     #[test]
     fn unlit_bypasses_lighting_and_returns_base_plus_emissive() {
         let (primitives, vertices) = unit_triangle();
-        let mut header = principled_header();
-        header.illumination = Illumination::Unlit as u32;
+        let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.2, 0.4, 0.6, 1.0],
             emission_color: [0.1, 0.0, 0.0, 0.0],
@@ -1282,8 +1294,10 @@ mod tests {
             illuminance: [10.0; 3],
             visibility: 1.0,
         };
+        let mut input = base_input(&primitives, &vertices, header, parameters);
+        input.response_program = Some(ProgramRef::Builtin(BuiltinProgram::Unlit));
         let resolved = resolve_pixel(
-            base_input(&primitives, &vertices, header, parameters),
+            input,
             LightingEnvironment {
                 directional: &[light],
                 punctual: &[],
@@ -1388,7 +1402,6 @@ mod tests {
     fn npr_uses_quantized_toon_response() {
         let (primitives, vertices) = unit_triangle();
         let mut header = principled_header();
-        header.illumination = Illumination::Stylized as u32;
         let parameters = GpuSurfaceParameters {
             base_color: [1.0, 1.0, 1.0, 1.0],
             ..Default::default()
@@ -1398,8 +1411,10 @@ mod tests {
             illuminance: [1.0; 3],
             visibility: 1.0,
         };
+        let mut input = base_input(&primitives, &vertices, header, parameters);
+        input.response_program = Some(ProgramRef::Builtin(BuiltinProgram::Npr));
         let resolved = resolve_pixel(
-            base_input(&primitives, &vertices, header, parameters),
+            input,
             LightingEnvironment {
                 directional: &[light],
                 punctual: &[],
@@ -1518,8 +1533,7 @@ mod tests {
     fn base_color_texture_srgb_decodes_and_modulates_unlit_output() {
         use crate::{srgb_channel_to_linear, SEMANTIC_BASE_COLOR};
         let (primitives, vertices) = unit_triangle();
-        let mut header = principled_header();
-        header.illumination = Illumination::Unlit as u32;
+        let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.2, 0.4, 0.6, 1.0],
             emission_color: [0.1, 0.0, 0.0, 0.0],
@@ -1534,6 +1548,7 @@ mod tests {
         }];
         let input = ResolveInput {
             textures: &textures,
+            response_program: Some(ProgramRef::Builtin(BuiltinProgram::Unlit)),
             ..base_input(&primitives, &vertices, header, parameters)
         };
         let resolved = resolve_pixel(
@@ -1603,6 +1618,8 @@ mod tests {
             textures: &textures,
             ..base_input(&primitives, &vertices, header, parameters)
         };
+        let mut input = input;
+        input.response_program = Some(ProgramRef::Builtin(BuiltinProgram::Unlit));
         let tilted = resolve_pixel(
             input,
             LightingEnvironment {

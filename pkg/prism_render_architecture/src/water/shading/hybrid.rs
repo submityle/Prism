@@ -15,6 +15,102 @@ use super::{
     HybridBlendParams, HybridResponse, NprShadingParams, PbrShadingParams, SurfaceShadingInputs,
 };
 
+/// Normalized inputs shared by the CPU planner and the raster shader.
+///
+/// Both response arms consume the same rule: the stylized region is the maximum
+/// of the shore and shallow-water signals. Keeping the signals normalized
+/// before this function makes the contract directly portable to WESL without
+/// importing any host-side distance or depth units into the shader.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HybridWeightInputs {
+    /// Normalized shore-proximity signal (`1` at the shore, `0` offshore).
+    pub shore_signal: f32,
+    /// Normalized shallow-water signal (`1` at zero depth, `0` in deep water).
+    pub shallow_signal: f32,
+    /// Opacity of the stylized overlay over the blended base.
+    pub overlay_opacity: f32,
+}
+
+/// The shared CPU/GPU hybrid weight contract.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HybridWeights {
+    /// Weight toward the stylized response.
+    pub npr_weight: f32,
+    /// Weight toward the physically based response.
+    pub pbr_weight: f32,
+    /// Clamped opacity of the orthogonal stylized overlay.
+    pub overlay_opacity: f32,
+}
+
+/// Resolve normalized hybrid weights.
+///
+/// This is the behavior contract mirrored by `water_hybrid_weight_contract`
+/// in `water_surface_raster.wesl`: clamp both region signals, take their
+/// maximum for the `NPR` weight, and use its complement for `PBR`.
+#[must_use]
+pub fn resolve_hybrid_weights(inputs: HybridWeightInputs) -> HybridWeights {
+    let shore_signal = inputs.shore_signal.clamp(0.0, 1.0);
+    let shallow_signal = inputs.shallow_signal.clamp(0.0, 1.0);
+    let npr_weight = shore_signal.max(shallow_signal);
+
+    HybridWeights {
+        npr_weight,
+        pbr_weight: 1.0 - npr_weight,
+        overlay_opacity: inputs.overlay_opacity.clamp(0.0, 1.0),
+    }
+}
+
+/// Convert physical shore/depth measurements into the normalized contract.
+#[must_use]
+pub fn resolve_hybrid_geometry_weights(
+    blend: HybridBlendParams,
+    inputs: SurfaceShadingInputs,
+) -> HybridWeights {
+    let shore_signal = if blend.shore_blend_dist > EPS {
+        (1.0 - inputs.dist_to_shore / blend.shore_blend_dist).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let shallow_signal = if blend.deep_blend_depth > EPS {
+        (1.0 - inputs.depth / blend.deep_blend_depth).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    resolve_hybrid_weights(HybridWeightInputs {
+        shore_signal,
+        shallow_signal,
+        overlay_opacity: blend.overlay_opacity,
+    })
+}
+
+/// Blend one scalar response using the shared region weights and then apply
+/// the orthogonal stylized overlay.
+#[must_use]
+pub fn compose_hybrid_scalar(pbr: f32, npr: f32, weights: HybridWeights) -> f32 {
+    let blended = pbr * weights.pbr_weight + npr * weights.npr_weight;
+    blended * (1.0 - weights.overlay_opacity) + npr * weights.overlay_opacity
+}
+
+/// Current-to-previous motion convention used by the water raster output.
+#[must_use]
+pub fn hybrid_motion_vector(current_uv: [f32; 2], previous_uv: [f32; 2]) -> [f32; 2] {
+    [
+        current_uv[0] - previous_uv[0],
+        current_uv[1] - previous_uv[1],
+    ]
+}
+
+/// Reactive coverage used to gate the hybrid overlay without adding a new
+/// render target to the existing water surface ABI.
+#[must_use]
+pub fn hybrid_reactive_mask(foam: f32, motion: [f32; 2], transparency: f32) -> f32 {
+    let motion_strength = (motion[0] * motion[0] + motion[1] * motion[1]).sqrt();
+    foam.clamp(0.0, 1.0)
+        .max((motion_strength * 32.0).clamp(0.0, 1.0))
+        .max((1.0 - transparency).clamp(0.0, 1.0))
+}
+
 /// Resolve the [`HybridResponse`] for one surface sample.
 ///
 /// The stylized weight rises toward `1` near the shore and in the shallows and
@@ -28,28 +124,14 @@ pub fn plan_hybrid(
 ) -> HybridResponse {
     let pbr = plan_pbr(pbr_params, inputs);
     let npr = plan_npr(npr_params, inputs);
-
-    let shore_factor = if blend.shore_blend_dist > EPS {
-        (1.0 - inputs.dist_to_shore / blend.shore_blend_dist).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let shallow_factor = if blend.deep_blend_depth > EPS {
-        (1.0 - inputs.depth / blend.deep_blend_depth).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-
-    let npr_weight = shore_factor.max(shallow_factor).clamp(0.0, 1.0);
-    let pbr_weight = 1.0 - npr_weight;
-    let overlay_opacity = blend.overlay_opacity.clamp(0.0, 1.0);
+    let weights = resolve_hybrid_geometry_weights(blend, inputs);
 
     HybridResponse {
         pbr,
         npr,
-        npr_weight,
-        pbr_weight,
-        overlay_opacity,
+        npr_weight: weights.npr_weight,
+        pbr_weight: weights.pbr_weight,
+        overlay_opacity: weights.overlay_opacity,
     }
 }
 
@@ -185,5 +267,39 @@ mod tests {
             plan_hybrid(blend_params(), pbr_params(), npr_params(), inputs),
             plan_hybrid(blend_params(), pbr_params(), npr_params(), inputs)
         );
+    }
+
+    #[test]
+    fn normalized_weight_contract_matches_geometry_planner() {
+        let inputs = inputs_at(1.0, 1.0);
+        let direct = resolve_hybrid_weights(HybridWeightInputs {
+            shore_signal: 2.0 / 3.0,
+            shallow_signal: 0.5,
+            overlay_opacity: 0.35,
+        });
+        let geometry = resolve_hybrid_geometry_weights(blend_params(), inputs);
+        assert!((direct.npr_weight - geometry.npr_weight).abs() <= EPS);
+        assert!((direct.pbr_weight - geometry.pbr_weight).abs() <= EPS);
+        assert!((direct.overlay_opacity - geometry.overlay_opacity).abs() <= EPS);
+    }
+
+    #[test]
+    fn overlay_is_consumed_after_region_blend() {
+        let weights = HybridWeights {
+            npr_weight: 0.25,
+            pbr_weight: 0.75,
+            overlay_opacity: 0.5,
+        };
+        assert!((compose_hybrid_scalar(0.0, 1.0, weights) - 0.625).abs() < EPS);
+    }
+
+    #[test]
+    fn motion_and_reactive_contracts_are_bounded() {
+        assert_eq!(
+            hybrid_motion_vector([0.75, 0.25], [0.5, 0.5]),
+            [0.25, -0.25]
+        );
+        assert!((0.0..=1.0).contains(&hybrid_reactive_mask(0.3, [0.01, 0.0], 0.8)));
+        assert_eq!(hybrid_reactive_mask(0.0, [0.0, 0.0], 1.0), 0.0);
     }
 }

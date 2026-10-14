@@ -670,7 +670,7 @@ pub struct LobeSamplingSettings {
 impl Default for LobeSamplingSettings {
     fn default() -> Self {
         Self {
-            policy: LobeSamplingPolicy::for_quality(crate::ShadingQuality::High),
+            policy: LobeSamplingPolicy::for_quality(ShadingQuality::High),
             frame_index: 0,
             pixel: [0, 0],
         }

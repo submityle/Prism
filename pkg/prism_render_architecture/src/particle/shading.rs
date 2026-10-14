@@ -38,6 +38,7 @@
 use super::lod::ParticleQuality;
 use super::sort_cull::{choose_sort_strategy, BlendMode, SortDecision};
 use super::{EmberShadingModel, ShadingBasis, SortStrategy, Vec3};
+use crate::render_fabric::{ServiceId, ServiceSet};
 
 /// The render phase a particle renderer submits into (design §15).
 ///
@@ -143,54 +144,93 @@ pub fn attribute_footprint(model: EmberShadingModel) -> ShadingAttributeFootprin
     }
 }
 
-/// The shared lighting base services a platform makes available (design §16).
-///
-/// These gate the optional services in [`LightingServices`]; clustered lighting
-/// is always available for a lit model, but shadows / `GI` / ray tracing are
-/// only subscribed to when both the platform offers them and the model is lit.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct LightingServiceCaps {
-    /// Virtual shadow maps are available to receive.
-    pub shadow_maps: bool,
-    /// Screen-space / probe global illumination is available.
-    pub global_illumination: bool,
-    /// Ray-traced lighting (`bevy_solari`-style) is available.
-    pub ray_tracing: bool,
-}
+/// Stable semantic service identity for the particle shading declarations.
+pub const PARTICLE_CLUSTERED_LIGHTS: ServiceId = ServiceId(20);
+/// Stable semantic service identity for virtual shadow-map reception.
+pub const PARTICLE_SHADOW_MAPS: ServiceId = ServiceId(4);
+/// Stable semantic service identity for global illumination.
+pub const PARTICLE_GLOBAL_ILLUMINATION: ServiceId = ServiceId(2);
+/// Stable semantic service identity for ray-traced lighting.
+pub const PARTICLE_RAY_TRACING: ServiceId = ServiceId(21);
 
-/// The shared base services a shading model subscribes to this frame.
-///
-/// Determined by whether the model needs lighting at all (design §16): `Unlit`
-/// subscribes to nothing, while `PBR` and `NPR` subscribe *identically* — the
-/// shading axis never gates which shared services a lit model can consume.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct LightingServices {
-    /// Clustered (forward+) light evaluation.
-    pub clustered_lights: bool,
-    /// Virtual shadow-map reception.
-    pub shadow_maps: bool,
-    /// Global illumination (probe / screen-space).
-    pub global_illumination: bool,
-    /// Ray-traced lighting contribution.
-    pub ray_traced: bool,
-}
+/// The platform capability declaration accepted by particle shading.
+pub const PARTICLE_LIGHTING_SERVICES: ServiceSet = ServiceSet::new(&[
+    PARTICLE_SHADOW_MAPS,
+    PARTICLE_GLOBAL_ILLUMINATION,
+    PARTICLE_RAY_TRACING,
+]);
+
+const CLUSTERED: ServiceSet = ServiceSet::new(&[PARTICLE_CLUSTERED_LIGHTS]);
+const CLUSTERED_SHADOW: ServiceSet = ServiceSet::new(&[
+    PARTICLE_CLUSTERED_LIGHTS,
+    PARTICLE_SHADOW_MAPS,
+]);
+const CLUSTERED_GI: ServiceSet = ServiceSet::new(&[
+    PARTICLE_CLUSTERED_LIGHTS,
+    PARTICLE_GLOBAL_ILLUMINATION,
+]);
+const CLUSTERED_RAY: ServiceSet = ServiceSet::new(&[PARTICLE_CLUSTERED_LIGHTS, PARTICLE_RAY_TRACING]);
+const CLUSTERED_SHADOW_GI: ServiceSet = ServiceSet::new(&[
+    PARTICLE_CLUSTERED_LIGHTS,
+    PARTICLE_SHADOW_MAPS,
+    PARTICLE_GLOBAL_ILLUMINATION,
+]);
+const CLUSTERED_SHADOW_RAY: ServiceSet = ServiceSet::new(&[
+    PARTICLE_CLUSTERED_LIGHTS,
+    PARTICLE_SHADOW_MAPS,
+    PARTICLE_RAY_TRACING,
+]);
+const CLUSTERED_GI_RAY: ServiceSet = ServiceSet::new(&[
+    PARTICLE_CLUSTERED_LIGHTS,
+    PARTICLE_GLOBAL_ILLUMINATION,
+    PARTICLE_RAY_TRACING,
+]);
+const CLUSTERED_SHADOW_GI_RAY: ServiceSet = ServiceSet::new(&[
+    PARTICLE_CLUSTERED_LIGHTS,
+    PARTICLE_SHADOW_MAPS,
+    PARTICLE_GLOBAL_ILLUMINATION,
+    PARTICLE_RAY_TRACING,
+]);
 
 /// Resolves which shared lighting services a shading model consumes.
 ///
 /// An unlit model consumes none. Any lit model (`PBR`, `NPR`, a lit `Custom`, or
 /// a hybrid with a lit lobe) always consumes clustered lights and additionally
-/// each optional service the platform offers — the same set regardless of the
-/// `PBR`-vs-`NPR` choice (design §16, §18).
+/// each optional service in the platform declaration — the same set regardless
+/// of the `PBR`-vs-`NPR` choice (design §16, §18).
 #[must_use]
-pub fn lighting_services(model: EmberShadingModel, caps: LightingServiceCaps) -> LightingServices {
+pub fn lighting_services(model: EmberShadingModel, caps: ServiceSet) -> ServiceSet {
     if !model.needs_lighting() {
-        return LightingServices::default();
+        return ServiceSet::EMPTY;
     }
-    LightingServices {
-        clustered_lights: true,
-        shadow_maps: caps.shadow_maps,
-        global_illumination: caps.global_illumination,
-        ray_traced: caps.ray_tracing,
+    let shadow = caps.contains(PARTICLE_SHADOW_MAPS);
+    let gi = caps.contains(PARTICLE_GLOBAL_ILLUMINATION);
+    let ray = caps.contains(PARTICLE_RAY_TRACING);
+    match (shadow, gi, ray) {
+        (false, false, false) => CLUSTERED,
+        (true, false, false) => CLUSTERED_SHADOW,
+        (false, true, false) => CLUSTERED_GI,
+        (false, false, true) => CLUSTERED_RAY,
+        (true, true, false) => CLUSTERED_SHADOW_GI,
+        (true, false, true) => CLUSTERED_SHADOW_RAY,
+        (false, true, true) => CLUSTERED_GI_RAY,
+        (true, true, true) => CLUSTERED_SHADOW_GI_RAY,
+    }
+}
+
+/// Rebuilds a particle service declaration from the GPU twin's compact result.
+#[must_use]
+pub fn lighting_services_from_bits(bits: u32) -> ServiceSet {
+    match bits & 0x0f {
+        0 => ServiceSet::EMPTY,
+        1 => CLUSTERED,
+        3 => CLUSTERED_SHADOW,
+        5 => CLUSTERED_GI,
+        9 => CLUSTERED_RAY,
+        7 => CLUSTERED_SHADOW_GI,
+        11 => CLUSTERED_SHADOW_RAY,
+        13 => CLUSTERED_GI_RAY,
+        _ => CLUSTERED_SHADOW_GI_RAY,
     }
 }
 
@@ -437,7 +477,7 @@ pub struct ShadingProgramInput {
     /// The renderer's blend mode.
     pub blend: BlendMode,
     /// The platform's available shared lighting services.
-    pub caps: LightingServiceCaps,
+    pub caps: ServiceSet,
     /// Whether the renderer is a volumetric (smoke/fluid) renderer.
     pub volumetric: bool,
     /// The resolved quality tier (drives the deep-shadow ladder).
@@ -456,7 +496,7 @@ pub struct ShadingProgram {
     /// The per-particle attributes the kernel reads.
     pub footprint: ShadingAttributeFootprint,
     /// The shared lighting services the kernel subscribes to.
-    pub lighting: LightingServices,
+    pub lighting: ServiceSet,
     /// The volumetric self-shadow tier the kernel uses.
     pub deep_shadow: DeepShadowMode,
     /// Whether the model consumes lighting at all (cached from the model).
@@ -483,12 +523,8 @@ pub fn resolve_shading_program(input: ShadingProgramInput) -> ShadingProgram {
 mod tests {
     use super::*;
 
-    fn all_caps() -> LightingServiceCaps {
-        LightingServiceCaps {
-            shadow_maps: true,
-            global_illumination: true,
-            ray_tracing: true,
-        }
+    fn all_caps() -> ServiceSet {
+        PARTICLE_LIGHTING_SERVICES
     }
 
     #[test]
@@ -564,7 +600,7 @@ mod tests {
     #[test]
     fn unlit_subscribes_to_no_lighting_services() {
         let svc = lighting_services(EmberShadingModel::Unlit, all_caps());
-        assert_eq!(svc, LightingServices::default());
+        assert_eq!(svc, ServiceSet::EMPTY);
     }
 
     #[test]
@@ -572,24 +608,20 @@ mod tests {
         let pbr = lighting_services(EmberShadingModel::Pbr, all_caps());
         let npr = lighting_services(EmberShadingModel::Npr, all_caps());
         assert_eq!(pbr, npr);
-        assert!(pbr.clustered_lights);
-        assert!(pbr.shadow_maps);
-        assert!(pbr.global_illumination);
-        assert!(pbr.ray_traced);
+        assert!(pbr.contains(PARTICLE_CLUSTERED_LIGHTS));
+        assert!(pbr.contains(PARTICLE_SHADOW_MAPS));
+        assert!(pbr.contains(PARTICLE_GLOBAL_ILLUMINATION));
+        assert!(pbr.contains(PARTICLE_RAY_TRACING));
     }
 
     #[test]
     fn lighting_services_gate_on_platform_caps() {
-        let caps = LightingServiceCaps {
-            shadow_maps: true,
-            global_illumination: false,
-            ray_tracing: false,
-        };
+        let caps = ServiceSet::new(&[PARTICLE_SHADOW_MAPS]);
         let svc = lighting_services(EmberShadingModel::Pbr, caps);
-        assert!(svc.clustered_lights);
-        assert!(svc.shadow_maps);
-        assert!(!svc.global_illumination);
-        assert!(!svc.ray_traced);
+        assert!(svc.contains(PARTICLE_CLUSTERED_LIGHTS));
+        assert!(svc.contains(PARTICLE_SHADOW_MAPS));
+        assert!(!svc.contains(PARTICLE_GLOBAL_ILLUMINATION));
+        assert!(!svc.contains(PARTICLE_RAY_TRACING));
     }
 
     #[test]
@@ -601,7 +633,7 @@ mod tests {
         };
         assert_eq!(
             lighting_services(model, all_caps()),
-            LightingServices::default()
+            ServiceSet::EMPTY
         );
     }
 
@@ -799,7 +831,7 @@ mod tests {
         });
         assert_eq!(program.phase, ParticleRenderPhase::Transparent);
         assert!(program.footprint.material_params);
-        assert!(program.lighting.clustered_lights);
+        assert!(program.lighting.contains(PARTICLE_CLUSTERED_LIGHTS));
         assert_eq!(
             program.deep_shadow,
             DeepShadowMode::DeepOpacity { layers: 8 }
@@ -818,7 +850,7 @@ mod tests {
         });
         assert_eq!(program.phase, ParticleRenderPhase::Transparent);
         assert_eq!(program.footprint, ShadingAttributeFootprint::default());
-        assert_eq!(program.lighting, LightingServices::default());
+        assert_eq!(program.lighting, ServiceSet::EMPTY);
         assert_eq!(program.deep_shadow, DeepShadowMode::None);
         assert!(!program.needs_lighting);
     }

@@ -12,10 +12,11 @@ use bevy_image::Image;
 use bevy_material::AlphaMode;
 use bevy_pbr::StandardMaterial;
 use prism_render_architecture::abi::GenerationalHandle;
+use prism_render_architecture::render_fabric::RenderDomain;
 
 use crate::{
-    GpuMaterialTexture, GpuSurfaceParameters, Illumination, MaterialDomain, MaterialFeatureFlags,
-    MaterialRecord, MaterialRenderClass,
+    GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags,
+    MaterialRecord, MaterialRenderClass, ShadingPlan,
 };
 
 #[repr(u32)]
@@ -215,19 +216,19 @@ pub fn import_standard_material(
         handle,
         revision,
         domain: MaterialDomain::Surface,
+        render_domain: RenderDomain::Surface,
         render_class,
-        // Style axis is orthogonal to the closure graph: clearcoat is a lobe
-        // (carried by `closure_mask`), not an illumination.
-        illumination: if material.unlit {
-            Illumination::Unlit
+        // Response selection is a plan, not a raster/blend class. The standard
+        // material importer only needs the built-in Lit/Unlit programs.
+        response_plan: if material.unlit {
+            ShadingPlan::single_builtin(crate::BuiltinProgram::Unlit)
         } else {
-            Illumination::Lit
+            ShadingPlan::default()
         },
         features,
         closure_mask: closure_mask(material),
         surface: import_openpbr_surface(material, alpha_cutoff),
         textures: texture_rows,
-        custom_program: None,
     }
 }
 

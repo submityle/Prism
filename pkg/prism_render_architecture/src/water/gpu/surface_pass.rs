@@ -7,27 +7,27 @@
 //! [`super::pipeline`] and [`super::super::kernels`]). None of them draw
 //! anything. This module owns the missing half: the `@vertex`/`@fragment`
 //! raster pass that reads the solved displacement/normal/foam fields, shades
-//! them through the §5 frontend fork, and composites the result into the frame
+//! them through the §5 response fork, and composites the result into the frame
 //! buffer. It mirrors the forward transparent water pass every shipping
 //! renderer runs — `UE5` Single Layer Water, `Crest`, and `WaveWorks` all draw
 //! their ocean this way, after the opaque pass and before post-processing.
 //!
 //! Like the rest of [`super`], this is **pure integer bookkeeping**: no `GPU`
 //! handles, no floats, no wall clock. It fixes the blend mode, depth state,
-//! render target, bound shared base, and the stable `WESL` entry-point names
+//! render target and the stable `WESL` entry-point names
 //! the scene crate's draw node binds against, so the whole raster contract is
 //! deterministic and `CPU`-testable. The `WESL` source behind each entry name
 //! is authored in `water_surface.wesl`; only the contract lives here, exactly
 //! as [`super::super::kernels::WaterKernel::wesl_entry_point`] contracts the
 //! compute entry names.
 //!
-//! The geometry (vertex) stage is identical across all four frontends — the
-//! displaced surface mesh is frontend-agnostic — while the lighting response
-//! (fragment) stage forks per frontend (design §5). That split is expressed
+//! The geometry (vertex) stage is identical across all response plans — the
+//! displaced surface mesh is response-agnostic — while the lighting response
+//! (fragment) stage forks per response program (design §5). That split is expressed
 //! here as a shared [`SurfaceDrawDescriptor::vertex_entry`] and a
-//! frontend-specialized [`SurfaceDrawDescriptor::fragment_entry`].
+//! response-plan-specialized [`SurfaceDrawDescriptor::fragment_entry`].
 
-use super::super::{ShadingFrontend, SharedBaseServices};
+use super::super::{ResponseProgram, WaterShadingPlan};
 
 /// Depth-test comparison the surface draw uses against the already-populated
 /// scene depth buffer.
@@ -92,17 +92,14 @@ pub enum WaterRenderTarget {
 
 /// The full contract for one water-surface raster draw.
 ///
-/// Carries the shading frontend, the shared advanced base it binds (always the
-/// full base — §5b), the blend mode, depth state, and render target. The
+/// Carries the response/composition plan, blend mode, depth state, and render
+/// target. The
 /// `WESL` entry-point accessors give the stable names the scene crate's draw
 /// node keys its render pipeline against.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SurfaceDrawDescriptor {
-    /// Which §5 lighting-response frontend shades this surface.
-    pub frontend: ShadingFrontend,
-    /// The shared advanced base services bound for this draw. Every frontend
-    /// binds the full base; `NPR` is not a reduced path (§5b).
-    pub bound_base: SharedBaseServices,
+    /// Which §5 response/composition plan shades this surface.
+    pub plan: WaterShadingPlan,
     /// Color blend mode.
     pub blend: SurfaceBlend,
     /// Depth test / write state.
@@ -114,7 +111,7 @@ pub struct SurfaceDrawDescriptor {
 impl SurfaceDrawDescriptor {
     /// The stable `WESL` vertex entry-point name.
     ///
-    /// Shared across all four frontends: the displaced surface mesh geometry is
+    /// Shared across all response plans: the displaced surface mesh geometry is
     /// frontend-agnostic (design §5), so a single vertex stage feeds every
     /// lighting response. The `WESL` source lives in `water_surface.wesl`.
     #[must_use]
@@ -122,18 +119,22 @@ impl SurfaceDrawDescriptor {
         "water_surface_vs"
     }
 
-    /// The stable `WESL` fragment entry-point name for this frontend.
+    /// The stable `WESL` fragment entry-point name for this response plan.
     ///
-    /// Unlike the vertex stage, the fragment stage forks per frontend because
-    /// the frontends diverge exactly in the lighting response (design §5). Each
+    /// Unlike the vertex stage, the fragment stage forks per response program
+    /// because response programs diverge exactly in lighting response (design §5). Each
     /// name is distinct so the pipeline cache keys the correct specialization.
     #[must_use]
     pub fn fragment_entry(self) -> &'static str {
-        match self.frontend {
-            ShadingFrontend::Pbr => "water_surface_fs_pbr",
-            ShadingFrontend::Npr => "water_surface_fs_npr",
-            ShadingFrontend::Custom => "water_surface_fs_custom",
-            ShadingFrontend::Hybrid => "water_surface_fs_hybrid",
+        match self.plan {
+            WaterShadingPlan::Single { program } => match program {
+                ResponseProgram::Pbr => "water_surface_fs_pbr",
+                ResponseProgram::Npr => "water_surface_fs_npr",
+                ResponseProgram::Custom => "water_surface_fs_custom",
+            },
+            // Compatibility entry retained while the resident composition
+            // pass equivalence gate is being exercised.
+            WaterShadingPlan::MaskBlend { .. } => "water_surface_fs_hybrid",
         }
     }
 
@@ -145,19 +146,24 @@ impl SurfaceDrawDescriptor {
     }
 }
 
-/// Plan the default surface draw for a frontend.
+/// Plan the default surface draw for one response program.
 ///
-/// Binds the full shared advanced base (§5b, every frontend), pre-multiplied
+/// Uses the catalog-derived shared service closure, pre-multiplied
 /// alpha compositing for the refraction/reflection result, a `LessEqual` depth
 /// test against opaque geometry with depth-write disabled (the transparent
 /// surface must not occlude later transparent draws), and the main `HDR`
-/// transparent target. Deterministic: identical frontend in, identical
+/// transparent target. Deterministic: identical response program in, identical
 /// descriptor out, so the `GPU` pipeline key is stable across frames.
 #[must_use]
-pub fn plan_surface_draw(frontend: ShadingFrontend) -> SurfaceDrawDescriptor {
+pub fn plan_surface_draw(frontend: ResponseProgram) -> SurfaceDrawDescriptor {
+    plan_surface_plan(WaterShadingPlan::single(frontend))
+}
+
+/// Plan a surface draw from the complete response/composition plan.
+#[must_use]
+pub fn plan_surface_plan(plan: WaterShadingPlan) -> SurfaceDrawDescriptor {
     SurfaceDrawDescriptor {
-        frontend,
-        bound_base: frontend.shared_base(),
+        plan,
         blend: SurfaceBlend::PremultipliedAlpha,
         depth: SurfaceDepth {
             test: DepthTest::LessEqual,
@@ -171,22 +177,16 @@ pub fn plan_surface_draw(frontend: ShadingFrontend) -> SurfaceDrawDescriptor {
 mod tests {
     use super::*;
 
-    const FRONTENDS: [ShadingFrontend; 4] = [
-        ShadingFrontend::Pbr,
-        ShadingFrontend::Npr,
-        ShadingFrontend::Custom,
-        ShadingFrontend::Hybrid,
+    const FRONTENDS: [ResponseProgram; 3] = [
+        ResponseProgram::Pbr,
+        ResponseProgram::Npr,
+        ResponseProgram::Custom,
     ];
 
     #[test]
-    fn every_frontend_binds_the_full_shared_base() {
+    fn every_frontend_uses_the_shared_response_contract() {
         for frontend in FRONTENDS {
-            let draw = plan_surface_draw(frontend);
-            assert!(
-                draw.bound_base.contains(SharedBaseServices::ALL),
-                "{frontend:?} must bind the full shared advanced base (§5b)"
-            );
-            assert_eq!(draw.bound_base.len(), SharedBaseServices::COUNT);
+            assert!(!plan_surface_draw(frontend).fragment_entry().is_empty());
         }
     }
 
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn vertex_entry_is_shared_and_stable() {
-        let shared = plan_surface_draw(ShadingFrontend::Pbr).vertex_entry();
+        let shared = plan_surface_draw(ResponseProgram::Pbr).vertex_entry();
         assert_eq!(shared, "water_surface_vs");
         for frontend in FRONTENDS {
             // The displaced-mesh geometry stage is frontend-agnostic (§5).
@@ -231,8 +231,8 @@ mod tests {
     }
 
     #[test]
-    fn fragment_entry_forks_per_frontend_and_is_a_raster_stage() {
-        let mut seen: [&'static str; 4] = [""; 4];
+    fn fragment_entry_forks_per_response_and_is_a_raster_stage() {
+        let mut seen: [&'static str; 3] = [""; 3];
         for (slot, frontend) in FRONTENDS.iter().enumerate() {
             let draw = plan_surface_draw(*frontend);
             let fs = draw.fragment_entry();
@@ -249,6 +249,13 @@ mod tests {
                 assert_ne!(seen[i], seen[j], "fragment entries must be unique");
             }
         }
+    }
+
+    #[test]
+    fn mask_blend_is_composition_and_keeps_legacy_entry_until_equivalence_gate() {
+        let draw = plan_surface_plan(WaterShadingPlan::hybrid());
+        assert!(matches!(draw.plan, WaterShadingPlan::MaskBlend { .. }));
+        assert_eq!(draw.fragment_entry(), "water_surface_fs_hybrid");
     }
 
     #[test]

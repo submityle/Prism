@@ -67,7 +67,8 @@ pub struct BinQueueOutcome {
     pub queued: usize,
     /// Work items produced (a split bin produces three, not one).
     pub work_items: usize,
-    /// Bins skipped because their packed class did not name a phase.
+    /// Bins whose descriptor-table index was unknown and therefore used the
+    /// complete spine fallback query.
     pub unknown_class: usize,
     /// Bins skipped because the pipeline or the representative instance was
     /// missing from the registry.
@@ -78,7 +79,7 @@ impl BinQueueOutcome {
     /// The number of bins the stream contained.
     #[must_use]
     pub const fn total(self) -> usize {
-        self.queued + self.unknown_class + self.unresolved
+        self.queued + self.unresolved
     }
 }
 
@@ -93,9 +94,10 @@ impl RenderQueues {
     /// cluster/LOD selector for diagnostics.
     ///
     /// Items are ordered by their absolute command slot, so the queue records
-    /// bins in the same order the argument buffer stores them. A bin whose class
-    /// does not decode, or whose pipeline/instance is not resident, is skipped
-    /// and counted in the returned [`BinQueueOutcome`].
+    /// bins in the same order the argument buffer stores them. A bin whose
+    /// descriptor index is unknown uses the registry's complete spine fallback
+    /// and is counted in `unknown_class`; geometry/instance residency failures
+    /// remain unresolved and are skipped.
     pub fn fill_bins<D: RenderDevice, P: MeshPipelineProvider>(
         &mut self,
         device: &D,
@@ -112,8 +114,18 @@ impl RenderQueues {
     ) -> BinQueueOutcome {
         let mut outcome = BinQueueOutcome::default();
         for range in &bins.bins {
-            let passes = registry.pass_descriptors(range.key.pipeline_class)
-                .expect("unknown draw-bin pass descriptor index: refusing silent geometry loss");
+            let fallback_pass;
+            let passes = match registry.pass_descriptors(range.key.pipeline_class) {
+                Some(passes) => passes,
+                None => {
+                    // The packed stream cannot recover a missing material pass
+                    // set. Keep the draw alive with a complete, known query and
+                    // make the loss observable to diagnostics.
+                    outcome.unknown_class += 1;
+                    fallback_pass = registry.fallback_pass();
+                    core::slice::from_ref(&fallback_pass)
+                }
+            };
             let Some(mesh_class) = registry.mesh_class(range.key.vertex_buffer_class) else {
                 outcome.unresolved += 1;
                 continue;

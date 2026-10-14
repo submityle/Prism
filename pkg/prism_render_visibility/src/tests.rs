@@ -25,13 +25,13 @@ fn material(handle: GenerationalHandle) -> MaterialRecord {
         handle,
         revision: 1,
         domain: MaterialDomain::Surface,
+        render_domain: RenderDomain::Surface,
         render_class: MaterialRenderClass::Opaque,
-        illumination: Illumination::Lit,
+        response_plan: prism_render_material::ShadingPlan::default(),
         features: Default::default(),
         closure_mask: 1,
         surface: Default::default(),
         textures: Vec::new(),
-        custom_program: None,
     }
 }
 

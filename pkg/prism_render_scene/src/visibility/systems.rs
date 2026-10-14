@@ -193,17 +193,17 @@ fn draw_bin_candidate(
 ) -> Option<DrawBinCandidate> {
     let geometry = geometries.record(work.geometry)?;
     let lod = geometry.resolve_lod(work.lod_or_cluster)?;
-    let material = materials.get(&work.material)?;
+    materials.get(&work.material)?;
     Some(DrawBinCandidate {
         scene: work.scene,
         key: DrawBinKey {
             geometry: work.geometry,
             lod_or_cluster: lod.level,
-            // The bin class is the material's full permutation key (illumination
-            // + live lobe set + render_class), not just illumination/render_class:
-            // materials that differ only in a live lobe (e.g. a face-shadow or
-            // clearcoat lobe) must not batch into one bin.
-            pipeline_class: material.specialization().bin_class(),
+            // Unified visibility uses one resident raster pipeline; response
+            // programs and live lobes are selected from the ABI header during
+            // shading. Keep the bin key a dense execution-table coordinate,
+            // never a material bit packing.
+            pipeline_class: 0,
             vertex_buffer_class: geometry.vertex_buffer_class,
             index_buffer_class: geometry.index_buffer_class,
             indexed: lod.primitive_kind

@@ -3,6 +3,7 @@
 
 use bevy_platform::future::block_on;
 use bevy_render::renderer::RenderDevice;
+use core::mem::size_of;
 use prism_render_material::{BlendDomain, ChannelMask, MaterialRenderClass};
 use prism_render_scene::response_gpu::{
     GpuAuxiliaryMerge, GpuCompositionJob, GpuResponseOutput, ResponseCompositionPipelines,
@@ -30,7 +31,38 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
         }
     };
     eprintln!("response GPU adapter: {:?}", adapter.get_info());
-    Some(block_on(adapter.request_device(&Default::default())).expect("GPU device"))
+    let limits = adapter.limits();
+    let required_auxiliary_bytes = 14_520_u64 * size_of::<GpuAuxiliaryMerge>() as u64;
+    let capability_error = if limits.max_compute_invocations_per_workgroup < 64
+        || limits.max_compute_workgroup_size_x < 64
+        || limits.max_storage_buffer_binding_size < required_auxiliary_bytes
+        || limits.max_buffer_size < required_auxiliary_bytes
+    {
+        Some(format!(
+            "response composition needs workgroup x64 and {required_auxiliary_bytes} byte storage buffers; adapter limits are {limits:?}"
+        ))
+    } else {
+        None
+    };
+    if let Some(error) = capability_error {
+        assert!(
+            std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+            "PRISM_REQUIRE_GPU set: response GPU capability gate failed: {error}"
+        );
+        eprintln!("response GPU skipped: {error}");
+        return None;
+    }
+    match block_on(adapter.request_device(&Default::default())) {
+        Ok(device_queue) => Some(device_queue),
+        Err(error) => {
+            assert!(
+                std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+                "PRISM_REQUIRE_GPU set: response GPU device request failed: {error}"
+            );
+            eprintln!("response GPU skipped: device request failed: {error}");
+            None
+        }
+    }
 }
 
 fn upload<T: bytemuck::Pod>(device: &wgpu::Device, label: &str, values: &[T]) -> wgpu::Buffer {

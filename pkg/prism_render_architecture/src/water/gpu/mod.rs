@@ -132,8 +132,8 @@ pub use surface_mesh_kernel::{
 };
 
 pub use surface_pass::{
-    plan_surface_draw, DepthTest, SurfaceBlend, SurfaceDepth, SurfaceDrawDescriptor,
-    WaterRenderTarget,
+    plan_surface_draw, plan_surface_plan, DepthTest, SurfaceBlend, SurfaceDepth,
+    SurfaceDrawDescriptor, WaterRenderTarget,
 };
 
 pub use surface_reconstruct_kernel::{

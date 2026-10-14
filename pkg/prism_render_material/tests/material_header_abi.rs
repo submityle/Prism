@@ -1,10 +1,11 @@
 //! The `GpuMaterialHeader` ABI mirror gate (design doc §8.2, roadmap P1-b).
 //!
 //! The material header is declared once in Rust (`record.rs`) and mirrored by
-//! five WESL shaders that cannot `import` the Rust type: `material.wesl`'s
+//! six WESL shaders that cannot `import` the Rust type: `material.wesl`'s
 //! canonical `PrismMaterialHeader`, plus the standalone `MaterialHeader`
-//! mirrors in `opaque.wesl`, `transparent.wesl`, `visibility.wesl` and
-//! `material_classification.wesl`. WESL binds storage-buffer struct fields
+//! mirrors in `opaque.wesl`, `transparent.wesl`, `visibility.wesl`,
+//! `visibility_raster.wesl` and `material_classification.wesl`. WESL binds
+//! storage-buffer struct fields
 //! **positionally**, so a field added, removed or reordered in one place and not
 //! the other silently shifts every subsequent word — the exact drift §8.2
 //! demands be impossible.
@@ -91,11 +92,12 @@ fn strip_comment(line: &str) -> &str {
 }
 
 /// Every WESL shader that mirrors the header, with its struct name.
-const MIRRORS: [(&str, &str); 5] = [
+const MIRRORS: [(&str, &str); 6] = [
     ("material.wesl", "PrismMaterialHeader"),
     ("opaque.wesl", "MaterialHeader"),
     ("transparent.wesl", "MaterialHeader"),
     ("visibility.wesl", "MaterialHeader"),
+    ("visibility_raster.wesl", "MaterialHeader"),
     ("material_classification.wesl", "MaterialHeader"),
 ];
 
@@ -123,4 +125,29 @@ fn every_wesl_material_header_mirrors_the_rust_struct_exactly() {
              storage-buffer fields positionally, so the names and order must match exactly"
         );
     }
+}
+
+#[test]
+fn abi7_execution_binding_is_five_dense_words_with_full_permutation_width() {
+    let header = prism_render_material::GpuMaterialHeader {
+        execution_plan_index: 7,
+        execution_program_index: 11,
+        execution_package_index: 13,
+        execution_permutation_low: 0x7654_3210,
+        execution_permutation_high: 0xfedc_ba98,
+        ..Default::default()
+    };
+    assert_eq!(
+        header.execution_binding_words(),
+        [7, 11, 13, 0x7654_3210, 0xfedc_ba98]
+    );
+    assert_eq!(
+        header.execution_permutation_low as u64
+            | (u64::from(header.execution_permutation_high) << 32),
+        0xfedc_ba98_7654_3210
+    );
+    assert_eq!(
+        std::mem::size_of::<prism_render_material::GpuMaterialHeader>(),
+        28 * std::mem::size_of::<u32>()
+    );
 }

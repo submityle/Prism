@@ -1,8 +1,8 @@
 struct PrismMaterialHeader {
     generation: u32,
     revision: u32,
-    illumination: u32,
     render_class: u32,
+    render_domain: u32,
     feature_flags: u32,
     closure_mask: u32,
     parameter_offset: u32,
@@ -11,12 +11,9 @@ struct PrismMaterialHeader {
     texture_count: u32,
     sampler_offset: u32,
     sampler_count: u32,
-    custom_program: u32,
     is_active: u32,
     material_epoch_low: u32,
     material_epoch_high: u32,
-    specialization_low: u32,
-    specialization_high: u32,
     lobe_mask: u32,
     // PCM extension digest (§5.3): `used` and `required`, each split low/high
     // so all 64 registry slots are addressable. Mirrors
@@ -34,6 +31,13 @@ struct PrismMaterialHeader {
     dynamic_snow: u32,
     dynamic_damage: u32,
     dynamic_dissolve: u32,
+    // ABI v8: verified dense plan/program/package identity plus the complete
+    // 64-bit permutation index. Each word is 0xffffffff when unbound.
+    execution_plan_index: u32,
+    execution_program_index: u32,
+    execution_package_index: u32,
+    execution_permutation_low: u32,
+    execution_permutation_high: u32,
 }
 
 struct PrismSurfaceParameters {

@@ -13,7 +13,7 @@ use prism_bevy::{
 };
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_material::{
-    GpuSurfaceParameters, Illumination, MaterialDomain, MaterialFeatureFlags, MaterialRenderClass,
+    GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags, MaterialRenderClass,
 };
 
 fn handle(index: u32) -> GenerationalHandle {
@@ -60,13 +60,13 @@ fn material() -> MaterialRecord {
         handle: material_handle(),
         revision: 1,
         domain: MaterialDomain::default(),
+        render_domain: prism_render_material::RenderDomain::Surface,
         render_class: MaterialRenderClass::Opaque,
-        illumination: Illumination::default(),
+        response_plan: prism_render_material::ShadingPlan::default(),
         features: MaterialFeatureFlags::default(),
         closure_mask: 0,
         surface: GpuSurfaceParameters::default(),
         textures: Vec::new(),
-        custom_program: None,
     }
 }
 

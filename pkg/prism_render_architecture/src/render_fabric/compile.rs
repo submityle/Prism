@@ -33,6 +33,10 @@ pub enum FabricCompileError {
         resource: ResourceKey,
         frame: u64,
     },
+    UnexpectedBinding {
+        resource: ResourceKey,
+        frame: u64,
+    },
     MissingBinding {
         resource: ResourceKey,
         frame: u64,
@@ -207,6 +211,14 @@ impl<'a> ResourceTemplates<'a> {
         }
         let admission_order = admission.compile()?.execution_order;
         let mut supplied = BTreeMap::new();
+        for binding in external {
+            if !needed.contains(&(binding.key, binding.frame)) {
+                return Err(FabricCompileError::UnexpectedBinding {
+                    resource: binding.key,
+                    frame: binding.frame,
+                });
+            }
+        }
         for &binding in external {
             let address = (binding.key, binding.frame);
             if supplied.insert(address, binding).is_some() {
@@ -372,8 +384,13 @@ impl<'a> ResourceTemplates<'a> {
             passes,
             versions,
             plan,
+            barriers_by_destination: Vec::new(),
             items: Vec::new(),
         };
+        compiled.barriers_by_destination = vec![Vec::new(); compiled.plan.declared_pass_count];
+        for (index, barrier) in compiled.plan.barriers.iter().enumerate() {
+            compiled.barriers_by_destination[barrier.destination.0 as usize].push(index);
+        }
         for item in items {
             self.validate_payload(&compiled, item)?;
         }
@@ -512,6 +529,7 @@ pub struct CompiledFeatureGraph {
     passes: Vec<PassSpec>,
     versions: Vec<FrameResourceVersion>,
     plan: CompiledGpuFrameGraph,
+    barriers_by_destination: Vec<Vec<usize>>,
     items: Vec<FrameRenderItem>,
 }
 impl CompiledFeatureGraph {
@@ -546,13 +564,8 @@ impl CompiledFeatureGraph {
     pub fn execute<S: FeatureGraphSink>(self, sink: &mut S) -> Result<(), S::Error> {
         sink.begin(&self.resources, &self.items, &self.plan)?;
         for &id in &self.plan.execution_order {
-            for barrier in self
-                .plan
-                .barriers
-                .iter()
-                .filter(|barrier| barrier.destination == id)
-            {
-                sink.barrier(barrier)?;
+            for &barrier in &self.barriers_by_destination[id.0 as usize] {
+                sink.barrier(&self.plan.barriers[barrier])?;
             }
             sink.pass(&self.passes[id.0 as usize])?;
         }

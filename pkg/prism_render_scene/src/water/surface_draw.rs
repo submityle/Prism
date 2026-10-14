@@ -167,7 +167,7 @@ pub(crate) fn draw_water_surface(
             continue;
         }
         let Some(pipeline) =
-            cache.get_render_pipeline(view_pipelines.id_for(draw.shading.frontend))
+            cache.get_render_pipeline(view_pipelines.id_for(draw.shading.plan))
         else {
             continue;
         };

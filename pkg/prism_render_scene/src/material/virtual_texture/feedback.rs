@@ -22,8 +22,8 @@ use bevy_render::{
 use prism_render_architecture::gpu_scene::InstanceRecord;
 use prism_render_architecture::texture_streaming::TextureSemantic as StreamingTextureSemantic;
 use prism_render_material::{
-    GpuMaterialTexture, Illumination, MaterialVtFormat, MaterialVtSourceSnapshot,
-    TextureSemantic as MaterialTextureSemantic, NO_VIRTUAL_TEXTURE,
+    BuiltinProgram, GpuMaterialTexture, MaterialVtFormat, MaterialVtSourceSnapshot, ProgramRef,
+    ShadingPlan, TextureSemantic as MaterialTextureSemantic, NO_VIRTUAL_TEXTURE,
 };
 use prism_render_visibility::{
     barycentric_derivatives, interpolate_vec2, ClipVertex, GpuViewRecord, Viewport,
@@ -391,12 +391,14 @@ fn decode_view_feedback(
                 continue;
             };
 
-            let shade_channel = match material.illumination {
-                Illumination::Lit => Some(crate::shading::texel_cache::ShadeChannel::LitDiffuse),
-                Illumination::Stylized => {
+            let shade_channel = match material.response_plan {
+                ShadingPlan::Single { program: ProgramRef::Builtin(BuiltinProgram::Lit) } => {
+                    Some(crate::shading::texel_cache::ShadeChannel::LitDiffuse)
+                }
+                ShadingPlan::Single { program: ProgramRef::Builtin(BuiltinProgram::Npr) } => {
                     Some(crate::shading::texel_cache::ShadeChannel::StylizedDiffuse)
                 }
-                Illumination::Unlit | Illumination::Custom => None,
+                _ => None,
             };
             if let Some(channel) = shade_channel
                 && let Ok(chart) = build_shade_dispatch_chart(

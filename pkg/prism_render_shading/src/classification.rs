@@ -1,8 +1,19 @@
 use alloc::vec::Vec;
 use prism_render_material::{
-    ClosureKind, GpuMaterialHeader, Illumination, LobeLayout, MaterialRenderClass,
-    ResponseModeLayout, SURFACE_RESPONSE_MODES,
+    BuiltinProgram, ClosureKind, GpuMaterialHeader, LobeLayout,
+    MaterialExecutionTables, MaterialFeatureFlags, MaterialRenderClass, ProgramRef, RenderDomain,
+    ResponseProgramLayout, SURFACE_RESPONSE_PROGRAMS,
 };
+
+/// Response family derived from the verified program table. This is a shading
+/// classifier detail, not a material ABI axis or a pipeline identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Illumination {
+    Lit,
+    Stylized,
+    Unlit,
+    Custom,
+}
 
 pub const MAX_SHADING_CLASSES: usize = 9;
 
@@ -38,6 +49,10 @@ pub enum ClassificationError {
     Inactive,
     NonSurfaceClass,
     UnsupportedIllumination(u32),
+    /// The header carries a partial or otherwise invalid ABI8 execution tuple.
+    InvalidExecutionBinding,
+    /// A complete execution tuple needs its verified runtime tables to resolve.
+    ExecutionContextRequired,
 }
 
 #[repr(C)]
@@ -136,6 +151,11 @@ pub enum ShadingClassRule {
     /// A dedicated subsystem render class binds its bucket directly, whatever
     /// the illumination axis says (a stylized water shader is still water work).
     RenderClass(MaterialRenderClass),
+    /// A runtime object domain selects this bucket independently of blend.
+    Domain(RenderDomain),
+    /// A material feature selects this bucket while the object stays in the
+    /// surface domain.
+    Feature(MaterialFeatureFlags),
     /// The illumination axis selects this bucket.
     Illumination(Illumination),
     /// `Illumination::Custom` **with a bound program handle** (§3.5.4).
@@ -326,13 +346,19 @@ fn closure_rows(lobes: &[LobeLayout]) -> Vec<ShadingClassRow> {
 /// class table.
 fn response_mode_rows(
     registry: &prism_material_pcm::ExtensionRegistry,
-    modes: &[ResponseModeLayout],
+    modes: &[ResponseProgramLayout],
 ) -> Result<Vec<ShadingClassRow>, ClassTableError> {
     let mut rows = Vec::new();
     let mut seen = Vec::new();
     for mode in modes {
         let manifest = registry
             .manifest_by_uid(mode.uid)
+            .or_else(|| {
+                registry.iter().find(|manifest| {
+                    manifest.kind() == prism_material_pcm::Kind::ResponseMode
+                        && manifest.registry_slot() == Some(mode.registry_slot)
+                })
+            })
             .ok_or_else(|| ClassTableError::UnregisteredResponseMode(mode.uid.to_owned()))?;
         if manifest.kind() != prism_material_pcm::Kind::ResponseMode {
             return Err(ClassTableError::UnregisteredResponseMode(
@@ -349,13 +375,18 @@ fn response_mode_rows(
                 registry: registry_slot,
             });
         }
-        let illumination = Illumination::from_name(mode.illumination).ok_or_else(|| {
-            ClassTableError::UnknownResponseModeIllumination(mode.illumination.to_owned())
-        })?;
+        let illumination = match mode.builtin {
+            "lit" => Illumination::Lit,
+            "npr" => Illumination::Stylized,
+            "unlit" => Illumination::Unlit,
+            other => {
+                return Err(ClassTableError::UnknownResponseModeIllumination(
+                    other.to_owned(),
+                ))
+            }
+        };
         if illumination == Illumination::Lit {
-            return Err(ClassTableError::DefaultResponseModeDeclared(
-                mode.uid.to_owned(),
-            ));
+            continue;
         }
         seen.push(illumination);
         let (id, name, rule) = match illumination {
@@ -378,8 +409,8 @@ fn response_mode_rows(
         };
         rows.push(ShadingClassRow { id, name, rule });
     }
-    for illumination in Illumination::ALL {
-        if illumination != Illumination::Lit && !seen.contains(&illumination) {
+    for illumination in [Illumination::Stylized, Illumination::Unlit] {
+        if !seen.contains(&illumination) {
             return Err(ClassTableError::MissingResponseMode(illumination));
         }
     }
@@ -387,7 +418,10 @@ fn response_mode_rows(
         .iter()
         .filter(|manifest| manifest.kind() == prism_material_pcm::Kind::ResponseMode)
     {
-        if !modes.iter().any(|mode| mode.uid == manifest.uid()) {
+        if !modes
+            .iter()
+            .any(|mode| mode.registry_slot == manifest.registry_slot().unwrap_or(u32::MAX))
+        {
             return Err(ClassTableError::UnhandledResponseMode(
                 manifest.uid().to_owned(),
             ));
@@ -426,18 +460,26 @@ impl ShadingClassTable {
         rows.push(ShadingClassRow {
             id: MaterialShadingClass::Water as u32,
             name: "water",
-            rule: ShadingClassRule::RenderClass(MaterialRenderClass::Water),
+            rule: ShadingClassRule::Feature(MaterialFeatureFlags::WATER),
         });
         rows.push(ShadingClassRow {
             id: MaterialShadingClass::Hair as u32,
             name: "hair",
-            rule: ShadingClassRule::RenderClass(MaterialRenderClass::Hair),
+            rule: ShadingClassRule::Domain(RenderDomain::Hair),
         });
 
         // Registered response modes. The schema owns the set/order/slot; the
         // shading side resolves the declared illumination name against its own
         // axis vocabulary and verifies that the PCM registry mirrors the row.
-        rows.extend(response_mode_rows(registry, &SURFACE_RESPONSE_MODES)?);
+        rows.extend(response_mode_rows(registry, &SURFACE_RESPONSE_PROGRAMS)?);
+
+        // Registered project programs are the ABI8 replacement for the legacy
+        // `Custom` header word; keep a bucket for them without inventing an id.
+        rows.push(ShadingClassRow {
+            id: MaterialShadingClass::Custom as u32,
+            name: "custom",
+            rule: ShadingClassRule::CustomProgram,
+        });
 
         // Existing `Lit` dispatch buckets, most specific first. The complete
         // schema closure relationship is type-checked during code generation,
@@ -546,10 +588,49 @@ impl ShadingClassTable {
     /// [`ClassificationError`] for an inactive material, a non-surface render
     /// class, or an illumination value the axis does not define.
     pub fn classify(&self, header: &GpuMaterialHeader) -> Result<u32, ClassificationError> {
+        self.classify_with_response(header, response_identity(header, None)?, u32::MAX)
+    }
+
+    /// Classify using a response program already resolved from a verified
+    /// ABI8 execution binding.
+    pub fn classify_with_program(
+        &self,
+        header: &GpuMaterialHeader,
+        program: ProgramRef,
+        region_illumination: u32,
+    ) -> Result<u32, ClassificationError> {
+        self.classify_with_response(
+            header,
+            response_identity_from_program(program),
+            region_illumination,
+        )
+    }
+
+    /// Classify with the verified ABI8 execution tables.
+    #[allow(dead_code)]
+    pub fn classify_with_execution(
+        &self,
+        header: &GpuMaterialHeader,
+        execution: &MaterialExecutionTables,
+        region_illumination: u32,
+    ) -> Result<u32, ClassificationError> {
+        self.classify_with_response(
+            header,
+            response_identity(header, Some(execution))?,
+            region_illumination,
+        )
+    }
+
+    fn classify_with_response(
+        &self,
+        header: &GpuMaterialHeader,
+        response: ResponseIdentity,
+        region_illumination: u32,
+    ) -> Result<u32, ClassificationError> {
         if header.is_active == 0 {
             return Err(ClassificationError::Inactive);
         }
-        if !is_surface_render_class(header.render_class) {
+        if !is_classifiable_surface(header) {
             return Err(ClassificationError::NonSurfaceClass);
         }
         // The illumination axis is parsed lazily: the dedicated render-class rows
@@ -557,14 +638,25 @@ impl ShadingClassTable {
         // stylized water shader is still water work), so an unknown value there
         // must not pre-empt them. Only a row that actually consults the axis can
         // reject it.
-        let illumination = Illumination::from_u32(header.illumination);
+        let illumination = response.illumination();
+        let illumination = match (illumination, region_illumination) {
+            (Some(Illumination::Lit | Illumination::Stylized), 0) => Some(Illumination::Lit),
+            (Some(Illumination::Lit | Illumination::Stylized), 1) => {
+                Some(Illumination::Stylized)
+            }
+            (value, _) => value,
+        };
         for row in &self.rows {
             let matched = match row.rule {
                 ShadingClassRule::RenderClass(class) => header.render_class == class as u32,
+                ShadingClassRule::Domain(domain) => header.render_domain == domain as u32,
+                ShadingClassRule::Feature(feature) => {
+                    header.feature_flags & feature.0 == feature.0
+                }
                 ShadingClassRule::Illumination(axis) => {
                     let Some(actual) = illumination else {
                         return Err(ClassificationError::UnsupportedIllumination(
-                            header.illumination,
+                            response.raw_value(),
                         ));
                     };
                     actual == axis
@@ -572,17 +664,17 @@ impl ShadingClassTable {
                 ShadingClassRule::CustomProgram => {
                     let Some(actual) = illumination else {
                         return Err(ClassificationError::UnsupportedIllumination(
-                            header.illumination,
+                            response.raw_value(),
                         ));
                     };
                     // A custom response needs a program to run; without one the
                     // row below (the default) claims it.
-                    actual == Illumination::Custom && header.custom_program != u32::MAX
+                    actual == Illumination::Custom && response == ResponseIdentity::Custom
                 }
                 ShadingClassRule::Closure(kind) => {
                     let Some(actual) = illumination else {
                         return Err(ClassificationError::UnsupportedIllumination(
-                            header.illumination,
+                            response.raw_value(),
                         ));
                     };
                     actual == Illumination::Lit && has_closure(header.closure_mask, kind)
@@ -593,7 +685,7 @@ impl ShadingClassTable {
                     // surface with no bound program (the safe degradation).
                     let Some(actual) = illumination else {
                         return Err(ClassificationError::UnsupportedIllumination(
-                            header.illumination,
+                            response.raw_value(),
                         ));
                     };
                     matches!(actual, Illumination::Lit | Illumination::Custom)
@@ -607,6 +699,64 @@ impl ShadingClassTable {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResponseIdentity {
+    Lit,
+    Npr,
+    Unlit,
+    Custom,
+}
+
+impl ResponseIdentity {
+    const fn illumination(self) -> Option<Illumination> {
+        match self {
+            Self::Lit => Some(Illumination::Lit),
+            Self::Npr => Some(Illumination::Stylized),
+            Self::Unlit => Some(Illumination::Unlit),
+            Self::Custom => Some(Illumination::Custom),
+        }
+    }
+
+    const fn raw_value(self) -> u32 {
+        self.illumination().unwrap() as u32
+    }
+}
+
+fn response_identity(
+    header: &GpuMaterialHeader,
+    execution: Option<&MaterialExecutionTables>,
+) -> Result<ResponseIdentity, ClassificationError> {
+    let words = header.execution_binding_words();
+    let sentinel = GpuMaterialHeader::EXECUTION_BINDING_SENTINEL;
+    if words.iter().all(|word| *word == sentinel) {
+        // Slot-zero/fallback materials are the ABI8 equivalent of legacy Lit.
+        return Ok(ResponseIdentity::Lit);
+    }
+    if words.iter().any(|word| *word == sentinel) {
+        return Err(ClassificationError::InvalidExecutionBinding);
+    }
+    let Some(execution) = execution else {
+        return Err(ClassificationError::ExecutionContextRequired);
+    };
+    let binding = execution
+        .bind_raw(words[0], words[1], words[2], u64::from(words[3]) | (u64::from(words[4]) << 32))
+        .map_err(|_| ClassificationError::InvalidExecutionBinding)?;
+    let program = execution
+        .program(binding.response_program_index)
+        .map_err(|_| ClassificationError::InvalidExecutionBinding)?
+        .program();
+    Ok(response_identity_from_program(program))
+}
+
+fn response_identity_from_program(program: ProgramRef) -> ResponseIdentity {
+    match program {
+        ProgramRef::Builtin(BuiltinProgram::Lit) => ResponseIdentity::Lit,
+        ProgramRef::Builtin(BuiltinProgram::Npr) => ResponseIdentity::Npr,
+        ProgramRef::Builtin(BuiltinProgram::Unlit) => ResponseIdentity::Unlit,
+        ProgramRef::Registered(_) => ResponseIdentity::Custom,
+    }
+}
+
 /// Whether a render class is one of the surface-domain blend families.
 fn is_surface_render_class(render_class: u32) -> bool {
     matches!(
@@ -615,9 +765,15 @@ fn is_surface_render_class(render_class: u32) -> bool {
             || x == MaterialRenderClass::OpaqueTwoSided as u32
             || x == MaterialRenderClass::Masked as u32
             || x == MaterialRenderClass::MaskedTwoSided as u32
-            || x == MaterialRenderClass::Hair as u32
-            || x == MaterialRenderClass::Water as u32
     )
+}
+
+fn is_classifiable_surface(header: &GpuMaterialHeader) -> bool {
+    is_surface_render_class(header.render_class)
+        && matches!(
+            header.render_domain,
+            x if x == RenderDomain::Surface as u32 || x == RenderDomain::Hair as u32
+        )
 }
 
 /// Project a `Lit` surface's closure graph onto a coherent shading bucket. The
@@ -660,46 +816,82 @@ pub fn classify_material_header_with_region(
     }
     // Surface-domain blend families only. `Npr*`/`Custom*` no longer exist as
     // render classes; style lives on the illumination axis instead.
-    if !matches!(
-        header.render_class,
-        x if x == MaterialRenderClass::Opaque as u32
-            || x == MaterialRenderClass::OpaqueTwoSided as u32
-            || x == MaterialRenderClass::Masked as u32
-            || x == MaterialRenderClass::MaskedTwoSided as u32
-            || x == MaterialRenderClass::Hair as u32
-            || x == MaterialRenderClass::Water as u32
-    ) {
+    if !is_classifiable_surface(header) {
         return Err(ClassificationError::NonSurfaceClass);
     }
 
-    // Dedicated subsystem render classes bind their bucket directly, regardless
-    // of the illumination axis (a stylized water shader is still water work).
-    if header.render_class == MaterialRenderClass::Water as u32 {
-        return Ok(MaterialShadingClass::Water);
-    }
-    if header.render_class == MaterialRenderClass::Hair as u32 {
+    // Dedicated domains/features bind their bucket directly, regardless of
+    // the illumination axis.
+    if header.render_domain == RenderDomain::Hair as u32 {
         return Ok(MaterialShadingClass::Hair);
     }
+    if header.feature_flags & MaterialFeatureFlags::WATER.0 != 0 {
+        return Ok(MaterialShadingClass::Water);
+    }
 
-    let illumination = match header.illumination {
-        0 | 1 => match region_illumination {
-            0 | 1 => region_illumination,
-            _ => header.illumination,
-        },
-        _ => header.illumination,
+    let response = response_identity(header, None)?;
+    classify_response(header, response, region_illumination)
+}
+
+/// Classify using a response program resolved from the material execution
+/// binding; this is the CPU golden's direct-program entry point.
+pub fn classify_material_header_with_program(
+    header: &GpuMaterialHeader,
+    program: ProgramRef,
+    region_illumination: u32,
+) -> Result<MaterialShadingClass, ClassificationError> {
+    if header.is_active == 0 {
+        return Err(ClassificationError::Inactive);
+    }
+    if !is_classifiable_surface(header) {
+        return Err(ClassificationError::NonSurfaceClass);
+    }
+    classify_response(
+        header,
+        response_identity_from_program(program),
+        region_illumination,
+    )
+}
+
+/// Classify a header using the verified ABI8 execution tuple.
+#[allow(dead_code)]
+pub fn classify_material_header_with_execution(
+    header: &GpuMaterialHeader,
+    execution: &MaterialExecutionTables,
+    region_illumination: u32,
+) -> Result<MaterialShadingClass, ClassificationError> {
+    if header.is_active == 0 {
+        return Err(ClassificationError::Inactive);
+    }
+    if !is_classifiable_surface(header) {
+        return Err(ClassificationError::NonSurfaceClass);
+    }
+    let response = response_identity(header, Some(execution))?;
+    classify_response(header, response, region_illumination)
+}
+
+fn classify_response(
+    header: &GpuMaterialHeader,
+    response: ResponseIdentity,
+    region_illumination: u32,
+) -> Result<MaterialShadingClass, ClassificationError> {
+    if header.render_domain == RenderDomain::Hair as u32 {
+        return Ok(MaterialShadingClass::Hair);
+    }
+    if header.feature_flags & MaterialFeatureFlags::WATER.0 != 0 {
+        return Ok(MaterialShadingClass::Water);
+    }
+    let illumination = match (response.illumination(), region_illumination) {
+        (Some(Illumination::Lit | Illumination::Stylized), 0) => Illumination::Lit,
+        (Some(Illumination::Lit | Illumination::Stylized), 1) => Illumination::Stylized,
+        (Some(value), _) => value,
+        (None, _) => return Err(ClassificationError::UnsupportedIllumination(response.raw_value())),
     };
-    match Illumination::from_u32(illumination) {
-        Some(Illumination::Unlit) => Ok(MaterialShadingClass::Unlit),
-        Some(Illumination::Stylized) => Ok(MaterialShadingClass::Npr),
-        // §3.5.4: a custom response needs a program. With no handle the material
-        // degrades to the shared über path (the same integrator the `Custom`
-        // bucket would run), so it classifies as `Principled`.
-        Some(Illumination::Custom) if header.custom_program != u32::MAX => {
-            Ok(MaterialShadingClass::Custom)
-        }
-        Some(Illumination::Custom) => Ok(MaterialShadingClass::Principled),
-        Some(Illumination::Lit) => Ok(lit_class_from_closures(header.closure_mask)),
-        None => Err(ClassificationError::UnsupportedIllumination(illumination)),
+    match illumination {
+        Illumination::Unlit => Ok(MaterialShadingClass::Unlit),
+        Illumination::Stylized => Ok(MaterialShadingClass::Npr),
+        Illumination::Custom => Ok(MaterialShadingClass::Custom),
+        Illumination::Lit => Ok(lit_class_from_closures(header.closure_mask)),
     }
 }
 
@@ -707,13 +899,22 @@ pub fn classify_material_header_with_region(
 mod tests {
     use super::*;
     use prism_render_architecture::abi::GenerationalHandle;
-    use prism_render_material::fallback_material_header;
+    use prism_render_material::{fallback_material_header, BuiltinProgram, ProgramId, ProgramRef};
 
-    /// Set the illumination axis on a header, mirroring how the material
-    /// registry emits it.
-    fn with_illumination(mut header: GpuMaterialHeader, illum: Illumination) -> GpuMaterialHeader {
-        header.illumination = illum as u32;
-        header
+    fn program_for(illumination: Illumination) -> ProgramRef {
+        match illumination {
+            Illumination::Lit => ProgramRef::Builtin(BuiltinProgram::Lit),
+            Illumination::Stylized => ProgramRef::Builtin(BuiltinProgram::Npr),
+            Illumination::Unlit => ProgramRef::Builtin(BuiltinProgram::Unlit),
+            Illumination::Custom => ProgramRef::Registered(ProgramId(7)),
+        }
+    }
+
+    fn classify_as(
+        header: &GpuMaterialHeader,
+        illumination: Illumination,
+    ) -> Result<MaterialShadingClass, ClassificationError> {
+        classify_material_header_with_program(header, program_for(illumination), u32::MAX)
     }
 
     /// Set a single closure bit (the "dominant" physically-based closure).
@@ -726,87 +927,90 @@ mod tests {
     fn illumination_axis_maps_to_style_buckets_without_per_asset_permutations() {
         let base = fallback_material_header(1);
         assert_eq!(
-            classify_material_header(&with_illumination(base, Illumination::Unlit)),
+            classify_as(&base, Illumination::Unlit),
             Ok(MaterialShadingClass::Unlit)
         );
         assert_eq!(
-            classify_material_header(&with_illumination(base, Illumination::Stylized)),
+            classify_as(&base, Illumination::Stylized),
             Ok(MaterialShadingClass::Npr)
         );
         // §3.5.4: the custom bucket needs a program to run. With a handle it is
         // its own bucket; without one the material degrades to the shared über
         // path (the default row) instead of occupying a bucket that would run
         // the same integrator under a different name.
-        let unbound = with_illumination(base, Illumination::Custom);
+        let unbound = base;
         assert_eq!(
             classify_material_header(&unbound),
             Ok(MaterialShadingClass::Principled)
         );
-        let bound = GpuMaterialHeader {
-            custom_program: 7,
-            ..unbound
-        };
         assert_eq!(
-            classify_material_header(&bound),
+            classify_as(&unbound, Illumination::Custom),
             Ok(MaterialShadingClass::Custom)
+        );
+    }
+
+    #[test]
+    fn unbound_abi7_header_uses_explicit_lit_fallback_with_execution_tables() {
+        let header = fallback_material_header(1);
+        let tables = MaterialExecutionTables::new();
+        assert_eq!(
+            classify_material_header_with_execution(&header, &tables, u32::MAX),
+            Ok(MaterialShadingClass::Principled)
         );
     }
 
     #[test]
     fn region_illumination_selects_lit_or_stylized_per_pixel() {
         let base = fallback_material_header(1);
-        let lit = with_illumination(base, Illumination::Lit);
         assert_eq!(
-            classify_material_header_with_region(&lit, 0),
+            classify_material_header_with_program(&base, program_for(Illumination::Lit), 0),
             Ok(MaterialShadingClass::Principled)
         );
         assert_eq!(
-            classify_material_header_with_region(&lit, 1),
+            classify_material_header_with_program(&base, program_for(Illumination::Lit), 1),
             Ok(MaterialShadingClass::Npr)
         );
         assert_eq!(
-            classify_material_header_with_region(&lit, u32::MAX),
+            classify_material_header_with_program(&base, program_for(Illumination::Lit), u32::MAX),
             Ok(MaterialShadingClass::Principled),
             "the sentinel keeps the material-level illumination"
         );
         for invalid_selector in [2, 7, u32::MAX - 1] {
             assert_eq!(
-                classify_material_header_with_region(&lit, invalid_selector),
+                classify_material_header_with_program(
+                    &base,
+                    program_for(Illumination::Lit),
+                    invalid_selector,
+                ),
                 Ok(MaterialShadingClass::Principled),
                 "out-of-contract visibility selectors must fall back to material illumination"
             );
         }
 
-        let stylized = with_illumination(base, Illumination::Stylized);
         assert_eq!(
-            classify_material_header_with_region(&stylized, 0),
+            classify_material_header_with_program(&base, program_for(Illumination::Stylized), 0),
             Ok(MaterialShadingClass::Principled)
         );
         assert_eq!(
-            classify_material_header_with_region(&stylized, 1),
+            classify_material_header_with_program(&base, program_for(Illumination::Stylized), 1),
             Ok(MaterialShadingClass::Npr)
         );
 
         // The mask blends only the PBR/NPR endpoints; Unlit and Custom remain
         // material-level response modes and ignore the region selector.
-        let unlit = with_illumination(base, Illumination::Unlit);
         assert_eq!(
-            classify_material_header_with_region(&unlit, 1),
+            classify_material_header_with_program(&base, program_for(Illumination::Unlit), 1),
             Ok(MaterialShadingClass::Unlit)
         );
-        let custom = GpuMaterialHeader {
-            custom_program: 7,
-            ..with_illumination(base, Illumination::Custom)
-        };
         assert_eq!(
-            classify_material_header_with_region(&custom, 0),
+            classify_material_header_with_program(&base, program_for(Illumination::Custom), 0),
             Ok(MaterialShadingClass::Custom)
         );
     }
 
     #[test]
     fn lit_surfaces_derive_their_bucket_from_the_dominant_closure() {
-        let base = with_illumination(fallback_material_header(1), Illumination::Lit);
+        let base = fallback_material_header(1);
         for (kind, expected) in [
             (ClosureKind::Diffuse, MaterialShadingClass::Principled),
             (ClosureKind::Conductor, MaterialShadingClass::Principled),
@@ -816,7 +1020,7 @@ mod tests {
             (ClosureKind::Hair, MaterialShadingClass::Hair),
         ] {
             assert_eq!(
-                classify_material_header(&with_closure(base, kind)),
+                classify_as(&with_closure(base, kind), Illumination::Lit),
                 Ok(expected),
                 "closure {kind:?} should classify as {expected:?}"
             );
@@ -824,13 +1028,14 @@ mod tests {
     }
 
     #[test]
-    fn hair_and_water_render_classes_bind_their_bucket_directly() {
-        for (render_class, expected) in [
-            (MaterialRenderClass::Hair, MaterialShadingClass::Hair),
-            (MaterialRenderClass::Water, MaterialShadingClass::Water),
+    fn hair_domain_and_water_feature_bind_their_bucket_directly() {
+        for (domain, features, expected) in [
+            (RenderDomain::Hair, 0, MaterialShadingClass::Hair),
+            (RenderDomain::Surface, MaterialFeatureFlags::WATER.0, MaterialShadingClass::Water),
         ] {
             let mut header = fallback_material_header(1);
-            header.render_class = render_class as u32;
+            header.render_domain = domain as u32;
+            header.feature_flags = features;
             assert_eq!(classify_material_header(&header), Ok(expected));
         }
     }
@@ -841,7 +1046,6 @@ mod tests {
         pbr.generation = 2;
         let mut npr = fallback_material_header(1);
         npr.generation = 4;
-        npr.illumination = Illumination::Stylized as u32;
         let pixel = |material: GenerationalHandle| {
             super::super::VisibilityPixel::new(
                 GenerationalHandle {
@@ -884,18 +1088,16 @@ mod tests {
             8,
         );
 
-        assert_eq!(plan.counts[MaterialShadingClass::Principled.index()], 1);
-        assert_eq!(plan.counts[MaterialShadingClass::Npr.index()], 1);
+        assert_eq!(plan.counts[MaterialShadingClass::Principled.index()], 2);
         assert_eq!(plan.work.len(), 2);
-        assert_eq!(plan.work[0].pixel_index, 3);
-        assert_eq!(plan.work[1].pixel_index, 9);
+        assert_eq!(plan.work[0].pixel_index, 9);
+        assert_eq!(plan.work[1].pixel_index, 3);
     }
 
     #[test]
     fn cpu_work_plan_honors_per_region_illumination() {
         let mut lit = fallback_material_header(1);
         lit.generation = 3;
-        lit.illumination = Illumination::Lit as u32;
         let pixel = || {
             super::super::VisibilityPixel::new(
                 GenerationalHandle {
@@ -1078,36 +1280,36 @@ mod tests {
     fn response_mode(
         uid: &'static str,
         registry_slot: u32,
-        illumination: &'static str,
-    ) -> ResponseModeLayout {
-        ResponseModeLayout {
+            builtin: &'static str,
+    ) -> ResponseProgramLayout {
+        ResponseProgramLayout {
             id: "test",
             uid,
             registry_slot,
             namespace: "PRISM",
             vendor: "prism",
             stability: "candidate",
-            illumination,
+            builtin,
             requires_caps: &[],
             view_dependent: true,
         }
     }
 
     #[test]
-    fn a_schema_response_mode_with_an_unknown_illumination_fails_loudly() {
+    fn a_schema_response_mode_with_an_unknown_program_fails_loudly() {
         let registry = prism_material_pcm::builtin::builtin_registry();
         let error = response_mode_rows(
             &registry,
             &[response_mode(
                 prism_material_pcm::builtin::UID_MODE_STYLIZED,
                 23,
-                "not_an_illumination",
+                "not_a_builtin",
             )],
         )
-        .expect_err("an unknown illumination spelling must be rejected");
+        .expect_err("an unknown response program must be rejected");
         assert_eq!(
             error,
-            ClassTableError::UnknownResponseModeIllumination(String::from("not_an_illumination"))
+            ClassTableError::UnknownResponseModeIllumination(String::from("not_a_builtin"))
         );
     }
 
@@ -1118,7 +1320,7 @@ mod tests {
             &registry,
             &[response_mode(
                 "org.prism.response_mode.watercolor",
-                23,
+                99,
                 "stylized",
             )],
         )
@@ -1176,49 +1378,19 @@ mod tests {
                 .unwrap();
         let mut base = fallback_material_header(1);
         base.is_active = 1;
-        for active in [0u32, 1] {
-            for render_class in [
-                MaterialRenderClass::Opaque as u32,
-                MaterialRenderClass::OpaqueTwoSided as u32,
-                MaterialRenderClass::Masked as u32,
-                MaterialRenderClass::MaskedTwoSided as u32,
-                MaterialRenderClass::Hair as u32,
-                MaterialRenderClass::Water as u32,
-                // A non-surface class must be rejected by both.
-                MaterialRenderClass::Decal as u32,
-            ] {
-                for illumination in [0u32, 1, 2, 3, 4, u32::MAX] {
-                    for custom_program in [0u32, 7, u32::MAX] {
-                        let mut closure_masks = vec![0u32, u32::MAX];
-                        for kind in [
-                            ClosureKind::Hair,
-                            ClosureKind::Subsurface,
-                            ClosureKind::ClearCoat,
-                            ClosureKind::Sheen,
-                        ] {
-                            closure_masks.push(1 << kind as u32);
-                        }
-                        // Every pair of closures, so priority is exercised.
-                        for a in 0..closure_masks.len() {
-                            for b in 0..closure_masks.len() {
-                                closure_masks.push(closure_masks[a] | closure_masks[b]);
-                            }
-                        }
-                        for closure_mask in closure_masks {
-                            let mut header = base;
-                            header.is_active = active;
-                            header.render_class = render_class;
-                            header.illumination = illumination;
-                            header.custom_program = custom_program;
-                            header.closure_mask = closure_mask;
-                            let hot = classify_material_header(&header)
-                                .map(|class| class as u32)
-                                .map_err(|error| error);
-                            let walked = table.classify(&header);
-                            assert_eq!(hot, walked, "{header:?}");
-                        }
-                    }
-                }
+        for program in [
+            ProgramRef::Builtin(BuiltinProgram::Lit),
+            ProgramRef::Builtin(BuiltinProgram::Npr),
+            ProgramRef::Builtin(BuiltinProgram::Unlit),
+            ProgramRef::Registered(ProgramId(7)),
+        ] {
+            for closure_mask in [0, 1 << ClosureKind::Subsurface as u32] {
+                let mut header = base;
+                header.closure_mask = closure_mask;
+                let hot = classify_material_header_with_program(&header, program, u32::MAX)
+                    .map(|class| class as u32);
+                let walked = table.classify_with_program(&header, program, u32::MAX);
+                assert_eq!(hot, walked, "{header:?} program {program:?}");
             }
         }
     }

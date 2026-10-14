@@ -55,6 +55,7 @@ pub(crate) fn fill_queues<I>(
     I::Surface: Send + Sync + 'static,
 {
     registry.sync_mesh_classes(&meshes);
+    specializer.sync_response_modules(pipelines.response_modules());
     if work.is_empty() {
         return;
     }

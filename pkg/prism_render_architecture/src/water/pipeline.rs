@@ -19,7 +19,7 @@
 //!    ([`super::transition`]), the caustics route ([`super::caustics`]), the
 //!    surface-reconstruction route for particle bodies ([`super::reconstruct`]),
 //!    the pressure solver for `FLIP`/`APIC` bodies ([`super::flip`]), the shared
-//!    advanced base the frontend consumes ([`super::SharedBaseServices`]), and
+//!    catalog-derived services the shading plan consumes, and
 //!    the per-stage work costs charged against the budget.
 //! 3. **Queue** ([`queue`]) — turns the prepared bodies into
 //!    [`super::budget::WaterJobRequest`]s, arbitrates them through
@@ -45,7 +45,7 @@ use super::profile::WaterSimProfile;
 use super::reconstruct::{
     select_reconstruction, ReconstructionContext, ReconstructionMethod, ReconstructionThresholds,
 };
-use super::shading::{plan_shading, SurfaceShadingInputs, WaterShadingResponse};
+use super::shading::{plan_shading_plan, SurfaceShadingInputs, WaterShadingResponse};
 use super::shoreline::{plan_shoreline, ShorelineInputs, ShorelinePlan};
 use super::simulation::{plan_sim, SimInputs, SimStepPlan};
 use super::surface_fx::{plan_surface_fx, SurfaceFxInputs, SurfaceFxPlan};
@@ -53,8 +53,7 @@ use super::transition::{solver_blend_weights, SolverBlendWeights, TransitionBand
 use super::underwater::RgbColor;
 use super::wetness::SurfaceMoisture;
 use super::{
-    ShadingFrontend, SharedBaseServices, SolverKind, Vec3, WaterBody, WaterBodyHandle, WaterBudget,
-    WaterKind,
+    SolverKind, Vec3, WaterBody, WaterBodyHandle, WaterBudget, WaterKind, WaterShadingPlan,
 };
 
 /// The live, per-frame dynamic state sampled from the running water solve that
@@ -122,10 +121,10 @@ pub struct WaterDynamics {
     /// Relative body/fluid speed used to evaluate coupling drag.
     pub rel_speed: f32,
     /// Resolved specular highlight intensity from the lighting pass, in
-    /// `0..=1`, fed to the shading frontends (design §5).
+    /// `0..=1`, fed to the selected response program (design §5).
     pub specular_intensity: f32,
     /// Resolved caustic coverage from the caustics pass, in `0..=1`, fed to the
-    /// shading frontends (design §5).
+    /// response program (design §5).
     pub caustic_intensity: f32,
 }
 
@@ -231,7 +230,7 @@ pub struct WaterExtract {
     /// Solver bucket.
     pub solver: SolverKind,
     /// Lighting-response frontend.
-    pub frontend: ShadingFrontend,
+    pub shading_plan: WaterShadingPlan,
     /// Camera distance in world units, clamped to be non-negative.
     pub camera_distance: f32,
     /// Quality preference clamped into `0..=1`.
@@ -292,11 +291,7 @@ pub struct WaterPrepare {
     /// Solver bucket.
     pub solver: SolverKind,
     /// Lighting-response frontend.
-    pub frontend: ShadingFrontend,
-    /// The shared advanced base the frontend consumes. Every frontend, `NPR`
-    /// included, returns the full base, so this is always
-    /// [`SharedBaseServices::ALL`].
-    pub shared_base: SharedBaseServices,
+    pub shading_plan: WaterShadingPlan,
     /// Camera distance carried forward for budget-priority ordering.
     pub camera_distance: f32,
     /// Solver-blend weights (particle / shallow-water / spectral) at this
@@ -330,7 +325,7 @@ pub struct WaterPrepare {
     /// Two-way rigid-body coupling forces and read-back schedule.
     pub coupling: CouplingFramePlan,
     /// Four-frontend lighting-response fork result for this body (design §5).
-    /// The frontends diverge only here; every other field is frontend-agnostic.
+    /// Response programs diverge only here; every other field is response-agnostic.
     pub shading: WaterShadingResponse,
 }
 
@@ -401,7 +396,7 @@ pub fn extract(body: &WaterBody, sample: WaterViewSample) -> WaterExtract {
         body: body.handle,
         kind: body.kind,
         solver: body.solver,
-        frontend: body.frontend,
+        shading_plan: body.shading_plan,
         camera_distance: sample.camera_distance.max(0.0),
         quality_bias: sample.quality_bias.clamp(0.0, 1.0),
         particle_count: sample.particle_count,
@@ -535,8 +530,8 @@ pub fn prepare(extract: WaterExtract, config: &WaterFrameConfig) -> WaterPrepare
     let cos_view = (1.0 - dynamics.sin_incidence * dynamics.sin_incidence)
         .max(0.0)
         .sqrt();
-    let shading = plan_shading(
-        extract.frontend,
+    let shading = plan_shading_plan(
+        extract.shading_plan,
         extract.profile.shading,
         SurfaceShadingInputs {
             cos_view,
@@ -557,8 +552,7 @@ pub fn prepare(extract: WaterExtract, config: &WaterFrameConfig) -> WaterPrepare
         body: extract.body,
         kind: extract.kind,
         solver: extract.solver,
-        frontend: extract.frontend,
-        shared_base: extract.frontend.shared_base(),
+        shading_plan: extract.shading_plan,
         camera_distance: extract.camera_distance,
         blend,
         caustics,
@@ -717,6 +711,7 @@ pub fn plan_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::ResponseProgram;
     use crate::deformation::DeformationHandle;
 
     const CONFIG: WaterFrameConfig = WaterFrameConfig {
@@ -760,7 +755,7 @@ mod tests {
             handle: WaterBodyHandle(handle),
             kind,
             solver,
-            frontend: ShadingFrontend::Pbr,
+            shading_plan: WaterShadingPlan::single(ResponseProgram::Pbr),
             deformation: DeformationHandle(handle),
             grid_resolution: 16,
             cascade_count: 4,
@@ -868,16 +863,16 @@ mod tests {
 
     #[test]
     fn prepare_every_frontend_shares_full_base() {
-        for frontend in [
-            ShadingFrontend::Pbr,
-            ShadingFrontend::Npr,
-            ShadingFrontend::Custom,
-            ShadingFrontend::Hybrid,
+        for shading_plan in [
+            WaterShadingPlan::single(ResponseProgram::Pbr),
+            WaterShadingPlan::single(ResponseProgram::Npr),
+            WaterShadingPlan::single(ResponseProgram::Custom),
+            WaterShadingPlan::hybrid(),
         ] {
             let mut b = body(0, WaterKind::Ocean, SolverKind::SpectralIfft);
-            b.frontend = frontend;
+            b.shading_plan = shading_plan;
             let p = prepare(extract(&b, sample(5.0, 0)), &CONFIG);
-            assert_eq!(p.shared_base, SharedBaseServices::ALL);
+            assert_eq!(p.shading_plan, shading_plan);
         }
     }
 
@@ -1129,28 +1124,28 @@ mod tests {
         let mut b = body(3, WaterKind::Surface, SolverKind::ShallowWater);
         let sample = sample(8.0, 0);
 
-        b.frontend = ShadingFrontend::Pbr;
+        b.shading_plan = WaterShadingPlan::single(ResponseProgram::Pbr);
         assert!(matches!(
             prepare(extract(&b, sample), &CONFIG).shading,
             WaterShadingResponse::Pbr(_)
         ));
 
-        b.frontend = ShadingFrontend::Npr;
+        b.shading_plan = WaterShadingPlan::single(ResponseProgram::Npr);
         assert!(matches!(
             prepare(extract(&b, sample), &CONFIG).shading,
             WaterShadingResponse::Npr(_)
         ));
 
-        b.frontend = ShadingFrontend::Custom;
+        b.shading_plan = WaterShadingPlan::single(ResponseProgram::Custom);
         assert!(matches!(
             prepare(extract(&b, sample), &CONFIG).shading,
             WaterShadingResponse::Custom(_)
         ));
 
-        b.frontend = ShadingFrontend::Hybrid;
+        b.shading_plan = WaterShadingPlan::hybrid();
         assert!(matches!(
             prepare(extract(&b, sample), &CONFIG).shading,
-            WaterShadingResponse::Hybrid(_)
+            WaterShadingResponse::MaskBlend(_)
         ));
     }
 

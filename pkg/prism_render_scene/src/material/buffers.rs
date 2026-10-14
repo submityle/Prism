@@ -18,7 +18,7 @@ pub(crate) struct MaterialTextureRow(pub GpuMaterialTexture);
 bevy_render::impl_atomic_pod!(MaterialHeaderRow, MaterialHeaderRowBlob);
 bevy_render::impl_atomic_pod!(MaterialTextureRow, MaterialTextureRowBlob);
 
-/// GPU-visible material tables (unified Material ABI v5).
+/// GPU-visible material tables (unified Material ABI v8).
 ///
 /// * `headers` — one fixed-stride [`GpuMaterialHeader`] per material index.
 /// * `parameters` — a flat `u32` **word heap** holding each material's packed
@@ -157,7 +157,12 @@ impl MaterialGpuBuffers {
                 texture_bytes += size_of_val(record.textures.as_slice()) as u64;
                 self.headers.grow_and_set(
                     index,
-                    MaterialHeaderRow(record.header(offset, texture_offset, epoch)),
+                    MaterialHeaderRow(record.header_with_execution(
+                        offset,
+                        texture_offset,
+                        epoch,
+                        runtime.registry.execution_binding_at(index),
+                    )),
                 );
             } else if index == 0 {
                 // Slot zero is the permanent principled fallback; it always
@@ -193,7 +198,7 @@ impl MaterialGpuBuffers {
 mod tests {
     use bevy_ecs::world::{FromWorld, World};
     use prism_render_architecture::gpu_scene::GpuCompletionValue;
-    use prism_render_material::{Illumination, MaterialRenderClass};
+    use prism_render_material::MaterialRenderClass;
 
     use super::*;
 
@@ -209,13 +214,13 @@ mod tests {
                 handle,
                 revision: 1,
                 domain: prism_render_material::MaterialDomain::Surface,
+                render_domain: prism_render_material::RenderDomain::Surface,
                 render_class: MaterialRenderClass::Opaque,
-                illumination: Illumination::Lit,
+                response_plan: prism_render_material::ShadingPlan::default(),
                 features: Default::default(),
                 closure_mask: 1,
                 surface: GpuSurfaceParameters::default(),
                 textures: vec![],
-                custom_program: None,
             })
             .unwrap();
 
@@ -243,13 +248,13 @@ mod tests {
                 handle,
                 revision: 1,
                 domain: prism_render_material::MaterialDomain::Surface,
+                render_domain: prism_render_material::RenderDomain::Surface,
                 render_class: MaterialRenderClass::Opaque,
-                illumination: Illumination::Lit,
+                response_plan: prism_render_material::ShadingPlan::default(),
                 features: Default::default(),
                 closure_mask: 1,
                 surface: GpuSurfaceParameters::default(),
                 textures: vec![],
-                custom_program: None,
             })
             .unwrap();
         buffers.apply_dirty(&mut runtime);

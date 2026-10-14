@@ -97,7 +97,8 @@ pub use chromatic_aberration::{
     CHROMATIC_ABERRATION_EPSILON,
 };
 pub use classification::{
-    classify_material_header, ClassTableError, ClassificationError, MaterialShadingClass,
+    classify_material_header, classify_material_header_with_execution, ClassTableError,
+    ClassificationError, MaterialShadingClass,
     ShadingClassRow, ShadingClassRule, ShadingClassTable, ShadingWorkItem, ShadingWorkPlan,
     MAX_SHADING_CLASSES,
 };

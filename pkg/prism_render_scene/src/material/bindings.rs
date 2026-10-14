@@ -41,12 +41,16 @@ pub struct MaterialBindGroup {
     pub bind_group: Option<BindGroup>,
     bindless: bool,
     generation_table_buffer: Option<Buffer>,
+    execution_plan_buffer: Buffer,
+    execution_program_buffer: Buffer,
+    execution_package_buffer: Buffer,
     buffer_ids: Option<[BufferId; 3]>,
     virtual_texture_buffer_ids: Option<[BufferId; 2]>,
     generation_table_buffer_id: Option<BufferId>,
     buffer_version: u32,
     texture_version: u32,
     generation_table_version: u32,
+    execution_table_version: u32,
 }
 
 impl FromWorld for MaterialBindGroup {
@@ -100,6 +104,21 @@ impl FromWorld for MaterialBindGroup {
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             })
         });
+        let execution_plan_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("prism material execution plans"),
+            contents: bytemuck::cast_slice(&[[u32::MAX; 2]]),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        });
+        let execution_program_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("prism material execution programs"),
+            contents: bytemuck::cast_slice(&[[0_u32; 4]]),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        });
+        let execution_package_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("prism material execution packages"),
+            contents: bytemuck::cast_slice(&[0_u32]),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        });
 
         let (layout, layout_descriptor) = if bindless {
             let count = NonZero::new(capacity)
@@ -117,6 +136,9 @@ impl FromWorld for MaterialBindGroup {
                     virtual_texture_atlas,
                     virtual_texture_sampler,
                     storage_buffer_read_only_sized(false, NonZero::new(size_of::<u32>() as u64)),
+                    storage_buffer_read_only_sized(false, NonZero::new(8)),
+                    storage_buffer_read_only_sized(false, NonZero::new(16)),
+                    storage_buffer_read_only_sized(false, NonZero::new(4)),
                 ),
             );
             (
@@ -134,6 +156,9 @@ impl FromWorld for MaterialBindGroup {
                     (6, virtual_texture_config),
                     (7, virtual_texture_atlas),
                     (8, virtual_texture_sampler),
+                    (10, storage_buffer_read_only_sized(false, NonZero::new(8))),
+                    (11, storage_buffer_read_only_sized(false, NonZero::new(16))),
+                    (12, storage_buffer_read_only_sized(false, NonZero::new(4))),
                 ),
             );
             (
@@ -148,12 +173,16 @@ impl FromWorld for MaterialBindGroup {
             bind_group: None,
             bindless,
             generation_table_buffer,
+            execution_plan_buffer,
+            execution_program_buffer,
+            execution_package_buffer,
             buffer_ids: None,
             virtual_texture_buffer_ids: None,
             generation_table_buffer_id: None,
             buffer_version: 0,
             texture_version: 0,
             generation_table_version: 0,
+            execution_table_version: 0,
         }
     }
 }
@@ -181,6 +210,7 @@ impl MaterialBindGroup {
         let version = runtime.registry.snapshot().buffer_version;
         let texture_version = arrays.version();
         let generation_table_version = runtime.texture_generation_version();
+        let execution_table_version = runtime.registry.execution_table_version();
         let generation_table_buffer_id = self.generation_table_buffer.as_ref().map(Buffer::id);
         let virtual_texture_buffer_ids = [
             virtual_texture.page_table_buffer().id(),
@@ -191,6 +221,7 @@ impl MaterialBindGroup {
             && self.buffer_version == version
             && self.texture_version == texture_version
             && self.generation_table_version == generation_table_version
+            && self.execution_table_version == execution_table_version
             && self.generation_table_buffer_id == generation_table_buffer_id
         {
             return;
@@ -203,6 +234,14 @@ impl MaterialBindGroup {
                     bytemuck::cast_slice(runtime.texture_generation_table()),
                 );
             }
+        }
+        if self.execution_table_version != execution_table_version {
+            let plans = runtime.registry.execution_plan_rows();
+            let programs = runtime.registry.execution_program_rows();
+            let packages = [runtime.registry.execution_package_count()];
+            queue.write_buffer(&self.execution_plan_buffer, 0, bytemuck::cast_slice(if plans.is_empty() { &[[u32::MAX; 2]] } else { plans }));
+            queue.write_buffer(&self.execution_program_buffer, 0, bytemuck::cast_slice(if programs.is_empty() { &[[0_u32; 4]] } else { programs }));
+            queue.write_buffer(&self.execution_package_buffer, 0, bytemuck::cast_slice(&packages));
         }
         self.bind_group = Some(if self.bindless {
             // The bindless arrays extend the same bind group with the texture
@@ -228,6 +267,9 @@ impl MaterialBindGroup {
                         .as_ref()
                         .expect("bindless material layout requires generation table")
                         .as_entire_binding(),
+                    self.execution_plan_buffer.as_entire_binding(),
+                    self.execution_program_buffer.as_entire_binding(),
+                    self.execution_package_buffer.as_entire_binding(),
                 )),
             )
         } else {
@@ -242,6 +284,9 @@ impl MaterialBindGroup {
                     (6, virtual_texture.config_buffer().as_entire_binding()),
                     (7, virtual_texture.atlas_view()),
                     (8, virtual_texture.sampler()),
+                    (10, self.execution_plan_buffer.as_entire_binding()),
+                    (11, self.execution_program_buffer.as_entire_binding()),
+                    (12, self.execution_package_buffer.as_entire_binding()),
                 )),
             )
         });
@@ -251,5 +296,6 @@ impl MaterialBindGroup {
         self.buffer_version = version;
         self.texture_version = texture_version;
         self.generation_table_version = generation_table_version;
+        self.execution_table_version = execution_table_version;
     }
 }

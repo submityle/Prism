@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn quantizer_is_nearest_over_all_targets_and_levels() {
         for level in 0..=16usize {
-            let levels = super::color_quant_num_levels(level);
+            let levels = color_quant_num_levels(level);
             for target in 0..=255u8 {
                 let chosen = quantize_color_channel(level, target);
                 let chosen_err =

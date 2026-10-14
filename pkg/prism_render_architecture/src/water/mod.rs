@@ -28,14 +28,11 @@
 //! two-way coupling ([`coupling`]), solver-transition blending ([`transition`]),
 //! and the per-frame solve budget ([`budget`]) round out the subsystem.
 //!
-//! **Frontend orthogonality.** The `PBR`, `NPR`, custom, and hybrid frontends
-//! diverge *only* in their lighting response (see [`ShadingFrontend`]). Every
-//! frontend — `NPR` included — consumes the exact same shared advanced base:
-//! virtual geometry, `Lumen`-style hybrid GI, `ReSTIR` DI/GI, virtual shadow
-//! maps, froxel volumetrics, ray-traced reflections and caustics, the
-//! path-tracing reference, and temporal upsampling. This is encoded in
-//! [`SharedBaseServices`] and asserted by [`ShadingFrontend::shared_base`], so
-//! "does `NPR` miss any advanced feature?" has a compile-checked answer: no.
+//! **Response/composition orthogonality.** `PBR`, `NPR`, and custom are
+//! response programs; water Hybrid is a `WaterShadingPlan::MaskBlend` that
+//! composes two response arms. Active water roots consume services through
+//! the built-in `FeatureCatalog` closure, so no parallel shared-base set can
+//! drift from the authoritative declaration.
 //!
 //! This module owns the geometry, solver, budget, and shading contracts and the
 //! math/handle types shared across the sibling modules. It references, never
@@ -89,6 +86,67 @@ pub mod waterline;
 pub mod wetness;
 
 use crate::deformation::DeformationHandle;
+use crate::render_fabric::{FeatureId, ResourceKey, ServiceId, WATER_SERVICE_IDS};
+pub use crate::render_fabric::ResponseProgram;
+
+/// The water-specific response/composition plan.
+///
+/// `MaskBlend` is deliberately not a `ResponseProgram`: it composes two
+/// response arms and therefore owns no response implementation identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum WaterShadingPlan {
+    /// One response program shades the whole surface.
+    Single { program: ResponseProgram },
+    /// Continuous region blending is executed by the resident composition
+    /// pass after both response arms have produced their outputs.
+    MaskBlend {
+        left: ResponseProgram,
+        right: ResponseProgram,
+        mask: WaterMaskSource,
+        domain: WaterBlendDomain,
+    },
+}
+
+/// Stable mask identity used by the water hybrid authoring plan.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum WaterMaskSource {
+    ShoreAndShallow,
+}
+
+/// Channels affected by a water response composition.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum WaterBlendDomain {
+    FullRadiance,
+}
+
+impl Default for WaterShadingPlan {
+    fn default() -> Self {
+        Self::Single {
+            program: ResponseProgram::Pbr,
+        }
+    }
+}
+
+impl WaterShadingPlan {
+    pub const fn single(program: ResponseProgram) -> Self {
+        Self::Single { program }
+    }
+
+    pub const fn hybrid() -> Self {
+        Self::MaskBlend {
+            left: ResponseProgram::Pbr,
+            right: ResponseProgram::Npr,
+            mask: WaterMaskSource::ShoreAndShallow,
+            domain: WaterBlendDomain::FullRadiance,
+        }
+    }
+
+    pub const fn primary_response(self) -> ResponseProgram {
+        match self {
+            Self::Single { program } | Self::MaskBlend { left: program, .. } => program,
+        }
+    }
+}
 
 /// Version of the water subsystem contracts in this module.
 pub const WATER_ARCHITECTURE_VERSION: u32 = 1;
@@ -436,121 +494,28 @@ impl SolverKind {
     }
 }
 
-/// The set of shared advanced base services a water frontend consumes.
-///
-/// These services live in sibling crates/modules (virtual geometry, lighting,
-/// virtual shadows, ray scene, temporal upsampling); water only *consumes*
-/// them and never reimplements them. The type exists so the contract "every
-/// frontend shares the full advanced base" is expressed as data rather than
-/// prose. Bit operations are integer comparisons, never `f32` equality.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct SharedBaseServices(u16);
+/// Stable semantic service identity for the water feature declarations.
+pub const WATER_VIRTUAL_GEOMETRY: ServiceId = WATER_SERVICE_IDS[0];
+/// Stable semantic service identity for hybrid global illumination.
+pub const WATER_HYBRID_GI: ServiceId = WATER_SERVICE_IDS[1];
+/// Stable semantic service identity for `ReSTIR` light resampling.
+pub const WATER_RESTIR: ServiceId = WATER_SERVICE_IDS[2];
+/// Stable semantic service identity for virtual shadow maps.
+pub const WATER_VIRTUAL_SHADOW: ServiceId = WATER_SERVICE_IDS[3];
+/// Stable semantic service identity for froxel volumetrics.
+pub const WATER_FROXEL_VOLUME: ServiceId = WATER_SERVICE_IDS[4];
+/// Stable semantic service identity for ray-traced reflections.
+pub const WATER_RT_REFLECTION: ServiceId = WATER_SERVICE_IDS[5];
+/// Stable semantic service identity for ray-traced caustics.
+pub const WATER_RT_CAUSTICS: ServiceId = WATER_SERVICE_IDS[6];
+/// Stable semantic service identity for the path-tracing reference.
+pub const WATER_PATH_TRACING_REF: ServiceId = WATER_SERVICE_IDS[7];
+/// Stable semantic service identity for temporal upsampling.
+pub const WATER_TEMPORAL_UPSAMPLE: ServiceId = WATER_SERVICE_IDS[8];
 
-impl SharedBaseServices {
-    /// Virtual geometry vis-buffer cluster LOD / software raster.
-    pub const VIRTUAL_GEOMETRY: Self = Self(1 << 0);
-    /// `Lumen`-style hybrid global illumination.
-    pub const HYBRID_GI: Self = Self(1 << 1);
-    /// `ReSTIR` direct/indirect light resampling.
-    pub const RESTIR: Self = Self(1 << 2);
-    /// Virtual shadow maps (`VSM`).
-    pub const VIRTUAL_SHADOW: Self = Self(1 << 3);
-    /// Froxel volumetrics (underwater scattering, god rays).
-    pub const FROXEL_VOLUME: Self = Self(1 << 4);
-    /// Ray-traced reflections (SSR miss fallback).
-    pub const RT_REFLECTION: Self = Self(1 << 5);
-    /// Ray-traced / photon caustics.
-    pub const RT_CAUSTICS: Self = Self(1 << 6);
-    /// Offline path-tracing reference for calibration.
-    pub const PATH_TRACING_REF: Self = Self(1 << 7);
-    /// Temporal upsampling / anti-aliasing history.
-    pub const TEMPORAL_UPSAMPLE: Self = Self(1 << 8);
-
-    /// The empty set.
-    pub const NONE: Self = Self(0);
-
-    /// The full shared advanced base — the nine services above.
-    pub const ALL: Self = Self(
-        (1 << 0)
-            | (1 << 1)
-            | (1 << 2)
-            | (1 << 3)
-            | (1 << 4)
-            | (1 << 5)
-            | (1 << 6)
-            | (1 << 7)
-            | (1 << 8),
-    );
-
-    /// Number of distinct services in the full base.
-    pub const COUNT: u32 = 9;
-
-    /// Raw bit pattern.
-    #[must_use]
-    pub const fn bits(self) -> u16 {
-        self.0
-    }
-
-    /// Union of two service sets.
-    #[must_use]
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    /// `true` when `self` contains every service in `other`.
-    #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        (self.0 & other.0) == other.0
-    }
-
-    /// Count of services present in this set.
-    #[must_use]
-    pub const fn len(self) -> u32 {
-        self.0.count_ones()
-    }
-
-    /// `true` when no service is present.
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-}
-
-/// The four shading frontends. They diverge only in the lighting response;
-/// geometry, simulation, refraction/reflection routing, and the entire shared
-/// advanced base ([`SharedBaseServices`]) are identical across all four.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ShadingFrontend {
-    /// Physically based: Schlick `Fresnel`, `Beer-Lambert` absorption, GGX
-    /// micro-surface, grazing subsurface transmission, spectral dispersion.
-    Pbr,
-    /// Stylized (illumination axis): ramp-quantized water color, toon specular
-    /// blocks, hand-drawn foam lines, stylized caustics, ink diffusion.
-    Npr,
-    /// Author-injected closure hook compiled into a shader specialization.
-    Custom,
-    /// Per-region/per-layer blend of the above on one water body.
-    Hybrid,
-}
-
-impl ShadingFrontend {
-    /// The shared advanced base this frontend consumes.
-    ///
-    /// Every frontend consumes the full base: `NPR` is *not* a reduced path.
-    /// The frontends differ only in how they interpret the resulting lighting,
-    /// so this returns [`SharedBaseServices::ALL`] unconditionally.
-    #[must_use]
-    pub fn shared_base(self) -> SharedBaseServices {
-        SharedBaseServices::ALL
-    }
-
-    /// `true` when this frontend consumes the entire shared advanced base.
-    /// Holds for all four frontends by construction.
-    #[must_use]
-    pub fn shares_full_base(self) -> bool {
-        self.shared_base().contains(SharedBaseServices::ALL)
-    }
-}
+/// Stable semantic owner for the water surface feature declaration.
+pub const WATER_SURFACE_FEATURE: FeatureId = FeatureId(0x1000);
+pub const WATER_SURFACE_RESOURCE: ResourceKey = ResourceKey::of(WATER_SURFACE_FEATURE, 0);
 
 /// The unified authoring/runtime description of one water body.
 ///
@@ -567,8 +532,8 @@ pub struct WaterBody {
     pub kind: WaterKind,
     /// Solver bucket driving this body.
     pub solver: SolverKind,
-    /// Lighting-response frontend.
-    pub frontend: ShadingFrontend,
+    /// Response/composition plan; `MaskBlend` is a composition, not a response.
+    pub shading_plan: WaterShadingPlan,
     /// Deformation-cache entry the displacement/height update writes into.
     pub deformation: DeformationHandle,
     /// Grid resolution per side for height-field / spectral cascades, or the
@@ -652,41 +617,36 @@ mod tests {
     }
 
     #[test]
-    fn shared_base_set_algebra() {
-        let a = SharedBaseServices::VIRTUAL_GEOMETRY.union(SharedBaseServices::HYBRID_GI);
-        assert!(a.contains(SharedBaseServices::VIRTUAL_GEOMETRY));
-        assert!(a.contains(SharedBaseServices::HYBRID_GI));
-        assert!(!a.contains(SharedBaseServices::RESTIR));
-        assert_eq!(a.len(), 2);
-        assert!(SharedBaseServices::NONE.is_empty());
-        assert_eq!(SharedBaseServices::ALL.len(), SharedBaseServices::COUNT);
+    fn shared_base_declaration_is_complete() {
+        let required = crate::render_fabric::water_required_services();
+        assert_eq!(required.as_slice().len(), 9);
+        assert!(required.contains(WATER_VIRTUAL_GEOMETRY));
+        assert!(required.contains(WATER_HYBRID_GI));
     }
 
     #[test]
     fn every_frontend_shares_the_full_advanced_base() {
-        // The core contract: NPR is not a reduced path. All four frontends
-        // consume the entire shared advanced base.
-        for frontend in [
-            ShadingFrontend::Pbr,
-            ShadingFrontend::Npr,
-            ShadingFrontend::Custom,
-            ShadingFrontend::Hybrid,
+        // The core contract: NPR is not a reduced path. All response arms and
+        // the MaskBlend plan use the same catalog-derived service closure.
+        for _frontend in [
+            ResponseProgram::Pbr,
+            ResponseProgram::Npr,
+            ResponseProgram::Custom,
+            WaterShadingPlan::hybrid().primary_response(),
         ] {
-            assert!(frontend.shares_full_base());
-            assert_eq!(frontend.shared_base(), SharedBaseServices::ALL);
             // Each individual service is present for every frontend.
             for service in [
-                SharedBaseServices::VIRTUAL_GEOMETRY,
-                SharedBaseServices::HYBRID_GI,
-                SharedBaseServices::RESTIR,
-                SharedBaseServices::VIRTUAL_SHADOW,
-                SharedBaseServices::FROXEL_VOLUME,
-                SharedBaseServices::RT_REFLECTION,
-                SharedBaseServices::RT_CAUSTICS,
-                SharedBaseServices::PATH_TRACING_REF,
-                SharedBaseServices::TEMPORAL_UPSAMPLE,
+                WATER_VIRTUAL_GEOMETRY,
+                WATER_HYBRID_GI,
+                WATER_RESTIR,
+                WATER_VIRTUAL_SHADOW,
+                WATER_FROXEL_VOLUME,
+                WATER_RT_REFLECTION,
+                WATER_RT_CAUSTICS,
+                WATER_PATH_TRACING_REF,
+                WATER_TEMPORAL_UPSAMPLE,
             ] {
-                assert!(frontend.shared_base().contains(service));
+                assert!(crate::render_fabric::water_required_services().contains(service));
             }
         }
     }

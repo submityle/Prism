@@ -26,7 +26,7 @@ use crate::mesh_pipeline::{full_lobe_fallback, MeshPipelineKey, MeshPipelineSpec
 use crate::pipeline_cache::{
     hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
 };
-use crate::queue::phase_for_render_class;
+use crate::queue::{phase_for_material, phase_for_render_class};
 use crate::queue::DrawRequest;
 use crate::queue::{PhaseItem, RenderQueues};
 use crate::sets::{RenderPhase, RenderSystems};
@@ -37,8 +37,11 @@ use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
 use prism_render_architecture::view_family::ViewKind;
-use prism_render_material::MaterialRenderClass;
-use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex, PermutationSpace};
+use prism_render_material::{MaterialRenderClass, RenderDomain};
+use prism_render_architecture::shader_package::{
+    ArtifactDigest, ExecutionFamily, ModuleId, ModuleIdentity, PermutationIndex, PermutationSpace,
+    ShaderPackageId,
+};
 
 fn dense(index: u64) -> PermutationIndex {
     PermutationSpace::try_new([64]).unwrap().check_index(index).unwrap()
@@ -49,6 +52,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::scene::{SceneRegistry, VisibilityWorkList};
+use crate::pipeline_pass::PassRole;
 use prism_render_driver::{
     BufferDescriptor, BufferId, BufferUsages, ColorTargetState, DeviceDescriptor, FragmentState,
     Instance, MultisampleState, PrimitiveState, PrimitiveTopology, RenderDevice,
@@ -579,6 +583,7 @@ fn fill_from_visibility_resolves_and_queues() {
     });
     registry.insert_material(prism_render_material::fallback_material_record(material, 1));
     registry.set_material_passes(material, vec![crate::PassDescriptor {
+        role: PassRole::Surface,
         execution_family: ExecutionFamily::FusedBuiltin,
         response_module_id: ModuleId(1),
         permutation_index: dense(1),
@@ -833,14 +838,15 @@ fn filling_the_queue_specializes_and_appends() {
 #[test]
 fn phase_for_bin_class_round_trips_the_render_class() {
     let mut registry = SceneRegistry::new();
-    for (index, (class, phase)) in [
-        (MaterialRenderClass::Opaque, RenderPhase::Opaque),
-        (MaterialRenderClass::Hair, RenderPhase::Opaque),
-        (MaterialRenderClass::Transparent, RenderPhase::Transparent),
-        (MaterialRenderClass::Volume, RenderPhase::Custom),
+    for (index, (domain, class, phase)) in [
+        (RenderDomain::Surface, MaterialRenderClass::Opaque, RenderPhase::Opaque),
+        (RenderDomain::Hair, MaterialRenderClass::Opaque, RenderPhase::Opaque),
+        (RenderDomain::Surface, MaterialRenderClass::Transparent, RenderPhase::Transparent),
+        (RenderDomain::Volume, MaterialRenderClass::Opaque, RenderPhase::Custom),
     ].into_iter().enumerate() {
         let handle = GenerationalHandle::new(index as u32, 1);
         let mut record = prism_render_material::fallback_material_record(handle, 1);
+        record.render_domain = domain;
         record.render_class = class;
         registry.insert_material(record);
         let table = registry.material_pass_index(handle).unwrap();
@@ -854,28 +860,33 @@ fn phase_for_bin_class_round_trips_the_render_class() {
 #[test]
 fn material_render_class_selects_the_phase() {
     use MaterialRenderClass::{
-        Additive, Decal, Hair, Masked, MaskedTwoSided, Opaque, OpaqueTwoSided, Transmissive,
-        Transparent, Volume, Water,
+        Additive, Masked, MaskedTwoSided, Opaque, OpaqueTwoSided, Transmissive, Transparent,
     };
-    for class in [Opaque, OpaqueTwoSided, Masked, MaskedTwoSided, Hair, Water] {
+    for class in [Opaque, OpaqueTwoSided, Masked, MaskedTwoSided] {
         assert_eq!(
             phase_for_render_class(class),
             RenderPhase::Opaque,
             "{class:?} is opaque-family"
         );
     }
-    for class in [Transmissive, Transparent, Additive, Decal] {
+    for class in [Transmissive, Transparent, Additive] {
         assert_eq!(
             phase_for_render_class(class),
             RenderPhase::Transparent,
             "{class:?} is transparent-family"
         );
     }
-    assert_eq!(
-        phase_for_render_class(Volume),
-        RenderPhase::Custom,
-        "a volume is a project-injected pass, not a surface draw"
+    let mut water = prism_render_material::fallback_material_record(
+        GenerationalHandle::new(90, 1),
+        1,
     );
+    water.features |= prism_render_material::MaterialFeatureFlags::WATER;
+    assert_eq!(phase_for_material(&water), RenderPhase::Transparent);
+    water.render_domain = RenderDomain::Hair;
+    water.features = prism_render_material::MaterialFeatureFlags::default();
+    assert_eq!(phase_for_material(&water), RenderPhase::Opaque);
+    water.render_domain = RenderDomain::Volume;
+    assert_eq!(phase_for_material(&water), RenderPhase::Custom);
 }
 
 /// Mesh specialization builds one pipeline per `(variant, layout)` pair and
@@ -978,6 +989,75 @@ fn full_lobe_fallback_uses_the_declared_dense_index() {
     assert_eq!(fallback.execution_family, variant.execution_family);
     assert_eq!(fallback.color_format, variant.color_format);
     assert!(full_lobe_fallback(MeshPipelineKey { fallback_permutation: None, ..variant }).is_none());
+}
+
+#[test]
+fn response_modules_are_interned_dense_checked_and_composition_resident() {
+    use crate::mesh_pipelines::{ResponseModuleCache, ResponseModuleCacheError, ResponseModuleSpec};
+
+    let adapter = NullInstance::new()
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let space = PermutationSpace::try_new([2]).unwrap();
+    let descriptor = ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    );
+    let spec = ResponseModuleSpec {
+        execution_family: ExecutionFamily::SplitResponse,
+        identity: ModuleIdentity {
+            package: ShaderPackageId::new("app.response.test"),
+            digest: ArtifactDigest([9; 32]),
+            entry_point: "vs".into(),
+            binding_layout_digest: [7; 32],
+        },
+        permutations: space.clone(),
+        full_lobe_fallback: Some(space.check_index(1).unwrap()),
+        descriptor: descriptor.clone(),
+        builtin: false,
+    };
+    let mut modules = ResponseModuleCache::new();
+    let first = modules.intern(&device, spec.clone()).unwrap();
+    assert_eq!(modules.intern(&device, spec.clone()), Ok(first));
+    assert_eq!(modules.len(), 1, "same package/module identity shares one RHI module");
+    let composition = modules.ensure_composition_kernel(&device).unwrap();
+    assert_ne!(composition, first);
+    assert!(modules.composition_kernel().is_some());
+    assert_eq!(modules.len(), 2, "composition is a resident module, not a per-material package");
+
+    let mut fused_custom = spec;
+    fused_custom.execution_family = ExecutionFamily::FusedBuiltin;
+    assert_eq!(
+        modules.intern(&device, fused_custom),
+        Err(ResponseModuleCacheError::FusedCustom)
+    );
+
+    let mut specializer = MeshPipelineSpecializer::new();
+    specializer.sync_response_modules(&modules);
+    let provider = StubProvider::new(&device);
+    let variant = MeshPipelineKey {
+        execution_family: ExecutionFamily::SplitResponse,
+        response_module_id: first,
+        permutation_index: space.check_index(1).unwrap(),
+        fallback_permutation: Some(space.check_index(1).unwrap()),
+        color_format: None,
+        depth_format: None,
+        sample_count: 1,
+        topology: PrimitiveTopology::TriangleList,
+    };
+    assert!(specializer
+        .specialize_with_provider(&device, variant, &[], &provider)
+        .is_ready());
+    let invalid = MeshPipelineKey {
+        permutation_index: dense(2),
+        ..variant
+    };
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        specializer.specialize_with_provider(&device, invalid, &[], &provider);
+    }))
+    .is_err());
 }
 
 /// A cold specialization resolves to the über fallback immediately; the worker
@@ -2334,6 +2414,7 @@ fn bin_fixture(
         (transparent_material, ModuleId(2), RenderPhase::Transparent),
     ] {
         registry.set_material_passes(material, vec![crate::PassDescriptor {
+            role: PassRole::Surface,
             execution_family: ExecutionFamily::FusedBuiltin,
             response_module_id: module,
             permutation_index: dense(1),
@@ -2674,7 +2755,8 @@ fn packed_bin_streams_offset_the_indirect_arguments() {
     assert_eq!(offsets, vec![base, base + 20]);
 }
 
-/// Unknown descriptor IDs fail loudly; temporarily absent geometry is counted.
+/// Unknown descriptor IDs remain drawable through the complete fallback;
+/// temporarily absent geometry is still counted as unresolved.
 #[test]
 fn undecodable_and_unresolved_bins_are_counted() {
     use prism_render_visibility::build_view_draw_bins;
@@ -2701,13 +2783,23 @@ fn undecodable_and_unresolved_bins_are_counted() {
     candidates.push(orphan);
 
     let foreign_bins = build_view_draw_bins(GenerationalHandle::new(0, 1), 8, [foreign]);
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        RenderQueues::new().fill_bins(
-            &device, &mut MeshPipelineSpecializer::new(), &fixture.registry,
-            &fixture.meshes, &fixture.instances, declared_args_buffer(&device),
-            &foreign_bins, None, 1, DrawFunctionId(0), &provider,
-        );
-    })).is_err());
+    let mut foreign_queues = RenderQueues::new();
+    let foreign_outcome = foreign_queues.fill_bins(
+        &device,
+        &mut MeshPipelineSpecializer::new(),
+        &fixture.registry,
+        &fixture.meshes,
+        &fixture.instances,
+        declared_args_buffer(&device),
+        &foreign_bins,
+        None,
+        1,
+        DrawFunctionId(0),
+        &provider,
+    );
+    assert_eq!(foreign_outcome.queued, 1, "unknown bins use the complete fallback");
+    assert_eq!(foreign_outcome.unknown_class, 1);
+    assert_eq!(foreign_queues.phase(RenderPhase::Opaque).len(), 1);
 
     let bins = build_view_draw_bins(GenerationalHandle::new(0, 1), 8, candidates);
     let mut queues = RenderQueues::new();
@@ -2725,8 +2817,12 @@ fn undecodable_and_unresolved_bins_are_counted() {
         DrawFunctionId(0),
         &provider,
     );
-    assert_eq!(outcome.queued, 2, "the two drawable bins still queue");
-    assert_eq!(outcome.unknown_class, 0, "foreign IDs fail instead of silently skipping");
+    assert_eq!(
+        outcome.queued,
+        2,
+        "the foreign bin queues through fallback and the resident bin remains drawable"
+    );
+    assert_eq!(outcome.unknown_class, 0, "the foreign bin was tested separately");
     assert_eq!(outcome.unresolved, 1, "the orphan class is not drawn");
     assert_eq!(outcome.total(), bins.bins.len());
 }
@@ -3517,6 +3613,7 @@ fn depth_resolves_occlusion_on_a_gpu() {
         registry.insert_material(far_record);
         for (handle, module) in [(near_material, ModuleId(1)), (far_material, ModuleId(2))] {
             registry.set_material_passes(handle, vec![crate::PassDescriptor {
+                role: PassRole::Surface,
                 execution_family: ExecutionFamily::FusedBuiltin,
                 response_module_id: module,
                 permutation_index: PermutationIndex::ZERO,

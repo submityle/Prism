@@ -7,6 +7,8 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+thiserror = "2.0"
+prism_render_graph = { path = "../prism_render_graph" }
 bevy_app = { path = "../../crates/bevy_app", version = "0.20.0-dev" }
 bevy_asset = { path = "../../crates/bevy_asset", version = "0.20.0-dev" }
 bevy_ecs = { path = "../../crates/bevy_ecs", version = "0.20.0-dev" }
@@ -40,6 +42,7 @@ prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
 prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
 
 [dev-dependencies]
+bevy_tasks = { path = "../../crates/bevy_tasks", version = "0.20.0-dev" }
 # Real-device GPU parity tests bind the water compute kernels on the same
 # `wgpu` 30 the render world uses; feature-unified with `bevy_render`.
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
@@ -49,3 +52,7 @@ glam = { version = "0.33.2", default-features = false }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "resident_composition_gpu"
+path = "text/integration/resident_composition_gpu.rs"
