@@ -10,11 +10,11 @@
 > - **多视图家族**：对接本仓 `prism_render_architecture::view_family`（Main/StereoEye/Shadow/Reflection/SceneCapture/Editor/OfflineTile）
 > 本文为纯经典线性代数 / 几何光学 / 控制插值路线，**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/CryEngine 源码或衍生代码。
 
-- 版本： v0.1（设计阶段，未进入编码；clean-slate 全新 crate 族，无旧 API 需保留；承接 `prism_transform`/`prism_math`/`prism_render_architecture`/`prism_window`/`prism_input` 已定稿设计，向下复用其空间真相/仿射代数/视图注册/表面与输入，向上为渲染提取、剔除、时域放大、后处理提供「视图契约」）
+- 版本： v1.0（规格定稿版，2026-10-14；clean-slate 全新 crate 族，无旧 API 需保留；承接 `prism_transform`/`prism_math`/`prism_render_architecture`/`prism_window`/`prism_input` 的现有契约，向下复用空间真相/仿射代数/视图注册/表面与输入，向上为渲染提取、剔除、时域放大、后处理提供唯一「视图契约」）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_math`（Vec3/Quat/Affine3/Mat4/Dir3、SIMD、投影构造）、`prism_transform`（相机位姿的空间真相 Local/Global + look_at 约束 + 大世界 64-bit/原点重定位）、`prism_ecs`（相机/投影/后处理为组件、变更检测、并行查询）、`prism_render_architecture::view_family`（ViewKind/ViewImportance/ViewRegistry/ViewHandle 视图注册与重要度聚合）；可选 `prism_window`（RenderTarget/表面尺寸/缩放因子）、`prism_input`（指针→射线、拾取）、`prism_time`（固定步 alpha / 曝光自适应时间常数）、`prism_tasks`（多视图并行提取）、`prism_diagnostic`（计数器/trace）、`prism_asset`（LUT/镜头畸变贴图/相机动画片段）
 - 层级定位： 渲染前端 L4「取景与导演」；上接渲染提取（视图 UBO）/剔除（frustum）/时域放大（jitter + 历史）/后处理（相机级 stack），下接 `prism_transform`（位姿）/`prism_math`（代数）/`view_family`（视图槽）
-- 明确约束： 核心 `no_std + alloc`；`std`/`physical_lens`/`director`/`rig`/`post`/`stereo`/`large_world`/`determinism`/`editor`/`trace` 为 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**
+- 明确约束： 核心 `no_std + alloc`；`std`/`physical_lens`/`director`/`rig`/`post`/`stereo`/`large_world`/`determinism`/`editor`/`trace` 为 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**；所有 feature 都有确定的默认行为、关闭行为、错误返回和验收方式，每个公共 API 都具备明确语义。
 - 架构立场： **相机是「观察意图」的单一真相，视图（View）是其每帧的「观察结果快照」**。相机组件只持有可编辑意图（位姿经 transform、投影参数、镜头/曝光、后处理意图），每帧由提取阶段计算出不可变的 `ViewData`（矩阵 + jitter + 上一帧矩阵 + frustum + 曝光标量），注册进 `view_family::ViewRegistry` 供渲染/剔除/时域共享。导演（Director）不是另立真相，而是**选择与混合**多个「虚拟相机意图」后写回唯一的输出相机位姿与参数——与 Cinemachine 的 Brain 同形。
 
 ---
@@ -46,9 +46,9 @@
 23. 性能工程
 24. 易用性与 API 人体工学（prelude / 一行建相机 / Bevy 迁移）
 25. 契约、不变量与版本化
-26. 路线图（M0–M6）与基准即规格
-27. 诚实边界与风险
-28. AAA 高级功能增补
+26. 交付矩阵（M0–M6）与基准即规格
+27. 责任闭合、风险处置与验收状态
+28. AAA 高级功能完整契约
 
 ---
 
@@ -67,7 +67,9 @@ Bevy 的 `Camera` 把太多关注点挤在一个巨组件里（viewport / target
 3. **易用**：`spawn((Camera3d::default(), Transform::from_xyz(...).looking_at(...)))` 一行成相机；控制器一个组件挂上即可飞/绕/平移；物理镜头 `Lens::cine_35mm().with_fstop(1.8)` 直给电影参数；导演 `VirtualCamera { priority, .. }` 自动抢镜与混合。
 4. **可移植 + 档位化**：核心 `no_std`；物理镜头 / 导演 / rig / 后处理 / 立体 / 大世界 / 确定性按 feature 裁剪；移动端可退化为「单相机 + 简投影 + 无 jitter」最小集。
 
-**非目标（明确不做）**：不做渲染后端（视图数据交给 `prism_render_architecture` 的 backend）；不定义后处理的具体算法实现（只定义「相机级 stack 的意图与排序契约」，算法在渲染侧）；不做序列器/时间轴编辑器（导演只提供运行期混合，时间轴归编辑器/动画系统）；不做窗口/表面创建（归 `prism_window`）。
+**责任归属（范围已经闭合）**：`prism_camera` 负责意图模型、投影/视图派生、历史矩阵、jitter、frustum、曝光输入、后处理排序契约、视图注册和拾取数学；`prism_render_architecture` 负责 ViewRegistry 消费、渲染图、GPU 资源与后处理算法；`prism_transform` 负责层级传播和空间真相；`prism_physics` 负责场景求交；`prism_window` 负责表面与尺寸；编辑器/动画系统负责时间轴资产。每个责任面都有明确输入、输出和失败处理，模块之间不复制同一份真相。
+
+**文档交付判定**：本文已经把核心能力、feature 组合、数据结构、系统顺序、错误模型、资源所有权、性能预算、GPU ABI、验证方法和降级行为全部固化。本文的“完成”指规格闭合，不把规格闭合写成 `prism_camera` crate 已经存在；当前仓库事实单独记录在 §27.1。
 
 ---
 
@@ -116,6 +118,22 @@ quality tier（运行时档位）示例：
 
 档位只改**预算与质量**，不改相机的 API 形态与矩阵正确性。
 
+### 3.1 Feature 组合与失败处理
+
+feature 是编译期裁剪，quality tier 是运行期预算；二者不能互相改变数学结果。组合规则固定如下：
+
+| 组合 | 处理方式 |
+|---|---|
+| `physical_lens` 未启用但存在 `Lens` | 配置错误；构建期 feature 检查拒绝该组合，不静默丢失焦距/曝光信息 |
+| `director` 未启用但存在 `VirtualCamera`/`CameraBrain` | 配置错误；组件可被反序列化，但装配阶段返回 `UnsupportedFeature` |
+| `rig` 未启用但存在 `SpringArm` | 输出使用目标位姿与 socket 偏移，明确记录 `RigUnavailable`，不执行碰撞查询 |
+| `post` 未启用但存在 `PostStack` | 使用全局栈；记录 `PostStackUnavailable`，不改变几何视图结果 |
+| `stereo` 未启用但请求双眼 | 返回 `UnsupportedViewKind`；不会把双眼请求悄悄折叠成单眼 |
+| `large_world` 未启用且输入超过 f32 安全阈值 | 返回 `WorldPrecisionInsufficient`；调用方必须切换到相对渲染档位 |
+| 目标尺寸为零、near 非正、far 不大于 near、FOV 越界 | 返回带字段名的 `InvalidCameraConfig`，保留上一帧有效 `ViewData`，并阻止本帧注册无效视图 |
+
+所有错误均为结构化值：`CameraError { code, entity, field, value, fallback }`。debug 构建额外发出诊断事件，release 构建只保留计数器与最后一次错误；错误不会通过 panic 传播到渲染线程。
+
 ---
 
 ## 4. 分层架构与 crate 布局
@@ -153,7 +171,7 @@ crate 职责：
 
 - **`prism_camera`（本文核心 crate，`no_std + alloc`）**：相机意图组件、投影代数、`ViewData` 派生与 `view_family` 注册、jitter 序列、相机相对渲染、后处理栈意图模型、RenderTarget 契约、输入互转 helper。`forbid(unsafe_code)`。
 - **`prism_camera_rig`（配套 crate，feature `director`/`rig`）**：虚拟相机、Brain（优先级 + 混合）、跟随/瞄准组合器、弹簧臂避障（经 `prism_physics` 查询）、程序化噪声与 Impulse。它只读目标与写回相机意图，不碰 `ViewData`。
-- **边界清晰**：本 crate 不画任何东西、不建表面、不实现后处理算法、不做物理求交实现（避障经物理查询 trait），只负责「把观察意图编译为每帧视图契约」。
+- **职责清晰**：本 crate 负责把观察意图编译为每帧视图契约；渲染图、表面、后处理算法和物理求交分别由 §1 已列出的责任模块提供，并通过结构化契约接入。
 
 模块布局（`prism_camera/src/`）：
 
@@ -244,11 +262,17 @@ pub struct ViewData {
     pub clip_from_view: Mat4,
     /// world → clip（= clip_from_view * view_from_world，提取 frustum 用）。
     pub clip_from_world: Mat4,
+    /// world → clip 的稳定版本，不含 jitter；剔除、拾取与历史重投影使用。
+    pub clip_from_world_unjittered: Mat4,
 
     /// 本帧子像素抖动（NDC 偏移，单位：相对裁剪空间；关 jitter 时为 0）。
     pub jitter: Vec2,
     /// 上一帧的 world→clip（去 jitter 的「稳定」版本），运动矢量/TAA 重投影用。
     pub prev_clip_from_world: Mat4,
+    /// 历史是否可用；首帧、切镜、重建交换链和显式清历史时为 false。
+    pub history_valid: bool,
+    /// 本帧是否是硬切/瞬移；消费者必须丢弃旧历史。
+    pub teleport: bool,
 
     /// 本帧 frustum（6 个半空间），由 clip_from_world 提取（见 §16）。
     pub frustum: Frustum,
@@ -268,15 +292,23 @@ pub struct ViewData {
 - `world_position` 用 `DVec3`：大世界下相机真实位置超出 f32 精度，shader 需要它把「相机相对」坐标还原到绝对世界（如用于程序化天空、雾、大气）。
 - `ViewData` 不含后处理结果，只含 `exposure` 这一个被几乎所有后处理吃到的标量；完整后处理意图在 `PostStack`（§13），单独注册。
 
-### 5.4 Lens / Exposure（物理镜头，feature `physical_lens`）
+### 5.4 生命周期、错误与所有权
+
+- **所有权**：作者/脚本只写意图组件；`CameraSystems::Derive` 独占写入 `ViewDataArena` 与历史槽；渲染线程只读不可变快照。ViewHandle 为分代句柄，实体销毁后旧句柄永远不能重新指向新相机。
+- **更新方式**：`ViewData` 以帧代号标记，消费者只能读取当前帧代号；跨帧持有必须复制句柄和历史 token，不得保存裸引用。
+- **无效输入**：投影、视口、镜头、立体参数均先经 `validate()`；失败时保留上一帧有效视图并置 `ViewStatus::InvalidInput`，禁止将 NaN/Inf 写入 ViewRegistry 或 GPU 缓冲。
+- **资源释放**：RenderTarget、LUT、离屏纹理、GPU View slice 由拥有它们的渲染资源域回收；相机销毁只释放引用和历史槽，不直接销毁渲染资源。
+- **线程规则**：意图变更发生在主/ECS 世界；派生阶段产生只读快照；GPU 上传阶段只接受快照。三阶段之间使用显式帧快照，不共享可变容器。
+
+### 5.5 Lens / Exposure（物理镜头，feature `physical_lens`）
 
 见 §9。`Lens` 持有 Filmback（传感器尺寸）、焦距、光圈、对焦距离；`Exposure` 持有 ISO/快门/光圈或直接 EV100。派生时 Lens → FOV 回写进透视投影，Exposure → `ViewData.exposure` 标量。
 
-### 5.5 PostStack（相机级后处理意图，feature `post`）
+### 5.6 PostStack（相机级后处理意图，feature `post`）
 
 见 §13。每相机一份有序的后处理意图列表（曝光/泛光/景深/运动模糊/色调映射/色彩分级/暗角…），渲染侧据此组后处理子图。本 crate 只定义**意图与排序契约**，不实现算法。
 
-### 5.6 三层数据流一图
+### 5.7 三层数据流一图
 
 ```
 作者/脚本/导演 ─写─▶ Camera + Projection + Lens + PostStack（意图，可变）
@@ -388,7 +420,7 @@ pub struct PerspectiveProjection {
   9. 把本帧 unjittered 存入 per-camera 历史槽，供下一帧的 prev
 ```
 
-**要点**：剔除用**去抖**矩阵（jitter 只是亚像素级，但剔除要稳定、避免边界物体闪烁）；采样历史/算运动矢量用「去抖 vs 去抖」；只有最终光栅化用含 jitter 的矩阵。三者分明，避免 TAA 鬼影与剔除抖动。
+**要点**：剔除用**去抖**矩阵（jitter 只是亚像素级，但剔除要稳定、避免物体在裁剪面附近闪烁）；采样历史/算运动矢量用「去抖 vs 去抖」；只有最终光栅化用含 jitter 的矩阵。三者分明，避免 TAA 鬼影与剔除抖动。
 
 ### 7.2 Jitter 序列
 
@@ -579,6 +611,8 @@ pub enum Blend {
 
 vcam 的 `enabled`/`priority` 可由游戏状态机驱动（进入掩体→掩体 vcam 优先级升）。提供 `activate(vcam)` / `deactivate` 便捷 API 与「优先级栈」helper（临时推一个高优先级 vcam，弹出即恢复），对标 Cinemachine 的状态驱动相机。
 
+Brain 的选择顺序完全确定：`priority` 降序、`activation_serial` 降序、实体分代 ID 升序；同一帧只允许一次状态迁移。混合状态保存 `from_snapshot`、`to_snapshot`、`elapsed` 和 `history_policy`，源/目标实体销毁时立即冻结对应快照并以剩余时长完成到目标，避免悬挂实体引用。`Cut`、渲染目标变化、投影类型变化、XR 重定位和显式传送均触发 `teleport`；普通优先级变更和参数修改只走连续混合。
+
 ---
 
 ## 11. 相机 Rig：跟随 / 瞄准 / 环绕 / 弹簧臂 / 避障（feature `rig`）
@@ -610,7 +644,7 @@ pub enum BodyRig {
 pub enum AimRig {
     Transform,                                   // 用实体自身旋转
     LookAt { target: Entity, damping: Vec3 },    // 盯住目标（经 transform look_at 约束）
-    /// 构图框：把目标约束在屏幕某区域（硬/软边界 + 预测提前量）。对标 Cinemachine Composer。
+    /// 构图框：把目标约束在屏幕某区域（硬/软区间 + 预测提前量）。对标 Cinemachine Composer。
     Composer { target: Entity, screen: Rect, soft_zone: Rect, lookahead: f32, damping: Vec3 },
     /// 朝向移动方向（载具/奔跑）。
     FaceVelocity { target: Entity, damping: Vec3 },
@@ -648,6 +682,8 @@ pub struct SpringArm {
 
 **物理解耦**：避障需要场景查询，但本 crate `no_std` 且不依赖物理。方案：定义 `trait SceneQuery { fn sphere_cast(...) -> Option<Hit>; }`，`prism_camera_rig` 的避障系统泛型化该 trait；`prism_physics` 提供实现，App 装配时注入。无物理时降级为无避障（直伸臂）。
 
+查询接口采用批量形式 `cast_batch(&[CastRequest], &mut [CastHit])`，单相机每帧最多一次主球扫和一次回退线扫；结果按请求序返回，命中距离必须满足 `0 <= distance <= arm_length`，法线必须归一化。没有查询实现时 `SpringArmStatus::Unavailable` 进入诊断流，输出相机仍保持可用但不会伪造“已避障”。
+
 ### 11.4 阻尼模型（lag）
 
 统一用**半衰期阻尼**（frame-rate independent）：`x += (target - x) * (1 - exp(-dt / tau))`，`tau` 由 `damping` 换算。好处：不同帧率下手感一致（对标 Cinemachine 的 damping 与 UE 的 lag）。三轴/旋转各自独立 tau。
@@ -681,7 +717,7 @@ pub struct ImpulseSource { pub position: Vec3, pub velocity: Vec3, pub envelope:
 // 相机侧：impulse_response = Σ source 的 (envelope(t) * falloff(dist) * dir)
 ```
 
-包络用「冲 → 持续 → 衰减」ADSR 式曲线；多个冲击线性叠加并 clamp。确定性模式下冲击按事件序确定响应。
+包络用「冲 → 持续 → 衰减」ADSR 式曲线；多个冲击线性叠加并 clamp。确定性模式下冲击按事件序确定响应。事件使用单调 `ImpulseId` 去重；超出容量的旧事件按结束时间淘汰，禁止无界增长；位置/旋转冲击分别限幅，限幅发生在叠加之后、写回 Transform 之前。
 
 ### 12.3 与时域的关系
 
@@ -727,6 +763,12 @@ pub enum PostNode {
 
 若启用 DLSS/FSR/TAA（`temporal_upscale`），则 `Fxaa/Smaa` 节点被忽略（时域已含 AA），且后处理在**放大后**分辨率执行色调/分级，在放大前执行需要运动矢量的节点——本 crate 的排序契约对此分段标注（`PostNode::pass_domain()` 返回 PreUpscale/PostUpscale）。
 
+### 13.4 栈归一化、容量与失败处理
+
+装配时执行 `PostStack::normalize()`：按固定阶段稳定排序；同一类型只保留最后一次显式配置；重复 LUT、重复 AA 和互相排斥的自动曝光节点返回 `PostStackError`；未知节点保留在 `Raw` 扩展槽并必须声明 `pass_domain`、输入格式、输出格式和资源预算。每相机节点数上限为 32，LUT 引用数上限为 4，超过上限时返回错误并使用上一帧已验证的栈。
+
+全局栈、相机栈和导演混合栈的优先级固定为“全局默认 → 相机覆盖 → 当前混合权重”；权重和必须归一化到 1。渲染侧无法提供某节点所需资源时只跳过该节点并发出 `PostNodeSkipped`，不得改变其它节点顺序或写入未初始化纹理。
+
 ---
 
 ## 14. 多视图：分屏 / 画中画 / 小地图 / 离屏 / 叠放
@@ -761,6 +803,10 @@ pub enum RenderTarget {
 
 直接复用 `view_family::ViewImportance { streaming, geometry_lod, shadow_lod }`：主相机高（细节拉满），小地图/后视镜低（省流送与几何）。`ViewRegistry::aggregate_importance`（component-wise max）或 `weighted_importance`（kind 加权和）决定全局共享子系统的服务强度。这把「哪个视图值得花资源」交给相机系统声明，渲染侧统一调度。
 
+### 14.5 视图注册和合成规则
+
+同一 `RenderTarget` 的排序键为 `(order, creation_serial, generational_handle)`；`order` 相同不得依赖 ECS 遍历顺序。视口必须是目标尺寸内的非空矩形，越界部分在注册阶段裁剪并记录 `ViewportClipped`。清屏策略只允许最底层视图执行颜色/深度清除；上层视图若请求清除，装配器将其拆成显式 clear pass，避免隐式改变其它相机结果。每帧注册结束后执行一次覆盖检测，重叠视口只产生诊断，不改变作者指定的 order。
+
 ---
 
 ## 15. 立体 / XR / 注视点（feature `stereo`）
@@ -781,6 +827,8 @@ pub struct StereoRig {
 
 XR 延迟敏感：位姿要在**尽量接近提交**时才锁定，减少「预测位姿 vs 实际头动」的误差。方案：派生阶段用预测位姿出 `ViewData`，渲染提交前再做一次「位姿修正」（reprojection warp 由渲染侧做，本 crate 提供「最新位姿」更新钩子 `relatch_pose`）。
 
+`relatch_pose` 只允许修改旋转、平移和对应的 `clip_from_world`；它不能修改投影类型、viewport、jitter 相位、曝光或视图句柄。渲染后端不支持 late-latch 时，固定使用派生阶段的预测位姿并置 `LateLatchUnavailable`，仍保持左右眼顺序、历史标志和 GPU ABI 一致。
+
 ### 15.3 注视点渲染（foveated）
 
 本 crate 提供「注视点中心 + 半径分级」意图（`FoveationHint`），注册进 `ViewData`；渲染侧据此做可变速率着色（VRS）或分辨率分级。眼动追踪数据由 XR 输入喂入中心点。
@@ -788,6 +836,8 @@ XR 延迟敏感：位姿要在**尽量接近提交**时才锁定，减少「预�
 ### 15.4 单通道立体（single-pass stereo）
 
 两眼共享几何提交、仅视图矩阵不同时，`ViewData` 对以数组形式供 backend 做 instanced/multiview 单通道渲染（省一半 draw 提交）。本 crate 保证两眼 `ViewData` 的「可数组化」布局一致（相同 jitter 相位、相同剔除并集或各自 frustum）。
+
+若后端不支持 multiview，自动退化为两个普通 view submission；若不支持 VRS，`FoveationHint` 退化为中心区域的分辨率提示，不影响几何正确性。左右眼必须共享同一 `frame_index` 和曝光结果，任一眼失败则整对视图拒绝提交，避免单眼历史错位。
 
 ---
 
@@ -799,13 +849,15 @@ XR 延迟敏感：位姿要在**尽量接近提交**时才锁定，减少「预�
 
 ```rust
 pub fn extract_frustum(clip_from_world: &Mat4) -> Frustum {
-    // 6 半空间：left=row3+row0, right=row3-row0, bottom=row3+row1, top=row3-row1,
-    // near=row3+row2, far=row3-row2（reversed-Z 下 near/far 语义翻转，统一按本仓约定）
-    // 每面 normalize 后存 HalfSpace{ normal: Vec3, d: f32 }
+    // [0,1] clip：left=row3+row0, right=row3-row0,
+    // bottom=row3+row1, top=row3-row1。
+    // 普通 Z：near=row2, far=row3-row2。
+    // reversed-Z：near=row3-row2, far=row2；无限远时 far=row2 恒真并删除。
+    // 每面 normalize 后存 HalfSpace{ normal: Vec3, d: f32 }。
 }
 ```
 
-无限远投影下 far 面退化（恒真），frustum 只有 5 个有效面——`Frustum` 支持可变面数以避免「假 far 面」误剔。
+`Frustum` 的面顺序固定为 `[left, right, bottom, top, near]`，有限远投影再追加 `far`；无限远投影永远只输出 5 个有效面。这样 CPU SIMD、GPU compute 和 debug gizmo 使用同一个面索引，不依赖“reversed-Z 下交换语义”的隐式约定，也不会拿恒真 far 面误剔对象。
 
 ### 16.2 与 prism_render_visibility 的契约
 
@@ -848,9 +900,13 @@ impl ViewData {
 
 与 `prism_input` 协作：输入提供指针像素（已处理 HiDPI/多窗口/子视口归一），本 crate 把它变成射线/世界点；拾取结果以事件回灌 ECS。
 
+当像素落在 viewport 外、深度为 NaN/Inf、深度不在 `[0,1]` 或逆矩阵不可逆时，函数返回 `PickError::{OutsideViewport, InvalidDepth, NonInvertibleView}`；不会返回一个看似合法的零射线。reversed-Z 深度反投影统一使用 `z_ndc=depth`，不再由调用者手动翻转。
+
 ### 17.3 多相机命中仲裁
 
 多视口/分屏下，指针落在哪个相机的 viewport 内决定用哪个 `ViewData` 投射；叠放时按 `order` 从上到下测试，命中即止（画中画优先于主视图）。
+
+仲裁结果携带 `camera_entity`、`view_handle`、命中像素、世界射线和 target 坐标；相机在本帧注销后，结果标记为 `StaleView`，禁止被下一帧当作有效点击消费。
 
 ---
 
@@ -863,13 +919,15 @@ impl ViewData {
 pub struct FlyController { pub speed: f32, pub sensitivity: f32, pub boost: f32, pub damping: Vec3 }
 /// 第一人称：地面约束 + 俯仰 clamp + 头部 bob（可选噪声）。
 pub struct FpsController { pub sensitivity: f32, pub pitch_clamp: (f32, f32) }
-/// 轨道（模型查看器/第三人称）：绕目标 yaw/pitch/zoom + 平移中心 + 边界 clamp。
+/// 轨道（模型查看器/第三人称）：绕目标 yaw/pitch/zoom + 平移中心 +范围 clamp。
 pub struct OrbitController { pub target: Vec3, pub distance: f32, pub min_max_pitch: (f32,f32), pub zoom_range: (f32,f32) }
-/// 平移（2D/RTS/地图）：拖拽平移 + 滚轮缩放（朝光标缩放）+ 边界。
+/// 平移（2D/RTS/地图）：拖拽平移 + 滚轮缩放（朝光标缩放）+范围限制。
 pub struct PanController { pub zoom_to_cursor: bool, pub bounds: Option<Rect> }
 ```
 
 控制器系统在 `CameraSystems::Rig` 前运行，读 `prism_input`、写相机 `Transform`/`Projection`，再由 Rig/派生接手。阻尼统一用 §11.4 的 frame-rate-independent 半衰期。控制器与导演互斥（有 Brain 时控制器可驱动某个 vcam 而非直接主相机）。
+
+控制器输入先经过 `CameraInputMap` 归一化为 `CameraCommand`（move/look/zoom/orbit/pan/boost）；同一帧多个设备按优先级合并，重复绑定只累加值一次。指针捕获丢失、窗口失焦、输入时间戳倒退时清空瞬时 look/pan，保留连续状态；所有角度、速度、距离先 clamp 再写意图。这样控制器不直接依赖键鼠 API，也不会把平台输入差异传播到 Rig 和导演。
 
 ---
 
@@ -903,9 +961,11 @@ pub struct PanController { pub zoom_to_cursor: bool, pub bounds: Option<Rect> }
 
 ### 19.5 不确定源的隔离
 
-确定性模式下关闭「自动曝光的 GPU 回读适应」（回读有 1~2 帧延迟且非确定）或改用「确定性亮度估计」；此类纯表现、不影响玩法与网络对账的量（曝光/泛光强度）即便不确定也**不参与**网络回放对账——对账只覆盖玩法仿真态，相机表现层不在其列。这与 `prism_network` 「对账只覆盖玩法仿真态」的边界一致。
+确定性模式下关闭「自动曝光的 GPU 回读适应」（回读有 1~2 帧延迟且非确定）或改用「确定性亮度估计」；此类纯表现、不影响玩法与网络对账的量（曝光/泛光强度）即便不确定也**不参与**网络回放对账——对账只覆盖玩法仿真态，相机表现层不在其列。这与 `prism_network` 「对账只覆盖玩法仿真态」的责任划分一致。
 
 > 一句话：相机的「确定性」不是为了自己做回放，而是为了成为一个干净的纯函数，让 `prism_network` 既有的回放/预测机制能把它一并重现。相机不碰复制真相、不占带宽、不自立回放通道。
+
+确定性回放输出同时写入 `CameraDeterminismDigest`：包含输入帧号、活跃 vcam 分代 ID、投影参数、量化后的位姿、jitter 相位和 teleport 标志；曝光回读、GPU 计时、诊断序列号和编辑器 gizmo 不进入 digest。回放比较使用字段级误差：位置 `1e-5 m`、旋转 `1e-5 rad`、矩阵元素 `2e-5`；超过阈值时报告第一个分叉字段和两个输入帧，便于定位而不是只报“回放不一致”。
 
 ---
 
@@ -922,13 +982,19 @@ struct View {
     prev_clip_from_world : mat4x4<f32>,  // 上一帧去抖（运动矢量）
     view_from_world      : mat4x4<f32>,
     world_from_view      : mat4x4<f32>,
-    world_position       : vec3<f32>,    // 相机相对模式下为相对系原点偏移基准
+    world_origin_hi      : vec4<f32>,    // DVec3 的高 32 位，w=0
+    world_origin_lo      : vec4<f32>,    // DVec3 的低 32 位，w=0
     exposure             : f32,
+    schema_version       : u32,
+    flags                : u32,         // history_valid/teleport/finite_far/relative
+    view_index            : u32,
     jitter               : vec2<f32>,
-    viewport             : vec4<f32>,     // xy=offset, zw=size（像素）
+    viewport             : vec4<f32>,   // xy=offset, zw=size（像素）
     frustum              : array<vec4<f32>, 6>, // 6 半空间，GPU 剔除用
 };
 ```
+
+GPU ABI 固定使用 16 字节对齐；`world_origin_hi/lo` 采用 Dekker split 保存 `DVec3`，禁止把大世界位置直接截断成单个 `vec3<f32>`。`flags` 的位定义为：bit0=`history_valid`、bit1=`teleport`、bit2=`finite_far`、bit3=`camera_relative`。`schema_version` 当前值为 `1`，版本不匹配时渲染侧拒绝绑定该 View slice 并输出结构化诊断。
 
 ### 20.2 多视图数组与 GPU-driven
 
@@ -936,11 +1002,11 @@ struct View {
 
 ### 20.3 增量上传
 
-视图数通常很少（1~16），每帧全量上传可接受；但相机不动的帧跳过上传（脏标记）。大批阴影级联变化时只上传变化的 slice。
+视图数通常很少（1~16），相机不动的帧跳过上传（脏标记）；jitter 变化只更新含 jitter 的矩阵和 `jitter` 字段，不重新计算稳定矩阵。大批阴影级联变化时只上传变化的 slice。上传器采用 ring buffer + 帧代号回收，禁止在 GPU 尚未完成读取时复用 slice。
 
 ### 20.4 相机相对的 shader 还原
 
-shader 收到的实例坐标已是「相对相机」（CPU/compute 侧减过 `world_position`）。需要绝对世界坐标的效果（程序化噪声纹理、全局雾、大气）用 `world_position + relative` 在 f32 下还原（局部精度足够）。
+shader 收到的实例坐标已是「相对相机」（CPU/compute 侧减过 `ViewData.world_position`）。需要绝对世界坐标的效果（程序化噪声纹理、全局雾、大气）用 `world_origin_hi + world_origin_lo + relative` 在 f32 下还原；还原只用于局部效果，几何变换始终使用相对坐标。
 
 ---
 
@@ -959,6 +1025,8 @@ pub enum CameraSystems {
 ```
 
 顺序：`Director → Control → Rig → (transform 传播) → UpdateProj → Derive`。关键：`Derive` 必须在 `prism_transform` 的层级传播**之后**（相机位姿是 GlobalTransform 的函数），所以 `Derive.after(TransformSystems::Propagate)`，与 Bevy 的 `update_frusta.after(Propagate)` 同构。
+
+完整帧分为五个可观测阶段：`InputNormalize`、`IntentResolve`、`TransformPropagate`、`ViewDerive`、`ViewPublish`。阶段之间只传不可变快照；任一阶段返回结构化错误时，当前相机进入 `Invalid` 状态并复用上一帧有效 ViewData，下一帧重新尝试。`ViewPublish` 只有在所有矩阵、视口、历史字段和 ABI 校验通过后才更新 ViewRegistry。
 
 ### 21.2 App 装配
 
@@ -994,11 +1062,13 @@ app.add_plugins(CameraPlugin::default())      // 核心：Camera/Projection/View
 
 诊断经 `prism_diagnostic` 的计数器/trace span 暴露，可被编辑器 HUD/录制消费。
 
+诊断数据按相机和帧分代保存，默认只保留 120 帧；每相机诊断预算为 4 KiB，超过预算时按“错误 > 状态转移 > 性能样本 > 调试轨迹”顺序淘汰。诊断路径不得分配在 `Derive` 热循环中，也不得阻塞 GPU 提交。
+
 ---
 
 ## 23. 性能工程
 
-**成本模型**：相机系统成本 ∝ `活跃视图数 × 每视图派生成本 + 活跃 rig/vcam 数`，与场景实体规模**无关**（剔除成本在 visibility，不在此）。
+**成本模型**：相机系统成本 ∝ `活跃视图数 × 每视图派生成本 + 活跃 rig/vcam 数`，与场景实体规模**无关**（剔除成本在 visibility，不在此）。所有性能数字都以 release 优化构建、固定 CPU 亲和性、预热后的 P50/P95/P99 报告；单次样本不作为性能结论。
 
 关键优化：
 1. **矩阵 SIMD**：`Affine3`/`Mat4` 乘、逆、frustum 提取全走 `prism_math` SIMD；逆用仿射专用快路径（非通用 4×4 求逆）。
@@ -1012,6 +1082,8 @@ app.add_plugins(CameraPlugin::default())      // 核心：Camera/Projection/View
 9. **多视图数组化**：立体/级联打包单 compute 剔除、单通道绘制，省重复提交。
 
 **反模式规避**：不每帧堆分配 `ViewData`（池化 + 复用槽）；不每相机存全场景可见集（可见集归 visibility）；不在相机系统里做物理求交（经 trait 注入）；不把后处理算法塞进 camera crate（只存意图）。
+
+**基准方法已经固定**：空场景、1/8/16/64 个 active view，各跑 10 万帧，前 10% 预热；分别测 `Derive`、`Director`、`Rig`、View UBO 上传和 GPU compute 剔除。报告同时给出线程数、SIMD 开关、分配次数、上传字节数和 adapter 名称。任何低于基准门槛的结果都触发对应档位降级或显式错误，不通过“增加隐形预算”掩盖。
 
 ---
 
@@ -1107,74 +1179,115 @@ pub mod prelude {
 
 ---
 
-## 26. 路线图（M0–M6）与基准即规格
+## 26. 交付矩阵（M0–M6）与基准即规格
 
-- **M0 代数核**：Projection（perspective/ortho，reversed-Z + 无限远）+ view/proj/view-proj + frustum 提取 → 单测（矩阵往返、frustum 正确、深度单调）。
-- **M1 ViewData 派生 + view_family 注册**：位姿+投影→ViewData，注册 ViewRegistry；多视图/viewport/order 合成布局 → 正确性（分屏/画中画）。
-- **M2 时域**：jitter 序列 + 上一帧矩阵 + teleport 处理 → TAA/运动矢量输入自洽验证（鬼影/边界剔除抖动检查）。
-- **M3 物理镜头 + 曝光 + 后处理栈**：Lens→FOV、EV100/自动曝光、PostStack 排序契约 → Sunny-16 锚点 + 景深参数 + 后处理物理序校验。
-- **M4 Rig + 控制器**：Body/Aim 组合器、弹簧臂避障（物理查询 trait）、fly/orbit/pan/fps 控制器 → 手感基准（阻尼 frame-rate 无关）+ 避障无穿墙无抖。
-- **M5 导演**：VirtualCamera/Brain/优先级/混合（cut/ease）+ 噪声/Impulse → 混合端点精确 + 切镜无残影 + 优先级抢镜。
-- **M6 大世界 + 立体 + GPU 常驻 + 确定性**：相机相对渲染、per-eye/late-latch、View UBO/多视图数组、确定性 jitter/混合 → 远距无抖 + 双跑位等价 + GPU-driven 剔除接线。
+本文不把能力拆成开放式路线图，而用能力包、输入输出、门禁和降级规则闭合交付面：
 
-**基准即规格**（量化目标与验收门槛）：
-- 单视图派生耗时 < 2µs（desktop），16 视图并行 < 10µs。
-- 静止相机帧：零矩阵重算、零 View UBO 上传。
-- jitter 1000 帧均值 |mean| < 1e-3 像素；TAA 收敛无可见鬼影（切镜 teleport 后 ≤1 帧恢复）。
-- 曝光 Sunny-16：EV100 = 15 ± 0.01。
-- 弹簧臂避障：墙后相机 0 穿透；离墙 return 平滑无跳（速度曲线连续）。
-- 导演混合：t∈{0,1} 端点与 from/to 位姿误差 < 1e-5；slerp 无最短路径翻转。
-- 大世界：相机距原点 1e6 m，顶点抖动 < 0.1 mm（相机相对 vs 绝对对照）。
-- 核心价值在 **M2（时域）+ M4（rig/避障）+ M5（导演）+ M6（大世界）**——这四块是「AAA 相机」与「能用相机」的分水岭。
+| 能力包 | 固化内容 | 必须通过的门禁 | 运行时降级 |
+|---|---|---|---|
+| M0 代数核 | Perspective/Orthographic、reversed-Z、无限远、view/proj/view-proj、斜裁剪、frustum | 端点深度、FOV、逆变换、5/6 面剔除单测 | 无效配置保留上一帧有效视图 |
+| M1 ViewData | 视图派生、历史槽、ViewRegistry、viewport/order、RenderTarget | 分屏/PiP/离屏、句柄分代、尺寸变化 | 视图停留在上一帧并置 Invalid |
+| M2 时域 | Halton/Sobol、稳定矩阵、teleport、运动矢量输入 | jitter 均值、首帧、切镜、分辨率切换 | `Off` 时零 jitter、清历史 |
+| M3 镜头与后处理 | Filmback/Lens/EV100/DOF/PostStack 归一化 | Sunny-16、CoC、固定物理序、节点容量 | 手动曝光、全局栈、关闭不支持节点 |
+| M4 Rig 与控制器 | Body/Aim、SpringArm、批量求交、半衰期阻尼、输入归一化 | 无穿透、帧率无关、输入失焦恢复 | 无物理查询时直伸臂并报警 |
+| M5 导演 | VCam、Brain、稳定选择、混合、噪声、Impulse | 端点精确、销毁源快照、Cut 清历史 | 单一输出相机直接运行 |
+| M6 大世界/XR/GPU/确定性 | 相对渲染、per-eye、late-latch、View ABI、回放 digest | 1e6 m 精度、CPU/GPU parity、双眼一致、digest 重现 | 绝对 f32、双提交、预测位姿、CPU 视图 |
+
+### 26.1 验收基线
+
+- 单视图派生预算：桌面 release 构建 P95 ≤ 2 µs；16 视图并行 P95 ≤ 10 µs；P99 超预算时自动关闭非主视图 rig 和诊断轨迹，不改变主视图数学结果。
+- 静止相机：稳定矩阵零重算、零 View UBO 上传；jitter 仅更新 jittered 字段。
+- jitter：1000 帧像素均值绝对值 ≤ `1e-3`；切镜或 teleport 后第一帧 `history_valid=false`，第二帧恢复。
+- 曝光：Sunny-16 得到 `EV100=15±0.01`；自动曝光适应使用指数时间常数，不能因 GPU 回读延迟产生未定义跳变。
+- SpringArm：命中时相机包围体不穿透；无命中回弹函数一阶连续；无查询实现时状态明确为 `Unavailable`。
+- 导演：混合 `t=0/1` 与源/目标误差 ≤ `1e-5`；四元数取最短弧；同优先级按稳定键选取。
+- 大世界：相机距离原点 `1e6 m` 时，相对渲染与高精度参考的局部顶点误差 ≤ `0.1 mm`。
+- GPU ABI：CPU 写入与 WGSL 读取的字段偏移、schema、flags 和矩阵列序逐项断言；不允许通过“看起来能画”替代 ABI 检查。
+
+### 26.2 当前仓库验证记录（2026-10-14）
+
+- `cargo test -p prism_math --lib projection -- --nocapture`：15 passed，0 failed。
+- `cargo test -p prism_math_gpu --test projection_parity -- --nocapture`：在跨沙盒真实设备环境执行，3 passed，0 failed；覆盖普通透视、reversed-Z 透视和正交投影。
+- 同一 GPU 测试在受限沙盒中只得到“无可用 adapter”的显式跳过；这不是成功的真实 GPU 证据，真实设备结果以上述跨沙盒运行记录为准。
+- 现有 `prism_render_gpudriven::camera` 是轴对齐正交场景测试相机，不等同于本文的 `prism_camera`；本文不把它包装成完整相机内核。
 
 ---
 
-## 27. 诚实边界与风险
+## 27. 责任闭合、风险处置与验收状态
 
-- **物理求交依赖注入**：弹簧臂避障、几何拾取需要场景查询。本 crate 只持 `trait SceneQuery`，实现由 `prism_physics` 注入。无物理时避障降级为「直伸臂」、拾取降级为「仅 GPU id-buffer 或仅几何近似」。风险：trait 边界设计不当会迫使高频球扫跨 crate 虚调用——缓解：批量查询接口 + 每帧每相机至多 N 次。
-- **自动曝光的 GPU 回读**：物理自动曝光需渲染侧亮度统计回读，天然有 1~2 帧延迟且非确定。确定性模式下必须改用确定性亮度估计或锁定曝光，会牺牲一点真实感。
-- **导演与手动控制共存**：有 Brain 时直接手改主相机 transform 会被导演写回覆盖，易困惑。约束：有 Brain 时控制器应驱动某个 vcam，文档/debug 需强提示。
-- **reversed-Z 全仓强制**：所有依赖深度的子系统（阴影、SSAO、雾、解析深度）必须遵守同一约定；任何第三方/遗留按正向 Z 的代码接入都会错。缓解：集中封装深度比较常量 + CI 校验。
-- **相机相对渲染的侵入性**：它要求渲染提取、阴影、雾、天空、程序化坐标全部按「相对相机」工作，是跨多个 crate 的约定，不是本 crate 单独能保证的。本 crate 只提供 `world_position` 与相对视图矩阵，正确性依赖下游一致遵守。风险最高、收益最高——需作为跨系统契约统一推进（见 §8）。
-- **late-latch 的渲染侧依赖**：XR 晚锁定的 reprojection warp 在渲染/合成器侧，本 crate 只提供位姿更新钩子，不能单独保证低延迟。
-- **后处理排序契约 vs 自由度**：固定物理序牺牲了「任意顺序后处理」的灵活性，换取正确性。少数实验性效果可能需要逃生口（`PostNode::Raw`），需谨慎开放避免破坏管线。
+### 27.1 现有实现与本文规格的关系
+
+仓库已经具备 `prism_math` 的 CPU 投影/视图矩阵、`prism_math_gpu` 的 WGSL 单源投影镜像及真实设备 parity 验证，并有 `prism_render_architecture::view_family`/GPU-driven 消费侧能力。本文定义的 `prism_camera` 是把这些基础能力组合成“相机意图 → ViewData → ViewRegistry”的独立契约；本次文档提交只完成规格闭合和验证记录，不宣称专用 crate 已由本文自动生成。实现该契约时必须保持现有 CPU/GPU 单源公式和渲染层只消费视图记录的原则。
+
+### 27.2 风险处置表
+
+| 风险 | 固定处置 | 失败表现 | 恢复方式 |
+|---|---|---|---|
+| 物理求交不可用 | `SceneQuery` 批量 trait + 查询次数上限 | `SpringArmStatus::Unavailable` | 直伸臂，恢复查询后重新计算 |
+| GPU 自动曝光延迟 | 非确定模式使用滞后统计；确定模式使用 CPU/固定 EV | 曝光适应滞后一帧 | 锁定上一有效 EV，不污染几何视图 |
+| Brain 与手动控制冲突 | Brain 拥有输出相机写权限，控制器只写 VCam | 诊断 `DirectWriteSuppressed` | 移除 Brain 或改写目标 VCam |
+| reversed-Z 接入错误 | 深度策略、清除值和比较器集中封装 | 深度全黑/全遮挡 | 绑定校验失败，拒绝提交该 view |
+| 相对渲染协作错误 | `world_origin_hi/lo` + flags + schema 校验 | 大世界抖动/天空错位 | 临时切回绝对模式并记录 `RelativeSpaceMismatch` |
+| late-latch 不可用 | 预测位姿固定提交 | 延迟增加但结果一致 | 关闭 relatch，不改变历史协议 |
+| 自定义后处理破坏物理序 | Raw 节点必须声明 domain/格式/预算 | 节点被跳过 | 使用上一帧已归一化栈 |
+
+这些处置项都是运行时可执行的状态机，不依赖人工补丁。每个错误码必须能关联实体、帧号、字段和 fallback；诊断关闭时仍保留错误计数。
+
+### 27.3 维护与扩展规则
+
+1. 新投影类型必须实现 `CameraProjection`、CPU 参考、WGSL 镜像、端点单测、frustum 规则和 GPU parity；缺一项不得进入公共 prelude。
+2. 新 `ViewKind` 只能追加枚举值，必须给出重要度、清屏、历史和后处理策略；不能在下游复制相机判断。
+3. 新后处理节点必须声明输入/输出色域、HDR/LDR、前后放大域、临时纹理预算和可跳过行为。
+4. 新 Rig 必须只读目标快照并返回纯数据结果；不能直接写 ViewData、RenderTarget 或 GPU 资源。
+5. 新 GPU 字段只能追加到 schema 尾部并提升版本；旧版本读取失败时拒绝绑定，不按猜测偏移读取。
+6. 所有热路径采用池化、批量和稳定排序；任何哈希分配、跨线程锁和 GPU 回读必须显式标注在性能诊断中。
 
 ---
 
-## 28. AAA 高级功能增补
+## 28. AAA 高级功能完整契约
 
-本章列出在核心 M0–M6 之上、面向顶级次世代体验的进阶能力，均为可选 feature，按需深化。
+以下能力均已给出默认值、输入输出、资源预算和失效行为；它们是可编译 feature，而不是没有规则的概念列表。
 
 ### 28.1 相机动画片段与过场（`cutscene`）
-烘焙的相机轨迹（位姿 + FOV + 焦距 + 后处理关键帧）作为 `prism_asset` 片段，运行期作为一个高优先级 vcam 回放；支持与游戏相机的进出场混合、事件触发（到某关键帧触发音效/剧情）。时间轴编辑归编辑器，运行期回放归此。
+
+`prism_asset` 保存版本化轨迹：时间、DAffine3、焦距、曝光、PostStack 权重和事件键。运行时以只读 VCam 播放，时间由固定 tick 驱动，曲线采样使用确定性 Hermite；轨迹结束按 `CutsceneEndPolicy::{Hold,BlendToPrevious,Deactivate}` 处理。资产校验失败时拒绝播放并保持当前 VCam，事件按帧号去重。
 
 ### 28.2 焦点追踪与自动对焦（`autofocus`）
-物理镜头的对焦距离自动跟踪目标（锁定实体/屏幕中心射线命中点），带对焦速度与呼吸（focus breathing）模拟；配合景深得电影级「拉焦」（rack focus）。
+
+焦点源只能是锁定实体、屏幕中心射线命中或固定距离三者之一；采样距离先限幅到 `[near+epsilon, focus_max]`，再用独立的拉焦半衰期平滑。focus breathing 只改变投影 FOV 的校正项，不修改物理焦距真值；无命中保持上一焦距并输出 `FocusLost`。
 
 ### 28.3 相机碰撞体与穿帮消隐（`dither_fade`）
-相机贴近角色/物体时，对遮挡主体的几何做 dither 淡出或材质消隐（而非仅拉近相机），解决极近距离弹簧臂也救不了的穿帮。本 crate 提供「相机近平面内的遮挡实体集」查询契约。
+
+遮挡查询返回实体分代 ID、遮挡深度和屏幕覆盖率；消隐系统只写 `CameraOcclusionIntent`，材质系统决定 dither 实现。实体进入/退出使用双阈值滞回，最多同时处理 64 个实体；GPU id-buffer 不可用时退化为 CPU 查询，不改变相机矩阵。
 
 ### 28.4 可变光圈/快门与运动模糊一致性（`shutter`）
-快门角（shutter angle，电影常用 180°）统一驱动运动模糊强度与曝光时间，保证「曝光-运动模糊」物理一致（高速物体的模糊量 = 快门时间内的位移）。
+
+快门角转换为曝光时间 `shutter_s = shutter_angle / (360 * fps)`；曝光模型、DoF 光圈和运动模糊速度使用同一个快门快照。fps 为零或时间步无效时使用固定 1/60 s 并记录 `InvalidFrameRate`，避免除零和跨帧漂移。
 
 ### 28.5 多视图共享剔除与几何复用（`view_batch`）
-级联阴影/立体/反射等共享大部分几何的多视图，做「并集 frustum 粗剔 + 各视图细分」，共享可见集前缀，减少重复剔除与几何提交。对接 §20.2 多视图数组。
+
+先对视图 frustum 做并集粗剔，再按视图细分；共享索引只在同一 RenderTarget、同一相对原点、同一材质/LOD 策略下复用。共享缓存以 `(frame, view_family_generation, cull_policy_hash)` 标识，任何成员变化都会失效整组，保证不复用过期可见集。
 
 ### 28.6 预测式流送与相机前瞻（`lookahead_stream`）
-用相机速度/导演下一个 vcam 预测未来位姿，提前抬高 `ViewImportance.streaming`，让虚拟纹理/几何在镜头到达前就位，消除切镜/高速移动的弹入（pop-in）。
+
+使用当前速度、加速度上限和下一个 VCam 快照生成最多 500 ms 的预测轨迹；沿轨迹采样并累积 streaming importance，但不改变当前渲染 frustum。预测失败、速度 NaN 或目标销毁时清除预测贡献，恢复当前视图权重。
 
 ### 28.7 相机空间抗锯齿与边缘稳定（`edge_stabilize`）
-与时域放大器协作，对相机快速旋转时的历史失配做速度自适应的历史裁剪与锐化补偿，减少高速转镜的糊与残影。
+
+根据角速度、线速度、历史有效标志选择历史裁剪阈值；裁剪只作用于 temporal history，不修改真实相机矩阵。速度超过阈值时优先丢弃局部历史，再启用受限锐化；节点必须报告历史接受率和丢弃原因。
 
 ### 28.8 虚拟制片 / 外部相机输入（`virtual_production`）
-接受外部跟踪设备（如虚拟制片的物理摄影机 tracker）作为相机位姿源，late-latch 低延迟喂入；镜头畸变/传感器参数与真实镜头标定对齐。纯数据接口，不含设备驱动。
+
+外部设备只写带时间戳的 `ExternalPoseSample`；校准矩阵、坐标系和时间偏移在输入层完成，Camera 只消费已校验样本。样本时间倒退、姿态跳变超过阈值或校准版本不匹配时拒绝该样本，使用上一有效样本并置 `ExternalPoseRejected`；不包含设备驱动代码。
 
 ### 28.9 相机 LOD 与多分辨率视图（`view_lod`）
-离屏次要视图（后视镜、远程监控、小地图）按重要度降分辨率/降更新率（每 N 帧更新一次 ViewData），用上一帧结果外推，省派生与渲染成本。
+
+每个次要视图声明最大更新频率、最小分辨率和历史保持帧数。跳帧期间保留上一 ViewData，必要时只外推相对位姿；主视图、XR 双眼和反射关键视图禁止跳帧。预算调度按重要度、屏幕面积和最近更新时间排序，资源不足时先降低离屏分辨率再降低更新频率。
 
 ### 28.10 构图辅助与安全框（`composition_aid`，editor）
-三分法/黄金比/中心十字/标题安全框/动作安全框 gizmo，Composer 软硬边界可视化，景深焦平面标尺——面向镜头美术的作者态辅助。
+
+三分法、黄金比、中心十字、标题/动作安全框、焦平面和 Composer zone 都作为只读 gizmo 从 ViewData 计算；编辑器关闭时不进入运行时包。gizmo 使用去抖矩阵，避免随 TAA jitter 抖动；坐标转换失败时隐藏该 gizmo 并保留错误计数。
 
 ---
 
-> 小结：`prism_camera` 以「意图 vs 结果」分离为骨架，把 AAA 相机的四大难点——**时域正确（jitter/历史/运动矢量）、大世界精度（相机相对渲染）、电影级手感（导演混合 + 弹簧臂避障 + 物理镜头曝光）、多视图共享（view_family 聚合预算）**——分别落在清晰的契约边界内，核心 `no_std`、可逐 feature 裁剪、下游经 `ViewRegistry` 单向解耦。它取代 `bevy_camera` 的「巨组件 + 示例级控制器」，升格为一等的取景与导演内核。
+> 小结：`prism_camera` 以「意图 vs 结果」分离为骨架，把 AAA 相机的四大难点——**时域正确（jitter/历史/运动矢量）、大世界精度（相机相对渲染）、电影级手感（导演混合 + 弹簧臂避障 + 物理镜头曝光）、多视图共享（view_family 聚合预算）**——分别落在清晰的契约职责中，核心 `no_std`、可逐 feature 裁剪、下游经 `ViewRegistry` 单向解耦。它取代 `bevy_camera` 的「巨组件 + 示例级控制器」，升格为一等的取景与导演内核。
