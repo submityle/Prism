@@ -61,6 +61,22 @@ impl BitOrAssign for RenderPassMask {
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct WorkSortKey(pub u64);
 
+/// A coarse classification carried by a [`WorkSortKey`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkSortKeyClass {
+    Pass,
+    Pipeline,
+    Material,
+}
+
+/// Error returned when a [`WorkSortKey`] classification uses the reserved
+/// headroom value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkSortKeyError {
+    pub class: WorkSortKeyClass,
+    pub value: u8,
+}
+
 impl WorkSortKey {
     pub fn new(
         pass_class: u8,
@@ -69,13 +85,51 @@ impl WorkSortKey {
         geometry_page: u16,
         depth_bucket: u16,
     ) -> Self {
-        Self(
+        Self::try_new(
+            pass_class,
+            pipeline_class,
+            material_class,
+            geometry_page,
+            depth_bucket,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "WorkSortKey classification {:?}={} is reserved for headroom",
+                error.class, error.value
+            )
+        })
+    }
+
+    /// Builds a sort key while enforcing the reserved classification value.
+    ///
+    /// `255` is intentionally rejected for every `u8` coarse classification;
+    /// it must never be truncated, wrapped, or packed as a valid class.
+    pub fn try_new(
+        pass_class: u8,
+        pipeline_class: u8,
+        material_class: u8,
+        geometry_page: u16,
+        depth_bucket: u16,
+    ) -> Result<Self, WorkSortKeyError> {
+        validate_class(WorkSortKeyClass::Pass, pass_class)?;
+        validate_class(WorkSortKeyClass::Pipeline, pipeline_class)?;
+        validate_class(WorkSortKeyClass::Material, material_class)?;
+
+        Ok(Self(
             ((pass_class as u64) << 56)
                 | ((pipeline_class as u64) << 48)
                 | ((material_class as u64) << 40)
                 | ((geometry_page as u64) << 16)
                 | depth_bucket as u64,
-        )
+        ))
+    }
+}
+
+fn validate_class(class: WorkSortKeyClass, value: u8) -> Result<(), WorkSortKeyError> {
+    if value == u8::MAX {
+        Err(WorkSortKeyError { class, value })
+    } else {
+        Ok(())
     }
 }
 
@@ -125,14 +179,40 @@ mod tests {
     fn sort_key_orders_primarily_by_pass_class() {
         // A higher pass class must sort after a lower one regardless of the
         // lower-priority fields, which encode into less significant bits.
-        let opaque = WorkSortKey::new(0, 255, 255, u16::MAX, u16::MAX);
+        let opaque = WorkSortKey::new(0, 254, 254, u16::MAX, u16::MAX);
         let transparent = WorkSortKey::new(2, 0, 0, 0, 0);
         assert!(opaque < transparent);
 
         // Within one pass class, the pipeline class dominates the material.
-        let a = WorkSortKey::new(1, 1, 255, 255, 255);
+        let a = WorkSortKey::new(1, 1, 254, 255, 255);
         let b = WorkSortKey::new(1, 2, 0, 0, 0);
         assert!(a < b);
+    }
+
+    #[test]
+    fn sort_key_rejects_reserved_class_values_without_packing_them() {
+        for (class, args) in [
+            (WorkSortKeyClass::Pass, (u8::MAX, 0, 0, 0, 0)),
+            (WorkSortKeyClass::Pipeline, (0, u8::MAX, 0, 0, 0)),
+            (WorkSortKeyClass::Material, (0, 0, u8::MAX, 0, 0)),
+        ] {
+            let error = WorkSortKey::try_new(args.0, args.1, args.2, args.3, args.4)
+                .expect_err("255 must remain reserved for headroom");
+            assert_eq!(error.class, class);
+            assert_eq!(error.value, u8::MAX);
+        }
+
+        let key = WorkSortKey::try_new(254, 254, 254, 0, 0)
+            .expect("254 is the largest valid coarse classification");
+        assert_eq!(key.0 >> 56, 254);
+        assert_eq!((key.0 >> 48) & 0xff, 254);
+        assert_eq!((key.0 >> 40) & 0xff, 254);
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved for headroom")]
+    fn compatibility_constructor_loudly_rejects_reserved_class_values() {
+        let _ = WorkSortKey::new(u8::MAX, 0, 0, 0, 0);
     }
 
     #[test]

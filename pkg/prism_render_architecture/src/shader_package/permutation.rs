@@ -91,15 +91,12 @@ impl PermutationSpace {
     }
     /// Builds a space from per-axis option counts.
     ///
-    /// Each count is clamped to a minimum of 1: an axis always has at least the
-    /// default option, so an empty axis cannot silently zero the total.
+    /// This is the infallible convenience form of [`Self::try_new`]. Invalid
+    /// declarations are programmer errors and panic instead of being silently
+    /// clamped or saturated into a colliding dense identity.
     #[must_use]
     pub fn new(axis_option_counts: impl IntoIterator<Item = u32>) -> Self {
-        let axes = axis_option_counts
-            .into_iter()
-            .map(|count| count.max(1))
-            .collect();
-        Self { axes }
+        Self::try_new(axis_option_counts).expect("invalid shader permutation space")
     }
 
     /// Number of axes (feature switches) in the space.
@@ -116,15 +113,13 @@ impl PermutationSpace {
 
     /// Total number of permutations (product of per-axis option counts).
     ///
-    /// An empty space has exactly one permutation (the trivial variant). The
-    /// product saturates at [`u64::MAX`] rather than overflowing.
+    /// An empty space has exactly one permutation (the trivial variant).
+    /// Construction already rejects overflow, so this accessor cannot silently
+    /// alias two dense indices by saturation.
     #[must_use]
     pub fn total_permutations(&self) -> u64 {
-        let mut total: u64 = 1;
-        for &count in &self.axes {
-            total = total.saturating_mul(u64::from(count));
-        }
-        total
+        self.checked_total()
+            .expect("PermutationSpace invariant violated")
     }
 
     /// Computes the dense linear index of `key` within this space.
@@ -243,13 +238,6 @@ mod tests {
             PermutationSpace::try_new([u32::MAX; 3]),
             Err(PermutationError::Overflow)
         );
-        let legacy = PermutationSpace::new([u32::MAX; 3]);
-        assert_eq!(
-            legacy.checked_index_of(&PermutationKey::new([0; 3])),
-            Err(PermutationError::Overflow)
-        );
-        assert_eq!(legacy.index_of(&PermutationKey::new([0; 3])), None);
-        assert_eq!(legacy.key_from_index(0), None);
         let space = PermutationSpace::try_new([2, 3]).unwrap();
         assert_eq!(
             space.checked_index_of(&PermutationKey::new([0])),
@@ -277,10 +265,8 @@ mod tests {
     }
 
     #[test]
-    fn zero_option_axis_is_clamped_to_one() {
-        let space = PermutationSpace::new([0, 5]);
-        assert_eq!(space.axis_options(0), Some(1));
-        assert_eq!(space.total_permutations(), 5);
+    fn infallible_constructor_rejects_zero_option_axis() {
+        assert!(std::panic::catch_unwind(|| PermutationSpace::new([0, 5])).is_err());
     }
 
     #[test]
@@ -324,8 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn total_saturates_instead_of_overflowing() {
-        let space = PermutationSpace::new([u32::MAX, u32::MAX, u32::MAX]);
-        assert_eq!(space.total_permutations(), u64::MAX);
+    fn infallible_constructor_rejects_product_overflow() {
+        assert!(std::panic::catch_unwind(|| PermutationSpace::new([u32::MAX; 3])).is_err());
     }
 }
