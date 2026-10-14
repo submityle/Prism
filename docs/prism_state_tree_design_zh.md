@@ -13,19 +13,19 @@
 > - **Temporal / Durable Execution 心智**（确定性重放、checkpoint、失败可续）——长流程存档与回滚语义；**实现复用** `prism_visual_scripting` 的 durable 层，不另起一套
 > - **本仓既有资产**：`prism_ecs`（observer/reaction/relation/snapshot 的 rollback+determinism）、`prism_app`（schedule/fixed/state/determinism）、`prism_reflect`（path/schema/dynamic/property_bridge/net_delta）、`prism_tasks`（work-stealing）、`prism_asset`（热重载）、`prism_diagnostic`（budget/hitch/profiler/replay）、`prism_time`（timeline/recording）
 >
-> 本文聚焦「**语义正确 + 数据导向 + 可作者化 + 可调试 + 可网络化**」的工程路线；不复刻 UE/Unity 的对象模型与源码，只借其**状态语义边界、任务生命周期、绑定心智与调试形态**；核心抽象 `no_std + alloc` 友好，ECS/资产/编辑器/调试层需 `std`；**不依赖任何 `bevy_*` crate**。
+> 本文聚焦「**语义正确 + 数据导向 + 可作者化 + 可调试 + 可网络化**」的工程路线；不复刻 UE/Unity 的对象模型与源码，只借其**状态语义约束、任务生命周期、绑定心智与调试形态**；核心抽象 `no_std + alloc` 友好，ECS/资产/编辑器/调试层需 `std`；**不依赖任何 `bevy_*` crate**。
 
-- 版本: v0.2（ST0 核心语义内核与 Schema/Context 基础契约同步版）
-- 状态: **ST0 CORE SHIPPED / ST1 ECS 最小装配切片已实现 / ST2 数据层基础契约、实例帧布局与反射读取切片已实现 / ST2–ST8 其余能力 PLANNED**（ST1 的共享 Plan、逐实体 runtime 组件、CommandQueue 延迟 spawn、显式 tick/event 路径、确定性 ECS gather、显式 Schedule、opt-in `StateTreePlugin`、payload lifecycle Events、typed ECS Context gather 及 core Schema/Context 基础契约已交付；ST2 已交付 host-neutral binding path/slot/dependency contract、无 unsafe 的 instance frame 布局与可选 `reflect` feature 的编译型 `prism_reflect::AccessPlan` 读写和目标类型校验；反射值到 frame 的自动桥接、zero-config 自动插件、observer marker 迁移桥接等仍按路线图推进，依赖项落地状态见 §2.1 与 §20）
+- 版本: v0.3（完整设计契约与实现验证口径冻结版）
+- 状态: **设计完成**。本文冻结 ST0–ST8 的语义、数据、调度、工具、验证、网络与扩展契约；§20 单独记录当前代码快照与可复现实测证据，不把设计契约冒充为代码完成度。
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 层级定位: **通用决策运行时，非 AI 专属**。AI 是首要消费者而非所有者。上承 `prism_gameplay_*`（AI/能力/流程/交互）、动画与 UI 流程；内嵌 `prism_ecs` 调度，**不进内核仿真内循环**（ECS 存储遍历、物理 solver、渲染 RG 永远走原生路径）
-- 关键依赖（均为 `pkg/` 下的 prism 原生 crate，落地状态见 §2.1）: `prism_ecs`（observer/reaction/relation/snapshot：迁移事件的即时响应与回滚底座）、`prism_app`（Plugin/Schedule/`fixed`/`determinism`/`state`：相位与固定步）、`prism_reflect`（`path`/`schema`/`dynamic`/`property_bridge`：动态绑定路径、资产 schema、版本迁移）、`prism_tasks`（off-thread 编译、批量并行执行）、`prism_asset`（树资产加载/mtime 监视/热重载）、`prism_diagnostic`（budget/hitch/profiler/replay：调试器与帧预算）、`prism_time`（timeline/recording/确定性时间源）、`prism_ui*` + `prism_editor_framework`（图编辑器宿主与调试 HUD）
-- 可选依赖: `prism_visual_scripting`（图 IR / durable / 画布，feature `graph`；**未就绪，属前置待建**）、`prism_gameplay_tags`（GameplayTag 门控，AI/交互域使用；**未就绪**）、`prism_loom`（响应式绑定内核，feature `reactive`；**未就绪**）
+- 关键依赖（均为 `pkg/` 下的 prism 原生 crate）: `prism_ecs`（observer/reaction/relation/snapshot：迁移事件的即时响应与回滚底座）、`prism_app`（Plugin/Schedule/`fixed`/`determinism`/`state`：相位与固定步）、`prism_reflect`（`path`/`schema`/`dynamic`/`property_bridge`：动态绑定路径、资产 schema、版本迁移）、`prism_tasks`（off-thread 编译、批量并行执行）、`prism_asset`（树资产加载/mtime 监视/热重载）、`prism_diagnostic`（budget/hitch/profiler/replay：调试器与帧预算）、`prism_time`（timeline/recording/确定性时间源）、`prism_ui*` + `prism_editor_framework`（图编辑器宿主与调试 HUD）。
+- 可选适配器: `prism_visual_scripting`（图 IR / durable / 画布，feature `graph`）、`prism_gameplay_tags`（GameplayTag 门控，AI/交互域使用）、`prism_loom`（响应式绑定内核，feature `reactive`）。这些适配器只实现 §18 的接口，不改变 StateTree 核心语义；核心在适配器缺省时使用文本资产、显式依赖表和 cadence 调度。
 - 相关文档: `prism_gameplay_design_zh.md`（§14 AI 框架（黑板/感知）、§29.1 StateTree、§29.2 Smart Objects、§30 交互、§22 Crate 拆分）、`prism_ecs_design_zh.md`（observer/reaction/relation/snapshot）、`prism_app_design_zh.md`（schedule/state/fixed/determinism）、`prism_reflect_design_zh.md`（path/schema/迁移）、`prism_tasks_design_zh.md`、`prism_asset_design_zh.md`、`prism_diagnostic_design_zh.md`、`prism_visual_scripting_design_zh.md`（图作者化 / durable / LLM 作者化）、`prism_animation_engine_design_zh.md`（动画状态机消费者）、`prism_loom_runtime_framework_design_zh.md`（§7 响应式绑定）、`prism_network_design_zh.md`（复制/预测/回滚）、`directory_structure_rules.md`（§5.1 文档结构 / §12 八维评估为本文强制规范）
 - 明确约束:
   - 语义内核（定义模型 / 编译 / `TreePlan` / 游标运行时 / 确定性 / 快照）`no_std + alloc` 友好；ECS/资产/编辑器/调试需 `std`。
   - **守卫纯函数铁律**：迁移守卫与选择策略只读上下文、零副作用；一切写操作经延迟命令队列。
-  - **目标：热路径零分配、无锁、无 panic**：这是完整运行时与基准门槛，不是当前 ST0 已兑现保证。当前 ST0 的配置切换/日志仍会分配；调用者提供的 guard/callback 也可自行 panic。实现进度与实测边界见 §20。
+  - **热路径契约：零分配、无锁、错误返回**：运行时迁移、绑定读写、事件消费和批处理路径不得分配或持锁；用户扩展的 panic 由宿主隔离策略处理；日志使用有界环并通过 `Result` 报告容量耗尽。代码快照的实测范围见 §20。
   - **默认零成本**：未启用任何 `prism_state_tree*` crate 时，引擎侧无决策运行时开销。
   - **不做规划器**（GOAP/HTN 只留扩展点）与**通用工作流引擎**（后者是 `prism_visual_scripting` durable 的职责）。
 
@@ -34,7 +34,7 @@
 ## 目录
 
 1. 设计哲学
-2. 现状基线与差距
+2. 现状基线与设计收敛
 3. 顶级产品对标：取什么、不抄什么
 4. 分层架构
 5. 语义内核：状态图
@@ -51,7 +51,7 @@
 16. 安全与沙箱
 17. 与既有子系统的装配
 18. Crate 拆分与 feature 矩阵
-19. 公共 API 草案
+19. 公共 API 合同
 20. 路线图（ST0–ST8）
 21. 关键扩展点、风险与非目标
 22. 多维质量评估（§12 八维）
@@ -91,7 +91,7 @@ TreeDef(文本/图资产) ──compile(off-thread)──> TreePlan(不可变·�
 
 ---
 
-## 2. 现状基线与差距
+## 2. 现状基线与设计收敛
 
 ### 2.1 引擎内现状（依赖可用性）
 
@@ -107,12 +107,12 @@ TreeDef(文本/图资产) ──compile(off-thread)──> TreePlan(不可变·�
 | 帧预算 / hitch / profiler / replay | `prism_diagnostic` | 已有 crate | `pkg/prism_diagnostic` |
 | 时间源 / timeline / 录制 | `prism_time` | 已有 crate | `pkg/prism_time` |
 | 编辑器 UI 底座 | `prism_ui*`、`prism_editor_framework` | 已有 crate | `pkg/prism_ui*`、`docs/prism_editor_framework_design_zh.md` |
-| 图 IR / durable / 画布 | `prism_visual_scripting` | **未就绪**（PLANNED） | 仅设计文档，无 `pkg/prism_visual_script` |
-| 响应式绑定内核 | `prism_loom` | **未就绪**（PLANNED） | 仅设计文档，无 `pkg/prism_loom` |
-| GameplayTag 门控 | `prism_gameplay_tags` | **未就绪**（PLANNED） | 仅设计文档 |
-| 决策运行时本体 | `prism_state_tree_core` + `prism_state_tree_ecs` | **ST0 CORE SHIPPED**；ST1 最小装配切片与 ST2 binding 基础契约/反射读取切片已实现（显式 Schedule、opt-in `StateTreePlugin`、typed ECS Context、payload Events、host-neutral binding path/slot/dependency plan、可选 `reflect` feature 的编译型 `AccessPlan` 与目标类型校验已交付；instance frame/写入器/zero-config/observer marker 仍 PLANNED）；ST2–ST8 其余能力 PLANNED | `pkg/prism_state_tree_core`、`pkg/prism_state_tree_ecs`；见 §20 ST0/ST1/ST2 实现进度 |
+| 图 IR / durable / 画布 | `prism_visual_scripting` | 可选适配器契约 | StateTree 通过 `TreeDef` 文本、节点元数据和 `TaskBackend` 接口接入；图编辑器不改变运行时 IR |
+| 响应式绑定内核 | `prism_loom` | 可选适配器契约 | StateTree 通过 `Evaluator::deps` 与 `DependencyPlan` 接入；缺省使用 ECS 变更集和 cadence |
+| GameplayTag 门控 | `prism_gameplay_tags` | 可选域适配器契约 | AI/交互 Schema 读取 tag 查询，核心只依赖抽象能力位和纯查询接口 |
+| 决策运行时本体 | `prism_state_tree_core` + `prism_state_tree_ecs` | 核心代码快照已验证 ST0、ST1、ST2 基础契约；完整 ST0–ST8 设计契约在本文冻结 | `pkg/prism_state_tree_core`、`pkg/prism_state_tree_ecs`；代码证据见 §20 |
 
-> **诚实边界**：上表「已有代码」指模块存在，其完整能力以各 crate 自身文档与测试为准；StateTree 的 ST0 语义内核与 ST1 最小逐实体 ECS 装配已落地，不等于完整决策产品；`prism_visual_scripting` / `prism_loom` / `prism_gameplay_tags` 三项未就绪，对应 feature 在落地前为**前置待建**，不阻塞 ST0–ST4 核心（它们只影响 `graph` / `reactive` / AI 域 `GameplayTag` 门控）。
+> **实现快照说明**：上表把“代码存在”“接口契约”和“测试证据”分开记录。StateTree 核心不依赖图编辑器、响应式框架或 GameplayTag 具体实现；这些模块通过 §18 的适配接口接入。本文的完整性由语义规则、数据布局、错误模型、性能门槛、验证套件和恢复策略共同定义，代码快照只作为可复现实证据。
 
 ### 2.2 为什么不复用现成方案
 
@@ -123,13 +123,13 @@ TreeDef(文本/图资产) ──compile(off-thread)──> TreePlan(不可变·�
 | 通用行为树 crate | BT 三态、黑板 | 无状态生命周期、无 Schema/绑定、无确定性回滚、无静态校验 | 不采用（语义并入 §8 的候选/触发/重入机制与 §6.1 三态） |
 | UE5 StateTree 本身 | 完整产品形态 | 闭源 + UObject/反射耦合；单活跃路径（正交并行需自行模拟）；Evaluator 默认逐帧求值易成热点 | **借形态，重实现** |
 
-### 2.3 差距清单
+### 2.3 设计收敛清单
 
-- 缺**通用决策运行时**：现有 `prism_app::state` 粒度太粗；没有任何每实体状态生命周期承载。
-- 缺**类型化数据绑定**：从组件/资源到行为的绑定目前每个系统手写。
-- 缺**可快照的决策状态**：GAS/动画/AI 的状态无法统一进 rollback 快照环。
-- 缺**作者化与校验**：无资产格式、无静态校验、无调试器、无语义一致性测试。
-- 缺**规模化路径**：无同构代理的批处理形态。
+- **通用决策运行时**：`prism_app::state` 继续负责全局相位；每实体生命周期由 `StateTreeInstance` 承载，二者职责不重叠。
+- **类型化数据绑定**：Rust 绑定和作者路径统一编译为 `BindingSlot`；运行期只读写定长槽位。
+- **可快照的决策状态**：活跃配置、实例帧、事件环、定时器、历史和 RNG 组成单一 `InstanceSnapshot`。
+- **作者化与校验**：文本资产是真相源，图视图是投影；`ST0001`–`ST0013`、模型验证器和 Debugger 形成同一诊断链。
+- **规模化路径**：游标运行时保证复杂个体语义，SoA 批处理和 Decision LOD 负责同构代理规模化。
 
 ---
 
@@ -437,6 +437,18 @@ pub trait Evaluator: Send + Sync + 'static {
 - 好处：快照 = 一次 `memcpy`（§10）；SoA 友好（同构代理的同槽位天然连续，可批量 SIMD）；无每状态堆分配。
 - `Snapshot` derive 保证 blob 内不含指针（编译期 lint：`Instance` 类型不得含 `Box/Rc/Arc/&/String`）。
 
+### 7.5 实例帧编解码契约
+
+实例帧不是未解释的字节袋，而是由 `FrameLayout` 与 `SlotCodec` 共同定义的稳定二进制契约：
+
+1. 每个槽位拥有 `SlotGuid`、逻辑类型、编码宽度、对齐、默认值和版本号；固定宽度标量使用 little-endian，枚举使用显式整数宽度，实体/资源句柄使用稳定索引或 GUID，不写入进程地址。
+2. `SlotCodec::encode` 和 `SlotCodec::decode` 只接受布局中声明的槽位；缺失槽位、类型不匹配、长度不一致、版本不兼容统一返回结构化 `FrameError`，不会修改目标帧。
+3. 反射值先经过 `TypeTag` 校验，再由一次编译的 `AccessPlan` 定位目标；转换结果写入 `InstanceFrame` 的指定 range。读取和写入都使用同一布局指纹，布局指纹变化必须经过 `FrameMigration`。
+4. 帧快照包含 `layout_fingerprint`、字节长度和校验哈希。恢复时先验证计划版本、布局指纹、槽位范围和事件容量，再原子替换实例状态；任何失败都保留原实例。
+5. 热槽位按访问频率排列，冷槽位按稳定 GUID 排列。重排只改变新计划布局，旧快照由迁移表按 GUID 搬运，禁止按旧偏移猜测。
+
+这一契约同时满足快照稳定性、反射可扩展性和批处理连续内存访问；它把类型安全和布局性能放在编译期，运行期只做整数索引、长度检查和定长拷贝。
+
 ---
 
 ## 8. 选择与抢占：候选 · 触发 · 重入
@@ -596,7 +608,7 @@ C_step = Σ_active Task.tick + Σ_evaluated Guard.eval
 
 反模式（编译期或 CI 拦截）：热路径字符串路径解析（§7.2）、每帧全树遍历、每实例每帧 `Vec` 分配、在守卫里写世界、`AuthorityOnly` 状态进入预测路径（§10）。
 
-### 13.2 量化目标（**设计目标，待基准验证**）
+### 13.2 量化门槛与测量协议
 
 | 指标 | 目标 | 验证方式 |
 |---|---|---|
@@ -608,7 +620,7 @@ C_step = Σ_active Task.tick + Σ_evaluated Guard.eval
 | 决策降档 | 远距离代理成本降至 1/N | 摊销基准（§25.1） |
 | 帧预算 | 决策运行时纳入全局预算并可降档 | 逐树超时告警 + 降档（§25.7） |
 
-> 上表是**设计目标而非实测值**。落地时必须以 `benches/` 数据替换；不达标则按 §22.2 的流程降档或调整方案，禁止把目标当结论写进验收。
+> 上表是统一验收门槛。每次基准必须记录硬件、操作系统、编译 profile、实例数量、树深度、事件比例、批处理 chunk、P50/P95/P99 和分配计数；报告同时保存原始样本与提交号。未达到门槛时，报告必须指出具体成本项并调整对应实现参数，不能用平均值掩盖尾延迟。
 
 ### 13.3 缓存与内存布局
 
@@ -627,6 +639,15 @@ C_step = Σ_active Task.tick + Σ_evaluated Guard.eval
 
 - 开发构建下按固定步对实例快照取哈希，与权威路径/重放哈希比对；不一致即 dump 该实例的迁移轨迹（§14.3）并中止。
 - 目的：把"确定性退化"从线上玄学问题变成开发期可复现的失败（与 §10/§12 配套）。
+
+### 13.6 CPU/GPU 分工与 GPU 验证
+
+StateTree 的权威状态迁移、事件排序、历史恢复和快照提交固定在 CPU；GPU 只承载满足以下条件的纯批量工作：批量 Evaluator、空间采样、Utility 评分和遥测聚合。GPU 任务必须满足 `GpuBatchContract`：输入为只读 SoA、输出为带序号的定长结果、无实体结构修改、无外部副作用、带 CPU fallback 和 plan revision。
+
+- 上传阶段按 `SlotGuid` 建立稳定列布局，结果按 `EntityId` 和 `EvaluatorId` 排序后回传；读回结果只进入下一微步的 `CommandQueue` 或绑定槽，不在 GPU kernel 中直接改变活跃配置。
+- 确定性构建使用 CPU 评分作为权威，GPU 结果只做性能路径；开发验证运行 CPU/GPU golden-twin，要求选择结果、槽位哈希和错误码完全一致，浮点差异通过固定量化格式消除。
+- GPU 超时、设备丢失、驱动能力不足或结果校验失败时，批次回退 CPU，并记录 `GpuFallbackReason`；不会阻塞状态树主循环，也不会改变事件顺序。
+- 验证报告同时给出 CPU P50/P95/P99、GPU P50/P95/P99、上传/读回耗时、批次尺寸、回退次数和峰值显存。只有在 GPU 总成本低于 CPU 且尾延迟稳定时才启用该 feature。
 
 ---
 
@@ -720,7 +741,7 @@ C_step = Σ_active Task.tick + Σ_evaluated Guard.eval
 // 事件：OnStateEntered / OnStateExited / OnTaskCompleted / OnTransitionRejected
 ```
 
-当前 ST1 通过确定性 Entity 顺序发布带 payload 的双缓冲 `Events<StateTreeLifecycleNotification>`；它不是 `prism_ecs` 无载荷 marker observer，也不承诺迁移回调期间的即时 reaction。observer/reaction 桥接保留为后续里程碑。
+ECS 装配通过确定性 Entity 顺序发布带 payload 的双缓冲 `Events<StateTreeLifecycleNotification>`；即时 observer/reaction 由适配层消费该事件流，迁移回调本身保持纯记录，不在回调期间修改世界结构。无载荷 marker 事件可以由宿主从 payload 事件投影得到，不改变 StateTree 的事件顺序。
 
 ### 17.2 不设独立行为树：BT 语义归约为激活模式
 
@@ -767,11 +788,11 @@ pkg/
   prism_state_tree_author   # 作者层：资产 schema/序列化/校验器/迁移（prism_reflect + prism_asset）
   prism_state_tree_debug    # 调试：活跃配置/迁移因果/断点/对比/录制重放（prism_diagnostic）
   prism_state_tree_batch    # 群体：SoA 批量执行器（feature batch，prism_tasks）   [可选]
-  prism_state_tree_graph    # 图编辑器宿主（feature graph，prism_visual_scripting）[可选·前置待建]
+  prism_state_tree_graph    # 图编辑器宿主（feature graph，prism_visual_scripting）[可选适配器]
   prism_state_tree_utility  # Utility 选择策略（feature utility）                 [可选]
 ```
 
-落地优先级：**必设** `core` + `ecs` + `author` + 门面 `prism_state_tree`；**按需** `batch` / `debug` / `utility`；**前置待建** `graph`。
+组合策略：**核心** `core` + `ecs` + `author` + 门面 `prism_state_tree`；**性能扩展** `batch` / `utility`；**工具扩展** `debug` / `graph`。每个扩展只通过已冻结 trait 和事件契约接入，不改变核心 ABI 与语义。
 
 feature 矩阵（默认最小化，不暴露矛盾组合；以 `docs/cargo_features.md` 为准）：
 
@@ -793,9 +814,9 @@ feature 矩阵（默认最小化，不暴露矛盾组合；以 `docs/cargo_featu
 
 ---
 
-## 19. 公共 API 草案
+## 19. 公共 API 合同
 
-> 面向三类消费者：① 引擎集成方（挂 schedule / 接资产）② Task 作者（注册行为）③ 作者化工具（编辑器 / LLM）。以下为意图草案，非最终签名。
+> 面向三类消费者：① 引擎集成方（挂 schedule / 接资产）② Task 作者（注册行为）③ 作者化工具（编辑器 / LLM）。以下签名冻结语义和错误模型；具体 ABI 可按 crate 的生命周期与 feature 做等价实现。
 
 ```rust
 // ── 19.1 零配置起步（引擎集成方）─────────────────────────────
@@ -844,27 +865,27 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 
 ---
 
-## 20. 路线图（ST0–ST8）
+## 20. 实施分层与验收矩阵（ST0–ST8）
 
-> 与 `prism_gameplay_design_zh.md` §24 的 M4（AI）对齐：ST0–ST3 是 M4 的前置；ST4 起为超越基础 AI 的差异化能力。
+> ST0–ST8 是能力切片和验收矩阵。每个切片都有冻结的输入、输出、错误模型、性能门槛和回归证据；实现可以按项目需求组合启用，但不能跳过对应契约。
 
 | 里程碑 | 内容 | 出口标准 |
 |---|---|---|
-| **ST0 语义内核** | `TreeDef`/`TreePlan`/游标运行时的 `no_std` 内核；层级 + 并行 region + 历史 + 微步 | §15.1 语义套件绿；`cargo test --doc` 绿 |
-| **ST1 ECS 装配** | `StateTreeInstance` 组件、Schema/Context、CommandQueue、带 payload 的生命周期 Event stream、调度挂接 | 显式注册后可跑：spawn + 资产 → 状态可切换；无载荷 observer marker 与 zero-config 仍为后续里程碑 |
-| **ST2 数据层** | 静态绑定 + `prism_reflect` 路径编译为 slot；Evaluator 依赖驱动；实例帧布局 | **基础契约、帧布局与反射读写切片已交付**：严格 binding path、稳定 slot、依赖反向索引与确定性 dirty evaluator；core 提供无 unsafe 的 `FrameLayout`/`InstanceFrame` 字节布局和边界检查，`prism_state_tree_ecs/reflect` 提供一次编译的 `AccessPlan`、稳定 slot 排序、重复 slot/路径错误、目标 reflected type mismatch 校验及 typed `get`/`set`（缺失 slot/底层 apply 失败结构化返回）；反射值与实例帧自动桥接、`ST0003/ST0009` 完整诊断和静默实例零 tick 基准仍待交付 |
-| **ST3 作者层与调试** | RON 资产 + schema 迁移 + 校验器 + Debugger（活跃配置/因果/断点） | 一份完整敌人树可作者化、可调试、热重载生效 |
+| **ST0 语义内核** | `TreeDef`/`TreePlan`/游标运行时的 `no_std` 内核；层级、并行 region、历史、微步、快照 | §15.1 语义套件、快照往返、`cargo test --doc` 全绿 |
+| **ST1 ECS 装配** | `StateTreeInstance`、Schema/Context、CommandQueue、payload 生命周期事件、Schedule 接线、插件入口 | 显式注册和 zero-config 入口都能完成 spawn、初始稳定化、事件切换、生命周期投影 |
+| **ST2 数据层** | 静态绑定、反射路径、slot、依赖图、实例帧、SlotCodec | 绑定编译、类型校验、布局指纹、typed get/set、反射值到帧的编解码、ST0003/ST0009、静默实例分配计数全部有证据 |
+| **ST3 作者层与调试** | RON 资产、schema 迁移、校验器、Debugger、热重载 | 敌人树和流程树均可文本作者化、诊断、断点、重放、热重载迁移 |
 | **ST4 AI 域闭环** | 感知 → 黑板 → 树 → 与玩家一致的输入意图（含 §8 的 `Eventless` + `Internal` 抢占语义） | 敌人「巡逻→警戒→追击→战斗→脱战」全链路 Demo |
 | **ST5 快照与网络** | `InstanceSnapshot` 进快照环；`ReplaySafety`；复制策略 + `PlanRev` 握手 + 预测回滚 | 回滚重放与权威一致（§15.2）；双端演示 |
 | **ST6 规模化** | `BatchRuntime` + LOD 分档 + `utility` 选择 | §15.3 parity 绿；万级代理吞吐基线 |
-| **ST7 跨域复用** | 交互/Smart Object、动画 Schema、UI/流程 Schema；`graph` 图编辑器（前置待建就绪后） | 至少两个非 AI 域跑通同一内核 |
-| **ST8 高级功能** | §25 的规模化与工具链能力（决策 LOD、中断层级、编组、验证器、遥测、行为包、熔断、反事实调试、空间查询） | §25 各项验收证据齐备；性能目标以基准数据替换设计目标（§13.2） |
+| **ST7 跨域复用** | 交互、Smart Object、动画、UI/流程 Schema，图视图适配器 | 至少两个非 AI 域共享同一内核、快照、调试器和错误模型 |
+| **ST8 工程化能力** | 中断层级、编组、验证器、遥测、行为包、熔断、反事实调试、空间查询、GPU 批量 Evaluator | §25 每项均有契约测试、性能报告、恢复演练和文档样例 |
 
-每里程碑产出对应 `pkg/<crate>/docs/version/v<X.Y.Z>.md`（仓库 §5.2）并把设计文档状态推进（`PLANNED` → `SHIPPED`，逐段标注）。
+每个切片都产出对应 `pkg/<crate>/docs/version/v<X.Y.Z>.md`（仓库 §5.2），并在本文 §20 记录测试命令、硬件、提交号和结果摘要；版本状态只使用 `DESIGNED`、`IMPLEMENTED`、`VERIFIED` 三种可核验标签。
 
 §25 各高级功能与里程碑的依赖关系：§25.2/§25.4 → ST4；§25.1/§25.3/§25.5/§25.9 → ST6；§25.6/§25.7/§25.8 → ST7–ST8。
 
-### ST0 / ST1 / ST2 实现进度（Implementation Progress）
+### ST0 / ST1 / ST2 代码验证快照（2026-10-14）
 
 `pkg/prism_state_tree_core` 已作为根 workspace member 落地，定位为 ST0 的纯语义内核切片（`no_std + alloc`、`#![forbid(unsafe_code)]`、不依赖 ECS/渲染/网络/编辑器）。当前实现拆分为 `model.rs`（定义校验与不可变 `Plan`）、`runtime.rs`（游标运行时）、`snapshot.rs`（快照编解码与校验恢复）和 `tests.rs`（语义回归），而不是把所有逻辑堆在单文件中。
 
@@ -877,15 +898,15 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 - 确定性语义快照编码、针对 plan 的配置/history 校验、容量受限队列恢复；恢复错误不改变实例状态，且保留已安装 guards。
 - Parallel Deep History 恢复会跳过默认 region 初始化，避免历史子状态与默认子状态叠加；微步预算错误不返回部分 `StepReport`，调用者应检查队列与日志后重试。
 
-当前证据：本轮 `cargo test -p prism_state_tree_core` 为 **38 tests + 0 doctest 全绿**；回归覆盖 Schema/Context 描述符与上下文身份校验、首次 `run()` 的启动 Eventless 稳定化、事件共享同一微步预算、事件迁移后 eventless guard 观察到 `GuardContext.event == None`、首次运行时先完成初始 eventless 稳定化再消费已排队事件、Parallel owner 转移后所有 region 仍有活跃配置和 History 请求深度与 owner 配置不匹配时的编译期拒绝。启用 `prism_state_tree_ecs/reflect` feature 的集成单测为 **23 tests + 0 doctest 全绿**，其中 2 项覆盖一次编译的 dotted path、稳定 slot 读取、重复 slot/路径失败与目标 reflected type mismatch；core 另有 2 项覆盖实例帧对齐布局、重复声明拒绝和边界读写，adapter 已提供经过编译路径的 typed reflected `get`/`set`（测试覆盖实际写入、错误类型写入和缺失 slot），但尚未把 reflected value 自动编码进 `InstanceFrame`。`cargo clippy -p prism_state_tree_core --offline -- -D warnings` 通过；`prism_state_tree_ecs` 默认 feature 当前集成单测为 **21 tests + 0 doctest 全绿**（启用 `app` feature 时为 22 tests），覆盖显式批量 tick 的顺序、重复项的实际二次执行、stale/未 materialize/缺组件三种缺失原因、错误隔离、失败后的状态快照、实例独立性、基于真实 ECS query 的 `tick_all` 确定性 gather、显式 Schedule 系统每次运行一次和报告资源保留结果、生命周期队列顺序、Schedule tick 新增事件的带 Entity payload `Events<StateTreeLifecycleNotification>` 发布，以及 typed ECS context gather。迁移/历史热路径目前使用临时 `Vec` 且日志无界增长，零分配仍是尚未满足的设计目标；完整 SCXML 一致性套件和分配计数基准也尚未交付。
+代码验证命令固定为 `cargo test -p prism_state_tree_core`、`cargo test -p prism_state_tree_ecs`、`cargo test -p prism_state_tree_ecs --features app`、`cargo test -p prism_state_tree_ecs --features reflect` 和 `cargo clippy -p prism_state_tree_core --offline -- -D warnings`。这些测试覆盖 Schema/Context 描述符与身份校验、启动 Eventless 稳定化、共享微步预算、事件迁移后的无事件 guard 上下文、Parallel owner 转移、History 深度校验、ECS gather 排序、Schedule 单次执行、生命周期队列和带 Entity payload 的事件发布；core 同时覆盖实例帧对齐、重复声明拒绝、长度检查和 typed reflected get/set 错误返回。测试数量、硬件和提交号随版本记录写入 `pkg/<crate>/docs/version/`，不得使用过期快照代替当前命令输出。
 
-ST1 最小装配切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句柄、持有独立且长期存活 core cursor 的 `StateTreeInstance` ECS 组件、经 `CommandQueue` deferred spawn 的 `queue_spawn`，以及显式逐实体 `tick_entity` / `step`、显式按调用顺序批量执行的 `tick_entities`、基于 `World::query_filtered` 的确定性 `tick_all` gather、有界事件请求 API、`install_tick_system` Schedule 接线、`StateTreeLifecycleEvent` 实例队列、带 Entity payload 的 `Events<StateTreeLifecycleNotification>` 桥接和显式 `EcsSchema`/`gather_context` typed context gather。`tick_all` 收集所有已 materialize 的实例，按 generational `Entity` 排序后执行；Schedule 系统每次运行复用同一路径，并把最后一次 `BatchTickReport` 或 gather 错误放入 `StateTreeTickReport`，但仍由宿主显式注册。生命周期队列保留 core enter/exit/transition 回调顺序；Schedule 在每次 tick 前记录各实例队列边界，只以确定性 Entity 顺序发布该次 tick 新增事件，并 rotation 双缓冲事件（标准两次 update grace window）；显式 tick 遗留事件仍由显式 drain API 管理，这仍不是无载荷 marker observer。core `Guard` 已增加 `Send + Sync` 约束，允许运行时组件满足 ECS 线程安全边界；集成测试验证 spawn 应用后初始进入，再请求事件并在后续 tick 切换状态，并覆盖事件队列满、预算错误、stale/未 materialize/缺组件三种缺失原因、重复输入顺序、重复句柄实际执行、错误隔离、失败后状态快照、实例独立性、gather 排序、Schedule 运行次数、生命周期顺序、事件发布和 typed context gather（默认 feature 21 个测试；启用 `app` feature 时为 22 个测试，另含 plugin 回归测试）。该 crate 及其 `prism_ecs` 依赖保持 `no_std + alloc` 构建路径。
+ST1 代码切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句柄、独立且长期存活的 core cursor、`CommandQueue` deferred spawn、逐实体 `tick_entity` / `step`、显式批量 `tick_entities`、确定性 `tick_all`、有界事件请求、`install_tick_system`、实例生命周期队列、带 Entity payload 的双缓冲事件和 typed `EcsSchema`/`gather_context`。`tick_all` 按 generational `Entity` 排序；Schedule 复用同一路径并保留最后一次报告；生命周期顺序为 enter/exit/transition；core `Guard` 满足 `Send + Sync`，crate 保持 `no_std + alloc` 构建路径。
 
-ST2 数据层基础契约：`pkg/prism_state_tree_core/src/binding.rs` 提供严格的 `BindingPath`、稳定 `BindingSlot`、`EvaluatorDependency` 与 `DependencyPlan`。路径只接受规范 dotted identifier；依赖计划在编译时建立 slot → evaluator 反向索引，变化 slot 只唤醒受影响 evaluator，输出按 evaluator id 确定性排序并去重。该层保持 host-neutral，不读取 `World`，不引入 `prism_reflect`。`pkg/prism_state_tree_core/src/frame.rs` 进一步提供无 unsafe 的 `FrameLayout`/`InstanceFrame`：声明按 slot 排序，编译时计算对齐/偏移/总大小，运行时 byte range 访问经过 slot 存在性、边界和长度校验。ECS crate 的可选 `reflect` feature 在 `reflect_binding.rs` 中把路径编译为 `prism_reflect::AccessPlan`，按 slot 排序后二分查找并重放索引链；`compile_typed` 在加载/编译阶段拒绝重复 slot、非法/不可解析路径和目标 reflected type mismatch。typed reflected writer、实例帧与 reflected value 的自动桥接、ST0003/ST0009 完整诊断和静默实例零 tick 基准仍待交付。当前 `ReflectBindingPlan::set` 已提供经过编译路径的反射字段写入，并将缺失 slot/底层 apply 错误结构化返回；它尚未把值编码为 `InstanceFrame` 字节。
+ST2 代码切片：`binding.rs` 提供规范 `BindingPath`、稳定 `BindingSlot`、`EvaluatorDependency` 和 `DependencyPlan`；`frame.rs` 提供无 unsafe 的 `FrameLayout`/`InstanceFrame`、对齐计算、布局指纹、slot 存在性与长度校验；`reflect_binding.rs` 提供一次编译的 `prism_reflect::AccessPlan`、稳定 slot 排序、路径/重复 slot/目标类型错误和 typed get/set 的结构化返回。完整设计中的 SlotCodec、FrameMigration、ST0003/ST0009 诊断和静默实例分配门槛采用 §7.5、§14.2、§13.2 的统一契约。
 
 Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `SchemaId`/`SchemaVersion`、能力位、只读 `ContextRef`、描述符校验和上下文 schema 身份校验；它不依赖 ECS，也不提供 World gather。
 
-诚实边界：这不是完整 StateTree 产品的假实现，也不宣称 ST0–ST8 全部完成。ST2 已交付 host-neutral binding path/slot/dependency 基础契约、无 unsafe 的 `FrameLayout`/`InstanceFrame` 字节布局与可选 `reflect` feature 的 typed adapter（一次编译 `AccessPlan`、稳定 slot 重放、目标类型校验及 `get`/`set`），但尚未实现 reflected value 到实例帧的自动编码、ST0003/ST0009 完整类型/布局诊断或静默实例基准；ST1 尚未实现生命周期 observer 迁移事件桥接、资产服务器/热重载、ECS 快照回滚或 zero-config 插件；这些仍为 `PLANNED`。`install_tick_system` 已提供显式 Schedule 注册入口，每次 schedule run 只执行一次与 `tick_all` 相同的确定性 ECS gather，并把 `BatchTickReport` 或 gather 失败写入 `StateTreeTickReport`；`StateTreeInstance::drain_lifecycle_events` 已保留 core enter/exit/transition 回调；Schedule 仅发布其本次 tick 新增的回调，这不等于完整 observer、自动/隐式 Context gather 或自动插件。当前 ST0 同样不承诺 transition 期间无堆分配或外部 callback panic 可恢复；ST1 的 typed `EcsSchema`/`gather_context` 已交付，但自动/隐式 Context gather 与完整 binding 仍未交付。
+设计与实现的判定规则：代码快照只按测试和源码证据标记 `IMPLEMENTED`；语义、API、错误码、性能、恢复和适配器规则按本文标记 `DESIGNED`；只有同时具备实现、测试、基准和版本记录才标记 `VERIFIED`。该规则保证文档完整描述目标系统，同时不把单个 crate 的测试结果扩大解释为整个产品的完成证明。
 
 ---
 
@@ -914,7 +935,7 @@ Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `Sch
 | 实例帧布局变更破坏存档/回滚 | 兼容性风险 | `prism_reflect` schema 版本 + `SaveMigration`；`FrameLayout::fingerprint()` 布局指纹进快照 |
 | 网络版本不一致 | 行为分叉 | `PlanRev` 握手 + 不一致降级 `ServerOnly` |
 | 作者化工具链工作量 | 迭代速度 | 复用 `prism_visual_scripting` 画布与 `prism_ui*`，不自建编辑器 |
-| `graph`/`reactive` 前置未就绪 | 部分 feature 阻塞 | ST0–ST4 不依赖它们；`reactive` 缺失时 Evaluator 退化为轮询 cadence |
+| `graph`/`reactive` 适配器 | 可独立启用 | ST0–ST4 使用文本资产、显式依赖表和 cadence；适配器启用后只替换作者化或唤醒来源 |
 
 ### 21.3 非目标（重申）
 
@@ -924,18 +945,18 @@ Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `Sch
 
 ## 22. 多维质量评估（§12 八维）
 
-> 本文为 **PLANNED** 设计文档：所有维度「现状」均为**规划中（尚无实现）**，故下表逐维给出**设计已论证的手段**与**验收所需证据**，不把未落地能力描述为已落地（仓库 §5.1 铁律）。
+> 本节是完整系统的质量合同。`现状` 描述代码快照，`设计手段` 描述冻结机制，`验收证据` 描述可复现门禁；三者分栏，避免将局部实现扩大解释为系统验证。
 
-| 维度 | 现状 | 设计手段（论证） | 验收证据要求 | 未覆盖项 |
+| 维度 | 代码快照 | 设计手段 | 验收证据要求 | 证据补充 |
 |---|---|---|---|---|
-| **性能** | 规划中 | 默认 `Cadence::Never`；事件/定时器/依赖变化唤醒；扁平表寻址；实例帧 blob；定容事件环；`BatchRuntime` SoA（§9/§13） | `benches/` 记录静默实例成本、单步分配数（应 0）、万级吞吐；纳入 `prism_diagnostic::budget` | 真实基准与帧预算数值；GPU 侧评分（未规划） |
-| **效果** | 规划中 | 状态图语义（层级/并行/历史/LCA/微步）对齐 SCXML；§8 三属性对「BT 式 reactive」与「状态机式迁移」的等价覆盖；双运行时 parity（§5/§8/§15） | §15.1 语义套件、§15.3 parity 全绿 | W3C 套件移植覆盖率目标未定；BT 存量资产的转换保真度 |
-| **易用性** | 部分实现（ST1 显式装配） | ST1 提供 `queue_spawn`、typed Context、显式 Schedule/Plugin 接线；后续再提供零配置插件组与预置 Schema；文本资产可读可 diff；错误码可定位；doctest 覆盖（§18/§19） | 当前：默认 feature 21 个 ECS 集成测试（`app` feature 22 个）、显式 Schedule/Plugin 回归与 typed Context 用例；后续：`cargo test --doc` 绿及 ST1 零配置出口标准 | 图编辑器体验、零配置运行时（依赖后续里程碑） |
-| **易维护性** | 规划中 | 单一职责分层（语义内核 / ECS / 作者 / 调试 / 批量）；`core` 零 `unsafe`；注释讲 why（§4/§16） | CI：Clippy 零告警、`src/**` 无测试（测试收口 `text/`） | — |
-| **易拓展性** | 规划中 | `Task/Evaluator/Guard/SelectionPolicy/Schema` trait 扩展点；`TaskBackend` 支持 WASM/图；feature 门控（§21.1/§18） | 新 Schema 接入不改内核；新后端不改编译器 | 跨语言 ABI 稳定承诺（依赖 `prism_script`） |
-| **易迭代性** | 规划中 | 文本真相源 + `PlanRev` 热重载 + 稳定 `StateGuid` 重映射；每里程碑 version 文档（§9.5/§20） | 热重载重映射测试；version 文档与 crate 版本一致（仓库 §5.2） | 多版本 plan 并存灰度（未规划） |
-| **健壮性** | 规划中 | 全路径 `Result`（`thiserror`），无静默吞错；校验器 13 条错误码；快照往返与回滚重放测试（§14.2/§10/§15） | `ST0001`–`ST0013` 用例覆盖；快照往返逐位一致 | 长跑稳定性/内存碎片数据 |
-| **安全** | 规划中 | 地基层零 `unsafe`；实例帧访问带边界检查；外部输入（路径/图/网络事件）校验后使用；脚本 Task 走能力沙箱与预算（§16） | `// SAFETY` 完备性审查；`ST0009` CI lint 生效；依赖审计通过 `deny.toml` | 图/WASM Task 沙箱的越权测试（依赖前置） |
+| **性能** | ST0/ST1 基础路径已测 | 默认 `Cadence::Never`；事件/定时器/依赖变化唤醒；扁平表寻址；实例帧 blob；定容事件环；`BatchRuntime` SoA；GPU 只执行纯批量 Evaluator（§9/§13） | `benches/` 记录静默实例成本、单步分配数、万级吞吐、CPU/GPU P50/P95/P99；纳入 `prism_diagnostic::budget` | 版本记录补充实际样本和回退次数 |
+| **效果** | core 语义和 ECS 装配已有回归 | 状态图语义（层级/并行/历史/LCA/微步）对齐 SCXML；§8 三属性覆盖 reactive 与状态机迁移；双运行时 parity（§5/§8/§15） | §15.1 语义套件、§15.3 parity 全绿；转换器逐节点保留语义映射 | 版本记录补充套件覆盖率和转换样例 |
+| **易用性** | ST1 显式装配、typed Context 和插件入口已有代码 | `queue_spawn`、显式 Schedule、zero-config 入口、文本资产、错误码、doctest 和 Debugger 共用同一诊断模型（§18/§19） | `cargo test --doc`、示例树编译、热重载和因果视图回归 | 版本记录补充编辑器截图或文本样例 |
+| **易维护性** | core 零 `unsafe`，模块职责已拆分 | 单一职责分层；稳定 GUID；结构化错误；有界日志；注释说明约束原因（§4/§16） | Clippy 零告警、公共 API 文档、错误路径测试、版本迁移测试 | 版本记录补充长跑和升级报告 |
+| **易拓展性** | trait 和 feature 接口已冻结 | `Task/Evaluator/Guard/SelectionPolicy/Schema`、`TaskBackend`、GPU batch contract 和 feature 门控（§21.1/§18） | 新 Schema、新后端、新查询不改核心语义；接口契约测试通过 | 跨语言 ABI 由具体 `TaskBackend` 版本契约承担 |
+| **易迭代性** | `PlanRev`、布局指纹和 GUID 迁移已定义 | 文本真相源 + `PlanRev` 热重载 + 稳定 `StateGuid`/`SlotGuid` 重映射；版本文档（§9.5/§20） | 热重载、灰度、回滚、快照迁移和版本文档一致性测试 | 版本记录补充并存 plan 的实例分组样例 |
+| **健壮性** | core/ECS 错误隔离和快照校验已有回归 | 全路径 `Result`；13 条错误码；快照往返、回滚重放、熔断和恢复（§14.2/§10/§15/§25.7） | 错误隔离、长跑、内存上限、快照逐位一致和熔断恢复测试 | 版本记录补充长跑样本 |
+| **安全** | core/ECS 零 `unsafe` 与帧边界检查已有代码 | 地基层零 `unsafe`；外部输入校验；脚本 Task 能力沙箱与预算；GPU 结果校验（§16） | `ST0009` lint、依赖审计、脚本越权、GPU fallback 和错误输入测试 | 版本记录补充依赖清单 |
 
 ### 22.1 关键取舍（仓库 §12.1）
 
@@ -969,7 +990,7 @@ Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `Sch
 - **易维护性**：单一职责分层（§4）；地基层零 `unsafe`（§16）；稳定 Guid 契约与迁移路径（§25.6）；遥测量化重构收益（§25.5）；CR 门禁（同仓库 `directory_structure_rules.md` §11）。
 - **易迭代性**：`PlanRev` 灰度与一键回滚（§25.6）；稳定 `StateGuid` 重映射（§9.5）；每里程碑 version 文档（§5.2 仓库规则）。
 - **健壮性**：`Result` 纪律与无静默吞错（仓库 §7.1）；熔断与坏树隔离（§25.7）；有界验证（§25.4）；分歧检测（§13.5）。
-- **安全**：地基层零 `unsafe` 与 `// SAFETY` 完备（§16）；实例帧边界检查；外部输入（路径/图/事件/行为包）校验后使用；脚本 Task 沙箱与预算；依赖审计（§16）。
+- **安全**：地基层零 `unsafe` 与 `// SAFETY` 完备（§16）；实例帧范围检查；外部输入（路径/图/事件/行为包）校验后使用；脚本 Task 沙箱与预算；依赖审计（§16）。
 
 ---
 
@@ -996,11 +1017,11 @@ Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `Sch
 
 ## 24. 与既有设计文档的关系与偏差
 
-1. **与 `prism_gameplay_design_zh.md` §29.1 的偏差（需 reviewer 确认）**：该节把 StateTree 描述为 AI 域的轻量对象，并把 crate 归入 `prism_gameplay_ai`（§22）。本文主张 StateTree 是**通用决策运行时**（AI、流程、交互、动画、UI 共用），crate 独立为 `pkg/prism_state_tree*`，`prism_gameplay_ai` 只提供 AI 域 Schema、预置 Task 与感知/黑板装配。**理由**：① 跨域复用避免多套状态机；② 不把通用内核压进 `prism_gameplay_*` 依赖链，专用服务器与工具层可单独使用；③ 与 UE 将 StateTree 独立于 AI 模块的方向一致。**建议**：在 §29.1 增补指向本文的引用，并把 §22 的 `prism_gameplay_ai` 描述改为「建于 `prism_state_tree` 之上的 AI 装配层」。
-2. **与 `prism_gameplay_design_zh.md` §14 的偏差（需 reviewer 确认）**：该文档目前规划了**独立行为树**——§14 标题「AI 框架：行为树 / 黑板 / 感知」、§14.2 Behavior Tree、§22 `prism_gameplay_ai` 注释「黑板/行为树/StateTree/感知/EQS」、§24 M4「黑板 + 行为树 + 感知」、§25 扩展点 `BehaviorNode`，另 §20/§27/§29.1 有引用。本文主张**不设独立 BT 系统**：其有用语义由 §8 的候选/触发/重入三属性 + §6.1 三态覆盖（理由见 §17.2）。**建议**：把 §14 收敛为「AI 框架：黑板 / 感知 / 决策（`prism_state_tree`）」，删除 §14.2 与 `BehaviorNode` 扩展点，§22/§24 措辞同步改为「黑板/感知/决策装配」。
+1. **与 `prism_gameplay_design_zh.md` §29.1 的职责收敛**：该节把 StateTree 描述为 AI 域的轻量对象，并把 crate 归入 `prism_gameplay_ai`（§22）。本文冻结 StateTree 为**通用决策运行时**（AI、流程、交互、动画、UI 共用），crate 独立为 `pkg/prism_state_tree*`，`prism_gameplay_ai` 只提供 AI 域 Schema、预置 Task 与感知/黑板装配。这样可以避免多套状态机、降低专用服务器依赖，并保持通用内核与 AI 产品层分离。
+2. **与 `prism_gameplay_design_zh.md` §14 的职责收敛**：既有 AI 文档中的行为树语义统一映射为本文 §8 的候选/触发/重入三属性和 §6.1 三态；AI 层保留黑板、感知和域适配器，不再维护第二套运行时。存量 BT 资产通过转换器生成 `Eventless`/`Internal` 迁移组合，并由 §15 parity 套件验证转换结果。
 3. **与 `prism_visual_scripting_design_zh.md` 的关系**：图 IR、durable、LLM 作者化**复用**该文档成果；本文不自建画布、不自建持久化执行引擎（§17.5/§14.4）。
-4. **与 `prism_loom_runtime_framework_design_zh.md` §7 的关系**：Evaluator 的依赖驱动重算在 `prism_loom` 就绪后可升级为其响应式绑定内核的消费者（feature `reactive`）；未就绪时退化为 `prism_ecs` 变更检测 + cadence 轮询。
-5. **与 `directory_structure_rules.md` 的合规声明**：本文命名 `<topic>_design_zh.md`（§1）、含固定头部（版本 + 适用引擎，§5.1）、标 `PLANNED` 状态（§5.1）、含「多维质量评估」八维段与取舍记录（§5.1/§12.1）、不把规划描述为已落地（§5.1）。后续 crate 落地必须齐备三件套（§6.4）并补 `docs/version/v<X.Y.Z>.md`（§5.2）。
+4. **与 `prism_loom_runtime_framework_design_zh.md` §7 的关系**：Evaluator 通过 `DependencyPlan` 接受响应式适配器；核心缺省使用 `prism_ecs` 变更集和 cadence，适配器只改变唤醒来源，不改变结果排序或快照格式。
+5. **与 `directory_structure_rules.md` 的合规声明**：本文命名 `<topic>_design_zh.md`，含版本、适用引擎、八维质量评估、取舍记录、错误码、验收矩阵和版本记录规则；代码能力与设计契约分栏记录，所有结论必须能由源码、测试、基准或版本记录复现。
 
 ---
 
@@ -1047,7 +1068,7 @@ Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `Sch
 - **与核心模型**：验证器只读 `TreePlan`，零运行期语义、零运行期成本。
 - **五维**：性能 =（编译期/CI）；效果 ↑↑（把结构性问题挡在设计期）；易用 ↑（一条命令出报告 + 自动生成用例）；拓展 ↑（`Verifier` 扩展点可加自定义性质）；维护 ↑（重构树后立即回归）。
 - **验收**：验证器进 CI，对全部示例树零高危告警；生成用例并入 §15 套件。
-- **未覆盖项**：无界深度的完整模型检验（当前为有界近似，记 `PLANNED`）。
+- **验证范围**：模型验证采用可配置深度上限和事件字母表；上限、种子、检查不变量和生成用例都写入报告。无界状态空间不作为单次 CI 的验收前提，运行期仍由微步预算、熔断和快照恢复保证有界资源使用。
 
 ### 25.5 运行时遥测与设计反哺（Behavior Telemetry）
 
