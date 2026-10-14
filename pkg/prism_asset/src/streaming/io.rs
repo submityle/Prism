@@ -139,7 +139,7 @@ impl<'a> StreamIoExecutor<'a> {
             .sources
             .read_range(&request.path, request.offset, request.len)
         {
-            Ok(bytes) => {
+            Ok(bytes) if u64::try_from(bytes.len()).ok() == Some(request.len) => {
                 // No public operation between begin_load and this call can
                 // change the state because the executor owns the controller
                 // borrow. Keep the transition explicit nevertheless.
@@ -147,6 +147,17 @@ impl<'a> StreamIoExecutor<'a> {
                     .complete_load(id)
                     .map_err(StreamIoError::Controller)?;
                 Ok(bytes)
+            }
+            Ok(bytes) => {
+                let error = ReadError::Io(format!(
+                    "short read: requested {} bytes, received {}",
+                    request.len,
+                    bytes.len()
+                ));
+                self.controller
+                    .fail(id, StreamFailure::Read)
+                    .map_err(StreamIoError::Controller)?;
+                Err(StreamIoError::Read { id, error })
             }
             Err(error) => {
                 self.controller
@@ -253,6 +264,26 @@ mod tests {
         bytes: &'static [u8],
     }
 
+    struct ShortSource;
+
+    impl AssetReader for ShortSource {
+        fn read(&self, _path: &str) -> Result<Vec<u8>, ReadError> {
+            Ok(vec![1, 2])
+        }
+
+        fn read_range(&self, _path: &str, _offset: u64, _len: u64) -> Result<Vec<u8>, ReadError> {
+            Ok(vec![1, 2])
+        }
+
+        fn metadata(&self, _path: &str) -> Result<AssetMeta, ReadError> {
+            Ok(AssetMeta {
+                size: 4,
+                modified_ms: None,
+                is_dir: false,
+            })
+        }
+    }
+
     impl AssetReader for CountingSource {
         fn read(&self, _path: &str) -> Result<Vec<u8>, ReadError> {
             self.reads.fetch_add(1, Ordering::SeqCst);
@@ -317,6 +348,24 @@ mod tests {
             StreamingController::new(super::super::ResidencyLimits::new(16, 16, 16));
         let mut executor = StreamIoExecutor::new(&sources, &mut controller);
         let id = executor.submit(request("bad://hero.bin", 4)).unwrap();
+        let error = executor.execute(id).unwrap_err();
+        assert!(matches!(error, StreamIoError::Read { .. }));
+        assert_eq!(executor.controller().state(id), Some(StreamState::Failed));
+        assert_eq!(
+            executor.controller().used(),
+            super::super::Residency::default()
+        );
+    }
+
+    #[test]
+    fn short_read_marks_failed_and_releases_all_budget() {
+        let mut sources = AssetSources::new();
+        sources.mount("short", Arc::new(ShortSource), 0);
+        let mut controller =
+            StreamingController::new(super::super::ResidencyLimits::new(16, 16, 16));
+        let mut executor = StreamIoExecutor::new(&sources, &mut controller);
+        let id = executor.submit(request("short://hero.bin", 4)).unwrap();
+
         let error = executor.execute(id).unwrap_err();
         assert!(matches!(error, StreamIoError::Read { .. }));
         assert_eq!(executor.controller().state(id), Some(StreamState::Failed));
