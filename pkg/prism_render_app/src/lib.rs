@@ -72,6 +72,7 @@ mod mesh_pipeline;
 mod mesh_pipelines;
 mod mesh_source;
 mod pipeline_cache;
+mod pipeline_pass;
 mod plugin;
 mod queue;
 mod queue_stage;
@@ -114,6 +115,7 @@ pub use mesh_pipeline::{
     full_lobe_fallback, MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer,
 };
 pub use mesh_pipelines::{MeshPipelines, SpineMeshPipeline};
+pub use pipeline_pass::{PassDescriptor, PassDescriptorClass, PassSetError};
 pub use pipeline_cache::{
     hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
 };

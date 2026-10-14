@@ -28,6 +28,7 @@ prism_render_runtime = { path = "../prism_render_runtime" }
 prism_render_driver_null = { path = "../../os-backends/prism_render_driver_null" }
 # The shipped hardware backend, used by the GPU-gated readback test.
 prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
+prism_tasks = { path = "../prism_tasks" }
 
 [lints]
 workspace = true

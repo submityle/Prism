@@ -89,23 +89,13 @@ pub fn phase_for_render_class(class: MaterialRenderClass) -> RenderPhase {
     }
 }
 
-/// The phase a bin belongs to, from the material permutation / bin class the
-/// bin key carries.
-///
-/// A bin key stores the compact
-/// [`SpecializationId::bin_class`](prism_render_material::SpecializationId::bin_class)
-/// (`illumination` 2 bits | `render_class` 8 bits | live lobe set), so the
-/// `render_class` — and therefore the phase — is recoverable without the
-/// material record. The packed class is decoded in exactly one place
-/// ([`SpecializationId::from_bin_class`]), the same inverse the bin path uses to
-/// rebuild the pipeline key, so a phase can never disagree with the pipeline a
-/// bin specializes to. Returns `None` for an unassigned/foreign class value.
-///
-/// [`SpecializationId::from_bin_class`]: prism_render_material::SpecializationId::from_bin_class
+/// Single-pass compatibility query. Multi-pass callers must iterate the
+/// descriptor set; no phase is decoded from bits or silently picked first.
 #[must_use]
-pub fn phase_for_bin_class(bin_class: u32) -> Option<RenderPhase> {
-    let specialization = prism_render_material::SpecializationId::from_bin_class(bin_class)?;
-    MaterialRenderClass::from_u32(specialization.render_class_bits()).map(phase_for_render_class)
+pub fn phase_for_bin_class(registry: &crate::SceneRegistry, bin_class: u32) -> Option<RenderPhase> {
+    let passes = registry.pass_descriptors(bin_class)?;
+    assert_eq!(passes.len(), 1, "multi-pass bin has no single phase");
+    Some(passes[0].render_phase)
 }
 
 /// One queued draw: the pipeline to bind plus the mesh/material it draws.
@@ -295,10 +285,11 @@ impl RenderQueues {
     ) -> usize {
         let mut queued = 0;
         for item in work {
-            let Some(request) = registry.resolve(item, meshes, depth_format, sample_count, draw)
+            let Some(requests) = registry.resolve_passes(item, meshes, depth_format, sample_count, draw)
             else {
                 continue;
             };
+            for request in requests {
             let pipeline = specializer
                 .specialize_with_provider(device, request.variant, &request.layout, provider)
                 .id();
@@ -321,6 +312,7 @@ impl RenderQueues {
                 },
             );
             queued += 1;
+            }
         }
         queued
     }

@@ -27,6 +27,8 @@ use crate::draw::DrawFunctionId;
 use crate::frame::RENDER_TARGET_FORMAT;
 use crate::mesh::RenderMesh;
 use crate::mesh_pipeline::MeshPipelineKey;
+use crate::pipeline_pass::{PassDescriptor, PassDescriptorClass, PassDescriptorTable, PassSetError};
+use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
 use crate::queue::{phase_for_render_class, DrawRequest};
 use crate::render_asset::RenderAssets;
 
@@ -126,6 +128,8 @@ pub struct SceneRegistry {
     // asset-facing half of the registry); the accessors stay the public API.
     pub(crate) geometries: BTreeMap<GeometryHandle, GeometryRecord>,
     materials: BTreeMap<SceneMaterialHandle, MaterialRecord>,
+    material_passes: BTreeMap<SceneMaterialHandle, u32>,
+    pass_descriptors: PassDescriptorTable,
     pub(crate) mesh_classes: BTreeMap<u32, MeshClass>,
     /// The mesh asset each geometry draws, when the scene named one (see
     /// [`mesh_source`](crate::mesh_source)).
@@ -146,8 +150,34 @@ impl SceneRegistry {
 
     /// Inserts or replaces a material record.
     pub fn insert_material(&mut self, record: MaterialRecord) {
+        // This registry's default provider is explicitly the white spine, not
+        // a claim to implement the material's response plan. Real renderers
+        // replace this binding via set_material_passes after module resolution.
+        let pass = PassDescriptor {
+            execution_family: ExecutionFamily::FusedBuiltin,
+            response_module_id: ModuleId::SPINE,
+            permutation_index: PermutationIndex::ZERO,
+            fallback_permutation: None,
+            render_phase: phase_for_render_class(record.render_class),
+            draw: None,
+            sort_class: PassDescriptorClass::SURFACE,
+        };
+        let index = self.pass_descriptors.intern(vec![pass]).expect("valid spine pass");
+        self.material_passes.insert(record.handle, index);
         self.materials.insert(record.handle, record);
     }
+
+    /// Binds an already resolved DriverLocal pass set. Both direct and bin
+    /// paths subsequently use this same immutable, deduplicated table entry.
+    pub fn set_material_passes(&mut self, handle: SceneMaterialHandle, passes: Vec<PassDescriptor>) -> Result<u32, PassSetError> {
+        if !self.materials.contains_key(&handle) { return Err(PassSetError::MissingMaterial); }
+        let index = self.pass_descriptors.intern(passes)?;
+        self.material_passes.insert(handle, index);
+        Ok(index)
+    }
+
+    pub fn material_pass_index(&self, handle: SceneMaterialHandle) -> Option<u32> { self.material_passes.get(&handle).copied() }
+    pub fn pass_descriptors(&self, index: u32) -> Option<&[PassDescriptor]> { self.pass_descriptors.get(index) }
 
     /// Inserts or replaces the pipeline inputs for a vertex-buffer class.
     pub fn insert_mesh_class(&mut self, class: u32, mesh_class: MeshClass) {
@@ -199,50 +229,46 @@ impl SceneRegistry {
         sample_count: u32,
         draw: DrawFunctionId,
     ) -> Option<DrawRequest> {
+        let mut requests = self.resolve_passes(item, meshes, depth_format, sample_count, draw)?;
+        assert_eq!(requests.len(), 1, "multi-pass material must use resolve_passes, never truncate to one surface draw");
+        requests.pop()
+    }
+
+    /// Resolves every pass, in declaration order. No pass is recovered from
+    /// compact class bits; a missing table entry is an invariant violation.
+    pub fn resolve_passes(&self, item: &GpuRenderWorkItem, meshes: &RenderAssets<RenderMesh>, depth_format: Option<TextureFormat>, sample_count: u32, draw: DrawFunctionId) -> Option<Vec<DrawRequest>> {
         let geometry = self.geometries.get(&item.geometry)?;
         let lod = geometry.resolve_lod(item.lod_or_cluster)?;
-        let material = self.materials.get(&item.material)?;
+        self.materials.get(&item.material)?;
         let mesh_class = self.mesh_classes.get(&geometry.vertex_buffer_class)?;
         // The geometry's own mesh owns the buffers: a class is a vertex stage,
         // not a buffer set, so several meshes share it.
         let mesh = self.geometry_mesh(item.geometry)?;
         let prepared = meshes.get(mesh)?;
 
-        // `illumination` is a response axis, not a phase; the phase comes from
-        // the blend family, and the permutation identity keys the pipeline.
-        let phase = phase_for_render_class(material.render_class);
-        let specialization = material.specialization();
-        let variant = MeshPipelineKey {
-            class: specialization.bin_class(),
-            color_format: Some(RENDER_TARGET_FORMAT),
-            depth_format,
-            sample_count,
-            topology: mesh_class.topology,
-            shader_id: specialization.0,
-        };
-
-        Some(DrawRequest {
-            phase,
-            variant,
+        let index = self.material_pass_index(item.material).expect("resident material has no pass binding");
+        let passes = self.pass_descriptors(index).expect("material pass table index out of range");
+        Some(passes.iter().map(|pass| DrawRequest {
+            phase: pass.render_phase,
+            variant: pass.mesh_variant(mesh_class.topology, Some(RENDER_TARGET_FORMAT), depth_format, sample_count),
             layout: mesh_class.layout.clone(),
             lod_level: lod.level,
             geometry: item.geometry,
             material: item.material,
             scene: item.scene,
-            order: item.sort_key.0,
-            draw,
+            order: coarse_sort_key(item.sort_key, pass.sort_class).0,
+            draw: pass.draw.unwrap_or(draw),
             vertices: prepared.buffers.vertices.clone(),
             indices: prepared.buffers.indices,
             first: lod.first_element,
             count: lod.element_count,
             base_vertex: lod.base_vertex,
-        })
+        }).collect())
     }
 
     /// The mesh pipeline variant a packed draw bin specializes to.
     ///
-    /// A bin key carries only the compact permutation class
-    /// ([`SpecializationId::bin_class`]), so this reconstructs the full key —
+    /// A bin key carries only the pass-set table index, so this resolves a full query —
     /// which is what makes a material specialize to the **same** pipeline
     /// whether it is queued directly or through a bin — and folds in the
     /// vertex-buffer class's topology and layout class, exactly as
@@ -251,7 +277,6 @@ impl SceneRegistry {
     /// Returns `None` when the class does not decode to a legal permutation, or
     /// when the bin's vertex-buffer class is not resident.
     ///
-    /// [`SpecializationId::bin_class`]: prism_render_material::SpecializationId::bin_class
     #[must_use]
     pub fn bin_variant(
         &self,
@@ -259,19 +284,10 @@ impl SceneRegistry {
         depth_format: Option<TextureFormat>,
         sample_count: u32,
     ) -> Option<MeshPipelineKey> {
-        let specialization =
-            prism_render_material::SpecializationId::from_bin_class(key.pipeline_class)?;
+        let passes = self.pass_descriptors(key.pipeline_class)?;
+        assert_eq!(passes.len(), 1, "multi-pass bin must iterate the complete descriptor set");
         let mesh_class = self.mesh_classes.get(&key.vertex_buffer_class)?;
-        Some(MeshPipelineKey {
-            // Re-derived from the reconstructed key (not copied from the bin),
-            // so class and shader identity can never disagree.
-            class: specialization.bin_class(),
-            color_format: Some(RENDER_TARGET_FORMAT),
-            depth_format,
-            sample_count,
-            topology: mesh_class.topology,
-            shader_id: specialization.0,
-        })
+        Some(passes[0].mesh_variant(mesh_class.topology, Some(RENDER_TARGET_FORMAT), depth_format, sample_count))
     }
 
     /// Derives the frame's draw-bin candidates from the visible work list.
@@ -300,7 +316,7 @@ impl SceneRegistry {
             if geometry.resolve_lod(item.lod_or_cluster).is_none() {
                 continue;
             }
-            let Some(material) = self.materials.get(&item.material) else {
+            let Some(_) = self.materials.get(&item.material) else {
                 continue;
             };
             // Both must exist for the item to be drawable: the class is the
@@ -324,7 +340,7 @@ impl SceneRegistry {
                 key: DrawBinKey {
                     geometry: item.geometry,
                     lod_or_cluster: item.lod_or_cluster,
-                    pipeline_class: material.specialization().bin_class(),
+                    pipeline_class: self.material_pass_index(item.material).expect("resident material has no pass binding"),
                     vertex_buffer_class: geometry.vertex_buffer_class,
                     index_buffer_class: geometry.index_buffer_class,
                     indexed,
@@ -340,4 +356,10 @@ impl SceneRegistry {
         }
         candidates
     }
+}
+
+/// Replace only the coarse sorting category. The u32 descriptor table index
+/// never enters this u8 field, even after the table grows beyond 255 entries.
+pub fn coarse_sort_key(key: prism_render_visibility::WorkSortKey, class: PassDescriptorClass) -> prism_render_visibility::WorkSortKey {
+    prism_render_visibility::WorkSortKey((key.0 & !(0xffu64 << 48)) | (u64::from(class.get()) << 48))
 }

@@ -13,6 +13,24 @@
 
 use alloc::vec::Vec;
 
+/// Checked dense index, not a packed mask. Decode against the owning space.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PermutationIndex(u64);
+
+impl PermutationIndex {
+    pub const ZERO: Self = Self(0);
+    pub const fn get(self) -> u64 { self.0 }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PermutationError {
+    EmptyAxis(usize),
+    Overflow,
+    WrongArity,
+    CoordinateOutOfRange(usize),
+    IndexOutOfRange(u64),
+}
+
 /// A mixed-radix description of a shader's permutation space.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct PermutationSpace {
@@ -21,6 +39,36 @@ pub struct PermutationSpace {
 }
 
 impl PermutationSpace {
+    /// New runtime declarations reject zero axes and any u64 product overflow.
+    pub fn try_new(axis_option_counts: impl IntoIterator<Item = u32>) -> Result<Self, PermutationError> {
+        let axes: Vec<_> = axis_option_counts.into_iter().collect();
+        if let Some(axis) = axes.iter().position(|count| *count == 0) {
+            return Err(PermutationError::EmptyAxis(axis));
+        }
+        let space = Self { axes };
+        space.checked_total()?;
+        Ok(space)
+    }
+
+    pub fn checked_total(&self) -> Result<u64, PermutationError> {
+        self.axes.iter().try_fold(1u64, |total, count| total.checked_mul(u64::from(*count)).ok_or(PermutationError::Overflow))
+    }
+
+    pub fn check_index(&self, raw: u64) -> Result<PermutationIndex, PermutationError> {
+        if raw >= self.checked_total()? { return Err(PermutationError::IndexOutOfRange(raw)); }
+        Ok(PermutationIndex(raw))
+    }
+
+    pub fn checked_index_of(&self, key: &PermutationKey) -> Result<PermutationIndex, PermutationError> {
+        self.checked_total()?;
+        if key.coords.len() != self.axes.len() { return Err(PermutationError::WrongArity); }
+        let mut index = 0u64;
+        for (axis, (&coord, &count)) in key.coords.iter().zip(&self.axes).enumerate() {
+            if coord >= count { return Err(PermutationError::CoordinateOutOfRange(axis)); }
+            index = index.checked_mul(u64::from(count)).and_then(|index| index.checked_add(u64::from(coord))).ok_or(PermutationError::Overflow)?;
+        }
+        Ok(PermutationIndex(index))
+    }
     /// Builds a space from per-axis option counts.
     ///
     /// Each count is clamped to a minimum of 1: an axis always has at least the
@@ -69,17 +117,7 @@ impl PermutationSpace {
     /// coordinate is out of range for its axis.
     #[must_use]
     pub fn index_of(&self, key: &PermutationKey) -> Option<u64> {
-        if key.coords.len() != self.axes.len() {
-            return None;
-        }
-        let mut index: u64 = 0;
-        for (coord, &count) in key.coords.iter().zip(&self.axes) {
-            if *coord >= count {
-                return None;
-            }
-            index = index.saturating_mul(u64::from(count)) + u64::from(*coord);
-        }
-        Some(index)
+        self.checked_index_of(key).ok().map(PermutationIndex::get)
     }
 
     /// Reconstructs the [`PermutationKey`] at a dense linear `index`.
@@ -89,9 +127,7 @@ impl PermutationSpace {
     /// Returns `None` when `index` is not less than [`Self::total_permutations`].
     #[must_use]
     pub fn key_from_index(&self, index: u64) -> Option<PermutationKey> {
-        if index >= self.total_permutations() {
-            return None;
-        }
+        self.check_index(index).ok()?;
         let mut coords = alloc::vec![0u32; self.axes.len()];
         let mut remainder = index;
         // Decode from the fastest-varying (last) axis back to the first.
@@ -163,6 +199,29 @@ impl PermutationSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_dense_indices_have_no_lobe_bit_window() {
+        let space = PermutationSpace::try_new([2; 40]).unwrap();
+        let key = PermutationKey::new([1; 40]);
+        let index = space.checked_index_of(&key).unwrap();
+        assert_eq!(index.get(), (1u64 << 40) - 1);
+        assert_eq!(space.key_from_index(index.get()), Some(key));
+        assert_eq!(space.check_index(1u64 << 40), Err(PermutationError::IndexOutOfRange(1u64 << 40)));
+    }
+
+    #[test]
+    fn checked_space_rejects_overflow_even_for_zero_index() {
+        assert_eq!(PermutationSpace::try_new([0, 2]), Err(PermutationError::EmptyAxis(0)));
+        assert_eq!(PermutationSpace::try_new([u32::MAX; 3]), Err(PermutationError::Overflow));
+        let legacy = PermutationSpace::new([u32::MAX; 3]);
+        assert_eq!(legacy.checked_index_of(&PermutationKey::new([0; 3])), Err(PermutationError::Overflow));
+        assert_eq!(legacy.index_of(&PermutationKey::new([0; 3])), None);
+        assert_eq!(legacy.key_from_index(0), None);
+        let space = PermutationSpace::try_new([2, 3]).unwrap();
+        assert_eq!(space.checked_index_of(&PermutationKey::new([0])), Err(PermutationError::WrongArity));
+        assert_eq!(space.checked_index_of(&PermutationKey::new([0, 3])), Err(PermutationError::CoordinateOutOfRange(1)));
+    }
 
     #[test]
     fn total_is_product_of_axes() {

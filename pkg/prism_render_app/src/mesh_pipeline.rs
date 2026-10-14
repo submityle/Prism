@@ -13,11 +13,10 @@ use prism_render_driver::{
     PrimitiveTopology, RenderDevice, RenderPipelineDescriptor, RenderPipelineId, TextureFormat,
     VertexBufferLayout,
 };
-use prism_render_material::{LobeMask, SpecializationId};
+use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
+use std::collections::HashMap;
 
-use crate::pipeline_cache::{
-    hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
-};
+use crate::pipeline_cache::{PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution};
 
 /// The variant part of a mesh pipeline key: everything but the vertex layout.
 ///
@@ -28,8 +27,14 @@ use crate::pipeline_cache::{
 /// specialize to different pipelines.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct MeshPipelineKey {
-    /// The material permutation / bin class.
-    pub class: u32,
+    /// Shared execution path, not a packed material-style axis.
+    pub execution_family: ExecutionFamily,
+    /// Driver-local code, entry point and binding ABI identity.
+    pub response_module_id: ModuleId,
+    /// Checked dense index in the module's declared permutation space.
+    pub permutation_index: PermutationIndex,
+    /// Explicit module-declared fallback. Never inferred from a lobe bitmask.
+    pub fallback_permutation: Option<PermutationIndex>,
     /// The single color-target format, or `None` for a depth-only pipeline.
     pub color_format: Option<TextureFormat>,
     /// The depth/stencil format, or `None` when there is no depth state.
@@ -38,46 +43,82 @@ pub struct MeshPipelineKey {
     pub sample_count: u32,
     /// The primitive topology.
     pub topology: PrimitiveTopology,
-    /// A stable identity for the shader module and its entry points.
-    pub shader_id: u64,
 }
 
 impl MeshPipelineKey {
-    /// The full pipeline key for a mesh with `layout`.
-    #[must_use]
-    pub fn with_layout(self, layout: &[VertexBufferLayout]) -> PipelineKey {
-        PipelineKey::new(
-            self.class,
-            self.color_format,
-            self.depth_format,
-            self.sample_count,
-            hash_vertex_layouts(layout),
-            self.topology,
-            self.shader_id,
+    fn request_id(self, layout: &[VertexBufferLayout]) -> MeshSpecializationId {
+        MeshSpecializationId {
+            variant: self,
+            layout: MeshLayoutId::from_layouts(layout),
+        }
+    }
+
+    fn key_from_descriptor(self, descriptor: &RenderPipelineDescriptor) -> PipelineKey {
+        PipelineKey::from_descriptor(self.execution_family, self.response_module_id, self.permutation_index, descriptor)
+    }
+}
+
+/// Exact in-memory identity of a mesh specialization request.
+///
+/// The index maps the public `(variant, layout)` release input back to the
+/// complete descriptor-derived cache key, including provider-owned state.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct MeshSpecializationId {
+    variant: MeshPipelineKey,
+    layout: MeshLayoutId,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct MeshLayoutId(Vec<MeshBufferId>);
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct MeshBufferId {
+    array_stride: u64,
+    step_mode: u32,
+    attributes: Vec<MeshAttributeId>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct MeshAttributeId {
+    format: u32,
+    offset: u64,
+    shader_location: u32,
+}
+
+impl MeshLayoutId {
+    fn from_layouts(layouts: &[VertexBufferLayout]) -> Self {
+        Self(
+            layouts
+                .iter()
+                .map(|layout| MeshBufferId {
+                    array_stride: layout.array_stride,
+                    step_mode: match layout.step_mode {
+                        prism_render_driver::VertexStepMode::Vertex => 0,
+                        prism_render_driver::VertexStepMode::Instance => 1,
+                    },
+                    attributes: layout
+                        .attributes
+                        .iter()
+                        .map(|attribute| MeshAttributeId {
+                            format: attribute.format as u32,
+                            offset: attribute.offset,
+                            shader_location: attribute.shader_location,
+                        })
+                        .collect(),
+                })
+                .collect(),
         )
     }
 }
 
 /// The full-lobe über fallback for a cold specialization.
 ///
-/// The fallback keeps the illumination and render-class axes but expands the
-/// live lobe set to every schema lobe. A provider can therefore select the
-/// all-lobe über shader from the fallback key while the exact specialization
-/// compiles in the background. `None` means the compact class did not decode to
-/// a legal `SpecializationId`, in which case the caller keeps the synchronous
-/// path.
+/// The module declaration supplies a checked dense fallback index. A mask is
+/// data/layout information and cannot be decoded from a permutation index.
 #[must_use]
 pub fn full_lobe_fallback(variant: MeshPipelineKey) -> Option<MeshPipelineKey> {
-    let specialization = SpecializationId::from_bin_class(variant.class)?;
-    let illumination = specialization.illumination()?;
-    let full = SpecializationId::new(
-        illumination,
-        LobeMask::all().0,
-        specialization.render_class_bits(),
-    );
     Some(MeshPipelineKey {
-        class: full.bin_class(),
-        shader_id: full.0,
+        permutation_index: variant.fallback_permutation?,
         ..variant
     })
 }
@@ -86,6 +127,7 @@ pub fn full_lobe_fallback(variant: MeshPipelineKey) -> Option<MeshPipelineKey> {
 #[derive(Default, prism_ecs::prelude::Resource)]
 pub struct MeshPipelineSpecializer {
     cache: PipelineCache,
+    key_index: HashMap<MeshSpecializationId, PipelineKey>,
 }
 
 /// Supplies the pipeline descriptor for a mesh variant.
@@ -126,6 +168,7 @@ impl MeshPipelineSpecializer {
     pub fn new() -> Self {
         Self {
             cache: PipelineCache::new(),
+            key_index: HashMap::new(),
         }
     }
 
@@ -137,6 +180,7 @@ impl MeshPipelineSpecializer {
     {
         Self {
             cache: PipelineCache::with_worker(device),
+            key_index: HashMap::new(),
         }
     }
 
@@ -145,6 +189,7 @@ impl MeshPipelineSpecializer {
     pub fn with_compiler(compiler: alloc::sync::Arc<dyn PipelineCompiler>) -> Self {
         Self {
             cache: PipelineCache::with_compiler(compiler),
+            key_index: HashMap::new(),
         }
     }
 
@@ -180,8 +225,10 @@ impl MeshPipelineSpecializer {
         descriptor: RenderPipelineDescriptor,
     ) -> RenderPipelineId {
         let descriptor = with_mesh_layout(descriptor, layout);
-        self.cache
-            .get_or_create(device, variant.with_layout(layout), &descriptor)
+        let key = variant.key_from_descriptor(&descriptor);
+        self.key_index
+            .insert(variant.request_id(layout), key.clone());
+        self.cache.get_or_create(device, key, &descriptor)
     }
 
     /// Specializes `variant`, returning a ready pipeline or the full-lobe über
@@ -200,20 +247,23 @@ impl MeshPipelineSpecializer {
         D: RenderDevice,
         F: Fn(&MeshPipelineKey) -> RenderPipelineDescriptor,
     {
-        let key = variant.with_layout(layout);
         let Some(fallback_variant) = full_lobe_fallback(variant) else {
             let descriptor = with_mesh_layout(build(&variant), layout);
+            let key = variant.key_from_descriptor(&descriptor);
+            self.key_index
+                .insert(variant.request_id(layout), key.clone());
             return PipelineResolution::Ready(self.cache.get_or_create(device, key, &descriptor));
         };
         let descriptor = with_mesh_layout(build(&variant), layout);
         let fallback_descriptor = with_mesh_layout(build(&fallback_variant), layout);
-        self.cache.resolve_or_request(
-            device,
-            key,
-            descriptor,
-            fallback_variant.with_layout(layout),
-            fallback_descriptor,
-        )
+        let key = variant.key_from_descriptor(&descriptor);
+        let fallback_key = fallback_variant.key_from_descriptor(&fallback_descriptor);
+        self.key_index
+            .insert(variant.request_id(layout), key.clone());
+        self.key_index
+            .insert(fallback_variant.request_id(layout), fallback_key.clone());
+        self.cache
+            .resolve_or_request(device, key, descriptor, fallback_key, fallback_descriptor)
     }
 
     /// Specializes `variant` through a [`MeshPipelineProvider`], with the
@@ -249,17 +299,21 @@ impl MeshPipelineSpecializer {
         for (variant, layout) in requests {
             let Some(fallback_variant) = full_lobe_fallback(variant) else {
                 let descriptor = with_mesh_layout(build(&variant), &layout);
-                let _ = self
-                    .cache
-                    .get_or_create(device, variant.with_layout(&layout), &descriptor);
+                let key = variant.key_from_descriptor(&descriptor);
+                self.key_index
+                    .insert(variant.request_id(&layout), key.clone());
+                let _ = self.cache.get_or_create(device, key, &descriptor);
                 continue;
             };
-            warm.push((
-                variant.with_layout(&layout),
-                with_mesh_layout(build(&variant), &layout),
-                fallback_variant.with_layout(&layout),
-                with_mesh_layout(build(&fallback_variant), &layout),
-            ));
+            let descriptor = with_mesh_layout(build(&variant), &layout);
+            let fallback_descriptor = with_mesh_layout(build(&fallback_variant), &layout);
+            let key = variant.key_from_descriptor(&descriptor);
+            let fallback_key = fallback_variant.key_from_descriptor(&fallback_descriptor);
+            self.key_index
+                .insert(variant.request_id(&layout), key.clone());
+            self.key_index
+                .insert(fallback_variant.request_id(&layout), fallback_key.clone());
+            warm.push((key, descriptor, fallback_key, fallback_descriptor));
         }
         self.cache.prewarm(device, warm);
     }
@@ -272,11 +326,20 @@ impl MeshPipelineSpecializer {
         variant: MeshPipelineKey,
         layout: &[VertexBufferLayout],
     ) -> bool {
-        self.cache.release(device, &variant.with_layout(layout))
+        let request = variant.request_id(layout);
+        let Some(key) = self.key_index.get(&request) else {
+            return false;
+        };
+        let released = self.cache.release(device, key);
+        if released {
+            self.key_index.remove(&request);
+        }
+        released
     }
 
     /// Destroys every specialized pipeline.
     pub fn clear<D: RenderDevice>(&mut self, device: &D) {
         self.cache.clear(device);
+        self.key_index.clear();
     }
 }

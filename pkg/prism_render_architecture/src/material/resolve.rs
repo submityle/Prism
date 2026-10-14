@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn a_shader_backed_custom_material_routes_to_closure_table() {
         let mut rec = record(MaterialExecutionPath::ClosureTable);
-        rec.shader = Some(ShaderPackageId(String::from("custom.pbr")));
+        rec.shader = Some(ShaderPackageId::new("custom.pbr"));
         let records = [rec];
         let bins = bin_visible_materials(&[0], &records);
         assert_eq!(bins.closure_table, vec![0]);

@@ -37,7 +37,13 @@ use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
 use prism_render_architecture::view_family::ViewKind;
-use prism_render_material::{Illumination, LobeMask, MaterialRenderClass, SpecializationId};
+use prism_render_material::MaterialRenderClass;
+use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex, PermutationSpace};
+
+fn dense(index: u64) -> PermutationIndex {
+    PermutationSpace::try_new([64]).unwrap().check_index(index).unwrap()
+}
+
 use prism_render_visibility::GpuRenderWorkItem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -191,7 +197,7 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
     let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
         "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
     ));
-    let descriptor = RenderPipelineDescriptor {
+    let mut descriptor = RenderPipelineDescriptor {
         label: Some("cache-test".into()),
         layout: None,
         vertex: VertexState {
@@ -214,56 +220,28 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
         ],
     );
     let layout_hash = hash_vertex_layouts(core::slice::from_ref(&layout));
+    descriptor.vertex.buffers = vec![layout.clone()];
 
     let mut cache = PipelineCache::new();
-    let key = PipelineKey::new(
-        7,
-        Some(TextureFormat::Rgba8Unorm),
-        None,
-        1,
-        layout_hash,
-        PrimitiveTopology::TriangleList,
-        0xABCD,
-    );
-    let first = cache.get_or_create(&device, key, &descriptor);
-    let second = cache.get_or_create(&device, key, &descriptor);
+    let key = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(0xABCD), dense(7), &descriptor);
+    let first = cache.get_or_create(&device, key.clone(), &descriptor);
+    let second = cache.get_or_create(&device, key.clone(), &descriptor);
     assert_eq!(first, second, "the same key returns the same pipeline");
     assert_eq!(cache.len(), 1, "the pipeline is built once");
 
-    let other = PipelineKey::new(
-        8,
-        Some(TextureFormat::Rgba8Unorm),
-        None,
-        1,
-        layout_hash,
-        PrimitiveTopology::TriangleList,
-        0xABCD,
-    );
+    let other = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(0xABCD), dense(8), &descriptor);
     let distinct = cache.get_or_create(&device, other, &descriptor);
     assert_ne!(distinct, first, "a different key compiles a new pipeline");
     assert_eq!(cache.len(), 2);
 
     // The key must separate pipelines that differ only in topology or shader:
     // keying on neither aliased two different PSOs onto one cache entry.
-    let other_topology = PipelineKey::new(
-        7,
-        Some(TextureFormat::Rgba8Unorm),
-        None,
-        1,
-        layout_hash,
-        PrimitiveTopology::TriangleStrip,
-        0xABCD,
-    );
+    let mut strip_descriptor = descriptor.clone();
+    strip_descriptor.primitive.topology = PrimitiveTopology::TriangleStrip;
+    strip_descriptor.primitive.strip_index_format = Some(prism_render_driver::IndexFormat::Uint16);
+    let other_topology = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(0xABCD), dense(7), &strip_descriptor);
     assert_ne!(other_topology, key, "topology is part of the identity");
-    let other_shader = PipelineKey::new(
-        7,
-        Some(TextureFormat::Rgba8Unorm),
-        None,
-        1,
-        layout_hash,
-        PrimitiveTopology::TriangleList,
-        0x1234,
-    );
+    let other_shader = PipelineKey::from_descriptor(ExecutionFamily::FusedBuiltin, ModuleId(0x1234), dense(7), &descriptor);
     assert_ne!(other_shader, key, "the shader identity is part of the key");
 
     // A layout with the same total stride but different attributes must not
@@ -600,6 +578,15 @@ fn fill_from_visibility_resolves_and_queues() {
         }],
     });
     registry.insert_material(prism_render_material::fallback_material_record(material, 1));
+    registry.set_material_passes(material, vec![crate::PassDescriptor {
+        execution_family: ExecutionFamily::FusedBuiltin,
+        response_module_id: ModuleId(1),
+        permutation_index: dense(1),
+        fallback_permutation: Some(dense(63)),
+        render_phase: RenderPhase::Opaque,
+        draw: None,
+        sort_class: crate::PassDescriptorClass::SURFACE,
+    }]).unwrap();
     registry.insert_mesh_class(
         5,
         MeshClass::new(vec![layout], PrimitiveTopology::TriangleList),
@@ -776,12 +763,15 @@ fn filling_the_queue_specializes_and_appends() {
     };
 
     let variant = MeshPipelineKey {
-        class: 1,
+        execution_family: ExecutionFamily::FusedBuiltin,
+        response_module_id: ModuleId(9),
+        permutation_index: dense(1),
+        fallback_permutation: Some(dense(63)),
         color_format: Some(TextureFormat::Rgba8Unorm),
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-        shader_id: 9,
+
     };
     let layout_a = prism_render_driver::VertexBufferLayout::packed(
         prism_render_driver::VertexStepMode::Vertex,
@@ -839,39 +829,24 @@ fn filling_the_queue_specializes_and_appends() {
     );
 }
 
-/// A bin's phase is recoverable from the bin class, and the two packings agree —
-/// a drift between `bin_class`'s layout and this decode would alias phases.
+/// A bin class indexes the same explicit pass table as direct resolution.
 #[test]
 fn phase_for_bin_class_round_trips_the_render_class() {
-    use prism_render_material::{Illumination, SpecializationId};
-
-    let cases = [
+    let mut registry = SceneRegistry::new();
+    for (index, (class, phase)) in [
         (MaterialRenderClass::Opaque, RenderPhase::Opaque),
         (MaterialRenderClass::Hair, RenderPhase::Opaque),
         (MaterialRenderClass::Transparent, RenderPhase::Transparent),
         (MaterialRenderClass::Volume, RenderPhase::Custom),
-    ];
-    for (class, phase) in cases {
-        // `illumination` never selects a phase; vary it to prove independence.
-        for illumination in [
-            Illumination::Lit,
-            Illumination::Stylized,
-            Illumination::Unlit,
-            Illumination::Custom,
-        ] {
-            let spec = SpecializationId::new(illumination, 0, class as u32);
-            assert_eq!(
-                crate::phase_for_bin_class(spec.bin_class()),
-                Some(phase),
-                "{class:?} under {illumination:?} phases as {phase:?}"
-            );
-        }
+    ].into_iter().enumerate() {
+        let handle = GenerationalHandle::new(index as u32, 1);
+        let mut record = prism_render_material::fallback_material_record(handle, 1);
+        record.render_class = class;
+        registry.insert_material(record);
+        let table = registry.material_pass_index(handle).unwrap();
+        assert_eq!(crate::phase_for_bin_class(&registry, table), Some(phase));
     }
-    assert_eq!(
-        crate::phase_for_bin_class(0x03FF_FFFF),
-        None,
-        "an unassigned class value is rejected, not guessed"
-    );
+    assert_eq!(crate::phase_for_bin_class(&registry, u32::MAX), None);
 }
 
 /// Surface draws are phased by blend family only — the illumination axis is a
@@ -932,12 +907,15 @@ fn mesh_specialization_dedups_by_variant_and_layout() {
     };
 
     let variant = MeshPipelineKey {
-        class: 3,
+        execution_family: ExecutionFamily::FusedBuiltin,
+        response_module_id: ModuleId(0x55),
+        permutation_index: dense(3),
+        fallback_permutation: None,
         color_format: Some(TextureFormat::Rgba8Unorm),
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-        shader_id: 0x55,
+
     };
     let layout_a = prism_render_driver::VertexBufferLayout::packed(
         prism_render_driver::VertexStepMode::Vertex,
@@ -981,26 +959,25 @@ fn mesh_specialization_dedups_by_variant_and_layout() {
     assert_eq!(specializer.pipeline_count(), 0);
 }
 
-/// The fallback key preserves illumination/render-class and expands the live
-/// lobe set to every schema lobe; its shader identity is the full specialization.
+/// Fallback is declared by the owning package, never inferred from mask bits.
 #[test]
-fn full_lobe_fallback_expands_the_live_lobe_set() {
-    let specialization = SpecializationId::new(Illumination::Lit, 1 << 3, 2);
+fn full_lobe_fallback_uses_the_declared_dense_index() {
     let variant = MeshPipelineKey {
-        class: specialization.bin_class(),
+        execution_family: ExecutionFamily::SplitResponse,
+        response_module_id: ModuleId(17),
+        permutation_index: dense(4),
+        fallback_permutation: Some(dense(63)),
         color_format: Some(TextureFormat::Rgba8Unorm),
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-        shader_id: specialization.0,
     };
-    let fallback = full_lobe_fallback(variant).expect("a legal specialization has a fallback");
-    let decoded =
-        SpecializationId::from_bin_class(fallback.class).expect("the fallback class decodes");
-    assert_eq!(decoded.illumination(), Some(Illumination::Lit));
-    assert_eq!(decoded.closure_mask(), LobeMask::all().0);
-    assert_eq!(decoded.render_class_bits(), 2);
-    assert_eq!(fallback.shader_id, decoded.0);
+    let fallback = full_lobe_fallback(variant).unwrap();
+    assert_eq!(fallback.permutation_index, dense(63));
+    assert_eq!(fallback.response_module_id, variant.response_module_id);
+    assert_eq!(fallback.execution_family, variant.execution_family);
+    assert_eq!(fallback.color_format, variant.color_format);
+    assert!(full_lobe_fallback(MeshPipelineKey { fallback_permutation: None, ..variant }).is_none());
 }
 
 /// A cold specialization resolves to the über fallback immediately; the worker
@@ -1017,7 +994,7 @@ fn async_pipeline_cache_serves_fallback_then_switches() {
     let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
         "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
     ));
-    let descriptor = RenderPipelineDescriptor {
+    let mut descriptor = RenderPipelineDescriptor {
         label: Some("async-cache-test".into()),
         layout: None,
         vertex: VertexState {
@@ -1036,27 +1013,32 @@ fn async_pipeline_cache_serves_fallback_then_switches() {
         &[prism_render_driver::VertexFormat::Float32x3],
     );
     let layout = core::slice::from_ref(&layout);
-    let specialization = SpecializationId::new(Illumination::Lit, 1, 0);
+
     let variant = MeshPipelineKey {
-        class: specialization.bin_class(),
+        execution_family: ExecutionFamily::FusedBuiltin,
+            response_module_id: ModuleId(1),
+            permutation_index: dense(1),
+            fallback_permutation: Some(dense(63)),
         color_format: Some(TextureFormat::Rgba8Unorm),
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-        shader_id: specialization.0,
+
     };
     let fallback = full_lobe_fallback(variant).expect("fallback variant");
-    let target_key = variant.with_layout(layout);
-    let fallback_key = fallback.with_layout(layout);
+    descriptor.vertex.buffers = layout.to_vec();
+    let target_key = PipelineKey::from_descriptor(variant.execution_family, variant.response_module_id, variant.permutation_index, &descriptor);
+    let fallback_key =
+        PipelineKey::from_descriptor(fallback.execution_family, fallback.response_module_id, fallback.permutation_index, &descriptor);
     assert_ne!(target_key, fallback_key, "the test uses a partial lobe set");
 
     let compiler = GateCompiler::new(RenderPipelineId::from_parts(101, 1));
     let mut cache = PipelineCache::with_compiler(compiler.clone());
     let first = cache.resolve_or_request(
         &device,
-        target_key,
+        target_key.clone(),
         descriptor.clone(),
-        fallback_key,
+        fallback_key.clone(),
         descriptor.clone(),
     );
     assert!(
@@ -1102,7 +1084,7 @@ fn async_pipeline_cache_bounds_the_in_flight_backlog() {
     let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
         "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
     ));
-    let descriptor = RenderPipelineDescriptor {
+    let mut descriptor = RenderPipelineDescriptor {
         label: Some("async-backpressure-test".into()),
         layout: None,
         vertex: VertexState {
@@ -1121,27 +1103,32 @@ fn async_pipeline_cache_bounds_the_in_flight_backlog() {
         &[prism_render_driver::VertexFormat::Float32x3],
     );
     let layout = core::slice::from_ref(&layout);
+    descriptor.vertex.buffers = layout.to_vec();
     let compiler = GateCompiler::new(RenderPipelineId::from_parts(303, 1));
     let mut cache = PipelineCache::with_compiler(compiler.clone());
 
     let mut keys = Vec::new();
     for bit in 0..5 {
-        let specialization = SpecializationId::new(Illumination::Lit, 1 << bit, 0);
+
         let variant = MeshPipelineKey {
-            class: specialization.bin_class(),
+            execution_family: ExecutionFamily::FusedBuiltin,
+            response_module_id: ModuleId(1),
+            permutation_index: dense(u64::from(bit as u32) + 1),
+            fallback_permutation: Some(dense(63)),
             color_format: Some(TextureFormat::Rgba8Unorm),
             depth_format: None,
             sample_count: 1,
             topology: PrimitiveTopology::TriangleList,
-            shader_id: specialization.0,
+
         };
         let fallback = full_lobe_fallback(variant).expect("fallback variant");
-        let key = variant.with_layout(layout);
-        let fallback_key = fallback.with_layout(layout);
+        let key = PipelineKey::from_descriptor(variant.execution_family, variant.response_module_id, variant.permutation_index, &descriptor);
+        let fallback_key =
+            PipelineKey::from_descriptor(fallback.execution_family, fallback.response_module_id, fallback.permutation_index, &descriptor);
         assert!(matches!(
             cache.resolve_or_request(
                 &device,
-                key,
+                key.clone(),
                 descriptor.clone(),
                 fallback_key,
                 descriptor.clone(),
@@ -1184,7 +1171,7 @@ fn pipeline_prewarm_queues_hot_variants() {
     let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
         "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
     ));
-    let descriptor = RenderPipelineDescriptor {
+    let mut descriptor = RenderPipelineDescriptor {
         label: Some("prewarm-test".into()),
         layout: None,
         vertex: VertexState {
@@ -1203,28 +1190,32 @@ fn pipeline_prewarm_queues_hot_variants() {
         &[prism_render_driver::VertexFormat::Float32x3],
     );
     let layout = core::slice::from_ref(&layout);
+    descriptor.vertex.buffers = layout.to_vec();
     let compiler = GateCompiler::new(RenderPipelineId::from_parts(404, 1));
     let mut cache = PipelineCache::with_compiler(compiler.clone());
 
     let mut requests = Vec::new();
     let mut keys = Vec::new();
     for bit in 0..3 {
-        let specialization = SpecializationId::new(Illumination::Lit, 1 << bit, 0);
+
         let variant = MeshPipelineKey {
-            class: specialization.bin_class(),
+            execution_family: ExecutionFamily::FusedBuiltin,
+            response_module_id: ModuleId(1),
+            permutation_index: dense(u64::from(bit as u32) + 1),
+            fallback_permutation: Some(dense(63)),
             color_format: Some(TextureFormat::Rgba8Unorm),
             depth_format: None,
             sample_count: 1,
             topology: PrimitiveTopology::TriangleList,
-            shader_id: specialization.0,
+
         };
         let fallback = full_lobe_fallback(variant).expect("fallback variant");
-        let key = variant.with_layout(layout);
-        keys.push(key);
+        let key = PipelineKey::from_descriptor(variant.execution_family, variant.response_module_id, variant.permutation_index, &descriptor);
+        keys.push(key.clone());
         requests.push((
             key,
             descriptor.clone(),
-            fallback.with_layout(layout),
+            PipelineKey::from_descriptor(fallback.execution_family, fallback.response_module_id, fallback.permutation_index, &descriptor),
             descriptor.clone(),
         ));
     }
@@ -1244,7 +1235,13 @@ fn pipeline_prewarm_queues_hot_variants() {
     assert_eq!(compiler.calls(), 3);
     for key in keys {
         assert_eq!(
-            cache.resolve_or_request(&device, key, descriptor.clone(), key, descriptor.clone(),),
+            cache.resolve_or_request(
+                &device,
+                key.clone(),
+                descriptor.clone(),
+                key,
+                descriptor.clone(),
+            ),
             PipelineResolution::Ready(compiler.result)
         );
     }
@@ -1283,14 +1280,17 @@ fn mesh_specialization_uses_the_full_lobe_fallback_while_compiling() {
         &[prism_render_driver::VertexFormat::Float32x3],
     );
     let layout = core::slice::from_ref(&layout);
-    let specialization = SpecializationId::new(Illumination::Lit, 1, 0);
+
     let variant = MeshPipelineKey {
-        class: specialization.bin_class(),
+        execution_family: ExecutionFamily::FusedBuiltin,
+            response_module_id: ModuleId(1),
+            permutation_index: dense(1),
+            fallback_permutation: Some(dense(63)),
         color_format: Some(TextureFormat::Rgba8Unorm),
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-        shader_id: specialization.0,
+
     };
     let compiler = GateCompiler::new(RenderPipelineId::from_parts(202, 1));
     let mut specializer = MeshPipelineSpecializer::with_compiler(compiler.clone());
@@ -1353,14 +1353,17 @@ fn wgpu_pipeline_worker_compiles_a_cold_specialization_in_the_background() {
         &[prism_render_driver::VertexFormat::Float32x3],
     );
     let layout = core::slice::from_ref(&layout);
-    let specialization = SpecializationId::new(Illumination::Lit, 1, 0);
+
     let variant = MeshPipelineKey {
-        class: specialization.bin_class(),
+        execution_family: ExecutionFamily::FusedBuiltin,
+            response_module_id: ModuleId(1),
+            permutation_index: dense(1),
+            fallback_permutation: Some(dense(63)),
         color_format: Some(TextureFormat::Rgba8Unorm),
         depth_format: None,
         sample_count: 1,
         topology: PrimitiveTopology::TriangleList,
-        shader_id: specialization.0,
+
     };
     let mut specializer = MeshPipelineSpecializer::with_worker(runtime.device_handle());
     let first = specializer.specialize_with(device, variant, layout, |_| descriptor.clone());
@@ -2324,6 +2327,23 @@ fn bin_fixture(
     clear.render_class = MaterialRenderClass::Transparent;
     registry.insert_material(clear);
 
+    // Compiled-table handoff is explicit: material records do not smuggle a
+    // packed specialization or an implicit fallback into the pipeline cache.
+    for (material, module, phase) in [
+        (opaque_material, ModuleId(1), RenderPhase::Opaque),
+        (transparent_material, ModuleId(2), RenderPhase::Transparent),
+    ] {
+        registry.set_material_passes(material, vec![crate::PassDescriptor {
+            execution_family: ExecutionFamily::FusedBuiltin,
+            response_module_id: module,
+            permutation_index: dense(1),
+            fallback_permutation: Some(dense(63)),
+            render_phase: phase,
+            draw: None,
+            sort_class: crate::PassDescriptorClass::SURFACE,
+        }]).unwrap();
+    }
+
     let mut builder = SceneTransactionBuilder::new(0, 1);
     for (handle, material) in [
         (opaque, opaque_material),
@@ -2453,6 +2473,7 @@ fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
         outcome,
         crate::BinQueueOutcome {
             queued: 2,
+            work_items: 2,
             unknown_class: 0,
             unresolved: 0
         }
@@ -2653,8 +2674,7 @@ fn packed_bin_streams_offset_the_indirect_arguments() {
     assert_eq!(offsets, vec![base, base + 20]);
 }
 
-/// A bin whose packed class does not decode, and one whose pipeline is not
-/// resident, are counted as skips instead of queueing an unusable draw.
+/// Unknown descriptor IDs fail loudly; temporarily absent geometry is counted.
 #[test]
 fn undecodable_and_unresolved_bins_are_counted() {
     use prism_render_visibility::build_view_draw_bins;
@@ -2672,14 +2692,22 @@ fn undecodable_and_unresolved_bins_are_counted() {
     let mut candidates = fixture
         .registry
         .bin_candidates(&fixture.meshes, &fixture.work);
-    // A foreign permutation class: bits outside the packed field width.
+    // A foreign descriptor-table ID must never silently drop geometry.
     let mut foreign = candidates[0];
-    foreign.key.pipeline_class = 1 << prism_render_material::BIN_CLASS_BITS;
+    foreign.key.pipeline_class = u32::MAX;
     // A bin whose vertex-buffer class has no resident pipeline inputs.
     let mut orphan = candidates[1];
     orphan.key.vertex_buffer_class = 99;
-    candidates.push(foreign);
     candidates.push(orphan);
+
+    let foreign_bins = build_view_draw_bins(GenerationalHandle::new(0, 1), 8, [foreign]);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        RenderQueues::new().fill_bins(
+            &device, &mut MeshPipelineSpecializer::new(), &fixture.registry,
+            &fixture.meshes, &fixture.instances, declared_args_buffer(&device),
+            &foreign_bins, None, 1, DrawFunctionId(0), &provider,
+        );
+    })).is_err());
 
     let bins = build_view_draw_bins(GenerationalHandle::new(0, 1), 8, candidates);
     let mut queues = RenderQueues::new();
@@ -2698,7 +2726,7 @@ fn undecodable_and_unresolved_bins_are_counted() {
         &provider,
     );
     assert_eq!(outcome.queued, 2, "the two drawable bins still queue");
-    assert_eq!(outcome.unknown_class, 1, "the foreign class is not guessed");
+    assert_eq!(outcome.unknown_class, 0, "foreign IDs fail instead of silently skipping");
     assert_eq!(outcome.unresolved, 1, "the orphan class is not drawn");
     assert_eq!(outcome.total(), bins.bins.len());
 }
@@ -3324,23 +3352,15 @@ fn an_empty_stage_does_not_break_the_stage_chain() {
 }
 /// A provider that gives one colour per material permutation class, so a test
 /// can tell two draws apart by their pixels.
-struct IlluminationColourPipeline {
+struct ModuleColourPipeline {
     lit: RenderPipelineDescriptor,
     stylized: RenderPipelineDescriptor,
 }
 
-impl crate::mesh_pipeline::MeshPipelineProvider for IlluminationColourPipeline {
+impl crate::mesh_pipeline::MeshPipelineProvider for ModuleColourPipeline {
     fn descriptor(&self, variant: &MeshPipelineKey) -> RenderPipelineDescriptor {
-        // Keyed on the *illumination axis*, not the exact permutation class: the
-        // renderer may resolve a cold class through a fallback permutation (the
-        // full-lobe über shader) before the exact one exists, and the colour a
-        // draw shows must not depend on which of the two pipelines ran.
-        match prism_render_material::SpecializationId::from_bin_class(variant.class)
-            .and_then(|specialization| specialization.illumination())
-        {
-            Some(prism_render_material::Illumination::Stylized) => self.stylized.clone(),
-            _ => self.lit.clone(),
-        }
+        if variant.response_module_id == ModuleId(2) { self.stylized.clone() }
+        else { self.lit.clone() }
     }
 }
 
@@ -3358,7 +3378,7 @@ fn depth_resolves_occlusion_on_a_gpu() {
     use prism_render_architecture::geometry::{
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
     };
-    use prism_render_material::{Illumination, MaterialRenderClass};
+    use prism_render_material::MaterialRenderClass;
     use prism_render_visibility::{
         GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey,
     };
@@ -3410,11 +3430,7 @@ fn depth_resolves_occlusion_on_a_gpu() {
     // Two permutations, so the two draws specialize to different pipelines.
     let near_record = prism_render_material::fallback_material_record(near_material, 1);
     let mut far_record = prism_render_material::fallback_material_record(far_material, 1);
-    far_record.illumination = Illumination::Stylized;
     far_record.render_class = MaterialRenderClass::Opaque;
-    let near_class = near_record.specialization().bin_class();
-    let far_class = far_record.specialization().bin_class();
-    assert_ne!(near_class, far_class, "the two materials differ");
 
     let (device, colour_pipelines) = {
         let render = app.get_sub_app(RenderApp).expect("the render sub-app");
@@ -3459,7 +3475,7 @@ fn depth_resolves_occlusion_on_a_gpu() {
         };
         (
             device,
-            IlluminationColourPipeline {
+            ModuleColourPipeline {
                 lit: descriptor("1.0, 0.0, 0.0, 1.0"),
                 stylized: descriptor("0.0, 0.0, 1.0, 1.0"),
             },
@@ -3499,6 +3515,17 @@ fn depth_resolves_occlusion_on_a_gpu() {
         }
         registry.insert_material(near_record);
         registry.insert_material(far_record);
+        for (handle, module) in [(near_material, ModuleId(1)), (far_material, ModuleId(2))] {
+            registry.set_material_passes(handle, vec![crate::PassDescriptor {
+                execution_family: ExecutionFamily::FusedBuiltin,
+                response_module_id: module,
+                permutation_index: PermutationIndex::ZERO,
+                fallback_permutation: None,
+                render_phase: RenderPhase::Opaque,
+                draw: None,
+                sort_class: crate::PassDescriptorClass::SURFACE,
+            }]).unwrap();
+        }
     }
     {
         let work = render.world.resource_mut::<VisibilityWorkList>();

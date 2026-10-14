@@ -29,7 +29,8 @@ use prism_render_visibility::{DrawBinRange, ViewDrawBins};
 
 use crate::draw::DrawFunctionId;
 use crate::mesh_pipeline::{MeshPipelineProvider, MeshPipelineSpecializer};
-use crate::queue::{phase_for_bin_class, IndirectArgs, PhaseItem, RenderQueues};
+use crate::queue::{IndirectArgs, PhaseItem, RenderQueues};
+use crate::frame::RENDER_TARGET_FORMAT;
 use crate::scene::SceneRegistry;
 
 /// The indirect argument range one packed bin owns.
@@ -64,6 +65,8 @@ pub fn bin_indirect_args(
 pub struct BinQueueOutcome {
     /// Bins queued as indirect draws.
     pub queued: usize,
+    /// Work items produced (a split bin produces three, not one).
+    pub work_items: usize,
     /// Bins skipped because their packed class did not name a phase.
     pub unknown_class: usize,
     /// Bins skipped because the pipeline or the representative instance was
@@ -109,14 +112,9 @@ impl RenderQueues {
     ) -> BinQueueOutcome {
         let mut outcome = BinQueueOutcome::default();
         for range in &bins.bins {
-            let Some(phase) = phase_for_bin_class(range.key.pipeline_class) else {
-                outcome.unknown_class += 1;
-                continue;
-            };
-            let (Some(variant), Some(mesh_class)) = (
-                registry.bin_variant(&range.key, depth_format, sample_count),
-                registry.mesh_class(range.key.vertex_buffer_class),
-            ) else {
+            let passes = registry.pass_descriptors(range.key.pipeline_class)
+                .expect("unknown draw-bin pass descriptor index: refusing silent geometry loss");
+            let Some(mesh_class) = registry.mesh_class(range.key.vertex_buffer_class) else {
                 outcome.unresolved += 1;
                 continue;
             };
@@ -133,16 +131,18 @@ impl RenderQueues {
                 outcome.unresolved += 1;
                 continue;
             };
+            for pass in passes {
+            let variant = pass.mesh_variant(mesh_class.topology, Some(RENDER_TARGET_FORMAT), depth_format, sample_count);
             let pipeline = specializer
                 .specialize_with_provider(device, variant, &mesh_class.layout, provider)
                 .id();
             self.push(
-                phase,
+                pass.render_phase,
                 PhaseItem {
                     pipeline,
-                    draw,
+                    draw: pass.draw.unwrap_or(draw),
                     geometry: range.key.geometry,
-                    vertices: buffers.vertices,
+                    vertices: buffers.vertices.clone(),
                     indices: buffers.indices,
                     first: 0,
                     count: 0,
@@ -157,6 +157,8 @@ impl RenderQueues {
                     ),
                 },
             );
+            outcome.work_items += 1;
+            }
             outcome.queued += 1;
         }
         outcome
