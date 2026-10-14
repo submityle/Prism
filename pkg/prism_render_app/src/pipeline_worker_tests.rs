@@ -1,4 +1,5 @@
 use super::*;
+use prism_render_architecture::shader_package::{PipelineReadiness, ShaderPackageId};
 use prism_render_driver::{
     DeviceDescriptor, Instance, MultisampleState, PrimitiveState, RequestAdapterOptions,
     ShaderModuleId, VertexState,
@@ -335,5 +336,156 @@ fn worker_count_zero_is_rejected() {
             worker_count: 0,
             queue_capacity: 1,
         },
+    );
+}
+
+#[test]
+fn typed_key_maps_to_cold_key_without_hash_only_reverse_decoding() {
+    let mut cache = PipelineCache::new();
+    let key = key(7);
+    let package = ShaderPackageId::new("app.pipeline-cache.mapping");
+
+    assert_eq!(
+        cache.cold_key_for(&key),
+        Err(PipelineKeyMappingError::UnregisteredModule(ModuleId(7)))
+    );
+    cache
+        .register_module_package(ModuleId(7), package)
+        .expect("first package registration");
+    let cold = cache
+        .remember_cold_key(&key)
+        .expect("registered module maps to cold key");
+    assert_eq!(cold.package, package);
+    assert_eq!(cold.permutation_index, 0);
+    assert_eq!(cache.typed_key_for(&cold), Ok(key.clone()));
+    assert_eq!(
+        cache.typed_key_for(&PsoCacheKey::new(package, 999, cold.state)),
+        Err(PipelineKeyMappingError::UnknownColdKey)
+    );
+    assert_eq!(
+        cache.register_module_package(ModuleId(7), ShaderPackageId::new("other.package")),
+        Err(PipelineKeyMappingError::ConflictingModulePackage {
+            module_id: ModuleId(7),
+            existing: package,
+            requested: ShaderPackageId::new("other.package"),
+        })
+    );
+    assert_eq!(
+        cache.register_module_package(ModuleId(8), package),
+        Err(PipelineKeyMappingError::PackageMappedToMultipleModules {
+            package,
+            existing: ModuleId(7),
+            requested: ModuleId(8),
+        })
+    );
+}
+
+#[test]
+fn unregistered_lookup_exposes_mapping_error_without_dropping_fallback() {
+    let device = device();
+    let mut cache = PipelineCache::new();
+    let result = cache.resolve_or_request(&*device, key(7), descriptor(), key(99), descriptor());
+
+    assert!(result.is_ready());
+    assert_eq!(cache.len(), 2);
+    assert_eq!(
+        cache.last_mapping_error(),
+        Some(PipelineKeyMappingError::UnregisteredModule(ModuleId(7)))
+    );
+}
+
+#[test]
+fn warm_runtime_follows_real_pipeline_cache_miss_fallback_and_ready() {
+    let device = device();
+    let compiler = ControlledCompiler::new(device.clone(), None);
+    let mut cache = PipelineCache::with_compiler(compiler.clone());
+    let package = ShaderPackageId::new("app.pipeline-cache.lifecycle");
+    let fallback_package = ShaderPackageId::new("app.pipeline-cache.lifecycle.fallback");
+    cache.register_module_package(ModuleId(1), package).unwrap();
+    cache
+        .register_module_package(ModuleId(99), fallback_package)
+        .unwrap();
+
+    let target = key(1);
+    let fallback = key(99);
+    let first = cache.resolve_or_request(
+        &*device,
+        target.clone(),
+        descriptor(),
+        fallback,
+        descriptor(),
+    );
+    assert!(matches!(first, PipelineResolution::Fallback(_)));
+    assert_eq!(
+        cache.lookup_status(&target),
+        Some(PipelineLookupStatus::Miss)
+    );
+    assert_eq!(cache.readiness(&target), Ok(PipelineReadiness::Compiling));
+    assert_eq!(cache.warm_counters().runtime_misses, 1);
+    assert_eq!(cache.warm_counters().compiles_started, 2);
+
+    let repeat = cache.resolve_or_request(
+        &*device,
+        target.clone(),
+        descriptor(),
+        key(99),
+        descriptor(),
+    );
+    assert!(matches!(repeat, PipelineResolution::Fallback(_)));
+    assert_eq!(
+        cache.lookup_status(&target),
+        Some(PipelineLookupStatus::Fallback)
+    );
+    assert_eq!(cache.warm_counters().runtime_misses, 2);
+
+    compiler.release();
+    drain(&mut cache, &device);
+    let second = cache.resolve_or_request(
+        &*device,
+        target.clone(),
+        descriptor(),
+        key(99),
+        descriptor(),
+    );
+    assert!(second.is_ready());
+    assert_eq!(
+        cache.lookup_status(&target),
+        Some(PipelineLookupStatus::Ready)
+    );
+    assert_eq!(cache.readiness(&target), Ok(PipelineReadiness::Ready));
+    assert_eq!(cache.warm_counters().compiles_finished, 2);
+    assert_eq!(cache.warm_counters().runtime_misses, 2);
+    cache.shutdown(&*device);
+}
+
+#[test]
+fn lru_uses_explicit_residency_bytes_and_binary_api_is_unsupported() {
+    let mut cache = PipelineCache::with_lru_budget(100);
+    let first_package = ShaderPackageId::new("app.pipeline-cache.lru.first");
+    let second_package = ShaderPackageId::new("app.pipeline-cache.lru.second");
+    cache
+        .register_module_package(ModuleId(1), first_package)
+        .unwrap();
+    cache
+        .register_module_package(ModuleId(2), second_package)
+        .unwrap();
+    let first = key(1);
+    let second = key(2);
+
+    assert_eq!(
+        cache.record_resident_size(&first, 60).unwrap().evicted,
+        Vec::new()
+    );
+    let outcome = cache.record_resident_size(&second, 60).unwrap();
+    assert!(outcome.admitted);
+    assert_eq!(outcome.evicted.len(), 1);
+    assert_eq!(cache.lru().unwrap().used_bytes(), 60);
+    assert_eq!(
+        cache.export_driver_binary(&cache.cold_key_for(&first).unwrap()),
+        Err(PipelineBinaryCacheError::Unsupported)
+    );
+    assert_eq!(
+        cache.import_driver_binary(&cache.cold_key_for(&second).unwrap(), &[1, 2, 3]),
+        Err(PipelineBinaryCacheError::Unsupported)
     );
 }

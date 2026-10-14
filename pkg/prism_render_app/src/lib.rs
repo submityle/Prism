@@ -49,10 +49,13 @@
 //!
 //! ## Scope
 //!
-//! This crate is the seam, not the renderer. The frame graph it records is
-//! deliberately minimal — it clears the offscreen target — because the point of
-//! this layer is to prove the ECS ↔ RHI wiring. Passes for geometry, materials,
-//! lighting, and post-processing layer on top of the same `Render` schedule.
+//! This crate owns the render-app seam and the executable frame-graph path. It
+//! keeps backend/device state in the render world while geometry, materials,
+//! lighting, and post-processing are added as declared passes on the same
+//! `Render` schedule. A provider must register every response module/package
+//! identity before a specialized pipeline can enter the cold-cache lifecycle;
+//! missing mappings are reported as loud errors rather than silently losing
+//! residency accounting.
 #![forbid(unsafe_code)]
 
 extern crate alloc;
@@ -119,7 +122,9 @@ pub use mesh_pipelines::{
     ResponseModuleSpec, SpineMeshPipeline,
 };
 pub use pipeline_cache::{
-    hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
+    cold_key_from_pipeline_key, hash_vertex_layouts, PipelineBinaryCacheError, PipelineCache,
+    PipelineCompiler, PipelineKey, PipelineKeyMappingError, PipelineLookupStatus,
+    PipelineResolution,
 };
 pub use pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
 pub use plugin::PrismRenderPlugin;
@@ -170,7 +175,9 @@ pub mod prelude {
         ResponseModuleSpec, SpineMeshPipeline,
     };
     pub use crate::pipeline_cache::{
-        hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
+        cold_key_from_pipeline_key, hash_vertex_layouts, PipelineBinaryCacheError, PipelineCache,
+        PipelineCompiler, PipelineKey, PipelineKeyMappingError, PipelineLookupStatus,
+        PipelineResolution,
     };
     pub use crate::pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
     pub use crate::plugin::PrismRenderPlugin;

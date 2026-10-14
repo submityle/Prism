@@ -246,6 +246,14 @@ impl MeshPipelineSpecializer {
                 module.permutations.clone(),
                 module.full_lobe_fallback,
             );
+            self.cache
+                .register_module_package(module.module_id, module.identity.package.clone())
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "response module/package mapping is not stable for module {:?}: {error:?}",
+                        module.module_id
+                    )
+                });
         }
     }
 

@@ -36,6 +36,28 @@ architecture 提供 `PsoCacheKey`、`WarmSetPlanner`、`WarmRuntime`、
 在此限制下，app 的热缓存、异步编译、fallback 和模块驻留是真实运行时路径；冷层
 模型的磁盘读写仍由后端消费者负责，不能把模型测试写成跨会话 GPU 命中证明。
 
+本轮 app 接线已将 `PipelineCache` 的真实生命周期映射到 architecture 冷层。
+正式 response module 都由 `MeshPipelineSpecializer::sync_response_modules` 注册 package；
+注册冲突会立即失败。为保留低层 cache 的独立调度测试和 legacy 调用，未注册 module
+的 lookup 仍可绑定 fallback，但会在 `PipelineCache::last_mapping_error()` 暴露
+`UnregisteredModule` 等错误，不能静默跳过 warm/LRU 账本：
+
+- `register_module_package` 明确绑定 driver-local `ModuleId` 与冷层
+  `ShaderPackageId`；禁止把 `ModuleId` 数字或字符串临时拼成 package，也禁止同一
+  package 同时代表多个 module。`cold_key_from_pipeline_key` 只把完整 typed state
+  编码为 `PipelineStateHash`；反向查找只允许使用 cache 已观察到的无歧义 typed
+  binding，不从 hash 猜回 `PipelineState`。
+- 在完成 module/package 注册后，`resolve_or_request` 首次请求记录 `Miss`，fallback 实际绑定时报告
+  `PipelineResolution::Fallback`，worker dispatch/complete/failure 分别推进
+  `WarmRuntime` 的 `Queued/Compiling/Ready/Failed`；命中后 lookup 状态为 `Ready`。
+- `LruPsoCache` 通过 `with_lru_budget` 和 `record_resident_size` 接收后端真实提供的
+  residency 字节数；app 不从 descriptor、pipeline id 或 shader 源码伪造大小。LRU
+  驱逐结果只作为冷层模型结果返回，不越过 `ContentCache` 的引用计数直接销毁 live
+  RHI 对象。
+- `import_driver_binary` / `export_driver_binary` 当前固定返回
+  `PipelineBinaryCacheError::Unsupported`，明确表示 RHI 尚未提供 driver-owned
+  binary seam。
+
 ## 身份与数据分工
 
 重新编译才需要进入 package/permutation/state identity：响应模块、静态能力、
@@ -50,11 +72,13 @@ Manifest。
 ## 验证记录
 
 - `cargo test -q -p prism_render_architecture --lib`：11,273 passed。
-- `cargo test -q -p prism_render_app --lib`：149 passed。
+- `cargo test -q -p prism_render_app --lib`：152 passed（本轮定向新增 3 项）。
 - `cargo test -q -p prism_render_scene --lib`：1,729 passed。
 - `cargo test -q -p prism_render_architecture shader_package --lib`：86 passed。
 - `cargo fmt --all -- --check`：通过。
 - `PermutationSpace` 严格构造与置换回归：10 passed。
+- app pipeline-cache 接线测试：typed/cold 映射、Miss → Fallback → Ready、LRU
+  显式字节记账和 Unsupported binary API 均通过（3 tests）。
 
 这些是 CPU/契约层证据，不等同于真实 GPU adapter 通过。GPU 测试必须报告实际
 adapter、限制和是否执行了 dispatch；设备能力不足或无 adapter 时只能记为跳过，
