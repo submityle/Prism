@@ -122,7 +122,9 @@ fn compiled() -> CompiledEntry {
 }
 fn packages() -> ShaderPackageRegistry {
     let mut packages = ShaderPackageRegistry::new();
-    packages.register(package()).unwrap();
+    packages
+        .register_verified(compiled().artifact().clone())
+        .unwrap();
     assert!(packages
         .validate(&package().id, &expectation())
         .unwrap()
@@ -545,6 +547,49 @@ fn package_state_revision_and_abi_are_rechecked_on_resolve() {
         r.register(registered(0), manifest(), compiled(), &packages()),
         Err(RegistryError::PackageAbi(_))
     ));
+}
+
+#[test]
+fn metadata_ready_cannot_forge_executable_validation() {
+    let r = registry(&[registered(0)], false);
+    let mut metadata = ShaderPackageRegistry::new();
+    metadata.register(package()).unwrap();
+    metadata.validate(&package().id, &expectation());
+    assert_eq!(
+        r.resolve(registered(0), &metadata).unwrap_err(),
+        RegistryError::PackageNotVerified
+    );
+}
+
+#[test]
+fn valid_code_replacement_with_identical_metadata_is_rejected() {
+    let r = registry(&[registered(0)], false);
+    let mut words = binary();
+    words[18] = 2; // valid LocalSize.x change, no metadata change
+    let changed = CompiledEntry::from_spirv(package(), words).unwrap();
+    assert_ne!(changed.digest(), compiled().digest());
+    let mut packages = ShaderPackageRegistry::new();
+    packages
+        .register_verified(changed.artifact().clone())
+        .unwrap();
+    packages.validate(&package().id, &expectation());
+    assert_eq!(
+        r.resolve(registered(0), &packages).unwrap_err(),
+        RegistryError::PackageCodeChanged
+    );
+}
+
+#[test]
+fn structurally_reflectable_but_ill_typed_code_is_rejected() {
+    let mut words = binary();
+    words[27] = 2; // OpFunction result type is a function type, not void
+    assert!(matches!(
+        CompiledEntry::from_spirv(package(), words),
+        Err(CompiledEntryError::Validation(_))
+    ));
+    let entry = compiled();
+    assert_eq!(entry.digest(), entry.clone().digest());
+    assert_eq!(entry.spirv().as_ptr(), entry.clone().spirv().as_ptr());
 }
 #[test]
 fn both_arms_validate_and_custom_blends_choose_composition() {

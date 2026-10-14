@@ -20,12 +20,14 @@
 
 use crate::abi::{AbiHash, AbiVersion};
 
+mod artifact;
 mod manifest;
 mod permutation;
 mod pso_cache;
 mod registry;
 mod state;
 
+pub use artifact::{ArtifactDigest, ArtifactValidationError, VerifiedShaderArtifact};
 pub use manifest::{ManifestExpectation, RejectionReason, ValidationOutcome};
 pub use permutation::{PermutationKey, PermutationSelector, PermutationSpace};
 pub use pso_cache::{

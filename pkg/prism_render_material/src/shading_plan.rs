@@ -12,8 +12,8 @@ use alloc::{
 };
 use prism_material_pcm::CapabilitySet;
 use prism_render_architecture::shader_package::{
-    ManifestExpectation, PackageState, RejectionReason, ShaderPackageManifest,
-    ShaderPackageRegistry, ValidationOutcome,
+    ArtifactDigest, ArtifactValidationError, ManifestExpectation, PackageState, RejectionReason,
+    ShaderPackageManifest, ShaderPackageRegistry, ValidationOutcome, VerifiedShaderArtifact,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -485,15 +485,16 @@ pub enum CompiledEntryError {
     FunctionMissing(u32),
     InvalidFunction(u32),
     EmptyProvenance,
+    Validation(ArtifactValidationError),
 }
 
 /// Immutable SPIR-V artifact plus an entry actually declared and defined in it.
-/// This is reflection/binding validation, NOT a replacement for compiler or
-/// spirv-val validation of type correctness, shader semantics or target support.
+/// Full Naga validation precedes binding. Device support and response semantics
+/// are separately checked by pipeline creation and response conformance tests.
 #[derive(Clone, Debug)]
 pub struct CompiledEntry {
     manifest: ShaderPackageManifest,
-    spirv: Vec<u32>,
+    artifact: VerifiedShaderArtifact,
     function_id: u32,
 }
 
@@ -609,9 +610,11 @@ impl CompiledEntry {
         if !functions.contains(&function_id) {
             return Err(CompiledEntryError::FunctionMissing(function_id));
         }
+        let artifact = VerifiedShaderArtifact::from_spirv(manifest.clone(), spirv)
+            .map_err(CompiledEntryError::Validation)?;
         Ok(Self {
             manifest,
-            spirv,
+            artifact,
             function_id,
         })
     }
@@ -619,7 +622,13 @@ impl CompiledEntry {
         &self.manifest
     }
     pub fn spirv(&self) -> &[u32] {
-        &self.spirv
+        self.artifact.spirv()
+    }
+    pub fn artifact(&self) -> &VerifiedShaderArtifact {
+        &self.artifact
+    }
+    pub fn digest(&self) -> ArtifactDigest {
+        self.artifact.digest()
     }
     pub fn function_id(&self) -> u32 {
         self.function_id
@@ -634,6 +643,8 @@ pub enum RegistryError {
     StaleProgram(ProgramRef),
     PackageUnavailable,
     PackageChanged,
+    PackageNotVerified,
+    PackageCodeChanged,
     PackageAbi(RejectionReason),
     Contract(ContractError),
     CustomRequiresSplit,
@@ -771,6 +782,12 @@ impl ResponseRegistry {
         }
         if let ValidationOutcome::Rejected(reason) = actual.validate(&self.abi_expectation) {
             return Err(RegistryError::PackageAbi(reason));
+        }
+        let artifact = packages
+            .verified_artifact(&expected.id)
+            .ok_or(RegistryError::PackageNotVerified)?;
+        if artifact.digest() != compiled.digest() {
+            return Err(RegistryError::PackageCodeChanged);
         }
         Ok(())
     }

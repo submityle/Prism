@@ -13,7 +13,7 @@ use alloc::collections::BTreeMap;
 
 use super::manifest::{ManifestExpectation, ValidationOutcome};
 use super::state::TransitionError;
-use super::{PackageState, ShaderPackageId, ShaderPackageManifest};
+use super::{PackageState, ShaderPackageId, ShaderPackageManifest, VerifiedShaderArtifact};
 
 /// Why a package could not be registered.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,6 +35,7 @@ pub struct RegistryEntry {
 #[derive(Clone, Debug, Default)]
 pub struct ShaderPackageRegistry {
     entries: BTreeMap<ShaderPackageId, RegistryEntry>,
+    artifacts: BTreeMap<ShaderPackageId, VerifiedShaderArtifact>,
 }
 
 impl ShaderPackageRegistry {
@@ -43,6 +44,7 @@ impl ShaderPackageRegistry {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
         }
     }
 
@@ -64,6 +66,27 @@ impl ShaderPackageRegistry {
             },
         );
         Ok(())
+    }
+
+    /// Registers validated executable bytes atomically with their manifest.
+    /// ABI validation must still run before this package becomes ready.
+    ///
+    /// # Errors
+    /// Returns [`RegisterError::Duplicate`] without replacing existing code.
+    pub fn register_verified(
+        &mut self,
+        artifact: VerifiedShaderArtifact,
+    ) -> Result<(), RegisterError> {
+        let id = artifact.manifest().id.clone();
+        self.register(artifact.manifest().clone())?;
+        self.artifacts.insert(id, artifact);
+        Ok(())
+    }
+
+    /// Returns validated code only; metadata-only registrations return `None`.
+    #[must_use]
+    pub fn verified_artifact(&self, id: &ShaderPackageId) -> Option<&VerifiedShaderArtifact> {
+        self.artifacts.get(id)
     }
 
     /// Returns the stored entry for `id`, if any.

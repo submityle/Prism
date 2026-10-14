@@ -7,6 +7,8 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+naga = { version = "30", features = ["spv-in"] }
+blake3 = { version = "1.8", default-features = false }
 # The physics engine owns the authoritative cloth-physics algorithms; the
 # render architecture delegates to it so there is a single implementation
 # (no render/physics double-implementation of the same solver math).
