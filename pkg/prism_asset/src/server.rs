@@ -242,6 +242,18 @@ impl AssetServer {
         inner.fail(plan.id, &plan.path, reason.to_string());
     }
 
+    pub(crate) fn fail_async_load_path(&self, path: &AssetPath, reason: &str) {
+        let mut inner = self.lock();
+        let id = inner
+            .interned
+            .get(path)
+            .and_then(UntypedWeakHandle::upgrade)
+            .map(|handle| handle.id());
+        if let Some(id) = id {
+            inner.fail(id, path, reason.to_string());
+        }
+    }
+
     /// Creates an empty server with no loaders registered and no sources
     /// mounted.
     #[must_use]

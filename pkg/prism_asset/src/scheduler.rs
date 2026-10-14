@@ -14,8 +14,9 @@
 
 use crate::server::AsyncLoadPreparation;
 use crate::{AssetPath, AssetServer, AssetTypeId, UntypedHandle};
-use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::sync::{Arc, Weak};
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::sync::Arc;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
@@ -38,12 +39,17 @@ pub enum LoadFailure {
     AssemblyFailed(String),
 }
 
-/// A request could not be admitted to the bounded in-flight set.
+/// A root request could not be admitted to the bounded scheduler.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScheduleError {
     /// The configured maximum number of unique requests is already in flight.
     AtCapacity {
-        /// Maximum number of unique in-flight requests.
+        /// Maximum number of concurrently executing assembly flights.
+        limit: usize,
+    },
+    /// A dependency would exceed the bounded waiting queue.
+    DependencyQueueFull {
+        /// Maximum number of dependency flights waiting for execution.
         limit: usize,
     },
 }
@@ -53,6 +59,9 @@ impl core::fmt::Display for ScheduleError {
         match self {
             Self::AtCapacity { limit } => {
                 write!(f, "asset load scheduler is at capacity ({limit})")
+            }
+            Self::DependencyQueueFull { limit } => {
+                write!(f, "asset dependency queue is full ({limit})")
             }
         }
     }
@@ -134,6 +143,16 @@ impl Flight {
 
 struct SchedulerState {
     in_flight: BTreeMap<AssetPath, Arc<Flight>>,
+    running: BTreeMap<AssetPath, Arc<Flight>>,
+    queued: VecDeque<QueuedFlight>,
+    admission_waiters: Vec<(Arc<()>, Priority, Waker)>,
+}
+
+struct QueuedFlight {
+    path: AssetPath,
+    flight: Arc<Flight>,
+    priority: Priority,
+    ancestors: BTreeSet<AssetPath>,
 }
 
 /// Concurrent facade for scheduling path loads through an existing server.
@@ -162,10 +181,12 @@ impl Clone for LoadScheduler {
 
 impl LoadScheduler {
     /// Create a scheduler with an explicit pool and a maximum number of
-    /// concurrently admitted unique paths. The supplied pool remains the CPU
-    /// pool for source compatibility; an independent I/O pool with the same
-    /// worker count is created for blocking source reads. `max_in_flight` must
-    /// be nonzero.
+    /// concurrently executing assembly flights. The supplied pool remains the
+    /// CPU pool for source compatibility; an independent I/O pool with the
+    /// same worker count is created for blocking source reads. `max_in_flight`
+    /// must be nonzero. Root requests fail fast at capacity; dependency
+    /// requests enter a bounded priority queue so a parent can yield its slot
+    /// while waiting for its dependency closure.
     #[must_use]
     pub fn new(server: Arc<AssetServer>, pool: TaskPool, max_in_flight: usize) -> Self {
         let io_pool = TaskPool::with_threads(pool.worker_count());
@@ -195,6 +216,9 @@ impl LoadScheduler {
             limit: max_in_flight,
             state: Arc::new(Mutex::new(SchedulerState {
                 in_flight: BTreeMap::new(),
+                running: BTreeMap::new(),
+                queued: VecDeque::new(),
+                admission_waiters: Vec::new(),
             })),
         }
     }
@@ -229,7 +253,7 @@ impl LoadScheduler {
         // an untyped root request for the same path can share a flight only
         // when loader selection resolves them to the same produced type.
         let requested_type = requested_type.or_else(|| self.server.inferred_asset_type(&path));
-        let (flight, is_new) = {
+        let (flight, start_now) = {
             let mut state = self.state.lock().expect("load scheduler poisoned");
             if let Some(existing) = state.in_flight.get(&path) {
                 if let (Some(existing_type), Some(requested_type)) =
@@ -260,8 +284,14 @@ impl LoadScheduler {
                 existing.priority.boost_to(priority);
                 (Arc::clone(existing), false)
             } else {
-                if state.in_flight.len() >= self.limit {
+                let can_start = state.running.len() < self.limit
+                    && state.queued.is_empty()
+                    && state.admission_waiters.is_empty();
+                if !can_start && ancestors.is_empty() {
                     return Err(ScheduleError::AtCapacity { limit: self.limit });
+                }
+                if !can_start && !ancestors.is_empty() && state.queued.len() >= self.limit {
+                    return Err(ScheduleError::DependencyQueueFull { limit: self.limit });
                 }
                 let flight = Arc::new(Flight {
                     notification: Mutex::new(FlightNotification {
@@ -272,50 +302,23 @@ impl LoadScheduler {
                     requested_type,
                 });
                 state.in_flight.insert(path.clone(), Arc::clone(&flight));
-                (flight, true)
+                if can_start {
+                    state.running.insert(path.clone(), Arc::clone(&flight));
+                    (flight, true)
+                } else {
+                    state.queued.push_back(QueuedFlight {
+                        path: path.clone(),
+                        flight: Arc::clone(&flight),
+                        priority,
+                        ancestors: ancestors.clone(),
+                    });
+                    (flight, false)
+                }
             }
         };
 
-        if is_new {
-            let server = Arc::clone(&self.server);
-            let state: Weak<Mutex<SchedulerState>> = Arc::downgrade(&self.state);
-            let job_flight = Arc::clone(&flight);
-            let job_path = path.clone();
-            let scheduler = self.clone();
-            let pool = self.cpu_pool.clone();
-            let task = pool.spawn_async(async move {
-                let outcome = execute_async_load(
-                    scheduler,
-                    server,
-                    job_path.clone(),
-                    job_flight.requested_type,
-                    priority,
-                    ancestors,
-                )
-                .await;
-                // Completion and removal share the same lock as admission. A
-                // racing duplicate therefore either joins this flight before
-                // it completes, or starts a fresh flight after its slot has
-                // been released.
-                let wakers = if let Some(state) = state.upgrade() {
-                    let mut state = state.lock().expect("load scheduler poisoned");
-                    let wakers = job_flight.complete(outcome);
-                    if state
-                        .in_flight
-                        .get(&job_path)
-                        .is_some_and(|f| Arc::ptr_eq(f, &job_flight))
-                    {
-                        state.in_flight.remove(&job_path);
-                    }
-                    wakers
-                } else {
-                    // Tickets may outlive the scheduler itself; they must
-                    // still observe the worker's terminal result.
-                    job_flight.complete(outcome)
-                };
-                Flight::wake_all(wakers);
-            });
-            task.detach();
+        if start_now {
+            self.spawn_flight(path, flight.clone(), priority, ancestors);
         }
 
         Ok(LoadTicket {
@@ -328,7 +331,8 @@ impl LoadScheduler {
         })
     }
 
-    /// Number of admitted unique requests not yet completed.
+    /// Number of admitted unique requests not yet completed, including
+    /// dependency flights waiting for an execution slot.
     #[must_use]
     pub fn in_flight(&self) -> usize {
         self.state
@@ -338,10 +342,162 @@ impl LoadScheduler {
             .len()
     }
 
-    /// Maximum number of admitted unique requests.
+    /// Maximum number of concurrently executing assembly flights.
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.limit
+    }
+
+    fn spawn_flight(
+        &self,
+        path: AssetPath,
+        flight: Arc<Flight>,
+        priority: Priority,
+        ancestors: BTreeSet<AssetPath>,
+    ) {
+        let scheduler = self.clone();
+        let server = Arc::clone(&self.server);
+        let pool = self.cpu_pool.clone();
+        let task = pool.spawn_async(async move {
+            let priority = flight.priority.effective_priority().max(priority);
+            let panic_server = Arc::clone(&server);
+            let outcome = match PanicBoundary::new(execute_async_load(
+                scheduler.clone(),
+                Arc::clone(&server),
+                path.clone(),
+                Arc::clone(&flight),
+                flight.requested_type,
+                priority,
+                ancestors,
+            ))
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(()) => {
+                    panic_server.fail_async_load_path(&path, "async load worker panicked");
+                    Err(LoadFailure::WorkerPanicked)
+                }
+            };
+            scheduler.finish_flight(path, flight, outcome);
+        });
+        task.detach();
+    }
+
+    fn finish_flight(&self, path: AssetPath, flight: Arc<Flight>, outcome: ScheduleOutcome) {
+        let (wakers, admission_wakers, queued) = {
+            let mut state = self.state.lock().expect("load scheduler poisoned");
+            if state
+                .running
+                .get(&path)
+                .is_some_and(|running| Arc::ptr_eq(running, &flight))
+            {
+                state.running.remove(&path);
+            }
+            let wakers = flight.complete(outcome);
+            if state
+                .in_flight
+                .get(&path)
+                .is_some_and(|current| Arc::ptr_eq(current, &flight))
+            {
+                state.in_flight.remove(&path);
+            }
+            let queued = self.admit_queued_locked(&mut state);
+            let admission_wakers = self.take_admission_wakers_locked(&mut state);
+            (wakers, admission_wakers, queued)
+        };
+        Flight::wake_all(wakers);
+        for queued in queued {
+            self.spawn_flight(
+                queued.path,
+                queued.flight,
+                queued.priority,
+                queued.ancestors,
+            );
+        }
+        Flight::wake_all(admission_wakers);
+    }
+
+    fn admit_queued_locked(&self, state: &mut SchedulerState) -> Vec<QueuedFlight> {
+        let mut admitted = Vec::new();
+        while state.running.len() < self.limit {
+            if state.queued.is_empty() {
+                break;
+            }
+            let mut index = 0;
+            for candidate in 1..state.queued.len() {
+                let candidate_priority =
+                    state.queued[candidate].flight.priority.effective_priority();
+                let selected_priority = state.queued[index].flight.priority.effective_priority();
+                if candidate_priority > selected_priority {
+                    index = candidate;
+                }
+            }
+            let queued = state.queued.remove(index).expect("queued index is valid");
+            state
+                .running
+                .insert(queued.path.clone(), Arc::clone(&queued.flight));
+            admitted.push(queued);
+        }
+        admitted
+    }
+
+    fn release_execution_slot(&self, path: &AssetPath, flight: &Arc<Flight>) {
+        let (admission_wakers, queued) = {
+            let mut state = self.state.lock().expect("load scheduler poisoned");
+            if state
+                .running
+                .get(path)
+                .is_some_and(|running| Arc::ptr_eq(running, flight))
+            {
+                state.running.remove(path);
+            }
+            let queued = self.admit_queued_locked(&mut state);
+            let admission_wakers = self.take_admission_wakers_locked(&mut state);
+            (admission_wakers, queued)
+        };
+        for queued in queued {
+            self.spawn_flight(
+                queued.path,
+                queued.flight,
+                queued.priority,
+                queued.ancestors,
+            );
+        }
+        Flight::wake_all(admission_wakers);
+    }
+
+    fn acquire_execution_slot(
+        &self,
+        path: AssetPath,
+        flight: Arc<Flight>,
+        priority: Priority,
+    ) -> ExecutionSlotFuture {
+        ExecutionSlotFuture {
+            scheduler: self.clone(),
+            path,
+            flight,
+            token: Arc::new(()),
+            priority,
+        }
+    }
+
+    fn take_admission_wakers_locked(&self, state: &mut SchedulerState) -> Vec<Waker> {
+        let available = self.limit.saturating_sub(state.running.len());
+        let mut wakers = Vec::with_capacity(available.min(state.admission_waiters.len()));
+        for _ in 0..available {
+            let Some(index) = state
+                .admission_waiters
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, (_, priority, _))| *priority)
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            let (_, _, waker) = state.admission_waiters.remove(index);
+            wakers.push(waker);
+        }
+        wakers
     }
 }
 
@@ -349,6 +505,7 @@ async fn execute_async_load(
     scheduler: LoadScheduler,
     server: Arc<AssetServer>,
     path: AssetPath,
+    flight: Arc<Flight>,
     requested_type: Option<AssetTypeId>,
     priority: Priority,
     mut ancestors: BTreeSet<AssetPath>,
@@ -420,13 +577,19 @@ async fn execute_async_load(
         server.fail_async_load(&plan, &error);
         return Err(LoadFailure::AssemblyFailed(error));
     }
-    let mut pending = Vec::with_capacity(output.primary.dependencies.len());
     for dependency in &output.primary.dependencies {
         if ancestors.contains(&dependency.path) {
             let error = format!("dependency cycle at {}", dependency.path);
             server.fail_async_load(&plan, &error);
             return Err(LoadFailure::AssemblyFailed(error));
         }
+    }
+    if !output.primary.dependencies.is_empty() {
+        scheduler.release_execution_slot(&path, &flight);
+    }
+    let has_dependencies = !output.primary.dependencies.is_empty();
+    let mut dependencies = Vec::with_capacity(output.primary.dependencies.len());
+    for dependency in &output.primary.dependencies {
         let ticket = match scheduler.schedule_typed_with_ancestors(
             dependency.path.clone(),
             priority,
@@ -440,10 +603,7 @@ async fn execute_async_load(
                 return Err(LoadFailure::AssemblyFailed(error));
             }
         };
-        pending.push((dependency.path.clone(), ticket));
-    }
-    let mut dependencies = Vec::with_capacity(pending.len());
-    for (dependency_path, ticket) in pending {
+        let dependency_path = dependency.path.clone();
         match ticket.await {
             Ok(handle) if server.is_loaded(handle.id()) => dependencies.push(handle),
             Ok(_) => {
@@ -458,9 +618,104 @@ async fn execute_async_load(
             }
         }
     }
+    if has_dependencies {
+        scheduler
+            .acquire_execution_slot(path.clone(), Arc::clone(&flight), priority)
+            .await;
+    }
     server
         .commit_async_load(plan, output, dependencies)
         .map_err(LoadFailure::AssemblyFailed)
+}
+
+struct PanicBoundary<F> {
+    future: Pin<Box<F>>,
+}
+
+impl<F> PanicBoundary<F> {
+    fn new(future: F) -> Self {
+        Self {
+            future: Box::pin(future),
+        }
+    }
+}
+
+impl<F> Future for PanicBoundary<F>
+where
+    F: Future,
+{
+    type Output = Result<F::Output, ()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            this.future.as_mut().poll(cx)
+        })) {
+            Ok(Poll::Ready(output)) => Poll::Ready(Ok(output)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(_) => Poll::Ready(Err(())),
+        }
+    }
+}
+
+struct ExecutionSlotFuture {
+    scheduler: LoadScheduler,
+    path: AssetPath,
+    flight: Arc<Flight>,
+    token: Arc<()>,
+    priority: Priority,
+}
+
+impl Future for ExecutionSlotFuture {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut state = this
+            .scheduler
+            .state
+            .lock()
+            .expect("load scheduler poisoned");
+        if state.running.len() < this.scheduler.limit && state.queued.is_empty() {
+            state
+                .running
+                .insert(this.path.clone(), Arc::clone(&this.flight));
+            state
+                .admission_waiters
+                .retain(|(token, _, _)| !Arc::ptr_eq(token, &this.token));
+            return Poll::Ready(());
+        }
+        if let Some((_, priority, waker)) = state
+            .admission_waiters
+            .iter_mut()
+            .find(|(token, _, _)| Arc::ptr_eq(token, &this.token))
+        {
+            *priority = this.priority;
+            if !waker.will_wake(cx.waker()) {
+                *waker = cx.waker().clone();
+            }
+        } else {
+            state.admission_waiters.push((
+                Arc::clone(&this.token),
+                this.priority,
+                cx.waker().clone(),
+            ));
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for ExecutionSlotFuture {
+    fn drop(&mut self) {
+        let mut state = self
+            .scheduler
+            .state
+            .lock()
+            .expect("load scheduler poisoned");
+        state
+            .admission_waiters
+            .retain(|(token, _, _)| !Arc::ptr_eq(token, &self.token));
+    }
 }
 
 fn read_bytes_inline(plan: &crate::server::AsyncLoadPlan) -> Result<Vec<u8>, String> {
@@ -859,6 +1114,31 @@ mod tests {
     }
 
     #[test]
+    fn parent_dependency_does_not_deadlock_when_execution_capacity_is_one() {
+        let mut source = MemSource::new();
+        source.insert("parent.parent", Arc::<[u8]>::from([]));
+        source.insert("child.sched", Arc::<[u8]>::from([]));
+        let server = Arc::new(AssetServer::new());
+        server.register_loader(TestLoader);
+        server.register_loader(ParentLoader);
+        server.mount("mem", Arc::new(source), 0);
+        let scheduler = LoadScheduler::with_io_cpu_pools(
+            Arc::clone(&server),
+            TaskPool::with_threads(1),
+            TaskPool::with_threads(1),
+            1,
+        );
+        let ticket = scheduler
+            .schedule("mem://parent.parent", Priority::Normal)
+            .expect("parent request admitted");
+        let handle = scheduler.cpu_pool.block_on(ticket);
+        assert!(handle.is_ok(), "parent assembly failed: {handle:?}");
+        let handle = handle.expect("parent and child commit");
+        assert!(server.is_loaded(handle.id()));
+        assert_eq!(scheduler.in_flight(), 0);
+    }
+
+    #[test]
     fn dependency_failure_does_not_publish_parent_revision() {
         let mut source = MemSource::new();
         source.insert("parent.parent", Arc::<[u8]>::from([]));
@@ -992,6 +1272,15 @@ mod tests {
             Pin::new(&mut ticket).poll(&mut cx),
             Poll::Ready(Err(LoadFailure::NoLoader))
         );
+    }
+
+    #[test]
+    fn panic_boundary_turns_worker_panics_into_terminal_results() {
+        let pool = TaskPool::with_threads(0);
+        let result = pool.block_on(PanicBoundary::new(async {
+            panic!("synthetic async worker panic")
+        }));
+        assert_eq!(result, Err(()));
     }
 
     #[test]
