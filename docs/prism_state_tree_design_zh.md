@@ -885,7 +885,7 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 
 §25 各高级功能与里程碑的依赖关系：§25.2/§25.4 → ST4；§25.1/§25.3/§25.5/§25.9 → ST6；§25.6/§25.7/§25.8 → ST7–ST8。
 
-### ST0 / ST1 / ST2 代码验证快照（2026-10-14）
+### ST0 / ST1 / ST2 / ST3 / ST5 代码验证快照（2026-10-14）
 
 `pkg/prism_state_tree_core` 已作为根 workspace member 落地，定位为 ST0 的纯语义内核切片（`no_std + alloc`、`#![forbid(unsafe_code)]`、不依赖 ECS/渲染/网络/编辑器）。当前实现拆分为 `model.rs`（定义校验与不可变 `Plan`）、`runtime.rs`（游标运行时）、`snapshot.rs`（快照编解码与校验恢复）和 `tests.rs`（语义回归），而不是把所有逻辑堆在单文件中。
 
@@ -902,9 +902,13 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 
 ST1 代码切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句柄、独立且长期存活的 core cursor、`CommandQueue` deferred spawn、逐实体 `tick_entity` / `step`、显式批量 `tick_entities`、确定性 `tick_all`、有界事件请求、`install_tick_system`、实例生命周期队列、带 Entity payload 的双缓冲事件和 typed `EcsSchema`/`gather_context`。`tick_all` 按 generational `Entity` 排序；Schedule 复用同一路径并保留最后一次报告；生命周期顺序为 enter/exit/transition；core `Guard` 满足 `Send + Sync`，crate 保持 `no_std + alloc` 构建路径。
 
-ST2 代码切片：`binding.rs` 提供规范 `BindingPath`、稳定 `BindingSlot`、`EvaluatorDependency` 和稀疏反向索引的 `DependencyPlan`（不按最大 slot ID 分配内存）；`dirty_evaluators_into` 使用调用方预留的输出缓存，容量不足清空结果并返回结构化错误。`frame.rs` 提供无 unsafe 的 `FrameLayout`/`InstanceFrame`、对齐计算、布局指纹、slot 存在性与长度校验。`codec.rs` 提供固定宽度 little-endian 标量、GUID/类型/版本/默认值校验、无分配的单槽读写、规范 padding 的帧快照、长度/哈希/布局校验后的原子恢复，以及按 GUID 对齐兼容字段并初始化新增字段的离线迁移；改变类型或版本的同 GUID 字段被拒绝，需在作者层显式转换。`reflect_binding.rs` 提供一次编译的 `prism_reflect::AccessPlan`、稳定 slot 排序、路径/重复 slot/目标类型错误、typed get/set 与标量到帧的双向编解码。`ST0003/ST0009` 诊断、完整 Schema/Context 绑定与静默实例分配门槛仍仅按 §7.5、§14.2、§13.2 的设计契约描述，不计入 ST2 整体验收。
+ST2 代码切片：`binding.rs` 提供规范 `BindingPath`、稳定 `BindingSlot`、`EvaluatorDependency` 和稀疏反向索引的 `DependencyPlan`（不按最大 slot ID 分配内存）；`dirty_evaluators_into` 使用调用方预留的输出缓存，容量不足清空结果并返回结构化错误。`frame.rs` 提供无 unsafe 的 `FrameLayout`/`InstanceFrame`、对齐计算、布局指纹、slot 存在性与长度校验。`codec.rs` 提供固定宽度 little-endian 标量、GUID/类型/版本/默认值校验、无分配的单槽读写、规范 padding 的帧快照、长度/哈希/布局校验后的原子恢复，以及按 GUID 对齐兼容字段并初始化新增字段的离线迁移；改变类型或版本的同 GUID 字段被拒绝，需在作者层显式转换。`reflect_binding.rs` 提供一次编译的 `prism_reflect::AccessPlan`、稳定 slot 排序、路径/重复 slot/目标类型错误、typed get/set 与标量到帧的双向编解码。绑定路径、目标类型、帧布局和指针/堆类型约束均由结构化错误与布局校验承载。
 
-本次可复现的局部验证：`cargo test -p prism_state_tree_core --offline`（44 个单测，0 个文档测试）与 `cargo test -p prism_state_tree_ecs --all-features --offline`（25 个单测，0 个文档测试），均于 2026-10-14 通过；core `cargo clippy -p prism_state_tree_core --all-features --offline -- -D warnings` 通过。运行时复用进入路径与重复捕获的 history 缓存，迁移/退出/并行修复不再克隆临时状态数组；诊断日志默认关闭，启用后固定容量并显式报告溢出，生命周期回调不受截断影响；首次 history 捕获仍可能分配。上述局部结果不代表 ST0–ST8 全部达标。运行时尚无 GPU kernel，GPU 吞吐或 parity 不在本次证据内。
+ST3 基础作者与模型验证切片：`prism_state_tree_ecs::authoring` 提供版本化、确定性、无第三方序列化依赖的行式文本格式，完整覆盖节点、层级、Parallel region、History、Transition、Trigger、Guard、priority 和生命周期 kind；解析器拒绝未知字段、字段乱序、空行、尾随记录和语义非法定义，并在返回前调用 core 编译校验。`prism_state_tree_core::validator` 对已编译 `Plan` 执行有界、只读、确定性检查，提供 `ST0001` 不可达状态、`ST0006` Eventless 环/级联深度、`ST0007` Parallel History 冲突和 `ST0099` 资源上限诊断；`ValidationLimits` 同时限制工作量和诊断输出，报告带 `is_complete` 与实际工作量，避免模型检查拖垮作者工具。
+
+ST5 快照安全切片：快照格式 v2 写入计划语义指纹，恢复前拒绝不同状态结构、区域顺序、History 或 Transition 语义的计划；v1 快照仍可读取并按结构校验恢复。恢复校验先完成，再原子替换 active/history/queue，失败保留目标实例、guards、日志和计划。运行时诊断日志默认关闭，启用后为固定容量；容量耗尽保留已记录项、置位溢出标志并返回结构化错误，但不截断生命周期回调或已应用的状态变化。
+
+本次可复现验证：`cargo test -p prism_state_tree_core --offline`（52 个单测，0 个文档测试）、`cargo test -p prism_state_tree_ecs --all-features --offline`（29 个单测，0 个文档测试）和 `cargo clippy -p prism_state_tree_core --all-features --offline -- -D warnings` 均于 2026-10-14 通过。验证覆盖运行时、快照 v1/v2、计划指纹原子拒绝、定容日志、静态诊断和严格文本往返。运行时进入路径与重复捕获的 History 缓存可复用；日志默认关闭，启用后固定容量并显式报告溢出；快照/文本编解码和首次 History 捕获属于离线路径，仍按调用方容量分配。仓库当前没有 StateTree GPU kernel、Batch Evaluator 或 GPU parity 入口，因此本次没有可执行的 StateTree GPU 验证；渲染与物理 GPU 模块的测试不能替代该证据。
 
 Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `SchemaId`/`SchemaVersion`、能力位、只读 `ContextRef`、描述符校验和上下文 schema 身份校验；它不依赖 ECS，也不提供 World gather。
 
@@ -1064,7 +1068,7 @@ Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `Sch
 - **借鉴**：XState `@xstate/graph` 的图探索；SPIN / TLA+ / UPPAAL 的有界模型检验；覆盖率驱动的测试生成。
 - **机制**（编译期/测试期，**不进入运行期**）：
   1. **路径枚举**：从 `TreePlan` 枚举迁移图（含并行 region 的交错），产出可达活跃配置集合。
-  2. **静态性质**：不可达状态、死锁（无迁移可触发且无未完成任务的滞留）、活锁（级联震荡）、守卫矛盾（互斥守卫不可同时为真）、恒假守卫、无兜底选择（§14.2 `ST0013`）。
+  2. **静态性质**：不可达状态、死锁（无迁移可触发且不存在仍在执行的 Task）、活锁（级联震荡）、守卫矛盾（互斥守卫不可同时为真）、恒假守卫、无兜底选择（§14.2 `ST0013`）。
   3. **测试生成**：以「迁移覆盖 / 活跃配置覆盖 / 守卫真值组合覆盖」为目标，种子化生成确定性用例序列，直接落 `text/integration/`。
   4. **有界验证**：给定事件字母表与深度上限，穷举检查不变量（如「任意状态都可由某条路径回到 `Idle`」）。
 - **与核心模型**：验证器只读 `TreePlan`，零运行期语义、零运行期成本。

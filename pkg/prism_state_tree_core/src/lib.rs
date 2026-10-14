@@ -18,6 +18,7 @@ mod model;
 mod runtime;
 mod schema;
 mod snapshot;
+mod validator;
 
 pub use binding::{
     BindingPath, BindingPathError, BindingSlot, DependencyError, DependencyPlan,
@@ -39,6 +40,10 @@ pub use schema::{
     ContextRef, Schema, SchemaCapabilities, SchemaDescriptor, SchemaError, SchemaId, SchemaVersion,
 };
 pub use snapshot::{RestoreError, Snapshot, SnapshotCodecError};
+pub use validator::{
+    validate, Diagnostic, DiagnosticCode, DiagnosticSeverity, ValidationLimits, ValidationReport,
+    Validator,
+};
 
 #[cfg(test)]
 extern crate std;
