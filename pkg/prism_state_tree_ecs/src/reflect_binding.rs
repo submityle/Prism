@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use prism_reflect::{AccessError, AccessPlan, Reflect};
 use prism_state_tree_core::{
-    BindingPath, BindingPathError, BindingSlot, FrameError, InstanceFrame,
+    BindingPath, BindingPathError, BindingSlot, FrameError, InstanceFrame, SlotCodec, SlotValue,
 };
 
 /// A compiled reflected path assigned to one stable `StateTree` slot.
@@ -52,6 +52,8 @@ pub enum ReflectBindingError {
         /// The actual reflected type name.
         actual: &'static str,
     },
+    /// The reflected scalar is not supported by the fixed-width frame codec.
+    UnsupportedValue(BindingSlot),
 }
 
 impl fmt::Display for ReflectBindingError {
@@ -80,6 +82,9 @@ impl fmt::Display for ReflectBindingError {
                 "slot {} expected reflected type `{expected}`, got `{actual}`",
                 slot.0
             ),
+            Self::UnsupportedValue(slot) => {
+                write!(f, "unsupported reflected scalar at slot {}", slot.0)
+            }
         }
     }
 }
@@ -179,12 +184,13 @@ impl ReflectBindingPlan {
                 slot,
                 error: FrameError::MissingSlot(slot),
             })?;
-        let bytes = value.as_any().downcast_ref::<alloc::vec::Vec<u8>>().ok_or(
-            ReflectBindingError::Frame {
+        let bytes = value
+            .as_any()
+            .downcast_ref::<Vec<u8>>()
+            .ok_or(ReflectBindingError::Frame {
                 slot,
                 error: FrameError::OutOfBounds,
-            },
-        )?;
+            })?;
         if bytes.len() != field.size {
             return Err(ReflectBindingError::Frame {
                 slot,
@@ -195,13 +201,72 @@ impl ReflectBindingPlan {
             .write(slot, 0..field.size, bytes)
             .map_err(|error| ReflectBindingError::Frame { slot, error })
     }
+
+    /// Encodes a reflected scalar using the slot's checked, little-endian wire type.
+    pub fn encode_typed(
+        &self,
+        codec: &SlotCodec,
+        frame: &mut InstanceFrame,
+        slot: BindingSlot,
+        value: &dyn Reflect,
+    ) -> Result<(), ReflectBindingError> {
+        self.plan(slot)?;
+        let any = value.as_any();
+        let scalar = if let Some(value) = any.downcast_ref::<bool>() {
+            SlotValue::Bool(*value)
+        } else if let Some(value) = any.downcast_ref::<u32>() {
+            SlotValue::U32(*value)
+        } else if let Some(value) = any.downcast_ref::<i32>() {
+            SlotValue::I32(*value)
+        } else if let Some(value) = any.downcast_ref::<u64>() {
+            SlotValue::U64(*value)
+        } else if let Some(value) = any.downcast_ref::<i64>() {
+            SlotValue::I64(*value)
+        } else if let Some(value) = any.downcast_ref::<f32>() {
+            SlotValue::F32(*value)
+        } else if let Some(value) = any.downcast_ref::<f64>() {
+            SlotValue::F64(*value)
+        } else {
+            return Err(ReflectBindingError::UnsupportedValue(slot));
+        };
+        codec
+            .encode(frame, slot, scalar)
+            .map_err(|error| ReflectBindingError::Frame { slot, error })
+    }
+
+    /// Applies a decoded scalar to a compiled reflected path without string lookup.
+    pub fn decode_typed(
+        &self,
+        codec: &SlotCodec,
+        frame: &InstanceFrame,
+        root: &mut dyn Reflect,
+        slot: BindingSlot,
+    ) -> Result<(), ReflectBindingError> {
+        let scalar = codec
+            .decode(frame, slot)
+            .map_err(|error| ReflectBindingError::Frame { slot, error })?;
+        let target = self.plan(slot)?;
+        let result = match scalar {
+            SlotValue::Bool(value) => target.set(root, &value),
+            SlotValue::U32(value) => target.set(root, &value),
+            SlotValue::I32(value) => target.set(root, &value),
+            SlotValue::U64(value) => target.set(root, &value),
+            SlotValue::I64(value) => target.set(root, &value),
+            SlotValue::F32(value) => target.set(root, &value),
+            SlotValue::F64(value) => target.set(root, &value),
+        };
+        result.map_err(|error| ReflectBindingError::Write { slot, error })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use alloc::{vec, vec::Vec};
     use prism_reflect::{Reflect, ReflectRef};
-    use prism_state_tree_core::{BindingSlot, FrameLayout, InstanceFrame};
+    use prism_state_tree_core::{
+        BindingSlot, FrameError, FrameLayout, InstanceFrame, SlotCodec, SlotDecl, SlotGuid,
+        SlotType, SlotValue,
+    };
 
     use super::{ReflectBindingError, ReflectBindingPlan};
 
@@ -299,5 +364,42 @@ mod tests {
                 .reflect_ref(),
             ReflectRef::Value(_)
         ));
+    }
+
+    #[test]
+    fn reflected_scalar_roundtrips_through_typed_frame() {
+        let mut target = Target {
+            health: Health { current: -14 },
+        };
+        let slot = BindingSlot(0);
+        let bindings =
+            ReflectBindingPlan::compile_typed(&target, vec![(slot, "health.current", Some("i32"))])
+                .unwrap();
+        let codec = SlotCodec::compile(vec![SlotDecl {
+            slot,
+            guid: SlotGuid(42),
+            kind: SlotType::I32,
+            version: 1,
+            default: SlotValue::I32(0),
+        }])
+        .unwrap();
+        let mut frame = codec.new_frame();
+        bindings
+            .encode_typed(&codec, &mut frame, slot, &target.health.current)
+            .unwrap();
+        assert_eq!(frame.read(slot, 0..4).unwrap(), &(-14_i32).to_le_bytes());
+        target.health.current = 7;
+        bindings
+            .decode_typed(&codec, &frame, &mut target, slot)
+            .unwrap();
+        assert_eq!(target.health.current, -14);
+        assert!(matches!(
+            bindings.encode_typed(&codec, &mut frame, slot, &3.0_f32),
+            Err(ReflectBindingError::Frame {
+                error: FrameError::TypeMismatch(_),
+                ..
+            })
+        ));
+        assert_eq!(codec.decode(&frame, slot), Ok(SlotValue::I32(-14)));
     }
 }

@@ -902,7 +902,9 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 
 ST1 代码切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句柄、独立且长期存活的 core cursor、`CommandQueue` deferred spawn、逐实体 `tick_entity` / `step`、显式批量 `tick_entities`、确定性 `tick_all`、有界事件请求、`install_tick_system`、实例生命周期队列、带 Entity payload 的双缓冲事件和 typed `EcsSchema`/`gather_context`。`tick_all` 按 generational `Entity` 排序；Schedule 复用同一路径并保留最后一次报告；生命周期顺序为 enter/exit/transition；core `Guard` 满足 `Send + Sync`，crate 保持 `no_std + alloc` 构建路径。
 
-ST2 代码切片：`binding.rs` 提供规范 `BindingPath`、稳定 `BindingSlot`、`EvaluatorDependency` 和 `DependencyPlan`；`frame.rs` 提供无 unsafe 的 `FrameLayout`/`InstanceFrame`、对齐计算、布局指纹、slot 存在性与长度校验；`reflect_binding.rs` 提供一次编译的 `prism_reflect::AccessPlan`、稳定 slot 排序、路径/重复 slot/目标类型错误和 typed get/set 的结构化返回。完整设计中的 SlotCodec、FrameMigration、ST0003/ST0009 诊断和静默实例分配门槛采用 §7.5、§14.2、§13.2 的统一契约。
+ST2 代码切片：`binding.rs` 提供规范 `BindingPath`、稳定 `BindingSlot`、`EvaluatorDependency` 和 `DependencyPlan`；`frame.rs` 提供无 unsafe 的 `FrameLayout`/`InstanceFrame`、对齐计算、布局指纹、slot 存在性与长度校验。`codec.rs` 提供固定宽度 little-endian 标量、GUID/类型/版本/默认值校验、无分配的单槽读写、规范 padding 的帧快照、长度/哈希/布局校验后的原子恢复，以及按 GUID 对齐兼容字段并初始化新增字段的离线迁移；改变类型或版本的同 GUID 字段被拒绝，需在作者层显式转换。`reflect_binding.rs` 提供一次编译的 `prism_reflect::AccessPlan`、稳定 slot 排序、路径/重复 slot/目标类型错误、typed get/set 与标量到帧的双向编解码。`ST0003/ST0009` 诊断、完整 Schema/Context 绑定与静默实例分配门槛仍仅按 §7.5、§14.2、§13.2 的设计契约描述，不计入 ST2 整体验收。
+
+本次可复现的局部验证：`cargo test -p prism_state_tree_core --offline`（42 个单测，0 个文档测试）与 `cargo test -p prism_state_tree_ecs --all-features --offline`（25 个单测，0 个文档测试），均于 2026-10-14 通过；这仅证明所列单元与集成路径，不代表 ST0–ST8 全部达标。运行时尚无 GPU kernel，GPU 吞吐或 parity 不在本次证据内。
 
 Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `SchemaId`/`SchemaVersion`、能力位、只读 `ContextRef`、描述符校验和上下文 schema 身份校验；它不依赖 ECS，也不提供 World gather。
 

@@ -12,6 +12,7 @@
 extern crate alloc;
 
 mod binding;
+mod codec;
 mod frame;
 mod model;
 mod runtime;
@@ -21,6 +22,9 @@ mod snapshot;
 pub use binding::{
     BindingPath, BindingPathError, BindingSlot, DependencyError, DependencyPlan,
     EvaluatorDependency,
+};
+pub use codec::{
+    FrameMigration, FrameSnapshot, SlotCodec, SlotDecl, SlotGuid, SlotType, SlotValue,
 };
 pub use frame::{FrameError, FrameField, FrameLayout, InstanceFrame};
 pub use model::{

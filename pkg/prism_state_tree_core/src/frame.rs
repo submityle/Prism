@@ -3,7 +3,7 @@
 use alloc::{vec, vec::Vec};
 use core::fmt;
 
-use crate::BindingSlot;
+use crate::{BindingSlot, SlotGuid};
 
 /// A frame field's validated byte layout.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,12 +43,24 @@ pub enum FrameError {
     },
     /// Two fields use one slot.
     DuplicateSlot(BindingSlot),
+    /// Two fields claim the same asset-stable identity.
+    DuplicateGuid(SlotGuid),
     /// Arithmetic overflow occurred while calculating the layout.
     Overflow,
     /// A requested slot is absent from the layout.
     MissingSlot(BindingSlot),
     /// A byte range does not fit inside the selected field.
     OutOfBounds,
+    /// A codec or snapshot describes a different compiled layout.
+    LayoutMismatch,
+    /// The supplied value does not match the field's declared type.
+    TypeMismatch(BindingSlot),
+    /// Encoded data is not a canonical value of the declared type.
+    InvalidValue(BindingSlot),
+    /// The snapshot length, checksum or padding is invalid.
+    CorruptSnapshot,
+    /// A field with this identity changed type or schema version.
+    IncompatibleGuid(SlotGuid),
 }
 
 impl fmt::Display for FrameError {
@@ -56,9 +68,15 @@ impl fmt::Display for FrameError {
         match self {
             Self::InvalidField { slot } => write!(f, "invalid frame field at slot {}", slot.0),
             Self::DuplicateSlot(slot) => write!(f, "duplicate frame slot {}", slot.0),
+            Self::DuplicateGuid(guid) => write!(f, "duplicate frame GUID {}", guid.0),
             Self::Overflow => f.write_str("frame layout arithmetic overflow"),
             Self::MissingSlot(slot) => write!(f, "frame slot {} is not declared", slot.0),
             Self::OutOfBounds => f.write_str("frame access is out of bounds"),
+            Self::LayoutMismatch => f.write_str("frame layout does not match codec"),
+            Self::TypeMismatch(slot) => write!(f, "frame type mismatch at slot {}", slot.0),
+            Self::InvalidValue(slot) => write!(f, "invalid frame value at slot {}", slot.0),
+            Self::CorruptSnapshot => f.write_str("corrupt frame snapshot"),
+            Self::IncompatibleGuid(guid) => write!(f, "incompatible frame GUID {}", guid.0),
         }
     }
 }
@@ -167,6 +185,14 @@ impl InstanceFrame {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub(crate) fn replace_bytes(&mut self, bytes: &[u8]) -> Result<(), FrameError> {
+        if bytes.len() != self.bytes.len() {
+            return Err(FrameError::OutOfBounds);
+        }
+        self.bytes.copy_from_slice(bytes);
+        Ok(())
     }
 
     /// Reads a checked byte range from a slot.
