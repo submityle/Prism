@@ -2,11 +2,11 @@
 
 验证日期：2026-10-15。
 
-本记录覆盖测试层的真实 WGPU/Metal 入口、RenderFabric 定向测试、response composition，以及水体 `MaskBlend` raster 的设备级能力门禁。2026-10-15 的水体门禁已修复一个真实 shader ABI 错误，并将低 `max_bind_groups` 设备明确分类为 skip；没有修改 `docs/refactoring-dev/`。
+本记录覆盖测试层的真实 WGPU/Metal 入口、RenderFabric 定向测试、response composition，以及水体 `MaskBlend` raster 的设备级能力门禁。2026-10-15 的跨沙盒运行已拿到 Apple M2 Metal adapter：response composition 严格 GPU 对拍通过；水体 raster 因 `max_bind_groups=8` 小于所需 10，严格门禁按设计失败。没有修改 `docs/refactoring-dev/`。
 
 ## 2026-10-15 水体 Hybrid 门禁增量
 
-`PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test water_hybrid_golden` 首次在真实设备上暴露 `SurfaceSample.geometry_opacity` 不存在的字段访问，已删除错误写入。重新运行后，真实适配器和设备请求成功，但本机适配器报告 `max_bind_groups=8`，而完整水面 raster 绑定需要 10 组，因此普通门禁输出明确 `SKIP`；这不是 GPU shader-module 通过。若设置 `PRISM_REQUIRE_GPU=1`，能力不足会按设计直接失败。
+`PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test water_hybrid_golden` 在真实 Apple M2 Metal adapter 上完成 adapter/device 获取，但本机报告 `max_bind_groups=8`，而完整水面 raster 绑定需要 10 组，因此普通门禁输出明确 `SKIP`；严格门禁输出明确失败。这不是 GPU shader-module 通过，也没有把能力不足记为通过。
 
 ## 测试入口与 gating
 
@@ -22,16 +22,14 @@ response composition 测试在获取 adapter 后检查 compute workgroup 与 sto
 
 | 命令 | 结果 |
 |---|---|
-| `cargo test -p prism_render_architecture render_fabric --lib --offline -- --nocapture` | **70 passed / 0 failed / 11,195 filtered**；当前工作树已包含并运行 RenderFabric PCM bridge 测试；存在 3 个既有 warning。 |
+| `cargo test -p prism_render_architecture render_fabric --lib --offline -- --nocapture` | **73 passed / 0 failed / 11,200 filtered**；当前工作树已包含并运行 RenderFabric PCM bridge 测试；存在 3 个既有 warning。 |
 | `cargo test -p prism_ui_render_backend --features gpu --test gpu_parity --offline -- --nocapture` | **7 passed / 0 failed**；7 个用例均输出 `no usable WGPU device, skipping`，因此这是 CPU 侧测试通过，不是 GPU 对拍通过。 |
 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_ui_render_backend --features gpu --test gpu_parity --offline -- --nocapture` | **0 passed / 7 failed**；每个用例报告 `could not acquire a usable WGPU device`。 |
 | `cargo test -p prism_ui_render_backend --features gpu --test dock_gpu_parity --offline -- --nocapture` | **0 passed / 1 failed**；报告 `dock GPU parity requires a real wgpu adapter; refusing to skip validation`。 |
 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_gpudriven --lib --offline -- --nocapture` | **11 passed / 7 failed**；7 个 GPU 用例真实报告 `PRISM_REQUIRE_GPU is set but no adapter was found`。 |
-| `cargo test -p prism_render_scene --test response_composition_gpu --offline -- --nocapture` | **2 passed / 0 failed**；CPU packing 通过，GPU parity 在 adapter 获取阶段显式 skip，真实输出为 `No suitable graphics adapter found; noop not requested, vulkan support not compiled in, metal found no adapters, dx12 support not compiled in, gl not requested, webgpu not requested`。这不是 GPU 对拍通过。 |
-| `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu --offline -- --nocapture` | **1 passed / 1 failed**；CPU packing 通过，GPU parity 按严格能力门禁失败，真实输出为 `required GPU adapter unavailable: No suitable graphics adapter found; noop not requested, vulkan support not compiled in, metal found no adapters, dx12 support not compiled in, gl not requested, webgpu not requested`。 |
-| `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test resident_composition_gpu --offline -- --nocapture` | 同上，未进入 GPU 初始化，被同一现有编译错误阻断。 |
+| `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu --test water_hybrid_golden --offline -- --nocapture` | response composition **2 passed / 0 failed**，真实 Apple M2 Metal adapter/device 获取成功，1320 cases / 14520 auxiliary jobs GPU readback 通过；water Hybrid **14 passed / 1 failed**，唯一失败为真实能力门禁：`max_bind_groups=8`，所需 10。 |
 
-当前隔离环境没有可用 WGPU adapter；没有可宣称的 Metal 实机对拍、response composition readback 或 resident HDR 输出。response composition 的普通模式只保留显式 skip，严格模式保留真实失败，不能把默认通过解释为 GPU 已运行。
+跨沙盒主机本轮有 Apple M2 Metal adapter，response composition 已有真实 GPU readback 对拍通过；水体 Hybrid 因绑定组上限不足保留严格失败证据。resident composition 未在本轮命令中执行，不作通过声明。
 
 ## 写集边界
 
@@ -43,4 +41,4 @@ response composition 测试在获取 adapter 后检查 compute workgroup 与 sto
 - `pkg/prism_render_scene/text/unit/shading/composition_ecs.rs`
 - `docs/gpu_cross_sandbox_implementation_zh.md`
 
-未覆盖的 response/resident 命令需要先由上游修复 `classification.rs` 与当前生成的 `ResponseProgramLayout` 不一致，再在带 Metal/WGPU adapter 的主机上以 `PRISM_REQUIRE_GPU=1` 重跑。上述 compile failure 和 no-adapter failure 都保留为失败证据，不用 skip 或伪造输出替代。
+resident composition 仍需在目标设备上以 `PRISM_REQUIRE_GPU=1` 单独执行；水体 raster 需要降低绑定组数量或提供 `max_bind_groups >= 10` 的设备后再重跑。上述能力失败保留为失败证据，不用 skip 或伪造输出替代。

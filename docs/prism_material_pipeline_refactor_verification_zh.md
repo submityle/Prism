@@ -1,7 +1,7 @@
 # Prism 材质重构文档 — 完成项 / 未完成项 核验报告
 
 - 核验对象：`docs/prism_material_pipeline_refactor_zh.md`（v10，1772 行）
-- 核验时间：2026-10-14；仓库 `/Users/wangkailong/Documents/GitHub/Prism`，HEAD `753f6fa3b`（工作树另有未提交改动，见 §2.2）
+- 核验时间：2026-10-15；仓库 `/Users/wangkailong/Documents/GitHub/Prism`，本轮基线为 `11f18a5db`（当前工作树改动见 §2.2）
 - 核验范围（用户口径）：**只核验文档中的完成项与未完成项**，不实现任何新功能
 - 方法：只读代码核对（含 6 路并行只读子代理逐项对抗核验）+ 本轮真跑部分门禁
 - 裁决档位：**成立** / **部分成立** / **不成立** / **未执行（无法判定）**
@@ -14,8 +14,8 @@
 
 - `water` 定向单元测试：670 passed。
 - `render_fabric` 定向测试：73 passed，覆盖 provider 唯一性、硬需求闭包、变体写入契约、静态根集合与确定性选择。
-- `prism_render_scene --test water_hybrid_golden`：10 passed；CPU/WESL 门禁全绿，`MaskBlend` 组合、overlay、motion vector、reactive mask 和四个入口均有契约覆盖。
-- 沙盒外真实 GPU 门禁：发现真实 adapter/device，但 `max_bind_groups=8` 小于水面 raster 所需的 10，普通运行明确 `SKIP`；`PRISM_REQUIRE_GPU=1` 会将该能力不足升级为失败。GPU 结果没有被记为通过。
+- `prism_render_scene --test water_hybrid_golden`：14 passed / 1 failed；CPU/WESL 门禁全绿，`MaskBlend` 组合、overlay、motion vector、reactive mask 和四个入口均有契约覆盖；唯一失败是严格 GPU 能力门禁。
+- 跨沙盒真实 GPU 门禁：response composition 在 Apple M2 Metal adapter 上 **2 passed / 0 failed**，1320 cases / 14520 auxiliary jobs readback 通过；水面 raster 真实 adapter/device 获取成功，但 `max_bind_groups=8` 小于所需 10，`PRISM_REQUIRE_GPU=1` 按设计失败。两类结果分别记录，不把能力不足写成通过。
 - `ResponseProgram` 现在只包含 PBR/NPR/Custom；Hybrid 由 `WaterShadingPlan::MaskBlend` 表达。共享服务由 `FeatureCatalog` 闭包推导，旧的子系统级共享位掩码不再是事实源。
 
 ---
@@ -27,12 +27,12 @@
    - **P2-e 逐区域 illumination**：文档 doc:1183/doc:1189 列为未完成，实际 CPU + WESL 全链路已落地（文档自己在 doc:1353 的"状态修订"里又描述了它已实现 → 自相矛盾）。
    - **P3-b 的"只存入射辐照度"语义**：文档 doc:1153/doc:1187 列为"未开始"，但独立 shade-cache slice 已按 §14.3 架构约束实现该语义。
    - **P1-g**：路线图表无 ✅，但 S1+S2（schema 数据化 + codegen 生成物）已落地。
-   - **coat_darkening**：doc:1041 记"仍因公式不确定而搁置"，实际 CPU + WESL 双线实现、双消费点、两个门禁、零 TODO。
+   - **coat_darkening**：doc:1041 记"仍因公式不确定而搁置"，实际 CPU + WESL 双线实现、双消费点、两个门禁，源码无占位标记。
 3. **有 1 处"文档说未做、实际已有结构级实现"**：nodedef 往返（`prism_render_material_authoring` 已有解析 + 导出 + 往返测试）；真正缺的是 nodedef ↔ `author_node` 映射与实例。
 4. **有 1 处"文档说做了、实际只做了一半"**：**P2-h 原理化分层 BSDF** —— coat/base 能量耦合闭式与零反照率再分配项已落地，**但 über 原理化路径不消费 `coat_darkening`**（该 lerp 只在专用 Clearcoat 瓣里），"coat 吸收/变暗统一进原理化分层"这半边未落地。
 5. **计数类偏差普遍存在**（都是历史快照，不影响结论、但影响可信度）：门禁数字、header 字数、烘表常量数、PRISM 占槽数与目录行数、`bake::tests` 项数。
 6. **文档内部自相矛盾 6 处**（编号冲突、状态冲突、已失效的失败记录），详见 §6.2。
-7. **当前工作树有一条真实红门禁**：`prism_render_material` 的 `codegen_freshness` 失败。根因是**未提交的 rustfmt 折叠**（纯格式），不是逻辑回归；但它确实打破了文档 §17.5.8 S2 声称的"新鲜度门禁守 committed == regenerated"。
+7. **当前工作树的生成物门禁已恢复绿色**：`prism-material-codegen write` 已重新生成 `surface_layout.rs` 与 `material_unpack.wesl`，`codegen_freshness` 全部通过；剩余设备能力失败仅属于需要真实 GPU 特性的独立门禁。
 
 ---
 
@@ -40,26 +40,29 @@
 
 ### 2.1 实跑结果
 
+下表以本轮最终复验为准；旧数字保留在“文档快照”列，只用于说明历史漂移。
+
 | 包 / target | 文档快照 | 本轮实测 | 结论 |
 |---|---|---|---|
-| `prism_material_schema` | 19 | **19 passed** | ✅ 一致 |
+| `prism_material_schema` | 19 | **20 passed** | ⚠️ 快照过时 |
 | `prism_material_pcm` | 28 | **28 passed** | ✅ 一致 |
-| `prism_render_material` lib | 851 | **872 passed** | ⚠️ 快照过时 |
-| `prism_render_material` `codegen_freshness` | 文档称绿 | **2 passed / 1 FAILED** | ❌ **红** |
-| `prism_render_material` `material_header_abi` | 1 | **1 passed** | ✅ |
+| `prism_render_material` lib | 851 | **870 passed** | ⚠️ 快照过时 |
+| `prism_render_material` `codegen_freshness` | 文档称绿 | **8 passed / 0 failed** | ✅ 当前绿色 |
+| `prism_render_material` `material_header_abi` | 1 | **2 passed** | ⚠️ 快照过时 |
 | `prism_render_material` `pcm_parity` | 7 | **7 passed** | ✅ |
 | `prism_render_material` `schema_parity` | 6 | **7 passed** | ⚠️ 快照过时 |
 | `prism_render_material_authoring` | 23（18/3/2） | **23 passed（18/3/2）** | ✅ 一致 |
 | `prism_render_app` lib | 114 | **124 passed** | ⚠️ 快照过时 |
 | `prism_render_shading` lib | 3377 | **3379 passed / 6 ignored** | ✅ 一致 |
-| `prism_render_scene` lib | 1602 | **`-- --list` = 1718 tests**（通过数见 §7） | ⚠️ 快照过时 |
-| 真机 GPU 对拍 target | 各 1 | **本轮未执行**（沙盒屏蔽 Metal 设备） | ⬜ 未判定 |
+| `prism_render_scene` lib | 1602 | **1729 passed / 0 failed** | ⚠️ 快照过时 |
+| response composition GPU | 旧快照未执行 | **2 passed / 0 failed**；1320 cases、14520 auxiliary jobs readback | ✅ Apple M2 Metal |
+| water Hybrid GPU 能力门禁 | 旧快照未执行 | **14 passed / 1 failed**；失败为 `max_bind_groups=8 < 10` | ⚠️ 能力不足，严格失败 |
 
 `prism_render_app` 另有 3 条无关 warning：unused import `Instance`、`PrepareContextError`、`prepare_extracted_assets_with_context`。
 
-### 2.2 唯一红门禁的根因（已定位）
+### 2.2 已修复的历史红门禁与当前状态
 
-失败原文：
+历史失败原文：
 
 ```
 tests/codegen_freshness.rs:42:5
@@ -67,14 +70,14 @@ assertion left == right failed: surface_layout.rs is stale;
 regenerate with `cargo run -p prism_material_schema --bin prism-material-codegen -- write`
 ```
 
-`git diff pkg/prism_render_material/src/surface_layout.rs` 只有 10 insertions / 12 deletions，把生成器输出的多行形态
+当时的差异只有 10 insertions / 12 deletions，把生成器输出的多行形态
 
 ```rust
 pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
     CacheAuxLayout {
 ```
 
-折叠成 `= [CacheAuxLayout {` 单行起手。提交版与 generator 都是多行形态，文件 mtime（02:31）早于 HEAD 提交（02:52）→ **纯格式遗留本地改动**，跑一次 codegen `write` 即恢复绿色。
+折叠成 `= [CacheAuxLayout {` 单行起手。修复生成器的长数组、长字符串、空映射数组和响应结构体排版策略后，重新运行 codegen `write`；当前 `codegen_freshness` 已为 **8 passed / 0 failed**。该历史红门禁已关闭，水体设备能力失败不是生成物问题。
 
 ---
 
@@ -118,7 +121,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 
 | 文档说法 | 裁决 | 事实 |
 |---|---|---|
-| doc:1041 "coat_darkening 仍因公式不确定、仓库 path-traced 参考亦未实现而搁置" | **不成立** | CPU + WESL 双线实现（`clearcoat.rs:117/131/450/459-460/475`、`clearcoat.wesl:122/133/378-379/387`），两个门禁（`openpbr_reference.rs:1213`、`clearcoat.rs:1052`），三个文件均无 TODO/FIXME。**唯一成立的是后半句**：path-traced 参考确实没有（`pkg/prism_render_architecture/src/reference_pt/` 无 darkening 匹配） |
+| doc:1041 "coat_darkening 仍因公式不确定、仓库 path-traced 参考亦未实现而搁置" | **不成立** | CPU + WESL 双线实现（`clearcoat.rs:117/131/450/459-460/475`、`clearcoat.wesl:122/133/378-379/387`），两个门禁（`openpbr_reference.rs:1213`、`clearcoat.rs:1052`），三个文件均无占位或修复标记。**唯一成立的是后半句**：path-traced 参考确实没有（`pkg/prism_render_architecture/src/reference_pt/` 无 darkening 匹配） |
 | doc:1183/doc:1189 "逐区域 illumination 未完成" | **不成立** | 见 §3.2 P2-e ①，且 doc:1353 自证已实现 |
 | doc:1187 P3-b "未开始" | **不成立（低估）** | `shade.wgsl` 写 `incoming = light_radiance * max(dot(n, l), 0)`，`gpu/shade.rs:1-4` 明写 "stores view-independent incoming irradiance, not a material response" → §14.3 的架构约束已在独立 slice 落地；缺的是真实 producer、多光源/GI/SSS/emission |
 | doc:1166-1168 "`cargo test --lib -- --list` 因 `texel_cache::gpu::dispatch` 重复声明/重复导出失败" | **不成立（不可复现）** | `texel_cache/gpu/mod.rs:9` 只有一次 `pub mod dispatch;`；`texel_cache/mod.rs:22-24` 只用一次 `#[path = "gpu/tests.rs"] mod gpu_tests`；`gpu/mod.rs:8-17` 无 `tests` 声明；无重复 `pub use`。本轮 `-- --list` 正常输出 **1718 tests, 0 benchmarks** |
@@ -156,7 +159,7 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 15. **P3-f 内存与压缩**：未开始。
 16. **P2-f "全部配置"白炉**：`metal(0.1)` 仍被 omit，且门禁文件内注释陈旧。
 17. **P1-b 门禁盲区**：第 6 个 `MaterialHeader` 镜像（`visibility_raster.wesl:24-35`）未纳入 `MIRRORS`。
-18. **工作树红门禁**：`codegen_freshness` 失败（格式性，跑 codegen `write` 即恢复）。
+18. **历史生成物门禁**：曾因生成器排版差异失败；本轮已重新生成并由 `codegen_freshness` 的 **8 passed / 0 failed** 关闭该问题。
 
 ---
 
@@ -194,11 +197,10 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
 
 ---
 
-## 6. 本轮未执行 / 无法判定的项
+## 6. 当前仍未执行 / 无法判定的项
 
-1. **真机 GPU 对拍**（7 个 target 文件确实存在）：
+1. **其余真机 GPU 对拍**（7 个 target 文件确实存在）：
    `pkg/prism_render_material_gpu/tests/{bc_parity, albedo_table_gpu_parity, dynamic_channels_gpu_parity, glint_gpu_parity, lobe_sampler_gpu_parity, measured_brdf_gpu_parity, texture_lod_gpu_parity}.rs`。
-   沙盒屏蔽 Metal 设备访问，需越出沙盒以 `PRISM_REQUIRE_GPU=1` 运行；本轮未越权执行 → **文档中"真机通过"的结论本轮不独立复现**（但门禁文件与 `require_gpu()`/skip 逻辑存在，`tests.rs:53-55`、`shade_tests.rs:36-38`）。
+   response composition 已有跨沙盒 Metal readback 通过；上述 7 个材质 GPU target 本轮没有逐项执行，因此不把它们写成通过。门禁文件与 `require_gpu()`/skip 逻辑存在（`tests.rs:53-55`、`shade_tests.rs:36-38`）。
 2. **性能数字**：`bench_const_table_vs_buffer_table` 的 5.561 / 8.255 ms、逐光源去重 7.397→5.767 ms（−22.0%）——函数存在（`albedo_table_gpu_parity.rs:374` 等），但数值需真机 GPU 复跑。
-3. **`prism_render_scene --lib` 通过数**：`--list` 得 1718；全量通过数本轮未取到（长任务仍在跑）。
-4. **GPU 侧语义**（shade-cache 写入是否为辐照度、bindless 采样、page-table 消费）依据源码与门禁代码判定，未在真机二次确认。
+3. **GPU 侧语义**（shade-cache 写入是否为辐照度、bindless 采样、page-table 消费）依据源码与门禁代码判定，未在真机二次确认。

@@ -28,6 +28,6 @@ schema 只维护 `lit` / `npr` / `unlit` 内建消费者身份；custom `Program
 
 ## 验证记录
 
-- `cargo test -p prism_render_material --test shading_plan --offline -q`：21/21 通过；覆盖 schema 字段投影、每一字段漏报、十个活动瓣逐一漏报、映射/理由、五契约、两臂、三内建身份、四个动态 channel 的能力继承、ID 0 / MAX / stale、包状态/ABI/修订以及真实 SPIR-V 入口。
-- `cargo test -p prism_render_material --offline -q`：最终包级 916 项通过（872 + 8 + 1 + 7 + 7 + 21，包含上述新增测试），进程退出码 0；上游 `prism_render_graph` 在并发修改期间曾短暂出现 `E0515`/`E0061` 编译错误，最终复测时已解除。现存上游 warnings 未在本切片处理。未修改上述上游文件，也未 commit/push。
+- `cargo test -p prism_render_material --test shading_plan --offline -- --nocapture`：28/28 通过；除原有 schema 字段投影、每一字段漏报、十个活动瓣逐一漏报、映射/理由、五契约、两臂、三内建身份、四个动态 channel 的能力继承、ID 0 / MAX / stale、包状态/ABI/修订以及真实 SPIR-V 入口外，新增验证所有 builtin 的字段/lobe 分区、Unlit decode-only contract 与 execution-table kind=2，以及 stale `Registered(ProgramId)` 在 `validate_plan` 构建期硬失败。
+- 2026-10-15 当前定向复验：材质 lib 870 项、`schema_parity` 7 项、`shading_plan` 28 项、`material_header_abi` 2 项、`pcm_parity` 7 项和 `codegen_freshness` 8 项全部通过；`surface_layout.rs` 与 `material_unpack.wesl` 已由 `prism-material-codegen write` 重新生成。现存上游 warnings 未在本切片处理。
 - `rustfmt --edition 2024 --check` 对本模块和新增测试通过；`git diff --check` 对 `lib.rs` 通过。

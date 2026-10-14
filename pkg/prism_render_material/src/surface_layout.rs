@@ -520,16 +520,58 @@ pub struct ResponseProgramLayout {
 }
 
 const RESPONSE_LIT_LOBES: [ResponseLobeLayout; 10] = [
-    ResponseLobeLayout { id: "emission", supported: false, ignored_reason: Some("Emission is composed as a separate output channel, not evaluated by the principled direct adapter.") },
-    ResponseLobeLayout { id: "clearcoat", supported: true, ignored_reason: None },
-    ResponseLobeLayout { id: "anisotropy", supported: true, ignored_reason: None },
-    ResponseLobeLayout { id: "sheen", supported: false, ignored_reason: Some("The current principled adapter does not read the sheen/fuzz lobe.") },
-    ResponseLobeLayout { id: "subsurface", supported: false, ignored_reason: Some("The current principled adapter does not read the subsurface lobe.") },
-    ResponseLobeLayout { id: "transmission", supported: true, ignored_reason: None },
-    ResponseLobeLayout { id: "thin_film", supported: true, ignored_reason: None },
-    ResponseLobeLayout { id: "npr_face", supported: false, ignored_reason: Some("The NPR face lobe belongs to the separate NPR adapter.") },
-    ResponseLobeLayout { id: "glint", supported: true, ignored_reason: None },
-    ResponseLobeLayout { id: "measured_brdf", supported: false, ignored_reason: Some("Measured BRDF requires a distinct registered response path.") },
+    ResponseLobeLayout {
+        id: "emission",
+        supported: false,
+        ignored_reason: Some(
+            "Emission is composed as a separate output channel, not evaluated by the principled direct adapter.",
+        ),
+    },
+    ResponseLobeLayout {
+        id: "clearcoat",
+        supported: true,
+        ignored_reason: None,
+    },
+    ResponseLobeLayout {
+        id: "anisotropy",
+        supported: true,
+        ignored_reason: None,
+    },
+    ResponseLobeLayout {
+        id: "sheen",
+        supported: false,
+        ignored_reason: Some("The current principled adapter does not read the sheen/fuzz lobe."),
+    },
+    ResponseLobeLayout {
+        id: "subsurface",
+        supported: false,
+        ignored_reason: Some("The current principled adapter does not read the subsurface lobe."),
+    },
+    ResponseLobeLayout {
+        id: "transmission",
+        supported: true,
+        ignored_reason: None,
+    },
+    ResponseLobeLayout {
+        id: "thin_film",
+        supported: true,
+        ignored_reason: None,
+    },
+    ResponseLobeLayout {
+        id: "npr_face",
+        supported: false,
+        ignored_reason: Some("The NPR face lobe belongs to the separate NPR adapter."),
+    },
+    ResponseLobeLayout {
+        id: "glint",
+        supported: true,
+        ignored_reason: None,
+    },
+    ResponseLobeLayout {
+        id: "measured_brdf",
+        supported: false,
+        ignored_reason: Some("Measured BRDF requires a distinct registered response path."),
+    },
 ];
 const RESPONSE_LIT_MAPPED_FIELDS: [ResponseFieldMappingLayout; 32] = [
     ResponseFieldMappingLayout { lobe: None, name: "base_color", semantic: "base albedo controls the principled direct response", test: "pkg/prism_render_shading/src/lighting.rs::white_furnace_stays_bounded_across_roughness_and_metalness" },
@@ -974,16 +1016,58 @@ const RESPONSE_NPR_IGNORED_FIELDS: [ResponseIgnoredFieldLayout; 47] = [
 ];
 
 const RESPONSE_UNLIT_LOBES: [ResponseLobeLayout; 10] = [
-    ResponseLobeLayout { id: "emission", supported: false, ignored_reason: Some("Emission is supplied through the response output contract rather than this field matrix.") },
-    ResponseLobeLayout { id: "clearcoat", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
-    ResponseLobeLayout { id: "anisotropy", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
-    ResponseLobeLayout { id: "sheen", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
-    ResponseLobeLayout { id: "subsurface", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
-    ResponseLobeLayout { id: "transmission", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
-    ResponseLobeLayout { id: "thin_film", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
-    ResponseLobeLayout { id: "npr_face", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
-    ResponseLobeLayout { id: "glint", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
-    ResponseLobeLayout { id: "measured_brdf", supported: false, ignored_reason: Some("Unlit does not evaluate scene-lighting lobes.") },
+    ResponseLobeLayout {
+        id: "emission",
+        supported: false,
+        ignored_reason: Some(
+            "Emission is supplied through the response output contract rather than this field matrix.",
+        ),
+    },
+    ResponseLobeLayout {
+        id: "clearcoat",
+        supported: false,
+        ignored_reason: Some("Unlit does not evaluate scene-lighting lobes."),
+    },
+    ResponseLobeLayout {
+        id: "anisotropy",
+        supported: false,
+        ignored_reason: Some("Unlit does not evaluate scene-lighting lobes."),
+    },
+    ResponseLobeLayout {
+        id: "sheen",
+        supported: false,
+        ignored_reason: Some("Unlit does not evaluate scene-lighting lobes."),
+    },
+    ResponseLobeLayout {
+        id: "subsurface",
+        supported: false,
+        ignored_reason: Some("Unlit does not evaluate scene-lighting lobes."),
+    },
+    ResponseLobeLayout {
+        id: "transmission",
+        supported: false,
+        ignored_reason: Some("Unlit does not evaluate scene-lighting lobes."),
+    },
+    ResponseLobeLayout {
+        id: "thin_film",
+        supported: false,
+        ignored_reason: Some("Unlit does not evaluate scene-lighting lobes."),
+    },
+    ResponseLobeLayout {
+        id: "npr_face",
+        supported: false,
+        ignored_reason: Some("Unlit does not evaluate scene-lighting lobes."),
+    },
+    ResponseLobeLayout {
+        id: "glint",
+        supported: false,
+        ignored_reason: Some("Unlit does not evaluate scene-lighting lobes."),
+    },
+    ResponseLobeLayout {
+        id: "measured_brdf",
+        supported: false,
+        ignored_reason: Some("Unlit does not evaluate scene-lighting lobes."),
+    },
 ];
 const RESPONSE_UNLIT_MAPPED_FIELDS: [ResponseFieldMappingLayout; 0] = [];
 const RESPONSE_UNLIT_IGNORED_FIELDS: [ResponseIgnoredFieldLayout; 53] = [

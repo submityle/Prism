@@ -9,9 +9,7 @@ use prism_render_architecture::{
     },
 };
 use prism_render_material::shading_plan::*;
-use prism_render_material::{
-    LobeMask, MaterialExecutionTables, SURFACE_CHANNELS, SURFACE_LOBES,
-};
+use prism_render_material::{LobeMask, MaterialExecutionTables, SURFACE_CHANNELS, SURFACE_LOBES};
 
 fn catalog() -> SurfaceFieldCatalog {
     SurfaceFieldCatalog::generated().unwrap()
@@ -42,7 +40,11 @@ fn generated_builtin_contracts_partition_every_field_and_lobe() {
         .map(|lobe| lobe.id)
         .collect::<std::collections::BTreeSet<_>>();
 
-    for program in [BuiltinProgram::Lit, BuiltinProgram::Npr, BuiltinProgram::Unlit] {
+    for program in [
+        BuiltinProgram::Lit,
+        BuiltinProgram::Npr,
+        BuiltinProgram::Unlit,
+    ] {
         let manifest = ResponseManifest::from_builtin(program).unwrap();
         manifest.validate(&catalog()).unwrap();
 
@@ -58,8 +60,15 @@ fn generated_builtin_contracts_partition_every_field_and_lobe() {
             .iter()
             .map(|(field, _)| field.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        assert!(mapped.is_disjoint(&ignored), "{program:?} maps and ignores a field");
-        assert_eq!(mapped.len() + ignored.len(), all_fields.len(), "{program:?}");
+        assert!(
+            mapped.is_disjoint(&ignored),
+            "{program:?} maps and ignores a field"
+        );
+        assert_eq!(
+            mapped.len() + ignored.len(),
+            all_fields.len(),
+            "{program:?}"
+        );
         assert!(all_fields
             .iter()
             .all(|field| mapped.contains(field) || ignored.contains(field)));
@@ -76,8 +85,15 @@ fn generated_builtin_contracts_partition_every_field_and_lobe() {
             .iter()
             .map(|(lobe, _)| lobe.as_str())
             .collect::<std::collections::BTreeSet<_>>();
-        assert!(supported.is_disjoint(&ignored_lobes), "{program:?} lobe overlap");
-        assert_eq!(supported.len() + ignored_lobes.len(), all_lobes.len(), "{program:?}");
+        assert!(
+            supported.is_disjoint(&ignored_lobes),
+            "{program:?} lobe overlap"
+        );
+        assert_eq!(
+            supported.len() + ignored_lobes.len(),
+            all_lobes.len(),
+            "{program:?}"
+        );
         assert_eq!(supported.union(&ignored_lobes).count(), all_lobes.len());
     }
 }
@@ -86,22 +102,36 @@ fn generated_builtin_contracts_partition_every_field_and_lobe() {
 fn unlit_contract_and_execution_row_are_decode_only_and_unlit_typed() {
     let manifest = ResponseManifest::from_builtin(BuiltinProgram::Unlit).unwrap();
     assert!(manifest.surface.field_mappings.is_empty());
-    assert_eq!(manifest.surface.ignored_fields_with_reason.len(), catalog().fields().count());
+    assert_eq!(
+        manifest.surface.ignored_fields_with_reason.len(),
+        catalog().fields().count()
+    );
     assert!(manifest.surface.supported_lobes.is_empty());
-    assert_eq!(manifest.surface.ignored_lobes_with_reason.len(), SURFACE_LOBES.len());
+    assert_eq!(
+        manifest.surface.ignored_lobes_with_reason.len(),
+        SURFACE_LOBES.len()
+    );
     assert!(!manifest.lighting.direct_light);
     assert!(!manifest.lighting.shadows);
     assert!(!manifest.lighting.indirect_diffuse);
     assert!(!manifest.lighting.reflection);
     assert!(!manifest.lighting.transmission);
-    assert_eq!(manifest.output.produced_channels, ChannelMask::one(ResponseChannel::Emission)
-        .union(ChannelMask::one(ResponseChannel::Alpha)));
-    assert_eq!(manifest.output.blendable_channels, ChannelMask::one(ResponseChannel::Emission));
+    assert_eq!(
+        manifest.output.produced_channels,
+        ChannelMask::one(ResponseChannel::Emission).union(ChannelMask::one(ResponseChannel::Alpha))
+    );
+    assert_eq!(
+        manifest.output.blendable_channels,
+        ChannelMask::one(ResponseChannel::Emission)
+    );
     assert!(!manifest.execution.supports_fused);
     assert!(manifest.execution.supports_split);
     assert_eq!(manifest.execution.max_cost_class, CostClass::Low);
     assert!(manifest.cache.reads.is_empty());
-    assert_eq!(manifest.cache.writes, vec![CacheChannel::Response(ResponseChannel::Emission)]);
+    assert_eq!(
+        manifest.cache.writes,
+        vec![CacheChannel::Response(ResponseChannel::Emission)]
+    );
     assert_eq!(manifest.cache.temporal, TemporalRequirement::None);
 
     let entry = compiled();
@@ -128,7 +158,13 @@ fn unlit_contract_and_execution_row_are_decode_only_and_unlit_typed() {
         .unwrap();
     assert_eq!(tables.gpu_program_rows(), vec![[2, package.get(), 1, 0]]);
     assert_eq!(tables.gpu_plan_rows(), vec![[program.get(), u32::MAX]]);
-    assert_eq!(tables.bind_raw(plan.get(), program.get(), package.get(), 0).unwrap().to_words(), [0, 0, 0, 0, 0]);
+    assert_eq!(
+        tables
+            .bind_raw(plan.get(), program.get(), package.get(), 0)
+            .unwrap()
+            .to_words(),
+        [0, 0, 0, 0, 0]
+    );
 }
 
 // This test program intentionally ignores everything; it is NOT a Lit/NPR
@@ -726,7 +762,10 @@ fn structurally_reflectable_but_ill_typed_code_is_rejected() {
     assert_eq!(entry.spirv().as_ptr(), entry.clone().spirv().as_ptr());
 }
 #[test]
-fn both_arms_validate_and_custom_blends_choose_composition() {
+fn region_selection_materials_execute_both_response_arms() {
+    // This is the direct gate for 02 §10.4: a region-selected material must
+    // validate both response arms before the runtime can route pixels through
+    // the binary selector or the continuous MaskBlend path.
     let r = registry(&[registered(0), registered(1)], false);
     let p = packages();
     let plan = blend(

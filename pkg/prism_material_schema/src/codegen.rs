@@ -409,6 +409,60 @@ const fn energy_policy_str(policy: EnergyPolicy) -> &'static str {
 /// hand-written list can become a second source of truth.
 #[must_use]
 pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
+    fn emit_response_lobe(
+        output: &mut String,
+        id: &str,
+        supported: bool,
+        ignored_reason: Option<&str>,
+    ) {
+        let _ = writeln!(output, "    ResponseLobeLayout {{");
+        let _ = writeln!(output, "        id: {id:?},");
+        let _ = writeln!(output, "        supported: {supported},");
+        if let Some(reason) = ignored_reason {
+            let inline_reason = format!("        ignored_reason: Some({reason:?}),");
+            if inline_reason.chars().count() <= RUSTFMT_MAX_WIDTH {
+                let _ = writeln!(output, "{inline_reason}");
+            } else {
+                let _ = writeln!(output, "        ignored_reason: Some(");
+                let _ = writeln!(output, "            {reason:?},");
+                output.push_str("        ),\n");
+            }
+        } else {
+            output.push_str("        ignored_reason: None,\n");
+        }
+        output.push_str("    },\n");
+    }
+
+    fn emit_response_ignored_field(output: &mut String, owner: &str, name: &str, reason: &str) {
+        let inline = format!(
+            "    ResponseIgnoredFieldLayout {{ lobe: {owner}, name: {name:?}, reason: {reason:?} }},"
+        );
+        if inline.chars().count() <= RUSTFMT_MAX_WIDTH {
+            let _ = writeln!(output, "{inline}");
+            return;
+        }
+
+        let _ = writeln!(output, "    ResponseIgnoredFieldLayout {{");
+        let _ = writeln!(output, "        lobe: {owner},");
+        let _ = writeln!(output, "        name: {name:?},");
+        let _ = writeln!(output, "        reason: {reason:?},");
+        output.push_str("    },\n");
+    }
+
+    fn emit_string_slice_field(output: &mut String, field: &str, values: &[String]) {
+        let inline = format!("        {field}: &[{}],", values.join(", "));
+        if inline.chars().count() <= RUSTFMT_MAX_WIDTH {
+            let _ = writeln!(output, "{inline}");
+            return;
+        }
+
+        let _ = writeln!(output, "        {field}: &[");
+        for value in values {
+            let _ = writeln!(output, "            {value},");
+        }
+        output.push_str("        ],\n");
+    }
+
     let core_words = schema.core.words;
     let max_lobe_words = max_lobe_words(schema);
     let count = schema.lobe_count();
@@ -631,7 +685,7 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
             .map(|c| format!("{c:?}"))
             .collect();
         let _ = writeln!(o, "        stability: {:?},", lobe.stability.as_str());
-        let _ = writeln!(o, "        requires_caps: &[{}],", caps.join(", "));
+        emit_string_slice_field(&mut o, "requires_caps", &caps);
         let _ = writeln!(
             o,
             "        energy_policy: {:?},",
@@ -930,19 +984,12 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         );
         for lobe in &lobes {
             let reason = program.surface.ignored_lobes.get(&lobe.id);
-            if let Some(reason) = reason {
-                let _ = writeln!(
-                    o,
-                    "    ResponseLobeLayout {{ id: {:?}, supported: false, ignored_reason: Some({:?}) }},",
-                    lobe.id, reason
-                );
-            } else {
-                let _ = writeln!(
-                    o,
-                    "    ResponseLobeLayout {{ id: {:?}, supported: true, ignored_reason: None }},",
-                    lobe.id
-                );
-            }
+            emit_response_lobe(
+                &mut o,
+                &lobe.id,
+                reason.is_none(),
+                reason.as_deref().map(String::as_str),
+            );
         }
         o.push_str("];\n");
 
@@ -965,22 +1012,29 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let _ = writeln!(
-            o,
-            "const {prefix}_MAPPED_FIELDS: [ResponseFieldMappingLayout; {}] = [",
-            mapped.len()
-        );
-        for (owner, field, semantic, test) in mapped {
-            let owner = owner
-                .map(|value| format!("Some({value:?})"))
-                .unwrap_or_else(|| "None".into());
+        if mapped.is_empty() {
             let _ = writeln!(
                 o,
-                "    ResponseFieldMappingLayout {{ lobe: {owner}, name: {:?}, semantic: {:?}, test: {:?} }},",
-                field.name, semantic, test
+                "const {prefix}_MAPPED_FIELDS: [ResponseFieldMappingLayout; 0] = [];"
             );
+        } else {
+            let _ = writeln!(
+                o,
+                "const {prefix}_MAPPED_FIELDS: [ResponseFieldMappingLayout; {}] = [",
+                mapped.len()
+            );
+            for (owner, field, semantic, test) in mapped {
+                let owner = owner
+                    .map(|value| format!("Some({value:?})"))
+                    .unwrap_or_else(|| "None".into());
+                let _ = writeln!(
+                    o,
+                    "    ResponseFieldMappingLayout {{ lobe: {owner}, name: {:?}, semantic: {:?}, test: {:?} }},",
+                    field.name, semantic, test
+                );
+            }
+            o.push_str("];\n");
         }
-        o.push_str("];\n");
         let _ = writeln!(
             o,
             "const {prefix}_IGNORED_FIELDS: [ResponseIgnoredFieldLayout; {}] = [",
@@ -990,11 +1044,7 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
             let owner = owner
                 .map(|value| format!("Some({value:?})"))
                 .unwrap_or_else(|| "None".into());
-            let _ = writeln!(
-                o,
-                "    ResponseIgnoredFieldLayout {{ lobe: {owner}, name: {:?}, reason: {:?} }},",
-                field.name, reason
-            );
+            emit_response_ignored_field(&mut o, &owner, &field.name, reason);
         }
         o.push_str("];\n\n");
     }
@@ -1070,12 +1120,8 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
             "        temporal_history: {},",
             program.lighting.temporal_history
         );
-        let _ = writeln!(o, "        produced_channels: &[{}],", produced.join(", "));
-        let _ = writeln!(
-            o,
-            "        blendable_channels: &[{}],",
-            blendable.join(", ")
-        );
+        emit_string_slice_field(&mut o, "produced_channels", &produced);
+        emit_string_slice_field(&mut o, "blendable_channels", &blendable);
         let _ = writeln!(
             o,
             "        supports_fused: {},",
@@ -1091,8 +1137,8 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
             "        max_cost_class: {:?},",
             program.execution.max_cost_class.as_str()
         );
-        let _ = writeln!(o, "        cache_reads: &[{}],", reads.join(", "));
-        let _ = writeln!(o, "        cache_writes: &[{}],", writes.join(", "));
+        emit_string_slice_field(&mut o, "cache_reads", &reads);
+        emit_string_slice_field(&mut o, "cache_writes", &writes);
         let _ = writeln!(
             o,
             "        cache_temporal: {:?},",

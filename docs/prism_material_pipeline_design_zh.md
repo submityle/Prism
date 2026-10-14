@@ -509,16 +509,16 @@ v2 文档 §6.2 描述的"四档子系统注册表"是**文档产物，不是代
 
 ## 10. 诚实的固有摩擦与风险
 
-1. **B 档降级不可移除**。NPR 在 RT/GI 里只取反照率是**设计选择**，不是待办；写清它，才能避免下游误以为"再努力一点就能物理正确"。
+1. **B 档降级不可移除**。NPR 在 RT/GI 里只取反照率是**设计选择**，不是缺陷或欠账；写清它，才能避免下游误以为"再努力一点就能物理正确"。
 2. **没有成熟的"一等 NPR"范式**。产业界多数 NPR 是后处理或独立管线；本项目的赌注是"同一 über + 不同响应函数"。第一条线（§4.5）就是这个赌注尚未兑现的证据：NPR 目前只吃 3 个 OpenPBR 参数。
 3. **ALU 上涨是可预期的代价**。要 NPR 消费全部通道，瓣必须声明 `requires_caps`，采样预算按画质档缩放，且**画质档不进置换键**（I2）。
 4. **置换爆炸的治理是工程问题，不是架构问题**：内容哈希去重 + archetype 聚类 + 按需异步编译 + 全瓣 über 回退，**不设全局硬顶**（`refactor_zh` §8.4）。
 5. **同一能力在多处并存**是当前最大的结构性风险：两套 PSO 缓存（§9.2 ③）、两套帧图（§9.2 ④）、TAA/upscale 双驻（§5.2）、OIT 三驻（§5.4）。收口必须按"一个模型 + 一个键 + 两个层级"推进，禁止再造第三套。
 6. **Bevy 耦合边界**：迁移后每个 pass 仍是 ECS 系统，只把**顺序**改成声明式；`plugin.rs` 的 20 元组上限是当前被迫的 workaround 来源。
-7. **验证盲区**：(a) 真机 GPU 对拍需要 `PRISM_REQUIRE_GPU=1` 且脱离沙盒，当前无法在 CI 跑（7 个 GPU target 存在但"未执行"）；(b) `shading_resolve.wesl` 的 switch 无门禁（§4.5 缺口 2）；(c) 第 6 份 `MaterialHeader` 镜像在 `visibility_raster.wesl:24-35`，**不在** `MIRRORS` 清单内（`tests/material_header_abi.rs:126,148`）。
-8. **工作树存在一条红色门禁**：`codegen_freshness` 因未提交的 rustfmt 折叠失败（纯格式差异）；执行 `cargo run -p prism_material_schema --bin prism-material-codegen -- write` 即恢复（`prism_material_pipeline_refactor_verification_zh.md:38,50-67`）。
+7. **验证边界**：(a) 真机 GPU 对拍需要 `PRISM_REQUIRE_GPU=1` 且主机提供真实 adapter；本轮 Apple M2 Metal 已通过 response composition 严格 readback，水面 raster 因 `max_bind_groups=8 < 10` 严格失败，其余未逐项运行的 GPU target 仍不能写成通过；(b) `shading_resolve.wesl` 的有限 shading-class switch 已由 `shading_resolve_switch_covers_every_registered_shading_class` 机械门禁覆盖；(c) `visibility_raster.wesl` 已纳入 `tests/material_header_abi.rs` 的六份 `MaterialHeader` 镜像清单，字段顺序与 Rust ABI 逐字校验。
+8. **生成物门禁已恢复为绿色**：2026-10-15 执行 `cargo run -p prism_material_schema --bin prism-material-codegen --offline -- write` 重新生成 `surface_layout.rs` 与 `material_unpack.wesl`；`codegen_freshness` 全部通过，生成物不再依赖手工格式修补（`prism_material_pipeline_refactor_verification_zh.md:38,50-67`）。
 
-## 11. 落地路线图（状态以 2026-10-14 工作树为准）
+## 11. 落地路线图（状态以 2026-10-15 工作树为准）
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|

@@ -623,6 +623,48 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
     }
 }
 
+/// The shading-class switch is the WESL-side dispatch table for the finite
+/// CPU `MaterialShadingClass` domain.  Compilation alone cannot catch a new
+/// class constant that is declared but never routed, so keep the constants,
+/// switch arms, and fallback mechanically tied together here.
+#[test]
+fn shading_resolve_switch_covers_every_registered_shading_class() {
+    let source = include_str!("../../shaders/shading_resolve.wesl");
+    let classes = [
+        ("PRINCIPLED", "shade_principled("),
+        ("UNLIT", "surface.base_color + surface.emissive"),
+        ("SUBSURFACE", "shade_subsurface("),
+        ("CLEARCOAT", "shade_clearcoat("),
+        ("CLOTH", "shade_cloth("),
+        ("HAIR", "shade_hair("),
+        ("WATER", "shade_water("),
+        ("NPR", "shade_toon("),
+        ("CUSTOM", "shade_principled("),
+    ];
+
+    assert!(source.contains("switch params.shading_class"));
+    for (name, implementation) in classes {
+        let constant = format!("const SHADING_CLASS_{name}:");
+        let arm = format!("case SHADING_CLASS_{name}:");
+        assert!(
+            source.contains(&constant),
+            "missing shading-class constant {name}"
+        );
+        assert!(
+            source.contains(&arm),
+            "missing shading-class switch arm {name}"
+        );
+        assert!(
+            source.contains(implementation),
+            "missing implementation for {name}"
+        );
+    }
+    assert!(
+        source.contains("default:"),
+        "unknown classes need a loud-safe fallback arm"
+    );
+}
+
 #[test]
 fn shading_resolve_declares_the_independent_shade_cache_consumer_contract() {
     let source = include_str!("../../shaders/shading_resolve.wesl");

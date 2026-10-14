@@ -27,4 +27,4 @@ schema 的十个瓣均声明作者闭包实现：Emission、ClearCoat、Conducto
 
 运行时分类不再读取瓣实现关系表。既有三个闭包派发分支保持原行为；完整实现关系不会把 emission、thin film、glint 等修改项错误扩成互斥运行桶。性能上没有新增运行时分配、字符串匹配或查表；扩展实现只需更新 schema 与真正的作者枚举，生成物 freshness 与编译门禁同时约束一致性。
 
-验证：`cargo test -q -p prism_material_schema -p prism_render_material -p prism_render_shading` 实跑退出码为零，schema 20 项、材质单元 872 项、材质集成 22 项、shading 3379 项通过；shading 原有 6 项 ignored 不计入通过数量。生成物 freshness、格式检查和限定文件 diff 检查通过。本切片不改 GPU ABI 或数学公式，不据此报告 GPU 测量结果。
+2026-10-15 当前复验中，`cargo test -p prism_render_material --offline` 为 870 项库测试、8 项 codegen freshness、2 项 MaterialHeader ABI、7 项 PCM parity、7 项 schema parity、28 项 shading-plan 测试全部通过；`prism_render_shading` 为 3381 passed / 0 failed / 6 ignored。`surface_layout.rs` 与 `material_unpack.wesl` 已由 `prism-material-codegen write` 重新生成并通过 freshness 门禁。本切片不据此报告 GPU 测量结果。

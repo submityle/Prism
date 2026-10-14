@@ -12,12 +12,7 @@ GPU ABI 为 64 字节的五路 RGB + alpha、16 字节的控制项，以及独�
 
 ## 实测
 
-普通门禁命令：`cargo test -p prism_render_scene --test response_composition_gpu --offline -- --nocapture`。
-结果为 **2 passed / 0 failed**：CPU 侧非法输入/packing 测试通过；response GPU parity 测试在 adapter 获取阶段明确 skip。真实 stderr 为：
-`No suitable graphics adapter found; noop not requested, vulkan support not compiled in, metal found no adapters, dx12 support not compiled in, gl not requested, webgpu not requested`。
+跨沙盒严格门禁命令：`PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu --offline -- --nocapture`。
+结果为 **2 passed / 0 failed**：CPU packing 与 production GPU parity 均通过；真实 adapter 为 Apple M2、backend 为 Metal，GPU readback 覆盖 1320 cases / 14520 auxiliary jobs，提交与读回耗时约 2.75 ms。
 
-严格门禁命令：`PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu --offline -- --nocapture`。
-结果为 **1 passed / 1 failed**：同一 CPU packing 测试通过，GPU parity 测试在 adapter 不可用时按设计失败，panic 信息为：
-`required GPU adapter unavailable: No suitable graphics adapter found; noop not requested, vulkan support not compiled in, metal found no adapters, dx12 support not compiled in, gl not requested, webgpu not requested`。
-
-因此本机本轮没有可宣称的 Metal/WGPU response readback 或 GPU 对拍结果；默认通过仅表示显式 capability gate 允许跳过，不是伪造的 GPU 通过。测试仍覆盖全部 31 个非空自定义辐射掩码、FullRadiance、DirectOnly、5 种 alpha 规则和 8 个遮罩值的 CPU-side job 构建，以及非法输入/辅助输出计数与类型错误拒绝行为。真实 GPU readback 需在存在合适 adapter 的主机上重新运行严格命令。
+因此本轮已有可宣称的 Metal response readback 与 GPU 对拍结果。测试仍覆盖全部 31 个非空自定义辐射掩码、FullRadiance、DirectOnly、5 种 alpha 规则和 8 个遮罩值的 CPU-side job 构建，以及非法输入/辅助输出计数与类型错误拒绝行为。水体 Hybrid 的独立能力门禁仍因 `max_bind_groups=8 < 10` 严格失败，不能与本 response composition 结果混写。

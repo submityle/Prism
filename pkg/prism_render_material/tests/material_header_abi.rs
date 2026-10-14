@@ -148,6 +148,6 @@ fn abi7_execution_binding_is_five_dense_words_with_full_permutation_width() {
     );
     assert_eq!(
         std::mem::size_of::<prism_render_material::GpuMaterialHeader>(),
-        28 * std::mem::size_of::<u32>()
+        29 * std::mem::size_of::<u32>()
     );
 }
