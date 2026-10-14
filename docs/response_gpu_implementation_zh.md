@@ -1,6 +1,6 @@
 # Response GPU 合成验证
 
-验证日期：2026-10-14。
+验证日期：2026-10-15。
 
 `prism_render_scene::response_gpu::ResponseCompositionPipelines` 创建并复用生产 compute 管线。
 GPU ABI 为 64 字节的五路 RGB + alpha、16 字节的控制项，以及独立 64 字节的类型化辅助项。
@@ -12,12 +12,12 @@ GPU ABI 为 64 字节的五路 RGB + alpha、16 字节的控制项，以及独�
 
 ## 实测
 
-命令：`PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu -- --nocapture`。
-在 Apple M2 / Metal 上 2 项测试通过，无跳过。
-覆盖全部 31 个非空自定义辐射掩码、FullRadiance、DirectOnly，5 种 alpha 规则和 8 个遮罩值：
-1,320 项辐射输出、14,520 项辅助作业与权威 CPU 合成逐项对照。
-同时覆盖非法输入、辅助输出计数与类型错误的拒绝行为。
+普通门禁命令：`cargo test -p prism_render_scene --test response_composition_gpu --offline -- --nocapture`。
+结果为 **2 passed / 0 failed**：CPU 侧非法输入/packing 测试通过；response GPU parity 测试在 adapter 获取阶段明确 skip。真实 stderr 为：
+`No suitable graphics adapter found; noop not requested, vulkan support not compiled in, metal found no adapters, dx12 support not compiled in, gl not requested, webgpu not requested`。
 
-该批次两份辐射平面共 168,960 字节，最新复验提交到读回的主机墙钟为 4.025083 ms。
-这个值包含驱动提交、同步、映射和读回，不是 GPU timestamp，也不是逐帧性能或完整场景基准。
-单独的内核对照证明合成语义与 ABI；完整运行链路的证据记录在帧图实现文档。
+严格门禁命令：`PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu --offline -- --nocapture`。
+结果为 **1 passed / 1 failed**：同一 CPU packing 测试通过，GPU parity 测试在 adapter 不可用时按设计失败，panic 信息为：
+`required GPU adapter unavailable: No suitable graphics adapter found; noop not requested, vulkan support not compiled in, metal found no adapters, dx12 support not compiled in, gl not requested, webgpu not requested`。
+
+因此本机本轮没有可宣称的 Metal/WGPU response readback 或 GPU 对拍结果；默认通过仅表示显式 capability gate 允许跳过，不是伪造的 GPU 通过。测试仍覆盖全部 31 个非空自定义辐射掩码、FullRadiance、DirectOnly、5 种 alpha 规则和 8 个遮罩值的 CPU-side job 构建，以及非法输入/辅助输出计数与类型错误拒绝行为。真实 GPU readback 需在存在合适 adapter 的主机上重新运行严格命令。

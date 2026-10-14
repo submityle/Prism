@@ -27,10 +27,11 @@ response composition 测试在获取 adapter 后检查 compute workgroup 与 sto
 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_ui_render_backend --features gpu --test gpu_parity --offline -- --nocapture` | **0 passed / 7 failed**；每个用例报告 `could not acquire a usable WGPU device`。 |
 | `cargo test -p prism_ui_render_backend --features gpu --test dock_gpu_parity --offline -- --nocapture` | **0 passed / 1 failed**；报告 `dock GPU parity requires a real wgpu adapter; refusing to skip validation`。 |
 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_gpudriven --lib --offline -- --nocapture` | **11 passed / 7 failed**；7 个 GPU 用例真实报告 `PRISM_REQUIRE_GPU is set but no adapter was found`。 |
-| `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu --offline -- --nocapture` | 未进入 GPU 初始化；被现有 `pkg/prism_render_shading/src/classification.rs:352-353` 编译错误阻断：`ResponseProgramLayout` 没有 `illumination` 字段。 |
+| `cargo test -p prism_render_scene --test response_composition_gpu --offline -- --nocapture` | **2 passed / 0 failed**；CPU packing 通过，GPU parity 在 adapter 获取阶段显式 skip，真实输出为 `No suitable graphics adapter found; noop not requested, vulkan support not compiled in, metal found no adapters, dx12 support not compiled in, gl not requested, webgpu not requested`。这不是 GPU 对拍通过。 |
+| `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu --offline -- --nocapture` | **1 passed / 1 failed**；CPU packing 通过，GPU parity 按严格能力门禁失败，真实输出为 `required GPU adapter unavailable: No suitable graphics adapter found; noop not requested, vulkan support not compiled in, metal found no adapters, dx12 support not compiled in, gl not requested, webgpu not requested`。 |
 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test resident_composition_gpu --offline -- --nocapture` | 同上，未进入 GPU 初始化，被同一现有编译错误阻断。 |
 
-当前隔离环境没有可用 WGPU adapter；没有可宣称的 Metal 实机对拍、response composition readback 或 resident HDR 输出。不能把默认 UI parity 的 7 个测试通过解释为 GPU 已运行。
+当前隔离环境没有可用 WGPU adapter；没有可宣称的 Metal 实机对拍、response composition readback 或 resident HDR 输出。response composition 的普通模式只保留显式 skip，严格模式保留真实失败，不能把默认通过解释为 GPU 已运行。
 
 ## 写集边界
 
