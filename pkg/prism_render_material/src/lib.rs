@@ -82,11 +82,11 @@ pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};
 pub use shading_plan::{
     BlendDomain, BuiltinProgram, CacheChannel, CacheContract, ChannelMask, CompiledEntry,
-    CompiledEntryError, ContractError, CostClass, ExecutionContract, ExecutionFamily, FieldId,
-    FieldMapping, LightingContract, LobeId, MaskSource as ResponseMaskSource, OutputContract,
-    PlanValidationContext, ProgramId, ProgramRef, Reason, RegisteredResponse, RegistryError,
-    ResponseChannel, ResponseManifest, ResponseRegistry, ShadingPlan, SurfaceContract,
-    SurfaceFieldCatalog, TemporalRequirement, ValidatedPlan,
+    CompiledEntryError, ContractError, CostClass, CustomResponseReceipt, ExecutionContract,
+    ExecutionFamily, FieldId, FieldMapping, LightingContract, LobeId,
+    MaskSource as ResponseMaskSource, OutputContract, PlanValidationContext, ProgramId, ProgramRef,
+    Reason, RegisteredResponse, RegistryError, ResponseChannel, ResponseManifest, ResponseRegistry,
+    ShadingPlan, SurfaceContract, SurfaceFieldCatalog, TemporalRequirement, ValidatedPlan,
 };
 pub use surface::{
     GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuGlintLobe, GpuMeasuredBrdfLobe,

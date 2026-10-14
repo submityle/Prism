@@ -12,8 +12,9 @@ use alloc::{
 };
 use prism_material_pcm::CapabilitySet;
 use prism_render_architecture::shader_package::{
-    ArtifactDigest, ArtifactValidationError, ManifestExpectation, PackageState, RejectionReason,
-    ShaderPackageManifest, ShaderPackageRegistry, ValidationOutcome, VerifiedShaderArtifact,
+    ArtifactDigest, ArtifactValidationError, ManifestExpectation, PackageState, RegisterError,
+    RejectionReason, ShaderPackageId, ShaderPackageManifest, ShaderPackageRegistry,
+    ValidationOutcome, VerifiedShaderArtifact,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -789,6 +790,8 @@ pub enum RegistryError {
     PackageChanged,
     PackageNotVerified,
     PackageCodeChanged,
+    PackageRegistration(RegisterError),
+    Compile(CompiledEntryError),
     PackageAbi(RejectionReason),
     Contract(ContractError),
     CustomRequiresSplit,
@@ -800,10 +803,35 @@ impl From<ContractError> for RegistryError {
     }
 }
 
+impl From<CompiledEntryError> for RegistryError {
+    fn from(error: CompiledEntryError) -> Self {
+        Self::Compile(error)
+    }
+}
+
+impl From<RegisterError> for RegistryError {
+    fn from(error: RegisterError) -> Self {
+        Self::PackageRegistration(error)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RegisteredResponse {
     manifest: ResponseManifest,
     compiled: CompiledEntry,
+}
+
+/// Receipt returned by the end-to-end custom response producer.
+#[derive(Clone, Debug)]
+pub struct CustomResponseReceipt {
+    /// Stable response-program identity used by authoring and material data.
+    pub program: ProgramRef,
+    /// Package identity used by the verified shader registry.
+    pub package: ShaderPackageId,
+    /// Content digest of the accepted executable bytes.
+    pub digest: ArtifactDigest,
+    /// Reflected entry-point function ID in the executable module.
+    pub function_id: u32,
 }
 
 impl RegisteredResponse {
@@ -841,6 +869,61 @@ impl ResponseRegistry {
             programs: BTreeMap::new(),
             retired: BTreeSet::new(),
         }
+    }
+
+    /// Produces and registers a custom response from executable SPIR-V bytes.
+    ///
+    /// This is the single cold-path entry for custom programs: reflection and
+    /// Naga validation happen before the package is made ready, the package is
+    /// checked against this registry's ABI expectation, and only then is the
+    /// registered `ProgramRef` published. A stale or reserved ID is rejected;
+    /// no builtin or default program is substituted.
+    pub fn register_custom_spirv(
+        &mut self,
+        program_id: ProgramId,
+        manifest: ResponseManifest,
+        package_manifest: ShaderPackageManifest,
+        spirv: Vec<u32>,
+        packages: &mut ShaderPackageRegistry,
+    ) -> Result<CustomResponseReceipt, RegistryError> {
+        let program = ProgramRef::Registered(program_id);
+        check_id(program)?;
+        if self.programs.contains_key(&program) {
+            return Err(RegistryError::DuplicateProgram(program));
+        }
+        if self.retired.contains(&program_id) {
+            return Err(RegistryError::RetiredProgramId(program_id));
+        }
+        if manifest.execution.supports_fused || !manifest.execution.supports_split {
+            return Err(RegistryError::CustomRequiresSplit);
+        }
+        manifest.validate(&self.fields)?;
+
+        let compiled = CompiledEntry::from_spirv(package_manifest, spirv)?;
+        let package_id = compiled.package_manifest().id.clone();
+        if let Some(existing) = packages.verified_artifact(&package_id) {
+            if existing.digest() != compiled.digest() {
+                return Err(RegistryError::PackageCodeChanged);
+            }
+        } else if packages.contains(&package_id) {
+            return Err(RegistryError::PackageNotVerified);
+        } else {
+            packages.register_verified(compiled.artifact().clone())?;
+        }
+        let outcome = packages
+            .validate(&package_id, &self.abi_expectation)
+            .ok_or(RegistryError::PackageUnavailable)?;
+        if let ValidationOutcome::Rejected(reason) = outcome {
+            return Err(RegistryError::PackageAbi(reason));
+        }
+        self.check_binding(&compiled, packages)?;
+        self.register(program, manifest, compiled.clone(), packages)?;
+        Ok(CustomResponseReceipt {
+            program,
+            package: package_id,
+            digest: compiled.digest(),
+            function_id: compiled.function_id(),
+        })
     }
     /// Atomic: no id is consumed if any contract/artifact/package check fails.
     pub fn register(

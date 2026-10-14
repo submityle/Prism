@@ -283,6 +283,89 @@ fn packages() -> ShaderPackageRegistry {
         .is_accepted());
     packages
 }
+
+#[test]
+fn custom_spirv_registration_publishes_a_verified_receipt_atomically() {
+    let mut responses = ResponseRegistry::new(catalog(), expectation());
+    let mut packages = ShaderPackageRegistry::new();
+    let receipt = responses
+        .register_custom_spirv(ProgramId(7), manifest(), package(), binary(), &mut packages)
+        .unwrap();
+
+    assert_eq!(receipt.program, ProgramRef::Registered(ProgramId(7)));
+    assert_eq!(receipt.package, package().id);
+    assert_eq!(
+        receipt.digest,
+        CompiledEntry::from_spirv(package(), binary())
+            .unwrap()
+            .digest()
+    );
+    assert_eq!(receipt.function_id, 3);
+    assert_eq!(responses.len(), 1);
+    assert_eq!(packages.len(), 1);
+    assert_eq!(
+        packages.state_of(&receipt.package),
+        Some(PackageState::Ready)
+    );
+    assert!(responses.resolve(receipt.program, &packages).is_ok());
+}
+
+#[test]
+fn custom_spirv_registration_rejects_stale_invalid_and_incompatible_inputs_without_response() {
+    let mut stale = ResponseRegistry::new(catalog(), expectation());
+    let mut stale_packages = packages();
+    stale
+        .register(registered(9), manifest(), compiled(), &stale_packages)
+        .unwrap();
+    stale.unregister(registered(9)).unwrap();
+    let stale_error = stale.register_custom_spirv(
+        ProgramId(9),
+        manifest(),
+        package(),
+        binary(),
+        &mut stale_packages,
+    );
+    assert!(matches!(
+        stale_error,
+        Err(RegistryError::RetiredProgramId(ProgramId(9)))
+    ));
+    assert!(stale.is_empty());
+
+    let mut invalid = ResponseRegistry::new(catalog(), expectation());
+    let mut invalid_packages = ShaderPackageRegistry::new();
+    let invalid_error = invalid.register_custom_spirv(
+        ProgramId(10),
+        manifest(),
+        package(),
+        vec![0x0723_0203],
+        &mut invalid_packages,
+    );
+    assert!(matches!(invalid_error, Err(RegistryError::Compile(_))));
+    assert!(invalid.is_empty());
+    assert!(invalid_packages.is_empty());
+
+    let mut incompatible = ResponseRegistry::new(catalog(), expectation());
+    let mut incompatible_packages = ShaderPackageRegistry::new();
+    let mut incompatible_manifest = package();
+    incompatible_manifest.abi_hash = AbiHash::from_bytes(b"wrong");
+    let incompatible_error = incompatible.register_custom_spirv(
+        ProgramId(11),
+        manifest(),
+        incompatible_manifest,
+        binary(),
+        &mut incompatible_packages,
+    );
+    assert!(matches!(
+        incompatible_error,
+        Err(RegistryError::PackageAbi(_))
+    ));
+    assert!(incompatible.is_empty());
+    assert_eq!(incompatible_packages.len(), 1);
+    assert_eq!(
+        incompatible_packages.state_of(&ShaderPackageId::new("contract-test")),
+        Some(PackageState::Rejected)
+    );
+}
 fn context() -> PlanValidationContext {
     PlanValidationContext {
         active_lobes: LobeMask::all(),
