@@ -42,16 +42,17 @@
 //! - **Standard I/O (implemented and covered by crate tests, `std`):** `AssetServer`, `AssetLoader`,
 //!   `LoadContext`, path/load deduplication, VFS sources, synchronous dependency
 //!   assembly, and a bounded scheduler with a limited lock-outside read/decode/
-//!   dependency-commit path, cancellation and backpressure.
+//!   dependency-commit path, separate I/O/CPU pools, cancellation and
+//!   backpressure.
 //! - **Hot reload (implemented in part):** watcher/event batching, reload plans,
 //!   dependency-aware reassembly, and last-known-good retention are available;
 //!   lock-free asynchronous reassembly, full labeled-revision lifecycle, and
 //!   Windows-equivalent secure path opening remain incomplete.
 //! - **Not implemented here:** offline cooking, DDC/CAS ownership, codecs,
 //!   labeled-asset async assembly, reload epochs, range-backed assembly,
-//!   independent I/O/CPU pools, streaming residency, DirectStorage/GPU decode,
-//!   and release packaging. Those belong to Asset Build or future runtime
-//!   features. The scheduler slice is not a complete EDL pipeline.
+//!   streaming residency, DirectStorage/GPU decode, and release packaging.
+//!   Those belong to Asset Build or future runtime features. The scheduler
+//!   slice is not a complete EDL pipeline.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]

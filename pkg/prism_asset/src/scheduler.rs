@@ -3,12 +3,14 @@
 //!
 //! This API coalesces concurrent requests for the same path, bounds admission,
 //! snapshots source/loader state under the server mutex, and performs full
-//! reads and synchronous CPU decoding outside that mutex before committing one
-//! dependency-aware revision. The current slice does not support labeled
-//! sub-assets, reload epochs, range reads, independent I/O/CPU pools, or
-//! preemptive cancellation. Priority orders queued task-pool work where
-//! possible; ticket cancellation stops that caller from waiting but does not
-//! kill shared or already-running work.
+//! reads on an I/O pool plus synchronous CPU decoding on a CPU pool before
+//! committing one dependency-aware revision. Awaiting a dependency yields the
+//! CPU worker, so a fixed worker count cannot deadlock solely because parent
+//! assemblies are waiting for child flights. The current slice does not
+//! support labeled sub-assets, reload epochs, range reads, or preemptive
+//! cancellation. Priority orders queued CPU-pool work where possible; ticket
+//! cancellation stops that caller from waiting but does not kill shared or
+//! already-running work.
 
 use crate::server::AsyncLoadPreparation;
 use crate::{AssetPath, AssetServer, AssetTypeId, UntypedHandle};
@@ -140,7 +142,8 @@ struct SchedulerState {
 /// joins its existing request even when the scheduler is at capacity.
 pub struct LoadScheduler {
     server: Arc<AssetServer>,
-    pool: TaskPool,
+    io_pool: TaskPool,
+    cpu_pool: TaskPool,
     limit: usize,
     state: Arc<Mutex<SchedulerState>>,
 }
@@ -149,7 +152,8 @@ impl Clone for LoadScheduler {
     fn clone(&self) -> Self {
         Self {
             server: Arc::clone(&self.server),
-            pool: self.pool.clone(),
+            io_pool: self.io_pool.clone(),
+            cpu_pool: self.cpu_pool.clone(),
             limit: self.limit,
             state: Arc::clone(&self.state),
         }
@@ -158,13 +162,36 @@ impl Clone for LoadScheduler {
 
 impl LoadScheduler {
     /// Create a scheduler with an explicit pool and a maximum number of
-    /// concurrently admitted unique paths. `max_in_flight` must be nonzero.
+    /// concurrently admitted unique paths. The supplied pool remains the CPU
+    /// pool for source compatibility; an independent I/O pool with the same
+    /// worker count is created for blocking source reads. `max_in_flight` must
+    /// be nonzero.
     #[must_use]
     pub fn new(server: Arc<AssetServer>, pool: TaskPool, max_in_flight: usize) -> Self {
+        let io_pool = TaskPool::with_threads(pool.worker_count());
+        Self::with_io_cpu_pools(server, io_pool, pool, max_in_flight)
+    }
+
+    /// Create a scheduler with explicitly separated I/O and CPU pools.
+    ///
+    /// I/O work is submitted to `io_pool`; decoding, dependency assembly, and
+    /// commit work run on `cpu_pool`. The pools must be independent: passing
+    /// the same single-threaded pool for both can deadlock a read future that
+    /// is awaited by its only worker. Dependency waits are future awaits, not
+    /// blocking joins, so CPU workers are available to run newly admitted
+    /// dependency flights while parents are pending.
+    #[must_use]
+    pub fn with_io_cpu_pools(
+        server: Arc<AssetServer>,
+        io_pool: TaskPool,
+        cpu_pool: TaskPool,
+        max_in_flight: usize,
+    ) -> Self {
         assert!(max_in_flight > 0, "max_in_flight must be nonzero");
         Self {
             server,
-            pool,
+            io_pool,
+            cpu_pool,
             limit: max_in_flight,
             state: Arc::new(Mutex::new(SchedulerState {
                 in_flight: BTreeMap::new(),
@@ -214,7 +241,7 @@ impl LoadScheduler {
                                 result: None,
                                 waiters: Vec::new(),
                             }),
-                            priority: self.pool.priority_group(priority),
+                            priority: self.cpu_pool.priority_group(priority),
                             requested_type: Some(requested_type),
                         });
                         conflict.complete(Err(LoadFailure::AssemblyFailed(format!(
@@ -241,7 +268,7 @@ impl LoadScheduler {
                         result: None,
                         waiters: Vec::new(),
                     }),
-                    priority: self.pool.priority_group(priority),
+                    priority: self.cpu_pool.priority_group(priority),
                     requested_type,
                 });
                 state.in_flight.insert(path.clone(), Arc::clone(&flight));
@@ -255,7 +282,7 @@ impl LoadScheduler {
             let job_flight = Arc::clone(&flight);
             let job_path = path.clone();
             let scheduler = self.clone();
-            let pool = self.pool.clone();
+            let pool = self.cpu_pool.clone();
             let task = pool.spawn_async(async move {
                 let outcome = execute_async_load(
                     scheduler,
@@ -347,11 +374,32 @@ async fn execute_async_load(
         }
         AsyncLoadPreparation::New(plan) => plan,
     };
+    let bytes = if scheduler.io_pool.is_single_threaded() {
+        read_bytes_inline(&plan)
+    } else {
+        let read_sources = plan.sources.clone();
+        let read_path = plan.path.clone();
+        scheduler
+            .io_pool
+            .spawn_async(async move {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    read_sources.read(&read_path)
+                })) {
+                    Ok(Ok(bytes)) => Ok(bytes),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => Err("asset source or loader panicked".to_string()),
+                }
+            })
+            .await
+    };
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            server.fail_async_load(&plan, &error);
+            return Err(LoadFailure::AssemblyFailed(error));
+        }
+    };
     let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let bytes = plan
-            .sources
-            .read(&plan.path)
-            .map_err(|error| error.to_string())?;
         plan.loaders
             .load_for_type(&plan.path, plan.type_id, &bytes)
             .map_err(|error| error.to_string())
@@ -413,6 +461,16 @@ async fn execute_async_load(
     server
         .commit_async_load(plan, output, dependencies)
         .map_err(LoadFailure::AssemblyFailed)
+}
+
+fn read_bytes_inline(plan: &crate::server::AsyncLoadPlan) -> Result<Vec<u8>, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        plan.sources.read(&plan.path)
+    })) {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("asset source or loader panicked".to_string()),
+    }
 }
 
 /// A future for one consumer of a scheduled load. Cancelling a ticket only
@@ -687,8 +745,8 @@ mod tests {
         ));
 
         release.store(true, Ordering::Release);
-        assert!(scheduler.pool.block_on(&mut first).is_ok());
-        assert!(scheduler.pool.block_on(duplicate).is_ok());
+        assert!(scheduler.cpu_pool.block_on(&mut first).is_ok());
+        assert!(scheduler.cpu_pool.block_on(duplicate).is_ok());
         assert_eq!(scheduler.in_flight(), 0);
 
         // The completion path released the exact flight's slot before a new
@@ -696,7 +754,7 @@ mod tests {
         let next = scheduler
             .schedule("gate://second.sched", Priority::Normal)
             .expect("capacity released after completion");
-        assert!(scheduler.pool.block_on(next).is_ok());
+        assert!(scheduler.cpu_pool.block_on(next).is_ok());
         assert_eq!(scheduler.in_flight(), 0);
     }
 
@@ -707,7 +765,10 @@ mod tests {
         let ticket = scheduler
             .schedule("missing.unknown", Priority::Normal)
             .expect("request admitted");
-        assert_eq!(scheduler.pool.block_on(ticket), Err(LoadFailure::NoLoader));
+        assert_eq!(
+            scheduler.cpu_pool.block_on(ticket),
+            Err(LoadFailure::NoLoader)
+        );
         assert_eq!(scheduler.in_flight(), 0);
     }
 
@@ -721,7 +782,7 @@ mod tests {
             .schedule("panic://boom.sched", Priority::Normal)
             .expect("request admitted");
         let error = scheduler
-            .pool
+            .cpu_pool
             .block_on(ticket)
             .expect_err("source panic must fail the scheduled assembly");
         assert_eq!(
@@ -764,8 +825,8 @@ mod tests {
         }
         assert_eq!(peak.load(Ordering::Acquire), 2);
         release.store(true, Ordering::Release);
-        assert!(scheduler.pool.block_on(first).is_ok());
-        assert!(scheduler.pool.block_on(second).is_ok());
+        assert!(scheduler.cpu_pool.block_on(first).is_ok());
+        assert!(scheduler.cpu_pool.block_on(second).is_ok());
     }
 
     #[test]
@@ -777,12 +838,17 @@ mod tests {
         server.register_loader(TestLoader);
         server.register_loader(ParentLoader);
         server.mount("mem", Arc::new(source), 0);
-        let scheduler = LoadScheduler::new(Arc::clone(&server), TaskPool::with_threads(2), 4);
+        let scheduler = LoadScheduler::with_io_cpu_pools(
+            Arc::clone(&server),
+            TaskPool::with_threads(1),
+            TaskPool::with_threads(1),
+            4,
+        );
         let ticket = scheduler
             .schedule("mem://parent.parent", Priority::Normal)
             .expect("parent request admitted");
         let handle = scheduler
-            .pool
+            .cpu_pool
             .block_on(ticket)
             .expect("parent and child commit");
         assert!(server.is_loaded(handle.id()));
@@ -805,7 +871,7 @@ mod tests {
             .schedule("mem://parent.parent", Priority::Normal)
             .expect("parent request admitted");
         let error = scheduler
-            .pool
+            .cpu_pool
             .block_on(ticket)
             .expect_err("dependency failure must be terminal");
         assert!(matches!(error, LoadFailure::AssemblyFailed(_)));
@@ -830,7 +896,7 @@ mod tests {
             .schedule("mem://a.cyc", Priority::Normal)
             .expect("cycle request admitted");
         let error = scheduler
-            .pool
+            .cpu_pool
             .block_on(ticket)
             .expect_err("dependency cycle must be terminal");
         assert!(matches!(error, LoadFailure::AssemblyFailed(_)));
@@ -862,13 +928,13 @@ mod tests {
             )
             .expect("conflict is represented by a completed ticket");
         assert_eq!(
-            scheduler.pool.block_on(second),
+            scheduler.cpu_pool.block_on(second),
             Err(LoadFailure::AssemblyFailed(
                 "same asset path requested with conflicting types: gate://typed.sched".into()
             ))
         );
         release.store(true, Ordering::Release);
-        assert!(scheduler.pool.block_on(&mut first).is_ok());
+        assert!(scheduler.cpu_pool.block_on(&mut first).is_ok());
         assert_eq!(scheduler.in_flight(), 0);
     }
 
@@ -1046,7 +1112,7 @@ mod tests {
         drop(first);
         assert_eq!(flight.waiter_count(), 1);
         release.store(true, Ordering::Release);
-        assert!(scheduler.pool.block_on(duplicate).is_ok());
+        assert!(scheduler.cpu_pool.block_on(duplicate).is_ok());
         assert_eq!(flight.waiter_count(), 0);
     }
 
