@@ -411,59 +411,6 @@ impl Default for GpuMeasuredBrdfLobe {
 pub struct LobeMask(pub u32);
 
 impl LobeMask {
-    pub const EMISSION: Self = Self(1 << 0);
-    pub const CLEARCOAT: Self = Self(1 << 1);
-    pub const ANISOTROPY: Self = Self(1 << 2);
-    pub const SHEEN: Self = Self(1 << 3);
-    pub const SUBSURFACE: Self = Self(1 << 4);
-    pub const TRANSMISSION: Self = Self(1 << 5);
-    /// `OpenPBR` `thin_film`: the iridescent film lobe.
-    pub const THIN_FILM: Self = Self(1 << 6);
-    /// The stylized SDF face-shadow lobe. It lives at the base of the Prism
-    /// extension region (§4.5 constraint 2), so the canonical `KHR` region can
-    /// grow through slots 0..16 without ever aliasing a private lobe.
-    pub const NPR_FACE: Self = Self(1 << 16);
-    /// The procedural glint lobe (§17.6): a discrete (counting) microfacet
-    /// estimator blended into the specular lobe. Slot 17 keeps the extension
-    /// region dense from its base.
-    pub const GLINT: Self = Self(1 << 17);
-    /// The measured (tabulated) BRDF/BTF lobe (§17.6): trilinear table lookup in
-    /// Rusinkiewicz coordinates. Slot 18 keeps the extension region dense.
-    pub const MEASURED_BRDF: Self = Self(1 << 18);
-
-    /// The `OpenPBR` specification-core bit region (§4.5 constraint 2).
-    ///
-    /// Canonical (`namespace == "KHR"`) lobes occupy this low, fixed segment.
-    /// A mask that fits entirely inside [`Self::KHR_REGION`] describes a
-    /// *pure `OpenPBR`* surface, so pruning it to this region is the identity
-    /// (see [`crate::project_to_openpbr`]) and its BSDF response is the
-    /// conformance reference the `OpenPBR` gate compares against.
-    ///
-    /// This mask is the runtime mirror of the schema's `namespace` column; the
-    /// schema-parity gate asserts the two never drift.
-    pub const KHR_REGION: Self = Self(
-        Self::EMISSION.0
-            | Self::CLEARCOAT.0
-            | Self::ANISOTROPY.0
-            | Self::SHEEN.0
-            | Self::SUBSURFACE.0
-            | Self::TRANSMISSION.0
-            | Self::THIN_FILM.0,
-    );
-
-    /// The Prism extension bit region (§4.5 constraint 2).
-    ///
-    /// Every non-`KHR` lobe (`PRISM`/`EXT`/`X_STUDIO`) occupies this high
-    /// segment. It is disjoint from [`Self::KHR_REGION`], so a private lobe can
-    /// never alias a specification-half field, and a downstream pure-OpenPBR
-    /// consumer simply ignores anything outside [`Self::KHR_REGION`].
-    pub const EXTENSION_REGION: Self =
-        Self(Self::NPR_FACE.0 | Self::GLINT.0 | Self::MEASURED_BRDF.0);
-
-    /// Number of distinct lobe bits defined; also the number of iterations of
-    /// [`Self::iter_present`] over a fully populated mask.
-    pub const COUNT: u32 = 10;
-
     /// Raw bits.
     pub const fn bits(self) -> u32 {
         self.0
@@ -482,25 +429,6 @@ impl LobeMask {
     /// Count of present lobes (drives the packed length).
     pub const fn present_count(self) -> u32 {
         (self.0 & Self::all().0).count_ones()
-    }
-
-    /// The mask with every defined lobe bit set.
-    pub const fn all() -> Self {
-        // Two dense segments (§4.5 constraint 2): canonical `0..6` plus the
-        // extension base at bit 16, so this is an OR of the defined bits rather
-        // than a contiguous `(1 << COUNT) - 1`.
-        Self(
-            Self::EMISSION.0
-                | Self::CLEARCOAT.0
-                | Self::ANISOTROPY.0
-                | Self::SHEEN.0
-                | Self::SUBSURFACE.0
-                | Self::TRANSMISSION.0
-                | Self::THIN_FILM.0
-                | Self::NPR_FACE.0
-                | Self::GLINT.0
-                | Self::MEASURED_BRDF.0,
-        )
     }
 
     /// Keep only the bits inside the `OpenPBR` specification-core region.
@@ -539,22 +467,6 @@ impl LobeMask {
         } else {
             Some(LobeRegion::Extension)
         }
-    }
-
-    /// Canonical low-bit-first ordering of the defined lobes.
-    const fn canonical() -> [Self; Self::COUNT as usize] {
-        [
-            Self::EMISSION,
-            Self::CLEARCOAT,
-            Self::ANISOTROPY,
-            Self::SHEEN,
-            Self::SUBSURFACE,
-            Self::TRANSMISSION,
-            Self::THIN_FILM,
-            Self::NPR_FACE,
-            Self::GLINT,
-            Self::MEASURED_BRDF,
-        ]
     }
 }
 
@@ -1109,10 +1021,7 @@ mod tests {
         let block = SurfaceParameterBlock::from_full(&authored(), LobeMask::all());
         assert_eq!(
             block.packed_len_words(),
-            SURFACE_CORE_WORDS
-                + crate::surface_layout::SURFACE_LOBE_WORDS_BY_SLOT
-                    .iter()
-                    .sum::<usize>()
+            SURFACE_CORE_WORDS + SURFACE_LOBE_WORDS_BY_SLOT.iter().sum::<usize>()
         );
         assert_eq!(block.pack().len(), block.packed_len_words());
     }
@@ -1120,8 +1029,17 @@ mod tests {
     #[test]
     fn pack_unpack_round_trips_for_every_lobe_subset() {
         let params = authored();
-        for raw in 0..(1u32 << LobeMask::COUNT) {
-            let mask = LobeMask(raw);
+        for subset in 0..(1u32 << LobeMask::COUNT) {
+            let mask = LobeMask::canonical().into_iter().enumerate().fold(
+                LobeMask::default(),
+                |mask, (index, bit)| {
+                    if subset & (1 << index) != 0 {
+                        mask.union(bit)
+                    } else {
+                        mask
+                    }
+                },
+            );
             let block = SurfaceParameterBlock::from_full(&params, mask);
             let words = block.pack();
             assert_eq!(words.len(), block.packed_len_words());

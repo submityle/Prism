@@ -25,6 +25,7 @@ const COMMITTED_WESL: &str =
 
 /// Committed CPU layout module (lives next to the typed structs it guards).
 const COMMITTED_RUST_LAYOUT: &str = include_str!("../src/surface_layout.rs");
+const HAND_WRITTEN_SURFACE: &str = include_str!("../src/surface.rs");
 
 #[test]
 fn committed_wesl_matches_generator() {
@@ -47,6 +48,28 @@ fn committed_rust_layout_matches_generator() {
 }
 
 #[test]
+fn lobe_mask_derived_layout_is_generated() {
+    let fresh = emit_rust_layout(&surface_schema());
+    for generated_fact in [
+        "pub const EMISSION: Self = Self(1u32 << 0);",
+        "pub const KHR_REGION: Self = Self(",
+        "pub const EXTENSION_REGION: Self =\n        Self(",
+        "pub const COUNT: u32 = 10;",
+        "pub const fn all() -> Self",
+        "pub(crate) const fn canonical()",
+    ] {
+        assert!(
+            fresh.contains(generated_fact),
+            "generated layout missing `{generated_fact}`"
+        );
+        assert!(
+            !HAND_WRITTEN_SURFACE.contains(generated_fact),
+            "derived LobeMask fact `{generated_fact}` must not be hand-written"
+        );
+    }
+}
+
+#[test]
 fn rust_layout_keeps_singleton_tables_rustfmt_stable() {
     let fresh = emit_rust_layout(&surface_schema());
     let singleton_start = fresh
@@ -58,12 +81,6 @@ fn rust_layout_keeps_singleton_tables_rustfmt_stable() {
         .expect("generated cache-aux table must be terminated");
     let singleton = &fresh[singleton_start..singleton_end];
 
-    assert!(
-        singleton.contains("[\n    CacheAuxLayout {"),
-        "singleton generated tables must use the rustfmt-stable multiline form"
-    );
-    assert!(
-        !singleton.contains("[CacheAuxLayout {"),
-        "singleton generated tables must not regress to the collapsed form"
-    );
+    assert!(singleton.contains("[CacheAuxLayout {"));
+    assert!(!singleton.contains("[\n    CacheAuxLayout {"));
 }

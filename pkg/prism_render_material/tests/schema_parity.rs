@@ -11,7 +11,7 @@ use prism_material_schema::{surface_schema, FieldType, SurfaceSchema};
 use prism_render_material::{
     openpbr_conformance, project_to_openpbr, GpuSurfaceParameters, LobeMask, LobeRegion,
     OpenPbrConformance, SurfaceParameterBlock, MATERIAL_ABI_VERSION, SURFACE_CORE_WORDS,
-    SURFACE_LOBE_WORDS, SURFACE_LOBE_WORDS_BY_SLOT,
+    SURFACE_LOBES, SURFACE_LOBE_WORDS, SURFACE_LOBE_WORDS_BY_SLOT,
 };
 
 #[test]
@@ -205,7 +205,17 @@ fn registry_slots_match_lobe_mask_constants() {
 fn packed_len_matches_for_every_lobe_subset() {
     let schema = schema();
     let params = authored();
-    for raw in 0..(1u32 << LobeMask::COUNT) {
+    for subset in 0..(1u32 << LobeMask::COUNT) {
+        let raw = SURFACE_LOBES
+            .iter()
+            .enumerate()
+            .fold(0u32, |mask, (index, lobe)| {
+                if subset & (1 << index) != 0 {
+                    mask | (1 << lobe.registry_slot)
+                } else {
+                    mask
+                }
+            });
         let mask = LobeMask(raw);
         let block = SurfaceParameterBlock::from_full(&params, mask);
         assert_eq!(

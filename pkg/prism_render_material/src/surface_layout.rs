@@ -33,6 +33,69 @@ pub const SURFACE_LOBE_COUNT: u32 = 10;
 /// an `array<u32, SURFACE_MAX_WORDS>`.
 pub const SURFACE_MAX_WORDS: usize = 104;
 
+/// Schema-derived optional-lobe mask facts.
+impl crate::surface::LobeMask {
+    /// Bit for the `emission` lobe (schema registry slot 0).
+    pub const EMISSION: Self = Self(1u32 << 0);
+    /// Bit for the `clearcoat` lobe (schema registry slot 1).
+    pub const CLEARCOAT: Self = Self(1u32 << 1);
+    /// Bit for the `anisotropy` lobe (schema registry slot 2).
+    pub const ANISOTROPY: Self = Self(1u32 << 2);
+    /// Bit for the `sheen` lobe (schema registry slot 3).
+    pub const SHEEN: Self = Self(1u32 << 3);
+    /// Bit for the `subsurface` lobe (schema registry slot 4).
+    pub const SUBSURFACE: Self = Self(1u32 << 4);
+    /// Bit for the `transmission` lobe (schema registry slot 5).
+    pub const TRANSMISSION: Self = Self(1u32 << 5);
+    /// Bit for the `thin_film` lobe (schema registry slot 6).
+    pub const THIN_FILM: Self = Self(1u32 << 6);
+    /// Bit for the `npr_face` lobe (schema registry slot 16).
+    pub const NPR_FACE: Self = Self(1u32 << 16);
+    /// Bit for the `glint` lobe (schema registry slot 17).
+    pub const GLINT: Self = Self(1u32 << 17);
+    /// Bit for the `measured_brdf` lobe (schema registry slot 18).
+    pub const MEASURED_BRDF: Self = Self(1u32 << 18);
+
+    /// All `OpenPBR` specification-core lobe bits.
+    pub const KHR_REGION: Self = Self(
+        Self::EMISSION.0
+            | Self::CLEARCOAT.0
+            | Self::ANISOTROPY.0
+            | Self::SHEEN.0
+            | Self::SUBSURFACE.0
+            | Self::TRANSMISSION.0
+            | Self::THIN_FILM.0,
+    );
+
+    /// All non-`KHR` extension lobe bits.
+    pub const EXTENSION_REGION: Self =
+        Self(Self::NPR_FACE.0 | Self::GLINT.0 | Self::MEASURED_BRDF.0);
+
+    /// Number of distinct lobe bits defined by the schema.
+    pub const COUNT: u32 = 10;
+
+    /// The mask containing every schema-defined lobe bit.
+    pub const fn all() -> Self {
+        Self(Self::KHR_REGION.0 | Self::EXTENSION_REGION.0)
+    }
+
+    /// Defined lobes in canonical low-bit-first pack order.
+    pub(crate) const fn canonical() -> [Self; Self::COUNT as usize] {
+        [
+            Self::EMISSION,
+            Self::CLEARCOAT,
+            Self::ANISOTROPY,
+            Self::SHEEN,
+            Self::SUBSURFACE,
+            Self::TRANSMISSION,
+            Self::THIN_FILM,
+            Self::NPR_FACE,
+            Self::GLINT,
+            Self::MEASURED_BRDF,
+        ]
+    }
+}
+
 /// One optional lobe's generated identity, in canonical pack order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LobeLayout {
@@ -295,18 +358,16 @@ pub struct CacheAuxLayout {
 }
 
 /// The object-space cache auxiliaries in registry-slot order.
-pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
-    CacheAuxLayout {
-        id: "surfel",
-        uid: "org.prism.cache_aux.surfel",
-        registry_slot: 26,
-        namespace: "PRISM",
-        vendor: "prism",
-        stability: "candidate",
-        requires_caps: &["object_space_cache"],
-        view_dependent: false,
-    },
-];
+pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [CacheAuxLayout {
+    id: "surfel",
+    uid: "org.prism.cache_aux.surfel",
+    registry_slot: 26,
+    namespace: "PRISM",
+    vendor: "prism",
+    stability: "candidate",
+    requires_caps: &["object_space_cache"],
+    view_dependent: false,
+}];
 
 /// One bake/pass-time extension's generated manifest identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

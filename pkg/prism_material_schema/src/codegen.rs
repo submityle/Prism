@@ -9,9 +9,10 @@
 //!   (`prism_render_scene/src/shaders/material_unpack.wesl`): the lobe-bit
 //!   constants, the neutral surface, `prism_packed_word_count` and
 //!   `prism_unpack_surface`.
-//! * [`emit_rust_layout`] — the CPU layout constants and lobe table consumed by
-//!   `prism_render_material::surface` (`SURFACE_CORE_WORDS`, `SURFACE_MAX_WORDS`,
-//!   the canonical [`SURFACE_LOBES`](crate) table, …).
+//! * [`emit_rust_layout`] — the CPU layout constants, `LobeMask` layout facts,
+//!   and lobe table consumed by `prism_render_material::surface`
+//!   (`SURFACE_CORE_WORDS`, `SURFACE_MAX_WORDS`, the canonical
+//!   [`SURFACE_LOBES`](crate) table, …).
 //!
 //! Both emitters are pure functions of the schema, so the generated files are
 //! committed and a freshness test (`regenerate == committed`) turns any drift
@@ -397,13 +398,15 @@ const fn energy_policy_str(policy: EnergyPolicy) -> &'static str {
 }
 
 /// Emit the generated Rust layout module consumed by
-/// `prism_render_material::surface` (constants + the canonical lobe table).
+/// `prism_render_material::surface` (constants, `LobeMask` layout facts, and
+/// the canonical lobe table).
 ///
 /// The output is byte-stable and ends with a trailing newline. It deliberately
-/// contains *no behaviour*, only the layout facts the hand-written typed structs
-/// are checked against: word counts, the lobe count, the worst-case word count,
-/// and the canonical `(id, mask_const, registry_slot, words)` table in pack
-/// order.
+/// contains only schema-derived layout facts the hand-written typed structs are
+/// checked against: word counts, lobe bits and regions, the worst-case word
+/// count, and the canonical `(id, mask_const, registry_slot, words)` table in
+/// pack order. Small `const fn` accessors are emitted with the facts so no
+/// hand-written list can become a second source of truth.
 #[must_use]
 pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     let core_words = schema.core.words;
@@ -485,6 +488,94 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     o.push_str("/// an `array<u32, SURFACE_MAX_WORDS>`.\n");
     let _ = writeln!(o, "pub const SURFACE_MAX_WORDS: usize = {max_words};");
     o.push('\n');
+
+    // LobeMask's bit assignments, namespace regions, count and canonical pack
+    // order are all derived facts. Emit them in a separate impl so the type and
+    // behaviour-oriented methods can stay hand-written in `surface.rs` while
+    // schema changes cannot drift from a duplicated bit list.
+    o.push_str("/// Schema-derived optional-lobe mask facts.\n");
+    o.push_str("impl crate::surface::LobeMask {\n");
+    for lobe in &lobes {
+        let _ = writeln!(
+            o,
+            "    /// Bit for the `{}` lobe (schema registry slot {}).",
+            lobe.id, lobe.registry_slot
+        );
+        let _ = writeln!(
+            o,
+            "    pub const {}: Self = Self(1u32 << {});",
+            lobe.mask_const, lobe.registry_slot
+        );
+    }
+
+    let khr_lobes = lobes
+        .iter()
+        .copied()
+        .filter(|lobe| lobe.namespace.is_openpbr_core())
+        .collect::<Vec<_>>();
+    let extension_lobes = lobes
+        .iter()
+        .copied()
+        .filter(|lobe| !lobe.namespace.is_openpbr_core())
+        .collect::<Vec<_>>();
+
+    fn emit_region_mask(o: &mut String, name: &str, lobes: &[&Lobe]) {
+        if lobes.is_empty() {
+            let _ = writeln!(o, "    pub const {name}: Self = Self(0);");
+            return;
+        }
+        if lobes.len() <= 3 {
+            let expression = lobes
+                .iter()
+                .map(|lobe| format!("Self::{}.0", lobe.mask_const))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let declaration = format!("    pub const {name}: Self = Self({expression});");
+            if declaration.chars().count() > RUSTFMT_MAX_WIDTH {
+                let _ = writeln!(o, "    pub const {name}: Self =");
+                let _ = writeln!(o, "        Self({expression});");
+            } else {
+                let _ = writeln!(o, "{declaration}");
+            }
+            return;
+        }
+
+        let _ = writeln!(o, "    pub const {name}: Self = Self(");
+        for (index, lobe) in lobes.iter().enumerate() {
+            let suffix = if index + 1 == lobes.len() { "," } else { "" };
+            if index == 0 {
+                let _ = writeln!(o, "        Self::{}.0{suffix}", lobe.mask_const);
+            } else {
+                let _ = writeln!(o, "            | Self::{}.0{suffix}", lobe.mask_const);
+            }
+        }
+        o.push_str("    );\n");
+    }
+
+    o.push_str("\n    /// All `OpenPBR` specification-core lobe bits.\n");
+    emit_region_mask(&mut o, "KHR_REGION", &khr_lobes);
+
+    o.push_str("\n    /// All non-`KHR` extension lobe bits.\n");
+    emit_region_mask(&mut o, "EXTENSION_REGION", &extension_lobes);
+
+    o.push_str("\n    /// Number of distinct lobe bits defined by the schema.\n");
+    let _ = writeln!(o, "    pub const COUNT: u32 = {count};");
+
+    o.push_str("\n    /// The mask containing every schema-defined lobe bit.\n");
+    o.push_str("    pub const fn all() -> Self {\n");
+    o.push_str("        Self(Self::KHR_REGION.0 | Self::EXTENSION_REGION.0)\n");
+    o.push_str("    }\n");
+
+    o.push_str("\n    /// Defined lobes in canonical low-bit-first pack order.\n");
+    o.push_str("    pub(crate) const fn canonical() -> [Self; Self::COUNT as usize] {\n");
+    o.push_str("        [\n");
+    for lobe in &lobes {
+        let _ = writeln!(o, "            Self::{},", lobe.mask_const);
+    }
+    o.push_str("        ]\n");
+    o.push_str("    }\n");
+    o.push_str("}\n\n");
+
     o.push_str("/// One optional lobe's generated identity, in canonical pack order.\n");
     o.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
     o.push_str("pub struct LobeLayout {\n");
@@ -665,27 +756,51 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     cache_aux.sort_by_key(|aux| aux.registry_slot);
     let _ = writeln!(
         o,
-        "/// The object-space cache auxiliaries in registry-slot order.\npub const SURFACE_CACHE_AUX: [CacheAuxLayout; {}] = [",
-        cache_aux.len()
+        "/// The object-space cache auxiliaries in registry-slot order."
     );
+    if cache_aux.len() == 1 {
+        let _ = writeln!(
+            o,
+            "pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [CacheAuxLayout {{"
+        );
+    } else {
+        let _ = writeln!(
+            o,
+            "pub const SURFACE_CACHE_AUX: [CacheAuxLayout; {}] = [",
+            cache_aux.len()
+        );
+    }
     for aux in &cache_aux {
-        o.push_str("    CacheAuxLayout {\n");
-        let _ = writeln!(o, "        id: {:?},", aux.id);
-        let _ = writeln!(o, "        uid: {:?},", aux.uid);
-        let _ = writeln!(o, "        registry_slot: {},", aux.registry_slot);
-        let _ = writeln!(o, "        namespace: {:?},", aux.namespace.as_str());
-        let _ = writeln!(o, "        vendor: {:?},", aux.vendor);
-        let _ = writeln!(o, "        stability: {:?},", aux.stability.as_str());
+        if cache_aux.len() != 1 {
+            o.push_str("    CacheAuxLayout {\n");
+        }
+        let indent = if cache_aux.len() == 1 {
+            "    "
+        } else {
+            "        "
+        };
+        let _ = writeln!(o, "{indent}id: {:?},", aux.id);
+        let _ = writeln!(o, "{indent}uid: {:?},", aux.uid);
+        let _ = writeln!(o, "{indent}registry_slot: {},", aux.registry_slot);
+        let _ = writeln!(o, "{indent}namespace: {:?},", aux.namespace.as_str());
+        let _ = writeln!(o, "{indent}vendor: {:?},", aux.vendor);
+        let _ = writeln!(o, "{indent}stability: {:?},", aux.stability.as_str());
         let caps: Vec<String> = aux
             .requires_caps
             .iter()
             .map(|capability| format!("{capability:?}"))
             .collect();
-        let _ = writeln!(o, "        requires_caps: &[{}],", caps.join(", "));
-        let _ = writeln!(o, "        view_dependent: {},", aux.view_dependent);
-        o.push_str("    },\n");
+        let _ = writeln!(o, "{indent}requires_caps: &[{}],", caps.join(", "));
+        let _ = writeln!(o, "{indent}view_dependent: {},", aux.view_dependent);
+        if cache_aux.len() != 1 {
+            o.push_str("    },\n");
+        }
     }
-    o.push_str("];\n");
+    if cache_aux.len() == 1 {
+        o.push_str("}];\n");
+    } else {
+        o.push_str("];\n");
+    }
 
     // Bake/pass-time identity-only extensions (§5.2): no registry slot, no
     // per-material payload; the generated table is the manifest's
@@ -824,6 +939,25 @@ mod tests {
     }
 
     #[test]
+    fn empty_lobe_regions_emit_zero_masks() {
+        for (keep_core, empty_region) in [(true, "EXTENSION_REGION"), (false, "KHR_REGION")] {
+            let mut schema = surface_schema();
+            schema
+                .lobes
+                .retain(|lobe| lobe.namespace.is_openpbr_core() == keep_core);
+            let rust = emit_rust_layout(&schema);
+            assert!(rust.contains(&format!("    pub const {empty_region}: Self = Self(0);")));
+            assert!(!rust.contains("Self()"));
+        }
+        let mut schema = surface_schema();
+        schema.lobes.clear();
+        let rust = emit_rust_layout(&schema);
+        assert!(rust.contains("    pub const COUNT: u32 = 0;"));
+        assert!(rust.contains("    pub const KHR_REGION: Self = Self(0);"));
+        assert!(rust.contains("    pub const EXTENSION_REGION: Self = Self(0);"));
+    }
+
+    #[test]
     fn wesl_exposes_the_consumer_api() {
         let wesl = emit_wesl_unpack(&surface_schema());
         for needle in [
@@ -884,12 +1018,23 @@ mod tests {
             "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 19] =\n    [8, 16, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4];",
             "pub const SURFACE_LOBE_COUNT: u32 = 10;",
             "pub const SURFACE_MAX_WORDS: usize = 104;",
+            "impl crate::surface::LobeMask {",
+            "    pub const EMISSION: Self = Self(1u32 << 0);",
+            "    pub const THIN_FILM: Self = Self(1u32 << 6);",
+            "    pub const NPR_FACE: Self = Self(1u32 << 16);",
+            "    pub const GLINT: Self = Self(1u32 << 17);",
+            "    pub const MEASURED_BRDF: Self = Self(1u32 << 18);",
+            "    pub const KHR_REGION: Self = Self(",
+            "    pub const EXTENSION_REGION: Self =\n        Self(",
+            "    pub const COUNT: u32 = 10;",
+            "    pub const fn all() -> Self {",
+            "    pub(crate) const fn canonical() -> [Self; Self::COUNT as usize] {",
             "pub const SURFACE_LOBES: [LobeLayout; 10] = [",
             "pub const SURFACE_LOBE_CLOSURES: [(&str, &str); 3] = [\n    (\"clearcoat\", \"clearcoat\"),\n    (\"sheen\", \"sheen\"),\n    (\"subsurface\", \"subsurface\"),\n];",
             "    ChannelLayout {\n        id: \"wetness\",\n        uid: \"org.prism.channel.wetness\",\n        registry_slot: 19,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        header_word: 0,\n        default: 0.0,\n        requires_caps: &[\"object_space_cache\"],\n        view_dependent: false,\n    },",
             "    ChannelLayout {\n        id: \"snow\",\n        uid: \"org.prism.channel.snow\",\n        registry_slot: 20,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        header_word: 1,\n        default: 0.0,\n        requires_caps: &[\"virtual_texture\"],\n        view_dependent: false,\n    },",
-            "pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [",
-            "    CacheAuxLayout {\n        id: \"surfel\",\n        uid: \"org.prism.cache_aux.surfel\",\n        registry_slot: 26,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        requires_caps: &[\"object_space_cache\"],\n        view_dependent: false,\n    },",
+            "pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [CacheAuxLayout {",
+            "    id: \"surfel\",\n    uid: \"org.prism.cache_aux.surfel\",\n    registry_slot: 26,\n    namespace: \"PRISM\",\n    vendor: \"prism\",\n    stability: \"candidate\",\n    requires_caps: &[\"object_space_cache\"],\n    view_dependent: false,\n}];",
             "pub const SURFACE_IDENTITY_EXTENSIONS: [IdentityExtensionLayout; 5] = [",
             "    IdentityExtensionLayout {\n        id: \"face_shadow_sdf\",\n        uid: \"studio.prism.provider.face_shadow_sdf\",\n        kind: \"provider\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
             "    IdentityExtensionLayout {\n        id: \"measured_brdf\",\n        uid: \"org.prism.provider.measured_brdf\",\n        kind: \"provider\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"experimental\",\n        requires_caps: &[\"heavy_sampling\"],\n        view_dependent: true,\n    },",
