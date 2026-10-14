@@ -17,6 +17,7 @@ mod openpbr;
 mod record;
 mod registry;
 mod resources;
+pub mod shading_plan;
 mod surface;
 mod surface_layout;
 mod texture_addressing;
@@ -74,6 +75,14 @@ pub use record::{
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};
+pub use shading_plan::{
+    BlendDomain, BuiltinProgram, CacheChannel, CacheContract, ChannelMask, CompiledEntry,
+    CompiledEntryError, ContractError, CostClass, ExecutionContract, ExecutionFamily, FieldId,
+    FieldMapping, LightingContract, LobeId, MaskSource as ResponseMaskSource, OutputContract,
+    PlanValidationContext, ProgramId, ProgramRef, Reason, RegisteredResponse, RegistryError,
+    ResponseChannel, ResponseManifest, ResponseRegistry, ShadingPlan, SurfaceContract,
+    SurfaceFieldCatalog, TemporalRequirement, ValidatedPlan,
+};
 pub use surface::{
     GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuGlintLobe, GpuMeasuredBrdfLobe,
     GpuNprFaceLobe, GpuSheenLobe, GpuSubsurfaceLobe, GpuSurfaceCore, GpuThinFilmLobe,
@@ -82,9 +91,9 @@ pub use surface::{
 };
 pub use surface_layout::{
     CacheAuxLayout, ChannelLayout, IdentityExtensionLayout, LobeLayout, ResponseModeLayout,
-    SURFACE_CACHE_AUX, SURFACE_CHANNELS, SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES,
-    SURFACE_LOBE_CLOSURES, SURFACE_LOBE_COUNT, SURFACE_LOBE_WORDS_BY_SLOT, SURFACE_MAX_WORDS,
-    SURFACE_RESPONSE_MODES,
+    SurfaceFieldLayout, SURFACE_CACHE_AUX, SURFACE_CHANNELS, SURFACE_FIELDS,
+    SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES, SURFACE_LOBE_CLOSURES, SURFACE_LOBE_COUNT,
+    SURFACE_LOBE_WORDS_BY_SLOT, SURFACE_MAX_WORDS, SURFACE_RESPONSE_MODES,
 };
 pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};
 pub use texture_blend::{
