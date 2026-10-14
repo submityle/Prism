@@ -8,6 +8,7 @@ pub enum MaterialValidationError {
     MissingNode(MaterialNodeId),
     Cycle(MaterialNodeId),
     EmptyClosure(MaterialNodeId),
+    MissingCustomProgram,
 }
 
 impl fmt::Display for MaterialValidationError {
@@ -86,6 +87,7 @@ mod tests {
         let graph = MaterialGraph {
             nodes: BTreeMap::new(),
             output: Some(output),
+            plan: None,
         };
         assert_eq!(
             validate_graph(&graph),
@@ -99,6 +101,7 @@ mod tests {
         let graph = MaterialGraph {
             nodes: BTreeMap::from([(output, MaterialNode::Multiply(output, output))]),
             output: Some(output),
+            plan: None,
         };
         assert_eq!(
             validate_graph(&graph),
@@ -113,6 +116,7 @@ mod tests {
         let graph = MaterialGraph {
             nodes: BTreeMap::from([(a, MaterialNode::Add(b, b)), (b, MaterialNode::Add(a, a))]),
             output: Some(a),
+            plan: None,
         };
         assert!(matches!(
             validate_graph(&graph),
@@ -132,6 +136,7 @@ mod tests {
                 },
             )]),
             output: Some(output),
+            plan: None,
         };
         assert_eq!(
             validate_graph(&graph),
@@ -157,6 +162,7 @@ mod tests {
                 ),
             ]),
             output: Some(output),
+            plan: None,
         };
         assert_eq!(validate_graph(&graph), Ok(()));
     }

@@ -1,5 +1,6 @@
-use crate::axis::{Illumination, SpecializationId};
-use crate::{MaterialFeatureFlags, MaterialRenderClass, MaterialValidationError};
+use crate::{
+    BuiltinProgram, MaterialFeatureFlags, MaterialRenderClass, MaterialValidationError, ShadingPlan,
+};
 use alloc::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -54,21 +55,23 @@ pub enum MaterialNode {
 pub struct MaterialGraph {
     pub nodes: BTreeMap<MaterialNodeId, MaterialNode>,
     pub output: Option<MaterialNodeId>,
+    /// Explicit lowering intent for registered programs and response composition.
+    /// A graph with no override selects Lit or Npr from its live closures.
+    pub plan: Option<ShadingPlan>,
 }
 
 /// The lowered, live-pruned material. The closure graph is **preserved** as an
 /// ordered node list; it is no longer collapsed into a single shading model.
-/// Style lives on the orthogonal [`Illumination`] axis and the compiled
-/// permutation identity is the [`SpecializationId`].
+/// Response selection is an explicit plan. Packed lobes are layout data;
+/// executable module/permutation identity is assigned by package compilation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalizedMaterial {
     pub nodes: Vec<(MaterialNodeId, MaterialNode)>,
     pub output: MaterialNodeId,
     pub features: MaterialFeatureFlags,
     pub render_class: MaterialRenderClass,
-    pub illumination: Illumination,
+    pub plan: ShadingPlan,
     pub closure_mask: u32,
-    pub specialization_id: SpecializationId,
 }
 
 impl MaterialGraph {
@@ -85,7 +88,8 @@ impl MaterialGraph {
 
         let mut closure_mask = 0_u32;
         let mut features = MaterialFeatureFlags::default();
-        let mut illumination = Illumination::Lit;
+        let mut npr = false;
+        let mut custom = false;
         for id in &live {
             match self.nodes[id] {
                 MaterialNode::TextureSample { .. } => features |= MaterialFeatureFlags::NORMAL_MAP,
@@ -97,14 +101,11 @@ impl MaterialGraph {
                     if matches!(kind, ClosureKind::Emission) {
                         features |= MaterialFeatureFlags::EMISSIVE;
                     }
-                    // Illumination is an orthogonal axis, not a collapse: an NPR
-                    // closure marks the surface as `Stylized`, a custom closure
-                    // as `Custom`. The rest of the closure graph is preserved.
                     if matches!(kind, ClosureKind::Npr) {
-                        illumination = Illumination::Stylized;
+                        npr = true;
                     }
                     if matches!(kind, ClosureKind::Custom) {
-                        illumination = Illumination::Custom;
+                        custom = true;
                     }
                     if matches!(kind, ClosureKind::Layer | ClosureKind::Mix) {
                         features |= MaterialFeatureFlags::COMPLEX_CLOSURE;
@@ -122,17 +123,24 @@ impl MaterialGraph {
             MaterialRenderClass::Opaque
         };
 
-        let specialization_id =
-            SpecializationId::new(illumination, closure_mask, render_class as u32);
+        let plan = self.plan.clone().unwrap_or_else(|| {
+            ShadingPlan::single_builtin(if npr {
+                BuiltinProgram::Npr
+            } else {
+                BuiltinProgram::Lit
+            })
+        });
+        if custom && !plan.contains_registered() {
+            return Err(MaterialValidationError::MissingCustomProgram);
+        }
 
         Ok(NormalizedMaterial {
             nodes,
             output,
             features,
             render_class,
-            illumination,
+            plan,
             closure_mask,
-            specialization_id,
         })
     }
 }

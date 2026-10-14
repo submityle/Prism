@@ -10,6 +10,7 @@ pub mod bake;
 #[cfg(feature = "bevy")]
 mod bevy_bridge;
 pub mod capability;
+pub mod execution;
 mod handle;
 mod ir;
 mod normal_map;
@@ -45,6 +46,11 @@ pub use bake::{
 pub use bevy_bridge::{
     import_openpbr_surface, import_standard_material, StandardMaterialTextureResolver,
     TextureSemantic,
+};
+pub use execution::{
+    ExecutionTable, MaterialExecutionBinding, MaterialExecutionError, MaterialExecutionPackage,
+    MaterialExecutionProgram, MaterialExecutionTables, PackageIndex, PlanIndex, ProgramIndex,
+    ResponseProgramIndex, ShadingPlanIndex,
 };
 pub use handle::{MaterialCapacityError, MaterialHandleAllocator, MaterialHandleError};
 pub use ir::{
@@ -90,10 +96,10 @@ pub use surface::{
     SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
 };
 pub use surface_layout::{
-    CacheAuxLayout, ChannelLayout, IdentityExtensionLayout, LobeLayout, ResponseModeLayout,
+    CacheAuxLayout, ChannelLayout, IdentityExtensionLayout, LobeLayout, ResponseProgramLayout,
     SurfaceFieldLayout, SURFACE_CACHE_AUX, SURFACE_CHANNELS, SURFACE_FIELDS,
     SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES, SURFACE_LOBE_CLOSURES, SURFACE_LOBE_COUNT,
-    SURFACE_LOBE_WORDS_BY_SLOT, SURFACE_MAX_WORDS, SURFACE_RESPONSE_MODES,
+    SURFACE_LOBE_WORDS_BY_SLOT, SURFACE_MAX_WORDS, SURFACE_RESPONSE_PROGRAMS,
 };
 pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};
 pub use texture_blend::{

@@ -59,6 +59,16 @@ impl MaterialRegistry {
             return Err(MaterialRegistryError::InvalidHandle(record.handle));
         }
         let index = record.handle.index as usize;
+        // Validate before touching any per-slot state. A rejected publication
+        // must preserve the live record, dynamic channels, epoch and dirty set.
+        if let Some(Some(slot)) = self.slots.get(index)
+            && record.revision <= slot.revision
+        {
+            return Err(MaterialRegistryError::StaleRevision {
+                current: slot.revision,
+                incoming: record.revision,
+            });
+        }
         self.generations
             .resize(self.generations.len().max(index + 1), 0);
         self.generations[index] = record.handle.generation;
@@ -70,14 +80,6 @@ impl MaterialRegistry {
         self.dynamic[index] = DynamicChannels::NONE;
         self.slots
             .resize_with(self.slots.len().max(index + 1), || None);
-        if let Some(slot) = &self.slots[index]
-            && record.revision <= slot.revision
-        {
-            return Err(MaterialRegistryError::StaleRevision {
-                current: slot.revision,
-                incoming: record.revision,
-            });
-        }
         self.slots[index] = Some(Slot {
             revision: record.revision,
             record,
@@ -153,6 +155,9 @@ impl MaterialRegistry {
         if self.slots.get(index).and_then(Option::as_ref).is_none() {
             return Err(MaterialRegistryError::InvalidHandle(handle));
         }
+        // Compare the GPU-visible value, not an unsanitized float: repeated
+        // NaN/out-of-range inputs must not trigger an upload every frame.
+        let channels = DynamicChannels::from_words(channels.to_words());
         self.dynamic
             .resize(self.dynamic.len().max(index + 1), DynamicChannels::NONE);
         if self.dynamic[index] == channels {
@@ -270,6 +275,62 @@ mod tests {
         // A strictly newer revision supersedes the slot.
         registry.publish(record(handle, 6)).unwrap();
         assert_eq!(registry.get(handle).unwrap().revision, 6);
+    }
+
+    #[test]
+    fn rejected_publish_preserves_all_live_state() {
+        let mut registry = MaterialRegistry::new(8);
+        let handle = registry.allocate().unwrap();
+        registry.publish(record(handle, 5)).unwrap();
+        let channels = DynamicChannels {
+            wetness: 0.7,
+            snow: 0.2,
+            damage: 0.4,
+            dissolve: 0.1,
+        };
+        registry.set_dynamic_channels(handle, channels).unwrap();
+        let snapshot = registry.snapshot();
+        let live = registry.get(handle).unwrap().clone();
+        registry.take_dirty();
+        for revision in [0, 4, 5] {
+            assert!(matches!(
+                registry.publish(record(handle, revision)),
+                Err(MaterialRegistryError::StaleRevision { .. })
+            ));
+            assert_eq!(registry.snapshot(), snapshot);
+            assert_eq!(registry.get(handle), Some(&live));
+            assert_eq!(registry.dynamic_channels_at(handle.index), channels);
+            assert_eq!(
+                registry.generation_at(handle.index),
+                Some(handle.generation)
+            );
+            assert!(registry.take_dirty().is_empty());
+        }
+    }
+
+    #[test]
+    fn sanitized_dynamic_inputs_are_upload_idempotent() {
+        let mut registry = MaterialRegistry::new(8);
+        let handle = registry.allocate().unwrap();
+        registry.publish(record(handle, 1)).unwrap();
+        registry.take_dirty();
+        let channels = DynamicChannels {
+            wetness: 4.0,
+            snow: -3.0,
+            damage: f32::NAN,
+            dissolve: f32::INFINITY,
+        };
+        registry.set_dynamic_channels(handle, channels).unwrap();
+        assert_eq!(registry.take_dirty(), vec![handle.index]);
+        registry.set_dynamic_channels(handle, channels).unwrap();
+        assert!(registry.take_dirty().is_empty());
+        assert_eq!(
+            registry.dynamic_channels_at(handle.index),
+            DynamicChannels {
+                wetness: 1.0,
+                ..DynamicChannels::NONE
+            }
+        );
     }
 
     #[test]

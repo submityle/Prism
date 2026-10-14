@@ -47,6 +47,32 @@ pub enum ShadingPlan {
     },
 }
 
+impl Default for ShadingPlan {
+    fn default() -> Self {
+        Self::Single {
+            program: ProgramRef::Builtin(BuiltinProgram::Lit),
+        }
+    }
+}
+
+impl ShadingPlan {
+    pub const fn single_builtin(program: BuiltinProgram) -> Self {
+        Self::Single {
+            program: ProgramRef::Builtin(program),
+        }
+    }
+
+    pub fn contains_registered(&self) -> bool {
+        match self {
+            Self::Single { program } => matches!(program, ProgramRef::Registered(_)),
+            Self::MaskBlend { left, right, .. } => {
+                matches!(left, ProgramRef::Registered(_))
+                    || matches!(right, ProgramRef::Registered(_))
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MaskSource {
     Texture(String),
@@ -64,12 +90,7 @@ pub enum BlendDomain {
     CustomChannelMask(ChannelMask),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecutionFamily {
-    FusedBuiltin,
-    SplitResponse,
-    Composition,
-}
+pub use prism_render_architecture::shader_package::ExecutionFamily;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct FieldId {

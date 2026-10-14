@@ -16,7 +16,7 @@ use prism_render_material::capability::{
 };
 use prism_render_material::{
     DynamicChannels, Illumination, LobeMask, SURFACE_CACHE_AUX, SURFACE_CHANNELS,
-    SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES, SURFACE_RESPONSE_MODES,
+    SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES, SURFACE_RESPONSE_PROGRAMS,
 };
 
 /// Every schema lobe is registered in the committed catalogue with the same
@@ -34,7 +34,7 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
     assert_eq!(count_of(Kind::Channel), 4, "dynamic channels");
     assert_eq!(
         count_of(Kind::ResponseMode),
-        SURFACE_RESPONSE_MODES.len(),
+        SURFACE_RESPONSE_PROGRAMS.len(),
         "response-mode extensions"
     );
     assert_eq!(
@@ -261,7 +261,7 @@ fn the_specification_core_requires_no_platform_capability() {
 fn the_registry_response_modes_mirror_the_illumination_axis() {
     let committed = builtin_registry();
     let mut declared = Vec::new();
-    for mode in &SURFACE_RESPONSE_MODES {
+    for mode in &SURFACE_RESPONSE_PROGRAMS {
         let manifest = committed
             .manifest_by_uid(mode.uid)
             .unwrap_or_else(|| panic!("catalogue is missing response mode {}", mode.uid));
@@ -316,7 +316,7 @@ fn the_registry_response_modes_mirror_the_illumination_axis() {
     // The other direction: no registered response mode without a schema row.
     for manifest in committed.iter().filter(|m| m.kind() == Kind::ResponseMode) {
         assert!(
-            SURFACE_RESPONSE_MODES
+            SURFACE_RESPONSE_PROGRAMS
                 .iter()
                 .any(|mode| mode.uid == manifest.uid()),
             "{} has no schema response-mode row",
@@ -445,7 +445,7 @@ fn the_schema_cache_aux_matches_the_catalogue() {
     let mut expected: Vec<u32> = SURFACE_CHANNELS
         .iter()
         .map(|channel| channel.registry_slot)
-        .chain(SURFACE_RESPONSE_MODES.iter().map(|mode| mode.registry_slot))
+        .chain(SURFACE_RESPONSE_PROGRAMS.iter().map(|mode| mode.registry_slot))
         .chain(slots)
         .collect();
     expected.sort_unstable();

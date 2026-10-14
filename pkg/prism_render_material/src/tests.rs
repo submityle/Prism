@@ -58,20 +58,14 @@ fn graph_normalization_removes_dead_nodes_and_classifies_npr() {
             (dead, MaterialNode::Constant(MaterialValue::Scalar(9.0))),
         ]),
         output: Some(output),
+        plan: None,
     };
     let normalized = graph.normalize().unwrap();
     assert_eq!(normalized.nodes.len(), 2);
-    // NPR is now the orthogonal `Stylized` illumination axis, not a render
-    // class flattened into the blend family.
     assert_eq!(normalized.render_class, MaterialRenderClass::Opaque);
-    assert_eq!(normalized.illumination, Illumination::Stylized);
     assert_eq!(
-        normalized.specialization_id,
-        SpecializationId::new(
-            Illumination::Stylized,
-            normalized.closure_mask,
-            MaterialRenderClass::Opaque as u32
-        )
+        normalized.plan,
+        ShadingPlan::single_builtin(BuiltinProgram::Npr)
     );
 }
 
@@ -111,6 +105,7 @@ fn graph_normalization_accepts_an_arbitrarily_deep_closure_slab() {
     let graph = MaterialGraph {
         nodes,
         output: Some(last),
+        plan: None,
     };
     let normalized = graph
         .normalize()

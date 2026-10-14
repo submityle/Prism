@@ -463,13 +463,12 @@ pub const SURFACE_IDENTITY_EXTENSIONS: [IdentityExtensionLayout; 5] = [
     },
 ];
 
-/// One runtime response mode's generated manifest identity.
+/// One runtime response program's generated manifest identity.
 ///
-/// `illumination` is the schema spelling the shading side resolves; an
-/// unknown spelling is a pipeline-build error, never a silent fallthrough.
+/// `builtin` identifies the closed engine-provided response family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResponseModeLayout {
-    /// Human-facing response-mode id (schema `id`).
+pub struct ResponseProgramLayout {
+    /// Human-facing response-program id (schema `id`).
     pub id: &'static str,
     /// Globally unique capability id (schema `uid`).
     pub uid: &'static str,
@@ -481,48 +480,48 @@ pub struct ResponseModeLayout {
     pub vendor: &'static str,
     /// Stability level (schema `stability`).
     pub stability: &'static str,
-    /// The `Illumination` spelling this mode selects.
-    pub illumination: &'static str,
+    /// Built-in response family (`lit`, `npr`, or `unlit`).
+    pub builtin: &'static str,
     /// Platform capabilities required beyond the baseline.
     pub requires_caps: &'static [&'static str],
     /// Whether the response changes with the view direction.
     pub view_dependent: bool,
 }
 
-/// The runtime response modes in registry-slot order.
-pub const SURFACE_RESPONSE_MODES: [ResponseModeLayout; 3] = [
-    ResponseModeLayout {
-        id: "stylized",
-        uid: "org.prism.response_mode.stylized",
+/// The runtime response programs in registry-slot order.
+pub const SURFACE_RESPONSE_PROGRAMS: [ResponseProgramLayout; 3] = [
+    ResponseProgramLayout {
+        id: "lit",
+        uid: "org.prism.response_program.lit",
         registry_slot: 23,
         namespace: "PRISM",
         vendor: "prism",
         stability: "candidate",
-        illumination: "stylized",
+        builtin: "lit",
         requires_caps: &[],
         view_dependent: true,
     },
-    ResponseModeLayout {
-        id: "unlit",
-        uid: "org.prism.response_mode.unlit",
+    ResponseProgramLayout {
+        id: "npr",
+        uid: "org.prism.response_program.npr",
         registry_slot: 24,
         namespace: "PRISM",
         vendor: "prism",
         stability: "candidate",
-        illumination: "unlit",
+        builtin: "npr",
         requires_caps: &[],
-        view_dependent: false,
+        view_dependent: true,
     },
-    ResponseModeLayout {
-        id: "custom",
-        uid: "org.prism.response_mode.custom",
+    ResponseProgramLayout {
+        id: "unlit",
+        uid: "org.prism.response_program.unlit",
         registry_slot: 25,
         namespace: "PRISM",
         vendor: "prism",
-        stability: "experimental",
-        illumination: "custom",
+        stability: "candidate",
+        builtin: "unlit",
         requires_caps: &[],
-        view_dependent: true,
+        view_dependent: false,
     },
 ];
 

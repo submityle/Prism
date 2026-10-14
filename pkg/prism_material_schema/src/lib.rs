@@ -30,12 +30,14 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use core::fmt;
 
 use serde::Deserialize;
 
 pub mod codegen;
+mod response;
+pub use response::*;
 
 /// The canonical surface schema, embedded at build time from
 /// `schema/surface.toml`. This is the committed single source of truth.
@@ -77,10 +79,9 @@ pub struct SurfaceSchema {
     /// no packed block, it owns one of the header's `dynamic_*` words.
     #[serde(default, rename = "channel")]
     pub channels: Vec<Channel>,
-    /// Runtime response modes (§5.2). These are the non-default illumination
-    /// variants; `Lit` is the specification default and is not registered.
-    #[serde(default, rename = "response_mode")]
-    pub response_modes: Vec<ResponseMode>,
+    /// Response program identities and their five consumption contracts.
+    #[serde(default, rename = "response_program")]
+    pub response_programs: Vec<ResponseProgram>,
     /// Object-space cache auxiliary declarations (§14.3).
     #[serde(default, rename = "cache_aux")]
     pub cache_aux: Vec<CacheAux>,
@@ -127,42 +128,8 @@ pub struct Channel {
     pub requires_caps: Vec<String>,
     /// Whether the channel's effect changes with the view direction.
     pub view_dependent: bool,
-}
-
-/// A runtime response mode declared by the schema (§5.2 / §5.4).
-///
-/// A response mode owns one non-default value of the `Illumination` axis. The
-/// schema declares the identity, slot and attribution; the shading side
-/// resolves `illumination` against its own `Illumination` vocabulary and
-/// rejects an unknown spelling at pipeline-build time (the same loud-error rule
-/// as `closure`).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResponseMode {
-    /// Human-facing response-mode id.
-    pub id: String,
-    /// Immutable global identity, shared with the PCM registry row.
-    pub uid: String,
-    /// The `Illumination` variant spelling this mode selects.
-    ///
-    /// Kept as a string because the schema crate deliberately does not depend
-    /// on the runtime axis; [the shading-side parser](https://docs.rs/prism_render_shading)
-    /// is the authority that resolves it and fails loudly on an unknown name.
-    pub illumination: String,
-    /// Header-digest slot (response modes are runtime-read, header-resident
-    /// extensions; see §5.2).
-    pub registry_slot: u32,
-    /// Mutable governance namespace (§5.4).
-    pub namespace: Namespace,
-    /// Mutable vendor tag (§5.4).
-    pub vendor: String,
-    /// Mutable stability level (§5.4).
-    pub stability: Stability,
-    /// Platform capabilities required beyond the baseline.
-    #[serde(default)]
-    pub requires_caps: Vec<String>,
-    /// Whether the response changes with the view direction.
-    pub view_dependent: bool,
+    /// Whether a plan may use this scalar as a mask, inheriting capabilities.
+    pub usable_as_mask: bool,
 }
 
 /// An object-space cache auxiliary output (§14.3).
@@ -288,12 +255,15 @@ pub struct Field {
     pub bit_region: Namespace,
     /// First `u32` word of this field within its record.
     pub pack_slot: u32,
-    /// Which `SpecializationId` subfield this contributes to (§8.1).
+    /// Which structural layout input this contributes to; never a packed ID.
     #[serde(default)]
     pub spec_subfield: SpecSubfield,
     /// Which pipeline steps consume this field (§8.5).
     #[serde(default)]
     pub consumed_by: Vec<ConsumedStep>,
+    /// Exhaustive response semantics. Missing entries are errors, not ignores.
+    #[serde(default)]
+    pub responses: BTreeMap<String, FieldResponse>,
     /// Neutral default used when the owning lobe is absent.
     pub default: DefaultValue,
     /// Human/machine-checkable validity predicate over the field value.
@@ -469,7 +439,7 @@ impl IdentityKind {
     }
 }
 
-/// Which `SpecializationId` subfield a field contributes to (§8.1).
+/// Structural metadata; surface values never become permutation identities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecSubfield {
@@ -478,8 +448,6 @@ pub enum SpecSubfield {
     None,
     /// Contributes to the open lobe closure mask.
     ClosureMask,
-    /// Contributes to the illumination axis.
-    Illumination,
     /// Contributes to the render-class axis.
     RenderClass,
 }
@@ -490,7 +458,7 @@ pub enum SpecSubfield {
 pub enum ConsumedStep {
     /// Word-heap unpack (`material_unpack`).
     Unpack,
-    /// Response-mode classification (`material_classification`).
+    /// Work classification (`material_classification`).
     Classify,
     /// BSDF sampling / evaluation (`material_sample`).
     Sample,
@@ -502,6 +470,12 @@ pub enum ConsumedStep {
     Doc,
     /// Compliance predicate (§4.5).
     Compliance,
+    /// Lit response semantics (not merely unpacking).
+    Lit,
+    /// NPR response semantics.
+    Npr,
+    /// Unlit response semantics.
+    Unlit,
 }
 
 /// How a field participates in the layered energy budget (§17.2).
@@ -745,26 +719,15 @@ impl SurfaceSchema {
             }
         }
 
-        // Runtime response modes: each owns one non-default illumination
-        // variant and one header-digest slot. The uid shares the global
-        // identity space with lobes and channels, so one kind can never alias
-        // another.
-        let mut header_slots = BTreeSet::new();
-        let mut response_illuminations = BTreeSet::new();
-        for mode in &self.response_modes {
-            if mode.illumination.is_empty() {
-                return Err(SchemaError::EmptyResponseModeIllumination(mode.id.clone()));
+        // All header-resident kinds share the lobe slot and identity space.
+        let mut header_slots: BTreeSet<u32> =
+            self.lobes.iter().map(|lobe| lobe.registry_slot).collect();
+        for program in &self.response_programs {
+            if !uids.insert(program.uid.clone()) {
+                return Err(SchemaError::DuplicateUid(program.uid.clone()));
             }
-            if !uids.insert(mode.uid.clone()) {
-                return Err(SchemaError::DuplicateUid(mode.uid.clone()));
-            }
-            if !header_slots.insert(mode.registry_slot) {
-                return Err(SchemaError::DuplicateHeaderSlot(mode.registry_slot));
-            }
-            if !response_illuminations.insert(mode.illumination.clone()) {
-                return Err(SchemaError::DuplicateResponseModeIllumination(
-                    mode.illumination.clone(),
-                ));
+            if !header_slots.insert(program.registry_slot) {
+                return Err(SchemaError::DuplicateHeaderSlot(program.registry_slot));
             }
         }
 
@@ -789,7 +752,7 @@ impl SurfaceSchema {
             }
         }
 
-        // Object-space cache auxiliaries: like channels and response modes they
+        // Object-space cache auxiliaries: like channels and response programs they
         // are header-resident, but their payload is a cached render quantity,
         // not a per-material word. They still share the same slot space.
         for aux in &self.cache_aux {
@@ -809,7 +772,7 @@ impl SurfaceSchema {
                 return Err(SchemaError::DuplicateUid(extension.uid.clone()));
             }
         }
-        Ok(())
+        self.validate_responses()
     }
 }
 
@@ -886,10 +849,8 @@ pub enum SchemaError {
     NonContiguousRegistrySlots,
     /// A lobe declared an empty closure implementation name.
     EmptyClosureName(String),
-    /// A response mode declared an empty illumination spelling.
-    EmptyResponseModeIllumination(String),
-    /// Two response modes select the same illumination variant.
-    DuplicateResponseModeIllumination(String),
+    /// A response declaration is incomplete or inconsistent.
+    ResponseContract(String),
     /// Two runtime channels claim the same header word.
     DuplicateChannelWord(u32),
     /// Two header-resident non-lobe records claim the same registry slot.
@@ -947,18 +908,7 @@ impl fmt::Display for SchemaError {
             Self::EmptyClosureName(id) => {
                 write!(f, "lobe {id:?} declares an empty closure name")
             }
-            Self::EmptyResponseModeIllumination(id) => {
-                write!(
-                    f,
-                    "response mode {id:?} declares an empty illumination name"
-                )
-            }
-            Self::DuplicateResponseModeIllumination(illumination) => {
-                write!(
-                    f,
-                    "two response modes select the illumination variant {illumination:?}"
-                )
-            }
+            Self::ResponseContract(message) => write!(f, "response contract: {message}"),
             Self::DuplicateChannelWord(word) => {
                 write!(f, "two runtime channels claim header word {word}")
             }
@@ -1012,7 +962,7 @@ mod tests {
     #[test]
     fn embedded_schema_parses_and_validates() {
         let schema = surface_schema();
-        assert_eq!(schema.schema_version, 1);
+        assert_eq!(schema.schema_version, 2);
         assert_eq!(schema.core.words, 20);
         assert_eq!(schema.lobe_count(), 10);
         // The open-vocabulary glint lobe (§17.6) is a first-class member of the
@@ -1030,19 +980,15 @@ mod tests {
         assert_eq!(glint.words, 4);
         assert!(glint.requires_caps.is_empty());
 
-        assert_eq!(schema.response_modes.len(), 3);
-        let stylized = schema
-            .response_modes
-            .iter()
-            .find(|mode| mode.id == "stylized")
-            .expect("stylized response mode declared");
-        assert_eq!(stylized.uid, "org.prism.response_mode.stylized");
-        assert_eq!(stylized.illumination, "stylized");
-        assert_eq!(stylized.registry_slot, 23);
-        assert_eq!(stylized.namespace, Namespace::Prism);
-        assert_eq!(stylized.stability, Stability::Candidate);
-        assert!(stylized.requires_caps.is_empty());
-        assert!(stylized.view_dependent);
+        assert_eq!(schema.response_programs.len(), 3);
+        let lit = schema.response_programs.iter().find(|program| program.id == "lit")
+            .expect("lit response program declared");
+        assert_eq!(lit.uid, "org.prism.response_program.lit");
+        assert_eq!(lit.registry_slot, 23);
+        assert_eq!(lit.namespace, Namespace::Prism);
+        assert_eq!(lit.stability, Stability::Candidate);
+        assert!(lit.requires_caps.is_empty());
+        assert!(lit.view_dependent);
 
         let wetness = schema
             .channels
@@ -1244,91 +1190,52 @@ words = 0
     }
 
     #[test]
-    fn rejects_an_empty_response_mode_illumination() {
-        let bad = schema_with_records(
-            r#"
-[[response_mode]]
-id = "broken"
-uid = "org.prism.response_mode.broken"
-illumination = ""
-registry_slot = 23
-namespace = "PRISM"
-vendor = "prism"
-stability = "candidate"
-requires_caps = []
-view_dependent = true
-"#,
-        );
-        assert_eq!(
-            SurfaceSchema::parse(&bad).unwrap_err(),
-            SchemaError::EmptyResponseModeIllumination(String::from("broken"))
-        );
+    fn rejects_two_response_programs_claiming_one_slot() {
+        let mut schema = surface_schema();
+        schema.response_programs[1].registry_slot = schema.response_programs[0].registry_slot;
+        assert!(matches!(schema.validate(), Err(SchemaError::DuplicateHeaderSlot(_))));
     }
 
     #[test]
-    fn rejects_two_response_modes_claiming_one_slot() {
-        let bad = schema_with_records(
-            r#"
-[[response_mode]]
-id = "a"
-uid = "org.prism.response_mode.a"
-illumination = "stylized"
-registry_slot = 23
-namespace = "PRISM"
-vendor = "prism"
-stability = "candidate"
-requires_caps = []
-view_dependent = true
-
-[[response_mode]]
-id = "b"
-uid = "org.prism.response_mode.b"
-illumination = "unlit"
-registry_slot = 23
-namespace = "PRISM"
-vendor = "prism"
-stability = "candidate"
-requires_caps = []
-view_dependent = false
-"#,
-        );
-        assert_eq!(
-            SurfaceSchema::parse(&bad).unwrap_err(),
-            SchemaError::DuplicateHeaderSlot(23)
-        );
+    fn response_program_cannot_alias_a_lobe_slot() {
+        let mut schema = surface_schema();
+        schema.response_programs[0].registry_slot = schema.lobes[0].registry_slot;
+        assert!(matches!(schema.validate(), Err(SchemaError::DuplicateHeaderSlot(_))));
     }
 
     #[test]
-    fn rejects_two_response_modes_selecting_one_illumination() {
-        let bad = schema_with_records(
-            r#"
-[[response_mode]]
-id = "a"
-uid = "org.prism.response_mode.a"
-illumination = "stylized"
-registry_slot = 23
-namespace = "PRISM"
-vendor = "prism"
-stability = "candidate"
-requires_caps = []
-view_dependent = true
+    fn rejects_duplicate_builtin_programs() {
+        let mut schema = surface_schema();
+        schema.response_programs[1].builtin = schema.response_programs[0].builtin;
+        assert!(matches!(schema.validate(), Err(SchemaError::ResponseContract(_))));
+    }
 
-[[response_mode]]
-id = "b"
-uid = "org.prism.response_mode.b"
-illumination = "stylized"
-registry_slot = 24
-namespace = "PRISM"
-vendor = "prism"
-stability = "candidate"
-requires_caps = []
-view_dependent = true
-"#,
-        );
-        assert_eq!(
-            SurfaceSchema::parse(&bad).unwrap_err(),
-            SchemaError::DuplicateResponseModeIllumination(String::from("stylized"))
-        );
+    #[test]
+    fn adding_a_field_requires_an_explicit_response_declaration() {
+        let mut schema = surface_schema();
+        let mut field = schema.core.fields[0].clone();
+        field.name = "new_surface_parameter".into();
+        field.pack_slot = schema.core.words;
+        field.responses.clear();
+        schema.core.words += field.ty.words();
+        schema.core.fields.push(field);
+        assert!(matches!(schema.validate(), Err(SchemaError::ResponseContract(_))));
+    }
+
+    #[test]
+    fn deleting_a_mapping_or_its_consumer_is_rejected() {
+        let mut schema = surface_schema();
+        schema.core.fields[0].responses.remove("lit");
+        assert!(matches!(schema.validate(), Err(SchemaError::ResponseContract(_))));
+        let mut schema = surface_schema();
+        schema.core.fields[0].consumed_by.retain(|s| *s != ConsumedStep::Lit);
+        assert!(matches!(schema.validate(), Err(SchemaError::ResponseContract(_))));
+    }
+
+    #[test]
+    fn padding_is_not_a_semantic_response_input() {
+        let schema = surface_schema();
+        assert!(schema.response_fields().iter().all(|(_, f)| f.ty != FieldType::Pad));
     }
 
     #[test]

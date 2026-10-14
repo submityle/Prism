@@ -863,16 +863,16 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     }
     o.push_str("];\n");
 
-    // Runtime response modes (§5.2): the non-default Illumination variants.
-    // Like channels, they are header-resident PCM rows; unlike channels, their
-    // generated table is the classification pass's row source.
-    o.push_str("\n/// One runtime response mode's generated manifest identity.\n");
+    // Runtime response programs (§5.2): compiled response identities and
+    // their schema-owned contract metadata. The dense compiled-entry index is
+    // assigned by the runtime registry; this table only carries stable schema
+    // identity and attribution.
+    o.push_str("\n/// One runtime response program's generated manifest identity.\n");
     o.push_str("///\n");
-    o.push_str("/// `illumination` is the schema spelling the shading side resolves; an\n");
-    o.push_str("/// unknown spelling is a pipeline-build error, never a silent fallthrough.\n");
+    o.push_str("/// `builtin` identifies the closed engine-provided response family.\n");
     o.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
-    o.push_str("pub struct ResponseModeLayout {\n");
-    o.push_str("    /// Human-facing response-mode id (schema `id`).\n");
+    o.push_str("pub struct ResponseProgramLayout {\n");
+    o.push_str("    /// Human-facing response-program id (schema `id`).\n");
     o.push_str("    pub id: &'static str,\n");
     o.push_str("    /// Globally unique capability id (schema `uid`).\n");
     o.push_str("    pub uid: &'static str,\n");
@@ -884,36 +884,36 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     o.push_str("    pub vendor: &'static str,\n");
     o.push_str("    /// Stability level (schema `stability`).\n");
     o.push_str("    pub stability: &'static str,\n");
-    o.push_str("    /// The `Illumination` spelling this mode selects.\n");
-    o.push_str("    pub illumination: &'static str,\n");
+    o.push_str("    /// Built-in response family (`lit`, `npr`, or `unlit`).\n");
+    o.push_str("    pub builtin: &'static str,\n");
     o.push_str("    /// Platform capabilities required beyond the baseline.\n");
     o.push_str("    pub requires_caps: &'static [&'static str],\n");
     o.push_str("    /// Whether the response changes with the view direction.\n");
     o.push_str("    pub view_dependent: bool,\n");
     o.push_str("}\n\n");
-    let mut response_modes = schema.response_modes.clone();
-    response_modes.sort_by_key(|mode| mode.registry_slot);
+    let mut response_programs = schema.response_programs.clone();
+    response_programs.sort_by_key(|program| program.registry_slot);
     let _ = writeln!(
         o,
-        "/// The runtime response modes in registry-slot order.\npub const SURFACE_RESPONSE_MODES: [ResponseModeLayout; {}] = [",
-        response_modes.len()
+        "/// The runtime response programs in registry-slot order.\npub const SURFACE_RESPONSE_PROGRAMS: [ResponseProgramLayout; {}] = [",
+        response_programs.len()
     );
-    for mode in &response_modes {
-        o.push_str("    ResponseModeLayout {\n");
-        let _ = writeln!(o, "        id: {:?},", mode.id);
-        let _ = writeln!(o, "        uid: {:?},", mode.uid);
-        let _ = writeln!(o, "        registry_slot: {},", mode.registry_slot);
-        let _ = writeln!(o, "        namespace: {:?},", mode.namespace.as_str());
-        let _ = writeln!(o, "        vendor: {:?},", mode.vendor);
-        let _ = writeln!(o, "        stability: {:?},", mode.stability.as_str());
-        let _ = writeln!(o, "        illumination: {:?},", mode.illumination);
-        let caps: Vec<String> = mode
+    for program in &response_programs {
+        o.push_str("    ResponseProgramLayout {\n");
+        let _ = writeln!(o, "        id: {:?},", program.id);
+        let _ = writeln!(o, "        uid: {:?},", program.uid);
+        let _ = writeln!(o, "        registry_slot: {},", program.registry_slot);
+        let _ = writeln!(o, "        namespace: {:?},", program.namespace.as_str());
+        let _ = writeln!(o, "        vendor: {:?},", program.vendor);
+        let _ = writeln!(o, "        stability: {:?},", program.stability.as_str());
+        let _ = writeln!(o, "        builtin: {:?},", program.builtin.as_str());
+        let caps: Vec<String> = program
             .requires_caps
             .iter()
             .map(|capability| format!("{capability:?}"))
             .collect();
         let _ = writeln!(o, "        requires_caps: &[{}],", caps.join(", "));
-        let _ = writeln!(o, "        view_dependent: {},", mode.view_dependent);
+        let _ = writeln!(o, "        view_dependent: {},", program.view_dependent);
         o.push_str("    },\n");
     }
     o.push_str("];\n");
@@ -1107,10 +1107,7 @@ mod tests {
             "    IdentityExtensionLayout {\n        id: \"srgb\",\n        uid: \"org.prism.transfer.srgb\",\n        kind: \"transfer\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"stable\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
             "    IdentityExtensionLayout {\n        id: \"sample_budget\",\n        uid: \"org.prism.downgrade.sample_budget\",\n        kind: \"downgrade\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
             "    IdentityExtensionLayout {\n        id: \"outline\",\n        uid: \"org.prism.composite.outline\",\n        kind: \"composite\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"stable\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
-            "pub const SURFACE_RESPONSE_MODES: [ResponseModeLayout; 3] = [",
-            "    ResponseModeLayout {\n        id: \"stylized\",\n        uid: \"org.prism.response_mode.stylized\",\n        registry_slot: 23,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        illumination: \"stylized\",\n        requires_caps: &[],\n        view_dependent: true,\n    },",
-            "    ResponseModeLayout {\n        id: \"unlit\",\n        uid: \"org.prism.response_mode.unlit\",\n        registry_slot: 24,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        illumination: \"unlit\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
-            "    ResponseModeLayout {\n        id: \"custom\",\n        uid: \"org.prism.response_mode.custom\",\n        registry_slot: 25,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"experimental\",\n        illumination: \"custom\",\n        requires_caps: &[],\n        view_dependent: true,\n    },",
+            "pub const SURFACE_RESPONSE_PROGRAMS: [ResponseProgramLayout; 3] = [",
             "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 8,\n        namespace: \"KHR\",\n        stability: \"stable\",\n        requires_caps: &[],\n        energy_policy: \"independent\",\n    },",
             "    LobeLayout {\n        id: \"npr_face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"NPR_FACE\",\n        registry_slot: 16,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"none\",\n    },",
             "    LobeLayout {\n        id: \"glint\",\n        uid: \"org.prism.lobe.glint\",\n        mask_const: \"GLINT\",\n        registry_slot: 17,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"coupled\",\n    },",
