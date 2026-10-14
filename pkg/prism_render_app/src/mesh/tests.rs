@@ -176,6 +176,21 @@ fn a_re_prepare_reuses_buffers_that_still_fit() {
     );
 }
 
+#[test]
+fn a_reused_buffer_keeps_capacity_for_a_later_growth() {
+    let (device, queue) = null_device();
+    let id = AssetId::new(prism_asset::AssetIndex::from_parts(0, 1));
+    let first = RenderMesh::prepare(&quad(6, false), id, &device, &queue, None).expect("prepares");
+    let smaller = RenderMesh::prepare(&quad(3, false), id, &device, &queue, Some(&first))
+        .expect("smaller mesh reuses");
+    assert_eq!(smaller.buffers.vertices, first.buffers.vertices);
+
+    let restored = RenderMesh::prepare(&quad(6, false), id, &device, &queue, Some(&smaller))
+        .expect("capacity still fits");
+    assert_eq!(restored.buffers.vertices, first.buffers.vertices);
+    assert_eq!(device.live_resource_count(), 1);
+}
+
 /// A mesh that outgrows its buffer, or stops being indexed, releases what it no
 /// longer uses — the ownership rule the trait documents.
 #[test]

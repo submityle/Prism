@@ -52,9 +52,9 @@ impl GpuImage {
 ///
 /// The ownership rule from [`RenderAsset::prepare`] lives here: a texture from
 /// `previous` that already has the right extent and format is reused (and
-/// re-uploaded into), and anything that no longer fits is released through
-/// `device` before a replacement is created — so exactly one texture, view, and
-/// sampler exist per image, whatever the image did between frames.
+/// re-uploaded into), while a replacement is fully created and uploaded before
+/// the old objects are released. That preserves the last-known-good GPU form
+/// until the new form is ready.
 pub fn prepare_image(
     device: &dyn RenderDevice,
     queue: &dyn RenderQueue,
@@ -66,31 +66,33 @@ pub fn prepare_image(
     let reusable =
         previous.is_some_and(|previous| previous.extent == extent && previous.format == format);
 
-    let (texture, view) = if reusable {
+    let (texture, view, old_texture) = if reusable {
         let previous = previous.expect("checked above");
-        (previous.texture, previous.view)
+        (previous.texture, previous.view, None)
     } else {
-        if let Some(previous) = previous {
-            device.destroy_texture_view(previous.view);
-            device.destroy_texture(previous.texture);
-        }
         let texture = device.create_texture(&TextureDescriptor::new_2d(
             extent,
             format,
             IMAGE_TEXTURE_USAGES,
         ));
         let view = device.create_texture_view(texture, &TextureViewDescriptor::default());
-        (texture, view)
+        (
+            texture,
+            view,
+            previous.map(|previous| (previous.texture, previous.view)),
+        )
     };
 
     let desired_sampler = source.sampler();
-    let sampler = match previous {
-        Some(previous) if previous.sampler_descriptor == *desired_sampler => previous.sampler,
-        Some(previous) => {
-            device.destroy_sampler(previous.sampler);
-            device.create_sampler(desired_sampler)
+    let (sampler, old_sampler) = match previous {
+        Some(previous) if previous.sampler_descriptor == *desired_sampler => {
+            (previous.sampler, None)
         }
-        None => device.create_sampler(desired_sampler),
+        Some(previous) => (
+            device.create_sampler(desired_sampler),
+            Some(previous.sampler),
+        ),
+        None => (device.create_sampler(desired_sampler), None),
     };
 
     queue.write_texture(
@@ -107,6 +109,14 @@ pub fn prepare_image(
             rows_per_image: Some(extent.height),
         },
     );
+
+    if let Some((old_texture, old_view)) = old_texture {
+        device.destroy_texture_view(old_view);
+        device.destroy_texture(old_texture);
+    }
+    if let Some(old_sampler) = old_sampler {
+        device.destroy_sampler(old_sampler);
+    }
 
     GpuImage {
         texture,

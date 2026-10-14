@@ -24,10 +24,8 @@ pub struct MeshBuffersAllocation {
 /// Creates, reuses, or releases a mesh's buffers and uploads its bytes.
 ///
 /// The ownership rule from [`RenderAsset::prepare`] lives here: a buffer from
-/// `previous` that is large enough and has the right format is reused, and one
-/// that is not is released through `device` before a replacement is created — so
-/// exactly one of the two GPU objects exists per buffer kind, whatever the mesh
-/// did between frames.
+/// `previous` that is large enough and has the right format is reused, while a
+/// replacement is created and uploaded before the old buffer is released.
 pub fn prepare_mesh_buffers(
     device: &dyn RenderDevice,
     queue: &dyn RenderQueue,
@@ -39,24 +37,23 @@ pub fn prepare_mesh_buffers(
     let mut vertex_capacity = Vec::with_capacity(vertex_streams.len());
     for (stream_index, bytes) in vertex_streams.iter().enumerate() {
         let byte_len = bytes.len() as u64;
-        let reusable = previous
-            .and_then(|mesh| mesh.buffers.vertices.get(stream_index).copied())
-            .filter(|_| {
-                previous
-                    .and_then(|mesh| mesh.vertex_capacity.get(stream_index))
-                    .is_some_and(|capacity| *capacity >= byte_len)
-            });
+        let previous_buffer =
+            previous.and_then(|mesh| mesh.buffers.vertices.get(stream_index).copied());
+        let previous_capacity = previous
+            .and_then(|mesh| mesh.vertex_capacity.get(stream_index).copied())
+            .unwrap_or(0);
+        let reusable = previous_buffer.filter(|_| previous_capacity >= byte_len);
         let buffer = reusable.unwrap_or_else(|| {
-            if let Some(previous) = previous {
-                if let Some(old) = previous.buffers.vertices.get(stream_index).copied() {
-                    device.destroy_buffer(old);
-                }
-            }
             create_buffer(device, "mesh vertex stream", byte_len, BufferUsages::VERTEX)
         });
         queue.write_buffer(buffer, 0, bytes);
+        if reusable.is_none() {
+            if let Some(old) = previous_buffer {
+                device.destroy_buffer(old);
+            }
+        }
         vertices.push(buffer);
-        vertex_capacity.push(byte_len);
+        vertex_capacity.push(reusable.map_or(byte_len.max(4), |_| previous_capacity));
     }
     if let Some(previous) = previous {
         for old in previous.buffers.vertices.iter().skip(vertex_streams.len()) {
@@ -64,21 +61,15 @@ pub fn prepare_mesh_buffers(
         }
     }
 
-    let reusable_index = match (index_bytes, previous.and_then(|p| p.buffers.indices)) {
+    let previous_index = previous.and_then(|p| p.buffers.indices);
+    let reusable_index = match (index_bytes, previous_index) {
         (Some((bytes, format)), Some((id, previous_format)))
             if previous_format == format
                 && previous.is_some_and(|p| p.index_capacity >= bytes.len() as u64) =>
         {
             Some(id)
         }
-        (_, previous_buffer) => {
-            // Either the mesh stopped being indexed, changed width, or grew: the
-            // old buffer goes, and a new one is created only if still needed.
-            if let Some((id, _)) = previous_buffer {
-                device.destroy_buffer(id);
-            }
-            None
-        }
+        _ => None,
     };
 
     let (indices, index_capacity) = match index_bytes {
@@ -88,9 +79,26 @@ pub fn prepare_mesh_buffers(
                 create_buffer(device, "mesh index buffer", bytes_len, BufferUsages::INDEX)
             });
             queue.write_buffer(id, 0, bytes);
-            (Some((id, format)), bytes_len)
+            if reusable_index.is_none() {
+                if let Some((old, _)) = previous_index {
+                    device.destroy_buffer(old);
+                }
+            }
+            (
+                Some((id, format)),
+                if reusable_index.is_some() {
+                    previous.map_or(bytes_len.max(4), |p| p.index_capacity)
+                } else {
+                    bytes_len.max(4)
+                },
+            )
         }
-        None => (None, 0),
+        None => {
+            if let Some((old, _)) = previous_index {
+                device.destroy_buffer(old);
+            }
+            (None, 0)
+        }
     };
 
     MeshBuffersAllocation {

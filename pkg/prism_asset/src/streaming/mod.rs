@@ -18,9 +18,15 @@ use prism_tasks::Priority;
 
 mod async_io;
 mod io;
+mod page_residency;
 
 pub use async_io::{AsyncStreamIoExecutor, AsyncStreamTask};
 pub use io::{StreamIoError, StreamIoExecutor, SubmitAndExecuteError};
+pub use page_residency::{
+    PageAdmissionError, PageBudget, PageBudgetError, PageFailure, PageId, PageKey, PageLoadError,
+    PageRangeError, PageRequestError, PageResidency, PageSize, PageSizeError, PageState,
+    PageTransitionError, PageUsage,
+};
 
 /// The three independently bounded residency pools tracked by the decision
 /// layer.

@@ -1,0 +1,897 @@
+//! CPU-side fixed-page range residency.
+//!
+//! This module owns page identity, CPU bytes, admission, and deterministic
+//! reclamation. It performs real AssetSources::read_range calls but creates no
+//! GPU resources, performs no GPU upload/decode, and depends on no renderer.
+
+use super::super::{AssetPath, AssetSources, ReadError};
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::fmt;
+use prism_tasks::Priority;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+/// A validated fixed page size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PageSize(u64);
+
+impl PageSize {
+    /// Creates a non-zero power-of-two page size.
+    pub fn new(bytes: u64) -> Result<Self, PageSizeError> {
+        if bytes == 0 {
+            return Err(PageSizeError::Zero);
+        }
+        if !bytes.is_power_of_two() {
+            return Err(PageSizeError::NotPowerOfTwo(bytes));
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Returns the size in bytes.
+    #[must_use]
+    pub const fn bytes(self) -> u64 {
+        self.0
+    }
+}
+
+/// Invalid fixed page size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageSizeError {
+    Zero,
+    NotPowerOfTwo(u64),
+}
+
+impl fmt::Display for PageSizeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Zero => f.write_str("page size must be non-zero"),
+            Self::NotPowerOfTwo(bytes) => write!(f, "page size {bytes} is not a power of two"),
+        }
+    }
+}
+
+impl std::error::Error for PageSizeError {}
+
+/// CPU byte and in-flight limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageBudget {
+    max_bytes: u64,
+    max_in_flight: usize,
+}
+
+impl PageBudget {
+    /// Creates a budget with at least one admission slot.
+    pub fn new(max_bytes: u64, max_in_flight: usize) -> Result<Self, PageBudgetError> {
+        if max_in_flight == 0 {
+            return Err(PageBudgetError::ZeroInFlight);
+        }
+        Ok(Self {
+            max_bytes,
+            max_in_flight,
+        })
+    }
+
+    #[must_use]
+    pub const fn max_bytes(self) -> u64 {
+        self.max_bytes
+    }
+
+    #[must_use]
+    pub const fn max_in_flight(self) -> usize {
+        self.max_in_flight
+    }
+}
+
+/// Invalid page budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageBudgetError {
+    ZeroInFlight,
+    SmallerThanPage { budget: u64, page_size: u64 },
+    NotPageAligned { budget: u64, page_size: u64 },
+}
+
+impl fmt::Display for PageBudgetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroInFlight => f.write_str("page budget max_in_flight must be non-zero"),
+            Self::SmallerThanPage { budget, page_size } => {
+                write!(
+                    f,
+                    "page budget {budget} is smaller than page size {page_size}"
+                )
+            }
+            Self::NotPageAligned { budget, page_size } => {
+                write!(
+                    f,
+                    "page budget {budget} is not aligned to page size {page_size}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PageBudgetError {}
+
+/// Source path and zero-based fixed page index.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PageKey {
+    path: AssetPath,
+    page_index: u64,
+}
+
+impl PageKey {
+    #[must_use]
+    pub fn new(path: impl Into<AssetPath>, page_index: u64) -> Self {
+        Self {
+            path: path.into(),
+            page_index,
+        }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &AssetPath {
+        &self.path
+    }
+
+    #[must_use]
+    pub const fn page_index(&self) -> u64 {
+        self.page_index
+    }
+
+    /// Computes the fixed range, rejecting offset overflow.
+    pub fn range(&self, page_size: PageSize) -> Result<(u64, u64), PageRangeError> {
+        let offset = self.page_index.checked_mul(page_size.bytes()).ok_or(
+            PageRangeError::OffsetOverflow {
+                page_index: self.page_index,
+                page_size: page_size.bytes(),
+            },
+        )?;
+        Ok((offset, page_size.bytes()))
+    }
+}
+
+/// A page offset that cannot be represented in u64.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageRangeError {
+    OffsetOverflow { page_index: u64, page_size: u64 },
+}
+
+impl fmt::Display for PageRangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OffsetOverflow {
+                page_index,
+                page_size,
+            } => write!(
+                f,
+                "page range offset overflows: page_index={page_index}, page_size={page_size}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PageRangeError {}
+
+/// Stable identity of one page request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PageId(u64);
+
+impl PageId {
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Page lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageState {
+    Pending,
+    Loading,
+    Resident,
+    Failed,
+    Cancelled,
+}
+
+/// Failure retained by a terminal page record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageFailure {
+    Read(ReadError),
+    ShortRead { expected: u64, actual: u64 },
+    SourcePanicked,
+    External(u32),
+}
+
+/// Error while requesting a page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageRequestError {
+    Range(PageRangeError),
+    IdExhausted,
+}
+
+impl fmt::Display for PageRequestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Range(error) => error.fmt(f),
+            Self::IdExhausted => f.write_str("page id space exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for PageRequestError {}
+
+/// Error while reserving a pending page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageAdmissionError {
+    Unknown(PageId),
+    InvalidState {
+        id: PageId,
+        state: PageState,
+    },
+    BudgetExceeded {
+        requested: u64,
+        limit: u64,
+    },
+    Backpressure {
+        in_flight: usize,
+        max_in_flight: usize,
+    },
+    BudgetOverflow,
+}
+
+impl fmt::Display for PageAdmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown(id) => write!(f, "unknown page {}", id.get()),
+            Self::InvalidState { id, state } => {
+                write!(f, "page {} is not pending; state is {state:?}", id.get())
+            }
+            Self::BudgetExceeded { requested, limit } => {
+                write!(
+                    f,
+                    "page CPU budget exceeded: requested {requested}, limit {limit}"
+                )
+            }
+            Self::Backpressure {
+                in_flight,
+                max_in_flight,
+            } => write!(
+                f,
+                "page load backpressure: {in_flight} in flight, limit {max_in_flight}"
+            ),
+            Self::BudgetOverflow => f.write_str("page CPU budget arithmetic overflowed"),
+        }
+    }
+}
+
+impl std::error::Error for PageAdmissionError {}
+
+/// Error for a non-admission state transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageTransitionError {
+    Unknown(PageId),
+    InvalidState { id: PageId, state: PageState },
+}
+
+impl fmt::Display for PageTransitionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown(id) => write!(f, "unknown page {}", id.get()),
+            Self::InvalidState { id, state } => {
+                write!(f, "invalid transition for page {} in {state:?}", id.get())
+            }
+        }
+    }
+}
+
+impl std::error::Error for PageTransitionError {}
+
+/// Error from a real synchronous page read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageLoadError {
+    Admission(PageAdmissionError),
+    Read {
+        id: PageId,
+        error: ReadError,
+    },
+    ShortRead {
+        id: PageId,
+        expected: u64,
+        actual: u64,
+    },
+    SourcePanicked {
+        id: PageId,
+    },
+    Transition(PageTransitionError),
+}
+
+impl fmt::Display for PageLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admission(error) => error.fmt(f),
+            Self::Read { id, error } => write!(f, "page {} read failed: {error}", id.get()),
+            Self::ShortRead {
+                id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "page {} short read: expected {expected}, received {actual}",
+                id.get()
+            ),
+            Self::SourcePanicked { id } => write!(f, "page {} source read panicked", id.get()),
+            Self::Transition(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for PageLoadError {}
+
+/// CPU budget usage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageUsage {
+    pub resident_bytes: u64,
+    pub loading_bytes: u64,
+    pub in_flight_pages: usize,
+}
+
+#[derive(Debug)]
+struct PageRecord {
+    key: PageKey,
+    state: PageState,
+    priority: Priority,
+    importance: u32,
+    sequence: u64,
+    failure: Option<PageFailure>,
+    bytes: Option<Vec<u8>>,
+}
+
+/// Deterministic CPU fixed-page residency authority.
+///
+/// A key is deduplicated while pending, loading, or resident. Callers can
+/// split begin_load and complete_load around asynchronous I/O, or use load for
+/// a real synchronous AssetSources::read_range call.
+pub struct PageResidency {
+    page_size: PageSize,
+    budget: PageBudget,
+    usage: PageUsage,
+    next_id: u64,
+    next_sequence: u64,
+    active: BTreeMap<PageKey, PageId>,
+    records: BTreeMap<PageId, PageRecord>,
+}
+
+impl PageResidency {
+    /// Creates a manager after validating budget/page alignment.
+    pub fn new(page_size: PageSize, budget: PageBudget) -> Result<Self, PageBudgetError> {
+        if budget.max_bytes < page_size.bytes() {
+            return Err(PageBudgetError::SmallerThanPage {
+                budget: budget.max_bytes,
+                page_size: page_size.bytes(),
+            });
+        }
+        if budget.max_bytes % page_size.bytes() != 0 {
+            return Err(PageBudgetError::NotPageAligned {
+                budget: budget.max_bytes,
+                page_size: page_size.bytes(),
+            });
+        }
+        Ok(Self {
+            page_size,
+            budget,
+            usage: PageUsage::default(),
+            next_id: 0,
+            next_sequence: 0,
+            active: BTreeMap::new(),
+            records: BTreeMap::new(),
+        })
+    }
+
+    #[must_use]
+    pub const fn page_size(&self) -> PageSize {
+        self.page_size
+    }
+
+    #[must_use]
+    pub const fn budget(&self) -> PageBudget {
+        self.budget
+    }
+
+    #[must_use]
+    pub const fn usage(&self) -> PageUsage {
+        self.usage
+    }
+
+    /// Requests one page, returning the existing id for an active duplicate.
+    /// Repeated requests can raise priority and importance.
+    pub fn request(
+        &mut self,
+        key: PageKey,
+        priority: Priority,
+        importance: u32,
+    ) -> Result<PageId, PageRequestError> {
+        key.range(self.page_size).map_err(PageRequestError::Range)?;
+        if let Some(id) = self.active.get(&key).copied() {
+            if let Some(record) = self.records.get_mut(&id) {
+                if matches!(
+                    record.state,
+                    PageState::Pending | PageState::Loading | PageState::Resident
+                ) {
+                    record.priority = record.priority.max(priority);
+                    record.importance = record.importance.max(importance);
+                    return Ok(id);
+                }
+            }
+            self.active.remove(&key);
+        }
+        let id = PageId(self.next_id);
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or(PageRequestError::IdExhausted)?;
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or(PageRequestError::IdExhausted)?;
+        self.records.insert(
+            id,
+            PageRecord {
+                key: key.clone(),
+                state: PageState::Pending,
+                priority,
+                importance,
+                sequence,
+                failure: None,
+                bytes: None,
+            },
+        );
+        self.active.insert(key, id);
+        Ok(id)
+    }
+
+    /// Returns the highest-priority pending page, FIFO within a priority tier.
+    #[must_use]
+    pub fn next_pending(&self) -> Option<(PageId, &PageKey)> {
+        self.records
+            .iter()
+            .filter(|(_, record)| record.state == PageState::Pending)
+            .max_by_key(|(id, record)| {
+                (
+                    record.priority,
+                    record.importance,
+                    core::cmp::Reverse(record.sequence),
+                    core::cmp::Reverse(id.get()),
+                )
+            })
+            .map(|(id, record)| (*id, &record.key))
+    }
+
+    /// Returns resident pages in deterministic eviction order.
+    #[must_use]
+    pub fn eviction_candidates(&self) -> Vec<PageId> {
+        let mut candidates = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.state == PageState::Resident)
+            .map(|(id, record)| {
+                (
+                    record.priority,
+                    record.importance,
+                    record.sequence,
+                    id.get(),
+                    *id,
+                )
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|candidate| (candidate.0, candidate.1, candidate.2, candidate.3));
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.4)
+            .collect()
+    }
+
+    /// Reserves one page of CPU budget and enters Loading.
+    pub fn begin_load(&mut self, id: PageId) -> Result<(), PageAdmissionError> {
+        let state = self
+            .records
+            .get(&id)
+            .map(|record| record.state)
+            .ok_or(PageAdmissionError::Unknown(id))?;
+        if state != PageState::Pending {
+            return Err(PageAdmissionError::InvalidState { id, state });
+        }
+        if self.usage.in_flight_pages >= self.budget.max_in_flight {
+            return Err(PageAdmissionError::Backpressure {
+                in_flight: self.usage.in_flight_pages,
+                max_in_flight: self.budget.max_in_flight,
+            });
+        }
+        let requested = self
+            .usage
+            .resident_bytes
+            .checked_add(self.usage.loading_bytes)
+            .and_then(|used| used.checked_add(self.page_size.bytes()))
+            .ok_or(PageAdmissionError::BudgetOverflow)?;
+        if requested > self.budget.max_bytes {
+            return Err(PageAdmissionError::BudgetExceeded {
+                requested,
+                limit: self.budget.max_bytes,
+            });
+        }
+        self.usage.loading_bytes = self
+            .usage
+            .loading_bytes
+            .checked_add(self.page_size.bytes())
+            .ok_or(PageAdmissionError::BudgetOverflow)?;
+        self.usage.in_flight_pages = self
+            .usage
+            .in_flight_pages
+            .checked_add(1)
+            .ok_or(PageAdmissionError::BudgetOverflow)?;
+        self.records
+            .get_mut(&id)
+            .expect("page record checked above")
+            .state = PageState::Loading;
+        Ok(())
+    }
+
+    /// Commits one complete fixed page and takes ownership of its CPU bytes.
+    pub fn complete_load(&mut self, id: PageId, bytes: Vec<u8>) -> Result<(), PageLoadError> {
+        let state = self
+            .records
+            .get(&id)
+            .map(|record| record.state)
+            .ok_or(PageTransitionError::Unknown(id))
+            .map_err(PageLoadError::Transition)?;
+        if state != PageState::Loading {
+            return Err(PageLoadError::Transition(
+                PageTransitionError::InvalidState { id, state },
+            ));
+        }
+        let expected = self.page_size.bytes();
+        let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if actual != expected {
+            self.fail(id, PageFailure::ShortRead { expected, actual })
+                .map_err(PageLoadError::Transition)?;
+            return Err(PageLoadError::ShortRead {
+                id,
+                expected,
+                actual,
+            });
+        }
+        self.usage.loading_bytes = self.usage.loading_bytes.saturating_sub(expected);
+        self.usage.resident_bytes = self.usage.resident_bytes.saturating_add(expected);
+        self.usage.in_flight_pages = self.usage.in_flight_pages.saturating_sub(1);
+        let record = self
+            .records
+            .get_mut(&id)
+            .expect("page record checked above");
+        record.state = PageState::Resident;
+        record.failure = None;
+        record.bytes = Some(bytes);
+        Ok(())
+    }
+
+    /// Marks a pending or loading page failed and releases loading budget.
+    pub fn fail(&mut self, id: PageId, failure: PageFailure) -> Result<(), PageTransitionError> {
+        let (state, key) = self
+            .records
+            .get(&id)
+            .map(|record| (record.state, record.key.clone()))
+            .ok_or(PageTransitionError::Unknown(id))?;
+        match state {
+            PageState::Pending => {}
+            PageState::Loading => self.release_loading(),
+            state => return Err(PageTransitionError::InvalidState { id, state }),
+        }
+        self.deactivate(&key, id);
+        let record = self
+            .records
+            .get_mut(&id)
+            .expect("page record checked above");
+        record.state = PageState::Failed;
+        record.failure = Some(failure);
+        record.bytes = None;
+        Ok(())
+    }
+
+    /// Cancels a pending or loading page and releases loading budget.
+    pub fn cancel(&mut self, id: PageId) -> Result<(), PageTransitionError> {
+        let (state, key) = self
+            .records
+            .get(&id)
+            .map(|record| (record.state, record.key.clone()))
+            .ok_or(PageTransitionError::Unknown(id))?;
+        match state {
+            PageState::Pending => {}
+            PageState::Loading => self.release_loading(),
+            state => return Err(PageTransitionError::InvalidState { id, state }),
+        }
+        self.deactivate(&key, id);
+        let record = self
+            .records
+            .get_mut(&id)
+            .expect("page record checked above");
+        record.state = PageState::Cancelled;
+        record.failure = None;
+        record.bytes = None;
+        Ok(())
+    }
+
+    /// Evicts a resident page, dropping its bytes and record.
+    pub fn evict(&mut self, id: PageId) -> Result<(), PageTransitionError> {
+        let (state, key) = self
+            .records
+            .get(&id)
+            .map(|record| (record.state, record.key.clone()))
+            .ok_or(PageTransitionError::Unknown(id))?;
+        if state != PageState::Resident {
+            return Err(PageTransitionError::InvalidState { id, state });
+        }
+        self.usage.resident_bytes = self
+            .usage
+            .resident_bytes
+            .saturating_sub(self.page_size.bytes());
+        self.deactivate(&key, id);
+        self.records.remove(&id);
+        Ok(())
+    }
+
+    /// Drops a failed or cancelled historical record.
+    pub fn forget_terminal(&mut self, id: PageId) -> Result<(), PageTransitionError> {
+        let state = self
+            .records
+            .get(&id)
+            .map(|record| record.state)
+            .ok_or(PageTransitionError::Unknown(id))?;
+        match state {
+            PageState::Failed | PageState::Cancelled => {
+                self.records.remove(&id);
+                Ok(())
+            }
+            state => Err(PageTransitionError::InvalidState { id, state }),
+        }
+    }
+
+    /// Performs one real synchronous AssetSources::read_range call.
+    pub fn load(&mut self, sources: &AssetSources, id: PageId) -> Result<(), PageLoadError> {
+        self.begin_load(id).map_err(PageLoadError::Admission)?;
+        let (key, offset) = {
+            let record = self.records.get(&id).expect("page record checked above");
+            let range = record
+                .key
+                .range(self.page_size)
+                .expect("page range was validated at request");
+            (record.key.clone(), range.0)
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            sources.read_range(key.path(), offset, self.page_size.bytes())
+        }));
+        match result {
+            Ok(Ok(bytes)) => self.complete_load(id, bytes),
+            Ok(Err(error)) => {
+                self.fail(id, PageFailure::Read(error.clone()))
+                    .map_err(PageLoadError::Transition)?;
+                Err(PageLoadError::Read { id, error })
+            }
+            Err(_) => {
+                self.fail(id, PageFailure::SourcePanicked)
+                    .map_err(PageLoadError::Transition)?;
+                Err(PageLoadError::SourcePanicked { id })
+            }
+        }
+    }
+
+    /// Loads the highest-priority pending page, if any.
+    pub fn load_next(&mut self, sources: &AssetSources) -> Result<Option<PageId>, PageLoadError> {
+        let id = self.next_pending().map(|(id, _)| id);
+        id.map(|id| self.load(sources, id).map(|()| id)).transpose()
+    }
+
+    #[must_use]
+    pub fn state(&self, id: PageId) -> Option<PageState> {
+        self.records.get(&id).map(|record| record.state)
+    }
+
+    #[must_use]
+    pub fn failure(&self, id: PageId) -> Option<&PageFailure> {
+        self.records
+            .get(&id)
+            .and_then(|record| record.failure.as_ref())
+    }
+
+    #[must_use]
+    pub fn key(&self, id: PageId) -> Option<&PageKey> {
+        self.records.get(&id).map(|record| &record.key)
+    }
+
+    #[must_use]
+    pub fn resident_bytes(&self, id: PageId) -> Option<&[u8]> {
+        self.records
+            .get(&id)
+            .filter(|record| record.state == PageState::Resident)
+            .and_then(|record| record.bytes.as_deref())
+    }
+
+    #[must_use]
+    pub fn priority(&self, id: PageId) -> Option<Priority> {
+        self.records.get(&id).map(|record| record.priority)
+    }
+
+    fn deactivate(&mut self, key: &PageKey, id: PageId) {
+        if self.active.get(key).copied() == Some(id) {
+            self.active.remove(key);
+        }
+    }
+
+    fn release_loading(&mut self) {
+        self.usage.loading_bytes = self
+            .usage
+            .loading_bytes
+            .saturating_sub(self.page_size.bytes());
+        self.usage.in_flight_pages = self.usage.in_flight_pages.saturating_sub(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MemSource;
+    use alloc::sync::Arc;
+
+    fn size() -> PageSize {
+        PageSize::new(4).unwrap()
+    }
+
+    fn manager(bytes: u64, in_flight: usize) -> PageResidency {
+        PageResidency::new(size(), PageBudget::new(bytes, in_flight).unwrap()).unwrap()
+    }
+
+    fn sources() -> AssetSources {
+        let mut sources = AssetSources::new();
+        let mut memory = MemSource::new();
+        memory.insert("payload.bin", b"abcdefghijkl".to_vec());
+        sources.mount("memory", Arc::new(memory), 0);
+        sources
+    }
+
+    #[test]
+    fn validates_page_size_and_budget_alignment() {
+        assert_eq!(PageSize::new(0), Err(PageSizeError::Zero));
+        assert_eq!(PageSize::new(6), Err(PageSizeError::NotPowerOfTwo(6)));
+        assert_eq!(PageBudget::new(16, 0), Err(PageBudgetError::ZeroInFlight));
+        assert!(matches!(
+            PageResidency::new(size(), PageBudget::new(2, 1).unwrap()),
+            Err(PageBudgetError::SmallerThanPage {
+                budget: 2,
+                page_size: 4
+            })
+        ));
+        assert!(matches!(
+            PageResidency::new(PageSize::new(8).unwrap(), PageBudget::new(10, 1).unwrap()),
+            Err(PageBudgetError::NotPageAligned {
+                budget: 10,
+                page_size: 8
+            })
+        ));
+    }
+
+    #[test]
+    fn computes_fixed_ranges_and_rejects_overflow() {
+        assert_eq!(
+            PageKey::new("payload.bin", 2).range(size()).unwrap(),
+            (8, 4)
+        );
+        assert_eq!(
+            PageKey::new("payload.bin", u64::MAX).range(size()),
+            Err(PageRangeError::OffsetOverflow {
+                page_index: u64::MAX,
+                page_size: 4
+            })
+        );
+    }
+
+    #[test]
+    fn deduplicates_active_request_and_upgrades_priority() {
+        let mut residency = manager(8, 1);
+        let key = PageKey::new("payload.bin", 1);
+        let first = residency.request(key.clone(), Priority::Low, 1).unwrap();
+        let duplicate = residency.request(key, Priority::High, 9).unwrap();
+        assert_eq!(duplicate, first);
+        assert_eq!(residency.priority(first), Some(Priority::High));
+        assert_eq!(residency.next_pending().unwrap().0, first);
+    }
+
+    #[test]
+    fn real_range_read_resides_exact_cpu_page() {
+        let sources = sources();
+        let mut residency = manager(8, 1);
+        let id = residency
+            .request(PageKey::new("memory://payload.bin", 1), Priority::Normal, 0)
+            .unwrap();
+        residency.load(&sources, id).unwrap();
+        assert_eq!(residency.state(id), Some(PageState::Resident));
+        assert_eq!(residency.resident_bytes(id), Some(&b"efgh"[..]));
+        assert_eq!(
+            residency.usage(),
+            PageUsage {
+                resident_bytes: 4,
+                loading_bytes: 0,
+                in_flight_pages: 0
+            }
+        );
+    }
+
+    #[test]
+    fn backpressure_failure_and_cancel_release_loading_budget() {
+        let mut residency = manager(8, 1);
+        let first = residency
+            .request(PageKey::new("payload.bin", 0), Priority::Normal, 0)
+            .unwrap();
+        let second = residency
+            .request(PageKey::new("payload.bin", 1), Priority::Normal, 0)
+            .unwrap();
+        residency.begin_load(first).unwrap();
+        assert_eq!(
+            residency.begin_load(second),
+            Err(PageAdmissionError::Backpressure {
+                in_flight: 1,
+                max_in_flight: 1
+            })
+        );
+        residency.fail(first, PageFailure::External(7)).unwrap();
+        assert_eq!(residency.usage(), PageUsage::default());
+        residency.begin_load(second).unwrap();
+        residency.cancel(second).unwrap();
+        assert_eq!(residency.usage(), PageUsage::default());
+        assert_eq!(residency.state(first), Some(PageState::Failed));
+        assert_eq!(residency.state(second), Some(PageState::Cancelled));
+    }
+
+    #[test]
+    fn read_failure_releases_budget_and_retry_is_not_deduplicated() {
+        let sources = sources();
+        let mut residency = manager(4, 1);
+        let first = residency
+            .request(PageKey::new("memory://missing.bin", 0), Priority::Normal, 0)
+            .unwrap();
+        assert!(matches!(
+            residency.load(&sources, first),
+            Err(PageLoadError::Read {
+                id,
+                error: ReadError::NotFound
+            }) if id == first
+        ));
+        assert_eq!(residency.usage(), PageUsage::default());
+        let retry = residency
+            .request(PageKey::new("memory://missing.bin", 0), Priority::Normal, 0)
+            .unwrap();
+        assert_ne!(retry, first);
+    }
+
+    #[test]
+    fn deterministic_eviction_orders_low_priority_old_pages_first() {
+        let sources = sources();
+        let mut residency = manager(12, 3);
+        let old_low = residency
+            .request(PageKey::new("memory://payload.bin", 0), Priority::Low, 0)
+            .unwrap();
+        let normal = residency
+            .request(PageKey::new("memory://payload.bin", 1), Priority::Normal, 0)
+            .unwrap();
+        let new_low = residency
+            .request(PageKey::new("memory://payload.bin", 2), Priority::Low, 0)
+            .unwrap();
+        residency.load(&sources, old_low).unwrap();
+        residency.load(&sources, normal).unwrap();
+        residency.load(&sources, new_low).unwrap();
+        assert_eq!(
+            residency.eviction_candidates(),
+            vec![old_low, new_low, normal]
+        );
+        residency.evict(old_low).unwrap();
+        assert_eq!(residency.usage().resident_bytes, 8);
+        assert_eq!(residency.state(old_low), None);
+    }
+}
