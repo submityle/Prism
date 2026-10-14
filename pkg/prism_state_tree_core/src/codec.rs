@@ -379,9 +379,7 @@ impl FrameMigration {
 mod tests {
     use alloc::vec;
 
-    use super::{
-        FrameMigration, FrameSnapshot, SlotCodec, SlotDecl, SlotGuid, SlotValue,
-    };
+    use super::{FrameMigration, FrameSnapshot, SlotCodec, SlotDecl, SlotGuid, SlotValue};
     use crate::{BindingSlot, FrameError};
 
     fn decl(slot: u32, guid: u128, default: SlotValue) -> SlotDecl {

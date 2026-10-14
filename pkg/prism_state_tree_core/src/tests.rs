@@ -798,6 +798,9 @@ fn deep_history_on_parallel_does_not_leave_default_region_states() {
     instance.run(&mut callback).unwrap();
     instance.send(Event::new(EventId(21))).unwrap();
     instance.run(&mut callback).unwrap();
+    let saved = instance.history[StateId(1).0 as usize].as_ref().unwrap();
+    let saved_allocation = saved.as_ptr();
+    let saved_capacity = saved.capacity();
     instance.send(Event::new(EventId(22))).unwrap();
     instance.run(&mut callback).unwrap();
 
@@ -813,6 +816,15 @@ fn deep_history_on_parallel_does_not_leave_default_region_states() {
         assert!(instance.is_active(state));
     }
     assert!(!instance.is_active(StateId(3)));
+
+    instance.send(Event::new(EventId(21))).unwrap();
+    instance.run(&mut callback).unwrap();
+    let saved = instance.history[StateId(1).0 as usize].as_ref().unwrap();
+    assert_eq!(saved.as_ptr(), saved_allocation);
+    assert_eq!(saved.capacity(), saved_capacity);
+    instance.send(Event::new(EventId(22))).unwrap();
+    instance.run(&mut callback).unwrap();
+    assert!(instance.is_active(StateId(4)));
 }
 
 #[test]

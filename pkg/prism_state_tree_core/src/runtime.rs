@@ -132,6 +132,7 @@ pub struct Instance {
     pub(crate) queue: VecDeque<Event>,
     pub(crate) guards: Vec<Option<Box<dyn Guard>>>,
     pub(crate) log: Vec<LogEntry>,
+    path_scratch: Vec<StateId>,
     pub(crate) event_capacity: usize,
     pub(crate) microstep_limit: MicrostepLimit,
     pub(crate) started: bool,
@@ -164,11 +165,12 @@ impl Instance {
         let count = plan.state_count();
         Ok(Self {
             plan,
-            active: Vec::new(),
+            active: Vec::with_capacity(count),
             history: vec![None; count],
             queue: VecDeque::with_capacity(event_capacity),
             guards: Vec::new(),
             log: Vec::new(),
+            path_scratch: Vec::with_capacity(count),
             event_capacity,
             microstep_limit,
             started: false,
@@ -372,12 +374,14 @@ impl Instance {
         if report.microsteps >= self.microstep_limit.0 {
             return Err(RuntimeError::MicrostepLimit(self.microstep_limit));
         }
-        let transition = self.plan.nodes[source.0 as usize].transitions[index].clone();
-        let effective_target = match transition.target {
+        let transition = &self.plan.nodes[source.0 as usize].transitions[index];
+        let target = transition.target;
+        let kind = transition.kind;
+        let effective_target = match target {
             TransitionTarget::SelfState => source,
             TransitionTarget::State(id) | TransitionTarget::History { owner: id, .. } => id,
         };
-        if transition.kind == TransitionKind::External {
+        if kind == TransitionKind::External {
             let boundary = if self.plan.is_descendant(effective_target, source) {
                 // A transition to a strict descendant keeps its source active;
                 // an explicit self transition restarts the source.
@@ -415,7 +419,7 @@ impl Instance {
             self.enter_target(
                 effective_target,
                 boundary,
-                match transition.target {
+                match target {
                     TransitionTarget::History { depth, .. } => Some(depth),
                     _ => None,
                 },
@@ -429,10 +433,10 @@ impl Instance {
             microstep: report.microsteps,
             state: source,
             source: Some(source),
-            target: Some(transition.target),
+            target: Some(target),
             event: self.current_event,
         });
-        callback.on_transition(source, transition.target);
+        callback.on_transition(source, target);
         report.microsteps += 1;
         Ok(())
     }
@@ -446,23 +450,19 @@ impl Instance {
         microstep: usize,
         callback: &mut C,
     ) {
-        let parallel_states: Vec<StateId> = self
-            .active
-            .iter()
-            .copied()
-            .filter(|state| {
-                matches!(
-                    self.plan.nodes[state.0 as usize].kind,
-                    NodeKind::Parallel { .. }
-                )
-            })
-            .collect();
-        for parallel in parallel_states {
-            let regions = match self.plan.nodes[parallel.0 as usize].kind.clone() {
-                NodeKind::Parallel { regions, .. } => regions,
+        let mut active_index = 0;
+        while active_index < self.active.len() {
+            let parallel = self.active[active_index];
+            active_index += 1;
+            let region_count = match &self.plan.nodes[parallel.0 as usize].kind {
+                NodeKind::Parallel { regions, .. } => regions.len(),
                 _ => continue,
             };
-            for region in regions {
+            for region_index in 0..region_count {
+                let region = match &self.plan.nodes[parallel.0 as usize].kind {
+                    NodeKind::Parallel { regions, .. } => regions[region_index],
+                    _ => unreachable!(),
+                };
                 if !self.is_active(region) {
                     self.enter_state_default(region, microstep, callback);
                 }
@@ -471,32 +471,25 @@ impl Instance {
     }
 
     fn capture_histories(&mut self, root: StateId) {
-        let owners: Vec<StateId> = self
-            .active
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.plan.is_descendant(*id, root)
-                    && self.plan.nodes[id.0 as usize].kind.history().is_some()
-            })
-            .collect();
-        for owner in owners {
-            let kind = &self.plan.nodes[owner.0 as usize].kind;
-            let snapshot = match kind.history().unwrap_or(HistoryMode::Deep) {
-                HistoryMode::Deep => self
-                    .active
-                    .iter()
-                    .copied()
-                    .filter(|id| self.plan.is_descendant(*id, owner) && *id != owner)
-                    .collect(),
-                HistoryMode::Shallow => self
-                    .active
-                    .iter()
-                    .copied()
-                    .filter(|id| self.plan.parent(*id) == Some(owner))
-                    .collect(),
+        for index in 0..self.active.len() {
+            let owner = self.active[index];
+            if !self.plan.is_descendant(owner, root) {
+                continue;
+            }
+            let Some(depth) = self.plan.nodes[owner.0 as usize].kind.history() else {
+                continue;
             };
-            self.history[owner.0 as usize] = Some(snapshot);
+            let saved = self.history[owner.0 as usize].get_or_insert_with(Vec::new);
+            saved.clear();
+            for &state in &self.active {
+                let include = match depth {
+                    HistoryMode::Deep => state != owner && self.plan.is_descendant(state, owner),
+                    HistoryMode::Shallow => self.plan.parent(state) == Some(owner),
+                };
+                if include {
+                    saved.push(state);
+                }
+            }
         }
     }
 
@@ -506,13 +499,11 @@ impl Instance {
         callback: &mut C,
         microstep: usize,
     ) {
-        let exiting: Vec<StateId> = self
-            .active
-            .iter()
-            .copied()
-            .filter(|id| self.plan.is_descendant(*id, root))
-            .collect();
-        for &state in exiting.iter().rev() {
+        for index in (0..self.active.len()).rev() {
+            let state = self.active[index];
+            if !self.plan.is_descendant(state, root) {
+                continue;
+            }
             callback.on_exit(state);
             self.log.push(LogEntry {
                 kind: LogKind::Exit,
@@ -532,13 +523,11 @@ impl Instance {
         callback: &mut C,
         microstep: usize,
     ) {
-        let exiting: Vec<StateId> = self
-            .active
-            .iter()
-            .copied()
-            .filter(|id| *id != boundary && self.plan.is_descendant(*id, boundary))
-            .collect();
-        for &state in exiting.iter().rev() {
+        for index in (0..self.active.len()).rev() {
+            let state = self.active[index];
+            if state == boundary || !self.plan.is_descendant(state, boundary) {
+                continue;
+            }
             callback.on_exit(state);
             self.log.push(LogEntry {
                 kind: LogKind::Exit,
@@ -578,17 +567,18 @@ impl Instance {
         if !self.plan.contains(target) || self.is_active(target) {
             return;
         }
-        let mut path = Vec::new();
+        self.path_scratch.clear();
         let mut cursor = target;
         while !self.is_active(cursor) && Some(cursor) != boundary {
-            path.push(cursor);
+            self.path_scratch.push(cursor);
             cursor = match self.plan.parent(cursor) {
                 Some(parent) => parent,
                 None => break,
             };
         }
-        path.reverse();
-        for &state in &path {
+        self.path_scratch.reverse();
+        for index in 0..self.path_scratch.len() {
+            let state = self.path_scratch[index];
             self.enter_one(state, microstep, callback);
             if history.is_none()
                 && matches!(
@@ -621,6 +611,7 @@ impl Instance {
         } else {
             self.initialize_children(target, microstep, callback);
         }
+        self.path_scratch.clear();
     }
 
     fn enter_one<C: LifecycleCallback>(
@@ -660,16 +651,20 @@ impl Instance {
         microstep: usize,
         callback: &mut C,
     ) {
-        match self.plan.nodes[owner.0 as usize].kind.clone() {
-            NodeKind::Atomic => {}
+        let region_count = match &self.plan.nodes[owner.0 as usize].kind {
+            NodeKind::Atomic => return,
             NodeKind::Compound { initial, .. } => {
-                self.enter_state_default(initial, microstep, callback)
+                self.enter_state_default(*initial, microstep, callback);
+                return;
             }
-            NodeKind::Parallel { regions, .. } => {
-                for region in regions {
-                    self.enter_state_default(region, microstep, callback)
-                }
-            }
+            NodeKind::Parallel { regions, .. } => regions.len(),
+        };
+        for index in 0..region_count {
+            let region = match &self.plan.nodes[owner.0 as usize].kind {
+                NodeKind::Parallel { regions, .. } => regions[index],
+                _ => unreachable!(),
+            };
+            self.enter_state_default(region, microstep, callback);
         }
     }
 
@@ -680,20 +675,22 @@ impl Instance {
         microstep: usize,
         callback: &mut C,
     ) {
-        let Some(saved) = self.history[owner.0 as usize].clone() else {
+        let Some(saved) = &self.history[owner.0 as usize] else {
             self.initialize_children(owner, microstep, callback);
             return;
         };
         match depth {
             HistoryMode::Shallow => {
-                for state in saved {
+                for index in 0..saved.len() {
+                    let state = self.history[owner.0 as usize].as_ref().unwrap()[index];
                     if self.plan.parent(state) == Some(owner) {
                         self.enter_state_default(state, microstep, callback);
                     }
                 }
             }
             HistoryMode::Deep => {
-                for state in saved {
+                for index in 0..saved.len() {
+                    let state = self.history[owner.0 as usize].as_ref().unwrap()[index];
                     if !self.is_active(state)
                         && self
                             .plan
