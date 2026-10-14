@@ -52,6 +52,13 @@ pub enum Action {
         /// Tab placement or edge split placement.
         placement: Placement,
     },
+    /// Activates a tab in the target's tab stack.
+    ActivateTab {
+        /// Existing panel or document in the destination stack.
+        target: Target,
+        /// Zero-based tab index within that stack.
+        index: usize,
+    },
     /// Remove a panel from the layout.
     Close {
         /// Panel to remove.
@@ -141,6 +148,7 @@ fn apply(layout: &mut DockLayout, action: Action) -> Result<(), LayoutError> {
             )?;
         }
         Action::Tabify { panel, target } => move_panel(layout, &panel, &target, Placement::Tab)?,
+        Action::ActivateTab { target, index } => activate_tab(layout, &target, index)?,
         Action::Move {
             panel,
             target,
@@ -244,6 +252,43 @@ fn apply(layout: &mut DockLayout, action: Action) -> Result<(), LayoutError> {
         }
     }
     Ok(())
+}
+
+fn activate_tab(layout: &mut DockLayout, target: &Target, index: usize) -> Result<(), LayoutError> {
+    if activate_node(&mut layout.root, target, index) {
+        return Ok(());
+    }
+    for window in &mut layout.floating {
+        if activate_node(&mut window.root, target, index) {
+            return Ok(());
+        }
+    }
+    Err(err(ValidationIssue::TargetNotFound))
+}
+
+fn activate_node(node: &mut DockNode, target: &Target, index: usize) -> bool {
+    match node {
+        DockNode::Split { children, .. } => children
+            .iter_mut()
+            .any(|child| activate_node(&mut child.node, target, index)),
+        DockNode::TabStack { tabs, active } if matches!(target, Target::Panel(panel) if tabs.contains(panel)) =>
+        {
+            if index >= tabs.len() {
+                return false;
+            }
+            *active = index;
+            true
+        }
+        DockNode::Document { tabs, active } if matches!(target, Target::Document(document) if tabs.contains(document)) =>
+        {
+            if index >= tabs.len() {
+                return false;
+            }
+            *active = index;
+            true
+        }
+        _ => false,
+    }
 }
 
 fn move_panel(
@@ -652,6 +697,32 @@ mod tests {
             moved.root,
             DockNode::TabStack {
                 tabs: vec!["a".into(), "b".into(), "c".into()],
+                active: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn activate_tab_changes_only_the_selected_stack() {
+        let layout = DockLayout {
+            root: DockNode::TabStack {
+                tabs: vec!["a".into(), "b".into()],
+                active: 0,
+            },
+            ..DockLayout::default()
+        };
+        let next = reduce(
+            &layout,
+            Action::ActivateTab {
+                target: Target::Panel("b".into()),
+                index: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            next.root,
+            DockNode::TabStack {
+                tabs: vec!["a".into(), "b".into()],
                 active: 1,
             }
         );

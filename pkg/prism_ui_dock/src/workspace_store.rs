@@ -17,8 +17,9 @@ use std::{
 };
 
 use crate::{
-    decode_workspace, decode_workspace_with_registry, encode_workspace, PanelRegistry,
-    WorkspaceDecodeLimits, WorkspaceDecodeOptions, WorkspaceManager, WorkspacePersistError,
+    decode_workspace, decode_workspace_with_registry, encode_workspace, MigrationError,
+    PanelRegistry, WorkspaceDecodeLimits, WorkspaceDecodeOptions, WorkspaceManager,
+    WorkspaceMigrationRegistry, WorkspacePersistError,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -55,6 +56,8 @@ pub enum WorkspaceStoreError {
     Io(io::Error),
     /// Snapshot bytes failed the versioned workspace codec.
     Codec(WorkspacePersistError),
+    /// Snapshot bytes failed the explicit schema migration registry.
+    Migration(MigrationError),
 }
 
 impl From<io::Error> for WorkspaceStoreError {
@@ -66,6 +69,12 @@ impl From<io::Error> for WorkspaceStoreError {
 impl From<WorkspacePersistError> for WorkspaceStoreError {
     fn from(error: WorkspacePersistError) -> Self {
         Self::Codec(error)
+    }
+}
+
+impl From<MigrationError> for WorkspaceStoreError {
+    fn from(error: MigrationError) -> Self {
+        Self::Migration(error)
     }
 }
 
@@ -163,7 +172,9 @@ impl WorkspaceFileStore {
         options: WorkspaceDecodeOptions<'_>,
         default: WorkspaceManager,
     ) -> LoadedWorkspace {
-        self.load_with(default, |bytes| decode_workspace(bytes, options))
+        self.load_with(default, |bytes| {
+            decode_workspace(bytes, options).map_err(WorkspaceStoreError::Codec)
+        })
     }
 
     /// Loads using the registered panel IDs as the persistence allow-list.
@@ -180,12 +191,43 @@ impl WorkspaceFileStore {
     ) -> LoadedWorkspace {
         self.load_with(default, |bytes| {
             decode_workspace_with_registry(bytes, registry, known_documents, limits)
+                .map_err(WorkspaceStoreError::Codec)
+        })
+    }
+
+    /// Loads after explicitly migrating the snapshot to the canonical
+    /// workspace wire version, then applies the caller's registry policy.
+    pub fn load_with_migration(
+        &self,
+        migration: &WorkspaceMigrationRegistry,
+        options: WorkspaceDecodeOptions<'_>,
+        default: WorkspaceManager,
+    ) -> LoadedWorkspace {
+        self.load_with(default, |bytes| {
+            let migrated = migration.migrate(bytes)?;
+            decode_workspace(&migrated, options).map_err(WorkspaceStoreError::Codec)
+        })
+    }
+
+    /// Registry-aware variant of [`Self::load_with_migration`].
+    pub fn load_with_registry_and_migration(
+        &self,
+        migration: &WorkspaceMigrationRegistry,
+        registry: &PanelRegistry,
+        known_documents: Option<&[&str]>,
+        limits: WorkspaceDecodeLimits,
+        default: WorkspaceManager,
+    ) -> LoadedWorkspace {
+        self.load_with(default, |bytes| {
+            let migrated = migration.migrate(bytes)?;
+            decode_workspace_with_registry(&migrated, registry, known_documents, limits)
+                .map_err(WorkspaceStoreError::Codec)
         })
     }
 
     fn load_with<F>(&self, default: WorkspaceManager, mut decode: F) -> LoadedWorkspace
     where
-        F: FnMut(&[u8]) -> Result<WorkspaceManager, WorkspacePersistError>,
+        F: FnMut(&[u8]) -> Result<WorkspaceManager, WorkspaceStoreError>,
     {
         let primary_error = match fs::read(&self.primary) {
             Ok(bytes) => match decode(&bytes) {
@@ -197,7 +239,7 @@ impl WorkspaceFileStore {
                         last_good_error: None,
                     };
                 }
-                Err(error) => Some(WorkspaceStoreError::Codec(error)),
+                Err(error) => Some(error),
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => Some(WorkspaceStoreError::Io(error)),
@@ -214,7 +256,7 @@ impl WorkspaceFileStore {
                         last_good_error: None,
                     };
                 }
-                Err(error) => Some(WorkspaceStoreError::Codec(error)),
+                Err(error) => Some(error),
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => Some(WorkspaceStoreError::Io(error)),
