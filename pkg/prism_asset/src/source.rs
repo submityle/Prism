@@ -583,6 +583,7 @@ struct Mount {
 pub struct AssetSources {
     mounts: Vec<Mount>,
     next_seq: u64,
+    revision: u64,
 }
 
 impl AssetSources {
@@ -610,13 +611,24 @@ impl AssetSources {
                 seq,
             });
         }
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Removes a mount by name, returning whether it was present.
     pub fn unmount(&mut self, name: &str) -> bool {
         let before = self.mounts.len();
         self.mounts.retain(|m| m.name != name);
-        self.mounts.len() != before
+        let removed = self.mounts.len() != before;
+        if removed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        removed
+    }
+
+    /// Returns the revision of the mounted source table.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Mount names in overlay order (highest priority first).

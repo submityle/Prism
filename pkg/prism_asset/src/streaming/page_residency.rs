@@ -5,7 +5,7 @@
 //! GPU resources, performs no GPU upload/decode, and depends on no renderer.
 
 use super::super::{AssetPath, AssetSources, ReadError};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::fmt;
 use prism_tasks::Priority;
@@ -52,11 +52,12 @@ impl fmt::Display for PageSizeError {
 
 impl std::error::Error for PageSizeError {}
 
-/// CPU byte and in-flight limits.
+/// CPU byte, in-flight, and terminal-diagnostic limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageBudget {
     max_bytes: u64,
     max_in_flight: usize,
+    max_terminal_records: usize,
 }
 
 impl PageBudget {
@@ -68,6 +69,7 @@ impl PageBudget {
         Ok(Self {
             max_bytes,
             max_in_flight,
+            max_terminal_records: max_in_flight.saturating_mul(2).max(1),
         })
     }
 
@@ -79,6 +81,21 @@ impl PageBudget {
     #[must_use]
     pub const fn max_in_flight(self) -> usize {
         self.max_in_flight
+    }
+
+    /// Returns the bounded number of failed/cancelled records retained for
+    /// diagnostics. A value of zero drops terminal metadata immediately.
+    #[must_use]
+    pub const fn max_terminal_records(self) -> usize {
+        self.max_terminal_records
+    }
+
+    /// Overrides terminal diagnostic retention without changing byte or
+    /// in-flight admission limits.
+    #[must_use]
+    pub const fn with_max_terminal_records(mut self, max_terminal_records: usize) -> Self {
+        self.max_terminal_records = max_terminal_records;
+        self
     }
 }
 
@@ -112,20 +129,29 @@ impl fmt::Display for PageBudgetError {
 
 impl std::error::Error for PageBudgetError {}
 
-/// Source path and zero-based fixed page index.
+/// Source path, revision, and zero-based fixed page index.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PageKey {
     path: AssetPath,
     page_index: u64,
+    source_revision: u64,
 }
 
 impl PageKey {
+    /// Creates a key tied to one source-table/content revision.
     #[must_use]
-    pub fn new(path: impl Into<AssetPath>, page_index: u64) -> Self {
+    pub fn new(path: impl Into<AssetPath>, page_index: u64, source_revision: u64) -> Self {
         Self {
             path: path.into(),
             page_index,
+            source_revision,
         }
+    }
+
+    /// Returns the revision that produced this page key.
+    #[must_use]
+    pub const fn source_revision(&self) -> u64 {
+        self.source_revision
     }
 
     #[must_use]
@@ -138,7 +164,7 @@ impl PageKey {
         self.page_index
     }
 
-    /// Computes the fixed range, rejecting offset overflow.
+    /// Computes the fixed range, rejecting offset and end overflow.
     pub fn range(&self, page_size: PageSize) -> Result<(u64, u64), PageRangeError> {
         let offset = self.page_index.checked_mul(page_size.bytes()).ok_or(
             PageRangeError::OffsetOverflow {
@@ -146,6 +172,12 @@ impl PageKey {
                 page_size: page_size.bytes(),
             },
         )?;
+        offset
+            .checked_add(page_size.bytes())
+            .ok_or(PageRangeError::EndOverflow {
+                offset,
+                page_size: page_size.bytes(),
+            })?;
         Ok((offset, page_size.bytes()))
     }
 }
@@ -154,6 +186,7 @@ impl PageKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageRangeError {
     OffsetOverflow { page_index: u64, page_size: u64 },
+    EndOverflow { offset: u64, page_size: u64 },
 }
 
 impl fmt::Display for PageRangeError {
@@ -165,6 +198,10 @@ impl fmt::Display for PageRangeError {
             } => write!(
                 f,
                 "page range offset overflows: page_index={page_index}, page_size={page_size}"
+            ),
+            Self::EndOverflow { offset, page_size } => write!(
+                f,
+                "page range end overflows: offset={offset}, page_size={page_size}"
             ),
         }
     }
@@ -359,6 +396,7 @@ pub struct PageResidency {
     next_sequence: u64,
     active: BTreeMap<PageKey, PageId>,
     records: BTreeMap<PageId, PageRecord>,
+    terminal_order: VecDeque<PageId>,
 }
 
 impl PageResidency {
@@ -384,6 +422,7 @@ impl PageResidency {
             next_sequence: 0,
             active: BTreeMap::new(),
             records: BTreeMap::new(),
+            terminal_order: VecDeque::new(),
         })
     }
 
@@ -593,6 +632,7 @@ impl PageResidency {
         record.state = PageState::Failed;
         record.failure = Some(failure);
         record.bytes = None;
+        self.retain_terminal(id);
         Ok(())
     }
 
@@ -616,6 +656,7 @@ impl PageResidency {
         record.state = PageState::Cancelled;
         record.failure = None;
         record.bytes = None;
+        self.retain_terminal(id);
         Ok(())
     }
 
@@ -648,6 +689,7 @@ impl PageResidency {
         match state {
             PageState::Failed | PageState::Cancelled => {
                 self.records.remove(&id);
+                self.terminal_order.retain(|candidate| *candidate != id);
                 Ok(())
             }
             state => Err(PageTransitionError::InvalidState { id, state }),
@@ -725,6 +767,21 @@ impl PageResidency {
         }
     }
 
+    fn retain_terminal(&mut self, id: PageId) {
+        self.terminal_order.push_back(id);
+        while self.terminal_order.len() > self.budget.max_terminal_records {
+            let Some(oldest) = self.terminal_order.pop_front() else {
+                break;
+            };
+            if matches!(
+                self.records.get(&oldest).map(|record| record.state),
+                Some(PageState::Failed | PageState::Cancelled)
+            ) {
+                self.records.remove(&oldest);
+            }
+        }
+    }
+
     fn release_loading(&mut self) {
         self.usage.loading_bytes = self
             .usage
@@ -780,13 +837,20 @@ mod tests {
     #[test]
     fn computes_fixed_ranges_and_rejects_overflow() {
         assert_eq!(
-            PageKey::new("payload.bin", 2).range(size()).unwrap(),
+            PageKey::new("payload.bin", 2, 0).range(size()).unwrap(),
             (8, 4)
         );
         assert_eq!(
-            PageKey::new("payload.bin", u64::MAX).range(size()),
+            PageKey::new("payload.bin", u64::MAX, 0).range(size()),
             Err(PageRangeError::OffsetOverflow {
                 page_index: u64::MAX,
+                page_size: 4
+            })
+        );
+        assert_eq!(
+            PageKey::new("payload.bin", u64::MAX / 4, 0).range(size()),
+            Err(PageRangeError::EndOverflow {
+                offset: u64::MAX - 3,
                 page_size: 4
             })
         );
@@ -795,7 +859,7 @@ mod tests {
     #[test]
     fn deduplicates_active_request_and_upgrades_priority() {
         let mut residency = manager(8, 1);
-        let key = PageKey::new("payload.bin", 1);
+        let key = PageKey::new("payload.bin", 1, 0);
         let first = residency.request(key.clone(), Priority::Low, 1).unwrap();
         let duplicate = residency.request(key, Priority::High, 9).unwrap();
         assert_eq!(duplicate, first);
@@ -804,11 +868,50 @@ mod tests {
     }
 
     #[test]
+    fn source_revision_prevents_stale_page_deduplication() {
+        let mut residency = manager(8, 2);
+        let old = residency
+            .request(PageKey::new("payload.bin", 0, 1), Priority::Normal, 0)
+            .unwrap();
+        let new = residency
+            .request(PageKey::new("payload.bin", 0, 2), Priority::Normal, 0)
+            .unwrap();
+        assert_ne!(old, new);
+        assert_eq!(residency.key(old).unwrap().source_revision(), 1);
+        assert_eq!(residency.key(new).unwrap().source_revision(), 2);
+    }
+
+    #[test]
+    fn terminal_records_are_bounded_and_oldest_is_reclaimed() {
+        let mut residency = PageResidency::new(
+            size(),
+            PageBudget::new(8, 1).unwrap().with_max_terminal_records(1),
+        )
+        .unwrap();
+        let first = residency
+            .request(PageKey::new("first.bin", 0, 0), Priority::Low, 0)
+            .unwrap();
+        residency.cancel(first).unwrap();
+        assert_eq!(residency.state(first), Some(PageState::Cancelled));
+
+        let second = residency
+            .request(PageKey::new("second.bin", 0, 0), Priority::Low, 0)
+            .unwrap();
+        residency.cancel(second).unwrap();
+        assert_eq!(residency.state(first), None);
+        assert_eq!(residency.state(second), Some(PageState::Cancelled));
+    }
+
+    #[test]
     fn real_range_read_resides_exact_cpu_page() {
         let sources = sources();
         let mut residency = manager(8, 1);
         let id = residency
-            .request(PageKey::new("memory://payload.bin", 1), Priority::Normal, 0)
+            .request(
+                PageKey::new("memory://payload.bin", 1, sources.revision()),
+                Priority::Normal,
+                0,
+            )
             .unwrap();
         residency.load(&sources, id).unwrap();
         assert_eq!(residency.state(id), Some(PageState::Resident));
@@ -827,10 +930,10 @@ mod tests {
     fn backpressure_failure_and_cancel_release_loading_budget() {
         let mut residency = manager(8, 1);
         let first = residency
-            .request(PageKey::new("payload.bin", 0), Priority::Normal, 0)
+            .request(PageKey::new("payload.bin", 0, 0), Priority::Normal, 0)
             .unwrap();
         let second = residency
-            .request(PageKey::new("payload.bin", 1), Priority::Normal, 0)
+            .request(PageKey::new("payload.bin", 1, 0), Priority::Normal, 0)
             .unwrap();
         residency.begin_load(first).unwrap();
         assert_eq!(
@@ -854,7 +957,11 @@ mod tests {
         let sources = sources();
         let mut residency = manager(4, 1);
         let first = residency
-            .request(PageKey::new("memory://missing.bin", 0), Priority::Normal, 0)
+            .request(
+                PageKey::new("memory://missing.bin", 0, sources.revision()),
+                Priority::Normal,
+                0,
+            )
             .unwrap();
         assert!(matches!(
             residency.load(&sources, first),
@@ -865,7 +972,11 @@ mod tests {
         ));
         assert_eq!(residency.usage(), PageUsage::default());
         let retry = residency
-            .request(PageKey::new("memory://missing.bin", 0), Priority::Normal, 0)
+            .request(
+                PageKey::new("memory://missing.bin", 0, sources.revision()),
+                Priority::Normal,
+                0,
+            )
             .unwrap();
         assert_ne!(retry, first);
     }
@@ -875,13 +986,25 @@ mod tests {
         let sources = sources();
         let mut residency = manager(12, 3);
         let old_low = residency
-            .request(PageKey::new("memory://payload.bin", 0), Priority::Low, 0)
+            .request(
+                PageKey::new("memory://payload.bin", 0, sources.revision()),
+                Priority::Low,
+                0,
+            )
             .unwrap();
         let normal = residency
-            .request(PageKey::new("memory://payload.bin", 1), Priority::Normal, 0)
+            .request(
+                PageKey::new("memory://payload.bin", 1, sources.revision()),
+                Priority::Normal,
+                0,
+            )
             .unwrap();
         let new_low = residency
-            .request(PageKey::new("memory://payload.bin", 2), Priority::Low, 0)
+            .request(
+                PageKey::new("memory://payload.bin", 2, sources.revision()),
+                Priority::Low,
+                0,
+            )
             .unwrap();
         residency.load(&sources, old_low).unwrap();
         residency.load(&sources, normal).unwrap();
