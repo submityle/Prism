@@ -5,8 +5,9 @@
 //! lives in storage, *how many* live references point at it, and *what it
 //! depends on*. With `std`, it also provides synchronous source/loader execution,
 //! an `AssetServer`, a bounded scheduler facade, and hot-reload primitives. The
-//! facade currently serializes actual server work; full event-driven parallel
-//! loading and runtime streaming remain future work.
+//! facade includes lock-outside full-load assembly and a narrow resident-root
+//! asynchronous reload path; full event-driven parallel loading and runtime
+//! streaming remain future work.
 //!
 //! ## Pieces
 //! - [`AssetIndex`]: a generational `(index, generation)` slot id. Reusing a
@@ -45,11 +46,12 @@
 //!   dependency-commit path, separate I/O/CPU pools, cancellation and
 //!   backpressure.
 //! - **Hot reload (implemented in part):** watcher/event batching, reload plans,
-//!   dependency-aware reassembly, and last-known-good retention are available;
-//!   lock-free asynchronous reassembly, full labeled-revision lifecycle, and
-//!   Windows-equivalent secure path opening remain incomplete.
+//!   dependency-aware reassembly, last-known-good retention, and narrow
+//!   resident-root asynchronous reload with per-path epoch supersede are
+//!   available; asynchronous labeled-revision reassembly, full labeled-revision
+//!   lifecycle, and Windows-equivalent secure path opening remain incomplete.
 //! - **Not implemented here:** offline cooking, DDC/CAS ownership, codecs,
-//!   labeled-asset async assembly, reload epochs, range-backed assembly,
+//!   labeled-asset async assembly, range-backed assembly,
 //!   streaming residency, DirectStorage/GPU decode, and release packaging.
 //!   Those belong to Asset Build or future runtime features. The scheduler
 //!   slice is not a complete EDL pipeline.

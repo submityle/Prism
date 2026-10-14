@@ -53,7 +53,7 @@ use crate::id::UntypedAssetId;
 use crate::load_state::{LoadState, RecursiveDependencyLoadState};
 use crate::loader_exec::{AssetLoader, AssetLoaders, ErasedLoadedAsset, FullLoadOutput};
 use crate::path::AssetPath;
-use crate::reload::{ReloadCommit, ReloadEpoch};
+use crate::reload::{ReloadCommit, ReloadCommitGuard, ReloadEpoch};
 use crate::reload_plan::ReloadPlan;
 use crate::source::{AssetReader, AssetSources};
 use crate::stores::AssetStores;
@@ -83,6 +83,22 @@ pub struct AssetServer {
 pub(crate) enum AsyncLoadPreparation {
     Existing(UntypedHandle),
     New(AsyncLoadPlan),
+}
+
+pub(crate) struct AsyncReloadPlan {
+    pub(crate) path: AssetPath,
+    pub(crate) id: UntypedAssetId,
+    pub(crate) type_id: AssetTypeId,
+    pub(crate) handle: UntypedHandle,
+    pub(crate) sources: AssetSources,
+    pub(crate) loaders: AssetLoaders,
+    pub(crate) epoch: ReloadCommitGuard,
+    pub(crate) source_revision: u64,
+}
+
+pub(crate) enum AsyncReloadCommitError {
+    Superseded,
+    Rejected(String),
 }
 
 pub(crate) struct AsyncLoadPlan {
@@ -123,6 +139,10 @@ struct AssetServerInner {
     /// Epoch arbitration for reload results. It is also useful to async
     /// callers that decode outside this server's state mutex.
     reload_epoch: ReloadEpoch,
+    /// Per-source arbitration so unrelated assets can reload concurrently.
+    reload_epochs: BTreeMap<AssetPath, ReloadEpoch>,
+    /// Incremented whenever the source overlay changes.
+    source_revision: u64,
 }
 
 /// A labeled value held outside storage until the complete reload assembly has
@@ -198,6 +218,74 @@ impl AssetServer {
         }))
     }
 
+    pub(crate) fn prepare_async_reload(
+        &self,
+        path: AssetPath,
+        requested: Option<AssetTypeId>,
+    ) -> Result<AsyncReloadPlan, String> {
+        let mut inner = self.lock();
+        if path.has_label() {
+            return Err("async reload does not yet support labeled assets".into());
+        }
+        let type_id = match requested {
+            Some(ty) => ty,
+            None => inner
+                .loaders
+                .policy()
+                .resolve_untyped(&path)
+                .and_then(|id| inner.loaders.policy().produced_type(id))
+                .ok_or_else(|| format!("no loader for {path}"))?,
+        };
+        let handle = inner
+            .interned
+            .get(&path)
+            .and_then(UntypedWeakHandle::upgrade)
+            .ok_or_else(|| format!("asset is not resident for async reload: {path}"))?;
+        if handle.id().type_id() != type_id {
+            return Err(format!(
+                "asset path is already interned with another type: {path}"
+            ));
+        }
+        if !matches!(inner.stores.load_state(handle.id()), LoadState::Loaded) {
+            return Err(format!("asset is not ready for async reload: {path}"));
+        }
+        let epoch = inner.reload_epochs.entry(path.clone()).or_default().begin();
+        Ok(AsyncReloadPlan {
+            path,
+            id: handle.id(),
+            type_id,
+            handle,
+            sources: inner.sources.clone(),
+            loaders: inner.loaders.clone(),
+            epoch,
+            source_revision: inner.source_revision,
+        })
+    }
+
+    pub(crate) fn resident_async_dependency(
+        &self,
+        path: &AssetPath,
+        expected: Option<AssetTypeId>,
+    ) -> Result<UntypedHandle, String> {
+        let inner = self.lock();
+        let handle = inner
+            .interned
+            .get(path)
+            .and_then(UntypedWeakHandle::upgrade)
+            .ok_or_else(|| format!("async reload dependency is not resident: {path}"))?;
+        if let Some(expected) = expected {
+            if handle.id().type_id() != expected {
+                return Err(format!(
+                    "async reload dependency has an unexpected type: {path}"
+                ));
+            }
+        }
+        if !matches!(inner.stores.load_state(handle.id()), LoadState::Loaded) {
+            return Err(format!("async reload dependency is not ready: {path}"));
+        }
+        Ok(handle)
+    }
+
     pub(crate) fn commit_async_load(
         &self,
         plan: AsyncLoadPlan,
@@ -237,6 +325,65 @@ impl AssetServer {
         Ok(plan.handle)
     }
 
+    pub(crate) fn commit_async_reload(
+        &self,
+        plan: AsyncReloadPlan,
+        output: FullLoadOutput,
+        dependencies: Vec<UntypedHandle>,
+    ) -> Result<UntypedHandle, AsyncReloadCommitError> {
+        if !output.labeled.is_empty() {
+            return Err(AsyncReloadCommitError::Rejected(
+                "labeled assets are not supported by async reload".into(),
+            ));
+        }
+        if output.primary.type_id != plan.type_id {
+            return Err(AsyncReloadCommitError::Rejected(
+                "loader produced an unexpected asset type".into(),
+            ));
+        }
+        let AsyncReloadPlan {
+            path,
+            id,
+            type_id: _,
+            handle,
+            sources: _,
+            loaders: _,
+            epoch,
+            source_revision,
+        } = plan;
+        let mut inner = self.lock();
+        match epoch.commit(|| {
+            if inner.source_revision != source_revision {
+                return Err(AsyncReloadCommitError::Rejected(
+                    "async reload source overlay changed".into(),
+                ));
+            }
+            if !matches!(inner.stores.load_state(id), LoadState::Loaded) {
+                return Err(AsyncReloadCommitError::Rejected(format!(
+                    "async reload target is no longer ready: {path}"
+                )));
+            }
+            let dependency_ids: Vec<_> = dependencies.iter().map(UntypedHandle::id).collect();
+            let mut candidate = inner.graph.clone();
+            if let Err(error) = candidate.replace_dependencies(id, dependency_ids) {
+                return Err(AsyncReloadCommitError::Rejected(format!(
+                    "async reload dependency cycle: {error:?}"
+                )));
+            }
+            inner
+                .stores
+                .fulfill_erased(id, output.primary.value)
+                .map_err(|error| AsyncReloadCommitError::Rejected(error.to_string()))?;
+            inner.graph = candidate;
+            let _ = inner.graph.set_self_state(id, LoadState::Loaded);
+            inner.retained.insert(id, dependencies);
+            Ok(handle.clone())
+        }) {
+            ReloadCommit::Committed(result) => result,
+            ReloadCommit::Superseded => Err(AsyncReloadCommitError::Superseded),
+        }
+    }
+
     pub(crate) fn fail_async_load(&self, plan: &AsyncLoadPlan, reason: &str) {
         let mut inner = self.lock();
         inner.fail(plan.id, &plan.path, reason.to_string());
@@ -270,6 +417,8 @@ impl AssetServer {
                 retained: BTreeMap::new(),
                 promoted_labels: BTreeMap::new(),
                 reload_epoch: ReloadEpoch::new(),
+                reload_epochs: BTreeMap::new(),
+                source_revision: 0,
             }),
         }
     }
@@ -299,7 +448,9 @@ impl AssetServer {
     /// Mounts a byte [`AssetReader`] under `name` at the given overlay
     /// `priority` (higher wins when the same path exists in several sources).
     pub fn mount(&self, name: &str, reader: Arc<dyn AssetReader>, priority: i32) {
-        self.lock().sources.mount(name, reader, priority);
+        let mut inner = self.lock();
+        inner.sources.mount(name, reader, priority);
+        inner.source_revision = inner.source_revision.wrapping_add(1);
     }
 
     /// Starts a managed platform watcher for a filesystem source.
@@ -322,7 +473,12 @@ impl AssetServer {
     /// Unmounts the source previously mounted under `name`, returning whether a
     /// source was removed.
     pub fn unmount(&self, name: &str) -> bool {
-        self.lock().sources.unmount(name)
+        let mut inner = self.lock();
+        let removed = inner.sources.unmount(name);
+        if removed {
+            inner.source_revision = inner.source_revision.wrapping_add(1);
+        }
+        removed
     }
 
     /// Loads the asset at `path` as type `A`, returning a strong [`Handle`]
