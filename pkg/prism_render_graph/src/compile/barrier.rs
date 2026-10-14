@@ -1,4 +1,4 @@
-//! Automatic barrier planning via the driver state tracker.
+//! Backend state-transition lowering, after the sole SSA kernel has solved hazards.
 //!
 //! Authors declare *uses*, never barriers. This module replays the scheduled
 //! frame through the driver's [`StateTracker`], which knows the correct
@@ -7,6 +7,10 @@
 //! previous owner left them (seeding the tracker) and are transitioned back to
 //! their declared exit state at frame end, so a swapchain image ends in
 //! `Present` and a history buffer ends ready for next frame.
+//!
+//! This stage never derives pass dependencies, versions, lifetimes or aliases.
+//! Read/read layout changes and imported entry/exit transitions are backend
+//! requirements in addition to the kernel's logical RAW/WAR/WAW barriers.
 //!
 //! Barriers are keyed by [`ResourceIndex`], not realized ids, because the
 //! solver runs before realization. Explicit-barrier backends map each index to

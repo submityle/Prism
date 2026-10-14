@@ -22,6 +22,7 @@
 pub mod alias;
 pub mod barrier;
 pub mod cull;
+pub(crate) mod kernel;
 pub mod lifetime;
 pub mod schedule;
 
@@ -32,26 +33,89 @@ use alloc::vec::Vec;
 use prism_render_driver::{Color, DepthLoadOp, Extent3d, LoadOp, StoreOp};
 
 use crate::access::TextureUse;
+use crate::capacity::GraphLimits;
 use crate::pass::{PassKind, PassNode};
 use crate::plan::{
-    ColorAttachmentPlan, CompileError, DepthAttachmentPlan, ExecutionPlan, RasterAttachments,
+    ColorAttachmentPlan, CompileError, DepthAttachmentPlan, ExecutionPlan, LogicalBarrier,
+    LogicalResource, RasterAttachments,
 };
 use crate::resource::{BufferResource, Lifetime, TextureResource};
 
 /// Compiles a declared frame into an immutable [`ExecutionPlan`].
 ///
 /// Borrows the graph's pass and resource tables and the frame's `swapchain`
-/// extent (which resolves screen-relative sizes). Returns [`CompileError`] only
-/// when the derived dependency graph contains a cycle; a well-formed graph
-/// always compiles.
+/// extent (which resolves screen-relative sizes). Validation happens before
+/// culling; footprint arithmetic and dependency cycles are reported as errors.
 pub(crate) fn compile(
     passes: &[PassNode],
     textures: &[TextureResource],
     buffers: &[BufferResource],
     swapchain: Extent3d,
 ) -> Result<ExecutionPlan, CompileError> {
+    GraphLimits::check_count("passes", passes.len(), u32::MAX as usize)?;
+    GraphLimits::check_count("textures", textures.len(), u32::MAX as usize)?;
+    GraphLimits::check_count("buffers", buffers.len(), u32::MAX as usize)?;
+    for pass in passes {
+        GraphLimits::check_count(
+            "accesses",
+            pass.texture_accesses
+                .len()
+                .checked_add(pass.buffer_accesses.len())
+                .ok_or(CompileError::Capacity {
+                    kind: "accesses",
+                    count: usize::MAX,
+                    limit: u32::MAX as usize,
+                })?,
+            u32::MAX as usize,
+        )?;
+        // Validation precedes culling: a malformed index must not reach an
+        // unchecked table lookup even when an access ultimately gets culled.
+        for acc in &pass.texture_accesses {
+            if acc.resource.get() as usize >= textures.len() {
+                return Err(CompileError::InvalidHandle {
+                    kind: "texture",
+                    index: acc.resource.get(),
+                    version: acc.input_version,
+                });
+            }
+        }
+        for acc in &pass.buffer_accesses {
+            if acc.resource.get() as usize >= buffers.len() {
+                return Err(CompileError::InvalidHandle {
+                    kind: "buffer",
+                    index: acc.resource.get(),
+                    version: acc.input_version,
+                });
+            }
+        }
+    }
     let alive = cull::cull(passes, textures, buffers);
-    let order = schedule::schedule(passes, &alive)?;
+    let accesses = schedule::normalize(passes, textures.len());
+    let solved = schedule::schedule(passes, &alive, &accesses)?;
+    let queues: Vec<_> = passes.iter().map(schedule::queue_class).collect();
+    let queue_batches = schedule::queue_batches(&queues, &solved.order, &solved.dependencies);
+    let logical_barriers = solved
+        .hazards
+        .iter()
+        .map(|h| {
+            let resource = accesses[h.destination][h.after].resource;
+            LogicalBarrier {
+                resource: if resource < textures.len() {
+                    LogicalResource::Texture(crate::ResourceIndex(resource as u32))
+                } else {
+                    LogicalResource::Buffer(crate::ResourceIndex(
+                        (resource - textures.len()) as u32,
+                    ))
+                },
+                source: h.source,
+                destination: h.destination,
+                before: h.before,
+                after: h.after,
+                queue_transfer: queues[h.source] != queues[h.destination],
+            }
+        })
+        .collect();
+    let order = solved.order;
 
     // A resource is "used" if any scheduled pass touches it; only used
     // resources are realized, state-tracked, and aliased.
@@ -66,8 +130,8 @@ pub(crate) fn compile(
         }
     }
 
-    let lifetimes = lifetime::analyze(passes, &order, textures.len(), buffers.len());
-    let alias = alias::plan_alias(textures, buffers, &lifetimes, order.len(), swapchain);
+    let lifetimes = lifetime::analyze(&accesses, &order, textures.len(), buffers.len());
+    let alias = alias::plan_alias(textures, buffers, &lifetimes, swapchain)?;
     let barrier_plan = barrier::plan_barriers(
         passes,
         textures,
@@ -92,6 +156,8 @@ pub(crate) fn compile(
     Ok(ExecutionPlan {
         order,
         alive,
+        logical_barriers,
+        queue_batches,
         barriers: barrier_plan.per_pass,
         final_barriers: barrier_plan.final_barriers,
         attachments,

@@ -18,9 +18,11 @@ use prism_render_driver::{
 
 use crate::access::{full_range, BufferUse, TextureUse};
 use crate::blackboard::Blackboard;
+use crate::capacity::GraphLimits;
 use crate::desc::{BufferDesc, TextureDesc};
 use crate::handle::{BufferHandle, ResourceIndex, TextureHandle};
 use crate::pass::{BufferAccessRecord, PassKind, TextureAccessRecord};
+use crate::plan::CompileError;
 use crate::resource::{BufferResource, Lifetime, TextureResource};
 
 /// Builds a single pass during the setup phase.
@@ -30,11 +32,17 @@ use crate::resource::{BufferResource, Lifetime, TextureResource};
 /// SSA version, returning the handle later passes must use to observe that
 /// write. Usage bits are inferred into each resource as a side effect, so
 /// authors seldom set them by hand.
+///
+/// Infallible registration/access helpers are intended for bounded startup
+/// declarations. Their checked `try_*` counterparts reject before changing
+/// resource usage, versions or access tables. Convenience access helpers share
+/// the preconditions of [`Self::access_texture`] or [`Self::use_buffer`].
 pub struct PassBuilder<'g> {
     textures: &'g mut Vec<TextureResource>,
     buffers: &'g mut Vec<BufferResource>,
     blackboard: &'g mut Blackboard,
     kind: PassKind,
+    limits: GraphLimits,
     tex_accesses: Vec<TextureAccessRecord>,
     buf_accesses: Vec<BufferAccessRecord>,
 }
@@ -45,12 +53,14 @@ impl<'g> PassBuilder<'g> {
         buffers: &'g mut Vec<BufferResource>,
         blackboard: &'g mut Blackboard,
         kind: PassKind,
+        limits: GraphLimits,
     ) -> Self {
         Self {
             textures,
             buffers,
             blackboard,
             kind,
+            limits,
             tex_accesses: Vec::new(),
             buf_accesses: Vec::new(),
         }
@@ -75,12 +85,20 @@ impl<'g> PassBuilder<'g> {
 
     /// Registers a transient texture (frame-local, aliasable) and returns a
     /// version-0 handle to it.
+    ///
+    /// # Panics
+    /// Panics if the texture limit is exhausted. Use [`Self::try_create_texture`]
+    /// for dynamic declarations.
     pub fn create_texture(&mut self, name: impl Into<String>, desc: TextureDesc) -> TextureHandle {
         self.push_texture(name, desc, Lifetime::Transient)
     }
 
     /// Registers a persistent texture (graph-allocated, preserved across
     /// frames, never aliased) and returns a version-0 handle to it.
+    ///
+    /// # Panics
+    /// Panics if the texture limit is exhausted. Use
+    /// [`Self::try_create_persistent_texture`] for dynamic declarations.
     pub fn create_persistent_texture(
         &mut self,
         name: impl Into<String>,
@@ -95,7 +113,21 @@ impl<'g> PassBuilder<'g> {
         desc: TextureDesc,
         lifetime: Lifetime,
     ) -> TextureHandle {
-        let index = ResourceIndex(self.textures.len() as u32);
+        self.try_push_texture(name, desc, lifetime)
+            .expect("graph texture capacity precondition; use try_create_texture for dynamic input")
+    }
+
+    fn try_push_texture(
+        &mut self,
+        name: impl Into<String>,
+        desc: TextureDesc,
+        lifetime: Lifetime,
+    ) -> Result<TextureHandle, CompileError> {
+        let index = ResourceIndex(GraphLimits::next_id(
+            "textures",
+            self.textures.len(),
+            self.limits.resources,
+        )?);
         self.textures.push(TextureResource {
             name: name.into(),
             desc,
@@ -105,17 +137,43 @@ impl<'g> PassBuilder<'g> {
             version: 0,
             realized: None,
         });
-        TextureHandle::new(index, 0)
+        Ok(TextureHandle::new(index, 0))
+    }
+
+    /// Admits a transient texture before growing the table or narrowing its ID.
+    pub fn try_create_texture(
+        &mut self,
+        name: impl Into<String>,
+        desc: TextureDesc,
+    ) -> Result<TextureHandle, CompileError> {
+        self.try_push_texture(name, desc, Lifetime::Transient)
+    }
+
+    /// Checked persistent registration; rejects before table growth.
+    pub fn try_create_persistent_texture(
+        &mut self,
+        name: impl Into<String>,
+        desc: TextureDesc,
+    ) -> Result<TextureHandle, CompileError> {
+        self.try_push_texture(name, desc, Lifetime::Persistent)
     }
 
     /// Registers a transient buffer (frame-local, aliasable) and returns a
     /// version-0 handle to it.
+    ///
+    /// # Panics
+    /// Panics if the buffer limit is exhausted. Use [`Self::try_create_buffer`]
+    /// for dynamic declarations.
     pub fn create_buffer(&mut self, name: impl Into<String>, desc: BufferDesc) -> BufferHandle {
         self.push_buffer(name, desc, Lifetime::Transient)
     }
 
     /// Registers a persistent buffer (graph-allocated, preserved across frames,
     /// never aliased) and returns a version-0 handle to it.
+    ///
+    /// # Panics
+    /// Panics if the buffer limit is exhausted. Use
+    /// [`Self::try_create_persistent_buffer`] for dynamic declarations.
     pub fn create_persistent_buffer(
         &mut self,
         name: impl Into<String>,
@@ -130,7 +188,21 @@ impl<'g> PassBuilder<'g> {
         desc: BufferDesc,
         lifetime: Lifetime,
     ) -> BufferHandle {
-        let index = ResourceIndex(self.buffers.len() as u32);
+        self.try_push_buffer(name, desc, lifetime)
+            .expect("graph buffer capacity precondition; use try_create_buffer for dynamic input")
+    }
+
+    fn try_push_buffer(
+        &mut self,
+        name: impl Into<String>,
+        desc: BufferDesc,
+        lifetime: Lifetime,
+    ) -> Result<BufferHandle, CompileError> {
+        let index = ResourceIndex(GraphLimits::next_id(
+            "buffers",
+            self.buffers.len(),
+            self.limits.resources,
+        )?);
         self.buffers.push(BufferResource {
             name: name.into(),
             desc,
@@ -140,7 +212,25 @@ impl<'g> PassBuilder<'g> {
             version: 0,
             realized: None,
         });
-        BufferHandle::new(index, 0)
+        Ok(BufferHandle::new(index, 0))
+    }
+
+    /// Admits a transient buffer before growing the table or narrowing its ID.
+    pub fn try_create_buffer(
+        &mut self,
+        name: impl Into<String>,
+        desc: BufferDesc,
+    ) -> Result<BufferHandle, CompileError> {
+        self.try_push_buffer(name, desc, Lifetime::Transient)
+    }
+
+    /// Checked persistent registration; rejects before table growth.
+    pub fn try_create_persistent_buffer(
+        &mut self,
+        name: impl Into<String>,
+        desc: BufferDesc,
+    ) -> Result<BufferHandle, CompileError> {
+        self.try_push_buffer(name, desc, Lifetime::Persistent)
     }
 
     // --- texture accesses -------------------------------------------------
@@ -148,16 +238,54 @@ impl<'g> PassBuilder<'g> {
     /// Records a texture access with an explicit subresource range, returning
     /// the post-access handle (a fresh version for writes, the same handle for
     /// reads).
+    ///
+    /// # Panics
+    /// Panics on an out-of-bounds/future handle or an exhausted access/version
+    /// limit. The handle must belong to this graph; in-range foreign handles
+    /// cannot be distinguished. Use [`Self::try_access_texture`] for dynamic
+    /// input. Stale input versions are allowed and preserve SSA dependencies.
     pub fn access_texture(
         &mut self,
         handle: TextureHandle,
         usage: TextureUse,
         range: SubresourceRange,
     ) -> TextureHandle {
-        let res = &mut self.textures[handle.resource().get() as usize];
+        self.try_access_texture(handle, usage, range)
+            .expect("graph texture access capacity/version precondition")
+    }
+
+    /// Checked access; leaves usage, version and access table unchanged on error.
+    ///
+    /// # Errors
+    /// Returns a capacity, invalid-handle or version-overflow error before
+    /// mutation. The handle must belong to this graph; this API validates its
+    /// index and version, not graph identity or backend subresource legality.
+    pub fn try_access_texture(
+        &mut self,
+        handle: TextureHandle,
+        usage: TextureUse,
+        range: SubresourceRange,
+    ) -> Result<TextureHandle, CompileError> {
+        self.check_next_access()?;
+        let invalid = CompileError::InvalidHandle {
+            kind: "texture",
+            index: handle.resource().get(),
+            version: handle.version(),
+        };
+        let res = self
+            .textures
+            .get_mut(handle.resource().get() as usize)
+            .ok_or(invalid.clone())?;
+        if handle.version() > res.version {
+            return Err(invalid);
+        }
+        let output = if usage.is_write() {
+            Some(self.limits.next_version(res.version)?)
+        } else {
+            None
+        };
         res.inferred_usage = res.inferred_usage.union(usage.required_usage());
-        if usage.is_write() {
-            let output = res.version + 1;
+        if let Some(output) = output {
             res.version = output;
             self.tex_accesses.push(TextureAccessRecord {
                 resource: handle.resource(),
@@ -167,7 +295,7 @@ impl<'g> PassBuilder<'g> {
                 usage,
                 range,
             });
-            TextureHandle::new(handle.resource(), output)
+            Ok(TextureHandle::new(handle.resource(), output))
         } else {
             self.tex_accesses.push(TextureAccessRecord {
                 resource: handle.resource(),
@@ -177,11 +305,14 @@ impl<'g> PassBuilder<'g> {
                 usage,
                 range,
             });
-            handle
+            Ok(handle)
         }
     }
 
     /// Records a whole-resource texture access.
+    ///
+    /// # Panics
+    /// Shares the handle and admission preconditions of [`Self::access_texture`].
     pub fn use_texture(&mut self, handle: TextureHandle, usage: TextureUse) -> TextureHandle {
         self.access_texture(handle, usage, full_range())
     }
@@ -234,11 +365,48 @@ impl<'g> PassBuilder<'g> {
     // --- buffer accesses --------------------------------------------------
 
     /// Records a buffer access, returning the post-access handle.
+    ///
+    /// # Panics
+    /// Panics on an out-of-bounds/future handle or an exhausted access/version
+    /// limit. The handle must belong to this graph; in-range foreign handles
+    /// cannot be distinguished. Use [`Self::try_use_buffer`] for dynamic input.
+    /// Stale input versions are allowed and preserve SSA dependencies.
     pub fn use_buffer(&mut self, handle: BufferHandle, usage: BufferUse) -> BufferHandle {
-        let res = &mut self.buffers[handle.resource().get() as usize];
+        self.try_use_buffer(handle, usage)
+            .expect("graph buffer access capacity/version precondition")
+    }
+
+    /// Checked buffer access; does not change versions on rejection.
+    ///
+    /// # Errors
+    /// Returns a capacity, invalid-handle or version-overflow error before
+    /// mutation. The handle must belong to this graph; this API validates its
+    /// index and version, not graph identity.
+    pub fn try_use_buffer(
+        &mut self,
+        handle: BufferHandle,
+        usage: BufferUse,
+    ) -> Result<BufferHandle, CompileError> {
+        self.check_next_access()?;
+        let invalid = CompileError::InvalidHandle {
+            kind: "buffer",
+            index: handle.resource().get(),
+            version: handle.version(),
+        };
+        let res = self
+            .buffers
+            .get_mut(handle.resource().get() as usize)
+            .ok_or(invalid.clone())?;
+        if handle.version() > res.version {
+            return Err(invalid);
+        }
+        let output = if usage.is_write() {
+            Some(self.limits.next_version(res.version)?)
+        } else {
+            None
+        };
         res.inferred_usage = res.inferred_usage.union(usage.required_usage());
-        if usage.is_write() {
-            let output = res.version + 1;
+        if let Some(output) = output {
             res.version = output;
             self.buf_accesses.push(BufferAccessRecord {
                 resource: handle.resource(),
@@ -247,7 +415,7 @@ impl<'g> PassBuilder<'g> {
                 output_version: output,
                 usage,
             });
-            BufferHandle::new(handle.resource(), output)
+            Ok(BufferHandle::new(handle.resource(), output))
         } else {
             self.buf_accesses.push(BufferAccessRecord {
                 resource: handle.resource(),
@@ -256,7 +424,7 @@ impl<'g> PassBuilder<'g> {
                 output_version: 0,
                 usage,
             });
-            handle
+            Ok(handle)
         }
     }
 
@@ -303,6 +471,20 @@ impl<'g> PassBuilder<'g> {
     /// Consumes the builder, yielding the recorded accesses.
     pub(crate) fn finish(self) -> (Vec<TextureAccessRecord>, Vec<BufferAccessRecord>) {
         (self.tex_accesses, self.buf_accesses)
+    }
+
+    fn check_next_access(&self) -> Result<(), CompileError> {
+        let count = self
+            .tex_accesses
+            .len()
+            .checked_add(self.buf_accesses.len())
+            .ok_or(CompileError::Capacity {
+                kind: "accesses",
+                count: usize::MAX,
+                limit: self.limits.accesses_per_pass,
+            })?;
+        GraphLimits::next_id("accesses", count, self.limits.accesses_per_pass)?;
+        Ok(())
     }
 }
 

@@ -1,4 +1,4 @@
-use prism_render_architecture::frame_graph::{
+use prism_render_graph::frame_graph::{
     AccessKind, GpuFrameGraphBuilder, PassDescriptor, QueueClass, ResourceAccess,
     ResourceDescriptor, ResourceLifetime,
 };

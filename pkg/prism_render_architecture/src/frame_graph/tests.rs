@@ -92,7 +92,22 @@ fn rejects_invalid_and_cyclic_graphs() {
         accesses: vec![],
         depends_on: vec![PassId(0)],
     });
-    assert_eq!(graph.compile().unwrap_err(), CompileError::CyclicDependency);
+    match graph.compile().unwrap_err() {
+        CompileError::Cycle {
+            unscheduled,
+            blocked,
+            cycle,
+            names,
+        } => {
+            assert_eq!(unscheduled, 2);
+            assert_eq!(blocked, vec![0, 1]);
+            assert_eq!(cycle.first(), cycle.last());
+            assert_eq!(cycle.len(), 3);
+            assert!(names.iter().any(|name| name == "a"));
+            assert!(names.iter().any(|name| name == "b"));
+        }
+        error => panic!("expected cycle diagnostics, got {error:?}"),
+    }
 }
 
 #[test]

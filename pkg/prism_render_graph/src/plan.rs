@@ -8,6 +8,7 @@
 //! copies the move-only execute closures; execution consumes those from the
 //! graph itself.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use prism_render_driver::{Barrier, DepthLoadOp, LoadOp, StoreOp};
@@ -22,27 +23,103 @@ use crate::handle::ResourceIndex;
 /// backends (wgpu) treat the plan as a verification oracle.
 pub type GraphBarrier = Barrier<ResourceIndex, ResourceIndex>;
 
-/// Why compilation failed.
+/// Namespace-preserving virtual resource identity for logical hazards.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LogicalResource {
+    /// Texture resource-table index.
+    Texture(ResourceIndex),
+    /// Buffer resource-table index.
+    Buffer(ResourceIndex),
+}
+
+/// A logical barrier projected from the sole SSA solver, before backend lowering.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LogicalBarrier {
+    /// Resource protected by the RAW/WAR/WAW edge.
+    pub resource: LogicalResource,
+    /// Original prerequisite pass index.
+    pub source: usize,
+    /// Original dependent pass index.
+    pub destination: usize,
+    /// Source access ordinal (textures first, then buffers).
+    pub before: usize,
+    /// Destination access ordinal (textures first, then buffers).
+    pub after: usize,
+    /// Whether the edge crosses logical queue classes.
+    pub queue_transfer: bool,
+}
+
+/// Why compilation failed.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CompileError {
     /// The pass dependency graph contains a cycle and cannot be scheduled.
     /// Carries the number of passes that could not be ordered.
     Cycle {
         /// How many passes remained unscheduled when progress stalled.
         unscheduled: usize,
+        /// Blocked original pass indices (including downstream dependents).
+        blocked: Vec<usize>,
+        /// A concrete closed dependency cycle; first == last.
+        cycle: Vec<usize>,
+        /// Names parallel to the cycle, for actionable diagnostics.
+        names: Vec<String>,
+    },
+    /// An admission limit was exceeded before table growth or ID narrowing.
+    Capacity {
+        /// Table or access class.
+        kind: &'static str,
+        /// Prospective count.
+        count: usize,
+        /// Effective configured limit.
+        limit: usize,
+    },
+    /// A resource version cannot be represented or exceeds its configured limit.
+    VersionOverflow {
+        /// Last valid version.
+        version: u32,
+        /// Maximum admitted version.
+        limit: u32,
+    },
+    /// Checked transient size/alignment arithmetic overflowed.
+    MemoryOverflow,
+    /// A typed executable handle is out of bounds or names a future version.
+    InvalidHandle {
+        /// Texture or buffer namespace.
+        kind: &'static str,
+        /// Resource index in that namespace.
+        index: u32,
+        /// Requested SSA input version.
+        version: u32,
+    },
+    /// An access names a resource absent from the declaration.
+    InvalidResource {
+        /// Declaring pass.
+        pass: crate::frame_graph::PassId,
+        /// Invalid resource.
+        resource: crate::frame_graph::ResourceId,
+    },
+    /// An explicit dependency is out of range or refers to the pass itself.
+    InvalidDependency {
+        /// Declaring pass.
+        pass: crate::frame_graph::PassId,
+        /// Invalid prerequisite.
+        dependency: crate::frame_graph::PassId,
     },
 }
 
 impl core::fmt::Display for CompileError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Cycle { unscheduled } => write!(
+            Self::Cycle { unscheduled, cycle, names, .. } => write!(
                 f,
-                "render graph has a dependency cycle ({unscheduled} passes unscheduled)"
+                "render graph has a dependency cycle ({unscheduled} passes unscheduled): {cycle:?} {names:?}"
             ),
+            other => write!(f, "render graph compile error: {other:?}"),
         }
     }
 }
+
+impl core::error::Error for CompileError {}
 
 /// A physical-memory slot assigned to a transient resource.
 ///
@@ -61,15 +138,15 @@ pub struct AliasSlot {
 /// Transient memory aliasing assignment for a frame.
 ///
 /// Indexed by [`ResourceIndex`]; `None` means the resource is not an aliasable
-/// transient (imported, persistent, or culled). `heap_size` is the peak
-/// simultaneous footprint — the size of the single heap that backs every slot.
+/// transient (imported, persistent, or culled). `heap_size` is the address
+/// extent including alignment gaps, not the sum of simultaneously live bytes.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct AliasPlan {
     /// Per-texture slot assignment.
     pub texture_slots: Vec<Option<AliasSlot>>,
     /// Per-buffer slot assignment.
     pub buffer_slots: Vec<Option<AliasSlot>>,
-    /// The peak simultaneous transient footprint in bytes.
+    /// The required heap address extent in bytes, including alignment gaps.
     pub heap_size: u64,
 }
 
@@ -117,6 +194,12 @@ pub struct ExecutionPlan {
     pub order: Vec<usize>,
     /// Per-original-pass liveness, indexed by pass index.
     pub alive: Vec<bool>,
+    /// Logical hazards from the shared SSA kernel; backend transitions below
+    /// additionally account for layouts, subresources and imported states.
+    pub logical_barriers: Vec<LogicalBarrier>,
+    /// Consecutive logical queue batches with dependency waits. Execution on
+    /// auto-sync backends still submits a single command buffer.
+    pub queue_batches: Vec<crate::frame_graph::QueueBatch>,
     /// Barriers to run before each ordered pass, parallel to [`Self::order`].
     pub barriers: Vec<Vec<GraphBarrier>>,
     /// Barriers to run after the last pass to satisfy imported exit states.

@@ -17,9 +17,10 @@
 //! the reuse is lifetime-safe.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::ops::Range;
 
-use super::{PassDescriptor, PassId, ResourceDescriptor, ResourceId, ResourceLifetime};
+use super::{ResourceDescriptor, ResourceId, ResourceLifetime};
 
 /// A byte region within the transient heap assigned to a single resource.
 ///
@@ -39,8 +40,8 @@ pub struct TransientRegion {
 
 /// A validated, aliased allocation plan for the frame graph's transient heap.
 ///
-/// Built by [`TransientAllocation::plan`] from the resource table, the pass
-/// table and the compiled execution order. Every accessor is derived from the
+/// Built by the authoritative compiler from the resource table and shared
+/// lifetime intervals. Every accessor is derived from the
 /// same first-fit assignment the compiler already relied on, so the plan can
 /// never disagree with `transient_offsets` / `transient_bytes`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -78,73 +79,48 @@ pub struct AliasOverlap {
 }
 
 impl TransientAllocation {
-    /// Builds the aliased plan from the compiled graph.
-    ///
-    /// `order` is the topologically sorted execution order; each resource's
-    /// lifetime is the inclusive span of execution positions that access it.
-    /// Transient resources are assigned by first-fit: a resource reuses an
-    /// existing region whenever that region is free (its last user precedes the
-    /// new resource's first user), is large enough, and keeps the offset
-    /// aligned. Everything else is derived from that assignment.
-    ///
-    /// # Panics
-    ///
-    /// Debug builds assert [`Self::validate_alias_safety`] holds, so a planner
-    /// regression that aliases overlapping lifetimes trips immediately in tests.
-    pub(crate) fn plan(
+    pub(crate) fn from_intervals(
         resources: &[ResourceDescriptor],
-        passes: &[PassDescriptor],
-        order: &[PassId],
-    ) -> Self {
-        let lifetimes = compute_lifetimes(resources, passes, order);
-
-        // First-fit assignment: reuse a free, large-enough, aligned block or
-        // grow the heap. Mirrors the golden reuse rule so offsets never drift.
-        let mut cursor = 0_u64;
-        let mut regions = vec![None; resources.len()];
-        let mut individual_bytes = 0_u64;
-        // (offset, size, last_user_position) for each live block.
-        let mut blocks: Vec<(u64, u64, u32)> = Vec::new();
-
-        let mut pending: Vec<(usize, u32, u32)> = resources
+        intervals: &[Option<(usize, usize)>],
+    ) -> Result<Self, super::CompileError> {
+        let requests: Vec<_> = resources
             .iter()
-            .enumerate()
-            .filter_map(|(index, resource)| {
-                if resource.lifetime != ResourceLifetime::Transient {
-                    return None;
-                }
-                lifetimes[index]
-                    .as_ref()
-                    .map(|life| (index, life.start, life.end - 1))
+            .zip(intervals)
+            .map(|(r, life)| {
+                (r.lifetime == ResourceLifetime::Transient)
+                    .then_some(*life)
+                    .flatten()
+                    .map(|(first, last)| crate::compile::kernel::AllocationRequest {
+                        size: r.size,
+                        alignment: r.alignment.max(1),
+                        first,
+                        last,
+                    })
             })
             .collect();
-        pending.sort_by_key(|(index, first, _)| (*first, *index));
-
-        for (index, first, last) in pending {
-            let resource = &resources[index];
-            let alignment = resource.alignment.max(1);
-            individual_bytes += resource.size;
-            if let Some(block) = blocks.iter_mut().find(|(offset, size, available_after)| {
-                *available_after < first && *size >= resource.size && *offset % alignment == 0
-            }) {
-                regions[index] = Some(TransientRegion {
-                    offset: block.0,
-                    size: resource.size,
-                    alignment,
-                });
-                block.2 = last;
-            } else {
-                cursor = cursor.div_ceil(alignment) * alignment;
-                regions[index] = Some(TransientRegion {
-                    offset: cursor,
-                    size: resource.size,
-                    alignment,
-                });
-                blocks.push((cursor, resource.size, last));
-                cursor += resource.size;
-            }
-        }
-
+        let (slots, cursor) = crate::compile::kernel::allocate(&requests)?;
+        let regions: Vec<_> = slots
+            .iter()
+            .zip(resources)
+            .map(|(slot, r)| {
+                slot.map(|s| TransientRegion {
+                    offset: s.offset,
+                    size: s.size,
+                    alignment: r.alignment.max(1),
+                })
+            })
+            .collect();
+        let lifetimes = intervals
+            .iter()
+            .zip(&requests)
+            .map(|(life, request)| {
+                request.and_then(|_| life.map(|(first, last)| first as u32..last as u32 + 1))
+            })
+            .collect();
+        let individual_bytes = requests.iter().flatten().try_fold(0_u64, |sum, r| {
+            sum.checked_add(r.size)
+                .ok_or(crate::plan::CompileError::MemoryOverflow)
+        })?;
         let alias_groups = group_by_offset(&regions);
 
         let plan = Self {
@@ -159,7 +135,7 @@ impl TransientAllocation {
             "transient alias plan aliased overlapping lifetimes: {:?}",
             plan.validate_alias_safety()
         );
-        plan
+        Ok(plan)
     }
 
     /// Total heap size the backend must allocate for all transient resources.
@@ -240,7 +216,7 @@ impl TransientAllocation {
     ///
     /// Returns the first [`AliasOverlap`] found, or `Ok(())` when the plan is
     /// sound. A correctly built plan is always `Ok`; a violation signals a
-    /// planner bug (see [`Self::plan`]'s debug assertion).
+    /// planner bug, rather than a recoverable declaration error.
     pub fn validate_alias_safety(&self) -> Result<(), AliasOverlap> {
         for group in &self.alias_groups {
             let offset = self
@@ -291,27 +267,6 @@ impl TransientAllocation {
     }
 }
 
-/// Inclusive execution-order lifetimes as half-open ranges (`first..last + 1`),
-/// indexed by `ResourceId`. `None` when no pass accesses the resource.
-fn compute_lifetimes(
-    resources: &[ResourceDescriptor],
-    passes: &[PassDescriptor],
-    order: &[PassId],
-) -> Vec<Option<Range<u32>>> {
-    let mut lifetimes = vec![None::<Range<u32>>; resources.len()];
-    for (position, &pass_id) in order.iter().enumerate() {
-        let position = position as u32;
-        for access in &passes[pass_id.0 as usize].accesses {
-            let life = &mut lifetimes[access.resource.0 as usize];
-            *life = Some(match life {
-                Some(existing) => existing.start..position + 1,
-                None => position..position + 1,
-            });
-        }
-    }
-    lifetimes
-}
-
 /// Partitions the assigned resources into alias groups keyed by heap offset,
 /// ascending by offset and, within a group, by `ResourceId`.
 ///
@@ -344,89 +299,5 @@ fn ranges_overlap(a: &Range<u32>, b: &Range<u32>) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn region(offset: u64, size: u64, alignment: u64) -> Option<TransientRegion> {
-        Some(TransientRegion {
-            offset,
-            size,
-            alignment,
-        })
-    }
-
-    #[test]
-    fn validate_alias_safety_accepts_disjoint_lifetimes_in_a_group() {
-        // Two resources aliased to offset 0, lifetimes [0,1] and [2,3]: disjoint.
-        let plan = TransientAllocation {
-            heap_bytes: 1024,
-            regions: vec![region(0, 1024, 256), region(0, 1024, 256)],
-            lifetimes: vec![Some(0..2), Some(2..4)],
-            alias_groups: vec![vec![ResourceId(0), ResourceId(1)]],
-            individual_bytes: 2048,
-        };
-        assert_eq!(plan.validate_alias_safety(), Ok(()));
-    }
-
-    #[test]
-    fn validate_alias_safety_flags_overlapping_lifetimes_in_a_group() {
-        // Two resources sharing offset 0 whose lifetimes [0,2] and [1,3] overlap
-        // at positions 1..2 — an unsound alias the validator must reject.
-        let plan = TransientAllocation {
-            heap_bytes: 1024,
-            regions: vec![region(0, 1024, 256), region(0, 1024, 256)],
-            lifetimes: vec![Some(0..3), Some(1..4)],
-            alias_groups: vec![vec![ResourceId(0), ResourceId(1)]],
-            individual_bytes: 2048,
-        };
-        assert_eq!(
-            plan.validate_alias_safety(),
-            Err(AliasOverlap {
-                offset: 0,
-                first: ResourceId(0),
-                second: ResourceId(1),
-            })
-        );
-    }
-
-    #[test]
-    fn touching_lifetimes_are_disjoint() {
-        // [0,0] then [1,1]: last_a (0) < first_b (1), so half-open 0..1 and 1..2
-        // do not overlap — the boundary case the first-fit reuse rule allows.
-        assert!(!ranges_overlap(&(0..1), &(1..2)));
-        assert!(ranges_overlap(&(0..2), &(1..3)));
-    }
-
-    #[test]
-    fn zero_sized_transients_never_alias_even_when_lifetimes_overlap() {
-        // Topology-only graphs model transients with size 0 (byte budgets are
-        // resolved later at runtime). Every such resource lands on offset 0, but
-        // an empty region owns no memory and cannot corrupt a peer, so two
-        // overlapping zero-byte resources must not be grouped or flagged.
-        let regions = vec![region(0, 0, 16), region(0, 0, 16)];
-        assert!(group_by_offset(&regions).is_empty());
-
-        let plan = TransientAllocation {
-            heap_bytes: 0,
-            regions,
-            lifetimes: vec![Some(0..5), Some(0..5)],
-            alias_groups: group_by_offset(&[region(0, 0, 16), region(0, 0, 16)]),
-            individual_bytes: 0,
-        };
-        assert_eq!(plan.validate_alias_safety(), Ok(()));
-    }
-
-    #[test]
-    fn peak_live_bytes_tracks_simultaneous_demand() {
-        // r0 live [0,2] (1024), r1 live [1,3] (512): overlap at 1..3 => 1536.
-        let plan = TransientAllocation {
-            heap_bytes: 1536,
-            regions: vec![region(0, 1024, 256), region(1024, 512, 256)],
-            lifetimes: vec![Some(0..3), Some(1..4)],
-            alias_groups: vec![vec![ResourceId(0)], vec![ResourceId(1)]],
-            individual_bytes: 1536,
-        };
-        assert_eq!(plan.peak_live_bytes(), 1536);
-        assert_eq!(plan.savings_bytes(), 0);
-    }
-}
+#[path = "../../text/unit/transient.rs"]
+mod tests;

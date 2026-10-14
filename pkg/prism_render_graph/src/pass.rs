@@ -174,7 +174,8 @@ impl fmt::Debug for PassFlags {
 /// One recorded texture access by a pass.
 ///
 /// `input_version` is the resource version the pass observes on entry; if the
-/// access writes (`produces`), it mints `output_version = input_version + 1`.
+/// access writes (`produces`), it mints the resource's next output version,
+/// which may be newer than `input_version + 1` for a stale input handle.
 /// The `range` scopes the access to specific mips/layers for subresource-exact
 /// barriers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

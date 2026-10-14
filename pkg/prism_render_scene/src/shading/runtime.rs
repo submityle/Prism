@@ -373,7 +373,7 @@ pub(crate) fn detect_shading_capabilities(
 
 #[derive(Resource)]
 pub(crate) struct ShadingFrameGraph {
-    pub(crate) compiled: prism_render_architecture::frame_graph::CompiledGpuFrameGraph,
+    pub(crate) compiled: prism_render_graph::frame_graph::CompiledGpuFrameGraph,
 }
 
 pub(crate) fn prepare_shading_work(
@@ -383,7 +383,10 @@ pub(crate) fn prepare_shading_work(
     materials: Res<super::super::material::runtime::RenderMaterialRegistry>,
     mut diagnostics: ResMut<PrismShadingDiagnostics>,
 ) {
-    debug_assert_eq!(frame_graph.compiled.execution_order.len(), 5);
+    debug_assert_eq!(
+        frame_graph.compiled.execution_order.len(),
+        frame_graph.compiled.declared_pass_count,
+    );
     // The GPU-observed counters are owned by the classification readback bridge
     // (populated at RenderGraph `Begin`); preserve them across this full-struct
     // CPU recompute so the one-frame-late device data is not clobbered.
@@ -439,6 +442,44 @@ fn shading_diagnostics(
 mod tests {
     use super::*;
     use prism_render_shading::MaterialShadingClass;
+
+    // Execute the real ECS system twice: the compiled declaration, not a
+    // separately maintained literal, owns the runtime pass-count invariant.
+    #[test]
+    fn prepare_shading_work_uses_declared_count_and_preserves_readback() {
+        let mut world = World::new();
+        let graph = super::super::graph::shading_frame_graph();
+        let declared = graph.passes().len();
+        let compiled = graph.compile().unwrap();
+        assert_eq!(compiled.declared_pass_count, declared);
+        world.insert_resource(ShadingFrameGraph { compiled });
+        world.insert_resource(PrismShadingSettings::default());
+        world.insert_resource(
+            super::super::super::visibility::runtime::UnifiedVisibilityState::default(),
+        );
+        world.insert_resource(
+            super::super::super::material::runtime::RenderMaterialRegistry::default(),
+        );
+        let counters = GpuClassificationCounters {
+            background_pixels: 7,
+            stale_pixels: 3,
+            unsupported_pixels: 2,
+            overflow_pixels: 1,
+        };
+        world.insert_resource(PrismShadingDiagnostics {
+            native_barycentrics: true,
+            gpu_classification: counters,
+            ..Default::default()
+        });
+        let mut schedule = Schedule::default();
+        schedule.add_systems(prepare_shading_work);
+        for _ in 0..2 {
+            schedule.run(&mut world);
+            let diagnostics = world.resource::<PrismShadingDiagnostics>();
+            assert!(diagnostics.native_barycentrics);
+            assert_eq!(diagnostics.gpu_classification, counters);
+        }
+    }
 
     #[test]
     fn settings_require_visibility_before_compute_resolve() {

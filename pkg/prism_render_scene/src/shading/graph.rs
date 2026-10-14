@@ -1,7 +1,9 @@
-use prism_render_architecture::frame_graph::{
+use prism_render_graph::frame_graph::{
     AccessKind, GpuFrameGraphBuilder, PassDescriptor, QueueClass, ResourceAccess,
     ResourceDescriptor, ResourceLifetime,
 };
+
+use super::composition::{CompositionPlane, COMPOSITION_PASS_NAME};
 
 pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
     let mut graph = GpuFrameGraphBuilder::default();
@@ -136,7 +138,7 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         ],
         depends_on: vec![scatter],
     });
-    graph.add_pass(PassDescriptor {
+    let resolve = graph.add_pass(PassDescriptor {
         name: "shading_resolve".into(),
         queue: QueueClass::Compute,
         accesses: vec![
@@ -154,6 +156,45 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         ],
         depends_on: vec![shade],
     });
+    // Producers own these per-view GPU allocations. They are imported, not
+    // transient aliases or frame-lag history; the resident endpoint admits the
+    // actual extent/64B/16B capacities before allocation. No scene flag changes
+    // this topology. Until split producers are connected, absence of a fresh
+    // publication makes only the execution a no-op.
+    let left = resource(
+        &mut graph,
+        CompositionPlane::Left.graph_name(),
+        ResourceLifetime::Imported,
+    );
+    let right = resource(
+        &mut graph,
+        CompositionPlane::Right.graph_name(),
+        ResourceLifetime::Imported,
+    );
+    let controls = resource(
+        &mut graph,
+        CompositionPlane::Controls.graph_name(),
+        ResourceLifetime::Imported,
+    );
+    let auxiliary = resource(
+        &mut graph,
+        CompositionPlane::Auxiliary.graph_name(),
+        ResourceLifetime::Imported,
+    );
+    graph.add_pass(PassDescriptor {
+        name: COMPOSITION_PASS_NAME.into(),
+        queue: QueueClass::Compute,
+        accesses: vec![
+            access(left, AccessKind::StorageWrite),
+            access(right, AccessKind::StorageRead),
+            access(controls, AccessKind::StorageRead),
+            access(auxiliary, AccessKind::StorageWrite),
+            access(visibility_ids, AccessKind::SampledRead),
+            access(visibility_metadata, AccessKind::SampledRead),
+            access(scene_color, AccessKind::StorageWrite),
+        ],
+        depends_on: vec![resolve],
+    });
     graph
 }
 
@@ -161,7 +202,7 @@ fn resource(
     graph: &mut GpuFrameGraphBuilder,
     name: &'static str,
     lifetime: ResourceLifetime,
-) -> prism_render_architecture::frame_graph::ResourceId {
+) -> prism_render_graph::frame_graph::ResourceId {
     graph.add_resource(ResourceDescriptor {
         name: name.into(),
         lifetime,
@@ -170,8 +211,12 @@ fn resource(
     })
 }
 
+#[cfg(test)]
+#[path = "../../text/unit/shading/composition_graph.rs"]
+mod composition_tests;
+
 fn access(
-    resource: prism_render_architecture::frame_graph::ResourceId,
+    resource: prism_render_graph::frame_graph::ResourceId,
     kind: AccessKind,
 ) -> ResourceAccess {
     ResourceAccess { resource, kind }
@@ -185,7 +230,8 @@ mod tests {
     fn shading_graph_orders_raster_classification_and_resolve_hazards() {
         let graph = shading_frame_graph();
         let compiled = graph.compile().unwrap();
-        assert_eq!(compiled.execution_order.len(), 6);
+        assert_eq!(compiled.execution_order.len(), graph.passes().len());
+        assert_eq!(compiled.declared_pass_count, graph.passes().len());
         assert_eq!(graph.passes()[0].name, "visibility_raster");
         assert_eq!(graph.passes()[4].name, "texel_space_shade_cache");
         assert_eq!(graph.passes()[5].name, "shading_resolve");
@@ -199,30 +245,30 @@ mod tests {
         );
         assert_eq!(
             graph.passes()[1].depends_on,
-            [prism_render_architecture::frame_graph::PassId(0)]
+            [prism_render_graph::frame_graph::PassId(0)]
         );
         assert_eq!(
             graph.passes()[2].depends_on,
-            [prism_render_architecture::frame_graph::PassId(1)]
+            [prism_render_graph::frame_graph::PassId(1)]
         );
         assert_eq!(
             graph.passes()[3].depends_on,
-            [prism_render_architecture::frame_graph::PassId(2)]
+            [prism_render_graph::frame_graph::PassId(2)]
         );
         assert_eq!(
             graph.passes()[4].depends_on,
-            [prism_render_architecture::frame_graph::PassId(3)]
+            [prism_render_graph::frame_graph::PassId(3)]
         );
         assert_eq!(
             graph.passes()[5].depends_on,
-            [prism_render_architecture::frame_graph::PassId(4)]
+            [prism_render_graph::frame_graph::PassId(4)]
         );
         assert!(compiled
             .barriers
             .iter()
             .any(|barrier| barrier.queue_transfer));
         let resource = |name: &str| {
-            prism_render_architecture::frame_graph::ResourceId(
+            prism_render_graph::frame_graph::ResourceId(
                 graph
                     .resources()
                     .iter()
@@ -233,9 +279,8 @@ mod tests {
         let has_barrier = |name: &str, source: u32, destination: u32| {
             compiled.barriers.iter().any(|barrier| {
                 barrier.resource == resource(name)
-                    && barrier.source == prism_render_architecture::frame_graph::PassId(source)
-                    && barrier.destination
-                        == prism_render_architecture::frame_graph::PassId(destination)
+                    && barrier.source == prism_render_graph::frame_graph::PassId(source)
+                    && barrier.destination == prism_render_graph::frame_graph::PassId(destination)
             })
         };
         assert!(has_barrier("visibility_ids", 0, 1));

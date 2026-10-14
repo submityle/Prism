@@ -35,6 +35,7 @@ pub mod particle;
 pub mod quality;
 pub mod ray_scene;
 pub mod reference_pt;
+pub mod render_fabric;
 pub mod shader_package;
 pub mod temporal_upscale;
 pub mod texture_streaming;

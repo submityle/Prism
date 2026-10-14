@@ -10,7 +10,7 @@
 //! [`compile`](RenderGraph::compile) turns the declaration into an immutable
 //! [`ExecutionPlan`] without touching the GPU; [`execute`](RenderGraph::execute)
 //! realizes the surviving transients, replays each pass's execute closure into
-//! a driver [`CommandBuffer`], and submits it.
+//! a driver [`CommandBuffer`](prism_render_driver::CommandBuffer), and submits it.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -24,6 +24,7 @@ use prism_render_driver::{
 
 use crate::blackboard::Blackboard;
 use crate::builder::{ExecuteContext, PassBuilder};
+use crate::capacity::GraphLimits;
 use crate::compile;
 use crate::desc::{BufferDesc, TextureDesc};
 use crate::handle::{BufferHandle, ResourceIndex, TextureHandle};
@@ -60,6 +61,7 @@ pub struct RenderGraph {
     passes: Vec<PassNode>,
     blackboard: Blackboard,
     swapchain: Extent3d,
+    limits: GraphLimits,
 }
 
 impl RenderGraph {
@@ -67,12 +69,18 @@ impl RenderGraph {
     /// given `swapchain` extent.
     #[must_use]
     pub fn new(swapchain: Extent3d) -> Self {
+        Self::with_limits(swapchain, GraphLimits::default())
+    }
+
+    /// Creates a graph with checked resource, pass, access and version limits.
+    pub fn with_limits(swapchain: Extent3d, limits: GraphLimits) -> Self {
         Self {
             textures: Vec::new(),
             buffers: Vec::new(),
             passes: Vec::new(),
             blackboard: Blackboard::new(),
             swapchain,
+            limits,
         }
     }
 
@@ -104,13 +112,32 @@ impl RenderGraph {
     /// The graph tracks its state transitions but never allocates or frees it;
     /// its realized objects are seeded from `imported` so execution reuses them
     /// verbatim. Returns a version-0 handle to the imported contents.
+    ///
+    /// # Panics
+    /// Panics if the configured texture limit is exhausted. For dynamic input,
+    /// use [`Self::try_import_texture`] to handle admission failure.
     pub fn import_texture(
         &mut self,
         name: impl Into<String>,
         desc: TextureDesc,
         imported: ImportedTexture,
     ) -> TextureHandle {
-        let index = ResourceIndex(self.textures.len() as u32);
+        self.try_import_texture(name, desc, imported)
+            .expect("graph import texture capacity precondition")
+    }
+
+    /// Checked import, leaving the graph unchanged if the resource table is full.
+    pub fn try_import_texture(
+        &mut self,
+        name: impl Into<String>,
+        desc: TextureDesc,
+        imported: ImportedTexture,
+    ) -> Result<TextureHandle, CompileError> {
+        let index = ResourceIndex(GraphLimits::next_id(
+            "textures",
+            self.textures.len(),
+            self.limits.resources,
+        )?);
         self.textures.push(TextureResource {
             name: name.into(),
             desc,
@@ -123,20 +150,39 @@ impl RenderGraph {
                 default_view: imported.default_view,
             }),
         });
-        TextureHandle::new(index, 0)
+        Ok(TextureHandle::new(index, 0))
     }
 
     /// Imports an externally-owned buffer. See [`import_texture`] for the
     /// ownership contract.
     ///
     /// [`import_texture`]: RenderGraph::import_texture
+    ///
+    /// # Panics
+    /// Panics if the configured buffer limit is exhausted. For dynamic input,
+    /// use [`Self::try_import_buffer`] to handle admission failure.
     pub fn import_buffer(
         &mut self,
         name: impl Into<String>,
         desc: BufferDesc,
         imported: ImportedBuffer,
     ) -> BufferHandle {
-        let index = ResourceIndex(self.buffers.len() as u32);
+        self.try_import_buffer(name, desc, imported)
+            .expect("graph import buffer capacity precondition")
+    }
+
+    /// Checked import, leaving the graph unchanged if the resource table is full.
+    pub fn try_import_buffer(
+        &mut self,
+        name: impl Into<String>,
+        desc: BufferDesc,
+        imported: ImportedBuffer,
+    ) -> Result<BufferHandle, CompileError> {
+        let index = ResourceIndex(GraphLimits::next_id(
+            "buffers",
+            self.buffers.len(),
+            self.limits.resources,
+        )?);
         self.buffers.push(BufferResource {
             name: name.into(),
             desc,
@@ -146,10 +192,15 @@ impl RenderGraph {
             version: 0,
             realized: Some(imported.buffer),
         });
-        BufferHandle::new(index, 0)
+        Ok(BufferHandle::new(index, 0))
     }
 
     /// Declares a raster pass: binds color/depth attachments and records draws.
+    ///
+    /// # Panics
+    /// Panics if the pass limit is exhausted, before calling `setup`. Setup
+    /// must also satisfy the preconditions of its infallible builder calls.
+    /// Use [`Self::try_add_raster_pass`] for fallible pass admission.
     pub fn add_raster_pass<Setup, Exec>(
         &mut self,
         name: impl Into<String>,
@@ -159,10 +210,35 @@ impl RenderGraph {
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
         Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
-        self.add_pass(name, PassKind::Raster, flags, setup);
+        self.try_add_raster_pass(name, flags, setup)
+            .expect("graph pass capacity precondition");
+    }
+
+    /// Checks pass admission before invoking setup.
+    ///
+    /// # Errors
+    /// Returns [`CompileError::Capacity`] without invoking `setup` when full.
+    /// Once admitted, setup handles its own checked builder errors; this
+    /// method does not roll back setup's resource or blackboard mutations.
+    pub fn try_add_raster_pass<Setup, Exec>(
+        &mut self,
+        name: impl Into<String>,
+        flags: PassFlags,
+        setup: Setup,
+    ) -> Result<(), CompileError>
+    where
+        Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
+        Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
+    {
+        self.try_add_pass(name, PassKind::Raster, flags, setup)
     }
 
     /// Declares a compute pass: records dispatches.
+    ///
+    /// # Panics
+    /// Panics if the pass limit is exhausted, before calling `setup`. Setup
+    /// must also satisfy the preconditions of its infallible builder calls.
+    /// Use [`Self::try_add_compute_pass`] for fallible pass admission.
     pub fn add_compute_pass<Setup, Exec>(
         &mut self,
         name: impl Into<String>,
@@ -172,10 +248,35 @@ impl RenderGraph {
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
         Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
-        self.add_pass(name, PassKind::Compute, flags, setup);
+        self.try_add_compute_pass(name, flags, setup)
+            .expect("graph pass capacity precondition");
+    }
+
+    /// Checks pass admission before invoking setup.
+    ///
+    /// # Errors
+    /// Returns [`CompileError::Capacity`] without invoking `setup` when full.
+    /// Once admitted, setup handles its own checked builder errors; this
+    /// method does not roll back setup's resource or blackboard mutations.
+    pub fn try_add_compute_pass<Setup, Exec>(
+        &mut self,
+        name: impl Into<String>,
+        flags: PassFlags,
+        setup: Setup,
+    ) -> Result<(), CompileError>
+    where
+        Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
+        Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
+    {
+        self.try_add_pass(name, PassKind::Compute, flags, setup)
     }
 
     /// Declares a transfer pass: copies/blits, tracked for synchronization.
+    ///
+    /// # Panics
+    /// Panics if the pass limit is exhausted, before calling `setup`. Setup
+    /// must also satisfy the preconditions of its infallible builder calls.
+    /// Use [`Self::try_add_transfer_pass`] for fallible pass admission.
     pub fn add_transfer_pass<Setup, Exec>(
         &mut self,
         name: impl Into<String>,
@@ -185,11 +286,36 @@ impl RenderGraph {
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
         Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
-        self.add_pass(name, PassKind::Transfer, flags, setup);
+        self.try_add_transfer_pass(name, flags, setup)
+            .expect("graph pass capacity precondition");
+    }
+
+    /// Checks pass admission before invoking setup.
+    ///
+    /// # Errors
+    /// Returns [`CompileError::Capacity`] without invoking `setup` when full.
+    /// Once admitted, setup handles its own checked builder errors; this
+    /// method does not roll back setup's resource or blackboard mutations.
+    pub fn try_add_transfer_pass<Setup, Exec>(
+        &mut self,
+        name: impl Into<String>,
+        flags: PassFlags,
+        setup: Setup,
+    ) -> Result<(), CompileError>
+    where
+        Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
+        Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
+    {
+        self.try_add_pass(name, PassKind::Transfer, flags, setup)
     }
 
     /// Declares a present pass: hands an imported swapchain image to the
     /// surface. A present pass is always a culling root.
+    ///
+    /// # Panics
+    /// Panics if the pass limit is exhausted, before calling `setup`. Setup
+    /// must also satisfy the preconditions of its infallible builder calls.
+    /// Use [`Self::try_add_present_pass`] for fallible pass admission.
     pub fn add_present_pass<Setup, Exec>(
         &mut self,
         name: impl Into<String>,
@@ -199,27 +325,50 @@ impl RenderGraph {
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
         Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
-        self.add_pass(name, PassKind::Present, flags, setup);
+        self.try_add_present_pass(name, flags, setup)
+            .expect("graph pass capacity precondition");
+    }
+
+    /// Checks pass admission before invoking setup.
+    ///
+    /// # Errors
+    /// Returns [`CompileError::Capacity`] without invoking `setup` when full.
+    /// Once admitted, setup handles its own checked builder errors; this
+    /// method does not roll back setup's resource or blackboard mutations.
+    pub fn try_add_present_pass<Setup, Exec>(
+        &mut self,
+        name: impl Into<String>,
+        flags: PassFlags,
+        setup: Setup,
+    ) -> Result<(), CompileError>
+    where
+        Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
+        Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
+    {
+        self.try_add_pass(name, PassKind::Present, flags, setup)
     }
 
     /// Shared pass-construction core: runs `setup` against a fresh
     /// [`PassBuilder`], captures the recorded accesses and the returned execute
     /// closure, and appends the resulting [`PassNode`].
-    fn add_pass<Setup, Exec>(
+    fn try_add_pass<Setup, Exec>(
         &mut self,
         name: impl Into<String>,
         kind: PassKind,
         flags: PassFlags,
         setup: Setup,
-    ) where
+    ) -> Result<(), CompileError>
+    where
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
         Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
+        GraphLimits::next_id("passes", self.passes.len(), self.limits.passes)?;
         let mut builder = PassBuilder::new(
             &mut self.textures,
             &mut self.buffers,
             &mut self.blackboard,
             kind,
+            self.limits,
         );
         let exec = setup(&mut builder);
         let (texture_accesses, buffer_accesses) = builder.finish();
@@ -231,20 +380,23 @@ impl RenderGraph {
             buffer_accesses,
             execute: Some(Box::new(exec)),
         });
+        Ok(())
     }
 
     /// Compiles the declared frame into an immutable [`ExecutionPlan`] without
-    /// touching the GPU. Fails only on a dependency cycle.
+    /// touching the GPU. Errors include cycles and checked memory overflow.
     ///
     /// # Errors
     /// Returns [`CompileError::Cycle`] when the derived dependency graph cannot
-    /// be topologically ordered.
+    /// be topologically ordered, or another [`CompileError`] for invalid
+    /// admission, handles or overflowing footprint arithmetic.
     pub fn compile(&self) -> Result<ExecutionPlan, CompileError> {
         compile::compile(&self.passes, &self.textures, &self.buffers, self.swapchain)
     }
 
     /// Compiles, realizes transients, replays every surviving pass into a
-    /// driver [`CommandBuffer`], and submits it on `queue`.
+    /// driver [`CommandBuffer`](prism_render_driver::CommandBuffer), and submits
+    /// it on `queue`.
     ///
     /// Consumes the graph: a frame's execute closures are move-only and run
     /// exactly once.

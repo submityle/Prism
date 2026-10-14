@@ -12,8 +12,8 @@
 //!
 //! - **SSA write-versioning** ([`handle`]). Every write mints a new resource
 //!   version, so "reader of version `v` depends on the writer of `v`" is exact,
-//!   with no manual edge wiring and no false dependencies between unrelated
-//!   writes to the same resource.
+//!   with no manual edge wiring. Physical WAW and WAR dependencies protect
+//!   storage even when a writer uses a stale input handle.
 //! - **Dead-pass culling** ([`compile::cull`]). Reverse reachability from the
 //!   frame's side-effecting roots (present, imported writes, explicit
 //!   [`PassFlags::SIDE_EFFECT`]) drops passes whose results nobody consumes.
@@ -21,7 +21,7 @@
 //!   sort respecting read-after-write *and* write-after-read ordering, with
 //!   insertion-order tie-breaking for stable, reproducible frames.
 //! - **Transient memory aliasing** ([`compile::alias`]). Lifetime analysis
-//!   plus a greedy interval assignment over the driver's [`TlsfAllocator`]
+//!   plus the shared kernel's deterministic first-fit interval assignment
 //!   lets non-overlapping transients share physical memory, recorded as plan
 //!   metadata for native placed-resource backends.
 //! - **Automatic barriers** ([`compile::barrier`]). The driver
@@ -46,12 +46,12 @@
 //! feature is off by default so the crate stays `no_std`.
 //!
 //! [`prism_render_driver`]: prism_render_driver
-//! [`TlsfAllocator`]: prism_render_driver::TlsfAllocator
 //! [`StateTracker`]: prism_render_driver::StateTracker
 //! [`CommandBuffer`]: prism_render_driver::CommandBuffer
 
 #![cfg_attr(all(not(test), not(feature = "parallel")), no_std)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![deny(missing_docs)]
 
 extern crate alloc;
 #[cfg(feature = "parallel")]
@@ -60,8 +60,10 @@ extern crate std;
 pub mod access;
 pub mod blackboard;
 pub mod builder;
+pub mod capacity;
 pub mod compile;
 pub mod desc;
+pub mod frame_graph;
 pub mod graph;
 pub mod handle;
 pub mod pass;
@@ -87,7 +89,7 @@ pub use pass::{
 };
 pub use plan::{
     AliasPlan, AliasSlot, ColorAttachmentPlan, CompileError, DepthAttachmentPlan, ExecutionPlan,
-    GraphBarrier, RasterAttachments,
+    GraphBarrier, LogicalBarrier, LogicalResource, RasterAttachments,
 };
 pub use resource::{
     BufferResource, ImportedBuffer, ImportedTexture, Lifetime, RealizedTexture, TextureResource,
@@ -95,4 +97,9 @@ pub use resource::{
 pub use systems::{configure_render_graph_sets, RenderGraphSystems};
 
 #[cfg(test)]
+#[path = "../text/unit/graph.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../text/unit/compiler.rs"]
+mod compiler_tests;
