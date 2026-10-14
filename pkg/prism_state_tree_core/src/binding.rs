@@ -81,7 +81,7 @@ pub struct EvaluatorDependency {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DependencyPlan {
     evaluators: Vec<EvaluatorDependency>,
-    reverse: Vec<Vec<u32>>,
+    reverse: Vec<(BindingSlot, Vec<u32>)>,
 }
 
 impl DependencyPlan {
@@ -93,21 +93,26 @@ impl DependencyPlan {
                 return Err(DependencyError::DuplicateEvaluator(pair[0].evaluator));
             }
         }
-        let slot_count = evaluators
-            .iter()
-            .flat_map(|entry| entry.inputs.iter())
-            .map(|slot| slot.0 as usize + 1)
-            .max()
-            .unwrap_or(0);
-        let mut reverse = vec![Vec::new(); slot_count];
+        let mut edges = Vec::new();
         for entry in &mut evaluators {
             entry.inputs.sort_unstable();
             if entry.inputs.windows(2).any(|pair| pair[0] == pair[1]) {
                 return Err(DependencyError::DuplicateInput(entry.evaluator));
             }
             for &slot in &entry.inputs {
-                reverse[slot.0 as usize].push(entry.evaluator);
+                edges.push((slot, entry.evaluator));
             }
+        }
+        edges.sort_unstable();
+        let mut reverse = Vec::<(BindingSlot, Vec<u32>)>::new();
+        for (slot, evaluator) in edges {
+            if let Some((last_slot, ids)) = reverse.last_mut()
+                && *last_slot == slot
+            {
+                ids.push(evaluator);
+                continue;
+            }
+            reverse.push((slot, vec![evaluator]));
         }
         Ok(Self {
             evaluators,
@@ -119,14 +124,42 @@ impl DependencyPlan {
     #[must_use]
     pub fn dirty_evaluators(&self, changed: &[BindingSlot]) -> Vec<u32> {
         let mut dirty = Vec::new();
+        // The convenience API allocates; use `dirty_evaluators_into` in a hot loop.
         for &slot in changed {
-            if let Some(ids) = self.reverse.get(slot.0 as usize) {
+            if let Ok(index) = self.reverse.binary_search_by_key(&slot, |(key, _)| *key) {
+                let ids = &self.reverse[index].1;
                 dirty.extend_from_slice(ids);
             }
         }
         dirty.sort_unstable();
         dirty.dedup();
         dirty
+    }
+
+    /// Writes sorted, unique dirty evaluator ids into a preallocated buffer.
+    ///
+    /// No allocation occurs, including on capacity error. On error the buffer
+    /// is empty; on success its previous content is replaced. Its capacity must
+    /// accommodate all matching edges (including duplicate changed slots).
+    pub fn dirty_evaluators_into(
+        &self,
+        changed: &[BindingSlot],
+        output: &mut Vec<u32>,
+    ) -> Result<(), DependencyError> {
+        output.clear();
+        for &slot in changed {
+            if let Ok(index) = self.reverse.binary_search_by_key(&slot, |(key, _)| *key) {
+                let ids = &self.reverse[index].1;
+                if ids.len() > output.capacity() - output.len() {
+                    output.clear();
+                    return Err(DependencyError::OutputCapacity);
+                }
+                output.extend_from_slice(ids);
+            }
+        }
+        output.sort_unstable();
+        output.dedup();
+        Ok(())
     }
 
     /// Returns the compiled evaluator declarations in stable id order.
@@ -143,6 +176,8 @@ pub enum DependencyError {
     DuplicateEvaluator(u32),
     /// One evaluator lists the same input slot twice.
     DuplicateInput(u32),
+    /// The supplied result buffer cannot hold all affected edges.
+    OutputCapacity,
 }
 
 impl fmt::Display for DependencyError {
@@ -150,6 +185,7 @@ impl fmt::Display for DependencyError {
         match self {
             Self::DuplicateEvaluator(id) => write!(f, "duplicate evaluator {id}"),
             Self::DuplicateInput(id) => write!(f, "evaluator {id} repeats an input slot"),
+            Self::OutputCapacity => f.write_str("dirty evaluator result buffer is full"),
         }
     }
 }
