@@ -20,6 +20,7 @@ mod lifecycle;
 #[cfg(feature = "reflect")]
 mod reflect_binding;
 mod schedule;
+mod snapshot_bridge;
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -45,6 +46,10 @@ use lifecycle::LifecycleCollector;
 pub use lifecycle::{StateTreeLifecycleEvent, StateTreeLifecycleNotification};
 #[cfg(feature = "reflect")]
 pub use reflect_binding::{ReflectBindingError, ReflectBindingPlan};
+pub use snapshot_bridge::{
+    capture_component_snapshot, capture_snapshot, restore_component_snapshot, restore_snapshot,
+    SnapshotBridgeError, SnapshotComponentError,
+};
 
 /// A host context validated against a concrete core [`Schema`].
 ///

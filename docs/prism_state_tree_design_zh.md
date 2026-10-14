@@ -908,7 +908,7 @@ ST3 基础作者与模型验证切片：`prism_state_tree_ecs::authoring` 提供
 
 ST5 快照安全切片：快照格式 v2 写入计划语义指纹，恢复前拒绝不同状态结构、区域顺序、History 或 Transition 语义的计划；v1 快照仍可读取并按结构校验恢复。恢复校验先完成，再原子替换 active/history/queue，失败保留目标实例、guards、日志和计划。运行时诊断日志默认关闭，启用后为固定容量；容量耗尽保留已记录项、置位溢出标志并返回结构化错误，但不截断生命周期回调或已应用的状态变化。
 
-本次可复现验证：`cargo test -p prism_state_tree_core --offline`（52 个单测，0 个文档测试）、`cargo test -p prism_state_tree_ecs --all-features --offline`（29 个单测，0 个文档测试）和 `cargo clippy -p prism_state_tree_core --all-features --offline -- -D warnings` 均于 2026-10-14 通过。验证覆盖运行时、快照 v1/v2、计划指纹原子拒绝、定容日志、静态诊断和严格文本往返。运行时进入路径与重复捕获的 History 缓存可复用；日志默认关闭，启用后固定容量并显式报告溢出；快照/文本编解码和首次 History 捕获属于离线路径，仍按调用方容量分配。仓库当前没有 StateTree GPU kernel、Batch Evaluator 或 GPU parity 入口，因此本次没有可执行的 StateTree GPU 验证；渲染与物理 GPU 模块的测试不能替代该证据。
+本次可复现验证：`cargo test -p prism_state_tree_core --offline`（52 个单测，0 个文档测试）、`cargo test -p prism_state_tree_ecs --all-features --offline`（34 个单测，0 个文档测试）、core 与 ECS all-features 严格 Clippy 均于 2026-10-14 通过。验证覆盖运行时、快照 v1/v2、计划指纹原子拒绝、定容日志、静态诊断、严格文本往返和 ECS 组件快照桥接。运行时进入路径与重复捕获的 History 缓存可复用；日志默认关闭，启用后固定容量并显式报告溢出；快照/文本编解码和首次 History 捕获属于离线路径，仍按调用方容量分配。仓库当前没有 StateTree GPU kernel、Batch Evaluator 或 GPU parity 入口，因此本次没有可执行的 StateTree GPU 验证；渲染与物理 GPU 模块的测试不能替代该证据。
 
 Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `SchemaId`/`SchemaVersion`、能力位、只读 `ContextRef`、描述符校验和上下文 schema 身份校验；它不依赖 ECS，也不提供 World gather。
 

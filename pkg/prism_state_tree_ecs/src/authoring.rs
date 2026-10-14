@@ -188,7 +188,6 @@ pub fn parse_tree_def(text: &str) -> Result<TreeDef, TreeDefTextError> {
         header,
         "prism_state_tree",
         &["version", "root", "nodes"],
-        header_line,
     )
     .ok_or(TreeDefTextError::InvalidHeader { line: header_line })?;
     let version = parse_u32(header_values[0], header_line, "version")?;
@@ -217,7 +216,6 @@ pub fn parse_tree_def(text: &str) -> Result<TreeDef, TreeDefTextError> {
                 "history",
                 "transitions",
             ],
-            line_no,
         )
         .ok_or(TreeDefTextError::MalformedRecord { line: line_no })?;
         let id = StateId(parse_u32(values[0], line_no, "id")?);
@@ -289,7 +287,6 @@ pub fn parse_tree_def(text: &str) -> Result<TreeDef, TreeDefTextError> {
                 transition_line,
                 "transition",
                 &["source", "target", "trigger", "guard", "priority", "kind"],
-                transition_line_no,
             )
             .ok_or(TreeDefTextError::MalformedRecord {
                 line: transition_line_no,
@@ -397,7 +394,6 @@ fn parse_record<'a>(
     line: &'a str,
     name: &str,
     keys: &[&str],
-    _line: usize,
 ) -> Option<Vec<&'a str>> {
     let mut tokens = line.split(' ');
     if tokens.next()? != name {
