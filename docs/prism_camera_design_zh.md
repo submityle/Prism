@@ -1002,7 +1002,7 @@ GPU ABI 固定使用 16 字节对齐；`world_origin_hi/lo` 采用 Dekker split 
 
 ### 20.3 增量上传
 
-视图数通常很少（1~16），相机不动的帧跳过上传（脏标记）；jitter 变化只更新含 jitter 的矩阵和 `jitter` 字段，不重新计算稳定矩阵。大批阴影级联变化时只上传变化的 slice。上传器采用 ring buffer + 帧代号回收，禁止在 GPU 尚未完成读取时复用 slice。
+视图数通常很少（1~16），相机不动的帧跳过上传（脏标记）；jitter 变化只更新含 jitter 的矩阵和 `jitter` 字段，不重新计算稳定矩阵。大批阴影级联变化时只上传变化的 slice。上传器采用 ring buffer + 帧代号回收，禁止在 GPU 完成读取前复用 slice。
 
 ### 20.4 相机相对的 shader 还原
 
