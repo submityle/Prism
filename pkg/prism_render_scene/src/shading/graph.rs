@@ -4,6 +4,7 @@ use prism_render_graph::frame_graph::{
 };
 
 use super::composition::{CompositionPlane, COMPOSITION_PASS_NAME};
+use super::post_graph::append_post_process_passes;
 
 pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
     let mut graph = GpuFrameGraphBuilder::default();
@@ -195,6 +196,8 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         ],
         depends_on: vec![resolve],
     });
+    append_post_process_passes(&mut graph)
+        .expect("generated shared post-process declarations must be valid");
     graph
 }
 
@@ -292,5 +295,8 @@ mod tests {
         assert!(has_barrier("texel_space_shade_jobs", 3, 4));
         assert!(has_barrier("texel_space_shade_atlas", 4, 5));
         assert!(has_barrier("shading_indirect_dispatch", 2, 5));
+        assert_eq!(graph.passes()[6].name, COMPOSITION_PASS_NAME);
+        assert_eq!(graph.passes()[7].name, "post_exposure");
+        assert_eq!(graph.passes().last().unwrap().name, "post_upscale");
     }
 }

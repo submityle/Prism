@@ -9,7 +9,7 @@
 > - **底层能力**：Vulkan render pass / dynamic rendering + `VK_KHR_dynamic_rendering_local_read`、`VK_KHR_synchronization2`、timeline semaphore；D3D12 enhanced barriers / split barrier / resource state；Metal `tile shader` / imageblock / memoryless / programmable blending
 > 本文为纯经典图形系统编程路线，**不含任何 AI/ML 内容**（不涉及任何学习型调度；排序/别名/屏障/合并均为确定性经典算法）。
 
-- 版本: v0.3（**编码阶段进行中**：核心编译器已实现、测试并提交；高级功能仍为 PLANNED。v0.1→v0.2 做了一次**重构深化**：拆分并深化依赖/剔除、生命周期/别名、屏障、多队列、并行录制、TBDR 六大核心算法章；新增「§17 极致性能工程」「§19 正确性·不变量·验证」「§20 易用性·可维护性·扩展性」三大横切章；高级功能章扩充 work graph / mesh-task pass / 光追加速结构构建 pass / 多 GPU 分帧 / 资源驻留流送编排；参考产品从 7 项扩至 15+ 项并逐项落到具体机制；路线图扩至 M0–M8。v0.2→v0.3（**进入编码**）：核心编译管线落地为真实代码——剔除（Kahn 拓扑 + 确定性 tie-break）、SSA 调度、生命周期区间分析、瞬态显存别名（复用 driver 的 TLSF 子分配器）、屏障规划、附件 load/store 推导，`#![no_std]` core+alloc，含 record-only mock 后端与 10 项编译/执行不变量测试，`cargo clippy`/`fmt` 零告警，已提交。）
+- 版本: v0.4（**声明式 pass 骨架已落地**：`prism_render_graph::frame_graph::codegen` 现在从一份不可变声明生成 ABI、bind-group、pipeline、resource 与依赖记录，并在构图前完成原子校验；`prism_render_scene` 的共享后处理链已由该生成器完整注册，`CompositionPass` 与 HDR 后处理保持固定拓扑。核心编译管线、SSA 调度、生命周期区间、瞬态别名、屏障规划、队列批次、并行录制与执行不变量测试均保留。）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_render_driver`（RHI：Device/Queue/资源/屏障/Fence/Semaphore/placed 子分配）、`prism_math`（视口/尺寸/打包）、`prism_utils`（句柄表/竞技场/位集/拓扑排序/区间树）、`prism_diagnostic`（GPU 计时/pass 标记/图可视化/内存图谱）、`prism_tasks`（并行录制与并行 setup/compile，§24.7 确定性归并）
 - 层级定位: L4 表现层（向下只依赖 `prism_render_driver` 与 L1 地基；向上被 `prism_render_scene` / `prism_material` / `prism_lighting` / `prism_post` / `prism_ui` 使用）
@@ -808,7 +808,7 @@ pkg/prism_render_graph/
 
 ## 24. 诚实边界与风险
 
-本文为设计规格，**当前无代码**；M0–M8 均为 PLANNED。本 crate 是 Driver（最大缺口）之后的紧邻缺口，价值在于「把现代渲染技术的编排复杂度一次性封装、处处复用」，但其正确性风险高度集中在自动化的屏障/别名/同步上。
+本文仍保留 M0–M8 的能力路线图，但核心声明/编译/执行路径已经是生产代码；当前已完成的实现以源码和测试为准，不把尚未接入的高级后端能力冒充为完成。`frame_graph::codegen` 的生成器为后处理骨架提供 ABI、bind-group、pipeline、resource 与依赖的单一声明入口，失败在构图前返回诊断错误。其正确性风险仍集中在自动化的屏障/别名/同步上，因此每项优化继续以编译期证明和 Null 后端测试为门禁。
 
 **高风险项**：
 1. **别名正确性（最高危）**：生命周期算错 → 两个「活着」的资源踩同块显存 → 随机、难复现的画面损坏。缓解：编译期不重叠证明（§19.2）+ Null 后端 golden（§14.4）+ 别名时间轴可视化（§14.3）+ `alias` feature 一键关闭定位问题 + 差分测试 alias on-vs-off。

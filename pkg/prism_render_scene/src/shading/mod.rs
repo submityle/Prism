@@ -28,6 +28,7 @@ mod motion_blur;
 mod ordered_dither;
 mod outline;
 mod plugin;
+mod post_graph;
 mod posterize;
 mod raster;
 mod resolve;
