@@ -26,7 +26,7 @@
 
 六条核心结论：
 
-1. **一份授权数据 + 一次构建 + 多个产物面。** `Mesh`（authoring/IR）是唯一真相；`prism_asset_build` 把它派生成运行时网格、虚拟几何页、碰撞几何、光追几何、缩略图等制品。任何运行时路径不得反向修改授权数据。
+1. **一份授权数据 + 一次构建 + 多个产物面。** `Mesh`（authoring/IR）是唯一真相；`prism_asset_build_core` 把它派生成运行时网格、虚拟几何页、碰撞几何、光追几何、缩略图等制品。任何运行时路径不得反向修改授权数据。
 2. **数据半个 crate，GPU 半个 crate。** `pkg/prism_mesh` 只持有与设备无关的几何数据（属性、索引、拓扑、包围体、校验、打包），`#![forbid(unsafe_code)]`、无 ECS、无 GPU 句柄；GPU 形态（缓冲、上传、生命周期）归 `prism_render_app`/`prism_render_scene`。职责分离直接保证可测试性。
 3. **顶点词表属于 RHI，不属于 Mesh。** 属性格式、缓冲布局、拓扑、索引宽度直接复用 `prism_render_driver` 的类型，避免两套枚举漂移（现状已如此，本文将其固化为契约）。
 4. **顶点流分流 + 域相关量化。** 位置/蒙皮/形变/材质属性按访问模式拆流，深度与阴影 pass 只绑定它真正需要的流；量化策略按几何变体（静态 vs 蒙皮 vs 虚拟几何）分级，而不是全局一刀切。
@@ -122,7 +122,7 @@
 ② Mesh Asset (prism_mesh)   属性/索引/拓扑/包围体/校验/内容哈希
         │  （设备无关的数据半边，可单测、可断言）
         ▼
-③ Build & Bake (prism_asset_build)  IR → 运行时网格 / 虚拟几何页 / 碰撞 / 光追 / 预览
+③ Build & Bake (prism_asset_build_core)  IR → 运行时网格 / 虚拟几何页 / 碰撞 / 光追 / 预览
         │  显式 schema 版本 + build_settings_hash，落 CAS/DDC
         ▼
 ④ GPU Residency (prism_render_app / prism_render_scene)
@@ -137,7 +137,7 @@
 
 层级依赖只向下。任何消费者都不得重新解包授权数据，只能消费构建期产物与其运行时句柄。
 
-### 5.2 crate / 模块布局（目标态）
+### 5.2 crate / 模块职责布局
 
 ```text
 pkg/prism_mesh                      设备无关几何数据（现状已落地，本文扩展其职责）
@@ -152,7 +152,11 @@ pkg/prism_mesh                      设备无关几何数据（现状已落地�
   ├─ skin.rs         蒙皮权重数据（设备无关）
   └─ hash.rs         确定性内容哈希（DDC 键）
 
-pkg/prism_asset_build/src/mesh      IR 修复/优化/简化/Cluster 化/量化/分页（§17）
+pkg/prism_asset_build_core
+  ├─ virtual_geometry_builder.rs    静态 Cluster 化与分页
+  ├─ virtual_geometry_lod.rs        QEM LOD 链构建
+  ├─ virtual_geometry_payload.rs    Cluster 局部量化 payload
+  └─ virtual_geometry.rs            版本化制品校验与编码（§17）
 pkg/prism_render_architecture
   ├─ geometry/        稳定几何表（GeometryRecord / GeometryLodRecord / ABI 校验）
   ├─ virtual_geometry/ Cluster cull、屏幕空间误差 LOD、页表、光栅路径、软件光栅、cut 选择
@@ -631,7 +635,7 @@ barycentrics = 可重建 / 原生输出 / 额外紧凑目标
 | 光追几何 | LOD0 + OMM | 高 | 可与虚拟几何页共享 |
 | SDF | 构建期体素化 | 中 | 用于软件追踪与 GI 代理 |
 
-规则：所有派生几何在 `prism_asset_build` 的 Artifact DAG 中显式表达依赖（资产构建文档 §12.2），不以“渲染时临时转换”替代构建。
+规则：所有派生几何在 `prism_asset_build_core` 的 Artifact DAG 中显式表达依赖（资产构建文档 §12.2），不以“渲染时临时转换”替代构建。
 
 ## 16. 压缩与带宽
 
@@ -801,7 +805,11 @@ impl Mesh {
     pub fn validate(&self) -> Result<(), MeshError>;
 }
 
-pub struct SubMesh { pub material_slot: u16, pub index_range: Range<u32> }
+pub struct SubMesh {
+    pub material_slot: u16,
+    pub index_range: Range<u32>,
+    pub cluster_range: Option<Range<u32>>,
+}
 pub struct VertexStreamLayout {
     pub kind: VertexStreamKind,
     pub array_stride: u64,
@@ -959,6 +967,6 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 ## 27. 结论
 
-Prism 的 Mesh 系统只有一个真相源和三个产物面：**设备无关的授权/运行时数据**（`prism_mesh`）、**构建期派生的运行时网格与虚拟几何页**（`prism_asset_build`）、**多消费者的 GPU 表示**（`prism_render_app`/`prism_render_scene`/`prism_render_architecture`）。系统通过分流顶点、域量化、Cluster/DAG 误差选择、统一 Visibility Buffer 语义、预算驱动驻留和可解释回退，维持性能、质量、扩展性与维护性的同一套契约。
+Prism 的 Mesh 系统只有一个真相源和三个产物面：**设备无关的授权/运行时数据**（`prism_mesh`）、**构建期派生的运行时网格与虚拟几何页**（`prism_asset_build_core`）、**多消费者的 GPU 表示**（`prism_render_app`/`prism_render_scene`/`prism_render_architecture`）。系统通过分流顶点、域量化、Cluster/DAG 误差选择、统一 Visibility Buffer 语义、预算驱动驻留和可解释回退，维持性能、质量、扩展性与维护性的同一套契约。
 
 文档中的所有能力都以 §22 的代码入口、§26 的验收项和 §18 的证据格式判定；实现、测试、诊断与回退必须在同一提交中同步更新。这样 Mesh 不会因为增加新格式、新后端或新形变器而分裂出第二份真相。
