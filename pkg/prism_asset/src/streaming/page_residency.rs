@@ -148,6 +148,16 @@ impl PageKey {
         }
     }
 
+    /// Creates a key using the current mounted-source revision.
+    #[must_use]
+    pub fn from_sources(
+        sources: &AssetSources,
+        path: impl Into<AssetPath>,
+        page_index: u64,
+    ) -> Self {
+        Self::new(path, page_index, sources.revision())
+    }
+
     /// Returns the revision that produced this page key.
     #[must_use]
     pub const fn source_revision(&self) -> u64 {
