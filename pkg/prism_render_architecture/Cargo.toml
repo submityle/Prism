@@ -10,6 +10,7 @@ publish = false
 naga = { version = "30", features = ["spv-in"] }
 blake3 = { version = "1.8", default-features = false }
 prism_render_graph = { path = "../prism_render_graph" }
+prism_material_pcm = { path = "../prism_material_pcm" }
 # The physics engine owns the authoritative cloth-physics algorithms; the
 # render architecture delegates to it so there is a single implementation
 # (no render/physics double-implementation of the same solver math).
