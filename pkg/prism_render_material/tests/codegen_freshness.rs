@@ -17,6 +17,7 @@
 
 use prism_material_schema::codegen::{emit_rust_layout, emit_wesl_unpack};
 use prism_material_schema::surface_schema;
+use prism_render_material::{ClosureKind, SURFACE_LOBE_CLOSURES};
 
 /// Committed GPU decoder, read at compile time so the test has no runtime path
 /// dependency. Relative to this test file in `prism_render_material/tests/`.
@@ -83,4 +84,130 @@ fn rust_layout_keeps_singleton_tables_rustfmt_stable() {
 
     assert!(singleton.contains("[CacheAuxLayout {"));
     assert!(!singleton.contains("[\n    CacheAuxLayout {"));
+}
+
+#[test]
+fn every_declared_lobe_closure_has_a_lobe() {
+    let schema = surface_schema();
+    assert_eq!(SURFACE_LOBE_CLOSURES.len(), schema.lobes.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for &(id, implementation) in &SURFACE_LOBE_CLOSURES {
+        assert!(
+            seen.insert(id),
+            "duplicate implementation relationship for {id}"
+        );
+        let lobe = schema
+            .lobes
+            .iter()
+            .find(|lobe| lobe.id == id)
+            .expect("implementation must reference a declared lobe");
+        assert_eq!(lobe.closure.as_deref(), Some(implementation));
+    }
+    assert!(schema
+        .lobes
+        .iter()
+        .all(|lobe| seen.contains(lobe.id.as_str())));
+}
+
+#[test]
+fn closure_authoring_discriminants_remain_stable() {
+    let kinds = [
+        ClosureKind::Diffuse,
+        ClosureKind::Conductor,
+        ClosureKind::Dielectric,
+        ClosureKind::ClearCoat,
+        ClosureKind::Sheen,
+        ClosureKind::Subsurface,
+        ClosureKind::Transmission,
+        ClosureKind::Emission,
+        ClosureKind::Hair,
+        ClosureKind::Volume,
+        ClosureKind::Npr,
+        ClosureKind::Custom,
+        ClosureKind::Mix,
+        ClosureKind::Layer,
+    ];
+    for (bit, kind) in kinds.into_iter().enumerate() {
+        assert_eq!(kind as usize, bit, "authoring closure ABI changed");
+    }
+}
+
+#[test]
+fn unknown_closure_implementation_fails_rust_compilation() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // Compile the actual authoring enum and the actual generated reference
+    // table. This intentionally does not keep a second spelling registry.
+    let ir = include_str!("../src/ir.rs");
+    let enum_start = ir.find("pub enum ClosureKind {").expect("authoring enum");
+    let enum_end = enum_start + ir[enum_start..].find('}').expect("enum end") + 1;
+    let declaration = &ir[enum_start..enum_end];
+    let temp = std::env::temp_dir().join(format!(
+        "prism-closure-compile-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir(&temp).expect("create isolated compiler output");
+    struct CompilerOutput(std::path::PathBuf);
+    impl Drop for CompilerOutput {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let output_guard = CompilerOutput(temp);
+    let compile = |schema: &prism_material_schema::SurfaceSchema| {
+        let layout = emit_rust_layout(schema);
+        let table_start = layout
+            .find("const _: &[crate::ir::ClosureKind] = &[")
+            .expect("generated implementation type check");
+        let table_end =
+            table_start + layout[table_start..].find("];\n").expect("type check end") + 3;
+        let source = format!(
+            "mod ir {{ {declaration} }}\n{}",
+            &layout[table_start..table_end]
+        );
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let mut child = Command::new(rustc)
+            .args([
+                "--crate-name",
+                "closure_gate",
+                "--crate-type",
+                "lib",
+                "--emit=metadata",
+                "--out-dir",
+            ])
+            .arg(&output_guard.0)
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run Rust compiler for implementation gate");
+        child
+            .stdin
+            .take()
+            .expect("compiler stdin")
+            .write_all(source.as_bytes())
+            .expect("send generated implementation references");
+        child.wait_with_output().expect("compiler result")
+    };
+    let mut schema = surface_schema();
+    let valid = compile(&schema);
+    assert!(
+        valid.status.success(),
+        "valid implementation table failed: {}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    schema.lobes[0].closure = Some("MissingClosureImplementation".into());
+    let invalid = compile(&schema);
+    assert!(!invalid.status.success(), "unknown implementation compiled");
+    let diagnostic = String::from_utf8_lossy(&invalid.stderr);
+    assert!(
+        diagnostic.contains("E0599") && diagnostic.contains("MissingClosureImplementation"),
+        "must fail on missing enum implementation, not an unrelated error: {diagnostic}"
+    );
 }

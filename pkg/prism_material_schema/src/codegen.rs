@@ -641,9 +641,7 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     }
     o.push_str("];\n");
 
-    // The lobe → closure-bucket link (§5.2): declared by the schema so the
-    // shading side derives its classification rows from the manifest instead of
-    // matching lobe ids by hand.
+    // The lobe → authored closure implementation link is a build-time fact.
     let closures: Vec<String> = lobes
         .iter()
         .filter_map(|lobe| {
@@ -652,10 +650,8 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
                 .map(|closure| format!("({:?}, {closure:?})", lobe.id))
         })
         .collect();
-    o.push_str("\n/// Lobe id → the shading-closure bucket it owns (§5.2).\n");
-    o.push_str("///\n");
-    o.push_str("/// Only lobes that declare a `closure` appear: a lobe with no closure\n");
-    o.push_str("/// contributes layout but no classification bucket.\n");
+    o.push_str("\n/// Build-time lobe → closure implementation relationships.\n");
+    o.push_str("/// Shared implementations do not imply shared runtime identity.\n");
     if closures.is_empty() {
         o.push_str("pub const SURFACE_LOBE_CLOSURES: [(&str, &str); 0] = [];\n");
     } else {
@@ -669,6 +665,18 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         }
         o.push_str("];\n");
     }
+
+    // A typo or removed IR implementation must fail the Rust build, rather
+    // than silently fall through a runtime classifier. No second spelling
+    // registry is maintained by the generator.
+    o.push_str("\n// Type-check every declared closure implementation at build time.\n");
+    o.push_str("const _: &[crate::ir::ClosureKind] = &[\n");
+    for lobe in &lobes {
+        if let Some(closure) = &lobe.closure {
+            let _ = writeln!(o, "    crate::ir::ClosureKind::{closure},");
+        }
+    }
+    o.push_str("];\n");
 
     // Runtime dynamic parameter channels (§17.1): declared by the same schema as
     // the lobes, so the ABI mirror gate, the PCM catalogue and this table all
@@ -1030,7 +1038,10 @@ mod tests {
             "    pub const fn all() -> Self {",
             "    pub(crate) const fn canonical() -> [Self; Self::COUNT as usize] {",
             "pub const SURFACE_LOBES: [LobeLayout; 10] = [",
-            "pub const SURFACE_LOBE_CLOSURES: [(&str, &str); 3] = [\n    (\"clearcoat\", \"clearcoat\"),\n    (\"sheen\", \"sheen\"),\n    (\"subsurface\", \"subsurface\"),\n];",
+            "pub const SURFACE_LOBE_CLOSURES: [(&str, &str); 10] = [",
+            "    (\"anisotropy\", \"Conductor\"),",
+            "    (\"glint\", \"Conductor\"),",
+            "    crate::ir::ClosureKind::Custom,",
             "    ChannelLayout {\n        id: \"wetness\",\n        uid: \"org.prism.channel.wetness\",\n        registry_slot: 19,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        header_word: 0,\n        default: 0.0,\n        requires_caps: &[\"object_space_cache\"],\n        view_dependent: false,\n    },",
             "    ChannelLayout {\n        id: \"snow\",\n        uid: \"org.prism.channel.snow\",\n        registry_slot: 20,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        header_word: 1,\n        default: 0.0,\n        requires_caps: &[\"virtual_texture\"],\n        view_dependent: false,\n    },",
             "pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [CacheAuxLayout {",

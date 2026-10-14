@@ -257,14 +257,11 @@ pub struct Lobe {
     /// checks the union of these for a material's **required** extensions.
     #[serde(default)]
     pub requires_caps: Vec<String>,
-    /// The shading-closure bucket this lobe owns, when it has one (§5.2).
+    /// Authoring `ClosureKind` implementation family used by this lobe.
     ///
-    /// A lobe is *layout*; a closure bucket is *classification*. Declaring the
-    /// link here is what makes the class table manifest-driven instead of
-    /// matching lobe ids by hand: the schema states "the `subsurface` lobe owns
-    /// the `subsurface` closure", and the shading side resolves that name
-    /// against its own `ClosureKind` set (an unknown name is a loud error, never
-    /// a silently invented bucket).
+    /// This is a build-time relationship, not a runtime bucket or program id.
+    /// Several lobes may augment the same implementation. Codegen emits typed
+    /// references, so a family absent from the material IR fails compilation.
     #[serde(default)]
     pub closure: Option<String>,
     /// Number of `u32` words the lobe occupies. Lobes are **variable length**
@@ -740,14 +737,10 @@ impl SurfaceSchema {
         // the words tile `0..channels.len()`, the default is a scalar, and the
         // identity is unique across the whole catalogue (lobes included) so a
         // channel can never alias a lobe's uid.
-        let mut closures = BTreeSet::new();
         for lobe in &self.lobes {
             if let Some(closure) = &lobe.closure {
                 if closure.is_empty() {
                     return Err(SchemaError::EmptyClosureName(lobe.id.clone()));
-                }
-                if !closures.insert(closure.clone()) {
-                    return Err(SchemaError::DuplicateClosureName(closure.clone()));
                 }
             }
         }
@@ -891,10 +884,8 @@ pub enum SchemaError {
     DuplicateUid(String),
     /// `registry_slot` values are not a contiguous `0..n` range.
     NonContiguousRegistrySlots,
-    /// A lobe declared an empty closure-bucket name.
+    /// A lobe declared an empty closure implementation name.
     EmptyClosureName(String),
-    /// Two lobes claim the same closure bucket.
-    DuplicateClosureName(String),
     /// A response mode declared an empty illumination spelling.
     EmptyResponseModeIllumination(String),
     /// Two response modes select the same illumination variant.
@@ -955,9 +946,6 @@ impl fmt::Display for SchemaError {
             Self::Parse(e) => write!(f, "schema parse error: {e}"),
             Self::EmptyClosureName(id) => {
                 write!(f, "lobe {id:?} declares an empty closure name")
-            }
-            Self::DuplicateClosureName(name) => {
-                write!(f, "two lobes claim the closure bucket {name:?}")
             }
             Self::EmptyResponseModeIllumination(id) => {
                 write!(
@@ -1225,8 +1213,8 @@ words = 0
     }
 
     #[test]
-    fn rejects_two_lobes_claiming_one_closure_bucket() {
-        let bad = schema_with_records(
+    fn lobes_can_share_a_closure_implementation() {
+        let shared = schema_with_records(
             r#"
 [[lobe]]
 id = "a"
@@ -1251,10 +1239,8 @@ stability = "stable"
 words = 0
 "#,
         );
-        assert_eq!(
-            SurfaceSchema::parse(&bad).unwrap_err(),
-            SchemaError::DuplicateClosureName(String::from("shared"))
-        );
+        let schema = SurfaceSchema::parse(&shared).unwrap();
+        assert_eq!(schema.lobes[0].closure, schema.lobes[1].closure);
     }
 
     #[test]

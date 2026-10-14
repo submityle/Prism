@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use prism_render_material::{
     ClosureKind, GpuMaterialHeader, Illumination, LobeLayout, MaterialRenderClass,
-    ResponseModeLayout, SURFACE_LOBE_CLOSURES, SURFACE_RESPONSE_MODES,
+    ResponseModeLayout, SURFACE_RESPONSE_MODES,
 };
 
 pub const MAX_SHADING_CLASSES: usize = 9;
@@ -175,14 +175,6 @@ pub enum ClassTableError {
     /// whole point: a registered-but-unshaded mode must be a loud error rather
     /// than a material that silently classifies as something else.
     UnhandledResponseMode(String),
-    /// A lobe declared a closure-bucket name the shading side does not
-    /// implement.
-    ///
-    /// The schema owns the declaration; the engine owns the implementation.
-    /// Silently dropping an unknown name would let a schema change remove a
-    /// bucket without any build failure, so this is a loud pipeline-build
-    /// error.
-    UnknownClosureName(String),
     /// A schema response mode named an illumination variant the runtime does
     /// not implement.
     UnknownResponseModeIllumination(String),
@@ -224,10 +216,6 @@ impl core::fmt::Display for ClassTableError {
                 f,
                 "response mode {uid:?} is registered but has no shading implementation"
             ),
-            Self::UnknownClosureName(name) => write!(
-                f,
-                "lobe closure {name:?} is declared by the schema but has no shading implementation"
-            ),
             Self::UnknownResponseModeIllumination(illumination) => write!(
                 f,
                 "response mode declares illumination {illumination:?}, which the runtime axis does not implement"
@@ -265,7 +253,7 @@ impl core::fmt::Display for ClassTableError {
 
 impl std::error::Error for ClassTableError {}
 
-/// A schema-declared closure name resolved to the engine's shading bucket.
+/// A legacy dispatch implementation, independent of the build-time lobe map.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ClosureBucket {
     /// The closure bit the row tests.
@@ -278,60 +266,40 @@ struct ClosureBucket {
     priority: u8,
 }
 
-/// Resolve a schema closure name against the shading side's closed
-/// implementation set.
-///
-/// Names are intentionally resolved here rather than baked into the schema:
-/// the schema declares *what the lobe owns*, while the shading crate owns the
-/// `ClosureKind` values and their evaluation order. A name that has no
-/// implementation below is an error, not a silently invented bucket.
-fn closure_from_name(name: &str) -> Option<ClosureBucket> {
-    match name {
-        // Hair is a subsystem closure with its own render class; it is also
-        // accepted here so a future schema declaration cannot be mistaken for
-        // an unknown string.
-        "hair" => Some(ClosureBucket {
-            kind: ClosureKind::Hair,
-            class: MaterialShadingClass::Hair,
-            row_name: "hair",
-            priority: 0,
-        }),
-        "subsurface" => Some(ClosureBucket {
-            kind: ClosureKind::Subsurface,
-            class: MaterialShadingClass::Subsurface,
-            row_name: "subsurface",
-            priority: 1,
-        }),
-        "clearcoat" => Some(ClosureBucket {
-            kind: ClosureKind::ClearCoat,
-            class: MaterialShadingClass::ClearCoat,
-            row_name: "clearcoat",
-            priority: 2,
-        }),
-        "sheen" => Some(ClosureBucket {
-            kind: ClosureKind::Sheen,
-            class: MaterialShadingClass::Cloth,
-            row_name: "cloth",
-            priority: 3,
-        }),
-        _ => None,
-    }
-}
-
-/// Build the `Lit` closure rows from the schema-generated lobe→closure table.
-///
-/// The table order is canonical (lobe order), so rows are explicitly sorted by
-/// the engine's most-specific-first priority. A closure declared for a lobe
-/// this build does not carry is skipped, preserving the previous
-/// "no lobe → no bucket" contract; an unknown *name* is always an error.
-fn closure_rows(
-    closures: &[(&str, &str)],
-    lobes: &[LobeLayout],
-) -> Result<Vec<ShadingClassRow>, ClassTableError> {
+/// Preserve existing dispatch implementations without interpreting authored
+/// closure implementation relationships as exclusive runtime buckets.
+fn closure_rows(lobes: &[LobeLayout]) -> Vec<ShadingClassRow> {
+    let dispatches = [
+        (
+            "subsurface",
+            ClosureBucket {
+                kind: ClosureKind::Subsurface,
+                class: MaterialShadingClass::Subsurface,
+                row_name: "subsurface",
+                priority: 1,
+            },
+        ),
+        (
+            "clearcoat",
+            ClosureBucket {
+                kind: ClosureKind::ClearCoat,
+                class: MaterialShadingClass::ClearCoat,
+                row_name: "clearcoat",
+                priority: 2,
+            },
+        ),
+        (
+            "sheen",
+            ClosureBucket {
+                kind: ClosureKind::Sheen,
+                class: MaterialShadingClass::Cloth,
+                row_name: "cloth",
+                priority: 3,
+            },
+        ),
+    ];
     let mut rows = Vec::new();
-    for (lobe_id, closure_name) in closures.iter().copied() {
-        let bucket = closure_from_name(closure_name)
-            .ok_or_else(|| ClassTableError::UnknownClosureName(closure_name.to_owned()))?;
+    for (lobe_id, bucket) in dispatches {
         if !lobes.iter().any(|lobe| lobe.id == lobe_id) {
             continue;
         }
@@ -345,7 +313,7 @@ fn closure_rows(
         ));
     }
     rows.sort_by_key(|(priority, _)| *priority);
-    Ok(rows.into_iter().map(|(_, row)| row).collect())
+    rows.into_iter().map(|(_, row)| row).collect()
 }
 
 /// Build the response-mode rows from the schema-generated table and verify the
@@ -448,8 +416,7 @@ impl ShadingClassTable {
     /// # Errors
     ///
     /// [`ClassTableError::UnhandledResponseMode`] when a registered response mode
-    /// has no engine implementation, or [`ClassTableError::UnknownClosureName`]
-    /// when a schema-declared closure name has no shading bucket implementation.
+    /// has no engine implementation.
     pub fn from_registry(
         registry: &prism_material_pcm::ExtensionRegistry,
         lobes: &[LobeLayout],
@@ -472,8 +439,9 @@ impl ShadingClassTable {
         // axis vocabulary and verifies that the PCM registry mirrors the row.
         rows.extend(response_mode_rows(registry, &SURFACE_RESPONSE_MODES)?);
 
-        // `Lit` closure buckets, most specific first — the schema-generated
-        // lobe→closure table is the authority for which of them exist.
+        // Existing `Lit` dispatch buckets, most specific first. The complete
+        // schema closure relationship is type-checked during code generation,
+        // not interpreted as an exclusive runtime dispatch bucket.
         // Hair is a *subsystem* closure with its own render class, not an
         // über-BSDF lobe: the schema's lobe table never carries it, so this row
         // is unconditional (the render-class row above already binds the same
@@ -483,7 +451,7 @@ impl ShadingClassTable {
             name: "hair",
             rule: ShadingClassRule::Closure(ClosureKind::Hair),
         });
-        rows.extend(closure_rows(&SURFACE_LOBE_CLOSURES, lobes)?);
+        rows.extend(closure_rows(lobes));
         rows.push(ShadingClassRow {
             id: MaterialShadingClass::Principled as u32,
             name: "principled",
@@ -1097,20 +1065,14 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_closure_without_a_shading_implementation_fails_loudly() {
-        // The table is generated from the schema, but the shading side still
-        // owns the closure implementations. A name the codegen can carry but
-        // the engine cannot resolve must fail pipeline build, never disappear
-        // into the default bucket.
-        let error = closure_rows(
-            &[("subsurface", "not_a_shading_closure")],
-            &prism_render_material::SURFACE_LOBES,
-        )
-        .expect_err("an unknown closure name must be rejected");
-        assert_eq!(
-            error,
-            ClassTableError::UnknownClosureName(String::from("not_a_shading_closure"))
-        );
+    fn complete_lobe_implementation_map_does_not_allocate_dispatch_buckets() {
+        // Emission, thin film and specular modifiers remain part of the lit
+        // evaluator. Their build-time relationship must not add dispatch bins.
+        let rows = closure_rows(&prism_render_material::SURFACE_LOBES);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, MaterialShadingClass::Subsurface as u32);
+        assert_eq!(rows[1].id, MaterialShadingClass::ClearCoat as u32);
+        assert_eq!(rows[2].id, MaterialShadingClass::Cloth as u32);
     }
 
     fn response_mode(

@@ -24,7 +24,7 @@ abi_version = 6
 
 # ---------------------------------------------------------------------------
 # Core: the always-present OpenPBR-anchored base every lit/stylized/unlit
-# surface carries (doc §3.3). SURFACE_CORE_WORDS = 12.
+# surface carries (doc §3.3). The word count is declared below.
 # ---------------------------------------------------------------------------
 [core]
 words = 20
@@ -216,6 +216,7 @@ default = 0.0
 
 [[lobe]]
 id = "emission"
+closure = "Emission"
 uid = "org.khronos.openpbr.emission"
 registry_slot = 0
 mask_const = "EMISSION"
@@ -285,7 +286,7 @@ default = 0.0
 id = "clearcoat"
 uid = "org.khronos.openpbr.coat"
 # The shading-closure bucket this lobe owns (§5.2, classification).
-closure = "clearcoat"
+closure = "ClearCoat"
 registry_slot = 1
 mask_const = "CLEARCOAT"
 namespace = "KHR"
@@ -433,6 +434,7 @@ default = 0.0
 
 [[lobe]]
 id = "anisotropy"
+closure = "Conductor"
 uid = "org.khronos.openpbr.specular_anisotropy"
 registry_slot = 2
 mask_const = "ANISOTROPY"
@@ -494,7 +496,7 @@ default = 0.0
 id = "sheen"
 uid = "org.khronos.openpbr.fuzz"
 # The shading-closure bucket this lobe owns (§5.2, classification).
-closure = "sheen"
+closure = "Sheen"
 registry_slot = 3
 mask_const = "SHEEN"
 namespace = "KHR"
@@ -565,7 +567,7 @@ view = "invariant"
 id = "subsurface"
 uid = "org.khronos.openpbr.subsurface"
 # The shading-closure bucket this lobe owns (§5.2, classification).
-closure = "subsurface"
+closure = "Subsurface"
 registry_slot = 4
 mask_const = "SUBSURFACE"
 namespace = "KHR"
@@ -687,6 +689,7 @@ default = 0.0
 
 [[lobe]]
 id = "transmission"
+closure = "Transmission"
 uid = "org.khronos.openpbr.transmission"
 registry_slot = 5
 mask_const = "TRANSMISSION"
@@ -826,6 +829,7 @@ default = 0.0
 
 [[lobe]]
 id = "thin_film"
+closure = "Dielectric"
 uid = "org.khronos.openpbr.thin_film"
 registry_slot = 6
 mask_const = "THIN_FILM"
@@ -883,6 +887,7 @@ default = 0.0
 
 [[lobe]]
 id = "npr_face"
+closure = "Npr"
 # Identity is `uid`-based and immutable once a material has been serialized, so
 # the uid keeps its original spelling even though the human-facing id became
 # `npr_face` (the lobe only serves the `Illumination::Stylized` / NPR line —
@@ -937,6 +942,7 @@ default = 0.0
 
 [[lobe]]
 id = "glint"
+closure = "Conductor"
 # Identity is `uid`-based and immutable once a material has been serialized.
 # The glint lobe is Prism-private: it is the discrete (counting) microfacet
 # estimator of §17.6 — a *re-shaping* of the specular NDF for materials whose
@@ -1013,6 +1019,9 @@ view = "dependent"
 
 [[lobe]]
 id = "measured_brdf"
+# Measured tables are an opaque authored closure implementation, not a
+# registered response program. Runtime response selection never reads this.
+closure = "Custom"
 # Identity is `uid`-based and immutable once a material has been serialized.
 # The measured lobe is Prism-private: it is the *data-driven but non-AI* member
 # of the open vocabulary (§17.6) — a tabulated BRDF/BTF (MERL et al.) sampled

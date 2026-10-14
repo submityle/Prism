@@ -246,14 +246,33 @@ pub const SURFACE_LOBES: [LobeLayout; 10] = [
     },
 ];
 
-/// Lobe id → the shading-closure bucket it owns (§5.2).
-///
-/// Only lobes that declare a `closure` appear: a lobe with no closure
-/// contributes layout but no classification bucket.
-pub const SURFACE_LOBE_CLOSURES: [(&str, &str); 3] = [
-    ("clearcoat", "clearcoat"),
-    ("sheen", "sheen"),
-    ("subsurface", "subsurface"),
+/// Build-time lobe → closure implementation relationships.
+/// Shared implementations do not imply shared runtime identity.
+pub const SURFACE_LOBE_CLOSURES: [(&str, &str); 10] = [
+    ("emission", "Emission"),
+    ("clearcoat", "ClearCoat"),
+    ("anisotropy", "Conductor"),
+    ("sheen", "Sheen"),
+    ("subsurface", "Subsurface"),
+    ("transmission", "Transmission"),
+    ("thin_film", "Dielectric"),
+    ("npr_face", "Npr"),
+    ("glint", "Conductor"),
+    ("measured_brdf", "Custom"),
+];
+
+// Type-check every declared closure implementation at build time.
+const _: &[crate::ir::ClosureKind] = &[
+    crate::ir::ClosureKind::Emission,
+    crate::ir::ClosureKind::ClearCoat,
+    crate::ir::ClosureKind::Conductor,
+    crate::ir::ClosureKind::Sheen,
+    crate::ir::ClosureKind::Subsurface,
+    crate::ir::ClosureKind::Transmission,
+    crate::ir::ClosureKind::Dielectric,
+    crate::ir::ClosureKind::Npr,
+    crate::ir::ClosureKind::Conductor,
+    crate::ir::ClosureKind::Custom,
 ];
 
 /// One runtime dynamic channel's generated identity.
