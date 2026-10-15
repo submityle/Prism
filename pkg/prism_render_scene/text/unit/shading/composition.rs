@@ -13,10 +13,16 @@ fn plane_capacity_mapping_matches_production_abi() {
     assert_eq!(CompositionPlane::Right.stride(), 64);
     assert_eq!(CompositionPlane::Controls.stride(), 16);
     assert_eq!(CompositionPlane::Auxiliary.stride(), 64);
+    assert_eq!(
+        CompositionPlane::WaterCoverage.graph_name(),
+        "water_coverage"
+    );
+    assert_eq!(CompositionPlane::WaterCoverage.stride(), 4);
     assert_eq!(layout.bytes(CompositionPlane::Left), 153 * 64);
     assert_eq!(layout.bytes(CompositionPlane::Right), 153 * 64);
     assert_eq!(layout.bytes(CompositionPlane::Controls), 153 * 16);
     assert_eq!(layout.bytes(CompositionPlane::Auxiliary), 7 * 64);
+    assert_eq!(layout.bytes(CompositionPlane::WaterCoverage), 153 * 4);
     let no_aux = ResponseCompositionLayout::new(UVec2::ONE, 0, &Limits::default()).unwrap();
     assert_eq!(no_aux.bytes(CompositionPlane::Auxiliary), 0);
 }

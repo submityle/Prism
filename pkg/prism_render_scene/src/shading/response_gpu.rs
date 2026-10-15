@@ -22,7 +22,7 @@ pub const RESPONSE_COMPOSITION_SHADER: &str = include_str!("../shaders/response_
 pub const RESPONSE_COMPOSITION_WORKGROUP_SIZE: u32 = 64;
 
 /// Device-owned pipelines reused by resident composition passes. Radiance uses
-/// bindings 0..2; auxiliary uses binding 3 in its independently derived layout.
+/// bindings 0..3; auxiliary uses binding 4 in its independently derived layout.
 pub struct ResponseCompositionPipelines {
     pub radiance: ComputePipeline,
     pub auxiliary: ComputePipeline,
@@ -102,6 +102,18 @@ pub struct GpuCompositionControl {
     pub shared_alpha: f32,
     pub alpha_rule: u32,
 }
+
+/// One per-pixel water coverage value in the shared response allocation.
+///
+/// The current response compositor reads this sidecar to preserve the
+/// neutral single-arm path while allowing a water producer to publish
+/// per-pixel coverage through
+/// [`crate::shading::composition::ViewResponseComposition::plane`]. Keeping
+/// the wrapper here makes the four-byte layout an explicit GPU contract
+/// instead of re-deriving it from an unrelated scalar at each call site.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct GpuWaterCoverage(pub u32);
 
 impl GpuCompositionControl {
     pub fn new(options: CompositionOptions<'_>) -> Result<Self, CompositionError> {
@@ -249,4 +261,18 @@ impl GpuCompositionJob {
 
 const _: () = assert!(size_of::<GpuResponseOutput>() == 64);
 const _: () = assert!(size_of::<GpuCompositionControl>() == 16);
+const _: () = assert!(size_of::<GpuWaterCoverage>() == 4);
 const _: () = assert!(size_of::<GpuAuxiliaryMerge>() == 64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::{align_of, size_of};
+
+    #[test]
+    fn water_coverage_is_a_four_byte_storage_element() {
+        assert_eq!(size_of::<GpuWaterCoverage>(), size_of::<u32>());
+        assert_eq!(align_of::<GpuWaterCoverage>(), align_of::<u32>());
+        assert_eq!(GpuWaterCoverage::default(), GpuWaterCoverage(0));
+    }
+}

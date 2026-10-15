@@ -63,6 +63,7 @@ pub use runtime::{PrismShadingDiagnostics, PrismShadingSettings};
 /// specialized render pipeline on the same per-view visibility-buffer path the
 /// shading passes build, so the sibling `water` module needs the component.
 pub(crate) use composite::composite_shading;
+pub(crate) use composition::ViewResponseComposition;
 pub(crate) use resources::ViewVisibilityBuffer;
 // Re-export the shared motion-vector G-buffer format so the transparent
 // water surface pass declares a byte-compatible second render target when

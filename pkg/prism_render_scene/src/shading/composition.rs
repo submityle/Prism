@@ -32,8 +32,8 @@ use wgpu_types::Limits;
 use super::{
     resources::{ViewVisibilityBuffer, SCENE_COLOR_FORMAT, VISIBILITY_ID_FORMAT},
     response_gpu::{
-        GpuAuxiliaryMerge, GpuCompositionControl, GpuResponseOutput, ResponseCompositionPipelines,
-        RESPONSE_COMPOSITION_WORKGROUP_SIZE,
+        GpuAuxiliaryMerge, GpuCompositionControl, GpuResponseOutput, GpuWaterCoverage,
+        ResponseCompositionPipelines, RESPONSE_COMPOSITION_WORKGROUP_SIZE,
     },
     runtime::PrismShadingSettings,
 };
@@ -58,6 +58,16 @@ pub enum CompositionPlane {
 }
 
 impl CompositionPlane {
+    /// Every resident composition plane, including planes not bound by the
+    /// current compositor entry point.
+    pub const ALL: [Self; 5] = [
+        Self::Left,
+        Self::Right,
+        Self::Controls,
+        Self::Auxiliary,
+        Self::WaterCoverage,
+    ];
+
     /// Stable resource name in the authoritative graph.
     pub const fn graph_name(self) -> &'static str {
         match self {
@@ -75,7 +85,7 @@ impl CompositionPlane {
             Self::Left | Self::Right => size_of::<GpuResponseOutput>() as u64,
             Self::Controls => size_of::<GpuCompositionControl>() as u64,
             Self::Auxiliary => size_of::<GpuAuxiliaryMerge>() as u64,
-            Self::WaterCoverage => size_of::<u32>() as u64,
+            Self::WaterCoverage => size_of::<GpuWaterCoverage>() as u64,
         }
     }
 }
@@ -179,12 +189,7 @@ impl ResponseCompositionLayout {
         let byte_limit = limits
             .max_buffer_size
             .min(u64::from(limits.max_storage_buffer_binding_size));
-        for plane in [
-            CompositionPlane::Left,
-            CompositionPlane::Right,
-            CompositionPlane::Controls,
-            CompositionPlane::Auxiliary,
-        ] {
+        for plane in CompositionPlane::ALL {
             let requested = layout.bytes(plane);
             if requested > byte_limit {
                 return Err(CompositionResourceError::BufferLimit {
@@ -349,8 +354,11 @@ impl ViewResponseComposition {
         });
         let auxiliary = (auxiliary_jobs != 0).then(|| allocate(CompositionPlane::Auxiliary));
         let water_coverage = device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("water_response_coverage"),
-            contents: cast_slice(&vec![0_u32; layout.pixel_count() as usize]),
+            label: Some(CompositionPlane::WaterCoverage.graph_name()),
+            contents: cast_slice(&vec![
+                GpuWaterCoverage::default();
+                layout.pixel_count() as usize
+            ]),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         });
         let radiance_group = device.create_bind_group(
@@ -360,15 +368,16 @@ impl ViewResponseComposition {
                 left.as_entire_binding(),
                 right.as_entire_binding(),
                 controls.as_entire_binding(),
+                water_coverage.as_entire_binding(),
             )),
         );
-        // Auto layouts are entry-point specific. Binding 3 must not be put in
-        // the radiance group's layout or rebound through that pipeline.
+        // Auto layouts are entry-point specific. Auxiliary uses binding 4 in
+        // its own entry point; it is not part of the radiance bind group.
         let auxiliary_group = auxiliary.as_ref().map(|buffer| {
             device.create_bind_group(
                 "prism response composition auxiliary",
                 &BindGroupLayout::from(pipelines.kernels.auxiliary.get_bind_group_layout(0)),
-                &BindGroupEntries::with_indices(((3, buffer.as_entire_binding()),)),
+                &BindGroupEntries::with_indices(((4, buffer.as_entire_binding()),)),
             )
         });
         Ok(Self {
@@ -459,7 +468,10 @@ impl ViewResponseComposition {
         if self.pipelines != pipelines.identities() {
             return Err(CompositionResourceError::PipelineMismatch);
         }
-        if target.left != self.left.id() || target.size != self.layout.size {
+        if target.left != self.left.id()
+            || target.water_coverage != self.water_coverage.id()
+            || target.size != self.layout.size
+        {
             return Err(CompositionResourceError::TargetMismatch);
         }
         if !self.publication.take(frame_index) {
@@ -520,6 +532,7 @@ impl ViewResponseComposition {
 pub struct ResponseCompositionTarget {
     group: BindGroup,
     left: BufferId,
+    water_coverage: BufferId,
     hdr: TextureId,
     ids: TextureId,
     metadata: TextureId,
@@ -578,6 +591,7 @@ impl ResponseCompositionTarget {
         Ok(Self {
             group,
             left: responses.left.id(),
+            water_coverage: responses.water_coverage.id(),
             hdr: hdr.id(),
             ids: ids.id(),
             metadata: metadata.id(),
@@ -592,6 +606,7 @@ impl ResponseCompositionTarget {
     ) -> bool {
         let (ids, metadata, size) = visibility.feedback_sources();
         self.left == responses.left.id()
+            && self.water_coverage == responses.water_coverage.id()
             && self.hdr == visibility.scene_color_texture().id()
             && self.ids == ids.id()
             && self.metadata == metadata.id()

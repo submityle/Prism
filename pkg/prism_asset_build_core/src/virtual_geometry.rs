@@ -1,9 +1,9 @@
 //! Asset-build bridge for the versioned virtual-geometry page format.
 //!
-//! This module deliberately canonicalizes and validates a prepared asset; it
-//! does not pretend to be a clusterizer or simplifier. Those algorithms need
-//! authored mesh IR and build settings, while this boundary makes the output
-//! contract executable inside the existing deterministic build graph and CAS.
+//! This module canonicalizes and validates a prepared asset. Clusterization and
+//! simplification are owned by the mesh build modules, while this processor
+//! makes their versioned output executable inside the deterministic build graph
+//! and CAS.
 
 use crate::job::{Processor, ProcessorError};
 use crate::types::{ArtifactDescriptor, ArtifactKey, ContentHash};

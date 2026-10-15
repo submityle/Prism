@@ -2,10 +2,9 @@
 //!
 //! [`GpuContext`] wraps the four long-lived `wgpu` handles (`Instance`,
 //! `Adapter`, `Device`, `Queue`) every dispatch needs. Acquisition is
-//! deliberately *best-effort*: [`GpuContext::try_headless`] returns [`None`] on
-//! a host with no usable adapter so a test suite can skip gracefully rather
-//! than fail, while still exercising the full dispatch on any machine with a
-//! real device such as an Apple `M`-series `GPU`.
+//! deliberately best-effort: [`GpuContext::try_headless`] returns [`None`] on
+//! a host with no usable adapter so a test suite can skip gracefully. Setting
+//! `PRISM_REQUIRE_GPU=1` turns that absence into a test failure.
 //!
 //! # Optional 64-bit atomics
 //!
@@ -82,7 +81,13 @@ impl GpuContext {
             display: None,
             backend_options: BackendOptions::default(),
         });
-        let adapter = block_on(instance.request_adapter(&RequestAdapterOptions::default())).ok()?;
+        let adapter = match block_on(instance.request_adapter(&RequestAdapterOptions::default())) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                require_gpu_or_skip(&error.to_string());
+                return None;
+            }
+        };
         // Enable each 64-bit feature independently, only when the adapter has
         // it, so the device request never fails and a device with plain
         // `SHADER_INT64` but no 64-bit atomics can still run the atomic-free
@@ -102,7 +107,11 @@ impl GpuContext {
             required_limits: adapter.limits(),
             ..Default::default()
         }))
-        .ok()?;
+        .ok()
+        .or_else(|| {
+            require_gpu_or_skip("logical device creation failed");
+            None
+        })?;
         Some(GpuContext {
             instance,
             adapter,
@@ -156,5 +165,11 @@ impl GpuContext {
         self.device
             .poll(PollType::wait_indefinitely())
             .expect("device poll should complete the submitted work");
+    }
+}
+
+fn require_gpu_or_skip(reason: &str) {
+    if std::env::var_os("PRISM_REQUIRE_GPU").is_some() {
+        panic!("PRISM_REQUIRE_GPU is set but no usable GPU was found: {reason}");
     }
 }

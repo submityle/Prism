@@ -390,8 +390,11 @@ impl Plugin for PrismShadingPlugin {
                 response_composition_pass
                     .in_set(ResponseCompositionSystems::Compose)
                     .after(dispatch_shading_resolve)
+                    .after(bevy_core_pipeline::Core3dSystems::MainPass)
+                    .after(crate::water::WaterSurfaceSystems::Draw)
                     .before(ssr_color_mips_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    .before(composite_shading)
+                    .before(bevy_core_pipeline::Core3dSystems::PostProcess),
             );
         render_app
             .init_resource::<bevy_render::render_phase::ViewBinnedRenderPhases<Visibility3d>>()
@@ -1547,6 +1550,7 @@ impl Plugin for PrismShadingPlugin {
                 ),
                 composite_shading
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)
+                    .after(ResponseCompositionSystems::Compose)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
                 transparent_forward_pass
                     .after(dispatch_shading_resolve)

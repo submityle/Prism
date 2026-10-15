@@ -1,9 +1,9 @@
 //! Device-independent skinning influence data.
 //!
-//! The renderer may later repack this data into a fixed-width GPU stream, but
-//! the asset-side representation keeps the authored per-vertex influence lists
-//! intact.  Construction and [`SkinningData::validate`] enforce the invariants
-//! that make such a repack safe.
+//! The asset-side representation keeps authored per-vertex influence lists
+//! intact; render upload chooses a fixed-width GPU stream from this validated
+//! contract. Construction and [`SkinningData::validate`] enforce the
+//! invariants that make that conversion safe.
 
 use core::fmt;
 

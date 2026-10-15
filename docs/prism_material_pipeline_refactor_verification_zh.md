@@ -14,8 +14,8 @@
 
 - `water` 定向单元测试：670 passed。
 - `render_fabric` 定向测试：73 passed，覆盖 provider 唯一性、硬需求闭包、变体写入契约、静态根集合与确定性选择。
-- `prism_render_scene --test water_hybrid_golden`：14 passed / 1 failed；CPU/WESL 门禁全绿，`MaskBlend` 组合、overlay、motion vector、reactive mask 和四个入口均有契约覆盖；唯一失败是严格 GPU 能力门禁。
-- 跨沙盒真实 GPU 门禁：response composition 在 Apple M2 Metal adapter 上 **2 passed / 0 failed**，1320 cases / 14520 auxiliary jobs readback 通过；水面 raster 真实 adapter/device 获取成功，但 `max_bind_groups=8` 小于所需 10，`PRISM_REQUIRE_GPU=1` 按设计失败。两类结果分别记录，不把能力不足写成通过。
+- `prism_render_scene --test water_hybrid_golden`：**15 passed / 0 failed**；CPU/WESL 门禁、`MaskBlend` 组合、overlay、motion vector、reactive mask、四个入口及真实 GPU gate 全部通过。
+- 跨沙盒真实 GPU 门禁：response composition 在 Apple M2 Metal adapter 上 **2 passed / 0 failed**，1320 cases / 14520 auxiliary jobs readback 通过；水面 raster 同一真实 adapter/device 上 **15 passed / 0 failed**。当前水面 raster 使用 7 个 bind groups，满足该设备 `max_bind_groups=8`，`PRISM_REQUIRE_GPU=1` 明确报告 `PASS`。
 - `ResponseProgram` 现在只包含 PBR/NPR/Custom；Hybrid 由 `WaterShadingPlan::MaskBlend` 表达。共享服务由 `FeatureCatalog` 闭包推导，旧的子系统级共享位掩码不再是事实源。
 
 ---
@@ -56,7 +56,7 @@
 | `prism_render_shading` lib | 3377 | **3379 passed / 6 ignored** | ✅ 一致 |
 | `prism_render_scene` lib | 1602 | **1729 passed / 0 failed** | ⚠️ 快照过时 |
 | response composition GPU | 旧快照未执行 | **2 passed / 0 failed**；1320 cases、14520 auxiliary jobs readback | ✅ Apple M2 Metal |
-| water Hybrid GPU 能力门禁 | 旧快照未执行 | **14 passed / 1 failed**；失败为 `max_bind_groups=8 < 10` | ⚠️ 能力不足，严格失败 |
+| water Hybrid GPU 能力门禁 | 旧快照未执行 | **15 passed / 0 failed**；Apple M2 Metal，7 groups ≤ `max_bind_groups=8` | ✅ 严格 GPU 通过 |
 
 `prism_render_app` 另有 3 条无关 warning：unused import `Instance`、`PrepareContextError`、`prepare_extracted_assets_with_context`。
 

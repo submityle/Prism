@@ -49,7 +49,6 @@ use super::extract::extract_water_bodies;
 use super::pipeline::init_water_compute_pipelines;
 use super::prepare::prepare_water_bodies;
 use super::resources::WaterGpuBodies;
-use super::surface_draw::draw_water_surface;
 use super::surface_motion::{prepare_water_surface_motion, WaterMotionHistory};
 use super::surface_pipeline::{
     init_water_surface_pipelines, prepare_water_surface_pipelines, WaterSurfacePipelines,
@@ -57,6 +56,7 @@ use super::surface_pipeline::{
 use super::surface_ssr::init_water_ssr_fallback;
 use super::surface_vsm::init_water_vsm_fallback;
 use super::surface_world_space_gi::init_water_world_space_gi_fallback;
+use super::{surface_draw::draw_water_surface, WaterSurfaceSystems};
 use crate::lighting::LightBindGroup;
 
 /// Installs the `GPU` water compute subsystem into an app.
@@ -131,7 +131,7 @@ impl Plugin for WaterPlugin {
             // bit cleared so the shader keeps the image-based reflection.
             .add_systems(RenderStartup, init_water_ssr_fallback)
             // And the world-space GI fallback probe buffer: a single dummy
-            // probe bound into `@group(8)` on any view without a resident
+            // probe bound into the merged `@group(6)` lighting group on any view without a resident
             // `ViewWorldSpaceGi` field, with the gather's `sample_enable` bit
             // cleared so the shader skips the probe gather entirely.
             .add_systems(RenderStartup, init_water_world_space_gi_fallback)
@@ -175,7 +175,8 @@ impl Plugin for WaterPlugin {
             .add_systems(
                 bevy_core_pipeline::Core3d,
                 draw_water_surface
-                    .after(crate::shading::composite_shading)
+                    .in_set(WaterSurfaceSystems::Draw)
+                    .after(bevy_core_pipeline::Core3dSystems::MainPass)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
             );
     }

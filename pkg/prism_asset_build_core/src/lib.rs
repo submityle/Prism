@@ -31,6 +31,8 @@ pub mod publication;
 pub mod recipe;
 /// Final release integrity and anti-rollback gate.
 pub mod release;
+/// Deterministic incremental runtime package generation and patch binding.
+pub mod runtime_patch;
 /// Immutable source snapshots and source identity.
 pub mod source;
 /// Revision manifests and atomic local publication.
@@ -55,13 +57,17 @@ pub use graph::{BuildError, BuildGraph, BuildOutputs};
 pub use hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
 pub use job::{BuildJob, JobId, Processor, ProcessorError};
 pub use package::{
-    package_runtime, package_runtime_with_options, AssetPackageMapping, PackageError,
-    PackageOptions, PackageRequest, RuntimePackage,
+    package_runtime, package_runtime_selected_with_options, package_runtime_with_options,
+    AssetPackageMapping, PackageError, PackageOptions, PackageRequest, RuntimePackage,
 };
 pub use patch::{plan_patch, PatchChange, PatchEntry, PatchPlan, PatchPlanError};
 pub use publication::{PublicationDescriptor, PublishedContainer};
 pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError};
 pub use release::{ReleaseDescriptor, ReleaseError, ReleaseGate, ReleaseVerification};
+pub use runtime_patch::{
+    package_runtime_patch, package_runtime_patch_with_options, RuntimePatchError,
+    RuntimePatchPackage, RuntimePatchRequest,
+};
 pub use source::{SourceError, SourceSnapshot};
 pub use transaction::{
     PublishError, PublishTransaction, PublishedManifest, RevisionStore, TransactionState,

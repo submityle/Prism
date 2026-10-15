@@ -51,11 +51,23 @@ pub enum SurfaceBinding {
     /// it so the motion vector captures the wave's own crest motion, not just
     /// camera reprojection.
     PreviousDisplacement,
+    /// `@binding(8)`: the resident left response plane written by the water
+    /// fragment producer and consumed by the shared compositor.
+    ResponseLeft,
+    /// `@binding(9)`: the resident right response plane written by the water
+    /// fragment producer and consumed by the shared compositor.
+    ResponseRight,
+    /// `@binding(10)`: per-pixel response composition controls written by the
+    /// water fragment producer and consumed by the shared compositor.
+    ResponseControls,
+    /// `@binding(11)`: per-pixel water ownership written by the water fragment
+    /// producer and consumed by the shared compositor.
+    WaterCoverage,
 }
 
 impl SurfaceBinding {
     /// Every binding in shader-declaration order.
-    pub const ALL: [SurfaceBinding; 8] = [
+    pub const ALL: [SurfaceBinding; 12] = [
         SurfaceBinding::View,
         SurfaceBinding::BasePositions,
         SurfaceBinding::SurfaceUvs,
@@ -64,6 +76,10 @@ impl SurfaceBinding {
         SurfaceBinding::SceneColor,
         SurfaceBinding::SceneSampler,
         SurfaceBinding::PreviousDisplacement,
+        SurfaceBinding::ResponseLeft,
+        SurfaceBinding::ResponseRight,
+        SurfaceBinding::ResponseControls,
+        SurfaceBinding::WaterCoverage,
     ];
 
     /// The literal `@binding(n)` slot index this binding occupies in `@group(0)`.
@@ -78,6 +94,10 @@ impl SurfaceBinding {
             SurfaceBinding::SceneColor => 5,
             SurfaceBinding::SceneSampler => 6,
             SurfaceBinding::PreviousDisplacement => 7,
+            SurfaceBinding::ResponseLeft => 8,
+            SurfaceBinding::ResponseRight => 9,
+            SurfaceBinding::ResponseControls => 10,
+            SurfaceBinding::WaterCoverage => 11,
         }
     }
 
@@ -93,6 +113,10 @@ impl SurfaceBinding {
             | SurfaceBinding::PreviousDisplacement => SurfaceBindingKind::StorageRead,
             SurfaceBinding::SceneColor => SurfaceBindingKind::SampledTexture,
             SurfaceBinding::SceneSampler => SurfaceBindingKind::Sampler,
+            SurfaceBinding::ResponseLeft
+            | SurfaceBinding::ResponseRight
+            | SurfaceBinding::ResponseControls
+            | SurfaceBinding::WaterCoverage => SurfaceBindingKind::StorageReadWrite,
         }
     }
 
@@ -128,6 +152,10 @@ impl SurfaceBinding {
                 | SurfaceBinding::NormalFoam
                 | SurfaceBinding::SceneColor
                 | SurfaceBinding::SceneSampler
+                | SurfaceBinding::ResponseLeft
+                | SurfaceBinding::ResponseRight
+                | SurfaceBinding::ResponseControls
+                | SurfaceBinding::WaterCoverage
         )
     }
 
@@ -138,8 +166,9 @@ impl SurfaceBinding {
     /// [`SurfaceBinding::PreviousDisplacement`] is the prior frame's
     /// [`SurfaceBinding::Displacement`] buffer, ping-ponged in rather than
     /// re-written by the meshing pass, so the surface-meshing kernel produces
-    /// one array that serves both slots across two frames. Every other storage
-    /// array is written fresh each frame and twins nothing.
+    /// one array that serves both slots across two frames. The response-plane
+    /// storage arrays are fragment-produced resources and are not part of this
+    /// vertex-array ping-pong contract.
     #[must_use]
     pub fn previous_frame_twin_of(self) -> Option<SurfaceBinding> {
         match self {
@@ -157,6 +186,9 @@ pub enum SurfaceBindingKind {
     Uniform,
     /// A `var<storage, read>` array.
     StorageRead,
+    /// A `var<storage, read_write>` array written by the water fragment
+    /// producer and read by the shared compositor in a later pass.
+    StorageReadWrite,
     /// A sampled `texture_2d<f32>`.
     SampledTexture,
     /// A filtering `sampler`.
@@ -282,7 +314,7 @@ mod tests {
 
     #[test]
     fn binding_indices_are_unique_and_contiguous() {
-        let mut seen = [false; 8];
+        let mut seen = [false; 12];
         for binding in SurfaceBinding::ALL {
             let i = binding.index() as usize;
             assert!(i < seen.len());
@@ -322,6 +354,22 @@ mod tests {
         assert_eq!(
             SurfaceBinding::PreviousDisplacement.kind(),
             SurfaceBindingKind::StorageRead
+        );
+        assert_eq!(
+            SurfaceBinding::ResponseLeft.kind(),
+            SurfaceBindingKind::StorageReadWrite
+        );
+        assert_eq!(
+            SurfaceBinding::ResponseRight.kind(),
+            SurfaceBindingKind::StorageReadWrite
+        );
+        assert_eq!(
+            SurfaceBinding::ResponseControls.kind(),
+            SurfaceBindingKind::StorageReadWrite
+        );
+        assert_eq!(
+            SurfaceBinding::WaterCoverage.kind(),
+            SurfaceBindingKind::StorageReadWrite
         );
     }
 
@@ -369,6 +417,10 @@ mod tests {
         assert!(!SurfaceBinding::SurfaceUvs.visible_in_fragment());
         assert!(!SurfaceBinding::Displacement.visible_in_fragment());
         assert!(!SurfaceBinding::PreviousDisplacement.visible_in_fragment());
+        assert!(SurfaceBinding::ResponseLeft.visible_in_fragment());
+        assert!(SurfaceBinding::ResponseRight.visible_in_fragment());
+        assert!(SurfaceBinding::ResponseControls.visible_in_fragment());
+        assert!(SurfaceBinding::WaterCoverage.visible_in_fragment());
     }
 
     #[test]

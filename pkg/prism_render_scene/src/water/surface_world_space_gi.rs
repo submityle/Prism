@@ -1,5 +1,5 @@
-//! The water-surface pass's **world-space global-illumination** `@group(8)`
-//! plumbing: the `CPU` half that lets the §5 image-based ambient term pick up
+//! The water-surface pass's **world-space global-illumination** slots in merged
+//! `@group(6)` plumbing: the `CPU` half that lets the §5 image-based ambient term pick up
 //! the engine's `Lumen`-style *far-field* diffuse indirect, gathered from the
 //! shared screen-probe buffer the opaque
 //! [`ViewWorldSpaceGi`](crate::shading::ViewWorldSpaceGi) prepass already
@@ -35,8 +35,8 @@
 //! gather and adds nothing — but the bind group stays structurally complete.
 //!
 //! The sibling [`super::surface_pipeline`] slice owns the raster pipelines;
-//! this slice adds the ninth (`@group(8)`) bind group, built once per view by
-//! [`super::surface_draw`].
+//! this slice supplies two slots in the merged lighting bind group, built once
+//! per view by [`super::surface_draw`].
 
 use bevy_ecs::prelude::*;
 use bevy_material::bind_group_layout_entries::{
@@ -57,7 +57,7 @@ use bytemuck::{Pod, Zeroable};
 const PROBE_STRIDE: u64 = 96;
 
 /// `GPU`-side mirror of the shader's `WaterWorldSpaceGiConfig` uniform (the
-/// water `@group(8) @binding(1)` block).
+/// water merged `@group(6) @binding(3)` block).
 ///
 /// Layout matches the `WGSL` struct byte-for-byte: a leading `vec2<u32>`
 /// (`probe_grid`, 8-byte aligned) precedes the `tile` count, three `f32`
@@ -124,7 +124,7 @@ impl GpuWaterWorldSpaceGiConfig {
     }
 }
 
-/// Builds the water-surface `@group(8)` world-space GI layout entries (two
+/// Builds the world-space GI slots of the merged water-surface `@group(6)` layout (two
 /// bindings), in the exact `@binding(n)` order `water_surface_raster.wesl`
 /// declares:
 ///
@@ -146,7 +146,7 @@ pub(crate) fn wsgi_layout_entries() -> BindGroupLayoutEntries<2> {
 }
 
 /// Correctly-sized fallback probe buffer bound into the surface pass's
-/// `@group(8)` on any view without a resident
+/// merged `@group(6)` on any view without a resident
 /// [`ViewWorldSpaceGi`](crate::shading::ViewWorldSpaceGi).
 ///
 /// Built once at `RenderStartup` by [`init_water_world_space_gi_fallback`];

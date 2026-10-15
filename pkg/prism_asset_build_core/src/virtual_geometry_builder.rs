@@ -1,11 +1,11 @@
-//! Deterministic baseline static-mesh clusterizer and page packer.
+//! Deterministic static-mesh clusterizer and page packer.
 //!
-//! This is the first executable M2 builder slice. It preserves authored
-//! triangle order, respects material submesh boundaries, enforces the fixed
-//! cluster limits, and emits real page payloads. It intentionally does not
-//! claim geometric simplification or a multi-level LOD DAG yet: each emitted
-//! cluster is a leaf/root, so the result is a correct streamed partition that
-//! later simplification passes can refine without changing the asset ABI.
+//! It preserves authored triangle order, respects material submesh ownership,
+//! enforces the fixed cluster limits, and emits versioned page payloads. Each
+//! emitted cluster is a leaf/root in the asset produced by this function. QEM
+//! simplification and LOD selection are supplied by
+//! [`crate::virtual_geometry_lod`], which builds independent versioned assets
+//! over the same page ABI.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -27,7 +27,7 @@ pub use crate::virtual_geometry_payload::{
     STATIC_CLUSTER_PAYLOAD_MAGIC, STATIC_CLUSTER_PAYLOAD_VERSION,
 };
 
-/// Fixed limits and page policy for the baseline clusterizer.
+/// Fixed limits and page policy for the static clusterizer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StaticClusterBuildSettings {
     /// Physical page size in bytes.
@@ -56,12 +56,17 @@ impl Default for StaticClusterBuildSettings {
 pub enum StaticClusterBuildError {
     /// The source mesh failed its own upload contract.
     InvalidMesh(MeshError),
-    /// Only indexed triangle lists are supported by this baseline builder.
+    /// Only indexed triangle lists are supported by this static builder.
     UnsupportedTopology(PrimitiveTopology),
     /// A source mesh has no index buffer.
     RequiresIndices,
     /// The source has no finite Float32x3 position attribute.
     MissingPositions,
+    /// CLST v2 stores positions and local triangle indices only.
+    UnsupportedAttribute {
+        /// First unsupported authored semantic in shader-location order.
+        name: &'static str,
+    },
     /// Settings violate the runtime ABI limits.
     InvalidSettings(&'static str),
     /// A single cluster cannot fit within one page.
@@ -99,6 +104,10 @@ impl core::fmt::Display for StaticClusterBuildError {
             Self::MissingPositions => {
                 f.write_str("mesh has no finite Float32x3 position attribute")
             }
+            Self::UnsupportedAttribute { name } => write!(
+                f,
+                "CLST v2 accepts position-only geometry; unsupported attribute {name}"
+            ),
             Self::InvalidSettings(field) => write!(f, "invalid cluster build setting {field}"),
             Self::ClusterTooLarge { bytes, page_size } => {
                 write!(
@@ -144,6 +153,14 @@ pub fn build_static_virtual_geometry(
         .find(|(attribute, _)| attribute.name == POSITION_ATTRIBUTE)
         .and_then(|(_, values)| values.as_positions())
         .ok_or(StaticClusterBuildError::MissingPositions)?;
+    if let Some((attribute, _)) = mesh
+        .attributes()
+        .find(|(attribute, _)| attribute.name != POSITION_ATTRIBUTE)
+    {
+        return Err(StaticClusterBuildError::UnsupportedAttribute {
+            name: attribute.name,
+        });
+    }
     if positions
         .iter()
         .any(|position| !position.iter().all(|value| value.is_finite()))
@@ -694,6 +711,20 @@ mod tests {
         assert_eq!(
             build_static_virtual_geometry(1, &non_indexed, StaticClusterBuildSettings::default()),
             Err(StaticClusterBuildError::RequiresIndices)
+        );
+    }
+
+    #[test]
+    fn clusterizer_rejects_attributes_the_payload_cannot_preserve() {
+        let source = mesh(1)
+            .with_attribute(
+                MeshVertexAttribute::new("Vertex_Uv0", VertexFormat::Float32x2, 1),
+                VertexAttributeValues::Float32x2(vec![[0.0, 0.0]; 3]),
+            )
+            .expect("UV count matches positions");
+        assert_eq!(
+            build_static_virtual_geometry(1, &source, StaticClusterBuildSettings::default()),
+            Err(StaticClusterBuildError::UnsupportedAttribute { name: "Vertex_Uv0" })
         );
     }
 }

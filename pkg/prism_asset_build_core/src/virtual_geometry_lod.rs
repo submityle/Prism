@@ -60,12 +60,11 @@ impl StaticVirtualGeometryLodSet {
             return Err(StaticVirtualGeometryLodError::InvalidTarget);
         }
         levels.sort_by_key(|level| level.level);
-        if levels.windows(2).any(|pair| {
-            pair[0].level == pair[1].level
-                || !pair[0].vertex_error.is_finite()
-                || !pair[1].vertex_error.is_finite()
-                || pair[1].vertex_error < pair[0].vertex_error
-        }) {
+        if levels.iter().any(|level| !level.vertex_error.is_finite())
+            || levels.windows(2).any(|pair| {
+                pair[0].level == pair[1].level || pair[1].vertex_error < pair[0].vertex_error
+            })
+        {
             return Err(StaticVirtualGeometryLodError::InvalidTarget);
         }
         let metrics = levels
@@ -125,8 +124,11 @@ pub enum StaticVirtualGeometryLodError {
     InvalidMesh(MeshError),
     /// The source must have indexed triangle-list topology.
     UnsupportedSource,
-    /// Reserved for callers using an older boundary policy.
-    MaterialSubmeshesUnsupported,
+    /// CLST v2 cannot preserve this authored vertex semantic.
+    UnsupportedAttribute {
+        /// First unsupported semantic in shader-location order.
+        name: &'static str,
+    },
     /// The target is zero or greater than the source triangle count.
     InvalidTarget,
     /// Existing QEM decimator failure.
@@ -144,9 +146,10 @@ impl core::fmt::Display for StaticVirtualGeometryLodError {
             Self::UnsupportedSource => {
                 f.write_str("LOD source must be indexed TriangleList geometry")
             }
-            Self::MaterialSubmeshesUnsupported => {
-                f.write_str("LOD simplification cannot cross material submesh boundaries")
-            }
+            Self::UnsupportedAttribute { name } => write!(
+                f,
+                "CLST v2 LOD input must be position-only; unsupported attribute {name}"
+            ),
             Self::InvalidTarget => f.write_str("LOD target is outside the source triangle range"),
             Self::Decimation(error) => write!(f, "QEM decimation failed: {error}"),
             Self::Build(error) => write!(f, "LOD page build failed: {error}"),
@@ -169,6 +172,14 @@ pub fn build_static_virtual_geometry_lod_chain(
     }
     mesh.validate()
         .map_err(StaticVirtualGeometryLodError::InvalidMesh)?;
+    if let Some((attribute, _)) = mesh
+        .attributes()
+        .find(|(attribute, _)| attribute.name != POSITION_ATTRIBUTE)
+    {
+        return Err(StaticVirtualGeometryLodError::UnsupportedAttribute {
+            name: attribute.name,
+        });
+    }
     if targets.is_empty() {
         return Err(StaticVirtualGeometryLodError::InvalidTarget);
     }
@@ -446,9 +457,26 @@ mod tests {
     use super::*;
     use prism_mesh::primitives::cube;
 
+    fn position_only_cube() -> Mesh {
+        let source = cube([2.0, 2.0, 2.0]).expect("cube");
+        Mesh::new(PrimitiveTopology::TriangleList)
+            .with_attribute(
+                prism_mesh::MeshVertexAttribute::new(
+                    POSITION_ATTRIBUTE,
+                    VertexFormat::Float32x3,
+                    0,
+                ),
+                prism_mesh::VertexAttributeValues::Float32x3(
+                    positions(&source).expect("cube positions").to_vec(),
+                ),
+            )
+            .expect("positions fit")
+            .indexed(source.indices().expect("cube indices").clone())
+    }
+
     #[test]
     fn qem_chain_builds_real_reduced_assets_with_errors() {
-        let source = cube([2.0, 2.0, 2.0]).expect("cube");
+        let source = position_only_cube();
         let result = build_static_virtual_geometry_lod_chain(
             21,
             &source,
@@ -474,7 +502,7 @@ mod tests {
 
     #[test]
     fn qem_chain_simplifies_material_partitions_independently() {
-        let mut source = cube([2.0, 2.0, 2.0]).expect("cube");
+        let mut source = position_only_cube();
         source = source.submeshed(vec![
             prism_mesh::SubMesh::new(0, 0..18),
             prism_mesh::SubMesh::new(1, 18..36),
@@ -501,7 +529,7 @@ mod tests {
 
     #[test]
     fn lod_set_uses_shared_hysteresis_and_prefetch_selection() {
-        let source = cube([2.0, 2.0, 2.0]).expect("cube");
+        let source = position_only_cube();
         let levels = build_static_virtual_geometry_lod_chain(
             21,
             &source,
@@ -526,5 +554,38 @@ mod tests {
         assert!(pick.selection.prefetch_level <= pick.selection.level);
         assert_eq!(pick.display.level, pick.selection.level);
         assert_eq!(pick.prefetch.level, pick.selection.prefetch_level);
+    }
+
+    #[test]
+    fn lod_set_rejects_a_non_finite_single_level_error() {
+        let source = position_only_cube();
+        let mut levels = build_static_virtual_geometry_lod_chain(
+            21,
+            &source,
+            StaticClusterBuildSettings::default(),
+            &[12],
+        )
+        .expect("LOD chain");
+        levels[0].vertex_error = f32::NAN;
+        assert_eq!(
+            StaticVirtualGeometryLodSet::new(levels),
+            Err(StaticVirtualGeometryLodError::InvalidTarget)
+        );
+    }
+
+    #[test]
+    fn qem_chain_rejects_attributes_it_cannot_serialize() {
+        let source = cube([2.0, 2.0, 2.0]).expect("cube");
+        assert_eq!(
+            build_static_virtual_geometry_lod_chain(
+                21,
+                &source,
+                StaticClusterBuildSettings::default(),
+                &[4],
+            ),
+            Err(StaticVirtualGeometryLodError::UnsupportedAttribute {
+                name: "Vertex_Normal"
+            })
+        );
     }
 }

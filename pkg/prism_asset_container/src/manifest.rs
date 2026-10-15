@@ -225,6 +225,73 @@ impl RuntimeManifest {
         self.routes.get(&guid)
     }
 
+    /// Applies a delta manifest to this snapshot and removes the supplied
+    /// logical routes from the base revision.
+    ///
+    /// The operation is transactional: if the patch introduces an invalid
+    /// dependency, container identity, or route, the receiver is unchanged.
+    /// Patch routes are applied after removals, so a later patch may restore a
+    /// GUID that an older patch tombstoned.
+    pub fn apply_patch(
+        &mut self,
+        patch: &RuntimeManifest,
+        removed_guids: &[StableGuid],
+    ) -> Result<(), ManifestError> {
+        let mut next = self.clone();
+        let mut previous = None;
+        for guid in removed_guids {
+            if guid.is_nil() || previous.is_some_and(|previous| previous >= *guid) {
+                return Err(ManifestError::InvalidFormat);
+            }
+            previous = Some(*guid);
+            next.routes.remove(guid);
+            next.metadata.remove(guid);
+        }
+
+        for (name, identity) in &patch.containers {
+            if let Some(existing) = next.containers.get(name)
+                && existing != identity
+            {
+                return Err(ManifestError::ContainerIdentityConflict(name.clone()));
+            }
+            next.containers.insert(name.clone(), *identity);
+        }
+
+        for (guid, route) in &patch.routes {
+            let metadata = patch
+                .metadata
+                .get(guid)
+                .ok_or(ManifestError::InvalidFormat)?;
+            validate_name(&route.container_name)?;
+            validate_metadata(metadata)?;
+            if !next.containers.contains_key(&route.container_name) {
+                return Err(ManifestError::MissingContainerIdentity(
+                    route.container_name.clone(),
+                ));
+            }
+            next.routes.insert(*guid, route.clone());
+            next.metadata.insert(*guid, metadata.clone());
+        }
+
+        let referenced = next
+            .routes
+            .values()
+            .map(|route| route.container_name.as_str())
+            .collect::<BTreeSet<_>>();
+        next.containers
+            .retain(|name, _| referenced.contains(name.as_str()));
+        validate_dependency_graph(&next.routes, &next.metadata)?;
+        for route in next.routes.values() {
+            if !next.containers.contains_key(&route.container_name) {
+                return Err(ManifestError::MissingContainerIdentity(
+                    route.container_name.clone(),
+                ));
+            }
+        }
+        *self = next;
+        Ok(())
+    }
+
     /// Iterates routes in canonical `StableGuid` order.
     pub fn routes(&self) -> impl Iterator<Item = &ManifestRoute> {
         self.routes.values()

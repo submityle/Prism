@@ -2,10 +2,9 @@
 //!
 //! [`GpuContext`] wraps the four long-lived `wgpu` handles (`Instance`,
 //! `Adapter`, `Device`, `Queue`) that every kernel dispatch needs. Acquisition
-//! is deliberately *best-effort*: [`GpuContext::try_headless`] returns [`None`]
-//! on a host with no usable adapter (some `CI` images) so a test suite can skip
-//! gracefully rather than fail, while still exercising the full dispatch on any
-//! machine with a real device such as an Apple `M`-series `GPU`.
+//! is deliberately best-effort: [`GpuContext::try_headless`] returns [`None`]
+//! on a host with no usable adapter so a test suite can skip gracefully.
+//! Setting `PRISM_REQUIRE_GPU=1` turns that absence into a test failure.
 //!
 //! This is a deliberate local copy of the identical helper in
 //! `prism_physics_gpu::context`: each `*_gpu` twin owns its own tiny device
@@ -75,7 +74,15 @@ impl GpuContext {
     /// skip `GPU` work instead of panicking on a host without a usable adapter.
     #[must_use]
     pub fn try_headless() -> Option<GpuContext> {
-        Self::probe().ok()
+        match Self::probe() {
+            Ok(context) => Some(context),
+            Err(error) => {
+                if std::env::var_os("PRISM_REQUIRE_GPU").is_some() {
+                    panic!("PRISM_REQUIRE_GPU is set but no usable GPU was found: {error}");
+                }
+                None
+            }
+        }
     }
 
     /// Acquires a headless compute device and preserves the concrete failure

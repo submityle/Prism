@@ -18,7 +18,7 @@ struct AuxiliaryMerge {
 @group(0) @binding(0) var<storage, read_write> left: array<ResponseOutput>;
 @group(0) @binding(1) var<storage, read> right: array<ResponseOutput>;
 @group(0) @binding(2) var<storage, read> controls: array<CompositionControl>;
-@group(0) @binding(3) var<storage, read_write> auxiliary: array<AuxiliaryMerge>;
+@group(0) @binding(3) var<storage, read> water_coverage: array<u32>;
 
 fn linear(a: f32, b: f32, mask: f32) -> f32 {
     if mask == 0.0 { return a; }
@@ -29,8 +29,14 @@ fn linear(a: f32, b: f32, mask: f32) -> f32 {
 @compute @workgroup_size(64)
 fn compose_responses(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
-    if i >= arrayLength(&controls) || i >= arrayLength(&left) || i >= arrayLength(&right) { return; }
+    if i >= arrayLength(&controls) || i >= arrayLength(&left) || i >= arrayLength(&right)
+        || i >= arrayLength(&water_coverage) { return; }
     let c = controls[i];
+    // Neutral controls plus zero coverage are the ordinary single-arm path.
+    // Skipping here keeps the resident compositor from rewriting untouched
+    // pixels while making the water producer's coverage sidecar an actual
+    // input to the composition contract.
+    if c.channels == 0u && water_coverage[i] == 0u { return; }
     var out = left[i];
     let b = right[i];
     for (var channel = 0u; channel < 5u; channel++) {
@@ -51,6 +57,11 @@ fn compose_responses(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     left[i] = out;
 }
+
+// Auxiliary has its own entry-point-specific auto layout. Keep it at binding 4
+// so the radiance entry can reserve binding 3 for the water coverage sidecar
+// without creating a cross-entry binding collision.
+@group(0) @binding(4) var<storage, read_write> auxiliary: array<AuxiliaryMerge>;
 
 @compute @workgroup_size(64)
 fn compose_auxiliary(@builtin(global_invocation_id) id: vec3<u32>) {

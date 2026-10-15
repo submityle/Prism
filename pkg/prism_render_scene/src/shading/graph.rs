@@ -164,6 +164,11 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         CompositionPlane::Auxiliary.graph_name(),
         ResourceLifetime::Imported,
     );
+    let water_coverage = resource(
+        &mut graph,
+        CompositionPlane::WaterCoverage.graph_name(),
+        ResourceLifetime::Imported,
+    );
     let resolve = graph.add_pass(PassDescriptor {
         name: "shading_resolve".into(),
         queue: QueueClass::Compute,
@@ -183,6 +188,24 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         ],
         depends_on: vec![shade],
     });
+    // Water is a real response producer, not a consumer of a completed
+    // composition. It rasterizes after MainPass in Core3d, reads the resolved
+    // scene color/depth for refraction and depth testing, and overwrites the
+    // response planes for the pixels it covers. The resident composition pass
+    // must therefore follow this producer.
+    let water = graph.add_pass(PassDescriptor {
+        name: "water_surface_raster".into(),
+        queue: QueueClass::Graphics,
+        accesses: vec![
+            access(depth, AccessKind::DepthAttachment),
+            access(scene_color, AccessKind::SampledRead),
+            access(left, AccessKind::StorageWrite),
+            access(right, AccessKind::StorageWrite),
+            access(controls, AccessKind::StorageWrite),
+            access(water_coverage, AccessKind::StorageWrite),
+        ],
+        depends_on: vec![resolve],
+    });
     graph.add_pass(PassDescriptor {
         name: COMPOSITION_PASS_NAME.into(),
         queue: QueueClass::Compute,
@@ -191,11 +214,12 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
             access(right, AccessKind::StorageRead),
             access(controls, AccessKind::StorageRead),
             access(auxiliary, AccessKind::StorageWrite),
+            access(water_coverage, AccessKind::StorageRead),
             access(visibility_ids, AccessKind::SampledRead),
             access(visibility_metadata, AccessKind::SampledRead),
             access(scene_color, AccessKind::StorageWrite),
         ],
-        depends_on: vec![resolve],
+        depends_on: vec![water],
     });
     append_post_process_passes(&mut graph)
         .expect("generated shared post-process declarations must be valid");
@@ -297,8 +321,11 @@ mod tests {
         assert!(has_barrier("texel_space_shade_atlas", 4, 5));
         assert!(has_barrier("shading_indirect_dispatch", 2, 5));
         assert!(has_barrier("response_left", 5, 6));
-        assert_eq!(graph.passes()[6].name, COMPOSITION_PASS_NAME);
-        assert_eq!(graph.passes()[7].name, "post_exposure");
+        assert!(has_barrier("response_left", 6, 7));
+        assert!(has_barrier("water_coverage", 6, 7));
+        assert_eq!(graph.passes()[6].name, "water_surface_raster");
+        assert_eq!(graph.passes()[7].name, COMPOSITION_PASS_NAME);
+        assert_eq!(graph.passes()[8].name, "post_exposure");
         assert_eq!(graph.passes().last().unwrap().name, "post_upscale");
     }
 }

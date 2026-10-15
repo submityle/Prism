@@ -85,6 +85,20 @@ struct WaterSurfaceView {
 // just camera reprojection.
 @group(0) @binding(7) var<storage, read> previous_displacement: array<vec4<f32>>;
 
+struct ResponseOutput {
+    words: array<f32, 16>,
+}
+struct CompositionControl {
+    mask: f32,
+    channels: u32,
+    shared_alpha: f32,
+    alpha_rule: u32,
+}
+@group(0) @binding(8) var<storage, read_write> response_left: array<ResponseOutput>;
+@group(0) @binding(9) var<storage, read_write> response_right: array<ResponseOutput>;
+@group(0) @binding(10) var<storage, read_write> response_controls: array<CompositionControl>;
+@group(0) @binding(11) var<storage, read_write> water_coverage: array<u32>;
+
 // Shared engine lighting base (`@group(1)`): byte-identical bindings to the
 // opaque `shading_resolve` path. All analytic directional + punctual lights
 // plus the image-based `SH` environment, so every §5 water response consumes
@@ -662,7 +676,7 @@ struct WaterGtaoConfig {
 
 @group(6) @binding(0) var<uniform> gtao_cfg: WaterGtaoConfig;
 
-// Screen-space one-bounce indirect-diffuse base (`@group(7)`): a single config
+// Screen-space one-bounce indirect-diffuse base (`@group(6) @binding(1)`): a single config
 // uniform. The transparent water surface gathers a single bounce of near-field
 // indirect diffuse out of the already-composited `@group(0)` `scene_color`
 // along the `GTAO` bent normal, marched over the shared reverse-Z Hi-Z pyramid
@@ -680,11 +694,11 @@ struct WaterSsgiConfig {
     _pad1: u32,
 }
 
-@group(7) @binding(0) var<uniform> ssgi_cfg: WaterSsgiConfig;
+@group(6) @binding(1) var<uniform> ssgi_cfg: WaterSsgiConfig;
 
-// World-space (`Lumen`-style) GI base (`@group(8)`): the engine's resident
+// World-space (`Lumen`-style) GI base (`@group(6) @binding(2..=3)`): the engine's resident
 // screen-probe field plus the per-view gather config. Where `SSGI`
-// (`@group(7)`) only sees the composited `scene_color`, this gathers the four
+// The SSGI slot only sees the composited `scene_color`, while this gathers the four
 // screen probes around the shading pixel and blends their L1 `SH` irradiance,
 // picking up far-field indirect light whose source is off-screen or behind the
 // camera. The `wsgi_`-prefixed twins below match the opaque golden
@@ -721,10 +735,10 @@ struct WaterWorldSpaceGiConfig {
     _pad0: u32,
 }
 
-@group(8) @binding(0) var<storage, read> wsgi_probes: array<WaterWorldSpaceGiProbe>;
-@group(8) @binding(1) var<uniform> wsgi_cfg: WaterWorldSpaceGiConfig;
+@group(6) @binding(2) var<storage, read> wsgi_probes: array<WaterWorldSpaceGiProbe>;
+@group(6) @binding(3) var<uniform> wsgi_cfg: WaterWorldSpaceGiConfig;
 
-// Projected caustics base (`@group(9)`): the light-space caustic-intensity
+// Projected caustics base (`@group(6) @binding(4..=5)`): the light-space caustic-intensity
 // texture the `water_caustics_project` kernel fills every frame plus the
 // per-body config. The `r32float` texture is not filterable, so the fragment
 // reads it with an integer `textureLoad` at the surface-simulation `UV` the
@@ -739,8 +753,8 @@ struct WaterCausticsConfig {
     _pad1: u32,
 }
 
-@group(9) @binding(0) var caustics_tex: texture_2d<f32>;
-@group(9) @binding(1) var<uniform> caustics_cfg: WaterCausticsConfig;
+@group(6) @binding(4) var caustics_tex: texture_2d<f32>;
+@group(6) @binding(5) var<uniform> caustics_cfg: WaterCausticsConfig;
 
 // Sample this fragment's projected caustic gain from the light-space intensity
 // texture. Returns zero (no focused light) when caustics are disabled or the
@@ -1314,7 +1328,7 @@ fn water_ssgi_gather(world_position: vec3<f32>, bent_normal_view: vec3<f32>, alb
     return ssgi_indirect_diffuse(mean_radiance, albedo, ssgi_cfg.intensity);
 }
 
-// --- World-space (`Lumen`-style) GI gather twins (`@group(8)`) ---
+// --- World-space (`Lumen`-style) GI gather twins (`@group(6)`) ---
 // Arm-for-arm with the opaque golden `world_space_gi_resolve.wesl` /
 // `prism_render_shading::gi::world_space` resolve, prefixed `water_wsgi_` so
 // the water surface consumes the same resident screen-probe field. Probe `SH`
@@ -1616,7 +1630,7 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
     let screen_uv = in.clip_position.xy / max(view.viewport.xy, vec2<f32>(1.0));
     let eye_depth = length(in.world_position - view.world_camera_position.xyz);
     let refracted_lit = apply_underwater_volume(refracted_raw, screen_uv, eye_depth);
-    // Add the projected focused-sunlight caustics (`@group(9)`): the
+    // Add the projected focused-sunlight caustics (`@group(6)`): the
     // `water_caustics_project` kernel folded the refractive `Jacobian` into a
     // light-space intensity this frame; brighten the already medium-attenuated
     // transmission with it, tinted by the water colour. A disabled or
@@ -1632,16 +1646,6 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
     let body = mix(refracted, lit + refracted * (1.0 - fresnel), fresnel);
     let color = mix(body, vec3<f32>(1.0), in.foam * view.surface_params.w);
     return vec4<f32>(color * alpha, alpha);
-}
-
-@fragment
-fn water_surface_fs_pbr(in: VertexOutput) -> FragmentOutput {
-    return FragmentOutput(shade_pbr_core(in), water_motion_vector(in));
-}
-
-@fragment
-fn water_surface_fs_npr(in: VertexOutput) -> FragmentOutput {
-    return FragmentOutput(shade_npr_core(in), water_motion_vector(in));
 }
 
 fn shade_npr_core(in: VertexOutput) -> vec4<f32> {
@@ -1703,6 +1707,16 @@ fn water_hybrid_reactive_mask(foam: f32, motion: vec2<f32>, transparency: f32) -
 // Apply the orthogonal stylized layer after the PBR/NPR region blend. The
 // overlay opacity is therefore an observable output control, not a value that
 // is merely carried through the response record.
+fn water_hybrid_overlay_factor(
+    blended_alpha: f32,
+    weights: WaterHybridWeights,
+    foam: f32,
+    motion: vec2<f32>,
+) -> f32 {
+    let reactive = water_hybrid_reactive_mask(foam, motion, blended_alpha);
+    return clamp(weights.overlay_opacity * max(reactive, 0.25), 0.0, 1.0);
+}
+
 fn water_hybrid_apply_overlay(
     blended: vec4<f32>,
     npr: vec4<f32>,
@@ -1710,9 +1724,52 @@ fn water_hybrid_apply_overlay(
     foam: f32,
     motion: vec2<f32>,
 ) -> vec4<f32> {
-    let reactive = water_hybrid_reactive_mask(foam, motion, blended.a);
-    let overlay = clamp(weights.overlay_opacity * max(reactive, 0.25), 0.0, 1.0);
+    let overlay = water_hybrid_overlay_factor(blended.a, weights, foam, motion);
     return mix(blended, npr, overlay);
+}
+
+fn response_value(color: vec4<f32>) -> ResponseOutput {
+    return ResponseOutput(array<f32, 16>(
+        color.r, color.g, color.b,
+        0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0,
+        color.a,
+    ));
+}
+
+// The raster producer writes all water response plans into the resident
+// response allocation. A coverage bit is the ownership signal: the compositor
+// ignores stale response values outside water geometry, so no full-view clears
+// of the 64-byte planes are required.
+fn write_response_planes(in: VertexOutput, left: vec4<f32>, right: vec4<f32>, mask: f32) {
+    let pixel = u32(in.clip_position.y) * u32(max(view.viewport.x, 1.0))
+        + u32(in.clip_position.x);
+    if pixel >= arrayLength(&response_left)
+        || pixel >= arrayLength(&response_right)
+        || pixel >= arrayLength(&response_controls)
+        || pixel >= arrayLength(&water_coverage) {
+        return;
+    }
+    response_left[pixel] = response_value(left);
+    response_right[pixel] = response_value(right);
+    response_controls[pixel] = CompositionControl(mask, 1u, left.a, 0u);
+    water_coverage[pixel] = 1u;
+}
+
+@fragment
+fn water_surface_fs_pbr(in: VertexOutput) -> FragmentOutput {
+    let pbr = shade_pbr_core(in);
+    write_response_planes(in, pbr, pbr, 0.0);
+    return FragmentOutput(pbr, water_motion_vector(in));
+}
+
+@fragment
+fn water_surface_fs_npr(in: VertexOutput) -> FragmentOutput {
+    let npr = shade_npr_core(in);
+    write_response_planes(in, npr, npr, 0.0);
+    return FragmentOutput(npr, water_motion_vector(in));
 }
 
 @fragment
@@ -1722,6 +1779,7 @@ fn water_surface_fs_custom(in: VertexOutput) -> FragmentOutput {
     let pbr = shade_pbr_core(in);
     let tint = view.water_color.rgb * view.style_params.z;
     let color = vec4<f32>(pbr.rgb + tint * pbr.a, pbr.a);
+    write_response_planes(in, color, color, 0.0);
     return FragmentOutput(color, water_motion_vector(in));
 }
 
@@ -1732,6 +1790,12 @@ fn water_surface_fs_hybrid(in: VertexOutput) -> FragmentOutput {
     let motion = water_motion_vector(in);
     let weights = water_hybrid_weight_contract(in.foam, view.style_params.w, view.style_params.w);
     let blended = mix(pbr, npr, weights.npr_weight);
+    let overlay = water_hybrid_overlay_factor(blended.a, weights, in.foam, motion);
     let color = water_hybrid_apply_overlay(blended, npr, weights, in.foam, motion);
+    // Encode the two-stage hybrid as one resident composition: the first arm
+    // is the PBR/NPR region blend and the second arm is the stylized overlay.
+    // This makes the post-raster HDR export equal to the legacy MRT colour
+    // while retaining the typed response producer contract.
+    write_response_planes(in, blended, npr, overlay);
     return FragmentOutput(color, motion);
 }

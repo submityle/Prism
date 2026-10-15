@@ -19,5 +19,9 @@ prism_render_driver = { path = "../prism_render_driver" }
 rustix = { version = "1.1.5", features = ["fs"] }
 tempfile = "3.27"
 
+[[bench]]
+name = "mesh_virtual_geometry"
+harness = false
+
 [lints]
 workspace = true

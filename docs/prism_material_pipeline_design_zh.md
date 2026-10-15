@@ -515,7 +515,7 @@ v2 文档 §6.2 描述的"四档子系统注册表"是**文档产物，不是代
 4. **置换爆炸的治理是工程问题，不是架构问题**：内容哈希去重 + archetype 聚类 + 按需异步编译 + 全瓣 über 回退，**不设全局硬顶**（`refactor_zh` §8.4）。
 5. **同一能力在多处并存**是当前最大的结构性风险：两套 PSO 缓存（§9.2 ③）、两套帧图（§9.2 ④）、TAA/upscale 双驻（§5.2）、OIT 三驻（§5.4）。收口必须按"一个模型 + 一个键 + 两个层级"推进，禁止再造第三套。
 6. **Bevy 耦合边界**：迁移后每个 pass 仍是 ECS 系统，只把**顺序**改成声明式；`plugin.rs` 的 20 元组上限是当前被迫的 workaround 来源。
-7. **验证边界**：(a) 真机 GPU 对拍需要 `PRISM_REQUIRE_GPU=1` 且主机提供真实 adapter；本轮 Apple M2 Metal 已通过 response composition 严格 readback，水面 raster 因 `max_bind_groups=8 < 10` 严格失败，其余未逐项运行的 GPU target 仍不能写成通过；(b) `shading_resolve.wesl` 的有限 shading-class switch 已由 `shading_resolve_switch_covers_every_registered_shading_class` 机械门禁覆盖；(c) `visibility_raster.wesl` 已纳入 `tests/material_header_abi.rs` 的六份 `MaterialHeader` 镜像清单，字段顺序与 Rust ABI 逐字校验。
+7. **验证边界**：(a) 真机 GPU 对拍需要 `PRISM_REQUIRE_GPU=1` 且主机提供真实 adapter；2026-10-15 Apple M2 Metal 已通过 response composition 严格 readback 与水面 raster 严格 shader/device gate，水面 raster 采用 7 个 bind groups，满足设备 `max_bind_groups=8`；其余未逐项运行的 GPU target 仍不能写成通过；(b) `shading_resolve.wesl` 的有限 shading-class switch 已由 `shading_resolve_switch_covers_every_registered_shading_class` 机械门禁覆盖；(c) `visibility_raster.wesl` 已纳入 `tests/material_header_abi.rs` 的六份 `MaterialHeader` 镜像清单，字段顺序与 Rust ABI 逐字校验。
 8. **生成物门禁已恢复为绿色**：2026-10-15 执行 `cargo run -p prism_material_schema --bin prism-material-codegen --offline -- write` 重新生成 `surface_layout.rs` 与 `material_unpack.wesl`；`codegen_freshness` 全部通过，生成物不再依赖手工格式修补（`prism_material_pipeline_refactor_verification_zh.md:38,50-67`）。
 
 ## 11. 落地路线图（状态以 2026-10-15 工作树为准）

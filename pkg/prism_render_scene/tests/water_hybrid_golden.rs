@@ -26,7 +26,9 @@ use wgpu::{
 };
 
 const RASTER_UUID: u128 = 0x5052_4953_4d5f_5741_5445_525f_4859_4201;
-const REQUIRED_BIND_GROUPS: u32 = 10;
+// The raster pipeline uses groups 0..=6. Keep this gate tied to the actual
+// descriptor count so Apple Metal's eight-group limit remains enforced.
+const REQUIRED_BIND_GROUPS: u32 = 7;
 
 fn load_source(
     _: &(),

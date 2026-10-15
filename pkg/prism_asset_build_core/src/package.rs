@@ -294,6 +294,27 @@ pub fn package_runtime_with_options(
     request: PackageRequest<'_>,
     options: PackageOptions,
 ) -> Result<RuntimePackage, PackageError> {
+    package_runtime_impl(request, options, None)
+}
+
+/// Packages only the selected assets while retaining the complete manifest as
+/// dependency context. This is the primitive used by runtime Patch creation:
+/// unchanged artifacts are not read from CAS or emitted into patch containers,
+/// but changed routes may still depend on unchanged base routes.
+pub fn package_runtime_selected_with_options(
+    request: PackageRequest<'_>,
+    options: PackageOptions,
+    selected_assets: impl IntoIterator<Item = AssetId>,
+) -> Result<RuntimePackage, PackageError> {
+    let selected_assets = selected_assets.into_iter().collect::<BTreeSet<_>>();
+    package_runtime_impl(request, options, Some(selected_assets))
+}
+
+fn package_runtime_impl(
+    request: PackageRequest<'_>,
+    options: PackageOptions,
+    selected_assets: Option<BTreeSet<AssetId>>,
+) -> Result<RuntimePackage, PackageError> {
     let PackageRequest {
         manifest,
         cas,
@@ -329,9 +350,14 @@ pub fn package_runtime_with_options(
         }
     }
 
-    for asset in manifest.entries.keys().copied() {
-        if !by_asset.contains_key(&asset) {
-            return Err(PackageError::MissingMapping { asset });
+    let selected_assets =
+        selected_assets.unwrap_or_else(|| manifest.entries.keys().copied().collect());
+    for asset in &selected_assets {
+        if !manifest.entries.contains_key(asset) {
+            return Err(PackageError::UnknownAsset { asset: *asset });
+        }
+        if !by_asset.contains_key(asset) {
+            return Err(PackageError::MissingMapping { asset: *asset });
         }
     }
 
@@ -423,10 +449,14 @@ pub fn package_runtime_with_options(
     let mut writers = BTreeMap::<String, ContainerWriter>::new();
     let mut chunk_inputs = BTreeMap::<String, Vec<ChunkInput>>::new();
     let mut payload_cache = BTreeMap::<ContentHash, Vec<u8>>::new();
-    for (asset, descriptor) in &manifest.entries {
+    for asset in &selected_assets {
+        let descriptor = manifest
+            .entries
+            .get(asset)
+            .expect("selected assets were validated above");
         let mapping = by_asset
             .get(asset)
-            .expect("all manifest assets were checked above");
+            .expect("selected assets were checked above");
         let payload = if let Some(payload) = payload_cache.get(&descriptor.content_hash) {
             payload.clone()
         } else {
@@ -551,7 +581,10 @@ pub fn package_runtime_with_options(
     // fixed. This prevents a manifest from accepting a same-named replacement
     // whose length, content hash, or generation differs from the package.
     let mut runtime_manifest = RuntimeManifest::new();
-    for mapping in by_asset.values() {
+    for asset in &selected_assets {
+        let mapping = by_asset
+            .get(asset)
+            .expect("selected assets were checked above");
         let descriptor = manifest
             .entries
             .get(&mapping.asset)
@@ -624,9 +657,17 @@ pub fn package_runtime_with_options(
         .map_err(PackageError::RuntimeManifest)?;
     Ok(RuntimePackage {
         source_manifest_hash: ContentHash::digest(&manifest.canonical_bytes()),
-        asset_guids: by_asset
+        asset_guids: selected_assets
             .iter()
-            .map(|(asset, mapping)| (*asset, mapping.guid))
+            .map(|asset| {
+                (
+                    *asset,
+                    by_asset
+                        .get(asset)
+                        .expect("selected assets were checked above")
+                        .guid,
+                )
+            })
             .collect(),
         containers,
         runtime_manifest,

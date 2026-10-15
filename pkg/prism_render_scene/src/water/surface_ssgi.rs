@@ -1,5 +1,5 @@
-//! The water-surface pass's **screen-space global-illumination** `@group(7)`
-//! plumbing: the `CPU` half that lets the §5 image-based ambient term pick up a
+//! The water-surface pass's **screen-space global-illumination** slot in merged
+//! `@group(6)` plumbing: the `CPU` half that lets the §5 image-based ambient term pick up a
 //! single bounce of *near-field* indirect diffuse, gathered from the already
 //! composited opaque `scene_color` along the surface's `GTAO` bent normal.
 //!
@@ -29,8 +29,8 @@
 //! required.
 //!
 //! The sibling [`super::surface_pipeline`] slice owns the raster pipelines; this
-//! slice adds the eighth (`@group(7)`) bind group, built once per view by
-//! [`super::surface_draw`].
+//! slice supplies one slot in the merged lighting bind group, built once per
+//! view by [`super::surface_draw`].
 
 use bevy_material::bind_group_layout_entries::{
     binding_types::uniform_buffer_sized, BindGroupLayoutEntries,
@@ -39,7 +39,7 @@ use bevy_render::render_resource::ShaderStages;
 use bytemuck::{Pod, Zeroable};
 
 /// `GPU`-side mirror of the shader's `WaterSsgiConfig` uniform (the water
-/// `@group(7) @binding(0)` block).
+/// merged `@group(6) @binding(1)` block).
 ///
 /// Layout matches the `WGSL` struct byte-for-byte: four `f32` tunables precede
 /// two `u32` controls and two trailing `u32` pads, so the block is a 32-byte
@@ -116,7 +116,7 @@ impl GpuWaterSsgiConfig {
     }
 }
 
-/// Builds the water-surface `@group(7)` `SSGI` layout entries (one binding): the
+/// Builds the `SSGI` slot of the merged water-surface `@group(6)` layout (one binding): the
 /// [`GpuWaterSsgiConfig`] uniform. Declared [`ShaderStages::FRAGMENT`]: the
 /// water surface runs the one-bounce gather in its fragment stage, reusing the
 /// `@group(0)` `scene_color` grab and the `@group(3)` Hi-Z pyramid, so it needs

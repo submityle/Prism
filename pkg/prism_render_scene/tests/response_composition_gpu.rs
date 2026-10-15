@@ -6,7 +6,8 @@ use bevy_render::renderer::RenderDevice;
 use core::mem::size_of;
 use prism_render_material::{BlendDomain, ChannelMask, MaterialRenderClass};
 use prism_render_scene::response_gpu::{
-    GpuAuxiliaryMerge, GpuCompositionJob, GpuResponseOutput, ResponseCompositionPipelines,
+    GpuAuxiliaryMerge, GpuCompositionJob, GpuResponseOutput, GpuWaterCoverage,
+    ResponseCompositionPipelines,
 };
 use prism_render_shading::response_output::*;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -257,6 +258,11 @@ fn production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary() {
         "composition controls",
         &jobs.iter().map(|j| j.control).collect::<Vec<_>>(),
     );
+    let water_coverage = upload(
+        &device,
+        "water coverage",
+        &vec![GpuWaterCoverage(1); jobs.len()],
+    );
     let auxiliary = upload(
         &device,
         "typed auxiliary",
@@ -281,13 +287,17 @@ fn production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary() {
                 binding: 2,
                 resource: controls.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: water_coverage.as_entire_binding(),
+            },
         ],
     });
     let aux_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("production auxiliary bindings"),
         layout: &pipelines.auxiliary.get_bind_group_layout(0),
         entries: &[wgpu::BindGroupEntry {
-            binding: 3,
+            binding: 4,
             resource: auxiliary.as_entire_binding(),
         }],
     });

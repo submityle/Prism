@@ -223,7 +223,47 @@ fn water_surface_raster_wesl_compiles_and_resolves_imports() {
     });
 }
 
-/// Regression guard for the water-surface `SSGI` wiring: the `@group(7)`
+/// The raster fragment is the live response producer, not only a legacy MRT
+/// writer. Keep all four typed outputs and the coverage ownership write pinned
+/// at source level so a layout refactor cannot silently disconnect composition.
+#[test]
+fn water_surface_raster_wesl_writes_all_response_planes() {
+    let src = include_str!("../shaders/water_surface_raster.wesl");
+    for declaration in [
+        "@binding(8) var<storage, read_write> response_left",
+        "@binding(9) var<storage, read_write> response_right",
+        "@binding(10) var<storage, read_write> response_controls",
+        "@binding(11) var<storage, read_write> water_coverage",
+    ] {
+        assert!(
+            src.contains(declaration),
+            "missing response declaration: {declaration}"
+        );
+    }
+    for write in [
+        "response_left[pixel] = response_value(left)",
+        "response_right[pixel] = response_value(right)",
+        "response_controls[pixel] = CompositionControl",
+        "water_coverage[pixel] = 1u",
+    ] {
+        assert!(
+            src.contains(write),
+            "missing response producer write: {write}"
+        );
+    }
+}
+
+/// The Hybrid response encoding must preserve the legacy two-stage result in
+/// the resident compositor: region blend first, reactive overlay second.
+#[test]
+fn water_surface_raster_wesl_encodes_hybrid_overlay_for_composition() {
+    let src = include_str!("../shaders/water_surface_raster.wesl");
+    assert!(src.contains("let overlay = water_hybrid_overlay_factor"));
+    assert!(src.contains("let blended = mix(pbr, npr, weights.npr_weight)"));
+    assert!(src.contains("write_response_planes(in, blended, npr, overlay)"));
+}
+
+/// Regression guard for the water-surface `SSGI` wiring: the merged `@group(6)`
 /// uniform must be *consumed*, not merely declared. Before this slice the
 /// `ssgi_cfg` block was bound but inert (no gather, no call site), so this test
 /// pins both the gather definition and its call from `water_ibl`, preventing a
@@ -238,15 +278,15 @@ fn water_surface_raster_wesl_consumes_the_ssgi_binding() {
     );
     assert!(
         src.contains("water_ssgi_gather(world_position, bent_normal_view"),
-        "water_ibl must call the SSGI gather so the @group(7) uniform is consumed",
+        "water_ibl must call the SSGI gather so the @group(6) uniform is consumed",
     );
 }
 
 /// Guards that the water surface shader actually *consumes* the world-space
-/// (`Lumen`-style) GI probe field at `@group(8)` rather than merely declaring
+/// (`Lumen`-style) GI probe field at merged `@group(6)` rather than merely declaring
 /// the binding. Pins the gather definition and its call from `water_ibl`, so a
 /// refactor cannot silently regress the far-field indirect bounce back to a
-/// dead `@group(8)` storage/uniform pair.
+/// dead merged `@group(6)` storage/uniform pair.
 #[test]
 fn water_surface_raster_wesl_consumes_the_world_space_gi_binding() {
     let src = include_str!("../shaders/water_surface_raster.wesl");
@@ -256,12 +296,12 @@ fn water_surface_raster_wesl_consumes_the_world_space_gi_binding() {
     );
     assert!(
         src.contains("water_world_space_gi_gather(world_position, frame.normal"),
-        "water_ibl must call the world-space GI gather so @group(8) is consumed",
+        "water_ibl must call the world-space GI gather so merged @group(6) is consumed",
     );
 }
 
 /// Guards that the water surface shader actually *consumes* the projected
-/// caustic-intensity texture at `@group(9)` rather than merely declaring the
+/// caustic-intensity texture at merged `@group(6)` rather than merely declaring the
 /// binding. Pins the gain helper and its call from `shade_pbr_core`, so a
 /// refactor cannot silently regress the focused-sunlight term back to the
 /// dead-compute gap this slice closed (the `water_caustics_project` kernel
@@ -275,7 +315,7 @@ fn water_surface_raster_wesl_consumes_the_caustics_binding() {
     );
     assert!(
         src.contains("water_caustic_gain(in.uv)"),
-        "shade_pbr_core must call water_caustic_gain so @group(9) is consumed",
+        "shade_pbr_core must call water_caustic_gain so merged @group(6) is consumed",
     );
 }
 
@@ -372,7 +412,7 @@ fn whole_word_count(hay: &str, word: &str) -> usize {
 
 /// Guards every water `WESL` shader against the *inert binding* defect class: a
 /// `@group(G) @binding(B) var NAME` declaration whose `NAME` is never read in
-/// the body. That is exactly the fault the surface `SSGI` `@group(7)` uniform
+/// the body. That is exactly the fault the surface `SSGI` slot in merged `@group(6)` uniform
 /// exhibited before `water_ssgi_gather` consumed it - a binding that reserves a
 /// bind-group slot and a resource on device yet contributes nothing, a silent
 /// fake implementation. Pinning it across all water sources stops any binding

@@ -2,10 +2,9 @@
 //!
 //! [`GpuContext`] wraps the four long-lived `wgpu` handles (`Instance`,
 //! `Adapter`, `Device`, `Queue`) that every kernel dispatch needs. Acquisition
-//! is deliberately *best-effort*: [`GpuContext::try_headless`] returns [`None`]
-//! on a host with no usable adapter (some `CI` images) so a test suite can skip
-//! gracefully rather than fail, while still exercising the full dispatch on any
-//! machine with a real device such as an Apple `M`-series `GPU`.
+//! is deliberately best-effort: [`GpuContext::try_headless`] returns [`None`]
+//! on a host with no usable adapter so a test suite can skip gracefully.
+//! Setting `PRISM_REQUIRE_GPU=1` turns that absence into a test failure.
 //!
 //! This is a deliberate local copy of the identical helper in
 //! `prism_ray_reorder_gpu::context`: each `*_gpu` twin owns its own tiny device
@@ -57,12 +56,22 @@ impl GpuContext {
             display: None,
             backend_options: BackendOptions::default(),
         });
-        let adapter = block_on(instance.request_adapter(&RequestAdapterOptions::default())).ok()?;
+        let adapter = match block_on(instance.request_adapter(&RequestAdapterOptions::default())) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                require_gpu_or_skip(&error.to_string());
+                return None;
+            }
+        };
         let (device, queue) = block_on(adapter.request_device(&DeviceDescriptor {
             required_limits: adapter.limits(),
             ..Default::default()
         }))
-        .ok()?;
+        .ok()
+        .or_else(|| {
+            require_gpu_or_skip("logical device creation failed");
+            None
+        })?;
         Some(GpuContext {
             instance,
             adapter,
@@ -93,5 +102,11 @@ impl GpuContext {
         self.device
             .poll(PollType::wait_indefinitely())
             .expect("device poll should complete the submitted work");
+    }
+}
+
+fn require_gpu_or_skip(reason: &str) {
+    if std::env::var_os("PRISM_REQUIRE_GPU").is_some() {
+        panic!("PRISM_REQUIRE_GPU is set but no usable GPU was found: {reason}");
     }
 }

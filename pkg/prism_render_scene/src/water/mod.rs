@@ -68,6 +68,19 @@ mod surface_ssr;
 mod surface_vsm;
 mod surface_world_space_gi;
 
+use bevy_ecs::schedule::SystemSet;
+
+/// Stable Core3d anchor for the water raster producer.
+///
+/// Shading composition consumes the response planes only after this set. The
+/// set is intentionally separate from the water simulation dispatch: response
+/// production is a raster dependency and must remain ordered after MainPass.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum WaterSurfaceSystems {
+    /// The per-view raster producer that writes water response planes.
+    Draw,
+}
+
 /// The high-level water authoring presets and the water body component they
 /// build, re-exported so a game can spawn an ocean, `FLIP`/`PBF` pool, or
 /// shallow-water pond with one call.

@@ -21,7 +21,7 @@ use bevy_render::{
     render_resource::{
         BindGroup, BindGroupEntries, Buffer, BufferInitDescriptor, BufferUsages, IndexFormat,
         LoadOp, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
-        RenderPipeline, StoreOp,
+        RenderPipeline, StoreOp, TextureView,
     },
     renderer::{RenderContext, RenderDevice, ViewQuery},
     view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget},
@@ -33,8 +33,8 @@ use prism_render_shading::ReceiverProjection;
 use crate::lighting::LightBindGroup;
 use crate::shading::{
     GpuVsmResolveParams, PrismShadingSettings, PrismVirtualShadowSettings,
-    PrismWorldSpaceGiSettings, ViewSsrTextures, ViewVisibilityBuffer, ViewVsmPageTable,
-    ViewVsmPhysicalAtlas, ViewWorldSpaceGi, VsmPrimaryLight,
+    PrismWorldSpaceGiSettings, ViewResponseComposition, ViewSsrTextures, ViewVisibilityBuffer,
+    ViewVsmPageTable, ViewVsmPhysicalAtlas, ViewWorldSpaceGi, VsmPrimaryLight,
 };
 
 use super::bind_groups::filtering_sampler;
@@ -67,16 +67,9 @@ struct PreparedSurfaceDraw<'a> {
     /// single-scatter + transmittance volume the surface fragment stage
     /// composites into its refraction.
     froxel_group: BindGroup,
-    #[expect(
-        dead_code,
-        reason = "RAII handle keeping the caustics config uniform alive for the                   `@group(9)` bind group that references it; the pass binds                   through `caustics_group` and never reads this field directly."
-    )]
     caustics_params: Buffer,
-    /// The `@group(9)` projected-caustics group for this body: the light-space
-    /// caustic-intensity texture the `water_caustics_project` kernel filled this
-    /// frame plus the per-body config uniform. The fragment stage adds the
-    /// focused-sunlight term onto the underwater refraction.
-    caustics_group: BindGroup,
+    caustics_view: TextureView,
+    lighting_group: Option<BindGroup>,
     index_count: u32,
 }
 
@@ -100,6 +93,7 @@ pub(crate) fn draw_water_surface(
         &ViewDepthStencilTexture,
         &ViewWaterSurfacePipelines,
         &ViewVisibilityBuffer,
+        &mut ViewResponseComposition,
         &ViewWaterMotionUniform,
         Option<&ViewSsrTextures>,
         Option<&ViewVsmPhysicalAtlas>,
@@ -112,15 +106,13 @@ pub(crate) fn draw_water_surface(
     if !settings.enable_visibility_buffer {
         return;
     }
-    if bodies.is_empty() {
-        return;
-    }
     let (
         extracted,
         target,
         depth,
         view_pipelines,
         visibility,
+        mut responses,
         motion_uniform,
         ssr_textures,
         vsm_atlas,
@@ -128,6 +120,10 @@ pub(crate) fn draw_water_surface(
         view_wsgi,
         msaa,
     ) = view.into_inner();
+    // Coverage is a per-frame ownership sidecar. Clear it before any possible
+    // early return so skipped bodies or unavailable GPU inputs cannot leak last
+    // frame's water pixels into the resident composition pass.
+    responses.clear_water_coverage(ctx.command_encoder());
     // The Prism visibility path is single-sample only; a multisampled view never
     // wrote `scene_color`, so refraction has nothing to sample.
     if msaa.is_some_and(|value| value.samples() != 1) {
@@ -150,7 +146,7 @@ pub(crate) fn draw_water_surface(
 
     let layout = cache.get_bind_group_layout(&surface_pipeline.layout);
     let froxel_layout = cache.get_bind_group_layout(&surface_pipeline.froxel_layout);
-    let caustics_layout = cache.get_bind_group_layout(&surface_pipeline.caustics_layout);
+    let lighting_layout = cache.get_bind_group_layout(&surface_pipeline.lighting_layout);
     let sampler = filtering_sampler(&device, "prism water surface refraction");
 
     // Build every body's device resources before opening the pass: the index
@@ -201,6 +197,10 @@ pub(crate) fn draw_water_surface(
                 body.buffers
                     .surface_mesh_displacement_prev
                     .as_entire_binding(),
+                responses.left_buffer().as_entire_binding(),
+                responses.right_buffer().as_entire_binding(),
+                responses.controls_buffer().as_entire_binding(),
+                responses.water_coverage_buffer().as_entire_binding(),
             )),
         );
         // The `@group(5)` underwater froxel volume: the `water_underwater_volume`
@@ -217,7 +217,7 @@ pub(crate) fn draw_water_surface(
                 body.buffers.surface_froxel_params.as_entire_binding(),
             )),
         );
-        // The `@group(9)` projected caustics: the `water_caustics_project` kernel
+        // The merged `@group(6)` projected caustics: the `water_caustics_project` kernel
         // already folded the refractive `Jacobian` into this body's light-space
         // caustic-intensity texture this frame; the fragment stage adds the
         // focused-sunlight term onto the underwater refraction. Per-body (the
@@ -232,14 +232,6 @@ pub(crate) fn draw_water_surface(
             contents: bytemuck::bytes_of(&caustics_config),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         });
-        let caustics_group = device.create_bind_group(
-            "prism water surface caustics",
-            &caustics_layout,
-            &BindGroupEntries::sequential((
-                &body.buffers.caustics_out,
-                caustics_params.as_entire_binding(),
-            )),
-        );
         prepared.push(PreparedSurfaceDraw {
             pipeline,
             uniform,
@@ -247,7 +239,8 @@ pub(crate) fn draw_water_surface(
             bind_group,
             froxel_group,
             caustics_params,
-            caustics_group,
+            caustics_view: body.buffers.caustics_out.clone(),
+            lighting_group: None,
             index_count: draw.grid.index_count(),
         });
     }
@@ -368,7 +361,8 @@ pub(crate) fn draw_water_surface(
         &BindGroupEntries::sequential((ssr_hzb, ssr_params_buffer.as_entire_binding())),
     );
 
-    // The `@group(6)` ground-truth ambient-occlusion group, built once for the
+    // The merged `@group(6)` lighting-feature group is built once for the
+    // view. Its first binding is the ground-truth ambient-occlusion config.
     // view. The water fragment runs the horizon `GTAO` search over the same
     // reverse-Z Hi-Z pyramid bound at `@group(3)` (reusing its reconstruction
     // matrices), occluding the image-based ambient term with the surface's own
@@ -377,7 +371,6 @@ pub(crate) fn draw_water_surface(
     // feature flag and a resident `ViewSsrTextures`; otherwise the config's
     // `sample_enable` bit is clear and the shader leaves the ambient term fully
     // lit. The buffer and group are declared here so they outlive the pass.
-    let gtao_layout = cache.get_bind_group_layout(&surface_pipeline.gtao_layout);
     let gtao_enable = settings.enable_gtao && ssr_textures.is_some();
     let gtao_config = GpuWaterGtaoConfig::new(gtao_enable);
     let gtao_params_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
@@ -385,20 +378,13 @@ pub(crate) fn draw_water_surface(
         contents: bytemuck::bytes_of(&gtao_config),
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
     });
-    let gtao_group = device.create_bind_group(
-        "prism water surface gtao",
-        &gtao_layout,
-        &BindGroupEntries::single(gtao_params_buffer.as_entire_binding()),
-    );
-
-    // The `@group(7)` SSGI group: a one-bounce near-field indirect-diffuse
+    // The second binding is the `SSGI` one-bounce near-field indirect-diffuse
     // gather that marches the `GTAO` bent normal over the shared `@group(3)`
     // Hi-Z pyramid and reads `@group(0)` `scene_color`. Like `GTAO` it needs
     // that depth pyramid, so it is gated on both the `SSGI` feature flag and a
     // resident `ViewSsrTextures`; otherwise the config's `sample_enable` bit is
     // clear and the shader adds no indirect diffuse. Radius and step budget
     // track the shared opaque `SSGI` settings.
-    let ssgi_layout = cache.get_bind_group_layout(&surface_pipeline.ssgi_layout);
     let ssgi_enable = settings.enable_ssgi && ssr_textures.is_some();
     let ssgi_config = GpuWaterSsgiConfig::new(
         ssgi_enable,
@@ -410,15 +396,10 @@ pub(crate) fn draw_water_surface(
         contents: bytemuck::bytes_of(&ssgi_config),
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
     });
-    let ssgi_group = device.create_bind_group(
-        "prism water surface ssgi",
-        &ssgi_layout,
-        &BindGroupEntries::single(ssgi_params_buffer.as_entire_binding()),
-    );
-
-    // The `@group(8)` world-space GI group: the engine's resident `Lumen`-style
+    // The third and fourth bindings are the world-space GI probe field and its
+    // per-view config.
     // screen-probe field plus a per-view gather config. Unlike `SSGI`
-    // (`@group(7)`), which only sees the composited `scene_color`, this gathers
+    // The SSGI slot only sees the composited `scene_color`, while this gathers
     // the four screen probes around the shading pixel and blends their L1 `SH`
     // irradiance — far-field indirect the near-field screen gather is blind to.
     // Gated on both the opt-in world-space GI setting and a resident
@@ -427,7 +408,6 @@ pub(crate) fn draw_water_surface(
     // shader skips the gather. The probe `SH` is in view space, so the shader
     // reconstructs its view-space normal/depth from the shared `@group(3)`
     // `view_from_world` matrix, exactly like `SSGI`/`GTAO`.
-    let wsgi_layout = cache.get_bind_group_layout(&surface_pipeline.wsgi_layout);
     let wsgi_enable = wsgi_settings.enabled && view_wsgi.is_some();
     let wsgi_probe_grid = view_wsgi.map_or(UVec2::ONE, |gi| gi.probe_grid);
     let wsgi_config = GpuWaterWorldSpaceGiConfig::new(
@@ -445,14 +425,20 @@ pub(crate) fn draw_water_surface(
     });
     let wsgi_probe_buffer =
         view_wsgi.map_or(&wsgi_fallback.probe_buffer, ViewWorldSpaceGi::probe_buffer);
-    let wsgi_group = device.create_bind_group(
-        "prism water surface wsgi",
-        &wsgi_layout,
-        &BindGroupEntries::sequential((
-            wsgi_probe_buffer.as_entire_binding(),
-            wsgi_params_buffer.as_entire_binding(),
-        )),
-    );
+    for draw in &mut prepared {
+        draw.lighting_group = Some(device.create_bind_group(
+            "prism water surface lighting features",
+            &lighting_layout,
+            &BindGroupEntries::sequential((
+                gtao_params_buffer.as_entire_binding(),
+                ssgi_params_buffer.as_entire_binding(),
+                wsgi_probe_buffer.as_entire_binding(),
+                wsgi_params_buffer.as_entire_binding(),
+                &draw.caustics_view,
+                draw.caustics_params.as_entire_binding(),
+            )),
+        ));
+    }
 
     // The `@group(4)` motion-vector group: the per-view current+previous
     // view-projection uniform `prepare_water_surface_motion` built this frame.
@@ -483,29 +469,35 @@ pub(crate) fn draw_water_surface(
             store: StoreOp::Store,
         },
     };
-    let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
-        label: Some("prism water surface"),
-        color_attachments: &[Some(color), Some(motion_attachment)],
-        depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Store)),
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
-    for draw in &prepared {
-        pass.set_render_pipeline(draw.pipeline);
-        pass.set_bind_group(0, &draw.bind_group, &[]);
-        pass.set_bind_group(1, light_group, &[]);
-        pass.set_bind_group(2, &vsm_group, &[]);
-        pass.set_bind_group(3, &ssr_group, &[]);
-        pass.set_bind_group(4, &motion_group, &[]);
-        pass.set_bind_group(5, &draw.froxel_group, &[]);
-        pass.set_bind_group(6, &gtao_group, &[]);
-        pass.set_bind_group(7, &ssgi_group, &[]);
-        pass.set_bind_group(8, &wsgi_group, &[]);
-        pass.set_bind_group(9, &draw.caustics_group, &[]);
-        pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
-        pass.draw_indexed(0..draw.index_count, 0, 0..1);
+    {
+        let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("prism water surface"),
+            color_attachments: &[Some(color), Some(motion_attachment)],
+            depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Store)),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        for draw in &prepared {
+            pass.set_render_pipeline(draw.pipeline);
+            pass.set_bind_group(0, &draw.bind_group, &[]);
+            pass.set_bind_group(1, light_group, &[]);
+            pass.set_bind_group(2, &vsm_group, &[]);
+            pass.set_bind_group(3, &ssr_group, &[]);
+            pass.set_bind_group(4, &motion_group, &[]);
+            pass.set_bind_group(5, &draw.froxel_group, &[]);
+            pass.set_bind_group(
+                6,
+                draw.lighting_group
+                    .as_ref()
+                    .expect("lighting group prepared before the raster pass"),
+                &[],
+            );
+            pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
+            pass.draw_indexed(0..draw.index_count, 0, 0..1);
+        }
     }
+    responses.publish(settings.frame_index);
 }
 
 /// Framebuffer extent as the shader's `f32`; viewport dimensions are small

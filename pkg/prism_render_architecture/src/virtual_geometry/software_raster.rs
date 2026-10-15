@@ -39,9 +39,9 @@
 //!
 //! Coverage uses the signed edge function with a strict top-left fill rule so
 //! that a shared edge between two adjacent triangles is owned by exactly one of
-//! them: no double-covered pixels, no cracks. This is the watertight end state
-//! the shipping compute shader still tracks as a TODO, so this reference pins
-//! the correct behavior the twin is validated against. Depth is interpolated
+//! them: no double-covered pixels, no cracks. The compute twin implements the
+//! same watertight rule, and this reference pins the behavior the twin is
+//! validated against. Depth is interpolated
 //! with screen-space-linear barycentrics, matching a hardware depth buffer for
 //! the NDC depth values fed in here.
 

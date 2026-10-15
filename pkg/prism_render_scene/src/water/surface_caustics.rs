@@ -1,4 +1,4 @@
-//! The water-surface pass's **projected-caustics** `@group(9)` plumbing: the
+//! The water-surface pass's **projected-caustics** slots in merged `@group(6)`:
 //! `CPU` half that finally *consumes* the light-space caustic-intensity texture
 //! the [`super::super::water`] `water_caustics_project` compute kernel already
 //! fills every frame.
@@ -18,9 +18,9 @@
 //! `Frostbite` / `Crest` focused-sunlight compositing path.
 //!
 //! The sibling [`super::surface_froxel`] slice closed the equivalent gap for the
-//! underwater froxel volume (`@group(5)`); this slice adds the tenth bind group
-//! on top of the `@group(0..=8)` geometry/light/`VSM`/`SSR`/motion/froxel/`GTAO`/
-//! `SSGI`/world-`GI` chain.
+//! underwater froxel volume (`@group(5)`); this slice supplies the final two
+//! bindings in the merged lighting group, keeping the raster pipeline at seven
+//! bind groups on devices such as Apple Metal.
 //!
 //! ## Caustic addressing
 //!
@@ -45,7 +45,7 @@ use bytemuck::{Pod, Zeroable};
 const EPS_STRENGTH: f32 = 1.0e-6;
 
 /// `GPU`-side mirror of the shader's `WaterCausticsConfig` uniform (the water
-/// `@group(9) @binding(1)` block).
+/// merged `@group(6) @binding(5)` block).
 ///
 /// Four scalars = 16 bytes, exactly one `WGSL` uniform-block alignment unit. The
 /// shader multiplies the sampled caustic gain by [`Self::strength`] and gates
@@ -84,7 +84,7 @@ impl GpuWaterSurfaceCausticsConfig {
     }
 }
 
-/// Builds the water-surface `@group(9)` caustics layout entries (two bindings),
+/// Builds the caustics slots of the merged water-surface `@group(6)` layout (two bindings),
 /// in the exact `@binding(n)` order `water_surface_raster.wesl` declares:
 ///
 /// 0. the `r32float` light-space caustic-intensity texture as a sampled `2D`

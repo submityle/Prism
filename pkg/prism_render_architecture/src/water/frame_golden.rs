@@ -56,7 +56,7 @@ const BLEND_SUM_EPS: f32 = 1.0e-4;
 /// The pinned digest of the canonical frame plan. Regenerated only by a
 /// deliberate, reviewed change to the planning pipeline; a mismatch means the
 /// aggregate frame drifted and must be explained before the constant is moved.
-const GOLDEN_FRAME_DIGEST: u64 = 0xa631_532d_c956_6ab3;
+const GOLDEN_FRAME_DIGEST: u64 = 0x09f4_1f66_b88e_d327;
 
 /// Shared per-frame routing thresholds, budget layout, and clipmap rings for the
 /// golden scene. Fixed values so the plan is reproducible frame to frame.

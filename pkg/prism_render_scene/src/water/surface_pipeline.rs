@@ -70,7 +70,8 @@ use bevy_ecs::prelude::*;
 use bevy_material::{
     bind_group_layout_entries::{
         binding_types::{
-            sampler, storage_buffer_read_only_sized, texture_2d, uniform_buffer_sized,
+            sampler, storage_buffer_read_only_sized, storage_buffer_sized, texture_2d,
+            uniform_buffer_sized,
         },
         BindGroupLayoutEntries,
     },
@@ -121,18 +122,20 @@ const fn frontend_slot(frontend: WaterShadingPlan) -> usize {
     }
 }
 
-/// Builds the water-surface `@group(0)` layout entries (seven bindings), in the
+/// Builds the water-surface `@group(0)` layout entries (twelve bindings), in the
 /// exact `@binding(n)` order
 /// [`SurfaceBinding`](prism_render_architecture::water::gpu::SurfaceBinding)
 /// declares: the per-view uniform, the four read-only per-vertex storage arrays
 /// (`base_positions`/`surface_uvs`/`displacement`/`normal_foam`), the refraction
-/// scene-colour texture, and its filtering sampler.
+/// scene-colour texture and sampler, the previous-frame displacement array, and
+/// the four read-write response-plane arrays.
 ///
-/// All seven are declared [`ShaderStages::VERTEX_FRAGMENT`]: the geometry stage
-/// reads the uniform and the four storage arrays, the lighting stage reads the
-/// uniform plus the refraction texture/sampler, and a visibility superset is a
-/// legal and cheaper declaration than two separate masks.
-fn surface_layout_entries() -> BindGroupLayoutEntries<8> {
+/// All twelve are declared [`ShaderStages::VERTEX_FRAGMENT`]: the geometry
+/// stage reads the uniform and vertex arrays, the lighting stage reads the
+/// uniform plus the refraction texture/sampler and writes the response planes,
+/// and a visibility superset is a legal and cheaper declaration than separate
+/// masks.
+fn surface_layout_entries() -> BindGroupLayoutEntries<12> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::VERTEX_FRAGMENT,
         (
@@ -151,6 +154,14 @@ fn surface_layout_entries() -> BindGroupLayoutEntries<8> {
             // @binding(7) previous-frame displacement (motion-vector twin of
             // @binding(3)); vertex-stage read, one `array<vec4<f32>>`.
             storage_buffer_read_only_sized(false, None),
+            // @binding(8..=11) resident response producer planes. Legacy
+            // colour entries do not read them; the MaskBlend response entry
+            // writes the right arm, controls and coverage while preserving the
+            // left-arm ABI for the resident compositor.
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
         ),
     )
 }
@@ -242,29 +253,12 @@ pub(crate) struct WaterSurfacePipelines {
     /// this descriptor so the fragment stage composites the participating
     /// medium into its refraction (see [`super::surface_froxel`]).
     pub(crate) froxel_layout: BindGroupLayoutDescriptor,
-    /// The `@group(6)` ground-truth ambient-occlusion layout: a single config
-    /// uniform. The fragment stage runs the horizon `GTAO` search over the
-    /// `@group(3)` Hi-Z pyramid it already binds, modulating the image-based
-    /// ambient term with the surface's own occlusion (see [`super::surface_gtao`]).
-    pub(crate) gtao_layout: BindGroupLayoutDescriptor,
-    /// `@group(7)` layout for the water surface's screen-space one-bounce
-    /// indirect-diffuse (`SSGI`) config uniform. The draw node binds a per-view
-    /// buffer here so the fragment stage can gather `scene_color` along the
-    /// `GTAO` bent normal over the `@group(3)` Hi-Z pyramid (see
-    /// [`super::surface_ssgi`]).
-    pub(crate) ssgi_layout: BindGroupLayoutDescriptor,
-    /// The world-space global-illumination (`@group(8)`) layout: the shared
-    /// screen-probe storage buffer plus a per-view config uniform. The draw node
-    /// binds the opaque `Lumen`-style probe field here so the fragment stage can
-    /// gather far-field indirect diffuse the screen-space `SSGI` term cannot see
-    /// (see [`super::surface_world_space_gi`]).
-    pub(crate) wsgi_layout: BindGroupLayoutDescriptor,
-    /// The projected-caustics (`@group(9)`) layout: the light-space caustic
-    /// intensity texture the `water_caustics_project` kernel fills plus a
-    /// per-body config uniform. The draw node binds it here so the fragment
-    /// stage can brighten the underwater refraction with focused sunlight
-    /// (see [`super::surface_caustics`]).
-    pub(crate) caustics_layout: BindGroupLayoutDescriptor,
+    /// The merged `@group(6)` lighting-feature layout. It keeps the per-view
+    /// GTAO/SSGI/WSGI configs and the per-body caustics texture in one group so
+    /// the raster pass stays within the eight-group limit exposed by Apple
+    /// Metal devices while preserving each feature's independent enable bit
+    /// and fallback resource.
+    pub(crate) lighting_layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
     pub(crate) shader: Handle<Shader>,
 }
@@ -285,10 +279,7 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
                 self.ssr_layout.clone(),
                 self.motion_layout.clone(),
                 self.froxel_layout.clone(),
-                self.gtao_layout.clone(),
-                self.ssgi_layout.clone(),
-                self.wsgi_layout.clone(),
-                self.caustics_layout.clone(),
+                self.lighting_layout.clone(),
             ],
             immediate_size: 0,
             vertex: VertexState {
@@ -430,32 +421,22 @@ pub(crate) fn init_water_surface_pipelines(
         "prism water surface froxel",
         &super::surface_froxel::froxel_layout_entries(),
     );
-    // @group(6): the horizon-GTAO config uniform; the draw node binds a per-view
-    // buffer against this descriptor so the fragment stage can occlude its
-    // image-based ambient term with a march over the @group(3) Hi-Z pyramid.
-    let gtao_layout = BindGroupLayoutDescriptor::new(
-        "prism water surface gtao",
-        &super::surface_gtao::gtao_layout_entries(),
-    );
-    // @group(7): the SSGI config uniform; the draw node binds a per-view buffer
-    // against this descriptor so the fragment stage can gather a one-bounce
-    // near-field indirect diffuse out of @group(0) scene_color along the GTAO
-    // bent normal.
-    let ssgi_layout = BindGroupLayoutDescriptor::new(
-        "prism water surface ssgi",
-        &super::surface_ssgi::ssgi_layout_entries(),
-    );
-    // World-space GI base (@group(8)): the shared screen-probe storage buffer
-    // plus the per-view gather config. Binding this lets the water fragment pick
-    // up the engine's Lumen-style far-field indirect diffuse, closing the
-    // off-screen/behind-camera gap SSGI (@group(7)) is blind to.
-    let wsgi_layout = BindGroupLayoutDescriptor::new(
-        "prism water surface wsgi",
-        &super::surface_world_space_gi::wsgi_layout_entries(),
-    );
-    let caustics_layout = BindGroupLayoutDescriptor::new(
-        "prism water surface caustics",
-        &super::surface_caustics::caustics_layout_entries(),
+    // @group(6): merge the four independent lighting-feature interfaces. The
+    // binding order mirrors water_surface_raster.wesl: GTAO config, SSGI
+    // config, WSGI probes, WSGI config, caustics texture, caustics config.
+    let lighting_layout = BindGroupLayoutDescriptor::new(
+        "prism water surface lighting features",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::FRAGMENT,
+            (
+                uniform_buffer_sized(false, None),
+                uniform_buffer_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                uniform_buffer_sized(false, None),
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                uniform_buffer_sized(false, None),
+            ),
+        ),
     );
 
     commands.insert_resource(WaterSurfacePipelines {
@@ -465,10 +446,7 @@ pub(crate) fn init_water_surface_pipelines(
         ssr_layout,
         motion_layout,
         froxel_layout,
-        gtao_layout,
-        ssgi_layout,
-        wsgi_layout,
-        caustics_layout,
+        lighting_layout,
         shader,
     });
 }
@@ -546,21 +524,19 @@ mod tests {
                 "prism water surface froxel",
                 &crate::water::surface_froxel::froxel_layout_entries(),
             ),
-            gtao_layout: BindGroupLayoutDescriptor::new(
-                "prism water surface gtao",
-                &crate::water::surface_gtao::gtao_layout_entries(),
-            ),
-            ssgi_layout: BindGroupLayoutDescriptor::new(
-                "prism water surface ssgi",
-                &crate::water::surface_ssgi::ssgi_layout_entries(),
-            ),
-            wsgi_layout: BindGroupLayoutDescriptor::new(
-                "prism water surface wsgi",
-                &crate::water::surface_world_space_gi::wsgi_layout_entries(),
-            ),
-            caustics_layout: BindGroupLayoutDescriptor::new(
-                "prism water surface caustics",
-                &crate::water::surface_caustics::caustics_layout_entries(),
+            lighting_layout: BindGroupLayoutDescriptor::new(
+                "prism water surface lighting features",
+                &BindGroupLayoutEntries::sequential(
+                    ShaderStages::FRAGMENT,
+                    (
+                        uniform_buffer_sized(false, None),
+                        uniform_buffer_sized(false, None),
+                        storage_buffer_read_only_sized(false, None),
+                        uniform_buffer_sized(false, None),
+                        texture_2d(TextureSampleType::Float { filterable: false }),
+                        uniform_buffer_sized(false, None),
+                    ),
+                ),
             ),
             shader: Handle::default(),
         }
@@ -642,18 +618,14 @@ mod tests {
         assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));
         assert_eq!(desc.primitive.cull_mode, None);
         assert_eq!(desc.primitive.topology, PrimitiveTopology::TriangleList);
-        // Ten bind-group layouts: the per-body @group(0) surface layout, the
+        // Seven bind-group layouts: the per-body @group(0) surface layout, the
         // shared @group(1) engine light table the fragment stage samples, the
         // @group(2) virtual-shadow-map twin the primary directional light reads,
         // the @group(3) screen-space-reflection Hi-Z pyramid + march config, the
         // @group(4) motion-vector uniform feeding the second render target, the
         // @group(5) underwater froxel volume composited into refraction, the
-        // @group(6) horizon-GTAO config occluding the image-based ambient term,
-        // the @group(7) SSGI config gathering a one-bounce indirect diffuse, the
-        // @group(8) world-space GI config sampling the irradiance probe field,
-        // and the @group(9) caustics texture + config focusing sunlight through
-        // the surface into the transmitted radiance.
-        assert_eq!(desc.layout.len(), 10);
+        // @group(6) merged GTAO + SSGI + world-space GI + caustics resources.
+        assert_eq!(desc.layout.len(), 7);
     }
 
     #[test]
