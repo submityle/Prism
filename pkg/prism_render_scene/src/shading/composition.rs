@@ -53,6 +53,8 @@ pub enum CompositionPlane {
     Controls,
     /// Independent 64-byte typed auxiliary jobs, not a radiance channel.
     Auxiliary,
+    /// One `u32` coverage flag per pixel for raster response producers.
+    WaterCoverage,
 }
 
 impl CompositionPlane {
@@ -63,6 +65,7 @@ impl CompositionPlane {
             Self::Right => "response_right",
             Self::Controls => "response_controls",
             Self::Auxiliary => "response_auxiliary",
+            Self::WaterCoverage => "water_coverage",
         }
     }
 
@@ -72,6 +75,7 @@ impl CompositionPlane {
             Self::Left | Self::Right => size_of::<GpuResponseOutput>() as u64,
             Self::Controls => size_of::<GpuCompositionControl>() as u64,
             Self::Auxiliary => size_of::<GpuAuxiliaryMerge>() as u64,
+            Self::WaterCoverage => size_of::<u32>() as u64,
         }
     }
 }
@@ -303,6 +307,7 @@ pub struct ViewResponseComposition {
     right: Buffer,
     controls: Buffer,
     auxiliary: Option<Buffer>,
+    water_coverage: Buffer,
     radiance_group: BindGroup,
     auxiliary_group: Option<BindGroup>,
     publication: Publication,
@@ -343,6 +348,11 @@ impl ViewResponseComposition {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         });
         let auxiliary = (auxiliary_jobs != 0).then(|| allocate(CompositionPlane::Auxiliary));
+        let water_coverage = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("water_response_coverage"),
+            contents: cast_slice(&vec![0_u32; layout.pixel_count() as usize]),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        });
         let radiance_group = device.create_bind_group(
             "prism response composition radiance",
             &BindGroupLayout::from(pipelines.kernels.radiance.get_bind_group_layout(0)),
@@ -368,6 +378,7 @@ impl ViewResponseComposition {
             right,
             controls,
             auxiliary,
+            water_coverage,
             radiance_group,
             auxiliary_group,
             publication: Publication::default(),
@@ -385,6 +396,26 @@ impl ViewResponseComposition {
         &self.left
     }
 
+    /// The right response plane written by a split raster producer.
+    pub(crate) fn right_buffer(&self) -> &Buffer {
+        &self.right
+    }
+
+    /// The per-pixel composition controls written by a split raster producer.
+    pub(crate) fn controls_buffer(&self) -> &Buffer {
+        &self.controls
+    }
+
+    /// The per-pixel coverage flags written by a raster producer.
+    pub(crate) fn water_coverage_buffer(&self) -> &Buffer {
+        &self.water_coverage
+    }
+
+    /// Clears coverage before the opaque resolve publishes its response.
+    pub(crate) fn clear_water_coverage(&self, encoder: &mut CommandEncoder) {
+        encoder.clear_buffer(&self.water_coverage, 0, None);
+    }
+
     /// Typed storage buffers filled by GPU producers. Auxiliary is absent when empty.
     pub fn plane(&self, plane: CompositionPlane) -> Option<&Buffer> {
         match plane {
@@ -392,6 +423,7 @@ impl ViewResponseComposition {
             CompositionPlane::Right => Some(&self.right),
             CompositionPlane::Controls => Some(&self.controls),
             CompositionPlane::Auxiliary => self.auxiliary.as_ref(),
+            CompositionPlane::WaterCoverage => Some(&self.water_coverage),
         }
     }
 
