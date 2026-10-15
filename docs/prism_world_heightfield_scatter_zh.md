@@ -18,6 +18,11 @@ surface_sample_reads 一致，只有 `field_work` 按各自实际探针计数。
 为空；这不是保证贴地密度的植被放置器，也不是 GPU 地形过滤或产品 renderer 接入。
 源候选中被其他候选阻挡、随后因密度或地形被删除的位置不会被回填。
 
+真正的二维贴地放置使用独立 `scatter_on_heightfield` 入口：按 XZ 候选投影 Y，
+采用独立 placement key/cache 与水平最小距离，并在最终位置采样作者场。
+它不改变本文件三维过滤接口的语义；完整规则见
+`prism_world_heightfield_placement_zh.md`。
+
 ## 明确的空间与插值契约
 
 `PlanarHeightfieldEmbedding` 显式指定样本 `[0,0]` 的世界整数毫米位置和正的

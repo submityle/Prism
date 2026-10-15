@@ -26,6 +26,8 @@ mod scatter_deletion;
 mod scatter_filter;
 #[cfg(all(test, feature = "scatter"))]
 mod scatter_filter_tests;
+#[cfg(feature = "scatter")]
+mod scatter_placement;
 mod stream_adapter;
 mod surface;
 #[cfg(test)]
@@ -63,6 +65,14 @@ pub use scatter_filter::{
     scatter_with_heightfield, scatter_with_indexed_heightfield, HeightfieldScatterBudget,
     HeightfieldScatterCacheKey, HeightfieldScatterError, HeightfieldScatterFilters,
     HeightfieldScatterOutput, HEIGHTFIELD_SCATTER_FILTER_VERSION,
+};
+#[cfg(feature = "scatter")]
+pub use scatter_placement::{
+    estimate_heightfield_placement_work, scatter_on_heightfield, HeightfieldPlacementBudget,
+    HeightfieldPlacementCacheKey, HeightfieldPlacementConfig, HeightfieldPlacementError,
+    HeightfieldPlacementFilters, HeightfieldPlacementKey, HeightfieldPlacementOutput,
+    HeightfieldPlacementPoint, HeightfieldPlacementRegion, HeightfieldPlacementWork,
+    HEIGHTFIELD_PLACEMENT_VERSION,
 };
 pub use stream_adapter::{TerrainStreamAdapter, TerrainStreamConfig, TerrainStreamError};
 pub use surface::{SdfSurfaceMesh, SurfaceCost, SurfaceError, SurfaceGeometry, SurfaceLimits};

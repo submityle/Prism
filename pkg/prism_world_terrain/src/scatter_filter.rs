@@ -323,7 +323,7 @@ fn filter_surface(
 // scaled component to spacing*rise (<2^64); overflow/oversize must reject. Only
 // surviving u64-sized components are squared in u128, and subtraction avoids
 // the potentially overflowing sum of two individually representable squares.
-fn slope_within(normal: [i128; 3], rise: u32, run: u32) -> bool {
+pub(crate) fn slope_within(normal: [i128; 3], rise: u32, run: u32) -> bool {
     let limit = normal[1] as u128 * u128::from(rise);
     let component = |value: i128| {
         value
