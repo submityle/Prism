@@ -37,7 +37,12 @@ fn unsupported_platforms_report_honestly() {
         // Covered by the live-read tests below.
         return;
     }
-    assert!(matches!(IoReactor::new(), Err(IoError::Unsupported)));
+    let reactor = IoReactor::new_with_fsync().expect("portable fsync reactor still starts");
+    let pool = TaskPool::new();
+    assert!(matches!(
+        pool.block_on(reactor.read(-1, 0, 0, IoPriority::Normal)),
+        Err(IoError::Unsupported)
+    ));
 }
 
 #[test]
@@ -286,9 +291,6 @@ fn write_at_offset_then_read_back_via_bridge() {
 
 #[test]
 fn fsync_is_ordered_after_prior_write_and_does_not_take_fd_ownership() {
-    if !IoReactor::supported() {
-        return;
-    }
     let path = make_pattern_file(0);
     let file = fs::OpenOptions::new()
         .read(true)
@@ -297,25 +299,42 @@ fn fsync_is_ordered_after_prior_write_and_does_not_take_fd_ownership() {
         .open(&path)
         .expect("open writable file");
     let fd = file.as_raw_fd();
-    let reactor = IoReactor::new().expect("start reactor");
+    let reactor = IoReactor::new_with_fsync().expect("start reactor");
     let pool = TaskPool::new();
     let payload: Vec<u8> = (0..4096).map(pattern_byte).collect();
 
-    // Await the barrier first. Its ordering guarantee must force the earlier
-    // write to settle before sync_all runs, even though both futures are live.
-    let write = reactor.write(fd, 0, &payload, IoPriority::Normal);
+    // Await the barrier first. On the real AIO backend its ordering guarantee
+    // forces the earlier write to settle before sync_all runs. On platforms
+    // without batch AIO, fsync remains independently supported and the test
+    // still verifies the portable path and borrowed-fd contract.
+    let write = if IoReactor::supported() {
+        Some(reactor.write(fd, 0, &payload, IoPriority::Normal))
+    } else {
+        None
+    };
     let sync = reactor.fsync(fd);
     pool.block_on(sync).expect("fsync completes");
-    assert_eq!(
-        pool.block_on(write).expect("write completes"),
-        payload.len()
-    );
-    assert_eq!(fs::read(&path).expect("read synced file"), payload);
+    if let Some(write) = write {
+        assert_eq!(
+            pool.block_on(write).expect("write completes"),
+            payload.len()
+        );
+        assert_eq!(fs::read(&path).expect("read synced file"), payload);
+    }
 
     // The descriptor is still owned by `file`; the bridge must not close it.
     file.metadata().expect("borrowed fd remains open");
     drop(file);
     let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn fsync_invalid_fd_is_structured() {
+    let reactor = IoReactor::new_with_fsync().expect("start reactor");
+    let error = TaskPool::new()
+        .block_on(reactor.fsync(-1))
+        .expect_err("negative fd must fail");
+    assert!(matches!(error, IoError::Sync(_)));
 }
 
 #[test]

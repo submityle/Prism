@@ -34,14 +34,15 @@
 //! exactly which request is in flight, without cancelling any already accepted.
 //!
 //! ## Honest platform scope
-//! This bridge is only as capable as [`AioQueue`]: it has a real backend solely
-//! on Apple/BSD today (POSIX AIO). On every other platform [`IoReactor::new`]
-//! returns [`IoError::Unsupported`] and spawns no thread. Both batched reads
-//! ([`IoReactor::read`]) and batched writes ([`IoReactor::write`]) are
-//! supported. [`IoReactor::fsync`] is a completion-tracked durability barrier
-//! executed by the reactor after all earlier queued operations have settled;
-//! POSIX AIO has no portable `fsync` list opcode, so this keeps the caller
-//! asynchronous without pretending that the platform queue supports one.
+//! Batched reads and writes are only as capable as [`AioQueue`]: they have a
+//! real backend solely on Apple/BSD today (POSIX AIO). On every other platform
+//! those operations complete with [`IoError::Unsupported`] and are never
+//! faked. [`IoReactor::fsync`] uses the portable standard-library
+//! [`std::fs::File::sync_all`] path on the reactor thread. Use
+//! [`IoReactor::new_with_fsync`] when no batch AIO backend is present. It is an
+//! ordered barrier:
+//! earlier submitted AIO operations are reaped before synchronization, and
+//! later operations are not submitted until synchronization returns.
 //!
 //! ## Caller contract
 //! As with [`AioQueue::submit`], the caller must keep the file descriptor open
@@ -55,13 +56,14 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::fmt;
 use core::future::Future;
-use core::mem::ManuallyDrop;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 use std::collections::{HashMap, HashSet};
-use std::os::fd::RawFd;
+use std::fs::File;
+use std::io::ErrorKind;
+use std::os::fd::{BorrowedFd, RawFd};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
@@ -87,7 +89,56 @@ pub enum IoError {
     ReactorGone,
     /// The underlying platform queue reported an error.
     Platform(AioError),
+    /// The portable `fsync` path reported an operating-system error.
+    Sync(SyncError),
 }
+
+/// Details of an operating-system error from [`IoReactor::fsync`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncError {
+    kind: ErrorKind,
+    raw_os_error: Option<i32>,
+}
+
+impl SyncError {
+    /// The standard-library error category.
+    #[must_use]
+    pub fn kind(self) -> ErrorKind {
+        self.kind
+    }
+
+    /// The platform error number, when the operating system supplied one.
+    #[must_use]
+    pub fn raw_os_error(self) -> Option<i32> {
+        self.raw_os_error
+    }
+
+    fn from_io(error: &std::io::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+        }
+    }
+
+    fn invalid_fd() -> Self {
+        Self {
+            kind: ErrorKind::InvalidInput,
+            raw_os_error: None,
+        }
+    }
+}
+
+impl fmt::Display for SyncError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "fsync failed ({:?}, raw OS error {:?})",
+            self.kind, self.raw_os_error
+        )
+    }
+}
+
+impl std::error::Error for SyncError {}
 
 impl fmt::Display for IoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -95,6 +146,7 @@ impl fmt::Display for IoError {
             Self::Unsupported => f.write_str("async I/O is unsupported on this platform"),
             Self::ReactorGone => f.write_str("async I/O reactor is no longer running"),
             Self::Platform(err) => write!(f, "async I/O backend error: {err}"),
+            Self::Sync(err) => err.fmt(f),
         }
     }
 }
@@ -103,6 +155,7 @@ impl std::error::Error for IoError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Platform(err) => Some(err),
+            Self::Sync(err) => Some(err),
             Self::Unsupported | Self::ReactorGone => None,
         }
     }
@@ -178,29 +231,46 @@ pub struct IoReactor {
 }
 
 impl IoReactor {
-    /// Start a reactor, or report why one cannot run on this platform.
+    /// Start a reactor.
     ///
-    /// Returns [`IoError::Unsupported`] (spawning no thread) when the platform
-    /// has no real async-I/O backend, and [`IoError::Platform`] if the backend
-    /// exists but the queue could not be created.
+    /// This constructor preserves the batch-AIO capability contract: it
+    /// returns [`IoError::Unsupported`] without spawning a thread when no real
+    /// batch backend exists. Use [`IoReactor::new_with_fsync`] for the
+    /// portable synchronization-only path.
     pub fn new() -> Result<Self> {
         if !AioQueue::supported() {
             return Err(IoError::Unsupported);
         }
+        Self::new_with_fsync()
+    }
 
+    /// Start a reactor with the portable [`IoReactor::fsync`] path enabled.
+    ///
+    /// Unlike [`IoReactor::new`], this constructor succeeds when the platform
+    /// has no batch AIO backend. Reads and writes submitted on such a reactor
+    /// resolve with [`IoError::Unsupported`]; `fsync` remains available through
+    /// `File::sync_all`. A non-unsupported queue creation failure is returned
+    /// as [`IoError::Platform`].
+    pub fn new_with_fsync() -> Result<Self> {
         let (tx, rx) = mpsc::channel::<Submission>();
-        let (init_tx, init_rx) = mpsc::channel::<core::result::Result<(), AioError>>();
+        let (init_tx, init_rx) = mpsc::channel::<core::result::Result<bool, AioError>>();
 
         let handle = thread::Builder::new()
             .name("prism-io-reactor".to_string())
             .spawn(move || match AioQueue::new() {
                 Ok(queue) => {
                     // Report success; if the creator already gave up, just exit.
-                    if init_tx.send(Ok(())).is_err() {
+                    if init_tx.send(Ok(true)).is_err() {
                         return;
                     }
                     drop(init_tx);
-                    reactor_loop(queue, rx);
+                    reactor_loop(Some(queue), rx);
+                }
+                Err(AioError::Unsupported) => {
+                    if init_tx.send(Ok(false)).is_ok() {
+                        drop(init_tx);
+                        reactor_loop(None, rx);
+                    }
                 }
                 Err(err) => {
                     let _ = init_tx.send(Err(err));
@@ -209,7 +279,7 @@ impl IoReactor {
             .map_err(|_| IoError::ReactorGone)?;
 
         match init_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
+            Ok(Ok(_has_aio)) => Ok(Self {
                 tx: Some(tx),
                 handle: Some(handle),
                 next_id: AtomicU64::new(0),
@@ -478,16 +548,22 @@ impl Future for AioSyncFuture {
         if self.done {
             return Poll::Pending;
         }
-        let mut inner = self.slot.inner.lock().unwrap();
-        if let Some(result) = inner.result.take() {
-            drop(inner.buf.take());
-            drop(inner);
+        let result = {
+            let mut inner = self.slot.inner.lock().unwrap();
+            if let Some(result) = inner.result.take() {
+                drop(inner.buf.take());
+                Some(result)
+            } else {
+                match &mut inner.waker {
+                    Some(existing) if existing.will_wake(cx.waker()) => {}
+                    slot => *slot = Some(cx.waker().clone()),
+                }
+                None
+            }
+        };
+        if let Some(result) = result {
             self.done = true;
             return Poll::Ready(result.map(|_| ()));
-        }
-        match &mut inner.waker {
-            Some(existing) if existing.will_wake(cx.waker()) => {}
-            slot => *slot = Some(cx.waker().clone()),
         }
         Poll::Pending
     }
@@ -520,7 +596,7 @@ impl Future for AioWriteFuture {
 /// The reactor thread's body: own the queue, batch-submit same-opcode runs of
 /// pending requests (requeuing any the kernel rejects), reap completions, and
 /// shut down cleanly when the channel disconnects.
-fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
+fn reactor_loop(mut queue: Option<AioQueue>, rx: Receiver<Submission>) {
     let mut inflight: HashMap<u64, Arc<IoSlot>> = HashMap::new();
     let mut pending: VecDeque<Submission> = VecDeque::new();
     let mut disconnected = false;
@@ -557,6 +633,11 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
                 complete_slot(&sub.slot, sync_fd(sub.fd));
                 continue;
             }
+            let Some(queue) = queue.as_mut() else {
+                let sub = pending.pop_front().expect("front transfer still exists");
+                complete_slot(&sub.slot, Err(IoError::Unsupported));
+                continue;
+            };
             // Length of the maximal front run sharing this opcode (reads and
             // writes use different `AioQueue` entry points, so a batch is
             // single-opcode).
@@ -690,6 +771,9 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
         }
 
         // 4. Reap completions (bounded so new submissions are noticed promptly).
+        let queue = queue
+            .as_mut()
+            .expect("in-flight AIO requests require an AIO queue");
         match queue.wait(usize::MAX, Some(REAP_TIMEOUT)) {
             Ok(completions) => {
                 for completion in completions {
@@ -721,31 +805,32 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
 /// Execute a durability barrier without taking ownership of the caller's fd.
 fn sync_fd(fd: RawFd) -> Result<usize> {
     if fd < 0 {
-        return Err(IoError::Platform(AioError::InvalidArgument));
+        return Err(IoError::Sync(SyncError::invalid_fd()));
     }
 
-    #[cfg(unix)]
-    {
-        use std::fs::File;
-        use std::os::fd::FromRawFd;
+    #[expect(
+        unsafe_code,
+        reason = "borrow the caller-owned fd long enough to duplicate it for File::sync_all"
+    )]
+    // SAFETY: the public reactor contract requires `fd` to remain an open,
+    // valid descriptor until this future resolves. The borrowed descriptor is
+    // immediately duplicated, so the caller's descriptor is never owned or
+    // closed by the temporary `File`.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let owned = borrowed
+        .try_clone_to_owned()
+        .map_err(|error| map_sync_error(&error))?;
+    File::from(owned)
+        .sync_all()
+        .map(|_| 0)
+        .map_err(|error| map_sync_error(&error))
+}
 
-        // SAFETY: the caller contract requires `fd` to remain open while the
-        // future is pending. `ManuallyDrop` prevents this borrowed descriptor
-        // from being closed when the temporary `File` is released.
-        #[expect(
-            unsafe_code,
-            reason = "borrow the caller-owned file descriptor without closing it"
-        )]
-        let file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
-        file.sync_all()
-            .map(|_| 0)
-            .map_err(|error| IoError::Platform(AioError::Io(error.raw_os_error().unwrap_or(-1))))
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = fd;
-        Err(IoError::Unsupported)
+fn map_sync_error(error: &std::io::Error) -> IoError {
+    if error.kind() == ErrorKind::Unsupported {
+        IoError::Unsupported
+    } else {
+        IoError::Sync(SyncError::from_io(error))
     }
 }
 
