@@ -31,6 +31,7 @@ extern crate alloc;
 
 mod attribute;
 mod bounds;
+pub mod deformation;
 mod error;
 mod hash;
 mod indices;

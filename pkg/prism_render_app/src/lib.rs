@@ -112,6 +112,7 @@ pub use material::{
     MaterialSyncReport, MaterialTextureSlots, MaterialUploadStats, ParameterHeap, RenderMaterials,
     TextureFallback, TextureHeapStats, TextureRequest, TextureSlotHeap,
 };
+pub use mesh::deformation::{DeformationCache, DeformationCacheError, DeformationOutput};
 pub use mesh::{RenderMesh, RenderMeshBufferInfo};
 pub use mesh_draw::{mesh_bin_draw, mesh_draw};
 pub use mesh_pipeline::{

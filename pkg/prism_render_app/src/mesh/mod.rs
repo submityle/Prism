@@ -8,6 +8,7 @@
 //! created or changed in the simulation reaches the GPU without the renderer
 //! knowing anything about the mesh's authoring types.
 
+pub mod deformation;
 mod prepare;
 
 #[cfg(test)]

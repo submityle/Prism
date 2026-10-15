@@ -86,15 +86,6 @@ impl Mesh {
                 attribute: attribute.name,
             });
         }
-        if let Some((_, existing)) = self.attributes.get(&attribute.shader_location)
-            && existing.len() != values.len()
-        {
-            return Err(MeshError::VertexCountMismatch {
-                attribute: attribute.name,
-                expected: existing.len(),
-                found: values.len(),
-            });
-        }
         if let Some((_, other)) = self.attributes.values().next()
             && other.len() != values.len()
         {
@@ -195,9 +186,9 @@ impl Mesh {
     /// The interleaved vertex layout the pipeline binds, in shader-location
     /// order, or `None` for a mesh with no attributes.
     ///
-    /// One buffer, level 0: each vertex's attributes are packed back to back with
-    /// the offsets the layout declares. A mesh that needed split streams would
-    /// need a layout per stream, which no renderer in the tree asks for yet.
+    /// Each vertex's attributes are packed back to back with the declared
+    /// offsets. Renderers using split streams use [`Self::stream_layouts`]
+    /// instead; the two layouts must not be mixed with each other's bytes.
     #[must_use]
     pub fn vertex_layout(&self) -> Option<VertexBufferLayout> {
         if self.attributes.is_empty() {

@@ -1,9 +1,9 @@
 # Prism Mesh 系统设计：顶级次世代 AAA 级几何数据模型与运行时几何管线
 
-> 状态：完整设计与验证版（v2）
+> 状态：设计规格与逐项验证记录（v2）；实现结论以 §26 的证据为准
 > 面向版本：Prism `0.20-dev` 当前仓库契约
 > 目标读者：渲染、资产工具链、平台、动画/物理与性能工程人员
-> 本文依据：当前仓库代码、CPU 单测、RenderApp 资产上传测试、虚拟几何 GPU twin 与 GDeflate GPU twin 的验证结果；性能门槛采用可复现基准协议记录，设备实测写入同一验证记录
+> 本文依据：当前仓库代码、CPU 单测、RenderApp 真实 GPU 像素读回、蒙皮/虚拟几何/GDeflate/OMM GPU twin 与 Mesh CPU 基准；预算表与设备实测严格分栏，不用预算或 Null/CPU 回退替代真实 GPU 结论
 > 关联文档：`prism_rendering_architecture_zh.md`（全局渲染架构）、`prism_asset_design_zh.md`（资产内核）、`prism_asset_build_design_zh.md`（构建/烘焙）、`prism_material_pipeline_refactor_zh.md`（材质与着色 ABI）、`prism_scene_design_zh.md`（场景与实例）、`prism_aaa_advanced_features_zh.md`（AAA 特性总表）
 > 最后更新：2026-10-15
 
@@ -90,11 +90,11 @@
 | DirectStorage / RTX IO / GDeflate | GPU 直通解压与分块 I/O；容器化流送 | 解压内核与容器格式独立实现 |
 | UE5 Virtual Shadow Map / OMM | 几何与阴影/光追的协同；alpha 覆盖微图 | 只是几何侧契约，阴影算法归别文档 |
 | USD / glTF / Alembic | 授权数据分层（几何/骨架/动画/材质分开）+ 稳定子资产标识 | 不把 USD/glTF 顶层结构直接当作引擎运行时 ABI |
-| Simplygon 类自动 LOD 工具 | 自动简化、轮廓与误差报告、硬边/UV seam 保护 | 简化算法自研并与 Golden 指标挂钩 |
+| Simplygon 类自动 LOD 工具 | 自动简化、误差报告、材质槽隔离 | 简化算法自研并与 Golden 指标挂钩 |
 
 ### 3.2 借什么、不借什么
 
-**借形态**：Cluster + DAG + 屏幕空间误差是当前公开信息里对“任意复杂度几何”最可验证的形态；分流顶点 + 域量化是带宽优化的成熟做法；一份授权数据派生多产物是 AAA 内容流水线的共识。
+**借形态**：固定 Cluster 分区 + 独立 QEM LOD 资产集合 + 屏幕空间误差，是当前实现采用的可验证形态；分流顶点 + 域量化是带宽优化的成熟做法；一份授权数据派生多产物是 AAA 内容流水线的共识。单一大 DAG 只作为外部技术对标，不作为 Prism 当前实现声明。
 
 **不借结论**：不做“必须 Mesh Shader”“必须某家 GPU”“必须单一万能格式”的强假设。Prism 的高层算法与光栅后端解耦（§11.4），能力探测与档位选择（§4）保证同一场景语义在兼容档也能跑。
 
@@ -131,7 +131,7 @@
 ⑤ Geometry Consumers（互不重复真相）
         │  标准 draw / GPU-driven 实例 / 虚拟几何 / 光追 / 物理 / 编辑器预览
         ▼
-⑥ Deformation (prism_render_architecture::deformation + prism_math_gpu)
+⑥ Deformation (prism_mesh::deformation + prism_render_app::DeformationCache)
            蒙皮/Morph/布料/顶点动画 → 形变缓存 → 多 pass 复用
 ```
 
@@ -150,6 +150,7 @@ pkg/prism_mesh                      设备无关几何数据（现状已落地�
   ├─ validate.rs     完整校验规则集
   ├─ morph.rs        Morph target 数据（设备无关）
   ├─ skin.rs         蒙皮权重数据（设备无关）
+  ├─ deformation.rs  批量 Morph/LBS/修正 CPU reference、输入校验与共享 storage ABI
   └─ hash.rs         确定性内容哈希（DDC 键）
 
 pkg/prism_asset_build_core
@@ -164,19 +165,21 @@ pkg/prism_render_architecture
   └─ gpu_scene/       实例身份与上传（几何只引用其句柄）
 pkg/prism_render_scene/src/geometry   Bevy 接入层；几何算法消费 `prism_mesh`，`mesh_adapter` 只负责源资产转换
 pkg/prism_math_gpu/src/skinning       GPU 蒙皮内核（CPU golden → GPU twin 校验）
+pkg/prism_render_app/src/mesh/deformation.rs  原生 RHI 批量计算、持久资源、跨帧双缓冲
 pkg/prism_micromap(_gpu)              OMM 烘焙与孪生
 pkg/prism_virtual_geometry_gpu        vis-buffer 软件光栅 GPU 孪生（元/逐像素校验）
 pkg/prism_gdeflate_gpu                页解压的去交错 GPU 孪生
 crates/bevy_mesh                      Bevy 接入与兼容路径；原生 Prism RHI 以 prism_mesh 为准（§20）
 ```
 
-### 5.3 当前实现与验证基线（2026-10-14）
+### 5.3 当前实现与验证基线（2026-10-15）
 
 - `prism_mesh::Mesh` 已提供属性、索引、拓扑、单流布局、分流布局、字节打包、包围体、校验、Morph、Skin、SubMesh 与确定性内容哈希；`#![forbid(unsafe_code)]`、无 ECS、无 GPU 句柄。
 - `VirtualGeometryVersion=1` 已提供 Cluster 资产契约、量化 payload 编解码、层级/包围体校验、页表、驻留页存储、LOD 选择、滞回、速度预取、Cluster cull、RasterPath 分类、软件光栅与逐帧计划组合；构建侧同时提供固定 Cluster 分区和独立 QEM LOD 资产集合。
 - `GeometryTable` 已提供 generation 句柄、代际回收、LOD 驻留回退与 ABI 检查；`RenderMesh` 已把分流数据接入 queue、frame graph、draw slot 与固定页 GPU 池。
 - `prism_render_scene::geometry::shading` 已迁移到 `prism_mesh::Mesh`；Bevy 主世界 Mesh 只在 `geometry::mesh_adapter` 中转换一次，几何解析、拓扑处理与单测不再依赖 Bevy Mesh 数据结构。
-- CPU 证据包括 `prism_mesh`、`prism_render_architecture`、资产流式化与渲染资产页池测试；GPU twin 证据覆盖虚拟几何计算内核与 GDeflate 去交错内核。真实设备测试使用 `PRISM_REQUIRE_GPU=1` 强制适配器存在，未暴露适配器时直接失败而不把 Null RHI 计为 GPU 通过。
+- CPU 证据包括 `prism_mesh`、`prism_render_architecture`、资产流式化与渲染资产页池测试；GPU twin 证据覆盖虚拟几何计算内核与 GDeflate 去交错内核。RenderApp、虚拟几何、GDeflate、OMM 测试使用 `PRISM_REQUIRE_GPU=1`；数学蒙皮使用 `PRISM_MATH_GPU_REQUIRED=1`。强制运行时无适配器即失败，Null RHI 不计为 GPU 通过。
+- `prism_mesh::deformation` 与 `prism_render_app::DeformationCache` 已验证批量 Morph → 4/8 影响 LBS → 外部修正，包含 50,000 顶点 CPU/GPU 对照、历史失效与直接顶点绘制像素读回；该证据不替代全部运行时阴影/深度/RT 消费者的集成验收。
 - 本文把已验证契约、运行时降级、性能门槛和演进规则统一成可执行规格；代码实现以这些契约和测试作为唯一判定来源。
 
 ## 6. 核心数据模型：一件 Mesh 是什么
@@ -224,21 +227,21 @@ MeshIR
 
 | 语义类别 | 推荐语义名 | 授权类型 | `Compatible`/`Standard` 出货格式 | `Ultra` 出货格式 | 字节/顶点 |
 |---|---|---|---|---|---|
-| 位置 | `Vertex_Position` | `[f32;3]` | `Float32x3` | 虚拟几何：`Snorm16x3` 级局部量化；蒙皮：`Float32x3` | 12 / 6 |
-| 法线 | `Vertex_Normal` | `[f32;3]` | `Snorm8x4` 或八面体 `Snorm16x2` | 八面体 `Snorm16x2` | 4 |
-| 切线 | `Vertex_Tangent` | `[f32;4]` | `Snorm8x4`（handedness 入 w） | 由法线 + 符号位重建 | 4 / 1 |
-| UV | `Vertex_Uv0..3` | `[f32;2]` | `Float16x2` | `Unorm16x2`（按 UV 包围盒归一） | 4 |
+| 位置 | `Vertex_Position` | `[f32;3]` | `Float32x3` | CLST payload：局部 `Unorm16x3` 编码；标准/蒙皮：`Float32x3` | 12 / 6（payload） |
+| 法线 | `Vertex_Normal` | `[f32;3]` | `Float32x3` / 显式 `Snorm8x4` | 标准网格保留；CLST v2 不存该属性 | 12 / 4 |
+| 切线 | `Vertex_Tangent` | `[f32;4]` | `Float32x4` / 显式 `Snorm8x4` | 标准网格保留 | 16 / 4 |
+| UV | `Vertex_Uv0..3` | `[f32;2]` | `Float32x2` / `Float16x2` | 标准网格保留 | 8 / 4 |
 | 顶点色 | `Vertex_Color` | `[f32;4]` | `Unorm8x4` / `Snorm8x4` | `Unorm8x4` | 4 |
-| 骨骼索引 | `Vertex_JointIndex` | `[u32;4]` | `Unorm8x4`（≤256 骨/批）或 `Uint16x4` | `Unorm8x4` | 4 / 8 |
+| 骨骼索引 | `Vertex_JointIndex` | `[u32;4]` | `Uint32x4`，索引不得按归一化颜色解释 | 同左；批量 compute 使用每影响 `u32` | 16（四索引） |
 | 骨骼权重 | `Vertex_JointWeight` | `[f32;4]` | `Unorm8x4`（归一化） | `Unorm8x4` | 4 |
-| Morph 增量 | （纹理化） | `[f32;3]` | 稠密：属性；大量目标：delta 纹理 | delta 纹理 | 0（纹理） |
+| Morph 增量 | `MorphTarget` | `[f32;3]` | compute CSR storage：`xyz + target_index` | 同左，独立于顶点属性数 | 16 / 非零贡献 |
 | 自定义 | `Vertex_Custom0..N` | 项目定义 | 由注册项声明 | 同左 | 视格式 |
 
 约束：
 
 - 属性数量必须落在 `Limits::max_vertex_attributes` 内（`baseline` 16、`desktop` 32）；顶点缓冲数不得超 `max_vertex_buffers`（8 / 16）。
 - 同一语义在整个项目内只有一个格式定义；变体（如法线的两种编码）只能是不同**流类别**，不能是同一语义的两种隐式含义。
-- 格式矩阵与 `prism_render_driver::VertexFormat` 的 12 个现有变体一一对齐；未进入 RHI 的 `Unorm16x2`、`Snorm16x2/3` 等编码只存在于虚拟几何 payload，不伪装成顶点输入格式。
+- 标准顶点输入只使用 `prism_render_driver::VertexFormat` 的现有变体。`Unorm16x3` 在本文专指 CLST 局部位置编码，不是 RHI 顶点格式；八面体、纹理 Morph 等其他编码必须有独立实现/制品证据，不能从格式名称推断存在。
 
 ### 6.4 拓扑
 
@@ -347,7 +350,7 @@ pub struct SubMesh {
 
 - **位置量化**基于 Cluster/页的局部包围盒，把位置映射到归一化整数；解码用页头部的 `scale/offset`。误差上界 = `局部extent / (2^bits - 1)`，必须并入该 Cluster 的 `object_error`，使 LOD 选择能感知量化误差。
 - **法线/切线/UV**由标准网格的分流布局与格式矩阵编码；CLST v2 不接受这些属性，因此不存在构建过程中静默重采样或丢失。
-- **UV** 按 UV 包围盒归一化到 `Unorm16`；若 UV 超出 [0,1]（平铺 UV），退化为 `Float16x2` 并在序列化中标记。
+- **UV** 由标准网格格式矩阵编码；当前紧凑格式是 `Float16x2`，不执行基于 UV 包围盒的隐式归一化。CLST v2 不存储 UV，输入含 UV 时返回 `UnsupportedAttribute`。
 - 量化是构建期设置的一部分；改变量化必须改变 `build_settings_hash` 并触发重建，禁止运行时“就地量化”。
 
 ### 7.4 缓冲对齐与 GPU 限制
@@ -379,17 +382,16 @@ pub struct SubMesh {
 
 ### 9.1 蒙皮
 
-- 默认路径：标准 GPU skinning，4 个影响（`Compatible`）到 8 个影响（`Standard`/`Ultra`）。
-- 内核：`prism_math_gpu::skinning`（CPU golden + GPU 孪生校验范式）。
-- 法线变换使用骨骼旋转（或用逆矩阵转置，按骨骼是否均匀缩放决定），构建期标记骨架是否存在非均匀缩放以选择正确路径。
-- 权重在构建期归一化；和为零的顶点必须退化为绑定姿态（而不是变成 NaN）。
+- 批量入口：设备无关 `DeformationMesh::new`，原生 GPU `DeformationCache::submit_pose`。profile 显式选择 4/8 影响；超限报错，不静默截断。数学库的 `prism_math_gpu::skinning` 是另一个算法 twin 入口，不冒充持久运行时缓存。
+- 内核为线性混合蒙皮（LBS），不把双四元数的数学 twin 等同于当前批量算法。位置使用三行仿射矩阵；法线始终使用对应逆转置，支持非均匀缩放与反射，奇异/非有限矩阵在提交前拒绝。
+- 权重在静态准备时归一化并去掉零项；无影响或和为零的顶点保留 **Morph 后的绑定姿态**。带符号 Morph 权重有效，蒙皮权重必须非负。
+- 有限值仍可能在乘加中溢出：静态准备记录位置/法线/逐目标的绝对包络，动态验证按目标、骨骼和修正计算保守范围。超过 `f32::MAX / 4` 的中间包络返回 `ArithmeticRange`，不钳制、不污染上一帧缓冲；该策略可保守拒绝最终会相消的极值姿态。
 
 ### 9.2 Morph target / blend shape
 
-- 少量目标：每目标一个顶点属性流，权重作为 uniform。
-- 大量目标（面部、纠正形变）：**delta 纹理**形态——每目标一层纹理，`(xyz)` 存位移；顶点阶段按权重采样累加。这避免属性数量爆炸。
-- 稀疏增量：只存变化的顶点及其索引，配合间接索引表；构建期报告稀疏率。
-- 法线 Morph：默认不存（用基法线 + 可选切线空间修正），可选“重算法线”标志由材质选择。
+- Dense/Sparse 授权目标在准备时转置为逐顶点 CSR storage；零增量不存储，不分配 `顶点数 × 目标数` 的稠密表，也不占 shader location。
+- 每项贡献为 `xyz` 位移 + `u32 target_index`（16 字节），每帧只上传目标权重；每个顶点遍历自己的非零贡献。
+- 当前 `MorphDelta` 只表达位置增量。法线由基法线逆转置蒙皮后归一化，可叠加显式外部法线修正；该接口不隐含自动重算法线或 Morph 法线导数。
 
 ### 9.3 复合顺序
 
@@ -403,8 +405,11 @@ bind pose → morph targets（按权重累加）→ skinning（骨骼变换）�
 
 ### 9.4 形变缓存与 motion vector
 
-- 形变结果写入**形变缓存**（double-buffered：当前帧 + 上一帧），供主视图、阴影、速度、可见性、光追 refit 复用。
-- 速度 = 当前形变位置 − 上一帧形变位置（世界空间）；缺上一帧时退化为实例位移。
+- `DeformationCache` 以拥有设备的 `Arc` 保存全部资源，满足 `Send + Sync + 'static`；静态输入只上传一次，每个非空姿态一次 compute dispatch，无生产读回，Drop 显式释放资源。创建前检查 storage/uniform/bind-group/dispatch 限制。
+- 两个输出均为 `STORAGE | VERTEX | COPY_SRC`，每顶点 32 字节，位置/法线位于 offset 0/16；`DeformationOutput::vertex_layout` 返回实际布局，不能误用标准 split-position 的 12 字节步长。
+- frame 必须严格递增；首帧、跳帧或 `invalidate_history` 使 `previous` 别名 `current` 且 `history_valid=false`，连续有效帧才承接历史。非法输入在任何 queue write 前拒绝，停用外部修正会显式清零。
+- 输出为 mesh-local：速度消费者必须分别乘当前/上一帧实例矩阵；历史无效时不计算形变速度。消费者须在同一有序 queue 的下一次更新前提交，缓存只保留两个姿态，不保存任意多帧。
+- 16×16 真实 GPU 像素测试已证明两个输出可直接作为顶点流参与位移/法线/速度着色，不经 CPU 重打包；完整引擎的主视图、深度、阴影及 RT refit 接线按各消费者单独核验。
 - `deformation::{DeformationBudget, DeformationKind}` 是预算与分类入口；每秒形变顶点数、BLAS refit 次数是硬预算。
 - 形变缓存的分配与普通顶点缓冲分属不同缓冲类（见 §12），避免与静态几何争夺分配器。
 
@@ -675,7 +680,7 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 
 ## 18. 性能预算与基准即规格
 
-以下是可执行预算门槛。每次基准运行同时记录设备标识、后端、驱动、分辨率、质量档、场景种子、冷启动/热启动状态和 P50/P95/P99；预算值用于回归判定，实测样本写入 `target/benchmarks/mesh/<date>/`。固定场景为：`100 万 Cluster 静态场景`、`2000 万三角形近景高模`、`单角色 5 万顶点蒙皮`、`1 万实例共享几何`。
+以下数字是产品级回归预算，不是当前设备已经达到的性能结论。一次完整场景性能样本必须同时记录设备标识、后端、驱动、分辨率、质量档、场景种子、冷启动/热启动状态和 P50/P95/P99，并写入 `target/benchmarks/mesh/<date>/`。固定场景为：`100 万 Cluster 静态场景`、`2000 万三角形近景高模`、`单角色 5 万顶点蒙皮`、`1 万实例共享几何`。
 
 | 指标 | 目标（`Standard`，1080p） | 目标（`Ultra`，4K） | 说明 |
 |---|---|---|---|
@@ -695,6 +700,17 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 - 画质对标协议与缺陷等级沿用渲染架构文档 §15.5/§15.6，几何侧补充“轮廓误差/屏幕误差/LOD 跳变”三项。
 - 性能结论必须绑定基准 artifact；画质结论必须绑定 Golden 图与误差报告，文档中的预算数字本身不替代实测。
 
+### 18.1 2026-10-15 当前实测
+
+实测设备为 Apple M2（10 核 GPU）、Metal、macOS 27.0.1（26A434），工具链为 `rustc 1.96.1` / `cargo 1.96.1`。`mesh_virtual_geometry` CPU 基准使用 8192 个三角形，生成 391 个 Cluster、4 页，采集 24 个样本：
+
+| CPU 指标 | P50 | P95 | P99 |
+|---|---:|---:|---:|
+| 构建耗时 | 2,206,459 ns | 2,696,292 ns | 3,316,916 ns |
+| LOD 选择 | 625 ns | 625 ns | 709 ns |
+
+这组数字只证明当前资产构建与 CPU LOD 选择的测量结果。真实 GPU 测试证明 GPU 路径执行正确，但本轮不产生 100 万 Cluster/1080p/4K 完整场景的 GPU timestamp、峰值 VRAM、上传带宽、缺页、功耗或帧时间数据，因此不据此宣称达到上表预算。
+
 ## 19. 诊断、测试与验证
 
 ### 19.1 必备诊断
@@ -705,17 +721,19 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 
 ### 19.2 Debug View
 
-- 三角形密度/超采样率热图、Cluster 轮廓、LOD 级别着色、Cut 可视化、页驻留热图、法线锥可视化、材质槽着色。
-- 与材质 ID / 对象 ID 视图共存（渲染架构 §15.2）。
+- 运行时统一使用 `GpuSceneDebugView` 作为调试视图入口，并与材质 ID / 对象 ID 视图共存（渲染架构 §15.2）。
+- Mesh 诊断协议保留三角形密度/超采样率、Cluster 轮廓、LOD、Cut、页驻留、法线锥与材质槽字段；验收时以实际诊断输出或捕获物为证据，不把字段清单本身视为已生成的 Debug View。
 
 ### 19.3 测试金字塔
 
-1. **单元测试（CPU golden）**：属性插值/合并、索引校验、包围体、量化/反量化误差界、Cluster 划分、层级误差单调、页打包与解包、子网格区间、Morph/Skin 数据结构；`pkg/prism_mesh/src/tests.rs` 与虚拟几何模块测试覆盖这些契约。
-2. **GPU 孪生一致性**：软件光栅、LOD 选择、vis word 编解码、投影、OMM、GDeflate 去交错 —— 与 CPU 参考逐元/逐像素比对（`prism_virtual_geometry_gpu`、`prism_micromap_gpu`、`prism_gdeflate_gpu` 已建立范式）。
-3. **图像测试**：标准网格、虚拟几何、蒙皮、Morph、LOD 过渡在不同档位的 Golden 图；含 TAA 稳定性帧。
-4. **压力测试**：百万级 Cluster、极端顶点数、极端尺度、非有限输入、恶意簇（NaN/退化/越界索引）、超预算场景。
-5. **确定性测试**：同输入多次构建哈希一致；不同线程数构建结果一致；跨平台位模式一致（允许量化差异的部分显式标注）。
-6. **回归门槛**：LOD 跳变、缺页 pop、轮廓误差、PSO 爆炸、显存超配都必须有专用断言。
+测试分成“当前完成性证据”和“产品级持续回归协议”，两者不得混写：
+
+1. **当前 CPU 契约证据**：`cargo test -p prism_mesh` 的 32 项库单测、14 项集成测试通过，`cargo test -p prism_asset_build_core --lib` 122 项通过；覆盖属性/索引/拓扑、包围体、内容哈希、分流布局、Morph/4–8 影响 LBS/修正顺序、共享 ABI、溢出输入拒绝、CLST v2 局部量化、固定 Cluster 分区、QEM LOD、非有限误差和不支持属性的反例。
+2. **当前真实 GPU 证据**：沙盒外执行 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh:: -- --nocapture`，14 项通过，其中标准网格 8×8 像素读回、批量形变 CPU/GPU 对照、形变 current/previous 直接绑定的 16×16 绘制实际执行 GPU 工作；其余项验证生命周期、限制与上传语义，不计为 GPU 画质证据。数学蒙皮以 `PRISM_MATH_GPU_REQUIRED=1` 强制 CPU/GPU parity，4 项通过；虚拟几何、GDeflate、OMM 使用 `PRISM_REQUIRE_GPU=1` 的 suites 通过。
+3. **产品级图像回归协议**：标准网格、虚拟几何、蒙皮、Morph、LOD 过渡按质量档采集 Golden 图和 TAA 稳定性帧；只有生成捕获物并通过误差阈值时才形成图像质量结论。
+4. **产品级压力协议**：百万级 Cluster、极端顶点数、极端尺度、非有限输入、退化/越界索引和超预算场景按固定种子执行；结果必须绑定测试日志与捕获物。
+5. **确定性协议**：同输入多次构建哈希一致、不同线程数结果一致；跨平台差异必须由版本化量化规则解释并记录。
+6. **回归门槛**：LOD 跳变、缺页 pop、轮廓误差、PSO 数量和显存超配分别设置断言与诊断字段，不用单一“测试通过”覆盖所有维度。
 
 ### 19.4 故障注入矩阵
 
@@ -865,7 +883,27 @@ pub fn select_raster_path(
 ) -> GeometryRasterPath;
 ```
 
-### 21.4 形变（`prism_render_architecture::deformation`）
+### 21.4 形变（设备无关输入、原生 RHI 缓存与共享调度）
+
+`prism_mesh::deformation` 导出 `DeformationMesh::new(positions, normals, targets, skin, max_influences)`、`DeformationPose { morph_weights, joints, corrections }`、`JointTransform`、`DeformationCorrection` 与 `DeformedVertex`。`validate_pose` 在任何 GPU 写入之前校验数量、数值、矩阵与保守算术包络；`evaluate` 提供批量 CPU reference。四/八影响 profile 均拒绝超量输入，不截断。
+
+`prism_render_app` 在 crate 根公开 `DeformationCache`、`DeformationCacheError`、`DeformationOutput`：
+
+```rust
+impl DeformationCache {
+    pub fn new(device: Arc<dyn RenderDevice + Send + Sync>, queue: &dyn RenderQueue,
+        mesh: DeformationMesh) -> Result<Self, DeformationCacheError>;
+    pub fn submit_pose(&mut self, queue: &dyn RenderQueue, frame: u64,
+        pose: DeformationPose<'_>) -> Result<DeformationOutput, DeformationCacheError>;
+    pub fn output(&self) -> Option<DeformationOutput>;
+    pub fn invalidate_history(&mut self);
+    pub fn allocated_bytes(&self) -> u64;
+}
+```
+
+缓存拥有 `Arc` 设备与 GPU 资源，满足 `Send + Sync + 'static`。输出 32 字节 stride，位置 offset 0、法线 offset 16；`current` 与 `previous` 都可作为 vertex/storage 输入。双缓冲要求所有消费者在同一有序队列的下一次姿态更新前提交；没有无限历史保留。失败不写 buffer、不推进 frame。全运行时消费者接线与设备丢失重建分别验收，不由此 API 的存在推定完成。
+
+共享预算调度继续使用 `prism_render_architecture::deformation`：
 
 ```rust
 pub struct DeformationHandle(pub u32);
@@ -886,7 +924,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 | 虚拟几何 GPU twin | `prism_virtual_geometry_gpu` | `cargo test -p prism_virtual_geometry_gpu` | 适配器缺少所需特性时回退 CPU/标准网格路径 |
 | 页驻留与 GPU 池 | `prism_asset::streaming`、`prism_render_app::render_asset` | page residency/page pool tests | 预算不足驱逐低优先级页，祖先覆盖画面 |
 | GDeflate GPU twin | `prism_gdeflate_gpu` | `cargo test -p prism_gdeflate_gpu` | GPU 解码不可用时使用 CPU 解码，保持同一 payload ABI |
-| 形变契约 | `prism_render_architecture::deformation`、`prism_math_gpu::skinning` | CPU golden/GPU twin tests | 动态几何走标准路径，复用形变预算与缓存接口 |
+| 批量形变与缓存 | `prism_mesh::deformation`、`prism_render_app::DeformationCache`、共享调度 | 10 项 CPU reference 测试、4 项原生缓存测试（其中 2 项真实 GPU） | CSR Morph → 4/8 LBS → 外部修正；跨帧双缓冲；输入错误保留上一帧，跳帧/teleport 失效历史 |
 | OMM/光追派生 | `prism_micromap(_gpu)` 与资产 DAG | OMM parity/capture tests | 不具备 RT/OMM 能力时使用标准阴影/光栅几何 |
 | 性能回归 | `benches/`、GPU timestamps、capture artifacts | §18 protocol | 超预算触发档位降级、预取收紧或页驱逐 |
 
@@ -903,6 +941,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 5. 新增 `pkg/prism_mesh/src/hash.rs`：确定性内容哈希（位模式、固定遍历序）。✅
 6. 新增 `streams.rs`：位置/着色/蒙皮/形变分流布局与实际字节打包，并接入 `RenderMesh` 多 buffer、queue、frame graph 和 draw slot。✅
 7. 修复 `MeshBounds` 对有限极值坐标的派生运算溢出，并加入极值回归测试；无法由 `f32` 表示的范围/半径按契约饱和至有限最大值。✅
+8. 批量形变共享 ABI、CPU reference 与原生 RHI 双缓冲缓存：50,000 顶点 CPU/GPU 对照，Morph-only、四/八影响、非均匀缩放、修正清零、资源释放、非法输入不改历史、current/previous 直接绘制像素断言。✅
 
 理由：设备无关工作可独立单测，GPU 上传闭环验证真实 buffer 的写入与替换语义；极值数值测试确保有限输入不会因中间运算变成 NaN/Inf。
 
@@ -940,30 +979,31 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 | 能力 | 当前证据 | 失败/降级语义 |
 |---|---|---|
-| Mesh 属性、拓扑、索引、SubMesh、包围体、哈希 | `cargo test -p prism_mesh` 通过 | 返回 `MeshError`，不创建 GPU 表示 |
-| 分流布局与实际字节打包 | RenderMesh mesh tests 与渲染资产测试通过 | 选择兼容单流 profile 或拒绝超出 `Limits` 的布局 |
+| Mesh 数据与批量形变 reference | `cargo test -p prism_mesh`：32 项库单测、14 项集成测试通过 | 返回结构化错误，不创建 GPU 表示；不截断影响列表 |
+| 分流布局、实际字节打包与标准 draw | RenderMesh tests 通过；Apple M2/Metal 上 8×8 GPU 像素读回实际运行 1 项并通过 | 选择兼容单流 profile 或拒绝超出 `Limits` 的布局 |
+| 虚拟几何构建 | `cargo test -p prism_asset_build_core --lib`：122 项通过；覆盖固定 Cluster、CLST v2、QEM LOD 与反例 | 不支持属性返回 `UnsupportedAttribute`；非有限误差拒绝构建 |
+| 原生批量形变与历史 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh::`：14 项通过；其中批量对照与 current/previous 光栅像素测试执行真实 GPU | pose/限制校验失败保留资源与历史；首帧/跳帧/teleport previous 别名 current；Drop 释放全部自有资源 |
 | 固定页 GPU 池事务 | `prism_render_app` page pool tests 通过 | 事务失败回滚，保留旧 resident range |
 | 虚拟几何 CPU 决策 | `prism_render_architecture` tests 通过 | 空/损坏层级生成空计划并记录诊断 |
-| 虚拟几何 GPU twin | `cargo test -p prism_virtual_geometry_gpu` 通过 | 缺少适配器/特性时保持 CPU reference 与标准路径 |
-| GDeflate GPU twin | `cargo test -p prism_gdeflate_gpu` 通过 | GPU 解码不可用时使用 CPU 解码 |
-| 强制真实 GPU 探测 | `PRISM_REQUIRE_GPU=1` 使无适配器环境直接失败 | 结果不计为 GPU 通过，CI 记录适配器缺失 |
+| 虚拟几何、GDeflate、OMM GPU twin | Apple M2/Metal 上以 `PRISM_REQUIRE_GPU=1` 强制执行对应 suites 并通过 | 缺少适配器/特性时保持 CPU reference 与标准路径 |
+| 蒙皮 GPU twin | `prism_math_gpu --test skinning_parity` 在 Apple M2/Metal 上实际运行 4 项并通过 | 无适配器且强制 GPU 时直接失败，不记录为 parity 通过 |
+| 强制真实 GPU 探测 | 沙盒内因没有适配器而按预期失败；沙盒外检测到 Metal 适配器并执行 GPU 工作 | 无适配器的结果只记录环境缺失，不计为 GPU 通过 |
 | 设备丢失与预算超限 | page pool、asset residency 状态机测试通过 | 延迟释放、驱逐、重上传，禁止悬挂句柄与 OOM |
-| 性能门槛 | §18 的固定场景、计时字段和 P50/P95/P99 协议 | 超预算触发质量档位、LOD、预取和驻留策略调整 |
+| CPU 性能样本 | §18.1 记录 8192 三角形/391 Cluster/4 页/24 样本的构建与 LOD P50/P95/P99 | 只用于 CPU 回归，不外推为完整场景 GPU 性能 |
+| 完整场景性能门槛 | §18 固定场景、计时字段和 P50/P95/P99 协议 | 只有 GPU timestamp、VRAM、上传、缺页与功耗捕获齐全时才判定预算 |
 
-## 26. 最终验收矩阵
+## 26. 最终验收矩阵：标准与本轮证据
 
-| 维度 | 验收标准 | 证据 |
+| 维度 | 产品级验收标准 | 本轮证据与结论 |
 |---|---|---|
-| 数据模型 | 属性/拓扑/索引/子网格/包围体/哈希全部有单测；格式矩阵全覆盖 RHI 变体 | `cargo test -p prism_mesh` |
-| 布局确定性 | 同属性集产生字节一致布局，哈希稳定 | 单测 + 哈希快照 |
-| 校验 | §6.8 全部规则有正/反用例；坏数据不崩溃 | 单测 + 故障注入 |
-| 标准路径 | `Compatible` 档标准网格 Golden 图通过 | 图像测试 |
-| 虚拟几何 | CPU 计划、页 ABI、LOD/cull/raster GPU twin 逐项一致；缺页使用祖先/fallback | 模块测试 + `cargo test -p prism_virtual_geometry_gpu` |
-| 形变 | Skin/Morph 数据结构、预算和 GPU twin 契约一致；动态路径回退标准网格 | `prism_mesh`/`prism_math_gpu` golden 与 render tests |
-| 光追 | OMM 与派生几何使用版本化资产契约；不具备 RT 时选择光栅 fallback | OMM parity/capture tests |
-| 带宽/性能 | §18 场景协议输出 P50/P95/P99、GPU 时间戳、VRAM、上传与缺页字段 | Mesh CPU benchmark + GPU timestamp artifact |
-| 维护性 | 扩展点按 §20.2 注册方式落地；无分支式扩展 | 代码评审 + 契约测试 |
-| 诊断 | 每条降级可解释 | Debug View + 诊断输出 |
+| 数据模型 | 属性/拓扑/索引/子网格/包围体/哈希有正反单测；格式矩阵覆盖 RHI 变体 | `prism_mesh` 32 项库单测与 14 项集成测试通过；该维度形成契约证据 |
+| 布局与标准路径 | 同属性集产生确定布局，上传字节与 draw 布局一致 | CPU 契约测试通过；Apple M2/Metal 8×8 像素读回 1 项通过。它证明标准 draw 闭环，不等同于全档位 Golden 图集 |
+| 虚拟几何 | 固定 Cluster、CLST v2、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | 构建侧 122 项通过；虚拟几何强制 GPU suite 通过；已有算法与 ABI 证据，CLST v2 仍只保存位置，不能外推为完整材质属性载荷 |
+| 形变 | Skin/Morph、缓存、预算与深度/阴影/速度/RT 消费一致 | 批量 Morph/LBS/修正的 CPU/GPU 对照（含 50,000 顶点）与 16×16 current/previous 直接绘制通过；数学蒙皮 parity 4 项通过。全部引擎 pass/RT 消费接线和跨档位 Golden 图不由这些独立测试证明 |
+| 光追派生 | OMM 与派生几何使用版本化资产契约；无 RT 能力时选择光栅路径 | OMM 强制 GPU parity 通过；不把它扩张为完整 RT 场景画质结论 |
+| 带宽与性能 | §18 固定场景输出 P50/P95/P99、GPU timestamp、VRAM、上传、缺页与功耗字段 | 已记录 CPU 构建/LOD P50/P95/P99；完整场景 GPU 字段无本轮 artifact，因此预算表保持回归门槛而非达标声明 |
+| 维护性 | 扩展点遵守 §20.2，schema/ABI 显式版本化，错误类型稳定 | crate 分层、CLST v2、资产 schema、`UnsupportedAttribute` 与非有限值错误由代码和测试锁定 |
+| 诊断 | 每条降级可解释，诊断字段可导出 | 通用 `GpuSceneDebugView` 与状态机诊断作为现有入口；Mesh 专用视图只有产生实际捕获物时才计入图像证据 |
 
 ## 27. 结论
 
