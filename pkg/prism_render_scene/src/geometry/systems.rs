@@ -85,8 +85,10 @@ pub(crate) fn sync_geometry_registry(
             primitive_count: primitive_count(mesh.primitive_topology(), base.element_count),
             lods,
         };
-        if registry.record(handle) != Some(&record) {
-            registry.upsert(asset, record);
+        if registry.handle(asset) != Some(handle) || registry.record(handle) != Some(&record) {
+            if !registry.upsert(asset, record) {
+                continue;
+            }
             changed = true;
         }
         // The geometry record describes draw ranges, while this mapping owns
@@ -136,23 +138,37 @@ fn draw_range(
     match mesh.buffer_info {
         RenderMeshBufferInfo::Indexed { count, .. } => {
             let indices = allocator.mesh_index_slice(asset)?;
+            let index_end = indices.range.start.checked_add(count)?;
+            if index_end > indices.range.end {
+                return None;
+            }
+            let vertex_end = vertices.range.start.checked_add(mesh.vertex_count)?;
+            if vertex_end > vertices.range.end {
+                return None;
+            }
             Some(DrawRange {
                 primitive_kind: GeometryPrimitiveKind::Indexed,
                 element_count: count,
                 first_element: indices.range.start,
-                base_vertex: vertices.range.start as i32,
+                base_vertex: i32::try_from(vertices.range.start).ok()?,
                 vertex_buffer_class,
                 index_buffer_class: registry.buffer_class(indices.buffer),
             })
         }
-        RenderMeshBufferInfo::NonIndexed => Some(DrawRange {
-            primitive_kind: GeometryPrimitiveKind::NonIndexed,
-            element_count: mesh.vertex_count,
-            first_element: vertices.range.start,
-            base_vertex: 0,
-            vertex_buffer_class,
-            index_buffer_class: 0,
-        }),
+        RenderMeshBufferInfo::NonIndexed => {
+            let vertex_end = vertices.range.start.checked_add(mesh.vertex_count)?;
+            if vertex_end > vertices.range.end {
+                return None;
+            }
+            Some(DrawRange {
+                primitive_kind: GeometryPrimitiveKind::NonIndexed,
+                element_count: mesh.vertex_count,
+                first_element: vertices.range.start,
+                base_vertex: 0,
+                vertex_buffer_class,
+                index_buffer_class: 0,
+            })
+        }
     }
 }
 
