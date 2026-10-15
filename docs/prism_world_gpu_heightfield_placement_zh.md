@@ -59,6 +59,13 @@ PRISM_REQUIRE_GPU=1`，`tests/heightfield_placement.rs` 的 7 项测试全部通
 同次无设备 Naga 闸门为 6 项通过，验证两个新 WGSL 的解析、core capabilities、入口、
 binding access、uniform span、64 字节 record/sample stride 和无 float/wide scalar。
 
+同次真实设备还通过了独立的 `heightfield_placement_deletion` 端到端回归：它由
+`GpuHeightfieldPlacement` 生成 placement，再由独立的 56-byte full-key deletion pass
+直接回读最终 `indirect[1]` 和 compact prefix。空删除、单项删除（重复 key 只删除一次）、
+全量删除均与 CPU oracle 的完整 key 集合一致，并验证上游 placement record 未被改写；
+`scatter_deletion_composed` 的 placement 组合回归同时通过 8 项。这个证据闭合的是
+placement deletion 的 GPU 输出与缓存身份，不代表产品 scene/ECS 或 renderer graph 已接线。
+
 release benchmark 使用 8 次 warmup、64 次 sample，计时拆分 host encode/finish 与
 submit+wait；不含 upload、readback、fixture、校验和绘制，不是 GPU timestamp，也不是
 完整产品帧时。结果为主机微秒：
@@ -75,14 +82,15 @@ submit+wait；不含 upload、readback、fixture、校验和绘制，不是 GPU 
 
 ## 尚未由本片声称完成的内容
 
-GPU placement deletion/full-key persistence、行星/曲率/数据层投影、风与交互、产品
-scene/ECS decoder、renderer graph、资产 GPU 直传、多表示 LOD 接缝和多厂商后端仍需
-各自独立验收。本片只证明二维平面高度场 GPU kernel 及其真实设备闭环。
+行星/曲率/数据层投影、风与交互、产品 scene/ECS decoder、renderer graph、资产 GPU
+直传、多表示 LOD 接缝和多厂商后端仍需各自独立验收。本片只证明二维平面高度场 GPU
+kernel、full-key deletion 及其真实设备闭环。
 
 ## 复现
 
 ```text
 cargo test --offline -p prism_world_gpu --features terrain_scatter --test wgsl_compile
 WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_world_gpu --features terrain_scatter --test heightfield_placement -- --nocapture
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_world_gpu --features terrain_scatter --test heightfield_placement_deletion --test scatter_deletion_composed -- --nocapture
 WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo bench --offline -p prism_world_gpu --features terrain_scatter --bench heightfield_placement -- --nocapture
 ```

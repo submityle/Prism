@@ -173,6 +173,56 @@ fn deletion_scatter_uses_core_integer_features_and_exact_binding_access() {
 
 #[cfg(feature = "terrain_scatter")]
 #[test]
+fn placement_deletion_uses_the_independent_56_byte_key_abi() {
+    let source = include_str!("../src/shaders/heightfield_placement_deletion.wgsl");
+    let module = wgpu::naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|error| panic!("placement deletion parse: {error}"));
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .expect("placement deletion requires no optional capabilities");
+    assert_eq!(module.entry_points.len(), 1);
+    assert_eq!(module.entry_points[0].workgroup_size, [64, 1, 1]);
+    let mut bindings = std::collections::BTreeMap::new();
+    for (_, variable) in module.global_variables.iter() {
+        if let Some(binding) = variable.binding {
+            assert_eq!(binding.group, 0);
+            assert!(bindings.insert(binding.binding, variable).is_none());
+        }
+    }
+    assert_eq!(bindings.len(), 7);
+    assert_eq!(bindings[&0].space, wgpu::naga::AddressSpace::Uniform);
+    let load = wgpu::naga::StorageAccess::LOAD;
+    let store = load | wgpu::naga::StorageAccess::STORE;
+    for binding in 1..=6 {
+        assert_eq!(
+            bindings[&binding].space,
+            wgpu::naga::AddressSpace::Storage {
+                access: if binding <= 4 { load } else { store },
+            }
+        );
+    }
+    match module.types[bindings[&4].ty].inner {
+        wgpu::naga::TypeInner::Array { stride, .. } => assert_eq!(stride, 56),
+        _ => panic!("placement deletion keys must have a 56-byte stride"),
+    }
+    for (_, ty) in module.types.iter() {
+        match ty.inner {
+            wgpu::naga::TypeInner::Scalar(scalar)
+            | wgpu::naga::TypeInner::Atomic(scalar)
+            | wgpu::naga::TypeInner::Vector { scalar, .. } => {
+                assert_ne!(scalar.kind, wgpu::naga::ScalarKind::Float);
+                assert!(scalar.width <= 4);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "terrain_scatter")]
+#[test]
 fn heightfield_scatter_uses_only_core_integer_features_and_six_storage_bindings() {
     let source = include_str!("../src/shaders/scatter_heightfield.wgsl");
     let module = wgpu::naga::front::wgsl::parse_str(source)

@@ -92,6 +92,17 @@ pub use heightfield_placement::{
     GpuHeightfieldPlacement, GpuHeightfieldPlacementError, GpuHeightfieldPlacementWorkBudget,
 };
 
+#[cfg(feature = "terrain_scatter")]
+mod heightfield_placement_deletion;
+
+#[cfg(feature = "terrain_scatter")]
+pub use heightfield_placement_deletion::{
+    GpuHeightfieldPlacementDeletionCacheKey, GpuHeightfieldPlacementDeletionCapacity,
+    GpuHeightfieldPlacementDeletionError, GpuHeightfieldPlacementDeletionUploadStats,
+    GpuHeightfieldPlacementDeletionWorkBudget, GpuHeightfieldPlacementDeletions,
+    GPU_HEIGHTFIELD_PLACEMENT_DELETION_KEY_ABI_VERSION, GPU_HEIGHTFIELD_PLACEMENT_DELETION_VERSION,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

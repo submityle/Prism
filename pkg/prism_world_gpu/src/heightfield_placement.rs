@@ -130,8 +130,11 @@ impl From<HeightfieldPlacementError> for GpuHeightfieldPlacementError {
 /// on the same object is unsupported. Encode allocates/uploads/maps nothing
 /// owned; driver allocations and retained immutable Arc snapshots are separate.
 pub struct GpuHeightfieldPlacement {
+    device_identity: std::sync::Arc<()>,
     queue: wgpu::Queue,
     capacity: usize,
+    vertex_count: u32,
+    request_generation: u64,
     max_brushes: usize,
     max_surface_samples: usize,
     max_groups: u32,
@@ -230,7 +233,7 @@ impl GpuHeightfieldPlacement {
         let indirect = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("placement final indirect"),
             contents: bytemuck::cast_slice(&[vertex_count, 0, 0, 0]),
-            usage: storage | upload | wgpu::BufferUsages::INDIRECT,
+            usage: storage | upload | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::INDIRECT,
         });
         let source_layout = layout(
             device,
@@ -323,8 +326,11 @@ impl GpuHeightfieldPlacement {
             ],
         );
         Ok(Self {
+            device_identity: ctx.device_identity().clone(),
             queue: ctx.queue().clone(),
             capacity,
+            vertex_count,
+            request_generation: 0,
             max_brushes,
             max_surface_samples,
             max_groups: limits.max_compute_workgroups_per_dimension,
@@ -414,6 +420,7 @@ impl GpuHeightfieldPlacement {
             }
         }
         self.request = Some(next);
+        self.request_generation = self.request_generation.wrapping_add(1).max(1);
         Ok(())
     }
 
@@ -507,6 +514,40 @@ impl GpuHeightfieldPlacement {
     /// Fixed primary-slot capacity; never an accepted-point truncation limit.
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    pub(super) fn device_identity(&self) -> &std::sync::Arc<()> {
+        &self.device_identity
+    }
+
+    pub(super) fn draw_args(&self) -> [u32; 3] {
+        [self.vertex_count, 0, 0]
+    }
+
+    pub(super) fn request_generation(&self) -> u64 {
+        self.request_generation
+    }
+
+    pub(super) fn validate_request(
+        &self,
+        config: HeightfieldPlacementConfig,
+        region: HeightfieldPlacementRegion,
+        field: &ScatterDensityField,
+        surface: &PlanarHeightfieldSurface,
+        filters: HeightfieldPlacementFilters,
+        budget: GpuHeightfieldPlacementWorkBudget,
+    ) -> Result<(), GpuHeightfieldPlacementError> {
+        prepare(
+            config,
+            region,
+            field,
+            surface,
+            filters,
+            budget,
+            [self.capacity, self.max_brushes, self.max_surface_samples],
+            self.max_groups,
+        )?;
+        Ok(())
     }
 }
 

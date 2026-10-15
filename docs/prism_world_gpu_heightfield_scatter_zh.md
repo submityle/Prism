@@ -9,6 +9,14 @@
 高度数据来自 `HeightfieldTile::bake/rebake` 的不可变快照，不是 CPU 预计算
 的候选接受标记。生产路径不逐点生成、采样、过滤或回读。
 
+本文件的 `GpuScatterHeightfield` 与二维贴地 placement 是两个不同边界：前者接收既有
+三维 XYZ source candidate，只做作者场/真实 heightfield 的过滤，删除候选但不移动、投影、
+补点或改变 source identity；后者由独立的 `GpuHeightfieldPlacement` 先按 XZ 生成二维
+canonical source，再把 Y 精确投影到三角面，最后在最终 XYZ 采样作者场并 compact。因此
+本过滤链的 source record、terrain ABI、预算和测试结果不能当作 placement 的 GPU twin
+证据；placement 的 ABI、事务性失败和 Apple M2/Metal 7/7、release benchmark 见
+`prism_world_gpu_heightfield_placement_zh.md`。
+
 过滤与 `prism_world_terrain::scatter_with_heightfield` revision 1 精确对应：
 
 - 显式平面 embedding，XZ 半开覆盖；按网格 a-c-b / b-c-d 三角拓扑，
@@ -155,7 +163,9 @@ terrain128 + height16,900），构造的三级 indirect 初始化另为 48B，�
 不含隐式零初始化及 driver 元数据。计时帧无上传。验证 staging、oracle/seen 仅属
 测试/基准，不属于生产 buffer 预算；这些容量载荷不是物理显存、RSS 或峰值内存。
 
-这是精确 GPU 地表过滤，不是完整产品散布。贴地放置、曲率/SDF/数据层和跨散布层
+这是精确 GPU 地表过滤，不是完整产品散布。二维平面贴地 placement kernel 已由独立的
+`GpuHeightfieldPlacement` 交付并有自己的 ABI、真实设备回归与限定 release benchmark，
+但这不表示它已经接入本链或产品。曲率/SDF/数据层和跨散布层
 规则、风/交互、scene schema/编辑器、产品
 renderer graph、蓝噪声频谱与混合 LOD 画质仍需各自实现并验收。局部 parity、
 像素和限定基准不能替代这些工作或整个 world 系统的完成证据。
