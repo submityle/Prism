@@ -12,5 +12,22 @@ libm = "0.2"
 prism_math = { path = "../prism_math" }
 prism_render_architecture = { path = "../prism_render_architecture" }
 
+[features]
+default = ["physical_lens", "post", "stereo", "determinism"]
+std = []
+physical_lens = []
+post = []
+stereo = []
+determinism = []
+cutscene = []
+autofocus = []
+shutter = []
+view_batch = []
+lookahead_stream = []
+edge_stabilize = []
+virtual_production = []
+view_lod = []
+composition_aid = []
+
 [lints]
 workspace = true

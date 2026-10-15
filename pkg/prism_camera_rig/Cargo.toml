@@ -12,5 +12,12 @@ libm = "0.2"
 prism_math = { path = "../prism_math" }
 prism_camera = { path = "../prism_camera" }
 
+[features]
+default = ["director", "rig"]
+director = []
+rig = []
+determinism = []
+trace = []
+
 [lints]
 workspace = true

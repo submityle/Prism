@@ -1,6 +1,6 @@
 use core::f32::consts::PI;
 
-use prism_math::{Mat4, Vec3A};
+use prism_math::{Mat4, Plane, Vec3A, Vec4};
 
 use crate::{CameraError, CameraErrorCode};
 
@@ -10,6 +10,45 @@ pub enum FovAxis {
     Vertical,
     Horizontal,
     Auto,
+}
+
+/// A clip-space plane used to replace the projection's near plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ObliquePlane {
+    pub normal: prism_math::Vec3,
+    pub d: f32,
+}
+
+impl ObliquePlane {
+    pub const fn new(normal: prism_math::Vec3, d: f32) -> Self {
+        Self { normal, d }
+    }
+
+    pub fn from_plane(plane: Plane) -> Self {
+        Self {
+            normal: plane.normal,
+            d: plane.d,
+        }
+    }
+}
+
+/// One render tile of a logical view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SubView {
+    pub full_size: [u32; 2],
+    pub offset: [u32; 2],
+    pub size: [u32; 2],
+}
+
+impl SubView {
+    pub fn validate(self) -> bool {
+        self.full_size[0] > 0
+            && self.full_size[1] > 0
+            && self.size[0] > 0
+            && self.size[1] > 0
+            && self.offset[0] <= self.full_size[0].saturating_sub(self.size[0])
+            && self.offset[1] <= self.full_size[1].saturating_sub(self.size[1])
+    }
 }
 
 /// Perspective projection intent.
@@ -237,6 +276,81 @@ impl Projection {
             Vec3A::new(-fw, fh, -z_far),
         ])
     }
+
+    /// Applies a Lengyel-style oblique near-plane replacement in view space.
+    pub fn with_oblique(self, plane: ObliquePlane) -> Result<Self, CameraError> {
+        let matrix = apply_oblique_near_plane(self.clip_from_view()?, plane)?;
+        Ok(Self::Custom {
+            clip_from_view: matrix,
+            near: self.near(),
+            far: self.far(),
+            reverse_z: self.reverse_z(),
+        })
+    }
+
+    /// Restricts a logical projection to one tile of a larger render.
+    pub fn with_sub_view(self, sub_view: SubView) -> Result<Self, CameraError> {
+        if !sub_view.validate() {
+            return Err(CameraError::new(
+                CameraErrorCode::InvalidViewport,
+                "sub_view",
+                0.0,
+            ));
+        }
+        let mut matrix = self.clip_from_view()?;
+        let sx = sub_view.full_size[0] as f32 / sub_view.size[0] as f32;
+        let sy = sub_view.full_size[1] as f32 / sub_view.size[1] as f32;
+        let cx = 2.0 * (sub_view.offset[0] as f32 + sub_view.size[0] as f32 * 0.5)
+            / sub_view.full_size[0] as f32
+            - 1.0;
+        let cy = 2.0 * (sub_view.offset[1] as f32 + sub_view.size[1] as f32 * 0.5)
+            / sub_view.full_size[1] as f32
+            - 1.0;
+        matrix.x_axis *= sx;
+        matrix.y_axis *= sy;
+        matrix.w_axis.x = matrix.w_axis.x * sx - cx;
+        matrix.w_axis.y = matrix.w_axis.y * sy + cy;
+        Ok(Self::Custom {
+            clip_from_view: matrix,
+            near: self.near(),
+            far: self.far(),
+            reverse_z: self.reverse_z(),
+        })
+    }
+}
+
+pub fn apply_oblique_near_plane(matrix: Mat4, plane: ObliquePlane) -> Result<Mat4, CameraError> {
+    if !plane.normal.is_finite() || !plane.d.is_finite() || plane.normal.length_squared() <= 1.0e-12
+    {
+        return Err(CameraError::new(
+            CameraErrorCode::InvalidProjection,
+            "oblique_plane",
+            0.0,
+        ));
+    }
+    let plane = Vec4::new(plane.normal.x, plane.normal.y, plane.normal.z, plane.d);
+    let inverse = matrix.inverse();
+    let corner = inverse.mul_vec4(Vec4::new(
+        if plane.x >= 0.0 { 1.0 } else { -1.0 },
+        if plane.y >= 0.0 { 1.0 } else { -1.0 },
+        1.0,
+        1.0,
+    ));
+    let scale = 2.0 / plane.dot(corner);
+    if !scale.is_finite() {
+        return Err(CameraError::new(
+            CameraErrorCode::NonFiniteDerivedView,
+            "oblique_plane",
+            0.0,
+        ));
+    }
+    let clip = plane * scale;
+    let mut out = matrix;
+    out.x_axis.z = clip.x - matrix.x_axis.w;
+    out.y_axis.z = clip.y - matrix.y_axis.w;
+    out.z_axis.z = clip.z - matrix.z_axis.w;
+    out.w_axis.z = clip.w - matrix.w_axis.w;
+    Ok(out)
 }
 
 fn matrix_is_finite(matrix: Mat4) -> bool {

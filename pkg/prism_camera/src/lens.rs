@@ -48,6 +48,35 @@ impl Lens {
         }
     }
 
+    pub const fn with_focal_length(mut self, focal_length_mm: f32) -> Self {
+        self.focal_length_mm = focal_length_mm;
+        self
+    }
+
+    pub const fn with_f_stop(mut self, f_stop: f32) -> Self {
+        self.f_stop = f_stop;
+        self
+    }
+
+    pub const fn with_focus_distance(mut self, focus_distance_m: f32) -> Self {
+        self.focus_distance_m = focus_distance_m;
+        self
+    }
+
+    pub fn validate(self) -> bool {
+        self.filmback.sensor_width_mm.is_finite()
+            && self.filmback.sensor_height_mm.is_finite()
+            && self.filmback.sensor_width_mm > 0.0
+            && self.filmback.sensor_height_mm > 0.0
+            && self.focal_length_mm.is_finite()
+            && self.focal_length_mm > 0.0
+            && self.f_stop.is_finite()
+            && self.f_stop > 0.0
+            && self.focus_distance_m.is_finite()
+            && self.focus_distance_m > 0.0
+            && self.blades >= 3
+    }
+
     pub fn vertical_fov(self) -> f32 {
         2.0 * libm::atanf(self.filmback.sensor_height_mm / (2.0 * self.focal_length_mm.max(1.0e-6)))
     }
@@ -82,6 +111,12 @@ pub enum Exposure {
         shutter_s: f32,
         iso: f32,
     },
+    Auto {
+        ev100: f32,
+        min_ev100: f32,
+        max_ev100: f32,
+        adapt_speed: f32,
+    },
 }
 
 impl Default for Exposure {
@@ -102,6 +137,32 @@ impl Exposure {
                 (f_stop.max(1.0e-4) * f_stop.max(1.0e-4)) / shutter_s.max(1.0e-6) * 100.0
                     / iso.max(1.0e-4),
             ),
+            Self::Auto {
+                ev100,
+                min_ev100,
+                max_ev100,
+                ..
+            } => ev100.clamp(min_ev100.min(max_ev100), min_ev100.max(max_ev100)),
+        }
+    }
+
+    pub fn adapt(self, target_ev100: f32, dt: f32) -> Self {
+        let Self::Auto {
+            ev100,
+            min_ev100,
+            max_ev100,
+            adapt_speed,
+        } = self
+        else {
+            return self;
+        };
+        let target = target_ev100.clamp(min_ev100.min(max_ev100), min_ev100.max(max_ev100));
+        let weight = 1.0 - libm::exp2f(-adapt_speed.max(0.0) * dt.max(0.0));
+        Self::Auto {
+            ev100: ev100 + (target - ev100) * weight,
+            min_ev100,
+            max_ev100,
+            adapt_speed,
         }
     }
 
@@ -130,5 +191,19 @@ mod tests {
         let lens = Lens::full_frame_50mm();
         assert!(lens.vertical_fov().is_finite());
         assert!(lens.circle_of_confusion(2.0).is_finite());
+        assert!(lens.with_f_stop(2.0).validate());
+    }
+
+    #[test]
+    fn auto_exposure_adapts_with_clamps() {
+        let exposure = Exposure::Auto {
+            ev100: 0.0,
+            min_ev100: 2.0,
+            max_ev100: 8.0,
+            adapt_speed: 10.0,
+        };
+        let adapted = exposure.adapt(20.0, 1.0);
+        assert!(adapted.ev100() <= 8.0);
+        assert!(adapted.ev100() > 2.0);
     }
 }
