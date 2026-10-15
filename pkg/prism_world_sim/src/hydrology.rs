@@ -113,6 +113,25 @@ impl HydrologyAnalysis {
             .collect()
     }
 
+    /// Returns stable directed edges whose source and destination are river cells.
+    pub fn river_segments(&self) -> Vec<HydrologyRiverSegment> {
+        self.cells
+            .iter()
+            .filter_map(|cell| {
+                if !cell.is_river {
+                    return None;
+                }
+                let destination = cell.downstream?;
+                let downstream = self.get(destination)?;
+                downstream.is_river.then_some(HydrologyRiverSegment {
+                    from: cell.coord,
+                    to: destination,
+                    accumulation: cell.accumulation,
+                })
+            })
+            .collect()
+    }
+
     /// Returns the accumulation threshold used to classify river cells.
     pub const fn river_threshold(&self) -> u64 {
         self.river_threshold
@@ -136,6 +155,17 @@ pub struct HydrologyAnalysisCell {
     pub basin: CellCoord,
     /// Whether `accumulation >= river_threshold`.
     pub is_river: bool,
+}
+
+/// One directed edge in the thresholded D8 river network.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HydrologyRiverSegment {
+    /// Upstream river cell.
+    pub from: CellCoord,
+    /// Downstream river cell.
+    pub to: CellCoord,
+    /// Upstream accumulation at `from`.
+    pub accumulation: u64,
 }
 
 /// Discrete hydrology state at one cell.
@@ -514,6 +544,14 @@ mod tests {
             HydrologyDirection::Sink
         );
         assert_eq!(analysis.river_cells(), alloc::vec![second, third]);
+        assert_eq!(
+            analysis.river_segments(),
+            alloc::vec![HydrologyRiverSegment {
+                from: second,
+                to: third,
+                accumulation: 2,
+            }]
+        );
     }
 
     #[test]

@@ -636,7 +636,7 @@ CPU地形新增`filter_heightfield_scatter`，对齐检查后稳定原地压紧�
 当前已交付 `prism_world_sim::HydrologyField::analyze_d8` 的 CPU 拓扑分析
 primitive：只在同一 Y 层的 X/Z 平面选择严格下降邻居，固定探测八邻居，按
 `(elevation, CellCoord)` 稳定处理同高候选，返回 downstream、汇流量、终端流域
-出口和阈值河网。分析区域同时裁剪源与下游候选，`u64` 汇流量和所有预算乘法均
+出口、阈值河网及河网内部的稳定有向 segment。分析区域同时裁剪源与下游候选，`u64` 汇流量和所有预算乘法均
 显式 checked；失败不返回部分结果，也不修改原场。该切片仍不是 GPU 水面/侵蚀
 stencil、河流样条作者数据或 `prism_water` 渲染接线。
 
