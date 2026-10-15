@@ -906,11 +906,7 @@ mod tests {
         assert!(has(ssr, "post_ssr_hit_distance", AccessKind::SampledRead));
 
         let stylized = find("post_posterize");
-        assert!(has(
-            stylized,
-            "hdr_scene_color",
-            AccessKind::StorageWrite
-        ));
+        assert!(has(stylized, "hdr_scene_color", AccessKind::StorageWrite));
         assert!(!has(stylized, "post_ssr_hzb", AccessKind::SampledRead));
 
         assert_ne!(exposure.accesses, ssr.accesses);
