@@ -21,11 +21,13 @@
 //! recently-changed row has since been swap-removed. The design explicitly
 //! accepts this over-approximation for the coarse layer.
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::archetype::ArchetypeId;
 use crate::change::Tick;
+use crate::component::StorageType;
 use crate::query::fetch::QueryData;
 use crate::query::filter::QueryFilter;
 use crate::query::state::QueryState;
@@ -61,6 +63,10 @@ pub struct DirtyChunkStats {
     pub reported_rows: usize,
     /// Number of hierarchical chunk summaries inspected by the column indexes.
     pub summaries_tested: usize,
+    /// Number of entities inspected in sparse-set change sources.
+    pub sparse_entities_checked: usize,
+    /// Number of sparse-derived chunk candidates after row-to-chunk deduplication.
+    pub sparse_chunk_candidates: usize,
 }
 
 /// Dirty row windows plus measurable traversal counters.
@@ -158,6 +164,42 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         access_ids.dedup();
         report.stats.access_columns = access_ids.len();
 
+        // Sparse components do not own table chunks. Resolve their changed
+        // entities once, then route each entity through the live location table
+        // to the row window of its current archetype. This keeps the fallback
+        // proportional to the sparse set's actual membership rather than to
+        // every row in every matched archetype.
+        let mut sparse_chunks: BTreeMap<ArchetypeId, Vec<usize>> = BTreeMap::new();
+        for &id in &access_ids {
+            let Some(info) = world.components().info(id) else {
+                continue;
+            };
+            if info.storage() != StorageType::SparseSet {
+                continue;
+            }
+            let Some(set) = world.sparse_sets().get(id) else {
+                continue;
+            };
+            for &entity in set.entities() {
+                report.stats.sparse_entities_checked += 1;
+                let Some(ticks) = set.component_ticks(entity) else {
+                    continue;
+                };
+                if !ticks.changed.is_newer_than(last_run, this_run) {
+                    continue;
+                }
+                let Some(location) = world.entities().location(entity) else {
+                    continue;
+                };
+                let chunks = sparse_chunks.entry(location.archetype_id).or_default();
+                chunks.push(location.row as usize);
+            }
+        }
+        for rows in sparse_chunks.values_mut() {
+            rows.sort_unstable();
+            rows.dedup();
+        }
+
         for archetype_id in archetypes {
             let Some(archetype) = world.archetypes().get(archetype_id) else {
                 continue;
@@ -171,6 +213,21 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             // O(sum(source candidates) + distinct candidates * column count),
             // rather than O(total candidates * log(total candidates)).
             let mut candidates = Vec::new();
+            if let Some(rows) = sparse_chunks.get(&archetype_id)
+                && !rows.is_empty()
+            {
+                let mut sparse_candidates = Vec::with_capacity(rows.len());
+                let mut previous = None;
+                for &row in rows {
+                    let chunk = row / rpc;
+                    if previous != Some(chunk) {
+                        sparse_candidates.push(chunk);
+                        previous = Some(chunk);
+                    }
+                }
+                report.stats.sparse_chunk_candidates += sparse_candidates.len();
+                candidates.push(sparse_candidates);
+            }
             for &id in &access_ids {
                 let Some(column) = table.column(id) else {
                     report.stats.non_table_columns += 1;
@@ -179,7 +236,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 report.stats.table_columns += 1;
                 let mut column_candidates = Vec::new();
                 let stats = column.visit_changed_chunks(last_run, this_run, |chunk| {
-                    column_candidates.push(chunk)
+                    column_candidates.push(chunk);
                 });
                 report.stats.column_candidates += stats.chunks_returned;
                 report.stats.summaries_tested += stats.summaries_tested;

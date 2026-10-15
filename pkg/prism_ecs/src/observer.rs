@@ -329,7 +329,7 @@ impl World {
     pub fn remove_observer(&mut self, id: ObserverId) -> bool {
         // Also covers the change-driven bus (design §24.2), whose ids come from
         // the same allocator and are interchangeable with `remove_change_observer`.
-        self.observers_mut().remove(id) || self.change_observers.remove(id)
+        self.observers_mut().remove(id) || self.remove_change_observer(id)
     }
 
     /// Raise a custom event of marker type `E` against `target` (design §12),

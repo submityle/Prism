@@ -11,6 +11,7 @@
 //! the physical [`Layout`] and drop glue recorded in the component registry, so
 //! a declared-but-unused sparse component costs nothing.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 
@@ -22,17 +23,27 @@ use crate::storage::sparse::ComponentSparseSet;
 ///
 /// Indexed directly by [`ComponentId::index`]; the slot is `None` until the
 /// component is first written. Table components never allocate a slot.
-#[derive(Default)]
 pub struct SparseSets {
     /// `sets[id] = Some(set)` once the sparse component `id` has been written.
     sets: Vec<Option<ComponentSparseSet>>,
+    // Arc keeps the tracker address stable even if the World itself is moved.
+    tracker: Arc<crate::change_index::ChangeTracker>,
+}
+
+impl Default for SparseSets {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SparseSets {
     /// A new, empty registry.
     #[inline]
     pub fn new() -> Self {
-        Self { sets: Vec::new() }
+        Self {
+            sets: Vec::new(),
+            tracker: Arc::new(crate::change_index::ChangeTracker::default()),
+        }
     }
 
     /// Number of sparse components that currently have a backing set.
@@ -117,5 +128,13 @@ impl SparseSets {
         for set in self.sets.iter_mut().flatten() {
             set.check_change_ticks(this_run);
         }
+    }
+
+    pub(crate) fn set_tracker(&mut self, tracker: &Arc<crate::change_index::ChangeTracker>) {
+        self.tracker = Arc::clone(tracker);
+    }
+
+    pub(crate) fn recorder(&self, component: ComponentId) -> crate::change_index::ChangeRecorder {
+        crate::change_index::ChangeRecorder::new(Arc::as_ptr(&self.tracker), component)
     }
 }

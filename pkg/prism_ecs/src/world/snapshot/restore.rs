@@ -49,6 +49,7 @@ pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
     // caches rebuild instead of dereferencing freed/renumbered columns.
     world.bump_archetype_generation();
     world.sparse_sets = SparseSets::new();
+    world.sparse_sets.set_tracker(&world.change_tracker);
     // Reset the shared-value pools too: restore re-interns every captured shared
     // value below (`insert_boxed`), so a stale pool would compound reference
     // counts across restores and leave them wrong afterwards (design §6 生命周期).

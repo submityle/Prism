@@ -268,6 +268,7 @@ pub struct Mut<'w, T: ?Sized> {
     added: Tick,
     last_run: Tick,
     this_run: Tick,
+    recorder: Option<crate::change_index::ChangeRecord>,
 }
 
 impl<'w, T: ?Sized> Mut<'w, T> {
@@ -281,6 +282,7 @@ impl<'w, T: ?Sized> Mut<'w, T> {
         added: Tick,
         last_run: Tick,
         this_run: Tick,
+        recorder: Option<crate::change_index::ChangeRecord>,
     ) -> Self {
         Self {
             value,
@@ -289,6 +291,7 @@ impl<'w, T: ?Sized> Mut<'w, T> {
             added,
             last_run,
             this_run,
+            recorder,
         }
     }
 
@@ -304,6 +307,9 @@ impl<'w, T: ?Sized> Mut<'w, T> {
             // while the `Mut` is live). Only a shared reference is formed;
             // metadata merges are atomic even for writers in the same chunk.
             unsafe { (&*chunk_changed).record(self.this_run) };
+        }
+        if let Some(recorder) = self.recorder {
+            recorder.record(self.this_run);
         }
     }
 
@@ -368,6 +374,9 @@ impl<'w, T: ?Sized> Mut<'w, T> {
             // SAFETY: same live-cell contract as `record_change`. Explicit old
             // ticks must enter the summary too (historical observers are valid).
             unsafe { (&*chunk_changed).record(last_changed) };
+        }
+        if let Some(recorder) = self.recorder {
+            recorder.record(last_changed);
         }
     }
 

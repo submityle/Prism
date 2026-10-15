@@ -53,7 +53,12 @@ pub enum BlobVecError {
     /// The configured element size and row window cannot form one block.
     BlockLayoutOverflow,
     /// A borrowed column was asked to grow beyond blocks owned by its table.
-    BorrowedCapacity { capacity: usize, required: usize },
+    BorrowedCapacity {
+        /// Capacity currently owned by the borrowed column.
+        capacity: usize,
+        /// Capacity required by the requested operation.
+        required: usize,
+    },
     /// A borrowed block attachment was null or incorrectly aligned.
     InvalidBlockPointer,
     /// Detaching a block would violate the borrowed-column lifecycle.
@@ -195,6 +200,10 @@ impl BlobVec {
     ///
     /// The caller still owns the unsafe lifetime/alising contract; this method
     /// checks the pointer invariants before it records the block.
+    ///
+    /// # Safety
+    /// `ptr` must satisfy the same lifetime and ownership contract as
+    /// [`Self::attach_block`].
     pub unsafe fn try_attach_block(&mut self, ptr: *mut u8) -> Result<(), BlobVecError> {
         if self.owns_blocks {
             return Err(BlobVecError::InvalidBlockPointer);

@@ -383,7 +383,12 @@ unsafe impl<T: Component> QueryData for &T {
 unsafe impl<T: Component> QueryData for &mut T {
     type Item<'w> = Mut<'w, T>;
     type State = ComponentId;
-    type Fetch<'w> = (StorageFetch<'w>, Tick, Tick);
+    type Fetch<'w> = (
+        StorageFetch<'w>,
+        Tick,
+        Tick,
+        crate::change_index::ChangeRecorder,
+    );
 
     fn init_state(components: &mut Components) -> Self::State {
         assert!(
@@ -438,7 +443,7 @@ unsafe impl<T: Component> QueryData for &mut T {
             // `init_state` already rejected a shared component for this term.
             StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         };
-        (storage, last_run, this_run)
+        (storage, last_run, this_run, sparse_sets.recorder(*state))
     }
 
     unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, _row: usize) -> bool {
@@ -451,7 +456,7 @@ unsafe impl<T: Component> QueryData for &mut T {
     }
 
     unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
-        let (storage, last_run, this_run) = fetch;
+        let (storage, last_run, this_run, recorder) = fetch;
         match storage {
             StorageFetch::Table(Some(t)) => {
                 let added = t.added_tick(row);
@@ -476,6 +481,7 @@ unsafe impl<T: Component> QueryData for &mut T {
                     added,
                     last_run,
                     this_run,
+                    Some(recorder.for_entity(entity)),
                 )
             }
             StorageFetch::Sparse(Some(set)) => {
@@ -498,7 +504,15 @@ unsafe impl<T: Component> QueryData for &mut T {
                     .expect("filter_fetch gate guaranteed the sparse component is present");
                 // A sparse set has no coarse chunk-version layer (design §6), so
                 // `Mut` carries `None` and skips the chunk-version write.
-                Mut::new(value, changed, None, added, last_run, this_run)
+                Mut::new(
+                    value,
+                    changed,
+                    None,
+                    added,
+                    last_run,
+                    this_run,
+                    Some(recorder.for_entity(entity)),
+                )
             }
             StorageFetch::Table(None) | StorageFetch::Sparse(None) => {
                 unreachable!("required `&mut T` fetched a row without the component")
@@ -628,7 +642,12 @@ unsafe impl<T: Component> QueryData for Option<&T> {
 unsafe impl<T: Component> QueryData for Option<&mut T> {
     type Item<'w> = Option<Mut<'w, T>>;
     type State = ComponentId;
-    type Fetch<'w> = (StorageFetch<'w>, Tick, Tick);
+    type Fetch<'w> = (
+        StorageFetch<'w>,
+        Tick,
+        Tick,
+        crate::change_index::ChangeRecorder,
+    );
 
     fn init_state(components: &mut Components) -> Self::State {
         assert!(
@@ -678,11 +697,11 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
             // `init_state` already rejected a shared component for this term.
             StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         };
-        (storage, last_run, this_run)
+        (storage, last_run, this_run, sparse_sets.recorder(*state))
     }
 
     unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
-        let (storage, last_run, this_run) = fetch;
+        let (storage, last_run, this_run, recorder) = fetch;
         match storage {
             StorageFetch::Table(opt) => opt.map(|t| {
                 let added = t.added_tick(row);
@@ -705,6 +724,7 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
                     added,
                     last_run,
                     this_run,
+                    Some(recorder.for_entity(entity)),
                 )
             }),
             StorageFetch::Sparse(opt) => opt.and_then(|set| {
@@ -726,7 +746,15 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
                     .added_tick(entity)
                     .expect("entity present: get_ptr returned Some");
                 // A sparse set has no coarse chunk-version layer (design §6).
-                Some(Mut::new(value, changed, None, added, last_run, this_run))
+                Some(Mut::new(
+                    value,
+                    changed,
+                    None,
+                    added,
+                    last_run,
+                    this_run,
+                    Some(recorder.for_entity(entity)),
+                ))
             }),
             // `init_state` already rejected a shared component for this term.
             StorageFetch::Shared(_) => unreachable!("shared storage rejected at init_state"),

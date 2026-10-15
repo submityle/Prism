@@ -34,6 +34,11 @@ impl Big {
 }
 impl Component for Big {}
 
+struct SparseDirty(u32);
+impl Component for SparseDirty {
+    const STORAGE: crate::component::StorageType = crate::component::StorageType::SparseSet;
+}
+
 /// Advance the world as if a system had just finished a run: the next window
 /// starts where this one ended, and the frame tick advances by one.
 fn advance_frame(w: &mut World) {
@@ -294,4 +299,44 @@ fn filter_chunk_rejects_a_changed_column_that_is_not_in_the_filter_window() {
     assert!(report.chunks.is_empty());
     assert_eq!(report.stats.merged_candidates, 1);
     assert_eq!(report.stats.filter_rejected, 1);
+}
+
+#[test]
+fn sparse_changes_fallback_to_changed_entities_without_scanning_table_rows() {
+    let mut w = World::new();
+    let entities: Vec<Entity> = (0..5).map(|i| w.spawn(SparseDirty(i))).collect();
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+    w.get_mut::<SparseDirty>(entities[3]).unwrap().0 += 1;
+
+    let state = w.query::<&SparseDirty>();
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+
+    assert_eq!(report.chunks.len(), 1, "one changed sparse row window");
+    assert_eq!(report.stats.sparse_entities_checked, entities.len());
+    assert_eq!(report.stats.sparse_chunk_candidates, 1);
+    assert_eq!(report.stats.table_columns, 0);
+    assert!(report.stats.non_table_columns > 0);
+    let location = w.entities().location(entities[3]).unwrap();
+    assert_eq!(report.chunks[0].archetype, location.archetype_id);
+    assert!(location.row as usize >= report.chunks[0].start);
+    assert!((location.row as usize) < report.chunks[0].end);
+}
+
+#[test]
+fn sparse_dirty_fallback_is_empty_for_a_clean_window() {
+    let mut w = World::new();
+    for i in 0..5 {
+        w.spawn(SparseDirty(i));
+    }
+    advance_frame(&mut w);
+    let report = w.query::<&SparseDirty>().dirty_chunks_with_stats(
+        &w,
+        w.last_change_tick(),
+        w.change_tick(),
+    );
+    assert!(report.chunks.is_empty());
+    assert_eq!(report.stats.sparse_entities_checked, 5);
+    assert_eq!(report.stats.sparse_chunk_candidates, 0);
 }

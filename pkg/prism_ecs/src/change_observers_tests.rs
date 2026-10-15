@@ -336,6 +336,22 @@ fn schedule_run_flushes_change_observers() {
 }
 
 #[test]
+fn structural_spawn_and_insert_are_indexed_observer_sources() {
+    let mut world = World::new();
+    world.insert_resource(Log::default());
+    world.observe_changed::<Health, _>(record(0));
+
+    let spawned = world.spawn(Health(1));
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(world.resource::<Log>().0[0].changed, alloc::vec![spawned]);
+
+    let inserted = world.spawn(());
+    assert!(world.insert(inserted, Health(2)));
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(world.resource::<Log>().0[1].changed, alloc::vec![inserted]);
+}
+
+#[test]
 fn an_observer_can_remove_itself_and_recursive_flush_does_not_reenter() {
     struct OwnObserver(crate::observer::ObserverId);
     impl Resource for OwnObserver {}
@@ -403,6 +419,10 @@ fn a_panicking_observer_is_preserved_and_retried_without_replaying_successes() {
         world.flush_changed_observers();
     }))
     .is_err());
+    assert!(
+        !world.change_observers.flushing,
+        "panic unwind must release the change-observer flush barrier"
+    );
     assert_eq!(world.flush_changed_observers(), 2);
     assert_eq!(
         world

@@ -169,5 +169,10 @@ impl World {
             let touched: Vec<_> = changes.iter().map(|c| c.id).collect();
             self.update_owning_groups(entity, &touched);
         }
+        for change in &changes {
+            if change.value.is_some() && final_set.contains(change.id) {
+                self.change_tracker.record(change.id, entity, now);
+            }
+        }
     }
 }

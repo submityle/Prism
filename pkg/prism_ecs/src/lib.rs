@@ -64,6 +64,7 @@ pub mod archetype;
 pub mod blob;
 pub mod bundle;
 pub mod change;
+pub(crate) mod change_index;
 pub mod change_observers;
 #[cfg(test)]
 mod change_observers_tests;

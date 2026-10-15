@@ -29,9 +29,9 @@ use core::marker::PhantomData;
 
 use crate::change::Tick;
 use crate::component::Component;
+use crate::component::ComponentId;
 use crate::entity::Entity;
 use crate::observer::ObserverId;
-use crate::query::{Changed, QueryState};
 use crate::world::{World, WorldId};
 
 /// The context handed to a change observer when it fires.
@@ -68,10 +68,16 @@ impl<'w> ChangeContext<'w> {
 /// Type-erased change-observer behavior so the registry can hold observers for
 /// many component types in one ordered list.
 trait ChangeObserver: Send + Sync {
-    /// Build the per-observer change query lazily (needs `&mut World`).
-    fn ensure_state(&mut self, world: &mut World);
-    /// Append the entities whose component changed in `(last_run, this_run]`.
-    fn collect(&self, world: &World, last_run: Tick, this_run: Tick, out: &mut Vec<Entity>);
+    fn component_id(&self) -> ComponentId;
+    /// Append entities from the exact write-side index.
+    fn collect(
+        &self,
+        world: &World,
+        cursor: &mut crate::change_index::ChangeCursor,
+        last_run: Tick,
+        this_run: Tick,
+        out: &mut Vec<Entity>,
+    );
     /// Invoke the user callback.
     fn fire(&mut self, ctx: &mut ChangeContext<'_>);
 }
@@ -79,9 +85,7 @@ trait ChangeObserver: Send + Sync {
 /// A change observer for one component type `T` and callback `C`.
 struct TypedChangeObserver<T: Component, C> {
     callback: C,
-    /// `Entity` rows whose `T` changed in the observer's current window.
-    /// Built lazily on the first flush so registration needs no world borrow.
-    state: Option<QueryState<Entity, Changed<T>>>,
+    component: ComponentId,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -90,24 +94,26 @@ where
     T: Component,
     C: FnMut(&mut ChangeContext<'_>) + Send + Sync + 'static,
 {
-    fn ensure_state(&mut self, world: &mut World) {
-        if self.state.is_none() {
-            self.state = Some(world.query_filtered::<Entity, Changed<T>>());
-        }
+    fn component_id(&self) -> ComponentId {
+        self.component
     }
 
-    fn collect(&self, world: &World, last_run: Tick, this_run: Tick, out: &mut Vec<Entity>) {
-        let Some(state) = &self.state else {
-            return;
-        };
-        let world_ptr = (world as *const World).cast_mut();
-        // SAFETY: `Entity` is a read-only data term, so no `&mut` fetch is
-        // formed and the shared `world` borrow is sufficient. The observer's
-        // state was built from the world that owns this registry, and
-        // `flush_changed_observers` always hands it that same `&self`, so the
-        // raw entry point's "same world as the state" contract holds here.
-        let iter = unsafe { state.iter_from_ptr(world_ptr, last_run, this_run) };
-        out.extend(iter);
+    fn collect(
+        &self,
+        world: &World,
+        cursor: &mut crate::change_index::ChangeCursor,
+        last_run: Tick,
+        this_run: Tick,
+        out: &mut Vec<Entity>,
+    ) {
+        world
+            .change_tracker
+            .collect(self.component, cursor, last_run, this_run, out);
+        out.retain(|&entity| {
+            world
+                .get_ticks::<T>(entity)
+                .is_some_and(|ticks| ticks.is_changed(last_run, this_run))
+        });
     }
 
     fn fire(&mut self, ctx: &mut ChangeContext<'_>) {
@@ -122,11 +128,13 @@ struct ChangeSlot {
     /// `(last_run, this_run]` and then advances this to `this_run`.
     last_run: Tick,
     observer: Box<dyn ChangeObserver>,
+    cursor: crate::change_index::ChangeCursor,
     pending: Vec<Entity>,
 }
 
 struct ChangeEntry {
     id: ObserverId,
+    component: ComponentId,
     active: bool,
     slot: Option<ChangeSlot>,
 }
@@ -141,7 +149,7 @@ struct ChangeEntry {
 pub(crate) struct ChangeObservers {
     slots: Vec<ChangeEntry>,
     active: usize,
-    flushing: bool,
+    pub(crate) flushing: bool,
 }
 
 impl ChangeObservers {
@@ -162,6 +170,7 @@ impl ChangeObservers {
     fn push(&mut self, slot: ChangeSlot) {
         self.slots.push(ChangeEntry {
             id: slot.id,
+            component: slot.observer.component_id(),
             active: true,
             slot: Some(slot),
         });
@@ -197,6 +206,13 @@ impl ChangeObservers {
         }
         false
     }
+
+    pub(crate) fn component_for(&self, id: ObserverId) -> Option<ComponentId> {
+        self.slots
+            .iter()
+            .find(|entry| entry.active && entry.id == id)
+            .map(|entry| entry.component)
+    }
 }
 
 impl World {
@@ -219,6 +235,11 @@ impl World {
         // Register `T` so `Changed<T>` resolves even for a world that never
         // touched it yet.
         self.components_mut().register::<T>();
+        let component = self
+            .components()
+            .id_of::<T>()
+            .expect("component registered");
+        let cursor = self.change_tracker.activate(component);
         let id = self.alloc_observer_id();
         let last_run = self.change_tick();
         self.change_observers.push(ChangeSlot {
@@ -226,9 +247,10 @@ impl World {
             last_run,
             observer: Box::new(TypedChangeObserver::<T, C> {
                 callback,
-                state: None,
+                component,
                 _marker: PhantomData,
             }),
+            cursor,
             pending: Vec::new(),
         });
         self.increment_change_tick();
@@ -241,7 +263,12 @@ impl World {
     /// Removing the observer that is *currently firing* takes effect after its
     /// callback returns, mirroring [`remove_observer`](World::remove_observer).
     pub fn remove_change_observer(&mut self, id: ObserverId) -> bool {
-        self.change_observers.remove(id)
+        let component = self.change_observers.component_for(id);
+        let removed = self.change_observers.remove(id);
+        if removed && let Some(component) = component {
+            self.change_tracker.deactivate(component);
+        }
+        removed
     }
 
     /// Flush every change observer (design §24.2).
@@ -287,9 +314,21 @@ impl World {
                 slot: Some(slot),
             };
             let slot = guard.slot.as_mut().expect("owned change observer");
-            slot.observer.ensure_state(guard.world);
-            slot.observer
-                .collect(guard.world, slot.last_run, this_run, &mut slot.pending);
+            // A previous flush may have left an undelivered batch here after a
+            // callback panic. Collect only the new window into a separate
+            // buffer so retry state is never re-filtered against a later
+            // `last_run` and accidentally discarded.
+            let mut fresh = Vec::new();
+            slot.observer.collect(
+                guard.world,
+                &mut slot.cursor,
+                slot.last_run,
+                this_run,
+                &mut fresh,
+            );
+            fresh.sort_unstable_by_key(|entity| (entity.index(), entity.generation()));
+            fresh.dedup();
+            slot.pending.extend(fresh);
             slot.pending
                 .sort_unstable_by_key(|entity| (entity.index(), entity.generation()));
             slot.pending.dedup();
@@ -342,10 +381,10 @@ struct ChangeSlotGuard<'w> {
 
 impl Drop for ChangeSlotGuard<'_> {
     fn drop(&mut self) {
-        if self.world.id() == self.world_id {
-            if let Some(slot) = self.slot.take() {
-                self.world.change_observers.put_back(self.index, slot);
-            }
+        if self.world.id() == self.world_id
+            && let Some(slot) = self.slot.take()
+        {
+            self.world.change_observers.put_back(self.index, slot);
         }
     }
 }

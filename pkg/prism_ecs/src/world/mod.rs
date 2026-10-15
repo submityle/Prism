@@ -73,6 +73,7 @@ pub struct World {
     /// deterministic derived-update bus flushed once per schedule run (or on
     /// demand). Empty by default.
     pub(crate) change_observers: crate::change_observers::ChangeObservers,
+    pub(crate) change_tracker: Arc<crate::change_index::ChangeTracker>,
     /// Observer-bound dependency graph, empty on worlds without reactions.
     pub(crate) reactions: crate::world_reactions::WorldReactions,
     /// Reflected-component registry (design §16.5 / §24.3): dynamic component
@@ -115,18 +116,22 @@ impl World {
     /// freshly spawned value stamped at tick `1` reads as added/changed to a
     /// system whose `last_run` defaults to [`Tick::ZERO`].
     pub fn new() -> Self {
+        let tracker = Arc::new(crate::change_index::ChangeTracker::default());
+        let mut sparse_sets = SparseSets::new();
+        sparse_sets.set_tracker(&tracker);
         Self {
             id: WorldId::next(),
             archetype_generation: 0,
             entities: Entities::new(),
             components: Components::new(),
             archetypes: Archetypes::new(),
-            sparse_sets: SparseSets::new(),
+            sparse_sets,
             shared_components: SharedComponents::new(),
             resources: Resources::new(),
             relations: Relations::new(),
             observers: Observers::new(),
             change_observers: crate::change_observers::ChangeObservers::default(),
+            change_tracker: tracker,
             reactions: crate::world_reactions::WorldReactions::default(),
             #[cfg(feature = "reflect")]
             reflect: crate::reflect_bridge::ReflectRegistry::default(),
@@ -164,6 +169,7 @@ impl World {
     #[inline]
     pub(crate) fn bump_archetype_generation(&mut self) {
         self.archetype_generation = self.archetype_generation.wrapping_add(1);
+        self.change_tracker.reset();
     }
 
     /// The world's current change tick (the tick new writes are stamped with).
@@ -852,6 +858,10 @@ impl World {
     ) {
         self.entities
             .set_location(entity, EntityLocation { archetype_id, row });
+        let change_tick = self.change_tick;
+        for &id in all_ids {
+            self.change_tracker.record(id, entity, change_tick);
+        }
 
         // Storage is already committed. Maintain groups before user code can
         // unwind, replace this world, or perform nested structural operations.
@@ -874,7 +884,6 @@ impl World {
                 || (fire_obs
                     && !self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, all_ids))
             {
-                return;
             }
         }
     }
@@ -1698,6 +1707,9 @@ impl World {
         // newly added to the entity on this call, then on_insert for every
         // written component. Both observe a fully consistent world.
         let req_ids: Vec<ComponentId> = required.iter().map(|(id, _, _)| *id).collect();
+        for &id in ids.iter().chain(req_ids.iter()) {
+            self.change_tracker.record(id, entity, change_tick);
+        }
         // The write is committed even if an Add/Insert callback panics. Group
         // membership must describe that storage before handing out &mut World.
         if !self.owning_groups.is_empty() {
@@ -2154,6 +2166,7 @@ impl World {
         let last_run = self.last_change_tick;
         let this_run = self.change_tick;
         let id = self.components.id_of::<T>()?;
+        let recorder = Some(self.change_tracker.recorder(id).for_entity(entity));
         let loc = self.entities.location(entity)?;
         if self.components.info(id)?.storage() == StorageType::SparseSet {
             let set = self.sparse_sets.get_mut(id)?;
@@ -2168,7 +2181,9 @@ impl World {
             let value = unsafe { set.get_mut::<T>(entity)? };
             // SAFETY: as above — unique access to this entity's changed-tick cell.
             let changed = unsafe { &mut *set.changed_tick_ptr(entity)? };
-            return Some(Mut::new(value, changed, None, added, last_run, this_run));
+            return Some(Mut::new(
+                value, changed, None, added, last_run, this_run, recorder,
+            ));
         }
         if self.components.info(id)?.storage() == StorageType::Shared {
             // Shared values are immutable once bound to an archetype (design
@@ -2199,6 +2214,7 @@ impl World {
             added,
             last_run,
             this_run,
+            recorder,
         ))
     }
 
