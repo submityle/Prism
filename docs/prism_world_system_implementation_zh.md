@@ -6,12 +6,12 @@
 
 ## 本批交接与验证范围
 
-2026-10-15 按共享磁盘协调要求停止构建；本批只整理 `prism_world_io`、`prism_world_terrain` 与本文，未使用或清理任何 Cargo target，未 push。
+2026-10-15 按共享磁盘协调要求停止共享 target 构建；本批只整理 `prism_world_io`、`prism_world_terrain` 与本文，测试使用独立的 `/private/tmp` target，未清理或覆盖共享 target，未 push。
 
-- 地形曲面提取在暂停前执行 `CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/private/tmp/prism-world-kernel-target cargo test --offline -j 1 -p prism_world_terrain --no-default-features`：59 passed、0 failed，其中新增曲面回归 9 项；之后仅作格式化。本批不重新执行构建。
-- 新增 threaded 文件 provider 与 16 项回归测试源码，缺失的测试模块文件已经补齐；该 provider **尚未编译或执行测试**，不能引用此前 IO/runtime 的通过记录为它背书。
+- 地形曲面提取使用 `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/private/tmp/prism-world-terrain-target cargo test --offline -j 1 -p prism_world_terrain --no-default-features`：59 passed、0 failed；随后启用 `mesh` feature 重跑为 62 passed、0 failed，包含原生 Mesh 转换回归。
+- 新增 threaded 文件 provider 与 16 项回归测试源码，使用 `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/private/tmp/prism-world-io-target cargo test --offline -j 1 -p prism_world_io` 完成 28 passed、0 failed（其中 threaded 回归 16 项）。
 - 本批运行的是指定文件的 `rustfmt --edition 2024 --config skip_children=true --check` 和 `git diff --check`，仅验证格式、解析及补丁空白，不等同于类型检查、clippy 或测试。
-- 未运行 threaded IO 的 std 测试、terrain 的 `mesh` feature 测试、新代码 clippy、性能/GPU 验证及全 workspace 测试：共享构建先前发生磁盘耗尽，协调方要求停止构建并先独立提交，且其他任务仍在修改 asset/render/ECS。未在其他目录偷偷构建或清理其产物。
+- 未运行新代码 clippy、性能/GPU 验证及全 workspace 测试；共享 target 仍有并行任务，故本批只使用 `/private/tmp` 隔离 target，没有清理或覆盖其他任务产物。
 
 本批提交是源码交接，不是完整系统验收；异步 world runtime 接线、任务池整合、跨 LOD 地形接缝和性能目标仍按下文边界保留。
 
@@ -58,7 +58,7 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 - 默认构建保持 `no_std + alloc`；`std` 只增加 scheduler 与文件系统 provider，不把 IO、资产数据库或 ECS 引入 world policy core。
 - `prism_world_runtime`：真实调用 `StreamScheduler` 生成 load/evict 动作，并通过有界、可取消、优先级排序的 provider 队列提交 cell；完成后执行固定 manifest header 校验，再进入 `SceneHost::load_cell`，失败/驱逐写入可 replay trace。std 构建新增 `IoSchedulerAdapter`，实际桥接 `prism_world_io::IoScheduler` 的 chunk/completion/cancel/backpressure/error 事件，并保留同步 `ChunkProvider` 兼容路径。
 - `FileCellProvider` 复用 `prism_world_io/std` 的真实 `FileProvider`，以 sector 注册完整 manifest/文件 offset/checksum，拒绝过期 manifest 并保留调度优先级。真实临时文件测试覆盖文件→分块 scheduler→header/checksum→`SceneHost`，及短读、打开失败、取消和错误隔离；底层每次 poll 为有界阻塞读取，不宣称已变成线程池异步文件 IO。
-- 本批新增独立的 `ThreadedFileProvider` 源码：固定 std worker、预留槽位/队列、受限 chunk、ACK 驱动的后续读取、worker 内文件打开/读取/关闭，以及非 joining 的取消/shutdown。取消的 Ready 缓冲区交由 worker 清理；槽位在结果和文件销毁后才释放。waker 克隆/替换后的销毁及唤醒位于 metadata 锁外，worker/批量 shutdown 隔离唤醒回调 panic。逻辑 payload 约束为 `capacity × max_chunk_size`，不包含调用方已取走的 chunk、线程栈、元数据、分配器开销或 RSS；阻塞 OS 调用只能合作取消，返回前仍占槽位。16 项测试源码覆盖范围/短读/打开失败、准入、parked ACK、queued/running/ready 取消、重复 shutdown、last-owner drop、唤醒时序及 panic，**本批未编译执行**。
+- 本批新增独立的 `ThreadedFileProvider` 源码：固定 std worker、预留槽位/队列、受限 chunk、ACK 驱动的后续读取、worker 内文件打开/读取/关闭，以及非 joining 的取消/shutdown。取消的 Ready 缓冲区交由 worker 清理；槽位在结果和文件销毁后才释放。waker 克隆/替换后的销毁及唤醒位于 metadata 锁外，worker/批量 shutdown 隔离唤醒回调 panic。逻辑 payload 约束为 `capacity × max_chunk_size`，不包含调用方已取走的 chunk、线程栈、元数据、分配器开销或 RSS；阻塞 OS 调用只能合作取消，返回前仍占槽位。16 项回归覆盖范围/短读/打开失败、准入、parked ACK、queued/running/ready 取消、重复 shutdown、last-owner drop、唤醒时序及 panic，已与 crate 其余测试合计 28 项通过。
 - 上述独立 provider 尚未替换 `FileCellProvider` 的阻塞后端，未接入 `prism_tasks`。`ChunkProvider::read_chunk` 返回完整 cell，`IoRuntime::poll` 仍直接同步调用它；仅将后端换成 threaded provider 再 `read_to_completion` 仍会阻塞 coordinator。真正的异步端到端路径还需要 Pending/completion 与共享取消句柄，不能把独立 provider 当作 runtime 已异步化。scheduler 的 provider 临时背压重试、活动请求公平性和 adapter waker 生命周期也尚未通过本批验证。
 - `IoSchedulerAdapter` 以带 ID/原始请求的 `Failed` 终态关联错误；scheduler 串行锁内跟踪实际 start/poll 回调，scheduler 的显式取消 ID 优先，provider 不能伪造其他请求的取消 ID。并发 blocking reader 保留各自结果、共享 provider 唤醒可唤醒全部等待者，public poll 不抢占其结果；终态被消费前仍计入 capacity，取消会唤醒停驻 reader。
 - `IoByteLimits` 为 adapter/file provider 增加独立的单请求和累计声明字节准入，包含 44 字节 header；mutex 内在分配请求 ID/启动 IO 前检查上限及累计溢出，拒绝不消耗 quota/ID。queued、active 和未消费的 Completed/Failed 均保留完整配额，消费 Chunk 不释放；兼容构造器保留无配置字节上限行为，但仍拒绝算术溢出。
@@ -74,8 +74,8 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 - `PlanetHeightfieldMesh` 将已烘焙高度投影为六面 cube-sphere 索引网格；TileKey 整数身份经 f64 UV/归一化投影，减 i64 毫米 origin 后编码为局部 f32 米制位置。半径限 `1..=2^52` 毫米，非正半径+高度、非有限值、载荷超限和超过位置误差预算均失败；误差界包含浮点运算及编码，不包含高度量化、三角插值和 LOD 接缝。测试覆盖六面向外绕序/单位法线、同级相邻 tile 与跨面边界位置、地球半径第 30 层 tile 小于 0.001 mm 的数值误差界及原生 Mesh。边缘法线为单侧差分，尚非跨 tile 平滑法线或混合 LOD 缝合；当前为全量投影。
 - `SdfGrid` 全量烘焙 signed Q16.16 到 X-fast 小端 i32；半开 XYZ 局部区域先 scratch 采样、成功才覆盖并递增 revision。按完整 dimensions、实际 source 调用数、输出+scratch 逻辑峰值字节预检，checked 算术及 fallible allocation 拒绝溢出/分配失败；任何采样失败保留原 bytes/revision。`quantize_sdf_mm` 用 i128 最近舍入、ties-away、超范围拒绝；`VoxelSdfSource` 只将声明为 Q8.8 的距离精确扩展 256 倍，拒绝 density/格式或规格不匹配，不伪造距离变换。空间 embedding 由 source 保持稳定；这一步没有执行曲面提取。
 - 新增 `SdfSurfaceMesh` 在同分辨率的固定六四面体格上提取零等值面，规范 sample/edge key 焊接顶点并消除重复端点退化面；半开 cube 区域读取一圈 sample halo，任意等分辨率分区与全量提取的有向三角集合一致。负值在内、零在外，输出外向 CCW 索引与按实际编码三角面面积加权的单位法线；开放区域边界法线仍为单侧平均。i128 先减整数毫米 origin，再作 f64 插值及局部 f32 米制编码，拒绝精度超限、面翻转/塌缩、无定义法线和坐标超界；误差界不覆盖采样、量化或曲面近似误差。
-- 曲面构建对 cube/triangle/vertex/逻辑峰值字节设硬限制，checked 算术与 fallible reservation，失败不修改源 grid。非空构建三次遍历，排序/查边复杂度 `O(C + T log T + T log V)`；输出载荷 `24V + 12T`，峰值 `max(60T + 12V, 12T + 48V)`，不含借用 grid、旧 mesh、分配器开销/容量取整和固定遍历栈。暂停前新增 9 项 no-default 回归已通过：256 种符号 mask 与距离极值、各向异性平面、零点焊接、闭球流形/Euler、任意区域分区、极大共用 origin、精确预算和错误路径。`mesh` feature 的原生转换和第 10 项回归仅有源码、未执行；这不是 Dual Contouring、Transvoxel 或混合 LOD 接缝实现，也尚未进入 renderer/physics 产品链路。
-- 表示选择和重烘规划现按实际 XY 网格覆盖乘 Z 深度计算工作量/字节，覆盖位置敏感的 floor/ceil 边界、溢出、完整规格比较及输入排列无关的脏区合并。此前 terrain 默认测试 49 项、启用原生 mesh 后 51 项通过，no-default/all-target clippy（含基准）通过；本批 no-default 59 项的范围和未验证项见交接节，不能延用旧 clippy/mesh 结果作为新曲面代码的证明。原生 mesh 的依赖 `prism_asset` 仍有既有文档告警。
+- 曲面构建对 cube/triangle/vertex/逻辑峰值字节设硬限制，checked 算术与 fallible reservation，失败不修改源 grid。非空构建三次遍历，排序/查边复杂度 `O(C + T log T + T log V)`；输出载荷 `24V + 12T`，峰值 `max(60T + 12V, 12T + 48V)`，不含借用 grid、旧 mesh、分配器开销/容量取整和固定遍历栈。no-default 回归 59 项及 `mesh` feature 回归 62 项已通过：覆盖 256 种符号 mask、距离极值、各向异性平面、零点焊接、闭球流形/Euler、任意区域分区、极大共用 origin、精确预算、错误路径与原生 Mesh 转换；这不是 Dual Contouring、Transvoxel 或混合 LOD 接缝实现，也尚未进入 renderer/physics 产品链路。
+- 表示选择和重烘规划现按实际 XY 网格覆盖乘 Z 深度计算工作量/字节，覆盖位置敏感的 floor/ceil 边界、溢出、完整规格比较及输入排列无关的脏区合并；本批 terrain no-default 59 项、启用原生 mesh 后 62 项通过。新代码 clippy、性能/GPU 仍未验收；原生 mesh 的依赖 `prism_asset` 仍有既有文档告警。
 - `prism_world_sim`：统一 tick/output/dirty-region budget，确定性局部侵蚀、持久体素/碎片 delta、水文容量约束、生态 biomass 更新和小端 delta codec。
 - M7 持久接缝已补齐：`simulation_delta_to_transaction` 将 `SimulationDelta` 编码为稳定 opaque `Bytes` forward + 同字段 `Delete` inverse，`WorldRuntime::append_simulation_delta` 自动使用 log next sequence 并写入 append-only log；simulation feature 测试覆盖 round-trip、错误和 facade 入口。
 - M7 SDF 只读接缝已补齐：`SparseSdfQuery`/`SdfQueryConsumer` 为多个消费者共享同一 sparse grid，明确区分 `Value`、`Miss` 与缺 brick 的 `Unknown`，覆盖负坐标、范围和缺失数据测试；不会把未知场误报为空场。
@@ -151,9 +151,9 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
-- M3：真实异步 world facade、`prism_tasks` 生命周期/取消整合、资产包解压、GPU 直传和产品级吞吐仍需实现或独立运行时验证；当前已有阻塞文件 provider、scheduler、manifest/payload、SceneHost 的 CPU 端到端证据。新增独立 threaded provider 仅完成本批源码整理，尚未编译测试。
+- M3：真实异步 world facade、`prism_tasks` 生命周期/取消整合、资产包解压、GPU 直传和产品级吞吐仍需实现或独立运行时验证；当前已有阻塞文件 provider、scheduler、manifest/payload、SceneHost 的 CPU 端到端证据。新增独立 threaded provider 已完成 28 项 crate 测试，但尚未替换 runtime 的阻塞后端或接入 `prism_tasks`。
 - M4 散布：GPU 候选生成/proxy 流、连续密度切换和大规模性能验收；当前完成的是内容中立、可再生且有界的 CPU 散布 kernel。
-- M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已有 no-default CPU 回归，但其原生 Mesh 转换与性能未验证。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
+- M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。
 - GPU proxy 的真实 adapter、dispatch/readback 正确性已有上述 Apple M2/Metal 证据；P50/P95/P99 性能、显存峰值、多厂商/后端与 renderer 端到端集成仍未验收。
