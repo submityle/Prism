@@ -11,12 +11,18 @@
 //! - an unbound or unloaded residency target is rejected instead of silently
 //!   mutating an unrelated ECS entity.
 
-use alloc::collections::BTreeMap;
-
 use prism_ecs::entity::Entity;
 use prism_ecs::world::World;
 use prism_scene::{despawn_instance, LocalEntityId, SceneInstance, SceneSpawn};
 use prism_world_stream::SectorId;
+
+mod ownership;
+mod plan_application;
+
+use ownership::SceneOwnership;
+
+#[cfg(test)]
+mod regression_tests;
 
 /// The scene-local target associated with one world residency id.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,22 +116,31 @@ pub enum SceneEcsHostError<E> {
 }
 
 /// A scene-owned ECS host implementing [`crate::SceneHost`].
+///
+/// Cell ownership and bindings live in the authoritative world's private
+/// resource, not in this temporary borrow. Dropping the host leaves scenes
+/// registered for takeover by a new host with a compatible provider. Use
+/// [`Self::shutdown`] for explicit scene teardown after persistence handoff.
+///
+/// Apply complete frames through [`crate::WorldRuntime::apply_scene_plan`] to
+/// reconcile stream eviction with residency actions in that same plan. The
+/// low-level [`crate::SceneHost`] operations remain strict and have no implicit
+/// frame scope.
 pub struct SceneEcsHost<'world, P> {
     world: &'world mut World,
     provider: P,
-    cells: BTreeMap<SectorId, SceneSpawn>,
-    bindings: BTreeMap<u64, ResidencyBinding>,
 }
 
 impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
-    /// Creates an empty host over an existing authoritative ECS world.
+    /// Creates a host, resuming this world's registered cells and bindings.
+    ///
+    /// There is one scene ownership registry per world, independent of provider
+    /// type. A replacement provider must support the existing scene templates;
+    /// provider-specific state is not saved in the registry. Use
+    /// [`Self::into_provider`] when that state must be handed over as well.
     pub fn new(world: &'world mut World, provider: P) -> Self {
-        Self {
-            world,
-            provider,
-            cells: BTreeMap::new(),
-            bindings: BTreeMap::new(),
-        }
+        world.init_resource::<SceneOwnership>();
+        Self { world, provider }
     }
 
     /// Borrows the authoritative ECS world.
@@ -153,19 +168,19 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
     /// Returns the scene ownership token for a loaded sector.
     #[must_use]
     pub fn loaded_cell(&self, sector: SectorId) -> Option<&SceneSpawn> {
-        self.cells.get(&sector)
+        self.ownership().cells.get(&sector)
     }
 
     /// Returns the number of live cell ownership tokens.
     #[must_use]
     pub fn loaded_cell_count(&self) -> usize {
-        self.cells.len()
+        self.ownership().cells.len()
     }
 
     /// Returns the binding for a world residency id.
     #[must_use]
     pub fn residency_binding(&self, residency_id: u64) -> Option<ResidencyBinding> {
-        self.bindings.get(&residency_id).copied()
+        self.ownership().bindings.get(&residency_id).copied()
     }
 
     /// Adds a stable residency-to-scene target mapping.
@@ -174,7 +189,7 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         residency_id: u64,
         binding: ResidencyBinding,
     ) -> Result<(), SceneEcsHostConfigError> {
-        if let Some(existing) = self.bindings.get(&residency_id).copied() {
+        if let Some(existing) = self.residency_binding(residency_id) {
             if existing != binding {
                 return Err(SceneEcsHostConfigError::ConflictingBinding {
                     residency_id,
@@ -184,13 +199,13 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
             }
             return Ok(());
         }
-        self.bindings.insert(residency_id, binding);
+        self.ownership_mut().bindings.insert(residency_id, binding);
         Ok(())
     }
 
     /// Removes a residency binding and returns it when present.
     pub fn unbind_residency(&mut self, residency_id: u64) -> Option<ResidencyBinding> {
-        self.bindings.remove(&residency_id)
+        self.ownership_mut().bindings.remove(&residency_id)
     }
 
     fn target(
@@ -198,11 +213,10 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
         residency_id: u64,
     ) -> Result<(ResidencyBinding, Entity), SceneEcsHostError<P::Error>> {
         let binding = self
-            .bindings
-            .get(&residency_id)
-            .copied()
+            .residency_binding(residency_id)
             .ok_or(SceneEcsHostError::ResidencyNotBound(residency_id))?;
         let spawn = self
+            .ownership()
             .cells
             .get(&binding.sector)
             .ok_or(SceneEcsHostError::CellNotLoaded(binding.sector))?;
@@ -218,7 +232,7 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
     }
 
     fn load_cell(&mut self, sector: SectorId) -> Result<(), SceneEcsHostError<P::Error>> {
-        if self.cells.contains_key(&sector) {
+        if self.loaded_cell(sector).is_some() {
             return Err(SceneEcsHostError::CellAlreadyLoaded(sector));
         }
         let spawn = self
@@ -232,16 +246,15 @@ impl<'world, P: SceneEcsProvider> SceneEcsHost<'world, P> {
             despawn_instance(self.world, &spawn);
             return Err(SceneEcsHostError::SceneNotAttached(sector));
         }
-        self.cells.insert(sector, spawn);
+        self.ownership_mut().cells.insert(sector, spawn);
         Ok(())
     }
 
     fn unload_cell(&mut self, sector: SectorId) -> Result<(), SceneEcsHostError<P::Error>> {
-        let Some(spawn) = self.cells.remove(&sector) else {
+        let Some(spawn) = self.ownership().cells.get(&sector).cloned() else {
             return Err(SceneEcsHostError::CellNotLoaded(sector));
         };
-        despawn_instance(self.world, &spawn);
-        self.bindings.retain(|_, binding| binding.sector != sector);
+        self.destroy_cell(sector, &spawn);
         Ok(())
     }
 }
@@ -297,13 +310,14 @@ mod tests {
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    struct Marker(u32);
+    pub(super) struct Marker(pub(super) u32);
 
     impl Component for Marker {}
 
     #[derive(Default)]
-    struct Provider {
-        events: vec::Vec<(u8, u64, Entity)>,
+    pub(super) struct Provider {
+        pub(super) events: vec::Vec<(u8, u64, Entity)>,
+        pub(super) fail_dematerialize: bool,
     }
 
     impl SceneEcsProvider for Provider {
@@ -363,6 +377,9 @@ mod tests {
             _local: LocalEntityId,
             entity: Entity,
         ) -> Result<(), Self::Error> {
+            if self.fail_dematerialize {
+                return Err(());
+            }
             world.get_mut::<Marker>(entity).ok_or(())?.0 = 3;
             self.events.push((2, residency_id, entity));
             Ok(())
