@@ -20,14 +20,14 @@ mod frame;
 mod group_contract;
 mod model;
 mod model_verify;
-mod replication_contract;
 mod replay;
+mod replication_contract;
 mod resilience;
 mod revision;
 mod runtime;
 mod schema;
-mod spatial_query;
 mod snapshot;
+mod spatial_query;
 mod task_contract;
 mod telemetry;
 mod validator;
@@ -74,16 +74,16 @@ pub use model_verify::{
     DiagnosticSeverity as ModelDiagnosticSeverity, PathStep, PathStepKind, TransitionCoverage,
     VerificationLimits, VerificationPath, VerificationReport,
 };
-pub use replication_contract::{
-    AuthorityMode, PlanRevisionHandshake, PlanRevisionHandshakeError,
-    PlanRevisionHandshakePolicy, PlanRevisionHandshakeStatus, PredictionSafety,
-    PredictionSafetyReason, ReplicationContractError, ReplicationPolicy, RollbackInput,
-    RollbackInputBuffer, RollbackInputContract, StateTreeReplicationPolicy, MAX_ROLLBACK_INPUTS,
-    MAX_ROLLBACK_INPUT_BYTES, MAX_ROLLBACK_INPUT_SIZE,
-};
 pub use replay::{
     active_state_digest, ActiveStateDigest, DivergenceReport, PlanDigest, ReplayError,
     ReplayReport, TraceInput, TraceLog, TraceLogError, TraceRecord,
+};
+pub use replication_contract::{
+    AuthorityMode, PlanRevisionHandshake, PlanRevisionHandshakeError, PlanRevisionHandshakePolicy,
+    PlanRevisionHandshakeStatus, PredictionSafety, PredictionSafetyReason,
+    ReplicationContractError, ReplicationPolicy, RollbackInput, RollbackInputContract,
+    RollbackInputError, StateTreeReplicationPolicy, MAX_ROLLBACK_INPUTS, MAX_ROLLBACK_INPUT_BYTES,
+    MAX_ROLLBACK_INPUT_SIZE,
 };
 pub use resilience::{
     BudgetChargeError, BudgetExhaustion, BudgetUsage, CircuitAdmission, CircuitBreaker,
