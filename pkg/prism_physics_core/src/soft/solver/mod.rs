@@ -102,7 +102,6 @@ impl SoftSolver {
             return;
         }
         let substeps = config.substeps.max(1);
-        let iterations = config.iterations.max(1);
         let h = dt / substeps as Real;
         if h <= 0.0 {
             return;

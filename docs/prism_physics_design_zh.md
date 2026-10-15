@@ -428,7 +428,16 @@ crates/
 
 > 实现现状补充（截至编码推进）：
 > - CCD 已从纯线性 shape-cast 升级为 rotational conservative-advancement（线性+角向守恒上界，支持纯自转触发与 position+orientation 两段回绕）。
-> - 布料-刚体双向耦合原语已落地（`CouplingBody` / `resolve_two_way_coupling`：逆质量加权接触分配 + 反作用冲量累积），并有 WGSL 孪生与真机 parity（`prism_physics_gpu::cloth::coupling`、`prism_volumetric_gpu`）。核心 pipeline glue 也已落地：`PhysicsWorld::resolve_cloth_coupling` 会从刚体 collider 构造 bounded proxy，执行耦合并把线性/可选角向反作用写回刚体；`prism_physics_core` 的 54 项 rigid-coupling 回归测试通过。当前边界是软体粒子列仍由调用方持有，`XpbdSolver` 不会凭空发现某个软体资产并自动调度该阶段；ECS/资产层的软体所有权与调度接线仍属于消费方契约，不应被描述成核心物理 kernel 缺失。
+> - 布料-刚体双向耦合原语已落地（`CouplingBody` / `resolve_two_way_coupling`：逆质量加权接触分配 + 反作用冲量累积），并有 WGSL 孪生与真机 parity（`prism_physics_gpu::cloth::coupling`、`prism_volumetric_gpu`）。核心 pipeline glue 也已落地：`PhysicsWorld::resolve_cloth_coupling` 会从刚体 collider 构造 bounded proxy，执行耦合并把线性/可选角向反作用写回刚体；`prism_physics_core` 的 rigid-coupling 回归测试通过。软体粒子状态的核心所有权与固定步接线也已补齐：`PhysicsWorld::soft_bodies` 通过 `SoftBodyHandle` / `SoftBodyStorage` 持有项目无关的 `SoftBody`，`XpbdSolver` 在每个固定 substep 按确定性槽位顺序执行“软体预测/投影 → proxy gather → two-way coupling → reaction writeback → 粒子速度恢复”。
+
+### 22.x 世界级软体所有权与固定 substep 接线
+
+这一步补的是核心 kernel 的端到端生命周期，不是 cloth gameplay 或 ECS 资源系统：
+
+- `PhysicsWorld::spawn_soft_body` 把调用方构造好的 `SoftBody` 放入代际句柄存储；存储只知道粒子、约束和 solver 配置，不知道 cloth、角色、材质或玩法类型。
+- `XpbdSolver` 对每个 live slot 按升序固定顺序处理。软体先完成一个与刚体相同的固定 substep 的预测和内部约束投影，再按 `gather_rigid_proxies -> resolve_two_way_coupling -> reaction writeback` 执行耦合，最后用耦合后的位移恢复粒子速度。
+- 默认 `ClothRigidCouplingConfig::disabled()` 不进入 proxy/coupling/writeback 阶段；无世界软体时刚体路径保持原有 bit-identical。软体自身的空存储、确定性重放和 clone 边界已有回归测试。
+- 仍未纳入：ECS/资产层如何创建、销毁、映射和渲染 `SoftBodyHandle`；GPU 粒子/约束后端及 CPU/GPU 同步；跨 crate 的调度、网络复制、快照编码和渲染网格回写。这些必须由消费方契约接入，不能在 `prism_physics_core` 内硬编码。
 
 ---
 

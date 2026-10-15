@@ -134,6 +134,9 @@ impl PhysicsWorld {
     /// rigid-only path is not entered and existing rigid worlds remain
     /// bit-identical.
     pub(crate) fn step_soft_bodies_substep(&mut self, h: Real) {
+        if self.soft_bodies.is_empty() {
+            return;
+        }
         let handles: Vec<SoftBodyHandle> = self.soft_bodies.handles().collect();
         let solver = SoftSolver::new();
         for handle in handles {
