@@ -238,6 +238,11 @@ fn every_service_id_has_exactly_one_provider_feature() {
     );
     let valid = catalog(vec![provider(A, SA, KA, &[])], vec![KA]).unwrap();
     assert_eq!(valid.provider(SA), Some(A));
+    let service_provider = valid.service_provider(SA).unwrap();
+    assert_eq!(service_provider.service(), SA);
+    assert_eq!(service_provider.feature(), A);
+    assert_eq!(service_provider.output().resources, &[KA]);
+    assert_eq!(valid.service_output(SA), Some(service_provider.output()));
     assert_eq!(valid.provider(SB), None);
 }
 
@@ -440,7 +445,14 @@ fn service_variants_publish_the_same_resource_interface() {
         ],
     );
     let valid = catalog(vec![root(&[SA]), definition], vec![KA]).unwrap();
-    assert_eq!(resolve(&valid).service_resources(SA), Some([KA].as_slice()));
+    let selection = resolve(&valid);
+    assert_eq!(selection.service_resources(SA), Some([KA].as_slice()));
+    assert_eq!(selection.service_provider(SA), valid.service_provider(SA));
+    assert_eq!(selection.service_output(SA), valid.service_output(SA));
+    assert_eq!(
+        selection.services().collect::<Vec<_>>(),
+        vec![valid.service_provider(SA).unwrap()]
+    );
     let mut broken = definition;
     broken.variants = table(vec![
         definition.variants[0],

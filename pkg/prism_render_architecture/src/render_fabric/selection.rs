@@ -4,7 +4,7 @@ use alloc::{
 };
 use core::fmt;
 
-use super::{topology, types::*, CatalogError, FeatureCatalog};
+use super::{topology, types::*, CatalogError, FeatureCatalog, ServiceProvider};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RootError {
@@ -166,7 +166,7 @@ pub struct FeatureSelection {
     quality: RenderQualityTier,
     closure: Vec<FeatureId>,
     selected: Vec<SelectedFeature>,
-    services: BTreeMap<ServiceId, (FeatureId, Vec<ResourceKey>)>,
+    services: BTreeMap<ServiceId, ServiceProvider>,
 }
 
 impl FeatureSelection {
@@ -185,9 +185,11 @@ impl FeatureSelection {
         while let Some(id) = pending.pop() {
             let feature = catalog.feature(id).expect("validated root or provider");
             for &service in feature.requires_services.as_slice() {
-                let provider = catalog.provider(service).expect("validated provider");
-                if closure.insert(provider) {
-                    pending.push(provider);
+                let provider = catalog
+                    .service_provider(service)
+                    .expect("validated provider");
+                if closure.insert(provider.feature()) {
+                    pending.push(provider.feature());
                 }
             }
         }
@@ -242,9 +244,12 @@ impl FeatureSelection {
                 definition: feature,
             });
             for output in feature.kind.provides() {
-                let mut resources = output.resources.to_vec();
-                resources.sort();
-                result.services.insert(output.service, (id, resources));
+                let provider = catalog
+                    .service_provider(output.service)
+                    .expect("validated provider");
+                debug_assert_eq!(provider.feature(), id);
+                debug_assert_eq!(provider.output(), output);
+                result.services.insert(output.service, provider);
             }
         }
         Ok(result)
@@ -271,12 +276,19 @@ impl FeatureSelection {
         self.selected.iter().find(|selected| selected.feature == id)
     }
     pub fn provider(&self, service: ServiceId) -> Option<FeatureId> {
-        self.services.get(&service).map(|(provider, _)| *provider)
+        self.service_provider(service).map(ServiceProvider::feature)
+    }
+    pub fn service_provider(&self, service: ServiceId) -> Option<ServiceProvider> {
+        self.services.get(&service).copied()
+    }
+    pub fn service_output(&self, service: ServiceId) -> Option<&'static ServiceOutput> {
+        self.service_provider(service).map(ServiceProvider::output)
     }
     pub fn service_resources(&self, service: ServiceId) -> Option<&[ResourceKey]> {
-        self.services
-            .get(&service)
-            .map(|(_, resources)| resources.as_slice())
+        self.service_output(service).map(|output| output.resources)
+    }
+    pub fn services(&self) -> impl Iterator<Item = ServiceProvider> + '_ {
+        self.services.values().copied()
     }
     /// Selected pass declarations only; not an executable/resource-bound graph.
     pub fn passes(&self) -> impl Iterator<Item = (FeatureId, &'static PassTemplate)> + '_ {

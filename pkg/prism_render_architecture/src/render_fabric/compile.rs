@@ -111,7 +111,10 @@ impl<'a> ResourceTemplates<'a> {
             for variant in feature.variants {
                 for pass in variant.passes {
                     for usage in pass.accesses {
-                        let template = result.templates[&usage.key];
+                        let template = *result
+                            .templates
+                            .get(&usage.key)
+                            .ok_or(FabricCompileError::MissingTemplate(usage.key))?;
                         if !template.layout.supports(usage.access) {
                             return Err(FabricCompileError::InvalidAccess {
                                 pass: pass.id,
@@ -191,7 +194,13 @@ impl<'a> ResourceTemplates<'a> {
                         });
                     }
                     dependencies.insert(writer);
-                } else if self.templates[&usage.key].lifetime == ResourceLifetime::Transient {
+                } else if self
+                    .templates
+                    .get(&usage.key)
+                    .ok_or(FabricCompileError::MissingTemplate(usage.key))?
+                    .lifetime
+                    == ResourceLifetime::Transient
+                {
                     return Err(FabricCompileError::MissingProducer(usage.key));
                 }
             }
@@ -208,8 +217,14 @@ impl<'a> ResourceTemplates<'a> {
         let admission_order = admission.compile()?.order;
         let mut supplied = BTreeMap::new();
         for binding in external {
+            let Some(template) = self.templates.get(&binding.key) else {
+                return Err(FabricCompileError::UnexpectedBinding {
+                    resource: binding.key,
+                    frame: binding.frame,
+                });
+            };
             if !needed.contains(&(binding.key, binding.frame))
-                || self.templates[&binding.key].lifetime == ResourceLifetime::Transient
+                || template.lifetime == ResourceLifetime::Transient
             {
                 return Err(FabricCompileError::UnexpectedBinding {
                     resource: binding.key,
@@ -230,7 +245,10 @@ impl<'a> ResourceTemplates<'a> {
         let mut resources: Vec<BoundResource> = Vec::new();
         let mut ids = BTreeMap::new();
         for (key, resource_frame) in needed {
-            let template = self.templates[&key];
+            let template = *self
+                .templates
+                .get(&key)
+                .ok_or(FabricCompileError::MissingTemplate(key))?;
             let history = resource_frame != frame;
             let binding = if template.lifetime == ResourceLifetime::Transient {
                 None
@@ -297,7 +315,10 @@ impl<'a> ResourceTemplates<'a> {
                 .iter()
                 .map(|usage| {
                     Ok(ResourceAccess {
-                        resource: ids[&(usage.key, use_frame(frame, *usage)?)],
+                        resource: ids
+                            .get(&(usage.key, use_frame(frame, *usage)?))
+                            .copied()
+                            .ok_or(FabricCompileError::MissingTemplate(usage.key))?,
                         kind: usage.access,
                     })
                 })
@@ -429,7 +450,10 @@ impl<'a> ResourceTemplates<'a> {
             }) {
                 return Err(FabricCompileError::PayloadNotReferenced(payload.resource));
             }
-            let template = self.templates[&payload.resource];
+            let template = *self
+                .templates
+                .get(&payload.resource)
+                .ok_or(FabricCompileError::MissingTemplate(payload.resource))?;
             if payload.lifetime != template.lifetime
                 || payload.layout != template.layout
                 || payload.size != template.layout.size().expect("validated layout")
@@ -631,16 +655,12 @@ fn project_barriers(
     let texture_resource_ids: Vec<_> = resource_is_texture
         .iter()
         .enumerate()
-        .filter_map(|(index, &is_texture)| {
-            is_texture.then_some(ResourceId(index as u32))
-        })
+        .filter_map(|(index, &is_texture)| is_texture.then_some(ResourceId(index as u32)))
         .collect();
     let buffer_resource_ids: Vec<_> = resource_is_texture
         .iter()
         .enumerate()
-        .filter_map(|(index, &is_texture)| {
-            (!is_texture).then_some(ResourceId(index as u32))
-        })
+        .filter_map(|(index, &is_texture)| (!is_texture).then_some(ResourceId(index as u32)))
         .collect();
     let normalized: Vec<Vec<AccessKind>> = passes
         .iter()

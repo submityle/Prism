@@ -199,24 +199,27 @@ fn derived_order_and_every_barrier_match_authoritative_resource_graph() {
         vec![PassKey(3), PassKey(2), PassKey(1)]
     );
     assert_eq!(compiled.plan().order, expected.order);
-    assert_eq!(compiled.barriers(), vec![
-        Barrier {
-            resource: b,
-            source: PassId(0),
-            destination: PassId(1),
-            before: AccessKind::IndirectRead,
-            after: AccessKind::StorageWrite,
-            queue_transfer: true
-        },
-        Barrier {
-            resource: a,
-            source: PassId(1),
-            destination: PassId(2),
-            before: AccessKind::StorageRead,
-            after: AccessKind::TransferWrite,
-            queue_transfer: true
-        },
-    ]);
+    assert_eq!(
+        compiled.barriers(),
+        vec![
+            Barrier {
+                resource: b,
+                source: PassId(0),
+                destination: PassId(1),
+                before: AccessKind::IndirectRead,
+                after: AccessKind::StorageWrite,
+                queue_transfer: true
+            },
+            Barrier {
+                resource: a,
+                source: PassId(1),
+                destination: PassId(2),
+                before: AccessKind::StorageRead,
+                after: AccessKind::TransferWrite,
+                queue_transfer: true
+            },
+        ]
+    );
     assert_eq!(compiled.plan().queue_batches, expected.queue_batches);
     assert_eq!(
         compiled.plan().alias.buffer_slots,
@@ -1209,6 +1212,25 @@ fn external_storage_requires_exact_type_alignment_range_and_unique_address() {
     let resources = ResourceTemplates::new(&catalog, &[a, b]).unwrap();
     let first = binding(a, 10, 1);
     let second = binding(b, 10, 2);
+    let unknown = FrameResourceBinding {
+        key: ResourceKey::engine(77),
+        ..first
+    };
+    assert_eq!(
+        resources
+            .compile(
+                &select(&catalog),
+                10,
+                &[unknown],
+                &[],
+                GraphLimits::default()
+            )
+            .unwrap_err(),
+        FabricCompileError::UnexpectedBinding {
+            resource: ResourceKey::engine(77),
+            frame: 10
+        }
+    );
     for bad in [
         FrameResourceBinding {
             physical: PhysicalResource::Texture(TextureId::from_parts(1, 1)),
@@ -1455,10 +1477,7 @@ fn foreign_selection_is_rejected_and_template_binding_order_does_not_change_plan
         .unwrap()
         .compile(&select(&catalog), 10, &[], &[], GraphLimits::default())
         .unwrap();
-    assert_eq!(
-        expected.plan().order,
-        reordered.plan().order
-    );
+    assert_eq!(expected.plan().order, reordered.plan().order);
     assert_eq!(expected.barriers(), reordered.barriers());
     assert_eq!(expected.versions(), reordered.versions());
     assert_eq!(

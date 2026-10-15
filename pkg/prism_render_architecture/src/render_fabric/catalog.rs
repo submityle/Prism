@@ -10,6 +10,33 @@ pub enum RequirementKind {
     Extra(VariantId),
 }
 
+/// The statically validated owner of one semantic service.
+///
+/// Keeping the provider feature and its published output together prevents
+/// consumers from accidentally treating a service ID as if it were enough to
+/// locate the resource interface. `FeatureCatalog` constructs exactly one of
+/// these values for every declared service ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServiceProvider {
+    service: ServiceId,
+    feature: FeatureId,
+    output: &'static ServiceOutput,
+}
+
+impl ServiceProvider {
+    pub const fn service(self) -> ServiceId {
+        self.service
+    }
+
+    pub const fn feature(self) -> FeatureId {
+        self.feature
+    }
+
+    pub const fn output(self) -> &'static ServiceOutput {
+        self.output
+    }
+}
+
 /// Semantic diagnostics: no frame-local resource or pass handles escape here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogError {
@@ -93,7 +120,7 @@ impl std::error::Error for CatalogError {}
 pub struct FeatureCatalog {
     features: BTreeMap<FeatureId, &'static FeatureDefinition>,
     resources: BTreeSet<ResourceKey>,
-    providers: BTreeMap<ServiceId, FeatureId>,
+    providers: BTreeMap<ServiceId, ServiceProvider>,
 }
 
 impl FeatureCatalog {
@@ -131,10 +158,15 @@ impl FeatureCatalog {
                 return Err(CatalogError::NoVariants(feature.id));
             }
             for output in feature.kind.provides() {
-                if let Some(first) = catalog.providers.insert(output.service, feature.id) {
+                let provider = ServiceProvider {
+                    service: output.service,
+                    feature: feature.id,
+                    output,
+                };
+                if let Some(first) = catalog.providers.insert(output.service, provider) {
                     return Err(CatalogError::DuplicateProvider {
                         service: output.service,
-                        first,
+                        first: first.feature(),
                         second: feature.id,
                     });
                 }
@@ -295,8 +327,18 @@ impl FeatureCatalog {
         self.features.values().copied()
     }
 
-    pub fn provider(&self, service: ServiceId) -> Option<FeatureId> {
+    /// Return the complete statically validated provider contract.
+    pub fn service_provider(&self, service: ServiceId) -> Option<ServiceProvider> {
         self.providers.get(&service).copied()
+    }
+
+    pub fn provider(&self, service: ServiceId) -> Option<FeatureId> {
+        self.service_provider(service).map(ServiceProvider::feature)
+    }
+
+    /// Return the provider's feature-level output interface.
+    pub fn service_output(&self, service: ServiceId) -> Option<&'static ServiceOutput> {
+        self.service_provider(service).map(ServiceProvider::output)
     }
 
     pub fn resources(&self) -> impl Iterator<Item = ResourceKey> + '_ {

@@ -131,7 +131,7 @@ pub struct ResourceUse {
 }
 
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RenderDomain {
     Surface,
     Particle,

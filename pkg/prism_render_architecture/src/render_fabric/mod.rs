@@ -13,6 +13,7 @@ mod device;
 mod history;
 mod payload;
 mod pcm;
+mod pipeline;
 mod resources;
 mod runtime;
 mod selection;
@@ -31,12 +32,13 @@ pub use builtins::{
     VOLUME_FROXEL_RESOURCE, VOLUME_SERVICE_IDS, VOLUME_VELOCITY_RESOURCE, WATER_FEATURE_ID,
     WATER_FOAM_RESOURCE, WATER_SERVICE_IDS, WATER_SPRAY_RESOURCE, WATER_SURFACE_RESOURCE,
 };
-pub use catalog::{CatalogError, FeatureCatalog, RequirementKind};
+pub use catalog::{CatalogError, FeatureCatalog, RequirementKind, ServiceProvider};
 pub use compile::*;
 pub use device::*;
 pub use history::*;
 pub use payload::*;
 pub use pcm::*;
+pub use pipeline::*;
 pub use resources::*;
 pub use runtime::*;
 pub use selection::{
@@ -48,6 +50,8 @@ pub use types::*;
 mod compile_tests;
 #[cfg(test)]
 mod pcm_tests;
+#[cfg(test)]
+mod pipeline_tests;
 #[cfg(test)]
 mod runtime_tests;
 #[cfg(test)]
