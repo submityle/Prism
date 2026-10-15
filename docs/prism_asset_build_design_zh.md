@@ -31,7 +31,7 @@
 
 ### 可执行验收矩阵（2026-10-15）
 
-补充状态（2026-10-16）：`prism_asset_build_core::release` 已增加持久化 `TrustPolicy`/`ReleaseTrustStore`，包含公钥派生 key-id、严格 canonical 编解码与校验和、key 添加/轮换/撤销、最低 revision、防止撤销 key 恢复、原子替换和 stale-writer 拒绝。该能力已由 release 单元回归覆盖，但 CLI `package/validate` 仍只支持 caller-owned key file，尚未读取持久化 trust policy；远程信任根、密钥托管、Provenance 和完整发行服务仍未完成。
+补充状态（2026-10-16）：`prism_asset_build_core::release` 已增加持久化 `TrustPolicy`/`ReleaseTrustStore`，包含公钥派生 key-id、严格 canonical 编解码与校验和、key 添加/轮换/撤销、最低 revision、防止撤销 key 恢复、原子替换和 stale-writer 拒绝；CLI `validate --trust-policy-file` 已接入该持久化策略，并覆盖成功、撤销 key 和互斥参数回归。远程信任根、密钥托管、Provenance 和完整发行服务仍未完成。
 
 矩阵中的“已实现”仅表示表列出的本地切片有实现路径及回归测试，不代表 AAA 生产成熟度、跨平台保证或性能达标。`部分实现` 表示存在可验证子集；`未实现` 表示当前没有可作为产品能力验收的端到端实现。代码/测试路径是复核入口，不把本节设计要求当成证据。
 
@@ -998,7 +998,7 @@ Patch = New Manifest
 
 ### 15.1 Runtime Manifest
 
-> **当前实现边界**：当前 Runtime Manifest v3 已是稳定身份到容器名、优先级、容器内 GUID、容器内容身份（长度、BLAKE3 hash、稳定 generation token）和 route 元数据的路由索引，并在运行时拒绝同名换包；v2 可只读解码为默认元数据。项目级驻留/streaming/install policy、压缩/加密与密码学签名仍未完成；当前 BLAKE3 摘要也不等同于认证签名。
+> **当前实现边界**：当前 Runtime Manifest v3 已是稳定身份到容器名、优先级、容器内 GUID、容器内容身份（长度、BLAKE3 hash、稳定 generation token）和 route 元数据的路由索引，并在运行时拒绝同名换包；v2 可只读解码为默认元数据。运行时已有本地 `RuntimeInstallPolicy`，在 staged overlay 发布前约束 capability、初始驻留、streaming 等级和已实现 codec；项目级策略编排、压缩/加密与运行时密码学信任根仍未完成；当前 BLAKE3 摘要也不等同于认证签名。
 
 Manifest 至少回答：
 
