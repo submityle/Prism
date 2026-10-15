@@ -2,47 +2,68 @@
 
 日期：2026-10-15
 
-本文把 `prism_world_system_design_zh.md` 的设计要求映射到当前仓库中已经存在的实现和验证结果。设计文档是架构输入；本记录只把有源码和测试证据的部分标为完成。
+本文只把已经存在源码、测试和提交记录的部分标为已交付；设计文档中的路线图、指标和效果目标仍然不能替代实现证据。
 
-## 已交付
+## 已交付切片
 
-### workspace crate
+### M0-M2：空间、流送和常驻
 
-- `prism_world`：组合三个 policy core 的 `WorldRuntime`，只输出 frame plan，不拥有 scene/ECS/GPU 真相。
-- `prism_world_stream`：i64 全局毫米坐标、负坐标 sector 换算、Morton locality hint、cell manifest、需求集、优先级、预算、预取、迟滞驱逐、可回放 VM trace。
-- `prism_world_residency`：A/B/C 三档状态、物化预算、确定性 promotion/demotion、HLOD 连续 alpha 与 dither、QoS 滞后调速、稀疏 SDF brick 和确定性 PCG/cache key。
-- `prism_world_persist`：PersistentId、规范化 OverrideDelta、append-only log、确定性 LWW CRDT、snapshot/timeline、undo/redo、little-endian codec 和 checksum。
+- `prism_world_stream`：`i64` 毫米坐标、负坐标 `div_euclid/rem_euclid`、sector/Morton locality、cell manifest、需求集、预测预取、优先级、预算、迟滞驱逐和可回放 frame trace。
+- `prism_world_residency`：A/B/C 三档状态、物化预算、确定性 promotion/demotion、HLOD 连续 alpha/dither、QoS governor、稀疏 SDF brick 和 PCG 图求值/脏传播/cache key。
+- `prism_world`：组合 policy core 的 `WorldRuntime`，并提供 feature-gated `SceneEcsHost`；cell 加载通过真实 `prism_scene::spawn_typed_plan`/`SceneSpawn::attach_instance`，卸载通过 `prism_scene::despawn_instance`，驻留升降级通过 typed provider 回调，不直接写第二份 scene 真相。
 
-所有新增 world core 都是 `no_std + alloc`、`forbid(unsafe_code)`，不依赖 `bevy_*`，不包含 TODO、占位实现或 `unimplemented!`。
+### M4：GPU proxy visibility contract
 
-## 验证结果
+- `prism_world_gpu` 已纳入根 workspace。
+- CPU contract、SoA little-endian upload layout、WGSL compute shader、readback 四字记录和 CPU golden 对拍已具备。
+- WGSL parse/validation、CPU tests 和 `cargo check --features gpu` 已通过。
+- 严格门禁命令：
+
+```text
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_world_gpu --features gpu --test gpu_parity -- --nocapture
+```
+
+本 checkout 的受控环境结果为失败：`No suitable graphics adapter found`，其中 Metal 没有返回 adapter。该结果是环境限制，不构成 GPU 通过证据；默认无 GPU 测试只允许显式非严格模式跳过。
+
+### M5：持久化
+
+- `prism_world_persist`：`PersistentId`、规范化 `OverrideDelta`、append-only log、确定性 LWW CRDT、snapshot/timeline、undo/redo、little-endian codec/checksum。
+- `std` feature 提供 `FileJournal` 和 `SnapshotStore`：版本头、长度/序号/payload/checksum、批量 append、`flush + sync_all`、重启恢复、损坏/截断尾部裁剪、乱序/重复拒绝、同目录临时文件原子替换和父目录同步。
+- 相关提交：`4d0fbfebe`；Scene/ECS 接缝提交：`34656b305`；GPU workspace 集成：`c94d5cf13`。
+
+## 当前验证
+
+通过：
 
 ```text
 cargo fmt -p prism_world_stream -p prism_world_residency -p prism_world_persist -p prism_world -- --check
-cargo clippy -p prism_world_stream -p prism_world_residency -p prism_world_persist -p prism_world --all-targets -- -D warnings
-cargo test -p prism_world_stream -p prism_world_residency -p prism_world_persist -p prism_world
-CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check \
-  -p prism_world_stream -p prism_world_residency -p prism_world_persist -p prism_world \
-  --no-default-features
+cargo test -p prism_world_persist --features std
+cargo test -p prism_world --features scene_host
+cargo test -p prism_world_gpu
+cargo test -p prism_world_gpu --features gpu --test wgsl_compile
+cargo check -p prism_world_gpu --features gpu
+CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_stream -p prism_world_residency -p prism_world_persist -p prism_world --no-default-features
 ```
 
-结果：格式检查通过，Clippy 零告警，四个 crate 共 20 个单元测试通过，隔离 target 的 no-default-features 检查通过。
+核心 world policy 与 durable/scene tests 当前共 12 项持久化测试、5 项 `prism_world` 测试、4 项 GPU CPU contract 测试和 1 项 WGSL validator 测试通过。
 
-## 接缝边界
+`cargo clippy -D warnings` 在包含 `prism_world` 依赖闭包时会进入仓库其他并行改动的 `prism_asset`/`prism_ecs`，当前被这些既有告警阻断；world 自身新增代码已按相应 crate 的局部检查验证，不能把依赖闭包失败误报为全 workspace 通过。
 
-- `WorldRuntime::tick` 只生成 stream/residency policy plan；宿主负责调用 `prism_scene` 的 spawn/despawn/materialize/dematerialize 契约。
-- `CellManifest` 只保存 scene key、版本、bounds 和派生 hash；它不复制 scene 内容，也不成为第二真相源。
-- `AppendOnlyLog` 是内存确定性核心；文件系统容器、崩溃恢复、压缩、签名和网络传输仍应由上层 provider 实现。
-- `SparseSdfBrickGrid`、PCG helper 和 HLOD 是 CPU 可验证 primitive；当前没有把它们冒充成 GPU clipmap、完整 PCG 节点图或真实渲染管线。
+## 尚未交付的边界
 
-## GPU 验证门禁
+以下项目仍在实现或需要独立硬件/端到端证据，不能用 policy primitive 冒充完成：
 
-World core 不需要 GPU。接入 GPU proxy/cull/LOD 时，必须同时记录 adapter 信息、所需 limits/features、shader/pipeline 创建结果和 CPU golden readback。严格模式使用：
+- M3：真正与 world stream 连通的异步 IO/provider、取消和背压闭环。
+- M6：terrain 多表示、cube-sphere 行星 tile、增量重烘端到端接入。
+- M7：侵蚀/破坏/生态/水文的 world 调度和 SDF 一场多用接入。
+- M8：多人 AOI/authority/sector handoff 网络消费层及轨道到地表端到端验证。
+- GPU proxy 的真实 adapter、dispatch、readback 和 P50/P95/P99 性能数据仍需在有 GPU 的环境执行。
 
-```bash
-WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_render_driver_wgpu --test gpu -- --nocapture
-```
+这些边界不是占位 API；每一项必须以可运行算法、明确契约、单测和真实调用路径交付后才从本节移除。
 
-仅获得 adapter 或默认测试 skip 不构成 world GPU 完成证据；性能报告需要单独记录 CPU/GPU P50/P95/P99、上传字节、显存和 pass 时间。
+## 不变量
 
-本次在受控环境执行严格 Metal 门禁的结果是：`PRISM_REQUIRE_GPU=1` 下 wgpu 没有返回 adapter，4 个基础 GPU 测试均按严格模式失败。该结果只说明当前执行环境不能提供 GPU 证据，不把 GPU 后端标记为通过，也不影响上面的 CPU/no-std 核心验证。
+- world 不复制 scene 内容；可变权威状态是 override delta，派生索引/代理/SDF/PCG 结果可删除重建。
+- policy core 保持 `no_std + alloc`、`forbid(unsafe_code)`；文件系统和 GPU 能力只在明确 feature/provider 边界出现。
+- 所有日志、排序、PCG、HLOD 和 readback contract 都有稳定顺序或稳定 key。
+- 任何声称 GPU 或性能完成的结论必须同时记录 adapter、pipeline、dispatch/readback、P50/P95/P99、上传字节和显存/资源预算。
