@@ -1,10 +1,9 @@
 //! Unit tests for the M4 file-watching layer.
 //!
-//! These exercise both backends: the portable polling watcher everywhere, and
-//! the native `kqueue` watcher on macOS/BSD. They assert that a modification to
-//! a watched file and a creation inside a watched directory are observed, that
-//! `unwatch` of an unknown path is reported, and that the backend selection is
-//! honest.
+//! These exercise the portable polling watcher everywhere, the native `kqueue`
+//! watcher on macOS/BSD, and the native Linux `inotify` watcher. They cover
+//! recursive additions, rename/delete, high-frequency directory changes,
+//! fallback polling, and honest backend selection.
 
 use core::time::Duration;
 use std::io::Write as _;
@@ -80,6 +79,67 @@ fn dir_creation(backend: Backend) {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+fn rename_and_delete(backend: Backend) {
+    let dir = scratch_dir("rename");
+    let before = dir.join("before.asset");
+    let after = dir.join("after.asset");
+    std::fs::write(&before, b"payload").expect("seed file");
+
+    let mut w = Watcher::with_backend(backend).expect("create watcher");
+    w.watch(&dir, false).expect("watch dir");
+
+    std::fs::rename(&before, &after).expect("rename file");
+    let rename_events = w.poll(DEADLINE).expect("poll rename");
+    let has_native_rename = rename_events
+        .iter()
+        .any(|event| event.kind == EventKind::Renamed);
+    let has_polling_pair = rename_events
+        .iter()
+        .any(|event| event.path == before && event.kind == EventKind::Removed)
+        && rename_events
+            .iter()
+            .any(|event| event.path == after && event.kind == EventKind::Created);
+    assert!(
+        has_native_rename || has_polling_pair,
+        "expected rename notification for {backend:?}, got {rename_events:?}"
+    );
+
+    std::fs::remove_file(&after).expect("delete renamed file");
+    let delete_events = w.poll(DEADLINE).expect("poll delete");
+    assert!(
+        delete_events
+            .iter()
+            .any(|event| event.path == after && event.kind == EventKind::Removed),
+        "expected delete notification for {backend:?}, got {delete_events:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn high_frequency_creates(backend: Backend) {
+    const COUNT: usize = 128;
+    let dir = scratch_dir("burst");
+    let mut w = Watcher::with_backend(backend).expect("create watcher");
+    w.watch(&dir, false).expect("watch dir");
+
+    for index in 0..COUNT {
+        std::fs::write(dir.join(format!("burst_{index:04}.asset")), [index as u8])
+            .expect("create burst file");
+    }
+
+    let events = w.poll(DEADLINE).expect("poll burst");
+    let created = events
+        .iter()
+        .filter(|event| event.kind == EventKind::Created)
+        .count();
+    assert!(
+        created >= COUNT,
+        "expected at least {COUNT} created events for {backend:?}, got {created}: {events:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn poll_backend_detects_file_modification() {
     file_modification(Backend::Poll);
@@ -88,6 +148,16 @@ fn poll_backend_detects_file_modification() {
 #[test]
 fn poll_backend_detects_dir_creation() {
     dir_creation(Backend::Poll);
+}
+
+#[test]
+fn poll_backend_detects_rename_and_delete() {
+    rename_and_delete(Backend::Poll);
+}
+
+#[test]
+fn poll_backend_handles_high_frequency_creates() {
+    high_frequency_creates(Backend::Poll);
 }
 
 #[cfg(any(
@@ -114,6 +184,49 @@ fn native_backend_detects_dir_creation() {
     dir_creation(Backend::Native);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_inotify_detects_recursive_creation() {
+    let dir = scratch_dir("recursive");
+    let nested = dir.join("nested");
+    let nested_file = nested.join("shader.wgsl");
+
+    let mut w = Watcher::with_backend(Backend::Native).expect("create inotify watcher");
+    w.watch(&dir, true).expect("watch recursive dir");
+
+    std::fs::create_dir(&nested).expect("create nested dir");
+    let first = w.poll(DEADLINE).expect("poll nested dir creation");
+    assert!(
+        first
+            .iter()
+            .any(|event| event.path == nested && event.kind == EventKind::Created),
+        "expected nested directory creation, got {first:?}"
+    );
+
+    std::fs::write(&nested_file, b"shader").expect("create nested file");
+    let second = w.poll(DEADLINE).expect("poll nested file creation");
+    assert!(
+        second
+            .iter()
+            .any(|event| event.path == nested_file && event.kind == EventKind::Created),
+        "expected dynamically watched nested file creation, got {second:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_inotify_detects_rename_and_delete() {
+    rename_and_delete(Backend::Native);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_inotify_handles_high_frequency_creates() {
+    high_frequency_creates(Backend::Native);
+}
+
 #[test]
 fn default_watcher_picks_native_when_available() {
     let w = Watcher::new().expect("create default watcher");
@@ -123,6 +236,22 @@ fn default_watcher_picks_native_when_available() {
         Backend::Poll
     };
     assert_eq!(w.backend(), expected);
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+)))]
+#[test]
+fn native_backend_is_explicitly_unsupported_without_native_implementation() {
+    assert!(matches!(
+        Watcher::with_backend(Backend::Native),
+        Err(super::WatchError::Unsupported)
+    ));
 }
 
 #[test]

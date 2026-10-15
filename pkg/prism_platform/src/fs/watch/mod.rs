@@ -7,25 +7,26 @@
 //! Requires the `watch` feature (and therefore `std`).
 //!
 //! ## Backends
+//! - **Linux — `inotify` (native, real):** watches directories with kernel
+//!   descriptors, dynamically adds recursive subdirectories, and drains the
+//!   kernel event queue in one poll operation.
 //! - **macOS / BSD — `kqueue` (native, real):** registers a `kqueue` filter
 //!   per watched file/directory descriptor and reports `EVFILT_VNODE` events.
 //!   Exercised by this crate's test-suite on macOS.
-//! - **Everywhere else — polling (portable, real):** a `stat`-based mtime/size
-//!   diff that re-scans watched paths. This is the honest baseline backend and
-//!   works on every `std` platform (Linux, Windows, …). It is also selectable
-//!   explicitly via [`Backend::Poll`].
+//! - **Everywhere else, including Windows — polling (portable, real):** a
+//!   `stat`-based mtime/size diff that re-scans watched paths. This is the safe
+//!   baseline backend and is selectable explicitly via [`Backend::Poll`].
 //!
-//! The design doc also lists `inotify` (Linux) and `ReadDirectoryChangesW`
-//! (Windows) as the eventual native backends. Those are **not implemented
-//! here**: on Linux/Windows this module uses the portable polling backend,
-//! which the design explicitly accepts as the honest baseline. Wiring the
-//! native Linux/Windows backends is future work and is called out honestly
-//! rather than stubbed.
+//! Windows does not have a native `ReadDirectoryChangesW` implementation in
+//! this module yet. `Backend::Native` therefore remains
+//! [`WatchError::Unsupported`] on Windows, while the default watcher uses the
+//! portable polling backend.
 //!
 //! ## Semantics
 //! - Events are coalesced edge notifications, not a guaranteed per-change log.
 //!   After any event, re-read the file; do not assume one event per write.
-//! - The polling backend fully supports recursive directory watching. The
+//! - The polling and Linux `inotify` backends fully support recursive directory
+//!   watching, including directories created after the watch starts. The
 //!   `kqueue` backend registers the directory plus its *current* entries when
 //!   `recursive` is requested; entries created *after* the watch starts are
 //!   not auto-registered (a known `kqueue` limitation), though the parent
@@ -40,6 +41,9 @@ use core::time::Duration;
 use std::path::{Path, PathBuf};
 
 mod poll;
+
+#[cfg(target_os = "linux")]
+mod inotify;
 
 #[cfg(any(
     target_vendor = "apple",
@@ -81,7 +85,7 @@ pub struct Event {
 /// Which backend a [`Watcher`] is using.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
-    /// A native OS watcher (`kqueue` on macOS/BSD).
+    /// A native OS watcher (`inotify` on Linux, `kqueue` on macOS/BSD).
     Native,
     /// The portable `stat`-based polling watcher.
     Poll,
@@ -91,7 +95,8 @@ pub enum Backend {
 #[derive(Debug)]
 pub enum WatchError {
     /// The requested backend is not available in this build/platform (for
-    /// example [`Backend::Native`] on Linux, where only polling is wired up).
+    /// example [`Backend::Native`] on Windows, where polling is the supported
+    /// fallback).
     Unsupported,
     /// A path was asked to be unwatched that was never watched.
     NotWatched,
@@ -130,6 +135,7 @@ impl From<std::io::Error> for WatchError {
 /// Returns `true` if a native OS watcher backend is available in this build.
 pub fn watch_native_supported() -> bool {
     #[cfg(any(
+        target_os = "linux",
         target_vendor = "apple",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -140,6 +146,7 @@ pub fn watch_native_supported() -> bool {
         true
     }
     #[cfg(not(any(
+        target_os = "linux",
         target_vendor = "apple",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -160,6 +167,8 @@ enum Inner {
         target_os = "dragonfly"
     ))]
     Kqueue(kqueue::KqueueWatcher),
+    #[cfg(target_os = "linux")]
+    Inotify(inotify::InotifyWatcher),
     Poll(poll::PollWatcher),
 }
 
@@ -195,6 +204,13 @@ impl Watcher {
                 backend: Backend::Poll,
             }),
             Backend::Native => {
+                #[cfg(target_os = "linux")]
+                {
+                    return Ok(Self {
+                        inner: Inner::Inotify(inotify::InotifyWatcher::new()?),
+                        backend: Backend::Native,
+                    });
+                }
                 #[cfg(any(
                     target_vendor = "apple",
                     target_os = "freebsd",
@@ -209,6 +225,7 @@ impl Watcher {
                     })
                 }
                 #[cfg(not(any(
+                    target_os = "linux",
                     target_vendor = "apple",
                     target_os = "freebsd",
                     target_os = "netbsd",
@@ -241,6 +258,8 @@ impl Watcher {
                 target_os = "dragonfly"
             ))]
             Inner::Kqueue(w) => w.watch(path, recursive),
+            #[cfg(target_os = "linux")]
+            Inner::Inotify(w) => w.watch(path, recursive),
             Inner::Poll(w) => w.watch(path, recursive),
         }
     }
@@ -257,6 +276,8 @@ impl Watcher {
                 target_os = "dragonfly"
             ))]
             Inner::Kqueue(w) => w.unwatch(path),
+            #[cfg(target_os = "linux")]
+            Inner::Inotify(w) => w.unwatch(path),
             Inner::Poll(w) => w.unwatch(path),
         }
     }
@@ -274,6 +295,8 @@ impl Watcher {
                 target_os = "dragonfly"
             ))]
             Inner::Kqueue(w) => w.poll(timeout),
+            #[cfg(target_os = "linux")]
+            Inner::Inotify(w) => w.poll(timeout),
             Inner::Poll(w) => w.poll(timeout),
         }
     }

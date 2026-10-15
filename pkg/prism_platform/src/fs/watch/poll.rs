@@ -7,7 +7,7 @@
 //! `std` platform — Linux, Windows, macOS, and anywhere else `std::fs` runs.
 //!
 //! It is the default backend on platforms without a wired-up native watcher
-//! (Linux/Windows here) and is always selectable explicitly via
+//! (Windows here) and is always selectable explicitly via
 //! [`super::Backend::Poll`].
 
 use core::time::Duration;
