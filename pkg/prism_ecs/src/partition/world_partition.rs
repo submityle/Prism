@@ -43,7 +43,7 @@
 
 use alloc::vec::Vec;
 
-use crate::partition::cell::{CellCoord, CellStreamer};
+use crate::partition::cell::{CellCoord, CellStreamer, StreamingDelta};
 use crate::partition::data_layer::DataLayers;
 use crate::partition::driver::{StreamDriver, StreamResult};
 use crate::partition::floating_origin::{FloatingOrigin, GridCell, LocalPos, WorldPos};
@@ -258,6 +258,18 @@ impl WorldPartition {
         sources.push(camera);
         sources.extend_from_slice(extra);
         self.interest.interests(&sources)
+    }
+
+    /// Recenter and plan without evicting entities. Scene owners with durable
+    /// storage consume this instead of [`Self::advance`], saving first and
+    /// committing each successful eviction through the driver. Failed work
+    /// must be cancelled through the driver's cancel methods to permit retry.
+    pub fn plan(&mut self, camera: WorldPos, extra: &[WorldPos]) -> StreamingDelta {
+        self.origin.recenter_to(camera);
+        let interests = self.interests_for(camera, extra);
+        let layers = &self.data_layers;
+        self.driver
+            .plan_filtered(&interests, |cell| layers.is_cell_streamable(cell))
     }
 
     /// Splits a world position into this subsystem's current `(cell, local)`

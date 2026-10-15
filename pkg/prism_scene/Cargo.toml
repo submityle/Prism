@@ -20,6 +20,8 @@ default = ["std", "materialize"]
 # override / remap core is fully `no_std + alloc`.
 std = ["prism_asset/std", "prism_ecs/std", "prism_ecs/reflect"]
 materialize = ["std", "dep:prism_reflect", "prism_ecs/reflect"]
+# Durable, scene-owned cell streaming; the ECS partition kernel remains I/O-free.
+partition = ["std", "dep:prism_reflect", "prism_ecs/partition", "prism_ecs/serialize"]
 
 [lints]
 workspace = true

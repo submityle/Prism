@@ -165,6 +165,38 @@ impl StreamDriver {
         self.streamer.mark_resident(cell);
     }
 
+    /// Plan streaming without draining the index or mutating the world.
+    /// Persistent owners must save every requested eviction before calling
+    /// [`Self::evict_cell`], and settle successful loads explicitly.
+    pub fn plan(&mut self, interests: &[CellCoord]) -> StreamingDelta {
+        self.plan_filtered(interests, |_| true)
+    }
+
+    /// Data-layer-filtered form of [`Self::plan`].
+    pub fn plan_filtered<F: Fn(CellCoord) -> bool>(
+        &mut self,
+        interests: &[CellCoord],
+        eligible: F,
+    ) -> StreamingDelta {
+        self.streamer.update_filtered(interests, eligible)
+    }
+
+    /// Cancel a failed eviction without changing the entity index. A later
+    /// plan requests it again if the cell is still outside the keep region.
+    pub fn cancel_unload(&mut self, cell: CellCoord) {
+        if self.streamer.state(cell) == CellState::Unloading {
+            self.streamer.mark_resident(cell);
+        }
+    }
+
+    /// Cancel a failed load. A later plan requests it again if still desired;
+    /// no entities may have been settled for this failed request.
+    pub fn cancel_load(&mut self, cell: CellCoord) {
+        if self.streamer.state(cell) == CellState::Loading {
+            self.streamer.force_unload(cell);
+        }
+    }
+
     /// Runs one streaming tick against `interests` and applies all evictions to
     /// `world` (design §13.1).
     ///

@@ -12,6 +12,7 @@ pub mod floating_origin;
 pub mod hlod;
 pub mod interest;
 pub mod lod;
+pub mod persistence;
 pub mod processor;
 pub mod streaming;
 pub mod view;

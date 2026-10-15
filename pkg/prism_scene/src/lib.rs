@@ -64,6 +64,8 @@ pub mod nested_runtime;
 #[cfg(feature = "materialize")]
 pub mod override_replay;
 pub mod overrides;
+#[cfg(feature = "partition")]
+pub mod partition;
 pub mod path;
 pub mod persistence;
 pub mod plan;
@@ -109,6 +111,8 @@ pub use overrides::{
     ArchetypeSignature, ComponentTypeId, OverrideError, OverrideSet, OverrideValue,
     PropertyOverride, StructuralOp,
 };
+#[cfg(feature = "partition")]
+pub use partition::{FileCellStore, PersistentEntityRef, PersistentPartition};
 pub use path::{FieldPath, FieldSegment};
 pub use persistence::{
     EntityBinding, PersistedPropertyOverride, PersistenceCapture, PersistenceDiagnostic,
@@ -160,6 +164,8 @@ pub mod prelude {
         ArchetypeSignature, ComponentTypeId, OverrideError, OverrideSet, OverrideValue,
         PropertyOverride, StructuralOp,
     };
+    #[cfg(feature = "partition")]
+    pub use crate::partition::{FileCellStore, PersistentEntityRef, PersistentPartition};
     pub use crate::path::{FieldPath, FieldSegment};
     pub use crate::persistence::{
         EntityBinding, PersistedPropertyOverride, PersistenceCapture, PersistenceDiagnostic,
