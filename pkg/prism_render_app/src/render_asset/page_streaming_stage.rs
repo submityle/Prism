@@ -32,11 +32,20 @@ pub struct FixedPageStreamingConfig {
     pub max_io_pages_per_frame: usize,
     /// Maximum number of owned payloads uploaded in one render prepare pass.
     pub max_uploads_per_frame: usize,
+    /// Maximum number of decoded feedback demands admitted to CPU residency
+    /// in one main-world frame.
+    pub max_feedback_admissions_per_frame: usize,
 }
 
 /// Last-frame diagnostics for the fixed-page streaming bridge.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Resource)]
 pub struct FixedPageStreamingStats {
+    /// Number of decoded feedback demands admitted to CPU residency last frame.
+    pub feedback_admitted: usize,
+    /// Number of decoded feedback demands rejected by page admission last frame.
+    pub feedback_request_errors: usize,
+    /// Number of decoded feedback demands still queued after admission.
+    pub feedback_queued: usize,
     /// Number of CPU page reads attempted by the last main-world pump.
     pub io_attempted: usize,
     /// Number of CPU page reads completed by the last main-world pump.
@@ -59,6 +68,7 @@ impl FixedPageStreamingConfig {
             gpu_pool,
             max_io_pages_per_frame: 1,
             max_uploads_per_frame: 1,
+            max_feedback_admissions_per_frame: 1,
         }
     }
 }
@@ -180,7 +190,18 @@ fn pump_fixed_page_streaming_io(
     config: Res<FixedPageStreamingConfig>,
     mut stats: ResMut<FixedPageStreamingStats>,
 ) {
+    let frame = source.advance_feedback_frame();
+    let admissions = source.admit_feedback(frame, config.max_feedback_admissions_per_frame);
     let report = source.pump_io(config.max_io_pages_per_frame);
+    stats.feedback_admitted = admissions
+        .iter()
+        .filter(|admission| admission.result.is_ok())
+        .count();
+    stats.feedback_request_errors = admissions
+        .iter()
+        .filter(|admission| admission.result.is_err())
+        .count();
+    stats.feedback_queued = source.feedback_len();
     stats.io_attempted = report.attempted;
     stats.io_loaded = report.loaded;
     stats.io_errors = report.errors.len();
@@ -304,7 +325,10 @@ mod tests {
     use alloc::sync::Arc;
 
     use prism_app::App;
-    use prism_asset::{AssetSources, MemSource, PageBudget, PageResidency, PageSize};
+    use prism_asset::{
+        AssetSources, FeedbackDemand, FeedbackDemandQueue, MemSource, PageBudget, PageKey,
+        PageResidency, PageSize,
+    };
     use prism_render_driver::BufferUsages;
     use prism_render_driver_null::NullInstance;
 
@@ -325,10 +349,19 @@ mod tests {
         sources.mount("memory", Arc::new(memory), 0);
         let residency =
             PageResidency::new(PageSize::new(4).unwrap(), PageBudget::new(4, 1).unwrap()).unwrap();
-        let mut source = FixedPageStreamingSource::new(sources, residency);
-        source
-            .request_page("memory://page.bin", 0, prism_tasks::Priority::High, 1)
-            .unwrap();
+        let source = FixedPageStreamingSource::with_feedback_queue(
+            sources,
+            residency,
+            FeedbackDemandQueue::new(4, 60),
+        );
+        let mut source = source;
+        source.submit_feedback(FeedbackDemand::new(
+            PageKey::from_sources(source.sources(), "memory://page.bin", 0),
+            0,
+            1,
+            0,
+            prism_tasks::Priority::High,
+        ));
 
         let mut app = App::new();
         app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
@@ -347,6 +380,9 @@ mod tests {
         assert_eq!(main_stats.io_attempted, 1);
         assert_eq!(main_stats.io_loaded, 1);
         assert_eq!(main_stats.io_errors, 0);
+        assert_eq!(main_stats.feedback_admitted, 1);
+        assert_eq!(main_stats.feedback_request_errors, 0);
+        assert_eq!(main_stats.feedback_queued, 0);
         let render = app.sub_app_mut(RenderApp).unwrap();
         assert!(render.world.resource::<FixedPageRenderQueue>().is_empty());
         let render_stats = render.world.resource::<FixedPageStreamingStats>();
@@ -356,6 +392,81 @@ mod tests {
             .world
             .resource::<FixedPageStreamingGpu<NullInstance>>();
         assert_eq!(gpu.bridge.pool().resident_page_count(), 1);
+    }
+
+    /// A real-device branch for the same feedback-driven vertical slice. The
+    /// test is intentionally explicit about skipping when no adapter exists;
+    /// Null-RHI coverage above is the mandatory deterministic regression.
+    #[test]
+    fn gpu_feedback_drives_fixed_page_upload_and_readback_when_available() {
+        use prism_render_driver_wgpu::WgpuInstance;
+
+        let Some((_device, _queue)) = WgpuInstance::new().request_default_device().ok() else {
+            assert!(
+                std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+                "PRISM_REQUIRE_GPU is set but no adapter was found"
+            );
+            eprintln!("SKIPPED fixed-page feedback GPU test: no adapter");
+            return;
+        };
+        let mut memory = MemSource::new();
+        memory.insert("page.bin", b"abcdefgh".to_vec());
+        let mut sources = AssetSources::new();
+        sources.mount("memory", Arc::new(memory), 0);
+        let residency =
+            PageResidency::new(PageSize::new(4).unwrap(), PageBudget::new(4, 1).unwrap()).unwrap();
+        let mut source = FixedPageStreamingSource::with_feedback_queue(
+            sources,
+            residency,
+            FeedbackDemandQueue::new(4, 60),
+        );
+        let key = PageKey::from_sources(source.sources(), "memory://page.bin", 1);
+        source.submit_feedback(FeedbackDemand::new(
+            key,
+            0,
+            10,
+            0,
+            prism_tasks::Priority::Critical,
+        ));
+
+        let mut app = App::new();
+        app.add_plugins(PrismRenderPlugin::new(WgpuInstance::new()));
+        register_fixed_page_streaming::<WgpuInstance>(
+            &mut app,
+            source,
+            FixedPageStreamingConfig::new(FixedPagePoolDescriptor::new(
+                4,
+                1,
+                BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            )),
+        );
+        app.update();
+
+        let main = app.world();
+        let page = main
+            .resource::<FixedPageStreamingSource>()
+            .residency()
+            .eviction_candidates()[0];
+        let render = app.sub_app_mut(RenderApp).unwrap();
+        let gpu = render
+            .world
+            .resource::<FixedPageStreamingGpu<WgpuInstance>>();
+        let allocation = gpu.bridge.allocation(page).expect("feedback page upload");
+        let bytes = render
+            .world
+            .resource::<RenderRuntimeResource<WgpuInstance>>()
+            .runtime()
+            .queue()
+            .read_buffer(
+                gpu.bridge.pool().buffer(),
+                allocation.offset_bytes(gpu.bridge.pool().page_size()) + 4,
+            );
+        let start = allocation.offset_bytes(gpu.bridge.pool().page_size()) as usize;
+        assert_eq!(&bytes[start..start + 4], b"efgh");
+        assert_eq!(
+            render.world.resource::<FixedPageStreamingStats>().uploads,
+            1
+        );
     }
 
     #[test]

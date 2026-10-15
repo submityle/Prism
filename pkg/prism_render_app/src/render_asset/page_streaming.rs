@@ -8,8 +8,8 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 
 use prism_asset::{
-    AssetPath, AssetSources, PageId, PageKey, PageLoadError, PageRequestError, PageResidency,
-    PageState,
+    AssetPath, AssetSources, FeedbackAdmission, FeedbackDemand, FeedbackDemandQueue, FeedbackPush,
+    PageId, PageKey, PageLoadError, PageRequestError, PageResidency, PageState,
 };
 use prism_ecs::prelude::Resource;
 use prism_tasks::Priority;
@@ -23,6 +23,8 @@ use prism_tasks::Priority;
 pub struct FixedPageStreamingSource {
     sources: AssetSources,
     residency: PageResidency,
+    feedback: FeedbackDemandQueue,
+    feedback_frame: u64,
     extracted: BTreeMap<PageId, ExtractedPageMetadata>,
 }
 
@@ -52,8 +54,35 @@ impl FixedPageStreamingSource {
         Self {
             sources,
             residency,
+            feedback: FeedbackDemandQueue::new(0, 0),
+            feedback_frame: 0,
             extracted: BTreeMap::new(),
         }
+    }
+
+    /// Creates a source with a bounded decoded-feedback queue.
+    ///
+    /// The queue accepts feedback that has already been decoded by an
+    /// external producer. This type does not read GPU memory or claim that a
+    /// GPU feedback path exists.
+    #[must_use]
+    pub fn with_feedback_queue(
+        sources: AssetSources,
+        residency: PageResidency,
+        feedback: FeedbackDemandQueue,
+    ) -> Self {
+        Self {
+            sources,
+            residency,
+            feedback,
+            feedback_frame: 0,
+            extracted: BTreeMap::new(),
+        }
+    }
+
+    /// Replaces the decoded-feedback queue policy before the stream is run.
+    pub fn configure_feedback_queue(&mut self, capacity: usize, max_age_frames: u64) {
+        self.feedback = FeedbackDemandQueue::new(capacity, max_age_frames);
     }
 
     /// Returns the mounted source table.
@@ -72,6 +101,45 @@ impl FixedPageStreamingSource {
     /// such as eviction.
     pub fn residency_mut(&mut self) -> &mut PageResidency {
         &mut self.residency
+    }
+
+    /// Submits one already-decoded feedback demand.
+    pub fn submit_feedback(&mut self, demand: FeedbackDemand) -> FeedbackPush {
+        self.feedback.push(demand)
+    }
+
+    /// Submits a batch of already-decoded feedback demands.
+    pub fn submit_feedback_batch(
+        &mut self,
+        demands: impl IntoIterator<Item = FeedbackDemand>,
+    ) -> Vec<FeedbackPush> {
+        self.feedback.push_batch(demands)
+    }
+
+    /// Returns the current feedback queue statistics.
+    #[must_use]
+    pub fn feedback_stats(&self) -> prism_asset::FeedbackDemandStats {
+        self.feedback.stats()
+    }
+
+    /// Returns the number of decoded feedback demands waiting for admission.
+    #[must_use]
+    pub fn feedback_len(&self) -> usize {
+        self.feedback.len()
+    }
+
+    /// Advances the source-owned logical feedback frame without involving GPU
+    /// state. Saturation keeps long-running sessions deterministic.
+    pub fn advance_feedback_frame(&mut self) -> u64 {
+        let frame = self.feedback_frame;
+        self.feedback_frame = self.feedback_frame.saturating_add(1);
+        frame
+    }
+
+    /// Admits a bounded batch of decoded feedback into CPU page residency.
+    pub fn admit_feedback(&mut self, current_frame: u64, limit: usize) -> Vec<FeedbackAdmission> {
+        self.feedback
+            .admit_batch(&mut self.residency, current_frame, limit)
     }
 
     /// Registers a page request using the source table's current revision.

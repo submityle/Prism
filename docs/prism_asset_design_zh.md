@@ -649,10 +649,16 @@ streaming producer 只需提交 typed `FixedPageUpload`，不需要依赖 `Asset
 猜测 fence 或 frame。backing buffer 通过现有 `PrepareContext`/`GpuPrepareBudget` 创建，
 失败会回到上下文的资源回滚路径，所属 `RenderAsset::unload` 应调用
 `FixedPagePool::destroy`。兼容性的立即替换 API 仍存在，但调用方必须证明没有在途 GPU
-消费者；生产路径应使用 deferred API。该切片仍不是 asset 层 GPU streaming、
-DirectStorage、GDeflate 完整 GPU 解压、GPU feedback/page-table、按反馈驱动的 page pool 淘汰或全资产 ECS/渲染闭环。固定页 streaming 的当前生产接线见 `page_streaming.rs` 与 `page_streaming_stage.rs`：它只接受显式 page request，不伪造 GPU feedback，也不把单页垂直切片描述成完整 M4。
-Null RHI 回归和 wgpu readback 测试均已接入；无 adapter 时测试显式跳过，设置
-`PRISM_REQUIRE_GPU=1` 则明确失败，不把 Null RHI 当作硬件可见性证明。
+消费者；生产路径应使用 deferred API。当前最小垂直切片已把**已解码的外部反馈**接入
+`FeedbackDemandQueue -> PageResidency -> read_range -> owned extract -> RenderApp prepare -> GPU fixed-page upload`：
+`FixedPageStreamingSource` 负责有界、确定性的反馈合并与 admission，`PostUpdate` 按配置的
+每帧 admission/I/O 上限推进，渲染侧继续只接收 owned payload 并通过现有 fixed-page
+bridge 写入真实 RHI buffer。该接口不读取或伪造 GPU feedback；GPU feedback buffer 的创建、
+读回和解码仍属于上层渲染/项目接入，asset 层只消费 `FeedbackDemand`。因此该切片仍不是
+DirectStorage、GDeflate 完整 GPU 解压、GPU page-table、按反馈驱动的 page pool 淘汰或全资产
+ECS/渲染闭环。Null RHI 回归覆盖完整 CPU→GPU 接线；有真实 adapter 时 wgpu 测试执行 buffer
+readback，无 adapter 时显式 skip，设置 `PRISM_REQUIRE_GPU=1` 则明确失败，不把 Null RHI 当作
+硬件可见性证明。
 
 ---
 
@@ -947,7 +953,7 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 - **M1 内核重铸（已交付）**：三层身份（+`StableGuid`/`AssetTypeId`）、`SoftHandle`、类型擦除注册、`Asset` trait + `visit_dependencies`、`reserve/fulfill/fail` + 延迟回收、依赖图增量就绪/失效、`ErrorRegistry`、确定性 loader 选择。旧 API 已按开发期策略重铸。
 - **M2 加载管线（部分交付）**：`AssetServer`、`AssetLoader`/`LoadContext`、VFS、同步依赖装配、bounded scheduler facade 和锁外异步 range executor 已有；M2.1 已交付独立 I/O/CPU 池上的有限完整读/解码/依赖等待/提交切片；依赖增量驱动的 EDL 作业图、range-backed 装配和真正可抢占阶段仍待交付。
 - **M3 热重载（部分交付）**：watch/去抖、失效反向传播、reload plan、失败保留 last-known-good 和 `Modified` 已有；锁外异步重装配现在覆盖新普通依赖、label 对应源和 sibling 新 label 的候选闭包，并以一次 revision-local commit 发布；完整 labeled revision 生命周期、可抢占阶段和跨平台安全打开语义仍待交付。
-- **M4 流送（部分交付）**：预算/滞回/取消/失败/驱逐状态机、同步与锁外异步 range executor，以及一个固定页请求到 RenderApp GPU 上传/延迟回收的窄垂直切片已交付；`StreamingManager` 预取、GPU feedback/page-table、按反馈驱动的 page pool、块级解码、DirectStorage 形态队列和完整 GDeflate 解压仍待交付。
+- **M4 流送（部分交付）**：预算/滞回/取消/失败/驱逐状态机、同步与锁外异步 range executor，以及一个由已解码 feedback admission 驱动、经 `PageResidency`/`read_range` 到 RenderApp GPU 上传/延迟回收的固定页窄垂直切片已交付；GPU feedback 的真实生成/读回/解码、`StreamingManager` 预取、GPU page-table、按反馈驱动的 page pool 淘汰、块级解码、DirectStorage 形态队列和完整 GDeflate 解压仍待交付。
 - **M5 资产包消费与容器挂载（部分交付）**：v1 raw/Deflate 与 v2 独立 Chunk Table 容器、Manifest/overlay、范围读取和 ChunkPlanner 驱动的物理布局已有；v2 已覆盖 Raw/Deflate、Chunk hash、entry raw offset、确定性对齐与严格损坏拒绝。完整 block-level Chunk wire contract、压缩块索引/加密/签名、GPU 直解、Cook/发行闭环仍待交付。
 - **M6 集成（目标）**：ECS、渲染驻留、场景/编辑器和 Asset Build 制品的端到端接线。
 
