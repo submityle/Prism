@@ -1197,7 +1197,7 @@ pub mod prelude {
 - 现有 `prism_render_gpudriven::camera` 是轴对齐正交场景测试相机，不等同于本文的 `prism_camera`；本文不把它包装成完整相机内核。
 - `cargo test -p prism_camera -p prism_camera_rig -p prism_camera_ecs --all-targets`：`prism_camera` 25 passed、`prism_camera_rig` 12 passed、`prism_camera_ecs` 4 passed，0 failed；覆盖投影视图派生、历史失效、viewport、jitter、frustum、镜头曝光、GPU ABI、后处理排序、立体视图、拾取、过场采样、外部姿态校验、遮挡滞回、前瞻预测、历史稳定化、Body/Aim、SpringArm、噪声、Impulse、输入归一化、LOD 调度、稳定选择、导演混合、半衰期工具和真实 ECS `PostUpdate` 发布链。
 - `cargo test -p prism_camera --all-features --all-targets`：31 passed；`cargo test -p prism_camera_rig --all-features --all-targets`：12 passed；显式 feature 组合和 `cargo check` 默认/全特性/裁剪配置均已验证。
-- `cargo fmt --all -- --check` 与相机改动的 `git diff --check`：通过。
+- 相机源码、Rig 基准和 ECS adapter 的定向 `rustfmt --check` 与相机改动的 `git diff --check`：通过；当前 workspace 全量 `cargo fmt --all -- --check` 会被其它未纳入本次相机提交的脏文件语法/格式问题阻断，不能作为相机代码失败证据。
 - `cargo bench -p prism_camera_rig --bench camera_contracts -- --iterations 1`：`derive_view=152.083 ns/op`、`camera_brain_update=22.738 ns/op`、`impulse_apply_6dof=47.217 ns/op`、`view_lod_scheduler=3.921 ns/op`；这是微基准结果，不替代多视图 P95/P99 性能报告。
 - GPU 记录来自 `prism_math_gpu` 的投影 parity 测试，不等同于 `prism_camera` 全链路 GPU 验收；当前 camera agent 运行中无可用 adapter 时明确跳过，不能据此宣称 camera 的真实设备全链路验证已完成。
 
