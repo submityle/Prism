@@ -109,6 +109,19 @@ wait. Full keys and the entire upstream snapshot are cache dependencies, not
 hash identities. See `docs/prism_world_gpu_scatter_deletions_zh.md` for API,
 budgets, failure semantics, physical-device tests and bounded measurements.
 
+`GpuSdfLookup` is the fixed-capacity GPU twin of the sparse integer SDF query
+contract. It uploads a deterministic `BrickCoord`-sorted key table, 16-bit
+samples packed two-per-word, and a bounded query batch. The shader performs
+negative-coordinate floor division and binary search, returning an explicit
+`Value` or `Unknown` result; a missing brick is never treated as empty space.
+Its logical buffer cost is `16 + 32*max(B,1) + 4*max(B,1)*ceil(S/2) +
+32*max(Q,1)` bytes, where `S=brick_size^3`. Upload and query validation happen
+before queue writes, and the physical parity harness covers pipeline creation,
+dispatch, packed signed samples, unknown bricks, and Apple M2/Metal readback.
+Production `encode` does not submit, wait, or read back. See
+`docs/prism_world_gpu_sdf_zh.md` for the ABI, budgets, lifecycle, and boundaries;
+renderer/physics/GI runtime consumers remain separate contracts.
+
 ## Verification
 
 CPU-only contract and packing tests:
@@ -129,6 +142,7 @@ cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test 
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test scatter_field -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test scatter_heightfield -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test scatter_deletion --test scatter_deletion_composed -- --nocapture
+cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test sdf_gpu -- --nocapture
 ```
 
 The parity test is a strict real-device gate: missing adapter/device acquisition

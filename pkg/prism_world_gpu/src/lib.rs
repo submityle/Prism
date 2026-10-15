@@ -41,6 +41,9 @@ pub mod gpu;
 pub mod resident;
 
 #[cfg(feature = "gpu")]
+mod sdf;
+
+#[cfg(feature = "gpu")]
 mod resident_density;
 
 #[cfg(feature = "gpu")]
@@ -51,6 +54,12 @@ pub use gpu::{AdapterEvidence, GpuAcquireError, GpuContext, GpuVisibility};
 
 #[cfg(feature = "gpu")]
 pub use resident::{GpuResidentError, GpuResidentVisibility};
+
+#[cfg(feature = "gpu")]
+pub use sdf::{
+    GpuSdfError, GpuSdfEvaluation, GpuSdfLookup, GpuSdfQuery, GpuSdfQueryResult, GpuSdfTelemetry,
+    GPU_SDF_ABI_VERSION, GPU_SDF_VERSION,
+};
 
 #[cfg(feature = "gpu")]
 pub use sector_proxies::{GpuSectorProxies, GpuSectorProxyError, ProxyUploadStats};

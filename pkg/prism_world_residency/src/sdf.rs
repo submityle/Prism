@@ -706,6 +706,25 @@ mod tests {
     }
 
     #[test]
+    fn allocated_brick_access_is_sorted_and_borrowed() {
+        let mut grid = SparseSdfBrickGrid::new(2, 2).unwrap();
+        grid.insert_brick(BrickCoord::new(1, 0, 0, 0), vec![7; 8])
+            .unwrap();
+        grid.insert_brick(BrickCoord::new(-1, 0, 0, 0), vec![-3; 8])
+            .unwrap();
+
+        assert_eq!(grid.sample_count(), 8);
+        assert_eq!(
+            grid.allocated_bricks(),
+            vec![BrickCoord::new(-1, 0, 0, 0), BrickCoord::new(1, 0, 0, 0)]
+        );
+        assert_eq!(
+            grid.brick_samples(BrickCoord::new(-1, 0, 0, 0)).unwrap(),
+            Some(&[-3; 8][..])
+        );
+    }
+
+    #[test]
     fn range_query_distinguishes_value_miss_and_unknown() {
         let mut grid = SparseSdfBrickGrid::new(2, 1).unwrap();
         grid.insert_brick(BrickCoord::new(-1, 0, 0, 0), vec![-2; 8])
