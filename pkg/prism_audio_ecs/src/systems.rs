@@ -174,11 +174,10 @@ pub fn spawn_voices(world: &mut World) {
     let query = world.query::<(Entity, &AudioEmitter, &GlobalTransform)>();
     let mut requests: Vec<_> = query
         .iter(world)
-        .filter_map(|(entity, emitter, pose)| {
-            emitter.wants_voice().then(|| {
-                let importance = effective_importance(emitter, pose.translation(), listener);
-                (entity, build_request(emitter, importance))
-            })
+        .filter(|(_, emitter, _)| emitter.wants_voice())
+        .map(|(entity, emitter, pose)| {
+            let importance = effective_importance(emitter, pose.translation(), listener);
+            (entity, build_request(emitter, importance))
         })
         .collect();
     requests.sort_unstable_by_key(|(entity, _)| *entity);

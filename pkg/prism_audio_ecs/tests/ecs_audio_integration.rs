@@ -1,6 +1,10 @@
 //! Native App -> component -> command ring -> real runtime/DSP regressions.
 //! Blocks are pumped offline on this test thread; no hardware backend is claimed.
 
+extern crate alloc;
+
+use alloc::sync::Arc;
+
 use prism_app::App;
 use prism_math::Vec3;
 use prism_transform::{GlobalTransform, Transform};
@@ -869,10 +873,7 @@ fn removal_replacement_and_pose_loss_retry_stops_without_orphaning_voices() {
 #[test]
 fn shutdown_closes_retained_clients_and_reclaims_all_graph_lifecycle_states() {
     use prism_audio_rt::AudioCommand;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Tracked(Arc<AtomicUsize>);
     impl AudioNode for Tracked {
