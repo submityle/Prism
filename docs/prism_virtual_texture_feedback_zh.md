@@ -21,9 +21,19 @@
 ## 验证
 
 ```text
-CARGO_TARGET_DIR=/private/tmp/prism-vt-target cargo test --locked --offline -p prism_virtual_texture_gpu --all-targets -- --nocapture
-PRISM_REQUIRE_GPU=1 CARGO_TARGET_DIR=/private/tmp/prism-vt-gpu-target \
-  cargo test --locked --offline -p prism_virtual_texture_gpu --all-targets
+CARGO_TARGET_DIR=/private/tmp/prism-vt-target cargo test --locked --offline \
+  -p prism_virtual_texture_gpu --all-targets -- --nocapture
+PRISM_REQUIRE_GPU=1 CARGO_TARGET_DIR=/private/tmp/prism-vt-target CARGO_BUILD_JOBS=1 \
+  cargo test --locked --offline -p prism_virtual_texture_gpu --all-targets -- --nocapture
+PRISM_REQUIRE_GPU=1 CARGO_TARGET_DIR=/private/tmp/prism-vt-target CARGO_BUILD_JOBS=1 \
+  cargo bench --locked --offline -p benches --bench prism_virtual_texture -- \
+  --quick --noplot
 ```
 
-第一条命令验证无 GPU 模式：设备无 adapter 时只对 real-GPU 测试输出明确 skip，设备无关的单元测试和 WGSL gate 仍必须通过。第二条命令是硬件 CI 门禁；它必须在真实 integrated/discrete GPU 上运行，不能用 software adapter 冒充通过。本机当前没有可用的真实 adapter，因此只能确认无 GPU 行为，不能宣称 GPU parity 已通过。
+第一条命令验证无 GPU 模式：设备无 adapter 时只对 real-GPU 测试输出明确 skip，设备无关的单元测试和 WGSL gate 仍必须通过。第二条命令是硬件 CI 门禁；它必须在真实 integrated/discrete GPU 上运行，不能用 software adapter 冒充通过。
+
+本机于 2026-10-16 在 Apple M2 / Metal / Integrated adapter 上运行第二条命令，结果为
+`18 passed, 0 failed`（另有集成测试 `2 + 8 + 3 + 1` 均通过）。随后 benchmark
+实际执行了 `page_lookup_readback`（约 `310 µs`）和
+`feedback_decode_readback`（约 `1.50 ms`），并打印同一 adapter 证据。该结果只证明
+当前机器的真实 Metal compute/readback 路径，不外推到其他 GPU 或平台。

@@ -69,7 +69,7 @@ fn cpu_feedback_and_residency(c: &mut Criterion) {
         let desc = desc(size);
         let feedback = grid(desc.grid_len());
         group.bench_with_input(BenchmarkId::new("decode", size), &(), |b, &()| {
-            b.iter(|| black_box(decode_feedback(&desc, &feedback, |_| None, 1)))
+            b.iter(|| black_box(decode_feedback(&desc, &feedback, |_| None, 1)));
         });
         group.bench_with_input(BenchmarkId::new("stream", size), &(), |b, &()| {
             b.iter(|| {
@@ -79,7 +79,7 @@ fn cpu_feedback_and_residency(c: &mut Criterion) {
                 );
                 let demands = decode_feedback(&desc, &feedback, |_| None, 1);
                 black_box(streamer.stream_demands(&demands))
-            })
+            });
         });
     }
     group.finish();
@@ -100,7 +100,7 @@ fn gpu_kernels(c: &mut Criterion) {
     let (table, queries) = gpu_lookup_fixture();
     let lookup = GpuPageLookup::new(&ctx);
     group.bench_function("page_lookup_readback", |b| {
-        b.iter(|| black_box(lookup.lookup(&ctx, &table, &queries).expect("GPU lookup")))
+        b.iter(|| black_box(lookup.lookup(&ctx, &table, &queries).expect("GPU lookup")));
     });
 
     let feedback_desc = desc(16_384);
@@ -113,7 +113,7 @@ fn gpu_kernels(c: &mut Criterion) {
                     .decode(&ctx, &feedback_desc, &feedback, |_| None, 1)
                     .expect("GPU feedback decode"),
             )
-        })
+        });
     });
     group.finish();
 }
