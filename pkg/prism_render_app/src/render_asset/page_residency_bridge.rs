@@ -1,17 +1,19 @@
 //! Narrow bridge from CPU fixed-page residency to the render-side page pool.
 //!
 //! The bridge consumes only pages that the asset side has already read and
-//! marked resident. It does not schedule I/O, decode bytes, infer feedback, or
-//! reclaim GPU pages after a fence; those policies remain with their owners.
+//! marked resident. It does not schedule I/O, decode bytes, or infer feedback.
+//! Deferred GPU reclaim is explicit: the submission owner supplies a completion
+//! value, and the bridge only forwards that proof to the page pool.
 
 use alloc::collections::BTreeMap;
 
 use prism_asset::{PageId, PageResidency};
+use prism_render_architecture::gpu_scene::GpuCompletionValue;
 use prism_render_driver::{RenderDevice, RenderQueue};
 
 use super::page_pool::{
-    FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageUpload, PageAllocation,
-    PagePoolError,
+    FixedPageDeferredReplacement, FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent,
+    FixedPageReclaimEvent, FixedPageUpload, PageAllocation, PagePoolError,
 };
 use super::{GpuPrepareBudget, PrepareCancellation, PrepareContext};
 
@@ -76,6 +78,10 @@ impl FixedPageResidencyBridge {
 
     /// Uploads one already-resident CPU page, replacing its prior GPU range
     /// atomically when one exists.
+    ///
+    /// This compatibility API performs immediate replacement. Callers that
+    /// may still have in-flight consumers must use
+    /// [`Self::upload_page_deferred`] and provide the actual completion value.
     pub fn upload_page(
         &mut self,
         residency: &PageResidency,
@@ -123,6 +129,60 @@ impl FixedPageResidencyBridge {
         };
         self.allocations.insert(page, allocation);
         Ok(event)
+    }
+
+    /// Uploads a resident page and retires its previous GPU allocation until
+    /// the caller-provided completion value has been observed.
+    ///
+    /// The completion value is deliberately supplied by the render submission
+    /// owner. The bridge never guesses a frame number or fabricates a fence.
+    pub fn upload_page_deferred(
+        &mut self,
+        residency: &PageResidency,
+        page: PageId,
+        revision: u64,
+        reclaim_after: GpuCompletionValue,
+        queue: &dyn RenderQueue,
+    ) -> Result<FixedPagePoolEvent, PageResidencyBridgeError> {
+        if residency.page_size().bytes() != self.pool.page_size() {
+            return Err(PageResidencyBridgeError::PageSizeMismatch {
+                cpu: residency.page_size().bytes(),
+                gpu: self.pool.page_size(),
+            });
+        }
+        let bytes = residency
+            .resident_bytes(page)
+            .ok_or(PageResidencyBridgeError::PageNotResident(page))?;
+        let upload = FixedPageUpload::new(revision, bytes);
+        let Some(previous) = self.allocations.get(&page).copied() else {
+            return self.upload_page(residency, page, revision, queue);
+        };
+        let mut transaction = self
+            .pool
+            .begin_replace(previous, upload)
+            .map_err(PageResidencyBridgeError::Pool)?;
+        transaction
+            .upload(queue)
+            .map_err(PageResidencyBridgeError::Pool)?;
+        let replacement: FixedPageDeferredReplacement = transaction
+            .commit_deferred(reclaim_after)
+            .map_err(PageResidencyBridgeError::Pool)?;
+        self.allocations.insert(page, replacement.allocation);
+        Ok(FixedPagePoolEvent::Replaced {
+            previous: replacement.previous,
+            allocation: replacement.allocation,
+            revision: replacement.revision,
+        })
+    }
+
+    /// Reclaims all retired GPU page ranges whose completion proof is ready.
+    pub fn reclaim_completed(
+        &mut self,
+        completed: GpuCompletionValue,
+    ) -> Result<Vec<FixedPageReclaimEvent>, PageResidencyBridgeError> {
+        self.pool
+            .reclaim_completed(completed)
+            .map_err(PageResidencyBridgeError::Pool)
     }
 
     /// Releases the GPU range for a page after the caller's fence/consumer

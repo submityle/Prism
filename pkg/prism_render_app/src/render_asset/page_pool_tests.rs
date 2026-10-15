@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::AtomicBool;
 
 use prism_asset::{AssetSources, MemSource, PageBudget, PageKey, PageResidency, PageSize};
+use prism_render_architecture::gpu_scene::GpuCompletionValue;
 use prism_render_driver::{
     BufferUsages, DeviceDescriptor, Instance, RenderQueue, RequestAdapterOptions,
 };
@@ -12,7 +13,7 @@ use prism_render_driver_null::{NullDevice, NullInstance, NullQueue};
 
 use super::{
     FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageResidencyBridge,
-    FixedPageUpload, GpuPrepareBudget, PagePoolError, PrepareContext,
+    FixedPageUpload, GpuPrepareBudget, PageAllocation, PagePoolError, PrepareContext,
 };
 
 fn null_device() -> (NullDevice, NullQueue) {
@@ -158,6 +159,158 @@ fn null_rhi_allocation_upload_replace_and_release_are_transactional() {
 }
 
 #[test]
+fn deferred_replacement_reclaims_only_after_completion_proof() {
+    let (device, queue) = null_device();
+    let mut pool = null_pool(&device, &queue);
+    let recording_queue = RecordingQueue::default();
+
+    let first = {
+        let mut transaction = pool
+            .begin_upload(FixedPageUpload::new(1, &[0; 16]))
+            .expect("the first page fits");
+        let allocation = transaction.allocation();
+        transaction
+            .upload(&recording_queue)
+            .expect("upload succeeds");
+        transaction.commit().expect("first allocation publishes");
+        allocation
+    };
+
+    let deferred = {
+        let mut transaction = pool
+            .begin_replace(first, FixedPageUpload::new(2, &[1; 16]))
+            .expect("replacement staging fits");
+        let allocation = transaction.allocation();
+        transaction
+            .upload(&recording_queue)
+            .expect("upload succeeds");
+        let deferred = transaction
+            .commit_deferred(GpuCompletionValue(7))
+            .expect("deferred replacement publishes");
+        assert_eq!(deferred.previous, first);
+        assert_eq!(deferred.allocation, allocation);
+        assert_eq!(deferred.revision, 2);
+        assert_eq!(deferred.reclaim_after, GpuCompletionValue(7));
+        deferred
+    };
+
+    assert_eq!(pool.resident_page_count(), 1);
+    assert_eq!(pool.pending_reclaim_page_count(), 1);
+    assert_eq!(pool.free_page_count(), 2);
+    assert!(pool
+        .reclaim_completed(GpuCompletionValue(6))
+        .expect("an incomplete proof is valid")
+        .is_empty());
+    assert_eq!(pool.pending_reclaim_page_count(), 1);
+    assert_eq!(pool.free_page_count(), 2);
+
+    pool.begin_release(deferred.allocation, 3)
+        .expect("the replacement is resident")
+        .commit()
+        .expect("the replacement release commits");
+    assert_eq!(pool.resident_page_count(), 0);
+    assert_eq!(pool.free_page_count(), 3);
+
+    let error = match pool.begin_upload(FixedPageUpload::new(4, &[0; 64])) {
+        Ok(_) => panic!("the retiring page must not be reused early"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        PagePoolError::OutOfPages {
+            requested: 4,
+            largest_contiguous: 3,
+        }
+    );
+
+    let reclaimed = pool
+        .reclaim_completed(GpuCompletionValue(7))
+        .expect("the completion proof permits reclamation");
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].allocation, first);
+    assert_eq!(reclaimed[0].reclaim_after, GpuCompletionValue(7));
+    assert_eq!(reclaimed[0].completed, GpuCompletionValue(7));
+    assert_eq!(pool.pending_reclaim_page_count(), 0);
+    assert_eq!(pool.free_page_count(), 4);
+
+    let mut reuse = pool
+        .begin_upload(FixedPageUpload::new(5, &[0; 64]))
+        .expect("the reclaimed pages are reusable");
+    reuse.upload(&recording_queue).expect("upload succeeds");
+    reuse.commit().expect("reused allocation publishes");
+
+    assert!(pool
+        .reclaim_completed(GpuCompletionValue(7))
+        .expect("reclaim is idempotent after the transition")
+        .is_empty());
+    pool.destroy(&device);
+}
+
+#[test]
+fn deferred_reclaims_are_independent_and_follow_completion_values() {
+    let (device, queue) = null_device();
+    let mut pool = null_pool(&device, &queue);
+    let recording_queue = RecordingQueue::default();
+
+    let upload = |pool: &mut FixedPagePool, revision: u64, byte: u8| {
+        let bytes = [byte; 16];
+        let mut transaction = pool
+            .begin_upload(FixedPageUpload::new(revision, &bytes))
+            .expect("page fits");
+        let allocation = transaction.allocation();
+        transaction
+            .upload(&recording_queue)
+            .expect("upload succeeds");
+        transaction.commit().expect("upload publishes");
+        allocation
+    };
+    let first = upload(&mut pool, 1, 1);
+    let second = upload(&mut pool, 2, 2);
+
+    let replace = |pool: &mut FixedPagePool,
+                   previous: PageAllocation,
+                   revision: u64,
+                   byte: u8,
+                   reclaim_after: u64| {
+        let bytes = [byte; 16];
+        let mut transaction = pool
+            .begin_replace(previous, FixedPageUpload::new(revision, &bytes))
+            .expect("replacement fits");
+        transaction
+            .upload(&recording_queue)
+            .expect("upload succeeds");
+        transaction
+            .commit_deferred(GpuCompletionValue(reclaim_after))
+            .expect("deferred replacement publishes")
+    };
+    let first_replacement = replace(&mut pool, first, 3, 3, 3);
+    let second_replacement = replace(&mut pool, second, 4, 4, 7);
+    assert_eq!(pool.pending_reclaim_page_count(), 2);
+    assert_eq!(pool.free_page_count(), 0);
+
+    let first_reclaimed = pool
+        .reclaim_completed(GpuCompletionValue(4))
+        .expect("first completion permits one reclaim");
+    assert_eq!(first_reclaimed.len(), 1);
+    assert_eq!(first_reclaimed[0].allocation, first_replacement.previous);
+    assert_eq!(pool.pending_reclaim_page_count(), 1);
+    assert_eq!(pool.free_page_count(), 1);
+
+    assert!(pool
+        .reclaim_completed(GpuCompletionValue(6))
+        .expect("second completion is not ready")
+        .is_empty());
+    let second_reclaimed = pool
+        .reclaim_completed(GpuCompletionValue(7))
+        .expect("second completion permits the final reclaim");
+    assert_eq!(second_reclaimed.len(), 1);
+    assert_eq!(second_reclaimed[0].allocation, second_replacement.previous);
+    assert_eq!(pool.pending_reclaim_page_count(), 0);
+    assert_eq!(pool.free_page_count(), 2);
+    pool.destroy(&device);
+}
+
+#[test]
 fn null_rhi_prepare_context_rollback_releases_pool_buffer() {
     let (device, queue) = null_device();
     let cancellation = AtomicBool::new(false);
@@ -242,6 +395,67 @@ fn resident_cpu_page_uploads_through_the_render_bridge() {
         released,
         FixedPagePoolEvent::Released { revision: 4, .. }
     ));
+    bridge.destroy(&device);
+    assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn render_bridge_deferred_replacement_requires_completion_before_reuse() {
+    let (device, queue) = null_device();
+    let mut source = MemSource::new();
+    source.insert("payload.bin", (0u8..16).collect::<Vec<u8>>());
+    let mut sources = AssetSources::new();
+    sources.mount("memory", Arc::new(source), 0);
+
+    let mut residency = PageResidency::new(
+        PageSize::new(16).expect("power-of-two page"),
+        PageBudget::new(16, 1).expect("one page budget"),
+    )
+    .expect("aligned page budget");
+    let page = residency
+        .request(
+            PageKey::from_sources(&sources, "memory://payload.bin", 0),
+            prism_tasks::Priority::Normal,
+            0,
+        )
+        .expect("page request");
+    residency.load(&sources, page).expect("range read");
+
+    let cancellation = AtomicBool::new(false);
+    let mut budget = GpuPrepareBudget::new(64);
+    let mut context = PrepareContext::new(&device, &queue, &mut budget, &cancellation);
+    let mut bridge = FixedPageResidencyBridge::new(
+        &mut context,
+        &FixedPagePoolDescriptor::new(16, 2, BufferUsages::COPY_DST),
+    )
+    .expect("GPU pool");
+    context.commit();
+    let recording_queue = RecordingQueue::default();
+
+    let first = bridge
+        .upload_page(&residency, page, 1, &recording_queue)
+        .expect("initial upload");
+    let first = match first {
+        FixedPagePoolEvent::Allocated { allocation, .. } => allocation,
+        other => panic!("unexpected initial event: {other:?}"),
+    };
+    let replacement = bridge
+        .upload_page_deferred(&residency, page, 2, GpuCompletionValue(9), &recording_queue)
+        .expect("deferred replacement");
+    assert!(matches!(
+        replacement,
+        FixedPagePoolEvent::Replaced { previous, .. } if previous == first
+    ));
+    assert_eq!(bridge.pool().pending_reclaim_page_count(), 1);
+    assert!(bridge
+        .reclaim_completed(GpuCompletionValue(8))
+        .expect("incomplete completion is accepted")
+        .is_empty());
+    let reclaimed = bridge
+        .reclaim_completed(GpuCompletionValue(9))
+        .expect("completion permits reclaim");
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].allocation, first);
     bridge.destroy(&device);
     assert_eq!(device.live_resource_count(), 0);
 }

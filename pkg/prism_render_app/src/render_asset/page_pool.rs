@@ -17,6 +17,7 @@
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use prism_render_architecture::gpu_scene::GpuCompletionValue;
 use prism_render_driver::{BufferDescriptor, BufferId, BufferUsages, RenderDevice, RenderQueue};
 
 use super::{PrepareContext, PrepareContextError};
@@ -152,6 +153,33 @@ pub enum FixedPagePoolEvent {
     },
 }
 
+/// The typed publication produced by a deferred replacement.
+///
+/// The new allocation is resident immediately, while `previous` remains
+/// quarantined until `reclaim_after` is observed as completed by the caller.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FixedPageDeferredReplacement {
+    /// The allocation retained until the completion proof arrives.
+    pub previous: PageAllocation,
+    /// The newly resident allocation.
+    pub allocation: PageAllocation,
+    /// The producer revision supplied with the upload.
+    pub revision: u64,
+    /// The caller-provided completion value after which `previous` is safe to reclaim.
+    pub reclaim_after: GpuCompletionValue,
+}
+
+/// A typed event for one prior allocation that was actually reclaimed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FixedPageReclaimEvent {
+    /// The allocation that became free.
+    pub allocation: PageAllocation,
+    /// The completion value attached when the replacement was published.
+    pub reclaim_after: GpuCompletionValue,
+    /// The observed completion value that made reclamation safe.
+    pub completed: GpuCompletionValue,
+}
+
 /// Errors that prevent a page-pool operation from being submitted or
 /// committed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -207,6 +235,10 @@ enum PageState {
     Uploaded(u64),
     Resident(u64),
     Releasing(u64),
+    Retiring {
+        token: u64,
+        reclaim_after: GpuCompletionValue,
+    },
 }
 
 impl PageState {
@@ -216,7 +248,8 @@ impl PageState {
             Self::Reserved(owner)
             | Self::Uploaded(owner)
             | Self::Resident(owner)
-            | Self::Releasing(owner) => Some(owner),
+            | Self::Releasing(owner)
+            | Self::Retiring { token: owner, .. } => Some(owner),
         }
     }
 }
@@ -232,6 +265,7 @@ pub struct FixedPagePool {
     page_size: u64,
     page_count: u32,
     pages: Vec<PageState>,
+    pending_reclaims: Vec<PendingPageReclaim>,
     next_token: u64,
     destroyed: AtomicBool,
 }
@@ -261,6 +295,7 @@ impl FixedPagePool {
             page_size: descriptor.page_size,
             page_count: descriptor.page_count,
             pages: alloc::vec![PageState::Free; descriptor.page_count as usize],
+            pending_reclaims: Vec::new(),
             next_token: 1,
             destroyed: AtomicBool::new(false),
         })
@@ -299,6 +334,15 @@ impl FixedPagePool {
         self.pages
             .iter()
             .filter(|state| matches!(state, PageState::Resident(_)))
+            .count() as u32
+    }
+
+    /// Returns the number of pages quarantined for deferred reclamation.
+    #[must_use]
+    pub fn pending_reclaim_page_count(&self) -> u32 {
+        self.pages
+            .iter()
+            .filter(|state| matches!(state, PageState::Retiring { .. }))
             .count() as u32
     }
 
@@ -363,6 +407,40 @@ impl FixedPagePool {
             revision,
             committed: false,
         })
+    }
+
+    /// Reclaims prior allocations whose caller-provided completion values have
+    /// been observed as complete. No wall-clock or frame-count assumption is
+    /// made; the caller supplies the actual completion proof.
+    pub fn reclaim_completed(
+        &mut self,
+        completed: GpuCompletionValue,
+    ) -> Result<Vec<FixedPageReclaimEvent>, PagePoolError> {
+        self.ensure_live()?;
+
+        for pending in &self.pending_reclaims {
+            if pending.reclaim_after <= completed {
+                self.validate_state(pending.allocation, PageStateKind::Retiring)?;
+            }
+        }
+
+        let pending = core::mem::take(&mut self.pending_reclaims);
+        let mut ready = Vec::new();
+        let mut deferred = Vec::with_capacity(pending.len());
+        for pending in pending {
+            if pending.reclaim_after <= completed {
+                self.set_state(pending.allocation, PageState::Free);
+                ready.push(FixedPageReclaimEvent {
+                    allocation: pending.allocation,
+                    reclaim_after: pending.reclaim_after,
+                    completed,
+                });
+            } else {
+                deferred.push(pending);
+            }
+        }
+        self.pending_reclaims = deferred;
+        Ok(ready)
     }
 
     /// Releases the backing buffer once the containing render asset is being
@@ -504,6 +582,7 @@ enum PageStateKind {
     Uploaded,
     Resident,
     Releasing,
+    Retiring,
 }
 
 impl PageStateKind {
@@ -514,8 +593,15 @@ impl PageStateKind {
                 | (Self::Uploaded, PageState::Uploaded(_))
                 | (Self::Resident, PageState::Resident(_))
                 | (Self::Releasing, PageState::Releasing(_))
+                | (Self::Retiring, PageState::Retiring { .. })
         )
     }
+}
+
+#[derive(Clone, Copy)]
+struct PendingPageReclaim {
+    allocation: PageAllocation,
+    reclaim_after: GpuCompletionValue,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -649,6 +735,41 @@ impl PageReplaceTransaction<'_, '_> {
             previous: self.previous,
             allocation: self.allocation,
             revision: self.upload.revision,
+        })
+    }
+
+    /// Publishes the new range while retaining the prior range until the
+    /// caller later proves that `reclaim_after` has completed on the GPU.
+    pub fn commit_deferred(
+        mut self,
+        reclaim_after: GpuCompletionValue,
+    ) -> Result<FixedPageDeferredReplacement, PagePoolError> {
+        if self.state != UploadState::Uploaded {
+            return Err(PagePoolError::InvalidTransactionState);
+        }
+        self.pool
+            .validate_state(self.previous, PageStateKind::Resident)?;
+        self.pool
+            .validate_state(self.allocation, PageStateKind::Uploaded)?;
+        self.pool
+            .set_state(self.allocation, PageState::Resident(self.allocation.token));
+        self.pool.set_state(
+            self.previous,
+            PageState::Retiring {
+                token: self.previous.token,
+                reclaim_after,
+            },
+        );
+        self.pool.pending_reclaims.push(PendingPageReclaim {
+            allocation: self.previous,
+            reclaim_after,
+        });
+        self.committed = true;
+        Ok(FixedPageDeferredReplacement {
+            previous: self.previous,
+            allocation: self.allocation,
+            revision: self.upload.revision,
+            reclaim_after,
         })
     }
 

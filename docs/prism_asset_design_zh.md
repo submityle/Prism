@@ -10,9 +10,9 @@
 > 本文为纯经典资产系统/内容管线路线，**不含任何 AI/ML 内容**，不含任何 Unreal/Unity 源码或衍生代码。
 
 - 版本：v0.2（开发中，允许破坏性调整；状态以本文“实施状态”和代码/测试为准）
-- 变更记录：本轮补充锁外异步 streaming executor、请求取消竞态门禁、异步 range 短读拒绝、容器单请求 range 预算门禁、异步 streaming gate 终态清理、构建验证字节预算、RenderAsset 延迟准备保留、`AssetServer` 事件/快照到 RenderAsset 的窄桥接、PrepareContext 事务 API 的根级/prelude 导出、CPU fixed-page residency、事务化 GPU fixed-page pool，以及有限范围的异步完整读/解码/依赖装配与独立 I/O/CPU 池切片；本轮另交付了已 resident 根资产的窄异步 reload、epoch supersede、source revision 门禁和失败不污染旧 revision 的测试切片；fixed-page key 现在绑定 source revision，范围检查覆盖末端溢出，失败/取消元数据按预算上限回收；继续将 loader/AssetServer 的同步现实、RangeSource 的稳定内容前提、raw 容器能力边界和完整 EDL 目标规格显式分离。
+- 变更记录：本轮补充锁外异步 streaming executor、请求取消竞态门禁、异步 range 短读拒绝、容器单请求 range 预算门禁、异步 streaming gate 终态清理、构建验证字节预算、RenderAsset 延迟准备保留、`AssetServer` 事件/快照到 RenderAsset 的窄桥接、PrepareContext 事务 API 的根级/prelude 导出、CPU fixed-page residency、事务化 GPU fixed-page pool，以及有限范围的异步完整读/解码/依赖装配与独立 I/O/CPU 池切片；本轮另交付了已 resident 根资产的窄异步 reload、epoch supersede、source revision 门禁和失败不污染旧 revision 的测试切片；fixed-page key 现在绑定 source revision，范围检查覆盖末端溢出，失败/取消元数据按预算上限回收；新增 GPU fixed-page replacement 的调用方 completion proof、retiring/reclaim 状态和 CPU residency bridge 的显式 deferred API；继续将 loader/AssetServer 的同步现实、RangeSource 的稳定内容前提、raw 容器能力边界和完整 EDL 目标规格显式分离。
 - 本文定位：运行时资产身份、存储、加载、VFS、热重载、流送与消费契约的**目标规格**；已交付能力与目标设计分开记录，不以设计段落冒充实现。
-- 当前基线：核心身份/存储/依赖核、同步 `AssetServer`/VFS/loader、bounded scheduler facade、锁外异步 range executor、CPU fixed-page residency、watch/reload 切片和 raw 容器消费切片已存在；EDL 并行装配、完整流送/GPU 解码、GPU page pool 与资产请求的生产接线、发行容器能力和 ECS/渲染闭环仍未交付。
+- 当前基线：核心身份/存储/依赖核、同步 `AssetServer`/VFS/loader、bounded scheduler facade、锁外异步 range executor、CPU fixed-page residency、watch/reload 切片和 raw 容器消费切片已存在；渲染侧已有固定页 GPU pool、CPU residency bridge 和由调用方提供 completion proof 的 deferred replacement/reclaim 窄切片，但 EDL 并行装配、完整流送/GPU 解码、GPU feedback/page-table、GPU page pool 与资产请求的生产接线、发行容器能力和 ECS/渲染闭环仍未交付。
 - 兼容策略：开发期不承诺旧 API/格式兼容；一旦进入发行，`StableGuid`、容器 ToC、Runtime Manifest 和资产 ABI 必须通过显式 schema 版本与迁移窗口演进。
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_utils`（稳定哈希/句柄位打包/小容器）、`prism_tasks`（异步作业图/优先级/背压）、`prism_reflect`（导入设置/元数据序列化）、`prism_diagnostic`（计数器/trace）、可选 `prism_gdeflate_gpu`（GPU 解压）
@@ -634,16 +634,19 @@ NVMe ──(批量队列, DirectStorage 形态)──▶ 显存暂存 ──(GPU
 
 `prism_asset` 负责「字节到达 + 层级决策 + 解压」，**GPU 资源对象的创建/销毁**归渲染侧（`prism_render_*`）：流送管理器发「层级 N 的字节已就绪」事件，渲染侧据此建/换 `wgpu` 纹理视图。两者经句柄 + 事件解耦，`prism_asset` 不依赖任何渲染 crate（保持 L5→L4 单向）。
 
-**2026-10-14 渲染侧窄切片已交付**：`prism_render_app::render_asset` 新增
+**2026-10-15 渲染侧窄切片已交付**：`prism_render_app::render_asset` 新增
 `FixedPagePool`，以 `FixedPagePoolDescriptor` 创建单一固定页 RHI buffer；资产或
 streaming producer 只需提交 typed `FixedPageUpload`，不需要依赖 `AssetId` 或
 `AssetServer`。`PageUploadTransaction`、`PageReplaceTransaction` 和
-`PageReleaseTransaction` 分别覆盖分配/真实 `RenderQueue::write_buffer` 上传、旧页保留
-直到新页提交、以及延迟释放；成功提交返回 `FixedPagePoolEvent`，未提交事务由 Drop
-回滚。backing buffer 通过现有 `PrepareContext`/`GpuPrepareBudget` 创建，失败会回到
-上下文的资源回滚路径，所属 `RenderAsset::unload` 应调用 `FixedPagePool::destroy`。
-该切片只证明固定页 buffer 的渲染侧事务，不是 asset 层 GPU streaming、DirectStorage、
-GDeflate 完整 GPU 解压、timeline-safe deferred reclaim 或 page-table/feedback 闭环。
+这些事务覆盖分配、真实 `RenderQueue::write_buffer` 上传、原子替换和释放；新增
+`commit_deferred(GpuCompletionValue)` 与 `reclaim_completed`，旧 allocation
+在 `Retiring` 状态中保持不可复用，直到调用方提供的 GPU completion value 到达。
+`FixedPageResidencyBridge` 另提供 `upload_page_deferred`/`reclaim_completed`，不会自行
+猜测 fence 或 frame。backing buffer 通过现有 `PrepareContext`/`GpuPrepareBudget` 创建，
+失败会回到上下文的资源回滚路径，所属 `RenderAsset::unload` 应调用
+`FixedPagePool::destroy`。兼容性的立即替换 API 仍存在，但调用方必须证明没有在途 GPU
+消费者；生产路径应使用 deferred API。该切片仍不是 asset 层 GPU streaming、
+DirectStorage、GDeflate 完整 GPU 解压、GPU feedback/page-table 或 ECS/渲染闭环。
 Null RHI 回归和 wgpu readback 测试均已接入；无 adapter 时测试显式跳过，设置
 `PRISM_REQUIRE_GPU=1` 则明确失败，不把 Null RHI 当作硬件可见性证明。
 

@@ -36,8 +36,9 @@ use prism_render_driver::{RenderDevice, RenderQueue};
 pub use context::{GpuPrepareBudget, PrepareCancellation, PrepareContext, PrepareContextError};
 pub use extract::{extract_assets, ExtractedAssets};
 pub use page_pool::{
-    FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageUpload, PageAllocation,
-    PagePoolError, PageReleaseTransaction, PageReplaceTransaction, PageUploadTransaction,
+    FixedPageDeferredReplacement, FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent,
+    FixedPageReclaimEvent, FixedPageUpload, PageAllocation, PagePoolError, PageReleaseTransaction,
+    PageReplaceTransaction, PageUploadTransaction,
 };
 pub use page_residency_bridge::{FixedPageResidencyBridge, PageResidencyBridgeError};
 pub use prepare::{
