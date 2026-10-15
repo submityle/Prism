@@ -305,7 +305,7 @@ Runner 经 `app.set_runner(..)` 注入；默认按 capability（有无显示器�
 - **帧节奏稳定**：优先稳定 1%low 而非平均 FPS；熔断防死亡螺旋。
 - **无头精简**：server 档不建渲染子应用/窗口，纯心跳。
 
-诚实边界：流水线重叠率、frame pacing 稳定性、启动耗时等指标需真实设备 + 大场景实测，均标注 PLANNED。
+诚实边界：当前机合成 CPU workload 已有流水线重叠率与 P50/P95/P99 基线；但 frame pacing 稳定性、启动耗时、真实游戏负载、GPU/present latency、跨机稳定性与生产阈值仍需真实设备 + 大场景实测，不能把现有基线外推为生产结论。
 
 ---
 
