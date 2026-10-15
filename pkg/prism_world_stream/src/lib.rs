@@ -334,6 +334,8 @@ pub struct StreamPlan {
     pub actions: Vec<StreamAction>,
     /// Total bytes admitted by load/prefetch actions.
     pub admitted_bytes: u64,
+    /// The exact VM instruction stream that produced this plan.
+    pub trace: VmTrace,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -381,6 +383,11 @@ impl StreamScheduler {
         budget: StreamBudget,
     ) -> StreamPlan {
         self.frame = self.frame.saturating_add(1);
+        let mut trace = VmTrace::new();
+        trace.push(VmInstruction::BeginFrame(self.frame));
+        for demand in demands {
+            trace.push(VmInstruction::Demand(demand.center));
+        }
         let mut requests = BTreeMap::<SectorId, StreamRequest>::new();
         for manifest in manifests {
             let mut best: Option<(u16, u64, StreamKind)> = None;
@@ -445,6 +452,7 @@ impl StreamScheduler {
             }
             self.resident.insert(request.sector, ResidentState::Loading);
             admitted_bytes = admitted_bytes.saturating_add(request.io_bytes);
+            trace.push(VmInstruction::Admit(request.sector));
             actions.push(if request.kind == StreamKind::Required {
                 StreamAction::Load(request)
             } else {
@@ -464,11 +472,17 @@ impl StreamScheduler {
                 break;
             }
             self.resident.remove(&sector);
+            trace.push(VmInstruction::Evict(sector));
             actions.push(StreamAction::Unload(sector));
         }
+        trace.push(VmInstruction::EndFrame {
+            frame: self.frame,
+            admitted_bytes,
+        });
         StreamPlan {
             actions,
             admitted_bytes,
+            trace,
         }
     }
 
@@ -654,6 +668,7 @@ mod tests {
             },
         );
         assert_eq!(plan.admitted_bytes, 50);
+        assert_eq!(plan.trace.replay(), Ok(1));
         assert!(matches!(
             plan.actions[0],
             StreamAction::Load(StreamRequest {
