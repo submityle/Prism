@@ -555,22 +555,18 @@ pub fn apply_camera_rigs(
     target_query: Option<Res<CameraTargetQueryResource>>,
 ) {
     let frame_dt = frame.effective_dt();
-    let scene = scene_query
-        .as_deref()
-        .and_then(|resource| {
-            resource
-                .query
-                .as_deref()
-                .map(|query| query as &dyn rig::SceneQuery)
-        });
-    let targets = target_query
-        .as_deref()
-        .and_then(|resource| {
-            resource
-                .query
-                .as_deref()
-                .map(|query| query as &dyn rig::TargetQuery)
-        });
+    let scene = scene_query.as_deref().and_then(|resource| {
+        resource
+            .query
+            .as_deref()
+            .map(|query| query as &dyn rig::SceneQuery)
+    });
+    let targets = target_query.as_deref().and_then(|resource| {
+        resource
+            .query
+            .as_deref()
+            .map(|query| query as &dyn rig::TargetQuery)
+    });
     for (mut pose, mut rig_state) in cameras.iter_mut() {
         let dt = if rig_state.dt_seconds.is_finite() {
             rig_state.dt_seconds.max(0.0)

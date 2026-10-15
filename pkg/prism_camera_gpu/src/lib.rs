@@ -25,9 +25,128 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 use prism_camera::{GpuViewRecord, GPU_VIEW_RECORD_SIZE, VIEW_SCHEMA_VERSION};
+use prism_render_driver::{BufferDescriptor, BufferId, BufferUsages, RenderDevice, RenderQueue};
 
 /// The byte width consumed by one camera view record.
 pub const VIEW_RECORD_SIZE: usize = GPU_VIEW_RECORD_SIZE;
+
+/// Minimal WGSL consumer used by render backends to validate the camera view
+/// record stride, matrix columns, origin split, scalar tail, viewport, and
+/// frustum fields. Production shaders may extend this struct only by following
+/// the same schema/version contract.
+pub const WGSL_VIEW_RECORD_CONSUMER: &str = r#"
+struct ViewRecord {
+    clip_from_world: mat4x4<f32>,
+    clip_from_world_unjittered: mat4x4<f32>,
+    prev_clip_from_world: mat4x4<f32>,
+    view_from_world: mat4x4<f32>,
+    world_from_view: mat4x4<f32>,
+    world_origin_hi: vec4<f32>,
+    world_origin_lo: vec4<f32>,
+    exposure: f32,
+    schema_version: u32,
+    flags: u32,
+    view_index: u32,
+    jitter_x: f32,
+    jitter_y: f32,
+    viewport_x: f32,
+    viewport_y: f32,
+    viewport_z: f32,
+    viewport_w: f32,
+    frustum_0_x: f32,
+    frustum_0_y: f32,
+    frustum_0_z: f32,
+    frustum_0_w: f32,
+    frustum_1_x: f32,
+    frustum_1_y: f32,
+    frustum_1_z: f32,
+    frustum_1_w: f32,
+    frustum_2_x: f32,
+    frustum_2_y: f32,
+    frustum_2_z: f32,
+    frustum_2_w: f32,
+    frustum_3_x: f32,
+    frustum_3_y: f32,
+    frustum_3_z: f32,
+    frustum_3_w: f32,
+    frustum_4_x: f32,
+    frustum_4_y: f32,
+    frustum_4_z: f32,
+    frustum_4_w: f32,
+    frustum_5_x: f32,
+    frustum_5_y: f32,
+    frustum_5_z: f32,
+    frustum_5_w: f32,
+};
+
+struct Output {
+    values: array<vec4<u32>, 16>,
+};
+
+@group(0) @binding(0) var<storage, read> views: array<ViewRecord>;
+@group(0) @binding(1) var<storage, read_write> output: Output;
+
+@compute @workgroup_size(1)
+fn main() {
+    let view = views[1];
+    output.values[0] = bitcast<vec4<u32>>(view.clip_from_world[0]);
+    output.values[1] = bitcast<vec4<u32>>(view.clip_from_world_unjittered[1]);
+    output.values[2] = bitcast<vec4<u32>>(view.prev_clip_from_world[2]);
+    output.values[3] = bitcast<vec4<u32>>(view.view_from_world[3]);
+    output.values[4] = bitcast<vec4<u32>>(view.world_from_view[0]);
+    output.values[5] = bitcast<vec4<u32>>(view.world_origin_hi);
+    output.values[6] = bitcast<vec4<u32>>(view.world_origin_lo);
+    output.values[7] = vec4<u32>(bitcast<u32>(view.exposure), view.schema_version, view.flags, view.view_index);
+    output.values[8] = vec4<u32>(
+        bitcast<u32>(view.jitter_x),
+        bitcast<u32>(view.jitter_y),
+        bitcast<u32>(view.viewport_x),
+        bitcast<u32>(view.viewport_y),
+    );
+    output.values[9] = vec4<u32>(
+        bitcast<u32>(view.viewport_z),
+        bitcast<u32>(view.viewport_w),
+        bitcast<u32>(view.frustum_0_x),
+        bitcast<u32>(view.frustum_0_y),
+    );
+    output.values[10] = vec4<u32>(
+        bitcast<u32>(view.frustum_0_z),
+        bitcast<u32>(view.frustum_0_w),
+        bitcast<u32>(view.frustum_1_x),
+        bitcast<u32>(view.frustum_1_y),
+    );
+    output.values[11] = vec4<u32>(
+        bitcast<u32>(view.frustum_1_z),
+        bitcast<u32>(view.frustum_1_w),
+        bitcast<u32>(view.frustum_2_x),
+        bitcast<u32>(view.frustum_2_y),
+    );
+    output.values[12] = vec4<u32>(
+        bitcast<u32>(view.frustum_2_z),
+        bitcast<u32>(view.frustum_2_w),
+        bitcast<u32>(view.frustum_3_x),
+        bitcast<u32>(view.frustum_3_y),
+    );
+    output.values[13] = vec4<u32>(
+        bitcast<u32>(view.frustum_3_z),
+        bitcast<u32>(view.frustum_3_w),
+        bitcast<u32>(view.frustum_4_x),
+        bitcast<u32>(view.frustum_4_y),
+    );
+    output.values[14] = vec4<u32>(
+        bitcast<u32>(view.frustum_4_z),
+        bitcast<u32>(view.frustum_4_w),
+        bitcast<u32>(view.frustum_5_x),
+        bitcast<u32>(view.frustum_5_y),
+    );
+    output.values[15] = vec4<u32>(
+        bitcast<u32>(view.frustum_5_z),
+        bitcast<u32>(view.frustum_5_w),
+        0u,
+        0u,
+    );
+}
+"#;
 
 /// The exact byte representation stored in a frame slot.
 pub type RecordBytes = [u8; VIEW_RECORD_SIZE];
@@ -191,6 +310,140 @@ pub trait UploadBackend {
 
     /// Accepts one immutable plan for upload.
     fn upload(&mut self, plan: &UploadPlan) -> Result<(), Self::Error>;
+}
+
+/// A real RHI-owned buffer containing every frame slot in the camera view ring.
+///
+/// The resource lifetime remains owned by the caller's render resource domain;
+/// [`RhiViewBuffer::destroy`] releases the generational buffer id explicitly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RhiViewBuffer {
+    buffer: BufferId,
+    frame_slot_count: usize,
+    view_capacity: usize,
+    slot_stride: usize,
+}
+
+impl RhiViewBuffer {
+    /// Creates a storage/copy-destination buffer sized for the complete ring.
+    pub fn new<D: RenderDevice>(
+        device: &D,
+        frame_slot_count: usize,
+        view_capacity: usize,
+    ) -> Result<Self, RingError> {
+        let slot_stride =
+            view_capacity
+                .checked_mul(VIEW_RECORD_SIZE)
+                .ok_or(RingError::CapacityOverflow {
+                    frame_slot_count,
+                    view_capacity,
+                })?;
+        let total_bytes =
+            frame_slot_count
+                .checked_mul(slot_stride)
+                .ok_or(RingError::CapacityOverflow {
+                    frame_slot_count,
+                    view_capacity,
+                })?;
+        if frame_slot_count == 0 {
+            return Err(RingError::InvalidFrameSlotCount {
+                requested: frame_slot_count,
+            });
+        }
+        if view_capacity == 0 {
+            return Err(RingError::InvalidViewCapacity {
+                requested: view_capacity,
+            });
+        }
+        let size = u64::try_from(total_bytes).map_err(|_| RingError::CapacityOverflow {
+            frame_slot_count,
+            view_capacity,
+        })?;
+        let buffer = device.create_buffer(&BufferDescriptor::new(
+            size,
+            BufferUsages::COPY_DST | BufferUsages::COPY_SRC | BufferUsages::STORAGE,
+        ));
+        Ok(Self {
+            buffer,
+            frame_slot_count,
+            view_capacity,
+            slot_stride,
+        })
+    }
+
+    /// Returns the RHI buffer id for binding or inspection.
+    #[must_use]
+    pub const fn buffer_id(self) -> BufferId {
+        self.buffer
+    }
+
+    /// Returns the configured number of physical frame slots.
+    #[must_use]
+    pub const fn frame_slot_count(self) -> usize {
+        self.frame_slot_count
+    }
+
+    /// Returns the configured logical view capacity per frame slot.
+    #[must_use]
+    pub const fn view_capacity(self) -> usize {
+        self.view_capacity
+    }
+
+    /// Returns the byte stride between physical frame slots.
+    #[must_use]
+    pub const fn slot_stride(self) -> usize {
+        self.slot_stride
+    }
+
+    /// Creates an upload sink that writes plans into this buffer through the RHI queue.
+    #[must_use]
+    pub const fn upload_backend<'a, Q: RenderQueue>(self, queue: &'a Q) -> RhiUploadBackend<'a, Q> {
+        RhiUploadBackend {
+            queue,
+            buffer: self.buffer,
+            slot_stride: self.slot_stride,
+        }
+    }
+
+    /// Releases the underlying RHI buffer id.
+    pub fn destroy<D: RenderDevice>(self, device: &D) {
+        device.destroy_buffer(self.buffer);
+    }
+}
+
+/// Errors produced while translating a validated plan into RHI writes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RhiUploadError {
+    /// The selected slot offset cannot be represented by the RHI's byte offset.
+    OffsetOverflow,
+}
+
+/// [`UploadBackend`] implementation over Prism's backend-neutral render queue.
+pub struct RhiUploadBackend<'a, Q> {
+    queue: &'a Q,
+    buffer: BufferId,
+    slot_stride: usize,
+}
+
+impl<Q: RenderQueue> UploadBackend for RhiUploadBackend<'_, Q> {
+    type Error = RhiUploadError;
+
+    fn upload(&mut self, plan: &UploadPlan) -> Result<(), Self::Error> {
+        let base = plan
+            .frame_slot()
+            .slot_index()
+            .checked_mul(self.slot_stride)
+            .ok_or(RhiUploadError::OffsetOverflow)?;
+        for operation in plan.operations() {
+            let offset = base
+                .checked_add(operation.offset_bytes())
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(RhiUploadError::OffsetOverflow)?;
+            self.queue
+                .write_buffer(self.buffer, offset, operation.bytes_ref());
+        }
+        Ok(())
+    }
 }
 
 /// Error returned by [`ViewBufferRing`] operations.

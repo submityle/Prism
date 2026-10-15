@@ -9,3 +9,8 @@ publish = false
 
 [dependencies]
 prism_camera = { path = "../prism_camera", default-features = false }
+prism_render_driver = { path = "../prism_render_driver", default-features = false }
+
+[dev-dependencies]
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }

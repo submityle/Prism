@@ -292,6 +292,13 @@ impl WgpuDevice {
         &self.inner.device
     }
 
+    /// Borrows a live buffer by its RHI id for backend-specific readback or
+    /// interop tests.
+    #[must_use]
+    pub fn wgpu_buffer(&self, id: rhi::BufferId) -> wgpu::Buffer {
+        self.inner.resolve_buffer(id)
+    }
+
     /// Borrows the adapter the device was created from, e.g. to query a
     /// surface's supported formats before configuring it.
     #[must_use]

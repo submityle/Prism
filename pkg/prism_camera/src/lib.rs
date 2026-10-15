@@ -48,12 +48,12 @@ pub use advanced::{ExternalPoseError, ExternalPoseSample, ExternalPoseValidator,
 pub use advanced::{FocusSource, FocusTracker};
 #[cfg(feature = "edge_stabilize")]
 pub use advanced::{HistoryRejectReason, HistoryStabilizer};
-pub use error::{CameraError, CameraErrorCode};
 pub use advanced_runtime::{
     AdvancedRuntime, AdvancedRuntimeConfig, AdvancedRuntimeConfigError, AdvancedRuntimeError,
     AdvancedRuntimeInput, AdvancedRuntimeLimits, AdvancedRuntimeOutput, CapacityField, FixedTick,
     RuntimeDegradation,
 };
+pub use error::{CameraError, CameraErrorCode};
 pub use frustum::{extract_frustum, Frustum, HalfSpace};
 pub use gpu::{
     GpuViewRecord, GPU_VIEW_OFFSET_CLIP_FROM_WORLD, GPU_VIEW_OFFSET_CLIP_FROM_WORLD_UNJITTERED,
