@@ -383,6 +383,61 @@ fn restore_discards_abandoned_change_log_and_keeps_post_restore_writes_visible()
     );
 }
 
+#[cfg(feature = "std")]
+#[test]
+fn restore_inside_running_change_observer_rebases_detached_slot() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    let mut world = World::new();
+    world.register_snapshot_component::<Health>();
+    world.insert_resource(Log::default());
+    let entity = world.spawn(Health(1));
+    let snapshot = Arc::new(Mutex::new(Some(world.snapshot())));
+    let restoring = Arc::new(AtomicBool::new(true));
+    world.observe_changed::<Health, _>({
+        let snapshot = snapshot.clone();
+        let restoring = restoring.clone();
+        move |ctx| {
+            let label = if restoring.swap(false, Ordering::Relaxed) {
+                ctx.world
+                    .restore(snapshot.lock().unwrap().as_ref().expect("snapshot"));
+                ctx.world.get_mut::<Health>(entity).unwrap().0 = 3;
+                0
+            } else {
+                1
+            };
+            let changed = ctx.changed().to_vec();
+            ctx.world
+                .resource_mut::<Log>()
+                .0
+                .push(Delivery { label, changed });
+        }
+    });
+
+    next_frame(&mut world);
+    world.get_mut::<Health>(entity).unwrap().0 = 2;
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(world.get::<Health>(entity), Some(&Health(3)));
+    assert_eq!(world.resource::<Log>().0.len(), 1);
+
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(
+        world.resource::<Log>().0,
+        alloc::vec![
+            Delivery {
+                label: 0,
+                changed: alloc::vec![entity],
+            },
+            Delivery {
+                label: 1,
+                changed: alloc::vec![entity],
+            },
+        ]
+    );
+}
+
 #[test]
 fn an_observer_can_remove_itself_and_recursive_flush_does_not_reenter() {
     struct OwnObserver(crate::observer::ObserverId);

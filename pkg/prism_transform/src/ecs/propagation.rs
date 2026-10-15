@@ -205,7 +205,10 @@ impl PropagationState {
                     stats.local_reads += 1;
                     *world.get::<Transform>(entity).expect("queried local")
                 } else {
-                    self.locals[old.expect("cached")]
+                    match old {
+                        Some(index) => self.locals[index],
+                        None => unreachable!("cached transform index missing"),
+                    }
                 };
                 let cached = old.map(|j| self.globals[j]);
                 let current = world.get::<GlobalTransform>(entity).copied();
@@ -259,11 +262,11 @@ impl PropagationState {
                 }
             }
             for entity in globals_changed {
-                if let Some(&node) = self.indices.get(&entity) {
-                    if world.get::<GlobalTransform>(entity) != Some(&self.globals[node.index()]) {
-                        self.ticks.mark(node);
-                        dirty = true;
-                    }
+                if let Some(&node) = self.indices.get(&entity)
+                    && world.get::<GlobalTransform>(entity) != Some(&self.globals[node.index()])
+                {
+                    self.ticks.mark(node);
+                    dirty = true;
                 }
             }
         }
@@ -359,14 +362,14 @@ pub enum TransformEcsError {
 pub struct EcsPropagationStats {
     /// Full membership queries (zero unless lifecycle or restore invalidated it).
     pub membership_scans: usize,
-    /// Full relation-index traversals to refresh canonical ChildOf edges.
+    /// Full relation-index traversals to refresh canonical `ChildOf` edges.
     /// Zero on clean frames; initial collection is included, not hidden at install.
     pub relation_scans: usize,
     /// All index edges visited by those traversals, including unrelated kinds.
     pub relation_edges_scanned: usize,
-    /// Canonical ChildOf edge sort calls (including empty/single-edge inputs).
+    /// Canonical `ChildOf` edge sort calls (including empty/single-edge inputs).
     pub relation_sorts: usize,
-    /// Entities whose ChildOf targets were inspected after topology invalidation.
+    /// Entities whose `ChildOf` targets were inspected after topology invalidation.
     /// Separate from relation-index traversals, counted by `relation_scans`.
     pub relation_checks: usize,
     /// Authoritative local values read from ECS after chunk/row tick filtering.

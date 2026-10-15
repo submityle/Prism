@@ -527,7 +527,9 @@ impl ChunkVersions {
         unsafe { &*cell }
             .parent
             .store(core::ptr::null_mut(), Ordering::Relaxed);
-        // SAFETY: the owner detaches the live cell before freeing its block.
+        // SAFETY: `cell` came from the live cell list and remains valid until
+        // the owner finishes detaching it; this shared reference only clears
+        // the cell's event-log pointer.
         let cell_ref = unsafe { &*cell };
         cell_ref
             .event_log

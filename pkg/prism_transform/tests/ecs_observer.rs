@@ -1,6 +1,9 @@
 //! Real ECS propagation, change-bus delivery and spatial integration contracts.
 #![cfg(feature = "ecs")]
 
+extern crate alloc;
+
+use alloc::sync::Arc;
 use prism_ecs::entity::Entity;
 use prism_ecs::hierarchy::ChildOf;
 use prism_ecs::observer::LifecycleEvent;
@@ -15,7 +18,6 @@ use prism_transform::ecs::{
 use prism_transform::hierarchy::HierarchyError;
 use prism_transform::{GlobalTransform, Transform};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 #[derive(Default, Debug, PartialEq)]
 struct Deliveries(Vec<(u8, Vec<Entity>)>);
