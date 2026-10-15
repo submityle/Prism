@@ -1,6 +1,6 @@
 # Prism World 系统实现记录
 
-日期：2026-10-15
+日期：2026-10-16
 
 本文只把已经存在源码、测试和提交记录的部分标为已交付；设计文档中的路线图、指标和效果目标仍然不能替代实现证据。
 
@@ -93,6 +93,16 @@ source 64 字节 record 保留源 accepted；新增 source-slot 对齐16字节�
 地形工作以 primary×4 逻辑读数在枚举前准入，实际查询 field 幸存点；复用两 Vec 原地压紧、容量继续计入原输出预算。完整缓存 key 通过 Arc 共享不可变 tile 快照，比较实际样本/spec/revision/embedding 和所有过滤参数，不用 tile/revision 或摘要替代身份。默认 78 项回归、scatter feature 93 项回归均通过，0失败/忽略；两配置 normal workspace all-target Clippy `-D warnings` 通过。新增查询覆盖非共面/对角线、半开边界、超2^53负坐标、i64/u32极值和解码超i64；过滤覆盖精确闭端点、双轴坡度、属性对齐、源距离/key重建、三轴逆序分区、完整缓存失效、公开 rebake 发布新快照及失败原子性、预算/溢出/空请求/缺覆盖。
 
 2026-10-16 `aarch64-apple-darwin`、macOS27.0.1、rustc1.96.1 release，8预热/64样本，主机墙钟 nearest-rank：100k真实查询含逐结果校验 P50/P95/P99=1705.166/2613.750/3803.084 µs、0分配；10k源+noise/warp作者场+地形过滤为3514.916/3930.916/5631.916 µs，6132个场幸存点筛到1250点，24528次逻辑地形读取，两列容量880000字节、恰2次分配，共享heightfield8450字节另计。每次完整结果在计时外逐点/属性对oracle，计时排除构造/校验/销毁；首次fixture未对齐格被预算拒绝后修正并加入候选数断言。不是GPU时间、峰值内存、无干扰A/B或产品帧时。完整方法与边界见 `prism_world_heightfield_scatter_zh.md`。
+
+### M4：真实 heightfield 的 GPU 精确地表过滤
+
+`prism_world_gpu/terrain_scatter` 的 `GpuScatterHeightfield` 组合整数源生成、作者场与地形过滤，直接读取真实 baked 高度样本，不在 CPU 逐点求值或回读生产输出。六 storage binding、128B 地形 uniform、i32 样本；有符号 i64 世界坐标与更宽有理高度/离地带、精确双轴坡度由核心 u32 limb 完成，不需要 shader-i64 或其他 optional feature。与 CPU revision1 三角/闭端点/坡度逐项一致，只删点、不移动/补点，保持源最小距离、key 重建和 XYZ 分区成员不变。
+
+全部资源在构造前验证，owned GPU 逻辑 buffer 为 `108C+64B+4S+496` 字节（C/B/S 为至少1的源/刷子/样本容量）。完整请求/读数/源/场预检在任何 queue write 前进行，可恢复错误保留旧请求、结构 key、固定资源与 GPU 输出。地形 uniform 变化上传128B；真实样本变化上传4N字节，只有 embedding、过滤或 metadata 变化不会重传相同样本。encode 无 owned 分配/上传/submit/wait/map/readback；必须先提交当前 encoder 再改请求。原64B源记录不改写，消费者必须使用最终16B属性、compact及indirect。
+
+2026-10-16 Apple M2/Metal 正常 workspace package 定向回归126项通过、0失败/忽略（库87、density8、parity1、resident6、field7、scatter5、heightfield8、terrain draw1、WGSL3），no-default库另73项通过。八项新增实机回归涵盖全部slot CPU oracle、compact唯一性、真实draw_indirect像素、有理/极值/坡度溢出、缓存与rebake、任意XYZ分区、尾部/空请求/连续无wait提交和失败保留旧输出。隔离原始源码 harness all-target Clippy `-D warnings`通过；正常 workspace all-target Clippy 在共享依赖 `prism_asset` 的164项现有lint/doc错误处失败，不视作通过，也不修改其他工作。
+
+release两轮每档8预热/64测量，共288次dispatch全部逐点对CPU。10k/100k三维候选分别从6132/61122场幸存点筛为1250/6193点；逻辑GPU buffer为1097460/10817460B，host高度scratch16900B，共享原高度8450B，首次显式上传含indirect初始化17396B。回归后复测的submit+wait P50/P95/P99分别1442.333/2362.833/4674.250µs和7522.584/15448.750/25020.584µs；首轮同样保留于 `prism_world_gpu_heightfield_scatter_zh.md`，不挑选较好尾延迟。计时不含上传/回读/CPU检查/绘制，不是GPU timestamp、物理VRAM或产品帧时；贴地放置和完整产品散布仍另行验收。
 
 ### M5：持久化
 
@@ -208,7 +218,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
 - M3：资产包解压、mmap schema 视图、GPU 直传和产品级吞吐仍需实现或独立运行时验证；共享动态优先级已接入但不提供抢占或跨队列无饥饿保证。任务池 Future/共享取消、固定 worker 及宿主原生 reactor → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md` 与 `prism_world_native_io_zh.md`，不能代替冷盘、资产包或产品负载验收。
-- M4 散布：GPU 地表过滤、贴地放置、曲率/数据层/跨散布层规则、风与交互、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场、真实heightfield的CPU高度/离地带/坡度稳定过滤、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
+- M4 散布：贴地放置、曲率/数据层/跨散布层规则、风与交互、持久override删除、笔刷空间索引、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场、真实heightfield的CPU/GPU高度/离地带/坡度精确稳定过滤、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。

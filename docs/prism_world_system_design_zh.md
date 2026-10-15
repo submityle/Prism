@@ -13,7 +13,7 @@
 > - **全局距离场**：UE Global Distance Field / Lumen SDF（稀疏 brick + mip 环，一场多用）
 > 本文为纯经典数据结构 + 空间算法 + 流送调度路线（Morton/Hilbert、四叉/八叉树、CDLOD/clipmap、Transvoxel/Dual Contouring/SDF、domain warp 噪声、水力/热力侵蚀 PDE、泊松盘/蓝噪声、D8 流向、并查集、CRDT），**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/其他引擎源码或衍生代码。
 
-- 版本： v3.17（新增真实 heightfield 精确三角查询与可选 CPU 地表高度/垂直离地带/有理坡度散布过滤，保持源点/key/最小距离和三轴分区不变；共享不可变地形快照、完整结构缓存键、预检读数预算和原地双列压紧。契约及限定 release 性能见 prism_world_heightfield_scatter_zh.md。既有整数 GPU 作者场 Apple M2/Metal 定向 113 项及真实间接绘制像素通过，见 prism_world_gpu_scatter_field_zh.md。已有 coverage/dither、sector 所有权、ProxyCellHost、共享 PriorityCell、原生 reactor、行星网格和有界 SDF。GPU 地表过滤/贴地放置、产品 scene/ECS decoder/render graph、资产解压/GPU 直传、多表示产品接线、LOD 接缝和真实加密传输仍须独立验收，不能把局部内核视为整个系统完成）
+- 版本： v3.18（真实 heightfield 精确地表高度/垂直离地带/有理坡度过滤已提供 CPU/GPU 双路径，保持源点/key/最小距离和三轴分区不变；GPU 直接读取真实样本，以核心 u32 limb 完成宽整数运算，无逐点 CPU 求值/读回。完整结构缓存键、容量/读数预检、固定资源和变更上传已具备。Apple M2/Metal 正常 workspace 定向 126 项及真实间接绘制像素通过，契约和两轮限定 release 性能见 prism_world_gpu_heightfield_scatter_zh.md。已有 coverage/dither、sector 所有权、ProxyCellHost、共享 PriorityCell、原生 reactor、行星网格和有界 SDF。贴地放置、产品 scene/ECS decoder/render graph、资产解压/GPU 直传、多表示产品接线、LOD 接缝和真实加密传输仍须独立验收，不能把局部内核视为整个系统完成）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（作者内容单元 / spawn·despawn·materialize API / override delta / PersistentId，见 `prism_scene_design_zh.md`）、`prism_asset`（`StableGuid`/软引用/依赖闭包/单文件包/mmap/内容寻址）、`prism_ecs`（物化边界的批量预留/列写入）、`prism_transform`（层级）、`prism_tasks`（并行流送/烘焙）、`prism_math`（定点/空间编码/噪声）、`prism_diagnostic`（计数器/trace）；向上接 `prism_render`/`prism_physics`/`prism_gi`（经 GPU 常驻实例流 + ECS 物化两个边界，均已去 Bevy）
 - 层级定位： 基座层 L6；下接 `prism_scene`/`prism_asset`/`prism_ecs`，上驱动渲染/物理/GI；与 `prism_terrain_world_design_zh.md`（地形多表示细节）互为上下位
@@ -581,7 +581,9 @@ CPU 只按 sector 流送 proxy 列的加载/卸载（§7），实例的剔除/LO
 
 GPU twin 已另由 `GpuScatterField` 交付：源整数生成后直接在 GPU 完成 noise/warp/笔刷合成、rank 过滤、最终 compact/indirect，生产路径不逐点 CPU 求值或读回。source 64 字节记录保持原源接受标记，新增 16 字节 density/species/最终接受/rank 属性；必须消费 field 的 compact/indirect，不能只看源标记。显式五 storage binding，无 shader-i64 feature，完整复合资源/源工作/场工作/刷子容量先检后写。Apple M2/Metal 完整定向 113 项及实际间接绘制像素通过；ABI、上传量、生命周期、性能与未集成边界见 `prism_world_gpu_scatter_field_zh.md`。这仍不包含地表过滤、笔刷空间索引、风/交互、蓝噪声或产品 scene/render 接线。
 
-真实地形的 CPU 过滤已由 `prism_world_terrain` 交付：`PlanarHeightfieldSurface` 为真实 baked tile 显式绑定平面世界 embedding，按既有 mesh 的 a-c-b / b-c-d 拓扑查询未取整的 i128 有理高度与几何法线，而非双线性插值。可选 `scatter_with_heightfield` 在作者场后稳定删除不满足地表高度、垂直离地带及精确 rise/run 坡度的点，既不投影也不补点；因此保持原 key 重建、最小距离和任意 XYZ 分区成员不变，窄离地带不保证有足够点。完整非空请求 XZ 必须被地形覆盖，四角读取预算按 primary 上界先检，实际输出复用原两列容量。缓存 key 共享不可变完整 tile 快照，比较全部样本而非 tile/revision 或摘要；发布重烘快照不会篡改旧结果。契约、测试与限定 CPU P50/P95/P99 见 `prism_world_heightfield_scatter_zh.md`；GPU 地形过滤、贴地放置、曲率/数据层/跨层规则与产品接线仍独立验收。
+真实地形的 CPU 过滤已由 `prism_world_terrain` 交付：`PlanarHeightfieldSurface` 为真实 baked tile 显式绑定平面世界 embedding，按既有 mesh 的 a-c-b / b-c-d 拓扑查询未取整的 i128 有理高度与几何法线，而非双线性插值。可选 `scatter_with_heightfield` 在作者场后稳定删除不满足地表高度、垂直离地带及精确 rise/run 坡度的点，既不投影也不补点；因此保持原 key 重建、最小距离和任意 XYZ 分区成员不变，窄离地带不保证有足够点。完整非空请求 XZ 必须被地形覆盖，四角读取预算按 primary 上界先检，实际输出复用原两列容量。缓存 key 共享不可变完整 tile 快照，比较全部样本而非 tile/revision 或摘要；发布重烘快照不会篡改旧结果。契约、测试与限定 CPU P50/P95/P99 见 `prism_world_heightfield_scatter_zh.md`。
+
+GPU twin `GpuScatterHeightfield` 已通过可选 `terrain_scatter` 交付：源生成→作者场→真实地形三级 pass，六 storage binding、128B 地形 uniform，样本 i16→i32 上传，u32 limb 精确处理有符号 i64 世界位置、宽位高度/离地带和双轴坡度，不要求额外设备 feature。只消费真实四角数据，不上传 CPU 接受标记。最终 source-slot 对齐属性与 compact/indirect 直接喂真实 draw；source 原记录不改写。完整复合 buffer 为 `108C+64B+4S+496` 字节（C/B/S 各取容量至少1），encode 无 owned 分配/上传/等待/读回；预检错误保留旧请求/缓存键/输出，相同样本不随 embedding/metadata 变化重传。Apple M2/Metal 正常 workspace 126 项全通过、两轮 release 全288次 dispatch 逐点对CPU，完整 ABI、分位数、资源与依赖 Clippy 边界见 `prism_world_gpu_heightfield_scatter_zh.md`。贴地放置、曲率/数据层/跨层规则、笔刷空间索引与产品接线仍独立验收。
 
 ### 15.3 风场与交互场
 

@@ -1,5 +1,55 @@
 //! Device-free shader parsing/validation gate.
 
+#[cfg(feature = "terrain_scatter")]
+#[test]
+fn heightfield_scatter_uses_only_core_integer_features_and_six_storage_bindings() {
+    let source = include_str!("../src/shaders/scatter_heightfield.wgsl");
+    let module = wgpu::naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|error| panic!("heightfield parse: {}", error.emit_to_string(source)));
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .expect("heightfield shader requires no optional capabilities");
+    assert_eq!(module.entry_points.len(), 1);
+    assert_eq!(module.entry_points[0].workgroup_size, [64, 1, 1]);
+    for (space, expected) in [
+        (wgpu::naga::AddressSpace::Uniform, 1),
+        (
+            wgpu::naga::AddressSpace::Storage {
+                access: wgpu::naga::StorageAccess::LOAD,
+            },
+            3,
+        ),
+        (
+            wgpu::naga::AddressSpace::Storage {
+                access: wgpu::naga::StorageAccess::LOAD | wgpu::naga::StorageAccess::STORE,
+            },
+            3,
+        ),
+    ] {
+        assert_eq!(
+            module
+                .global_variables
+                .iter()
+                .filter(|(_, var)| var.space == space)
+                .count(),
+            expected
+        );
+    }
+    for (_, ty) in module.types.iter() {
+        match ty.inner {
+            wgpu::naga::TypeInner::Scalar(scalar)
+            | wgpu::naga::TypeInner::Vector { scalar, .. } => {
+                assert_ne!(scalar.kind, wgpu::naga::ScalarKind::Float);
+                assert!(scalar.width <= 4);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(feature = "gpu")]
 #[test]
 fn proxy_visibility_shader_parses_and_validates() {

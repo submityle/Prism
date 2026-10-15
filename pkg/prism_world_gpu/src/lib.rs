@@ -62,6 +62,12 @@ mod scatter_field;
 #[cfg(feature = "gpu")]
 pub use scatter_field::{GpuScatterField, GpuScatterFieldError};
 
+#[cfg(feature = "terrain_scatter")]
+mod scatter_heightfield;
+
+#[cfg(feature = "terrain_scatter")]
+pub use scatter_heightfield::{GpuScatterHeightfield, GpuScatterHeightfieldError};
+
 #[cfg(test)]
 mod tests {
     use super::*;

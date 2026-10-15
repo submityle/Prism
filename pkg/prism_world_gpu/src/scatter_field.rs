@@ -402,7 +402,7 @@ fn brush_words(brush: &DensityBrush) -> [u32; 16] {
     words
 }
 
-fn validate(
+pub(crate) fn validate(
     capacity: usize,
     brushes: usize,
     budget: u64,

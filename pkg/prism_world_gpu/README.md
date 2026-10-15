@@ -76,6 +76,20 @@ submit, wait or read back. See `docs/prism_world_gpu_scatter_field_zh.md` for th
 exact ABI, budgets, queue lifecycle and physical-device evidence. Surface
 placement and product scene/render-graph integration remain separate work.
 
+The optional `terrain_scatter` feature adds `GpuScatterHeightfield`: source
+generation, author field and exact triangle-height/vertical-clearance/slope
+selection run as three GPU passes. A real immutable baked heightfield is
+uploaded once as i32 samples; production never generates or filters points on
+the CPU. Global i64 positions and signed wide rational comparisons use core
+u32 limbs, without float positions or shader-i64 features. Six storage bindings
+are required. Source records remain unchanged; only the final attributes,
+compact indices and indirect arguments express terrain selection. Logical
+buffers cost `108*max(capacity,1)+64*max(max_brushes,1)+4*max(max_surface_samples,1)+496`
+bytes, with separate reusable brush/height upload scratch. This is thinning,
+not projection or refill: source keys, distances and XYZ partition membership
+are preserved. See `docs/prism_world_gpu_heightfield_scatter_zh.md` for exact
+budgets, upload/cache identity, lifecycle and physical-device evidence.
+
 ## Verification
 
 CPU-only contract and packing tests:
@@ -94,6 +108,7 @@ cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test 
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test density_visibility -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test scatter_generation -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test scatter_field -- --nocapture
+cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test scatter_heightfield -- --nocapture
 ```
 
 The parity test is a strict real-device gate: missing adapter/device acquisition
