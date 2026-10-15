@@ -11,9 +11,6 @@ bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev", default-features = false, features = ["nostd-libm"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_material = { path = "../prism_render_material" }
-# The shading-class table (roadmap P2-j) is derived from the PCM registry, so the
-# response-mode rows are the class set's source of truth.
-prism_material_pcm = { path = "../prism_material_pcm" }
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in"] }

@@ -19,6 +19,7 @@ mod cloth;
 mod cloth_advanced;
 mod cluster;
 mod color_grade;
+mod cpu_response;
 mod dielectric_albedo_table;
 mod dof;
 mod dynamic;
@@ -99,11 +100,11 @@ pub use chromatic_aberration::{
 };
 pub use classification::{
     classify_material_header, classify_material_header_with_context,
-    classify_material_header_with_execution, response_bucket_key_for_header, ClassTableError,
-    ClassificationError, MaterialShadingClass, RenderPhase, ResponseBucket, ResponseBucketKey,
-    ResponseBucketTable, ResponseBucketValidationError, ShadingClassRow, ShadingClassRule,
-    ShadingClassTable, ShadingWorkItem, ShadingWorkPlan, LEGACY_SHADING_CLASS_COUNT,
-    MAX_SHADING_CLASSES,
+    classify_material_header_with_execution, classify_material_header_with_program,
+    classify_material_header_with_region, response_bucket_key_for_header,
+    response_kind_for_program, ClassificationError, RenderPhase, ResponseBucket, ResponseBucketKey,
+    ResponseBucketTable, ResponseBucketValidationError, ShadingWorkItem, ShadingWorkPlan,
+    ShadingWorkPlanError,
 };
 pub use clearcoat::evaluate_clearcoat_direct;
 pub use cloth::evaluate_cloth_direct;
@@ -116,6 +117,9 @@ pub use color_grade::{
     apply_color_grade, color_saturation, contrast, lift_gamma_gain, lin_to_lms, lms_to_lin, luma,
     offset, standard_illuminant_y, white_balance, ColorGradeParams, COLOR_GRADE_LUMA_WEIGHTS,
     D65_LMS,
+};
+pub use cpu_response::{
+    CpuResponseContext, CpuResponseError, CpuResponseEvaluator, CpuResponseRegistry,
 };
 pub use custom_response::{
     apply_custom_variant, respond_custom, CustomData, CustomResponseError, CustomViewContext,
@@ -196,9 +200,10 @@ pub use light_routing::{
     MAX_LIGHTING_CHANNELS, MAX_LIGHT_LAYERS,
 };
 pub use lighting::{
-    evaluate_principled_direct, evaluate_principled_direct_with, glint_shade_seed,
-    linear_furnace_response, principled_pre, DirectLightSample, PrincipledPre, ShadingFrame,
-    SurfaceSample,
+    evaluate_principled_direct, evaluate_principled_direct_channels,
+    evaluate_principled_direct_channels_with, evaluate_principled_direct_with, glint_shade_seed,
+    linear_furnace_response, principled_pre, DirectLightSample, PrincipledDirectChannels,
+    PrincipledPre, ShadingFrame, SurfaceSample,
 };
 pub use lobe_sampling::{
     lobe_blue_noise_1d, lobe_blue_noise_2d, lobe_clamp_unit, lobe_estimate, lobe_estimator_weight,
@@ -254,8 +259,9 @@ pub use gi::sky_lut::multiscatter_lut::bake_multiscatter_lut_for_budget;
 pub use gi::subsurface::preintegrated::preintegrated_diffuse_for_budget;
 pub use gi::translucency::diffusion::profile_radial_energy_for_budget as diffusion_profile_radial_energy_for_budget;
 pub use resolve::{
-    resolve_pixel, surface_sample_from_parameters, DirectionalLight, LightingEnvironment,
-    ResolveError, ResolveInput, ResolvedPixel, IDENTITY_WORLD_FROM_LOCAL,
+    resolve_pixel, resolve_pixel_with_cpu_responses, surface_sample_from_parameters,
+    DirectionalLight, LightingEnvironment, ResolveError, ResolveInput, ResolvedPixel,
+    IDENTITY_WORLD_FROM_LOCAL,
 };
 pub use screen_space::{
     accumulate_temporal, adaptive_history_weight, blend_specular, build_hemisphere_ray,

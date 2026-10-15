@@ -2,12 +2,15 @@
 //!
 //! This closes the visibility -> classify -> shade chain: it reconstructs a
 //! surface from one [`VisibilityPixel`], samples the material parameters, and
-//! evaluates direct lighting per shading class.  It is deliberately free of any
+//! evaluates the selected response program.  It is deliberately free of any
 //! GPU or Bevy dependency so it can act as the golden reference the WESL
 //! resolve shader must match bit-for-bit within tolerance.
 
 use crate::measured_brdf::MeasuredBrdf;
-use prism_render_material::{DynamicChannels, GpuMaterialHeader, GpuSurfaceParameters, ProgramRef};
+use prism_render_material::{
+    BuiltinProgram, DynamicChannels, GpuMaterialHeader, GpuSurfaceParameters, MaterialFeatureFlags,
+    ProgramId, ProgramRef, RenderDomain,
+};
 
 use crate::gi::area_light::ltc_lut::LtcLut;
 use crate::gi::area_light::representative::rect_representative_sample;
@@ -16,9 +19,9 @@ use crate::{
     apply_tangent_space_normal, classify_material_header, evaluate_image_based_light,
     reconstruct_surface, sample_material, ClassificationError, DirectLightSample,
     GpuShadingPrimitive, GpuShadingVertex, ImageBasedLight, MaterialModulationParams,
-    MaterialShadingClass, PunctualLight, SampledTextureBinding, ShadingFrame, StylizedParams,
-    SurfaceReconstructionError, SurfaceReconstructionFlags, SurfaceReconstructionInput,
-    SurfaceSample, TangentBasis, VisibilityPixel,
+    PunctualLight, SampledTextureBinding, ShadingFrame, StylizedParams, SurfaceReconstructionError,
+    SurfaceReconstructionFlags, SurfaceReconstructionInput, SurfaceSample, TangentBasis,
+    VisibilityPixel,
 };
 
 /// Identity `world_from_local` (row-major affine) used when an instance carries
@@ -118,20 +121,20 @@ impl Default for DirectionalLight {
 /// The lighting environment sampled by [`resolve_pixel`].
 #[derive(Clone, Copy, Debug)]
 pub struct LightingEnvironment<'a> {
-    /// Analytic directional lights accumulated for every shading class.
+    /// Analytic directional lights accumulated for every response.
     pub directional: &'a [DirectionalLight],
-    /// Punctual (point and spot) lights accumulated for every shading class.
+    /// Punctual (point and spot) lights accumulated for every response.
     pub punctual: &'a [PunctualLight],
     /// Optional image-based light supplying the indirect term.  When present it
     /// replaces the constant [`Self::ambient`] approximation.
     pub image_based: Option<ImageBasedLight>,
     /// Constant ambient irradiance approximating unresolved indirect light.
     pub ambient: [f32; 3],
-    /// Stylized (NPR) front-end controls used by the `MaterialShadingClass::Npr`
+    /// Stylized (NPR) front-end controls used by the builtin Npr
     /// path. The default reproduces the historical four-band toon lobe.
     pub stylized: StylizedParams,
     /// Resident polygonal rectangle area lights (LTC). The physically based
-    /// lobes (Principled/Cloth/Subsurface/ClearCoat/Custom) integrate the full
+    /// Lit surface response integrate the full
     /// Linearly-Transformed-Cosine term; the specialized Toon/Hair/Water lobes
     /// integrate each rectangle via the Most-Representative-Point conversion in
     /// [`crate::gi::area_light::representative`].
@@ -216,7 +219,7 @@ pub struct ResolveInput<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedPixel {
     pub color: [f32; 3],
-    pub shading_class: MaterialShadingClass,
+    pub response_program: ProgramRef,
     pub surface_flags: SurfaceReconstructionFlags,
 }
 
@@ -227,10 +230,14 @@ pub enum ResolveError {
     InvalidPixel,
     /// The material generation the pixel captured no longer matches the header.
     StaleMaterial,
-    /// The material could not be mapped to a lit surface shading class.
+    /// The material could not be mapped to a verified response program.
     Classification(ClassificationError),
     /// The surface could not be reconstructed from the geometry tables.
     Surface(SurfaceReconstructionError),
+    /// CPU resolve has no evaluator for arbitrary compiled package code.
+    RegisteredProgramEvaluatorRequired(ProgramId),
+    /// Registered CPU execution failed validation or evaluation.
+    CpuResponse(crate::CpuResponseError),
 }
 
 /// Maps stable GPU surface parameters onto the analytic BSDF sample.
@@ -386,27 +393,81 @@ pub fn resolve_pixel(
     input: ResolveInput<'_>,
     lights: LightingEnvironment<'_>,
 ) -> Result<ResolvedPixel, ResolveError> {
+    resolve_pixel_impl(input, lights, None)
+}
+
+/// Executes registered host code only through a generation-checked registry.
+/// Builtins use the same verified header identity, without a region selector.
+pub fn resolve_pixel_with_cpu_responses(
+    input: ResolveInput<'_>,
+    lights: LightingEnvironment<'_>,
+    registry: &crate::CpuResponseRegistry<'_>,
+    expected_execution_generation: u64,
+) -> Result<ResolvedPixel, ResolveError> {
+    resolve_pixel_impl(
+        input,
+        lights,
+        Some((registry, expected_execution_generation)),
+    )
+}
+
+fn resolve_pixel_impl(
+    input: ResolveInput<'_>,
+    lights: LightingEnvironment<'_>,
+    registry: Option<(&crate::CpuResponseRegistry<'_>, u64)>,
+) -> Result<ResolvedPixel, ResolveError> {
     if !input.pixel.is_valid() {
         return Err(ResolveError::InvalidPixel);
     }
     if input.header.generation != input.pixel.material_generation {
         return Err(ResolveError::StaleMaterial);
     }
-    let shading_class = match input.response_program {
-        Some(program) => crate::classification::classify_material_header_with_program(
+    let response_program = if let Some((registry, expected)) = registry {
+        registry
+            .validate_generation(expected)
+            .map_err(ResolveError::CpuResponse)?;
+        let program = crate::classify_material_header_with_context(
             &input.header,
-            program,
+            Some(registry.execution),
             u32::MAX,
-        ),
-        None => classify_material_header(&input.header),
-    }
-    .map_err(ResolveError::Classification)?;
-    let custom_identity = match input.response_program {
-        Some(ProgramRef::Registered(id)) => id.0,
-        _ => 0,
+        )
+        .map_err(ResolveError::Classification)?;
+        if input
+            .response_program
+            .is_some_and(|supplied| supplied != program)
+        {
+            return Err(ResolveError::CpuResponse(
+                crate::CpuResponseError::ProgramMismatch,
+            ));
+        }
+        program
+    } else {
+        match input.response_program {
+            Some(program) => crate::classification::classify_material_header_with_program(
+                &input.header,
+                program,
+                u32::MAX,
+            ),
+            None => classify_material_header(&input.header),
+        }
+        .map_err(ResolveError::Classification)?
     };
-    let custom_permutation = u64::from(input.header.execution_permutation_low)
-        | (u64::from(input.header.execution_permutation_high) << 32);
+    // A program id proves identity, not that this CPU has its executable code.
+    // Never substitute a hash-derived tint/gain for package evaluation.
+    let registered = if let ProgramRef::Registered(id) = response_program {
+        let Some((registry, expected)) = registry else {
+            return Err(ResolveError::RegisteredProgramEvaluatorRequired(id));
+        };
+        Some((
+            registry
+                .resolve(&input.header, expected)
+                .map_err(ResolveError::CpuResponse)?,
+            registry.generation(),
+            id,
+        ))
+    } else {
+        None
+    };
     let geometry = reconstruct_surface(
         SurfaceReconstructionInput {
             primitive_id: input.pixel.primitive_id,
@@ -512,6 +573,34 @@ pub fn resolve_pixel(
         tangent: geometry.tangent,
         bitangent: geometry.bitangent,
     };
+    if let Some(((binding, evaluator), execution_generation, program_id)) = registered {
+        let output = evaluator
+            .evaluate(crate::CpuResponseContext {
+                program_id,
+                binding,
+                execution_generation,
+                surface: &surface,
+                frame,
+                position: geometry.position,
+                lighting: lights,
+                screen_space_ao: input.screen_space_ao,
+            })
+            .map_err(ResolveError::CpuResponse)?;
+        output
+            .validate()
+            .map_err(|_| ResolveError::CpuResponse(crate::CpuResponseError::InvalidOutput))?;
+        let color = output.radiance();
+        if !color.iter().all(|value| value.is_finite()) {
+            return Err(ResolveError::CpuResponse(
+                crate::CpuResponseError::InvalidOutput,
+            ));
+        }
+        return Ok(ResolvedPixel {
+            color,
+            response_program,
+            surface_flags: geometry.flags,
+        });
+    }
     // §17.4 single-lobe sampling: one draw per pixel decides the glint mixture
     // state and whether the additive measured lobe is evaluated this frame. On
     // the full-quality tiers both factors are the exact identity.
@@ -574,10 +663,8 @@ pub fn resolve_pixel(
         None => [0.0; 3],
     };
 
-    // Integrates the principled GGX lobe over every analytic light, then adds
-    // the shared indirect + emissive terms once.  Shared by the physically
-    // based classes (Principled and, until their specialized lobes land,
-    // Subsurface/ClearCoat/Cloth/Hair/Water/Custom).
+    // Evaluates the complete authored principled mixture for every light,
+    // then adds area, indirect and emissive terms once.
     let shade_principled = || {
         // The view- and material-only albedo terms are identical for every
         // light, so they are computed **once per pixel** here and threaded into
@@ -644,52 +731,8 @@ pub fn resolve_pixel(
         add(add(accumulated, indirect), emissive)
     };
 
-    // Integrates the cloth (fabric) lobe over every analytic light, then adds
-    // the shared indirect + emissive terms once.  Used by the Cloth class.
-    let shade_cloth = || {
-        let mut accumulated = [0.0; 3];
-        for light in lights.directional {
-            accumulated = add(
-                accumulated,
-                crate::evaluate_cloth_direct(lit_surface, frame, direct_sample(*light)),
-            );
-        }
-        for light in lights.punctual {
-            if let Some(sample) = light.sample(geometry.position) {
-                accumulated = add(
-                    accumulated,
-                    crate::evaluate_cloth_direct(lit_surface, frame, sample),
-                );
-            }
-        }
-        add(add(add(accumulated, area_light_term), indirect), emissive)
-    };
-
-    // Integrates the subsurface (SSS) lobe over every analytic light, then
-    // adds the shared indirect + emissive terms once.  Used by the Subsurface
-    // class; the lobe intentionally accepts back-facing lights so radiance can
-    // transmit through thin geometry.
-    let shade_subsurface = || {
-        let mut accumulated = [0.0; 3];
-        for light in lights.directional {
-            accumulated = add(
-                accumulated,
-                crate::evaluate_subsurface_direct(lit_surface, frame, direct_sample(*light)),
-            );
-        }
-        for light in lights.punctual {
-            if let Some(sample) = light.sample(geometry.position) {
-                accumulated = add(
-                    accumulated,
-                    crate::evaluate_subsurface_direct(lit_surface, frame, sample),
-                );
-            }
-        }
-        add(add(add(accumulated, area_light_term), indirect), emissive)
-    };
-
     // Integrates the hair (strand) lobe over every analytic light, then adds
-    // the shared indirect + emissive terms once.  Used by the Hair class; the
+    // the shared indirect + emissive terms once.  Used inside the Lit hair domain; the
     // lobe keeps a translucent diffuse so it intentionally survives backward
     // grazing light rather than hard-cutting at `N.L = 0`.
     let shade_hair = || {
@@ -721,7 +764,7 @@ pub fn resolve_pixel(
     };
 
     // Integrates the single-layer water lobe over every analytic light, then
-    // adds the shared indirect + emissive terms once.  Used by the Water class;
+    // adds the shared indirect + emissive terms once.  Used inside the Lit water feature;
     // the Fresnel split routes energy between the surface glint and a
     // Beer-Lambert-absorbed refracted body.
     let shade_water = || {
@@ -752,58 +795,28 @@ pub fn resolve_pixel(
         add(add(accumulated, indirect), emissive)
     };
 
-    // Integrates the two-layer clear-coat lobe over every analytic light, then
-    // adds the shared indirect + emissive terms once.  Used by the ClearCoat
-    // class; a smooth dielectric coat (independent `clearcoat_roughness`) sits
-    // over the principled base, and the base is gated by the coat Fresnel twice
-    // (double-pass `(1 - clearcoat * Fc)^2` transmission).
-    let shade_clearcoat = || {
-        let mut accumulated = [0.0; 3];
-        for light in lights.directional {
-            accumulated = add(
-                accumulated,
-                crate::evaluate_clearcoat_direct(lit_surface, frame, direct_sample(*light)),
-            );
-        }
-        for light in lights.punctual {
-            if let Some(sample) = light.sample(geometry.position) {
-                accumulated = add(
-                    accumulated,
-                    crate::evaluate_clearcoat_direct(lit_surface, frame, sample),
-                );
+    // Domain/features select implementation details inside the Lit response;
+    // they never change program identity or create separate dispatch buckets.
+    let color = match response_program {
+        ProgramRef::Builtin(BuiltinProgram::Unlit) => add(base_color, emissive),
+        ProgramRef::Builtin(BuiltinProgram::Npr) => shade_toon(),
+        ProgramRef::Builtin(BuiltinProgram::Lit) => {
+            if input.header.render_domain == RenderDomain::Hair as u32 {
+                shade_hair()
+            } else if input.header.feature_flags & MaterialFeatureFlags::WATER.0 != 0 {
+                shade_water()
+            } else {
+                shade_principled()
             }
         }
-        add(add(add(accumulated, area_light_term), indirect), emissive)
-    };
-
-    // Every class is handled explicitly so this branch stays byte-for-byte in
-    // step with the `switch` in `shading_resolve.wesl` (9 arms, no wildcard).
-    // Subsurface, ClearCoat, Cloth, Hair and Water now have dedicated lobes;
-    // only Custom still shares `shade_principled()` with Principled, so the lint
-    // that would collapse those two equal arms is suppressed to preserve the
-    // 1:1 GPU switch mapping.
-    #[expect(
-        clippy::match_same_arms,
-        reason = "each class keeps its own arm to mirror the GPU `switch`; specialized lobes replace the shared fallback per class later"
-    )]
-    let color = match shading_class {
-        // Unlit surfaces bypass the lighting integrator entirely.
-        MaterialShadingClass::Unlit => add(base_color, emissive),
-        MaterialShadingClass::Npr => shade_toon(),
-        MaterialShadingClass::Principled => shade_principled(),
-        MaterialShadingClass::Subsurface => shade_subsurface(),
-        MaterialShadingClass::ClearCoat => shade_clearcoat(),
-        MaterialShadingClass::Cloth => shade_cloth(),
-        MaterialShadingClass::Hair => shade_hair(),
-        MaterialShadingClass::Water => shade_water(),
-        MaterialShadingClass::Custom => {
-            crate::apply_custom_variant(shade_principled(), custom_identity, custom_permutation)
+        ProgramRef::Registered(id) => {
+            return Err(ResolveError::RegisteredProgramEvaluatorRequired(id))
         }
     };
 
     Ok(ResolvedPixel {
         color,
-        shading_class,
+        response_program,
         surface_flags: geometry.flags,
     })
 }
@@ -852,10 +865,304 @@ fn normalize_or(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{encode_barycentrics, MaterialShadingClass};
+    use crate::encode_barycentrics;
     use prism_render_material::{
         fallback_material_header, BuiltinProgram, GpuMaterialHeader, MaterialRenderClass,
     };
+
+    #[test]
+    fn mixed_lobes_are_all_evaluated_without_changing_program_or_bucket() {
+        use prism_render_material::ClosureKind;
+        let (primitives, vertices) = unit_triangle();
+        let header = principled_header();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.6, 0.3, 0.15, 1.0],
+            specular_roughness: 0.4,
+            subsurface_weight: 0.45,
+            subsurface_radius: 0.7,
+            subsurface_color: [0.9, 0.4, 0.2, 0.0],
+            coat_weight: 0.4,
+            coat_roughness: 0.2,
+            fuzz_weight: 0.35,
+            fuzz_roughness: 0.6,
+            fuzz_color: [0.2, 0.8, 0.5, 0.0],
+            transmission_weight: 0.15,
+            emission_color: [0.01, 0.02, 0.03, 0.0],
+            emission_luminance: 2.0,
+            ..Default::default()
+        };
+        let directional = [DirectionalLight {
+            direction: [0.5, 0.1, 1.0],
+            illuminance: [2.0, 3.0, 4.0],
+            visibility: 0.8,
+        }];
+        let lights = LightingEnvironment {
+            directional: &directional,
+            ..Default::default()
+        };
+        let input = base_input(&primitives, &vertices, header, parameters);
+        let actual = resolve_pixel(input, lights).unwrap();
+        let geometry = reconstruct_surface(
+            SurfaceReconstructionInput {
+                primitive_id: 0,
+                barycentrics: input.pixel.barycentrics(),
+                geometry_generation: 9,
+                expected_geometry_generation: 9,
+            },
+            &primitives,
+            &vertices,
+        )
+        .unwrap();
+        let frame = ShadingFrame {
+            normal: geometry.normal,
+            view: normalize_or(sub(input.view_position, geometry.position), geometry.normal),
+            tangent: geometry.tangent,
+            bitangent: geometry.bitangent,
+        };
+        let surface = surface_sample_from_parameters(&parameters);
+        let expected =
+            crate::evaluate_principled_direct(surface, frame, direct_sample(directional[0]));
+        for (a, b) in actual.color.into_iter().zip(expected) {
+            assert!((a - b).abs() < 1e-6, "{a} != {b}");
+        }
+        let key = crate::response_bucket_key_for_header(&header, None, u32::MAX).unwrap();
+        for closure_mask in [
+            0,
+            1 << ClosureKind::Subsurface as u32,
+            1 << ClosureKind::ClearCoat as u32,
+            1 << ClosureKind::Sheen as u32,
+            u32::MAX,
+        ] {
+            let mut input = input;
+            input.header.closure_mask = closure_mask;
+            assert_eq!(resolve_pixel(input, lights).unwrap(), actual);
+            assert_eq!(
+                crate::response_bucket_key_for_header(&input.header, None, u32::MAX).unwrap(),
+                key
+            );
+        }
+        // Ablate one authored lobe at a time while retaining every other lobe.
+        for lobe in 0..4 {
+            let mut input = input;
+            match lobe {
+                0 => input.parameters.subsurface_weight = 0.0,
+                1 => input.parameters.coat_weight = 0.0,
+                2 => input.parameters.fuzz_weight = 0.0,
+                _ => input.parameters.transmission_weight = 0.0,
+            }
+            let ablated = resolve_pixel(input, lights).unwrap();
+            assert_eq!(ablated.response_program, actual.response_program);
+            assert!(
+                ablated
+                    .color
+                    .iter()
+                    .zip(actual.color)
+                    .any(|(a, b)| (a - b).abs() > 1e-5),
+                "lobe {lobe} disappeared from full evaluation"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_and_features_are_lit_internals_not_response_identities() {
+        let (primitives, vertices) = unit_triangle();
+        for (domain, flags) in [
+            (RenderDomain::Hair, 0),
+            (RenderDomain::Surface, MaterialFeatureFlags::WATER.0),
+        ] {
+            let mut header = principled_header();
+            header.render_domain = domain as u32;
+            header.feature_flags = flags;
+            for program in [
+                BuiltinProgram::Lit,
+                BuiltinProgram::Npr,
+                BuiltinProgram::Unlit,
+            ] {
+                let mut input = base_input(
+                    &primitives,
+                    &vertices,
+                    header,
+                    GpuSurfaceParameters::default(),
+                );
+                input.response_program = Some(ProgramRef::Builtin(program));
+                let resolved = resolve_pixel(input, LightingEnvironment::default()).unwrap();
+                assert_eq!(resolved.response_program, ProgramRef::Builtin(program));
+                assert!(resolved.color.iter().all(|c| c.is_finite()));
+            }
+        }
+    }
+
+    #[test]
+    fn registered_zero_executes_real_cpu_closure_with_verified_generation() {
+        use crate::{
+            response_output::ResponseOutput, CpuResponseContext, CpuResponseError,
+            CpuResponseRegistry,
+        };
+        use core::cell::Cell;
+        use prism_render_material::{ExecutionFamily, ResponseProgramIndex};
+        let program = ProgramRef::Registered(ProgramId(0));
+        let (tables, headers) = crate::classification::tests::execution_fixture(&[(
+            program,
+            ExecutionFamily::SplitResponse,
+        )]);
+        let calls = Cell::new(0);
+        let evaluator = |context: CpuResponseContext<'_>| {
+            calls.set(calls.get() + 1);
+            assert_eq!(context.program_id, ProgramId(0));
+            assert_eq!(context.execution_generation, 19);
+            assert_eq!(context.binding.permutation_index.get(), 1);
+            let mut direct = [0.0; 3];
+            let mut transmission = [0.0; 3];
+            for light in context.lighting.directional {
+                let channels = crate::evaluate_principled_direct_channels(
+                    *context.surface,
+                    context.frame,
+                    direct_sample(*light),
+                );
+                direct = add(direct, channels.direct);
+                transmission = add(transmission, channels.transmission);
+            }
+            Ok(ResponseOutput {
+                direct,
+                transmission,
+                emission: context.surface.emissive,
+                alpha: 1.0,
+                ..Default::default()
+            })
+        };
+        let mut registry = CpuResponseRegistry::new(&tables, 19);
+        let index = ResponseProgramIndex::from_raw(0, tables.programs()).unwrap();
+        registry.register(index, &evaluator).unwrap();
+        assert_eq!(
+            registry.register(index, &evaluator),
+            Err(CpuResponseError::DuplicateEvaluator(ProgramId(0)))
+        );
+        let (primitives, vertices) = unit_triangle();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.2, 0.5, 0.8, 1.0],
+            transmission_weight: 0.4,
+            emission_color: [0.1, 0.2, 0.3, 0.0],
+            emission_luminance: 1.0,
+            ..Default::default()
+        };
+        let input = base_input(&primitives, &vertices, headers[0], parameters);
+        let light = [DirectionalLight {
+            direction: [0.1, 0.0, 1.0],
+            illuminance: [3.0; 3],
+            visibility: 0.7,
+        }];
+        let lights = LightingEnvironment {
+            directional: &light,
+            ..Default::default()
+        };
+        let actual = resolve_pixel_with_cpu_responses(input, lights, &registry, 19).unwrap();
+        assert_eq!(actual.response_program, program);
+        assert_eq!(calls.get(), 1);
+        // A real evaluator using the same BSDF agrees with Lit, not an id hash.
+        let builtin = base_input(&primitives, &vertices, principled_header(), parameters);
+        let expected = resolve_pixel(builtin, lights).unwrap();
+        for (a, b) in actual.color.into_iter().zip(expected.color) {
+            assert!((a - b).abs() < 1e-6);
+        }
+        assert_eq!(
+            resolve_pixel_with_cpu_responses(input, lights, &registry, 20),
+            Err(ResolveError::CpuResponse(
+                CpuResponseError::StaleGeneration {
+                    expected: 20,
+                    actual: 19
+                }
+            ))
+        );
+        let mut mismatch = input;
+        mismatch.response_program = Some(ProgramRef::Builtin(BuiltinProgram::Lit));
+        assert_eq!(
+            resolve_pixel_with_cpu_responses(mismatch, lights, &registry, 19),
+            Err(ResolveError::CpuResponse(CpuResponseError::ProgramMismatch))
+        );
+        let mut stale = input;
+        stale.header.generation += 1;
+        assert_eq!(
+            resolve_pixel_with_cpu_responses(stale, lights, &registry, 19),
+            Err(ResolveError::StaleMaterial)
+        );
+        let mut stale_geometry = input;
+        stale_geometry.expected_geometry_generation += 1;
+        assert!(matches!(
+            resolve_pixel_with_cpu_responses(stale_geometry, lights, &registry, 19),
+            Err(ResolveError::Surface(_))
+        ));
+        let mut invalid = input;
+        invalid.header.execution_permutation_low = 2;
+        assert_eq!(
+            resolve_pixel_with_cpu_responses(invalid, lights, &registry, 19),
+            Err(ResolveError::Classification(
+                ClassificationError::InvalidExecutionBinding
+            ))
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "rejected inputs must never invoke user code"
+        );
+        let empty = CpuResponseRegistry::new(&tables, 19);
+        assert_eq!(
+            resolve_pixel_with_cpu_responses(input, lights, &empty, 19),
+            Err(ResolveError::CpuResponse(
+                CpuResponseError::MissingEvaluator(ProgramId(0))
+            ))
+        );
+        let mut explicit = input;
+        explicit.response_program = Some(program);
+        assert_eq!(
+            resolve_pixel(explicit, lights),
+            Err(ResolveError::RegisteredProgramEvaluatorRequired(ProgramId(
+                0
+            )))
+        );
+    }
+
+    #[test]
+    fn cpu_evaluator_failure_and_invalid_outputs_are_hard_errors() {
+        use crate::{
+            response_output::ResponseOutput, CpuResponseContext, CpuResponseError,
+            CpuResponseRegistry,
+        };
+        use prism_render_material::{ExecutionFamily, ResponseProgramIndex};
+        let (tables, headers) = crate::classification::tests::execution_fixture(&[(
+            ProgramRef::Registered(ProgramId(7)),
+            ExecutionFamily::SplitResponse,
+        )]);
+        let (primitives, vertices) = unit_triangle();
+        let input = base_input(
+            &primitives,
+            &vertices,
+            headers[0],
+            GpuSurfaceParameters::default(),
+        );
+        let index = ResponseProgramIndex::from_raw(0, tables.programs()).unwrap();
+        let fail = |_: CpuResponseContext<'_>| Err(CpuResponseError::EvaluationFailed);
+        let invalid = |_: CpuResponseContext<'_>| {
+            Ok(ResponseOutput {
+                direct: [f32::NAN; 3],
+                alpha: 1.0,
+                ..Default::default()
+            })
+        };
+        let mut registry = CpuResponseRegistry::new(&tables, 1);
+        registry.register(index, &fail).unwrap();
+        assert_eq!(
+            resolve_pixel_with_cpu_responses(input, LightingEnvironment::default(), &registry, 1),
+            Err(ResolveError::CpuResponse(
+                CpuResponseError::EvaluationFailed
+            ))
+        );
+        let mut registry = CpuResponseRegistry::new(&tables, 1);
+        registry.register(index, &invalid).unwrap();
+        assert_eq!(
+            resolve_pixel_with_cpu_responses(input, LightingEnvironment::default(), &registry, 1),
+            Err(ResolveError::CpuResponse(CpuResponseError::InvalidOutput))
+        );
+    }
 
     /// The `OpenPBR` thin-film lobe must reach the Airy BSDF: the ABI carries the
     /// film in micrometres while shading evaluates nanometres, and weight 0 stays
@@ -1349,7 +1656,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(resolved.shading_class, MaterialShadingClass::Unlit);
+        assert_eq!(
+            resolved.response_program,
+            ProgramRef::Builtin(BuiltinProgram::Unlit)
+        );
         assert_eq!(resolved.color, [0.3, 0.4, 0.6]);
     }
 
@@ -1466,7 +1776,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(resolved.shading_class, MaterialShadingClass::Npr);
+        assert_eq!(
+            resolved.response_program,
+            ProgramRef::Builtin(BuiltinProgram::Npr)
+        );
         // Facing light with 4 bands snaps N.L (=1.0) to the top band -> 1.0.
         for channel in 0..3 {
             assert!((resolved.color[channel] - 1.0).abs() < 1.0e-4);

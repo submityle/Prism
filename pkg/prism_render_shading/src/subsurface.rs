@@ -1,6 +1,6 @@
 //! Subsurface scattering (SSS) BSDF direct-lighting lobe.
 //!
-//! Backend-neutral golden reference for the `Subsurface` shading class and the
+//! Standalone backend-neutral subsurface reference and the
 //! byte-for-byte numerical twin of `subsurface.wesl` (`subsurface_direct`).
 //!
 //! The closure follows the real-time subsurface model used by Unreal's
@@ -80,8 +80,6 @@ pub fn evaluate_subsurface_direct(
     let n_dot_h = dot(n, h).max(MIN_N_DOT);
     let v_dot_h = dot(v, h).max(0.0);
 
-    let subsurface = surface.subsurface.clamp(0.0, 1.0);
-    let thickness = surface.thickness.clamp(0.0, 1.0);
     let metallic = surface.metallic.clamp(0.0, 1.0);
     let roughness = surface.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0);
     let alpha = roughness * roughness;
@@ -93,12 +91,34 @@ pub fn evaluate_subsurface_direct(
     let g = visibility_smith_ggx_correlated(n_dot_v, n_dot_l, alpha);
     let specular = mul_scalar(mul_scalar(f, d * g), n_dot_l);
 
+    let diffuse_weight = mul_scalar(sub([1.0; 3], f), 1.0 - metallic);
+    let (diffuse, transmitted) =
+        subsurface_diffuse_terms(&surface, n, v, l, raw_n_dot_l, diffuse_weight);
+    let lit = add(add(diffuse, specular), transmitted);
+    let radiance = mul_scalar(
+        mul(lit, light.illuminance),
+        light.visibility.clamp(0.0, 1.0),
+    );
+    add(radiance, surface.emissive)
+}
+
+/// Shared scattering-only terms. No specular, coat, fuzz, visibility or emission:
+/// the principled mixture supplies those once around the combined substrate.
+pub(crate) fn subsurface_diffuse_terms(
+    surface: &SurfaceSample,
+    n: [f32; 3],
+    v: [f32; 3],
+    l: [f32; 3],
+    raw_n_dot_l: f32,
+    diffuse_weight: [f32; 3],
+) -> ([f32; 3], [f32; 3]) {
+    let subsurface = surface.subsurface.clamp(0.0, 1.0);
+    let thickness = surface.thickness.clamp(0.0, 1.0);
     // Wrapped diffuse: the wrap width is the subsurface weight scaled by the
     // per-channel `subsurface_radius`, so scattering softens the terminator and
     // a red-heavy radius bleeds red further. `subsurface_color` tints the
     // scattered light. Both default to the identity.
     let scat_color = surface.subsurface_color;
-    let diffuse_weight = mul_scalar(sub([1.0; 3], f), 1.0 - metallic);
     let mut diffuse = [0.0f32; 3];
     for (channel, slot) in diffuse.iter_mut().enumerate() {
         // `subsurface_radius` (scalar) times `subsurface_radius_scale` (color3)
@@ -143,12 +163,7 @@ pub fn evaluate_subsurface_direct(
         [subsurface * back * thickness_attenuation; 3],
     );
 
-    let lit = add(add(diffuse, specular), transmitted);
-    let radiance = mul_scalar(
-        mul(lit, light.illuminance),
-        light.visibility.clamp(0.0, 1.0),
-    );
-    add(radiance, surface.emissive)
+    (diffuse, transmitted)
 }
 
 #[cfg(test)]

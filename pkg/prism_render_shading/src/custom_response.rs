@@ -1,9 +1,8 @@
-//! Stable Custom response evaluator and execution-identity adapter.
+//! Synthetic Custom response fixtures, not arbitrary package execution.
 //!
-//! Custom programs share the same surface and lighting narrow waist as the
-//! built-in responses.  The execution identity is data, not a permutation
-//! axis: the program id and permutation select one deterministic evaluator
-//! variant while the material instance remains ordinary surface data.
+//! These deterministic tint/gain examples exercise the response contract.
+//! Hashing an id/permutation does not execute its registered shader package.
+//! CPU resolve therefore never calls these helpers for Registered programs.
 
 use crate::response_output::{CompositionError, LightingContext, ResponseOutput};
 use crate::SurfaceSample;
@@ -35,7 +34,7 @@ pub struct CustomData {
 }
 
 impl CustomData {
-    /// Derives the deterministic ABI payload used by the CPU and GPU twins.
+    /// Derives a synthetic fixture payload, not a registered package evaluator.
     #[must_use]
     pub fn from_execution(program_id: u32, permutation_index: u64) -> Self {
         let seed = program_id
@@ -148,9 +147,8 @@ pub fn respond_custom<T: ?Sized>(
     Ok(output)
 }
 
-/// Applies the same execution-derived variant to an already-integrated
-/// aggregate.  The resolve CPU golden uses this helper for the registered
-/// response class; the WESL twin derives the identical `CustomData` words.
+/// Applies a synthetic id-hash variant to an already-integrated aggregate.
+/// This fixture does not interpret package code and is not used by CPU resolve.
 #[must_use]
 pub fn apply_custom_variant(
     aggregate: [f32; 3],

@@ -143,10 +143,9 @@ pub struct SurfaceSample {
     /// drives the slab to black, and `depth == 0` selects the specification's
     /// **non-physical tint** (the authored `transmission_color` applied directly).
     ///
-    /// The disjoint subsurface and advanced-cloth shading classes reuse this same
-    /// shade-time scalar as their normalised `[0, 1]` optical thickness. A given
-    /// material drives at most one of those paths, so the two readings never
-    /// conflict (the transmission lobe is inert whenever `transmission == 0`).
+    /// The real-time subsurface approximation also reads a clamped `[0, 1]`
+    /// optical thickness from this scalar. Mixed materials evaluate both
+    /// interpretations; this approximation is not a separate shading identity.
     pub thickness: f32,
     /// `OpenPBR` `specular_roughness_anisotropy` in `[0, 1]`: stretches the
     /// specular highlight along the (rotated) tangent direction. `0` is exactly
@@ -383,16 +382,49 @@ pub fn evaluate_principled_direct_with(
     light: DirectLightSample,
     pre: &PrincipledPre,
 ) -> [f32; 3] {
+    evaluate_principled_direct_channels_with(surface, frame, light, pre).radiance
+}
+
+/// Source-defined analytic-light channels. `direct` and `transmission` exclude
+/// self-emission; `radiance` preserves aggregate operation order and includes it
+/// for compatibility with the standalone direct evaluator.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PrincipledDirectChannels {
+    pub radiance: [f32; 3],
+    pub direct: [f32; 3],
+    pub transmission: [f32; 3],
+}
+
+pub fn evaluate_principled_direct_channels(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    light: DirectLightSample,
+) -> PrincipledDirectChannels {
+    let pre = principled_pre(&surface, &frame);
+    evaluate_principled_direct_channels_with(surface, frame, light, &pre)
+}
+
+/// Splits the response at its defining terms, not an aggregate residual.
+pub fn evaluate_principled_direct_channels_with(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    light: DirectLightSample,
+    pre: &PrincipledPre,
+) -> PrincipledDirectChannels {
     let n = normalize_or(frame.normal, [0.0, 1.0, 0.0]);
     let v = normalize_or(frame.view, n);
     let l = normalize_or(light.direction, n);
     let h = normalize_or(add(v, l), n);
-    let n_dot_l = dot(n, l).max(0.0);
+    let raw_n_dot_l = dot(n, l);
+    let n_dot_l = raw_n_dot_l.max(0.0);
     let n_dot_v = dot(n, v).max(MIN_N_DOT);
     let n_dot_h = dot(n, h).max(MIN_N_DOT);
     let v_dot_h = dot(v, h).max(0.0);
-    if n_dot_l <= 0.0 {
-        return surface.emissive;
+    if n_dot_l <= 0.0 && surface.subsurface <= 0.0 {
+        return PrincipledDirectChannels {
+            radiance: surface.emissive,
+            ..Default::default()
+        };
     }
 
     let metallic = surface.metallic.clamp(0.0, 1.0);
@@ -575,10 +607,37 @@ pub fn evaluate_principled_direct_with(
     );
     let diffuse = mul(add(diffuse_on, diffuse_comp), diffuse_weight);
     // `OpenPBR` `base_weight` scales the whole base layer; `1.0` is exact.
-    let base = mul_scalar(
-        add(diffuse, specular),
-        n_dot_l * surface.base_weight.clamp(0.0, 1.0),
-    );
+    let subsurface = surface.subsurface.clamp(0.0, 1.0);
+    let base = if subsurface > 0.0 {
+        let (scattered, transmitted) = crate::subsurface::subsurface_diffuse_terms(
+            &surface,
+            n,
+            v,
+            l,
+            raw_n_dot_l,
+            diffuse_weight,
+        );
+        // Replace only the diffuse share. GGX stays present, and coat/fuzz
+        // layer the combined substrate below instead of evaluating a second
+        // complete material (which would double-count base and emission).
+        let diffuse_mix = add(
+            mul_scalar(diffuse, n_dot_l * (1.0 - subsurface)),
+            mul_scalar(scattered, subsurface),
+        );
+        mul_scalar(
+            add(
+                add(diffuse_mix, mul_scalar(specular, n_dot_l)),
+                mul(transmitted, diffuse_weight),
+            ),
+            surface.base_weight.clamp(0.0, 1.0),
+        )
+    } else {
+        // Keep the zero-weight path exactly unchanged.
+        mul_scalar(
+            add(diffuse, specular),
+            n_dot_l * surface.base_weight.clamp(0.0, 1.0),
+        )
+    };
 
     let coat = surface.clearcoat.clamp(0.0, 1.0);
     let coat_roughness = surface.clearcoat_roughness.clamp(MIN_ROUGHNESS, 1.0);
@@ -775,18 +834,41 @@ pub fn evaluate_principled_direct_with(
     // the reflective base slab and the translucent slab, not an additive lobe:
     // mixing (rather than summing) is what keeps the two slabs inside one energy
     // budget. `transmission == 0` leaves the base untouched bit-for-bit.
-    let reflected = add(
-        add(
-            mul_scalar(base, coat_attenuation * (1.0 - transmission)),
-            coat_specular,
-        ),
-        transmission_term,
+    let direct = add(
+        mul_scalar(base, coat_attenuation * (1.0 - transmission)),
+        coat_specular,
     );
-    let radiance = mul(reflected, light.illuminance);
-    add(
-        mul_scalar(radiance, light.visibility.clamp(0.0, 1.0)),
-        surface.emissive,
-    )
+    let sheen = surface.sheen.clamp(0.0, 1.0);
+    let (direct, transmission_term) = if sheen > 0.0 {
+        let roughness = surface.fuzz_roughness.clamp(MIN_ROUGHNESS, 1.0);
+        let albedo = crate::charlie_albedo_table::fuzz_albedo_lookup(n_dot_v, roughness);
+        let substrate_scale = (1.0 - sheen * albedo).clamp(0.0, 1.0);
+        let fuzz = sheen
+            * crate::cloth::distribution_charlie(roughness, n_dot_h)
+            * crate::cloth::visibility_ashikhmin(n_dot_v, n_dot_l)
+            * n_dot_l;
+        (
+            add(
+                mul_scalar(direct, substrate_scale),
+                mul_scalar(surface.fuzz_color, fuzz),
+            ),
+            mul_scalar(transmission_term, substrate_scale),
+        )
+    } else {
+        (direct, transmission_term)
+    };
+    let visibility = light.visibility.clamp(0.0, 1.0);
+    PrincipledDirectChannels {
+        radiance: add(
+            mul_scalar(
+                mul(add(direct, transmission_term), light.illuminance),
+                visibility,
+            ),
+            surface.emissive,
+        ),
+        direct: mul_scalar(mul(direct, light.illuminance), visibility),
+        transmission: mul_scalar(mul(transmission_term, light.illuminance), visibility),
+    }
 }
 
 /// Integrates a constant environment over a deterministic cosine hemisphere.
@@ -1291,6 +1373,93 @@ mod tests {
             tangent: [1.0, 0.0, 0.0],
             bitangent: [0.0, 0.0, -1.0],
         }
+    }
+
+    #[test]
+    fn principled_source_channels_preserve_aggregate_and_emission_contract() {
+        for transmission in [0.0, 0.4, 1.0] {
+            for (subsurface, sheen, clearcoat) in [(0.0, 0.0, 0.0), (0.3, 0.2, 0.4)] {
+                let surface = SurfaceSample {
+                    base_color: [0.2, 0.5, 0.8],
+                    transmission,
+                    subsurface,
+                    sheen,
+                    clearcoat,
+                    emissive: [0.01, 0.02, 0.03],
+                    ..Default::default()
+                };
+                for visibility in [0.0, 0.7, 1.0] {
+                    let light = DirectLightSample {
+                        direction: [0.3, 1.0, 0.1],
+                        illuminance: [2.0, 3.0, 4.0],
+                        visibility,
+                    };
+                    let channels = evaluate_principled_direct_channels(surface, frame(), light);
+                    let pre = principled_pre(&surface, &frame());
+                    assert_eq!(
+                        channels,
+                        evaluate_principled_direct_channels_with(surface, frame(), light, &pre)
+                    );
+                    assert_eq!(
+                        channels.radiance,
+                        evaluate_principled_direct(surface, frame(), light)
+                    );
+                    let dark = evaluate_principled_direct_channels(
+                        SurfaceSample {
+                            emissive: [0.0; 3],
+                            ..surface
+                        },
+                        frame(),
+                        light,
+                    );
+                    assert_eq!(channels.direct, dark.direct);
+                    assert_eq!(channels.transmission, dark.transmission);
+                    for i in 0..3 {
+                        let sum =
+                            channels.direct[i] + channels.transmission[i] + surface.emissive[i];
+                        assert!(
+                            (sum - channels.radiance[i]).abs()
+                                <= 4.0 * f32::EPSILON * sum.abs().max(1.0)
+                        );
+                    }
+                    if visibility == 0.0 {
+                        assert_eq!(channels.radiance, surface.emissive);
+                        assert_eq!(channels.direct, [0.0; 3]);
+                        assert_eq!(channels.transmission, [0.0; 3]);
+                    } else if transmission == 0.0 {
+                        assert_eq!(channels.transmission, [0.0; 3]);
+                    } else {
+                        assert!(channels.transmission.iter().all(|x| *x > 0.0));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn principled_subsurface_keeps_backlighting_without_exclusive_routing() {
+        let light = DirectLightSample {
+            direction: [0.0, -1.0, 0.0],
+            ..light()
+        };
+        let surface = SurfaceSample {
+            subsurface: 0.6,
+            sheen: 0.2,
+            clearcoat: 0.4,
+            thickness: 0.1,
+            ..Default::default()
+        };
+        let channels = evaluate_principled_direct_channels(surface, frame(), light);
+        assert!(channels.radiance.iter().all(|x| x.is_finite() && *x > 0.0));
+        let opaque = evaluate_principled_direct_channels(
+            SurfaceSample {
+                subsurface: 0.0,
+                ..surface
+            },
+            frame(),
+            light,
+        );
+        assert_eq!(opaque, PrincipledDirectChannels::default());
     }
 
     /// A metallic flake surface with the glint lobe live: `density · area = 0.04`
