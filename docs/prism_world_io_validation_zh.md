@@ -1,8 +1,8 @@
 # World IO 独立验证记录
 
-日期：2026-10-15。验证源码基线：`a11675ca718da428ec70ae8fe02d3db195059b6a`。
+日期：2026-10-15。验证源码基线：world IO 调度修复工作树（随后由独立 commit 固化）。
 
-本次只验证 `prism_world_io`，未改动生产代码。统一实现记录正在由并行任务更新，因此本记录独立提交，不混入其他任务的暂存内容。
+本次只验证 `prism_world_io` 调度与 threaded provider，验证后仅整理相关文档，不混入其他任务的暂存内容。
 
 ## 环境与命令
 
@@ -32,7 +32,7 @@ done
 ## 结果
 
 - std 测试编译和 no_std 元数据编译均通过 `-D warnings`。
-- 全部 28 项单元测试通过，0 失败、0 忽略，其中 threaded provider 回归 16 项。
+- 全部 30 项单元测试通过，0 失败、0 忽略，其中 threaded provider 回归 16 项，新增活动读取 round-robin 与请求 ID 耗尽 fail-closed 回归各 1 项。
 - threaded provider 回归以 8 个测试线程重复 100 轮，1,600 次测试执行全部通过。它增加调度交错覆盖，不等同于模型检查或无竞态证明。
 - 对本批六个 IO/terrain 源码文件执行 `rustfmt --edition 2024 --config skip_children=true --check` 通过；这是格式检查，不是 terrain 编译证据。
 
@@ -44,6 +44,6 @@ done
 
 独立 rustc 检查不执行 Cargo feature 解析、workspace lint 配置、clippy、doctest 或依赖集成。此次没有测量吞吐、帧耗时、P50/P95/P99、RSS 或 GPU 指标，也未执行 terrain 测试。统一实现记录中的其他任务测试结果应按其各自命令和执行记录解释，不能归因于本次运行。
 
-固定 worker provider 已有上述测试证据，但尚不表示 `FileCellProvider`、world coordinator 和 `prism_tasks` 已形成非阻塞端到端链路；scheduler 背压重试、公平性与 runtime adapter 仍需单独验证。此前“新增 threaded provider 尚未编译执行”的交接描述只适用于当时的验证快照，已由本次独立检查补充。
+固定 worker provider 与 crate 内 scheduler 公平轮询已有上述测试证据，但尚不表示 `FileCellProvider`、world coordinator 和 `prism_tasks` 已形成非阻塞端到端链路；provider 临时背压重试和 runtime adapter 仍需单独验证。请求 ID 已验证不回绕、不复用。
 
 测试二进制与元数据合计约 1.8 MiB；完成后只删除本次独占目录中的这两个可再生成文件并移除空目录，不删除或清理共享 target。本次记录不构成完整 world 系统验收。

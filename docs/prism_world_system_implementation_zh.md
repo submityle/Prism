@@ -54,12 +54,12 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 ### M3：异步 IO/provider
 
-- `prism_world_io`：分块读取请求、稳定优先级/FIFO 排序、显式容量背压、可取消 poll 操作、连续 chunk/short-read/checksum 校验和 std 文件 provider。
+- `prism_world_io`：分块读取请求、稳定优先级/FIFO 准入、活动读取 round-robin、单调请求 ID 的 fail-closed 耗尽保护、显式容量背压、可取消 poll 操作、连续 chunk/short-read/checksum 校验和 std 文件 provider。
 - 默认构建保持 `no_std + alloc`；`std` 只增加 scheduler 与文件系统 provider，不把 IO、资产数据库或 ECS 引入 world policy core。
 - `prism_world_runtime`：真实调用 `StreamScheduler` 生成 load/evict 动作，并通过有界、可取消、优先级排序的 provider 队列提交 cell；完成后执行固定 manifest header 校验，再进入 `SceneHost::load_cell`，失败/驱逐写入可 replay trace。std 构建新增 `IoSchedulerAdapter`，实际桥接 `prism_world_io::IoScheduler` 的 chunk/completion/cancel/backpressure/error 事件，并保留同步 `ChunkProvider` 兼容路径。
 - `FileCellProvider` 复用 `prism_world_io/std` 的真实 `FileProvider`，以 sector 注册完整 manifest/文件 offset/checksum，拒绝过期 manifest 并保留调度优先级。真实临时文件测试覆盖文件→分块 scheduler→header/checksum→`SceneHost`，及短读、打开失败、取消和错误隔离；底层每次 poll 为有界阻塞读取，不宣称已变成线程池异步文件 IO。
 - 本批新增独立的 `ThreadedFileProvider` 源码：固定 std worker、预留槽位/队列、受限 chunk、ACK 驱动的后续读取、worker 内文件打开/读取/关闭，以及非 joining 的取消/shutdown。取消的 Ready 缓冲区交由 worker 清理；槽位在结果和文件销毁后才释放。waker 克隆/替换后的销毁及唤醒位于 metadata 锁外，worker/批量 shutdown 隔离唤醒回调 panic。逻辑 payload 约束为 `capacity × max_chunk_size`，不包含调用方已取走的 chunk、线程栈、元数据、分配器开销或 RSS；阻塞 OS 调用只能合作取消，返回前仍占槽位。16 项回归覆盖范围/短读/打开失败、准入、parked ACK、queued/running/ready 取消、重复 shutdown、last-owner drop、唤醒时序及 panic，已与 crate 其余测试合计 28 项通过。
-- 上述独立 provider 尚未替换 `FileCellProvider` 的阻塞后端，未接入 `prism_tasks`。`ChunkProvider::read_chunk` 返回完整 cell，`IoRuntime::poll` 仍直接同步调用它；仅将后端换成 threaded provider 再 `read_to_completion` 仍会阻塞 coordinator。真正的异步端到端路径还需要 Pending/completion 与共享取消句柄，不能把独立 provider 当作 runtime 已异步化。scheduler 的 provider 临时背压重试、活动请求公平性和 adapter waker 生命周期也尚未通过本批验证。
+- 上述独立 provider 尚未替换 `FileCellProvider` 的阻塞后端，未接入 `prism_tasks`。`ChunkProvider::read_chunk` 返回完整 cell，`IoRuntime::poll` 仍直接同步调用它；仅将后端换成 threaded provider 再 `read_to_completion` 仍会阻塞 coordinator。真正的异步端到端路径还需要 Pending/completion 与共享取消句柄，不能把独立 provider 当作 runtime 已异步化。IO crate 已独立验证活动请求公平轮询与请求 ID 耗尽保护；scheduler 的 provider 临时背压重试和 runtime adapter waker 生命周期仍未通过本批端到端验证。
 - `IoSchedulerAdapter` 以带 ID/原始请求的 `Failed` 终态关联错误；scheduler 串行锁内跟踪实际 start/poll 回调，scheduler 的显式取消 ID 优先，provider 不能伪造其他请求的取消 ID。并发 blocking reader 保留各自结果、共享 provider 唤醒可唤醒全部等待者，public poll 不抢占其结果；终态被消费前仍计入 capacity，取消会唤醒停驻 reader。
 - `IoByteLimits` 为 adapter/file provider 增加独立的单请求和累计声明字节准入，包含 44 字节 header；mutex 内在分配请求 ID/启动 IO 前检查上限及累计溢出，拒绝不消耗 quota/ID。queued、active 和未消费的 Completed/Failed 均保留完整配额，消费 Chunk 不释放；兼容构造器保留无配置字节上限行为，但仍拒绝算术溢出。
 - 聚合首次 chunk 时 fallible reserve 完整声明大小，后续 append 也为 fallible；分配失败取消底层操作，待 scheduler 移除后才以原 request ID/分配错误报告终态。累计上限 B 限制逻辑准入，不是 RSS 硬上限：保留 Chunk 副本与聚合结果的逻辑长度可接近 2B，Vec 实际容量/分配器、provider、事件元数据及交还调用方后的缓冲区不在计数内。

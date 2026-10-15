@@ -57,7 +57,7 @@ impl ReadRequest {
         Ok(self)
     }
 
-    /// Sets the scheduling priority. Higher values are polled first.
+    /// Sets admission priority. Higher values start first; active reads share turns.
     pub const fn with_priority(mut self, priority: u32) -> Self {
         self.priority = priority;
         self
@@ -132,6 +132,8 @@ pub enum IoError {
     Cancelled { request_id: RequestId },
     /// The scheduler's outstanding request limit has been reached.
     Backpressure { capacity: usize },
+    /// Every request identity has been assigned; identities are never reused.
+    RequestIdExhausted,
     /// The request range overflows `u64`.
     RangeOverflow,
     /// A provider returned a chunk at an unexpected byte offset.
@@ -155,6 +157,7 @@ impl fmt::Display for IoError {
             Self::Backpressure { capacity } => {
                 write!(formatter, "outstanding request capacity {capacity} is full")
             }
+            Self::RequestIdExhausted => formatter.write_str("request identities exhausted"),
             Self::RangeOverflow => formatter.write_str("request range overflows u64"),
             Self::InvalidChunkOffset { expected, actual } => {
                 write!(
@@ -298,6 +301,7 @@ mod std_support {
     use alloc::collections::{BTreeMap, BTreeSet, BinaryHeap};
     use alloc::vec;
     use core::cmp::Ordering;
+    use core::ops::Bound::{Excluded, Unbounded};
     use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
     use std::path::{Path, PathBuf};
@@ -305,7 +309,6 @@ mod std_support {
     struct QueuedRequest {
         request: ReadRequest,
         request_id: RequestId,
-        sequence: u64,
     }
 
     impl Eq for QueuedRequest {}
@@ -321,7 +324,6 @@ mod std_support {
             self.request
                 .priority
                 .cmp(&other.request.priority)
-                .then_with(|| other.sequence.cmp(&self.sequence))
                 .then_with(|| other.request_id.cmp(&self.request_id))
         }
     }
@@ -341,13 +343,16 @@ mod std_support {
         cancelled: bool,
     }
 
-    /// A deterministic priority scheduler with bounded outstanding work.
+    /// A bounded scheduler with priority/FIFO admission and round-robin active reads.
+    ///
+    /// Priority does not preempt already active operations. Each active operation is
+    /// visited at most once per poll; a ready chunk rotates the next poll's first turn.
     pub struct IoScheduler<P: ReadProvider> {
         provider: P,
         max_in_flight: usize,
         capacity: usize,
-        next_request_id: u64,
-        next_sequence: u64,
+        next_request_id: Option<u64>,
+        last_polled: Option<RequestId>,
         queue: BinaryHeap<QueuedRequest>,
         active: BTreeMap<RequestId, ActiveOperation<P::Operation>>,
         cancelled_ready: BTreeSet<RequestId>,
@@ -370,15 +375,23 @@ mod std_support {
                 provider,
                 max_in_flight,
                 capacity,
-                next_request_id: 1,
-                next_sequence: 0,
+                next_request_id: Some(1),
+                last_polled: None,
                 queue: BinaryHeap::new(),
                 active: BTreeMap::new(),
                 cancelled_ready: BTreeSet::new(),
             })
         }
 
-        /// Adds a request or reports backpressure when the outstanding limit is full.
+        #[cfg(test)]
+        pub(crate) fn set_next_request_id_for_test(&mut self, next: u64) {
+            self.next_request_id = Some(next);
+        }
+
+        /// Adds a request, reporting a full capacity or exhausted identities explicitly.
+        ///
+        /// Nonzero identities increase monotonically for this scheduler's lifetime,
+        /// including cancelled and completed requests. Exhaustion never wraps or resets.
         pub fn submit(&mut self, request: ReadRequest) -> Result<RequestId, IoError> {
             if self.len() >= self.capacity {
                 return Err(IoError::Backpressure {
@@ -386,14 +399,13 @@ mod std_support {
                 });
             }
             request.validate()?;
-            let request_id = RequestId(self.next_request_id);
-            self.next_request_id = self.next_request_id.wrapping_add(1);
+            let next = self.next_request_id.ok_or(IoError::RequestIdExhausted)?;
+            let request_id = RequestId(next);
+            self.next_request_id = next.checked_add(1);
             let queued = QueuedRequest {
                 request,
                 request_id,
-                sequence: self.next_sequence,
             };
-            self.next_sequence = self.next_sequence.wrapping_add(1);
             self.queue.push(queued);
             Ok(request_id)
         }
@@ -408,18 +420,13 @@ mod std_support {
                 }
                 return false;
             }
-            let mut retained = Vec::with_capacity(self.queue.len());
             let mut found = false;
-            while let Some(queued) = self.queue.pop() {
+            self.queue.retain(|queued| {
                 if queued.request_id == request_id {
                     found = true;
-                } else {
-                    retained.push(queued);
                 }
-            }
-            for queued in retained {
-                self.queue.push(queued);
-            }
+                queued.request_id != request_id
+            });
             if found {
                 self.cancelled_ready.insert(request_id);
             }
@@ -464,68 +471,88 @@ mod std_support {
                 );
             }
 
-            let request_ids: Vec<_> = self.active.keys().copied().collect();
-            for request_id in request_ids {
-                let Some(mut active) = self.active.remove(&request_id) else {
-                    continue;
+            for _ in 0..self.active.len() {
+                let next = self
+                    .last_polled
+                    .and_then(|last| self.active.range((Excluded(last), Unbounded)).next());
+                let Some((&request_id, _)) = next.or_else(|| self.active.first_key_value()) else {
+                    break;
                 };
-                if active.cancelled {
-                    return Poll::Ready(Err(IoError::Cancelled { request_id }));
+                self.last_polled = Some(request_id);
+                let active = self
+                    .active
+                    .get_mut(&request_id)
+                    .expect("selected active request");
+                let event = active.poll(request_id, context);
+                if matches!(event, Poll::Ready(Err(_) | Ok(IoEvent::Completed(_)))) {
+                    self.active.remove(&request_id);
                 }
-                match active.operation.poll_chunk(context) {
-                    Poll::Pending => {
-                        self.active.insert(request_id, active);
-                    }
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(Some(chunk))) => {
-                        if chunk.offset != active.next_offset {
-                            return Poll::Ready(Err(IoError::InvalidChunkOffset {
-                                expected: active.next_offset,
-                                actual: chunk.offset,
-                            }));
-                        }
-                        let chunk_length = chunk.bytes.len();
-                        let remaining = active.request.length - active.delivered;
-                        if chunk_length as u64 > remaining {
-                            return Poll::Ready(Err(IoError::InvalidChunkLength {
-                                remaining,
-                                actual: chunk_length,
-                            }));
-                        }
-                        active.next_offset += chunk_length as u64;
-                        active.delivered += chunk_length as u64;
-                        for byte in &chunk.bytes {
-                            active.checksum ^= *byte as u64;
-                            active.checksum = active.checksum.wrapping_mul(0x100000001b3);
-                        }
-                        self.active.insert(request_id, active);
-                        return Poll::Ready(Ok(IoEvent::Chunk { request_id, chunk }));
-                    }
-                    Poll::Ready(Ok(None)) => {
-                        if active.delivered != active.request.length {
-                            return Poll::Ready(Err(IoError::ShortRead {
-                                expected: active.request.length,
-                                actual: active.delivered,
-                            }));
-                        }
-                        if let Some(expected) = active.request.expected_checksum
-                            && expected != active.checksum
-                        {
-                            return Poll::Ready(Err(IoError::ChecksumMismatch {
-                                expected,
-                                actual: active.checksum,
-                            }));
-                        }
-                        return Poll::Ready(Ok(IoEvent::Completed(ReadSummary {
-                            request_id,
-                            offset: active.request.offset,
-                            length: active.delivered,
-                            checksum: active.checksum,
-                        })));
-                    }
+                if event.is_ready() {
+                    return event;
                 }
             }
             Poll::Pending
+        }
+    }
+
+    impl<O: ChunkedRead> ActiveOperation<O> {
+        fn poll(
+            &mut self,
+            request_id: RequestId,
+            context: &mut Context<'_>,
+        ) -> Poll<Result<IoEvent, IoError>> {
+            if self.cancelled {
+                return Poll::Ready(Err(IoError::Cancelled { request_id }));
+            }
+            match self.operation.poll_chunk(context) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Ready(Ok(Some(chunk))) => {
+                    if chunk.offset != self.next_offset {
+                        return Poll::Ready(Err(IoError::InvalidChunkOffset {
+                            expected: self.next_offset,
+                            actual: chunk.offset,
+                        }));
+                    }
+                    let chunk_length = chunk.bytes.len();
+                    let remaining = self.request.length - self.delivered;
+                    if chunk_length as u64 > remaining {
+                        return Poll::Ready(Err(IoError::InvalidChunkLength {
+                            remaining,
+                            actual: chunk_length,
+                        }));
+                    }
+                    self.next_offset += chunk_length as u64;
+                    self.delivered += chunk_length as u64;
+                    for byte in &chunk.bytes {
+                        self.checksum ^= *byte as u64;
+                        self.checksum = self.checksum.wrapping_mul(0x100000001b3);
+                    }
+                    Poll::Ready(Ok(IoEvent::Chunk { request_id, chunk }))
+                }
+                Poll::Ready(Ok(None)) => {
+                    if self.delivered != self.request.length {
+                        return Poll::Ready(Err(IoError::ShortRead {
+                            expected: self.request.length,
+                            actual: self.delivered,
+                        }));
+                    }
+                    if let Some(expected) = self.request.expected_checksum
+                        && expected != self.checksum
+                    {
+                        return Poll::Ready(Err(IoError::ChecksumMismatch {
+                            expected,
+                            actual: self.checksum,
+                        }));
+                    }
+                    Poll::Ready(Ok(IoEvent::Completed(ReadSummary {
+                        request_id,
+                        offset: self.request.offset,
+                        length: self.delivered,
+                        checksum: self.checksum,
+                    })))
+                }
+            }
         }
     }
 
@@ -792,6 +819,58 @@ mod tests {
         }
         fs::remove_file(path).expect("temporary file cleanup must succeed");
         assert_eq!(completed, vec![second, third, first]);
+    }
+
+    #[test]
+    fn active_reads_are_round_robin_after_admission() {
+        let mut scripts = BTreeMap::new();
+        scripts.insert(
+            RequestId(1),
+            vec![ReadChunk::new(0, vec![1]), ReadChunk::new(1, vec![2])],
+        );
+        scripts.insert(
+            RequestId(2),
+            vec![ReadChunk::new(0, vec![3]), ReadChunk::new(1, vec![4])],
+        );
+        let mut scheduler = IoScheduler::new(ScriptedProvider { scripts }, 2, 2)
+            .expect("scheduler config must succeed");
+        let first = scheduler
+            .submit(ReadRequest::new(0, 2))
+            .expect("first request must fit");
+        let second = scheduler
+            .submit(ReadRequest::new(0, 2))
+            .expect("second request must fit");
+        let mut context = context();
+        let mut chunk_requests = Vec::new();
+        let mut completed = 0;
+        while completed < 2 {
+            match scheduler.poll(&mut context) {
+                Poll::Ready(Ok(IoEvent::Chunk { request_id, .. })) => {
+                    chunk_requests.push(request_id)
+                }
+                Poll::Ready(Ok(IoEvent::Completed(_))) => completed += 1,
+                Poll::Ready(Err(error)) => panic!("unexpected IO error: {error}"),
+                Poll::Pending => {}
+            }
+        }
+        assert_eq!(chunk_requests, vec![first, second, first, second]);
+    }
+
+    #[test]
+    fn request_ids_fail_closed_without_wraparound() {
+        let path = temp_file(b"a");
+        let mut scheduler = IoScheduler::new(FileProvider::new(path.clone()), 1, 2)
+            .expect("scheduler config must succeed");
+        scheduler.set_next_request_id_for_test(u64::MAX);
+        assert_eq!(
+            scheduler.submit(ReadRequest::new(0, 1)),
+            Ok(RequestId(u64::MAX))
+        );
+        assert_eq!(
+            scheduler.submit(ReadRequest::new(0, 1)),
+            Err(IoError::RequestIdExhausted)
+        );
+        fs::remove_file(path).expect("temporary file cleanup must succeed");
     }
 
     #[test]
