@@ -27,6 +27,9 @@ pub enum DdcError {
     Io(io::Error),
     InvalidFormat(&'static str),
     InvalidDescriptor(&'static str),
+    /// The platform has no backend that can provide the cross-process
+    /// exclusion required by the shared on-disk index protocol.
+    CoordinationUnavailable(&'static str),
     Truncated,
     UnknownVersion(u32),
     HashMismatch {
@@ -54,6 +57,9 @@ impl fmt::Display for DdcError {
             Self::Io(error) => write!(f, "DDC I/O error: {error}"),
             Self::InvalidFormat(reason) => write!(f, "invalid DDC format: {reason}"),
             Self::InvalidDescriptor(reason) => write!(f, "invalid artifact descriptor: {reason}"),
+            Self::CoordinationUnavailable(reason) => {
+                write!(f, "DDC cross-process coordination unavailable: {reason}")
+            }
             Self::Truncated => f.write_str("DDC index is truncated"),
             Self::UnknownVersion(version) => write!(f, "unknown DDC index version: {version}"),
             Self::HashMismatch { expected, actual } => write!(
@@ -97,8 +103,10 @@ impl From<io::Error> for DdcError {
 /// temporary file through [`tempfile::NamedTempFile::persist`]. On POSIX, the
 /// containing directory is synced after replacement. The index is deliberately
 /// uses a stable advisory file lock to coordinate read-modify-write updates
-/// across Unix processes. Other platforms retain the single-owner-process
-/// contract unless an external workspace lease is used. `get`, `len`, and
+/// across Unix processes. Other platforms fail closed with
+/// [`DdcError::CoordinationUnavailable`] unless a platform-equivalent backend
+/// is added; they never silently retain a single-owner-process contract.
+/// `get`, `len`, and
 /// `is_empty` report this handle's last snapshot
 /// until it mutates or is reopened. The cache is independent from the CAS.
 ///
@@ -364,7 +372,9 @@ struct DdcFileLock;
 #[cfg(not(unix))]
 impl DdcFileLock {
     fn acquire(_root: &Path) -> Result<Self, DdcError> {
-        Ok(Self)
+        Err(DdcError::CoordinationUnavailable(
+            "cross-process DDC index locking has no supported platform backend",
+        ))
     }
 }
 
@@ -934,6 +944,17 @@ mod tests {
             orphan.exists(),
             "active/unknown writer files are not reaped"
         );
+        cleanup(&dir);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_ddc_coordination_fails_closed() {
+        let dir = temp_dir();
+        assert!(matches!(
+            DerivedDataCache::open(&dir),
+            Err(DdcError::CoordinationUnavailable(_))
+        ));
         cleanup(&dir);
     }
 }

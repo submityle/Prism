@@ -42,6 +42,9 @@ pub enum PublishError {
     Io(io::Error),
     Cas(CasError),
     Invalid(&'static str),
+    /// The platform has no backend that can provide the cross-process
+    /// exclusion required by this local publication protocol.
+    CoordinationUnavailable(&'static str),
     /// `CURRENT` was replaced, but the durable commit marker could not be
     /// written. The revision may already be visible; callers must reconcile
     /// it instead of retrying the same revision as a fresh transaction.
@@ -157,8 +160,8 @@ struct FilePublishLock;
 impl FilePublishLock {
     fn acquire(root: &Path) -> Result<Self, PublishError> {
         let _ = root;
-        Err(PublishError::Invalid(
-            "cross-process publication locking is unavailable on this platform",
+        Err(PublishError::CoordinationUnavailable(
+            "cross-process publication locking has no supported platform backend",
         ))
     }
 }
@@ -175,9 +178,10 @@ impl RevisionStore {
         let transactions_root = root.join("transactions");
         create_dir_all_durable(&transactions_root)?;
         // Serialize journal initialization and recovery with publishers in
-        // other Unix processes.  The root exists by this point, so the lock
-        // itself is also a durable store entry.
-        #[cfg(unix)]
+        // other processes. The root exists by this point, so the lock itself
+        // is also a durable store entry. Platforms without an equivalent
+        // cross-process lock fail closed instead of silently weakening the
+        // publication protocol.
         let _recovery_guard = FilePublishLock::acquire(&root)?;
         let cas = ContentAddressedStore::open(cas_root)?;
         let journal = TransactionJournal::open(transactions_root.join("journal.bin"))?;
@@ -2251,6 +2255,17 @@ mod tests {
                 .unwrap(),
             Some(BuildRevision(0))
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_publication_coordination_fails_closed() {
+        let dir = temp_dir();
+        assert!(matches!(
+            RevisionStore::open(&dir),
+            Err(PublishError::CoordinationUnavailable(_))
+        ));
         fs::remove_dir_all(dir).unwrap();
     }
 }
