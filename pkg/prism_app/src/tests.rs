@@ -4867,6 +4867,7 @@ mod state_depth_tests {
     use super::*;
 
     use prism_ecs::entity::Entity;
+    use prism_ecs::hierarchy::ChildOf;
 
     use crate::state::{ComputedStates, OnTransition, StateScoped, SubStates};
 
@@ -5426,6 +5427,38 @@ mod state_depth_tests {
         assert!(
             app.world().contains(game_entity_2),
             "entity tagged for the newly current mode survives"
+        );
+    }
+
+    /// A state-scoped hierarchy root owns its complete subtree. Descendants do
+    /// not need duplicate `StateScoped` tags, and an overlapping tag on a child
+    /// remains safe when the parent is removed first.
+    #[test]
+    fn state_scoped_entity_recursively_despawns_its_hierarchy() {
+        let mut app = App::new();
+        app.insert_state(Shell::Menu)
+            .enable_state_scoped_entities::<Shell>();
+        app.update();
+
+        let root = app.world_mut().spawn(StateScoped(Shell::Menu));
+        let child = app.world_mut().spawn(StateScoped(Shell::Menu));
+        let grandchild = app.world_mut().spawn(());
+        app.world_mut().add_relation::<ChildOf>(child, root);
+        app.world_mut().add_relation::<ChildOf>(grandchild, child);
+
+        app.world_mut()
+            .resource_mut::<NextState<Shell>>()
+            .set(Shell::InGame);
+        app.update();
+
+        assert!(!app.world().contains(root), "scoped root is removed");
+        assert!(
+            !app.world().contains(child),
+            "tagged child is removed exactly once even when roots overlap"
+        );
+        assert!(
+            !app.world().contains(grandchild),
+            "untagged descendants follow the scoped hierarchy root"
         );
     }
 

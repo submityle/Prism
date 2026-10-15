@@ -474,7 +474,7 @@ AAA 要求「一个系统崩了不拖垮整个进程」:
 
 ### 24.10 诚实边界
 
-本章设计目标以 2026-10 代码为准**大部分已落地**：24.1 插件依赖图（`plugin_graph`）、24.4 运行模式（`run_mode`/`capability`/`platform_tier`）、24.5 优雅生命周期（`exit`/`lifecycle`）、24.6 cvar（`cvar`）、24.7 崩溃隔离 + 看门狗（`crash`/`watchdog`）、24.8 子状态与状态作用域实体（`state/sub`、`state/scoped`）均有实现并可测；24.9 多窗口已支持开多个窗口（`WinitRunner::with_windows`），多世界亦已落地（`SubApp` 各持独立 ECS World，经 `App::init_sub_app_time_domain` 各持独立 time 域，见 §25.4）；24.3 的 `prism_tasks` 车道接线已落地为可选渲染车道（`pipelined-tasks` feature 的 `TaskLane`，默认仍为专用线程车道）；24.2 的**配置热重载**已落地（`hot-reload` feature 的 `ConfigHotReload`：文件哈希监视 + 逐帧经用户层重放，与冷加载走同一解析器）。**尚未落地**：24.2 的系统/模块热重载（dylib）、24.9 的每窗口渲染目标。本 crate 是地基运行时,勿与上层 `prism_loom_runtime_framework` 职责重叠(后者做更高层游戏流程编排)。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
+本章设计目标以 2026-10 代码为准**大部分已落地**：24.1 插件依赖图（`plugin_graph`）、24.4 运行模式（`run_mode`/`capability`/`platform_tier`）、24.5 优雅生命周期（`exit`/`lifecycle`）、24.6 cvar（`cvar`）、24.8 子状态与状态作用域实体（`state/sub`、`state/scoped`）均有实现并可测；其中状态作用域清理调用 ECS 的 `World::despawn_recursive`，沿规范 `ChildOf` 关系递归删除未重复打标签的后代，并覆盖父子同时标记的幂等场景。24.7 已有 crash dump 与看门狗基础设施，但单 system panic 后隔离故障 system 并继续运行仍待闭环，不能把整节标为完成。24.9 多窗口已支持开多个窗口（`WinitRunner::with_windows`），多世界亦已落地（`SubApp` 各持独立 ECS World，经 `App::init_sub_app_time_domain` 各持独立 time 域，见 §25.4）；24.3 的 `prism_tasks` 车道接线已落地为可选渲染车道（`pipelined-tasks` feature 的 `TaskLane`，默认仍为专用线程车道）；24.2 的**配置热重载**已落地（`hot-reload` feature 的 `ConfigHotReload`：文件哈希监视 + 逐帧经用户层重放，与冷加载走同一解析器）。**尚未落地**：24.2 的系统/模块热重载（dylib）、24.7 的单 system panic 隔离恢复、24.9 的每窗口渲染目标。本 crate 是地基运行时,勿与上层 `prism_loom_runtime_framework` 职责重叠(后者做更高层游戏流程编排)。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
 
 ---
 

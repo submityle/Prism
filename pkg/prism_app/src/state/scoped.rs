@@ -43,15 +43,15 @@
 //! same frame's `Update` is therefore kept; only entities whose owning mode is
 //! no longer current are removed.
 //!
-//! # Scope: flat despawn only
+//! # Hierarchical cleanup
 //!
-//! The despawn is **flat**: exactly the tagged entities are removed, not their
-//! descendants. `prism_ecs` does not yet model an entity hierarchy
-//! (parent/child links or recursive despawn), so a scene graph's children are
-//! not cascaded here. Hierarchical / recursive state-scoped despawn is deferred
-//! until `prism_ecs` grows a hierarchy; it is documented as absent rather than
-//! faked. Until then, tag each entity that must be cleaned up, or despawn
-//! children explicitly from an `OnExit` system.
+//! Cleanup is **recursive** through `prism_ecs`'s canonical
+//! [`ChildOf`](prism_ecs::hierarchy::ChildOf) relation. Tagging a hierarchy root
+//! therefore scopes its whole subtree; descendants do not need duplicate
+//! [`StateScoped`] components. Multiple doomed entities may overlap in one
+//! subtree: [`World::despawn_recursive`] is idempotent for entities already
+//! removed by an earlier root, so cleanup remains deterministic regardless of
+//! query order.
 //!
 //! [`State`]: prism_ecs::schedule::State
 //! [`State<S>`]: prism_ecs::schedule::State
@@ -87,7 +87,8 @@ impl<S: States> Component for StateScoped<S> {}
 ///
 /// Registered by [`App::enable_state_scoped_entities`] into
 /// [`StateTransitionSet::Compute`]. Does nothing while [`State<S>`](State) is
-/// absent. The despawn is flat (see the [module docs](crate::state::scoped)).
+/// absent. Despawn recursively removes descendants connected through the
+/// canonical [`ChildOf`](prism_ecs::hierarchy::ChildOf) relation.
 pub fn clean_up_state_scoped_entities<S: States>(world: &mut World) {
     let Some(current) = world
         .get_resource::<State<S>>()
@@ -105,7 +106,7 @@ pub fn clean_up_state_scoped_entities<S: States>(world: &mut World) {
         .collect();
 
     for entity in doomed {
-        world.despawn(entity);
+        world.despawn_recursive(entity);
     }
 }
 
@@ -123,8 +124,9 @@ impl App {
     /// [`State<S>`](prism_ecs::schedule::State) exists, tagged entities are left
     /// untouched.
     ///
-    /// Idempotent: wiring happens only once per `S`. The despawn is flat; see
-    /// the [module docs](crate::state::scoped) for the hierarchy limitation.
+    /// Idempotent: wiring happens only once per `S`. Cleanup recursively removes
+    /// the tagged entity's canonical hierarchy subtree; see the
+    /// [module docs](crate::state::scoped) for the exact semantics.
     pub fn enable_state_scoped_entities<S: States>(&mut self) -> &mut Self {
         if self
             .initialized_states
