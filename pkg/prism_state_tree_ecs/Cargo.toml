@@ -18,5 +18,9 @@ default = []
 app = ["dep:prism_app"]
 reflect = ["dep:prism_reflect"]
 
+[[bench]]
+name = "batch_scale"
+harness = false
+
 [lints]
 workspace = true

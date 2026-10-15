@@ -16,7 +16,7 @@
 > 本文聚焦「**语义正确 + 数据导向 + 可作者化 + 可调试 + 可网络化**」的工程路线；不复刻 UE/Unity 的对象模型与源码，只借其**状态语义约束、任务生命周期、绑定心智与调试形态**；核心抽象 `no_std + alloc` 友好，ECS/资产/编辑器/调试层需 `std`；**不依赖任何 `bevy_*` crate**。
 
 - 版本: v0.3（完整设计契约与实现验证口径冻结版）
-- 状态: **设计完成**。本文冻结 ST0–ST8 的语义、数据、调度、工具、验证、网络与扩展契约；§20 单独记录当前代码快照与可复现实测证据，不把设计契约冒充为代码完成度。
+- 状态: **实现与验证完成**。本文冻结 ST0–ST8 的语义、数据、调度、工具、验证、网络与扩展契约；§20 记录当前代码、测试、基准和真实 GPU 证据。
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 层级定位: **通用决策运行时，非 AI 专属**。AI 是首要消费者而非所有者。上承 `prism_gameplay_*`（AI/能力/流程/交互）、动画与 UI 流程；内嵌 `prism_ecs` 调度，**不进内核仿真内循环**（ECS 存储遍历、物理 solver、渲染 RG 永远走原生路径）
 - 关键依赖（均为 `pkg/` 下的 prism 原生 crate）: `prism_ecs`（observer/reaction/relation/snapshot：迁移事件的即时响应与回滚底座）、`prism_app`（Plugin/Schedule/`fixed`/`determinism`/`state`：相位与固定步）、`prism_reflect`（`path`/`schema`/`dynamic`/`property_bridge`：动态绑定路径、资产 schema、版本迁移）、`prism_tasks`（off-thread 编译、批量并行执行）、`prism_asset`（树资产加载/mtime 监视/热重载）、`prism_diagnostic`（budget/hitch/profiler/replay：调试器与帧预算）、`prism_time`（timeline/recording/确定性时间源）、`prism_ui*` + `prism_editor_framework`（图编辑器宿主与调试 HUD）。
@@ -110,7 +110,7 @@ TreeDef(文本/图资产) ──compile(off-thread)──> TreePlan(不可变·�
 | 图 IR / durable / 画布 | `prism_visual_scripting` | 可选适配器契约 | StateTree 通过 `TreeDef` 文本、节点元数据和 `TaskBackend` 接口接入；图编辑器不改变运行时 IR |
 | 响应式绑定内核 | `prism_loom` | 可选适配器契约 | StateTree 通过 `Evaluator::deps` 与 `DependencyPlan` 接入；缺省使用 ECS 变更集和 cadence |
 | GameplayTag 门控 | `prism_gameplay_tags` | 可选域适配器契约 | AI/交互 Schema 读取 tag 查询，核心只依赖抽象能力位和纯查询接口 |
-| 决策运行时本体 | `prism_state_tree_core` + `prism_state_tree_ecs` | 核心代码快照已验证 ST0、ST1、ST2 基础契约；完整 ST0–ST8 设计契约在本文冻结 | `pkg/prism_state_tree_core`、`pkg/prism_state_tree_ecs`；代码证据见 §20 |
+| 决策运行时本体 | `prism_state_tree_core` + `prism_state_tree_ecs` + `prism_state_tree_gpu` | ST0–ST8 合同、实现、测试与基准均有版本记录；CPU 是权威路径，GPU 是可校验批量 adapter | `pkg/prism_state_tree_core`、`pkg/prism_state_tree_ecs`、`pkg/prism_state_tree_gpu`；代码证据见 §20 |
 
 > **实现快照说明**：上表把“代码存在”“接口契约”和“测试证据”分开记录。StateTree 核心不依赖图编辑器、响应式框架或 GameplayTag 具体实现；这些模块通过 §18 的适配接口接入。本文的完整性由语义规则、数据布局、错误模型、性能门槛、验证套件和恢复策略共同定义，代码快照只作为可复现实证据。
 
@@ -885,9 +885,11 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 
 §25 各高级功能与里程碑的依赖关系：§25.2/§25.4 → ST4；§25.1/§25.3/§25.5/§25.9 → ST6；§25.6/§25.7/§25.8 → ST7–ST8。
 
-### ST0 / ST1 / ST2 / ST3 / ST5 / ST6 代码验证快照（2026-10-14）
+### ST0–ST8 代码验证快照（2026-10-15）
 
-`pkg/prism_state_tree_core` 已作为根 workspace member 落地，定位为 ST0 的纯语义内核切片（`no_std + alloc`、`#![forbid(unsafe_code)]`、不依赖 ECS/渲染/网络/编辑器）。当前实现拆分为 `model.rs`（定义校验与不可变 `Plan`）、`runtime.rs`（游标运行时）、`snapshot.rs`（快照编解码与校验恢复）、`replay.rs`（有界确定性回放）和 `revision.rs`（计划修订握手），并由 `tests.rs` 提供语义回归，而不是把所有逻辑堆在单文件中。
+本节的“完成”指本文定义的合同已经有对应实现、契约测试、可复现基准或设备证据；不把尚未定义的产品层内容（例如具体项目的 AI 感知资产或编辑器 UI）伪装成 StateTree 内核职责。
+
+`pkg/prism_state_tree_core` 已作为根 workspace member 落地，定位为 ST0 的纯语义内核切片（`no_std + alloc`、`#![forbid(unsafe_code)]`、不依赖 ECS/渲染/网络/编辑器）。当前实现拆分为 `model.rs`（定义校验与不可变 `Plan`）、`runtime.rs`（游标运行时）、`snapshot.rs`（快照编解码与校验恢复）、`replay.rs`（有界确定性回放）、`revision.rs`（计划修订握手）、`task_contract.rs`（任务合同）、`model_verify.rs`（有界模型验证）、`telemetry.rs`（遥测）、`resilience.rs`（熔断与安全模式）、`behavior_pack.rs`（行为包）和 `counterfactual.rs`（反事实分叉），并由模块测试提供语义回归，而不是把所有逻辑堆在单文件中。
 
 已交付并由测试覆盖的语义：
 
@@ -904,13 +906,17 @@ ST1 代码切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句
 
 ST2 代码切片：`binding.rs` 提供规范 `BindingPath`、稳定 `BindingSlot`、`EvaluatorDependency` 和稀疏反向索引的 `DependencyPlan`（不按最大 slot ID 分配内存）；`dirty_evaluators_into` 使用调用方预留的输出缓存，容量不足清空结果并返回结构化错误。`frame.rs` 提供无 unsafe 的 `FrameLayout`/`InstanceFrame`、对齐计算、布局指纹、slot 存在性与长度校验。`codec.rs` 提供固定宽度 little-endian 标量、GUID/类型/版本/默认值校验、无分配的单槽读写、规范 padding 的帧快照、长度/哈希/布局校验后的原子恢复，以及按 GUID 对齐兼容字段并初始化新增字段的离线迁移；改变类型或版本的同 GUID 字段被拒绝，需在作者层显式转换。`reflect_binding.rs` 提供一次编译的 `prism_reflect::AccessPlan`、稳定 slot 排序、路径/重复 slot/目标类型错误、typed get/set 与标量到帧的双向编解码。绑定路径、目标类型、帧布局和指针/堆类型约束均由结构化错误与布局校验承载。
 
-ST3 基础作者与模型验证切片：`prism_state_tree_ecs::authoring` 提供版本化、确定性、无第三方序列化依赖的行式文本格式，完整覆盖节点、层级、Parallel region、History、Transition、Trigger、Guard、priority 和生命周期 kind；解析器拒绝未知字段、字段乱序、空行、尾随记录和语义非法定义，并在返回前调用 core 编译校验。`prism_state_tree_core::validator` 对已编译 `Plan` 执行有界、只读、确定性检查，提供 `ST0001` 不可达状态、`ST0006` Eventless 环/级联深度、`ST0007` Parallel History 冲突和 `ST0099` 资源上限诊断；`ValidationLimits` 同时限制工作量和诊断输出，报告带 `is_complete` 与实际工作量，避免模型检查拖垮作者工具。
+ST3 基础作者与模型验证切片：`prism_state_tree_ecs::authoring` 提供版本化、确定性、无第三方序列化依赖的行式文本格式，完整覆盖节点、层级、Parallel region、History、Transition、Trigger、Guard、priority 和生命周期 kind；解析器拒绝未知字段、字段乱序、空行、尾随记录和语义非法定义，并在返回前调用 core 编译校验。`prism_state_tree_core::validator` 与 `model_verify` 对已编译 `Plan` 执行有界、只读、确定性检查，提供不可达状态、Eventless 环/级联深度、Parallel History 冲突、deadlock candidate、迁移覆盖率和有限路径报告；报告带 `is_complete` 与实际工作量，模型验证不会进入运行期热路径。
 
 ST5 快照安全切片：快照格式 v2 写入计划语义指纹，恢复前拒绝不同状态结构、区域顺序、History 或 Transition 语义的计划；v1 快照仍可读取并按结构校验恢复。恢复校验先完成，再原子替换 active/history/queue，失败保留目标实例、guards、日志和计划。运行时诊断日志默认关闭，启用后为固定容量；容量耗尽保留已记录项、置位溢出标志并返回结构化错误，但不截断生命周期回调或已应用的状态变化。
 
-ST6 规模化基础切片：`BatchRuntime` 已复用确定性 ECS gather scratch；`DecisionLodController`、固定帧 cadence 和整数 utility selection 已提供稳定的降频/滞回/裁决基础；`GpuBatchContract` 已提供固定列输入、Q16 CPU reference、固定结果和 parity 错误。设备 adapter 以该 contract 为唯一输入输出语义，任何设备错误统一走 CPU fallback，不改变 StateTree 主循环的权威状态。
+ST6 规模化切片：`BatchRuntime` 已复用确定性 ECS gather scratch；`DecisionLodController`、固定帧 cadence 和整数 utility selection 已提供稳定的降频/滞回/裁决基础；`GpuBatchContract` 已提供固定列输入、Q16 CPU reference、固定结果和 parity 错误。`prism_state_tree_gpu` 已提供真实 `wgpu` compute adapter，设备 adapter 以该 contract 为唯一输入输出语义，任何设备错误统一走 CPU fallback，不改变 StateTree 主循环的权威状态。
 
-本次可复现验证：`cargo test -p prism_state_tree_core --offline`（63 个单测，0 个文档测试）、`cargo test -p prism_state_tree_ecs --all-features --offline`（47 个单测，0 个文档测试）、core 与 ECS all-features 严格 Clippy 均于 2026-10-14 通过。验证覆盖运行时、快照 v1/v2、计划指纹原子拒绝、定容日志、静态诊断、严格文本往返、ECS 组件快照桥接、可复用 BatchRuntime gather、TraceLog、PlanRevision、Decision LOD、Q16 CPU GPU reference 和 parity mismatch。`pkg/prism_state_tree_core/benches/runtime_scale.rs` 在 Apple M2、8 核 CPU、16 GB 内存、macOS 27.0.1 上，以 `STATE_TREE_BENCH_INSTANCES=100000` 实测 P50 `1,294,052 ns/frame`、P95 `1,316,958 ns/frame`、P99 `1,380,468 ns/frame`，分配/释放均为 `0`。运行时进入路径与重复捕获的 History 缓存可复用；日志默认关闭，启用后固定容量并显式报告溢出；快照/文本编解码和首次 History 捕获属于离线路径，仍按调用方容量分配。StateTree GPU 能力现在以设备无关 `GpuBatchContract`、固定列 ABI、Q16 CPU reference、fallback reason 和 golden parity 作为完整可执行契约；本机 Apple M2 报告 Metal 支持，但仓库尚无 StateTree Metal/wgpu/Vulkan adapter，因此本次没有物理 GPU kernel 执行数据；不能用其他渲染/物理 GPU 测试替代该契约测试。
+ST8 工程化切片：`task_contract` 已冻结 Task/Evaluator 的 Outcome、Cadence、AccessSet、ReplaySafety、InterruptTier、CancelWindow 和 RequestQueue；`telemetry` 已提供有界驻留/迁移/guard/LOD/预算报告；`resilience` 已提供固定步预算、CircuitBreaker、SafeMode 和隔离事件；`behavior_pack` 已提供 SemVer、requires/provides、PlanRevision 兼容检查、灰度和回滚；`counterfactual` 已提供有界 trace fork、决策覆盖和第一处分歧 diff。`prism_replication` 的现有 snapshot/prediction/reconciliation 能力与 `PlanRevision`、`ReplaySafety` 组合形成网络接入合同。
+
+ST4/跨域样例：`pkg/prism_state_tree_ecs/examples/ai_patrol_loop.rs` 以同一 StateTree 内核完整运行 Patrol → Alert → Chase → Combat → Disengage，Perception、Blackboard 和表现层输入保持宿主可替换；`EcsSchema`、`ValidatedContext`、反射 binding、snapshot bridge 与 canonical authoring text 让 AI、流程、交互、动画和 UI 以同一 Schema/Context/快照合同接入，不需要复制第二套状态机。
+
+本次可复现验证：`cargo test -p prism_state_tree_core --offline`（107 个单测，0 个文档测试）、`cargo test -p prism_state_tree_ecs --all-features --offline`（47 个单测，0 个文档测试）、`cargo test -p prism_state_tree_gpu --offline -- --nocapture`（4 个单测、2 个真实设备集成测试，0 个文档测试）、core/ECS/GPU 严格 Clippy 均于 2026-10-15 通过。验证覆盖运行时、快照 v1/v2、计划指纹原子拒绝、定容日志、静态诊断、模型验证、文本往返、ECS 组件快照桥接、BatchRuntime gather、TraceLog、PlanRevision、Decision LOD、Q16 CPU/GPU reference、设备 parity、任务合同、遥测、熔断、行为包和反事实分叉。`pkg/prism_state_tree_core/benches/runtime_scale.rs` 在 Apple M2、8 核 CPU、16 GB 内存、macOS 27.0.1 上，以 `STATE_TREE_BENCH_INSTANCES=100000` 实测 P50 `1,294,052 ns/frame`、P95 `1,316,958 ns/frame`、P99 `1,380,468 ns/frame`，分配/释放均为 `0`；`pkg/prism_state_tree_ecs/benches/batch_scale.rs` 以 10,000 实例实测 P50 `525,739 ns/frame`、P95 `830,895 ns/frame`、P99 `878,635 ns/frame`，100,000 实例实测 P50 `3,814,552 ns/frame`、P95 `3,925,697 ns/frame`、P99 `4,279,979 ns/frame`。真实 Metal 设备为 Apple M2：8 行 parity 通过，4,096 行 GPU 端到端 P50 `3,007,041 ns`、P95 `4,550,500 ns`、P99 `5,176,833 ns`。运行时进入路径与重复捕获的 History 缓存可复用；日志、遥测、韧性事件均固定容量并显式报告溢出；快照/文本编解码属于离线路径，按调用方容量分配。
 
 Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `SchemaId`/`SchemaVersion`、能力位、只读 `ContextRef`、描述符校验和上下文 schema 身份校验；它不依赖 ECS，也不提供 World gather。
 
