@@ -222,6 +222,18 @@ fn clearcoat_bitangent_or(
     return base_bitangent;
 }
 
+// The coat owns its interface normal for microfacet geometry only. The base
+// layer keeps using the base shading normal. The zero vector inherits it.
+fn clearcoat_interface_normal(
+    coat_normal: vec3<f32>,
+    base_normal: vec3<f32>,
+) -> vec3<f32> {
+    if dot(coat_normal, coat_normal) > 0.0 {
+        return brdf_normalize_or(coat_normal, base_normal);
+    }
+    return base_normal;
+}
+
 // Schlick's Fresnel approximation. Mirrors `fresnel_schlick`.
 fn fresnel_schlick(f0: vec3<f32>, v_dot_h: f32) -> vec3<f32> {
     let one_minus = 1.0 - clamp(v_dot_h, 0.0, 1.0);
@@ -1120,11 +1132,7 @@ fn principled_direct_channels_with(
     let coat_f = fresnel_schlick(vec3<f32>(coat_f0), v_dot_h);
     // The coat owns its interface normal for microfacet geometry only. The
     // base layer and the slab attenuation below intentionally keep `n`.
-    let coat_n = if dot(surface.coat_normal, surface.coat_normal) > 0.0 {
-        brdf_normalize_or(surface.coat_normal, n)
-    } else {
-        n
-    };
+    let coat_n = clearcoat_interface_normal(surface.coat_normal, n);
     let coat_n_dot_h = dot(coat_n, h);
     let coat_n_dot_v = dot(coat_n, v);
     let coat_n_dot_l = dot(coat_n, l);
