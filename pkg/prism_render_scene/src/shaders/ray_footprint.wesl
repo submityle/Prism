@@ -27,10 +27,19 @@
 
 const FOOTPRINT_WORDS: u32 = 4u;
 const RESULT_WORDS: u32 = 4u;
+// An f32 needs at most 254 power-of-two steps to move between the smallest
+// positive subnormal and the largest finite value.  Keeping the loop bound
+// explicit gives native GPU backends a finite worst-case cost and avoids
+// driver-dependent behaviour for data-dependent `loop` constructs.
+const LOG2_MAX_ITERATIONS: u32 = 256u;
 
-/// `f32` `+inf` bit pattern, used to detect non-finite inputs without an
-/// `isFinite` builtin (`abs(v) == +inf` catches `±inf`; `v != v` catches `NaN`).
-const POSITIVE_INF_BITS: u32 = 2139095040u;
+/// IEEE-754 masks used to classify `f32` values without relying on backend
+/// floating-point comparison behaviour for `NaN`. Metal may legally contract
+/// or canonicalize exceptional comparisons, while the exponent/mantissa bits
+/// remain stable after `bitcast`.
+const F32_SIGN_BITS: u32 = 2147483648u;
+const F32_ABS_BITS: u32 = 2147483647u;
+const F32_EXPONENT_BITS: u32 = 2139095040u;
 
 /// Per-dispatch uniform mirroring `GpuFootprintParams` in `abi.rs`.
 struct FootprintParams {
@@ -44,13 +53,19 @@ struct FootprintParams {
 @group(0) @binding(1) var<storage, read_write> results: array<u32>;
 @group(0) @binding(2) var<uniform> params: FootprintParams;
 
+/// Returns whether `value` is `NaN` or either infinity.
+fn is_nonfinite(value: f32) -> bool {
+    return (bitcast<u32>(value) & F32_ABS_BITS) >= F32_EXPONENT_BITS;
+}
+
 /// Replaces non-finite (`NaN`/`±inf`) or negative values with zero, mirroring
-/// the golden `sanitize_nonneg`.
+/// the golden `sanitize_nonneg`. Classification is bit-based so the contract
+/// is stable on Metal and other backends that use fast-math comparisons.
 fn sanitize_nonneg(value: f32) -> f32 {
-    let inf = bitcast<f32>(POSITIVE_INF_BITS);
-    let is_nan = value != value;
-    let is_inf = abs(value) == inf;
-    if (is_nan || is_inf || value < 0.0) {
+    let bits = bitcast<u32>(value);
+    let magnitude = bits & F32_ABS_BITS;
+    let is_negative = (bits & F32_SIGN_BITS) != 0u && magnitude != 0u;
+    if (magnitude >= F32_EXPONENT_BITS || is_negative) {
         return 0.0;
     }
     return value;
@@ -63,22 +78,19 @@ fn sanitize_nonneg(value: f32) -> f32 {
 /// non-positive inputs to `0.0`. Only exact power-of-two scalings and integer
 /// additions are used, so it evaluates identically to the `CPU` reference.
 fn log2_linear(ratio: f32) -> f32 {
-    let inf = bitcast<f32>(POSITIVE_INF_BITS);
-    let is_nan = ratio != ratio;
-    let is_inf = abs(ratio) == inf;
-    if (is_nan || is_inf || ratio <= 0.0) {
+    if (is_nonfinite(ratio) || ratio <= 0.0) {
         return 0.0;
     }
     var mantissa = ratio;
     var exponent = 0.0;
-    loop {
+    for (var i = 0u; i < LOG2_MAX_ITERATIONS; i = i + 1u) {
         if (mantissa < 2.0) {
             break;
         }
         mantissa = mantissa * 0.5;
         exponent = exponent + 1.0;
     }
-    loop {
+    for (var i = 0u; i < LOG2_MAX_ITERATIONS; i = i + 1u) {
         if (mantissa >= 1.0) {
             break;
         }

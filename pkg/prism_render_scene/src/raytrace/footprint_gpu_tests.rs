@@ -19,9 +19,11 @@
 //! evidence the ported mip selection matches its reference to `float32`
 //! rounding, not merely that it compiles.
 //!
-//! Adapter acquisition is best-effort: on a headless host with no `wgpu`
-//! adapter [`try_solver_device`] returns `None` and the test skips with a
-//! printed notice instead of failing.
+//! Adapter acquisition is best-effort by default: on a headless host with no
+//! `wgpu` adapter [`try_solver_device`] returns `None` and the test skips with
+//! a printed notice. Setting `PRISM_REQUIRE_GPU` turns that absence into a
+//! failure, so a requested device run can never be recorded as GPU evidence
+//! when it actually skipped.
 
 use bevy_asset::{uuid::Uuid, AssetId};
 use bevy_platform::future::block_on;
@@ -390,6 +392,10 @@ fn dispatch_footprint(
 )]
 fn ray_footprint_matches_cpu_golden_on_device() {
     let Some((device, queue)) = try_solver_device() else {
+        assert!(
+            std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
         eprintln!("skipping ray_footprint parity: no wgpu adapter");
         return;
     };

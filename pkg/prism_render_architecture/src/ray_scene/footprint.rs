@@ -6,10 +6,11 @@
 //! the surface's texel size selects a texture mip level. This mirrors the
 //! ray-cones texture-`LOD` technique used by production hardware ray tracers.
 //!
-//! The `GPU` traversal kernels that would evaluate this per hit are pending the
-//! GPU backend; this module provides the `CPU`-verifiable arithmetic contract.
-//! Only basic arithmetic plus `sqrt` is used: no transcendental functions
-//! (`log2`, `tan`, ...) appear here, so the result is deterministic and cheap.
+//! The `GPU` traversal kernels mirror this arithmetic contract in
+//! `prism_render_scene`; this module remains the CPU-authoritative reference
+//! used by the device-parity gates. Only basic arithmetic plus `sqrt` is used:
+//! no transcendental functions (`log2`, `tan`, ...) appear here, so the result
+//! is deterministic and cheap.
 
 /// Cone description carried alongside a ray.
 ///
