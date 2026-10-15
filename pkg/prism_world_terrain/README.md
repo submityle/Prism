@@ -12,6 +12,8 @@ Engine-neutral, `no_std + alloc` terrain and planetary primitives for Prism.
 - Integer and Q32.32 positions subtract the origin before converting to `f32`; the result carries a conservative absolute error bound.
 - Height sampling is requested with quantized tile-local coordinates and returns integer millimetres, making the interface recordable and replayable.
 - Voxel storage is a validated little-endian, row-major byte contract with X as the fastest-changing axis and power-of-two streaming bricks.
+- Representation selection covers heightfield, voxel, and signed-distance data with validated dimensions, deterministic query-driven selection, and explicit conversion metadata.
+- Incremental rebake planning merges tile-local dirty regions deterministically and admits work through task, abstract-work, and output-byte budgets without allocating in the geometry hot path.
 - `TerrainStreamAdapter` projects each valid cube-sphere `TileKey` into a stable
   `prism_world_stream::CellManifest`, including an exact tile identity sector,
   conservative signed-millimetre planetary bounds, content metadata, and a
@@ -26,6 +28,21 @@ render submission, collision, persistence, and GPU formats remain external
 adapters. The terrain-to-stream adapter is the narrow exception: it only emits
 validated stream manifests and does not perform IO, decompression, residency,
 or scene mutation.
+
+## Representation and rebake planning
+
+`TerrainRepresentationSelector` chooses a representation from explicit query
+requirements: signed-distance data for collision or distance queries, voxel data
+for volumetric queries, and heightfields for surface-only queries. The selector
+is deterministic and does not inspect runtime device state, so the same input
+produces the same representation during replay and offline baking.
+
+`RebakePlanner` accepts closed Q16 tile-local dirty regions, merges overlapping
+or edge-adjacent regions in stable tile/coordinate order, estimates target
+representation work and output bytes with checked arithmetic, and admits only
+the tasks that fit the caller's budget. Deferred regions remain explicit in the
+returned plan and can be submitted again with a later budget without changing
+the ordering.
 
 ## Terrain-to-stream adapter
 

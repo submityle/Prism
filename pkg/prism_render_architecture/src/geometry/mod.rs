@@ -2,9 +2,9 @@
 
 use crate::gpu_scene::GeometryHandle;
 
+pub mod consumer;
 pub mod residency;
 pub mod table;
-pub mod consumer;
 
 pub use consumer::{
     MeshConsumer, MeshConsumerBinding, MeshConsumerBindingError, MeshConsumerSelection,

@@ -13,6 +13,8 @@ mod coordinates;
 mod cube_sphere;
 mod height;
 mod lod;
+mod rebake;
+mod representation;
 mod stream_adapter;
 mod tile;
 mod voxel;
@@ -25,6 +27,14 @@ pub use cube_sphere::{
 };
 pub use height::{DeterministicHeightSampler, HeightSample, HeightSampleValue, HeightSampler};
 pub use lod::{evaluate_lod, LodError, LodEvaluation, LodMetric};
+pub use rebake::{
+    DirtyRegion, RebakeBudget, RebakeError, RebakePlan, RebakePlanner, RebakeRequest, RebakeTask,
+};
+pub use representation::{
+    HeightfieldSpec, RepresentationChoice, RepresentationError, RepresentationKind,
+    RepresentationQuery, RepresentationSpec, RepresentationWork, SdfSpec,
+    TerrainRepresentationSelector, VoxelSpec,
+};
 pub use stream_adapter::{TerrainStreamAdapter, TerrainStreamConfig, TerrainStreamError};
 pub use tile::{TileEdge, TileError, TileKey, TileQuadrant, MAX_TILE_LEVEL};
 pub use voxel::{

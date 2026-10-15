@@ -52,10 +52,7 @@ pub enum MeshRepresentation {
         frame: u64,
     },
     /// A cluster payload selected from a virtual-geometry page.
-    VirtualCluster {
-        page: GeometryPageKey,
-        cluster: u32,
-    },
+    VirtualCluster { page: GeometryPageKey, cluster: u32 },
 }
 
 /// A versioned build product consumed by collision, RT, SDF, or other derived
@@ -210,9 +207,9 @@ impl MeshConsumerBinding {
                     used_fallback: true,
                 })
             }
-            MeshConsumer::MotionVector | MeshConsumer::Collision | MeshConsumer::DerivedGeometry => {
-                self.select(consumer)
-            }
+            MeshConsumer::MotionVector
+            | MeshConsumer::Collision
+            | MeshConsumer::DerivedGeometry => self.select(consumer),
         }
     }
 }
@@ -253,7 +250,9 @@ mod tests {
             MeshConsumer::Shadow,
             MeshConsumer::RayTracing,
         ] {
-            let MeshConsumerSelection::Render { representation, .. } = binding.select(consumer).unwrap() else {
+            let MeshConsumerSelection::Render { representation, .. } =
+                binding.select(consumer).unwrap()
+            else {
                 panic!("render consumer must resolve to one representation");
             };
             assert_eq!(representation, binding.current);
@@ -267,7 +266,9 @@ mod tests {
             previous,
             history_valid,
             ..
-        } = binding(false, true).select(MeshConsumer::MotionVector).unwrap()
+        } = binding(false, true)
+            .select(MeshConsumer::MotionVector)
+            .unwrap()
         else {
             panic!("motion consumer must resolve to a pair");
         };

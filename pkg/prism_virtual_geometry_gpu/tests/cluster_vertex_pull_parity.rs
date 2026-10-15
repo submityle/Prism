@@ -20,11 +20,7 @@ fn clst_v3_attribute_is_decoded_by_vertex_shader_and_reaches_color_target() {
     };
     let payload = encode_cluster_payload_with_attributes(
         bounds,
-        &[
-            [-1.0, -1.0, 0.0],
-            [1.0, -1.0, 0.0],
-            [-1.0, 1.0, 0.0],
-        ],
+        &[[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [-1.0, 1.0, 0.0]],
         &[0, 1, 2],
         0,
         &[ClusterVertexAttribute {

@@ -14,9 +14,9 @@ use prism_render_architecture::virtual_geometry::{
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
-    Color, ColorTargetState, ColorWrites, CommandEncoderDescriptor, FragmentState,
-    LoadOp, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState,
+    BindGroupLayoutEntry, BindingType, BufferBindingType, BufferDescriptor, BufferUsages, Color,
+    ColorTargetState, ColorWrites, CommandEncoderDescriptor, FragmentState, LoadOp, Operations,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState,
     RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
     ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, TextureDescriptor,
     TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor, VertexState,
@@ -54,7 +54,10 @@ impl core::fmt::Display for ClusterVertexPullError {
 
 /// One reusable raw-payload vertex-pulling render pipeline.
 pub struct GpuClusterVertexPull {
-    #[expect(dead_code, reason = "kept alive so the pipeline's module remains valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline's module remains valid"
+    )]
     module: ShaderModule,
     layout: BindGroupLayout,
     pipeline: RenderPipeline,
@@ -137,8 +140,12 @@ impl GpuClusterVertexPull {
             .iter()
             .find(|attribute| attribute.semantic == attribute_semantic)
             .ok_or(ClusterVertexPullError::MissingAttribute)?;
-        let (attribute_offset, attribute_format) =
-            attribute_data_offset(payload, decoded.positions.len(), decoded.indices.len() / 3, attribute)?;
+        let (attribute_offset, attribute_format) = attribute_data_offset(
+            payload,
+            decoded.positions.len(),
+            decoded.indices.len() / 3,
+            attribute,
+        )?;
         let params = Params {
             vertex_count: decoded.positions.len() as u32,
             index_count: decoded.indices.len() as u32,
@@ -250,10 +257,15 @@ impl GpuClusterVertexPull {
             .get_mapped_range()
             .expect("CLST vertex-pull readback should be mapped after device wait");
         let mut pixels = Vec::with_capacity((width * height) as usize);
-        for row in mapped.chunks_exact(padded_row as usize).take(height as usize) {
-            pixels.extend(row[..bytes_per_row as usize].chunks_exact(4).map(|pixel| {
-                [pixel[0], pixel[1], pixel[2], pixel[3]]
-            }));
+        for row in mapped
+            .chunks_exact(padded_row as usize)
+            .take(height as usize)
+        {
+            pixels.extend(
+                row[..bytes_per_row as usize]
+                    .chunks_exact(4)
+                    .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]]),
+            );
         }
         drop(mapped);
         staging.unmap();
@@ -296,29 +308,38 @@ fn attribute_data_offset(
         .and_then(|end| end.checked_add(triangle_count * 6))
         .ok_or(ClusterVertexPullError::InvalidDimensions)?;
     let mut cursor = (geometry_end + 3) & !3;
-    let position_end = cursor.checked_add(8).ok_or(ClusterVertexPullError::InvalidDimensions)?;
+    let position_end = cursor
+        .checked_add(8)
+        .ok_or(ClusterVertexPullError::InvalidDimensions)?;
     if position_end > bytes.len() {
         return Err(ClusterVertexPullError::InvalidDimensions);
     }
     let count = u16::from_le_bytes([bytes[cursor + 4], bytes[cursor + 5]]) as usize;
     cursor = position_end;
     for _ in 0..count {
-        let header_end = cursor.checked_add(12).ok_or(ClusterVertexPullError::InvalidDimensions)?;
+        let header_end = cursor
+            .checked_add(12)
+            .ok_or(ClusterVertexPullError::InvalidDimensions)?;
         if header_end > bytes.len() {
             return Err(ClusterVertexPullError::InvalidDimensions);
         }
         let name_len = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
         let format_tag = u16::from_le_bytes([bytes[cursor + 2], bytes[cursor + 3]]) as u32;
         let location = u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap());
-        let data_len = u32::from_le_bytes(bytes[cursor + 8..cursor + 12].try_into().unwrap()) as usize;
+        let data_len =
+            u32::from_le_bytes(bytes[cursor + 8..cursor + 12].try_into().unwrap()) as usize;
         cursor = header_end;
-        let name_end = cursor.checked_add(name_len).ok_or(ClusterVertexPullError::InvalidDimensions)?;
+        let name_end = cursor
+            .checked_add(name_len)
+            .ok_or(ClusterVertexPullError::InvalidDimensions)?;
         if name_end > bytes.len() {
             return Err(ClusterVertexPullError::InvalidDimensions);
         }
         let name = core::str::from_utf8(&bytes[cursor..name_end]).unwrap_or("");
         cursor = (name_end + 3) & !3;
-        let data_end = cursor.checked_add(data_len).ok_or(ClusterVertexPullError::InvalidDimensions)?;
+        let data_end = cursor
+            .checked_add(data_len)
+            .ok_or(ClusterVertexPullError::InvalidDimensions)?;
         if data_end > bytes.len() {
             return Err(ClusterVertexPullError::InvalidDimensions);
         }

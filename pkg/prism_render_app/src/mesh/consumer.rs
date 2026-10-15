@@ -1,8 +1,8 @@
 //! Concrete GPU bindings for the engine-neutral mesh consumer contract.
 
 use prism_render_architecture::geometry::{
-    MeshConsumer, MeshConsumerBinding, MeshConsumerBindingError,
-    MeshConsumerSelection, MeshDerivedArtifact, MeshRepresentation,
+    MeshConsumer, MeshConsumerBinding, MeshConsumerBindingError, MeshConsumerSelection,
+    MeshDerivedArtifact, MeshRepresentation,
 };
 use prism_render_architecture::gpu_scene::GeometryHandle;
 use prism_render_architecture::virtual_geometry::GeometryPageKey;
@@ -76,11 +76,17 @@ impl RenderMeshConsumerBinding {
         let source = match selection {
             MeshConsumerSelection::Motion { history_valid, .. } if history_valid => &self.previous,
             MeshConsumerSelection::Motion { .. } => &self.current,
-            MeshConsumerSelection::Render { used_fallback: true, .. } => &self.fallback,
+            MeshConsumerSelection::Render {
+                used_fallback: true,
+                ..
+            } => &self.fallback,
             MeshConsumerSelection::Render { .. } => &self.current,
             MeshConsumerSelection::Derived { artifact, .. } => match self.derived.as_ref() {
                 Some(source @ GpuMeshSource::DerivedArtifact { artifact: bound })
-                    if *bound == artifact => source,
+                    if *bound == artifact =>
+                {
+                    source
+                }
                 _ => return Err(MeshConsumerBindingError::MissingDerivedArtifact),
             },
         };
@@ -120,7 +126,9 @@ impl RenderMesh {
                 current: MeshRepresentation::StaticLod { level: lod },
                 previous: MeshRepresentation::StaticLod { level: lod },
                 history_valid: false,
-                fallback: MeshRepresentation::StaticLod { level: fallback_lod },
+                fallback: MeshRepresentation::StaticLod {
+                    level: fallback_lod,
+                },
                 derived: None,
             },
             current: source.clone(),
@@ -236,7 +244,13 @@ mod tests {
         let binding = static_binding();
         let (source, selection) = binding.select(MeshConsumer::MotionVector, true).unwrap();
         assert_eq!(source, &binding.current);
-        assert!(matches!(selection, MeshConsumerSelection::Motion { history_valid: false, .. }));
+        assert!(matches!(
+            selection,
+            MeshConsumerSelection::Motion {
+                history_valid: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -251,7 +265,13 @@ mod tests {
         );
         let (source, selection) = virtual_binding.select(MeshConsumer::Shadow, false).unwrap();
         assert_eq!(source, &virtual_binding.fallback);
-        assert!(matches!(selection, MeshConsumerSelection::Render { used_fallback: true, .. }));
+        assert!(matches!(
+            selection,
+            MeshConsumerSelection::Render {
+                used_fallback: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -272,8 +292,14 @@ mod tests {
             },
             &fallback,
         );
-        assert_eq!(binding.select(MeshConsumer::MainView, true).unwrap().0, &binding.current);
-        assert_eq!(binding.select(MeshConsumer::MotionVector, true).unwrap().0, &binding.previous);
+        assert_eq!(
+            binding.select(MeshConsumer::MainView, true).unwrap().0,
+            &binding.current
+        );
+        assert_eq!(
+            binding.select(MeshConsumer::MotionVector, true).unwrap().0,
+            &binding.previous
+        );
         assert_ne!(binding.current, binding.previous);
     }
 

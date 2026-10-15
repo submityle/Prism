@@ -72,10 +72,10 @@ impl AssetLoader for SceneLoader {
             4 => {
                 // The dependency is intentionally not resident. The async
                 // path must reject before publishing any decoded output.
-                ctx.add_dependency(DepRequest::typed(
+                ctx.add_typed_dependency(
                     AssetPath::parse("missing.async-leaf"),
                     AssetTypeId::of::<Leaf>(),
-                ));
+                );
                 ctx.add_labeled_asset("keep", Label(40));
             }
             _ => return Err(LoadError::Malformed("unknown revision".into())),
@@ -170,7 +170,9 @@ fn duplicate_async_label_rejects_the_complete_revision() {
     assert_eq!(server.with_asset(source.id(), |value| value.0), Some(1));
     assert_eq!(server.with_asset(keep.id(), |value| value.0), Some(10));
     assert_eq!(server.with_asset(gone.id(), |value| value.0), Some(11));
-    assert!(server.load_untyped("scene.async-revision#provisional").is_none());
+    assert!(server
+        .load_untyped("scene.async-revision#provisional")
+        .is_none());
     assert_eq!(server.load_state(source.untyped_id()), LoadState::Loaded);
     assert_eq!(server.load_state(keep.untyped_id()), LoadState::Loaded);
     assert_eq!(server.load_state(gone.untyped_id()), LoadState::Loaded);
@@ -182,6 +184,7 @@ fn unresident_async_dependency_rejects_without_publishing_labels() {
     let source = server.load::<Scene>("scene.async-revision");
     let keep = server.load::<Label>("scene.async-revision#keep");
     let gone = server.load::<Label>("scene.async-revision#gone");
+    let assets_before = server.total_assets();
 
     mount_revision(&server, 4);
     let result = async_reload(&server);
@@ -195,5 +198,5 @@ fn unresident_async_dependency_rejects_without_publishing_labels() {
     assert_eq!(server.load_state(source.untyped_id()), LoadState::Loaded);
     assert_eq!(server.load_state(keep.untyped_id()), LoadState::Loaded);
     assert_eq!(server.load_state(gone.untyped_id()), LoadState::Loaded);
-    assert!(server.load_untyped("missing.async-leaf").is_none());
+    assert_eq!(server.total_assets(), assets_before);
 }
