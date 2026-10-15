@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use bevy_ecs::prelude::*;
 use prism_render_shading::{
-    classify_material_header, classify_material_header_with_execution, MAX_SHADING_CLASSES,
+    classify_material_header_with_context, response_bucket_key_for_header, ResponseBucketKey,
 };
 
 use super::post_graph::{PostExecutionBinding, POST_EXECUTION_BINDINGS};
@@ -305,11 +307,11 @@ impl Default for PrismShadingSettings {
     }
 }
 
-#[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Resource, Clone, Debug, Default, Eq, PartialEq)]
 pub struct PrismShadingDiagnostics {
     pub visible_work_items: u32,
     pub classified_materials: u32,
-    pub class_counts: [u32; MAX_SHADING_CLASSES],
+    pub bucket_counts: BTreeMap<ResponseBucketKey, u32>,
     pub stale_materials: u32,
     pub unsupported_materials: u32,
     pub visibility_buffer_active: bool,
@@ -430,18 +432,14 @@ fn shading_diagnostics(
             diagnostics.stale_materials = diagnostics.stale_materials.saturating_add(1);
             continue;
         };
-        let classification = match execution {
-            Some(execution) => {
-                classify_material_header_with_execution(&header, execution, u32::MAX)
-            }
-            None => classify_material_header(&header),
-        };
+        let classification = classify_material_header_with_context(&header, execution, u32::MAX)
+            .and_then(|_| response_bucket_key_for_header(&header, execution, u32::MAX));
         match classification {
-            Ok(class) => {
+            Ok(key) => {
                 diagnostics.classified_materials =
                     diagnostics.classified_materials.saturating_add(1);
-                diagnostics.class_counts[class.index()] =
-                    diagnostics.class_counts[class.index()].saturating_add(1);
+                let count = diagnostics.bucket_counts.entry(key).or_default();
+                *count = count.saturating_add(1);
             }
             Err(_) => {
                 diagnostics.unsupported_materials =
@@ -455,7 +453,6 @@ fn shading_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_render_shading::MaterialShadingClass;
 
     // Execute the real ECS system twice: the compiled declaration, not a
     // separately maintained literal, owns the runtime pass-count invariant.
@@ -512,7 +509,6 @@ mod tests {
             ..Default::default()
         };
         assert!(!diagnostics.compute_resolve_active);
-        assert_eq!(MaterialShadingClass::Principled.index(), 0);
     }
 
     #[test]
@@ -532,7 +528,8 @@ mod tests {
         assert_eq!(diagnostics.visible_work_items, 4);
         assert_eq!(diagnostics.classified_materials, 2);
         assert_eq!(
-            diagnostics.class_counts[MaterialShadingClass::Principled.index()],
+            diagnostics.bucket_counts
+                [&response_bucket_key_for_header(&principled, None, u32::MAX).unwrap()],
             2
         );
         assert_eq!(diagnostics.unsupported_materials, 1);

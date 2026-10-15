@@ -5,6 +5,7 @@
 //! facade and hands it to the render world as the [`PrismGpu`] resource.
 
 mod context;
+pub(crate) mod fabric;
 mod plugin;
 
 pub use context::{PrismGpu, PrismGpuInitError};

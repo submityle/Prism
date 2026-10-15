@@ -29,6 +29,7 @@ use super::surface_node::SurfaceDraw;
 /// `prepare` stage produced for this body's solver bucket and per-kernel
 /// workgroup counts.
 pub(crate) struct WaterGpuBody {
+    pub(crate) spray: Option<super::spray_history::PreparedSpray>,
     /// The resident buffer set backing every bind group of this body.
     ///
     /// Keeps the `wgpu` buffer and texture handles alive for the lifetime of
@@ -65,6 +66,7 @@ impl WaterGpuBody {
         fabric: WaterFabricPlan,
     ) -> Self {
         Self {
+            spray: None,
             buffers,
             bind_groups,
             dispatches,

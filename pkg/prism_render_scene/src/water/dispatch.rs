@@ -26,6 +26,7 @@ use prism_render_architecture::water::kernels::WaterKernel;
 use super::bind_groups::WaterBodyBindGroups;
 use super::pipeline::{wesl_group, WaterComputePipelines};
 use super::resources::WaterGpuBodies;
+use super::spray_history::{SprayHistory, SprayPipelines};
 
 /// Borrows the concrete bind group a kernel dispatches against from a body.
 ///
@@ -90,6 +91,8 @@ pub(crate) fn dispatch_water(
     pipelines: Res<WaterComputePipelines>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,
+    mut spray_history: ResMut<SprayHistory>,
+    spray_pipelines: Option<Res<SprayPipelines>>,
 ) {
     if bodies.is_empty() {
         return;
@@ -105,6 +108,58 @@ pub(crate) fn dispatch_water(
         {
             return;
         }
+    }
+
+    // Core3d may execute once per view. Particle publication is a frame-global
+    // service and is therefore guarded by the history resource; the water
+    // solve below still records for the current view as before.
+    if spray_history.dispatched != Some(spray_history.frame)
+        && let Some(spray_pipelines) = spray_pipelines.as_deref()
+    {
+        {
+            let encoder = ctx.command_encoder();
+            for body in &bodies.bodies {
+                if let Some(spray) = body.spray.as_ref() {
+                    spray_history.reset_missing(encoder, spray);
+                }
+            }
+        }
+        let frame = spray_history.frame;
+        {
+            let mut pass = ctx
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("prism particle spray feedback"),
+                    timestamp_writes: None,
+                });
+            for body in &bodies.bodies {
+                let Some(spray) = body.spray.as_ref() else {
+                    continue;
+                };
+                let ready = [
+                    spray_pipelines.apply,
+                    spray_pipelines.simulate,
+                    spray_pipelines.publish,
+                ]
+                .into_iter()
+                .all(|id| cache.get_compute_pipeline(id).is_some());
+                if !ready {
+                    continue;
+                }
+                for (id, groups) in [
+                    (spray_pipelines.apply, spray.cells.div_ceil(64)),
+                    (spray_pipelines.simulate, 1),
+                    (spray_pipelines.publish, spray.cells.div_ceil(64)),
+                ] {
+                    let pipeline = cache.get_compute_pipeline(id).expect("checked");
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &spray.bind_group, &[]);
+                    pass.dispatch_workgroups(groups, 1, 1);
+                }
+                spray_history.publish(spray);
+            }
+        }
+        spray_history.dispatched = Some(frame);
     }
 
     // Double-buffer the surface displacement for motion vectors: snapshot each

@@ -26,10 +26,12 @@ use super::body::{ExtractedWater, WaterBody};
 /// drop out cleanly and no stale body survives into the prepare stage.
 pub(crate) fn extract_water_bodies(
     mut extracted: ResMut<ExtractedWater>,
-    bodies: Extract<Query<&WaterBody>>,
+    bodies: Extract<Query<(Entity, &WaterBody)>>,
 ) {
     extracted.bodies.clear();
-    for body in bodies.iter() {
+    extracted.entities.clear();
+    for (entity, body) in bodies.iter() {
+        extracted.entities.push(entity);
         extracted.bodies.push(body.clone());
     }
 }

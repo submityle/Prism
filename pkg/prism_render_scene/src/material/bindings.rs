@@ -14,7 +14,7 @@ use bevy_render::{
     renderer::{RenderDevice, RenderQueue},
 };
 use core::num::NonZero;
-use prism_render_material::{GpuMaterialHeader, GpuMaterialTexture};
+use prism_render_material::{GpuMaterialHeader, GpuMaterialTexture, EXECUTION_PLAN_ROW_WORDS};
 
 use super::texture_heap::RESERVED_GENERATION;
 use super::{
@@ -106,7 +106,7 @@ impl FromWorld for MaterialBindGroup {
         });
         let execution_plan_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("prism material execution plans"),
-            contents: bytemuck::cast_slice(&[[u32::MAX; 3]]),
+            contents: bytemuck::cast_slice(&[[u32::MAX; EXECUTION_PLAN_ROW_WORDS]]),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
         let execution_program_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
@@ -136,7 +136,12 @@ impl FromWorld for MaterialBindGroup {
                     virtual_texture_atlas,
                     virtual_texture_sampler,
                     storage_buffer_read_only_sized(false, NonZero::new(size_of::<u32>() as u64)),
-                    storage_buffer_read_only_sized(false, NonZero::new(8)),
+                    storage_buffer_read_only_sized(
+                        false,
+                        NonZero::new(
+                            (EXECUTION_PLAN_ROW_WORDS * core::mem::size_of::<u32>()) as u64,
+                        ),
+                    ),
                     storage_buffer_read_only_sized(false, NonZero::new(16)),
                     storage_buffer_read_only_sized(false, NonZero::new(4)),
                 ),
@@ -156,7 +161,15 @@ impl FromWorld for MaterialBindGroup {
                     (6, virtual_texture_config),
                     (7, virtual_texture_atlas),
                     (8, virtual_texture_sampler),
-                    (10, storage_buffer_read_only_sized(false, NonZero::new(8))),
+                    (
+                        10,
+                        storage_buffer_read_only_sized(
+                            false,
+                            NonZero::new(
+                                (EXECUTION_PLAN_ROW_WORDS * core::mem::size_of::<u32>()) as u64,
+                            ),
+                        ),
+                    ),
                     (11, storage_buffer_read_only_sized(false, NonZero::new(16))),
                     (12, storage_buffer_read_only_sized(false, NonZero::new(4))),
                 ),
@@ -243,7 +256,7 @@ impl MaterialBindGroup {
                 &self.execution_plan_buffer,
                 0,
                 bytemuck::cast_slice(if plans.is_empty() {
-                    &[[u32::MAX; 3]]
+                    &[[u32::MAX; EXECUTION_PLAN_ROW_WORDS]]
                 } else {
                     plans
                 }),

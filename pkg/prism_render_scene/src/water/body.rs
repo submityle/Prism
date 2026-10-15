@@ -24,8 +24,8 @@
 //! turns into resident buffers and the twelve bind groups. Neither view copies
 //! the owned pools.
 
-use bevy_ecs::component::Component;
 use bevy_ecs::resource::Resource;
+use bevy_ecs::{component::Component, entity::Entity};
 
 use prism_render_architecture::water::gpu::buffers::WaterBufferCounts;
 use prism_render_architecture::water::gpu::pipeline::{
@@ -53,6 +53,8 @@ use super::surface_shading::WaterSurfaceShading;
 /// no-op rather than a fabricated solve.
 #[derive(Component, Clone, Debug, Default, PartialEq)]
 pub struct WaterBody {
+    /// Opt-in persistent particle-to-foam service domain, independent of views.
+    pub(crate) spray_feedback: Option<super::spray_history::SprayFeedbackGrid>,
     // -- Ocean: spectral IFFT + analytic Gerstner --------------------------
     /// Initial `Tessendorf` spectrum amplitudes `h0` (`array<vec2<f32>>`).
     pub(crate) spectrum_h0: Vec<[f32; 2]>,
@@ -310,6 +312,8 @@ impl WaterBody {
 pub(crate) struct ExtractedWater {
     /// Every extracted body, in main-world iteration order.
     pub(crate) bodies: Vec<WaterBody>,
+    /// Full generational main-world identity; vector indices are not identities.
+    pub(crate) entities: Vec<Entity>,
 }
 
 #[cfg(test)]

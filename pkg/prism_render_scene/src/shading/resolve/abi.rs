@@ -1,7 +1,7 @@
 //! ABI shared between the shading-resolve compute pass and
 //! `shaders/shading_resolve.wesl`.
 //!
-//! The resolve entry point is dispatched once per `MaterialShadingClass` with
+//! The resolve entry point is dispatched once per runtime response bucket with
 //! an indirect argument buffer, so the only per-dispatch state it needs is the
 //! active class index plus the framebuffer dimensions and the world-space view
 //! position used to build the shading frame.  Everything else is read from the
@@ -26,7 +26,7 @@ pub(crate) const RESOLVE_WORKGROUP_SIZE: u32 = 64;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuShadingResolveParams {
-    /// Active `MaterialShadingClass` discriminant for this dispatch.
+    /// Active runtime response bucket index for this dispatch.
     pub shading_class: u32,
     /// Framebuffer width in pixels (used to unflatten `pixel_index`).
     pub width: u32,

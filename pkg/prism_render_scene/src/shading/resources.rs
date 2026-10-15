@@ -205,7 +205,7 @@ impl ViewShadingBuffers {
                             execution_family: bucket.execution_family as u32,
                             program_id: bucket.program_id.0,
                             render_phase: bucket.render_phase as u32,
-                            legacy_class: bucket.legacy_class,
+                            reserved: 0,
                         })
                         .collect::<Vec<_>>(),
                 ),
@@ -474,11 +474,19 @@ pub(crate) fn prepare_shading_buffers(
         }) {
             continue;
         }
-        let bucket_table = materials
-            .registry
-            .execution_tables()
-            .map(prism_render_shading::ResponseBucketTable::from_execution_tables)
-            .unwrap_or_else(prism_render_shading::ResponseBucketTable::builtin_compatibility);
+        let bucket_table = match materials.registry.execution_tables() {
+            Some(tables) => {
+                match prism_render_shading::ResponseBucketTable::from_execution_tables(tables) {
+                    Ok(table) => table,
+                    Err(error) => {
+                        bevy_log::error!("invalid material response bucket table: {error:?}");
+                        commands.entity(entity).remove::<ViewShadingBuffers>();
+                        continue;
+                    }
+                }
+            }
+            None => prism_render_shading::ResponseBucketTable::builtin(),
+        };
         commands.entity(entity).insert(ViewShadingBuffers::new(
             &device,
             size,

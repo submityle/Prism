@@ -49,6 +49,7 @@ use super::extract::extract_water_bodies;
 use super::pipeline::init_water_compute_pipelines;
 use super::prepare::prepare_water_bodies;
 use super::resources::WaterGpuBodies;
+use super::spray_history::{init_spray_pipelines, SprayHistory};
 use super::surface_motion::{prepare_water_surface_motion, WaterMotionHistory};
 use super::surface_pipeline::{
     init_water_surface_pipelines, prepare_water_surface_pipelines, WaterSurfacePipelines,
@@ -92,6 +93,7 @@ impl Plugin for WaterPlugin {
         embedded_asset!(app, "../shaders/water_flip_particle_reorder.wesl");
         embedded_asset!(app, "../shaders/water_surface_mesh.wesl");
         embedded_asset!(app, "../shaders/water_surface_raster.wesl");
+        embedded_asset!(app, "../shaders/particle_spray_feedback.wgsl");
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -104,10 +106,15 @@ impl Plugin for WaterPlugin {
             .init_resource::<WaterGpuBodies>()
             // Default-empty snapshot the extract stage refills every frame.
             .init_resource::<ExtractedWater>()
+            .init_resource::<SprayHistory>()
             // Build the sixteen pipelines + twelve layouts once, then insert the
             // shared `WaterComputePipelines` resource the prepare and dispatch
             // stages read.
             .add_systems(RenderStartup, init_water_compute_pipelines)
+            .add_systems(
+                RenderStartup,
+                init_spray_pipelines.after(crate::gpu::fabric::init_scene_fabric),
+            )
             // Cache the per-view, per-target-format specialized surface raster
             // pipelines, matching the shading composite pass's specialization
             // registry.

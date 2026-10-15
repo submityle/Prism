@@ -12,7 +12,11 @@ use bevy_render::{
     },
 };
 
-use crate::{buffers::GpuSceneBindGroup, GpuSceneInstanceAddress, MaterialBindGroup};
+use crate::{
+    buffers::GpuSceneBindGroup, geometry::select_render_mesh, GpuSceneInstanceAddress,
+    MaterialBindGroup,
+};
+use prism_render_architecture::geometry::MeshConsumer;
 
 pub(crate) type DrawGpuSceneOpaque = (
     SetItemPipeline,
@@ -73,6 +77,7 @@ pub(super) fn draw_direct_mesh<'w>(
     meshes: &'w RenderAssets<RenderMesh>,
     instances: &'w RenderMeshInstances,
     allocator: &'w MeshAllocator,
+    registry: &'w crate::RenderGeometryRegistry,
     pass: &mut TrackedRenderPass<'w>,
 ) -> RenderCommandResult {
     let Some(address) = address else {
@@ -81,6 +86,9 @@ pub(super) fn draw_direct_mesh<'w>(
     let Some(mesh_id) = instances.mesh_asset_id(item.main_entity()) else {
         return RenderCommandResult::Skip;
     };
+    if select_render_mesh(registry, mesh_id, MeshConsumer::MainView, 0).is_err() {
+        return RenderCommandResult::Skip;
+    }
     let Some(mesh) = meshes.get(mesh_id) else {
         return RenderCommandResult::Skip;
     };

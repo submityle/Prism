@@ -3,7 +3,7 @@
 //! This is the compute stage that turns the material-classified visibility
 //! buffer into a shaded HDR image.  It runs after
 //! [`super::classification_gpu`] has bucketed every covered pixel into a
-//! per-`MaterialShadingClass` worklist and computed the indirect dispatch
+//! per-response-bucket worklist and computed the indirect dispatch
 //! arguments, and before the main pass composites the result to the screen.
 //!
 //! The stage is deliberately split into cohesive files instead of one large
@@ -28,6 +28,7 @@ mod bind_groups;
 mod dispatch;
 mod motion;
 mod pipeline;
+mod registered_source;
 
 #[cfg(test)]
 mod shader_tests;
@@ -38,4 +39,4 @@ pub(crate) use abi::GpuVsmResolveParams;
 pub(crate) use bind_groups::ViewResolveVsmPageTable;
 pub(crate) use dispatch::dispatch_shading_resolve;
 pub(crate) use motion::{prepare_resolve_motion, ResolveMotionHistory};
-pub(crate) use pipeline::init_shading_resolve_pipeline;
+pub(crate) use pipeline::{init_shading_resolve_pipeline, refresh_shading_resolve_pipeline};

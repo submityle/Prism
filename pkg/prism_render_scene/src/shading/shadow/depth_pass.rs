@@ -39,7 +39,11 @@ use bevy_render::{
     sync_world::MainEntity,
 };
 
-use crate::{buffers::GpuSceneBindGroup, ExtractedSceneInstance, GpuSceneInstanceAddress};
+use crate::{
+    buffers::GpuSceneBindGroup, geometry::select_render_mesh, ExtractedSceneInstance,
+    GpuSceneInstanceAddress, RenderGeometryRegistry,
+};
+use prism_render_architecture::geometry::MeshConsumer;
 
 use super::pipeline::{
     GpuShadowDepthView, ShadowDepthPipeline, ShadowDepthPipelineKey, ShadowDepthViewUniform,
@@ -83,6 +87,7 @@ pub(crate) fn queue_shadow_depth(
     meshes: Res<RenderAssets<RenderMesh>>,
     render_instances: Res<RenderMeshInstances>,
     scene_instances: Query<(&GpuSceneInstanceAddress, &ExtractedSceneInstance)>,
+    geometry: Res<RenderGeometryRegistry>,
     mut draw_list: ResMut<ShadowDepthDrawList>,
 ) {
     draw_list.0.clear();
@@ -93,6 +98,9 @@ pub(crate) fn queue_shadow_depth(
         let Some(mesh_id) = render_instances.mesh_asset_id(instance.main_entity) else {
             continue;
         };
+        if select_render_mesh(&geometry, mesh_id, MeshConsumer::Shadow, 0).is_err() {
+            continue;
+        }
         let Some(mesh) = meshes.get(mesh_id) else {
             continue;
         };
@@ -191,6 +199,7 @@ pub(crate) fn shadow_depth_pass(world: &World, mut ctx: RenderContext) {
     let meshes = world.resource::<RenderAssets<RenderMesh>>();
     let render_instances = world.resource::<RenderMeshInstances>();
     let allocator = world.resource::<MeshAllocator>();
+    let geometry = world.resource::<RenderGeometryRegistry>();
 
     for (draw_index, draw) in extracted.depth_draws.iter().enumerate() {
         let Some(layer_view) = atlas.layer_view(draw.layer) else {
@@ -239,6 +248,9 @@ pub(crate) fn shadow_depth_pass(world: &World, mut ctx: RenderContext) {
             let Some(mesh_id) = render_instances.mesh_asset_id(entry.main_entity) else {
                 continue;
             };
+            if select_render_mesh(geometry, mesh_id, MeshConsumer::Shadow, 0).is_err() {
+                continue;
+            }
             let Some(mesh) = meshes.get(mesh_id) else {
                 continue;
             };

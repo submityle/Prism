@@ -812,16 +812,127 @@ fn principled_direct_with(
     light: DirectLightSample,
     pre: PrincipledPre,
 ) -> vec3<f32> {
+    return principled_direct_channels_with(surface, frame, light, pre).radiance;
+}
+
+// Keep the legacy radiance expression intact for fixed-point comparisons;
+// composition consumes the two contributions at their source, never a residual
+// obtained by subtracting indirect illumination from the final HDR color.
+struct PrincipledDirectChannels {
+    radiance: vec3<f32>,
+    direct: vec3<f32>,
+    transmission: vec3<f32>,
+}
+
+// Scattering-only twin of `subsurface.rs::subsurface_diffuse_terms`.
+// The standalone subsurface/cloth modules import this module's surface and
+// GGX helpers, so the principled mixture cannot import their full integrators
+// without a cycle (or double-counting specular/emission).
+struct PrincipledSubsurfaceTerms {
+    diffuse: vec3<f32>,
+    transmission: vec3<f32>,
+}
+
+fn principled_subsurface_terms(
+    surface: SurfaceSample,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    l: vec3<f32>,
+    raw_n_dot_l: f32,
+    diffuse_weight: vec3<f32>,
+) -> PrincipledSubsurfaceTerms {
+    let subsurface = clamp(surface.subsurface, 0.0, 1.0);
+    let thickness = clamp(surface.thickness, 0.0, 1.0);
+    var diffuse = vec3<f32>(0.0);
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        let wrap = clamp(
+            subsurface * surface.subsurface_radius * surface.subsurface_radius_scale[c],
+            0.0,
+            1.0,
+        );
+        let one_plus_w = 1.0 + wrap;
+        let e_wrap = max((1.0 + 2.0 * wrap) / (one_plus_w * one_plus_w), 1.0e-3);
+        let diffuse_cos = clamp(
+            (raw_n_dot_l + wrap) / ((1.0 + wrap) * (1.0 + wrap)),
+            0.0,
+            1.0,
+        ) / e_wrap;
+        diffuse[c] = surface.base_color[c]
+            * surface.subsurface_color[c]
+            * INV_PI
+            * diffuse_cos
+            * diffuse_weight[c];
+    }
+    let h_transmission = brdf_normalize_or(l + n * 0.2, n);
+    let sharpness = max(
+        12.0 * (1.0 + clamp(surface.scatter_anisotropy, -1.0, 1.0)),
+        MIN_N_DOT,
+    );
+    let back = pow(clamp(dot(v, -h_transmission), 0.0, 1.0), sharpness);
+    let transmitted = (surface.base_color * surface.subsurface_color)
+        * (subsurface * back * (1.0 - thickness));
+    return PrincipledSubsurfaceTerms(diffuse, transmitted);
+}
+
+// Same baked directional albedo and interpolation as charlie_albedo_table.rs
+// and cloth.wesl. Kept local to avoid the cloth -> brdf import cycle.
+const PRINCIPLED_FUZZ_N_MU: i32 = 17;
+const PRINCIPLED_FUZZ_N_R: i32 = 9;
+const PRINCIPLED_FUZZ_ALBEDO: array<f32, 153> = array<f32, 153>(
+    1.000000, 1.000000, 0.649052, 0.282295, 0.116762, 0.044961, 0.015821, 0.004987, 0.001375, 0.000322, 0.000061, 0.000009, 0.000001, 0.000000, 0.000000, 0.000000, 0.000000,
+    1.000000, 0.868676, 0.677266, 0.538730, 0.431285, 0.345282, 0.275282, 0.217819, 0.170482, 0.131497, 0.099501, 0.073411, 0.052347, 0.035572, 0.022467, 0.012500, 0.005209,
+    0.928916, 0.716657, 0.595808, 0.504953, 0.431375, 0.369553, 0.316454, 0.270209, 0.229555, 0.193579, 0.161614, 0.133140, 0.107750, 0.085115, 0.064965, 0.047073, 0.031251,
+    0.810533, 0.646225, 0.552173, 0.480724, 0.422060, 0.371965, 0.328132, 0.289150, 0.254069, 0.222217, 0.193104, 0.166352, 0.141669, 0.118817, 0.097613, 0.077898, 0.059546,
+    0.744316, 0.604668, 0.524836, 0.463977, 0.413764, 0.370588, 0.332490, 0.298281, 0.267155, 0.238550, 0.212042, 0.187323, 0.164145, 0.142310, 0.121656, 0.102055, 0.083397,
+    0.701662, 0.577044, 0.506022, 0.451871, 0.407107, 0.368500, 0.334302, 0.303441, 0.275201, 0.249079, 0.224705, 0.201788, 0.180111, 0.159499, 0.139803, 0.120900, 0.102697,
+    0.671750, 0.557241, 0.492234, 0.442722, 0.401779, 0.366425, 0.335052, 0.306665, 0.280621, 0.256435, 0.233778, 0.212381, 0.192041, 0.172592, 0.153896, 0.135837, 0.118325,
+    0.649554, 0.542347, 0.481705, 0.435588, 0.397465, 0.364541, 0.335312, 0.308831, 0.284496, 0.261864, 0.240608, 0.220482, 0.201294, 0.182884, 0.165127, 0.147906, 0.131134,
+    0.632425, 0.530705, 0.473381, 0.429855, 0.393906, 0.362883, 0.335331, 0.310368, 0.287407, 0.266029, 0.245935, 0.226876, 0.208675, 0.191184, 0.174267, 0.157825, 0.141770,
+);
+
+fn principled_fuzz_albedo_lookup(n_dot_v: f32, roughness: f32) -> f32 {
+    let x = clamp(n_dot_v, 0.0, 1.0) * f32(PRINCIPLED_FUZZ_N_MU - 1);
+    let y = clamp(roughness, 0.0, 1.0) * f32(PRINCIPLED_FUZZ_N_R - 1);
+    let i0 = min(i32(x), PRINCIPLED_FUZZ_N_MU - 2);
+    let j0 = min(i32(y), PRINCIPLED_FUZZ_N_R - 2);
+    let fx = x - f32(i0);
+    let fy = y - f32(j0);
+    let a = PRINCIPLED_FUZZ_ALBEDO[j0 * PRINCIPLED_FUZZ_N_MU + i0];
+    let b = PRINCIPLED_FUZZ_ALBEDO[j0 * PRINCIPLED_FUZZ_N_MU + i0 + 1];
+    let c = PRINCIPLED_FUZZ_ALBEDO[(j0 + 1) * PRINCIPLED_FUZZ_N_MU + i0];
+    let d = PRINCIPLED_FUZZ_ALBEDO[(j0 + 1) * PRINCIPLED_FUZZ_N_MU + i0 + 1];
+    let top = a + (b - a) * fx;
+    let bottom = c + (d - c) * fx;
+    return clamp(top + (bottom - top) * fy, 0.0, 1.0);
+}
+
+fn principled_distribution_charlie(roughness: f32, n_dot_h: f32) -> f32 {
+    let inv_r = 1.0 / roughness;
+    let sin2h = max(1.0 - n_dot_h * n_dot_h, 0.0078125);
+    return (2.0 + inv_r) * pow(sin2h, inv_r * 0.5) * (1.0 / (2.0 * PI));
+}
+
+fn principled_visibility_ashikhmin(n_dot_v: f32, n_dot_l: f32) -> f32 {
+    return 1.0 / max(4.0 * (n_dot_l + n_dot_v - n_dot_l * n_dot_v), MIN_N_DOT);
+}
+
+fn principled_direct_channels_with(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    light: DirectLightSample,
+    pre: PrincipledPre,
+) -> PrincipledDirectChannels {
     let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
     let v = brdf_normalize_or(frame.view, n);
     let l = brdf_normalize_or(light.direction, n);
     let h = brdf_normalize_or(v + l, n);
-    let n_dot_l = max(dot(n, l), 0.0);
+    let raw_n_dot_l = dot(n, l);
+    let n_dot_l = max(raw_n_dot_l, 0.0);
     let n_dot_v = max(dot(n, v), MIN_N_DOT);
     let n_dot_h = max(dot(n, h), MIN_N_DOT);
     let v_dot_h = max(dot(v, h), 0.0);
-    if n_dot_l <= 0.0 {
-        return surface.emissive;
+    if n_dot_l <= 0.0 && surface.subsurface <= 0.0 {
+        return PrincipledDirectChannels(surface.emissive, vec3<f32>(0.0), vec3<f32>(0.0));
     }
 
     let metallic = clamp(surface.metallic, 0.0, 1.0);
@@ -963,7 +1074,18 @@ fn principled_direct_with(
     );
     let diffuse = (diffuse_on + diffuse_comp) * diffuse_weight;
     // `OpenPBR` `base_weight` scales the whole base layer; 1.0 is exact.
-    let base = (diffuse + specular) * (n_dot_l * clamp(surface.base_weight, 0.0, 1.0));
+    var base = (diffuse + specular) * (n_dot_l * clamp(surface.base_weight, 0.0, 1.0));
+    let subsurface = clamp(surface.subsurface, 0.0, 1.0);
+    if subsurface > 0.0 {
+        let scattered = principled_subsurface_terms(surface, n, v, l, raw_n_dot_l, diffuse_weight);
+        let diffuse_mix = diffuse * (n_dot_l * (1.0 - subsurface))
+            + scattered.diffuse * subsurface;
+        // Replace the diffuse share only; GGX and the enclosing coat/fuzz
+        // layers remain present exactly once, as in the CPU principled path.
+        base = ((diffuse_mix + specular * n_dot_l)
+            + scattered.transmission * diffuse_weight)
+            * clamp(surface.base_weight, 0.0, 1.0);
+    }
 
     // Clearcoat: a second, always-dielectric GGX lobe that attenuates the base
     // response by its own Fresnel reflectance.
@@ -975,7 +1097,7 @@ fn principled_direct_with(
     let coat_f0 = pow((clamp(surface.coat_ior, 1.0 + 1.0e-3, 3.0) - 1.0)
         / (clamp(surface.coat_ior, 1.0 + 1.0e-3, 3.0) + 1.0), 2.0);
     let coat_f = fresnel_schlick(vec3<f32>(coat_f0), v_dot_h);
-    let coat_specular = coat_f
+    let coat_single_scatter = coat_f
         * (coat
             * distribution_ggx(n_dot_h, coat_alpha)
             * vis_smith(n_dot_v, n_dot_l, coat_alpha)
@@ -997,7 +1119,7 @@ fn principled_direct_with(
     // Fast path: with no coat every term below is scaled away, so the table
     // lookups are skipped entirely for a material that never authors a coat.
     let coat_lobe_albedo = pre.coat_lobe_albedo;
-    let coat_specular = coat_specular
+    let coat_specular = coat_single_scatter
         + vec3<f32>(coat * (coat_r_slab - coat_lobe_albedo) * n_dot_l * INV_PI);
     let coat_attenuation = 1.0 + coat * (coat_t_slab - 1.0);
 
@@ -1083,12 +1205,29 @@ fn principled_direct_with(
     // the reflective base slab and the translucent slab, not an additive lobe;
     // mixing keeps both slabs inside one energy budget. `transmission == 0`
     // leaves the base untouched bit-for-bit.
-    let reflected = base * (coat_attenuation * (1.0 - transmission))
+    var reflected = base * (coat_attenuation * (1.0 - transmission))
         + coat_specular
         + transmission_term;
+    var direct_term = base * (coat_attenuation * (1.0 - transmission)) + coat_specular;
+    let sheen = clamp(surface.sheen, 0.0, 1.0);
+    if sheen > 0.0 {
+        let fuzz_roughness = clamp(surface.fuzz_roughness, MIN_ROUGHNESS, 1.0);
+        let albedo = principled_fuzz_albedo_lookup(n_dot_v, fuzz_roughness);
+        let substrate_scale = clamp(1.0 - sheen * albedo, 0.0, 1.0);
+        let fuzz = sheen
+            * principled_distribution_charlie(fuzz_roughness, n_dot_h)
+            * principled_visibility_ashikhmin(n_dot_v, n_dot_l)
+            * n_dot_l;
+        direct_term = direct_term * substrate_scale + surface.fuzz_color * fuzz;
+        transmission_term = transmission_term * substrate_scale;
+        reflected = direct_term + transmission_term;
+    }
 
     let radiance = reflected * light.illuminance;
-    return radiance * clamp(light.visibility, 0.0, 1.0) + surface.emissive;
+    let visibility = clamp(light.visibility, 0.0, 1.0);
+    let direct = direct_term * light.illuminance * visibility;
+    let transmitted = transmission_term * light.illuminance * visibility;
+    return PrincipledDirectChannels(radiance * visibility + surface.emissive, direct, transmitted);
 }
 
 // Non-photoreal quantized diffuse lobe. Mirrors `evaluate_toon_direct`.

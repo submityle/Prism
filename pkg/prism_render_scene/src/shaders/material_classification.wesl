@@ -33,7 +33,7 @@ struct PixelClass {
     shading_class: u32,
     work_index: u32,
     material_index: u32,
-    response_class: u32,
+    response_kind: u32,
     flags: u32,
 }
 
@@ -41,7 +41,7 @@ struct WorkItem {
     pixel_index: u32,
     material_index: u32,
     shading_class: u32,
-    response_class: u32,
+    response_kind: u32,
     flags: u32,
 }
 
@@ -49,13 +49,18 @@ struct ResponseBucket {
     execution_family: u32,
     program_id: u32,
     render_phase: u32,
-    legacy_class: u32,
+    reserved: u32,
 }
 
 struct ExecutionPlanRow {
     left_program: u32,
     right_program: u32,
     execution_family: u32,
+    blended_channels: u32,
+    mask_kind: u32,
+    mask_index: u32,
+    blend_domain: u32,
+    reserved: u32,
 }
 
 struct ExecutionProgramRow {
@@ -83,167 +88,95 @@ struct ExecutionProgramRow {
 
 var<immediate> params: ClassificationParams;
 
-// Closure-kind bit positions (see `ir::ClosureKind`).
-const CLOSURE_CLEARCOAT: u32 = 3u;
-const CLOSURE_SHEEN: u32 = 4u;
-const CLOSURE_SUBSURFACE: u32 = 5u;
-const CLOSURE_HAIR: u32 = 8u;
-
-// MaterialShadingClass discriminants (see `classification::MaterialShadingClass`).
-const CLASS_PRINCIPLED: u32 = 0u;
-const CLASS_UNLIT: u32 = 1u;
-const CLASS_SUBSURFACE: u32 = 2u;
-const CLASS_CLEARCOAT: u32 = 3u;
-const CLASS_CLOTH: u32 = 4u;
-const CLASS_HAIR: u32 = 5u;
-const CLASS_WATER: u32 = 6u;
-const CLASS_NPR: u32 = 7u;
-const CLASS_CUSTOM: u32 = 8u;
-
-fn has_closure(mask: u32, bit: u32) -> bool {
-    return (mask & (1u << bit)) != 0u;
+// Program kinds are the generated execution-table ABI, not lobe buckets.
+struct ExecutionIdentity {
+    family: u32,
+    program_id: u32,
+    response_kind: u32,
 }
 
-// Project a Lit surface's closure graph onto a coherent bucket, matching the
-// CPU `lit_class_from_closures` derivation exactly.
-fn lit_class_from_closures(mask: u32) -> u32 {
-    if has_closure(mask, CLOSURE_HAIR) { return CLASS_HAIR; }
-    if has_closure(mask, CLOSURE_SUBSURFACE) { return CLASS_SUBSURFACE; }
-    if has_closure(mask, CLOSURE_CLEARCOAT) { return CLASS_CLEARCOAT; }
-    if has_closure(mask, CLOSURE_SHEEN) { return CLASS_CLOTH; }
-    return CLASS_PRINCIPLED;
+fn execution_identity(header: MaterialHeader, region_selector: u32) -> ExecutionIdentity {
+    let invalid = ExecutionIdentity(0xffffffffu, 0xffffffffu, 0xffffffffu);
+    let sentinel = 0xffffffffu;
+    let all_unbound = header.execution_plan_index == sentinel
+        && header.execution_program_index == sentinel
+        && header.execution_package_index == sentinel
+        && header.execution_permutation_low == sentinel
+        && header.execution_permutation_high == sentinel;
+    let any_unbound = header.execution_plan_index == sentinel
+        || header.execution_program_index == sentinel
+        || header.execution_package_index == sentinel
+        || header.execution_permutation_low == sentinel
+        || header.execution_permutation_high == sentinel;
+    if any_unbound && !all_unbound { return invalid; }
+    var identity = ExecutionIdentity(0u, 0u, 0u);
+    if !all_unbound {
+        if header.execution_plan_index >= arrayLength(&execution_plans)
+            || header.execution_program_index >= arrayLength(&execution_programs)
+            || header.execution_package_index >= arrayLength(&execution_packages) {
+            return invalid;
+        }
+        let plan = execution_plans[header.execution_plan_index];
+        if plan.left_program != header.execution_program_index
+            && plan.right_program != header.execution_program_index {
+            return invalid;
+        }
+        let program = execution_programs[header.execution_program_index];
+        if program.package_index != header.execution_package_index
+            || program.response_kind > 3u {
+            return invalid;
+        }
+        let after_limit = header.execution_permutation_high > program.permutation_count_high
+            || (header.execution_permutation_high == program.permutation_count_high
+                && header.execution_permutation_low >= program.permutation_count_low);
+        if after_limit { return invalid; }
+        identity = ExecutionIdentity(plan.execution_family, program.program_id, program.response_kind);
+    }
+    // Binary region endpoints only change builtin Lit/Npr; registered ids,
+    // including zero, and Unlit retain their verified implementation.
+    if identity.response_kind <= 1u && region_selector <= 1u {
+        identity.program_id = region_selector;
+        identity.response_kind = region_selector;
+    }
+    return identity;
 }
 
-fn material_class(header: MaterialHeader, region_illumination: u32) -> u32 {
-    // Only the seven blend/raster classes are surface-compatible. Runtime
-    // domains are carried by render_domain; water stays Surface and is marked
-    // by FEATURE_WATER.
-    let surface = (header.render_class == 0u || header.render_class == 1u
-        || header.render_class == 2u || header.render_class == 3u)
+fn material_response_kind(header: MaterialHeader, identity: ExecutionIdentity) -> u32 {
+    let surface = header.render_class <= 3u
         && (header.render_domain == 0u || header.render_domain == 3u);
-    if header.is_active == 0u || !surface {
-        return 0xffffffffu;
-    }
-    // Dedicated domain/feature paths bind their bucket directly.
-    if header.render_domain == 3u { return CLASS_HAIR; }
-    if (header.feature_flags & (1u << 8u)) != 0u { return CLASS_WATER; }
-    let sentinel = 0xffffffffu;
-    let words_all_sentinel = header.execution_plan_index == sentinel
-        && header.execution_program_index == sentinel
-        && header.execution_package_index == sentinel
-        && header.execution_permutation_low == sentinel
-        && header.execution_permutation_high == sentinel;
-    let words_partial = header.execution_plan_index == sentinel
-        || header.execution_program_index == sentinel
-        || header.execution_package_index == sentinel
-        || header.execution_permutation_low == sentinel
-        || header.execution_permutation_high == sentinel;
-    if words_partial && !words_all_sentinel { return sentinel; }
-    var response_kind = 0u;
-    if !words_all_sentinel {
-        if header.execution_plan_index >= arrayLength(&execution_plans)
-            || header.execution_program_index >= arrayLength(&execution_programs)
-            || header.execution_package_index >= arrayLength(&execution_packages) {
-            return sentinel;
-        }
-        let plan = execution_plans[header.execution_plan_index];
-        if plan.left_program != header.execution_program_index
-            && plan.right_program != header.execution_program_index {
-            return sentinel;
-        }
-        let program = execution_programs[header.execution_program_index];
-        if program.package_index != header.execution_package_index {
-            return sentinel;
-        }
-        let perm_after_limit = header.execution_permutation_high > program.permutation_count_high
-            || (header.execution_permutation_high == program.permutation_count_high
-                && header.execution_permutation_low >= program.permutation_count_low);
-        if perm_after_limit { return sentinel; }
-        response_kind = program.response_kind;
-        if response_kind > 3u { return sentinel; }
-    }
-    // A region mask only blends the Lit/NPR endpoints. Unlit and custom
-    // response programs remain material-level choices.
-    if (response_kind == 0u || response_kind == 1u) && region_illumination == 1u {
-        return CLASS_NPR;
-    }
-    if response_kind == 1u { return CLASS_NPR; }
-    if response_kind == 2u { return CLASS_UNLIT; }
-    if response_kind == 3u { return CLASS_CUSTOM; }
-    return lit_class_from_closures(header.closure_mask);
+    if header.is_active == 0u || !surface { return 0xffffffffu; }
+    return identity.response_kind;
 }
 
-fn response_bucket_for_execution(header: MaterialHeader, region_illumination: u32) -> u32 {
-    let sentinel = 0xffffffffu;
-    var execution_family = 0u;
-    var program_id = 0u;
-    var response_kind = 0u;
-    let words_all_sentinel = header.execution_plan_index == sentinel
-        && header.execution_program_index == sentinel
-        && header.execution_package_index == sentinel
-        && header.execution_permutation_low == sentinel
-        && header.execution_permutation_high == sentinel;
-    let words_partial = header.execution_plan_index == sentinel
-        || header.execution_program_index == sentinel
-        || header.execution_package_index == sentinel
-        || header.execution_permutation_low == sentinel
-        || header.execution_permutation_high == sentinel;
-    if words_partial && !words_all_sentinel {
-        return sentinel;
+fn response_bucket_for_execution(header: MaterialHeader, identity: ExecutionIdentity) -> u32 {
+    if identity.response_kind > 3u { return 0xffffffffu; }
+    var phase = 0u;
+    if header.render_class >= 4u && header.render_class <= 6u {
+        phase = 1u;
+    } else if identity.response_kind == 1u {
+        phase = 2u;
+    } else if identity.response_kind == 3u {
+        phase = 3u;
     }
-    if !words_all_sentinel {
-        if header.execution_plan_index >= arrayLength(&execution_plans)
-            || header.execution_program_index >= arrayLength(&execution_programs)
-            || header.execution_package_index >= arrayLength(&execution_packages) {
-            return sentinel;
-        }
-        let plan = execution_plans[header.execution_plan_index];
-        if plan.left_program != header.execution_program_index
-            && plan.right_program != header.execution_program_index {
-            return sentinel;
-        }
-        let program = execution_programs[header.execution_program_index];
-        if program.package_index != header.execution_package_index {
-            return sentinel;
-        }
-        let perm_after_limit = header.execution_permutation_high > program.permutation_count_high
-            || (header.execution_permutation_high == program.permutation_count_high
-                && header.execution_permutation_low >= program.permutation_count_low);
-        if perm_after_limit {
-            return sentinel;
-        }
-        execution_family = plan.execution_family;
-        program_id = program.program_id;
-        response_kind = program.response_kind;
+    // The upload is sorted lexicographically. Search is logarithmic even for
+    // project registries with thousands of compiled response entries.
+    var low = 0u;
+    var high = arrayLength(&response_buckets);
+    while low < high {
+        let mid = low + (high - low) / 2u;
+        let row = response_buckets[mid];
+        let less = row.execution_family < identity.family
+            || (row.execution_family == identity.family && row.program_id < identity.program_id)
+            || (row.execution_family == identity.family && row.program_id == identity.program_id
+                && row.render_phase < phase);
+        if less { low = mid + 1u; } else { high = mid; }
     }
-    if header.render_class == 4u || header.render_class == 5u || header.render_class == 6u {
-        // Transparent/additive/transmissive are a separate phase even when
-        // they use a built-in response program.
-        for (var bucket = 0u; bucket < arrayLength(&response_buckets); bucket = bucket + 1u) {
-            let row = response_buckets[bucket];
-            if row.execution_family == execution_family
-                && row.program_id == program_id
-                && row.render_phase == 1u {
-                return bucket;
-            }
-        }
-        return sentinel;
+    if low < arrayLength(&response_buckets) {
+        let row = response_buckets[low];
+        if row.execution_family == identity.family && row.program_id == identity.program_id
+            && row.render_phase == phase { return low; }
     }
-    var render_phase = 0u;
-    if (response_kind == 1u || region_illumination == 1u) {
-        render_phase = 2u;
-    } else if response_kind == 3u {
-        render_phase = 3u;
-    }
-    for (var bucket = 0u; bucket < arrayLength(&response_buckets); bucket = bucket + 1u) {
-        let row = response_buckets[bucket];
-        if row.execution_family == execution_family
-            && row.program_id == program_id
-            && row.render_phase == render_phase {
-            return bucket;
-        }
-    }
-    return sentinel;
+    return 0xffffffffu;
 }
 
 @compute @workgroup_size(64)
@@ -276,26 +209,26 @@ fn classify_count(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     // `metadata.z` is the visibility raster's Lit/Stylized selector
     // (`0`/`1`), or `0xffffffff` when the material has no region mask.
-    let response_class = material_class(header, metadata.z);
-    let shading_class = response_bucket_for_execution(header, metadata.z);
+    let identity = execution_identity(header, metadata.z);
+    let response_kind = material_response_kind(header, identity);
+    let shading_class = response_bucket_for_execution(header, identity);
     if shading_class >= params.class_count {
         pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 0xffffffffu, 8u);
         atomicAdd(&diagnostics[2], 1u);
         return;
     }
-    if response_class == 0xffffffffu || shading_class == 0xffffffffu {
+    if response_kind == 0xffffffffu || shading_class == 0xffffffffu {
         pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 0xffffffffu, 8u);
         atomicAdd(&diagnostics[2], 1u);
         return;
     }
-    // The response class is carried per work item for the finite implementation
-    // switch; it is not part of the bucket identity and therefore does not
-    // constrain the dynamic table cardinality.
+    // The program kind selects a compiled builtin or registered entry. Lobe
+    // combinations never change the execution identity or bucket cardinality.
     pixels[pixel] = PixelClass(
         shading_class,
         0xffffffffu,
         material_index,
-        response_class,
+        response_kind,
         header.feature_flags,
     );
     atomicAdd(&class_counts[shading_class], 1u);
@@ -332,7 +265,7 @@ fn scatter_work(@builtin(global_invocation_id) id: vec3<u32>) {
         pixel,
         record.material_index,
         record.shading_class,
-        record.response_class,
+        record.response_kind,
         record.flags,
     );
     pixels[pixel].work_index = destination;

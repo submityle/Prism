@@ -52,6 +52,7 @@ mod prepare;
 mod resources;
 #[cfg(test)]
 mod shader_tests;
+mod spray_history;
 mod surface_caustics;
 mod surface_draw;
 mod surface_froxel;
@@ -89,3 +90,4 @@ pub use authoring::{
     RiverControlPoint, RiverPreset, ShallowWaterPreset,
 };
 pub use body::WaterBody;
+pub use spray_history::{SprayFeedbackGrid, WaterSpraySource};

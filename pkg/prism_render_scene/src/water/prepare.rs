@@ -41,6 +41,9 @@ pub(crate) fn prepare_water_bodies(
     extracted: Res<ExtractedWater>,
     pipelines: Option<Res<WaterComputePipelines>>,
     device: Res<RenderDevice>,
+    scene_fabric: Res<crate::gpu::fabric::SceneFabric>,
+    mut spray_history: ResMut<super::spray_history::SprayHistory>,
+    spray_pipelines: Option<Res<super::spray_history::SprayPipelines>>,
 ) {
     bodies.bodies.clear();
 
@@ -51,7 +54,8 @@ pub(crate) fn prepare_water_bodies(
         return;
     };
 
-    for body in &extracted.bodies {
+    spray_history.begin_frame(&extracted.entities);
+    for (index, body) in extracted.bodies.iter().enumerate() {
         let plan = prepare(&body.as_extract());
         if plan.dispatches.is_empty() {
             continue;
@@ -67,13 +71,24 @@ pub(crate) fn prepare_water_bodies(
         let shading = surface_draw
             .as_ref()
             .map_or(WaterShadingPlan::default(), |draw| draw.shading.plan);
-        let fabric = WaterFabricPlan::for_shading(shading);
-        bodies.bodies.push(WaterGpuBody::new(
+        let water_fabric = WaterFabricPlan::for_shading(shading);
+        let mut resident = WaterGpuBody::new(
             buffers,
             bind_groups,
             plan.dispatches,
             surface_draw,
-            fabric,
-        ));
+            water_fabric,
+        );
+        if let Some(spray_pipelines) = spray_pipelines.as_deref() {
+            resident.spray = spray_history.prepare(
+                extracted.entities[index],
+                body,
+                &resident.buffers,
+                &device,
+                spray_pipelines,
+                &scene_fabric,
+            );
+        }
+        bodies.bodies.push(resident);
     }
 }

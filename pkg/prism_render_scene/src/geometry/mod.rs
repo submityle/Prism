@@ -1,5 +1,6 @@
 mod bindings;
 mod buffers;
+mod consumer;
 mod mesh_adapter;
 pub(crate) mod rows;
 mod runtime;
@@ -11,6 +12,8 @@ mod systems;
 
 pub use bindings::GeometryBindGroup;
 pub use runtime::RenderGeometryRegistry;
+
+pub(crate) use consumer::select_render_mesh;
 pub use shading::{
     build_shading_geometry, RenderShadingGeometry, RenderShadingGeometryHeader,
     RenderShadingPrimitive, RenderShadingVertex, ShadingGeometryBuildError,

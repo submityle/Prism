@@ -1,8 +1,8 @@
 //! Compute pipeline + bind-group layouts for the shading-resolve pass.
 //!
 //! The resolve entry point (`shaders/shading_resolve.wesl`) is dispatched once
-//! per [`MaterialShadingClass`](prism_render_shading::MaterialShadingClass)
-//! with an indirect argument buffer.  It reads four bind groups:
+//! per [`ResponseBucketKey`](prism_render_shading::ResponseBucketKey)
+//! with an indirect argument buffer. It reads eight bind groups:
 //!
 //! * **group 0** — visibility inputs + the HDR storage-texture output.  Owned
 //!   here because it is unique to this pass.
@@ -19,12 +19,15 @@
 //!   layout so each fragment iterates only the punctual lights assigned to its
 //!   froxel instead of the whole scene.  Falls back to the full light list when
 //!   a neutral single-cluster grid is bound.
+//! * **group 6** — virtual-shadow-map resources and their disabled fallbacks.
+//! * **group 7** — area lights and the independent shade-cache consumer ABI.
+//!   They share a physical group to stay within the eight-group device limit.
 //!
 //! Reusing the material/light *layout descriptors* (rather than re-declaring
 //! them) guarantees the resolve pipeline and those bind groups can never drift
 //! out of sync.
 
-use bevy_asset::{load_embedded_asset, Handle};
+use bevy_asset::{Assets, Handle};
 use bevy_ecs::prelude::*;
 use bevy_material::{
     bind_group_layout_entries::{
@@ -50,6 +53,7 @@ use bevy_shader::{Shader, ShaderDefVal};
 use bytemuck::Zeroable;
 
 use super::super::texel_cache::gpu::atlas::SHADE_ATLAS_FORMAT;
+use crate::material::runtime::RenderMaterialRegistry;
 use crate::shading::texel_cache::{GpuShadeChartInfo, GpuShadePageLookup, GpuShadeResolvePage};
 use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 
@@ -58,11 +62,12 @@ use super::super::shadow::ShadowBindGroup;
 use super::super::area_light::GpuAreaLight;
 use super::super::resources::{MOTION_VECTOR_FORMAT, SCENE_COLOR_FORMAT};
 use super::abi::GpuShadingResolveParams;
+use super::registered_source;
 
-/// Compute pipeline and the two owned bind-group layouts for the resolve pass.
+/// Compute pipeline and the four owned bind-group layouts for the resolve pass.
 #[derive(Resource)]
 pub(crate) struct ShadingResolvePipeline {
-    /// `shading_resolve` compute entry point, specialized against all four
+    /// `shading_resolve` compute entry point, specialized against all eight
     /// group layouts and the 32-byte immediate block.
     pub(crate) resolve: CachedComputePipelineId,
     /// group 0: visibility ids/metadata textures + HDR storage-texture output.
@@ -110,14 +115,22 @@ pub(crate) struct ShadingResolvePipeline {
     /// Fallback 1x1 `Rgba32Float` `LTC` amplitude LUT (identity amplitude texel)
     /// bound when no real `AreaLightLtcLut` is resident.
     pub(crate) area_dummy_amp: TextureView,
-    /// group 8: independent P3 shade-cache lookup, page metadata, chart
-    /// parameterisation, atlas and enable/count uniform.
-    pub(crate) shade_cache_layout: BindGroupLayout,
     pub(crate) shade_cache_dummy_lookup: Buffer,
     pub(crate) shade_cache_dummy_page_table: Buffer,
     pub(crate) shade_cache_dummy_pages: Buffer,
     pub(crate) shade_cache_dummy_charts: Buffer,
     pub(crate) shade_cache_dummy_atlas: TextureView,
+    /// The bind-group descriptor list used to queue the current resolve PSO.
+    /// Keeping the descriptors beside the cached pipeline lets a newly
+    /// installed execution table relink only the shader module without
+    /// rebuilding any resident layouts or fallback resources.
+    pub(crate) layout_descriptors: [BindGroupLayoutDescriptor; 8],
+    /// Shader module for the currently linked execution table.
+    pub(crate) shader: Handle<Shader>,
+    /// Whether the material group uses binding arrays on this device.
+    pub(crate) bindless: bool,
+    /// Execution-table version captured when `resolve` was queued.
+    pub(crate) execution_table_version: u32,
 }
 
 /// Builds the group-0 layout entries:
@@ -245,36 +258,28 @@ fn vsm_layout_entries() -> BindGroupLayoutEntries<4> {
     )
 }
 
-/// Builds the group-7 layout entries for the polygonal area lights:
+/// Builds the shared group-7 layout for area lights and the shade-cache consumer:
 ///
 /// 0. the per-frame `GpuAreaLight` storage array (read-only), and
-/// 1-2. the two baked `LTC` `Rgba32Float` coefficient LUTs.
+/// 1-2. the two baked `LTC` `Rgba32Float` coefficient LUTs,
+/// 3-6. independent shade-cache lookup, writer page table, page and chart buffers,
+/// 7. the shade-cache atlas, and
+/// 8. the shade-cache enable/count uniform.
 ///
 /// The LUTs are declared non-filterable: the resolve twin fetches them with a
 /// manual bilinear `textureLoad` because the device may lack the optional
 /// `FLOAT32_FILTERABLE` feature a linear `Rgba32Float` sampler would need.
 /// `None` min-binding-size keeps the layout agnostic to the array length; the
 /// shader guards every index with `arrayLength`.
-fn area_light_layout_entries() -> BindGroupLayoutEntries<3> {
+/// The cache keeps its independent buffers and metadata ABI; only the physical
+/// group changes. A ninth group would exceed Metal's eight-group device limit.
+fn area_light_layout_entries() -> BindGroupLayoutEntries<9> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
             storage_buffer_read_only_sized(false, None),
             texture_2d(TextureSampleType::Float { filterable: false }),
             texture_2d(TextureSampleType::Float { filterable: false }),
-        ),
-    )
-}
-
-/// Builds the independent P3 shade-cache consumer layout.
-///
-/// The page lookup, physical writer table, and chart/page metadata remain
-/// separate buffers so neither the Material-VT ABI nor the writer's four-word
-/// page entry can be mistaken for the resolve contract.
-fn shade_cache_layout_entries() -> BindGroupLayoutEntries<6> {
-    BindGroupLayoutEntries::sequential(
-        ShaderStages::COMPUTE,
-        (
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
@@ -283,6 +288,130 @@ fn shade_cache_layout_entries() -> BindGroupLayoutEntries<6> {
             uniform_buffer_sized(false, None),
         ),
     )
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use bevy_render::render_resource::{BindingType, BufferBindingType, TextureViewDimension};
+
+    #[test]
+    fn resolve_auxiliary_layout_matches_shader_bindings() {
+        let entries = area_light_layout_entries();
+        let shader = include_str!("../../shaders/shading_resolve.wesl");
+        let names = [
+            "area_lights",
+            "area_light_ltc_coeffs",
+            "area_light_ltc_amp",
+            "shade_page_lookup",
+            "shade_page_table",
+            "shade_resolve_pages",
+            "shade_chart_infos",
+            "shade_atlas",
+            "shade_cache_params",
+        ];
+        for (index, (entry, name)) in entries.iter().zip(names).enumerate() {
+            assert_eq!(entry.binding, index as u32);
+            assert_eq!(entry.visibility, ShaderStages::COMPUTE);
+            assert_eq!(entry.count, None);
+            let (ty, qualifier) = match index {
+                0 | 3..=6 => (
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    "<storage, read>",
+                ),
+                1 | 2 | 7 => (
+                    BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    "",
+                ),
+                8 => (
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    "<uniform>",
+                ),
+                _ => unreachable!(),
+            };
+            assert_eq!(entry.ty, ty, "binding {index}: {name}");
+            assert!(shader.contains(&format!(
+                "@group(7) @binding({index}) var{qualifier} {name}:"
+            )));
+        }
+    }
+
+    #[test]
+    fn resolve_shader_and_dispatch_stay_within_eight_groups() {
+        let shader = include_str!("../../shaders/shading_resolve.wesl");
+        let mut bindings = std::collections::BTreeSet::new();
+        for declaration in shader
+            .lines()
+            .filter_map(|line| line.strip_prefix("@group("))
+        {
+            let (group, rest) = declaration.split_once(") @binding(").unwrap();
+            let group: u32 = group.parse().unwrap();
+            let binding: u32 = rest.split_once(')').unwrap().0.parse().unwrap();
+            assert!(group < 8, "resolve needs a ninth bind group: {group}");
+            assert!(
+                bindings.insert((group, binding)),
+                "duplicate shader binding"
+            );
+        }
+        assert_eq!(
+            bindings
+                .iter()
+                .filter(|(group, _)| *group == 7)
+                .copied()
+                .collect::<Vec<_>>(),
+            (0..9).map(|binding| (7, binding)).collect::<Vec<_>>()
+        );
+
+        let dispatch = include_str!("dispatch.rs");
+        let groups: Vec<u32> = dispatch
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pass.set_bind_group("))
+            .map(|args| args.split_once(',').unwrap().0.parse().unwrap())
+            .collect();
+        assert_eq!(groups, (0..8).collect::<Vec<_>>());
+
+        // Preparation must bind the same sequence as the shader/host layout.
+        let preparation = include_str!("bind_groups.rs");
+        let packed = preparation
+            .split_once("let area = device.create_bind_group(")
+            .unwrap()
+            .1;
+        let packed = packed.split_once(")),").unwrap().0;
+        let actual: Vec<&str> = packed
+            .split_once("BindGroupEntries::sequential((")
+            .unwrap()
+            .1
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                "area_lights_binding,",
+                "area_coeffs,",
+                "area_amp,",
+                "cache_lookup,",
+                "cache_page_table,",
+                "cache_pages,",
+                "cache_charts,",
+                "cache_atlas,",
+                "cache_params_buffer.as_entire_binding(),",
+            ]
+        );
+    }
 }
 
 /// Builds a 1x1 `Rgba32Float` fallback `LTC` LUT view carrying one identity
@@ -326,7 +455,8 @@ pub(crate) fn init_shading_resolve_pipeline(
     light_bindings: Res<LightBindGroup>,
     shadow_bindings: Res<ShadowBindGroup>,
     cluster_bindings: Res<ClusterBindGroup>,
-    asset_server: Res<bevy_asset::AssetServer>,
+    materials: Res<RenderMaterialRegistry>,
+    mut shaders: ResMut<Assets<Shader>>,
     queue: Res<RenderQueue>,
 ) {
     let view_entries = view_layout_entries();
@@ -342,11 +472,6 @@ pub(crate) fn init_shading_resolve_pipeline(
     let area_descriptor =
         BindGroupLayoutDescriptor::new("prism resolve area lights", &area_entries);
     let area_layout = device.create_bind_group_layout("prism resolve area lights", &area_entries);
-    let shade_cache_entries = shade_cache_layout_entries();
-    let shade_cache_descriptor =
-        BindGroupLayoutDescriptor::new("prism resolve shade cache", &shade_cache_entries);
-    let shade_cache_layout =
-        device.create_bind_group_layout("prism resolve shade cache", &shade_cache_entries);
 
     // Fallback VSM resources bound when a view has no resident page table /
     // physical atlas (feature off, or the upload bridge / raster fill has not
@@ -482,34 +607,38 @@ pub(crate) fn init_shading_resolve_pipeline(
     });
     let shade_cache_dummy_atlas =
         shade_cache_dummy_texture.create_view(&TextureViewDescriptor::default());
-    let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "../shaders/shading_resolve.wesl");
+    let modules = materials
+        .registry
+        .execution_tables()
+        .map(registered_source::catalogue)
+        .transpose()
+        .unwrap_or_else(|error| panic!("invalid registered response catalogue: {error:?}"))
+        .unwrap_or_default();
+    let linked_source =
+        registered_source::link(include_str!("../../shaders/shading_resolve.wesl"), &modules)
+            .unwrap_or_else(|error| panic!("failed to link registered response shader: {error:?}"));
+    let shader: Handle<Shader> = shaders.add(Shader::from_wesl(
+        linked_source,
+        "embedded://prism_render_scene/shaders/shading_resolve_linked.wesl",
+    ));
 
-    let resolve = cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("prism shading resolve".into()),
-        layout: vec![
-            view_descriptor,
-            material_bindings.layout_descriptor.clone(),
-            scene_descriptor,
-            light_bindings.layout_descriptor.clone(),
-            shadow_bindings.layout_descriptor.clone(),
-            cluster_bindings.layout_descriptor.clone(),
-            // group 6: virtual-shadow-map sample bindings.
-            vsm_descriptor,
-            // group 7: polygonal area lights (LTC) storage array + two LUTs.
-            area_descriptor,
-            // group 8: independent P3 shade-cache consumer resources.
-            shade_cache_descriptor,
-        ],
-        immediate_size: size_of::<GpuShadingResolveParams>() as u32,
-        shader,
-        shader_defs: vec![ShaderDefVal::Bool(
-            "MATERIAL_BINDLESS".into(),
-            material_bindings.bindless(),
-        )],
-        entry_point: Some("shading_resolve".into()),
-        ..Default::default()
-    });
+    // Keep the physical group budget explicit: adding a ninth descriptor must
+    // not silently make the pipeline unconstructible on eight-group devices.
+    let layout_descriptors: [BindGroupLayoutDescriptor; 8] = [
+        view_descriptor,
+        material_bindings.layout_descriptor.clone(),
+        scene_descriptor,
+        light_bindings.layout_descriptor.clone(),
+        shadow_bindings.layout_descriptor.clone(),
+        cluster_bindings.layout_descriptor.clone(),
+        // group 6: virtual-shadow-map sample bindings.
+        vsm_descriptor,
+        // group 7: area lights (bindings 0..2) + shade cache (3..8).
+        area_descriptor,
+    ];
+    let layout = layout_descriptors.clone();
+    let resolve =
+        queue_resolve_pipeline(&cache, layout, shader.clone(), material_bindings.bindless());
 
     commands.insert_resource(ShadingResolvePipeline {
         resolve,
@@ -525,11 +654,73 @@ pub(crate) fn init_shading_resolve_pipeline(
         area_dummy_lights,
         area_dummy_coeffs,
         area_dummy_amp,
-        shade_cache_layout,
         shade_cache_dummy_lookup,
         shade_cache_dummy_page_table,
         shade_cache_dummy_pages,
         shade_cache_dummy_charts,
         shade_cache_dummy_atlas,
+        layout_descriptors,
+        shader,
+        bindless: material_bindings.bindless(),
+        execution_table_version: materials.registry.execution_table_version(),
     });
+}
+
+fn queue_resolve_pipeline(
+    cache: &PipelineCache,
+    layout: [BindGroupLayoutDescriptor; 8],
+    shader: Handle<Shader>,
+    bindless: bool,
+) -> CachedComputePipelineId {
+    cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism shading resolve".into()),
+        layout: layout.into(),
+        immediate_size: size_of::<GpuShadingResolveParams>() as u32,
+        shader,
+        shader_defs: vec![ShaderDefVal::Bool("MATERIAL_BINDLESS".into(), bindless)],
+        entry_point: Some("shading_resolve".into()),
+        ..Default::default()
+    })
+}
+
+/// Re-links the finite registered-response switch when execution tables change.
+/// The hot path only observes the new cached pipeline id; bind-group layouts and
+/// fallback resources remain resident, so a material-table update costs one
+/// cold shader link and never leaves the resolve pass using an older ABI.
+pub(crate) fn refresh_shading_resolve_pipeline(
+    materials: Res<RenderMaterialRegistry>,
+    cache: Res<PipelineCache>,
+    mut shaders: ResMut<Assets<Shader>>,
+    mut pipeline: ResMut<ShadingResolvePipeline>,
+) {
+    let version = materials.registry.execution_table_version();
+    if version == pipeline.execution_table_version {
+        return;
+    }
+    let modules = materials
+        .registry
+        .execution_tables()
+        .map(registered_source::catalogue)
+        .transpose()
+        .unwrap_or_else(|error| panic!("invalid registered response catalogue: {error:?}"))
+        .unwrap_or_default();
+    let linked_source =
+        registered_source::link(include_str!("../../shaders/shading_resolve.wesl"), &modules)
+            .unwrap_or_else(|error| {
+                panic!("failed to relink registered response shader: {error:?}")
+            });
+    let shader = shaders.add(Shader::from_wesl(
+        linked_source,
+        format!("embedded://prism_render_scene/shaders/shading_resolve_linked_{version}.wesl"),
+    ));
+    pipeline.resolve = queue_resolve_pipeline(
+        &cache,
+        pipeline.layout_descriptors.clone(),
+        shader.clone(),
+        // The layout is fixed for the lifetime of the render device. The
+        // existing shader was queued with the same bindless choice.
+        pipeline.bindless,
+    );
+    pipeline.shader = shader;
+    pipeline.execution_table_version = version;
 }

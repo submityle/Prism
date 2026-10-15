@@ -58,3 +58,11 @@ workspace = true
 [[test]]
 name = "resident_composition_gpu"
 path = "text/integration/resident_composition_gpu.rs"
+
+[[test]]
+name = "material_classification_gpu"
+path = "text/integration/material_classification_gpu.rs"
+
+[[test]]
+name = "brdf_channels_gpu"
+path = "text/integration/brdf_channels_gpu.rs"

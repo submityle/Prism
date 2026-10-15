@@ -20,7 +20,11 @@ use bevy_render::{
     },
 };
 
-use crate::{buffers::GpuSceneBindGroup, GpuSceneInstanceAddress, MaterialBindGroup};
+use crate::{
+    buffers::GpuSceneBindGroup, geometry::select_render_mesh, GpuSceneInstanceAddress,
+    MaterialBindGroup, RenderGeometryRegistry,
+};
+use prism_render_architecture::geometry::MeshConsumer;
 
 use super::phase::TransparentOit3d;
 
@@ -106,6 +110,7 @@ impl RenderCommand<TransparentOit3d> for DrawOitMesh {
         SRes<RenderAssets<RenderMesh>>,
         SRes<RenderMeshInstances>,
         SRes<MeshAllocator>,
+        SRes<RenderGeometryRegistry>,
     );
     type ViewQuery = ();
     type ItemQuery = &'static GpuSceneInstanceAddress;
@@ -113,18 +118,22 @@ impl RenderCommand<TransparentOit3d> for DrawOitMesh {
         item: &TransparentOit3d,
         _: (),
         address: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        (meshes, instances, allocator): SystemParamItem<'w, '_, Self::Param>,
+        (meshes, instances, allocator, geometry): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let meshes = meshes.into_inner();
         let instances = instances.into_inner();
         let allocator = allocator.into_inner();
+        let geometry = geometry.into_inner();
         let Some(address) = address else {
             return RenderCommandResult::Skip;
         };
         let Some(mesh_id) = instances.mesh_asset_id(item.main_entity()) else {
             return RenderCommandResult::Skip;
         };
+        if select_render_mesh(geometry, mesh_id, MeshConsumer::MainView, 0).is_err() {
+            return RenderCommandResult::Skip;
+        }
         let Some(mesh) = meshes.get(mesh_id) else {
             return RenderCommandResult::Skip;
         };

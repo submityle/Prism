@@ -648,8 +648,11 @@ impl WaterBodyGpuBuffers {
         let foam_in = zeroed_storage(device, "prism water foam in", foam_bytes);
         let foam_u = zeroed_storage(device, "prism water foam u", foam_bytes);
         let foam_v = zeroed_storage(device, "prism water foam v", foam_bytes);
-        let foam_sources =
-            read_only_storage(device, "prism water foam sources", upload.foam_sources);
+        // The particle service writes lagged feedback into this same input.
+        // Empty authored sources still need the full declared grid, not one scalar.
+        let mut source_values = upload.foam_sources.to_vec();
+        source_values.resize(upload.foam_cells as usize, 0.0);
+        let foam_sources = read_only_storage(device, "prism water foam sources", &source_values);
         let foam_out = zeroed_storage(device, "prism water foam out", foam_bytes);
         let foam_params = uniform(device, "prism water foam params", &upload.foam_params);
 

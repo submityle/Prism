@@ -126,7 +126,8 @@ use super::{
     },
     resolve::{
         dispatch_shading_resolve, init_shading_resolve_pipeline, prepare_resolve_motion,
-        prepare_shading_resolve_bind_groups, ResolveMotionHistory,
+        prepare_shading_resolve_bind_groups, refresh_shading_resolve_pipeline,
+        ResolveMotionHistory,
     },
     resources::{prepare_shading_buffers, prepare_visibility_buffers},
     runtime::{
@@ -656,6 +657,10 @@ impl Plugin for PrismShadingPlugin {
                         .after(sky_multiscatter_lut_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
+            )
+            .add_systems(
+                Render,
+                refresh_shading_resolve_pipeline.in_set(RenderSystems::PrepareResources),
             )
             .add_systems(
                 Render,

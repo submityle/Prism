@@ -18,7 +18,13 @@ use bevy_asset::{uuid::Uuid, AssetId};
 use bevy_shader::{
     Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ShaderDefVal, ValidateShader,
 };
-use prism_render_material::GpuMaterialTexture;
+use prism_render_architecture::{
+    abi::{AbiHash, AbiVersion},
+    shader_package::{ShaderPackageId, ShaderPackageManifest},
+};
+use prism_render_material::{
+    response_source::RESPONSE_FUNCTION_ABI, CompiledEntry, GpuMaterialTexture,
+};
 use std::mem::{offset_of, size_of};
 
 const MATERIAL_TEXTURE_FIELDS: [(&str, &str); 8] = [
@@ -621,64 +627,115 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             )
         });
     }
+
+    // Compile the exact linked sources used by RenderStartup as well. The
+    // empty table proves the no-registered-program path remains valid; the
+    // finite entry proves generated function names, variant dispatch and the
+    // complete registered-response ABI type-check against production imports.
+    let empty_linked =
+        super::registered_source::link(include_str!("../../shaders/shading_resolve.wesl"), &[])
+            .expect("empty registered-response link must succeed");
+    let empty_linked_id = shader_id(0x5052_4953_4d5f_524c_4e4d_0000_0001);
+    cache.set_shader(
+        empty_linked_id,
+        Shader::from_wesl(
+            empty_linked,
+            "embedded://prism_render_scene/shaders/shading_resolve_linked_empty.wesl",
+        ),
+    );
+    cache
+        .get(2, empty_linked_id, &[])
+        .expect("empty registered-response resolve must compile");
+
+    let manifest = ShaderPackageManifest {
+        id: ShaderPackageId::new("resolve-linked-test"),
+        source_revision: "shader-tests".into(),
+        entry_point: "main".into(),
+        abi_version: AbiVersion::from_parts(1, 0),
+        abi_hash: AbiHash::from_bytes(RESPONSE_FUNCTION_ABI.as_bytes()),
+        permutation_count: 2,
+    };
+    let compiled = CompiledEntry::from_response_wgsl(
+        manifest,
+        vec![
+            "return RegisteredResponse(vec3<f32>(1.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), 1.0);".into(),
+            "return RegisteredResponse(vec3<f32>(0.0), vec3<f32>(1.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), 1.0);".into(),
+        ],
+    )
+    .expect("test registered response must compile as a standalone package");
+    let module = super::registered_source::RegisteredModule {
+        program_id: 17,
+        compiled: &compiled,
+    };
+    let linked = super::registered_source::link(
+        include_str!("../../shaders/shading_resolve.wesl"),
+        &[module],
+    )
+    .expect("finite registered-response link must succeed");
+    let linked_id = shader_id(0x5052_4953_4d5f_524c_4e4d_0000_0002);
+    cache.set_shader(
+        linked_id,
+        Shader::from_wesl(
+            linked,
+            "embedded://prism_render_scene/shaders/shading_resolve_linked_test.wesl",
+        ),
+    );
+    for (id, defs, label) in [
+        (3, &[][..], "finite non-bindless"),
+        (
+            4,
+            &[ShaderDefVal::Bool("MATERIAL_BINDLESS".into(), true)][..],
+            "finite bindless",
+        ),
+    ] {
+        cache
+            .get(id, linked_id, defs)
+            .unwrap_or_else(|error| panic!("{label} registered-response resolve failed: {error}"));
+    }
 }
 
-/// The shading-class switch is the WESL-side dispatch table for the finite
-/// CPU `MaterialShadingClass` domain.  Compilation alone cannot catch a new
-/// class constant that is declared but never routed, so keep the constants,
-/// switch arms, and fallback mechanically tied together here.
+/// Lobe combinations must not project back onto an exclusive implementation.
 #[test]
-fn shading_resolve_switch_covers_every_registered_shading_class() {
+fn shading_resolve_dispatches_program_kinds_without_lobe_classes() {
     let source = include_str!("../../shaders/shading_resolve.wesl");
-    let classes = [
-        ("PRINCIPLED", "shade_principled("),
-        ("UNLIT", "surface.base_color + surface.emissive"),
-        ("SUBSURFACE", "shade_subsurface("),
-        ("CLEARCOAT", "shade_clearcoat("),
-        ("CLOTH", "shade_cloth("),
-        ("HAIR", "shade_hair("),
-        ("WATER", "shade_water("),
-        ("NPR", "shade_toon("),
-        ("CUSTOM", "shade_principled("),
-    ];
-
-    // Classification now dispatches by the runtime bucket id and the resolve
-    // shader maps that id through the immutable bucket table before selecting
-    // the finite legacy implementation arm.
-    assert!(source.contains("let response_class = item.response_class"));
-    assert!(source.contains("switch response_class"));
-    for (name, implementation) in classes {
-        let constant = format!("const SHADING_CLASS_{name}:");
-        let arm = format!("case SHADING_CLASS_{name}:");
-        assert!(
-            source.contains(&constant),
-            "missing shading-class constant {name}"
-        );
-        assert!(
-            source.contains(&arm),
-            "missing shading-class switch arm {name}"
-        );
-        assert!(
-            source.contains(implementation),
-            "missing implementation for {name}"
-        );
+    assert!(source.contains("let response_kind = item.response_kind"));
+    assert!(source.contains("switch response_kind"));
+    for name in ["LIT", "NPR", "UNLIT", "REGISTERED"] {
+        assert!(source.contains(&format!("const RESPONSE_{name}:")));
+        assert!(source.contains(&format!("case RESPONSE_{name}:")));
     }
-    assert!(
-        source.contains("default:"),
-        "unknown classes need a loud-safe fallback arm"
-    );
+    assert!(source.contains("evaluated = shade_principled("));
+    assert!(source.contains("material_header.render_domain == 3u"));
+    assert!(source.contains("default: { return; }"));
+    assert!(!source.contains("SHADING_CLASS_"));
+    assert!(!source.contains("MaterialShadingClass"));
+    assert!(!source.contains("switch material_header.closure_mask"));
+}
+
+#[test]
+fn response_channels_are_produced_at_the_integrator_source() {
+    let source = include_str!("../../shaders/shading_resolve.wesl");
+    assert!(source.contains("reflected = reflected + channels.direct"));
+    assert!(source.contains("transmitted = transmitted + channels.transmission"));
+    assert!(source.contains("evaluated.transmission.x"));
+    assert!(source.contains("response_indirect_diffuse = vec3<f32>(0.0)"));
+    assert!(source.contains("response_reflection = vec3<f32>(0.0)"));
+    assert!(source.contains("clamp(surface.geometry_opacity, 0.0, 1.0)"));
+    assert!(!source.contains("color - indirect - emissive"));
+    assert!(!source.contains("custom_variant_gain"));
+    assert!(!source.contains("custom_variant_tint"));
 }
 
 #[test]
 fn shading_resolve_declares_the_independent_shade_cache_consumer_contract() {
     let source = include_str!("../../shaders/shading_resolve.wesl");
     for declaration in [
-        "@group(8) @binding(0)",
-        "@group(8) @binding(1)",
-        "@group(8) @binding(2)",
-        "@group(8) @binding(3)",
-        "@group(8) @binding(4)",
-        "@group(8) @binding(5)",
+        "@group(7) @binding(3) var<storage, read> shade_page_lookup:",
+        "@group(7) @binding(4) var<storage, read> shade_page_table:",
+        "@group(7) @binding(5) var<storage, read> shade_resolve_pages:",
+        "@group(7) @binding(6) var<storage, read> shade_chart_infos:",
+        "@group(7) @binding(7) var shade_atlas:",
+        "@group(7) @binding(8) var<uniform> shade_cache_params:",
         "fn shade_find_chart(",
         "fn shade_find_page(",
         "fn shade_cache_sample(",

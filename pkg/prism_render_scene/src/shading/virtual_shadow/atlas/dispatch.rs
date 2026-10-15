@@ -61,7 +61,11 @@ use bevy_render::{
     renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
 };
 
-use crate::{buffers::GpuSceneBindGroup, ExtractedSceneInstance, GpuSceneInstanceAddress};
+use crate::{
+    buffers::GpuSceneBindGroup, geometry::select_render_mesh, ExtractedSceneInstance,
+    GpuSceneInstanceAddress, RenderGeometryRegistry,
+};
+use prism_render_architecture::geometry::MeshConsumer;
 
 use super::abi::GpuVsmCasterDepthView;
 use super::pipeline::{
@@ -92,6 +96,7 @@ pub(crate) fn queue_vsm_caster_depth(
     meshes: Res<RenderAssets<RenderMesh>>,
     render_instances: Res<RenderMeshInstances>,
     scene_instances: Query<(&GpuSceneInstanceAddress, &ExtractedSceneInstance)>,
+    geometry: Res<RenderGeometryRegistry>,
     mut draw_list: ResMut<VsmCasterDepthDrawList>,
 ) {
     draw_list.clear();
@@ -102,6 +107,9 @@ pub(crate) fn queue_vsm_caster_depth(
         let Some(mesh_id) = render_instances.mesh_asset_id(instance.main_entity) else {
             continue;
         };
+        if select_render_mesh(&geometry, mesh_id, MeshConsumer::Shadow, 0).is_err() {
+            continue;
+        }
         let Some(mesh) = meshes.get(mesh_id) else {
             continue;
         };
@@ -246,6 +254,7 @@ pub(crate) fn vsm_caster_depth_pass(
     meshes: Res<RenderAssets<RenderMesh>>,
     render_instances: Res<RenderMeshInstances>,
     allocator: Res<MeshAllocator>,
+    geometry: Res<RenderGeometryRegistry>,
     mut ctx: RenderContext,
 ) {
     if !settings.enable_virtual_shadow {
@@ -327,6 +336,9 @@ pub(crate) fn vsm_caster_depth_pass(
             let Some(mesh_id) = render_instances.mesh_asset_id(draw.main_entity) else {
                 continue;
             };
+            if select_render_mesh(&geometry, mesh_id, MeshConsumer::Shadow, 0).is_err() {
+                continue;
+            }
             let Some(mesh) = meshes.get(mesh_id) else {
                 continue;
             };

@@ -2,7 +2,7 @@
 //!
 //! The material (group 1) and light (group 3) bind groups already live on the
 //! shared [`MaterialBindGroup`]/[`LightBindGroup`] resources, so this stage only
-//! builds the two pass-owned groups:
+//! builds the four pass-owned groups:
 //!
 //! * **group 0** — the two visibility textures, the HDR storage-texture output
 //!   and the screen-space GTAO input (all sourced from the view), the two
@@ -12,8 +12,10 @@
 //! * **group 2** — the per-view compacted worklist ([`ViewShadingBuffers`])
 //!   spliced together with the render-world scene-instance and
 //!   shading-geometry tables.
+//! * **group 6** — virtual-shadow-map resources or disabled fallbacks.
+//! * **group 7** — area-light and independent shade-cache resources or fallbacks.
 //!
-//! Both groups are cleared to `None` (by dropping the component) unless every
+//! These groups are cleared (by dropping the component) unless every
 //! upstream buffer is resident, so [`super::dispatch`] can treat a present
 //! [`ViewResolveBindGroups`] as "safe to record".
 
@@ -77,7 +79,7 @@ pub(crate) struct ViewResolveVsmPageTable {
     pub(crate) slot_count: u32,
 }
 
-/// The pass-owned bind groups (group 0 + group 2 + group 6) for one view.
+/// The pass-owned bind groups (groups 0, 2, 6 and 7) for one view.
 ///
 /// Present only when every backing buffer/texture is resident; its absence is
 /// the dispatch node's signal to skip the view this frame.
@@ -91,15 +93,10 @@ pub(crate) struct ViewResolveBindGroups {
     /// [`GpuVsmResolveParams`] uniform. Always built with real or fallback
     /// resources so the pipeline's group 6 is bound every dispatch.
     pub(crate) vsm: BindGroup,
-    /// group 7: polygonal area lights (`LTC`). The storage array plus the two
-    /// baked `LTC`-`LUT` textures (coeffs + amplitude). Always built with real
-    /// or pipeline-owned dummy resources so the pipeline's group 7 is bound
-    /// every dispatch; the shader skips degenerate records when the subsystem
-    /// is off.
+    /// group 7: area lights (`LTC`) at bindings 0..2 and the independent P3
+    /// shade-cache consumer at 3..8. Always built with real or disabled fallback
+    /// resources; physical packing does not couple the two enable states.
     pub(crate) area: BindGroup,
-    /// group 8: independent P3 shade-cache lookup/page/chart metadata and
-    /// atlas. Always bound with real or disabled fallback resources.
-    pub(crate) shade_cache: BindGroup,
 }
 
 /// `PrepareBindGroups` system building [`ViewResolveBindGroups`] for every view
@@ -328,14 +325,8 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                 &pipeline.area_dummy_amp,
             ),
         };
-        let area = device.create_bind_group(
-            "prism resolve area lights",
-            &pipeline.area_layout,
-            &BindGroupEntries::sequential((area_lights_binding, area_coeffs, area_amp)),
-        );
-
-        // group 8: independent P3 shade-cache resources. The disabled fallback
-        // is a complete, format-correct bind group; the shader additionally
+        // group 7, bindings 3..8: independent P3 shade-cache resources. The
+        // disabled fallback is complete and format-correct; the shader additionally
         // checks the explicit enabled/count uniform before reading it.
         let cache_binding = shade_cache.binding();
         let cache_params = GpuShadeCacheResolveParams {
@@ -374,10 +365,13 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         let cache_atlas = cache_binding
             .as_ref()
             .map_or(&pipeline.shade_cache_dummy_atlas, |value| &value.atlas);
-        let shade_cache = device.create_bind_group(
-            "prism resolve shade cache",
-            &pipeline.shade_cache_layout,
+        let area = device.create_bind_group(
+            "prism resolve area lights and shade cache",
+            &pipeline.area_layout,
             &BindGroupEntries::sequential((
+                area_lights_binding,
+                area_coeffs,
+                area_amp,
                 cache_lookup,
                 cache_page_table,
                 cache_pages,
@@ -392,7 +386,6 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
             scene: scene_group,
             vsm,
             area,
-            shade_cache,
         });
     }
 }

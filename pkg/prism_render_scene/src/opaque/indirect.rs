@@ -10,7 +10,10 @@ use bevy_render::{
     render_phase::{PhaseItem, RenderCommand, RenderCommandResult, TrackedRenderPass},
 };
 
-use crate::{visibility::runtime::UnifiedVisibilityState, GpuSceneInstanceAddress, RenderGpuScene};
+use crate::{
+    visibility::runtime::UnifiedVisibilityState, GpuSceneInstanceAddress, RenderGeometryRegistry,
+    RenderGpuScene,
+};
 
 const INDEXED_COMMAND_SIZE: u64 =
     size_of::<bevy_render::render_resource::DrawIndexedIndirectArgs>() as u64;
@@ -24,6 +27,7 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
         SRes<RenderAssets<RenderMesh>>,
         SRes<RenderMeshInstances>,
         SRes<MeshAllocator>,
+        SRes<RenderGeometryRegistry>,
         SRes<UnifiedVisibilityState>,
         SRes<super::GpuSceneOpaqueIndirectEnabled>,
         SRes<crate::visibility::runtime::UnifiedVisibilityEnabled>,
@@ -42,6 +46,7 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
             meshes,
             instances,
             allocator,
+            geometry,
             visibility,
             enabled,
             visibility_enabled,
@@ -64,6 +69,7 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
                 meshes.into_inner(),
                 instances.into_inner(),
                 allocator.into_inner(),
+                geometry.into_inner(),
                 pass,
             );
         }
@@ -84,6 +90,7 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
                 meshes.into_inner(),
                 instances.into_inner(),
                 allocator.into_inner(),
+                geometry.into_inner(),
                 pass,
             );
         }
@@ -100,10 +107,21 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
         let meshes = meshes.into_inner();
         let instances = instances.into_inner();
         let allocator = allocator.into_inner();
+        let geometry = geometry.into_inner();
         let buffers = buffers.into_inner();
         let Some(mesh_id) = instances.mesh_asset_id(item.main_entity()) else {
             return RenderCommandResult::Skip;
         };
+        if super::super::geometry::select_render_mesh(
+            geometry,
+            mesh_id,
+            prism_render_architecture::geometry::MeshConsumer::MainView,
+            0,
+        )
+        .is_err()
+        {
+            return RenderCommandResult::Skip;
+        }
         let Some(mesh) = meshes.get(mesh_id) else {
             return RenderCommandResult::Skip;
         };

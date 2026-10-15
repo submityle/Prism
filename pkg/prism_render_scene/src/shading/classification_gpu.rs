@@ -23,8 +23,6 @@ use bevy_render::{
 use bevy_shader::Shader;
 use bytemuck::{Pod, Zeroable};
 
-use prism_render_shading::LEGACY_SHADING_CLASS_COUNT;
-
 pub const CLASSIFICATION_WORKGROUP_SIZE: u32 = 64;
 
 #[repr(C)]
@@ -33,7 +31,7 @@ pub(crate) struct GpuShadingBucket {
     pub execution_family: u32,
     pub program_id: u32,
     pub render_phase: u32,
-    pub legacy_class: u32,
+    pub reserved: u32,
 }
 
 #[cfg(test)]
@@ -56,7 +54,7 @@ pub(crate) struct GpuShadingPixelClass {
     pub class: u32,
     pub work_index: u32,
     pub material_index: u32,
-    pub response_class: u32,
+    pub response_kind: u32,
     pub flags: u32,
 }
 
@@ -77,13 +75,11 @@ pub(crate) const fn classification_dispatch(pixel_count: u32) -> GpuShadingDispa
 }
 
 #[cfg(test)]
-fn class_prefix_sum(
-    counts: [u32; LEGACY_SHADING_CLASS_COUNT],
-) -> ([u32; LEGACY_SHADING_CLASS_COUNT], u32) {
-    let mut offsets = [0; LEGACY_SHADING_CLASS_COUNT];
+fn class_prefix_sum(counts: &[u32]) -> (Vec<u32>, u32) {
+    let mut offsets = vec![0; counts.len()];
     let mut cursor = 0_u32;
     let mut index = 0;
-    while index < LEGACY_SHADING_CLASS_COUNT {
+    while index < counts.len() {
         offsets[index] = cursor;
         cursor = cursor.saturating_add(counts[index]);
         index += 1;
@@ -312,15 +308,17 @@ mod tests {
 
     #[test]
     fn prefix_sum_is_contiguous_and_bounded() {
-        let mut counts = [0; LEGACY_SHADING_CLASS_COUNT];
+        let mut counts = vec![0; 37];
+        counts[36] = 5;
         counts[0] = 3;
         counts[2] = 4;
-        let (offsets, total) = class_prefix_sum(counts);
+        let (offsets, total) = class_prefix_sum(&counts);
         assert_eq!(offsets[0], 0);
         assert_eq!(offsets[1], 3);
         assert_eq!(offsets[2], 3);
         assert_eq!(offsets[3], 7);
-        assert_eq!(total, 7);
+        assert_eq!(offsets[36], 7);
+        assert_eq!(total, 12);
     }
 
     #[test]

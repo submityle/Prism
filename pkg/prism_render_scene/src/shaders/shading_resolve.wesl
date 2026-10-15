@@ -2,7 +2,7 @@
 //!
 //! This is the terminal stage of the visibility -> classify -> shade chain.
 //! `material_classification.wesl` has already bucketed every covered pixel into
-//! a per-`MaterialShadingClass` worklist (`work[class_offsets[class] + local]`)
+//! a per-response-bucket worklist (`work[class_offsets[class] + local]`)
 //! and written the per-class indirect dispatch arguments.  This shader is
 //! dispatched once per class with those indirect args; each invocation drains
 //! one work item, reconstructs the surface, evaluates the lighting for its
@@ -41,6 +41,7 @@ import prism_render_scene::shaders::brdf::{
     dielectric_f0,
     principled_direct,
     principled_direct_with,
+    principled_direct_channels_with,
     principled_pre,
     stylized_direct,
     face_shadow_light_cosines,
@@ -87,7 +88,8 @@ import prism_render_scene::shaders::material::{
     PrismSurfaceParameters,
 };
 import prism_render_scene::shaders::material_unpack::{
-    prism_unpack_surface, prism_packed_word_count, prism_neutral_surface
+    prism_unpack_surface, prism_packed_word_count, prism_neutral_surface,
+    PRISM_LOBE_SUBSURFACE
 };
 import prism_render_scene::shaders::gpu_scene::{
     GpuSceneInstance,
@@ -123,21 +125,44 @@ import bevy_render::maths::affine3_to_square;
 // follow all `import`s.
 enable wgpu_binding_array;
 
+// The render-startup linker replaces this exact seam with the finite registered
+// response ABI and switch table. The embedded source keeps a type-correct,
+// unreachable invalid implementation so shader/import tests can compile the
+// builtin-only pipeline before any user package is installed.
+// PRISM_REGISTERED_RESPONSE_BEGIN
+fn registered_response(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    geometry: SurfaceSampleGeometry,
+    parameters: PrismSurfaceParameters,
+    header: PrismMaterialHeader,
+    indirect: IndirectResult,
+    view_position: vec3<f32>,
+    pixel: vec2<u32>,
+    screen_size: vec2<u32>,
+    frame_index: u32,
+    program_id: u32,
+    permutation_low: u32,
+    permutation_high: u32,
+) -> ResponseOutput {
+    var invalid: ResponseOutput;
+    invalid.words = array<f32, 16>(
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    );
+    return invalid;
+}
+// PRISM_REGISTERED_RESPONSE_END
+
 // Sentinel packed into the visibility targets for uncovered pixels. Matches
 // `VisibilityPixel::is_valid` on the CPU side.
 const VISIBILITY_BACKGROUND: u32 = 0xffffffffu;
 
-// `MaterialShadingClass` discriminants, mirroring the Rust enum in
-// `prism_render_shading`. Each is handled by an explicit `switch` arm below.
-const SHADING_CLASS_PRINCIPLED: u32 = 0u;
-const SHADING_CLASS_UNLIT: u32 = 1u;
-const SHADING_CLASS_SUBSURFACE: u32 = 2u;
-const SHADING_CLASS_CLEARCOAT: u32 = 3u;
-const SHADING_CLASS_CLOTH: u32 = 4u;
-const SHADING_CLASS_HAIR: u32 = 5u;
-const SHADING_CLASS_WATER: u32 = 6u;
-const SHADING_CLASS_NPR: u32 = 7u;
-const SHADING_CLASS_CUSTOM: u32 = 8u;
+// Response kinds mirror the generated execution program rows.
+const RESPONSE_LIT: u32 = 0u;
+const RESPONSE_NPR: u32 = 1u;
+const RESPONSE_UNLIT: u32 = 2u;
+const RESPONSE_REGISTERED: u32 = 3u;
 
 // Semantic tag (mirrors `material_sample.wesl`) marking the baked face
 // shadow SDF map so the toon integrator can find it by scanning the
@@ -178,7 +203,7 @@ struct WorkItem {
     pixel_index: u32,
     material_index: u32,
     shading_class: u32,
-    response_class: u32,
+    response_kind: u32,
     flags: u32,
 }
 
@@ -186,7 +211,7 @@ struct ResponseBucket {
     execution_family: u32,
     program_id: u32,
     render_phase: u32,
-    legacy_class: u32,
+    reserved: u32,
 }
 
 // Structured response ABI. The CPU/GPU composition path stores five RGB
@@ -776,6 +801,7 @@ fn clustered_punctual_direct_irradiance(
 // occlusion the composite reuses to weight the SSR reflection identically.
 struct IndirectResult {
     total: vec3<f32>,
+    diffuse: vec3<f32>,
     env_specular: vec3<f32>,
     spec_weight: vec3<f32>,
     // Pre-albedo diffuse *irradiance* term (the diffuse half of `total` divided
@@ -812,6 +838,7 @@ fn ambient_indirect(surface: SurfaceSample, frame: ShadingFrame, env: LightEnvir
 
     var out: IndirectResult;
     out.total = diffuse;
+    out.diffuse = diffuse;
     out.env_specular = vec3<f32>(0.0);
     out.spec_weight = spec_weight;
     // Pre-albedo ambient the SSGI gather blends misses toward: `env.ambient`
@@ -845,6 +872,7 @@ fn image_based_sh(surface: SurfaceSample, frame: ShadingFrame, env: LightEnviron
 
     var out: IndirectResult;
     out.total = diffuse * occlusion + env_specular;
+    out.diffuse = diffuse * occlusion;
     out.env_specular = env_specular;
     out.spec_weight = spec_weight;
     // Pre-albedo ambient: the cosine-convolved SH irradiance over PI, occluded.
@@ -901,6 +929,7 @@ fn image_based_prefiltered(
 
     var out: IndirectResult;
     out.total = diffuse * occlusion + env_specular;
+    out.diffuse = diffuse * occlusion;
     out.env_specular = env_specular;
     out.spec_weight = spec_weight;
     // Pre-albedo ambient: identical diffuse lobe to the SH path.
@@ -950,7 +979,7 @@ struct AreaLight {
 @group(7) @binding(1) var area_light_ltc_coeffs: texture_2d<f32>;
 @group(7) @binding(2) var area_light_ltc_amp: texture_2d<f32>;
 
-// --- group 8: independent P3 object/texture-space shade cache ---
+// --- group 7, bindings 3..8: independent P3 object/texture-space shade cache ---
 //
 // This ABI is intentionally separate from Material-VT. The page lookup is
 // key-sorted, the writer page table carries generation/epoch proof, chart rows
@@ -1016,12 +1045,12 @@ struct ShadeCacheResolveParams {
     padding2: u32,
 }
 
-@group(8) @binding(0) var<storage, read> shade_page_lookup: array<ShadePageLookup>;
-@group(8) @binding(1) var<storage, read> shade_page_table: array<ShadePageEntry>;
-@group(8) @binding(2) var<storage, read> shade_resolve_pages: array<ShadeResolvePage>;
-@group(8) @binding(3) var<storage, read> shade_chart_infos: array<ShadeChartInfo>;
-@group(8) @binding(4) var shade_atlas: texture_2d<f32>;
-@group(8) @binding(5) var<uniform> shade_cache_params: ShadeCacheResolveParams;
+@group(7) @binding(3) var<storage, read> shade_page_lookup: array<ShadePageLookup>;
+@group(7) @binding(4) var<storage, read> shade_page_table: array<ShadePageEntry>;
+@group(7) @binding(5) var<storage, read> shade_resolve_pages: array<ShadeResolvePage>;
+@group(7) @binding(6) var<storage, read> shade_chart_infos: array<ShadeChartInfo>;
+@group(7) @binding(7) var shade_atlas: texture_2d<f32>;
+@group(7) @binding(8) var<uniform> shade_cache_params: ShadeCacheResolveParams;
 
 // Near-parallel edge directions span zero solid angle (golden `MIN_SIN`).
 const AL_MIN_SIN: f32 = 1.0e-7;
@@ -1424,6 +1453,12 @@ fn rect_representative_sample(world_position: vec3<f32>, normal_in: vec3<f32>, l
     return out;
 }
 
+struct DirectResponse {
+    radiance: vec3<f32>,
+    direct: vec3<f32>,
+    transmission: vec3<f32>,
+}
+
 // Physically based integrator shared by every lit closure. Accumulates the
 // principled GGX lobe over all analytic lights, then adds the indirect and
 // emissive terms exactly once. Mirrors the CPU `_ =>` principled branch.
@@ -1439,8 +1474,10 @@ fn shade_principled(
     // material binds none) and its authored (weight, phi_d, scale).
     measured_slot: u32,
     measured_params: vec4<f32>,
-) -> vec3<f32> {
+) -> DirectResponse {
     var accumulated = vec3<f32>(0.0);
+    var reflected = vec3<f32>(0.0);
+    var transmitted = vec3<f32>(0.0);
     // The view- and material-only albedo terms are identical for every light, so
     // they are computed **once per pixel** and threaded into each per-light
     // evaluation instead of being recomputed per light. Mirrors
@@ -1451,9 +1488,12 @@ fn shade_principled(
     for (var i = 0u; i < directional_total; i = i + 1u) {
         let sample = sample_directional_shadowed(i, frame, world_position);
         let direct = to_direct_sample(sample);
-        accumulated = accumulated + principled_direct_with(lit, frame, direct, pre);
+        let channels = principled_direct_channels_with(lit, frame, direct, pre);
+        accumulated = accumulated + channels.radiance;
+        reflected = reflected + channels.direct;
+        transmitted = transmitted + channels.transmission;
         if measured_slot != 0xFFFFFFFFu && measured_params.x > 0.0 {
-            accumulated = accumulated + measured_params.w * measured_direct(
+            let measured = measured_params.w * measured_direct(
                 measured_slot,
                 measured_params.y,
                 measured_params.z,
@@ -1461,6 +1501,8 @@ fn shade_principled(
                 frame,
                 direct,
             );
+            accumulated = accumulated + measured;
+            reflected = reflected + measured;
         }
     }
 
@@ -1479,9 +1521,12 @@ fn shade_principled(
             continue;
         }
         let direct = to_direct_sample(sample);
-        accumulated = accumulated + principled_direct_with(lit, frame, direct, pre);
+        let channels = principled_direct_channels_with(lit, frame, direct, pre);
+        accumulated = accumulated + channels.radiance;
+        reflected = reflected + channels.direct;
+        transmitted = transmitted + channels.transmission;
         if measured_slot != 0xFFFFFFFFu && measured_params.x > 0.0 {
-            accumulated = accumulated + measured_params.w * measured_direct(
+            let measured = measured_params.w * measured_direct(
                 measured_slot,
                 measured_params.y,
                 measured_params.z,
@@ -1489,64 +1534,15 @@ fn shade_principled(
                 frame,
                 direct,
             );
+            accumulated = accumulated + measured;
+            reflected = reflected + measured;
         }
     }
 
-    accumulated = accumulated + accumulate_area_lights(lit, frame, world_position);
-    return accumulated + indirect + emissive;
-}
-
-// Registered Custom response evaluator. The package/program identity remains
-// data in the execution table; this stable evaluator ABI derives a bounded
-// variant from the program id and checked permutation coordinate without
-// growing the material permutation key or introducing dynamic function calls.
-fn custom_variant_unit(seed: u32, salt: u32) -> f32 {
-    let mixed = seed + salt * 2654435761u;
-    return f32(mixed & 255u) / 255.0;
-}
-
-fn custom_variant_gain(program_id: u32, permutation_low: u32, permutation_high: u32) -> f32 {
-    let seed = program_id * 1664525u + permutation_low + permutation_high * 1013904223u;
-    return 0.75 + custom_variant_unit(seed, 27u) * 0.50;
-}
-
-fn custom_variant_tint(program_id: u32, permutation_low: u32, permutation_high: u32) -> vec3<f32> {
-    let seed = program_id * 1664525u + permutation_low + permutation_high * 1013904223u;
-    return vec3<f32>(
-        0.85 + custom_variant_unit(seed, 3u) * 0.30,
-        0.85 + custom_variant_unit(seed, 11u) * 0.30,
-        0.85 + custom_variant_unit(seed, 19u) * 0.30,
-    );
-}
-
-fn shade_custom(
-    lit: SurfaceSample,
-    frame: ShadingFrame,
-    world_position: vec3<f32>,
-    indirect: vec3<f32>,
-    emissive: vec3<f32>,
-    env: LightEnvironment,
-    slice: ClusterSlice,
-    measured_slot: u32,
-    measured_params: vec4<f32>,
-    program_id: u32,
-    permutation_low: u32,
-    permutation_high: u32,
-) -> vec3<f32> {
-    let base = shade_principled(
-        lit,
-        frame,
-        world_position,
-        indirect,
-        emissive,
-        env,
-        slice,
-        measured_slot,
-        measured_params,
-    );
-    let gain = custom_variant_gain(program_id, permutation_low, permutation_high);
-    let tint = custom_variant_tint(program_id, permutation_low, permutation_high);
-    return base * tint * gain;
+    let area = accumulate_area_lights(lit, frame, world_position);
+    accumulated = accumulated + area;
+    reflected = reflected + area;
+    return DirectResponse(accumulated + indirect + emissive, reflected, transmitted);
 }
 
 // Head-frame face-shadow inputs threaded into the toon integrator. `active`
@@ -1621,7 +1617,7 @@ fn face_shadow_sample_sdf(tex_offset: u32, tex_count: u32, uv: vec2<f32>) -> f32
 }
 
 // Non-photoreal integrator: the quantized toon lobe over every analytic light,
-// plus indirect and emissive. Mirrors the CPU `MaterialShadingClass::Npr` arm.
+// plus indirect and emissive. Mirrors the CPU builtin Npr arm.
 fn stylized_for_material(base: StylizedParams, parameters: PrismSurfaceParameters) -> StylizedParams {
     var result = base;
     result.ramp_softness = result.ramp_softness * parameters.npr_stylized_ramp_softness;
@@ -1640,7 +1636,7 @@ fn shade_toon(
     slice: ClusterSlice,
     parameters: PrismSurfaceParameters,
     face: FaceShadow,
-) -> vec3<f32> {
+) -> DirectResponse {
     var accumulated = vec3<f32>(0.0);
     let stylized = stylized_for_material(env.stylized, parameters);
 
@@ -1691,11 +1687,11 @@ fn shade_toon(
         accumulated = accumulated + stylized_direct(lit, frame, area_sample, stylized);
     }
 
-    return accumulated + indirect + emissive;
+    return DirectResponse(accumulated + indirect + emissive, accumulated, vec3<f32>(0.0));
 }
 
 // Cloth integrator: the fabric lobe over every analytic light, plus indirect
-// and emissive. Mirrors the CPU `MaterialShadingClass::Cloth` arm.
+// and emissive. Mirrors the CPU Lit fuzz lobe arm.
 fn shade_cloth(
     lit: SurfaceSample,
     frame: ShadingFrame,
@@ -1797,7 +1793,7 @@ fn shade_hair(
     emissive: vec3<f32>,
     env: LightEnvironment,
     slice: ClusterSlice,
-) -> vec3<f32> {
+) -> DirectResponse {
     var accumulated = vec3<f32>(0.0);
     // The view- and material-only albedo terms are identical for every light, so
     // they are computed **once per pixel** and threaded into each per-light
@@ -1837,11 +1833,11 @@ fn shade_hair(
         accumulated = accumulated + hair_direct(lit, frame, area_sample);
     }
 
-    return accumulated + indirect + emissive;
+    return DirectResponse(accumulated + indirect + emissive, accumulated, vec3<f32>(0.0));
 }
 
 // Water integrator: the single-layer water lobe over every analytic light,
-// plus indirect and emissive. Mirrors the CPU `MaterialShadingClass::Water`
+// plus indirect and emissive. Mirrors the CPU Lit water feature
 // arm; the Fresnel split routes energy between the surface glint and the
 // Beer-Lambert-absorbed refracted body.
 fn shade_water(
@@ -1852,7 +1848,7 @@ fn shade_water(
     emissive: vec3<f32>,
     env: LightEnvironment,
     slice: ClusterSlice,
-) -> vec3<f32> {
+) -> DirectResponse {
     var accumulated = vec3<f32>(0.0);
     // The view- and material-only albedo terms are identical for every light, so
     // they are computed **once per pixel** and threaded into each per-light
@@ -1892,7 +1888,7 @@ fn shade_water(
         accumulated = accumulated + water_direct(lit, frame, area_sample);
     }
 
-    return accumulated + indirect + emissive;
+    return DirectResponse(accumulated + indirect + emissive, accumulated, vec3<f32>(0.0));
 }
 
 fn shade_clearcoat(
@@ -1938,17 +1934,14 @@ fn shade_clearcoat(
     return accumulated + indirect + emissive;
 }
 
-fn shade_cache_channel_for_class(shading_class: u32) -> u32 {
-    if shading_class == SHADING_CLASS_NPR {
-        return 1u;
+fn shade_cache_channel_for_response(response_kind: u32, lobe_mask: u32) -> u32 {
+    if response_kind == RESPONSE_NPR { return 1u; }
+    // Cache content is a lobe concern, never an execution/bucket identity.
+    if response_kind == RESPONSE_LIT {
+        if (lobe_mask & PRISM_LOBE_SUBSURFACE) != 0u { return 2u; }
+        return 0u;
     }
-    if shading_class == SHADING_CLASS_SUBSURFACE {
-        return 2u;
-    }
-    if shading_class == SHADING_CLASS_UNLIT {
-        return 0xffffffffu;
-    }
-    return 0u;
+    return 0xffffffffu;
 }
 
 fn shade_chart_key_less(
@@ -2089,12 +2082,13 @@ fn shade_cache_sample(
     material_epoch_high: u32,
     face: u32,
     uv: vec2<f32>,
-    shading_class: u32,
+    response_kind: u32,
+    lobe_mask: u32,
 ) -> vec4<f32> {
     if shade_cache_params.enabled == 0u || shade_cache_params.page_count == 0u {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-    let channel = shade_cache_channel_for_class(shading_class);
+    let channel = shade_cache_channel_for_response(response_kind, lobe_mask);
     if channel == 0xffffffffu || face > 0xffffu {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
@@ -2205,8 +2199,8 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     if item.shading_class != params.shading_class {
         return;
     }
-    let response_class = item.response_class;
-    if response_class == 0xffffffffu || response_class > SHADING_CLASS_CUSTOM {
+    let response_kind = item.response_kind;
+    if response_kind > RESPONSE_REGISTERED {
         return;
     }
 
@@ -2565,7 +2559,8 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         material_header.material_epoch_high,
         primitive_index,
         geometry.uv,
-        response_class,
+        response_kind,
+        material_header.lobe_mask,
     );
     if cached_irradiance.w > 0.5 {
         let occlusion = clamp(lit.ambient_occlusion, 0.0, 1.0);
@@ -2574,13 +2569,13 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         let current_diffuse = diffuse_albedo * indirect_result.ambient_irradiance;
         let cached_diffuse = diffuse_albedo * cached_ambient;
         indirect = indirect - current_diffuse + cached_diffuse;
+        indirect_result.diffuse = indirect_result.diffuse - current_diffuse + cached_diffuse;
         indirect_result.ambient_irradiance = cached_ambient;
     }
 
-    // Explicit per-class dispatch. Subsurface/clearcoat/cloth/hair/water now
-    // run dedicated closures; only custom still shares the principled
-    // integrator, and each keeps its own arm so a real closure drops in
-    // independently.
+    // Program dispatch is independent of active lobe combinations. Builtin
+    // Lit evaluates the full layered response; domain implementations remain
+    // internal to that response rather than creating runtime material classes.
     let slice = resolve_cluster_slice(geometry.position, u32(coord.x), u32(coord.y));
     // §17.6 measured lobe: resolve the table row once per pixel and hand the
     // integrator its slot plus the authored (weight, phi_d, scale). An unbound
@@ -2610,40 +2605,35 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     if params.shading_class < arrayLength(&response_buckets) {
         response_program_id = response_buckets[params.shading_class].program_id;
     }
-    var color: vec3<f32>;
-    switch response_class {
-        case SHADING_CLASS_PRINCIPLED: {
-            color = shade_principled(
-                lit,
-                frame,
-                geometry.position,
-                indirect,
-                emissive,
-                env,
-                slice,
-                measured_slot,
-                measured_params,
-            );
+    var evaluated: DirectResponse;
+    var response_indirect_diffuse = indirect_result.diffuse;
+    var response_reflection = indirect_result.env_specular;
+    switch response_kind {
+        case RESPONSE_LIT: {
+            if material_header.render_domain == 3u {
+                evaluated = shade_hair(lit, frame, geometry.position, indirect, emissive, env, slice);
+            } else if (material_header.feature_flags & (1u << 8u)) != 0u {
+                evaluated = shade_water(lit, frame, geometry.position, indirect, emissive, env, slice);
+            } else {
+                evaluated = shade_principled(
+                    lit,
+                    frame,
+                    geometry.position,
+                    indirect,
+                    emissive,
+                    env,
+                    slice,
+                    measured_slot,
+                    measured_params,
+                );
+            }
         }
-        case SHADING_CLASS_UNLIT: {
-            color = surface.base_color + surface.emissive;
+        case RESPONSE_UNLIT: {
+            evaluated = DirectResponse(surface.base_color + emissive, surface.base_color, vec3<f32>(0.0));
+            response_indirect_diffuse = vec3<f32>(0.0);
+            response_reflection = vec3<f32>(0.0);
         }
-        case SHADING_CLASS_SUBSURFACE: {
-            color = shade_subsurface(lit, frame, geometry.position, indirect, emissive, env, slice);
-        }
-        case SHADING_CLASS_CLEARCOAT: {
-            color = shade_clearcoat(lit, frame, geometry.position, indirect, emissive, env, slice);
-        }
-        case SHADING_CLASS_CLOTH: {
-            color = shade_cloth(lit, frame, geometry.position, indirect, emissive, env, slice);
-        }
-        case SHADING_CLASS_HAIR: {
-            color = shade_hair(lit, frame, geometry.position, indirect, emissive, env, slice);
-        }
-        case SHADING_CLASS_WATER: {
-            color = shade_water(lit, frame, geometry.position, indirect, emissive, env, slice);
-        }
-        case SHADING_CLASS_NPR: {
+        case RESPONSE_NPR: {
             var face = face_shadow_disabled();
             if (material_header.feature_flags & MATERIAL_FEATURE_FACE_SHADOW) != 0u {
                 face.enabled = 1u;
@@ -2655,66 +2645,55 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
                 face.tex_count = material_header.texture_count;
                 face.uv = geometry.uv;
             }
-            color = shade_toon(lit, frame, geometry.position, indirect, emissive, env, slice, parameters, face);
+            evaluated = shade_toon(lit, frame, geometry.position, indirect, emissive, env, slice, parameters, face);
         }
-        case SHADING_CLASS_CUSTOM: {
-            color = shade_custom(
-                lit,
+        case RESPONSE_REGISTERED: {
+            let registered = registered_response(
+                surface,
                 frame,
-                geometry.position,
-                indirect,
-                emissive,
-                env,
-                slice,
-                measured_slot,
-                measured_params,
+                geometry,
+                parameters,
+                material_header,
+                indirect_result,
+                params.view_position.xyz,
+                vec2<u32>(u32(coord.x), u32(coord.y)),
+                vec2<u32>(params.width, params.height),
+                params.frame_index,
                 response_program_id,
                 material_header.execution_permutation_low,
                 material_header.execution_permutation_high,
             );
+            if item.pixel_index < arrayLength(&response_left) {
+                response_left[item.pixel_index] = registered;
+            }
+            textureStore(scene_color, coord, vec4<f32>(
+                registered.words[12], registered.words[13], registered.words[14], 1.0));
+            return;
         }
-        default: {
-            color = shade_principled(
-                lit,
-                frame,
-                geometry.position,
-                indirect,
-                emissive,
-                env,
-                slice,
-                measured_slot,
-                measured_params,
-            );
-        }
+        default: { return; }
     }
 
-    // Produce the structured response alongside the legacy HDR store. The
-    // current resolve computes one aggregate radiance, so the decomposition is
-    // conservative: direct is the residual after indirect and emission,
-    // reflection is the independently tracked environment specular, and the
-    // transmission arm remains zero until a dedicated transmission transport
-    // term is available. The five arms still sum exactly to the legacy color.
-    let response_reflection = indirect_result.env_specular;
-    let response_indirect_diffuse = indirect - response_reflection;
-    let response_direct = color - indirect - emissive;
+    // Each contribution is accumulated at its source. In particular Unlit
+    // exports no lighting channels and transmission is not folded into direct.
+    let color = evaluated.radiance;
     var response: ResponseOutput;
     response.words = array<f32, 16>(
-        response_direct.x,
-        response_direct.y,
-        response_direct.z,
+        evaluated.direct.x,
+        evaluated.direct.y,
+        evaluated.direct.z,
         response_indirect_diffuse.x,
         response_indirect_diffuse.y,
         response_indirect_diffuse.z,
         response_reflection.x,
         response_reflection.y,
         response_reflection.z,
-        0.0,
-        0.0,
-        0.0,
+        evaluated.transmission.x,
+        evaluated.transmission.y,
+        evaluated.transmission.z,
         emissive.x,
         emissive.y,
         emissive.z,
-        1.0,
+        clamp(surface.geometry_opacity, 0.0, 1.0),
     );
     if item.pixel_index < arrayLength(&response_left) {
         response_left[item.pixel_index] = response;
