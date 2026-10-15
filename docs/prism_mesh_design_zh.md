@@ -184,6 +184,16 @@ crates/bevy_mesh                      Bevy 接入与兼容路径；原生 Prism 
 - `prism_mesh::deformation` 与 `prism_render_app::DeformationCache` 已验证批量 Morph → 4/8 影响 LBS → 外部修正，包含 50,000 顶点 CPU/GPU 对照、历史失效与直接顶点绘制像素读回；该证据不替代全部运行时阴影/深度/RT 消费者的集成验收。
 - 本文把已验证契约、运行时降级、性能门槛和演进规则统一成可执行规格；代码实现以这些契约和测试作为唯一判定来源。
 
+本次 2026-10-15 复核在当前工作树重新执行了 Mesh 核心证据：
+`cargo test -p prism_mesh --lib --tests` 为 34 个库测试加 14 个集成测试全部通过；
+`cargo test -p prism_asset_build_core --lib` 为 134 项全部通过，其中包含 12 项静态 LOD 定向测试；
+Mesh、静态 LOD、RenderApp Mesh、RenderScene 几何适配和几何表相关 Rust 源文件的 `rustfmt --check` 全部通过。
+真实 GPU 复核在沙盒外执行 `PRISM_REQUIRE_GPU=1 cargo test -p prism_virtual_geometry_gpu --test cluster_vertex_pull_parity -- --nocapture`，
+1 项通过，确认 CLST v3 顶点拉取与 `Unorm8x4` 属性解码经过真实 Metal render pass 并完成颜色读回。
+RenderApp Mesh 过滤测试本次未进入测试阶段：当前并行工作树中的 Render Fabric 迁移在
+`pkg/prism_render_architecture/src/render_fabric/compile.rs:669` 与 `:671` 对 `ResourceId` 调用了不存在的
+`.expect()`；该编译错误不属于 Mesh 实现，也未被计入 Mesh 通过项。
+
 ## 6. 核心数据模型：一件 Mesh 是什么
 
 ### 6.1 三层身份
