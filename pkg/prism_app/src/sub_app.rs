@@ -30,9 +30,7 @@ use prism_ecs::world::World;
 
 use crate::time::{EngineClocks, TimeUpdateStrategy};
 
-use crate::schedule::{
-    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Startup, StateTransition, Update,
-};
+use crate::phase_order::{PhaseOrder, PhaseOrderError};
 use crate::sub_app_label::{BoxedSubAppLabel, SubAppLabel};
 
 /// The one-way simulation → sub-app data pump (design §9, §25.2).
@@ -62,6 +60,7 @@ pub struct SubApp {
     /// The ECS world this sub-app simulates. Its [`Schedules`] resource owns
     /// the phase schedules.
     pub world: World,
+    phase_order: PhaseOrder,
     /// The one-way extract steps pulling data in from the main world, run in
     /// order once per frame before [`update`](SubApp::update). Empty on the main
     /// sub-app and on any secondary sub-app that does not need to read the main
@@ -94,6 +93,7 @@ impl SubApp {
         world.init_resource::<Schedules>();
         Self {
             world,
+            phase_order: PhaseOrder::default(),
             extracts: Vec::new(),
             snapshot_history: None,
             #[cfg(feature = "std")]
@@ -165,7 +165,7 @@ impl SubApp {
 
     // Explicit run_schedule and fixed simulation remain complete; only the
     // variable-frame driver uses this opt-in budget gate.
-    fn run_frame_schedule(&mut self, label: impl ScheduleLabel) {
+    pub(crate) fn run_frame_schedule(&mut self, label: impl ScheduleLabel) {
         #[cfg(feature = "std")]
         if let Some(started) = self.frame_budget_started
             && let Some(policy) = self
@@ -262,12 +262,52 @@ impl SubApp {
         true
     }
 
-    /// Run the startup phases exactly once, in order
-    /// (`PreStartup → Startup → PostStartup`, design §7).
+    /// Insert `phase` immediately before `anchor` in its startup or frame
+    /// sequence, preserving all core phase order (design §7).
+    ///
+    /// Custom phases can anchor subsequent insertions. Existing schedules are
+    /// preserved; absent schedules are created empty. Duplicate phase labels
+    /// (including reserved core labels) are rejected before missing anchors,
+    /// without modifying either the order or schedules.
+    ///
+    /// Configure startup insertions before [`App::try_finish`](crate::App::try_finish):
+    /// inserting later does not replay startup. Fixed tick phases, fixed hooks,
+    /// and exit schedules have separate drivers and are not insertion anchors.
+    /// Use [`RunFixedMainLoop`](crate::RunFixedMainLoop) to bracket the fixed loop.
+    /// Custom phase timings use their concrete label's type name; values of the
+    /// same label type share a diagnostics name but remain distinct schedules.
+    pub fn insert_phase_before(
+        &mut self,
+        anchor: impl ScheduleLabel,
+        phase: impl ScheduleLabel + Clone,
+    ) -> Result<&mut Self, PhaseOrderError> {
+        self.phase_order
+            .insert(&mut self.world, anchor, phase, false)?;
+        Ok(self)
+    }
+
+    /// Insert `phase` immediately after `anchor`. See
+    /// [`insert_phase_before`](Self::insert_phase_before) for validation and
+    /// lifecycle rules. Repeated insertions after the same anchor place the
+    /// newest phase closest to it; anchor to the previous custom phase to append.
+    pub fn insert_phase_after(
+        &mut self,
+        anchor: impl ScheduleLabel,
+        phase: impl ScheduleLabel + Clone,
+    ) -> Result<&mut Self, PhaseOrderError> {
+        self.phase_order
+            .insert(&mut self.world, anchor, phase, true)?;
+        Ok(self)
+    }
+
+    /// Run the startup sequence in order, including inserted phases (design §7).
+    /// [`App::try_finish`](crate::App::try_finish) gates this to once; explicitly
+    /// calling this method runs the sequence each time.
     pub fn run_startup(&mut self) {
-        self.run_schedule(PreStartup);
-        self.run_schedule(Startup);
-        self.run_schedule(PostStartup);
+        for index in 0..self.phase_order.startup.len() {
+            let run = self.phase_order.startup[index].run.clone();
+            run(self);
+        }
     }
 
     // ---- time domain (design §24.9 / §25.4) -------------------------------
@@ -462,18 +502,13 @@ impl SubApp {
         }
     }
 
-    /// The plain, un-instrumented per-frame phase sequence (design §7). This is
-    /// the hot path when no [`FrameDiagnostics`](crate::diagnostics::FrameDiagnostics)
-    /// is installed, and the body the instrumented path mirrors.
+    /// Drive the shared frame order without timing (design §7).
     fn update_phases(&mut self) {
         crate::time::advance_time(&mut self.world);
-        self.run_frame_schedule(First);
-        crate::fixed::run_fixed_main_loop(&mut self.world);
-        self.run_frame_schedule(PreUpdate);
-        self.run_frame_schedule(StateTransition);
-        self.run_frame_schedule(Update);
-        self.run_frame_schedule(PostUpdate);
-        self.run_frame_schedule(Last);
+        for index in 0..self.phase_order.frame.len() {
+            let run = self.phase_order.frame[index].run.clone();
+            run(self);
+        }
     }
 
     /// The frame sequence wrapped in wall-clock timing, taken only when a
@@ -493,24 +528,9 @@ impl SubApp {
         }
         crate::time::advance_time(&mut self.world);
 
-        self.run_phase_timed(First, "First");
-
-        let fixed_start = Instant::now();
-        crate::fixed::run_fixed_main_loop(&mut self.world);
-        let fixed_elapsed = fixed_start.elapsed();
-        if let Some(diag) = self.world.get_resource_mut::<FrameDiagnostics>() {
-            diag.record_phase("RunFixedMainLoop", fixed_elapsed);
+        for index in 0..self.phase_order.frame.len() {
+            self.run_phase_timed(index);
         }
-        #[cfg(feature = "trace")]
-        if let Some(trace) = self.world.get_resource_mut::<crate::trace::PhaseTrace>() {
-            trace.record_phase("RunFixedMainLoop", fixed_elapsed);
-        }
-
-        self.run_phase_timed(PreUpdate, "PreUpdate");
-        self.run_phase_timed(StateTransition, "StateTransition");
-        self.run_phase_timed(Update, "Update");
-        self.run_phase_timed(PostUpdate, "PostUpdate");
-        self.run_phase_timed(Last, "Last");
 
         self.finish_frame_budget();
         let frame_elapsed = frame_start.elapsed();
@@ -526,19 +546,22 @@ impl SubApp {
     /// Run one phase schedule, recording its wall-clock duration into the
     /// present [`FrameDiagnostics`](crate::diagnostics::FrameDiagnostics).
     #[cfg(feature = "std")]
-    fn run_phase_timed(&mut self, label: impl ScheduleLabel, phase: &'static str) {
+    fn run_phase_timed(&mut self, index: usize) {
+        let phase = &self.phase_order.frame[index];
+        let name = phase.name;
+        let run = phase.run.clone();
         let start = std::time::Instant::now();
-        self.run_frame_schedule(label);
+        run(self);
         let elapsed = start.elapsed();
         if let Some(diag) = self
             .world
             .get_resource_mut::<crate::diagnostics::FrameDiagnostics>()
         {
-            diag.record_phase(phase, elapsed);
+            diag.record_phase(name, elapsed);
         }
         #[cfg(feature = "trace")]
         if let Some(trace) = self.world.get_resource_mut::<crate::trace::PhaseTrace>() {
-            trace.record_phase(phase, elapsed);
+            trace.record_phase(name, elapsed);
         }
     }
 }

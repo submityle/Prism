@@ -31,6 +31,7 @@ use crate::lifecycle::{
     AppLifecycle, DeviceLost, DeviceRestored, FocusChanged, LowMemory, Resumed, Suspended,
     WillRenderFirstFrame,
 };
+use crate::phase_order::PhaseOrderError;
 use crate::plugin::Plugin;
 use crate::plugin_group::PluginGroup;
 use crate::run_mode::RunMode;
@@ -294,6 +295,30 @@ impl App {
             .expect("schedule was just ensured to exist")
             .add_systems(systems);
         self
+    }
+
+    /// Insert `phase` immediately before `anchor` in the main sub-app's startup
+    /// or frame sequence (design §7). Creates an empty schedule when absent.
+    /// Configure startup insertions before [`try_finish`](Self::try_finish).
+    /// See [`SubApp::insert_phase_before`] for validation and timing rules.
+    pub fn insert_phase_before(
+        &mut self,
+        anchor: impl ScheduleLabel,
+        phase: impl ScheduleLabel + Clone,
+    ) -> Result<&mut Self, PhaseOrderError> {
+        self.sub_apps.main.insert_phase_before(anchor, phase)?;
+        Ok(self)
+    }
+
+    /// Insert `phase` immediately after `anchor` in the main sub-app's startup
+    /// or frame sequence. See [`SubApp::insert_phase_after`] for ordering rules.
+    pub fn insert_phase_after(
+        &mut self,
+        anchor: impl ScheduleLabel,
+        phase: impl ScheduleLabel + Clone,
+    ) -> Result<&mut Self, PhaseOrderError> {
+        self.sub_apps.main.insert_phase_after(anchor, phase)?;
+        Ok(self)
     }
 
     /// Insert a resource into the main world, returning `&mut self` for

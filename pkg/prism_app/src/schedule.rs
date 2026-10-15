@@ -27,18 +27,17 @@
 //! once per fixed step. The accumulator itself lives in `prism_time` (the
 //! single source of truth, design §25.1); this crate only drives it.
 //!
-//! # Honestly deferred
+//! # Dynamic phase insertion
 //!
-//! - **Dynamic phase insertion** (design §7: a plugin inserting a new phase
-//!   *before/after* a core one, which requires an ordered list of boxed phase
-//!   labels) is not yet possible through the public API:
-//!   [`World::run_schedule`](prism_ecs::world::World::run_schedule) only accepts a
-//!   *concrete* label and the boxed-label running path is `pub(crate)` inside
-//!   `prism_ecs`. M1 therefore drives the fixed core order via explicit
-//!   per-phase `run_schedule` calls; extensible phase ordering is tracked for a
-//!   later milestone and is documented as absent, not faked.
+//! [`App::insert_phase_before`](crate::App::insert_phase_before) and
+//! [`App::insert_phase_after`](crate::App::insert_phase_after) extend the startup
+//! or frame sequence relative to an existing label, preserving core order.
+//! [`RunFixedMainLoop`] anchors the native driver without changing fixed-step
+//! cadence. Secondary worlds use the equivalent [`SubApp`](crate::SubApp) APIs.
 
 use prism_ecs::schedule::ScheduleLabel;
+
+pub use crate::phase_order::RunFixedMainLoop;
 
 /// Define a zero-sized core-phase label type that auto-implements
 /// [`ScheduleLabel`] via the standard derives.
@@ -119,11 +118,8 @@ core_phase! {
 /// The startup phases, in run order. Driven exactly once by
 /// [`App::run`](crate::app::App::run) before the first frame.
 ///
-/// These are runtime markers for documentation and tests; the actual run is a
-/// straight-line sequence of concrete
-/// [`World::run_schedule`](prism_ecs::world::World::run_schedule) calls in
-/// [`SubApp::run_startup`](crate::sub_app::SubApp::run_startup) (labels are
-/// distinct types and cannot share one array).
+/// These name the built-in phases; inserted phases also run through
+/// [`SubApp::run_startup`](crate::sub_app::SubApp::run_startup).
 pub const STARTUP_PHASES: [&str; 3] = ["PreStartup", "Startup", "PostStartup"];
 
 /// The per-frame phases, in run order (design §7). `RunFixedMainLoop` is the
