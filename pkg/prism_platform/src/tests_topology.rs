@@ -103,16 +103,16 @@ fn numa_node_count_counts_distinct_nodes() {
 }
 
 #[test]
-fn detect_is_honest_about_being_unprobed() {
+fn detect_distinguishes_probed_from_fallback() {
     let t = CpuTopology::detect();
-    // At least one core, single flat node, all Unknown class, not probed.
+    // Live supported probes need not be single-node or homogeneous.
     assert!(t.logical_core_count() >= 1);
-    assert_eq!(t.numa_node_count(), 1);
-    assert!(!t.is_probed());
-    assert!(!t.is_hybrid());
-    assert!(t.cores().iter().all(|c| c.kind == CoreKind::Unknown));
-    // physical == logical count in the fallback (no SMT collapsing).
-    assert_eq!(t.physical_core_count(), t.logical_core_count());
+    if !t.is_probed() {
+        assert_eq!(t.numa_node_count(), 1);
+        assert!(!t.is_hybrid());
+        assert!(t.cores().iter().all(|c| c.kind == CoreKind::Unknown));
+        assert_eq!(t.physical_core_count(), t.logical_core_count());
+    }
 }
 
 #[test]

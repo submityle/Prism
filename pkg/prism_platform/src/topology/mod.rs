@@ -13,13 +13,10 @@
 //! - [`CpuTopology`] is *data only*. It is built with [`TopologyBuilder`] (used
 //!   by a real OS probe, by tests, or by any caller that already knows the
 //!   layout) and validated once so downstream code can trust it.
-//! - [`CpuTopology::detect`] returns a **best-effort** topology for the current
-//!   process. Under `std` it fills in the logical-core count and architecture;
-//!   it does **not** claim to know the `P`/`E` split, `SMT` siblings, `NUMA`
-//!   geometry, or cache domains, because those require per-OS syscalls that are
-//!   not wired yet. [`CpuTopology::is_probed`] reports whether the richer fields
-//!   are real (`true`) or the uniform fallback (`false`), so callers never
-//!   mistake "one flat node of unknown cores" for a genuine single-socket read.
+//! - [`CpuTopology::detect`] reads Linux sysfs and the calling thread's allowed
+//!   CPU list. Other platforms and failed probes explicitly report a uniform
+//!   fallback through [`CpuTopology::source`]. Optional capacity, cache and
+//!   distance data are never invented; see [`linux`] for the injectable probe.
 //!
 //! See [`qos`] for mapping engine lanes onto OS quality-of-service classes and
 //! [`power`] for the energy / thermal hooks that let a scheduler back off under
@@ -30,6 +27,42 @@ use core::fmt;
 
 pub mod power;
 pub mod qos;
+pub mod linux;
+
+/// Why a real topology could not be obtained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopologyFallback {
+    /// No native backend is implemented for this operating system.
+    UnsupportedPlatform,
+    /// The Linux files were unavailable, inconsistent, or changed mid-probe.
+    ProbeFailed,
+    /// Operating-system probing is unavailable without `std`.
+    NoStd,
+}
+
+/// Provenance of the topology, independent of optional metadata availability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopologySource {
+    /// A coherent Linux online/allowed CPU, SMT and NUMA sysfs snapshot.
+    LinuxSysfs,
+    /// Caller-supplied, validated data; not a live hardware probe.
+    Explicit,
+    /// Uniform unknown-class data, not a claim about physical geometry.
+    Fallback(TopologyFallback),
+}
+
+/// An OS-reported data or unified cache, restricted to available logical CPUs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopologyCache {
+    /// OS cache level (not restricted to L1/L2/L3).
+    pub level: u8,
+    /// Capacity in bytes.
+    pub size_bytes: u64,
+    /// Coherency line size in bytes.
+    pub line_bytes: u32,
+    /// Sorted OS logical CPU ids sharing the cache.
+    pub cores: Vec<u32>,
+}
 
 /// The performance class of a logical core on a hybrid (big.LITTLE / Intel
 /// hybrid) machine.
@@ -140,35 +173,79 @@ impl std::error::Error for TopologyError {}
 pub struct CpuTopology {
     cores: Vec<TopologyCore>,
     numa_node_count: u16,
-    probed: bool,
+    source: TopologySource,
+    distances: Option<Vec<Vec<u16>>>,
+    caches: Vec<TopologyCache>,
 }
 
 impl CpuTopology {
     /// Best-effort topology for the current process.
     ///
-    /// Under `std` this reports the real logical-core count (via
-    /// [`std::thread::available_parallelism`]) as a single flat `NUMA` node of
-    /// [`CoreKind::Unknown`] cores, each its own physical core and cache domain.
-    /// It makes **no** claim about the `P`/`E` split, `SMT` topology, `NUMA`
-    /// geometry, or cache sharing — those need per-OS syscalls that are not
-    /// wired yet, so [`CpuTopology::is_probed`] returns `false` here. Without
-    /// `std` it falls back to a single core.
+    /// Linux reads online CPUs intersected with the current thread's allowed
+    /// list, physical siblings and NUMA membership. Missing optional capacity,
+    /// distances or caches stay unknown. Probe errors and other OSes return
+    /// an explicitly marked fallback; use [`linux::probe`] for diagnostics.
+    /// Without `std` the fallback has one core. This does not bind memory or
+    /// pin threads, nor promise that CPU hotplug cannot occur after returning.
     #[must_use]
     pub fn detect() -> Self {
-        let count = logical_core_count().max(1);
+        #[cfg(all(feature = "std", any(target_os = "linux", target_os = "android")))]
+        {
+            linux::probe_or_fallback(|path| std::fs::read_to_string(path).ok(), logical_core_count())
+        }
+        #[cfg(not(all(feature = "std", any(target_os = "linux", target_os = "android"))))]
+        {
+            #[cfg(not(feature = "std"))]
+            let reason = TopologyFallback::NoStd;
+            #[cfg(feature = "std")]
+            let reason = TopologyFallback::UnsupportedPlatform;
+            Self::fallback(logical_core_count().max(1), reason)
+        }
+    }
+
+    fn fallback(count: usize, reason: TopologyFallback) -> Self {
         let cores = (0..count)
             .map(|i| {
                 let id = i as u32;
                 TopologyCore::new(id, id, 0, 0, CoreKind::Unknown)
             })
             .collect();
-        // `probed = false`: this is the uniform fallback, not a genuine OS read
-        // of the hybrid/NUMA/cache geometry.
         Self {
             cores,
             numa_node_count: 1,
-            probed: false,
+            source: TopologySource::Fallback(reason),
+            distances: None,
+            caches: Vec::new(),
         }
+    }
+
+    /// How this topology was obtained (explicit data is not a hardware probe).
+    #[must_use]
+    pub fn source(&self) -> TopologySource {
+        self.source
+    }
+
+    /// Distinct OS NUMA ids in ascending order. Distance rows/columns use this
+    /// order, not `max(node_id) + 1`; memory-only/inaccessible nodes are omitted.
+    #[must_use]
+    pub fn node_ids(&self) -> Vec<u16> {
+        let mut ids: Vec<_> = self.cores.iter().map(|core| core.numa_node).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// OS distance rows in [`Self::node_ids`] order, or `None` when unavailable
+    /// or invalid. No synthetic remote distance is presented as measured data.
+    #[must_use]
+    pub fn numa_distances(&self) -> Option<&[Vec<u16>]> {
+        self.distances.as_deref()
+    }
+
+    /// OS-reported caches. Missing/inconsistent cache records are omitted.
+    #[must_use]
+    pub fn caches(&self) -> &[TopologyCache] {
+        &self.caches
     }
 
     /// All logical cores, in the order they were supplied.
@@ -198,12 +275,12 @@ impl CpuTopology {
         self.numa_node_count
     }
 
-    /// Whether the richer fields (`P`/`E` class, `SMT`, `NUMA`, cache domains)
-    /// are a genuine OS read (`true`) or the uniform [`CpuTopology::detect`]
-    /// fallback (`false`).
+    /// Whether geometry was probed or explicitly supplied, rather than a
+    /// uniform fallback. Optional class/cache/distance information may still
+    /// be unknown. Use [`Self::source`] to distinguish live from explicit data.
     #[must_use]
     pub fn is_probed(&self) -> bool {
-        self.probed
+        !matches!(self.source, TopologySource::Fallback(_))
     }
 
     /// Whether this machine mixes performance and efficiency cores.
@@ -324,7 +401,9 @@ impl TopologyBuilder {
         Ok(CpuTopology {
             cores: self.cores,
             numa_node_count,
-            probed: true,
+            source: TopologySource::Explicit,
+            distances: None,
+            caches: Vec::new(),
         })
     }
 }
