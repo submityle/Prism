@@ -20,11 +20,11 @@
 //!
 //! ## What is verified
 //!
-//! [`probe_topology`] is implemented and tested on **Apple Silicon macOS**,
-//! where the result is an exact, `SMT`-free `P`/`E` + shared-`L2` description.
-//! On other targets it returns [`ProbeError::Unsupported`] rather than
-//! fabricating a layout it cannot confirm; callers fall back to
-//! [`prism_platform::topology::CpuTopology::detect`].
+//! [`probe_topology`] is implemented on Linux through the validated sysfs
+//! parser and on **Apple Silicon macOS** through the exact, `SMT`-free
+//! `P`/`E` + shared-`L2` sysctl description. Other targets return
+//! [`ProbeError::Unsupported`] rather than fabricating a layout; Linux hosts
+//! without a stable sysfs view return structured [`ProbeError::Skipped`].
 //!
 //! [`probe_security`] follows the same contract for
 //! [`prism_platform::security::SecurityPosture`]: on Apple Silicon macOS it
@@ -42,9 +42,11 @@ pub mod security;
 pub mod sysctl;
 pub mod topology;
 
-pub use error::ProbeError;
+pub use error::{ProbeError, ProbeSkip};
 pub use security::probe_security;
-pub use topology::probe_topology;
+pub use topology::{
+    bind_current_thread_to_node, probe_numa_nodes, probe_topology, NumaAffinityError, NumaNode,
+};
 
 #[cfg(test)]
 mod tests_security;

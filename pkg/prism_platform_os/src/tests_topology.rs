@@ -6,11 +6,14 @@
 //! [`ProbeError::Unsupported`] and the checks degrade to confirming that honest
 //! refusal rather than a fabricated topology.
 //!
-//! Note: `sysctl` can be denied inside a sandbox, in which case the probe
-//! surfaces [`ProbeError::Os`]; run these unsandboxed to exercise the real
-//! read.
+//! Note: sysfs/procfs or `sysctl` can be denied inside a sandbox. Such cases
+//! surface as structured `Skipped`/`Os` results; run these unsandboxed to
+//! exercise the real read.
 
-use crate::{probe_topology, ProbeError};
+use crate::{
+    bind_current_thread_to_node, probe_numa_nodes, probe_topology, NumaAffinityError, ProbeError,
+};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use prism_platform::topology::CoreKind;
 
 #[test]
@@ -44,8 +47,46 @@ fn probe_agrees_with_runtime_or_refuses_honestly() {
             }
         }
         // Honest refusal on an unverified target is an acceptable outcome.
-        Err(ProbeError::Unsupported) => {}
+        Err(ProbeError::Unsupported | ProbeError::Skipped { .. }) => {}
         Err(e) => panic!("unexpected probe failure: {e}"),
+    }
+}
+
+#[test]
+fn numa_nodes_are_real_or_structurally_unavailable() {
+    match probe_numa_nodes() {
+        Ok(nodes) => {
+            assert!(!nodes.is_empty());
+            assert!(nodes.windows(2).all(|pair| pair[0].id < pair[1].id));
+            for node in nodes {
+                assert!(node.cpus.windows(2).all(|pair| pair[0] < pair[1]));
+            }
+        }
+        Err(ProbeError::Unsupported | ProbeError::Skipped { .. }) => {}
+        Err(error) => panic!("unexpected NUMA-node probe failure: {error}"),
+    }
+}
+
+#[test]
+fn node_binding_never_reports_success_without_a_real_mask() {
+    match probe_numa_nodes() {
+        Ok(nodes) => {
+            let Some(node) = nodes.iter().find(|node| !node.cpus.is_empty()) else {
+                return;
+            };
+            match bind_current_thread_to_node(node.id) {
+                Ok(()) => {}
+                Err(
+                    NumaAffinityError::Unsupported
+                    | NumaAffinityError::Skipped { .. }
+                    | NumaAffinityError::InvalidNode
+                    | NumaAffinityError::InvalidTopology,
+                ) => {}
+                Err(error) => panic!("unexpected NUMA affinity failure: {error}"),
+            }
+        }
+        Err(ProbeError::Unsupported | ProbeError::Skipped { .. }) => {}
+        Err(error) => panic!("unexpected NUMA-node probe failure: {error}"),
     }
 }
 
@@ -55,7 +96,7 @@ fn apple_silicon_is_hybrid_smt_free_single_node() {
     let topo = match probe_topology() {
         Ok(t) => t,
         // sysctl denied (sandbox): cannot exercise the real read here.
-        Err(ProbeError::Os(_)) => return,
+        Err(ProbeError::Os(_) | ProbeError::Skipped { .. }) => return,
         Err(e) => panic!("probe failed on Apple Silicon: {e}"),
     };
 

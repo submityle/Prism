@@ -220,7 +220,13 @@ mod backend {
     const MPOL_F_STATIC_NODES: c_ulong = 1 << 15;
     const ENOMEM: i32 = 12;
     const EINVAL: i32 = 22;
+    const ENOSYS: i32 = 38;
+    const EOPNOTSUPP: i32 = 95;
 
+    #[expect(
+        unsafe_code,
+        reason = "Linux NUMA memory policy requires the mbind syscall declaration"
+    )]
     unsafe extern "C" {
         fn mbind(
             start: *mut c_void,
@@ -264,6 +270,10 @@ mod backend {
                 NumaAllocationError::InvalidNode
             } else if errno == ENOMEM {
                 NumaAllocationError::OutOfMemory
+            } else if errno == ENOSYS || errno == EOPNOTSUPP {
+                // ENOSYS / EOPNOTSUPP: the syscall is absent or disabled by
+                // the running kernel. This is a capability gap, not success.
+                NumaAllocationError::Unsupported
             } else {
                 NumaAllocationError::SystemError(errno)
             })
