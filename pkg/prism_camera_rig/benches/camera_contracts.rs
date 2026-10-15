@@ -12,18 +12,28 @@
     reason = "the benchmark reports measurements to stdout"
 )]
 
+#[cfg(all(feature = "director", feature = "rig"))]
 use std::env;
+#[cfg(all(feature = "director", feature = "rig"))]
 use std::fs;
+#[cfg(all(feature = "director", feature = "rig"))]
 use std::hint::black_box;
+#[cfg(all(feature = "director", feature = "rig"))]
 use std::path::Path;
+#[cfg(all(feature = "director", feature = "rig"))]
 use std::time::Instant;
 
+#[cfg(all(feature = "director", feature = "rig"))]
 use prism_camera::{derive_view, CameraIntent, CameraPose, ViewHistory, ViewLod};
+#[cfg(all(feature = "director", feature = "rig"))]
 use prism_camera_rig::{CameraBrain, Impulse, ViewUpdateScheduler, VirtualCamera};
+#[cfg(all(feature = "director", feature = "rig"))]
 use prism_math::{DVec3, Vec3};
 
+#[cfg(all(feature = "director", feature = "rig"))]
 const SAMPLES: usize = 10_000;
 
+#[cfg(all(feature = "director", feature = "rig"))]
 fn repetitions() -> usize {
     let args: Vec<String> = env::args().collect();
     args.windows(2)
@@ -33,6 +43,7 @@ fn repetitions() -> usize {
         .unwrap_or(5)
 }
 
+#[cfg(all(feature = "director", feature = "rig"))]
 fn best_ns_per_op<F>(repetitions: usize, mut operation: F) -> f64
 where
     F: FnMut(),
@@ -46,6 +57,7 @@ where
     best
 }
 
+#[cfg(all(feature = "director", feature = "rig"))]
 fn main() {
     let repetitions = repetitions();
     let mut history = ViewHistory::default();
@@ -133,4 +145,9 @@ fn main() {
     }
     fs::write(&output, csv).expect("write benchmark output");
     eprintln!("benchmark_output={output}");
+}
+
+#[cfg(not(all(feature = "director", feature = "rig")))]
+fn main() {
+    println!("camera_contracts requires both the director and rig features");
 }

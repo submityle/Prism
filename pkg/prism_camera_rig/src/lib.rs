@@ -5,6 +5,8 @@
 extern crate alloc;
 
 #[cfg(feature = "rig")]
+use alloc::boxed::Box;
+#[cfg(feature = "rig")]
 use alloc::vec::Vec;
 #[cfg(any(feature = "director", feature = "rig"))]
 use prism_camera::CameraPose;
@@ -54,7 +56,222 @@ pub struct VirtualCamera {
 }
 
 #[cfg(feature = "rig")]
+pub type Entity = u64;
+
+#[cfg(feature = "rig")]
+pub const MAX_RIG_TARGETS: usize = 64;
+
+#[cfg(feature = "rig")]
+pub const MAX_DOLLY_POINTS: usize = 256;
+
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TargetState {
+    pub valid: bool,
+    pub position: DVec3,
+    pub rotation: DQuat,
+    pub velocity: DVec3,
+}
+
+#[cfg(feature = "rig")]
+impl Default for TargetState {
+    fn default() -> Self {
+        Self {
+            valid: false,
+            position: DVec3::ZERO,
+            rotation: DQuat::IDENTITY,
+            velocity: DVec3::ZERO,
+        }
+    }
+}
+
+/// Resolves a bounded set of stable target identifiers in caller-owned memory.
+#[cfg(feature = "rig")]
+pub trait TargetQuery {
+    fn resolve_batch(&self, entities: &[Entity], states: &mut [TargetState]);
+}
+
+#[cfg(feature = "rig")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DollyPath {
+    points: Box<[DVec3]>,
+}
+
+#[cfg(feature = "rig")]
+impl Default for DollyPath {
+    fn default() -> Self {
+        Self {
+            points: Box::new([]),
+        }
+    }
+}
+
+#[cfg(feature = "rig")]
+impl DollyPath {
+    pub fn new(points: Box<[DVec3]>) -> Self {
+        Self::from_slice(&points)
+    }
+
+    pub fn from_slice(points: &[DVec3]) -> Self {
+        let mut bounded = Vec::with_capacity(points.len().min(MAX_DOLLY_POINTS));
+        for &point in points.iter().take(MAX_DOLLY_POINTS) {
+            if point.is_finite() {
+                bounded.push(point);
+            }
+        }
+        Self {
+            points: bounded.into_boxed_slice(),
+        }
+    }
+
+    pub fn as_slice(&self) -> &[DVec3] {
+        &self.points
+    }
+
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    pub fn sample(&self, position: f32, fallback: DVec3) -> DVec3 {
+        if self.points.is_empty() {
+            return fallback;
+        }
+        if self.points.len() == 1 {
+            return self.points[0];
+        }
+        let t = if position.is_finite() {
+            position.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let scaled = t * (self.points.len() - 1) as f32;
+        let index = (scaled.floor() as usize).min(self.points.len() - 2);
+        let local = (scaled - index as f32).clamp(0.0, 1.0) as f64;
+        self.points[index].lerp(self.points[index + 1], local)
+    }
+}
+
+#[cfg(feature = "rig")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub min: Vec2,
+    pub max: Vec2,
+}
+
+#[cfg(feature = "rig")]
+impl Rect {
+    pub const fn new(min: Vec2, max: Vec2) -> Self {
+        Self { min, max }
+    }
+
+    pub fn normalized(self) -> Self {
+        let min = if self.min.is_finite() {
+            self.min
+        } else {
+            Vec2::ZERO
+        };
+        let max = if self.max.is_finite() {
+            self.max
+        } else {
+            Vec2::ONE
+        };
+        Self {
+            min: Vec2::new(min.x.min(max.x), min.y.min(max.y)),
+            max: Vec2::new(min.x.max(max.x), min.y.max(max.y)),
+        }
+    }
+
+    pub fn center(self) -> Vec2 {
+        let rect = self.normalized();
+        (rect.min + rect.max) * 0.5
+    }
+}
+
+#[cfg(feature = "rig")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollisionMask(pub u32);
+
+#[cfg(feature = "rig")]
+impl CollisionMask {
+    pub const NONE: Self = Self(0);
+    pub const ALL: Self = Self(u32::MAX);
+}
+
+#[cfg(feature = "rig")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpringArmBody {
+    pub target: Entity,
+    pub arm: SpringArm,
+    pub socket_offset: Vec3,
+    pub direction: Vec3,
+    pub mask: CollisionMask,
+}
+
+/// Target-aware SpringArm configuration used by [`BodyRig::SpringArmTargeted`].
+#[cfg(feature = "rig")]
+pub type SpringArmRig = SpringArmBody;
+
+#[cfg(feature = "rig")]
+impl Default for SpringArmBody {
+    fn default() -> Self {
+        Self {
+            target: 0,
+            arm: SpringArm::default(),
+            socket_offset: Vec3::ZERO,
+            direction: Vec3::NEG_Z,
+            mask: CollisionMask::ALL,
+        }
+    }
+}
+
+#[cfg(feature = "rig")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigResolveInput {
+    pub fallback: CameraPose,
+    pub target_position: DVec3,
+    pub target_rotation: DQuat,
+    pub target_velocity: DVec3,
+    pub group_direction: DVec3,
+    pub spring_socket_offset: Vec3,
+    pub spring_direction: Vec3,
+    pub previous_position: Option<DVec3>,
+    pub previous_rotation: Option<DQuat>,
+    pub previous_spring_distance: f32,
+    pub dt: f32,
+}
+
+#[cfg(feature = "rig")]
+impl Default for RigResolveInput {
+    fn default() -> Self {
+        Self {
+            fallback: CameraPose::default(),
+            target_position: DVec3::ZERO,
+            target_rotation: DQuat::IDENTITY,
+            target_velocity: DVec3::ZERO,
+            group_direction: DVec3::new(0.0, 0.0, 1.0),
+            spring_socket_offset: Vec3::ZERO,
+            spring_direction: Vec3::NEG_Z,
+            previous_position: None,
+            previous_rotation: None,
+            previous_spring_distance: f32::NAN,
+            dt: 0.0,
+        }
+    }
+}
+
+#[cfg(feature = "rig")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyOutput {
+    pub position: DVec3,
+    pub spring_arm_status: Option<SpringArmStatus>,
+}
+
+#[cfg(feature = "rig")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum BodyRig {
     Fixed {
         position: DVec3,
@@ -69,6 +286,18 @@ pub enum BodyRig {
         yaw: f32,
         pitch: f32,
     },
+    SpringArm(SpringArm),
+    SpringArmTargeted(SpringArmBody),
+    Dolly {
+        path: DollyPath,
+        position: f32,
+        damping: f32,
+    },
+    GroupCompose {
+        targets: Box<[Entity]>,
+        padding: f32,
+        damping: Vec3,
+    },
 }
 
 #[cfg(feature = "rig")]
@@ -82,10 +311,10 @@ impl Default for BodyRig {
 
 #[cfg(feature = "rig")]
 impl BodyRig {
-    pub fn position(self, fallback: DVec3) -> DVec3 {
+    pub fn position(&self, fallback: DVec3) -> DVec3 {
         let position = match self {
-            Self::Fixed { position } => position,
-            Self::Follow { target, offset } => target + offset,
+            Self::Fixed { position } => *position,
+            Self::Follow { target, offset } => *target + *offset,
             Self::Orbit {
                 target,
                 radius,
@@ -93,19 +322,156 @@ impl BodyRig {
                 pitch,
             } => {
                 let rotation =
-                    DQuat::from_rotation_y(yaw as f64) * DQuat::from_rotation_x(pitch as f64);
-                target + rotation.mul_vec3(DVec3::new(0.0, 0.0, radius.max(0.0) as f64))
+                    DQuat::from_rotation_y(*yaw as f64) * DQuat::from_rotation_x(*pitch as f64);
+                *target + rotation.mul_vec3(DVec3::new(0.0, 0.0, radius.max(0.0) as f64))
             }
+            Self::Dolly { path, position, .. } => path.sample(*position, fallback),
+            Self::SpringArm(_) | Self::SpringArmTargeted(_) | Self::GroupCompose { .. } => fallback,
         };
         position.is_finite().then_some(position).unwrap_or(fallback)
+    }
+
+    pub fn resolve(
+        &self,
+        input: RigResolveInput,
+        targets: Option<&dyn TargetQuery>,
+        scene: Option<&dyn SceneQuery>,
+    ) -> BodyOutput {
+        let fallback = finite_position(input.fallback.position, DVec3::ZERO);
+        let mut target_ids = [0; MAX_RIG_TARGETS];
+        let mut target_states = [TargetState::default(); MAX_RIG_TARGETS];
+        let target_count = collect_body_targets(self, &mut target_ids);
+        if let Some(query) = targets {
+            query.resolve_batch(
+                &target_ids[..target_count],
+                &mut target_states[..target_count],
+            );
+        }
+        let mut spring_arm_status = None;
+        let position = match self {
+            Self::Fixed { position } => *position,
+            Self::Follow { target, offset } => *target + *offset,
+            Self::Orbit {
+                target,
+                radius,
+                yaw,
+                pitch,
+            } => {
+                let rotation =
+                    DQuat::from_rotation_y(*yaw as f64) * DQuat::from_rotation_x(*pitch as f64);
+                *target + rotation.mul_vec3(DVec3::new(0.0, 0.0, radius.max(0.0) as f64))
+            }
+            Self::SpringArm(arm) => {
+                let socket = input.target_position
+                    + input.target_rotation.mul_vec3(DVec3::new(
+                        input.spring_socket_offset.x as f64,
+                        input.spring_socket_offset.y as f64,
+                        input.spring_socket_offset.z as f64,
+                    ));
+                let direction = finite_direction(
+                    input.spring_direction,
+                    input.target_rotation.mul_vec3(DVec3::new(0.0, 0.0, -1.0)),
+                );
+                let (distance, status) = arm.resolve_with_mask(
+                    scene,
+                    socket.as_vec3(),
+                    direction,
+                    input.previous_spring_distance,
+                    input.dt,
+                    CollisionMask::ALL,
+                );
+                spring_arm_status = Some(status);
+                socket
+                    + DVec3::new(direction.x as f64, direction.y as f64, direction.z as f64)
+                        * distance as f64
+            }
+            Self::SpringArmTargeted(body) => {
+                let target = target_state(
+                    body.target,
+                    &target_ids[..target_count],
+                    &target_states[..target_count],
+                )
+                .unwrap_or(TargetState {
+                    valid: true,
+                    position: input.target_position,
+                    rotation: input.target_rotation,
+                    velocity: input.target_velocity,
+                });
+                let socket = target.position
+                    + target.rotation.mul_vec3(DVec3::new(
+                        body.socket_offset.x as f64,
+                        body.socket_offset.y as f64,
+                        body.socket_offset.z as f64,
+                    ));
+                let direction = finite_direction(
+                    body.direction,
+                    target.rotation.mul_vec3(DVec3::new(0.0, 0.0, -1.0)),
+                );
+                let (distance, status) = body.arm.resolve_with_mask(
+                    scene,
+                    socket.as_vec3(),
+                    direction,
+                    input.previous_spring_distance,
+                    input.dt,
+                    body.mask,
+                );
+                spring_arm_status = Some(status);
+                socket
+                    + DVec3::new(direction.x as f64, direction.y as f64, direction.z as f64)
+                        * distance as f64
+            }
+            Self::Dolly {
+                path,
+                position,
+                damping,
+            } => damp_position(
+                input.previous_position,
+                path.sample(*position, fallback),
+                Vec3::splat(*damping),
+                input.dt,
+            ),
+            Self::GroupCompose {
+                targets: entities,
+                padding,
+                damping,
+            } => group_position(
+                entities,
+                *padding,
+                *damping,
+                input,
+                &target_ids[..target_count],
+                &target_states[..target_count],
+            ),
+        };
+        BodyOutput {
+            position: finite_position(position, fallback),
+            spring_arm_status,
+        }
     }
 }
 
 #[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AimRig {
-    Fixed { rotation: DQuat },
-    LookAt { target: DVec3 },
+    Fixed {
+        rotation: DQuat,
+    },
+    LookAt {
+        target: DVec3,
+    },
+    Transform,
+    Composer {
+        target: Entity,
+        screen: Rect,
+        soft_zone: Rect,
+        lookahead: f32,
+        damping: Vec3,
+    },
+    FaceVelocity {
+        target: Entity,
+        damping: Vec3,
+    },
+    HardLockHorizon,
 }
 
 #[cfg(feature = "rig")]
@@ -134,8 +500,91 @@ impl AimRig {
                 );
                 (DQuat::from_rotation_y(yaw) * DQuat::from_rotation_x(-pitch)).normalize()
             }
+            Self::Transform | Self::Composer { .. } | Self::FaceVelocity { .. } => fallback,
+            Self::HardLockHorizon => lock_horizon(fallback),
         };
         rotation.is_finite().then_some(rotation).unwrap_or(fallback)
+    }
+
+    pub fn resolve(self, input: RigResolveInput, targets: Option<&dyn TargetQuery>) -> DQuat {
+        let fallback = input
+            .previous_rotation
+            .filter(|rotation| rotation.is_finite())
+            .unwrap_or(input.fallback.rotation);
+        let mut target_ids = [0; MAX_RIG_TARGETS];
+        let mut target_states = [TargetState::default(); MAX_RIG_TARGETS];
+        let target_count = collect_aim_targets(self, &mut target_ids);
+        if let Some(query) = targets {
+            query.resolve_batch(
+                &target_ids[..target_count],
+                &mut target_states[..target_count],
+            );
+        }
+        let target = match self {
+            Self::Fixed { rotation } => rotation,
+            Self::LookAt { target } => look_at_rotation(input.fallback.position, target, fallback),
+            Self::Transform => input.target_rotation,
+            Self::Composer {
+                target: entity,
+                screen,
+                soft_zone,
+                lookahead,
+                damping,
+            } => {
+                let Some(state) = target_state(
+                    entity,
+                    &target_ids[..target_count],
+                    &target_states[..target_count],
+                ) else {
+                    return fallback;
+                };
+                let target =
+                    state.position + state.velocity * sanitize_nonnegative(lookahead) as f64;
+                let direction = (target - input.fallback.position).normalize_or_zero();
+                if direction.length_squared() <= 1.0e-12 {
+                    fallback
+                } else {
+                    let offset = screen.center() - soft_zone.center();
+                    let distance = (target - input.fallback.position).length().max(1.0);
+                    let right = fallback.mul_vec3(DVec3::X);
+                    let up = fallback.mul_vec3(DVec3::Y);
+                    let target = target
+                        + right * offset.x as f64 * distance * 0.5
+                        + up * offset.y as f64 * distance * 0.5;
+                    let desired = look_at_rotation(input.fallback.position, target, fallback);
+                    damp_rotation(input.previous_rotation, desired, damping, input.dt)
+                }
+            }
+            Self::FaceVelocity {
+                target: entity,
+                damping,
+            } => {
+                let Some(state) = target_state(
+                    entity,
+                    &target_ids[..target_count],
+                    &target_states[..target_count],
+                ) else {
+                    return fallback;
+                };
+                let velocity = state.velocity;
+                if !velocity.is_finite() || velocity.length_squared() <= 1.0e-12 {
+                    fallback
+                } else {
+                    let desired = look_at_rotation(
+                        input.fallback.position,
+                        input.fallback.position + velocity,
+                        fallback,
+                    );
+                    damp_rotation(input.previous_rotation, desired, damping, input.dt)
+                }
+            }
+            Self::HardLockHorizon => lock_horizon(fallback),
+        };
+        target
+            .normalize()
+            .is_finite()
+            .then_some(target.normalize())
+            .unwrap_or(fallback)
     }
 }
 
@@ -158,6 +607,226 @@ pub fn compose_rig(body: BodyRig, aim: AimRig, origin: DVec3, fallback: CameraPo
         },
         spring_arm_status: None,
     }
+}
+
+#[cfg(feature = "rig")]
+pub fn compose_rig_with_queries(
+    body: &BodyRig,
+    aim: AimRig,
+    origin: DVec3,
+    input: RigResolveInput,
+    targets: Option<&dyn TargetQuery>,
+    scene: Option<&dyn SceneQuery>,
+) -> RigOutput {
+    let body_output = body.resolve(input, targets, scene);
+    let aim_input = RigResolveInput {
+        fallback: CameraPose {
+            position: body_output.position,
+            world_origin: origin,
+            ..input.fallback
+        },
+        ..input
+    };
+    let rotation = aim.resolve(aim_input, targets);
+    RigOutput {
+        pose: CameraPose {
+            position: body_output.position,
+            rotation,
+            world_origin: origin,
+        },
+        spring_arm_status: body_output.spring_arm_status,
+    }
+}
+
+#[cfg(feature = "rig")]
+fn finite_position(value: DVec3, fallback: DVec3) -> DVec3 {
+    value.is_finite().then_some(value).unwrap_or(fallback)
+}
+
+#[cfg(feature = "rig")]
+fn finite_direction(value: Vec3, fallback: DVec3) -> Vec3 {
+    if value.is_finite() && value.length_squared() > 1.0e-12 {
+        value.normalize()
+    } else {
+        let fallback = fallback.as_vec3();
+        if fallback.is_finite() && fallback.length_squared() > 1.0e-12 {
+            fallback.normalize()
+        } else {
+            Vec3::NEG_Z
+        }
+    }
+}
+
+#[cfg(feature = "rig")]
+fn sanitize_nonnegative(value: f32) -> f64 {
+    if value.is_finite() {
+        value.max(0.0) as f64
+    } else {
+        0.0
+    }
+}
+
+#[cfg(feature = "rig")]
+fn collect_body_targets(body: &BodyRig, output: &mut [Entity; MAX_RIG_TARGETS]) -> usize {
+    match body {
+        BodyRig::SpringArmTargeted(body) => {
+            output[0] = body.target;
+            1
+        }
+        BodyRig::GroupCompose { targets, .. } => copy_unique_entities(targets, output),
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "rig")]
+fn collect_aim_targets(aim: AimRig, output: &mut [Entity; MAX_RIG_TARGETS]) -> usize {
+    match aim {
+        AimRig::Composer { target, .. } | AimRig::FaceVelocity { target, .. } => {
+            output[0] = target;
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "rig")]
+fn copy_unique_entities(source: &[Entity], output: &mut [Entity; MAX_RIG_TARGETS]) -> usize {
+    let mut count = 0;
+    for &entity in source.iter().take(MAX_RIG_TARGETS) {
+        if !output[..count].contains(&entity) {
+            output[count] = entity;
+            count += 1;
+        }
+    }
+    count
+}
+
+#[cfg(feature = "rig")]
+fn target_state(
+    entity: Entity,
+    entities: &[Entity],
+    states: &[TargetState],
+) -> Option<TargetState> {
+    entities
+        .iter()
+        .position(|candidate| *candidate == entity)
+        .and_then(|index| states.get(index).copied())
+        .filter(|state| {
+            state.valid
+                && state.position.is_finite()
+                && state.rotation.is_finite()
+                && state.velocity.is_finite()
+        })
+}
+
+#[cfg(feature = "rig")]
+fn damp_position(previous: Option<DVec3>, target: DVec3, damping: Vec3, dt: f32) -> DVec3 {
+    let Some(previous) = previous.filter(|value| value.is_finite()) else {
+        return target;
+    };
+    if !target.is_finite() || !dt.is_finite() || dt <= 0.0 {
+        return target;
+    }
+    let axis = |current: f64, target: f64, half_life: f32| {
+        let half_life = half_life as f64;
+        if !half_life.is_finite() || half_life <= 0.0 {
+            target
+        } else {
+            target + (current - target) * libm::exp2(-dt as f64 / half_life)
+        }
+    };
+    DVec3::new(
+        axis(previous.x, target.x, damping.x),
+        axis(previous.y, target.y, damping.y),
+        axis(previous.z, target.z, damping.z),
+    )
+}
+
+#[cfg(feature = "rig")]
+fn damp_rotation(previous: Option<DQuat>, target: DQuat, damping: Vec3, dt: f32) -> DQuat {
+    let target = target.normalize();
+    let Some(previous) = previous.filter(|value| value.is_finite()) else {
+        return target;
+    };
+    let half_life = damping.x.max(damping.y).max(damping.z);
+    if !half_life.is_finite() || half_life <= 0.0 || !dt.is_finite() || dt <= 0.0 {
+        target
+    } else {
+        let amount = 1.0 - libm::exp2(-dt as f64 / half_life as f64);
+        previous.normalize().slerp(target, amount.clamp(0.0, 1.0))
+    }
+}
+
+#[cfg(feature = "rig")]
+fn group_position(
+    entities: &[Entity],
+    padding: f32,
+    damping: Vec3,
+    input: RigResolveInput,
+    query_entities: &[Entity],
+    states: &[TargetState],
+) -> DVec3 {
+    let mut count = 0usize;
+    let mut center = DVec3::ZERO;
+    for (index, &entity) in entities.iter().take(MAX_RIG_TARGETS).enumerate() {
+        if entities[..index].contains(&entity) {
+            continue;
+        }
+        if let Some(state) = target_state(entity, query_entities, states) {
+            center += state.position;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return input.fallback.position;
+    }
+    center /= count as f64;
+    let mut radius = 0.0f64;
+    for (index, &entity) in entities.iter().take(MAX_RIG_TARGETS).enumerate() {
+        if entities[..index].contains(&entity) {
+            continue;
+        }
+        if let Some(state) = target_state(entity, query_entities, states) {
+            radius = radius.max(state.position.distance(center));
+        }
+    }
+    let direction =
+        if input.group_direction.is_finite() && input.group_direction.length_squared() > 1.0e-12 {
+            input.group_direction.normalize()
+        } else {
+            DVec3::Z
+        };
+    let target = center + direction * (radius + sanitize_nonnegative(padding));
+    damp_position(input.previous_position, target, damping, input.dt)
+}
+
+#[cfg(feature = "rig")]
+fn look_at_rotation(position: DVec3, target: DVec3, fallback: DQuat) -> DQuat {
+    let direction = (target - position).normalize_or_zero();
+    if direction.length_squared() <= 1.0e-12 || !direction.is_finite() {
+        return fallback;
+    }
+    let yaw = libm::atan2(-direction.x, -direction.z);
+    let pitch = libm::atan2(
+        direction.y,
+        (direction.x * direction.x + direction.z * direction.z).sqrt(),
+    );
+    (DQuat::from_rotation_y(yaw) * DQuat::from_rotation_x(-pitch)).normalize()
+}
+
+#[cfg(feature = "rig")]
+fn lock_horizon(rotation: DQuat) -> DQuat {
+    let rotation = rotation.normalize();
+    let forward = rotation.mul_vec3(DVec3::new(0.0, 0.0, -1.0));
+    if !forward.is_finite() || forward.length_squared() <= 1.0e-12 {
+        return DQuat::IDENTITY;
+    }
+    let yaw = libm::atan2(-forward.x, -forward.z);
+    let pitch = libm::atan2(
+        forward.y,
+        (forward.x * forward.x + forward.z * forward.z).sqrt(),
+    );
+    (DQuat::from_rotation_y(yaw) * DQuat::from_rotation_x(-pitch)).normalize()
 }
 
 #[cfg(feature = "director")]
@@ -328,6 +997,15 @@ pub struct CastHit {
 #[cfg(feature = "rig")]
 pub trait SceneQuery {
     fn cast_batch(&self, requests: &[CastRequest], hits: &mut [CastHit]);
+
+    fn cast_batch_masked(
+        &self,
+        requests: &[CastRequest],
+        hits: &mut [CastHit],
+        _mask: CollisionMask,
+    ) {
+        self.cast_batch(requests, hits);
+    }
 }
 
 #[cfg(feature = "rig")]
@@ -723,45 +1401,69 @@ impl Default for SpringArm {
 
 #[cfg(feature = "rig")]
 impl SpringArm {
-    pub fn resolve<Q: SceneQuery>(
+    pub fn resolve_with_mask(
         &self,
-        query: Option<&Q>,
+        query: Option<&dyn SceneQuery>,
         origin: Vec3,
         direction: Vec3,
         previous_distance: f32,
         dt: f32,
+        mask: CollisionMask,
     ) -> (f32, SpringArmStatus) {
-        let arm_length = self.arm_length.max(0.0);
-        let direction = direction.normalize_or_zero();
+        let arm_length = finite_nonnegative(self.arm_length);
+        let direction = if direction.is_finite() && direction.length_squared() > 1.0e-12 {
+            direction.normalize()
+        } else {
+            Vec3::NEG_Z
+        };
         let Some(query) = query else {
             return (arm_length, SpringArmStatus::Unavailable);
         };
         let request = CastRequest {
-            origin,
+            origin: if origin.is_finite() {
+                origin
+            } else {
+                Vec3::ZERO
+            },
             direction,
             distance: arm_length,
-            radius: self.probe_radius.max(0.0),
+            radius: finite_nonnegative(self.probe_radius),
         };
         let mut hit = [CastHit {
             hit: false,
             distance: arm_length,
             normal: Vec3::Y,
         }];
-        query.cast_batch(&[request], &mut hit);
+        query.cast_batch_masked(&[request], &mut hit, mask);
         if !hit[0].distance.is_finite() || hit[0].distance < 0.0 {
             return (arm_length, SpringArmStatus::Unavailable);
         }
+        if hit[0].distance > arm_length {
+            return (arm_length, SpringArmStatus::Unavailable);
+        }
+        if hit[0].hit && (!hit[0].normal.is_finite() || hit[0].normal.length_squared() <= 1.0e-12) {
+            return (arm_length, SpringArmStatus::Unavailable);
+        }
+        if hit[0].hit {
+            hit[0].normal = hit[0].normal.normalize();
+        }
         let target = if hit[0].hit {
-            (hit[0].distance - self.collision_margin.max(0.0)).clamp(0.0, arm_length)
+            (hit[0].distance - finite_nonnegative(self.collision_margin)).clamp(0.0, arm_length)
         } else {
             arm_length
         };
+        let previous = if previous_distance.is_finite() {
+            previous_distance.clamp(0.0, arm_length)
+        } else {
+            target
+        };
         let distance = smooth_half_life(
-            previous_distance.clamp(0.0, arm_length),
+            previous,
             target,
             self.lag_half_life,
-            dt.max(0.0),
-        );
+            if dt.is_finite() { dt.max(0.0) } else { 0.0 },
+        )
+        .clamp(0.0, arm_length);
         (
             distance,
             if hit[0].hit {
@@ -770,6 +1472,33 @@ impl SpringArm {
                 SpringArmStatus::Clear
             },
         )
+    }
+
+    pub fn resolve<Q: SceneQuery>(
+        &self,
+        query: Option<&Q>,
+        origin: Vec3,
+        direction: Vec3,
+        previous_distance: f32,
+        dt: f32,
+    ) -> (f32, SpringArmStatus) {
+        self.resolve_with_mask(
+            query.map(|value| value as &dyn SceneQuery),
+            origin,
+            direction,
+            previous_distance,
+            dt,
+            CollisionMask::ALL,
+        )
+    }
+}
+
+#[cfg(feature = "rig")]
+fn finite_nonnegative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
     }
 }
 
@@ -1064,6 +1793,170 @@ mod tests {
         assert!((distance - 0.9).abs() < 1.0e-6);
         let (_, status) = arm.resolve::<Query>(None, Vec3::ZERO, Vec3::Z, 4.0, 0.016);
         assert_eq!(status, SpringArmStatus::Unavailable);
+    }
+
+    struct BatchQuery {
+        states: [(Entity, TargetState); 4],
+        hit: Option<f32>,
+        calls: core::cell::Cell<usize>,
+    }
+
+    impl TargetQuery for BatchQuery {
+        fn resolve_batch(&self, entities: &[Entity], states: &mut [TargetState]) {
+            self.calls.set(self.calls.get() + 1);
+            for (entity, state) in entities.iter().zip(states.iter_mut()) {
+                if let Some((_, source)) = self.states.iter().find(|(id, _)| id == entity) {
+                    *state = *source;
+                }
+            }
+        }
+    }
+
+    impl SceneQuery for BatchQuery {
+        fn cast_batch(&self, requests: &[CastRequest], hits: &mut [CastHit]) {
+            self.calls.set(self.calls.get() + 1);
+            assert_eq!(requests.len(), hits.len());
+            for (hit, request) in hits.iter_mut().zip(requests) {
+                hit.hit = self.hit.is_some();
+                hit.distance = self.hit.unwrap_or(request.distance);
+                hit.normal = Vec3::Y;
+            }
+        }
+    }
+
+    #[test]
+    fn complete_body_variants_use_bounded_deterministic_queries() {
+        let query = BatchQuery {
+            states: [
+                (
+                    7,
+                    TargetState {
+                        valid: true,
+                        position: DVec3::new(0.0, 0.0, 0.0),
+                        rotation: DQuat::IDENTITY,
+                        velocity: DVec3::ZERO,
+                    },
+                ),
+                (
+                    9,
+                    TargetState {
+                        valid: true,
+                        position: DVec3::new(4.0, 0.0, 0.0),
+                        rotation: DQuat::IDENTITY,
+                        velocity: DVec3::ZERO,
+                    },
+                ),
+                (0, TargetState::default()),
+                (0, TargetState::default()),
+            ],
+            hit: None,
+            calls: core::cell::Cell::new(0),
+        };
+        let input = RigResolveInput {
+            fallback: CameraPose::default(),
+            group_direction: DVec3::Z,
+            dt: 1.0 / 60.0,
+            ..Default::default()
+        };
+        let body = BodyRig::GroupCompose {
+            targets: vec![7, 9, 7].into_boxed_slice(),
+            padding: 1.0,
+            damping: Vec3::ZERO,
+        };
+        let output = body.resolve(input, Some(&query), None);
+        assert_eq!(output.position, DVec3::new(2.0, 0.0, 3.0));
+        assert_eq!(query.calls.get(), 1);
+
+        let path = DollyPath::from_slice(&[
+            DVec3::ZERO,
+            DVec3::new(10.0, 0.0, 0.0),
+            DVec3::new(20.0, 0.0, 0.0),
+        ]);
+        assert_eq!(path.len(), 3);
+        assert_eq!(path.sample(0.25, DVec3::ZERO), DVec3::new(5.0, 0.0, 0.0));
+        let dolly = BodyRig::Dolly {
+            path,
+            position: 0.5,
+            damping: 0.0,
+        };
+        assert_eq!(dolly.position(DVec3::ZERO), DVec3::new(10.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn complete_aim_variants_are_finite_and_deterministic() {
+        let query = BatchQuery {
+            states: [
+                (
+                    3,
+                    TargetState {
+                        valid: true,
+                        position: DVec3::new(0.0, 0.0, -10.0),
+                        rotation: DQuat::IDENTITY,
+                        velocity: DVec3::X,
+                    },
+                ),
+                (0, TargetState::default()),
+                (0, TargetState::default()),
+                (0, TargetState::default()),
+            ],
+            hit: None,
+            calls: core::cell::Cell::new(0),
+        };
+        let input = RigResolveInput {
+            fallback: CameraPose::default(),
+            previous_rotation: Some(DQuat::IDENTITY),
+            dt: 1.0 / 60.0,
+            ..Default::default()
+        };
+        let composer = AimRig::Composer {
+            target: 3,
+            screen: Rect::new(Vec2::new(0.5, 0.5), Vec2::ONE),
+            soft_zone: Rect::new(Vec2::ZERO, Vec2::ONE),
+            lookahead: 2.0,
+            damping: Vec3::ZERO,
+        };
+        assert!(composer.resolve(input, Some(&query)).is_finite());
+        let facing = AimRig::FaceVelocity {
+            target: 3,
+            damping: Vec3::ZERO,
+        }
+        .resolve(input, Some(&query));
+        assert!(facing.is_finite());
+        let locked = AimRig::HardLockHorizon.resolve(input, None);
+        assert!(locked.is_finite());
+        assert!(locked.mul_vec3(DVec3::Y).y.abs() > 0.99);
+        assert_eq!(query.calls.get(), 2);
+    }
+
+    #[test]
+    fn spring_arm_mask_and_return_lag_are_bounded() {
+        let query = BatchQuery {
+            states: [
+                (0, TargetState::default()),
+                (0, TargetState::default()),
+                (0, TargetState::default()),
+                (0, TargetState::default()),
+            ],
+            hit: Some(1.0),
+            calls: core::cell::Cell::new(0),
+        };
+        let arm = SpringArm {
+            arm_length: 4.0,
+            lag_half_life: 1.0,
+            collision_margin: 0.1,
+            ..Default::default()
+        };
+        let (distance, status) = arm.resolve_with_mask(
+            Some(&query),
+            Vec3::ZERO,
+            Vec3::NEG_Z,
+            4.0,
+            1.0 / 60.0,
+            CollisionMask(0x10),
+        );
+        assert_eq!(status, SpringArmStatus::Hit);
+        assert!(distance < 4.0 && distance > 0.0);
+        assert_eq!(query.calls.get(), 1);
     }
 
     #[test]
