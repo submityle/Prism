@@ -464,6 +464,24 @@ tasks.join(|| left(), || right());                 // 分治二叉 join
 
 **交付状态**：`pkg/prism_tasks/src/topology/`（`distance.rs`/`cache.rs`/`descriptor.rs` 纯数据模型 + `placement.rs`/`schedule.rs` 纯算法 + `mod.rs` 聚合）已落地，是 §24.6 在既有 `numa`/`affinity` 模块之上**补齐而非重写**的那层可移植拓扑数据模型与放置/调度策略，全部为**纯确定性、无时钟、无线程、不探测硬件**的函数，复用 `numa` 的 `CoreInfo`/`CoreClass`（P/E 分类）/`NumaNodeId` 原语。**数据模型**：`TopologyDescriptor`（核列表 + 跨节点 `NumaDistanceMatrix` + `CacheTopology` 的可注入模型，`new` 校验空核/重复核 id/距离矩阵节点数与核跨度一致/缓存引用的核存在，`uniform(n)` 为非 NUMA/非混合核的均匀退化，`from_numa_topology` 从既有 `Topology` 桥接）暴露 `performance_core_count`/`efficiency_core_count`/`is_hybrid`/`cores_on_node`/`cores_of_class`/`node_of_core` 等纯查询；`NumaDistanceMatrix`（行主序方阵，遵循 ACPI SLIT 约定 `LOCAL_DISTANCE=10`，`single`/`uniform`(钳 `remote≥LOCAL`)/`from_rows`(校验方阵、正距、对角线为行最小)，`get`/`distance`/`is_symmetric`，允许非对称延迟)；`CacheTopology`（`CacheLevel` L1<L2<L3 有序、`CacheInfo{level,size_bytes,line_bytes,cores}`，`shares_cache`/`sharers`/`innermost_shared_level`/`line_bytes`，`empty` 为无缓存图退化，`shared_l3` 便捷构造)。**放置策略**：`WorkloadClass`（`LatencySensitive`/`Throughput`→P 核优先、`Background`→E 核优先）经 `core_class_preference` 定序，`plan_placement` 按「核类偏好 → NUMA 本地优先（低节点号先）→ 核 id」确定性定序并对 worker 做轮转过订阅，产出 `PlacementPlan`（每 `WorkerPlacement` 含 `core`/`node`/`class`/`memory_node` 的 NUMA 本地内存归属建议，`worker_nodes`/`memory_nodes` 可直喂 `numa::steal_order`）；`plan_partitioned` 沿 P/E 边界把延迟池与背景池切成**互斥**核集（混合核上 P 给延迟、E 给背景）。**距离感知调度**：`rank_nodes_by_distance`（按距离升序、同距按节点号 tie-break 全序）、`nearest_node`（候选集中选最近）、`choose_balanced_node`（在 `(距离, 负载, 节点号)` 字典序上取最小——最近优先、同距选最闲、再同取最小号）。`no_std`+`alloc` 兼容（核心仅用 `core`+`alloc`）。**29 单测绿**：距离矩阵对角本地/非对角远端、`uniform` 钳 remote、`from_rows` 非对称构造与坏输入全拒、`distance` 越界 panic、缓存层级序/共享/sharers/最内层共享/空缓存退化、`shared_l3` 排序去重、`descriptor` 访问器+hybrid 判定+坏输入全拒+`from_numa_topology` 桥接+`uniform` 单节点全 P、`WorkloadClass` 偏好表、延迟填 P 核优先/背景填 E 核优先/吞吐与 P 优先一致/类内 NUMA 本地优先/过订阅轮转/空或零 worker 空计划、分区混合核互斥切分与同构机退化、节点按距离排序+同距 tie-break+最近候选、`choose_balanced_node` 距离>负载>节点号优先级与边界；`cargo test -p prism_tasks` 221 全绿、`cargo clippy -p prism_tasks --all-targets` 零告警（含 `doc_markdown`）。诚实边界：真实拓扑探测（NUMA 距离、P/E 映射、缓存几何）属 `prism_platform` 职责，今日该层仅暴露逻辑核计数，故在其注入完整 `TopologyDescriptor` 前调用方用 `TopologyDescriptor::uniform` 退化为单节点全性能核（本模块绝不臆造拓扑）；`plan_partitioned` 在同构机（无 P 或无 E 核）上缺偏好核的那一池会外溢到可用核、两池可能重叠，为刻意标注的退化情形；`LatencySensitive` 与 `Throughput` 共享 P 优先定序（区别在语义与分区互斥性），距离矩阵的绝对数值仅用于排序、不解释为真实纳秒。
 
+#### 24.6.1 真实 OS NUMA/亲和验收边界
+
+§24.6 的可移植 `topology` 数据模型和放置算法不等于真实硬件已经接受了
+NUMA/亲和设置。真实验收必须由 OS 证据完成：
+
+- `prism_platform_os::probe_topology()` 必须成功并返回 `is_probed() == true`；
+  逻辑拓扑模型或 `TopologyDescriptor::uniform` 退化模型不能作为硬件证据。
+- CPU 亲和必须在设置后调用 `current_thread_affinity()` 回读；worker 的计划
+  assignment 只能说明“请求了哪个核”，不能说明绑定已经成功。
+- NUMA node 绑定必须使用真实节点 CPU 集合并回读有效 mask；arena 的
+  `NumaPlacement::Fallback` 明确计为未绑定，不能当作 NUMA 成功。
+- `pkg/prism_tasks/tests/numa_acceptance.rs` 是独立的 OS 验收入口。默认模式在
+  当前主机或沙箱不提供真实能力、或 OS 拒绝操作时输出 `SKIPPED` 并保留诊断；
+  设置 `PRISM_REQUIRE_NUMA=1` 后，同样情况改为测试失败，适合 CI/验收机的硬门槛。
+- 该验收只证明拓扑探测、亲和回读、worker 绑定结果和 arena placement 的真实性，
+  不包含吞吐、延迟、跨 NUMA 收益或任何性能数字结论；这些仍需真实硬件与代表性
+  负载基准单独证明。
+
 ### 24.7 确定性并行（可回放）—— ✅ 已交付（`deterministic_replay` 模块）
 
 回滚网络/录像要求并行结果**与线程数/窃取时序无关**：

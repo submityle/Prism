@@ -12,6 +12,11 @@
 //! binding into a failure. No synthetic topology, timing value, or requested
 //! placement is counted as a success.
 
+#![expect(
+    clippy::print_stderr,
+    reason = "acceptance diagnostics are intentionally emitted to stderr"
+)]
+
 use prism_platform::{current_thread_affinity, set_current_thread_affinity_mask};
 use prism_platform_os::{bind_current_thread_to_node, probe_numa_nodes, probe_topology};
 use prism_tasks::{CoreClassPolicy, TaskPool, TaskPoolConfig};
