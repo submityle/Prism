@@ -40,7 +40,7 @@ CARGO_BUILD_JOBS=1 \
 cargo test -p prism_render_app --lib
 ```
 
-在沙盒内运行时，16 个硬件门禁因无法访问 adapter 而失败；这证明沙盒不能作为本机 GPU 验收环境。允许沙盒外访问本机图形设备后，Metal/wgpu 路径实际启动，第一次完整门禁为 `227 passed, 1 failed`。修正 recovery 测试中错误的 `frames_before` 采样边界后，硬件门禁仍在 `recovery::hardware_tests::gpu_recovery_rebuilds_resources_and_restores_pixels` 的 material buffer 字节等价断言失败（`hardware_tests.rs:344`）。因此当前真实 GPU recovery 不能宣称完成。
+在沙盒内运行时，16 个硬件门禁因无法访问 adapter 而失败；这证明沙盒不能作为本机 GPU 验收环境。允许沙盒外访问本机图形设备后，Metal/wgpu 路径实际启动；修复 material buffer 首次分配的全容量初始化后，完整门禁结果为 `228 passed, 0 failed, 0 ignored`。其中 `recovery::hardware_tests::gpu_recovery_rebuilds_resources_and_restores_pixels` 已验证设备替换、材质 buffer 全容量字节、replay buffer、像素和新 device generation 均恢复。
 
 ### Headless runner parity
 
@@ -68,7 +68,7 @@ cargo bench -p prism_app --bench runtime_pipeline \
 
 1. `real_window_presentation_acceptance_entry` 仍是 `#[ignore]`，需要真实 OS window 和 display compositor；本次没有伪造窗口验收。
 2. `runner_parity` 本次只运行 `--headless-only`，没有执行 Winit 窗口分支。
-3. 真实 Metal/wgpu 的普通绘制、材质、mesh、transform 等硬件用例可在沙盒外启动，但 device-loss recovery 的 material buffer 恢复字节对等仍失败；需继续修复后再把 GPU recovery 设为通过。
+3. 真实 Metal/wgpu 的普通绘制、材质、mesh、transform 与 device-loss recovery 已在本机门禁通过；仍缺真实移动设备、其他后端和长时间运行证据。
 4. benchmark 没有跨机器、长时间、真实游戏场景、present latency、功耗或 GPU 帧时间门槛；不能据此声称“超过 UE”或达到固定 FPS。
 5. 全仓测试不作为本记录门禁；`prism_replication` 的 `security.rs` 重复导入问题由 Dalton 处理，本次未修改或绕过它。
 

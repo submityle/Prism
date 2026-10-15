@@ -91,6 +91,12 @@ pub struct MaterialParameterBuffers {
     /// Extra usages every created buffer carries — `COPY_SRC` when a caller wants
     /// a diagnostic readback; production passes none.
     extra_usage: BufferUsages,
+    /// Whether the current GPU allocations have been initialized from the CPU
+    /// mirrors.  A freshly-created backend buffer is not required to contain
+    /// zeroes, while a recovered allocation is filled from the mirrors.  Keeping
+    /// this bit lets the first normal sync initialize the whole allocation once,
+    /// so recovery has deterministic bytes to replay (including slack).
+    gpu_initialized: bool,
 }
 
 impl MaterialParameterBuffers {
@@ -119,6 +125,7 @@ impl MaterialParameterBuffers {
             placements: BTreeMap::new(),
             texture_placements: BTreeMap::new(),
             extra_usage,
+            gpu_initialized: false,
         };
         buffers.allocate(
             device,
@@ -307,7 +314,7 @@ impl MaterialParameterBuffers {
             }
         }
 
-        if report.grew {
+        if report.grew || !self.gpu_initialized {
             self.upload_all(queue);
         } else {
             self.upload_rows(queue, &dirty_headers);
@@ -350,6 +357,7 @@ impl MaterialParameterBuffers {
         self.headers = None;
         self.parameters = None;
         self.textures = None;
+        self.gpu_initialized = false;
     }
 
     /// Recreates all three buffers on a replacement device and restores their
@@ -362,6 +370,7 @@ impl MaterialParameterBuffers {
         self.headers = None;
         self.parameters = None;
         self.textures = None;
+        self.gpu_initialized = false;
         self.allocate(
             device,
             self.header_capacity.max(1),
@@ -456,10 +465,11 @@ impl MaterialParameterBuffers {
         self.words.resize(words as usize, 0);
         self.texture_rows
             .resize(texture_rows as usize, GpuMaterialTexture::default());
+        self.gpu_initialized = false;
     }
 
     /// Uploads the whole mirror (after a growth).
-    fn upload_all<Q: RenderQueue>(&self, queue: &Q) {
+    fn upload_all<Q: RenderQueue>(&mut self, queue: &Q) {
         let (Some(headers), Some(parameters), Some(textures)) =
             (self.headers, self.parameters, self.textures)
         else {
@@ -468,6 +478,7 @@ impl MaterialParameterBuffers {
         queue.write_buffer(headers, 0, &header_bytes(&self.rows));
         queue.write_buffer(parameters, 0, &word_bytes(&self.words));
         queue.write_buffer(textures, 0, &texture_bytes(&self.texture_rows));
+        self.gpu_initialized = true;
     }
 
     /// Uploads the given texture runs, batched into the span they cover.
