@@ -170,7 +170,7 @@ impl HeightfieldLodSeamPlan {
         morph_alpha: f32,
         limits: LodSeamLimits,
     ) -> Result<Self, LodSeamError> {
-        if segments < 2 || !segments.is_power_of_two() || segments % 2 != 0 {
+        if segments < 2 || !segments.is_power_of_two() || !segments.is_multiple_of(2) {
             return Err(LodSeamError::InvalidSegments);
         }
         if segments > limits.max_segments {
