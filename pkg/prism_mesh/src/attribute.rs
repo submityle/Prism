@@ -175,6 +175,45 @@ impl VertexAttributeValues {
         }
     }
 
+    /// Gathers typed values without conversion, preserving raw half/integer
+    /// bits, request order, and duplicates. Validates all indices before allocation.
+    #[must_use]
+    pub fn gather(&self, vertex_indices: &[u32]) -> Option<Self> {
+        if vertex_indices
+            .iter()
+            .any(|index| *index as usize >= self.len())
+        {
+            return None;
+        }
+        vertex_indices
+            .len()
+            .checked_mul(self.format().size() as usize)?;
+        macro_rules! gather {
+            ($values:expr, $variant:ident) => {
+                Self::$variant(
+                    vertex_indices
+                        .iter()
+                        .map(|index| $values[*index as usize])
+                        .collect(),
+                )
+            };
+        }
+        Some(match self {
+            Self::Float32(v) => gather!(v, Float32),
+            Self::Float32x2(v) => gather!(v, Float32x2),
+            Self::Float32x3(v) => gather!(v, Float32x3),
+            Self::Float32x4(v) => gather!(v, Float32x4),
+            Self::Float16x2(v) => gather!(v, Float16x2),
+            Self::Float16x4(v) => gather!(v, Float16x4),
+            Self::Uint32(v) => gather!(v, Uint32),
+            Self::Uint32x2(v) => gather!(v, Uint32x2),
+            Self::Uint32x4(v) => gather!(v, Uint32x4),
+            Self::Sint32(v) => gather!(v, Sint32),
+            Self::Unorm8x4(v) => gather!(v, Unorm8x4),
+            Self::Snorm8x4(v) => gather!(v, Snorm8x4),
+        })
+    }
+
     /// Gathers the requested vertices into tightly packed little-endian bytes.
     ///
     /// Request order and repeated indices are preserved. Returns `None` if an
@@ -262,6 +301,48 @@ impl VertexAttributeValues {
         match self {
             Self::Float32x3(values) => Some(values),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_gather_preserves_bits_order_duplicates_and_empty_for_all_formats() {
+        // Gathering is byte-preserving, even for data the later Mesh validator
+        // will reject (NaN payloads). It must not numerically convert values.
+        let nan = f32::from_bits(0x7fc0_1234);
+        let values = [
+            VertexAttributeValues::Float32(vec![-0.0, nan]),
+            VertexAttributeValues::Float32x2(vec![[-0.0, nan], [f32::MIN, f32::MAX]]),
+            VertexAttributeValues::Float32x3(vec![[-0.0, nan, 1.0], [2.0; 3]]),
+            VertexAttributeValues::Float32x4(vec![[-0.0, nan, 1.0, -2.0], [2.0; 4]]),
+            VertexAttributeValues::Float16x2(vec![[0x8000, 0x7e01], [0x0001, 0x7bff]]),
+            VertexAttributeValues::Float16x4(vec![[0x8000, 0x7e01, 0x0001, 0x7bff], [0; 4]]),
+            VertexAttributeValues::Uint32(vec![0, u32::MAX]),
+            VertexAttributeValues::Uint32x2(vec![[0, u32::MAX], [7, 9]]),
+            VertexAttributeValues::Uint32x4(vec![[0, u32::MAX, 1, 2], [7; 4]]),
+            VertexAttributeValues::Sint32(vec![i32::MIN, i32::MAX]),
+            VertexAttributeValues::Unorm8x4(vec![[0, 1, 128, 255], [7; 4]]),
+            VertexAttributeValues::Snorm8x4(vec![[-128, -127, 0, 127], [7; 4]]),
+        ];
+        for values in values {
+            let gathered = values.gather(&[1, 0, 1]).unwrap();
+            assert_eq!(gathered.format(), values.format());
+            assert_eq!(gathered.len(), 3);
+            assert_eq!(
+                gathered.gather_bytes(&[0, 1, 2]),
+                values.gather_bytes(&[1, 0, 1])
+            );
+            assert!(values.gather(&[0, 2]).is_none());
+            assert!(values.gather(&[u32::MAX]).is_none());
+            let empty = values.gather(&[]).unwrap();
+            assert!(empty.is_empty());
+            assert_eq!(empty.format(), values.format());
+            assert!(empty.gather(&[0]).is_none());
+            assert!(empty.gather(&[]).unwrap().is_empty());
         }
     }
 }

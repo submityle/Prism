@@ -220,26 +220,7 @@ pub fn decode_cluster_payload(
         }
         positions.push(position);
     }
-    let squared_error: f64 = (0..3)
-        .map(|axis| {
-            let min = f64::from(stored_min[axis]);
-            let max = f64::from(stored_max[axis]);
-            if min == max {
-                return 0.0;
-            }
-            let half_step = (max - min) / (2.0 * f64::from(u16::MAX));
-            // Include conversion-to-f32 rounding, including subnormal coordinates.
-            let rounding =
-                min.abs().max(max.abs()) * f64::from(f32::EPSILON) + f64::from(f32::from_bits(1));
-            (half_step + rounding).powi(2)
-        })
-        .sum();
-    let rounded_error = squared_error as f32;
-    let max_error_squared = if f64::from(rounded_error) < squared_error {
-        f32::from_bits(rounded_error.to_bits() + 1)
-    } else {
-        rounded_error
-    };
+    let max_error_squared = cluster_position_error_squared(bounds)?;
     let mut indices = Vec::with_capacity(triangle_count * 3);
     for _ in 0..triangle_count * 3 {
         let index = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
@@ -256,6 +237,49 @@ pub fn decode_cluster_payload(
         attributes,
         max_error_squared,
     })
+}
+
+/// Conservative position displacement for the CLST local-u16 codec, including
+/// f32 reconstruction rounding. Shared by offline error metadata and decoding.
+pub fn cluster_position_error(bounds: SceneBounds) -> Result<f32, ClusterPayloadError> {
+    Ok(round_up(position_error_squared_f64(bounds)?.sqrt()))
+}
+
+/// Squared displacement bound. Infinity denotes a valid coordinate range whose
+/// squared error is not representable in f32; use [`cluster_position_error`]
+/// when the unsquared distance is required.
+pub fn cluster_position_error_squared(bounds: SceneBounds) -> Result<f32, ClusterPayloadError> {
+    Ok(round_up(position_error_squared_f64(bounds)?))
+}
+
+fn position_error_squared_f64(bounds: SceneBounds) -> Result<f64, ClusterPayloadError> {
+    if !bounds_finite(bounds) {
+        return Err(ClusterPayloadError::NonFinite);
+    }
+    let (min, max) = bounds_min_max(bounds);
+    Ok((0..3)
+        .map(|axis| {
+            let min = f64::from(min[axis]);
+            let max = f64::from(max[axis]);
+            if min == max {
+                return 0.0;
+            }
+            let half_step = (max - min) / (2.0 * f64::from(u16::MAX));
+            // Include conversion-to-f32 rounding, including subnormal coordinates.
+            let rounding =
+                min.abs().max(max.abs()) * f64::from(f32::EPSILON) + f64::from(f32::from_bits(1));
+            (half_step + rounding).powi(2)
+        })
+        .sum())
+}
+
+fn round_up(value: f64) -> f32 {
+    let rounded_error = value as f32;
+    if f64::from(rounded_error) < value {
+        f32::from_bits(rounded_error.to_bits() + 1)
+    } else {
+        rounded_error
+    }
 }
 
 fn bounds_min_max(bounds: SceneBounds) -> ([f32; 3], [f32; 3]) {
@@ -379,5 +403,74 @@ mod tests {
             f32::INFINITY,
             "unrepresentable squared bounds remain conservative"
         );
+        let distance = cluster_position_error(bounds).unwrap();
+        assert!(distance.is_finite() && distance > 0.0);
+        assert_eq!(cluster_position_error_squared(bounds), Ok(f32::INFINITY));
+    }
+
+    #[test]
+    fn shared_position_bounds_cover_reconstruction_at_every_scale() {
+        for extent in [f32::from_bits(8), 1.0e-30, 1.0, 1.0e30, f32::MAX * 0.5] {
+            let bounds = SceneBounds {
+                center: [0.0; 3],
+                half_extents: [extent; 3],
+                radius: extent,
+                _padding: 0.0,
+            };
+            let source: Vec<_> = (0..64)
+                .map(|i| {
+                    let x = -1.0 + 2.0 * f64::from(i) / 63.0;
+                    [
+                        (f64::from(extent) * x) as f32,
+                        (f64::from(extent) * x * 0.37) as f32,
+                        (f64::from(extent) * x * -0.81) as f32,
+                    ]
+                })
+                .collect();
+            let payload = encode_cluster_payload(bounds, &source, &[0, 1, 2]).unwrap();
+            let decoded = decode_cluster_payload(bounds, &payload).unwrap();
+            assert_eq!(
+                decoded.max_error_squared,
+                cluster_position_error_squared(bounds).unwrap()
+            );
+            let limit = f64::from(cluster_position_error(bounds).unwrap()).powi(2);
+            assert!(limit > 0.0 && limit.is_finite());
+            for (expected, actual) in source.iter().zip(decoded.positions) {
+                let actual_error: f64 = (0..3)
+                    .map(|axis| (f64::from(expected[axis]) - f64::from(actual[axis])).powi(2))
+                    .sum();
+                assert!(actual_error <= limit, "{extent}: {actual_error} > {limit}");
+            }
+        }
+        let point = SceneBounds {
+            half_extents: [0.0; 3],
+            ..bounds()
+        };
+        assert_eq!(cluster_position_error(point), Ok(0.0));
+        assert_eq!(cluster_position_error_squared(point), Ok(0.0));
+        for invalid in [
+            SceneBounds {
+                radius: f32::NAN,
+                ..bounds()
+            },
+            SceneBounds {
+                half_extents: [-1.0; 3],
+                ..bounds()
+            },
+            SceneBounds {
+                center: [f32::MAX; 3],
+                half_extents: [f32::MAX; 3],
+                ..bounds()
+            },
+        ] {
+            assert_eq!(
+                cluster_position_error(invalid),
+                Err(ClusterPayloadError::NonFinite)
+            );
+            assert_eq!(
+                cluster_position_error_squared(invalid),
+                Err(ClusterPayloadError::NonFinite)
+            );
+        }
     }
 }

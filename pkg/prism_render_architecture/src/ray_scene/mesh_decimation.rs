@@ -55,12 +55,20 @@ use core::cmp::Reverse;
 
 use super::triangle_mesh::{TriangleMesh, TriangleMeshError};
 
+mod vertex_preserving;
+pub use vertex_preserving::{
+    decimate_preserving_vertices, DecimationChannel, VertexDecimationConstraints,
+    VertexPreservingDecimation,
+};
+
 /// Failure modes of [`decimate`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecimationError {
     /// The requested triangle target was zero; a mesh must keep at least one
     /// triangle to remain a surface.
     ZeroTarget,
+    /// A constraint/channel has invalid dimensions, weights, or finite values.
+    InvalidConstraints(&'static str),
     /// Rebuilding the simplified [`TriangleMesh`] failed. Carries the
     /// propagated [`TriangleMeshError`]; by construction the compacted pools
     /// are valid, so this is not expected in practice.
@@ -74,6 +82,7 @@ impl core::fmt::Display for DecimationError {
             Self::ZeroTarget => {
                 write!(f, "decimation target must be at least one triangle")
             }
+            Self::InvalidConstraints(field) => write!(f, "invalid decimation {field}"),
             Self::Rebuild(err) => {
                 write!(f, "failed to rebuild decimated mesh: {err}")
             }
@@ -234,17 +243,17 @@ struct Collapse {
     drop: u32,
     /// Version stamp of `keep` when this entry was created; a mismatch on pop
     /// means the entry is stale.
-    keep_version: u32,
+    keep_version: u64,
     /// Version stamp of `drop` when this entry was created.
-    drop_version: u32,
+    drop_version: u64,
     /// The solved merged position, carried so pops avoid re-solving.
     target: [f64; 3],
 }
 
 impl PartialEq for Collapse {
-    /// Equality compares only the ordering key (the cost bits).
+    /// Equality uses the complete deterministic heap key.
     fn eq(&self, other: &Self) -> bool {
-        self.cost.to_bits() == other.cost.to_bits()
+        self.cmp(other).is_eq()
     }
 }
 
@@ -261,7 +270,12 @@ impl Ord for Collapse {
     /// Orders by `cost` using the IEEE total order so `NaN` never corrupts the
     /// heap; wrapped in [`Reverse`] at push time to make the heap a min-heap.
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.cost.total_cmp(&other.cost)
+        self.cost
+            .total_cmp(&other.cost)
+            .then_with(|| self.keep.cmp(&other.keep))
+            .then_with(|| self.drop.cmp(&other.drop))
+            .then_with(|| self.keep_version.cmp(&other.keep_version))
+            .then_with(|| self.drop_version.cmp(&other.drop_version))
     }
 }
 
@@ -279,7 +293,7 @@ struct Decimator {
     removed_vertex: Vec<bool>,
     /// Monotonic version stamp per vertex; bumped whenever a vertex's quadric
     /// or position changes so stale heap entries can be detected.
-    version: Vec<u32>,
+    version: Vec<u64>,
     /// Face vertex triples; retired faces are marked in `removed_face`.
     faces: Vec<[u32; 3]>,
     /// `true` once a face has collapsed to zero area and been dropped.
@@ -612,11 +626,11 @@ fn add_boundary_quadrics(
     positions: &[[f64; 3]],
     quadrics: &mut [Quadric],
 ) {
-    use std::collections::HashMap;
+    use alloc::collections::BTreeMap;
 
     // Count how many live faces reference each undirected edge, and remember
     // one face normal per edge for the perpendicular virtual plane.
-    let mut edge_use: HashMap<(u32, u32), (u32, [f64; 3])> = HashMap::new();
+    let mut edge_use: BTreeMap<(u32, u32), (u32, [f64; 3])> = BTreeMap::new();
     for (fid, tri) in faces.iter().enumerate() {
         if removed_face[fid] {
             continue;

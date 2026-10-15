@@ -88,12 +88,14 @@ pub use virtual_geometry_builder::{
     STATIC_CLUSTER_PAYLOAD_MAGIC, STATIC_CLUSTER_PAYLOAD_VERSION,
 };
 pub use virtual_geometry_lod::{
-    build_static_virtual_geometry_lod_chain, StaticVirtualGeometryLod,
-    StaticVirtualGeometryLodError, StaticVirtualGeometryLodSet,
+    build_static_virtual_geometry_lod_chain, build_static_virtual_geometry_lod_chain_with_policy,
+    LodAttributeMetric, LodAttributePolicy, StaticLodPolicy, StaticVirtualGeometryLod,
+    StaticVirtualGeometryLodError, StaticVirtualGeometryLodSet, STATIC_LOD_ALGORITHM_VERSION,
 };
 pub use virtual_geometry_payload::{
-    decode_cluster_payload, encode_cluster_payload, encode_cluster_payload_with_attributes,
-    ClusterPayloadError, ClusterVertexAttribute, QuantizedClusterPayload, MAX_CLUSTER_ATTRIBUTES,
+    cluster_position_error, cluster_position_error_squared, decode_cluster_payload,
+    encode_cluster_payload, encode_cluster_payload_with_attributes, ClusterPayloadError,
+    ClusterVertexAttribute, QuantizedClusterPayload, MAX_CLUSTER_ATTRIBUTES,
     MAX_CLUSTER_ATTRIBUTE_NAME_BYTES, POSITION_ONLY_CLUSTER_PAYLOAD_VERSION,
     STATIC_CLUSTER_PAYLOAD_MAGIC as QUANTIZED_CLUSTER_PAYLOAD_MAGIC,
     STATIC_CLUSTER_PAYLOAD_VERSION as QUANTIZED_CLUSTER_PAYLOAD_VERSION,

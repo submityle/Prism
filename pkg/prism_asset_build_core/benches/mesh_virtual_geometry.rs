@@ -42,6 +42,47 @@ fn source_mesh(triangle_count: usize) -> Mesh {
         .indexed(Indices::Uint32(indices))
 }
 
+fn attributed_grid(side: u32) -> Mesh {
+    let mut positions = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+    for y in 0..=side {
+        for x in 0..=side {
+            positions.push([x as f32, y as f32, 0.0]);
+            uvs.push([x as f32 / side as f32, y as f32 / side as f32]);
+        }
+    }
+    for y in 0..side {
+        for x in 0..side {
+            let a = y * (side + 1) + x;
+            indices.extend([a, a + 1, a + side + 2, a, a + side + 2, a + side + 1]);
+        }
+    }
+    let vertex_count = positions.len();
+    Mesh::new(PrimitiveTopology::TriangleList)
+        .with_attribute(
+            MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 0),
+            VertexAttributeValues::Float32x3(positions),
+        )
+        .unwrap()
+        .with_attribute(
+            MeshVertexAttribute::new("Vertex_Normal", VertexFormat::Float32x3, 1),
+            VertexAttributeValues::Float32x3(vec![[0.0, 0.0, 1.0]; vertex_count]),
+        )
+        .unwrap()
+        .with_attribute(
+            MeshVertexAttribute::new("Vertex_Uv", VertexFormat::Float32x2, 2),
+            VertexAttributeValues::Float32x2(uvs),
+        )
+        .unwrap()
+        .with_attribute(
+            MeshVertexAttribute::new("Vertex_Tangent", VertexFormat::Float32x4, 3),
+            VertexAttributeValues::Float32x4(vec![[1.0, 0.0, 0.0, 1.0]; vertex_count]),
+        )
+        .unwrap()
+        .indexed(Indices::Uint32(indices))
+}
+
 fn percentile(samples: &mut [u128], numerator: usize, denominator: usize) -> u128 {
     samples.sort_unstable();
     let index = ((samples.len() - 1) * numerator).div_ceil(denominator);
@@ -54,6 +95,10 @@ fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_TRIANGLES);
     assert!(triangles > 0, "PRISM_MESH_BENCH_TRIANGLES must be positive");
+    assert!(
+        triangles <= u32::MAX as usize / 3,
+        "triangle count exceeds index ABI"
+    );
     let source = source_mesh(triangles);
     let settings = StaticClusterBuildSettings::default();
 
@@ -69,10 +114,36 @@ fn main() {
         black_box(asset);
     }
 
-    let lod_source = source_mesh(triangles.min(256));
-    let lod_targets = [triangles.min(256) as u32, triangles.min(64).max(1) as u32];
+    let grid_side: u32 = env::var("PRISM_MESH_BENCH_GRID_SIDE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(32);
+    assert!(
+        (8..=512).contains(&grid_side),
+        "grid side must be in 8..=512"
+    );
+    let lod_source = attributed_grid(grid_side);
+    let faces = grid_side * grid_side * 2;
+    let lod_targets = [faces, faces / 2, faces / 4];
+    // Warm up before timing. Validate achieved counts: disconnected triangle
+    // soup can exercise the selector without ever exercising simplification.
     let lods = build_static_virtual_geometry_lod_chain(11, &lod_source, settings, &lod_targets)
         .expect("build LOD assets");
+    let actual: Vec<_> = lods.iter().map(|level| level.achieved_triangles).collect();
+    assert!(
+        actual.windows(2).all(|p| p[1] < p[0]),
+        "benchmark did not simplify"
+    );
+    let mut lod_build_samples = [0_u128; SAMPLES];
+    for sample in &mut lod_build_samples {
+        let start = Instant::now();
+        let rebuilt =
+            build_static_virtual_geometry_lod_chain(11, &lod_source, settings, &lod_targets)
+                .expect("build attributed LOD assets");
+        *sample = start.elapsed().as_nanos();
+        assert_eq!(rebuilt, lods, "LOD artifact must be deterministic");
+        black_box(rebuilt);
+    }
     let lod_set = StaticVirtualGeometryLodSet::new(lods).expect("index LOD assets");
     let mut lod_samples = [0_u128; SAMPLES];
     for sample in &mut lod_samples {
@@ -98,6 +169,9 @@ fn main() {
     println!("  clusters          : {cluster_count}");
     println!("  pages             : {page_count}");
     println!("  samples           : {SAMPLES}");
+    println!("  lod grid side     : {grid_side}");
+    println!("  lod targets       : {lod_targets:?}");
+    println!("  lod achieved      : {actual:?}");
     println!(
         "  build p50 ns      : {}",
         percentile(&mut build_samples, 50, 100)
@@ -111,15 +185,27 @@ fn main() {
         percentile(&mut build_samples, 99, 100)
     );
     println!(
-        "  lod p50 ns        : {}",
+        "  lod build p50 ns  : {}",
+        percentile(&mut lod_build_samples, 50, 100)
+    );
+    println!(
+        "  lod build p95 ns  : {}",
+        percentile(&mut lod_build_samples, 95, 100)
+    );
+    println!(
+        "  lod build p99 ns  : {}",
+        percentile(&mut lod_build_samples, 99, 100)
+    );
+    println!(
+        "  select x64 p50 ns : {}",
         percentile(&mut lod_samples, 50, 100)
     );
     println!(
-        "  lod p95 ns        : {}",
+        "  select x64 p95 ns : {}",
         percentile(&mut lod_samples, 95, 100)
     );
     println!(
-        "  lod p99 ns        : {}",
+        "  select x64 p99 ns : {}",
         percentile(&mut lod_samples, 99, 100)
     );
     println!("  gpu fields        : runtime capture required");

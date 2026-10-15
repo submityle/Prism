@@ -11,8 +11,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::virtual_geometry_payload::{
-    encode_cluster_payload_with_attributes, ClusterPayloadError, ClusterVertexAttribute,
-    MAX_CLUSTER_ATTRIBUTES, MAX_CLUSTER_ATTRIBUTE_NAME_BYTES,
+    cluster_position_error, encode_cluster_payload_with_attributes, ClusterPayloadError,
+    ClusterVertexAttribute, MAX_CLUSTER_ATTRIBUTES, MAX_CLUSTER_ATTRIBUTE_NAME_BYTES,
 };
 use prism_mesh::{
     content_hash, Mesh, MeshBounds, MeshError, MeshVertexAttribute, VertexAttributeValues,
@@ -333,7 +333,9 @@ fn abi_u32(value: usize, kind: &'static str) -> Result<u32, StaticClusterBuildEr
     u32::try_from(value).map_err(|_| StaticClusterBuildError::AbiCountOverflow(kind))
 }
 
-fn validate_settings(settings: StaticClusterBuildSettings) -> Result<(), StaticClusterBuildError> {
+pub(super) fn validate_settings(
+    settings: StaticClusterBuildSettings,
+) -> Result<(), StaticClusterBuildError> {
     if settings.page_size < 1024 || !settings.page_size.is_power_of_two() {
         return Err(StaticClusterBuildError::InvalidSettings("page_size"));
     }
@@ -350,7 +352,7 @@ fn validate_settings(settings: StaticClusterBuildSettings) -> Result<(), StaticC
     Ok(())
 }
 
-fn submesh_ranges(
+pub(super) fn submesh_ranges(
     mesh: &Mesh,
     index_count: u32,
 ) -> Result<Vec<(u32, u32, u16)>, StaticClusterBuildError> {
@@ -462,7 +464,9 @@ fn flush_cluster(
     let node_index = abi_u32(nodes.len(), "node")?;
     page_payload.extend_from_slice(&payload);
     let normal_cone = normal_cone(vertices, indices);
-    nodes.push(ClusterNode::leaf(bounds, 0.0, *page_key));
+    let position_error =
+        cluster_position_error(bounds).map_err(StaticClusterBuildError::InvalidPayload)?;
+    nodes.push(ClusterNode::leaf(bounds, position_error, *page_key));
     clusters.push(VirtualGeometryClusterRecord {
         node_index,
         page: *page_key,
@@ -585,7 +589,7 @@ fn normal_cone(vertices: &[[f32; 3]], indices: &[u16]) -> [f32; 4] {
     ]
 }
 
-fn settings_hash(settings: StaticClusterBuildSettings) -> [u8; 32] {
+pub(super) fn settings_hash(settings: StaticClusterBuildSettings) -> [u8; 32] {
     let mut bytes = [0u8; 9];
     bytes[0..4].copy_from_slice(&settings.page_size.to_le_bytes());
     bytes[4..6].copy_from_slice(&settings.max_vertices_per_cluster.to_le_bytes());
@@ -593,6 +597,8 @@ fn settings_hash(settings: StaticClusterBuildSettings) -> [u8; 32] {
     bytes[8] = settings.compression as u8;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"Prism.StaticClusterBuild.CLST");
+    // Algorithm revision: leaf errors include the position-codec displacement.
+    hasher.update(&2u32.to_le_bytes());
     hasher.update(&STATIC_CLUSTER_PAYLOAD_VERSION.to_le_bytes());
     hasher.update(&bytes);
     *hasher.finalize().as_bytes()
@@ -947,6 +953,51 @@ mod tests {
             asset.header.build_settings_hash,
             *blake3::hash(&old_settings).as_bytes()
         );
+        let mut previous = blake3::Hasher::new();
+        previous.update(b"Prism.StaticClusterBuild.CLST");
+        previous.update(&STATIC_CLUSTER_PAYLOAD_VERSION.to_le_bytes());
+        previous.update(&old_settings);
+        assert_ne!(
+            asset.header.build_settings_hash,
+            *previous.finalize().as_bytes()
+        );
+        let mut expected = blake3::Hasher::new();
+        expected.update(b"Prism.StaticClusterBuild.CLST");
+        expected.update(&2u32.to_le_bytes());
+        expected.update(&STATIC_CLUSTER_PAYLOAD_VERSION.to_le_bytes());
+        expected.update(&old_settings);
+        assert_eq!(
+            asset.header.build_settings_hash,
+            *expected.finalize().as_bytes()
+        );
+    }
+
+    #[test]
+    fn cluster_leaf_error_includes_shared_position_quantization_bound() {
+        let source = mesh(20);
+        let asset =
+            build_static_virtual_geometry(18, &source, StaticClusterBuildSettings::default())
+                .unwrap();
+        for cluster in &asset.clusters {
+            let page = asset
+                .pages
+                .iter()
+                .find(|p| p.record.key == cluster.page)
+                .unwrap();
+            let payload = &page.payload[cluster.payload_offset as usize
+                ..(cluster.payload_offset + cluster.payload_size) as usize];
+            let decoded = crate::decode_cluster_payload(cluster.bounds, payload).unwrap();
+            let node = &asset.nodes[cluster.node_index as usize];
+            assert!(node.self_error > 0.0);
+            assert_eq!(
+                node.self_error,
+                cluster_position_error(cluster.bounds).unwrap()
+            );
+            assert_eq!(
+                decoded.max_error_squared,
+                crate::cluster_position_error_squared(cluster.bounds).unwrap()
+            );
+        }
     }
 
     #[test]

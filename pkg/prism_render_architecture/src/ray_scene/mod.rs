@@ -888,7 +888,10 @@ pub use mesh_border_detection::{detect_borders, MeshBorders};
 pub use mesh_bounding_sphere::{bounding_sphere, BoundingSphere};
 pub use mesh_closest_point::{closest_point_on_mesh, MeshClosestPoint};
 pub use mesh_connected_components::{connected_components, split_components, MeshComponents};
-pub use mesh_decimation::{decimate, DecimationError};
+pub use mesh_decimation::{
+    decimate, decimate_preserving_vertices, DecimationChannel, DecimationError,
+    VertexDecimationConstraints, VertexPreservingDecimation,
+};
 pub use mesh_dihedral_cosine::{dihedral_cosines, DihedralCosines, DihedralEdge};
 pub use mesh_edge_length_stats::{edge_length_stats, EdgeLengthStats};
 pub use mesh_edge_split::{split_long_edges, MAX_PASSES as EDGE_SPLIT_MAX_PASSES};
