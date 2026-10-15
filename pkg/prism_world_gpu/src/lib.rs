@@ -24,7 +24,13 @@ pub use packing::{ClusterSoa, ProxySoa, SoaBufferPack};
 pub mod gpu;
 
 #[cfg(feature = "gpu")]
+pub mod resident;
+
+#[cfg(feature = "gpu")]
 pub use gpu::{AdapterEvidence, GpuAcquireError, GpuContext, GpuVisibility};
+
+#[cfg(feature = "gpu")]
+pub use resident::{GpuResidentError, GpuResidentVisibility};
 
 #[cfg(test)]
 mod tests {

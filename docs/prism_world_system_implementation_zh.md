@@ -37,6 +37,12 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 2026-10-15 跨沙盒实机结果通过：Apple M2、Metal、IntegratedGpu、无额外必需 feature；真实创建 pipeline、dispatch、map/readback，并逐项比较规范四字与原始屏幕误差。测试覆盖 5 个可见/不可见对象、129 个对象的 3-workgroup 尾部、LOD 阈值、量化半步/饱和与空输入。5 个对象上传 368 字节、读回 100 字节；一般非空上传量 `128 + 48×N`、读回量 `20×N`。测试严格拒绝缺少 adapter/device、CPU adapter 或未遵守 `WGPU_BACKEND`，不把跳过算通过。telemetry 耗时是主机墙钟，不是 GPU timestamp，也不构成吞吐或 P50/P95/P99 性能达标证据。
 
+### M4：固定容量 GPU 驻留与间接绘制
+
+`GpuResidentVisibility` 已提供一次资源分配、验证后增量写入、显式 dense prefix、camera/count 上传与纯 encode。GPU 输出唯一 source-slot compact 流和 `[vertex_count, visible_count, 0, 0]`，真实间接实例 draw 已通过像素验证；每个非空 64-lane 工作组只预留一次全局输出区间。生产 encode 不分配 GPU 资源、不上传、不 submit/wait/map/readback。逐帧必须先提交再上传或 encode 下一帧，不能累积多个不同 camera 的 encoder 后一起提交。
+
+2026-10-15 Apple M2/Metal 严格回归：库单测 7 项、visibility shader validation 1 项、parity 1 项、resident 3 项通过，harness all-target 与正常 workspace GPU lib clippy 通过 `-D warnings`。百万实例/75% 可见、release、8 预热+64 样本，主机 record+finish P50/P95/P99 为 21.167/33.125/35.625 µs，submit+wait 为 1371.750/1511.000/1619.583 µs；逻辑 buffer 72,000,144 字节，首次上传 48,000,128 字节，计时帧无上传/回读/绘制。不是 GPU timestamp、物理 VRAM 或完整产品帧时。API、复现方式、三档实测与未集成边界见 `prism_world_gpu_resident_zh.md`，不据此宣称 M4 全部完成。
+
 ### M4：可再生 CPU 散布 kernel
 
 - `prism_world_residency::scatter` 在全局整数毫米三维格中每格生成一个 hash-jitter 候选；显式 seed/version/salt 与完整结构化 candidate key 决定位置。半开位置范围负责唯一归属，负坐标使用 Euclidean 除法；任意拆分、合并和请求顺序不会改变成员集合。完整 cache key 包含 kernel 版本、配置与范围，丢弃后可重建，不充当持久对象身份。
@@ -160,7 +166,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。
-- GPU proxy 的真实 adapter、dispatch/readback 正确性已有上述 Apple M2/Metal 证据；P50/P95/P99 性能、显存峰值、多厂商/后端与 renderer 端到端集成仍未验收。
+- GPU proxy 已有 Apple M2/Metal parity、驻留 compact/真实间接绘制及限定 release P50/P95/P99 证据；物理显存峰值、多厂商/后端、完整产品性能与 renderer/sector 生命周期端到端集成仍未验收。
 
 这些边界已有明确契约和可运行基础；只有补齐对应真实运行时证据后，才从本节移除。
 

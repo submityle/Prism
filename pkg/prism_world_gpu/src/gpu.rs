@@ -16,7 +16,7 @@ use wgpu::{
 
 use crate::{ProxyInstance, ProxySoa, VisibilityInput, VisibilityOutput};
 
-const WORKGROUP_SIZE: u32 = 64;
+pub(crate) const WORKGROUP_SIZE: u32 = 64;
 
 /// Adapter/device acquisition failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,7 +175,7 @@ impl GpuContext {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct GpuParams {
+pub(crate) struct GpuParams {
     camera: [f32; 4],
     projection_scale: f32,
     max_distance: f32,
@@ -184,9 +184,34 @@ struct GpuParams {
     frustum: [[f32; 4]; 6],
 }
 
+impl GpuParams {
+    pub(crate) fn new(input: VisibilityInput, proxy_count: u32) -> Self {
+        Self {
+            camera: [
+                input.camera_position[0],
+                input.camera_position[1],
+                input.camera_position[2],
+                0.0,
+            ],
+            projection_scale: input.projection_scale,
+            max_distance: input.max_distance,
+            proxy_count,
+            reserved: 0,
+            frustum: input.frustum.map(|plane| {
+                [
+                    plane.normal[0],
+                    plane.normal[1],
+                    plane.normal[2],
+                    plane.distance,
+                ]
+            }),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct GpuRecord {
+pub(crate) struct GpuRecord {
     visible: u32,
     lod: u32,
     error_quantized: u32,
@@ -297,26 +322,7 @@ impl GpuVisibility {
             contents: bytemuck::cast_slice(&soa.metadata),
             usage: BufferUsages::STORAGE,
         });
-        let params = GpuParams {
-            camera: [
-                input.camera_position[0],
-                input.camera_position[1],
-                input.camera_position[2],
-                0.0,
-            ],
-            projection_scale: input.projection_scale,
-            max_distance: input.max_distance,
-            proxy_count: proxies.len() as u32,
-            reserved: 0,
-            frustum: input.frustum.map(|plane| {
-                [
-                    plane.normal[0],
-                    plane.normal[1],
-                    plane.normal[2],
-                    plane.distance,
-                ]
-            }),
-        };
+        let params = GpuParams::new(input, proxies.len() as u32);
         let params_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("prism_world_visibility_params"),
             contents: bytemuck::bytes_of(&params),
@@ -336,29 +342,18 @@ impl GpuVisibility {
             usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("prism_world_visibility_bind_group"),
-            layout: &self.layout,
-            entries: &[
-                buffer_binding(0, &params_buffer),
-                buffer_binding(1, &positions),
-                buffer_binding(2, &errors),
-                buffer_binding(3, &metadata),
-                buffer_binding(4, &output),
-            ],
-        });
+        let bind_group = self.bind_group(
+            device,
+            &params_buffer,
+            &positions,
+            &errors,
+            &metadata,
+            &output,
+        );
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_world_visibility_encoder"),
         });
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("prism_world_visibility_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dispatch_workgroups, 1, 1);
-        }
+        self.encode(&mut encoder, &bind_group, proxies.len() as u32);
         encoder.copy_buffer_to_buffer(&output, 0, &staging, 0, output_size);
         let dispatch_started = Instant::now();
         ctx.queue().submit([encoder.finish()]);
@@ -401,6 +396,45 @@ impl GpuVisibility {
         }
     }
 
+    pub(crate) fn bind_group(
+        &self,
+        device: &Device,
+        params: &Buffer,
+        positions: &Buffer,
+        errors: &Buffer,
+        metadata: &Buffer,
+        output: &Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&BindGroupDescriptor {
+            label: Some("prism_world_visibility_bind_group"),
+            layout: &self.layout,
+            entries: &[
+                buffer_binding(0, params),
+                buffer_binding(1, positions),
+                buffer_binding(2, errors),
+                buffer_binding(3, metadata),
+                buffer_binding(4, output),
+            ],
+        })
+    }
+
+    pub(crate) fn encode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        bind_group: &wgpu::BindGroup,
+        count: u32,
+    ) {
+        if count != 0 {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("prism_world_visibility_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(count.div_ceil(WORKGROUP_SIZE), 1, 1);
+        }
+    }
+
     /// Ensures the shader module remains owned alongside the pipeline.
     #[must_use]
     pub fn shader_module(&self) -> &wgpu::ShaderModule {
@@ -408,7 +442,7 @@ impl GpuVisibility {
     }
 }
 
-fn uniform_entry(binding: u32) -> BindGroupLayoutEntry {
+pub(crate) fn uniform_entry(binding: u32) -> BindGroupLayoutEntry {
     BindGroupLayoutEntry {
         binding,
         visibility: ShaderStages::COMPUTE,
@@ -421,7 +455,7 @@ fn uniform_entry(binding: u32) -> BindGroupLayoutEntry {
     }
 }
 
-fn storage_entry(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
+pub(crate) fn storage_entry(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
     BindGroupLayoutEntry {
         binding,
         visibility: ShaderStages::COMPUTE,
@@ -434,7 +468,7 @@ fn storage_entry(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
     }
 }
 
-fn buffer_binding(binding: u32, buffer: &Buffer) -> wgpu::BindGroupEntry<'_> {
+pub(crate) fn buffer_binding(binding: u32, buffer: &Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()),

@@ -13,11 +13,11 @@
 > - **全局距离场**：UE Global Distance Field / Lumen SDF（稀疏 brick + mip 环，一场多用）
 > 本文为纯经典数据结构 + 空间算法 + 流送调度路线（Morton/Hilbert、四叉/八叉树、CDLOD/clipmap、Transvoxel/Dual Contouring/SDF、domain warp 噪声、水力/热力侵蚀 PDE、泊松盘/蓝噪声、D8 流向、并查集、CRDT），**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/其他引擎源码或衍生代码。
 
-- 版本： v3.8（增加 IO 单请求/累计声明字节准入及终态消费后释放配额；增加全局整数格 CPU 散布、跨请求最小距离筛选、结构化 key 和工作量/输出预算。已有 f64 cube-sphere 行星网格、局部 f32 位置误差预算及 level-30 精度回归、有界 Q16.16 SDF 烘焙、heightfield 原生 Mesh 和 Metal 局部上传像素对拍。完整 GPU world scene/散布、资产解压/GPU 直传、多表示曲面提取、LOD 接缝和真实加密传输仍需独立运行时验收，证据见实现记录）
+- 版本： v3.9（增加固定容量 GPU proxy 驻留、增量上传、工作组聚合 compact 和真实间接绘制，附百万实例 Metal release 分位数；已有 IO 字节准入、全局整数格 CPU 散布、f64 cube-sphere 行星网格、有界 Q16.16 SDF 烘焙和原生 Mesh 局部上传像素对拍。完整 GPU world scene/散布、资产解压/GPU 直传、多表示产品接线、LOD 接缝和真实加密传输仍需独立运行时验收，证据见实现记录）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（作者内容单元 / spawn·despawn·materialize API / override delta / PersistentId，见 `prism_scene_design_zh.md`）、`prism_asset`（`StableGuid`/软引用/依赖闭包/单文件包/mmap/内容寻址）、`prism_ecs`（物化边界的批量预留/列写入）、`prism_transform`（层级）、`prism_tasks`（并行流送/烘焙）、`prism_math`（定点/空间编码/噪声）、`prism_diagnostic`（计数器/trace）；向上接 `prism_render`/`prism_physics`/`prism_gi`（经 GPU 常驻实例流 + ECS 物化两个边界，均已去 Bevy）
 - 层级定位： 基座层 L6；下接 `prism_scene`/`prism_asset`/`prism_ecs`，上驱动渲染/物理/GI；与 `prism_terrain_world_design_zh.md`（地形多表示细节）互为上下位
-- 明确约束：核心 `no_std + alloc`；`std`/`async_io`/`gpu_stream`/`persist`/`pcg`/`sim`/`sdf`/`planet`/`vgeo`/`vtex`/`bake_farm` 为 feature（网络相关 feature `network`/`server_mesh` 移至 `prism_network`）；工作区核心 crate `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**；GPU/IO 吞吐/显存/带宽仍是 design target，当前只把 `prism_world_gpu` 的 shader/dispatch/readback parity 作为真实设备证据，不把它扩大为完整性能结论
+- 明确约束：核心 `no_std + alloc`；`std`/`async_io`/`gpu_stream`/`persist`/`pcg`/`sim`/`sdf`/`planet`/`vgeo`/`vtex`/`bake_farm` 为 feature（网络相关 feature `network`/`server_mesh` 移至 `prism_network`）；工作区核心 crate `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**；产品 GPU/IO 吞吐、物理显存和带宽指标仍是 design target。真实设备证据包括 proxy parity、驻留 compact/间接绘制和 terrain 局部上传；限定实测不扩大为完整性能结论
 - 架构立场： **scene 是单一逻辑真相，世界系统是其上的流送/常驻/持久化基座，不另立平行真相源**；世界持久数据 = 确定性可再生的派生缓存 + override delta 事务日志
 - 烘焙归属： 本文所述“烘焙期”派生数据（空间索引 / HLOD 代理 / 全局 SDF / 导航网格 / 散布 proxy 列 / 烘焙 GI / PCG 产物）为 `OfflineShipped`，其 DAG、缓存键、DDC/CAS 归 `Prism Asset Build`（`prism_asset_build_design_zh.md` §2.7/§4.6/§12.8）；运行时破坏/编辑触发的局部重算为 `RuntimeDerived`，与离线路径共用同一 Bake Kernel（该文 §6.6）。逐项契约登记见 `prism_derived_data_contract_zh.md`（B 组 / C 组）
 
@@ -203,7 +203,7 @@ sector-local 坐标 = f32，相对所属 sector 原点
 - **相机相对渲染**：绘制时统一换算到「相机所在 sector 为临时原点」的 camera-relative f32，远物体用 double→float 的分段精度，无抖动。
 - **跨 sector 运动**：对象越界只改 `GlobalPos` 的 i64 并重算 local f32，是一次 O(1) 定点加减，无全局 rebasing，无其他对象受影响。
 
-定点编解码、sector 归属、local 换算都是 `prism_math` 的纯函数，**可单元测试、可确定性验证**（这是本文少数能在无 GPU 本机实测的部分）。
+定点编解码、sector 归属、local 换算都是 `prism_math` 的纯函数，**可单元测试、可确定性验证**，不依赖 GPU 环境。
 
 ### 5.3 Morton / Hilbert 空间近邻排序
 
@@ -345,7 +345,7 @@ scene template / manifest / override delta(CPU 路径, async_io):
 
 IO 子系统有显式带宽预算（design target，如 PCIe 4.0 NVMe ≈ 7 GB/s、直传解压后等效更高），残留引擎（§7）按此预算裁剪本帧 IO 指令；队列积压时产生背压，残留引擎自动降预取、降细节，保证热路径（交互半径）IO 优先完成。
 
-> IO/带宽/显存数字均为 design target；当前已在沙盒外 Apple M2 Metal 上验证 `prism_world_gpu` 的 proxy visibility/cull/LOD shader、dispatch 和 readback parity，但没有把该窄测试扩大为完整 world streaming 或性能实测。其余可验证部分包括 CPU 侧的调度、预算裁剪、PCG graph、durable recovery 与 scene ownership 单测。
+> 本节 IO/带宽/显存数字均为 design target。Apple M2/Metal 已验证 proxy visibility/cull/LOD parity、固定容量驻留/compact/真实间接绘制，以及 terrain 局部上传；驻留百万实例的限定 release 分位数见 `prism_world_gpu_resident_zh.md`，不是完整 world streaming、物理显存或产品帧时验收。其余证据包括 CPU 调度、预算裁剪、PCG graph、durable recovery、真实 archive 加载与 scene ownership 回归。
 
 ---
 
@@ -760,7 +760,7 @@ CPU 只按 sector 流送 proxy 列的加载/卸载（§7），实例的剔除/LO
 
 ## 22. 性能工程
 
-世界系统的性能目标：**稳定帧时、成本正比于变化、显存/带宽有预算上限、热路径零回读**。以下数字除 CPU 纯函数外均为 design target（本机无 GPU 与高速存储实测环境，如实标注）。
+世界系统的性能目标：**稳定帧时、成本正比于变化、显存/带宽有预算上限、热路径零回读**。以下数字仍为产品 design target；另有 CPU、缓存文件 IO 和 Apple M2/Metal 限定实测，见实现记录及对应专项文档，不能用局部测试替代这些目标。
 
 ### 22.1 预算矩阵（随 quality tier 调，§3）
 
@@ -789,7 +789,7 @@ CPU 只按 sector 流送 proxy 列的加载/卸载（§7），实例的剔除/LO
 - 显存分配：proxy 实例环、纹理流送池、SDF brick 池、几何池各有配额与 LRU 驱逐，远景先退。
 - 内容寻址去重（scene §8.5）：相同资产跨 cell 共享一份，省内存。
 
-> 可实测部分：定点坐标换算、sector 空间编码、需求集求解与预算裁剪、CRDT 合并、脏传播、稳定排序等 CPU 纯函数可单元测 + 基准（§27）。GPU/IO 吞吐、显存占用、帧时为 design target。
+> 已测范围：CPU 纯函数单测与基准（§27）、缓存文件 archive 链路、Metal proxy 驻留可见性和 terrain 离屏绘制。冷盘/资产包/GPU 直传吞吐、物理显存峰值与完整产品帧时仍为 design target。
 
 ---
 
@@ -1060,7 +1060,7 @@ schema 版本（scene）、PCG 图版本、算法版本、存档容器版本各�
 
 ### 27.3 诚实边界与风险
 
-- **无 GPU/高速存储实测**：GPU 直传吞吐、显存占用、proxy 绘制帧时、SDF 烘焙耗时、IO 带宽全为 design target，标注清楚，待目标硬件校准（§8.3、§22）。
+- **限定实测与产品门槛分开**：已有 Metal proxy compute/间接绘制、terrain 局部上传、CPU SDF 烘焙与缓存文件 IO 的实测证据；GPU 直传吞吐、物理显存峰值、产品 proxy 绘制帧时、冷盘/资产包 IO 带宽仍为 design target，需目标硬件和真实内容校准（§8.3、§22）。
 - **行星尺度未端到端验证**：cube-sphere + i64 定点在逻辑上消抖，但「轨道到地表全链路无缝 + 多人确定性」需真实工程迭代。
 - **仿真规模权衡**：侵蚀/破坏/生态的实时规模受预算约束，大世界多为离线烘焙 + 局部实时（§16.5）。
 - **CRDT 结构性冲突**：属性/增删可自动合并，深层结构冲突（同对象被删又被改）需策略或人工介入（§11.3）。
