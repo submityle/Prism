@@ -45,6 +45,7 @@
 
 #![cfg(feature = "std")]
 
+use crate::cycle_collector;
 use crate::dependency::{DependencyError, DependencyGraph};
 use crate::error::{AssetError, ErrorRegistry};
 use crate::guid::StableGuid;
@@ -129,13 +130,22 @@ struct AssetServerInner {
     catalog: BTreeMap<StableGuid, AssetPath>,
     /// `owner -> strong handles it keeps alive` (its labeled sub-assets and its
     /// successfully wired dependencies, transitively). Replacing an entry on
-    /// reload drops the previous closure's strong refs.
+    /// reload drops the previous closure's strong refs. Every reserved slot has
+    /// an entry, even with no dependencies, so graph cleanup follows arena
+    /// reclamation rather than path visibility or ownership promotion.
     retained: BTreeMap<UntypedAssetId, Vec<UntypedHandle>>,
+    /// `asset id -> weak owner handle`, used to distinguish external roots
+    /// whose allocation is not currently present in another retained vector.
+    owner_weaks: BTreeMap<UntypedAssetId, UntypedWeakHandle>,
     /// Labels whose lifetime has been promoted from their source revision to
     /// the label itself. This records promotions that happen recursively while
     /// the source is still assembling, before its retained closure is
     /// published.
     promoted_labels: BTreeMap<UntypedAssetId, UntypedAssetId>,
+    /// Ownership transfers made while the current synchronous candidate is
+    /// being assembled. A failed candidate rolls back only its own suffix.
+    promotion_journal: Vec<PromotionRecord>,
+    promotion_depth: usize,
     /// Epoch arbitration for reload results. It is also useful to async
     /// callers that decode outside this server's state mutex.
     reload_epoch: ReloadEpoch,
@@ -155,6 +165,19 @@ struct StagedLabeledAsset {
     value: Box<dyn core::any::Any + Send>,
     dependencies: Vec<UntypedHandle>,
     handle: UntypedHandle,
+}
+
+/// Captures one source/label ownership transfer while a candidate revision is
+/// being assembled. A failed candidate must undo only transfers made by that
+/// candidate; nested loads that successfully commit own their own journal
+/// scope and discard it at their commit boundary.
+struct PromotionRecord {
+    label_id: UntypedAssetId,
+    source_id: UntypedAssetId,
+    label: UntypedHandle,
+    previous_promoted: Option<UntypedAssetId>,
+    source_had_label: bool,
+    label_had_source: bool,
 }
 
 impl AssetServer {
@@ -202,6 +225,8 @@ impl AssetServer {
             .reserve_by_type(type_id)
             .ok_or_else(|| format!("asset arena unavailable for {path}"))?;
         let id = handle.id();
+        inner.retained.entry(id).or_default();
+        inner.owner_weaks.insert(id, handle.downgrade());
         inner.interned.insert(path.clone(), handle.downgrade());
         inner
             .catalog
@@ -321,7 +346,13 @@ impl AssetServer {
         }
         inner.graph = candidate;
         let _ = inner.graph.set_self_state(plan.id, LoadState::Loaded);
-        inner.retained.insert(plan.id, dependencies);
+        inner.retained.insert(
+            plan.id,
+            dependencies
+                .into_iter()
+                .filter(|dependency| dependency.id() != plan.id)
+                .collect(),
+        );
         Ok(plan.handle)
     }
 
@@ -376,7 +407,13 @@ impl AssetServer {
                 .map_err(|error| AsyncReloadCommitError::Rejected(error.to_string()))?;
             inner.graph = candidate;
             let _ = inner.graph.set_self_state(id, LoadState::Loaded);
-            inner.retained.insert(id, dependencies);
+            inner.retained.insert(
+                id,
+                dependencies
+                    .into_iter()
+                    .filter(|dependency| dependency.id() != id)
+                    .collect(),
+            );
             Ok(handle.clone())
         }) {
             ReloadCommit::Committed(result) => result,
@@ -415,7 +452,10 @@ impl AssetServer {
                 interned: BTreeMap::new(),
                 catalog: BTreeMap::new(),
                 retained: BTreeMap::new(),
+                owner_weaks: BTreeMap::new(),
                 promoted_labels: BTreeMap::new(),
+                promotion_journal: Vec::new(),
+                promotion_depth: 0,
                 reload_epoch: ReloadEpoch::new(),
                 reload_epochs: BTreeMap::new(),
                 source_revision: 0,
@@ -856,6 +896,8 @@ impl AssetServerInner {
         //    this path finds the in-flight handle in step 1.
         let handle = self.stores.reserve_by_type(type_id)?;
         let id = handle.id();
+        self.retained.entry(id).or_default();
+        self.owner_weaks.insert(id, handle.downgrade());
 
         // 4. Intern (weak) and catalog before decoding.
         self.interned.insert(path.clone(), handle.downgrade());
@@ -880,6 +922,29 @@ impl AssetServerInner {
     fn promote_label_ownership(&mut self, label: &UntypedHandle, source: &UntypedHandle) {
         let source_id = source.id();
         let label_id = label.id();
+        // A later resolution must not remove a reference installed as a real
+        // dependency after the initial source-owned reference was transferred.
+        if self.promoted_labels.get(&label_id) == Some(&source_id) {
+            return;
+        }
+        let source_had_label = self
+            .retained
+            .get(&source_id)
+            .is_some_and(|retained| retained.iter().any(|handle| handle.id() == label_id));
+        let label_had_source = self
+            .retained
+            .get(&label_id)
+            .is_some_and(|retained| retained.iter().any(|handle| handle.id() == source_id));
+        if self.promotion_depth != 0 {
+            self.promotion_journal.push(PromotionRecord {
+                label_id,
+                source_id,
+                label: label.clone(),
+                previous_promoted: self.promoted_labels.get(&label_id).copied(),
+                source_had_label,
+                label_had_source,
+            });
+        }
         if let Some(retained) = self.retained.get_mut(&source_id) {
             retained.retain(|handle| handle.id() != label_id);
         }
@@ -895,8 +960,47 @@ impl AssetServerInner {
     /// slot looking permanently in-flight.
     fn finalize_safe(&mut self, path: AssetPath, id: UntypedAssetId, type_id: AssetTypeId) {
         let failure_path = path.clone();
-        if catch_unwind(AssertUnwindSafe(|| self.finalize(path, id, type_id))).is_err() {
+        let checkpoint = self.promotion_journal.len();
+        self.promotion_depth += 1;
+        let result = catch_unwind(AssertUnwindSafe(|| self.finalize(path, id, type_id)));
+        let committed = matches!(&result, Ok(true));
+        if !committed {
+            self.rollback_promotions(checkpoint);
+        } else {
+            self.promotion_journal.truncate(checkpoint);
+        }
+        if result.is_err() {
             self.fail(id, &failure_path, "asset source or loader panicked");
+        }
+        self.promotion_depth -= 1;
+    }
+
+    fn rollback_promotions(&mut self, checkpoint: usize) {
+        while self.promotion_journal.len() > checkpoint {
+            let record = self
+                .promotion_journal
+                .pop()
+                .expect("journal length checked");
+            if let Some(previous) = record.previous_promoted {
+                self.promoted_labels.insert(record.label_id, previous);
+            } else {
+                self.promoted_labels.remove(&record.label_id);
+            }
+            if record.source_had_label {
+                if let Some(source_retained) = self.retained.get_mut(&record.source_id) {
+                    if !source_retained
+                        .iter()
+                        .any(|handle| handle.id() == record.label_id)
+                    {
+                        source_retained.push(record.label.clone());
+                    }
+                }
+            }
+            if !record.label_had_source {
+                if let Some(label_retained) = self.retained.get_mut(&record.label_id) {
+                    label_retained.retain(|handle| handle.id() != record.source_id);
+                }
+            }
         }
     }
 
@@ -905,14 +1009,14 @@ impl AssetServerInner {
     /// fulfills the reserved slot `id`. A first-load failure transitions the
     /// slot to [`LoadState::Failed`] with a recorded [`AssetError`]; a reload
     /// failure keeps the existing ready payload and restores `Loaded` state.
-    fn finalize(&mut self, path: AssetPath, id: UntypedAssetId, type_id: AssetTypeId) {
+    fn finalize(&mut self, path: AssetPath, id: UntypedAssetId, type_id: AssetTypeId) -> bool {
         let had_ready_value = matches!(self.stores.load_state(id), LoadState::Loaded);
         let previous_labels = self.labels_for_source(&path);
         let bytes = match self.sources.read(&path) {
             Ok(bytes) => bytes,
             Err(err) => {
                 self.fail(id, &path, err.to_string());
-                return;
+                return false;
             }
         };
 
@@ -922,13 +1026,13 @@ impl AssetServerInner {
             Ok(output) => output,
             Err(err) => {
                 self.fail(id, &path, err.to_string());
-                return;
+                return false;
             }
         };
         let FullLoadOutput { primary, labeled } = output;
         if primary.type_id != type_id {
             self.fail(id, &path, "loader produced an unexpected asset type");
-            return;
+            return false;
         }
         let ErasedLoadedAsset {
             value,
@@ -953,7 +1057,7 @@ impl AssetServerInner {
                     &path,
                     alloc::format!("dependency could not be resolved: {}", dep.path),
                 );
-                return;
+                return false;
             };
             if self.stores.load_state(dep_handle.id()).is_failed() {
                 self.fail(
@@ -961,7 +1065,7 @@ impl AssetServerInner {
                     &path,
                     alloc::format!("dependency failed to load: {}", dep.path),
                 );
-                return;
+                return false;
             }
             dependency_ids.push(dep_handle.id());
             dependency_handles.push(dep_handle);
@@ -978,7 +1082,7 @@ impl AssetServerInner {
             if !label_paths.insert(sub_path.clone()) {
                 self.rollback_staged_labels(&provisional_labels);
                 self.fail(id, &path, "loader emitted a duplicate labeled asset");
-                return;
+                return false;
             }
             let handle = if let Some(existing) = self
                 .interned
@@ -992,7 +1096,7 @@ impl AssetServerInner {
                         &path,
                         alloc::format!("labeled asset type changed at {} during reload", sub_path),
                     );
-                    return;
+                    return false;
                 }
                 existing
             } else {
@@ -1000,8 +1104,10 @@ impl AssetServerInner {
                 let Some(handle) = self.stores.reserve_by_type(sub.type_id) else {
                     self.rollback_staged_labels(&provisional_labels);
                     self.fail(id, &path, "labeled asset arena unavailable");
-                    return;
+                    return false;
                 };
+                self.retained.entry(handle.id()).or_default();
+                self.owner_weaks.insert(handle.id(), handle.downgrade());
                 self.interned.insert(sub_path.clone(), handle.downgrade());
                 self.catalog.insert(
                     StableGuid::from_path(&sub_path.to_string()),
@@ -1021,7 +1127,7 @@ impl AssetServerInner {
                         &path,
                         alloc::format!("labeled dependency could not be resolved: {}", dep.path),
                     );
-                    return;
+                    return false;
                 };
                 if self.stores.load_state(dep_handle.id()).is_failed() {
                     self.rollback_staged_labels(&provisional_labels);
@@ -1030,7 +1136,7 @@ impl AssetServerInner {
                         &path,
                         alloc::format!("labeled dependency failed to load: {}", dep.path),
                     );
-                    return;
+                    return false;
                 }
                 label_dependency_ids.push(dep_handle.id());
                 label_dependencies.push(dep_handle);
@@ -1049,7 +1155,11 @@ impl AssetServerInner {
         // complete candidate revision to that latest graph snapshot.
         let mut candidate_graph = self.graph.clone();
         match candidate_graph.replace_dependencies(id, dependency_ids.clone()) {
-            Ok(()) => retained.extend(dependency_handles),
+            Ok(()) => retained.extend(
+                dependency_handles
+                    .into_iter()
+                    .filter(|dependency| dependency.id() != id),
+            ),
             Err(DependencyError::Cycle { participants }) if had_ready_value => {
                 self.rollback_staged_labels(&provisional_labels);
                 self.fail(
@@ -1060,7 +1170,7 @@ impl AssetServerInner {
                         participants.len()
                     ),
                 );
-                return;
+                return false;
             }
             Err(DependencyError::Cycle { .. }) => {
                 // Initial loads tolerate a cycle by dropping offending edges;
@@ -1068,9 +1178,10 @@ impl AssetServerInner {
                 for (dependency_id, dependency_handle) in
                     dependency_ids.iter().copied().zip(dependency_handles)
                 {
-                    if candidate_graph
-                        .try_add_dependency(id, dependency_id)
-                        .is_ok()
+                    if dependency_id != id
+                        && candidate_graph
+                            .try_add_dependency(id, dependency_id)
+                            .is_ok()
                     {
                         retained.push(dependency_handle);
                     }
@@ -1099,7 +1210,7 @@ impl AssetServerInner {
                         participants.len()
                     ),
                 );
-                return;
+                return false;
             }
         }
 
@@ -1115,10 +1226,17 @@ impl AssetServerInner {
                     "staged labeled asset type mismatch",
                 );
                 self.fail(id, &path, "staged labeled asset could not be committed");
-                return;
+                return false;
             }
             let _ = self.graph.set_self_state(staged.id, LoadState::Loaded);
-            retained.extend(staged.dependencies);
+            // Label dependencies are hoisted to their source's closure. A
+            // dependency on that source must not become a source self-ref.
+            retained.extend(
+                staged
+                    .dependencies
+                    .into_iter()
+                    .filter(|dependency| dependency.id() != id && dependency.id() != staged.id),
+            );
             // Keep the label alive through its source until a real label
             // consumer takes ownership via `promote_label_ownership`. This is
             // required because the intern table is intentionally weak.
@@ -1134,8 +1252,12 @@ impl AssetServerInner {
                 // closure's strong references deterministically.
                 self.retained.insert(id, retained);
                 self.retire_removed_labels(&path, &previous_labels, &label_paths);
+                true
             }
-            Err(err) => self.fail(id, &path, err.to_string()),
+            Err(err) => {
+                self.fail(id, &path, err.to_string());
+                return false;
+            }
         }
     }
 
@@ -1163,6 +1285,7 @@ impl AssetServerInner {
                 "labeled asset staging rolled back",
             ));
             let _ = self.stores.fail_erased(*id, error);
+            let _ = self.graph.set_self_state(*id, LoadState::Failed(error));
             self.promoted_labels.remove(id);
         }
     }
@@ -1208,7 +1331,9 @@ impl AssetServerInner {
             if let Some(retained) = self.retained.get_mut(&source_id) {
                 retained.retain(|handle| handle.id() != *label_id);
             }
-            self.retained.remove(label_id);
+            // Release the old ownership closure now, but keep the GC key:
+            // external handles must observe Failed until their slot is freed.
+            self.retained.entry(*label_id).or_default().clear();
             self.promoted_labels.remove(label_id);
             let guid = StableGuid::from_path(&label_path.to_string());
             if self.catalog.get(&guid) == Some(label_path) {
@@ -1250,6 +1375,8 @@ impl AssetServerInner {
         self.stores.register::<A>();
         let handle = self.stores.reserve::<A>();
         let id = handle.id();
+        self.retained.entry(id).or_default();
+        self.owner_weaks.insert(id, handle.downgrade());
         self.graph.add_asset(id);
         let eid = self.errors.record(AssetError::new("<unresolved>", reason));
         self.stores.fail_erased(id, eid);
@@ -1281,6 +1408,7 @@ impl AssetServerInner {
             .collect();
         for id in &dead_owners {
             self.retained.remove(id);
+            self.owner_weaks.remove(id);
             self.graph.remove_asset(*id);
         }
 
@@ -1295,10 +1423,16 @@ impl AssetServerInner {
     fn collect_releases(&mut self) -> usize {
         let mut total = 0;
         loop {
+            let collected_cycle = cycle_collector::collect_promoted_cycles(
+                &mut self.retained,
+                &self.promoted_labels,
+                &self.owner_weaks,
+                &self.stores,
+            );
             let reclaimed = self.stores.collect_releases();
             let pruned = self.prune_dead();
             total += reclaimed;
-            if reclaimed == 0 && !pruned {
+            if reclaimed == 0 && !pruned && !collected_cycle {
                 break;
             }
         }

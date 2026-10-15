@@ -62,6 +62,8 @@
 extern crate alloc;
 
 mod asset;
+#[cfg(feature = "std")]
+mod cycle_collector;
 mod dependency;
 mod error;
 mod event;

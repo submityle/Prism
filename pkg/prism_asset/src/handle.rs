@@ -9,7 +9,7 @@ use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
 static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -75,6 +75,10 @@ pub(crate) struct HandleInner {
     id: UntypedAssetId,
     handle_id: HandleId,
     release: Arc<ReleaseSignal>,
+    /// Tombstone set by the server-owned cycle collector before it releases
+    /// an unreachable retained closure. Weak upgrades double-check this flag
+    /// so a racing upgrade cannot resurrect a collected allocation.
+    retired_for_collection: AtomicBool,
 }
 
 impl HandleInner {
@@ -86,7 +90,18 @@ impl HandleInner {
             id,
             handle_id,
             release,
+            retired_for_collection: AtomicBool::new(false),
         })
+    }
+
+    pub(crate) fn is_retired_for_collection(&self) -> bool {
+        self.retired_for_collection.load(AtomicOrdering::Acquire)
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn set_retired_for_collection(&self, retired: bool) {
+        self.retired_for_collection
+            .store(retired, AtomicOrdering::Release);
     }
 }
 
@@ -217,7 +232,16 @@ impl<A: ?Sized> WeakHandle<A> {
     /// least one strong handle still exists.
     #[must_use]
     pub fn upgrade(&self) -> Option<Handle<A>> {
-        self.inner.upgrade().map(Handle::from_arc)
+        let inner = self.inner.upgrade()?;
+        if inner.is_retired_for_collection() {
+            return None;
+        }
+        let handle = Handle::from_arc(inner);
+        if handle.inner.is_retired_for_collection() {
+            drop(handle);
+            return None;
+        }
+        Some(handle)
     }
 
     /// The number of live strong handles (0 once the asset is reclaimable).
@@ -267,6 +291,11 @@ impl UntypedHandle {
     #[must_use]
     pub fn strong_count(&self) -> usize {
         Arc::strong_count(&self.inner)
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn set_retired_for_collection(&self, retired: bool) {
+        self.inner.set_retired_for_collection(retired);
     }
 
     /// Re-applies the compile-time type tag `A`, yielding a typed [`Handle`]
@@ -323,7 +352,16 @@ impl UntypedWeakHandle {
     /// at least one strong handle still exists.
     #[must_use]
     pub fn upgrade(&self) -> Option<UntypedHandle> {
-        self.inner.upgrade().map(|inner| UntypedHandle { inner })
+        let inner = self.inner.upgrade()?;
+        if inner.is_retired_for_collection() {
+            return None;
+        }
+        let handle = UntypedHandle { inner };
+        if handle.inner.is_retired_for_collection() {
+            drop(handle);
+            return None;
+        }
+        Some(handle)
     }
 
     /// The number of live strong handles (0 once the asset is reclaimable).
