@@ -22,6 +22,7 @@ members = [
   "pkg/prism_tasks",
   "pkg/prism_transform",
   "pkg/prism_camera",
+  "pkg/prism_camera_ecs",
   "pkg/prism_camera_rig",
   "pkg/prism_diagnostic",
   "pkg/prism_platform",
