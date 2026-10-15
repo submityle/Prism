@@ -54,10 +54,16 @@
 //!   the full EDL pipeline and
 //!   Windows-equivalent secure path opening remain incomplete.
 //! - **Not implemented here:** offline cooking, DDC/CAS ownership, codecs,
-//!   range-backed assembly, streaming residency, DirectStorage/GPU decode, and
-//!   release packaging.
-//!   Those belong to Asset Build or future runtime features. The scheduler
-//!   slice is not a complete EDL pipeline.
+//!   DirectStorage/GPU decode, and release packaging. Those belong to Asset
+//!   Build or future runtime features. The scheduler slice is not a complete
+//!   EDL pipeline.
+//! - **Runtime range streaming (implemented, `std`):** bounded synchronous and
+//!   asynchronous range assembly, fixed-page CPU residency, deterministic
+//!   feedback admission, and CPU/GPU/staging residency accounting are exposed
+//!   through public types such as [`RangeAssemblyPlan`], [`PageResidency`],
+//!   and [`StreamingController`]. These adapters perform source reads and
+//!   lifecycle accounting only; they do not create GPU resources or claim
+//!   DirectStorage/GPU-decode support.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
