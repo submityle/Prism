@@ -83,6 +83,8 @@ members = [
   "pkg/prism_world_residency",
   "pkg/prism_world_persist",
   "pkg/prism_world",
+  # Engine-neutral world proxy visibility contract and optional wgpu compute twin.
+  "pkg/prism_world_gpu",
   "pkg/prism_state_tree_core",
   "pkg/prism_state_tree_ecs",
   "pkg/prism_state_tree_gpu",
