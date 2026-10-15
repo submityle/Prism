@@ -1,0 +1,16 @@
+[package]
+name = "prism_camera_rig"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Deterministic camera rigs, spring-arm queries, controllers, and director blending"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+libm = "0.2"
+prism_math = { path = "../prism_math" }
+prism_camera = { path = "../prism_camera" }
+
+[lints]
+workspace = true
