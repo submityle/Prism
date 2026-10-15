@@ -9,3 +9,7 @@ publish = false
 [[bench]]
 name = "residency_schedule"
 harness = false
+
+[[bench]]
+name = "scatter_field"
+harness = false

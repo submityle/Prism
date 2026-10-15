@@ -20,6 +20,7 @@ mod pcg;
 mod qos;
 mod residency;
 mod scatter;
+mod scatter_field;
 mod scheduler;
 mod sdf;
 
@@ -37,6 +38,11 @@ pub use scatter::{
     estimate_scatter_work, scatter, ScatterBudget, ScatterCacheKey, ScatterCandidateKey,
     ScatterConfig, ScatterError, ScatterOutput, ScatterPoint, ScatterRegion, ScatterWorkEstimate,
     SCATTER_KERNEL_VERSION,
+};
+pub use scatter_field::{
+    scatter_with_density_field, DensityBrush, DensityBrushOp, DensityNoise, FieldScatterBudget,
+    FieldScatterCacheKey, FieldScatterOutput, ScatterDensityField, ScatterFieldBuildBudget,
+    ScatterFieldConfig, ScatterFieldError, ScatterFieldSample, SCATTER_FIELD_VERSION,
 };
 pub use scheduler::{ResidencyAction, ResidencyKeepReason, ResidencyPlan, ResidencyScheduler};
 pub use sdf::{
