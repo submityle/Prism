@@ -1,7 +1,8 @@
 //! Unit tests for the M4 file-watching layer.
 //!
 //! These exercise the portable polling watcher everywhere, the native `kqueue`
-//! watcher on macOS/BSD, and the native Linux `inotify` watcher. They cover
+//! watcher on macOS/BSD, the native Linux `inotify` watcher, and the native
+//! Windows `ReadDirectoryChangesW` watcher. They cover
 //! recursive additions, rename/delete, high-frequency directory changes,
 //! fallback polling, and honest backend selection.
 
@@ -227,6 +228,49 @@ fn linux_inotify_handles_high_frequency_creates() {
     high_frequency_creates(Backend::Native);
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_native_detects_file_modification() {
+    file_modification(Backend::Native);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_native_detects_recursive_creation() {
+    let dir = scratch_dir("windows_recursive");
+    let nested = dir.join("nested");
+    let nested_file = nested.join("shader.wgsl");
+
+    let mut w = Watcher::with_backend(Backend::Native).expect("create Windows watcher");
+    w.watch(&dir, true).expect("watch recursive dir");
+
+    std::fs::create_dir(&nested).expect("create nested dir");
+    let first = w.poll(DEADLINE).expect("poll nested dir creation");
+    assert!(
+        first
+            .iter()
+            .any(|event| event.path == nested && event.kind == EventKind::Created),
+        "expected nested directory creation, got {first:?}"
+    );
+
+    std::fs::write(&nested_file, b"shader").expect("create nested file");
+    let second = w.poll(DEADLINE).expect("poll nested file creation");
+    assert!(
+        second
+            .iter()
+            .any(|event| event.path == nested_file && event.kind == EventKind::Created),
+        "expected dynamically watched nested file creation, got {second:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_native_detects_rename_and_delete() {
+    rename_and_delete(Backend::Native);
+}
+
 #[test]
 fn default_watcher_picks_native_when_available() {
     let w = Watcher::new().expect("create default watcher");
@@ -244,7 +288,8 @@ fn default_watcher_picks_native_when_available() {
     target_os = "freebsd",
     target_os = "netbsd",
     target_os = "openbsd",
-    target_os = "dragonfly"
+    target_os = "dragonfly",
+    windows
 )))]
 #[test]
 fn native_backend_is_explicitly_unsupported_without_native_implementation() {

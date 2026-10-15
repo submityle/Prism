@@ -13,34 +13,35 @@
 //! - **macOS / BSD — `kqueue` (native, real):** registers a `kqueue` filter
 //!   per watched file/directory descriptor and reports `EVFILT_VNODE` events.
 //!   Exercised by this crate's test-suite on macOS.
-//! - **Everywhere else, including Windows — polling (portable, real):** a
-//!   `stat`-based mtime/size diff that re-scans watched paths. This is the safe
-//!   baseline backend and is selectable explicitly via [`Backend::Poll`].
-//!
-//! Windows does not have a native `ReadDirectoryChangesW` implementation in
-//! this module yet. `Backend::Native` therefore remains
-//! [`WatchError::Unsupported`] on Windows, while the default watcher uses the
-//! portable polling backend.
+//! - **Windows — `ReadDirectoryChangesW` (native, real):** uses overlapped
+//!   directory notifications, including dynamic recursive subtrees.
+//! - **Everywhere else — polling (portable, real):** a `stat`-based mtime/size
+//!   diff that re-scans watched paths. This is the safe baseline backend and is
+//!   selectable explicitly via [`Backend::Poll`].
 //!
 //! ## Semantics
 //! - Events are coalesced edge notifications, not a guaranteed per-change log.
 //!   After any event, re-read the file; do not assume one event per write.
-//! - The polling and Linux `inotify` backends fully support recursive directory
-//!   watching, including directories created after the watch starts. The
-//!   `kqueue` backend registers the directory plus its *current* entries when
-//!   `recursive` is requested; entries created *after* the watch starts are
-//!   not auto-registered (a known `kqueue` limitation), though the parent
+//! - The polling, Linux `inotify`, and Windows `ReadDirectoryChangesW`
+//!   backends fully support recursive directory watching, including
+//!   directories created after the watch starts. The `kqueue` backend
+//!   registers the directory plus its *current* entries when `recursive` is
+//!   requested; entries created *after* the watch starts are not
+//!   auto-registered (a known `kqueue` limitation), though the parent
 //!   directory still reports a change. Use [`Backend::Poll`] when you need
-//!   fully-dynamic recursive trees.
+//!   fully-dynamic recursive trees on kqueue.
 //! - Rename detection is best-effort; a rename may surface as
-//!   [`EventKind::Renamed`] (kqueue) or as a [`EventKind::Removed`] +
-//!   [`EventKind::Created`] pair (polling).
+//!   [`EventKind::Renamed`] (native backends) or as a
+//!   [`EventKind::Removed`] + [`EventKind::Created`] pair (polling).
 
 use core::fmt;
 use core::time::Duration;
 use std::path::{Path, PathBuf};
 
 mod poll;
+
+#[cfg(windows)]
+mod windows;
 
 #[cfg(target_os = "linux")]
 mod inotify;
@@ -85,7 +86,7 @@ pub struct Event {
 /// Which backend a [`Watcher`] is using.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
-    /// A native OS watcher (`inotify` on Linux, `kqueue` on macOS/BSD).
+    /// A native OS watcher (`inotify`, `kqueue`, or `ReadDirectoryChangesW`).
     Native,
     /// The portable `stat`-based polling watcher.
     Poll,
@@ -94,9 +95,7 @@ pub enum Backend {
 /// Why a watch operation failed.
 #[derive(Debug)]
 pub enum WatchError {
-    /// The requested backend is not available in this build/platform (for
-    /// example [`Backend::Native`] on Windows, where polling is the supported
-    /// fallback).
+    /// The requested backend is not available in this build/platform.
     Unsupported,
     /// A path was asked to be unwatched that was never watched.
     NotWatched,
@@ -140,7 +139,8 @@ pub fn watch_native_supported() -> bool {
         target_os = "freebsd",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "dragonfly"
+        target_os = "dragonfly",
+        windows
     ))]
     {
         true
@@ -151,7 +151,8 @@ pub fn watch_native_supported() -> bool {
         target_os = "freebsd",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "dragonfly"
+        target_os = "dragonfly",
+        windows
     )))]
     {
         false
@@ -169,6 +170,8 @@ enum Inner {
     Kqueue(kqueue::KqueueWatcher),
     #[cfg(target_os = "linux")]
     Inotify(inotify::InotifyWatcher),
+    #[cfg(windows)]
+    Windows(windows::WindowsWatcher),
     Poll(poll::PollWatcher),
 }
 
@@ -204,6 +207,13 @@ impl Watcher {
                 backend: Backend::Poll,
             }),
             Backend::Native => {
+                #[cfg(windows)]
+                {
+                    return Ok(Self {
+                        inner: Inner::Windows(windows::WindowsWatcher::new()?),
+                        backend: Backend::Native,
+                    });
+                }
                 #[cfg(target_os = "linux")]
                 {
                     return Ok(Self {
@@ -230,7 +240,8 @@ impl Watcher {
                     target_os = "freebsd",
                     target_os = "netbsd",
                     target_os = "openbsd",
-                    target_os = "dragonfly"
+                    target_os = "dragonfly",
+                    windows
                 )))]
                 {
                     Err(WatchError::Unsupported)
@@ -260,6 +271,8 @@ impl Watcher {
             Inner::Kqueue(w) => w.watch(path, recursive),
             #[cfg(target_os = "linux")]
             Inner::Inotify(w) => w.watch(path, recursive),
+            #[cfg(windows)]
+            Inner::Windows(w) => w.watch(path, recursive),
             Inner::Poll(w) => w.watch(path, recursive),
         }
     }
@@ -278,6 +291,8 @@ impl Watcher {
             Inner::Kqueue(w) => w.unwatch(path),
             #[cfg(target_os = "linux")]
             Inner::Inotify(w) => w.unwatch(path),
+            #[cfg(windows)]
+            Inner::Windows(w) => w.unwatch(path),
             Inner::Poll(w) => w.unwatch(path),
         }
     }
@@ -297,6 +312,8 @@ impl Watcher {
             Inner::Kqueue(w) => w.poll(timeout),
             #[cfg(target_os = "linux")]
             Inner::Inotify(w) => w.poll(timeout),
+            #[cfg(windows)]
+            Inner::Windows(w) => w.poll(timeout),
             Inner::Poll(w) => w.poll(timeout),
         }
     }
