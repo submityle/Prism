@@ -230,6 +230,8 @@ pub mod pacing;
 #[cfg(feature = "determinism")]
 pub mod peer_sync;
 pub mod phase_order;
+#[cfg(feature = "std")]
+pub mod pie;
 #[cfg(feature = "pipelined")]
 pub mod pipelined;
 pub mod platform_tier;
@@ -292,6 +294,10 @@ pub use pacing::{
 #[cfg(feature = "determinism")]
 pub use peer_sync::{reconcile_with_peer, PeerAuthoritative, ReconcileOutcome};
 pub use phase_order::{PhaseOrderError, RunFixedMainLoop};
+#[cfg(feature = "std")]
+pub use pie::{
+    PieError, PieFrameOutcome, PieInstance, PieInstanceId, PieInstances, PieScheduleDebug, PieState,
+};
 #[cfg(feature = "pipelined")]
 pub use pipelined::PipelinedExecutor;
 pub use platform_tier::PlatformTierProfile;
@@ -370,6 +376,11 @@ pub mod prelude {
         AdaptiveAction, AdaptiveFrameLimiter, FrameLimit, FramePacer, FrameRateLadder, FrameStats,
     };
     pub use crate::phase_order::{PhaseOrderError, RunFixedMainLoop};
+    #[cfg(feature = "std")]
+    pub use crate::pie::{
+        PieError, PieFrameOutcome, PieInstance, PieInstanceId, PieInstances, PieScheduleDebug,
+        PieState,
+    };
     #[cfg(feature = "pipelined")]
     pub use crate::pipelined::PipelinedExecutor;
     pub use crate::platform_tier::PlatformTierProfile;
