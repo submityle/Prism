@@ -142,12 +142,7 @@ impl<'a> ResourceTemplates<'a> {
             let valid = self
                 .catalog
                 .feature(selected.feature_id())
-                .is_some_and(|feature| {
-                    feature
-                        .variants
-                        .iter()
-                        .any(|variant| core::ptr::eq(variant, selected.variant()))
-                });
+                .is_some_and(|feature| selected.matches_definition(feature));
             if !valid {
                 return Err(FabricCompileError::ForeignSelection(selected.feature_id()));
             }
@@ -212,7 +207,9 @@ impl<'a> ResourceTemplates<'a> {
         let admission_order = admission.compile()?.execution_order;
         let mut supplied = BTreeMap::new();
         for binding in external {
-            if !needed.contains(&(binding.key, binding.frame)) {
+            if !needed.contains(&(binding.key, binding.frame))
+                || self.templates[&binding.key].lifetime == ResourceLifetime::Transient
+            {
                 return Err(FabricCompileError::UnexpectedBinding {
                     resource: binding.key,
                     frame: binding.frame,

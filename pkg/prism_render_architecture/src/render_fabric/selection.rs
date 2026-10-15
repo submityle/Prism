@@ -109,13 +109,35 @@ impl fmt::Display for SelectionError {
 }
 impl std::error::Error for SelectionError {}
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct SelectedFeature {
     feature: FeatureId,
     variant: &'static FeatureVariant,
+    definition: &'static FeatureDefinition,
 }
 
+// Equality describes the chosen implementation, not the registration order of
+// its other candidates. Keep provenance validation separate from this semantic
+// equality so shuffled declarations still produce equal selections.
+impl PartialEq for SelectedFeature {
+    fn eq(&self, other: &Self) -> bool {
+        self.feature == other.feature && self.variant == other.variant
+    }
+}
+impl Eq for SelectedFeature {}
+
 impl SelectedFeature {
+    pub(super) fn matches_definition(&self, definition: &FeatureDefinition) -> bool {
+        // A shared variant alone is not proof of the same hard dependencies,
+        // provider interface, root kind/domain, or candidate set. Never resolve
+        // again here: consumers validate the frozen source declaration instead.
+        (core::ptr::eq(self.definition, definition) || self.definition == definition)
+            && definition
+                .variants
+                .iter()
+                .any(|variant| core::ptr::eq(variant, self.variant))
+    }
+
     pub const fn feature_id(&self) -> FeatureId {
         self.feature
     }
@@ -217,6 +239,7 @@ impl FeatureSelection {
             result.selected.push(SelectedFeature {
                 feature: id,
                 variant,
+                definition: feature,
             });
             for output in feature.kind.provides() {
                 let mut resources = output.resources.to_vec();

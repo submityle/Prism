@@ -488,6 +488,30 @@ fn external_bindings_must_match_the_current_graph_footprint() {
             frame: 10,
         }
     );
+
+    // Transients are graph-owned even when their semantic key is referenced.
+    // Silently discarding this binding would allocate different storage from
+    // the one the caller supplied and bypass its layout/version validation.
+    let transient = buffer(A, ResourceLifetime::Transient);
+    assert_eq!(
+        resources
+            .compile(
+                &select(&catalog),
+                10,
+                &[
+                    binding(transient, 10, 77),
+                    binding(b, 9, 9),
+                    binding(b, 10, 10)
+                ],
+                &[],
+                GraphLimits::default()
+            )
+            .unwrap_err(),
+        FabricCompileError::UnexpectedBinding {
+            resource: A,
+            frame: 10,
+        }
+    );
 }
 
 #[test]
@@ -1305,6 +1329,115 @@ fn resource_footprint_sum_overflow_is_an_authority_error() {
         .compile(&select(&catalog), 10, &[], &[], GraphLimits::default())
         .unwrap_err(),
         FabricCompileError::Graph(CompileError::MemoryOverflow)
+    );
+}
+
+#[test]
+fn shared_variants_do_not_allow_foreign_feature_contracts_or_candidate_sets() {
+    const SERVICE: ServiceId = ServiceId(720);
+    const PROVIDER: FeatureId = FeatureId(721);
+    let variants = table(vec![variant(720, 0, vec![]), variant(721, 1, vec![])]);
+    let root = FeatureDefinition::subsystem(
+        ROOT,
+        RenderDomain::Surface,
+        ServiceSet::EMPTY,
+        &variants[1..],
+    );
+    let source = FeatureCatalog::new(table(vec![root]), &[]).unwrap();
+    let selection = select(&source);
+    let provider = FeatureDefinition::service(
+        PROVIDER,
+        table(vec![ServiceOutput {
+            service: SERVICE,
+            resources: &[],
+        }]),
+        ServiceSet::EMPTY,
+        table(vec![variant(722, 0, vec![])]),
+    );
+    for changed in [
+        FeatureDefinition {
+            requires_services: ServiceSet::new(&[SERVICE]),
+            ..root
+        },
+        FeatureDefinition {
+            domain: Some(RenderDomain::Volume),
+            ..root
+        },
+        FeatureDefinition::response(ROOT, ServiceSet::EMPTY, root.variants),
+        FeatureDefinition { variants, ..root },
+    ] {
+        let target = FeatureCatalog::new(table(vec![changed, provider]), &[]).unwrap();
+        assert_eq!(
+            ResourceTemplates::new(&target, &[])
+                .unwrap()
+                .compile(&selection, 10, &[], &[], GraphLimits::default())
+                .unwrap_err(),
+            FabricCompileError::ForeignSelection(ROOT)
+        );
+    }
+    // Sharing an unchanged definition across catalogs remains supported.
+    let equivalent = FeatureCatalog::new(table(vec![provider, root]), &[]).unwrap();
+    ResourceTemplates::new(&equivalent, &[])
+        .unwrap()
+        .compile(&selection, 10, &[], &[], GraphLimits::default())
+        .unwrap();
+}
+
+#[test]
+fn shared_provider_variants_cannot_reinterpret_the_published_service_interface() {
+    const SERVICE: ServiceId = ServiceId(730);
+    const PROVIDER: FeatureId = FeatureId(731);
+    let provider = FeatureDefinition::service(
+        PROVIDER,
+        table(vec![ServiceOutput {
+            service: SERVICE,
+            resources: &[A],
+        }]),
+        ServiceSet::EMPTY,
+        table(vec![variant(
+            730,
+            0,
+            vec![pass(
+                730,
+                QueueClass::Compute,
+                vec![
+                    usage(A, AccessKind::StorageWrite),
+                    usage(B, AccessKind::StorageWrite),
+                ],
+            )],
+        )]),
+    );
+    let root = FeatureDefinition::subsystem(
+        ROOT,
+        RenderDomain::Surface,
+        ServiceSet::new(&[SERVICE]),
+        table(vec![variant(731, 0, vec![])]),
+    );
+    let source = FeatureCatalog::new(table(vec![root, provider]), &[A, B]).unwrap();
+    let selection = select(&source);
+    assert_eq!(selection.service_resources(SERVICE), Some(&[A][..]));
+    let changed = FeatureDefinition {
+        kind: FeatureKind::Service {
+            provides: table(vec![ServiceOutput {
+                service: SERVICE,
+                resources: &[B],
+            }]),
+        },
+        ..provider
+    };
+    let target = FeatureCatalog::new(table(vec![root, changed]), &[A, B]).unwrap();
+    assert_eq!(
+        ResourceTemplates::new(
+            &target,
+            &[
+                buffer(A, ResourceLifetime::Transient),
+                buffer(B, ResourceLifetime::Transient)
+            ]
+        )
+        .unwrap()
+        .compile(&selection, 10, &[], &[], GraphLimits::default())
+        .unwrap_err(),
+        FabricCompileError::ForeignSelection(PROVIDER)
     );
 }
 

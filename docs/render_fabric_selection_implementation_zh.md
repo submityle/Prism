@@ -144,3 +144,11 @@ clippy 仍报告其他代理范围的 texture_streaming/virtual_geometry 既有�
 3. Persistent 资源由调用方提交绝对帧绑定，Render Fabric 对其生命周期、content version、SSA 和物理区间执行受检验证。
 4. 水体、体积、粒子、毛发、贴花的内建资源键与模板已统一登记，服务 provider 的每个 variant 都通过写入集门禁。
 5. 设备初始化时一次性冻结根集合、依赖闭包和 variant；运行期只消费冻结选择，不重复选择。
+
+### 冻结选择来源与绑定准入复核（2026-10-15）
+
+冻结选择现在保留源 `FeatureDefinition`，编译消费时检查完整声明与所选变体；即使另一个 catalog 复用了同一个静态 variant，也不能改变硬依赖、provider 接口、特性种类或候选集后复用旧选择。选择的语义相等性仍只比较选中实现，保持声明重排后的确定性。
+
+外部绑定只准用于本帧图确实需要的非 transient 资源。向 transient 模板提供外部物理绑定会明确返回 `UnexpectedBinding`，不会被忽略或混用为图内分配。
+
+本批验证均使用 `CARGO_INCREMENTAL=0`：`cargo test -p prism_render_architecture --lib render_fabric::` 为 75 passed；`--lib render_layers` 为 2 passed；`--lib every_persistent_instance_field_has_a_delta_kind` 为 1 passed；`--doc render_fabric` 为 4 passed。三个变更源码文件的格式与 diff 检查通过。这些结果证明上述准入修复，不替代真实水体、粒子生产接线和 GPU 场景验收证据。
