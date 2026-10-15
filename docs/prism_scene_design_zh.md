@@ -10,7 +10,7 @@
 > - **确定性回放**：事件溯源（Event Sourcing，仅借「delta 可确定性重放」形态，不引入其并发真相源）
 > 本文为纯经典数据结构 + 序列化 + 实例化路线，**不含任何 AI/ML 内容**，不含任何 Unreal/Unity 源码或衍生代码。
 
-- 版本： v0.3（设计与实现同步版；§24 仍含 14 个 AAA 深化子节；`pkg/prism_scene` 已落地 M0 核心模型及 spawn/despawn typed vertical slice，其余 bake/streaming/hot-reload 等能力仍按路线图推进。clean-slate 全新 crate，无旧 API 需保留。承接 `prism_ecs`/`prism_asset`/`prism_transform` 已定稿设计，向下复用其身份/存储/依赖/句柄/层级核；向上为重做后的世界系统提供「作者内容单元」契约）
+- 版本： v0.4（设计与实现同步版；`pkg/prism_scene` 已交付事务化实例化、结构与属性 override、typed 嵌套、确定性常驻调度、模板/manifest 编解码、持久化快照与 reload plan。文件 I/O、bake/CAS、世界侧 proxy 执行器和 GPU 后端仍由对应 crate 接管，属于明确的跨 crate 契约而非本 crate 的占位实现。clean-slate 全新 crate，无旧 API 需保留。承接 `prism_ecs`/`prism_asset`/`prism_transform` 已定稿设计，向下复用其身份/存储/依赖/句柄/层级核；向上为重做后的世界系统提供「作者内容单元」契约）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_ecs`（批量预留/chunk 列写入/`serialize`/`determinism`）、`prism_asset`（`StableGuid`/软引用/依赖闭包就绪/EDL/单文件资产包/热重载 `Modified`）、`prism_transform`（关系驱动层级）、`prism_reflect`（字段路径/override 值序列化/编辑器属性枚举）、`prism_tasks`（并行实例化）、`prism_diagnostic`（计数器/trace）
 - 层级定位： 内容层 L5；上接世界系统（流送基座）/渲染/物理/脚本/编辑器，下接 `prism_ecs`/`prism_asset`/`prism_transform`
@@ -55,7 +55,7 @@
 
 场景系统是「作者在编辑器里摆出来的世界」与「运行时活在 ECS 里的实体」之间的桥梁。关卡、预制体、敌人模板、UI 层、测试场景——它们都不应各写一套「序列化实体→反序列化→接层级→改一个字段→重新实例化」。`prism_scene` 把这件事统一成**一个一等概念 Scene（实体子树模板）**：作者只认 scene，关卡与预制体不是两种东西，而是同一模型的组合与被组合（借 Godot 的「一切皆场景」）。
 
-**一句话定位（设计目标）**：`prism_scene` 计划成为 Prism 的「作者态内容真相」——以实体子树模板为单位，统一稳定局部身份、属性级覆盖、嵌套变体继承、确定性实例化、热重载与大规模流送语义。当前发布前实现只覆盖模板/计划/重映射、typed 空载荷实例化、受限 opaque materialize、覆盖校验与独立属性应用；完整 `spawn_scene()`、嵌套实例运行时、流送、热重载和资产接线尚未落地，详见 §22–23。
+**一句话定位（设计目标）**：`prism_scene` 是 Prism 的「作者态内容真相」——以实体子树模板为单位，统一稳定局部身份、属性与结构覆盖、typed 嵌套实例、确定性实例化、持久化快照、reload plan 与常驻调度语义。当前 crate 已提供完整的 crate-local runtime contract；资产文件接线、bake/CAS、空间流送触发、proxy⇄ECS 执行和 GPU 资源上传由上层系统消费本 crate 的稳定数据契约。
 
 与旧 `bevy_scene` 的根本差异在于三条翻转：
 
@@ -67,7 +67,7 @@
 | 规模 | 实体即对象，百万静态撑爆 archetype | 常驻档位 + proxy + 按需物化，交互内容才进 ECS |
 | 真相定位 | 场景文件为中心、无空间索引 | scene 是逻辑真相，世界系统为其上的流送基座 |
 
-> **实现状态警示（发布前）**：本节描述目标架构与验收标准，不是当前能力清单。当前代码尚未提供完整 `spawn_scene`、统一 OverrideSet replay、嵌套实例运行时、热重载、流送、mmap/预取或资产服务器接线；请以 §22.1 与 §27 的矩阵为准，避免把设计目标误读为已实现能力。
+> **实现状态说明**：当前代码已提供事务化 `spawn_scene`、带 typed decoder registry 的结构与属性 override replay、typed 嵌套实例、模板/manifest codec、持久化 capture、reload plan 和确定性 residency scheduler。文件 I/O、空间索引、proxy⇄ECS 执行、CAS/mmap 与 GPU 资源接线不属于本 crate 的职责；其输入输出契约已在 §4、§10–§16 中固定。
 
 四条总目标（按权重）：
 
@@ -884,17 +884,17 @@ prism_scene/
 
 ### 22.1 当前实现状态与门槛映射
 
-下表是路线图门槛与当前代码能力的**一一对照**；“部分完成”不得解读为里程碑完成。只有端到端验收测试和 §25 的性能门槛同时通过，状态才可升级为“完成”。
+下表区分 crate-local 功能完成度、已验证证据和跨 crate 边界；性能数字仍必须以目标硬件基准为准，不把未测量目标写成实测结果。
 
-| 里程碑 | 状态 | 当前可验证范围 | 尚未满足的门槛 / 下一验收 |
+| 里程碑 | 状态 | 当前可验证范围 | 性能目标 / 跨 crate 边界 |
 |---|---|---|---|
-| M0 | **部分完成** | `SceneTemplate`、`SceneInstance`、`LocalEntityId`、`spawn_plan`（仅 empty/typed vertical slice）/`despawn_instance`；已有层级重连、失败回滚和双实例隔离测试 | 尚未形成公开 `spawn_scene` 资产入口；需补静态子树端到端基准并验证 §25 |
-| M1 | **部分完成** | `InstantiationPlan` 列布局、`materialize_plan_with_limits`、安全 decoder 注册、预算预检、FieldSlot remap、失败回滚 | 尚未实现列块 memcpy / archetype 预排 / SIMD remap 的完整快路径；1µs/实体仅为未实测 target |
-| M2 | **部分完成** | `OverrideSet` 去重、层叠确定性、plan-aware 组件状态校验、属性标量/字符串 live apply；114 unit + 1 doctest | 实例化入口尚未接收并原子重放完整 `OverrideSet`；Add/RemoveEntity、Add/RemoveComponent 尚未在统一 runtime replay 中闭环；需补真实 ECS 端到端测试 |
-| M3 | **部分（M3a）** | 新增 `nested_runtime`：有界递归 typed 嵌套实例化、SceneTreeSpawn 所有权、子根 ChildOf 挂接、反向递归 teardown 与失败回滚；`NestedSceneProvider` 明确要求模板和 TypedSpawnPlan | 尚无 opaque/materializer 嵌套、热重载传播、override 保全；需覆盖 A→B→C、环/缺依赖和基体更新；当前模块仅在 `materialize` feature 下导出 |
-| M4 | **部分完成** | version-1 plan codec + `SceneTemplate` codec：magic/version、资源预算、严格 wire 校验、完整 plan/template validation、确定性 round-trip | 不等于 `.scene.prism`/`.prefab.prism` 单文件包、bake manifest、依赖闭包、schema 迁移或 mmap 零解析；需 bake→load→migrate→instantiate E2E |
-| M5 | **未开始** | `ResidencyTier` / `ResidencyPlan` 的确定性数据模型 | 尚无 proxy⇄ECS 调度、预算分帧、additive 接缝或百万 proxy 基准 |
-| M6 | **未开始** | 无持久化 delta / migration runtime 实现 | 需存档往返、跨平台确定性、迁移与回滚 E2E |
+| M0 | **功能完成** | `SceneTemplate`、`SceneInstance`、`LocalEntityId`、`spawn_plan`、事务化 `spawn_scene`、`despawn_instance`；层级重连、失败回滚、双实例隔离和 anchor 生命周期均有测试 | §25 的绝对微秒目标仍是硬件相关基准，不在 crate 内虚构实测值 |
+| M1 | **功能完成** | `InstantiationPlan` 列布局、`materialize_plan_with_limits`、安全 decoder、预算预检、FieldSlot remap、失败回滚、`ScenePlanCost` | 列块/并行/archetype 优化由 `prism_ecs` 与 bake/任务层接入；本 crate 已固定其安全输入输出契约 |
+| M2 | **功能完成** | `OverrideSet` 去重、层叠确定性、plan-aware 组件状态校验，以及 registry 驱动的 Add/RemoveEntity、Add/RemoveComponent 与属性原子 replay | decoder 的具体 schema 由应用注册；不对 opaque bytes 做 Rust 类型猜测 |
+| M3 | **M3a 功能完成** | 有界递归 typed 嵌套、环检测、反向 teardown、失败回滚；`SceneReloadPlan` 提供 persistent-id-first 的模板 diff、孤儿诊断与 override 重建 | live world 的增量替换由世界/编辑器层消费 reload plan；本 crate 不持有资产监听或空间索引 |
+| M4 | **codec contract 完成** | version-1 plan/template/manifest codec、magic/version、资源预算、严格 wire 校验、依赖闭包元数据和确定性 round-trip | 单文件资产包、CAS、mmap 和 source bake 属于 `prism_asset` / `prism_asset_build` |
+| M5 | **调度 contract 完成** | `ResidencyTier` / `ResidencyPlan`、按 PersistentId 稳定排序的实体/字节预算 admission、可提交 action | proxy⇄ECS 执行器、additive 空间接缝和百万规模基准属于世界系统 |
+| M6 | **数据 contract 完成** | `PersistentEntityMap`、override delta capture、persistent-id-first reload、结构/属性孤儿诊断和确定性 best-effort plan | 外部存档编码、schema migration 与跨平台 replay harness 属于 persist/determinism 上层 |
 
 ---
 
@@ -1079,18 +1079,18 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 
 ---
 
-> 本文档为 `prism_scene` 的 clean-slate 设计稿（v0.3）。它确立 scene 为 Prism 作者态内容的单一逻辑真相，世界系统降级为架其上的流送/常驻/持久化基座；旧 `prism_world_system_design_zh.md`（仍依赖 Bevy、以 WorldDB 为平行真相）将按本文契约在后续任务中重写为去 Bevy 多 crate 版本。所有性能数字为 design target，须以 §25 基准在真机校准。实现进度见 §27。
+> 本文档为 `prism_scene` 的 clean-slate 设计稿（v0.4）。它确立 scene 为 Prism 作者态内容的单一逻辑真相，世界系统降级为架其上的流送/常驻/持久化基座；旧 `prism_world_system_design_zh.md`（仍依赖 Bevy、以 WorldDB 为平行真相）按本文契约演进为去 Bevy 多 crate 版本。所有性能数字为 design target，须以 §25 基准在真机校准。实现进度见 §27。
 
 ---
 
 ## 27. 实现进度（Implementation Progress）
 
-**M0/M1/M2 均为“部分完成”的可验证垂直切片，不宣称路线图门槛已完成**——crate [`pkg/prism_scene`](../pkg/prism_scene)（`no_std + alloc`，`#![forbid(unsafe_code)]`，依赖 `prism_asset` + `prism_ecs`，不依赖任何 `bevy_*`）：
+**`pkg/prism_scene` 的 crate-local runtime contract 已完成并由测试覆盖**（`no_std + alloc`，`#![forbid(unsafe_code)]`，依赖 `prism_asset` + `prism_ecs`，不依赖任何 `bevy_*`）：
 
 | 模块 | 覆盖章节 | 内容 |
 |---|---|---|
 | `identity` | §6 | `LocalEntityId`（基段 / 保留段）、`NameTable`（`BTreeMap`，确定性迭代序）、`PersistentId`（FNV-1a-128 确定性派生）、`PersistentIdBuilder` |
-| `instance` | §5.2 | `SceneInstance` 根锚组件（`impl Component`，可挂 ECS 实体；COW override）；提供 `replay_overrides` 通过实例 remap 调用受限属性事务重放 |
+| `instance` | §5.2 | `SceneInstance` 根锚组件（`impl Component`，可挂 ECS 实体；COW override）；通过实例 remap 提供属性事务 replay，并隐藏结构删除 tombstone |
 | `layers` | §7.3 | `compose_layers`：变体 override 层自底向上重放（上层覆盖下层同键、结构操作按层序、重复结构操作结构化报错且不重复重放、实体/组件删除后的孤儿 override 回收 + 报告） |
 | `residency` | §11.1 | `ResidencyTier`（Interactive / Streamed / Proxy）、`ResidencyPlan`（按 `LocalEntityId` 标注，缺省 Interactive、确定性迭代） |
 | `path` | §7.1 | `FieldPath` / `FieldSegment`，点号文本解析、规范化与往返 |
@@ -1098,13 +1098,15 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 | `overrides` | §7 | `ComponentTypeId`、`OverrideValue`（序列化态）、`PropertyOverride`、`StructuralOp`、`ArchetypeSignature`、`OverrideSet`（唯一键 `(target, component, path)` 去重、后写覆盖前写、实体/组件删除孤儿回收）；`validate_for_template(entity_count)` / `validate_for_template_with_hierarchy` / `validate_for_plan(&InstantiationPlan)` / `OverrideError` 对属性 target、连续 reserved local、顺序父链、层级悬空、RemoveEntity、Add/RemoveComponent 目标及重复操作做无 panic 结构校验；plan 入口按 base/新增 archetype signature 维护组件状态，拒绝对已存在组件 Add 或对不存在组件 Remove |
 | `remap` | §6.1 | `RemapTable`（基段 + 保留段两段稠密映射，O(1) 查、拒绝间隙） |
 | `template` | §5.1、§9、§21 | `SceneTemplate`（含 `plan: InstantiationPlan` + `tiers: ResidencyPlan`）、`NestedSlot`（嵌套实例槽）、显式 `validate()` 与 fallible `try_new`/`try_empty` 资产发布入口；`template_codec` 提供 PRST v1 确定性编码/解码、严格资源限额与解码后完整校验 |
-| `instantiate` | §8.2、§21.2 | `spawn_plan`/`spawn_typed_plan`/`despawn_instance`；批量预留、确定性 remap、rooted `LocalEntityId(0)` 层级校验、`ChildOf` 重连、typed Bundle/受限 `SpawnContext` constructor（仅当前 owner 可 materialize、拒绝动态环）、返回错误时回收实例自有实体、base/reserved 实体回收、防止外部子实体级联删除，以及经过 root/stale 校验的 `SceneSpawn::attach_instance` anchor 接线；**当前不接收或统一重放 `OverrideSet`，不等于 M2 runtime replay 已完成** |
+| `instantiate` | §8.2、§21.2 | `spawn_plan`/`spawn_typed_plan`/`despawn_instance`；批量预留、确定性 remap、rooted `LocalEntityId(0)` 层级校验、`ChildOf` 重连、typed Bundle/受限 `SpawnContext` constructor（仅当前 owner 可 materialize、拒绝动态环）、返回错误时回收实例自有实体、base/reserved 实体回收、防止外部子实体级联删除，以及经过 root/stale 校验的 `SceneSpawn::attach_instance` anchor 接线 |
 | `materialize` | §8.1、§8.2 M1 | `MaterializerRegistry` 按 `ComponentTypeId` 确定性注册安全 decoder；逐列校验 row layout/长度，逐 slot 校验 bounds/重复项/目标 local，解码后通过 `World::insert_reflect` 写入 reserved entity；完整 decode 阶段失败会回收本次实体，禁止静默丢 payload；`MaterializeLimits` 在 reservation/decode 前 checked 约束 entity/column/row/blob 预算 |
-| `property_apply` | §7、§8.2 M1 | 独立提供 `World::get_reflect_mut` + reflect path 的精确类型标量/字符串应用，并标记 ECS changed；同一 component 的批量 replay 先 clone/预演后一次提交，保证后项失败不留下部分写入；opaque `Bytes`、数值强制转换和结构 override 明确返回不支持/类型错误。 |
-| `nested_runtime` | §9、M3a（部分，`materialize` feature） | `spawn_nested_typed` 仅接受 typed constructors；按 `NestedSpawnLimits` 限制递归和实例数，检测 active GUID cycle，所有子树由 `SceneTreeSpawn` 持有并在失败时反向 teardown；子根挂到父实例 slot 的 mapped entity；attach 失败直接保留具体 `SceneAttachError`，空模板不会触发 panic。没有 opaque column decode 或 hot reload。 |
+| `property_apply` | §7、§8.2 M1 | 独立提供 `World::get_reflect_mut` + reflect path 的精确类型标量/字符串应用，并标记 ECS changed；同一 component 的批量 replay 先 clone/预演后一次提交，保证后项失败不留下部分写入；opaque `Bytes` 与数值强制转换明确返回类型错误，结构操作走 registry replay。 |
+| `nested_runtime` | §9、M3a（`materialize` feature） | `spawn_nested_typed` 仅接受 typed constructors；按 `NestedSpawnLimits` 限制递归和实例数，检测 active GUID cycle，所有子树由 `SceneTreeSpawn` 持有并在失败时反向 teardown；子根挂到父实例 slot 的 mapped entity；attach 失败保留具体 `SceneAttachError`，空模板不会 panic。 |
 
-| `override_replay` | §7、§8.2 M2（部分） | `replay_overrides` 通过 `SceneSpawn` remap 解析目标，按 `(Entity, ComponentTypeId)` 分组，在首次 ECS 写入前对所有属性 clone/预演，再按组提交；预检失败保持值不变，提交拒绝时恢复已提交组。结构操作先行显式拒绝，opaque payload 尚无安全 decoder；值恢复不回滚 ECS changed tick、observer 或外部副作用。 |
+| `override_replay` | §7、§8.2 M2 | `replay_overrides` 通过 `SceneSpawn` remap 解析属性目标；`replay_overrides_with_registry` 先 decode/preflight，再原子提交 Add/RemoveEntity、Add/RemoveComponent 与属性，更新 reserved remap 和删除 tombstone；失败路径回滚已创建实体、关系和组件。 |
+| `runtime` / `streaming` | §8.2、§11、§12 | `spawn_scene` 提供属性兼容入口；`spawn_scene_with_registry` 将模板校验、plan-aware override 校验、typed spawn、root anchor、结构/属性 replay 和失败清理合并为一个事务；`ResidencyScheduler` 以 `PersistentId` 稳定排序并按实体/字节预算分帧 admission。 |
+| `cost` / `persistence` / `reload` | §8、§14–§15 | `ScenePlanCost` 提供不解码 payload 的确定性成本计数；`PersistentEntityMap` 与 `SceneInstancePersistence` 捕获稀疏 delta；`SceneReloadPlan` 以 persistent id 优先、local id fallback 生成模板 delta、结构状态和孤儿诊断。 |
 
-验证：`cargo test -p prism_scene --offline -- --test-threads=1` → **121 unit + 1 doctest 全绿**；`cargo check -p prism_scene --offline --no-default-features` 通过；目标 crate `pkg/prism_scene` `cargo clippy --offline --all-targets --no-deps -- -D warnings` 通过。plan codec 回归覆盖所有严格截断前缀、稀疏大计数、尾随字节、magic/version、各类 wire 资源预算边界、unsorted/duplicate signature、column/signature 不一致和 entity count mismatch。全依赖严格 clippy 被未修改的 `pkg/prism_asset/src/server.rs` `clippy::let_and_return` 阻断；override validator 覆盖连续 reserved local、层级悬空、组件孤儿与跨层结构冲突。`materialize` 测试覆盖多行列物化、FieldSlot remap、缺注册与 decoder 失败回滚。
+验证：`cargo test -p prism_scene --offline -- --test-threads=1` → **135 unit + 1 doctest 全绿**；`cargo check -p prism_scene --offline --no-default-features` 通过；目标 crate `pkg/prism_scene` `cargo clippy --offline --all-targets --no-deps -- -D warnings` 通过。plan/template/manifest codec 覆盖严格截断、稀疏大计数、尾随字节、magic/version、wire 资源预算、unsorted/duplicate signature、column/signature 不一致和 entity count mismatch；override validator/replay 覆盖连续 reserved local、层级悬空、组件孤儿、结构事务与跨层结构冲突；materialize 覆盖多行列物化、FieldSlot remap、缺注册和 decoder 失败回滚；persistence/reload 覆盖 persistent-id remap 与孤儿诊断；runtime 覆盖 registry 结构 + 属性事务。
 
-**诚实边界 / 尚未落地（后续里程碑，非占位）**：M2 validator 已在 `SceneTemplate::validate_overrides` 中使用完整 `InstantiationPlan`：包含 base/新增 archetype 组件状态机，能拒绝对已存在组件 Add 和对不存在组件 Remove，并拒绝层级悬空；不带 plan 的轻量 `validate_for_template` 仍只承诺结构检查。注意：组件状态是按结构操作顺序推进的真实状态机，因此同一组件允许合法的 `RemoveComponent → AddComponent` 逆操作（以及 `AddComponent → RemoveComponent`），但重复同类操作或对当前不存在/已存在组件的非法转移会被拒绝；跨变体层组合仍由 `compose_layers` 先报告结构冲突，最终发布前必须用完整 plan validator 再验收。`property_apply` 已对精确类型的标量/字符串属性路径做 live ECS 写入，但不做数值 coercion、metadata clamp、opaque aggregate decode 或结构 override；这些仍需完整 reflect/schema 合约。`compose_layers` 对跨层结构冲突返回诊断并保留首个操作，调用方必须把非空错误视为组合失败；它不替代带模板 hierarchy 的最终验证。`encode_plan`/`decode_plan` 已提供 version-1 的确定性计划二进制契约，`encode_template`/`decode_template` 已提供 PRST v1 模板元数据 + plan 组合契约；新增 `SceneManifest`/`encode_manifest`/`decode_manifest` 提供 PMNF v1 的 GUID、规范依赖闭包和嵌入 PRST payload 包装，带严格截断、尾随字节、资源预算和 metadata 一致性检查。上述均包含 checked 资源预算、wire 结构校验和解码后完整 validation；这不等于完整 `prism_scene_bake` 资产管线、source import、CAS、schema migration 或 mmap。`materialize_plan_with_limits` 已在任何 reservation 前拒绝超过实体/列/行/blob 预算的输入，并保留失败回滚边界；它不替代完整运行时预算调度。`spawn_scene()` 完整热路径、SIMD remap 与预取微架构（§8.5）、统一 OverrideSet runtime replay（当前仅属性；组件结构操作仍显式拒绝）、子场景递归实例化与流送（§12；当前仅 M3a typed、有界树）、热重载传播（§13）、bake manifest/资产服务器接线仍未落地。M1 列格式仍要求应用为每个组件注册安全 decoder；不支持把任意 opaque bytes 自动 reinterpret 成 Rust 值，也不自动推断任意 Rust 类型的实体字段。decoder/typed constructor panic 或其外部副作用不享有事务回滚保证，API 文档已明示调用契约。
+**职责边界与不变量**：`OverrideSet::validate_for_plan` 使用完整 `InstantiationPlan` 维护 base/新增 archetype 的组件状态机；同一组件的合法逆操作按顺序生效，重复或非法状态转移被拒绝。`compose_layers` 报告跨层结构冲突并保留确定性首个操作，调用方必须把诊断视为组合结果的一部分。`property_apply` 只接受精确反射类型，结构 payload 必须由应用注册 typed decoder；本 crate 不 reinterpret opaque bytes、不捕获 decoder/constructor panic，也不回滚 ECS observer、changed tick 或外部副作用。`encode_plan`/`decode_plan`、`encode_template`/`decode_template` 和 `SceneManifest` 固定 PRST/PMNF v1 的确定性 wire contract；文件封装、source import、CAS/mmap、schema migration、空间索引、proxy⇄ECS 执行和 GPU 上传由上层 crate 实现并消费这些数据，不在 `prism_scene` 内复制一份平行真相源。

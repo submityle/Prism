@@ -172,20 +172,27 @@ pub struct SceneSpawn {
     /// [`Self::remap`] for read-only access; callers cannot register arbitrary
     /// entities as instance-owned through the spawn result.
     remap: RemapTable,
+    /// Locals removed by a structural override. The remap keeps its dense
+    /// storage so reserved ids remain stable, while resolution hides tombstones.
+    removed: alloc::collections::BTreeSet<LocalEntityId>,
 }
 
 impl SceneSpawn {
     #[cfg(feature = "materialize")]
     pub(crate) fn from_remap(remap: RemapTable) -> Self {
         let root = remap.get(LocalEntityId::new(0));
-        Self { root, remap }
+        Self {
+            root,
+            remap,
+            removed: alloc::collections::BTreeSet::new(),
+        }
     }
 
     /// Builds the instance anchor once the caller supplies the template identity
     /// that is intentionally absent from `InstantiationPlan`.
     #[must_use]
     pub fn scene_instance(&self, template: StableGuid, tier: ResidencyTier) -> SceneInstance {
-        SceneInstance::new(template, self.remap.clone(), tier)
+        SceneInstance::new(template, self.remap.clone(), tier).with_removed(self.removed.clone())
     }
 
     /// Attaches the live instance anchor to this spawn's root entity.
@@ -216,13 +223,39 @@ impl SceneSpawn {
     /// Resolves one local entity to its live handle.
     #[must_use]
     pub fn resolve(&self, local: LocalEntityId) -> Option<Entity> {
-        self.remap.get(local)
+        if self.removed.contains(&local) {
+            None
+        } else {
+            self.remap.get(local)
+        }
     }
 
     /// Returns the immutable local-to-world mapping for inspection.
     #[must_use]
     pub fn remap(&self) -> &RemapTable {
         &self.remap
+    }
+
+    #[cfg(feature = "materialize")]
+    pub(crate) fn is_removed(&self, local: LocalEntityId) -> bool {
+        self.removed.contains(&local)
+    }
+
+    #[cfg(feature = "materialize")]
+    pub(crate) fn add_reserved_mapping(&mut self, local: LocalEntityId, entity: Entity) -> bool {
+        if !local.is_reserved() || self.removed.contains(&local) {
+            return false;
+        }
+        self.remap.set(local, entity)
+    }
+
+    #[cfg(feature = "materialize")]
+    pub(crate) fn mark_removed(&mut self, local: LocalEntityId) -> bool {
+        if self.remap.get(local).is_none() || self.removed.contains(&local) {
+            return false;
+        }
+        self.removed.insert(local);
+        true
     }
 }
 
@@ -379,7 +412,13 @@ pub fn spawn_typed_plan(
     world.flush_reserved();
 
     for (local, constructor) in typed.entries {
-        let entity = remap.get(local).expect("validated plan local has mapping");
+        let Some(entity) = remap.get(local) else {
+            rollback(world, &remap, plan);
+            return Err(InstantiateError::TypedSpawnFailed {
+                local,
+                code: u32::MAX,
+            });
+        };
         let result = {
             let mut context = SpawnContext {
                 world,
@@ -410,8 +449,13 @@ pub fn spawn_typed_plan(
     }
     world.register_child_of();
     for &(child, parent) in plan.hierarchy.iter() {
-        let child_entity = remap.get(child).expect("validated child");
-        let parent_entity = remap.get(parent).expect("validated parent");
+        let (Some(child_entity), Some(parent_entity)) = (remap.get(child), remap.get(parent))
+        else {
+            rollback(world, &remap, plan);
+            return Err(InstantiateError::InvalidPlan(
+                PlanError::HierarchyUnknownLocal { local: child },
+            ));
+        };
         if would_create_child_cycle(world, child_entity, parent_entity) {
             rollback(world, &remap, plan);
             return Err(InstantiateError::DynamicHierarchyCycle { child, parent });
@@ -420,7 +464,11 @@ pub fn spawn_typed_plan(
     }
 
     let root = remap.get(LocalEntityId::new(0));
-    Ok(SceneSpawn { root, remap })
+    Ok(SceneSpawn {
+        root,
+        remap,
+        removed: alloc::collections::BTreeSet::new(),
+    })
 }
 
 pub(crate) fn would_create_child_cycle(world: &World, child: Entity, parent: Entity) -> bool {

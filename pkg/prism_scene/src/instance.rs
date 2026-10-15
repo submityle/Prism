@@ -8,6 +8,7 @@
 //! the current [`ResidencyTier`].
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 
 use prism_asset::StableGuid;
 use prism_ecs::component::Component;
@@ -35,6 +36,9 @@ pub struct SceneInstance {
     /// The map is immutable to consumers after construction; structural
     /// ownership is established only by the scene instantiation pipeline.
     remap: RemapTable,
+    /// Locals removed by a structural override. The mapping remains dense for
+    /// stable identity, but resolution hides these tombstones.
+    removed: BTreeSet<LocalEntityId>,
     /// This instance's override set; `None` until a field is first overridden.
     pub overrides: Option<Box<OverrideSet>>,
     /// Cross-session / network locator (design §6.2, §15).
@@ -51,6 +55,7 @@ impl SceneInstance {
         Self {
             template,
             remap,
+            removed: BTreeSet::new(),
             overrides: None,
             persistent: None,
             tier,
@@ -67,7 +72,23 @@ impl SceneInstance {
     /// Resolves a template-local entity id to this instance's live entity.
     #[must_use]
     pub fn resolve(&self, local: LocalEntityId) -> Option<Entity> {
-        self.remap.get(local)
+        if self.removed.contains(&local) {
+            None
+        } else {
+            self.remap.get(local)
+        }
+    }
+
+    /// Whether this instance has removed the local entity through a structural
+    /// override.
+    #[must_use]
+    pub fn is_removed(&self, local: LocalEntityId) -> bool {
+        self.removed.contains(&local)
+    }
+
+    pub(crate) fn with_removed(mut self, removed: BTreeSet<LocalEntityId>) -> Self {
+        self.removed = removed;
+        self
     }
 
     /// Returns the instance mapping for read-only inspection.

@@ -328,8 +328,10 @@ mod tests {
     #[test]
     fn enforces_decode_limits_and_wire_headers() {
         let encoded = encode_template(&template()).unwrap();
-        let mut tiny = TemplateDecodeLimits::default();
-        tiny.max_bytes = encoded.len() - 1;
+        let tiny = TemplateDecodeLimits {
+            max_bytes: encoded.len() - 1,
+            ..TemplateDecodeLimits::default()
+        };
         assert_eq!(
             decode_template(&encoded, tiny),
             Err(TemplateCodecError::ResourceLimit("template bytes"))

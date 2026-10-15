@@ -128,7 +128,7 @@ pub fn spawn_nested_typed<P: NestedSceneProvider>(
     let mut active = Vec::new();
     active.push(template.guid);
     let mut count = 0;
-    let result = spawn_tree(
+    spawn_tree(
         world,
         template,
         root_plan,
@@ -137,8 +137,7 @@ pub fn spawn_nested_typed<P: NestedSceneProvider>(
         0,
         &mut active,
         &mut count,
-    );
-    result
+    )
 }
 
 fn spawn_tree<P: NestedSceneProvider>(
@@ -184,15 +183,12 @@ fn spawn_tree<P: NestedSceneProvider>(
             despawn_instance(world, &spawn);
             return Err(NestedInstantiateError::Cycle(slot.template));
         }
-        let child_template = match provider.template(slot.template) {
-            Some(value) => value,
-            None => {
-                for child in children.into_iter().rev() {
-                    child.tree.despawn_tree(world);
-                }
-                despawn_instance(world, &spawn);
-                return Err(NestedInstantiateError::MissingTemplate(slot.template));
+        let Some(child_template) = provider.template(slot.template) else {
+            for child in children.into_iter().rev() {
+                child.tree.despawn_tree(world);
             }
+            despawn_instance(world, &spawn);
+            return Err(NestedInstantiateError::MissingTemplate(slot.template));
         };
         if let Err(error) = child_template.validate() {
             for child in children.drain(..).rev() {

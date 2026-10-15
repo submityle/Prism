@@ -973,13 +973,13 @@ mod tests {
         let mut repeated = OverrideSet::new();
         for _ in 0..2 {
             repeated.push_structural(StructuralOp::RemoveEntity {
-                local: LocalEntityId::new(0),
+                local: LocalEntityId::new(1),
             });
         }
         assert_eq!(
-            repeated.validate_for_template(1),
+            repeated.validate_for_template(2),
             Err(super::OverrideError::DuplicateRemoveEntity {
-                local: LocalEntityId::new(0)
+                local: LocalEntityId::new(1)
             })
         );
     }

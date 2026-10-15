@@ -1,4 +1,4 @@
-//! Prism Scene: the template / instance / override runtime (design §5-§7, §14).
+//! Prism Scene: the template / instance / override runtime (design §5-§15).
 //!
 //! A **Scene** is a first-class entity-subtree template. At runtime it is
 //! represented in three layers (design §5):
@@ -35,6 +35,11 @@
 //!   internal references pointing inside *its own* instance (design §6.1).
 //! - [`template`] — the immutable [`SceneTemplate`] descriptor and its nested
 //!   instance [`NestedSlot`]s (design §5.1, §9).
+//! - [`runtime`] — transactional scene spawn, including typed structural replay
+//!   when the `materialize` feature is enabled.
+//! - [`streaming`] — deterministic residency admission and frame budgets.
+//! - [`persistence`] / [`reload`] — ECS-free delta capture and template reload
+//!   planning with persistent-id-first remapping.
 //!
 //! The crate is `no_std + alloc` and forbids `unsafe`. It depends only on
 //! `prism_asset` (for the [`prism_asset::StableGuid`] identity shared with the
@@ -46,6 +51,7 @@
 
 extern crate alloc;
 
+pub mod cost;
 pub mod identity;
 pub mod instance;
 pub mod instantiate;
@@ -59,10 +65,12 @@ pub mod nested_runtime;
 pub mod override_replay;
 pub mod overrides;
 pub mod path;
+pub mod persistence;
 pub mod plan;
 pub mod plan_codec;
 #[cfg(feature = "materialize")]
 pub mod property_apply;
+pub mod reload;
 pub mod remap;
 pub mod residency;
 #[cfg(feature = "materialize")]
@@ -71,6 +79,7 @@ pub mod streaming;
 pub mod template;
 pub mod template_codec;
 
+pub use cost::ScenePlanCost;
 pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
 pub use instance::SceneInstance;
 pub use instantiate::{
@@ -92,23 +101,32 @@ pub use nested_runtime::{
     NestedSpawnLimits, SceneTreeChild, SceneTreeSpawn,
 };
 #[cfg(feature = "materialize")]
-pub use override_replay::{replay_overrides, OverrideReplayError};
+pub use override_replay::{
+    replay_overrides, replay_overrides_with_registry, OverrideReplayError, StructuralDecodeFailure,
+    StructuralDecoder, StructuralDecoderRegistrationError, StructuralDecoderRegistry,
+};
 pub use overrides::{
     ArchetypeSignature, ComponentTypeId, OverrideError, OverrideSet, OverrideValue,
     PropertyOverride, StructuralOp,
 };
 pub use path::{FieldPath, FieldSegment};
+pub use persistence::{
+    EntityBinding, PersistedPropertyOverride, PersistenceCapture, PersistenceDiagnostic,
+    PersistenceError, PersistentEntityMap, PersistentOverrideSet, SceneInstancePersistence,
+};
 pub use plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
 pub use plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits};
 #[cfg(feature = "materialize")]
 pub use property_apply::{apply_property_override, apply_property_overrides, PropertyApplyError};
+pub use reload::{
+    plan_reload, HierarchyChange, ReloadDiagnostic, ReloadError, ReloadOrphanReason,
+    SceneReloadPlan, TemplateDelta,
+};
 pub use remap::RemapTable;
 pub use residency::{ResidencyPlan, ResidencyTier};
 #[cfg(feature = "materialize")]
-pub use runtime::{spawn_scene, SceneSpawnError};
-pub use streaming::{
-    ResidencyAction, ResidencyBudget, ResidencyRequest, ResidencyScheduler,
-};
+pub use runtime::{spawn_scene, spawn_scene_with_registry, SceneSpawnError};
+pub use streaming::{ResidencyAction, ResidencyBudget, ResidencyRequest, ResidencyScheduler};
 pub use template::{NestedSlot, SceneTemplate, TemplateError};
 pub use template_codec::{
     decode_template, encode_template, TemplateCodecError, TemplateDecodeLimits,
@@ -116,6 +134,7 @@ pub use template_codec::{
 
 /// The common types most consumers import.
 pub mod prelude {
+    pub use crate::cost::ScenePlanCost;
     pub use crate::identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
     pub use crate::instance::SceneInstance;
     pub use crate::instantiate::{
@@ -131,17 +150,31 @@ pub mod prelude {
         MaterializeFailure, MaterializeLimits, MaterializerRegistry, RemappedEntityField,
         RowLayout,
     };
+    #[cfg(feature = "materialize")]
+    pub use crate::override_replay::{
+        replay_overrides, replay_overrides_with_registry, OverrideReplayError,
+        StructuralDecodeFailure, StructuralDecoder, StructuralDecoderRegistrationError,
+        StructuralDecoderRegistry,
+    };
     pub use crate::overrides::{
         ArchetypeSignature, ComponentTypeId, OverrideError, OverrideSet, OverrideValue,
         PropertyOverride, StructuralOp,
     };
     pub use crate::path::{FieldPath, FieldSegment};
+    pub use crate::persistence::{
+        EntityBinding, PersistedPropertyOverride, PersistenceCapture, PersistenceDiagnostic,
+        PersistenceError, PersistentEntityMap, PersistentOverrideSet, SceneInstancePersistence,
+    };
     pub use crate::plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
     pub use crate::plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits};
+    pub use crate::reload::{
+        plan_reload, HierarchyChange, ReloadDiagnostic, ReloadError, ReloadOrphanReason,
+        SceneReloadPlan, TemplateDelta,
+    };
     pub use crate::remap::RemapTable;
     pub use crate::residency::{ResidencyPlan, ResidencyTier};
     #[cfg(feature = "materialize")]
-    pub use crate::runtime::{spawn_scene, SceneSpawnError};
+    pub use crate::runtime::{spawn_scene, spawn_scene_with_registry, SceneSpawnError};
     pub use crate::streaming::{
         ResidencyAction, ResidencyBudget, ResidencyRequest, ResidencyScheduler,
     };

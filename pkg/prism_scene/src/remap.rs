@@ -50,6 +50,7 @@ impl RemapTable {
     /// Records a reserved-segment mapping at `offset` (0-based). The offset must
     /// be at most the current reserved length; a larger offset is rejected so a
     /// gap can never be silently introduced.
+    #[cfg(any(feature = "materialize", test))]
     pub(crate) fn set_reserved(&mut self, offset: u32, entity: Entity) -> bool {
         let index = offset as usize;
         if index < self.reserved.len() {
@@ -66,13 +67,7 @@ impl RemapTable {
     /// Sets the mapping for `local`, routing to the base or reserved run by its
     /// segment. A base id must be within the current base length (or exactly
     /// one past it, which appends). Returns whether the mapping was stored.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reserved-segment writers are consumed by future structural overrides"
-        )
-    )]
+    #[cfg(any(feature = "materialize", test))]
     pub(crate) fn set(&mut self, local: LocalEntityId, entity: Entity) -> bool {
         if local.is_reserved() {
             self.set_reserved(local.index() - LocalEntityId::RESERVED_BASE, entity)

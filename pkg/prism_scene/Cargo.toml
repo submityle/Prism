@@ -2,7 +2,7 @@
 name = "prism_scene"
 version = "0.1.0"
 edition = "2024"
-description = "Prism scene/template/instance/override runtime (design §5-§7, §14). no_std + alloc; deterministic cross-session identity and sparse property/structural override sets. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+description = "Prism scene/template/instance/override runtime (design §5-§15). no_std + alloc; deterministic transactional instantiation, nested typed scenes, residency scheduling, persistence and reload planning. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
 license = "MIT OR Apache-2.0"
 publish = false
 

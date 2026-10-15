@@ -185,6 +185,37 @@ pub fn decode_manifest(
     Ok(manifest)
 }
 
+struct Reader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], ManifestError> {
+        let end = self.at.checked_add(n).ok_or(ManifestError::Truncated)?;
+        let value = self
+            .bytes
+            .get(self.at..end)
+            .ok_or(ManifestError::Truncated)?;
+        self.at = end;
+        Ok(value)
+    }
+    fn u16(&mut self) -> Result<u16, ManifestError> {
+        let b = self.take(2)?;
+        let v = u16::from_le_bytes([b[0], b[1]]);
+        Ok(v)
+    }
+    fn u32(&mut self) -> Result<u32, ManifestError> {
+        let b = self.take(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+    fn u128(&mut self) -> Result<u128, ManifestError> {
+        let b = self.take(16)?;
+        Ok(u128::from_le_bytes(
+            b.try_into().map_err(|_| ManifestError::Truncated)?,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,36 +246,5 @@ mod tests {
             decode_manifest(&encoded, ManifestDecodeLimits::default()),
             Err(ManifestError::TrailingBytes)
         );
-    }
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], ManifestError> {
-        let end = self.at.checked_add(n).ok_or(ManifestError::Truncated)?;
-        let value = self
-            .bytes
-            .get(self.at..end)
-            .ok_or(ManifestError::Truncated)?;
-        self.at = end;
-        Ok(value)
-    }
-    fn u16(&mut self) -> Result<u16, ManifestError> {
-        let b = self.take(2)?;
-        let v = u16::from_le_bytes([b[0], b[1]]);
-        Ok(v)
-    }
-    fn u32(&mut self) -> Result<u32, ManifestError> {
-        let b = self.take(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-    fn u128(&mut self) -> Result<u128, ManifestError> {
-        let b = self.take(16)?;
-        Ok(u128::from_le_bytes(
-            b.try_into().map_err(|_| ManifestError::Truncated)?,
-        ))
     }
 }
