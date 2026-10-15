@@ -7,8 +7,8 @@
 //! committing one dependency-aware revision. Awaiting a dependency yields the
 //! CPU worker, so a fixed worker count cannot deadlock solely because parent
 //! assemblies are waiting for child flights. Reload flights support a narrow
-//! resident-root revision replacement with per-path epoch supersede and labeled
-//! outputs whose dependencies are already resident; automatic loading of new
+//! resident-root revision replacement with per-path epoch supersede and direct
+//! labeled-path loads that reuse the source assembly; automatic loading of new
 //! reload dependencies remains unsupported. Range reads and preemptive
 //! cancellation are also outside this slice. Priority orders queued CPU-pool
 //! work where possible; ticket
@@ -651,12 +651,48 @@ async fn execute_async_load(
     priority: Priority,
     mut ancestors: BTreeSet<AssetPath>,
 ) -> ScheduleOutcome {
-    if !ancestors.insert(path.clone()) {
+    let requested_path = path.clone();
+    let source_path = path.clone().without_label();
+    let requested_label = path.has_label();
+    let source_was_ancestor = ancestors.contains(&source_path);
+    if !ancestors.insert(requested_path.clone()) {
         return Err(LoadFailure::AssemblyFailed(format!(
-            "dependency cycle at {path}"
+            "dependency cycle at {requested_path}"
         )));
     }
-    let preparation = match server.prepare_async_load(path.clone(), requested_type) {
+    if requested_label {
+        if source_was_ancestor {
+            return Err(LoadFailure::AssemblyFailed(format!(
+                "dependency cycle at {source_path}"
+            )));
+        }
+        scheduler.release_execution_slot(&FlightKey::Load(requested_path.clone()), &flight);
+        let source_ticket = match scheduler.schedule_with_ancestors(
+            source_path.clone(),
+            priority,
+            ancestors.clone(),
+        ) {
+            Ok(ticket) => ticket,
+            Err(error) => return Err(LoadFailure::AssemblyFailed(error.to_string())),
+        };
+        let source_result = source_ticket.await;
+        return match source_result {
+            Ok(handle) if server.is_loaded(handle.id()) => {
+                server.load_untyped(requested_path.clone()).ok_or_else(|| {
+                    LoadFailure::AssemblyFailed(format!(
+                        "labeled asset was not emitted by {source_path}: {requested_path}"
+                    ))
+                })
+            }
+            Ok(_) => Err(LoadFailure::AssemblyFailed(format!(
+                "source asset failed to load: {source_path}"
+            ))),
+            Err(error) => Err(LoadFailure::AssemblyFailed(format!(
+                "source asset {source_path} failed: {error:?}"
+            ))),
+        };
+    }
+    let preparation = match server.prepare_async_load(source_path.clone(), requested_type) {
         Ok(preparation) => preparation,
         Err(error) if error.starts_with("no loader for ") => return Err(LoadFailure::NoLoader),
         Err(error) => return Err(LoadFailure::AssemblyFailed(error)),
@@ -667,7 +703,7 @@ async fn execute_async_load(
                 return Ok(handle);
             }
             return Err(LoadFailure::AssemblyFailed(format!(
-                "asset is already loading outside this scheduler: {path}"
+                "asset is already loading outside this scheduler: {source_path}"
             )));
         }
         AsyncLoadPreparation::New(plan) => plan,
@@ -725,7 +761,7 @@ async fn execute_async_load(
         .iter()
         .any(|labeled| !labeled.dependencies.is_empty());
     if !output.primary.dependencies.is_empty() || has_labeled_dependencies {
-        scheduler.release_execution_slot(&FlightKey::Load(path.clone()), &flight);
+        scheduler.release_execution_slot(&FlightKey::Load(requested_path.clone()), &flight);
     }
     let has_dependencies = !output.primary.dependencies.is_empty();
     let mut dependencies = Vec::with_capacity(output.primary.dependencies.len());
@@ -770,9 +806,11 @@ async fn execute_async_load(
         .collect();
     let mut labeled_dependencies = Vec::with_capacity(labeled_requests.len());
     for (label, requests) in labeled_requests {
-        let label_path = path.clone().with_label(label);
+        let label_path = source_path.clone().with_label(label);
         let mut label_ancestors = ancestors.clone();
-        if !label_ancestors.insert(label_path.clone()) {
+        let is_requested_source_label =
+            ancestors.contains(&label_path) && label_path.clone().without_label() == source_path;
+        if !is_requested_source_label && !label_ancestors.insert(label_path.clone()) {
             let error = format!("dependency cycle at {label_path}");
             server.fail_async_load(&plan, &error);
             return Err(LoadFailure::AssemblyFailed(error));
@@ -816,7 +854,11 @@ async fn execute_async_load(
     }
     if has_dependencies || has_labeled_dependencies {
         scheduler
-            .acquire_execution_slot(FlightKey::Load(path.clone()), Arc::clone(&flight), priority)
+            .acquire_execution_slot(
+                FlightKey::Load(requested_path.clone()),
+                Arc::clone(&flight),
+                priority,
+            )
             .await;
     }
     server
@@ -1268,6 +1310,21 @@ mod tests {
         }
     }
 
+    struct LabeledLoader;
+
+    impl AssetLoader for LabeledLoader {
+        type Asset = TestAsset;
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["scene"]
+        }
+
+        fn load(&self, _bytes: &[u8], ctx: &mut LoadContext) -> Result<TestAsset, LoadError> {
+            ctx.add_labeled_asset("mesh", OtherAsset);
+            Ok(TestAsset)
+        }
+    }
+
     struct OtherLoader;
 
     impl AssetLoader for OtherLoader {
@@ -1583,6 +1640,87 @@ mod tests {
             scheduler.cpu_pool.block_on(ticket),
             Err(LoadFailure::NoLoader)
         );
+        assert_eq!(scheduler.in_flight(), 0);
+    }
+
+    #[test]
+    fn direct_labeled_path_reuses_async_source_assembly() {
+        let server = Arc::new(AssetServer::new());
+        server.register_loader(LabeledLoader);
+        let mut source = MemSource::new();
+        source.insert("scene.scene", Arc::<[u8]>::from([]));
+        server.mount("mem", Arc::new(source), 0);
+        let scheduler = LoadScheduler::new(Arc::clone(&server), TaskPool::with_threads(1), 1);
+
+        let label = scheduler
+            .cpu_pool
+            .block_on(
+                scheduler
+                    .schedule("mem://scene.scene#mesh", Priority::Normal)
+                    .expect("labeled request admitted"),
+            )
+            .expect("labeled request should commit");
+
+        assert_eq!(label.id().type_id(), AssetTypeId::of::<OtherAsset>());
+        assert!(server.is_loaded(label.id()));
+        assert!(server.is_loaded(
+            server
+                .load_untyped("mem://scene.scene")
+                .expect("source should be resident")
+                .id()
+        ));
+        assert_eq!(scheduler.in_flight(), 0);
+    }
+
+    #[test]
+    fn direct_labeled_path_resolves_already_resident_source() {
+        let server = Arc::new(AssetServer::new());
+        server.register_loader(LabeledLoader);
+        let mut source = MemSource::new();
+        source.insert("scene.scene", Arc::<[u8]>::from([]));
+        server.mount("mem", Arc::new(source), 0);
+        let primary = server
+            .load_untyped("mem://scene.scene")
+            .expect("source should load");
+        assert!(server.is_loaded(primary.id()));
+        let scheduler = LoadScheduler::new(Arc::clone(&server), TaskPool::with_threads(1), 1);
+
+        let label = scheduler
+            .cpu_pool
+            .block_on(
+                scheduler
+                    .schedule("mem://scene.scene#mesh", Priority::Normal)
+                    .expect("labeled request admitted"),
+            )
+            .expect("resident source should resolve its label");
+
+        assert_eq!(label.id().type_id(), AssetTypeId::of::<OtherAsset>());
+        assert!(server.is_loaded(label.id()));
+        assert_eq!(scheduler.in_flight(), 0);
+    }
+
+    #[test]
+    fn unknown_direct_labeled_path_does_not_poison_source_revision() {
+        let server = Arc::new(AssetServer::new());
+        server.register_loader(LabeledLoader);
+        let mut source = MemSource::new();
+        source.insert("scene.scene", Arc::<[u8]>::from([]));
+        server.mount("mem", Arc::new(source), 0);
+        let scheduler = LoadScheduler::new(Arc::clone(&server), TaskPool::with_threads(1), 1);
+
+        let result = scheduler.cpu_pool.block_on(
+            scheduler
+                .schedule("mem://scene.scene#missing", Priority::Normal)
+                .expect("unknown label request admitted"),
+        );
+        assert!(matches!(
+            result,
+            Err(LoadFailure::AssemblyFailed(message)) if message.contains("was not emitted")
+        ));
+        let primary = server
+            .load_untyped("mem://scene.scene")
+            .expect("source should remain queryable");
+        assert!(server.is_loaded(primary.id()));
         assert_eq!(scheduler.in_flight(), 0);
     }
 

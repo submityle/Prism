@@ -48,12 +48,13 @@
 //! - **Hot reload (implemented in part):** watcher/event batching, reload plans,
 //!   dependency-aware reassembly, last-known-good retention, and narrow
 //!   resident-root asynchronous reload with per-path epoch supersede are
-//!   available. Async reload can stage labeled outputs when the root and every
+//!   available. Async loads can now resolve a direct `path#label` request by
+//!   reusing the source assembly; async reload can stage labeled outputs when the root and every
 //!   labeled dependency is already resident; automatic new-dependency loading,
 //!   sibling new-label closure assembly, the full EDL pipeline, and
 //!   Windows-equivalent secure path opening remain incomplete.
 //! - **Not implemented here:** offline cooking, DDC/CAS ownership, codecs,
-//!   labeled-asset async assembly, range-backed assembly,
+//!   automatic loading of new reload dependencies, range-backed assembly,
 //!   streaming residency, DirectStorage/GPU decode, and release packaging.
 //!   Those belong to Asset Build or future runtime features. The scheduler
 //!   slice is not a complete EDL pipeline.
