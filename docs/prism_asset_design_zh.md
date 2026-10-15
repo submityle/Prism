@@ -772,7 +772,7 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 - 容器格式（ToC + 压缩分块 blob）与 patch/DLC：Asset Build §14.3/§14.5。
 - 本 crate 侧：按内容目录（`StableGuid → ChunkId → 容器`）定位、挂载优先级（§10.4）、按段异步读取（§10.3/§10.5）、解压与 GPU 直通（§11.2）。
 
-> **当前实现边界**：当前运行时消费切片覆盖 raw/per-payload Deflate 容器、ToC/范围/哈希校验、文件 `RangeSource`、Manifest 路由、overlay 和显式 Patch tombstone（高优先级删除标记可隐藏底层 GUID，卸载后恢复）。`install_runtime_package` 现在提供本地原子安装事务：先在 overlay 克隆快照中挂载容器/tombstone，完成 Manifest route、优先级、容器 GUID 与 immutable identity 全量绑定校验后，才一次性替换 live overlay；任一失败都保留旧快照。构建侧已有可验证的 Patch vertical slice：`prism_asset_build_core::package_runtime_patch` 只发新增/变更或 mapping 变化的 payload，并为变更 route 携带无 payload 的依赖上下文；`RuntimePatchPackage::apply_to_manifest` 校验 descriptor、base/patch/target manifest hash 和路由/tombstone/依赖元数据一致性；`prism_asset_build_cli patch` 已能对本地已发布 package 生成确定性 Patch 目录。`prism_asset_build_core::release` 和 CLI 还提供 caller-owned Ed25519 release descriptor 签名/验签（`release.sig`），但没有密钥托管、跨机器信任根或完整发行服务。上述能力尚未接入运行时下载、OverlaySet 的自动安装发现、远程发行闭环或 package-level 回滚。BLAKE3 是未认证完整性摘要，不是防篡改签名。发行 publication 边界已额外严格证明 Build Manifest 的每个 `AssetId` 都有唯一的 `StableGuid` runtime route，防止发布内部自洽但缺少运行时资产的包。压缩块表、加密、密钥/nonce/tag、容器/Merkle 签名、anti-rollback、远程 CDN 按段读取及 package-level rollback 均未完成。
+> **当前实现边界**：当前运行时消费切片覆盖 raw/per-payload Deflate 容器、ToC/范围/哈希校验、文件 `RangeSource`、Manifest 路由、overlay 和显式 Patch tombstone（高优先级删除标记可隐藏底层 GUID，卸载后恢复）。`install_runtime_package` 现在提供本地原子安装事务：先在 overlay 克隆快照中挂载容器/tombstone，完成 Manifest route、优先级、容器 GUID 与 immutable identity 全量绑定校验后，才一次性替换 live overlay；任一失败都保留旧快照。新增 `install_runtime_package_transaction` 返回有界、可编码的本地回滚/重启恢复记录，回滚前复核 overlay fingerprint、Manifest/container identity 与 caller-owned provenance；它不是远程发布协议或认证信任根。构建侧已有可验证的 Patch vertical slice：`prism_asset_build_core::package_runtime_patch` 只发新增/变更或 mapping 变化的 payload，并为变更 route 携带无 payload 的依赖上下文；`RuntimePatchPackage::apply_to_manifest` 校验 descriptor、base/patch/target manifest hash 和路由/tombstone/依赖元数据一致性；`prism_asset_build_cli patch` 已能对本地已发布 package 生成确定性 Patch 目录。`prism_asset_build_core::release` 和 CLI 还提供 caller-owned Ed25519 release descriptor 签名/验签（`release.sig`），但没有密钥托管、跨机器信任根或完整发行服务。上述能力尚未接入运行时下载、OverlaySet 的自动安装发现或远程发行闭环。BLAKE3 是未认证完整性摘要，不是防篡改签名。发行 publication 边界已额外严格证明 Build Manifest 的每个 `AssetId` 都有唯一的 `StableGuid` runtime route，防止发布内部自洽但缺少运行时资产的包。压缩块表、加密、密钥/nonce/tag、容器/Merkle 签名、anti-rollback、远程 CDN 按段读取、DLC 闭包和远程 package rollback 均未完成。
 
 ---
 
@@ -1059,6 +1059,16 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 > 门槛纪律：新增并发路径必附 `loom` 用例；新增解析/解压入口必附 fuzz 目标；新增处理器必附双跑对拍。无此三者不予合入。
 
 ---
+
+### 25.1 当前实现补记（2026-10-16）
+
+以下运行时安全与恢复切片已经有代码和回归证据，不再视为设计占位：
+
+- `FsSource` 在 Windows 使用 reparse-point 拒绝与最终句柄路径校验；Unix 路径继续使用目录描述符相对打开，避免元数据检查与实际读取之间的路径替换竞态。
+- 构建执行器在 artifact 验证与 revision publication 之间保留明确边界，支持在副作用边界前取消；取消不会发布部分 revision。
+- runtime package install 提供有界 provenance、manifest/container identity binding、进程内 rollback 和可持久化的重启 recovery record；恢复记录带版本、大小上限、规范排序和摘要校验，绑定不匹配时保持 live overlay 不变。
+
+验证命令：`cargo test --locked -p prism_asset --all-targets`、`cargo test --locked -p prism_asset_container --all-targets`、`cargo test --locked -p prism_asset_build_core --all-targets`。Windows 原生 reparse-point 行为仍需在 Windows runner 上执行；本机没有把非 Windows 编译结果冒充为该平台证据。
 
 ## 26. API 人体工学深化（派生宏 / 系统参数 / prelude）
 

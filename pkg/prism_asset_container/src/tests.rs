@@ -8,12 +8,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "mmap")]
 use crate::MmapRangeSource;
 use crate::{
-    install_runtime_package, ChunkInput, ChunkPlanner, ChunkPolicy, Codec, ContainerError,
-    ContainerIdentity, ContainerReader, ContainerWriter, FileRangeSource, InstallMount,
-    InstallTombstones, ManifestAssetReader, ManifestError, ManifestMetadata, ManifestRangeRequest,
-    ManifestReadError, ManifestRoute, MemoryRangeSource, OverlaySet, RangeBatchPolicy,
-    RangeRequest, RangeSource, RangeSourceError, RuntimeInstallPolicy, RuntimeManifest,
-    CHUNK_FORMAT_VERSION, FORMAT_VERSION, MAGIC, SUPPORTED_FORMAT_VERSIONS,
+    install_runtime_package, install_runtime_package_transaction, ChunkInput, ChunkPlanner,
+    ChunkPolicy, Codec, ContainerError, ContainerIdentity, ContainerReader, ContainerWriter,
+    FileRangeSource, InstallMount, InstallTombstones, ManifestAssetReader, ManifestError,
+    ManifestMetadata, ManifestRangeRequest, ManifestReadError, ManifestRoute, MemoryRangeSource,
+    OverlaySet, RangeBatchPolicy, RangeRequest, RangeSource, RangeSourceError,
+    RuntimeInstallPolicy, RuntimeManifest, CHUNK_FORMAT_VERSION, FORMAT_VERSION, MAGIC,
+    SUPPORTED_FORMAT_VERSIONS,
 };
 
 fn guid(name: &str) -> StableGuid {
@@ -2303,4 +2304,109 @@ fn runtime_package_install_policy_rejects_before_publishing_overlay() {
     assert!(matches!(error, crate::InstallError::Policy { guid, .. } if guid == package_guid));
     assert_eq!(overlay.read_all(existing_guid).unwrap(), b"existing");
     assert!(!overlay.contains(package_guid));
+}
+
+#[test]
+fn runtime_package_transaction_rolls_back_and_recovers_from_bounded_record() {
+    let existing_guid = guid("existing.rollback");
+    let package_guid = guid("package.rollback");
+    let existing_bytes = build(&[("existing.rollback", b"existing")]);
+    let package_bytes = build(&[("package.rollback", b"package")]);
+    let provenance = b"release-provenance-v1";
+
+    let mut overlay = OverlaySet::new();
+    overlay.mount("base", 1, ContainerReader::new(existing_bytes).unwrap());
+    let previous = overlay.clone();
+
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert(ManifestRoute {
+            guid: package_guid,
+            container_name: "package".into(),
+            priority: 5,
+            container_guid: package_guid,
+        })
+        .unwrap();
+    manifest
+        .bind_container("package", identity(&package_bytes))
+        .unwrap();
+
+    let mut handle = install_runtime_package_transaction(
+        &mut overlay,
+        &manifest,
+        [InstallMount::new(
+            "package",
+            5,
+            ContainerReader::new(package_bytes).unwrap(),
+        )],
+        std::iter::empty::<InstallTombstones>(),
+        provenance,
+    )
+    .unwrap();
+    let record = handle.recovery_record();
+    let encoded = record.encode().unwrap();
+    assert_eq!(
+        crate::RuntimeInstallRecovery::decode(&encoded).unwrap(),
+        record
+    );
+    assert_eq!(overlay.read_all(package_guid).unwrap(), b"package");
+
+    handle.rollback(&mut overlay).unwrap();
+    assert_eq!(overlay.read_all(existing_guid).unwrap(), b"existing");
+    assert!(!overlay.contains(package_guid));
+
+    let mut installed = previous.clone();
+    installed.mount(
+        "package",
+        5,
+        ContainerReader::new(build(&[("package.rollback", b"package")])).unwrap(),
+    );
+    let decoded = crate::RuntimeInstallRecovery::decode(&encoded).unwrap();
+    decoded
+        .recover_rollback(&mut installed, previous, &manifest, provenance)
+        .unwrap();
+    assert_eq!(installed.read_all(existing_guid).unwrap(), b"existing");
+    assert!(!installed.contains(package_guid));
+}
+
+#[test]
+fn runtime_package_recovery_rejects_tampering_without_mutating_live_overlay() {
+    let package_guid = guid("package.recovery-tamper");
+    let package_bytes = build(&[("package.recovery-tamper", b"package")]);
+    let mut overlay = OverlaySet::new();
+    let previous = overlay.clone();
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert(ManifestRoute {
+            guid: package_guid,
+            container_name: "package".into(),
+            priority: 5,
+            container_guid: package_guid,
+        })
+        .unwrap();
+    manifest
+        .bind_container("package", identity(&package_bytes))
+        .unwrap();
+    let handle = install_runtime_package_transaction(
+        &mut overlay,
+        &manifest,
+        [InstallMount::new(
+            "package",
+            5,
+            ContainerReader::new(package_bytes).unwrap(),
+        )],
+        std::iter::empty::<InstallTombstones>(),
+        b"provenance",
+    )
+    .unwrap();
+    let mut record = handle.recovery_record().encode().unwrap();
+    let last = record.len() - 1;
+    record[last] ^= 1;
+    assert!(matches!(
+        crate::RuntimeInstallRecovery::decode(&record),
+        Err(crate::RecoveryError::HashMismatch)
+    ));
+    assert!(overlay.contains(package_guid));
+    handle.commit();
+    assert!(!previous.contains(package_guid));
 }

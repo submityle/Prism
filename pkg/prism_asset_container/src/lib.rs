@@ -32,8 +32,11 @@ pub use format::{
     FORMAT_VERSION, MAGIC, SUPPORTED_FORMAT_VERSIONS,
 };
 pub use install::{
-    install_runtime_package, install_runtime_package_with_policy, InstallError, InstallMount,
-    InstallTombstones, RuntimeInstallPolicy,
+    install_runtime_package, install_runtime_package_transaction,
+    install_runtime_package_transaction_with_policy, install_runtime_package_with_policy,
+    InstallError, InstallMount, InstallTombstones, RecoveryError, RuntimeInstallHandle,
+    RuntimeInstallPolicy, RuntimeInstallRecovery, RuntimePackageProvenance,
+    MAX_RUNTIME_PROVENANCE_BYTES, MAX_RUNTIME_RECOVERY_BYTES,
 };
 pub use manifest::{
     ContainerIdentity, ManifestError, ManifestMetadata, ManifestRoute, RuntimeManifest,

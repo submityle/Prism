@@ -219,6 +219,42 @@ impl OverlaySet {
             Some(GuidWinner::Tombstone) | None => Err(ContainerError::MissingAsset(guid)),
         }
     }
+
+    /// Returns a deterministic identity for the complete overlay state.
+    ///
+    /// The digest includes mount kind, name, priority, mount serial, immutable
+    /// container identity, and tombstone GUIDs. It is intended for local
+    /// install/recovery guards; it is not an authentication token.
+    pub(crate) fn install_fingerprint(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PRISM_OVERLAY_FINGERPRINT\0");
+        hasher.update(&self.next_serial.to_le_bytes());
+        hasher.update(&(self.mounts.len() as u64).to_le_bytes());
+        for mount in &self.mounts {
+            hasher.update(&[0]);
+            hasher.update(&(mount.name.len() as u64).to_le_bytes());
+            hasher.update(mount.name.as_bytes());
+            hasher.update(&mount.priority.to_le_bytes());
+            hasher.update(&mount.serial.to_le_bytes());
+            let info = mount.reader.info();
+            hasher.update(&info.total_len.to_le_bytes());
+            hasher.update(&info.content_hash);
+            hasher.update(&info.generation.to_le_bytes());
+        }
+        hasher.update(&(self.tombstones.len() as u64).to_le_bytes());
+        for mount in &self.tombstones {
+            hasher.update(&[1]);
+            hasher.update(&(mount.name.len() as u64).to_le_bytes());
+            hasher.update(mount.name.as_bytes());
+            hasher.update(&mount.priority.to_le_bytes());
+            hasher.update(&mount.serial.to_le_bytes());
+            hasher.update(&(mount.guids.len() as u64).to_le_bytes());
+            for guid in &mount.guids {
+                hasher.update(&guid.to_u128().to_le_bytes());
+            }
+        }
+        *hasher.finalize().as_bytes()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
