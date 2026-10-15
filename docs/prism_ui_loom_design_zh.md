@@ -443,8 +443,10 @@ pub trait LayoutProtocol {
 
 > **实现状态(✅ `prism_ui_component` / `prism_ui_router` / `prism_ui_async`)**:生命周期钩子
 > `on_mount`/`on_update`/`on_unmount`/`on_cleanup`(偏离:`on_cleanup` 签名为 `FnOnce`,一次性释放订阅更贴合所有权),
-> 路由 `before_enter` 异步守卫 + `:param` 类型化解析 + 可恢复深链接,`prism_ui_async` 竞态取消(最新请求胜出)+ SWR 缓存
-> 均落地。component 22+2doc、router 33+1doc、async 28+4+8doc 测试全绿,clippy `-D warnings` 干净。
+> 路由 `Router::navigate_guarded`/`poll_navigation` 提供可轮询的 `before_enter` 守卫；redirect 会保留完整
+> path/query/fragment deep link，`resume_deep_link` 在允许后恢复并消费目标；`:param` 类型化解析与
+> `prism_ui_async` 竞态取消(最新请求胜出)+ SWR 缓存均落地。component 22+2doc、router 53+1doc、
+> async 28+4+8doc 测试全绿,clippy `-D warnings` 干净。
 
 ### 9.12 主题管线 / 设计令牌编译
 
@@ -496,7 +498,7 @@ pub trait LayoutProtocol {
 | `prism_ui_component` | React / SolidJS 组件 | ✅ 已交付 | 14 |
 | `prism_ui_store` | Redux / Zustand / Pinia | ✅ 已交付 | 11 |
 | `prism_ui_i18n` | FormatJS / Fluent | ✅ 已交付 | 9 |
-| `prism_ui_router` | React Router / Vue Router | ✅ 已交付 | 15 |
+| `prism_ui_router` | React Router / Vue Router | ✅ 已交付 | 53 |
 | `prism_ui_form` | React Hook Form / VeeValidate | ✅ 已交付 | 20 |
 | `prism_ui_overlay` | Radix / Floating UI | ✅ 已交付 | 22 |
 | `prism_ui_virtual` | TanStack Virtual | ✅ 已交付 | 25 |

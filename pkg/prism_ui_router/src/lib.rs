@@ -71,4 +71,4 @@ pub use param::{parse_param, parse_param_or, FromParam};
 pub use path::Location;
 pub use query::{parse_query_pairs, serialize_query_pairs, QueryString};
 pub use route::{RouteMatch, RoutePattern};
-pub use router::Router;
+pub use router::{NavigationError, Router};

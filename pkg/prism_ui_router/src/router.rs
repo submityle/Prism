@@ -13,6 +13,7 @@ use core::cell::RefCell;
 
 use prism_ui_reactive::{Memo, Runtime, Signal};
 
+use crate::guard::{DeepLinkState, Guard, GuardOutcome, GuardPoll, PendingNavigation};
 use crate::matcher::{RouteId, RouteTable};
 use crate::path::Location;
 use crate::route::RouteMatch;
@@ -23,6 +24,18 @@ use crate::route::RouteMatch;
 struct History {
     stack: Vec<Location>,
     cursor: usize,
+}
+
+struct QueuedNavigation {
+    navigation: PendingNavigation,
+    resume_deep_link: bool,
+}
+
+/// Errors returned when a guarded navigation cannot be queued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationError {
+    /// A previous guarded navigation is still waiting for its guard decision.
+    PendingNavigation,
 }
 
 /// A reactive router over a shared `Runtime`.
@@ -39,6 +52,8 @@ pub struct Router {
     location: Signal<Location>,
     history: Rc<RefCell<History>>,
     current: Memo<Option<(RouteId, RouteMatch)>>,
+    pending: Rc<RefCell<Option<QueuedNavigation>>>,
+    deep_link: Rc<RefCell<DeepLinkState>>,
 }
 
 impl Router {
@@ -64,6 +79,8 @@ impl Router {
             location,
             history,
             current,
+            pending: Rc::new(RefCell::new(None)),
+            deep_link: Rc::new(RefCell::new(DeepLinkState::new())),
         }
     }
 
@@ -86,9 +103,16 @@ impl Router {
     /// Navigates to `path`, pushing it onto the history stack.
     ///
     /// Any forward history (entries after the current cursor) is discarded, so
-    /// navigation always continues from the current position.
+    /// navigation always continues from the current position. A direct
+    /// navigation also supersedes any pending guarded navigation and clears a
+    /// remembered deep link, because it is an explicit new user intent.
     pub fn navigate(&self, path: &str) {
-        let next = Location::new(path);
+        self.pending.borrow_mut().take();
+        self.deep_link.borrow_mut().take();
+        self.commit(Location::new(path));
+    }
+
+    fn commit(&self, next: Location) {
         {
             let mut history = self.history.borrow_mut();
             let cursor = history.cursor;
@@ -97,6 +121,116 @@ impl Router {
             history.cursor = history.stack.len() - 1;
         }
         self.location.set(next);
+    }
+
+    /// Starts a guarded navigation and drives its guard once.
+    ///
+    /// An `Allow` commits the target, `Reject` leaves the current location
+    /// unchanged, and `Redirect` commits the redirect while remembering the
+    /// original complete location for later resumption. A `Pending` result is
+    /// retained inside the router and must be advanced with
+    /// [`Router::poll_navigation`].
+    pub fn navigate_guarded(
+        &self,
+        path: &str,
+        guard: impl Guard + 'static,
+    ) -> Result<GuardPoll, NavigationError> {
+        self.start_guarded(Location::new(path), guard, false)
+    }
+
+    fn start_guarded(
+        &self,
+        target: Location,
+        guard: impl Guard + 'static,
+        resume_deep_link: bool,
+    ) -> Result<GuardPoll, NavigationError> {
+        let mut pending = self.pending.borrow_mut();
+        if pending.is_some() {
+            return Err(NavigationError::PendingNavigation);
+        }
+        *pending = Some(QueuedNavigation {
+            navigation: PendingNavigation::new(target, guard),
+            resume_deep_link,
+        });
+        drop(pending);
+        let Some(poll) = self.poll_navigation() else {
+            return Err(NavigationError::PendingNavigation);
+        };
+        Ok(poll)
+    }
+
+    /// Advances the currently queued guarded navigation, if one exists.
+    ///
+    /// The returned outcome is applied exactly once when it becomes ready.
+    /// `None` means there is no guarded navigation in flight.
+    pub fn poll_navigation(&self) -> Option<GuardPoll> {
+        let result = {
+            let mut pending = self.pending.borrow_mut();
+            pending.as_mut().map(|queued| queued.navigation.poll())
+        }?;
+        if matches!(result, GuardPoll::Pending) {
+            return Some(result);
+        }
+
+        let queued = self.pending.borrow_mut().take()?;
+        let target = queued.navigation.target().clone();
+        let GuardPoll::Ready(outcome) = result else {
+            return Some(GuardPoll::Pending);
+        };
+        match &outcome {
+            GuardOutcome::Allow => {
+                self.commit(target.clone());
+                if queued.resume_deep_link {
+                    self.deep_link.borrow_mut().take();
+                }
+            }
+            GuardOutcome::Redirect(path) => {
+                self.deep_link.borrow_mut().remember(target);
+                self.commit(Location::new(path));
+            }
+            GuardOutcome::Reject => {}
+        }
+        Some(GuardPoll::Ready(outcome))
+    }
+
+    /// Returns whether a guarded navigation is waiting for another poll.
+    #[must_use]
+    pub fn has_pending_navigation(&self) -> bool {
+        self.pending.borrow().is_some()
+    }
+
+    /// Returns the target of the currently queued guarded navigation.
+    #[must_use]
+    pub fn pending_navigation_target(&self) -> Option<Location> {
+        self.pending
+            .borrow()
+            .as_ref()
+            .map(|queued| queued.navigation.target().clone())
+    }
+
+    /// Returns the remembered location captured before a guard redirect.
+    #[must_use]
+    pub fn deep_link(&self) -> Option<Location> {
+        self.deep_link.borrow().peek().cloned()
+    }
+
+    /// Takes and clears the remembered deep link without navigating.
+    pub fn take_deep_link(&self) -> Option<Location> {
+        self.deep_link.borrow_mut().take()
+    }
+
+    /// Re-runs a guard for the remembered deep link, if any.
+    ///
+    /// The deep link remains remembered while the guard is pending or rejects.
+    /// It is consumed only after the resumed navigation is allowed.
+    pub fn resume_deep_link(
+        &self,
+        guard: impl Guard + 'static,
+    ) -> Result<Option<GuardPoll>, NavigationError> {
+        let Some(target) = self.deep_link() else {
+            return Ok(None);
+        };
+        self.start_guarded(target, guard, true).map(Some)
     }
 
     /// Moves one step back in history, if possible.
@@ -157,7 +291,9 @@ mod tests {
     use prism_ui_reactive::Runtime;
 
     use super::Router;
+    use crate::guard::{Guard, GuardOutcome, GuardPoll};
     use crate::matcher::{RouteId, RouteTable};
+    use crate::{Location, NavigationError};
 
     fn table() -> RouteTable {
         RouteTable::new()
@@ -240,5 +376,132 @@ mod tests {
         router.navigate("/users/3");
         assert!(!router.can_go_forward());
         assert_eq!(router.location().path(), "/users/3");
+    }
+
+    #[test]
+    fn allowed_guard_commits_only_after_guard_decision() {
+        let rt = Runtime::new();
+        let router = Router::new(&rt, "/", table());
+        struct AllowOnSecondPoll {
+            polls: u32,
+        }
+        impl Guard for AllowOnSecondPoll {
+            fn poll(&mut self, _location: &Location) -> GuardPoll {
+                self.polls += 1;
+                if self.polls == 1 {
+                    GuardPoll::Pending
+                } else {
+                    GuardPoll::Ready(GuardOutcome::Allow)
+                }
+            }
+        }
+        assert_eq!(
+            router.navigate_guarded("/users/42", AllowOnSecondPoll { polls: 0 }),
+            Ok(GuardPoll::Pending)
+        );
+        assert_eq!(
+            router.poll_navigation(),
+            Some(GuardPoll::Ready(GuardOutcome::Allow))
+        );
+        assert_eq!(router.location().path(), "/users/42");
+    }
+
+    #[test]
+    fn redirect_remembers_full_deep_link_and_resume_consumes_it() {
+        let rt = Runtime::new();
+        let router = Router::new(&rt, "/", table());
+        let result = router.navigate_guarded(
+            "/users/42?tab=activity#comments",
+            crate::guard::FnGuard::new(|_| GuardOutcome::Redirect("/login".into())),
+        );
+        assert_eq!(
+            result,
+            Ok(GuardPoll::Ready(GuardOutcome::Redirect("/login".into())))
+        );
+        assert_eq!(router.location().path(), "/login");
+        assert_eq!(
+            router
+                .deep_link()
+                .map(|location| location.as_str().to_string()),
+            Some("/users/42?tab=activity#comments".to_string())
+        );
+
+        assert_eq!(
+            router.resume_deep_link(crate::guard::FnGuard::new(|_| GuardOutcome::Allow)),
+            Ok(Some(GuardPoll::Ready(GuardOutcome::Allow)))
+        );
+        assert_eq!(
+            router.location().as_str(),
+            "/users/42?tab=activity#comments"
+        );
+        assert_eq!(router.deep_link(), None);
+    }
+
+    #[test]
+    fn rejected_guard_preserves_location_and_redirected_deep_link() {
+        let rt = Runtime::new();
+        let router = Router::new(&rt, "/login", table());
+        let first = router.navigate_guarded(
+            "/users/42",
+            crate::guard::FnGuard::new(|_| GuardOutcome::Redirect("/login".into())),
+        );
+        assert!(first.is_ok());
+        let result = router.resume_deep_link(crate::guard::FnGuard::new(|_| GuardOutcome::Reject));
+        assert_eq!(result, Ok(Some(GuardPoll::Ready(GuardOutcome::Reject))));
+        assert_eq!(router.location().path(), "/login");
+        assert_eq!(
+            router
+                .deep_link()
+                .map(|location| location.path().to_string()),
+            Some("/users/42".to_string())
+        );
+    }
+
+    #[test]
+    fn second_guarded_navigation_is_rejected_while_one_is_pending() {
+        let rt = Runtime::new();
+        let router = Router::new(&rt, "/", table());
+        let pending = crate::guard::ManualGuard::new();
+        assert_eq!(
+            router.navigate_guarded("/users/1", pending),
+            Ok(GuardPoll::Pending)
+        );
+        assert_eq!(
+            router.navigate_guarded(
+                "/users/2",
+                crate::guard::FnGuard::new(|_| GuardOutcome::Allow)
+            ),
+            Err(NavigationError::PendingNavigation)
+        );
+        assert_eq!(
+            router
+                .pending_navigation_target()
+                .map(|location| location.path().to_string()),
+            Some("/users/1".to_string())
+        );
+    }
+
+    #[test]
+    fn direct_navigation_supersedes_pending_guard_and_stale_deep_link() {
+        let rt = Runtime::new();
+        let router = Router::new(&rt, "/", table());
+        assert_eq!(
+            router.navigate_guarded(
+                "/users/1",
+                crate::guard::FnGuard::new(|_| GuardOutcome::Redirect("/login".into()))
+            ),
+            Ok(GuardPoll::Ready(GuardOutcome::Redirect("/login".into())))
+        );
+        assert!(router.deep_link().is_some());
+
+        assert_eq!(
+            router.navigate_guarded("/users/2", crate::guard::ManualGuard::new()),
+            Ok(GuardPoll::Pending)
+        );
+        router.navigate("/");
+        assert_eq!(router.location().path(), "/");
+        assert!(!router.has_pending_navigation());
+        assert_eq!(router.deep_link(), None);
+        assert_eq!(router.poll_navigation(), None);
     }
 }

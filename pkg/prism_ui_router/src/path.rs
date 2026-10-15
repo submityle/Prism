@@ -22,6 +22,7 @@ use crate::encoding::{form_decode, percent_decode};
 /// percent-decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Location {
+    raw: String,
     path: String,
     segments: Vec<String>,
     query: BTreeMap<String, String>,
@@ -55,6 +56,12 @@ impl Location {
             raw_path.to_string()
         };
 
+        let raw = if input.is_empty() {
+            "/".to_string()
+        } else {
+            input.to_string()
+        };
+
         let segments = raw_path
             .split('/')
             .filter(|segment| !segment.is_empty())
@@ -76,6 +83,7 @@ impl Location {
         }
 
         Self {
+            raw,
             path,
             segments,
             query,
@@ -87,6 +95,15 @@ impl Location {
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Returns the complete navigation target, including query and fragment.
+    ///
+    /// The original spelling is retained so a guarded redirect can resume the
+    /// exact deep link instead of reconstructing it from a lossy query map.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.raw
     }
 
     /// Returns the non-empty path segments, in order.
@@ -178,5 +195,12 @@ mod tests {
     fn fragment_is_percent_decoded() {
         let loc = Location::new("/doc#section%201");
         assert_eq!(loc.fragment(), Some("section 1"));
+    }
+
+    #[test]
+    fn retains_complete_navigation_target_for_resume() {
+        let loc = Location::new("/orders/42?tab=items#details");
+        assert_eq!(loc.as_str(), "/orders/42?tab=items#details");
+        assert_eq!(loc.path(), "/orders/42");
     }
 }
