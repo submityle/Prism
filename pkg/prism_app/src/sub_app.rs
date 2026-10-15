@@ -76,6 +76,8 @@ pub struct SubApp {
     /// Optional bounded world-snapshot history for rollback (design §14 / M5).
     /// `None` until [`init_snapshot_history`](SubApp::init_snapshot_history).
     snapshot_history: Option<SnapshotHistory>,
+    #[cfg(feature = "std")]
+    frame_budget_started: Option<std::time::Instant>,
 }
 
 impl Default for SubApp {
@@ -94,6 +96,8 @@ impl SubApp {
             world,
             extracts: Vec::new(),
             snapshot_history: None,
+            #[cfg(feature = "std")]
+            frame_budget_started: None,
         }
     }
 
@@ -157,6 +161,44 @@ impl SubApp {
             return;
         }
         self.world.run_schedule(label);
+    }
+
+    // Explicit run_schedule and fixed simulation remain complete; only the
+    // variable-frame driver uses this opt-in budget gate.
+    fn run_frame_schedule(&mut self, label: impl ScheduleLabel) {
+        #[cfg(feature = "std")]
+        if let Some(started) = self.frame_budget_started
+            && let Some(policy) = self
+                .world
+                .get_resource::<crate::budget::FrameScheduleBudget>()
+        {
+            let remaining = policy
+                .budget()
+                .headroom(started.elapsed())
+                .unwrap_or_default();
+            #[cfg(feature = "multi_thread")]
+            let pool = self
+                .world
+                .get_resource::<crate::tasks::TaskPoolResource>()
+                .map(|resource| resource.0.clone());
+            #[cfg(feature = "multi_thread")]
+            let deferred = if let Some(pool) = pool {
+                self.world
+                    .run_schedule_parallel_budgeted(label, &pool, remaining)
+            } else {
+                self.world.run_schedule_budgeted(label, remaining)
+            };
+            #[cfg(not(feature = "multi_thread"))]
+            let deferred = self.world.run_schedule_budgeted(label, remaining);
+            if let Some(policy) = self
+                .world
+                .get_resource_mut::<crate::budget::FrameScheduleBudget>()
+            {
+                policy.record_deferred(deferred);
+            }
+            return;
+        }
+        self.run_schedule(label);
     }
 
     // ---- rollback history (design §14 / M5) --------------------------------
@@ -347,6 +389,16 @@ impl SubApp {
     /// time and fixed-loop steps, so a clock-less secondary sub-app still runs
     /// its variable-step phases.
     pub fn update(&mut self) {
+        #[cfg(feature = "std")]
+        {
+            self.frame_budget_started = self
+                .world
+                .get_resource_mut::<crate::budget::FrameScheduleBudget>()
+                .map(|policy| {
+                    policy.begin();
+                    std::time::Instant::now()
+                });
+        }
         // Opt-in observability (design §16): when a `FrameDiagnostics` resource
         // is present on this world, run the timed path; otherwise run the plain
         // phase sequence so an un-observed frame pays nothing.
@@ -368,6 +420,46 @@ impl SubApp {
             }
         }
         self.update_phases();
+        #[cfg(feature = "std")]
+        self.finish_frame_budget();
+    }
+
+    #[cfg(feature = "std")]
+    fn finish_frame_budget(&mut self) {
+        let started = self.frame_budget_started.take();
+
+        #[cfg(feature = "multi_thread")]
+        if let Some(qos) = self
+            .world
+            .get_resource::<crate::tasks::TaskQosResource>()
+            .cloned()
+        {
+            let frame_budget = started.and_then(|frame_start| {
+                self.world
+                    .get_resource::<crate::budget::FrameScheduleBudget>()
+                    .map(|policy| (frame_start, policy.budget()))
+            });
+            let report = qos.run_frame(|| {
+                frame_budget.map(|(frame_start, budget)| {
+                    duration_to_nanos(budget.headroom(frame_start.elapsed()).unwrap_or_default())
+                })
+            });
+            let pending_background = qos.pending_in(prism_tasks::Priority::Background);
+            if let Some(policy) = self
+                .world
+                .get_resource_mut::<crate::budget::FrameScheduleBudget>()
+            {
+                policy.record_tasks(report, pending_background);
+            }
+        }
+
+        if let Some(started) = started
+            && let Some(policy) = self
+                .world
+                .get_resource_mut::<crate::budget::FrameScheduleBudget>()
+        {
+            policy.finish(started.elapsed());
+        }
     }
 
     /// The plain, un-instrumented per-frame phase sequence (design §7). This is
@@ -375,13 +467,13 @@ impl SubApp {
     /// is installed, and the body the instrumented path mirrors.
     fn update_phases(&mut self) {
         crate::time::advance_time(&mut self.world);
-        self.run_schedule(First);
+        self.run_frame_schedule(First);
         crate::fixed::run_fixed_main_loop(&mut self.world);
-        self.run_schedule(PreUpdate);
-        self.run_schedule(StateTransition);
-        self.run_schedule(Update);
-        self.run_schedule(PostUpdate);
-        self.run_schedule(Last);
+        self.run_frame_schedule(PreUpdate);
+        self.run_frame_schedule(StateTransition);
+        self.run_frame_schedule(Update);
+        self.run_frame_schedule(PostUpdate);
+        self.run_frame_schedule(Last);
     }
 
     /// The frame sequence wrapped in wall-clock timing, taken only when a
@@ -420,6 +512,7 @@ impl SubApp {
         self.run_phase_timed(PostUpdate, "PostUpdate");
         self.run_phase_timed(Last, "Last");
 
+        self.finish_frame_budget();
         let frame_elapsed = frame_start.elapsed();
         if let Some(diag) = self.world.get_resource_mut::<FrameDiagnostics>() {
             diag.record_frame(frame_elapsed);
@@ -435,7 +528,7 @@ impl SubApp {
     #[cfg(feature = "std")]
     fn run_phase_timed(&mut self, label: impl ScheduleLabel, phase: &'static str) {
         let start = std::time::Instant::now();
-        self.run_schedule(label);
+        self.run_frame_schedule(label);
         let elapsed = start.elapsed();
         if let Some(diag) = self
             .world
@@ -448,6 +541,11 @@ impl SubApp {
             trace.record_phase(phase, elapsed);
         }
     }
+}
+
+#[cfg(all(feature = "std", feature = "multi_thread"))]
+fn duration_to_nanos(duration: std::time::Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
 /// The set of sub-apps an [`App`](crate::app::App) drives: one *main* sub-app

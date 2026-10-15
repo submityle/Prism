@@ -174,12 +174,12 @@ impl Drop for DedicatedLane {
 struct TaskLane {
     /// The shared work-stealing pool the render jobs run on.
     pool: prism_tasks::TaskPool,
-    /// Tracks the outstanding render job (one at a time) so [`collect`] can use
-    /// the pool's help-on-wait: the main thread helps run queued jobs instead of
-    /// idling while the render competes for a worker on a shared pool.
+    /// Explicit Critical lane for the frame's render work. [`collect`] uses
+    /// priority-inheriting help-on-wait so this committed frame cannot sit
+    /// behind deferrable or ordinary pool work.
     ///
     /// [`collect`]: TaskLane::collect
-    counter: prism_tasks::Counter,
+    group: prism_tasks::PriorityGroup,
     /// Cloned into each render job to ship its outcome back.
     results_tx: Sender<RenderOutcome>,
     /// Receives each finished frame's outcome.
@@ -191,9 +191,10 @@ impl TaskLane {
     /// Wrap an existing pool as a render lane.
     fn new(pool: prism_tasks::TaskPool) -> Self {
         let (results_tx, results_rx) = mpsc::channel();
+        let group = pool.priority_group(prism_tasks::Priority::Critical);
         Self {
             pool,
-            counter: prism_tasks::Counter::new(),
+            group,
             results_tx,
             results_rx,
         }
@@ -203,7 +204,7 @@ impl TaskLane {
     /// on the result channel; `collect` blocks on that channel.
     fn submit(&self, secs: Secondaries) {
         let results_tx = self.results_tx.clone();
-        self.pool.spawn(&self.counter, move || {
+        self.pool.spawn_in_group(&self.group, move || {
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| render_frame(secs)));
             let message = match outcome {
                 Ok(secs) => RenderOutcome::Done(secs),
@@ -215,12 +216,12 @@ impl TaskLane {
 
     /// Block until the pool answers with the in-flight frame's outcome.
     ///
-    /// [`TaskPool::wait`](prism_tasks::TaskPool::wait) runs first so a saturated
-    /// / shared pool does not leave the main thread idle while the render job is
-    /// queued behind other work (help-on-wait); the result channel then yields
-    /// the finished frame.
+    /// [`TaskPool::wait_inherited`](prism_tasks::TaskPool::wait_inherited) runs
+    /// first so a saturated shared pool promotes and helps execute this
+    /// committed Critical frame; the result channel then yields the outcome.
     fn collect(&self) -> Option<RenderOutcome> {
-        self.pool.wait(&self.counter);
+        self.pool
+            .wait_inherited(&self.group, prism_tasks::Priority::Critical);
         self.results_rx.recv().ok()
     }
 }
@@ -394,6 +395,26 @@ impl PipelinedExecutor {
             Some(RenderOutcome::Panicked(payload)) => std::panic::resume_unwind(payload),
             // The lane stopped without answering; nothing to collect.
             None => {}
+        }
+    }
+}
+
+#[cfg(all(test, feature = "pipelined-tasks"))]
+mod task_lane_tests {
+    use super::*;
+
+    #[test]
+    fn pooled_render_lane_is_critical_and_completes_consecutive_frames() {
+        let lane = TaskLane::new(prism_tasks::TaskPool::with_threads(0));
+        assert_eq!(lane.group.base(), prism_tasks::Priority::Critical);
+        assert_eq!(
+            lane.group.effective_priority(),
+            prism_tasks::Priority::Critical
+        );
+        for _ in 0..2 {
+            lane.submit(Vec::new());
+            assert!(matches!(lane.collect(), Some(RenderOutcome::Done(secs)) if secs.is_empty()));
+            assert!(lane.group.is_complete());
         }
     }
 }

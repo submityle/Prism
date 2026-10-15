@@ -161,8 +161,8 @@ pub use pipeline::{Pipeline, Stage};
 pub use priority::{Priority, PriorityCell, PriorityGroup};
 pub use prism_platform::AffinityError;
 pub use qos::{
-    admits_background, BudgetedItem, FrameRunReport, FrameScheduler, FrameStep, LanePlan,
-    LaneQueues, LANE_COUNT,
+    admits_background, BudgetedItem, FrameBatch, FrameRunReport, FrameScheduler, FrameStep,
+    LanePlan, LaneQueues, LANE_COUNT,
 };
 pub use reduce::tree_combine;
 pub use replay::{DeterministicSession, ReplayError, ReplayRecord, SplitEvent};

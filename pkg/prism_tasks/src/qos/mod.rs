@@ -29,9 +29,9 @@
 //!
 //! # Layering
 //! [`FrameScheduler`] is a thin façade over the existing [`TaskPool`]: admitted
-//! jobs are spawned through [`TaskPool::spawn`] and joined through
-//! [`TaskPool::wait`], so it inherits help-on-wait (no deadlock) and the
-//! single-threaded inline fallback for free. The scheduling *decision* is
+//! jobs retain their explicit lanes through [`TaskPool::spawn_in_group`] and
+//! join through [`TaskPool::wait`], so it inherits help-on-wait (no deadlock)
+//! and the single-threaded inline fallback for free. The scheduling *decision* is
 //! independent of the pool, so the core can also be embedded in subsystems that
 //! own their own executor.
 
@@ -42,7 +42,7 @@ use alloc::vec::Vec;
 
 use crate::job::Job;
 use crate::priority::Priority;
-use crate::{Counter, TaskPool};
+use crate::TaskPool;
 
 pub use lane::{admits_background, BudgetedItem, FrameStep, LanePlan, LaneQueues, LANE_COUNT};
 
@@ -65,6 +65,55 @@ pub struct FrameRunReport {
     pub background_nanos_consumed: u64,
     /// Background headroom still unspent when the frame ended, in nanoseconds.
     pub remaining_nanos_after: u64,
+}
+
+/// Jobs admitted from a [`FrameScheduler`] for one budget decision.
+///
+/// Admission and execution are deliberately separate: a caller that protects a
+/// scheduler with a mutex can call [`FrameScheduler::prepare_frame`] while the
+/// lock is held, release the lock, and only then execute this batch. Jobs in
+/// the batch may therefore submit more work to the same scheduler without
+/// deadlocking behind a runner that is waiting for them to finish.
+#[must_use = "an admitted frame batch must be run or deliberately discarded"]
+pub struct FrameBatch {
+    pool: TaskPool,
+    admitted: Vec<(Priority, Job)>,
+    report: FrameRunReport,
+}
+
+impl FrameBatch {
+    /// Deterministic admission report for this batch.
+    #[must_use]
+    pub fn report(&self) -> FrameRunReport {
+        self.report
+    }
+
+    /// Whether this batch admitted no work.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.admitted.is_empty()
+    }
+
+    /// Dispatch every admitted job and wait for the batch to finish.
+    ///
+    /// The returned report is identical to [`FrameBatch::report`].
+    pub fn run(self) -> FrameRunReport {
+        let groups = [
+            Priority::Background,
+            Priority::Low,
+            Priority::Normal,
+            Priority::High,
+            Priority::Critical,
+        ]
+        .map(|lane| self.pool.priority_group(lane));
+        for (lane, job) in self.admitted {
+            self.pool.spawn_in_group(&groups[lane as usize], job);
+        }
+        for group in &groups {
+            self.pool.wait(group.counter());
+        }
+        self.report
+    }
 }
 
 /// A frame-budget-aware `QoS` scheduler bound to a [`TaskPool`].
@@ -92,6 +141,12 @@ impl FrameScheduler {
         }
     }
 
+    /// Redirect future admitted batches to `pool`, preserving every queued job.
+    /// Already prepared batches retain their original pool.
+    pub fn set_pool(&mut self, pool: TaskPool) {
+        self.pool = pool;
+    }
+
     /// Queue `f` on `lane` with estimated cost `est_nanos`. Prefer
     /// [`FrameScheduler::submit_foreground`] / [`FrameScheduler::submit_background`]
     /// for the common cases.
@@ -104,13 +159,13 @@ impl FrameScheduler {
     }
 
     /// Queue committed foreground work on `lane` (ignored budget cost). Panics
-    /// in debug builds if `lane` is [`Priority::Background`]; use
+    /// if `lane` is [`Priority::Background`]; use
     /// [`FrameScheduler::submit_background`] for deferrable work.
     pub fn submit_foreground<F>(&mut self, lane: Priority, f: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        debug_assert_ne!(
+        assert_ne!(
             lane,
             Priority::Background,
             "foreground submit on the background lane; use submit_background"
@@ -160,17 +215,57 @@ impl FrameScheduler {
     /// background item that does not fit is left queued and reported in
     /// [`FrameRunReport::background_deferred`].
     pub fn run_frame(&mut self, remaining_background_nanos: u64) -> FrameRunReport {
+        self.prepare_frame(remaining_background_nanos).run()
+    }
+
+    /// Decide which queued jobs fit this frame and move them into an executable
+    /// batch without running them yet.
+    ///
+    /// This is the lock-friendly sibling of [`FrameScheduler::run_frame`]. The
+    /// scheduler's FIFO queues are mutated only during admission; execution is
+    /// owned by the returned [`FrameBatch`] and can happen after any outer lock
+    /// protecting the scheduler has been released.
+    pub fn prepare_frame(&mut self, remaining_background_nanos: u64) -> FrameBatch {
+        self.prepare_batch(remaining_background_nanos, usize::MAX, true)
+    }
+
+    /// Admit all currently queued committed work without admitting Background.
+    /// A wall-clock driver can execute this batch before measuring the headroom
+    /// available for Background work.
+    pub fn prepare_foreground(&mut self) -> FrameBatch {
+        self.prepare_batch(0, usize::MAX, false)
+    }
+
+    /// Admit at most one job, leaving any Background head that does not fit
+    /// queued. This lets a wall-clock driver recheck headroom between jobs.
+    pub fn prepare_next(&mut self, remaining_background_nanos: u64) -> FrameBatch {
+        self.prepare_batch(remaining_background_nanos, 1, true)
+    }
+
+    fn prepare_batch(
+        &mut self,
+        remaining_background_nanos: u64,
+        limit: usize,
+        include_background: bool,
+    ) -> FrameBatch {
         let mut remaining = remaining_background_nanos;
         let mut report = FrameRunReport {
             remaining_nanos_after: remaining,
             ..FrameRunReport::default()
         };
-        let counter = Counter::new();
         // Collect admitted jobs first so the deterministic decision is complete
         // before any worker starts; this keeps the report independent of
         // execution order.
-        let mut admitted: Vec<Job> = Vec::new();
-        loop {
+        let mut admitted = Vec::new();
+        while admitted.len() < limit {
+            if !include_background
+                && !matches!(
+                    self.lanes.peek_plan(remaining),
+                    LanePlan::Run { lane, .. } if lane != Priority::Background
+                )
+            {
+                break;
+            }
             match self.lanes.next_step(&mut remaining) {
                 FrameStep::Ran {
                     lane,
@@ -183,7 +278,7 @@ impl FrameScheduler {
                     } else {
                         report.foreground_ran += 1;
                     }
-                    admitted.push(payload);
+                    admitted.push((lane, payload));
                 }
                 FrameStep::DeferredBackground { pending, .. } => {
                     report.background_deferred = pending;
@@ -193,11 +288,11 @@ impl FrameScheduler {
             }
         }
         report.remaining_nanos_after = remaining;
-        for job in admitted {
-            self.pool.spawn(&counter, job);
+        FrameBatch {
+            pool: self.pool.clone(),
+            admitted,
+            report,
         }
-        self.pool.wait(&counter);
-        report
     }
 }
 

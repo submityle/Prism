@@ -328,3 +328,23 @@ fn frame_scheduler_single_threaded_fallback_runs_inline() {
     assert_eq!(hits.load(Ordering::Relaxed), 2);
     assert!(sched.is_empty());
 }
+
+#[test]
+fn frame_scheduler_admits_background_on_exact_budget_boundary() {
+    let pool = TaskPool::with_threads(0);
+    let mut sched = pool.frame_scheduler();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let task_hits = Arc::clone(&hits);
+    sched.submit_background(7, move || {
+        task_hits.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let report = sched.run_frame(7);
+
+    assert_eq!(report.background_ran, 1);
+    assert_eq!(report.background_deferred, 0);
+    assert_eq!(report.background_nanos_consumed, 7);
+    assert_eq!(report.remaining_nanos_after, 0);
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+    assert!(sched.is_empty());
+}

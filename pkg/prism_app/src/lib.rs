@@ -209,6 +209,8 @@
 //! only publicly documented architectural shapes.
 
 pub mod app;
+#[cfg(feature = "std")]
+pub mod budget;
 pub mod capability;
 #[cfg(feature = "std")]
 pub mod crash;
@@ -257,6 +259,8 @@ pub mod watchdog;
 mod tests;
 
 pub use app::{App, Plugins, PluginsState};
+#[cfg(feature = "std")]
+pub use budget::{FrameScheduleBudget, TaskBudgetSnapshot};
 pub use capability::{Capabilities, QualityTier};
 #[cfg(feature = "std")]
 pub use crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
@@ -316,6 +320,8 @@ pub use state::{
 };
 pub use sub_app::{ExtractFn, SubApp, SubApps};
 pub use sub_app_label::{BoxedSubAppLabel, SubAppLabel};
+#[cfg(feature = "multi_thread")]
+pub use tasks::{TaskPoolResource, TaskQosResource};
 pub use time::{EngineClocks, TimeUpdateStrategy};
 #[cfg(feature = "trace")]
 pub use trace::{PhaseEvent, PhaseTrace};
@@ -327,6 +333,8 @@ pub use watchdog::{FrameStall, FrameWatchdog, StallHandler, WatchdogConfig};
 /// `prism_ecs` prelude so a user needs only one `use`.
 pub mod prelude {
     pub use crate::app::{App, Plugins, PluginsState};
+    #[cfg(feature = "std")]
+    pub use crate::budget::{FrameScheduleBudget, TaskBudgetSnapshot};
     pub use crate::capability::{Capabilities, QualityTier};
     #[cfg(feature = "std")]
     pub use crate::crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
@@ -387,7 +395,7 @@ pub mod prelude {
     pub use crate::sub_app::{ExtractFn, SubApp, SubApps};
     pub use crate::sub_app_label::{BoxedSubAppLabel, SubAppLabel};
     #[cfg(feature = "multi_thread")]
-    pub use crate::tasks::TaskPoolResource;
+    pub use crate::tasks::{TaskPoolResource, TaskQosResource};
     pub use crate::time::{EngineClocks, TimeUpdateStrategy};
     #[cfg(feature = "std")]
     pub use crate::watchdog::{FrameStall, FrameWatchdog, StallHandler, WatchdogConfig};

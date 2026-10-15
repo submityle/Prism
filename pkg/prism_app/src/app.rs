@@ -671,16 +671,29 @@ impl App {
             .get_resource::<crate::tasks::TaskPoolResource>()
     }
 
+    /// Persistent frame-budgeted QoS queues associated with [`task_pool`](Self::task_pool).
+    #[cfg(feature = "multi_thread")]
+    #[must_use]
+    pub fn task_qos(&self) -> Option<&crate::tasks::TaskQosResource> {
+        self.world().get_resource::<crate::tasks::TaskQosResource>()
+    }
+
     /// Install (or replace) the `prism_tasks` pool the main sub-app's schedules
     /// dispatch conflict-free system waves onto (design §8.2).
     ///
     /// Under the `multi_thread` feature [`App::new`] already installs a private
     /// pool; call this to *share* one pool across several apps (or tune the
     /// worker count with [`prism_tasks::TaskPool::with_threads`]).
+    /// Pending QoS work and cloned queue handles survive a pool replacement.
     #[cfg(feature = "multi_thread")]
     pub fn set_task_pool(&mut self, pool: prism_tasks::TaskPool) -> &mut Self {
-        self.world_mut()
-            .insert_resource(crate::tasks::TaskPoolResource(pool));
+        let world = self.world_mut();
+        if let Some(qos) = world.get_resource::<crate::tasks::TaskQosResource>() {
+            qos.set_pool(pool.clone());
+        } else {
+            world.insert_resource(crate::tasks::TaskQosResource::new(pool.clone()));
+        }
+        world.insert_resource(crate::tasks::TaskPoolResource(pool));
         self
     }
 
