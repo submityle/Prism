@@ -114,6 +114,7 @@ use super::{
         init_outline_pipeline, outline_pass, prepare_outline_bind_groups, prepare_outline_textures,
         PrismOutlineSettings,
     },
+    post_graph::{validate_post_execution_bindings, POST_EXECUTION_BINDINGS},
     posterize::{
         init_posterize_pipeline, posterize_pass, prepare_posterize_bind_groups,
         prepare_posterize_textures, PrismPosterizeSettings,
@@ -361,7 +362,10 @@ impl Plugin for PrismShadingPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        let compiled_graph = shading_frame_graph()
+        let frame_graph = shading_frame_graph();
+        validate_post_execution_bindings(&frame_graph)
+            .expect("Prism post-process execution ledger must cover the graph");
+        let compiled_graph = frame_graph
             .compile()
             .expect("Prism shading frame graph must be valid");
         // The pass is installed once, irrespective of scene/split contents.
@@ -452,6 +456,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<ExtractedAreaLights>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
+                post_execution_bindings: POST_EXECUTION_BINDINGS,
             })
             .add_render_command::<Visibility3d, DrawVisibilityRaster>()
             .add_render_command::<TransparentOit3d, DrawTransparentOit>()

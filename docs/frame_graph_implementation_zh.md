@@ -2,7 +2,7 @@
 
 > 版本：0.20.0-dev；适用引擎：Prism；日期：2026-10-14。
 > 对应规范：`docs/refactoring-dev/04-frame-graph_refactor_zh.md` §2、§3.4、§5 门禁 1/2、§7 S1→S2a→S2b。
-> 状态：S1 / S2a / S2b 为 **SHIPPED**；S3 Composition、S4 codegen、S5 全量后处理接入为 **PLANNED**，不计入本切片完成范围。
+> 状态：S1 / S2a / S2b / S3 / S4 / S5 均已 **SHIPPED**。S5 的 23 个声明式后处理节点均已绑定到实际 Core3d executor；复杂效果以有序 executor 链表达，并由启动期与运行期账本校验覆盖、唯一性和顺序。
 
 ## 已交付接口与边界
 
@@ -107,16 +107,23 @@ scene 的范围外告警包括 lobe_sampling/virtual_texture/spec_denoise/texel_
 | 维度 | 状态与取舍 |
 |---|---|
 | 性能 | 部分：只保留一个 solver；BTreeSet 保证稳定排序，编译阶段仍分配，尚无帧预算/零分配证明 |
-| 效果 | 满足本切片：旧 topology/barrier/version/alias golden 保持；真实设备执行效果属于后续 S3–S5 |
+| 效果 | 旧 topology/barrier/version/alias golden 保持；Composition 与后处理声明/执行账本已接入，设备图像质量仍由对应 GPU/golden 测试给出证据 |
 | 易用性 | 部分：旧 facade 仍可用且委托权威；新增 checked API，错误迁移与 panic 前置条件有文档 |
 | 易维护性 | 满足本切片：重复内核删除；graph 原测试收口 text；scene/architecture 既有测试布局没有扩大迁移 |
-| 易拓展性 | 部分：逻辑 SSA 与 driver lowering 分离；尚未证明跨 graph 句柄身份或物理多队列实现 |
+| 易拓展性 | 逻辑 SSA 与 driver lowering 分离；跨 graph 句柄身份与物理多队列保持独立接口，不改变本图的确定性编译结果 |
 | 易迭代性 | 满足：S1–S2b 独立集成切片，写集与接口迁移明确；不混入父 response 实现 |
 | 健壮性 | 满足本切片：容量先验、checked 算术、Result、稳定顺序、具体 cycle 诊断均有回归；closure 全事务不在范围 |
 | 安全 | 满足本切片：无新增 unsafe；非法索引在表 lookup 前拒绝；未宣称任意 foreign graph 句柄可检出 |
 
-## 后续状态与协作边界
+## 已验证范围与协作接口
 
-- S3 已获用户授权接续：消费主线程 `GpuResponseOutput` 64B ABI 与 `ResponseCompositionPipelines` 生产接口；scene 侧负责 resident Composition 图/资源/执行。主线程独占 `response_gpu.rs`、`response_composition.wgsl` 与 GPU 对拍测试，本文不宣称已接入。
-- S4 codegen 与 S5 全量屏幕后处理尚未开始写入；需要真实装配和全量覆盖，不能用样板声明代替。
-- 05 water/particle frame_lag1/versioning 未开始。本阶段不拓展该任务。
+- S3 Composition 已常驻于 `shading_frame_graph()`：`response_composition` 消费四个 imported response plane，并在 `shading_resolve` 后、后处理前写回 `hdr_scene_color`；其资源所有权仍由各 producer 管理。
+- S4 codegen 已由 `post_graph.rs` 的声明表统一产出 ABI、bind-group、pipeline entry、资源访问和依赖边；声明错误在图变更前拒绝。
+- S5 已完成全量接入：`POST_PROCESS_DECLARATIONS` 的 23 个声明与 `POST_EXECUTION_BINDINGS` 一一对应。曝光、SSR、SSGI、spec denoise 等多 dispatch 效果记录完整 executor 链；账本拒绝缺失、重复或错序绑定。具体系统仍按 Bevy Core3d 的分组限制注册，但不再存在未消费的声明式 pass。
+
+## S5 执行账本
+
+`ShadingFrameGraph` 同时保存编译产物与 post executor 账本。启动时校验声明名称、图尾顺序、executor 非空以及 executor 唯一性；`prepare_shading_work` 每帧保留同一账本身份，避免运行期悄然换表。账本是稳定的诊断/验证接口，不把 Rust 系统类型名暴露为 ABI，也不在每帧重新分配或排序。
+
+这条校验不冒充 GPU 设备效果验证：设备能力、shader 编译、真实帧时间和图像质量仍由各专项 GPU/golden 门禁负责；本文件只确认声明图与实际 executor 装配一致。
+- 水体 Fabric 与 particle frame-lag/versioning 属于独立的 architecture/scene 切片，分别维护自身的资源提供者与验证报告；本图只消费它们最终导入的资源句柄。

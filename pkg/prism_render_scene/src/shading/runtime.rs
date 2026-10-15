@@ -3,6 +3,8 @@ use prism_render_shading::{
     classify_material_header, classify_material_header_with_execution, MAX_SHADING_CLASSES,
 };
 
+use super::post_graph::{PostExecutionBinding, POST_EXECUTION_BINDINGS};
+
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct PrismShadingSettings {
     pub max_visible_pixels: u32,
@@ -376,6 +378,7 @@ pub(crate) fn detect_shading_capabilities(
 #[derive(Resource)]
 pub(crate) struct ShadingFrameGraph {
     pub(crate) compiled: prism_render_graph::frame_graph::CompiledGpuFrameGraph,
+    pub(crate) post_execution_bindings: &'static [PostExecutionBinding],
 }
 
 pub(crate) fn prepare_shading_work(
@@ -389,6 +392,7 @@ pub(crate) fn prepare_shading_work(
         frame_graph.compiled.execution_order.len(),
         frame_graph.compiled.declared_pass_count,
     );
+    debug_assert_eq!(frame_graph.post_execution_bindings, POST_EXECUTION_BINDINGS);
     // The GPU-observed counters are owned by the classification readback bridge
     // (populated at RenderGraph `Begin`); preserve them across this full-struct
     // CPU recompute so the one-frame-late device data is not clobbered.
@@ -462,7 +466,10 @@ mod tests {
         let declared = graph.passes().len();
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.declared_pass_count, declared);
-        world.insert_resource(ShadingFrameGraph { compiled });
+        world.insert_resource(ShadingFrameGraph {
+            compiled,
+            post_execution_bindings: POST_EXECUTION_BINDINGS,
+        });
         world.insert_resource(PrismShadingSettings::default());
         world.insert_resource(
             super::super::super::visibility::runtime::UnifiedVisibilityState::default(),
