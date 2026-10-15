@@ -428,7 +428,7 @@ crates/
 
 > 实现现状补充（截至编码推进）：
 > - CCD 已从纯线性 shape-cast 升级为 rotational conservative-advancement（线性+角向守恒上界，支持纯自转触发与 position+orientation 两段回绕）。
-> - 布料-刚体双向耦合原语已落地（`CouplingBody` / `resolve_two_way_coupling`：逆质量加权接触分配 + 反作用冲量累积），并有 WGSL 孪生与真机 parity（`prism_physics_gpu::cloth::coupling`、`prism_volumetric_gpu`）。**已知差距**：核心 step 管线（`pipeline` / `world` / `XpbdSolver`）尚未端到端串联“从刚体构造 proxy → 耦合 → 反作用冲量写回刚体”，仍在推进。
+> - 布料-刚体双向耦合原语已落地（`CouplingBody` / `resolve_two_way_coupling`：逆质量加权接触分配 + 反作用冲量累积），并有 WGSL 孪生与真机 parity（`prism_physics_gpu::cloth::coupling`、`prism_volumetric_gpu`）。核心 pipeline glue 也已落地：`PhysicsWorld::resolve_cloth_coupling` 会从刚体 collider 构造 bounded proxy，执行耦合并把线性/可选角向反作用写回刚体；`prism_physics_core` 的 54 项 rigid-coupling 回归测试通过。当前边界是软体粒子列仍由调用方持有，`XpbdSolver` 不会凭空发现某个软体资产并自动调度该阶段；ECS/资产层的软体所有权与调度接线仍属于消费方契约，不应被描述成核心物理 kernel 缺失。
 
 ---
 
