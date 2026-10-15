@@ -714,6 +714,12 @@ impl WorldCellStore {
             });
         }
         let old = self.cells.get(&cell).map(Vec::as_slice).unwrap_or(&[]);
+        if objects.len() > self.limits.max_objects {
+            return Err(WorldCellStoreError::ObjectCapacityExceeded {
+                requested: objects.len(),
+                available: self.limits.max_objects,
+            });
+        }
         let mut seen = Vec::new();
         seen.try_reserve_exact(objects.len())
             .map_err(|_| WorldCellStoreError::AllocationFailed)?;
@@ -722,13 +728,13 @@ impl WorldCellStore {
                 return Err(WorldCellStoreError::DuplicateObject { object });
             }
             seen.push(object);
-            if let Some(owner) = self.owners.get(&object).copied() {
-                if owner != cell || !old.contains(&object) {
-                    return Err(WorldCellStoreError::ObjectAlreadyResident {
-                        object,
-                        cell: owner,
-                    });
-                }
+            if let Some(owner) = self.owners.get(&object).copied()
+                && (owner != cell || !old.contains(&object))
+            {
+                return Err(WorldCellStoreError::ObjectAlreadyResident {
+                    object,
+                    cell: owner,
+                });
             }
         }
         let new_total = self

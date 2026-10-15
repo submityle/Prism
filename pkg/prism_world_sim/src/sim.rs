@@ -1,8 +1,9 @@
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use crate::ecology::{EcologyConfig, EcologyDelta, EcologyField};
 use crate::hydrology::{FlowDelta, HydrologyField};
-use crate::types::{DirtyRegion, DirtyRegions, Region};
+use crate::types::{CellCoord, DirtyRegion, DirtyRegions, Region};
 use crate::voxel::{stable_fragment_key, FragmentDelta, VoxelCell, VoxelDelta, VoxelField};
 
 /// Per-tick admission limits shared by all simulation phases.
@@ -151,6 +152,159 @@ pub enum SimulationError {
     TickOverflow,
 }
 
+/// Failure while applying one persisted simulation delta.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimulationApplyError {
+    /// The current tick cannot advance to the delta's tick.
+    TickOverflow,
+    /// The delta is not the next tick and cannot be applied exactly once.
+    UnexpectedTick {
+        /// Tick required by the receiver.
+        expected: u64,
+        /// Tick carried by the delta.
+        actual: u64,
+    },
+    /// A flow record has no positive amount or routes to itself.
+    InvalidFlow,
+    /// A flow references a cell absent from the receiver's hydrology field.
+    MissingHydrologyCell(CellCoord),
+    /// A flow would remove more water than is currently available.
+    WaterUnderflow {
+        /// Cell whose water would become negative.
+        coord: CellCoord,
+        /// Water available after prior records in this delta.
+        available: u32,
+        /// Water requested by this record.
+        required: u32,
+    },
+    /// A flow would exceed the destination capacity or integer range.
+    WaterCapacityExceeded {
+        /// Destination cell.
+        coord: CellCoord,
+        /// Water present before this incoming amount.
+        current: u32,
+        /// Incoming amount.
+        incoming: u32,
+        /// Destination capacity.
+        capacity: u32,
+    },
+    /// More than one flow record originates at the same cell.
+    DuplicateFlowSource(CellCoord),
+    /// Flow records are not in the stable source-coordinate order emitted by the simulator.
+    NonCanonicalFlowOrder {
+        /// Previous source coordinate.
+        previous: CellCoord,
+        /// Current source coordinate.
+        current: CellCoord,
+    },
+    /// A flow record does not match the deterministic routing equation.
+    FlowTransitionMismatch {
+        /// Source coordinate.
+        from: CellCoord,
+        /// Destination coordinate.
+        to: CellCoord,
+        /// Amount carried by the delta.
+        actual: u32,
+        /// Amount required by replay.
+        expected: u32,
+    },
+    /// More than one voxel record targets the same coordinate.
+    DuplicateVoxelCoordinate(CellCoord),
+    /// A voxel record references a cell absent from the receiver.
+    MissingVoxelCell(CellCoord),
+    /// A voxel record names a different material than the receiver.
+    VoxelMaterialMismatch {
+        /// Voxel coordinate.
+        coord: CellCoord,
+        /// Material in the receiver.
+        actual: u16,
+        /// Material carried by the delta.
+        expected: u16,
+    },
+    /// A voxel record's before mass differs from the receiver.
+    VoxelMassMismatch {
+        /// Voxel coordinate.
+        coord: CellCoord,
+        /// Mass in the receiver.
+        actual: u32,
+        /// Before mass carried by the delta.
+        expected: u32,
+    },
+    /// A voxel record does not satisfy before-after-removed arithmetic.
+    InvalidVoxelTransition,
+    /// A voxel record does not match the deterministic erosion equation.
+    VoxelRemovalMismatch {
+        /// Voxel coordinate.
+        coord: CellCoord,
+        /// Removed mass carried by the delta.
+        actual: u32,
+        /// Removed mass required by replay.
+        expected: u32,
+    },
+    /// Erosion claims more water than is available after routing.
+    ErosionWaterUnderflow {
+        /// Voxel coordinate.
+        coord: CellCoord,
+        /// Water available after prior adjustments.
+        available: u32,
+        /// Water required for the claimed removal.
+        required: u32,
+    },
+    /// More than one ecology record targets the same coordinate.
+    DuplicateEcologyCoordinate(CellCoord),
+    /// An ecology record references a cell absent from the receiver.
+    MissingEcologyCell(CellCoord),
+    /// An ecology record's before biomass differs from the receiver.
+    EcologyBiomassMismatch {
+        /// Ecology coordinate.
+        coord: CellCoord,
+        /// Biomass in the receiver.
+        actual: u32,
+        /// Before biomass carried by the delta.
+        expected: u32,
+    },
+    /// An ecology record would exceed its cell capacity.
+    EcologyCapacityExceeded {
+        /// Ecology coordinate.
+        coord: CellCoord,
+        /// Biomass carried by the delta.
+        biomass: u32,
+        /// Cell capacity.
+        capacity: u32,
+    },
+    /// An ecology record reports moisture different from replay hydrology.
+    EcologyMoistureMismatch {
+        /// Ecology coordinate.
+        coord: CellCoord,
+        /// Moisture carried by the delta.
+        actual: u16,
+        /// Moisture computed during replay.
+        expected: u16,
+    },
+    /// An ecology record reports stress different from the replay equation.
+    EcologyStressMismatch {
+        /// Ecology coordinate.
+        coord: CellCoord,
+        /// Stress carried by the delta.
+        actual: u16,
+        /// Stress computed during replay.
+        expected: u16,
+    },
+    /// An ecology record does not match the deterministic transition equation.
+    EcologyTransitionMismatch {
+        /// Ecology coordinate.
+        coord: CellCoord,
+        /// Biomass carried by the delta.
+        actual: u32,
+        /// Biomass required by replay.
+        expected: u32,
+    },
+    /// A fragment record has no positive mass.
+    InvalidFragment,
+    /// Internal checked arithmetic could not represent a replay adjustment.
+    ArithmeticOverflow,
+}
+
 /// Deterministic engine-neutral world simulation owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorldSim {
@@ -193,6 +347,11 @@ impl WorldSim {
         }
     }
 
+    /// Returns the last successfully advanced simulation tick.
+    pub const fn current_tick(&self) -> u64 {
+        self.tick
+    }
+
     /// Runs hydrology, local erosion, and ecology in stable phase order.
     pub fn step(&mut self, budget: TickBudget) -> Result<TickReport, SimulationError> {
         self.tick = self.next_tick()?;
@@ -228,6 +387,328 @@ impl WorldSim {
             dirty_regions: dirty.into_vec(),
             budget: ledger.usage(),
         })
+    }
+
+    /// Applies one previously emitted delta without re-running simulation.
+    ///
+    /// Validation is completed against the current state before any field is
+    /// mutated. Flow adjustments are accumulated only for coordinates touched
+    /// by the delta; voxel and ecology coordinates are required to be unique.
+    /// This keeps replay linear in the delta size instead of cloning the full
+    /// sparse world, while rejecting divergence before publication.
+    pub fn apply_delta(&mut self, delta: &SimulationDelta) -> Result<(), SimulationApplyError> {
+        let expected = self
+            .next_tick()
+            .map_err(|_| SimulationApplyError::TickOverflow)?;
+        if delta.tick != expected {
+            return Err(SimulationApplyError::UnexpectedTick {
+                expected,
+                actual: delta.tick,
+            });
+        }
+
+        let mut flow_adjustments = BTreeMap::<CellCoord, i64>::new();
+        let mut flow_sources = BTreeSet::new();
+        let mut outgoing = BTreeMap::<CellCoord, u32>::new();
+        let mut incoming = BTreeMap::<CellCoord, u32>::new();
+        let mut previous_source = None;
+        for flow in &delta.flow_deltas {
+            if flow.amount == 0 || flow.from == flow.to {
+                return Err(SimulationApplyError::InvalidFlow);
+            }
+            if let Some(previous) = previous_source
+                && previous >= flow.from
+            {
+                return Err(SimulationApplyError::NonCanonicalFlowOrder {
+                    previous,
+                    current: flow.from,
+                });
+            }
+            previous_source = Some(flow.from);
+            if !flow_sources.insert(flow.from) {
+                return Err(SimulationApplyError::DuplicateFlowSource(flow.from));
+            }
+            let source = self
+                .hydrology
+                .get(flow.from)
+                .ok_or(SimulationApplyError::MissingHydrologyCell(flow.from))?;
+            self.hydrology
+                .get(flow.to)
+                .ok_or(SimulationApplyError::MissingHydrologyCell(flow.to))?;
+            let source_water = i64::from(source.water)
+                .checked_sub(i64::from(outgoing.get(&flow.from).copied().unwrap_or(0)))
+                .ok_or(SimulationApplyError::ArithmeticOverflow)?;
+            if source_water < i64::from(flow.amount) {
+                return Err(SimulationApplyError::WaterUnderflow {
+                    coord: flow.from,
+                    available: source_water as u32,
+                    required: flow.amount,
+                });
+            }
+            let expected_destination = flow
+                .from
+                .horizontal_neighbors()
+                .into_iter()
+                .filter_map(|candidate| self.hydrology.get(candidate).map(|cell| (candidate, cell)))
+                .filter(|(_, cell)| cell.elevation < source.elevation)
+                .min_by_key(|(candidate, cell)| (cell.elevation, *candidate));
+            let Some((expected_to, expected_destination_cell)) = expected_destination else {
+                return Err(SimulationApplyError::FlowTransitionMismatch {
+                    from: flow.from,
+                    to: flow.to,
+                    actual: flow.amount,
+                    expected: 0,
+                });
+            };
+            if expected_to != flow.to {
+                return Err(SimulationApplyError::FlowTransitionMismatch {
+                    from: flow.from,
+                    to: flow.to,
+                    actual: flow.amount,
+                    expected: 0,
+                });
+            }
+            let available = u32::try_from(source_water)
+                .map_err(|_| SimulationApplyError::ArithmeticOverflow)?;
+            let downhill = u32::try_from(
+                i64::from(source.elevation) - i64::from(expected_destination_cell.elevation),
+            )
+            .unwrap_or(u32::MAX);
+            let quarter = available.saturating_add(3) / 4;
+            let slope_limit = downhill
+                .saturating_add(1)
+                .saturating_add(u32::from(source.permeability) / 16);
+            let free_space = expected_destination_cell
+                .capacity
+                .saturating_sub(expected_destination_cell.water)
+                .saturating_sub(incoming.get(&flow.to).copied().unwrap_or(0));
+            let expected_amount = available.min(quarter).min(slope_limit).min(free_space);
+            if flow.amount != expected_amount {
+                return Err(SimulationApplyError::FlowTransitionMismatch {
+                    from: flow.from,
+                    to: flow.to,
+                    actual: flow.amount,
+                    expected: expected_amount,
+                });
+            }
+            let incoming_amount = flow.amount;
+            outgoing
+                .entry(flow.from)
+                .and_modify(|value| *value = value.saturating_add(flow.amount))
+                .or_insert(flow.amount);
+            incoming
+                .entry(flow.to)
+                .and_modify(|value| *value = value.saturating_add(incoming_amount))
+                .or_insert(incoming_amount);
+            let incoming = i64::from(flow.amount);
+            adjust_water(&mut flow_adjustments, flow.from, -incoming)?;
+            adjust_water(&mut flow_adjustments, flow.to, incoming)?;
+        }
+
+        let mut voxel_coordinates = BTreeSet::new();
+        for voxel in &delta.voxel_deltas {
+            if voxel.before_mass < voxel.after_mass
+                || voxel.before_mass - voxel.after_mass != voxel.removed_mass
+            {
+                return Err(SimulationApplyError::InvalidVoxelTransition);
+            }
+            if !voxel_coordinates.insert(voxel.coord) {
+                return Err(SimulationApplyError::DuplicateVoxelCoordinate(voxel.coord));
+            }
+            let current = self
+                .voxels
+                .get(voxel.coord)
+                .ok_or(SimulationApplyError::MissingVoxelCell(voxel.coord))?;
+            if current.material != voxel.material {
+                return Err(SimulationApplyError::VoxelMaterialMismatch {
+                    coord: voxel.coord,
+                    actual: current.material,
+                    expected: voxel.material,
+                });
+            }
+            if current.mass != voxel.before_mass {
+                return Err(SimulationApplyError::VoxelMassMismatch {
+                    coord: voxel.coord,
+                    actual: current.mass,
+                    expected: voxel.before_mass,
+                });
+            }
+            if voxel.removed_mass != 0 {
+                let water = self
+                    .hydrology
+                    .get(voxel.coord)
+                    .ok_or(SimulationApplyError::MissingHydrologyCell(voxel.coord))?;
+                let available = adjusted_water(
+                    water.water,
+                    flow_adjustments.get(&voxel.coord).copied().unwrap_or(0),
+                )?;
+                let water_cost = voxel
+                    .removed_mass
+                    .checked_mul(self.config.water_cost_per_mass)
+                    .ok_or(SimulationApplyError::ArithmeticOverflow)?;
+                let expected_removed = current
+                    .mass
+                    .min(
+                        u32::try_from(available)
+                            .map_err(|_| SimulationApplyError::ArithmeticOverflow)?
+                            / self.config.water_cost_per_mass,
+                    )
+                    .min(self.config.max_erosion_mass)
+                    .min(u32::from(current.hardness).saturating_add(1));
+                if voxel.removed_mass != expected_removed {
+                    return Err(SimulationApplyError::VoxelRemovalMismatch {
+                        coord: voxel.coord,
+                        actual: voxel.removed_mass,
+                        expected: expected_removed,
+                    });
+                }
+                if i64::from(water_cost) > available {
+                    return Err(SimulationApplyError::ErosionWaterUnderflow {
+                        coord: voxel.coord,
+                        available: u32::try_from(available)
+                            .map_err(|_| SimulationApplyError::ArithmeticOverflow)?,
+                        required: water_cost,
+                    });
+                }
+                adjust_water(&mut flow_adjustments, voxel.coord, -i64::from(water_cost))?;
+            }
+        }
+
+        for fragment in &delta.fragment_deltas {
+            if fragment.mass == 0 {
+                return Err(SimulationApplyError::InvalidFragment);
+            }
+        }
+
+        let mut ecology_coordinates = BTreeSet::new();
+        for ecology in &delta.ecology_deltas {
+            if !ecology_coordinates.insert(ecology.coord) {
+                return Err(SimulationApplyError::DuplicateEcologyCoordinate(
+                    ecology.coord,
+                ));
+            }
+            let current = self
+                .ecology
+                .get(ecology.coord)
+                .ok_or(SimulationApplyError::MissingEcologyCell(ecology.coord))?;
+            if current.biomass != ecology.before_biomass {
+                return Err(SimulationApplyError::EcologyBiomassMismatch {
+                    coord: ecology.coord,
+                    actual: current.biomass,
+                    expected: ecology.before_biomass,
+                });
+            }
+            if ecology.after_biomass > current.capacity {
+                return Err(SimulationApplyError::EcologyCapacityExceeded {
+                    coord: ecology.coord,
+                    biomass: ecology.after_biomass,
+                    capacity: current.capacity,
+                });
+            }
+            let moisture = match self.hydrology.get(ecology.coord) {
+                Some(hydrology) => {
+                    let water = adjusted_water(
+                        hydrology.water,
+                        flow_adjustments.get(&ecology.coord).copied().unwrap_or(0),
+                    )?;
+                    if hydrology.capacity == 0 {
+                        0
+                    } else {
+                        ((u64::try_from(water)
+                            .map_err(|_| SimulationApplyError::ArithmeticOverflow)?
+                            * 65_535)
+                            / u64::from(hydrology.capacity))
+                        .min(65_535) as u16
+                    }
+                }
+                None => 0,
+            };
+            if ecology.moisture != moisture {
+                return Err(SimulationApplyError::EcologyMoistureMismatch {
+                    coord: ecology.coord,
+                    actual: ecology.moisture,
+                    expected: moisture,
+                });
+            }
+            let stress = moisture.abs_diff(self.config.ecology.preferred_moisture);
+            if ecology.stress != stress {
+                return Err(SimulationApplyError::EcologyStressMismatch {
+                    coord: ecology.coord,
+                    actual: ecology.stress,
+                    expected: stress,
+                });
+            }
+            let neighbor_sum: u64 = ecology
+                .coord
+                .horizontal_neighbors()
+                .into_iter()
+                .filter_map(|neighbor| {
+                    self.ecology
+                        .get(neighbor)
+                        .map(|value| u64::from(value.biomass))
+                })
+                .sum();
+            let neighbor_average = (neighbor_sum / 4).min(u64::from(current.capacity)) as u32;
+            let potential = (u64::from(current.fertility) * u64::from(moisture) / 65_535) as u32
+                / u32::from(self.config.ecology.growth_divisor);
+            let crowding_loss = neighbor_average.saturating_sub(current.biomass) / 32;
+            let stress_loss = u32::from(stress) / u32::from(self.config.ecology.stress_divisor);
+            let growth = potential.min(current.capacity.saturating_sub(current.biomass));
+            let expected_after = current
+                .biomass
+                .saturating_add(growth)
+                .saturating_sub(crowding_loss.saturating_add(stress_loss));
+            if ecology.after_biomass != expected_after {
+                return Err(SimulationApplyError::EcologyTransitionMismatch {
+                    coord: ecology.coord,
+                    actual: ecology.after_biomass,
+                    expected: expected_after,
+                });
+            }
+        }
+
+        for (coord, adjustment) in flow_adjustments {
+            let cell = self
+                .hydrology
+                .cells_mut()
+                .get_mut(&coord)
+                .ok_or(SimulationApplyError::MissingHydrologyCell(coord))?;
+            let water = adjusted_water(cell.water, adjustment)?;
+            cell.water =
+                u32::try_from(water).map_err(|_| SimulationApplyError::ArithmeticOverflow)?;
+        }
+        for voxel in &delta.voxel_deltas {
+            let current = self
+                .voxels
+                .get(voxel.coord)
+                .ok_or(SimulationApplyError::MissingVoxelCell(voxel.coord))?;
+            if voxel.after_mass == 0 {
+                self.voxels.remove(voxel.coord);
+            } else {
+                self.voxels.set(
+                    voxel.coord,
+                    VoxelCell {
+                        mass: voxel.after_mass,
+                        ..current
+                    },
+                );
+            }
+        }
+        for ecology in &delta.ecology_deltas {
+            let current = self
+                .ecology
+                .get(ecology.coord)
+                .ok_or(SimulationApplyError::MissingEcologyCell(ecology.coord))?;
+            self.ecology.set(
+                ecology.coord,
+                crate::ecology::EcologyCell {
+                    biomass: ecology.after_biomass,
+                    ..current
+                },
+            );
+        }
+        self.tick = delta.tick;
+        Ok(())
     }
 
     fn erode(
@@ -294,6 +775,25 @@ impl WorldSim {
             });
         }
     }
+}
+
+fn adjusted_water(base: u32, adjustment: i64) -> Result<i64, SimulationApplyError> {
+    i64::from(base)
+        .checked_add(adjustment)
+        .filter(|water| *water >= 0 && *water <= i64::from(u32::MAX))
+        .ok_or(SimulationApplyError::ArithmeticOverflow)
+}
+
+fn adjust_water(
+    adjustments: &mut BTreeMap<CellCoord, i64>,
+    coord: CellCoord,
+    amount: i64,
+) -> Result<(), SimulationApplyError> {
+    let entry = adjustments.entry(coord).or_insert(0);
+    *entry = entry
+        .checked_add(amount)
+        .ok_or(SimulationApplyError::ArithmeticOverflow)?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -32,6 +32,25 @@ that same field. `transaction_to_simulation_delta` checks the exact field
 shape and value types before decoding, so unrelated persistence transactions
 cannot be mistaken for simulation deltas.
 
+## Deterministic replay
+
+`WorldSim::apply_delta` applies one previously emitted `SimulationDelta` to the
+next tick without executing hydrology, erosion, or ecology again. It validates
+the deterministic flow-routing and erosion equations as well as voxel,
+fragment, and ecology records first, rejects out-of-order or divergent state,
+and only then publishes the changes. Flow adjustments use a bounded map for
+touched cells; the full sparse world is not cloned. A failed application
+leaves the receiver unchanged, which makes decoded journal or network deltas
+safe to retry after the caller restores the expected state.
+
+The replay contract is covered by the crate unit tests and can be exercised
+with:
+
+```text
+cargo test --manifest-path pkg/prism_world_sim/Cargo.toml --no-default-features
+cargo test --manifest-path pkg/prism_world_sim/Cargo.toml --features persist
+```
+
 ## Validation
 
 From the repository root:

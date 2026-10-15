@@ -25,6 +25,23 @@ bytes 44..    opaque scene payload
 The payload is intentionally opaque. A host may reject it, retain it, decode
 it, or forward it to another subsystem.
 
+## Cross-cell stable references and restart snapshots
+
+`WorldCellStore` is the runtime-owned index for `StableWorldRef` values. It
+keeps one canonical sorted object list per resident `SectorId`, rejects
+duplicate ownership, supports explicit relocation between resident cells, and
+enforces cell/object/snapshot byte limits. `encode_snapshot` and
+`decode_snapshot` use a versioned little-endian format with canonical cell and
+object ordering; decoding validates counts and the complete byte stream before
+publishing a store.
+
+`StableRefSceneHost` decorates an existing `SceneHost` with an explicit
+`StableRefDecoder`. Load/reload decodes and validates the new identity set
+before calling the authoritative host, then publishes it only after host
+success. Eviction calls the host first and removes the index only after success.
+The decoder owns the cell payload format; this crate does not pretend to parse
+product scenes or create ECS entities.
+
 The coordinator's `no_std` poll layer is independent from an OS executor:
 `CellProvider` is the provider boundary and `SceneHost` is the scene boundary.
 Under `std`, `IoSchedulerAdapter` is the concrete bridge to

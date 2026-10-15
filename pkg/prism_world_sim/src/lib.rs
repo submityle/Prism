@@ -31,7 +31,8 @@ pub use persist::{
     SIMULATION_DELTA_FIELD,
 };
 pub use sim::{
-    BudgetUsage, SimulationDelta, SimulationError, TickBudget, TickReport, WorldSim, WorldSimConfig,
+    BudgetUsage, SimulationApplyError, SimulationDelta, SimulationError, TickBudget, TickReport,
+    WorldSim, WorldSimConfig,
 };
 pub use types::{CellCoord, DirtyRegion, Region};
 pub use voxel::{stable_fragment_key, FragmentDelta, VoxelCell, VoxelDelta, VoxelField};
@@ -137,5 +138,109 @@ mod tests {
             .set(sink, HydrologyCell::new(i32::MIN, 0, 100, u16::MAX));
         let report = sim.step(TickBudget::new(8, 8, 4)).unwrap();
         assert_eq!(report.delta.flow_deltas[0].amount, 10);
+    }
+
+    #[test]
+    fn emitted_delta_replays_exactly_without_rerunning_simulation() {
+        let mut source = populated_sim();
+        let mut replay = source.clone();
+        let report = source.step(TickBudget::new(64, 64, 16)).unwrap();
+
+        replay.apply_delta(&report.delta).unwrap();
+
+        assert_eq!(replay, source);
+        assert_eq!(replay.current_tick(), report.delta.tick);
+    }
+
+    #[test]
+    fn invalid_delta_is_rejected_before_any_state_mutation() {
+        let mut sim = populated_sim();
+        let before = sim.clone();
+        let delta = SimulationDelta {
+            tick: 1,
+            flow_deltas: alloc::vec![FlowDelta {
+                from: CellCoord::new(0, 0, 0),
+                to: CellCoord::new(1, 0, 0),
+                amount: 101,
+            }],
+            ..SimulationDelta::default()
+        };
+
+        assert!(matches!(
+            sim.apply_delta(&delta),
+            Err(SimulationApplyError::FlowTransitionMismatch { .. })
+                | Err(SimulationApplyError::WaterCapacityExceeded { .. })
+                | Err(SimulationApplyError::WaterUnderflow { .. })
+        ));
+        assert_eq!(sim, before);
+    }
+
+    #[test]
+    fn replay_rejects_ecology_metadata_or_transition_tampering() {
+        let mut source = populated_sim();
+        let mut replay = source.clone();
+        let report = source.step(TickBudget::new(64, 64, 16)).unwrap();
+        let mut delta = report.delta.clone();
+        let original_stress = delta
+            .ecology_deltas
+            .first()
+            .expect("fixture must emit an ecology delta")
+            .stress;
+        delta.ecology_deltas[0].stress = original_stress.wrapping_add(1);
+
+        let before = replay.clone();
+        assert!(matches!(
+            replay.apply_delta(&delta),
+            Err(SimulationApplyError::EcologyStressMismatch { .. })
+        ));
+        assert_eq!(replay, before);
+
+        let ecology = &mut delta.ecology_deltas[0];
+        ecology.stress = report.delta.ecology_deltas[0].stress;
+        ecology.after_biomass = ecology.after_biomass.saturating_add(1);
+        assert!(matches!(
+            replay.apply_delta(&delta),
+            Err(SimulationApplyError::EcologyTransitionMismatch { .. })
+        ));
+        assert_eq!(replay, before);
+    }
+
+    #[test]
+    fn replay_rejects_flow_and_erosion_tampering_without_mutation() {
+        let mut source = populated_sim();
+        let mut replay = source.clone();
+        let report = source.step(TickBudget::new(64, 64, 16)).unwrap();
+
+        let mut flow_tampered = report.delta.clone();
+        flow_tampered.flow_deltas[0].amount -= 1;
+        let before = replay.clone();
+        assert!(matches!(
+            replay.apply_delta(&flow_tampered),
+            Err(SimulationApplyError::FlowTransitionMismatch { .. })
+        ));
+        assert_eq!(replay, before);
+
+        let mut erosion_tampered = report.delta.clone();
+        erosion_tampered.voxel_deltas[0].removed_mass += 1;
+        erosion_tampered.voxel_deltas[0].after_mass -= 1;
+        assert!(matches!(
+            replay.apply_delta(&erosion_tampered),
+            Err(SimulationApplyError::VoxelRemovalMismatch { .. })
+        ));
+        assert_eq!(replay, before);
+    }
+
+    #[test]
+    fn replay_accepts_ecology_without_a_hydrology_cell() {
+        let mut source = WorldSim::new(WorldSimConfig::default()).unwrap();
+        let coord = CellCoord::new(0, 0, 0);
+        source
+            .ecology
+            .set(coord, EcologyCell::new(4, 65_535, 100).unwrap());
+        let mut replay = source.clone();
+        let report = source.step(TickBudget::new(64, 64, 16)).unwrap();
+
+        replay.apply_delta(&report.delta).unwrap();
+        assert_eq!(replay, source);
     }
 }
