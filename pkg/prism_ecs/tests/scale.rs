@@ -788,14 +788,24 @@ mod perf_gate {
         assert_eq!(query.iter(&world).count(), 2);
         let cold_calls = MATCH_CALLS.swap(0, Ordering::Relaxed);
         assert_eq!(cold_calls, world.archetypes().len());
-        emit_complexity("query_match_cold_calls", world.archetypes().len(), 0, cold_calls);
+        emit_complexity(
+            "query_match_cold_calls",
+            world.archetypes().len(),
+            0,
+            cold_calls,
+        );
 
         for _ in 0..8 {
             assert_eq!(query.iter(&world).count(), 2);
         }
         let warm_calls = MATCH_CALLS.swap(0, Ordering::Relaxed);
         assert_eq!(warm_calls, 0);
-        emit_complexity("query_match_warm_calls", world.archetypes().len(), 0, warm_calls);
+        emit_complexity(
+            "query_match_warm_calls",
+            world.archetypes().len(),
+            0,
+            warm_calls,
+        );
 
         world.spawn((Pos(3.0, 0.0, 0.0), Marker));
         assert_eq!(query.iter(&world).count(), 3);
@@ -822,7 +832,10 @@ mod perf_gate {
                 let location = world.entities().location(entity).expect("live location");
                 let archetype = world.archetypes().get(location.archetype_id).unwrap();
                 let rows_per_chunk = archetype.table().rows_per_chunk();
-                expected.insert((location.archetype_id, location.row as usize / rows_per_chunk));
+                expected.insert((
+                    location.archetype_id,
+                    location.row as usize / rows_per_chunk,
+                ));
             }
 
             let dirty = query.dirty_chunks(&world, last, now);

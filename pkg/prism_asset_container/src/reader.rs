@@ -310,8 +310,8 @@ impl ContainerReader {
     }
 
     fn decode_chunk(&self, chunk: ChunkInfo) -> Result<Vec<u8>, ContainerError> {
-        let stored_len = usize::try_from(chunk.stored_len)
-            .map_err(|_| ContainerError::IntegerOverflow)?;
+        let stored_len =
+            usize::try_from(chunk.stored_len).map_err(|_| ContainerError::IntegerOverflow)?;
         let mut stored = vec![0; stored_len];
         self.read_physical_range(chunk.offset, &mut stored)?;
         match chunk.codec {
@@ -557,7 +557,9 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
         || usize::from(read_u16(&header, 10)?) != CHUNK_HEADER_SIZE
         || read_u32(&header, 12)? != 0
         || header[136..CHUNK_HEADER_SIZE].iter().any(|byte| *byte != 0)
-    { return Err(ContainerError::InvalidHeader); }
+    {
+        return Err(ContainerError::InvalidHeader);
+    }
     let count = read_u32(&header, 16)?;
     let chunk_count = read_u32(&header, 20)?;
     let dir_off = read_u64(&header, 24)?;
@@ -566,24 +568,53 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
     let table_len = read_u64(&header, 48)?;
     let payload_off = read_u64(&header, 56)?;
     let total_len = read_u64(&header, 64)?;
-    let expected_dir_len = u64::from(count).checked_mul(CHUNK_RECORD_SIZE as u64).ok_or(ContainerError::IntegerOverflow)?;
-    let expected_table_len = u64::from(chunk_count).checked_mul(CHUNK_TABLE_RECORD_SIZE as u64).ok_or(ContainerError::IntegerOverflow)?;
-    let dir_end = dir_off.checked_add(dir_len).ok_or(ContainerError::IntegerOverflow)?;
-    let table_end = table_off.checked_add(table_len).ok_or(ContainerError::IntegerOverflow)?;
-    if total_len > source.len() { return Err(ContainerError::Truncated); }
-    if dir_off != CHUNK_HEADER_SIZE as u64 || dir_len != expected_dir_len || table_off < dir_end || table_off % 8 != 0 || table_len != expected_table_len || payload_off < table_end || total_len != source.len() || payload_off > total_len {
+    let expected_dir_len = u64::from(count)
+        .checked_mul(CHUNK_RECORD_SIZE as u64)
+        .ok_or(ContainerError::IntegerOverflow)?;
+    let expected_table_len = u64::from(chunk_count)
+        .checked_mul(CHUNK_TABLE_RECORD_SIZE as u64)
+        .ok_or(ContainerError::IntegerOverflow)?;
+    let dir_end = dir_off
+        .checked_add(dir_len)
+        .ok_or(ContainerError::IntegerOverflow)?;
+    let table_end = table_off
+        .checked_add(table_len)
+        .ok_or(ContainerError::IntegerOverflow)?;
+    if total_len > source.len() {
+        return Err(ContainerError::Truncated);
+    }
+    if dir_off != CHUNK_HEADER_SIZE as u64
+        || dir_len != expected_dir_len
+        || table_off < dir_end
+        || table_off % 8 != 0
+        || table_len != expected_table_len
+        || payload_off < table_end
+        || total_len != source.len()
+        || payload_off > total_len
+    {
         return Err(ContainerError::InvalidHeader);
     }
     let content_hash = digest_range(source, 0, total_len)?;
     let generation = u64::from_le_bytes(content_hash[..8].try_into().unwrap());
-    let mut directory = vec![0; usize::try_from(dir_len).map_err(|_| ContainerError::IntegerOverflow)?];
+    let mut directory =
+        vec![0; usize::try_from(dir_len).map_err(|_| ContainerError::IntegerOverflow)?];
     read_from_source(source, dir_off, &mut directory)?;
-    if blake3::hash(&directory).as_bytes() != &header[72..104] { return Err(ContainerError::HashMismatch); }
-    let mut table = vec![0; usize::try_from(table_len).map_err(|_| ContainerError::IntegerOverflow)?];
+    if blake3::hash(&directory).as_bytes() != &header[72..104] {
+        return Err(ContainerError::HashMismatch);
+    }
+    let mut table =
+        vec![0; usize::try_from(table_len).map_err(|_| ContainerError::IntegerOverflow)?];
     read_from_source(source, table_off, &mut table)?;
-    if blake3::hash(&table).as_bytes() != &header[104..136] { return Err(ContainerError::HashMismatch); }
+    if blake3::hash(&table).as_bytes() != &header[104..136] {
+        return Err(ContainerError::HashMismatch);
+    }
     validate_zero_range_as(source, dir_end, table_off, ContainerError::InvalidHeader)?;
-    validate_zero_range_as(source, table_end, payload_off, ContainerError::InvalidHeader)?;
+    validate_zero_range_as(
+        source,
+        table_end,
+        payload_off,
+        ContainerError::InvalidHeader,
+    )?;
 
     let mut chunks = BTreeMap::new();
     for (index, record) in table.chunks_exact(CHUNK_TABLE_RECORD_SIZE).enumerate() {
@@ -592,17 +623,45 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
         let stored_len = read_u64(record, 8)?;
         let raw_len = read_u64(record, 16)?;
         let codec = Codec::decode(record[24])?;
-        if record[25..28].iter().any(|byte| *byte != 0) || record[60..64].iter().any(|byte| *byte != 0) { return Err(ContainerError::InvalidDirectory); }
-        if codec == Codec::Raw && stored_len != raw_len { return Err(ContainerError::InvalidDirectory); }
-        let end = offset.checked_add(stored_len).ok_or(ContainerError::IntegerOverflow)?;
-        if offset < payload_off || end > total_len { return Err(ContainerError::OutOfBounds); }
+        if record[25..28].iter().any(|byte| *byte != 0)
+            || record[60..64].iter().any(|byte| *byte != 0)
+        {
+            return Err(ContainerError::InvalidDirectory);
+        }
+        if codec == Codec::Raw && stored_len != raw_len {
+            return Err(ContainerError::InvalidDirectory);
+        }
+        let end = offset
+            .checked_add(stored_len)
+            .ok_or(ContainerError::IntegerOverflow)?;
+        if offset < payload_off || end > total_len {
+            return Err(ContainerError::OutOfBounds);
+        }
         let hash = record[28..60].try_into().unwrap();
-        if codec == Codec::Raw { validate_hash_range(source, offset, end, hash)?; } else {
-            let mut stored = vec![0; usize::try_from(stored_len).map_err(|_| ContainerError::IntegerOverflow)?];
+        if codec == Codec::Raw {
+            validate_hash_range(source, offset, end, hash)?;
+        } else {
+            let mut stored =
+                vec![0; usize::try_from(stored_len).map_err(|_| ContainerError::IntegerOverflow)?];
             read_from_source(source, offset, &mut stored)?;
             validate_deflate(&stored, raw_len, hash)?;
         }
-        if chunks.insert(id, ChunkInfo { id, offset, stored_len, raw_len, codec, hash }).is_some() { return Err(ContainerError::InvalidDirectory); }
+        if chunks
+            .insert(
+                id,
+                ChunkInfo {
+                    id,
+                    offset,
+                    stored_len,
+                    raw_len,
+                    codec,
+                    hash,
+                },
+            )
+            .is_some()
+        {
+            return Err(ContainerError::InvalidDirectory);
+        }
     }
     let mut ordered: Vec<_> = chunks.values().copied().collect();
     ordered.sort_by_key(|chunk| (chunk.offset, chunk.id));
@@ -617,7 +676,10 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
             .checked_add(chunk.raw_len)
             .ok_or(ContainerError::IntegerOverflow)?;
         validate_zero_range(source, cursor, chunk.offset)?;
-        cursor = chunk.offset.checked_add(chunk.stored_len).ok_or(ContainerError::IntegerOverflow)?;
+        cursor = chunk
+            .offset
+            .checked_add(chunk.stored_len)
+            .ok_or(ContainerError::IntegerOverflow)?;
         raw_cursor = raw_end;
     }
     if let Some(last) = chunks.values().max_by_key(|chunk| chunk.offset) {
@@ -638,34 +700,102 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
     let mut decoded_chunks = BTreeMap::<u32, Vec<u8>>::new();
     for record in directory.chunks_exact(CHUNK_RECORD_SIZE) {
         let guid = StableGuid::from_u128(u128::from_le_bytes(record[0..16].try_into().unwrap()));
-        if entries.contains_key(&guid) || previous_guid.is_some_and(|previous| previous >= guid) { eprintln!("v2 guid ordering"); return Err(ContainerError::InvalidDirectory); }
+        if entries.contains_key(&guid) || previous_guid.is_some_and(|previous| previous >= guid) {
+            eprintln!("v2 guid ordering");
+            return Err(ContainerError::InvalidDirectory);
+        }
         previous_guid = Some(guid);
         let chunk_id = read_u32(record, 16)?;
         let raw_offset = read_u64(record, 24)?;
         let raw_len = read_u64(record, 32)?;
-        let chunk = chunks.get(&chunk_id).copied().ok_or(ContainerError::InvalidDirectory)?;
-        let raw_end = raw_offset.checked_add(raw_len).ok_or(ContainerError::IntegerOverflow)?;
-        if record[20..24].iter().any(|byte| *byte != 0) || record[76..80].iter().any(|byte| *byte != 0) || raw_end > chunk.raw_len { eprintln!("v2 entry bounds guid={guid:?} chunk={chunk_id} raw={raw_offset}+{raw_len} chunkraw={}", chunk.raw_len); return Err(ContainerError::InvalidDirectory); }
+        let chunk = chunks
+            .get(&chunk_id)
+            .copied()
+            .ok_or(ContainerError::InvalidDirectory)?;
+        let raw_end = raw_offset
+            .checked_add(raw_len)
+            .ok_or(ContainerError::IntegerOverflow)?;
+        if record[20..24].iter().any(|byte| *byte != 0)
+            || record[76..80].iter().any(|byte| *byte != 0)
+            || raw_end > chunk.raw_len
+        {
+            eprintln!("v2 entry bounds guid={guid:?} chunk={chunk_id} raw={raw_offset}+{raw_len} chunkraw={}", chunk.raw_len);
+            return Err(ContainerError::InvalidDirectory);
+        }
         let hash = record[40..72].try_into().unwrap();
         let alignment = u32::from_le_bytes(record[72..76].try_into().unwrap());
-        let absolute = chunk.offset.checked_add(raw_offset).ok_or(ContainerError::IntegerOverflow)?;
-        if alignment == 0 || !alignment.is_power_of_two() || absolute % u64::from(alignment) != 0 { eprintln!("v2 alignment guid={guid:?} absolute={absolute} alignment={alignment}"); return Err(ContainerError::InvalidDirectory); }
-        if chunk.codec == Codec::Raw { validate_hash_range(source, absolute, absolute.checked_add(raw_len).ok_or(ContainerError::IntegerOverflow)?, hash)?; } else {
-            let decoded = decoded_chunks.entry(chunk_id).or_default();
-            if decoded.is_empty() { *decoded = decode_chunk_source(source, chunk)?; }
-            let start = usize::try_from(raw_offset).map_err(|_| ContainerError::IntegerOverflow)?;
-            let end = start.checked_add(usize::try_from(raw_len).map_err(|_| ContainerError::IntegerOverflow)?).ok_or(ContainerError::IntegerOverflow)?;
-            if blake3::hash(decoded.get(start..end).ok_or(ContainerError::OutOfBounds)?).as_bytes() != &hash { return Err(ContainerError::HashMismatch); }
+        let absolute = chunk
+            .offset
+            .checked_add(raw_offset)
+            .ok_or(ContainerError::IntegerOverflow)?;
+        if alignment == 0 || !alignment.is_power_of_two() || absolute % u64::from(alignment) != 0 {
+            eprintln!("v2 alignment guid={guid:?} absolute={absolute} alignment={alignment}");
+            return Err(ContainerError::InvalidDirectory);
         }
-        entries.insert(guid, EntryInfo { guid, chunk_id, raw_offset, offset: chunk.offset, stored_len: chunk.stored_len, raw_len, codec: chunk.codec, hash, alignment });
+        if chunk.codec == Codec::Raw {
+            validate_hash_range(
+                source,
+                absolute,
+                absolute
+                    .checked_add(raw_len)
+                    .ok_or(ContainerError::IntegerOverflow)?,
+                hash,
+            )?;
+        } else {
+            let decoded = decoded_chunks.entry(chunk_id).or_default();
+            if decoded.is_empty() {
+                *decoded = decode_chunk_source(source, chunk)?;
+            }
+            let start = usize::try_from(raw_offset).map_err(|_| ContainerError::IntegerOverflow)?;
+            let end = start
+                .checked_add(usize::try_from(raw_len).map_err(|_| ContainerError::IntegerOverflow)?)
+                .ok_or(ContainerError::IntegerOverflow)?;
+            if blake3::hash(decoded.get(start..end).ok_or(ContainerError::OutOfBounds)?).as_bytes()
+                != &hash
+            {
+                return Err(ContainerError::HashMismatch);
+            }
+        }
+        entries.insert(
+            guid,
+            EntryInfo {
+                guid,
+                chunk_id,
+                raw_offset,
+                offset: chunk.offset,
+                stored_len: chunk.stored_len,
+                raw_len,
+                codec: chunk.codec,
+                hash,
+                alignment,
+            },
+        );
     }
-    Ok(ParsedContainer { info: ContainerInfo { version: CHUNK_FORMAT_VERSION, entry_count: count, chunk_count, total_len, content_hash, generation }, entries, chunks })
+    Ok(ParsedContainer {
+        info: ContainerInfo {
+            version: CHUNK_FORMAT_VERSION,
+            entry_count: count,
+            chunk_count,
+            total_len,
+            content_hash,
+            generation,
+        },
+        entries,
+        chunks,
+    })
 }
 
-fn decode_chunk_source(source: &dyn crate::RangeSource, chunk: ChunkInfo) -> Result<Vec<u8>, ContainerError> {
-    let mut stored = vec![0; usize::try_from(chunk.stored_len).map_err(|_| ContainerError::IntegerOverflow)?];
+fn decode_chunk_source(
+    source: &dyn crate::RangeSource,
+    chunk: ChunkInfo,
+) -> Result<Vec<u8>, ContainerError> {
+    let mut stored =
+        vec![0; usize::try_from(chunk.stored_len).map_err(|_| ContainerError::IntegerOverflow)?];
     read_from_source(source, chunk.offset, &mut stored)?;
-    match chunk.codec { Codec::Raw => Ok(stored), Codec::Deflate => decode_deflate(&stored, chunk.raw_len) }
+    match chunk.codec {
+        Codec::Raw => Ok(stored),
+        Codec::Deflate => decode_deflate(&stored, chunk.raw_len),
+    }
 }
 
 fn validate_zero_range(

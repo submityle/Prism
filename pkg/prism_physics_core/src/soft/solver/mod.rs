@@ -108,9 +108,7 @@ impl SoftSolver {
             return;
         }
         for _ in 0..substeps {
-            self.step_substep_before_velocity_recovery(
-                particles, constraints, config, contacts, h,
-            );
+            self.step_substep_before_velocity_recovery(particles, constraints, config, contacts, h);
             self.recover_substep_velocities(particles, h);
         }
     }

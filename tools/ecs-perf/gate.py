@@ -313,6 +313,11 @@ def validate_portable(data, kind):
     return data
 
 
+def load_portable(path):
+    data = json.loads(Path(path).read_text())
+    return validate_portable(data, data.get("kind"))
+
+
 def percentile(values, fraction):
     ordered = sorted(values)
     index = max(0, min(len(ordered) - 1, math.ceil(fraction * len(ordered)) - 1))
@@ -558,6 +563,21 @@ def main(argv=None):
     collect.add_argument("--machine-id", required=True)
     collect.add_argument("--target-dir", required=True)
     collect.add_argument("--output", required=True)
+    portable = sub.add_parser(
+        "portable",
+        help="run the offline portable complexity gate and report timing percentiles",
+    )
+    portable.add_argument("--baseline", required=True)
+    portable.add_argument("--target-dir", required=True)
+    portable.add_argument("--output", required=True)
+    portable.add_argument("--report", required=True)
+    record_portable = sub.add_parser(
+        "record-portable-baseline",
+        help="explicitly persist a portable measurement as a complexity baseline",
+    )
+    record_portable.add_argument("--measurement", required=True)
+    record_portable.add_argument("--baseline", required=True)
+    record_portable.add_argument("--replace", action="store_true")
     record = sub.add_parser("record-baseline", help="explicitly persist an accepted measurement")
     record.add_argument("--measurement", required=True)
     record.add_argument("--baseline", required=True)
@@ -571,6 +591,21 @@ def main(argv=None):
     try:
         if args.action == "measure":
             measure(args)
+        elif args.action == "portable":
+            if Path(args.output).resolve() == Path(args.baseline).resolve() or Path(args.report).resolve() in {
+                Path(args.output).resolve(), Path(args.baseline).resolve()
+            }:
+                raise GateError("portable output, report and baseline must be different files")
+            measure_portable(args)
+            report = compare_portable(load_portable(args.baseline), load_portable(args.output))
+            write_json(args.report, report)
+            print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
+            return 0 if report["passed"] else 1
+        elif args.action == "record-portable-baseline":
+            if Path(args.measurement).resolve() == Path(args.baseline).resolve():
+                raise GateError("baseline and measurement must be different files")
+            record_portable_baseline(load_portable(args.measurement), args.baseline, args.replace)
+            print(f"Recorded portable baseline: {args.baseline}")
         elif args.action == "record-baseline":
             if Path(args.measurement).resolve() == Path(args.baseline).resolve():
                 raise GateError("baseline and measurement must be different files")

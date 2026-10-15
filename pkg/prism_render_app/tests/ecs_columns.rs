@@ -1041,7 +1041,10 @@ mod automatic_recovery {
             let destination = buffers
                 .get_mut(&buffer)
                 .unwrap_or_else(|| panic!("software buffer {buffer:?} is not live"));
-            assert!(end <= destination.len(), "software buffer upload exceeds allocation");
+            assert!(
+                end <= destination.len(),
+                "software buffer upload exceeds allocation"
+            );
             destination[offset as usize..end].copy_from_slice(data);
             drop(buffers);
             self.0
