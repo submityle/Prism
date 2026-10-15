@@ -51,6 +51,9 @@ fn export_nodegraph(out: &mut String, graph: &NodeGraph, indent: usize) {
             attributes(&graph.attributes)
         ),
     );
+    for input in &graph.inputs {
+        export_input(out, input, indent + 1, false);
+    }
     for node in &graph.nodes {
         export_node(out, node, indent + 1);
     }

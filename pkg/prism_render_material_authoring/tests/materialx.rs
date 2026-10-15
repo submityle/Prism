@@ -386,14 +386,27 @@ fn unsupported_expression_nodes_still_require_a_bake() {
 }
 
 #[test]
-fn interface_and_non_default_outputs_are_explicitly_unsafe() {
+fn interface_connections_resolve_and_non_default_outputs_remain_explicitly_unsafe() {
     let interface_document = parse_materialx(
-        r#"<materialx><nodegraph name="g"><open_pbr_surface name="s"><input name="base_color" type="color3" interfacename="base"/></open_pbr_surface></nodegraph></materialx>"#,
+        r#"<materialx><nodegraph name="g"><input name="base" type="color3" value="0.1, 0.2, 0.3"/><open_pbr_surface name="s"><input name="base_color" type="color3" interfacename="base"/></open_pbr_surface></nodegraph></materialx>"#,
     )
     .expect("interface declaration is structurally valid");
-    let interface_error = adapt_openpbr_surface(&interface_document, "g", "s")
-        .expect_err("interface resolution is outside the restricted adapter");
-    assert_eq!(interface_error.0.code, DiagnosticCode::UnsafeConnection);
+    let interface_surface = adapt_openpbr_surface(&interface_document, "g", "s")
+        .expect("graph interface input resolves to its literal");
+    assert_eq!(
+        interface_surface.parameters.base_color,
+        [0.1, 0.2, 0.3, 1.0]
+    );
+
+    let round_trip = export_materialx(&interface_document);
+    let reparsed = parse_materialx(&round_trip).expect("interface survives export");
+    assert_eq!(
+        adapt_openpbr_surface(&reparsed, "g", "s")
+            .expect("reimported interface")
+            .parameters
+            .base_color,
+        [0.1, 0.2, 0.3, 1.0]
+    );
 
     let output_document = parse_materialx(
         r#"<materialx><nodegraph name="g"><constant name="c" type="float" value="0.2"/><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="c" output="alternate"/></open_pbr_surface></nodegraph></materialx>"#,
@@ -402,20 +415,31 @@ fn interface_and_non_default_outputs_are_explicitly_unsafe() {
     let output_error = adapt_openpbr_surface(&output_document, "g", "s")
         .expect_err("non-default output selection is not guessed");
     assert_eq!(output_error.0.code, DiagnosticCode::UnsafeConnection);
+
+    let operator_output_document = parse_materialx(
+        r#"<materialx><nodegraph name="g"><constant name="a" type="float" value="0.1"/><constant name="b" type="float" value="0.2"/><add name="sum"><input name="in1" nodename="a"/><input name="in2" nodename="b"/><output name="alternate" type="float"/></add><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="sum" output="alternate"/></open_pbr_surface></nodegraph></materialx>"#,
+    )
+    .expect("operator output declaration is structurally valid");
+    let operator_output_error = adapt_openpbr_surface(&operator_output_document, "g", "s")
+        .expect_err("operator outputs without an evaluator must not alias the default output");
+    assert_eq!(
+        operator_output_error.0.code,
+        DiagnosticCode::UnsafeConnection
+    );
 }
 
 #[test]
-fn graph_output_and_type_mismatched_connections_are_not_guessed() {
+fn graph_outputs_resolve_and_type_mismatched_connections_are_not_guessed() {
     let graph_output_document = parse_materialx(
         r#"<materialx>
           <nodegraph name="values"><constant name="c" type="float" value="0.2"/><output name="out" type="float" nodename="c"/></nodegraph>
-          <nodegraph name="surface"><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodegraph="values" output="out"/></open_pbr_surface></nodegraph>
+          <nodegraph name="surface"><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodegraph="values"/></open_pbr_surface></nodegraph>
         </materialx>"#,
     )
     .expect("graph output reference is structurally valid");
-    let graph_output_error = adapt_openpbr_surface(&graph_output_document, "surface", "s")
-        .expect_err("graph output evaluation is not implemented");
-    assert_eq!(graph_output_error.0.code, DiagnosticCode::UnsafeConnection);
+    let graph_output_surface = adapt_openpbr_surface(&graph_output_document, "surface", "s")
+        .expect("graph output resolves through its connected constant");
+    assert_eq!(graph_output_surface.parameters.specular_roughness, 0.2);
 
     let mismatched_document = parse_materialx(
         r#"<materialx><nodegraph name="g"><constant name="c" type="color3" value="0.2, 0.3, 0.4"/><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodename="c"/></open_pbr_surface></nodegraph></materialx>"#,
@@ -424,6 +448,31 @@ fn graph_output_and_type_mismatched_connections_are_not_guessed() {
     let mismatch = adapt_openpbr_surface(&mismatched_document, "g", "s")
         .expect_err("source and input types must agree");
     assert_eq!(mismatch.0.code, DiagnosticCode::InvalidValue);
+}
+
+#[test]
+fn interface_and_graph_output_error_paths_remain_diagnostic() {
+    let missing_interface = parse_materialx(
+        r#"<materialx><nodegraph name="g"><open_pbr_surface name="s"><input name="base_color" type="color3" interfacename="missing"/></open_pbr_surface></nodegraph></materialx>"#,
+    )
+    .expect_err("missing graph interface must not become a default");
+    assert_eq!(missing_interface.0.code, DiagnosticCode::InvalidReference);
+
+    let unconnected_output = parse_materialx(
+        r#"<materialx><nodegraph name="values"><output name="out" type="float"/></nodegraph><nodegraph name="surface"><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodegraph="values" output="out"/></open_pbr_surface></nodegraph></materialx>"#,
+    )
+    .expect("unconnected graph output is structurally representable");
+    let unconnected_error = adapt_openpbr_surface(&unconnected_output, "surface", "s")
+        .expect_err("unconnected graph output must not become a default");
+    assert_eq!(unconnected_error.0.code, DiagnosticCode::UnsafeConnection);
+
+    let ambiguous_output = parse_materialx(
+        r#"<materialx><nodegraph name="values"><constant name="a" type="float" value="0.2"/><constant name="b" type="float" value="0.4"/><output name="a_out" type="float" nodename="a"/><output name="b_out" type="float" nodename="b"/></nodegraph><nodegraph name="surface"><open_pbr_surface name="s"><input name="specular_roughness" type="float" nodegraph="values"/></open_pbr_surface></nodegraph></materialx>"#,
+    )
+    .expect("implicit graph output connection is structurally representable");
+    let ambiguous_error = adapt_openpbr_surface(&ambiguous_output, "surface", "s")
+        .expect_err("multiple graph outputs require an explicit output name");
+    assert_eq!(ambiguous_error.0.code, DiagnosticCode::InvalidReference);
 }
 
 #[test]

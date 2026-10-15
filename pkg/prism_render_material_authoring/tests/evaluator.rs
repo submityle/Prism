@@ -93,3 +93,46 @@ fn evaluator_rejects_reversed_clamp_bounds_without_panicking() {
     assert_eq!(error.0.code, DiagnosticCode::InvalidValue);
     assert!(error.to_string().contains("lower bound"));
 }
+
+#[test]
+fn evaluator_resolves_graph_outputs_and_interfaces_through_nested_expressions() {
+    let document = parse_materialx(
+        r#"<materialx><nodegraph name="g"><input name="scale" type="float" value="0.5"/><constant name="base" type="float" value="0.4"/><multiply name="scaled"><input name="in1" nodename="base"/><input name="in2" interfacename="scale"/></multiply><output name="out" type="float" nodename="scaled"/></nodegraph></materialx>"#,
+    )
+    .unwrap();
+    let graph = &document.nodegraphs[0];
+    let value = evaluate_connection(
+        &document,
+        graph,
+        &Connection {
+            node: None,
+            output: Some("out".into()),
+            nodegraph: Some("g".into()),
+        },
+    )
+    .unwrap();
+    assert_eq!(value.type_name, "float");
+    let numeric = value.value.parse::<f32>().unwrap();
+    assert!((numeric - 0.2).abs() < 1e-6);
+}
+
+#[test]
+fn evaluator_rejects_graph_output_cycles() {
+    let document = parse_materialx(
+        r#"<materialx><nodegraph name="g"><output name="a" type="float" nodegraph="g" output="b"/><output name="b" type="float" nodegraph="g" output="a"/></nodegraph></materialx>"#,
+    )
+    .unwrap();
+    let graph = &document.nodegraphs[0];
+    let error = evaluate_connection(
+        &document,
+        graph,
+        &Connection {
+            node: None,
+            output: Some("a".into()),
+            nodegraph: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.0.code, DiagnosticCode::UnsafeConnection);
+    assert!(error.to_string().contains("cyclic graph output"));
+}

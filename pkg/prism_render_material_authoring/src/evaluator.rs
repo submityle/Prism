@@ -25,20 +25,19 @@ pub fn evaluate_connection(
                 )
             })
     })?;
-    let node_name = connection.node.as_deref().ok_or_else(|| {
-        error(
-            DiagnosticCode::UnsafeConnection,
-            "graph-output connections cannot be evaluated by the expression evaluator",
-        )
-    })?;
     let mut stack = BTreeSet::new();
-    eval_node(
-        document,
-        target_graph,
-        node_name,
-        connection.output.as_deref(),
-        &mut stack,
-    )
+    evaluate_connection_inner(document, target_graph, connection, &mut stack)
+}
+
+/// Resolves one node input, including a literal, connection, or graph
+/// interface reference. `None` means that the input is omitted.
+pub(crate) fn evaluate_input(
+    document: &Document,
+    graph: &NodeGraph,
+    input: &crate::Input,
+) -> Result<Option<TypedValue>, AuthoringError> {
+    let mut stack = BTreeSet::new();
+    evaluate_input_inner(document, graph, input, &mut stack)
 }
 
 fn eval_node(
@@ -91,6 +90,14 @@ fn eval_node_inner(
             if let Some(value) = &declared.value {
                 return Ok(value.clone());
             }
+            return Err(error(
+                DiagnosticCode::UnsafeConnection,
+                format!(
+                    "node '{}' output '{}' has no evaluable literal",
+                    node.name,
+                    output.unwrap()
+                ),
+            ));
         } else {
             return Err(error(
                 DiagnosticCode::InvalidReference,
@@ -104,11 +111,7 @@ fn eval_node_inner(
     }
     let mut values = Vec::with_capacity(node.inputs.len());
     for input in &node.inputs {
-        let value = if let Some(literal) = &input.value {
-            literal.clone()
-        } else if let Some(connection) = &input.connection {
-            evaluate_connection_inner(document, graph, connection, stack)?
-        } else {
+        let Some(value) = evaluate_input_inner(document, graph, input, stack)? else {
             return Err(error(
                 DiagnosticCode::UnsafeConnection,
                 format!("node '{}' input '{}' is unconnected", node.name, input.name),
@@ -203,13 +206,126 @@ fn evaluate_connection_inner(
                 )
             })
     })?;
-    let name = c.node.as_deref().ok_or_else(|| {
+    if let Some(name) = c.node.as_deref() {
+        return eval_node(document, target, name, c.output.as_deref(), stack);
+    }
+    let output = c
+        .output
+        .as_deref()
+        .or_else(|| (target.outputs.len() == 1).then(|| target.outputs[0].name.as_str()));
+    let output = output.ok_or_else(|| {
         error(
-            DiagnosticCode::UnsafeConnection,
-            "graph output cannot be evaluated",
+            DiagnosticCode::InvalidReference,
+            format!(
+                "connection to nodegraph '{}' does not select one of its graph outputs",
+                target.name
+            ),
         )
     })?;
-    eval_node(document, target, name, c.output.as_deref(), stack)
+    eval_graph_output(document, target, output, stack)
+}
+
+fn evaluate_input_inner(
+    document: &Document,
+    graph: &NodeGraph,
+    input: &crate::Input,
+    stack: &mut BTreeSet<String>,
+) -> Result<Option<TypedValue>, AuthoringError> {
+    if let Some(value) = &input.value {
+        return Ok(Some(value.clone()));
+    }
+    if let Some(connection) = &input.connection {
+        return evaluate_connection_inner(document, graph, connection, stack).map(Some);
+    }
+    if let Some(interface) = input.attributes.get("interfacename") {
+        return evaluate_interface(document, graph, interface, stack).map(Some);
+    }
+    Ok(None)
+}
+
+fn evaluate_interface(
+    document: &Document,
+    graph: &NodeGraph,
+    name: &str,
+    stack: &mut BTreeSet<String>,
+) -> Result<TypedValue, AuthoringError> {
+    let key = format!("{}::@interface::{name}", graph.name);
+    if !stack.insert(key.clone()) {
+        return Err(error(
+            DiagnosticCode::UnsafeConnection,
+            format!("cyclic graph interface resolution at '{name}'"),
+        ));
+    }
+    let input = graph
+        .inputs
+        .iter()
+        .find(|input| input.name == name)
+        .ok_or_else(|| {
+            error(
+                DiagnosticCode::InvalidReference,
+                format!(
+                    "interface input '{name}' does not exist in nodegraph '{}'",
+                    graph.name
+                ),
+            )
+        })?;
+    let result = if let Some(value) = &input.value {
+        Ok(value.clone())
+    } else if let Some(connection) = &input.connection {
+        evaluate_connection_inner(document, graph, connection, stack)
+    } else if let Some(alias) = input.attributes.get("interfacename") {
+        evaluate_interface(document, graph, alias, stack)
+    } else {
+        Err(error(
+            DiagnosticCode::UnsafeConnection,
+            format!("graph interface input '{name}' has no value or connection"),
+        ))
+    };
+    stack.remove(&key);
+    result
+}
+
+fn eval_graph_output(
+    document: &Document,
+    graph: &NodeGraph,
+    name: &str,
+    stack: &mut BTreeSet<String>,
+) -> Result<TypedValue, AuthoringError> {
+    let key = format!("{}::@output::{name}", graph.name);
+    if !stack.insert(key.clone()) {
+        return Err(error(
+            DiagnosticCode::UnsafeConnection,
+            format!("cyclic graph output resolution at '{name}'"),
+        ));
+    }
+    let output = graph
+        .outputs
+        .iter()
+        .find(|output| output.name == name)
+        .ok_or_else(|| {
+            error(
+                DiagnosticCode::InvalidReference,
+                format!(
+                    "output '{name}' does not exist on nodegraph '{}'",
+                    graph.name
+                ),
+            )
+        })?;
+    let result = if let Some(value) = &output.value {
+        Ok(value.clone())
+    } else if let Some(connection) = &output.connection {
+        evaluate_connection_inner(document, graph, connection, stack)
+    } else {
+        Err(error(
+            DiagnosticCode::UnsafeConnection,
+            format!(
+                "graph output '{name}' in nodegraph '{}' is unconnected",
+                graph.name
+            ),
+        ))
+    };
+    stack.remove(&key);
+    result
 }
 fn numbers(v: &TypedValue) -> Result<Vec<f32>, AuthoringError> {
     v.value

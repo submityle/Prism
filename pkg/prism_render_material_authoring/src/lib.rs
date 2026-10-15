@@ -2,9 +2,10 @@
 //!
 //! This crate parses a documented MaterialX subset into a loss-aware authoring
 //! IR and depends on Prism's runtime material crate only at the explicit
-//! OpenPBR/Standard Surface adapter boundary. That adapter evaluates literals
-//! and a bounded pure numeric expression subset; texture/procedural graphs and
-//! graph interfaces are rejected instead of being treated as defaults.
+//! OpenPBR/Standard Surface adapter boundary. That adapter evaluates literals,
+//! graph interfaces, graph outputs, and a bounded pure numeric expression
+//! subset; texture/procedural graphs are rejected instead of being treated as
+//! defaults.
 
 #![allow(
     clippy::doc_markdown,

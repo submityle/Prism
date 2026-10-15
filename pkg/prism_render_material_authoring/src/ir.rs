@@ -85,6 +85,8 @@ pub struct NodeDef {
 pub struct NodeGraph {
     /// Stable graph identifier.
     pub name: String,
+    /// Compound graph interface inputs in source order.
+    pub inputs: Vec<Input>,
     /// Node instances in source order.
     pub nodes: Vec<Node>,
     /// Graph outputs in source order.

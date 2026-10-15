@@ -31,9 +31,10 @@ const NODE_ATTRIBUTES: &[&str] = &["name", "type", "value", "nodedef", "doc", "n
 /// Parses the explicitly supported MaterialX subset.
 ///
 /// Supported structure: `materialx`, `nodedef` with input/output declarations,
-/// `nodegraph` with node/input/output children, literal input values, and
-/// `nodename`/`nodegraph` output connections. Unknown elements and node
-/// categories are errors; callers must not assume omitted data was preserved.
+/// `nodegraph` with interface inputs, node/input/output children, literal input
+/// values, and `nodename`/`nodegraph` output connections. Unknown elements and
+/// node categories are errors; callers must not assume omitted data was
+/// preserved.
 pub fn parse_materialx(source: &str) -> Result<Document, AuthoringError> {
     let xml = XmlDocument::parse(source).map_err(|error| {
         AuthoringError::new(
@@ -162,11 +163,18 @@ fn parse_nodegraph(
 ) -> Result<NodeGraph, AuthoringError> {
     let name = required(xml, element, "name")?;
     insert_id(xml, graph_ids, &name, element)?;
+    let mut interface_ids = BTreeSet::new();
     let mut node_ids = BTreeSet::new();
+    let mut inputs = Vec::new();
     let mut nodes = Vec::new();
     let mut outputs = Vec::new();
     for child in element.children().filter(XmlNode::is_element) {
         match child.tag_name().name() {
+            "input" => {
+                let input = parse_input(xml, child, false)?;
+                insert_id(xml, &mut interface_ids, &input.name, child)?;
+                inputs.push(input);
+            }
             "node" => {
                 let node = parse_node(xml, child)?;
                 insert_id(xml, &mut node_ids, &node.name, child)?;
@@ -190,6 +198,7 @@ fn parse_nodegraph(
     }
     Ok(NodeGraph {
         name,
+        inputs,
         nodes,
         outputs,
         attributes: attrs(xml, element, &["name", "doc", "namespace"])?,
@@ -286,12 +295,29 @@ fn parse_input(
     let literal = element.attribute("value");
     let node = element.attribute("nodename");
     let graph = element.attribute("nodegraph");
+    let interface = element.attribute("interfacename");
     if literal.is_some() && (node.is_some() || graph.is_some()) {
         return Err(fail(
             xml,
             element,
             DiagnosticCode::InvalidStructure,
             format!("input '{name}' cannot contain both a literal and a connection"),
+        ));
+    }
+    if interface.is_some() && (literal.is_some() || node.is_some() || graph.is_some()) {
+        return Err(fail(
+            xml,
+            element,
+            DiagnosticCode::InvalidStructure,
+            format!("input '{name}' cannot contain interfacename with a literal or connection"),
+        ));
+    }
+    if interface.is_some_and(str::is_empty) {
+        return Err(fail(
+            xml,
+            element,
+            DiagnosticCode::InvalidStructure,
+            format!("input '{name}' requires a non-empty interfacename"),
         ));
     }
     let value = literal.map(|value| TypedValue {
@@ -370,63 +396,88 @@ fn validate_references(xml: &XmlDocument<'_>, doc: &Document) -> Result<(), Auth
         .collect();
     for graph in &doc.nodegraphs {
         let nodes: BTreeSet<_> = graph.nodes.iter().map(|n| n.name.as_str()).collect();
-        for connection in graph
-            .nodes
+        for input in graph
+            .inputs
             .iter()
-            .flat_map(|n| &n.inputs)
-            .filter_map(|i| i.connection.as_ref())
-            .chain(graph.outputs.iter().filter_map(|o| o.connection.as_ref()))
+            .chain(graph.nodes.iter().flat_map(|n| &n.inputs))
         {
-            if let Some(graph_name) = connection.nodegraph.as_deref() {
-                let Some(target_graph) = graphs.get(graph_name) else {
-                    return Err(AuthoringError::new(
-                        DiagnosticCode::InvalidReference,
-                        format!("nodegraph reference '{graph_name}' does not exist"),
-                        None,
-                    ));
-                };
-                if let Some(node_name) = connection.node.as_deref() {
-                    if !target_graph.nodes.iter().any(|node| node.name == node_name) {
-                        return Err(AuthoringError::new(
-                            DiagnosticCode::InvalidReference,
-                            format!("node reference '{node_name}' does not exist in nodegraph '{graph_name}'"),
-                            None,
-                        ));
-                    }
-                } else if connection.output.is_some()
-                    && !target_graph
-                        .outputs
-                        .iter()
-                        .any(|o| Some(o.name.as_str()) == connection.output.as_deref())
-                {
-                    return Err(AuthoringError::new(
-                        DiagnosticCode::InvalidReference,
-                        format!(
-                            "output {:?} does not exist on nodegraph '{graph_name}'",
-                            connection.output
-                        ),
-                        None,
-                    ));
-                }
-            } else if connection
-                .node
-                .as_deref()
-                .is_none_or(|name| !nodes.contains(name))
+            if let Some(interface) = input.attributes.get("interfacename")
+                && !graph
+                    .inputs
+                    .iter()
+                    .any(|candidate| candidate.name == *interface)
             {
-                // Permit forward graph references only when the target is a known graph; node links stay graph-local.
                 return Err(AuthoringError::new(
                     DiagnosticCode::InvalidReference,
                     format!(
-                        "node reference '{}' does not exist in nodegraph '{}'",
-                        connection.node.as_deref().unwrap_or("<missing>"),
+                        "interface input '{interface}' does not exist in nodegraph '{}'",
                         graph.name
                     ),
                     None,
                 ));
             }
+            if let Some(connection) = input.connection.as_ref() {
+                validate_connection(&graphs, graph, &nodes, connection)?;
+            }
+        }
+        for output in &graph.outputs {
+            if let Some(connection) = output.connection.as_ref() {
+                validate_connection(&graphs, graph, &nodes, connection)?;
+            }
         }
     }
     let _ = xml;
+    Ok(())
+}
+
+fn validate_connection(
+    graphs: &BTreeMap<&str, &NodeGraph>,
+    graph: &NodeGraph,
+    nodes: &BTreeSet<&str>,
+    connection: &Connection,
+) -> Result<(), AuthoringError> {
+    if let Some(graph_name) = connection.nodegraph.as_deref() {
+        let Some(target_graph) = graphs.get(graph_name) else {
+            return Err(AuthoringError::new(
+                DiagnosticCode::InvalidReference,
+                format!("nodegraph reference '{graph_name}' does not exist"),
+                None,
+            ));
+        };
+        if let Some(node_name) = connection.node.as_deref() {
+            if !target_graph.nodes.iter().any(|node| node.name == node_name) {
+                return Err(AuthoringError::new(
+                    DiagnosticCode::InvalidReference,
+                    format!(
+                        "node reference '{node_name}' does not exist in nodegraph '{graph_name}'"
+                    ),
+                    None,
+                ));
+            }
+        } else if let Some(output) = connection.output.as_deref()
+            && !target_graph.outputs.iter().any(|item| item.name == output)
+        {
+            return Err(AuthoringError::new(
+                DiagnosticCode::InvalidReference,
+                format!("output '{output}' does not exist on nodegraph '{graph_name}'"),
+                None,
+            ));
+        }
+    } else if connection
+        .node
+        .as_deref()
+        .is_none_or(|name| !nodes.contains(name))
+    {
+        return Err(AuthoringError::new(
+            DiagnosticCode::InvalidReference,
+            format!(
+                "node reference '{}' does not exist in nodegraph '{}'",
+                connection.node.as_deref().unwrap_or("<missing>"),
+                graph.name
+            ),
+            None,
+        ));
+    }
     Ok(())
 }
 

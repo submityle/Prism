@@ -138,9 +138,9 @@ impl From<&RuntimeSurface> for OpenPbrSurface {
 /// Adapt one OpenPBR or MaterialX Standard Surface node to Prism's canonical
 /// runtime parameter block.
 ///
-/// Literals and the bounded pure-expression subset implemented by
-/// [`crate::evaluate_connection`] are evaluated. Texture, procedural,
-/// conditional, interface, and graph-output connections fail with an explicit
+/// Literals, graph interface inputs, graph outputs, and the bounded
+/// pure-expression subset implemented by [`crate::evaluate_connection`] are
+/// evaluated. Texture and procedural nodes still fail with an explicit
 /// diagnostic; callers must bake or evaluate those graphs rather than silently
 /// accepting defaults.
 pub fn adapt_openpbr_surface(
@@ -324,33 +324,7 @@ fn resolve_input<'a>(
     graph: &'a crate::NodeGraph,
     input: &'a crate::Input,
 ) -> Result<Option<TypedValue>, AuthoringError> {
-    if let Some(value) = &input.value {
-        return Ok(Some(value.clone()));
-    }
-    let Some(connection) = &input.connection else {
-        if input.attributes.contains_key("interfacename") {
-            return Err(error(
-                DiagnosticCode::UnsafeConnection,
-                format!(
-                    "input '{}' uses a node interface connection; interface resolution is not implemented",
-                    input.name
-                ),
-            ));
-        }
-        return Ok(None); // Omitted values use the canonical OpenPBR defaults.
-    };
-    // Keep graph-output connections outside this adapter's contract. The
-    // evaluator deliberately rejects them too, but this check makes the
-    // authoring/runtime boundary explicit at the call site and preserves the
-    // diagnostic even if the evaluator grows additional graph support later.
-    if connection.node.is_none() {
-        return Err(error(
-            DiagnosticCode::UnsafeConnection,
-            "graph-output connections cannot be safely evaluated by the restricted adapter"
-                .to_owned(),
-        ));
-    }
-    crate::evaluator::evaluate_connection(document, graph, connection).map(Some)
+    crate::evaluator::evaluate_input(document, graph, input)
 }
 
 fn value_type(value: &TypedValue) -> Option<&str> {
