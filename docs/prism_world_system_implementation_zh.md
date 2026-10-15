@@ -26,7 +26,7 @@ CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check \
   --no-default-features
 ```
 
-结果：格式检查通过，Clippy 零告警，四个 crate 共 19 个单元测试通过，隔离 target 的 no-default-features 检查通过。
+结果：格式检查通过，Clippy 零告警，四个 crate 共 20 个单元测试通过，隔离 target 的 no-default-features 检查通过。
 
 ## 接缝边界
 
