@@ -436,6 +436,7 @@ impl<A: WinitApp> ApplicationHandler for WinitRunner<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prism_platform::suspend::SuspendEventKind;
     use prism_window::geometry::PhysicalSize;
 
     /// A host that counts the lifecycle callbacks it receives.
@@ -488,6 +489,43 @@ mod tests {
         runner.handle_suspended();
         runner.handle_suspended();
         assert_eq!(runner.app.suspended, 2, "each suspend is forwarded");
+    }
+
+    #[test]
+    fn injected_lifecycle_preserves_kind_and_monotonic_timestamp() {
+        struct RecordingApp {
+            events: Vec<SuspendEvent>,
+        }
+
+        impl WinitApp for RecordingApp {
+            fn resumed(&mut self, _backend: &mut WinitBackend) {}
+
+            fn lifecycle(&mut self, event: SuspendEvent, _backend: &mut WinitBackend) {
+                self.events.push(event);
+            }
+
+            fn frame(&mut self, _backend: &mut WinitBackend) -> FrameOutcome {
+                FrameOutcome::Continue
+            }
+        }
+
+        let mut app = RecordingApp { events: Vec::new() };
+        let mut backend = WinitBackend::new();
+        app.lifecycle(
+            SuspendEvent::suspended(prism_platform::MonotonicNanos(100)),
+            &mut backend,
+        );
+        app.lifecycle(
+            SuspendEvent::resumed(prism_platform::MonotonicNanos(1_100)),
+            &mut backend,
+        );
+
+        assert_eq!(app.events.len(), 2);
+        assert_eq!(app.events[0].kind(), SuspendEventKind::Suspended);
+        assert_eq!(app.events[0].timestamp().0, 100);
+        assert_eq!(app.events[1].kind(), SuspendEventKind::Resumed);
+        assert_eq!(app.events[1].timestamp().0, 1_100);
+        assert!(app.events[1].timestamp() > app.events[0].timestamp());
     }
 
     #[test]
