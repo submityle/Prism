@@ -43,6 +43,12 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 2026-10-15 Apple M2/Metal 严格回归：库单测 7 项、visibility shader validation 1 项、parity 1 项、resident 3 项通过，harness all-target 与正常 workspace GPU lib clippy 通过 `-D warnings`。百万实例/75% 可见、release、8 预热+64 样本，主机 record+finish P50/P95/P99 为 21.167/33.125/35.625 µs，submit+wait 为 1371.750/1511.000/1619.583 µs；逻辑 buffer 72,000,144 字节，首次上传 48,000,128 字节，计时帧无上传/回读/绘制。不是 GPU timestamp、物理 VRAM 或完整产品帧时。API、复现方式、三档实测与未集成边界见 `prism_world_gpu_resident_zh.md`，不据此宣称 M4 全部完成。
 
+### M4：扇区所有权与宿主生命周期
+
+`ProxyRegistry` 提供固定代理容量、独立 sector 数量预算（含空 sector）、sector 内唯一 ID、代际 handle、交换压紧和 dirty range；`GpuSectorProxies` 持有同一注册表、预留 SoA scratch 和固定 resident GPU 资源，无变化 upload 为 O(1)，改变后的扫描/转置/清标记总计 O(N + K)，逻辑列上传为 48K 字节。未上传编辑和整体替换 registry 均拒绝 render/camera/encode，尾删和全卸载仍同步 count。返回的校验/预算错误不改变注册表；map/Arc 的普通分配 OOM 不属于可恢复错误承诺。
+
+`prism_world_runtime/proxy_host` 在 header 校验后借用项目 decoder、原 `SceneHost` 与同一注册表，先派生 admission 后调用权威 host。load 错误或 unwind 仅补偿新增派生 sector，不能回滚 host 的部分修改；evict 成功后才删代理，失败/unwind 保留。它不另立 scene 真相、不规定 payload 格式、不启用 wgpu。真实 stream demand/coordinator→decoder/host→上传→间接绘制与策略驱逐像素回归已接通；合约、测试方法与性能边界见 `prism_world_sector_proxies_zh.md`。这不是产品 ECS decoder/render graph 的完整接入。
+
 ### M4：可再生 CPU 散布 kernel
 
 - `prism_world_residency::scatter` 在全局整数毫米三维格中每格生成一个 hash-jitter 候选；显式 seed/version/salt 与完整结构化 candidate key 决定位置。半开位置范围负责唯一归属，负坐标使用 Euclidean 除法；任意拆分、合并和请求顺序不会改变成员集合。完整 cache key 包含 kernel 版本、配置与范围，丢弃后可重建，不充当持久对象身份。
@@ -168,7 +174,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。
-- GPU proxy 已有 Apple M2/Metal parity、驻留 compact/真实间接绘制及限定 release P50/P95/P99 证据；物理显存峰值、多厂商/后端、完整产品性能与 renderer/sector 生命周期端到端集成仍未验收。
+- GPU proxy 已有 Apple M2/Metal parity、驻留 compact/真实间接绘制、sector/coordinator/宿主生命周期及限定 release P50/P95/P99 证据；物理显存峰值、多厂商/后端、完整产品性能与产品 scene/ECS decoder/renderer graph 集成仍未验收。
 
 这些边界已有明确契约和可运行基础；只有补齐对应真实运行时证据后，才从本节移除。
 

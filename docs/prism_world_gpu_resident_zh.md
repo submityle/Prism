@@ -19,7 +19,7 @@
 5. `encode(camera, encoder)`：非空帧未上传当前 camera/count 时返回 `CameraNotUploaded`，不修改 encoder。成功时无上传、submit、wait、map、readback 或新建 GPU 资源。
 6. 下游读取 compact/record 或绘制，然后由调用方提交 encoder。
 
-必须先提交本帧，再在同一 resident 对象上上传或 encode 下一帧。`Queue::write_buffer` 在下一次提交前执行，不是按它在 encoder 之间的调用位置执行；因此不能先录制多个不同 camera/count 的 encoder，最后一起提交。连续逐帧提交不要求主机等待 GPU。宿主负责 scene/sector 到 dense slot 的成员映射、卸载时交换压紧及固定容量不足时的预算/驱逐策略；本 API 不另建内容真相或替宿主选择策略。
+必须先提交本帧，再在同一 resident 对象上上传或 encode 下一帧。`Queue::write_buffer` 在下一次提交前执行，不是按它在 encoder 之间的调用位置执行；因此不能先录制多个不同 camera/count 的 encoder，最后一起提交。连续逐帧提交不要求主机等待 GPU。`GpuSectorProxies`/`ProxyRegistry` 已提供 sector 到 dense slot 的成员映射、代际 handle、卸载交换压紧及 dirty range 上传，`ProxyCellHost` 将其接入 coordinator 的宿主生命周期；固定容量不足时仍由宿主选择预算/驱逐策略。低层 resident API 不另建内容真相或替宿主选择策略。
 
 compact 输出是原始槽位，不是 proxy ID；不同 proxy 可重复 ID。有效区间仅为 indirect `instanceCount` 前缀，顺序无保证；旧尾部与 active count 以外的 visibility records 不属于本帧。参数为 `[vertex_count, visible_count, 0, 0]`，支持一个非索引实例 draw，不是任意多材质/多网格 draw-command 分桶。空帧也在 encoder 内清零 instance count，不产生零 workgroup dispatch。
 
@@ -41,7 +41,7 @@ cargo test --offline -p prism_world_gpu --features gpu --lib -j1
 WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo bench --offline -p prism_world_gpu --features gpu --bench resident_visibility -j1
 ```
 
-本次为避免无关 terrain→Mesh→asset/ECS 的 dev-dependency 闭包，使用 `/private/tmp/prism-world-resident-Uswnyn/Cargo.toml` 独立 consumer harness，以路径依赖真实 `prism_world_gpu/gpu` 并把上述原始测试/bench 源码注册为显式 target；没有替换被测模块或使用 mock GPU。库原始 `src/lib.rs` 另注册为 `world_gpu_unit` 测试 target。验证时关闭 incremental/debug info、离线单 job。实际运行结果：库单测 7 项、visibility shader validation 1 项、真实 parity 1 项、resident 3 项全部通过，0 忽略。独立 harness all-target clippy 与正常 workspace 的 GPU 库 clippy 均通过 `-D warnings`。
+初次验证为避免无关 terrain→Mesh→asset/ECS 的 dev-dependency 闭包，使用独立 consumer harness，以路径依赖真实 `prism_world_gpu/gpu` 并把上述原始测试/bench 源码注册为显式 target；没有替换被测模块或使用 mock GPU。库原始 `src/lib.rs` 另注册为 `world_gpu_unit` 测试 target。初次实际运行结果为库单测 7 项、visibility shader validation 1 项、真实 parity 1 项、resident 3 项全部通过，0 忽略；独立 harness all-target clippy 与正常 workspace 的 GPU 库 clippy 均通过 `-D warnings`。后续 sector 生命周期增量、真实文件同场回归及独立 CPU registry 性能证据见 `prism_world_sector_proxies_zh.md`，不将下表旧基准扩展为新 wrapper 的性能。
 
 resident 覆盖 0/1/63/64/65/128/129 dense count、阈值与球面边界、重复 ID、全部规范 record/compact 集合、尾部/中间增量更新、非法输入不局部写入、camera/count 上传先决条件、无主机等待的逐帧提交与归零、零容量、固定 buffer 身份及真实间接绘制前后像素。shader validation 不要求 GPU；其余两个 resident 测试要求物理 GPU。此处实际验证 Metal，不推导 Vulkan/DX12 已通过。
 
@@ -59,4 +59,4 @@ benchmark 生成确定性 75% 可见数据；每档一次上传，8 次预热、
 
 ## 不扩大的验收结论
 
-已验证固定容量驻留、增量上传、GPU 视锥/距离/误差 LOD、compact 与真实单 draw 消费，且生产 encode 零回读。尚未接入产品 render graph/WorldCoordinator 的 sector 生命周期，也未实现 GPU 散布生成、HZB 遮挡、密度/风/交互场、多 draw 分桶、LOD 连续几何切换、虚拟几何/纹理或 GPU 直传。这些仍须各自实现并进行端到端验收；不能以本切片宣布 M4 或整个 world 系统完成。
+已验证固定容量驻留、增量上传、GPU 视锥/距离/误差 LOD、compact 与真实单 draw 消费，且生产 encode 零回读。sector ownership、coordinator/host 生命周期与真实间接绘制已通过 `GpuSectorProxies`/`ProxyCellHost` 接通，见 `prism_world_sector_proxies_zh.md`。产品 scene/ECS decoder/render graph、GPU 散布生成、HZB 遮挡、密度/风/交互场、多 draw 分桶、LOD 连续几何切换、虚拟几何/纹理或 GPU 直传仍须各自实现并进行端到端验收；不能以本切片宣布 M4 或整个 world 系统完成。

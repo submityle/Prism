@@ -13,12 +13,14 @@
 
 mod contract;
 mod packing;
+mod registry;
 
 pub use contract::{
     Cluster, FrustumPlane, ProxyInstance, VisibilityInput, VisibilityOutput, ERROR_QUANTUM,
     LOD_THRESHOLDS,
 };
 pub use packing::{ClusterSoa, ProxySoa, SoaBufferPack};
+pub use registry::{ProxyHandle, ProxyRegistry, ProxyRegistryError};
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -27,10 +29,16 @@ pub mod gpu;
 pub mod resident;
 
 #[cfg(feature = "gpu")]
+mod sector_proxies;
+
+#[cfg(feature = "gpu")]
 pub use gpu::{AdapterEvidence, GpuAcquireError, GpuContext, GpuVisibility};
 
 #[cfg(feature = "gpu")]
 pub use resident::{GpuResidentError, GpuResidentVisibility};
+
+#[cfg(feature = "gpu")]
+pub use sector_proxies::{GpuSectorProxies, GpuSectorProxyError, ProxyUploadStats};
 
 #[cfg(test)]
 mod tests {

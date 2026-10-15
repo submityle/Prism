@@ -393,7 +393,10 @@ fn require_limit(
     }
 }
 
-fn validate_capacity(capacity: usize, limits: &wgpu::Limits) -> Result<(), GpuResidentError> {
+pub(crate) fn validate_capacity(
+    capacity: usize,
+    limits: &wgpu::Limits,
+) -> Result<(), GpuResidentError> {
     let count = u32::try_from(capacity).map_err(|_| GpuResidentError::ArithmeticOverflow)?;
     let slots = u64::from(count.max(1));
     let largest = slots

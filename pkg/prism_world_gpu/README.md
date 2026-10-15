@@ -21,6 +21,21 @@ every canonical word and the unquantized error against the CPU golden.
 `ClusterSoa` preserves geometric error as float bits in its fourth span word;
 its bounds column contains centre and radius.
 
+`ProxyRegistry` adds bounded sector ownership, stable generational handles,
+swap-remove dense compaction, and dirty ranges without enabling a GPU backend.
+Proxy and sector counts have independent budgets, including empty sectors.
+`GpuSectorProxies` couples that registry to fixed `GpuResidentVisibility`
+buffers and pre-reserved SoA scratch. Uploads transpose only dirty ranges;
+unchanged upload is O(1), while changed upload scans the active N rows and
+transposes K dirty rows in O(N + K). Rendering rejects unuploaded edits or a
+replaced registry. Production upload/encode never submit, wait, or read back.
+
+`prism_world_runtime/proxy_host` decorates a caller-owned scene host and decoder
+with this registry's lifecycle, without enabling wgpu. Load failures compensate
+only derived proxy insertion, not partial authoritative-host changes. See
+`docs/prism_world_sector_proxies_zh.md` for budgets, call ordering, failure
+semantics, real file/coordinator-to-indirect-pixel evidence, and CPU benchmarks.
+
 ## Verification
 
 CPU-only contract and packing tests:
@@ -35,6 +50,7 @@ WGSL parse/validation and real backend tests:
 ```text
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test wgsl_compile
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test gpu_parity -- --nocapture
+cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test resident_visibility -- --nocapture
 ```
 
 The parity test is a strict real-device gate: missing adapter/device acquisition

@@ -5,9 +5,11 @@
 use std::collections::BTreeSet;
 
 use prism_world_gpu::{
-    FrustumPlane, GpuContext, GpuResidentError, GpuResidentVisibility, ProxyInstance, ProxySoa,
+    FrustumPlane, GpuContext, GpuResidentError, GpuResidentVisibility, GpuSectorProxies,
+    GpuSectorProxyError, ProxyInstance, ProxyRegistry, ProxyRegistryError, ProxySoa,
     VisibilityInput,
 };
+use prism_world_stream::SectorId;
 
 fn gpu_context() -> GpuContext {
     let ctx = GpuContext::try_headless()
@@ -463,6 +465,28 @@ impl DrawHarness {
         let mut encoder = ctx.device().create_command_encoder(&Default::default());
         resident.write_camera(camera()).unwrap();
         resident.encode(camera(), &mut encoder).unwrap();
+        self.finish_draw(ctx, resident, encoder, proxies)
+    }
+
+    fn draw_sector(&self, ctx: &GpuContext, sector: &mut GpuSectorProxies) -> Vec<u8> {
+        let mut encoder = ctx.device().create_command_encoder(&Default::default());
+        sector.write_camera(camera()).unwrap();
+        sector.encode(camera(), &mut encoder).unwrap();
+        self.finish_draw(
+            ctx,
+            sector.resident().unwrap(),
+            encoder,
+            sector.registry().proxies(),
+        )
+    }
+
+    fn finish_draw(
+        &self,
+        ctx: &GpuContext,
+        resident: &GpuResidentVisibility,
+        mut encoder: wgpu::CommandEncoder,
+        proxies: &[ProxyInstance],
+    ) -> Vec<u8> {
         let view = self.target.create_view(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -576,4 +600,465 @@ fn compact_and_test_draw_shaders_validate_without_a_device() {
         .validate(&module)
         .expect("resident WGSL validates");
     }
+}
+
+#[test]
+fn sector_upload_compaction_stale_handles_and_unload_drive_real_pixels() {
+    let ctx = gpu_context();
+    let mut sector = GpuSectorProxies::new(&ctx, 4, 3).unwrap();
+    let draw = DrawHarness::new(&ctx, sector.resident().unwrap());
+    let a = SectorId::new(0, 0, 0, 0);
+    let b = SectorId::new(0, 1, 0, 0);
+    let c = SectorId::new(0, 2, 0, 0);
+    let hidden = ProxyInstance::new(70, 0, [100.0, 0.0, 0.0], 0.0, 1.0, 100.0);
+    let visible = ProxyInstance::new(71, 0, [0.0, 0.0, 1.0], 0.0, 1.0, 100.0);
+    let ah = sector
+        .registry_mut()
+        .insert_sector(a, &[hidden, visible])
+        .unwrap();
+    let bh = sector
+        .registry_mut()
+        .insert_sector(b, &[hidden, visible])
+        .unwrap();
+    let mut encoder = ctx.device().create_command_encoder(&Default::default());
+    assert!(matches!(
+        sector.encode(camera(), &mut encoder),
+        Err(GpuSectorProxyError::PendingUpload)
+    ));
+    assert!(matches!(
+        sector.write_camera(camera()),
+        Err(GpuSectorProxyError::PendingUpload)
+    ));
+    assert!(matches!(
+        sector.resident(),
+        Err(GpuSectorProxyError::PendingUpload)
+    ));
+    drop(encoder);
+    let full = sector.upload().unwrap();
+    assert_eq!(
+        (
+            full.ranges,
+            full.proxies,
+            full.column_bytes,
+            full.dense_count
+        ),
+        (1, 4, 192, 4)
+    );
+    let buffers = (
+        sector.resident().unwrap().indirect_args() as *const wgpu::Buffer,
+        sector.resident().unwrap().compact_indices() as *const wgpu::Buffer,
+        sector.resident().unwrap().visibility_records() as *const wgpu::Buffer,
+    );
+    let initial = draw.draw_sector(&ctx, &mut sector);
+    assert_eq!(pixel(&initial, 16, 32), &[0, 255, 0, 255]);
+    assert_eq!(pixel(&initial, 48, 32), &[255, 0, 0, 255]);
+    assert_eq!(sector.upload().unwrap().column_bytes, 0);
+    assert_eq!(draw.draw_sector(&ctx, &mut sector), initial);
+
+    // Rejected mutations do not invalidate the synchronized GPU contents.
+    assert!(matches!(
+        sector.registry_mut().insert_sector(c, &[hidden]),
+        Err(ProxyRegistryError::CapacityExceeded { .. })
+    ));
+    let mut invalid = hidden;
+    invalid.position[0] = f32::NAN;
+    assert!(matches!(
+        sector.registry_mut().update(ah[0], invalid),
+        Err(ProxyRegistryError::InvalidProxy { .. })
+    ));
+    assert!(!sector.registry().has_pending_uploads());
+    assert_eq!(draw.draw_sector(&ctx, &mut sector), initial);
+
+    // Two disjoint rows are uploaded as two ranges; no untouched rows copied.
+    let mut changed = hidden;
+    changed.flags = 8;
+    sector.registry_mut().update(ah[0], changed).unwrap();
+    sector.registry_mut().update(bh[0], changed).unwrap();
+    let sparse = sector.upload().unwrap();
+    assert_eq!(
+        (sparse.ranges, sparse.proxies, sparse.column_bytes),
+        (2, 2, 96)
+    );
+    assert_eq!(draw.draw_sector(&ctx, &mut sector), initial);
+
+    // Sector B survives two swap-removes with unchanged stable handles/IDs.
+    assert!(sector.registry_mut().remove_sector(a));
+    assert_eq!(sector.registry().dense_slot(bh[1]), Some(0));
+    assert_eq!(sector.registry().dense_slot(bh[0]), Some(1));
+    assert!(sector.registry().get(ah[0]).is_none());
+    let compact = sector.upload().unwrap();
+    assert_eq!(
+        (compact.ranges, compact.proxies, compact.dense_count),
+        (1, 2, 2)
+    );
+    let moved = draw.draw_sector(&ctx, &mut sector);
+    assert_eq!(pixel(&moved, 16, 32), &[0, 0, 0, 255]);
+    assert_eq!(pixel(&moved, 48, 32), &[0, 0, 0, 255]);
+    assert_eq!(pixel(&moved, 0, 32), &[0, 0, 255, 255]);
+
+    // A recycled slot cannot be changed through the old sector's handle.
+    let ch = sector.registry_mut().insert_sector(c, &[visible]).unwrap();
+    assert!(ah.iter().any(|old| old.slot() == ch[0].slot()));
+    assert!(matches!(
+        sector.registry_mut().update(ah[0], hidden),
+        Err(ProxyRegistryError::InvalidHandle { .. })
+    ));
+    assert_eq!(sector.upload().unwrap().proxies, 1);
+    let added = draw.draw_sector(&ctx, &mut sector);
+    assert_eq!(pixel(&added, 32, 32), &[0, 0, 255, 255]);
+
+    // Tail-only unload has no dirty rows, but must still update the draw count.
+    assert!(sector.registry_mut().remove_sector(c));
+    assert_eq!(sector.registry().dirty_ranges().count(), 0);
+    assert!(sector.registry().has_pending_uploads());
+    let tail = sector.upload().unwrap();
+    assert_eq!((tail.ranges, tail.proxies, tail.dense_count), (0, 0, 2));
+    assert_eq!(draw.draw_sector(&ctx, &mut sector), moved);
+    assert!(sector.registry_mut().remove_sector(b));
+    let empty = sector.upload().unwrap();
+    assert_eq!((empty.ranges, empty.proxies, empty.dense_count), (0, 0, 0));
+    assert!(draw
+        .draw_sector(&ctx, &mut sector)
+        .chunks_exact(4)
+        .all(|rgba| rgba == [0, 0, 0, 255]));
+    assert_eq!(
+        buffers,
+        (
+            sector.resident().unwrap().indirect_args() as *const wgpu::Buffer,
+            sector.resident().unwrap().compact_indices() as *const wgpu::Buffer,
+            sector.resident().unwrap().visibility_records() as *const wgpu::Buffer,
+        )
+    );
+
+    let mut zero = GpuSectorProxies::new(&ctx, 0, 3).unwrap();
+    assert_eq!(zero.registry().sector_capacity(), 1);
+    zero.registry_mut().insert_sector(a, &[]).unwrap();
+    assert!(matches!(
+        zero.registry_mut().insert_sector(b, &[]),
+        Err(ProxyRegistryError::SectorCapacityExceeded { capacity: 1 })
+    ));
+    assert!(!zero.registry().has_pending_uploads());
+    assert_eq!(zero.upload().unwrap().dense_count, 0);
+    let draw_zero = DrawHarness::new(&ctx, zero.resident().unwrap());
+    assert!(draw_zero
+        .draw_sector(&ctx, &mut zero)
+        .chunks_exact(4)
+        .all(|rgba| rgba == [0, 0, 0, 255]));
+    let mut no_sectors = GpuSectorProxies::with_sector_capacity(&ctx, 1, 0, 3).unwrap();
+    assert!(matches!(
+        no_sectors.registry_mut().insert_sector(a, &[]),
+        Err(ProxyRegistryError::SectorCapacityExceeded { capacity: 0 })
+    ));
+    // Device limits are rejected before attempting any large CPU allocation.
+    assert!(matches!(
+        GpuSectorProxies::new(&ctx, usize::MAX, 3),
+        Err(GpuSectorProxyError::Resident(
+            GpuResidentError::ArithmeticOverflow
+        ))
+    ));
+    // Replacing a mutable registry cannot bypass pending tracking or capacity.
+    // Hold the original identity alive, including its now-stale CPU/GPU state.
+    let original = std::mem::replace(sector.registry_mut(), ProxyRegistry::new(4).unwrap());
+    assert!(matches!(
+        sector.upload(),
+        Err(GpuSectorProxyError::RegistryReplaced)
+    ));
+    assert!(matches!(
+        sector.resident(),
+        Err(GpuSectorProxyError::RegistryReplaced)
+    ));
+    assert!(matches!(
+        sector.write_camera(camera()),
+        Err(GpuSectorProxyError::RegistryReplaced)
+    ));
+    let mut encoder = ctx.device().create_command_encoder(&Default::default());
+    assert!(matches!(
+        sector.encode(camera(), &mut encoder),
+        Err(GpuSectorProxyError::RegistryReplaced)
+    ));
+    // Restoring the actual original registry preserves the valid association.
+    *sector.registry_mut() = original;
+    assert_eq!(sector.upload().unwrap().proxies, 0);
+}
+
+#[test]
+fn coordinator_cell_host_upload_and_indirect_draw_share_sector_lifecycle() {
+    use prism_world_runtime::{
+        CancellationToken, CellProvider, CellReadRequest, LoadedCell, ManifestHeader,
+        ProxyCellHost, SceneHost, TraceEvent, WorldFrameCoordinator, CELL_HEADER_SIZE,
+    };
+    use prism_world_stream::{AabbI64, CellManifest, DemandSource, GlobalPos, StreamBudget};
+
+    struct Provider(Vec<u8>);
+    impl CellProvider for Provider {
+        type Error = std::convert::Infallible;
+        fn read_cell(
+            &self,
+            _: &CellReadRequest,
+            cancel: CancellationToken,
+        ) -> Result<Vec<u8>, Self::Error> {
+            assert!(!cancel.is_cancelled());
+            Ok(self.0.clone())
+        }
+    }
+    #[derive(Default)]
+    struct Host {
+        loaded: BTreeSet<SectorId>,
+    }
+    impl SceneHost for Host {
+        type Error = std::convert::Infallible;
+        fn load_cell(
+            &mut self,
+            manifest: &CellManifest,
+            payload: &[u8],
+        ) -> Result<(), Self::Error> {
+            assert_eq!(payload, b"derived fixture");
+            assert!(self.loaded.insert(manifest.sector));
+            Ok(())
+        }
+        fn evict_cell(&mut self, sector: SectorId) -> Result<(), Self::Error> {
+            assert!(self.loaded.remove(&sector));
+            Ok(())
+        }
+    }
+    let manifest = CellManifest {
+        sector: SectorId::new(0, -1, 2, 0),
+        bounds: AabbI64::new(GlobalPos::new(-1, 0, 0), GlobalPos::new(1, 1, 1)).unwrap(),
+        scene_key: 42,
+        content_version: 9,
+        derived_hash: 27,
+        io_bytes: (CELL_HEADER_SIZE + b"derived fixture".len()) as u64,
+    };
+    let mut bytes = ManifestHeader::from_manifest(manifest).encode();
+    bytes.extend_from_slice(b"derived fixture");
+    let mut coordinator = WorldFrameCoordinator::new(Provider(bytes), 1).unwrap();
+    let mut host = Host::default();
+    let ctx = gpu_context();
+    let mut sector = GpuSectorProxies::new(&ctx, 2, 3).unwrap();
+    let draw = DrawHarness::new(&ctx, sector.resident().unwrap());
+    let decoder = |m: &CellManifest,
+                   payload: &[u8]|
+     -> Result<Vec<ProxyInstance>, std::convert::Infallible> {
+        assert_eq!(*m, manifest);
+        assert_eq!(payload, b"derived fixture");
+        Ok(vec![
+            ProxyInstance::new(13, 0, [100.0, 0.0, 0.0], 0.0, 1.0, 100.0),
+            ProxyInstance::new(14, 0, [0.0, 0.0, 1.0], 0.0, 1.0, 100.0),
+        ])
+    };
+    let budget = StreamBudget {
+        io_bytes: manifest.io_bytes,
+        max_actions: 1,
+    };
+    {
+        let mut coupled = ProxyCellHost::new(&mut host, sector.registry_mut(), decoder);
+        let report = coordinator.plan_frame(
+            &[DemandSource::new(manifest.sector, 0, 1, 10).unwrap()],
+            &[manifest],
+            &[],
+            budget,
+            &mut coupled,
+        );
+        assert_eq!((report.submitted, report.failed), (1, 0));
+        assert!(coordinator.poll_io(&mut coupled));
+    }
+    assert!(host.loaded.contains(&manifest.sector));
+    assert_eq!(sector.upload().unwrap().proxies, 2);
+    let visible = draw.draw_sector(&ctx, &mut sector);
+    assert_eq!(pixel(&visible, 16, 32), &[0, 255, 0, 255]);
+    let handles = sector
+        .registry()
+        .sector_handles(manifest.sector)
+        .unwrap()
+        .to_vec();
+    // Eviction originates in the real stream policy, not a manual registry edit.
+    {
+        let mut coupled = ProxyCellHost::new(&mut host, sector.registry_mut(), decoder);
+        let report = coordinator.plan_frame(
+            &[],
+            &[manifest],
+            &[LoadedCell::new(manifest)],
+            budget,
+            &mut coupled,
+        );
+        assert_eq!((report.actions, report.failed), (1, 0));
+    }
+    assert!(host.loaded.is_empty());
+    assert!(handles
+        .iter()
+        .all(|&handle| sector.registry().get(handle).is_none()));
+    assert_eq!(sector.upload().unwrap().dense_count, 0);
+    assert!(draw
+        .draw_sector(&ctx, &mut sector)
+        .chunks_exact(4)
+        .all(|rgba| rgba == [0, 0, 0, 255]));
+    assert!(coordinator.trace().as_slice().iter().any(
+        |event| matches!(event, TraceEvent::Loaded { sector, .. } if *sector == manifest.sector)
+    ));
+    assert!(coordinator.trace().as_slice().iter().any(
+        |event| matches!(event, TraceEvent::Evicted { sector, .. } if *sector == manifest.sector)
+    ));
+    assert_eq!(coordinator.trace().replay(), Ok(2));
+}
+
+#[test]
+fn packed_file_validation_gates_sector_upload_and_real_indirect_pixels() {
+    use prism_world_runtime::{
+        CellReadRequest, FailureStage, FileCellProvider, LoadedCell, ManifestHeader, ProxyCellHost,
+        SceneHost, TraceEvent, WorldFrameCoordinator, CELL_HEADER_SIZE,
+    };
+    use prism_world_stream::{AabbI64, CellManifest, DemandSource, GlobalPos, StreamBudget};
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Archive(PathBuf);
+    impl Archive {
+        fn new(bytes: &[u8]) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "prism_world_gpu_archive_{}_{}.bin",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let archive = Self(path);
+            file.write_all(bytes).unwrap();
+            archive
+        }
+    }
+    impl Drop for Archive {
+        fn drop(&mut self) {
+            match std::fs::remove_file(&self.0) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("archive cleanup: {error}"),
+            }
+        }
+    }
+    #[derive(Default)]
+    struct Host(BTreeSet<SectorId>);
+    impl SceneHost for Host {
+        type Error = std::convert::Infallible;
+        fn load_cell(&mut self, m: &CellManifest, payload: &[u8]) -> Result<(), Self::Error> {
+            assert_eq!(payload, b"visible file cell");
+            assert!(self.0.insert(m.sector));
+            Ok(())
+        }
+        fn evict_cell(&mut self, sector: SectorId) -> Result<(), Self::Error> {
+            assert!(self.0.remove(&sector));
+            Ok(())
+        }
+    }
+    let payload = b"visible file cell";
+    let manifests: Vec<_> = (0..3)
+        .map(|index| CellManifest {
+            sector: SectorId::new(0, index, 0, 0),
+            bounds: AabbI64::new(GlobalPos::new(index, 0, 0), GlobalPos::new(index + 1, 1, 1))
+                .unwrap(),
+            scene_key: index as u128,
+            content_version: 7,
+            derived_hash: 83,
+            io_bytes: (CELL_HEADER_SIZE + payload.len()) as u64,
+        })
+        .collect();
+    let mut packed = b"archive prefix".to_vec();
+    let mut requests = Vec::new();
+    for (index, &manifest) in manifests.iter().enumerate() {
+        let mut header = manifest;
+        if index == 2 {
+            header.content_version += 1;
+        }
+        let mut bytes = ManifestHeader::from_manifest(header).encode();
+        bytes.extend_from_slice(payload);
+        requests.push(
+            CellReadRequest::new(manifest, 0)
+                .with_byte_offset(packed.len() as u64)
+                .with_expected_checksum(prism_world_io::checksum(&bytes) ^ u64::from(index == 1)),
+        );
+        packed.extend_from_slice(&bytes);
+        packed.extend_from_slice(b"range gap");
+    }
+    let file = Archive::new(&packed);
+    // Seven-byte chunks split every fixed header; only one physical read is active.
+    let mut provider = FileCellProvider::with_chunk_size(&file.0, 1, 3, 7).unwrap();
+    for request in requests {
+        assert!(provider.register(request).unwrap().is_none());
+    }
+    let mut coordinator = WorldFrameCoordinator::new(provider, 3).unwrap();
+    let mut host = Host::default();
+    let ctx = gpu_context();
+    let mut sector = GpuSectorProxies::with_sector_capacity(&ctx, 2, 1, 3).unwrap();
+    let draw = DrawHarness::new(&ctx, sector.resident().unwrap());
+    let decoder =
+        |m: &CellManifest, data: &[u8]| -> Result<Vec<ProxyInstance>, std::convert::Infallible> {
+            assert_eq!(*m, manifests[0]);
+            assert_eq!(data, payload);
+            Ok(vec![
+                ProxyInstance::new(31, 0, [100.0, 0.0, 0.0], 0.0, 1.0, 100.0),
+                ProxyInstance::new(32, 0, [0.0, 0.0, 1.0], 0.0, 1.0, 100.0),
+            ])
+        };
+    let demands: Vec<_> = manifests
+        .iter()
+        .map(|m| DemandSource::new(m.sector, 0, 1, 10).unwrap())
+        .collect();
+    let budget = StreamBudget {
+        io_bytes: manifests.iter().map(|m| m.io_bytes).sum(),
+        max_actions: 3,
+    };
+    {
+        let mut coupled = ProxyCellHost::new(&mut host, sector.registry_mut(), decoder);
+        let report = coordinator.plan_frame(&demands, &manifests, &[], budget, &mut coupled);
+        assert_eq!((report.submitted, report.failed), (3, 0));
+        for _ in &manifests {
+            assert!(coordinator.poll_io(&mut coupled));
+        }
+        assert!(!coordinator.poll_io(&mut coupled));
+    }
+    assert_eq!(coordinator.in_flight(), 0);
+    assert_eq!(host.0, BTreeSet::from([manifests[0].sector]));
+    assert_eq!(sector.registry().sector_count(), 1);
+    assert_eq!(sector.registry().len(), 2);
+    for (manifest, expected) in manifests[1..]
+        .iter()
+        .zip([FailureStage::Provider, FailureStage::ManifestHeader])
+    {
+        assert!(coordinator
+            .trace()
+            .as_slice()
+            .iter()
+            .any(|event| matches!(event,
+                TraceEvent::Failed { sector, stage, .. }
+                    if *sector == manifest.sector && *stage == expected
+            )));
+    }
+    assert_eq!(sector.upload().unwrap().column_bytes, 96);
+    let image = draw.draw_sector(&ctx, &mut sector);
+    assert_eq!(pixel(&image, 16, 32), &[0, 255, 0, 255]);
+    assert_eq!(pixel(&image, 48, 32), &[0, 0, 0, 255]);
+    assert_eq!(coordinator.trace().replay(), Ok(1));
+    {
+        let mut coupled = ProxyCellHost::new(&mut host, sector.registry_mut(), decoder);
+        let report = coordinator.plan_frame(
+            &[],
+            &manifests,
+            &[LoadedCell::new(manifests[0])],
+            budget,
+            &mut coupled,
+        );
+        assert_eq!((report.actions, report.failed), (1, 0));
+    }
+    assert!(host.0.is_empty());
+    assert_eq!(sector.upload().unwrap().dense_count, 0);
+    assert!(draw
+        .draw_sector(&ctx, &mut sector)
+        .chunks_exact(4)
+        .all(|rgba| rgba == [0, 0, 0, 255]));
+    assert_eq!(coordinator.trace().replay(), Ok(2));
 }

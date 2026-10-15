@@ -11,6 +11,7 @@ default = []
 gpu = ["dep:bytemuck", "dep:futures-lite", "dep:wgpu"]
 
 [dependencies]
+prism_world_stream = { path = "../prism_world_stream", default-features = false }
 bytemuck = { version = "1.5", features = ["derive"], optional = true }
 futures-lite = { version = "2", optional = true }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12"], optional = true }
@@ -19,9 +20,15 @@ wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", 
 bytemuck = { version = "1.5", features = ["derive"] }
 futures-lite = "2"
 prism_world_terrain = { path = "../prism_world_terrain", features = ["mesh"] }
+prism_world_runtime = { path = "../prism_world_runtime", features = ["proxy_host"] }
+prism_world_io = { path = "../prism_world_io", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12"] }
 
 [[bench]]
 name = "resident_visibility"
 harness = false
 required-features = ["gpu"]
+
+[[bench]]
+name = "registry"
+harness = false

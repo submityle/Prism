@@ -13,7 +13,7 @@
 > - **全局距离场**：UE Global Distance Field / Lumen SDF（稀疏 brick + mip 环，一场多用）
 > 本文为纯经典数据结构 + 空间算法 + 流送调度路线（Morton/Hilbert、四叉/八叉树、CDLOD/clipmap、Transvoxel/Dual Contouring/SDF、domain warp 噪声、水力/热力侵蚀 PDE、泊松盘/蓝噪声、D8 流向、并查集、CRDT），**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/其他引擎源码或衍生代码。
 
-- 版本： v3.11（任务 Future、cell 路由和 IO scheduler 共享同一动态 PriorityCell，逐 native chunk 采样 kernel hint，并验证准入/取消/场景 host 链路与排队深度开销；已有宿主原生 reactor、固定容量 GPU proxy 驻留/间接绘制、CPU 散布、行星网格和有界 SDF。动态优先级不抢占活动读取，物理槽等待仍为 FIFO；完整 GPU world scene/散布、资产解压/GPU 直传、多表示产品接线、LOD 接缝和真实加密传输仍需运行时验收，证据见实现记录与 prism_world_shared_priority_zh.md）
+- 版本： v3.12（新增独立 sector/代理预算、代际 handle、卸载交换压紧、dirty range 增量驻留和 header 后的 ProxyCellHost 接缝，已接通 coordinator/宿主生命周期与真实 Metal 间接绘制像素验证；已有共享动态 PriorityCell、宿主原生 reactor、CPU 散布、行星网格和有界 SDF。无变化上传 O(1)，改变后扫描/转置为 O(N + K)，不宣称总计 O(K)；产品 scene/ECS decoder/render graph、完整 GPU 散布、资产解压/GPU 直传、多表示产品接线、LOD 接缝和真实加密传输仍须独立验收，证据见实现记录与 prism_world_sector_proxies_zh.md）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（作者内容单元 / spawn·despawn·materialize API / override delta / PersistentId，见 `prism_scene_design_zh.md`）、`prism_asset`（`StableGuid`/软引用/依赖闭包/单文件包/mmap/内容寻址）、`prism_ecs`（物化边界的批量预留/列写入）、`prism_transform`（层级）、`prism_tasks`（并行流送/烘焙）、`prism_math`（定点/空间编码/噪声）、`prism_diagnostic`（计数器/trace）；向上接 `prism_render`/`prism_physics`/`prism_gi`（经 GPU 常驻实例流 + ECS 物化两个边界，均已去 Bevy）
 - 层级定位： 基座层 L6；下接 `prism_scene`/`prism_asset`/`prism_ecs`，上驱动渲染/物理/GI；与 `prism_terrain_world_design_zh.md`（地形多表示细节）互为上下位

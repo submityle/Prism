@@ -27,6 +27,8 @@ mod file_provider;
 mod io_adapter;
 #[cfg(feature = "tasks")]
 mod priority_cell_io;
+#[cfg(feature = "proxy_host")]
+mod proxy_cell_host;
 #[cfg(all(feature = "reactor", unix))]
 mod reactor_cell_io;
 #[cfg(feature = "std")]
@@ -40,6 +42,8 @@ mod threaded_cell_io;
 mod file_provider_tests;
 #[cfg(all(test, feature = "tasks"))]
 mod priority_cell_io_tests;
+#[cfg(all(test, feature = "proxy_host"))]
+mod proxy_cell_host_tests;
 #[cfg(all(test, feature = "reactor", unix))]
 mod reactor_cell_io_tests;
 #[cfg(all(test, feature = "std"))]
@@ -53,6 +57,8 @@ pub use file_provider::FileCellProvider;
 pub use io_adapter::{IoAdapterEvent, IoByteLimits, IoRequestId, IoSchedulerAdapter};
 #[cfg(feature = "tasks")]
 pub use priority_cell_io::{PrioritizedCellIo, PriorityCellIo};
+#[cfg(feature = "proxy_host")]
+pub use proxy_cell_host::{CellProxyDecoder, ProxyCellHost, ProxyCellHostError};
 #[cfg(all(feature = "reactor", unix))]
 pub use reactor_cell_io::ReactorCellIo;
 #[cfg(feature = "std")]
