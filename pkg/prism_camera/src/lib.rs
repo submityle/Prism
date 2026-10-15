@@ -49,7 +49,15 @@ pub use advanced::{FocusSource, FocusTracker};
 pub use advanced::{HistoryRejectReason, HistoryStabilizer};
 pub use error::{CameraError, CameraErrorCode};
 pub use frustum::{extract_frustum, Frustum, HalfSpace};
-pub use gpu::{GpuViewRecord, VIEW_SCHEMA_VERSION};
+pub use gpu::{
+    GpuViewRecord, GPU_VIEW_OFFSET_CLIP_FROM_WORLD, GPU_VIEW_OFFSET_CLIP_FROM_WORLD_UNJITTERED,
+    GPU_VIEW_OFFSET_EXPOSURE, GPU_VIEW_OFFSET_FLAGS, GPU_VIEW_OFFSET_FRUSTUM,
+    GPU_VIEW_OFFSET_JITTER, GPU_VIEW_OFFSET_PREV_CLIP_FROM_WORLD, GPU_VIEW_OFFSET_SCHEMA_VERSION,
+    GPU_VIEW_OFFSET_VIEW_FROM_WORLD, GPU_VIEW_OFFSET_VIEW_INDEX, GPU_VIEW_OFFSET_VIEWPORT,
+    GPU_VIEW_OFFSET_WORLD_FROM_VIEW, GPU_VIEW_OFFSET_WORLD_ORIGIN_HI,
+    GPU_VIEW_OFFSET_WORLD_ORIGIN_LO, GPU_VIEW_RECORD_ALIGNMENT, GPU_VIEW_RECORD_SIZE,
+    VIEW_SCHEMA_VERSION,
+};
 pub use jitter::{JitterSequence, JitterState};
 pub use lens::Exposure;
 #[cfg(feature = "physical_lens")]

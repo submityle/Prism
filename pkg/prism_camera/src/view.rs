@@ -88,6 +88,7 @@ pub struct ViewData {
     pub frustum: crate::Frustum,
     pub frustum_reverse_z: bool,
     pub frustum_finite_far: bool,
+    pub relative_rendering: bool,
     pub exposure: f32,
     pub viewport_px: ViewportRect,
     pub world_position: DVec3,
@@ -260,6 +261,7 @@ pub fn derive_view(
         frustum,
         frustum_reverse_z: projection.reverse_z(),
         frustum_finite_far: projection.far().is_some(),
+        relative_rendering: intent.relative_rendering,
         exposure,
         viewport_px,
         world_position: pose.position,
@@ -311,7 +313,7 @@ impl ViewData {
                 self.history_valid,
                 self.teleport,
                 self.frustum.count == 6,
-                true,
+                self.relative_rendering,
             ),
             view_index: self.handle.index,
             jitter: GpuViewRecord::jitter(self.jitter),
@@ -385,6 +387,77 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, CameraErrorCode::StaleViewHandle);
+    }
+
+    #[test]
+    fn gpu_relative_flag_matches_camera_intent() {
+        let pose = CameraPose {
+            position: DVec3::new(10.0, 20.0, 30.0),
+            world_origin: DVec3::new(1000.0, 2000.0, 3000.0),
+            ..Default::default()
+        };
+        let mut intent = CameraIntent::default();
+        intent.relative_rendering = false;
+        let view = derive_view(
+            intent,
+            pose,
+            0,
+            [64, 64],
+            &mut ViewHistory::default(),
+        )
+        .unwrap();
+        assert!(!view.relative_rendering);
+        assert_eq!(view.gpu_record().flags & (1 << 3), 0);
+
+        intent.relative_rendering = true;
+        let view = derive_view(
+            intent,
+            pose,
+            0,
+            [64, 64],
+            &mut ViewHistory::default(),
+        )
+        .unwrap();
+        assert!(view.relative_rendering);
+        assert_ne!(view.gpu_record().flags & (1 << 3), 0);
+    }
+
+    #[test]
+    fn relative_rendering_selects_world_origin_for_view_space() {
+        let pose = CameraPose {
+            position: DVec3::new(1010.0, 2020.0, 3030.0),
+            world_origin: DVec3::new(1000.0, 2000.0, 3000.0),
+            ..Default::default()
+        };
+        let mut relative = CameraIntent::default();
+        relative.relative_rendering = true;
+        let relative_view = derive_view(
+            relative,
+            pose,
+            0,
+            [64, 64],
+            &mut ViewHistory::default(),
+        )
+        .unwrap();
+        assert_eq!(relative_view.world_origin, pose.world_origin);
+        assert_eq!(relative_view.world_from_view.translation.x, 10.0);
+        assert_eq!(relative_view.world_from_view.translation.y, 20.0);
+        assert_eq!(relative_view.world_from_view.translation.z, 30.0);
+
+        let mut absolute = relative;
+        absolute.relative_rendering = false;
+        let absolute_view = derive_view(
+            absolute,
+            pose,
+            0,
+            [64, 64],
+            &mut ViewHistory::default(),
+        )
+        .unwrap();
+        assert_eq!(absolute_view.world_origin, DVec3::ZERO);
+        assert_eq!(absolute_view.world_from_view.translation.x, 1010.0);
+        assert_eq!(absolute_view.world_from_view.translation.y, 2020.0);
+        assert_eq!(absolute_view.world_from_view.translation.z, 3030.0);
     }
 
     #[cfg(feature = "physical_lens")]

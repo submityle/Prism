@@ -8,13 +8,117 @@
 
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use prism_app::{App, Plugin, PostUpdate};
+#[cfg(any(feature = "director", feature = "rig"))]
+use prism_ecs::prelude::IntoSystemConfigs;
 use prism_camera::{
     derive_view, publish_view, CameraError, CameraIntent, CameraPose, ViewData, ViewHandle,
     ViewHistory,
 };
-use prism_ecs::prelude::{Bundle, Component, Entity, Query, ResMut, Resource};
+use prism_ecs::prelude::{Bundle, Component, Entity, Query, ResMut, Resource, SystemSet};
 use prism_render_architecture::view_family::{ViewImportance, ViewRegistry};
+
+#[cfg(any(feature = "director", feature = "rig"))]
+use prism_camera_rig as rig;
+
+#[cfg(any(feature = "director", feature = "rig"))]
+pub use prism_camera_rig;
+
+/// Ordered anchors for the camera runtime's PostUpdate pipeline.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
+pub enum CameraSystemSet {
+    /// Clears per-frame diagnostics before runtime evaluation.
+    Prepare,
+    /// Selects and blends virtual cameras into output poses.
+    Director,
+    /// Resolves body, aim, controllers, noise, and impulses into output poses.
+    Rig,
+    /// Derives immutable views and publishes them to the view registry.
+    Publication,
+}
+
+#[cfg(feature = "director")]
+/// ECS-owned virtual-camera candidate. The mathematical candidate remains in
+/// `prism_camera_rig`; this wrapper only gives it entity ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+pub struct VirtualCameraComponent(pub rig::VirtualCamera);
+
+#[cfg(feature = "director")]
+/// ECS director state for one output camera.
+#[derive(Clone, Debug, Component)]
+pub struct CameraBrainComponent {
+    /// Candidate entities, evaluated in this explicit order before the
+    /// director applies its stable priority/key ordering.
+    pub candidates: Vec<Entity>,
+    pub brain: rig::CameraBrain,
+    pub default_pose: CameraPose,
+    pub dt_seconds: f32,
+    scratch: Vec<rig::VirtualCamera>,
+}
+
+#[cfg(feature = "director")]
+impl Default for CameraBrainComponent {
+    fn default() -> Self {
+        Self {
+            candidates: Vec::new(),
+            brain: rig::CameraBrain::default(),
+            default_pose: CameraPose::default(),
+            dt_seconds: 1.0 / 60.0,
+            scratch: Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "director")]
+impl CameraBrainComponent {
+    pub const MAX_CANDIDATES: usize = 64;
+
+    /// Replaces the candidate list while enforcing the bounded hot-path
+    /// contract. The first 64 entities are retained deterministically.
+    pub fn set_candidates<I>(&mut self, candidates: I)
+    where
+        I: IntoIterator<Item = Entity>,
+    {
+        self.candidates.clear();
+        self.candidates.extend(
+            candidates
+                .into_iter()
+                .take(Self::MAX_CANDIDATES),
+        );
+    }
+}
+
+#[cfg(feature = "rig")]
+/// ECS-owned body/aim rig. Physics queries remain an injected concern of the
+/// pure `SceneQuery` API; this component handles the deterministic pose path.
+#[derive(Clone, Debug, Component)]
+pub struct CameraRigComponent {
+    pub body: rig::BodyRig,
+    pub aim: rig::AimRig,
+    pub world_origin: prism_math::DVec3,
+    pub fallback: CameraPose,
+    pub noise: Option<rig::CameraNoise>,
+    pub impulse: Option<rig::Impulse>,
+    pub time_seconds: f32,
+}
+
+#[cfg(feature = "rig")]
+impl Default for CameraRigComponent {
+    fn default() -> Self {
+        Self {
+            body: rig::BodyRig::default(),
+            aim: rig::AimRig::default(),
+            world_origin: prism_math::DVec3::ZERO,
+            fallback: CameraPose::default(),
+            noise: None,
+            impulse: None,
+            time_seconds: 0.0,
+        }
+    }
+}
 
 /// ECS component carrying the engine-neutral camera intent.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
@@ -202,6 +306,7 @@ pub struct PublishedView {
 #[derive(Debug, Default, Resource)]
 pub struct PublishedViews {
     views: Vec<PublishedView>,
+    last_valid: Vec<PublishedView>,
 }
 
 impl PublishedViews {
@@ -229,6 +334,29 @@ impl PublishedViews {
 
     fn push(&mut self, view: PublishedView) {
         self.views.push(view);
+    }
+
+    fn remember_valid(&mut self, view: PublishedView) {
+        if let Some(previous) = self
+            .last_valid
+            .iter_mut()
+            .find(|previous| previous.entity == view.entity)
+        {
+            *previous = view;
+        } else {
+            self.last_valid.push(view);
+        }
+    }
+
+    fn previous(&self, entity: Entity) -> Option<PublishedView> {
+        self.last_valid
+            .iter()
+            .copied()
+            .find(|view| view.entity == entity)
+    }
+
+    fn remove(&mut self, entity: Entity) {
+        self.last_valid.retain(|view| view.entity != entity);
     }
 
     fn sort_deterministically(&mut self) {
@@ -272,6 +400,68 @@ impl CameraDiagnostics {
     }
 }
 
+#[cfg(feature = "director")]
+/// Evaluates every ECS-owned director before view derivation.
+pub fn apply_camera_directors(
+    mut outputs: Query<(
+        &mut CameraPoseComponent,
+        &mut CameraIntentComponent,
+        &mut CameraBrainComponent,
+    )>,
+    candidates: Query<&VirtualCameraComponent>,
+) {
+    for (mut pose, mut intent, mut brain) in outputs.iter_mut() {
+        brain.scratch.clear();
+        for index in 0..brain.candidates.len() {
+            let entity = brain.candidates[index];
+            if let Ok(candidate) = candidates.get(entity) {
+                brain.scratch.push(candidate.0);
+            }
+        }
+        let selected = rig::CameraBrain::choose(&brain.scratch);
+        let dt_seconds = brain.dt_seconds;
+        let default_pose = brain.default_pose;
+        let mut director = brain.brain;
+        let output = director.update(&brain.scratch, dt_seconds, default_pose);
+        brain.brain = director;
+        pose.0 = output;
+        intent.0.lens = selected.and_then(|camera| camera.lens);
+    }
+}
+
+#[cfg(feature = "rig")]
+/// Resolves the pure body/aim path and applies optional deterministic camera
+/// noise and one-shot impulse data before publication.
+pub fn apply_camera_rigs(mut cameras: Query<(&mut CameraPoseComponent, &mut CameraRigComponent)>) {
+    for (mut pose, mut rig_state) in cameras.iter_mut() {
+        let output = rig::compose_rig(
+            rig_state.body,
+            rig_state.aim,
+            rig_state.world_origin,
+            rig_state.fallback,
+        );
+        let mut next_pose = output.pose;
+        if let Some(noise) = rig_state.noise {
+            next_pose = noise.sample(next_pose, rig_state.time_seconds);
+        }
+        if let Some(impulse) = rig_state.impulse {
+            let (impulsed, remaining) = impulse.apply(next_pose, rig_state.dt_seconds());
+            next_pose = impulsed;
+            rig_state.impulse = (remaining.remaining_s > 0.0).then_some(remaining);
+        }
+        rig_state.time_seconds = (rig_state.time_seconds + rig_state.dt_seconds()).max(0.0);
+        rig_state.fallback = next_pose;
+        pose.0 = next_pose;
+    }
+}
+
+#[cfg(feature = "rig")]
+impl CameraRigComponent {
+    fn dt_seconds(&self) -> f32 {
+        1.0 / 60.0
+    }
+}
+
 /// Derives and publishes every camera entity for the current frame.
 pub fn publish_camera_views(
     mut cameras: Query<(
@@ -288,6 +478,7 @@ pub fn publish_camera_views(
     registry.begin_frame();
     published.clear();
     diagnostics.clear();
+    let mut active_entities = Vec::new();
 
     let frame_number = frame.frame;
     let target_size = frame.target_size;
@@ -295,8 +486,10 @@ pub fn publish_camera_views(
         if !intent.0.active {
             history.0.clear();
             registry.remove(entity);
+            published.remove(entity);
             continue;
         }
+        active_entities.push(entity);
 
         match derive_view(intent.0, pose.0, frame_number, target_size, &mut history.0) {
             Ok(mut data) => {
@@ -305,18 +498,38 @@ pub fn publish_camera_views(
                     history.0.clear();
                     registry.remove(entity);
                 } else {
-                    published.push(PublishedView { entity, data });
+                    let view = PublishedView { entity, data };
+                    published.remember_valid(view);
+                    published.push(view);
                 }
             }
             Err(error) => {
                 diagnostics.push(CameraViewError { entity, error });
-                history.0.clear();
-                registry.remove(entity);
+                if let Some(mut previous) = published.previous(entity) {
+                    previous.data.status = prism_camera::ViewStatus::Invalid(error.code);
+                    if registry
+                        .publish(entity, &mut previous.data, intent.0.importance)
+                        .is_ok()
+                    {
+                        published.push(previous);
+                    } else {
+                        history.0.clear();
+                        registry.remove(entity);
+                        published.remove(entity);
+                    }
+                } else {
+                    history.0.clear();
+                    registry.remove(entity);
+                    published.remove(entity);
+                }
             }
         }
     }
     registry.finish_frame();
     published.sort_deterministically();
+    published
+        .last_valid
+        .retain(|previous| active_entities.contains(&previous.entity));
     frame.frame = frame.frame.wrapping_add(1);
 }
 
@@ -345,8 +558,27 @@ impl Plugin for CameraPlugin {
         app.insert_resource(CameraFrame::new(self.target_size))
             .init_resource::<CameraViewRegistry>()
             .init_resource::<PublishedViews>()
-            .init_resource::<CameraDiagnostics>()
-            .add_systems(PostUpdate, publish_camera_views);
+            .init_resource::<CameraDiagnostics>();
+
+        #[cfg(all(feature = "director", feature = "rig"))]
+        app.add_systems(
+            PostUpdate,
+            (
+                apply_camera_directors,
+                apply_camera_rigs,
+                publish_camera_views,
+            )
+                .chain(),
+        );
+        #[cfg(all(feature = "director", not(feature = "rig")))]
+        app.add_systems(
+            PostUpdate,
+            (apply_camera_directors, publish_camera_views).chain(),
+        );
+        #[cfg(all(feature = "rig", not(feature = "director")))]
+        app.add_systems(PostUpdate, (apply_camera_rigs, publish_camera_views).chain());
+        #[cfg(not(any(feature = "director", feature = "rig")))]
+        app.add_systems(PostUpdate, publish_camera_views);
     }
 }
 
@@ -355,6 +587,60 @@ mod tests {
     use super::*;
     use prism_app::App;
     use prism_camera::{CameraErrorCode, ViewKind};
+
+    #[cfg(any(feature = "director", feature = "rig"))]
+    use prism_math::DVec3;
+
+    #[cfg(feature = "director")]
+    #[test]
+    fn director_system_selects_candidate_and_publishes_output_pose() {
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::default());
+        let candidate = app.world_mut().spawn(VirtualCameraComponent(
+            rig::VirtualCamera {
+                key: 7,
+                priority: 10,
+                pose: CameraPose {
+                    position: DVec3::new(3.0, 2.0, 1.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ));
+        let output = app.world_mut().spawn(CameraBundle::default());
+        let mut brain = CameraBrainComponent::default();
+        brain.set_candidates([candidate]);
+        assert!(app.world_mut().insert(output, brain));
+
+        app.update();
+
+        let pose = app.world().get::<CameraPoseComponent>(output).unwrap();
+        assert_eq!(pose.0.position, DVec3::new(3.0, 2.0, 1.0));
+        assert_eq!(app.world().resource::<PublishedViews>().len(), 1);
+    }
+
+    #[cfg(feature = "rig")]
+    #[test]
+    fn rig_system_composes_body_and_aim_before_publication() {
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::default());
+        let output = app.world_mut().spawn(CameraBundle::default());
+        assert!(app.world_mut().insert(
+            output,
+            CameraRigComponent {
+                body: rig::BodyRig::Fixed {
+                    position: DVec3::new(4.0, 5.0, 6.0),
+                },
+                aim: rig::AimRig::default(),
+                ..Default::default()
+            },
+        ));
+
+        app.update();
+
+        let pose = app.world().get::<CameraPoseComponent>(output).unwrap();
+        assert_eq!(pose.0.position, DVec3::new(4.0, 5.0, 6.0));
+    }
 
     #[test]
     fn app_update_publishes_intent_to_view_data_and_reuses_history() {
@@ -427,5 +713,34 @@ mod tests {
 
         assert!(app.world().resource::<PublishedViews>().is_empty());
         assert_eq!(app.world().resource::<CameraViewRegistry>().len(), 0);
+    }
+
+    #[test]
+    fn invalid_update_retains_previous_view_with_structured_status() {
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::default());
+        let entity = app.world_mut().spawn(CameraBundle::default());
+
+        app.update();
+        assert_eq!(app.world().resource::<PublishedViews>().len(), 1);
+
+        assert!(app.world_mut().insert(
+            entity,
+            CameraIntentComponent(CameraIntent {
+                viewport: prism_camera::Viewport::from_pixels([0, 0], [0, 1]),
+                ..CameraIntent::default()
+            }),
+        ));
+        app.update();
+
+        let published = app.world().resource::<PublishedViews>();
+        let view = published.iter().next().expect("previous view is retained");
+        assert_eq!(view.entity, entity);
+        assert_eq!(
+            view.data.status,
+            prism_camera::ViewStatus::Invalid(CameraErrorCode::InvalidViewport)
+        );
+        assert_eq!(app.world().resource::<CameraViewRegistry>().len(), 1);
+        assert_eq!(app.world().resource::<CameraDiagnostics>().errors().len(), 1);
     }
 }
