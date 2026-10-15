@@ -32,6 +32,21 @@ pub enum TransportSecurity {
     Rejected,
 }
 
+/// Endpoint migration capabilities exposed by a concrete transport.
+///
+/// The generic transport seam deliberately does not assume that a provider can
+/// prove path ownership or preserve a peer identity across endpoint changes.
+/// Callers must inspect this capability and use the provider-specific
+/// authorization/control plane before attempting a migration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportMigrationCapability {
+    /// The transport has no endpoint migration operation.
+    Unsupported,
+    /// The provider can atomically rebind an admitted peer identity to a new
+    /// endpoint while retaining its transport object and queued datagrams.
+    IdentityPreservingPeerRebind,
+}
+
 /// The transport provider seam (design §6): bytes out, bytes in.
 ///
 /// A real provider (reliable UDP / QUIC) implements this over a socket; the
@@ -67,6 +82,15 @@ pub trait Transport: Send + Sync {
     fn take_security_error(&mut self) -> Option<SecurityError> {
         None
     }
+
+    /// Whether this provider exposes an endpoint migration operation.
+    ///
+    /// This is only a capability declaration. It is not proof that a new
+    /// endpoint belongs to the peer; authentication and path validation remain
+    /// the caller's responsibility.
+    fn migration_capability(&self) -> TransportMigrationCapability {
+        TransportMigrationCapability::Unsupported
+    }
 }
 
 /// A boxed transport is itself a transport, so a caller can erase the concrete
@@ -94,6 +118,10 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
 
     fn take_security_error(&mut self) -> Option<SecurityError> {
         (**self).take_security_error()
+    }
+
+    fn migration_capability(&self) -> TransportMigrationCapability {
+        (**self).migration_capability()
     }
 }
 

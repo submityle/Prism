@@ -21,7 +21,7 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use crate::transport::{Transport, TransportSecurity};
+use crate::transport::{Transport, TransportMigrationCapability, TransportSecurity};
 
 /// Number of bytes in each endpoint nonce.
 pub const SESSION_NONCE_LEN: usize = 32;
@@ -1364,6 +1364,10 @@ where
 
     fn security_overhead(&self) -> usize {
         DATA_HEADER_LEN.saturating_add(self.provider.max_seal_overhead())
+    }
+
+    fn migration_capability(&self) -> TransportMigrationCapability {
+        self.inner.migration_capability()
     }
 
     fn take_security_error(&mut self) -> Option<SecurityError> {
