@@ -56,6 +56,9 @@
 //! - [`replay`] — bounded, versioned logical event recording with deterministic
 //!   encoding and cursor playback; durable storage and byte-stream integrity
 //!   remain backend concerns.
+//! - [`event_log`] — a bounded provider seam for storing encoded replay events,
+//!   with idempotent append, cursor replay, memory/file providers and explicit
+//!   flush/sync barriers; it does not become a second world-state authority.
 //!
 //! With the `app` feature, [`plugin`] wires replication into a `prism_app` `App`
 //! as plugins (design §25.2): [`ReplicationPlugin`](plugin::ReplicationPlugin) is
@@ -67,7 +70,8 @@
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
-//! they land; nothing here is a stub.
+//! they land; unsupported production providers remain explicit capability/error
+//! contracts rather than being represented by a stub implementation.
 //!
 //! The core is `no_std` + `alloc`.
 //!
@@ -120,6 +124,8 @@ pub mod multiplex;
 pub mod net_diagnostics;
 
 pub mod replay;
+
+pub mod event_log;
 
 pub mod frame;
 
