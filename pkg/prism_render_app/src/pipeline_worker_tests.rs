@@ -1,5 +1,9 @@
 use super::*;
-use prism_render_architecture::shader_package::{PipelineReadiness, ShaderPackageId};
+use prism_render_architecture::abi::AbiHash;
+use prism_render_architecture::shader_package::{
+    DeviceFingerprint, GraphicsBackend, PersistLoadError, PersistedPsoCache, PipelineReadiness,
+    PipelineStateHash, PsoCacheKey, ShaderPackageId,
+};
 use prism_render_driver::{
     DeviceDescriptor, Instance, MultisampleState, PrimitiveState, RequestAdapterOptions,
     ShaderModuleId, VertexState,
@@ -8,6 +12,25 @@ use prism_render_driver_null::{NullDevice, NullInstance};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+fn persistence_path(label: &str) -> std::path::PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    std::env::temp_dir().join(format!(
+        "prism-pso-{label}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+fn persistence_fingerprint(driver: u64) -> DeviceFingerprint {
+    DeviceFingerprint::new(
+        GraphicsBackend::Other(7),
+        1,
+        2,
+        driver,
+        AbiHash([3; 32]),
+    )
+}
 
 fn device() -> Arc<NullDevice> {
     let instance = NullInstance::new();
@@ -117,6 +140,230 @@ fn drain(cache: &mut PipelineCache, device: &NullDevice) {
         assert!(Instant::now() < deadline, "worker results did not arrive");
         std::thread::yield_now();
     }
+}
+
+#[test]
+fn finish_pending_admits_successful_worker_results_without_disabling_worker() {
+    let device = device();
+    let compiler = ControlledCompiler::new(device.clone(), None);
+    compiler.release();
+    let mut cache = PipelineCache::with_compiler_config(
+        compiler,
+        PipelineCompileConfig {
+            worker_count: 1,
+            queue_capacity: 1,
+        },
+    );
+    assert!(matches!(
+        request(&mut cache, &device, 1),
+        PipelineResolution::Fallback(_)
+    ));
+    cache.finish_pending(&*device);
+    assert!(request(&mut cache, &device, 1).is_ready());
+    assert!(cache.has_worker());
+    cache.shutdown(&*device);
+}
+
+#[test]
+fn persisted_load_rejects_fingerprint_mismatch_without_poisoning_pending_entries() {
+    let path = persistence_path("fingerprint");
+    let expected = persistence_fingerprint(11);
+    let mut persisted = PersistedPsoCache::new(persistence_fingerprint(12));
+    persisted.insert(
+        PsoCacheKey::new(ShaderPackageId::new("pso-test"), 1, PipelineStateHash(2)),
+        vec![1, 2, 3],
+    );
+    std::fs::write(&path, persisted.encode()).expect("write test cache");
+
+    let device = device();
+    let mut cache = PipelineCache::new();
+    assert_eq!(
+        cache.load_persisted_cache_from_path(&path, &expected, 1024),
+        Err(PipelineCachePersistenceError::Decode(
+            PersistLoadError::Fingerprint(
+                prism_render_architecture::shader_package::FingerprintMismatch::Driver,
+            ),
+        ))
+    );
+    assert_eq!(cache.pending_persisted_len(), 0);
+    cache.shutdown(&*device);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn persisted_binary_is_consumed_only_after_typed_mapping_and_import_failure_falls_back() {
+    let device = device();
+    let compiler = ControlledCompiler::new(device.clone(), None);
+    compiler.release();
+    let mut cache = PipelineCache::with_compiler(compiler);
+    let package = ShaderPackageId::new("pso-test.lazy-import");
+    let fallback_package = ShaderPackageId::new("pso-test.lazy-import.fallback");
+    cache.register_module_package(ModuleId(1), package).unwrap();
+    cache
+        .register_module_package(ModuleId(99), fallback_package)
+        .unwrap();
+
+    let target = key(1);
+    let cold = cache.remember_cold_key(&target).unwrap();
+    let mut persisted = PersistedPsoCache::new(persistence_fingerprint(1));
+    persisted.insert(cold, vec![1, 2, 3]);
+    assert_eq!(cache.load_persisted_cache(persisted), 1);
+
+    let first = cache.resolve_or_request(
+        &*device,
+        target.clone(),
+        descriptor(),
+        key(99),
+        descriptor(),
+    );
+    assert!(matches!(first, PipelineResolution::Fallback(_)));
+    assert_eq!(cache.pending_persisted_len(), 0);
+    assert_eq!(
+        cache.last_binary_error(),
+        Some(PipelineBinaryCacheError::Unsupported)
+    );
+    assert_eq!(
+        cache.lookup_status(&target),
+        Some(PipelineLookupStatus::Miss)
+    );
+
+    drain(&mut cache, &device);
+    assert!(cache
+        .resolve_or_request(&*device, target, descriptor(), key(99), descriptor())
+        .is_ready());
+    cache.shutdown(&*device);
+}
+
+#[test]
+fn persisted_load_enforces_encoded_size_budget() {
+    let path = persistence_path("size");
+    std::fs::write(&path, [0u8; 8]).expect("write oversized test cache");
+    let device = device();
+    let mut cache = PipelineCache::new();
+    assert_eq!(
+        cache.load_persisted_cache_from_path(&path, &persistence_fingerprint(1), 7),
+        Err(PipelineCachePersistenceError::FileTooLarge {
+            size: 8,
+            max_bytes: 7,
+        })
+    );
+    cache.shutdown(&*device);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn persistence_config_cannot_raise_global_file_budget() {
+    assert_eq!(
+        PipelineCachePersistenceConfig::new("cache")
+            .with_max_bytes(u64::MAX)
+            .max_bytes,
+        MAX_PERSISTED_PSO_CACHE_BYTES
+    );
+}
+
+#[test]
+fn empty_persisted_save_is_atomic_and_round_trips() {
+    let path = persistence_path("roundtrip");
+    let device = device();
+    let cache = PipelineCache::new();
+    assert_eq!(
+        cache.save_persisted_cache_to_path(
+            &*device,
+            persistence_fingerprint(1),
+            &path,
+            MAX_PERSISTED_PSO_CACHE_BYTES,
+        ),
+        Ok(0)
+    );
+    let bytes = std::fs::read(&path).expect("atomic save produced destination");
+    assert_eq!(
+        PersistedPsoCache::load_for(&bytes, &persistence_fingerprint(1))
+            .expect("saved image is readable")
+            .len(),
+        0
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn persistence_rejects_non_idle_workers_without_replacing_the_previous_image() {
+    let device = device();
+    let compiler = ControlledCompiler::new(device.clone(), None);
+    let mut cache = PipelineCache::with_compiler_config(
+        compiler.clone(),
+        PipelineCompileConfig {
+            worker_count: 1,
+            queue_capacity: 0,
+        },
+    );
+    let path = persistence_path("not-idle");
+    let previous = b"previous-valid-image";
+    std::fs::write(&path, previous).expect("write previous image");
+    request(&mut cache, &device, 1);
+    compiler.wait_started(1);
+
+    assert_eq!(
+        cache.save_persisted_cache_to_path(
+            &*device,
+            persistence_fingerprint(1),
+            &path,
+            MAX_PERSISTED_PSO_CACHE_BYTES,
+        ),
+        Err(PipelineCachePersistenceError::NotIdle)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), previous);
+
+    compiler.release();
+    cache.shutdown(&*device);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn clear_invalidates_driver_local_package_and_typed_key_mappings() {
+    let device = device();
+    let mut cache = PipelineCache::new();
+    let package = ShaderPackageId::new("pso-test.invalidate");
+    let key = key(1);
+    cache.register_module_package(ModuleId(1), package).unwrap();
+    let cold = cache.remember_cold_key(&key).unwrap();
+    assert_eq!(cache.typed_key_for(&cold), Ok(key.clone()));
+
+    cache.clear(&*device);
+
+    assert_eq!(
+        cache.cold_key_for(&key),
+        Err(PipelineKeyMappingError::UnregisteredModule(ModuleId(1)))
+    );
+    assert_eq!(
+        cache.typed_key_for(&cold),
+        Err(PipelineKeyMappingError::UnknownColdKey)
+    );
+}
+
+#[test]
+fn null_backend_reports_unsupported_binary_export_for_resident_pipeline() {
+    let device = device();
+    let mut cache = PipelineCache::new();
+    let descriptor = descriptor();
+    let key = key(1);
+    cache
+        .register_module_package(key.response_module_id, ShaderPackageId::new("test.pipeline"))
+        .unwrap();
+    cache.get_or_create(&*device, key, &descriptor);
+    let path = persistence_path("unsupported");
+    assert_eq!(
+        cache.save_persisted_cache_to_path(
+            &*device,
+            persistence_fingerprint(1),
+            &path,
+            MAX_PERSISTED_PSO_CACHE_BYTES,
+        ),
+        Err(PipelineCachePersistenceError::Binary(
+            PipelineBinaryCacheError::Unsupported,
+        ))
+    );
+    assert!(!path.exists(), "failed save must not replace destination");
+    cache.shutdown(&*device);
 }
 
 #[test]
@@ -459,7 +706,8 @@ fn warm_runtime_follows_real_pipeline_cache_miss_fallback_and_ready() {
 }
 
 #[test]
-fn lru_uses_explicit_residency_bytes_and_binary_api_is_unsupported() {
+fn lru_uses_explicit_residency_bytes_and_binary_api_uses_driver_capability() {
+    let device = device();
     let mut cache = PipelineCache::with_lru_budget(100);
     let first_package = ShaderPackageId::new("app.pipeline-cache.lru.first");
     let second_package = ShaderPackageId::new("app.pipeline-cache.lru.second");
@@ -481,11 +729,37 @@ fn lru_uses_explicit_residency_bytes_and_binary_api_is_unsupported() {
     assert_eq!(outcome.evicted.len(), 1);
     assert_eq!(cache.lru().unwrap().used_bytes(), 60);
     assert_eq!(
-        cache.export_driver_binary(&cache.cold_key_for(&first).unwrap()),
-        Err(PipelineBinaryCacheError::Unsupported)
+        cache.export_driver_binary(device.as_ref(), &cache.cold_key_for(&first).unwrap()),
+        Err(PipelineBinaryCacheError::NotResident)
     );
     assert_eq!(
-        cache.import_driver_binary(&cache.cold_key_for(&second).unwrap(), &[1, 2, 3]),
+        cache.import_driver_binary(
+            device.as_ref(),
+            &cache.cold_key_for(&second).unwrap(),
+            &[1, 2, 3],
+        ),
         Err(PipelineBinaryCacheError::Unsupported)
     );
+}
+
+#[test]
+fn repeated_hot_resolution_does_not_accumulate_cache_references() {
+    let device = device();
+    let mut cache = PipelineCache::new();
+    let requested = key(7);
+    let fallback = key(99);
+    for _ in 0..64 {
+        assert!(cache
+            .resolve_or_request(
+                device.as_ref(),
+                requested.clone(),
+                descriptor(),
+                fallback.clone(),
+                descriptor(),
+            )
+            .is_ready());
+    }
+    assert_eq!(cache.cache.refcount(&requested), 1);
+    assert_eq!(cache.cache.refcount(&fallback), 1);
+    cache.clear(device.as_ref());
 }

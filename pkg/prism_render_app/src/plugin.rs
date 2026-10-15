@@ -1,9 +1,11 @@
 //! The [`PrismRenderPlugin`]: assembly of the render sub-app.
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use prism_app::{App, First, Last, Plugin, SubApp};
 use prism_ecs::schedule::{IntoSystemConfigs, Schedule, Schedules};
+use prism_ecs::world::World;
 use prism_render_driver::{FrameSync, Instance};
 use prism_render_runtime::RenderRuntime;
 
@@ -16,6 +18,10 @@ use crate::material::{
 };
 use crate::mesh_pipeline::MeshPipelineSpecializer;
 use crate::mesh_pipelines::MeshPipelines;
+use crate::pipeline_cache::{
+    pso_device_fingerprint, PipelineCachePersistenceConfig, PipelineCachePersistenceError,
+    PipelineCachePersistenceStatus,
+};
 use crate::queue::RenderQueues;
 use crate::queue_stage::fill_queues;
 use crate::record::RenderRecord;
@@ -70,6 +76,8 @@ pub struct PrismRenderPlugin<I> {
     instance: Mutex<Option<I>>,
     /// The render sub-app's startup configuration.
     config: RenderAppConfig,
+    /// Optional driver-local PSO cache persistence.
+    pso_cache_persistence: Option<PipelineCachePersistenceConfig>,
 }
 
 impl<I: Instance> PrismRenderPlugin<I> {
@@ -85,7 +93,32 @@ impl<I: Instance> PrismRenderPlugin<I> {
         Self {
             instance: Mutex::new(Some(instance)),
             config,
+            pso_cache_persistence: None,
         }
+    }
+
+    /// Enables driver-local PSO persistence at `path`.
+    #[must_use]
+    pub fn with_pso_cache_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.pso_cache_persistence = Some(PipelineCachePersistenceConfig::new(path));
+        self
+    }
+
+    /// Enables driver-local PSO persistence with an explicit configuration.
+    #[must_use]
+    pub fn with_pso_cache_config(mut self, config: PipelineCachePersistenceConfig) -> Self {
+        self.pso_cache_persistence = Some(config);
+        self
+    }
+
+    /// Creates a plugin with render and PSO-persistence configuration together.
+    #[must_use]
+    pub fn with_config_and_pso_cache(
+        instance: I,
+        config: RenderAppConfig,
+        pso_cache: PipelineCachePersistenceConfig,
+    ) -> Self {
+        Self::with_config(instance, config).with_pso_cache_config(pso_cache)
     }
 
     /// The configuration this plugin will build the render sub-app with.
@@ -106,6 +139,135 @@ impl<I: Instance> PrismRenderPlugin<I> {
                 )
             })
     }
+}
+
+fn load_persisted_pso_cache<I>(world: &mut World)
+where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    let Some(config) = world
+        .get_resource::<PipelineCachePersistenceConfig>()
+        .cloned()
+    else {
+        return;
+    };
+    let fingerprint = pso_device_fingerprint(
+        world
+            .resource::<RenderRuntimeResource<I>>()
+            .runtime()
+            .adapter_info(),
+    );
+    let result = world
+        .resource_mut::<MeshPipelineSpecializer>()
+        .load_persisted_cache_from_path(&config, &fingerprint);
+    world.resource_mut::<PipelineCachePersistenceStatus>().load = Some(result);
+}
+
+fn record_pso_save_result(world: &mut World, result: Result<usize, PipelineCachePersistenceError>) {
+    if world
+        .get_resource::<PipelineCachePersistenceConfig>()
+        .is_some()
+    {
+        world.resource_mut::<PipelineCachePersistenceStatus>().save = Some(result);
+    }
+}
+
+fn pso_save_rejection(
+    recovering: bool,
+    idle: bool,
+    device_lost: bool,
+) -> Option<PipelineCachePersistenceError> {
+    if recovering {
+        Some(PipelineCachePersistenceError::Recovering)
+    } else if device_lost {
+        Some(PipelineCachePersistenceError::DeviceLost)
+    } else if !idle {
+        Some(PipelineCachePersistenceError::NotIdle)
+    } else {
+        None
+    }
+}
+
+fn persist_pso_cache_after_idle<I>(world: &mut World, idle: bool)
+where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    let Some(config) = world
+        .get_resource::<PipelineCachePersistenceConfig>()
+        .cloned()
+    else {
+        return;
+    };
+    let recovering = crate::recovery::is_recovering(world);
+    let device_lost = world
+        .resource::<RenderRuntimeResource<I>>()
+        .runtime()
+        .device_lost()
+        .is_some();
+    let result = if let Some(error) = pso_save_rejection(recovering, idle, device_lost) {
+        Err(error)
+    } else {
+        let fingerprint = pso_device_fingerprint(
+            world
+                .resource::<RenderRuntimeResource<I>>()
+                .runtime()
+                .adapter_info(),
+        );
+        let mut specializer = world
+            .remove_resource::<MeshPipelineSpecializer>()
+            .expect("the mesh pipeline specializer is installed");
+        let result = specializer.save_persisted_cache(
+            world
+                .resource::<RenderRuntimeResource<I>>()
+                .runtime()
+                .device(),
+            &config,
+            fingerprint,
+        );
+        world.insert_resource(specializer);
+        result
+    };
+    record_pso_save_result(world, result);
+}
+
+/// Saves the configured PSO cache at an explicit host-controlled lifecycle point.
+///
+/// The cache remains installed and its worker pool remains usable after this
+/// call. The final plugin shutdown still owns worker and native-pipeline release.
+pub fn save_persisted_pso_cache<I>(world: &mut World)
+where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    if crate::recovery::is_recovering(world) {
+        persist_pso_cache_after_idle::<I>(world, false);
+        return;
+    }
+    if world
+        .resource::<RenderRuntimeResource<I>>()
+        .runtime()
+        .device_lost()
+        .is_some()
+    {
+        record_pso_save_result(world, Err(PipelineCachePersistenceError::DeviceLost));
+        return;
+    }
+    let idle = world
+        .resource::<RenderRuntimeResource<I>>()
+        .runtime()
+        .wait_idle();
+    persist_pso_cache_after_idle::<I>(world, idle);
 }
 
 impl<I> Plugin for PrismRenderPlugin<I>
@@ -164,6 +326,12 @@ where
             .world
             .insert_resource(crate::draw::canonical::registry());
         render.world.insert_resource(pipeline_specializer);
+        render
+            .world
+            .insert_resource(PipelineCachePersistenceStatus::default());
+        if let Some(pso_cache) = self.pso_cache_persistence.clone() {
+            render.world.insert_resource(pso_cache);
+        }
         render.world.insert_resource(mesh_pipelines);
         render.world.insert_resource(SceneRegistry::new());
         render.world.insert_resource(VisibilityWorkList::new());
@@ -188,6 +356,14 @@ where
             schedules.insert(Render, Schedule::new());
             schedules.insert(RenderStartup, Schedule::new());
             schedules.insert(Last, Schedule::new());
+        }
+        if self.pso_cache_persistence.is_some() {
+            render
+                .world
+                .resource_mut::<Schedules>()
+                .get_mut(RenderStartup)
+                .expect("the startup schedule was just inserted")
+                .add_systems(load_persisted_pso_cache::<I>);
         }
         {
             let schedule = render
@@ -242,6 +418,7 @@ where
         app.init_resource::<crate::PublishedTransforms>();
         app.add_systems(Last, crate::transforms::publish_transforms);
         app.add_extract(RenderApp, crate::transforms::extract_transforms);
+        crate::ecs_columns::install_gpu_column_extraction::<I>(app);
         // The spine's frame draws meshes, so the plugin owns that family: its
         // extract, its prepared table, and its prepare stage. Registering it
         // again elsewhere is a no-op.
@@ -269,30 +446,73 @@ where
         };
         crate::presentation::shutdown::<I>(&mut render.world);
         // A partially rebuilt target may still name the previous generation.
-        // Release the device with the world instead of waiting on a lost GPU
-        // or destroying those ids against its replacement.
-        if crate::recovery::is_recovering(&render.world)
-            || render
+        // Never wait on or destroy resources through a lost/replaced device.
+        let recovering = crate::recovery::is_recovering(&render.world);
+        let device_lost = render
+            .world
+            .get_resource::<RenderRuntimeResource<I>>()
+            .is_some_and(|runtime| runtime.runtime().device_lost().is_some());
+        let idle = if recovering || device_lost {
+            false
+        } else {
+            // Drain the pipeline before releasing resources. The device itself
+            // is dropped with the runtime when the app's worlds are torn down.
+            render
                 .world
                 .get_resource::<RenderRuntimeResource<I>>()
-                .is_some_and(|runtime| runtime.runtime().device_lost().is_some())
+                .is_some_and(|runtime| runtime.runtime().wait_idle())
+        };
+        persist_pso_cache_after_idle::<I>(&mut render.world, idle);
+        if render
+            .world
+            .get_resource::<RenderRuntimeResource<I>>()
+            .is_some()
         {
-            return;
+            let mut specializer = render
+                .world
+                .remove_resource::<MeshPipelineSpecializer>()
+                .expect("the mesh pipeline specializer is installed");
+            if idle && !recovering && !device_lost {
+                let runtime = render.world.resource::<RenderRuntimeResource<I>>();
+                specializer.shutdown(runtime.runtime().device());
+            } else {
+                specializer.shutdown_without_device();
+            }
+            render.world.insert_resource(specializer);
         }
-        // Drain the pipeline, then release the frame target. The device itself
-        // is dropped with the runtime when the app's worlds are torn down.
-        if let Some(runtime) = render.world.get_resource::<RenderRuntimeResource<I>>() {
-            let _ = runtime.runtime().wait_idle();
-        }
-        if let (Some(runtime), Some(target)) = (
-            render.world.get_resource::<RenderRuntimeResource<I>>(),
-            render.world.get_resource::<RenderTarget>(),
-        ) {
-            target.destroy(runtime.runtime().device());
+        if idle && !recovering && !device_lost {
+            if let (Some(runtime), Some(target)) = (
+                render.world.get_resource::<RenderRuntimeResource<I>>(),
+                render.world.get_resource::<RenderTarget>(),
+            ) {
+                target.destroy(runtime.runtime().device());
+            }
         }
     }
 
     fn needs_rendering(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pso_save_rejection_prioritizes_recovery_then_loss_then_idle() {
+        assert_eq!(
+            pso_save_rejection(true, true, true),
+            Some(PipelineCachePersistenceError::Recovering)
+        );
+        assert_eq!(
+            pso_save_rejection(false, true, true),
+            Some(PipelineCachePersistenceError::DeviceLost)
+        );
+        assert_eq!(
+            pso_save_rejection(false, false, false),
+            Some(PipelineCachePersistenceError::NotIdle)
+        );
+        assert_eq!(pso_save_rejection(false, true, false), None);
     }
 }

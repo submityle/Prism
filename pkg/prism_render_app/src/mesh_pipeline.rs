@@ -10,7 +10,8 @@
 //! reused.
 
 use prism_render_architecture::shader_package::{
-    ExecutionFamily, ModuleId, PermutationIndex, PermutationSpace,
+    DeviceFingerprint, ExecutionFamily, ModuleId, PermutationIndex, PermutationSpace,
+    PersistedPsoCache,
 };
 use prism_render_driver::{
     PrimitiveTopology, RenderDevice, RenderPipelineDescriptor, RenderPipelineId, TextureFormat,
@@ -18,7 +19,10 @@ use prism_render_driver::{
 };
 use std::collections::{BTreeMap, HashMap};
 
-use crate::pipeline_cache::{PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution};
+use crate::pipeline_cache::{
+    PipelineBinaryCacheError, PipelineCache, PipelineCachePersistenceConfig,
+    PipelineCachePersistenceError, PipelineCompiler, PipelineKey, PipelineResolution,
+};
 
 /// The variant part of a mesh pipeline key: everything but the vertex layout.
 ///
@@ -302,6 +306,73 @@ impl MeshPipelineSpecializer {
     #[must_use]
     pub fn pending_pipeline_count(&self) -> usize {
         self.cache.pending_len()
+    }
+
+    /// Installs a fingerprint-validated persisted image for lazy driver import.
+    /// The image is consumed only when a real typed specialization is
+    /// requested, preserving the one-way cold-key mapping contract.
+    pub fn load_persisted_cache(&mut self, persisted: PersistedPsoCache) -> usize {
+        self.cache.load_persisted_cache(persisted)
+    }
+
+    /// Loads a fingerprint-validated persisted image from disk for lazy driver
+    /// import. Missing files are treated as an empty first-run cache.
+    pub fn load_persisted_cache_from_path(
+        &mut self,
+        config: &PipelineCachePersistenceConfig,
+        fingerprint: &DeviceFingerprint,
+    ) -> Result<usize, PipelineCachePersistenceError> {
+        self.cache
+            .load_persisted_cache_from_path(&config.path, fingerprint, config.max_bytes)
+    }
+
+    /// Number of persisted binaries that have not yet met a typed request.
+    #[must_use]
+    pub fn pending_persisted_pipeline_count(&self) -> usize {
+        self.cache.pending_persisted_len()
+    }
+
+    /// Exports all resident driver binaries with their architecture identity.
+    pub fn export_persisted_cache<D: RenderDevice>(
+        &self,
+        device: &D,
+        fingerprint: DeviceFingerprint,
+    ) -> Result<PersistedPsoCache, PipelineBinaryCacheError> {
+        self.cache.export_persisted_cache(device, fingerprint)
+    }
+
+    /// Finishes already-dispatched work and atomically saves the current cache.
+    /// This is the explicit lifecycle API used by the render plugin at shutdown
+    /// and available to hosts that save at a controlled checkpoint.
+    pub fn save_persisted_cache<D: RenderDevice>(
+        &mut self,
+        device: &D,
+        config: &PipelineCachePersistenceConfig,
+        fingerprint: DeviceFingerprint,
+    ) -> Result<usize, PipelineCachePersistenceError> {
+        self.cache.finish_pending(device);
+        self.cache
+            .save_persisted_cache_to_path(device, fingerprint, &config.path, config.max_bytes)
+    }
+
+    /// Waits for dispatched workers without writing a file. Hosts can use this
+    /// before inspecting or exporting the cache through a separate policy.
+    pub fn finish_pending<D: RenderDevice>(&mut self, device: &D) {
+        self.cache.finish_pending(device);
+    }
+
+    /// Releases worker threads and every cache-owned native pipeline.
+    pub fn shutdown<D: RenderDevice>(&mut self, device: &D) {
+        self.cache.shutdown(device);
+        self.key_index.clear();
+    }
+
+    /// Stops workers and drops pipeline ids without issuing backend destroys.
+    /// Use this when device loss or an unconfirmed idle state makes backend
+    /// resource destruction unsafe; the device teardown owns those objects.
+    pub fn shutdown_without_device(&mut self) {
+        self.cache.shutdown_without_device();
+        self.key_index.clear();
     }
 
     /// Returns the pipeline for `(variant, layout)`, compiling `descriptor` on

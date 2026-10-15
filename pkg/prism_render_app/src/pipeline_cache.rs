@@ -21,18 +21,144 @@ pub use pipeline_state::PipelineState;
 
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::shader_package::{
-    AdmitOutcome, DrawDecision, LruPsoCache, PipelineReadiness, PsoCacheKey, ShaderPackageId,
-    WarmCounters, WarmRuntime,
+    AdmitOutcome, DeviceFingerprint, DrawDecision, GraphicsBackend, LruPsoCache, PersistLoadError,
+    PersistedPsoCache, PipelineReadiness, PsoCacheKey, ShaderPackageId, WarmCounters, WarmRuntime,
 };
 pub use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
+use prism_render_architecture::{abi::AbiHash, ARCHITECTURE_VERSION};
 use prism_render_driver::{
-    CacheStats, ContentCache, RenderDevice, RenderPipelineDescriptor, RenderPipelineId,
-    VertexBufferLayout,
+    AdapterInfo, Backend, CacheStats, ContentCache, RenderDevice, RenderPipelineDescriptor,
+    RenderPipelineId, VertexBufferLayout,
 };
 use std::collections::{BTreeSet, VecDeque};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
+
+/// Hard upper bound for one on-disk PSO image.
+///
+/// The bound is checked before decoding and again before writing. It keeps a
+/// corrupt or unexpectedly large cache from turning startup or shutdown into an
+/// unbounded allocation and I/O operation.
+pub const MAX_PERSISTED_PSO_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Version of the app-owned render pipeline ABI used in the device fingerprint.
+/// Increment this when the pipeline descriptor/shader contract changes without
+/// changing the architecture or material ABI versions.
+pub const PSO_CACHE_ABI_VERSION: u32 = 1;
+
+/// Configuration for the optional application-owned PSO cache file.
+#[derive(Clone, Debug, Eq, PartialEq, Resource)]
+pub struct PipelineCachePersistenceConfig {
+    /// The file written on graceful shutdown and read during render startup.
+    pub path: PathBuf,
+    /// Maximum encoded file size accepted by load/save operations.
+    pub max_bytes: u64,
+}
+
+impl PipelineCachePersistenceConfig {
+    /// Creates a persistence configuration using the safe default size limit.
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            max_bytes: MAX_PERSISTED_PSO_CACHE_BYTES,
+        }
+    }
+
+    /// Replaces the encoded-size limit, retaining the caller's explicit bound.
+    #[must_use]
+    pub const fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_bytes = if max_bytes > MAX_PERSISTED_PSO_CACHE_BYTES {
+            MAX_PERSISTED_PSO_CACHE_BYTES
+        } else {
+            max_bytes
+        };
+        self
+    }
+}
+
+/// The last result of each persistence lifecycle operation.
+#[derive(Clone, Debug, Eq, PartialEq, Resource, Default)]
+pub struct PipelineCachePersistenceStatus {
+    /// Result recorded by the startup load, if persistence was configured.
+    pub load: Option<Result<usize, PipelineCachePersistenceError>>,
+    /// Result recorded by an explicit or shutdown save, if persistence was configured.
+    pub save: Option<Result<usize, PipelineCachePersistenceError>>,
+}
+
+/// A recoverable persistence failure. The render app keeps rendering with a
+/// cold cache after any of these errors; callers can inspect the exact reason.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PipelineCachePersistenceError {
+    /// Reading metadata or bytes failed.
+    Read(std::io::ErrorKind),
+    /// Writing bytes, creating a parent directory, or syncing the temporary file failed.
+    Write(std::io::ErrorKind),
+    /// Replacing the destination with the fully written temporary file failed.
+    Rename(std::io::ErrorKind),
+    /// The image was corrupt, unknown, or targeted another device/driver/ABI.
+    Decode(PersistLoadError),
+    /// The selected backend rejected import/export of opaque pipeline binaries.
+    Binary(PipelineBinaryCacheError),
+    /// The render device was already lost or is being replaced.
+    DeviceLost,
+    /// The render app is in a recovery transition and cannot persist binaries.
+    Recovering,
+    /// The runtime could not confirm that submitted work had completed.
+    NotIdle,
+    /// The encoded image exceeded the configured allocation/I/O budget.
+    FileTooLarge {
+        /// Observed or produced byte count.
+        size: u64,
+        /// Configured maximum byte count.
+        max_bytes: u64,
+    },
+}
+
+/// Builds the device/driver/ABI identity used by the persisted PSO wire format.
+///
+/// The RHI exposes a textual driver token, so it is deterministically reduced
+/// to the numeric field required by the architecture contract. Unknown driver
+/// strings remain distinct from a known string, and backend/vendor/device are
+/// retained as first-class fields.
+#[must_use]
+pub fn pso_device_fingerprint(info: &AdapterInfo) -> DeviceFingerprint {
+    let backend = match info.backend {
+        Backend::Vulkan => GraphicsBackend::Vulkan,
+        Backend::Metal => GraphicsBackend::Metal,
+        Backend::Dx12 => GraphicsBackend::Dx12,
+        Backend::WebGpu => GraphicsBackend::WebGpu,
+        Backend::Noop => GraphicsBackend::Other(0),
+        _ => GraphicsBackend::Other(1),
+    };
+    let driver = info.driver.as_deref().unwrap_or("<unknown-driver>");
+    let driver_hash = AbiHash::from_bytes(driver.as_bytes());
+    let driver_version = u64::from_le_bytes(
+        driver_hash.0[..8]
+            .try_into()
+            .expect("the ABI hash always has at least eight bytes"),
+    );
+    let architecture_version = ARCHITECTURE_VERSION.to_le_bytes();
+    let pso_abi_version = PSO_CACHE_ABI_VERSION.to_le_bytes();
+    let material_abi_version = prism_render_material::MATERIAL_ABI_VERSION.to_le_bytes();
+    let abi_hash = AbiHash::combine(&[
+        b"prism-render-app-pso-cache",
+        &architecture_version,
+        &material_abi_version,
+        &pso_abi_version,
+    ]);
+    DeviceFingerprint::new(
+        backend,
+        info.vendor_id,
+        info.device_id,
+        driver_version,
+        abi_hash,
+    )
+}
 
 /// The content key of one render pipeline.
 ///
@@ -105,15 +231,33 @@ pub enum PipelineLookupStatus {
     Miss,
 }
 
-/// RHI pipeline-binary persistence is not available at this app/RHI seam.
+/// Errors from the app/RHI driver-owned pipeline-binary seam.
 ///
-/// The architecture crate only supplies a validated wire model. Until the RHI
-/// exposes driver-owned import/export, these operations must fail explicitly;
-/// no `RenderPipelineId`, shader source, or descriptor hash is a binary.
+/// The architecture crate supplies the validated wire model while the RHI
+/// owns the opaque binary. No `RenderPipelineId`, shader source, or descriptor
+/// hash is accepted as a substitute for a backend binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PipelineBinaryCacheError {
     /// The selected RHI has no driver-binary import/export API.
     Unsupported,
+    /// The backend rejected an otherwise mapped binary.
+    Driver(prism_render_driver::PipelineBinaryCacheError),
+    /// The cold key has not been observed with a complete typed key.
+    UnknownColdKey,
+    /// The requested pipeline is already resident; the imported native object
+    /// was discarded so the cache keeps one owner.
+    AlreadyResident,
+    /// The mapped typed pipeline is not resident and therefore cannot export.
+    NotResident,
+}
+
+impl From<prism_render_driver::PipelineBinaryCacheError> for PipelineBinaryCacheError {
+    fn from(error: prism_render_driver::PipelineBinaryCacheError) -> Self {
+        match error {
+            prism_render_driver::PipelineBinaryCacheError::Unsupported => Self::Unsupported,
+            other => Self::Driver(other),
+        }
+    }
 }
 
 impl From<&RenderPipelineDescriptor> for PipelineState {
@@ -409,6 +553,14 @@ pub struct PipelineCache {
     /// Optional byte-budgeted cold residency model. It is opt-in because the
     /// current RHI does not expose driver PSO binary sizes.
     lru: Option<LruPsoCache>,
+    /// Driver binaries loaded from a fingerprint-validated persisted image.
+    /// They remain keyed by the irreversible cold identity until the matching
+    /// typed specialization is observed by the renderer.
+    persisted: std::collections::BTreeMap<PsoCacheKey, Vec<u8>>,
+    /// The last import failure observed while consuming a persisted binary.
+    /// Compilation continues through the normal fallback path after a failed
+    /// import, but the failure remains inspectable by diagnostics.
+    last_binary_error: Option<PipelineBinaryCacheError>,
     /// Last requested-specialization status, distinct from the bound fallback.
     last_lookup: std::collections::BTreeMap<PipelineKey, PipelineLookupStatus>,
     /// The first typed/cold mapping error observed by the current lookup.
@@ -442,6 +594,8 @@ impl PipelineCache {
             typed_by_cold: std::collections::BTreeMap::new(),
             warm_runtime: WarmRuntime::new(),
             lru: None,
+            persisted: std::collections::BTreeMap::new(),
+            last_binary_error: None,
             last_lookup: std::collections::BTreeMap::new(),
             last_mapping_error: None,
         }
@@ -499,6 +653,8 @@ impl PipelineCache {
             typed_by_cold: std::collections::BTreeMap::new(),
             warm_runtime: WarmRuntime::new(),
             lru: None,
+            persisted: std::collections::BTreeMap::new(),
+            last_binary_error: None,
             last_lookup: std::collections::BTreeMap::new(),
             last_mapping_error: None,
         }
@@ -659,21 +815,200 @@ impl PipelineCache {
         self.lru.as_ref()
     }
 
-    /// Driver-binary import is intentionally unavailable at this RHI seam.
-    pub fn import_driver_binary(
-        &mut self,
-        _key: &PsoCacheKey,
-        _binary: &[u8],
-    ) -> Result<(), PipelineBinaryCacheError> {
-        Err(PipelineBinaryCacheError::Unsupported)
+    /// Installs a fingerprint-validated persisted image for lazy import.
+    ///
+    /// Cold keys intentionally cannot be reverse-decoded into a complete
+    /// [`PipelineKey`]. The bytes therefore stay pending until a real typed
+    /// specialization is requested, at which point the observed mapping is
+    /// exact and the backend binary can be imported without guessing.
+    pub fn load_persisted_cache(&mut self, persisted: PersistedPsoCache) -> usize {
+        self.persisted.clear();
+        for entry in persisted.entries() {
+            self.persisted.insert(entry.key.clone(), entry.blob.clone());
+        }
+        self.persisted.len()
     }
 
-    /// Driver-binary export is intentionally unavailable at this RHI seam.
-    pub fn export_driver_binary(
+    /// Loads and fingerprint-validates a persisted image from `path`.
+    ///
+    /// A missing file is the normal first-run result and returns `Ok(0)`. All
+    /// other read/decode/fingerprint failures leave the in-memory pending image
+    /// untouched so a bad file cannot poison a previously usable cache.
+    pub fn load_persisted_cache_from_path(
+        &mut self,
+        path: &Path,
+        fingerprint: &DeviceFingerprint,
+        max_bytes: u64,
+    ) -> Result<usize, PipelineCachePersistenceError> {
+        let max_bytes = max_bytes.min(MAX_PERSISTED_PSO_CACHE_BYTES);
+        let size = match fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(PipelineCachePersistenceError::Read(error.kind())),
+        };
+        if size > max_bytes {
+            return Err(PipelineCachePersistenceError::FileTooLarge { size, max_bytes });
+        }
+        let bytes =
+            fs::read(path).map_err(|error| PipelineCachePersistenceError::Read(error.kind()))?;
+        let actual_size = bytes.len() as u64;
+        if actual_size > max_bytes {
+            return Err(PipelineCachePersistenceError::FileTooLarge {
+                size: actual_size,
+                max_bytes,
+            });
+        }
+        let persisted = PersistedPsoCache::load_for(&bytes, fingerprint)
+            .map_err(PipelineCachePersistenceError::Decode)?;
+        Ok(self.load_persisted_cache(persisted))
+    }
+
+    /// Number of persisted binaries still waiting for a matching typed key.
+    #[must_use]
+    pub fn pending_persisted_len(&self) -> usize {
+        self.persisted.len()
+    }
+
+    /// Returns the most recent driver-binary import failure, if any.
+    #[must_use]
+    pub fn last_binary_error(&self) -> Option<PipelineBinaryCacheError> {
+        self.last_binary_error
+    }
+
+    /// Exports all resident pipelines for which a complete typed/cold mapping
+    /// is known. Pending, failed, and evicted specializations are omitted; the
+    /// resulting image contains only binaries that can be safely reused.
+    pub fn export_persisted_cache<D: RenderDevice>(
         &self,
-        _key: &PsoCacheKey,
+        device: &D,
+        fingerprint: prism_render_architecture::shader_package::DeviceFingerprint,
+    ) -> Result<PersistedPsoCache, PipelineBinaryCacheError> {
+        let mut persisted = PersistedPsoCache::new(fingerprint);
+        for (cold, typed) in &self.typed_by_cold {
+            let Some(pipeline) = self.cache.get(typed) else {
+                continue;
+            };
+            let binary = device
+                .export_render_pipeline_binary(pipeline)
+                .map_err(PipelineBinaryCacheError::from)?;
+            persisted.insert(cold.clone(), binary);
+        }
+        Ok(persisted)
+    }
+
+    /// Exports and atomically replaces the persisted image at `path`.
+    ///
+    /// The parent directory is created once, the complete image is written and
+    /// synced to a uniquely named sibling, and only then is it renamed over the
+    /// destination. A failed save therefore leaves the previous valid image in
+    /// place whenever the filesystem supports atomic rename.
+    pub fn save_persisted_cache_to_path<D: RenderDevice>(
+        &self,
+        device: &D,
+        fingerprint: DeviceFingerprint,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<usize, PipelineCachePersistenceError> {
+        // The binary image is a snapshot of driver-owned state. A result still
+        // waiting in the worker pool is not part of that snapshot, and a
+        // backend that has reported loss must never be queried for export.
+        if !self.is_idle() {
+            return Err(PipelineCachePersistenceError::NotIdle);
+        }
+        if device.take_device_lost().is_some() {
+            return Err(PipelineCachePersistenceError::DeviceLost);
+        }
+        let max_bytes = max_bytes.min(MAX_PERSISTED_PSO_CACHE_BYTES);
+        let persisted = self
+            .export_persisted_cache(device, fingerprint)
+            .map_err(PipelineCachePersistenceError::Binary)?;
+        let entry_count = persisted.len();
+        let bytes = persisted.encode();
+        let size = bytes.len() as u64;
+        if size > max_bytes {
+            return Err(PipelineCachePersistenceError::FileTooLarge { size, max_bytes });
+        }
+
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)
+                .map_err(|error| PipelineCachePersistenceError::Write(error.kind()))?;
+        }
+
+        static TEMP_FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut temporary = path.to_path_buf();
+        temporary.set_extension(format!("tmp-{}-{}", std::process::id(), counter));
+
+        let write_result = (|| {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .map_err(|error| PipelineCachePersistenceError::Write(error.kind()))?;
+            file.write_all(&bytes)
+                .map_err(|error| PipelineCachePersistenceError::Write(error.kind()))?;
+            file.sync_all()
+                .map_err(|error| PipelineCachePersistenceError::Write(error.kind()))?;
+            drop(file);
+            fs::rename(&temporary, path)
+                .map_err(|error| PipelineCachePersistenceError::Rename(error.kind()))
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(entry_count)
+    }
+
+    /// Imports a backend-owned binary into the hot cache after resolving the
+    /// previously observed typed/cold identity binding.
+    pub fn import_driver_binary<D: RenderDevice>(
+        &mut self,
+        device: &D,
+        key: &PsoCacheKey,
+        binary: &[u8],
+    ) -> Result<(), PipelineBinaryCacheError> {
+        let typed = self
+            .typed_key_for(key)
+            .map_err(|_| PipelineBinaryCacheError::UnknownColdKey)?;
+        let pipeline = match device.import_render_pipeline_binary(binary) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                let error = PipelineBinaryCacheError::from(error);
+                self.last_binary_error = Some(error);
+                return Err(error);
+            }
+        };
+        if self.cache.get(&typed).is_some() {
+            device.destroy_render_pipeline(pipeline);
+            return Err(PipelineBinaryCacheError::AlreadyResident);
+        }
+        self.cache.get_or_create(typed.clone(), || pipeline);
+        self.persisted.remove(key);
+        self.mark_ready(&typed);
+        self.last_lookup.insert(typed, PipelineLookupStatus::Ready);
+        Ok(())
+    }
+
+    /// Exports a resident pipeline through the backend-owned binary seam.
+    pub fn export_driver_binary<D: RenderDevice>(
+        &self,
+        device: &D,
+        key: &PsoCacheKey,
     ) -> Result<Vec<u8>, PipelineBinaryCacheError> {
-        Err(PipelineBinaryCacheError::Unsupported)
+        let typed = self
+            .typed_key_for(key)
+            .map_err(|_| PipelineBinaryCacheError::UnknownColdKey)?;
+        let pipeline = self
+            .cache
+            .get(&typed)
+            .ok_or(PipelineBinaryCacheError::NotResident)?;
+        device
+            .export_render_pipeline_binary(pipeline)
+            .map_err(PipelineBinaryCacheError::from)
     }
 
     /// The number of distinct cached pipelines.
@@ -736,6 +1071,19 @@ impl PipelineCache {
     #[must_use]
     pub fn has_worker(&self) -> bool {
         self.compile_queue.is_some()
+    }
+
+    /// Whether the cache has no queued, executing, or unpumped worker result.
+    ///
+    /// This is the cache-local idle condition used by persistence. The render
+    /// runtime still owns the separate GPU queue-idle check before calling the
+    /// save path.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.pending.is_empty()
+            && self.waiting.is_empty()
+            && self.in_flight.is_empty()
+            && self.compiling_len() == 0
     }
 
     /// Advances a mapped key to `Ready` after a synchronous or completed cache
@@ -824,16 +1172,35 @@ impl PipelineCache {
         key.assert_matches(&descriptor);
         fallback_key.assert_matches(&fallback_descriptor);
         self.last_mapping_error = None;
+        self.last_binary_error = None;
         let key_cold = self.remember_cold_key_observable(&key);
         let _fallback_cold = self.remember_cold_key_observable(&fallback_key);
-        if let Some(id) = self.cache.acquire(&key) {
+        if let Some(id) = self.cache.peek(&key) {
             self.mark_ready(&key);
             self.last_lookup.insert(key, PipelineLookupStatus::Ready);
             return PipelineResolution::Ready(id);
         }
 
-        let fallback = self.cache.get_or_create(fallback_key.clone(), || {
-            device.create_render_pipeline(&fallback_descriptor)
+        if let Some(cold) = key_cold.as_ref() {
+            if let Some(binary) = self.persisted.remove(cold) {
+                match device.import_render_pipeline_binary(&binary) {
+                    Ok(id) => {
+                        self.cache.get_or_create(key.clone(), || id);
+                        self.mark_ready(&key);
+                        self.last_lookup.insert(key, PipelineLookupStatus::Ready);
+                        return PipelineResolution::Ready(id);
+                    }
+                    Err(error) => {
+                        self.last_binary_error = Some(PipelineBinaryCacheError::from(error));
+                    }
+                }
+            }
+        }
+
+        let fallback = self.cache.peek(&fallback_key).unwrap_or_else(|| {
+            self.cache.get_or_create(fallback_key.clone(), || {
+                device.create_render_pipeline(&fallback_descriptor)
+            })
         });
         self.mark_ready(&fallback_key);
         if fallback_key == key {
@@ -951,6 +1318,23 @@ impl PipelineCache {
             }
         }
         self.dispatch_waiting();
+    }
+
+    /// Waits for all pending jobs and admits successful results into the cache.
+    /// The worker pool remains available, so an explicit save can be followed
+    /// by more rendering. Final worker shutdown is owned by [`Self::shutdown`].
+    pub fn finish_pending<D: RenderDevice>(&mut self, device: &D) {
+        if self.compile_queue.is_none() {
+            return;
+        }
+        while !self.pending.is_empty() || !self.in_flight.is_empty() || !self.waiting.is_empty() {
+            let before = (self.pending.len(), self.in_flight.len(), self.waiting.len());
+            self.pump(device);
+            let after = (self.pending.len(), self.in_flight.len(), self.waiting.len());
+            if before == after {
+                std::thread::yield_now();
+            }
+        }
     }
 
     /// Sends waiting jobs while worker slots have room. A disconnected
@@ -1083,6 +1467,11 @@ impl PipelineCache {
         self.cache
             .drain_all(|id| device.destroy_render_pipeline(id));
         self.warm_runtime = WarmRuntime::new();
+        self.persisted.clear();
+        self.module_packages.clear();
+        self.cold_by_typed.clear();
+        self.typed_by_cold.clear();
+        self.last_binary_error = None;
         self.last_lookup.clear();
         self.last_mapping_error = None;
         if let Some(budget) = self.lru.as_ref().map(LruPsoCache::budget_bytes) {
@@ -1110,6 +1499,41 @@ impl PipelineCache {
         self.cache
             .drain_all(|id| device.destroy_render_pipeline(id));
         self.warm_runtime = WarmRuntime::new();
+        self.persisted.clear();
+        self.module_packages.clear();
+        self.cold_by_typed.clear();
+        self.typed_by_cold.clear();
+        self.last_binary_error = None;
+        self.last_lookup.clear();
+        self.last_mapping_error = None;
+        if let Some(budget) = self.lru.as_ref().map(LruPsoCache::budget_bytes) {
+            self.lru = Some(LruPsoCache::with_budget(budget));
+        }
+    }
+
+    /// Stops workers and drops cache-owned pipeline ids without calling into a
+    /// device that is lost or whose completion state was not confirmed.
+    ///
+    /// The device teardown owns the native objects in this case. Calling a
+    /// backend destroy method after loss (or while work may still be in flight)
+    /// is not a safe cleanup operation, but leaving compiler workers alive
+    /// would keep the render world and backend handles alive indefinitely.
+    pub fn shutdown_without_device(&mut self) {
+        if let Some(queue) = self.compile_queue.take() {
+            let _ = queue.shutdown();
+        }
+        self.pending.clear();
+        self.waiting.clear();
+        self.in_flight.clear();
+        self.canceled.clear();
+        self.failed.clear();
+        self.cache.drain_all(|_| {});
+        self.warm_runtime = WarmRuntime::new();
+        self.persisted.clear();
+        self.module_packages.clear();
+        self.cold_by_typed.clear();
+        self.typed_by_cold.clear();
+        self.last_binary_error = None;
         self.last_lookup.clear();
         self.last_mapping_error = None;
         if let Some(budget) = self.lru.as_ref().map(LruPsoCache::budget_bytes) {

@@ -37,6 +37,7 @@ pub struct InternedModule {
 pub enum ModuleInternError {
     Permutation(PermutationError),
     DeclarationChanged,
+    ReservedIdentityConflict,
     Exhausted,
 }
 
@@ -47,12 +48,10 @@ pub struct ModuleInterner {
 }
 
 impl ModuleInterner {
-    pub fn intern(
-        &mut self,
-        identity: ModuleIdentity,
-        permutations: PermutationSpace,
+    fn validate_declaration(
+        permutations: &PermutationSpace,
         full_lobe_fallback: Option<PermutationIndex>,
-    ) -> Result<ModuleId, ModuleInternError> {
+    ) -> Result<(), ModuleInternError> {
         permutations
             .checked_total()
             .map_err(ModuleInternError::Permutation)?;
@@ -61,6 +60,16 @@ impl ModuleInterner {
                 .check_index(index.get())
                 .map_err(ModuleInternError::Permutation)?;
         }
+        Ok(())
+    }
+
+    pub fn intern(
+        &mut self,
+        identity: ModuleIdentity,
+        permutations: PermutationSpace,
+        full_lobe_fallback: Option<PermutationIndex>,
+    ) -> Result<ModuleId, ModuleInternError> {
+        Self::validate_declaration(&permutations, full_lobe_fallback)?;
         if let Some(id) = self.by_identity.get(&identity) {
             let existing = &self.modules[id];
             if existing.permutations != permutations
@@ -76,6 +85,46 @@ impl ModuleInterner {
             })
             .map_err(|_| ModuleInternError::Exhausted)?;
         let id = ModuleId(raw);
+        self.by_identity.insert(identity.clone(), id);
+        self.modules.insert(
+            id,
+            InternedModule {
+                identity,
+                permutations,
+                full_lobe_fallback,
+            },
+        );
+        Ok(id)
+    }
+
+    /// Binds a reserved driver-local module id to a declaration.
+    ///
+    /// Reserved ids are not allocated from the ordinary process-wide counter,
+    /// but they still participate in the same identity/declaration table. This
+    /// prevents the spine from bypassing permutation validation or allowing a
+    /// later ordinary intern to silently claim the same declaration.
+    pub fn reserve(
+        &mut self,
+        id: ModuleId,
+        identity: ModuleIdentity,
+        permutations: PermutationSpace,
+        full_lobe_fallback: Option<PermutationIndex>,
+    ) -> Result<ModuleId, ModuleInternError> {
+        Self::validate_declaration(&permutations, full_lobe_fallback)?;
+        if let Some(existing_id) = self.by_identity.get(&identity).copied() {
+            if existing_id != id {
+                return Err(ModuleInternError::ReservedIdentityConflict);
+            }
+        }
+        if let Some(existing) = self.modules.get(&id) {
+            if existing.identity != identity
+                || existing.permutations != permutations
+                || existing.full_lobe_fallback != full_lobe_fallback
+            {
+                return Err(ModuleInternError::DeclarationChanged);
+            }
+            return Ok(id);
+        }
         self.by_identity.insert(identity.clone(), id);
         self.modules.insert(
             id,
@@ -161,5 +210,30 @@ mod tests {
         assert!(core::ptr::eq(first.as_str(), second.as_str()));
         assert_ne!(first, ShaderPackageId::new("different-package"));
         assert_eq!(size_of::<ShaderPackageId>(), size_of::<usize>());
+    }
+
+    #[test]
+    fn reserved_module_uses_the_same_declaration_validation() {
+        let mut modules = ModuleInterner::default();
+        let identity = identity();
+        let space = PermutationSpace::try_new([2]).unwrap();
+        let fallback = space.check_index(1).unwrap();
+        assert_eq!(
+            modules.reserve(
+                ModuleId::SPINE,
+                identity.clone(),
+                space.clone(),
+                Some(fallback),
+            ),
+            Ok(ModuleId::SPINE)
+        );
+        assert_eq!(
+            modules.intern(identity.clone(), space.clone(), Some(fallback)),
+            Ok(ModuleId::SPINE)
+        );
+        assert_eq!(
+            modules.reserve(ModuleId::SPINE, identity, space, None),
+            Err(ModuleInternError::DeclarationChanged)
+        );
     }
 }
