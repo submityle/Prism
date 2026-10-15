@@ -93,6 +93,8 @@ pub mod prediction;
 
 pub mod lag_comp;
 
+pub mod interp;
+
 pub mod transport;
 
 pub mod security;
