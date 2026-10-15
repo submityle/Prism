@@ -16,9 +16,10 @@ heightfield cells. It selects a strictly lower X/Z neighbor, uses canonical
 direction, flow accumulation, terminal basin, and thresholded river cells in
 stable coordinate order. An optional `Region` clips both sources and
 downstream candidates, so an analysis cannot silently route outside its
-requested area. The caller supplies both a cell limit and a fixed eight-probe-
-per-cell neighbor budget; checked `u64` accumulation never returns partial
-results after overflow or budget failure.
+requested area. `river_cells` and `river_segments` expose the thresholded
+network as stable coordinates and directed edges. The caller supplies both a
+cell limit and a fixed eight-probe-per-cell neighbor budget; checked `u64`
+accumulation never returns partial results after overflow or budget failure.
 
 This is a hydrology topology/analysis primitive. It does not claim a GPU
 stencil solver, water-surface simulation, erosion feedback, river spline

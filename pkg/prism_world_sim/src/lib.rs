@@ -27,6 +27,7 @@ pub use ecology::{EcologyCell, EcologyConfig, EcologyDelta, EcologyField};
 pub use hydrology::{
     FlowDelta, HydrologyAnalysis, HydrologyAnalysisBudget, HydrologyAnalysisCell,
     HydrologyAnalysisError, HydrologyCell, HydrologyDirection, HydrologyField,
+    HydrologyRiverSegment,
 };
 #[cfg(feature = "persist")]
 pub use persist::{
