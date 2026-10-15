@@ -76,6 +76,7 @@ pub enum SecurityDirection {
 }
 
 impl SecurityDirection {
+    #[cfg(any(test, feature = "crypto"))]
     const fn wire(self) -> u8 {
         match self {
             Self::ClientToServer => 0,
