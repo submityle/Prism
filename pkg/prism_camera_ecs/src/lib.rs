@@ -10,16 +10,21 @@
 
 extern crate alloc;
 
+#[cfg(feature = "rig")]
+use alloc::boxed::Box;
 use alloc::vec::Vec;
-use prism_app::{App, Plugin, PostUpdate};
-#[cfg(any(feature = "director", feature = "rig"))]
-use prism_ecs::prelude::IntoSystemConfigs;
+use prism_app::{App, EngineClocks, Plugin, PostUpdate};
 use prism_camera::{
     derive_view, publish_view, CameraError, CameraIntent, CameraPose, ViewData, ViewHandle,
     ViewHistory,
 };
-use prism_ecs::prelude::{Bundle, Component, Entity, Query, ResMut, Resource, SystemSet};
+#[cfg(any(feature = "director", feature = "rig"))]
+use prism_ecs::prelude::IntoSystemConfigs;
+use prism_ecs::prelude::{Bundle, Component, Entity, Query, Res, ResMut, Resource, SystemSet};
 use prism_render_architecture::view_family::{ViewImportance, ViewRegistry};
+
+#[cfg(feature = "rig")]
+use prism_math::Vec2;
 
 #[cfg(any(feature = "director", feature = "rig"))]
 use prism_camera_rig as rig;
@@ -34,10 +39,28 @@ pub enum CameraSystemSet {
     Prepare,
     /// Selects and blends virtual cameras into output poses.
     Director,
+    /// Normalizes application input into controller commands.
+    Control,
     /// Resolves body, aim, controllers, noise, and impulses into output poses.
     Rig,
     /// Derives immutable views and publishes them to the view registry.
     Publication,
+}
+
+#[cfg(feature = "rig")]
+/// Optional physics/query provider used by camera rigs.
+#[derive(Default, Resource)]
+pub struct CameraSceneQueryResource {
+    /// The application-owned scene query implementation.
+    pub query: Option<Box<dyn rig::SceneQuery + Send + Sync>>,
+}
+
+#[cfg(feature = "rig")]
+/// Optional target snapshot provider used by targeted and grouped rigs.
+#[derive(Default, Resource)]
+pub struct CameraTargetQueryResource {
+    /// The application-owned target query implementation.
+    pub query: Option<Box<dyn rig::TargetQuery + Send + Sync>>,
 }
 
 #[cfg(feature = "director")]
@@ -55,6 +78,7 @@ pub struct CameraBrainComponent {
     pub candidates: Vec<Entity>,
     pub brain: rig::CameraBrain,
     pub default_pose: CameraPose,
+    /// Optional fixed override. `NaN` means use [`CameraFrame::dt_seconds`].
     pub dt_seconds: f32,
     scratch: Vec<rig::VirtualCamera>,
 }
@@ -66,7 +90,7 @@ impl Default for CameraBrainComponent {
             candidates: Vec::new(),
             brain: rig::CameraBrain::default(),
             default_pose: CameraPose::default(),
-            dt_seconds: 1.0 / 60.0,
+            dt_seconds: f32::NAN,
             scratch: Vec::new(),
         }
     }
@@ -83,11 +107,8 @@ impl CameraBrainComponent {
         I: IntoIterator<Item = Entity>,
     {
         self.candidates.clear();
-        self.candidates.extend(
-            candidates
-                .into_iter()
-                .take(Self::MAX_CANDIDATES),
-        );
+        self.candidates
+            .extend(candidates.into_iter().take(Self::MAX_CANDIDATES));
     }
 }
 
@@ -103,6 +124,49 @@ pub struct CameraRigComponent {
     pub noise: Option<rig::CameraNoise>,
     pub impulse: Option<rig::Impulse>,
     pub time_seconds: f32,
+    /// Previous resolved spring-arm distance; `NaN` means initialize from the first query.
+    pub spring_distance: f32,
+    /// Optional fixed override. `NaN` means use [`CameraFrame::dt_seconds`].
+    pub dt_seconds: f32,
+}
+
+#[cfg(feature = "rig")]
+/// Controller mode driven by an application-fed normalized camera command.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CameraControllerMode {
+    /// Free-fly controller for debug and DCC-style cameras.
+    Fly(rig::FlyController),
+    /// Orbit controller around a target snapshot.
+    Orbit(rig::OrbitController),
+    /// Local-plane pan controller for map and editor cameras.
+    Pan(rig::PanController),
+}
+
+#[cfg(feature = "rig")]
+/// ECS-owned controller input seam. Platform events are converted by the
+/// application into [`rig::CameraCommand`] before this system runs.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+pub struct CameraControllerComponent {
+    /// Command accumulated for the current frame.
+    pub command: rig::CameraCommand,
+    /// Device-independent normalization and sensitivity policy.
+    pub input_map: rig::CameraInputMap,
+    /// Active controller implementation.
+    pub mode: CameraControllerMode,
+}
+
+#[cfg(feature = "rig")]
+impl Default for CameraControllerComponent {
+    fn default() -> Self {
+        Self {
+            command: rig::CameraCommand::default(),
+            input_map: rig::CameraInputMap::default(),
+            mode: CameraControllerMode::Fly(rig::FlyController {
+                speed: 5.0,
+                ..Default::default()
+            }),
+        }
+    }
 }
 
 #[cfg(feature = "rig")]
@@ -116,6 +180,8 @@ impl Default for CameraRigComponent {
             noise: None,
             impulse: None,
             time_seconds: 0.0,
+            spring_distance: f32::NAN,
+            dt_seconds: f32::NAN,
         }
     }
 }
@@ -172,6 +238,8 @@ pub struct CameraFrame {
     pub frame: u64,
     /// Target extent used to resolve the camera viewport.
     pub target_size: [u32; 2],
+    /// Variable-step duration used by Director, Rig, and controller systems.
+    pub dt_seconds: f32,
 }
 
 impl Default for CameraFrame {
@@ -179,6 +247,7 @@ impl Default for CameraFrame {
         Self {
             frame: 0,
             target_size: [1, 1],
+            dt_seconds: 1.0 / 60.0,
         }
     }
 }
@@ -190,6 +259,19 @@ impl CameraFrame {
         Self {
             frame: 0,
             target_size,
+            dt_seconds: 1.0 / 60.0,
+        }
+    }
+}
+
+impl CameraFrame {
+    /// Returns a finite, non-negative frame delta for runtime systems.
+    #[must_use]
+    pub fn effective_dt(self) -> f32 {
+        if self.dt_seconds.is_finite() {
+            self.dt_seconds.max(0.0)
+        } else {
+            1.0 / 60.0
         }
     }
 }
@@ -409,6 +491,7 @@ pub fn apply_camera_directors(
         &mut CameraBrainComponent,
     )>,
     candidates: Query<&VirtualCameraComponent>,
+    frame: Res<CameraFrame>,
 ) {
     for (mut pose, mut intent, mut brain) in outputs.iter_mut() {
         brain.scratch.clear();
@@ -419,7 +502,11 @@ pub fn apply_camera_directors(
             }
         }
         let selected = rig::CameraBrain::choose(&brain.scratch);
-        let dt_seconds = brain.dt_seconds;
+        let dt_seconds = if brain.dt_seconds.is_finite() {
+            brain.dt_seconds.max(0.0)
+        } else {
+            frame.effective_dt()
+        };
         let default_pose = brain.default_pose;
         let mut director = brain.brain;
         let output = director.update(&brain.scratch, dt_seconds, default_pose);
@@ -430,35 +517,109 @@ pub fn apply_camera_directors(
 }
 
 #[cfg(feature = "rig")]
+/// Applies normalized controller commands before procedural rig resolution.
+pub fn apply_camera_controls(
+    mut cameras: Query<(&mut CameraPoseComponent, &mut CameraControllerComponent)>,
+    frame: Res<CameraFrame>,
+) {
+    let dt = frame.effective_dt();
+    for (mut pose, mut controller) in cameras.iter_mut() {
+        let command = controller.input_map.normalize(controller.command);
+        controller.command = rig::CameraCommand::default();
+        match &mut controller.mode {
+            CameraControllerMode::Fly(fly) => {
+                fly.move_axis = command.move_axis;
+                pose.0 = fly.apply(pose.0, dt);
+            }
+            CameraControllerMode::Orbit(orbit) => {
+                orbit.yaw += command.look_axis.x;
+                orbit.pitch = (orbit.pitch - command.look_axis.y).clamp(-1.56, 1.56);
+                orbit.radius = (orbit.radius - command.zoom).max(0.0);
+                pose.0 = orbit.pose(pose.0.world_origin);
+            }
+            CameraControllerMode::Pan(pan) => {
+                pan.axis = Vec2::new(command.move_axis.x, command.move_axis.y);
+                pose.0 = pan.apply(pose.0, dt);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "rig")]
 /// Resolves the pure body/aim path and applies optional deterministic camera
 /// noise and one-shot impulse data before publication.
-pub fn apply_camera_rigs(mut cameras: Query<(&mut CameraPoseComponent, &mut CameraRigComponent)>) {
+pub fn apply_camera_rigs(
+    mut cameras: Query<(&mut CameraPoseComponent, &mut CameraRigComponent)>,
+    frame: Res<CameraFrame>,
+    scene_query: Option<Res<CameraSceneQueryResource>>,
+    target_query: Option<Res<CameraTargetQueryResource>>,
+) {
+    let frame_dt = frame.effective_dt();
+    let scene = scene_query
+        .as_deref()
+        .and_then(|resource| {
+            resource
+                .query
+                .as_deref()
+                .map(|query| query as &dyn rig::SceneQuery)
+        });
+    let targets = target_query
+        .as_deref()
+        .and_then(|resource| {
+            resource
+                .query
+                .as_deref()
+                .map(|query| query as &dyn rig::TargetQuery)
+        });
     for (mut pose, mut rig_state) in cameras.iter_mut() {
-        let output = rig::compose_rig(
-            rig_state.body,
+        let dt = if rig_state.dt_seconds.is_finite() {
+            rig_state.dt_seconds.max(0.0)
+        } else {
+            frame_dt
+        };
+        let output = rig::compose_rig_with_queries(
+            &rig_state.body,
             rig_state.aim,
             rig_state.world_origin,
-            rig_state.fallback,
+            rig::RigResolveInput {
+                fallback: rig_state.fallback,
+                target_position: rig_state.fallback.position,
+                target_rotation: rig_state.fallback.rotation,
+                target_velocity: prism_math::DVec3::ZERO,
+                group_direction: prism_math::DVec3::Z,
+                spring_socket_offset: prism_math::Vec3::ZERO,
+                spring_direction: prism_math::Vec3::NEG_Z,
+                previous_position: Some(rig_state.fallback.position),
+                previous_rotation: Some(rig_state.fallback.rotation),
+                previous_spring_distance: rig_state.spring_distance,
+                dt,
+            },
+            targets,
+            scene,
         );
         let mut next_pose = output.pose;
+        if let Some(distance) = output.spring_distance {
+            rig_state.spring_distance = distance;
+        }
         if let Some(noise) = rig_state.noise {
             next_pose = noise.sample(next_pose, rig_state.time_seconds);
         }
         if let Some(impulse) = rig_state.impulse {
-            let (impulsed, remaining) = impulse.apply(next_pose, rig_state.dt_seconds());
+            let (impulsed, remaining) = impulse.apply(next_pose, dt);
             next_pose = impulsed;
             rig_state.impulse = (remaining.remaining_s > 0.0).then_some(remaining);
         }
-        rig_state.time_seconds = (rig_state.time_seconds + rig_state.dt_seconds()).max(0.0);
+        rig_state.time_seconds = (rig_state.time_seconds + dt).max(0.0);
         rig_state.fallback = next_pose;
         pose.0 = next_pose;
     }
 }
 
-#[cfg(feature = "rig")]
-impl CameraRigComponent {
-    fn dt_seconds(&self) -> f32 {
-        1.0 / 60.0
+/// Captures the engine clock before director, controller, and rig systems run.
+/// Every camera stage in one PostUpdate therefore observes the same delta.
+pub fn prepare_camera_frame(mut frame: ResMut<CameraFrame>, clocks: Option<Res<EngineClocks>>) {
+    if let Some(clocks) = clocks {
+        frame.dt_seconds = clocks.delta_secs();
     }
 }
 
@@ -559,26 +720,52 @@ impl Plugin for CameraPlugin {
             .init_resource::<CameraViewRegistry>()
             .init_resource::<PublishedViews>()
             .init_resource::<CameraDiagnostics>();
+        #[cfg(feature = "rig")]
+        app.init_resource::<CameraSceneQueryResource>()
+            .init_resource::<CameraTargetQueryResource>();
 
         #[cfg(all(feature = "director", feature = "rig"))]
         app.add_systems(
             PostUpdate,
             (
-                apply_camera_directors,
-                apply_camera_rigs,
-                publish_camera_views,
+                prepare_camera_frame.in_set(CameraSystemSet::Prepare),
+                apply_camera_directors.in_set(CameraSystemSet::Director),
+                apply_camera_controls.in_set(CameraSystemSet::Control),
+                apply_camera_rigs.in_set(CameraSystemSet::Rig),
+                publish_camera_views.in_set(CameraSystemSet::Publication),
             )
                 .chain(),
         );
         #[cfg(all(feature = "director", not(feature = "rig")))]
         app.add_systems(
             PostUpdate,
-            (apply_camera_directors, publish_camera_views).chain(),
+            (
+                prepare_camera_frame.in_set(CameraSystemSet::Prepare),
+                apply_camera_directors.in_set(CameraSystemSet::Director),
+                publish_camera_views.in_set(CameraSystemSet::Publication),
+            )
+                .chain(),
         );
         #[cfg(all(feature = "rig", not(feature = "director")))]
-        app.add_systems(PostUpdate, (apply_camera_rigs, publish_camera_views).chain());
+        app.add_systems(
+            PostUpdate,
+            (
+                prepare_camera_frame.in_set(CameraSystemSet::Prepare),
+                apply_camera_controls.in_set(CameraSystemSet::Control),
+                apply_camera_rigs.in_set(CameraSystemSet::Rig),
+                publish_camera_views.in_set(CameraSystemSet::Publication),
+            )
+                .chain(),
+        );
         #[cfg(not(any(feature = "director", feature = "rig")))]
-        app.add_systems(PostUpdate, publish_camera_views);
+        app.add_systems(
+            PostUpdate,
+            (
+                prepare_camera_frame.in_set(CameraSystemSet::Prepare),
+                publish_camera_views.in_set(CameraSystemSet::Publication),
+            )
+                .chain(),
+        );
     }
 }
 
@@ -589,15 +776,16 @@ mod tests {
     use prism_camera::{CameraErrorCode, ViewKind};
 
     #[cfg(any(feature = "director", feature = "rig"))]
-    use prism_math::DVec3;
+    use prism_math::{DQuat, DVec3, Vec3};
 
     #[cfg(feature = "director")]
     #[test]
     fn director_system_selects_candidate_and_publishes_output_pose() {
         let mut app = App::new();
         app.add_plugins(CameraPlugin::default());
-        let candidate = app.world_mut().spawn(VirtualCameraComponent(
-            rig::VirtualCamera {
+        let candidate = app
+            .world_mut()
+            .spawn(VirtualCameraComponent(rig::VirtualCamera {
                 key: 7,
                 priority: 10,
                 pose: CameraPose {
@@ -605,8 +793,7 @@ mod tests {
                     ..Default::default()
                 },
                 ..Default::default()
-            },
-        ));
+            }));
         let output = app.world_mut().spawn(CameraBundle::default());
         let mut brain = CameraBrainComponent::default();
         brain.set_candidates([candidate]);
@@ -640,6 +827,116 @@ mod tests {
 
         let pose = app.world().get::<CameraPoseComponent>(output).unwrap();
         assert_eq!(pose.0.position, DVec3::new(4.0, 5.0, 6.0));
+    }
+
+    #[cfg(feature = "rig")]
+    #[test]
+    fn rig_system_consumes_injected_target_and_scene_queries() {
+        struct Query;
+
+        impl rig::TargetQuery for Query {
+            fn resolve_batch(&self, entities: &[rig::Entity], states: &mut [rig::TargetState]) {
+                for (entity, state) in entities.iter().zip(states.iter_mut()) {
+                    if *entity == 42 {
+                        *state = rig::TargetState {
+                            valid: true,
+                            position: DVec3::ZERO,
+                            rotation: DQuat::IDENTITY,
+                            velocity: DVec3::ZERO,
+                        };
+                    }
+                }
+            }
+        }
+
+        impl rig::SceneQuery for Query {
+            fn cast_batch(&self, _requests: &[rig::CastRequest], hits: &mut [rig::CastHit]) {
+                for hit in hits {
+                    hit.hit = true;
+                    hit.distance = 1.0;
+                    hit.normal = Vec3::Y;
+                }
+            }
+        }
+
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::default());
+        app.world_mut()
+            .resource_mut::<CameraSceneQueryResource>()
+            .query = Some(Box::new(Query));
+        app.world_mut()
+            .resource_mut::<CameraTargetQueryResource>()
+            .query = Some(Box::new(Query));
+        let output = app.world_mut().spawn(CameraBundle::default());
+        assert!(app.world_mut().insert(
+            output,
+            CameraRigComponent {
+                body: rig::BodyRig::SpringArmTargeted(rig::SpringArmBody {
+                    target: 42,
+                    arm: rig::SpringArm {
+                        arm_length: 4.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ));
+
+        app.update();
+
+        let pose = app.world().get::<CameraPoseComponent>(output).unwrap();
+        assert!((pose.0.position.z + 0.95).abs() < 1.0e-6);
+    }
+
+    #[cfg(feature = "rig")]
+    #[test]
+    fn rig_system_retains_spring_arm_distance_between_frames() {
+        struct Query;
+
+        impl rig::SceneQuery for Query {
+            fn cast_batch(&self, _requests: &[rig::CastRequest], hits: &mut [rig::CastHit]) {
+                for hit in hits {
+                    hit.hit = true;
+                    hit.distance = 1.0;
+                    hit.normal = Vec3::Y;
+                }
+            }
+        }
+
+        let mut app = App::new();
+        app.add_plugins(CameraPlugin::default());
+        app.world_mut()
+            .resource_mut::<CameraSceneQueryResource>()
+            .query = Some(Box::new(Query));
+        let output = app.world_mut().spawn(CameraBundle::default());
+        assert!(app.world_mut().insert(
+            output,
+            CameraRigComponent {
+                body: rig::BodyRig::SpringArm(rig::SpringArm {
+                    arm_length: 4.0,
+                    lag_half_life: 0.2,
+                    collision_margin: 0.0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ));
+
+        app.update();
+        let first = app
+            .world()
+            .get::<CameraRigComponent>(output)
+            .unwrap()
+            .spring_distance;
+        app.update();
+        let second = app
+            .world()
+            .get::<CameraRigComponent>(output)
+            .unwrap()
+            .spring_distance;
+        assert!(first.is_finite());
+        assert_eq!(second, first);
     }
 
     #[test]
@@ -741,6 +1038,9 @@ mod tests {
             prism_camera::ViewStatus::Invalid(CameraErrorCode::InvalidViewport)
         );
         assert_eq!(app.world().resource::<CameraViewRegistry>().len(), 1);
-        assert_eq!(app.world().resource::<CameraDiagnostics>().errors().len(), 1);
+        assert_eq!(
+            app.world().resource::<CameraDiagnostics>().errors().len(),
+            1
+        );
     }
 }

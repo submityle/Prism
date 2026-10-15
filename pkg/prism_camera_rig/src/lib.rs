@@ -268,6 +268,7 @@ impl Default for RigResolveInput {
 pub struct BodyOutput {
     pub position: DVec3,
     pub spring_arm_status: Option<SpringArmStatus>,
+    pub spring_distance: Option<f32>,
 }
 
 #[cfg(feature = "rig")]
@@ -348,6 +349,7 @@ impl BodyRig {
             );
         }
         let mut spring_arm_status = None;
+        let mut spring_distance = None;
         let position = match self {
             Self::Fixed { position } => *position,
             Self::Follow { target, offset } => *target + *offset,
@@ -381,6 +383,7 @@ impl BodyRig {
                     CollisionMask::ALL,
                 );
                 spring_arm_status = Some(status);
+                spring_distance = Some(distance);
                 socket
                     + DVec3::new(direction.x as f64, direction.y as f64, direction.z as f64)
                         * distance as f64
@@ -416,6 +419,7 @@ impl BodyRig {
                     body.mask,
                 );
                 spring_arm_status = Some(status);
+                spring_distance = Some(distance);
                 socket
                     + DVec3::new(direction.x as f64, direction.y as f64, direction.z as f64)
                         * distance as f64
@@ -446,6 +450,7 @@ impl BodyRig {
         BodyOutput {
             position: finite_position(position, fallback),
             spring_arm_status,
+            spring_distance,
         }
     }
 }
@@ -593,6 +598,7 @@ impl AimRig {
 pub struct RigOutput {
     pub pose: CameraPose,
     pub spring_arm_status: Option<SpringArmStatus>,
+    pub spring_distance: Option<f32>,
 }
 
 #[cfg(feature = "rig")]
@@ -606,6 +612,7 @@ pub fn compose_rig(body: BodyRig, aim: AimRig, origin: DVec3, fallback: CameraPo
             world_origin: origin,
         },
         spring_arm_status: None,
+        spring_distance: None,
     }
 }
 
@@ -635,6 +642,7 @@ pub fn compose_rig_with_queries(
             world_origin: origin,
         },
         spring_arm_status: body_output.spring_arm_status,
+        spring_distance: body_output.spring_distance,
     }
 }
 

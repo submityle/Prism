@@ -398,26 +398,12 @@ mod tests {
         };
         let mut intent = CameraIntent::default();
         intent.relative_rendering = false;
-        let view = derive_view(
-            intent,
-            pose,
-            0,
-            [64, 64],
-            &mut ViewHistory::default(),
-        )
-        .unwrap();
+        let view = derive_view(intent, pose, 0, [64, 64], &mut ViewHistory::default()).unwrap();
         assert!(!view.relative_rendering);
         assert_eq!(view.gpu_record().flags & (1 << 3), 0);
 
         intent.relative_rendering = true;
-        let view = derive_view(
-            intent,
-            pose,
-            0,
-            [64, 64],
-            &mut ViewHistory::default(),
-        )
-        .unwrap();
+        let view = derive_view(intent, pose, 0, [64, 64], &mut ViewHistory::default()).unwrap();
         assert!(view.relative_rendering);
         assert_ne!(view.gpu_record().flags & (1 << 3), 0);
     }
@@ -431,14 +417,8 @@ mod tests {
         };
         let mut relative = CameraIntent::default();
         relative.relative_rendering = true;
-        let relative_view = derive_view(
-            relative,
-            pose,
-            0,
-            [64, 64],
-            &mut ViewHistory::default(),
-        )
-        .unwrap();
+        let relative_view =
+            derive_view(relative, pose, 0, [64, 64], &mut ViewHistory::default()).unwrap();
         assert_eq!(relative_view.world_origin, pose.world_origin);
         assert_eq!(relative_view.world_from_view.translation.x, 10.0);
         assert_eq!(relative_view.world_from_view.translation.y, 20.0);
@@ -446,14 +426,8 @@ mod tests {
 
         let mut absolute = relative;
         absolute.relative_rendering = false;
-        let absolute_view = derive_view(
-            absolute,
-            pose,
-            0,
-            [64, 64],
-            &mut ViewHistory::default(),
-        )
-        .unwrap();
+        let absolute_view =
+            derive_view(absolute, pose, 0, [64, 64], &mut ViewHistory::default()).unwrap();
         assert_eq!(absolute_view.world_origin, DVec3::ZERO);
         assert_eq!(absolute_view.world_from_view.translation.x, 1010.0);
         assert_eq!(absolute_view.world_from_view.translation.y, 2020.0);

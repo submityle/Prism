@@ -10,7 +10,7 @@
 > - **多视图家族**：对接本仓 `prism_render_architecture::view_family`（Main/StereoEye/Shadow/Reflection/SceneCapture/Editor/OfflineTile）
 > 本文为纯经典线性代数 / 几何光学 / 控制插值路线，**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/CryEngine 源码或衍生代码。
 
-- 版本： v1.3（核心运行时实现核验版，2026-10-15；`prism_camera`、`prism_camera_rig` 与 `prism_camera_ecs` 已纳入 workspace，并完成默认/全特性测试、裁剪配置检查、ECS 发布链测试和 GPU 数学 parity 记录；承接 `prism_math`/`prism_render_architecture` 的现有契约）
+- 版本： v1.4（核心运行时实现核验版，2026-10-15；`prism_camera`、`prism_camera_gpu`、`prism_camera_rig` 与 `prism_camera_ecs` 已纳入根 workspace，并完成默认/全特性测试、裁剪配置检查、ECS 发布链测试、GPU 上传 ring 测试和 GPU 数学 parity 记录；承接 `prism_math`/`prism_render_architecture` 的现有契约）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_math`（Vec3/Quat/Affine3/Mat4/Dir3、SIMD、投影构造）、`prism_transform`（相机位姿的空间真相 Local/Global + look_at 约束 + 大世界 64-bit/原点重定位）、`prism_ecs`（相机/投影/后处理为组件、变更检测、并行查询）、`prism_render_architecture::view_family`（ViewKind/ViewImportance/ViewRegistry/ViewHandle 视图注册与重要度聚合）；可选 `prism_window`（RenderTarget/表面尺寸/缩放因子）、`prism_input`（指针→射线、拾取）、`prism_time`（固定步 alpha / 曝光自适应时间常数）、`prism_tasks`（多视图并行提取）、`prism_diagnostic`（计数器/trace）、`prism_asset`（LUT/镜头畸变贴图/相机动画片段）
 - 层级定位： 渲染前端 L4「取景与导演」；上接渲染提取（视图 UBO）/剔除（frustum）/时域放大（jitter + 历史）/后处理（相机级 stack），下接 `prism_transform`（位姿）/`prism_math`（代数）/`view_family`（视图槽）
@@ -1021,8 +1021,8 @@ pub enum CameraSystems {
 
 ```rust
 app.add_plugins(prism_camera_ecs::CameraPlugin::default()); // ECS/App 发布适配层
-// Director/Rig/Post 的具体系统由上层应用装配；本仓库当前提供
-// prism_camera_rig 的纯数据 API 和 prism_camera 的 PostStack 契约。
+// Director、Control、Rig、Prepare、Publication 由 CameraPlugin 按固定顺序装配；
+// 渲染后处理算法仍由下游渲染侧消费 prism_camera 的 PostStack 契约。
 ```
 
 `prism_camera_ecs::CameraPlugin` 在 `PostUpdate` 中调用核心 `derive_view`/`publish_view`，并通过 `CameraViewRegistry` 维护实体到稳定 `ViewHandle` 的映射；渲染插件作为读取者。二者经 `ViewRegistry` 单向解耦（相机写、渲染读）。
@@ -1195,10 +1195,11 @@ pub mod prelude {
 - `cargo test -p prism_math_gpu --test projection_parity -- --nocapture`：在跨沙盒真实设备环境执行，3 passed，0 failed；覆盖普通透视、reversed-Z 透视和正交投影。
 - 同一 GPU 测试在受限沙盒中只得到“无可用 adapter”的显式跳过；这不是成功的真实 GPU 证据，真实设备结果以上述跨沙盒运行记录为准。
 - 现有 `prism_render_gpudriven::camera` 是轴对齐正交场景测试相机，不等同于本文的 `prism_camera`；本文不把它包装成完整相机内核。
-- `cargo test -p prism_camera -p prism_camera_rig -p prism_camera_ecs --all-targets`：`prism_camera` 25 passed、`prism_camera_rig` 12 passed、`prism_camera_ecs` 4 passed，0 failed；覆盖投影视图派生、历史失效、viewport、jitter、frustum、镜头曝光、GPU ABI、后处理排序、立体视图、拾取、过场采样、外部姿态校验、遮挡滞回、前瞻预测、历史稳定化、Body/Aim、SpringArm、噪声、Impulse、输入归一化、LOD 调度、稳定选择、导演混合、半衰期工具和真实 ECS `PostUpdate` 发布链。
-- `cargo test -p prism_camera --all-features --all-targets`：31 passed；`cargo test -p prism_camera_rig --all-features --all-targets`：12 passed；显式 feature 组合和 `cargo check` 默认/全特性/裁剪配置均已验证。
+- `cargo test -p prism_camera -p prism_camera_rig -p prism_camera_gpu -p prism_camera_ecs --all-targets --offline`：`prism_camera` 32 passed、`prism_camera_rig` 15 passed、`prism_camera_gpu` 6 passed、`prism_camera_ecs` 8 passed，0 failed；覆盖投影视图派生、历史失效、viewport、jitter、frustum、镜头曝光、GPU ABI、上传 ring 生命周期、后处理排序、立体视图、拾取、过场采样、外部姿态校验、遮挡滞回、前瞻预测、历史稳定化、Body/Aim、SceneQuery/TargetQuery 注入、SpringArm、噪声、Impulse、输入归一化、LOD 调度、稳定选择、导演混合、半衰期工具和真实 ECS `PostUpdate` 发布链。
+- `cargo test -p prism_camera --all-features --all-targets --offline`：40 passed；`cargo check -p prism_camera -p prism_camera_rig -p prism_camera_gpu -p prism_camera_ecs --offline`：通过；显式 feature 组合和 `no_std` 裁剪配置均已验证。
 - 相机源码、Rig 基准和 ECS adapter 的定向 `rustfmt --check` 与相机改动的 `git diff --check`：通过；当前 workspace 全量 `cargo fmt --all -- --check` 会被其它未纳入本次相机提交的脏文件语法/格式问题阻断，不能作为相机代码失败证据。
-- `cargo bench -p prism_camera_rig --bench camera_contracts -- --iterations 1`：`derive_view=152.083 ns/op`、`camera_brain_update=22.738 ns/op`、`impulse_apply_6dof=47.217 ns/op`、`view_lod_scheduler=3.921 ns/op`；这是微基准结果，不替代多视图 P95/P99 性能报告。
+- `cargo bench -p prism_camera_rig --bench camera_contracts -- --iterations 1`：本次独立验证得到 `derive_view=2656.400 ns/op`、`camera_brain_update=220.367 ns/op`、`impulse_apply_6dof=567.771 ns/op`、`view_lod_scheduler=31.325 ns/op`；ECS 多视图基准得到 1/8/16/64 view 的 P50/P95/P99 分别为 `31364/42812/66823`、`56385/64520/68750`、`86656/97427/102906`、`282906/309166/332718 ns/frame`。这些是当前机器的可复现实测，不替代跨硬件预算结论。
+- `prism_camera_gpu` 当前验证的是 engine-neutral upload plan/ring 的完整生命周期；真实 GPU 设备验证仍由 `prism_math_gpu` projection parity 提供数学设备证据，尚未把相机 View UBO 绑定到具体渲染 backend，因此不将数学 parity 误报为完整相机 GPU backend 验收。
 - GPU 记录来自 `prism_math_gpu` 的投影 parity 测试，不等同于 `prism_camera` 全链路 GPU 验收；当前 camera agent 运行中无可用 adapter 时明确跳过，不能据此宣称 camera 的真实设备全链路验证已完成。
 
 ---
@@ -1207,11 +1208,11 @@ pub mod prelude {
 
 ### 27.1 当前实现与本文规格的关系
 
-`pkg/prism_camera` 已提供 `CameraIntent`、`CameraPose`、`Projection`、`ViewData`、`ViewHistory`、viewport、reversed-Z/无限远投影、oblique/SubView、5/6 面 frustum、Halton/Sobol jitter、Filmback/Lens/Exposure、PostStack、viewport/world picking、StereoPair/late-latch、相对渲染原点拆分、GPU View ABI 和 `ViewRegistry` 发布桥接；advanced 契约提供 CameraTrack、自动对焦、快门、foveation、批量 key、LOD、构图、确定性 digest、ExternalPoseValidator、OcclusionFadeState、LookaheadPredictor 和 HistoryStabilizer。`pkg/prism_camera_rig` 已提供 `VirtualCamera`、`CameraBrain`、稳定优先级选择、位姿混合、Body/Aim、`SceneQuery` 批量弹簧臂、半衰期阻尼、Fly/Orbit/Pan 控制器、确定性梯度噪声、ImpulseBuffer、输入归一化和 ViewUpdateScheduler；`pkg/prism_camera_ecs` 已提供实体组件、帧资源、稳定句柄映射、诊断资源和 `PostUpdate` 发布系统。
+`pkg/prism_camera` 已提供 `CameraIntent`、`CameraPose`、`Projection`、`ViewData`、`ViewHistory`、viewport、reversed-Z/无限远投影、oblique/SubView、5/6 面 frustum、Halton/Sobol jitter、Filmback/Lens/Exposure、PostStack、viewport/world picking、StereoPair/late-latch、相对渲染原点拆分、GPU View ABI、`ViewRegistry` 发布桥接和 fixed-tick `AdvancedRuntime`；advanced 契约提供 CameraTrack、自动对焦、快门、foveation、批量 key、LOD、构图、确定性 digest、ExternalPoseValidator、OcclusionFadeState、LookaheadPredictor 和 HistoryStabilizer。`pkg/prism_camera_rig` 已提供 `VirtualCamera`、`CameraBrain`、稳定优先级选择、位姿混合、Body/Aim、`SceneQuery`/`TargetQuery` 批量弹簧臂、半衰期阻尼、Fly/Orbit/Pan 控制器、确定性梯度噪声、ImpulseBuffer、输入归一化和 ViewUpdateScheduler；`pkg/prism_camera_ecs` 已提供实体组件、统一帧时钟、稳定句柄映射、诊断资源、SceneQuery/TargetQuery 注入和 `PostUpdate` 发布系统；`pkg/prism_camera_gpu` 已提供有界 ViewBufferRing、增量上传、清零、提交/取消/回收和 stale token/schema 校验。
 
-实现采用三层所有权：相机 crate 只计算不可变视图快照，rig crate 只生成位姿结果，ECS adapter 只负责生命周期和发布；渲染资源、物理求交和 Transform 存储继续由各自 crate 持有。三个 crate 均禁止 unsafe；核心数学和 rig 路径保持 `no_std + alloc`，ECS adapter 使用应用/ECS crate。提交记录为 `cfb34909f`（ECS 发布链）、`503b0e72d`（高级契约与基准）和 `bf53ef12b`（裁剪配置测试修正）。
+实现采用四层所有权：相机 crate 只计算不可变视图快照，rig crate 只生成位姿结果，ECS adapter 只负责生命周期和发布，GPU crate 只负责 ABI 消费侧的有界上传计划；渲染资源、物理求交和 Transform 存储继续由各自 crate 持有。四个相机 crate 均禁止 unsafe；核心数学、rig 和 GPU ring 路径保持 `no_std + alloc`，ECS adapter 使用应用/ECS crate。已核验提交包括 `cfb34909f`（ECS 发布链）、`bf53ef12b`（裁剪配置测试修正）、`6dd2e3929`（ABI/ECS 加固）、`e4cf94581`（GPU consumer）、`e522e7c57`（fixed-tick advanced runtime）；本次接线提交将在本次核验后追加。
 
-本文中涉及的渲染后处理算法、物理后端、XR 设备驱动和完整 ECS 导演/Rig 系统由对应所有者消费这些稳定契约；它们不复制相机矩阵或历史真相。相机核心的交付验收以三个 crate 的 API、单元测试、feature check、ABI 检查和可获得的 GPU parity 证据为准；跨模块能力沿同一契约接入，不改变相机数学与历史协议。
+本文中涉及的渲染后处理算法、物理后端、XR 设备驱动和具体渲染 backend 由对应所有者消费这些稳定契约；相机 ECS 内的 Director/Control/Rig/Publication 已提供可运行接线，它们不复制相机矩阵或历史真相。相机核心的交付验收以四个 crate 的 API、单元测试、feature check、ABI/upload plan 检查和可获得的 GPU parity 证据为准；跨模块能力沿同一契约接入，不改变相机数学与历史协议。
 
 ### 27.2 风险处置表
 

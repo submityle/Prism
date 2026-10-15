@@ -49,20 +49,62 @@ mod tests {
     fn record_has_stable_wgsl_layout() {
         assert_eq!(size_of::<GpuViewRecord>(), GPU_VIEW_RECORD_SIZE);
         assert_eq!(align_of::<GpuViewRecord>(), GPU_VIEW_RECORD_ALIGNMENT);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, clip_from_world), GPU_VIEW_OFFSET_CLIP_FROM_WORLD);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, clip_from_world_unjittered), GPU_VIEW_OFFSET_CLIP_FROM_WORLD_UNJITTERED);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, prev_clip_from_world), GPU_VIEW_OFFSET_PREV_CLIP_FROM_WORLD);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, view_from_world), GPU_VIEW_OFFSET_VIEW_FROM_WORLD);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, world_from_view), GPU_VIEW_OFFSET_WORLD_FROM_VIEW);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, world_origin_hi), GPU_VIEW_OFFSET_WORLD_ORIGIN_HI);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, world_origin_lo), GPU_VIEW_OFFSET_WORLD_ORIGIN_LO);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, exposure), GPU_VIEW_OFFSET_EXPOSURE);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, schema_version), GPU_VIEW_OFFSET_SCHEMA_VERSION);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, flags), GPU_VIEW_OFFSET_FLAGS);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, view_index), GPU_VIEW_OFFSET_VIEW_INDEX);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, jitter), GPU_VIEW_OFFSET_JITTER);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, viewport), GPU_VIEW_OFFSET_VIEWPORT);
-        assert_eq!(core::mem::offset_of!(GpuViewRecord, frustum), GPU_VIEW_OFFSET_FRUSTUM);
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, clip_from_world),
+            GPU_VIEW_OFFSET_CLIP_FROM_WORLD
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, clip_from_world_unjittered),
+            GPU_VIEW_OFFSET_CLIP_FROM_WORLD_UNJITTERED
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, prev_clip_from_world),
+            GPU_VIEW_OFFSET_PREV_CLIP_FROM_WORLD
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, view_from_world),
+            GPU_VIEW_OFFSET_VIEW_FROM_WORLD
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, world_from_view),
+            GPU_VIEW_OFFSET_WORLD_FROM_VIEW
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, world_origin_hi),
+            GPU_VIEW_OFFSET_WORLD_ORIGIN_HI
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, world_origin_lo),
+            GPU_VIEW_OFFSET_WORLD_ORIGIN_LO
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, exposure),
+            GPU_VIEW_OFFSET_EXPOSURE
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, schema_version),
+            GPU_VIEW_OFFSET_SCHEMA_VERSION
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, flags),
+            GPU_VIEW_OFFSET_FLAGS
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, view_index),
+            GPU_VIEW_OFFSET_VIEW_INDEX
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, jitter),
+            GPU_VIEW_OFFSET_JITTER
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, viewport),
+            GPU_VIEW_OFFSET_VIEWPORT
+        );
+        assert_eq!(
+            core::mem::offset_of!(GpuViewRecord, frustum),
+            GPU_VIEW_OFFSET_FRUSTUM
+        );
     }
 
     #[test]
@@ -110,13 +152,31 @@ mod tests {
             ..Default::default()
         };
         let bytes = record.to_bytes_le();
-        assert_eq!(&bytes[GPU_VIEW_OFFSET_EXPOSURE..][..4], &1.5_f32.to_le_bytes());
-        assert_eq!(&bytes[GPU_VIEW_OFFSET_SCHEMA_VERSION..][..4], &2_u32.to_le_bytes());
+        assert_eq!(
+            &bytes[GPU_VIEW_OFFSET_EXPOSURE..][..4],
+            &1.5_f32.to_le_bytes()
+        );
+        assert_eq!(
+            &bytes[GPU_VIEW_OFFSET_SCHEMA_VERSION..][..4],
+            &2_u32.to_le_bytes()
+        );
         assert_eq!(&bytes[GPU_VIEW_OFFSET_FLAGS..][..4], &3_u32.to_le_bytes());
-        assert_eq!(&bytes[GPU_VIEW_OFFSET_VIEW_INDEX..][..4], &4_u32.to_le_bytes());
-        assert_eq!(&bytes[GPU_VIEW_OFFSET_JITTER..][..4], &5.0_f32.to_le_bytes());
-        assert_eq!(&bytes[GPU_VIEW_OFFSET_JITTER + 4..][..4], &6.0_f32.to_le_bytes());
-        assert_eq!(&bytes[GPU_VIEW_OFFSET_VIEWPORT..][..4], &7.0_f32.to_le_bytes());
+        assert_eq!(
+            &bytes[GPU_VIEW_OFFSET_VIEW_INDEX..][..4],
+            &4_u32.to_le_bytes()
+        );
+        assert_eq!(
+            &bytes[GPU_VIEW_OFFSET_JITTER..][..4],
+            &5.0_f32.to_le_bytes()
+        );
+        assert_eq!(
+            &bytes[GPU_VIEW_OFFSET_JITTER + 4..][..4],
+            &6.0_f32.to_le_bytes()
+        );
+        assert_eq!(
+            &bytes[GPU_VIEW_OFFSET_VIEWPORT..][..4],
+            &7.0_f32.to_le_bytes()
+        );
         assert!(bytes[488..].iter().all(|byte| *byte == 0));
     }
 }

@@ -74,7 +74,10 @@ fn config() -> Config {
 }
 
 fn percentile(samples: &mut [u128], numerator: usize, denominator: usize) -> u128 {
-    assert!(!samples.is_empty(), "percentile requires at least one sample");
+    assert!(
+        !samples.is_empty(),
+        "percentile requires at least one sample"
+    );
     samples.sort_unstable();
     let index = ((samples.len() - 1) * numerator).div_ceil(denominator);
     samples[index]
@@ -117,7 +120,9 @@ fn build_app(view_count: usize) -> App {
 fn ordered_and_stable(app: &App, handles: &mut Option<Vec<ViewHandle>>) -> (bool, bool) {
     let published = app.world().resource::<PublishedViews>();
     let current_handles: Vec<_> = published.iter().map(|view| view.data.handle).collect();
-    let handles_stable = handles.as_ref().is_none_or(|previous| previous == &current_handles);
+    let handles_stable = handles
+        .as_ref()
+        .is_none_or(|previous| previous == &current_handles);
     if handles.is_none() {
         *handles = Some(current_handles);
     }
@@ -165,11 +170,26 @@ fn measure(view_count: usize, config: Config) -> Measurement {
         black_box((active_views, diagnostics, registry_views));
     }
 
-    assert_eq!(active_views, view_count, "all configured views must publish");
-    assert_eq!(diagnostics, 0, "valid multi-view inputs must stay diagnostic-free");
-    assert_eq!(registry_views, view_count, "registry must retain every active view");
-    assert!(handles_stable, "view handles must remain stable after warm-up");
-    assert!(order_stable, "published views must stay sorted by order and entity");
+    assert_eq!(
+        active_views, view_count,
+        "all configured views must publish"
+    );
+    assert_eq!(
+        diagnostics, 0,
+        "valid multi-view inputs must stay diagnostic-free"
+    );
+    assert_eq!(
+        registry_views, view_count,
+        "registry must retain every active view"
+    );
+    assert!(
+        handles_stable,
+        "view handles must remain stable after warm-up"
+    );
+    assert!(
+        order_stable,
+        "published views must stay sorted by order and entity"
+    );
 
     Measurement {
         view_count,
@@ -195,10 +215,7 @@ fn diagnostic_probe() -> usize {
         ..CameraBundle::default()
     });
     app.update();
-    app.world()
-        .resource::<CameraDiagnostics>()
-        .errors()
-        .len()
+    app.world().resource::<CameraDiagnostics>().errors().len()
 }
 
 fn main() {
@@ -210,10 +227,7 @@ fn main() {
     let diagnostic_errors = diagnostic_probe();
 
     println!("prism_camera_ecs multiview_contracts");
-    println!(
-        "  target          : {}x{}",
-        TARGET_SIZE[0], TARGET_SIZE[1]
-    );
+    println!("  target          : {}x{}", TARGET_SIZE[0], TARGET_SIZE[1]);
     println!("  warm-up frames  : {}", config.warmup_frames);
     println!("  samples         : {}", config.samples);
     println!("  frames/sample   : {}", config.frames_per_sample);

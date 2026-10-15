@@ -9,6 +9,3 @@ publish = false
 
 [dependencies]
 prism_camera = { path = "../prism_camera", default-features = false }
-
-# Keep direct manifest-path checks independent from the repository workspace.
-[workspace]
