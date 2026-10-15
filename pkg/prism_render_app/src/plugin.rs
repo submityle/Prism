@@ -249,6 +249,7 @@ where
         // Images reach the GPU the same way: the spine owns the family so a
         // material can bind a texture without the app wiring a second pipeline.
         crate::render_asset::register_render_assets::<I, crate::GpuImage>(app);
+        crate::presentation::install::<I>(app);
     }
 
     fn finish(&self, app: &mut App) {
@@ -266,6 +267,7 @@ where
         let Some(render) = app.sub_app_mut(RenderApp) else {
             return;
         };
+        crate::presentation::shutdown::<I>(&mut render.world);
         // A partially rebuilt target may still name the previous generation.
         // Release the device with the world instead of waiting on a lost GPU
         // or destroying those ids against its replacement.

@@ -75,7 +75,7 @@ use crate::state::StateTransitionSet;
 /// despawns it at the next [`StateTransition`].
 /// Enable the cleanup for a state type with
 /// [`App::enable_state_scoped_entities`]; see the [module docs](crate::state::scoped)
-/// for the full lifecycle and the flat-despawn scope limit.
+/// for the full lifecycle and recursive hierarchy cleanup behavior.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StateScoped<S: States>(pub S);
 

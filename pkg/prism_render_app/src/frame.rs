@@ -55,10 +55,20 @@ pub(crate) fn target_graph(
     queues: &RenderQueues,
     functions: &DrawFunctions,
 ) -> RenderGraph {
+    target_graph_output(target, queues, functions).0
+}
+
+/// The color handle lets the presentation pass consume this exact frame.
+pub(crate) fn target_graph_output(
+    target: &RenderTarget,
+    queues: &RenderQueues,
+    functions: &DrawFunctions,
+) -> (RenderGraph, prism_render_graph::TextureHandle) {
     let mut graph = RenderGraph::new(target.viewport().extent());
-    let color = graph.import_texture(
+    let mut color = graph.import_texture(
         "prism-render-app-target",
-        TextureDesc::color(target.format()).with_usage(TextureUsages::COPY_SRC),
+        TextureDesc::color(target.format())
+            .with_usage(TextureUsages::COPY_SRC.union(TextureUsages::TEXTURE_BINDING)),
         ImportedTexture {
             texture: target.texture(),
             default_view: target.view(),
@@ -103,7 +113,7 @@ pub(crate) fn target_graph(
     // A frame that rasterizes geometry needs depth, and the pipelines it
     // specializes must agree with the attachment: the queue stage passes
     // `RENDER_DEPTH_FORMAT` into the variant for exactly this reason.
-    let depth = graph.import_texture(
+    let mut depth = graph.import_texture(
         "prism-render-app-depth",
         TextureDesc::depth(target.depth_format()),
         ImportedTexture {
@@ -121,9 +131,9 @@ pub(crate) fn target_graph(
     graph.add_raster_pass(
         "prism-render-app-clear",
         PassFlags::SIDE_EFFECT,
-        move |builder| {
-            let _ = builder.color_attachment(color);
-            let _ = builder.depth_attachment(depth);
+        |builder| {
+            color = builder.color_attachment(color);
+            depth = builder.depth_attachment(depth);
             |_ctx| {}
         },
     );
@@ -155,9 +165,9 @@ pub(crate) fn target_graph(
         graph.add_raster_pass(
             format!("prism-render-app-{phase:?}"),
             PassFlags::SIDE_EFFECT,
-            move |builder| {
-                let _ = builder.color_attachment(color);
-                let _ = builder.depth_attachment(depth);
+            |builder| {
+                color = builder.color_attachment(color);
+                depth = builder.depth_attachment(depth);
                 for handle in &vertex_reads {
                     let _ = builder.read_vertex(*handle);
                 }
@@ -178,5 +188,5 @@ pub(crate) fn target_graph(
             },
         );
     }
-    graph
+    (graph, color)
 }

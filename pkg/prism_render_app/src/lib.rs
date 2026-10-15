@@ -77,6 +77,7 @@ mod mesh_source;
 mod pipeline_cache;
 mod pipeline_pass;
 mod plugin;
+pub mod presentation;
 mod queue;
 mod queue_stage;
 mod record;
@@ -133,6 +134,12 @@ pub use pipeline_cache::{
 };
 pub use pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
 pub use plugin::PrismRenderPlugin;
+pub use presentation::{
+    WindowFrameStatus, WindowId, WindowRenderError, WindowRenderQueues, WindowRenderRequests,
+    WindowRenderTargets, WindowSurfaceOptions,
+};
+#[cfg(feature = "winit")]
+pub use presentation::WinitPresentationPlugin;
 pub use queue::{
     phase_for_bin_class, phase_for_render_class, DrawRequest, IndirectArgs, PhaseItem, RenderQueues,
 };
@@ -195,6 +202,12 @@ pub mod prelude {
     };
     pub use crate::pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
     pub use crate::plugin::PrismRenderPlugin;
+    pub use crate::presentation::{
+        WindowFrameStatus, WindowId, WindowRenderError, WindowRenderQueues, WindowRenderRequests,
+        WindowRenderTargets, WindowSurfaceOptions,
+    };
+    #[cfg(feature = "winit")]
+    pub use crate::presentation::WinitPresentationPlugin;
     pub use crate::queue::{
         phase_for_bin_class, phase_for_render_class, DrawRequest, IndirectArgs, PhaseItem,
         RenderQueues,

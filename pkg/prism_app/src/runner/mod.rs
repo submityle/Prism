@@ -47,6 +47,10 @@ mod headless;
 mod once;
 #[cfg(feature = "winit")]
 mod winit;
+#[cfg(feature = "winit")]
+mod window_bridge;
+#[cfg(feature = "winit")]
+pub use window_bridge::WindowRenderBridge;
 
 #[cfg(feature = "std")]
 pub use dedicated_server::{DedicatedServerRunner, ServerTickDiagnostics};

@@ -119,6 +119,18 @@ where
             }
         }
         ensure_render_startup(world);
+        // Startup can execute provider-owned systems that submit work to the
+        // replacement device. Observe a loss here before an asset-recovery
+        // deferral can turn this frame into an apparently clean retry; the
+        // caller must retain the precise replacement-loss diagnostic.
+        if world
+            .resource::<RenderRuntimeResource<I>>()
+            .runtime()
+            .device_lost()
+            .is_some()
+        {
+            return Err("replacement device was lost during startup".into());
+        }
         if !core_was_rebuilt && recovered_assets_pending(world) {
             // The next one-way extract must first copy unchanged source assets.
             return Ok(false);

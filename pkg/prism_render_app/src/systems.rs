@@ -110,6 +110,9 @@ pub(crate) fn execute_frame<I>(
     runtime: Res<RenderRuntimeResource<I>>,
     mut target: ResMut<RenderTarget>,
     mut stats: ResMut<RenderFrameStats>,
+    requests: Res<crate::WindowRenderRequests<I>>,
+    overrides: Res<crate::WindowRenderQueues>,
+    mut windows: ResMut<crate::WindowRenderTargets<I>>,
 ) where
     I: Instance + Send + Sync + 'static,
     I::Adapter: Send + Sync + 'static,
@@ -117,6 +120,9 @@ pub(crate) fn execute_frame<I>(
     I::Queue: Send + Sync + FrameSync + 'static,
     I::Surface: Send + Sync + 'static,
 {
+    if windows.drive(runtime.runtime(), &requests, &overrides, &queues, &functions, &mut stats) {
+        return;
+    }
     let viewport = record.viewport;
     stats.last_viewport = viewport;
     if viewport.is_empty() {

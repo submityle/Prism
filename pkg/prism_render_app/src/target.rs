@@ -17,7 +17,8 @@ use crate::intent::RenderViewport;
 /// texture was born zeroed").
 pub(crate) const RENDER_TARGET_USAGES: TextureUsages = TextureUsages::RENDER_ATTACHMENT
     .union(TextureUsages::COPY_SRC)
-    .union(TextureUsages::COPY_DST);
+    .union(TextureUsages::COPY_DST)
+    .union(TextureUsages::TEXTURE_BINDING);
 
 /// The render sub-app's offscreen frame target: its color plane and its depth
 /// plane.
@@ -48,21 +49,32 @@ impl RenderTarget {
 
     /// Creates a target of `viewport` in the crate's frame-target formats.
     fn create<D: RenderDevice>(device: &D, viewport: RenderViewport) -> Self {
+        let mut pending = TargetAllocation { device, texture: None, view: None,
+            depth_texture: None, depth_view: None };
         let format = crate::RENDER_TARGET_FORMAT;
         let texture = device.create_texture(&TextureDescriptor::new_2d(
             viewport.extent(),
             format,
             RENDER_TARGET_USAGES,
         ));
+        pending.texture = Some(texture);
         let view = device.create_texture_view(texture, &TextureViewDescriptor::default());
+        pending.view = Some(view);
         let depth_format = crate::RENDER_DEPTH_FORMAT;
         let depth_texture = device.create_texture(&TextureDescriptor::new_2d(
             viewport.extent(),
             depth_format,
             TextureUsages::RENDER_ATTACHMENT,
         ));
+        pending.depth_texture = Some(depth_texture);
         let depth_view =
             device.create_texture_view(depth_texture, &TextureViewDescriptor::default());
+        pending.depth_view = Some(depth_view);
+        // Transfer ownership only after the complete pair exists.
+        pending.texture = None;
+        pending.view = None;
+        pending.depth_texture = None;
+        pending.depth_view = None;
         Self {
             texture,
             view,
@@ -85,8 +97,9 @@ impl RenderTarget {
         if self.viewport == viewport {
             return;
         }
-        self.destroy(device);
-        *self = Self::create(device, viewport);
+        let replacement = Self::create(device, viewport);
+        let previous = core::mem::replace(self, replacement);
+        previous.destroy(device);
     }
 
     /// Releases the target's textures and views.
@@ -137,5 +150,22 @@ impl RenderTarget {
     #[must_use]
     pub fn depth_format(&self) -> TextureFormat {
         self.depth_format
+    }
+}
+
+struct TargetAllocation<'a, D: RenderDevice> {
+    device: &'a D,
+    texture: Option<TextureId>,
+    view: Option<TextureViewId>,
+    depth_texture: Option<TextureId>,
+    depth_view: Option<TextureViewId>,
+}
+
+impl<D: RenderDevice> Drop for TargetAllocation<'_, D> {
+    fn drop(&mut self) {
+        if let Some(id) = self.depth_view { self.device.destroy_texture_view(id); }
+        if let Some(id) = self.depth_texture { self.device.destroy_texture(id); }
+        if let Some(id) = self.view { self.device.destroy_texture_view(id); }
+        if let Some(id) = self.texture { self.device.destroy_texture(id); }
     }
 }

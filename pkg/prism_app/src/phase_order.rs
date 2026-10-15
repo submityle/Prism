@@ -8,7 +8,9 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use prism_ecs::schedule::{BoxedScheduleLabel, Schedule, ScheduleLabel, Schedules};
+use prism_ecs::schedule::{
+    BoxedScheduleLabel, ContinueReport, Schedule, ScheduleLabel, Schedules, StepReport, Stepping,
+};
 use prism_ecs::world::World;
 
 use crate::fixed::{
@@ -58,10 +60,16 @@ pub(crate) struct Phase {
     #[cfg_attr(not(any(feature = "std", test)), allow(dead_code))]
     pub(crate) name: &'static str,
     pub(crate) run: Arc<dyn Fn(&mut SubApp) + Send + Sync>,
+    pub(crate) step: Arc<dyn Fn(&mut SubApp, &mut Stepping) -> StepReport + Send + Sync>,
+    pub(crate) continue_: Arc<dyn Fn(&mut SubApp, &mut Stepping) -> ContinueReport + Send + Sync>,
+    pub(crate) is_fixed_driver: bool,
 }
 
 impl Phase {
     fn schedule<L: ScheduleLabel + Clone>(label: L, name: &'static str, startup: bool) -> Self {
+        let run_label = label.clone();
+        let step_label = label.clone();
+        let continue_label = label.clone();
         Self {
             label: BoxedScheduleLabel::new(label.clone()),
             name,
@@ -69,11 +77,22 @@ impl Phase {
             // to World::run_schedule would look up a different (double-boxed) key.
             run: Arc::new(move |sub_app| {
                 if startup {
-                    sub_app.run_schedule(label.clone());
+                    sub_app.run_schedule(run_label.clone());
                 } else {
-                    sub_app.run_frame_schedule(label.clone());
+                    sub_app.run_frame_schedule(run_label.clone());
                 }
             }),
+            step: Arc::new(move |sub_app, stepping| {
+                crate::sub_app::step_schedule(&mut sub_app.world, step_label.clone(), stepping)
+            }),
+            continue_: Arc::new(move |sub_app, stepping| {
+                crate::sub_app::continue_schedule(
+                    &mut sub_app.world,
+                    continue_label.clone(),
+                    stepping,
+                )
+            }),
+            is_fixed_driver: false,
         }
     }
 }
@@ -97,6 +116,12 @@ impl Default for PhaseOrder {
                     label: BoxedScheduleLabel::new(RunFixedMainLoop),
                     name: "RunFixedMainLoop",
                     run: Arc::new(|sub_app| crate::fixed::run_fixed_main_loop(&mut sub_app.world)),
+                    step: Arc::new(|_, _| StepReport::FrameBoundary),
+                    continue_: Arc::new(|_, _| ContinueReport {
+                        ran: Vec::new(),
+                        stop: prism_ecs::schedule::ContinueStop::FrameBoundary,
+                    }),
+                    is_fixed_driver: true,
                 },
                 Phase::schedule(PreUpdate, "PreUpdate", false),
                 Phase::schedule(StateTransition, "StateTransition", false),

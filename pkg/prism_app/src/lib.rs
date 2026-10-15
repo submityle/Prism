@@ -235,6 +235,8 @@ pub mod fixed;
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
 pub mod lifecycle;
+#[cfg(feature = "module-reload")]
+pub mod module_reload;
 #[cfg(feature = "std")]
 pub mod pacing;
 #[cfg(feature = "determinism")]
@@ -248,6 +250,7 @@ pub mod platform_tier;
 pub mod plugin;
 pub mod plugin_graph;
 pub mod plugin_group;
+pub mod presentation;
 #[cfg(feature = "reflect")]
 pub mod reflect_config;
 pub mod rollback;

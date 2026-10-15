@@ -15,20 +15,17 @@
 //! each phase is run by label through
 //! [`World::run_schedule`](prism_ecs::world::World::run_schedule).
 //!
-//! # Pipelining is deferred
-//!
-//! This milestone (M3 Inc1) runs the main and secondary sub-apps **serially**
-//! within one frame, which is exactly what design §23 (risk #1) prescribes:
-//! "get serial extract working first, then enable `pipelined`." Running a
-//! render sub-app for frame *N* in parallel with the main sub-app simulating
-//! frame *N+1* (design §9, §24.3, §25.2) is M3 Inc2 and is honestly absent
-//! here, not stubbed.
+//! The default path extracts and updates serially. The `pipelined` feature
+//! also supports overlapping a secondary world's frame N with the main world's
+//! frame N+1; extraction remains on the main thread between complete frames.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::rollback::SnapshotHistory;
-use prism_ecs::schedule::{ScheduleLabel, Schedules};
+use prism_ecs::schedule::{
+    ContinueReport, Schedule, ScheduleLabel, Schedules, StepReport, Stepping,
+};
 use prism_ecs::world::World;
 
 use crate::time::{EngineClocks, TimeUpdateStrategy};
@@ -49,9 +46,8 @@ use crate::sub_app_label::{BoxedSubAppLabel, SubAppLabel};
 /// run change-detecting queries and advance extraction bookkeeping; the
 /// authoritative simulation state must **not** be mutated here, and a secondary
 /// sub-app must never write back into the main world. This invariant is a
-/// documented contract (the richer, trait-driven `ExtractComponent` pipeline of
-/// ECS design §23.5 is not yet available in `prism_ecs`, so the seam is defined
-/// here as a plain closure rather than faked).
+/// documented contract. Typed `prism_ecs::extract` operations can run inside
+/// this closure to maintain entity mappings and changed-component extraction.
 ///
 /// `Send + Sync` is required now even though M3 Inc1 runs serially, so the
 /// contract already supports the `pipelined` refinement (M3 Inc2).
@@ -164,6 +160,44 @@ impl SubApp {
             return;
         }
         self.world.run_schedule(label);
+    }
+
+    /// Number of variable-frame phases, including the native fixed-loop slot.
+    pub(crate) fn frame_phase_len(&self) -> usize {
+        self.phase_order.frame.len()
+    }
+
+    /// Whether a variable-frame phase is the native fixed-loop slot.
+    pub(crate) fn frame_phase_is_fixed_driver(&self, index: usize) -> bool {
+        self.phase_order
+            .frame
+            .get(index)
+            .is_some_and(|phase| phase.is_fixed_driver)
+    }
+
+    /// Step one system in a configured variable-frame phase.
+    pub(crate) fn step_frame_phase(&mut self, index: usize, stepping: &mut Stepping) -> StepReport {
+        let step = self
+            .phase_order
+            .frame
+            .get(index)
+            .map(|phase| phase.step.clone())
+            .unwrap_or_else(|| panic!("invalid frame phase index {index}"));
+        step(self, stepping)
+    }
+
+    pub(crate) fn continue_frame_phase(
+        &mut self,
+        index: usize,
+        stepping: &mut Stepping,
+    ) -> ContinueReport {
+        let continue_ = self
+            .phase_order
+            .frame
+            .get(index)
+            .map(|phase| phase.continue_.clone())
+            .unwrap_or_else(|| panic!("invalid frame phase index {index}"));
+        continue_(self, stepping)
     }
 
     // Explicit run_schedule and fixed simulation remain complete; only the
@@ -665,6 +699,25 @@ impl SubApps {
         self.secondary.is_empty()
     }
 
+    /// Number of secondary sub-apps in frame order.
+    pub(crate) fn secondary_len(&self) -> usize {
+        self.secondary.len()
+    }
+
+    /// Mutable access to a secondary by stable insertion-order index.
+    pub(crate) fn secondary_mut_at(&mut self, index: usize) -> Option<&mut SubApp> {
+        self.secondary.get_mut(index).map(|(_, sub_app)| sub_app)
+    }
+
+    /// Run one secondary's one-way extract against the completed main world.
+    pub(crate) fn run_extract_at(&mut self, index: usize) -> bool {
+        let Some((_, sub_app)) = self.secondary.get_mut(index) else {
+            return false;
+        };
+        sub_app.run_extract(&mut self.main.world);
+        true
+    }
+
     /// Run startup once for the main sub-app and then each secondary sub-app,
     /// in insertion order (design §7). Extract does not run during startup:
     /// it is the per-frame simulation → render seam, not a one-time init step.
@@ -809,6 +862,73 @@ impl SubApps {
     pub fn sync(&mut self) {
         if let Some(pipeline) = self.pipeline.as_mut() {
             pipeline.sync(&mut self.secondary);
+        }
+    }
+}
+
+/// Step one schedule while preserving the world-owned registry on both normal
+/// return and panic unwind. The concrete label remains at the call site so the
+/// type-erased schedule key is never double-boxed.
+pub(crate) fn step_schedule<L: ScheduleLabel + Clone>(
+    world: &mut World,
+    label: L,
+    stepping: &mut Stepping,
+) -> StepReport {
+    let schedule = world
+        .get_resource_mut::<Schedules>()
+        .and_then(|schedules| schedules.remove(label.clone()));
+    let Some(schedule) = schedule else {
+        return StepReport::FrameBoundary;
+    };
+    let mut guard = ScheduleStepGuard {
+        world,
+        label,
+        schedule: Some(schedule),
+    };
+    stepping.step_system(
+        guard.schedule.as_mut().expect("leased schedule"),
+        guard.world,
+    )
+}
+
+/// Continue a labeled schedule until its next breakpoint or frame boundary.
+pub(crate) fn continue_schedule<L: ScheduleLabel + Clone>(
+    world: &mut World,
+    label: L,
+    stepping: &mut Stepping,
+) -> ContinueReport {
+    let schedule = world
+        .get_resource_mut::<Schedules>()
+        .and_then(|schedules| schedules.remove(label.clone()));
+    let Some(schedule) = schedule else {
+        return ContinueReport {
+            ran: Vec::new(),
+            stop: prism_ecs::schedule::ContinueStop::FrameBoundary,
+        };
+    };
+    let mut guard = ScheduleStepGuard {
+        world,
+        label,
+        schedule: Some(schedule),
+    };
+    stepping.continue_frame(
+        guard.schedule.as_mut().expect("leased schedule"),
+        guard.world,
+    )
+}
+
+struct ScheduleStepGuard<'a, L: ScheduleLabel + Clone> {
+    world: &'a mut World,
+    label: L,
+    schedule: Option<Schedule>,
+}
+
+impl<L: ScheduleLabel + Clone> Drop for ScheduleStepGuard<'_, L> {
+    fn drop(&mut self) {
+        if let Some(schedule) = self.schedule.take() {
+            self.world
+                .resource_mut::<Schedules>()
+                .insert(self.label.clone(), schedule);
         }
     }
 }

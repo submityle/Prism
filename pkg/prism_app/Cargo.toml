@@ -12,6 +12,7 @@ prism_ecs = { path = "../prism_ecs", default-features = false }
 prism_time = { path = "../prism_time", default-features = false }
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
 libm = "0.2"
+libloading = { version = "0.8.9", optional = true }
 prism_tasks = { path = "../prism_tasks", optional = true }
 prism_window = { path = "../prism_window", optional = true }
 prism_window_winit = { path = "../prism_window_winit", optional = true }
@@ -51,8 +52,8 @@ pipelined-tasks = ["pipelined", "dep:prism_tasks"]
 # per-frame state hash for dual-run divergence detection, and transparent
 # per-step input record/replay. The primitives are pure core+alloc logic
 # (no clocks/threads), so this feature is additive and does not imply `std`;
-# an app opts in only when it needs reproducible runs. World-snapshot rollback
-# stays out until `prism_ecs` grows a snapshot API (documented in the module).
+# an app opts in only when it needs reproducible runs. Snapshot history uses
+# prism_ecs WorldSnapshot; this feature also enables rollback input replay.
 determinism = []
 
 # Windowed runner (M4, design §10): open a winit window and drive the App on the
@@ -76,6 +77,9 @@ trace = ["std"]
 # I/O); off by default so a shipped build pays nothing.
 hot-reload = ["std"]
 
+# Native module reload requires dynamic libraries and host synchronization.
+module-reload = ["std", "dep:libloading", "reflect"]
+
 # Capture bounded recent diagnostic events in crash reports. Global logger
 # installation remains explicit; the adapter can forward to an existing sink.
 diagnostic = ["std", "dep:prism_diagnostic"]
@@ -86,6 +90,15 @@ diagnostic = ["std", "dep:prism_diagnostic"]
 [[bench]]
 name = "frame_loop"
 harness = false
+
+[[bench]]
+name = "runtime_pipeline"
+harness = false
+required-features = ["multi_thread", "pipelined-tasks"]
+
+[[example]]
+name = "runner_parity"
+required-features = ["winit", "determinism"]
 
 # AAA lint bar. prism_app contains no `unsafe`, so unlike prism_ecs it can keep
 # the workspace-strength lints as warnings and still hit zero warnings.

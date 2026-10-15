@@ -23,6 +23,14 @@ prism_render_graph = { path = "../prism_render_graph" }
 prism_render_runtime = { path = "../prism_render_runtime" }
 prism_tasks = { path = "../prism_tasks" }
 prism_transform = { path = "../prism_transform", features = ["ecs"] }
+prism_window = { path = "../prism_window" }
+raw-window-handle = { version = "0.6", default-features = false }
+prism_window_winit = { path = "../prism_window_winit", optional = true }
+
+[features]
+default = []
+# Connect the App's real OS windows to the same presentation driver.
+winit = ["prism_app/winit", "dep:prism_window_winit"]
 
 [dev-dependencies]
 # The headless reference backend: drives the extract + render path in CI with

@@ -114,6 +114,25 @@ struct WindowedHost {
     exit: Rc<Cell<Option<AppExit>>>,
 }
 
+impl WindowedHost {
+    fn shutdown(&mut self) {
+        if !self.app.shutdown_ran() {
+            self.app.sync_sub_apps();
+            self.app.run_shutdown();
+        }
+    }
+}
+
+impl Drop for WindowedHost {
+    fn drop(&mut self) {
+        // Also covers event-loop creation failure and platform termination
+        // without a final frame. Avoid invoking user systems during unwinding.
+        if !std::thread::panicking() {
+            self.shutdown();
+        }
+    }
+}
+
 impl WinitApp for WindowedHost {
     fn resumed(&mut self, backend: &mut WinitBackend) {
         if !self.started {
@@ -126,7 +145,8 @@ impl WinitApp for WindowedHost {
         self.app.send_event(Resumed);
     }
 
-    fn suspended(&mut self, _backend: &mut WinitBackend) {
+    fn suspended(&mut self, backend: &mut WinitBackend) {
+        super::window_bridge::publish(&mut self.app, backend, &self.open, true);
         // A platform suspend pauses the app: `drive_app_lifecycle` (installed
         // by `App::add_lifecycle_events`) moves `AppLifecycle` to `Suspended`,
         // pauses virtual time, and stops advancing the fixed accumulator until
@@ -160,6 +180,11 @@ impl WinitApp for WindowedHost {
             }
         }
 
+        for window in &closed {
+            backend.request_destroy(*window);
+        }
+        super::window_bridge::publish(&mut self.app, backend, &self.open, false);
+
         if !self.first_frame_sent {
             self.app.send_event(WillRenderFirstFrame);
             self.first_frame_sent = true;
@@ -168,18 +193,20 @@ impl WinitApp for WindowedHost {
         // Async-ready gate (design §6): finish + start up once every plugin
         // reports ready; a still-initializing plugin is waited for.
         self.app.try_finish();
-        self.app.update();
+        let presentation_paced = crate::presentation::run_window_frame(&mut self.app);
 
         if let Some(exit) = self.app.poll_exit() {
             // Honor the pipeline contract: bring the final in-flight render home
             // before the loop ends. A no-op when nothing is pipelined
             // (design §9 — runners sync once the frame loop ends).
-            self.app.sync_sub_apps();
+            self.shutdown();
             self.exit.set(Some(exit));
             return FrameOutcome::Exit;
         }
 
-        self.pacer.throttle();
+        if !presentation_paced {
+            self.pacer.throttle();
+        }
         FrameOutcome::Continue
     }
 }
@@ -345,6 +372,67 @@ mod tests {
         let mut other = vec![WindowId(1)];
         assert!(!close_windows(&mut other, &[WindowId(9)]));
         assert_eq!(other, vec![WindowId(1)]);
+    }
+
+    #[derive(Clone, prism_ecs::prelude::Resource)]
+    struct ShutdownTrace(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
+
+    struct ShutdownPlugin(ShutdownTrace);
+
+    impl crate::Plugin for ShutdownPlugin {
+        fn build(&self, app: &mut App) {
+            app.insert_resource(self.0.clone());
+            app.add_systems(
+                crate::Shutdown,
+                |trace: prism_ecs::prelude::Res<ShutdownTrace>| {
+                    trace.0.lock().unwrap().push("schedule");
+                },
+            );
+        }
+
+        fn shutdown(&self, _app: &mut App) {
+            self.0 .0.lock().unwrap().push("plugin");
+        }
+    }
+
+    fn shutdown_host() -> (WindowedHost, ShutdownTrace) {
+        let trace = ShutdownTrace(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        let mut app = App::new();
+        app.add_plugins(ShutdownPlugin(trace.clone()));
+        let host = WindowedHost {
+            app,
+            windows: Vec::new(),
+            open: Vec::new(),
+            started: false,
+            pacer: FramePacer::new(FrameLimit::Off),
+            first_frame_sent: false,
+            exit: Rc::new(Cell::new(None)),
+        };
+        (host, trace)
+    }
+
+    #[test]
+    fn confirmed_exit_runs_shutdown_before_returning_and_only_once() {
+        let (mut host, trace) = shutdown_host();
+        host.app
+            .world_mut()
+            .resource_mut::<AppExitRequest>()
+            .send_success();
+        assert_eq!(host.frame(&mut WinitBackend::new()), FrameOutcome::Exit);
+        assert!(host.app.shutdown_ran());
+        assert_eq!(host.exit.get(), Some(AppExit::Success));
+        assert_eq!(*trace.0.lock().unwrap(), ["schedule", "plugin"]);
+        drop(host);
+        assert_eq!(*trace.0.lock().unwrap(), ["schedule", "plugin"]);
+    }
+
+    #[test]
+    fn host_drop_without_final_frame_runs_shutdown() {
+        // The same ownership path as platform loop creation failure or an OS
+        // termination that bypasses poll_exit; no display server is needed.
+        let (host, trace) = shutdown_host();
+        drop(host);
+        assert_eq!(*trace.0.lock().unwrap(), ["schedule", "plugin"]);
     }
 
     #[test]

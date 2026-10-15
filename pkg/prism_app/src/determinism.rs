@@ -39,19 +39,16 @@
 //! [`init_input_recording`](crate::app::App::init_input_recording)); an app
 //! that does not install them pays nothing.
 //!
-//! # Honestly deferred
+//! # Snapshot integration and numeric scope
 //!
-//! The design §15 "rollback hook" (snapshot the World, re-run `FixedMain` to
-//! the present) and §22's *periodic World snapshot* are **not** implemented
-//! here, because `prism_ecs` exposes no World snapshot / clone / serialize API
-//! to build a real snapshot on — a rollback that cannot restore state would be
-//! a fake. Input recording (this module) is the half of record/replay that is
-//! buildable today; snapshot/rollback lands when `prism_ecs` grows a snapshot
-//! contract and belongs to the `prism_replication` layer. Cross-platform
-//! floating-point bit-equality additionally needs a fixed-point / soft-float
-//! math path (design §15/§23 risk #4, owned by `prism_math`); until then the
-//! frame hash is reproducible on a *fixed* platform/toolchain, which is what
-//! regression dual-runs need. Both deferrals are documented, not stubbed.
+//! [`SnapshotHistory`](crate::rollback::SnapshotHistory) retains bounded ECS
+//! World snapshots; [`RollbackReplay`](crate::rollback_replay::RollbackReplay)
+//! restores snapshots and reconciles corrected input. Their App/SubApp helpers
+//! retain the ECS snapshot contract, including required component snapshot glue.
+//! Numeric determinism remains the content's responsibility: integer/fixed-point
+//! arithmetic can be portable, while arbitrary floating-point systems are not
+//! made bit-identical by enabling this feature. `runner_parity` exercises the
+//! same integer workload and manual jitter timeline in windowed/headless runners.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
