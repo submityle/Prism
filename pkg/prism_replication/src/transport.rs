@@ -391,6 +391,8 @@ pub mod simulated {
         pub jitter: u32,
         /// Drop every `n`th attempted send; `None` disables loss.
         pub drop_every: Option<u64>,
+        /// Duplicate every `n`th accepted send; `None` disables duplication.
+        pub duplicate_every: Option<u64>,
         /// Reverse each due batch when true, making reordering explicit.
         pub reorder_due_batches: bool,
         /// Maximum queued datagrams per endpoint.
@@ -403,6 +405,7 @@ pub mod simulated {
                 latency: 1,
                 jitter: 0,
                 drop_every: None,
+                duplicate_every: None,
                 reorder_due_batches: false,
                 queue_limit: 256,
             }
@@ -415,6 +418,7 @@ pub mod simulated {
                 latency: self.latency,
                 jitter: self.jitter,
                 drop_every: self.drop_every.filter(|value| *value != 0),
+                duplicate_every: self.duplicate_every.filter(|value| *value != 0),
                 reorder_due_batches: self.reorder_due_batches,
                 queue_limit: self.queue_limit.max(1),
             }
@@ -593,6 +597,19 @@ pub mod simulated {
                 endpoint,
                 bytes: bytes.to_vec(),
             });
+            if self
+                .network
+                .config
+                .duplicate_every
+                .is_some_and(|n| state.sends.is_multiple_of(n))
+            {
+                state.in_flight.push(Packet {
+                    deliver_at,
+                    order,
+                    endpoint,
+                    bytes: bytes.to_vec(),
+                });
+            }
         }
 
         fn recv(&mut self) -> Option<Vec<u8>> {
@@ -634,6 +651,7 @@ pub mod simulated {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use alloc::vec;
 
         #[test]
         fn deterministic_faults_drop_and_reverse_without_unbounded_growth() {
@@ -641,6 +659,7 @@ pub mod simulated {
                 latency: 1,
                 jitter: 2,
                 drop_every: Some(5),
+                duplicate_every: None,
                 reorder_due_batches: true,
                 queue_limit: 8,
             };
@@ -669,6 +688,178 @@ pub mod simulated {
             network.reset();
             network.advance();
             assert_eq!(b.recv(), None);
+        }
+
+        #[test]
+        fn duplicate_fault_is_deterministic_and_bounded() {
+            let config = FaultConfig {
+                latency: 1,
+                jitter: 0,
+                drop_every: None,
+                duplicate_every: Some(2),
+                reorder_due_batches: false,
+                queue_limit: 16,
+            };
+            let (network, mut a, mut b) = SimulatedNetwork::pair(config);
+            for value in 0..4_u8 {
+                a.send(&[value]);
+            }
+            network.advance();
+            let mut received = Vec::new();
+            while let Some(bytes) = b.recv() {
+                received.push(bytes[0]);
+            }
+            assert_eq!(received, vec![0, 1, 1, 2, 3, 3]);
+            assert_eq!(network.pending(), 0);
+        }
+    }
+
+    #[cfg(feature = "crypto")]
+    #[cfg(test)]
+    mod secure_channel_tests {
+        use super::*;
+        use crate::multiplex::{ChannelMux, MuxConfig, NetChannel};
+        use crate::security::{PskCredential, PskKeyring, RingPskKeyringProvider, SecureTransport};
+        use crate::transport::TransportSecurity;
+        use alloc::vec;
+
+        fn key(id: u32, byte: u8) -> PskCredential {
+            PskCredential::new(id, [byte; 32])
+        }
+
+        type SecureSimTransport = SecureTransport<SimulatedTransport, RingPskKeyringProvider>;
+        type SecureMux = ChannelMux<SecureSimTransport>;
+
+        fn connect(
+            network: &SimulatedNetwork,
+            client_link: SimulatedTransport,
+            server_link: SimulatedTransport,
+            client_keyring: PskKeyring,
+            server_keyring: PskKeyring,
+        ) -> (SecureMux, SecureMux) {
+            let client = SecureTransport::new_client(
+                client_link,
+                RingPskKeyringProvider::new(client_keyring),
+            )
+            .expect("client hello is generated");
+            let server = SecureTransport::new_server(
+                server_link,
+                RingPskKeyringProvider::new(server_keyring),
+            );
+            let config = MuxConfig {
+                min_rto: 3,
+                reliable_window: 16,
+                reliable_queue: 64,
+                path_mtu: 1_200,
+                ..MuxConfig::default()
+            };
+            let mut client = ChannelMux::new(client, config);
+            let mut server = ChannelMux::new(server, config);
+            for tick in 1..=64 {
+                network.advance();
+                client.tick_at(tick);
+                server.tick_at(tick);
+                if client.security_state() == TransportSecurity::Established
+                    && server.security_state() == TransportSecurity::Established
+                {
+                    return (client, server);
+                }
+            }
+            panic!(
+                "secure simulated handshake did not complete: {:?} / {:?}",
+                client.security_state(),
+                server.security_state()
+            );
+        }
+
+        fn drive(network: &SimulatedNetwork, client: &mut SecureMux, server: &mut SecureMux) {
+            for tick in 65..=2_000 {
+                network.advance();
+                client.tick_at(tick);
+                server.tick_at(tick);
+                if server.queued(NetChannel::EventsReliable) == 0
+                    && client.queued(NetChannel::EventsReliable) == 0
+                    && network.pending() == 0
+                {
+                    return;
+                }
+            }
+            panic!(
+                "secure simulated transport did not drain: client={:?} server={:?} pending={}",
+                client.telemetry(),
+                server.telemetry(),
+                network.pending()
+            );
+        }
+
+        #[test]
+        fn secure_mux_closes_loss_reorder_duplicate_and_reconnect_loop() {
+            let config = FaultConfig {
+                latency: 1,
+                jitter: 3,
+                drop_every: Some(7),
+                duplicate_every: Some(5),
+                reorder_due_batches: true,
+                queue_limit: 128,
+            };
+            let (network, client_link, server_link) = SimulatedNetwork::pair(config);
+            let old = key(101, 0x41);
+            let (mut client, mut server) = connect(
+                &network,
+                client_link.clone(),
+                server_link.clone(),
+                PskKeyring::new(old),
+                PskKeyring::new(old),
+            );
+
+            assert_eq!(client.datagram_mut().telemetry().credential_id, Some(101));
+            assert_eq!(server.datagram_mut().telemetry().credential_id, Some(101));
+            assert!(client.datagram_mut().telemetry().handshakes_completed >= 1);
+            assert!(server.datagram_mut().telemetry().handshakes_completed >= 1);
+
+            for sequence in 0..24_u8 {
+                client
+                    .send(NetChannel::EventsReliable, &[sequence])
+                    .expect("bounded event queue accepts the test slice");
+            }
+            drive(&network, &mut client, &mut server);
+
+            let mut received = Vec::new();
+            while let Some(payload) = server.recv(NetChannel::EventsReliable) {
+                received.push(payload);
+            }
+            assert_eq!(
+                received,
+                (0..24_u8)
+                    .map(|sequence| vec![sequence])
+                    .collect::<Vec<_>>(),
+                "reliable application delivery is ordered and exactly once"
+            );
+            assert!(
+                server.datagram_mut().telemetry().replayed_datagrams > 0,
+                "duplicate injection reaches the authenticated replay window"
+            );
+
+            network.reset();
+            drop(client);
+            drop(server);
+            let (mut client, mut server) = connect(
+                &network,
+                client_link,
+                server_link,
+                PskKeyring::new(old),
+                PskKeyring::new(old),
+            );
+            client
+                .send(NetChannel::EventsReliable, b"after-reconnect")
+                .unwrap();
+            drive(&network, &mut client, &mut server);
+            assert_eq!(
+                server.recv(NetChannel::EventsReliable),
+                Some(b"after-reconnect".to_vec())
+            );
+            assert_eq!(client.datagram_mut().telemetry().credential_id, Some(101));
+            assert!(client.datagram_mut().telemetry().handshakes_completed >= 1);
         }
     }
 }

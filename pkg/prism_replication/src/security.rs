@@ -76,6 +76,8 @@ pub enum SecurityError {
 pub struct SecurityTelemetrySnapshot {
     /// Current authenticated-session state.
     pub state: TransportSecurity,
+    /// Credential id selected by a rotating-key provider, if applicable.
+    pub credential_id: Option<u32>,
     /// Handshake frames sent, including retransmissions.
     pub handshake_transmissions: u64,
     /// Handshake frames sent after the initial offer/accept.
@@ -157,6 +159,14 @@ pub struct ServerAccept {
 pub trait SessionSecurityProvider: Send + Sync + 'static {
     /// Stable provider/algorithm id negotiated in the cleartext handshake.
     fn provider_id(&self) -> u16;
+
+    /// Optional deployment credential id selected for this session.
+    ///
+    /// This is metadata only: it never exposes key material. Providers without
+    /// rotating credentials keep the default `None`.
+    fn credential_id(&self) -> Option<u32> {
+        None
+    }
 
     /// Maximum bytes added by [`Self::seal`] to one plaintext. This is used to
     /// reserve MTU and congestion budget before a datagram is queued.
@@ -496,6 +506,10 @@ impl RingPskKeyringProvider {
 impl SessionSecurityProvider for RingPskKeyringProvider {
     fn provider_id(&self) -> u16 {
         RING_PSK_KEYRING_PROVIDER_ID
+    }
+
+    fn credential_id(&self) -> Option<u32> {
+        self.selected_id
     }
 
     fn max_seal_overhead(&self) -> usize {
@@ -1036,6 +1050,7 @@ where
     pub fn telemetry(&self) -> SecurityTelemetrySnapshot {
         SecurityTelemetrySnapshot {
             state: self.security_state(),
+            credential_id: self.provider.credential_id(),
             handshake_transmissions: self.handshake_transmissions,
             handshake_retries: self.handshake_retries,
             protected_datagrams_sent: self.protected_datagrams_sent,
@@ -1075,6 +1090,10 @@ where
         let Some(accept) = self.server_accept.as_ref() else {
             return;
         };
+        if self.handshake_transmissions > 0 {
+            self.handshake_retries = self.handshake_retries.saturating_add(1);
+        }
+        self.handshake_transmissions = self.handshake_transmissions.saturating_add(1);
         self.inner.send(&encode_accept(accept));
     }
 
@@ -1823,6 +1842,8 @@ mod tests {
             .inbox
             .extend(old_client.inner.outbox.drain(..));
         assert_eq!(old_server.recv(), Some(b"old-session".to_vec()));
+        assert_eq!(old_client.telemetry().credential_id, Some(11));
+        assert_eq!(old_server.telemetry().credential_id, Some(11));
 
         let (mut new_client, mut new_server) = connect_keyring(PskKeyring::new(next), server_keys);
         new_client.send(b"new-session");
@@ -1831,6 +1852,33 @@ mod tests {
             .inbox
             .extend(new_client.inner.outbox.drain(..));
         assert_eq!(new_server.recv(), Some(b"new-session".to_vec()));
+        assert_eq!(new_client.telemetry().credential_id, Some(12));
+        assert_eq!(new_server.telemetry().credential_id, Some(12));
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn ciphertext_from_an_old_session_is_rejected_after_reconnect() {
+        let old = PskCredential::new(41, [0x41; 32]);
+        let next = PskCredential::new(42, [0x42; 32]);
+        let (mut old_client, mut old_server) =
+            connect_keyring(PskKeyring::new(old), PskKeyring::new(old));
+        old_client.send(b"stale");
+        let stale_frame = old_client.inner.outbox.pop_front().unwrap();
+        old_server.inner.inbox.push_back(stale_frame.clone());
+        assert_eq!(old_server.recv(), Some(b"stale".to_vec()));
+
+        let (new_client, mut new_server) =
+            connect_keyring(PskKeyring::new(next), PskKeyring::new(next));
+        assert_eq!(new_client.telemetry().credential_id, Some(42));
+        assert_eq!(new_server.telemetry().credential_id, Some(42));
+        new_server.inner.inbox.push_back(stale_frame);
+        assert_eq!(new_server.recv(), None);
+        assert_eq!(new_server.security_state(), TransportSecurity::Rejected);
+        assert_eq!(
+            new_server.take_security_error(),
+            Some(SecurityError::ProviderRejected)
+        );
     }
 
     #[cfg(feature = "crypto")]
