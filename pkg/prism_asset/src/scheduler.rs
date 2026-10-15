@@ -713,11 +713,6 @@ async fn execute_async_load(
             return Err(LoadFailure::AssemblyFailed(error));
         }
     };
-    if !output.labeled.is_empty() {
-        let error = "labeled assets are not supported by async assembly".to_string();
-        server.fail_async_load(&plan, &error);
-        return Err(LoadFailure::AssemblyFailed(error));
-    }
     for dependency in &output.primary.dependencies {
         if ancestors.contains(&dependency.path) {
             let error = format!("dependency cycle at {}", dependency.path);
@@ -725,7 +720,11 @@ async fn execute_async_load(
             return Err(LoadFailure::AssemblyFailed(error));
         }
     }
-    if !output.primary.dependencies.is_empty() {
+    let has_labeled_dependencies = output
+        .labeled
+        .iter()
+        .any(|labeled| !labeled.dependencies.is_empty());
+    if !output.primary.dependencies.is_empty() || has_labeled_dependencies {
         scheduler.release_execution_slot(&FlightKey::Load(path.clone()), &flight);
     }
     let has_dependencies = !output.primary.dependencies.is_empty();
@@ -759,13 +758,69 @@ async fn execute_async_load(
             }
         }
     }
-    if has_dependencies {
+    // Do not hold a borrow of `ErasedLoadedAsset` across dependency awaits:
+    // its boxed payload is `dyn Any + Send`, not `Sync`, so retaining that
+    // borrow would make the worker future fail the task pool's `Send` bound.
+    // Dependency metadata is owned and `Send`, while the erased payload stays
+    // parked in `output` until the atomic commit below.
+    let labeled_requests: Vec<_> = output
+        .labeled
+        .iter()
+        .map(|labeled| (labeled.label.clone(), labeled.dependencies.clone()))
+        .collect();
+    let mut labeled_dependencies = Vec::with_capacity(labeled_requests.len());
+    for (label, requests) in labeled_requests {
+        let label_path = path.clone().with_label(label);
+        let mut label_ancestors = ancestors.clone();
+        if !label_ancestors.insert(label_path.clone()) {
+            let error = format!("dependency cycle at {label_path}");
+            server.fail_async_load(&plan, &error);
+            return Err(LoadFailure::AssemblyFailed(error));
+        }
+        let mut resolved = Vec::with_capacity(requests.len());
+        for dependency in requests {
+            if label_ancestors.contains(&dependency.path) {
+                let error = format!("dependency cycle at {}", dependency.path);
+                server.fail_async_load(&plan, &error);
+                return Err(LoadFailure::AssemblyFailed(error));
+            }
+            let ticket = match scheduler.schedule_typed_with_ancestors(
+                dependency.path.clone(),
+                priority,
+                dependency.expected_type,
+                label_ancestors.clone(),
+            ) {
+                Ok(ticket) => ticket,
+                Err(error) => {
+                    let error = error.to_string();
+                    server.fail_async_load(&plan, &error);
+                    return Err(LoadFailure::AssemblyFailed(error));
+                }
+            };
+            let dependency_path = dependency.path.clone();
+            match ticket.await {
+                Ok(handle) if server.is_loaded(handle.id()) => resolved.push(handle),
+                Ok(_) => {
+                    let error = format!("dependency {} failed to load", dependency_path);
+                    server.fail_async_load(&plan, &error);
+                    return Err(LoadFailure::AssemblyFailed(error));
+                }
+                Err(error) => {
+                    let error = format!("dependency {} failed: {error:?}", dependency_path);
+                    server.fail_async_load(&plan, &error);
+                    return Err(LoadFailure::AssemblyFailed(error));
+                }
+            }
+        }
+        labeled_dependencies.push(resolved);
+    }
+    if has_dependencies || has_labeled_dependencies {
         scheduler
             .acquire_execution_slot(FlightKey::Load(path.clone()), Arc::clone(&flight), priority)
             .await;
     }
     server
-        .commit_async_load(plan, output, dependencies)
+        .commit_async_load(plan, output, dependencies, labeled_dependencies)
         .map_err(LoadFailure::AssemblyFailed)
 }
 
@@ -1745,7 +1800,7 @@ mod tests {
             .load_for_type(&plan.path, plan.type_id, &[])
             .expect("test output decodes");
         let error = server
-            .commit_async_load(plan, output, Vec::new())
+            .commit_async_load(plan, output, Vec::new(), Vec::new())
             .expect_err("failed slot must not be resurrected");
         assert!(error.contains("no longer loading"));
     }

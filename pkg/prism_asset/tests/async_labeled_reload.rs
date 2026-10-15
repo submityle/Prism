@@ -126,6 +126,34 @@ fn async_reload(server: &Arc<AssetServer>) -> Result<prism_asset::UntypedHandle,
 }
 
 #[test]
+fn async_initial_load_commits_labeled_outputs_and_their_dependencies() {
+    let server = server(1);
+    let pool = TaskPool::with_threads(2);
+    let scheduler = LoadScheduler::new(Arc::clone(&server), pool.clone(), 2);
+    let root = pool.block_on(
+        scheduler
+            .schedule("scene.async-revision", Priority::Normal)
+            .expect("initial async load should be admitted"),
+    );
+    let root = root.expect("initial async load should commit");
+
+    let source = server.load::<Scene>("scene.async-revision");
+    let keep = server.load::<Label>("scene.async-revision#keep");
+    let dependent = server.load::<Label>("scene.async-revision#dependent");
+    let leaf = server.load::<Leaf>("resident.async-leaf");
+
+    assert_eq!(root.id(), source.untyped_id());
+    assert_eq!(server.with_asset(source.id(), |value| value.0), Some(1));
+    assert_eq!(server.with_asset(keep.id(), |value| value.0), Some(10));
+    assert_eq!(server.with_asset(dependent.id(), |value| value.0), Some(12));
+    assert!(server.with_asset(leaf.id(), |_| ()).is_some());
+    assert_eq!(server.load_state(source.untyped_id()), LoadState::Loaded);
+    assert_eq!(server.load_state(keep.untyped_id()), LoadState::Loaded);
+    assert_eq!(server.load_state(dependent.untyped_id()), LoadState::Loaded);
+    assert_eq!(scheduler.in_flight(), 0);
+}
+
+#[test]
 fn async_reload_commits_labeled_revision_and_preserves_identity() {
     let server = server(1);
     let source = server.load::<Scene>("scene.async-revision");

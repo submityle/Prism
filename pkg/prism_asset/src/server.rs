@@ -197,7 +197,7 @@ impl AssetServer {
     ) -> Result<AsyncLoadPreparation, String> {
         let mut inner = self.lock();
         if path.has_label() {
-            return Err("async assembly does not yet support labeled assets".into());
+            return Err("async assembly must start from a primary asset path".into());
         }
         let type_id = match requested {
             Some(ty) => ty,
@@ -316,15 +316,17 @@ impl AssetServer {
         plan: AsyncLoadPlan,
         output: FullLoadOutput,
         dependencies: Vec<UntypedHandle>,
+        labeled_dependencies: Vec<Vec<UntypedHandle>>,
     ) -> Result<UntypedHandle, String> {
-        if !output.labeled.is_empty() {
-            self.fail_async_load(&plan, "labeled assets are not supported by async assembly");
-            return Err("labeled assets are not supported by async assembly".into());
+        if output.labeled.len() != labeled_dependencies.len() {
+            self.fail_async_load(&plan, "async labeled dependency staging is incomplete");
+            return Err("async labeled dependency staging is incomplete".into());
         }
         if output.primary.type_id != plan.type_id {
             self.fail_async_load(&plan, "loader produced an unexpected asset type");
             return Err("loader produced an unexpected asset type".into());
         }
+        let FullLoadOutput { primary, labeled } = output;
         let mut inner = self.lock();
         if !matches!(inner.stores.load_state(plan.id), LoadState::Loading) {
             let reason = format!("async load slot is no longer loading: {}", plan.path);
@@ -332,27 +334,108 @@ impl AssetServer {
             self.fail_async_load(&plan, &reason);
             return Err(reason);
         }
+
+        let mut provisional_labels = Vec::new();
+        let mut label_paths = BTreeSet::new();
+        let mut staged_labels = Vec::with_capacity(labeled.len());
+        for (sub, sub_dependencies) in labeled.into_iter().zip(labeled_dependencies) {
+            let sub_path = plan.path.clone().with_label(sub.label.clone());
+            if !label_paths.insert(sub_path.clone()) {
+                inner.rollback_staged_labels(&provisional_labels);
+                let reason = "async load emitted a duplicate labeled asset".to_string();
+                inner.fail(plan.id, &plan.path, reason.clone());
+                return Err(reason);
+            }
+            let handle = if let Some(existing) = inner
+                .interned
+                .get(&sub_path)
+                .and_then(UntypedWeakHandle::upgrade)
+            {
+                if existing.id().type_id() != sub.type_id {
+                    inner.rollback_staged_labels(&provisional_labels);
+                    let reason = format!("async load labeled asset type changed at {sub_path}");
+                    inner.fail(plan.id, &plan.path, reason.clone());
+                    return Err(reason);
+                }
+                existing
+            } else {
+                inner.stores.register_erased(sub.type_id, sub.make_store);
+                let Some(handle) = inner.stores.reserve_by_type(sub.type_id) else {
+                    inner.rollback_staged_labels(&provisional_labels);
+                    let reason = "async load labeled asset arena unavailable".to_string();
+                    inner.fail(plan.id, &plan.path, reason.clone());
+                    return Err(reason);
+                };
+                inner.retained.entry(handle.id()).or_default();
+                inner.owner_weaks.insert(handle.id(), handle.downgrade());
+                inner.interned.insert(sub_path.clone(), handle.downgrade());
+                inner.catalog.insert(
+                    StableGuid::from_path(&sub_path.to_string()),
+                    sub_path.clone(),
+                );
+                provisional_labels.push((sub_path.clone(), handle.id()));
+                handle
+            };
+            staged_labels.push(StagedLabeledAsset {
+                path: sub_path,
+                id: handle.id(),
+                value: sub.value,
+                dependencies: sub_dependencies,
+                handle,
+            });
+        }
+
         let dependency_ids: Vec<_> = dependencies.iter().map(UntypedHandle::id).collect();
         let mut candidate = inner.graph.clone();
         if let Err(error) = candidate.replace_dependencies(plan.id, dependency_ids) {
-            drop(inner);
-            self.fail_async_load(&plan, &format!("dependency cycle: {error:?}"));
-            return Err(format!("dependency cycle: {error:?}"));
+            inner.rollback_staged_labels(&provisional_labels);
+            let reason = format!("dependency cycle: {error:?}");
+            inner.fail(plan.id, &plan.path, reason.clone());
+            return Err(reason);
         }
-        if let Err(error) = inner.stores.fulfill_erased(plan.id, output.primary.value) {
+        for staged in &staged_labels {
+            let label_dependencies = staged
+                .dependencies
+                .iter()
+                .map(UntypedHandle::id)
+                .chain(core::iter::once(plan.id));
+            if let Err(error) = candidate.replace_dependencies(staged.id, label_dependencies) {
+                inner.rollback_staged_labels(&provisional_labels);
+                let reason = format!("async labeled dependency cycle: {error:?}");
+                inner.fail(plan.id, &plan.path, reason.clone());
+                return Err(reason);
+            }
+        }
+
+        let mut retained: Vec<UntypedHandle> = dependencies
+            .into_iter()
+            .filter(|dependency| dependency.id() != plan.id)
+            .collect();
+        for staged in staged_labels {
+            if let Err(error) = inner.stores.fulfill_erased(staged.id, staged.value) {
+                inner.rollback_staged_labels(&provisional_labels);
+                let reason = error.to_string();
+                inner.fail(plan.id, &plan.path, reason.clone());
+                return Err(reason);
+            }
+            let _ = candidate.set_self_state(staged.id, LoadState::Loaded);
+            retained.extend(
+                staged.dependencies.into_iter().filter(|dependency| {
+                    dependency.id() != plan.id && dependency.id() != staged.id
+                }),
+            );
+            if inner.promoted_labels.get(&staged.id) != Some(&plan.id) {
+                retained.push(staged.handle);
+            }
+        }
+        if let Err(error) = inner.stores.fulfill_erased(plan.id, primary.value) {
             let reason = error.to_string();
             inner.fail(plan.id, &plan.path, reason.clone());
             return Err(reason);
         }
         inner.graph = candidate;
         let _ = inner.graph.set_self_state(plan.id, LoadState::Loaded);
-        inner.retained.insert(
-            plan.id,
-            dependencies
-                .into_iter()
-                .filter(|dependency| dependency.id() != plan.id)
-                .collect(),
-        );
+        inner.retained.insert(plan.id, retained);
         Ok(plan.handle)
     }
 
