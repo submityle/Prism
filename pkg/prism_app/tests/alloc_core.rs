@@ -154,13 +154,13 @@ fn state_computation_substates_and_scoped_cleanup_remain_available() {
 #[test]
 fn settings_use_caller_supplied_environment_and_ordered_cascade() {
     let mut settings = Settings::new();
-    settings.set(SettingsLayer::EngineDefault, "render.quality", 1_i64.into());
+    settings.set(SettingsLayer::EngineDefault, "render.quality", 1_i64);
     settings.apply_env_vars(
         [("PRISM_RENDER_QUALITY", "2"), ("OTHER", "ignored")],
         "PRISM_",
     );
     assert_eq!(settings.get_int("render.quality"), Some(2));
-    settings.set(SettingsLayer::Runtime, "render.quality", 3_i64.into());
+    settings.set(SettingsLayer::Runtime, "render.quality", 3_i64);
     assert_eq!(settings.get_int("render.quality"), Some(3));
     settings.clear(SettingsLayer::Runtime, "render.quality");
     assert_eq!(settings.get_int("render.quality"), Some(2));
