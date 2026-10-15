@@ -45,11 +45,17 @@ pub fn sync_audio_players(world: &mut World) {
             continue;
         }
         if player.asset.is_some() {
-            player.state = if asset_resolved {
-                AudioPlaybackState::AwaitingSourceRoute
+            if asset_resolved {
+                // A published resident route owns the `Ready` state. Keep it
+                // across frames instead of resetting it before the route
+                // cache gets a chance to run; all other resolved assets are
+                // still waiting for route materialization.
+                if player.state != AudioPlaybackState::Ready {
+                    player.state = AudioPlaybackState::AwaitingSourceRoute;
+                }
             } else {
-                AudioPlaybackState::WaitingForAsset
-            };
+                player.state = AudioPlaybackState::WaitingForAsset;
+            }
             // The current runtime command contract carries policy, not decoded
             // media. Do not turn an asset into an abstract fake-success voice.
             if world.get::<DerivedEmitter>(entity).is_some()
@@ -232,7 +238,7 @@ mod tests {
         let mut app = test_app();
         app.world_mut()
             .resource_mut::<AudioAssetStore>()
-            .load_bank(test_manifest(), &wav_mono(4))
+            .load_bank(test_streaming_manifest(), &wav_mono(4))
             .expect("bank loads");
         let entity = app.world_mut().spawn(AudioPlayer::from_asset(
             AudioAssetHandle::new(BankId(7), EntryId(1)),
@@ -267,12 +273,12 @@ mod tests {
         );
     }
 
-    fn test_manifest() -> BankManifest {
+    fn test_streaming_manifest() -> BankManifest {
         BankManifest::new(BankId(7), String::from("test"), 1).with_media(MediaEntry::new(
             EntryId(1),
             String::from("clip"),
             MediaFormat::new(CodecTag::Pcm, 1, 48_000, Some(4)),
-            Residency::Memory,
+            Residency::Streaming { prefetch_frames: 2 },
             0,
             52,
         ))

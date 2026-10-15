@@ -17,6 +17,7 @@ use crate::listener::AudioListener;
 use crate::master_gain::MasterGain;
 use crate::playback::PlaybackSettings;
 use crate::player::AudioPlayer;
+use crate::source_route::{AudioGraphRouteState, AudioOutputLayout};
 use crate::systems::{audio_frame, AudioSystems};
 use crate::telemetry::AudioTelemetry;
 use crate::voice_registry::{LiveVoices, PendingStops, RemovedAudioEmitters, VoiceMirror};
@@ -88,6 +89,8 @@ pub fn install(world: &mut World, config: AudioRuntimeConfig) {
     world.insert_resource(RemovedAudioEmitters::default());
     world.init_resource::<MasterGain>();
     world.init_resource::<AudioAssetStore>();
+    world.init_resource::<AudioOutputLayout>();
+    world.insert_resource(AudioGraphRouteState::default());
     if world.get_resource::<PhysicalVoiceBudget>().is_none() {
         world.insert_resource(PhysicalVoiceBudget::new(config.max_physical_voices));
     }

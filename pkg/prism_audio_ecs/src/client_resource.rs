@@ -113,6 +113,17 @@ impl AudioClient {
         }
     }
 
+    /// Publishes a graph while preserving ownership when the runtime is closed.
+    pub(crate) fn try_publish_graph(
+        &self,
+        graph: Box<AudioGraph>,
+    ) -> Result<Option<Box<AudioGraph>>, Box<AudioGraph>> {
+        match self.raw().as_ref() {
+            Some(client) => Ok(client.publish_graph(graph)),
+            None => Err(graph),
+        }
+    }
+
     /// Reads the next unread telemetry frame, if any.
     #[must_use]
     #[inline]

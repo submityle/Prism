@@ -24,12 +24,16 @@ pub mod playback;
 pub mod player;
 pub mod player_systems;
 pub mod plugin;
+pub mod scene_adapter;
+pub mod source_route;
 pub mod systems;
 pub mod telemetry;
 pub mod voice_registry;
 pub mod volume;
 
-pub use assets::{AudioAssetLoadError, AudioAssetStore};
+pub use assets::{
+    AudioAssetLoadError, AudioAssetStore, AudioSourceRouteError, ResidentAudioSource,
+};
 pub use budget::PhysicalVoiceBudget;
 pub use client_resource::{AudioClient, AudioRuntimeHost};
 pub use emitter::AudioEmitter;
@@ -39,6 +43,10 @@ pub use playback::{PlaybackMode, PlaybackSettings};
 pub use player::{AudioPlaybackState, AudioPlayer};
 pub use player_systems::{apply_player_disposition, sync_audio_players};
 pub use plugin::AudioRuntimePlugin;
+pub use scene_adapter::materialize_scene_audio_sources;
+pub use source_route::{
+    sync_audio_source_routes, AudioGraphRouteError, AudioGraphRouteState, AudioOutputLayout,
+};
 pub use systems::AudioSystems;
 pub use telemetry::AudioTelemetry;
 pub use voice_registry::{LiveVoices, PendingStops, RemovedAudioEmitters, VoiceMirror};
@@ -46,7 +54,9 @@ pub use volume::Volume;
 
 /// Common public audio ECS types.
 pub mod prelude {
-    pub use crate::assets::{AudioAssetLoadError, AudioAssetStore};
+    pub use crate::assets::{
+        AudioAssetLoadError, AudioAssetStore, AudioSourceRouteError, ResidentAudioSource,
+    };
     pub use crate::budget::PhysicalVoiceBudget;
     pub use crate::client_resource::{AudioClient, AudioRuntimeHost};
     pub use crate::emitter::AudioEmitter;
@@ -56,6 +66,10 @@ pub mod prelude {
     pub use crate::player::{AudioPlaybackState, AudioPlayer};
     pub use crate::player_systems::{apply_player_disposition, sync_audio_players};
     pub use crate::plugin::AudioRuntimePlugin;
+    pub use crate::scene_adapter::materialize_scene_audio_sources;
+    pub use crate::source_route::{
+        sync_audio_source_routes, AudioGraphRouteError, AudioGraphRouteState, AudioOutputLayout,
+    };
     pub use crate::systems::AudioSystems;
     pub use crate::telemetry::AudioTelemetry;
     pub use crate::voice_registry::{LiveVoices, PendingStops, RemovedAudioEmitters, VoiceMirror};

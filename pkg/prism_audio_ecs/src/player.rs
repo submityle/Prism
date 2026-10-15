@@ -72,6 +72,8 @@ pub struct AudioPlayer {
     pub playing: bool,
     /// Decoder-frame playhead maintained by the ECS control plane.
     pub playhead: u64,
+    /// Monotonic control-plane epoch used to restart a materialized source.
+    pub route_epoch: u64,
     /// Readiness/completion observed by the last sync pass.
     pub state: AudioPlaybackState,
 }
@@ -88,6 +90,7 @@ impl AudioPlayer {
             stop_requested: false,
             playing: true,
             playhead: 0,
+            route_epoch: 0,
             state: AudioPlaybackState::Ready,
         }
     }
@@ -108,6 +111,7 @@ impl AudioPlayer {
     pub const fn with_asset(mut self, asset: AudioAssetHandle) -> Self {
         self.asset = Some(asset);
         self.playhead = 0;
+        self.route_epoch = self.route_epoch.wrapping_add(1);
         self.state = AudioPlaybackState::WaitingForAsset;
         self
     }
@@ -133,6 +137,7 @@ impl AudioPlayer {
         self.stop_requested = false;
         self.playing = true;
         self.playhead = 0;
+        self.route_epoch = self.route_epoch.wrapping_add(1);
         self.state = if self.asset.is_some() {
             AudioPlaybackState::WaitingForAsset
         } else {

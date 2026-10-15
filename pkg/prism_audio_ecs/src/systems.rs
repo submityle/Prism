@@ -43,7 +43,9 @@ pub fn audio_frame(world: &mut World) {
     {
         return;
     }
+    crate::scene_adapter::materialize_scene_audio_sources(world);
     crate::player_systems::sync_audio_players(world);
+    crate::source_route::sync_audio_source_routes(world);
     crate::player_systems::apply_player_disposition(world);
     stop_removed_voices(world);
     stop_flagged_voices(world);
