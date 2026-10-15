@@ -419,7 +419,7 @@ fn decode_view_feedback(
                     },
                     ShadeDemandConfig {
                         chart_extent: chart.texel_extent,
-                        page_size: 128,
+                        page_size: crate::shading::texel_cache::SHADE_PAGE_SIZE,
                         page_byte_cost: SHADE_PAGE_BYTE_COST,
                         frame,
                         channel,

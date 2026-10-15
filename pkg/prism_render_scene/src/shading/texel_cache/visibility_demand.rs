@@ -11,6 +11,10 @@ use prism_render_visibility::texture_lod;
 
 use super::{FaceChart, ShadeChannel, ShadePageKey, ShadePageRequest};
 
+/// Logical shade page edge shared by visibility feedback, atlas allocation,
+/// and the resolve-side chart/page mapping.
+pub const SHADE_PAGE_SIZE: u32 = 128;
+
 /// One real visibility-buffer sample for object/texture-space shading.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShadeVisibilitySample {

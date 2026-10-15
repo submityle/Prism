@@ -42,7 +42,9 @@ pub use producer::{
     begin_shade_writes, begin_shade_writes_from_epoch_batch, begin_shade_writes_from_registry,
     is_write_pending, PreparedShadeWrites, ShadeWriteProducerError, SubmittedShadeWrites,
 };
-pub(crate) use production::{build_shade_dispatch_batch, ShadeDispatchBuildError};
+pub(crate) use production::{
+    build_shade_dispatch_batch, build_shade_dispatch_batch_mixed_epochs, ShadeDispatchBuildError,
+};
 pub use production::{build_shade_dispatch_chart, ShadeDispatchInputs, ShadeDispatchJobInput};
 pub(crate) use production_resources::{
     extract_shade_dispatch_inputs, prepare_shade_dispatch, shade_dispatch_pass,
@@ -62,6 +64,7 @@ pub use store::{
 pub use visibility_demand::{
     shade_page_request_from_visibility, ShadeDemandBatchError, ShadeDemandConfig,
     ShadeDemandEpochBatch, ShadeDemandRecord, ShadeDemandRegistry, ShadeVisibilitySample,
+    SHADE_PAGE_SIZE,
 };
 
 #[cfg(test)]

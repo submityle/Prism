@@ -7,6 +7,8 @@
 //! is observable here, but this module intentionally does not publish a page
 //! table: publication remains the shade-store producer's responsibility.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use bevy_ecs::prelude::*;
 use bevy_render::{
     render_resource::{Buffer, CommandEncoder, TextureView},
@@ -21,8 +23,10 @@ use crate::{
 };
 
 use super::{
-    build_shade_dispatch_batch, PreparedShadeDispatch, ShadeDispatch, ShadeDispatchBuildError,
-    ShadeDispatchConfig, ShadeDispatchInputs,
+    build_shade_dispatch_batch, build_shade_dispatch_batch_mixed_epochs, FaceChart,
+    PreparedShadeDispatch, ShadeAtlasLayout, ShadeDemandRegistry, ShadeDispatch,
+    ShadeDispatchBuildError, ShadeDispatchConfig, ShadeDispatchInputs, ShadePageHandle,
+    ShadePageKey, ShadePageTableRecord, SHADE_PAGE_SIZE,
 };
 
 /// Default fixed allocation limits for an explicitly enabled writer.
@@ -33,25 +37,23 @@ pub const DEFAULT_SHADE_DISPATCH_CONFIG: ShadeDispatchConfig = ShadeDispatchConf
     max_vertices: 16_384,
 };
 
-/// Render-world opt-in for production texel-space shade dispatch.
-///
-/// It is disabled by default because no object/material shade-page producer is
-/// installed yet.  Enabling it only allocates the writer; a compute pass is
-/// still impossible until [`ShadeDispatchInputs`] contains real page/chart
-/// requests and the render world has matching geometry and lights.
+/// Render-world control for production texel-space shade dispatch.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShadeDispatchProductionSettings {
     /// Whether the production resource may allocate and prepare work.
     pub enabled: bool,
     /// Fixed GPU capacities for the writer.
     pub config: ShadeDispatchConfig,
+    /// Explicit directional-light policy used by the automatic producer.
+    pub directional_light: u32,
 }
 
 impl Default for ShadeDispatchProductionSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             config: DEFAULT_SHADE_DISPATCH_CONFIG,
+            directional_light: 0,
         }
     }
 }
@@ -78,6 +80,13 @@ struct InFlightShadeDispatch {
     job_count: u32,
 }
 
+#[derive(Clone, Debug)]
+struct AutoShadePublication {
+    records: BTreeMap<ShadePageKey, ShadePageTableRecord>,
+    charts: BTreeMap<ShadePageKey, FaceChart>,
+    jobs: BTreeMap<ShadePageKey, super::ShadeDispatchJobInput>,
+}
+
 /// Owns the production writer and its explicit prepare → record → complete
 /// boundary.
 #[derive(Resource)]
@@ -88,6 +97,12 @@ pub struct ShadeDispatchProductionGpu {
     status: ShadeDispatchProductionStatus,
     active_page_count: u32,
     active_chart_count: u32,
+    next_slot: u32,
+    next_generation: u64,
+    active_records: BTreeMap<ShadePageKey, ShadePageTableRecord>,
+    active_charts: BTreeMap<ShadePageKey, FaceChart>,
+    active_jobs: BTreeMap<ShadePageKey, super::ShadeDispatchJobInput>,
+    pending_publication: Option<AutoShadePublication>,
 }
 
 impl Default for ShadeDispatchProductionGpu {
@@ -99,6 +114,12 @@ impl Default for ShadeDispatchProductionGpu {
             status: ShadeDispatchProductionStatus::Disabled,
             active_page_count: 0,
             active_chart_count: 0,
+            next_slot: 0,
+            next_generation: 1,
+            active_records: BTreeMap::new(),
+            active_charts: BTreeMap::new(),
+            active_jobs: BTreeMap::new(),
+            pending_publication: None,
         }
     }
 }
@@ -150,6 +171,11 @@ impl ShadeDispatchProductionGpu {
             return;
         };
         if completed.0 >= in_flight.completion.0 {
+            if let Some(publication) = self.pending_publication.take() {
+                self.active_records = publication.records;
+                self.active_charts = publication.charts;
+                self.active_jobs = publication.jobs;
+            }
             self.status = ShadeDispatchProductionStatus::Completed {
                 completion: in_flight.completion.0,
                 job_count: in_flight.job_count,
@@ -160,6 +186,7 @@ impl ShadeDispatchProductionGpu {
     }
 
     fn cancel_prepared(&mut self) {
+        self.pending_publication = None;
         if let (Some(dispatch), Some(prepared)) = (self.dispatch.as_mut(), self.prepared.take()) {
             let _ = dispatch.cancel(prepared);
         }
@@ -171,6 +198,8 @@ impl ShadeDispatchProductionGpu {
         inputs: &ShadeDispatchInputs,
         geometry: &RenderShadingGeometryRegistry,
         lights: &ExtractedLights,
+        auto_publication: Option<AutoShadePublication>,
+        mixed_epochs: bool,
     ) {
         if self.in_flight.is_some() || self.prepared.is_some() {
             return;
@@ -180,7 +209,11 @@ impl ShadeDispatchProductionGpu {
             self.status = ShadeDispatchProductionStatus::Error;
             return;
         };
-        let batch = match build_shade_dispatch_batch(inputs, geometry, lights) {
+        let batch = match if mixed_epochs {
+            build_shade_dispatch_batch_mixed_epochs(inputs, geometry, lights)
+        } else {
+            build_shade_dispatch_batch(inputs, geometry, lights)
+        } {
             Ok(batch) => batch,
             Err(ShadeDispatchBuildError::NoInput) => {
                 self.deactivate_snapshot();
@@ -189,6 +222,7 @@ impl ShadeDispatchProductionGpu {
             }
             Err(_) => {
                 self.deactivate_snapshot();
+                self.pending_publication = None;
                 self.status = ShadeDispatchProductionStatus::Error;
                 return;
             }
@@ -204,6 +238,7 @@ impl ShadeDispatchProductionGpu {
             Ok(prepared) => {
                 self.active_page_count = batch.page_table.len() as u32;
                 self.active_chart_count = batch.chart_infos.len() as u32;
+                self.pending_publication = auto_publication;
                 self.status = ShadeDispatchProductionStatus::Prepared {
                     job_count: prepared.job_count(),
                 };
@@ -211,6 +246,7 @@ impl ShadeDispatchProductionGpu {
             }
             Err(_) => {
                 self.deactivate_snapshot();
+                self.pending_publication = None;
                 self.status = ShadeDispatchProductionStatus::Error;
             }
         }
@@ -222,6 +258,7 @@ impl ShadeDispatchProductionGpu {
         };
         let Some(dispatch) = self.dispatch.as_mut() else {
             self.deactivate_snapshot();
+            self.pending_publication = None;
             self.status = ShadeDispatchProductionStatus::Error;
             return;
         };
@@ -240,9 +277,135 @@ impl ShadeDispatchProductionGpu {
             }
             Err(_) => {
                 self.deactivate_snapshot();
+                self.pending_publication = None;
                 self.status = ShadeDispatchProductionStatus::Error;
             }
         }
+    }
+
+    fn build_auto_inputs(
+        &mut self,
+        demands: &ShadeDemandRegistry,
+        config: ShadeDispatchConfig,
+        directional_light: u32,
+    ) -> Result<Option<(ShadeDispatchInputs, AutoShadePublication, bool)>, ()> {
+        let batches = demands.epoch_batches().map_err(|_| ())?;
+        let mut requested = BTreeMap::<ShadePageKey, super::ShadeDemandRecord>::new();
+        for batch in batches {
+            for record in batch.records {
+                requested.insert(record.request.key, record);
+            }
+        }
+        if requested.is_empty() {
+            return Ok(None);
+        }
+
+        let layout =
+            ShadeAtlasLayout::new(config.atlas_extent, [SHADE_PAGE_SIZE; 2]).map_err(|_| ())?;
+        let capacity = config.max_pages.min(layout.capacity()) as usize;
+        let mut pending_records = self.active_records.clone();
+        let mut pending_charts = self.active_charts.clone();
+        let mut pending_jobs = self.active_jobs.clone();
+        let used_slots = pending_records
+            .values()
+            .map(|record| record.handle.slot)
+            .collect::<BTreeSet<_>>();
+
+        let mut candidates = requested.into_values().collect::<Vec<_>>();
+        candidates.sort_unstable_by(|a, b| {
+            b.request
+                .priority
+                .cmp(&a.request.priority)
+                .then_with(|| a.request.key.cmp(&b.request.key))
+        });
+
+        let mut next_slot = self.next_slot;
+        for demand in candidates {
+            if pending_jobs.len() >= config.max_jobs as usize {
+                break;
+            }
+            if pending_records.len() >= capacity
+                && !pending_records.contains_key(&demand.request.key)
+            {
+                continue;
+            }
+            if let Some(previous) = pending_charts.get(&demand.request.key)
+                && *previous != demand.chart
+            {
+                return Err(());
+            }
+
+            let slot = if let Some(previous) = pending_records.get(&demand.request.key) {
+                previous.handle.slot
+            } else {
+                while next_slot < layout.capacity() && used_slots.contains(&next_slot) {
+                    next_slot = next_slot.saturating_add(1);
+                }
+                if next_slot >= layout.capacity() {
+                    continue;
+                }
+                next_slot
+            };
+            let generation = self.next_generation;
+            self.next_generation = self.next_generation.checked_add(1).ok_or(())?;
+            let handle = ShadePageHandle {
+                slot,
+                generation,
+                epoch: demand.request.key.material_epoch,
+            };
+            let [atlas_x, atlas_y] = layout.origin(slot).ok_or(())?;
+            pending_records.insert(
+                demand.request.key,
+                ShadePageTableRecord {
+                    key: demand.request.key,
+                    handle,
+                    atlas_x,
+                    atlas_y,
+                },
+            );
+            pending_charts.insert(demand.request.key, demand.chart);
+            pending_jobs.insert(
+                demand.request.key,
+                super::ShadeDispatchJobInput {
+                    geometry_index: demand.geometry_index,
+                    chart: demand.chart,
+                    page_key: demand.request.key,
+                    directional_light,
+                },
+            );
+            if !used_slots.contains(&slot) {
+                next_slot = next_slot.saturating_add(1);
+            }
+        }
+        if pending_jobs.is_empty() {
+            return Ok(None);
+        }
+
+        let jobs = pending_jobs.values().copied().collect::<Vec<_>>();
+
+        let pages = pending_records.values().copied().collect::<Vec<_>>();
+        let epoch = pages
+            .first()
+            .map(|record| record.key.material_epoch)
+            .unwrap_or(0);
+        let mixed_epochs = pages
+            .iter()
+            .any(|record| record.key.material_epoch != epoch);
+        self.next_slot = next_slot;
+        Ok(Some((
+            ShadeDispatchInputs {
+                epoch,
+                page_size: SHADE_PAGE_SIZE,
+                pages,
+                jobs,
+            },
+            AutoShadePublication {
+                records: pending_records,
+                charts: pending_charts,
+                jobs: pending_jobs,
+            },
+            mixed_epochs,
+        )))
     }
 }
 
@@ -273,6 +436,7 @@ pub(crate) fn extract_shade_dispatch_inputs(
 pub(crate) fn prepare_shade_dispatch(
     settings: Res<ShadeDispatchProductionSettings>,
     inputs: Res<ShadeDispatchInputs>,
+    demands: Res<ShadeDemandRegistry>,
     geometry: Res<RenderShadingGeometryRegistry>,
     lights: Res<ExtractedLights>,
     device: Res<RenderDevice>,
@@ -290,7 +454,32 @@ pub(crate) fn prepare_shade_dispatch(
         return;
     }
     production.ensure_dispatch(&device, settings.config);
-    production.prepare(&queue, &inputs, &geometry, &lights);
+    let (effective_inputs, auto_publication, mixed_epochs) = if inputs.is_empty() {
+        match production.build_auto_inputs(&demands, settings.config, settings.directional_light) {
+            Ok(Some((generated, publication, mixed))) => (generated, Some(publication), mixed),
+            Ok(None) => {
+                if production.in_flight.is_none() {
+                    production.status = ShadeDispatchProductionStatus::NoInput;
+                }
+                return;
+            }
+            Err(()) => {
+                production.deactivate_snapshot();
+                production.status = ShadeDispatchProductionStatus::Error;
+                return;
+            }
+        }
+    } else {
+        (inputs.clone(), None, false)
+    };
+    production.prepare(
+        &queue,
+        &effective_inputs,
+        &geometry,
+        &lights,
+        auto_publication,
+        mixed_epochs,
+    );
 }
 
 /// Core3d node that records the already prepared writer pass.

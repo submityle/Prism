@@ -270,6 +270,7 @@ pub enum ShadePageTableError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShadePageTableSnapshot {
     epoch: u64,
+    mixed_epochs: bool,
     records: Vec<ShadePageTableRecord>,
     gpu_entries: Vec<GpuShadePageEntry>,
     gpu_lookup: Vec<GpuShadePageLookup>,
@@ -304,6 +305,23 @@ impl ShadePageTableSnapshot {
         epoch: u64,
         records: impl IntoIterator<Item = ShadePageTableRecord>,
     ) -> Result<Self, ShadePageTableError> {
+        Self::build(records, Some(epoch))
+    }
+
+    /// Builds a key-sorted snapshot whose records may carry different
+    /// material epochs. Each key/handle pair is still checked individually;
+    /// this only removes the frame-wide epoch restriction so visibility
+    /// feedback can publish independent material revisions together.
+    pub fn try_from_records_mixed_epochs(
+        records: impl IntoIterator<Item = ShadePageTableRecord>,
+    ) -> Result<Self, ShadePageTableError> {
+        Self::build(records, None)
+    }
+
+    fn build(
+        records: impl IntoIterator<Item = ShadePageTableRecord>,
+        expected_epoch: Option<u64>,
+    ) -> Result<Self, ShadePageTableError> {
         let mut records: Vec<_> = records.into_iter().collect();
         records.sort_unstable_by_key(|record| record.key);
         if records.len() > u32::MAX as usize {
@@ -327,7 +345,11 @@ impl ShadePageTableSnapshot {
             if !origins.insert((record.atlas_x, record.atlas_y)) {
                 return Err(ShadePageTableError::DuplicateAtlasOrigin);
             }
-            if record.key.material_epoch != epoch || record.handle.epoch != epoch {
+            if record.key.material_epoch != record.handle.epoch
+                || expected_epoch.is_some_and(|epoch| {
+                    record.key.material_epoch != epoch || record.handle.epoch != epoch
+                })
+            {
                 return Err(ShadePageTableError::EpochMismatch);
             }
             let generation = u32::try_from(record.handle.generation)
@@ -347,7 +369,8 @@ impl ShadePageTableSnapshot {
         }
 
         Ok(Self {
-            epoch,
+            epoch: expected_epoch.unwrap_or(0),
+            mixed_epochs: expected_epoch.is_none(),
             records,
             gpu_entries,
             gpu_lookup,
@@ -359,6 +382,13 @@ impl ShadePageTableSnapshot {
     #[must_use]
     pub const fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Whether this snapshot contains independently validated material
+    /// epochs instead of one frame-wide epoch.
+    #[must_use]
+    pub const fn has_mixed_epochs(&self) -> bool {
+        self.mixed_epochs
     }
 
     /// Number of indexed shade pages in this snapshot.
@@ -450,7 +480,11 @@ impl ShadePageTableSnapshot {
             if self.indices.get(&record.key) != Some(&page_index) {
                 return Err(ShadePageTableError::DuplicateKey);
             }
-            if record.key.material_epoch != self.epoch || record.handle.epoch != self.epoch {
+            if record.key.material_epoch != record.handle.epoch
+                || (!self.mixed_epochs
+                    && (record.key.material_epoch != self.epoch
+                        || record.handle.epoch != self.epoch))
+            {
                 return Err(ShadePageTableError::EpochMismatch);
             }
             if u32::try_from(record.handle.generation).ok() != Some(gpu.generation)
@@ -1341,6 +1375,31 @@ mod tests {
         );
         assert_eq!(
             ShadePageTableSnapshot::try_from_records(8, [record(1, 0, 0)]),
+            Err(ShadePageTableError::EpochMismatch)
+        );
+    }
+
+    #[test]
+    fn mixed_epoch_snapshot_keeps_per_record_proofs_and_sorted_lookup() {
+        let mut first = record(2, 0, 0);
+        first.key.material_epoch = 2;
+        first.handle.epoch = 2;
+        let mut second = record(1, 1, 4);
+        second.key.material_epoch = 1;
+        second.handle.epoch = 1;
+
+        let snapshot =
+            ShadePageTableSnapshot::try_from_records_mixed_epochs([first, second]).unwrap();
+        assert!(snapshot.has_mixed_epochs());
+        assert_eq!(snapshot.epoch(), 0);
+        assert_eq!(snapshot.records()[0].key.material_epoch, 1);
+        assert_eq!(snapshot.records()[1].key.material_epoch, 2);
+        assert!(snapshot.validate().is_ok());
+
+        let mut invalid = first;
+        invalid.handle.epoch = 9;
+        assert_eq!(
+            ShadePageTableSnapshot::try_from_records_mixed_epochs([invalid]),
             Err(ShadePageTableError::EpochMismatch)
         );
     }

@@ -1,12 +1,9 @@
 //! Render-world input seam for the production texel-space shade writer.
 //!
-//! This module deliberately does not discover object/material pages by
-//! guessing from the scene.  A future page producer must submit an explicit
-//! [`ShadeDispatchInputs`] frame containing the page-table records and the
-//! face/chart requests it owns.  The render world then resolves those
-//! requests against the real shading-geometry registry and the real extracted
-//! directional-light table.  With no such input the production path is
-//! disabled and records no GPU work.
+//! Explicit [`ShadeDispatchInputs`] remains the compatibility API. Visibility
+//! feedback can also be lowered into the same input shape by the production
+//! resource, so the page table, chart metadata, writer jobs, and resolve
+//! consumer share one validated path.
 
 use std::collections::BTreeMap;
 
@@ -131,6 +128,26 @@ pub(crate) fn build_shade_dispatch_batch(
     geometry: &RenderShadingGeometryRegistry,
     lights: &ExtractedLights,
 ) -> Result<ShadeDispatchBatch, ShadeDispatchBuildError> {
+    build_shade_dispatch_batch_inner(inputs, geometry, lights, false)
+}
+
+/// Builds a batch from the automatic visibility producer. Every page still
+/// validates its own key/handle epoch proof, but one feedback frame may carry
+/// pages from more than one material revision.
+pub(crate) fn build_shade_dispatch_batch_mixed_epochs(
+    inputs: &ShadeDispatchInputs,
+    geometry: &RenderShadingGeometryRegistry,
+    lights: &ExtractedLights,
+) -> Result<ShadeDispatchBatch, ShadeDispatchBuildError> {
+    build_shade_dispatch_batch_inner(inputs, geometry, lights, true)
+}
+
+fn build_shade_dispatch_batch_inner(
+    inputs: &ShadeDispatchInputs,
+    geometry: &RenderShadingGeometryRegistry,
+    lights: &ExtractedLights,
+    allow_mixed_epochs: bool,
+) -> Result<ShadeDispatchBatch, ShadeDispatchBuildError> {
     if inputs.jobs.is_empty() || inputs.pages.is_empty() {
         return Err(ShadeDispatchBuildError::NoInput);
     }
@@ -138,7 +155,11 @@ pub(crate) fn build_shade_dispatch_batch(
         return Err(ShadeDispatchBuildError::InvalidPageSize);
     }
 
-    let page_table = ShadePageTableSnapshot::try_from_records(inputs.epoch, inputs.pages.clone())?;
+    let page_table = if allow_mixed_epochs {
+        ShadePageTableSnapshot::try_from_records_mixed_epochs(inputs.pages.clone())?
+    } else {
+        ShadePageTableSnapshot::try_from_records(inputs.epoch, inputs.pages.clone())?
+    };
 
     // Build the resolve metadata only from explicit job provenance. A page
     // without a chart is rejected; no UV, face, or atlas-derived guess is
