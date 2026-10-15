@@ -22,6 +22,7 @@
 //! [`crate::emitter::AudioEmitter`] from
 //! [`crate::playback::PlaybackSettings`] and [`crate::volume::Volume`].
 
+use prism_audio_assets::asset::AudioAssetHandle;
 use prism_audio_core::voice::VoiceGroup;
 use prism_ecs::prelude::Component;
 
@@ -33,6 +34,17 @@ use crate::playback::PlaybackSettings;
 /// full-volume radius so no distance attenuation is applied.
 const NON_SPATIAL_DISTANCE: f32 = f32::MAX;
 
+/// Current ECS-side state of a player asset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioPlaybackState {
+    /// The source is usable by the ECS control plane.
+    Ready,
+    /// The source handle is not currently resolved by [`AudioAssetStore`].
+    WaitingForAsset,
+    /// The bank entry resolved, but no source-node route exists yet.
+    AwaitingSourceRoute,
+}
+
 /// A high-level audio source attached to an entity.
 ///
 /// An [`AudioPlayer`] names *which* logical source plays (its
@@ -40,10 +52,13 @@ const NON_SPATIAL_DISTANCE: f32 = f32::MAX;
 /// its scheduling [`priority`](AudioPlayer::priority). Pair it with a
 /// [`PlaybackSettings`] to describe importance attenuation, virtualization,
 /// and explicit-stop disposition; the sync system then owns the derived
-/// [`AudioEmitter`]. A group is not a decoded source binding: sample playback
-/// and natural-completion events are not supplied by the underlying runtime.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+/// [`AudioEmitter`]. An optional asset handle is resolved by the ECS asset
+/// store before a voice is allocated; unresolved media never becomes a fake
+/// successful voice.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct AudioPlayer {
+    /// Optional imported media identity.
+    pub asset: Option<AudioAssetHandle>,
     /// Logical source group, forwarded to the runtime for playback limiting.
     pub group: VoiceGroup,
     /// Scheduling priority used for tie-breaking and telemetry.
@@ -53,6 +68,12 @@ pub struct AudioPlayer {
     /// [`PlaybackMode`](crate::playback::PlaybackMode) disposition (despawn the
     /// entity, remove the playback components, or nothing).
     pub stop_requested: bool,
+    /// Whether the player currently wants playback.
+    pub playing: bool,
+    /// Decoder-frame playhead maintained by the ECS control plane.
+    pub playhead: u64,
+    /// Readiness/completion observed by the last sync pass.
+    pub state: AudioPlaybackState,
 }
 
 impl AudioPlayer {
@@ -61,10 +82,34 @@ impl AudioPlayer {
     #[inline]
     pub const fn new(group: VoiceGroup) -> Self {
         Self {
+            asset: None,
             group,
             priority: 0,
             stop_requested: false,
+            playing: true,
+            playhead: 0,
+            state: AudioPlaybackState::Ready,
         }
+    }
+
+    /// Builds a player bound to imported media `asset`.
+    #[must_use]
+    #[inline]
+    pub const fn from_asset(asset: AudioAssetHandle, group: VoiceGroup) -> Self {
+        let mut player = Self::new(group);
+        player.asset = Some(asset);
+        player.state = AudioPlaybackState::WaitingForAsset;
+        player
+    }
+
+    /// Binds imported media and resets the decoder-frame playhead.
+    #[must_use]
+    #[inline]
+    pub const fn with_asset(mut self, asset: AudioAssetHandle) -> Self {
+        self.asset = Some(asset);
+        self.playhead = 0;
+        self.state = AudioPlaybackState::WaitingForAsset;
+        self
     }
 
     /// Sets the scheduling priority.
@@ -79,6 +124,20 @@ impl AudioPlayer {
     #[inline]
     pub fn stop(&mut self) {
         self.stop_requested = true;
+        self.playing = false;
+    }
+
+    /// Starts from frame zero and clears a prior finite-source completion.
+    #[inline]
+    pub fn play(&mut self) {
+        self.stop_requested = false;
+        self.playing = true;
+        self.playhead = 0;
+        self.state = if self.asset.is_some() {
+            AudioPlaybackState::WaitingForAsset
+        } else {
+            AudioPlaybackState::Ready
+        };
     }
 }
 
@@ -94,6 +153,7 @@ pub fn derive_emitter(player: &AudioPlayer, settings: &PlaybackSettings) -> Audi
     let mut emitter = AudioEmitter::new(player.group, importance)
         .with_priority(player.priority)
         .with_behavior(settings.mode.virtual_behavior());
+    emitter.playing = player.playing;
     emitter = if settings.spatial {
         emitter.with_distance(settings.reference_distance, settings.max_distance)
     } else {

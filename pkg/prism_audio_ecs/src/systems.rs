@@ -17,8 +17,8 @@ use crate::commands::{
 };
 use crate::plugin::BridgeState;
 use crate::{
-    AudioClient, AudioEmitter, AudioListener, AudioTelemetry, LiveVoices, MasterGain, PendingStops,
-    PhysicalVoiceBudget, RemovedAudioEmitters, VoiceMirror,
+    AudioClient, AudioEmitter, AudioListener, AudioPlayer, AudioTelemetry, LiveVoices, MasterGain,
+    PendingStops, PhysicalVoiceBudget, RemovedAudioEmitters, VoiceMirror,
 };
 
 /// Ordering set for the native audio bridge in `prism_app::Last`.
@@ -292,6 +292,38 @@ pub fn apply_physical_budget(world: &mut World) {
 pub fn pump_telemetry(world: &mut World) {
     let client = world.resource::<AudioClient>().clone();
     while let Some(frame) = client.recv_telemetry() {
+        world
+            .resource_mut::<VoiceMirror>()
+            .advance(frame.frames as u64);
         world.resource_mut::<AudioTelemetry>().push(frame);
+    }
+    sync_player_playheads(world);
+}
+
+/// Projects accepted voice playheads from the deterministic mirror onto ECS
+/// players. Asset-backed players without a source route intentionally remain at
+/// their last playhead (normally zero); they do not advance as fake playback.
+fn sync_player_playheads(world: &mut World) {
+    let entities: Vec<_> = world
+        .query::<(Entity, &AudioPlayer)>()
+        .iter(world)
+        .map(|(entity, _)| entity)
+        .collect();
+    let updates: Vec<_> = {
+        let live = world.resource::<LiveVoices>();
+        let mirror = world.resource::<VoiceMirror>();
+        entities
+            .into_iter()
+            .filter_map(|entity| {
+                let handle = live.get(entity)?;
+                let elapsed = mirror.get(handle)?.elapsed;
+                Some((entity, elapsed))
+            })
+            .collect()
+    };
+    for (entity, playhead) in updates {
+        if let Some(mut player) = world.get_mut::<AudioPlayer>(entity) {
+            player.playhead = playhead;
+        }
     }
 }

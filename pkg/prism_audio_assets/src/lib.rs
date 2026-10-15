@@ -12,7 +12,10 @@
 
 extern crate alloc;
 
+pub mod asset;
 pub mod bank;
 pub mod codec;
 pub mod dialogue;
 pub mod streaming;
+
+pub use asset::{resolve_audio_asset, AudioAssetHandle, AudioAssetResidency, ResolvedAudioAsset};

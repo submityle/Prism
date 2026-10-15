@@ -9,6 +9,7 @@ use prism_audio_rt::AudioRuntimeConfig;
 use prism_ecs::{observer::ObserverId, prelude::*, world::WorldId};
 use prism_transform::GlobalTransform;
 
+use crate::assets::AudioAssetStore;
 use crate::budget::PhysicalVoiceBudget;
 use crate::client_resource::{AudioClient, AudioRuntimeHost};
 use crate::emitter::AudioEmitter;
@@ -86,6 +87,7 @@ pub fn install(world: &mut World, config: AudioRuntimeConfig) {
     world.insert_resource(PendingStops::default());
     world.insert_resource(RemovedAudioEmitters::default());
     world.init_resource::<MasterGain>();
+    world.init_resource::<AudioAssetStore>();
     if world.get_resource::<PhysicalVoiceBudget>().is_none() {
         world.insert_resource(PhysicalVoiceBudget::new(config.max_physical_voices));
     }

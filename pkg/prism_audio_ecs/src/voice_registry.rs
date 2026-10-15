@@ -55,6 +55,12 @@ impl VoiceMirror {
         self.pool.set_max_physical(max_physical);
     }
 
+    /// Advances the mirror by one runtime-rendered block.
+    #[inline]
+    pub(crate) fn advance(&mut self, frames: u64) {
+        self.pool.advance(frames);
+    }
+
     /// Returns the number of mirrored physical and virtual voices.
     #[must_use]
     #[inline]

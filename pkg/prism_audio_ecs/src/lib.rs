@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+pub mod assets;
 pub mod budget;
 pub mod client_resource;
 pub mod commands;
@@ -28,13 +29,14 @@ pub mod telemetry;
 pub mod voice_registry;
 pub mod volume;
 
+pub use assets::{AudioAssetLoadError, AudioAssetStore};
 pub use budget::PhysicalVoiceBudget;
 pub use client_resource::{AudioClient, AudioRuntimeHost};
 pub use emitter::AudioEmitter;
 pub use listener::AudioListener;
 pub use master_gain::MasterGain;
 pub use playback::{PlaybackMode, PlaybackSettings};
-pub use player::AudioPlayer;
+pub use player::{AudioPlaybackState, AudioPlayer};
 pub use player_systems::{apply_player_disposition, sync_audio_players};
 pub use plugin::AudioRuntimePlugin;
 pub use systems::AudioSystems;
@@ -44,13 +46,14 @@ pub use volume::Volume;
 
 /// Common public audio ECS types.
 pub mod prelude {
+    pub use crate::assets::{AudioAssetLoadError, AudioAssetStore};
     pub use crate::budget::PhysicalVoiceBudget;
     pub use crate::client_resource::{AudioClient, AudioRuntimeHost};
     pub use crate::emitter::AudioEmitter;
     pub use crate::listener::AudioListener;
     pub use crate::master_gain::MasterGain;
     pub use crate::playback::{PlaybackMode, PlaybackSettings};
-    pub use crate::player::AudioPlayer;
+    pub use crate::player::{AudioPlaybackState, AudioPlayer};
     pub use crate::player_systems::{apply_player_disposition, sync_audio_players};
     pub use crate::plugin::AudioRuntimePlugin;
     pub use crate::systems::AudioSystems;

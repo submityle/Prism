@@ -13,6 +13,7 @@ prism_math = { path = "../prism_math" }
 prism_transform = { path = "../prism_transform", features = ["ecs"] }
 prism_audio_core = { path = "../prism_audio_core" }
 prism_audio_rt = { path = "../prism_audio_rt" }
+prism_audio_assets = { path = "../prism_audio_assets" }
 libm = "0.2"
 
 [lints]

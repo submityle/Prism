@@ -670,7 +670,17 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 
 前端 `bevy_audio` 保留 `AudioPlayer`/`PlaybackSettings`/`Volume` API 兼容，内部翻译为命令。
 
-### 21.1 运行时桥落地契约（`prism_audio_rt`，已实现）
+### 21.1 当前 Prism 音频 ECS 资产闭环（已实现的控制面边界）
+
+当前仓库已经把资产身份、Bank 校验、ECS 状态和现有 voice 控制面的可落地部分接通，但尚未把解码媒体接入 `AudioGraph` 的 source node：
+
+- `prism_audio_assets::AudioAssetHandle` 是 `(BankId, EntryId)` 稳定句柄；只有经过已加载 `BankRegistry` 与实际 `DecoderRegistry` 校验的条目才能解析为 `ResolvedAudioAsset`，并明确标记常驻或流式 residency。加载失败不会发布半成品 Bank。
+- `prism_audio_ecs::AudioAssetStore` 是 ECS 资源，负责在非 RT 侧加载/卸载 Bank 与解析句柄。`AudioPlayer` 绑定句柄后有明确的 `WaitingForAsset` 状态；条目已解析但还没有媒体到 source-node/render-graph 的命令路由时，状态为 `AwaitingSourceRoute`。
+- 资产句柄未解析或仅解析成功时，都不会创建抽象 `AudioEmitter`/voice 冒充样本播放。这样当前 `AudioCommand::SpawnVoice` 仍只承载 voice policy 的事实不会被掩盖；`prism_audio_bevy` 目前只是兼容 facade，`prism_scene` 也尚未替它完成资产字段到 source node 的反射/材质化映射。
+- 对没有资产句柄的抽象/程序化 player，现有 ECS voice 生命周期仍真实工作。`TelemetryFrame.frames` 推进 `VoiceMirror`，再由 `VoiceInfo.elapsed` 回写 `AudioPlayer.playhead`；没有 live voice 的资产播放器不会凭空推进播放头。
+- 已验证的范围是 headless/offline runtime pool、Bank 解码与 ECS 生命周期测试。真实设备的 cpal 回调、设备时钟/热插拔、以及“解码缓冲/PrefetchStream → `SamplePlayerNode` 或 streaming source → `AudioGraph`”的端到端播放仍需后续实现与设备验证，不能由本节的状态接线推断为已完成。
+
+### 21.2 运行时桥落地契约（`prism_audio_rt`，已实现）
 
 以下为 `prism_audio_rt` 的具体实现契约，是上述线程/内存模型的可运行落地，与 AAA 实践对齐并逐条闭环验证：
 
