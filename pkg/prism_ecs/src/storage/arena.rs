@@ -173,6 +173,10 @@ impl VmArena {
     }
 
     /// Caller has ended all accesses to this arena's live block.
+    ///
+    /// # Safety
+    /// `ptr` must identify a live allocation belonging to this arena, and
+    /// `stride` must be the stride used when that allocation was acquired.
     unsafe fn free(&mut self, ptr: NonNull<u8>, stride: usize) {
         let addr = ptr.as_ptr().addr();
         let (&base, segment) = self

@@ -9,6 +9,8 @@
 //! snapshots and, with deterministic value glue, a stable
 //! [`state_hash`](super::WorldSnapshot::state_hash).
 
+#![allow(clippy::items_after_test_module)]
+
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -389,10 +391,10 @@ fn capture_reusable_column(
             if seen.insert(Arc::as_ptr(chunk) as usize, ()).is_some() {
                 continue;
             }
-            if let Some(origin) = &chunk.origin {
-                if origin.reusable_in(world) {
-                    old.insert(origin.key.clone(), chunk.clone());
-                }
+            if let Some(origin) = &chunk.origin
+                && origin.reusable_in(world)
+            {
+                old.insert(origin.key.clone(), chunk.clone());
             }
         }
     }
@@ -491,7 +493,7 @@ fn capture_reusable_column(
                                 added[local],
                                 changed[local],
                                 0,
-                            )
+                            );
                         };
                     }
                     buffer.into_chunk(key.and_then(origin))

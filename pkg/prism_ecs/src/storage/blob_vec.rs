@@ -846,10 +846,8 @@ mod tests {
         let mut v = BlobVec::new_borrowed(layout_of::<u32>(), None, 4);
         // SAFETY: null is intentionally supplied to verify the checked error
         // path; no pointer is recorded on failure.
-        assert_eq!(
-            unsafe { v.try_attach_block(core::ptr::null_mut()) },
-            Err(BlobVecError::InvalidBlockPointer)
-        );
+        let result = unsafe { v.try_attach_block(core::ptr::null_mut()) };
+        assert_eq!(result, Err(BlobVecError::InvalidBlockPointer));
         assert_eq!(v.try_detach_block(), Err(BlobVecError::NoAttachedBlock));
     }
 

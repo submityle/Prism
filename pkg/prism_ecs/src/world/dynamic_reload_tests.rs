@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc, clippy::undocumented_unsafe_blocks)]
+
 use core::alloc::Layout;
 
 use alloc::sync::Arc;
@@ -1020,7 +1022,7 @@ fn required_constructor_panic_after_yield_discards_all_staged_values() {
         let entity = world.spawn(Neighbor(5));
         let location = world.entities.location(entity).unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            insert(&mut world, entity, id, tracked(1, &drops))
+            insert(&mut world, entity, id, tracked(1, &drops));
         }));
         assert!(result.is_err());
         assert_eq!(drops.load(Ordering::SeqCst), 2);

@@ -576,6 +576,9 @@ impl QueryParamState {
         D::State: 'static,
         F::State: 'static,
     {
+        /// # Safety
+        /// `query` must point to exactly one initialized `QueryState<D, F>`
+        /// allocated by this constructor and must not have been dropped yet.
         unsafe fn drop_query<D: QueryData, F: QueryFilter>(query: NonNull<()>) {
             // SAFETY: this function is paired with the allocation of exactly
             // `QueryState<D, F>` below and called exactly once by `Drop`.

@@ -38,9 +38,12 @@ pub(super) struct SnapshotEq {
 impl SnapshotEq {
     pub(super) fn of<T: PartialEq + 'static>() -> Self {
         // SAFETY: callers must supply two initialized values of this exact T.
+        /// # Safety
+        /// Both pointers must be valid, properly aligned, initialized `T`
+        /// values for the duration of the comparison.
         unsafe fn equal_ptr<T: PartialEq>(a: *const u8, b: *const u8) -> bool {
-            // SAFETY: the enclosing function's contract guarantees two valid T's.
-            unsafe { &*a.cast::<T>() == &*b.cast::<T>() }
+            // SAFETY: the function contract guarantees two valid T values.
+            unsafe { *a.cast::<T>() == *b.cast::<T>() }
         }
         fn equal_any<T: PartialEq + 'static>(a: &dyn Any, b: &dyn Any) -> Option<bool> {
             Some(a.downcast_ref::<T>()? == b.downcast_ref::<T>()?)

@@ -665,10 +665,9 @@ mod perf_gate {
     #[test]
     #[ignore = "controlled-machine sample producer; invoke through tools/ecs-perf/gate.py"]
     fn controlled_samples() {
-        assert!(
-            !cfg!(debug_assertions),
-            "performance samples require --release"
-        );
+        if cfg!(debug_assertions) {
+            panic!("performance samples require --release");
+        }
         emit_samples("spawn_batch", ENTITIES, || {
             let mut world = World::new();
             let start = Instant::now();

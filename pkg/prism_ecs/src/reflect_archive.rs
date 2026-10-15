@@ -732,10 +732,10 @@ fn field_info(
                 (TypeInfo::Enum(e), Access::TupleIndex(i), Access::TupleIndex(j)) if i == j => {
                     for v in e.variants() {
                         spend(work, 1, "validation steps")?;
-                        if let VariantKind::Tuple(fields) = v.kind() {
-                            if let Some(f) = fields.get(*i) {
-                                names.insert(f.type_name());
-                            }
+                        if let VariantKind::Tuple(fields) = v.kind()
+                            && let Some(f) = fields.get(*i)
+                        {
+                            names.insert(f.type_name());
                         }
                     }
                 }
@@ -928,15 +928,14 @@ impl World {
             if !self.contains(entity) {
                 return Err(PrefabError::MissingEntity(entity).into());
             }
-            if !self.reflect_entity(entity).is_empty()
+            if (!self.reflect_entity(entity).is_empty()
                 || !self.prefabs_of(entity).is_empty()
                 || self
                     .get::<PrefabOverrides>(entity)
-                    .is_some_and(|p| p.components().next().is_some())
+                    .is_some_and(|p| p.components().next().is_some()))
+                && seen.insert(entity)
             {
-                if seen.insert(entity) {
-                    queue.push_back(entity);
-                }
+                queue.push_back(entity);
             }
         }
         let mut records = Vec::new();
@@ -1155,15 +1154,14 @@ impl World {
                     }
                     // Historical whole-component migrations are supported, but
                     // ownership paths require an explicit compatible schema.
-                    if let Some((logical, wrote)) = self.reflect.schemas().locate(name) {
-                        if self
+                    if let Some((logical, wrote)) = self.reflect.schemas().locate(name)
+                        && self
                             .reflect
                             .schemas()
                             .current_schema(logical)
                             .is_none_or(|s| s.type_name() != name || s.version() != wrote)
-                        {
-                            return Err(ReflectArchiveError::PrefabSchemaMismatch(id));
-                        }
+                    {
+                        return Err(ReflectArchiveError::PrefabSchemaMismatch(id));
                     }
                     let root = component_info(self, id)?;
                     if root.type_name() != name

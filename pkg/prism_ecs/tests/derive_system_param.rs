@@ -14,6 +14,8 @@
 //! (which mention the impl lifetimes `'w`/`'s`) still resolves to a `'static`
 //! tuple and compiles.
 
+#![allow(clippy::unused_unit)]
+
 use prism_ecs::prelude::*;
 
 #[derive(Component)]
@@ -100,6 +102,7 @@ fn derived_system_param_drives_a_real_system() {
 
 /// A unit-struct param (empty `State` tuple) is also a valid `SystemParam` and
 /// can drive a system that takes nothing from the world.
+#[allow(clippy::unused_unit)]
 #[derive(SystemParam)]
 struct NoCtx;
 

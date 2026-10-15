@@ -80,7 +80,7 @@ impl DynamicComponentLayout {
     }
 
     fn validate(self) -> Result<(), DynamicComponentError> {
-        if self.layout.size() % self.layout.align() != 0 {
+        if !self.layout.size().is_multiple_of(self.layout.align()) {
             return Err(DynamicComponentError::UnpaddedLayout);
         }
         Ok(())
@@ -293,12 +293,12 @@ impl Drop for DynamicValueSlot {
             }
         }
         let _allocation = Allocation(self.ptr, self.descriptor.layout);
-        if core::mem::take(&mut self.initialized) {
-            if let Some(drop) = self.descriptor.drop {
-                // SAFETY: the flag proves initialization and unique ownership;
-                // it was cleared before calling user code, even if it unwinds.
-                unsafe { drop(self.ptr.as_ptr()) };
-            }
+        if core::mem::take(&mut self.initialized)
+            && let Some(drop) = self.descriptor.drop
+        {
+            // SAFETY: the flag proves initialization and unique ownership;
+            // it was cleared before calling user code, even if it unwinds.
+            unsafe { drop(self.ptr.as_ptr()) };
         }
     }
 }
@@ -560,7 +560,7 @@ impl World {
                 // SAFETY: registered constructor transfers exactly one value
                 // of this descriptor, including ownership if it later panics.
                 unsafe {
-                    core::ptr::copy_nonoverlapping(ptr, value.ptr.as_ptr(), value.layout().size())
+                    core::ptr::copy_nonoverlapping(ptr, value.ptr.as_ptr(), value.layout().size());
                 };
                 value.initialized = true;
             });
@@ -597,7 +597,7 @@ impl World {
             // SAFETY: initialized old value; ownership moves out at commit,
             // with no callback between this copy and its storage overwrite.
             unsafe {
-                core::ptr::copy_nonoverlapping(ptr, retired.ptr.as_ptr(), descriptor.layout.size())
+                core::ptr::copy_nonoverlapping(ptr, retired.ptr.as_ptr(), descriptor.layout.size());
             };
         }
         if dst_id != loc.archetype_id {
@@ -617,7 +617,7 @@ impl World {
                                 output.ptr.as_ptr(),
                                 added,
                                 now,
-                            )
+                            );
                         };
                         output.initialized = false;
                     } else {
@@ -628,7 +628,7 @@ impl World {
                                 old.get_ptr(loc.row as usize),
                                 added,
                                 old.changed_tick(loc.row as usize),
-                            )
+                            );
                         };
                     }
                 }
@@ -659,7 +659,7 @@ impl World {
                             output.ptr.as_ptr(),
                             column.get_ptr(loc.row as usize),
                             output.layout().size(),
-                        )
+                        );
                     };
                     output.initialized = false;
                     column.set_changed_tick(loc.row as usize, now);
@@ -671,11 +671,17 @@ impl World {
                 continue;
             }
             let set = self.sparse_sets.get_mut(*cid).unwrap();
+            // SAFETY: exclusive World access keeps the sparse set stable for
+            // this lookup and the returned pointer is used only in this scope.
             if let Some(ptr) = unsafe { set.get_ptr(entity) } {
                 // SAFETY: only the explicit old value can be present, and was
                 // detached above; replacement preserves its original added tick.
                 unsafe {
-                    core::ptr::copy_nonoverlapping(output.ptr.as_ptr(), ptr, output.layout().size())
+                    core::ptr::copy_nonoverlapping(
+                        output.ptr.as_ptr(),
+                        ptr,
+                        output.layout().size(),
+                    );
                 };
                 set.set_changed_tick(entity, now);
             } else {
@@ -825,6 +831,8 @@ impl World {
                 (
                     ptr,
                     set.added_tick(entity).unwrap(),
+                    // SAFETY: entity presence was checked immediately above;
+                    // exclusive World access keeps the sparse set unchanged.
                     unsafe { set.changed_tick_ptr(entity).unwrap() },
                     None,
                 )
@@ -835,6 +843,8 @@ impl World {
             ptr: NonNull::new(ptr).unwrap(),
             layout: descriptor.layout,
             added,
+            // SAFETY: `changed` points to the live row metadata selected above
+            // under an exclusive World borrow.
             changed: unsafe { &mut *changed },
             chunk_changed,
             this_run: self.change_tick,
@@ -1045,7 +1055,7 @@ impl World {
                         output.ptr.as_ptr(),
                         *added,
                         now,
-                    )
+                    );
                 };
                 output.initialized = false;
             }

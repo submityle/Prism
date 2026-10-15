@@ -170,9 +170,9 @@ fn serial_next_fold_and_partial_fold_skip_cold_chunks_before_data_fetch() {
     let expected = vec![entities[rpc + 1], entities[3 * rpc]];
 
     reset_counts();
-    let mut iter = query.iter(&world);
+    let iter = query.iter(&world);
     let mut via_next = Vec::new();
-    while let Some(entity) = iter.next() {
+    for entity in iter {
         via_next.push(entity);
     }
     assert_eq!(via_next, expected);
@@ -440,7 +440,7 @@ fn parallel_partial_batches_skip_cold_chunks_before_data_fetch() {
         let output = Mutex::new(Vec::new());
         reset_counts();
         query.par_for_each(&world, &pool, batch_size, |entity| {
-            output.lock().unwrap().push(entity)
+            output.lock().unwrap().push(entity);
         });
         assert_eq!(
             sorted(output.into_inner().unwrap()),

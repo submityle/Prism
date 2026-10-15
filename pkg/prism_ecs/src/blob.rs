@@ -93,6 +93,12 @@ impl BlobId {
     pub const fn len(self) -> usize {
         self.len
     }
+
+    /// Whether this identity describes an empty payload.
+    #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
 }
 
 /// Errors returned by fallible blob operations.
@@ -358,9 +364,10 @@ impl BlobStore {
     /// content, returning a handle that can later be read back with
     /// [`get_pod`](Self::get_pod).
     ///
-    /// # Safety contract (not `unsafe`, but important)
+    /// # Safety
     ///
-    /// This copies `size_of::<T>()` bytes out of `*value`. For the result to
+    /// The caller must ensure that copying `size_of::<T>()` bytes out of
+    /// `*value` is appropriate for the type. For the result to
     /// be meaningful and the read to be well defined, `T` must have **no
     /// uninitialized padding bytes** (e.g. `u32`, `[u8; N]`, or
     /// `#[repr(C)]`/`#[repr(packed)]` structs whose fields tile the type with
@@ -718,6 +725,7 @@ mod tests {
         let h = unsafe { store.insert_pod(&0x1122_3344_5566_7788u64) };
         // SAFETY: the blob was produced from u64.
         assert_eq!(
+            // SAFETY: the handle was created from a u64 payload.
             unsafe { store.get_pod::<u64>(h) },
             Some(&0x1122_3344_5566_7788u64)
         );

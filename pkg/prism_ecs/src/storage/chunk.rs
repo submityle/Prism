@@ -97,7 +97,11 @@ struct ChangeLog {
     next_visit: AtomicU64,
 }
 
+// SAFETY: the log's spin lock serializes all access to its interior map, and
+// the map contains only owned event data.
 unsafe impl Send for ChangeLog {}
+// SAFETY: shared access always acquires the log's spin lock before touching
+// the interior map.
 unsafe impl Sync for ChangeLog {}
 
 struct ChangeLogGuard<'a> {
@@ -423,6 +427,7 @@ pub struct ChunkVersions {
     // occupy [leaf_capacity, leaf_capacity + cells.len()) in the same heap,
     // but remain embedded in physical blocks. Boxes keep parent links stable
     // when this vector or the enclosing column moves.
+    #[allow(clippy::vec_box)]
     branches: Vec<Box<ChunkChange>>,
     leaf_capacity: usize,
     events: Box<ChangeLog>,
@@ -496,6 +501,8 @@ impl ChunkVersions {
             self.grow_index();
         }
         // SAFETY: the caller guarantees a live, writable ChunkChange.
+        // SAFETY: the owner detaches the live cell before freeing its block.
+        // SAFETY: the owner detaches the live cell before freeing its block.
         let cell_ref = unsafe { &*cell };
         cell_ref
             .event_chunk
@@ -520,6 +527,7 @@ impl ChunkVersions {
         unsafe { &*cell }
             .parent
             .store(core::ptr::null_mut(), Ordering::Relaxed);
+        // SAFETY: the owner detaches the live cell before freeing its block.
         let cell_ref = unsafe { &*cell };
         cell_ref
             .event_log
@@ -638,10 +646,10 @@ impl ChunkVersions {
             if let Some(&cell) = self.cells.get(event.chunk) {
                 // SAFETY: attached cells remain live during shared traversal.
                 let cell = unsafe { &*cell };
-                if cell.event_generation.load(Ordering::Acquire) == event.generation {
-                    if cell.candidate_visit.swap(visit_id, Ordering::AcqRel) != visit_id {
-                        candidates.push(event.chunk);
-                    }
+                if cell.event_generation.load(Ordering::Acquire) == event.generation
+                    && cell.candidate_visit.swap(visit_id, Ordering::AcqRel) != visit_id
+                {
+                    candidates.push(event.chunk);
                 }
             }
         });
@@ -996,9 +1004,12 @@ impl Drop for ChunkVersions {
             unsafe { &*cell }
                 .parent
                 .store(core::ptr::null_mut(), Ordering::Relaxed);
+            // SAFETY: the tracker exclusively owns destruction of attached
+            // cells, so each pointer is still live here.
             unsafe { &*cell }
                 .event_log
                 .store(core::ptr::null_mut(), Ordering::Release);
+            // SAFETY: see the preceding safety comment.
             unsafe { &*cell }
                 .event_generation
                 .store(0, Ordering::Relaxed);
@@ -1202,6 +1213,7 @@ mod tests {
     /// cells are boxed so growing the fixture never invalidates attached cells.
     struct Fixture {
         cv: ChunkVersions,
+        #[allow(clippy::vec_box)]
         backing: Vec<Box<ChunkChange>>,
     }
 
@@ -1371,6 +1383,8 @@ mod tests {
         f.backing[1]
             .range
             .store(ChunkChange::EMPTY, Ordering::Relaxed);
+        // SAFETY: the boxed cell is live, aligned, and remains owned by the
+        // fixture until it is detached.
         unsafe { f.cv.attach_cell(&mut *f.backing[1]) };
         let (chunks, stats) = indexed(&f, Tick::new(6), Tick::new(7));
         assert!(chunks.is_empty(), "stale detached event leaked: {chunks:?}");

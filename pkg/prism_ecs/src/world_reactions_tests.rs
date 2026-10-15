@@ -89,7 +89,7 @@ fn unrelated_sources_and_equal_writes_do_not_execute_effects() {
     let source = world.reaction_source::<Input>();
     let sparse = world.reaction_source::<SparseInput>();
     world.add_reaction(&[source], |world| {
-        world.resource_mut::<Output>().runs += 100
+        world.resource_mut::<Output>().runs += 100;
     });
     world.add_reaction(&[sparse], |world| world.resource_mut::<Output>().runs += 1);
     world.get_mut::<Input>(entity).unwrap().set_if_neq(Input(1));
@@ -159,7 +159,7 @@ fn a_panicking_effect_keeps_its_callback_and_pending_work_for_retry() {
         world.resource_mut::<Output>().runs += 1;
     });
     world.add_reaction(&[derived], |world| {
-        world.resource_mut::<Output>().runs += 10
+        world.resource_mut::<Output>().runs += 10;
     });
     world.get_mut::<Input>(entity).unwrap().0 = 2;
     assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

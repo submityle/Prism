@@ -682,11 +682,11 @@ fn canonical_field(
             (ReflectRef::Enum(value), Access::Field(name)) => value.field(name),
             (ReflectRef::TupleStruct(value), Access::TupleIndex(index)) => value.field(*index),
             (ReflectRef::Enum(value), Access::TupleIndex(index)) => {
-                if let Some(dynamic) = current.downcast_ref::<DynamicEnum>() {
-                    if let DynamicVariant::Struct(fields) = dynamic.variant() {
-                        let (name, _) = fields.get(*index).ok_or_else(missing)?;
-                        normalized = Access::Field((*name).into());
-                    }
+                if let Some(dynamic) = current.downcast_ref::<DynamicEnum>()
+                    && let DynamicVariant::Struct(fields) = dynamic.variant()
+                {
+                    let (name, _) = fields.get(*index).ok_or_else(missing)?;
+                    normalized = Access::Field((*name).into());
                 }
                 value.field_at(*index)
             }

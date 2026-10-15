@@ -626,15 +626,13 @@ impl RelationIndex {
             return None;
         }
         self.mark_changed();
-        if exclusive {
-            if let Some((_, existing)) = self.forward.get(&fkey) {
-                let olds: Vec<Entity> = existing.clone();
-                evicted = olds.first().copied();
-                for old in olds {
-                    self.remove_from_reverse(relation, source, old);
-                }
-                self.forward.remove(&fkey);
+        if exclusive && let Some((_, existing)) = self.forward.get(&fkey) {
+            let olds: Vec<Entity> = existing.clone();
+            evicted = olds.first().copied();
+            for old in olds {
+                self.remove_from_reverse(relation, source, old);
             }
+            self.forward.remove(&fkey);
         }
 
         self.forward
