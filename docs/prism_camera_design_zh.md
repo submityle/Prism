@@ -10,11 +10,11 @@
 > - **多视图家族**：对接本仓 `prism_render_architecture::view_family`（Main/StereoEye/Shadow/Reflection/SceneCapture/Editor/OfflineTile）
 > 本文为纯经典线性代数 / 几何光学 / 控制插值路线，**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/CryEngine 源码或衍生代码。
 
-- 版本： v1.2（核心运行时实现版，2026-10-15；`prism_camera` 与 `prism_camera_rig` 已纳入 workspace，并完成 crate 级测试、feature 组合检查和真实设备投影 parity；承接 `prism_math`/`prism_render_architecture` 的现有契约）
+- 版本： v1.3（核心运行时实现核验版，2026-10-15；`prism_camera`、`prism_camera_rig` 与 `prism_camera_ecs` 已纳入 workspace，并完成默认/全特性测试、裁剪配置检查、ECS 发布链测试和 GPU 数学 parity 记录；承接 `prism_math`/`prism_render_architecture` 的现有契约）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_math`（Vec3/Quat/Affine3/Mat4/Dir3、SIMD、投影构造）、`prism_transform`（相机位姿的空间真相 Local/Global + look_at 约束 + 大世界 64-bit/原点重定位）、`prism_ecs`（相机/投影/后处理为组件、变更检测、并行查询）、`prism_render_architecture::view_family`（ViewKind/ViewImportance/ViewRegistry/ViewHandle 视图注册与重要度聚合）；可选 `prism_window`（RenderTarget/表面尺寸/缩放因子）、`prism_input`（指针→射线、拾取）、`prism_time`（固定步 alpha / 曝光自适应时间常数）、`prism_tasks`（多视图并行提取）、`prism_diagnostic`（计数器/trace）、`prism_asset`（LUT/镜头畸变贴图/相机动画片段）
 - 层级定位： 渲染前端 L4「取景与导演」；上接渲染提取（视图 UBO）/剔除（frustum）/时域放大（jitter + 历史）/后处理（相机级 stack），下接 `prism_transform`（位姿）/`prism_math`（代数）/`view_family`（视图槽）
-- 明确约束：核心 `no_std + alloc`；`std` 控制标准库接入，`physical_lens`/`post`/`stereo`/`determinism`/`cutscene`/`autofocus`/`shutter`/`view_batch`/`lookahead_stream`/`edge_stabilize`/`virtual_production`/`view_lod`/`composition_aid` 提供可组合的构建配置；相机数据契约保持稳定，关闭某项配置时由调用方选择对应降级路径；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**；每个公共 API 都具备明确语义、容量和错误返回。
+- 明确约束：核心 `no_std + alloc`；`prism_camera` 的 feature 为 `std`、`physical_lens`、`post`、`stereo`、`determinism`、`cutscene`、`autofocus`、`shutter`、`view_batch`、`lookahead_stream`、`edge_stabilize`、`virtual_production`、`view_lod`、`composition_aid`、`occlusion_fade`；`prism_camera_rig` 的 feature 为 `director`、`rig`、`determinism`、`trace`；相机数据契约保持稳定，关闭某项配置时由调用方选择对应降级路径；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**；每个公共 API 都具备明确语义、容量和错误返回。
 - 架构立场： **相机是「观察意图」的单一真相，视图（View）是其每帧的「观察结果快照」**。相机组件只持有可编辑意图（位姿经 transform、投影参数、镜头/曝光、后处理意图），每帧由提取阶段计算出不可变的 `ViewData`（矩阵 + jitter + 上一帧矩阵 + frustum + 曝光标量），注册进 `view_family::ViewRegistry` 供渲染/剔除/时域共享。导演（Director）不是另立真相，而是**选择与混合**多个「虚拟相机意图」后写回唯一的输出相机位姿与参数——与 Cinemachine 的 Brain 同形。
 
 ---
@@ -64,12 +64,12 @@ Bevy 的 `Camera` 把太多关注点挤在一个巨组件里（viewport / target
 
 1. **性能**：视图派生成本 ∝ 活跃相机数，而非场景规模；矩阵走 SIMD；多视图提取并行；视图数据可直供 GPU 做 GPU-driven 剔除；导演/rig 仅在活跃时付费。
 2. **效果（能力）**：物理相机曝光与景深（电影级）；Reversed-Z + 无限远（远近都不抖）；相机相对渲染（大世界无浮点抖动）；jitter + 上一帧矩阵（TAA/DLSS/FSR/运动模糊开箱）；导演混合与弹簧臂避障（第三人称/过场电影级手感）。
-3. **易用**：`spawn((Camera3d::default(), Transform::from_xyz(...).looking_at(...)))` 一行成相机；控制器一个组件挂上即可飞/绕/平移；物理镜头 `Lens::cine_35mm().with_fstop(1.8)` 直给电影参数；导演 `VirtualCamera { priority, .. }` 自动抢镜与混合。
-4. **可移植 + 档位化**：核心 `no_std`；物理镜头 / 导演 / rig / 后处理 / 立体 / 大世界 / 确定性按 feature 裁剪；移动端可退化为「单相机 + 简投影 + 无 jitter」最小集。
+3. **易用**：`prism_camera_ecs::CameraBundle::default()` 一行建立标准相机实体；控制器和导演使用 `prism_camera_rig` 的纯数据 API；物理镜头 `Lens::cine_35mm().with_f_stop(1.8)` 直给电影参数。
+4. **可移植 + 档位化**：核心 `no_std`；物理镜头 / 后处理 / 立体 / 确定性和高级纯数据契约按 feature 裁剪，Rig 的 director/rig 能力由配套 crate 裁剪；移动端可退化为「单相机 + 简投影 + 无 jitter」最小集。
 
 **责任归属（范围已经闭合）**：`prism_camera` 负责意图模型、投影/视图派生、历史矩阵、jitter、frustum、曝光输入、后处理排序契约、视图注册和拾取数学；`prism_render_architecture` 负责 ViewRegistry 消费、渲染图、GPU 资源与后处理算法；`prism_transform` 负责层级传播和空间真相；`prism_physics` 负责场景求交；`prism_window` 负责表面与尺寸；编辑器/动画系统负责时间轴资产。每个责任面都有明确输入、输出和失败处理，模块之间不复制同一份真相。
 
-**文档交付判定**：本文已经把核心能力、数据结构、系统顺序、错误模型、资源所有权、性能预算、GPU ABI、验证方法和运行时降级行为固化；§27.1 记录当前实现、测试与提交状态，API 以 workspace 中的两个 crate 为准。
+**文档交付判定**：本文把核心能力、数据结构、系统顺序、错误模型、资源所有权、性能预算、GPU ABI、验证方法和运行时降级行为固化；§27.1 区分已经由源码和测试验证的实现，以及由下游渲染、物理、XR 或编辑器消费的稳定契约。API 以 workspace 中的三个相机 crate 为准。
 
 ---
 
@@ -96,16 +96,16 @@ Bevy 的 `Camera` 把太多关注点挤在一个巨组件里（viewport / target
 
 | 能力 | 开关（feature） | 默认 | 关掉的后果 |
 |---|---|---|---|
-| 物理镜头/曝光 | `physical_lens` | 开（desktop） | 退化为 FOV + 固定曝光标量 |
+| 物理镜头/曝光 | `physical_lens` | 开（当前默认 feature） | 退化为 FOV + 固定曝光标量 |
 | 自动曝光（直方图/平均亮度自适应） | `physical_lens` + 渲染侧回读 | 开 | 仅手动 EV100 |
-| 导演/虚拟相机 | `director` | 开 | 无混合，直接用唯一相机位姿 |
-| 相机 Rig（弹簧臂/避障/跟随） | `rig` | 开 | 无 rig，手动驱动 transform |
+| 导演/虚拟相机 | `prism_camera_rig/director` | 开（`prism_camera_rig` 默认） | 无混合，直接使用调用方提供的位姿 |
+| 相机 Rig（弹簧臂/避障/跟随） | `prism_camera_rig/rig` | 开（`prism_camera_rig` 默认） | 无 rig，手动驱动位姿 |
 | 相机级后处理栈 | `post` | 开 | 全局默认后处理，无 per-camera 覆盖 |
 | 时域 jitter + 历史矩阵 | 恒开（无成本可关 jitter） | 开 | 关 jitter 则 TAA/DLSS 失效，退 MSAA/无 AA |
 | 立体 / XR | `stereo` | 关 | 无 per-eye / late-latch |
-| 大世界相机相对 | `large_world`（需 transform f64） | 关 | 远离原点浮点抖动 |
+| 大世界相机相对 | `CameraIntent.relative_rendering` | 开（当前默认值） | 使用绝对渲染矩阵，适合原点附近场景 |
 | 确定性/回放 | `determinism` | 关 | 导演混合/噪声顺序不保证跨平台一致 |
-| 编辑器集成（viewport gizmo / 相机预览） | `editor` | 关 | 无编辑器视口特性 |
+| 编辑器集成（viewport gizmo / 相机预览） | 下游编辑器装配 | 不属于相机 crate feature | 只使用 `ViewData` 和诊断数据，不进入核心 crate |
 
 quality tier（运行时档位）示例：
 
@@ -124,13 +124,13 @@ quality tier（运行时档位）示例：
 
 | 组合 | 处理方式 |
 |---|---|
-| `physical_lens`/`post`/`stereo`/`determinism` 等能力 feature 关闭 | 保留稳定数据 API，由应用装配选择手动曝光、全局后处理、单视图或非确定性路径；不静默改变矩阵计算 |
-| `director`/`rig` feature 关闭 | 不启用对应系统装配；直接使用唯一输出相机或无查询的直伸臂策略 |
+| `physical_lens`/`post`/`stereo`/`determinism` 等能力 feature 关闭 | 保留核心数据 API，由应用选择手动曝光、下游后处理、单视图或非确定性路径；不静默改变核心矩阵计算 |
+| `prism_camera_rig/director` 或 `rig` 关闭 | 不编译对应 Rig 能力；调用方直接提供 `CameraPose` 或使用无查询的直伸臂策略 |
 | `std` feature 关闭 | 保持 `no_std + alloc` 核心；不引入标准库状态 |
-| 外部 XR、物理、渲染算法未接入 | 使用相机 crate 提供的纯数据 fallback：双眼由 `StereoConfig` 派生，SpringArm 为 `Unavailable`，后处理只保留意图 |
-| 目标尺寸为零、near 非正、far 不大于 near、FOV 越界 | 返回带字段名的 `InvalidCameraConfig`，保留上一帧有效 `ViewData`，并阻止本帧注册无效视图 |
+| 外部 XR、物理、渲染算法未接入 | 使用相机 crate 提供的纯数据契约：双眼由 `StereoConfig` 派生，Rig 的 `SceneQuery` 缺失时返回 `Unavailable`，后处理只保留意图 |
+| 目标尺寸为零、near 非正、far 不大于 near、FOV 越界 | 返回 `CameraErrorCode` 对应错误；ECS adapter 记录 `CameraDiagnostics`，清理该实体的历史和注册句柄，不发布无效视图 |
 
-所有错误均为结构化值：`CameraError { code, entity, field, value, fallback }`。debug 构建额外发出诊断事件，release 构建只保留计数器与最后一次错误；错误不会通过 panic 传播到渲染线程。
+相机核心错误为无分配值 `CameraError { code, field, value, handle }`；ECS adapter 以 `CameraViewError { entity, error }` 关联实体并通过 `CameraDiagnostics` 暴露本帧错误。错误不会通过 panic 传播到渲染线程；上一帧视图保留策略由上层发布器负责，核心数学层只返回明确错误。
 
 ---
 
@@ -138,14 +138,14 @@ quality tier（运行时档位）示例：
 
 ```
 意图层（作者/脚本可写）────────────────────────────────
-  prism_camera            Camera / Projection / Lens / PostStack / RenderTarget 意图组件
+  prism_camera            CameraIntent / Projection / Lens / PostStack / RenderTarget 纯数据
          │                (no_std + alloc；只持有可编辑意图，不算每帧结果)
          │
   prism_camera_rig        VirtualCamera / Director(Brain) / 跟随·瞄准·弹簧臂·噪声·Impulse
          │ (feature: director/rig；读目标 transform + 物理查询 → 写回输出相机位姿/参数)
          ▼
 派生层（每帧提取，只读结果）──────────────────────────
-  prism_camera(extract)   位姿(Global) + 投影 → ViewData{ view, proj, view_proj,
+  prism_camera(extract)   位姿(CameraPose) + 投影 → ViewData{ view, proj, view_proj,
          │                prev_view_proj, jitter, frustum, exposure, viewport }
          │                注册/更新进 view_family::ViewRegistry
          ▼
@@ -165,10 +165,13 @@ quality tier（运行时档位）示例：
   prism_input(可选)         指针 → 射线 / 拾取
 ```
 
+`prism_camera_ecs` 是可选的 ECS/App 适配层：它提供 `CameraBundle`、`CameraFrame`、`CameraPlugin`、`CameraViewRegistry`、`PublishedViews` 和 `CameraDiagnostics`，在 `PostUpdate` 中执行“intent + pose + history -> derive_view -> publish_view”。核心数学 crate 不拥有 ECS 生命周期；不使用 ECS 的调用方直接调用 `derive_view` 和 `publish_view`。
+
 crate 职责：
 
 - **`prism_camera`（本文核心 crate，`no_std + alloc`）**：相机意图组件、投影代数、`ViewData` 派生与 `view_family` 注册、jitter 序列、相机相对渲染、后处理栈意图模型、RenderTarget 契约、输入互转 helper。`forbid(unsafe_code)`。
-- **`prism_camera_rig`（配套 crate，feature `director`/`rig`）**：虚拟相机、Brain（优先级 + 混合）、跟随/瞄准组合器、弹簧臂避障（经 `prism_physics` 查询）、程序化噪声与 Impulse。它只读目标与写回相机意图，不碰 `ViewData`。
+- **`prism_camera_rig`（配套 crate，feature `director`/`rig`）**：虚拟相机、Brain（优先级 + 混合）、跟随/瞄准组合器、弹簧臂避障（经 `SceneQuery` trait 注入查询）、程序化噪声与 Impulse。它只生成 `CameraPose` 等纯数据结果，不碰 `ViewData` 或 GPU 资源。
+- **`prism_camera_ecs`（ECS/App 适配层）**：把核心纯函数接入 `prism_ecs` 和 `prism_app` 的实体、资源、`PostUpdate` 生命周期；不复制相机数学和视图注册真相。
 - **职责清晰**：本 crate 负责把观察意图编译为每帧视图契约；渲染图、表面、后处理算法和物理求交分别由 §1 已列出的责任模块提供，并通过结构化契约接入。
 
 模块布局（`prism_camera/src/`）：
@@ -195,48 +198,50 @@ error.rs          结构化错误码和 stale handle 关联
 
 全系统只有两个一等概念：**意图（Camera + 伴随组件）** 与 **结果（ViewData）**。意图可写、可被导演改写；结果每帧派生、只读、注册进 `view_family`。
 
-### 5.1 Camera（相机意图组件）
+### 5.1 CameraIntent（相机意图）
 
 ```rust
 /// 一个「观察意图」。位姿由同实体的 prism_transform 提供（look_at 等约束亦在此），
 /// 本组件只持有「如何成像」的意图，不持有矩阵（矩阵在 ViewData）。
-#[derive(Component, Clone, Debug)]
-pub struct Camera {
+#[derive(Clone, Copy, Debug)]
+pub struct CameraIntent {
     /// 是否参与本帧渲染（关则不派生 ViewData、不占视图槽）。
     pub active: bool,
     /// 渲染顺序：同一 RenderTarget 上多相机叠放时由小到大合成（minimap/PiP）。
     pub order: i32,
     /// 输出目标（主窗口 / 具名窗口 / 离屏纹理）。
     pub target: RenderTarget,
-    /// 目标内的子视口（None=整个 target）。分屏/画中画用。
-    pub viewport: Option<Viewport>,
-    /// 清屏策略（继承 / 固定色 / 不清，叠放时上层常用 None）。
-    pub clear: ClearColor,
+    /// 目标内的子视口（`Viewport::FULL` 表示整个 target）。分屏/画中画用。
+    pub viewport: Viewport,
+    /// 子像素抖动序列及幅度。
+    pub jitter: JitterSequence,
+    pub jitter_scale: f32,
+    /// 手动、物理或自动曝光意图。
+    pub exposure: Exposure,
+    #[cfg(feature = "physical_lens")]
+    pub lens: Option<Lens>,
+    /// 清屏策略（颜色、深度或不清）。
+    pub clear: ClearMode,
     /// 本相机映射到 view_family 的角色（默认 Main）。
     pub kind: ViewKind,
     /// 向共享子系统声明的重要度（流送/几何LOD/阴影LOD 偏置）。
     pub importance: ViewImportance,
-    /// HDR 输出意图（关则 LDR 直出，省中间 HDR target）。
-    pub hdr: bool,
+    /// 是否使用相机相对渲染原点。
+    pub relative_rendering: bool,
 }
 ```
 
-`Camera2d` / `Camera3d` 是**预设打包**（bundle 式），不是继承：
+ECS 场景使用 `prism_camera_ecs::CameraBundle` 打包意图、位姿和历史；核心 crate 不定义 `Camera`、`Camera2d` 或 `Camera3d` 组件，也不直接拥有 ECS `Bundle`：
 
 ```rust
-/// 3D 相机预设：Camera + Projection::perspective + 常见 3D 后处理默认。
-pub fn camera_3d() -> impl Bundle {
-    (Camera { kind: ViewKind::Main, hdr: true, ..default() },
-     Projection::perspective(PerspectiveProjection::default()),
-     Transform::default())
-}
+let camera = app.world_mut().spawn(prism_camera_ecs::CameraBundle::default());
 ```
 
-**不变量**：`Camera` 永不持有矩阵、frustum、jitter 相位或曝光标量——这些全在 `ViewData`，由派生系统每帧生成。作者改意图，派生改结果，二者永不交叉写。
+**不变量**：`CameraIntent` 永不持有矩阵、frustum、jitter 相位或曝光标量——这些全在 `ViewData`，由派生函数每帧生成。作者、Rig 或 ECS 系统改意图/位姿，派生函数只产生结果快照。
 
 ### 5.2 Projection（投影意图）
 
-见 §6。`Projection` 是枚举（Perspective / Orthographic / Physical / Custom），持有生成 `clip_from_view` 矩阵所需的意图参数，随 render area 尺寸变化自动 `update(width,height)`。
+见 §6。`Projection` 是枚举（Perspective / Orthographic / Custom），持有生成 `clip_from_view` 矩阵所需的意图参数；物理镜头通过 `CameraIntent.lens` 修改透视 FOV，不增加独立的 `Physical` 枚举分支。当前核心 API 由调用方在目标尺寸变化时传入新的 `target_size`，不提供 `Projection::update(width,height)` 方法。
 
 ### 5.3 ViewData（每帧观察结果，只读快照）
 
@@ -327,21 +332,8 @@ pub struct ViewData {
 pub enum Projection {
     Perspective(PerspectiveProjection),
     Orthographic(OrthographicProjection),
-    /// 物理镜头驱动的透视（焦距/传感器算 FOV），feature physical_lens。
-    Physical(PhysicalProjection),
-    /// 自定义：直接给 clip_from_view 构造闭包/trait 对象。
-    Custom(Box<dyn CameraProjection + Send + Sync>),
-}
-
-pub trait CameraProjection {
-    /// 生成 view→clip 矩阵（本仓统一 reversed-Z + 可选无限远）。
-    fn clip_from_view(&self) -> Mat4;
-    /// render area 尺寸变化时回调（更新纵横比等）。
-    fn update(&mut self, width: f32, height: f32);
-    /// 远平面（无限远时返回 f32::INFINITY 的语义值）。
-    fn far(&self) -> f32;
-    /// frustum 8 角点（view 空间），供剔除/级联阴影切分。
-    fn frustum_corners(&self, z_near: f32, z_far: f32) -> [Vec3A; 8];
+    /// 自定义：调用方直接提供已验证的 clip_from_view 矩阵和裁剪元数据。
+    Custom { clip_from_view: Mat4, near: f32, far: Option<f32>, reverse_z: bool },
 }
 ```
 
@@ -452,7 +444,7 @@ pub enum JitterSequence { Off, Halton23 { len: u32 }, Sobol { len: u32 } }
 
 ### 8.2 与 prism_transform 协作
 
-`prism_transform`（feature `f64` + 原点重定位）已提供「网格/容器原点重定位」。`prism_camera`（feature `large_world`）在派生时：
+`prism_transform`（feature `f64` + 原点重定位）已提供「网格/容器原点重定位」。`prism_camera` 通过 `CameraIntent.relative_rendering` 在派生时：
 - 读相机 `GlobalTransform` 的 f64 世界位 → `ViewData.world_position: DVec3`。
 - `view_from_world` 存**旋转为主、平移置零**的相对视图矩阵；绝对平移由 `world_position` 携带。
 - 渲染提取时，实例的 world 矩阵在 CPU（或 compute）侧做 `translation -= view.world_position` 后降 f32 上传。
@@ -461,7 +453,7 @@ pub enum JitterSequence { Off, Halton23 { len: u32 }, Sobol { len: u32 } }
 
 ### 8.3 关掉的退化
 
-`large_world` 关：`world_position` 仍填（供雾/天空），但 `view_from_world` 为常规绝对矩阵，适合原点附近的常规场景（移动端/小地图游戏）。
+`relative_rendering` 关：`world_position` 仍填（供雾/天空），但 `view_from_world` 使用常规绝对平移，适合原点附近的常规场景（移动端/小地图游戏）。
 
 ---
 
@@ -822,7 +814,7 @@ pub struct StereoRig {
 
 XR 延迟敏感：位姿要在**尽量接近提交**时才锁定，减少「预测位姿 vs 实际头动」的误差。方案：派生阶段用预测位姿出 `ViewData`，渲染提交前再做一次「位姿修正」（reprojection warp 由渲染侧做，本 crate 提供「最新位姿」更新钩子 `relatch_pose`）。
 
-`relatch_pose` 只允许修改旋转、平移和对应的 `clip_from_world`；它不能修改投影类型、viewport、jitter 相位、曝光或视图句柄。渲染后端不支持 late-latch 时，固定使用派生阶段的预测位姿并置 `LateLatchUnavailable`，仍保持左右眼顺序、历史标志和 GPU ABI 一致。
+`StereoConfig::relatch` 只允许修改旋转、平移和对应的 `clip_from_world`、未抖动矩阵与 frustum；它不能修改投影类型、viewport、jitter 相位、曝光或视图句柄。渲染后端不支持 late-latch 时，固定使用派生阶段的预测位姿，仍保持左右眼顺序、历史标志和 GPU ABI 一致。
 
 ### 15.3 注视点渲染（foveated）
 
@@ -856,7 +848,7 @@ pub fn extract_frustum(clip_from_world: &Mat4) -> Frustum {
 
 ### 16.2 与 prism_render_visibility 的契约
 
-`ViewData.frustum` 是剔除的唯一几何输入。`prism_render_visibility` 从 `view_family::ViewRegistry` 取每个视图的 frustum 做：
+`ViewData.frustum` 是剔除侧的几何输入。相机 crate 负责提取并发布它；`prism_render_visibility` 从 `view_family::ViewRegistry` 消费每个视图的 frustum 做：
 - CPU 粗剔（AABB/Sphere vs frustum，SIMD 批量，经 `prism_math` 的 `intersects_obb`/`intersects_sphere`）。
 - GPU-driven 细剔（frustum + Hi-Z，`ViewData` 的矩阵填进 View UBO，compute 剔除，§20）。
 
@@ -1009,6 +1001,8 @@ shader 收到的实例坐标已是「相对相机」（CPU/compute 侧减过 `Vi
 
 ### 21.1 系统集与顺序
 
+以下名称是跨 crate 的装配顺序约定，不是当前 `prism_camera` 导出的枚举；当前可执行的核心发布系统由 `prism_camera_ecs::CameraPlugin` 安装为 `PostUpdate` 系统，Director、Rig、Transform 和 Window 的调度由上层应用负责。
+
 ```rust
 pub enum CameraSystems {
     Director,   // 评估 vcam + Brain 混合 → 写回输出相机意图（feature director）
@@ -1026,13 +1020,12 @@ pub enum CameraSystems {
 ### 21.2 App 装配
 
 ```rust
-app.add_plugins(CameraPlugin::default())      // 核心：Camera/Projection/ViewData/jitter
-   .add_plugins(DirectorPlugin)               // feature director
-   .add_plugins(RigPlugin::<MyPhysics>::new()) // feature rig，注入场景查询实现
-   .add_plugins(PostPlugin);                  // feature post
+app.add_plugins(prism_camera_ecs::CameraPlugin::default()); // ECS/App 发布适配层
+// Director/Rig/Post 的具体系统由上层应用装配；本仓库当前提供
+// prism_camera_rig 的纯数据 API 和 prism_camera 的 PostStack 契约。
 ```
 
-`CameraPlugin` 向 `view_family` 注册写入者；渲染插件作为读取者。二者经 `ViewRegistry` 单向解耦（相机写、渲染读）。
+`prism_camera_ecs::CameraPlugin` 在 `PostUpdate` 中调用核心 `derive_view`/`publish_view`，并通过 `CameraViewRegistry` 维护实体到稳定 `ViewHandle` 的映射；渲染插件作为读取者。二者经 `ViewRegistry` 单向解耦（相机写、渲染读）。
 
 ### 21.3 与 Window 的尺寸/缩放
 
@@ -1087,35 +1080,34 @@ app.add_plugins(CameraPlugin::default())      // 核心：Camera/Projection/View
 ### 24.1 一行建相机
 
 ```rust
-// 3D 主相机
-commands.spawn((
-    Camera3d::default(),
-    Transform::from_xyz(0.0, 5.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
-));
+// 主相机：ECS adapter 负责实体与生命周期，核心 crate 只提供纯数据。
+app.world_mut().spawn(prism_camera_ecs::CameraBundle::default());
 
 // 带电影镜头 + 自由飞行调试
-commands.spawn((
-    Camera3d::default(),
-    Lens::cine_35mm().with_fstop(1.8),
-    FlyController::default(),
-    Transform::default(),
-));
+let mut intent = prism_camera::CameraIntent::default();
+intent.lens = Some(Lens::cine_35mm().with_f_stop(1.8));
+let entity = app.world_mut().spawn(prism_camera_ecs::CameraBundle {
+    intent: prism_camera_ecs::CameraIntentComponent(intent),
+    ..Default::default()
+});
 ```
 
 ### 24.2 导演：摆 vcam，不碰主相机
 
 ```rust
-let brain = commands.spawn((Camera3d::default(), CameraBrain::default())).id();
-// 跟随玩家的第三人称 vcam
-commands.spawn(VirtualCamera {
+let output_pose = prism_camera::CameraPose::default();
+let mut brain = prism_camera_rig::CameraBrain::default();
+// 跟随玩家的第三人称 vcam（纯数据候选）
+let candidate = prism_camera_rig::VirtualCamera {
+    key: 1,
     priority: 10,
-    body: BodyRig::SpringArm(SpringArm { target: player, arm_length: 4.0, probe_radius: 0.3, ..default() }),
-    aim: AimRig::Composer { target: player, screen: center_rect(), lookahead: 0.2, ..default() },
-    blend_in: Blend::EaseInOut { secs: 0.5 },
-    ..default()
-});
-// 过场特写 vcam（优先级更高，激活即自动混合切入）
-commands.spawn(VirtualCamera { priority: 100, enabled: false, /* 特写构图 */ ..default() });
+    enabled: true,
+    pose: output_pose,
+    lens: None,
+    weight: 1.0,
+};
+// 将 candidate 和其它候选传给 brain.update；输出是纯 CameraPose。
+let _pose = brain.update(&[candidate], 1.0 / 60.0, output_pose);
 ```
 
 ### 24.3 prelude
@@ -1123,12 +1115,10 @@ commands.spawn(VirtualCamera { priority: 100, enabled: false, /* 特写构图 */
 ```rust
 pub mod prelude {
     pub use crate::{
-        Camera, Camera2d, Camera3d, Projection, PerspectiveProjection, OrthographicProjection,
-        RenderTarget, Viewport, ClearColor, ViewData, ViewKind,
+        CameraIntent, CameraPose, Projection, PerspectiveProjection, OrthographicProjection,
+        RenderTarget, Viewport, ClearMode, ViewData, ViewKind,
     };
     #[cfg(feature = "physical_lens")] pub use crate::{Lens, Exposure, Filmback};
-    #[cfg(feature = "director")]      pub use crate::{VirtualCamera, CameraBrain, Blend};
-    #[cfg(feature = "rig")]           pub use crate::{BodyRig, AimRig, SpringArm, FlyController, OrbitController, PanController, CameraNoise};
     #[cfg(feature = "post")]          pub use crate::{PostStack, PostNode, Tonemapper};
 }
 ```
@@ -1137,23 +1127,23 @@ pub mod prelude {
 
 | Bevy | Prism | 说明 |
 |---|---|---|
-| `Camera` 巨组件 | `Camera`（意图）+ `ViewData`（结果） | 关注点分离；矩阵不再在组件里 |
+| `Camera` 巨组件 | `CameraIntent` + `ViewData`（结果） | 关注点分离；矩阵不再在意图里 |
 | `Camera.target` | `RenderTarget` | 同形（窗口/纹理） |
 | `Projection`（含 reversed-Z 否视版本而定） | `Projection`（强制 reversed-Z + 可无限远） | 统一精度约定 |
-| `Camera.hdr` | `Camera.hdr` | 保留 |
+| `Camera.hdr` | 下游渲染目标配置 | 不属于当前 `CameraIntent` 核心字段 |
 | `bevy_camera_controller`（示例级） | `prism_camera_rig` 控制器预设 | 升为一等 |
 | 无（物理相机） | `Lens`/`Exposure` | 新增电影级 |
 | 无（导演） | `VirtualCamera`/`CameraBrain` | 新增 Cinemachine 式 |
-| 无（相机相对渲染） | `large_world` feature | 新增大世界 |
+| 无（相机相对渲染） | `CameraIntent.relative_rendering` | 由意图字段控制 |
 | `update_frusta` | `CameraSystems::Derive`（含 frustum 提取） | 合并进派生 |
 
-提供 `prism_camera::compat`（可选）把常见 Bevy 相机 spawn 模式一键翻译，降低迁移摩擦。
+当前没有 `prism_camera::compat` 或 `Camera3d` 兼容层；迁移代码应显式构造 `CameraIntent`、`CameraPose`，或使用 `prism_camera_ecs::CameraBundle`。
 
 ### 24.5 易出错点的护栏
 
 - 手改 `ViewData`：类型上只读（无 `&mut` API 暴露给用户），编译期挡住。
-- 忘了 `looking_at`：`Camera3d::default()` 的 Transform 默认看向 -Z，给合理初值。
-- reversed-Z 深度比较写反：提供 `DepthCompare::reversed()` 常量与 debug 断言「清深度=0」。
+- 忘了设置位姿：`CameraPose::default()` 使用原点和单位旋转，应用应在发布前写入有效姿态。
+- reversed-Z 深度比较写反：下游渲染器必须使用近 1、远 0、清深度 0 和 `GREATER`；相机 crate 通过 `Projection::reverse_z()` 和 GPU flags 暴露该约定。
 - 多相机同 order 同 viewport 互覆盖：debug 下警告重叠全屏相机未设 order。
 
 ---
@@ -1161,11 +1151,11 @@ pub mod prelude {
 ## 25. 契约、不变量与版本化
 
 **核心不变量**：
-1. `Camera`（意图）永不含矩阵/frustum/jitter/曝光；`ViewData`（结果）只读且每帧全派生。
+1. `CameraIntent`（意图）永不含矩阵/frustum；jitter 与曝光是输入意图，派生后的 jitter 与曝光标量位于 `ViewData`；`ViewData` 是每帧结果快照。
 2. 剔除/拾取用去抖矩阵；光栅化用含抖矩阵；运动矢量用「去抖 vs 上一帧去抖」。三者永不混用。
 3. 所有透视投影 reversed-Z；深度约定全仓一致（近 1 远 0，测试 GREATER，清 0）。
-4. `Derive` 必在 transform 传播之后；相机位姿是 `GlobalTransform` 的纯函数。
-5. 导演产物写回唯一输出相机；主视图 `ViewData` 恒唯一确定，不被候选 vcam 污染。
+4. 使用 ECS adapter 时，`publish_camera_views` 在 `PostUpdate` 消费已准备好的 `CameraPose`；Transform 传播由上层在写入 pose 前完成。
+5. `prism_camera_rig` 的 Brain 输出 `CameraPose`；它不直接写 ECS 组件或 `ViewData`，由上层把结果写回目标实体。
 6. `ViewData` 注册进 `view_family::ViewRegistry`，相机写、渲染读，单向解耦。
 
 **版本化**：View UBO 布局带 `schema_version`；新增字段向后兼容追加（不插中间）；`ViewKind`/`PostNode` 枚举用非穷尽（`#[non_exhaustive]`）以便加视图类型/后处理节点不破坏下游 match。
@@ -1181,7 +1171,7 @@ pub mod prelude {
 | 能力包 | 固化内容 | 必须通过的门禁 | 运行时降级 |
 |---|---|---|---|
 | M0 代数核 | Perspective/Orthographic、reversed-Z、无限远、view/proj/view-proj、斜裁剪、frustum | 端点深度、FOV、逆变换、5/6 面剔除单测 | 无效配置保留上一帧有效视图 |
-| M1 ViewData | 视图派生、历史槽、ViewRegistry、viewport/order、RenderTarget | 分屏/PiP/离屏、句柄分代、尺寸变化 | 视图停留在上一帧并置 Invalid |
+| M1 ViewData | 视图派生、历史槽、ViewRegistry、viewport/order、RenderTarget | 分屏/PiP/离屏、句柄分代、尺寸变化 | 核心返回 `CameraError`；ECS adapter 记录诊断并移除该实体的无效注册 |
 | M2 时域 | Halton/Sobol、稳定矩阵、teleport、运动矢量输入 | jitter 均值、首帧、切镜、分辨率切换 | `Off` 时零 jitter、清历史 |
 | M3 镜头与后处理 | Filmback/Lens/EV100/Auto/DOF/PostStack 归一化 | Sunny-16、CoC、曝光适应、固定物理序、节点容量 | 手动曝光、全局栈、关闭不支持节点 |
 | M4 Rig 与控制器 | Body/Aim、SpringArm、批量求交、半衰期阻尼、输入归一化、LOD 调度 | 无穿透、帧率无关、非有限输入清零、跳帧间隔 | 无物理查询时直伸臂并置 `Unavailable` |
@@ -1205,8 +1195,11 @@ pub mod prelude {
 - `cargo test -p prism_math_gpu --test projection_parity -- --nocapture`：在跨沙盒真实设备环境执行，3 passed，0 failed；覆盖普通透视、reversed-Z 透视和正交投影。
 - 同一 GPU 测试在受限沙盒中只得到“无可用 adapter”的显式跳过；这不是成功的真实 GPU 证据，真实设备结果以上述跨沙盒运行记录为准。
 - 现有 `prism_render_gpudriven::camera` 是轴对齐正交场景测试相机，不等同于本文的 `prism_camera`；本文不把它包装成完整相机内核。
-- `cargo test -p prism_camera -p prism_camera_rig --all-targets`：`prism_camera` 25 passed、`prism_camera_rig` 9 passed，0 failed；覆盖投影视图派生、历史失效、viewport、jitter、frustum、镜头曝光、GPU ABI、后处理 key 空间、立体视图、拾取、过场采样与结束策略、外部姿态校验、遮挡滞回、前瞻预测、历史稳定化、Body/Aim、SpringArm、噪声、Impulse、输入归一化、LOD 调度、稳定选择、导演混合和半衰期工具。
-- `cargo check -p prism_camera --no-default-features` 与 `cargo check -p prism_camera_rig --no-default-features`：通过；核心数据契约在裁剪配置下保持可编译。
+- `cargo test -p prism_camera -p prism_camera_rig -p prism_camera_ecs --all-targets`：`prism_camera` 25 passed、`prism_camera_rig` 12 passed、`prism_camera_ecs` 4 passed，0 failed；覆盖投影视图派生、历史失效、viewport、jitter、frustum、镜头曝光、GPU ABI、后处理排序、立体视图、拾取、过场采样、外部姿态校验、遮挡滞回、前瞻预测、历史稳定化、Body/Aim、SpringArm、噪声、Impulse、输入归一化、LOD 调度、稳定选择、导演混合、半衰期工具和真实 ECS `PostUpdate` 发布链。
+- `cargo test -p prism_camera --all-features --all-targets`：31 passed；`cargo test -p prism_camera_rig --all-features --all-targets`：12 passed；显式 feature 组合和 `cargo check` 默认/全特性/裁剪配置均已验证。
+- `cargo fmt --all -- --check` 与相机改动的 `git diff --check`：通过。
+- `cargo bench -p prism_camera_rig --bench camera_contracts -- --iterations 1`：`derive_view=152.083 ns/op`、`camera_brain_update=22.738 ns/op`、`impulse_apply_6dof=47.217 ns/op`、`view_lod_scheduler=3.921 ns/op`；这是微基准结果，不替代多视图 P95/P99 性能报告。
+- GPU 记录来自 `prism_math_gpu` 的投影 parity 测试，不等同于 `prism_camera` 全链路 GPU 验收；当前 camera agent 运行中无可用 adapter 时明确跳过，不能据此宣称 camera 的真实设备全链路验证已完成。
 
 ---
 
@@ -1214,11 +1207,11 @@ pub mod prelude {
 
 ### 27.1 当前实现与本文规格的关系
 
-`pkg/prism_camera` 已提供 `CameraIntent`、`CameraPose`、`Projection`、`ViewData`、`ViewHistory`、viewport、reversed-Z/无限远投影、oblique/SubView、5/6 面 frustum、Halton/Sobol jitter、Filmback/Lens/Exposure、PostStack、viewport/world picking、StereoPair/late-latch、相对渲染原点拆分、GPU View ABI 和 `ViewRegistry` 发布桥接；advanced 契约提供 CameraTrack、自动对焦、快门、foveation、批量 key、LOD、构图、确定性 digest、ExternalPoseValidator、OcclusionFadeState、LookaheadPredictor 和 HistoryStabilizer。`pkg/prism_camera_rig` 已提供 `VirtualCamera`、`CameraBrain`、稳定优先级选择、位姿混合、Body/Aim、`SceneQuery` 批量弹簧臂、半衰期阻尼、Fly/Orbit/Pan 控制器、确定性梯度噪声、ImpulseBuffer、输入归一化和 ViewUpdateScheduler。
+`pkg/prism_camera` 已提供 `CameraIntent`、`CameraPose`、`Projection`、`ViewData`、`ViewHistory`、viewport、reversed-Z/无限远投影、oblique/SubView、5/6 面 frustum、Halton/Sobol jitter、Filmback/Lens/Exposure、PostStack、viewport/world picking、StereoPair/late-latch、相对渲染原点拆分、GPU View ABI 和 `ViewRegistry` 发布桥接；advanced 契约提供 CameraTrack、自动对焦、快门、foveation、批量 key、LOD、构图、确定性 digest、ExternalPoseValidator、OcclusionFadeState、LookaheadPredictor 和 HistoryStabilizer。`pkg/prism_camera_rig` 已提供 `VirtualCamera`、`CameraBrain`、稳定优先级选择、位姿混合、Body/Aim、`SceneQuery` 批量弹簧臂、半衰期阻尼、Fly/Orbit/Pan 控制器、确定性梯度噪声、ImpulseBuffer、输入归一化和 ViewUpdateScheduler；`pkg/prism_camera_ecs` 已提供实体组件、帧资源、稳定句柄映射、诊断资源和 `PostUpdate` 发布系统。
 
-实现采用两层所有权：相机 crate 只计算不可变视图快照，rig crate 只生成位姿结果；渲染资源、物理求交和 ECS 存储继续由各自 crate 持有。两个 crate 均为 `no_std` 核心、禁止 unsafe，并通过分代句柄、结构化错误、固定容量 frustum、批量查询和稳定排序维持性能与可维护性。提交记录为 `f717eff15`（运行时实现）与 `e7df20525`（ABI/公共契约修正）。
+实现采用三层所有权：相机 crate 只计算不可变视图快照，rig crate 只生成位姿结果，ECS adapter 只负责生命周期和发布；渲染资源、物理求交和 Transform 存储继续由各自 crate 持有。三个 crate 均禁止 unsafe；核心数学和 rig 路径保持 `no_std + alloc`，ECS adapter 使用应用/ECS crate。提交记录为 `cfb34909f`（ECS 发布链）、`503b0e72d`（高级契约与基准）和 `bf53ef12b`（裁剪配置测试修正）。
 
-本文中涉及的渲染后处理算法、物理后端、XR 设备驱动和 ECS 组件装配由对应所有者消费这些稳定契约；它们不复制相机矩阵或历史真相。相机核心的交付验收以两个 crate 的 API、单元测试、no-default feature check、ABI 检查和真实设备投影 parity 为准；跨模块能力沿同一契约接入，不改变相机数学与历史协议。
+本文中涉及的渲染后处理算法、物理后端、XR 设备驱动和完整 ECS 导演/Rig 系统由对应所有者消费这些稳定契约；它们不复制相机矩阵或历史真相。相机核心的交付验收以三个 crate 的 API、单元测试、feature check、ABI 检查和可获得的 GPU parity 证据为准；跨模块能力沿同一契约接入，不改变相机数学与历史协议。
 
 ### 27.2 风险处置表
 
@@ -1232,11 +1225,11 @@ pub mod prelude {
 | late-latch 不可用 | 预测位姿固定提交 | 延迟增加但结果一致 | 关闭 relatch，不改变历史协议 |
 | 自定义后处理破坏物理序 | Raw 节点必须声明 domain/格式/预算 | 节点被跳过 | 使用上一帧已归一化栈 |
 
-这些处置项都是运行时可执行的状态机，不依赖人工补丁。每个错误码必须能关联实体、帧号、字段和 fallback；诊断关闭时仍保留错误计数。
+这些处置项都是运行时可执行的契约，不依赖人工补丁。核心错误关联字段和值；ECS adapter 额外关联实体，帧号由 `CameraFrame` 提供；诊断关闭时仍可由上层保留错误计数。
 
 ### 27.3 维护与扩展规则
 
-1. 新投影类型必须实现 `CameraProjection`、CPU 参考、WGSL 镜像、端点单测、frustum 规则和 GPU parity；缺一项不得进入公共 prelude。
+1. 新投影类型必须实现 `Projection` 的验证、CPU 参考、端点单测、frustum 规则和 GPU parity；缺一项不得进入公共 prelude。
 2. 新 `ViewKind` 只能追加枚举值，必须给出重要度、清屏、历史和后处理策略；不能在下游复制相机判断。
 3. 新后处理节点必须声明输入/输出色域、HDR/LDR、前后放大域、临时纹理预算和可跳过行为。
 4. 新 Rig 必须只读目标快照并返回纯数据结果；不能直接写 ViewData、RenderTarget 或 GPU 资源。
@@ -1257,7 +1250,7 @@ pub mod prelude {
 
 焦点源只能是锁定实体、屏幕中心射线命中或固定距离三者之一；采样距离先限幅到 `[near+epsilon, focus_max]`，再用独立的拉焦半衰期平滑。focus breathing 只改变投影 FOV 的校正项，不修改物理焦距真值；无命中保持上一焦距并输出 `FocusLost`。
 
-### 28.3 相机碰撞体与穿帮消隐（`dither_fade`）
+### 28.3 相机碰撞体与穿帮消隐（`occlusion_fade`）
 
 遮挡查询返回实体分代 ID、遮挡深度和屏幕覆盖率；消隐系统只写 `CameraOcclusionIntent`，材质系统决定 dither 实现。实体进入/退出使用双阈值滞回，最多同时处理 64 个实体；GPU id-buffer 不可用时退化为 CPU 查询，不改变相机矩阵。
 

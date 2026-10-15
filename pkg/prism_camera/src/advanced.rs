@@ -5,22 +5,12 @@
 ))]
 use alloc::vec::Vec;
 
-#[cfg(any(
-    feature = "cutscene",
-    feature = "virtual_production",
-    feature = "view_batch",
-    feature = "lookahead_stream",
-    feature = "determinism"
-))]
+#[cfg(feature = "lookahead_stream")]
 use prism_math::DVec3;
-#[cfg(any(feature = "virtual_production", feature = "view_batch"))]
+#[cfg(feature = "virtual_production")]
 use prism_math::Vec2;
 
-#[cfg(any(
-    feature = "cutscene",
-    feature = "virtual_production",
-    feature = "determinism"
-))]
+#[cfg(any(feature = "cutscene", feature = "virtual_production"))]
 use crate::CameraPose;
 #[cfg(feature = "cutscene")]
 use crate::Exposure;
@@ -717,7 +707,7 @@ mod tests {
     ))]
     use super::*;
     #[cfg(feature = "determinism")]
-    use crate::{derive_view, CameraIntent, ViewHistory};
+    use crate::{derive_view, CameraIntent, CameraPose, ViewHistory};
     #[cfg(any(
         feature = "cutscene",
         feature = "determinism",
