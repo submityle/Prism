@@ -1008,14 +1008,14 @@ pub enum CameraSystems {
     Director,   // 评估 vcam + Brain 混合 → 写回输出相机意图（feature director）
     Control,    // 控制器读输入写 transform（或驱动 vcam）
     Rig,        // Body/Aim 组合器 + 弹簧臂避障 + 噪声/Impulse → 写 transform
-    UpdateProj, // render area 变化 → Projection::update
+    UpdateProj, // render area 变化 → 上层更新 target_size/Projection 意图
     Derive,     // 位姿+投影+jitter+曝光 → ViewData，注册 view_family
 }
 ```
 
 顺序：`Director → Control → Rig → (transform 传播) → UpdateProj → Derive`。关键：`Derive` 必须在 `prism_transform` 的层级传播**之后**（相机位姿是 GlobalTransform 的函数），所以 `Derive.after(TransformSystems::Propagate)`，与 Bevy 的 `update_frusta.after(Propagate)` 同构。
 
-完整帧分为五个可观测阶段：`InputNormalize`、`IntentResolve`、`TransformPropagate`、`ViewDerive`、`ViewPublish`。阶段之间只传不可变快照；任一阶段返回结构化错误时，当前相机进入 `Invalid` 状态并复用上一帧有效 ViewData，下一帧重新尝试。`ViewPublish` 只有在所有矩阵、视口、历史字段和 ABI 校验通过后才更新 ViewRegistry。
+完整帧分为五个可观测阶段：`InputNormalize`、`IntentResolve`、`TransformPropagate`、`ViewDerive`、`ViewPublish`。阶段之间只传不可变快照；核心 `derive_view` 返回结构化错误时，ECS adapter 记录 `CameraDiagnostics`、清理该实体历史并移除注册句柄，下一帧重新尝试。`ViewPublish` 只有在所有矩阵、视口、历史字段和 ABI 校验通过后才更新 ViewRegistry。
 
 ### 21.2 App 装配
 
@@ -1170,7 +1170,7 @@ pub mod prelude {
 
 | 能力包 | 固化内容 | 必须通过的门禁 | 运行时降级 |
 |---|---|---|---|
-| M0 代数核 | Perspective/Orthographic、reversed-Z、无限远、view/proj/view-proj、斜裁剪、frustum | 端点深度、FOV、逆变换、5/6 面剔除单测 | 无效配置保留上一帧有效视图 |
+| M0 代数核 | Perspective/Orthographic、reversed-Z、无限远、view/proj/view-proj、斜裁剪、frustum | 端点深度、FOV、逆变换、5/6 面剔除单测 | 返回结构化 `CameraError`，不产生无效矩阵 |
 | M1 ViewData | 视图派生、历史槽、ViewRegistry、viewport/order、RenderTarget | 分屏/PiP/离屏、句柄分代、尺寸变化 | 核心返回 `CameraError`；ECS adapter 记录诊断并移除该实体的无效注册 |
 | M2 时域 | Halton/Sobol、稳定矩阵、teleport、运动矢量输入 | jitter 均值、首帧、切镜、分辨率切换 | `Off` 时零 jitter、清历史 |
 | M3 镜头与后处理 | Filmback/Lens/EV100/Auto/DOF/PostStack 归一化 | Sunny-16、CoC、曝光适应、固定物理序、节点容量 | 手动曝光、全局栈、关闭不支持节点 |

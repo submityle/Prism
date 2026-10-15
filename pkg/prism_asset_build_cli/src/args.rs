@@ -17,6 +17,7 @@ pub enum Command {
     Import(Import),
     Build(Build),
     Package(Package),
+    Patch(Patch),
     Validate(Validate),
     Inspect(Inspect),
 }
@@ -91,6 +92,31 @@ pub struct Package {
     /// explicit versioned runtime mapping file
     #[argh(option)]
     pub mapping: Option<PathBuf>,
+}
+
+/// Build an incremental runtime patch from a published base package to the
+/// current target revision.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "patch")]
+pub struct Patch {
+    /// target local revision store directory
+    #[argh(option)]
+    pub store: PathBuf,
+    /// base committed build revision number
+    #[argh(option)]
+    pub base_revision: u64,
+    /// previously emitted base runtime package directory
+    #[argh(option)]
+    pub base_package: PathBuf,
+    /// explicit versioned mapping file for the base revision
+    #[argh(option)]
+    pub base_mapping: PathBuf,
+    /// explicit versioned mapping file for the target revision
+    #[argh(option)]
+    pub mapping: PathBuf,
+    /// output directory for the patch descriptor, manifests, and containers
+    #[argh(option)]
+    pub output: PathBuf,
 }
 
 /// Validate a previously emitted runtime package against the current revision.

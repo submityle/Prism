@@ -412,7 +412,7 @@ pub fn package_runtime_patch_with_options(
 
     let patch_mappings =
         namespace_changed_mappings(target_mappings, &selected_assets, target_manifest.revision);
-    let payload = package_runtime_selected_with_options(
+    let mut payload = package_runtime_selected_with_options(
         PackageRequest {
             manifest: target_manifest,
             cas,
@@ -430,6 +430,17 @@ pub fn package_runtime_patch_with_options(
         &selected_assets,
         &payload.runtime_manifest,
     )?;
+    complete_patch_dependency_context(
+        &mut payload.runtime_manifest,
+        &target_runtime_manifest,
+        selected_assets
+            .iter()
+            .map(|asset| target_by_asset[asset].guid),
+    )?;
+    payload.runtime_manifest_bytes = payload
+        .runtime_manifest
+        .encode()
+        .map_err(RuntimePatchError::Manifest)?;
     let target_runtime_manifest_bytes = target_runtime_manifest
         .encode()
         .map_err(RuntimePatchError::Manifest)?;
@@ -468,6 +479,67 @@ fn namespace_changed_mappings(
             mapping
         })
         .collect()
+}
+
+/// Adds target routes needed only to validate and resolve patch dependencies.
+///
+/// These context routes intentionally do not add payload bytes: unchanged
+/// containers remain owned by the base package. Keeping the context routes in
+/// the patch manifest makes the delta self-describing while preserving the
+/// incremental payload guarantee.
+fn complete_patch_dependency_context(
+    patch: &mut RuntimeManifest,
+    target: &RuntimeManifest,
+    roots: impl IntoIterator<Item = StableGuid>,
+) -> Result<(), RuntimePatchError> {
+    let mut pending = roots.into_iter().collect::<BTreeSet<_>>();
+    let mut closure = BTreeSet::new();
+    while let Some(guid) = pending.pop_first() {
+        if !closure.insert(guid) {
+            continue;
+        }
+        let metadata = target
+            .metadata(guid)
+            .ok_or(RuntimePatchError::TargetRouteMissing { guid })?;
+        pending.extend(metadata.hard_dependencies.iter().copied());
+        pending.extend(metadata.optional_dependencies.iter().copied());
+    }
+
+    for guid in &closure {
+        let route = target
+            .route(*guid)
+            .ok_or(RuntimePatchError::TargetRouteMissing { guid: *guid })?;
+        let metadata = target
+            .metadata(*guid)
+            .ok_or(RuntimePatchError::TargetRouteMissing { guid: *guid })?;
+        if let Some(existing) = patch.route(*guid) {
+            if existing != route {
+                return Err(RuntimePatchError::TargetRouteMismatch { guid: *guid });
+            }
+        } else {
+            patch
+                .insert_with_metadata(route.clone(), metadata.clone())
+                .map_err(RuntimePatchError::Manifest)?;
+        }
+        let identity = target.container_identity(&route.container_name).ok_or(
+            RuntimePatchError::TargetContainerMismatch {
+                name: route.container_name.clone(),
+            },
+        )?;
+        patch
+            .bind_container(route.container_name.clone(), identity)
+            .map_err(RuntimePatchError::Manifest)?;
+    }
+
+    for guid in &closure {
+        let metadata = target
+            .metadata(*guid)
+            .ok_or(RuntimePatchError::TargetRouteMissing { guid: *guid })?;
+        patch
+            .set_metadata(*guid, metadata.clone())
+            .map_err(RuntimePatchError::Manifest)?;
+    }
+    Ok(())
 }
 
 fn validate_patch_routes(
@@ -807,6 +879,21 @@ mod tests {
             .metadata(StableGuid::from_u128(22))
             .unwrap();
         assert_eq!(metadata.hard_dependencies, vec![StableGuid::from_u128(11)]);
+        assert!(patch
+            .payload
+            .runtime_manifest
+            .route(StableGuid::from_u128(11))
+            .is_some());
+        assert_eq!(patch.payload.containers.len(), 1);
+        assert_eq!(
+            patch
+                .apply_to_manifest(
+                    base_package.source_manifest_hash,
+                    &base_package.runtime_manifest,
+                )
+                .unwrap(),
+            patch.target_runtime_manifest
+        );
     }
 
     #[test]

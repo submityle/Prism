@@ -227,7 +227,7 @@ fn prepare_package(
     })
 }
 
-fn package_mappings(
+pub(crate) fn package_mappings(
     manifest: &prism_asset_build_core::Manifest,
     mappings: Vec<prism_asset_build_core::AssetPackageMapping>,
 ) -> Result<Vec<prism_asset_build_core::AssetPackageMapping>, CommandError> {

@@ -19,13 +19,17 @@ fn temp_dir(label: &str) -> PathBuf {
 }
 
 fn png_bytes() -> Vec<u8> {
+    png_bytes_with([11, 22, 33])
+}
+
+fn png_bytes_with(rgb: [u8; 3]) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut encoder = Encoder::new(&mut bytes, 1, 1);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().expect("PNG header should encode");
     writer
-        .write_image_data(&[11, 22, 33])
+        .write_image_data(&rgb)
         .expect("PNG pixel should encode");
     drop(writer);
     bytes
@@ -126,6 +130,31 @@ fn validate_with_mapping(store: &Path, package: &Path, mapping: &Path) -> Output
         package.to_str().expect("temporary paths are UTF-8"),
         "--mapping",
         mapping.to_str().expect("temporary paths are UTF-8"),
+    ])
+}
+
+fn patch(
+    store: &Path,
+    base_revision: &str,
+    base_package: &Path,
+    base_mapping: &Path,
+    mapping: &Path,
+    output: &Path,
+) -> Output {
+    run(&[
+        "patch",
+        "--store",
+        store.to_str().expect("temporary paths are UTF-8"),
+        "--base-revision",
+        base_revision,
+        "--base-package",
+        base_package.to_str().expect("temporary paths are UTF-8"),
+        "--base-mapping",
+        base_mapping.to_str().expect("temporary paths are UTF-8"),
+        "--mapping",
+        mapping.to_str().expect("temporary paths are UTF-8"),
+        "--output",
+        output.to_str().expect("temporary paths are UTF-8"),
     ])
 }
 
@@ -238,6 +267,94 @@ fn cli_validate_rejects_tampered_runtime_container() {
     let validated = validate(&store, &package_dir);
     assert!(!validated.status.success(), "tampered package was accepted");
     assert!(String::from_utf8_lossy(&validated.stderr).contains("failed"));
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
+fn cli_patch_emits_incremental_manifests_and_containers() {
+    let root = temp_dir("patch");
+    let (source, store, base_package) = build(&root);
+    let mapping = explicit_mapping(&root);
+    let packaged = package_with_mapping(&store, &base_package, &mapping);
+    assert!(
+        packaged.status.success(),
+        "base package failed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+
+    fs::write(&source, png_bytes_with([44, 55, 66])).expect("changed PNG should be written");
+    let rebuilt = run(&[
+        "build",
+        "--source",
+        source.to_str().expect("temporary paths are UTF-8"),
+        "--logical-path",
+        LOGICAL_PATH,
+        "--asset-id",
+        ASSET_ID,
+        "--store",
+        store.to_str().expect("temporary paths are UTF-8"),
+    ]);
+    assert!(
+        rebuilt.status.success(),
+        "target build failed: {}",
+        String::from_utf8_lossy(&rebuilt.stderr)
+    );
+
+    let patch_dir = root.join("patch");
+    let emitted = patch(&store, "0", &base_package, &mapping, &mapping, &patch_dir);
+    assert!(
+        emitted.status.success(),
+        "patch failed: {}",
+        String::from_utf8_lossy(&emitted.stderr)
+    );
+    assert!(patch_dir.join("descriptor.bin").is_file());
+    assert!(patch_dir.join("patch_manifest.bin").is_file());
+    assert!(patch_dir.join("target_manifest.bin").is_file());
+    assert!(patch_dir.join("containers").is_dir());
+    assert!(String::from_utf8_lossy(&emitted.stdout).contains("target_revision=1"));
+
+    let rerun = patch(&store, "0", &base_package, &mapping, &mapping, &patch_dir);
+    assert!(
+        rerun.status.success(),
+        "identical patch rerun failed: {}",
+        String::from_utf8_lossy(&rerun.stderr)
+    );
+
+    let invalid_base_mapping = root.join("invalid-base-mapping.txt");
+    fs::write(
+        &invalid_base_mapping,
+        format!(
+            "version=1\nasset=6;guid=path:{LOGICAL_PATH};container=core;priority=0;chunk_priority=0\nasset=7;guid=path:{LOGICAL_PATH};container=core;priority=0;chunk_priority=1\n"
+        ),
+    )
+    .expect("invalid base mapping should be written");
+    let invalid = patch(
+        &store,
+        "0",
+        &base_package,
+        &invalid_base_mapping,
+        &mapping,
+        &root.join("invalid-patch"),
+    );
+    assert!(
+        !invalid.status.success(),
+        "duplicate base GUID was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("one-to-one"),
+        "{}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
+
+    fs::write(patch_dir.join("containers/stale"), b"stale")
+        .expect("stale patch output should be written");
+    let stale = patch(&store, "0", &base_package, &mapping, &mapping, &patch_dir);
+    assert!(!stale.status.success(), "stale patch output was accepted");
+    assert!(
+        String::from_utf8_lossy(&stale.stderr).contains("unexpected container"),
+        "{}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
     fs::remove_dir_all(root).expect("test outputs should be cleaned up");
 }
 
