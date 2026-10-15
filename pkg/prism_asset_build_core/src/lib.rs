@@ -29,6 +29,8 @@ pub mod patch;
 pub mod profile;
 /// Immutable binding between a build revision and its runtime package outputs.
 pub mod publication;
+/// Canonical local release provenance and package audit facts.
+pub mod provenance;
 /// Explicit importer/cook recipe identity.
 pub mod recipe;
 /// Final release integrity and anti-rollback gate.
@@ -74,6 +76,7 @@ pub use profile::{
     ProfileLayer, ProfileMergePolicy, ProfileOverridePolicy, ProfileValue,
 };
 pub use publication::{PublicationDescriptor, PublishedContainer};
+pub use provenance::{ProvenanceArtifact, ProvenanceContainer, ReleaseProvenance};
 pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError};
 pub use release::{
     ReleaseDescriptor, ReleaseError, ReleaseGate, ReleaseKeyId, ReleaseKeyStatus, ReleasePublicKey,

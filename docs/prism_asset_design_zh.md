@@ -22,6 +22,8 @@
 
 ### 实施状态（2026-10-16）
 
+本地发布包现额外生成 `provenance.bin`：它以 canonical bytes 绑定当前 Build Manifest、每个 Artifact、Runtime Publication 与每个 Container 的 revision/hash/长度/依赖事实，并由 CLI `package` 写入、`validate` 严格解码和逐字节复核。该 descriptor 不声称包含远程 Worker、源码提交、密钥托管或跨机器信任根证明。
+
 本轮新增的 `FeedbackDemandQueue` 已完成代码和回归测试：它按 source revision 隔离反馈，执行去重合并、确定性排序、过期淘汰、top-K 容量限制，并可批量生成 `PageResidency` 请求。该队列仍属于流送需求决策层，不代表 GPU feedback/page-table 或完整纹理驻留闭环已经完成。
 
 以下状态只记录仓库中已存在、可运行并有测试覆盖的能力，不把设计文字当作实现。容器安全边界同时以实现的读路径为准：挂载时校验的是当时读取到的完整字节；range source 在 reader 生命周期内必须保持不可变；整 payload `read_all` 再校验 entry digest，局部 `read_range` 不提供密码学子范围认证（详见 §10.5）。

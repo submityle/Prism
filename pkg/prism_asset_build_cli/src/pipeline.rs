@@ -8,6 +8,7 @@ use prism_asset_build_core::import::{
 use prism_asset_build_core::{
     ArtifactQualityGate, AssetId, BuildExecutor, BuildGraph, BuildRevision, ContentHash,
     DerivedDataCache, ImportRecipe, JobId, PackageRequest, PublicationDescriptor,
+    ReleaseProvenance,
     ReleaseDescriptor, ReleaseSignatureError, ReleaseSigner, ReleaseTrustStore, ReleaseVerifier,
     RevisionStore, RuntimePackage, SignedReleaseDescriptor, SourceSnapshot,
 };
@@ -190,6 +191,7 @@ struct PreparedPackage {
     build_manifest_hash: ContentHash,
     package: RuntimePackage,
     publication: PublicationDescriptor,
+    provenance: ReleaseProvenance,
 }
 
 fn prepare_package(
@@ -251,11 +253,14 @@ fn prepare_package(
         &package.containers,
     )
     .map_err(CommandError::Publication)?;
+    let provenance = ReleaseProvenance::from_manifest(&manifest, build_manifest_hash, &publication)
+        .map_err(|error| CommandError::InvalidInput(error.to_owned()))?;
     Ok(PreparedPackage {
         revision,
         build_manifest_hash,
         package,
         publication,
+        provenance,
     })
 }
 
@@ -340,6 +345,11 @@ fn write_package(output: &Path, prepared: &PreparedPackage) -> Result<(), Comman
         .encode()
         .map_err(CommandError::Publication)?;
     write_immutable(output.join("publication.bin"), &publication_bytes)?;
+    let provenance_bytes = prepared
+        .provenance
+        .encode()
+        .map_err(|error| CommandError::InvalidInput(error.to_owned()))?;
+    write_immutable(output.join("provenance.bin"), &provenance_bytes)?;
     let containers = output.join("containers");
     fs::create_dir_all(&containers)?;
     for (name, bytes) in &prepared.package.containers {
@@ -473,6 +483,18 @@ fn validate_package_output(output: &Path, prepared: &PreparedPackage) -> Result<
     if publication_bytes != expected_publication || publication != prepared.publication {
         return Err(CommandError::InvalidInput(
             "publication descriptor differs from deterministic package output".into(),
+        ));
+    }
+    let provenance_bytes = fs::read(output.join("provenance.bin"))?;
+    let provenance = ReleaseProvenance::decode(&provenance_bytes)
+        .map_err(|error| CommandError::InvalidInput(error.to_owned()))?;
+    let expected_provenance = prepared
+        .provenance
+        .encode()
+        .map_err(|error| CommandError::InvalidInput(error.to_owned()))?;
+    if provenance_bytes != expected_provenance || provenance != prepared.provenance {
+        return Err(CommandError::InvalidInput(
+            "release provenance differs from deterministic package output".into(),
         ));
     }
     for (name, expected) in &prepared.package.containers {
