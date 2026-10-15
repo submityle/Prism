@@ -17,7 +17,7 @@ use crate::{
     diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings},
     extract::{
         lifecycle::destroy_removed_entities, ExtractedSceneInstance, GpuSceneInstanceAddress,
-        PrismGpuSceneEntity,
+        PrismGpuSceneEntity, PrismGpuSceneLodSet,
     },
     scene::RenderGpuScene,
 };
@@ -34,6 +34,7 @@ pub(crate) fn extract_scene_instances(
                 &GlobalTransform,
                 Option<&Aabb>,
                 &Mesh3d,
+                Option<&PrismGpuSceneLodSet>,
                 Option<&MeshMaterial3d<StandardMaterial>>,
             ),
             (
@@ -43,12 +44,14 @@ pub(crate) fn extract_scene_instances(
                     Changed<GlobalTransform>,
                     Changed<Aabb>,
                     Changed<Mesh3d>,
+                    Changed<PrismGpuSceneLodSet>,
                     Changed<MeshMaterial3d<StandardMaterial>>,
                 )>,
             ),
         >,
     >,
     mut removed: Extract<RemovedComponents<PrismGpuSceneEntity>>,
+    mut removed_lods: Extract<RemovedComponents<PrismGpuSceneLodSet>>,
     render_entities: Extract<Query<RenderEntity>>,
     mut extracted_instances: Query<&mut ExtractedSceneInstance>,
     mut commands: Commands,
@@ -61,7 +64,15 @@ pub(crate) fn extract_scene_instances(
         }
     }
 
-    for (main_entity, render_entity, config, transform, bounds, mesh, material) in &changed {
+    for main_entity in removed_lods.read() {
+        if let Ok(render_entity) = render_entities.get(main_entity)
+            && let Ok(mut existing) = extracted_instances.get_mut(render_entity)
+        {
+            existing.lod_meshes.clear();
+        }
+    }
+
+    for (main_entity, render_entity, config, transform, bounds, mesh, lods, material) in &changed {
         let main_entity = bevy_render::sync_world::MainEntity::from(main_entity);
         let update = ExtractedSceneInstance {
             main_entity,
@@ -69,6 +80,14 @@ pub(crate) fn extract_scene_instances(
             transform: *transform,
             bounds: bounds.copied(),
             mesh: mesh.clone(),
+            lod_meshes: lods
+                .map(|lods| {
+                    lods.lods
+                        .iter()
+                        .map(|lod| (lod.mesh.id(), lod.screen_error))
+                        .collect()
+                })
+                .unwrap_or_default(),
             geometry: config.geometry,
             material: config.material,
             material_asset: material.map(|material| material.0.id()),
@@ -132,9 +151,11 @@ pub(crate) fn apply_extracted_scene_changes(
     let mut new_bindings = Vec::new();
     let mut allocated_handles = Vec::new();
     let mut allocation_failures = 0_u32;
+    let mut geometry_binding_failures = 0_u32;
     buffers.set_upload_budget(upload_settings.budget);
 
     for (entity, mut extracted) in &mut changed {
+        let newly_allocated = extracted.handle.is_none();
         let handle = match extracted.handle {
             Some(handle) => handle,
             None => match scene.allocate() {
@@ -153,6 +174,18 @@ pub(crate) fn apply_extracted_scene_changes(
         let geometry = extracted
             .geometry
             .unwrap_or_else(|| scene.geometry_for_mesh(extracted.mesh.id()));
+        if !scene.bind_geometry_mesh(geometry, extracted.mesh.id())
+            || !scene.bind_geometry_lod_meshes(geometry, &extracted.lod_meshes)
+        {
+            geometry_binding_failures += 1;
+            if newly_allocated {
+                let _ = scene.cancel_allocation(handle);
+                if extracted.geometry.is_none() {
+                    let _ = scene.retire_geometry(extracted.mesh.id());
+                }
+            }
+            continue;
+        }
         let material = if extracted.material != SceneMaterialHandle::default() {
             extracted.material
         } else {
@@ -214,6 +247,7 @@ pub(crate) fn apply_extracted_scene_changes(
 
     let transaction = transaction.finish();
     diagnostics.allocation_failures = allocation_failures;
+    diagnostics.geometry_binding_failures = geometry_binding_failures;
     if !transaction.operations.is_empty() {
         let report = scene.apply_entity_transaction(&mut buffers, &transaction);
         let upload = buffers.last_upload_plan();

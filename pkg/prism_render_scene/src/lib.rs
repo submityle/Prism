@@ -36,7 +36,10 @@ pub use compare::GpuSceneParityDiagnostics;
 pub use completion::GpuCompletionTracker;
 pub use consumer::{GpuSceneBufferBindings, GpuSceneReader};
 pub use diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings};
-pub use extract::{ExtractedSceneInstance, GpuSceneInstanceAddress, PrismGpuSceneEntity};
+pub use extract::{
+    ExtractedSceneInstance, GpuSceneInstanceAddress, PrismGpuSceneEntity, PrismGpuSceneLod,
+    PrismGpuSceneLodSet,
+};
 pub use geometry::{
     build_shading_geometry, GeometryBindGroup, RenderGeometryRegistry, RenderShadingGeometry,
     RenderShadingGeometryBuffers, RenderShadingGeometryEntry, RenderShadingGeometryHeader,

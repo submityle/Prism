@@ -1,6 +1,7 @@
 mod bindings;
 mod buffers;
 mod consumer;
+mod draw_range;
 mod mesh_adapter;
 pub(crate) mod rows;
 mod runtime;
@@ -13,7 +14,8 @@ mod systems;
 pub use bindings::GeometryBindGroup;
 pub use runtime::RenderGeometryRegistry;
 
-pub(crate) use consumer::select_render_mesh;
+pub(crate) use consumer::{select_render_mesh, select_render_mesh_asset};
+pub(crate) use draw_range::{indexed_draw_range, non_indexed_draw_range};
 pub use shading::{
     build_shading_geometry, RenderShadingGeometry, RenderShadingGeometryHeader,
     RenderShadingPrimitive, RenderShadingVertex, ShadingGeometryBuildError,

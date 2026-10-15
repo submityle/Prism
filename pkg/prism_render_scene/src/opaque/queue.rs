@@ -21,9 +21,11 @@ use super::{
     GpuSceneOpaqueIndirectEnabled,
 };
 use crate::{
+    geometry::select_render_mesh,
     visibility::runtime::{UnifiedVisibilitySettings, UnifiedVisibilityState},
-    GpuSceneDiagnostics, GpuSceneInstanceAddress, GpuSceneMode,
+    GpuSceneDiagnostics, GpuSceneInstanceAddress, GpuSceneMode, RenderGeometryRegistry,
 };
+use prism_render_architecture::geometry::MeshConsumer;
 
 #[derive(SystemParam)]
 pub(crate) struct OpaqueQueueControl<'w> {
@@ -33,6 +35,14 @@ pub(crate) struct OpaqueQueueControl<'w> {
     visibility_settings: Res<'w, UnifiedVisibilitySettings>,
     debug_view: Res<'w, GpuSceneDebugView>,
     diagnostics: ResMut<'w, GpuSceneDiagnostics>,
+}
+
+#[derive(SystemParam)]
+pub(crate) struct OpaqueQueueMeshes<'w> {
+    render_meshes: Res<'w, RenderAssets<RenderMesh>>,
+    render_instances: Res<'w, RenderMeshInstances>,
+    mesh_allocator: Res<'w, MeshAllocator>,
+    geometry: Res<'w, RenderGeometryRegistry>,
 }
 
 #[expect(
@@ -48,9 +58,7 @@ pub(crate) fn queue_gpu_scene_opaque(
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     views: Query<(&RenderVisibleEntities, &ExtractedView)>,
     view_keys: Res<ViewKeyCache>,
-    render_meshes: Res<RenderAssets<RenderMesh>>,
-    render_instances: Res<RenderMeshInstances>,
-    mesh_allocator: Res<MeshAllocator>,
+    meshes: OpaqueQueueMeshes,
     scene_instances: Query<&GpuSceneInstanceAddress>,
     dirty: Res<DirtySpecializations>,
     mut previously_queued: Local<bevy_render::sync_world::MainEntityHashSet>,
@@ -109,7 +117,7 @@ pub(crate) fn queue_gpu_scene_opaque(
             control.indirect_enabled.0 && control.visibility_settings.indirect_first_instance,
         );
         control.diagnostics.opaque_visible += unified.count;
-        for (render_entity, main_entity) in queue_entries {
+        for (render_entity, main_entity, requested_lod) in queue_entries {
             if queue_one(
                 phase,
                 render_entity,
@@ -120,10 +128,12 @@ pub(crate) fn queue_gpu_scene_opaque(
                 &pipeline_cache,
                 &pipeline,
                 &mut pipelines,
-                &render_meshes,
-                &render_instances,
-                &mesh_allocator,
+                &meshes.render_meshes,
+                &meshes.render_instances,
+                &meshes.mesh_allocator,
                 &scene_instances,
+                &meshes.geometry,
+                requested_lod,
             ) {
                 previously_queued.insert(main_entity);
                 control.diagnostics.opaque_queued += 1;
@@ -140,7 +150,7 @@ fn opaque_queue_entries(
     visible: prism_render_visibility::BufferRange,
     bins: &prism_render_visibility::ViewDrawBins,
     indirect: bool,
-) -> Vec<(Entity, bevy_render::sync_world::MainEntity)> {
+) -> Vec<(Entity, bevy_render::sync_world::MainEntity, u32)> {
     if indirect {
         return bins
             .bins
@@ -148,14 +158,22 @@ fn opaque_queue_entries(
             .filter(|bin| {
                 bin.key.pass_mask & prism_render_visibility::RenderPassMask::OPAQUE.0 != 0
             })
-            .filter_map(|bin| scene.entity_binding_for_handle(bin.representative_scene))
+            .filter_map(|bin| {
+                scene
+                    .entity_binding_for_handle(bin.representative_scene)
+                    .map(|(render, main)| (render, main, bin.key.lod_or_cluster))
+            })
             .collect();
     }
     visibility.frame.work_items
         [visible.start as usize..visible.start.saturating_add(visible.count) as usize]
         .iter()
         .filter(|work| work.pass_mask.0 & prism_render_visibility::RenderPassMask::OPAQUE.0 != 0)
-        .filter_map(|work| scene.entity_binding_for_handle(work.scene))
+        .filter_map(|work| {
+            scene
+                .entity_binding_for_handle(work.scene)
+                .map(|(render, main)| (render, main, work.lod_or_cluster))
+        })
         .collect()
 }
 
@@ -177,6 +195,8 @@ fn queue_one(
     render_instances: &RenderMeshInstances,
     mesh_allocator: &MeshAllocator,
     scene_instances: &Query<&GpuSceneInstanceAddress>,
+    geometry: &RenderGeometryRegistry,
+    requested_lod: u32,
 ) -> bool {
     let Ok(address) = scene_instances.get(render_entity) else {
         return false;
@@ -184,10 +204,15 @@ fn queue_one(
     let Some(mesh_id) = render_instances.mesh_asset_id(main_entity) else {
         return false;
     };
-    let Some(mesh) = render_meshes.get(mesh_id) else {
+    let Ok(selection) =
+        select_render_mesh(geometry, mesh_id, MeshConsumer::MainView, requested_lod)
+    else {
         return false;
     };
-    let Some(slabs) = mesh_allocator.mesh_slabs(&mesh_id) else {
+    let Some(mesh) = render_meshes.get(selection.asset) else {
+        return false;
+    };
+    let Some(slabs) = mesh_allocator.mesh_slabs(&selection.asset) else {
         return false;
     };
     let key = view_key
@@ -217,7 +242,7 @@ fn queue_one(
             lightmap_slab: None,
         },
         Opaque3dBinKey {
-            asset_id: mesh_id.into(),
+            asset_id: selection.asset.into(),
         },
         (render_entity, main_entity),
         InputUniformIndex(address.index),

@@ -23,6 +23,8 @@ pub struct RenderGpuScene {
     entities: HashMap<Entity, SceneHandle>,
     main_entities: HashMap<Entity, bevy_render::sync_world::MainEntity>,
     geometry: HashMap<AssetId<Mesh>, GeometryHandle>,
+    geometry_assets: HashMap<GeometryHandle, AssetId<Mesh>>,
+    geometry_lods: HashMap<GeometryHandle, Vec<(AssetId<Mesh>, f32)>>,
     geometry_generations: HashMap<AssetId<Mesh>, u32>,
     next_geometry_index: u32,
     material_generations: HashMap<u32, (u32, bool)>,
@@ -44,6 +46,8 @@ impl RenderGpuScene {
             entities: HashMap::new(),
             main_entities: HashMap::new(),
             geometry: HashMap::new(),
+            geometry_assets: HashMap::new(),
+            geometry_lods: HashMap::new(),
             geometry_generations: HashMap::new(),
             next_geometry_index: 1,
             material_generations: HashMap::new(),
@@ -139,11 +143,79 @@ impl RenderGpuScene {
             .checked_add(1)
             .expect("GPU Scene geometry handle space exhausted");
         self.geometry.insert(mesh, handle);
+        self.geometry_assets.insert(handle, mesh);
         handle
+    }
+
+    /// Binds the base asset without overwriting an existing identity.
+    ///
+    /// A geometry handle and a base asset are both stable identities. Reusing
+    /// either side for a different owner would leave already extracted
+    /// instances resolving to the wrong physical mesh, so conflicts are
+    /// rejected and the previous mapping is preserved.
+    pub fn bind_geometry_mesh(&mut self, handle: GeometryHandle, mesh: AssetId<Mesh>) -> bool {
+        if self
+            .geometry_assets
+            .get(&handle)
+            .is_some_and(|mapped| *mapped != mesh)
+            || self
+                .geometry
+                .get(&mesh)
+                .is_some_and(|mapped| *mapped != handle)
+        {
+            return false;
+        }
+        self.geometry_assets.insert(handle, mesh);
+        self.geometry.insert(mesh, handle);
+        true
+    }
+
+    pub fn bind_geometry_lod_meshes(
+        &mut self,
+        handle: GeometryHandle,
+        meshes: &[(AssetId<Mesh>, f32)],
+    ) -> bool {
+        let base = self.geometry_assets.get(&handle).copied();
+        if base.is_none()
+            || meshes.iter().any(|(asset, _)| {
+                self.geometry
+                    .get(asset)
+                    .is_some_and(|mapped| *mapped != handle)
+                    || self.geometry_lods.iter().any(|(owner, lods)| {
+                        *owner != handle && lods.iter().any(|(mapped, _)| mapped == asset)
+                    })
+            })
+        {
+            return false;
+        }
+        let mut seen = std::collections::HashSet::new();
+        self.geometry_lods.insert(
+            handle,
+            meshes
+                .iter()
+                .copied()
+                .filter(|(asset, error)| {
+                    base != Some(*asset) && error.is_finite() && seen.insert(*asset)
+                })
+                .collect(),
+        );
+        true
+    }
+
+    pub(crate) fn retire_geometry_lod(&mut self, mesh: AssetId<Mesh>) -> bool {
+        let mut changed = false;
+        for lods in self.geometry_lods.values_mut() {
+            let before = lods.len();
+            lods.retain(|(asset, _)| *asset != mesh);
+            changed |= before != lods.len();
+        }
+        changed
     }
 
     pub fn retire_geometry(&mut self, mesh: AssetId<Mesh>) -> Option<GeometryHandle> {
         let retired = self.geometry.remove(&mesh)?;
+        self.geometry_assets.remove(&retired);
+        self.geometry_lods.remove(&retired);
         self.geometry_generations
             .insert(mesh, retired.generation.saturating_add(1));
         Some(retired)
@@ -156,9 +228,26 @@ impl RenderGpuScene {
     pub(crate) fn geometry_assets(
         &self,
     ) -> impl Iterator<Item = (AssetId<Mesh>, GeometryHandle)> + '_ {
-        self.geometry
+        self.geometry_assets
             .iter()
-            .map(|(asset, handle)| (*asset, *handle))
+            .map(|(handle, asset)| (*asset, *handle))
+    }
+
+    pub(crate) fn geometry_lod_assets(
+        &self,
+        handle: GeometryHandle,
+    ) -> impl Iterator<Item = (u32, AssetId<Mesh>, f32)> + '_ {
+        self.geometry_lods
+            .get(&handle)
+            .into_iter()
+            .flat_map(|lods| lods.iter().enumerate())
+            .filter_map(|(index, (asset, screen_error))| {
+                Some((
+                    u32::try_from(index).ok()?.saturating_add(1),
+                    *asset,
+                    *screen_error,
+                ))
+            })
     }
 
     /// Registers an externally-owned material row and rejects stale reuse.
@@ -234,5 +323,45 @@ impl RenderGpuScene {
         completed: prism_render_architecture::gpu_scene::GpuCompletionValue,
     ) -> u32 {
         self.allocator.reclaim_completed(completed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_asset::uuid::Uuid;
+
+    fn mesh(id: u128) -> AssetId<Mesh> {
+        AssetId::Uuid {
+            uuid: Uuid::from_u128(id),
+        }
+    }
+
+    #[test]
+    fn geometry_binding_rejects_handle_and_asset_aliasing() {
+        let mut scene = RenderGpuScene::new(8);
+        let first = GeometryHandle::new(1, 1);
+        let second = GeometryHandle::new(2, 1);
+        let base = mesh(1);
+
+        assert!(scene.bind_geometry_mesh(first, base));
+        assert!(!scene.bind_geometry_mesh(second, base));
+        assert!(!scene.bind_geometry_mesh(first, mesh(2)));
+        assert_eq!(scene.geometry_handle(base), Some(first));
+    }
+
+    #[test]
+    fn lod_binding_rejects_shared_assets_and_preserves_owner() {
+        let mut scene = RenderGpuScene::new(8);
+        let first = GeometryHandle::new(1, 1);
+        let second = GeometryHandle::new(2, 1);
+        let shared_lod = mesh(3);
+
+        assert!(scene.bind_geometry_mesh(first, mesh(1)));
+        assert!(scene.bind_geometry_mesh(second, mesh(2)));
+        assert!(scene.bind_geometry_lod_meshes(first, &[(shared_lod, 1.0)]));
+        assert!(!scene.bind_geometry_lod_meshes(second, &[(shared_lod, 1.0)]));
+        assert_eq!(scene.geometry_lod_assets(first).count(), 1);
+        assert_eq!(scene.geometry_lod_assets(second).count(), 0);
     }
 }

@@ -3,7 +3,6 @@ use bevy_ecs::{
     query::ROQueryItem,
     system::{lifetimeless::SRes, SystemParamItem},
 };
-use bevy_pbr::RenderMeshInstances;
 use bevy_render::{
     mesh::{allocator::MeshAllocator, RenderMesh, RenderMeshBufferInfo},
     render_asset::RenderAssets,
@@ -25,7 +24,6 @@ pub(crate) struct DrawGpuSceneIndirectBin;
 impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
     type Param = (
         SRes<RenderAssets<RenderMesh>>,
-        SRes<RenderMeshInstances>,
         SRes<MeshAllocator>,
         SRes<RenderGeometryRegistry>,
         SRes<UnifiedVisibilityState>,
@@ -44,7 +42,6 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
         address: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
         (
             meshes,
-            instances,
             allocator,
             geometry,
             visibility,
@@ -67,7 +64,6 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
                 item,
                 address,
                 meshes.into_inner(),
-                instances.into_inner(),
                 allocator.into_inner(),
                 geometry.into_inner(),
                 pass,
@@ -88,7 +84,6 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
                 item,
                 address,
                 meshes.into_inner(),
-                instances.into_inner(),
                 allocator.into_inner(),
                 geometry.into_inner(),
                 pass,
@@ -105,33 +100,29 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
             return RenderCommandResult::Skip;
         }
         let meshes = meshes.into_inner();
-        let instances = instances.into_inner();
         let allocator = allocator.into_inner();
         let geometry = geometry.into_inner();
         let buffers = buffers.into_inner();
-        let Some(mesh_id) = instances.mesh_asset_id(item.main_entity()) else {
+        let Ok(mesh_id) = item.bin_key.asset_id.try_typed::<bevy_mesh::Mesh>() else {
             return RenderCommandResult::Skip;
         };
-        if super::super::geometry::select_render_mesh(
+        let Ok(selection) = super::super::geometry::select_render_mesh_asset(
             geometry,
             mesh_id,
             prism_render_architecture::geometry::MeshConsumer::MainView,
-            0,
-        )
-        .is_err()
-        {
-            return RenderCommandResult::Skip;
-        }
-        let Some(mesh) = meshes.get(mesh_id) else {
+        ) else {
             return RenderCommandResult::Skip;
         };
-        let Some(vertices) = allocator.mesh_vertex_slice(&mesh_id) else {
+        let Some(mesh) = meshes.get(selection.asset) else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(vertices) = allocator.mesh_vertex_slice(&selection.asset) else {
             return RenderCommandResult::Skip;
         };
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
         match mesh.buffer_info {
             RenderMeshBufferInfo::Indexed { index_format, .. } => {
-                let Some(indices) = allocator.mesh_index_slice(&mesh_id) else {
+                let Some(indices) = allocator.mesh_index_slice(&selection.asset) else {
                     return RenderCommandResult::Skip;
                 };
                 pass.set_index_buffer(indices.buffer.slice(..), index_format);

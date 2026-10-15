@@ -62,8 +62,11 @@ use bevy_render::{
 };
 
 use crate::{
-    buffers::GpuSceneBindGroup, geometry::select_render_mesh, ExtractedSceneInstance,
-    GpuSceneInstanceAddress, RenderGeometryRegistry,
+    buffers::GpuSceneBindGroup,
+    geometry::{
+        indexed_draw_range, non_indexed_draw_range, select_render_mesh, select_render_mesh_asset,
+    },
+    ExtractedSceneInstance, GpuSceneInstanceAddress, RenderGeometryRegistry,
 };
 use prism_render_architecture::geometry::MeshConsumer;
 
@@ -107,10 +110,10 @@ pub(crate) fn queue_vsm_caster_depth(
         let Some(mesh_id) = render_instances.mesh_asset_id(instance.main_entity) else {
             continue;
         };
-        if select_render_mesh(&geometry, mesh_id, MeshConsumer::Shadow, 0).is_err() {
+        let Ok(selection) = select_render_mesh(&geometry, mesh_id, MeshConsumer::Shadow, 0) else {
             continue;
-        }
-        let Some(mesh) = meshes.get(mesh_id) else {
+        };
+        let Some(mesh) = meshes.get(selection.asset) else {
             continue;
         };
         let key = MeshPipelineKey::from_primitive_topology_and_strip_index(
@@ -127,7 +130,7 @@ pub(crate) fn queue_vsm_caster_depth(
         };
         draw_list.push(VsmCasterDepthDrawEntry {
             pipeline_id,
-            main_entity: instance.main_entity,
+            asset: selection.asset,
             instance_index: address.index,
         });
     }
@@ -252,7 +255,6 @@ pub(crate) fn vsm_caster_depth_pass(
     targets: Res<VsmCasterDepthTargets>,
     pipeline_cache: Res<PipelineCache>,
     meshes: Res<RenderAssets<RenderMesh>>,
-    render_instances: Res<RenderMeshInstances>,
     allocator: Res<MeshAllocator>,
     geometry: Res<RenderGeometryRegistry>,
     mut ctx: RenderContext,
@@ -333,16 +335,15 @@ pub(crate) fn vsm_caster_depth_pass(
             let Some(render_pipeline) = pipeline_cache.get_render_pipeline(draw.pipeline_id) else {
                 continue;
             };
-            let Some(mesh_id) = render_instances.mesh_asset_id(draw.main_entity) else {
+            let Ok(selection) =
+                select_render_mesh_asset(&geometry, draw.asset, MeshConsumer::Shadow)
+            else {
                 continue;
             };
-            if select_render_mesh(&geometry, mesh_id, MeshConsumer::Shadow, 0).is_err() {
-                continue;
-            }
-            let Some(mesh) = meshes.get(mesh_id) else {
+            let Some(mesh) = meshes.get(selection.asset) else {
                 continue;
             };
-            let Some(vertices) = allocator.mesh_vertex_slice(&mesh_id) else {
+            let Some(vertices) = allocator.mesh_vertex_slice(&selection.asset) else {
                 continue;
             };
             pass.set_render_pipeline(render_pipeline);
@@ -355,17 +356,30 @@ pub(crate) fn vsm_caster_depth_pass(
                     index_format,
                     count,
                 } => {
-                    let Some(indices) = allocator.mesh_index_slice(&mesh_id) else {
+                    let Some(indices) = allocator.mesh_index_slice(&selection.asset) else {
                         continue;
                     };
                     pass.set_index_buffer(indices.buffer.slice(..), index_format);
-                    pass.draw_indexed(
-                        indices.range.start..indices.range.start + count,
-                        vertices.range.start as i32,
-                        instance,
-                    );
+                    let Some(range) = indexed_draw_range(
+                        &selection.lod,
+                        vertices.range.clone(),
+                        indices.range.clone(),
+                        count,
+                    ) else {
+                        continue;
+                    };
+                    pass.draw_indexed(range, selection.lod.base_vertex, instance);
                 }
-                RenderMeshBufferInfo::NonIndexed => pass.draw(vertices.range, instance),
+                RenderMeshBufferInfo::NonIndexed => {
+                    let Some(range) = non_indexed_draw_range(
+                        &selection.lod,
+                        vertices.range.clone(),
+                        mesh.vertex_count,
+                    ) else {
+                        continue;
+                    };
+                    pass.draw(range, instance);
+                }
             }
         }
     }

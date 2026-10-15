@@ -194,6 +194,9 @@ fn draw_bin_candidate(
     let geometry = geometries.record(work.geometry)?;
     let lod = geometry.resolve_lod(work.lod_or_cluster)?;
     materials.get(&work.material)?;
+    let (vertex_buffer_class, index_buffer_class) = geometries
+        .buffer_classes_for_lod(work.geometry, lod.level)
+        .unwrap_or((geometry.vertex_buffer_class, geometry.index_buffer_class));
     Some(DrawBinCandidate {
         scene: work.scene,
         key: DrawBinKey {
@@ -204,8 +207,8 @@ fn draw_bin_candidate(
             // shading. Keep the bin key a dense execution-table coordinate,
             // never a material bit packing.
             pipeline_class: 0,
-            vertex_buffer_class: geometry.vertex_buffer_class,
-            index_buffer_class: geometry.index_buffer_class,
+            vertex_buffer_class,
+            index_buffer_class,
             indexed: lod.primitive_kind
                 == prism_render_architecture::geometry::GeometryPrimitiveKind::Indexed,
             primitive_kind: lod.primitive_kind,

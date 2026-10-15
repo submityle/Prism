@@ -22,6 +22,19 @@ PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test \
 
 该测试证明的是 proxy visibility/cull/LOD 合同和 shader/readback 闭环，不宣称完整 world renderer、GPU PCG、流送直传或性能指标；性能仍需独立 benchmark 记录上传字节、GPU pass 时间、显存和 P50/P95/P99。
 
+## 2026-10-15 Terrain draw GPU parity
+
+独立的 `pkg/prism_world_gpu/tests/terrain_draw.rs` 在同一 Apple M2 Metal
+适配器上完成真实 indexed terrain draw 验证：`1 passed / 0 failed`。测试
+同时覆盖完整网格上传、局部 dirty patch 上传、index buffer draw、readback
+以及局部更新后与完整重建的逐像素结果比较。
+
+本次 fixture 的可复核证据为：完整 vertex upload `2592 bytes`，局部 patch
+upload `800 bytes`；局部上传路径的 GPU 输出与完整上传路径逐像素一致。
+该结果证明的是 terrain mesh 的索引/局部更新/GPU draw 合同，不把一个小型
+fixture 的耗时外推为通用性能指标；正式性能仍需按内容规模记录 GPU 时间、
+显存和 P50/P95/P99。
+
 ## 测试入口与 gating
 
 - RenderFabric：`cargo test -p prism_render_architecture render_fabric --lib --offline -- --nocapture`。
@@ -42,10 +55,12 @@ response composition 测试在获取 adapter 后检查 compute workgroup 与 sto
 | `cargo test -p prism_ui_render_backend --features gpu --test dock_gpu_parity --offline -- --nocapture` | **0 passed / 1 failed**；报告 `dock GPU parity requires a real wgpu adapter; refusing to skip validation`。 |
 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_gpudriven --lib --offline -- --nocapture` | **11 passed / 7 failed**；7 个 GPU 用例真实报告 `PRISM_REQUIRE_GPU is set but no adapter was found`。 |
 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu --test water_hybrid_golden --offline -- --nocapture` | response composition **2 passed / 0 failed**，真实 Apple M2 Metal adapter/device 获取成功，1320 cases / 14520 auxiliary jobs GPU readback 通过（host submit+readback 6.654458 ms）；water Hybrid **15 passed / 0 failed**，真实 adapter/device 与 shader module gate 通过。 |
+| `CARGO_TARGET_DIR=/private/tmp/prism-render-scene-target PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test -p prism_render_scene --test resident_composition_gpu --offline -- --nocapture` | **3 passed / 0 failed**；Apple M2 Metal，HDR storage capability gate、resident target/pipeline identity 与 GPU producer→resident composition→HDR readback 全部通过。 |
+| `PRISM_REQUIRE_GPU=1 WGPU_BACKEND=metal cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test terrain_draw -- --nocapture` | **1 passed / 0 failed**；Apple M2 Metal，完整上传 `2592 bytes`、局部 patch `800 bytes`，GPU draw readback 与完整重建逐像素一致。 |
 
-跨沙盒主机本轮有 Apple M2 Metal adapter，response composition 与水体 Hybrid 均有真实 GPU readback/shader gate 通过证据。resident composition 未在本轮命令中执行，不作通过声明。
+跨沙盒主机本轮有 Apple M2 Metal adapter，response composition、水体 Hybrid、resident composition 与 terrain draw 均有真实 GPU readback/shader gate 通过证据。
 
-## 写集边界
+## GPU 验证写集
 
 本次新增/修改仅限：
 
@@ -55,7 +70,11 @@ response composition 测试在获取 adapter 后检查 compute workgroup 与 sto
 - `pkg/prism_render_scene/text/unit/shading/composition_ecs.rs`
 - `docs/gpu_cross_sandbox_implementation_zh.md`
 
-resident composition 仍需在目标设备上以 `PRISM_REQUIRE_GPU=1` 单独执行；当前水体 raster 的 7-group layout 已满足 Apple M2 Metal 的 `max_bind_groups=8`，后续设备验证应继续保留 `PASS/SKIP/FAIL` 的严格分类。
+resident composition 已在目标 Apple M2 Metal 设备上以 `PRISM_REQUIRE_GPU=1` 单独执行并通过；当前水体 raster 的 7-group layout 满足该设备的 `max_bind_groups=8`，GPU 门禁统一保留 `PASS/SKIP/FAIL` 严格分类。
+
+## 2026-10-15 几何 LOD 与 draw-range 接线
+
+RenderScene 的几何 LOD 生命周期、独立 prepared mesh 映射、每 LOD buffer class、visibility/draw-bin、opaque/transparent/raster/shadow/VSM 消费，以及 indexed/non-indexed draw range fail-closed 校验已完成接线。对应单元测试与 RenderScene 全量测试通过；无效或陈旧几何元数据只会跳过 draw，不会提交越界 GPU 命令。
 
 ## 2026-10-15 材质响应与 8-word execution plan
 

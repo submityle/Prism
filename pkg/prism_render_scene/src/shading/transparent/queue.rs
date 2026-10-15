@@ -21,7 +21,10 @@ use bevy_render::{
 };
 use prism_render_visibility::RenderPassMask;
 
-use crate::{GpuSceneInstanceAddress, RenderGpuScene};
+use crate::{
+    geometry::select_render_mesh, GpuSceneInstanceAddress, RenderGeometryRegistry, RenderGpuScene,
+};
+use prism_render_architecture::geometry::MeshConsumer;
 
 use super::super::runtime::PrismShadingSettings;
 use super::draw::DrawTransparentOit;
@@ -44,6 +47,7 @@ pub(crate) fn queue_transparent_oit(
     render_meshes: Res<RenderAssets<RenderMesh>>,
     render_instances: Res<RenderMeshInstances>,
     scene_instances: Query<&GpuSceneInstanceAddress>,
+    geometry: Res<RenderGeometryRegistry>,
     visibility: Res<crate::visibility::runtime::UnifiedVisibilityState>,
     scene: Res<RenderGpuScene>,
     mut previously_queued: Local<
@@ -117,16 +121,21 @@ pub(crate) fn queue_transparent_oit(
             else {
                 continue;
             };
-            candidates.push((render_entity, main_entity));
+            candidates.push((render_entity, main_entity, work.lod_or_cluster));
         }
-        for (render_entity, main_entity) in candidates {
+        for (render_entity, main_entity, requested_lod) in candidates {
             let Ok(address) = scene_instances.get(render_entity) else {
                 continue;
             };
             let Some(mesh_id) = render_instances.mesh_asset_id(main_entity) else {
                 continue;
             };
-            let Some(mesh) = render_meshes.get(mesh_id) else {
+            let Ok(selection) =
+                select_render_mesh(&geometry, mesh_id, MeshConsumer::MainView, requested_lod)
+            else {
+                continue;
+            };
+            let Some(mesh) = render_meshes.get(selection.asset) else {
                 continue;
             };
             let key = view_key
@@ -153,7 +162,7 @@ pub(crate) fn queue_transparent_oit(
                     draw_function,
                     indexed: matches!(mesh.buffer_info, RenderMeshBufferInfo::Indexed { .. }),
                 },
-                TransparentOitBinKey(mesh_id.into()),
+                TransparentOitBinKey(selection.asset.into()),
                 (render_entity, main_entity),
                 InputUniformIndex(address.index),
                 BinnedRenderPhaseType::NonMesh,

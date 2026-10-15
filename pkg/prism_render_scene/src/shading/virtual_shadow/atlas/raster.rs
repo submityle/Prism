@@ -40,7 +40,6 @@ use bevy_render::{
         TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
-    sync_world::MainEntity,
 };
 
 use super::pipeline::VSM_CASTER_DEPTH_FORMAT;
@@ -113,8 +112,8 @@ pub(crate) struct ViewVsmCasterDepth {
 pub(crate) struct VsmCasterDepthDrawEntry {
     /// The mesh-specialized caster depth pipeline for this instance.
     pub pipeline_id: CachedRenderPipelineId,
-    /// Main-world entity used to resolve the mesh asset id at draw time.
-    pub main_entity: MainEntity,
+    /// Exact prepared mesh asset selected when the queue entry was built.
+    pub asset: bevy_asset::AssetId<bevy_mesh::Mesh>,
     /// Row of this instance in the GPU-scene transform / instance tables.
     pub instance_index: u32,
 }

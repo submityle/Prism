@@ -53,7 +53,7 @@ pub(crate) struct TransparentOitBinKey(pub(crate) bevy_asset::UntypedAssetId);
 /// carry independent pipelines and draw commands.
 pub(crate) struct TransparentOit3d {
     batch_set_key: TransparentOitBatchSetKey,
-    _bin_key: TransparentOitBinKey,
+    pub(crate) mesh_asset: bevy_asset::UntypedAssetId,
     representative_entity: (Entity, MainEntity),
     batch_range: Range<u32>,
     extra_index: PhaseItemExtraIndex,
@@ -93,9 +93,10 @@ impl BinnedPhaseItem for TransparentOit3d {
         batch_range: Range<u32>,
         extra_index: PhaseItemExtraIndex,
     ) -> Self {
+        let mesh_asset = bin_key.0;
         Self {
             batch_set_key,
-            _bin_key: bin_key,
+            mesh_asset,
             representative_entity,
             batch_range,
             extra_index,

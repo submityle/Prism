@@ -44,11 +44,10 @@ impl RenderGeometryBuffers {
             }
             let lod_offset = self.lods.len() as u32;
             self.lods.extend(record.lods.iter().copied().map(|lod| {
-                RenderGeometryLod::from_record(
-                    lod,
-                    record.vertex_buffer_class,
-                    record.index_buffer_class,
-                )
+                let classes = registry
+                    .buffer_classes_for_lod(record.handle, lod.level)
+                    .unwrap_or((record.vertex_buffer_class, record.index_buffer_class));
+                RenderGeometryLod::from_record(lod, classes.0, classes.1)
             }));
             self.headers.values_mut()[record.handle.index as usize] = RenderGeometryHeader {
                 generation: record.handle.generation,

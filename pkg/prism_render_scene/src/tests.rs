@@ -198,6 +198,7 @@ fn extracted_instance() -> ExtractedSceneInstance {
         transform: bevy_transform::components::GlobalTransform::IDENTITY,
         bounds: None,
         mesh: Mesh3d::default(),
+        lod_meshes: Vec::new(),
         geometry: None,
         material: Default::default(),
         material_asset: None,

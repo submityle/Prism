@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn services_are_catalog_derived() {
         assert_eq!(WATER_FABRIC_SERVICES, water_required_services());
-        assert_eq!(WATER_FABRIC_SERVICES.len(), 9);
+        assert_eq!(WATER_FABRIC_SERVICES.len(), 10);
     }
 
     #[test]

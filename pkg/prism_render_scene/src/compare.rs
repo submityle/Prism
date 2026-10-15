@@ -79,6 +79,7 @@ mod tests {
             transform: bevy_transform::components::GlobalTransform::IDENTITY,
             bounds: None,
             mesh: bevy_mesh::Mesh3d::default(),
+            lod_meshes: Vec::new(),
             geometry: None,
             material: Default::default(),
             material_asset: None,

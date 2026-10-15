@@ -16,6 +16,7 @@ pub struct GpuSceneDiagnostics {
     pub updated_fields: u32,
     pub transaction_errors: u32,
     pub allocation_failures: u32,
+    pub geometry_binding_failures: u32,
     pub stale_handles: u32,
     pub reclaimed_handles: u32,
     pub dirty_slots: u32,

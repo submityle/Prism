@@ -3,18 +3,17 @@ use bevy_ecs::{
     query::ROQueryItem,
     system::{lifetimeless::SRes, SystemParamItem},
 };
-use bevy_pbr::{RenderMeshInstances, SetMeshViewBindGroup, SetMeshViewEmptyBindGroup};
+use bevy_pbr::{SetMeshViewBindGroup, SetMeshViewEmptyBindGroup};
 use bevy_render::{
     mesh::{allocator::MeshAllocator, RenderMesh, RenderMeshBufferInfo},
     render_asset::RenderAssets,
-    render_phase::{
-        PhaseItem, RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
-    },
+    render_phase::{RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass},
 };
 
 use crate::{
-    buffers::GpuSceneBindGroup, geometry::select_render_mesh, GpuSceneInstanceAddress,
-    MaterialBindGroup,
+    buffers::GpuSceneBindGroup,
+    geometry::{indexed_draw_range, non_indexed_draw_range, select_render_mesh_asset},
+    GpuSceneInstanceAddress, MaterialBindGroup,
 };
 use prism_render_architecture::geometry::MeshConsumer;
 
@@ -75,7 +74,6 @@ pub(super) fn draw_direct_mesh<'w>(
     item: &Opaque3d,
     address: Option<ROQueryItem<'w, '_, &'static GpuSceneInstanceAddress>>,
     meshes: &'w RenderAssets<RenderMesh>,
-    instances: &'w RenderMeshInstances,
     allocator: &'w MeshAllocator,
     registry: &'w crate::RenderGeometryRegistry,
     pass: &mut TrackedRenderPass<'w>,
@@ -83,16 +81,16 @@ pub(super) fn draw_direct_mesh<'w>(
     let Some(address) = address else {
         return RenderCommandResult::Skip;
     };
-    let Some(mesh_id) = instances.mesh_asset_id(item.main_entity()) else {
+    let Ok(mesh_id) = item.bin_key.asset_id.try_typed::<bevy_mesh::Mesh>() else {
         return RenderCommandResult::Skip;
     };
-    if select_render_mesh(registry, mesh_id, MeshConsumer::MainView, 0).is_err() {
-        return RenderCommandResult::Skip;
-    }
-    let Some(mesh) = meshes.get(mesh_id) else {
+    let Ok(selection) = select_render_mesh_asset(registry, mesh_id, MeshConsumer::MainView) else {
         return RenderCommandResult::Skip;
     };
-    let Some(vertices) = allocator.mesh_vertex_slice(&mesh_id) else {
+    let Some(mesh) = meshes.get(selection.asset) else {
+        return RenderCommandResult::Skip;
+    };
+    let Some(vertices) = allocator.mesh_vertex_slice(&selection.asset) else {
         return RenderCommandResult::Skip;
     };
     pass.set_vertex_buffer(0, vertices.buffer.slice(..));
@@ -102,17 +100,28 @@ pub(super) fn draw_direct_mesh<'w>(
             index_format,
             count,
         } => {
-            let Some(indices) = allocator.mesh_index_slice(&mesh_id) else {
+            let Some(indices) = allocator.mesh_index_slice(&selection.asset) else {
                 return RenderCommandResult::Skip;
             };
             pass.set_index_buffer(indices.buffer.slice(..), index_format);
-            pass.draw_indexed(
-                indices.range.start..indices.range.start + count,
-                vertices.range.start as i32,
-                instances,
-            );
+            let Some(range) = indexed_draw_range(
+                &selection.lod,
+                vertices.range.clone(),
+                indices.range.clone(),
+                count,
+            ) else {
+                return RenderCommandResult::Skip;
+            };
+            pass.draw_indexed(range, selection.lod.base_vertex, instances);
         }
-        RenderMeshBufferInfo::NonIndexed => pass.draw(vertices.range, instances),
+        RenderMeshBufferInfo::NonIndexed => {
+            let Some(range) =
+                non_indexed_draw_range(&selection.lod, vertices.range.clone(), mesh.vertex_count)
+            else {
+                return RenderCommandResult::Skip;
+            };
+            pass.draw(range, instances);
+        }
     }
     RenderCommandResult::Success
 }

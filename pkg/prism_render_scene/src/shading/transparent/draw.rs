@@ -11,18 +11,17 @@ use bevy_ecs::{
     query::ROQueryItem,
     system::{lifetimeless::SRes, SystemParamItem},
 };
-use bevy_pbr::{MeshViewBindGroup, RenderMeshInstances};
+use bevy_pbr::MeshViewBindGroup;
 use bevy_render::{
     mesh::{allocator::MeshAllocator, RenderMesh, RenderMeshBufferInfo},
     render_asset::RenderAssets,
-    render_phase::{
-        PhaseItem, RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
-    },
+    render_phase::{RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass},
 };
 
 use crate::{
-    buffers::GpuSceneBindGroup, geometry::select_render_mesh, GpuSceneInstanceAddress,
-    MaterialBindGroup, RenderGeometryRegistry,
+    buffers::GpuSceneBindGroup,
+    geometry::{indexed_draw_range, non_indexed_draw_range, select_render_mesh_asset},
+    GpuSceneInstanceAddress, MaterialBindGroup, RenderGeometryRegistry,
 };
 use prism_render_architecture::geometry::MeshConsumer;
 
@@ -108,7 +107,6 @@ pub(crate) struct DrawOitMesh;
 impl RenderCommand<TransparentOit3d> for DrawOitMesh {
     type Param = (
         SRes<RenderAssets<RenderMesh>>,
-        SRes<RenderMeshInstances>,
         SRes<MeshAllocator>,
         SRes<RenderGeometryRegistry>,
     );
@@ -118,26 +116,27 @@ impl RenderCommand<TransparentOit3d> for DrawOitMesh {
         item: &TransparentOit3d,
         _: (),
         address: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        (meshes, instances, allocator, geometry): SystemParamItem<'w, '_, Self::Param>,
+        (meshes, allocator, geometry): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let meshes = meshes.into_inner();
-        let instances = instances.into_inner();
         let allocator = allocator.into_inner();
         let geometry = geometry.into_inner();
         let Some(address) = address else {
             return RenderCommandResult::Skip;
         };
-        let Some(mesh_id) = instances.mesh_asset_id(item.main_entity()) else {
+        let Ok(selected_asset) = item.mesh_asset.try_typed::<bevy_mesh::Mesh>() else {
             return RenderCommandResult::Skip;
         };
-        if select_render_mesh(geometry, mesh_id, MeshConsumer::MainView, 0).is_err() {
-            return RenderCommandResult::Skip;
-        }
-        let Some(mesh) = meshes.get(mesh_id) else {
+        let Ok(selection) =
+            select_render_mesh_asset(geometry, selected_asset, MeshConsumer::MainView)
+        else {
             return RenderCommandResult::Skip;
         };
-        let Some(vertices) = allocator.mesh_vertex_slice(&mesh_id) else {
+        let Some(mesh) = meshes.get(selection.asset) else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(vertices) = allocator.mesh_vertex_slice(&selection.asset) else {
             return RenderCommandResult::Skip;
         };
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
@@ -147,17 +146,30 @@ impl RenderCommand<TransparentOit3d> for DrawOitMesh {
                 index_format,
                 count,
             } => {
-                let Some(indices) = allocator.mesh_index_slice(&mesh_id) else {
+                let Some(indices) = allocator.mesh_index_slice(&selection.asset) else {
                     return RenderCommandResult::Skip;
                 };
                 pass.set_index_buffer(indices.buffer.slice(..), index_format);
-                pass.draw_indexed(
-                    indices.range.start..indices.range.start + count,
-                    vertices.range.start as i32,
-                    instance,
-                );
+                let Some(range) = indexed_draw_range(
+                    &selection.lod,
+                    vertices.range.clone(),
+                    indices.range.clone(),
+                    count,
+                ) else {
+                    return RenderCommandResult::Skip;
+                };
+                pass.draw_indexed(range, selection.lod.base_vertex, instance);
             }
-            RenderMeshBufferInfo::NonIndexed => pass.draw(vertices.range, instance),
+            RenderMeshBufferInfo::NonIndexed => {
+                let Some(range) = non_indexed_draw_range(
+                    &selection.lod,
+                    vertices.range.clone(),
+                    mesh.vertex_count,
+                ) else {
+                    return RenderCommandResult::Skip;
+                };
+                pass.draw(range, instance);
+            }
         }
         RenderCommandResult::Success
     }

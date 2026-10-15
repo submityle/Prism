@@ -8,15 +8,15 @@
 use bevy_asset::AssetId;
 use bevy_mesh::Mesh;
 use prism_render_architecture::geometry::{
-    MeshConsumer, MeshConsumerBinding, MeshConsumerBindingError, MeshConsumerSelection,
-    MeshRepresentation,
+    GeometryLodRecord, MeshConsumer, MeshConsumerBinding, MeshConsumerBindingError,
+    MeshConsumerSelection, MeshRepresentation,
 };
 use prism_render_architecture::gpu_scene::GeometryHandle;
 
 use super::runtime::RenderGeometryRegistry;
 
 /// Logical selection returned to a scene draw consumer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RenderSceneMeshSelection {
     /// Stable geometry identity used by the GPU Scene.
     pub geometry: GeometryHandle,
@@ -24,6 +24,10 @@ pub(crate) struct RenderSceneMeshSelection {
     pub representation: MeshRepresentation,
     /// Whether the declared fallback was selected.
     pub used_fallback: bool,
+    /// The exact resident draw range selected from the geometry table.
+    pub lod: GeometryLodRecord,
+    /// Prepared asset containing the selected LOD's physical buffers.
+    pub asset: AssetId<Mesh>,
 }
 
 /// Resolve one prepared asset through the shared render-consumer contract.
@@ -32,6 +36,33 @@ pub(crate) fn select_render_mesh(
     asset: AssetId<Mesh>,
     consumer: MeshConsumer,
     requested_lod: u32,
+) -> Result<RenderSceneMeshSelection, MeshConsumerBindingError> {
+    select_render_mesh_internal(registry, asset, consumer, requested_lod, None)
+}
+
+/// Resolves a phase item's already-selected prepared asset without falling
+/// back to LOD 0. Visibility and queue systems may choose an independent mesh
+/// asset for a resident LOD; draw consumers must bind that same asset.
+pub(crate) fn select_render_mesh_asset(
+    registry: &RenderGeometryRegistry,
+    asset: AssetId<Mesh>,
+    consumer: MeshConsumer,
+) -> Result<RenderSceneMeshSelection, MeshConsumerBindingError> {
+    let geometry = registry
+        .handle(asset)
+        .ok_or(MeshConsumerBindingError::InvalidGeometry)?;
+    let level = registry
+        .lod_level_for_asset(geometry, asset)
+        .ok_or(MeshConsumerBindingError::InvalidGeometry)?;
+    select_render_mesh_internal(registry, asset, consumer, level, Some(asset))
+}
+
+fn select_render_mesh_internal(
+    registry: &RenderGeometryRegistry,
+    asset: AssetId<Mesh>,
+    consumer: MeshConsumer,
+    requested_lod: u32,
+    exact_asset: Option<AssetId<Mesh>>,
 ) -> Result<RenderSceneMeshSelection, MeshConsumerBindingError> {
     let geometry = registry
         .handle(asset)
@@ -43,26 +74,34 @@ pub(crate) fn select_render_mesh(
         .lods
         .iter()
         .find(|lod| lod.resident && lod.fallback)
-        .map(|lod| lod.level)
+        .copied()
+        .ok_or(MeshConsumerBindingError::InvalidRevision)?;
+    let requested = record
+        .resolve_lod(requested_lod)
         .ok_or(MeshConsumerBindingError::InvalidRevision)?;
     let binding = MeshConsumerBinding {
         geometry,
         revision: record.revision,
         current: MeshRepresentation::StaticLod {
-            level: requested_lod,
+            level: requested.level,
         },
         previous: MeshRepresentation::StaticLod {
-            level: requested_lod,
+            level: requested.level,
         },
         history_valid: false,
-        fallback: MeshRepresentation::StaticLod { level: fallback },
+        fallback: MeshRepresentation::StaticLod {
+            level: fallback.level,
+        },
         derived: None,
     };
-    let preferred_resident = record
+    let exact_resident = record
         .lods
         .iter()
         .any(|lod| lod.level == requested_lod && lod.resident);
-    let selection = binding.select_with_fallback(consumer, preferred_resident)?;
+    // `resolve_lod` has already selected the closest resident ancestor (or the
+    // declared fallback). The contract must consume that resolved record rather
+    // than replacing it with a second, less precise fallback decision.
+    let selection = binding.select_with_fallback(consumer, true)?;
     match selection {
         MeshConsumerSelection::Render {
             geometry,
@@ -71,7 +110,11 @@ pub(crate) fn select_render_mesh(
         } => Ok(RenderSceneMeshSelection {
             geometry,
             representation,
-            used_fallback,
+            used_fallback: used_fallback || !exact_resident,
+            lod: *requested,
+            asset: exact_asset
+                .or_else(|| registry.lod_asset(geometry, requested.level))
+                .ok_or(MeshConsumerBindingError::InvalidGeometry)?,
         }),
         MeshConsumerSelection::Motion { .. } | MeshConsumerSelection::Derived { .. } => {
             Err(MeshConsumerBindingError::MissingDerivedArtifact)
@@ -127,6 +170,7 @@ mod tests {
             MeshRepresentation::StaticLod { level: 0 }
         );
         assert!(!selected.used_fallback);
+        assert_eq!(selected.lod.level, 0);
     }
 
     #[test]
@@ -137,5 +181,6 @@ mod tests {
             MeshRepresentation::StaticLod { level: 0 }
         );
         assert!(selected.used_fallback);
+        assert_eq!(selected.lod.level, 0);
     }
 }

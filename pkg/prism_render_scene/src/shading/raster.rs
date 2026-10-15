@@ -30,8 +30,11 @@ use bevy_render::{
 use bevy_shader::Shader;
 
 use crate::{
-    buffers::GpuSceneBindGroup, geometry::select_render_mesh, GpuSceneInstanceAddress,
-    MaterialBindGroup, RenderGeometryRegistry,
+    buffers::GpuSceneBindGroup,
+    geometry::{
+        indexed_draw_range, non_indexed_draw_range, select_render_mesh, select_render_mesh_asset,
+    },
+    GpuSceneInstanceAddress, MaterialBindGroup, RenderGeometryRegistry,
 };
 use prism_render_architecture::geometry::MeshConsumer;
 
@@ -70,7 +73,7 @@ pub(crate) struct VisibilityBinKey(bevy_asset::UntypedAssetId);
 
 pub(crate) struct Visibility3d {
     batch_set_key: VisibilityBatchSetKey,
-    _bin_key: VisibilityBinKey,
+    mesh_asset: bevy_asset::UntypedAssetId,
     representative_entity: (Entity, MainEntity),
     batch_range: Range<u32>,
     extra_index: PhaseItemExtraIndex,
@@ -110,9 +113,10 @@ impl BinnedPhaseItem for Visibility3d {
         batch_range: Range<u32>,
         extra_index: PhaseItemExtraIndex,
     ) -> Self {
+        let mesh_asset = bin_key.0;
         Self {
             batch_set_key,
-            _bin_key: bin_key,
+            mesh_asset,
             representative_entity,
             batch_range,
             extra_index,
@@ -319,7 +323,6 @@ pub(crate) struct DrawVisibilityMesh;
 impl RenderCommand<Visibility3d> for DrawVisibilityMesh {
     type Param = (
         SRes<RenderAssets<RenderMesh>>,
-        SRes<RenderMeshInstances>,
         SRes<MeshAllocator>,
         SRes<RenderGeometryRegistry>,
     );
@@ -329,26 +332,27 @@ impl RenderCommand<Visibility3d> for DrawVisibilityMesh {
         item: &Visibility3d,
         _: (),
         address: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        (meshes, instances, allocator, geometry): SystemParamItem<'w, '_, Self::Param>,
+        (meshes, allocator, geometry): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let meshes = meshes.into_inner();
-        let instances = instances.into_inner();
         let allocator = allocator.into_inner();
         let geometry = geometry.into_inner();
         let Some(address) = address else {
             return RenderCommandResult::Skip;
         };
-        let Some(mesh_id) = instances.mesh_asset_id(item.main_entity()) else {
+        let Ok(selected_asset) = item.mesh_asset.try_typed::<bevy_mesh::Mesh>() else {
             return RenderCommandResult::Skip;
         };
-        if select_render_mesh(geometry, mesh_id, MeshConsumer::MainView, 0).is_err() {
-            return RenderCommandResult::Skip;
-        }
-        let Some(mesh) = meshes.get(mesh_id) else {
+        let Ok(selection) =
+            select_render_mesh_asset(geometry, selected_asset, MeshConsumer::MainView)
+        else {
             return RenderCommandResult::Skip;
         };
-        let Some(vertices) = allocator.mesh_vertex_slice(&mesh_id) else {
+        let Some(mesh) = meshes.get(selection.asset) else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(vertices) = allocator.mesh_vertex_slice(&selection.asset) else {
             return RenderCommandResult::Skip;
         };
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
@@ -358,17 +362,30 @@ impl RenderCommand<Visibility3d> for DrawVisibilityMesh {
                 index_format,
                 count,
             } => {
-                let Some(indices) = allocator.mesh_index_slice(&mesh_id) else {
+                let Some(indices) = allocator.mesh_index_slice(&selection.asset) else {
                     return RenderCommandResult::Skip;
                 };
                 pass.set_index_buffer(indices.buffer.slice(..), index_format);
-                pass.draw_indexed(
-                    indices.range.start..indices.range.start + count,
-                    vertices.range.start as i32,
-                    instance,
-                );
+                let Some(range) = indexed_draw_range(
+                    &selection.lod,
+                    vertices.range.clone(),
+                    indices.range.clone(),
+                    count,
+                ) else {
+                    return RenderCommandResult::Skip;
+                };
+                pass.draw_indexed(range, selection.lod.base_vertex, instance);
             }
-            RenderMeshBufferInfo::NonIndexed => pass.draw(vertices.range, instance),
+            RenderMeshBufferInfo::NonIndexed => {
+                let Some(range) = non_indexed_draw_range(
+                    &selection.lod,
+                    vertices.range.clone(),
+                    mesh.vertex_count,
+                ) else {
+                    return RenderCommandResult::Skip;
+                };
+                pass.draw(range, instance);
+            }
         }
         RenderCommandResult::Success
     }
@@ -390,6 +407,7 @@ pub(crate) fn queue_visibility_raster(
     render_meshes: Res<RenderAssets<RenderMesh>>,
     render_instances: Res<RenderMeshInstances>,
     scene_instances: Query<&GpuSceneInstanceAddress>,
+    geometry: Res<RenderGeometryRegistry>,
     visibility: Res<crate::visibility::runtime::UnifiedVisibilityState>,
     scene: Res<crate::RenderGpuScene>,
     mut previously_queued: Local<
@@ -463,16 +481,21 @@ pub(crate) fn queue_visibility_raster(
             else {
                 continue;
             };
-            candidates.push((render_entity, main_entity));
+            candidates.push((render_entity, main_entity, work.lod_or_cluster));
         }
-        for (render_entity, main_entity) in candidates {
+        for (render_entity, main_entity, requested_lod) in candidates {
             let Ok(address) = scene_instances.get(render_entity) else {
                 continue;
             };
             let Some(mesh_id) = render_instances.mesh_asset_id(main_entity) else {
                 continue;
             };
-            let Some(mesh) = render_meshes.get(mesh_id) else {
+            let Ok(selection) =
+                select_render_mesh(&geometry, mesh_id, MeshConsumer::MainView, requested_lod)
+            else {
+                continue;
+            };
+            let Some(mesh) = render_meshes.get(selection.asset) else {
                 continue;
             };
             let key = view_key
@@ -495,7 +518,7 @@ pub(crate) fn queue_visibility_raster(
                     draw_function,
                     indexed: matches!(mesh.buffer_info, RenderMeshBufferInfo::Indexed { .. }),
                 },
-                VisibilityBinKey(mesh_id.into()),
+                VisibilityBinKey(selection.asset.into()),
                 (render_entity, main_entity),
                 InputUniformIndex(address.index),
                 BinnedRenderPhaseType::NonMesh,
