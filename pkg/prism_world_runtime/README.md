@@ -49,13 +49,17 @@ in a file/packed archive and, optionally, the FNV-1a checksum of the entire cell
 these registrations; missing or stale registrations fail before file IO.
 
 ```rust
-use prism_world_runtime::{CellReadRequest, FileCellProvider};
+use prism_world_runtime::{CellReadRequest, FileCellProvider, IoByteLimits};
 use prism_world_stream::CellManifest;
 
 fn file_cells(path: &str, manifest: CellManifest, offset: u64, checksum: u64)
     -> FileCellProvider
 {
-    let mut provider = FileCellProvider::with_chunk_size(path, 2, 8, 4096)
+    let mut provider = FileCellProvider::with_byte_limits(path, 2, 8, 4096,
+        IoByteLimits {
+            max_request_bytes: 16 * 1024 * 1024,
+            max_total_bytes: 64 * 1024 * 1024,
+        })
         .expect("nonzero scheduler limits");
     provider.register(CellReadRequest::new(manifest, 0)
         .with_byte_offset(offset)
@@ -70,9 +74,63 @@ cross `SceneHost::load_cell`. For explicit chunk polling, use `resolve` and subm
 the returned request to `scheduler()`. Re-register changed manifests explicitly.
 The existing file provider opens one file per operation and performs bounded
 **blocking** filesystem reads during polling; this is not worker-thread async IO.
-Capacity bounds outstanding requests, not total payload bytes; callers must also
-bound manifest sizes/stream budgets. Chunk events and collected completion bytes
-are both retained when another reader drives a request ahead of its consumer.
+The request-count capacity and byte admission limits are separate controls.
+
+## Byte admission and memory scope
+
+`IoSchedulerAdapter::with_byte_limits` and `FileCellProvider::with_byte_limits`
+accept `IoByteLimits { max_request_bytes, max_total_bytes }`. Both limits use
+the full declared `manifest.io_bytes`, including the 44-byte header, not just
+the scene payload. `byte_limits()` returns the original limits, and
+`admitted_bytes()` reports current declared-byte admission. Source registration
+alone does not reserve bytes. The legacy `new` and `with_chunk_size` signatures
+remain available without configured byte limits (`byte_limits() == None`).
+
+Submission checks request-count capacity, the single-request byte limit, checked
+`u64` addition, and the cumulative byte limit before assigning a scheduler ID or
+starting IO. Byte rejection is an `IoError::Provider` diagnostic with the
+requested/limit values (or the overflowing operands); request-count rejection
+is `IoError::Backpressure`. Rejections consume neither quota nor IDs. Limits are
+never silently clamped: zero permits only empty declarations, and a single limit
+larger than the total is preserved. Even legacy constructors reject arithmetic
+overflow. Scheduler range-validation rejection also consumes no admission.
+
+Queued requests, active operations, and **unconsumed terminal results** all hold
+their full declared bytes and request slot. EOF, checksum/provider failure,
+cancellation, and completion do not release quota until the corresponding
+`Failed`/`Completed` event is consumed. Consuming a `Chunk` does not release it.
+A blocking read consumes its own terminal result before returning.
+
+Aggregation lazily uses `try_reserve_exact` for the full declaration on the first
+chunk, avoiding geometric growth and repeated aggregate copying; further appends
+also use fallible reservation. Capacity/allocator errors cancel the underlying
+operation, wake the poller, and wait for scheduler removal/drop before delivering
+`Failed { request_id, request, error }` with the original allocation diagnostic.
+They do not turn into a second cancellation event. This recovery is limited to
+aggregate reservation, not arbitrary allocator failure throughout the process.
+Provider cancellation IDs are normalized at both start and poll boundaries;
+scheduler cancellations use their explicit request ID, not the latest provider
+callback's ID. Allocation cleanup preserves this identity and replaces only the
+terminal error cause with the original allocation diagnostic.
+
+For a configured cumulative limit `B`, the sum of admitted declarations is at
+most `B`. Aggregate reservation targets sum to at most `B`, but this is not an
+exact allocator-capacity or RSS ceiling. In particular:
+
+- Ready `Chunk` events retain independent byte copies while the aggregate is
+  built. `Completed` takes ownership of the aggregate without another clone,
+  but may coexist with all those chunks. Retained logical chunk lengths plus
+  aggregate/completed byte lengths can approach **2B**, not B.
+- Actual `Vec` capacities, allocator rounding/metadata, provider-owned buffers
+  and operations, temporary chunks, and scheduler/event/map/waker storage are
+  not bounded by this byte counter. Empty chunks can add event metadata without
+  adding payload length. Registration storage is also outside admission.
+- Once returned to the caller, chunk/completion buffers and any `SceneHost`
+  copies are outside admission lifetime; callers must manage their retention.
+
+Thus byte admission bounds declared work and logical retained payload, not all
+allocation overhead. The provider and consumer still need their own memory and
+retention policies; an arbitrary provider can allocate excess backing capacity.
 
 ## Features
 
@@ -97,3 +155,8 @@ Tests create real temporary files and cover packed ranges with split headers,
 exact payload delivery to `SceneHost`, EOF/short reads, checksums, open errors,
 invalid headers, stale registrations, request-associated cancellation/errors,
 buffered-event backpressure, and simultaneous pending readers sharing one waker.
+Byte-budget regressions cover exact/zero/independent limits, sum/range overflow,
+rejection without ID allocation, unconsumed success/error/cancellation quota,
+fallible aggregate allocation with counted operation cancellation/drop, blocking
+reader wake-up, concurrent byte admission/release, and header-inclusive bounded
+file-to-`SceneHost` loading.

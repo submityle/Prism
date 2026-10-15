@@ -19,6 +19,7 @@ mod hlod;
 mod pcg;
 mod qos;
 mod residency;
+mod scatter;
 mod scheduler;
 mod sdf;
 
@@ -31,6 +32,11 @@ pub use qos::{QosConfig, QosDecision, QosGovernor, QualityTier};
 pub use residency::{
     MaterializationBudget, PolicyError, ResidencyPolicy, ResidencyRecord, ResidencyState,
     ResidencyTier,
+};
+pub use scatter::{
+    estimate_scatter_work, scatter, ScatterBudget, ScatterCacheKey, ScatterCandidateKey,
+    ScatterConfig, ScatterError, ScatterOutput, ScatterPoint, ScatterRegion, ScatterWorkEstimate,
+    SCATTER_KERNEL_VERSION,
 };
 pub use scheduler::{ResidencyAction, ResidencyKeepReason, ResidencyPlan, ResidencyScheduler};
 pub use sdf::{

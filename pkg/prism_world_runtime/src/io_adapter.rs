@@ -1,6 +1,7 @@
 //! Standard-library bridge from world cell requests to the chunked IO scheduler.
 
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::task::{Context, Poll, Waker};
@@ -18,6 +19,20 @@ use crate::{CancellationToken, CellReadRequest, ChunkProvider};
 
 /// The request identity assigned by [`prism_world_io::IoScheduler`].
 pub type IoRequestId = prism_world_io::RequestId;
+
+/// Admission limits for declared cell bytes, including the fixed manifest header.
+///
+/// These are logical byte limits, not an allocator/RSS limit: buffered chunk
+/// events can retain another copy of the aggregate payload. Zero is allowed
+/// and admits only empty requests; values are never silently clamped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IoByteLimits {
+    /// Maximum declared bytes for one request.
+    pub max_request_bytes: u64,
+    /// Maximum sum of declared bytes for all requests whose terminal event
+    /// has not been consumed, including queued, active, and buffered results.
+    pub max_total_bytes: u64,
+}
 
 /// One event emitted by [`IoSchedulerAdapter::poll`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,6 +71,7 @@ pub enum IoAdapterEvent {
 struct PendingRead {
     request: CellReadRequest,
     bytes: Vec<u8>,
+    allocation_error: Option<IoError>,
 }
 
 struct TrackingProvider<P> {
@@ -117,6 +133,7 @@ struct AdapterState<P: ReadProvider> {
     ready: VecDeque<IoAdapterEvent>,
     callback_request: Arc<Mutex<Option<IoRequestId>>>,
     blocking: BTreeMap<IoRequestId, Waker>,
+    admitted_bytes: u64,
 }
 
 /// A std adapter that exposes [`prism_world_io::IoScheduler`] through world cell requests.
@@ -128,6 +145,7 @@ pub struct IoSchedulerAdapter<P: ReadProvider> {
     state: Mutex<AdapterState<P>>,
     chunk_size: usize,
     capacity: usize,
+    byte_limits: Option<IoByteLimits>,
     wake: Arc<SchedulerWake>,
 }
 
@@ -138,11 +156,40 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
     }
 
     /// Creates an adapter with an explicit scheduler chunk size.
+    ///
+    /// This compatibility constructor has no configured byte limits. Accounting
+    /// overflow is still rejected; use [`Self::with_byte_limits`] for byte admission.
     pub fn with_chunk_size(
         provider: P,
         max_in_flight: usize,
         capacity: usize,
         chunk_size: usize,
+    ) -> Result<Self, ConfigError> {
+        Self::configured(provider, max_in_flight, capacity, chunk_size, None)
+    }
+
+    /// Creates an adapter with explicit request-count and declared-byte limits.
+    ///
+    /// Admission rejects a request exceeding either byte limit before assigning
+    /// an ID or starting IO. Limits are independent: a per-request limit larger
+    /// than the total limit is preserved, not clamped. Terminal results hold
+    /// their declared bytes until consumed. See [`IoByteLimits`] for memory scope.
+    pub fn with_byte_limits(
+        provider: P,
+        max_in_flight: usize,
+        capacity: usize,
+        chunk_size: usize,
+        limits: IoByteLimits,
+    ) -> Result<Self, ConfigError> {
+        Self::configured(provider, max_in_flight, capacity, chunk_size, Some(limits))
+    }
+
+    fn configured(
+        provider: P,
+        max_in_flight: usize,
+        capacity: usize,
+        chunk_size: usize,
+        byte_limits: Option<IoByteLimits>,
     ) -> Result<Self, ConfigError> {
         if chunk_size == 0 {
             return Err(ConfigError::ZeroChunkSize);
@@ -160,14 +207,19 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
                 ready: VecDeque::new(),
                 callback_request,
                 blocking: BTreeMap::new(),
+                admitted_bytes: 0,
             }),
             chunk_size,
             capacity,
+            byte_limits,
             wake: Arc::new(SchedulerWake::default()),
         })
     }
 
     /// Submits a world cell request to the underlying scheduler.
+    ///
+    /// A byte-admission rejection is an [`IoError::Provider`] with explicit
+    /// requested/limit values; it has no request ID and consumes no quota.
     pub fn submit(&self, request: CellReadRequest) -> Result<IoRequestId, IoError> {
         let mut state = self.lock_state()?;
         let id = self.submit_locked(&mut state, request)?;
@@ -186,6 +238,37 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
                 capacity: self.capacity,
             });
         }
+        let declared = request.manifest().io_bytes;
+        if let Some(limits) = self.byte_limits
+            && declared > limits.max_request_bytes
+        {
+            return Err(IoError::Provider {
+                message: format!(
+                    "request declares {declared} bytes, exceeding per-request limit {}",
+                    limits.max_request_bytes
+                ),
+            });
+        }
+        let admitted_bytes =
+            state
+                .admitted_bytes
+                .checked_add(declared)
+                .ok_or_else(|| IoError::Provider {
+                    message: format!(
+                        "declared byte admission overflow: {} + {declared}",
+                        state.admitted_bytes
+                    ),
+                })?;
+        if let Some(limits) = self.byte_limits
+            && admitted_bytes > limits.max_total_bytes
+        {
+            return Err(IoError::Provider {
+                message: format!(
+                    "total declared bytes {admitted_bytes} exceed total limit {}",
+                    limits.max_total_bytes
+                ),
+            });
+        }
         let io_request = request
             .io_request()
             .with_chunk_size(self.chunk_size)
@@ -198,9 +281,25 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
             PendingRead {
                 request,
                 bytes: Vec::new(),
+                allocation_error: None,
             },
         );
+        state.admitted_bytes = admitted_bytes;
         Ok(request_id)
+    }
+
+    /// Returns the configured byte limits, or `None` for compatibility constructors.
+    #[must_use]
+    pub const fn byte_limits(&self) -> Option<IoByteLimits> {
+        self.byte_limits
+    }
+
+    /// Returns declared bytes held by all requests with unconsumed terminal events.
+    ///
+    /// Unlike allocator capacity, this does not decrease when an operation fails
+    /// or when individual chunk events are consumed.
+    pub fn admitted_bytes(&self) -> Result<u64, IoError> {
+        Ok(self.lock_state()?.admitted_bytes)
     }
 
     /// Cancels a queued or active scheduler request.
@@ -350,9 +449,17 @@ impl<P: ReadProvider> AdapterState<P> {
             event,
             IoAdapterEvent::Completed { .. } | IoAdapterEvent::Failed { .. }
         ) {
-            self.pending.remove(&event.request_id());
-            self.blocking.remove(&event.request_id());
+            self.retire_request(event.request_id());
         }
+    }
+
+    fn retire_request(&mut self, request_id: IoRequestId) {
+        if let Some(pending) = self.pending.remove(&request_id) {
+            self.admitted_bytes = self
+                .admitted_bytes
+                .saturating_sub(pending.request.manifest().io_bytes);
+        }
+        self.blocking.remove(&request_id);
     }
 
     fn poll_scheduler(
@@ -387,11 +494,13 @@ impl<P: ReadProvider> AdapterState<P> {
                 let Some(pending) = self.pending.get_mut(&request_id) else {
                     return Poll::Ready(Err(internal_error("failure has no pending request")));
                 };
-                pending.bytes.clear();
-                let error = match error {
-                    IoError::Cancelled { .. } => IoError::Cancelled { request_id },
-                    other => other,
-                };
+                // The scheduler has now dropped the failed/cancelled operation.
+                // Preserve allocation failure as the terminal cause rather than
+                // exposing the cancellation used to clean up the operation.
+                // Cancellation IDs were normalized at the provider boundary;
+                // scheduler cancellations supplied the explicit ID above.
+                pending.bytes = Vec::new();
+                let error = pending.allocation_error.take().unwrap_or(error);
                 Poll::Ready(Ok(IoAdapterEvent::Failed {
                     request_id,
                     request: pending.request,
@@ -402,6 +511,41 @@ impl<P: ReadProvider> AdapterState<P> {
                 let Some(pending) = self.pending.get_mut(&request_id) else {
                     return Poll::Ready(Err(internal_error("chunk has no pending request")));
                 };
+                // Lazily reserve the full declaration on the first
+                // chunk, avoiding geometric aggregate growth/copies. Even the
+                // legacy constructors use fallible aggregation. The scheduler
+                // has already validated this chunk against the declared length.
+                let reservation = if pending.bytes.capacity() == 0 {
+                    usize::try_from(pending.request.manifest().io_bytes)
+                        .map_err(|_| internal_error("declared bytes do not fit usize"))
+                        .and_then(|declared| {
+                            pending.bytes.try_reserve_exact(declared).map_err(|error| {
+                                IoError::Provider {
+                                    message: format!("cell aggregation allocation failed: {error}"),
+                                }
+                            })
+                        })
+                } else {
+                    pending
+                        .bytes
+                        .try_reserve_exact(chunk.bytes().len())
+                        .map_err(|error| IoError::Provider {
+                            message: format!("cell aggregation allocation failed: {error}"),
+                        })
+                };
+                if let Err(error) = reservation {
+                    pending.bytes = Vec::new();
+                    pending.allocation_error = Some(error);
+                    // Do not emit a terminal event (and release admission) until
+                    // scheduler.poll has removed this cancelled operation.
+                    if !self.scheduler.cancel(request_id) {
+                        return Poll::Ready(Err(internal_error(
+                            "failed aggregate has no active operation",
+                        )));
+                    }
+                    context.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
                 pending.bytes.extend_from_slice(chunk.bytes());
                 let request = pending.request;
                 Poll::Ready(Ok(IoAdapterEvent::Chunk {
@@ -526,6 +670,10 @@ impl Wake for BlockingWaker {
 #[cfg(test)]
 #[path = "io_adapter_tests.rs"]
 mod correlation_tests;
+
+#[cfg(test)]
+#[path = "io_budget_tests.rs"]
+mod budget_tests;
 
 #[cfg(test)]
 mod tests {

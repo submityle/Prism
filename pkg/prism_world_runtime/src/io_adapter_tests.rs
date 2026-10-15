@@ -89,8 +89,19 @@ impl ReadProvider for GateProvider {
 #[test]
 fn simultaneous_blocking_readers_receive_only_their_own_pending_results() {
     let (gate, entered) = Gate::new();
-    let adapter =
-        Arc::new(IoSchedulerAdapter::new(GateProvider(Arc::clone(&gate)), 2, 2).expect("adapter"));
+    let adapter = Arc::new(
+        IoSchedulerAdapter::with_byte_limits(
+            GateProvider(Arc::clone(&gate)),
+            2,
+            2,
+            1,
+            IoByteLimits {
+                max_request_bytes: 1,
+                max_total_bytes: 2,
+            },
+        )
+        .expect("adapter"),
+    );
     let (sender, results) = mpsc::channel();
     let threads: Vec<_> = [17, 29]
         .into_iter()
@@ -111,6 +122,7 @@ fn simultaneous_blocking_readers_receive_only_their_own_pending_results() {
         .recv_timeout(TIMEOUT)
         .expect("second reader pending");
     assert_ne!(first, second);
+    assert_eq!(adapter.admitted_bytes(), Ok(2));
     // Public polling may drive reserved operations, but cannot steal events.
     assert!(adapter.poll(&mut context()).is_pending());
     gate.release();
@@ -122,6 +134,7 @@ fn simultaneous_blocking_readers_receive_only_their_own_pending_results() {
         thread.join().expect("reader thread");
     }
     assert!(adapter.is_empty());
+    assert_eq!(adapter.admitted_bytes(), Ok(0));
 }
 
 #[test]

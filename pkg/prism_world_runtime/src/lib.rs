@@ -25,7 +25,7 @@ mod file_provider_tests;
 #[cfg(feature = "std")]
 pub use file_provider::FileCellProvider;
 #[cfg(feature = "std")]
-pub use io_adapter::{IoAdapterEvent, IoRequestId, IoSchedulerAdapter};
+pub use io_adapter::{IoAdapterEvent, IoByteLimits, IoRequestId, IoSchedulerAdapter};
 
 /// The byte width of the fixed cell manifest header.
 pub const CELL_HEADER_SIZE: usize = 44;
@@ -822,7 +822,10 @@ impl<P: ChunkProvider> WorldFrameCoordinator<P> {
     }
 
     /// Polls one submitted IO request and, on success, commits it to `host`.
-    pub fn poll_io<H: SceneHost>(&mut self, host: &mut H) -> bool {
+    pub fn poll_io<H: SceneHost>(&mut self, host: &mut H) -> bool
+    where
+        P::Error: fmt::Debug,
+    {
         let Some(completion) = self.io.poll() else {
             return false;
         };
@@ -887,7 +890,7 @@ impl<P: ChunkProvider> WorldFrameCoordinator<P> {
             IoCompletion::Failed {
                 request_id,
                 request,
-                error: _,
+                error,
             } => {
                 let frame = self
                     .pending
@@ -899,7 +902,7 @@ impl<P: ChunkProvider> WorldFrameCoordinator<P> {
                     request.sector(),
                     TraceOp::Load,
                     FailureStage::Provider,
-                    "cell provider rejected IO",
+                    &format!("{error:?}"),
                 );
             }
         }

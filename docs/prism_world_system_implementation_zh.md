@@ -26,6 +26,13 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 2026-10-15 跨沙盒实机结果通过：Apple M2、Metal、IntegratedGpu、无额外必需 feature；真实创建 pipeline、dispatch、map/readback，并逐项比较规范四字与原始屏幕误差。测试覆盖 5 个可见/不可见对象、129 个对象的 3-workgroup 尾部、LOD 阈值、量化半步/饱和与空输入。5 个对象上传 368 字节、读回 100 字节；一般非空上传量 `128 + 48×N`、读回量 `20×N`。测试严格拒绝缺少 adapter/device、CPU adapter 或未遵守 `WGPU_BACKEND`，不把跳过算通过。telemetry 耗时是主机墙钟，不是 GPU timestamp，也不构成吞吐或 P50/P95/P99 性能达标证据。
 
+### M4：可再生 CPU 散布 kernel
+
+- `prism_world_residency::scatter` 在全局整数毫米三维格中每格生成一个 hash-jitter 候选；显式 seed/version/salt 与完整结构化 candidate key 决定位置。半开位置范围负责唯一归属，负坐标使用 Euclidean 除法；任意拆分、合并和请求顺序不会改变成员集合。完整 cache key 包含 kernel 版本、配置与范围，丢弃后可重建，不充当持久对象身份。
+- 可选最小距离采用 jittered lattice 上的 Matérn type-II 式筛选，重建未请求邻格的原始候选，以 `(priority hash, full key)` 排名消除边界依赖；不是 Poisson 输入、蓝噪声保证、最大填充或递归 dart throwing。距离比较使用宽整数，等于半径允许保留。
+- 预检工作量上界为 `N × (2 × ceil(radius/spacing) + 1)^3`，无筛选时为 `N`；输出数量和 Vec 容量载荷字节另有硬限制。checked 算术、一次 fallible exact reservation，超限整体失败，不返回随预算变化的截断前缀；字节限制不含分配器元数据、栈或外部消费者副本。
+- no-default 测试 35 项（其中散布新增 20 项）、all-target clippy `-D warnings` 和格式检查通过，覆盖全局参考筛选、跨 cell 最小距离、未请求邻格阻挡、任意分区双向请求、缓存重建、预算与 i64 极值。这是 CPU 派生数据 kernel；尚无 GPU 散布生成、proxy 渲染/密度淡入、地表投影或百万点性能验收结论。
+
 ### M5：持久化
 
 - `prism_world_persist`：`PersistentId`、规范化 `OverrideDelta`、append-only log、确定性 LWW CRDT、snapshot/timeline、undo/redo、little-endian codec/checksum。
@@ -40,8 +47,10 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 - 默认构建保持 `no_std + alloc`；`std` 只增加 scheduler 与文件系统 provider，不把 IO、资产数据库或 ECS 引入 world policy core。
 - `prism_world_runtime`：真实调用 `StreamScheduler` 生成 load/evict 动作，并通过有界、可取消、优先级排序的 provider 队列提交 cell；完成后执行固定 manifest header 校验，再进入 `SceneHost::load_cell`，失败/驱逐写入可 replay trace。std 构建新增 `IoSchedulerAdapter`，实际桥接 `prism_world_io::IoScheduler` 的 chunk/completion/cancel/backpressure/error 事件，并保留同步 `ChunkProvider` 兼容路径。
 - `FileCellProvider` 复用 `prism_world_io/std` 的真实 `FileProvider`，以 sector 注册完整 manifest/文件 offset/checksum，拒绝过期 manifest 并保留调度优先级。真实临时文件测试覆盖文件→分块 scheduler→header/checksum→`SceneHost`，及短读、打开失败、取消和错误隔离；底层每次 poll 为有界阻塞读取，不宣称已变成线程池异步文件 IO。
-- `IoSchedulerAdapter` 以带 ID/原始请求的 `Failed` 终态关联错误；scheduler 串行锁内跟踪实际 start/poll 回调，scheduler 的显式取消 ID 优先，provider 不能伪造其他请求的取消 ID。并发 blocking reader 保留各自结果、共享 provider 唤醒可唤醒全部等待者，public poll 不抢占其结果；终态被消费前仍计入 capacity，取消会唤醒停驻 reader。capacity 当前限请求数而非累计字节，不宣称是全内存上限。
-- runtime 全 feature 测试 19 项、no-default 测试 3 项、两种 feature 的 all-target clippy/check/fmt 通过；5 项并发/关联测试额外重复 100 轮通过。上述验证不依赖 `prism_asset`。
+- `IoSchedulerAdapter` 以带 ID/原始请求的 `Failed` 终态关联错误；scheduler 串行锁内跟踪实际 start/poll 回调，scheduler 的显式取消 ID 优先，provider 不能伪造其他请求的取消 ID。并发 blocking reader 保留各自结果、共享 provider 唤醒可唤醒全部等待者，public poll 不抢占其结果；终态被消费前仍计入 capacity，取消会唤醒停驻 reader。
+- `IoByteLimits` 为 adapter/file provider 增加独立的单请求和累计声明字节准入，包含 44 字节 header；mutex 内在分配请求 ID/启动 IO 前检查上限及累计溢出，拒绝不消耗 quota/ID。queued、active 和未消费的 Completed/Failed 均保留完整配额，消费 Chunk 不释放；兼容构造器保留无配置字节上限行为，但仍拒绝算术溢出。
+- 聚合首次 chunk 时 fallible reserve 完整声明大小，后续 append 也为 fallible；分配失败取消底层操作，待 scheduler 移除后才以原 request ID/分配错误报告终态。累计上限 B 限制逻辑准入，不是 RSS 硬上限：保留 Chunk 副本与聚合结果的逻辑长度可接近 2B，Vec 实际容量/分配器、provider、事件元数据及交还调用方后的缓冲区不在计数内。
+- 预算补丁在并行任务验证快照中通过 runtime 全 feature 测试 27 项、no-default 测试 3 项及两种 feature 的 all-target clippy/check/fmt；本批新增 8 项预算/文件验证，既有 5 项并发/关联测试先前额外重复 100 轮通过。收尾重跑时共享工作区另有并行修改将 provider 错误转为 `error.to_string()`，但 `ChunkProvider::Error` 无 Display 约束，导致 `lib.rs` 的 E0599 编译失败；该并行修改未纳入本批，不将当前共享工作区误报为全部通过。上述 runtime 验证不依赖 `prism_asset`。
 
 ### M6-M8：地形、仿真与网络边界
 
@@ -128,6 +137,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
 - M3：真实资产包解压、GPU 直传和产品级吞吐仍需独立运行时验证；当前已完成文件 provider、scheduler、manifest/payload、SceneHost 的 CPU 端到端验证。
+- M4 散布：GPU 候选生成/proxy 流、连续密度切换和大规模性能验收；当前完成的是内容中立、可再生且有界的 CPU 散布 kernel。
 - M6：多表示曲面提取/转换、LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝已完成。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。

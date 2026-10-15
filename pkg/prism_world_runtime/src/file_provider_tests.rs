@@ -153,6 +153,68 @@ fn next_event<P: prism_world_io::ReadProvider>(adapter: &IoSchedulerAdapter<P>) 
 }
 
 #[test]
+fn bounded_file_admission_counts_header_and_delivers_only_admitted_payloads() {
+    let payload = b"bounded scene";
+    let m = manifest(0, CELL_HEADER_SIZE + payload.len());
+    let bytes = cell_bytes(m, payload);
+    let mut archive = b"prefix".to_vec();
+    let offset = archive.len() as u64;
+    archive.extend_from_slice(&bytes);
+    let file = TempFile::new(&archive);
+    for (single, total, admitted) in [
+        (m.io_bytes - 1, m.io_bytes, false),
+        (m.io_bytes, m.io_bytes - 1, false),
+        (m.io_bytes, m.io_bytes, true),
+    ] {
+        let mut provider = FileCellProvider::with_byte_limits(
+            &file.0,
+            1,
+            2,
+            3,
+            IoByteLimits {
+                max_request_bytes: single,
+                max_total_bytes: total,
+            },
+        )
+        .expect("bounded file provider");
+        let request = CellReadRequest::new(m, 1);
+        provider
+            .register(
+                request
+                    .with_byte_offset(offset)
+                    .with_expected_checksum(checksum(&bytes)),
+            )
+            .expect("registration is independent of admission");
+        assert_eq!(provider.scheduler().admitted_bytes(), Ok(0));
+        let result = provider.read_chunk(&request, CancellationToken::new(false));
+        if admitted {
+            assert_eq!(result, Ok(bytes.clone()));
+        } else {
+            assert!(matches!(result, Err(IoError::Provider { .. })));
+        }
+        assert_eq!(provider.scheduler().admitted_bytes(), Ok(0));
+        assert!(provider.scheduler().is_empty());
+        let (host, trace) = run_frame(provider, &[m]);
+        if admitted {
+            assert_eq!(host.0[&m.sector], payload);
+            assert!(trace
+                .as_slice()
+                .iter()
+                .any(|e| matches!(e, TraceEvent::Loaded { .. })));
+        } else {
+            assert!(host.0.is_empty());
+            assert!(trace.as_slice().iter().any(|e| matches!(
+                e,
+                TraceEvent::Failed {
+                    stage: FailureStage::Provider,
+                    ..
+                }
+            )));
+        }
+    }
+}
+
+#[test]
 fn real_file_chunks_summary_checksum_backpressure_and_cancel() {
     let file = TempFile::new(b"prefix0123456789suffix");
     let adapter =

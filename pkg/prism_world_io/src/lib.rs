@@ -299,7 +299,7 @@ mod std_support {
     use alloc::vec;
     use core::cmp::Ordering;
     use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{ErrorKind, Read, Seek, SeekFrom};
     use std::path::{Path, PathBuf};
 
     struct QueuedRequest {
@@ -557,6 +557,28 @@ mod std_support {
         cancelled: bool,
     }
 
+    pub(super) fn read_chunk_fully<R: Read>(reader: &mut R, bytes: &mut [u8]) -> Result<(), IoError> {
+        let mut actual = 0;
+        while actual < bytes.len() {
+            match reader.read(&mut bytes[actual..]) {
+                Ok(0) => {
+                    return Err(IoError::ShortRead {
+                        expected: bytes.len() as u64,
+                        actual: actual as u64,
+                    });
+                }
+                Ok(read) => actual += read,
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(IoError::Provider {
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     impl ChunkedRead for FileReadOperation {
         fn poll_chunk(
             &mut self,
@@ -572,21 +594,13 @@ mod std_support {
             }
             let bytes_to_read = self.remaining.min(self.chunk_size as u64) as usize;
             let mut bytes = vec![0; bytes_to_read];
-            match self.file.read(&mut bytes) {
-                Ok(actual) if actual == bytes_to_read => {
-                    let offset = self.next_offset;
-                    self.next_offset += actual as u64;
-                    self.remaining -= actual as u64;
-                    Poll::Ready(Ok(Some(ReadChunk::new(offset, bytes))))
-                }
-                Ok(actual) => Poll::Ready(Err(IoError::ShortRead {
-                    expected: bytes_to_read as u64,
-                    actual: actual as u64,
-                })),
-                Err(error) => Poll::Ready(Err(IoError::Provider {
-                    message: error.to_string(),
-                })),
+            if let Err(error) = read_chunk_fully(&mut self.file, &mut bytes) {
+                return Poll::Ready(Err(error));
             }
+            let offset = self.next_offset;
+            self.next_offset += bytes_to_read as u64;
+            self.remaining -= bytes_to_read as u64;
+            Poll::Ready(Ok(Some(ReadChunk::new(offset, bytes))))
         }
 
         fn cancel(&mut self) {
@@ -635,7 +649,7 @@ mod tests {
     use alloc::vec;
     use core::task::{Context, Poll, Waker};
     use std::fs;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -651,6 +665,23 @@ mod tests {
         let mut file = fs::File::create(&path).expect("temp file creation must succeed");
         file.write_all(bytes).expect("temp file write must succeed");
         path
+    }
+
+    struct OneByteReader {
+        bytes: &'static [u8],
+        offset: usize,
+    }
+
+    impl Read for OneByteReader {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            if self.offset == self.bytes.len() {
+                return Ok(0);
+            }
+            let count = output.len().min(1).min(self.bytes.len() - self.offset);
+            output[..count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
+            self.offset += count;
+            Ok(count)
+        }
     }
 
     fn collect_file(path: PathBuf, request: ReadRequest) -> (Vec<u8>, ReadSummary) {
@@ -682,6 +713,18 @@ mod tests {
     fn checksum_is_stable() {
         assert_eq!(checksum(b"hello"), 0xa430d84680aabd0b);
         assert_eq!(checksum(b"hello"), checksum(b"hello"));
+    }
+
+    #[test]
+    fn file_read_accepts_partial_reads_until_the_chunk_is_full() {
+        let mut reader = OneByteReader {
+            bytes: b"abcd",
+            offset: 0,
+        };
+        let mut output = [0; 4];
+        super::std_support::read_chunk_fully(&mut reader, &mut output)
+            .expect("partial reads must be accumulated");
+        assert_eq!(&output, b"abcd");
     }
 
     #[test]

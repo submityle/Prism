@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use prism_world_io::{ConfigError, FileProvider, IoError};
 use prism_world_stream::SectorId;
 
-use crate::{CancellationToken, CellReadRequest, ChunkProvider, IoSchedulerAdapter};
+use crate::{CancellationToken, CellReadRequest, ChunkProvider, IoByteLimits, IoSchedulerAdapter};
 
 /// Routes cell manifests to validated ranges in one file or packed cell archive.
 ///
@@ -43,6 +43,29 @@ impl FileCellProvider {
                 max_in_flight,
                 capacity,
                 chunk_size,
+            )?,
+            sources: BTreeMap::new(),
+        })
+    }
+
+    /// Creates a file provider with explicit declared-byte admission limits.
+    ///
+    /// Limits are enforced on resolved requests, not on source registration.
+    /// No byte limit is silently clamped. See [`IoByteLimits`] for memory scope.
+    pub fn with_byte_limits(
+        path: impl Into<PathBuf>,
+        max_in_flight: usize,
+        capacity: usize,
+        chunk_size: usize,
+        limits: IoByteLimits,
+    ) -> Result<Self, ConfigError> {
+        Ok(Self {
+            adapter: IoSchedulerAdapter::with_byte_limits(
+                FileProvider::new(path),
+                max_in_flight,
+                capacity,
+                chunk_size,
+                limits,
             )?,
             sources: BTreeMap::new(),
         })
