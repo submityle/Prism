@@ -1,6 +1,7 @@
 //! The authority half of the app seam: apply inbound commands, broadcast deltas.
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use std::sync::Mutex;
 
@@ -9,11 +10,18 @@ use prism_ecs::resource::Resource;
 use prism_ecs::system::ResMut;
 
 use crate::delta::{Record, Schema};
-use crate::reliable::ReliableChannel;
+use crate::multiplex::{
+    negotiate_protocol, ChannelMux, MuxSendError, MuxStats, NegotiatedProtocol, NetChannel,
+    ProtocolError, QueueOutcome,
+};
 use crate::session::{ServerSession, SessionError};
 use crate::transport::Transport;
 
-use super::{DEFAULT_MIN_RTO, DEFAULT_WINDOW};
+use super::{
+    decode_event, decode_rpc, decode_state, encode_accept, encode_delta, encode_event,
+    encode_reject, encode_rpc, encode_snapshot, encode_state, ConnectionState, EventEnvelope,
+    ReplicationConfig, RpcEnvelope,
+};
 
 /// How the authority turns an inbound command into an authoritative change.
 pub trait ServerStrategy: Send + Sync + 'static {
@@ -32,7 +40,13 @@ pub trait ServerStrategy: Send + Sync + 'static {
 pub struct ServerReplication<S: ServerStrategy> {
     session: ServerSession,
     strategy: S,
-    channel: ReliableChannel<Box<dyn Transport>>,
+    mux: ChannelMux<Box<dyn Transport>>,
+    config: ReplicationConfig,
+    connection: ConnectionState,
+    next_rpc_id: u64,
+    pending_commands: VecDeque<Vec<u8>>,
+    inbound_events: VecDeque<Vec<u8>>,
+    newest_state: Option<Vec<u8>>,
     /// The first error from the most recent [`pump`](Self::pump), readable by the
     /// app; a rejected command must not panic the frame loop.
     last_error: Option<SessionError>,
@@ -40,6 +54,8 @@ pub struct ServerReplication<S: ServerStrategy> {
     /// Commands that arrived but could not be decoded (a protocol/version
     /// mismatch). Counted so a silently dropped input is observable.
     rejected: u64,
+    last_protocol_error: Option<ProtocolError>,
+    last_send_error: Option<MuxSendError>,
 }
 
 impl<S: ServerStrategy> Resource for ServerReplication<S> {}
@@ -56,13 +72,61 @@ impl<S: ServerStrategy> ServerReplication<S> {
         strategy: S,
         transport: Box<dyn Transport>,
     ) -> Result<Self, SessionError> {
+        Self::new_with_config(
+            schema,
+            capacity,
+            snapshot,
+            strategy,
+            transport,
+            ReplicationConfig::for_capacity(capacity),
+        )
+    }
+
+    /// Build authority with explicit multiplexing and handshake limits.
+    ///
+    /// # Errors
+    /// [`SessionError`] for a malformed seed snapshot, or
+    /// [`SessionError::Transport`] if the MTU cannot fit the handshake.
+    pub fn new_with_config(
+        schema: Schema,
+        capacity: usize,
+        snapshot: &[u8],
+        strategy: S,
+        transport: Box<dyn Transport>,
+        config: ReplicationConfig,
+    ) -> Result<Self, SessionError> {
+        let config = config.for_session(capacity);
+        let mut mux = ChannelMux::new(transport, config.mux);
+        // Accept is the largest fixed-size handshake envelope (seven bytes).
+        mux.check_send(NetChannel::RpcReliable, 7)
+            .map_err(SessionError::Transport)?;
+        let connection = if config.protocol.rollback_window == 0 {
+            ConnectionState::Rejected(ProtocolError::InvalidRollbackWindow { offered: 0 })
+        } else {
+            ConnectionState::Handshaking
+        };
+        if let ConnectionState::Rejected(error) = connection {
+            mux.send(NetChannel::RpcReliable, &encode_reject(error))
+                .map_err(SessionError::Transport)?;
+        }
         Ok(Self {
             session: ServerSession::new(schema, capacity, snapshot)?,
             strategy,
-            channel: ReliableChannel::new(transport, DEFAULT_MIN_RTO, DEFAULT_WINDOW),
+            mux,
+            config,
+            connection,
+            next_rpc_id: 0,
+            pending_commands: VecDeque::new(),
+            inbound_events: VecDeque::new(),
+            newest_state: None,
             last_error: None,
             applied: 0,
             rejected: 0,
+            last_protocol_error: match connection {
+                ConnectionState::Rejected(error) => Some(error),
+                ConnectionState::Handshaking | ConnectionState::Established(_) => None,
+            },
+            last_send_error: None,
         })
     }
 
@@ -80,31 +144,63 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// in [`rejected`](Self::rejected) rather than applied.
     pub fn pump(&mut self) -> usize {
         self.last_error = None;
-        self.channel.tick();
+        self.mux.tick();
+        if matches!(self.connection, ConnectionState::Rejected(_)) {
+            return 0;
+        }
+        self.drain_control();
+        if !matches!(self.connection, ConnectionState::Established(_)) {
+            return 0;
+        }
+        self.drain_auxiliary_channels();
+        if !matches!(self.connection, ConnectionState::Established(_)) {
+            return 0;
+        }
+
         let mut advanced = 0;
-        // Only advance while a window slot is free, so the delta is always retained.
-        while !self.channel.is_full() {
-            let Some(bytes) = self.channel.recv() else {
+        while let Some(bytes) = self.pending_commands.front() {
+            if self.mux.is_backpressured(NetChannel::EventsReliable) {
+                self.last_send_error =
+                    Some(MuxSendError::Backpressured(NetChannel::EventsReliable));
                 break;
-            };
-            let Some(command) = self.strategy.decode(&bytes) else {
-                self.rejected += 1;
+            }
+            let Some(command) = self.strategy.decode(bytes) else {
+                self.pending_commands.pop_front();
+                self.rejected = self.rejected.saturating_add(1);
                 continue;
             };
+
+            // Advance a clone first. Authority is committed only after the
+            // resulting delta has entered the reliable event queue.
+            let mut candidate = self.session.clone();
             let mut wire = Vec::new();
-            match self
-                .session
-                .advance(|record| self.strategy.apply(record, command), &mut wire)
+            if let Err(error) =
+                candidate.advance(|record| self.strategy.apply(record, command), &mut wire)
             {
+                self.last_error = Some(error);
+                break;
+            }
+            let delta = encode_delta(&wire);
+            match self.mux.send(NetChannel::EventsReliable, &delta) {
                 Ok(_) => {
-                    // A slot was free (checked above), so the framed delta is accepted.
-                    let sent = self.channel.send(&wire);
-                    debug_assert!(sent.is_some(), "the send window had a free slot");
-                    self.applied += 1;
+                    self.session = candidate;
+                    self.pending_commands.pop_front();
+                    self.applied = self.applied.saturating_add(1);
                     advanced += 1;
                 }
-                Err(error) => {
-                    self.last_error = Some(error);
+                Err(error @ MuxSendError::Backpressured(_)) => {
+                    self.last_send_error = Some(error);
+                    break;
+                }
+                Err(error @ MuxSendError::TooLarge { .. }) => {
+                    // The command was never committed. Drop this unrepresentable
+                    // result so it cannot permanently block later commands.
+                    self.last_send_error = Some(error);
+                    self.pending_commands.pop_front();
+                    self.rejected = self.rejected.saturating_add(1);
+                }
+                Err(error @ MuxSendError::ConnectionNotEstablished) => {
+                    self.last_send_error = Some(error);
                     break;
                 }
             }
@@ -112,9 +208,123 @@ impl<S: ServerStrategy> ServerReplication<S> {
         advanced
     }
 
+    fn drain_control(&mut self) {
+        while self.pending_commands.len() < self.config.mux.reliable_queue.max(1) {
+            let Some(bytes) = self.mux.recv(NetChannel::RpcReliable) else {
+                break;
+            };
+            let envelope = match decode_rpc(&bytes) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    self.reject(error, true);
+                    break;
+                }
+            };
+            match envelope {
+                RpcEnvelope::Hello(remote) => {
+                    if !matches!(self.connection, ConnectionState::Handshaking) {
+                        self.reject(ProtocolError::UnexpectedHandshake, true);
+                        break;
+                    }
+                    match negotiate_protocol(self.config.protocol, remote) {
+                        Ok(negotiated) => {
+                            let accept = encode_accept(negotiated);
+                            match self.mux.send(NetChannel::RpcReliable, &accept) {
+                                Ok(_) => {
+                                    self.connection = ConnectionState::Established(negotiated);
+                                }
+                                Err(error) => {
+                                    self.last_send_error = Some(error);
+                                    break;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            self.reject(error, true);
+                            break;
+                        }
+                    }
+                }
+                RpcEnvelope::Payload(payload) => {
+                    if !matches!(self.connection, ConnectionState::Established(_)) {
+                        self.reject(
+                            ProtocolError::TrafficBeforeHandshake {
+                                channel: NetChannel::RpcReliable,
+                            },
+                            true,
+                        );
+                        break;
+                    }
+                    self.pending_commands.push_back(payload.to_vec());
+                }
+                RpcEnvelope::Accept(_) | RpcEnvelope::Reject(_) => {
+                    self.reject(ProtocolError::UnexpectedHandshake, true);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn drain_auxiliary_channels(&mut self) {
+        while self.inbound_events.len() < self.config.mux.reliable_queue.max(1) {
+            let Some(bytes) = self.mux.recv(NetChannel::EventsReliable) else {
+                break;
+            };
+            match decode_event(&bytes) {
+                Ok(EventEnvelope::Payload(event)) => {
+                    self.inbound_events.push_back(event.to_vec());
+                }
+                Ok(EventEnvelope::Delta(_) | EventEnvelope::Snapshot(_)) => {
+                    self.reject(
+                        ProtocolError::MalformedMessage {
+                            channel: NetChannel::EventsReliable,
+                        },
+                        true,
+                    );
+                    break;
+                }
+                Err(error) => {
+                    self.reject(error, true);
+                    break;
+                }
+            }
+        }
+        if !matches!(self.connection, ConnectionState::Established(_)) {
+            return;
+        }
+        while let Some(bytes) = self.mux.recv(NetChannel::StateUnreliable) {
+            match decode_state(&bytes) {
+                Ok(state) => self.newest_state = Some(state.to_vec()),
+                Err(error) => {
+                    self.reject(error, true);
+                    break;
+                }
+            }
+        }
+        for channel in [NetChannel::InputUnreliable, NetChannel::BulkReliable] {
+            if self.mux.recv(channel).is_some() {
+                self.reject(super::malformed(channel), true);
+                break;
+            }
+        }
+    }
+
+    fn reject(&mut self, error: ProtocolError, notify_peer: bool) {
+        if notify_peer {
+            let rejection = encode_reject(error);
+            if let Err(send_error) = self.mux.send(NetChannel::RpcReliable, &rejection) {
+                self.last_send_error = Some(send_error);
+            }
+        }
+        self.connection = ConnectionState::Rejected(error);
+        self.last_protocol_error = Some(error);
+    }
+
     /// Send the framed full snapshot to the peer — the seed a joining or
     /// resyncing client applies before any delta. Returns the seeded revision, or
-    /// `Ok(None)` when the send window is full (retry on a later frame).
+    /// `Ok(None)` on backpressure, MTU overflow or connection rejection; use
+    /// [`take_send_error`](Self::take_send_error) to distinguish these cases.
+    /// Snapshots share the event lane with deltas to preserve their order.
     ///
     /// The frame is a full **snapshot**, not a delta, so the client must apply it
     /// with [`ClientSession::reseed`](crate::session::ClientSession::reseed) rather
@@ -123,18 +333,72 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// # Errors
     /// [`SessionError::NoBaseline`] before any authority exists, or a store error.
     pub fn seed(&mut self) -> Result<Option<u32>, SessionError> {
-        if self.channel.is_full() {
+        if matches!(self.connection, ConnectionState::Rejected(_)) {
+            self.last_send_error = Some(MuxSendError::ConnectionNotEstablished);
             return Ok(None);
         }
         let mut wire = Vec::new();
         let revision = self.session.snapshot_frame(&mut wire)?;
-        self.channel.send(&wire);
-        Ok(Some(revision))
+        let snapshot = encode_snapshot(&wire);
+        match self.mux.send(NetChannel::EventsReliable, &snapshot) {
+            Ok(_) => Ok(Some(revision)),
+            Err(error) => {
+                self.last_send_error = Some(error);
+                Ok(None)
+            }
+        }
     }
 
     /// Take the error the last [`pump`](Self::pump) stopped on, clearing it.
     pub fn take_last_error(&mut self) -> Option<SessionError> {
         self.last_error.take()
+    }
+
+    /// Take the most recent handshake or envelope failure.
+    pub fn take_protocol_error(&mut self) -> Option<ProtocolError> {
+        self.last_protocol_error.take()
+    }
+
+    /// Take the most recent explicit send refusal.
+    pub fn take_send_error(&mut self) -> Option<MuxSendError> {
+        self.last_send_error.take()
+    }
+
+    /// Queue a reliable authoritative event independently of RPC traffic.
+    pub fn send_event(&mut self, bytes: &[u8]) -> Result<QueueOutcome, MuxSendError> {
+        self.require_established()?;
+        let event = encode_event(bytes);
+        let result = self.mux.send(NetChannel::EventsReliable, &event);
+        self.record_send(result)
+    }
+
+    /// Queue a reliable RPC response/control payload.
+    pub fn send_rpc(&mut self, bytes: &[u8]) -> Result<u64, MuxSendError> {
+        self.require_established()?;
+        let rpc = encode_rpc(bytes);
+        let result = self.mux.send(NetChannel::RpcReliable, &rpc);
+        self.record_send(result)?;
+        let id = self.next_rpc_id;
+        self.next_rpc_id = self.next_rpc_id.wrapping_add(1);
+        Ok(id)
+    }
+
+    /// Queue newest-wins transient state for the client.
+    pub fn send_state(&mut self, bytes: &[u8]) -> Result<QueueOutcome, MuxSendError> {
+        self.require_established()?;
+        let state = encode_state(bytes);
+        let result = self.mux.send(NetChannel::StateUnreliable, &state);
+        self.record_send(result)
+    }
+
+    /// Take one client event/proposal.
+    pub fn recv_event(&mut self) -> Option<Vec<u8>> {
+        self.inbound_events.pop_front()
+    }
+
+    /// Take the newest client state/input-side payload.
+    pub fn recv_state(&mut self) -> Option<Vec<u8>> {
+        self.newest_state.take()
     }
 
     /// The current authoritative revision.
@@ -164,13 +428,49 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// Whether the outbound send window is full.
     #[must_use]
     pub fn is_full(&self) -> bool {
-        self.channel.is_full()
+        matches!(self.connection, ConnectionState::Rejected(_))
+            || self.mux.is_backpressured(NetChannel::EventsReliable)
     }
 
-    /// How many outbound messages are still unacknowledged.
+    /// How many event-lane messages (snapshots, deltas and application events)
+    /// are pending or unacknowledged.
     #[must_use]
     pub fn unacked(&self) -> usize {
-        self.channel.unacked()
+        self.mux.queued(NetChannel::EventsReliable)
+    }
+
+    /// Current handshake state.
+    #[must_use]
+    pub fn connection_state(&self) -> ConnectionState {
+        self.connection
+    }
+
+    /// Agreed protocol and rollback window, once connected.
+    #[must_use]
+    pub fn negotiated(&self) -> Option<NegotiatedProtocol> {
+        self.connection.negotiated()
+    }
+
+    /// Per-connection multiplexing and congestion counters.
+    #[must_use]
+    pub fn transport_stats(&self) -> MuxStats {
+        self.mux.stats()
+    }
+
+    fn require_established(&mut self) -> Result<(), MuxSendError> {
+        if self.negotiated().is_some() {
+            Ok(())
+        } else {
+            self.last_send_error = Some(MuxSendError::ConnectionNotEstablished);
+            Err(MuxSendError::ConnectionNotEstablished)
+        }
+    }
+
+    fn record_send<T>(&mut self, result: Result<T, MuxSendError>) -> Result<T, MuxSendError> {
+        if let Err(error) = &result {
+            self.last_send_error = Some(*error);
+        }
+        result
     }
 }
 
@@ -183,6 +483,7 @@ pub struct ReplicationServerPlugin<S: ServerStrategy> {
     /// Taken by [`Plugin::build`]; `Plugin::is_unique` guarantees one build.
     strategy: Mutex<Option<S>>,
     transport: Mutex<Option<Box<dyn Transport>>>,
+    config: ReplicationConfig,
 }
 
 impl<S: ServerStrategy> ReplicationServerPlugin<S> {
@@ -202,7 +503,15 @@ impl<S: ServerStrategy> ReplicationServerPlugin<S> {
             snapshot,
             strategy: Mutex::new(Some(strategy)),
             transport: Mutex::new(Some(transport)),
+            config: ReplicationConfig::for_capacity(capacity),
         }
+    }
+
+    /// Override multiplexing and handshake limits.
+    #[must_use]
+    pub fn with_config(mut self, config: ReplicationConfig) -> Self {
+        self.config = config;
+        self
     }
 }
 
@@ -220,12 +529,13 @@ impl<S: ServerStrategy> Plugin for ReplicationServerPlugin<S> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
             .expect("ReplicationServerPlugin::build ran twice");
-        let server = ServerReplication::<S>::new(
+        let server = ServerReplication::<S>::new_with_config(
             self.schema.clone(),
             self.capacity,
             &self.snapshot,
             strategy,
             transport,
+            self.config,
         )
         .expect("authority seed snapshot is malformed");
         app.insert_resource(server);
@@ -243,7 +553,6 @@ mod tests {
     use super::*;
     use crate::delta::{encode_snapshot, FieldKind, FieldValue};
     use crate::plugin::{Replication, ReplicationPlugin, ReplicationStrategy};
-    use crate::session::ClientSession;
     use crate::transport::memory::InMemoryTransport;
     use alloc::vec;
 
@@ -294,8 +603,382 @@ mod tests {
         }
     }
 
-    /// The full loop, both halves as real `prism_app` plugins over one reliable
-    /// channel: a client's command reaches authority, authority advances and
+    fn drive(client: &mut Replication<AddClient>, server: &mut ServerReplication<AddAuthority>) {
+        for _ in 0..8 {
+            client.pump();
+            server.pump();
+        }
+    }
+
+    fn memory_pair(
+        client_config: ReplicationConfig,
+        server_config: ReplicationConfig,
+    ) -> (Replication<AddClient>, ServerReplication<AddAuthority>) {
+        let (a, b) = InMemoryTransport::pair();
+        (
+            Replication::new_with_config(
+                schema(),
+                8,
+                &snapshot_at(0, 0),
+                AddClient,
+                Box::new(a),
+                client_config,
+            )
+            .unwrap(),
+            ServerReplication::new_with_config(
+                schema(),
+                8,
+                &snapshot_at(0, 0),
+                AddAuthority,
+                Box::new(b),
+                server_config,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Exercise the actual app scheduling seam, with the same assertions for
+    /// memory and real sockets. Polls are bounded even if delivery fails.
+    fn exercise_plugins(
+        client_end: Box<dyn Transport>,
+        server_end: Box<dyn Transport>,
+        wait: bool,
+    ) {
+        let mut client_app = App::new();
+        client_app.add_plugins(ReplicationPlugin::new(
+            schema(),
+            8,
+            snapshot_at(0, 0),
+            AddClient,
+            client_end,
+        ));
+        let mut server_app = App::new();
+        server_app.add_plugins(ReplicationServerPlugin::new(
+            schema(),
+            8,
+            snapshot_at(0, 0),
+            AddAuthority,
+            server_end,
+        ));
+        for _ in 0..1_000 {
+            client_app.update();
+            server_app.update();
+            if client_app
+                .world()
+                .resource::<Replication<AddClient>>()
+                .negotiated()
+                .is_some()
+            {
+                break;
+            }
+            if wait {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        assert_eq!(
+            client_app
+                .world()
+                .resource::<Replication<AddClient>>()
+                .negotiated(),
+            server_app
+                .world()
+                .resource::<ServerReplication<AddAuthority>>()
+                .negotiated()
+        );
+        assert!(client_app
+            .world()
+            .resource::<Replication<AddClient>>()
+            .negotiated()
+            .is_some());
+        {
+            let client = client_app
+                .world_mut()
+                .resource_mut::<Replication<AddClient>>();
+            assert_eq!(client.predict_and_send(3).unwrap(), Some(0));
+            client.send_event(b"client event").unwrap();
+            client.send_state(b"client old").unwrap();
+            assert_eq!(
+                client.send_state(b"client state"),
+                Ok(QueueOutcome::ReplacedOlder)
+            );
+        }
+        {
+            let server = server_app
+                .world_mut()
+                .resource_mut::<ServerReplication<AddAuthority>>();
+            server.send_rpc(b"server rpc").unwrap();
+            server.send_event(b"server event").unwrap();
+            server.send_state(b"server old").unwrap();
+            assert_eq!(
+                server.send_state(b"server state"),
+                Ok(QueueOutcome::ReplacedOlder)
+            );
+        }
+        let (mut ce, mut cr, mut cs, mut se, mut ss) = (None, None, None, None, None);
+        for _ in 0..1_000 {
+            client_app.update();
+            server_app.update();
+            let client = client_app
+                .world_mut()
+                .resource_mut::<Replication<AddClient>>();
+            ce = ce.or_else(|| client.recv_event());
+            cr = cr.or_else(|| client.recv_rpc());
+            cs = cs.or_else(|| client.recv_state());
+            let acked = client.acked();
+            assert_eq!(client.take_last_error(), None);
+            assert_eq!(client.take_protocol_error(), None);
+            let server = server_app
+                .world_mut()
+                .resource_mut::<ServerReplication<AddAuthority>>();
+            se = se.or_else(|| server.recv_event());
+            ss = ss.or_else(|| server.recv_state());
+            assert_eq!(server.take_last_error(), None);
+            assert_eq!(server.take_protocol_error(), None);
+            if acked == 1
+                && ce.is_some()
+                && cr.is_some()
+                && cs.is_some()
+                && se.is_some()
+                && ss.is_some()
+            {
+                break;
+            }
+            if wait {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        assert_eq!(ce, Some(b"server event".to_vec()));
+        assert_eq!(cr, Some(b"server rpc".to_vec()));
+        assert_eq!(cs, Some(b"server state".to_vec()));
+        assert_eq!(se, Some(b"client event".to_vec()));
+        assert_eq!(ss, Some(b"client state".to_vec()));
+        let client = client_app.world().resource::<Replication<AddClient>>();
+        let server = server_app
+            .world()
+            .resource::<ServerReplication<AddAuthority>>();
+        assert_eq!(client.acked(), 1);
+        assert_eq!(client.predicted(), 1);
+        assert_eq!(int(client.state().unwrap()), 3);
+        assert_eq!(server.applied(), 1);
+        assert_eq!(server.revision(), Some(1));
+    }
+
+    #[test]
+    fn memory_plugins_exchange_events_rpcs_state_and_prediction() {
+        let (a, b) = InMemoryTransport::pair();
+        exercise_plugins(Box::new(a), Box::new(b), false);
+    }
+
+    #[test]
+    fn loopback_udp_plugins_exchange_events_rpcs_state_and_prediction() {
+        fn bind() -> Option<crate::udp::UdpTransport> {
+            match crate::udp::UdpTransport::bind("127.0.0.1:0") {
+                Ok(socket) => Some(socket),
+                Err(error) => {
+                    assert!(
+                        std::env::var_os("PRISM_REQUIRE_NET").is_none(),
+                        "required UDP bind failed: {error}"
+                    );
+                    std::eprintln!("skipping replication UDP test: {error}");
+                    None
+                }
+            }
+        }
+        let Some(mut a) = bind() else {
+            return;
+        };
+        let Some(mut b) = bind() else {
+            return;
+        };
+        a.connect_to(b.local_addr().unwrap()).unwrap();
+        b.connect_to(a.local_addr().unwrap()).unwrap();
+        exercise_plugins(Box::new(a), Box::new(b), true);
+    }
+
+    #[test]
+    fn incompatible_versions_are_rejected_on_both_endpoints() {
+        let mut client_config = ReplicationConfig::for_capacity(8);
+        client_config.protocol.version += 1;
+        let server_config = ReplicationConfig::for_capacity(8);
+        let (mut client, mut server) = memory_pair(client_config, server_config);
+        client.send(&3i64.to_le_bytes()).unwrap();
+        drive(&mut client, &mut server);
+        assert_eq!(
+            client.connection_state(),
+            ConnectionState::Rejected(ProtocolError::VersionMismatch {
+                local: client_config.protocol.version,
+                remote: server_config.protocol.version
+            })
+        );
+        assert_eq!(
+            server.connection_state(),
+            ConnectionState::Rejected(ProtocolError::VersionMismatch {
+                local: server_config.protocol.version,
+                remote: client_config.protocol.version
+            })
+        );
+        assert_eq!(server.applied(), 0);
+        assert_eq!(
+            client.try_send_rpc(b"x"),
+            Err(MuxSendError::ConnectionNotEstablished)
+        );
+        assert_eq!(
+            client.send_event(b"x"),
+            Err(MuxSendError::ConnectionNotEstablished)
+        );
+        assert_eq!(
+            server.send_state(b"x"),
+            Err(MuxSendError::ConnectionNotEstablished)
+        );
+    }
+
+    #[test]
+    fn zero_rollback_offer_is_rejected_and_never_applies_commands() {
+        let (a, b) = InMemoryTransport::pair();
+        let config = ReplicationConfig::for_capacity(8);
+        let mut peer = ChannelMux::new(a, config.mux);
+        let mut server = ServerReplication::new_with_config(
+            schema(),
+            8,
+            &snapshot_at(0, 0),
+            AddAuthority,
+            Box::new(b),
+            config,
+        )
+        .unwrap();
+        peer.send(
+            NetChannel::RpcReliable,
+            &super::super::encode_hello(crate::multiplex::ProtocolOffer::current(0)),
+        )
+        .unwrap();
+        peer.send(NetChannel::RpcReliable, &encode_rpc(&3i64.to_le_bytes()))
+            .unwrap();
+        for _ in 0..8 {
+            peer.tick();
+            server.pump();
+        }
+        assert_eq!(
+            server.connection_state(),
+            ConnectionState::Rejected(ProtocolError::InvalidRollbackWindow { offered: 0 })
+        );
+        assert_eq!(server.applied(), 0);
+        let reply = peer.recv(NetChannel::RpcReliable).unwrap();
+        assert!(matches!(
+            decode_rpc(&reply),
+            Ok(RpcEnvelope::Reject(ProtocolError::InvalidRollbackWindow {
+                offered: 0
+            }))
+        ));
+    }
+
+    #[test]
+    fn rollback_window_preserves_the_acked_baseline_and_reopens_after_reconciliation() {
+        let mut config = ReplicationConfig::for_capacity(8);
+        config.protocol.rollback_window = 3;
+        let (mut client, mut server) = memory_pair(config, ReplicationConfig::for_capacity(8));
+        drive(&mut client, &mut server);
+        assert_eq!(client.negotiated().unwrap().rollback_window, 3);
+        assert_eq!(client.predict_and_send(1).unwrap(), Some(0));
+        assert_eq!(client.predict_and_send(2).unwrap(), Some(1));
+        assert_eq!(
+            client.predict_and_send(4),
+            Err(SessionError::RollbackWindowFull {
+                pending: 2,
+                window: 3
+            })
+        );
+        assert_eq!(client.predicted(), 2);
+        drive(&mut client, &mut server);
+        assert_eq!(client.acked(), 2);
+        assert_eq!(int(client.state().unwrap()), 3);
+        assert_eq!(client.predict_and_send(4).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn reliable_event_backpressure_does_not_advance_authority() {
+        let (a, b) = InMemoryTransport::pair();
+        let mut config = ReplicationConfig::for_capacity(8);
+        config.mux.reliable_queue = 1;
+        config.mux.reliable_window = 1;
+        let mut peer = ChannelMux::new(a, config.mux);
+        let mut server = ServerReplication::new_with_config(
+            schema(),
+            8,
+            &snapshot_at(0, 0),
+            AddAuthority,
+            Box::new(b),
+            config,
+        )
+        .unwrap();
+        peer.send(
+            NetChannel::RpcReliable,
+            &super::super::encode_hello(config.protocol),
+        )
+        .unwrap();
+        for _ in 0..8 {
+            peer.tick();
+            server.pump();
+        }
+        assert!(server.negotiated().is_some());
+        peer.recv(NetChannel::RpcReliable).unwrap();
+        peer.send(NetChannel::RpcReliable, &encode_rpc(&3i64.to_le_bytes()))
+            .unwrap();
+        peer.tick();
+        server.send_event(b"in flight").unwrap();
+        // Tick only the mux: receive the command and send the event without
+        // allowing the peer to acknowledge it or applying the command yet.
+        server.mux.tick();
+        server.send_event(b"queued").unwrap();
+        assert_eq!(server.pump(), 0);
+        assert_eq!(server.revision(), Some(0));
+        assert_eq!(server.pending_commands.len(), 1);
+        assert_eq!(
+            server.take_send_error(),
+            Some(MuxSendError::Backpressured(NetChannel::EventsReliable))
+        );
+        for _ in 0..12 {
+            peer.tick();
+            while peer.recv(NetChannel::EventsReliable).is_some() {}
+            server.pump();
+        }
+        assert_eq!(server.applied(), 1);
+        assert_eq!(server.revision(), Some(1));
+        assert_eq!(int(server.record().unwrap()), 3);
+    }
+
+    #[test]
+    fn malformed_event_rejects_before_queued_commands_can_mutate_authority() {
+        let (a, b) = InMemoryTransport::pair();
+        let config = ReplicationConfig::for_capacity(8);
+        let mut peer = ChannelMux::new(a, config.mux);
+        let mut server =
+            ServerReplication::new(schema(), 8, &snapshot_at(0, 0), AddAuthority, Box::new(b))
+                .unwrap();
+        peer.send(
+            NetChannel::RpcReliable,
+            &super::super::encode_hello(config.protocol),
+        )
+        .unwrap();
+        for _ in 0..8 {
+            peer.tick();
+            server.pump();
+        }
+        peer.send(NetChannel::RpcReliable, &encode_rpc(&3i64.to_le_bytes()))
+            .unwrap();
+        peer.send(NetChannel::EventsReliable, &[255]).unwrap();
+        peer.tick();
+        assert_eq!(server.pump(), 0);
+        assert_eq!(server.revision(), Some(0));
+        assert_eq!(
+            server.connection_state(),
+            ConnectionState::Rejected(ProtocolError::MalformedMessage {
+                channel: NetChannel::EventsReliable
+            })
+        );
+    }
+
+    /// The full loop, both halves as real `prism_app` plugins over the mux:
+    /// a client's command reaches authority, authority advances and
     /// broadcasts the delta, and the client's prediction reconciles to it — all
     /// driven by the two frame loops, no manual pumping.
     #[test]
@@ -394,7 +1077,7 @@ mod tests {
     /// resync path `receive` (which only understands deltas) cannot serve.
     #[test]
     fn a_seed_frame_reseeds_a_client_to_the_authoritative_revision() {
-        let (mut client_end, server_end) = InMemoryTransport::pair();
+        let (client_end, server_end) = InMemoryTransport::pair();
         let mut server = ServerReplication::new(
             schema(),
             8,
@@ -404,18 +1087,32 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(server.seed().unwrap(), Some(5));
-        // One pump tick transmits the queued seed frame to the peer.
-        server.pump();
-        let packet = client_end.recv().expect("the seed frame reached the peer");
-        let (kind, _seq, snapshot_frame) = crate::reliable::decode(&packet).expect("a packet");
-        assert_eq!(kind, 0, "a data packet");
+        let mut client = Replication::new(
+            schema(),
+            8,
+            &snapshot_at(0, 0),
+            AddClient,
+            Box::new(client_end),
+        )
+        .unwrap();
 
-        // A client seeded at revision 0 resyncs to authority's revision 5.
-        let mut client = ClientSession::<i64>::new(schema(), 8, &snapshot_at(0, 0)).unwrap();
-        assert_eq!(client.reseed(snapshot_frame).unwrap(), 5);
+        assert_eq!(server.seed().unwrap(), Some(5));
+        for _ in 0..8 {
+            client.pump();
+            server.pump();
+        }
         assert_eq!(client.acked(), 5);
         assert_eq!(int(client.state().unwrap()), 50);
+
+        // A later delta must follow the snapshot on the same ordered lane.
+        client.send(&2i64.to_le_bytes()).unwrap();
+        for _ in 0..8 {
+            client.pump();
+            server.pump();
+        }
+        assert_eq!(client.acked(), 6);
+        assert_eq!(int(client.state().unwrap()), 52);
+        assert_eq!(client.take_last_error(), None);
     }
 
     /// A **predicted** command whose simulation matches authority is confirmed, not

@@ -27,6 +27,10 @@ use crate::snapshot::{SnapshotError, SnapshotStore};
 /// A session-level failure.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionError {
+    /// A plugin's configured MTU cannot carry its control messages.
+    Transport(crate::multiplex::MuxSendError),
+    /// Prediction was attempted after a plugin connection was rejected.
+    Protocol(crate::multiplex::ProtocolError),
     /// A delta could not be encoded.
     Delta(DeltaError),
     /// A frame was malformed or oversized on the wire.
@@ -39,6 +43,15 @@ pub enum SessionError {
     NoBaseline,
     /// A revision counter would overflow `u32`.
     RevisionOverflow(u32),
+    /// The negotiated rollback window already contains the maximum number of
+    /// unconfirmed local inputs plus the acknowledged baseline; the caller must
+    /// wait for authority or resync.
+    RollbackWindowFull {
+        /// Inputs currently awaiting authority.
+        pending: usize,
+        /// Negotiated retained revision count, including the baseline slot.
+        window: u32,
+    },
 }
 
 impl From<FrameError> for SessionError {
@@ -211,6 +224,12 @@ impl<F: Clone> ClientSession<F> {
     #[must_use]
     pub fn predicted(&self) -> u32 {
         self.prediction.predicted()
+    }
+
+    /// Number of local inputs still awaiting authoritative confirmation.
+    #[must_use]
+    pub fn pending_inputs(&self) -> usize {
+        self.prediction.pending().len()
     }
 
     /// The currently predicted record.

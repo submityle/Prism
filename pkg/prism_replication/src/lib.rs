@@ -41,6 +41,9 @@
 //!   [`Transport`](transport::Transport): a [`ReliableChannel`](reliable::ReliableChannel)
 //!   owns an ARQ sender/receiver pair, encodes each message as a small datagram,
 //!   and hands reassembled in-order payloads up to the session (design §6).
+//! - [`multiplex`] — independent reliable event, RPC and bulk channels, plus
+//!   newest-wins unreliable state and bounded input channels over one datagram
+//!   transport, with explicit MTU limits, backpressure and shared byte admission.
 //! - [`session`] — the **wiring**: [`ServerSession`](session::ServerSession)
 //!   (authority: seed snapshots, step deltas, lagging-client catch-up) and
 //!   [`ClientSession`](session::ClientSession) (prediction fed by inbound frames),
@@ -51,6 +54,8 @@
 //! the client half (predict + reconcile) and
 //! [`ReplicationServerPlugin`](plugin::ReplicationServerPlugin) is the authority
 //! half (apply inbound commands + broadcast deltas).
+//! The plugins use [`multiplex::ChannelMux`] and negotiate a protocol version
+//! and rollback capacity before accepting application traffic.
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
@@ -83,6 +88,8 @@ pub mod prediction;
 pub mod transport;
 
 pub mod reliable;
+
+pub mod multiplex;
 
 pub mod frame;
 
