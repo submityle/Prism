@@ -58,7 +58,7 @@ impl TimeTravel {
     pub fn seek(&self, frame: u64, world: &mut World) -> bool {
         match self.ring.get(frame) {
             Some(snapshot) => {
-                world.restore(snapshot);
+                world.restore(&snapshot);
                 true
             }
             None => false,
@@ -105,7 +105,7 @@ impl TimeTravel {
     }
 
     /// Borrow the snapshot recorded for `frame`, if retained.
-    pub fn snapshot(&self, frame: u64) -> Option<&WorldSnapshot> {
+    pub fn snapshot(&self, frame: u64) -> Option<WorldSnapshot> {
         self.ring.get(frame)
     }
 

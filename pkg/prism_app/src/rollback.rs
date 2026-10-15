@@ -34,6 +34,7 @@
 use alloc::vec::Vec;
 
 use prism_ecs::component::ComponentId;
+use prism_ecs::resource::Resource;
 use prism_ecs::world::snapshot::SnapshotRing;
 use prism_ecs::world::World;
 
@@ -47,6 +48,8 @@ pub struct SnapshotHistory {
     ring: SnapshotRing,
     next_frame: u64,
 }
+
+impl Resource for SnapshotHistory {}
 
 impl SnapshotHistory {
     /// A history retaining the most recent `capacity` frames.
@@ -140,7 +143,7 @@ impl SnapshotHistory {
     pub fn rollback(&self, world: &mut World, frame: u64) -> bool {
         match self.ring.get(frame) {
             Some(snapshot) => {
-                world.restore(snapshot);
+                world.restore(&snapshot);
                 true
             }
             None => false,

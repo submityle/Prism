@@ -242,6 +242,8 @@ members = [
 exclude = [
   # Integration tests are not part of the workspace
   "tests-integration",
+  # The controlled ECS performance gate is a Python runner, not a Rust crate.
+  "tools/ecs-perf",
 ]
 
 [workspace.lints.clippy]

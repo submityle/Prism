@@ -21,10 +21,17 @@ use crate::startup::{ensure_render_startup, RenderStartupState};
 use crate::target::RenderTarget;
 use crate::texture_cache::TextureCache;
 
+// A custom provider factory can be expensive and may fail repeatedly while
+// its own compilation pipeline warms up. Back off only that retry class; asset
+// preparation and startup failures remain immediately retryable so recovery
+// does not add avoidable latency to ordinary transient work.
+const PROVIDER_RETRY_BACKOFF_FRAMES: u32 = 2;
+
 #[derive(Default, Resource)]
 struct RecoveryState {
     active: bool,
     attempts: u64,
+    provider_retry_backoff: u32,
     replacement: Option<RecoveryReport>,
     core_rebuilt: bool,
 }
@@ -67,6 +74,12 @@ where
     if state.replacement.is_some() && reason.is_some() {
         state.replacement = None;
         state.core_rebuilt = false;
+        state.provider_retry_backoff = 0;
+    }
+    if state.provider_retry_backoff != 0 {
+        state.provider_retry_backoff -= 1;
+        world.insert_resource(state);
+        return true;
     }
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<bool, String> {
         let core_was_rebuilt = state.core_rebuilt;
@@ -162,9 +175,14 @@ where
             state = RecoveryState::default();
         }
         Ok(Ok(false)) => {}
-        Ok(Err(error)) => world
-            .resource::<DeviceLossSignal>()
-            .failed(state.attempts, error),
+        Ok(Err(error)) => {
+            if error.starts_with("custom mesh pipeline recovery failed:") {
+                state.provider_retry_backoff = PROVIDER_RETRY_BACKOFF_FRAMES;
+            }
+            world
+                .resource::<DeviceLossSignal>()
+                .failed(state.attempts, error);
+        }
         Err(payload) => world
             .resource::<DeviceLossSignal>()
             .failed(state.attempts, panic_message(payload)),
