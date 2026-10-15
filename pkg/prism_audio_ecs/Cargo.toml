@@ -1,0 +1,19 @@
+[package]
+name = "prism_audio_ecs"
+version = "0.1.0"
+edition = "2024"
+description = "Native Prism App/ECS audio frontend over the existing lock-free audio runtime"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_app = { path = "../prism_app" }
+prism_ecs = { path = "../prism_ecs" }
+prism_math = { path = "../prism_math" }
+prism_transform = { path = "../prism_transform", features = ["ecs"] }
+prism_audio_core = { path = "../prism_audio_core" }
+prism_audio_rt = { path = "../prism_audio_rt" }
+libm = "0.2"
+
+[lints]
+workspace = true
