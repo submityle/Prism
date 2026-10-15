@@ -15,6 +15,23 @@ const CHILD_MODE: &str = "PRISM_WORLD_PERSIST_PROCESS_LOCK_PROBE_MODE";
 const CHILD_PATH: &str = "PRISM_WORLD_PERSIST_PROCESS_LOCK_PROBE_PATH";
 const CHILD_TEST: &str = "journal_process_lock_child_probe";
 
+struct Fixture {
+    directory: PathBuf,
+    path: PathBuf,
+}
+
+impl Fixture {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
 fn committed_prefix() -> Vec<Transaction> {
     [10, 20]
         .into_iter()
@@ -34,7 +51,7 @@ fn committed_prefix() -> Vec<Transaction> {
         .collect()
 }
 
-fn fixture_path() -> PathBuf {
+fn fixture() -> Fixture {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock after epoch")
@@ -45,7 +62,12 @@ fn fixture_path() -> PathBuf {
             std::process::id()
         ));
         match fs::create_dir(&directory) {
-            Ok(()) => return directory.join("journal"),
+            Ok(()) => {
+                return Fixture {
+                    path: directory.join("journal"),
+                    directory,
+                };
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => panic!("create unique journal fixture: {error}"),
         }
@@ -100,7 +122,8 @@ fn journal_process_lock_child_probe() {
 
 #[test]
 fn journal_exclusive_lock_rejects_child_then_allows_reopen_without_mutation() {
-    let path = fixture_path();
+    let fixture = fixture();
+    let path = fixture.path();
     let expected = committed_prefix();
     {
         let mut journal = FileJournal::open(&path).expect("create journal fixture");
