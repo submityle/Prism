@@ -60,9 +60,9 @@ pub use representation::{
 pub use scatter_deletion::{filter_heightfield_scatter, DeletionFilteredHeightfieldScatter};
 #[cfg(feature = "scatter")]
 pub use scatter_filter::{
-    scatter_with_heightfield, HeightfieldScatterBudget, HeightfieldScatterCacheKey,
-    HeightfieldScatterError, HeightfieldScatterFilters, HeightfieldScatterOutput,
-    HEIGHTFIELD_SCATTER_FILTER_VERSION,
+    scatter_with_heightfield, scatter_with_indexed_heightfield, HeightfieldScatterBudget,
+    HeightfieldScatterCacheKey, HeightfieldScatterError, HeightfieldScatterFilters,
+    HeightfieldScatterOutput, HEIGHTFIELD_SCATTER_FILTER_VERSION,
 };
 pub use stream_adapter::{TerrainStreamAdapter, TerrainStreamConfig, TerrainStreamError};
 pub use surface::{SdfSurfaceMesh, SurfaceCost, SurfaceError, SurfaceGeometry, SurfaceLimits};

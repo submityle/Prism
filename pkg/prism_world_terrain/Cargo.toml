@@ -27,3 +27,8 @@ harness = false
 name = "heightfield_scatter"
 harness = false
 required-features = ["scatter"]
+
+[[bench]]
+name = "indexed_heightfield_scatter"
+harness = false
+required-features = ["scatter"]

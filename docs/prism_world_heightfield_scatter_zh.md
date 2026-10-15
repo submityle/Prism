@@ -7,6 +7,12 @@
 `scatter` feature 导出 `scatter_with_heightfield`，组合既有源散布、作者密度/
 种类场和地形过滤。两种配置均为 `no_std + alloc`，不引入引擎或 GPU。
 
+`scatter_with_indexed_heightfield` 则直接组合 `ScatterBrushIndex` CPU 空间 BVH
+和同一个地表过滤内核。它显式接收已构建索引与有界可复用 `ScatterBrushScratch`，
+不在每次请求中重建索引或增长 scratch；线性入口仍保留，调用者按负载选择。
+两入口的 points、attributes、完整 cache key、candidate_evaluations 和
+surface_sample_reads 一致，只有 `field_work` 按各自实际探针计数。
+
 这条 CPU 路径只删除原始候选，不移动、投影或补点。因此保留源 candidate key
 重建、最小距离和任意 XYZ 半开请求分区的成员不变性。离地带很窄时可能稀疏甚至
 为空；这不是保证贴地密度的植被放置器，也不是 GPU 地形过滤或产品 renderer 接入。
@@ -71,6 +77,14 @@ surface 持有不可变 `Arc<HeightfieldTile>`，clone 共享样本，不隐式�
 两 Vec 的实际容量载荷；这不是 allocator/RSS 峰值限制。Arc 快照、field 既有刷子、
 分配器元数据和外部副本均不在该输出预算内。
 
+索引入口也先执行同一个地形预检，再进入 indexed source 的工作、scratch 和输出
+准入；空请求仍检查 scratch 容量。新增 `HeightfieldScatterError::Index` 保留完整
+`ScatterBrushIndexError` 及错误链，地形预检错误仍使用原有错误类型。它没有新的
+语义版本或缓存身份；索引、scratch 的容量/布局不进入派生结果 key。既有
+`filter_heightfield_scatter` 可直接消费其输出，持久删除仍按完整 candidate key
+匹配并保持属性对齐。索引和 scratch 的实际容量载荷另计，不能藏入输出预算；
+全重叠时遍历、命中排序及精确合成可能比线性更慢。
+
 ## 复现入口
 
 在仓库根目录执行：
@@ -91,9 +105,9 @@ CARGO_INCREMENTAL=0 cargo bench --offline -p prism_world_terrain --features scat
 压紧，排除 fixture 构造、oracle 准备、结果校验和销毁。每次完整结果在计时外逐点/属性
 与标量 oracle 比较，额外检测分配次数和容量稳定性。
 
-### 2026-10-16 release 实测
+### 2026-10-16 原始线性入口 release 实测
 
-正常 workspace 默认配置 78 项、`scatter` 配置 93 项单测全部通过，0 失败/忽略；
+原始切片验收时，正常 workspace 默认配置 78 项、`scatter` 配置 93 项单测全部通过，0 失败/忽略；
 两配置 all-target Clippy `-D warnings` 通过。新增 19 项查询与 15 项过滤回归覆盖
 精确三角面 oracle、极端整数、完整缓存身份、XYZ 分区、预算及属性对齐。公开
 `HeightfieldTile::rebake` 回归另验证独立 owner 发布新 Arc 后，新旧快照/选择隔离，
@@ -121,3 +135,55 @@ GPU timestamp、产品帧时或完整散布性能达标承诺。
 
 这些入口是局部 CPU 内核验证，不代表全 workspace、GPU 地形过滤、风/交互、曲率/
 数据层/跨散布层过滤、贴地放置、蓝噪声画质或产品级性能验收。
+
+## CPU 空间索引与真实地形组合 A/B
+
+复现新增的完整生产调用基准：
+
+```text
+cargo test --offline --locked -p prism_world_terrain --features scatter --test indexed_heightfield_scatter
+cargo bench --offline --locked -p prism_world_terrain --features scatter --bench indexed_heightfield_scatter
+```
+
+本轮正常 workspace `scatter` 配置 109 项库测试和新增 11 项公开集成测试全部通过，
+0失败/忽略；`--no-default-features` 78 项库测试通过，两配置 all-target Clippy
+`-D warnings`、本轮文件格式和 diff 检查通过。集成测试以原线性入口为结果参考，
+覆盖无刷子/空请求、noise/warp与非交换ID顺序、稀疏/全重叠实际work、i64极值、
+三轴非对齐逆序分区与源最小距离、精确/少一预算、预检顺序/溢出/错误链、完整
+缓存依赖、完整键删除组合及跨索引/失败后的scratch复用。独立源码审查未发现
+可复现缺陷；这些是局部契约证据，不是完整系统验收。
+
+2026-10-16，Apple M2、`aarch64-apple-darwin`、rustc 1.96.1，正常 workspace
+release/bench profile，独立 target `/private/tmp/prism-indexed-terrain-target-32CI9Y`。
+每类负载 8 预热对 + 32 测量对，交替 AB/BA，nearest-rank P50/P95/P99
+为第16/31/32名。计时包含源生成、作者刷子场、真实地形过滤和两个输出分配；排除
+fixture/index/scratch 构造、参考输出、完整校验、打印和析构。不是 GPU 时间、
+无干扰隔离实验、产品帧时或性能阈值门禁。共享宿主并行负载可影响尾延迟。
+
+地形仍为前述真实65×65 ramp、8450字节高度载荷。请求为
+`[-1000,-1200,-1000]..[1000,1300,1000]`，100mm格、10000 primary，
+最小距离0；seed=`0x0123456789abcdef`、version1、salt22。场 seed=
+`0xfedcba9876543210`、base density40000/species7、关闭noise/warp。
+1024刷子按逆序输入ID，规范合成为ID升序；opacity40000、species=ID，
+ID%3对应 `Replace(30000+ID*17%20000)` / `Add(1000)` / `Add(-300)`。
+稀疏中心为 `[-1500+(ID%16)*200,-900+((ID/16)%4)*600,-1500+(ID/64)*200]`，
+内/外半径40/80mm；全重叠中心 `[0,0,0]`、半径200/10000mm。
+过滤高度[-100,100]、离地带[-250,250]mm、坡度≤1/10。
+
+| 负载 | 线性 P50 / P95 / P99（µs） | 索引 P50 / P95 / P99（µs） | 场后 / 地形后点数 |
+| --- | --- | --- | --- |
+| 1024稀疏刷子 | 23322.709 / 24135.250 / 24262.958 | 1049.458 / 1170.041 / 1262.417 | 6075 / 1209 |
+| 1024全重叠刷子 | 84574.709 / 89875.833 / 93354.000 | 131862.875 / 136042.167 / 138091.750 | 7310 / 1461 |
+
+两边candidate_evaluations均10000；稀疏线性/索引实际field_work为
+10250000/124572，全重叠为10250000/30720000；实际surface reads分别为
+24300、29240。每次两Vec容量均为10000行，points800000字节、attributes80000字节，
+合计880000字节、恰两个分配；scratch固定1024索引/8192字节，无请求内增长。
+索引2047节点/139200字节、完整作者刷子载荷65536字节、共享地形另计。
+
+有限预算为source10000 probes/10000 points/16MiB，field30720000 work/16MiB，
+terrain40000 reads；构造最多1024刷子/65536字节、索引262144字节、scratch8192字节。
+线性/索引各自最坏场准入为10250000/30720000，不以较低实际work绕过预检；排序
+比较、CPU指令和时间不是逻辑probe预算。全部160次计时调用（含预热）在计时外
+核对完整points/attributes/cache/counters及固定容量，每条路径与自身参考的
+field_work也完全一致。全重叠索引明显退化，因此不默认取代线性扫描。

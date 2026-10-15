@@ -8,9 +8,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use prism_world_residency::{
-    estimate_scatter_work, scatter_with_density_field, FieldScatterBudget, FieldScatterCacheKey,
-    ScatterBudget, ScatterConfig, ScatterDensityField, ScatterFieldError, ScatterFieldSample,
-    ScatterPoint, ScatterRegion,
+    estimate_scatter_work, scatter_with_density_field, scatter_with_indexed_density_field,
+    FieldScatterBudget, FieldScatterCacheKey, FieldScatterOutput, ScatterBrushIndex,
+    ScatterBrushIndexError, ScatterBrushScratch, ScatterBudget, ScatterConfig, ScatterDensityField,
+    ScatterFieldError, ScatterFieldSample, ScatterPoint, ScatterRegion,
 };
 
 use crate::{
@@ -123,6 +124,8 @@ pub enum HeightfieldScatterError {
     },
     /// Source generation, density field or output capacity failure.
     Source(ScatterFieldError),
+    /// Indexed source admission, scratch capacity, or generation failure.
+    Index(ScatterBrushIndexError),
     /// Missing terrain coverage or invalid surface query.
     Surface(HeightfieldQueryError),
 }
@@ -143,6 +146,7 @@ impl fmt::Display for HeightfieldScatterError {
                 )
             }
             Self::Source(error) => write!(f, "heightfield source scatter: {error}"),
+            Self::Index(error) => write!(f, "heightfield indexed source scatter: {error}"),
             Self::Surface(error) => write!(f, "heightfield scatter surface: {error}"),
         }
     }
@@ -152,6 +156,7 @@ impl core::error::Error for HeightfieldScatterError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Source(error) => Some(error),
+            Self::Index(error) => Some(error),
             Self::Surface(error) => Some(error),
             _ => None,
         }
@@ -167,6 +172,12 @@ impl From<ScatterFieldError> for HeightfieldScatterError {
 impl From<HeightfieldQueryError> for HeightfieldScatterError {
     fn from(error: HeightfieldQueryError) -> Self {
         Self::Surface(error)
+    }
+}
+
+impl From<ScatterBrushIndexError> for HeightfieldScatterError {
+    fn from(error: ScatterBrushIndexError) -> Self {
+        Self::Index(error)
     }
 }
 
@@ -195,6 +206,54 @@ pub fn scatter_with_heightfield(
     filters: HeightfieldScatterFilters,
     surface_budget: HeightfieldScatterBudget,
 ) -> Result<HeightfieldScatterOutput, HeightfieldScatterError> {
+    validate_surface_request(config, region, surface, filters, surface_budget)?;
+    let source = scatter_with_density_field(config, region, source_budget, field, field_budget)?;
+    filter_surface(source, surface, filters)
+}
+
+/// Generates indexed density scatter and stably thins it using a real heightfield.
+///
+/// This has exactly the same retained points, attributes, cache identity, source
+/// candidate count and surface reads as [`scatter_with_heightfield`] for the
+/// index's immutable field. Only `field_work` counts indexed node/brush probes.
+/// The index and reusable scratch must be explicitly budgeted by the caller;
+/// neither is built or grown here. Full overlap can be slower than linear scan.
+///
+/// Terrain filters, coverage and conservative reads are checked before source
+/// enumeration. Indexed source work, output and scratch admission then run even
+/// for an empty request. Compaction reuses the two source output allocations;
+/// it does not project, refill holes, or alter minimum-distance/partition rules.
+#[allow(clippy::too_many_arguments)]
+pub fn scatter_with_indexed_heightfield(
+    config: ScatterConfig,
+    region: ScatterRegion,
+    source_budget: ScatterBudget,
+    index: &ScatterBrushIndex,
+    scratch: &mut ScatterBrushScratch,
+    field_budget: FieldScatterBudget,
+    surface: &PlanarHeightfieldSurface,
+    filters: HeightfieldScatterFilters,
+    surface_budget: HeightfieldScatterBudget,
+) -> Result<HeightfieldScatterOutput, HeightfieldScatterError> {
+    validate_surface_request(config, region, surface, filters, surface_budget)?;
+    let source = scatter_with_indexed_density_field(
+        config,
+        region,
+        source_budget,
+        index,
+        scratch,
+        field_budget,
+    )?;
+    filter_surface(source, surface, filters)
+}
+
+fn validate_surface_request(
+    config: ScatterConfig,
+    region: ScatterRegion,
+    surface: &PlanarHeightfieldSurface,
+    filters: HeightfieldScatterFilters,
+    surface_budget: HeightfieldScatterBudget,
+) -> Result<(), HeightfieldScatterError> {
     filters.validate()?;
     let estimate = estimate_scatter_work(config, region).map_err(ScatterFieldError::from)?;
     let empty = region
@@ -223,8 +282,14 @@ pub fn scatter_with_heightfield(
             limit: surface_budget.max_sample_reads,
         });
     }
-    let mut source =
-        scatter_with_density_field(config, region, source_budget, field, field_budget)?;
+    Ok(())
+}
+
+fn filter_surface(
+    mut source: FieldScatterOutput,
+    surface: &PlanarHeightfieldSurface,
+    filters: HeightfieldScatterFilters,
+) -> Result<HeightfieldScatterOutput, HeightfieldScatterError> {
     let surface_sample_reads = source.points.len() as u64 * 4;
     let mut retained = 0;
     for read in 0..source.points.len() {

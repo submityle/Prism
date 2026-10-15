@@ -111,6 +111,14 @@ source 64 字节 record 保留源 accepted；新增 source-slot 对齐16字节�
 
 2026-10-16 `aarch64-apple-darwin`、macOS27.0.1、rustc1.96.1 release，8预热/64样本，主机墙钟 nearest-rank：100k真实查询含逐结果校验 P50/P95/P99=1705.166/2613.750/3803.084 µs、0分配；10k源+noise/warp作者场+地形过滤为3514.916/3930.916/5631.916 µs，6132个场幸存点筛到1250点，24528次逻辑地形读取，两列容量880000字节、恰2次分配，共享heightfield8450字节另计。每次完整结果在计时外逐点/属性对oracle，计时排除构造/校验/销毁；首次fixture未对齐格被预算拒绝后修正并加入候选数断言。不是GPU时间、峰值内存、无干扰A/B或产品帧时。完整方法与边界见 `prism_world_heightfield_scatter_zh.md`。
 
+### M4：CPU 刷子索引与真实 heightfield 组合
+
+`scatter_with_indexed_heightfield` 显式接收已构建CPU空间BVH及有界可复用scratch，先执行地形完整覆盖/过滤参数/primary×4读取预算预检，再调用索引密度源，最后与线性入口共用精确地表过滤和原地两列压紧。完整点/属性/cache/source candidate counter/地形读数与线性相同，仅实际field_work不同；算法版本不变，支持直接组合完整键删除。新增Index错误保留原始索引错误链，不隐式创建/增长scratch或引入逐点临时输出。
+
+正常workspace scatter配置109项库测试+新增11项公开集成测试通过，no-default配置78项通过，0失败/忽略；两配置all-target严格Clippy与本轮文件格式/diff检查通过。覆盖线性全输出对照、noise/warp/非交换ID顺序、稀疏与全重叠work、极端整数、三轴分区/距离、严格预算/溢出/错误顺序与错误链、完整缓存/删除组合、scratch跨索引/失败复用；独立源码审查未发现可复现缺陷。索引依赖residency另通过99项库测试+16项公开集成测试+1项文档测试，不代表全workspace验证。
+
+2026-10-16 Apple M2 release，1024刷子/10000 primary、真实65² ramp，每类8预热对+32测量对交替AB/BA，全部160次计时调用在计时外全量核对输出/cache/counters与容量。稀疏线性/索引P50/P95/P99为23322.709/24135.250/24262.958与1049.458/1170.041/1262.417µs；全重叠为84574.709/89875.833/93354.000与131862.875/136042.167/138091.750µs，因此索引仍为显式可选。两Vec恰2分配、880000字节容量，索引139200字节/scratch8192字节/地形8450字节另计。无noise/warp、最小距离0，主机墙钟含源/场/地形/输出分配，不是GPU timestamp、RSS、产品帧时或完整系统验收；复现与预算见`prism_world_heightfield_scatter_zh.md`。
+
 ### M4：真实 heightfield 的 GPU 精确地表过滤
 
 `prism_world_gpu/terrain_scatter` 的 `GpuScatterHeightfield` 组合整数源生成、作者场与地形过滤，直接读取真实 baked 高度样本，不在 CPU 逐点求值或回读生产输出。六 storage binding、128B 地形 uniform、i32 样本；有符号 i64 世界坐标与更宽有理高度/离地带、精确双轴坡度由核心 u32 limb 完成，不需要 shader-i64 或其他 optional feature。与 CPU revision1 三角/闭端点/坡度逐项一致，只删点、不移动/补点，保持源最小距离、key 重建和 XYZ 分区成员不变。

@@ -36,6 +36,14 @@
 
 源 points Vec 原地压紧，attributes 一次预留源幸存者容量；返回两列严格对齐。两 Vec 的实际容量继续共同计入 `FieldScatterBudget.max_output_bytes`，不因筛后点少而少计 spare capacity。错误整体拒绝请求，不返回预算相关的截断前缀。与原线性接口相同，总输出载荷限制不是构造过程的峰值 RSS 上限。
 
+真实地形组合由 `prism_world_terrain/scatter` 的 `scatter_with_indexed_heightfield`
+直接提供：先统一检查地形参数、完整 XZ 覆盖及 primary×4 读取预算，再调用索引源，
+最后复用线性地形入口的精确高度/clearance/坡度过滤与两列稳定压紧。完整地形缓存
+身份、source candidate counter、地形读数、位置和属性与线性相同，仅实际场 work
+不同。索引错误通过 `HeightfieldScatterError::Index` 保留；结果可以继续交给
+`filter_heightfield_scatter` 按完整键做持久删除。API、回归和组合 A/B 见
+`prism_world_heightfield_scatter_zh.md`；不另引入缓存版本或隐式 scratch 分配。
+
 ## 复现入口
 
 ```sh
@@ -77,4 +85,4 @@ benchmark 对 B=32/1024/10000 各测稀疏和全部重叠配方，启用 noise/w
 
 ## 仍独立的边界
 
-本切片仅实现 CPU 作者刷子空间查询及其 source scatter 组合。GPU 可选索引已另行交付；增量编辑重拟合、产品 scene/ECS/render graph 接线、贴地放置、曲率/数据层/跨层规则、风/交互和蓝噪声目标仍须各自交付。CPU 索引可以随配方重建，不将全量构造冒充增量编辑。
+本切片实现 CPU 作者刷子空间查询、source scatter 和真实 heightfield 过滤组合。GPU 可选索引已另行交付；增量编辑重拟合、产品 scene/ECS/render graph 接线、贴地放置、曲率/数据层/跨层规则、风/交互和蓝噪声目标仍须各自交付。CPU 索引可以随配方重建，不将全量构造冒充增量编辑。
