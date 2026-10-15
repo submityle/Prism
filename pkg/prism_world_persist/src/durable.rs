@@ -6,9 +6,10 @@
 //! tail record. A snapshot is encoded completely before it is written to a
 //! sibling temporary file, flushed, synced, and renamed into place.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +19,14 @@ use crate::{
     decode_snapshot, decode_transaction, encode_snapshot, encode_transaction, AppendOnlyLog,
     CodecError, LogError, Snapshot, Transaction,
 };
+
+mod journal_write;
+use journal_write::JournalWriter;
+
+#[cfg(test)]
+mod journal_fault_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 const JOURNAL_MAGIC: [u8; 4] = *b"PWRJ";
 const JOURNAL_VERSION: u32 = 1;
@@ -66,6 +75,19 @@ impl JournalRecovery {
 pub enum JournalError {
     /// The operating system rejected a file operation.
     Io(io::Error),
+    /// Another handle holds an incompatible operating-system file lock.
+    Locked,
+    /// An exclusive operating-system file lock could not be acquired.
+    Lock(io::Error),
+    /// A previous I/O failure requires dropping and reopening this journal.
+    Poisoned,
+    /// An operation failed and its durable rollback also failed.
+    RollbackFailed {
+        /// The original append failure.
+        operation: Box<JournalError>,
+        /// The error encountered while restoring the previous file boundary.
+        rollback: io::Error,
+    },
     /// The file was shorter than its fixed version header.
     TruncatedHeader,
     /// The file magic did not identify a Prism world journal.
@@ -91,6 +113,18 @@ impl fmt::Display for JournalError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "journal I/O error: {error}"),
+            Self::Locked => formatter.write_str("journal is locked by another handle"),
+            Self::Lock(error) => write!(formatter, "journal exclusive lock error: {error}"),
+            Self::Poisoned => {
+                formatter.write_str("journal is poisoned; drop and reopen to recover")
+            }
+            Self::RollbackFailed {
+                operation,
+                rollback,
+            } => write!(
+                formatter,
+                "{operation}; journal rollback also failed: {rollback}"
+            ),
             Self::TruncatedHeader => formatter.write_str("journal version header is truncated"),
             Self::InvalidHeader => formatter.write_str("journal version header is invalid"),
             Self::UnsupportedVersion(version) => {
@@ -112,7 +146,15 @@ impl fmt::Display for JournalError {
     }
 }
 
-impl std::error::Error for JournalError {}
+impl std::error::Error for JournalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) | Self::Lock(error) => Some(error),
+            Self::RollbackFailed { operation, .. } => Some(operation.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<io::Error> for JournalError {
     fn from(error: io::Error) -> Self {
@@ -168,16 +210,23 @@ impl From<CodecError> for SnapshotError {
 }
 
 /// A durable append-only file journal backed by a validated in-memory log.
+///
+/// Holds an exclusive OS file lock until dropped. All journal users must honor
+/// this lock; replacing the path or writing through an unlocked handle is not
+/// supported. An I/O failure poisons the handle even if rollback succeeds.
 pub struct FileJournal {
     file: File,
     path: PathBuf,
     log: AppendOnlyLog,
-    end_offset: u64,
+    writer: JournalWriter,
     recovery: Option<JournalRecovery>,
 }
 
 impl FileJournal {
     /// Opens or creates a journal and recovers its valid transaction prefix.
+    /// Returns [`JournalError::Locked`] if another handle owns the file lock,
+    /// and [`JournalError::Lock`] if the OS cannot provide the lock. Locking
+    /// precedes all header reads, initialization, and tail recovery.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         let path = path.as_ref().to_path_buf();
         let mut file = OpenOptions::new()
@@ -186,6 +235,10 @@ impl FileJournal {
             .read(true)
             .write(true)
             .open(&path)?;
+        file.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => JournalError::Locked,
+            TryLockError::Error(error) => JournalError::Lock(error),
+        })?;
         let file_len = file.metadata()?.len();
 
         if file_len == 0 {
@@ -196,7 +249,7 @@ impl FileJournal {
                 file,
                 path,
                 log: AppendOnlyLog::new(),
-                end_offset: JOURNAL_HEADER_LEN,
+                writer: JournalWriter::new(JOURNAL_HEADER_LEN),
                 recovery: None,
             });
         }
@@ -311,7 +364,7 @@ impl FileJournal {
             file,
             path,
             log,
-            end_offset,
+            writer: JournalWriter::new(end_offset),
             recovery,
         })
     }
@@ -322,6 +375,8 @@ impl FileJournal {
     }
 
     /// Returns the currently loaded validated log.
+    /// After an I/O failure this remains the pre-failure view. Reopening may
+    /// recover additional complete records if rollback could not finish.
     pub const fn log(&self) -> &AppendOnlyLog {
         &self.log
     }
@@ -332,66 +387,30 @@ impl FileJournal {
     }
 
     /// Appends one transaction, flushes it, and calls sync_all before return.
+    /// Any I/O failure poisons this handle until it is dropped and reopened.
     pub fn append(&mut self, transaction: Transaction) -> Result<(), JournalError> {
-        self.log.validate_append(&transaction)?;
-        let record = encode_record(&transaction)?;
-        let start = self.end_offset;
-        if let Err(error) = self.write_durable(start, &record) {
-            self.rollback_to(start);
-            return Err(error);
-        }
-        if let Err(error) = self.log.append(transaction) {
-            self.rollback_to(start);
-            return Err(JournalError::Log(error));
-        }
-        self.end_offset = start + record.len() as u64;
-        Ok(())
+        self.writer
+            .append(&mut self.file, &mut self.log, transaction)
     }
 
     /// Appends a batch with one flush and one sync_all for better throughput.
+    /// Any I/O failure poisons this handle. If rollback fails, reopening may
+    /// recover a complete prefix of the batch; batches are not crash-atomic.
     pub fn append_batch(&mut self, transactions: &[Transaction]) -> Result<(), JournalError> {
-        if transactions.is_empty() {
-            return Ok(());
-        }
-        let mut candidate = self.log.clone();
-        let mut bytes = Vec::new();
-        for transaction in transactions {
-            candidate.validate_append(transaction)?;
-            bytes.extend_from_slice(&encode_record(transaction)?);
-            candidate.append(transaction.clone())?;
-        }
-        let start = self.end_offset;
-        if let Err(error) = self.write_durable(start, &bytes) {
-            self.rollback_to(start);
-            return Err(error);
-        }
-        self.log = candidate;
-        self.end_offset = start + bytes.len() as u64;
-        Ok(())
+        self.writer
+            .append_batch(&mut self.file, &mut self.log, transactions)
     }
 
     /// Flushes the journal's operating-system file handle without syncing it.
+    /// Rejects poisoned handles and poisons this handle on an I/O failure.
     pub fn flush(&mut self) -> Result<(), JournalError> {
-        self.file.flush().map_err(JournalError::Io)
+        self.writer.flush(&mut self.file)
     }
 
     /// Requests durable persistence of all journal bytes written so far.
+    /// Rejects poisoned handles and poisons this handle on an I/O failure.
     pub fn sync(&mut self) -> Result<(), JournalError> {
-        self.file.sync_all().map_err(JournalError::Io)
-    }
-
-    fn write_durable(&mut self, start: u64, bytes: &[u8]) -> Result<(), JournalError> {
-        self.file.seek(SeekFrom::Start(start))?;
-        self.file.write_all(bytes)?;
-        self.flush()?;
-        self.sync()?;
-        Ok(())
-    }
-
-    fn rollback_to(&mut self, offset: u64) {
-        let _ = self.file.set_len(offset);
-        let _ = self.file.seek(SeekFrom::Start(offset));
-        self.end_offset = offset;
+        self.writer.sync(&mut self.file)
     }
 }
 

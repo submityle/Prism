@@ -29,6 +29,8 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 - `prism_world_persist`：`PersistentId`、规范化 `OverrideDelta`、append-only log、确定性 LWW CRDT、snapshot/timeline、undo/redo、little-endian codec/checksum。
 - `std` feature 提供 `FileJournal` 和 `SnapshotStore`：版本头、长度/序号/payload/checksum、批量 append、`flush + sync_all`、重启恢复、损坏/截断尾部裁剪、乱序/重复拒绝、同目录临时文件原子替换和父目录同步。
+- `FileJournal::open` 在读取、初始化或恢复之前取得独占 OS 文件锁，并保持到句柄销毁；第二个句柄明确返回 `Locked`，不支持绕过锁写入或替换锁定路径。写入、flush 或 sync 的 I/O 失败会 poison 当前句柄，即使尾部回滚成功也必须销毁并重开；回滚失败同时保留原始错误和回滚错误。故障注入走同一生产 writer，覆盖 seek/短写/flush/sync 和 truncate/seek/flush/sync 回滚失败。失败后内存 log 保持旧视图，但回滚失败且磁盘已有完整记录时，重开允许恢复这些记录；batch 不是崩溃原子事务。
+- 本轮 macOS 验证：`cargo test -j 1 -p prism_world_persist --features std --quiet` 的 18 项测试及 `cargo check -j 1 -p prism_world_persist --no-default-features` 通过。锁内读测试复用持锁文件句柄并恢复游标，避免另开句柄与 Windows 独占锁冲突；尚未提供 Windows 实机验证。
 - 相关提交：`4d0fbfebe`；Scene/ECS 接缝提交：`34656b305`；GPU workspace 集成：`c94d5cf13`。
 
 ### M3：异步 IO/provider
@@ -64,7 +66,7 @@ CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo clippy -p prism_world_net
 CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_stream -p prism_world_residency -p prism_world_persist -p prism_world --no-default-features
 ```
 
-核心 world policy 与 durable/scene tests 当前共 12 项持久化测试、5 项 `prism_world` 测试、11 项 IO 测试、4 项 network 测试、6 项 simulation 测试、7 项 terrain 测试、4 项 GPU CPU contract 测试和 1 项 WGSL validator 测试通过。
+核心 world policy 与 durable/scene tests 的既有验证包含 5 项 `prism_world` 测试、11 项 IO 测试、4 项 network 测试、6 项 simulation 测试、7 项 terrain 测试和 1 项 WGSL validator 测试；本轮持久化回归扩至上述 18 项，GPU CPU contract 已有 5 项通过。场景扩展修复与测试仍需独立验收，不以这些数量代替完整端到端覆盖。
 
 万级 benchmark（本机单次 best，作为回归基线，不是跨硬件性能承诺）：
 
@@ -74,7 +76,7 @@ CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_stre
 - persist CRDT merge：10,000 transactions，2.394 ms，4.18 Mtx/s；encode 7.642 ms，decode 10.246 ms。
 - 以上由 `cargo bench -p prism_world_stream -p prism_world_residency -p prism_world_persist -p prism_world --benches` 实际执行，结果随 CPU、编译器和负载变化。
 
-2026-10-15 当前 checkout 的严格 GPU 重跑结果为失败：`No suitable graphics adapter found`（Metal 未返回 adapter）；这不否定文档中记录的跨沙盒 Apple M2/Metal parity 结果，但当前环境不能重复该实机证据。
+2026-10-15 受限环境中的严格 GPU 重跑曾失败：`No suitable graphics adapter found`（Metal 未返回 adapter）。同日经过用户允许的跨沙盒严格重跑已取得上文 Apple M2/Metal 的 pipeline、dispatch/readback 和 parity 通过证据；保留该受限探测失败记录，不将无 adapter 的运行算作通过。
 
 `cargo clippy -D warnings` 在包含 `prism_world` 依赖闭包时会进入仓库其他并行改动的 `prism_asset`/`prism_ecs`，当前被这些既有告警阻断；world 自身新增代码已按相应 crate 的局部检查验证，不能把依赖闭包失败误报为全 workspace 通过。
 

@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
+use crate::durable::test_support::read_journal_bytes;
 
-fn transaction(id: u128, clock: u64, sequence: u64, value: i64) -> Transaction {
+pub(super) fn transaction(id: u128, clock: u64, sequence: u64, value: i64) -> Transaction {
     let forward = OverrideDelta::single(FieldId(1), OverrideValue::Integer(value))
         .expect("valid forward delta");
     let inverse =
@@ -21,7 +22,7 @@ fn transaction(id: u128, clock: u64, sequence: u64, value: i64) -> Transaction {
     .expect("valid transaction")
 }
 
-fn temporary_path(label: &str) -> PathBuf {
+pub(super) fn temporary_path(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock after epoch")
@@ -77,6 +78,82 @@ fn journal_rejects_duplicate_without_mutating_file_or_log() {
     ));
     assert_eq!(fs::metadata(&path).expect("metadata").len(), before_len);
     assert_eq!(journal.log().len(), 1);
+    journal
+        .append(transaction(30, 2, 1, 20))
+        .expect("validation failure must not poison the journal");
+}
+
+#[test]
+fn journal_exclusive_lock_rejects_second_handle_until_drop() {
+    let path = temporary_path("exclusive-lock");
+    let first = transaction(101, 1, 0, 10);
+    let second = transaction(102, 2, 1, 20);
+    let mut journal = FileJournal::open(&path).expect("first handle");
+    // Even an empty journal is protected before any append.
+    let header = read_journal_bytes(&mut journal);
+    assert!(matches!(
+        FileJournal::open(&path),
+        Err(JournalError::Locked)
+    ));
+    assert_eq!(read_journal_bytes(&mut journal), header);
+    journal.append(first.clone()).expect("first append");
+    let before = read_journal_bytes(&mut journal);
+    assert!(matches!(
+        FileJournal::open(&path),
+        Err(JournalError::Locked)
+    ));
+    assert_eq!(read_journal_bytes(&mut journal), before);
+    drop(journal);
+
+    let mut reopened = FileJournal::open(&path).expect("lock released on drop");
+    assert_eq!(reopened.log().as_slice(), &[first.clone()]);
+    reopened.append(second.clone()).expect("second append");
+    drop(reopened);
+    let reopened = FileJournal::open(&path).expect("restart");
+    assert_eq!(reopened.log().as_slice(), &[first, second]);
+    assert_eq!(reopened.recovery(), None);
+}
+
+#[test]
+fn journal_exclusive_lock_is_visible_to_another_process() {
+    const CHILD_PATH: &str = "PRISM_JOURNAL_LOCK_TEST_CHILD_PATH";
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let raw = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("child opens actual file");
+        assert!(matches!(raw.try_lock(), Err(fs::TryLockError::WouldBlock)));
+        assert!(matches!(
+            FileJournal::open(&path),
+            Err(JournalError::Locked)
+        ));
+        return;
+    }
+
+    let path = temporary_path("process-lock");
+    let mut journal = FileJournal::open(&path).expect("parent journal");
+    journal.append(transaction(103, 1, 0, 10)).unwrap();
+    let before = read_journal_bytes(&mut journal);
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "durable_tests::journal_exclusive_lock_is_visible_to_another_process",
+            "--nocapture",
+        ])
+        .env(CHILD_PATH, &path)
+        .output()
+        .expect("start lock contender process");
+    assert!(
+        child.status.success(),
+        "child failed: {}\n{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+    assert_eq!(read_journal_bytes(&mut journal), before);
+    drop(journal);
+    assert!(FileJournal::open(&path).is_ok());
 }
 
 #[test]
