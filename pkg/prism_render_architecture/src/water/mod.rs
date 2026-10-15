@@ -55,6 +55,7 @@ pub mod coastline;
 pub mod coupling;
 pub mod coupling_frame;
 pub mod dispersion;
+pub mod fabric;
 pub mod fft;
 pub mod flip;
 pub mod flip_sort;

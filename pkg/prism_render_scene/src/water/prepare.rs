@@ -20,6 +20,7 @@ use bevy_ecs::prelude::*;
 use bevy_render::renderer::RenderDevice;
 
 use prism_render_architecture::water::gpu::pipeline::prepare;
+use prism_render_architecture::water::{WaterFabricPlan, WaterShadingPlan};
 
 use super::bind_groups::{WaterBodyBindGroups, WaterBodyGpuBuffers};
 use super::body::ExtractedWater;
@@ -63,11 +64,16 @@ pub(crate) fn prepare_water_bodies(
         // CPU (no device needed): `None` for simulation-only / un-swept /
         // degenerate bodies, which then draw nothing.
         let surface_draw = super::surface_node::plan_surface_draw(body);
+        let shading = surface_draw
+            .as_ref()
+            .map_or(WaterShadingPlan::default(), |draw| draw.shading.plan);
+        let fabric = WaterFabricPlan::for_shading(shading);
         bodies.bodies.push(WaterGpuBody::new(
             buffers,
             bind_groups,
             plan.dispatches,
             surface_draw,
+            fabric,
         ));
     }
 }

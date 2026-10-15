@@ -158,6 +158,9 @@ pub(crate) fn draw_water_surface(
     // pass that records all the draws.
     let mut prepared: Vec<PreparedSurfaceDraw> = Vec::new();
     for body in &bodies.bodies {
+        if !body.fabric.is_link_complete() {
+            continue;
+        }
         let Some(draw) = body.surface_draw.as_ref() else {
             continue;
         };

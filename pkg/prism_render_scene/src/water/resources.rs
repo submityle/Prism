@@ -16,6 +16,7 @@
 use bevy_ecs::resource::Resource;
 
 use prism_render_architecture::water::gpu::pipeline::PlannedDispatch;
+use prism_render_architecture::water::WaterFabricPlan;
 
 use super::bind_groups::{WaterBodyBindGroups, WaterBodyGpuBuffers};
 use super::surface_node::SurfaceDraw;
@@ -47,6 +48,8 @@ pub(crate) struct WaterGpuBody {
     /// [`draw_water_surface`](super::surface_draw::draw_water_surface) to key
     /// the pipeline and size the index buffer.
     pub(crate) surface_draw: Option<SurfaceDraw>,
+    /// Declarative services, resources, and resident passes for this body.
+    pub(crate) fabric: WaterFabricPlan,
 }
 
 impl WaterGpuBody {
@@ -59,12 +62,14 @@ impl WaterGpuBody {
         bind_groups: WaterBodyBindGroups,
         dispatches: Vec<PlannedDispatch>,
         surface_draw: Option<SurfaceDraw>,
+        fabric: WaterFabricPlan,
     ) -> Self {
         Self {
             buffers,
             bind_groups,
             dispatches,
             surface_draw,
+            fabric,
         }
     }
 }

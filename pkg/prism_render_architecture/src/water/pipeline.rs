@@ -38,6 +38,7 @@ use super::breaking::BreakingSample;
 use super::budget::{plan_water, WaterJobKind, WaterJobRequest, WaterSolvePlan};
 use super::caustics::{select_caustics, CausticsMethod, CausticsThresholds};
 use super::coupling_frame::{plan_coupling_frame, CouplingFramePlan, CouplingInputs};
+use super::fabric::WaterFabricPlan;
 use super::flip::{select_pressure_solver, PressureSolver, PressureSolverThresholds};
 use super::ocean_lod::{bin_ocean_patches, OceanClipmapConfig, OceanClipmapPlan};
 use super::optics::{plan_optics, OpticsInputs, OpticsPlan};
@@ -351,6 +352,9 @@ pub struct WaterFramePlan {
     pub prepares: Vec<WaterPrepare>,
     /// The arbitrated, dispatch-ready queue.
     pub queue: WaterQueue,
+    /// The declarative render-fabric view for every prepared body, in stable
+    /// input order.
+    pub fabric: Vec<WaterFabricPlan>,
 }
 
 /// Squared, then cubed, saturating powers of the grid resolution.
@@ -701,10 +705,15 @@ pub fn plan_frame(
         prepares.push(prepare(snapshot, config));
     }
     let queue = queue(&prepares, budget, config.clipmap);
+    let fabric = prepares
+        .iter()
+        .map(|prepare| WaterFabricPlan::for_shading(prepare.shading_plan))
+        .collect();
     WaterFramePlan {
         extracts,
         prepares,
         queue,
+        fabric,
     }
 }
 
