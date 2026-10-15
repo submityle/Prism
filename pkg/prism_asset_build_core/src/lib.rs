@@ -76,9 +76,9 @@ pub use profile::{
 pub use publication::{PublicationDescriptor, PublishedContainer};
 pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError};
 pub use release::{
-    ReleaseDescriptor, ReleaseError, ReleaseGate, ReleaseKeyId, ReleasePublicKey,
-    ReleaseSignatureError, ReleaseSigner, ReleaseVerification, ReleaseVerifier,
-    SignedReleaseDescriptor,
+    ReleaseDescriptor, ReleaseError, ReleaseGate, ReleaseKeyId, ReleaseKeyStatus, ReleasePublicKey,
+    ReleaseSignatureError, ReleaseSigner, ReleaseTrustError, ReleaseTrustStore,
+    ReleaseVerification, ReleaseVerifier, SignedReleaseDescriptor, TrustPolicy,
 };
 pub use resources::{BuildResources, ResourceError};
 pub use runtime_patch::{
