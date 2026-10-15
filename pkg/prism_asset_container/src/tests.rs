@@ -7,7 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     ChunkInput, ChunkPlanner, ChunkPolicy, Codec, ContainerError, ContainerIdentity,
-    ContainerReader, ContainerWriter, FileRangeSource, ManifestAssetReader, ManifestError,
+    install_runtime_package, ContainerReader, ContainerWriter, FileRangeSource, InstallMount,
+    InstallTombstones, ManifestAssetReader, ManifestError,
     ManifestMetadata, ManifestRangeRequest, ManifestReadError, ManifestRoute, MemoryRangeSource,
     OverlaySet, RangeBatchPolicy, RangeRequest, RangeSource, RangeSourceError, RuntimeManifest,
     FORMAT_VERSION, MAGIC,
@@ -1726,4 +1727,83 @@ fn runtime_manifest_patch_replaces_routes_removes_tombstones_and_is_transactiona
         Err(ManifestError::ContainerIdentityConflict(name)) if name == "patch"
     ));
     assert_eq!(base, before);
+}
+
+#[test]
+fn runtime_package_install_publishes_only_after_manifest_binding() {
+    let existing_guid = guid("existing.asset");
+    let package_guid = guid("package.asset");
+    let existing_bytes = build(&[("existing.asset", b"existing")]);
+    let package_bytes = build(&[("package.asset", b"package")]);
+
+    let mut overlay = OverlaySet::new();
+    overlay.mount("base", 1, ContainerReader::new(existing_bytes).unwrap());
+
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert(ManifestRoute {
+            guid: package_guid,
+            container_name: "package".into(),
+            priority: 5,
+            container_guid: package_guid,
+        })
+        .unwrap();
+    manifest
+        .bind_container("package", identity(&package_bytes))
+        .unwrap();
+
+    install_runtime_package(
+        &mut overlay,
+        &manifest,
+        [InstallMount::new(
+            "package",
+            5,
+            ContainerReader::new(package_bytes.clone()).unwrap(),
+        )],
+        std::iter::empty::<InstallTombstones>(),
+    )
+    .unwrap();
+
+    assert_eq!(overlay.read_all(package_guid).unwrap(), b"package");
+    assert_eq!(overlay.read_all(existing_guid).unwrap(), b"existing");
+}
+
+#[test]
+fn runtime_package_install_failure_keeps_previous_overlay_snapshot() {
+    let existing_guid = guid("existing.asset");
+    let package_guid = guid("package.asset");
+    let existing_bytes = build(&[("existing.asset", b"existing")]);
+    let expected_bytes = build(&[("package.asset", b"expected")]);
+    let wrong_bytes = build(&[("package.asset", b"wrong")]);
+
+    let mut overlay = OverlaySet::new();
+    overlay.mount("base", 1, ContainerReader::new(existing_bytes).unwrap());
+
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert(ManifestRoute {
+            guid: package_guid,
+            container_name: "package".into(),
+            priority: 5,
+            container_guid: package_guid,
+        })
+        .unwrap();
+    manifest
+        .bind_container("package", identity(&expected_bytes))
+        .unwrap();
+
+    let error = install_runtime_package(
+        &mut overlay,
+        &manifest,
+        [InstallMount::new(
+            "package",
+            5,
+            ContainerReader::new(wrong_bytes).unwrap(),
+        )],
+        std::iter::empty::<InstallTombstones>(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, crate::InstallError::Manifest(_)));
+    assert_eq!(overlay.read_all(existing_guid).unwrap(), b"existing");
+    assert!(!overlay.contains(package_guid));
 }

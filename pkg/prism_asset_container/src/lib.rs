@@ -10,6 +10,7 @@ extern crate alloc;
 
 mod chunk;
 mod format;
+mod install;
 mod manifest;
 mod manifest_reader;
 mod overlay;
@@ -23,6 +24,7 @@ pub use chunk::{
     ChunkInput, ChunkPlacement, ChunkPlan, ChunkPlanError, ChunkPlanner, ChunkPolicy, PlannedChunk,
 };
 pub use format::{Codec, ContainerError, ContainerInfo, EntryInfo, FORMAT_VERSION, MAGIC};
+pub use install::{install_runtime_package, InstallError, InstallMount, InstallTombstones};
 pub use manifest::{
     ContainerIdentity, ManifestError, ManifestMetadata, ManifestRoute, RuntimeManifest,
     MANIFEST_MAGIC, MANIFEST_VERSION,
