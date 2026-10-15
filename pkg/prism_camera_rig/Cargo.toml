@@ -10,14 +10,19 @@ publish = false
 [dependencies]
 libm = "0.2"
 prism_math = { path = "../prism_math" }
-prism_camera = { path = "../prism_camera" }
+prism_camera = { path = "../prism_camera", default-features = false }
 
 [features]
-default = ["director", "rig"]
-director = []
-rig = []
+default = ["director", "rig", "determinism"]
+# Director candidates carry an optional physical lens contract.
+director = ["prism_camera/physical_lens"]
+rig = ["prism_camera/view_lod"]
 determinism = []
 trace = []
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "camera_contracts"
+harness = false

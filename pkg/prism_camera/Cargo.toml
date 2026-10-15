@@ -14,13 +14,15 @@ prism_render_architecture = { path = "../prism_render_architecture" }
 
 [features]
 default = ["physical_lens", "post", "stereo", "determinism"]
+# The core projection/view path is always available. Optional features only
+# add their corresponding public contracts and implementation code.
 std = []
 physical_lens = []
 post = []
 stereo = []
 determinism = []
 cutscene = []
-autofocus = []
+autofocus = ["physical_lens"]
 shutter = []
 view_batch = []
 lookahead_stream = []
@@ -28,6 +30,7 @@ edge_stabilize = []
 virtual_production = []
 view_lod = []
 composition_aid = []
+occlusion_fade = []
 
 [lints]
 workspace = true

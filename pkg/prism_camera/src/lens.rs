@@ -1,12 +1,15 @@
+#[cfg(feature = "physical_lens")]
 use prism_math::Vec2;
 
 /// Sensor dimensions in millimetres.
+#[cfg(feature = "physical_lens")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Filmback {
     pub sensor_width_mm: f32,
     pub sensor_height_mm: f32,
 }
 
+#[cfg(feature = "physical_lens")]
 impl Filmback {
     pub const SUPER_35: Self = Self {
         sensor_width_mm: 24.89,
@@ -18,6 +21,7 @@ impl Filmback {
     };
 }
 
+#[cfg(feature = "physical_lens")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Lens {
     pub filmback: Filmback,
@@ -27,6 +31,7 @@ pub struct Lens {
     pub blades: u8,
 }
 
+#[cfg(feature = "physical_lens")]
 impl Lens {
     pub const fn cine_35mm() -> Self {
         Self {
@@ -186,6 +191,7 @@ mod tests {
         assert!((ev - 15.0).abs() < 0.05);
     }
 
+    #[cfg(feature = "physical_lens")]
     #[test]
     fn physical_lens_has_finite_fov_and_coc() {
         let lens = Lens::full_frame_50mm();

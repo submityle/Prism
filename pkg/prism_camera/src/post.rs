@@ -115,6 +115,61 @@ impl PostNode {
             _ => None,
         }
     }
+
+    fn validate(self) -> bool {
+        match self {
+            Self::Exposure(settings) => settings.compensation_ev.is_finite(),
+            Self::Bloom(settings) => {
+                settings.threshold.is_finite()
+                    && settings.intensity.is_finite()
+                    && settings.radius.is_finite()
+                    && settings.threshold >= 0.0
+                    && settings.intensity >= 0.0
+                    && settings.radius >= 0.0
+            }
+            Self::DepthOfField(settings) => {
+                settings.focus_distance_m.is_finite()
+                    && settings.max_coc_mm.is_finite()
+                    && settings.focus_distance_m > 0.0
+                    && settings.max_coc_mm >= 0.0
+                    && settings.aperture_blades >= 3
+            }
+            Self::MotionBlur(settings) => {
+                settings.shutter_angle.is_finite()
+                    && settings.max_velocity_pixels.is_finite()
+                    && settings.shutter_angle >= 0.0
+                    && settings.max_velocity_pixels >= 0.0
+            }
+            Self::ChromaticAberration(value) | Self::Vignette(value) | Self::FilmGrain(value) => {
+                value.is_finite() && value >= 0.0
+            }
+            Self::ColorGrade(settings) => {
+                settings.exposure_ev.is_finite()
+                    && settings.contrast.is_finite()
+                    && settings.saturation.is_finite()
+            }
+            Self::Smaa(level) => level > 0,
+            Self::Tonemap(_) | Self::Fxaa | Self::Raw { .. } => true,
+        }
+    }
+
+    fn sort_key(self) -> (PostStage, PassDomain, u64) {
+        let kind = match self {
+            Self::MotionBlur(_) => 0,
+            Self::DepthOfField(_) => 1,
+            Self::Bloom(_) => 2,
+            Self::Exposure(_) => 3,
+            Self::Tonemap(_) => 4,
+            Self::ColorGrade(_) => 5,
+            Self::ChromaticAberration(_) => 6,
+            Self::Vignette(_) => 7,
+            Self::FilmGrain(_) => 8,
+            Self::Fxaa => 9,
+            Self::Smaa(_) => 10,
+            Self::Raw { id, .. } => 0x1_0000_0000 | id as u64,
+        };
+        (self.stage(), self.domain(), kind)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +177,7 @@ pub enum PostStackError {
     CapacityExceeded,
     DuplicateExclusiveNode,
     InvalidDomain,
+    InvalidSettings,
 }
 
 /// Bounded authoring stack. Normalization is deterministic and allocation-free
@@ -139,6 +195,9 @@ impl PostStack {
             return Err(PostStackError::CapacityExceeded);
         }
         for node in &self.nodes {
+            if !node.validate() {
+                return Err(PostStackError::InvalidSettings);
+            }
             if node.domain() == PassDomain::PreUpscale && node.stage() >= PostStage::Tonemap {
                 return Err(PostStackError::InvalidDomain);
             }
@@ -154,16 +213,12 @@ impl PostStack {
                 seen_count += 1;
             }
         }
-        self.nodes.sort_by(|a, b| {
-            a.stage()
-                .cmp(&b.stage())
-                .then_with(|| a.domain().cmp(&b.domain()))
-        });
+        self.nodes.sort_by_key(|node| node.sort_key());
         Ok(())
     }
 
     pub fn push(&mut self, node: PostNode) -> Result<(), PostStackError> {
-        if self.nodes.len() == Self::MAX_NODES {
+        if self.nodes.len() >= Self::MAX_NODES {
             return Err(PostStackError::CapacityExceeded);
         }
         self.nodes.push(node);
@@ -212,5 +267,47 @@ mod tests {
             }))
             .unwrap();
         assert!(stack.normalize().is_ok());
+    }
+
+    #[test]
+    fn normalization_rejects_non_finite_or_invalid_settings() {
+        let mut stack = PostStack {
+            nodes: vec![PostNode::Bloom(BloomSettings {
+                threshold: f32::NAN,
+                intensity: 1.0,
+                radius: 1.0,
+            })],
+        };
+        assert_eq!(stack.normalize(), Err(PostStackError::InvalidSettings));
+
+        stack.nodes[0] = PostNode::DepthOfField(DofSettings {
+            focus_distance_m: 2.0,
+            max_coc_mm: 1.0,
+            aperture_blades: 2,
+        });
+        assert_eq!(stack.normalize(), Err(PostStackError::InvalidSettings));
+    }
+
+    #[test]
+    fn normalization_has_deterministic_tie_order() {
+        let mut stack = PostStack {
+            nodes: vec![
+                PostNode::Raw {
+                    id: 20,
+                    stage: PostStage::Stylize,
+                    domain: PassDomain::PostUpscale,
+                },
+                PostNode::Vignette(0.5),
+                PostNode::Raw {
+                    id: 3,
+                    stage: PostStage::Stylize,
+                    domain: PassDomain::PostUpscale,
+                },
+            ],
+        };
+        stack.normalize().unwrap();
+        assert!(matches!(stack.nodes[0], PostNode::Vignette(_)));
+        assert!(matches!(stack.nodes[1], PostNode::Raw { id: 3, .. }));
+        assert!(matches!(stack.nodes[2], PostNode::Raw { id: 20, .. }));
     }
 }

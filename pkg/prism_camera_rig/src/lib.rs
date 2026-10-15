@@ -4,21 +4,56 @@
 
 extern crate alloc;
 
+#[cfg(feature = "rig")]
 use alloc::vec::Vec;
-use prism_camera::{CameraPose, Lens};
+#[cfg(any(feature = "director", feature = "rig"))]
+use prism_camera::CameraPose;
+#[cfg(feature = "director")]
+use prism_camera::Lens;
+#[cfg(any(feature = "director", feature = "rig"))]
 use prism_math::{DQuat, DVec3, Quat, Vec2, Vec3};
 
+/// Optional caller-owned counters for profiling rig work without forcing a
+/// timing dependency into the allocation-free runtime crate.
+#[cfg(feature = "trace")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TraceCounters {
+    pub director_updates: u64,
+    pub rig_resolves: u64,
+}
+
+#[cfg(feature = "trace")]
+impl TraceCounters {
+    pub const fn new() -> Self {
+        Self {
+            director_updates: 0,
+            rig_resolves: 0,
+        }
+    }
+
+    pub fn record_director_update(&mut self) {
+        self.director_updates = self.director_updates.saturating_add(1);
+    }
+
+    pub fn record_rig_resolve(&mut self) {
+        self.rig_resolves = self.rig_resolves.saturating_add(1);
+    }
+}
+
 /// A camera candidate with a stable identity used for deterministic selection.
+#[cfg(feature = "director")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VirtualCamera {
     pub key: u64,
     pub priority: i32,
     pub enabled: bool,
     pub pose: CameraPose,
+    #[cfg(feature = "director")]
     pub lens: Option<Lens>,
     pub weight: f32,
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BodyRig {
     Fixed {
@@ -36,6 +71,7 @@ pub enum BodyRig {
     },
 }
 
+#[cfg(feature = "rig")]
 impl Default for BodyRig {
     fn default() -> Self {
         Self::Fixed {
@@ -44,6 +80,7 @@ impl Default for BodyRig {
     }
 }
 
+#[cfg(feature = "rig")]
 impl BodyRig {
     pub fn position(self, fallback: DVec3) -> DVec3 {
         let position = match self {
@@ -64,12 +101,14 @@ impl BodyRig {
     }
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AimRig {
     Fixed { rotation: DQuat },
     LookAt { target: DVec3 },
 }
 
+#[cfg(feature = "rig")]
 impl Default for AimRig {
     fn default() -> Self {
         Self::Fixed {
@@ -78,6 +117,7 @@ impl Default for AimRig {
     }
 }
 
+#[cfg(feature = "rig")]
 impl AimRig {
     pub fn rotation(self, position: DVec3, fallback: DQuat) -> DQuat {
         let rotation = match self {
@@ -99,12 +139,14 @@ impl AimRig {
     }
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigOutput {
     pub pose: CameraPose,
     pub spring_arm_status: Option<SpringArmStatus>,
 }
 
+#[cfg(feature = "rig")]
 pub fn compose_rig(body: BodyRig, aim: AimRig, origin: DVec3, fallback: CameraPose) -> RigOutput {
     let position = body.position(fallback.position);
     let rotation = aim.rotation(position, fallback.rotation);
@@ -118,6 +160,7 @@ pub fn compose_rig(body: BodyRig, aim: AimRig, origin: DVec3, fallback: CameraPo
     }
 }
 
+#[cfg(feature = "director")]
 impl Default for VirtualCamera {
     fn default() -> Self {
         Self {
@@ -132,27 +175,34 @@ impl Default for VirtualCamera {
 }
 
 /// Blend policy for two virtual-camera outputs.
+#[cfg(feature = "director")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Blend {
     pub duration_s: f32,
     pub elapsed_s: f32,
 }
 
+#[cfg(feature = "director")]
 impl Blend {
     pub const fn new(duration_s: f32) -> Self {
         Self {
-            duration_s,
+            duration_s: if duration_s.is_finite() && duration_s > 0.0 {
+                duration_s
+            } else {
+                0.0
+            },
             elapsed_s: 0.0,
         }
     }
     pub fn advance(self, dt: f32) -> Self {
         Self {
-            elapsed_s: (self.elapsed_s + dt.max(0.0)).min(self.duration_s.max(0.0)),
+            elapsed_s: (self.elapsed_s + if dt.is_finite() { dt.max(0.0) } else { 0.0 })
+                .min(self.duration_s),
             ..self
         }
     }
     pub fn amount(self) -> f32 {
-        if self.duration_s <= 0.0 {
+        if !self.duration_s.is_finite() || self.duration_s <= 0.0 {
             1.0
         } else {
             (self.elapsed_s / self.duration_s).clamp(0.0, 1.0)
@@ -164,6 +214,7 @@ impl Blend {
 }
 
 /// Stateful director. Candidate order is priority descending, then key ascending.
+#[cfg(feature = "director")]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CameraBrain {
     pub active_key: Option<u64>,
@@ -174,13 +225,31 @@ pub struct CameraBrain {
     current_pose: Option<CameraPose>,
 }
 
+#[cfg(feature = "director")]
 impl CameraBrain {
     pub fn choose(cameras: &[VirtualCamera]) -> Option<VirtualCamera> {
         cameras
             .iter()
             .copied()
-            .filter(|camera| camera.enabled && camera.weight > 0.0)
-            .max_by(|a, b| a.priority.cmp(&b.priority).then_with(|| b.key.cmp(&a.key)))
+            .filter(|camera| {
+                camera.enabled
+                    && camera.weight.is_finite()
+                    && camera.weight > 0.0
+                    && camera.pose.position.is_finite()
+                    && camera.pose.rotation.is_finite()
+                    && camera.pose.world_origin.is_finite()
+            })
+            .max_by(|a, b| {
+                let priority = a.priority.cmp(&b.priority);
+                #[cfg(feature = "determinism")]
+                {
+                    priority.then_with(|| b.key.cmp(&a.key))
+                }
+                #[cfg(not(feature = "determinism"))]
+                {
+                    priority
+                }
+            })
     }
 
     pub fn update(
@@ -192,8 +261,12 @@ impl CameraBrain {
         let Some(next) = Self::choose(candidates) else {
             self.cut = false;
             self.active_key = None;
+            self.blend = None;
+            self.from_pose = None;
+            self.current_pose = None;
             return default;
         };
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
         let changed = self.active_key != Some(next.key);
         if changed {
             self.from_pose = self.current_pose;
@@ -223,6 +296,7 @@ impl CameraBrain {
     }
 }
 
+#[cfg(feature = "director")]
 fn blend_pose(from: CameraPose, to: CameraPose, amount: f32) -> CameraPose {
     let t = amount.clamp(0.0, 1.0) as f64;
     CameraPose {
@@ -233,6 +307,7 @@ fn blend_pose(from: CameraPose, to: CameraPose, amount: f32) -> CameraPose {
 }
 
 /// A bounded sphere cast request for a spring arm.
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CastRequest {
     pub origin: Vec3,
@@ -241,6 +316,7 @@ pub struct CastRequest {
     pub radius: f32,
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CastHit {
     pub hit: bool,
@@ -249,10 +325,12 @@ pub struct CastHit {
 }
 
 /// Batch query owner. Physics remains authoritative outside this crate.
+#[cfg(feature = "rig")]
 pub trait SceneQuery {
     fn cast_batch(&self, requests: &[CastRequest], hits: &mut [CastHit]);
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpringArmStatus {
     Clear,
@@ -260,6 +338,7 @@ pub enum SpringArmStatus {
     Unavailable,
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpringArm {
     pub arm_length: f32,
@@ -268,12 +347,14 @@ pub struct SpringArm {
     pub collision_margin: f32,
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NoiseAxes {
     pub amplitude: Vec3,
     pub frequency: Vec3,
 }
 
+#[cfg(feature = "rig")]
 impl Default for NoiseAxes {
     fn default() -> Self {
         Self {
@@ -283,6 +364,7 @@ impl Default for NoiseAxes {
     }
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraNoise {
     pub position: NoiseAxes,
@@ -292,6 +374,7 @@ pub struct CameraNoise {
     pub temporal_clamp: f32,
 }
 
+#[cfg(feature = "rig")]
 impl Default for CameraNoise {
     fn default() -> Self {
         Self {
@@ -304,6 +387,7 @@ impl Default for CameraNoise {
     }
 }
 
+#[cfg(feature = "rig")]
 impl CameraNoise {
     pub fn sample(self, pose: CameraPose, time_s: f32) -> CameraPose {
         let g = self.gain.max(0.0);
@@ -331,6 +415,7 @@ impl CameraNoise {
     }
 }
 
+#[cfg(feature = "rig")]
 fn gradient_noise(value: f32) -> f32 {
     if !value.is_finite() {
         return 0.0;
@@ -359,6 +444,7 @@ fn gradient_noise(value: f32) -> f32 {
     (first + (octave_left + (octave_right - octave_left) * octave_fade) * 0.5) / 1.5
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImpulseSource {
     pub id: u64,
@@ -370,6 +456,7 @@ pub struct ImpulseSource {
     pub decay_s: f32,
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImpulseBuffer {
     pub entries: Vec<ImpulseEntry>,
@@ -377,12 +464,14 @@ pub struct ImpulseBuffer {
     pub max_rotation: f32,
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImpulseEntry {
     pub source: ImpulseSource,
     pub started_at_s: f32,
 }
 
+#[cfg(feature = "rig")]
 impl Default for ImpulseBuffer {
     fn default() -> Self {
         Self {
@@ -393,12 +482,14 @@ impl Default for ImpulseBuffer {
     }
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImpulseResponse {
     pub translation: Vec3,
     pub rotation: Vec3,
 }
 
+#[cfg(feature = "rig")]
 impl ImpulseSource {
     pub fn response(self, camera_position: Vec3, time_s: f32) -> ImpulseResponse {
         let attack = self.attack_s.max(0.0);
@@ -447,6 +538,7 @@ impl ImpulseSource {
     }
 }
 
+#[cfg(feature = "rig")]
 impl ImpulseBuffer {
     pub const MAX_SOURCES: usize = 64;
 
@@ -497,6 +589,7 @@ impl ImpulseBuffer {
     }
 }
 
+#[cfg(feature = "rig")]
 fn clamp_vector(value: Vec3, limit: f32) -> Vec3 {
     let limit = limit.max(0.0);
     let length = value.length();
@@ -511,6 +604,7 @@ fn clamp_vector(value: Vec3, limit: f32) -> Vec3 {
     }
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CameraCommand {
     pub move_axis: Vec3,
@@ -519,6 +613,7 @@ pub struct CameraCommand {
     pub boost: bool,
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraInputMap {
     pub move_deadzone: f32,
@@ -527,6 +622,7 @@ pub struct CameraInputMap {
     pub boost_multiplier: f32,
 }
 
+#[cfg(feature = "rig")]
 impl Default for CameraInputMap {
     fn default() -> Self {
         Self {
@@ -538,6 +634,7 @@ impl Default for CameraInputMap {
     }
 }
 
+#[cfg(feature = "rig")]
 impl CameraInputMap {
     pub fn normalize(self, mut command: CameraCommand) -> CameraCommand {
         if !command.move_axis.is_finite() {
@@ -585,11 +682,13 @@ impl CameraInputMap {
     }
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Debug, Default)]
 pub struct ViewUpdateScheduler {
     pub last_frames: Vec<u64>,
 }
 
+#[cfg(feature = "rig")]
 impl ViewUpdateScheduler {
     pub fn should_update(
         &mut self,
@@ -610,6 +709,7 @@ impl ViewUpdateScheduler {
     }
 }
 
+#[cfg(feature = "rig")]
 impl Default for SpringArm {
     fn default() -> Self {
         Self {
@@ -621,6 +721,7 @@ impl Default for SpringArm {
     }
 }
 
+#[cfg(feature = "rig")]
 impl SpringArm {
     pub fn resolve<Q: SceneQuery>(
         &self,
@@ -672,6 +773,7 @@ impl SpringArm {
     }
 }
 
+#[cfg(feature = "rig")]
 pub fn smooth_half_life(current: f32, target: f32, half_life: f32, dt: f32) -> f32 {
     if !current.is_finite() || !target.is_finite() {
         return if target.is_finite() { target } else { current };
@@ -683,12 +785,14 @@ pub fn smooth_half_life(current: f32, target: f32, half_life: f32, dt: f32) -> f
     target + (current - target) * k
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FlyController {
     pub move_axis: Vec3,
     pub speed: f32,
 }
 
+#[cfg(feature = "rig")]
 impl FlyController {
     pub fn apply(self, pose: CameraPose, dt: f32) -> CameraPose {
         let movement = pose.rotation.mul_vec3(prism_math::DVec3::new(
@@ -703,6 +807,7 @@ impl FlyController {
     }
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct OrbitController {
     pub yaw: f32,
@@ -711,6 +816,7 @@ pub struct OrbitController {
     pub target: DVec3,
 }
 
+#[cfg(feature = "rig")]
 impl OrbitController {
     pub fn pose(self, world_origin: DVec3) -> CameraPose {
         let pitch = self.pitch.clamp(-1.56, 1.56);
@@ -725,12 +831,14 @@ impl OrbitController {
     }
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PanController {
     pub axis: Vec2,
     pub speed: f32,
 }
 
+#[cfg(feature = "rig")]
 impl PanController {
     pub fn apply(self, pose: CameraPose, dt: f32) -> CameraPose {
         let local = Vec3::new(self.axis.x, self.axis.y, 0.0) * (self.speed.max(0.0) * dt.max(0.0));
@@ -742,6 +850,7 @@ impl PanController {
     }
 }
 
+#[cfg(feature = "rig")]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Impulse {
     pub translation: Vec3,
@@ -749,28 +858,78 @@ pub struct Impulse {
     pub remaining_s: f32,
 }
 
+#[cfg(feature = "rig")]
 impl Impulse {
     pub fn sample(self, dt: f32) -> (CameraPose, Self) {
-        let factor = if self.remaining_s <= 0.0 {
-            0.0
-        } else {
-            (dt.max(0.0) / self.remaining_s).clamp(0.0, 1.0)
-        };
+        if !self.translation.is_finite() || !self.rotation.is_finite() {
+            return (CameraPose::default(), Self::default());
+        }
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        let factor = self.decay_factor(dt);
         let next = Self {
             translation: self.translation * (1.0 - factor),
             rotation: self.rotation * (1.0 - factor),
-            remaining_s: (self.remaining_s - dt.max(0.0)).max(0.0),
+            remaining_s: if self.remaining_s.is_finite() {
+                (self.remaining_s - dt).max(0.0)
+            } else {
+                0.0
+            },
         };
+        if factor >= 1.0 || !self.remaining_s.is_finite() || self.remaining_s <= 0.0 {
+            return (CameraPose::default(), Self::default());
+        }
         let pose = CameraPose {
             position: self.translation.as_dvec3(),
-            rotation: Quat::from_rotation_y(self.rotation.y).as_dquat(),
+            rotation: self.rotation_quaternion(),
             ..CameraPose::default()
         };
         (pose, next)
     }
+
+    pub fn apply(self, pose: CameraPose, dt: f32) -> (CameraPose, Self) {
+        if !self.translation.is_finite() || !self.rotation.is_finite() {
+            return (pose, Self::default());
+        }
+        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        let factor = self.decay_factor(dt);
+        if factor >= 1.0 || !self.remaining_s.is_finite() || self.remaining_s <= 0.0 {
+            return (pose, Self::default());
+        }
+        let offset = pose.rotation.mul_vec3(self.translation.as_dvec3());
+        let output = CameraPose {
+            position: pose.position + offset,
+            rotation: (pose.rotation * self.rotation_quaternion()).normalize(),
+            ..pose
+        };
+        let remaining = (self.remaining_s - dt).max(0.0);
+        (
+            output,
+            Self {
+                translation: self.translation * (1.0 - factor),
+                rotation: self.rotation * (1.0 - factor),
+                remaining_s: remaining,
+            },
+        )
+    }
+
+    fn decay_factor(self, dt: f32) -> f32 {
+        if !self.remaining_s.is_finite() || self.remaining_s <= 0.0 {
+            1.0
+        } else {
+            (if dt.is_finite() { dt.max(0.0) } else { 0.0 } / self.remaining_s).clamp(0.0, 1.0)
+        }
+    }
+
+    fn rotation_quaternion(self) -> DQuat {
+        (Quat::from_rotation_x(self.rotation.x)
+            * Quat::from_rotation_y(self.rotation.y)
+            * Quat::from_rotation_z(self.rotation.z))
+        .normalize()
+        .as_dquat()
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "director", feature = "rig"))]
 mod tests {
     use super::*;
 
@@ -816,6 +975,52 @@ mod tests {
         let pose = brain.update(&[a, b], 0.5, CameraPose::default());
         assert!((pose.position.x - 5.0).abs() < 1.0e-6);
         assert!(!brain.cut);
+    }
+
+    #[test]
+    fn brain_clears_transition_state_when_no_candidate_is_available() {
+        let camera = VirtualCamera {
+            key: 4,
+            pose: CameraPose {
+                position: DVec3::new(8.0, 0.0, 0.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut brain = CameraBrain {
+            blend_duration_s: 1.0,
+            ..Default::default()
+        };
+        let _ = brain.update(&[camera], 0.0, CameraPose::default());
+        let fallback = CameraPose {
+            position: DVec3::new(-2.0, 0.0, 0.0),
+            ..Default::default()
+        };
+        assert_eq!(brain.update(&[], 0.5, fallback), fallback);
+        assert_eq!(brain.active_key, None);
+        assert_eq!(brain.blend, None);
+        let resumed = brain.update(&[camera], 0.0, fallback);
+        assert_eq!(resumed, camera.pose);
+        assert!(brain.cut);
+    }
+
+    #[test]
+    fn brain_ignores_non_finite_candidates_and_dt() {
+        let invalid = VirtualCamera {
+            key: 1,
+            weight: f32::NAN,
+            ..Default::default()
+        };
+        assert_eq!(CameraBrain::choose(&[invalid]), None);
+        let valid = VirtualCamera {
+            key: 2,
+            ..Default::default()
+        };
+        let mut brain = CameraBrain::default();
+        assert_eq!(
+            brain.update(&[valid], f32::NAN, CameraPose::default()),
+            valid.pose
+        );
     }
 
     #[test]
@@ -895,6 +1100,28 @@ mod tests {
         assert!(!buffer.submit(source, 0.0));
         let response = buffer.sample(Vec3::ZERO, 0.5);
         assert!(response.translation.length() <= 1.0 + 1.0e-6);
+    }
+
+    #[test]
+    fn impulse_applies_all_six_degrees_of_freedom_and_expires() {
+        let impulse = Impulse {
+            translation: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Vec3::new(0.1, 0.2, 0.3),
+            remaining_s: 1.0,
+        };
+        let base = CameraPose {
+            position: DVec3::new(10.0, 0.0, 0.0),
+            rotation: DQuat::from_rotation_y(0.4),
+            ..Default::default()
+        };
+        let (output, next) = impulse.apply(base, 0.0);
+        assert_ne!(output.position, base.position);
+        assert_ne!(output.rotation, base.rotation);
+        assert!(output.rotation.is_finite());
+        assert_eq!(next.remaining_s, 1.0);
+        let (expired, cleared) = impulse.apply(base, 1.0);
+        assert_eq!(expired, base);
+        assert_eq!(cleared, Impulse::default());
     }
 
     #[test]

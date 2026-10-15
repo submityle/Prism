@@ -1,9 +1,37 @@
+#[cfg(any(
+    feature = "cutscene",
+    feature = "occlusion_fade",
+    feature = "lookahead_stream"
+))]
 use alloc::vec::Vec;
 
-use prism_math::{DVec3, Vec2};
+#[cfg(any(
+    feature = "cutscene",
+    feature = "virtual_production",
+    feature = "view_batch",
+    feature = "lookahead_stream",
+    feature = "determinism"
+))]
+use prism_math::DVec3;
+#[cfg(any(feature = "virtual_production", feature = "view_batch"))]
+use prism_math::Vec2;
 
-use crate::{CameraPose, Exposure, Lens, RenderTarget, ViewData, ViewKind};
+#[cfg(any(
+    feature = "cutscene",
+    feature = "virtual_production",
+    feature = "determinism"
+))]
+use crate::CameraPose;
+#[cfg(feature = "cutscene")]
+use crate::Exposure;
+#[cfg(feature = "physical_lens")]
+use crate::Lens;
+#[cfg(any(feature = "view_batch", feature = "determinism"))]
+use crate::ViewData;
+#[cfg(feature = "view_batch")]
+use crate::{RenderTarget, ViewKind};
 
+#[cfg(feature = "cutscene")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CutsceneEndPolicy {
     Hold,
@@ -11,12 +39,14 @@ pub enum CutsceneEndPolicy {
     Deactivate,
 }
 
+#[cfg(feature = "cutscene")]
 impl Default for CutsceneEndPolicy {
     fn default() -> Self {
         Self::Hold
     }
 }
 
+#[cfg(feature = "cutscene")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraKeyframe {
     pub tick: u64,
@@ -26,12 +56,14 @@ pub struct CameraKeyframe {
     pub event_key: u64,
 }
 
+#[cfg(feature = "cutscene")]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CameraTrack {
     pub keyframes: Vec<CameraKeyframe>,
     pub end_policy: CutsceneEndPolicy,
 }
 
+#[cfg(feature = "cutscene")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraTrackSample {
     pub pose: CameraPose,
@@ -42,6 +74,7 @@ pub struct CameraTrackSample {
     pub handoff_to_previous: bool,
 }
 
+#[cfg(feature = "cutscene")]
 impl CameraTrack {
     pub const MAX_KEYFRAMES: usize = 4096;
 
@@ -148,12 +181,14 @@ impl CameraTrack {
     }
 }
 
+#[cfg(feature = "cutscene")]
 fn lerp_exposure(a: Exposure, b: Exposure, t: f32) -> Exposure {
     Exposure::ManualEv100 {
         ev100: a.ev100() + (b.ev100() - a.ev100()) * t.clamp(0.0, 1.0),
     }
 }
 
+#[cfg(feature = "autofocus")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FocusSource {
     FixedDistance { distance_m: f32 },
@@ -161,6 +196,7 @@ pub enum FocusSource {
     ScreenCenterHit { distance_m: Option<f32> },
 }
 
+#[cfg(feature = "autofocus")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FocusTracker {
     pub focus_distance_m: f32,
@@ -168,6 +204,7 @@ pub struct FocusTracker {
     pub half_life_s: f32,
 }
 
+#[cfg(feature = "autofocus")]
 impl Default for FocusTracker {
     fn default() -> Self {
         Self {
@@ -178,6 +215,7 @@ impl Default for FocusTracker {
     }
 }
 
+#[cfg(feature = "autofocus")]
 impl FocusTracker {
     pub fn update(&mut self, source: FocusSource, near: f32, dt: f32) -> bool {
         let distance = match source {
@@ -199,20 +237,38 @@ impl FocusTracker {
     }
 }
 
+#[cfg(any(feature = "autofocus", feature = "occlusion_fade"))]
 fn smooth_scalar(current: f32, target: f32, half_life: f32, dt: f32) -> f32 {
-    if half_life <= 0.0 || dt <= 0.0 {
+    if !target.is_finite() {
+        return if current.is_finite() { current } else { 0.0 };
+    }
+    if !current.is_finite() {
+        return target;
+    }
+    if !dt.is_finite() {
+        return if dt.is_sign_positive() {
+            target
+        } else {
+            current
+        };
+    }
+    if half_life.is_nan() || half_life <= 0.0 || dt <= 0.0 {
         target
+    } else if half_life.is_infinite() {
+        current
     } else {
         target + (current - target) * libm::exp2f(-dt / half_life)
     }
 }
 
+#[cfg(feature = "shutter")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Shutter {
     pub shutter_angle_deg: f32,
     pub fps: f32,
 }
 
+#[cfg(feature = "shutter")]
 impl Default for Shutter {
     fn default() -> Self {
         Self {
@@ -222,6 +278,7 @@ impl Default for Shutter {
     }
 }
 
+#[cfg(feature = "shutter")]
 impl Shutter {
     pub fn exposure_seconds(self) -> f32 {
         if self.fps.is_finite() && self.fps > 0.0 {
@@ -232,6 +289,7 @@ impl Shutter {
     }
 }
 
+#[cfg(feature = "virtual_production")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FoveationHint {
     pub center: Vec2,
@@ -240,6 +298,7 @@ pub struct FoveationHint {
     pub peripheral_scale: f32,
 }
 
+#[cfg(feature = "virtual_production")]
 impl Default for FoveationHint {
     fn default() -> Self {
         Self {
@@ -251,6 +310,7 @@ impl Default for FoveationHint {
     }
 }
 
+#[cfg(feature = "view_batch")]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ViewBatchKey {
     pub target: RenderTarget,
@@ -259,6 +319,7 @@ pub struct ViewBatchKey {
     pub policy_hash: u64,
 }
 
+#[cfg(feature = "view_batch")]
 impl ViewBatchKey {
     pub fn from_view(view: &ViewData, policy_hash: u64) -> Self {
         Self {
@@ -274,6 +335,7 @@ impl ViewBatchKey {
     }
 }
 
+#[cfg(feature = "view_lod")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewLod {
     pub max_update_hz: f32,
@@ -281,6 +343,7 @@ pub struct ViewLod {
     pub history_frames: u32,
 }
 
+#[cfg(feature = "view_lod")]
 impl Default for ViewLod {
     fn default() -> Self {
         Self {
@@ -291,16 +354,40 @@ impl Default for ViewLod {
     }
 }
 
+#[cfg(feature = "view_lod")]
 impl ViewLod {
+    pub fn update_interval_frames(self, frame_rate: f32) -> u64 {
+        if !self.max_update_hz.is_finite()
+            || !frame_rate.is_finite()
+            || self.max_update_hz <= 0.0
+            || frame_rate <= 0.0
+        {
+            return 1;
+        }
+        (frame_rate / self.max_update_hz).ceil().max(1.0) as u64
+    }
+
+    pub fn resolution_scale(self) -> f32 {
+        if self.min_resolution_scale.is_finite() {
+            self.min_resolution_scale.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    pub fn effective_history_frames(self) -> u32 {
+        self.history_frames
+    }
+
     pub fn should_update(self, frame: u64, last_frame: u64, frame_rate: f32) -> bool {
-        if self.max_update_hz <= 0.0 || frame_rate <= 0.0 {
+        if frame < last_frame {
             return true;
         }
-        let interval = (frame_rate / self.max_update_hz).ceil().max(1.0) as u64;
-        frame.saturating_sub(last_frame) >= interval
+        frame.saturating_sub(last_frame) >= self.update_interval_frames(frame_rate)
     }
 }
 
+#[cfg(feature = "composition_aid")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CompositionGuide {
     pub thirds: bool,
@@ -309,6 +396,7 @@ pub struct CompositionGuide {
     pub action_safe: f32,
 }
 
+#[cfg(feature = "virtual_production")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExternalPoseError {
     InvalidSample,
@@ -318,6 +406,7 @@ pub enum ExternalPoseError {
     RotationJump,
 }
 
+#[cfg(feature = "virtual_production")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExternalPoseSample {
     pub timestamp_s: f64,
@@ -325,6 +414,7 @@ pub struct ExternalPoseSample {
     pub calibration_version: u64,
 }
 
+#[cfg(feature = "virtual_production")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExternalPoseValidator {
     pub calibration_version: u64,
@@ -333,6 +423,7 @@ pub struct ExternalPoseValidator {
     pub last: Option<ExternalPoseSample>,
 }
 
+#[cfg(feature = "virtual_production")]
 impl Default for ExternalPoseValidator {
     fn default() -> Self {
         Self {
@@ -344,6 +435,7 @@ impl Default for ExternalPoseValidator {
     }
 }
 
+#[cfg(feature = "virtual_production")]
 impl ExternalPoseValidator {
     pub fn accept(&mut self, sample: ExternalPoseSample) -> Result<CameraPose, ExternalPoseError> {
         if !sample.timestamp_s.is_finite()
@@ -381,6 +473,7 @@ impl ExternalPoseValidator {
     }
 }
 
+#[cfg(feature = "occlusion_fade")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OcclusionSample {
     pub entity_id: u64,
@@ -388,6 +481,7 @@ pub struct OcclusionSample {
     pub coverage: f32,
 }
 
+#[cfg(feature = "occlusion_fade")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraOcclusionIntent {
     pub entity_id: u64,
@@ -395,6 +489,7 @@ pub struct CameraOcclusionIntent {
     pub fade: f32,
 }
 
+#[cfg(feature = "occlusion_fade")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct OcclusionFadeState {
     pub intents: Vec<CameraOcclusionIntent>,
@@ -403,6 +498,7 @@ pub struct OcclusionFadeState {
     pub half_life_s: f32,
 }
 
+#[cfg(feature = "occlusion_fade")]
 impl Default for OcclusionFadeState {
     fn default() -> Self {
         Self {
@@ -414,13 +510,14 @@ impl Default for OcclusionFadeState {
     }
 }
 
+#[cfg(feature = "occlusion_fade")]
 impl OcclusionFadeState {
     pub const MAX_INTENTS: usize = 64;
 
     pub fn update(&mut self, samples: &[OcclusionSample], dt: f32) {
         for sample in samples.iter().take(Self::MAX_INTENTS) {
             let covered = sample.coverage.is_finite() && sample.coverage >= self.enter_coverage;
-            let visible = sample.coverage.is_finite() && sample.coverage <= self.exit_coverage;
+            let visible = !sample.coverage.is_finite() || sample.coverage <= self.exit_coverage;
             let Some(index) = self.intents.iter().position(|intent| {
                 intent.entity_id == sample.entity_id && intent.generation == sample.generation
             }) else {
@@ -455,6 +552,7 @@ impl OcclusionFadeState {
     }
 }
 
+#[cfg(feature = "lookahead_stream")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LookaheadPredictor {
     pub horizon_s: f32,
@@ -463,6 +561,7 @@ pub struct LookaheadPredictor {
     pub max_acceleration: f32,
 }
 
+#[cfg(feature = "lookahead_stream")]
 impl Default for LookaheadPredictor {
     fn default() -> Self {
         Self {
@@ -474,6 +573,7 @@ impl Default for LookaheadPredictor {
     }
 }
 
+#[cfg(feature = "lookahead_stream")]
 impl LookaheadPredictor {
     pub const MAX_SAMPLES: usize = 16;
 
@@ -497,6 +597,7 @@ impl LookaheadPredictor {
     }
 }
 
+#[cfg(feature = "lookahead_stream")]
 fn clamp_dvec3(value: DVec3, limit: f64) -> DVec3 {
     let length = value.length();
     if !length.is_finite() || length <= limit || length <= 1.0e-12 {
@@ -506,6 +607,7 @@ fn clamp_dvec3(value: DVec3, limit: f64) -> DVec3 {
     }
 }
 
+#[cfg(feature = "edge_stabilize")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HistoryRejectReason {
     InvalidHistory,
@@ -513,6 +615,7 @@ pub enum HistoryRejectReason {
     AngularVelocity,
 }
 
+#[cfg(feature = "edge_stabilize")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HistoryStabilizer {
     pub max_linear_velocity: f32,
@@ -520,6 +623,7 @@ pub struct HistoryStabilizer {
     pub clamp_weight: f32,
 }
 
+#[cfg(feature = "edge_stabilize")]
 impl Default for HistoryStabilizer {
     fn default() -> Self {
         Self {
@@ -530,6 +634,7 @@ impl Default for HistoryStabilizer {
     }
 }
 
+#[cfg(feature = "edge_stabilize")]
 impl HistoryStabilizer {
     pub fn history_weight(
         self,
@@ -553,6 +658,7 @@ impl HistoryStabilizer {
     }
 }
 
+#[cfg(feature = "composition_aid")]
 impl Default for CompositionGuide {
     fn default() -> Self {
         Self {
@@ -564,11 +670,13 @@ impl Default for CompositionGuide {
     }
 }
 
+#[cfg(feature = "determinism")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CameraDeterminismDigest {
     pub bytes: [u8; 32],
 }
 
+#[cfg(feature = "determinism")]
 impl CameraDeterminismDigest {
     pub fn from_view(view: &ViewData, frame: u64) -> Self {
         let mut lanes = [0xcbf29ce484222325_u64; 4];
@@ -594,6 +702,7 @@ impl CameraDeterminismDigest {
     }
 }
 
+#[cfg(feature = "physical_lens")]
 #[allow(dead_code)]
 fn _keep_lens_type_visible(_: Lens) {}
 
@@ -603,6 +712,7 @@ mod tests {
     use crate::{derive_view, CameraIntent, ViewHistory};
     use prism_math::DVec3;
 
+    #[cfg(feature = "cutscene")]
     #[test]
     fn track_rejects_unsorted_keyframes_and_interpolates() {
         let mut track = CameraTrack::default();
@@ -626,6 +736,7 @@ mod tests {
         assert!((track.sample(15, CameraPose::default()).0.position.x - 5.0).abs() < 1.0e-6);
     }
 
+    #[cfg(feature = "cutscene")]
     #[test]
     fn track_end_policy_is_observable() {
         let mut track = CameraTrack {
@@ -652,6 +763,7 @@ mod tests {
         assert!(track.sample_state(2, fallback).handoff_to_previous);
     }
 
+    #[cfg(feature = "determinism")]
     #[test]
     fn digest_changes_when_view_changes() {
         let mut history = ViewHistory::default();
@@ -680,6 +792,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "virtual_production")]
     #[test]
     fn external_pose_validator_rejects_stale_and_large_jumps() {
         let mut validator = ExternalPoseValidator::default();
@@ -709,6 +822,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "occlusion_fade")]
     #[test]
     fn occlusion_fade_uses_capacity_and_hysteresis() {
         let mut state = OcclusionFadeState::default();
@@ -743,6 +857,7 @@ mod tests {
         assert!(state.intents.is_empty());
     }
 
+    #[cfg(all(feature = "lookahead_stream", feature = "edge_stabilize"))]
     #[test]
     fn lookahead_is_bounded_and_history_rejects_fast_motion() {
         let points = LookaheadPredictor::default().predict(
@@ -756,5 +871,43 @@ mod tests {
             HistoryStabilizer::default().history_weight(true, 100.0, 0.0),
             Err(HistoryRejectReason::LinearVelocity)
         );
+    }
+
+    #[cfg(feature = "occlusion_fade")]
+    #[test]
+    fn occlusion_invalid_samples_release_existing_fade() {
+        let mut state = OcclusionFadeState::default();
+        state.update(
+            &[OcclusionSample {
+                entity_id: 9,
+                generation: 1,
+                coverage: 1.0,
+            }],
+            0.0,
+        );
+        assert_eq!(state.intents[0].fade, 1.0);
+        state.update(
+            &[OcclusionSample {
+                entity_id: 9,
+                generation: 1,
+                coverage: f32::NAN,
+            }],
+            1.0,
+        );
+        assert!(state.intents.is_empty());
+    }
+
+    #[cfg(feature = "view_lod")]
+    #[test]
+    fn view_lod_handles_invalid_rate_and_frame_rewind() {
+        let policy = ViewLod {
+            max_update_hz: f32::NAN,
+            min_resolution_scale: 4.0,
+            history_frames: 0,
+        };
+        assert_eq!(policy.update_interval_frames(60.0), 1);
+        assert!(policy.should_update(2, 10, 60.0));
+        assert_eq!(policy.resolution_scale(), 1.0);
+        assert_eq!(policy.effective_history_frames(), 0);
     }
 }

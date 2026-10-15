@@ -15,25 +15,47 @@ mod gpu;
 mod jitter;
 mod lens;
 mod pick;
+#[cfg(feature = "post")]
 mod post;
 mod projection;
+#[cfg(feature = "stereo")]
 mod stereo;
 mod target;
 mod view;
 
-pub use advanced::{
-    CameraDeterminismDigest, CameraKeyframe, CameraOcclusionIntent, CameraTrack, CameraTrackSample,
-    CompositionGuide, CutsceneEndPolicy, ExternalPoseError, ExternalPoseSample,
-    ExternalPoseValidator, FocusSource, FocusTracker, FoveationHint, HistoryRejectReason,
-    HistoryStabilizer, LookaheadPredictor, OcclusionFadeState, OcclusionSample, Shutter,
-    ViewBatchKey, ViewLod,
-};
+#[cfg(feature = "determinism")]
+pub use advanced::CameraDeterminismDigest;
+#[cfg(feature = "composition_aid")]
+pub use advanced::CompositionGuide;
+#[cfg(feature = "lookahead_stream")]
+pub use advanced::LookaheadPredictor;
+#[cfg(feature = "occlusion_fade")]
+pub use advanced::OcclusionFadeState;
+#[cfg(feature = "shutter")]
+pub use advanced::Shutter;
+#[cfg(feature = "view_batch")]
+pub use advanced::ViewBatchKey;
+#[cfg(feature = "view_lod")]
+pub use advanced::ViewLod;
+#[cfg(feature = "cutscene")]
+pub use advanced::{CameraKeyframe, CameraTrack, CameraTrackSample, CutsceneEndPolicy};
+#[cfg(feature = "occlusion_fade")]
+pub use advanced::{CameraOcclusionIntent, OcclusionSample};
+#[cfg(feature = "virtual_production")]
+pub use advanced::{ExternalPoseError, ExternalPoseSample, ExternalPoseValidator, FoveationHint};
+#[cfg(feature = "autofocus")]
+pub use advanced::{FocusSource, FocusTracker};
+#[cfg(feature = "edge_stabilize")]
+pub use advanced::{HistoryRejectReason, HistoryStabilizer};
 pub use error::{CameraError, CameraErrorCode};
 pub use frustum::{extract_frustum, Frustum, HalfSpace};
 pub use gpu::{GpuViewRecord, VIEW_SCHEMA_VERSION};
 pub use jitter::{JitterSequence, JitterState};
-pub use lens::{Exposure, Filmback, Lens};
+pub use lens::Exposure;
+#[cfg(feature = "physical_lens")]
+pub use lens::{Filmback, Lens};
 pub use pick::PickError;
+#[cfg(feature = "post")]
 pub use post::{
     BloomSettings, ColorGradeSettings, DofSettings, ExposureSettings, MotionBlurSettings,
     PassDomain, PostNode, PostStack, PostStackError, PostStage, Tonemapper,
@@ -43,6 +65,7 @@ pub use projection::{
     FovAxis, ObliquePlane, OrthographicProjection, PerspectiveProjection, Projection,
     ProjectionError, SubView,
 };
+#[cfg(feature = "stereo")]
 pub use stereo::{Eye, LateLatchPose, StereoConfig, StereoPair};
 pub use target::{ClearMode, RenderTarget, Viewport, ViewportRect};
 pub use view::{
@@ -52,12 +75,19 @@ pub use view::{
 /// Public types commonly needed by camera authors.
 pub mod prelude {
     pub use crate::{
-        derive_view, publish_view, BloomSettings, CameraError, CameraErrorCode, CameraIntent,
-        CameraPose, ClearMode, ColorGradeSettings, DofSettings, Exposure, ExposureSettings,
-        Filmback, Frustum, GpuViewRecord, JitterSequence, JitterState, Lens, MotionBlurSettings,
-        ObliquePlane, OrthographicProjection, PassDomain, PerspectiveProjection, PickError,
-        PostNode, PostStack, PostStage, Projection, RenderTarget, StereoConfig, StereoPair,
+        derive_view, publish_view, CameraError, CameraErrorCode, CameraIntent, CameraPose,
+        ClearMode, Exposure, Frustum, GpuViewRecord, JitterSequence, JitterState, ObliquePlane,
+        OrthographicProjection, PerspectiveProjection, PickError, Projection, RenderTarget,
         SubView, ViewData, ViewHandle, ViewHistory, ViewImportance, ViewKind, ViewStatus, Viewport,
         ViewportRect,
     };
+    #[cfg(feature = "post")]
+    pub use crate::{
+        BloomSettings, ColorGradeSettings, DofSettings, ExposureSettings, PostNode, PostStack,
+        PostStage,
+    };
+    #[cfg(feature = "stereo")]
+    pub use crate::{Eye, LateLatchPose, StereoConfig, StereoPair};
+    #[cfg(feature = "physical_lens")]
+    pub use crate::{Filmback, Lens};
 }

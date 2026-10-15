@@ -1,8 +1,10 @@
 use prism_math::{Affine3, DQuat, DVec3, Mat4, Vec2, Vec3};
 use prism_render_architecture::view_family::{ViewHandle, ViewImportance, ViewKind, ViewRegistry};
 
+#[cfg(feature = "physical_lens")]
+use crate::Lens;
 use crate::{
-    extract_frustum, CameraError, CameraErrorCode, Exposure, GpuViewRecord, JitterSequence, Lens,
+    extract_frustum, CameraError, CameraErrorCode, Exposure, GpuViewRecord, JitterSequence,
     Projection, RenderTarget, Viewport, ViewportRect,
 };
 
@@ -38,6 +40,7 @@ pub struct CameraIntent {
     pub jitter: JitterSequence,
     pub jitter_scale: f32,
     pub exposure: Exposure,
+    #[cfg(feature = "physical_lens")]
     pub lens: Option<Lens>,
     pub importance: ViewImportance,
     pub relative_rendering: bool,
@@ -56,6 +59,7 @@ impl Default for CameraIntent {
             jitter: JitterSequence::default(),
             jitter_scale: 1.0,
             exposure: Exposure::default(),
+            #[cfg(feature = "physical_lens")]
             lens: None,
             importance: ViewKind::Main.default_importance(),
             relative_rendering: true,
@@ -74,6 +78,7 @@ pub struct ViewData {
     pub view_from_world: Affine3,
     pub world_from_view: Affine3,
     pub clip_from_view: Mat4,
+    pub clip_from_view_unjittered: Mat4,
     pub clip_from_world: Mat4,
     pub clip_from_world_unjittered: Mat4,
     pub jitter: Vec2,
@@ -81,6 +86,8 @@ pub struct ViewData {
     pub history_valid: bool,
     pub teleport: bool,
     pub frustum: crate::Frustum,
+    pub frustum_reverse_z: bool,
+    pub frustum_finite_far: bool,
     pub exposure: f32,
     pub viewport_px: ViewportRect,
     pub world_position: DVec3,
@@ -151,7 +158,11 @@ pub fn derive_view(
         ));
     }
     let viewport_px = intent.viewport.resolve(target_size)?;
+    #[cfg(feature = "physical_lens")]
     let mut projection = intent.projection;
+    #[cfg(not(feature = "physical_lens"))]
+    let projection = intent.projection;
+    #[cfg(feature = "physical_lens")]
     if let Projection::Perspective(mut value) = projection {
         if let Some(lens) = intent.lens {
             let mut lens_projection = value;
@@ -239,6 +250,7 @@ pub fn derive_view(
         view_from_world,
         world_from_view,
         clip_from_view,
+        clip_from_view_unjittered,
         clip_from_world: current,
         clip_from_world_unjittered: stable,
         jitter: jitter_state.value_pixels,
@@ -246,6 +258,8 @@ pub fn derive_view(
         history_valid,
         teleport,
         frustum,
+        frustum_reverse_z: projection.reverse_z(),
+        frustum_finite_far: projection.far().is_some(),
         exposure,
         viewport_px,
         world_position: pose.position,
@@ -371,6 +385,7 @@ mod tests {
         assert_eq!(error.code, CameraErrorCode::StaleViewHandle);
     }
 
+    #[cfg(feature = "physical_lens")]
     #[test]
     fn lens_updates_perspective_fov() {
         let mut history = ViewHistory::default();
