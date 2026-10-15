@@ -293,7 +293,10 @@ pub use plugin::{Plugin, PluginDependency};
 pub use plugin_graph::PluginGraphError;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 #[cfg(feature = "reflect")]
-pub use reflect_config::{clamp_and_validate, schema_for};
+pub use reflect_config::{
+    clamp_and_validate, cvar_specs_for, cvar_specs_from_metadata, cvar_specs_from_registration,
+    schema_for, ReflectConfigError,
+};
 pub use rollback::SnapshotHistory;
 #[cfg(feature = "determinism")]
 pub use rollback_replay::RollbackReplay;
@@ -362,6 +365,11 @@ pub mod prelude {
     pub use crate::plugin::{Plugin, PluginDependency};
     pub use crate::plugin_graph::PluginGraphError;
     pub use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
+    #[cfg(feature = "reflect")]
+    pub use crate::reflect_config::{
+        clamp_and_validate, cvar_specs_for, cvar_specs_from_metadata, cvar_specs_from_registration,
+        schema_for, ReflectConfigError,
+    };
     pub use crate::run_mode::RunMode;
     #[cfg(feature = "std")]
     pub use crate::runner::{DedicatedServerRunner, ServerTickDiagnostics};

@@ -34,6 +34,18 @@ struct Light {
     #[reflect(required, default = 42)]
     priority: i32,
 
+    #[reflect(default = -3)]
+    offset: i32,
+
+    #[reflect(default = -9223372036854775808)]
+    signed_limit: i64,
+
+    #[reflect(default = -0.25)]
+    negative_bias: f64,
+
+    #[reflect(default = 18446744073709551615)]
+    unsigned_limit: u64,
+
     #[reflect(default = "none")]
     tag: String,
 }
@@ -103,6 +115,23 @@ fn field_required_and_defaults() {
     let priority = meta.field("priority").unwrap();
     assert!(priority.is_required());
     assert_eq!(priority.default_value(), Some(&AttributeValue::Int(42)));
+
+    assert_eq!(
+        meta.field("offset").unwrap().default_value(),
+        Some(&AttributeValue::Int(-3))
+    );
+    assert_eq!(
+        meta.field("signed_limit").unwrap().default_value(),
+        Some(&AttributeValue::Int(i64::MIN))
+    );
+    assert_eq!(
+        meta.field("negative_bias").unwrap().default_value(),
+        Some(&AttributeValue::Float(-0.25))
+    );
+    assert_eq!(
+        meta.field("unsigned_limit").unwrap().default_value(),
+        Some(&AttributeValue::UInt(u64::MAX))
+    );
 
     let tag = meta.field("tag").unwrap();
     assert_eq!(

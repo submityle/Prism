@@ -33,6 +33,7 @@ use syn::{Data, DeriveInput, Expr, ExprLit, ExprUnary, Fields, Lit, UnOp};
 enum AttrLit {
     Bool(bool),
     Int(i64),
+    UInt(u64),
     Float(f64),
     Text(String),
 }
@@ -43,6 +44,7 @@ impl AttrLit {
         match self {
             Self::Bool(b) => quote! { ::prism_reflect::schema::AttributeValue::Bool(#b) },
             Self::Int(i) => quote! { ::prism_reflect::schema::AttributeValue::Int(#i) },
+            Self::UInt(i) => quote! { ::prism_reflect::schema::AttributeValue::UInt(#i) },
             Self::Float(f) => quote! { ::prism_reflect::schema::AttributeValue::Float(#f) },
             Self::Text(s) => quote! {
                 ::prism_reflect::schema::AttributeValue::Text(::std::string::String::from(#s))
@@ -253,8 +255,8 @@ fn parse_field_reflect(attr: &syn::Attribute, fm: &mut FieldMeta) -> syn::Result
             let text: syn::LitStr = meta.value()?.parse()?;
             fm.category = Some(text.value());
         } else if path.is_ident("default") {
-            let lit: Lit = meta.value()?.parse()?;
-            fm.default = Some(lit_to_attr(&lit)?);
+            let expr: Expr = meta.value()?.parse()?;
+            fm.default = Some(expr_to_attr(&expr)?);
         } else if path.is_ident("skip") {
             fm.skip = parse_flag(&meta)?;
         } else if path.is_ident("readonly") {
@@ -289,12 +291,56 @@ fn parse_flag(meta: &syn::meta::ParseNestedMeta) -> syn::Result<bool> {
 fn lit_to_attr(lit: &Lit) -> syn::Result<AttrLit> {
     match lit {
         Lit::Bool(b) => Ok(AttrLit::Bool(b.value)),
-        Lit::Int(i) => Ok(AttrLit::Int(i.base10_parse()?)),
-        Lit::Float(f) => Ok(AttrLit::Float(f.base10_parse()?)),
+        Lit::Int(i) => match i.base10_parse::<i64>() {
+            Ok(value) => Ok(AttrLit::Int(value)),
+            Err(_) => Ok(AttrLit::UInt(i.base10_parse()?)),
+        },
+        Lit::Float(f) => {
+            let value = f.base10_parse::<f64>()?;
+            if !value.is_finite() {
+                return Err(syn::Error::new_spanned(f, "default must be finite"));
+            }
+            Ok(AttrLit::Float(value))
+        }
         Lit::Str(s) => Ok(AttrLit::Text(s.value())),
         other => Err(syn::Error::new_spanned(
             other,
             "unsupported literal in #[reflect(...)]: expected bool, integer, float, or string",
+        )),
+    }
+}
+
+/// Convert a default-value expression, accepting unary-negative numeric
+/// literals in addition to the ordinary literal forms.
+fn expr_to_attr(expr: &Expr) -> syn::Result<AttrLit> {
+    match expr {
+        Expr::Lit(ExprLit { lit, .. }) => lit_to_attr(lit),
+        Expr::Unary(ExprUnary {
+            op: UnOp::Neg(_),
+            expr,
+            ..
+        }) => {
+            match expr_to_attr(expr)? {
+                AttrLit::Int(value) => value.checked_neg().map(AttrLit::Int).ok_or_else(|| {
+                    syn::Error::new_spanned(expr, "negative integer default is outside i64")
+                }),
+                AttrLit::UInt(value) => i64::try_from(-i128::from(value))
+                    .map(AttrLit::Int)
+                    .map_err(|_| {
+                        syn::Error::new_spanned(expr, "negative integer default is outside i64")
+                    }),
+                AttrLit::Float(value) => Ok(AttrLit::Float(-value)),
+                _ => Err(syn::Error::new_spanned(
+                    expr,
+                    "unary minus requires a numeric default literal",
+                )),
+            }
+        }
+        Expr::Group(group) => expr_to_attr(&group.expr),
+        Expr::Paren(paren) => expr_to_attr(&paren.expr),
+        other => Err(syn::Error::new_spanned(
+            other,
+            "unsupported expression in #[reflect(default = ...)]: expected a literal",
         )),
     }
 }
@@ -332,5 +378,42 @@ fn expr_to_f64(expr: &Expr) -> syn::Result<f64> {
             other,
             "expected a numeric literal in range bound",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expr_to_attr, AttrLit};
+
+    #[test]
+    fn numeric_default_limits_preserve_the_metadata_kind() {
+        let signed = syn::parse_str("-9223372036854775808").unwrap();
+        assert!(matches!(
+            expr_to_attr(&signed).unwrap(),
+            AttrLit::Int(i64::MIN)
+        ));
+
+        let unsigned = syn::parse_str("18446744073709551615").unwrap();
+        assert!(matches!(
+            expr_to_attr(&unsigned).unwrap(),
+            AttrLit::UInt(u64::MAX)
+        ));
+    }
+
+    #[test]
+    fn invalid_defaults_return_errors_instead_of_panicking() {
+        for source in [
+            "-9223372036854775809",
+            "18446744073709551616",
+            "1e999",
+            "-true",
+            "some_function()",
+        ] {
+            let expr = syn::parse_str(source).unwrap();
+            assert!(
+                expr_to_attr(&expr).is_err(),
+                "accepted invalid default: {source}"
+            );
+        }
     }
 }

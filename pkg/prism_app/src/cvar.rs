@@ -50,17 +50,16 @@
 //! ascending-name order regardless of registration order or hash seeding —
 //! the same determinism contract the settings store keeps (design §15).
 //!
-//! # Schema source: imperative now, `reflect` later
+//! # Schema sources
 //!
 //! Design §25.3 routes cvar range-clamping / defaults / rename compatibility
-//! through `prism_reflect` attribute metadata once that lands. This module
-//! provides all three **imperatively** at registration — a real, self-contained
-//! mechanism, not a fake of reflect: bounds give clamping
+//! through `prism_reflect` attribute metadata. The imperative API remains the
+//! base mechanism: bounds give clamping
 //! ([`CvarBounds`]), the default is fixed per cvar, and a rename is declared
 //! with [`CvarSpec::alias`] and resolved by [`CvarRegistry::resolve`] on every
-//! read/write. Only the reflect-*attribute* source of that same metadata is
-//! absent, to be layered on later without changing these validation semantics.
-//! Nothing here is stubbed.
+//! read/write. With the `reflect` feature, [`App::register_reflected_cvars`]
+//! derives those same declarations from `#[reflect(clamp/default/rename)]`
+//! metadata, then uses this registry and settings cascade unchanged.
 //!
 //! [`Resource`]: prism_ecs::resource::Resource
 //! [`Settings`]: crate::settings::Settings
@@ -1007,6 +1006,58 @@ impl App {
             default,
         );
         if let Some(change) = change {
+            self.send_event(change);
+        }
+        Ok(())
+    }
+
+    /// Register every cvar declared by `T`'s `#[reflect(...)]` field metadata.
+    ///
+    /// Fields carrying `default = ...` become cvars; `clamp`/`range` supplies
+    /// bounds and `rename` supplies the canonical name while preserving the Rust
+    /// field name as an alias. The complete batch is validated against a cloned
+    /// registry before any declaration or default becomes visible, so malformed
+    /// metadata and name collisions cannot leave a partially registered config.
+    /// Existing imperative registrations remain fully supported.
+    ///
+    /// # Errors
+    /// Returns a [`ReflectConfigError`](crate::reflect_config::ReflectConfigError)
+    /// for invalid metadata or a collision with an existing cvar/alias.
+    #[cfg(feature = "reflect")]
+    pub fn register_reflected_cvars<T>(
+        &mut self,
+    ) -> Result<(), crate::reflect_config::ReflectConfigError>
+    where
+        T: prism_reflect::GetTypeRegistration,
+    {
+        let specs = crate::reflect_config::cvar_specs_for::<T>()?;
+        let mut staged = self
+            .world()
+            .get_resource::<CvarRegistry>()
+            .cloned()
+            .unwrap_or_default();
+        let mut staged_settings = self
+            .world()
+            .get_resource::<Settings>()
+            .cloned()
+            .unwrap_or_default();
+        let mut defaults = Vec::with_capacity(specs.len());
+        for spec in specs {
+            defaults.push(staged.register(spec)?);
+        }
+
+        let mut changes = Vec::with_capacity(defaults.len());
+        for (name, default) in defaults {
+            let change = staged_settings.set(SettingsLayer::EngineDefault, name, default);
+            if let Some(change) = change {
+                changes.push(change);
+            }
+        }
+
+        self.init_cvars();
+        *self.world_mut().resource_mut::<CvarRegistry>() = staged;
+        *self.world_mut().resource_mut::<Settings>() = staged_settings;
+        for change in changes {
             self.send_event(change);
         }
         Ok(())
