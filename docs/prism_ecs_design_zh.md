@@ -50,7 +50,7 @@
 
 ## 1. 设计哲学与目标
 
-ECS 是整个 Prism 脱离 Bevy 工程的"命门"——渲染、物理、音频算法层基本只依赖 `bevy_math`（= glam 封装），深耦合集中在少数 ECS 对接层（`prism_render_scene / material / visibility`、`prism_bevy`、`prism_audio_bevy`、`prism_ui_ecs`）。把 ECS 自研化并对外保持近 Bevy 的 API，就能让这些对接层以"改 import"级别的成本迁移。
+ECS 是整个 Prism 脱离 Bevy 工程的"命门"——渲染、物理、音频算法层基本只依赖 `bevy_math`（= glam 封装），深耦合集中在少数 ECS 对接层（`prism_render_scene / material / visibility`、旧 Bevy 桥接层、`prism_audio_bevy`、`prism_ui_ecs`）。把 ECS 自研化并对外保持近 Bevy 的 API，就能让这些对接层以"改 import"级别的成本迁移。
 
 **一句话定位**：`prism_ecs` 是 Prism 的"权威仿真内核"——百万~千万级实体、每帧数千~数万结构变更、GPU 驱动提取下，迭代/调度/变更检测/命令回放/内存成本正比于**变化量**而非总量；多核近线性扩展；并原生支撑大世界流送、确定性回滚网络、GPU 常驻。
 
@@ -458,7 +458,7 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 迁移路径：
 1. 提供 `prism_ecs::prelude` 与 bevy_ecs 近同名导出。
 2. 把 `prism_ui_ecs`（当前依赖 `bevy_ecs`）切到 `prism_ecs`，用其现有测试对拍验证。
-3. 渲染/音频对接层（`prism_render_scene/material/visibility`、`prism_bevy`、`prism_audio_bevy`）逐个切换，保留公共 API，内部换内核。
+3. 渲染/音频对接层（`prism_render_scene/material/visibility`、旧 Bevy 桥接层、`prism_audio_bevy`）逐个切换，保留公共 API，内部换内核；旧桥接层已退役。
 
 ---
 

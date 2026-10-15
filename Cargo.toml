@@ -21,6 +21,7 @@ members = [
   "pkg/prism_time",
   "pkg/prism_tasks",
   "pkg/prism_transform",
+  "pkg/prism_transform_ecs",
   "pkg/prism_camera",
   "pkg/prism_camera_gpu",
   "pkg/prism_camera_ecs",
@@ -97,8 +98,6 @@ members = [
   "pkg/prism_state_tree_ecs",
   "pkg/prism_state_tree_gpu",
   "pkg/prism_ui_dock",
-  # Prism Bevy integration bridge for the GPU-driven renderer (phased-out once prism_app lands).
-  "pkg/prism_bevy",
   # Prism experimental next-generation physics engine.
   "pkg/prism_physics_core",
   "pkg/prism_physics_geometry",

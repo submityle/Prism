@@ -27,7 +27,7 @@
 - `crates/*` 无一依赖 `pkg/prism_*`（已核实 `rg prism_ crates/*/Cargo.toml` 为空）。
 - `pkg/prism_*` 刻意不依赖 Bevy 渲染栈。
 - 已接 `bevy` 桥接的 pkg 仅 2 个：`prism_render_material`、`prism_render_visibility`（均含 `src/bevy_bridge.rs`）。
-- 下游集成 crate `pkg/prism_bevy` 已建立，承载可见性插件（slice 2）。
+- 原下游集成 crate `pkg/prism_bevy` 已完成迁移审计并退役；可见性能力由 native Prism crate 承载。
 
 ## 3. 处置分类定义
 
@@ -181,7 +181,7 @@ Bevy 原本缺失、由 pkg 带来的全新 AAA 能力，不涉及“重构某 c
 | 切片 | 范围 | R 类覆盖 | 状态 |
 | --- | --- | --- | --- |
 | S1 | `prism_render_visibility` 接 `bevy` 桥接 | — | ✅ 完成（98 测试） |
-| S2 | `prism_bevy` 可见性插件：实体镜像 + `cull_view` + 回写 | bevy_camera 可见性 | ✅ 完成（3 集成测试，零警告） |
+| S2 | 旧 `prism_bevy` 可见性插件：实体镜像 + `cull_view` + 回写 | bevy_camera 可见性 | ✅ 完成并退役（能力已迁移到 native Prism crate） |
 | S3 | 材质自动注册 `StandardMaterial`→`MaterialRecord` | bevy_material | 计划 |
 | S4 | 场景提取统一 → `prism_render_scene` | bevy_extract, bevy_render(部分) | 计划 |
 | S5 | 着色/光照 → `prism_render_shading` | bevy_pbr, bevy_light | 计划（最大，须再拆） |
@@ -227,7 +227,7 @@ Bevy 原本缺失、由 pkg 带来的全新 AAA 能力，不涉及“重构某 c
 ## 11. 验证、回退与风险
 
 - **逐片验证**：`cargo build -p <crate>` → `cargo test -p <crate>`；桥接改动追加 `--features bevy`。
-- **回归基线**：`prism_render_visibility --features bevy` 维持 98 测试；`prism_bevy` 集成测试全绿。
+- **历史回归基线**：`prism_render_visibility --features bevy` 维持 98 测试；旧 `prism_bevy` 集成测试曾全绿，随后完成退役。
 - **回退路径**：任一 R 类切换后回归，可从默认插件图摘除 pkg 插件、恢复对应 crate 实现，互不影响其他切片。
 - **GPU 切片**：虚拟几何/体积/头发/光追需真实设备，CPU 测试工具无法断言，单列设备内验证阶段。
 - **主要风险**：
@@ -239,7 +239,7 @@ Bevy 原本缺失、由 pkg 带来的全新 AAA 能力，不涉及“重构某 c
 ## 12. 当前进度
 
 - ✅ S1：`prism_render_visibility` 接桥，98 测试通过。
-- ✅ S2：`prism_bevy` 可见性插件，3 集成测试 + doctest 全绿，零 clippy 警告；修复句柄分配不变量 bug（index 0 保留、generation 须递增）。
+- ✅ S2：旧 `prism_bevy` 可见性插件曾有 3 个集成测试 + doctest 全绿，零 clippy 警告；句柄分配不变量已由 native Prism 路径保留，旧桥接层已移除。
 - ⏭️ 下一步（待批准后动代码）：S3 材质自动注册（`StandardMaterial`→`MaterialRecord`）。
 
 > 本文仅为文档；代码改动按 §7 切片队列在获批后逐片推进。
