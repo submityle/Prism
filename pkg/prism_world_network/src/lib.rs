@@ -25,9 +25,12 @@ pub use prism_world_stream::{AabbI64, GlobalPos, SectorId};
 pub use server_mesh::{
     AbortOutcome, AdmissionError, ApplyOutcome, AuthorityEpoch, AuthorityLease, AuthorityLoad,
     BatchPrepareResult, CommitOutcome, EpochError, HandoffCommand,
-    HandoffError as ServerMeshHandoffError, HandoffReceipt, HandoffTicket, HandoffTransactionId,
-    LeaseError, LeaseId, LeaseRole, MeshConfigError, MeshError, PartitionRecord, PrepareOutcome,
-    ServerMesh, ServerMeshConfig,
+    HandoffError as ServerMeshHandoffError, HandoffReceipt, HandoffSnapshot, HandoffSnapshotState,
+    HandoffTicket, HandoffTransactionId, LeaseError, LeaseId, LeaseRole, MemoryMeshTransport,
+    MemoryMeshTransportError, MeshConfigError, MeshError, MeshFailureDetector, MeshMessage,
+    MeshNodeError, MeshNodeEvent, MeshNodeOpenError, MeshPacket, MeshPersistence, MeshReject,
+    MeshReply, MeshRequest, MeshSnapshotError, MeshTransport, PartitionRecord, PrepareOutcome,
+    ServerMesh, ServerMeshConfig, ServerMeshNode, ServerMeshSnapshot,
 };
 pub use session::{
     AuthToken, FlushError, FlushReport, MemoryTransport, MemoryTransportError, ReceiveError,
