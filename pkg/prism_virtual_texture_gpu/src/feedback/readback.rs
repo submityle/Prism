@@ -8,7 +8,10 @@ use core::fmt;
 
 use wgpu::{Buffer, BufferUsages, CommandEncoderDescriptor};
 
-use crate::{buffer, context::GpuContext};
+use crate::{
+    buffer,
+    context::{GpuContext, GpuError},
+};
 
 const WORD_BYTES: usize = size_of::<u32>();
 
@@ -35,6 +38,8 @@ pub enum FeedbackReadbackError {
     SourceMissingCopySourceUsage,
     /// An intermediate byte-count conversion overflowed.
     ByteCountOverflow,
+    /// The device or mapping operation failed while reading back the buffer.
+    Gpu(GpuError),
 }
 
 impl fmt::Display for FeedbackReadbackError {
@@ -63,6 +68,7 @@ impl fmt::Display for FeedbackReadbackError {
             Self::ByteCountOverflow => {
                 formatter.write_str("feedback readback byte count overflowed")
             }
+            Self::Gpu(error) => error.fmt(formatter),
         }
     }
 }
@@ -133,7 +139,8 @@ impl GpuFeedbackReadback {
             });
         buffer::copy(&mut encoder, source, &self.staging, byte_count);
         ctx.queue().submit([encoder.finish()]);
-        let mut words = buffer::read_back::<u32>(ctx, &self.staging);
+        let mut words =
+            buffer::try_read_back::<u32>(ctx, &self.staging).map_err(FeedbackReadbackError::Gpu)?;
         words.truncate(word_count);
         Ok(words)
     }

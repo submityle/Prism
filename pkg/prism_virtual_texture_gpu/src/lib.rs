@@ -37,9 +37,13 @@ pub mod context;
 pub mod feedback;
 pub mod lookup;
 pub mod page_table;
+pub mod pipeline;
 
-pub use context::GpuContext;
+pub use context::{DeviceLostState, GpuAdapterClass, GpuAdapterEvidence, GpuContext, GpuError};
 pub use feedback::readback::{FeedbackReadbackError, GpuFeedbackReadback};
 pub use feedback::{CellMap, GpuFeedbackDecode, REQ_NONE};
-pub use lookup::{GpuPageLookup, GpuPageResolution, MISS};
+pub use lookup::{GpuPageLookup, GpuPageLookupError, GpuPageResolution, MISS};
 pub use page_table::{GpuPageTableStorage, PageTableStorageError};
+pub use pipeline::{
+    VirtualTextureBackend, VirtualTextureError, VirtualTextureFrame, VirtualTexturePipeline,
+};

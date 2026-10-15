@@ -1,7 +1,7 @@
 //! Real-device parity tests for the virtual-texture page-table lookup twin.
 //!
 //! Each test acquires a best-effort headless `GPU` via
-//! [`GpuContext::try_headless`]. On a machine with a usable adapter (e.g. Apple
+//! [`GpuContext::try_real_headless`]. On a machine with a usable adapter (e.g. Apple
 //! `M`-series Metal) the lookup kernel runs for real and is compared against the
 //! device-free CPU golden
 //! [`GpuPageTable::lookup`](prism_render_architecture::texture_streaming::GpuPageTable::lookup);
@@ -24,7 +24,7 @@ use prism_virtual_texture_gpu::{GpuContext, GpuPageLookup, MISS};
     reason = "test diagnostics: explain a GPU-less skip so CI logs are legible"
 )]
 fn with_gpu() -> Option<GpuContext> {
-    match GpuContext::try_headless() {
+    match GpuContext::try_real_headless() {
         Some(ctx) => Some(ctx),
         None => {
             eprintln!(
@@ -78,7 +78,9 @@ fn lookup_resident_keys_match_golden_slots() {
     let (table, resident) = resident_table();
     let gpu = GpuPageLookup::new(&ctx);
 
-    let device = gpu.lookup(&ctx, &table, &resident);
+    let device = gpu
+        .lookup(&ctx, &table, &resident)
+        .expect("GPU lookup should complete");
     assert_eq!(device.len(), resident.len());
     for (i, &k) in resident.iter().enumerate() {
         let golden = table.lookup(k).expect("resident key must resolve");
@@ -108,7 +110,9 @@ fn lookup_mixed_hits_and_misses_match_golden() {
         }
     }
 
-    let device = gpu.lookup(&ctx, &table, &queries);
+    let device = gpu
+        .lookup(&ctx, &table, &queries)
+        .expect("GPU lookup should complete");
     assert_eq!(device.len(), queries.len());
     for (i, &k) in queries.iter().enumerate() {
         let golden = table.lookup(k).unwrap_or(MISS);
@@ -126,7 +130,9 @@ fn lookup_against_empty_table_is_all_miss() {
     let gpu = GpuPageLookup::new(&ctx);
     let queries = vec![key(0, 0, 0, 0, 0), key(1, 2, 0, 3, 4), key(5, 1, 1, 6, 7)];
 
-    let device = gpu.lookup(&ctx, &table, &queries);
+    let device = gpu
+        .lookup(&ctx, &table, &queries)
+        .expect("GPU lookup should complete");
     assert_eq!(device.len(), queries.len());
     for (i, &k) in queries.iter().enumerate() {
         assert_eq!(table.lookup(k), None, "golden must miss on empty table");
@@ -140,7 +146,9 @@ fn resolve_finds_nearest_coarse_resident_page_and_matches_cpu() {
     let requested = key(3, 0, 1, 13, 7);
     let table = GpuPageTable::from_bindings(&[(key(3, 2, 1, 3, 1), 27), (key(3, 4, 1, 0, 0), 49)]);
     let gpu = GpuPageLookup::new(&ctx);
-    let result = gpu.resolve(&ctx, &table, requested, 5);
+    let result = gpu
+        .resolve(&ctx, &table, requested, 5)
+        .expect("GPU resolve should complete");
     assert_eq!(result, table.resolve(requested, 5));
     assert_eq!(result.unwrap().key, key(3, 2, 1, 3, 1));
     assert_eq!(result.unwrap().slot, 27);
@@ -153,12 +161,16 @@ fn resolve_reports_original_request_for_tail_refinement_and_miss() {
     let requested = key(3, 0, 1, 13, 7);
     let table = GpuPageTable::from_bindings(&[(key(3, 2, 1, 3, 1), 27)]);
     let gpu = GpuPageLookup::new(&ctx);
-    let tail = gpu.resolve_with_feedback(&ctx, &table, requested, 5);
+    let tail = gpu
+        .resolve_with_feedback(&ctx, &table, requested, 5)
+        .expect("GPU resolve should complete");
     assert_eq!(tail.resolution.unwrap().slot, 27);
     assert_eq!(tail.feedback, Some(requested));
 
     let missing_key = key(8, 0, 0, 0, 0);
-    let missing = gpu.resolve_with_feedback(&ctx, &table, missing_key, 5);
+    let missing = gpu
+        .resolve_with_feedback(&ctx, &table, missing_key, 5)
+        .expect("GPU resolve should complete");
     assert_eq!(missing.resolution, None);
     assert_eq!(missing.feedback, Some(missing_key));
 }
@@ -169,9 +181,14 @@ fn resolve_preserves_miss_when_no_tail_is_resident() {
     let requested = key(3, 0, 1, 13, 7);
     let table = GpuPageTable::from_bindings(&[(key(4, 2, 1, 3, 1), 27)]);
     let gpu = GpuPageLookup::new(&ctx);
-    assert_eq!(gpu.resolve(&ctx, &table, requested, 5), None);
     assert_eq!(
-        gpu.resolve(&ctx, &table, requested, 5),
+        gpu.resolve(&ctx, &table, requested, 5)
+            .expect("GPU resolve should complete"),
+        None
+    );
+    assert_eq!(
+        gpu.resolve(&ctx, &table, requested, 5)
+            .expect("GPU resolve should complete"),
         table.resolve(requested, 5)
     );
 }
@@ -185,7 +202,9 @@ fn resolve_batch_matches_cpu_for_exact_coarse_and_miss_queries() {
     let table = GpuPageTable::from_bindings(&[(exact, 27), (key(3, 4, 1, 0, 0), 49)]);
     let gpu = GpuPageLookup::new(&ctx);
     let keys = [exact, coarse_request, miss];
-    let got = gpu.resolve_with_feedback_batch(&ctx, &table, &keys, 5);
+    let got = gpu
+        .resolve_with_feedback_batch(&ctx, &table, &keys, 5)
+        .expect("GPU resolve should complete");
 
     assert_eq!(got.len(), keys.len());
     assert_eq!(got[0].resolution, table.resolve(exact, 5));
@@ -203,6 +222,8 @@ fn resolve_batch_matches_cpu_for_exact_coarse_and_miss_queries() {
 fn resolve_batch_empty_input_does_not_require_a_gpu_dispatch() {
     let Some(ctx) = with_gpu() else { return };
     let gpu = GpuPageLookup::new(&ctx);
-    let result = gpu.resolve_with_feedback_batch(&ctx, &GpuPageTable::new(), &[], 0);
+    let result = gpu
+        .resolve_with_feedback_batch(&ctx, &GpuPageTable::new(), &[], 0)
+        .expect("empty resolve batch should complete without dispatch");
     assert!(result.is_empty());
 }

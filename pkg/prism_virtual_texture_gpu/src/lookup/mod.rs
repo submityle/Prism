@@ -29,11 +29,54 @@ use prism_render_architecture::texture_streaming::{
 };
 
 use crate::buffer;
-use crate::context::GpuContext;
+use crate::context::{GpuContext, GpuError};
 
 /// Sentinel slot written for a page coordinate with no resident entry, matching
 /// the shader's `MISS` constant. Equals `None` from the golden `lookup`.
 pub const MISS: u32 = u32::MAX;
+
+/// Errors returned when a page-lookup dispatch cannot be completed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GpuPageLookupError {
+    /// The canonical page-table word layout or miss-sentinel invariant failed.
+    InvalidPageTable(&'static str),
+    /// Host query packing exceeded `usize`.
+    QueryWordCountOverflow,
+    /// The shader dispatch returned no result for a single-page request.
+    MissingSingleResult,
+    /// The output buffer byte count could not be represented.
+    OutputByteCountOverflow,
+    /// The device or readback operation failed.
+    Gpu(GpuError),
+}
+
+impl core::fmt::Display for GpuPageLookupError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidPageTable(message) => {
+                write!(formatter, "invalid GPU page table: {message}")
+            }
+            Self::QueryWordCountOverflow => {
+                formatter.write_str("GPU query word count overflowed usize")
+            }
+            Self::MissingSingleResult => {
+                formatter.write_str("single-page GPU lookup returned no result")
+            }
+            Self::OutputByteCountOverflow => {
+                formatter.write_str("GPU lookup output byte count overflowed u64")
+            }
+            Self::Gpu(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for GpuPageLookupError {}
+
+impl From<GpuError> for GpuPageLookupError {
+    fn from(error: GpuError) -> Self {
+        Self::Gpu(error)
+    }
+}
 
 /// Resolved virtual page plus the original page to feed back for refinement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,7 +118,7 @@ pub struct GpuPageLookup {
 
 impl GpuPageLookup {
     /// Compiles the lookup kernel on `ctx`'s device.
-    #[must_use]
+    #[must_use = "retain the compiled GPU lookup pipeline"]
     pub fn new(ctx: &GpuContext) -> GpuPageLookup {
         let device = ctx.device();
         let module = device.create_shader_module(ShaderModuleDescriptor {
@@ -163,19 +206,29 @@ impl GpuPageLookup {
     /// The returned vector is parallel to `keys`: entry `i` is the slot the
     /// golden `GpuPageTable::lookup(keys[i])` would return, or [`MISS`] for a
     /// page coordinate with no resident entry.
-    #[must_use]
+    #[must_use = "handle the GPU resolve result"]
     pub fn lookup(
         &self,
         ctx: &GpuContext,
         table: &GpuPageTable,
         keys: &[TexturePageKey],
-    ) -> Vec<u32> {
-        assert_valid_page_table_words(table.words());
+    ) -> Result<Vec<u32>, GpuPageLookupError> {
+        validate_page_table_words(table.words())?;
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(state) = ctx.device_lost() {
+            return Err(GpuPageLookupError::Gpu(GpuError::DeviceLost(state)));
+        }
         let device = ctx.device();
 
         // Pre-reduce each query to its three compare words via the golden
         // packer, so the shader and golden search identical keys.
-        let mut query_words: Vec<u32> = Vec::with_capacity(keys.len() * 3);
+        let query_word_count = keys
+            .len()
+            .checked_mul(3)
+            .ok_or(GpuPageLookupError::QueryWordCountOverflow)?;
+        let mut query_words: Vec<u32> = Vec::with_capacity(query_word_count);
         for &key in keys {
             let [w0, w1, w2] = GpuPageTable::compare_words(key);
             query_words.push(w0);
@@ -183,10 +236,14 @@ impl GpuPageLookup {
             query_words.push(w2);
         }
 
-        let entry_count = u32::try_from(table.len())
-            .expect("virtual-texture page table exceeds the GPU u32 entry-count ABI");
-        let query_count = u32::try_from(keys.len())
-            .expect("virtual-texture query batch exceeds the GPU u32 query-count ABI");
+        let entry_count = u32::try_from(table.len()).map_err(|_| GpuError::AbiLimitExceeded {
+            resource: "page-table entries",
+            value: table.len(),
+        })?;
+        let query_count = u32::try_from(keys.len()).map_err(|_| GpuError::AbiLimitExceeded {
+            resource: "lookup queries",
+            value: keys.len(),
+        })?;
 
         // `storage_read` rejects empty slices; pad degenerate inputs to one word
         // so a device with zero resident entries or zero queries still binds.
@@ -256,9 +313,9 @@ impl GpuPageLookup {
         buffer::copy(&mut enc, &out_buf, &stage, out_bytes);
         ctx.queue().submit([enc.finish()]);
 
-        let mut slots = buffer::read_back::<u32>(ctx, &stage);
+        let mut slots = buffer::read_back::<u32>(ctx, &stage)?;
         slots.truncate(keys.len());
-        slots
+        Ok(slots)
     }
 
     /// Resolves one requested page on the GPU, probing progressively coarser
@@ -269,16 +326,16 @@ impl GpuPageLookup {
     /// The binary-search dispatch remains the authoritative exact lookup. The
     /// host only expands the deterministic mip-cover candidates and selects
     /// the first hit, matching `GpuPageTable::resolve` exactly.
-    #[must_use]
+    #[must_use = "handle the GPU resolve result"]
     pub fn resolve(
         &self,
         ctx: &GpuContext,
         table: &GpuPageTable,
         key: TexturePageKey,
         coarsest_mip: u8,
-    ) -> Option<PageResolution> {
+    ) -> Result<Option<PageResolution>, GpuPageLookupError> {
         self.resolve_with_feedback(ctx, table, key, coarsest_mip)
-            .resolution
+            .map(|result| result.resolution)
     }
 
     /// GPU page lookup with explicit quality-refinement feedback.
@@ -288,18 +345,18 @@ impl GpuPageLookup {
     /// virtual key whenever the sample was not exact. A full miss retains the
     /// same request, so callers never lose demand when falling back to a
     /// non-virtual texture.
-    #[must_use]
+    #[must_use = "handle the GPU resolve result"]
     pub fn resolve_with_feedback(
         &self,
         ctx: &GpuContext,
         table: &GpuPageTable,
         key: TexturePageKey,
         coarsest_mip: u8,
-    ) -> GpuPageResolution {
-        self.resolve_with_feedback_batch(ctx, table, &[key], coarsest_mip)
+    ) -> Result<GpuPageResolution, GpuPageLookupError> {
+        self.resolve_with_feedback_batch(ctx, table, &[key], coarsest_mip)?
             .into_iter()
             .next()
-            .expect("single-page resolve must return one result")
+            .ok_or(GpuPageLookupError::MissingSingleResult)
     }
 
     /// Resolves a batch of requested pages in one GPU dispatch and readback.
@@ -308,27 +365,34 @@ impl GpuPageLookup {
     /// command submission is important for material workloads, where a frame
     /// commonly resolves many page samples. An empty batch returns immediately
     /// without touching the device.
-    #[must_use]
+    #[must_use = "handle the GPU resolve result"]
     pub fn resolve_with_feedback_batch(
         &self,
         ctx: &GpuContext,
         table: &GpuPageTable,
         keys: &[TexturePageKey],
         coarsest_mip: u8,
-    ) -> Vec<GpuPageResolution> {
-        assert_valid_page_table_words(table.words());
+    ) -> Result<Vec<GpuPageResolution>, GpuPageLookupError> {
+        validate_page_table_words(table.words())?;
         if keys.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
+        }
+        if let Some(state) = ctx.device_lost() {
+            return Err(GpuPageLookupError::Gpu(GpuError::DeviceLost(state)));
         }
         let device = ctx.device();
-        let entry_count = u32::try_from(table.len())
-            .expect("virtual-texture page table exceeds the GPU u32 entry-count ABI");
-        let query_count = u32::try_from(keys.len())
-            .expect("virtual-texture resolve batch exceeds the GPU u32 query-count ABI");
+        let entry_count = u32::try_from(table.len()).map_err(|_| GpuError::AbiLimitExceeded {
+            resource: "page-table entries",
+            value: table.len(),
+        })?;
+        let query_count = u32::try_from(keys.len()).map_err(|_| GpuError::AbiLimitExceeded {
+            resource: "resolve queries",
+            value: keys.len(),
+        })?;
         let query_word_count = keys
             .len()
             .checked_mul(3)
-            .expect("virtual-texture resolve query word count overflowed usize");
+            .ok_or(GpuPageLookupError::QueryWordCountOverflow)?;
         let mut query_words = Vec::with_capacity(query_word_count);
         for &key in keys {
             query_words.extend_from_slice(&GpuPageTable::compare_words(key));
@@ -352,7 +416,7 @@ impl GpuPageLookup {
         let query_buf = buffer::storage_read(device, "prism_vt_resolve_query", &query_words);
         let out_bytes = u64::from(query_count)
             .checked_mul(3 * size_of::<u32>() as u64)
-            .expect("virtual-texture resolve output byte count overflowed u64");
+            .ok_or(GpuPageLookupError::OutputByteCountOverflow)?;
         let out_buf = buffer::storage_rw_zeroed(device, "prism_vt_resolve_result", out_bytes);
         let bind = device.create_bind_group(&BindGroupDescriptor {
             label: Some("prism_vt_resolve_bind"),
@@ -391,8 +455,9 @@ impl GpuPageLookup {
         let stage = buffer::staging(device, "prism_vt_resolve_stage", out_bytes);
         buffer::copy(&mut enc, &out_buf, &stage, out_bytes);
         ctx.queue().submit([enc.finish()]);
-        let words = buffer::read_back::<u32>(ctx, &stage);
-        keys.iter()
+        let words = buffer::read_back::<u32>(ctx, &stage)?;
+        Ok(keys
+            .iter()
             .enumerate()
             .map(|(index, &key)| {
                 let base = index * 3;
@@ -418,7 +483,7 @@ impl GpuPageLookup {
                     resolution,
                 }
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -426,19 +491,20 @@ impl GpuPageLookup {
 /// `MISS` is the lookup kernel's no-resident-page result, so it cannot also be
 /// a physical slot. Keep this check at the consumer boundary even though the
 /// CPU golden table already rejects the value in `from_bindings`.
-fn assert_valid_page_table_words(words: &[u32]) {
-    assert_eq!(
-        words.len() % PAGE_TABLE_ENTRY_WORDS,
-        0,
-        "GPU page table must contain complete entries"
-    );
-    for entry in words.chunks_exact(PAGE_TABLE_ENTRY_WORDS) {
-        assert_ne!(
-            entry[PAGE_TABLE_ENTRY_WORDS - 1],
-            MISS,
-            "GPU page-table physical slots must not use the reserved miss sentinel"
-        );
+fn validate_page_table_words(words: &[u32]) -> Result<(), GpuPageLookupError> {
+    if !words.len().is_multiple_of(PAGE_TABLE_ENTRY_WORDS) {
+        return Err(GpuPageLookupError::InvalidPageTable(
+            "table does not contain complete entries",
+        ));
     }
+    for entry in words.chunks_exact(PAGE_TABLE_ENTRY_WORDS) {
+        if entry[PAGE_TABLE_ENTRY_WORDS - 1] == MISS {
+            return Err(GpuPageLookupError::InvalidPageTable(
+                "physical slots must not use the reserved miss sentinel",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn lookup_layout(device: &wgpu::Device, label: &str) -> BindGroupLayout {
@@ -515,23 +581,27 @@ mod tests {
 
     #[test]
     fn page_table_abi_rejects_miss_sentinel_as_a_physical_slot() {
-        let result = std::panic::catch_unwind(|| {
-            assert_valid_page_table_words(&[1, 0, 0, MISS]);
-        });
-        assert!(result.is_err());
+        assert_eq!(
+            validate_page_table_words(&[1, 0, 0, MISS]),
+            Err(GpuPageLookupError::InvalidPageTable(
+                "physical slots must not use the reserved miss sentinel"
+            ))
+        );
     }
 
     #[test]
     fn page_table_abi_accepts_low_and_high_non_sentinel_slots() {
-        assert_valid_page_table_words(&[1, 0, 0, 0, 2, 0, 0, MISS - 1]);
+        assert!(validate_page_table_words(&[1, 0, 0, 0, 2, 0, 0, MISS - 1]).is_ok());
     }
 
     #[test]
     fn page_table_abi_rejects_partial_entries() {
-        let result = std::panic::catch_unwind(|| {
-            assert_valid_page_table_words(&[1, 0, 0]);
-        });
-        assert!(result.is_err());
+        assert_eq!(
+            validate_page_table_words(&[1, 0, 0]),
+            Err(GpuPageLookupError::InvalidPageTable(
+                "table does not contain complete entries"
+            ))
+        );
     }
 
     #[test]

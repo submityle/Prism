@@ -43,7 +43,7 @@ use prism_render_architecture::texture_streaming::{
 };
 
 use crate::buffer;
-use crate::context::GpuContext;
+use crate::context::{GpuContext, GpuError};
 
 pub mod readback;
 
@@ -157,25 +157,36 @@ impl GpuFeedbackDecode {
     /// base page `(i % pages_x, i / pages_x)`). A grid whose length does not
     /// match `desc.grid_len()`, a zero `mip_count`, or an empty grid yields an
     /// empty vector, mirroring the golden `decode_feedback` early-out.
-    #[must_use]
     pub fn map_cells(
         &self,
         ctx: &GpuContext,
         desc: &FeedbackTextureDesc,
         grid: &[u8],
-    ) -> Vec<CellMap> {
+    ) -> Result<Vec<CellMap>, GpuError> {
+        self.try_map_cells(ctx, desc, grid)
+    }
+
+    /// Fallible variant of [`map_cells`](Self::map_cells), preserving device
+    /// loss and readback failures for a caller that can switch to CPU mode.
+    pub fn try_map_cells(
+        &self,
+        ctx: &GpuContext,
+        desc: &FeedbackTextureDesc,
+        grid: &[u8],
+    ) -> Result<Vec<CellMap>, GpuError> {
         if grid.len() != desc.grid_len() || desc.mip_count == 0 || grid.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
+        }
+        if let Some(state) = ctx.device_lost() {
+            return Err(GpuError::DeviceLost(state));
         }
         let device = ctx.device();
-
-        // Expand each min-mip byte to its own word so the shader indexes cells
-        // directly without unpacking; `storage_read` is happy with a non-empty
-        // slice (guaranteed, since an empty grid returned above).
         let cell_words: Vec<u32> = grid.iter().map(|&b| u32::from(b)).collect();
-        let cell_count = u32::try_from(cell_words.len())
-            .expect("virtual-texture feedback grid exceeds the GPU u32 cell-count ABI");
-
+        let cell_count =
+            u32::try_from(cell_words.len()).map_err(|_| GpuError::AbiLimitExceeded {
+                resource: "feedback cells",
+                value: cell_words.len(),
+            })?;
         let params = buffer::uniform(
             device,
             "prism_vt_feedback_params",
@@ -193,7 +204,6 @@ impl GpuFeedbackDecode {
         let grid_buf = buffer::storage_read(device, "prism_vt_feedback_grid", &cell_words);
         let out_bytes = u64::from(cell_count) * (OUT_WORDS as u64) * size_of::<u32>() as u64;
         let out_buf = buffer::storage_rw_zeroed(device, "prism_vt_feedback_out", out_bytes);
-
         let bind = device.create_bind_group(&BindGroupDescriptor {
             label: Some("prism_vt_feedback_bind"),
             layout: &self.layout,
@@ -212,7 +222,6 @@ impl GpuFeedbackDecode {
                 },
             ],
         });
-
         let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_vt_feedback_encoder"),
         });
@@ -225,13 +234,11 @@ impl GpuFeedbackDecode {
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(groups(cell_count), 1, 1);
         }
-
         let stage = buffer::staging(device, "prism_vt_feedback_stage", out_bytes);
         buffer::copy(&mut enc, &out_buf, &stage, out_bytes);
         ctx.queue().submit([enc.finish()]);
-
-        let words = buffer::read_back::<u32>(ctx, &stage);
-        words
+        let words = buffer::try_read_back::<u32>(ctx, &stage)?;
+        Ok(words
             .chunks_exact(OUT_WORDS)
             .take(cell_count as usize)
             .map(|c| CellMap {
@@ -240,7 +247,7 @@ impl GpuFeedbackDecode {
                 w2: c[2],
                 desired: c[3],
             })
-            .collect()
+            .collect())
     }
 
     /// Decodes the feedback grid into deduplicated per-page demand on the device.
@@ -250,16 +257,27 @@ impl GpuFeedbackDecode {
     /// row-major cell order, stamping each surviving demand with `resident_mip`
     /// and `frame`. The result equals `decode_feedback(desc, grid, resident_mip,
     /// frame)` for the same inputs.
-    #[must_use]
     pub fn decode(
+        &self,
+        ctx: &GpuContext,
+        desc: &FeedbackTextureDesc,
+        grid: &[u8],
+        resident_mip: impl FnMut(TexturePageKey) -> Option<u8>,
+        frame: u64,
+    ) -> Result<Vec<PageDemand>, GpuError> {
+        self.try_decode(ctx, desc, grid, resident_mip, frame)
+    }
+
+    /// Fallible GPU decode used by the recoverable frame pipeline.
+    pub fn try_decode(
         &self,
         ctx: &GpuContext,
         desc: &FeedbackTextureDesc,
         grid: &[u8],
         mut resident_mip: impl FnMut(TexturePageKey) -> Option<u8>,
         frame: u64,
-    ) -> Vec<PageDemand> {
-        let cells = self.map_cells(ctx, desc, grid);
+    ) -> Result<Vec<PageDemand>, GpuError> {
+        let cells = self.try_map_cells(ctx, desc, grid)?;
         let mut merged: BTreeMap<TexturePageKey, PageDemand> = BTreeMap::new();
         for cell in cells {
             if cell.desired == REQ_NONE {
@@ -279,7 +297,7 @@ impl GpuFeedbackDecode {
             };
             merged.entry(key).or_insert(demand);
         }
-        merged.into_values().collect()
+        Ok(merged.into_values().collect())
     }
 }
 
@@ -365,7 +383,7 @@ mod tests {
         reason = "surface a clear skip message when no GPU adapter is present"
     )]
     fn with_gpu(body: impl FnOnce(&GpuContext)) {
-        match GpuContext::try_headless() {
+        match GpuContext::try_real_headless() {
             Some(ctx) => body(&ctx),
             None => eprintln!("skipping GPU feedback-decode test: no usable adapter"),
         }
@@ -415,7 +433,9 @@ mod tests {
             grid[cell(3, 3)] = 200; // clamp up to max mip 3
 
             let kernel = GpuFeedbackDecode::new(ctx);
-            let got = kernel.map_cells(ctx, &d, &grid);
+            let got = kernel
+                .map_cells(ctx, &d, &grid)
+                .expect("feedback map dispatch should complete");
             let want = reference_map(&d, &grid);
             assert_eq!(got.len(), 16);
             assert_eq!(got, want, "device per-cell map must equal the host oracle");
@@ -456,7 +476,9 @@ mod tests {
             let kernel = GpuFeedbackDecode::new(ctx);
             // A non-trivial residency closure to exercise the host fold.
             let resident = |k: TexturePageKey| if k.mip == 0 { Some(2) } else { None };
-            let got = kernel.decode(ctx, &d, &grid, resident, 9);
+            let got = kernel
+                .decode(ctx, &d, &grid, resident, 9)
+                .expect("feedback decode dispatch should complete");
             let want = golden_decode(&d, &grid, resident, 9);
             assert!(!got.is_empty(), "fixture produces demand");
             assert_eq!(got, want, "device decode must equal the CPU golden exactly");
@@ -474,7 +496,9 @@ mod tests {
             grid[cell(0, 1)] = 1;
             grid[cell(1, 1)] = 1;
             let kernel = GpuFeedbackDecode::new(ctx);
-            let got = kernel.decode(ctx, &d, &grid, |_| None, 1);
+            let got = kernel
+                .decode(ctx, &d, &grid, |_| None, 1)
+                .expect("feedback decode dispatch should complete");
             assert_eq!(got.len(), 1, "four collapsing cells dedup to one demand");
             assert_eq!(got[0].key.mip, 1);
             assert_eq!(got[0].key.x, 0);
@@ -488,8 +512,14 @@ mod tests {
         with_gpu(|ctx| {
             let d = desc();
             let kernel = GpuFeedbackDecode::new(ctx);
-            assert!(kernel.map_cells(ctx, &d, &[0u8; 3]).is_empty());
-            assert!(kernel.decode(ctx, &d, &[0u8; 3], |_| None, 1).is_empty());
+            assert!(kernel
+                .map_cells(ctx, &d, &[0u8; 3])
+                .expect("malformed feedback is a valid empty result")
+                .is_empty());
+            assert!(kernel
+                .decode(ctx, &d, &[0u8; 3], |_| None, 1)
+                .expect("malformed feedback is a valid empty result")
+                .is_empty());
         });
     }
 }

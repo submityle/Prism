@@ -1,6 +1,6 @@
 //! Real-wgpu validation for the persistent page-table and feedback readback slice.
 //!
-//! These tests skip only when no headless adapter is available. Set
+//! These tests skip only when no real headless adapter is available. Set
 //! `PRISM_REQUIRE_GPU=1` to turn that environmental skip into a failure.
 
 use prism_render_architecture::texture_streaming::{GpuPageTable, TexturePageKey};
@@ -14,7 +14,7 @@ use prism_virtual_texture_gpu::{
     reason = "test diagnostics: explain a GPU-less skip"
 )]
 fn with_gpu() -> Option<GpuContext> {
-    match GpuContext::try_headless() {
+    match GpuContext::try_real_headless() {
         Some(ctx) => Some(ctx),
         None => {
             eprintln!("[prism_virtual_texture_gpu] no headless GPU adapter; skipping storage/readback test");
@@ -177,4 +177,76 @@ fn external_feedback_storage_buffer_round_trips_through_staging() {
         readback.read_from(&ctx, &not_copyable, 1),
         Err(FeedbackReadbackError::SourceMissingCopySourceUsage)
     );
+}
+
+#[test]
+fn persistent_page_table_expands_without_losing_the_previous_contract() {
+    let Some(ctx) = with_gpu() else { return };
+    let mut storage = GpuPageTableStorage::new(&ctx, 1).expect("initial storage");
+    let readback = GpuFeedbackReadback::new(&ctx, 16).expect("readback");
+    let initial = GpuPageTable::from_bindings(&[(
+        TexturePageKey {
+            texture: 2,
+            mip: 1,
+            layer: 0,
+            x: 3,
+            y: 4,
+        },
+        17,
+    )]);
+    storage.upload(&ctx, &initial).expect("initial upload");
+    let initial_capacity = storage.capacity_entries();
+    storage
+        .ensure_capacity(&ctx, 4)
+        .expect("page-table capacity growth");
+    assert_eq!(storage.len(), initial.len());
+    let preserved = readback
+        .read_from(&ctx, storage.buffer(), storage.capacity_entries() * 4)
+        .expect("preserved page-table readback");
+    assert_eq!(&preserved[..initial.words().len()], initial.words());
+    assert!(preserved[initial.words().len()..]
+        .iter()
+        .all(|&word| word == 0));
+
+    let expanded = GpuPageTable::from_bindings(&[
+        (
+            TexturePageKey {
+                texture: 4,
+                mip: 0,
+                layer: 0,
+                x: 0,
+                y: 0,
+            },
+            1,
+        ),
+        (
+            TexturePageKey {
+                texture: 4,
+                mip: 0,
+                layer: 0,
+                x: 1,
+                y: 0,
+            },
+            2,
+        ),
+        (
+            TexturePageKey {
+                texture: 4,
+                mip: 0,
+                layer: 0,
+                x: 2,
+                y: 0,
+            },
+            3,
+        ),
+    ]);
+    storage
+        .upload_resizing(&ctx, &expanded)
+        .expect("resizing upload");
+    assert!(storage.capacity_entries() >= expanded.len());
+    assert!(storage.capacity_entries() > initial_capacity);
+    let words = readback
+        .read_from(&ctx, storage.buffer(), storage.capacity_entries() * 4)
+        .expect("expanded table readback");
+    assert_eq!(&words[..expanded.words().len()], expanded.words());
 }

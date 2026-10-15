@@ -9,7 +9,10 @@ use core::fmt;
 use prism_render_architecture::texture_streaming::{GpuPageTable, PAGE_TABLE_ENTRY_WORDS};
 use wgpu::Buffer;
 
-use crate::{buffer, context::GpuContext};
+use crate::{
+    buffer,
+    context::{GpuContext, GpuError},
+};
 
 const WORD_BYTES: usize = size_of::<u32>();
 
@@ -44,6 +47,8 @@ pub enum PageTableStorageError {
     },
     /// An intermediate byte-count conversion overflowed.
     ByteCountOverflow,
+    /// The GPU context is already reporting a recoverable device error.
+    Gpu(GpuError),
 }
 
 impl fmt::Display for PageTableStorageError {
@@ -55,6 +60,7 @@ impl fmt::Display for PageTableStorageError {
             Self::ReservedMissSentinel { entry } => write!(formatter, "page-table entry {entry} uses the reserved u32::MAX miss sentinel"),
             Self::DeviceBufferLimitExceeded { requested_bytes, limit_bytes } => write!(formatter, "page-table storage requires {requested_bytes} bytes but device limit is {limit_bytes}"),
             Self::ByteCountOverflow => formatter.write_str("page-table storage byte count overflowed"),
+            Self::Gpu(error) => write!(formatter, "page-table GPU operation failed: {error}"),
         }
     }
 }
@@ -66,11 +72,13 @@ pub struct GpuPageTableStorage {
     buffer: Buffer,
     capacity_entries: usize,
     len: usize,
+    words: Vec<u32>,
 }
 
 impl GpuPageTableStorage {
     /// Allocates a zeroed storage buffer for a fixed entry capacity.
     pub fn new(ctx: &GpuContext, capacity_entries: usize) -> Result<Self, PageTableStorageError> {
+        ensure_context_ready(ctx)?;
         if capacity_entries == 0 {
             return Err(PageTableStorageError::ZeroCapacity);
         }
@@ -97,6 +105,7 @@ impl GpuPageTableStorage {
             ),
             capacity_entries,
             len: 0,
+            words: Vec::new(),
         })
     }
 
@@ -115,6 +124,7 @@ impl GpuPageTableStorage {
         ctx: &GpuContext,
         words: &[u32],
     ) -> Result<(), PageTableStorageError> {
+        ensure_context_ready(ctx)?;
         let entry_count = validate_words(words)?;
         if entry_count > self.capacity_entries {
             return Err(PageTableStorageError::CapacityExceeded {
@@ -131,7 +141,44 @@ impl GpuPageTableStorage {
         ctx.queue()
             .write_buffer(&self.buffer, 0, bytemuck::cast_slice(&padded));
         self.len = entry_count;
+        self.words.clear();
+        self.words.extend_from_slice(words);
         Ok(())
+    }
+
+    /// Grows the persistent table before an upload when the current capacity
+    /// is insufficient. The old buffer remains live until the replacement is
+    /// fully allocated, so a failed growth cannot invalidate the active table.
+    pub fn ensure_capacity(
+        &mut self,
+        ctx: &GpuContext,
+        required_entries: usize,
+    ) -> Result<(), PageTableStorageError> {
+        ensure_context_ready(ctx)?;
+        if required_entries <= self.capacity_entries {
+            return Ok(());
+        }
+        let mut capacity = self.capacity_entries.max(1);
+        while capacity < required_entries {
+            capacity = capacity
+                .checked_mul(2)
+                .ok_or(PageTableStorageError::ByteCountOverflow)?;
+        }
+        let mut replacement = Self::new(ctx, capacity)?;
+        replacement.upload_words(ctx, &self.words)?;
+        *self = replacement;
+        Ok(())
+    }
+
+    /// Uploads a table, growing the persistent allocation if necessary.
+    pub fn upload_resizing(
+        &mut self,
+        ctx: &GpuContext,
+        table: &GpuPageTable,
+    ) -> Result<(), PageTableStorageError> {
+        let entry_count = validate_words(table.words())?;
+        self.ensure_capacity(ctx, entry_count)?;
+        self.upload(ctx, table)
     }
 
     #[must_use]
@@ -169,6 +216,13 @@ fn validate_words(words: &[u32]) -> Result<usize, PageTableStorageError> {
         }
     }
     Ok(words.len() / PAGE_TABLE_ENTRY_WORDS)
+}
+
+fn ensure_context_ready(ctx: &GpuContext) -> Result<(), PageTableStorageError> {
+    if let Some(state) = ctx.device_lost() {
+        return Err(PageTableStorageError::Gpu(GpuError::DeviceLost(state)));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! Real-device parity tests for the sampler-feedback min-mip decode twin.
 //!
 //! Each test acquires a best-effort headless `GPU` via
-//! [`GpuContext::try_headless`]. On a machine with a usable adapter (e.g. Apple
+//! [`GpuContext::try_real_headless`]. On a machine with a usable adapter (e.g. Apple
 //! `M`-series Metal) the decode kernel runs for real and is compared against the
 //! device-free CPU golden
 //! [`decode_feedback`](prism_render_architecture::texture_streaming::decode_feedback);
@@ -26,7 +26,7 @@ use prism_virtual_texture_gpu::{GpuContext, GpuFeedbackDecode};
     reason = "test diagnostics: explain a GPU-less skip so CI logs are legible"
 )]
 fn with_gpu() -> Option<GpuContext> {
-    match GpuContext::try_headless() {
+    match GpuContext::try_real_headless() {
         Some(ctx) => Some(ctx),
         None => {
             eprintln!(
@@ -96,7 +96,9 @@ fn decode_large_grid_matches_golden_exactly() {
     let grid = varied_grid(px, py);
 
     let kernel = GpuFeedbackDecode::new(&ctx);
-    let device = kernel.decode(&ctx, &d, &grid, resident, 777);
+    let device = kernel
+        .decode(&ctx, &d, &grid, resident, 777)
+        .expect("GPU feedback decode should complete");
     let golden = decode_feedback(&d, &grid, resident, 777);
 
     assert!(!device.is_empty(), "varied grid must produce demand");
@@ -130,7 +132,9 @@ fn decode_all_not_requested_is_empty_on_device() {
     let grid = vec![NOT_REQUESTED; px as usize * py as usize];
 
     let kernel = GpuFeedbackDecode::new(&ctx);
-    let device = kernel.decode(&ctx, &d, &grid, resident, 1);
+    let device = kernel
+        .decode(&ctx, &d, &grid, resident, 1)
+        .expect("GPU feedback decode should complete");
     assert!(device.is_empty(), "an all-skip grid yields no demand");
     assert_eq!(device, decode_feedback(&d, &grid, resident, 1));
 }

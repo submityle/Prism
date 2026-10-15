@@ -14,10 +14,12 @@
 //! code.
 
 use bytemuck::Pod;
+use std::sync::mpsc;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
+
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, MapMode};
 
-use crate::context::GpuContext;
+use crate::context::{GpuContext, GpuError};
 
 /// Uploads `data` as a read-only `STORAGE` buffer.
 #[must_use]
@@ -83,20 +85,47 @@ pub fn copy(encoder: &mut CommandEncoder, source: &Buffer, staging: &Buffer, len
 ///
 /// The buffer is unmapped before returning so it can be reused.
 ///
-/// # Panics
-///
-/// Panics if the mapped range is unavailable after the device poll, which would
-/// indicate the submitted copy never completed.
-#[must_use]
-pub fn read_back<T: Pod>(ctx: &GpuContext, staging: &Buffer) -> Vec<T> {
-    staging.slice(..).map_async(MapMode::Read, |_| {});
-    ctx.wait();
-    let view = staging
-        .slice(..)
-        .get_mapped_range()
-        .expect("mapped readback range should be available after poll");
+#[must_use = "handle the GPU readback result"]
+pub fn try_read_back<T: Pod>(ctx: &GpuContext, staging: &Buffer) -> Result<Vec<T>, GpuError> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    staging.slice(..).map_async(MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    ctx.wait()?;
+    match receiver.try_recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            return Err(GpuError::ReadbackMapFailed(error.to_string()));
+        }
+        Err(mpsc::TryRecvError::Empty) => {
+            return Err(GpuError::ReadbackMapFailed(
+                "mapping callback did not complete after device poll".into(),
+            ));
+        }
+        Err(mpsc::TryRecvError::Disconnected) => {
+            return Err(GpuError::ReadbackMapFailed(
+                "mapping callback channel disconnected".into(),
+            ));
+        }
+    }
+    let view = match staging.slice(..).get_mapped_range() {
+        Ok(view) => view,
+        Err(error) => {
+            staging.unmap();
+            return Err(GpuError::ReadbackRangeUnavailable(error.to_string()));
+        }
+    };
     let values = bytemuck::cast_slice::<u8, T>(&view).to_vec();
     drop(view);
     staging.unmap();
-    values
+    Ok(values)
+}
+
+/// Reads a staging buffer using the fallible readback path.
+///
+/// This name is retained for callers of the original helper; failures are
+/// returned instead of being converted into an empty result.
+#[must_use = "handle the GPU readback result"]
+pub fn read_back<T: Pod>(ctx: &GpuContext, staging: &Buffer) -> Result<Vec<T>, GpuError> {
+    try_read_back(ctx, staging)
 }
