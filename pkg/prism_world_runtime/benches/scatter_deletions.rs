@@ -226,10 +226,12 @@ fn report(label: &str, samples: &mut [Duration; SAMPLES]) {
 }
 
 fn main() {
-    assert!(
-        !black_box(cfg!(debug_assertions)),
-        "run this benchmark with cargo bench (release)"
-    );
+    if black_box(cfg!(debug_assertions)) {
+        eprintln!(
+            "scatter_deletions: skipped under debug; run with cargo bench for release measurements"
+        );
+        return;
+    }
     println!(
         "scatter_deletions release host benchmark: os={} arch={} warmup={WARMUP} samples={SAMPLES} \
          seed={SEED:#018x} version=1 salt=22 spacing_mm=50 min_distance_mm=0 delete=source_index%4==0",
