@@ -189,6 +189,12 @@ struct ResponseBucket {
     legacy_class: u32,
 }
 
+// Structured response ABI. The CPU/GPU composition path stores five RGB
+// channels consecutively followed by shared alpha in a 64-byte record.
+struct ResponseOutput {
+    words: array<f32, 16>,
+}
+
 // Current + previous frame view-projection matrices for motion-vector output.
 // Mirrors `MotionMatrices` in `resolve/motion.rs` (128 bytes: two column-major
 // mat4x4<f32>).
@@ -251,6 +257,10 @@ struct MotionMatrices {
 // energy-conserving substitution rather than a double-counting add. Always
 // bound because the resolve writes it every pixel.
 @group(0) @binding(14) var world_restir_direct: texture_storage_2d<rgba16float, write>;
+// 15: structured response written by the resolve producer. A one-element
+// fallback is bound when the resident per-view allocation is not ready; the
+// producer checks the array length before writing.
+@group(0) @binding(15) var<storage, read_write> response_left: array<ResponseOutput>;
 
 // --- group 1: material tables (shared MaterialBindGroup layout) ---
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
@@ -2618,6 +2628,37 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
+    // Produce the structured response alongside the legacy HDR store. The
+    // current resolve computes one aggregate radiance, so the decomposition is
+    // conservative: direct is the residual after indirect and emission,
+    // reflection is the independently tracked environment specular, and the
+    // transmission arm remains zero until a dedicated transmission transport
+    // term is available. The five arms still sum exactly to the legacy color.
+    let response_reflection = indirect_result.env_specular;
+    let response_indirect_diffuse = indirect - response_reflection;
+    let response_direct = color - indirect - emissive;
+    var response: ResponseOutput;
+    response.words = array<f32, 16>(
+        response_direct.x,
+        response_direct.y,
+        response_direct.z,
+        response_indirect_diffuse.x,
+        response_indirect_diffuse.y,
+        response_indirect_diffuse.z,
+        response_reflection.x,
+        response_reflection.y,
+        response_reflection.z,
+        0.0,
+        0.0,
+        0.0,
+        emissive.x,
+        emissive.y,
+        emissive.z,
+        1.0,
+    );
+    if item.pixel_index < arrayLength(&response_left) {
+        response_left[item.pixel_index] = response;
+    }
     textureStore(scene_color, coord, vec4<f32>(color, 1.0));
     // SSR energy-conservation exports: the IBL specular this pixel already
     // received and the environment-BRDF weight it was scaled by. The SSR

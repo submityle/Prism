@@ -23,6 +23,7 @@ use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 use super::super::shadow::ShadowBindGroup;
 
 use super::super::classification_gpu::GpuShadingDispatchArgs;
+use super::super::composition::ViewResponseComposition;
 use super::super::ibl::EnvPrefilterBindGroups;
 use super::super::resources::ViewShadingBuffers;
 use super::abi::{GpuShadingResolveParams, RESOLVE_FLAG_GTAO, RESOLVE_FLAG_IBL_SPECULAR};
@@ -42,7 +43,12 @@ const _: () = assert!(
 
 pub(crate) fn dispatch_shading_resolve(
     settings: Res<super::super::runtime::PrismShadingSettings>,
-    view: ViewQuery<(&ViewShadingBuffers, &ViewResolveBindGroups, &ExtractedView)>,
+    view: ViewQuery<(
+        &ViewShadingBuffers,
+        &ViewResolveBindGroups,
+        &ExtractedView,
+        Option<&mut ViewResponseComposition>,
+    )>,
     material_bindings: Res<MaterialBindGroup>,
     light_bindings: Res<LightBindGroup>,
     shadow_bindings: Res<ShadowBindGroup>,
@@ -55,7 +61,7 @@ pub(crate) fn dispatch_shading_resolve(
     if !settings.enable_visibility_buffer {
         return;
     }
-    let (buffers, groups, extracted) = view.into_inner();
+    let (buffers, groups, extracted, mut responses) = view.into_inner();
 
     // Every bind group must be resident: the two pass-owned ones plus the
     // shared material/light groups the classification stage also depends on.
@@ -135,5 +141,9 @@ pub(crate) fn dispatch_shading_resolve(
         params.shading_class = class;
         pass.set_immediates(0, bytemuck::bytes_of(&params));
         pass.dispatch_workgroups_indirect(&buffers.dispatch_args, class as u64 * stride);
+    }
+    drop(pass);
+    if let Some(responses) = responses.as_deref_mut() {
+        responses.publish(settings.frame_index);
     }
 }

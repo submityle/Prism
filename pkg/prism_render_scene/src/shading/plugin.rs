@@ -50,7 +50,8 @@ use super::{
         prepare_shading_composite_pipelines, ShadingCompositePipeline,
     },
     composition::{
-        init_response_composition, prepare_response_composition_targets, response_composition_pass,
+        init_response_composition, prepare_response_composition_resources,
+        prepare_response_composition_targets, response_composition_pass,
         ResponseCompositionSystems,
     },
     ddgi::{
@@ -375,7 +376,14 @@ impl Plugin for PrismShadingPlugin {
             .add_systems(RenderStartup, init_response_composition)
             .add_systems(
                 Render,
-                prepare_response_composition_targets.in_set(RenderSystems::PrepareBindGroups),
+                (
+                    prepare_response_composition_resources
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_response_composition_targets
+                        .after(prepare_response_composition_resources)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                ),
             )
             .add_systems(
                 bevy_core_pipeline::Core3d,

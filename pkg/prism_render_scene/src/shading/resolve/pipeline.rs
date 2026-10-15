@@ -29,8 +29,8 @@ use bevy_ecs::prelude::*;
 use bevy_material::{
     bind_group_layout_entries::{
         binding_types::{
-            sampler, storage_buffer_read_only_sized, texture_2d, texture_cube, texture_storage_2d,
-            uniform_buffer_sized,
+            sampler, storage_buffer_read_only_sized, storage_buffer_sized, texture_2d,
+            texture_cube, texture_storage_2d, uniform_buffer_sized,
         },
         BindGroupLayoutEntries,
     },
@@ -92,6 +92,10 @@ pub(crate) struct ShadingResolvePipeline {
     /// word so the resolve's channel gate treats every punctual light as
     /// visible, preserving byte-for-byte behaviour when routing is disabled.
     pub(crate) scene_dummy_visible_lights: Buffer,
+    /// Fallback one-element response output bound when a view has not yet
+    /// received its resident response allocation. The shader guards the pixel
+    /// index against this buffer's length, so it is safe even for large views.
+    pub(crate) response_dummy: Buffer,
     /// group 7: the per-frame `GpuAreaLight` storage array + the two baked
     /// Linearly Transformed Cosines (`LTC`) `Rgba32Float` coefficient LUTs the
     /// `accumulate_area_lights` twin fetches with a manual bilinear `textureLoad`.
@@ -142,8 +146,9 @@ pub(crate) struct ShadingResolvePipeline {
 /// Entries 12-13 are the write-only SSGI exports (`ssgi_ambient`,
 /// `ssgi_albedo`); entry 14 is the write-only world-space ReSTIR direct
 /// export (`world_restir_direct`); all always bound because the resolve
-/// writes them every pixel.
-fn view_layout_entries() -> BindGroupLayoutEntries<15> {
+/// writes them every pixel. Entry 15 is the structured response output written
+/// by the resolve producer and consumed by the resident response compositor.
+fn view_layout_entries() -> BindGroupLayoutEntries<16> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -173,6 +178,10 @@ fn view_layout_entries() -> BindGroupLayoutEntries<15> {
             // subtract the clustered punctual diffuse before folding in the
             // reservoir estimate; always bound because the resolve writes it.
             texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
+            // 15: structured response output (16 f32 words = 64 bytes). The
+            // resolve writes one element per covered pixel; a one-element
+            // dummy is bound until the per-view allocation is prepared.
+            storage_buffer_sized(false, None),
         ),
     )
 }
@@ -389,6 +398,11 @@ pub(crate) fn init_shading_resolve_pipeline(
         contents: bytemuck::cast_slice(&[u32::MAX]),
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
     });
+    let response_dummy = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism resolve response dummy"),
+        contents: bytemuck::cast_slice(&[0.0_f32; 16]),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
 
     // Fallback area-light resources bound when the opt-in subsystem is off (no
     // `AreaLightLtcLut` baked) or the per-frame buffer has not uploaded yet.
@@ -506,6 +520,7 @@ pub(crate) fn init_shading_resolve_pipeline(
         vsm_dummy_page_table,
         vsm_dummy_atlas,
         scene_dummy_visible_lights,
+        response_dummy,
         area_layout,
         area_dummy_lights,
         area_dummy_coeffs,

@@ -139,24 +139,6 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         ],
         depends_on: vec![scatter],
     });
-    let resolve = graph.add_pass(PassDescriptor {
-        name: "shading_resolve".into(),
-        queue: QueueClass::Compute,
-        accesses: vec![
-            access(visibility_ids, AccessKind::StorageRead),
-            access(visibility_metadata, AccessKind::StorageRead),
-            access(depth, AccessKind::SampledRead),
-            access(scene, AccessKind::StorageRead),
-            access(geometry, AccessKind::StorageRead),
-            access(materials, AccessKind::StorageRead),
-            access(shading_work, AccessKind::StorageRead),
-            access(indirect_dispatch, AccessKind::IndirectRead),
-            access(shade_page_table, AccessKind::StorageRead),
-            access(shade_atlas, AccessKind::SampledRead),
-            access(scene_color, AccessKind::StorageWrite),
-        ],
-        depends_on: vec![shade],
-    });
     // Producers own these per-view GPU allocations. They are imported, not
     // transient aliases or frame-lag history; the resident endpoint admits the
     // actual extent/64B/16B capacities before allocation. No scene flag changes
@@ -182,6 +164,25 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         CompositionPlane::Auxiliary.graph_name(),
         ResourceLifetime::Imported,
     );
+    let resolve = graph.add_pass(PassDescriptor {
+        name: "shading_resolve".into(),
+        queue: QueueClass::Compute,
+        accesses: vec![
+            access(visibility_ids, AccessKind::StorageRead),
+            access(visibility_metadata, AccessKind::StorageRead),
+            access(depth, AccessKind::SampledRead),
+            access(scene, AccessKind::StorageRead),
+            access(geometry, AccessKind::StorageRead),
+            access(materials, AccessKind::StorageRead),
+            access(shading_work, AccessKind::StorageRead),
+            access(indirect_dispatch, AccessKind::IndirectRead),
+            access(shade_page_table, AccessKind::StorageRead),
+            access(shade_atlas, AccessKind::SampledRead),
+            access(left, AccessKind::StorageWrite),
+            access(scene_color, AccessKind::StorageWrite),
+        ],
+        depends_on: vec![shade],
+    });
     graph.add_pass(PassDescriptor {
         name: COMPOSITION_PASS_NAME.into(),
         queue: QueueClass::Compute,
@@ -295,6 +296,7 @@ mod tests {
         assert!(has_barrier("texel_space_shade_jobs", 3, 4));
         assert!(has_barrier("texel_space_shade_atlas", 4, 5));
         assert!(has_barrier("shading_indirect_dispatch", 2, 5));
+        assert!(has_barrier("response_left", 5, 6));
         assert_eq!(graph.passes()[6].name, COMPOSITION_PASS_NAME);
         assert_eq!(graph.passes()[7].name, "post_exposure");
         assert_eq!(graph.passes().last().unwrap().name, "post_upscale");

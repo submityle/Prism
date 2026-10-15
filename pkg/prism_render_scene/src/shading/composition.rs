@@ -1,28 +1,31 @@
 //! Resident response composition resources and command recording.
 //!
-//! Producers fill both response planes and the controls on the GPU, then
-//! [`ViewResponseComposition::publish`] a current-frame token. Composition
-//! consumes that token once because the production kernel overwrites the left
-//! plane. No token means no work, not a different graph topology. These planes
-//! are not temporal history: an old frame must never be blended again.
+//! The shading resolve producer writes the left response plane after shared
+//! geometry, shadow and lighting terms have been evaluated. The resident
+//! compositor then consumes a current-frame token once; an old frame is never
+//! blended again and a missing token is a no-op, not a graph-topology change.
 //!
-//! Producers must share already-shadowed lighting before splitting into arms.
-//! The existing monolithic resolve does not yet produce these response planes;
-//! this endpoint does not manufacture arms from its final HDR output.
+//! Split-arm producers may replace the right plane and controls before calling
+//! [`ViewResponseComposition::publish`]. The built-in resolve path supplies a
+//! neutral right/control state, so ordinary materials retain the exact resolve
+//! radiance while the same resident pass remains available for split plans.
 
 #![deny(missing_docs)]
 
 use bevy_ecs::prelude::*;
+use bevy_log::error;
 use bevy_math::UVec2;
 use bevy_render::{
     render_resource::{
         BindGroup, BindGroupEntries, BindGroupLayout, Buffer, BufferDescriptor, BufferId,
-        BufferUsages, CommandEncoder, ComputePassDescriptor, ComputePipeline, ComputePipelineId,
-        PipelineCompilationOptions, RawComputePipelineDescriptor, ShaderModuleDescriptor,
-        ShaderSource, Texture, TextureDimension, TextureFormat, TextureId, TextureUsages,
+        BufferInitDescriptor, BufferUsages, CommandEncoder, ComputePassDescriptor, ComputePipeline,
+        ComputePipelineId, PipelineCompilationOptions, RawComputePipelineDescriptor,
+        ShaderModuleDescriptor, ShaderSource, Texture, TextureDimension, TextureFormat, TextureId,
+        TextureUsages,
     },
     renderer::{RenderContext, RenderDevice, ViewQuery},
 };
+use bytemuck::cast_slice;
 use thiserror::Error;
 use wgpu_types::Limits;
 
@@ -325,7 +328,20 @@ impl ViewResponseComposition {
         };
         let left = allocate(CompositionPlane::Left);
         let right = allocate(CompositionPlane::Right);
-        let controls = allocate(CompositionPlane::Controls);
+        let neutral_control = GpuCompositionControl {
+            mask: 0.0,
+            channels: 0,
+            shared_alpha: 1.0,
+            // Preserve the producer's alpha. This is the neutral rule for the
+            // built-in single-arm path and remains valid for split producers
+            // that explicitly rewrite controls before publication.
+            alpha_rule: 1,
+        };
+        let controls = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some(CompositionPlane::Controls.graph_name()),
+            contents: cast_slice(&vec![neutral_control; layout.pixel_count() as usize]),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        });
         let auxiliary = (auxiliary_jobs != 0).then(|| allocate(CompositionPlane::Auxiliary));
         let radiance_group = device.create_bind_group(
             "prism response composition radiance",
@@ -362,6 +378,11 @@ impl ViewResponseComposition {
     /// Immutable checked dimensions and plane-to-byte mappings.
     pub const fn layout(&self) -> ResponseCompositionLayout {
         self.layout
+    }
+
+    /// The left response plane written by the shading resolve producer.
+    pub(crate) fn left_buffer(&self) -> &Buffer {
+        &self.left
     }
 
     /// Typed storage buffers filled by GPU producers. Auxiliary is absent when empty.
@@ -574,6 +595,41 @@ fn validate_target(
 
 pub(crate) fn init_response_composition(mut commands: Commands, device: Res<RenderDevice>) {
     commands.insert_resource(ResidentCompositionPipelines::new(&device));
+}
+
+/// Gives every visibility view a resident response allocation. The allocation
+/// is sized from the actual view target, not from a fixed screen limit, and is
+/// replaced atomically when a camera changes resolution.
+pub(crate) fn prepare_response_composition_resources(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    pipelines: Res<ResidentCompositionPipelines>,
+    views: Query<(
+        Entity,
+        &ViewVisibilityBuffer,
+        Option<&ViewResponseComposition>,
+    )>,
+) {
+    for (entity, visibility, existing) in &views {
+        if existing.is_some_and(|responses| responses.layout().size() == visibility.size) {
+            continue;
+        }
+        match ViewResponseComposition::new(&device, &pipelines, visibility.size, 0) {
+            Ok(responses) => {
+                commands.entity(entity).insert(responses);
+            }
+            Err(error) => {
+                commands
+                    .entity(entity)
+                    .remove::<ViewResponseComposition>()
+                    .remove::<ResponseCompositionTarget>();
+                error!(
+                    "failed to allocate resident response composition for view {:?}: {error}",
+                    entity
+                );
+            }
+        }
+    }
 }
 
 pub(crate) fn prepare_response_composition_targets(

@@ -32,6 +32,7 @@ use crate::{GpuSceneBuffers, RenderShadingGeometryBuffers};
 
 use super::super::ao::ViewGtaoTextures;
 use super::super::area_light::{AreaLightGpuBuffer, AreaLightLtcLut};
+use super::super::composition::ViewResponseComposition;
 use super::super::ibl::{DfgLutTexture, PrefilteredEnvironmentMap};
 use super::super::light_routing::ViewLightRouting;
 use super::super::resources::{ViewShadingBuffers, ViewVisibilityBuffer};
@@ -128,6 +129,7 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         Option<&ViewVsmPhysicalAtlas>,
         Option<&ViewResolveVsmPageTable>,
         Option<&ViewLightRouting>,
+        Option<&ViewResponseComposition>,
     )>,
 ) {
     // Scene/geometry tables are shared across all views; if either has not
@@ -144,14 +146,23 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         geometry.buffers(),
     )
     else {
-        for (entity, _, _, _, _, _, _, _) in &views {
+        for (entity, _, _, _, _, _, _, _, _) in &views {
             commands.entity(entity).remove::<ViewResolveBindGroups>();
         }
         return;
     };
 
-    for (entity, visibility, buffers, motion, gtao, vsm_atlas, vsm_page_table, light_routing) in
-        &views
+    for (
+        entity,
+        visibility,
+        buffers,
+        motion,
+        gtao,
+        vsm_atlas,
+        vsm_page_table,
+        light_routing,
+        responses,
+    ) in &views
     {
         let (ids, metadata) = visibility.attachments();
         // Bind the view's GTAO visibility when present, else a 1x1 white
@@ -185,6 +196,13 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                 // 14: world-space ReSTIR direct export (raw cosine-weighted
                 // punctual irradiance), read by the world_restir composite.
                 visibility.world_restir_direct_view(),
+                // 15: resolve-produced structured response. The dummy is a
+                // valid one-element storage binding; the shader bounds-checks
+                // before writing when no resident response allocation exists.
+                responses.map_or_else(
+                    || pipeline.response_dummy.as_entire_binding(),
+                    |value| value.left_buffer().as_entire_binding(),
+                ),
             )),
         );
         let scene_group = device.create_bind_group(
