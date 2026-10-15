@@ -16,6 +16,13 @@ Engine-neutral, `no_std + alloc` terrain and planetary primitives for Prism.
 - Incremental rebake planning merges tile-local dirty regions deterministically and admits work through task, abstract-work, and output-byte budgets without allocating in the geometry hot path.
 - Heightfield baking supports bounded full builds and atomic local resampling;
   its indexed planar mesh updates only the dirty vertices and normal halo.
+- `PlanarHeightfieldSurface` queries a shared baked snapshot with exact integer
+  triangle interpolation and upward geometric normals, without a mesh or float
+  world coordinates. Its explicit embedding has half-open XZ ownership.
+- Optional `scatter` combines source scatter and author density/species with
+  exact height, signed vertical-clearance and rational-slope thinning. It only
+  removes points, preserving source keys, minimum distance and XYZ partition
+  invariance; this is not ground projection or guaranteed surface density.
 - Planet mesh baking projects those heights using f64 tile coordinates and an
   integer-millimetre origin, checks local f32 position error against a caller
   budget, and preserves level-30 tile detail. The optional `mesh` feature emits
@@ -36,6 +43,16 @@ host/render-edge adapter and currently enables the standard-library-backed
 combination. Cache-lineage tokens on baked heightfields prevent a change from
 one independent cache from being applied to another cache with the same tile,
 specification, and revision.
+
+The optional `scatter` feature remains `no_std + alloc` and only adds the
+engine-neutral residency kernel. Surface construction/queries allocate nothing;
+scatter reuses the source's two point/attribute Vec allocations for stable
+in-place thinning. Terrain work is admitted as four logical sample reads per
+primary candidate before enumeration. The complete cache key shares the actual
+immutable terrain snapshot and structurally compares all samples; tile/revision
+alone is not identity. Snapshot residency and structural comparison costs remain
+caller concerns. Exact contracts and benchmark methodology are documented in
+`docs/prism_world_heightfield_scatter_zh.md` at the repository root.
 
 The crate owns data contracts and executable geometry/data kernels. Engine scheduling,
 render submission, collision, persistence, and GPU formats remain external
@@ -90,6 +107,8 @@ From the repository root:
 ```text
 cargo fmt --manifest-path pkg/prism_world_terrain/Cargo.toml -- --check
 cargo test --manifest-path pkg/prism_world_terrain/Cargo.toml --no-default-features
+cargo test --manifest-path pkg/prism_world_terrain/Cargo.toml --features scatter
+cargo clippy --manifest-path pkg/prism_world_terrain/Cargo.toml --features scatter --all-targets -- -D warnings
 cargo check --manifest-path pkg/prism_world_terrain/Cargo.toml --features mesh
 cargo test --manifest-path pkg/prism_world_terrain/Cargo.toml --features mesh
 cargo clippy --manifest-path pkg/prism_world_terrain/Cargo.toml --no-default-features -- -D warnings
@@ -112,3 +131,10 @@ The release benchmark `cargo bench -p prism_world_terrain --bench heightfield_ba
 reports nearest-rank P50/P95/P99 for full/local heightfield and SDF baking,
 planar mesh builds/updates, and full planet mesh projection. Logical payload
 sizes are printed separately from timings; they are not allocator/RSS peaks.
+
+`cargo bench -p prism_world_terrain --features scatter --bench heightfield_scatter`
+measures 100k exact queries (including result checks) and full 10k-candidate
+source/author-field/terrain thinning separately. It checks zero query allocations,
+exactly two full-result allocations, stable buffer capacities and every final
+point/attribute pair. Eight warmups and 64 samples yield nearest-rank
+P50/P95/P99 host wall time, not product frame time or GPU measurements.

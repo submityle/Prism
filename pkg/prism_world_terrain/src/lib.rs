@@ -13,10 +13,17 @@ mod bake;
 mod coordinates;
 mod cube_sphere;
 mod height;
+mod heightfield_surface;
+#[cfg(test)]
+mod heightfield_surface_tests;
 mod lod;
 mod planet_mesh;
 mod rebake;
 mod representation;
+#[cfg(feature = "scatter")]
+mod scatter_filter;
+#[cfg(all(test, feature = "scatter"))]
+mod scatter_filter_tests;
 mod stream_adapter;
 mod surface;
 #[cfg(test)]
@@ -33,6 +40,10 @@ pub use cube_sphere::{
     direction_to_face_uv, face_uv_to_direction, CubeFace, CubeSphereError, FaceUv, UnitDirection,
 };
 pub use height::{DeterministicHeightSampler, HeightSample, HeightSampleValue, HeightSampler};
+pub use heightfield_surface::{
+    HeightfieldQueryError, HeightfieldSurfaceSample, PlanarHeightfieldEmbedding,
+    PlanarHeightfieldSurface, HEIGHTFIELD_SURFACE_VERSION,
+};
 pub use lod::{evaluate_lod, LodError, LodEvaluation, LodMetric};
 pub use planet_mesh::{PlanetHeightfieldMesh, PlanetMeshConfig};
 pub use rebake::{
@@ -42,6 +53,12 @@ pub use representation::{
     HeightfieldSpec, RepresentationChoice, RepresentationError, RepresentationKind,
     RepresentationQuery, RepresentationSpec, RepresentationWork, SdfSpec,
     TerrainRepresentationSelector, VoxelSpec,
+};
+#[cfg(feature = "scatter")]
+pub use scatter_filter::{
+    scatter_with_heightfield, HeightfieldScatterBudget, HeightfieldScatterCacheKey,
+    HeightfieldScatterError, HeightfieldScatterFilters, HeightfieldScatterOutput,
+    HEIGHTFIELD_SCATTER_FILTER_VERSION,
 };
 pub use stream_adapter::{TerrainStreamAdapter, TerrainStreamConfig, TerrainStreamError};
 pub use surface::{SdfSurfaceMesh, SurfaceCost, SurfaceError, SurfaceGeometry, SurfaceLimits};

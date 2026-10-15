@@ -10,13 +10,20 @@ publish = false
 [features]
 default = []
 mesh = ["dep:prism_mesh", "dep:prism_render_driver"]
+scatter = ["dep:prism_world_residency"]
 
 [dependencies]
 prism_world_stream = { path = "../prism_world_stream", default-features = false }
 libm = "0.2"
+prism_world_residency = { path = "../prism_world_residency", optional = true }
 prism_mesh = { path = "../prism_mesh", optional = true }
 prism_render_driver = { path = "../prism_render_driver", optional = true }
 
 [[bench]]
 name = "heightfield_bake"
 harness = false
+
+[[bench]]
+name = "heightfield_scatter"
+harness = false
+required-features = ["scatter"]
