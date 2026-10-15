@@ -6,6 +6,7 @@
 //! place it using the world's high-precision transform boundary.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{DirtyRegion, HeightSample, HeightSampler, HeightfieldSpec, TileKey};
 
@@ -39,6 +40,8 @@ pub enum BakeError<E> {
     TileMismatch,
     /// A mesh missed an update, or a change belongs to another representation.
     StaleChange,
+    /// The process-wide disposable cache identity space is exhausted.
+    CacheIdExhausted,
     /// Patch size is non-positive/non-finite, or geometry cannot be represented.
     InvalidGeometry,
 }
@@ -86,6 +89,7 @@ impl SampleBounds {
 /// also requires rebuilding its mesh. Tokens are not global content identities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GridChange {
+    cache_id: u64,
     tile: TileKey,
     spec: HeightfieldSpec,
     previous_revision: u64,
@@ -106,13 +110,25 @@ impl GridChange {
 }
 
 /// Disposable baked height data; authored source remains in the scene/provider.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct HeightfieldTile {
+    cache_id: u64,
     tile: TileKey,
     spec: HeightfieldSpec,
     revision: u64,
     samples: Vec<i16>,
 }
+
+impl PartialEq for HeightfieldTile {
+    fn eq(&self, other: &Self) -> bool {
+        self.tile == other.tile
+            && self.spec == other.spec
+            && self.revision == other.revision
+            && self.samples == other.samples
+    }
+}
+
+impl Eq for HeightfieldTile {}
 
 impl HeightfieldTile {
     /// Bakes the complete tile after validating both count and payload limits.
@@ -129,6 +145,7 @@ impl HeightfieldTile {
         };
         let samples = sample_region(tile, spec, bounds, sampler, limits)?;
         Ok(Self {
+            cache_id: next_cache_id().ok_or(BakeError::CacheIdExhausted)?,
             tile,
             spec,
             revision: 0,
@@ -200,6 +217,7 @@ impl HeightfieldTile {
                 .copy_from_slice(&staged[row * width..(row + 1) * width]);
         }
         let change = GridChange {
+            cache_id: self.cache_id,
             tile: self.tile,
             spec: self.spec,
             previous_revision: self.revision,
@@ -265,8 +283,9 @@ fn index(side: u32, x: u32, z: u32) -> usize {
 }
 
 /// Indexed local heightfield geometry with in-place one-ring normal updates.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct HeightfieldMesh {
+    cache_id: u64,
     tile: TileKey,
     spec: HeightfieldSpec,
     revision: u64,
@@ -275,6 +294,19 @@ pub struct HeightfieldMesh {
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
+}
+
+impl PartialEq for HeightfieldMesh {
+    fn eq(&self, other: &Self) -> bool {
+        self.tile == other.tile
+            && self.spec == other.spec
+            && self.revision == other.revision
+            && self.size_metres == other.size_metres
+            && self.positions == other.positions
+            && self.normals == other.normals
+            && self.uvs == other.uvs
+            && self.indices == other.indices
+    }
 }
 
 impl HeightfieldMesh {
@@ -313,6 +345,7 @@ impl HeightfieldMesh {
             return Err(BakeError::BudgetExceeded);
         }
         let mut result = Self {
+            cache_id: field.cache_id,
             tile: field.tile,
             spec: field.spec,
             revision: field.revision,
@@ -356,8 +389,10 @@ impl HeightfieldMesh {
         field: &HeightfieldTile,
         change: GridChange,
     ) -> Result<SampleBounds, BakeError<core::convert::Infallible>> {
-        if self.tile != field.tile
+        if self.cache_id != field.cache_id
+            || self.tile != field.tile
             || change.tile != field.tile
+            || change.cache_id != field.cache_id
             || self.spec != field.spec
             || change.spec != field.spec
             || self.revision != change.previous_revision
@@ -427,15 +462,45 @@ fn height_metres(field: &HeightfieldTile, x: u32, z: u32) -> f32 {
         * 0.001) as f32
 }
 
+static NEXT_CACHE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_cache_id() -> Option<u64> {
+    let mut current = NEXT_CACHE_ID.load(Ordering::Relaxed);
+    loop {
+        if current == 0 || current == u64::MAX {
+            return None;
+        }
+        match NEXT_CACHE_ID.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Some(current),
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[cfg(test)]
+fn next_cache_id_candidate(current: u64) -> Option<u64> {
+    (current != 0 && current != u64::MAX).then_some(current)
+}
+
 fn normal(field: &HeightfieldTile, size: [f32; 2], x: u32, z: u32) -> [f32; 3] {
     let side = field.spec.samples_per_edge();
     let left = x.saturating_sub(1);
     let right = (x + 1).min(side - 1);
     let back = z.saturating_sub(1);
     let front = (z + 1).min(side - 1);
-    let dx = f64::from(height_metres(field, right, z) - height_metres(field, left, z))
+    let scale_metres = field.spec.height_scale_mm() as f64 * 0.001;
+    let dx = (f64::from(field.samples[index(side, right, z)])
+        - f64::from(field.samples[index(side, left, z)]))
+        * scale_metres
         / (f64::from(size[0]) * f64::from(right - left) / f64::from(side - 1));
-    let dz = f64::from(height_metres(field, x, front) - height_metres(field, x, back))
+    let dz = (f64::from(field.samples[index(side, x, front)])
+        - f64::from(field.samples[index(side, x, back)]))
+        * scale_metres
         / (f64::from(size[1]) * f64::from(front - back) / f64::from(side - 1));
     let length = libm::sqrt(dx * dx + 1.0 + dz * dz);
     [
@@ -603,11 +668,25 @@ mod tests {
         assert_eq!(second.bounds.count::<()>().unwrap(), 1);
         assert_eq!(mesh.update(&field, first), Err(BakeError::StaleChange));
         assert_eq!(mesh.update(&field, second), Err(BakeError::StaleChange));
+        let mut independent =
+            HeightfieldTile::bake(field.tile, field.spec, &plane(10_000), LIMITS).unwrap();
+        let independent_change = independent.rebake(region, &plane(10_000), LIMITS).unwrap();
+        let mut independent_mesh =
+            HeightfieldMesh::build(&independent, [1.0, 1.0], LIMITS).unwrap();
+        assert_eq!(
+            independent_mesh.update(&field, independent_change),
+            Err(BakeError::StaleChange)
+        );
         let other = DirtyRegion::new(TileKey::root(CubeFace::NegativeY), 0, 0, 0, 0).unwrap();
         assert_eq!(
             field.rebake(other, &plane(0), LIMITS),
             Err(BakeError::TileMismatch)
         );
+
+        let same_content =
+            HeightfieldTile::bake(field.tile, field.spec, &plane(0), LIMITS).unwrap();
+        let same_mesh = HeightfieldMesh::build(&same_content, [1.0, 1.0], LIMITS).unwrap();
+        assert_eq!(mesh, same_mesh);
     }
 
     #[cfg(feature = "mesh")]
@@ -622,5 +701,13 @@ mod tests {
         assert_eq!(mesh.vertex_buffer_data().len(), 81 * 32);
         assert_eq!(mesh.indices().unwrap().len(), 384);
         assert!(mesh.bounds().is_some());
+    }
+
+    #[test]
+    fn cache_id_allocator_fails_closed_at_extremes() {
+        assert_eq!(next_cache_id_candidate(1), Some(1));
+        assert_eq!(next_cache_id_candidate(u64::MAX - 1), Some(u64::MAX - 1));
+        assert_eq!(next_cache_id_candidate(u64::MAX), None);
+        assert_eq!(next_cache_id_candidate(0), None);
     }
 }

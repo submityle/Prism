@@ -28,7 +28,14 @@ Engine-neutral, `no_std + alloc` terrain and planetary primitives for Prism.
 
 ## Performance layout
 
-The hot-path keys and geometry values are small `Copy` structs with no heap allocation. Tile traversal uses integer coordinates. The direction contract uses scalar `f32` normalization; planet mesh projection keeps tile coordinates and normalization in `f64` until origin-relative metre encoding. Cross-face adjacency is a fixed table lookup plus one optional integer index reversal, so it does not require a floating-point direction round trip. Voxel data is contiguous, two bytes per component, X-major, and suitable for direct upload or brick-local staging. Buffer owners, baking, and planning use `alloc`; the basic key, LOD, coordinate, and sampling contracts do not allocate.
+The hot-path keys and geometry values are small `Copy` structs with no heap allocation. Tile traversal uses integer coordinates. The direction contract uses scalar `f32` normalization; planet mesh projection keeps tile coordinates and normalization in `f64` until origin-relative metre encoding. Cross-face adjacency is a fixed table lookup plus one optional integer index reversal, so it does not require a floating-point direction round trip. Voxel data is contiguous, two bytes per component, X-major, and suitable for direct upload or brick-local staging. Buffer owners, baking, and planning use `alloc`; the basic key, LOD, coordinate, and sampling contracts do not allocate. Heightfield baking and mesh construction deliberately allocate bounded staging/output buffers and are not zero-allocation hot paths.
+
+The default feature set remains `no_std + alloc`. The optional `mesh` feature is a
+host/render-edge adapter and currently enables the standard-library-backed
+`prism_mesh` and `prism_render_driver` dependencies; it is not a no-std feature
+combination. Cache-lineage tokens on baked heightfields prevent a change from
+one independent cache from being applied to another cache with the same tile,
+specification, and revision.
 
 The crate owns data contracts and executable geometry/data kernels. Engine scheduling,
 render submission, collision, persistence, and GPU formats remain external
@@ -83,6 +90,8 @@ From the repository root:
 ```text
 cargo fmt --manifest-path pkg/prism_world_terrain/Cargo.toml -- --check
 cargo test --manifest-path pkg/prism_world_terrain/Cargo.toml --no-default-features
+cargo check --manifest-path pkg/prism_world_terrain/Cargo.toml --features mesh
+cargo test --manifest-path pkg/prism_world_terrain/Cargo.toml --features mesh
 cargo clippy --manifest-path pkg/prism_world_terrain/Cargo.toml --no-default-features -- -D warnings
 ```
 
