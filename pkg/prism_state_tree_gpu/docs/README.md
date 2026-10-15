@@ -7,5 +7,7 @@
 验证：
 
 - `cargo test -p prism_state_tree_gpu --offline -- --nocapture`
+- `PRISM_REQUIRE_GPU=1 cargo test -p prism_state_tree_gpu --test real_device_parity -- --nocapture`
+- `PRISM_REQUIRE_GPU=1 cargo test -p prism_state_tree_gpu --test scale_report -- --nocapture`
 - Apple M2 / Metal：8 行 parity 通过；4,096 行端到端报告 P50 `3,007,041 ns`、P95 `4,550,500 ns`、P99 `5,176,833 ns`。
-- 无 native adapter 时集成测试安全跳过，并输出明确原因。
+- 默认模式在无 native adapter 时集成测试安全跳过，并输出明确原因；设置 `PRISM_REQUIRE_GPU=1` 后无设备会直接失败，因此不会把 skip 计为 GPU 证据。

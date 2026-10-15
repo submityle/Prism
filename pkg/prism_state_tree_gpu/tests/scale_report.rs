@@ -14,6 +14,14 @@ use prism_state_tree_gpu::{GpuContext, GpuEvaluator};
 const ROWS: usize = 4_096;
 const SAMPLES: usize = 24;
 
+fn context_for_test() -> Option<GpuContext> {
+    let context = GpuContext::try_headless();
+    if context.is_none() && std::env::var_os("PRISM_REQUIRE_GPU").is_some() {
+        panic!("PRISM_REQUIRE_GPU is set, but no native StateTree GPU adapter is available");
+    }
+    context
+}
+
 fn percentile(samples: &mut [u128], numerator: usize, denominator: usize) -> u128 {
     samples.sort_unstable();
     let index = ((samples.len() - 1) * numerator).div_ceil(denominator);
@@ -22,7 +30,7 @@ fn percentile(samples: &mut [u128], numerator: usize, denominator: usize) -> u12
 
 #[test]
 fn real_device_scale_report() {
-    let Some(context) = GpuContext::try_headless() else {
+    let Some(context) = context_for_test() else {
         eprintln!("StateTree GPU scale skipped: no native adapter");
         return;
     };

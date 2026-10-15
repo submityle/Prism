@@ -8,9 +8,17 @@
 use prism_state_tree_ecs::{quantize_bias, quantize_unit, GpuBatchContract, GpuBatchInput};
 use prism_state_tree_gpu::{GpuContext, GpuEvaluator};
 
+fn context_for_test() -> Option<GpuContext> {
+    let context = GpuContext::try_headless();
+    if context.is_none() && std::env::var_os("PRISM_REQUIRE_GPU").is_some() {
+        panic!("PRISM_REQUIRE_GPU is set, but no native StateTree GPU adapter is available");
+    }
+    context
+}
+
 #[test]
 fn real_device_score_kernel_matches_cpu_golden() {
-    let Some(context) = GpuContext::try_headless() else {
+    let Some(context) = context_for_test() else {
         eprintln!("StateTree GPU parity skipped: no native adapter");
         return;
     };
@@ -74,7 +82,7 @@ fn real_device_score_kernel_matches_cpu_golden() {
 
 #[test]
 fn real_device_signed_and_saturated_scores_match_cpu_golden() {
-    let Some(context) = GpuContext::try_headless() else {
+    let Some(context) = context_for_test() else {
         eprintln!("StateTree GPU signed-score parity skipped: no native adapter");
         return;
     };
