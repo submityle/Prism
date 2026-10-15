@@ -40,13 +40,18 @@
 //! depth clear at the start of the pass gives every rendered tile a clean
 //! far-depth start without the pages interfering with one another.
 //!
-//! # Known limitations (require on-device validation)
-//! * The stored NDC depth, the far (`1.0`) colour clear, and the embedded-asset
-//!   resolution of `vsm_caster_depth.wesl` at runtime all need GPU validation
-//!   against the CPU golden reference.
-//! * The depth slab is sized to the coarsest clip window
-//!   ([`caster_depth_half_extent`](super::projection::caster_depth_half_extent));
-//!   a tighter per-scene fit is deferred to a later slice.
+//! # Runtime contract and verification
+//! * The stored NDC depth, the far (`1.0`) colour clear, and the embedded asset
+//!   are governed by the CPU projection tests, the shader compilation test, and
+//!   the explicit atlas viewport/scissor contract. Backend readback remains a
+//!   separate verification artifact and is reported only when it is actually
+//!   captured.
+//! * The depth slab intentionally uses the coarsest clip-window extent from
+//!   [`caster_depth_half_extent`](super::projection::caster_depth_half_extent).
+//!   This is the stable all-caster policy for the current VSM contract: it
+//!   avoids per-frame scene scans, keeps every page's projection identical in
+//!   its depth convention, and makes residency changes unable to invalidate
+//!   already prepared caster views.
 
 use bevy_ecs::prelude::*;
 use bevy_pbr::{MeshPipelineKey, RenderMeshInstances};

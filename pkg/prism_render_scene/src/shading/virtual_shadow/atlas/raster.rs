@@ -68,10 +68,9 @@ pub(crate) struct VsmCasterPage {
 
 /// Per-view input: the resident clipmap pages to rasterize this frame.
 ///
-/// Attached to a shaded 3D view by the parent slice, which bridges the
-/// page-table's per-view `ViewVsmRenderPages` into this atlas-owned type. Read
-/// by [`prepare_vsm_caster_depth_views`](super::dispatch::prepare_vsm_caster_depth_views);
-/// until the bridge lands no in-crate system inserts it, hence the guard.
+/// Attached to a shaded 3D view by the parent bridge, which mirrors the
+/// page-table's per-view records into this atlas-owned type. Read by
+/// [`prepare_vsm_caster_depth_views`](super::dispatch::prepare_vsm_caster_depth_views).
 #[derive(Component, Default)]
 pub(crate) struct ViewVsmCasterPages {
     /// Resident clipmap pages to render into the atlas this frame.

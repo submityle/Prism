@@ -32,8 +32,8 @@ use super::pages::{build_render_pages, VsmRenderPage};
 /// this frame: the flat `window_slot_count`-entry `u32` buffer the
 /// `vsm_sample.wesl` shader indexes by window slot, plus its slot count.
 ///
-/// Produced by [`super::readback::collect_vsm_page_readback`] and consumed by the
-/// resolve-pass VSM sample integration wired in a later slice.
+/// Produced by [`super::readback::collect_vsm_page_readback`] and consumed by
+/// the same-frame resolve binding bridge and water-surface VSM consumer.
 #[derive(Component)]
 pub(crate) struct ViewVsmPageTable {
     /// `STORAGE | COPY_DST` buffer holding the flat page table (binding for the
@@ -42,7 +42,7 @@ pub(crate) struct ViewVsmPageTable {
     /// Number of `u32` entries in `buffer` (== `window_slot_count`).
     #[expect(
         dead_code,
-        reason = "slot count is read by the resolve-pass vsm_sample integration wired in a later slice"
+        reason = "slot count is carried through the same-frame resolve bridge and water diagnostics"
     )]
     pub slot_count: u32,
 }
@@ -50,12 +50,12 @@ pub(crate) struct ViewVsmPageTable {
 /// Per-view component listing the resident clipmap pages the physical-atlas
 /// raster fill pass repaints caster depth into this frame.
 ///
-/// Produced by [`super::readback::collect_vsm_page_readback`] and consumed by the
-/// physical-atlas raster fill pass wired in a later slice.
+/// Produced by [`super::readback::collect_vsm_page_readback`] and mirrored into
+/// the atlas-owned caster-page component by the same-frame bridge.
 #[derive(Component)]
 #[expect(
     dead_code,
-    reason = "pages are read by the physical-atlas raster fill pass wired in a later slice"
+    reason = "pages are mirrored into the atlas-owned caster-page component by the same-frame bridge"
 )]
 pub(crate) struct ViewVsmRenderPages {
     /// The pages to repaint this frame, each resolved to its backing physical

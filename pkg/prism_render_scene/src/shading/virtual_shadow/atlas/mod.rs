@@ -13,19 +13,18 @@
 //! channel is the stored NDC depth) and the golden
 //! [`prism_render_shading::shadow::virtual_sm`] sampling path assumes.
 //!
-//! This slice owns only the *resource*: the per-view atlas depth texture, its
-//! sampling view, the filtering sampler `vsm_sample.wesl` binds at binding `2`,
-//! and the tiling math (kept as pure, testable functions). It deliberately does
-//! not run any pass -- the shadow-depth draw that fills the atlas tiles and the
-//! resolve pass that samples it are wired by later slices.
+//! This module owns the per-view atlas depth texture, its sampling view, the
+//! filtering sampler `vsm_sample.wesl` binds at binding `2`, the tiling math,
+//! and the caster-depth pass that fills resident tiles. The resolve pass binds
+//! the same atlas through the parent shading plugin.
 //!
 //! * [`resources`] -- the [`resources::ViewVsmPhysicalAtlas`] component, the
 //!   [`resources::VsmPhysicalAtlasCache`] host resource, the
 //!   [`resources::prepare_vsm_physical_atlas`] `PrepareResources` system, and
 //!   the `atlas_tile_origin` / `physical_pages_per_edge` tiling functions.
 //!
-//! The resource, the caster-depth raster pass, and their re-exports are all
-//! consumed by the parent `virtual_shadow` slice's plugin / render-graph wiring.
+//! The resource, caster-depth raster pass, and re-exports are consumed by the
+//! parent shading plugin's render schedule.
 
 mod resources;
 

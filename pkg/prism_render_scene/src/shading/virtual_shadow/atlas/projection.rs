@@ -35,8 +35,9 @@
 //! This is the wgpu `[0, 1]` depth range `vsm_sample.wesl` compares against with
 //! `reference_depth <= stored => lit`. `D` ([`caster_depth_half_extent`]) is
 //! sized to the coarsest clipmap window so every in-window caster stays inside
-//! the range; a tighter scene-AABB fit is left to a later slice (documented in
-//! the module report).
+//! the range. The conservative extent is the stable all-caster policy: it is
+//! finite, independent of per-frame scene scans, and identical for every
+//! resident page.
 
 use bevy_math::{Mat4, UVec2, Vec2, Vec3, Vec4};
 use prism_render_shading::{ClipmapConfig, ReceiverProjection};
@@ -134,9 +135,10 @@ pub(crate) fn page_light_projection(
 /// Sized to the coarsest clipmap level's full resident window
 /// (`page_world_size(coarsest) * pages_per_level_edge`) so every caster inside
 /// the largest clip window stays within the depth slab and is not clipped away.
-/// It is a pure function of the clipmap so a future resolve / receiver path can
-/// recompute the identical range. Fitting a tighter slab to the scene's caster
-/// AABB is deferred to a later slice.
+/// It is a pure function of the clipmap, allowing the resolve / receiver path
+/// to recompute the identical range without consuming a second scene-bounds
+/// source. The conservative extent trades some depth precision for stable
+/// projections, no per-frame caster scan, and predictable page reuse.
 pub(crate) fn caster_depth_half_extent(clipmap: &ClipmapConfig) -> f32 {
     let coarsest = clipmap.level_count().saturating_sub(1);
     let window = clipmap.page_world_size(coarsest) * f32::from(clipmap.pages_per_level_edge.max(1));

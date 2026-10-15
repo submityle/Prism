@@ -5,8 +5,8 @@
 //! late), decodes it with [`super::decode::request_keys`], drives the golden
 //! [`VirtualShadowMapDriver`] to make the requested pages resident, uploads the
 //! resulting page table via [`VsmPageTableBufferCache`] and attaches the per-view
-//! [`ViewVsmPageTable`] / [`ViewVsmRenderPages`] the resolve and raster-fill
-//! slices consume.
+//! [`ViewVsmPageTable`] / [`ViewVsmRenderPages`] outputs consumed by the
+//! same-frame resolve and raster-fill bridge.
 //!
 //! It runs the same three-stage `RenderGraph` state machine as the visibility
 //! parity readback: `request` enqueues the copy, `map_submitted` starts the async
@@ -152,7 +152,7 @@ pub(crate) fn map_submitted_vsm_page_readback(
 /// Consumes each mapped request bitmap (`RenderSystems::PrepareResources`, next frame):
 /// decodes the requests, drives the golden allocator, uploads the resulting
 /// page table and attaches the per-view [`ViewVsmPageTable`] /
-/// [`ViewVsmRenderPages`].
+/// [`ViewVsmRenderPages`] outputs used by the same-frame bridge.
 ///
 /// When VSM is disabled every resource is cleared so no stale residency leaks
 /// into a later re-enable. Driver / buffer state for views absent this frame is

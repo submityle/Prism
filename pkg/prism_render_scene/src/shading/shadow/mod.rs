@@ -15,10 +15,10 @@
 //! `prism_render_shading::shadow::csm`; atlas layer assignment comes from
 //! `prism_render_shading::shadow::atlas`.
 //!
-//! The device-side pipeline object construction, per-view uniform upload,
-//! draw submission per atlas layer, and the resolve-side wiring that binds the
-//! atlas texture and feeds these matrices are built in later slices and require
-//! on-device validation for numerical parity against the CPU reference.
+//! The device-side pipeline object construction, per-layer uniform upload, draw
+//! submission, and resolve-side atlas bindings are all wired by the shading
+//! plugin. CPU planning and standalone shader tests define the portable
+//! contract; backend readback evidence is recorded separately when available.
 
 mod abi;
 mod bindings;

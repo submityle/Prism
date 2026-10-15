@@ -668,8 +668,16 @@ vertex/index range、`base_vertex` 与 `vertex_count`，越界或溢出直接跳
 - `pkg/prism_render_scene/src/geometry/consumer.rs` 与各 draw/queue consumer；
 - `pkg/prism_render_scene/src/geometry/draw_range.rs` 及 geometry/scene/lifecycle 单测。
 
-这部分结论是源代码与 CPU/编译测试结论；它不把未执行的完整场景 GPU Golden 图或
-跨设备性能预算写成已验证结果。
+Shadow depth 与 VSM caster 已纳入同一 Mesh consumer contract：两条路径都从稳定的
+`GeometryHandle`/LOD 选择取得 prepared asset，并在 allocator slice、buffer class、索引/顶点
+范围和 `base_vertex` 进入 GPU draw 前执行 fail-closed 校验。VSM 的页表读回、同帧 bridge、物理
+atlas caster-depth 与 shading resolve 绑定已经由 `prism_render_scene::shading::plugin` 串成同一
+条执行链；coarsest clip-window depth slab 是当前稳定契约，用于避免每帧 caster 扫描和页驻留
+变化导致投影 ABI 失配。
+
+这部分完成性结论由源代码、CPU/编译测试和已有 GPU twin 证据共同组成；完整场景 Golden 图、
+跨设备画质对拍和性能预算仍按 §18 的固定采集协议单独判定，不用单元测试或设计预算替代真实
+捕获物。
 
 ## 14. 材质 / 着色 ABI 与 PSO 复用
 
@@ -796,7 +804,7 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 测试分成“当前完成性证据”和“产品级持续回归协议”，两者不得混写：
 
 1. **当前 CPU 契约证据**：`cargo test -p prism_mesh` 的 34 项库单测、14 项集成测试通过，`cargo test -p prism_asset_build_core` 的 149 项全包测试通过（其中 134 项 library tests，整个构建 crate 的快照，不全属于 Mesh）；定向 `cargo test -p prism_render_architecture cluster_payload --lib` 12 项、`mesh_decimation` 19 项通过。覆盖属性/索引/拓扑、包围体、哈希、分流布局、批量形变、溢出拒绝、CLST v2/v3、12 种格式精确 gather、截断/损坏载荷、含属性分簇、压缩页、endpoint-QEM 实际简化、材质/缝/分类约束、版本化身份、f64 BVH 与跨尺度量化误差。构建侧 LOD/surface 定向测试为 12 项。
-2. **当前真实 GPU 证据**：2026-10-15 沙盒外执行 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh:: -- --nocapture`，本轮 Mesh 过滤集 20 项通过，其中标准与 half2/half4/附加颜色属性的 8×8 绘制、批量形变对照、current/previous 的 16×16 绘制实际执行 GPU 工作。数学蒙皮强制 parity 4 项通过；虚拟几何、GDeflate、OMM 强制 suites 通过。CLST v3 整页 Metal storage roundtrip 逐字节一致只证明压缩/驻留/读取；本轮新增 `prism_virtual_geometry_gpu --test cluster_vertex_pull_parity` 在真实 render pass 中从原始 CLST v3 字节解码位置与 `Unorm8x4` 属性并读回颜色，补足 shader 属性解码证据，但仍不代替完整场景材质 Golden 图。
+2. **当前真实 GPU 证据**：2026-10-15 沙盒外执行 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh:: -- --nocapture`，本轮 Mesh 过滤集 20 项通过，其中标准与 half2/half4/附加颜色属性的 8×8 绘制、批量形变对照、current/previous 的 16×16 绘制实际执行 GPU 工作。数学蒙皮强制 parity 4 项通过；虚拟几何、GDeflate、OMM 强制 suites 通过。CLST v3 整页 Metal storage roundtrip 逐字节一致只证明压缩/驻留/读取；本轮新增 `prism_virtual_geometry_gpu --test cluster_vertex_pull_parity` 在真实 render pass 中从原始 CLST v3 字节解码位置与 `Unorm8x4` 属性并读回颜色，补足 shader 属性解码证据，但仍不代替完整场景材质 Golden 图。当前 host 的 `cargo test -j1 -p prism_render_scene --lib` 全量结果为 **1760 passed**；`PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu -- --nocapture` 的真实 GPU gate 因 Metal 报告无 adapter 而失败，因此该结果不计入场景 GPU 通过，也不把 CPU/ GPU twin 证据扩写成完整场景 GPU 完成。
 3. **产品级图像回归协议**：标准网格、虚拟几何、蒙皮、Morph、LOD 过渡按质量档采集 Golden 图和 TAA 稳定性帧；只有生成捕获物并通过误差阈值时才形成图像质量结论。
 4. **产品级压力协议**：百万级 Cluster、极端顶点数、极端尺度、非有限输入、退化/越界索引和超预算场景按固定种子执行；结果必须绑定测试日志与捕获物。
 5. **确定性协议**：同输入多次构建哈希一致、不同线程数结果一致；跨平台差异必须由版本化量化规则解释并记录。

@@ -27,21 +27,12 @@
 //! the WESL structs, and [`settings`] is the render-world resource mapping the
 //! architecture / golden contracts onto those blocks.
 //!
-//! The device-side pipeline objects, buffer uploads, the physical-page
-//! allocator wiring and the resolve-pass integration are registered by a later
-//! slice (the render graph / plugin wiring is handled separately) and require
-//! on-device validation for numerical parity against the CPU reference.  Until
-//! that slice lands, the ABI and settings API below has no in-crate consumer
-//! outside the layout / compilation tests, so the module and its re-exports are
-//! `dead_code`-/`unused`-expected rather than trimmed.
+//! The device-side pipeline objects, buffer uploads, bounded physical-page
+//! allocator bridge, caster-depth atlas pass, and resolve-pass bindings are
+//! registered by the shading plugin. CPU planning and standalone shader tests
+//! define the portable contract; backend readback evidence is recorded
+//! separately when available.
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "VSM ABI's page-mark / sample blocks are consumed by the device-side wiring slice added separately"
-    )
-)]
 mod abi;
 mod atlas;
 mod bind_groups;
@@ -59,7 +50,7 @@ mod shader_tests;
 
 #[expect(
     unused_imports,
-    reason = "re-exported for the device-side VSM page-mark / sample wiring slice added separately"
+    reason = "shared VSM ABI re-exports are consumed by the parent plugin and shader/resolve contract tests"
 )]
 pub(crate) use abi::{
     window_slot_count, GpuVsmPageMarkParams, GpuVsmReceiver, GpuVsmReceiverGenParams,
@@ -75,7 +66,7 @@ pub(crate) use settings::PrismVirtualShadowSettings;
 
 #[expect(
     unused_imports,
-    reason = "physical-atlas resource re-exported for the VSM raster / resolve wiring slice added separately"
+    reason = "atlas resource re-exports are consumed by the parent plugin and resolve/water consumers"
 )]
 pub(crate) use atlas::{
     atlas_tile_origin, physical_pages_per_edge, prepare_vsm_physical_atlas, ViewVsmPhysicalAtlas,

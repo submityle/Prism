@@ -9,7 +9,7 @@
 //! this-frame render pages, and [`resources`] owns the per-view golden driver and
 //! the GPU page-table buffer cache. The attached per-view components feed the
 //! resolve-pass sample integration and the physical-atlas raster fill pass
-//! wired in later slices.
+//! used by the same-frame resolve binding bridge and physical-atlas raster fill.
 
 mod decode;
 mod pages;

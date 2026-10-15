@@ -20,8 +20,9 @@
 //! `scene_depth` ([`super::super::ssr::ViewSsrTextures`]); only views that ran
 //! the SSR prepass carry it, which is why the receiver-generation pass is
 //! interim-gated behind `enable_ssr` (see
-//! [`super::super::runtime::PrismShadingSettings::enable_virtual_shadow`]). A
-//! dedicated shared depth prepass would lift that coupling in a later slice.
+//! [`super::super::runtime::PrismShadingSettings::enable_virtual_shadow`]).
+//! The existing SSR depth prepass is the shared depth source for this render
+//! path, so receiver generation and page marking share one explicit ordering.
 
 use bevy_ecs::prelude::*;
 use bevy_math::Mat4;

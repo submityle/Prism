@@ -20,14 +20,16 @@
 //!   (its own colour target plus the shared transient depth buffer) and
 //!   replaying the geometry list with that layer's per-view dynamic offset.
 //!
-//! # Known limitations (require on-device validation)
-//! * The node has no `ViewQuery`, so under multiple cameras `Core3d` runs it
-//!   once per view and each run refills the whole atlas identically
-//!   (last-write-wins).  This is correct but redundant; a future slice should
-//!   gate it to run once per frame.
-//! * The stored depth / distance values, the white (`far`) clear, and the
-//!   embedded-asset resolution of `shadow_depth.wesl` at runtime all need GPU
-//!   validation against the CPU golden reference.
+//! # Runtime contract and verification
+//! * This node is registered as a render-world system without `ViewQuery`, so
+//!   it executes once for the render frame and replays the shared atlas plan in
+//!   layer order. Per-camera work is represented by the extracted shadow
+//!   layers; the node does not perform an implicit per-camera replay.
+//! * The CPU planner, projection ABI, standalone shader compilation test, and
+//!   fail-closed mesh-range checks define the portable contract. A device
+//!   readback is an additional backend verification artifact, not a hidden
+//!   prerequisite for the draw path or a reason to claim a stronger result
+//!   than the evidence actually provides.
 
 use bevy_ecs::prelude::*;
 use bevy_pbr::{MeshPipelineKey, RenderMeshInstances};
