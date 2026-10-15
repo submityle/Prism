@@ -119,7 +119,7 @@ where
         .expect("fixed page streaming pool descriptor must be valid");
         Self {
             bridge,
-            max_uploads_per_frame: config.max_uploads_per_frame.max(1),
+            max_uploads_per_frame: config.max_uploads_per_frame,
             pending_submission: false,
             observed_submissions: 0,
             marker: PhantomData,
@@ -232,11 +232,26 @@ fn prepare_fixed_page_streaming<I>(
     let completed = GpuCompletionValue(runtime.runtime().completed_value());
     let _ = gpu.bridge.reclaim_completed(completed);
     let reclaim_after = GpuCompletionValue(runtime.runtime().next_completion_value());
+    while let Some(release) = queue.pop_release() {
+        match gpu
+            .bridge
+            .release_page_deferred(release.page, release.revision, reclaim_after)
+        {
+            Ok(()) => gpu.pending_submission = true,
+            Err(PageResidencyBridgeError::UnknownPage(_)) => {}
+            Err(error) => {
+                stats.upload_errors += 1;
+                stats.last_upload_error = Some(error);
+                break;
+            }
+        }
+    }
     for _ in 0..gpu.max_uploads_per_frame {
         let Some(payload) = queue.pop() else {
             break;
         };
-        match gpu.bridge.upload_page_bytes(
+        match gpu.bridge.upload_page_bytes_for_slot(
+            &payload.slot,
             payload.page,
             payload.revision,
             &payload.bytes,
@@ -277,9 +292,10 @@ fn finish_fixed_page_streaming_submission<I>(
         // A zero-sized frame or graph compile failure did not produce the
         // completion value used by a replacement. Drain the queue before
         // releasing that unsubmitted replacement's retired range.
-        let _ = runtime.runtime().wait_idle();
-        let _ = gpu.bridge.reclaim_completed(GpuCompletionValue(u64::MAX));
-        gpu.pending_submission = false;
+        if runtime.runtime().wait_idle() {
+            let _ = gpu.bridge.reclaim_completed(GpuCompletionValue(u64::MAX));
+            gpu.pending_submission = false;
+        }
     }
 }
 
@@ -340,5 +356,100 @@ mod tests {
             .world
             .resource::<FixedPageStreamingGpu<NullInstance>>();
         assert_eq!(gpu.bridge.pool().resident_page_count(), 1);
+    }
+
+    #[test]
+    fn cpu_eviction_retires_the_gpu_page_through_the_render_queue() {
+        let mut memory = MemSource::new();
+        memory.insert("page.bin", b"abcdefgh".to_vec());
+        let mut sources = AssetSources::new();
+        sources.mount("memory", Arc::new(memory), 0);
+        let residency =
+            PageResidency::new(PageSize::new(4).unwrap(), PageBudget::new(4, 1).unwrap()).unwrap();
+        let mut source = FixedPageStreamingSource::new(sources, residency);
+        source
+            .request_page("memory://page.bin", 0, prism_tasks::Priority::High, 1)
+            .unwrap();
+
+        let mut app = App::new();
+        app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
+        register_fixed_page_streaming::<NullInstance>(
+            &mut app,
+            source,
+            FixedPageStreamingConfig::new(FixedPagePoolDescriptor::new(
+                4,
+                1,
+                BufferUsages::COPY_DST,
+            )),
+        );
+        app.update();
+
+        let page = app
+            .world()
+            .resource::<FixedPageStreamingSource>()
+            .residency()
+            .eviction_candidates()[0];
+        app.world_mut()
+            .resource_mut::<FixedPageStreamingSource>()
+            .residency_mut()
+            .evict(page)
+            .unwrap();
+        app.update();
+
+        let render = app.sub_app_mut(RenderApp).unwrap();
+        let gpu = render
+            .world
+            .resource::<FixedPageStreamingGpu<NullInstance>>();
+        assert_eq!(gpu.bridge.pool().resident_page_count(), 0);
+        assert_eq!(gpu.bridge.pool().pending_reclaim_page_count(), 1);
+        assert_eq!(gpu.bridge.pool().free_page_count(), 0);
+        assert_eq!(
+            render
+                .world
+                .resource::<FixedPageStreamingStats>()
+                .upload_errors,
+            0
+        );
+    }
+
+    #[test]
+    fn zero_upload_budget_keeps_owned_payload_queued() {
+        let mut memory = MemSource::new();
+        memory.insert("page.bin", b"abcdefgh".to_vec());
+        let mut sources = AssetSources::new();
+        sources.mount("memory", Arc::new(memory), 0);
+        let residency =
+            PageResidency::new(PageSize::new(4).unwrap(), PageBudget::new(4, 1).unwrap()).unwrap();
+        let mut source = FixedPageStreamingSource::new(sources, residency);
+        source
+            .request_page("memory://page.bin", 0, prism_tasks::Priority::High, 1)
+            .unwrap();
+
+        let mut config = FixedPageStreamingConfig::new(FixedPagePoolDescriptor::new(
+            4,
+            1,
+            BufferUsages::COPY_DST,
+        ));
+        config.max_uploads_per_frame = 0;
+        let mut app = App::new();
+        app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
+        register_fixed_page_streaming::<NullInstance>(&mut app, source, config);
+        app.update();
+
+        let render = app.sub_app_mut(RenderApp).unwrap();
+        assert_eq!(
+            render.world.resource::<FixedPageStreamingStats>().uploads,
+            0
+        );
+        assert_eq!(render.world.resource::<FixedPageRenderQueue>().len(), 1);
+        assert_eq!(
+            render
+                .world
+                .resource::<FixedPageStreamingGpu<NullInstance>>()
+                .bridge
+                .pool()
+                .resident_page_count(),
+            0
+        );
     }
 }

@@ -180,6 +180,18 @@ pub struct FixedPageReclaimEvent {
     pub completed: GpuCompletionValue,
 }
 
+/// The publication returned when a resident range is retired for deferred
+/// release. The range remains unavailable until `reclaim_after` is observed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FixedPageDeferredRelease {
+    /// The allocation waiting for completion.
+    pub allocation: PageAllocation,
+    /// The producer revision associated with the release.
+    pub revision: u64,
+    /// The completion value that makes reclamation safe.
+    pub reclaim_after: GpuCompletionValue,
+}
+
 /// Errors that prevent a page-pool operation from being submitted or
 /// committed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -812,6 +824,32 @@ impl PageReleaseTransaction<'_> {
         Ok(FixedPagePoolEvent::Released {
             allocation: self.allocation,
             revision: self.revision,
+        })
+    }
+
+    /// Retires the range until the caller-provided completion proof arrives.
+    pub fn commit_deferred(
+        mut self,
+        reclaim_after: GpuCompletionValue,
+    ) -> Result<FixedPageDeferredRelease, PagePoolError> {
+        self.pool
+            .validate_state(self.allocation, PageStateKind::Releasing)?;
+        self.pool.set_state(
+            self.allocation,
+            PageState::Retiring {
+                token: self.allocation.token,
+                reclaim_after,
+            },
+        );
+        self.pool.pending_reclaims.push(PendingPageReclaim {
+            allocation: self.allocation,
+            reclaim_after,
+        });
+        self.committed = true;
+        Ok(FixedPageDeferredRelease {
+            allocation: self.allocation,
+            revision: self.revision,
+            reclaim_after,
         })
     }
 

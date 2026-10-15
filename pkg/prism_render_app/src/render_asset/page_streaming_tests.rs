@@ -6,7 +6,9 @@ use prism_asset::{
 };
 use prism_tasks::Priority;
 
-use super::{FixedPageBytesUploader, FixedPageRenderQueue, FixedPageStreamingSource};
+use super::{
+    FixedPageBytesUploader, FixedPageRenderQueue, FixedPageSlotKey, FixedPageStreamingSource,
+};
 
 fn source() -> AssetSources {
     let mut sources = AssetSources::new();
@@ -65,6 +67,17 @@ fn extraction_tracking_drops_evicted_page_ids() {
         .expect("resident page evicts");
     assert_eq!(streaming.extract_to_render(&mut queue), 0);
     assert_eq!(streaming.extracted_page_count(), 0);
+    let release = queue.pop_release().expect("eviction queues GPU release");
+    assert_eq!(release.page, page);
+    assert_eq!(release.revision, streaming.sources().revision());
+    assert_eq!(
+        release.slot,
+        FixedPageSlotKey {
+            path: "memory://payload.bin".into(),
+            page_index: 0,
+        }
+    );
+    assert!(queue.is_empty());
 }
 
 #[test]

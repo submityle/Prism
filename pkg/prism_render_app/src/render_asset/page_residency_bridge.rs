@@ -15,6 +15,7 @@ use super::page_pool::{
     FixedPageDeferredReplacement, FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent,
     FixedPageReclaimEvent, FixedPageUpload, PageAllocation, PagePoolError,
 };
+use super::page_streaming::FixedPageSlotKey;
 use super::{GpuPrepareBudget, PrepareCancellation, PrepareContext};
 
 /// Errors raised while connecting a resident CPU page to the GPU pool.
@@ -34,6 +35,8 @@ pub enum PageResidencyBridgeError {
 pub struct FixedPageResidencyBridge {
     pool: FixedPagePool,
     allocations: BTreeMap<PageId, PageAllocation>,
+    slot_allocations: BTreeMap<FixedPageSlotKey, PageAllocation>,
+    page_slots: BTreeMap<PageId, FixedPageSlotKey>,
 }
 
 impl FixedPageResidencyBridge {
@@ -46,6 +49,8 @@ impl FixedPageResidencyBridge {
         Ok(Self {
             pool: FixedPagePool::new(context, descriptor)?,
             allocations: BTreeMap::new(),
+            slot_allocations: BTreeMap::new(),
+            page_slots: BTreeMap::new(),
         })
     }
 
@@ -232,6 +237,72 @@ impl FixedPageResidencyBridge {
         Ok(event)
     }
 
+    /// Uploads an owned page into a stable logical slot, replacing an older
+    /// source revision even when CPU residency assigned it a new `PageId`.
+    pub fn upload_page_bytes_for_slot(
+        &mut self,
+        slot: &FixedPageSlotKey,
+        page: PageId,
+        revision: u64,
+        bytes: &[u8],
+        reclaim_after: GpuCompletionValue,
+        queue: &dyn RenderQueue,
+    ) -> Result<FixedPagePoolEvent, PageResidencyBridgeError> {
+        let expected = usize::try_from(self.pool.page_size()).unwrap_or(usize::MAX);
+        if bytes.len() != expected {
+            return Err(PageResidencyBridgeError::PageSizeMismatch {
+                cpu: bytes.len() as u64,
+                gpu: self.pool.page_size(),
+            });
+        }
+        let upload = FixedPageUpload::new(revision, bytes);
+        let event = if let Some(previous) = self.slot_allocations.get(slot).copied() {
+            let mut transaction = self
+                .pool
+                .begin_replace(previous, upload)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            transaction
+                .upload(queue)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            let deferred = transaction
+                .commit_deferred(reclaim_after)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            FixedPagePoolEvent::Replaced {
+                previous: deferred.previous,
+                allocation: deferred.allocation,
+                revision: deferred.revision,
+            }
+        } else {
+            let mut transaction = self
+                .pool
+                .begin_upload(upload)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            transaction
+                .upload(queue)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            transaction
+                .commit()
+                .map_err(PageResidencyBridgeError::Pool)?
+        };
+        let allocation = match event {
+            FixedPagePoolEvent::Allocated { allocation, .. }
+            | FixedPagePoolEvent::Replaced { allocation, .. } => allocation,
+            FixedPagePoolEvent::Released { .. } => unreachable!("upload cannot release a page"),
+        };
+        if let Some(old_page) = self
+            .page_slots
+            .iter()
+            .find_map(|(old_page, old_slot)| (old_slot == slot).then_some(*old_page))
+        {
+            self.allocations.remove(&old_page);
+            self.page_slots.remove(&old_page);
+        }
+        self.allocations.insert(page, allocation);
+        self.page_slots.insert(page, slot.clone());
+        self.slot_allocations.insert(slot.clone(), allocation);
+        Ok(event)
+    }
+
     /// Reclaims all retired GPU page ranges whose completion proof is ready.
     pub fn reclaim_completed(
         &mut self,
@@ -262,7 +333,39 @@ impl FixedPageResidencyBridge {
             .commit()
             .map_err(PageResidencyBridgeError::Pool)?;
         self.allocations.remove(&page);
+        if let Some(slot) = self.page_slots.remove(&page) {
+            if self.slot_allocations.get(&slot) == Some(&allocation) {
+                self.slot_allocations.remove(&slot);
+            }
+        }
         Ok(event)
+    }
+
+    /// Retires a GPU page after CPU eviction without reusing it before the
+    /// caller-provided completion value is observed.
+    pub fn release_page_deferred(
+        &mut self,
+        page: PageId,
+        revision: u64,
+        reclaim_after: GpuCompletionValue,
+    ) -> Result<(), PageResidencyBridgeError> {
+        let allocation = self
+            .allocations
+            .get(&page)
+            .copied()
+            .ok_or(PageResidencyBridgeError::UnknownPage(page))?;
+        self.pool
+            .begin_release(allocation, revision)
+            .map_err(PageResidencyBridgeError::Pool)?
+            .commit_deferred(reclaim_after)
+            .map_err(PageResidencyBridgeError::Pool)?;
+        self.allocations.remove(&page);
+        if let Some(slot) = self.page_slots.remove(&page) {
+            if self.slot_allocations.get(&slot) == Some(&allocation) {
+                self.slot_allocations.remove(&slot);
+            }
+        }
+        Ok(())
     }
 
     /// Destroys the backing buffer. Call this from the owning render asset's

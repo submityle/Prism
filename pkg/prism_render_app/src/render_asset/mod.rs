@@ -40,14 +40,14 @@ use prism_render_driver::{RenderDevice, RenderQueue};
 pub use context::{GpuPrepareBudget, PrepareCancellation, PrepareContext, PrepareContextError};
 pub use extract::{extract_assets, ExtractedAssets};
 pub use page_pool::{
-    FixedPageDeferredReplacement, FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent,
-    FixedPageReclaimEvent, FixedPageUpload, PageAllocation, PagePoolError, PageReleaseTransaction,
-    PageReplaceTransaction, PageUploadTransaction,
+    FixedPageDeferredRelease, FixedPageDeferredReplacement, FixedPagePool, FixedPagePoolDescriptor,
+    FixedPagePoolEvent, FixedPageReclaimEvent, FixedPageUpload, PageAllocation, PagePoolError,
+    PageReleaseTransaction, PageReplaceTransaction, PageUploadTransaction,
 };
 pub use page_residency_bridge::{FixedPageResidencyBridge, PageResidencyBridgeError};
 pub use page_streaming::{
-    FixedPageBytesUploader, FixedPageIoReport, FixedPageRenderPayload, FixedPageRenderQueue,
-    FixedPageStreamingManager, FixedPageStreamingSource,
+    FixedPageBytesUploader, FixedPageIoReport, FixedPageReleasePayload, FixedPageRenderPayload,
+    FixedPageRenderQueue, FixedPageSlotKey, FixedPageStreamingManager, FixedPageStreamingSource,
 };
 pub use page_streaming_stage::{
     register_fixed_page_streaming, FixedPageStreamingConfig, FixedPageStreamingGpu,

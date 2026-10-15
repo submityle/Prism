@@ -23,7 +23,22 @@ use prism_tasks::Priority;
 pub struct FixedPageStreamingSource {
     sources: AssetSources,
     residency: PageResidency,
-    extracted: BTreeMap<PageId, u64>,
+    extracted: BTreeMap<PageId, ExtractedPageMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExtractedPageMetadata {
+    slot: FixedPageSlotKey,
+    revision: u64,
+}
+
+/// Stable identity of a page slot across source revisions.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FixedPageSlotKey {
+    /// Mounted asset path without a source revision.
+    pub path: AssetPath,
+    /// Zero-based page index within the asset.
+    pub page_index: u64,
 }
 
 /// Compatibility name for callers that prefer to describe this value as a
@@ -121,13 +136,36 @@ impl FixedPageStreamingSource {
         let mut extracted = 0;
         let residents = self.residency.eviction_candidates();
         let resident_ids = residents.iter().copied().collect::<BTreeSet<_>>();
-        self.extracted.retain(|page, _| resident_ids.contains(page));
+        let evicted = self
+            .extracted
+            .keys()
+            .copied()
+            .filter(|page| !resident_ids.contains(page))
+            .collect::<Vec<_>>();
+        for page in evicted {
+            let metadata = self
+                .extracted
+                .get(&page)
+                .expect("evicted page metadata is retained until extraction")
+                .clone();
+            queue.discard_upload(page);
+            queue.push_release(FixedPageReleasePayload {
+                page,
+                slot: metadata.slot,
+                revision: metadata.revision,
+            });
+            self.extracted.remove(&page);
+        }
         for page in residents {
             let Some(key) = self.residency.key(page).cloned() else {
                 continue;
             };
             let revision = key.source_revision();
-            if self.extracted.get(&page) == Some(&revision) {
+            if self
+                .extracted
+                .get(&page)
+                .is_some_and(|metadata| metadata.revision == revision)
+            {
                 continue;
             }
             let Some(bytes) = self.residency.resident_bytes(page) else {
@@ -135,10 +173,23 @@ impl FixedPageStreamingSource {
             };
             queue.push(FixedPageRenderPayload {
                 page,
+                slot: FixedPageSlotKey {
+                    path: key.path().clone(),
+                    page_index: key.page_index(),
+                },
                 revision,
                 bytes: bytes.to_vec(),
             });
-            self.extracted.insert(page, revision);
+            self.extracted.insert(
+                page,
+                ExtractedPageMetadata {
+                    slot: FixedPageSlotKey {
+                        path: key.path().clone(),
+                        page_index: key.page_index(),
+                    },
+                    revision,
+                },
+            );
             extracted += 1;
         }
         extracted
@@ -161,6 +212,8 @@ pub struct FixedPageIoReport {
 pub struct FixedPageRenderPayload {
     /// CPU residency identity of the page.
     pub page: PageId,
+    /// Stable slot identity used to replace older source revisions.
+    pub slot: FixedPageSlotKey,
     /// Source-table revision that produced the page bytes.
     pub revision: u64,
     /// Owned page bytes; the render side must not borrow CPU residency.
@@ -171,6 +224,18 @@ pub struct FixedPageRenderPayload {
 #[derive(Debug, Default, Resource)]
 pub struct FixedPageRenderQueue {
     pages: VecDeque<FixedPageRenderPayload>,
+    releases: VecDeque<FixedPageReleasePayload>,
+}
+
+/// An extracted page that left CPU residency and must be retired on the GPU.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixedPageReleasePayload {
+    /// CPU residency identity of the page being retired.
+    pub page: PageId,
+    /// Stable slot identity for diagnostics and stale-release protection.
+    pub slot: FixedPageSlotKey,
+    /// Source revision that produced the page.
+    pub revision: u64,
 }
 
 impl FixedPageRenderQueue {
@@ -189,7 +254,7 @@ impl FixedPageRenderQueue {
     /// Returns whether no payload is waiting for upload.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pages.is_empty()
+        self.pages.is_empty() && self.releases.is_empty()
     }
 
     /// Removes the oldest payload for a render-side upload decision.
@@ -200,6 +265,27 @@ impl FixedPageRenderQueue {
     /// Puts a payload back at the front after a render-side admission failure.
     pub fn push_front(&mut self, payload: FixedPageRenderPayload) {
         self.pages.push_front(payload);
+    }
+
+    /// Queues a deferred GPU release for a CPU-evicted page.
+    pub fn push_release(&mut self, payload: FixedPageReleasePayload) {
+        self.releases.push_back(payload);
+    }
+
+    /// Removes a page upload that was extracted but not yet prepared.
+    pub fn discard_upload(&mut self, page: PageId) {
+        let mut retained = VecDeque::with_capacity(self.pages.len());
+        while let Some(payload) = self.pages.pop_front() {
+            if payload.page != page {
+                retained.push_back(payload);
+            }
+        }
+        self.pages = retained;
+    }
+
+    /// Removes the oldest deferred GPU release.
+    pub fn pop_release(&mut self) -> Option<FixedPageReleasePayload> {
+        self.releases.pop_front()
     }
 
     fn push(&mut self, payload: FixedPageRenderPayload) {

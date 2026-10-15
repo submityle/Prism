@@ -13,7 +13,8 @@ use prism_render_driver_null::{NullDevice, NullInstance, NullQueue};
 
 use super::{
     FixedPagePool, FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageResidencyBridge,
-    FixedPageUpload, GpuPrepareBudget, PageAllocation, PagePoolError, PrepareContext,
+    FixedPageSlotKey, FixedPageUpload, GpuPrepareBudget, PageAllocation, PagePoolError,
+    PrepareContext,
 };
 
 fn null_device() -> (NullDevice, NullQueue) {
@@ -456,6 +457,91 @@ fn render_bridge_deferred_replacement_requires_completion_before_reuse() {
         .expect("completion permits reclaim");
     assert_eq!(reclaimed.len(), 1);
     assert_eq!(reclaimed[0].allocation, first);
+    bridge.destroy(&device);
+    assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn stable_slot_replacement_retires_old_revision_and_ignores_stale_release() {
+    let (device, queue) = null_device();
+    let mut residency = PageResidency::new(
+        PageSize::new(16).expect("power-of-two page"),
+        PageBudget::new(32, 2).expect("two page budget"),
+    )
+    .expect("aligned page budget");
+    let old_page = residency
+        .request(
+            PageKey::new("memory://payload.bin", 0, 1),
+            prism_tasks::Priority::Normal,
+            0,
+        )
+        .expect("old revision request");
+    let new_page = residency
+        .request(
+            PageKey::new("memory://payload.bin", 0, 2),
+            prism_tasks::Priority::Normal,
+            0,
+        )
+        .expect("new revision request");
+
+    let cancellation = AtomicBool::new(false);
+    let mut budget = GpuPrepareBudget::new(64);
+    let mut context = PrepareContext::new(&device, &queue, &mut budget, &cancellation);
+    let mut bridge = FixedPageResidencyBridge::new(
+        &mut context,
+        &FixedPagePoolDescriptor::new(16, 2, BufferUsages::COPY_DST),
+    )
+    .expect("GPU pool");
+    context.commit();
+    let recording_queue = RecordingQueue::default();
+    let slot = FixedPageSlotKey {
+        path: "memory://payload.bin".into(),
+        page_index: 0,
+    };
+
+    bridge
+        .upload_page_bytes_for_slot(
+            &slot,
+            old_page,
+            1,
+            &[0; 16],
+            GpuCompletionValue(7),
+            &recording_queue,
+        )
+        .expect("old revision upload");
+    bridge
+        .upload_page_bytes_for_slot(
+            &slot,
+            new_page,
+            2,
+            &[1; 16],
+            GpuCompletionValue(7),
+            &recording_queue,
+        )
+        .expect("new revision replaces the stable slot");
+    assert_eq!(bridge.pool().resident_page_count(), 1);
+    assert_eq!(bridge.pool().pending_reclaim_page_count(), 1);
+
+    assert_eq!(
+        bridge.release_page_deferred(old_page, 1, GpuCompletionValue(8)),
+        Err(super::PageResidencyBridgeError::UnknownPage(old_page))
+    );
+    assert!(bridge
+        .reclaim_completed(GpuCompletionValue(6))
+        .expect("old revision is still in flight")
+        .is_empty());
+    assert_eq!(
+        bridge
+            .reclaim_completed(GpuCompletionValue(7))
+            .expect("replacement completion permits reclaim")
+            .len(),
+        1
+    );
+
+    bridge
+        .release_page_deferred(new_page, 2, GpuCompletionValue(9))
+        .expect("current revision release");
+    assert_eq!(bridge.pool().pending_reclaim_page_count(), 1);
     bridge.destroy(&device);
     assert_eq!(device.live_resource_count(), 0);
 }
