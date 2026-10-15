@@ -119,10 +119,9 @@ Loom 以多个独立 crate 分层实现,每一层都可单独使用。下表为 
 全部 25 个 crate 累计 **630 个 lib + 集成测试通过**(表中「测试」列为各 crate `--lib --tests` 计数;另有 42 个 doctest 通过,合计 672)。每个 crate 均:`#![forbid(unsafe_code)]`、
 `no_std` 友好(`default = ["std"]`,proc-macro crate 除外)、通过严格 Clippy(零告警)。
 
-> **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括:宏层 `$` 语法糖的 **ECS 字段绑定登记**
-> 形态(当前已交付的 `$` 为 **响应式信号读取** 语法糖;自动登记 `EcsBridge` 字段绑定的形态尚需
-> 宏层拿到桥/实体上下文,仍在设计)、`.loom` / `.loom.style` 热重载的 **文件系统监听集成**、
-> **静态子树提升**、**双模式编译**(dev 解释 / release 宏固化)。
+> **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括组件生命周期钩子、路由守卫/深链接、
+> `t!` 宏糖与 RTL，以及更高层的远端 `.loom` 资产工作流；上述宏层字段绑定登记、文件系统监听、
+> 静态子树提升和双模式编译已经由对应 crate 交付并通过测试，不再列为规划项。
 > 已交付并通过测试的能力包括:字段级 **ECS ↔ Signal 双向绑定** 及其 **Bevy 调度器集成**
 > (`LoomSyncSet` / `NonSend` + exclusive system)、`Show` / `For` **信号驱动结构绑定**
 > (两阶段批量 spawn/despawn + `diff_keyed` LIS 最小移动)、`loom!` 宏 `$` **响应式读取语法糖**、
