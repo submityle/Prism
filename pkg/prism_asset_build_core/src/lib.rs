@@ -37,6 +37,8 @@ pub mod release;
 pub mod resources;
 /// Deterministic incremental runtime package generation and patch binding.
 pub mod runtime_patch;
+/// Portable shader-package asset references and complete variant manifests.
+pub mod shader_package;
 /// Immutable source snapshots and source identity.
 pub mod source;
 /// Revision manifests and atomic local publication.
@@ -83,13 +85,14 @@ pub use runtime_patch::{
     package_runtime_patch, package_runtime_patch_with_options, RuntimePatchError,
     RuntimePatchPackage, RuntimePatchRequest,
 };
+pub use shader_package::{ShaderPackageAsset, ShaderPackageAssetError};
 pub use source::{SourceError, SourceSnapshot};
 pub use transaction::{
     PublishError, PublishTransaction, PublishedManifest, RevisionStore, TransactionState,
 };
 pub use types::{
-    ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, ContentHash, Manifest, ManifestEntry,
-    TransactionId,
+    ArtifactDescriptor, ArtifactKey, ArtifactStorageClass, AssetId, BuildRevision, ContentHash,
+    Manifest, ManifestEntry, TransactionId,
 };
 pub use validation::{ArtifactQualityGate, ValidationError, ValidationPolicy, ValidationReport};
 pub use virtual_geometry::{

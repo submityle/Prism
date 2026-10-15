@@ -1,12 +1,12 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use std::io::Write;
 
+use flate2::{write::DeflateEncoder, Compression};
 use prism_asset::StableGuid;
 
 use crate::chunk::ChunkPlan;
 use crate::format::{Codec, ContainerError, FORMAT_VERSION, HEADER_SIZE, MAGIC, RECORD_SIZE};
-
-const PLANNED_FORMAT_VERSION: u16 = 2;
 
 /// One uncompressed asset supplied to the deterministic writer.
 #[derive(Clone, Debug)]
@@ -17,10 +17,18 @@ pub struct WriteEntry {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug)]
+struct EncodedEntry {
+    raw: Vec<u8>,
+    stored: Vec<u8>,
+    codec: Codec,
+    alignment: u32,
+}
+
 /// Deterministic version-1 runtime container writer.
 #[derive(Default, Debug)]
 pub struct ContainerWriter {
-    entries: BTreeMap<StableGuid, (Vec<u8>, u32)>,
+    entries: BTreeMap<StableGuid, EncodedEntry>,
 }
 
 impl ContainerWriter {
@@ -52,7 +60,63 @@ impl ContainerWriter {
         if alignment == 0 || !alignment.is_power_of_two() {
             return Err(ContainerError::InvalidAlignment);
         }
-        self.entries.insert(guid, (bytes.into(), alignment));
+        let bytes = bytes.into();
+        self.entries.insert(
+            guid,
+            EncodedEntry {
+                stored: bytes.clone(),
+                raw: bytes,
+                codec: Codec::Raw,
+                alignment,
+            },
+        );
+        Ok(())
+    }
+
+    /// Adds a raw payload encoded as a deterministic raw-DEFLATE stream.
+    ///
+    /// The directory hash always covers the decoded bytes, while the physical
+    /// container hash covers the compressed bytes through the normal container
+    /// identity.  Range reads for this codec decode the complete payload and
+    /// then return the requested raw subrange.
+    pub fn add_deflate(
+        &mut self,
+        guid: StableGuid,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Result<(), ContainerError> {
+        self.add_deflate_aligned(guid, bytes, 1)
+    }
+
+    /// Adds a raw payload encoded as raw-DEFLATE with an absolute alignment.
+    pub fn add_deflate_aligned(
+        &mut self,
+        guid: StableGuid,
+        bytes: impl Into<Vec<u8>>,
+        alignment: u32,
+    ) -> Result<(), ContainerError> {
+        if self.entries.contains_key(&guid) {
+            return Err(ContainerError::DuplicateGuid(guid));
+        }
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(ContainerError::InvalidAlignment);
+        }
+        let raw = bytes.into();
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(&raw)
+            .map_err(|_| ContainerError::CompressionFailed)?;
+        let stored = encoder
+            .finish()
+            .map_err(|_| ContainerError::CompressionFailed)?;
+        self.entries.insert(
+            guid,
+            EncodedEntry {
+                raw,
+                stored,
+                codec: Codec::Deflate,
+                alignment,
+            },
+        );
         Ok(())
     }
 
@@ -72,8 +136,10 @@ impl ContainerWriter {
         let mut directory = Vec::with_capacity(directory_len);
         let mut offset =
             u64::try_from(payload_start).map_err(|_| ContainerError::IntegerOverflow)?;
-        for (guid, (bytes, alignment)) in &entries {
-            let align = u64::from(*alignment);
+        for (guid, entry) in &entries {
+            let bytes = &entry.stored;
+            let alignment = entry.alignment;
+            let align = u64::from(alignment);
             let remainder = offset % align;
             let padding = if remainder == 0 { 0 } else { align - remainder };
             offset = offset
@@ -82,11 +148,13 @@ impl ContainerWriter {
             directory.extend_from_slice(&guid.to_u128().to_le_bytes());
             directory.extend_from_slice(&offset.to_le_bytes());
             let len = u64::try_from(bytes.len()).map_err(|_| ContainerError::IntegerOverflow)?;
+            let raw_len =
+                u64::try_from(entry.raw.len()).map_err(|_| ContainerError::IntegerOverflow)?;
             directory.extend_from_slice(&len.to_le_bytes());
-            directory.extend_from_slice(&len.to_le_bytes());
-            directory.push(Codec::Raw as u8);
+            directory.extend_from_slice(&raw_len.to_le_bytes());
+            directory.push(entry.codec as u8);
             directory.extend_from_slice(&[0; 3]);
-            directory.extend_from_slice(blake3::hash(&bytes).as_bytes());
+            directory.extend_from_slice(blake3::hash(&entry.raw).as_bytes());
             directory.extend_from_slice(&alignment.to_le_bytes());
             let next = offset
                 .checked_add(len)
@@ -110,8 +178,8 @@ impl ContainerWriter {
         out.extend_from_slice(&directory);
         let mut cursor =
             u64::try_from(payload_start).map_err(|_| ContainerError::IntegerOverflow)?;
-        for ((_, (_, alignment)), payload) in entries.iter().zip(payloads.iter()) {
-            let align = u64::from(*alignment);
+        for ((_, entry), payload) in entries.iter().zip(payloads.iter()) {
+            let align = u64::from(entry.alignment);
             let remainder = cursor % align;
             let padding = if remainder == 0 { 0 } else { align - remainder };
             let padding_len =
@@ -139,7 +207,7 @@ impl ContainerWriter {
         Ok(out)
     }
 
-    /// Emits a container using an already validated chunk plan.
+    /// Emits a version-1 container using an already validated chunk plan.
     ///
     /// The plan is consumed as layout data, rather than merely checked: every
     /// placement controls the physical payload offset and every chunk gap is
@@ -156,6 +224,9 @@ impl ContainerWriter {
         }
 
         let entries = self.entries;
+        if let Some(entry) = entries.values().find(|entry| entry.codec != Codec::Raw) {
+            return Err(ContainerError::CodecNotSupportedForLayout(entry.codec));
+        }
         if plan.assignments.len() != entries.len() {
             return Err(ContainerError::InvalidDirectory);
         }
@@ -185,10 +256,10 @@ impl ContainerWriter {
                 {
                     return Err(ContainerError::InvalidDirectory);
                 }
-                let (_, (_, asset_alignment)) = entries
+                let (_, entry) = entries
                     .get_key_value(&placement.guid)
                     .ok_or(ContainerError::InvalidDirectory)?;
-                let required_alignment = chunk_alignment.max(u64::from(*asset_alignment));
+                let required_alignment = chunk_alignment.max(u64::from(entry.alignment));
                 let expected_offset = align_up(placement_cursor, required_alignment)?;
                 if placement.offset != expected_offset {
                     return Err(ContainerError::InvalidDirectory);
@@ -239,7 +310,9 @@ impl ContainerWriter {
 
         let mut records = Vec::with_capacity(directory_len);
         let mut payload_ranges = Vec::with_capacity(entries.len());
-        for (guid, (bytes, alignment)) in &entries {
+        for (guid, entry) in &entries {
+            let bytes = &entry.raw;
+            let alignment = entry.alignment;
             let (_, placement) = placements
                 .get(guid)
                 .copied()
@@ -253,7 +326,7 @@ impl ContainerWriter {
                 .checked_add(chunk_offset)
                 .and_then(|value| value.checked_add(placement.offset))
                 .ok_or(ContainerError::IntegerOverflow)?;
-            if offset % u64::from(*alignment) != 0 {
+            if offset % u64::from(alignment) != 0 {
                 return Err(ContainerError::InvalidDirectory);
             }
             let len = u64::try_from(bytes.len()).map_err(|_| ContainerError::IntegerOverflow)?;
@@ -282,7 +355,7 @@ impl ContainerWriter {
         let payload_start_u64 = payload_start;
         let mut out = vec![0; total_len];
         out[0..8].copy_from_slice(&MAGIC);
-        out[8..10].copy_from_slice(&PLANNED_FORMAT_VERSION.to_le_bytes());
+        out[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
         out[10..12].copy_from_slice(&(HEADER_SIZE as u16).to_le_bytes());
         out[12..16].copy_from_slice(&0_u32.to_le_bytes());
         out[16..20].copy_from_slice(&count.to_le_bytes());

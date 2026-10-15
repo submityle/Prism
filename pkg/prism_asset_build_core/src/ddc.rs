@@ -4,7 +4,7 @@
 //! index.  Artifact bytes remain the responsibility of [`crate::cas`]; this
 //! module never creates, reads, or deletes a CAS blob.
 
-use crate::types::{ArtifactDescriptor, ArtifactKey, ContentHash};
+use crate::types::{ArtifactDescriptor, ArtifactKey, ArtifactStorageClass, ContentHash};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 const MAGIC: &[u8] = b"PRISM-DDC\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const CHECKSUM_LEN: usize = 32;
 const MAX_ENTRIES: u64 = 1_000_000;
 const MAX_DEPENDENCIES: u64 = 1_000_000;
@@ -42,6 +42,10 @@ pub enum DdcError {
         key: ArtifactKey,
         reason: &'static str,
     },
+    /// A driver/backend-local artifact attempted to enter the shared DDC.
+    DriverLocalArtifact {
+        key: ArtifactKey,
+    },
 }
 
 impl fmt::Display for DdcError {
@@ -69,6 +73,11 @@ impl fmt::Display for DdcError {
             Self::KeyConflict { key, reason } => {
                 write!(f, "DDC key {} conflicts: {reason}", key.to_hex())
             }
+            Self::DriverLocalArtifact { key } => write!(
+                f,
+                "DDC key {} is driver-local and cannot enter shared derived data",
+                key.to_hex()
+            ),
         }
     }
 }
@@ -368,6 +377,9 @@ fn read_index(path: &Path) -> Result<BTreeMap<ArtifactKey, ArtifactDescriptor>, 
 }
 
 fn validate_entry(key: ArtifactKey, descriptor: &ArtifactDescriptor) -> Result<(), DdcError> {
+    if descriptor.storage_class != ArtifactStorageClass::Shared {
+        return Err(DdcError::DriverLocalArtifact { key });
+    }
     descriptor.validate().map_err(DdcError::InvalidDescriptor)?;
     if descriptor.key != key {
         return Err(DdcError::KeyConflict {
@@ -395,6 +407,10 @@ fn encode_index(entries: &BTreeMap<ArtifactKey, ArtifactDescriptor>) -> Result<V
         body.extend_from_slice(&descriptor.key.0);
         body.extend_from_slice(&descriptor.kind.to_le_bytes());
         body.extend_from_slice(&descriptor.schema.to_le_bytes());
+        body.push(match descriptor.storage_class {
+            ArtifactStorageClass::Shared => 0,
+            ArtifactStorageClass::DriverLocal => 1,
+        });
         body.extend_from_slice(&descriptor.content_hash.0);
         body.extend_from_slice(&descriptor.byte_len.to_le_bytes());
         body.extend_from_slice(&descriptor.alignment.to_le_bytes());
@@ -448,6 +464,11 @@ fn decode_index(bytes: &[u8]) -> Result<BTreeMap<ArtifactKey, ArtifactDescriptor
             key: ArtifactKey(cursor.array_32()?),
             kind: cursor.u128()?,
             schema: cursor.u32()?,
+            storage_class: match cursor.take(1)?[0] {
+                0 => ArtifactStorageClass::Shared,
+                1 => ArtifactStorageClass::DriverLocal,
+                _ => return Err(DdcError::InvalidFormat("unknown artifact storage class")),
+            },
             content_hash: ContentHash(cursor.array_32()?),
             byte_len: cursor.u64()?,
             alignment: cursor.u32()?,

@@ -17,7 +17,7 @@ use prism_asset_container::{
 };
 
 use crate::cas::{CasError, ContentAddressedStore};
-use crate::types::{ArtifactKey, AssetId, ContentHash, Manifest};
+use crate::types::{ArtifactKey, ArtifactStorageClass, AssetId, ContentHash, Manifest};
 
 /// The runtime identity and container route assigned to one build asset.
 ///
@@ -49,12 +49,15 @@ pub struct PackageRequest<'a> {
 pub struct PackageOptions {
     /// Maximum raw bytes per planned chunk, including internal padding.
     pub chunk_policy: ChunkPolicy,
+    /// Per-payload encoding used by the runtime container writer.
+    pub codec: prism_asset_container::Codec,
 }
 
 impl Default for PackageOptions {
     fn default() -> Self {
         Self {
             chunk_policy: ChunkPolicy::default(),
+            codec: prism_asset_container::Codec::Raw,
         }
     }
 }
@@ -198,6 +201,8 @@ pub enum PackageError {
         key: ArtifactKey,
         reason: &'static str,
     },
+    /// A driver-local artifact cannot be emitted into a portable package.
+    DriverLocalArtifact { asset: AssetId, key: ArtifactKey },
     /// A container writer rejected an encoded record.
     Container {
         name: String,
@@ -301,6 +306,11 @@ impl std::fmt::Display for PackageError {
                     key.to_hex()
                 )
             }
+            Self::DriverLocalArtifact { asset, key } => write!(
+                f,
+                "asset {asset:?} artifact {} is driver-local and cannot be packaged",
+                key.to_hex()
+            ),
             Self::Container { name, source } => write!(f, "container {name:?} failed: {source}"),
             Self::ChunkPlan { name, source } => {
                 write!(f, "container {name:?} chunk plan failed: {source}")
@@ -385,6 +395,12 @@ fn package_runtime_impl(
     let mut artifact_assets = BTreeMap::<ArtifactKey, BTreeSet<AssetId>>::new();
     let mut artifact_descriptors = BTreeMap::new();
     for (asset, descriptor) in &manifest.entries {
+        if descriptor.storage_class != ArtifactStorageClass::Shared {
+            return Err(PackageError::DriverLocalArtifact {
+                asset: *asset,
+                key: descriptor.key,
+            });
+        }
         descriptor
             .validate()
             .map_err(|reason| PackageError::InvalidDescriptor {
@@ -568,14 +584,19 @@ fn package_runtime_impl(
                 priority: mapping.chunk_priority,
             });
 
-        writers
-            .entry(mapping.container_name.clone())
-            .or_default()
-            .add_aligned(mapping.guid, payload, descriptor.alignment)
-            .map_err(|source| PackageError::Container {
-                name: mapping.container_name.clone(),
-                source,
-            })?;
+        let writer = writers.entry(mapping.container_name.clone()).or_default();
+        match options.codec {
+            prism_asset_container::Codec::Raw => {
+                writer.add_aligned(mapping.guid, payload, descriptor.alignment)
+            }
+            prism_asset_container::Codec::Deflate => {
+                writer.add_deflate_aligned(mapping.guid, payload, descriptor.alignment)
+            }
+        }
+        .map_err(|source| PackageError::Container {
+            name: mapping.container_name.clone(),
+            source,
+        })?;
     }
 
     let mut containers = BTreeMap::new();
@@ -586,12 +607,15 @@ fn package_runtime_impl(
                 name: name.clone(),
                 source,
             })?;
-        let bytes = writer
-            .finish_with_chunk_plan(&plan, options.chunk_policy.chunk_alignment)
-            .map_err(|source| PackageError::Container {
-                name: name.clone(),
-                source,
-            })?;
+        let bytes = if options.codec == prism_asset_container::Codec::Raw {
+            writer.finish_with_chunk_plan(&plan, options.chunk_policy.chunk_alignment)
+        } else {
+            writer.finish()
+        }
+        .map_err(|source| PackageError::Container {
+            name: name.clone(),
+            source,
+        })?;
         containers.insert(name, bytes);
     }
 
@@ -656,7 +680,7 @@ fn package_runtime_impl(
                     optional_dependencies: Vec::new(),
                     initial_residency: 0,
                     streaming_level: 0,
-                    codec: prism_asset_container::Codec::Raw,
+                    codec: options.codec,
                     schema: descriptor.schema,
                     install_capabilities: 0,
                 },
@@ -699,7 +723,7 @@ fn package_runtime_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_asset_container::ContainerReader;
+    use prism_asset_container::{Codec, ContainerReader, FORMAT_VERSION};
     use tempfile::tempdir;
 
     fn key(n: u8) -> ArtifactKey {
@@ -722,6 +746,7 @@ mod tests {
                         key: key(1),
                         kind: 1,
                         schema: 1,
+                        storage_class: crate::types::ArtifactStorageClass::Shared,
                         content_hash: root_hash,
                         byte_len: root_bytes.len() as u64,
                         alignment: 16,
@@ -734,6 +759,7 @@ mod tests {
                         key: key(2),
                         kind: 1,
                         schema: 1,
+                        storage_class: crate::types::ArtifactStorageClass::Shared,
                         content_hash: leaf_hash,
                         byte_len: leaf_bytes.len() as u64,
                         alignment: 16,
@@ -884,13 +910,14 @@ mod tests {
                     chunk_alignment: 64,
                     max_chunks: 2,
                 },
+                codec: prism_asset_container::Codec::Raw,
             },
         )
         .unwrap();
 
         let name = "z.container";
         let reader = ContainerReader::new(package.container_bytes(name).unwrap().to_vec()).unwrap();
-        assert_eq!(reader.info().version, 2);
+        assert_eq!(reader.info().version, FORMAT_VERSION);
         let root = reader.entry(StableGuid::from_u128(101)).unwrap();
         let leaf = reader.entry(StableGuid::from_u128(202)).unwrap();
         let payload_start = u64::from_le_bytes(
@@ -915,6 +942,44 @@ mod tests {
     }
 
     #[test]
+    fn package_runtime_can_emit_deterministic_deflate_payloads() {
+        let (manifest, cas, mappings) = manifest_and_cas();
+        let package = package_runtime_with_options(
+            PackageRequest {
+                manifest: &manifest,
+                cas: &cas,
+                mappings,
+            },
+            PackageOptions {
+                chunk_policy: ChunkPolicy::default(),
+                codec: prism_asset_container::Codec::Deflate,
+            },
+        )
+        .unwrap();
+
+        let container = package.container_bytes("z.container").unwrap();
+        let reader = ContainerReader::new(container.to_vec()).unwrap();
+        let root = StableGuid::from_u128(101);
+        assert_eq!(reader.entry(root).unwrap().codec, Codec::Deflate);
+        assert!(!reader.read_all(root).unwrap().is_empty());
+        assert_eq!(
+            package.runtime_manifest.metadata(root).unwrap().codec,
+            Codec::Deflate
+        );
+        let leaf = StableGuid::from_u128(202);
+        let leaf_reader =
+            ContainerReader::new(package.container_bytes("a.container").unwrap().to_vec()).unwrap();
+        assert_eq!(leaf_reader.entry(leaf).unwrap().codec, Codec::Deflate);
+        assert!(!leaf_reader.read_all(leaf).unwrap().is_empty());
+        assert_eq!(
+            package.runtime_manifest.metadata(leaf).unwrap().codec,
+            Codec::Deflate
+        );
+        let decoded = RuntimeManifest::decode(&package.runtime_manifest_bytes).unwrap();
+        assert_eq!(decoded, package.runtime_manifest);
+    }
+
+    #[test]
     fn package_runtime_rejects_chunk_capacity_and_count_overflow() {
         let (manifest, cas, mappings) = manifest_and_cas();
         assert!(matches!(
@@ -930,6 +995,7 @@ mod tests {
                         chunk_alignment: 4,
                         max_chunks: 1,
                     },
+                    codec: prism_asset_container::Codec::Raw,
                 },
             ),
             Err(PackageError::ChunkPlan { .. })
@@ -950,6 +1016,7 @@ mod tests {
                         chunk_alignment: 64,
                         max_chunks: 1,
                     },
+                    codec: prism_asset_container::Codec::Raw,
                 },
             ),
             Err(PackageError::ChunkPlan { .. })

@@ -103,6 +103,8 @@ pub enum ManifestError {
     UnsupportedVersion(u16),
     /// Header, field encoding, or canonical ordering is invalid.
     InvalidFormat,
+    /// A route names a codec not implemented by this manifest reader.
+    UnsupportedCodec(u8),
     /// A stable GUID has more than one route.
     DuplicateGuid(StableGuid),
     /// A container name has more than one immutable identity.
@@ -126,6 +128,9 @@ impl fmt::Display for ManifestError {
             Self::BadMagic => f.write_str("invalid runtime manifest magic"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported runtime manifest version {v}"),
             Self::InvalidFormat => f.write_str("invalid runtime manifest format"),
+            Self::UnsupportedCodec(codec) => {
+                write!(f, "unsupported runtime manifest codec {codec}")
+            }
             Self::DuplicateGuid(g) => write!(f, "duplicate manifest guid {g:?}"),
             Self::ContainerIdentityConflict(name) => {
                 write!(f, "conflicting identity for runtime container {name:?}")
@@ -541,10 +546,12 @@ impl RuntimeManifest {
                     optional_dependencies: dependencies[hard_count..].to_vec(),
                     initial_residency: fixed[8],
                     streaming_level: fixed[9],
-                    codec: match fixed[10] {
-                        0 => crate::Codec::Raw,
-                        _ => return Err(ManifestError::InvalidFormat),
-                    },
+                    codec: crate::Codec::decode(fixed[10]).map_err(|error| match error {
+                        crate::ContainerError::UnsupportedCodec(codec) => {
+                            ManifestError::UnsupportedCodec(codec)
+                        }
+                        _ => ManifestError::InvalidFormat,
+                    })?,
                     schema: u32::from_le_bytes(fixed[12..16].try_into().unwrap()),
                     install_capabilities: u64::from_le_bytes(fixed[16..24].try_into().unwrap()),
                 };

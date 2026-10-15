@@ -1,10 +1,12 @@
 //! Versioned, deterministic runtime asset containers and priority overlays.
 //!
-//! This crate owns runtime consumption only. It does not cook assets, compress
-//! payloads, authenticate publishers, or submit data to a GPU. The current
-//! writer supports the `Raw` codec; other codec ids are preserved in metadata
-//! by future-compatible readers only when explicitly supported (currently they
-//! are rejected during mount).
+//! This crate owns runtime consumption only. It does not cook assets,
+//! authenticate publishers, or submit data to a GPU. The writer and reader
+//! support deterministic raw and raw-DEFLATE payloads; higher-level chunk
+//! compression indexes, encryption, signatures, and GPU decompression remain
+//! outside this crate. Only [`FORMAT_VERSION`] is a supported container wire
+//! version; planned versions are rejected until their complete semantics are
+//! specified and implemented.
 
 extern crate alloc;
 
@@ -23,7 +25,10 @@ mod writer;
 pub use chunk::{
     ChunkInput, ChunkPlacement, ChunkPlan, ChunkPlanError, ChunkPlanner, ChunkPolicy, PlannedChunk,
 };
-pub use format::{Codec, ContainerError, ContainerInfo, EntryInfo, FORMAT_VERSION, MAGIC};
+pub use format::{
+    Codec, ContainerError, ContainerInfo, EntryInfo, FORMAT_VERSION, MAGIC,
+    SUPPORTED_FORMAT_VERSIONS,
+};
 pub use install::{install_runtime_package, InstallError, InstallMount, InstallTombstones};
 pub use manifest::{
     ContainerIdentity, ManifestError, ManifestMetadata, ManifestRoute, RuntimeManifest,

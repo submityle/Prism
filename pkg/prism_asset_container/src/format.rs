@@ -4,6 +4,8 @@ use core::fmt;
 pub const MAGIC: [u8; 8] = *b"PRISMCN\0";
 /// Current on-disk format version. Incompatible versions are rejected.
 pub const FORMAT_VERSION: u16 = 1;
+/// The complete set of container versions accepted by this crate.
+pub const SUPPORTED_FORMAT_VERSIONS: &[u16] = &[FORMAT_VERSION];
 
 pub(crate) const HEADER_SIZE: usize = 96;
 pub(crate) const RECORD_SIZE: usize = 80;
@@ -12,14 +14,17 @@ pub(crate) const RECORD_SIZE: usize = 80;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Codec {
-    /// Stored bytes are the raw asset bytes (the only implemented codec).
+    /// Stored bytes are the raw asset bytes.
     Raw = 0,
+    /// Stored bytes are a deterministic raw-DEFLATE stream.
+    Deflate = 1,
 }
 
 impl Codec {
     pub(crate) fn decode(value: u8) -> Result<Self, ContainerError> {
         match value {
             0 => Ok(Self::Raw),
+            1 => Ok(Self::Deflate),
             other => Err(ContainerError::UnsupportedCodec(other)),
         }
     }
@@ -52,9 +57,9 @@ pub struct EntryInfo {
     pub offset: u64,
     /// Number of bytes stored in the container.
     pub stored_len: u64,
-    /// Number of decoded bytes; equal to `stored_len` for `Raw`.
+    /// Number of decoded bytes.
     pub raw_len: u64,
-    /// Payload encoding; only `Raw` is currently supported.
+    /// Payload encoding used by the record.
     pub codec: Codec,
     /// BLAKE3 digest of the payload bytes.
     pub hash: [u8; 32],
@@ -83,8 +88,12 @@ pub enum ContainerError {
     DuplicateGuid(prism_asset::StableGuid),
     /// A TOC entry names a codec not implemented by this reader.
     UnsupportedCodec(u8),
+    /// A known codec cannot be used with the requested physical layout.
+    CodecNotSupportedForLayout(Codec),
     /// A directory or complete-payload digest does not match its bytes.
     HashMismatch,
+    /// A payload codec failed while encoding or decoding.
+    CompressionFailed,
     /// No mounted container contains the requested asset.
     MissingAsset(prism_asset::StableGuid),
     /// The requested payload range exceeds the raw payload length.
@@ -111,7 +120,14 @@ impl fmt::Display for ContainerError {
             Self::OutOfBounds => f.write_str("container range is out of bounds"),
             Self::DuplicateGuid(g) => write!(f, "duplicate asset guid {g:?}"),
             Self::UnsupportedCodec(c) => write!(f, "unsupported payload codec {c}"),
+            Self::CodecNotSupportedForLayout(codec) => {
+                write!(
+                    f,
+                    "payload codec {codec:?} is not supported for this layout"
+                )
+            }
             Self::HashMismatch => f.write_str("container or payload hash mismatch"),
+            Self::CompressionFailed => f.write_str("container payload compression failed"),
             Self::MissingAsset(g) => write!(f, "asset {g:?} is not mounted"),
             Self::InvalidRange => f.write_str("requested asset range is invalid"),
             Self::InvalidAlignment => f.write_str("payload alignment is invalid"),

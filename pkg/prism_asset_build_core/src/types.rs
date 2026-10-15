@@ -20,6 +20,24 @@ pub struct BuildRevision(pub u64);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TransactionId(pub [u8; 16]);
 
+/// Storage residency of an artifact descriptor.
+///
+/// Only [`ArtifactStorageClass::Shared`] artifacts may enter a build
+/// `Manifest` or the shared DDC. `DriverLocal` is reserved for PSO/pipeline
+/// and driver shader caches whose identity includes device/backend state.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ArtifactStorageClass {
+    Shared,
+    DriverLocal,
+}
+
+impl ArtifactStorageClass {
+    #[must_use]
+    pub const fn is_shared(self) -> bool {
+        matches!(self, Self::Shared)
+    }
+}
+
 impl TransactionId {
     /// Returns the canonical lowercase hexadecimal representation.
     #[must_use]
@@ -35,6 +53,7 @@ pub struct ArtifactDescriptor {
     pub key: ArtifactKey,
     pub kind: u128,
     pub schema: u32,
+    pub storage_class: ArtifactStorageClass,
     pub content_hash: ContentHash,
     pub byte_len: u64,
     pub alignment: u32,
@@ -54,11 +73,27 @@ impl ArtifactDescriptor {
             key,
             kind,
             schema,
+            storage_class: ArtifactStorageClass::Shared,
             content_hash: ContentHash::digest(bytes),
             byte_len: bytes.len() as u64,
             alignment,
             dependencies,
         }
+    }
+
+    /// Creates a descriptor for a driver-local result. Such a descriptor is
+    /// intentionally rejected by DDC, build Manifest, and runtime packaging.
+    pub fn for_driver_local_bytes(
+        key: ArtifactKey,
+        kind: u128,
+        schema: u32,
+        alignment: u32,
+        dependencies: Vec<ArtifactKey>,
+        bytes: &[u8],
+    ) -> Self {
+        let mut descriptor = Self::for_bytes(key, kind, schema, alignment, dependencies, bytes);
+        descriptor.storage_class = ArtifactStorageClass::DriverLocal;
+        descriptor
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -117,6 +152,9 @@ impl Manifest {
         let mut map = BTreeMap::new();
         for entry in entries {
             entry.descriptor.validate()?;
+            if !entry.descriptor.storage_class.is_shared() {
+                return Err("manifest cannot contain driver-local artifacts");
+            }
             if map.insert(entry.asset, entry.descriptor).is_some() {
                 return Err("manifest contains duplicate AssetId");
             }
@@ -131,7 +169,7 @@ impl Manifest {
     /// little-endian; entries follow ascending AssetId and dependencies retain order.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.extend_from_slice(b"PRISM-MANIFEST\0\x01");
+        out.extend_from_slice(b"PRISM-MANIFEST\0\x02");
         out.extend_from_slice(&self.revision.0.to_le_bytes());
         out.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
         for (asset, d) in &self.entries {
@@ -139,6 +177,10 @@ impl Manifest {
             out.extend_from_slice(&d.key.0);
             out.extend_from_slice(&d.kind.to_le_bytes());
             out.extend_from_slice(&d.schema.to_le_bytes());
+            out.push(match d.storage_class {
+                ArtifactStorageClass::Shared => 0,
+                ArtifactStorageClass::DriverLocal => 1,
+            });
             out.extend_from_slice(&d.content_hash.0);
             out.extend_from_slice(&d.byte_len.to_le_bytes());
             out.extend_from_slice(&d.alignment.to_le_bytes());

@@ -2,6 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use flate2::{Decompress, FlushDecompress, Status};
 
 use prism_asset::StableGuid;
 
@@ -10,8 +11,6 @@ use crate::format::{
     HEADER_SIZE, MAGIC, RECORD_SIZE,
 };
 use crate::{RangeBatchPolicy, RangeRequest};
-
-const PLANNED_FORMAT_VERSION: u16 = 2;
 
 const VALIDATION_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -100,10 +99,8 @@ impl ContainerReader {
         self.entries.keys().copied()
     }
 
-    /// Reads a byte range from a raw payload. Payload integrity was verified
-    /// in full when this reader was constructed, and this operation relies on
-    /// the `RangeSource` remaining immutable. It does not authenticate the
-    /// requested subrange against the full-payload digest.
+    /// Reads a byte range from a decoded payload. Raw payloads use direct
+    /// physical range I/O; Deflate payloads are decoded and then sliced.
     pub fn read_range(
         &self,
         guid: StableGuid,
@@ -120,6 +117,19 @@ impl ContainerReader {
             .ok_or(ContainerError::IntegerOverflow)?;
         if end > entry.raw_len {
             return Err(ContainerError::InvalidRange);
+        }
+        if entry.codec == Codec::Deflate {
+            let decoded = self.decode_entry(*entry)?;
+            let start = usize::try_from(offset).map_err(|_| ContainerError::IntegerOverflow)?;
+            let finish = start
+                .checked_add(out.len())
+                .ok_or(ContainerError::IntegerOverflow)?;
+            out.copy_from_slice(
+                decoded
+                    .get(start..finish)
+                    .ok_or(ContainerError::OutOfBounds)?,
+            );
+            return Ok(());
         }
         let physical_offset = entry
             .offset
@@ -155,6 +165,22 @@ impl ContainerReader {
     ) -> Result<Vec<Vec<u8>>, ContainerError> {
         if policy.max_batch_bytes == 0 {
             return Err(ContainerError::InvalidBatchPolicy);
+        }
+
+        if requests.iter().any(|request| {
+            self.entries
+                .get(&request.guid)
+                .is_some_and(|entry| entry.codec == Codec::Deflate)
+        }) {
+            let mut outputs = Vec::with_capacity(requests.len());
+            for request in requests.iter().copied() {
+                let len = self.validate_range_request(request)?;
+                policy.validate_request_len(request.len)?;
+                let mut output = vec![0; len];
+                self.read_range(request.guid, request.offset, &mut output)?;
+                outputs.push(output);
+            }
+            return Ok(outputs);
         }
 
         let mut outputs = Vec::with_capacity(requests.len());
@@ -244,6 +270,14 @@ impl ContainerReader {
         }
     }
 
+    fn decode_entry(&self, entry: EntryInfo) -> Result<Vec<u8>, ContainerError> {
+        let stored_len =
+            usize::try_from(entry.stored_len).map_err(|_| ContainerError::IntegerOverflow)?;
+        let mut stored = vec![0; stored_len];
+        self.read_physical_range(entry.offset, &mut stored)?;
+        decode_deflate(&stored, entry.raw_len)
+    }
+
     /// Reads and verifies the complete raw payload.
     pub fn read_all(&self, guid: StableGuid) -> Result<Vec<u8>, ContainerError> {
         let entry = self
@@ -316,7 +350,7 @@ fn parse_source(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Cont
         return Err(ContainerError::BadMagic);
     }
     let version = read_u16(&header, 8)?;
-    if version != FORMAT_VERSION && version != PLANNED_FORMAT_VERSION {
+    if version != FORMAT_VERSION {
         return Err(ContainerError::UnsupportedVersion(version));
     }
     if usize::from(read_u16(&header, 10)?) != HEADER_SIZE || read_u32(&header, 12)? != 0 {
@@ -342,8 +376,7 @@ fn parse_source(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Cont
     }
     if dir_off != HEADER_SIZE as u64
         || dir_len != expected_dir_len
-        || (version == FORMAT_VERSION && dir_end != payload_off)
-        || (version == PLANNED_FORMAT_VERSION && dir_end > payload_off)
+        || dir_end > payload_off
         || total_len != source_len
         || payload_off > total_len
     {
@@ -396,7 +429,15 @@ fn parse_source(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Cont
         if offset % u64::from(alignment) != 0 {
             return Err(ContainerError::InvalidDirectory);
         }
-        validate_hash_range(source, offset, end, hash)?;
+        if codec == Codec::Raw {
+            validate_hash_range(source, offset, end, hash)?;
+        } else {
+            let stored_len =
+                usize::try_from(stored_len).map_err(|_| ContainerError::IntegerOverflow)?;
+            let mut stored = vec![0; stored_len];
+            read_from_source(source, offset, &mut stored)?;
+            validate_deflate(&stored, raw_len, hash)?;
+        }
         entries.insert(
             guid,
             EntryInfo {
@@ -414,11 +455,7 @@ fn parse_source(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Cont
     // Requiring monotonic, non-overlapping ranges prevents aliasing/overlap
     // tricks. Gaps are part of the canonical byte layout and must be zero.
     let mut ordered: Vec<_> = entries.values().collect();
-    if version == FORMAT_VERSION {
-        ordered.sort_by_key(|entry| entry.guid);
-    } else {
-        ordered.sort_by_key(|entry| (entry.offset, entry.stored_len, entry.guid));
-    }
+    ordered.sort_by_key(|entry| (entry.offset, entry.stored_len, entry.guid));
     let mut cursor = payload_off;
     for entry in ordered {
         if entry.offset < cursor {
@@ -525,6 +562,97 @@ where
         offset = offset
             .checked_add(u64::try_from(amount).map_err(|_| ContainerError::IntegerOverflow)?)
             .ok_or(ContainerError::IntegerOverflow)?;
+    }
+    Ok(())
+}
+
+fn decode_deflate(stored: &[u8], raw_len: u64) -> Result<Vec<u8>, ContainerError> {
+    let raw_len = usize::try_from(raw_len).map_err(|_| ContainerError::IntegerOverflow)?;
+    let capacity = raw_len
+        .checked_add(1)
+        .ok_or(ContainerError::IntegerOverflow)?;
+    let mut output = vec![0_u8; capacity];
+    let mut decompressor = Decompress::new(false);
+    let status = loop {
+        let written = usize::try_from(decompressor.total_out())
+            .map_err(|_| ContainerError::CompressionFailed)?;
+        if written >= capacity {
+            return Err(ContainerError::CompressionFailed);
+        }
+        let consumed = usize::try_from(decompressor.total_in())
+            .map_err(|_| ContainerError::CompressionFailed)?;
+        let input = stored
+            .get(consumed..)
+            .ok_or(ContainerError::CompressionFailed)?;
+        let before_in = decompressor.total_in();
+        let before_out = decompressor.total_out();
+        let status = decompressor
+            .decompress(input, &mut output[written..], FlushDecompress::Finish)
+            .map_err(|_| ContainerError::CompressionFailed)?;
+        if status == Status::StreamEnd {
+            break status;
+        }
+        if status == Status::BufError
+            || (decompressor.total_in() == before_in && decompressor.total_out() == before_out)
+        {
+            return Err(ContainerError::CompressionFailed);
+        }
+    };
+    if status != Status::StreamEnd
+        || decompressor.total_in() != u64::try_from(stored.len()).unwrap_or(u64::MAX)
+        || usize::try_from(decompressor.total_out()).unwrap_or(usize::MAX) != raw_len
+    {
+        return Err(ContainerError::CompressionFailed);
+    }
+    output.truncate(raw_len);
+    Ok(output)
+}
+
+fn validate_deflate(
+    stored: &[u8],
+    raw_len: u64,
+    expected_hash: [u8; 32],
+) -> Result<(), ContainerError> {
+    let mut decompressor = Decompress::new(false);
+    let mut output = vec![0_u8; VALIDATION_CHUNK_SIZE];
+    let mut hasher = blake3::Hasher::new();
+    let status = loop {
+        let consumed = usize::try_from(decompressor.total_in())
+            .map_err(|_| ContainerError::CompressionFailed)?;
+        let input = stored
+            .get(consumed..)
+            .ok_or(ContainerError::CompressionFailed)?;
+        let before_in = decompressor.total_in();
+        let before_out = decompressor.total_out();
+        let status = decompressor
+            .decompress(input, &mut output, FlushDecompress::Finish)
+            .map_err(|_| ContainerError::CompressionFailed)?;
+        let produced = decompressor
+            .total_out()
+            .checked_sub(before_out)
+            .ok_or(ContainerError::CompressionFailed)?;
+        let produced = usize::try_from(produced).map_err(|_| ContainerError::CompressionFailed)?;
+        hasher.update(&output[..produced]);
+        if decompressor.total_out() > raw_len {
+            return Err(ContainerError::CompressionFailed);
+        }
+        if status == Status::StreamEnd {
+            break status;
+        }
+        if (status == Status::BufError && produced == 0)
+            || (decompressor.total_in() == before_in && decompressor.total_out() == before_out)
+        {
+            return Err(ContainerError::CompressionFailed);
+        }
+    };
+    if status != Status::StreamEnd
+        || decompressor.total_in() != u64::try_from(stored.len()).unwrap_or(u64::MAX)
+        || decompressor.total_out() != raw_len
+    {
+        return Err(ContainerError::CompressionFailed);
+    }
+    if hasher.finalize().as_bytes() != &expected_hash {
+        return Err(ContainerError::HashMismatch);
     }
     Ok(())
 }

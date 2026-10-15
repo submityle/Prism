@@ -11,6 +11,7 @@ use crate::{
     InstallTombstones, ManifestAssetReader, ManifestError, ManifestMetadata, ManifestRangeRequest,
     ManifestReadError, ManifestRoute, MemoryRangeSource, OverlaySet, RangeBatchPolicy,
     RangeRequest, RangeSource, RangeSourceError, RuntimeManifest, FORMAT_VERSION, MAGIC,
+    SUPPORTED_FORMAT_VERSIONS,
 };
 
 fn guid(name: &str) -> StableGuid {
@@ -23,6 +24,72 @@ fn build(entries: &[(&str, &[u8])]) -> Vec<u8> {
         writer.add(guid(name), bytes.to_vec()).unwrap();
     }
     writer.finish().unwrap()
+}
+
+#[test]
+fn deterministic_deflate_payload_round_trips_and_supports_raw_ranges() {
+    let id = guid("compressed.asset");
+    let bytes = b"repeatable payload ".repeat(512);
+    let mut first = ContainerWriter::new();
+    first.add_deflate(id, bytes.clone()).unwrap();
+    let first_bytes = first.finish().unwrap();
+
+    let mut second = ContainerWriter::new();
+    second.add_deflate(id, bytes.clone()).unwrap();
+    let second_bytes = second.finish().unwrap();
+    assert_eq!(first_bytes, second_bytes);
+
+    let reader = ContainerReader::new(first_bytes.clone()).unwrap();
+    let entry = reader.entry(id).unwrap();
+    assert_eq!(entry.codec, Codec::Deflate);
+    assert_eq!(entry.raw_len, bytes.len() as u64);
+    assert!(entry.stored_len < entry.raw_len);
+    assert_eq!(reader.read_all(id).unwrap(), bytes);
+
+    let mut range = vec![0; 37];
+    reader.read_range(id, 123, &mut range).unwrap();
+    assert_eq!(range, bytes[123..160]);
+
+    let ranges = reader
+        .read_ranges(
+            &[
+                RangeRequest {
+                    guid: id,
+                    offset: 0,
+                    len: 5,
+                },
+                RangeRequest {
+                    guid: id,
+                    offset: 500,
+                    len: 11,
+                },
+            ],
+            RangeBatchPolicy::default(),
+        )
+        .unwrap();
+    assert_eq!(ranges, vec![bytes[0..5].to_vec(), bytes[500..511].to_vec()]);
+
+    let range_reader =
+        ContainerReader::from_range_source(Arc::new(MemoryRangeSource::new(first_bytes))).unwrap();
+    assert_eq!(range_reader.read_all(id).unwrap(), bytes);
+}
+
+#[test]
+fn deflate_payload_corruption_is_rejected_at_mount() {
+    let id = guid("corrupt-compressed.asset");
+    let mut writer = ContainerWriter::new();
+    writer.add_deflate(id, b"payload".repeat(128)).unwrap();
+    let mut bytes = writer.finish().unwrap();
+    let entry = ContainerReader::new(bytes.clone())
+        .unwrap()
+        .entry(id)
+        .unwrap();
+    let offset = usize::try_from(entry.offset).unwrap();
+    bytes[offset] ^= 0x80;
+    assert!(matches!(
+        ContainerReader::new(bytes),
+        Err(ContainerError::CompressionFailed | ContainerError::HashMismatch)
+    ));
 }
 
 fn identity(bytes: &[u8]) -> ContainerIdentity {
@@ -821,7 +888,7 @@ fn aligned_payloads_preserve_absolute_offsets_and_zero_padding() {
 }
 
 #[test]
-fn planned_layout_is_consumed_and_round_trips_in_version_two() {
+fn planned_layout_is_consumed_and_round_trips_in_version_one() {
     let first = guid("planned-first");
     let second = guid("planned-second");
     let policy = ChunkPolicy {
@@ -855,7 +922,10 @@ fn planned_layout_is_consumed_and_round_trips_in_version_two() {
     let bytes = writer
         .finish_with_chunk_plan(&plan, policy.chunk_alignment)
         .unwrap();
-    assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 2);
+    assert_eq!(
+        u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
+        FORMAT_VERSION
+    );
     let reader = ContainerReader::new(bytes).unwrap();
     let first_entry = reader.entry(first).unwrap();
     let second_entry = reader.entry(second).unwrap();
@@ -1055,7 +1125,7 @@ fn planned_writer_rejects_noncanonical_chunk_gaps() {
 }
 
 #[test]
-fn version_two_reader_rejects_nonzero_directory_alignment_padding() {
+fn version_one_reader_rejects_nonzero_directory_alignment_padding() {
     let id = guid("padding-check");
     let plan = ChunkPlanner::new(ChunkPolicy {
         max_chunk_size: 8,
@@ -1079,6 +1149,48 @@ fn version_two_reader_rejects_nonzero_directory_alignment_padding() {
     assert_eq!(
         ContainerReader::new(bytes).unwrap_err(),
         ContainerError::InvalidHeader
+    );
+}
+
+#[test]
+fn version_two_is_rejected_and_supported_versions_are_a_closed_set() {
+    assert_eq!(SUPPORTED_FORMAT_VERSIONS, &[FORMAT_VERSION]);
+    let mut bytes = build(&[("version-two", b"payload")]);
+    bytes[8..10].copy_from_slice(&2_u16.to_le_bytes());
+    assert_eq!(
+        ContainerReader::new(bytes).unwrap_err(),
+        ContainerError::UnsupportedVersion(2)
+    );
+}
+
+#[test]
+fn unknown_container_codec_is_a_structured_error() {
+    let mut bytes = build(&[("unknown-codec", b"payload")]);
+    bytes[96 + 40] = 0xff;
+    update_directory_hash(&mut bytes);
+    assert_eq!(
+        ContainerReader::new(bytes).unwrap_err(),
+        ContainerError::UnsupportedCodec(0xff)
+    );
+}
+
+#[test]
+fn chunk_plan_rejects_deflate_with_a_structured_layout_error() {
+    let id = guid("compressed-planned");
+    let plan = ChunkPlanner::new(ChunkPolicy::default())
+        .plan([ChunkInput {
+            guid: id,
+            size: 1024,
+            alignment: 1,
+            dependencies: vec![],
+            priority: 0,
+        }])
+        .unwrap();
+    let mut writer = ContainerWriter::new();
+    writer.add_deflate(id, vec![7; 1024]).unwrap();
+    assert_eq!(
+        writer.finish_with_chunk_plan(&plan, ChunkPolicy::default().chunk_alignment),
+        Err(ContainerError::CodecNotSupportedForLayout(Codec::Deflate))
     );
 }
 
@@ -1273,7 +1385,7 @@ fn runtime_manifest_persists_route_dependencies_and_delivery_metadata() {
                 optional_dependencies: vec![optional],
                 initial_residency: 2,
                 streaming_level: 4,
-                codec: Codec::Raw,
+                codec: Codec::Deflate,
                 schema: 9,
                 install_capabilities: 0x25,
             },
@@ -1286,6 +1398,36 @@ fn runtime_manifest_persists_route_dependencies_and_delivery_metadata() {
     assert_eq!(
         decoded.metadata(root).unwrap().hard_dependencies,
         vec![hard]
+    );
+}
+
+#[test]
+fn unknown_manifest_codec_is_a_structured_error() {
+    let id = guid("manifest-unknown-codec");
+    let bytes = build(&[("manifest-unknown-codec", b"payload")]);
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert(ManifestRoute {
+            guid: id,
+            container_name: "asset".into(),
+            priority: 0,
+            container_guid: id,
+        })
+        .unwrap();
+    manifest.bind_container("asset", identity(&bytes)).unwrap();
+    let mut encoded = manifest.encode().unwrap();
+
+    // One container and one route with no dependencies: metadata starts after
+    // the fixed header, container record/name, route record/name.
+    let codec_offset = 20 + 50 + "asset".len() + 38 + "asset".len() + 10;
+    encoded[codec_offset] = 0xff;
+    let body_end = encoded.len() - 32;
+    let hash = *blake3::hash(&encoded[..body_end]).as_bytes();
+    encoded[body_end..].copy_from_slice(&hash);
+
+    assert_eq!(
+        RuntimeManifest::decode(&encoded),
+        Err(ManifestError::UnsupportedCodec(0xff))
     );
 }
 

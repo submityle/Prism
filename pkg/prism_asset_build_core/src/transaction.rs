@@ -3,7 +3,8 @@ use crate::journal::{JournalRecord, TransactionJournal};
 use crate::package::RuntimePackage;
 use crate::publication::PublicationDescriptor;
 use crate::types::{
-    ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, Manifest, ManifestEntry, TransactionId,
+    ArtifactDescriptor, ArtifactKey, ArtifactStorageClass, AssetId, BuildRevision, Manifest,
+    ManifestEntry, TransactionId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -33,8 +34,8 @@ fn next_transaction_id() -> TransactionId {
     TransactionId(digest.as_bytes()[..16].try_into().unwrap())
 }
 
-const MANIFEST_MAGIC: &[u8] = b"PRISM-MANIFEST\0\x01";
-const MANIFEST_ENTRY_FIXED_BYTES: usize = 16 + 32 + 16 + 4 + 32 + 8 + 4 + 8;
+const MANIFEST_MAGIC: &[u8] = b"PRISM-MANIFEST\0\x02";
+const MANIFEST_ENTRY_FIXED_BYTES: usize = 16 + 32 + 16 + 4 + 1 + 32 + 8 + 4 + 8;
 
 #[derive(Debug)]
 pub enum PublishError {
@@ -1272,6 +1273,11 @@ fn decode_manifest(
         let key = ArtifactKey(reader.array::<32>()?);
         let kind = reader.u128()?;
         let schema = reader.u32()?;
+        let storage_class = match reader.u8()? {
+            0 => ArtifactStorageClass::Shared,
+            1 => ArtifactStorageClass::DriverLocal,
+            _ => return Err(PublishError::Invalid("unknown artifact storage class")),
+        };
         let content_hash = crate::types::ContentHash(reader.array::<32>()?);
         let byte_len = reader.u64()?;
         let alignment = reader.u32()?;
@@ -1292,6 +1298,7 @@ fn decode_manifest(
                 key,
                 kind,
                 schema,
+                storage_class,
                 content_hash,
                 byte_len,
                 alignment,
@@ -1347,6 +1354,10 @@ impl<'a> ManifestReader<'a> {
 
     fn u32(&mut self) -> Result<u32, PublishError> {
         Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    fn u8(&mut self) -> Result<u8, PublishError> {
+        Ok(self.take(1)?[0])
     }
 
     fn u64(&mut self) -> Result<u64, PublishError> {
@@ -1515,6 +1526,7 @@ mod tests {
             key: ArtifactKey([7; 32]),
             kind: 4,
             schema: 1,
+            storage_class: ArtifactStorageClass::Shared,
             content_hash: ContentHash::digest(bytes),
             byte_len: bytes.len() as u64,
             alignment: 16,
