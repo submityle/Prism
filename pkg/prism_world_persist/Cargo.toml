@@ -1,0 +1,17 @@
+[package]
+name = "prism_world_persist"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic no_std + alloc persistence, timeline, and CRDT core for Prism worlds."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = []
+
+[lib]
+path = "src/lib.rs"
+
+# This crate is intentionally tested as a standalone no_std + alloc package;
+# the Prism workspace root must not be changed for that purpose.
+[workspace]
