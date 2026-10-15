@@ -6,6 +6,10 @@ use core::cmp::Ordering;
 use crate::{RepresentationChoice, RepresentationError, RepresentationSpec, TileKey};
 
 /// A closed tile-local dirty rectangle in Q16 normalized coordinates.
+///
+/// The endpoints `0` and `u16::MAX` map to the first and last sample of
+/// each XY axis. Planning encloses the rectangle with floor/ceil grid
+/// indices, including interpolation endpoints for a non-aligned edit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirtyRegion {
     tile: TileKey,
@@ -182,6 +186,13 @@ pub struct RebakePlanner;
 
 impl RebakePlanner {
     /// Merges overlapping/edge-adjacent regions and admits tasks in stable order.
+    ///
+    /// A merged bounding rectangle may include unchanged samples. Its entire
+    /// enclosing XY grid footprint is charged, including complete Z columns
+    /// for voxel and SDF targets. Costs describe packed sample payloads, not
+    /// padded GPU buffers or whole-brick transfers. Per-task cost overflow
+    /// returns an error; tasks whose cumulative costs exceed the remaining
+    /// budget are deferred without wrapping the admitted totals.
     pub fn plan(
         &self,
         request: RebakeRequest,
@@ -201,7 +212,7 @@ impl RebakePlanner {
                 .target
                 .estimate_work(region.tile(), sample_count)
                 .map_err(RebakeError::Representation)?;
-            let fits = (tasks.len() as u32) < budget.max_tasks
+            let fits = u32::try_from(tasks.len()).is_ok_and(|count| count < budget.max_tasks)
                 && total_work_units
                     .checked_add(work.work_units)
                     .is_some_and(|value| value <= budget.max_work_units)
@@ -236,37 +247,34 @@ impl RebakePlanner {
 }
 
 fn sample_count(spec: RepresentationSpec, region: DirtyRegion) -> Result<u64, RebakeError> {
-    let span_u = u64::from(region.max_u_q16()) - u64::from(region.min_u_q16()) + 1;
-    let span_v = u64::from(region.max_v_q16()) - u64::from(region.min_v_q16()) + 1;
     let (resolution_u, resolution_v) = match spec {
-        RepresentationSpec::Heightfield(spec) => (
-            u64::from(spec.samples_per_edge()),
-            u64::from(spec.samples_per_edge()),
-        ),
+        RepresentationSpec::Heightfield(spec) => (spec.samples_per_edge(), spec.samples_per_edge()),
         RepresentationSpec::Voxel(spec) => {
             let dimensions = spec.layout().dimensions();
-            (u64::from(dimensions[0]), u64::from(dimensions[1]))
+            (dimensions[0], dimensions[1])
         }
         RepresentationSpec::Sdf(spec) => {
             let dimensions = spec.dimensions();
-            (u64::from(dimensions[0]), u64::from(dimensions[1]))
+            (dimensions[0], dimensions[1])
         }
     };
-    let samples_u = span_u
-        .checked_mul(resolution_u)
-        .and_then(|value| value.checked_add(65_535))
-        .map(|value| value / 65_536)
-        .ok_or(RebakeError::CostOverflow)?
-        .max(1);
-    let samples_v = span_v
-        .checked_mul(resolution_v)
-        .and_then(|value| value.checked_add(65_535))
-        .map(|value| value / 65_536)
-        .ok_or(RebakeError::CostOverflow)?
-        .max(1);
+    let samples_u = covered_axis_samples(region.min_u_q16(), region.max_u_q16(), resolution_u);
+    let samples_v = covered_axis_samples(region.min_v_q16(), region.max_v_q16(), resolution_v);
     samples_u
         .checked_mul(samples_v)
         .ok_or(RebakeError::CostOverflow)
+}
+
+fn covered_axis_samples(min: u16, max: u16, resolution: u32) -> u64 {
+    // Validated specs always have resolution >= 1. Products of a u16 coordinate
+    // and (u32 resolution - 1) fit u64, including MAX_TILE_LEVEL tiles. Counting
+    // by endpoint indices instead of span length preserves the grid phase:
+    // a short interval straddling a sample can need three enclosing points.
+    let intervals = u64::from(resolution - 1);
+    let denominator = u64::from(u16::MAX);
+    let first = u64::from(min) * intervals / denominator;
+    let last = (u64::from(max) * intervals).div_ceil(denominator);
+    last - first + 1
 }
 
 fn merge_regions(regions: &[DirtyRegion]) -> Vec<DirtyRegion> {
@@ -342,7 +350,7 @@ mod tests {
 
     #[test]
     fn invalid_and_boundary_regions_are_rejected_or_preserved() {
-        let tile = TileKey::new(CubeFace::NegativeX, 30, 0, 1_u32 << 30 - 1).unwrap();
+        let tile = TileKey::new(CubeFace::NegativeX, 30, 0, (1_u32 << 30) - 1).unwrap();
         assert_eq!(
             DirtyRegion::new(tile, 5, 9, 4, 9),
             Err(RebakeError::InvalidDirtyRegion)
@@ -419,6 +427,216 @@ mod tests {
             assert_eq!(plan.tasks.len(), 1);
             assert!(plan.total_work_units > 0);
             assert!(plan.total_bytes > 0);
+        }
+    }
+
+    #[test]
+    fn full_regions_charge_exact_packed_volume_bytes() {
+        let tile = TileKey::new(CubeFace::NegativeX, crate::MAX_TILE_LEVEL, 0, 0).unwrap();
+        let full = region(tile, 0, 0, u16::MAX, u16::MAX);
+        let voxel = VoxelSpec::new([7, 5, 3], 2, VoxelComponentFormat::DensityU16).unwrap();
+        let targets = [
+            (
+                RepresentationSpec::Heightfield(HeightfieldSpec::new(5, 1).unwrap()),
+                50,
+                25,
+            ),
+            (
+                RepresentationSpec::Voxel(voxel),
+                voxel.layout().expected_byte_len().unwrap() as u64,
+                105,
+            ),
+            (
+                RepresentationSpec::Sdf(SdfSpec::new([7, 5, 3], 2, 1).unwrap()),
+                420,
+                105,
+            ),
+        ];
+        for (target, bytes, output_samples) in targets {
+            let work_units = output_samples * (u64::from(tile.level()) + 1);
+            let plan = RebakePlanner
+                .plan(
+                    RebakeRequest::new(target, target),
+                    &[full],
+                    RebakeBudget::new(1, work_units, bytes),
+                )
+                .unwrap();
+            assert_eq!(plan.tasks.len(), 1);
+            assert!(plan.deferred.is_empty());
+            assert_eq!(plan.total_bytes, bytes);
+            assert_eq!(plan.total_work_units, work_units);
+            assert_eq!(plan.tasks[0].bytes, bytes);
+            assert_eq!(plan.tasks[0].work_units, work_units);
+
+            for budget in [
+                RebakeBudget::new(1, work_units, bytes - 1),
+                RebakeBudget::new(1, work_units - 1, bytes),
+            ] {
+                let deferred = RebakePlanner
+                    .plan(RebakeRequest::new(target, target), &[full], budget)
+                    .unwrap();
+                assert!(deferred.tasks.is_empty());
+                assert_eq!(deferred.deferred, [full]);
+                assert_eq!(deferred.total_bytes, 0);
+                assert_eq!(deferred.total_work_units, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn non_aligned_footprints_account_for_grid_position_and_endpoints() {
+        let tile = TileKey::root(CubeFace::PositiveX);
+        let target = RepresentationSpec::Heightfield(HeightfieldSpec::new(4, 1).unwrap());
+        // Grid points are 0, 21845, 43690, and 65535. Equal-length intervals
+        // have different conservative footprints depending on the grid phase.
+        assert_eq!(sample_count(target, region(tile, 0, 0, 2, 0)).unwrap(), 2);
+        assert_eq!(
+            sample_count(target, region(tile, 21844, 0, 21846, 0)).unwrap(),
+            3
+        );
+        assert_eq!(
+            sample_count(target, region(tile, 21844, 21844, 21846, 21846)).unwrap(),
+            9
+        );
+        assert_eq!(
+            sample_count(target, region(tile, 21845, 21845, 21845, 21845)).unwrap(),
+            1
+        );
+        assert_eq!(
+            sample_count(target, region(tile, 21846, 21846, 21846, 21846)).unwrap(),
+            4
+        );
+        assert_eq!(
+            sample_count(target, region(tile, 65535, 65535, 65535, 65535)).unwrap(),
+            1
+        );
+        let sdf = RepresentationSpec::Sdf(SdfSpec::new([4, 4, 3], 1, 1).unwrap());
+        let dirty = region(tile, 21844, 21844, 21846, 21846);
+        let plan = RebakePlanner
+            .plan(
+                RebakeRequest::new(sdf, sdf),
+                &[dirty],
+                RebakeBudget::new(1, 27, 108),
+            )
+            .unwrap();
+        assert_eq!(plan.total_bytes, 3 * 3 * 3 * 4);
+        assert_eq!(plan.total_work_units, 27);
+        let singleton = RepresentationSpec::Sdf(SdfSpec::new([1, 1, 3], 1, 1).unwrap());
+        assert_eq!(
+            sample_count(singleton, region(tile, 0, 0, 65535, 65535)).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn axis_coverage_is_conservative_for_representative_grids() {
+        for resolution in [1, 2, 3, 4, 17, 129, 65_536, u32::MAX] {
+            for min in [0_u16, 1, 21844, 21845, 21846, 32767, 65534, 65535] {
+                for max in [
+                    min,
+                    min.saturating_add(1),
+                    min.saturating_add(100),
+                    u16::MAX,
+                ] {
+                    let count = covered_axis_samples(min, max, resolution);
+                    let intervals = u128::from(resolution - 1);
+                    let denominator = u128::from(u16::MAX);
+                    // Wide-integer cross multiplication verifies the floor/ceil
+                    // enclosure without reusing the u64 division-based result.
+                    let first = u128::from(min) * intervals / denominator;
+                    let last = first + u128::from(count) - 1;
+                    assert!(first * denominator <= u128::from(min) * intervals);
+                    assert!((first + 1) * denominator > u128::from(min) * intervals);
+                    assert!(last * denominator >= u128::from(max) * intervals);
+                    assert!(last == 0 || (last - 1) * denominator < u128::from(max) * intervals);
+                    assert!(count <= u64::from(resolution));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn per_task_overflow_errors_and_cumulative_overflow_defers() {
+        let tile = TileKey::root(CubeFace::PositiveZ);
+        let full = region(tile, 0, 0, u16::MAX, u16::MAX);
+        let huge = RepresentationSpec::Sdf(SdfSpec::new([u32::MAX; 3], 1, 1).unwrap());
+        assert_eq!(
+            RebakePlanner.plan(
+                RebakeRequest::new(huge, huge),
+                &[full],
+                RebakeBudget::new(1, u64::MAX, u64::MAX)
+            ),
+            Err(RebakeError::Representation(
+                RepresentationError::CostOverflow
+            ))
+        );
+        let byte_overflow =
+            RepresentationSpec::Sdf(SdfSpec::new([u32::MAX, u32::MAX, 1], 1, 1).unwrap());
+        assert_eq!(
+            RebakePlanner.plan(
+                RebakeRequest::new(byte_overflow, byte_overflow),
+                &[full],
+                RebakeBudget::new(1, u64::MAX, u64::MAX)
+            ),
+            Err(RebakeError::Representation(
+                RepresentationError::CostOverflow
+            ))
+        );
+        // Each independent tile fits, but two 2^63-byte outputs cannot fit one
+        // u64 budget. No buffers are allocated by this pure data planner.
+        let large = RepresentationSpec::Heightfield(HeightfieldSpec::new(1_u32 << 31, 1).unwrap());
+        let second = region(TileKey::root(CubeFace::NegativeZ), 0, 0, u16::MAX, u16::MAX);
+        let plan = RebakePlanner
+            .plan(
+                RebakeRequest::new(large, large),
+                &[second, full],
+                RebakeBudget::new(2, u64::MAX, u64::MAX),
+            )
+            .unwrap();
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.deferred.len(), 1);
+        assert_eq!(plan.total_bytes, 1_u64 << 63);
+        assert_eq!(plan.total_work_units, 1_u64 << 62);
+    }
+
+    #[test]
+    fn merges_and_budget_results_are_invariant_under_all_input_permutations() {
+        let tile = TileKey::new(
+            CubeFace::NegativeY,
+            crate::MAX_TILE_LEVEL,
+            (1_u32 << 30) - 1,
+            0,
+        )
+        .unwrap();
+        let inputs = [
+            region(tile, 21844, 0, 21844, 50),
+            region(tile, 21845, 25, 21846, 100),
+            region(tile, 50000, 50000, 51000, 51000),
+            region(tile, 21844, 0, 21844, 50),
+        ];
+        let target = RepresentationSpec::Sdf(SdfSpec::new([4, 4, 3], 1, 1).unwrap());
+        let request = RebakeRequest::new(target, target);
+        let budget = RebakeBudget::new(1, u64::MAX, u64::MAX);
+        let reference = RebakePlanner.plan(request, &inputs, budget).unwrap();
+        assert_eq!(reference.tasks.len(), 1);
+        assert_eq!(reference.deferred.len(), 1);
+        // Bounding union spans three U points and two V points; depth is 3.
+        assert_eq!(reference.total_bytes, 3 * 2 * 3 * 4);
+        for a in 0..4 {
+            for b in 0..4 {
+                for c in 0..4 {
+                    for d in 0..4 {
+                        if a == b || a == c || a == d || b == c || b == d || c == d {
+                            continue;
+                        }
+                        let permutation = [inputs[a], inputs[b], inputs[c], inputs[d]];
+                        assert_eq!(
+                            RebakePlanner.plan(request, &permutation, budget).unwrap(),
+                            reference
+                        );
+                    }
+                }
+            }
         }
     }
 }

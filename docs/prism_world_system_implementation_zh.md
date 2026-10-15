@@ -45,6 +45,9 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 - `prism_world_terrain`：cube-sphere 六面映射、四叉树 tile/跨面邻接、连续 screen-space LOD/morph、i64/Q32.32 局部坐标误差界、确定性高度采样和小端体素布局。
 - M6 纵切已补齐：`TerrainStreamAdapter` 将 `TileKey` 映射为稳定 `SectorId`，计算保守行星毫米 AABB，生成稳定 `CellManifest`/derived hash，并可直接交给 `StreamScheduler`；12 项 terrain 测试、fmt/check/clippy 通过。
+- M6 可执行 heightfield kernel：全量烘焙为带正毫米比例的 signed i16 高度，超范围明确失败；`BakeLimits` 在采样和分配前限制数量/载荷字节，分配失败可返回错误。局部脏区按网格 floor/ceil 保守覆盖，先完成 scratch 采样再提交；失败不改变高度或 revision。`GridChange` 是单个稳定 cache owner 的有序 token，不是跨缓存的全局身份。
+- `HeightfieldMesh` 输出本地 XZ 米制索引网格，+Y 三角绕序和有限差分单位法线；更新覆盖脏高度及一圈法线邻域、不重分配原 mesh。载荷为 `32×顶点数 + 24×quad数` 字节。`mesh` feature 输出真实 `prism_mesh::Mesh`，不是渲染占位数据；本地平面不宣称已做 cube-sphere 投影或 LOD 接缝。
+- 表示选择和重烘规划现按实际 XY 网格覆盖乘 Z 深度计算工作量/字节，覆盖位置敏感的 floor/ceil 边界、溢出、完整规格比较及输入排列无关的脏区合并。当前 terrain 默认测试 31 项、启用原生 mesh 后 32 项通过，no-default/all-target clippy（含基准）通过。
 - `prism_world_sim`：统一 tick/output/dirty-region budget，确定性局部侵蚀、持久体素/碎片 delta、水文容量约束、生态 biomass 更新和小端 delta codec。
 - M7 持久接缝已补齐：`simulation_delta_to_transaction` 将 `SimulationDelta` 编码为稳定 opaque `Bytes` forward + 同字段 `Delete` inverse，`WorldRuntime::append_simulation_delta` 自动使用 log next sequence 并写入 append-only log；simulation feature 测试覆盖 round-trip、错误和 facade 入口。
 - M7 SDF 只读接缝已补齐：`SparseSdfQuery`/`SdfQueryConsumer` 为多个消费者共享同一 sparse grid，明确区分 `Value`、`Miss` 与缺 brick 的 `Unknown`，覆盖负坐标、范围和缺失数据测试；不会把未知场误报为空场。
@@ -85,6 +88,22 @@ CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_stre
 
 2026-10-15 受限环境中的严格 GPU 重跑曾失败：`No suitable graphics adapter found`（Metal 未返回 adapter）。同日经过用户允许的跨沙盒严格重跑已取得上文 Apple M2/Metal 的 pipeline、dispatch/readback 和 parity 通过证据；保留该受限探测失败记录，不将无 adapter 的运行算作通过。
 
+### 地形原生网格与 Metal 实机回归
+
+```text
+CARGO_TARGET_DIR=/private/tmp/prism-world-kernel-target cargo bench -p prism_world_terrain --bench heightfield_bake
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo test -p prism_world_gpu --features gpu --test terrain_draw --test gpu_parity -- --nocapture
+```
+
+`terrain_draw` 在 Apple M2/Metal IntegratedGpu 上将真实原生 Mesh 顶点/索引送入 indexed raster，启用背面剔除，读回 64² RGBA8 像素检查覆盖、UV、法线和高度。81 顶点、384 索引；全量顶点 2,592 字节、索引 1,536 字节；3×3 高度重烘只需更新含法线邻域的 5×5 顶点，五段上传共 800 字节到同一个 GPU buffer。局部上传与全量替换的全部 16,384 读回字节一致，远离脏区的像素不变。64 次测量、8 次预热的主机墙钟 encode/submit/执行/同步/map/copy 为 P50/P95/P99 = 590/839/882 µs；这是 debug、小型离屏测试，不是 GPU timestamp、产品帧时或完整 render graph 集成结论。严格 parity 测试同次重跑通过。
+
+CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下表单位 ns，为 nearest-rank P50/P95/P99，本机本轮结果，不代表跨硬件承诺或峰值内存。局部更新均为 9 个高度样本、25 个 mesh 顶点。
+
+| 网格 | 高度载荷 / mesh 载荷字节 | 全量高度 | 全量 mesh | 局部高度 | 局部 mesh |
+|---|---:|---:|---:|---:|---:|
+| 129² | 33,282 / 925,728 | 119,583 / 184,458 / 222,334 | 265,625 / 412,167 / 494,209 | 167 / 500 / 1,500 | 333 / 541 / 667 |
+| 257² | 132,098 / 3,686,432 | 323,416 / 994,083 / 1,312,042 | 761,709 / 1,625,917 / 2,512,334 | 500 / 2,708 / 3,416 | 292 / 1,292 / 1,417 |
+
 `cargo clippy -D warnings` 在包含 `prism_world` 依赖闭包时会进入仓库其他并行改动的 `prism_asset`/`prism_ecs`，当前被这些既有告警阻断；world 自身新增代码已按相应 crate 的局部检查验证，不能把依赖闭包失败误报为全 workspace 通过。
 
 ## 尚未交付的边界
@@ -92,7 +111,7 @@ CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_stre
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
 - M3：真实资产包解压、GPU 直传和产品级吞吐仍需独立运行时验证；当前已完成文件 provider、scheduler、manifest/payload、SceneHost 的 CPU 端到端验证。
-- M6：terrain 多表示、增量重烘以及 terrain-to-render 的端到端接入；terrain-to-world-stream manifest 接缝已完成。
+- M6：多表示曲面提取/转换、LOD 接缝、行星投影及实际 renderer graph 接入；heightfield 原子局部重烘、native Mesh 和离屏真实 GPU 绘制、terrain-to-world-stream manifest 接缝已完成。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。
 - GPU proxy 的真实 adapter、dispatch/readback 正确性已有上述 Apple M2/Metal 证据；P50/P95/P99 性能、显存峰值、多厂商/后端与 renderer 端到端集成仍未验收。

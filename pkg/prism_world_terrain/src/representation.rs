@@ -147,7 +147,18 @@ impl RepresentationSpec {
         }
     }
 
-    /// Returns a deterministic work and byte estimate for a tile-local sample count.
+    /// Returns deterministic work and packed output bytes for an XY sample footprint.
+    ///
+    /// `sample_count` counts covered XY grid points, not volume samples. Voxel and
+    /// SDF footprints rebuild complete Z columns; their depth is applied here to
+    /// both work and bytes. Heightfield samples occupy two bytes, voxel samples
+    /// use the layout's component width, and Q16.16 SDF samples occupy four bytes.
+    /// There is no brick padding, header, compression, or GPU alignment in this
+    /// packed data contract. One output sample costs `tile.level() + 1` abstract
+    /// work units; this is a scheduling weight, not a wall-clock prediction.
+    ///
+    /// Returns [`RepresentationError::CostOverflow`] if any count, byte, or work
+    /// multiplication exceeds `u64`; it never saturates a budget estimate.
     pub fn estimate_work(
         self,
         tile: TileKey,
@@ -156,21 +167,23 @@ impl RepresentationSpec {
         let level_factor = u64::from(tile.level())
             .checked_add(1)
             .ok_or(RepresentationError::CostOverflow)?;
-        let work_multiplier = match self {
-            Self::Heightfield(spec) => u64::from(spec.samples_per_edge().max(2)),
+        let depth = match self {
+            Self::Heightfield(_) => 1,
             Self::Voxel(spec) => u64::from(spec.layout().dimensions()[2]),
             Self::Sdf(spec) => u64::from(spec.dimensions()[2]),
         };
-        let work_units = sample_count
-            .checked_mul(work_multiplier)
-            .and_then(|value| value.checked_mul(level_factor))
+        let output_samples = sample_count
+            .checked_mul(depth)
+            .ok_or(RepresentationError::CostOverflow)?;
+        let work_units = output_samples
+            .checked_mul(level_factor)
             .ok_or(RepresentationError::CostOverflow)?;
         let bytes_per_sample = match self {
             Self::Heightfield(_) => 2,
-            Self::Voxel(_) => 2,
+            Self::Voxel(spec) => spec.layout().format().byte_width() as u64,
             Self::Sdf(_) => 4,
         };
-        let bytes = sample_count
+        let bytes = output_samples
             .checked_mul(bytes_per_sample)
             .ok_or(RepresentationError::CostOverflow)?;
         Ok(RepresentationWork { work_units, bytes })
@@ -193,30 +206,61 @@ pub struct RepresentationChoice {
     pub source: RepresentationSpec,
     /// Target representation requested by the consumer.
     pub target: RepresentationSpec,
-    /// Whether the choice requires resampling or only a same-format rebake.
+    /// Whether the complete source and target specifications differ.
+    ///
+    /// Resolution, scale, component format, and brick-layout changes all require
+    /// conversion, even within one family. This flag describes required work,
+    /// not a guarantee that a particular source-to-target converter exists.
     pub conversion_required: bool,
 }
 
 impl RepresentationChoice {
-    /// Validates and creates a source-to-target choice.
+    /// Creates a source-to-target choice from validated representation specs.
     pub const fn new(source: RepresentationSpec, target: RepresentationSpec) -> Self {
         Self {
             source,
             target,
-            conversion_required: !same_kind(source.kind(), target.kind()),
+            conversion_required: !same_spec(source, target),
         }
     }
 }
 
-const fn same_kind(left: RepresentationKind, right: RepresentationKind) -> bool {
-    matches!(
-        (left, right),
-        (
-            RepresentationKind::Heightfield,
-            RepresentationKind::Heightfield
-        ) | (RepresentationKind::Voxel, RepresentationKind::Voxel)
-            | (RepresentationKind::Sdf, RepresentationKind::Sdf)
-    )
+const fn same_spec(left: RepresentationSpec, right: RepresentationSpec) -> bool {
+    match (left, right) {
+        (RepresentationSpec::Heightfield(left), RepresentationSpec::Heightfield(right)) => {
+            left.samples_per_edge == right.samples_per_edge
+                && left.height_scale_mm == right.height_scale_mm
+        }
+        (RepresentationSpec::Voxel(left), RepresentationSpec::Voxel(right)) => {
+            let left = left.layout();
+            let right = right.layout();
+            same_dimensions(left.dimensions(), right.dimensions())
+                && left.brick_size() == right.brick_size()
+                && matches!(
+                    (left.format(), right.format()),
+                    (
+                        VoxelComponentFormat::SignedDistanceQ8_8,
+                        VoxelComponentFormat::SignedDistanceQ8_8
+                    ) | (
+                        VoxelComponentFormat::DensityU16,
+                        VoxelComponentFormat::DensityU16
+                    ) | (
+                        VoxelComponentFormat::MaterialIdU16,
+                        VoxelComponentFormat::MaterialIdU16
+                    )
+                )
+        }
+        (RepresentationSpec::Sdf(left), RepresentationSpec::Sdf(right)) => {
+            same_dimensions(left.dimensions, right.dimensions)
+                && left.brick_size == right.brick_size
+                && left.distance_scale_mm == right.distance_scale_mm
+        }
+        _ => false,
+    }
+}
+
+const fn same_dimensions(left: [u32; 3], right: [u32; 3]) -> bool {
+    left[0] == right[0] && left[1] == right[1] && left[2] == right[2]
 }
 
 /// Deterministic selector for choosing among heightfield, voxel, and SDF data.
@@ -318,21 +362,19 @@ mod tests {
                 .kind(),
             RepresentationKind::Sdf
         );
-        assert_eq!(
+        assert!(
             RepresentationChoice::new(
                 RepresentationSpec::Heightfield(heightfield),
                 RepresentationSpec::Sdf(sdf)
             )
-            .conversion_required,
-            true
+            .conversion_required
         );
-        assert_eq!(
-            RepresentationChoice::new(
+        assert!(
+            !RepresentationChoice::new(
                 RepresentationSpec::Voxel(voxel),
                 RepresentationSpec::Voxel(voxel)
             )
-            .conversion_required,
-            false
+            .conversion_required
         );
     }
 
@@ -349,6 +391,135 @@ mod tests {
         assert!(
             spec.estimate_work(high, 64).unwrap().work_units
                 > spec.estimate_work(low, 64).unwrap().work_units
+        );
+        assert_eq!(spec.estimate_work(low, 64).unwrap().bytes, 128);
+        assert_eq!(spec.estimate_work(high, 64).unwrap().bytes, 128);
+    }
+
+    #[test]
+    fn conversion_compares_every_field_not_only_the_family() {
+        let heightfield = RepresentationSpec::Heightfield(HeightfieldSpec::new(33, 1).unwrap());
+        for different in [
+            RepresentationSpec::Heightfield(HeightfieldSpec::new(65, 1).unwrap()),
+            RepresentationSpec::Heightfield(HeightfieldSpec::new(33, 2).unwrap()),
+        ] {
+            assert!(RepresentationChoice::new(heightfield, different).conversion_required);
+        }
+
+        let density = VoxelComponentFormat::DensityU16;
+        let voxel = RepresentationSpec::Voxel(VoxelSpec::new([8, 9, 10], 2, density).unwrap());
+        for (dimensions, brick, format) in [
+            ([9, 9, 10], 2, density),
+            ([8, 10, 10], 2, density),
+            ([8, 9, 11], 2, density),
+            ([8, 9, 10], 4, density),
+            ([8, 9, 10], 2, VoxelComponentFormat::SignedDistanceQ8_8),
+            ([8, 9, 10], 2, VoxelComponentFormat::MaterialIdU16),
+        ] {
+            let different =
+                RepresentationSpec::Voxel(VoxelSpec::new(dimensions, brick, format).unwrap());
+            assert!(RepresentationChoice::new(voxel, different).conversion_required);
+        }
+
+        let sdf = RepresentationSpec::Sdf(SdfSpec::new([8, 9, 10], 2, 1).unwrap());
+        for (dimensions, brick, scale) in [
+            ([9, 9, 10], 2, 1),
+            ([8, 10, 10], 2, 1),
+            ([8, 9, 11], 2, 1),
+            ([8, 9, 10], 4, 1),
+            ([8, 9, 10], 2, 2),
+        ] {
+            let different =
+                RepresentationSpec::Sdf(SdfSpec::new(dimensions, brick, scale).unwrap());
+            assert!(RepresentationChoice::new(sdf, different).conversion_required);
+        }
+
+        for source in [heightfield, voxel, sdf] {
+            for target in [heightfield, voxel, sdf] {
+                assert_eq!(
+                    RepresentationChoice::new(source, target).conversion_required,
+                    source != target
+                );
+            }
+        }
+        for format in [
+            density,
+            VoxelComponentFormat::SignedDistanceQ8_8,
+            VoxelComponentFormat::MaterialIdU16,
+        ] {
+            let spec = RepresentationSpec::Voxel(VoxelSpec::new([8, 9, 10], 2, format).unwrap());
+            assert!(!RepresentationChoice::new(spec, spec).conversion_required);
+        }
+    }
+
+    #[test]
+    fn full_volume_cost_includes_depth_exactly_once() {
+        let tile = TileKey::root(CubeFace::NegativeZ);
+        let dimensions = [7, 5, 3];
+        let xy_count = u64::from(dimensions[0]) * u64::from(dimensions[1]);
+        for format in [
+            VoxelComponentFormat::DensityU16,
+            VoxelComponentFormat::SignedDistanceQ8_8,
+            VoxelComponentFormat::MaterialIdU16,
+        ] {
+            let spec = VoxelSpec::new(dimensions, 2, format).unwrap();
+            let work = RepresentationSpec::Voxel(spec)
+                .estimate_work(tile, xy_count)
+                .unwrap();
+            assert_eq!(work.work_units, 105);
+            assert_eq!(
+                work.bytes,
+                spec.layout().expected_byte_len().unwrap() as u64
+            );
+        }
+        let sdf = RepresentationSpec::Sdf(SdfSpec::new(dimensions, 2, 1).unwrap());
+        assert_eq!(
+            sdf.estimate_work(tile, xy_count).unwrap(),
+            RepresentationWork {
+                work_units: 105,
+                bytes: 420
+            }
+        );
+        assert_eq!(
+            sdf.estimate_work(tile, 0).unwrap(),
+            RepresentationWork {
+                work_units: 0,
+                bytes: 0
+            }
+        );
+    }
+
+    #[test]
+    fn cost_overflow_is_explicit_for_samples_bytes_and_level_weight() {
+        let root = TileKey::root(CubeFace::PositiveX);
+        let leaf = TileKey::new(CubeFace::NegativeY, crate::MAX_TILE_LEVEL, 0, 0).unwrap();
+        let volume = RepresentationSpec::Sdf(SdfSpec::new([1, 1, 3], 1, 1).unwrap());
+        let scalar = RepresentationSpec::Sdf(SdfSpec::new([1, 1, 1], 1, 1).unwrap());
+        let heightfield = RepresentationSpec::Heightfield(HeightfieldSpec::new(2, 1).unwrap());
+        // Depth expansion overflows before either work weighting or encoding.
+        assert_eq!(
+            volume.estimate_work(root, u64::MAX / 3 + 1),
+            Err(RepresentationError::CostOverflow)
+        );
+        // Sample count is representable; the packed output byte count is not.
+        assert_eq!(
+            scalar.estimate_work(root, u64::MAX / 4 + 1),
+            Err(RepresentationError::CostOverflow)
+        );
+        assert_eq!(
+            heightfield.estimate_work(root, u64::MAX / 2 + 1),
+            Err(RepresentationError::CostOverflow)
+        );
+        // Bytes fit but the maximum-level scheduling weight does not.
+        assert_eq!(
+            scalar.estimate_work(leaf, u64::MAX / 31 + 1),
+            Err(RepresentationError::CostOverflow)
+        );
+        let xy_count = u64::from(u32::MAX) * u64::from(u32::MAX);
+        let huge = RepresentationSpec::Sdf(SdfSpec::new([u32::MAX; 3], 1, 1).unwrap());
+        assert_eq!(
+            huge.estimate_work(root, xy_count),
+            Err(RepresentationError::CostOverflow)
         );
     }
 

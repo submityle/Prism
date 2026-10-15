@@ -18,4 +18,5 @@ wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", 
 [dev-dependencies]
 bytemuck = { version = "1.5", features = ["derive"] }
 futures-lite = "2"
+prism_world_terrain = { path = "../prism_world_terrain", features = ["mesh"] }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12"] }

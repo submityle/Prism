@@ -1,0 +1,83 @@
+//! Release-mode CPU regression distributions, not a GPU or product-scale claim.
+
+use std::hint::black_box;
+use std::time::{Duration, Instant};
+
+use prism_world_terrain::{
+    BakeLimits, CubeFace, DirtyRegion, HeightSample, HeightSampleValue, HeightSampler,
+    HeightfieldMesh, HeightfieldSpec, HeightfieldTile, TileKey,
+};
+
+struct Plane(i64);
+
+impl HeightSampler for Plane {
+    type Error = core::convert::Infallible;
+
+    fn sample_height(&self, point: HeightSample) -> Result<HeightSampleValue, Self::Error> {
+        Ok(HeightSampleValue::from_millimetres(
+            self.0 + i64::from(point.u_q16()) * 2,
+        ))
+    }
+}
+
+fn report(name: &str, mut samples: Vec<Duration>) {
+    samples.sort_unstable();
+    let quantile = |p: usize| samples[(samples.len() * p).div_ceil(100) - 1].as_nanos();
+    println!(
+        "{name} samples={} p50_ns={} p95_ns={} p99_ns={}",
+        samples.len(),
+        quantile(50),
+        quantile(95),
+        quantile(99),
+    );
+}
+
+fn main() {
+    const RUNS: usize = 128;
+    const WARMUP: usize = 16;
+    for side in [129_u32, 257] {
+        let tile = TileKey::root(CubeFace::PositiveY);
+        let spec = HeightfieldSpec::new(side, 10).unwrap();
+        let vertices = side as usize * side as usize;
+        let payload = vertices * 32 + (side as usize - 1).pow(2) * 24;
+        let limits = BakeLimits {
+            max_samples: vertices,
+            max_bytes: payload,
+        };
+        let mut bakes = Vec::with_capacity(RUNS);
+        let mut meshes = Vec::with_capacity(RUNS);
+        let mut local_bakes = Vec::with_capacity(RUNS);
+        let mut updates = Vec::with_capacity(RUNS);
+        for iteration in 0..WARMUP + RUNS {
+            let start = Instant::now();
+            let mut field =
+                HeightfieldTile::bake(tile, spec, black_box(&Plane(0)), limits).unwrap();
+            let bake_time = start.elapsed();
+            let start = Instant::now();
+            let mut mesh =
+                HeightfieldMesh::build(black_box(&field), [128.0, 128.0], limits).unwrap();
+            let mesh_time = start.elapsed();
+            let region = DirtyRegion::new(tile, 32_767, 32_767, 32_768, 32_768).unwrap();
+            let start = Instant::now();
+            let change = field
+                .rebake(region, black_box(&Plane(1_000)), limits)
+                .unwrap();
+            let local_bake_time = start.elapsed();
+            let start = Instant::now();
+            let bounds = mesh.update(black_box(&field), change).unwrap();
+            let update_time = start.elapsed();
+            black_box((&mesh, bounds));
+            if iteration >= WARMUP {
+                bakes.push(bake_time);
+                meshes.push(mesh_time);
+                local_bakes.push(local_bake_time);
+                updates.push(update_time);
+            }
+        }
+        println!("grid={side}x{side} height_bytes={} mesh_payload_bytes={payload} local_samples=9 local_vertices=25 warmup={WARMUP}", vertices * 2);
+        report("height_bake", bakes);
+        report("mesh_build", meshes);
+        report("height_local_rebake", local_bakes);
+        report("mesh_local_update", updates);
+    }
+}

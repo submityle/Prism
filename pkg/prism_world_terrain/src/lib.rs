@@ -1,14 +1,15 @@
 //! Engine-neutral terrain and planetary core primitives for Prism.
 //!
-//! The crate owns geometry and data contracts only. It has no engine, renderer,
-//! allocator, operating-system, or GPU dependency and is usable on
-//! `no_std` targets with `alloc`.
+//! The default build owns geometry/data contracts and executable baking kernels,
+//! with no engine, operating-system, or GPU dependency (`no_std + alloc`). The
+//! optional `mesh` adapter produces native Prism mesh assets at the render edge.
 #![no_std]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 extern crate alloc;
 
+mod bake;
 mod coordinates;
 mod cube_sphere;
 mod height;
@@ -19,6 +20,7 @@ mod stream_adapter;
 mod tile;
 mod voxel;
 
+pub use bake::{BakeError, BakeLimits, GridChange, HeightfieldMesh, HeightfieldTile, SampleBounds};
 pub use coordinates::{
     CoordinateError, FixedPoint3, I64Point, VerifiedLocalPoint, FIXED_FRAC_BITS, FIXED_SCALE,
 };
