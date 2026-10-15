@@ -926,15 +926,7 @@ mod automatic_recovery {
         devices: Mutex<Vec<Arc<Probe>>>,
     }
 
-    impl Controls {
-        fn current(&self) -> Arc<Probe> {
-            self.devices.lock().unwrap().last().unwrap().clone()
-        }
-
-        fn lose(&self) {
-            *self.current().loss.lock().unwrap() = Some(rhi::DeviceLostReason::Destroyed);
-        }
-
+    impl Probe {
         fn read_buffer(&self, id: rhi::BufferId, len: usize) -> Vec<u8> {
             let buffers = self.buffers.lock().unwrap();
             buffers
@@ -945,8 +937,43 @@ mod automatic_recovery {
                 .to_vec()
         }
 
-        fn buffer_count(&self) -> usize {
-            self.buffers.lock().unwrap().len()
+        fn write_count(&self, id: rhi::BufferId) -> usize {
+            self.writes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(buffer, _, _)| *buffer == id)
+                .count()
+        }
+
+        fn live_column_count(&self) -> usize {
+            let buffers = self.buffers.lock().unwrap();
+            self.columns
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|id| buffers.contains_key(id))
+                .count()
+        }
+
+        fn column_write_count(&self) -> usize {
+            let columns = self.columns.lock().unwrap().clone();
+            self.writes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(buffer, _, _)| columns.contains(buffer))
+                .count()
+        }
+    }
+
+    impl Controls {
+        fn current(&self) -> Arc<Probe> {
+            self.devices.lock().unwrap().last().unwrap().clone()
+        }
+
+        fn lose(&self) {
+            *self.current().loss.lock().unwrap() = Some(rhi::DeviceLostReason::Destroyed);
         }
     }
 
@@ -1180,17 +1207,34 @@ mod automatic_recovery {
         app.update();
         assert_eq!(report::<Row>(&app).unwrap().uploaded_bytes, 35 * 512);
         let old = controls.current();
-        assert_eq!(old.writes.lock().unwrap().len(), 2);
         let retained = render(&app)
             .resource::<EcsResidentColumns<Row>>()
             .column(archetype)
             .unwrap();
+        let old_buffer = retained.buffer_id().unwrap();
+        assert_eq!(old.write_count(old_buffer), 2);
+        let initial = expected(app.world(), archetype);
+        assert_eq!(retained.live_bytes() as usize, initial.len());
+        assert_eq!(old.read_buffer(old_buffer, initial.len()), initial);
         app.update();
         assert_eq!(report::<Row>(&app), Ok(EcsColumnUploadStats::default()));
-        assert_eq!(old.writes.lock().unwrap().len(), 2);
+        assert_eq!(old.write_count(old_buffer), 2);
 
         app.world_mut().increment_change_tick();
         *app.world_mut().get_mut::<Row>(entities[31]).unwrap() = row(909);
+        app.update();
+        assert_eq!(
+            report::<Row>(&app),
+            Ok(EcsColumnUploadStats {
+                allocations: 0,
+                upload_calls: 1,
+                uploaded_bytes: 32 * 512,
+            })
+        );
+        let dirty = expected(app.world(), archetype);
+        assert_eq!(old.read_buffer(old_buffer, dirty.len()), dirty);
+        assert_eq!(old.write_count(old_buffer), 3);
+
         controls.lose();
         controls.fail_device.store(true, Ordering::SeqCst);
         app.update();
@@ -1225,7 +1269,7 @@ mod automatic_recovery {
                 .get_resource::<EcsResidentColumns<Compact>>()
                 .is_none());
             assert_eq!(generation(&app), 0);
-            assert_eq!(old.writes.lock().unwrap().len(), 2);
+            assert_eq!(old.write_count(old_buffer), 3);
             assert_eq!(old.columns.lock().unwrap().len(), 1);
         }
 
@@ -1235,7 +1279,10 @@ mod automatic_recovery {
         assert_eq!(report::<Row>(&app), Err(EcsColumnUploadError::DeviceLost));
         let replacement = controls.current();
         assert!(!Arc::ptr_eq(&old, &replacement));
-        assert!(replacement.writes.lock().unwrap().is_empty());
+        assert!(
+            replacement.column_write_count() == 0,
+            "replacement column writes before healthy extraction"
+        );
         app.update(); // First extraction on the healthy replacement fully initializes.
         assert_eq!(
             report::<Row>(&app),
@@ -1261,13 +1308,18 @@ mod automatic_recovery {
             copied += bytes.len();
         }
         assert_eq!(copied, expected.len());
+        assert_eq!(
+            replacement.read_buffer(buffer, expected.len()),
+            expected,
+            "replacement software device contains the complete resident column"
+        );
         let write_count = writes.len();
         drop(writes);
         app.update();
         assert_eq!(report::<Row>(&app), Ok(EcsColumnUploadStats::default()));
         assert_eq!(report::<Compact>(&app), Ok(EcsColumnUploadStats::default()));
         assert_eq!(replacement.writes.lock().unwrap().len(), write_count);
-        assert_eq!(old.writes.lock().unwrap().len(), 2);
+        assert_eq!(old.write_count(old_buffer), 3);
 
         // Loss on an otherwise clean frame also removes all bindable cache rows.
         controls.lose();
@@ -1283,5 +1335,11 @@ mod automatic_recovery {
         assert_eq!(generation(&app), 2);
         assert_eq!(report::<Row>(&app).unwrap().uploaded_bytes, 35 * 512);
         assert_eq!(report::<Compact>(&app).unwrap().uploaded_bytes, 12);
+        drop(retained);
+        assert_eq!(
+            old.live_column_count(),
+            0,
+            "old device resident-column buffers are fully released"
+        );
     }
 }
