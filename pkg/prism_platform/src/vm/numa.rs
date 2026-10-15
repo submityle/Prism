@@ -190,7 +190,7 @@ impl Drop for NumaAllocation {
             // heap allocation created above.
             #[expect(unsafe_code, reason = "deallocate the owned fallback NUMA storage")]
             unsafe {
-                alloc::dealloc(ptr.as_ptr(), layout)
+                alloc::dealloc(ptr.as_ptr(), layout);
             };
         }
     }

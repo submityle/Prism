@@ -54,6 +54,33 @@ def protocol():
     )
 
 
+def portable_fixture(kind="portable-measurement"):
+    complexity = [
+        {"metric": "query_match_cold_calls", "world_units": 3, "changed_units": 0, "value": 3},
+        {"metric": "query_match_warm_calls", "world_units": 3, "changed_units": 0, "value": 0},
+        {"metric": "query_match_new_archetype_calls", "world_units": 4, "changed_units": 1, "value": 1},
+        {"metric": "dirty_chunks_output", "world_units": 256, "changed_units": 3, "value": 1},
+        {"metric": "dirty_chunks_output", "world_units": 16384, "changed_units": 3, "value": 3},
+        {"metric": "changed_scan_rows", "world_units": 256, "changed_units": 3, "value": 3},
+        {"metric": "changed_scan_rows", "world_units": 16384, "changed_units": 3, "value": 3},
+    ]
+    timing = {
+        metric: [100 + index for index in range(gate.PORTABLE_SAMPLES)]
+        for metric in gate.PORTABLE_TIMING_METRICS
+    }
+    data = {
+        "schema": 1,
+        "kind": kind,
+        "contract": gate.portable_contract(),
+        "complexity": complexity,
+        "timing": timing,
+    }
+    data["contract_sha256"] = gate.digest(data["contract"])
+    if kind == "portable-baseline":
+        data["complexity"] = [dict(record, tolerance_abs=0) for record in complexity]
+    return data
+
+
 class ComparisonTests(unittest.TestCase):
     def test_equal_and_improved_measurements_pass(self):
         candidate = fixture()
@@ -155,6 +182,40 @@ class ProtocolTests(unittest.TestCase):
             with self.subTest(case=index), self.assertRaises(gate.GateError):
                 gate.parse_samples(output)
 
+    def test_portable_parser_accepts_libtest_prefix_and_requires_all_records(self):
+        source = portable_fixture()
+        output = "running 1 test\n" + gate.PORTABLE_COMPLEXITY_PREFIX + json.dumps(source["complexity"][0])
+        for record in source["complexity"][1:]:
+            output += "\n" + gate.PORTABLE_COMPLEXITY_PREFIX + json.dumps(record)
+        for metric, values in source["timing"].items():
+            for sample, ns in enumerate(values):
+                output += "\n" + gate.PORTABLE_TIMING_PREFIX + json.dumps({
+                    "metric": metric,
+                    "sample": sample,
+                    "ns": ns,
+                    "units": gate.PORTABLE_TIMING_METRICS[metric],
+                })
+        parsed = gate.parse_portable_samples(output)
+        self.assertEqual(len(parsed["complexity"]), 7)
+        self.assertEqual(parsed["timing"]["changed_scan_16384"], list(range(100, 109)))
+
+    def test_portable_parser_rejects_missing_complexity_point(self):
+        source = portable_fixture()
+        output = "\n".join(
+            gate.PORTABLE_COMPLEXITY_PREFIX + json.dumps(record)
+            for record in source["complexity"][:-1]
+        )
+        for metric, values in source["timing"].items():
+            for sample, ns in enumerate(values):
+                output += "\n" + gate.PORTABLE_TIMING_PREFIX + json.dumps({
+                    "metric": metric,
+                    "sample": sample,
+                    "ns": ns,
+                    "units": gate.PORTABLE_TIMING_METRICS[metric],
+                })
+        with self.assertRaises(gate.GateError):
+            gate.parse_portable_samples(output)
+
 
 class PersistenceAndCliTests(unittest.TestCase):
     def setUp(self):
@@ -223,6 +284,36 @@ class PersistenceAndCliTests(unittest.TestCase):
                           "--max-regression-percent", "0", "--report", self.base)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(self.base.read_bytes(), before)
+
+    def test_portable_complexity_regression_is_blocking_and_timing_is_percentiled(self):
+        base = portable_fixture("portable-baseline")
+        candidate = portable_fixture()
+        candidate["complexity"][3]["value"] = 2
+        report = gate.compare_portable(base, candidate)
+        self.assertFalse(report["passed"])
+        dirty_256 = next(
+            row for row in report["complexity"]
+            if row["metric"] == "dirty_chunks_output" and row["world_units"] == 256
+        )
+        self.assertFalse(dirty_256["passed"])
+        self.assertEqual(report["timing"]["changed_scan_16384"]["p50_ns"], 104)
+        self.assertEqual(report["timing"]["changed_scan_16384"]["p95_ns"], 108)
+        self.assertEqual(report["timing"]["changed_scan_16384"]["p99_ns"], 108)
+
+    def test_portable_baseline_is_explicit_and_non_clobbering(self):
+        measurement = portable_fixture()
+        gate.record_portable_baseline(measurement, self.base)
+        saved = self.base.read_bytes()
+        with self.assertRaises(FileExistsError):
+            gate.record_portable_baseline(measurement, self.base)
+        self.assertEqual(self.base.read_bytes(), saved)
+
+    def test_portable_baseline_rejects_invalid_tolerance(self):
+        for tolerance in [-1, True, 1.5, "zero"]:
+            candidate = portable_fixture("portable-baseline")
+            candidate["complexity"][0]["tolerance_abs"] = tolerance
+            with self.subTest(tolerance=tolerance), self.assertRaises(gate.GateError):
+                gate.validate_portable(candidate, "portable-baseline")
 
     def test_no_acknowledgement_does_not_invoke_cargo(self):
         with patch.object(gate.subprocess, "run") as run, redirect_stderr(io.StringIO()):

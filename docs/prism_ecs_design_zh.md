@@ -52,9 +52,9 @@
 
 ## 1. 设计哲学与目标
 
-ECS 是整个 Prism 脱离 Bevy 工程的"命门"。迁移目标是把算法层与 ECS 对接层解耦，并保持近 Bevy 的使用体验；迁移不保证只需「改 import」，还要核对调度、生命周期、提取和回滚语义。当前 `prism_ui_ecs`、`prism_render_app` 与 `prism_scene` 已有原生 `prism_ecs` 链路，`prism_audio_bevy` 仍依赖 Bevy；不能把所有旧桥接层统称为已迁移或未迁移（见 §21/§22）。
+ECS 是整个 Prism 脱离 Bevy 工程的"命门"。迁移目标是把算法层与 ECS 对接层解耦，并保持近 Bevy 的使用体验；迁移不保证只需「改 import」，还要核对调度、生命周期、提取和回滚语义。当前 `prism_ui_ecs`、`prism_render_app`、`prism_scene` 与 `prism_audio_ecs` 已有原生 `prism_ecs` 链路；`prism_audio_bevy` 已收敛为仅重导出 `prism_audio_ecs` 的兼容 facade，不再维护第二套 Bevy 音频实现。仍不能把代码迁移完成等同于应用工作流和联合验收完成（见 §21/§22）。
 
-**一句话定位（目标）**：`prism_ecs` 是 Prism 的"权威仿真内核"——面向百万~千万级实体、每帧数千~数万结构变更与 GPU 驱动提取，追求增量路径成本随**变化量**增长、多核近线性扩展，并原生支撑大世界流送、确定性回滚网络、GPU 常驻。**这不是所有路径已达成的复杂度/吞吐保证**：全量查询仍处理匹配数据，脏块发现仍检查匹配表的全部 chunk，见 §7/§10/§17/§22。
+**一句话定位（目标）**：`prism_ecs` 是 Prism 的"权威仿真内核"——面向百万~千万级实体、每帧数千~数万结构变更与 GPU 驱动提取，追求增量路径成本随**变化量**增长、多核近线性扩展，并原生支撑大世界流送、确定性回滚网络、GPU 常驻。**这不是所有路径已达成的复杂度/吞吐保证**：全量查询仍处理匹配数据；Table chunk 的正常写入发现已具备变化源索引，但查询匹配与下游反应/上传仍有各自成本，见 §7/§10/§17/§22。
 
 四条总目标（按权重）：
 
@@ -205,7 +205,7 @@ Query<Relations<ChildOf>>                 // §11
 - **查询状态便捷访问**：`QueryState` 提供只读的 `contains`/`count`/`is_empty`/`for_each` 与可变对偶 `for_each_mut`（与 `Query` 系统参数同形），免去手写 `iter(world).count()` 之类；两者都走 `QueryIter::fold` 批量化快路径（§17.1）。`QueryIter::size_hint` 返回剩余行的**紧上界**（剩余原型行数之和，逐行门全通过时即精确），使 `collect`/`Vec` 一次定容。
 - **成对/组合迭代**：`QueryState::iter_combinations::<K>(world)` 产出匹配行的**无序 K 子集**（Bevy `iter_combinations` 的只读半边），按行序**字典序**、确定可重复；`K=2` 即宽相等/约束求解要的候选对，`K=1` 退化为普通迭代，`K=0` 或 `K>匹配数` 产出为空。限定 `D: ReadOnlyQueryData`——一次 yield 交出 K 个 item，若允许 `&mut` 项，同一实体可同时出现在两个存活组合里而自别名；成对写入请用另一查询或命令缓冲。匹配行收集复用普通迭代器的逐行门（门逻辑只有一份，经 `QueryIter::next_with_entity` 暴露），代价 `O(匹配行 + K·C(匹配行, K))`。
 - **系统 / raw 入口的 world 契约（补强）**：`System::validate_world` 钩子在 `System::run` **递增 world tick 之前**校验（并行执行器也在分配 change 窗口前校验），所以被拒绝的跨 world 调用不留副作用；为**不同 world 重新 `initialize`** 会重置 `last_run`，避免用旧世界的 tick 下界漏掉新世界的既有变更。所有 raw `*_from_ptr` 入口（含 `par_*_from_ptr`）的 safety 契约写明「world 必须是构造该 state 的 world」且迭代期间禁止并发结构修改（`World::restore`）。
-- **脏块访问器**（核心）：`QueryState::dirty_chunks(world, last_run, this_run)` 与系统参数面 `Query::dirty_chunks()`（自动用本 system 的 `(last_run, this_run]` 窗口）返回版本命中的 Table 行窗口，再在窗口内做精确筛选。**发现阶段仍扫描匹配表的全部 chunk 版本**（`query/dirty.rs`），不是仅遍历脏块的索引：固定访问列数下为 O(匹配 chunk 总数)，后续读取/上传才随脏窗口及其覆盖行数增长。粗窗口允许多报，不替代逐行过滤与 SparseSet 在场检查；写屏障/版本回绕不变量必须保持，不能用「粗层是超集」掩盖这些正确性要求。
+- **脏块访问器**（核心）：`QueryState::dirty_chunks(world, last_run, this_run)` 与系统参数面 `Query::dirty_chunks()`（自动用本 system 的 `(last_run, this_run]` 窗口）返回版本命中的 Table 行窗口，再在窗口内做精确筛选。`ChunkVersions` 的正常写入路径记录 tick→chunk 变化源，`ChangeLog` 按 tick 有序保存批次，观察窗口通过 B-tree range 直接定位相关批次；候选 chunk 用访问 epoch 去重并以固定机器字宽 radix sort 恢复行序。设保留批次数为 `B`、窗口内批次数为 `B_w`、窗口事件候选数为 `K`，存储发现为 **O(log B + B_w + K)**（两段回绕窗口仍为常数个 range）；不是旧的 O(匹配 chunk 总数)。但 `dirty_chunks` 仍需枚举匹配 archetype、访问列并合并多列候选，端到端不能简化为纯 O(变化量)。粗窗口允许多报，不替代逐行过滤与 SparseSet 在场检查；写屏障/版本回绕、detach/reuse generation 不变量必须保持，不能用「粗层是超集」掩盖这些正确性要求。rebuild/restore 或日志缺口可保守回退 interval-tree 扫描，因此本切片不宣称所有路径都严格 O(变化量)。
 - **SIMD 批量核 + chunk 切片迭代**（已落地）：`simd` feature 提供 `add_assign`/`scale_assign`/`axpy_assign`/`sum` 等列批量核（`core::arch` SSE2/NEON，标量路径作为 golden 对拍）。`QueryState::simd_iter::<K>(&world)` / `simd_iter_mut::<K>(&mut World)` 顺序产出**chunk 对齐的类型化列切片**（每片 ≤ K 行、尾片可短）——切片本身就是内核输入（组件列是 `f32` 时即 `&[f32]`），不需要再打包一层；`par_chunks`/`par_chunks_mut` 是同一机制的并行版（§8.3）。数据项须 `ColumnSliceData`、过滤器须 `ArchetypalFilter`，两者都在入口处**一次性断言**（稀疏数据/逐行过滤器明确 panic，不静默降级）；`ColumnSliceData`/`ArchetypalFilter` 与 `multi_thread` 解耦，顺序切片迭代在基础构建即可用。
 - **par_iter**：按 chunk 切分投递到 `prism_tasks`（见 §8），work-stealing 负载均衡。
 - **disjoint 查询与 `ParamSet`**：同 system 多个**不冲突**查询可共存，普通参数的访问冲突在初始化时拒绝。`system/param_set.rs` 已实现 0–12 元组及嵌套 `ParamSet`，支持 `ParamSet<(Query<&mut T>, Query<&T>)>` 的普通函数签名。`p0()`…`p11()` **独占借用整个 set**，惰性 fetch，返回项的 world/state 两个寿命都缩短到该次借用，禁止同时保留冲突项或经 consuming API 逃逸；成员内部仍须无冲突，对外及调度的静态访问集为**所有成员的并集**（即使未 fetch），deferred apply/discard 按元组顺序。derive `SystemParam` 的结构体成员描述符需显式 `'static`，不是活值借用。运行时回归见 `tests/param_set.rs`，同时访问/嵌套/寿命逃逸的拒绝用例为模块内 `compile_fail` doctest；本次未重跑。
@@ -274,7 +274,7 @@ fn spawn_bullets(mut cmd: Commands, q: Query<&Transform, With<Gun>>) {
 ## 10. 变更检测与反应式内核
 
 - **双层变更检测**：
-  - *chunk 版本号*（粗）：目标与已有快路径是先比对 chunk 版本，跳过干净块的行读取；**跳过 payload 不等于发现零成本**，仍需检查块头。普通查询各迭代入口的 skip/写屏障一致性另需回归验证。
+  - *chunk 版本号*（粗）：正常写入先通过 tick→chunk 变化源索引定位窗口内候选，再用 chunk 摘要/代际校验保持保守正确性；**跳过 payload 不等于端到端零成本**，仍需枚举匹配 archetype/访问列并合并候选，rebuild/restore/日志缺口还可回退 interval tree。普通查询各迭代入口的 skip/写屏障一致性另需回归验证。
   - *per-component tick*（细）：精确判定单实体是否在 `(last_run, this_run]` 内被写，支撑 `Added<T>`/`Changed<T>`。
   - 相等保护写：避免无谓 tick 推进（沿用 `prism_ui_ecs` 现有桥接思路，防 ECS→signal→ECS 往返震荡）。
 - **push 反应图**（Our Machinery Truth + SolidJS）：`reaction.rs` 已有去重、拓扑顺序的派生 DAG；`world_reactions.rs` 的 `reaction_source::<T>` / `add_reaction` 将组件变更批次绑定到 World，先收齐源批次再执行 dirty 子图，effect 写入下次 flush 才可见。panic 后保留未完成批次供重试，不回滚已发生的用户副作用。**当前是「源发现轮询 + 下游 push」**：`change_observers.rs` 在 flush 时通过 chunk/tick 查询收集源，不是每次组件写入都直接入全局事件队列，不能宣称端到端 O(变化量)。`prism_ui_ecs/src/schedule.rs` 已对接 signal：ECS→signal 消费观察批次，signal→ECS 仍逐绑定检查 signal、相等时不写 tick。完全消除源轮询及大绑定集发现成本仍是原目标，不因 DAG 已实现而视为完成。
@@ -415,7 +415,7 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 - **fiber 作业图**：重 system 内 chunk 子作业并行；减少同步开销与多核近线性是性能目标，不是所有工作负载的保证。
 - **内存**：原型预热**已落地**为 `World::prewarm::<B>(entities) -> ArchetypeId`——按 bundle（**含 required components**）解析/创建目标 archetype，并预留每个表列、实体列与 chunk 版本窗口的容量；**不生成实体、不跑 hook/observer/构造器**，因此可以在加载时预热预计 burst 的 bundle（有对应回归源码）。共享组件 bundle 会**明确 panic**：共享值参与 archetype 身份，单凭 bundle 类型不能解析。实体/原型空槽回收已有 free list + 空原型复用。**大页竞技场分配已有实现**（`vm` feature，`storage/arena.rs`）：`ChunkArena` 从 `prism_platform` VM 层预留页对齐 segment 并 bump 切块，支持时尝试大页/巨页，释放块复用；无相应后端时回退逐块全局分配。**NUMA 仍缺显式节点绑定及拓扑感知分配/调度契约**：当前代码不能保证 worker 本地页。OS 的 first-touch 行为依赖平台/内存策略，初始化线程、任务迁移与页迁移也会改变局部性；不能将「未绑定」描述成已实现 NUMA 就近或性能保证。
 - **GPU 常驻列直传**：脏块增量上传，省 CPU 打包。
-- **成本 ∝ 变化量（目标）**：已有脏块过滤与脏节点执行；源发现仍可能扫描匹配 chunk、观察注册项或绑定信号。须分别量测发现、精炼、执行与上传，不能把下游增量化等同于全链路零扫描。
+- **成本 ∝ 变化量（目标）**：Table chunk 的正常写入源发现已推进为 tick→chunk 索引，存储层窗口查询接近严格变化量；但匹配 archetype/访问列枚举、多列合并、观察注册项、绑定信号及下游执行/上传仍有独立成本。须分别量测发现、精炼、执行与上传，不能把这一切片等同于全链路零扫描。
 
 ### 17.1 实测（本机，release，2026-10）
 
@@ -443,7 +443,7 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 | 聚集（改前 1 万行） | 3.8–5.8 ms | **9.6–10.5 µs** | **390–550×** | 10,230（≈改动量） |
 | 散布（每 100 行改 1 行） | 3.0–3.7 ms | 21–71 µs | 43–142× | **1,000,000（每个 chunk 都脏）** |
 
-诚实结论：历史样本中的粗粒度遍历为**微秒级**，记录的比值最低约 43×，不构成「永远高于 40×」保证。发现阶段为 O(chunk 数) = O(N / rows_per_chunk)，与改动量无关；后续精炼还取决于**覆盖行数**：聚集时接近改动量，散布时可覆盖全世界。因此总成本包含全 chunk 头扫描，即便聚集样本也不能宣称严格仅 ∝ 变化量；后续 `Changed` 迭代优化还可能改变对照基线。
+诚实结论：历史样本中的粗粒度遍历为**微秒级**，记录的比值最低约 43×，不构成「永远高于 40×」保证；这些样本也早于当前变化源索引，不能当作本切片的验收。当前 Table chunk 正常写入的存储发现为 O(log B + B_w + K)，但 query 仍需匹配 archetype/访问列和多列合并，粗窗口精炼还取决于**覆盖行数**：聚集时接近改动量，散布时可覆盖全世界。因此总成本不能宣称端到端严格仅 ∝ 变化量；后续 `Changed` 迭代优化还可能改变对照基线。
 
 **SIMD 列批量核实测（`simd` feature，`query/simd.rs`，Neon 后端）**：把列核与「LLVM 已自动向量化的标量 `for` 循环」正面对比（`scale_simd_kernels_vs_scalar`，同一台 aarch64 机器，两种工作集各测 3 次取最快）：
 
@@ -474,7 +474,7 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 迁移路径：
 1. 提供 `prism_ecs::prelude` 与 bevy_ecs 近同名导出。
 2. 把 `prism_ui_ecs`（当前依赖 `bevy_ecs`）切到 `prism_ecs`，用其现有测试对拍验证。
-3. 渲染/音频对接层（`prism_render_scene/material/visibility`、旧 Bevy 桥接层、`prism_audio_bevy`）逐个切换，保留公共 API，内部换内核；旧桥接层已退役。
+3. 渲染/音频对接层（`prism_render_scene/material/visibility` 等）逐个核对，保留公共 API，内部换内核；其中 `prism_audio_ecs` 已使用原生 `prism_ecs`，`prism_audio_bevy` 仅保留为兼容 facade，不再维护第二套 Bevy 音频实现。音频 native ECS/facade 已完成局部验证：30 个 unit tests、22 个 integration tests、4 个 facade integration tests；完整应用工作流仍待联合验收。
 
 ---
 
@@ -520,7 +520,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 - **M3 作业**：fiber 作业图 + system 内 chunk 并行；多线程执行器。
 - **M4 关系/反应**：fragmenting relations + 传递/通配/层级；observer/hook；push 反应图；required components；prefab/`IsA`；blob。
 - **M5 规模/网络/GPU**：World Partition 流送 + 实体 LOD/休眠 + 64-bit 浮点原点；snapshot/delta + 确定性 + 回滚/预测；GPU 常驻列直传。
-- **M6 迁移/工具（完整目标保留）**：bevy_ecs 兼容 prelude；UI、渲染、场景、音频对接层迁移与对拍；ECS 检视器 + 火焰图 + 时间旅行。当前 `prism_ui_ecs`、`prism_render_app`、`prism_scene` 已使用原生 ECS，inspector/timetravel 有可选 `ecs` 接入；场景已有 materialize、嵌套实例、override replay 与 partition 接线，不能列作全未实现。**仍需完整应用/旧场景资产及编辑流程迁移验收、场景与音频联合工作流对拍**；`prism_audio_bevy/Cargo.toml` 仍直接依赖 `bevy_app/ecs/math/transform`，音频原生 ECS 前端迁移仍是实际缺口。
+- **M6 迁移/工具（完整目标保留）**：bevy_ecs 兼容 prelude；UI、渲染、场景、音频对接层迁移与对拍；ECS 检视器 + 火焰图 + 时间旅行。当前 `prism_ui_ecs`、`prism_render_app`、`prism_scene` 已使用原生 ECS，`prism_audio_bevy` 已改为重导出 `prism_audio_ecs` 的兼容 facade；inspector/timetravel 有可选 `ecs` 接入；场景已有 materialize、嵌套实例、override replay 与 partition 接线，不能列作全未实现。**仍需完整应用/旧场景资产及编辑流程迁移验收、场景与音频联合工作流对拍，以及音频资产导入/解码、播放头绑定和场景生命周期接线**。
 
 **基准即规格（验收目标）**：每里程碑须有正确性与受控性能基线，性能回归阻断合入；SIMD 逐值等价，确定性双跑哈希一致，并区分 chunk 发现总量与脏 payload 量。当前 `scale` 量具打印耗时不设墙钟阈值，不等于这些门槛已全部落实。核心价值仍集中在 **M2（chunk/脏块）+ M3（fiber）+ M5（流送/确定性网络/GPU 常驻）**；原目标不因标注边界而缩减。
 
@@ -529,7 +529,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 ## 22. 诚实边界与风险
 
 - **当前源码包含的机制（含未提交实现，不等于整章验收）**：物理单块 chunk / chunk-aware fetch / 四态存储 / ParamSet / 调度与作业图 / fragmenting relations / observer、hook 与反应图 / 快照回滚 / partition 与 LOD / 动态活值及布局迁移 / prefab 字段 override 与 V3 存档 / VM arena 均有实现入口。跨 crate 也已有 App 可选流水线与渲染提取、显式 policy 配置、transform observer 与 BVH/grid 消费、原生 UI 桥和场景物化，以及策略驱动的 ECS 网络回滚/帧哈希审计；不能再统一标为 PLANNED。各项安全契约与限制见对应章节，本次只核对源码，不报告编译/测试通过。
-- **尚未实现或未充分验收的关键范围**：脏块发现仍 O(匹配 chunk 总数)，push 仍轮询变更源，UI signal→ECS 仍检查绑定；transform 每次传播仍收集并排序层级边。M6 尚有音频原生 ECS 前端迁移及场景/旧资产/编辑工作流的完整对拍。NUMA 显式绑定与拓扑感知策略缺失。当前 checkout 的受控多核扩展、端到端 GPU 常驻/同步收益、跨平台浮点确定性及 P50/P95/P99 证据仍待补齐；历史量具输出不代替这些验收。
+- **尚未实现或未充分验收的关键范围**：Table chunk 正常写入的脏块源发现已不再是 O(匹配 chunk 总数)，但 query 的匹配/多列合并、rebuild/restore/日志缺口 fallback、push 的其他源轮询、UI signal→ECS 绑定检查仍未统一为严格变化量；transform 每次传播仍收集并排序层级边。M6 的音频 native ECS/facade 已有局部验证（`prism_audio_ecs`：30 个 unit tests、22 个 integration tests；`prism_audio_bevy` facade：4 个 facade integration tests），但完整应用场景、旧资产与编辑工作流仍需联合对拍。NUMA 显式绑定与拓扑感知策略缺失。当前 checkout 的受控多核扩展、端到端 GPU 常驻/同步收益、跨平台浮点确定性及 P50/P95/P99 证据仍待补齐；历史量具输出不代替这些验收。
 - **并行安全收口**：chunk 元数据并发访问、写屏障与版本回绕属于需集中验证的安全面；本文不因有脏块 API 就宣称其并发证明或本轮修复已通过。系统 panic 隔离亦不回滚已发生的普通写入/用户外部副作用，不能泛化为任意操作的事务回滚。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
@@ -662,4 +662,4 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 本章职责对齐已有真实跨 crate 消费，不能再概括成「仅 ECS 侧实现」：§24.1 tasks lane/预算，§24.2 transform 空间消费者与原生 UI 桥，§24.3 动态 ABI/反射桥/字段策略/V3 prefab 存档，§24.4 原生 App 网络回滚与有限窗口审计均见上述入口；§23.5 App/渲染流水线也已有源码。**这些包含当前未提交实现，未在本次编译或重跑，机制存在不等于所有 feature/平台/失败路径验收完成。**
 
-完整目标继续保留：脏块发现 O(全部匹配 chunk)、push 源轮询与 UI signal 扫描尚非严格变化量成本；关系边收集/排序仍有全量项；音频原生迁移和场景/旧资产/编辑流程联合验收仍待完成；显式 NUMA/拓扑策略缺失；受控性能回归门槛、真实 GPU 常驻/同步压测与跨平台浮点确定性证据仍不足。有限窗口/注册范围的哈希相等不能替代整个仿真链路正确性证明。本章仍用于固定职责与引用，而非将原范围缩减为现有机制清单。实现仅借鉴公开架构形态与经典数值，不引入 Unreal Engine / Unity 源码。
+完整目标继续保留：脏块的正常写入源发现已推进到 tick→chunk 索引，但 query 端到端、fallback、push 源轮询与 UI signal 扫描尚非统一的严格变化量成本；关系边收集/排序仍有全量项；音频代码迁移已完成，但资产导入/解码、播放头绑定、场景生命周期接线，以及场景/旧资产/编辑流程联合验收仍待完成；显式 NUMA/拓扑策略缺失；受控性能回归门槛、真实 GPU 常驻/同步压测与跨平台浮点确定性证据仍不足。有限窗口/注册范围的哈希相等不能替代整个仿真链路正确性证明。本章仍用于固定职责与引用，而非将原范围缩减为现有机制清单。实现仅借鉴公开架构形态与经典数值，不引入 Unreal Engine / Unity 源码。

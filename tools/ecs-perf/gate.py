@@ -63,6 +63,15 @@ PORTABLE_COMPLEXITY_METRICS = {
     "dirty_chunks_output": 2,
     "changed_scan_rows": 2,
 }
+PORTABLE_COMPLEXITY_POINTS = {
+    ("query_match_cold_calls", 3),
+    ("query_match_warm_calls", 3),
+    ("query_match_new_archetype_calls", 4),
+    ("dirty_chunks_output", 256),
+    ("dirty_chunks_output", 16384),
+    ("changed_scan_rows", 256),
+    ("changed_scan_rows", 16384),
+}
 PORTABLE_TIMING_METRICS = {
     "dirty_chunks_256": 256,
     "changed_scan_256": 256,
@@ -213,9 +222,9 @@ def parse_portable_samples(output):
     complexity = {}
     timing = {name: {} for name in PORTABLE_TIMING_METRICS}
     for line in output.splitlines():
-        if line.startswith(PORTABLE_COMPLEXITY_PREFIX):
+        if PORTABLE_COMPLEXITY_PREFIX in line:
             try:
-                record = json.loads(line[len(PORTABLE_COMPLEXITY_PREFIX):])
+                record = json.loads(line.split(PORTABLE_COMPLEXITY_PREFIX, 1)[1])
                 metric, world_units, changed_units, value = (
                     record[key] for key in ["metric", "world_units", "changed_units", "value"]
                 )
@@ -236,9 +245,9 @@ def parse_portable_samples(output):
                 "changed_units": changed_units,
                 "value": value,
             }
-        elif line.startswith(PORTABLE_TIMING_PREFIX):
+        elif PORTABLE_TIMING_PREFIX in line:
             try:
-                record = json.loads(line[len(PORTABLE_TIMING_PREFIX):])
+                record = json.loads(line.split(PORTABLE_TIMING_PREFIX, 1)[1])
                 metric, sample, ns, units = (
                     record[key] for key in ["metric", "sample", "ns", "units"]
                 )
@@ -253,9 +262,8 @@ def parse_portable_samples(output):
             if sample in timing[metric]:
                 raise GateError(f"duplicate portable timing sample: {metric}/{sample}")
             timing[metric][sample] = ns
-    expected_complexity = set(PORTABLE_COMPLEXITY_METRICS)
-    if {metric for metric, _ in complexity} != expected_complexity:
-        raise GateError("portable complexity metric set differs from the gate contract")
+    if set(complexity) != PORTABLE_COMPLEXITY_POINTS:
+        raise GateError("portable complexity point set differs from the gate contract")
     if any(len(values) != PORTABLE_SAMPLES for values in timing.values()):
         raise GateError("missing portable timing samples")
     return {
@@ -302,7 +310,12 @@ def validate_portable(data, kind):
                 type(record.get("changed_units")) is not int or record["changed_units"] < 0 or
                 type(record.get("value")) is not int or record["value"] < 0):
             raise GateError("invalid portable complexity fields")
+        if kind == "portable-baseline" and (
+                type(record.get("tolerance_abs")) is not int or record["tolerance_abs"] < 0):
+            raise GateError("invalid portable complexity tolerance")
         parsed_complexity[key] = record
+    if set(parsed_complexity) != PORTABLE_COMPLEXITY_POINTS:
+        raise GateError("portable complexity point set differs from the gate contract")
     timing = data.get("timing")
     if not isinstance(timing, dict) or set(timing) != set(PORTABLE_TIMING_METRICS):
         raise GateError("portable timing metric set differs from the gate contract")
@@ -381,7 +394,8 @@ def measure_portable(args):
     contract = portable_contract()
     command = [
         "cargo", "test", "--locked", "--offline", "--release", "--target-dir", str(target),
-        "-p", "prism_ecs", "--features", FEATURES, "--test", "scale", PORTABLE_TEST,
+        "--manifest-path", str(ROOT / "pkg/prism_ecs/Cargo.toml"), "-p", "prism_ecs",
+        "--features", FEATURES, "--test", "scale", PORTABLE_TEST,
         "--", "--exact", "--nocapture", "--test-threads=1",
     ]
     print("Running:", " ".join(command), flush=True)
@@ -531,7 +545,8 @@ def measure(args):
     }
     command = [
         "cargo", "test", "--locked", "--release", "--target-dir", str(target),
-        "-p", "prism_ecs", "--features", FEATURES, "--test", "scale", TEST,
+        "--manifest-path", str(ROOT / "pkg/prism_ecs/Cargo.toml"), "-p", "prism_ecs",
+        "--features", FEATURES, "--test", "scale", TEST,
         "--", "--exact", "--ignored", "--nocapture", "--test-threads=1",
     ]
     # Compile/test exit status is authoritative; partial sample output is never
@@ -571,6 +586,12 @@ def main(argv=None):
     portable.add_argument("--target-dir", required=True)
     portable.add_argument("--output", required=True)
     portable.add_argument("--report", required=True)
+    portable_measure = sub.add_parser(
+        "portable-measure",
+        help="run the offline portable benchmark and persist its measurement",
+    )
+    portable_measure.add_argument("--target-dir", required=True)
+    portable_measure.add_argument("--output", required=True)
     record_portable = sub.add_parser(
         "record-portable-baseline",
         help="explicitly persist a portable measurement as a complexity baseline",
@@ -601,6 +622,8 @@ def main(argv=None):
             write_json(args.report, report)
             print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
             return 0 if report["passed"] else 1
+        elif args.action == "portable-measure":
+            measure_portable(args)
         elif args.action == "record-portable-baseline":
             if Path(args.measurement).resolve() == Path(args.baseline).resolve():
                 raise GateError("baseline and measurement must be different files")

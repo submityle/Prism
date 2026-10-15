@@ -32,8 +32,24 @@ jobs:
       - name: Comparator rejects regressions and incompatible machines
         run: python3 -m unittest discover -s tools/ecs-perf -p 'test_*.py' -v
       - uses: ./.github/actions/install-rust
+      - name: Offline portable complexity and percentile gate
+        run: |
+          python3 tools/ecs-perf/gate.py portable \
+            --baseline tools/ecs-perf/portable-baseline.json \
+            --target-dir "$RUNNER_TEMP/prism-ecs-portable-target" \
+            --output "$RUNNER_TEMP/prism-ecs-portable-measurement.json" \
+            --report "$RUNNER_TEMP/prism-ecs-portable-report.json"
+      - name: Upload portable gate report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ecs-portable-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/prism-ecs-portable-measurement.json
+            ${{ runner.temp }}/prism-ecs-portable-report.json
       - name: Exact operation-count and dirty-output contracts (no timing assertions)
-        run: cargo test --locked -p prism_ecs --features multi_thread,simd --test scale perf_contract_ -- --test-threads=1
+        run: cargo test --locked --manifest-path pkg/prism_ecs/Cargo.toml -p prism_ecs --features multi_thread,simd --test scale perf_contract_ -- --test-threads=1
       - name: Query, dirty-chunk and SIMD correctness
         run: |
-          cargo test --locked -p prism_ecs --features multi_thread,simd --lib query::
+          cargo test --locked --manifest-path pkg/prism_ecs/Cargo.toml -p prism_ecs --features multi_thread,simd --lib query::

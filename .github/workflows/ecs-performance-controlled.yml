@@ -64,7 +64,8 @@ jobs:
       - name: Verify deterministic contracts before accepting any timings
         run: |
           cargo test --locked --release --target-dir "$ECS_PERF_TARGET_DIR" \
-            -p prism_ecs --features multi_thread,simd --test scale perf_contract_ -- --test-threads=1
+            --manifest-path pkg/prism_ecs/Cargo.toml -p prism_ecs --features multi_thread,simd \
+            --test scale perf_contract_ -- --test-threads=1
       - name: Collect real release-mode samples
         run: |
           python3 tools/ecs-perf/gate.py measure --controlled-machine \

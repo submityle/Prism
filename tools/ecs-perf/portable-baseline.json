@@ -1,0 +1,122 @@
+{
+  "complexity": [
+    {
+      "changed_units": 3,
+      "metric": "changed_scan_rows",
+      "tolerance_abs": 0,
+      "value": 3,
+      "world_units": 256
+    },
+    {
+      "changed_units": 3,
+      "metric": "changed_scan_rows",
+      "tolerance_abs": 0,
+      "value": 3,
+      "world_units": 16384
+    },
+    {
+      "changed_units": 3,
+      "metric": "dirty_chunks_output",
+      "tolerance_abs": 0,
+      "value": 1,
+      "world_units": 256
+    },
+    {
+      "changed_units": 3,
+      "metric": "dirty_chunks_output",
+      "tolerance_abs": 0,
+      "value": 3,
+      "world_units": 16384
+    },
+    {
+      "changed_units": 0,
+      "metric": "query_match_cold_calls",
+      "tolerance_abs": 0,
+      "value": 3,
+      "world_units": 3
+    },
+    {
+      "changed_units": 1,
+      "metric": "query_match_new_archetype_calls",
+      "tolerance_abs": 0,
+      "value": 1,
+      "world_units": 4
+    },
+    {
+      "changed_units": 0,
+      "metric": "query_match_warm_calls",
+      "tolerance_abs": 0,
+      "value": 0,
+      "world_units": 3
+    }
+  ],
+  "contract": {
+    "benchmark_sha256": "cbc2ba0a18a250568e85bf40d8451125ddfd030475e2bcdda915b386743e315c",
+    "complexity_metrics": {
+      "changed_scan_rows": 2,
+      "dirty_chunks_output": 2,
+      "query_match_cold_calls": 1,
+      "query_match_new_archetype_calls": 1,
+      "query_match_warm_calls": 1
+    },
+    "protocol": "PRISM_ECS_COMPLEXITY_V1",
+    "samples": 9,
+    "test": "perf_gate::portable_complexity_samples",
+    "timing_metrics": {
+      "changed_scan_16384": 16384,
+      "changed_scan_256": 256,
+      "dirty_chunks_16384": 16384,
+      "dirty_chunks_256": 256
+    },
+    "timing_protocol": "PRISM_ECS_TIMING_V1"
+  },
+  "contract_sha256": "86529e6eaf46c2cb5eb1977208f579d9bf55dcaf683f41d799a6afadeed1b1af",
+  "kind": "portable-baseline",
+  "schema": 1,
+  "timing": {
+    "changed_scan_16384": [
+      3041,
+      3041,
+      3000,
+      3041,
+      2958,
+      2917,
+      3042,
+      2959,
+      2917
+    ],
+    "changed_scan_256": [
+      250,
+      208,
+      209,
+      208,
+      209,
+      208,
+      209,
+      250,
+      208
+    ],
+    "dirty_chunks_16384": [
+      583,
+      500,
+      500,
+      458,
+      708,
+      459,
+      417,
+      4417,
+      667
+    ],
+    "dirty_chunks_256": [
+      208,
+      166,
+      167,
+      166,
+      125,
+      166,
+      166,
+      166,
+      166
+    ]
+  }
+}

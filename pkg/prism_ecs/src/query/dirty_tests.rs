@@ -169,6 +169,45 @@ fn no_writes_reports_no_dirty_chunks() {
 }
 
 #[test]
+fn empty_window_uses_only_the_root_summary() {
+    let mut w = World::new();
+    for i in 0..10 {
+        w.spawn(Big::new(i));
+    }
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+
+    let state = w.query::<&Big>();
+    let dirty = state.dirty_chunks(&w, last_run, this_run);
+    assert!(dirty.is_empty());
+}
+
+#[test]
+fn dirty_chunks_follow_an_archetype_migration() {
+    #[derive(Clone, Copy)]
+    struct Tag;
+    impl Component for Tag {}
+
+    let mut w = World::new();
+    let entity = w.spawn(Big::new(1));
+    advance_frame(&mut w);
+    let state = w.query::<&Big>();
+
+    let last_run = w.change_tick();
+    w.increment_change_tick();
+    assert!(w.insert(entity, Tag));
+    w.get_mut::<Big>(entity).unwrap().tag = 99;
+    let this_run = w.change_tick();
+
+    let location = w.entities().location(entity).unwrap();
+    let dirty = state.dirty_chunks(&w, last_run, this_run);
+    assert_eq!(dirty.len(), 1, "migrated row should have one dirty window");
+    assert_eq!(dirty[0].archetype, location.archetype_id);
+    assert_eq!((dirty[0].start, dirty[0].end), (0, 1));
+}
+
+#[test]
 fn write_set_component_marks_chunk_dirty_for_read_query() {
     // A query reading A over an archetype {A, B}: writing B must still flag the
     // chunk, because dirty_chunks unions the query's read AND write sets, and B
