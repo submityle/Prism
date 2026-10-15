@@ -173,8 +173,8 @@ impl AudioBuffer {
     /// Fills every active sample with silence.
     #[inline]
     pub fn clear(&mut self) {
-        for v in &mut self.data {
-            *v = 0.0;
+        for channel in 0..self.channels {
+            self.channel_mut(channel).fill(0.0);
         }
     }
 
@@ -211,6 +211,10 @@ impl AudioBuffer {
             return;
         }
 
+        for channel in 0..self.channels {
+            self.channel_mut(channel).fill(0.0);
+        }
+
         if other.channels == 1 {
             let src = other.channel(0);
             for dst_channel in 0..self.channels {
@@ -222,12 +226,12 @@ impl AudioBuffer {
         if self.channels == 1 {
             let dst = self.channel_mut(0);
             let divisor = other.channels as Sample;
-            for frame in 0..frames {
+            for (frame, sample) in dst.iter_mut().take(frames).enumerate() {
                 let mut sum = 0.0;
                 for src_channel in 0..other.channels {
                     sum += other.channel(src_channel)[frame];
                 }
-                dst[frame] = sum / divisor;
+                *sample = sum / divisor;
             }
             return;
         }
@@ -236,8 +240,6 @@ impl AudioBuffer {
             let dst = self.channel_mut(dst_channel);
             if let Some(src) = (dst_channel < other.channels).then(|| other.channel(dst_channel)) {
                 dst[..frames].copy_from_slice(&src[..frames]);
-            } else {
-                dst[..frames].fill(0.0);
             }
         }
     }
@@ -327,5 +329,36 @@ mod tests {
         mono.copy_from_converted(&stereo);
 
         assert_eq!(mono.channel(0), &[0.5, 0.0, 0.5]);
+    }
+
+    #[test]
+    fn converted_copy_clears_destination_tail_without_touching_capacity_tail() {
+        let mut mono = AudioBuffer::new(ChannelLayout::Mono, 2);
+        mono.channel_mut(0).copy_from_slice(&[0.25, -0.5]);
+
+        let mut stereo = AudioBuffer::new(ChannelLayout::Stereo, 4);
+        stereo.set_active_frames(4);
+        for channel in 0..stereo.channels() {
+            stereo.channel_mut(channel).fill(9.0);
+        }
+        stereo.set_active_frames(2);
+        stereo.copy_from_converted(&mono);
+
+        assert_eq!(stereo.channel(0), &[0.25, -0.5]);
+        assert_eq!(stereo.channel(1), &[0.25, -0.5]);
+        stereo.set_active_frames(4);
+        assert_eq!(stereo.channel(0), &[0.25, -0.5, 9.0, 9.0]);
+        assert_eq!(stereo.channel(1), &[0.25, -0.5, 9.0, 9.0]);
+    }
+
+    #[test]
+    fn clear_only_writes_the_active_window() {
+        let mut buffer = AudioBuffer::new(ChannelLayout::Mono, 4);
+        buffer.channel_mut(0).fill(7.0);
+        buffer.set_active_frames(2);
+        buffer.clear();
+        assert_eq!(buffer.channel(0), &[0.0, 0.0]);
+        buffer.set_active_frames(4);
+        assert_eq!(buffer.channel(0), &[0.0, 0.0, 7.0, 7.0]);
     }
 }

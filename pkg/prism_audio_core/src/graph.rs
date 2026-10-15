@@ -529,6 +529,15 @@ mod tests {
         }
     }
 
+    struct StereoDc(Sample, Sample);
+    impl AudioNode for StereoDc {
+        fn process(&mut self, _ctx: &RenderContext, io: &mut ProcessIo<'_>) {
+            let out = io.output(0);
+            out.channel_mut(0).fill(self.0);
+            out.channel_mut(1).fill(self.1);
+        }
+    }
+
     /// A unity pass-through that copies input 0 to output 0.
     struct Passthrough;
     impl AudioNode for Passthrough {
@@ -606,5 +615,21 @@ mod tests {
         );
         let err = g.connect(PortRef::new(a, 0), PortRef::new(b, 0));
         assert!(matches!(err, Err(GraphError::LayoutMismatch { .. })));
+    }
+
+    #[test]
+    fn master_output_converts_layout_only_at_the_delivery_boundary() {
+        let mut g = AudioGraph::new(48_000, 8);
+        let source = g.add_node(
+            Box::new(StereoDc(0.25, 0.75)),
+            vec![],
+            vec![ChannelLayout::Stereo],
+        );
+        g.set_master(PortRef::new(source, 0)).unwrap();
+        g.compile().unwrap();
+
+        let mut out = AudioBuffer::new(ChannelLayout::Mono, 8);
+        g.process(8, 0, &mut out);
+        assert_eq!(out.channel(0)[0], 0.5);
     }
 }

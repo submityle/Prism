@@ -33,6 +33,8 @@ pub enum DeviceError {
     UnsupportedChannelCount(usize),
     /// The device stream uses a sample format the backend cannot drive.
     UnsupportedSampleFormat(String),
+    /// A live output backend was requested with no callback scratch frames.
+    InvalidBlockFrames,
     /// A WAV encode/decode or file-system error occurred in the offline sink.
     Wav(String),
 }
@@ -54,6 +56,9 @@ impl fmt::Display for DeviceError {
             }
             DeviceError::UnsupportedSampleFormat(fmt) => {
                 write!(f, "unsupported device sample format: {fmt}")
+            }
+            DeviceError::InvalidBlockFrames => {
+                f.write_str("audio device block frame count must be non-zero")
             }
             DeviceError::Wav(msg) => write!(f, "WAV file error: {msg}"),
         }

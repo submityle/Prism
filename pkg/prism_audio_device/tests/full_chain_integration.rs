@@ -485,6 +485,7 @@ fn device_error_is_thread_safe_and_formats_each_variant() {
         },
         DeviceError::UnsupportedChannelCount(3),
         DeviceError::UnsupportedSampleFormat("u24".into()),
+        DeviceError::InvalidBlockFrames,
         DeviceError::Wav("truncated header".into()),
     ];
 

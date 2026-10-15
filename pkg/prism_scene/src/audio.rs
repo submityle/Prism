@@ -85,4 +85,20 @@ mod tests {
         assert!(source.looping);
         assert_eq!(source.gain(), 0.25);
     }
+
+    #[test]
+    fn gain_sanitizes_negative_and_non_finite_authored_values() {
+        assert_eq!(AudioSourceNode::new(1, 2).with_gain(-1.0).gain(), 0.0);
+        assert_eq!(AudioSourceNode::new(1, 2).with_gain(f32::NAN).gain(), 0.0);
+        assert_eq!(
+            AudioSourceNode::new(1, 2).with_gain(f32::INFINITY).gain(),
+            0.0
+        );
+        assert_eq!(
+            AudioSourceNode::new(1, 2)
+                .with_gain(f32::NEG_INFINITY)
+                .gain(),
+            0.0
+        );
+    }
 }

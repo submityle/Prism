@@ -175,6 +175,10 @@ pub fn open_default_output(
     runtime: AudioRuntime,
     block_frames: usize,
 ) -> Result<CpalOutput, DeviceError> {
+    if block_frames == 0 {
+        return Err(DeviceError::InvalidBlockFrames);
+    }
+    let block_frames = block_frames.min(runtime.max_block());
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -324,9 +328,10 @@ where
     let chunk_samples = (scratch.len() / channels) * channels;
     debug_assert!(chunk_samples >= channels, "scratch smaller than one frame");
 
+    let whole_samples = data.len() - data.len() % channels;
     let mut offset = 0;
-    while offset < data.len() {
-        let take = (data.len() - offset).min(chunk_samples);
+    while offset < whole_samples {
+        let take = (whole_samples - offset).min(chunk_samples);
         let staged = &mut scratch[..take];
         renderer.render_interleaved(staged);
         for (dst, &src) in data[offset..offset + take].iter_mut().zip(staged.iter()) {
@@ -334,12 +339,16 @@ where
         }
         offset += take;
     }
+    for sample in &mut data[whole_samples..] {
+        *sample = T::from_sample(0.0);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{fill_output, layout_for_channels};
+    use super::{fill_output, layout_for_channels, open_default_output};
     use crate::render::BlockRenderer;
+    use crate::DeviceError;
     use cpal::Sample;
     use prism_audio_core::buffer::ChannelLayout;
     use prism_audio_rt::{runtime, AudioRuntimeConfig};
@@ -395,5 +404,27 @@ mod tests {
         let mut data = [1.0f32; 13];
         fill_output(&mut renderer, &mut scratch, &mut data);
         assert!(data.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn fill_output_silences_a_partial_trailing_frame() {
+        let (rt, _client, _collector) = runtime(AudioRuntimeConfig {
+            max_block: 16,
+            ..AudioRuntimeConfig::default()
+        });
+        let mut renderer = BlockRenderer::new(rt, ChannelLayout::Stereo, 8);
+        let mut scratch = [0.0f32; 8 * 2];
+        let mut data = [1.0f32; 5];
+        fill_output(&mut renderer, &mut scratch, &mut data);
+        assert!(data.iter().all(|&sample| sample == 0.0));
+    }
+
+    #[test]
+    fn opening_with_zero_block_frames_is_rejected_before_device_access() {
+        let (runtime, _client, _collector) = runtime(AudioRuntimeConfig::default());
+        assert!(matches!(
+            open_default_output(runtime, 0),
+            Err(DeviceError::InvalidBlockFrames)
+        ));
     }
 }

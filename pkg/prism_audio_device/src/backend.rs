@@ -81,7 +81,13 @@ impl DeviceRecovery {
     /// Applies an observed event and returns the resulting state.
     pub fn observe(&mut self, event: DeviceEvent) -> DeviceState {
         match event {
-            DeviceEvent::Started | DeviceEvent::Reconnected => {
+            DeviceEvent::Started => {
+                if self.state != DeviceState::Failed {
+                    self.state = DeviceState::Running;
+                    self.attempts = 0;
+                }
+            }
+            DeviceEvent::Reconnected => {
                 self.state = DeviceState::Running;
                 self.attempts = 0;
             }
@@ -91,15 +97,19 @@ impl DeviceRecovery {
                 }
             }
             DeviceEvent::Disconnected => {
-                self.state = DeviceState::Recovering;
+                if self.state != DeviceState::Failed {
+                    self.state = DeviceState::Recovering;
+                }
             }
             DeviceEvent::RecoveryFailed => {
-                self.attempts = self.attempts.saturating_add(1);
-                self.state = if self.attempts < self.max_attempts.max(1) {
-                    DeviceState::Recovering
-                } else {
-                    DeviceState::Failed
-                };
+                if self.state != DeviceState::Failed {
+                    self.attempts = self.attempts.saturating_add(1);
+                    self.state = if self.attempts < self.max_attempts.max(1) {
+                        DeviceState::Recovering
+                    } else {
+                        DeviceState::Failed
+                    };
+                }
             }
         }
         self.state
@@ -168,13 +178,16 @@ impl AudioDeviceBackend for FakeAudioBackend {
     }
 
     fn start(&mut self) -> Result<(), Self::Error> {
+        if self.state() == DeviceState::Failed {
+            return Err(String::from("fake device recovery budget exhausted"));
+        }
         self.started = true;
         self.recovery.observe(DeviceEvent::Started);
         Ok(())
     }
 
     fn callback(&mut self, output: &mut [Sample]) -> Result<(), Self::Error> {
-        if !self.started || self.state() == DeviceState::Failed {
+        if !self.started || !matches!(self.state(), DeviceState::Running | DeviceState::Degraded) {
             return Err(String::from("fake device is not running"));
         }
         self.renderer.render_interleaved(output);
@@ -184,15 +197,21 @@ impl AudioDeviceBackend for FakeAudioBackend {
     fn poll_event(&mut self) -> Option<DeviceEvent> {
         let event = self.events.pop_front()?;
         self.recovery.observe(event);
-        if matches!(event, DeviceEvent::Disconnected) {
-            self.started = false;
+        match event {
+            DeviceEvent::Started | DeviceEvent::Reconnected => self.started = true,
+            DeviceEvent::Disconnected => self.started = false,
+            DeviceEvent::Underrun { .. } | DeviceEvent::RecoveryFailed => {}
         }
         Some(event)
     }
 
     fn recover(&mut self) -> Result<(), Self::Error> {
-        if self.recovery.state() == DeviceState::Failed {
-            return Err(String::from("fake recovery budget exhausted"));
+        match self.recovery.state() {
+            DeviceState::Failed => {
+                return Err(String::from("fake recovery budget exhausted"));
+            }
+            DeviceState::Recovering => {}
+            _ => return Err(String::from("fake device is not awaiting recovery")),
         }
         self.started = true;
         self.recovery.recovered();
@@ -242,5 +261,43 @@ mod tests {
         assert_eq!(recovery.state(), DeviceState::Recovering);
         recovery.observe(DeviceEvent::RecoveryFailed);
         assert_eq!(recovery.state(), DeviceState::Failed);
+    }
+
+    #[test]
+    fn recovery_cannot_be_started_from_an_active_device() {
+        let mut backend = fake();
+        backend.start().unwrap();
+        assert!(backend.recover().is_err());
+        assert_eq!(backend.state(), DeviceState::Running);
+    }
+
+    #[test]
+    fn reconnect_event_restores_callback_delivery() {
+        let mut backend = fake();
+        backend.start().unwrap();
+        backend.inject(DeviceEvent::Disconnected);
+        assert_eq!(backend.poll_event(), Some(DeviceEvent::Disconnected));
+        let mut output = [0.0; 16];
+        assert!(backend.callback(&mut output).is_err());
+
+        backend.inject(DeviceEvent::Reconnected);
+        assert_eq!(backend.poll_event(), Some(DeviceEvent::Reconnected));
+        backend.callback(&mut output).unwrap();
+        assert_eq!(backend.state(), DeviceState::Running);
+    }
+
+    #[test]
+    fn failed_backend_cannot_bypass_the_recovery_budget_with_start() {
+        let mut backend = fake();
+        backend.start().unwrap();
+        backend.inject(DeviceEvent::Disconnected);
+        backend.poll_event();
+        backend.inject(DeviceEvent::RecoveryFailed);
+        backend.poll_event();
+        backend.inject(DeviceEvent::RecoveryFailed);
+        backend.poll_event();
+        assert_eq!(backend.state(), DeviceState::Failed);
+        assert!(backend.start().is_err());
+        assert!(backend.callback(&mut [0.0; 16]).is_err());
     }
 }

@@ -685,6 +685,26 @@ mod tests {
     }
 
     #[test]
+    fn typed_audio_source_materializes_only_the_scene_descriptor() {
+        let plan = plan(&[0], &[]);
+        let source = AudioSourceNode::new(7, 11)
+            .with_playing(false)
+            .with_looping(true)
+            .with_gain(0.25);
+        let mut world = World::new();
+        let spawned = spawn_typed_plan(
+            &mut world,
+            &plan,
+            TypedSpawnPlan::new().with_audio_source(LocalEntityId::new(0), source),
+        )
+        .unwrap();
+        let entity = spawned.resolve(LocalEntityId::new(0)).unwrap();
+
+        assert_eq!(world.get::<AudioSourceNode>(entity), Some(&source));
+        assert_eq!(world.get::<SceneInstance>(entity), None);
+    }
+
+    #[test]
     fn typed_constructor_can_remap_a_later_local() {
         let plan = plan(&[0, 1], &[]);
         let mut world = World::new();
