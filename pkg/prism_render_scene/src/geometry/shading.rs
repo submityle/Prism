@@ -106,10 +106,16 @@ pub fn build_shading_geometry(
             _padding: 0,
         })
         .collect();
-    let indices: Vec<usize> = mesh.indices().map_or_else(
-        || (0..positions.len()).collect(),
-        |indices| indices.iter().collect(),
-    );
+    let indices: Vec<usize> = match mesh.indices() {
+        None => (0..positions.len()).collect(),
+        Some(indices) => indices
+            .to_u32()
+            .into_iter()
+            .map(|index| {
+                usize::try_from(index).map_err(|_| ShadingGeometryBuildError::InvalidIndex)
+            })
+            .collect::<Result<_, _>>()?,
+    };
     let primitives = triangle_indices(mesh.primitive_topology(), &indices)?
         .into_iter()
         .map(|[a, b, c]| {
