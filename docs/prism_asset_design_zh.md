@@ -691,7 +691,7 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 
 `feature = "hot_reload"`，编辑器/迭代核心。
 
-> **当前实现边界**：已有 watcher 事件/去抖模型、`Arc<AssetServer>::watch` 托管后台消费入口和由调用方驱动的批次应用入口；锁外异步 reload 已有 resident、无 label 根资产的窄切片，且同步候选 staging 的 promotion/label 生命周期回归已覆盖，但 labeled revision 的异步 staging、完整依赖装配和更大规模交错验证仍未完成。Unix `FsSource` 已使用目录 fd 相对打开与 `O_NOFOLLOW` 消除 metadata→open 的 TOCTOU 窗口；Windows reparse-point 防护及非 Unix 等价安全打开语义仍待实现。
+> **当前实现边界**：已有 watcher 事件/去抖模型、`Arc<AssetServer>::watch` 托管后台消费入口和由调用方驱动的批次应用入口；锁外异步 reload 已有限支持 resident 根资产的 labeled revision staging，但 root/labeled dependencies 必须已 resident/`Loaded`，且重复 label、类型变化、cycle、非 resident 新依赖和更大规模交错验证仍受边界约束。同步候选 staging 的 promotion/label 生命周期回归已覆盖。Unix `FsSource` 已使用目录 fd 相对打开与 `O_NOFOLLOW` 消除 metadata→open 的 TOCTOU 窗口；Windows reparse-point 防护及非 Unix 等价安全打开语义仍待实现。
 
 - **变更侦测**：`AssetSource::watch` 接平台 FS 事件（inotify/FSEvents/ReadDirectoryChangesW，经 `prism_platform` 隔离），去抖后产出「路径 X 变更」。
 - **失效传播**：路径 → `StableGuid` → `AssetIndex`，经 §8.1 依赖图**反向遍历** dependents，把该资产及其所有传递依赖者标 `stale`。例：`tex.png` 改 → 用它的 `material` stale → 用该材质的 `scene` 的受影响部分 stale。
