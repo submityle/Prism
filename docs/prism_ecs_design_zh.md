@@ -277,6 +277,7 @@ fn spawn_bullets(mut cmd: Commands, q: Query<&Transform, With<Gun>>) {
 - **双层变更检测**：
   - *chunk 版本号*（粗）：正常写入先通过 tick→chunk 变化源索引定位窗口内候选，再用 chunk 摘要/代际校验保持保守正确性；**跳过 payload 不等于端到端零成本**，仍需枚举匹配 archetype/访问列并合并候选，rebuild/restore/日志缺口还可回退 interval tree。普通查询各迭代入口的 skip/写屏障一致性另需回归验证。
   - *per-component tick*（细）：精确判定单实体是否在 `(last_run, this_run]` 内被写，支撑 `Added<T>`/`Changed<T>`。
+  - *restore 日志边界*：snapshot restore 会推进 change-index epoch、清空旧批次，并将已注册 change observer 的 pending batch 与 cursor 重置到恢复后的 tick 基线；恢复前时间线的变更不会重放，而恢复后同 tick 的首次写入仍可被观察。该边界由 restore + observer 回归测试覆盖。
   - 相等保护写：避免无谓 tick 推进（沿用 `prism_ui_ecs` 现有桥接思路，防 ECS→signal→ECS 往返震荡）。
 - **push 反应图**（Our Machinery Truth + SolidJS）：`reaction.rs` 已有去重、拓扑顺序的派生 DAG；`world_reactions.rs` 的 `reaction_source::<T>` / `add_reaction` 将组件变更批次绑定到 World，先收齐源批次再执行 dirty 子图，effect 写入下次 flush 才可见。panic 后保留未完成批次供重试，不回滚已发生的用户副作用。**当前是「源发现轮询 + 下游 push」**：`change_observers.rs` 在 flush 时通过 chunk/tick 查询收集源，不是每次组件写入都直接入全局事件队列，不能宣称端到端 O(变化量)。`prism_ui_ecs/src/schedule.rs` 已对接 signal：ECS→signal 消费观察批次，signal→ECS 仍逐绑定检查 signal、相等时不写 tick。完全消除源轮询及大绑定集发现成本仍是原目标，不因 DAG 已实现而视为完成。
 
@@ -540,7 +541,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 ## 22. 诚实边界与风险
 
 - **当前源码包含的机制（含未提交实现，不等于整章验收）**：物理单块 chunk / chunk-aware fetch / 四态存储 / ParamSet / 调度与作业图 / fragmenting relations / observer、hook 与反应图 / 快照回滚 / partition 与 LOD / 动态活值及布局迁移 / prefab 字段 override 与 V3 存档 / VM arena 均有实现入口。跨 crate 也已有 App 可选流水线与渲染提取、显式 policy 配置、transform observer 与 BVH/grid 消费、原生 UI 桥和场景物化，以及策略驱动的 ECS 网络回滚/帧哈希审计；不能再统一标为 PLANNED。各项安全契约与限制见对应章节，本次只核对源码，不报告编译/测试通过。
-- **尚未实现或未充分验收的关键范围**：Table chunk 正常写入的脏块源发现已不再是 O(匹配 chunk 总数)，并已补上 SparseSet 变化实体到当前 archetype 行窗口的 fallback；query 的匹配/多列合并、rebuild/restore/日志缺口 fallback、push 的其他源轮询、UI signal→ECS 绑定检查仍未统一为严格变化量。当前 change observer 已有按组件/实体/tick 的写入索引，覆盖 `Mut<T>`、spawn 和 insert，并以实体 tick 复核作为安全 fallback；但完整结构变更矩阵、restore 后长期日志回收和端到端量具仍需继续验收。transform 每次传播仍收集并排序关系边，本任务未修改 `pkg/prism_transform`，因此不能声称该部分已完成。M6 的音频 native ECS/facade 已有局部验证（`prism_audio_ecs`：30 个 unit tests、22 个 integration tests；`prism_audio_bevy` facade：4 个 facade integration tests），但完整应用场景、旧资产与编辑工作流仍需联合对拍。NUMA 显式绑定与拓扑感知策略缺失。当前 checkout 的受控多核扩展、端到端 GPU 常驻/同步收益、跨平台浮点确定性及 P50/P95/P99 证据仍待补齐；历史量具输出不代替这些验收。
+- **尚未实现或未充分验收的关键范围**：Table chunk 正常写入的脏块源发现已不再是 O(匹配 chunk 总数)，并已补上 SparseSet 变化实体到当前 archetype 行窗口的 fallback；query 的匹配/多列合并、日志缺口 fallback、push 的其他源轮询、UI signal→ECS 绑定检查仍未统一为严格变化量。当前 change observer 已有按组件/实体/tick 的写入索引，覆盖 `Mut<T>`、spawn 和 insert，并以实体 tick 复核作为安全 fallback；本切片已闭环 snapshot restore 后的 change-index epoch、pending batch 丢弃及 observer cursor 重基线，恢复前时间线不会重放，恢复后同 tick 的首次写入仍可见；完整结构变更矩阵与端到端量具仍需继续验收。transform 每次传播仍收集并排序关系边，本任务未修改 `pkg/prism_transform`，因此不能声称该部分已完成。M6 的音频 native ECS/facade 已有局部验证（`prism_audio_ecs`：30 个 unit tests、22 个 integration tests；`prism_audio_bevy` facade：4 个 facade integration tests），但完整应用场景、旧资产与编辑工作流仍需联合对拍。NUMA 显式绑定与拓扑感知策略缺失。当前 checkout 的受控多核扩展、端到端 GPU 常驻/同步收益、跨平台浮点确定性及 P50/P95/P99 证据仍待补齐；历史量具输出不代替这些验收。
 - **并行安全收口**：chunk 元数据并发访问、写屏障与版本回绕属于需集中验证的安全面；本文不因有脏块 API 就宣称其并发证明或本轮修复已通过。系统 panic 隔离亦不回滚已发生的普通写入/用户外部副作用，不能泛化为任意操作的事务回滚。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
