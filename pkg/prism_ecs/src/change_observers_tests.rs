@@ -352,6 +352,38 @@ fn structural_spawn_and_insert_are_indexed_observer_sources() {
 }
 
 #[test]
+fn restore_discards_abandoned_change_log_and_keeps_post_restore_writes_visible() {
+    let mut world = World::new();
+    world.register_snapshot_component::<Health>();
+    world.insert_resource(Log::default());
+    let entity = world.spawn(Health(1));
+    world.observe_changed::<Health, _>(record(0));
+    let snapshot = world.snapshot();
+
+    // This event belongs to the abandoned timeline. It is indexed, but is
+    // deliberately left unflushed before the restore.
+    next_frame(&mut world);
+    world.get_mut::<Health>(entity).unwrap().0 = 2;
+    world.restore(&snapshot);
+    assert_eq!(world.get::<Health>(entity), Some(&Health(1)));
+    assert_eq!(world.flush_changed_observers(), 0);
+    assert!(world.resource::<Log>().0.is_empty());
+
+    // The snapshot's exact tick is preserved. A write immediately after the
+    // restore must nevertheless be delivered, rather than being hidden by an
+    // observer baseline equal to that tick.
+    world.get_mut::<Health>(entity).unwrap().0 = 3;
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(
+        world.resource::<Log>().0,
+        alloc::vec![Delivery {
+            label: 0,
+            changed: alloc::vec![entity],
+        }]
+    );
+}
+
+#[test]
 fn an_observer_can_remove_itself_and_recursive_flush_does_not_reenter() {
     struct OwnObserver(crate::observer::ObserverId);
     impl Resource for OwnObserver {}
