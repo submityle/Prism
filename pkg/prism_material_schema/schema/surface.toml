@@ -1,19 +1,14 @@
 # Prism PCM self-describing surface schema — the single declarative source of
 # truth for the über-BSDF parameter layout (design doc §17.5).
 #
-# Today the field layout, bit masks, specialization keys, defaults and valid
-# ranges are hand-written in six places (Rust `surface.rs`/`record.rs`, the WESL
-# `material_unpack`/`classification`/`sample` twins, the CPU golden in
-# `prism_render_shading`, the doc field tables §4.4, and the compliance enum
-# §4.5). This file reverse-declares that hidden contract so a single codegen can
-# later emit all six and byte-parity becomes a constructive result (§17.5.3)
-# rather than a test-maintained invariant.
+# The schema owns the field layout, bit masks, defaults and valid ranges. S2
+# codegen emits the committed Rust layout facts and WESL unpack twin from this
+# declaration; parity gates cover the remaining typed CPU/GPU behavior.
 #
-# Landing stages (doc §17.5.8): S1 declares and parity-checks this schema
-# against the hand-written layout; S2 (current) makes it a generator — the WESL
-# `material_unpack` twin and the Rust `surface_layout` constants are emitted
-# from this file by `prism-material-codegen`, and `codegen_freshness` tests fail
-# on any drift. Byte parity vs `surface.rs` is still guarded by the S1 gate.
+# Landing stages (doc §17.5.8): S1 declared and parity-checked this schema
+# against the typed layout; S2 makes it the generator — the WESL
+# `material_unpack` twin and Rust `surface_layout` facts are emitted from this
+# file by `prism-material-codegen`, and `codegen_freshness` fails on drift.
 
 schema_version = 2
 # Tracks `MATERIAL_ABI_VERSION`. v5 introduced the expanded OpenPBR clearcoat

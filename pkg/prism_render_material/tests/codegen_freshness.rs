@@ -98,6 +98,34 @@ fn lobe_mask_derived_layout_is_generated() {
 }
 
 #[test]
+fn generated_layout_exports_schema_versions_and_field_metadata() {
+    let schema = surface_schema();
+    assert_eq!(
+        prism_render_material::SURFACE_SCHEMA_VERSION,
+        schema.schema_version
+    );
+    assert_eq!(
+        prism_render_material::SURFACE_ABI_VERSION,
+        schema.abi_version
+    );
+
+    let fresh = emit_rust_layout(&schema);
+    for generated_fact in [
+        "pub const SURFACE_SCHEMA_VERSION: u32 = 2;",
+        "pub const SURFACE_ABI_VERSION: u32 = 8;",
+        "pub mask_bits: u32,",
+        "pub pack_slot: u32,",
+        "pub words: u32,",
+        "pub bit_region: &'static str,",
+    ] {
+        assert!(
+            fresh.contains(generated_fact),
+            "generated layout missing `{generated_fact}`"
+        );
+    }
+}
+
+#[test]
 fn rust_layout_keeps_singleton_tables_rustfmt_stable() {
     let fresh = emit_rust_layout(&surface_schema());
     let singleton_start = fresh

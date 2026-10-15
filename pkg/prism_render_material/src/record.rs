@@ -6,19 +6,6 @@ use core::ops::{BitOr, BitOrAssign};
 use prism_render_architecture::abi::GenerationalHandle;
 pub use prism_render_architecture::render_fabric::RenderDomain;
 
-/// Material ABI version. Bumped to 8 when the header gained an explicit
-/// render-domain word alongside the five-word
-/// dense material execution binding (plan, response program, package and the
-/// full 64-bit permutation index). The binding is a table identity, never a
-/// hash or a truncated specialization surrogate.
-///
-/// The earlier v5-only layout change was the first version in which the
-/// `clearcoat` lobe grew to carry the `OpenPBR` `coat_ior` / `coat_color` fields
-/// (design doc §4.4 / P1-f), so a v4 reader can no longer decode the packed
-/// block. The remaining v5 header/classification work (§8, P1-b/P1-h) lands on
-/// top of this marker rather than re-issuing it.
-pub const MATERIAL_ABI_VERSION: u32 = 8;
-
 /// Sentinel for every unbound material-execution word.
 pub const MATERIAL_EXECUTION_BINDING_SENTINEL: u32 = u32::MAX;
 

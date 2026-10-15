@@ -76,7 +76,7 @@ pub use record::{
     inactive_material_header, DynamicChannels, GpuMaterialHeader, GpuMaterialTexture,
     GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags, MaterialRecord,
     MaterialRenderClass, RenderDomain, FALLBACK_MATERIAL_HANDLE, ILLUMINATION_BLEND_SENTINEL,
-    ILLUMINATION_BLEND_UNORM_MAX, MATERIAL_ABI_VERSION, NO_VIRTUAL_TEXTURE, PORTABLE_TEXTURE_ATLAS,
+    ILLUMINATION_BLEND_UNORM_MAX, NO_VIRTUAL_TEXTURE, PORTABLE_TEXTURE_ATLAS,
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};
@@ -94,11 +94,13 @@ pub use surface::{
     GpuTransmissionLobe, LobeMask, LobeRegion, SurfaceParameterBlock, SurfaceUnpackError,
     SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
 };
+pub use surface_layout::SURFACE_ABI_VERSION as MATERIAL_ABI_VERSION;
 pub use surface_layout::{
     CacheAuxLayout, ChannelLayout, IdentityExtensionLayout, LobeLayout, ResponseProgramLayout,
-    SurfaceFieldLayout, SURFACE_CACHE_AUX, SURFACE_CHANNELS, SURFACE_FIELDS,
+    SurfaceFieldLayout, SURFACE_ABI_VERSION, SURFACE_CACHE_AUX, SURFACE_CHANNELS, SURFACE_FIELDS,
     SURFACE_IDENTITY_EXTENSIONS, SURFACE_LOBES, SURFACE_LOBE_CLOSURES, SURFACE_LOBE_COUNT,
     SURFACE_LOBE_WORDS_BY_SLOT, SURFACE_MAX_WORDS, SURFACE_RESPONSE_PROGRAMS,
+    SURFACE_SCHEMA_VERSION,
 };
 pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};
 pub use texture_blend::{

@@ -11,12 +11,11 @@
 //! editing all six, and any drift is a silent CPU/GPU parity or compliance bug.
 //!
 //! This crate holds the declarative schema and the deterministic, pure layout
-//! derivation that a future codegen (stages S2–S4) will consume to emit all six
-//! products. In the current landing stage **S1** (§17.5.8) the schema is only
-//! *declared and parity-checked* against the hand-written layout — nothing is
-//! generated yet. The S1 acceptance gate lives in `prism_render_material` and
-//! asserts, byte-for-byte, that the schema-derived layout equals the authored
-//! layout in `surface.rs` for every lobe subset.
+//! derivation consumed by the S2 codegen. The generator emits the committed
+//! Rust layout facts and WESL unpack twin; freshness gates keep those products
+//! byte-identical to regeneration. The S1 acceptance gate remains in
+//! `prism_render_material` and asserts, byte-for-byte, that the schema-derived
+//! layout equals the authored typed surface image for every lobe subset.
 //!
 //! # Design boundary (§17.5.5)
 //!

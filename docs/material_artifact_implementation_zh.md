@@ -28,3 +28,9 @@ schema 的十个瓣均声明作者闭包实现：Emission、ClearCoat、Conducto
 运行时分类不再读取瓣实现关系表。既有三个闭包派发分支保持原行为；完整实现关系不会把 emission、thin film、glint 等修改项错误扩成互斥运行桶。性能上没有新增运行时分配、字符串匹配或查表；扩展实现只需更新 schema 与真正的作者枚举，生成物 freshness 与编译门禁同时约束一致性。
 
 2026-10-15 当前复验中，`cargo test -p prism_render_material --offline` 为 870 项库测试、8 项 codegen freshness、2 项 MaterialHeader ABI、7 项 PCM parity、7 项 schema parity、28 项 shading-plan 测试全部通过；`prism_render_shading` 为 3381 passed / 0 failed / 6 ignored。`surface_layout.rs` 与 `material_unpack.wesl` 已由 `prism-material-codegen write` 重新生成并通过 freshness 门禁。本切片不据此报告 GPU 测量结果。
+
+## 2026-10-15：Surface ABI 派生布局与动态通道 freshness/parity
+
+ABI 版本、lobe 位值、字段相对槽位/字数/位区均由 `surface.toml` 经 codegen 输出；`record.rs` 不再维护第二份 `MATERIAL_ABI_VERSION` 数值，公开兼容名称由生成的 `SURFACE_ABI_VERSION` 提供。`schema_parity` 直接对拍生成表与 schema 元数据，移除了按常量名称手写位值匹配表；`material_header_abi` 额外校验 schema `header_word` 与 Rust/WESL 的 `dynamic_*` 顺序一致。
+
+本切片没有伪造任何 GPU/RHI 行为，也没有修改水体、render_fabric、VT 或 `docs/refactoring-dev/`。

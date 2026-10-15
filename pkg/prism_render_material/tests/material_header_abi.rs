@@ -128,6 +128,46 @@ fn every_wesl_material_header_mirrors_the_rust_struct_exactly() {
 }
 
 #[test]
+fn dynamic_channel_header_words_follow_schema_order() {
+    let rust = rust_fields(include_str!("../src/record.rs"));
+    let expected = prism_render_material::SURFACE_CHANNELS
+        .iter()
+        .map(|channel| format!("dynamic_{}", channel.id))
+        .collect::<Vec<_>>();
+    let actual = rust
+        .iter()
+        .filter_map(|(name, _)| name.strip_prefix("dynamic_").map(|_| name.clone()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        actual, expected,
+        "Rust dynamic header words drifted from schema order"
+    );
+    for (index, channel) in prism_render_material::SURFACE_CHANNELS.iter().enumerate() {
+        assert_eq!(
+            channel.header_word, index as u32,
+            "{} header word",
+            channel.id
+        );
+    }
+
+    let shaders = Path::new(env!("CARGO_MANIFEST_DIR")).join("../prism_render_scene/src/shaders");
+    for (file, struct_name) in MIRRORS {
+        let source = std::fs::read_to_string(shaders.join(file))
+            .unwrap_or_else(|error| panic!("read {file}: {error}"));
+        let mirror = wesl_fields(&source, struct_name);
+        let dynamic = mirror
+            .iter()
+            .filter_map(|(name, _)| name.strip_prefix("dynamic_").map(|_| name.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dynamic, expected,
+            "{file} dynamic channel order drifted from schema"
+        );
+    }
+}
+
+#[test]
 fn abi7_execution_binding_is_five_dense_words_with_full_permutation_width() {
     let header = prism_render_material::GpuMaterialHeader {
         execution_plan_index: 7,

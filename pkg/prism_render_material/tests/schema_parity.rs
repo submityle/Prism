@@ -149,23 +149,6 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
     }
 }
 
-/// The `LobeMask` bits named by a schema `mask_const` string.
-fn mask_const_bits(name: &str) -> u32 {
-    match name {
-        "EMISSION" => LobeMask::EMISSION.bits(),
-        "CLEARCOAT" => LobeMask::CLEARCOAT.bits(),
-        "ANISOTROPY" => LobeMask::ANISOTROPY.bits(),
-        "SHEEN" => LobeMask::SHEEN.bits(),
-        "SUBSURFACE" => LobeMask::SUBSURFACE.bits(),
-        "TRANSMISSION" => LobeMask::TRANSMISSION.bits(),
-        "THIN_FILM" => LobeMask::THIN_FILM.bits(),
-        "NPR_FACE" => LobeMask::NPR_FACE.bits(),
-        "GLINT" => LobeMask::GLINT.bits(),
-        "MEASURED_BRDF" => LobeMask::MEASURED_BRDF.bits(),
-        other => panic!("unknown mask_const {other}"),
-    }
-}
-
 fn schema() -> SurfaceSchema {
     surface_schema()
 }
@@ -194,14 +177,71 @@ fn core_and_lobe_word_counts_match_surface_rs() {
 #[test]
 fn registry_slots_match_lobe_mask_constants() {
     let schema = schema();
-    for lobe in &schema.lobes {
+    for (schema_lobe, generated_lobe) in schema.canonical_lobes().into_iter().zip(SURFACE_LOBES) {
         assert_eq!(
-            1u32 << lobe.registry_slot,
-            mask_const_bits(&lobe.mask_const),
-            "lobe {} registry_slot/bit mismatch",
-            lobe.id
+            1u32 << schema_lobe.registry_slot,
+            generated_lobe.mask_bits,
+            "lobe {} registry_slot/generated bit mismatch",
+            schema_lobe.id
+        );
+        assert_eq!(
+            generated_lobe.registry_slot, schema_lobe.registry_slot,
+            "lobe {} registry slot mismatch",
+            schema_lobe.id
+        );
+        assert_eq!(
+            generated_lobe.words as u32, schema_lobe.words,
+            "lobe {} word footprint mismatch",
+            schema_lobe.id
         );
     }
+}
+
+#[test]
+fn generated_surface_fields_match_schema_layout_metadata() {
+    let schema = schema();
+    let expected = schema
+        .core
+        .fields
+        .iter()
+        .filter(|field| field.ty != FieldType::Pad)
+        .map(|field| {
+            (
+                None,
+                field.name.as_str(),
+                field.pack_slot,
+                field.ty.words(),
+                field.bit_region.as_str(),
+            )
+        })
+        .chain(schema.canonical_lobes().into_iter().flat_map(|lobe| {
+            lobe.fields
+                .iter()
+                .filter(|field| field.ty != FieldType::Pad)
+                .map(move |field| {
+                    (
+                        Some(lobe.id.as_str()),
+                        field.name.as_str(),
+                        field.pack_slot,
+                        field.ty.words(),
+                        field.bit_region.as_str(),
+                    )
+                })
+        }))
+        .collect::<Vec<_>>();
+    let actual = prism_render_material::SURFACE_FIELDS
+        .iter()
+        .map(|field| {
+            (
+                field.lobe,
+                field.name,
+                field.pack_slot,
+                field.words,
+                field.bit_region,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
 }
 
 #[test]

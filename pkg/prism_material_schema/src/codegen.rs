@@ -483,6 +483,19 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         "//! checked against — never diverge from — the schema. Edit the schema, not this.\n",
     );
     o.push('\n');
+    o.push_str("/// Schema format version for this generated surface layout.\n");
+    let _ = writeln!(
+        o,
+        "pub const SURFACE_SCHEMA_VERSION: u32 = {};",
+        schema.schema_version
+    );
+    o.push_str("/// Runtime material ABI version owned by `schema/surface.toml`.\n");
+    let _ = writeln!(
+        o,
+        "pub const SURFACE_ABI_VERSION: u32 = {};",
+        schema.abi_version
+    );
+    o.push('\n');
     o.push_str("/// Number of `u32` words in the always-present surface core.\n");
     let _ = writeln!(o, "pub const SURFACE_CORE_WORDS: usize = {core_words};");
     o.push_str("/// Widest per-lobe word footprint in the schema.\n");
@@ -642,6 +655,8 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     o.push_str("    pub mask_const: &'static str,\n");
     o.push_str("    /// Immutable `LobeMask` bit index and low-bit-first pack order.\n");
     o.push_str("    pub registry_slot: u32,\n");
+    o.push_str("    /// The concrete `LobeMask` bit value for this registry slot.\n");
+    o.push_str("    pub mask_bits: u32,\n");
     o.push_str("    /// `u32` word footprint of the lobe.\n");
     o.push_str("    pub words: usize,\n");
     o.push_str("    /// Governance namespace / bit-region partition key (§5.4).\n");
@@ -677,6 +692,7 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         let _ = writeln!(o, "        uid: {:?},", lobe.uid);
         let _ = writeln!(o, "        mask_const: {:?},", lobe.mask_const);
         let _ = writeln!(o, "        registry_slot: {},", lobe.registry_slot);
+        let _ = writeln!(o, "        mask_bits: {},", 1u32 << lobe.registry_slot);
         let _ = writeln!(o, "        words: {},", lobe.words);
         let _ = writeln!(o, "        namespace: {:?},", lobe.namespace.as_str());
         let caps: Vec<String> = lobe
@@ -1174,6 +1190,12 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     o.push_str("    pub lobe: Option<&'static str>,\n");
     o.push_str("    /// Field name within the owning record.\n");
     o.push_str("    pub name: &'static str,\n");
+    o.push_str("    /// First `u32` word within the owning record.\n");
+    o.push_str("    pub pack_slot: u32,\n");
+    o.push_str("    /// Word footprint of the field's storage type.\n");
+    o.push_str("    pub words: u32,\n");
+    o.push_str("    /// Schema bit-region spelling (`KHR`, `PRISM`, ...).\n");
+    o.push_str("    pub bit_region: &'static str,\n");
     o.push_str("}\n\n");
     let _ = writeln!(o, "/// Every non-padding field, in core-then-registry-slot order.\npub const SURFACE_FIELDS: [SurfaceFieldLayout; {field_count}] = [");
     for field in schema
@@ -1184,8 +1206,11 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     {
         let _ = writeln!(
             o,
-            "    SurfaceFieldLayout {{\n        lobe: None,\n        name: {:?},\n    }},",
-            field.name
+            "    SurfaceFieldLayout {{\n        lobe: None,\n        name: {:?},\n        pack_slot: {},\n        words: {},\n        bit_region: {:?},\n    }},",
+            field.name,
+            field.pack_slot,
+            field.ty.words(),
+            field.bit_region.as_str()
         );
     }
     for lobe in lobes {
@@ -1196,8 +1221,12 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         {
             let _ = writeln!(
                 o,
-                "    SurfaceFieldLayout {{\n        lobe: Some({:?}),\n        name: {:?},\n    }},",
-                lobe.id, field.name
+                "    SurfaceFieldLayout {{\n        lobe: Some({:?}),\n        name: {:?},\n        pack_slot: {},\n        words: {},\n        bit_region: {:?},\n    }},",
+                lobe.id,
+                field.name,
+                field.pack_slot,
+                field.ty.words(),
+                field.bit_region.as_str()
             );
         }
     }
@@ -1338,10 +1367,10 @@ mod tests {
             "    IdentityExtensionLayout {\n        id: \"sample_budget\",\n        uid: \"org.prism.downgrade.sample_budget\",\n        kind: \"downgrade\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
             "    IdentityExtensionLayout {\n        id: \"outline\",\n        uid: \"org.prism.composite.outline\",\n        kind: \"composite\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"stable\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
             "pub const SURFACE_RESPONSE_PROGRAMS: [ResponseProgramLayout; 3] = [",
-            "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 8,\n        namespace: \"KHR\",\n        stability: \"stable\",\n        requires_caps: &[],\n        energy_policy: \"independent\",\n    },",
-            "    LobeLayout {\n        id: \"npr_face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"NPR_FACE\",\n        registry_slot: 16,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"none\",\n    },",
-            "    LobeLayout {\n        id: \"glint\",\n        uid: \"org.prism.lobe.glint\",\n        mask_const: \"GLINT\",\n        registry_slot: 17,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"coupled\",\n    },",
-            "    LobeLayout {\n        id: \"measured_brdf\",\n        uid: \"org.prism.lobe.measured_brdf\",\n        mask_const: \"MEASURED_BRDF\",\n        registry_slot: 18,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"independent\",\n    },",
+            "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        mask_bits: 1,\n        words: 8,\n        namespace: \"KHR\",\n        stability: \"stable\",\n        requires_caps: &[],\n        energy_policy: \"independent\",\n    },",
+            "    LobeLayout {\n        id: \"npr_face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"NPR_FACE\",\n        registry_slot: 16,\n        mask_bits: 65536,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"none\",\n    },",
+            "    LobeLayout {\n        id: \"glint\",\n        uid: \"org.prism.lobe.glint\",\n        mask_const: \"GLINT\",\n        registry_slot: 17,\n        mask_bits: 131072,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"coupled\",\n    },",
+            "    LobeLayout {\n        id: \"measured_brdf\",\n        uid: \"org.prism.lobe.measured_brdf\",\n        mask_const: \"MEASURED_BRDF\",\n        registry_slot: 18,\n        mask_bits: 262144,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"independent\",\n    },",
         ] {
             assert!(rust.contains(needle), "generated Rust missing `{needle}`");
         }
