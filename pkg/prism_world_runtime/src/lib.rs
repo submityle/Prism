@@ -18,8 +18,17 @@ use prism_world_stream::{CellManifest, DemandSource, SectorId, StreamAction, Str
 
 mod routed_io;
 pub use routed_io::RoutedCellIo;
+mod scatter_persist;
+pub use scatter_persist::{
+    decode_scatter_deletions, encode_scatter_deletions, PersistedFieldScatterOutput,
+    PersistedScatterOutput, ScatterDeletionBinding, ScatterDeletionCodecBudget,
+    ScatterDeletionSnapshot, ScatterPersistenceError, SCATTER_DELETION_HEADER_BYTES,
+    SCATTER_DELETION_KEY_BYTES,
+};
 #[cfg(test)]
 mod async_coordinator_tests;
+#[cfg(test)]
+mod scatter_persist_tests;
 
 #[cfg(feature = "std")]
 mod file_provider;

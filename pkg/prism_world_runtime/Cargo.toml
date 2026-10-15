@@ -30,5 +30,10 @@ name = "threaded_archive"
 harness = false
 required-features = ["std"]
 
+[[bench]]
+name = "scatter_deletions"
+harness = false
+required-features = ["std"]
+
 [lints.rust]
 unsafe_code = "forbid"

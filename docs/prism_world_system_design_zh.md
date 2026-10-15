@@ -13,7 +13,7 @@
 > - **全局距离场**：UE Global Distance Field / Lumen SDF（稀疏 brick + mip 环，一场多用）
 > 本文为纯经典数据结构 + 空间算法 + 流送调度路线（Morton/Hilbert、四叉/八叉树、CDLOD/clipmap、Transvoxel/Dual Contouring/SDF、domain warp 噪声、水力/热力侵蚀 PDE、泊松盘/蓝噪声、D8 流向、并查集、CRDT），**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/其他引擎源码或衍生代码。
 
-- 版本： v3.18（真实 heightfield 精确地表高度/垂直离地带/有理坡度过滤已提供 CPU/GPU 双路径，保持源点/key/最小距离和三轴分区不变；GPU 直接读取真实样本，以核心 u32 limb 完成宽整数运算，无逐点 CPU 求值/读回。完整结构缓存键、容量/读数预检、固定资源和变更上传已具备。Apple M2/Metal 正常 workspace 定向 126 项及真实间接绘制像素通过，契约和两轮限定 release 性能见 prism_world_gpu_heightfield_scatter_zh.md。已有 coverage/dither、sector 所有权、ProxyCellHost、共享 PriorityCell、原生 reactor、行星网格和有界 SDF。贴地放置、产品 scene/ECS decoder/render graph、资产解压/GPU 直传、多表示产品接线、LOD 接缝和真实加密传输仍须独立验收，不能把局部内核视为整个系统完成）
+- 版本： v3.19（CPU源/作者场新增完整键持久删除：绑定scene作者节点及调用方field、规范codec、稳定原地过滤、完整额外cache依赖、真实文件关闭重开/重新生成与undo/redo；字段LWW不是逐键并发union，内存Timeline与FileJournal不自动原子。契约及限定CPU分位数见prism_world_scatter_deletions_zh.md。真实heightfield已有精确CPU/GPU双路径和固定资源，Apple M2/Metal正常workspace定向126项及真实间接绘制像素通过，见prism_world_gpu_heightfield_scatter_zh.md。已有coverage/dither、sector所有权、ProxyCellHost、共享PriorityCell、原生reactor、行星网格和有界SDF。GPU删除、贴地放置、产品scene/ECS decoder/render graph、资产解压/GPU直传、多表示产品接线、LOD接缝和真实加密传输仍须独立验收，不能把局部内核视为整个系统完成）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（作者内容单元 / spawn·despawn·materialize API / override delta / PersistentId，见 `prism_scene_design_zh.md`）、`prism_asset`（`StableGuid`/软引用/依赖闭包/单文件包/mmap/内容寻址）、`prism_ecs`（物化边界的批量预留/列写入）、`prism_transform`（层级）、`prism_tasks`（并行流送/烘焙）、`prism_math`（定点/空间编码/噪声）、`prism_diagnostic`（计数器/trace）；向上接 `prism_render`/`prism_physics`/`prism_gi`（经 GPU 常驻实例流 + ECS 物化两个边界，均已去 Bevy）
 - 层级定位： 基座层 L6；下接 `prism_scene`/`prism_asset`/`prism_ecs`，上驱动渲染/物理/GI；与 `prism_terrain_world_design_zh.md`（地形多表示细节）互为上下位
@@ -589,7 +589,9 @@ GPU twin `GpuScatterHeightfield` 已通过可选 `terrain_scatter` 交付：源�
 
 - **风场**：全局 + 局部风场驱动植被 GPU 顶点动画（无需逐实例 CPU 更新），确定性噪声风 + 阵风事件。
 - **交互场**：角色/载具经过压弯草木——写一张局部交互纹理（GPU），实例顶点采样该场形变，交互后弹回；交互场是瞬时的，不入持久化。
-- **破坏/采集**：砍树/割草是 override delta（§11，删除某 PersistentId 的 proxy），重进范围时存档的删除 delta 使其不再出现。
+- **破坏/采集**：业务行为产生 override delta（§11）；可再生候选的删除以「scene拥有的作者散布节点PersistentId + 完整ScatterCandidateKey」定位，由节点的调用方schema字段保存完整键集合，不能持久化dense slot或把候选键截成PersistentId。重进时先重建派生点，再应用恢复的删除快照。
+
+CPU源/作者场桥接已由`ScatterDeletionSet`与`ScatterDeletionBinding`实现，规范PSDL codec先检查wire/count/Rust容量，严格拒绝损坏/未知键；稳定原地压紧并保留完整snapshot额外cache依赖，真实FileJournal关闭重开和持久undo/redo已回归。当前整字段快照为LWW，不是逐键并发合并；Timeline提交不自动落盘，失败发布策略由宿主明确处理。身份迁移、资源/历史成本、完整例子和限定CPU基准见`prism_world_scatter_deletions_zh.md`；GPU删除、地形专用wrapper和产品scene/render接线尚须独立验收，不引入固定游戏类型或编辑权限策略。
 
 ### 15.4 LOD 与远景
 

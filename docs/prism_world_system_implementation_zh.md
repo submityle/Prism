@@ -104,6 +104,14 @@ source 64 字节 record 保留源 accepted；新增 source-slot 对齐16字节�
 
 release两轮每档8预热/64测量，共288次dispatch全部逐点对CPU。10k/100k三维候选分别从6132/61122场幸存点筛为1250/6193点；逻辑GPU buffer为1097460/10817460B，host高度scratch16900B，共享原高度8450B，首次显式上传含indirect初始化17396B。回归后复测的submit+wait P50/P95/P99分别1442.333/2362.833/4674.250µs和7522.584/15448.750/25020.584µs；首轮同样保留于 `prism_world_gpu_heightfield_scatter_zh.md`，不挑选较好尾延迟。计时不含上传/回读/CPU检查/绘制，不是GPU timestamp、物理VRAM或产品帧时；贴地放置和完整产品散布仍另行验收。
 
+### M4/M5：可再生散布的完整键持久删除
+
+`ScatterDeletionSet` 以不可变完整结构键集合提供稳定原地过滤；`ScatterDeletionBinding` 将整组键存于调用方选择的作者节点 PersistentId/FieldId 的 override Bytes，而不是散布 dense slot、截断 hash 或第二份内容数据库。格式 `PSDL` revision1 为16B头+每键52B，严格数值排序/唯一、完整键重建及独立 wire/count/Rust容量准入；错误不降级为空。单键实际修改O(D)拷贝、过滤O(N log D)，原points/attributes指针容量与源key/距离语义不变，不补点。runtime输出保留node/field/完整集合额外cache依赖；整字段提交沿用Timeline真实inverse及字段LWW，明确不是逐键并发union。
+
+真实FileJournal关闭重开→回放→丢弃并重新生成缓冲→过滤，以及持久undo/redo回归已通过。并行流送修改前默认runtime 78、no-default 30、proxy_host 98测试通过，residency 91单测+1doctest通过；最后三项回归加入前全feature曾通过115项。默认/no-default all-target严格lint及完整示例随后通过（51点、删除/undo/redo为1/0/1、3条事务回放）。最新默认/全feature测试及全feature lint重跑被其他并行流送修改中`prism_world/src/lib.rs:126`未匹配新增`StreamAction::Reload`阻断，不扩大为当前脏工作区全配置通过。完整可执行示例以clone staging、落盘成功后才发布内存Timeline；保留进程内撤销栈、不声称重建重启后的可编辑历史。这是明确的失败发布边界，不是产品增量事务或跨资源崩溃原子指令。
+
+2026-10-16 macOS27.0.1/aarch64/rustc1.96.1 release，每项8预热/64样本：10k/100k输入、25%删除，原地过滤主机P50/P95/P99分别791.917/797.167/922.708µs及9758.500/9875.125/11031.166µs；独立encode+decode为106.000/109.209/113.917µs及1083.584/1092.292/1252.833µs。完整结果/指针/容量在计时外逐样本校验，不含生成/clone/析构，不是GPU时间、RSS或产品帧时。wire/实际容量、完整契约及历史/合并/发布成本见`prism_world_scatter_deletions_zh.md`；GPU删除、地形专用wrapper和产品接线仍另行交付。
+
 ### M5：持久化
 
 - `prism_world_persist`：`PersistentId`、规范化 `OverrideDelta`、append-only log、确定性 LWW CRDT、snapshot/timeline、undo/redo、little-endian codec/checksum。
@@ -218,7 +226,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
 - M3：资产包解压、mmap schema 视图、GPU 直传和产品级吞吐仍需实现或独立运行时验证；共享动态优先级已接入但不提供抢占或跨队列无饥饿保证。任务池 Future/共享取消、固定 worker 及宿主原生 reactor → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md` 与 `prism_world_native_io_zh.md`，不能代替冷盘、资产包或产品负载验收。
-- M4 散布：贴地放置、曲率/数据层/跨散布层规则、风与交互、持久override删除、笔刷空间索引、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场、真实heightfield的CPU/GPU高度/离地带/坡度精确稳定过滤、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
+- M4 散布：贴地放置、曲率/数据层/跨散布层规则、风与交互、GPU持久删除过滤、地形删除wrapper、逐键并发删除协议、笔刷空间索引、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场、真实heightfield的CPU/GPU高度/离地带/坡度精确稳定过滤、CPU源/作者场完整键持久删除与文件恢复、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。

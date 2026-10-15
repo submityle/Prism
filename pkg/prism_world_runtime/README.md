@@ -139,6 +139,54 @@ retention policies; an arbitrary provider can allocate excess backing capacity.
 - `--no-default-features` builds the coordinator, bounded IO queue, header
   validation, and replayable trace without `std`.
 
+## Persistent scatter deletions
+
+The runtime also bridges regenerable CPU scatter to scene-owned override fields,
+without depending on an ECS or renderer. `ScatterDeletionBinding { object, field }`
+identifies the author scatter node and the caller's schema field. A candidate is
+identified by its complete `ScatterCandidateKey`, never a dense index or a hash
+truncated to `PersistentId`. `ScatterDeletionSet` is provided by
+`prism_world_residency`; its budgets count actual Rust key Vec capacity, while
+`ScatterDeletionCodecBudget` separately limits canonical encoded bytes.
+
+Read a binding from `Timeline::state()`, edit its immutable set with
+`with_deleted(key, true, budget.deletions)`, and pass
+`binding.delta(&updated, budget.max_encoded_bytes)` to `Timeline::commit` with
+`binding.object`. The timeline captures the real prior value for undo. Read the
+resulting snapshot and call `filter_source` or `filter_field` on a regenerated
+buffer. The returned wrapper retains the complete snapshot, including node and
+field; compare it in addition to the upstream source cache key. Filtering is
+stable, in-place, and does not move/refill candidates or shrink capacities.
+
+The complete executable example creates its own temporary journal, persists a
+full-key deletion, closes/reopens/replays, regenerates points, and checks durable
+undo/redo. It cleans up only the temporary directory it created:
+
+```text
+cargo run --offline -p prism_world_runtime --example scatter_deletions
+cargo bench --offline -p prism_world_runtime --bench scatter_deletions
+```
+
+The example stages a cloned timeline, appends the transaction durably, then
+publishes the new timeline. This demonstrates a failure-safe publication policy,
+not an efficient incremental transaction implementation. `Timeline::commit`
+does not write a `FileJournal`; the two operations are not automatically atomic.
+An append error may poison the journal: stop publishing and reopen/recover before
+deciding how to retry. History/inverse fields contain full snapshots and their
+cumulative storage is outside the single-field codec budget.
+The example retains its in-process undo stack while reopening the journal;
+replay restores `WorldState`, not an editable undo history after restart.
+
+The version-1 `PSDL` encoding uses a 16-byte header and 52 bytes per full key,
+strict numeric structural order, and checked length/count/capacity limits.
+Malformed fields return an error, never silently clear deletions. Empty deltas
+remove the field; standalone empty encoding still needs a 16-byte header.
+The field uses existing whole-field LWW, **not per-key concurrent union**: racing
+snapshots can lose another writer's deletion. Recipe identity changes require
+explicit migration. GPU deletion, heightfield wrappers, and product integration
+are separate work. Full contracts and measured CPU percentiles are recorded in
+`docs/prism_world_scatter_deletions_zh.md`.
+
 ## Verification
 
 ```text
