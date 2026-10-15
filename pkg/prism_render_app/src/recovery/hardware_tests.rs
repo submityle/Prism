@@ -182,7 +182,7 @@ fn gpu_recovery_rebuilds_resources_and_restores_pixels() {
             .resource::<RenderRuntimeResource<WgpuInstance>>();
         assert!(runtime.runtime().wait_idle());
     }
-    let (right_pixels, right_materials, right_replay, frames_before) = {
+    let (right_pixels, right_materials, right_replay) = {
         let render = app.get_sub_app(RenderApp).expect("render sub-app");
         let runtime = render
             .world
@@ -193,7 +193,6 @@ fn gpu_recovery_rebuilds_resources_and_restores_pixels() {
             read_target(&render.world),
             read_material_buffers(&render.world),
             replay_bytes,
-            render.world.resource::<RenderFrameStats>().frames_submitted,
         )
     };
     assert_eq!(pixel(&right_pixels, 13, 8), &[255, 255, 255, 255]);
@@ -222,6 +221,12 @@ fn gpu_recovery_rebuilds_resources_and_restores_pixels() {
         .get_mut::<Transform>(transform_entity)
         .expect("transform") = Transform::from_xyz(0.75, 0.0, 0.0);
     app.update();
+    let frames_before = app
+        .get_sub_app(RenderApp)
+        .expect("render sub-app")
+        .world
+        .resource::<RenderFrameStats>()
+        .frames_submitted;
     let old_device: Arc<WgpuDevice> = app
         .get_sub_app(RenderApp)
         .expect("render sub-app")
