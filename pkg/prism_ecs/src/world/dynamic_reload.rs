@@ -735,6 +735,7 @@ impl World {
         }
         let mut retired = DynamicValueSlot::new(descriptor);
         if storage == StorageType::SparseSet {
+            self.change_tracker.record(id, entity, self.change_tick);
             // SAFETY: independent aligned empty slot with the exact old ABI.
             retired.initialized = unsafe {
                 self.sparse_sets

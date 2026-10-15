@@ -412,6 +412,31 @@ fn sparse_filter_source_merges_with_dirty_table_columns() {
 }
 
 #[test]
+fn sparse_membership_removal_is_reported_for_live_entity() {
+    let mut w = World::new();
+    let entity = w.spawn(Big::new(0));
+    assert!(w.insert(entity, SparseDirty(7)));
+    let with = w.query_filtered::<Entity, With<SparseDirty>>();
+    let without = w.query_filtered::<Entity, Without<SparseDirty>>();
+    assert_eq!(with.iter(&w).count(), 1);
+    assert_eq!(without.iter(&w).count(), 0);
+
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+    assert!(w.remove::<SparseDirty>(entity));
+
+    let with_report = with.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(with_report.stats.sparse_index_events, 1);
+    assert_eq!(with_report.chunks.len(), 1);
+    assert!(with_report.chunks[0].start <= w.entities().location(entity).unwrap().row as usize);
+
+    let without_report = without.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(without_report.stats.sparse_index_events, 1);
+    assert_eq!(without_report.chunks.len(), 1);
+}
+
+#[test]
 fn sparse_filter_source_propagates_through_or() {
     let mut w = World::new();
     let entity = w.spawn(Big::new(0));

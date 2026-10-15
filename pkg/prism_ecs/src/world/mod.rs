@@ -1755,6 +1755,7 @@ impl World {
     pub fn remove<B: Bundle>(&mut self, entity: Entity) -> bool {
         let mut ids = Vec::new();
         B::component_ids(&mut self.components, &mut ids);
+        let change_tick = self.change_tick;
         if self.entities.location(entity).is_none() {
             return false;
         }
@@ -1791,8 +1792,13 @@ impl World {
         // Sparse components are removed out of band with no archetype move.
         let mut removed_any = false;
         for (&id, &storage) in ids.iter().zip(&storages) {
-            if storage == StorageType::SparseSet && self.sparse_sets.remove(id, entity) {
-                removed_any = true;
+            if storage == StorageType::SparseSet && self.sparse_sets.contains(id, entity) {
+                // Keep the live entity's current archetype discoverable to a
+                // dirty query even though the sparse value is removed before
+                // the query runs. Despawn has no live row and is intentionally
+                // not represented as a sparse membership candidate.
+                self.change_tracker.record(id, entity, change_tick);
+                removed_any |= self.sparse_sets.remove(id, entity);
             }
         }
 

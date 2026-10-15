@@ -8,11 +8,14 @@
 //! refresh and appends the matches to a cached list, so steady-state iteration
 //! never rescans the whole archetype table (design §7, M2 query cache).
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use crate::archetype::ArchetypeId;
 use crate::change::Tick;
+use crate::change_index::{ChangeCursor, ChangeTracker};
+use crate::component::ComponentId;
 use crate::entity::Entity;
 use crate::query::access::Access;
 use crate::query::combinations::QueryCombinationsIter;
@@ -104,6 +107,12 @@ pub struct QueryState<D: QueryData, F: QueryFilter = ()> {
     /// resolved term states are `Send + Sync` by the [`QueryData`]/
     /// [`QueryFilter`] bounds, so the whole state is honestly `Send + Sync`.
     matched: SpinLock<MatchedArchetypes>,
+    /// Sparse change sources retained for the coarse dirty-window path. The
+    /// tracker keeps only logs while at least one query/observer is alive; the
+    /// per-query cursors make collection proportional to new batches.
+    dirty_tracker: Option<Arc<ChangeTracker>>,
+    dirty_sources: Vec<ComponentId>,
+    dirty_cursors: SpinLock<Vec<ChangeCursor>>,
     _marker: PhantomData<fn() -> (D, F)>,
 }
 
@@ -122,12 +131,42 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         let mut access = Access::new();
         D::update_access(&data_state, &mut access);
         F::update_access(&filter_state, &mut access);
+        let mut dirty_sources = access.reads().to_vec();
+        dirty_sources.extend_from_slice(access.writes());
+        F::dirty_sources(&filter_state, &mut dirty_sources);
+        dirty_sources.sort_unstable();
+        dirty_sources.dedup();
+        dirty_sources.retain(|id| {
+            world
+                .components()
+                .info(*id)
+                .is_some_and(|info| info.storage() == crate::component::StorageType::SparseSet)
+        });
+        let dirty_tracker = if dirty_sources.is_empty() {
+            None
+        } else {
+            Some(Arc::clone(&world.change_tracker))
+        };
+        let dirty_cursors = SpinLock::new(
+            dirty_sources
+                .iter()
+                .map(|id| {
+                    dirty_tracker
+                        .as_ref()
+                        .expect("sparse dirty sources have a tracker")
+                        .activate(*id)
+                })
+                .collect(),
+        );
         Self {
             world_id,
             data_state,
             filter_state,
             access,
             matched: SpinLock::new(MatchedArchetypes::new(world.archetype_generation())),
+            dirty_tracker,
+            dirty_sources,
+            dirty_cursors,
             _marker: PhantomData,
         }
     }
@@ -158,6 +197,24 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     #[inline]
     pub(crate) fn filter_state(&self) -> &F::State {
         &self.filter_state
+    }
+
+    /// Collect sparse component writes/removals recorded since the caller's
+    /// last cursor window. The query owns one cursor per sparse source, so the
+    /// tracker can discard history as soon as no observer/query retains it.
+    pub(crate) fn collect_sparse_changes(
+        &self,
+        last_run: Tick,
+        this_run: Tick,
+        out: &mut Vec<Entity>,
+    ) {
+        let Some(tracker) = &self.dirty_tracker else {
+            return;
+        };
+        let mut cursors = self.dirty_cursors.lock();
+        for (index, &component) in self.dirty_sources.iter().enumerate() {
+            tracker.collect(component, &mut cursors[index], last_run, this_run, out);
+        }
     }
 
     /// Whether `entity` is matched by this query (live and satisfying every
@@ -1150,6 +1207,16 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // batches make each `&mut [T]` slice unique across threads.
         unsafe {
             self.par_chunks_from_ptr(world_ptr, this_run, pool, batch_size, &func);
+        }
+    }
+}
+
+impl<D: QueryData, F: QueryFilter> Drop for QueryState<D, F> {
+    fn drop(&mut self) {
+        if let Some(tracker) = &self.dirty_tracker {
+            for &component in &self.dirty_sources {
+                tracker.deactivate(component);
+            }
         }
     }
 }

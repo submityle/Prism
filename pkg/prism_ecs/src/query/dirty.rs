@@ -70,6 +70,8 @@ pub struct DirtyChunkStats {
     pub sparse_entities_checked: usize,
     /// Number of sparse-derived chunk candidates after row-to-chunk deduplication.
     pub sparse_chunk_candidates: usize,
+    /// Number of sparse writes/removals delivered from the exact change index.
+    pub sparse_index_events: usize,
 }
 
 /// Dirty row windows plus measurable traversal counters.
@@ -187,6 +189,18 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // proportional to the sparse set's actual membership rather than to
         // every row in every matched archetype.
         let mut sparse_chunks: BTreeMap<ArchetypeId, Vec<usize>> = BTreeMap::new();
+        let mut indexed_entities = Vec::new();
+        self.collect_sparse_changes(last_run, this_run, &mut indexed_entities);
+        report.stats.sparse_index_events = indexed_entities.len();
+        for entity in indexed_entities {
+            let Some(location) = world.entities().location(entity) else {
+                continue;
+            };
+            sparse_chunks
+                .entry(location.archetype_id)
+                .or_default()
+                .push(location.row as usize);
+        }
         for &id in &access_ids {
             let Some(info) = world.components().info(id) else {
                 continue;
