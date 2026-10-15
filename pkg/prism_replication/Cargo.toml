@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+prism_math = { path = "../prism_math", default-features = false }
 prism_app = { path = "../prism_app", optional = true }
 prism_ecs = { path = "../prism_ecs", optional = true }
 ring = { version = "0.17.14", optional = true }

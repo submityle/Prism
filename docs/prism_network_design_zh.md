@@ -572,7 +572,7 @@ M1 传输: 可靠 UDP + 多通道 + 丢包/延迟注入（✅机制；✅自适�
 M2 复制骨架: 权威 delta 事件流(复用 persist) + 瞬时快照 delta + baseline（✅核心逻辑）
 M3 AOI: 空间裁剪 + 簇分级 + relevancy/dormancy（✅均匀网格逻辑；🚧与 scene/world 实体映射）
 M4 预测与和解: 客户端预测 + 回滚重放 + 平滑校正（✅纯逻辑与 ECS bridge；🚧跨机验证）
-M5 延迟补偿: 历史位姿环 + 回溯命中 + 窗口有界(lag_comp)（⬜未实现）
+M5 延迟补偿: 历史位姿环 + 回溯命中 + 窗口有界(lag_comp)（✅纯逻辑 AABB 射线核；🚧接入权威 ECS/窄相碰撞与跨机验证）
 M6 反作弊接缝: 权威回路钩子点 + 确定性对账根基（🚧hash audit 已有；provider/策略未完成）
 M7 规模: 服务器网格分片 + 权威移交 + 过载降级 + 容灾(server_mesh)（⬜未实现）
 M8 工具: 事件流录制/回放 + 网络剖析 + 预测可视化 + QUIC 适配（⬜未实现；QUIC 未接入）
@@ -586,7 +586,7 @@ M9 后端 provider: uwu_event_mesh 适配(durable log/游标/DLQ/timeline) 作�
 - 当前已有单机 loopback、真实 UDP/ARQ 测试，以及对自适应窗口/发送预算在确定性丢包与 RTT 变化下的单测；但没有跨进程、跨机器或真实公网链路证据。因此吞吐、尾延迟、丢包恢复时间、并发连接数和公网拥塞行为仍是 design target，不是生产验收结果。
 - `security` 的 `RingPskProvider` 已提供可复核的 PSK/AES-256-GCM 密码实现和 144 项全 feature 回归；但密钥托管/轮换、跨机器身份验证、部署级信任根和公网安全验收仍未完成，不能据此宣称生产部署安全闭环已完成。
 - `prism_replication` 的 ECS bridge 已接入 World snapshot/固定步回滚路径，但真实服务器权威 ECS、scene/component 复制和跨机 reconciliation 仍需端到端验收。
-- `lag_comp`、`server_mesh`、QUIC/WebTransport、NAT/ICE/relay、事件流 durable provider 和完整反作弊策略仍未实现，不得用设计章节替代代码完成声明。
+- `server_mesh`、QUIC/WebTransport、NAT/ICE/relay、事件流 durable provider 和完整反作弊策略仍未实现；`lag_comp` 已有有界历史 AABB 射线核，但权威 ECS/窄相碰撞接入和跨机验证仍未完成，不得用设计章节替代代码完成声明。
 - 反作弊上限由「服务器权威 + 确定性对账」决定，客户端侧检测可被破解、仅作噪声过滤；**不含任何 ML**。
 - 浮点仿真参与权威必须定点化，否则无法保证跨平台确定性与回滚收敛。
 - QUIC/中继/NAT 穿透依赖部署环境，设计只定接缝与回退策略，不保证所有网络拓扑可直连。

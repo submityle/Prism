@@ -91,6 +91,8 @@ pub mod snapshot;
 
 pub mod prediction;
 
+pub mod lag_comp;
+
 pub mod transport;
 
 pub mod security;
