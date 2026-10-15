@@ -31,6 +31,18 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_world_gpu --features 
 - `std` feature 提供 `FileJournal` 和 `SnapshotStore`：版本头、长度/序号/payload/checksum、批量 append、`flush + sync_all`、重启恢复、损坏/截断尾部裁剪、乱序/重复拒绝、同目录临时文件原子替换和父目录同步。
 - 相关提交：`4d0fbfebe`；Scene/ECS 接缝提交：`34656b305`；GPU workspace 集成：`c94d5cf13`。
 
+### M3：异步 IO/provider
+
+- `prism_world_io`：分块读取请求、稳定优先级/FIFO 排序、显式容量背压、可取消 poll 操作、连续 chunk/short-read/checksum 校验和 std 文件 provider。
+- 默认构建保持 `no_std + alloc`；`std` 只增加 scheduler 与文件系统 provider，不把 IO、资产数据库或 ECS 引入 world policy core。
+
+### M6-M8：地形、仿真与网络边界
+
+- `prism_world_terrain`：cube-sphere 六面映射、四叉树 tile/跨面邻接、连续 screen-space LOD/morph、i64/Q32.32 局部坐标误差界、确定性高度采样和小端体素布局。
+- `prism_world_sim`：统一 tick/output/dirty-region budget，确定性局部侵蚀、持久体素/碎片 delta、水文容量约束、生态 biomass 更新和小端 delta codec。
+- `prism_world_network`：复用 stream/persist 身份的 AOI、delta envelope、authority/read-only/shared-LWW policy、sector handoff ledger 和顺序无关 PersistentId 合并；不拥有传输层或第二份世界真相。
+- 这些 crate 已加入根 workspace，均有可运行算法和单测；它们是 world 接缝的 engine-neutral 实现，不宣称已经完成整个 renderer/physics/network transport 端到端产品。
+
 ## 当前验证
 
 通过：
@@ -42,21 +54,26 @@ cargo test -p prism_world --features scene_host
 cargo test -p prism_world_gpu
 cargo test -p prism_world_gpu --features gpu --test wgsl_compile
 cargo check -p prism_world_gpu --features gpu
+CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_io -p prism_world_network -p prism_world_sim -p prism_world_terrain --no-default-features
+cargo test -p prism_world_io --features std
+cargo test -p prism_world_network -p prism_world_sim -p prism_world_terrain
+CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo clippy -p prism_world_io --features std --all-targets -- -D warnings
+CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo clippy -p prism_world_network -p prism_world_sim -p prism_world_terrain --all-targets -- -D warnings
 CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_stream -p prism_world_residency -p prism_world_persist -p prism_world --no-default-features
 ```
 
-核心 world policy 与 durable/scene tests 当前共 12 项持久化测试、5 项 `prism_world` 测试、4 项 GPU CPU contract 测试和 1 项 WGSL validator 测试通过。
+核心 world policy 与 durable/scene tests 当前共 12 项持久化测试、5 项 `prism_world` 测试、11 项 IO 测试、4 项 network 测试、6 项 simulation 测试、7 项 terrain 测试、4 项 GPU CPU contract 测试和 1 项 WGSL validator 测试通过。
 
 `cargo clippy -D warnings` 在包含 `prism_world` 依赖闭包时会进入仓库其他并行改动的 `prism_asset`/`prism_ecs`，当前被这些既有告警阻断；world 自身新增代码已按相应 crate 的局部检查验证，不能把依赖闭包失败误报为全 workspace 通过。
 
 ## 尚未交付的边界
 
-以下项目仍在实现或需要独立硬件/端到端证据，不能用 policy primitive 冒充完成：
+以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
-- M3：真正与 world stream 连通的异步 IO/provider、取消和背压闭环。
-- M6：terrain 多表示、cube-sphere 行星 tile、增量重烘端到端接入。
-- M7：侵蚀/破坏/生态/水文的 world 调度和 SDF 一场多用接入。
-- M8：多人 AOI/authority/sector handoff 网络消费层及轨道到地表端到端验证。
+- M3：`prism_world_stream` 到 `prism_world_io` 再到真实 scene/asset provider 的端到端异步调用链和吞吐基准。
+- M6：terrain 多表示、增量重烘以及 terrain-to-render/world streaming 的端到端接入。
+- M7：simulation-to-world persistence、SDF 一场多用和大规模实时调度接入。
+- M8：真实传输层、多人会话、认证/重试、跨 sector handoff 的端到端一致性验证。
 - GPU proxy 的真实 adapter、dispatch、readback 和 P50/P95/P99 性能数据仍需在有 GPU 的环境执行。
 
 这些边界不是占位 API；每一项必须以可运行算法、明确契约、单测和真实调用路径交付后才从本节移除。

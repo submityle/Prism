@@ -1,0 +1,119 @@
+//! Deterministic, budgeted, engine-neutral world simulation primitives.
+//!
+//! This crate owns bounded integer algorithms for local erosion, destructive
+//! voxel deltas, fragment deltas, ecological state transitions, and discrete
+//! hydrology. It does not model complete rigid-body, fluid, terrain, or
+//! material physics. Every step is finite, deterministic, and returns the
+//! changes and dirty regions needed by an external world owner.
+#![no_std]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+extern crate alloc;
+
+mod codec;
+mod ecology;
+mod hydrology;
+mod sim;
+mod types;
+mod voxel;
+
+pub use codec::{decode_delta, encode_delta, CodecError};
+pub use ecology::{EcologyCell, EcologyConfig, EcologyDelta, EcologyField};
+pub use hydrology::{FlowDelta, HydrologyCell, HydrologyField};
+pub use sim::{
+    BudgetUsage, SimulationDelta, SimulationError, TickBudget, TickReport, WorldSim, WorldSimConfig,
+};
+pub use types::{CellCoord, DirtyRegion, Region};
+pub use voxel::{stable_fragment_key, FragmentDelta, VoxelCell, VoxelDelta, VoxelField};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn populated_sim() -> WorldSim {
+        let mut sim = WorldSim::new(WorldSimConfig::default()).unwrap();
+        let source = CellCoord::new(0, 0, 0);
+        let sink = CellCoord::new(1, 0, 0);
+        sim.hydrology
+            .set(source, HydrologyCell::new(2, 40, 100, u16::MAX));
+        sim.hydrology
+            .set(sink, HydrologyCell::new(0, 0, 100, u16::MAX));
+        sim.voxels.set(source, VoxelCell::new(7, 5, 0).unwrap());
+        sim.ecology
+            .set(source, EcologyCell::new(4, 65_535, 100).unwrap());
+        sim
+    }
+
+    #[test]
+    fn one_tick_conserves_water_except_for_erosion_consumption() {
+        let mut sim = populated_sim();
+        let initial_water = sim.hydrology.water_at(CellCoord::new(0, 0, 0))
+            + sim.hydrology.water_at(CellCoord::new(1, 0, 0));
+        let report = sim.step(TickBudget::new(64, 64, 16));
+        let final_water = sim.hydrology.water_at(CellCoord::new(0, 0, 0))
+            + sim.hydrology.water_at(CellCoord::new(1, 0, 0));
+        let consumed = report
+            .delta
+            .voxel_deltas
+            .iter()
+            .map(|delta| delta.removed_mass * 8)
+            .sum::<u32>();
+        let moved = report
+            .delta
+            .flow_deltas
+            .iter()
+            .map(|delta| delta.amount)
+            .sum::<u32>();
+        assert_eq!(moved, 10);
+        assert_eq!(initial_water, final_water + consumed);
+        assert_eq!(report.delta.voxel_deltas[0].removed_mass, 1);
+    }
+
+    #[test]
+    fn identical_inputs_produce_identical_tick_reports() {
+        let mut left = populated_sim();
+        let mut right = populated_sim();
+        let budget = TickBudget::new(64, 64, 16);
+        assert_eq!(left.step(budget), right.step(budget));
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn shared_budget_caps_work_and_output() {
+        let mut sim = populated_sim();
+        let report = sim.step(TickBudget::new(1, 1, 1));
+        assert!(report.budget.work_units <= 1);
+        assert!(report.budget.output_records <= 1);
+        assert!(report.delta.voxel_deltas.is_empty());
+        assert!(report.delta.fragment_deltas.is_empty());
+    }
+
+    #[test]
+    fn dirty_regions_merge_adjacent_phase_outputs() {
+        let mut sim = populated_sim();
+        let report = sim.step(TickBudget::new(64, 64, 16));
+        assert_eq!(report.dirty_regions.len(), 1);
+        assert_eq!(
+            report.dirty_regions[0].region,
+            Region::new(CellCoord::new(-1, -1, -1), CellCoord::new(1, 1, 1)).unwrap()
+        );
+    }
+
+    #[test]
+    fn stable_fragment_keys_are_replayable_and_coordinate_sensitive() {
+        let origin = CellCoord::new(-3, 2, 8);
+        assert_eq!(
+            stable_fragment_key(9, origin, 4),
+            stable_fragment_key(9, origin, 4)
+        );
+        assert_ne!(
+            stable_fragment_key(9, origin, 4),
+            stable_fragment_key(10, origin, 4)
+        );
+        assert_ne!(
+            stable_fragment_key(9, origin, 4),
+            stable_fragment_key(9, CellCoord::new(-2, 2, 8), 4)
+        );
+    }
+}

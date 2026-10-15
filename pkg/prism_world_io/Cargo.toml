@@ -1,0 +1,14 @@
+[package]
+name = "prism_world_io"
+version = "0.1.0"
+edition = "2024"
+description = "Engine-neutral asynchronous world IO and provider primitives for Prism"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = ["std"]
+std = []
+
+[lints.rust]
+unsafe_code = "forbid"
