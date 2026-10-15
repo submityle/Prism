@@ -8,6 +8,9 @@ Engine-neutral, `no_std + alloc` terrain and planetary primitives for Prism.
 - `TileKey` is a face-local quadtree key with stable child order and explicit cross-face edge transforms.
 - Child expansion is fallible at `MAX_TILE_LEVEL`; callers cannot accidentally create an invalid level-31 tile.
 - LOD uses projected geometric error in pixels, a clamped continuous level, and smooth morph alpha.
+- `HeightfieldLodSeamPlan` validates same/adjacent-level `TileKey` neighbors and emits bounded,
+  deterministic 2:1 coarse-edge transition strips plus fine-boundary morph records without
+  requiring a GPU or renderer dependency; it does not claim cross-tile normal continuity.
 - Non-finite intermediate LOD values and fixed-point height multiplication overflow are rejected or saturated deterministically.
 - Integer and Q32.32 positions subtract the origin before converting to `f32`; the result carries a conservative absolute error bound.
 - Height sampling is requested with quantized tile-local coordinates and returns integer millimetres, making the interface recordable and replayable.

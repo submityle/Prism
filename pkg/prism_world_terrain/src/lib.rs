@@ -17,6 +17,7 @@ mod heightfield_surface;
 #[cfg(test)]
 mod heightfield_surface_tests;
 mod lod;
+mod lod_seam;
 #[cfg(feature = "scatter")]
 mod placement_deletion;
 mod planet_mesh;
@@ -51,6 +52,11 @@ pub use heightfield_surface::{
     PlanarHeightfieldSurface, HEIGHTFIELD_SURFACE_VERSION,
 };
 pub use lod::{evaluate_lod, LodError, LodEvaluation, LodMetric};
+pub use lod_seam::{
+    HeightfieldLodSeamPlan, LodSeamCost, LodSeamEdgeMode, LodSeamError, LodSeamLimits,
+    LodSeamMorphVertex, LodSeamNeighbor, LodSeamTransitionEdge, LodSeamVertex,
+    HEIGHTFIELD_LOD_SEAM_VERSION,
+};
 #[cfg(feature = "scatter")]
 pub use placement_deletion::{
     filter_heightfield_placement, DeletionFilteredHeightfieldPlacement,
