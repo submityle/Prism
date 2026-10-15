@@ -21,6 +21,7 @@ prism_render_visibility = { path = "../prism_render_visibility" }
 prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
 prism_render_graph = { path = "../prism_render_graph" }
 prism_render_runtime = { path = "../prism_render_runtime" }
+prism_tasks = { path = "../prism_tasks" }
 
 [dev-dependencies]
 # The headless reference backend: drives the extract + render path in CI with
@@ -28,7 +29,6 @@ prism_render_runtime = { path = "../prism_render_runtime" }
 prism_render_driver_null = { path = "../../os-backends/prism_render_driver_null" }
 # The shipped hardware backend, used by the GPU-gated readback test.
 prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
-prism_tasks = { path = "../prism_tasks" }
 
 [lints]
 workspace = true

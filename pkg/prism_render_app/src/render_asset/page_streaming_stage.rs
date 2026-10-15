@@ -1,0 +1,302 @@
+//! ECS wiring for the fixed-page CPU-to-GPU streaming slice.
+//!
+//! The main world owns requests, source reads, and CPU residency. Extraction
+//! moves owned page payloads into the render world. The render prepare stage
+//! performs the real queue upload, while cleanup only retires replacements after
+//! the runtime has reported a real submission completion value.
+
+use core::marker::PhantomData;
+
+use prism_app::{App, PostUpdate};
+use prism_ecs::prelude::{FromWorld, Res, ResMut, Resource};
+use prism_ecs::schedule::{IntoSystemConfigs, Schedule, Schedules};
+use prism_ecs::world::World;
+use prism_render_architecture::gpu_scene::GpuCompletionValue;
+use prism_render_driver::{FrameSync, Instance};
+
+use crate::label::RenderApp;
+use crate::render_asset::{
+    FixedPagePoolDescriptor, FixedPageRenderQueue, FixedPageResidencyBridge,
+    FixedPageStreamingSource, GpuPrepareBudget, PrepareCancellation,
+};
+use crate::runtime_resource::RenderRuntimeResource;
+use crate::sets::RenderSystems;
+use crate::startup::GpuResourceAppExt;
+
+/// Main-world policy for the fixed-page streaming bridge.
+#[derive(Clone, Debug, Resource)]
+pub struct FixedPageStreamingConfig {
+    /// GPU fixed-page backing-buffer descriptor.
+    pub gpu_pool: FixedPagePoolDescriptor,
+    /// Maximum number of CPU range reads performed by the automatic pump.
+    pub max_io_pages_per_frame: usize,
+    /// Maximum number of owned payloads uploaded in one render prepare pass.
+    pub max_uploads_per_frame: usize,
+}
+
+impl FixedPageStreamingConfig {
+    /// Creates a config with one bounded I/O and upload operation per frame.
+    #[must_use]
+    pub const fn new(gpu_pool: FixedPagePoolDescriptor) -> Self {
+        Self {
+            gpu_pool,
+            max_io_pages_per_frame: 1,
+            max_uploads_per_frame: 1,
+        }
+    }
+}
+
+#[derive(Clone, Resource)]
+struct FixedPageStreamingRenderConfig {
+    gpu_pool: FixedPagePoolDescriptor,
+    max_uploads_per_frame: usize,
+}
+
+/// Render-world GPU state for one fixed-page stream.
+pub struct FixedPageStreamingGpu<I>
+where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    bridge: FixedPageResidencyBridge,
+    max_uploads_per_frame: usize,
+    /// A replacement was prepared before the current frame submission.
+    pending_submission: bool,
+    observed_submissions: u64,
+    marker: PhantomData<fn() -> I>,
+}
+
+impl<I> Resource for FixedPageStreamingGpu<I>
+where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+}
+
+impl<I> FromWorld for FixedPageStreamingGpu<I>
+where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    fn from_world(world: &mut World) -> Self {
+        let config = world.resource::<FixedPageStreamingRenderConfig>().clone();
+        let runtime = world.resource::<RenderRuntimeResource<I>>();
+        let mut budget = GpuPrepareBudget::unlimited();
+        let cancellation = PrepareCancellation::new(false);
+        let bridge = FixedPageResidencyBridge::new_with_budget(
+            runtime.runtime().device(),
+            runtime.runtime().queue(),
+            &config.gpu_pool,
+            &mut budget,
+            &cancellation,
+        )
+        .expect("fixed page streaming pool descriptor must be valid");
+        Self {
+            bridge,
+            max_uploads_per_frame: config.max_uploads_per_frame.max(1),
+            pending_submission: false,
+            observed_submissions: 0,
+            marker: PhantomData,
+        }
+    }
+}
+
+/// Registers the complete fixed-page stream path on an app with a render app.
+///
+/// The caller supplies the CPU source so the path cannot silently fall back to
+/// a fake reader. Requests made during `Update` are pumped in `PostUpdate`,
+/// extracted as owned bytes, and uploaded during render preparation.
+pub fn register_fixed_page_streaming<I>(
+    app: &mut App,
+    source: FixedPageStreamingSource,
+    config: FixedPageStreamingConfig,
+) where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    app.insert_resource(source);
+    app.insert_resource(config.clone());
+    app.add_systems(PostUpdate, pump_fixed_page_streaming_io);
+    app.add_extract(RenderApp, extract_fixed_page_streaming);
+
+    let render = app
+        .sub_app_mut(RenderApp)
+        .expect("PrismRenderPlugin must be installed before fixed-page streaming");
+    render.world.insert_resource(FixedPageRenderQueue::new());
+    render
+        .world
+        .insert_resource(FixedPageStreamingRenderConfig {
+            gpu_pool: config.gpu_pool,
+            max_uploads_per_frame: config.max_uploads_per_frame,
+        });
+    render.init_gpu_resource::<FixedPageStreamingGpu<I>>();
+    let schedules = render.world.resource_mut::<Schedules>();
+    if !schedules.contains(crate::Render) {
+        schedules.insert(crate::Render, Schedule::new());
+    }
+    let schedule = schedules
+        .get_mut(crate::Render)
+        .expect("render schedule exists");
+    schedule.add_systems(prepare_fixed_page_streaming::<I>.in_set(RenderSystems::PrepareResources));
+    schedule
+        .add_systems(finish_fixed_page_streaming_submission::<I>.in_set(RenderSystems::Cleanup));
+}
+
+fn pump_fixed_page_streaming_io(
+    mut source: ResMut<FixedPageStreamingSource>,
+    config: Res<FixedPageStreamingConfig>,
+) {
+    let _ = source.pump_io(config.max_io_pages_per_frame);
+}
+
+fn extract_fixed_page_streaming(main: &mut World, render: &mut World) {
+    let Some(config) = main.get_resource::<FixedPageStreamingConfig>().cloned() else {
+        return;
+    };
+    let Some(source) = main.get_resource_mut::<FixedPageStreamingSource>() else {
+        return;
+    };
+    let mut queue = render
+        .get_resource_mut::<FixedPageRenderQueue>()
+        .map(core::mem::take)
+        .unwrap_or_default();
+    source.extract_to_render(&mut queue);
+    if let Some(existing) = render.get_resource_mut::<FixedPageRenderQueue>() {
+        *existing = queue;
+    } else {
+        render.insert_resource(queue);
+    }
+    if render
+        .get_resource::<FixedPageStreamingRenderConfig>()
+        .is_none()
+    {
+        render.insert_resource(FixedPageStreamingRenderConfig {
+            gpu_pool: config.gpu_pool,
+            max_uploads_per_frame: config.max_uploads_per_frame,
+        });
+    }
+}
+
+fn prepare_fixed_page_streaming<I>(
+    mut queue: ResMut<FixedPageRenderQueue>,
+    mut gpu: ResMut<FixedPageStreamingGpu<I>>,
+    runtime: Res<RenderRuntimeResource<I>>,
+) where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    let completed = GpuCompletionValue(runtime.runtime().completed_value());
+    let _ = gpu.bridge.reclaim_completed(completed);
+    let reclaim_after = GpuCompletionValue(runtime.runtime().next_completion_value());
+    for _ in 0..gpu.max_uploads_per_frame {
+        let Some(payload) = queue.pop() else {
+            break;
+        };
+        match gpu.bridge.upload_page_bytes(
+            payload.page,
+            payload.revision,
+            &payload.bytes,
+            reclaim_after,
+            runtime.runtime().queue(),
+        ) {
+            Ok(event) => {
+                if matches!(event, crate::FixedPagePoolEvent::Replaced { .. }) {
+                    gpu.pending_submission = true;
+                }
+            }
+            Err(_) => {
+                queue.push_front(payload);
+                break;
+            }
+        }
+    }
+}
+
+fn finish_fixed_page_streaming_submission<I>(
+    mut gpu: ResMut<FixedPageStreamingGpu<I>>,
+    stats: Res<crate::RenderFrameStats>,
+    runtime: Res<RenderRuntimeResource<I>>,
+) where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    if stats.frames_submitted > gpu.observed_submissions {
+        gpu.observed_submissions = stats.frames_submitted;
+        gpu.pending_submission = false;
+    } else if gpu.pending_submission {
+        // A zero-sized frame or graph compile failure did not produce the
+        // completion value used by a replacement. Drain the queue before
+        // releasing that unsubmitted replacement's retired range.
+        let _ = runtime.runtime().wait_idle();
+        let _ = gpu.bridge.reclaim_completed(GpuCompletionValue(u64::MAX));
+        gpu.pending_submission = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use prism_app::App;
+    use prism_asset::{AssetSources, MemSource, PageBudget, PageResidency, PageSize};
+    use prism_render_driver::BufferUsages;
+    use prism_render_driver_null::NullInstance;
+
+    use super::*;
+    use crate::{
+        render_asset::{FixedPagePoolDescriptor, FixedPageRenderQueue, FixedPageStreamingSource},
+        PrismRenderPlugin, RenderApp,
+    };
+
+    #[test]
+    fn registration_runs_cpu_io_extract_prepare_and_gpu_upload() {
+        let mut memory = MemSource::new();
+        memory.insert("page.bin", b"abcdefgh".to_vec());
+        let mut sources = AssetSources::new();
+        sources.mount("memory", Arc::new(memory), 0);
+        let residency =
+            PageResidency::new(PageSize::new(4).unwrap(), PageBudget::new(4, 1).unwrap()).unwrap();
+        let mut source = FixedPageStreamingSource::new(sources, residency);
+        source
+            .request_page("memory://page.bin", 0, prism_tasks::Priority::High, 1)
+            .unwrap();
+
+        let mut app = App::new();
+        app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
+        register_fixed_page_streaming::<NullInstance>(
+            &mut app,
+            source,
+            FixedPageStreamingConfig::new(FixedPagePoolDescriptor::new(
+                4,
+                1,
+                BufferUsages::COPY_DST,
+            )),
+        );
+        app.update();
+
+        let render = app.sub_app_mut(RenderApp).unwrap();
+        assert!(render.world.resource::<FixedPageRenderQueue>().is_empty());
+        let gpu = render
+            .world
+            .resource::<FixedPageStreamingGpu<NullInstance>>();
+        assert_eq!(gpu.bridge.pool().resident_page_count(), 1);
+    }
+}

@@ -20,12 +20,16 @@ mod context;
 mod extract;
 mod page_pool;
 mod page_residency_bridge;
+mod page_streaming;
+mod page_streaming_stage;
 mod prepare;
 mod stage;
 mod table;
 
 #[cfg(test)]
 mod page_pool_tests;
+#[cfg(test)]
+mod page_streaming_tests;
 #[cfg(test)]
 mod tests;
 
@@ -41,6 +45,13 @@ pub use page_pool::{
     PageReplaceTransaction, PageUploadTransaction,
 };
 pub use page_residency_bridge::{FixedPageResidencyBridge, PageResidencyBridgeError};
+pub use page_streaming::{
+    FixedPageBytesUploader, FixedPageIoReport, FixedPageRenderPayload, FixedPageRenderQueue,
+    FixedPageStreamingManager, FixedPageStreamingSource,
+};
+pub use page_streaming_stage::{
+    register_fixed_page_streaming, FixedPageStreamingConfig, FixedPageStreamingGpu,
+};
 pub use prepare::{
     prepare_extracted_assets, prepare_extracted_assets_with_context, AssetSyncReport,
     PrepareAssetError,

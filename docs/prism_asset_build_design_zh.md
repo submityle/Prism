@@ -5,16 +5,16 @@
 > 本文设计从外部源资产进入项目开始，覆盖导入、规范化、派生数据烘焙、平台 Cook、质量验证、内容寻址缓存、打包、签名、Patch/DLC 和运行时交付。`Prism Asset Build` 生成制品；`prism_asset` 运行时负责解析、挂载、异步加载、流送、热重载和回收。
 
 - 文档状态：开发期目标规格（Draft，允许破坏性调整；不是已交付能力声明）
-- 变更记录：本轮补充本地 DDC 显式容量驱逐、构建 artifact/Manifest 字节预算、运行时同步与锁外异步 range I/O、异步短读拒绝、异步 streaming gate 终态清理、容器单请求 range 预算门禁、确定性 range batching、GDeflate stored-block GPU 快速路径，以及 Runtime AssetServer→RenderAsset 窄桥接的验收边界；CPU fixed-page key 已绑定 source revision，页范围校验覆盖末端溢出，终态诊断记录受预算约束；渲染侧 fixed-page pool 已增加 caller-provided completion proof 的 deferred replacement/reclaim，但不改变构建侧尚未接入 GPU page request、feedback/page-table 和完整 Cook 的事实；继续冻结“BuildGraph 可并行规划 ≠ BuildExecutor 已并行发布”的边界，并将 raw v2 物理布局、跨平台锁、Source/Recipe 主链和发行安全能力列为独立验收项。
-- 当前基线：本地确定性 build/CAS/DDC/revision 垂直切片、PNG artifact importer、虚拟几何 canonical processor 和 raw package/runtime bridge 已有代码与测试；BuildGraph 与 BuildExecutor 都提供按稳定 DAG ready wave 并行执行的真实线程安全路径，DDC/CAS 工作并行而缓存更新、Manifest staging 和 Revision 发布保持确定性；质量门已支持单 artifact 与唯一内容字节总预算；运行时容器已有有界 deterministic range batching，`prism_asset` 已有锁外异步 range executor 和 CPU fixed-page residency，`prism_render_app` 已有独立的事务化 GPU fixed-page pool primitive 及 completion-safe deferred reclaim；CLI 已补齐受限的 `package`/`validate` 发行命令，但它们只覆盖当前单 PNG 垂直切片，不是通用 Cook；完整 importer/recipe、远程服务、稳定发行协议、GPU page request/feedback/page-table 接线和发布安全链仍未完成。
-- 运行时异步 I/O 验收边界：`AsyncStreamIoExecutor` 的请求 gate 已在成功、取消、失败等终态回收，并对重复执行/重复取消返回明确错误；CPU `PageResidency` 已证明固定页 `read_range`、source revision 隔离、范围末端溢出拒绝、终态元数据有界、预算、背压和确定性 eviction；GPU pool 已证明固定 buffer 的真实写入与事务回滚，但尚未接入运行时 page request、fence 或 feedback。这些只证明窄切片生命周期安全，不等于 Build/Cook、解码、GPU streaming 或 DirectStorage 发行链已经完成。
+- 变更记录：本轮补充本地 DDC 显式容量驱逐、构建 artifact/Manifest 字节预算、运行时同步与锁外异步 range I/O、异步短读拒绝、异步 streaming gate 终态清理、容器单请求 range 预算门禁、确定性 range batching、GDeflate stored-block GPU 快速路径，以及 Runtime AssetServer→RenderAsset 窄桥接；CPU fixed-page key 已绑定 source revision，页范围校验覆盖末端溢出，终态诊断记录受预算约束；`prism_render_app` 现已把固定页请求、CPU residency、owned extraction、render prepare 上传和 completion-safe deferred replacement/reclaim 接成可验证链路；feedback/page-table、完整 Cook、发行安全能力仍保持独立验收项。
+- 当前基线：本地确定性 build/CAS/DDC/revision 垂直切片、PNG artifact importer、虚拟几何 canonical processor 和 raw package/runtime bridge 已有代码与测试；BuildGraph 与 BuildExecutor 都提供按稳定 DAG ready wave 并行执行的真实线程安全路径，DDC/CAS 工作并行而缓存更新、Manifest staging 和 Revision 发布保持确定性；质量门已支持单 artifact 与唯一内容字节总预算；运行时容器已有有界 deterministic range batching，`prism_asset` 已有锁外异步 range executor 和 CPU fixed-page residency，`prism_render_app` 已有 CPU 到 GPU fixed-page streaming wiring、事务化 GPU pool 和 completion-safe deferred reclaim；CLI 已补齐受限的 `package`/`validate` 发行命令，但它们只覆盖当前单 PNG 垂直切片，不是通用 Cook；完整 importer/recipe、远程服务、稳定发行协议、GPU feedback/page-table 接线和发布安全链仍未完成。
+- 运行时异步 I/O 验收边界：`AsyncStreamIoExecutor` 的请求 gate 已在成功、取消、失败等终态回收，并对重复执行/重复取消返回明确错误；CPU `PageResidency` 已证明固定页 `read_range`、source revision 隔离、范围末端溢出拒绝、终态元数据有界、预算、背压和确定性 eviction；`prism_render_app` 的 fixed-page bridge 已证明 owned bytes 经 extract 进入 render prepare、真实 buffer 写入并按 runtime completion value 延迟回收，注册测试覆盖 Null backend，已有 GPU pool 测试覆盖 wgpu 上传/替换读回；feedback/page-table、通用解码、DirectStorage 发行链和完整 Build/Cook 仍未纳入该切片。
 - 兼容策略：开发期不承诺旧 API/格式兼容；发行前冻结 Artifact Key、Schema、Container、Manifest 与签名策略，并建立兼容矩阵及迁移/拒绝规则。
 - 目标：顶级次世代 AAA 内容规模，同时兼顾中小项目的渐进采用
 - 核心取向：效果不被工具链限制、离线换运行时性能、增量优先、确定性优先、可诊断优先
 - 参考形态：Unreal Asset Registry / Cook / DDC / IoStore、Unity Importer / Addressables、Bazel/Nix 内容寻址、DirectStorage/GDeflate、现代虚拟纹理与虚拟几何流水线
 - 关联文档：`docs/prism_asset_design_zh.md`、`docs/prism_material_pipeline_design_zh.md`、`docs/prism_rendering_architecture_zh.md`、`docs/prism_platform_design_zh.md`、`docs/prism_derived_data_contract_zh.md`（派生数据契约登记表）
 
-## 实施状态（2026-10-14）
+## 实施状态（2026-10-15）
 
 当前仓库已交付一个可验证的 M0 垂直切片，但距离本文定义的 AAA 构建系统仍有明确缺口：
 
@@ -27,7 +27,7 @@
 
 本文的 M0/M1…路线图是验收目标，不代表这些能力已经存在；只有有代码、测试和运行时对接的切片才可标为完成。
 
-### 可执行验收矩阵（2026-10-14）
+### 可执行验收矩阵（2026-10-15）
 
 矩阵中的“已实现”仅表示表列出的本地切片有实现路径及回归测试，不代表 AAA 生产成熟度、跨平台保证或性能达标。`部分实现` 表示存在可验证子集；`未实现` 表示当前没有可作为产品能力验收的端到端实现。代码/测试路径是复核入口，不把本节设计要求当成证据。
 

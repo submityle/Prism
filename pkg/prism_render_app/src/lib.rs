@@ -134,12 +134,15 @@ pub use queue::{
 pub use record::RenderRecord;
 pub use render_asset::{
     extract_assets, prepare_assets, prepare_extracted_assets,
-    prepare_extracted_assets_with_context, register_render_assets, AssetSyncReport, AssetSyncStats,
-    ExtractedAssets, FixedPageDeferredReplacement, FixedPagePool, FixedPagePoolDescriptor,
-    FixedPagePoolEvent, FixedPageReclaimEvent, FixedPageResidencyBridge, FixedPageUpload,
-    GpuPrepareBudget, PageAllocation, PagePoolError, PageReleaseTransaction,
-    PageReplaceTransaction, PageResidencyBridgeError, PageUploadTransaction, PrepareAssetError,
-    PrepareCancellation, PrepareContext, PrepareContextError, RenderAsset, RenderAssets,
+    prepare_extracted_assets_with_context, register_fixed_page_streaming, register_render_assets,
+    AssetSyncReport, AssetSyncStats, ExtractedAssets, FixedPageBytesUploader,
+    FixedPageDeferredReplacement, FixedPageIoReport, FixedPagePool, FixedPagePoolDescriptor,
+    FixedPagePoolEvent, FixedPageReclaimEvent, FixedPageRenderPayload, FixedPageRenderQueue,
+    FixedPageResidencyBridge, FixedPageStreamingConfig, FixedPageStreamingGpu,
+    FixedPageStreamingManager, FixedPageStreamingSource, FixedPageUpload, GpuPrepareBudget,
+    PageAllocation, PagePoolError, PageReleaseTransaction, PageReplaceTransaction,
+    PageResidencyBridgeError, PageUploadTransaction, PrepareAssetError, PrepareCancellation,
+    PrepareContext, PrepareContextError, RenderAsset, RenderAssets,
 };
 pub use runtime_resource::RenderRuntimeResource;
 pub use scene::{MeshClass, SceneRegistry, VisibilityWorkList};
@@ -189,13 +192,15 @@ pub mod prelude {
     pub use crate::record::RenderRecord;
     pub use crate::render_asset::{
         extract_assets, prepare_assets, prepare_extracted_assets,
-        prepare_extracted_assets_with_context, register_render_assets, AssetSyncReport,
-        AssetSyncStats, ExtractedAssets, FixedPageDeferredReplacement, FixedPagePool,
-        FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageReclaimEvent,
-        FixedPageResidencyBridge, FixedPageUpload, GpuPrepareBudget, PageAllocation, PagePoolError,
-        PageReleaseTransaction, PageReplaceTransaction, PageResidencyBridgeError,
-        PageUploadTransaction, PrepareAssetError, PrepareCancellation, PrepareContext,
-        PrepareContextError, RenderAsset, RenderAssets,
+        prepare_extracted_assets_with_context, register_fixed_page_streaming,
+        register_render_assets, AssetSyncReport, AssetSyncStats, ExtractedAssets,
+        FixedPageBytesUploader, FixedPageDeferredReplacement, FixedPageIoReport, FixedPagePool,
+        FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageReclaimEvent, FixedPageRenderPayload,
+        FixedPageRenderQueue, FixedPageResidencyBridge, FixedPageStreamingConfig,
+        FixedPageStreamingGpu, FixedPageStreamingManager, FixedPageStreamingSource,
+        FixedPageUpload, GpuPrepareBudget, PageAllocation, PagePoolError, PageReleaseTransaction,
+        PageReplaceTransaction, PageResidencyBridgeError, PageUploadTransaction, PrepareAssetError,
+        PrepareCancellation, PrepareContext, PrepareContextError, RenderAsset, RenderAssets,
     };
     pub use crate::scene::{MeshClass, SceneRegistry, VisibilityWorkList};
     pub use crate::sets::{

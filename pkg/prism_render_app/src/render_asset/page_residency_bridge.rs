@@ -175,6 +175,63 @@ impl FixedPageResidencyBridge {
         })
     }
 
+    /// Uploads an owned extracted page without borrowing the CPU residency
+    /// manager. This is the render-world entry point for cross-world page
+    /// extraction; completion remains explicit and is attached to a real queue
+    /// submission by the caller.
+    pub fn upload_page_bytes(
+        &mut self,
+        page: PageId,
+        revision: u64,
+        bytes: &[u8],
+        reclaim_after: GpuCompletionValue,
+        queue: &dyn RenderQueue,
+    ) -> Result<FixedPagePoolEvent, PageResidencyBridgeError> {
+        let expected = usize::try_from(self.pool.page_size()).unwrap_or(usize::MAX);
+        if bytes.len() != expected {
+            return Err(PageResidencyBridgeError::PageSizeMismatch {
+                cpu: bytes.len() as u64,
+                gpu: self.pool.page_size(),
+            });
+        }
+        let upload = FixedPageUpload::new(revision, bytes);
+        let event = if let Some(previous) = self.allocations.get(&page).copied() {
+            let mut transaction = self
+                .pool
+                .begin_replace(previous, upload)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            transaction
+                .upload(queue)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            let deferred = transaction
+                .commit_deferred(reclaim_after)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            FixedPagePoolEvent::Replaced {
+                previous: deferred.previous,
+                allocation: deferred.allocation,
+                revision: deferred.revision,
+            }
+        } else {
+            let mut transaction = self
+                .pool
+                .begin_upload(upload)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            transaction
+                .upload(queue)
+                .map_err(PageResidencyBridgeError::Pool)?;
+            transaction
+                .commit()
+                .map_err(PageResidencyBridgeError::Pool)?
+        };
+        let allocation = match event {
+            FixedPagePoolEvent::Allocated { allocation, .. }
+            | FixedPagePoolEvent::Replaced { allocation, .. } => allocation,
+            FixedPagePoolEvent::Released { .. } => unreachable!("upload cannot release a page"),
+        };
+        self.allocations.insert(page, allocation);
+        Ok(event)
+    }
+
     /// Reclaims all retired GPU page ranges whose completion proof is ready.
     pub fn reclaim_completed(
         &mut self,
