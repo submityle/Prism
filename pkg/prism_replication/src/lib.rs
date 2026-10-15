@@ -50,6 +50,9 @@
 //!   (authority: seed snapshots, step deltas, lagging-client catch-up) and
 //!   [`ClientSession`](session::ClientSession) (prediction fed by inbound frames),
 //!   exchanging framed bytes over any transport.
+//! - [`mapping`] — a bounded, deterministic bridge from local generational ECS
+//!   handles to stable scene/entity/component identities, with authority and
+//!   revision checks plus a versioned snapshot codec.
 //!
 //! With the `app` feature, [`plugin`] wires replication into a `prism_app` `App`
 //! as plugins (design §25.2): [`ReplicationPlugin`](plugin::ReplicationPlugin) is
@@ -84,6 +87,8 @@ pub mod arq;
 pub mod bitpack;
 
 pub mod delta;
+
+pub mod mapping;
 
 pub mod quantize;
 
