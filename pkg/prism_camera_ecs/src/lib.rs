@@ -20,7 +20,9 @@ use prism_camera::{
 };
 #[cfg(any(feature = "director", feature = "rig"))]
 use prism_ecs::prelude::IntoSystemConfigs;
-use prism_ecs::prelude::{Bundle, Component, Entity, Query, Res, ResMut, Resource, SystemSet};
+use prism_ecs::prelude::{
+    Bundle, Component, Entity, IntoSystemConfigs, Query, Res, ResMut, Resource, SystemSet,
+};
 use prism_render_architecture::view_family::{ViewImportance, ViewRegistry};
 
 #[cfg(feature = "rig")]
