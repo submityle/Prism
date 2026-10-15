@@ -94,11 +94,11 @@ pub(crate) struct FiberInner {
 #[derive(Clone, Copy)]
 pub(crate) struct FiberPtr(pub(crate) *mut FiberInner);
 
-// SAFETY: see the type docs — exactly one owner touches the pointee at a time.
 #[expect(
     unsafe_code,
     reason = "single-owner fiber handoff across worker threads"
 )]
+// SAFETY: see the type docs — exactly one owner touches the pointee at a time.
 unsafe impl Send for FiberPtr {}
 
 /// Whether the calling thread is currently executing inside a fiber.
@@ -232,12 +232,12 @@ pub(crate) extern "C" fn fiber_enter(fiber: *mut FiberInner) -> ! {
 
     let result = catch_unwind(AssertUnwindSafe(job));
 
-    // SAFETY: still exclusively owned. Record any panic, mark done, then switch
-    // back to the worker's scheduler context, which is live and awaiting us.
     #[expect(
         unsafe_code,
         reason = "finalize the fiber and switch back to the worker"
     )]
+    // SAFETY: still exclusively owned. Record any panic, mark done, then switch
+    // back to the worker's scheduler context, which is live and awaiting us.
     unsafe {
         if let Err(payload) = result {
             (*fiber).panic = Some(payload);

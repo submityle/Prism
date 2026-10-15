@@ -81,14 +81,14 @@ pub(crate) struct Stack {
     node: NumaNodeId,
 }
 
-// SAFETY: a `Stack` owns its heap region exclusively; the raw pointer is never
-// aliased. Moving that ownership between threads (worker A acquires, the fiber
-// migrates, worker B releases) is sound because only one thread holds the
-// `Stack` at a time under the scheduler's single-owner protocol.
 #[expect(
     unsafe_code,
     reason = "Stack uniquely owns its heap region; move is sound"
 )]
+// SAFETY: a `Stack` owns its heap region exclusively; the raw pointer is never
+// aliased. Moving that ownership between threads (worker A acquires, the fiber
+// migrates, worker B releases) is sound because only one thread holds the
+// `Stack` at a time under the scheduler's single-owner protocol.
 unsafe impl Send for Stack {}
 
 impl Stack {

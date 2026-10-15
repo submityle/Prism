@@ -187,7 +187,7 @@ impl TopologyDescriptor {
         let caches = CacheTopology::new(
             platform
                 .into_iter()
-                .flat_map(|p| p.caches())
+                .flat_map(prism_platform::CpuTopology::caches)
                 .filter_map(|cache| {
                     let level = match cache.level {
                         1 => CacheLevel::L1,
@@ -209,7 +209,7 @@ impl TopologyDescriptor {
             node_count,
             distances,
             caches,
-            platform_source: platform.map(|p| p.source()),
+            platform_source: platform.map(prism_platform::CpuTopology::source),
             platform_distances: measured.is_some(),
         }
     }

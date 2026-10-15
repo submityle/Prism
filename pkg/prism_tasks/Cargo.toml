@@ -3,7 +3,7 @@ name = "prism_tasks"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-description = "Prism parallel-runtime kernel: a work-stealing thread pool with per-worker deques, a global injector queue, and atomic Counter fork-join dependencies. M0 delivers the std thread pool (spawn/wait with help-on-wait, join, no deadlock) plus a single-threaded synchronous fallback; M1 adds structured parallelism (scope/join/parallel_for/reduce/prefix_sum); M2 adds real stackful fibers (a reusable stack pool, arch-specific x86_64/aarch64 context switching, and a wait-set so a job that waits yields its worker instead of blocking it) behind the off-by-default `fibers` feature, falling back to help-on-wait when it is off. Async executor, NUMA, and determinism land in later milestones. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+description = "Prism parallel-runtime kernel: a work-stealing thread pool with per-worker deques, a global injector queue, and atomic Counter fork-join dependencies. Includes structured parallelism, optional stackful fibers, async execution, named lanes, affinity/NUMA placement, deterministic replay, QoS/thread-class routing, cancellation, tracing, and a bevy_tasks-shaped compatibility layer behind feature flags. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
 license = "MIT OR Apache-2.0"
 publish = false
 

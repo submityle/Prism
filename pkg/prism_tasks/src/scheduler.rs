@@ -68,8 +68,13 @@ pub(crate) struct Shared {
     /// itself to its assigned core at startup (best-effort; see
     /// [`crate::affinity`]). `None` means run unpinned.
     affinity_plan: Option<crate::affinity::WorkerCorePlan>,
+    /// One startup outcome slot per planned worker. Slots are populated before
+    /// the pool constructor returns, so public diagnostics never expose a
+    /// partially initialized binding vector.
     worker_bindings: Option<Vec<Mutex<Option<crate::affinity::WorkerBindingRecord>>>>,
+    /// Number of workers that have published their startup binding record.
     binding_ready: AtomicUsize,
+    /// Coordinates the constructor's bounded startup publication wait.
     binding_wait: Mutex<()>,
     binding_cvar: Condvar,
 }

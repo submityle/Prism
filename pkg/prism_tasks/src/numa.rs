@@ -15,12 +15,14 @@
 //!    P-cores and background work E-cores (design §24.6).
 //!
 //! ## Probe and fallback
-//! [`Topology::detect`] consumes [`prism_platform::topology::CpuTopology`],
-//! retaining OS CPU/node ids, optional cache/distance data and provenance.
-//! Linux probes sysfs and the calling thread's allowed CPUs; unsupported or
-//! failed probes explicitly fall back. Unknown hardware classes use the
-//! ordinary Performance *scheduling lane*, not a claim that P cores were found.
-//! Inspect [`Topology::platform`] for the original class and probe source.
+//! [`Topology::detect`] prefers the real-OS twin's verified probe and falls back
+//! to [`prism_platform::topology::CpuTopology::detect`] when that probe is
+//! unavailable. It retains OS CPU/node ids, optional cache/distance data and
+//! provenance. Linux probes sysfs and the calling thread's allowed CPUs;
+//! unsupported or failed probes explicitly fall back. Unknown hardware classes
+//! use the ordinary Performance *scheduling lane*, not a claim that P cores
+//! were found. Inspect [`Topology::platform`] for the original class and probe
+//! source.
 //!
 //! The `numa` feature enables local-first stealing for affinity-planned workers.
 //! Pinning is best-effort; neither topology nor stealing binds physical memory

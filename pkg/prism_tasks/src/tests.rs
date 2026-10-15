@@ -1013,6 +1013,42 @@ mod m4 {
 
     #[cfg(not(feature = "single"))]
     #[test]
+    fn pinned_pool_publishes_one_honest_binding_record_per_worker() {
+        let pool = TaskPool::with_config(TaskPoolConfig {
+            threads: 2,
+            pin_workers: true,
+            core_class_policy: CoreClassPolicy::Flat,
+        });
+        let assignments = pool
+            .worker_core_assignments()
+            .expect("pinning should retain the worker plan");
+        let records = pool
+            .worker_binding_outcomes()
+            .expect("pinning should publish worker outcomes");
+
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(records.len(), assignments.len());
+        for (index, record) in records.iter().enumerate() {
+            let assignment = record
+                .outcome
+                .assignment()
+                .expect("every planned worker must have an assignment");
+            assert_eq!(assignment, assignments[index]);
+            if record.outcome.is_bound() {
+                // Read-back is optional on platforms that can set but cannot
+                // query affinity. When available, it must contain the core
+                // that the OS accepted for this worker.
+                if let Some(mask) = &record.effective_cpus {
+                    assert!(mask.contains(&assignment.core));
+                }
+            } else {
+                assert!(record.outcome.error().is_some());
+            }
+        }
+    }
+
+    #[cfg(not(feature = "single"))]
+    #[test]
     fn new_frame_arenas_sized_per_worker() {
         let pool = TaskPool::with_threads(4);
         let arenas = pool.new_frame_arenas(DEFAULT_ARENA_CAPACITY);
