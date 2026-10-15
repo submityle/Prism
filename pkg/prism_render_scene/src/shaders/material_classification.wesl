@@ -33,6 +33,7 @@ struct PixelClass {
     shading_class: u32,
     work_index: u32,
     material_index: u32,
+    response_class: u32,
     flags: u32,
 }
 
@@ -40,6 +41,7 @@ struct WorkItem {
     pixel_index: u32,
     material_index: u32,
     shading_class: u32,
+    response_class: u32,
     flags: u32,
 }
 
@@ -53,6 +55,7 @@ struct ResponseBucket {
 struct ExecutionPlanRow {
     left_program: u32,
     right_program: u32,
+    execution_family: u32,
 }
 
 struct ExecutionProgramRow {
@@ -60,6 +63,7 @@ struct ExecutionProgramRow {
     package_index: u32,
     permutation_count_low: u32,
     permutation_count_high: u32,
+    program_id: u32,
 }
 
 @group(0) @binding(0) var visibility_ids: texture_2d<u32>;
@@ -169,13 +173,77 @@ fn material_class(header: MaterialHeader, region_illumination: u32) -> u32 {
     return lit_class_from_closures(header.closure_mask);
 }
 
-fn response_bucket_for_legacy_class(legacy_class: u32) -> u32 {
+fn response_bucket_for_execution(header: MaterialHeader, region_illumination: u32) -> u32 {
+    let sentinel = 0xffffffffu;
+    var execution_family = 0u;
+    var program_id = 0u;
+    var response_kind = 0u;
+    let words_all_sentinel = header.execution_plan_index == sentinel
+        && header.execution_program_index == sentinel
+        && header.execution_package_index == sentinel
+        && header.execution_permutation_low == sentinel
+        && header.execution_permutation_high == sentinel;
+    let words_partial = header.execution_plan_index == sentinel
+        || header.execution_program_index == sentinel
+        || header.execution_package_index == sentinel
+        || header.execution_permutation_low == sentinel
+        || header.execution_permutation_high == sentinel;
+    if words_partial && !words_all_sentinel {
+        return sentinel;
+    }
+    if !words_all_sentinel {
+        if header.execution_plan_index >= arrayLength(&execution_plans)
+            || header.execution_program_index >= arrayLength(&execution_programs)
+            || header.execution_package_index >= arrayLength(&execution_packages) {
+            return sentinel;
+        }
+        let plan = execution_plans[header.execution_plan_index];
+        if plan.left_program != header.execution_program_index
+            && plan.right_program != header.execution_program_index {
+            return sentinel;
+        }
+        let program = execution_programs[header.execution_program_index];
+        if program.package_index != header.execution_package_index {
+            return sentinel;
+        }
+        let perm_after_limit = header.execution_permutation_high > program.permutation_count_high
+            || (header.execution_permutation_high == program.permutation_count_high
+                && header.execution_permutation_low >= program.permutation_count_low);
+        if perm_after_limit {
+            return sentinel;
+        }
+        execution_family = plan.execution_family;
+        program_id = program.program_id;
+        response_kind = program.response_kind;
+    }
+    if header.render_class == 4u || header.render_class == 5u || header.render_class == 6u {
+        // Transparent/additive/transmissive are a separate phase even when
+        // they use a built-in response program.
+        for (var bucket = 0u; bucket < arrayLength(&response_buckets); bucket = bucket + 1u) {
+            let row = response_buckets[bucket];
+            if row.execution_family == execution_family
+                && row.program_id == program_id
+                && row.render_phase == 1u {
+                return bucket;
+            }
+        }
+        return sentinel;
+    }
+    var render_phase = 0u;
+    if (response_kind == 1u || region_illumination == 1u) {
+        render_phase = 2u;
+    } else if response_kind == 3u {
+        render_phase = 3u;
+    }
     for (var bucket = 0u; bucket < arrayLength(&response_buckets); bucket = bucket + 1u) {
-        if response_buckets[bucket].legacy_class == legacy_class {
+        let row = response_buckets[bucket];
+        if row.execution_family == execution_family
+            && row.program_id == program_id
+            && row.render_phase == render_phase {
             return bucket;
         }
     }
-    return 0xffffffffu;
+    return sentinel;
 }
 
 @compute @workgroup_size(64)
@@ -190,32 +258,46 @@ fn classify_count(@builtin(global_invocation_id) id: vec3<u32>) {
     // Slot zero counts uncovered/background pixels. It is diagnostic data,
     // not a malformed-visibility error.
     if ids.x == 0xffffffffu || metadata.x == 0xffffffffu {
-        pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, 0xffffffffu, 1u);
+        pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 1u);
         atomicAdd(&diagnostics[0], 1u);
         return;
     }
     let material_index = metadata.x;
     if material_index >= params.material_capacity || material_index >= arrayLength(&materials) {
-        pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 2u);
+        pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 0xffffffffu, 2u);
         atomicAdd(&diagnostics[1], 1u);
         return;
     }
     let header = materials[material_index];
     if header.is_active == 0u || header.generation != metadata.y {
-        pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 4u);
+        pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 0xffffffffu, 4u);
         atomicAdd(&diagnostics[1], 1u);
         return;
     }
     // `metadata.z` is the visibility raster's Lit/Stylized selector
     // (`0`/`1`), or `0xffffffff` when the material has no region mask.
-    let legacy_class = material_class(header, metadata.z);
-    let shading_class = response_bucket_for_legacy_class(legacy_class);
+    let response_class = material_class(header, metadata.z);
+    let shading_class = response_bucket_for_execution(header, metadata.z);
     if shading_class >= params.class_count {
-        pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 8u);
+        pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 0xffffffffu, 8u);
         atomicAdd(&diagnostics[2], 1u);
         return;
     }
-    pixels[pixel] = PixelClass(shading_class, 0xffffffffu, material_index, header.feature_flags);
+    if response_class == 0xffffffffu || shading_class == 0xffffffffu {
+        pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 0xffffffffu, 8u);
+        atomicAdd(&diagnostics[2], 1u);
+        return;
+    }
+    // The response class is carried per work item for the finite implementation
+    // switch; it is not part of the bucket identity and therefore does not
+    // constrain the dynamic table cardinality.
+    pixels[pixel] = PixelClass(
+        shading_class,
+        0xffffffffu,
+        material_index,
+        response_class,
+        header.feature_flags,
+    );
     atomicAdd(&class_counts[shading_class], 1u);
 }
 
@@ -246,6 +328,12 @@ fn scatter_work(@builtin(global_invocation_id) id: vec3<u32>) {
         atomicAdd(&diagnostics[3], 1u);
         return;
     }
-    work[destination] = WorkItem(pixel, record.material_index, record.shading_class, record.flags);
+    work[destination] = WorkItem(
+        pixel,
+        record.material_index,
+        record.shading_class,
+        record.response_class,
+        record.flags,
+    );
     pixels[pixel].work_index = destination;
 }

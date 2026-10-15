@@ -97,11 +97,12 @@ pub use chromatic_aberration::{
     CHROMATIC_ABERRATION_EPSILON,
 };
 pub use classification::{
-    classify_material_header, classify_material_header_with_execution, ClassTableError,
-    ClassificationError, MaterialShadingClass, ShadingClassRow, ShadingClassRule,
-    RenderPhase, ResponseBucket, ResponseBucketKey, ResponseBucketTable,
-    ResponseBucketValidationError, ShadingClassTable, ShadingWorkItem, ShadingWorkPlan,
-    LEGACY_SHADING_CLASS_COUNT, MAX_SHADING_CLASSES,
+    classify_material_header, classify_material_header_with_context,
+    classify_material_header_with_execution, response_bucket_key_for_header, ClassTableError,
+    ClassificationError, MaterialShadingClass, RenderPhase, ResponseBucket, ResponseBucketKey,
+    ResponseBucketTable, ResponseBucketValidationError, ShadingClassRow, ShadingClassRule,
+    ShadingClassTable, ShadingWorkItem, ShadingWorkPlan, LEGACY_SHADING_CLASS_COUNT,
+    MAX_SHADING_CLASSES,
 };
 pub use clearcoat::evaluate_clearcoat_direct;
 pub use cloth::evaluate_cloth_direct;

@@ -15,8 +15,7 @@ use bevy_material::{
 };
 use bevy_render::{
     render_resource::{
-        BindGroupEntries, BindGroupLayout, CachedComputePipelineId,
-        ComputePassDescriptor,
+        BindGroupEntries, BindGroupLayout, CachedComputePipelineId, ComputePassDescriptor,
         ComputePipelineDescriptor, PipelineCache, ShaderStages, TextureSampleType,
     },
     renderer::{RenderContext, RenderDevice, ViewQuery},
@@ -24,28 +23,9 @@ use bevy_render::{
 use bevy_shader::Shader;
 use bytemuck::{Pod, Zeroable};
 
-use prism_render_shading::{ResponseBucketTable, LEGACY_SHADING_CLASS_COUNT};
+use prism_render_shading::LEGACY_SHADING_CLASS_COUNT;
 
 pub const CLASSIFICATION_WORKGROUP_SIZE: u32 = 64;
-
-/// The engine's live shading-class count, derived once from the built-in PCM
-/// catalogue (roadmap P2-j).
-///
-/// The shader's prefix-sum/scatter arrays are fixed-width — WGSL has no dynamic
-/// arrays — so `MAX_SHADING_CLASSES` stays the *capacity*, while the number of
-/// buckets actually dispatched comes from the class table. A catalogue that
-/// would not fit is a construction error, caught where the table is built.
-pub(crate) fn builtin_shading_class_count() -> u32 {
-    use std::sync::OnceLock;
-    static COUNT: OnceLock<u32> = OnceLock::new();
-    *COUNT.get_or_init(|| ResponseBucketTable::builtin_compatibility().len() as u32)
-}
-
-pub(crate) fn builtin_shading_bucket_table() -> &'static ResponseBucketTable {
-    use std::sync::OnceLock;
-    static TABLE: OnceLock<ResponseBucketTable> = OnceLock::new();
-    TABLE.get_or_init(ResponseBucketTable::builtin_compatibility)
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq, Eq)]
@@ -54,19 +34,6 @@ pub(crate) struct GpuShadingBucket {
     pub program_id: u32,
     pub render_phase: u32,
     pub legacy_class: u32,
-}
-
-pub(crate) fn gpu_bucket_rows() -> Vec<GpuShadingBucket> {
-    builtin_shading_bucket_table()
-        .buckets()
-        .iter()
-        .map(|bucket| GpuShadingBucket {
-            execution_family: bucket.execution_family as u32,
-            program_id: bucket.program_id.0,
-            render_phase: bucket.render_phase as u32,
-            legacy_class: bucket.legacy_class,
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -89,6 +56,7 @@ pub(crate) struct GpuShadingPixelClass {
     pub class: u32,
     pub work_index: u32,
     pub material_index: u32,
+    pub response_class: u32,
     pub flags: u32,
 }
 
@@ -264,7 +232,7 @@ pub(crate) fn dispatch_material_classification(
         // P2-j: the live class count is the table's, not the capacity. The
         // table is derived once from the built-in registry (which is what the
         // engine actually implements) and cached, so a pass never rebuilds it.
-        class_count: builtin_shading_class_count(),
+        class_count: buffers.bucket_count,
     };
     if params.pixel_count == 0 {
         return;
@@ -335,7 +303,7 @@ mod tests {
     #[test]
     fn abi_sizes_and_dispatch_use_the_expected_contract() {
         assert_eq!(size_of::<GpuShadingClassificationParams>(), 24);
-        assert_eq!(size_of::<GpuShadingPixelClass>(), 16);
+        assert_eq!(size_of::<GpuShadingPixelClass>(), 20);
         assert_eq!(size_of::<GpuShadingDispatchArgs>(), 12);
         assert_eq!(INVALID_CLASS, u32::MAX);
         assert_eq!(classification_dispatch(0).workgroups_x, 0);

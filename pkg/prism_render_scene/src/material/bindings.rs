@@ -106,12 +106,12 @@ impl FromWorld for MaterialBindGroup {
         });
         let execution_plan_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("prism material execution plans"),
-            contents: bytemuck::cast_slice(&[[u32::MAX; 2]]),
+            contents: bytemuck::cast_slice(&[[u32::MAX; 3]]),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
         let execution_program_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("prism material execution programs"),
-            contents: bytemuck::cast_slice(&[[0_u32; 4]]),
+            contents: bytemuck::cast_slice(&[[0_u32; 5]]),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         });
         let execution_package_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
@@ -243,7 +243,7 @@ impl MaterialBindGroup {
                 &self.execution_plan_buffer,
                 0,
                 bytemuck::cast_slice(if plans.is_empty() {
-                    &[[u32::MAX; 2]]
+                    &[[u32::MAX; 3]]
                 } else {
                     plans
                 }),
@@ -252,7 +252,7 @@ impl MaterialBindGroup {
                 &self.execution_program_buffer,
                 0,
                 bytemuck::cast_slice(if programs.is_empty() {
-                    &[[0_u32; 4]]
+                    &[[0_u32; 5]]
                 } else {
                     programs
                 }),

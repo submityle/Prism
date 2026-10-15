@@ -156,8 +156,15 @@ fn unlit_contract_and_execution_row_are_decode_only_and_unlit_typed() {
             ChannelMask::default(),
         )
         .unwrap();
-    assert_eq!(tables.gpu_program_rows(), vec![[2, package.get(), 1, 0]]);
-    assert_eq!(tables.gpu_plan_rows(), vec![[program.get(), u32::MAX]]);
+    assert_eq!(tables.gpu_program_rows(), vec![[2, package.get(), 1, 0, 2]]);
+    assert_eq!(
+        tables.gpu_plan_rows(),
+        vec![[
+            program.get(),
+            u32::MAX,
+            ExecutionFamily::FusedBuiltin as u32
+        ]]
+    );
     assert_eq!(
         tables
             .bind_raw(plan.get(), program.get(), package.get(), 0)

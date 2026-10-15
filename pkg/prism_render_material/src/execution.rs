@@ -499,25 +499,28 @@ impl MaterialExecutionTables {
     }
 
     /// Returns the compact GPU plan rows. The row contains the program indices
-    /// accepted by the plan; the shader uses it to reject a forged plan/program
-    /// tuple before it classifies a pixel.
+    /// accepted by the plan plus its verified execution family; the shader uses
+    /// all three words to reject a forged plan/program tuple and to derive the
+    /// response bucket key without a legacy-class projection.
     #[must_use]
-    pub fn gpu_plan_rows(&self) -> Vec<[u32; 2]> {
+    pub fn gpu_plan_rows(&self) -> Vec<[u32; 3]> {
         self.plans
             .iter()
             .map(|plan| {
                 [
                     plan.left.get(),
                     plan.right.map_or(u32::MAX, |index| index.get()),
+                    plan.execution_family as u32,
                 ]
             })
             .collect()
     }
 
     /// Returns compact GPU program rows: response kind, owning package and the
-    /// full 64-bit permutation-space count split into two words.
+    /// full 64-bit permutation-space count split into two words, followed by
+    /// the stable `ProgramId` used by response bucket identity.
     #[must_use]
-    pub fn gpu_program_rows(&self) -> Vec<[u32; 4]> {
+    pub fn gpu_program_rows(&self) -> Vec<[u32; 5]> {
         self.programs
             .iter()
             .map(|program| {
@@ -528,14 +531,30 @@ impl MaterialExecutionTables {
                     ProgramRef::Registered(_) => RESPONSE_PROGRAM_KIND_CUSTOM,
                 };
                 let count = program.permutations.checked_total().unwrap_or(0);
+                let program_id = match program.program {
+                    ProgramRef::Builtin(BuiltinProgram::Lit) => 0,
+                    ProgramRef::Builtin(BuiltinProgram::Npr) => 1,
+                    ProgramRef::Builtin(BuiltinProgram::Unlit) => 2,
+                    ProgramRef::Registered(id) => id.0,
+                };
                 [
                     kind,
                     program.package.get(),
                     count as u32,
                     (count >> 32) as u32,
+                    program_id,
                 ]
             })
             .collect()
+    }
+
+    /// Returns the verified execution family for a checked binding.
+    #[must_use]
+    pub fn execution_family_for_binding(
+        &self,
+        binding: MaterialExecutionBinding,
+    ) -> Result<ExecutionFamily, MaterialExecutionError> {
+        Ok(self.plan(binding.shading_plan_index)?.execution_family)
     }
 
     /// Number of verified package rows exposed to the GPU bounds check.
@@ -780,10 +799,17 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(tables.gpu_plan_rows(), vec![[program.get(), u32::MAX]]);
+        assert_eq!(
+            tables.gpu_plan_rows(),
+            vec![[
+                program.get(),
+                u32::MAX,
+                ExecutionFamily::FusedBuiltin as u32
+            ]]
+        );
         assert_eq!(
             tables.gpu_program_rows(),
-            vec![[RESPONSE_PROGRAM_KIND_LIT, package.get(), 2, 0]]
+            vec![[RESPONSE_PROGRAM_KIND_LIT, package.get(), 2, 0, 0]]
         );
         assert_eq!(tables.gpu_package_count(), 1);
         assert_eq!(

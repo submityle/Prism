@@ -3,6 +3,7 @@
 
 use super::{ModuleId, PermutationIndex};
 
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ExecutionFamily {
     FusedBuiltin,

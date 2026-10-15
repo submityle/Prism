@@ -12,9 +12,7 @@ use bevy_render::{
 };
 use prism_render_shading::ShadingWorkItem;
 
-use super::classification_gpu::{
-    gpu_bucket_rows, builtin_shading_bucket_table, GpuShadingDispatchArgs, GpuShadingPixelClass,
-};
+use super::classification_gpu::{GpuShadingDispatchArgs, GpuShadingPixelClass};
 
 pub(crate) const VISIBILITY_ID_FORMAT: TextureFormat = TextureFormat::Rgba32Uint;
 
@@ -151,12 +149,19 @@ pub(crate) struct ViewShadingBuffers {
     pub(crate) output_bind_group: Option<BindGroup>,
     pub(crate) size: bevy_math::UVec2,
     pub(crate) capacity: u32,
+    pub(crate) bucket_count: u32,
+    pub(crate) bucket_table_version: u32,
 }
 
 impl ViewShadingBuffers {
-    fn new(device: &RenderDevice, size: bevy_math::UVec2) -> Self {
+    fn new(
+        device: &RenderDevice,
+        size: bevy_math::UVec2,
+        bucket_table: &prism_render_shading::ResponseBucketTable,
+        bucket_table_version: u32,
+    ) -> Self {
         let capacity = size.x.saturating_mul(size.y).max(1);
-        let bucket_count = builtin_shading_bucket_table().len() as u32;
+        let bucket_count = bucket_table.len() as u32;
         Self {
             pixel_classes: storage_buffer::<GpuShadingPixelClass>(
                 device,
@@ -170,12 +175,7 @@ impl ViewShadingBuffers {
                 capacity,
                 false,
             ),
-            class_counts: storage_buffer::<u32>(
-                device,
-                "prism class counts",
-                bucket_count,
-                false,
-            ),
+            class_counts: storage_buffer::<u32>(device, "prism class counts", bucket_count, false),
             class_offsets: storage_buffer::<u32>(
                 device,
                 "prism class offsets",
@@ -197,13 +197,26 @@ impl ViewShadingBuffers {
             diagnostics: storage_buffer::<u32>(device, "prism classification diagnostics", 4, true),
             buckets: device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("prism response bucket table"),
-                contents: bytemuck::cast_slice(&gpu_bucket_rows()),
+                contents: bytemuck::cast_slice(
+                    &bucket_table
+                        .buckets()
+                        .iter()
+                        .map(|bucket| super::classification_gpu::GpuShadingBucket {
+                            execution_family: bucket.execution_family as u32,
+                            program_id: bucket.program_id.0,
+                            render_phase: bucket.render_phase as u32,
+                            legacy_class: bucket.legacy_class,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             }),
             input_bind_group: None,
             output_bind_group: None,
             size,
             capacity,
+            bucket_count,
+            bucket_table_version,
         }
     }
 
@@ -433,6 +446,7 @@ pub(crate) fn prepare_visibility_buffers(
 pub(crate) fn prepare_shading_buffers(
     mut commands: Commands,
     settings: Res<super::runtime::PrismShadingSettings>,
+    materials: Res<super::super::material::runtime::RenderMaterialRegistry>,
     device: Res<RenderDevice>,
     views: Query<(
         Entity,
@@ -454,12 +468,23 @@ pub(crate) fn prepare_shading_buffers(
             }
             continue;
         };
-        if existing.is_some_and(|buffers| buffers.size == size) {
+        let bucket_table_version = materials.registry.execution_table_version();
+        if existing.is_some_and(|buffers| {
+            buffers.size == size && buffers.bucket_table_version == bucket_table_version
+        }) {
             continue;
         }
-        commands
-            .entity(entity)
-            .insert(ViewShadingBuffers::new(&device, size));
+        let bucket_table = materials
+            .registry
+            .execution_tables()
+            .map(prism_render_shading::ResponseBucketTable::from_execution_tables)
+            .unwrap_or_else(prism_render_shading::ResponseBucketTable::builtin_compatibility);
+        commands.entity(entity).insert(ViewShadingBuffers::new(
+            &device,
+            size,
+            &bucket_table,
+            bucket_table_version,
+        ));
     }
 }
 

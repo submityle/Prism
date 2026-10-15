@@ -42,8 +42,8 @@ pub struct MaterialRegistry {
     /// Verified dense execution identities live beside the baked record. They
     /// are runtime table bindings and must not be reconstructed from a hash.
     execution_bindings: Vec<Option<MaterialExecutionBinding>>,
-    execution_plan_rows: Vec<[u32; 2]>,
-    execution_program_rows: Vec<[u32; 4]>,
+    execution_plan_rows: Vec<[u32; 3]>,
+    execution_program_rows: Vec<[u32; 5]>,
     execution_package_count: u32,
     execution_table_version: u32,
     execution_tables: Option<MaterialExecutionTables>,
@@ -325,12 +325,12 @@ impl MaterialRegistry {
     }
 
     #[must_use]
-    pub fn execution_plan_rows(&self) -> &[[u32; 2]] {
+    pub fn execution_plan_rows(&self) -> &[[u32; 3]] {
         &self.execution_plan_rows
     }
 
     #[must_use]
-    pub fn execution_program_rows(&self) -> &[[u32; 4]] {
+    pub fn execution_program_rows(&self) -> &[[u32; 5]] {
         &self.execution_program_rows
     }
 

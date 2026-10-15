@@ -1,8 +1,8 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use prism_render_material::{
     BuiltinProgram, ClosureKind, GpuMaterialHeader, LobeLayout, MaterialExecutionTables,
-    MaterialFeatureFlags, MaterialRenderClass, ProgramRef, RenderDomain, ResponseProgramLayout,
-    SURFACE_RESPONSE_PROGRAMS,
+    MaterialFeatureFlags, MaterialRenderClass, ProgramRef, RenderDomain, ResponseProgramIndex,
+    ResponseProgramLayout, SURFACE_RESPONSE_PROGRAMS,
 };
 
 /// Response family derived from the verified program table. This is a shading
@@ -134,7 +134,10 @@ impl ResponseBucketTable {
                 legacy_class,
             });
             table.by_key.insert(key, bucket_id);
-            table.by_legacy_class.entry(legacy_class).or_insert(bucket_id);
+            table
+                .by_legacy_class
+                .entry(legacy_class)
+                .or_insert(bucket_id);
         }
         table
     }
@@ -142,18 +145,79 @@ impl ResponseBucketTable {
     #[must_use]
     pub fn builtin_compatibility() -> Self {
         use prism_render_material::{ExecutionFamily, ProgramId};
-        let entries: Vec<_> = (0..LEGACY_SHADING_CLASS_COUNT as u32)
-            .map(|legacy_class| {
+        let programs = [
+            (ProgramId(0), MaterialShadingClass::Principled as u32),
+            (ProgramId(1), MaterialShadingClass::Npr as u32),
+            (ProgramId(2), MaterialShadingClass::Unlit as u32),
+        ];
+        let phases = [
+            RenderPhase::Opaque,
+            RenderPhase::Transparent,
+            RenderPhase::Stylized,
+            RenderPhase::Custom,
+        ];
+        let entries = programs.into_iter().flat_map(|(program, legacy_class)| {
+            phases.into_iter().map(move |phase| {
                 (
-                    ResponseBucketKey::new(
-                        ExecutionFamily::FusedBuiltin,
-                        ProgramId(legacy_class),
-                        RenderPhase::Opaque,
-                    ),
+                    ResponseBucketKey::new(ExecutionFamily::FusedBuiltin, program, phase),
                     legacy_class,
                 )
             })
-            .collect();
+        });
+        Self::from_keys(entries)
+    }
+
+    /// Builds the complete finite lookup table exposed by verified execution
+    /// tables.  The table contains every program/family pair used by a plan
+    /// and every render-phase projection; it never invents a program id and it
+    /// remains immutable for the lifetime of the frame resources.
+    #[must_use]
+    pub fn from_execution_tables(execution: &MaterialExecutionTables) -> Self {
+        use prism_render_material::ExecutionFamily;
+        let phases = [
+            RenderPhase::Opaque,
+            RenderPhase::Transparent,
+            RenderPhase::Stylized,
+            RenderPhase::Custom,
+        ];
+        // All-sentinel materials remain valid after an execution table is
+        // installed, so retain the finite built-in fallback rows as well as
+        // the verified rows discovered below.
+        let mut entries = ResponseBucketTable::builtin_compatibility()
+            .buckets()
+            .iter()
+            .map(|bucket| (bucket.key(), bucket.legacy_class))
+            .collect::<Vec<_>>();
+        for [left, right, family] in execution.gpu_plan_rows() {
+            let family = match family {
+                0 => ExecutionFamily::FusedBuiltin,
+                1 => ExecutionFamily::SplitResponse,
+                2 => ExecutionFamily::Composition,
+                _ => continue,
+            };
+            for program_index in [left, right] {
+                if program_index == u32::MAX {
+                    continue;
+                }
+                let Ok(program_index) =
+                    ResponseProgramIndex::from_raw(program_index, execution.programs())
+                else {
+                    continue;
+                };
+                let Ok(program) = execution.program(program_index) else {
+                    continue;
+                };
+                let program = program.program();
+                let key_program = program_id(program);
+                let legacy_class = legacy_class_for_program(program);
+                entries.extend(phases.into_iter().map(|phase| {
+                    (
+                        ResponseBucketKey::new(family, key_program, phase),
+                        legacy_class,
+                    )
+                }));
+            }
+        }
         Self::from_keys(entries)
     }
 
@@ -205,7 +269,6 @@ pub enum ResponseBucketValidationError {
     MissingCompiledEntry { bucket: ResponseBucket },
 }
 
-
 /// The runtime shading bucket a pixel is binned into for the deferred/compute
 /// shading pass. This is a *derived* projection of the orthogonal material axes
 /// (`illumination` + `closure_mask` + `render_class`), not a stored field: the
@@ -250,6 +313,10 @@ pub struct ShadingWorkItem {
     pub pixel_index: u32,
     pub material_index: u32,
     pub shading_class: u32,
+    /// Compatibility implementation arm selected per material. This is not
+    /// bucket identity; multiple materials with the same execution key may
+    /// still select different closure arms inside the compiled response.
+    pub response_class: u32,
     pub flags: u32,
 }
 
@@ -308,9 +375,23 @@ impl ShadingWorkPlan {
         capacity: u32,
         buckets: &ResponseBucketTable,
     ) -> Self {
-        let mut classified: Vec<Vec<ShadingWorkItem>> = (0..buckets.len())
-            .map(|_| Vec::new())
-            .collect();
+        Self::build_with_region_and_buckets_and_execution(
+            pixels, materials, capacity, buckets, None,
+        )
+    }
+
+    /// Variant used by the live CPU replay path when ABI8 execution tables are
+    /// installed. It derives the exact same key as the GPU classifier and only
+    /// falls back to the all-sentinel built-in path when no binding is present.
+    pub fn build_with_region_and_buckets_and_execution(
+        pixels: impl IntoIterator<Item = (u32, super::VisibilityPixel, u32)>,
+        materials: &[GpuMaterialHeader],
+        capacity: u32,
+        buckets: &ResponseBucketTable,
+        execution: Option<&MaterialExecutionTables>,
+    ) -> Self {
+        let mut classified: Vec<Vec<ShadingWorkItem>> =
+            (0..buckets.len()).map(|_| Vec::new()).collect();
         let mut accepted = 0usize;
         for (pixel_index, pixel, region_illumination) in pixels {
             if !pixel.is_valid() || accepted >= capacity as usize {
@@ -322,17 +403,23 @@ impl ShadingWorkPlan {
             if header.generation != pixel.material_generation {
                 continue;
             }
-            let Ok(class) = classify_material_header_with_region(header, region_illumination)
+            let Ok(key) = response_bucket_key_for_header(header, execution, region_illumination)
             else {
                 continue;
             };
-            let Some(bucket_id) = buckets.bucket_for_legacy_class(class as u32) else {
+            let Ok(response_class) =
+                classify_material_header_with_context(header, execution, region_illumination)
+            else {
+                continue;
+            };
+            let Some(bucket_id) = buckets.bucket_id(key) else {
                 continue;
             };
             classified[bucket_id as usize].push(ShadingWorkItem {
                 pixel_index,
                 material_index: pixel.material_index,
                 shading_class: bucket_id,
+                response_class: response_class as u32,
                 flags: header.feature_flags,
             });
             accepted += 1;
@@ -936,11 +1023,23 @@ fn response_identity(
     header: &GpuMaterialHeader,
     execution: Option<&MaterialExecutionTables>,
 ) -> Result<ResponseIdentity, ClassificationError> {
+    let (_, program) = response_execution_identity(header, execution)?;
+    Ok(response_identity_from_program(program))
+}
+
+fn response_execution_identity(
+    header: &GpuMaterialHeader,
+    execution: Option<&MaterialExecutionTables>,
+) -> Result<(prism_render_material::ExecutionFamily, ProgramRef), ClassificationError> {
     let words = header.execution_binding_words();
     let sentinel = GpuMaterialHeader::EXECUTION_BINDING_SENTINEL;
     if words.iter().all(|word| *word == sentinel) {
-        // Slot-zero/fallback materials are the ABI8 equivalent of legacy Lit.
-        return Ok(ResponseIdentity::Lit);
+        // Slot-zero/fallback materials are the ABI8 equivalent of a fused Lit
+        // response and therefore have a real, deterministic bucket key.
+        return Ok((
+            prism_render_material::ExecutionFamily::FusedBuiltin,
+            ProgramRef::Builtin(BuiltinProgram::Lit),
+        ));
     }
     if words.iter().any(|word| *word == sentinel) {
         return Err(ClassificationError::InvalidExecutionBinding);
@@ -956,11 +1055,14 @@ fn response_identity(
             u64::from(words[3]) | (u64::from(words[4]) << 32),
         )
         .map_err(|_| ClassificationError::InvalidExecutionBinding)?;
+    let family = execution
+        .execution_family_for_binding(binding)
+        .map_err(|_| ClassificationError::InvalidExecutionBinding)?;
     let program = execution
         .program(binding.response_program_index)
         .map_err(|_| ClassificationError::InvalidExecutionBinding)?
         .program();
-    Ok(response_identity_from_program(program))
+    Ok((family, program))
 }
 
 fn response_identity_from_program(program: ProgramRef) -> ResponseIdentity {
@@ -969,6 +1071,80 @@ fn response_identity_from_program(program: ProgramRef) -> ResponseIdentity {
         ProgramRef::Builtin(BuiltinProgram::Npr) => ResponseIdentity::Npr,
         ProgramRef::Builtin(BuiltinProgram::Unlit) => ResponseIdentity::Unlit,
         ProgramRef::Registered(_) => ResponseIdentity::Custom,
+    }
+}
+
+fn program_id(program: ProgramRef) -> prism_render_material::ProgramId {
+    match program {
+        ProgramRef::Builtin(BuiltinProgram::Lit) => prism_render_material::ProgramId(0),
+        ProgramRef::Builtin(BuiltinProgram::Npr) => prism_render_material::ProgramId(1),
+        ProgramRef::Builtin(BuiltinProgram::Unlit) => prism_render_material::ProgramId(2),
+        ProgramRef::Registered(id) => id,
+    }
+}
+
+fn legacy_class_for_program(program: ProgramRef) -> u32 {
+    match program {
+        ProgramRef::Builtin(BuiltinProgram::Lit) => MaterialShadingClass::Principled as u32,
+        ProgramRef::Builtin(BuiltinProgram::Npr) => MaterialShadingClass::Npr as u32,
+        ProgramRef::Builtin(BuiltinProgram::Unlit) => MaterialShadingClass::Unlit as u32,
+        ProgramRef::Registered(_) => MaterialShadingClass::Custom as u32,
+    }
+}
+
+fn render_phase_for_header(
+    header: &GpuMaterialHeader,
+    program: ProgramRef,
+    region_illumination: u32,
+) -> RenderPhase {
+    if matches!(
+        MaterialRenderClass::from_u32(header.render_class),
+        Some(
+            MaterialRenderClass::Transmissive
+                | MaterialRenderClass::Transparent
+                | MaterialRenderClass::Additive
+        )
+    ) {
+        return RenderPhase::Transparent;
+    }
+    if region_illumination == 1 || matches!(program, ProgramRef::Builtin(BuiltinProgram::Npr)) {
+        return RenderPhase::Stylized;
+    }
+    if matches!(program, ProgramRef::Registered(_)) {
+        return RenderPhase::Custom;
+    }
+    RenderPhase::Opaque
+}
+
+/// Derives the live response bucket key from the verified execution binding.
+/// The returned key is the sole bucket identity; legacy shading classes are
+/// deliberately absent from this lookup.
+pub fn response_bucket_key_for_header(
+    header: &GpuMaterialHeader,
+    execution: Option<&MaterialExecutionTables>,
+    region_illumination: u32,
+) -> Result<ResponseBucketKey, ClassificationError> {
+    let (family, program) = response_execution_identity(header, execution)?;
+    Ok(ResponseBucketKey::from_program(
+        family,
+        program,
+        render_phase_for_header(header, program, region_illumination),
+    ))
+}
+
+/// Shared CPU classifier entry used by the replay/work-plan builder. Keeping
+/// this wrapper beside the key derivation prevents CPU diagnostics from
+/// silently reverting to the old unbound-only classifier.
+pub fn classify_material_header_with_context(
+    header: &GpuMaterialHeader,
+    execution: Option<&MaterialExecutionTables>,
+    region_illumination: u32,
+) -> Result<MaterialShadingClass, ClassificationError> {
+    match execution {
+        Some(execution) => {
+            classify_material_header_with_execution(header, execution, region_illumination)
+        }
+        None => classify_material_header_with_region(header, region_illumination),
     }
 }
 
@@ -1340,8 +1516,16 @@ mod tests {
         };
         let plan =
             ShadingWorkPlan::build_with_region([(4, pixel(), 0), (9, pixel(), 1)], &[lit], 8);
-        assert_eq!(plan.counts[MaterialShadingClass::Principled.index()], 1);
-        assert_eq!(plan.counts[MaterialShadingClass::Npr.index()], 1);
+        let opaque = plan
+            .buckets
+            .bucket_id(response_bucket_key_for_header(&lit, None, 0).unwrap())
+            .unwrap() as usize;
+        let stylized = plan
+            .buckets
+            .bucket_id(response_bucket_key_for_header(&lit, None, 1).unwrap())
+            .unwrap() as usize;
+        assert_eq!(plan.counts[opaque], 1);
+        assert_eq!(plan.counts[stylized], 1);
         assert_eq!(plan.work[0].pixel_index, 4);
         assert_eq!(plan.work[1].pixel_index, 9);
     }

@@ -178,6 +178,7 @@ struct WorkItem {
     pixel_index: u32,
     material_index: u32,
     shading_class: u32,
+    response_class: u32,
     flags: u32,
 }
 
@@ -1887,13 +1888,6 @@ fn shade_cache_channel_for_class(shading_class: u32) -> u32 {
     return 0u;
 }
 
-fn response_class_for_bucket(bucket_id: u32) -> u32 {
-    if bucket_id >= arrayLength(&response_buckets) {
-        return 0xffffffffu;
-    }
-    return response_buckets[bucket_id].legacy_class;
-}
-
 fn shade_chart_key_less(
     row: ShadeChartInfo,
     object_id: u32,
@@ -2148,8 +2142,8 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     if item.shading_class != params.shading_class {
         return;
     }
-    let response_class = response_class_for_bucket(params.shading_class);
-    if response_class == 0xffffffffu {
+    let response_class = item.response_class;
+    if response_class == 0xffffffffu || response_class > SHADING_CLASS_CUSTOM {
         return;
     }
 
