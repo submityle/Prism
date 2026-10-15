@@ -8,6 +8,18 @@
 //! The optional `state_hash` is a semantic authority hash, not a checksum of
 //! the encoded bytes; byte-stream integrity is deliberately delegated to the
 //! durable backend or transport framing.
+//!
+//! The version-one wire format is fixed little-endian and has no implicit
+//! compression or sorting:
+//!
+//! - header: `magic[4], version:u8, flags:u8, record_count:u32`;
+//! - record: `tick:u64, sequence:u64, channel:u8, direction:u8,
+//!   has_state_hash:u8, flags:u8, payload_len:u32`, followed by an optional
+//!   `state_hash:u64` and exactly `payload_len` bytes.
+//!
+//! Both flag fields are currently zero.  The decoder requires the complete
+//! input slice to contain exactly the declared records, so a truncated or
+//! trailing stream is rejected instead of being partially replayed.
 
 use alloc::vec::Vec;
 
@@ -134,14 +146,21 @@ pub struct ReplayLog {
 }
 
 impl ReplayLog {
-    /// Create a bounded recording.  A zero record limit intentionally records
-    /// nothing and makes every append fail explicitly.
+    /// Create a bounded recording.
+    ///
+    /// `max_records` is an append limit, not a requested allocation size.  A
+    /// zero limit intentionally records nothing and makes every append fail
+    /// explicitly.  `max_payload` is applied exactly as supplied; callers
+    /// that want the standard payload limit should use [`Self::with_capacity`].
     #[must_use]
     pub fn new(max_records: usize, max_payload: usize) -> Self {
         Self {
-            records: Vec::with_capacity(max_records),
+            // Do not allocate based on an untrusted or merely declarative
+            // bound.  The limit is enforced by `append`; allocation follows
+            // the actual number of accepted records.
+            records: Vec::new(),
             max_records,
-            max_payload: max_payload.min(DEFAULT_MAX_PAYLOAD),
+            max_payload,
         }
     }
 
@@ -194,6 +213,18 @@ impl ReplayLog {
         self.records.is_empty()
     }
 
+    /// Maximum number of records this log accepts.
+    #[must_use]
+    pub const fn max_records(&self) -> usize {
+        self.max_records
+    }
+
+    /// Maximum payload length accepted by this log.
+    #[must_use]
+    pub const fn max_payload(&self) -> usize {
+        self.max_payload
+    }
+
     /// Create a cursor starting before the first event.
     #[must_use]
     pub const fn cursor(&self) -> ReplayCursor {
@@ -239,7 +270,10 @@ impl ReplayLog {
         max_records: usize,
         max_payload: usize,
     ) -> Result<Self, ReplayError> {
-        if bytes.len() < HEADER_LEN || bytes[..4] != REPLAY_MAGIC {
+        if bytes.len() < HEADER_LEN {
+            return Err(ReplayError::Truncated);
+        }
+        if bytes[..4] != REPLAY_MAGIC {
             return Err(ReplayError::InvalidMagic);
         }
         if bytes[4] != REPLAY_VERSION {
@@ -302,7 +336,13 @@ impl ReplayLog {
     }
 }
 
-/// A monotonic cursor over a [`ReplayLog`].
+/// A monotonic index cursor over a [`ReplayLog`].
+///
+/// The cursor is not tied to a particular log.  `next` advances only when a
+/// record is returned, and an exhausted cursor remains at the end index.  If
+/// the same log later accepts another record, that record becomes visible to
+/// the cursor; callers that need an immutable replay view should stop
+/// appending before playback begins.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReplayCursor {
     index: usize,
@@ -320,6 +360,12 @@ impl ReplayCursor {
     #[must_use]
     pub const fn position(self) -> usize {
         self.index
+    }
+
+    /// Number of records still available from this cursor.
+    #[must_use]
+    pub fn remaining(self, log: &ReplayLog) -> usize {
+        log.len().saturating_sub(self.index)
     }
 
     /// Whether the cursor has consumed `log`.
@@ -398,15 +444,27 @@ mod tests {
         assert_eq!(decoded, log);
 
         let mut cursor = decoded.cursor();
+        assert_eq!(cursor.remaining(&decoded), 2);
         assert_eq!(cursor.next(&decoded).unwrap().payload, b"first");
         assert_eq!(cursor.position(), 1);
+        assert_eq!(cursor.remaining(&decoded), 1);
         assert_eq!(cursor.next(&decoded).unwrap().payload, b"second");
         assert!(cursor.next(&decoded).is_none());
+        assert_eq!(cursor.remaining(&decoded), 0);
         assert!(cursor.is_finished(&decoded));
     }
 
     #[test]
     fn append_rejects_capacity_payload_and_tick_rewind() {
+        let mut empty = ReplayLog::new(0, 0);
+        assert_eq!(empty.max_records(), 0);
+        assert_eq!(empty.max_payload(), 0);
+        assert_eq!(empty.encode().unwrap(), b"PRRP\x01\x00\x00\x00\x00\x00");
+        assert_eq!(
+            empty.append(record(0, 0, &[])),
+            Err(ReplayError::CapacityExceeded { limit: 0 })
+        );
+
         let mut log = ReplayLog::new(1, 3);
         log.append(record(2, 0, b"abc")).unwrap();
         assert_eq!(
@@ -431,6 +489,11 @@ mod tests {
 
     #[test]
     fn decoder_rejects_truncation_invalid_fields_and_trailing_bytes() {
+        assert_eq!(
+            ReplayLog::decode(&[], 1, DEFAULT_MAX_PAYLOAD),
+            Err(ReplayError::Truncated)
+        );
+
         let mut log = ReplayLog::with_capacity(1);
         log.append(record(1, 2, b"payload")).unwrap();
         let bytes = log.encode().unwrap();
@@ -444,6 +507,29 @@ mod tests {
         assert_eq!(
             ReplayLog::decode(&invalid, 1, DEFAULT_MAX_PAYLOAD),
             Err(ReplayError::InvalidField)
+        );
+
+        let mut invalid_header_flags = bytes.clone();
+        invalid_header_flags[5] = 1;
+        assert_eq!(
+            ReplayLog::decode(&invalid_header_flags, 1, DEFAULT_MAX_PAYLOAD),
+            Err(ReplayError::InvalidField)
+        );
+
+        let mut invalid_magic = bytes.clone();
+        invalid_magic[0] ^= 1;
+        assert_eq!(
+            ReplayLog::decode(&invalid_magic, 1, DEFAULT_MAX_PAYLOAD),
+            Err(ReplayError::InvalidMagic)
+        );
+
+        let mut unsupported_version = bytes.clone();
+        unsupported_version[4] = REPLAY_VERSION + 1;
+        assert_eq!(
+            ReplayLog::decode(&unsupported_version, 1, DEFAULT_MAX_PAYLOAD),
+            Err(ReplayError::UnsupportedVersion {
+                version: REPLAY_VERSION + 1
+            })
         );
 
         let mut trailing = bytes;
@@ -504,5 +590,39 @@ mod tests {
             ReplayLog::decode(&log.encode().unwrap(), 5, 8).unwrap(),
             log
         );
+    }
+
+    #[test]
+    fn encoding_is_exactly_little_endian_and_deterministic() {
+        let mut log = ReplayLog::new(1, 2);
+        log.append(ReplayRecord::new(
+            0x0102_0304_0506_0708,
+            0x1112_1314_1516_1718,
+            NetChannel::RpcReliable,
+            ReplayDirection::ServerToClient,
+            Some(0x2122_2324_2526_2728),
+            vec![0xaa, 0xbb],
+        ))
+        .unwrap();
+
+        let expected = vec![
+            b'P', b'R', b'R', b'P', 1, 0, 1, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1, 24, 23, 22, 21, 20,
+            19, 18, 17, 3, 1, 1, 0, 2, 0, 0, 0, 40, 39, 38, 37, 36, 35, 34, 33, 0xaa, 0xbb,
+        ];
+        assert_eq!(log.encode().unwrap(), expected);
+        assert_eq!(log.encode().unwrap(), expected);
+    }
+
+    #[test]
+    fn cursor_can_observe_records_appended_after_exhaustion() {
+        let mut log = ReplayLog::with_capacity(2);
+        log.append(record(1, 1, b"first")).unwrap();
+        let mut cursor = log.cursor();
+        assert_eq!(cursor.next(&log).unwrap().payload, b"first");
+        assert!(cursor.next(&log).is_none());
+
+        log.append(record(2, 2, b"second")).unwrap();
+        assert_eq!(cursor.next(&log).unwrap().payload, b"second");
+        assert!(cursor.is_finished(&log));
     }
 }
