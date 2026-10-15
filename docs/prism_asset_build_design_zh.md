@@ -31,6 +31,8 @@
 
 ### 可执行验收矩阵（2026-10-15）
 
+补充状态（2026-10-16）：`prism_asset_build_core::release` 已增加持久化 `TrustPolicy`/`ReleaseTrustStore`，包含公钥派生 key-id、严格 canonical 编解码与校验和、key 添加/轮换/撤销、最低 revision、防止撤销 key 恢复、原子替换和 stale-writer 拒绝。该能力已由 release 单元回归覆盖，但 CLI `package/validate` 仍只支持 caller-owned key file，尚未读取持久化 trust policy；远程信任根、密钥托管、Provenance 和完整发行服务仍未完成。
+
 矩阵中的“已实现”仅表示表列出的本地切片有实现路径及回归测试，不代表 AAA 生产成熟度、跨平台保证或性能达标。`部分实现` 表示存在可验证子集；`未实现` 表示当前没有可作为产品能力验收的端到端实现。代码/测试路径是复核入口，不把本节设计要求当成证据。
 
 | 能力边界 | 状态 | 当前实现与可复核证据 | 尚未满足的验收条件 |
