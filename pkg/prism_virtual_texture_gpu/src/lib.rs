@@ -36,7 +36,10 @@ pub mod buffer;
 pub mod context;
 pub mod feedback;
 pub mod lookup;
+pub mod page_table;
 
 pub use context::GpuContext;
+pub use feedback::readback::{FeedbackReadbackError, GpuFeedbackReadback};
 pub use feedback::{CellMap, GpuFeedbackDecode, REQ_NONE};
 pub use lookup::{GpuPageLookup, GpuPageResolution, MISS};
+pub use page_table::{GpuPageTableStorage, PageTableStorageError};

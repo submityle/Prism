@@ -45,6 +45,8 @@ use prism_render_architecture::texture_streaming::{
 use crate::buffer;
 use crate::context::GpuContext;
 
+pub mod readback;
+
 /// Desired-mip sentinel written by the kernel for a not-requested cell, matching
 /// the shader's `REQ_NONE`. Distinguishable from any real mip, which is a `u8`.
 pub const REQ_NONE: u32 = u32::MAX;
