@@ -53,7 +53,8 @@
 //! frame hash is reproducible on a *fixed* platform/toolchain, which is what
 //! regression dual-runs need. Both deferrals are documented, not stubbed.
 
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 
 use prism_ecs::resource::Resource;
 use prism_ecs::system::ResMut;

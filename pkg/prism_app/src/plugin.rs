@@ -14,6 +14,7 @@
 //! dependencies are reported at assembly time, never deferred to run time
 //! (design §23 risk #5).
 
+use alloc::vec::Vec;
 use core::any::{type_name, TypeId};
 
 use crate::app::App;

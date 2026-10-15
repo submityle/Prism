@@ -8,8 +8,10 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-prism_ecs = { path = "../prism_ecs" }
+prism_ecs = { path = "../prism_ecs", default-features = false }
 prism_time = { path = "../prism_time", default-features = false }
+hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
+libm = "0.2"
 prism_tasks = { path = "../prism_tasks", optional = true }
 prism_window = { path = "../prism_window", optional = true }
 prism_window_winit = { path = "../prism_window_winit", optional = true }
@@ -18,12 +20,10 @@ prism_window_winit = { path = "../prism_window_winit", optional = true }
 prism_reflect = { path = "../prism_reflect", default-features = false, features = ["std"], optional = true }
 
 [features]
-# `std` is on by default: the Runner / main loop needs std (design §1). The
-# App graph + plugin registry are no_std+alloc-capable in principle, but M0
-# ships the std runner, so std is required for now. This is an honest current
-# constraint, not a permanent design decision.
+# The App core is no_std + alloc. `std` enables platform clocks/probing,
+# process environment access, pacing, diagnostics, and the server runner.
 default = ["std"]
-std = ["prism_time/std"]
+std = ["prism_ecs/std", "prism_time/std"]
 
 # §8.2 / §20: dispatch each phase schedule's conflict-free system waves across a
 # `prism_tasks` work-stealing pool (stage-internal parallelism). Pulls in

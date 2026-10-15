@@ -55,10 +55,13 @@
 //!
 //! [`Resource`]: prism_ecs::resource::Resource
 //! [`Event`]: prism_ecs::event::Event
-//! [`BTreeMap`]: std::collections::BTreeMap
+//! [`BTreeMap`]: alloc::collections::BTreeMap
 
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
+use alloc::borrow::ToOwned;
+use alloc::collections::btree_map::Entry;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use prism_ecs::event::Event;
 use prism_ecs::resource::Resource;
@@ -498,6 +501,7 @@ impl Settings {
     /// A thin convenience wrapper over
     /// [`apply_env_vars`](Settings::apply_env_vars); see it for the key mapping
     /// and return semantics.
+    #[cfg(feature = "std")]
     pub fn apply_process_env(&mut self, prefix: &str) -> Vec<SettingChange> {
         self.apply_env_vars(std::env::vars(), prefix)
     }

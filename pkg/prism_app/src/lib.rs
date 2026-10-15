@@ -198,15 +198,25 @@
 //!
 //! # `std`
 //!
-//! M0 requires `std` (the runner / main loop needs it, design §1). The App
-//! graph + plugin registry are `no_std + alloc`-capable in principle; relaxing
-//! the `std` requirement is future work and is honestly not done yet.
+//! With default features disabled, the App core uses only `core` and `alloc`:
+//! plugin graphs, phase insertion, SubApps, fixed steps, states, settings,
+//! snapshots, and optional `determinism` record/replay remain available.
+//! Supply [`TimeUpdateStrategy::ManualDelta`] to advance time without a
+//! platform clock. Platform probing, process environment access, paced/server
+//! runners, diagnostics, and background threads require `std`. The unpaced
+//! [`HeadlessRunner`], [`ScheduleRunnerOnce`], and custom runners remain usable.
 //!
 //! # Provenance
 //!
 //! This crate is engine-agnostic and contains **no Unreal Engine or Unity
 //! source or derived code**, and depends on **no `bevy_*` crate**. It borrows
 //! only publicly documented architectural shapes.
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 pub mod app;
 #[cfg(feature = "std")]
@@ -258,7 +268,7 @@ pub mod trace;
 #[cfg(feature = "std")]
 pub mod watchdog;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests;
 
 pub use app::{App, Plugins, PluginsState};

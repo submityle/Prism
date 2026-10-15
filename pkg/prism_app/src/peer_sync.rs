@@ -12,6 +12,8 @@
 //! driver carries no networking dependency: a real transport fills in the hashes
 //! and inputs it has received, and a test supplies a fake.
 
+use alloc::vec::Vec;
+
 use crate::determinism::FrameHash;
 use crate::rollback_replay::RollbackReplay;
 use prism_ecs::world::World;
@@ -104,6 +106,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use prism_ecs::component::Component;
     use prism_ecs::entity::Entity;
 

@@ -32,8 +32,10 @@
 //! builds (design §24.1), via [`try_into_plugins`](PluginGroupBuilder::try_into_plugins)
 //! or as a panic from [`into_plugins`](PluginGroupBuilder::into_plugins).
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::any::TypeId;
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::plugin::Plugin;
 use crate::plugin_graph::{topological_order, Node, PluginGraphError};

@@ -19,9 +19,11 @@
 //! A group with no dependency edges therefore comes out exactly in its explicit
 //! order.
 
+use alloc::vec;
+use alloc::vec::Vec;
 use core::any::TypeId;
-use std::collections::HashMap;
-use std::fmt;
+use core::fmt;
+use hashbrown::HashMap;
 
 use crate::plugin::PluginDependency;
 
@@ -71,7 +73,7 @@ impl fmt::Display for PluginGraphError {
     }
 }
 
-impl std::error::Error for PluginGraphError {}
+impl core::error::Error for PluginGraphError {}
 
 /// Topologically order `nodes` so every dependency builds before its dependent,
 /// breaking ties by the input (explicit) order.

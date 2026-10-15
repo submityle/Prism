@@ -25,6 +25,8 @@
 //! ([`verify_against_manifest`](crate::app::App::verify_against_manifest)) or a
 //! peer, take the first divergent frame, and roll back to it.
 
+use alloc::vec::Vec;
+
 use crate::determinism::RecordedInput;
 use crate::rollback::SnapshotHistory;
 use prism_ecs::world::World;
@@ -163,6 +165,7 @@ impl<F: Clone> RollbackReplay<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use prism_ecs::component::Component;
     use prism_ecs::entity::Entity;
 

@@ -24,6 +24,9 @@
 //! frame *N+1* (design §9, §24.3, §25.2) is M3 Inc2 and is honestly absent
 //! here, not stubbed.
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
 use crate::rollback::SnapshotHistory;
 use prism_ecs::schedule::{ScheduleLabel, Schedules};
 use prism_ecs::world::World;

@@ -63,11 +63,15 @@
 //!
 //! [`Resource`]: prism_ecs::resource::Resource
 //! [`Settings`]: crate::settings::Settings
-//! [`BTreeMap`]: std::collections::BTreeMap
+//! [`BTreeMap`]: alloc::collections::BTreeMap
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
-use std::fmt;
+use alloc::borrow::ToOwned;
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::error::Error;
+use core::fmt;
 
 use prism_ecs::event::Event;
 use prism_ecs::resource::Resource;
@@ -1339,7 +1343,7 @@ impl App {
         // nearest whole step. The write below still clamps to the cvar's own
         // declared bounds (separate from the cycle range).
         let next = match current {
-            SettingValue::Int(_) => SettingValue::Int(stepped.round() as i64),
+            SettingValue::Int(_) => SettingValue::Int(libm::round(stepped) as i64),
             _ => SettingValue::Float(stepped),
         };
         self.set_cvar(name, next)
@@ -2080,7 +2084,7 @@ fn format_cvar_token(value: &SettingValue) -> String {
         SettingValue::Bool(flag) => flag.to_string(),
         SettingValue::Int(int) => int.to_string(),
         SettingValue::Float(float) => {
-            if float.is_finite() && float.fract() == 0.0 {
+            if float.is_finite() && libm::trunc(*float) == *float {
                 format!("{float}.0")
             } else {
                 float.to_string()

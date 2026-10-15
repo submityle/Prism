@@ -41,6 +41,8 @@
 //! [`Capabilities`]: crate::capability::Capabilities
 //! [`QualityTier`]: crate::capability::QualityTier
 
+use alloc::vec::Vec;
+
 use crate::app::App;
 use crate::capability::QualityTier;
 use crate::settings::{SettingValue, Settings, SettingsLayer};

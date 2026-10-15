@@ -14,8 +14,12 @@
 //!     .run();
 //! ```
 
-use std::any::TypeId;
-use std::collections::HashSet;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::any::TypeId;
+use hashbrown::HashSet;
 
 use prism_ecs::resource::Resource;
 use prism_ecs::schedule::{IntoSystemConfigs, Schedule, ScheduleLabel, Schedules};

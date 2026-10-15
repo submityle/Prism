@@ -31,6 +31,8 @@
 //! ([`World::register_snapshot_component_hashable`]); a component with clone glue
 //! but no value hashing contributes structure but not its value to the hash.
 
+use alloc::vec::Vec;
+
 use prism_ecs::component::ComponentId;
 use prism_ecs::world::snapshot::SnapshotRing;
 use prism_ecs::world::World;

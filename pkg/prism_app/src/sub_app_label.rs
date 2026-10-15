@@ -12,9 +12,10 @@
 //! [`TypeId`] so two different label types can never collide
 //! even if their inner values hash identically.
 
-use std::any::{Any, TypeId};
-use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
+use alloc::boxed::Box;
+use core::any::{Any, TypeId};
+use core::fmt::Debug;
+use core::hash::{Hash, Hasher};
 
 /// A type-erasable key identifying a secondary [`SubApp`](crate::sub_app::SubApp).
 ///
@@ -115,7 +116,7 @@ impl Hash for BoxedSubAppLabel {
 
 impl Debug for BoxedSubAppLabel {
     #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         Debug::fmt(&self.0, f)
     }
 }

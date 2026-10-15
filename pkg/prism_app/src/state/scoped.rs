@@ -56,6 +56,7 @@
 //! [`State`]: prism_ecs::schedule::State
 //! [`State<S>`]: prism_ecs::schedule::State
 
+use alloc::vec::Vec;
 use core::any::TypeId;
 
 use prism_ecs::component::Component;

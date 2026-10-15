@@ -4,7 +4,9 @@
 //! fixed loop is one frame-level anchor; its accumulator and inner tick order
 //! remain owned by [`crate::fixed`].
 
-use std::sync::Arc;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use prism_ecs::schedule::{BoxedScheduleLabel, Schedule, ScheduleLabel, Schedules};
 use prism_ecs::world::World;
@@ -38,8 +40,8 @@ pub enum PhaseOrderError {
     MissingAnchor(BoxedScheduleLabel),
 }
 
-impl std::fmt::Display for PhaseOrderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for PhaseOrderError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::DuplicatePhase(label) => {
                 write!(f, "phase {label:?} is already present or reserved")
@@ -49,10 +51,11 @@ impl std::fmt::Display for PhaseOrderError {
     }
 }
 
-impl std::error::Error for PhaseOrderError {}
+impl core::error::Error for PhaseOrderError {}
 
 pub(crate) struct Phase {
     label: BoxedScheduleLabel,
+    #[cfg_attr(not(any(feature = "std", test)), allow(dead_code))]
     pub(crate) name: &'static str,
     pub(crate) run: Arc<dyn Fn(&mut SubApp) + Send + Sync>,
 }
@@ -132,7 +135,7 @@ impl PhaseOrder {
             } else {
                 return Err(PhaseOrderError::MissingAnchor(anchor));
             };
-        let phase = Phase::schedule(label.clone(), std::any::type_name::<L>(), startup);
+        let phase = Phase::schedule(label.clone(), core::any::type_name::<L>(), startup);
         world.init_resource::<Schedules>();
         let schedules = world.resource_mut::<Schedules>();
         if !schedules.contains(label.clone()) {
