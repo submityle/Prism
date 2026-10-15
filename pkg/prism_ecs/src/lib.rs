@@ -89,6 +89,7 @@ mod hierarchy_tests;
 pub mod observer;
 #[cfg(feature = "partition")]
 pub mod partition;
+pub mod policy;
 pub mod prefab;
 pub mod query;
 pub mod reaction;
