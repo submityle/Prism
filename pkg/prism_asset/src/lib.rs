@@ -48,8 +48,10 @@
 //! - **Hot reload (implemented in part):** watcher/event batching, reload plans,
 //!   dependency-aware reassembly, last-known-good retention, and narrow
 //!   resident-root asynchronous reload with per-path epoch supersede are
-//!   available; asynchronous labeled-revision reassembly, full labeled-revision
-//!   lifecycle, and Windows-equivalent secure path opening remain incomplete.
+//!   available. Async reload can stage labeled outputs when the root and every
+//!   labeled dependency is already resident; automatic new-dependency loading,
+//!   sibling new-label closure assembly, the full EDL pipeline, and
+//!   Windows-equivalent secure path opening remain incomplete.
 //! - **Not implemented here:** offline cooking, DDC/CAS ownership, codecs,
 //!   labeled-asset async assembly, range-backed assembly,
 //!   streaming residency, DirectStorage/GPU decode, and release packaging.

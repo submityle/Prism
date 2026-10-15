@@ -7,10 +7,11 @@
 //! committing one dependency-aware revision. Awaiting a dependency yields the
 //! CPU worker, so a fixed worker count cannot deadlock solely because parent
 //! assemblies are waiting for child flights. Reload flights support a narrow
-//! resident-root revision replacement with per-path epoch supersede; labeled
-//! revisions and automatic loading of new reload dependencies remain
-//! unsupported. Range reads and preemptive cancellation are also outside this
-//! slice. Priority orders queued CPU-pool work where possible; ticket
+//! resident-root revision replacement with per-path epoch supersede and labeled
+//! outputs whose dependencies are already resident; automatic loading of new
+//! reload dependencies remains unsupported. Range reads and preemptive
+//! cancellation are also outside this slice. Priority orders queued CPU-pool
+//! work where possible; ticket
 //! cancellation stops that caller from waiting but does not kill shared or
 //! already-running work.
 
