@@ -15,10 +15,11 @@
 //! cancellation stops that caller from waiting but does not kill shared or
 //! already-running work.
 
+use crate::loader_exec::{AssetLoaders, FullLoadOutput};
 use crate::server::{
-    AsyncLoadPreparation, AsyncReloadCandidate, AsyncReloadCandidateAsset,
-    AsyncReloadCommitError, AsyncReloadPlan,
+    AsyncLoadPreparation, AsyncReloadCandidate, AsyncReloadCandidateAsset, AsyncReloadCommitError,
 };
+use crate::source::AssetSources;
 use crate::{AssetPath, AssetServer, AssetTypeId, UntypedHandle};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -880,11 +881,118 @@ async fn execute_async_reload(
         Err(error) if error.starts_with("no loader for ") => return Err(LoadFailure::NoLoader),
         Err(error) => return Err(LoadFailure::AssemblyFailed(error)),
     };
+    let output = decode_reload_source(
+        &scheduler,
+        &plan.sources,
+        &plan.loaders,
+        &plan.path,
+        plan.type_id,
+    )
+    .await
+    .map_err(LoadFailure::AssemblyFailed)?;
+    let mut decoded = BTreeMap::new();
+    let mut pending = VecDeque::new();
+    decoded.insert(plan.path.clone(), (plan.type_id, output));
+    pending.push_back(plan.path.clone());
+    const MAX_REVISION_CLOSURE: usize = 4096;
+    while let Some(current_path) = pending.pop_front() {
+        if decoded.len() > MAX_REVISION_CLOSURE {
+            return Err(LoadFailure::AssemblyFailed(
+                "async reload dependency closure exceeds the bounded candidate limit".into(),
+            ));
+        }
+        let requests = {
+            let (_, output) = decoded
+                .get(&current_path)
+                .expect("pending paths are inserted before they are queued");
+            let mut requests = Vec::new();
+            requests.extend(output.primary.dependencies.iter().cloned());
+            for labeled in &output.labeled {
+                requests.extend(labeled.dependencies.iter().cloned());
+            }
+            requests
+        };
+        for dependency in requests {
+            let source_path = dependency.path.clone().without_label();
+            if decoded.contains_key(&source_path) {
+                continue;
+            }
+            let dependency_type = if dependency.path.has_label() {
+                plan.loaders
+                    .policy()
+                    .resolve_untyped(&source_path)
+                    .and_then(|loader| plan.loaders.policy().produced_type(loader))
+                    .ok_or_else(|| {
+                        LoadFailure::AssemblyFailed(format!("no loader for {source_path}"))
+                    })?
+            } else {
+                dependency
+                    .expected_type
+                    .or_else(|| {
+                        plan.loaders
+                            .policy()
+                            .resolve_untyped(&source_path)
+                            .and_then(|loader| plan.loaders.policy().produced_type(loader))
+                    })
+                    .ok_or_else(|| {
+                        LoadFailure::AssemblyFailed(format!("no loader for {source_path}"))
+                    })?
+            };
+            let output = decode_reload_source(
+                &scheduler,
+                &plan.sources,
+                &plan.loaders,
+                &source_path,
+                dependency_type,
+            )
+            .await
+            .map_err(LoadFailure::AssemblyFailed)?;
+            if output.primary.type_id != dependency_type {
+                return Err(LoadFailure::AssemblyFailed(format!(
+                    "loader produced an unexpected asset type for {source_path}"
+                )));
+            }
+            decoded.insert(source_path.clone(), (dependency_type, output));
+            pending.push_back(source_path);
+        }
+    }
+    let candidate = AsyncReloadCandidate {
+        assets: decoded
+            .into_iter()
+            .map(|(path, (type_id, output))| AsyncReloadCandidateAsset {
+                path,
+                type_id,
+                output,
+            })
+            .collect(),
+    };
+    match server.commit_async_reload(plan, candidate) {
+        Ok(handle) => Ok(handle),
+        Err(AsyncReloadCommitError::Superseded) => Err(LoadFailure::Superseded),
+        Err(AsyncReloadCommitError::Rejected(error)) => Err(LoadFailure::AssemblyFailed(error)),
+    }
+}
+
+/// Reads and decodes one source revision outside the server state mutex.
+/// Reload assembly deliberately owns its decoded outputs until commit so a
+/// newly introduced dependency, label, or recursive dependency cannot observe
+/// a partially published resident graph.
+async fn decode_reload_source(
+    scheduler: &LoadScheduler,
+    sources: &AssetSources,
+    loaders: &AssetLoaders,
+    path: &AssetPath,
+    type_id: AssetTypeId,
+) -> Result<FullLoadOutput, String> {
     let bytes = if scheduler.io_pool.is_single_threaded() {
-        read_reload_bytes_inline(&plan)
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sources.read(path))) {
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(_) => Err("asset source or loader panicked".to_string()),
+        }
     } else {
-        let read_sources = plan.sources.clone();
-        let read_path = plan.path.clone();
+        let read_sources = sources.clone();
+        let read_path = path.clone();
         scheduler
             .io_pool
             .spawn_async(async move {
@@ -897,32 +1005,15 @@ async fn execute_async_reload(
                 }
             })
             .await
-    };
-    let bytes = bytes.map_err(LoadFailure::AssemblyFailed)?;
-    let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        plan.loaders
-            .load_for_type(&plan.path, plan.type_id, &bytes)
+    }?;
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        loaders
+            .load_for_type(path, type_id, &bytes)
             .map_err(|error| error.to_string())
     })) {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => return Err(LoadFailure::AssemblyFailed(error)),
-        Err(_) => return Err(LoadFailure::WorkerPanicked),
-    };
-    // The commit path resolves all dependency requests against the resident
-    // graph while the server lock is held. Keeping the decoded root as one
-    // candidate preserves atomic publication and avoids a second lock/lookup
-    // pass between assembly and commit.
-    let candidate = AsyncReloadCandidate {
-        assets: vec![AsyncReloadCandidateAsset {
-            path: plan.path.clone(),
-            type_id: plan.type_id,
-            output,
-        }],
-    };
-    match server.commit_async_reload(plan, candidate) {
-        Ok(handle) => Ok(handle),
-        Err(AsyncReloadCommitError::Superseded) => Err(LoadFailure::Superseded),
-        Err(AsyncReloadCommitError::Rejected(error)) => Err(LoadFailure::AssemblyFailed(error)),
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err("asset source or loader panicked".to_string()),
     }
 }
 
@@ -1084,16 +1175,6 @@ impl Drop for ExecutionSlotFuture {
 }
 
 fn read_bytes_inline(plan: &crate::server::AsyncLoadPlan) -> Result<Vec<u8>, String> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        plan.sources.read(&plan.path)
-    })) {
-        Ok(Ok(bytes)) => Ok(bytes),
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(_) => Err("asset source or loader panicked".to_string()),
-    }
-}
-
-fn read_reload_bytes_inline(plan: &AsyncReloadPlan) -> Result<Vec<u8>, String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         plan.sources.read(&plan.path)
     })) {
@@ -1554,7 +1635,7 @@ mod tests {
     }
 
     #[test]
-    fn async_reload_does_not_publish_unresident_dependencies() {
+    fn async_reload_publishes_a_new_dependency_closure_atomically() {
         let server = Arc::new(AssetServer::new());
         server.register_loader(ReloadRootLoader);
         server.register_loader(ReloadDependencyLoader);
@@ -1578,11 +1659,14 @@ mod tests {
                 .unwrap(),
         );
 
-        assert!(
-            matches!(result, Err(LoadFailure::AssemblyFailed(message)) if message.contains("not resident"))
-        );
-        assert_eq!(server.total_assets(), 2);
+        let result = result.expect("the revision-local dependency must be assembled");
+        assert_eq!(server.total_assets(), 3);
         assert!(server.is_loaded(root.untyped_id()));
+        assert!(server.is_loaded(result.id()));
+        let dependency = server
+            .load_untyped("b.rdep")
+            .expect("new dependency is resident after the commit");
+        assert!(server.is_loaded(dependency.id()));
         assert_eq!(scheduler.in_flight(), 0);
     }
 
