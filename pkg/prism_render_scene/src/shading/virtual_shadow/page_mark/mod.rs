@@ -18,15 +18,13 @@
 //! * [`bind_groups`] -- the `PrepareBindGroups` group-0 assembly;
 //! * [`dispatch`] -- the `Core3d` node clearing and marking the bitmap.
 //!
-//! **Incremental, not a no-op.** This pass does real GPU work every frame --
-//! it clears and populates a genuine resident-window request bitmap from live
-//! receivers. What it does *not* yet have is a downstream GPU consumer: the
-//! request bitmap is produced but not yet read back by the physical-page
-//! allocator, so no page-table / physical-atlas residency is driven from it
-//! yet. That allocation bridge (an LRU page-table readback feeding the resolve
-//! pass) is a separate future slice. Until it lands the marked bitmap has no
-//! in-crate reader outside this pass, so the plugin-facing re-exports below are
-//! `dead_code`-allowed rather than trimmed.
+//! This pass does real GPU work every frame: it clears and populates a genuine
+//! resident-window request bitmap from live receivers. The bitmap is copied
+//! through the render-graph readback state machine, decoded by the CPU page
+//! driver, and used to upload the virtual-to-physical page table. The resulting
+//! residency and resident-page list are bridged in the same `PrepareResources`
+//! phase to the resolve sampler and physical-atlas caster-depth pass; the only
+//! intentional latency is the readback's unavoidable one-frame copy.
 
 mod bind_groups;
 mod dispatch;
