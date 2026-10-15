@@ -17,6 +17,8 @@ mod heightfield_surface;
 #[cfg(test)]
 mod heightfield_surface_tests;
 mod lod;
+#[cfg(feature = "scatter")]
+mod placement_deletion;
 mod planet_mesh;
 mod rebake;
 mod representation;
@@ -49,6 +51,12 @@ pub use heightfield_surface::{
     PlanarHeightfieldSurface, HEIGHTFIELD_SURFACE_VERSION,
 };
 pub use lod::{evaluate_lod, LodError, LodEvaluation, LodMetric};
+#[cfg(feature = "scatter")]
+pub use placement_deletion::{
+    filter_heightfield_placement, DeletionFilteredHeightfieldPlacement,
+    HeightfieldPlacementDeletionBudget, HeightfieldPlacementDeletionError,
+    HeightfieldPlacementDeletionSet, HEIGHTFIELD_PLACEMENT_DELETION_VERSION,
+};
 pub use planet_mesh::{PlanetHeightfieldMesh, PlanetMeshConfig};
 pub use rebake::{
     DirtyRegion, RebakeBudget, RebakeError, RebakePlan, RebakePlanner, RebakeRequest, RebakeTask,

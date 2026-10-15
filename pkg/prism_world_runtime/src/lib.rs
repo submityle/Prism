@@ -18,6 +18,17 @@ use prism_world_stream::{CellManifest, DemandSource, SectorId, StreamAction, Str
 
 mod routed_io;
 pub use routed_io::RoutedCellIo;
+#[cfg(feature = "placement")]
+mod placement_persist;
+#[cfg(feature = "placement")]
+pub use placement_persist::{
+    decode_placement_deletions, encode_placement_deletions, PersistedHeightfieldPlacementOutput,
+    PlacementDeletionBinding, PlacementDeletionCodecBudget, PlacementDeletionSnapshot,
+    PlacementPersistenceError, PLACEMENT_DELETION_CODEC_VERSION, PLACEMENT_DELETION_HEADER_BYTES,
+    PLACEMENT_DELETION_KEY_BYTES,
+};
+#[cfg(all(test, feature = "placement"))]
+mod placement_persist_tests;
 mod scatter_persist;
 pub use scatter_persist::{
     decode_scatter_deletions, encode_scatter_deletions, PersistedFieldScatterOutput,

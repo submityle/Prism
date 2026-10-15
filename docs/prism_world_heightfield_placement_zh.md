@@ -14,8 +14,9 @@ XZ 半开请求没有 Y slab，因此高山不会因为源随机 Y 不在薄离�
 不保证每平方米最终数量、最大填充、泊松输入过程或蓝噪声频谱。
 
 本片交付 CPU 平面放置，不是 GPU twin、行星/任意朝向表面投影、曲率/数据层/
-跨散布层规则、风/交互、持久删除 codec、索引增量编辑或产品 scene/render graph 接线。
-既有三维候选删除 codec 不能直接代替新 placement 完整身份。
+跨散布层规则、风/交互、索引增量编辑或产品 scene/render graph 接线。
+完整 placement 删除及独立 `PPLD` 持久 codec 现由
+`prism_world_placement_deletions_zh.md` 交付；既有三维候选删除 codec 不能替代它。
 
 ## 候选身份、顺序与重建
 

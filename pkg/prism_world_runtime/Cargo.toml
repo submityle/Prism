@@ -13,11 +13,14 @@ prism_world_stream = { path = "../prism_world_stream" }
 prism_world_io = { path = "../prism_world_io", default-features = false }
 prism_world_persist = { path = "../prism_world_persist", default-features = false }
 prism_world_residency = { path = "../prism_world_residency" }
+prism_world_terrain = { path = "../prism_world_terrain", optional = true, default-features = false, features = ["scatter"] }
 prism_tasks = { path = "../prism_tasks", optional = true, default-features = false, features = ["std"] }
 prism_world_gpu = { path = "../prism_world_gpu", optional = true, default-features = false }
 
 [features]
 default = ["std"]
+# Full-key CPU heightfield placement deletion persistence; no GPU dependency.
+placement = ["dep:prism_world_terrain"]
 std = ["prism_world_io/std", "prism_world_persist/std"]
 tasks = ["std", "dep:prism_tasks", "prism_world_io/tasks"]
 # Host-owned native reactor and IO workers; no default feature expansion.
@@ -34,6 +37,15 @@ required-features = ["std"]
 name = "scatter_deletions"
 harness = false
 required-features = ["std"]
+
+[[example]]
+name = "placement_deletions"
+required-features = ["std", "placement"]
+
+[[bench]]
+name = "placement_deletions"
+harness = false
+required-features = ["std", "placement"]
 
 [lints.rust]
 unsafe_code = "forbid"
