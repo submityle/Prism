@@ -11,7 +11,8 @@ use prism_render_architecture::{
 };
 use prism_render_material::{
     fallback_material_header, BlendDomain, BuiltinProgram, ChannelMask, ClosureKind, CompiledEntry,
-    ExecutionFamily, GpuMaterialHeader, LobeMask, MaterialExecutionTables, ProgramId, ProgramRef,
+    ExecutionFamily, GpuMaterialHeader, LobeMask, MaterialExecutionTables, MaterialFeatureFlags,
+    ProgramId, ProgramRef,
     ResponseMaskSource, ShadingPlan,
 };
 use prism_render_shading::{
@@ -21,6 +22,8 @@ use prism_render_shading::{
 use wgpu::util::DeviceExt;
 
 const INVALID: u32 = u32::MAX;
+const PIXEL_CLASS_WORDS: usize = 5;
+const SHADING_WORK_ITEM_WORDS: usize = 8;
 const WIDTH: u32 = 17;
 const HEIGHT: u32 = 9;
 const PIXELS: u32 = WIDTH * HEIGHT;
@@ -180,10 +183,12 @@ fn fixture() -> Fixture {
         ProgramRef::Builtin(BuiltinProgram::Unlit),
     ]
     .into_iter()
-    // Deliberately register out of key order, including ids that collide with
-    // all builtin ids. Registered(0) is valid and must remain response kind 3.
+    // Deliberately register out of key order across small and large ids. The
+    // builtin identities 0..=2 are excluded here because a same-family
+    // collision is intentionally rejected as an ambiguous response bucket;
+    // that negative contract is covered by the classification unit tests.
     .chain(
-        [65535, 4096, 255, 64, 21, 16, 11, 7, 3, 2, 1, 0]
+        [65535, 4096, 255, 64, 21, 16, 11, 8, 7, 6, 5, 4, 3]
             .into_iter()
             .map(|id| ProgramRef::Registered(ProgramId(id))),
     );
@@ -197,10 +202,12 @@ fn fixture() -> Fixture {
                 PermutationSpace::try_new([2]).unwrap(),
             )
             .unwrap();
-        let family = if matches!(program, ProgramRef::Builtin(_)) {
-            ExecutionFamily::FusedBuiltin
-        } else {
-            ExecutionFamily::SplitResponse
+        let family = match program {
+            // Only Lit advertises the fused builtin execution contract. NPR and
+            // Unlit are builtin programs too, but their manifests intentionally
+            // require the split response path.
+            ProgramRef::Builtin(BuiltinProgram::Lit) => ExecutionFamily::FusedBuiltin,
+            ProgramRef::Builtin(_) | ProgramRef::Registered(_) => ExecutionFamily::SplitResponse,
         };
         let plan = execution
             .register_plan(
@@ -234,19 +241,29 @@ fn fixture() -> Fixture {
         )
         .unwrap();
     for program in &programs[..2] {
-        materials.push(bound_header(
+        let mut header = bound_header(
             mixed,
             execution
                 .bind_raw(plan.get(), program.get(), package.get(), 0)
                 .unwrap()
                 .to_words(),
-        ));
+        );
+        header.feature_flags |= MaterialFeatureFlags::ILLUMINATION_BLEND.0;
+        materials.push(header);
     }
     let good_materials = materials.len();
     let mut visibility: Vec<_> = (0..PIXELS)
         .map(|pixel| {
             let material = pixel as usize % good_materials;
-            let region = [INVALID, 0, 1][pixel as usize / good_materials % 3];
+            let is_continuous = materials[material]
+                .feature_flags
+                & MaterialFeatureFlags::ILLUMINATION_BLEND.0
+                != 0;
+            let region = if is_continuous {
+                [0, 32_768, u16::MAX as u32][pixel as usize / good_materials % 3]
+            } else {
+                [INVALID, 0, 1][pixel as usize / good_materials % 3]
+            };
             (
                 pixel,
                 VisibilityPixel {
@@ -257,7 +274,7 @@ fn fixture() -> Fixture {
                     material_index: material as u32,
                     material_generation: materials[material].generation,
                     barycentrics_unorm16: 0,
-                    coverage_and_flags: 255,
+                    coverage_and_flags: if is_continuous { region } else { 255 },
                 },
                 region,
             )
@@ -504,10 +521,10 @@ impl Harness {
             .collect();
         let classes = fixture.buckets.len();
         let output = [
-            storage(device, &vec![INVALID; PIXELS as usize * 5]),
+            storage(device, &vec![INVALID; PIXELS as usize * PIXEL_CLASS_WORDS]),
             storage(
                 device,
-                &vec![INVALID; physical_capacity.max(1) as usize * 5],
+                &vec![INVALID; physical_capacity.max(1) as usize * SHADING_WORK_ITEM_WORDS],
             ),
             storage(device, &vec![0; classes]),
             storage(device, &vec![INVALID; classes]),
@@ -635,6 +652,17 @@ fn assert_parity(fixture: &Fixture, cpu: &ShadingWorkPlan, result: &[Vec<u32>], 
         })
         .collect();
     assert_eq!(buckets, &expected_buckets, "uploaded CPU bucket keys");
+    for item in cpu.work.iter().filter(|item| item.response_meta != INVALID) {
+        assert_ne!(item.right_shading_class, INVALID);
+        assert_eq!(item.right_response_kind, 1, "continuous blend right arm is NPR");
+        assert_eq!(
+            item.response_meta & u16::MAX as u32,
+            fixture.visibility[item.pixel_index as usize]
+                .1
+                .coverage_and_flags,
+            "packed continuous mask matches visibility metadata"
+        );
+    }
     let mut expected_diagnostics = [0u32; 4];
     for &(pixel, flag) in &fixture.rejected {
         expected_diagnostics[match flag {
@@ -649,7 +677,7 @@ fn assert_parity(fixture: &Fixture, cpu: &ShadingWorkPlan, result: &[Vec<u32>], 
             fixture.visibility[pixel].1.material_index
         };
         assert_eq!(
-            &pixels[pixel * 5..pixel * 5 + 5],
+            &pixels[pixel * PIXEL_CLASS_WORDS..pixel * PIXEL_CLASS_WORDS + PIXEL_CLASS_WORDS],
             &[INVALID, INVALID, material, INVALID, flag],
             "rejected pixel {pixel}"
         );
@@ -659,7 +687,11 @@ fn assert_parity(fixture: &Fixture, cpu: &ShadingWorkPlan, result: &[Vec<u32>], 
     assert_eq!(diagnostics.as_slice(), expected_diagnostics, "diagnostics");
     let mut seen = vec![false; PIXELS as usize];
     let mut actual_counts = vec![0; cpu.buckets.len()];
-    for (destination, item) in work.chunks_exact(5).take(written).enumerate() {
+    for (destination, item) in work
+        .chunks_exact(SHADING_WORK_ITEM_WORDS)
+        .take(written)
+        .enumerate()
+    {
         let pixel = item[0] as usize;
         assert!(
             pixel < seen.len() && !seen[pixel],
@@ -678,7 +710,10 @@ fn assert_parity(fixture: &Fixture, cpu: &ShadingWorkPlan, result: &[Vec<u32>], 
                 expected.material_index,
                 expected.shading_class,
                 expected.response_kind,
-                expected.flags
+                expected.flags,
+                expected.right_shading_class,
+                expected.right_response_kind,
+                expected.response_meta,
             ]
         );
         let bucket = item[2] as usize;
@@ -689,7 +724,7 @@ fn assert_parity(fixture: &Fixture, cpu: &ShadingWorkPlan, result: &[Vec<u32>], 
         );
         actual_counts[bucket] += 1;
         assert_eq!(
-            &pixels[pixel * 5..pixel * 5 + 5],
+            &pixels[pixel * PIXEL_CLASS_WORDS..pixel * PIXEL_CLASS_WORDS + PIXEL_CLASS_WORDS],
             &[item[2], destination as u32, item[1], item[3], item[4]],
             "pixel/work back-reference"
         );
@@ -703,12 +738,15 @@ fn assert_parity(fixture: &Fixture, cpu: &ShadingWorkPlan, result: &[Vec<u32>], 
         );
     }
     assert!(
-        work[written * 5..].iter().all(|word| *word == INVALID),
+        work[written * SHADING_WORK_ITEM_WORDS..]
+            .iter()
+            .all(|word| *word == INVALID),
         "unwritten work/guard records unchanged"
     );
     for expected in &cpu.work {
         let pixel = expected.pixel_index as usize;
-        let record = &pixels[pixel * 5..pixel * 5 + 5];
+        let record = &pixels
+            [pixel * PIXEL_CLASS_WORDS..pixel * PIXEL_CLASS_WORDS + PIXEL_CLASS_WORDS];
         assert_eq!(
             [record[0], record[2], record[3], record[4]],
             [
@@ -723,8 +761,8 @@ fn assert_parity(fixture: &Fixture, cpu: &ShadingWorkPlan, result: &[Vec<u32>], 
         }
     }
     if written == cpu.work.len() {
-        let mut actual: Vec<[u32; 5]> = work
-            .chunks_exact(5)
+        let mut actual: Vec<[u32; SHADING_WORK_ITEM_WORDS]> = work
+            .chunks_exact(SHADING_WORK_ITEM_WORDS)
             .take(written)
             .map(|words| words.try_into().unwrap())
             .collect();
@@ -738,6 +776,9 @@ fn assert_parity(fixture: &Fixture, cpu: &ShadingWorkPlan, result: &[Vec<u32>], 
                     item.shading_class,
                     item.response_kind,
                     item.flags,
+                    item.right_shading_class,
+                    item.right_response_kind,
+                    item.response_meta,
                 ]
             })
             .collect();
@@ -818,6 +859,23 @@ fn real_gpu_classification_matches_program_ref_cpu_plan() {
     let fixture = fixture();
     assert_cpu_rejections(&fixture);
     let cpu = cpu_work_plan(&fixture);
+    let continuous_items: Vec<_> = cpu
+        .work
+        .iter()
+        .filter(|item| item.response_meta != INVALID)
+        .collect();
+    assert!(!continuous_items.is_empty(), "continuous MaskBlend fixture coverage");
+    for item in continuous_items {
+        assert_ne!(item.right_shading_class, INVALID);
+        assert_eq!(item.right_response_kind, 1, "continuous blend right arm is NPR");
+        assert_eq!(
+            item.response_meta & u16::MAX as u32,
+            fixture.visibility[item.pixel_index as usize]
+                .1
+                .coverage_and_flags,
+            "packed continuous mask matches visibility metadata"
+        );
+    }
     assert!(
         cpu.counts.iter().filter(|count| **count != 0).count() > 9,
         "more than nine occupied buckets"
