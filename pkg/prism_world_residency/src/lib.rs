@@ -23,7 +23,10 @@ mod scheduler;
 mod sdf;
 
 pub use hlod::{HlodCluster, HlodError, HlodLevel, LodTransition};
-pub use pcg::{derive_cache_key, pcg_hash_u32, DerivedCacheKey, Pcg32};
+pub use pcg::{
+    derive_cache_key, pcg_hash_u32, DependencySet, DerivedCacheKey, DirtySector, NodeId, NodeInput,
+    NodeKind, Pcg32, PcgEvaluation, PcgGraph, PcgGraphError, PcgNode, SectorCoord,
+};
 pub use qos::{QosConfig, QosDecision, QosGovernor, QualityTier};
 pub use residency::{
     MaterializationBudget, PolicyError, ResidencyPolicy, ResidencyRecord, ResidencyState,
@@ -199,7 +202,14 @@ mod tests {
         }
         assert_eq!(pcg_hash_u32(99), pcg_hash_u32(99));
         assert_ne!(pcg_hash_u32(99), pcg_hash_u32(100));
-        assert_eq!(derive_cache_key(1, 2, 3), derive_cache_key(1, 2, 3));
-        assert_ne!(derive_cache_key(1, 2, 3), derive_cache_key(1, 2, 4));
+        let sector = SectorCoord::new(0, 0, 0);
+        assert_eq!(
+            derive_cache_key(1, 2, 3, sector, 4),
+            derive_cache_key(1, 2, 3, sector, 4)
+        );
+        assert_ne!(
+            derive_cache_key(1, 2, 3, sector, 4),
+            derive_cache_key(1, 2, 4, sector, 4)
+        );
     }
 }
