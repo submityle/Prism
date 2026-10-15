@@ -15,6 +15,7 @@
 
 extern crate alloc;
 
+mod clipmap;
 mod hlod;
 mod pcg;
 mod qos;
@@ -26,6 +27,9 @@ mod scatter_field;
 mod scheduler;
 mod sdf;
 
+pub use clipmap::{
+    ClipmapAxis, CpuSdfClipmap, SdfClipmapConfig, SdfClipmapError, SdfClipmapUpdate,
+};
 pub use hlod::{HlodCluster, HlodError, HlodLevel, LodTransition};
 pub use pcg::{
     derive_cache_key, pcg_hash_u32, DependencySet, DerivedCacheKey, DirtySector, NodeId, NodeInput,
