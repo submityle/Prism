@@ -441,7 +441,8 @@ impl AssetServer {
             source_revision,
         } = plan;
         let mut inner = self.lock();
-        match epoch.commit(|| {
+        let mut staged_for_rollback = Vec::new();
+        let committed = epoch.commit(|| {
             if inner.source_revision != source_revision {
                 return Err(AsyncReloadCommitError::Rejected(
                     "async reload source overlay changed".into(),
@@ -464,14 +465,21 @@ impl AssetServer {
                 ));
             }
 
-            let previous_labels = inner.labels_for_source(&path);
-            let mut provisional = Vec::new();
+            // Every primary in the candidate is reassembled from the same
+            // source snapshot. Keep the old label set for each one so a
+            // successful closure commit can retire labels removed from an
+            // ordinary dependency as well as labels removed from the root.
+            let previous_labels_by_source: BTreeMap<AssetPath, Vec<(AssetPath, UntypedAssetId)>> =
+                candidate
+                    .assets
+                    .iter()
+                    .map(|asset| (asset.path.clone(), inner.labels_for_source(&asset.path)))
+                    .collect();
             let mut handles = BTreeMap::new();
             handles.insert(path.clone(), handle.clone());
             let mut source_assets = BTreeMap::new();
             for asset in &candidate.assets {
                 if source_assets.insert(asset.path.clone(), ()).is_some() {
-                    inner.rollback_staged_reload(&provisional);
                     return Err(AsyncReloadCommitError::Rejected(
                         "async reload candidate contains a duplicate source".into(),
                     ));
@@ -480,7 +488,6 @@ impl AssetServer {
                     continue;
                 }
                 if asset.path.has_label() {
-                    inner.rollback_staged_reload(&provisional);
                     return Err(AsyncReloadCommitError::Rejected(
                         "async reload candidate contains a labeled source".into(),
                     ));
@@ -491,7 +498,6 @@ impl AssetServer {
                     .and_then(UntypedWeakHandle::upgrade)
                 {
                     if existing.id().type_id() != asset.type_id {
-                        inner.rollback_staged_reload(&provisional);
                         return Err(AsyncReloadCommitError::Rejected(format!(
                             "async reload dependency type changed at {}",
                             asset.path
@@ -504,7 +510,6 @@ impl AssetServer {
                     .stores
                     .register_erased(asset.type_id, asset.output.primary.make_store);
                 let Some(new_handle) = inner.stores.reserve_by_type(asset.type_id) else {
-                    inner.rollback_staged_reload(&provisional);
                     return Err(AsyncReloadCommitError::Rejected(
                         "async reload dependency arena unavailable".into(),
                     ));
@@ -521,11 +526,13 @@ impl AssetServer {
                 );
                 inner.graph.add_asset(new_id);
                 let _ = inner.graph.set_self_state(new_id, LoadState::Loading);
-                provisional.push((asset.path.clone(), new_id));
+                staged_for_rollback.push((asset.path.clone(), new_id));
                 handles.insert(asset.path.clone(), new_handle);
             }
 
             let mut label_paths = BTreeSet::new();
+            let mut label_paths_by_source: BTreeMap<AssetPath, BTreeSet<AssetPath>> =
+                BTreeMap::new();
             let mut label_handles = BTreeMap::new();
             let mut staged_labels = Vec::new();
             for asset in &candidate.assets {
@@ -535,18 +542,20 @@ impl AssetServer {
                 for sub in &asset.output.labeled {
                     let sub_path = asset.path.clone().with_label(sub.label.clone());
                     if !label_paths.insert(sub_path.clone()) {
-                        inner.rollback_staged_reload(&provisional);
                         return Err(AsyncReloadCommitError::Rejected(
                             "async reload emitted a duplicate labeled asset".into(),
                         ));
                     }
+                    label_paths_by_source
+                        .entry(asset.path.clone())
+                        .or_default()
+                        .insert(sub_path.clone());
                     let sub_handle = if let Some(existing) = inner
                         .interned
                         .get(&sub_path)
                         .and_then(UntypedWeakHandle::upgrade)
                     {
                         if existing.id().type_id() != sub.type_id {
-                            inner.rollback_staged_reload(&provisional);
                             return Err(AsyncReloadCommitError::Rejected(format!(
                                 "async reload labeled asset type changed at {sub_path}"
                             )));
@@ -555,7 +564,6 @@ impl AssetServer {
                     } else {
                         inner.stores.register_erased(sub.type_id, sub.make_store);
                         let Some(new_handle) = inner.stores.reserve_by_type(sub.type_id) else {
-                            inner.rollback_staged_reload(&provisional);
                             return Err(AsyncReloadCommitError::Rejected(
                                 "async reload labeled asset arena unavailable".into(),
                             ));
@@ -572,7 +580,7 @@ impl AssetServer {
                         );
                         inner.graph.add_asset(new_id);
                         let _ = inner.graph.set_self_state(new_id, LoadState::Loading);
-                        provisional.push((sub_path.clone(), new_id));
+                        staged_for_rollback.push((sub_path.clone(), new_id));
                         new_handle
                     };
                     label_handles.insert(sub_path.clone(), sub_handle.clone());
@@ -699,10 +707,21 @@ impl AssetServer {
             for (owner, retained) in retained_by_owner {
                 inner.retained.insert(owner, retained);
             }
-            inner.retire_removed_labels(&path, &previous_labels, &label_paths);
+            for (source_path, previous_labels) in previous_labels_by_source {
+                let current_labels = label_paths_by_source
+                    .get(&source_path)
+                    .cloned()
+                    .unwrap_or_default();
+                inner.retire_removed_labels(&source_path, &previous_labels, &current_labels);
+            }
             Ok(handle.clone())
-        }) {
-            ReloadCommit::Committed(result) => result,
+        });
+        match committed {
+            ReloadCommit::Committed(Ok(handle)) => Ok(handle),
+            ReloadCommit::Committed(Err(error)) => {
+                inner.rollback_staged_reload(&staged_for_rollback);
+                Err(error)
+            }
             ReloadCommit::Superseded => Err(AsyncReloadCommitError::Superseded),
         }
     }

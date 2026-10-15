@@ -8,9 +8,10 @@
 //! CPU worker, so a fixed worker count cannot deadlock solely because parent
 //! assemblies are waiting for child flights. Reload flights support a narrow
 //! resident-root revision replacement with per-path epoch supersede and direct
-//! labeled-path loads that reuse the source assembly; automatic loading of new
-//! reload dependencies remains unsupported. Range reads and preemptive
-//! cancellation are also outside this slice. Priority orders queued CPU-pool
+//! labeled-path loads that reuse the source assembly; reload candidates also
+//! decode and stage newly introduced ordinary dependencies and sibling labels
+//! before one atomic commit. Range reads and preemptive cancellation are also
+//! outside this slice. Priority orders queued CPU-pool
 //! work where possible; ticket
 //! cancellation stops that caller from waiting but does not kill shared or
 //! already-running work.
@@ -157,6 +158,7 @@ impl Flight {
 struct SchedulerState {
     in_flight: BTreeMap<FlightKey, Arc<Flight>>,
     running: BTreeMap<FlightKey, Arc<Flight>>,
+    reload_reads: BTreeMap<ReloadReadKey, Arc<ReloadReadFlight>>,
     queued: VecDeque<QueuedFlight>,
     admission_waiters: Vec<AdmissionWaiter>,
     next_admission_seq: u64,
@@ -175,6 +177,98 @@ struct AdmissionWaiter {
 enum FlightKey {
     Load(AssetPath),
     Reload { path: AssetPath, serial: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ReloadReadKey {
+    source_revision: u64,
+    path: AssetPath,
+}
+
+struct ReloadReadFlight {
+    notification: Mutex<ReloadReadNotification>,
+}
+
+struct ReloadReadNotification {
+    result: Option<Result<Arc<[u8]>, String>>,
+    waiters: Vec<(Arc<()>, Waker)>,
+}
+
+impl ReloadReadFlight {
+    fn complete(&self, result: Result<Arc<[u8]>, String>) -> Vec<Waker> {
+        let mut notification = self
+            .notification
+            .lock()
+            .expect("reload read flight poisoned");
+        notification.result = Some(result);
+        core::mem::take(&mut notification.waiters)
+            .into_iter()
+            .map(|(_, waker)| waker)
+            .collect()
+    }
+
+    fn poll(&self, token: &Arc<()>, cx: &Context<'_>) -> Poll<Result<Arc<[u8]>, String>> {
+        let mut notification = self
+            .notification
+            .lock()
+            .expect("reload read flight poisoned");
+        if let Some(result) = notification.result.clone() {
+            return Poll::Ready(result);
+        }
+        if let Some((_, waker)) = notification
+            .waiters
+            .iter_mut()
+            .find(|(waiter, _)| Arc::ptr_eq(waiter, token))
+        {
+            if !waker.will_wake(cx.waker()) {
+                *waker = cx.waker().clone();
+            }
+        } else {
+            notification
+                .waiters
+                .push((Arc::clone(token), cx.waker().clone()));
+        }
+        if let Some(result) = notification.result.clone() {
+            Poll::Ready(result)
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn unregister(&self, token: &Arc<()>) {
+        let mut notification = self
+            .notification
+            .lock()
+            .expect("reload read flight poisoned");
+        notification
+            .waiters
+            .retain(|(waiter, _)| !Arc::ptr_eq(waiter, token));
+    }
+
+    fn wake_all(wakers: Vec<Waker>) {
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+}
+
+struct ReloadReadTicket {
+    flight: Arc<ReloadReadFlight>,
+    token: Arc<()>,
+}
+
+impl Future for ReloadReadTicket {
+    type Output = Result<Arc<[u8]>, String>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.flight.poll(&self.token, cx)
+    }
+}
+
+impl Drop for ReloadReadTicket {
+    fn drop(&mut self) {
+        self.flight.unregister(&self.token);
+    }
 }
 
 struct QueuedFlight {
@@ -247,6 +341,7 @@ impl LoadScheduler {
             state: Arc::new(Mutex::new(SchedulerState {
                 in_flight: BTreeMap::new(),
                 running: BTreeMap::new(),
+                reload_reads: BTreeMap::new(),
                 queued: VecDeque::new(),
                 admission_waiters: Vec::new(),
                 next_admission_seq: 0,
@@ -606,6 +701,64 @@ impl LoadScheduler {
         }
     }
 
+    fn reload_read(
+        &self,
+        source_revision: u64,
+        sources: &AssetSources,
+        path: &AssetPath,
+    ) -> ReloadReadTicket {
+        let key = ReloadReadKey {
+            source_revision,
+            path: path.clone(),
+        };
+        let (flight, start) = {
+            let mut state = self.state.lock().expect("load scheduler poisoned");
+            // Source revisions are immutable snapshots for a reload. Drop
+            // flights from older snapshots so a later mount can never reuse
+            // old bytes and the cache remains bounded by one revision.
+            state
+                .reload_reads
+                .retain(|candidate, _| candidate.source_revision == source_revision);
+            if let Some(flight) = state.reload_reads.get(&key) {
+                (Arc::clone(flight), false)
+            } else {
+                let flight = Arc::new(ReloadReadFlight {
+                    notification: Mutex::new(ReloadReadNotification {
+                        result: None,
+                        waiters: Vec::new(),
+                    }),
+                });
+                state.reload_reads.insert(key, Arc::clone(&flight));
+                (flight, true)
+            }
+        };
+        if start {
+            let read_sources = sources.clone();
+            let read_path = path.clone();
+            let read_flight = Arc::clone(&flight);
+            let read = move || match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                read_sources.read(&read_path)
+            })) {
+                Ok(Ok(bytes)) => Ok(Arc::<[u8]>::from(bytes)),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("asset source or loader panicked".to_string()),
+            };
+            if self.io_pool.is_single_threaded() {
+                ReloadReadFlight::wake_all(read_flight.complete(read()));
+            } else {
+                self.io_pool
+                    .spawn_async(async move {
+                        ReloadReadFlight::wake_all(read_flight.complete(read()));
+                    })
+                    .detach();
+            }
+        }
+        ReloadReadTicket {
+            flight,
+            token: Arc::new(()),
+        }
+    }
+
     /// Reserve available execution slots for the highest-priority waiters.
     ///
     /// The waiter stays in the admission list until it polls again and consumes
@@ -883,6 +1036,7 @@ async fn execute_async_reload(
     };
     let output = decode_reload_source(
         &scheduler,
+        plan.source_revision,
         &plan.sources,
         &plan.loaders,
         &plan.path,
@@ -940,6 +1094,7 @@ async fn execute_async_reload(
             };
             let output = decode_reload_source(
                 &scheduler,
+                plan.source_revision,
                 &plan.sources,
                 &plan.loaders,
                 &source_path,
@@ -979,33 +1134,15 @@ async fn execute_async_reload(
 /// a partially published resident graph.
 async fn decode_reload_source(
     scheduler: &LoadScheduler,
+    source_revision: u64,
     sources: &AssetSources,
     loaders: &AssetLoaders,
     path: &AssetPath,
     type_id: AssetTypeId,
 ) -> Result<FullLoadOutput, String> {
-    let bytes = if scheduler.io_pool.is_single_threaded() {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sources.read(path))) {
-            Ok(Ok(bytes)) => Ok(bytes),
-            Ok(Err(error)) => Err(error.to_string()),
-            Err(_) => Err("asset source or loader panicked".to_string()),
-        }
-    } else {
-        let read_sources = sources.clone();
-        let read_path = path.clone();
-        scheduler
-            .io_pool
-            .spawn_async(async move {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    read_sources.read(&read_path)
-                })) {
-                    Ok(Ok(bytes)) => Ok(bytes),
-                    Ok(Err(error)) => Err(error.to_string()),
-                    Err(_) => Err("asset source or loader panicked".to_string()),
-                }
-            })
-            .await
-    }?;
+    let bytes = scheduler
+        .reload_read(source_revision, sources, path)
+        .await?;
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         loaders
             .load_for_type(path, type_id, &bytes)

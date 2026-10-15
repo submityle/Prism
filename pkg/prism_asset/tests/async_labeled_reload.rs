@@ -2,11 +2,12 @@
 
 #![cfg(feature = "std")]
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use prism_asset::{
-    Asset, AssetLoader, AssetPath, AssetServer, AssetTypeId, DepRequest, LoadContext, LoadError,
-    LoadFailure, LoadScheduler, LoadState, MemSource,
+    Asset, AssetLoader, AssetMeta, AssetPath, AssetReader, AssetServer, AssetTypeId, DepRequest,
+    LoadContext, LoadError, LoadFailure, LoadScheduler, LoadState, MemSource, ReadError,
 };
 use prism_tasks::{Priority, TaskPool};
 
@@ -88,9 +89,66 @@ impl AssetLoader for SceneLoader {
                     )],
                 );
             }
+            6 => {
+                ctx.add_typed_dependency(
+                    AssetPath::parse("child.async-revision"),
+                    AssetTypeId::of::<Scene>(),
+                );
+                ctx.add_labeled_asset_with_deps(
+                    "uses-child",
+                    Label(60),
+                    vec![DepRequest::typed(
+                        AssetPath::parse("child.async-revision#keep"),
+                        AssetTypeId::of::<Label>(),
+                    )],
+                );
+            }
+            7 => {
+                ctx.add_typed_dependency(
+                    AssetPath::parse("missing.async-revision"),
+                    AssetTypeId::of::<Scene>(),
+                );
+                ctx.add_labeled_asset("keep", Label(70));
+            }
+            8 => {
+                ctx.add_typed_dependency(
+                    AssetPath::parse("a.async-cycle"),
+                    AssetTypeId::of::<Scene>(),
+                );
+            }
+            9 => {
+                ctx.add_typed_dependency(
+                    AssetPath::parse("shared.async-leaf"),
+                    AssetTypeId::of::<Leaf>(),
+                );
+                ctx.add_typed_dependency(
+                    AssetPath::parse("shared.async-leaf"),
+                    AssetTypeId::of::<Leaf>(),
+                );
+            }
             _ => return Err(LoadError::Malformed("unknown revision".into())),
         }
         Ok(Scene(revision))
+    }
+}
+
+struct CycleLoader;
+
+impl AssetLoader for CycleLoader {
+    type Asset = Scene;
+
+    fn extensions(&self) -> &'static [&'static str] {
+        &["async-cycle"]
+    }
+
+    fn load(&self, _bytes: &[u8], ctx: &mut LoadContext<'_>) -> Result<Scene, LoadError> {
+        let dependency = if ctx.path().path().starts_with("a.") {
+            "b.async-cycle"
+        } else {
+            "a.async-cycle"
+        };
+        ctx.add_typed_dependency(AssetPath::parse(dependency), AssetTypeId::of::<Scene>());
+        Ok(Scene(99))
     }
 }
 
@@ -109,10 +167,18 @@ impl AssetLoader for LeafLoader {
 }
 
 fn mount_revision(server: &AssetServer, revision: u8) {
+    mount_revision_with_child(server, revision, 1);
+}
+
+fn mount_revision_with_child(server: &AssetServer, revision: u8, child_revision: u8) {
     let mut source = MemSource::new();
     source.insert("scene.async-revision", [revision]);
+    source.insert("child.async-revision", [child_revision]);
     source.insert("resident.async-leaf", [0]);
     source.insert("new.async-leaf", [0]);
+    source.insert("shared.async-leaf", [0]);
+    source.insert("a.async-cycle", [0]);
+    source.insert("b.async-cycle", [0]);
     server.mount("mem", Arc::new(source), 0);
 }
 
@@ -120,8 +186,53 @@ fn server(revision: u8) -> Arc<AssetServer> {
     let server = Arc::new(AssetServer::new());
     server.register_loader(SceneLoader);
     server.register_loader(LeafLoader);
+    server.register_loader(CycleLoader);
     mount_revision(&server, revision);
     server
+}
+
+struct CountingSource {
+    source: MemSource,
+    shared_reads: Arc<AtomicUsize>,
+}
+
+impl AssetReader for CountingSource {
+    fn read(&self, path: &str) -> Result<Vec<u8>, ReadError> {
+        if path == "shared.async-leaf" {
+            self.shared_reads.fetch_add(1, Ordering::AcqRel);
+        }
+        self.source.read(path)
+    }
+
+    fn metadata(&self, path: &str) -> Result<AssetMeta, ReadError> {
+        self.source.metadata(path)
+    }
+}
+
+struct GateSource {
+    started: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+}
+
+impl AssetReader for GateSource {
+    fn read(&self, path: &str) -> Result<Vec<u8>, ReadError> {
+        if path == "scene.async-revision" {
+            self.started.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            return Ok(vec![2]);
+        }
+        Err(ReadError::NotFound)
+    }
+
+    fn metadata(&self, _path: &str) -> Result<AssetMeta, ReadError> {
+        Ok(AssetMeta {
+            size: 1,
+            modified_ms: None,
+            is_dir: false,
+        })
+    }
 }
 
 fn async_reload(server: &Arc<AssetServer>) -> Result<prism_asset::UntypedHandle, LoadFailure> {
@@ -258,4 +369,157 @@ fn async_reload_commits_a_new_labeled_dependency_closure() {
     assert!(server.is_loaded(source.untyped_id()));
     assert!(server.is_loaded(label.untyped_id()));
     assert!(server.is_loaded(leaf.untyped_id()));
+}
+
+#[test]
+fn async_reload_loads_new_ordinary_dependency_and_new_sibling_label() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+
+    mount_revision_with_child(&server, 6, 1);
+    let reloaded = async_reload(&server).expect("new dependency closure should commit");
+    assert_eq!(reloaded.id(), root.untyped_id());
+    assert_eq!(server.with_asset(root.id(), |value| value.0), Some(6));
+
+    let child = server.load::<Scene>("child.async-revision");
+    let child_keep = server.load::<Label>("child.async-revision#keep");
+    let sibling = server.load::<Label>("scene.async-revision#uses-child");
+    assert_eq!(server.with_asset(child.id(), |value| value.0), Some(1));
+    assert_eq!(
+        server.with_asset(child_keep.id(), |value| value.0),
+        Some(10)
+    );
+    assert_eq!(server.with_asset(sibling.id(), |value| value.0), Some(60));
+    assert!(server.is_loaded(child.untyped_id()));
+    assert!(server.is_loaded(child_keep.untyped_id()));
+    assert!(server.is_loaded(sibling.untyped_id()));
+}
+
+#[test]
+fn async_reload_retires_labels_removed_from_a_reloaded_ordinary_dependency() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    mount_revision_with_child(&server, 6, 1);
+    async_reload(&server).expect("first dependency closure should commit");
+    let child_gone = server.load::<Label>("child.async-revision#gone");
+    let child_keep = server.load::<Label>("child.async-revision#keep");
+
+    mount_revision_with_child(&server, 6, 2);
+    async_reload(&server).expect("second dependency closure should commit");
+    assert_eq!(server.with_asset(root.id(), |value| value.0), Some(6));
+    assert_eq!(
+        server.with_asset(child_keep.id(), |value| value.0),
+        Some(20)
+    );
+    assert!(server
+        .with_asset(child_gone.id(), |value| value.0)
+        .is_none());
+    assert!(server.load_state(child_gone.untyped_id()).is_failed());
+    assert!(server.load_untyped("child.async-revision#gone").is_none());
+}
+
+#[test]
+fn async_reload_failure_keeps_the_old_revision_when_a_new_dependency_is_missing() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let keep = server.load::<Label>("scene.async-revision#keep");
+    let assets_before = server.total_assets();
+
+    mount_revision(&server, 7);
+    let result = async_reload(&server);
+    assert!(
+        matches!(result, Err(LoadFailure::AssemblyFailed(error)) if error.contains("asset not found"))
+    );
+    assert_eq!(server.with_asset(root.id(), |value| value.0), Some(1));
+    assert_eq!(server.with_asset(keep.id(), |value| value.0), Some(10));
+    assert_eq!(server.total_assets(), assets_before);
+}
+
+#[test]
+fn async_reload_cycle_in_new_dependency_closure_is_rejected_atomically() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let assets_before = server.total_assets();
+
+    mount_revision(&server, 8);
+    let result = async_reload(&server);
+    assert!(matches!(result, Err(LoadFailure::AssemblyFailed(error)) if error.contains("cycle")));
+    assert_eq!(server.with_asset(root.id(), |value| value.0), Some(1));
+    // The candidate is decoded off-server, so a rejected cycle must not
+    // publish either newly discovered source into the resident stores.
+    for _ in 0..3 {
+        server.collect_releases();
+    }
+    assert_eq!(server.total_assets(), assets_before);
+}
+
+#[test]
+fn async_reload_deduplicates_concurrent_reads_for_the_same_new_dependency() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut source = MemSource::new();
+    source.insert("scene.async-revision", [9]);
+    source.insert("shared.async-leaf", [0]);
+    server.mount(
+        "counted",
+        Arc::new(CountingSource {
+            source,
+            shared_reads: Arc::clone(&reads),
+        }),
+        10,
+    );
+    let pool = TaskPool::with_threads(2);
+    let scheduler = LoadScheduler::new(Arc::clone(&server), pool.clone(), 2);
+    let first = scheduler
+        .schedule_reload("scene.async-revision", Priority::Normal)
+        .unwrap();
+    let second = scheduler
+        .schedule_reload("scene.async-revision", Priority::Critical)
+        .unwrap();
+    let first_result = pool.block_on(first);
+    let second_result = pool.block_on(second);
+    assert!(first_result.is_ok() || second_result.is_ok());
+    assert!(!matches!(first_result, Err(LoadFailure::AssemblyFailed(_))));
+    assert!(!matches!(
+        second_result,
+        Err(LoadFailure::AssemblyFailed(_))
+    ));
+    assert_eq!(reads.load(Ordering::Acquire), 1);
+    assert!(server.is_loaded(root.untyped_id()));
+}
+
+#[test]
+fn cancelling_reload_ticket_does_not_publish_a_partial_candidate() {
+    let server = server(1);
+    let root = server.load::<Scene>("scene.async-revision");
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    server.mount(
+        "gate",
+        Arc::new(GateSource {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        }),
+        20,
+    );
+    let pool = TaskPool::with_threads(2);
+    let scheduler = LoadScheduler::new(Arc::clone(&server), pool.clone(), 1);
+    let ticket = scheduler
+        .schedule_reload("scene.async-revision", Priority::Normal)
+        .unwrap();
+    while !started.load(Ordering::Acquire) {
+        std::thread::yield_now();
+    }
+    ticket.cancel();
+    assert_eq!(pool.block_on(ticket), Err(LoadFailure::Cancelled));
+    assert_eq!(server.with_asset(root.id(), |value| value.0), Some(1));
+
+    release.store(true, Ordering::Release);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while std::time::Instant::now() < deadline && scheduler.in_flight() != 0 {
+        std::thread::yield_now();
+    }
+    assert_eq!(scheduler.in_flight(), 0);
+    assert_eq!(server.with_asset(root.id(), |value| value.0), Some(2));
 }
