@@ -84,6 +84,14 @@ mod scatter_heightfield;
 #[cfg(feature = "terrain_scatter")]
 pub use scatter_heightfield::{GpuScatterHeightfield, GpuScatterHeightfieldError};
 
+#[cfg(feature = "terrain_scatter")]
+mod heightfield_placement;
+
+#[cfg(feature = "terrain_scatter")]
+pub use heightfield_placement::{
+    GpuHeightfieldPlacement, GpuHeightfieldPlacementError, GpuHeightfieldPlacementWorkBudget,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

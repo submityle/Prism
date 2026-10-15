@@ -13,10 +13,16 @@ XZ 半开请求没有 Y slab，因此高山不会因为源随机 Y 不在薄离�
 每个完整网格方格恰有一个原始候选，但最小距离、地形规则及作者密度仍可删除它；
 不保证每平方米最终数量、最大填充、泊松输入过程或蓝噪声频谱。
 
-本片交付 CPU 平面放置，不是 GPU twin、行星/任意朝向表面投影、曲率/数据层/
+本片主要记录 CPU 平面放置；对应的固定容量 GPU twin 已由
+`prism_world_gpu::GpuHeightfieldPlacement` 交付，ABI、实机回归和限定性能见
+`prism_world_gpu_heightfield_placement_zh.md`。两者都不是行星/任意朝向表面投影、曲率/数据层/
 跨散布层规则、风/交互、索引增量编辑或产品 scene/render graph 接线。
 完整 placement 删除及独立 `PPLD` 持久 codec 现由
 `prism_world_placement_deletions_zh.md` 交付；既有三维候选删除 codec 不能替代它。
+
+GPU twin 与 CPU 入口共享 placement/source identity 和精确投影语义，但不是把 CPU 幸存点上传到 GPU：GPU 固定容量地生成 canonical XZ source，执行水平 Matérn-II、真实三角面 projection/过滤、最终 XYZ 作者场，再写 compact/indirect。其 ABI 为 64B source record、64B surface sample、16B density/species/accepted/rank attributes，以及 `[vertex_count, accepted_count, 0, 0]` indirect 参数；owned 逻辑 buffer 预算为 `148*max(C,1)+64*max(B,1)+4*max(S,1)+468` 字节。完整 brush/heightfield snapshot、binding/dispatch 和 candidate/sample/field work 先做预算检查；可恢复上传失败保留旧请求、缓存键和 GPU 输出，projection overflow 在过滤前使整批 fail-closed，不返回部分结果。这里的预算是逻辑 GPU buffer 预算，不包含 host scratch、Arc/Vec 元数据或驱动内部显存，也不是时间上限。
+
+2026-10-16，Apple M2 IntegratedGpu / Metal 真实设备测试 7/7 通过，覆盖精确投影与法线、作者场、分区与 i64 边界、缓存/尾部、失败事务、投影溢出和真实 indirect draw。release benchmark 使用 8 次 warmup、64 次 sample，覆盖 10k/100k primary × 0/150mm；submit+wait P50/P95/P99（µs）依次为 `905.833/935.417/979.333`、`1097.500/1134.333/1161.625`、`1519.209/1893.292/2011.833`、`2059.167/2140.291/2407.000`。这是当前 Apple M2、驱动和 fixture 的限定主机墙钟结果，不是 GPU timestamp、跨硬件承诺或完整产品帧时；GPU twin 仍不等于 scene/render graph 接线、行星曲率、数据层或跨散布层规则已完成。
 
 ## 候选身份、顺序与重建
 
@@ -191,7 +197,8 @@ GPU crate文件集合的前后SHA-256相同：
 `1da7c9bbd5e71f44fb43a9c997733c1b999e79bd308af12b01acd1ec3714e123`。
 
 这是现有GPU过滤链的隔离回归，不是正常workspace GPU整包通过，
-更不是新二维贴地放置的GPU twin或GPU性能结果。本片仍只交付CPU放置。
+也不替代新二维贴地放置的 GPU twin 证据；新 GPU 证据见
+`prism_world_gpu_heightfield_placement_zh.md`。
 本机验证包manifest/lock保留在`/private/tmp/prism-placement-gpu-regression-5Ncrl4`，
 不纳入源码提交；构建输出与CPU测试共用本片专用target。
 

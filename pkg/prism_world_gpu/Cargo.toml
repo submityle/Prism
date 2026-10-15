@@ -60,3 +60,8 @@ required-features = ["terrain_scatter"]
 name = "scatter_deletion"
 harness = false
 required-features = ["gpu"]
+
+[[bench]]
+name = "heightfield_placement"
+harness = false
+required-features = ["terrain_scatter"]

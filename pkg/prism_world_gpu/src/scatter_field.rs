@@ -519,7 +519,7 @@ impl GpuScatterField {
     }
 }
 
-fn brush_words(brush: &DensityBrush) -> [u32; 16] {
+pub(crate) fn brush_words(brush: &DensityBrush) -> [u32; 16] {
     let mut words = [0; 16];
     words[0] = brush.id as u32;
     words[1] = (brush.id >> 32) as u32;

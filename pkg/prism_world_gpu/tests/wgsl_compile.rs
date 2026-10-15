@@ -1,5 +1,84 @@
 //! Device-free shader parsing/validation gate.
 
+#[cfg(feature = "terrain_scatter")]
+#[test]
+fn placement_shaders_match_core_integer_binding_and_record_abi() {
+    use wgpu::naga::{AddressSpace, ScalarKind, StorageAccess, TypeInner};
+    let load = StorageAccess::LOAD;
+    let store = load | StorageAccess::STORE;
+    for (name, source, uniform_size, accesses, entries) in [
+        (
+            "placement source",
+            include_str!("../src/shaders/heightfield_placement_source.wgsl"),
+            192,
+            vec![store],
+            vec!["placement_main"],
+        ),
+        (
+            "placement projection",
+            include_str!("../src/shaders/heightfield_placement_project.wgsl"),
+            128,
+            vec![store, load, store, store, store, store],
+            vec!["project_main", "finalize_main"],
+        ),
+    ] {
+        let module = wgpu::naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(module.entry_points.len(), entries.len(), "{name}");
+        for (entry, expected) in module.entry_points.iter().zip(entries) {
+            assert_eq!(entry.name, expected, "{name}");
+            assert_eq!(entry.workgroup_size, [64, 1, 1], "{name}");
+        }
+        let mut bindings = std::collections::BTreeMap::new();
+        for (_, variable) in module.global_variables.iter() {
+            if let Some(binding) = variable.binding {
+                assert_eq!(binding.group, 0, "{name}");
+                assert!(bindings.insert(binding.binding, variable).is_none());
+            }
+        }
+        assert_eq!(bindings.len(), accesses.len() + 1, "{name}");
+        assert_eq!(bindings[&0].space, AddressSpace::Uniform, "{name}");
+        match module.types[bindings[&0].ty].inner {
+            TypeInner::Struct { span, .. } => assert_eq!(span, uniform_size, "{name}"),
+            _ => panic!("{name}: uniform must be a struct"),
+        }
+        for (index, access) in accesses.into_iter().enumerate() {
+            assert_eq!(
+                bindings[&(index as u32 + 1)].space,
+                AddressSpace::Storage { access },
+                "{name}"
+            );
+        }
+        match module.types[bindings[&1].ty].inner {
+            TypeInner::Array { stride, .. } => assert_eq!(stride, 64, "{name} record stride"),
+            _ => panic!("{name}: records must be an array"),
+        }
+        if name == "placement projection" {
+            match module.types[bindings[&3].ty].inner {
+                TypeInner::Array { stride, .. } => assert_eq!(stride, 64, "sample stride"),
+                _ => panic!("samples must be an array"),
+            }
+        }
+        for (_, ty) in module.types.iter() {
+            match ty.inner {
+                TypeInner::Scalar(scalar)
+                | TypeInner::Atomic(scalar)
+                | TypeInner::Vector { scalar, .. } => {
+                    assert_ne!(scalar.kind, ScalarKind::Float, "{name}");
+                    assert!(scalar.width <= 4, "{name}");
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 #[cfg(feature = "gpu")]
 #[test]
 fn field_brush_hierarchy_uses_core_integer_types_and_the_existing_binding_abi() {
