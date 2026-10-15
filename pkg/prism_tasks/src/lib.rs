@@ -33,7 +33,8 @@
 //!
 //! ## M4 scope (this build) — memory & NUMA
 //! - [`FrameArenas`] / [`FrameArena`]: per-worker bump arenas for zero-lock
-//!   frame allocation, placed on each worker's NUMA node when known.
+//!   frame allocation, requesting each worker's NUMA node and exposing whether
+//!   the platform applied a real binding or used an explicit fallback.
 //! - [`CoreClassPolicy`] / [`TaskPool::new_frame_arenas`] / affinity planning:
 //!   best-effort worker pinning and NUMA-aware steal ordering.
 //!
@@ -128,7 +129,7 @@ use std::thread::JoinHandle;
 
 pub use affinity::{
     affinity_supported, pin_current_thread_to_core, plan_worker_cores, CoreAssignment,
-    CoreClassPolicy, WorkerCorePlan,
+    CoreClassPolicy, WorkerBindingOutcome, WorkerCorePlan,
 };
 pub use arena::{FrameArena, FrameArenas, DEFAULT_ARENA_CAPACITY};
 pub use async_exec::{

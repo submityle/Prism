@@ -197,11 +197,14 @@ pub use thread::{
 };
 pub use topology::power::{PowerPolicy, PowerSource, PowerState, ThermalState};
 pub use topology::qos::{qos_hint, EngineQos, OsQosHint};
-pub use topology::{CoreKind, CpuTopology, TopologyBuilder, TopologyCore, TopologyError};
+pub use topology::{
+    CoreKind, CpuTopology, TopologyBuilder, TopologyCapabilities, TopologyCore, TopologyError,
+};
 #[cfg(feature = "std")]
 pub use vm::{
     huge_pages_supported, large_page_size, memory_info, page_size, virtual_memory_supported,
-    MemoryInfo, MirroredRing, Protection, Reservation, VmError,
+    MemoryInfo, MirroredRing, NumaAllocation, NumaAllocationError, NumaPlacement, Protection,
+    Reservation, VmError,
 };
 #[cfg(feature = "std")]
 pub use wallclock::{now as wall_now, sample as wall_sample, WallClock, WallClockSample, WallTime};

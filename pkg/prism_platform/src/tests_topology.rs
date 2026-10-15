@@ -116,6 +116,31 @@ fn detect_distinguishes_probed_from_fallback() {
 }
 
 #[test]
+fn capabilities_report_operations_separately_from_topology_data() {
+    let capabilities = hybrid_machine().capabilities();
+    assert_eq!(
+        capabilities.topology_source,
+        crate::topology::TopologySource::Explicit
+    );
+    #[cfg(feature = "std")]
+    assert_eq!(capabilities.cpu_affinity, crate::affinity_supported());
+    #[cfg(not(feature = "std"))]
+    assert!(!capabilities.cpu_affinity);
+    #[cfg(feature = "std")]
+    assert_eq!(
+        capabilities.numa_memory_binding,
+        crate::NumaAllocation::supported()
+    );
+    #[cfg(not(feature = "std"))]
+    assert!(!capabilities.numa_memory_binding);
+    assert_eq!(capabilities.can_bind_workers(), capabilities.cpu_affinity);
+    assert_eq!(
+        capabilities.can_allocate_node_local(),
+        capabilities.numa_memory_binding
+    );
+}
+
+#[test]
 fn engine_qos_importance_is_monotonic() {
     // ALL is ordered most -> least important; importance must be strictly
     // decreasing.

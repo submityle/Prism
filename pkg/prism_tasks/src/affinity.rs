@@ -68,6 +68,59 @@ pub struct WorkerCorePlan {
     assignments: Vec<CoreAssignment>,
 }
 
+/// Result of attempting to bind the calling thread to a planned worker core.
+///
+/// The planned assignment is kept separate from the OS outcome. In particular,
+/// [`WorkerBindingOutcome::Unbound`] is not a successful binding: callers may
+/// continue safely without affinity, but must not report that the worker is
+/// pinned.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorkerBindingOutcome {
+    /// The OS accepted the affinity request for this assignment.
+    Bound {
+        /// Assignment that was successfully applied.
+        assignment: CoreAssignment,
+    },
+    /// The worker has a valid assignment, but the OS did not apply it.
+    Unbound {
+        /// Assignment that was requested.
+        assignment: CoreAssignment,
+        /// Explicit capability gap or OS rejection.
+        error: AffinityError,
+    },
+    /// No assignment exists for the requested worker index.
+    InvalidWorker {
+        /// Worker index that was requested.
+        worker: usize,
+    },
+}
+
+impl WorkerBindingOutcome {
+    /// Whether the OS accepted a real CPU-affinity binding.
+    #[must_use]
+    pub const fn is_bound(self) -> bool {
+        matches!(self, Self::Bound { .. })
+    }
+
+    /// The planned assignment, if the worker index was valid.
+    #[must_use]
+    pub const fn assignment(self) -> Option<CoreAssignment> {
+        match self {
+            Self::Bound { assignment } | Self::Unbound { assignment, .. } => Some(assignment),
+            Self::InvalidWorker { .. } => None,
+        }
+    }
+
+    /// The platform error when a valid assignment was not applied.
+    #[must_use]
+    pub const fn error(self) -> Option<AffinityError> {
+        match self {
+            Self::Unbound { error, .. } => Some(error),
+            Self::Bound { .. } | Self::InvalidWorker { .. } => None,
+        }
+    }
+}
+
 impl WorkerCorePlan {
     /// Number of workers covered.
     pub fn len(&self) -> usize {
@@ -108,9 +161,28 @@ impl WorkerCorePlan {
     /// [`AffinityError::Unsupported`] on platforms that cannot pin, or whatever
     /// the OS reports. A worker should treat any error as "run unpinned".
     pub fn pin_current(&self, worker: usize) -> Result<(), AffinityError> {
-        match self.assignment(worker) {
-            Some(a) => pin_current_thread_to_core(a.core),
-            None => Err(AffinityError::InvalidCore),
+        match self.bind_current(worker) {
+            WorkerBindingOutcome::Bound { .. } => Ok(()),
+            WorkerBindingOutcome::Unbound { error, .. } => Err(error),
+            WorkerBindingOutcome::InvalidWorker { .. } => Err(AffinityError::InvalidCore),
+        }
+    }
+
+    /// Bind the calling thread to the core assigned to `worker` and preserve
+    /// the complete outcome for diagnostics and capability-aware callers.
+    ///
+    /// `Unbound` is the safe degradation path: the worker remains correct and
+    /// may run without pinning, but no binding is claimed. An unsupported
+    /// platform is reported as [`AffinityError::Unsupported`] inside that
+    /// outcome rather than being converted into success.
+    #[must_use]
+    pub fn bind_current(&self, worker: usize) -> WorkerBindingOutcome {
+        let Some(assignment) = self.assignment(worker) else {
+            return WorkerBindingOutcome::InvalidWorker { worker };
+        };
+        match pin_current_thread_to_core(assignment.core) {
+            Ok(()) => WorkerBindingOutcome::Bound { assignment },
+            Err(error) => WorkerBindingOutcome::Unbound { assignment, error },
         }
     }
 }
@@ -227,6 +299,26 @@ mod tests {
             assert!(result.is_ok() || matches!(result, Err(AffinityError::SystemError(_))));
         } else {
             assert_eq!(result, Err(AffinityError::Unsupported));
+        }
+
+        match plan.bind_current(99) {
+            WorkerBindingOutcome::InvalidWorker { worker } => assert_eq!(worker, 99),
+            other => panic!("unexpected invalid-worker outcome: {other:?}"),
+        }
+        match plan.bind_current(0) {
+            WorkerBindingOutcome::Bound { assignment } => {
+                assert!(affinity_supported());
+                assert_eq!(assignment.worker, 0);
+            }
+            WorkerBindingOutcome::Unbound { assignment, error } => {
+                assert_eq!(assignment.worker, 0);
+                if affinity_supported() {
+                    assert!(matches!(error, AffinityError::SystemError(_)));
+                } else {
+                    assert_eq!(error, AffinityError::Unsupported);
+                }
+            }
+            WorkerBindingOutcome::InvalidWorker { .. } => unreachable!(),
         }
     }
 }

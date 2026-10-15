@@ -51,6 +51,36 @@ pub enum TopologySource {
     Fallback(TopologyFallback),
 }
 
+/// Runtime capabilities associated with a topology snapshot.
+///
+/// The topology data and the operations that can act on it are separate
+/// contracts: a platform may report CPU/node ids while still lacking either
+/// CPU affinity or NUMA memory policy support. A `false` field is an explicit
+/// capability gap, not permission to emulate success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TopologyCapabilities {
+    /// Provenance of the topology data used by the caller.
+    pub topology_source: TopologySource,
+    /// Whether the current build can apply a real OS CPU-affinity mask.
+    pub cpu_affinity: bool,
+    /// Whether the current build can request real node-local memory policy.
+    pub numa_memory_binding: bool,
+}
+
+impl TopologyCapabilities {
+    /// Whether worker-to-CPU binding can be attempted through the platform.
+    #[must_use]
+    pub const fn can_bind_workers(self) -> bool {
+        self.cpu_affinity
+    }
+
+    /// Whether an allocation can be made with a real NUMA node policy.
+    #[must_use]
+    pub const fn can_allocate_node_local(self) -> bool {
+        self.numa_memory_binding
+    }
+}
+
 /// An OS-reported data or unified cache, restricted to available logical CPUs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopologyCache {
@@ -228,6 +258,20 @@ impl CpuTopology {
         self.source
     }
 
+    /// Return the operation capabilities for this topology snapshot.
+    ///
+    /// `topology_source` describes only the data provenance. CPU affinity and
+    /// NUMA memory binding are queried independently because detecting a node
+    /// id does not imply that either operation is available.
+    #[must_use]
+    pub fn capabilities(&self) -> TopologyCapabilities {
+        TopologyCapabilities {
+            topology_source: self.source,
+            cpu_affinity: cpu_affinity_supported(),
+            numa_memory_binding: numa_memory_binding_supported(),
+        }
+    }
+
     /// Distinct OS NUMA ids in ascending order. Distance rows/columns use this
     /// order, not `max(node_id) + 1`; memory-only/inaccessible nodes are omitted.
     #[must_use]
@@ -316,6 +360,28 @@ impl CpuTopology {
             .filter(|c| c.physical_id == target.physical_id)
             .count()
             > 1
+    }
+}
+
+fn cpu_affinity_supported() -> bool {
+    #[cfg(feature = "std")]
+    {
+        crate::thread::affinity_supported()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        false
+    }
+}
+
+fn numa_memory_binding_supported() -> bool {
+    #[cfg(feature = "std")]
+    {
+        crate::vm::NumaAllocation::supported()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        false
     }
 }
 

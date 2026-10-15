@@ -25,6 +25,9 @@
 //!   `GlobalMemoryStatusEx`/`GetSystemInfo`/`GetLargePageMinimum`.
 //! - **Other OSes**: every operation honestly returns
 //!   [`VmError::Unsupported`].
+//! - **NUMA memory policy**: [`NumaAllocation`] uses a real node-binding
+//!   backend where implemented and otherwise reports [`NumaAllocationError::Unsupported`]
+//!   or an explicit [`NumaPlacement::Fallback`] when ordinary memory is allowed.
 //!
 //! ## Honest capability gaps
 //! - **Large/huge pages** are supported on Linux (`MAP_HUGETLB`, subject to the
@@ -486,6 +489,9 @@ fn round_up(v: usize, align: usize) -> Option<usize> {
 /// Magic ring buffer (mirrored virtual-memory mapping); see [`MirroredRing`].
 mod ring;
 pub use ring::MirroredRing;
+
+mod numa;
+pub use numa::{NumaAllocation, NumaAllocationError, NumaPlacement};
 
 #[cfg(test)]
 mod tests;

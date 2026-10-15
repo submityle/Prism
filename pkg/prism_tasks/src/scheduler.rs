@@ -239,7 +239,7 @@ impl Shared {
         // Best-effort — an unsupported platform (e.g. macOS) or an OS error
         // just leaves the worker unpinned; correctness never depends on it.
         if let Some(plan) = &self.affinity_plan {
-            let _ = plan.pin_current(index);
+            let _ = plan.bind_current(index);
         }
         #[cfg(feature = "fibers")]
         self.run_worker_fibers(index);

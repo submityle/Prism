@@ -27,9 +27,11 @@
 //! [`alloc`]: FrameArena::alloc
 //! [`alloc_bytes`]: FrameArena::alloc_bytes
 
-use std::alloc::{self, Layout};
+use std::alloc::Layout;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use prism_platform::{NumaAllocation, NumaPlacement};
 
 use crate::numa::NumaNodeId;
 
@@ -51,21 +53,22 @@ const ARENA_BASE_ALIGN: usize = 64;
 /// self`, so the borrow checker guarantees no allocation reference is still
 /// live when a frame is recycled.
 pub struct FrameArena {
+    /// Owned platform allocation. It may be node-bound or an explicit ordinary
+    /// heap fallback depending on the host capability.
+    _storage: NumaAllocation,
     /// Base of the backing allocation.
     base: NonNull<u8>,
-    /// Layout the base was allocated with (for dealloc and capacity).
-    layout: Layout,
-    /// Usable capacity in bytes (`layout.size()`).
+    /// Requested usable capacity in bytes.
     capacity: usize,
     /// Bump cursor: bytes handed out so far from `base`.
     offset: AtomicUsize,
     /// Peak value `offset` ever reached, across all frames (diagnostics).
     high_water: AtomicUsize,
-    /// NUMA node this arena's memory is associated with (design §14 — "每
-    /// worker 竞技场/栈在其所在 NUMA 节点分配"). On platforms without NUMA
-    /// probing this is always node 0; the field records intent and lets
-    /// steal-penalty logic reason about locality.
+    /// NUMA node requested for this arena. Use [`Self::placement`] to know
+    /// whether the request was actually bound by the OS.
     node: NumaNodeId,
+    /// Actual placement result, including an explicit safe fallback.
+    placement: NumaPlacement,
 }
 
 #[expect(
@@ -93,29 +96,28 @@ impl FrameArena {
 
     /// Create an arena of `capacity` bytes on NUMA node 0.
     ///
-    /// `capacity` is rounded up to at least one cache line. Panics only if the
-    /// resulting [`Layout`] is invalid (astronomically large `capacity`).
+    /// `capacity` is rounded up to at least one cache line. Panics only when
+    /// the platform allocator cannot provide the requested backing storage.
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_capacity_on_node(capacity, NumaNodeId::ZERO)
     }
 
-    /// Create an arena of `capacity` bytes tagged as living on `node`.
+    /// Create an arena of `capacity` bytes requested on `node`.
     ///
-    /// The tag is advisory: without OS NUMA support the memory is ordinary heap
-    /// (honest degradation — see [`crate::numa`]), but the association drives
-    /// same-node steal preference and locality diagnostics.
+    /// The constructor uses the platform's explicit safe-fallback path. On a
+    /// host without NUMA memory policy support the arena remains usable as
+    /// ordinary heap memory, and [`Self::placement`] reports that it is
+    /// unbound; it never reports a fabricated node binding.
     pub fn with_capacity_on_node(capacity: usize, node: NumaNodeId) -> Self {
         let capacity = capacity.max(ARENA_BASE_ALIGN);
-        let layout = Layout::from_size_align(capacity, ARENA_BASE_ALIGN)
-            .expect("invalid frame-arena layout");
-        // SAFETY: `layout` has a non-zero, cache-line-aligned size, satisfying
-        // the `alloc` contract. The returned pointer is checked for null.
-        #[expect(unsafe_code, reason = "raw backing allocation for the bump arena")]
-        let raw = unsafe { alloc::alloc(layout) };
-        let base = NonNull::new(raw).unwrap_or_else(|| alloc::handle_alloc_error(layout));
+        let mut storage =
+            NumaAllocation::on_node_or_fallback(capacity, ARENA_BASE_ALIGN, node.index())
+                .unwrap_or_else(|error| panic!("frame arena allocation failed: {error}"));
+        let base = NonNull::new(storage.as_mut_ptr()).expect("platform allocation returned null");
         Self {
+            placement: storage.placement(),
+            _storage: storage,
             base,
-            layout,
             capacity,
             offset: AtomicUsize::new(0),
             high_water: AtomicUsize::new(0),
@@ -147,6 +149,18 @@ impl FrameArena {
     /// The NUMA node this arena is associated with.
     pub fn node(&self) -> NumaNodeId {
         self.node
+    }
+
+    /// The actual OS placement result for this arena.
+    #[must_use]
+    pub fn placement(&self) -> NumaPlacement {
+        self.placement
+    }
+
+    /// Whether the arena backing memory has a real OS NUMA binding.
+    #[must_use]
+    pub fn is_numa_bound(&self) -> bool {
+        self.placement.is_bound()
     }
 
     /// Allocate `size` bytes aligned to `align`, lock-free. Returns [`None`] if
@@ -236,18 +250,6 @@ impl Default for FrameArena {
     }
 }
 
-impl Drop for FrameArena {
-    fn drop(&mut self) {
-        // SAFETY: `base`/`layout` came from the matching `alloc::alloc` in
-        // `with_capacity_on_node`; this is the sole owner, dropped once. Values
-        // allocated inside are intentionally not dropped (zero-drop contract).
-        #[expect(unsafe_code, reason = "free the arena's backing region")]
-        unsafe {
-            alloc::dealloc(self.base.as_ptr(), self.layout);
-        }
-    }
-}
-
 /// Round `value` up to the next multiple of `align` (a power of two), or
 /// [`None`] on overflow.
 fn align_up(value: usize, align: usize) -> Option<usize> {
@@ -330,6 +332,21 @@ mod tests {
         assert_ne!(core::ptr::from_mut(a), core::ptr::from_mut(b));
         assert_eq!(core::ptr::from_mut(a).align_offset(align_of::<u64>()), 0);
         assert_eq!(core::ptr::from_mut(b).align_offset(align_of::<u64>()), 0);
+    }
+
+    #[test]
+    fn placement_exposes_real_binding_or_explicit_fallback() {
+        let arena = FrameArena::with_capacity_on_node(4096, NumaNodeId::new(7));
+        assert_eq!(arena.is_numa_bound(), arena.placement().is_bound());
+        if !NumaAllocation::supported() {
+            assert_eq!(
+                arena.placement(),
+                NumaPlacement::Fallback {
+                    requested_node: 7,
+                    reason: prism_platform::NumaAllocationError::Unsupported,
+                }
+            );
+        }
     }
 
     #[test]

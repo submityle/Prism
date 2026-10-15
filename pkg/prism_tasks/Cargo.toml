@@ -22,10 +22,9 @@ single = ["std"]
 # multi-threaded pool. When off, `wait` keeps the help-on-wait fallback.
 fibers = ["multi_thread"]
 # M4: NUMA-aware scheduling. Records intent to prefer same-NUMA-node steals and
-# node-local per-worker arenas/stacks. Honest degradation: without an OS NUMA
-# map (none is exposed by `prism_platform` today) the topology stays a single
-# node, so enabling this does not fabricate nodes — it only flips the
-# `numa_enabled` request flag and compiles the NUMA scheduling paths.
+# requests node-local per-worker arenas/stacks. The platform capability and
+# each arena's placement report whether a real binding was applied; unsupported
+# hosts use ordinary memory without fabricating locality.
 numa = []
 # M6: enable the chrome-tracing (flamegraph-compatible) JSON export on
 # `JobTrace`. Span recording and the steal-rate / occupancy counters are
