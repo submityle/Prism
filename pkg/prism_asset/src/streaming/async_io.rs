@@ -26,17 +26,12 @@ struct RequestGate {
     phase: Mutex<RequestPhase>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum RequestPhase {
+    #[default]
     Ready,
     Reading,
     Cancelled,
-}
-
-impl Default for RequestPhase {
-    fn default() -> Self {
-        Self::Ready
-    }
 }
 
 impl RequestGate {
@@ -105,20 +100,17 @@ impl AsyncStreamIoExecutor {
     /// before calling the source, so a cancellation that wins first performs
     /// no source I/O.
     pub fn execute(&self, id: StreamRequestId) -> Result<AsyncStreamTask, StreamIoError> {
-        let gate = match self.gate(id) {
-            Ok(gate) => gate,
-            Err(_) => {
-                let state = self
-                    .controller
-                    .lock()
-                    .unwrap()
-                    .state(id)
-                    .ok_or(StreamIoError::Controller(StreamError::UnknownRequest(id)))?;
-                return Err(match state {
-                    StreamState::Cancelled => StreamIoError::Cancelled { id },
-                    state => StreamIoError::AlreadyExecuted { id, state },
-                });
-            }
+        let Ok(gate) = self.gate(id) else {
+            let state = self
+                .controller
+                .lock()
+                .unwrap()
+                .state(id)
+                .ok_or(StreamIoError::Controller(StreamError::UnknownRequest(id)))?;
+            return Err(match state {
+                StreamState::Cancelled => StreamIoError::Cancelled { id },
+                state => StreamIoError::AlreadyExecuted { id, state },
+            });
         };
         let gate_phase = gate.phase.lock().unwrap();
         let mut controller = self.controller.lock().unwrap();
@@ -239,20 +231,17 @@ impl AsyncStreamIoExecutor {
                 state => StreamIoError::AlreadyExecuted { id, state },
             });
         }
-        let gate = match self.gate(id) {
-            Ok(gate) => gate,
-            Err(_) => {
-                let state = self
-                    .controller
-                    .lock()
-                    .unwrap()
-                    .state(id)
-                    .ok_or(StreamIoError::Controller(StreamError::UnknownRequest(id)))?;
-                return Err(match state {
-                    StreamState::Cancelled => StreamIoError::Cancelled { id },
-                    state => StreamIoError::AlreadyExecuted { id, state },
-                });
-            }
+        let Ok(gate) = self.gate(id) else {
+            let state = self
+                .controller
+                .lock()
+                .unwrap()
+                .state(id)
+                .ok_or(StreamIoError::Controller(StreamError::UnknownRequest(id)))?;
+            return Err(match state {
+                StreamState::Cancelled => StreamIoError::Cancelled { id },
+                state => StreamIoError::AlreadyExecuted { id, state },
+            });
         };
         let mut gate_phase = gate.phase.lock().unwrap();
         let mut controller = self.controller.lock().unwrap();
@@ -556,7 +545,7 @@ mod tests {
         let (lock, wake) = &*blocker_release;
         *lock.lock().unwrap() = true;
         wake.notify_all();
-        let _ = blocker.join();
+        let _: () = blocker.join();
         assert!(matches!(
             pool.block_on(task),
             Err(StreamIoError::Cancelled { id: actual }) if actual == id

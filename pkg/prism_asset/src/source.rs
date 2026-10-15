@@ -429,7 +429,7 @@ impl AssetReader for FsSource {
             let mut file = std::fs::File::from(fd);
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes).map_err(|e| Self::map_io(&e))?;
-            return Ok(bytes);
+            Ok(bytes)
         }
 
         #[cfg(not(unix))]
@@ -465,7 +465,7 @@ impl AssetReader for FsSource {
                 }
                 filled += read;
             }
-            return Ok(buf);
+            Ok(buf)
         }
 
         #[cfg(not(unix))]
@@ -501,11 +501,11 @@ impl AssetReader for FsSource {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as u64);
-            return Ok(AssetMeta {
+            Ok(AssetMeta {
                 size: meta.len(),
                 modified_ms,
                 is_dir: meta.is_dir(),
-            });
+            })
         }
 
         #[cfg(not(unix))]
@@ -541,7 +541,7 @@ impl AssetReader for FsSource {
                 }
             }
             names.sort();
-            return Ok(names);
+            Ok(names)
         }
 
         #[cfg(not(unix))]

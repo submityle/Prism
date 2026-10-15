@@ -2,8 +2,10 @@
 
 #![cfg(feature = "std")]
 
+extern crate alloc;
+
+use alloc::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
 
 use prism_asset::{
     Asset, AssetLoader, AssetMeta, AssetPath, AssetReader, AssetServer, AssetTypeId, DepRequest,

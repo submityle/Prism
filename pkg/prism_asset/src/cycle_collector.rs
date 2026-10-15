@@ -105,10 +105,10 @@ pub(crate) fn collect_promoted_cycles(
     // Non-cycle guards were only needed to close the upgrade window. The
     // candidate handles stay tombstoned until their arena slots are reclaimed.
     for node in marked {
-        if !cycle_nodes.contains(&node) {
-            if let Some(handle) = observers.get(&node) {
-                handle.set_retired_for_collection(false);
-            }
+        if !cycle_nodes.contains(&node)
+            && let Some(handle) = observers.get(&node)
+        {
+            handle.set_retired_for_collection(false);
         }
     }
     drop(observers);

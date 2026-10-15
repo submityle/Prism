@@ -498,7 +498,7 @@ impl PageResidency {
                 page_size: page_size.bytes(),
             });
         }
-        if budget.max_bytes % page_size.bytes() != 0 {
+        if !budget.max_bytes.is_multiple_of(page_size.bytes()) {
             return Err(PageBudgetError::NotPageAligned {
                 budget: budget.max_bytes,
                 page_size: page_size.bytes(),
@@ -544,15 +544,15 @@ impl PageResidency {
     ) -> Result<PageId, PageRequestError> {
         key.range(self.page_size).map_err(PageRequestError::Range)?;
         if let Some(id) = self.active.get(&key).copied() {
-            if let Some(record) = self.records.get_mut(&id) {
-                if matches!(
+            if let Some(record) = self.records.get_mut(&id)
+                && matches!(
                     record.state,
                     PageState::Pending | PageState::Loading | PageState::Resident
-                ) {
-                    record.priority = record.priority.max(priority);
-                    record.importance = record.importance.max(importance);
-                    return Ok(id);
-                }
+                )
+            {
+                record.priority = record.priority.max(priority);
+                record.importance = record.importance.max(importance);
+                return Ok(id);
             }
             self.active.remove(&key);
         }

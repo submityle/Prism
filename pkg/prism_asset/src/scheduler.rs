@@ -453,28 +453,27 @@ impl LoadScheduler {
             if let Some(existing) = state.in_flight.get(&key) {
                 if let (Some(existing_type), Some(requested_type)) =
                     (existing.requested_type, requested_type)
+                    && existing_type != requested_type
                 {
-                    if existing_type != requested_type {
-                        let conflict = Arc::new(Flight {
-                            notification: Mutex::new(FlightNotification {
-                                result: None,
-                                waiters: Vec::new(),
-                            }),
-                            priority: self.cpu_pool.priority_group(priority),
-                            requested_type: Some(requested_type),
-                        });
-                        conflict.complete(Err(LoadFailure::AssemblyFailed(format!(
-                            "same asset path requested with conflicting types: {path}"
-                        ))));
-                        return Ok(LoadTicket {
-                            flight: conflict,
-                            waiter_token: Arc::new(()),
-                            cancellation: Arc::new(Mutex::new(Cancellation {
-                                cancelled: false,
-                                waker: None,
-                            })),
-                        });
-                    }
+                    let conflict = Arc::new(Flight {
+                        notification: Mutex::new(FlightNotification {
+                            result: None,
+                            waiters: Vec::new(),
+                        }),
+                        priority: self.cpu_pool.priority_group(priority),
+                        requested_type: Some(requested_type),
+                    });
+                    conflict.complete(Err(LoadFailure::AssemblyFailed(format!(
+                        "same asset path requested with conflicting types: {path}"
+                    ))));
+                    return Ok(LoadTicket {
+                        flight: conflict,
+                        waiter_token: Arc::new(()),
+                        cancellation: Arc::new(Mutex::new(Cancellation {
+                            cancelled: false,
+                            waker: None,
+                        })),
+                    });
                 }
                 existing.priority.boost_to(priority);
                 (Arc::clone(existing), false)
@@ -1019,7 +1018,7 @@ async fn execute_async_load(
             .await;
     }
     server
-        .commit_async_load(plan, output, dependencies, labeled_dependencies)
+        .commit_async_load(*plan, output, dependencies, labeled_dependencies)
         .map_err(LoadFailure::AssemblyFailed)
 }
 
@@ -2152,7 +2151,7 @@ mod tests {
             .load_for_type(&plan.path, plan.type_id, &[])
             .expect("test output decodes");
         let error = server
-            .commit_async_load(plan, output, Vec::new(), Vec::new())
+            .commit_async_load(*plan, output, Vec::new(), Vec::new())
             .expect_err("failed slot must not be resurrected");
         assert!(error.contains("no longer loading"));
     }

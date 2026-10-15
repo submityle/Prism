@@ -2,12 +2,14 @@
 
 #![cfg(feature = "std")]
 
+extern crate alloc;
+
+use alloc::sync::Arc;
 use prism_asset::{
     Asset, AssetLoader, AssetPath, AssetServer, AssetTypeId, DepRequest, LoadContext, LoadError,
     LoadScheduler, LoadState, MemSource, RecursiveDependencyLoadState,
 };
 use prism_tasks::{Priority, TaskPool};
-use std::sync::Arc;
 
 #[derive(Debug)]
 struct Source(u8);

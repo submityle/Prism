@@ -43,6 +43,12 @@ impl RangePart {
     pub const fn len(self) -> u64 {
         self.len
     }
+
+    /// Whether this range contributes no bytes.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
 }
 
 /// Bounds applied before any source I/O is started.

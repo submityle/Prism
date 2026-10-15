@@ -1,8 +1,10 @@
-//! Real AssetServer revision/ownership regressions, without a scheduler or API mocks.
+//! Real `AssetServer` revision/ownership regressions, without a scheduler or API mocks.
 
 #![cfg(feature = "std")]
 
-use std::sync::Arc;
+extern crate alloc;
+
+use alloc::sync::Arc;
 
 use prism_asset::{
     Asset, AssetEvent, AssetLoader, AssetPath, AssetServer, AssetTypeId, DepRequest, LoadContext,

@@ -83,7 +83,7 @@ pub struct AssetServer {
 
 pub(crate) enum AsyncLoadPreparation {
     Existing(UntypedHandle),
-    New(AsyncLoadPlan),
+    New(Box<AsyncLoadPlan>),
 }
 
 pub(crate) struct AsyncReloadPlan {
@@ -243,14 +243,14 @@ impl AssetServer {
             .insert(StableGuid::from_path(&path.to_string()), path.clone());
         inner.graph.add_asset(id);
         let _ = inner.graph.set_self_state(id, LoadState::Loading);
-        Ok(AsyncLoadPreparation::New(AsyncLoadPlan {
+        Ok(AsyncLoadPreparation::New(Box::new(AsyncLoadPlan {
             path,
             id,
             type_id,
             handle,
             sources: inner.sources.clone(),
             loaders: inner.loaders.clone(),
-        }))
+        })))
     }
 
     pub(crate) fn prepare_async_reload(
@@ -900,7 +900,7 @@ impl AssetServer {
         // source loader's complete labeled revision untouched.
         let path = requested_path.clone().without_label();
         let guard = inner.reload_epoch.begin();
-        let result = match guard.commit(|| {
+        match guard.commit(|| {
             if let Some(handle) = inner
                 .interned
                 .get(&path)
@@ -965,8 +965,7 @@ impl AssetServer {
                 }
             }),
             ReloadCommit::Superseded => None,
-        };
-        result
+        }
     }
 
     /// Applies one debounced watcher batch to resident assets.
@@ -1071,12 +1070,9 @@ impl AssetServer {
     /// reload cannot interleave between the two operations. `None` means the
     /// server has not registered an arena for `A`.
     #[must_use]
-    pub fn drain_events_with_snapshots<A: Asset>(
+    pub fn drain_events_with_snapshots<A: Asset + Clone>(
         &self,
-    ) -> Option<(Vec<crate::AssetEvent<A>>, Vec<(crate::AssetId<A>, A)>)>
-    where
-        A: Clone,
-    {
+    ) -> Option<(Vec<crate::AssetEvent<A>>, Vec<(crate::AssetId<A>, A)>)> {
         let mut inner = self.lock();
         inner
             .stores
@@ -1153,14 +1149,13 @@ impl AssetServerInner {
                 let handle = requested
                     .is_none_or(|type_id| handle.id().type_id() == type_id)
                     .then_some(handle)?;
-                if path.has_label() {
-                    if let Some(source) = self
+                if path.has_label()
+                    && let Some(source) = self
                         .interned
                         .get(&path.clone().without_label())
                         .and_then(UntypedWeakHandle::upgrade)
-                    {
-                        self.promote_label_ownership(&handle, &source);
-                    }
+                {
+                    self.promote_label_ownership(&handle, &source);
                 }
                 return Some(handle);
             }
@@ -1291,20 +1286,18 @@ impl AssetServerInner {
             } else {
                 self.promoted_labels.remove(&record.label_id);
             }
-            if record.source_had_label {
-                if let Some(source_retained) = self.retained.get_mut(&record.source_id) {
-                    if !source_retained
-                        .iter()
-                        .any(|handle| handle.id() == record.label_id)
-                    {
-                        source_retained.push(record.label.clone());
-                    }
-                }
+            if record.source_had_label
+                && let Some(source_retained) = self.retained.get_mut(&record.source_id)
+                && !source_retained
+                    .iter()
+                    .any(|handle| handle.id() == record.label_id)
+            {
+                source_retained.push(record.label.clone());
             }
-            if !record.label_had_source {
-                if let Some(label_retained) = self.retained.get_mut(&record.label_id) {
-                    label_retained.retain(|handle| handle.id() != record.source_id);
-                }
+            if !record.label_had_source
+                && let Some(label_retained) = self.retained.get_mut(&record.label_id)
+            {
+                label_retained.retain(|handle| handle.id() != record.source_id);
             }
         }
     }
@@ -1561,7 +1554,7 @@ impl AssetServerInner {
             }
             Err(err) => {
                 self.fail(id, &path, err.to_string());
-                return false;
+                false
             }
         }
     }
