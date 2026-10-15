@@ -19,7 +19,7 @@
 //! ready queue and fails fast if a future can make no progress, so it can never
 //! hang.
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Condvar, Mutex};
@@ -185,13 +185,15 @@ impl RunnableTask for TaskHarness {
 struct ThreadNotify {
     signaled: Mutex<bool>,
     cvar: Condvar,
+    single_driver: Option<Weak<Shared>>,
 }
 
 impl ThreadNotify {
-    fn new() -> Arc<Self> {
+    fn new(single_driver: Option<Weak<Shared>>) -> Arc<Self> {
         Arc::new(Self {
             signaled: Mutex::new(false),
             cvar: Condvar::new(),
+            single_driver,
         })
     }
 
@@ -202,26 +204,6 @@ impl ThreadNotify {
             signaled = self.cvar.wait(signaled).unwrap();
         }
         *signaled = false;
-    }
-
-    /// Wait up to `timeout` for a signal, clearing and returning `true` if one
-    /// arrived. Used by the single-threaded `block_on` to allow an *external*
-    /// waker (e.g. the `IoReactor` thread) to make progress while still
-    /// bounding a genuinely stalled future.
-    fn wait_timeout(&self, timeout: core::time::Duration) -> bool {
-        let mut signaled = self.signaled.lock().unwrap();
-        if *signaled {
-            *signaled = false;
-            return true;
-        }
-        let (guard, _timed_out) = self.cvar.wait_timeout(signaled, timeout).unwrap();
-        signaled = guard;
-        if *signaled {
-            *signaled = false;
-            true
-        } else {
-            false
-        }
     }
 
     /// Take and clear the current signal state without blocking.
@@ -236,6 +218,10 @@ impl WakeTask for ThreadNotify {
         let mut signaled = self.signaled.lock().unwrap();
         *signaled = true;
         self.cvar.notify_all();
+        drop(signaled);
+        if let Some(shared) = self.single_driver.as_ref().and_then(Weak::upgrade) {
+            shared.signal_async_driver();
+        }
     }
 }
 
@@ -283,7 +269,10 @@ impl TaskPool {
     where
         F: Future,
     {
-        let notify = ThreadNotify::new();
+        let single_driver = self
+            .is_single_threaded()
+            .then(|| Arc::downgrade(self.shared_state()));
+        let notify = ThreadNotify::new(single_driver);
         let waker = waker_of(Arc::clone(&notify));
         let mut cx = Context::from_waker(&waker);
         let mut future = Box::pin(future);
@@ -314,6 +303,7 @@ impl TaskPool {
     {
         let shared = self.shared_state();
         loop {
+            let epoch = shared.async_epoch();
             while let Some(task) = shared.pop_async_ready() {
                 task.run_boxed();
             }
@@ -326,7 +316,7 @@ impl TaskPool {
                 // declaring a stall, so an externally-driven future can make
                 // progress without the "never hangs" guarantee being lost: a
                 // genuinely stuck future still panics after the timeout.
-                if !notify.wait_timeout(block_on_stall_timeout())
+                if !shared.wait_async_ready(epoch, block_on_stall_timeout())
                     && shared.async_ready_is_empty()
                     && !notify.take_signal()
                 {
@@ -345,6 +335,10 @@ impl TaskPool {
 fn block_on_stall_timeout() -> core::time::Duration {
     core::time::Duration::from_secs(5)
 }
+
+#[cfg(test)]
+#[path = "single_wake_tests.rs"]
+mod single_wake_tests;
 
 #[cfg(test)]
 mod tests {

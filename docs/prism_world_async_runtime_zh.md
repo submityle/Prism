@@ -37,4 +37,16 @@ adapter 的 public poll 保留一个最新 Context 的 waker；并发 blocking r
 
 唤醒加固后的 release 本机记录：端到端 P50/P95/P99 为 6.626/10.308/12.405 ms，P50 对应 301.84 MiB/s；poll（含校验与 host）为 35.125/172.459/390.167 µs，共 4,929 次。文件可被 OS cache 命中，并行工作区有其他负载；不将此结果称为磁盘峰值吞吐、无 IO 卡顿达标或跨硬件承诺，也不将不同并行负载下的前后两次测量当作优化倍数证据。
 
-本批没有执行 GPU、冷盘、mmap、资产包解压或加密网络验收。`prism_tasks` 的调度/共享取消整合仍需独立实现，不能把标准 Future/waker 兼容性当成已经接入任务系统。
+本批没有执行 GPU、冷盘、mmap、资产包解压或加密网络验收。
+
+## 任务池与结构化取消
+
+启用 `prism_world_runtime/tasks` 后，`TaskCellIo::new(backend, &parent)` 取得一个空闲 backend 的独占所有权并创建 child token；非空闲 backend 原样返回。将 `next_cell_completion(&mut io)` 或协调器的 Context poll future 提交给 `prism_tasks::TaskPool::spawn_async`，即可在同一计算池中驱动加载。阻塞文件操作仍留在固定文件 worker 中。此 feature 不开启任务池的全局实例，也不替宿主选择线程数量。
+
+`CancelToken::cancelled()` 为每个 Future 独立登记最新 waker，drop 时 O(1) 注销，槽位存储受峰值同时等待者数量约束。树使用 weak child 与 strong parent 路径：丢弃中间 token 不切断仍存活后代的取消关系，废弃子树可以回收。传播与深链释放采用迭代遍历；clone、drop、wake 回调都在树与 waiter 锁外执行。先标记全部后代，再逐个通知；单个回调 panic 不跳过其他通知，正常调用完成清理后重抛第一个 panic，正在 unwind 时保持原 panic。若被压制的 panic payload 析构本身再次 panic，仅遗留其二次 payload，以免二次展开导致 abort。
+
+父 scope 取消会直接唤醒等待中的 IO task，即使 provider 没有通知。`TaskCellIo` 每次 poll 最多向 16 个已接受请求发出取消；还有剩余时主动唤醒并让出该 poll。取消后拒绝新提交，并将迟到的成功或单请求失败转为 `Cancelled`，不会把成功 payload 交给场景；backend 内部错误仍原样返回。配额直到消费终态才释放。drop 会逐个尝试取消全部剩余请求，即使通知或单次 backend cancel panic；标准 threaded backend 的 drop 不等待阻塞文件读取，自定义 backend 仍受自己的 drop 契约约束。
+
+真实 archive 回归在 0/1/2 个计算 worker 上运行：3 个 cell、每个 512 字节 payload、1 个文件槽、7 字节 chunk，核对 archive offset、checksum、header 和 host payload。过程中修复零 worker fallback 的外部唤醒：ready queue 与直接 Future 的通知共同推进带 epoch 的 condvar，多个 `block_on` driver 各自观察通知，不再等待 5 秒 stall timer 才继续。定向测试覆盖提前通知、直接 Future、排队 harness 与并发 driver。
+
+本轮启用 tasks 的 runtime 63 项通过；`prism_tasks` 默认配置及 `--no-default-features --features std` 均为 264 项单测与 11 项文档测试通过。runtime no-default 的 6 项通过；tasks/std 与 runtime/tasks 联合 all-target clippy、runtime no-default all-target clippy 均通过 `-D warnings`，指定文件格式检查与 `git diff --check` 通过。仍未接通共享动态优先级、原生 IO reactor、资产包解压、mmap 或 GPU 直传；取消集成不构成这些功能的验收。

@@ -27,6 +27,8 @@ mod file_provider;
 mod io_adapter;
 #[cfg(feature = "std")]
 mod scheduled_io;
+#[cfg(feature = "tasks")]
+mod task_cell_io;
 #[cfg(feature = "std")]
 mod threaded_cell_io;
 
@@ -34,6 +36,8 @@ mod threaded_cell_io;
 mod file_provider_tests;
 #[cfg(all(test, feature = "std"))]
 mod scheduled_io_tests;
+#[cfg(all(test, feature = "tasks"))]
+mod task_cell_io_tests;
 
 #[cfg(feature = "std")]
 pub use file_provider::FileCellProvider;
@@ -41,6 +45,8 @@ pub use file_provider::FileCellProvider;
 pub use io_adapter::{IoAdapterEvent, IoByteLimits, IoRequestId, IoSchedulerAdapter};
 #[cfg(feature = "std")]
 pub use scheduled_io::ScheduledCellIo;
+#[cfg(feature = "tasks")]
+pub use task_cell_io::TaskCellIo;
 #[cfg(feature = "std")]
 pub use threaded_cell_io::ThreadedCellIo;
 
@@ -202,6 +208,8 @@ impl LoadedCell {
 /// A bounded submission failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SubmitError {
+    /// The owning task scope has been cancelled and admits no further work.
+    Cancelled,
     /// The runtime has reached its outstanding request capacity.
     Backpressure {
         /// Maximum outstanding requests.
@@ -219,6 +227,7 @@ pub enum SubmitError {
 impl fmt::Display for SubmitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => formatter.write_str("IO task scope was cancelled"),
             Self::Backpressure { capacity } => {
                 write!(formatter, "IO capacity {capacity} is full")
             }
@@ -258,7 +267,7 @@ pub enum IoCompletion<E> {
         /// Opaque cell bytes.
         bytes: Vec<u8>,
     },
-    /// The request was cancelled before provider work started.
+    /// The request was cancelled; its payload must not be committed.
     Cancelled {
         /// Request identity.
         request_id: RequestId,
@@ -274,6 +283,28 @@ pub enum IoCompletion<E> {
         /// Provider failure.
         error: E,
     },
+}
+
+impl<E> IoCompletion<E> {
+    /// Returns the identity of the retired request.
+    #[must_use]
+    pub const fn request_id(&self) -> RequestId {
+        match self {
+            Self::Completed { request_id, .. }
+            | Self::Cancelled { request_id, .. }
+            | Self::Failed { request_id, .. } => *request_id,
+        }
+    }
+
+    /// Returns the original metadata of the retired request.
+    #[must_use]
+    pub const fn request(&self) -> CellReadRequest {
+        match self {
+            Self::Completed { request, .. }
+            | Self::Cancelled { request, .. }
+            | Self::Failed { request, .. } => *request,
+        }
+    }
 }
 
 impl<E: fmt::Debug> fmt::Debug for IoCompletion<E> {
@@ -444,6 +475,17 @@ pub trait CellIo {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Result<IoCompletion<Self::Error>, Self::Error>>;
+}
+
+/// Waits for one terminal cell event using the executor's task context.
+///
+/// This future borrows the backend exclusively and does not spawn work or park
+/// the calling thread. An idle backend may remain pending until its owner drops
+/// the future. The backend controls admission, cancellation, and polling cost.
+pub async fn next_cell_completion<I: CellIo + ?Sized>(
+    io: &mut I,
+) -> Result<IoCompletion<I::Error>, I::Error> {
+    core::future::poll_fn(|cx| io.poll_completion(cx)).await
 }
 
 impl<P: ChunkProvider> CellIo for IoRuntime<P> {

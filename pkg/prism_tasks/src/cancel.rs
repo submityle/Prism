@@ -12,9 +12,15 @@
 //! cancelling either clone cancels both. Use [`CancelToken::child`] when you
 //! want an independent sub-scope that the parent can still cancel.
 
-use alloc::sync::Arc;
+use alloc::boxed::Box;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::any::Any;
 use core::fmt;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -36,24 +42,176 @@ impl std::error::Error for Cancelled {}
 struct CancelState {
     /// Whether this node (and therefore its subtree) has been cancelled.
     cancelled: AtomicBool,
-    /// Registered child nodes, cancelled transitively by [`CancelState::cancel`].
-    children: Mutex<Vec<Arc<CancelState>>>,
+    /// Weak links let abandoned scopes die before their parent is cancelled.
+    children: Mutex<Vec<Weak<CancelState>>>,
+    /// Keep the path to live descendants intact even if intermediate tokens
+    /// are dropped. Together with weak child links this cannot form a cycle.
+    parent: Option<Arc<CancelState>>,
+    waiters: Mutex<CancelWaiters>,
 }
 
 impl CancelState {
-    /// Mark this node cancelled and recurse into every registered child.
-    fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        // Snapshot under the lock, then recurse without holding it: the tree
-        // has no cycles, and releasing the lock first avoids nesting child
-        // locks under the parent lock.
-        let children = {
-            let guard = self.children.lock().unwrap();
-            guard.clone()
-        };
-        for child in children {
-            child.cancel();
+    fn new(parent: Option<Arc<Self>>) -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            children: Mutex::new(Vec::new()),
+            parent,
+            waiters: Mutex::new(CancelWaiters::default()),
         }
+    }
+
+    fn cancel_node(&self, pending: &mut Vec<Arc<Self>>, wakers: &mut Vec<Arc<Waker>>) {
+        self.cancelled.store(true, Ordering::Release);
+        // The flag is checked under this same lock when registering. Either
+        // the waiter observes cancellation or this drain includes its waker.
+        let waiters = {
+            let mut guard = self.waiters.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
+        wakers.extend(waiters.slots.into_iter().flatten());
+        let children = {
+            let mut guard = self.children.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
+        // Upgrade outside the lock: even releasing a node's last Arc must not
+        // run a user waker destructor under a tree mutex.
+        pending.extend(children.into_iter().filter_map(|child| child.upgrade()));
+    }
+
+    fn cancel(&self) {
+        let already_panicking = std::thread::panicking();
+        let mut pending = Vec::new();
+        let mut wakers = Vec::new();
+        self.cancel_node(&mut pending, &mut wakers);
+        while let Some(child) = pending.pop() {
+            child.cancel_node(&mut pending, &mut wakers);
+        }
+
+        // Finish propagation before invoking user code. Catch wake and drop
+        // separately so even a panicking waker destructor cannot suppress
+        // another notification. Keep panic payloads until all notifications
+        // finish, since their destructors can also execute user code.
+        let mut failures = Vec::new();
+        for waker in wakers {
+            failures.extend(panic::catch_unwind(AssertUnwindSafe(|| waker.wake_by_ref())).err());
+            failures.extend(panic::catch_unwind(AssertUnwindSafe(|| drop(waker))).err());
+        }
+        let mut failures = failures.into_iter();
+        let first = failures.next();
+        for failure in failures {
+            discard_cancel_panic(failure);
+        }
+        if let Some(first) = first {
+            if already_panicking {
+                // Cancellation from a destructor must preserve the panic
+                // already unwinding through that destructor.
+                discard_cancel_panic(first);
+            } else {
+                panic::resume_unwind(first);
+            }
+        }
+    }
+}
+
+/// Dispose of one suppressed payload without allowing its destructor to
+/// replace the original panic. A destructor may panic with another payload
+/// whose destructor also panics, so never recursively dispose of that result:
+/// deliberately leak only that new payload rather than risking an abort or
+/// unbounded cleanup. The original payload is still released when possible.
+fn discard_cancel_panic(payload: Box<dyn Any + Send>) {
+    if let Err(cleanup_panic) = panic::catch_unwind(AssertUnwindSafe(|| drop(payload))) {
+        core::mem::forget(cleanup_panic);
+    }
+}
+
+impl Drop for CancelState {
+    fn drop(&mut self) {
+        // A live leaf may be the only owner of a very deep ancestry chain.
+        // Release it iteratively rather than recursively overflowing the stack.
+        let mut parent = self.parent.take();
+        while let Some(node) = parent.take() {
+            if let Some(mut state) = Arc::into_inner(node) {
+                parent = state.parent.take();
+            }
+        }
+    }
+}
+
+/// Reusable slots keep registration/removal O(1) and storage bounded by peak
+/// simultaneous waiters. Only Arc wrappers are copied while holding the lock.
+#[derive(Default)]
+struct CancelWaiters {
+    slots: Vec<Option<Arc<Waker>>>,
+    free: Vec<usize>,
+}
+
+struct CancelFuture<'a> {
+    state: &'a CancelState,
+    slot: Option<usize>,
+}
+
+impl CancelFuture<'_> {
+    fn unregister(&mut self) {
+        let Some(slot) = self.slot.take() else {
+            return;
+        };
+        let removed = {
+            let mut waiters = self.state.waiters.lock().unwrap();
+            // Cancellation may already have drained the entire registry.
+            let removed = waiters.slots.get_mut(slot).and_then(Option::take);
+            if removed.is_some() {
+                waiters.free.push(slot);
+            }
+            removed
+        };
+        drop(removed);
+    }
+}
+
+impl Future for CancelFuture<'_> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.state.cancelled.load(Ordering::Acquire) {
+            self.unregister();
+            return Poll::Ready(());
+        }
+
+        // RawWaker clone/drop/wake callbacks are arbitrary user code. Clone
+        // before locking; transfer replaced registrations out before dropping.
+        let waker = Arc::new(cx.waker().clone());
+        let (cancelled, replaced) = {
+            let mut waiters = self.state.waiters.lock().unwrap();
+            if self.state.cancelled.load(Ordering::Acquire) {
+                (true, None)
+            } else if let Some(slot) = self.slot {
+                (false, waiters.slots[slot].replace(Arc::clone(&waker)))
+            } else {
+                let slot = if let Some(slot) = waiters.free.pop() {
+                    waiters.slots[slot] = Some(Arc::clone(&waker));
+                    slot
+                } else {
+                    let slot = waiters.slots.len();
+                    waiters.slots.push(Some(Arc::clone(&waker)));
+                    slot
+                };
+                self.slot = Some(slot);
+                (false, None)
+            }
+        };
+        drop(replaced);
+        if cancelled {
+            self.unregister();
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for CancelFuture<'_> {
+    fn drop(&mut self) {
+        self.unregister();
     }
 }
 
@@ -73,10 +231,7 @@ impl CancelToken {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            state: Arc::new(CancelState {
-                cancelled: AtomicBool::new(false),
-                children: Mutex::new(Vec::new()),
-            }),
+            state: Arc::new(CancelState::new(None)),
         }
     }
 
@@ -88,27 +243,61 @@ impl CancelToken {
     /// cancellation.
     #[must_use]
     pub fn child(&self) -> CancelToken {
-        let child = Arc::new(CancelState {
-            cancelled: AtomicBool::new(false),
-            children: Mutex::new(Vec::new()),
-        });
+        let child = Arc::new(CancelState::new(Some(Arc::clone(&self.state))));
         // Hold the parent's children lock across the "is the parent cancelled?"
         // check and the registration push. `CancelState::cancel` also takes
-        // this lock to snapshot children, so the two cannot interleave in a way
+        // this lock to drain children, so the two cannot interleave in a way
         // that both leaves the child unregistered and lets it observe the
         // parent as not-yet-cancelled.
         let mut guard = self.state.children.lock().unwrap();
         if self.state.cancelled.load(Ordering::Acquire) {
             child.cancelled.store(true, Ordering::Release);
+        } else {
+            // Amortize pruning so a long-lived scope does not retain an
+            // unbounded list of weak links to abandoned children.
+            if guard.len() == guard.capacity() {
+                guard.retain(|child| child.strong_count() != 0);
+            }
+            guard.push(Arc::downgrade(&child));
         }
-        guard.push(Arc::clone(&child));
         drop(guard);
         CancelToken { state: child }
     }
 
     /// Cancel this token and, transitively, every descendant.
+    ///
+    /// # Panics
+    /// Unless this thread is already unwinding, the first waiter waker panic
+    /// is propagated after cancelling all descendants and notifying every
+    /// registered waiter. During unwinding, waiter panics are suppressed to
+    /// preserve the original panic. Suppressed payloads are dropped with panic
+    /// isolation; if a payload destructor panics, its new payload is deliberately
+    /// leaked to avoid recursive panicking destructors.
     pub fn cancel(&self) {
         self.state.cancel();
+    }
+
+    /// Wait until this token or an ancestor is cancelled.
+    ///
+    /// Every pending future registers independently and uses the waker from
+    /// its most recent poll. Dropping a future unregisters it. An already
+    /// cancelled token completes immediately, without cloning the waker.
+    /// Clone the token into an async task to share its cancellation lifetime:
+    ///
+    /// ```
+    /// # use prism_tasks::{CancelToken, TaskPool};
+    /// let pool = TaskPool::with_threads(1);
+    /// let cancel = CancelToken::new();
+    /// let task_cancel = cancel.clone();
+    /// let task = pool.spawn_async(async move { task_cancel.cancelled().await });
+    /// cancel.cancel();
+    /// pool.block_on(task);
+    /// ```
+    pub fn cancelled(&self) -> impl Future<Output = ()> + Send + '_ {
+        CancelFuture {
+            state: &self.state,
+            slot: None,
+        }
     }
 
     /// Whether this token (or an ancestor) has been cancelled.
@@ -129,6 +318,10 @@ impl CancelToken {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cancel_future_tests.rs"]
+mod cancel_future_tests;
 
 impl Default for CancelToken {
     fn default() -> Self {

@@ -13,10 +13,12 @@ prism_world_stream = { path = "../prism_world_stream" }
 prism_world_io = { path = "../prism_world_io", default-features = false }
 prism_world_persist = { path = "../prism_world_persist", default-features = false }
 prism_world_residency = { path = "../prism_world_residency" }
+prism_tasks = { path = "../prism_tasks", optional = true, default-features = false, features = ["std"] }
 
 [features]
 default = ["std"]
 std = ["prism_world_io/std", "prism_world_persist/std"]
+tasks = ["std", "dep:prism_tasks"]
 
 [[bench]]
 name = "threaded_archive"

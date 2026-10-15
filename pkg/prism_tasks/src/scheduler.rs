@@ -49,7 +49,8 @@ pub(crate) struct Shared {
     /// Ready-to-poll async task harnesses for the single-threaded fallback,
     /// drained by [`crate::TaskPool::block_on`] (multi-threaded pools re-enqueue
     /// harnesses as ordinary jobs instead).
-    async_ready: Mutex<VecDeque<Arc<dyn RunnableTask>>>,
+    async_ready: Mutex<AsyncReady>,
+    async_cvar: Condvar,
     /// Count of jobs currently queued anywhere (for park/wake decisions).
     queued: AtomicUsize,
     /// Set during shutdown to drain workers.
@@ -67,6 +68,12 @@ pub(crate) struct Shared {
     /// itself to its assigned core at startup (best-effort; see
     /// [`crate::affinity`]). `None` means run unpinned.
     affinity_plan: Option<crate::affinity::WorkerCorePlan>,
+}
+
+#[derive(Default)]
+struct AsyncReady {
+    queue: VecDeque<Arc<dyn RunnableTask>>,
+    epoch: u64,
 }
 
 impl Shared {
@@ -87,7 +94,8 @@ impl Shared {
             deques,
             injector: Mutex::new(VecDeque::new()),
             priority_inbox: PriorityInbox::new(),
-            async_ready: Mutex::new(VecDeque::new()),
+            async_ready: Mutex::new(AsyncReady::default()),
+            async_cvar: Condvar::new(),
             queued: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             park: Mutex::new(()),
@@ -344,17 +352,46 @@ impl Shared {
 
     /// Enqueue a ready async task harness (single-threaded fallback only).
     pub(crate) fn push_async_ready(&self, task: Arc<dyn RunnableTask>) {
-        self.async_ready.lock().unwrap().push_back(task);
+        let mut ready = self.async_ready.lock().unwrap();
+        ready.queue.push_back(task);
+        ready.epoch = ready.epoch.wrapping_add(1);
+        self.async_cvar.notify_all();
     }
 
     /// Pop one ready async task harness, if any (single-threaded fallback).
     pub(crate) fn pop_async_ready(&self) -> Option<Arc<dyn RunnableTask>> {
-        self.async_ready.lock().unwrap().pop_front()
+        self.async_ready.lock().unwrap().queue.pop_front()
     }
 
     /// Whether the single-threaded async ready queue is empty.
     pub(crate) fn async_ready_is_empty(&self) -> bool {
-        self.async_ready.lock().unwrap().is_empty()
+        self.async_ready.lock().unwrap().queue.is_empty()
+    }
+
+    /// Observe before polling/draining so wake-before-wait cannot be lost.
+    pub(crate) fn async_epoch(&self) -> u64 {
+        self.async_ready.lock().unwrap().epoch
+    }
+
+    /// A directly-polled future may wake without adding a queued harness.
+    pub(crate) fn signal_async_driver(&self) {
+        let mut ready = self.async_ready.lock().unwrap();
+        ready.epoch = ready.epoch.wrapping_add(1);
+        self.async_cvar.notify_all();
+    }
+
+    /// Wait on the same mutex that publishes queue entries and direct wakes.
+    /// Each driver retains its own epoch, so one waiter cannot consume another
+    /// driver's notification. No user callbacks execute under this mutex.
+    pub(crate) fn wait_async_ready(&self, epoch: u64, timeout: Duration) -> bool {
+        let ready = self.async_ready.lock().unwrap();
+        let (ready, _) = self
+            .async_cvar
+            .wait_timeout_while(ready, timeout, |ready| {
+                ready.queue.is_empty() && ready.epoch == epoch
+            })
+            .unwrap();
+        !ready.queue.is_empty() || ready.epoch != epoch
     }
 
     pub(crate) fn id(&self) -> usize {
