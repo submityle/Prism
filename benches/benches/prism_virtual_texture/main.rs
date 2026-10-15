@@ -1,9 +1,9 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use prism_render_architecture::texture_streaming::{
-    decode_feedback, FeedbackTextureDesc, StreamerConfig, TextureSemantic, VirtualTextureStreamer,
-    NOT_REQUESTED,
+    decode_feedback, FeedbackTextureDesc, GpuPageTable, StreamerConfig, TexturePageKey,
+    TextureSemantic, VirtualTextureStreamer, NOT_REQUESTED,
 };
-use prism_virtual_texture_gpu::GpuContext;
+use prism_virtual_texture_gpu::{GpuContext, GpuFeedbackDecode, GpuPageLookup};
 use std::hint::black_box;
 
 fn desc(size: usize) -> FeedbackTextureDesc {
@@ -33,6 +33,36 @@ fn grid(size: usize) -> Vec<u8> {
         .collect()
 }
 
+fn gpu_lookup_fixture() -> (GpuPageTable, Vec<TexturePageKey>) {
+    let bindings = (0..1024u32)
+        .map(|slot| {
+            (
+                TexturePageKey {
+                    texture: slot / 256,
+                    mip: ((slot / 64) % 4) as u8,
+                    layer: ((slot / 32) % 2) as u16,
+                    x: (slot % 32) as u16,
+                    y: 0,
+                },
+                slot,
+            )
+        })
+        .collect::<Vec<_>>();
+    let table = GpuPageTable::from_bindings(&bindings);
+    let queries = bindings
+        .iter()
+        .map(|&(key, _)| key)
+        .chain((0..1024u32).map(|index| TexturePageKey {
+            texture: 99,
+            mip: (index % 6) as u8,
+            layer: 0,
+            x: (index % 32) as u16,
+            y: ((index / 32) % 32) as u16,
+        }))
+        .collect();
+    (table, queries)
+}
+
 fn cpu_feedback_and_residency(c: &mut Criterion) {
     let mut group = c.benchmark_group("prism_virtual_texture/cpu");
     for size in [64usize, 1024, 16_384] {
@@ -55,20 +85,38 @@ fn cpu_feedback_and_residency(c: &mut Criterion) {
     group.finish();
 }
 
-fn gpu_gate(c: &mut Criterion) {
+fn gpu_kernels(c: &mut Criterion) {
     let mut group = c.benchmark_group("prism_virtual_texture/gpu");
     let Some(ctx) = GpuContext::try_real_headless() else {
-        eprintln!(
-            "[prism_virtual_texture] no real integrated/discrete adapter; GPU benchmarks skipped"
-        );
+        eprintln!("[prism_virtual_texture] SKIPPED: no real integrated/discrete adapter");
         group.finish();
         return;
     };
-    group.bench_function("adapter_gate", |b| {
-        b.iter(|| black_box(ctx.adapter_evidence()))
+    eprintln!(
+        "[prism_virtual_texture] GPU benchmark adapter: {:?}",
+        ctx.adapter_evidence()
+    );
+
+    let (table, queries) = gpu_lookup_fixture();
+    let lookup = GpuPageLookup::new(&ctx);
+    group.bench_function("page_lookup_readback", |b| {
+        b.iter(|| black_box(lookup.lookup(&ctx, &table, &queries).expect("GPU lookup")))
+    });
+
+    let feedback_desc = desc(16_384);
+    let feedback = grid(feedback_desc.grid_len());
+    let decode = GpuFeedbackDecode::new(&ctx);
+    group.bench_function("feedback_decode_readback", |b| {
+        b.iter(|| {
+            black_box(
+                decode
+                    .decode(&ctx, &feedback_desc, &feedback, |_| None, 1)
+                    .expect("GPU feedback decode"),
+            )
+        })
     });
     group.finish();
 }
 
-criterion_group!(benches, cpu_feedback_and_residency, gpu_gate);
+criterion_group!(benches, cpu_feedback_and_residency, gpu_kernels);
 criterion_main!(benches);

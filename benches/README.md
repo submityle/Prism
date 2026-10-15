@@ -48,6 +48,20 @@ green result).
 PRISM_REQUIRE_GPU=1 cargo bench -p benches --bench prism_gpu_cull
 ```
 
+## The virtual-texture streaming benchmark
+
+`prism_virtual_texture` reports CPU feedback decode and residency-streaming
+costs for 64, 1024, and 16384 feedback cells. When a real integrated or
+discrete adapter is available it also measures GPU page-table lookup and
+feedback decode with readback included in the measured operation. The GPU
+section prints `SKIPPED` when no real adapter is available; set
+`PRISM_REQUIRE_GPU=1` to turn that environmental skip into a failure.
+
+```sh
+cargo bench -p benches --bench prism_virtual_texture
+PRISM_REQUIRE_GPU=1 cargo bench -p benches --bench prism_virtual_texture
+```
+
 ## Criterion
 
 Bevy's benchmarks use [Criterion](https://crates.io/crates/criterion). If you want to learn more about using Criterion for comparing performance against a baseline or generating detailed reports, you can read the [Criterion.rs documentation](https://bheisler.github.io/criterion.rs/book/criterion_rs.html).
