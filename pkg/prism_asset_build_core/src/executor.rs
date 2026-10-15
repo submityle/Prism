@@ -11,6 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::thread;
 
+mod determinism;
+mod wave_results;
+pub use determinism::DeterminismDifference;
+
 /// Immutable semantic settings and output contract for one graph node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactSpec {
@@ -91,6 +95,8 @@ pub enum BuildExecutionError {
     DescriptorMismatch(JobId),
     /// Output contract could not be represented by a valid descriptor.
     InvalidOutput(JobId, &'static str),
+    /// Two fresh executions of the same job produced different bytes.
+    NonDeterministic(DeterminismDifference),
 }
 
 impl fmt::Display for BuildExecutionError {
@@ -110,6 +116,7 @@ impl fmt::Display for BuildExecutionError {
             Self::InvalidOutput(id, reason) => {
                 write!(f, "job {} has invalid output: {reason}", id.0)
             }
+            Self::NonDeterministic(difference) => difference.fmt(f),
         }
     }
 }
@@ -161,7 +168,7 @@ impl BuildExecutor {
         ddc: &mut DerivedDataCache,
         revision: BuildRevision,
     ) -> Result<BuildExecution, BuildExecutionError> {
-        self.execute_with_limit(graph, specs, store, ddc, revision, 1)
+        self.execute_with_limit(graph, specs, store, ddc, revision, 1, false)
     }
 
     /// Execute independent jobs concurrently, bounded by the host's available
@@ -193,7 +200,28 @@ impl BuildExecutor {
         revision: BuildRevision,
         max_concurrency: usize,
     ) -> Result<BuildExecution, BuildExecutionError> {
-        self.execute_with_limit(graph, specs, store, ddc, revision, max_concurrency)
+        self.execute_with_limit(graph, specs, store, ddc, revision, max_concurrency, false)
+    }
+
+    /// Bypass every DDC hit and execute each job twice with identical ordered
+    /// dependency bytes. Compare exact output bytes before writing that job to
+    /// CAS or DDC; publish the first checked output, without a third execution.
+    ///
+    /// A mismatch, processor error, or worker panic leaves `CURRENT` unchanged.
+    /// Successful jobs may still populate CAS/DDC before a later failure. Warm
+    /// cache entries are not evidence of determinism and are not compared to
+    /// these fresh outputs. This checks local in-process repeatability only;
+    /// it does not isolate ambient state or prove cross-machine reproducibility.
+    pub fn execute_verified_with_limit(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+        max_concurrency: usize,
+    ) -> Result<BuildExecution, BuildExecutionError> {
+        self.execute_with_limit(graph, specs, store, ddc, revision, max_concurrency, true)
     }
 
     fn execute_with_limit(
@@ -204,6 +232,7 @@ impl BuildExecutor {
         ddc: &mut DerivedDataCache,
         revision: BuildRevision,
         max_concurrency: usize,
+        verify_determinism: bool,
     ) -> Result<BuildExecution, BuildExecutionError> {
         if max_concurrency == 0 {
             return Err(BuildExecutionError::Graph(BuildError::InvalidConcurrency));
@@ -266,7 +295,11 @@ impl BuildExecutor {
                     input_keys,
                     job.processor(),
                     inputs,
-                    ddc.get(key),
+                    if verify_determinism {
+                        None
+                    } else {
+                        ddc.get(key)
+                    },
                 ));
             }
 
@@ -279,7 +312,15 @@ impl BuildExecutor {
                             id,
                             scope.spawn(move || {
                                 prepare_job(
-                                    id, key, spec, input_keys, processor, inputs, cached, store,
+                                    id,
+                                    key,
+                                    spec,
+                                    input_keys,
+                                    processor,
+                                    inputs,
+                                    cached,
+                                    store,
+                                    verify_determinism,
                                 )
                             }),
                         )
@@ -304,10 +345,10 @@ impl BuildExecutor {
                     .collect::<Vec<_>>()
             });
 
-            // `wave` is sorted because it is selected from the stable
-            // topological order. Apply cache mutations and surface failures
-            // in that same order regardless of completion timing.
-            for (id, result) in results {
+            // Canonicalize at the side-effect boundary, independently of the
+            // collector's arrival/join order. No cache mutation or failure
+            // selection may happen before this ordering step.
+            for (id, result) in wave_results::ordered(results) {
                 let prepared = match result {
                     Ok(prepared) => prepared,
                     Err((error, invalidate_cache)) => {
@@ -391,6 +432,7 @@ fn prepare_job(
     inputs: Vec<&[u8]>,
     cached: Option<ArtifactDescriptor>,
     store: &RevisionStore,
+    verify_determinism: bool,
 ) -> Result<PreparedJob, (BuildExecutionError, bool)> {
     let mut cached_bytes = None;
     let mut invalidate_cache = false;
@@ -423,12 +465,17 @@ fn prepare_job(
         Some(payload) => payload,
         None => {
             let input_refs: Vec<&[u8]> = inputs.iter().copied().collect();
-            processor.process(&input_refs).map_err(|source| {
+            let output = processor.process(&input_refs).map_err(|source| {
                 (
                     BuildExecutionError::Graph(BuildError::ProcessorFailed { job: id, source }),
                     invalidate_cache,
                 )
-            })?
+            })?;
+            if verify_determinism {
+                determinism::verify_second_run(id, key, processor.as_ref(), &input_refs, &output)
+                    .map_err(|error| (error, invalidate_cache))?;
+            }
+            output
         }
     };
     if spec.alignment == 0 || !spec.alignment.is_power_of_two() {

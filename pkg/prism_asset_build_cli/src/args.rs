@@ -53,6 +53,9 @@ pub struct Import {
     /// local revision store directory
     #[argh(option)]
     pub store: PathBuf,
+    /// bypass DDC and compare two fresh executions per job before publication
+    #[argh(switch)]
+    pub verify_determinism: bool,
 }
 
 /// Build is the explicit publication spelling of the import vertical slice.
@@ -71,6 +74,9 @@ pub struct Build {
     /// local revision store directory
     #[argh(option)]
     pub store: PathBuf,
+    /// bypass DDC and compare two fresh executions per job before publication
+    #[argh(switch)]
+    pub verify_determinism: bool,
 }
 
 /// Cook the current build revision into a deterministic runtime package.

@@ -52,7 +52,9 @@ pub mod virtual_geometry_payload;
 
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcCapacity, DdcError, DdcEviction, DerivedDataCache, LocalDdc};
-pub use executor::{ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor};
+pub use executor::{
+    ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor, DeterminismDifference,
+};
 pub use graph::{BuildError, BuildGraph, BuildOutputs};
 pub use hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
 pub use job::{BuildJob, JobId, Processor, ProcessorError};

@@ -30,6 +30,7 @@ pub fn publish(
     logical_path: String,
     asset_id: u128,
     store_root: PathBuf,
+    verify_determinism: bool,
 ) -> Result<(), CommandError> {
     let source = snapshot(&source_path, &logical_path)?;
     let (source_key, image_key) = artifact_keys(&source, asset_id)?;
@@ -73,10 +74,24 @@ pub fn publish(
             .ok_or_else(|| CommandError::InvalidInput("revision space is exhausted".into()))?,
         None => 0,
     };
-    let execution = BuildExecutor {
+    let executor = BuildExecutor {
         protocol_version: 1,
-    }
-    .execute_parallel(&graph, &specs, &store, &mut ddc, BuildRevision(revision))?;
+    };
+    let execution = if verify_determinism {
+        let limit = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        executor.execute_verified_with_limit(
+            &graph,
+            &specs,
+            &store,
+            &mut ddc,
+            BuildRevision(revision),
+            limit,
+        )?
+    } else {
+        executor.execute_parallel(&graph, &specs, &store, &mut ddc, BuildRevision(revision))?
+    };
     let image_descriptor = execution
         .published
         .manifest
@@ -93,6 +108,12 @@ pub fn publish(
     );
     println!("image_dimensions={}x{}", image.width, image.height);
     println!("cache_hits={}", execution.cache_hits.len());
+    if verify_determinism {
+        println!(
+            "determinism_verified_jobs={}",
+            execution.artifact_keys.len()
+        );
+    }
     Ok(())
 }
 
@@ -516,6 +537,7 @@ mod tests {
             "textures/hero.png".into(),
             7,
             root.join("store"),
+            false,
         )
         .unwrap();
         publish(
@@ -523,6 +545,7 @@ mod tests {
             "textures/hero.png".into(),
             7,
             root.join("store"),
+            false,
         )
         .unwrap();
 
@@ -549,6 +572,7 @@ mod tests {
             "textures/broken.png".into(),
             7,
             root.join("store"),
+            false,
         )
         .is_err());
         let store = RevisionStore::open(root.join("store")).unwrap();
