@@ -1,13 +1,13 @@
 //! Real archive-to-host latency; bounded memory, no GPU or RSS claims.
 use prism_world_io::{checksum, ThreadedFileConfig};
 use prism_world_runtime::{
-    CellFrameCoordinator, CellReadRequest, IoByteLimits, ManifestHeader, SceneHost, ThreadedCellIo,
-    CELL_HEADER_SIZE,
+    CellFrameCoordinator, CellIo, CellReadRequest, IoByteLimits, ManifestHeader, RoutedCellIo,
+    SceneHost, ThreadedCellIo, CELL_HEADER_SIZE,
 };
 use prism_world_stream::{AabbI64, CellManifest, DemandSource, GlobalPos, SectorId, StreamBudget};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
@@ -57,6 +57,84 @@ fn percentile(values: &mut [u128], percent: usize) -> u128 {
 }
 
 fn main() {
+    let mut native = false;
+    for argument in std::env::args().skip(1) {
+        match argument.as_str() {
+            "--reactor" => native = true,
+            "--bench" => {}
+            _ => panic!("unknown benchmark argument: {argument}"),
+        }
+    }
+    if native {
+        run_native();
+    } else {
+        run("threaded", |path| {
+            ThreadedCellIo::threaded(
+                path,
+                ThreadedFileConfig {
+                    workers: 2,
+                    capacity: 4,
+                    max_chunk_size: 16 * 1024,
+                },
+                4,
+                CELLS,
+                limits(),
+            )
+            .unwrap()
+        });
+    }
+}
+
+fn limits() -> IoByteLimits {
+    IoByteLimits {
+        max_request_bytes: CELL_BYTES as u64,
+        max_total_bytes: (CELLS * CELL_BYTES) as u64,
+    }
+}
+
+#[cfg(all(feature = "reactor", unix))]
+fn run_native() {
+    use prism_tasks::{IoReactor, NamedThreads, NamedThreadsConfig};
+    use prism_world_io::ReactorFileConfig;
+    use prism_world_runtime::ReactorCellIo;
+
+    assert!(IoReactor::supported(), "native backend unavailable");
+    let reactor = Arc::new(IoReactor::new().expect("native reactor"));
+    let workers = NamedThreads::with_config(NamedThreadsConfig {
+        io_threads: 2,
+        async_compute_threads: 1,
+    });
+    run("reactor", |path| {
+        ReactorCellIo::reactor(
+            path,
+            &reactor,
+            &workers,
+            ReactorFileConfig {
+                capacity: 4,
+                max_chunk_size: 16 * 1024,
+                max_request_bytes: CELL_BYTES as u64,
+                max_total_bytes: (4 * CELL_BYTES) as u64,
+            },
+            4,
+            CELLS,
+            limits(),
+        )
+        .unwrap()
+    });
+    // Only the non-compute host tears down services, workers before reactor.
+    drop(workers);
+    drop(reactor);
+}
+
+#[cfg(not(all(feature = "reactor", unix)))]
+fn run_native() {
+    panic!("--reactor requires the reactor feature and a supported Unix platform");
+}
+
+fn run<I: CellIo>(backend: &str, mut make_io: impl FnMut(&Path) -> RoutedCellIo<I>)
+where
+    I::Error: std::fmt::Debug,
+{
     let path = std::env::temp_dir().join(format!(
         "prism-world-archive-bench-{}.bin",
         std::process::id()
@@ -99,21 +177,7 @@ fn main() {
     let mut elapsed = Vec::with_capacity(SAMPLES);
     let mut poll_ns = Vec::new();
     for sample in 0..WARMUP + SAMPLES {
-        let mut io = ThreadedCellIo::threaded(
-            &archive.0,
-            ThreadedFileConfig {
-                workers: 2,
-                capacity: 4,
-                max_chunk_size: 16 * 1024,
-            },
-            4,
-            CELLS,
-            IoByteLimits {
-                max_request_bytes: CELL_BYTES as u64,
-                max_total_bytes: (CELLS * CELL_BYTES) as u64,
-            },
-        )
-        .unwrap();
+        let mut io = make_io(&archive.0);
         for source in &sources {
             io.register(*source).unwrap();
         }
@@ -156,7 +220,7 @@ fn main() {
     let p50 = percentile(&mut elapsed, 50);
     let p95 = percentile(&mut elapsed, 95);
     let p99 = percentile(&mut elapsed, 99);
-    println!("archive bytes={} cells={} workers=2 active=4 chunk=16384 warmup={} samples={} cached_file=true", CELLS * CELL_BYTES, CELLS, WARMUP, SAMPLES);
+    println!("backend={backend} archive bytes={} cells={} workers=2 active=4 chunk=16384 warmup={} samples={} cached_file=true", CELLS * CELL_BYTES, CELLS, WARMUP, SAMPLES);
     println!(
         "end_to_end_ns p50={p50} p95={p95} p99={p99}; median_MiB_per_s={:.2}",
         2.0e9 / p50 as f64

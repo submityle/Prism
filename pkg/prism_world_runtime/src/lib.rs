@@ -25,6 +25,8 @@ mod async_coordinator_tests;
 mod file_provider;
 #[cfg(feature = "std")]
 mod io_adapter;
+#[cfg(all(feature = "reactor", unix))]
+mod reactor_cell_io;
 #[cfg(feature = "std")]
 mod scheduled_io;
 #[cfg(feature = "tasks")]
@@ -34,6 +36,8 @@ mod threaded_cell_io;
 
 #[cfg(all(test, feature = "std"))]
 mod file_provider_tests;
+#[cfg(all(test, feature = "reactor", unix))]
+mod reactor_cell_io_tests;
 #[cfg(all(test, feature = "std"))]
 mod scheduled_io_tests;
 #[cfg(all(test, feature = "tasks"))]
@@ -43,6 +47,8 @@ mod task_cell_io_tests;
 pub use file_provider::FileCellProvider;
 #[cfg(feature = "std")]
 pub use io_adapter::{IoAdapterEvent, IoByteLimits, IoRequestId, IoSchedulerAdapter};
+#[cfg(all(feature = "reactor", unix))]
+pub use reactor_cell_io::ReactorCellIo;
 #[cfg(feature = "std")]
 pub use scheduled_io::ScheduledCellIo;
 #[cfg(feature = "tasks")]

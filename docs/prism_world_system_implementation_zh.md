@@ -60,7 +60,8 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 ### M3：异步 IO/provider
 
-- `prism_world_runtime/tasks` 提供 `TaskCellIo` child scope 和 `next_cell_completion`，真实 archive 加载在 `TaskPool` 的 0/1/2 worker 上完成 checksum/header/host 链路。`CancelToken::cancelled()` 可唤醒停驻任务，逐 poll 有界取消，迟到 payload 受抑制，drop 逐个取消未完成请求。零 worker fallback 已修复外部 IO 唤醒只入队不通知 driver 的停顿；runtime tasks 63 项、tasks std 264 项和 11 项文档测试通过。详细生命周期、panic 清理与验证边界见 `prism_world_async_runtime_zh.md`。
+- `prism_world_runtime/tasks` 提供 `TaskCellIo` child scope 和 `next_cell_completion`，真实 archive 加载在 `TaskPool` 的 0/1/2 worker 上完成 checksum/header/host 链路。`CancelToken::cancelled()` 可唤醒停驻任务，逐 poll 有界取消，迟到 payload 受抑制，drop 逐个取消未完成请求。零 worker fallback 已修复外部 IO 唤醒只入队不通知 driver 的停顿；runtime tasks 63 项、tasks std 273 项和 11 项文档测试通过。async harness 每 dispatch 最多 32 poll、continuation 进入全局 FIFO；零 worker root 每 32 dispatch 再获 poll，仍为合作式且不保证跨队列严格公平。详细生命周期、panic 清理与 feature 验证边界见 `prism_world_async_runtime_zh.md`。
+- `prism_world_runtime/reactor` 提供 `ReactorCellIo`，借用宿主既有 `IoReactor`/`NamedThreads`，IO worker 独占 fd/native future 并在 reap 后关闭；compute 只 poll。取消终态不提前退还原生清理配额，有界 FIFO 同时保留槽与声明字节后锁外唤醒，不自旋重试。真实 native archive 在 0/1/2 compute worker 完成校验和 host 链路，IO 63/runtime 67 测试通过；Apple M2/macOS 的 2 MiB cached archive release P50/P95/P99 为 4.413/4.511/4.525 ms。IO worker 会 park，非全部线程无阻塞；当前 backend 仅 Apple。所有权、2×capacity 准入界、复现与限定测量见 `prism_world_native_io_zh.md`。
 - `prism_world_io`：分块读取请求、稳定优先级/FIFO 准入、活动读取 round-robin、单调请求 ID 的 fail-closed 耗尽保护、显式容量背压、可取消 poll 操作、连续 chunk/short-read/checksum 校验和 std 文件 provider。
 - 默认构建保持 `no_std + alloc`；`std` 只增加 scheduler 与文件系统 provider，不把 IO、资产数据库或 ECS 引入 world policy core。
 - `prism_world_runtime`：真实调用 `StreamScheduler` 生成 load/evict 动作，并通过有界、可取消、优先级排序的 provider 队列提交 cell；完成后执行固定 manifest header 校验，再进入 `SceneHost::load_cell`，失败/驱逐写入可 replay trace。std 构建新增 `IoSchedulerAdapter`，实际桥接 `prism_world_io::IoScheduler` 的 chunk/completion/cancel/backpressure/error 事件，并保留同步 `ChunkProvider` 兼容路径。
@@ -161,7 +162,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
-- M3：共享动态优先级、原生 IO reactor 接线、资产包解压、mmap schema 视图、GPU 直传和产品级吞吐仍需实现或独立运行时验证；任务池 Future/共享取消及固定 worker → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md`，不能代替冷盘、资产包或产品负载验收。
+- M3：共享动态优先级、资产包解压、mmap schema 视图、GPU 直传和产品级吞吐仍需实现或独立运行时验证；任务池 Future/共享取消、固定 worker 及宿主原生 reactor → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md` 与 `prism_world_native_io_zh.md`，不能代替冷盘、资产包或产品负载验收。
 - M4 散布：GPU 候选生成/proxy 流、连续密度切换和大规模性能验收；当前完成的是内容中立、可再生且有界的 CPU 散布 kernel。
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。

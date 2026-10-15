@@ -9,6 +9,13 @@ publish = false
 [features]
 default = ["std"]
 std = []
+# Native reads use one caller-owned reactor and the existing named IO lane.
+# Neither dependency is enabled by the default or no_std builds.
+reactor = ["std", "dep:prism_tasks", "dep:prism_platform"]
+
+[target.'cfg(unix)'.dependencies]
+prism_tasks = { path = "../prism_tasks", optional = true, default-features = false, features = ["std", "multi_thread"] }
+prism_platform = { path = "../prism_platform", optional = true, default-features = false, features = ["std"] }
 
 [lints.rust]
 unsafe_code = "forbid"

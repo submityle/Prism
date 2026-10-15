@@ -680,6 +680,17 @@ pub use threaded_file::{
     ThreadedFileProvider, ThreadedFileReadOperation,
 };
 
+#[cfg(all(feature = "reactor", unix))]
+mod reactor;
+#[cfg(all(feature = "reactor", unix))]
+pub use reactor::{
+    QueuedReactorFileProvider, QueuedReactorFileReadOperation, ReactorFileConfig,
+    ReactorFileProvider, ReactorFileReadOperation,
+};
+
+#[cfg(all(test, feature = "reactor", unix))]
+mod reactor_tests;
+
 #[cfg(all(test, feature = "std"))]
 mod threaded_file_tests;
 

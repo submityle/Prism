@@ -49,7 +49,7 @@ adapter 的 public poll 保留一个最新 Context 的 waker；并发 blocking r
 
 真实 archive 回归在 0/1/2 个计算 worker 上运行：3 个 cell、每个 512 字节 payload、1 个文件槽、7 字节 chunk，核对 archive offset、checksum、header 和 host payload。过程中修复零 worker fallback 的外部唤醒：ready queue 与直接 Future 的通知共同推进带 epoch 的 condvar，多个 `block_on` driver 各自观察通知，不再等待 5 秒 stall timer 才继续。定向测试覆盖提前通知、直接 Future、排队 harness 与并发 driver。
 
-本轮启用 tasks 的 runtime 63 项通过；`prism_tasks` 默认配置及 `--no-default-features --features std` 的公平性收尾后计数为 273 项单测与 11 项文档测试（原 264 项，加已有公平性补丁 6 项及收尾新增 3 项）。runtime no-default 的 6 项通过；tasks/std 与 runtime/tasks 联合 all-target clippy、runtime no-default all-target clippy 均通过 `-D warnings`，指定文件格式检查与 `git diff --check` 通过。仍未接通共享动态优先级、原生 IO reactor、资产包解压、mmap 或 GPU 直传；取消集成不构成这些功能的验收。
+本轮启用 tasks 的 runtime 63 项通过；`prism_tasks` 默认配置及 `--no-default-features --features std` 的公平性收尾后计数为 273 项单测与 11 项文档测试（原 264 项，加已有公平性补丁 6 项及收尾新增 3 项）。runtime no-default 的 6 项通过；tasks/std 与 runtime/tasks 联合 all-target clippy、runtime no-default all-target clippy 均通过 `-D warnings`，指定文件格式检查与 `git diff --check` 通过。随后已接通宿主共享的原生 `IoReactor`/IO lane，提供 `ReactorCellIo` 和取消清理期间的槽位/字节 FIFO 等待，实际生命周期、平台限制与实测见 `prism_world_native_io_zh.md`。共享动态优先级、资产包解压、mmap 和 GPU 直传仍不属于本轮验收。
 
 ## 任务公平性
 
