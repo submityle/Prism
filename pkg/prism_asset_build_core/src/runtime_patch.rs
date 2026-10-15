@@ -5,7 +5,7 @@
 //! become tombstones, and the resulting descriptor binds both revisions and
 //! both runtime-manifest identities.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use prism_asset::StableGuid;
 use prism_asset_container::{
@@ -19,6 +19,8 @@ use crate::package::{
     PackageError, PackageOptions, PackageRequest, RuntimePackage,
 };
 use crate::patch::{plan_patch, PatchChange, PatchPlanError};
+use crate::provenance::ReleaseProvenance;
+use crate::publication::PublicationDescriptor;
 use crate::types::{ArtifactKey, AssetId, BuildRevision, ContentHash, Manifest};
 
 /// Inputs required to build a runtime patch from two committed revisions.
@@ -50,6 +52,11 @@ pub struct RuntimePatchPackage {
     pub target_runtime_manifest: RuntimeManifest,
     /// Canonical bytes of [`Self::target_runtime_manifest`].
     pub target_runtime_manifest_bytes: Vec<u8>,
+    /// Complete target-package provenance reconstructed from base and patch
+    /// container bytes.
+    pub target_provenance: ReleaseProvenance,
+    /// Canonical bytes of [`Self::target_provenance`].
+    pub target_provenance_bytes: Vec<u8>,
 }
 
 impl RuntimePatchPackage {
@@ -103,6 +110,14 @@ impl RuntimePatchPackage {
         {
             return Err(RuntimePatchError::TargetManifestMismatch);
         }
+
+        validate_target_provenance(
+            &self.target_provenance,
+            &self.target_provenance_bytes,
+            &self.descriptor,
+            &self.target_runtime_manifest,
+            &self.target_runtime_manifest_bytes,
+        )?;
 
         let mut merged = base_runtime_manifest.clone();
         merged.apply_patch(
@@ -190,6 +205,17 @@ pub enum RuntimePatchError {
     Manifest(ManifestError),
     /// The descriptor could not be constructed or encoded.
     Descriptor(PatchDescriptorError),
+    /// The target publication/provenance descriptor could not be constructed.
+    Provenance(&'static str),
+    /// The target provenance object and its canonical bytes disagree.
+    ProvenanceObjectMismatch,
+    /// The target provenance does not bind the patch target revision/manifests.
+    ProvenanceBindingMismatch,
+    /// The target provenance container facts do not match the target manifest.
+    ProvenanceContainerMismatch { name: String },
+    /// A target container is required by the complete target manifest but is
+    /// unavailable from either the base package or patch payload.
+    MissingTargetContainer { name: String },
     /// The descriptor bytes decode to a different descriptor object.
     DescriptorObjectMismatch,
     /// The supplied base build manifest hash does not match the descriptor.
@@ -233,6 +259,25 @@ impl std::fmt::Display for RuntimePatchError {
             Self::Package(error) => write!(f, "runtime patch packaging failed: {error}"),
             Self::Manifest(error) => write!(f, "runtime patch manifest merge failed: {error}"),
             Self::Descriptor(error) => write!(f, "runtime patch descriptor failed: {error}"),
+            Self::Provenance(error) => write!(f, "runtime patch provenance failed: {error}"),
+            Self::ProvenanceObjectMismatch => {
+                f.write_str("runtime patch provenance bytes do not match the descriptor object")
+            }
+            Self::ProvenanceBindingMismatch => {
+                f.write_str("runtime patch provenance is not bound to the patch target")
+            }
+            Self::ProvenanceContainerMismatch { name } => {
+                write!(
+                    f,
+                    "runtime patch provenance container facts mismatch {name:?}"
+                )
+            }
+            Self::MissingTargetContainer { name } => {
+                write!(
+                    f,
+                    "runtime patch target container bytes are missing for {name:?}"
+                )
+            }
             Self::DescriptorObjectMismatch => {
                 f.write_str("runtime patch descriptor bytes do not match the descriptor object")
             }
@@ -444,6 +489,13 @@ pub fn package_runtime_patch_with_options(
     let target_runtime_manifest_bytes = target_runtime_manifest
         .encode()
         .map_err(RuntimePatchError::Manifest)?;
+    let (target_provenance, target_provenance_bytes) = build_target_provenance(
+        base_package,
+        target_manifest,
+        &target_runtime_manifest,
+        &target_runtime_manifest_bytes,
+        &payload,
+    )?;
     let descriptor = RuntimePatchDescriptor::new(
         plan.base_revision.0,
         plan.target_revision.0,
@@ -461,7 +513,129 @@ pub fn package_runtime_patch_with_options(
         payload,
         target_runtime_manifest,
         target_runtime_manifest_bytes,
+        target_provenance,
+        target_provenance_bytes,
     })
+}
+
+fn build_target_provenance(
+    base_package: &RuntimePackage,
+    target_manifest: &Manifest,
+    target_runtime_manifest: &RuntimeManifest,
+    target_runtime_manifest_bytes: &[u8],
+    patch_payload: &RuntimePackage,
+) -> Result<(ReleaseProvenance, Vec<u8>), RuntimePatchError> {
+    let mut containers = BTreeMap::new();
+    for route in target_runtime_manifest.routes() {
+        if containers.contains_key(&route.container_name) {
+            continue;
+        }
+        let bytes = patch_payload
+            .containers
+            .get(&route.container_name)
+            .or_else(|| base_package.containers.get(&route.container_name))
+            .ok_or_else(|| RuntimePatchError::MissingTargetContainer {
+                name: route.container_name.clone(),
+            })?;
+        let identity = target_runtime_manifest
+            .container_identity(&route.container_name)
+            .ok_or_else(|| RuntimePatchError::ProvenanceContainerMismatch {
+                name: route.container_name.clone(),
+            })?;
+        if identity.byte_len != bytes.len() as u64
+            || identity.content_hash != ContentHash::digest(bytes).0
+        {
+            return Err(RuntimePatchError::ProvenanceContainerMismatch {
+                name: route.container_name.clone(),
+            });
+        }
+        containers.insert(route.container_name.clone(), bytes.clone());
+    }
+    let build_manifest_hash = ContentHash::digest(&target_manifest.canonical_bytes());
+    let publication = PublicationDescriptor::new(
+        target_manifest.revision,
+        build_manifest_hash,
+        target_runtime_manifest_bytes,
+        &containers,
+    )
+    .map_err(RuntimePatchError::Provenance)?;
+    let provenance =
+        ReleaseProvenance::from_manifest(target_manifest, build_manifest_hash, &publication)
+            .map_err(RuntimePatchError::Provenance)?;
+    let bytes = provenance.encode().map_err(RuntimePatchError::Provenance)?;
+    Ok((provenance, bytes))
+}
+
+fn validate_target_provenance(
+    provenance: &ReleaseProvenance,
+    provenance_bytes: &[u8],
+    descriptor: &RuntimePatchDescriptor,
+    target_runtime_manifest: &RuntimeManifest,
+    target_runtime_manifest_bytes: &[u8],
+) -> Result<(), RuntimePatchError> {
+    let decoded =
+        ReleaseProvenance::decode(provenance_bytes).map_err(RuntimePatchError::Provenance)?;
+    if decoded != *provenance
+        || provenance.encode().map_err(RuntimePatchError::Provenance)? != provenance_bytes
+    {
+        return Err(RuntimePatchError::ProvenanceObjectMismatch);
+    }
+    if provenance.revision.0 != descriptor.target_revision
+        || provenance.build_manifest_hash.0 != descriptor.target_build_manifest_hash
+        || provenance.runtime_manifest_hash.0 != descriptor.target_runtime_manifest_hash
+    {
+        return Err(RuntimePatchError::ProvenanceBindingMismatch);
+    }
+
+    let publication = PublicationDescriptor {
+        revision: BuildRevision(descriptor.target_revision),
+        build_manifest_hash: ContentHash(descriptor.target_build_manifest_hash),
+        runtime_manifest_hash: ContentHash::digest(target_runtime_manifest_bytes),
+        containers: provenance
+            .containers
+            .iter()
+            .map(|container| crate::publication::PublishedContainer {
+                name: container.name.clone(),
+                byte_len: container.byte_len,
+                content_hash: container.content_hash,
+            })
+            .collect(),
+    };
+    if provenance.publication_hash != publication.content_hash() {
+        return Err(RuntimePatchError::ProvenanceBindingMismatch);
+    }
+    let provenance_names = provenance
+        .containers
+        .iter()
+        .map(|container| container.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let target_names = target_runtime_manifest
+        .routes()
+        .map(|route| route.container_name.as_str())
+        .collect::<BTreeSet<_>>();
+    if provenance_names != target_names {
+        let name = target_names
+            .symmetric_difference(&provenance_names)
+            .next()
+            .map(|name| (*name).to_owned())
+            .expect("different sets have a symmetric difference");
+        return Err(RuntimePatchError::ProvenanceContainerMismatch { name });
+    }
+    for container in &provenance.containers {
+        let Some(identity) = target_runtime_manifest.container_identity(&container.name) else {
+            return Err(RuntimePatchError::ProvenanceContainerMismatch {
+                name: container.name.clone(),
+            });
+        };
+        if identity.byte_len != container.byte_len
+            || identity.content_hash != container.content_hash.0
+        {
+            return Err(RuntimePatchError::ProvenanceContainerMismatch {
+                name: container.name.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn namespace_changed_mappings(
@@ -1024,6 +1198,28 @@ mod tests {
                 &base_package.runtime_manifest,
             ),
             Err(RuntimePatchError::TargetManifestMismatch)
+        ));
+
+        let mut tampered_provenance_bytes = patch.clone();
+        tampered_provenance_bytes.target_provenance_bytes[0] ^= 1;
+        assert!(matches!(
+            tampered_provenance_bytes.apply_to_manifest(
+                base_package.source_manifest_hash,
+                &base_package.runtime_manifest,
+            ),
+            Err(RuntimePatchError::Provenance(_))
+        ));
+
+        let mut tampered_provenance_object = patch.clone();
+        tampered_provenance_object
+            .target_provenance
+            .publication_hash = ContentHash([8; 32]);
+        assert!(matches!(
+            tampered_provenance_object.apply_to_manifest(
+                base_package.source_manifest_hash,
+                &base_package.runtime_manifest,
+            ),
+            Err(RuntimePatchError::ProvenanceObjectMismatch)
         ));
     }
 

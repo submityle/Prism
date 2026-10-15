@@ -9,8 +9,8 @@ use crate::error::CommandError;
 use crate::mapping;
 use crate::pipeline::package_mappings;
 use prism_asset_build_core::{
-    package_runtime_patch, AssetPackageMapping, BuildRevision, ContentHash, RevisionStore,
-    RuntimePackage, RuntimePatchRequest,
+    package_runtime_patch, AssetPackageMapping, BuildRevision, ContentHash, ReleaseProvenance,
+    RevisionStore, RuntimePackage, RuntimePatchRequest,
 };
 use prism_asset_container::{ContainerReader, RuntimeManifest};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +45,19 @@ pub fn run(command: Patch) -> Result<(), CommandError> {
     })
     .map_err(|error| CommandError::InvalidInput(format!("runtime patch failed: {error}")))?;
 
+    let provenance = ReleaseProvenance::decode(&patch.target_provenance_bytes)
+        .map_err(|error| CommandError::InvalidInput(format!("patch provenance: {error}")))?;
+    if provenance != patch.target_provenance
+        || provenance
+            .encode()
+            .map_err(|error| CommandError::InvalidInput(format!("patch provenance: {error}")))?
+            != patch.target_provenance_bytes
+    {
+        return Err(CommandError::InvalidInput(
+            "patch provenance bytes do not match the generated target provenance".into(),
+        ));
+    }
+
     validate_output_shape(&command.output, patch.payload.containers.keys())?;
     write_immutable(
         command.output.join("descriptor.bin"),
@@ -57,6 +70,10 @@ pub fn run(command: Patch) -> Result<(), CommandError> {
     write_immutable(
         command.output.join("target_manifest.bin"),
         &patch.target_runtime_manifest_bytes,
+    )?;
+    write_immutable(
+        command.output.join("provenance.bin"),
+        &patch.target_provenance_bytes,
     )?;
     let containers = command.output.join("containers");
     fs::create_dir_all(&containers)?;
@@ -102,6 +119,7 @@ fn validate_output_shape<'a>(
         let allowed = name == "descriptor.bin"
             || name == "patch_manifest.bin"
             || name == "target_manifest.bin"
+            || name == "provenance.bin"
             || name == "containers";
         if !allowed {
             return Err(CommandError::InvalidInput(format!(
