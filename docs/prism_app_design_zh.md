@@ -348,10 +348,10 @@ pkg/prism_app/
     settings.rs            # 分层配置（接 prism_reflect）
     determinism.rs         # 固定序 / 录制重放 / 回滚编排钩子
     diagnostics.rs         # 阶段火焰图 / 帧统计
-  features = ["std","multi_thread","pipelined","pipelined-tasks","winit","headless","determinism","reflect","trace"]
+    features = ["std","multi_thread","pipelined","pipelined-tasks","winit","determinism","reflect","trace","hot-reload","module-reload"]
 ```
 
-依赖：`prism_ecs`、`prism_tasks`、`prism_time`，可选 `prism_diagnostic`/`prism_reflect`。窗口/输入经插件注入，**不**在 Cargo 层硬依赖具体后端。**不碰任何 `bevy_*`。**
+依赖：`prism_ecs`、`prism_tasks`、`prism_time`，可选 `prism_diagnostic`/`prism_reflect`。`HeadlessRunner` 是无窗口的默认 runner，不需要虚假的 `headless` feature；窗口/输入经插件注入，**不**在 Cargo 层硬依赖具体后端。**不碰任何 `bevy_*`。**
 
 ---
 
@@ -384,7 +384,7 @@ pkg/prism_app/
 ## 23. 诚实边界与风险
 
 - 本文为设计规格。**截至 2026-10-16 代码已进入实现**：M0–M3 机制、M4 窗口 Runner/生命周期/设备恢复路径、M5 确定性+基础网络/回滚+重放+对端同步与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——生产网络拓扑、真实窗口/移动设备与跨机验收仍缺；旧 `prism_bevy` 桥接层已完成退役。真实 Metal/wgpu GPU recovery 已通过本机全量门禁，剩余是其他平台/后端和更广泛集成证据，不应再写成该路径“未实现”。
-- **feature 面尚未完全对齐**：已按真实实现定义 `std`/`multi_thread`（阶段内并行，接 `prism_ecs/multi_thread` 的冲突图执行器）/`pipelined`/`pipelined-tasks`/`determinism`/`winit`/`reflect`/`trace`/`hot-reload`；§20 里的 `headless` 仍未定义（`HeadlessRunner` 本身就是无依赖的默认构件，暂不造空开关），**不提前声明空开关**，避免假实现。
+- **feature 面已与当前 Cargo 契约对齐**：`std`/`multi_thread`（阶段内并行，接 `prism_ecs/multi_thread` 的冲突图执行器）/`pipelined`/`pipelined-tasks`/`determinism`/`winit`/`reflect`/`trace`/`hot-reload`/`module-reload` 均有对应实现；`HeadlessRunner` 是无窗口的默认 runner，因此不另造空的 `headless` feature。
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：当前以 `ExtractFn` 作为跨 World 单向接缝，并已有串行/并行等价路径；剩余风险是大负载下的重叠率、尾延迟和跨线程生命周期验收，而不是缺少提取实现。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。
   2. **固定步长熔断（M2）**：死亡螺旋参数（max_frame_dt/max_substeps）需按内容压测标定，错配会在卡顿时放大为慢放或卡死。
