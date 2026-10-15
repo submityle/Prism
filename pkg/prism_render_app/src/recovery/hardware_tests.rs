@@ -9,7 +9,7 @@ use prism_ecs::event::{EventCursor, Events};
 use prism_ecs::schedule::{IntoSystemConfigs, Schedules};
 use prism_ecs::system::ResMut;
 use prism_ecs::world::World;
-use prism_render_driver::BufferUsages;
+use prism_render_driver::{BufferUsages, RenderDevice, RenderQueue};
 use prism_render_driver_wgpu::{WgpuDevice, WgpuInstance};
 use prism_render_material::{GpuMaterialHeader, GpuMaterialTexture};
 use prism_render_runtime::RenderRuntime;

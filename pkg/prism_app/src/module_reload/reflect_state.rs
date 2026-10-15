@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use prism_reflect::schema::{validate, TypeMetadata, TypeSchema};
 use prism_reflect::{
-    diff, from_binary_with_limits, to_binary, DeserializeLimits, DynamicStruct, FromReflect,
+    from_binary_with_limits, to_binary, DeserializeLimits, DynamicStruct, FromReflect,
     GetTypeRegistration, Reflect, TypeInfo, TypeRegistry, Typed,
 };
 
@@ -167,11 +167,16 @@ impl ReflectStateContract {
     }
 
     /// Add one consecutive schema migration (`from -> from + 1`).
-    pub fn migration<F>(&mut self, from: u64, to: u64, step: F) -> Result<(), ReflectStateError>
+    pub fn migration<F>(
+        &mut self,
+        from: u64,
+        to: u64,
+        step: F,
+    ) -> Result<(), ReflectStateError>
     where
         F: Fn(&mut DynamicStruct) -> Result<(), String> + Send + Sync + 'static,
     {
-        if from.checked_add(1) != Some(to) {
+        if to != from.saturating_add(1) {
             return Err(ReflectStateError::new(
                 "reflect migrations must advance exactly one schema version",
             ));
@@ -185,8 +190,8 @@ impl ReflectStateContract {
     }
 
     /// Prepare old module bytes for a candidate schema without invoking the
-    /// candidate library. The returned typed value is retained by the host to
-    /// detect a candidate that silently loses migrated fields.
+    /// candidate library. The returned fingerprint is a host canonical binary
+    /// used to detect a candidate that silently loses migrated fields.
     pub fn prepare(
         &self,
         from: u64,
@@ -202,16 +207,18 @@ impl ReflectStateContract {
         }
         let typed = (source.decode)(bytes).map_err(ReflectStateError::new)?;
         if typed.type_name() != source.schema.type_name() {
-            return Err(ReflectStateError::new(
-                "source decoder returned the wrong type",
-            ));
+            return Err(ReflectStateError::new("source decoder returned the wrong type"));
         }
         let canonical = to_binary(&*typed).map_err(|e| ReflectStateError::new(e.to_string()))?;
-        let mut dynamic =
-            from_binary_with_limits(&canonical, &self.registry, source.info, &self.limits)
-                .map_err(|e| ReflectStateError::new(e.to_string()))?
-                .downcast::<DynamicStruct>()
-                .map_err(|_| ReflectStateError::new("reflect binary did not produce a struct"))?;
+        let mut dynamic = from_binary_with_limits(
+            &canonical,
+            &self.registry,
+            source.info,
+            &self.limits,
+        )
+        .map_err(|e| ReflectStateError::new(e.to_string()))?
+        .downcast::<DynamicStruct>()
+        .map_err(|_| ReflectStateError::new("reflect binary did not produce a struct"))?;
         self.validate(&*dynamic, source)?;
         let mut version = from;
         while version < to {
@@ -221,65 +228,54 @@ impl ReflectStateContract {
                 ))
             })?;
             step(&mut dynamic).map_err(ReflectStateError::new)?;
-            version = version
-                .checked_add(1)
-                .ok_or_else(|| ReflectStateError::new("reflect schema version overflow"))?;
+            version = version.saturating_add(1);
         }
         self.validate(&*dynamic, target)?;
         let typed_target = (target.rebuild)(&*dynamic).map_err(ReflectStateError::new)?;
-        let target_canonical =
-            to_binary(&*typed_target).map_err(|e| ReflectStateError::new(e.to_string()))?;
-        let checked =
-            from_binary_with_limits(&target_canonical, &self.registry, target.info, &self.limits)
-                .map_err(|e| ReflectStateError::new(e.to_string()))?;
+        let target_canonical = to_binary(&*typed_target)
+            .map_err(|e| ReflectStateError::new(e.to_string()))?;
+        let checked = from_binary_with_limits(
+            &target_canonical,
+            &self.registry,
+            target.info,
+            &self.limits,
+        )
+        .map_err(|e| ReflectStateError::new(e.to_string()))?;
         if checked.type_name() != target.schema.type_name() {
-            return Err(ReflectStateError::new(
-                "target reflect round trip changed type",
-            ));
+            return Err(ReflectStateError::new("target reflect round trip changed type"));
         }
         let payload = (target.encode)(&*typed_target).map_err(ReflectStateError::new)?;
         Ok(PreparedState {
             schema: to,
             payload,
-            expected: typed_target,
+            fingerprint: target_canonical,
         })
     }
 
-    /// Validate a candidate's export after it imports a prepared state. This
-    /// rejects silent field loss before activation.
+    /// Validate and fingerprint a candidate's export after it imports a
+    /// prepared state. This rejects silent field loss before activation.
     pub fn validate_import(
         &self,
         schema: u64,
         bytes: &[u8],
-        expected: &dyn Reflect,
+        expected_fingerprint: &[u8],
     ) -> Result<(), ReflectStateError> {
         let version = self.version(schema)?;
         let typed = (version.decode)(bytes).map_err(ReflectStateError::new)?;
         let canonical = to_binary(&*typed).map_err(|e| ReflectStateError::new(e.to_string()))?;
-        let checked =
-            from_binary_with_limits(&canonical, &self.registry, version.info, &self.limits)
-                .map_err(|e| ReflectStateError::new(e.to_string()))?;
-        self.validate(&*checked, version)?;
-        if !diff(expected, &*typed).is_unchanged() {
+        if canonical != expected_fingerprint {
             return Err(ReflectStateError::new(
                 "candidate export does not preserve the migrated reflected state",
             ));
         }
-        Ok(())
-    }
-
-    /// Validate a freshly created module's initial state before first
-    /// activation. This keeps a configured contract authoritative even when
-    /// there is no previous instance to migrate.
-    pub fn validate_export(&self, schema: u64, bytes: &[u8]) -> Result<Vec<u8>, ReflectStateError> {
-        let version = self.version(schema)?;
-        let typed = (version.decode)(bytes).map_err(ReflectStateError::new)?;
-        let canonical = to_binary(&*typed).map_err(|e| ReflectStateError::new(e.to_string()))?;
-        let decoded =
-            from_binary_with_limits(&canonical, &self.registry, version.info, &self.limits)
-                .map_err(|e| ReflectStateError::new(e.to_string()))?;
-        self.validate(&*decoded, version)?;
-        Ok(canonical)
+        let decoded = from_binary_with_limits(
+            &canonical,
+            &self.registry,
+            version.info,
+            &self.limits,
+        )
+        .map_err(|e| ReflectStateError::new(e.to_string()))?;
+        self.validate(&*decoded, version)
     }
 
     fn version(&self, version: u64) -> Result<&Version, ReflectStateError> {
@@ -304,10 +300,10 @@ impl ReflectStateContract {
     }
 }
 
-/// Candidate-native bytes and the host typed state prepared before any
-/// candidate state is created.
+/// Candidate-native bytes and a host canonical representation prepared before
+/// any candidate state is created.
 pub struct PreparedState {
     pub(crate) schema: u64,
     pub(crate) payload: Vec<u8>,
-    pub(crate) expected: Box<dyn Reflect>,
+    pub(crate) fingerprint: Vec<u8>,
 }
