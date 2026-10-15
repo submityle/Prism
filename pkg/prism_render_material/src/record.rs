@@ -713,10 +713,10 @@ impl MaterialRecord {
     /// Which optional über-BSDF lobes this record carries.
     ///
     /// Lobes with a dedicated closure kind (emission, clearcoat, sheen,
-    /// subsurface, transmission) are driven by `closure_mask`; anisotropy has
-    /// no closure kind of its own, so it is derived from a non-zero authored
-    /// anisotropy amount. This is the mask serialized into the packed
-    /// parameter block and mirrored into [`GpuMaterialHeader::lobe_mask`].
+    /// subsurface, transmission) are driven by `closure_mask`; anisotropy and
+    /// the three parameter-only lobes are derived from their authored values.
+    /// This is the mask serialized into the packed parameter block and
+    /// mirrored into [`GpuMaterialHeader::lobe_mask`].
     pub fn lobe_mask(&self) -> LobeMask {
         let has = |kind: ClosureKind| self.closure_mask & (1 << kind as u32) != 0;
         let mut mask = LobeMask::default();
@@ -747,6 +747,19 @@ impl MaterialRecord {
             || self.surface.npr_stylized_rim_scale != 1.0
         {
             mask = mask.union(LobeMask::NPR_FACE);
+        }
+        // These lobes have no dedicated `ClosureKind` discriminant. Their
+        // weight is the effective activation gate: non-neutral shape
+        // parameters with zero weight are exact identities and must not add
+        // a packed lobe or alter the execution identity.
+        if self.surface.thin_film_weight != 0.0 {
+            mask = mask.union(LobeMask::THIN_FILM);
+        }
+        if self.surface.glint_weight != 0.0 {
+            mask = mask.union(LobeMask::GLINT);
+        }
+        if self.surface.measured_weight != 0.0 {
+            mask = mask.union(LobeMask::MEASURED_BRDF);
         }
         mask
     }
@@ -869,6 +882,77 @@ mod tests {
         assert!(mask.contains(LobeMask::EMISSION));
         assert!(mask.contains(LobeMask::ANISOTROPY));
         assert!(!mask.contains(LobeMask::SHEEN));
+    }
+
+    #[test]
+    fn every_surface_lobe_has_a_stable_activation_source() {
+        let handle = GenerationalHandle::new(1, 1);
+        let mut value = record(
+            handle,
+            closure_bit(ClosureKind::Emission)
+                | closure_bit(ClosureKind::ClearCoat)
+                | closure_bit(ClosureKind::Sheen)
+                | closure_bit(ClosureKind::Subsurface)
+                | closure_bit(ClosureKind::Transmission),
+            0,
+        );
+        value.surface.anisotropy = 0.25;
+        value.features |= MaterialFeatureFlags::FACE_SHADOW;
+        value.surface.thin_film_weight = 0.2;
+        value.surface.glint_weight = 0.3;
+        value.surface.measured_weight = 0.4;
+
+        assert_eq!(
+            value.lobe_mask(),
+            LobeMask::EMISSION
+                .union(LobeMask::CLEARCOAT)
+                .union(LobeMask::ANISOTROPY)
+                .union(LobeMask::SHEEN)
+                .union(LobeMask::SUBSURFACE)
+                .union(LobeMask::TRANSMISSION)
+                .union(LobeMask::THIN_FILM)
+                .union(LobeMask::NPR_FACE)
+                .union(LobeMask::GLINT)
+                .union(LobeMask::MEASURED_BRDF)
+        );
+    }
+
+    #[test]
+    fn parameter_only_lobes_are_inert_at_their_neutral_weights() {
+        let handle = GenerationalHandle::new(1, 1);
+        let mut value = record(handle, 0, 0);
+        value.surface.thin_film_thickness = 0.9;
+        value.surface.thin_film_ior = 1.8;
+        value.surface.glint_roughness = 0.4;
+        value.surface.glint_density = 32.0;
+        value.surface.measured_phi_d = 128.0;
+        value.surface.measured_scale = 2.0;
+
+        assert_eq!(value.lobe_mask(), LobeMask::default());
+
+        value.surface.thin_film_weight = 0.1;
+        value.surface.glint_weight = 0.1;
+        value.surface.measured_weight = 0.1;
+        assert!(value.lobe_mask().contains(LobeMask::THIN_FILM));
+        assert!(value.lobe_mask().contains(LobeMask::GLINT));
+        assert!(value.lobe_mask().contains(LobeMask::MEASURED_BRDF));
+    }
+
+    #[test]
+    fn header_and_packed_parameters_share_the_derived_lobe_mask() {
+        let handle = GenerationalHandle::new(1, 1);
+        let mut value = record(handle, 0, 0);
+        value.surface.thin_film_weight = 0.5;
+        value.surface.glint_weight = 0.25;
+        value.surface.measured_weight = 0.75;
+
+        let mask = value.lobe_mask();
+        let header = value.header(0, 0, 0);
+        let block = value.packed_parameters();
+
+        assert_eq!(header.lobe_mask, mask.bits());
+        assert_eq!(block.lobe_mask, mask);
+        assert_eq!(block.packed_len_words(), 20 + 4 + 4 + 4);
     }
 
     #[test]

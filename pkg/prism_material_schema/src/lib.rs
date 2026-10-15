@@ -131,6 +131,83 @@ pub struct Channel {
     pub usable_as_mask: bool,
 }
 
+/// A scalar validity interval declared by a field or runtime channel.
+///
+/// The schema currently uses the compact `lower..=upper` spelling (with an
+/// optional exclusive upper bound via `lower..upper`). Keeping the parsed form
+/// here makes the range contract executable instead of leaving it as an
+/// unchecked comment/string that each consumer would have to reinterpret.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ValidRange {
+    /// Lower endpoint.
+    pub min: f32,
+    /// Upper endpoint.
+    pub max: f32,
+    /// Whether the lower endpoint is included. Rust-style ranges always include it.
+    pub min_inclusive: bool,
+    /// Whether the upper endpoint is included (`..=` versus `..`).
+    pub max_inclusive: bool,
+}
+
+impl ValidRange {
+    /// Parse the schema's scalar interval spelling.
+    pub fn parse(expression: &str) -> Result<Self, String> {
+        let expression = expression.trim();
+        let (min_text, max_text) = expression
+            .split_once("..")
+            .ok_or_else(|| format!("expected a scalar range, got {expression:?}"))?;
+        let max_inclusive = max_text.starts_with('=');
+        let max_text = max_text.strip_prefix('=').unwrap_or(max_text).trim();
+        let min = parse_range_endpoint(min_text.trim())?;
+        let max = parse_range_endpoint(max_text)?;
+        if min.is_nan() || max.is_nan() {
+            return Err(format!("range {expression:?} cannot contain NaN"));
+        }
+        if min > max || (min == max && !max_inclusive) {
+            return Err(format!(
+                "range {expression:?} has inverted or empty endpoints"
+            ));
+        }
+        Ok(Self {
+            min,
+            max,
+            min_inclusive: true,
+            max_inclusive,
+        })
+    }
+
+    /// Whether a value satisfies this interval.
+    #[must_use]
+    pub fn contains(self, value: f32) -> bool {
+        if value.is_nan() {
+            return false;
+        }
+        let lower = if self.min_inclusive {
+            value >= self.min
+        } else {
+            value > self.min
+        };
+        let upper = if self.max_inclusive {
+            value <= self.max
+        } else {
+            value < self.max
+        };
+        lower && upper
+    }
+}
+
+/// Parse a validity endpoint, accepting the finite literals used by the schema
+/// plus `inf`/`-inf` for unbounded OpenPBR quantities such as luminance.
+pub fn parse_range_endpoint(text: &str) -> Result<f32, String> {
+    match text {
+        "inf" | "+inf" | "infinity" | "+infinity" => Ok(f32::INFINITY),
+        "-inf" | "-infinity" => Ok(f32::NEG_INFINITY),
+        _ => text
+            .parse::<f32>()
+            .map_err(|error| format!("invalid range endpoint {text:?}: {error}")),
+    }
+}
+
 /// An object-space cache auxiliary output (§14.3).
 ///
 /// A cache-aux row is header-resident and has a registry slot, but carries no
@@ -653,6 +730,19 @@ impl SurfaceSchema {
     pub fn validate(&self) -> Result<(), SchemaError> {
         validate_record("core", &self.core)?;
 
+        // The decoded fat surface is the CPU/GPU mirror target. Its field
+        // names must be globally unique even though packed records are split
+        // into core/lobes; otherwise two schema inputs would project onto one
+        // ABI member and one value would silently overwrite the other.
+        let mut surface_fields = BTreeSet::new();
+        for field in &self.core.fields {
+            if field.ty != FieldType::Pad && !surface_fields.insert(field.surface_field()) {
+                return Err(SchemaError::DuplicateSurfaceFieldName(
+                    field.surface_field().to_string(),
+                ));
+            }
+        }
+
         let mut slots = BTreeSet::new();
         let mut uids = BTreeSet::new();
         for lobe in &self.lobes {
@@ -663,6 +753,13 @@ impl SurfaceSchema {
                 return Err(SchemaError::DuplicateUid(lobe.uid.clone()));
             }
             validate_record(&lobe.id, &record_view(lobe))?;
+            for field in &lobe.fields {
+                if field.ty != FieldType::Pad && !surface_fields.insert(field.surface_field()) {
+                    return Err(SchemaError::DuplicateSurfaceFieldName(
+                        field.surface_field().to_string(),
+                    ));
+                }
+            }
             // A KHR / PRISM lobe's fields must all live in the owning bit region.
             for field in &lobe.fields {
                 if field.bit_region != lobe.namespace {
@@ -743,6 +840,32 @@ impl SurfaceSchema {
             }
             if channel.default.components().len() != 1 {
                 return Err(SchemaError::ChannelDefaultNotScalar(channel.id.clone()));
+            }
+            let range = channel
+                .valid
+                .as_deref()
+                .ok_or_else(|| SchemaError::MissingValidityPredicate {
+                    record: format!("channel {}", channel.id),
+                    field: "value".to_string(),
+                })
+                .and_then(|expression| {
+                    ValidRange::parse(expression).map_err(|reason| {
+                        SchemaError::InvalidValidityPredicate {
+                            record: format!("channel {}", channel.id),
+                            field: "value".to_string(),
+                            expression: expression.to_string(),
+                            reason,
+                        }
+                    })
+                })?;
+            let default = channel.default.components()[0];
+            if !range.contains(default) {
+                return Err(SchemaError::DefaultOutOfRange {
+                    record: format!("channel {}", channel.id),
+                    field: "value".to_string(),
+                    value: default.to_string(),
+                    expression: channel.valid.clone().unwrap_or_default(),
+                });
             }
         }
         for (index, word) in channel_words.iter().enumerate() {
@@ -832,6 +955,38 @@ fn validate_record(name: &str, record: &Record) -> Result<(), SchemaError> {
             record: name.to_string(),
         });
     }
+
+    for field in &record.fields {
+        if field.ty == FieldType::Pad {
+            continue;
+        }
+        let expression =
+            field
+                .valid
+                .as_deref()
+                .ok_or_else(|| SchemaError::MissingValidityPredicate {
+                    record: name.to_string(),
+                    field: field.name.clone(),
+                })?;
+        let range = ValidRange::parse(expression).map_err(|reason| {
+            SchemaError::InvalidValidityPredicate {
+                record: name.to_string(),
+                field: field.name.clone(),
+                expression: expression.to_string(),
+                reason,
+            }
+        })?;
+        for value in field.default.components() {
+            if !range.contains(value) {
+                return Err(SchemaError::DefaultOutOfRange {
+                    record: name.to_string(),
+                    field: field.name.clone(),
+                    value: value.to_string(),
+                    expression: expression.to_string(),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -891,6 +1046,37 @@ pub enum SchemaError {
         /// Offending field name.
         field: String,
     },
+    /// Two packed fields project onto the same decoded fat-surface member.
+    DuplicateSurfaceFieldName(String),
+    /// A semantic field or channel omitted its executable validity range.
+    MissingValidityPredicate {
+        /// Owning record or channel id.
+        record: String,
+        /// Field name, or `value` for a channel scalar.
+        field: String,
+    },
+    /// A validity range could not be parsed as a scalar interval.
+    InvalidValidityPredicate {
+        /// Owning record or channel id.
+        record: String,
+        /// Field name, or `value` for a channel scalar.
+        field: String,
+        /// Original schema expression.
+        expression: String,
+        /// Parser explanation.
+        reason: String,
+    },
+    /// A declared neutral default lies outside its declared validity interval.
+    DefaultOutOfRange {
+        /// Owning record or channel id.
+        record: String,
+        /// Field name, or `value` for a channel scalar.
+        field: String,
+        /// Default value rendered for diagnostics.
+        value: String,
+        /// Original schema expression.
+        expression: String,
+    },
     /// A lobe field's bit region differs from the lobe's namespace.
     FieldBitRegionMismatch {
         /// Owning lobe id.
@@ -945,6 +1131,30 @@ impl fmt::Display for SchemaError {
             Self::DefaultArityMismatch { record, field } => {
                 write!(f, "field `{record}.{field}` default arity != type")
             }
+            Self::DuplicateSurfaceFieldName(name) => {
+                write!(f, "duplicate decoded surface field {name:?}")
+            }
+            Self::MissingValidityPredicate { record, field } => {
+                write!(f, "field `{record}.{field}` has no validity predicate")
+            }
+            Self::InvalidValidityPredicate {
+                record,
+                field,
+                expression,
+                reason,
+            } => write!(
+                f,
+                "field `{record}.{field}` validity {expression:?} is invalid: {reason}"
+            ),
+            Self::DefaultOutOfRange {
+                record,
+                field,
+                value,
+                expression,
+            } => write!(
+                f,
+                "field `{record}.{field}` default {value} is outside validity {expression:?}"
+            ),
             Self::FieldBitRegionMismatch { lobe, field } => {
                 write!(f, "field `{lobe}.{field}` bit_region != lobe namespace")
             }
@@ -1022,6 +1232,77 @@ mod tests {
     }
 
     #[test]
+    fn defaults_and_validity_ranges_are_executable_schema_contracts() {
+        let schema = surface_schema();
+        let mut semantic_fields = 0usize;
+        let mut check = |record: &str, field: &Field| {
+            if field.ty == FieldType::Pad {
+                return;
+            }
+            semantic_fields += 1;
+            let expression = field
+                .valid
+                .as_deref()
+                .expect("every semantic field must declare a validity range");
+            let range = ValidRange::parse(expression).expect("schema range must parse");
+            assert!(
+                field
+                    .default
+                    .components()
+                    .into_iter()
+                    .all(|value| range.contains(value)),
+                "{record}.{} default is outside {expression}",
+                field.name
+            );
+        };
+        for field in &schema.core.fields {
+            check("core", field);
+        }
+        for lobe in &schema.lobes {
+            for field in &lobe.fields {
+                check(&lobe.id, field);
+            }
+        }
+        assert_eq!(semantic_fields, 53);
+
+        for channel in &schema.channels {
+            let expression = channel
+                .valid
+                .as_deref()
+                .expect("every runtime channel must declare a validity range");
+            let range = ValidRange::parse(expression).expect("channel range must parse");
+            assert!(range.contains(channel.default.components()[0]));
+        }
+    }
+
+    #[test]
+    fn validity_range_parser_rejects_invalid_or_inverted_ranges() {
+        let inclusive = ValidRange::parse("0.0..=1.0").unwrap();
+        assert!(inclusive.contains(1.0));
+        let exclusive = ValidRange::parse("0.0..1.0").unwrap();
+        assert!(!exclusive.contains(1.0));
+        assert!(ValidRange::parse("not-a-range").is_err());
+        assert!(ValidRange::parse("2.0..=1.0").is_err());
+    }
+
+    #[test]
+    fn schema_validation_rejects_missing_or_out_of_range_defaults() {
+        let mut missing = surface_schema();
+        missing.core.fields[0].valid = None;
+        assert!(matches!(
+            missing.validate(),
+            Err(SchemaError::MissingValidityPredicate { .. })
+        ));
+
+        let mut outside = surface_schema();
+        outside.core.fields[0].valid = Some("0.9..=1.0".into());
+        assert!(matches!(
+            outside.validate(),
+            Err(SchemaError::DefaultOutOfRange { .. })
+        ));
+    }
+
+    #[test]
     fn canonical_lobe_order_is_by_registry_slot() {
         let schema = surface_schema();
         let order: Vec<u32> = schema
@@ -1087,12 +1368,14 @@ type = "f32"
 bit_region = "KHR"
 pack_slot = 0
 default = 0.0
+valid = "0.0..=1.0"
 [[core.field]]
 name = "b"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
 default = 0.0
+valid = "0.0..=1.0"
 "#;
         assert!(matches!(
             SurfaceSchema::parse(bad),
@@ -1113,6 +1396,7 @@ type = "f32"
 bit_region = "KHR"
 pack_slot = 0
 default = 0.0
+valid = "0.0..=1.0"
 "#;
         assert!(matches!(
             SurfaceSchema::parse(bad),
@@ -1133,6 +1417,7 @@ type = "f32"
 bit_region = "KHR"
 pack_slot = 0
 default = 0.0
+valid = "0.0..=1.0"
 {records}
 "#
         )

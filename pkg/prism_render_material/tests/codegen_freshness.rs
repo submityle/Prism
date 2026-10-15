@@ -76,6 +76,45 @@ fn generated_field_directory_covers_exactly_non_padding_schema_fields() {
 }
 
 #[test]
+fn generated_unpack_covers_every_schema_default_once() {
+    let schema = surface_schema();
+    let generated = emit_wesl_unpack(&schema);
+    let start = generated
+        .find("fn prism_neutral_surface()")
+        .expect("generated neutral-surface function");
+    let end = generated[start..]
+        .find("fn prism_unpack_surface")
+        .map(|offset| start + offset)
+        .expect("generated unpack function");
+    let actual = generated[start..end]
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let line = line.strip_prefix("s.")?;
+            let (name, _) = line.split_once(" = ")?;
+            Some(name.to_string())
+        })
+        .collect::<Vec<_>>();
+    let mut expected = schema
+        .core
+        .fields
+        .iter()
+        .filter(|field| field.ty != prism_material_schema::FieldType::Pad)
+        .map(|field| field.surface_field().to_string())
+        .chain(schema.canonical_lobes().into_iter().flat_map(|lobe| {
+            lobe.fields
+                .iter()
+                .filter(|field| field.ty != prism_material_schema::FieldType::Pad)
+                .map(|field| field.surface_field().to_string())
+        }))
+        .collect::<Vec<_>>();
+    expected.sort();
+    let mut actual_sorted = actual;
+    actual_sorted.sort();
+    assert_eq!(actual_sorted, expected);
+}
+
+#[test]
 fn lobe_mask_derived_layout_is_generated() {
     let fresh = emit_rust_layout(&surface_schema());
     for generated_fact in [
@@ -93,6 +132,50 @@ fn lobe_mask_derived_layout_is_generated() {
         assert!(
             !HAND_WRITTEN_SURFACE.contains(generated_fact),
             "derived LobeMask fact `{generated_fact}` must not be hand-written"
+        );
+    }
+}
+
+#[test]
+fn handwritten_surface_has_no_schema_derived_layout_definitions() {
+    let schema = surface_schema();
+    let implementation_start = HAND_WRITTEN_SURFACE
+        .find("impl LobeMask {")
+        .map(|offset| offset + "impl LobeMask {".len())
+        .expect("hand-written LobeMask implementation");
+    let implementation_end = HAND_WRITTEN_SURFACE[implementation_start..]
+        .find("\n}\n\n/// Which of the two disjoint bit regions")
+        .map(|offset| implementation_start + offset)
+        .expect("LobeMask implementation end");
+    let lobe_impl = &HAND_WRITTEN_SURFACE[implementation_start..implementation_end];
+    let has_hand_written_associated_const = lobe_impl.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("pub const ") && !line.starts_with("pub const fn ")
+    });
+    assert!(
+        !has_hand_written_associated_const,
+        "LobeMask associated constants must come from generated surface_layout.rs"
+    );
+    assert!(
+        !lobe_impl.contains("1u32 <<"),
+        "LobeMask bit arithmetic must not be hand-written"
+    );
+    for lobe in schema.canonical_lobes() {
+        let declaration = format!("pub const {}: Self", lobe.mask_const);
+        assert!(
+            !HAND_WRITTEN_SURFACE.contains(&declaration),
+            "derived lobe bit `{declaration}` must not be hand-written"
+        );
+    }
+    for derived_name in [
+        "SURFACE_CORE_WORDS",
+        "SURFACE_LOBE_WORDS_BY_SLOT",
+        "SURFACE_LOBE_COUNT",
+        "SURFACE_MAX_WORDS",
+    ] {
+        assert!(
+            !HAND_WRITTEN_SURFACE.contains(&format!("pub const {derived_name}")),
+            "derived layout constant `{derived_name}` must be generated"
         );
     }
 }
