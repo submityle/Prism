@@ -1,0 +1,14 @@
+[package]
+name = "prism_camera_gpu"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Engine-neutral GPU view-buffer ring and upload planning for Prism cameras"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_camera = { path = "../prism_camera", default-features = false }
+
+# Keep direct manifest-path checks independent from the repository workspace.
+[workspace]
