@@ -896,7 +896,7 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 - `TreeDef → Plan` 的稠密 ID、父子一致性、单父、连通性、环、初始子状态、Parallel region 去重和 History owner 校验；
 - Atomic / Compound / Parallel 活跃配置，祖先迁移继承，声明顺序与 priority 的确定性裁决；
 - Event / Eventless 迁移、LCA exit/enter、Internal / External / Self 生命周期差异；
-- Shallow / Deep history、定容 FIFO event queue、微步预算（超限时保留尚未执行的事件）、纯 guard 和生命周期/迁移日志；
+- Shallow / Deep history、定容 FIFO event queue、微步预算（超限时保留剩余队列事件）、纯 guard 和生命周期/迁移日志；
 - 确定性语义快照编码、针对 plan 的配置/history 校验、容量受限队列恢复；恢复错误不改变实例状态，且保留已安装 guards。
 - Parallel Deep History 恢复会跳过默认 region 初始化，避免历史子状态与默认子状态叠加；微步预算错误不返回部分 `StepReport`，调用者应检查队列与日志后重试。
 
