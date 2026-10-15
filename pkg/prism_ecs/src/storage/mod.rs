@@ -31,12 +31,11 @@ mod sparse;
 mod sparse_sets;
 mod table;
 
-pub use blob_vec::BlobVec;
+pub use blob_vec::{BlobVec, BlobVecError};
 pub use chunk::{
     rows_per_chunk, ChunkBounds, ChunkChange, ChunkMeta, ChunkVersions, ChunkVisitStats,
     TARGET_CHUNK_BYTES,
 };
-pub use blob_vec::BlobVecError;
 pub use owning_group::{OwningGroup, OwningGroupId, OwningGroupIter};
 pub use shared::{SharedComponents, SharedValue, SharedValueId, SharedValuePool};
 pub use sparse::ComponentSparseSet;

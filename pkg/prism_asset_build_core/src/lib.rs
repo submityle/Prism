@@ -27,10 +27,10 @@ pub mod package;
 pub mod patch;
 /// Deterministic, schema-checked build profile composition and projections.
 pub mod profile;
-/// Immutable binding between a build revision and its runtime package outputs.
-pub mod publication;
 /// Canonical local release provenance and package audit facts.
 pub mod provenance;
+/// Immutable binding between a build revision and its runtime package outputs.
+pub mod publication;
 /// Explicit importer/cook recipe identity.
 pub mod recipe;
 /// Final release integrity and anti-rollback gate.
@@ -75,8 +75,8 @@ pub use profile::{
     BuildProfile, CapabilityCandidate, ProfileError, ProfileField, ProfileFieldType, ProfileHash,
     ProfileLayer, ProfileMergePolicy, ProfileOverridePolicy, ProfileValue,
 };
-pub use publication::{PublicationDescriptor, PublishedContainer};
 pub use provenance::{ProvenanceArtifact, ProvenanceContainer, ReleaseProvenance};
+pub use publication::{PublicationDescriptor, PublishedContainer};
 pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError};
 pub use release::{
     ReleaseDescriptor, ReleaseError, ReleaseGate, ReleaseKeyId, ReleaseKeyStatus, ReleasePublicKey,

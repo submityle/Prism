@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "mmap")]
+use crate::MmapRangeSource;
 use crate::{
     install_runtime_package, ChunkInput, ChunkPlanner, ChunkPolicy, Codec, ContainerError,
     ContainerIdentity, ContainerReader, ContainerWriter, FileRangeSource, InstallMount,
@@ -236,6 +238,38 @@ fn temporary_container_path(label: &str) -> std::path::PathBuf {
         std::process::id(),
         nonce
     ))
+}
+
+#[cfg(feature = "mmap")]
+#[test]
+fn mmap_range_source_mounts_and_reads_an_immutable_container() {
+    let id = guid("mmap.asset");
+    let payload = b"memory mapped payload".repeat(4096);
+    let bytes = build(&[("mmap.asset", &payload)]);
+    let path = temporary_container_path("mmap");
+    fs::write(&path, &bytes).unwrap();
+
+    let source = MmapRangeSource::open(&path).unwrap();
+    assert_eq!(source.len(), bytes.len() as u64);
+    let mut range = vec![0; 37];
+    source.read_range(96, &mut range).unwrap();
+    assert_eq!(range, bytes[96..133]);
+
+    let reader = ContainerReader::from_mmap_file(&path).unwrap();
+    assert_eq!(reader.read_all(id).unwrap(), payload);
+    fs::remove_file(path).unwrap();
+}
+
+#[cfg(feature = "mmap")]
+#[test]
+fn mmap_range_source_rejects_empty_files_before_mapping() {
+    let path = temporary_container_path("mmap-empty");
+    fs::write(&path, []).unwrap();
+    assert!(matches!(
+        MmapRangeSource::open(&path),
+        Err(RangeSourceError::Io(message)) if message.contains("empty file")
+    ));
+    fs::remove_file(path).unwrap();
 }
 
 #[test]

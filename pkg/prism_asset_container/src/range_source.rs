@@ -3,6 +3,9 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(feature = "mmap")]
+use memmap2::{Mmap, MmapOptions};
+
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 #[cfg(windows)]
@@ -158,6 +161,91 @@ impl RangeSource for FileRangeSource {
                 Err(error) => return Err(error),
             }
         }
+        Ok(())
+    }
+}
+
+/// An immutable memory-mapped local file range source.
+///
+/// The mapping is read-only and shared by clones. The file must remain
+/// immutable for the lifetime of every mounted reader, just like
+/// [`FileRangeSource`]. Mapping a file avoids the per-request `read_at` copy
+/// from the kernel page cache; callers still receive their requested bytes in
+/// the output buffer and the container reader retains its strict validation
+/// and hash checks.
+#[cfg(feature = "mmap")]
+#[derive(Clone)]
+pub struct MmapRangeSource {
+    map: Arc<Mmap>,
+    len: u64,
+}
+
+#[cfg(feature = "mmap")]
+impl fmt::Debug for MmapRangeSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MmapRangeSource")
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "mmap")]
+impl MmapRangeSource {
+    /// Opens and read-only maps a local container file.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, RangeSourceError> {
+        let file = File::open(path).map_err(|error| RangeSourceError::Io(error.to_string()))?;
+        Self::from_file(file)
+    }
+
+    /// Creates a read-only mapping from an already opened file.
+    pub fn from_file(file: File) -> Result<Self, RangeSourceError> {
+        let len = file
+            .metadata()
+            .map_err(|error| RangeSourceError::Io(error.to_string()))?
+            .len();
+        let map_len = usize::try_from(len).map_err(|_| RangeSourceError::OutOfBounds)?;
+        if map_len == 0 {
+            return Err(RangeSourceError::Io(
+                "cannot memory-map an empty file".into(),
+            ));
+        }
+        // `memmap2` requires the caller to uphold that the file is not
+        // concurrently mutated. The public source contract already requires
+        // immutable bytes for every mounted reader, and the mapping is
+        // read-only, so this is the single audited unsafe boundary.
+        #[allow(unsafe_code)]
+        let map = unsafe { MmapOptions::new().len(map_len).map(&file) }
+            .map_err(|error| RangeSourceError::Io(error.to_string()))?;
+        Ok(Self {
+            map: Arc::new(map),
+            len,
+        })
+    }
+}
+
+#[cfg(feature = "mmap")]
+impl RangeSource for MmapRangeSource {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError> {
+        let output_len = u64::try_from(out.len()).map_err(|_| RangeSourceError::OutOfBounds)?;
+        let end = offset
+            .checked_add(output_len)
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        if end > self.len {
+            return Err(RangeSourceError::OutOfBounds);
+        }
+        let start = usize::try_from(offset).map_err(|_| RangeSourceError::OutOfBounds)?;
+        let end = start
+            .checked_add(out.len())
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        out.copy_from_slice(
+            self.map
+                .get(start..end)
+                .ok_or(RangeSourceError::OutOfBounds)?,
+        );
         Ok(())
     }
 }

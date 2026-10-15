@@ -87,10 +87,10 @@ impl ReleaseProvenance {
         if self.producer.as_bytes() != PRODUCER {
             return Err("unsupported provenance producer");
         }
-        let artifact_count = u32::try_from(self.artifacts.len())
-            .map_err(|_| "too many provenance artifacts")?;
-        let container_count = u32::try_from(self.containers.len())
-            .map_err(|_| "too many provenance containers")?;
+        let artifact_count =
+            u32::try_from(self.artifacts.len()).map_err(|_| "too many provenance artifacts")?;
+        let container_count =
+            u32::try_from(self.containers.len()).map_err(|_| "too many provenance containers")?;
         let mut out = Vec::new();
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&self.revision.0.to_le_bytes());
@@ -232,7 +232,10 @@ impl<'a> Cursor<'a> {
         self.bytes.len() - self.offset
     }
     fn take(&mut self, length: usize) -> Result<&'a [u8], &'static str> {
-        let end = self.offset.checked_add(length).ok_or("provenance length overflows")?;
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or("provenance length overflows")?;
         if end > self.bytes.len() {
             return Err("provenance is truncated");
         }
@@ -241,12 +244,22 @@ impl<'a> Cursor<'a> {
         Ok(bytes)
     }
     fn array<const N: usize>(&mut self) -> Result<[u8; N], &'static str> {
-        self.take(N)?.try_into().map_err(|_| "provenance field has invalid length")
+        self.take(N)?
+            .try_into()
+            .map_err(|_| "provenance field has invalid length")
     }
-    fn u16(&mut self) -> Result<u16, &'static str> { Ok(u16::from_le_bytes(self.array()?)) }
-    fn u32(&mut self) -> Result<u32, &'static str> { Ok(u32::from_le_bytes(self.array()?)) }
-    fn u64(&mut self) -> Result<u64, &'static str> { Ok(u64::from_le_bytes(self.array()?)) }
-    fn u128(&mut self) -> Result<u128, &'static str> { Ok(u128::from_le_bytes(self.array()?)) }
+    fn u16(&mut self) -> Result<u16, &'static str> {
+        Ok(u16::from_le_bytes(self.array()?))
+    }
+    fn u32(&mut self) -> Result<u32, &'static str> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+    fn u64(&mut self) -> Result<u64, &'static str> {
+        Ok(u64::from_le_bytes(self.array()?))
+    }
+    fn u128(&mut self) -> Result<u128, &'static str> {
+        Ok(u128::from_le_bytes(self.array()?))
+    }
 }
 
 #[cfg(test)]
@@ -267,10 +280,13 @@ mod tests {
             alignment: 16,
             dependencies: vec![ArtifactKey([2; 32])],
         };
-        let manifest = Manifest::new(BuildRevision(3), [ManifestEntry {
-            asset: AssetId(11),
-            descriptor,
-        }])
+        let manifest = Manifest::new(
+            BuildRevision(3),
+            [ManifestEntry {
+                asset: AssetId(11),
+                descriptor,
+            }],
+        )
         .unwrap();
         let publication = PublicationDescriptor {
             revision: BuildRevision(3),
@@ -302,8 +318,16 @@ mod tests {
             producer: String::from_utf8(PRODUCER.to_vec()).unwrap(),
             artifacts: Vec::new(),
             containers: vec![
-                ProvenanceContainer { name: "z".into(), byte_len: 0, content_hash: ContentHash::digest(b"") },
-                ProvenanceContainer { name: "a".into(), byte_len: 0, content_hash: ContentHash::digest(b"") },
+                ProvenanceContainer {
+                    name: "z".into(),
+                    byte_len: 0,
+                    content_hash: ContentHash::digest(b""),
+                },
+                ProvenanceContainer {
+                    name: "a".into(),
+                    byte_len: 0,
+                    content_hash: ContentHash::digest(b""),
+                },
             ],
         };
         assert!(provenance.encode().is_err());

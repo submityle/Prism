@@ -10,7 +10,12 @@ publish = false
 [dependencies]
 blake3 = "1.8"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+memmap2 = { version = "0.9", optional = true }
 prism_asset = { path = "../prism_asset" }
+
+[features]
+default = []
+mmap = ["dep:memmap2"]
 
 [lints]
 workspace = true

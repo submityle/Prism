@@ -43,6 +43,8 @@ mod async_coordinator_tests;
 #[cfg(test)]
 mod scatter_persist_tests;
 
+#[cfg(feature = "asset_container")]
+mod asset_container_provider;
 #[cfg(feature = "std")]
 mod file_provider;
 #[cfg(feature = "std")]
@@ -60,6 +62,8 @@ mod task_cell_io;
 #[cfg(feature = "std")]
 mod threaded_cell_io;
 
+#[cfg(all(test, feature = "asset_container"))]
+mod asset_container_provider_tests;
 #[cfg(all(test, feature = "std"))]
 mod file_provider_tests;
 #[cfg(all(test, feature = "tasks"))]
@@ -73,6 +77,11 @@ mod scheduled_io_tests;
 #[cfg(all(test, feature = "tasks"))]
 mod task_cell_io_tests;
 
+#[cfg(feature = "asset_container")]
+pub use asset_container_provider::{
+    AssetContainerCellProvider, AssetContainerProviderError, AssetContainerProviderLimits,
+    DEFAULT_ASSET_CONTAINER_MAX_IO_BYTES,
+};
 #[cfg(feature = "std")]
 pub use file_provider::FileCellProvider;
 #[cfg(feature = "std")]

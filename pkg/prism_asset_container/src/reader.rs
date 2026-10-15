@@ -83,6 +83,14 @@ impl ContainerReader {
         })
     }
 
+    /// Mounts a read-only memory-mapped local container file.
+    #[cfg(feature = "mmap")]
+    pub fn from_mmap_file(path: impl AsRef<std::path::Path>) -> Result<Self, ContainerError> {
+        let source = crate::MmapRangeSource::open(path)
+            .map_err(|error| ContainerError::Source(error.to_string()))?;
+        Self::from_range_source(Arc::new(source))
+    }
+
     #[must_use]
     /// Returns validated top-level metadata.
     pub const fn info(&self) -> ContainerInfo {

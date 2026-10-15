@@ -5,7 +5,10 @@
 //! support deterministic raw and raw-DEFLATE payloads in both the legacy
 //! per-payload [`FORMAT_VERSION`] layout and the independently compressed
 //! [`CHUNK_FORMAT_VERSION`] chunk-table layout. Encryption, signatures,
-//! remote delivery, and GPU decompression remain outside this crate.
+//! remote delivery, and GPU decompression remain outside this crate. The
+//! optional `mmap` feature adds a read-only local-file [`MmapRangeSource`]
+//! without changing the validated container ABI or the default positional-I/O
+//! path.
 
 extern crate alloc;
 
@@ -40,6 +43,8 @@ pub use manifest_reader::{ManifestRangeRequest, ManifestReadError, ManifestReade
 pub use overlay::{MountedContainer, OverlaySet};
 pub use patch::{PatchDescriptorError, RuntimePatchDescriptor, PATCH_MAGIC, PATCH_VERSION};
 pub use range_batch::{RangeBatchPolicy, RangeRequest};
+#[cfg(feature = "mmap")]
+pub use range_source::MmapRangeSource;
 pub use range_source::{FileRangeSource, MemoryRangeSource, RangeSource, RangeSourceError};
 pub use reader::ContainerReader;
 pub use writer::{ContainerWriter, WriteEntry};
