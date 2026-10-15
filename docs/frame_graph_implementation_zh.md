@@ -127,3 +127,11 @@ scene 的范围外告警包括 lobe_sampling/virtual_texture/spec_denoise/texel_
 
 这条校验不冒充 GPU 设备效果验证：设备能力、shader 编译、真实帧时间和图像质量仍由各专项 GPU/golden 门禁负责；本文件只确认声明图与实际 executor 装配一致。
 - 水体 Fabric 与 particle frame-lag/versioning 属于独立的 architecture/scene 切片，分别维护自身的资源提供者与验证报告；本图只消费它们最终导入的资源句柄。
+
+## 2026-10-15 增量：按效果拆分资源访问契约
+
+`post_graph.rs` 已从“所有 23 个声明共用一套 `POST_ACCESSES`”收敛为一张全局资源池加 11 组精确访问集：曝光、Bloom、DoF、Motion Blur、SSR、SSGI、specular denoise、TAA、普通风格化、outline、tonemap 和 upscale 分别声明自己的读写资源。资源生命周期遵循同一原则：TAA/specular history 为 `Persistent`，Bloom/SSR/SSGI/DoF 等帧内中间结果为 `Transient`，extent-dependent 资源的真实尺寸仍由各 per-view owner 在设备能力检查后分配，拓扑图不伪造固定显存大小。
+
+新增回归断言验证：曝光包含 histogram/state 写集；SSR 包含 HZB/trace/hit-distance；普通 stylized pass 不带 SSR 资源；persistent history 与 transient scratch 不混淆。这样不会把 executor 链误当成单一 bind group，也不会因所有声明共享资源数组而掩盖 RAW/WAR/WAW 关系。
+
+本次定向复验：`cargo test -p prism_render_scene --offline --lib shading::` 为 820/820 通过；`shading_resolve_wesl_compiles_and_resolves_all_imports` 为 1/1 通过。warning 仍来自既有范围外模块，不能表述为全 workspace 零 warning；当前机器没有可用 GPU adapter，因此本增量没有新增设备级 parity 结果。

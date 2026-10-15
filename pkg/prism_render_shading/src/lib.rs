@@ -50,6 +50,7 @@ mod oit;
 // The conformance oracle is a *test* artifact (§4.5 constraint 1 / roadmap
 // P2-f): it exists to be compared against, so it is compiled only for tests and
 // adds nothing to the shipping shading binary.
+pub mod custom_response;
 #[cfg(test)]
 mod openpbr_reference;
 mod ordered_dither;
@@ -115,6 +116,9 @@ pub use color_grade::{
     apply_color_grade, color_saturation, contrast, lift_gamma_gain, lin_to_lms, lms_to_lin, luma,
     offset, standard_illuminant_y, white_balance, ColorGradeParams, COLOR_GRADE_LUMA_WEIGHTS,
     D65_LMS,
+};
+pub use custom_response::{
+    apply_custom_variant, respond_custom, CustomData, CustomResponseError, CustomViewContext,
 };
 pub use dof::{
     aperture_diameter, apply_dof, bokeh_weight, circle_of_confusion, coc_to_pixels,

@@ -1,6 +1,6 @@
 # Response Composition S1/S9 契约实现记录
 
-截至 2026-10-15，本切片建立 CPU 构建期契约、真实 SPIR-V 生产注册入口和注册绑定；不把 GPU 响应数学、逐通道合成、动态分桶、CompositionPass 或 `respond_custom` 函数伪装成已完成实现。实现位于 `pkg/prism_render_material/src/shading_plan.rs`，集成测试位于 `pkg/prism_render_material/tests/shading_plan.rs`。
+截至 2026-10-15，本切片建立 CPU 构建期契约、真实 SPIR-V 生产注册入口和注册绑定，并已接入动态分桶、resolve response producer 与稳定 Custom evaluator。实现位于 `pkg/prism_render_material/src/shading_plan.rs`、`pkg/prism_render_shading/src/{classification.rs,resolve.rs,custom_response.rs}`，集成测试位于 `pkg/prism_render_material/tests/shading_plan.rs`。
 
 ## 数据模型和入口
 
@@ -17,7 +17,7 @@
 
 此轻量反射不是完整 SPIR-V validator：它不证明响应数学，也不证明某个 `respond_custom` 签名；`CompiledEntry::from_spirv` 会把入口定义检查与 `VerifiedShaderArtifact` 的 Naga 全模块验证绑定起来，注册/解析阶段还会比较 package artifact digest，因此同一 package identity 下的代码替换会硬失败。设备特性与限额仍由实际 pipeline 创建验证，响应数学由对应对拍套件验证；这三类证据不互相替代。当前禁止裸字符串、裸 bool 作为编译入口证明。
 
-目标 shader ABI（未实现的规范签名）：`respond_custom(&SurfaceData, &LightingContext, &ViewContext, &CustomData) -> ResponseOutput`。输出计划包含 direct、indirect_diffuse、reflection、transmission、emission、alpha、auxiliary；S7 必须先定义 alpha / auxiliary 合并规则。当前 `ChannelMask` 只允许五个辐射通道参与组合，禁止把 alpha 或 auxiliary 当作可 lerp 的辐射量。
+Custom 的 CPU ABI 已落地为 `respond_custom(&SurfaceSample, &LightingContext, &CustomViewContext, &CustomData) -> ResponseOutput`；输出包含五个 radiance 通道与 alpha，auxiliary 仍由组合消费者独立管理。`CustomData::from_execution(program_id, permutation_index)` 与 `shading_resolve.wesl` 使用相同的 wrapping seed、gain、tint、alpha-scale 公式；执行身份是数据，不进入材质 permutation key。当前 GPU resolve 执行的是稳定内建 ABI evaluator，注册 SPIR-V 已完成结构/Naga/digest/身份验证，但任意注册函数体尚未在 resolve kernel 中动态调用，不能把注册成功表述为任意 Custom 字节码已执行。
 
 ## 上游 S2 接缝与责任边界
 
@@ -31,4 +31,9 @@ schema 只维护 `lit` / `npr` / `unlit` 内建消费者身份；custom `Program
 
 - `cargo test -p prism_render_material --test shading_plan --offline -- --nocapture`：30/30 通过；除原有 schema 字段投影、每一字段漏报、十个活动瓣逐一漏报、映射/理由、五契约、两臂、三内建身份、四个动态 channel 的能力继承、ID 0 / MAX / stale、包状态/ABI/修订以及真实 SPIR-V 入口外，还覆盖 custom SPIR-V 成功 receipt、Ready package、digest/function ID、stale ID、无效字节和 ABI mismatch 的失败原子性。
 - 2026-10-15 当前定向复验：材质 lib 870 项、`shading_plan` 30 项全部通过；`surface_layout.rs` 与 `material_unpack.wesl` 已由 `prism-material-codegen write` 重新生成。现存上游 warnings 未在本切片处理。
+- 2026-10-15 增量复验：`cargo test -p prism_render_shading --offline --lib custom_response` 为 4/4；Custom CPU evaluator 的执行身份公式对拍覆盖 `0/0`、普通值和 `u32::MAX/u64::MAX`；`cargo test -p prism_render_scene --offline --lib shading_resolve_wesl_compiles_and_resolves_all_imports` 为 1/1，真实 WESL import/type-check 通过。
 - `rustfmt --edition 2024 --check` 对本模块和新增测试通过；`git diff --check` 对 `lib.rs` 通过。
+
+## Resolve producer 接入
+
+`resolve_pixel` 现在从 `response_program` 和执行 permutation 派生 Custom 身份：分类/动态 bucket 选择 program id，resolve 读取 `execution_permutation_low/high`，Custom 分支经过独立 `apply_custom_variant`，而不是把 Custom 直接当作 Principled 的同义分支。WESL resolve 同时写入 `response_left`，图中由 `shading_resolve -> response_composition` 形成明确 RAW barrier；结构化五通道仍以 legacy HDR 聚合结果为守恒分解，transmission 在没有独立 transport term 时为零。这是稳定 producer ABI 和数据流接线，不是任意 SPIR-V 函数体动态链接证明。

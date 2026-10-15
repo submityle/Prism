@@ -17,14 +17,512 @@ pub(crate) struct PostExecutionBinding {
     pub(crate) executors: &'static [&'static str],
 }
 
-const POST_RESOURCES: &[ResourceDeclaration] = &[ResourceDeclaration {
-    name: "post_process_params",
-    lifetime: ResourceLifetime::Persistent,
-    size: 256,
-    alignment: 16,
-}];
+// The declaration frontend has one graph-wide resource table, while each pass
+// owns its precise access set below.  Extent-dependent textures intentionally
+// use a zero logical footprint: their real dimensions are admitted by the
+// per-view resource owners, not guessed at startup by this topology graph.
+const POST_RESOURCES: &[ResourceDeclaration] = &[
+    ResourceDeclaration {
+        name: "post_process_params",
+        lifetime: ResourceLifetime::Persistent,
+        size: 256,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_exposure_histogram",
+        lifetime: ResourceLifetime::Persistent,
+        size: 256,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_exposure_state",
+        lifetime: ResourceLifetime::Persistent,
+        size: 64,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_bloom_base",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_bloom_down",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_bloom_up",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_dof_coc",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_dof_blurred",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_dof_output",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_motion_tile_max",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_motion_neighbor_max",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_motion_output",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssr_depth",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssr_normal_roughness",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssr_hzb",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssr_color_mips",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssr_trace",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssr_resolved",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssr_hit_distance",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssr_env_specular",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssr_spec_weight",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssgi_output",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_ssgi_denoised",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_spec_history",
+        lifetime: ResourceLifetime::Persistent,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_spec_reprojected",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_spec_denoised",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_taa_history",
+        lifetime: ResourceLifetime::Persistent,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_taa_output",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_tonemap_output",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_upscale_color",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_upscale_output",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+];
 
-const POST_ACCESSES: &[AccessDeclaration] = &[
+const ACCESS_EXPOSURE: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_process_params",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_exposure_histogram",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_exposure_histogram",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_exposure_state",
+        kind: AccessKind::StorageWrite,
+    },
+];
+const ACCESS_BLOOM: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_process_params",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_bloom_base",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_bloom_down",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_bloom_down",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_bloom_up",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_bloom_up",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::StorageWrite,
+    },
+];
+const ACCESS_DOF: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "main_depth",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_process_params",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_dof_coc",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_dof_coc",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_dof_blurred",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_dof_blurred",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_dof_output",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::TransferWrite,
+    },
+];
+const ACCESS_MOTION_BLUR: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "visibility_metadata",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_depth",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_process_params",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_motion_tile_max",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_motion_tile_max",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_motion_neighbor_max",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_motion_neighbor_max",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_motion_output",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::TransferWrite,
+    },
+];
+const ACCESS_SSR: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "main_depth",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "visibility_metadata",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_process_params",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_depth",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_normal_roughness",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_hzb",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_hzb",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_color_mips",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_color_mips",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_trace",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_trace",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_resolved",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_resolved",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_hit_distance",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_hit_distance",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_env_specular",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_spec_weight",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::StorageWrite,
+    },
+];
+const ACCESS_SSGI: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "post_ssr_hzb",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_depth",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_normal_roughness",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_color_mips",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssgi_output",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssgi_output",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssgi_denoised",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssgi_denoised",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::StorageWrite,
+    },
+];
+const ACCESS_SPEC_DENOISE: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "post_ssr_trace",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_resolved",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_hit_distance",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_spec_history",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_spec_history",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_spec_reprojected",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_spec_reprojected",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_spec_denoised",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_spec_denoised",
+        kind: AccessKind::SampledRead,
+    },
+];
+const ACCESS_TAA: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "visibility_metadata",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_taa_history",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_taa_history",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_taa_output",
+        kind: AccessKind::StorageWrite,
+    },
+];
+const ACCESS_SIMPLE: &[AccessDeclaration] = &[
     AccessDeclaration {
         resource: "hdr_scene_color",
         kind: AccessKind::SampledRead,
@@ -38,11 +536,77 @@ const POST_ACCESSES: &[AccessDeclaration] = &[
         kind: AccessKind::StorageWrite,
     },
 ];
+const ACCESS_OUTLINE: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "visibility_ids",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "main_depth",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_process_params",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::StorageWrite,
+    },
+];
+const ACCESS_TONEMAP: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_process_params",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_tonemap_output",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::TransferWrite,
+    },
+];
+const ACCESS_UPSCALE: &[AccessDeclaration] = &[
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_taa_history",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_taa_history",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_upscale_color",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_upscale_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_upscale_output",
+        kind: AccessKind::StorageWrite,
+    },
+];
 
 const POST_BINDINGS: &[u8] = &[2, 1];
 
 macro_rules! post_passes {
-    ($(($name:literal, $hash:expr, $previous:expr)),+ $(,)?) => {
+    ($(($name:literal, $hash:expr, $previous:expr, $accesses:expr)),+ $(,)?) => {
         &[
             $(PassSkeletonDeclaration {
                 name: $name,
@@ -57,7 +621,7 @@ macro_rules! post_passes {
                     workgroup_size: [8, 8, 1],
                 },
                 resources: POST_RESOURCES,
-                accesses: POST_ACCESSES,
+                accesses: $accesses,
                 depends_on: &[$previous],
             }),+
         ]
@@ -67,29 +631,49 @@ macro_rules! post_passes {
 /// The complete fixed-topology post base.  Optional effects are data-gated;
 /// disabling an effect produces a no-op dispatch without changing the graph.
 pub(crate) const POST_PROCESS_DECLARATIONS: &[PassSkeletonDeclaration] = post_passes![
-    ("post_exposure", 0x01, "response_composition"),
-    ("post_bloom", 0x02, "post_exposure"),
-    ("post_dof", 0x03, "post_bloom"),
-    ("post_motion_blur", 0x04, "post_dof"),
-    ("post_ssr", 0x05, "post_motion_blur"),
-    ("post_ssgi", 0x06, "post_ssr"),
-    ("post_spec_denoise", 0x07, "post_ssgi"),
-    ("post_taa", 0x08, "post_spec_denoise"),
-    ("post_posterize", 0x09, "post_taa"),
-    ("post_outline", 0x0a, "post_posterize"),
-    ("post_hatching", 0x0b, "post_outline"),
-    ("post_halftone", 0x0c, "post_hatching"),
-    ("post_kuwahara", 0x0d, "post_halftone"),
-    ("post_color_grade", 0x0e, "post_kuwahara"),
-    ("post_chromatic_aberration", 0x0f, "post_color_grade"),
-    ("post_vignette", 0x10, "post_chromatic_aberration"),
-    ("post_film_grain", 0x11, "post_vignette"),
-    ("post_cas", 0x12, "post_film_grain"),
-    ("post_gamut_map", 0x13, "post_cas"),
-    ("post_ordered_dither", 0x14, "post_gamut_map"),
-    ("post_lens_flare", 0x15, "post_ordered_dither"),
-    ("post_tonemap", 0x16, "post_lens_flare"),
-    ("post_upscale", 0x17, "post_tonemap"),
+    (
+        "post_exposure",
+        0x01,
+        "response_composition",
+        ACCESS_EXPOSURE
+    ),
+    ("post_bloom", 0x02, "post_exposure", ACCESS_BLOOM),
+    ("post_dof", 0x03, "post_bloom", ACCESS_DOF),
+    ("post_motion_blur", 0x04, "post_dof", ACCESS_MOTION_BLUR),
+    ("post_ssr", 0x05, "post_motion_blur", ACCESS_SSR),
+    ("post_ssgi", 0x06, "post_ssr", ACCESS_SSGI),
+    ("post_spec_denoise", 0x07, "post_ssgi", ACCESS_SPEC_DENOISE),
+    ("post_taa", 0x08, "post_spec_denoise", ACCESS_TAA),
+    ("post_posterize", 0x09, "post_taa", ACCESS_SIMPLE),
+    ("post_outline", 0x0a, "post_posterize", ACCESS_OUTLINE),
+    ("post_hatching", 0x0b, "post_outline", ACCESS_SIMPLE),
+    ("post_halftone", 0x0c, "post_hatching", ACCESS_SIMPLE),
+    ("post_kuwahara", 0x0d, "post_halftone", ACCESS_SIMPLE),
+    ("post_color_grade", 0x0e, "post_kuwahara", ACCESS_SIMPLE),
+    (
+        "post_chromatic_aberration",
+        0x0f,
+        "post_color_grade",
+        ACCESS_SIMPLE
+    ),
+    (
+        "post_vignette",
+        0x10,
+        "post_chromatic_aberration",
+        ACCESS_SIMPLE
+    ),
+    ("post_film_grain", 0x11, "post_vignette", ACCESS_SIMPLE),
+    ("post_cas", 0x12, "post_film_grain", ACCESS_SIMPLE),
+    ("post_gamut_map", 0x13, "post_cas", ACCESS_SIMPLE),
+    ("post_ordered_dither", 0x14, "post_gamut_map", ACCESS_SIMPLE),
+    (
+        "post_lens_flare",
+        0x15,
+        "post_ordered_dither",
+        ACCESS_SIMPLE
+    ),
+    ("post_tonemap", 0x16, "post_lens_flare", ACCESS_TONEMAP),
+    ("post_upscale", 0x17, "post_tonemap", ACCESS_UPSCALE),
 ];
 
 const EXEC_EXPOSURE: &[&str] = &["exposure_histogram_pass", "exposure_average_pass"];
@@ -288,5 +872,74 @@ mod tests {
     fn every_declared_post_pass_has_one_unique_executor_chain() {
         let graph = crate::shading::graph::shading_frame_graph();
         validate_post_execution_bindings(&graph).unwrap();
+    }
+
+    #[test]
+    fn post_effects_publish_distinct_resource_contracts() {
+        let find = |name: &str| {
+            POST_PROCESS_DECLARATIONS
+                .iter()
+                .find(|pass| pass.name == name)
+                .unwrap_or_else(|| panic!("missing declaration {name}"))
+        };
+        let has = |pass: &PassSkeletonDeclaration, resource: &str, kind: AccessKind| {
+            pass.accesses
+                .iter()
+                .any(|access| access.resource == resource && access.kind == kind)
+        };
+
+        let exposure = find("post_exposure");
+        assert!(has(
+            exposure,
+            "post_exposure_histogram",
+            AccessKind::StorageWrite
+        ));
+        assert!(has(
+            exposure,
+            "post_exposure_state",
+            AccessKind::StorageWrite
+        ));
+
+        let ssr = find("post_ssr");
+        assert!(has(ssr, "post_ssr_hzb", AccessKind::StorageWrite));
+        assert!(has(ssr, "post_ssr_trace", AccessKind::StorageWrite));
+        assert!(has(ssr, "post_ssr_hit_distance", AccessKind::SampledRead));
+
+        let stylized = find("post_posterize");
+        assert!(has(
+            stylized,
+            "hdr_scene_color",
+            AccessKind::StorageWrite
+        ));
+        assert!(!has(stylized, "post_ssr_hzb", AccessKind::SampledRead));
+
+        assert_ne!(exposure.accesses, ssr.accesses);
+        assert_ne!(ssr.accesses, stylized.accesses);
+    }
+
+    #[test]
+    fn post_resource_lifetimes_keep_history_persistent_and_scratch_transient() {
+        let resource = |name: &str| {
+            POST_RESOURCES
+                .iter()
+                .find(|resource| resource.name == name)
+                .unwrap_or_else(|| panic!("missing resource {name}"))
+        };
+        assert_eq!(
+            resource("post_taa_history").lifetime,
+            ResourceLifetime::Persistent
+        );
+        assert_eq!(
+            resource("post_spec_history").lifetime,
+            ResourceLifetime::Persistent
+        );
+        assert_eq!(
+            resource("post_ssr_trace").lifetime,
+            ResourceLifetime::Transient
+        );
+        assert_eq!(
+            resource("post_bloom_down").lifetime,
+            ResourceLifetime::Transient
+        );
     }
 }

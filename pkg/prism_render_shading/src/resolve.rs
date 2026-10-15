@@ -401,6 +401,12 @@ pub fn resolve_pixel(
         None => classify_material_header(&input.header),
     }
     .map_err(ResolveError::Classification)?;
+    let custom_identity = match input.response_program {
+        Some(ProgramRef::Registered(id)) => id.0,
+        _ => 0,
+    };
+    let custom_permutation = u64::from(input.header.execution_permutation_low)
+        | (u64::from(input.header.execution_permutation_high) << 32);
     let geometry = reconstruct_surface(
         SurfaceReconstructionInput {
             primitive_id: input.pixel.primitive_id,
@@ -790,7 +796,9 @@ pub fn resolve_pixel(
         MaterialShadingClass::Cloth => shade_cloth(),
         MaterialShadingClass::Hair => shade_hair(),
         MaterialShadingClass::Water => shade_water(),
-        MaterialShadingClass::Custom => shade_principled(),
+        MaterialShadingClass::Custom => {
+            crate::apply_custom_variant(shade_principled(), custom_identity, custom_permutation)
+        }
     };
 
     Ok(ResolvedPixel {

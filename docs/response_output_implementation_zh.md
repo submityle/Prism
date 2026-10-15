@@ -1,17 +1,17 @@
 # 02-S7：结构化响应输出的 CPU 契约实现
 
-日期：2026-10-14。依据完整读取的 `docs/refactoring-dev/02-response-composition_refactor_zh.md`，实现 §4.3–4.5 的 CPU 输出、组合语义、共享光照输入接缝与守恒测试准入门禁。
+日期：2026-10-15。依据完整读取的 `docs/refactoring-dev/02-response-composition_refactor_zh.md`，实现 §4.3–4.5 的 CPU 输出、组合语义、共享光照输入接缝与守恒测试准入门禁，并补齐 resolve producer 的结构化左响应写入和 resident CompositionPass 的图依赖。
 
 ## 交付范围
 
-本切片仅写入四个文件：
+本切片的历史 CPU 组合交付写入四个文件；后续 producer/graph 接线另有独立提交：
 
 - `pkg/prism_render_shading/src/response_output.rs`：新独立模块。
 - `pkg/prism_render_shading/src/lib.rs`：仅新增公开模块与 crate-root reexport。
 - `pkg/prism_render_shading/tests/response_output.rs`：新集成测试。
 - `docs/response_output_implementation_zh.md`：本文。
 
-未修改 classification、resolve、scene、material/shading_plan、schema、codegen 或缓存布局；未提交或推送。后续动态桶/CPU 执行迁移不是本交付的完成声明。
+当前实现已修改 `pkg/prism_render_shading/src/classification.rs`、`resolve.rs`、`custom_response.rs`、`pkg/prism_render_scene/src/shaders/shading_resolve.wesl`、`shading/graph.rs` 与 `shading/post_graph.rs`，并通过对应定向验证。注册 SPIR-V 的身份和完整性已验证，但任意外部函数体的 GPU 动态调用不属于当前 ABI，因此不作该完成声明。
 
 ## 已完成的接口
 
@@ -133,8 +133,14 @@ git diff --check -- pkg/prism_render_shading/src/lib.rs pkg/prism_render_shading
 
 过程中首次 check 被并发上游缺失的 `architecture/render_fabric/compile.rs` 阻断，未修改该文件；上游恢复后继续验证。首次集成测试还发现并修复了本模块 aux 取值闭包的生命周期错误。完整套件仍输出旧 `lobe_sampling` / `resolve` / `openpbr_reference` 的 unused qualification/import/variable warnings，未扩大写域去修它们。
 
-## 后续消费者接入
+## 当前 producer 与 GPU 边界
 
-生产 response evaluator 应真正返回五个通道，而不是把 legacy 聚合颜色冒充 direct。GPU 组合内核可对照这里的已选/未选通道、shared alpha 和 aux 语义，但需要独立显式 GPU buffer ABI 与 shader 对拍；本文不宣称生产 GPU 路径、CompositionPass、显存成本或缓存一致性已经完成。
+resolve producer 已写入 `response_left` 的 64 字节结构化输出，并由常驻 `response_composition` 消费；GPU 组合内核保留这里定义的已选/未选通道、shared alpha 与 aux 语义。WESL 侧的五通道分解保证与 legacy HDR 聚合值相加一致，但 transmission 在没有独立 transport term 时为零；这不是“所有 OpenPBR transport 已完整覆盖”的声明。
 
-没有新增 Custom 函数实现或动态分派承诺。主线程继续持有 schema response-consumption 矩阵与 shader trust；字段的 mapped 数学语义及证据必须由真实消费/测试支撑，不能由本模块的组合测试代替。
+Custom GPU 分支采用与 CPU 相同的稳定执行身份公式；它是可测试、可缓存、无动态函数指针的 ABI evaluator。`register_custom_spirv` 仍负责真实 SPIR-V 的结构、Naga、manifest、digest 和 package identity 验证，但当前 resolve 不解释任意 SPIR-V 函数体。字段的 mapped 数学语义及 shader trust 仍必须由真实消费/测试支撑，不能由本模块的组合测试代替。
+
+## 2026-10-15 增量验证
+
+- `cargo test -p prism_render_shading --offline --lib custom_response`：4/4 通过，包含 CPU/WESL 执行身份公式对拍和极值 wrapping 回归。
+- `cargo test -p prism_render_scene --offline --lib shading_resolve_wesl_compiles_and_resolves_all_imports`：1/1 通过，真实 WESL 依赖导入和类型检查通过。
+- 当前工作区未获得可用 Metal/Vulkan/DX12 adapter；因此本次没有新增真实 GPU render/readback parity 证据。既有跨沙盒 response composition 记录仍以 `docs/response_gpu_implementation_zh.md` 为准，不能外推到本次 Custom resolve。

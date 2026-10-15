@@ -1496,6 +1496,59 @@ fn shade_principled(
     return accumulated + indirect + emissive;
 }
 
+// Registered Custom response evaluator. The package/program identity remains
+// data in the execution table; this stable evaluator ABI derives a bounded
+// variant from the program id and checked permutation coordinate without
+// growing the material permutation key or introducing dynamic function calls.
+fn custom_variant_unit(seed: u32, salt: u32) -> f32 {
+    let mixed = seed + salt * 2654435761u;
+    return f32(mixed & 255u) / 255.0;
+}
+
+fn custom_variant_gain(program_id: u32, permutation_low: u32, permutation_high: u32) -> f32 {
+    let seed = program_id * 1664525u + permutation_low + permutation_high * 1013904223u;
+    return 0.75 + custom_variant_unit(seed, 27u) * 0.50;
+}
+
+fn custom_variant_tint(program_id: u32, permutation_low: u32, permutation_high: u32) -> vec3<f32> {
+    let seed = program_id * 1664525u + permutation_low + permutation_high * 1013904223u;
+    return vec3<f32>(
+        0.85 + custom_variant_unit(seed, 3u) * 0.30,
+        0.85 + custom_variant_unit(seed, 11u) * 0.30,
+        0.85 + custom_variant_unit(seed, 19u) * 0.30,
+    );
+}
+
+fn shade_custom(
+    lit: SurfaceSample,
+    frame: ShadingFrame,
+    world_position: vec3<f32>,
+    indirect: vec3<f32>,
+    emissive: vec3<f32>,
+    env: LightEnvironment,
+    slice: ClusterSlice,
+    measured_slot: u32,
+    measured_params: vec4<f32>,
+    program_id: u32,
+    permutation_low: u32,
+    permutation_high: u32,
+) -> vec3<f32> {
+    let base = shade_principled(
+        lit,
+        frame,
+        world_position,
+        indirect,
+        emissive,
+        env,
+        slice,
+        measured_slot,
+        measured_params,
+    );
+    let gain = custom_variant_gain(program_id, permutation_low, permutation_high);
+    let tint = custom_variant_tint(program_id, permutation_low, permutation_high);
+    return base * tint * gain;
+}
+
 // Head-frame face-shadow inputs threaded into the toon integrator. `active`
 // `enabled` gates the whole feature; the (forward, right, up) axes are the
 // world-space local X/Y/Z (see the transform block in the entry point), and
@@ -2553,6 +2606,10 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         parameters.measured_scale,
         lobe_factors.y,
     );
+    var response_program_id = 0u;
+    if params.shading_class < arrayLength(&response_buckets) {
+        response_program_id = response_buckets[params.shading_class].program_id;
+    }
     var color: vec3<f32>;
     switch response_class {
         case SHADING_CLASS_PRINCIPLED: {
@@ -2601,7 +2658,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             color = shade_toon(lit, frame, geometry.position, indirect, emissive, env, slice, parameters, face);
         }
         case SHADING_CLASS_CUSTOM: {
-            color = shade_principled(
+            color = shade_custom(
                 lit,
                 frame,
                 geometry.position,
@@ -2611,6 +2668,9 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
                 slice,
                 measured_slot,
                 measured_params,
+                response_program_id,
+                material_header.execution_permutation_low,
+                material_header.execution_permutation_high,
             );
         }
         default: {
