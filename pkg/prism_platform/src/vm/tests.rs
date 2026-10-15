@@ -269,6 +269,14 @@ fn mirrored_ring_aliases_both_halves() {
     let ps = page_size();
     let ring = MirroredRing::with_min_capacity(1).expect("one-page ring should map");
     let cap = ring.capacity();
+    assert!(cap >= ps, "capacity must be at least one page");
+    #[cfg(windows)]
+    assert_eq!(
+        cap % super::backend::allocation_granularity(),
+        0,
+        "Windows mirrored views must begin on allocation-granularity boundaries"
+    );
+    #[cfg(not(windows))]
     assert_eq!(cap, ps, "capacity rounds up to a whole page");
     assert!(!ring.is_empty());
     assert!(!ring.as_ptr().is_null());

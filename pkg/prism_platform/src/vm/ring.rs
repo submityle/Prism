@@ -21,11 +21,14 @@
 //! - **Apple (macOS, aarch64/x86-64)**: `mach_vm_allocate` reserves `2N`, then
 //!   `mach_vm_remap` aliases the first `N` bytes over the second `N`
 //!   (shared, non-copy). Verified on real hardware.
-//! - **Other platforms**: honestly [`VmError::Unsupported`]. A real Linux
-//!   (`memfd_create` + double `mmap`) and Windows (`CreateFileMapping` +
-//!   `MapViewOfFileEx`) backend is PLANNED but intentionally not shipped
-//!   unverified from this macOS host (see the design doc's honest-boundary
-//!   note). Query [`MirroredRing::is_supported`] before relying on it.
+//! - **Windows**: a real pagefile-backed section is mapped twice at adjacent
+//!   addresses. Windows 10+ uses runtime-resolved `VirtualAlloc2` placeholder
+//!   replacement with `MapViewOfFile3`; older Windows uses a bounded retry loop
+//!   around two exact `MapViewOfFileEx` views. The latter is a real aliasing
+//!   fallback, never a copied or single-view buffer.
+//! - **Other platforms**: honestly [`VmError::Unsupported`]. Linux remains
+//!   planned because it is not implemented in this slice. Query
+//!   [`MirroredRing::is_supported`] before relying on it.
 //!
 //! ## Lifecycle contract
 //! A [`MirroredRing`] owns its whole `2N` mapping and releases it exactly once
