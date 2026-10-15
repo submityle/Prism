@@ -156,14 +156,15 @@ fn append_faults_poison_even_when_rollback_succeeds_and_preserve_both_errors_whe
             let mut journal = FileJournal::open(&path).unwrap();
             journal.append(first.clone()).unwrap();
             let before = read_journal_bytes(&mut journal);
-            let error = journal
-                .writer
-                .append(
-                    &mut FaultFile::new(&mut journal.file, failure, rollback, 7),
-                    &mut journal.log,
-                    second.clone(),
-                )
-                .expect_err("injected append must fail");
+            let error = {
+                // End the injected file borrow before dropping the poisoned
+                // journal below. Reopen must observe the real lock release.
+                let mut fault_file = FaultFile::new(&mut journal.file, failure, rollback, 7);
+                journal
+                    .writer
+                    .append(&mut fault_file, &mut journal.log, second.clone())
+                    .expect_err("injected append must fail")
+            };
             if rollback.is_some() {
                 match &error {
                     JournalError::RollbackFailed {
@@ -222,19 +223,20 @@ fn failed_batch_rollback_recovers_complete_prefix_before_allowing_more_appends()
         let mut journal = FileJournal::open(&path).unwrap();
         journal.append(first.clone()).unwrap();
         let before = read_journal_bytes(&mut journal);
-        let error = journal
-            .writer
-            .append_batch(
-                &mut FaultFile::new(
-                    &mut journal.file,
-                    Failure::Write,
-                    rollback_fails.then_some(RollbackFailure::Truncate),
-                    bytes_to_write,
-                ),
-                &mut journal.log,
-                &batch,
-            )
-            .expect_err("batch write must fail before final checksum byte");
+        let error = {
+            // Keep the injected borrow scoped so the poisoned handle can be
+            // dropped before the recovery reopen below.
+            let mut fault_file = FaultFile::new(
+                &mut journal.file,
+                Failure::Write,
+                rollback_fails.then_some(RollbackFailure::Truncate),
+                bytes_to_write,
+            );
+            journal
+                .writer
+                .append_batch(&mut fault_file, &mut journal.log, &batch)
+                .expect_err("batch write must fail before final checksum byte")
+        };
         assert_eq!(
             matches!(error, JournalError::RollbackFailed { .. }),
             rollback_fails

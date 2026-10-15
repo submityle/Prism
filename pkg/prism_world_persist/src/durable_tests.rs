@@ -62,6 +62,67 @@ fn journal_restarts_with_all_durable_transactions() {
 }
 
 #[test]
+fn default_event_log_backend_replays_with_a_bounded_cursor() {
+    let path = temporary_path("event-backend");
+    let _cleanup = RemoveOnDrop(path.clone());
+    let events = [
+        transaction(11, 1, 0, 10),
+        transaction(12, 2, 1, 20),
+        transaction(13, 3, 2, 30),
+    ];
+
+    let mut backend = DefaultEventLogBackend::open(&path).expect("open backend");
+    EventLogBackend::append_batch(&mut backend, &events).expect("append events");
+    assert_eq!(backend.cursor(), EventCursor::new(3));
+
+    let first = backend
+        .replay(EventCursor::default(), 2)
+        .expect("replay first page");
+    assert_eq!(first.events(), &events[..2]);
+    assert_eq!(first.next_cursor(), EventCursor::new(2));
+    assert!(first.has_more());
+
+    let second = backend
+        .replay(first.next_cursor(), 2)
+        .expect("replay second page");
+    assert_eq!(second.events(), &events[2..]);
+    assert_eq!(second.next_cursor(), backend.cursor());
+    assert!(!second.has_more());
+    assert_eq!(backend.replay(backend.cursor(), 1).unwrap().events(), &[]);
+    assert!(matches!(
+        backend.replay(EventCursor::new(4), 1),
+        Err(JournalError::CursorAhead { cursor: 4, end: 3 })
+    ));
+    assert!(matches!(
+        backend.replay(EventCursor::default(), MAX_REPLAY_BATCH + 1),
+        Err(JournalError::ReplayLimitExceeded { .. })
+    ));
+}
+
+#[test]
+fn default_event_log_backend_cursor_reopens_after_flush_and_sync() {
+    let path = temporary_path("event-backend-reopen");
+    let _cleanup = RemoveOnDrop(path.clone());
+    let first = transaction(14, 1, 0, 10);
+    let second = transaction(15, 2, 1, 20);
+
+    {
+        let mut backend = FileEventLogBackend::open(&path).expect("open backend");
+        backend.append(first.clone()).expect("append first");
+        backend.flush().expect("flush backend");
+        backend.append(second.clone()).expect("append second");
+        backend.sync().expect("sync backend");
+    }
+
+    let backend = DefaultEventLogBackend::open(&path).expect("reopen backend");
+    let replay = backend
+        .replay(EventCursor::default(), MAX_REPLAY_BATCH)
+        .expect("replay after reopen");
+    assert_eq!(replay.events(), &[first, second]);
+    assert_eq!(replay.end_cursor(), EventCursor::new(2));
+}
+
+#[test]
 fn journal_rejects_duplicate_without_mutating_file_or_log() {
     let path = temporary_path("duplicate");
     let _cleanup = RemoveOnDrop(path.clone());

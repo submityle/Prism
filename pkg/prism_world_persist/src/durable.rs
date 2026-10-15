@@ -34,7 +34,101 @@ const JOURNAL_HEADER_LEN: u64 = 8;
 const RECORD_HEADER_LEN: u64 = 12;
 const RECORD_TRAILER_LEN: u64 = 4;
 const MAX_RECORD_PAYLOAD: u32 = 16 * 1024 * 1024;
+/// Maximum number of transactions returned by one replay call.
+pub const MAX_REPLAY_BATCH: usize = 4096;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A durable event-log cursor pointing at the next sequence to replay.
+///
+/// Cursors are logical, not byte offsets. They remain stable across reopen
+/// and tail recovery as long as the valid journal prefix is retained.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct EventCursor {
+    next_sequence: u64,
+}
+
+impl EventCursor {
+    /// Creates a cursor positioned before `next_sequence`.
+    pub const fn new(next_sequence: u64) -> Self {
+        Self { next_sequence }
+    }
+
+    /// Returns the next transaction sequence this cursor will replay.
+    pub const fn next_sequence(self) -> u64 {
+        self.next_sequence
+    }
+}
+
+/// A bounded replay result from an [`EventLogBackend`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplayBatch {
+    events: Vec<Transaction>,
+    next_cursor: EventCursor,
+    end_cursor: EventCursor,
+}
+
+impl ReplayBatch {
+    fn new(events: Vec<Transaction>, next_cursor: EventCursor, end_cursor: EventCursor) -> Self {
+        Self {
+            events,
+            next_cursor,
+            end_cursor,
+        }
+    }
+
+    /// Returns the replayed transactions in append order.
+    pub fn events(&self) -> &[Transaction] {
+        &self.events
+    }
+
+    /// Consumes the batch and returns its owned transactions.
+    pub fn into_events(self) -> Vec<Transaction> {
+        self.events
+    }
+
+    /// Returns the cursor immediately after the returned events.
+    pub const fn next_cursor(&self) -> EventCursor {
+        self.next_cursor
+    }
+
+    /// Returns the current end cursor observed by this replay call.
+    pub const fn end_cursor(&self) -> EventCursor {
+        self.end_cursor
+    }
+
+    /// Returns whether another replay call can return more events.
+    pub const fn has_more(&self) -> bool {
+        self.next_cursor.next_sequence < self.end_cursor.next_sequence
+    }
+}
+
+/// Provider contract for the authoritative durable event stream.
+///
+/// The default implementation is [`FileJournal`]. Implementations keep
+/// append order, use the persist [`Transaction`] as the event unit, and make
+/// replay explicitly bounded by `limit`.
+pub trait EventLogBackend {
+    /// Backend-specific failure type.
+    type Error;
+
+    /// Appends one transaction durably.
+    fn append(&mut self, transaction: Transaction) -> Result<(), Self::Error>;
+
+    /// Appends a validated batch durably.
+    fn append_batch(&mut self, transactions: &[Transaction]) -> Result<(), Self::Error>;
+
+    /// Returns the cursor at the current end of the log.
+    fn cursor(&self) -> EventCursor;
+
+    /// Replays at most `limit` events from `cursor`.
+    fn replay(&self, cursor: EventCursor, limit: usize) -> Result<ReplayBatch, Self::Error>;
+
+    /// Flushes userspace/OS buffered bytes without requiring storage sync.
+    fn flush(&mut self) -> Result<(), Self::Error>;
+
+    /// Requests storage durability for all bytes written so far.
+    fn sync(&mut self) -> Result<(), Self::Error>;
+}
 
 /// Why a journal tail was discarded while opening it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,6 +201,20 @@ pub enum JournalError {
         /// Sequence stored in the decoded transaction.
         transaction: u64,
     },
+    /// A replay cursor points after the current durable log end.
+    CursorAhead {
+        /// Sequence requested by the cursor.
+        cursor: u64,
+        /// First sequence after the current log.
+        end: u64,
+    },
+    /// A replay request exceeds the backend's fixed safety bound.
+    ReplayLimitExceeded {
+        /// Number of events requested by the caller.
+        requested: usize,
+        /// Maximum number of events returned by one replay call.
+        max: usize,
+    },
 }
 
 impl fmt::Display for JournalError {
@@ -141,6 +249,16 @@ impl fmt::Display for JournalError {
             } => write!(
                 formatter,
                 "journal record sequence {record} differs from transaction sequence {transaction}"
+            ),
+            Self::CursorAhead { cursor, end } => {
+                write!(
+                    formatter,
+                    "journal cursor {cursor} is ahead of log end {end}"
+                )
+            }
+            Self::ReplayLimitExceeded { requested, max } => write!(
+                formatter,
+                "journal replay limit {requested} exceeds maximum {max}"
             ),
         }
     }
@@ -386,6 +504,43 @@ impl FileJournal {
         self.recovery
     }
 
+    /// Returns the cursor at the current end of the validated log.
+    pub const fn cursor(&self) -> EventCursor {
+        EventCursor::new(self.log.next_sequence())
+    }
+
+    /// Replays a bounded range beginning at `cursor`.
+    ///
+    /// The cursor denotes the next sequence to return. A cursor equal to the
+    /// current end is valid and returns an empty batch. A cursor ahead of the
+    /// end is rejected so consumers cannot silently skip an unavailable
+    /// prefix. `limit` may be zero, but must not exceed
+    /// [`MAX_REPLAY_BATCH`].
+    pub fn replay(&self, cursor: EventCursor, limit: usize) -> Result<ReplayBatch, JournalError> {
+        if limit > MAX_REPLAY_BATCH {
+            return Err(JournalError::ReplayLimitExceeded {
+                requested: limit,
+                max: MAX_REPLAY_BATCH,
+            });
+        }
+        let end = self.cursor();
+        if cursor > end {
+            return Err(JournalError::CursorAhead {
+                cursor: cursor.next_sequence(),
+                end: end.next_sequence(),
+            });
+        }
+        let start =
+            usize::try_from(cursor.next_sequence()).map_err(|_| JournalError::CursorAhead {
+                cursor: cursor.next_sequence(),
+                end: end.next_sequence(),
+            })?;
+        let stop = start.saturating_add(limit).min(self.log.len());
+        let events = self.log.as_slice()[start..stop].to_vec();
+        let next_cursor = EventCursor::new(cursor.next_sequence() + events.len() as u64);
+        Ok(ReplayBatch::new(events, next_cursor, end))
+    }
+
     /// Appends one transaction, flushes it, and calls sync_all before return.
     /// Any I/O failure poisons this handle until it is dropped and reopened.
     pub fn append(&mut self, transaction: Transaction) -> Result<(), JournalError> {
@@ -413,6 +568,40 @@ impl FileJournal {
         self.writer.sync(&mut self.file)
     }
 }
+
+impl EventLogBackend for FileJournal {
+    type Error = JournalError;
+
+    fn append(&mut self, transaction: Transaction) -> Result<(), Self::Error> {
+        FileJournal::append(self, transaction)
+    }
+
+    fn append_batch(&mut self, transactions: &[Transaction]) -> Result<(), Self::Error> {
+        FileJournal::append_batch(self, transactions)
+    }
+
+    fn cursor(&self) -> EventCursor {
+        FileJournal::cursor(self)
+    }
+
+    fn replay(&self, cursor: EventCursor, limit: usize) -> Result<ReplayBatch, Self::Error> {
+        FileJournal::replay(self, cursor, limit)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        FileJournal::flush(self)
+    }
+
+    fn sync(&mut self) -> Result<(), Self::Error> {
+        FileJournal::sync(self)
+    }
+}
+
+/// The built-in durable event-log backend.
+pub type DefaultEventLogBackend = FileJournal;
+
+/// Descriptive alias for the file-backed event-log backend.
+pub type FileEventLogBackend = FileJournal;
 
 /// Stateless atomic snapshot writer and loader.
 pub struct SnapshotStore;

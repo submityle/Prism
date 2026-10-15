@@ -32,7 +32,9 @@ pub use codec::{
 pub use crdt::{CrdtError, CrdtState, LwwRegister, MergeKey};
 #[cfg(feature = "std")]
 pub use durable::{
-    FileJournal, JournalError, JournalRecovery, RecoveryReason, SnapshotError, SnapshotStore,
+    DefaultEventLogBackend, EventCursor, EventLogBackend, FileEventLogBackend, FileJournal,
+    JournalError, JournalRecovery, RecoveryReason, ReplayBatch, SnapshotError, SnapshotStore,
+    MAX_REPLAY_BATCH,
 };
 pub use hash::{checksum32, hash64};
 pub use log::{AppendOnlyLog, LogError, ObjectLogIter};
