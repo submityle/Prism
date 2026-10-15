@@ -11,7 +11,57 @@ use alloc::vec::Vec;
 
 use prism_asset::StableGuid;
 
-use crate::{ContainerReader, ManifestReadError, ManifestReader, OverlaySet, RuntimeManifest};
+use crate::{
+    Codec, ContainerReader, ManifestReadError, ManifestReader, OverlaySet, RuntimeManifest,
+};
+
+/// Runtime admission policy applied before an install is published.
+///
+/// The policy is deliberately value-based and deterministic: it does not
+/// inspect the host filesystem or perform I/O. Callers can therefore build a
+/// policy from platform capabilities once and reuse it for every package.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeInstallPolicy {
+    /// Capability bits supplied by the target runtime.
+    pub available_capabilities: u64,
+    /// Highest initial residency tier accepted by the target runtime.
+    pub max_initial_residency: u8,
+    /// Highest streaming tier accepted by the target runtime.
+    pub max_streaming_level: u8,
+    /// Codec bitset: bit `Codec as u8` enables that codec.
+    pub allowed_codecs: u8,
+}
+
+impl Default for RuntimeInstallPolicy {
+    fn default() -> Self {
+        Self {
+            available_capabilities: u64::MAX,
+            max_initial_residency: u8::MAX,
+            max_streaming_level: u8::MAX,
+            allowed_codecs: (1 << Codec::Raw as u8) | (1 << Codec::Deflate as u8),
+        }
+    }
+}
+
+impl RuntimeInstallPolicy {
+    /// Creates a policy accepting every capability and codec implemented by
+    /// this crate.
+    #[must_use]
+    pub const fn permissive() -> Self {
+        Self {
+            available_capabilities: u64::MAX,
+            max_initial_residency: u8::MAX,
+            max_streaming_level: u8::MAX,
+            allowed_codecs: (1 << Codec::Raw as u8) | (1 << Codec::Deflate as u8),
+        }
+    }
+
+    /// Returns whether a manifest codec is accepted by this policy.
+    #[must_use]
+    pub const fn allows_codec(self, codec: Codec) -> bool {
+        self.allowed_codecs & (1 << codec as u8) != 0
+    }
+}
 
 /// One validated container to add to an install transaction.
 #[derive(Clone, Debug)]
@@ -68,6 +118,13 @@ impl InstallTombstones {
 pub enum InstallError {
     /// The manifest could not be bound to the staged overlay.
     Manifest(String),
+    /// A route's persisted delivery metadata is incompatible with the target.
+    Policy {
+        /// Logical route rejected by the policy.
+        guid: StableGuid,
+        /// Human-readable policy violation.
+        reason: String,
+    },
 }
 
 impl core::fmt::Display for InstallError {
@@ -75,6 +132,12 @@ impl core::fmt::Display for InstallError {
         match self {
             Self::Manifest(error) => {
                 write!(f, "runtime package manifest validation failed: {error}")
+            }
+            Self::Policy { guid, reason } => {
+                write!(
+                    f,
+                    "runtime package route {guid:?} rejected by install policy: {reason}"
+                )
             }
         }
     }
@@ -100,12 +163,68 @@ pub fn install_runtime_package(
     mounts: impl IntoIterator<Item = InstallMount>,
     tombstones: impl IntoIterator<Item = InstallTombstones>,
 ) -> Result<(), InstallError> {
+    install_runtime_package_with_policy(
+        live,
+        manifest,
+        mounts,
+        tombstones,
+        RuntimeInstallPolicy::permissive(),
+    )
+}
+
+/// Installs a package atomically after applying a target runtime policy.
+pub fn install_runtime_package_with_policy(
+    live: &mut OverlaySet,
+    manifest: &RuntimeManifest,
+    mounts: impl IntoIterator<Item = InstallMount>,
+    tombstones: impl IntoIterator<Item = InstallTombstones>,
+    policy: RuntimeInstallPolicy,
+) -> Result<(), InstallError> {
     let mut staged = live.clone();
     for mount in mounts {
         staged.mount(mount.name, mount.priority, mount.reader);
     }
     for tombstone in tombstones {
         staged.mount_tombstones(tombstone.name, tombstone.priority, tombstone.guids);
+    }
+
+    for route in manifest.routes() {
+        let metadata = manifest
+            .metadata(route.guid)
+            .ok_or_else(|| InstallError::Manifest("route metadata is missing".into()))?;
+        if metadata.install_capabilities & !policy.available_capabilities != 0 {
+            return Err(InstallError::Policy {
+                guid: route.guid,
+                reason: format!(
+                    "required capabilities 0x{:016x} exceed available 0x{:016x}",
+                    metadata.install_capabilities, policy.available_capabilities
+                ),
+            });
+        }
+        if metadata.initial_residency > policy.max_initial_residency {
+            return Err(InstallError::Policy {
+                guid: route.guid,
+                reason: format!(
+                    "initial residency {} exceeds maximum {}",
+                    metadata.initial_residency, policy.max_initial_residency
+                ),
+            });
+        }
+        if metadata.streaming_level > policy.max_streaming_level {
+            return Err(InstallError::Policy {
+                guid: route.guid,
+                reason: format!(
+                    "streaming level {} exceeds maximum {}",
+                    metadata.streaming_level, policy.max_streaming_level
+                ),
+            });
+        }
+        if !policy.allows_codec(metadata.codec) {
+            return Err(InstallError::Policy {
+                guid: route.guid,
+                reason: format!("codec {:?} is not enabled", metadata.codec),
+            });
+        }
     }
 
     // Binding performs every route, container identity, priority and payload

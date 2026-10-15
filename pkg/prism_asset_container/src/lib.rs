@@ -28,7 +28,10 @@ pub use format::{
     ChunkInfo, Codec, ContainerError, ContainerInfo, EntryInfo, CHUNK_FORMAT_VERSION,
     FORMAT_VERSION, MAGIC, SUPPORTED_FORMAT_VERSIONS,
 };
-pub use install::{install_runtime_package, InstallError, InstallMount, InstallTombstones};
+pub use install::{
+    install_runtime_package, install_runtime_package_with_policy, InstallError, InstallMount,
+    InstallTombstones, RuntimeInstallPolicy,
+};
 pub use manifest::{
     ContainerIdentity, ManifestError, ManifestMetadata, ManifestRoute, RuntimeManifest,
     MANIFEST_MAGIC, MANIFEST_VERSION,

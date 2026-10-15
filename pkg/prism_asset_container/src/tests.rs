@@ -10,8 +10,8 @@ use crate::{
     ContainerIdentity, ContainerReader, ContainerWriter, FileRangeSource, InstallMount,
     InstallTombstones, ManifestAssetReader, ManifestError, ManifestMetadata, ManifestRangeRequest,
     ManifestReadError, ManifestRoute, MemoryRangeSource, OverlaySet, RangeBatchPolicy,
-    RangeRequest, RangeSource, RangeSourceError, RuntimeManifest, CHUNK_FORMAT_VERSION,
-    FORMAT_VERSION, MAGIC, SUPPORTED_FORMAT_VERSIONS,
+    RangeRequest, RangeSource, RangeSourceError, RuntimeInstallPolicy, RuntimeManifest,
+    CHUNK_FORMAT_VERSION, FORMAT_VERSION, MAGIC, SUPPORTED_FORMAT_VERSIONS,
 };
 
 fn guid(name: &str) -> StableGuid {
@@ -2214,6 +2214,59 @@ fn runtime_package_install_failure_keeps_previous_overlay_snapshot() {
     )
     .unwrap_err();
     assert!(matches!(error, crate::InstallError::Manifest(_)));
+    assert_eq!(overlay.read_all(existing_guid).unwrap(), b"existing");
+    assert!(!overlay.contains(package_guid));
+}
+
+#[test]
+fn runtime_package_install_policy_rejects_before_publishing_overlay() {
+    let existing_guid = guid("existing.policy");
+    let package_guid = guid("package.policy");
+    let existing_bytes = build(&[("existing.policy", b"existing")]);
+    let package_bytes = build(&[("package.policy", b"package")]);
+
+    let mut overlay = OverlaySet::new();
+    overlay.mount("base", 1, ContainerReader::new(existing_bytes).unwrap());
+
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert_with_metadata(
+            ManifestRoute {
+                guid: package_guid,
+                container_name: "package".into(),
+                priority: 5,
+                container_guid: package_guid,
+            },
+            ManifestMetadata {
+                initial_residency: 3,
+                streaming_level: 2,
+                install_capabilities: 0b101,
+                ..ManifestMetadata::default()
+            },
+        )
+        .unwrap();
+    manifest
+        .bind_container("package", identity(&package_bytes))
+        .unwrap();
+
+    let error = crate::install_runtime_package_with_policy(
+        &mut overlay,
+        &manifest,
+        [InstallMount::new(
+            "package",
+            5,
+            ContainerReader::new(package_bytes).unwrap(),
+        )],
+        std::iter::empty::<InstallTombstones>(),
+        RuntimeInstallPolicy {
+            available_capabilities: 0b001,
+            max_initial_residency: 3,
+            max_streaming_level: 2,
+            allowed_codecs: 1,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, crate::InstallError::Policy { guid, .. } if guid == package_guid));
     assert_eq!(overlay.read_all(existing_guid).unwrap(), b"existing");
     assert!(!overlay.contains(package_guid));
 }
