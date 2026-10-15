@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 use crate::upload::checked_row_range;
 use crate::{
-    Image, ImageArtifact, ImageArtifactError, ImageError, ImageUploadPlan, RuntimeImageLoadError,
-    RuntimeImageLoader, IMAGE_UPLOAD_ROW_ALIGNMENT,
+    AlphaCoveragePolicy, Image, ImageArtifact, ImageArtifactError, ImageError, ImageMipArtifact,
+    ImageMipChain, ImageUploadPlan, MipGenerationSettings, RuntimeImageLoadError,
+    RuntimeImageLoader, TextureSemantic, IMAGE_UPLOAD_ROW_ALIGNMENT,
 };
 
 #[derive(Default)]
@@ -178,6 +179,83 @@ fn canonical_artifact_decodes_into_the_runtime_image_asset() {
 }
 
 #[test]
+fn mip_artifact_roundtrips_metadata_and_encoding_is_deterministic() {
+    let rgba8 = (0..(3 * 5 * 4))
+        .map(|value| value as u8)
+        .collect::<Vec<_>>();
+    let chain = ImageMipChain::generate(
+        3,
+        5,
+        &rgba8,
+        MipGenerationSettings {
+            semantic: TextureSemantic::NormalMap,
+            alpha: AlphaCoveragePolicy::Coverage { threshold: 127 },
+            ..MipGenerationSettings::default()
+        },
+    )
+    .unwrap();
+    let artifact = ImageMipArtifact::from_chain(&chain).unwrap();
+    let first = artifact.encode().unwrap();
+    let second = artifact.encode().unwrap();
+    assert_eq!(first, second);
+
+    let decoded = ImageMipArtifact::decode(&first).unwrap();
+    assert_eq!(decoded, artifact);
+    let image = decoded.to_image().unwrap();
+    assert_eq!(image.mip_level_count(), 4);
+    assert_eq!(image.mip_extent(1), Some(Extent3d::new_2d(2, 3)));
+}
+
+#[test]
+fn mip_artifact_rejects_truncation_trailing_bytes_and_invalid_dimensions() {
+    let artifact = ImageArtifact {
+        width: 2,
+        height: 2,
+        rgba8: vec![0; 16],
+    }
+    .encode_with_mips(MipGenerationSettings::default())
+    .unwrap();
+
+    assert_eq!(
+        ImageMipArtifact::decode(&artifact[..artifact.len() - 1]),
+        Err(ImageArtifactError::Truncated)
+    );
+
+    let mut trailing = artifact.clone();
+    trailing.push(0);
+    assert_eq!(
+        ImageMipArtifact::decode(&trailing),
+        Err(ImageArtifactError::TrailingBytes)
+    );
+
+    let mut invalid_dimensions = artifact;
+    invalid_dimensions[28..32].copy_from_slice(&3u32.to_le_bytes());
+    assert_eq!(
+        ImageMipArtifact::decode(&invalid_dimensions),
+        Err(ImageArtifactError::InvalidMipChain)
+    );
+}
+
+#[test]
+fn mip_artifact_rejects_budget_overflow_before_allocating_payload() {
+    let mut bytes = ImageArtifact {
+        width: 1,
+        height: 1,
+        rgba8: vec![0; 4],
+    }
+    .encode_with_mips(MipGenerationSettings::default())
+    .unwrap();
+    // The first level payload length begins immediately after its 16-byte
+    // level header's width and height fields. u64::MAX must fail closed in
+    // checked offset arithmetic without allocating or copying payload bytes.
+    bytes[36..44].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert_eq!(
+        ImageMipArtifact::decode(&bytes),
+        Err(ImageArtifactError::BudgetExceeded)
+    );
+}
+
+#[test]
 fn upload_plan_pads_each_row_but_preserves_tight_image_bytes() {
     let image = Image::new(
         Extent3d::new_2d(2, 2),
@@ -223,6 +301,44 @@ fn upload_plan_writes_only_through_the_supplied_real_texture_id() {
     assert_eq!(destination.size, image.extent());
     assert_eq!(*layout, plan.layout());
     assert_eq!(data, plan.data());
+}
+
+#[test]
+fn upload_plan_writes_each_mip_with_its_own_extent_and_padding() {
+    let rgba8 = (0..(3 * 5 * 4))
+        .map(|value| value as u8)
+        .collect::<Vec<_>>();
+    let chain = ImageMipChain::generate(3, 5, &rgba8, MipGenerationSettings::default())
+        .expect("odd dimensions generate a complete chain");
+    let image = Image::from_mip_chain(
+        &chain,
+        TextureFormat::Rgba8Unorm,
+        SamplerDescriptor::default(),
+    )
+    .unwrap();
+    let plan = ImageUploadPlan::for_image(&image).unwrap();
+    assert_eq!(plan.mip_count(), 4);
+    assert_eq!(plan.mip(0).unwrap().extent(), Extent3d::new_2d(3, 5));
+    assert_eq!(plan.mip(1).unwrap().extent(), Extent3d::new_2d(2, 3));
+    assert_eq!(plan.mip(2).unwrap().extent(), Extent3d::new_2d(1, 2));
+    assert_eq!(plan.mip(3).unwrap().extent(), Extent3d::new_2d(1, 1));
+
+    let queue = CapturingQueue::default();
+    let texture = TextureId::from_parts(12, 7);
+    plan.write_to(&queue, texture);
+    let writes = queue.writes.lock().unwrap();
+    assert_eq!(writes.len(), 4);
+    for (level, (destination, data, layout)) in writes.iter().enumerate() {
+        assert_eq!(destination.texture, texture);
+        assert_eq!(destination.mip_level, level as u32);
+        assert_eq!(destination.size, plan.mip(level as u32).unwrap().extent());
+        assert_eq!(*layout, plan.mip(level as u32).unwrap().layout());
+        assert_eq!(data, plan.mip(level as u32).unwrap().data());
+        assert_eq!(
+            layout.bytes_per_row.unwrap() % IMAGE_UPLOAD_ROW_ALIGNMENT,
+            0
+        );
+    }
 }
 
 #[test]

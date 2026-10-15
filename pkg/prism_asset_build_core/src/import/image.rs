@@ -3,7 +3,7 @@
 use crate::job::{Processor, ProcessorError};
 use crate::recipe::ImportProcessor;
 use alloc::vec::Vec;
-use prism_image::{ImageArtifact, ImageArtifactError};
+use prism_image::{ImageArtifact, ImageArtifactError, ImageMipArtifact, MipGenerationSettings};
 use std::io::Cursor;
 
 /// Runtime artifact kind for canonical RGBA8 images.
@@ -77,6 +77,19 @@ impl CanonicalPngProcessor {
         artifact.encode().map_err(ImageImportError::Artifact)?;
         Ok(artifact)
     }
+
+    /// Imports one PNG into the complete deterministic RGBA8 mip artifact.
+    pub fn import_mip_artifact(bytes: &[u8]) -> Result<ImageMipArtifact, ImageImportError> {
+        let base = Self::import(bytes)?;
+        let chain = prism_image::ImageMipChain::generate(
+            base.width,
+            base.height,
+            &base.rgba8,
+            MipGenerationSettings::default(),
+        )
+        .map_err(|_| ImageImportError::Artifact(ImageArtifactError::InvalidMipChain))?;
+        ImageMipArtifact::from_chain(&chain).map_err(ImageImportError::Artifact)
+    }
 }
 
 impl Processor for CanonicalPngProcessor {
@@ -86,7 +99,7 @@ impl Processor for CanonicalPngProcessor {
                 "PNG importer expects exactly one source",
             ));
         };
-        Self::import(source)
+        Self::import_mip_artifact(source)
             .and_then(|artifact| artifact.encode().map_err(ImageImportError::Artifact))
             .map_err(|error| ProcessorError::new(error.to_string()))
     }
@@ -94,7 +107,7 @@ impl Processor for CanonicalPngProcessor {
 
 impl ImportProcessor for CanonicalPngProcessor {
     const IMPORTER_ID: u128 = 0x504e47;
-    const IMPORTER_VERSION: u32 = 1;
+    const IMPORTER_VERSION: u32 = 2;
 }
 
 #[cfg(test)]
@@ -123,6 +136,29 @@ mod tests {
         assert_eq!(
             ImageArtifact::decode(&artifact.encode().unwrap()).unwrap(),
             artifact
+        );
+    }
+
+    #[test]
+    fn process_emits_complete_odd_dimension_mip_chain() {
+        let source = png_bytes(
+            png::ColorType::Rgba,
+            &(0..(3 * 5 * 4))
+                .map(|value| value as u8)
+                .collect::<Vec<_>>(),
+            3,
+            5,
+        );
+        let bytes = CanonicalPngProcessor.process(&[&source]).unwrap();
+        let artifact = ImageMipArtifact::decode(&bytes).unwrap();
+        assert_eq!((artifact.width, artifact.height), (3, 5));
+        assert_eq!(
+            artifact
+                .levels
+                .iter()
+                .map(|level| (level.width, level.height))
+                .collect::<Vec<_>>(),
+            vec![(3, 5), (2, 3), (1, 2), (1, 1)]
         );
     }
 

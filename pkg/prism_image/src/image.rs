@@ -19,6 +19,7 @@ pub struct Image {
     extent: Extent3d,
     format: TextureFormat,
     data: Vec<u8>,
+    mip_levels: Vec<Vec<u8>>,
     sampler: SamplerDescriptor,
 }
 
@@ -61,9 +62,41 @@ impl Image {
         Ok(Self {
             extent,
             format,
-            data,
+            data: data.clone(),
+            mip_levels: vec![data],
             sampler,
         })
+    }
+
+    /// Creates an RGBA8 image from a validated semantic mip chain.
+    pub fn from_mip_chain(
+        chain: &crate::ImageMipChain,
+        format: TextureFormat,
+        sampler: SamplerDescriptor,
+    ) -> Result<Self, ImageError> {
+        if format != TextureFormat::Rgba8Unorm {
+            return Err(ImageError::SizeMismatch {
+                expected: 0,
+                found: format.bytes_per_texel() as usize,
+            });
+        }
+        let Some(base) = chain.level(0) else {
+            return Err(ImageError::EmptyExtent);
+        };
+        let levels = chain
+            .levels()
+            .iter()
+            .map(|level| level.rgba8().to_vec())
+            .collect::<Vec<_>>();
+        let image = Self {
+            extent: Extent3d::new_2d(base.width(), base.height()),
+            format,
+            data: base.rgba8().to_vec(),
+            mip_levels: levels,
+            sampler,
+        };
+        image.validate_mip_levels()?;
+        Ok(image)
     }
 
     /// The image's texel extents.
@@ -84,6 +117,32 @@ impl Image {
         &self.data
     }
 
+    /// Returns the tightly packed bytes for `level`, including level zero.
+    #[must_use]
+    pub fn mip_data(&self, level: u32) -> Option<&[u8]> {
+        self.mip_levels
+            .get(usize::try_from(level).ok()?)
+            .map(Vec::as_slice)
+    }
+
+    /// The number of stored mip levels.
+    #[must_use]
+    pub fn mip_level_count(&self) -> u32 {
+        self.mip_levels.len() as u32
+    }
+
+    /// The texel extent of a stored mip level.
+    #[must_use]
+    pub fn mip_extent(&self, level: u32) -> Option<Extent3d> {
+        if level >= self.mip_level_count() {
+            return None;
+        }
+        Some(
+            self.extent
+                .mip_level_size(level, prism_render_driver::TextureDimension::D2),
+        )
+    }
+
     /// The sampler the image wants to be sampled through.
     #[must_use]
     pub const fn sampler(&self) -> &SamplerDescriptor {
@@ -97,6 +156,28 @@ impl Image {
     #[must_use]
     pub const fn bytes_per_row(&self) -> u32 {
         self.extent.width * self.format.bytes_per_texel()
+    }
+
+    fn validate_mip_levels(&self) -> Result<(), ImageError> {
+        if self.mip_levels.is_empty() || self.mip_levels[0] != self.data {
+            return Err(ImageError::SizeMismatch {
+                expected: self.data.len(),
+                found: self.mip_levels.first().map_or(0, Vec::len),
+            });
+        }
+        for (index, level) in self.mip_levels.iter().enumerate() {
+            let mip = self
+                .extent
+                .mip_level_size(index as u32, prism_render_driver::TextureDimension::D2);
+            let expected = bytes_for(mip, self.format);
+            if level.len() != expected {
+                return Err(ImageError::SizeMismatch {
+                    expected,
+                    found: level.len(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 

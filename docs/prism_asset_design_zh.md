@@ -372,7 +372,7 @@ AAA 资产系统的瓶颈常不在 CPU 而在**内存布局与分配抖动**。�
 
 ## 9. 加载管线：AssetServer / AssetLoader / 事件驱动装配
 
-> **实现契约（必须与目标规格分开阅读）**：当前 `AssetLoader::load(&[u8], &mut LoadContext)` 是同步、纯 CPU 解码函数；`AssetServer` 的公开同步路径仍在一次 mutex 临界区内完成读取、解码和依赖登记。`LoadScheduler` 已增加有限的锁外 `read -> decode -> dependency wait -> commit` 装配切片，并把阻塞 source read 与 CPU decode 放入独立池；它还提供一个受限异步 reload 切片：已 resident 的根资产在独立 reload flight 中读取/解码，root 与 labeled outputs 的依赖必须已 resident/`Loaded`，按路径 epoch 只允许最新结果提交，source overlay 变化、解码失败和未 resident 依赖均不会污染旧 revision。重复 label、类型变化和 cycle 在候选 graph 阶段拒绝，移除 label 转为失败并从 catalog 解除；该切片仍不自动加载新依赖、不支持 sibling 新 label 依赖闭包、不是完整 EDL，也不包含 range-backed assembly、可抢占取消或 GPU 上传闭环。优先级不能抢占已经开始的同步 loader，取消也只取消等待者而不强杀正在执行的 loader。下文 §9.3–§9.4 的依赖增量就绪、可抢占阶段和真正 EDL 仍是待实现目标，不能作为当前性能或并发保证。
+> **实现契约（必须与目标规格分开阅读）**：当前 `AssetLoader::load(&[u8], &mut LoadContext)` 是同步、纯 CPU 解码函数；`AssetServer` 的公开同步路径仍在一次 mutex 临界区内完成读取、解码和依赖登记。`LoadScheduler` 已增加有限的锁外 `read -> decode -> dependency wait -> commit` 装配切片，并把阻塞 source read 与 CPU decode 放入独立池；它还提供一个受限异步 reload 切片：已 resident 的根资产在独立 reload flight 中读取/解码，候选阶段会在锁外递归读取并解码 root、普通依赖、label 对应源和 label 声明的依赖，统一以 revision-local candidate 原子提交；按路径 epoch 只允许最新结果提交，source overlay 变化、解码失败、类型不匹配、cycle 和重复 label 均不会污染旧 revision。该切片仍不是完整 EDL，也不包含 range-backed assembly、可抢占取消或 GPU 上传闭环；候选闭包受固定数量上限约束，优先级不能抢占已经开始的同步 loader，取消也只取消等待者而不强杀正在执行的 loader。下文 §9.3–§9.4 的依赖增量就绪、可抢占阶段和真正 EDL 仍是待实现目标，不能作为当前性能或并发保证。
 
 ### 9.1 AssetLoader 协议
 
@@ -693,7 +693,7 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 
 `feature = "hot_reload"`，编辑器/迭代核心。
 
-> **当前实现边界**：已有 watcher 事件/去抖模型、`Arc<AssetServer>::watch` 托管后台消费入口和由调用方驱动的批次应用入口；锁外异步 reload 已有限支持 resident 根资产的 labeled revision staging，但 root/labeled dependencies 必须已 resident/`Loaded`，且重复 label、类型变化、cycle、非 resident 新依赖和更大规模交错验证仍受边界约束。同步候选 staging 的 promotion/label 生命周期回归已覆盖。Unix `FsSource` 已使用目录 fd 相对打开与 `O_NOFOLLOW` 消除 metadata→open 的 TOCTOU 窗口；Windows reparse-point 防护及非 Unix 等价安全打开语义仍待实现。
+> **当前实现边界**：已有 watcher 事件/去抖模型、`Arc<AssetServer>::watch` 托管后台消费入口和由调用方驱动的批次应用入口；锁外异步 reload 已有限支持 resident 根资产的 revision-local staging，并可递归纳入新普通依赖、label 对应源及 label 声明的依赖，所有候选在一次 commit 中发布。重复 label、类型变化、cycle、source overlay 变化、读取/解码失败、旧 epoch 和超出候选上限均拒绝发布并保留旧 revision；更大规模交错验证仍受边界约束。同步候选 staging 的 promotion/label 生命周期回归已覆盖。Unix `FsSource` 已使用目录 fd 相对打开与 `O_NOFOLLOW` 消除 metadata→open 的 TOCTOU 窗口；Windows reparse-point 防护及非 Unix 等价安全打开语义仍待实现。
 
 - **变更侦测**：`AssetSource::watch` 接平台 FS 事件（inotify/FSEvents/ReadDirectoryChangesW，经 `prism_platform` 隔离），去抖后产出「路径 X 变更」。
 - **失效传播**：路径 → `StableGuid` → `AssetIndex`，经 §8.1 依赖图**反向遍历** dependents，把该资产及其所有传递依赖者标 `stale`。例：`tex.png` 改 → 用它的 `material` stale → 用该材质的 `scene` 的受影响部分 stale。
@@ -955,7 +955,7 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 
 ## 22. 诚实边界与风险
 
-- **现状**：M0/M1 核与同步 AssetServer/VFS 已落地并有单测；构建核心有 CAS/ArtifactKey/Revision、支持 ready-wave 并行 DDC/CAS 的 BuildExecutor、本地 DDC 描述符索引和独立质量门禁，并有同进程双跑确定性门禁；容器 v1 有 Runtime Manifest 路由读取、`AssetReader` 适配、overlay、确定性有界 range batching，且 ChunkPlanner 已接入 v2 raw 物理布局；有界异步调度 facade 已覆盖容量、去重、取消和通知竞态，AssetServer 已提供 watcher 批次应用入口和托管后台消费入口，streaming 另有真实锁外异步 range executor。M2.1 已交付有限范围的锁外完整 `read -> decode -> dependency wait -> commit`：不同路径的 source read 可并行，I/O 与 CPU 使用独立池，父资产依赖成功后才提交，依赖失败/环会终态失败且不发布父 revision；另有 resident 根资产的有限 async reload/epoch 与已 resident labeled outputs staging，但不支持自动加载新依赖、sibling 新 label 依赖闭包、range-backed assembly、真正可抢占取消或完整 EDL。M3 的自动 watcher 消费切片已落地；旧 revision labeled 生命周期、provisional rollback 和 foreign-label promotion rollback 已有回归，完整异步 labeled 生命周期的交错负载和规模化验证仍未完成；M4–M6（流送/GPU 完整解压、BakeService、ECS/渲染/编辑器集成和发行生产链）仍未完成。本文是实施规格而非对未交付能力的宣称。
+- **现状**：M0/M1 核与同步 AssetServer/VFS 已落地并有单测；构建核心有 CAS/ArtifactKey/Revision、支持 ready-wave 并行 DDC/CAS 的 BuildExecutor、本地 DDC 描述符索引和独立质量门禁，并有同进程双跑确定性门禁；容器 v1 有 Runtime Manifest 路由读取、`AssetReader` 适配、overlay、确定性有界 range batching，且 ChunkPlanner 已接入 v2 raw 物理布局；有界异步调度 facade 已覆盖容量、去重、取消和通知竞态，AssetServer 已提供 watcher 批次应用入口和托管后台消费入口，streaming 另有真实锁外异步 range executor。M2.1 已交付有限范围的锁外完整 `read -> decode -> dependency wait -> commit`：不同路径的 source read 可并行，I/O 与 CPU 使用独立池，父资产依赖成功后才提交，依赖失败/环会终态失败且不发布父 revision；另有 resident 根资产的有限 async reload/epoch 与 revision-local 依赖闭包 staging，允许候选递归纳入新普通依赖、label 对应源和 label 声明的依赖，并在单次 commit 中原子发布，但仍不包含 range-backed assembly、真正可抢占取消或完整 EDL。M3 的自动 watcher 消费切片已落地；旧 revision labeled 生命周期、provisional rollback 和 foreign-label promotion rollback 已有回归，完整异步 labeled 生命周期的交错负载和规模化验证仍未完成；M4–M6（流送/GPU 完整解压、BakeService、ECS/渲染/编辑器集成和发行生产链）仍未完成。本文是实施规格而非对未交付能力的宣称。
 - **高风险项**：
   1. **StableGuid 冻结（M1/M5）**：派生规则一旦发行即不可变，变则旧存档/容器目录失效。须早定早冻、哈希算法与规范化规则定死并测「跨构建一致」。
   2. **异步装配正确性（M2）**：EDL 作业图 + 依赖增量就绪的竞态（并发 load 去重、依赖边并发更新、失败半装配回滚）是最易出错处，须压测并发加载 + 乱序完成。

@@ -6,12 +6,11 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    ChunkInput, ChunkPlanner, ChunkPolicy, Codec, ContainerError, ContainerIdentity,
-    install_runtime_package, ContainerReader, ContainerWriter, FileRangeSource, InstallMount,
-    InstallTombstones, ManifestAssetReader, ManifestError,
-    ManifestMetadata, ManifestRangeRequest, ManifestReadError, ManifestRoute, MemoryRangeSource,
-    OverlaySet, RangeBatchPolicy, RangeRequest, RangeSource, RangeSourceError, RuntimeManifest,
-    FORMAT_VERSION, MAGIC,
+    install_runtime_package, ChunkInput, ChunkPlanner, ChunkPolicy, Codec, ContainerError,
+    ContainerIdentity, ContainerReader, ContainerWriter, FileRangeSource, InstallMount,
+    InstallTombstones, ManifestAssetReader, ManifestError, ManifestMetadata, ManifestRangeRequest,
+    ManifestReadError, ManifestRoute, MemoryRangeSource, OverlaySet, RangeBatchPolicy,
+    RangeRequest, RangeSource, RangeSourceError, RuntimeManifest, FORMAT_VERSION, MAGIC,
 };
 
 fn guid(name: &str) -> StableGuid {

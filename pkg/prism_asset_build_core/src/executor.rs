@@ -5,6 +5,7 @@ use crate::ddc::{DdcError, DerivedDataCache};
 use crate::graph::{BuildError, BuildGraph};
 use crate::hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
 use crate::job::JobId;
+use crate::resources::{BuildResources, ResourceError};
 use crate::transaction::{PublishError, PublishedManifest, RevisionStore};
 use crate::types::{ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, ContentHash};
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,6 +76,8 @@ pub struct BuildExecution {
 /// Failure during deterministic execution or publication.
 #[derive(Debug)]
 pub enum BuildExecutionError {
+    /// Admission failed before any processor ran.
+    Resources(ResourceError),
     /// Graph validation or processor failure.
     Graph(BuildError),
     /// Artifact key derivation rejected an oversized input.
@@ -102,6 +105,7 @@ pub enum BuildExecutionError {
 impl fmt::Display for BuildExecutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Resources(error) => write!(f, "build resource admission failed: {error}"),
             Self::Graph(error) => write!(f, "build graph failed: {error}"),
             Self::Hash(error) => write!(f, "artifact key derivation failed: {error}"),
             Self::Ddc(error) => write!(f, "DDC failed: {error}"),
@@ -168,7 +172,16 @@ impl BuildExecutor {
         ddc: &mut DerivedDataCache,
         revision: BuildRevision,
     ) -> Result<BuildExecution, BuildExecutionError> {
-        self.execute_with_limit(graph, specs, store, ddc, revision, 1, false)
+        self.execute_with_limit(
+            graph,
+            specs,
+            store,
+            ddc,
+            revision,
+            1,
+            false,
+            BuildResources::UNLIMITED,
+        )
     }
 
     /// Execute independent jobs concurrently, bounded by the host's available
@@ -200,7 +213,16 @@ impl BuildExecutor {
         revision: BuildRevision,
         max_concurrency: usize,
     ) -> Result<BuildExecution, BuildExecutionError> {
-        self.execute_with_limit(graph, specs, store, ddc, revision, max_concurrency, false)
+        self.execute_with_limit(
+            graph,
+            specs,
+            store,
+            ddc,
+            revision,
+            max_concurrency,
+            false,
+            BuildResources::UNLIMITED,
+        )
     }
 
     /// Bypass every DDC hit and execute each job twice with identical ordered
@@ -221,7 +243,45 @@ impl BuildExecutor {
         revision: BuildRevision,
         max_concurrency: usize,
     ) -> Result<BuildExecution, BuildExecutionError> {
-        self.execute_with_limit(graph, specs, store, ddc, revision, max_concurrency, true)
+        self.execute_with_limit(
+            graph,
+            specs,
+            store,
+            ddc,
+            revision,
+            max_concurrency,
+            true,
+            BuildResources::UNLIMITED,
+        )
+    }
+
+    /// Bound simultaneous declared demand as well as worker count. All job
+    /// requests are validated before execution, including warm-cache jobs.
+    /// Ready jobs are admitted by ascending ID, skipping jobs which do not
+    /// fit the remaining wave. Every finite graph makes forward progress.
+    /// Working-set estimates exclude retained dependency/output bytes; this
+    /// is admission control, not an allocator-enforced process memory limit.
+    pub fn execute_with_resources(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+        max_concurrency: usize,
+        budget: BuildResources,
+        verify_determinism: bool,
+    ) -> Result<BuildExecution, BuildExecutionError> {
+        self.execute_with_limit(
+            graph,
+            specs,
+            store,
+            ddc,
+            revision,
+            max_concurrency,
+            verify_determinism,
+            budget,
+        )
     }
 
     fn execute_with_limit(
@@ -233,12 +293,44 @@ impl BuildExecutor {
         revision: BuildRevision,
         max_concurrency: usize,
         verify_determinism: bool,
+        budget: BuildResources,
     ) -> Result<BuildExecution, BuildExecutionError> {
         if max_concurrency == 0 {
             return Err(BuildExecutionError::Graph(BuildError::InvalidConcurrency));
         }
         let order = graph.execution_order()?;
         validate_specs(&order, specs)?;
+        if budget.cpu_threads == 0 {
+            return Err(BuildExecutionError::Resources(ResourceError::ZeroCpuBudget));
+        }
+        let mut remaining_dependencies = BTreeMap::new();
+        let mut dependents: BTreeMap<JobId, Vec<JobId>> = BTreeMap::new();
+        let mut ready = BTreeSet::new();
+        for &id in &order {
+            let job = graph.job(id).expect("validated job exists");
+            let request = job.resources();
+            if request.cpu_threads == 0 {
+                return Err(BuildExecutionError::Resources(
+                    ResourceError::ZeroCpuRequest(id),
+                ));
+            }
+            if !request.fits(budget) {
+                return Err(BuildExecutionError::Resources(
+                    ResourceError::ExceedsBudget {
+                        job: id,
+                        requested: request,
+                        budget,
+                    },
+                ));
+            }
+            remaining_dependencies.insert(id, job.dependencies().len());
+            if job.dependencies().is_empty() {
+                ready.insert(id);
+            }
+            for &dependency in job.dependencies() {
+                dependents.entry(dependency).or_default().push(id);
+            }
+        }
 
         let mut outputs = BTreeMap::<JobId, Vec<u8>>::new();
         let mut descriptors = BTreeMap::<JobId, ArtifactDescriptor>::new();
@@ -247,20 +339,19 @@ impl BuildExecutor {
 
         let mut completed = BTreeSet::new();
         while completed.len() < order.len() {
-            let mut ready: Vec<_> = order
+            let mut available = budget;
+            let wave: Vec<_> = ready
                 .iter()
                 .copied()
                 .filter(|id| {
-                    !completed.contains(id)
-                        && graph.job(*id).is_some_and(|job| {
-                            job.dependencies()
-                                .iter()
-                                .all(|dependency| completed.contains(dependency))
-                        })
+                    graph
+                        .job(*id)
+                        .expect("ready job exists")
+                        .resources()
+                        .reserve(&mut available)
                 })
+                .take(max_concurrency)
                 .collect();
-            ready.sort_unstable();
-            let wave: Vec<_> = ready.into_iter().take(max_concurrency).collect();
             if wave.is_empty() {
                 // `execution_order` has already validated the graph; this is
                 // defensive against a future scheduler regression.
@@ -377,16 +468,28 @@ impl BuildExecutor {
                 descriptors.insert(id, prepared.descriptor);
                 outputs.insert(id, prepared.output);
                 completed.insert(id);
+                ready.remove(&id);
+                if let Some(children) = dependents.get(&id) {
+                    for child in children {
+                        let pending = remaining_dependencies
+                            .get_mut(child)
+                            .expect("known dependent");
+                        *pending -= 1;
+                        if *pending == 0 {
+                            ready.insert(*child);
+                        }
+                    }
+                }
             }
         }
 
         let expected_current = store.current_revision()?;
         let mut transaction = store.begin(revision, expected_current);
-        for id in graph.execution_order()? {
+        for id in order {
             transaction.stage(
                 specs[&id].asset,
                 descriptors[&id].clone(),
-                outputs[&id].clone(),
+                outputs.remove(&id).expect("completed output exists"),
             )?;
         }
         let published = transaction.commit()?;
@@ -718,8 +821,8 @@ mod tests {
         graph.add_job(source.build_job(source_job)).unwrap();
         let recipe = crate::ImportRecipe {
             importer_id: crate::import::CanonicalPngProcessor::IMPORTER_ID,
-            importer_version: 1,
-            canonical_settings: b"rgba8".to_vec(),
+            importer_version: 2,
+            canonical_settings: b"rgba8+mips:sRGB,preserve,max=32,budget=268435456".to_vec(),
             profile_hash: [1; 32],
             toolchain_fingerprint: b"png-0.18".to_vec(),
             environment_fingerprint: b"portable".to_vec(),
@@ -731,7 +834,7 @@ mod tests {
                 source_job,
                 crate::import::CanonicalPngProcessor,
                 crate::import::IMAGE_ARTIFACT_KIND,
-                crate::import::IMAGE_ARTIFACT_SCHEMA,
+                crate::import::IMAGE_MIP_ARTIFACT_SCHEMA,
                 4,
             )
             .unwrap();
@@ -750,9 +853,10 @@ mod tests {
             .cas()
             .read(execution.published.manifest.entries[&AssetId(11)].content_hash)
             .unwrap();
-        let image = crate::import::ImageArtifact::decode(&bytes).unwrap();
+        let image = crate::import::ImageMipArtifact::decode(&bytes).unwrap();
         assert_eq!((image.width, image.height), (1, 1));
-        assert_eq!(image.rgba8, vec![9, 8, 7, 255]);
+        assert_eq!(image.levels.len(), 1);
+        assert_eq!(image.levels[0].rgba8, vec![9, 8, 7, 255]);
         assert_eq!(
             execution.artifact_keys[&import_job],
             recipe
@@ -761,7 +865,7 @@ mod tests {
                     &source,
                     &[],
                     crate::import::IMAGE_ARTIFACT_KIND,
-                    crate::import::IMAGE_ARTIFACT_SCHEMA,
+                    crate::import::IMAGE_MIP_ARTIFACT_SCHEMA,
                     4,
                 )
                 .unwrap()

@@ -20,13 +20,23 @@ mod artifact;
 mod error;
 mod image;
 mod runtime_loader;
+mod texture;
 mod upload;
 
 #[cfg(test)]
 mod tests;
 
-pub use artifact::{ImageArtifact, ImageArtifactError, IMAGE_ARTIFACT_SCHEMA};
+pub use artifact::{
+    ImageArtifact, ImageArtifactError, ImageArtifactMipLevel, ImageMipArtifact,
+    IMAGE_ARTIFACT_SCHEMA, IMAGE_MIP_ARTIFACT_SCHEMA,
+};
 pub use error::ImageError;
 pub use image::Image;
 pub use runtime_loader::{RuntimeImageLoadError, RuntimeImageLoader};
-pub use upload::{ImageUploadPlan, ImageUploadPlanError, IMAGE_UPLOAD_ROW_ALIGNMENT};
+pub use texture::{
+    AlphaCoveragePolicy, ImageMipChain, ImageMipLevel, MipChainError, MipGenerationSettings,
+    TextureSemantic,
+};
+pub use upload::{
+    ImageMipUpload, ImageUploadPlan, ImageUploadPlanError, IMAGE_UPLOAD_ROW_ALIGNMENT,
+};

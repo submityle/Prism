@@ -25,12 +25,16 @@ pub mod job;
 pub mod package;
 /// Deterministic diff and byte-accounting plans between build revisions.
 pub mod patch;
+/// Deterministic, schema-checked build profile composition and projections.
+pub mod profile;
 /// Immutable binding between a build revision and its runtime package outputs.
 pub mod publication;
 /// Explicit importer/cook recipe identity.
 pub mod recipe;
 /// Final release integrity and anti-rollback gate.
 pub mod release;
+/// Declared CPU, memory, I/O and device admission budgets.
+pub mod resources;
 /// Deterministic incremental runtime package generation and patch binding.
 pub mod runtime_patch;
 /// Immutable source snapshots and source identity.
@@ -63,6 +67,10 @@ pub use package::{
     AssetPackageMapping, PackageError, PackageOptions, PackageRequest, RuntimePackage,
 };
 pub use patch::{plan_patch, PatchChange, PatchEntry, PatchPlan, PatchPlanError};
+pub use profile::{
+    BuildProfile, CapabilityCandidate, ProfileError, ProfileField, ProfileFieldType, ProfileHash,
+    ProfileLayer, ProfileMergePolicy, ProfileOverridePolicy, ProfileValue,
+};
 pub use publication::{PublicationDescriptor, PublishedContainer};
 pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError};
 pub use release::{
@@ -70,6 +78,7 @@ pub use release::{
     ReleaseSignatureError, ReleaseSigner, ReleaseVerification, ReleaseVerifier,
     SignedReleaseDescriptor,
 };
+pub use resources::{BuildResources, ResourceError};
 pub use runtime_patch::{
     package_runtime_patch, package_runtime_patch_with_options, RuntimePatchError,
     RuntimePatchPackage, RuntimePatchRequest,

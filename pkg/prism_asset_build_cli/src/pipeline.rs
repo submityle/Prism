@@ -3,7 +3,7 @@ use crate::error::CommandError;
 use crate::mapping;
 use prism_asset::StableGuid;
 use prism_asset_build_core::import::{
-    CanonicalPngProcessor, ImageArtifact, IMAGE_ARTIFACT_KIND, IMAGE_ARTIFACT_SCHEMA,
+    CanonicalPngProcessor, ImageMipArtifact, IMAGE_ARTIFACT_KIND, IMAGE_MIP_ARTIFACT_SCHEMA,
 };
 use prism_asset_build_core::{
     ArtifactQualityGate, AssetId, BuildExecutor, BuildGraph, BuildRevision, ContentHash,
@@ -50,7 +50,7 @@ pub fn publish(
             source_job,
             CanonicalPngProcessor,
             IMAGE_ARTIFACT_KIND,
-            IMAGE_ARTIFACT_SCHEMA,
+            IMAGE_MIP_ARTIFACT_SCHEMA,
             4,
         )
         .map_err(|error| CommandError::InvalidInput(format!("import recipe rejected: {error}")))?;
@@ -99,7 +99,7 @@ pub fn publish(
         .entries
         .get(&AssetId(asset_id))
         .ok_or_else(|| CommandError::InvalidInput("published image artifact is missing".into()))?;
-    let image = ImageArtifact::decode(&store.cas().read(image_descriptor.content_hash)?)?;
+    let image = ImageMipArtifact::decode(&store.cas().read(image_descriptor.content_hash)?)?;
     println!("revision={}", execution.published.manifest.revision.0);
     println!("source_artifact_key={}", source_key.to_hex());
     println!("image_artifact_key={}", image_key.to_hex());
@@ -108,6 +108,7 @@ pub fn publish(
         image_descriptor.content_hash.to_hex()
     );
     println!("image_dimensions={}x{}", image.width, image.height);
+    println!("image_mip_levels={}", image.levels.len());
     println!("cache_hits={}", execution.cache_hits.len());
     if verify_determinism {
         println!(
@@ -544,8 +545,8 @@ fn snapshot(path: &Path, logical_path: &str) -> Result<SourceSnapshot, CommandEr
 fn recipe() -> ImportRecipe {
     ImportRecipe {
         importer_id: 0x504e47,
-        importer_version: 1,
-        canonical_settings: b"rgba8".to_vec(),
+        importer_version: 2,
+        canonical_settings: b"rgba8+mips:sRGB,preserve,max=32,budget=268435456".to_vec(),
         profile_hash: [1; 32],
         toolchain_fingerprint: b"prism-png-0.18".to_vec(),
         environment_fingerprint: b"portable".to_vec(),
@@ -567,7 +568,7 @@ fn artifact_keys(
         .artifact_spec(
             AssetId(asset_id),
             IMAGE_ARTIFACT_KIND,
-            IMAGE_ARTIFACT_SCHEMA,
+            IMAGE_MIP_ARTIFACT_SCHEMA,
             4,
         )
         .artifact_key(1, &[source_key])
@@ -644,9 +645,9 @@ mod tests {
         let manifest = store.manifest(BuildRevision(1)).unwrap();
         let descriptor = &manifest.entries[&AssetId(7)];
         let image =
-            ImageArtifact::decode(&store.cas().read(descriptor.content_hash).unwrap()).unwrap();
+            ImageMipArtifact::decode(&store.cas().read(descriptor.content_hash).unwrap()).unwrap();
         assert_eq!((image.width, image.height), (1, 1));
-        assert_eq!(image.rgba8, vec![1, 2, 3, 255]);
+        assert_eq!(image.levels[0].rgba8, vec![1, 2, 3, 255]);
         fs::remove_dir_all(root).unwrap();
     }
 

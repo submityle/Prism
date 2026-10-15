@@ -70,13 +70,23 @@ impl AssetLoader for SceneLoader {
                 ctx.add_labeled_asset("keep", Label(32));
             }
             4 => {
-                // The dependency is intentionally not resident. The async
-                // path must reject before publishing any decoded output.
+                // The dependency is missing. The async path must reject
+                // before publishing any decoded output.
                 ctx.add_typed_dependency(
                     AssetPath::parse("missing.async-leaf"),
                     AssetTypeId::of::<Leaf>(),
                 );
                 ctx.add_labeled_asset("keep", Label(40));
+            }
+            5 => {
+                ctx.add_labeled_asset_with_deps(
+                    "new-dependent",
+                    Label(50),
+                    vec![DepRequest::typed(
+                        AssetPath::parse("new.async-leaf"),
+                        AssetTypeId::of::<Leaf>(),
+                    )],
+                );
             }
             _ => return Err(LoadError::Malformed("unknown revision".into())),
         }
@@ -102,6 +112,7 @@ fn mount_revision(server: &AssetServer, revision: u8) {
     let mut source = MemSource::new();
     source.insert("scene.async-revision", [revision]);
     source.insert("resident.async-leaf", [0]);
+    source.insert("new.async-leaf", [0]);
     server.mount("mem", Arc::new(source), 0);
 }
 
@@ -218,7 +229,7 @@ fn unresident_async_dependency_rejects_without_publishing_labels() {
     let result = async_reload(&server);
     assert!(matches!(
         result,
-        Err(LoadFailure::AssemblyFailed(error)) if error.contains("dependency is not resident")
+        Err(LoadFailure::AssemblyFailed(error)) if error.contains("asset not found")
     ));
     assert_eq!(server.with_asset(source.id(), |value| value.0), Some(1));
     assert_eq!(server.with_asset(keep.id(), |value| value.0), Some(10));
@@ -227,4 +238,24 @@ fn unresident_async_dependency_rejects_without_publishing_labels() {
     assert_eq!(server.load_state(keep.untyped_id()), LoadState::Loaded);
     assert_eq!(server.load_state(gone.untyped_id()), LoadState::Loaded);
     assert_eq!(server.total_assets(), assets_before);
+}
+
+#[test]
+fn async_reload_commits_a_new_labeled_dependency_closure() {
+    let server = server(1);
+    let source = server.load::<Scene>("scene.async-revision");
+    let keep = server.load::<Label>("scene.async-revision#keep");
+
+    mount_revision(&server, 5);
+    let reloaded = async_reload(&server).expect("new labeled dependency should commit");
+    assert_eq!(reloaded.id(), source.untyped_id());
+    assert_eq!(server.with_asset(source.id(), |value| value.0), Some(5));
+    assert_eq!(server.with_asset(keep.id(), |value| value.0), None);
+    let label = server.load::<Label>("scene.async-revision#new-dependent");
+    assert_eq!(server.with_asset(label.id(), |value| value.0), Some(50));
+    let leaf = server.load::<Leaf>("new.async-leaf");
+    assert!(server.with_asset(leaf.id(), |_| ()).is_some());
+    assert!(server.is_loaded(source.untyped_id()));
+    assert!(server.is_loaded(label.untyped_id()));
+    assert!(server.is_loaded(leaf.untyped_id()));
 }

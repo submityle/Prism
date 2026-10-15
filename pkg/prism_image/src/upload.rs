@@ -47,7 +47,47 @@ impl core::fmt::Display for ImageUploadPlanError {
 
 impl std::error::Error for ImageUploadPlanError {}
 
-/// A validated, renderer-agnostic staging layout for one image upload.
+/// One validated, renderer-agnostic staging layout for a single mip upload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageMipUpload {
+    extent: Extent3d,
+    layout: ImageDataLayout,
+    data: Vec<u8>,
+}
+
+impl ImageMipUpload {
+    /// The destination extent for this mip level.
+    #[must_use]
+    pub const fn extent(&self) -> Extent3d {
+        self.extent
+    }
+
+    /// The exact RHI layout for this mip's staging bytes.
+    #[must_use]
+    pub fn layout(&self) -> ImageDataLayout {
+        self.layout
+    }
+
+    /// The padded staging bytes for this mip.
+    #[must_use]
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// The padded staging allocation size for this mip.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Whether this mip has no staging bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+/// A validated, renderer-agnostic staging layout for every mip upload.
 ///
 /// The plan owns padded bytes. Its `data` length is exactly
 /// `layout.bytes_per_row * layout.rows_per_image * extent.depth_or_array_layers`;
@@ -57,16 +97,38 @@ impl std::error::Error for ImageUploadPlanError {}
 pub struct ImageUploadPlan {
     extent: Extent3d,
     format: TextureFormat,
-    layout: ImageDataLayout,
-    data: Vec<u8>,
+    levels: Vec<ImageMipUpload>,
 }
 
 impl ImageUploadPlan {
     /// Builds a staging plan from an already validated image.
     pub fn for_image(image: &Image) -> Result<Self, ImageUploadPlanError> {
         let extent = image.extent();
+        let mut levels = Vec::with_capacity(image.mip_level_count() as usize);
+        for level in 0..image.mip_level_count() {
+            let level_extent = image
+                .mip_extent(level)
+                .ok_or(ImageUploadPlanError::StagingSizeOverflow)?;
+            let source = image
+                .mip_data(level)
+                .ok_or(ImageUploadPlanError::StagingSizeOverflow)?;
+            levels.push(Self::build_level(level_extent, image.format(), source)?);
+        }
+
+        Ok(Self {
+            extent,
+            format: image.format(),
+            levels,
+        })
+    }
+
+    fn build_level(
+        extent: Extent3d,
+        format: TextureFormat,
+        source: &[u8],
+    ) -> Result<ImageMipUpload, ImageUploadPlanError> {
         let tight_row = u64::from(extent.width)
-            .checked_mul(u64::from(image.format().bytes_per_texel()))
+            .checked_mul(u64::from(format.bytes_per_texel()))
             .ok_or(ImageUploadPlanError::RowPitchOverflow)?;
         let aligned_row = tight_row
             .checked_add(u64::from(IMAGE_UPLOAD_ROW_ALIGNMENT - 1))
@@ -75,7 +137,6 @@ impl ImageUploadPlan {
             .ok_or(ImageUploadPlanError::RowPitchOverflow)?;
         let bytes_per_row =
             u32::try_from(aligned_row).map_err(|_| ImageUploadPlanError::RowPitchOverflow)?;
-
         let row_count = u64::from(extent.height)
             .checked_mul(u64::from(extent.depth_or_array_layers))
             .ok_or(ImageUploadPlanError::StagingSizeOverflow)?;
@@ -83,7 +144,6 @@ impl ImageUploadPlan {
             .checked_mul(row_count)
             .and_then(|size| usize::try_from(size).ok())
             .ok_or(ImageUploadPlanError::StagingSizeOverflow)?;
-
         let tight_row =
             usize::try_from(tight_row).map_err(|_| ImageUploadPlanError::StagingSizeOverflow)?;
         let padded_row =
@@ -99,16 +159,14 @@ impl ImageUploadPlan {
                     .checked_mul(height)
                     .and_then(|base| base.checked_add(row))
                     .ok_or(ImageUploadPlanError::StagingSizeOverflow)?;
-                let source =
-                    checked_row_range(row_index, tight_row, tight_row, image.data().len())?;
+                let source_range =
+                    checked_row_range(row_index, tight_row, tight_row, source.len())?;
                 let target = checked_row_range(row_index, padded_row, tight_row, data.len())?;
-                data[target].copy_from_slice(&image.data()[source]);
+                data[target].copy_from_slice(&source[source_range]);
             }
         }
-
-        Ok(Self {
+        Ok(ImageMipUpload {
             extent,
-            format: image.format(),
             layout: ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
@@ -132,26 +190,38 @@ impl ImageUploadPlan {
 
     /// The exact RHI layout for [`Self::data`].
     #[must_use]
-    pub const fn layout(&self) -> ImageDataLayout {
-        self.layout
+    pub fn layout(&self) -> ImageDataLayout {
+        self.levels[0].layout
     }
 
     /// The padded staging bytes, including row padding.
     #[must_use]
     pub fn data(&self) -> &[u8] {
-        &self.data
+        self.levels[0].data()
     }
 
     /// The number of bytes allocated in the staging payload.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.data.len()
+        self.levels[0].len()
     }
 
     /// Whether the staging payload is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.levels[0].is_empty()
+    }
+
+    /// The number of mip levels represented by this plan.
+    #[must_use]
+    pub fn mip_count(&self) -> u32 {
+        self.levels.len() as u32
+    }
+
+    /// Returns the staging layout for one mip level.
+    #[must_use]
+    pub fn mip(&self, level: u32) -> Option<&ImageMipUpload> {
+        self.levels.get(usize::try_from(level).ok()?)
     }
 
     /// Uploads this plan to a caller-owned real texture through a real queue.
@@ -161,16 +231,18 @@ impl ImageUploadPlan {
     /// or fake that GPU object because resource ownership belongs to the render
     /// app/device boundary.
     pub fn write_to(&self, queue: &dyn RenderQueue, texture: TextureId) {
-        queue.write_texture(
-            TextureWrite {
-                texture,
-                mip_level: 0,
-                origin: [0, 0, 0],
-                size: self.extent,
-            },
-            &self.data,
-            self.layout,
-        );
+        for (mip_level, level) in self.levels.iter().enumerate() {
+            queue.write_texture(
+                TextureWrite {
+                    texture,
+                    mip_level: mip_level as u32,
+                    origin: [0, 0, 0],
+                    size: level.extent,
+                },
+                &level.data,
+                level.layout,
+            );
+        }
     }
 }
 

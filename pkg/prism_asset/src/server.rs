@@ -500,7 +500,9 @@ impl AssetServer {
                     handles.insert(asset.path.clone(), existing);
                     continue;
                 }
-                inner.stores.register_erased(asset.type_id, asset.output.primary.make_store);
+                inner
+                    .stores
+                    .register_erased(asset.type_id, asset.output.primary.make_store);
                 let Some(new_handle) = inner.stores.reserve_by_type(asset.type_id) else {
                     inner.rollback_staged_reload(&provisional);
                     return Err(AsyncReloadCommitError::Rejected(
@@ -510,7 +512,9 @@ impl AssetServer {
                 let new_id = new_handle.id();
                 inner.retained.entry(new_id).or_default();
                 inner.owner_weaks.insert(new_id, new_handle.downgrade());
-                inner.interned.insert(asset.path.clone(), new_handle.downgrade());
+                inner
+                    .interned
+                    .insert(asset.path.clone(), new_handle.downgrade());
                 inner.catalog.insert(
                     StableGuid::from_path(&asset.path.to_string()),
                     asset.path.clone(),
@@ -525,10 +529,9 @@ impl AssetServer {
             let mut label_handles = BTreeMap::new();
             let mut staged_labels = Vec::new();
             for asset in &candidate.assets {
-                let source_handle = handles
-                    .get(&asset.path)
-                    .cloned()
-                    .ok_or_else(|| AsyncReloadCommitError::Rejected("async reload source handle missing".into()))?;
+                let source_handle = handles.get(&asset.path).cloned().ok_or_else(|| {
+                    AsyncReloadCommitError::Rejected("async reload source handle missing".into())
+                })?;
                 for sub in &asset.output.labeled {
                     let sub_path = asset.path.clone().with_label(sub.label.clone());
                     if !label_paths.insert(sub_path.clone()) {
@@ -560,7 +563,9 @@ impl AssetServer {
                         let new_id = new_handle.id();
                         inner.retained.entry(new_id).or_default();
                         inner.owner_weaks.insert(new_id, new_handle.downgrade());
-                        inner.interned.insert(sub_path.clone(), new_handle.downgrade());
+                        inner
+                            .interned
+                            .insert(sub_path.clone(), new_handle.downgrade());
                         inner.catalog.insert(
                             StableGuid::from_path(&sub_path.to_string()),
                             sub_path.clone(),
@@ -571,12 +576,7 @@ impl AssetServer {
                         new_handle
                     };
                     label_handles.insert(sub_path.clone(), sub_handle.clone());
-                    staged_labels.push((
-                        sub_path,
-                        sub_handle,
-                        source_handle.clone(),
-                        sub.type_id,
-                    ));
+                    staged_labels.push((sub_path, sub_handle, source_handle.clone(), sub.type_id));
                 }
             }
 
@@ -622,7 +622,11 @@ impl AssetServer {
                     .collect::<Result<Vec<_>, _>>()?;
                 graph
                     .replace_dependencies(owner, primary_dependencies.iter().map(UntypedHandle::id))
-                    .map_err(|error| AsyncReloadCommitError::Rejected(format!("async reload dependency cycle: {error:?}")))?;
+                    .map_err(|error| {
+                        AsyncReloadCommitError::Rejected(format!(
+                            "async reload dependency cycle: {error:?}"
+                        ))
+                    })?;
                 retained.extend(
                     primary_dependencies
                         .iter()
@@ -637,7 +641,9 @@ impl AssetServer {
                         .output
                         .labeled
                         .iter()
-                        .find(|candidate| asset.path.clone().with_label(candidate.label.clone()) == *sub_path)
+                        .find(|candidate| {
+                            asset.path.clone().with_label(candidate.label.clone()) == *sub_path
+                        })
                         .expect("staged label has matching output");
                     let dependencies = sub
                         .dependencies
@@ -652,7 +658,11 @@ impl AssetServer {
                                 .map(UntypedHandle::id)
                                 .chain(core::iter::once(source_handle.id())),
                         )
-                        .map_err(|error| AsyncReloadCommitError::Rejected(format!("async reload labeled dependency cycle: {error:?}")))?;
+                        .map_err(|error| {
+                            AsyncReloadCommitError::Rejected(format!(
+                                "async reload labeled dependency cycle: {error:?}"
+                            ))
+                        })?;
                     retained.extend(
                         dependencies
                             .iter()

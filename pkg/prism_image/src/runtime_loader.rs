@@ -10,7 +10,7 @@ use core::fmt;
 use prism_asset::{AssetId, AssetLoader, Assets, Handle, LoadContext, LoadError, StableGuid};
 use prism_asset_container::{ManifestReadError, OverlaySet, RuntimeManifest};
 
-use crate::{Image, ImageArtifact, ImageArtifactError, ImageError};
+use crate::{Image, ImageArtifact, ImageArtifactError, ImageError, ImageMipArtifact};
 
 /// Failure to route, read, decode, or store a packaged runtime image.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,9 +79,7 @@ impl RuntimeImageLoader {
     /// Reads and decodes one image addressed by its stable runtime GUID.
     pub fn load(&self, guid: StableGuid) -> Result<Image, RuntimeImageLoadError> {
         let bytes = self.manifest.bind(&self.overlays)?.read_all(guid)?;
-        ImageArtifact::decode(&bytes)?
-            .to_image()
-            .map_err(RuntimeImageLoadError::Image)
+        decode_runtime_artifact(&bytes)
     }
 
     /// Loads an image and stores it in `assets`, minting a process-local typed
@@ -113,9 +111,13 @@ impl AssetLoader for RuntimeImageLoader {
     }
 
     fn load(&self, bytes: &[u8], _ctx: &mut LoadContext) -> Result<Self::Asset, LoadError> {
-        ImageArtifact::decode(bytes)
-            .map_err(|error| LoadError::Malformed(error.to_string()))?
-            .to_image()
-            .map_err(|error| LoadError::Malformed(error.to_string()))
+        decode_runtime_artifact(bytes).map_err(|error| LoadError::Malformed(error.to_string()))
     }
+}
+
+fn decode_runtime_artifact(bytes: &[u8]) -> Result<Image, RuntimeImageLoadError> {
+    if bytes.starts_with(b"PRIMG002") {
+        return Ok(ImageMipArtifact::decode(bytes)?.to_image()?);
+    }
+    Ok(ImageArtifact::decode(bytes)?.to_image()?)
 }

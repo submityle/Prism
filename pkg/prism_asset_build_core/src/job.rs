@@ -57,6 +57,7 @@ pub struct BuildJob {
     id: JobId,
     dependencies: Vec<JobId>,
     processor: Arc<dyn Processor>,
+    resources: crate::resources::BuildResources,
 }
 
 impl BuildJob {
@@ -70,11 +71,23 @@ impl BuildJob {
             id,
             dependencies: dependencies.into(),
             processor: Arc::new(processor),
+            resources: crate::resources::BuildResources::default(),
         }
     }
 
     pub fn id(&self) -> JobId {
         self.id
+    }
+
+    /// Declare peak concurrent demand for resource-aware execution. This is
+    /// scheduling policy and does not alter the semantic artifact key.
+    pub fn with_resources(mut self, resources: crate::resources::BuildResources) -> Self {
+        self.resources = resources;
+        self
+    }
+
+    pub fn resources(&self) -> crate::resources::BuildResources {
+        self.resources
     }
 
     pub fn dependencies(&self) -> &[JobId] {
