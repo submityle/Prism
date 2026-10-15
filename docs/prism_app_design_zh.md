@@ -11,7 +11,7 @@
 > - **管线/阶段**：flecs pipeline（阶段化 system 分组）
 > 本文为纯经典调度/循环路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.3→v0.4（v0.3 及以前为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：插件依赖图与分组/系统与模块热重载/子应用流水线深化/运行模式(无头服务器/编辑器内嵌/专用服务器)/优雅生命周期/控制台变量(cvar)与配置级联/崩溃隔离与系统恢复/子状态与状态作用域实体/多窗口多世界；v0.2→v0.3 新增第 25 章「跨 crate 契约对齐」：主循环编排 time 帧节奏/VRR/帧预算/挂起恢复 + 向 tasks 车道喂预算 / 子应用流水线以 ECS 提取为边界·tasks 线程类分离为执行·transform 双缓冲保读一致 / 配置与 cvar 经 reflect 特性校验 / 多世界各持独立 time 时间域；v0.3→v0.4 进入实现，并把 §22/§23 从“全部 PLANNED、无代码”回写为与代码一致：M0–M3 机制、M4 窗口 Runner 与恢复路径、M5 确定性与回滚、第 24 章大部分已落地；网络传输层以及部分原生窗口/GPU 验收仍待闭环，旧 Bevy 桥接层已退役）
+- 版本: v0.3→v0.4（v0.3 及以前为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：插件依赖图与分组/系统与模块热重载/子应用流水线深化/运行模式(无头服务器/编辑器内嵌/专用服务器)/优雅生命周期/控制台变量(cvar)与配置级联/崩溃隔离与系统恢复/子状态与状态作用域实体/多窗口多世界；v0.2→v0.3 新增第 25 章「跨 crate 契约对齐」：主循环编排 time 帧节奏/VRR/帧预算/挂起恢复 + 向 tasks 车道喂预算 / 子应用流水线以 ECS 提取为边界·tasks 线程类分离为执行·transform 双缓冲保读一致 / 配置与 cvar 经 reflect 特性校验 / 多世界各持独立 time 时间域；v0.3→v0.4 进入实现，并把 §22/§23 从“全部 PLANNED、无代码”回写为与代码一致：M0–M3 机制、M4 窗口 Runner 与恢复路径、M5 确定性与回滚、第 24 章大部分已落地；网络传输层、生产网络拓扑以及部分原生窗口/GPU 验收仍待闭环，旧 Bevy 桥接层已退役）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 状态补记（2026-10-16 复核）: `trace` 阶段火焰图、`hot-reload` 配置热重载、`module-reload` 的受信任 dylib 系统热重载、`PieInstances` 多实例 PIE、`WinitRunner::with_windows` 多窗口、`SubApp` 独立 time 域、平台 suspend / low-memory 回调、`pipelined-tasks` 车道均已有代码路径；设备丢失检测、替换设备、渲染核心资源重建与资源重放也已有实现（`RenderRuntime::recover_if_lost` + `prism_render_app::recovery`）。旧 `prism_bevy` 桥接层已完成退役。当前本机证据显示：App crate 测试与 headless parity 通过，CPU pipeline overlap benchmark 可执行；RenderApp 的 null/headless 与真实 Metal/wgpu 全量门禁均通过（`228 passed, 0 failed, 0 ignored`），包括 material buffer device-loss recovery。网络传输层、真实 Winit 窗口/移动设备验收和跨机性能数据仍未闭环；详细命令见 `docs/prism_app_render_acceptance_zh.md`。
 - 关键依赖: `prism_ecs`（World/Schedule/States）、`prism_tasks`（执行器/流水线）、`prism_time`（时钟/固定步长）、`prism_diagnostic`（可选）、`prism_reflect`（可选，配置/设置反射）
@@ -373,7 +373,7 @@ pkg/prism_app/
 - **M1 调度序 + 状态**（✅）：完整 Main 阶段序、PluginGroup/依赖解析/去重（`plugin_group`/`plugin_graph`）、States/OnEnter/OnExit（`state/*`）、Events 更新（`event`）。
 - **M2 固定步长**（✅）：累加器 + alpha + 死亡螺旋熔断（`fixed`）、`Time<Fixed/Virtual/Real>`（`time`）、FixedMain tick 组。
 - **M3 子应用 + 流水线**（✅ 机制；🚧 性能验收）：`sub_app` 的 extract 接线与 `pipelined` feature 已落地；渲染车道为**常驻单线程**（首帧惰性创建、逐帧经通道复用同一 worker，不每帧 `spawn`），保证提取语义与串行逐位等价。**`prism_tasks` 车道已接线**（`pipelined-tasks` feature）：可选 `TaskLane` 把每帧渲染作业投到 `prism_tasks` 工作窃取池（`App::enable_pipelined_rendering_with_task_pool`），管线跑在统一作业图上；两条车道共享同一 submit/collect 语义与等价性测试。尚未形成真实负载下的重叠率、尾延迟和吞吐基线。
-- **M4 窗口 Runner + 生命周期**（✅ 机制；🚧 集成验收）：`lifecycle`/`exit`/`pacing`、`WinitRunner`、多窗口、带单调时间戳的 `SuspendEvent` 转发、平台 suspend / low-memory 回调和设备丢失通知均已落地。设备替换、渲染核心资源重建、资源重放和恢复期间跳过普通 Render schedule 的路径也已有实现。`prism_render_app::presentation` 已提供 `WindowRenderRequests` / `WindowRenderTargets`，每窗口独立 surface、color/depth target、present 与 pacing target；真实 Metal/wgpu 全量 RenderApp 门禁已通过，当前仍待真实 Winit compositor、移动设备和跨平台后端验收，macOS 原生睡眠/唤醒真机演练未完成。
+- **M4 窗口 Runner + 生命周期**（✅ 机制；🚧 集成验收）：`lifecycle`/`exit`/`pacing`、`WinitRunner`、多窗口、带单调时间戳的 `SuspendEvent` 转发、平台 suspend / low-memory 回调和设备丢失通知均已落地。设备替换、渲染核心资源重建、资源重放和恢复期间跳过普通 Render schedule 的路径也已有实现。`prism_render_app::presentation` 已提供 `WindowRenderRequests` / `WindowRenderTargets`，每窗口独立 surface、color/depth target、present 与 pacing target；RenderApp 的 null/headless 与本机 Metal/wgpu 门禁已通过，当前仍待真实 Winit compositor、移动设备、其他后端和长时间运行验收，macOS 原生睡眠/唤醒真机演练未完成。
 - **M5 确定性 + 服务器**（🚧）：`determinism`（种子 RNG / 每帧状态哈希 / 逐固定步输入录放）、`DedicatedServerRunner`、`settings` 分层、基础 transport（memory/threaded/UDP）、可靠通道、多路复用、回滚窗口协商和显式 PSK/AES-GCM security provider 已落地；**world-snapshot 回滚已落地并接入 `App`/`SubApp`**（`rollback::SnapshotHistory` 复用 `prism_ecs` 的 `WorldSnapshot`/`SnapshotRing`，带上界环形历史、`try_capture` 缺 glue 上报、按帧回滚与逐帧状态哈希；`App`/`SubApp` 暴露 `init_snapshot_history` / `capture_snapshot` / `rollback_to`）；**late-input 回滚+重放环已落地**（`rollback_replay::RollbackReplay`：commit 记录快照+输入、rollback 还原到某帧并给出待重放输入序列、`reconcile` 用修正后的输入重放整段、重提交原地覆盖旧分支）；**对端同步编排已落地**（`peer_sync::reconcile_with_peer`：比对本地/对端逐帧帧哈希定位保留窗口内首个分歧帧、取对端权威输入驱动 `reconcile`，对端输入缺失或帧已淘汰则不动作并如实返回 `Unreconciled`）。**仍待做**：QUIC/WebTransport、NAT/ICE/relay、连接迁移/生产多 peer demux、跨机验收、scene/entity replication 映射和部署级密钥生命周期。
 - **M6 迁移/工具**（🚧）：`prelude`（贴近 `bevy_app`）、`diagnostics`（帧统计/启动耗时）、**阶段火焰图**（`trace` feature 的 `PhaseTrace`，逐帧逐阶段事件 + Chrome trace JSON 导出）、**配置热重载**（`hot-reload` feature 的 `ConfigHotReload`：文件哈希监视 + 逐帧经用户层重放）、**系统/模块热重载**（`module-reload` feature：受信任 dylib、稳定 system ID、ABI 校验、状态导出/迁移、帧边界自动轮询）与 **PIE 多实例**（`PieInstances`）均已有实现。旧 `prism_bevy` 桥接层已完成消费者审计并从 workspace 移除；M6 当前剩余的是跨平台/发行构建验证，而不是该桥接层退役。
 
@@ -383,7 +383,7 @@ pkg/prism_app/
 
 ## 23. 诚实边界与风险
 
-- 本文为设计规格。**截至 2026-10-16 代码已进入实现**：M0–M3 机制、M4 窗口 Runner/生命周期/设备恢复路径、M5 确定性+基础网络/回滚+重放+对端同步与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——生产网络拓扑、真实窗口/移动设备与跨机验收仍缺；旧 `prism_bevy` 桥接层已完成退役。真实 Metal/wgpu GPU recovery 已通过本机全量门禁，剩余是其他平台/后端和更广泛集成证据，不应再写成该路径“未实现”。
+- 本文为设计规格。**截至 2026-10-16 代码已进入实现**：M0–M3 机制、M4 窗口 Runner/生命周期/设备恢复路径、M5 确定性+基础网络/回滚+重放+对端同步与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——生产网络拓扑、真实窗口/移动设备与跨机验收仍缺；旧 `prism_bevy` 桥接层已完成退役。真实 Metal/wgpu GPU recovery 已通过本机全量门禁，剩余是其他平台/后端和更广泛集成证据，不应再把这些验收缺口写成机制“未实现”。
 - **feature 面已与当前 Cargo 契约对齐**：`std`/`multi_thread`（阶段内并行，接 `prism_ecs/multi_thread` 的冲突图执行器）/`pipelined`/`pipelined-tasks`/`determinism`/`winit`/`reflect`/`trace`/`hot-reload`/`module-reload` 均有对应实现；`HeadlessRunner` 是无窗口的默认 runner，因此不另造空的 `headless` feature。
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：当前以 `ExtractFn` 作为跨 World 单向接缝，并已有串行/并行等价路径；剩余风险是大负载下的重叠率、尾延迟和跨线程生命周期验收，而不是缺少提取实现。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。
@@ -476,7 +476,7 @@ AAA 要求「一个系统崩了不拖垮整个进程」:
 
 当前实现状态：`SystemPanicPolicy::DisableAndContinue` 已在调度器中捕获并隔离失败 system，记录 `SystemFailures` 并继续剩余调度；`CrashReporter` 已支持 panic hook、World/cvar/设置快照与最近日志，`FrameWatchdog` 已支持独立线程检测帧停顿并导出诊断。默认仍是 fail-fast；直接写入不会事务回滚，`panic = "abort"` 无法拦截，看门狗也只报告而不强杀/恢复卡死线程。
 
-当前实现状态：`WinitRunner::with_windows` 已提供多窗口生命周期，`prism_render_app::presentation` 已提供每窗口 surface、color/depth target、present/pacing 与安全释放/重建，`SubApp` 已支持独立 World 与独立 time 域。剩余的是 `prism_render_app` 集成编译、真实 Winit/wgpu/移动设备和设备恢复场景的验收证据；不是多窗口、每窗口渲染目标或多世界机制“未实现”。
+当前实现状态：`WinitRunner::with_windows` 已提供多窗口生命周期，`prism_render_app::presentation` 已提供每窗口 surface、color/depth target、present/pacing 与安全释放/重建，`SubApp` 已支持独立 World 与独立 time 域。剩余的是真实 Winit/wgpu 窗口、移动设备、其他后端和设备恢复场景的验收证据；不是多窗口、每窗口渲染目标或多世界机制“未实现”。
 
 ### 24.10 诚实边界
 
