@@ -90,6 +90,51 @@ impl RuntimePackage {
     }
 }
 
+/// Validates a complete asset-to-runtime mapping table without reading CAS.
+///
+/// Patch planning uses this before deciding which payloads to emit. Keeping
+/// mapping validation separate from payload packaging prevents a malformed
+/// target mapping from being hidden by an otherwise empty or partial patch.
+pub(crate) fn validate_package_mappings(
+    manifest: &Manifest,
+    mappings: &[AssetPackageMapping],
+) -> Result<BTreeMap<AssetId, AssetPackageMapping>, PackageError> {
+    let mut by_asset = BTreeMap::<AssetId, AssetPackageMapping>::new();
+    let mut by_guid = BTreeMap::<StableGuid, AssetId>::new();
+    for mapping in mappings {
+        if !manifest.entries.contains_key(&mapping.asset) {
+            return Err(PackageError::UnknownAsset {
+                asset: mapping.asset,
+            });
+        }
+        if by_asset.insert(mapping.asset, mapping.clone()).is_some() {
+            return Err(PackageError::DuplicateAssetMapping {
+                asset: mapping.asset,
+            });
+        }
+        if mapping.guid.is_nil() {
+            return Err(PackageError::InvalidGuid {
+                asset: mapping.asset,
+            });
+        }
+        if let Some(first_asset) = by_guid.insert(mapping.guid, mapping.asset)
+            && first_asset != mapping.asset
+        {
+            return Err(PackageError::DuplicateGuid {
+                guid: mapping.guid,
+                first_asset,
+                second_asset: mapping.asset,
+            });
+        }
+    }
+    for asset in manifest.entries.keys() {
+        if !by_asset.contains_key(asset) {
+            return Err(PackageError::MissingMapping { asset: *asset });
+        }
+    }
+    Ok(by_asset)
+}
+
 /// Errors raised before a runtime package is emitted.
 #[derive(Debug)]
 pub enum PackageError {
@@ -321,34 +366,7 @@ fn package_runtime_impl(
         mappings,
     } = request;
 
-    let mut by_asset = BTreeMap::<AssetId, AssetPackageMapping>::new();
-    let mut by_guid = BTreeMap::<StableGuid, AssetId>::new();
-    for mapping in mappings {
-        if !manifest.entries.contains_key(&mapping.asset) {
-            return Err(PackageError::UnknownAsset {
-                asset: mapping.asset,
-            });
-        }
-        if by_asset.insert(mapping.asset, mapping.clone()).is_some() {
-            return Err(PackageError::DuplicateAssetMapping {
-                asset: mapping.asset,
-            });
-        }
-        if mapping.guid.is_nil() {
-            return Err(PackageError::InvalidGuid {
-                asset: mapping.asset,
-            });
-        }
-        if let Some(first_asset) = by_guid.insert(mapping.guid, mapping.asset)
-            && first_asset != mapping.asset
-        {
-            return Err(PackageError::DuplicateGuid {
-                guid: mapping.guid,
-                first_asset,
-                second_asset: mapping.asset,
-            });
-        }
-    }
+    let by_asset = validate_package_mappings(manifest, &mappings)?;
 
     let selected_assets =
         selected_assets.unwrap_or_else(|| manifest.entries.keys().copied().collect());
@@ -610,6 +628,9 @@ fn package_runtime_impl(
                         },
                     )?;
                     for dependency_asset in dependency_assets {
+                        if !selected_assets.contains(dependency_asset) {
+                            continue;
+                        }
                         let dependency_mapping = by_asset.get(dependency_asset).ok_or(
                             PackageError::UnmappedDependency {
                                 asset: mapping.asset,

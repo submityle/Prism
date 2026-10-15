@@ -1662,3 +1662,68 @@ fn manifest_asset_reader_implements_vfs_path_and_subasset_contract() {
         Err(prism_asset::ReadError::InvalidPath)
     );
 }
+
+#[test]
+fn runtime_manifest_patch_replaces_routes_removes_tombstones_and_is_transactional() {
+    let base_guid = StableGuid::from_u128(1);
+    let removed_guid = StableGuid::from_u128(2);
+    let replacement_guid = StableGuid::from_u128(3);
+    let base_bytes = build(&[("base", b"base")]);
+    let patch_bytes = build(&[("replacement", b"patch")]);
+
+    let mut base = RuntimeManifest::new();
+    base.insert(ManifestRoute {
+        guid: base_guid,
+        container_name: "base".into(),
+        priority: 1,
+        container_guid: base_guid,
+    })
+    .unwrap();
+    base.insert(ManifestRoute {
+        guid: removed_guid,
+        container_name: "base".into(),
+        priority: 1,
+        container_guid: removed_guid,
+    })
+    .unwrap();
+    base.bind_container("base", identity(&base_bytes)).unwrap();
+
+    let mut patch = RuntimeManifest::new();
+    patch
+        .insert_with_metadata(
+            ManifestRoute {
+                guid: base_guid,
+                container_name: "patch".into(),
+                priority: 2,
+                container_guid: replacement_guid,
+            },
+            ManifestMetadata::default(),
+        )
+        .unwrap();
+    patch
+        .bind_container("patch", identity(&patch_bytes))
+        .unwrap();
+
+    base.apply_patch(&patch, &[removed_guid]).unwrap();
+    assert_eq!(base.route(base_guid).unwrap().container_name, "patch");
+    assert!(base.route(removed_guid).is_none());
+
+    let before = base.clone();
+    let mut conflicting_patch = RuntimeManifest::new();
+    conflicting_patch
+        .insert(ManifestRoute {
+            guid: StableGuid::from_u128(4),
+            container_name: "patch".into(),
+            priority: 3,
+            container_guid: StableGuid::from_u128(4),
+        })
+        .unwrap();
+    conflicting_patch
+        .bind_container("patch", identity(&base_bytes))
+        .unwrap();
+    assert!(matches!(
+        base.apply_patch(&conflicting_patch, &[]),
+        Err(ManifestError::ContainerIdentityConflict(name)) if name == "patch"
+    ));
+    assert_eq!(base, before);
+}

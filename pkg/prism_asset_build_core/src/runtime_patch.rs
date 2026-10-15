@@ -8,15 +8,18 @@
 use std::collections::BTreeSet;
 
 use prism_asset::StableGuid;
-use prism_asset_container::{ManifestError, PatchDescriptorError, RuntimePatchDescriptor};
+use prism_asset_container::{
+    ManifestError, ManifestMetadata, ManifestRoute, PatchDescriptorError, RuntimeManifest,
+    RuntimePatchDescriptor,
+};
 
 use crate::cas::ContentAddressedStore;
 use crate::package::{
-    package_runtime_selected_with_options, AssetPackageMapping, PackageError, PackageOptions,
-    PackageRequest, RuntimePackage,
+    package_runtime_selected_with_options, validate_package_mappings, AssetPackageMapping,
+    PackageError, PackageOptions, PackageRequest, RuntimePackage,
 };
 use crate::patch::{plan_patch, PatchChange, PatchPlanError};
-use crate::types::{AssetId, BuildRevision, ContentHash, Manifest};
+use crate::types::{ArtifactKey, AssetId, BuildRevision, ContentHash, Manifest};
 
 /// Inputs required to build a runtime patch from two committed revisions.
 pub struct RuntimePatchRequest<'a> {
@@ -42,6 +45,129 @@ pub struct RuntimePatchPackage {
     pub descriptor_bytes: Vec<u8>,
     /// Incremental containers and routes introduced by the patch.
     pub payload: RuntimePackage,
+    /// Complete target routing manifest. It carries metadata for dependencies
+    /// that remain in the base package without copying their payload bytes.
+    pub target_runtime_manifest: RuntimeManifest,
+    /// Canonical bytes of [`Self::target_runtime_manifest`].
+    pub target_runtime_manifest_bytes: Vec<u8>,
+}
+
+impl RuntimePatchPackage {
+    /// Verifies and applies this patch's routing state to a base manifest.
+    ///
+    /// The returned manifest is the authoritative target snapshot carried by
+    /// the patch. The incremental payload is checked against it first, so a
+    /// caller can mount `payload.containers` and then replace its routing
+    /// snapshot without silently accepting a mismatched patch.
+    pub fn apply_to_manifest(
+        &self,
+        base_build_manifest_hash: ContentHash,
+        base_runtime_manifest: &RuntimeManifest,
+    ) -> Result<RuntimeManifest, RuntimePatchError> {
+        let decoded = RuntimePatchDescriptor::decode(&self.descriptor_bytes)?;
+        if decoded != self.descriptor {
+            return Err(RuntimePatchError::DescriptorObjectMismatch);
+        }
+        if base_build_manifest_hash.0 != self.descriptor.base_build_manifest_hash {
+            return Err(RuntimePatchError::BaseBuildManifestHashMismatch);
+        }
+
+        let base_runtime_manifest_bytes = base_runtime_manifest
+            .encode()
+            .map_err(RuntimePatchError::Manifest)?;
+        if ContentHash::digest(&base_runtime_manifest_bytes).0
+            != self.descriptor.base_runtime_manifest_hash
+        {
+            return Err(RuntimePatchError::BaseRuntimeManifestHashMismatch);
+        }
+
+        let payload_manifest_bytes = self
+            .payload
+            .runtime_manifest
+            .encode()
+            .map_err(RuntimePatchError::Manifest)?;
+        if payload_manifest_bytes != self.payload.runtime_manifest_bytes
+            || ContentHash::digest(&payload_manifest_bytes).0
+                != self.descriptor.patch_runtime_manifest_hash
+        {
+            return Err(RuntimePatchError::PatchManifestMismatch);
+        }
+
+        let target_manifest_bytes = self
+            .target_runtime_manifest
+            .encode()
+            .map_err(RuntimePatchError::Manifest)?;
+        if target_manifest_bytes != self.target_runtime_manifest_bytes
+            || ContentHash::digest(&target_manifest_bytes).0
+                != self.descriptor.target_runtime_manifest_hash
+        {
+            return Err(RuntimePatchError::TargetManifestMismatch);
+        }
+
+        let mut merged = base_runtime_manifest.clone();
+        merged.apply_patch(
+            &self.payload.runtime_manifest,
+            &self.descriptor.removed_guids,
+        )?;
+        validate_patch_routes(&merged, &self.target_runtime_manifest)?;
+
+        for route in self.payload.runtime_manifest.routes() {
+            let target = self
+                .target_runtime_manifest
+                .route(route.guid)
+                .ok_or(RuntimePatchError::TargetRouteMissing { guid: route.guid })?;
+            if target != route {
+                return Err(RuntimePatchError::TargetRouteMismatch { guid: route.guid });
+            }
+            if self
+                .target_runtime_manifest
+                .container_identity(&route.container_name)
+                != self
+                    .payload
+                    .runtime_manifest
+                    .container_identity(&route.container_name)
+            {
+                return Err(RuntimePatchError::TargetContainerMismatch {
+                    name: route.container_name.clone(),
+                });
+            }
+        }
+
+        for route in base_runtime_manifest.routes() {
+            if self.descriptor.removed_guids.contains(&route.guid)
+                || self.payload.runtime_manifest.route(route.guid).is_some()
+            {
+                continue;
+            }
+            let target = self
+                .target_runtime_manifest
+                .route(route.guid)
+                .ok_or(RuntimePatchError::TargetRouteMissing { guid: route.guid })?;
+            if self.target_runtime_manifest.metadata(route.guid)
+                != base_runtime_manifest.metadata(route.guid)
+            {
+                return Err(RuntimePatchError::TargetMetadataMismatch { guid: route.guid });
+            }
+            if self
+                .target_runtime_manifest
+                .container_identity(&target.container_name)
+                != base_runtime_manifest.container_identity(&route.container_name)
+            {
+                return Err(RuntimePatchError::TargetContainerMismatch {
+                    name: target.container_name.clone(),
+                });
+            }
+        }
+
+        for guid in &self.descriptor.removed_guids {
+            if self.payload.runtime_manifest.route(*guid).is_none()
+                && self.target_runtime_manifest.route(*guid).is_some()
+            {
+                return Err(RuntimePatchError::RemovedRouteStillPresent { guid: *guid });
+            }
+        }
+        Ok(self.target_runtime_manifest.clone())
+    }
 }
 
 /// Errors raised while producing an incremental runtime package.
@@ -64,6 +190,28 @@ pub enum RuntimePatchError {
     Manifest(ManifestError),
     /// The descriptor could not be constructed or encoded.
     Descriptor(PatchDescriptorError),
+    /// The descriptor bytes decode to a different descriptor object.
+    DescriptorObjectMismatch,
+    /// The supplied base build manifest hash does not match the descriptor.
+    BaseBuildManifestHashMismatch,
+    /// The supplied base runtime manifest does not match the descriptor.
+    BaseRuntimeManifestHashMismatch,
+    /// The incremental runtime manifest object/bytes/hash is inconsistent.
+    PatchManifestMismatch,
+    /// The target runtime manifest object/bytes/hash is inconsistent.
+    TargetManifestMismatch,
+    /// A target snapshot route was not produced by the base-plus-patch route merge.
+    TargetRouteMissing { guid: StableGuid },
+    /// A patch route differs from the target snapshot route.
+    TargetRouteMismatch { guid: StableGuid },
+    /// An unchanged base route has different target metadata.
+    TargetMetadataMismatch { guid: StableGuid },
+    /// A patch route binds a different immutable container identity in the target.
+    TargetContainerMismatch { name: String },
+    /// A tombstoned route unexpectedly remains in the target snapshot.
+    RemovedRouteStillPresent { guid: StableGuid },
+    /// The base runtime package is internally inconsistent.
+    InvalidBasePackage(&'static str),
 }
 
 impl std::fmt::Display for RuntimePatchError {
@@ -85,6 +233,51 @@ impl std::fmt::Display for RuntimePatchError {
             Self::Package(error) => write!(f, "runtime patch packaging failed: {error}"),
             Self::Manifest(error) => write!(f, "runtime patch manifest merge failed: {error}"),
             Self::Descriptor(error) => write!(f, "runtime patch descriptor failed: {error}"),
+            Self::DescriptorObjectMismatch => {
+                f.write_str("runtime patch descriptor bytes do not match the descriptor object")
+            }
+            Self::BaseBuildManifestHashMismatch => {
+                f.write_str("base build manifest hash does not match runtime patch descriptor")
+            }
+            Self::BaseRuntimeManifestHashMismatch => {
+                f.write_str("base runtime manifest hash does not match runtime patch descriptor")
+            }
+            Self::PatchManifestMismatch => {
+                f.write_str("runtime patch payload manifest object or hash is inconsistent")
+            }
+            Self::TargetManifestMismatch => {
+                f.write_str("runtime patch target manifest object or hash is inconsistent")
+            }
+            Self::TargetRouteMissing { guid } => {
+                write!(f, "runtime patch target manifest is missing route {guid:?}")
+            }
+            Self::TargetRouteMismatch { guid } => {
+                write!(
+                    f,
+                    "runtime patch route {guid:?} differs from target manifest"
+                )
+            }
+            Self::TargetMetadataMismatch { guid } => {
+                write!(
+                    f,
+                    "unchanged runtime route {guid:?} has different target metadata"
+                )
+            }
+            Self::TargetContainerMismatch { name } => {
+                write!(
+                    f,
+                    "runtime patch target container identity differs for {name:?}"
+                )
+            }
+            Self::RemovedRouteStillPresent { guid } => {
+                write!(
+                    f,
+                    "runtime patch tombstone route {guid:?} remains in target manifest"
+                )
+            }
+            Self::InvalidBasePackage(reason) => {
+                write!(f, "base runtime package is invalid: {reason}")
+            }
         }
     }
 }
@@ -159,6 +352,8 @@ pub fn package_runtime_patch_with_options(
         return Err(RuntimePatchError::BasePackageRuntimeManifestMismatch);
     }
 
+    validate_base_package(base_package)?;
+    let target_by_asset = validate_package_mappings(target_manifest, &target_mappings)?;
     let plan = plan_patch(base_manifest, target_manifest)?;
     let mut selected_assets = BTreeSet::new();
     let mut removed_guids = BTreeSet::new();
@@ -174,11 +369,7 @@ pub fn package_runtime_patch_with_options(
                     .get(&entry.asset)
                     .copied()
                     .ok_or(RuntimePatchError::MissingBaseRoute { asset: entry.asset })?;
-                let target_guid = target_mappings
-                    .iter()
-                    .find(|mapping| mapping.asset == entry.asset)
-                    .map(|mapping| mapping.guid);
-                if target_guid.is_some_and(|target_guid| target_guid != base_guid) {
+                if target_by_asset[&entry.asset].guid != base_guid {
                     removed_guids.insert(base_guid);
                 }
             }
@@ -193,21 +384,52 @@ pub fn package_runtime_patch_with_options(
         }
     }
 
-    let target_mappings =
+    for asset in target_manifest.entries.keys() {
+        if selected_assets.contains(asset) {
+            continue;
+        }
+        let base_guid = base_package
+            .asset_guids
+            .get(asset)
+            .copied()
+            .ok_or(RuntimePatchError::MissingBaseRoute { asset: *asset })?;
+        let base_route = base_package
+            .runtime_manifest
+            .route(base_guid)
+            .ok_or(RuntimePatchError::MissingBaseRoute { asset: *asset })?;
+        let target_mapping = &target_by_asset[asset];
+        if base_guid != target_mapping.guid
+            || base_route.container_name != target_mapping.container_name
+            || base_route.priority != target_mapping.priority
+            || base_route.container_guid != target_mapping.guid
+        {
+            selected_assets.insert(*asset);
+            if base_guid != target_mapping.guid {
+                removed_guids.insert(base_guid);
+            }
+        }
+    }
+
+    let patch_mappings =
         namespace_changed_mappings(target_mappings, &selected_assets, target_manifest.revision);
     let payload = package_runtime_selected_with_options(
         PackageRequest {
             manifest: target_manifest,
             cas,
-            mappings: target_mappings,
+            mappings: patch_mappings,
         },
         options,
         selected_assets.iter().copied(),
     )?;
 
-    let mut target_runtime_manifest = base_package.runtime_manifest.clone();
     let removed_guids = removed_guids.into_iter().collect::<Vec<_>>();
-    target_runtime_manifest.apply_patch(&payload.runtime_manifest, &removed_guids)?;
+    let target_runtime_manifest = build_target_runtime_manifest(
+        base_package,
+        target_manifest,
+        &target_by_asset,
+        &selected_assets,
+        &payload.runtime_manifest,
+    )?;
     let target_runtime_manifest_bytes = target_runtime_manifest
         .encode()
         .map_err(RuntimePatchError::Manifest)?;
@@ -226,6 +448,8 @@ pub fn package_runtime_patch_with_options(
         descriptor,
         descriptor_bytes,
         payload,
+        target_runtime_manifest,
+        target_runtime_manifest_bytes,
     })
 }
 
@@ -244,6 +468,139 @@ fn namespace_changed_mappings(
             mapping
         })
         .collect()
+}
+
+fn validate_patch_routes(
+    merged: &RuntimeManifest,
+    target: &RuntimeManifest,
+) -> Result<(), RuntimePatchError> {
+    for route in merged.routes() {
+        let target_route = target
+            .route(route.guid)
+            .ok_or(RuntimePatchError::TargetRouteMissing { guid: route.guid })?;
+        if target_route != route {
+            return Err(RuntimePatchError::TargetRouteMismatch { guid: route.guid });
+        }
+    }
+    for route in target.routes() {
+        if merged.route(route.guid).is_none() {
+            return Err(RuntimePatchError::TargetRouteMissing { guid: route.guid });
+        }
+    }
+    Ok(())
+}
+
+fn validate_base_package(base_package: &RuntimePackage) -> Result<(), RuntimePatchError> {
+    if base_package.asset_guids.len() != base_package.runtime_manifest.routes().count() {
+        return Err(RuntimePatchError::InvalidBasePackage(
+            "asset-to-guid map does not cover exactly the runtime routes",
+        ));
+    }
+    for guid in base_package.asset_guids.values() {
+        if base_package.runtime_manifest.route(*guid).is_none() {
+            return Err(RuntimePatchError::InvalidBasePackage(
+                "asset-to-guid map references a missing runtime route",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn build_target_runtime_manifest(
+    base_package: &RuntimePackage,
+    target_manifest: &Manifest,
+    target_by_asset: &std::collections::BTreeMap<AssetId, AssetPackageMapping>,
+    selected_assets: &BTreeSet<AssetId>,
+    patch_manifest: &RuntimeManifest,
+) -> Result<RuntimeManifest, RuntimePatchError> {
+    let mut artifact_assets = std::collections::BTreeMap::<ArtifactKey, BTreeSet<AssetId>>::new();
+    for (asset, descriptor) in &target_manifest.entries {
+        artifact_assets
+            .entry(descriptor.key)
+            .or_default()
+            .insert(*asset);
+    }
+
+    let final_guid = |asset: AssetId| -> Result<StableGuid, RuntimePatchError> {
+        if selected_assets.contains(&asset) {
+            return Ok(target_by_asset[&asset].guid);
+        }
+        base_package
+            .asset_guids
+            .get(&asset)
+            .copied()
+            .ok_or(RuntimePatchError::MissingBaseRoute { asset })
+    };
+
+    let mut target = RuntimeManifest::new();
+    for (asset, descriptor) in &target_manifest.entries {
+        let mapping = &target_by_asset[asset];
+        let guid = final_guid(*asset)?;
+        let (container_name, container_guid, identity) = if selected_assets.contains(asset) {
+            let container_name = format!(
+                "patch_{}_{}",
+                target_manifest.revision.0, mapping.container_name
+            );
+            let route = patch_manifest
+                .route(guid)
+                .ok_or(RuntimePatchError::TargetRouteMissing { guid })?;
+            let identity = patch_manifest.container_identity(&container_name).ok_or(
+                RuntimePatchError::TargetContainerMismatch {
+                    name: container_name.clone(),
+                },
+            )?;
+            (container_name, route.container_guid, identity)
+        } else {
+            let base_route = base_package
+                .runtime_manifest
+                .route(guid)
+                .ok_or(RuntimePatchError::MissingBaseRoute { asset: *asset })?;
+            let identity = base_package
+                .runtime_manifest
+                .container_identity(&base_route.container_name)
+                .ok_or(RuntimePatchError::TargetContainerMismatch {
+                    name: base_route.container_name.clone(),
+                })?;
+            (
+                base_route.container_name.clone(),
+                base_route.container_guid,
+                identity,
+            )
+        };
+
+        let hard_dependencies = descriptor
+            .dependencies
+            .iter()
+            .flat_map(|dependency| artifact_assets.get(dependency).into_iter().flatten())
+            .map(|dependency_asset| final_guid(*dependency_asset))
+            .collect::<Result<BTreeSet<_>, _>>()?
+            .into_iter()
+            .collect::<Vec<_>>();
+        target
+            .insert_with_metadata(
+                ManifestRoute {
+                    guid,
+                    container_name: container_name.clone(),
+                    priority: mapping.priority,
+                    container_guid,
+                },
+                ManifestMetadata {
+                    hard_dependencies,
+                    optional_dependencies: Vec::new(),
+                    initial_residency: 0,
+                    streaming_level: 0,
+                    codec: prism_asset_container::Codec::Raw,
+                    schema: descriptor.schema,
+                    install_capabilities: 0,
+                },
+            )
+            .map_err(RuntimePatchError::Manifest)?;
+        target
+            .bind_container(container_name, identity)
+            .map_err(RuntimePatchError::Manifest)?;
+    }
+    target.encode().map_err(RuntimePatchError::Manifest)?;
+    Ok(target)
 }
 
 #[cfg(test)]
@@ -350,8 +707,24 @@ mod tests {
         assert!(merged.route(StableGuid::from_u128(101)).is_some());
         assert!(merged.route(StableGuid::from_u128(202)).is_none());
         assert_eq!(
-            ContentHash::digest(&merged.encode().unwrap()).0,
+            merged
+                .route(StableGuid::from_u128(101))
+                .unwrap()
+                .container_name,
+            "patch_2_target_a"
+        );
+        assert_eq!(
+            ContentHash::digest(&patch.target_runtime_manifest_bytes).0,
             patch.descriptor.target_runtime_manifest_hash
+        );
+        assert_eq!(
+            patch
+                .apply_to_manifest(
+                    base_package.source_manifest_hash,
+                    &base_package.runtime_manifest,
+                )
+                .unwrap(),
+            patch.target_runtime_manifest
         );
     }
 
@@ -430,10 +803,209 @@ mod tests {
         })
         .unwrap();
         let metadata = patch
-            .payload
-            .runtime_manifest
+            .target_runtime_manifest
             .metadata(StableGuid::from_u128(22))
             .unwrap();
         assert_eq!(metadata.hard_dependencies, vec![StableGuid::from_u128(11)]);
+    }
+
+    #[test]
+    fn empty_patch_reuses_base_manifest_without_reading_payloads() {
+        let directory = tempdir().unwrap();
+        let cas = ContentAddressedStore::open(directory.keep()).unwrap();
+        let bytes = b"stable";
+        cas.put(bytes).unwrap();
+        let base = Manifest::new(
+            BuildRevision(3),
+            [ManifestEntry {
+                asset: AssetId(1),
+                descriptor: descriptor(1, bytes, vec![]),
+            }],
+        )
+        .unwrap();
+        let target = Manifest::new(
+            BuildRevision(4),
+            [ManifestEntry {
+                asset: AssetId(1),
+                descriptor: descriptor(1, bytes, vec![]),
+            }],
+        )
+        .unwrap();
+        let mapping = AssetPackageMapping {
+            asset: AssetId(1),
+            guid: StableGuid::from_u128(11),
+            container_name: "base".into(),
+            priority: 0,
+            chunk_priority: 0,
+        };
+        let base_package = crate::package::package_runtime(PackageRequest {
+            manifest: &base,
+            cas: &cas,
+            mappings: vec![mapping.clone()],
+        })
+        .unwrap();
+        let patch = package_runtime_patch(RuntimePatchRequest {
+            base_manifest: &base,
+            target_manifest: &target,
+            base_package: &base_package,
+            cas: &cas,
+            target_mappings: vec![mapping],
+        })
+        .unwrap();
+        assert!(patch.payload.containers.is_empty());
+        assert!(patch.payload.runtime_manifest.routes().next().is_none());
+        assert_eq!(
+            patch
+                .apply_to_manifest(
+                    base_package.source_manifest_hash,
+                    &base_package.runtime_manifest,
+                )
+                .unwrap(),
+            base_package.runtime_manifest
+        );
+    }
+
+    #[test]
+    fn patch_rejects_base_and_target_integrity_mismatches() {
+        let directory = tempdir().unwrap();
+        let cas = ContentAddressedStore::open(directory.keep()).unwrap();
+        let base_bytes = b"base";
+        let target_bytes = b"target";
+        cas.put(base_bytes).unwrap();
+        cas.put(target_bytes).unwrap();
+        let base = Manifest::new(
+            BuildRevision(1),
+            [ManifestEntry {
+                asset: AssetId(1),
+                descriptor: descriptor(1, base_bytes, vec![]),
+            }],
+        )
+        .unwrap();
+        let target = Manifest::new(
+            BuildRevision(2),
+            [ManifestEntry {
+                asset: AssetId(1),
+                descriptor: descriptor(2, target_bytes, vec![]),
+            }],
+        )
+        .unwrap();
+        let mapping = AssetPackageMapping {
+            asset: AssetId(1),
+            guid: StableGuid::from_u128(11),
+            container_name: "asset".into(),
+            priority: 0,
+            chunk_priority: 0,
+        };
+        let base_package = crate::package::package_runtime(PackageRequest {
+            manifest: &base,
+            cas: &cas,
+            mappings: vec![mapping.clone()],
+        })
+        .unwrap();
+        let patch = package_runtime_patch(RuntimePatchRequest {
+            base_manifest: &base,
+            target_manifest: &target,
+            base_package: &base_package,
+            cas: &cas,
+            target_mappings: vec![mapping],
+        })
+        .unwrap();
+
+        let changed_base = RuntimeManifest::new();
+        let mut changed_patch = patch.clone();
+        changed_patch.descriptor.target_revision += 1;
+        assert!(matches!(
+            changed_patch.apply_to_manifest(
+                base_package.source_manifest_hash,
+                &base_package.runtime_manifest,
+            ),
+            Err(RuntimePatchError::DescriptorObjectMismatch)
+        ));
+        assert!(matches!(
+            patch.apply_to_manifest(ContentHash([7; 32]), &base_package.runtime_manifest),
+            Err(RuntimePatchError::BaseBuildManifestHashMismatch)
+        ));
+        assert!(matches!(
+            patch.apply_to_manifest(base_package.source_manifest_hash, &changed_base),
+            Err(RuntimePatchError::BaseRuntimeManifestHashMismatch)
+        ));
+        let mut tampered_target = patch.clone();
+        tampered_target.target_runtime_manifest_bytes[0] ^= 1;
+        assert!(matches!(
+            tampered_target.apply_to_manifest(
+                base_package.source_manifest_hash,
+                &base_package.runtime_manifest,
+            ),
+            Err(RuntimePatchError::TargetManifestMismatch)
+        ));
+    }
+
+    #[test]
+    fn patch_rejects_incomplete_or_duplicate_target_mappings() {
+        let directory = tempdir().unwrap();
+        let cas = ContentAddressedStore::open(directory.keep()).unwrap();
+        let bytes = b"asset";
+        cas.put(bytes).unwrap();
+        let base = Manifest::new(
+            BuildRevision(1),
+            [ManifestEntry {
+                asset: AssetId(1),
+                descriptor: descriptor(1, bytes, vec![]),
+            }],
+        )
+        .unwrap();
+        let target = Manifest::new(
+            BuildRevision(2),
+            [ManifestEntry {
+                asset: AssetId(1),
+                descriptor: descriptor(2, bytes, vec![]),
+            }],
+        )
+        .unwrap();
+        let base_mapping = AssetPackageMapping {
+            asset: AssetId(1),
+            guid: StableGuid::from_u128(11),
+            container_name: "base".into(),
+            priority: 0,
+            chunk_priority: 0,
+        };
+        let base_package = crate::package::package_runtime(PackageRequest {
+            manifest: &base,
+            cas: &cas,
+            mappings: vec![base_mapping],
+        })
+        .unwrap();
+        assert!(matches!(
+            package_runtime_patch(RuntimePatchRequest {
+                base_manifest: &base,
+                target_manifest: &target,
+                base_package: &base_package,
+                cas: &cas,
+                target_mappings: vec![],
+            }),
+            Err(RuntimePatchError::Package(PackageError::MissingMapping {
+                asset: AssetId(1)
+            }))
+        ));
+
+        let mapping = AssetPackageMapping {
+            asset: AssetId(1),
+            guid: StableGuid::from_u128(12),
+            container_name: "target".into(),
+            priority: 0,
+            chunk_priority: 0,
+        };
+        assert!(matches!(
+            package_runtime_patch(RuntimePatchRequest {
+                base_manifest: &base,
+                target_manifest: &target,
+                base_package: &base_package,
+                cas: &cas,
+                target_mappings: vec![mapping.clone(), mapping],
+            }),
+            Err(RuntimePatchError::Package(
+                PackageError::DuplicateAssetMapping { asset: AssetId(1) }
+            ))
+        ));
     }
 }
