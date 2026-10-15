@@ -604,7 +604,7 @@ mount("assets", patch_pak,priority=30)   // 热补丁
 
 大世界/高清资产装不下显存，必须按需换入换出。`StreamingManager` 对标 DOOM Eternal / Decima 的预算驱动流送：
 
-> **当前实现边界**：`prism_asset` 已实现预算控制器、同步 `StreamIoExecutor` 和使用现有 `TaskPool` 的锁外 `AsyncStreamIoExecutor`，两者都会真实调用 `AssetSources::read_range`；异步 executor 会在成功、取消、失败等请求终态清理 gate，并把重复执行/重复取消映射为明确错误，但只负责有界范围读取与状态提交，仍不包含解码器、GPU 资源上传或 DirectStorage 形态批量队列。完整预取、GPU 反馈闭环和按 Chunk 流送调度仍未实现。容器层已有文件 `RangeSource`、确定性 range batching、raw-DEFLATE per-payload 解码和按范围读取，但压缩 payload 仍需完整解码，不能替代完整流送系统。`prism_gdeflate_gpu` 已有真实 GPU de-interleave/stored-block 子集和 CPU Huffman fallback，不能宣称已完成完整 GPU 直通解压。
+> **当前实现边界**：`prism_asset` 已实现预算控制器、同步 `StreamIoExecutor` 和使用现有 `TaskPool` 的锁外 `AsyncStreamIoExecutor`，两者都会真实调用 `AssetSources::read_range`；异步 executor 会在成功、取消、失败等请求终态清理 gate，并把重复执行/重复取消映射为明确错误，但只负责有界范围读取与状态提交，仍不包含解码器、GPU 资源上传或 DirectStorage 形态批量队列。完整预取、GPU 反馈闭环和按 Chunk 流送调度仍未实现。容器层已有文件 `RangeSource`、确定性 range batching、raw-DEFLATE per-payload 解码和按范围读取，但压缩 payload 仍需完整解码，不能替代完整流送系统。`prism_gdeflate_gpu` 现在提供统一 `GDeflateDecoder`：有设备时真实执行 GPU de-interleave、CPU Huffman inflate，并返回 `DecodeReport`；设备限制、完整性失败或无设备均显式走 CPU fallback。它仍不是 GPU Huffman、DirectStorage 队列或资产运行时的完整直通接线。
 
 - **可流送资产声明分级**：纹理按 mip、网格按 LOD、虚拟纹理按 page。资产值内只常驻「低清兜底 + 元数据」，高清层级按需 `read_range` 流入。
 - **预算驱动驻留**：`StreamingBudget`（显存上限、每帧 I/O 带宽、并发解码）。管理器维护「每个可流送资产的目标层级」，由**请求器**（相机距离、屏幕占比、可见性、显式 pin）打分，预算内尽量满足高分请求，超预算则驱逐低分层级。
@@ -629,7 +629,7 @@ NVMe ──(批量队列, DirectStorage 形态)──▶ 显存暂存 ──(GPU
 ```
 
 - **批量队列**：成百上千小请求（mip/page）打包提交，摊薄每请求开销；完成走 fence/回调驱动 §9.3 作业图。
-- **GPU 解压（目标规格，尚未完整实现）**：目标是压缩 blob 直灌显存暂存区并由计算着色器解压。当前 `prism_gdeflate_gpu` 的通用路径只 GPU 去交错、CPU 执行 Huffman inflate；另有 stored-block 专用 GPU fast path，仍由 CPU 解析 raw-DEFLATE block 边界，且 fixed/dynamic Huffman 块拒绝进入该路径。
+- **GPU 解压（目标规格，尚未完整实现）**：目标是压缩 blob 直灌显存暂存区并由计算着色器解压。当前 `prism_gdeflate_gpu::GDeflateDecoder` 的统一路径会在真实设备上 GPU 去交错、CPU 执行 Huffman inflate，并在设备限制或校验失败时返回结构化 CPU fallback 报告；另有 stored-block 专用 GPU fast path，仍由 CPU 解析 raw-DEFLATE block 边界，且 fixed/dynamic Huffman 块不进入该专用路径。完整 GPU Huffman、压缩 chunk 到 runtime page/texture 的生产接线仍未完成。
 - **优雅降级**：平台无 DirectStorage/无 GPU 解压则回退 CPU 路径（`async_io` + CPU zstd/gdeflate），上层无感——档位铁律（§3）。
 
 ### 11.3 与渲染驻留的边界

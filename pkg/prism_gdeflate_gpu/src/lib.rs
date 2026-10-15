@@ -42,10 +42,14 @@ extern crate alloc;
 
 pub mod buffer;
 pub mod context;
+pub mod decoder;
 pub mod deinterleave;
 pub mod stored;
 
 pub use context::{GpuContext, GpuProbeError};
+pub use decoder::{
+    DecodePath, DecodeReport, DecodedGDeflate, DecoderError, GDeflateDecoder, GpuFallbackReason,
+};
 pub use deinterleave::{
     reference_deinterleave, DeinterleaveError, GpuDeinterleave, GROUP, LANES, WORD,
 };
