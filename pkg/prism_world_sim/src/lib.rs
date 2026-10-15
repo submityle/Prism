@@ -18,7 +18,9 @@ mod sim;
 mod types;
 mod voxel;
 
-pub use codec::{decode_delta, encode_delta, CodecError};
+pub use codec::{
+    decode_delta, decode_delta_with_limits, encode_delta, CodecError, DeltaDecodeLimits,
+};
 pub use ecology::{EcologyCell, EcologyConfig, EcologyDelta, EcologyField};
 pub use hydrology::{FlowDelta, HydrologyCell, HydrologyField};
 pub use sim::{
@@ -50,7 +52,7 @@ mod tests {
         let mut sim = populated_sim();
         let initial_water = sim.hydrology.water_at(CellCoord::new(0, 0, 0))
             + sim.hydrology.water_at(CellCoord::new(1, 0, 0));
-        let report = sim.step(TickBudget::new(64, 64, 16));
+        let report = sim.step(TickBudget::new(64, 64, 16)).unwrap();
         let final_water = sim.hydrology.water_at(CellCoord::new(0, 0, 0))
             + sim.hydrology.water_at(CellCoord::new(1, 0, 0));
         let consumed = report
@@ -82,7 +84,7 @@ mod tests {
     #[test]
     fn shared_budget_caps_work_and_output() {
         let mut sim = populated_sim();
-        let report = sim.step(TickBudget::new(1, 1, 1));
+        let report = sim.step(TickBudget::new(1, 1, 1)).unwrap();
         assert!(report.budget.work_units <= 1);
         assert!(report.budget.output_records <= 1);
         assert!(report.delta.voxel_deltas.is_empty());
@@ -92,7 +94,7 @@ mod tests {
     #[test]
     fn dirty_regions_merge_adjacent_phase_outputs() {
         let mut sim = populated_sim();
-        let report = sim.step(TickBudget::new(64, 64, 16));
+        let report = sim.step(TickBudget::new(64, 64, 16)).unwrap();
         assert_eq!(report.dirty_regions.len(), 1);
         assert_eq!(
             report.dirty_regions[0].region,
@@ -115,5 +117,18 @@ mod tests {
             stable_fragment_key(9, origin, 4),
             stable_fragment_key(9, CellCoord::new(-2, 2, 8), 4)
         );
+    }
+
+    #[test]
+    fn extreme_elevation_difference_routes_without_signed_overflow() {
+        let mut sim = WorldSim::new(WorldSimConfig::default()).unwrap();
+        let source = CellCoord::new(0, 0, 0);
+        let sink = CellCoord::new(1, 0, 0);
+        sim.hydrology
+            .set(source, HydrologyCell::new(i32::MAX, 40, 100, u16::MAX));
+        sim.hydrology
+            .set(sink, HydrologyCell::new(i32::MIN, 0, 100, u16::MAX));
+        let report = sim.step(TickBudget::new(8, 8, 4)).unwrap();
+        assert_eq!(report.delta.flow_deltas[0].amount, 10);
     }
 }

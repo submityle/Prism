@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use core::convert::TryFrom;
 
 use crate::ecology::EcologyDelta;
 use crate::hydrology::FlowDelta;
@@ -24,10 +25,56 @@ pub enum CodecError {
     InvalidRecord,
     /// Bytes remain after the final declared record.
     TrailingBytes,
+    /// The input exceeds the decoder's resource budget.
+    SizeLimit,
+}
+
+/// Resource limits applied before allocating decoded record vectors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeltaDecodeLimits {
+    /// Maximum encoded input size in bytes.
+    pub max_bytes: usize,
+    /// Maximum total number of decoded records.
+    pub max_records: usize,
+}
+
+impl Default for DeltaDecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: 16 * 1024 * 1024,
+            max_records: 1_000_000,
+        }
+    }
 }
 
 /// Encodes a simulation delta using stable little-endian integer records.
-pub fn encode_delta(delta: &SimulationDelta) -> Vec<u8> {
+pub fn encode_delta(delta: &SimulationDelta) -> Result<Vec<u8>, CodecError> {
+    let counts = [
+        delta.voxel_deltas.len(),
+        delta.fragment_deltas.len(),
+        delta.flow_deltas.len(),
+        delta.ecology_deltas.len(),
+    ];
+    for count in counts {
+        u32::try_from(count).map_err(|_| CodecError::CountOverflow)?;
+    }
+    for item in &delta.voxel_deltas {
+        if item.before_mass < item.after_mass
+            || item.before_mass - item.after_mass != item.removed_mass
+        {
+            return Err(CodecError::InvalidRecord);
+        }
+    }
+    for item in &delta.fragment_deltas {
+        if item.mass == 0 {
+            return Err(CodecError::InvalidRecord);
+        }
+    }
+    for item in &delta.flow_deltas {
+        if item.amount == 0 || item.from == item.to {
+            return Err(CodecError::InvalidRecord);
+        }
+    }
     let mut output = Vec::new();
     output.extend_from_slice(&MAGIC);
     put_u16(&mut output, VERSION);
@@ -64,11 +111,22 @@ pub fn encode_delta(delta: &SimulationDelta) -> Vec<u8> {
         put_u16(&mut output, item.moisture);
         put_u16(&mut output, item.stress);
     }
-    output
+    Ok(output)
 }
 
 /// Decodes a stable little-endian simulation delta.
 pub fn decode_delta(input: &[u8]) -> Result<SimulationDelta, CodecError> {
+    decode_delta_with_limits(input, DeltaDecodeLimits::default())
+}
+
+/// Decodes a simulation delta under explicit input and allocation limits.
+pub fn decode_delta_with_limits(
+    input: &[u8],
+    limits: DeltaDecodeLimits,
+) -> Result<SimulationDelta, CodecError> {
+    if input.len() > limits.max_bytes {
+        return Err(CodecError::SizeLimit);
+    }
     let mut reader = Reader { input, offset: 0 };
     if reader.take(4)? != MAGIC {
         return Err(CodecError::InvalidMagic);
@@ -77,10 +135,18 @@ pub fn decode_delta(input: &[u8]) -> Result<SimulationDelta, CodecError> {
         return Err(CodecError::UnsupportedVersion);
     }
     let tick = reader.u64()?;
-    let voxel_count = reader.count(24)?;
-    let fragment_count = reader.count(28)?;
+    let voxel_count = reader.count(26)?;
+    let fragment_count = reader.count(32)?;
     let flow_count = reader.count(28)?;
-    let ecology_count = reader.count(20)?;
+    let ecology_count = reader.count(24)?;
+    let total = voxel_count
+        .checked_add(fragment_count)
+        .and_then(|count| count.checked_add(flow_count))
+        .and_then(|count| count.checked_add(ecology_count))
+        .ok_or(CodecError::CountOverflow)?;
+    if total > limits.max_records {
+        return Err(CodecError::SizeLimit);
+    }
     let mut delta = SimulationDelta {
         tick,
         voxel_deltas: Vec::with_capacity(voxel_count),
@@ -293,8 +359,46 @@ mod tests {
                 stress: 20,
             }],
         };
-        let encoded = encode_delta(&delta);
+        let encoded = encode_delta(&delta).unwrap();
         assert_eq!(decode_delta(&encoded), Ok(delta.clone()));
-        assert_eq!(encode_delta(&decode_delta(&encoded).unwrap()), encoded);
+        assert_eq!(encode_delta(&decode_delta(&encoded).unwrap()), Ok(encoded));
+    }
+
+    #[test]
+    fn encoder_rejects_non_canonical_records() {
+        let invalid = SimulationDelta {
+            voxel_deltas: vec![VoxelDelta {
+                coord: CellCoord::new(0, 0, 0),
+                material: 1,
+                before_mass: 1,
+                after_mass: 1,
+                removed_mass: 1,
+            }],
+            ..SimulationDelta::default()
+        };
+        assert_eq!(encode_delta(&invalid), Err(CodecError::InvalidRecord));
+    }
+
+    #[test]
+    fn decoder_enforces_explicit_record_budget() {
+        let delta = SimulationDelta {
+            flow_deltas: vec![FlowDelta {
+                from: CellCoord::new(0, 0, 0),
+                to: CellCoord::new(1, 0, 0),
+                amount: 1,
+            }],
+            ..SimulationDelta::default()
+        };
+        let encoded = encode_delta(&delta).unwrap();
+        assert_eq!(
+            decode_delta_with_limits(
+                &encoded,
+                DeltaDecodeLimits {
+                    max_bytes: encoded.len(),
+                    max_records: 0,
+                }
+            ),
+            Err(CodecError::SizeLimit)
+        );
     }
 }

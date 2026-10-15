@@ -40,7 +40,12 @@ mod tests {
                 let face_uv = FaceUv::new(face, u, v).expect("valid face coordinate");
                 let direction = face_uv_to_direction(face_uv);
                 let recovered = direction_to_face_uv(direction.components()).expect("direction");
-                assert_eq!(recovered.face(), face, "uv=({u},{v}) dir={:?}", direction.components());
+                assert_eq!(
+                    recovered.face(),
+                    face,
+                    "uv=({u},{v}) dir={:?}",
+                    direction.components()
+                );
                 assert!((recovered.u() - u).abs() < 1.0e-6);
                 assert!((recovered.v() - v).abs() < 1.0e-6);
             }
@@ -78,7 +83,7 @@ mod tests {
     #[test]
     fn tile_uv_boundaries_and_quadtree_are_stable() {
         let root = TileKey::root(CubeFace::PositiveZ);
-        let children = root.children();
+        let children = root.children().expect("root has children");
         assert_eq!(
             children[0],
             TileKey::new(CubeFace::PositiveZ, 1, 0, 0).unwrap()
@@ -88,6 +93,9 @@ mod tests {
             TileKey::new(CubeFace::PositiveZ, 1, 1, 1).unwrap()
         );
         assert_eq!(children[2].parent(), Some(root));
+
+        let leaf = TileKey::new(CubeFace::PositiveZ, MAX_TILE_LEVEL, 0, 0).unwrap();
+        assert_eq!(leaf.children(), Err(TileError::NoChildren));
 
         let west =
             TileKey::from_face_uv(FaceUv::new(CubeFace::PositiveZ, -1.0, 0.0).unwrap(), 3).unwrap();
@@ -109,6 +117,11 @@ mod tests {
             .expect("valid LOD metric");
         assert_eq!(clamped.base_level(), 0);
         assert_eq!(clamped.morph_alpha(), 0.0);
+
+        assert_eq!(
+            evaluate_lod(LodMetric::new(f32::MAX, f32::MIN_POSITIVE, f32::MAX, 1.0, 2,).unwrap()),
+            Err(LodError::NonFinite)
+        );
     }
 
     #[test]
@@ -143,6 +156,11 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, other);
         assert!(first.height_mm().unsigned_abs() <= 2_000);
+
+        let saturated = DeterministicHeightSampler::new(42, i64::MAX)
+            .sample_height(sample)
+            .unwrap();
+        assert!(saturated.height_mm().unsigned_abs() <= i64::MAX as u64);
     }
 
     #[test]

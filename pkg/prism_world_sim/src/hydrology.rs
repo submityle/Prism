@@ -121,7 +121,10 @@ impl HydrologyField {
 
             let available =
                 source_water.saturating_sub(outgoing.get(&source).copied().unwrap_or(0));
-            let downhill = (source_cell.elevation - destination_cell.elevation) as u32;
+            let downhill = u32::try_from(
+                i64::from(source_cell.elevation) - i64::from(destination_cell.elevation),
+            )
+            .unwrap_or(u32::MAX);
             let quarter = available.saturating_add(3) / 4;
             let permeability = u32::from(source_cell.permeability);
             let slope_limit = downhill.saturating_add(1).saturating_add(permeability / 16);

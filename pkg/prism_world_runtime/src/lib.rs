@@ -14,6 +14,12 @@ use core::fmt;
 use prism_world_io::ReadRequest;
 use prism_world_stream::{CellManifest, DemandSource, SectorId, StreamAction, StreamBudget};
 
+#[cfg(feature = "std")]
+mod io_adapter;
+
+#[cfg(feature = "std")]
+pub use io_adapter::{IoAdapterEvent, IoRequestId, IoSchedulerAdapter};
+
 /// The byte width of the fixed cell manifest header.
 pub const CELL_HEADER_SIZE: usize = 44;
 
@@ -27,7 +33,8 @@ pub struct CellReadRequest {
 }
 
 impl CellReadRequest {
-    fn new(manifest: CellManifest, priority: u32) -> Self {
+    /// Creates a cell request for the given manifest and stream priority.
+    pub const fn new(manifest: CellManifest, priority: u32) -> Self {
         Self { manifest, priority }
     }
 

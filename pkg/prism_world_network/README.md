@@ -16,6 +16,8 @@ filesystem implementation.
 - This crate owns only the boundary policy: inclusive AOI selection,
   deterministic delta envelopes, publish permissions, sector handoff records,
   and an object-indexed merge facade.
+- Merge duplicate detection is indexed by `TransactionId`, so replaying a
+  large batch does not scan every object bucket linearly.
 
 The world remains authoritative for spatial placement and persistence remains
 authoritative for object state. An envelope carries a validated persistence

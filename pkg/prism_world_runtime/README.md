@@ -27,10 +27,13 @@ it, or forward it to another subsystem.
 
 The coordinator's `no_std` poll layer is independent from an OS executor:
 `CellProvider` is the provider boundary and `SceneHost` is the scene boundary.
-The separate `prism_world_io::IoScheduler` remains the chunk-level async/file
-provider implementation; an application can adapt its completed read events
-into `CellProvider` without making world policy depend on a thread runtime or
-filesystem.
+Under `std`, `IoSchedulerAdapter` is the concrete bridge to
+`prism_world_io::IoScheduler`, `ReadProvider`, and `ChunkedRead`: it submits
+`CellReadRequest` values, exposes chunk/completion events, forwards cancellation,
+backpressure, and provider errors, and can serve as the coordinator's
+`ChunkProvider`. The adapter's direct `poll` method preserves the asynchronous
+boundary; its `ChunkProvider` implementation is a blocking compatibility path
+for world coordination.
 
 ## Features
 

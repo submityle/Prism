@@ -79,7 +79,14 @@ impl LodEvaluation {
 /// Evaluates screen error, continuous level, and smooth morph alpha.
 pub fn evaluate_lod(metric: LodMetric) -> Result<LodEvaluation, LodError> {
     let screen_error = metric.geometric_error * metric.pixels_per_unit / metric.distance;
-    let unclamped_level = log2_approx(screen_error / metric.target_error);
+    if !screen_error.is_finite() {
+        return Err(LodError::NonFinite);
+    }
+    let level_ratio = screen_error / metric.target_error;
+    if !level_ratio.is_finite() {
+        return Err(LodError::NonFinite);
+    }
+    let unclamped_level = log2_approx(level_ratio);
     let continuous_level = unclamped_level.clamp(0.0, metric.max_level as f32);
     let base_level = continuous_level as u8;
     let fraction = continuous_level - base_level as f32;

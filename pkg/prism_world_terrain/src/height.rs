@@ -86,7 +86,7 @@ impl HeightSampler for DeterministicHeightSampler {
         state = mix64(state ^ u64::from(sample.u_q16()));
         state = mix64(state ^ u64::from(sample.v_q16()));
         let centered = ((state >> 16) & 0xffff) as i64 - 32_768;
-        let height = centered * self.amplitude_mm / 32_768;
+        let height = centered.saturating_mul(self.amplitude_mm) / 32_768;
         Ok(HeightSampleValue::from_millimetres(height))
     }
 }

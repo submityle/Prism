@@ -6,7 +6,9 @@ Engine-neutral, `no_std + alloc` terrain and planetary primitives for Prism.
 
 - Cube-sphere mapping uses six fixed orientations and deterministic dominant-axis tie breaking.
 - `TileKey` is a face-local quadtree key with stable child order and explicit cross-face edge transforms.
+- Child expansion is fallible at `MAX_TILE_LEVEL`; callers cannot accidentally create an invalid level-31 tile.
 - LOD uses projected geometric error in pixels, a clamped continuous level, and smooth morph alpha.
+- Non-finite intermediate LOD values and fixed-point height multiplication overflow are rejected or saturated deterministically.
 - Integer and Q32.32 positions subtract the origin before converting to `f32`; the result carries a conservative absolute error bound.
 - Height sampling is requested with quantized tile-local coordinates and returns integer millimetres, making the interface recordable and replayable.
 - Voxel storage is a validated little-endian, row-major byte contract with X as the fastest-changing axis and power-of-two streaming bricks.

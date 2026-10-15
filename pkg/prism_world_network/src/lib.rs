@@ -449,6 +449,7 @@ pub enum MergeError {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PersistentMergeState {
     envelopes: BTreeMap<PersistentId, BTreeMap<TransactionId, DeltaEnvelope>>,
+    transaction_objects: BTreeMap<TransactionId, PersistentId>,
     crdt: prism_world_persist::CrdtState,
 }
 
@@ -457,6 +458,7 @@ impl PersistentMergeState {
     pub const fn new() -> Self {
         Self {
             envelopes: BTreeMap::new(),
+            transaction_objects: BTreeMap::new(),
             crdt: prism_world_persist::CrdtState::new(),
         }
     }
@@ -466,23 +468,22 @@ impl PersistentMergeState {
     where
         I: IntoIterator<Item = &'a DeltaEnvelope>,
     {
-        let incoming: Vec<&DeltaEnvelope> = envelopes.into_iter().collect();
         let mut pending: BTreeMap<TransactionId, &DeltaEnvelope> = BTreeMap::new();
-        for envelope in &incoming {
+        for envelope in envelopes {
             let id = envelope.transaction_id();
             if let Some(existing) = self.find_envelope(id) {
-                if existing != *envelope {
+                if existing != envelope {
                     return Err(MergeError::ConflictingTransaction(id));
                 }
                 continue;
             }
             if let Some(existing) = pending.get(&id) {
-                if *existing != *envelope {
+                if *existing != envelope {
                     return Err(MergeError::ConflictingTransaction(id));
                 }
                 continue;
             }
-            pending.insert(id, *envelope);
+            pending.insert(id, envelope);
         }
 
         let mut next_crdt = self.crdt.clone();
@@ -494,6 +495,8 @@ impl PersistentMergeState {
                 .entry(envelope.object())
                 .or_default()
                 .insert(envelope.transaction_id(), envelope.clone());
+            self.transaction_objects
+                .insert(envelope.transaction_id(), envelope.object());
         }
         self.crdt = next_crdt;
         Ok(())
@@ -537,9 +540,8 @@ impl PersistentMergeState {
     }
 
     fn find_envelope(&self, id: TransactionId) -> Option<&DeltaEnvelope> {
-        self.envelopes
-            .values()
-            .find_map(|envelopes| envelopes.get(&id))
+        let object = self.transaction_objects.get(&id)?;
+        self.envelopes.get(object)?.get(&id)
     }
 }
 

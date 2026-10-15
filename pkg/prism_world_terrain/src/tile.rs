@@ -14,6 +14,8 @@ pub enum TileError {
     CoordinateOutOfRange,
     /// A face coordinate could not be converted because it was invalid.
     InvalidFaceCoordinate,
+    /// The tile is already at the maximum supported level.
+    NoChildren,
 }
 
 /// The four edges of a face-local tile.
@@ -133,15 +135,14 @@ impl TileKey {
     }
 
     /// Returns children in southwest, southeast, northwest, northeast order.
-    pub fn children(self) -> [Self; 4] {
-        assert!(
-            self.level < MAX_TILE_LEVEL,
-            "maximum tile level has no children"
-        );
+    pub fn children(self) -> Result<[Self; 4], TileError> {
+        if self.level >= MAX_TILE_LEVEL {
+            return Err(TileError::NoChildren);
+        }
         let level = self.level + 1;
         let x = self.x * 2;
         let y = self.y * 2;
-        [
+        Ok([
             Self {
                 face: self.face,
                 level,
@@ -166,7 +167,7 @@ impl TileKey {
                 x: x + 1,
                 y: y + 1,
             },
-        ]
+        ])
     }
 
     /// Returns the tile sharing the requested edge, including across cube faces.

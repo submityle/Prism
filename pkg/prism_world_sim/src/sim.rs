@@ -147,6 +147,8 @@ pub enum SimulationError {
     ZeroErosionLimit,
     /// The ecology configuration contained a zero divisor.
     InvalidEcologyConfig,
+    /// The simulation tick would wrap past the largest representable value.
+    TickOverflow,
 }
 
 /// Deterministic engine-neutral world simulation owner.
@@ -184,13 +186,16 @@ impl WorldSim {
     }
 
     /// Returns the next tick number that will be emitted.
-    pub const fn next_tick(&self) -> u64 {
-        self.tick.wrapping_add(1)
+    pub const fn next_tick(&self) -> Result<u64, SimulationError> {
+        match self.tick.checked_add(1) {
+            Some(tick) => Ok(tick),
+            None => Err(SimulationError::TickOverflow),
+        }
     }
 
     /// Runs hydrology, local erosion, and ecology in stable phase order.
-    pub fn step(&mut self, budget: TickBudget) -> TickReport {
-        self.tick = self.tick.wrapping_add(1);
+    pub fn step(&mut self, budget: TickBudget) -> Result<TickReport, SimulationError> {
+        self.tick = self.next_tick()?;
         let mut ledger = BudgetLedger::new(budget);
         let mut dirty = DirtyRegions::new(budget.dirty_regions);
         let mut delta = SimulationDelta {
@@ -218,11 +223,11 @@ impl WorldSim {
             &mut dirty,
             &mut delta.ecology_deltas,
         );
-        TickReport {
+        Ok(TickReport {
             delta,
             dirty_regions: dirty.into_vec(),
             budget: ledger.usage(),
-        }
+        })
     }
 
     fn erode(
@@ -288,5 +293,22 @@ impl WorldSim {
                 velocity: [0, -1, 0],
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tick_overflow_is_reported_without_mutating_state() {
+        let mut sim = WorldSim::new(WorldSimConfig::default()).unwrap();
+        sim.tick = u64::MAX;
+        assert_eq!(sim.next_tick(), Err(SimulationError::TickOverflow));
+        assert_eq!(
+            sim.step(TickBudget::new(1, 1, 1)),
+            Err(SimulationError::TickOverflow)
+        );
+        assert_eq!(sim.tick, u64::MAX);
     }
 }
