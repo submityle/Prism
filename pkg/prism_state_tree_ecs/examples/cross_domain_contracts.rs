@@ -1,4 +1,4 @@
-//! Verifies that Flow and Animation domains share one StateTree contract.
+//! Verifies that Flow and Animation domains share one `StateTree` contract.
 //!
 //! Both domains use the same compiled-plan shape, ECS instance adapter,
 //! snapshot bridge, debugger observations, and structured error handling.
@@ -16,13 +16,6 @@ enum Domain {
 }
 
 impl Domain {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Flow => "flow",
-            Self::Animation => "animation",
-        }
-    }
-
     fn event_id(self) -> EventId {
         match self {
             Self::Flow => EventId(10),
@@ -32,7 +25,6 @@ impl Domain {
 }
 
 struct Scenario {
-    domain: Domain,
     initial: StateId,
     target: StateId,
     event: EventId,
@@ -72,7 +64,6 @@ fn scenario(domain: Domain) -> Scenario {
         .add_breakpoint(Breakpoint::StateEntered(target))
         .expect("target breakpoint");
     Scenario {
-        domain,
         initial,
         target,
         event,
@@ -119,10 +110,6 @@ fn run(mut scenario: Scenario) {
         &[StateId(0), scenario.initial]
     );
     assert_eq!(scenario.debugger.hits().len(), 2);
-    println!(
-        "{} domain shares StateTree, snapshot, debugger, and errors",
-        scenario.domain.label()
-    );
 }
 
 fn main() {
