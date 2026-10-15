@@ -5,6 +5,7 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use crate::gpu::{
     buffer_binding, storage_entry, uniform_entry, GpuParams, GpuRecord, WORKGROUP_SIZE,
 };
+use crate::{resident_density::ResidentDensity, DensityPolicy};
 use crate::{GpuContext, GpuVisibility, ProxyInstance, ProxySoa, VisibilityInput};
 
 /// Validation failures detected before allocating resources or uploading columns.
@@ -27,6 +28,8 @@ pub enum GpuResidentError {
     InvalidCamera,
     /// Upload camera/count with `write_camera` before encoding this frame.
     CameraNotUploaded,
+    /// Density resources must be selected at construction; no lazy allocation.
+    DensityNotEnabled,
     /// The allocation or dispatch cannot fit the logical device's limits.
     DeviceLimit {
         limit: &'static str,
@@ -56,6 +59,9 @@ impl std::fmt::Display for GpuResidentError {
             Self::InvalidCamera => f.write_str("invalid visibility camera parameters"),
             Self::CameraNotUploaded => {
                 f.write_str("camera or dense count changed; call write_camera before encode")
+            }
+            Self::DensityNotEnabled => {
+                f.write_str("construct resident with density enabled before writing a policy")
             }
             Self::DeviceLimit {
                 limit,
@@ -102,8 +108,15 @@ pub struct GpuResidentVisibility {
     indirect: wgpu::Buffer,
     visibility: GpuVisibility,
     visibility_bind_group: wgpu::BindGroup,
-    compact_pipeline: wgpu::ComputePipeline,
-    compact_bind_group: wgpu::BindGroup,
+    compaction: ResidentCompaction,
+}
+
+enum ResidentCompaction {
+    Standard {
+        pipeline: wgpu::ComputePipeline,
+        bind_group: wgpu::BindGroup,
+    },
+    Density(ResidentDensity),
 }
 
 impl GpuResidentVisibility {
@@ -117,7 +130,34 @@ impl GpuResidentVisibility {
         capacity: usize,
         vertex_count: u32,
     ) -> Result<Self, GpuResidentError> {
+        Self::build(ctx, capacity, vertex_count, None)
+    }
+
+    /// Adds fixed coverage storage and a GPU density/distance-fade stage.
+    ///
+    /// The renderer must consume `density_coverage` (alpha or coverage discard)
+    /// to make partial coverage visible. Zero coverage is removed from indirect
+    /// draws; geometric visibility records retain their original ABI/policy.
+    /// Changing policy writes only 16 uniform bytes, never per-instance columns.
+    pub fn new_with_density(
+        ctx: &GpuContext,
+        capacity: usize,
+        vertex_count: u32,
+        policy: DensityPolicy,
+    ) -> Result<Self, GpuResidentError> {
+        Self::build(ctx, capacity, vertex_count, Some(policy))
+    }
+
+    fn build(
+        ctx: &GpuContext,
+        capacity: usize,
+        vertex_count: u32,
+        density: Option<DensityPolicy>,
+    ) -> Result<Self, GpuResidentError> {
         validate_capacity(capacity, &ctx.device().limits())?;
+        if density.is_some() {
+            crate::resident_density::validate_limits(&ctx.device().limits())?;
+        }
         let device = ctx.device();
         let slots = capacity.max(1) as u64;
         let storage = |label, size, extra| {
@@ -170,42 +210,54 @@ impl GpuResidentVisibility {
         let visibility = GpuVisibility::new(ctx);
         let visibility_bind_group =
             visibility.bind_group(device, &params, &positions, &errors, &metadata, &records);
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("resident visibility compact shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/proxy_compact.wgsl").into()),
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("resident visibility compact layout"),
-            entries: &[
-                uniform_entry(0),
-                storage_entry(1, true),
-                storage_entry(2, false),
-                storage_entry(3, false),
-            ],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("resident visibility compact pipeline layout"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("resident visibility compact pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let compact_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("resident visibility compact bind group"),
-            layout: &layout,
-            entries: &[
-                buffer_binding(0, &params),
-                buffer_binding(1, &records),
-                buffer_binding(2, &indices),
-                buffer_binding(3, &indirect),
-            ],
-        });
+        let compaction = if let Some(policy) = density {
+            ResidentCompaction::Density(ResidentDensity::new(
+                device, capacity, policy, &params, &positions, &errors, &metadata, &records,
+                &indices, &indirect,
+            ))
+        } else {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("resident visibility compact shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/proxy_compact.wgsl").into()),
+            });
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("resident visibility compact layout"),
+                entries: &[
+                    uniform_entry(0),
+                    storage_entry(1, true),
+                    storage_entry(2, false),
+                    storage_entry(3, false),
+                ],
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("resident visibility compact pipeline layout"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let compact_pipeline =
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("resident visibility compact pipeline"),
+                    layout: Some(&pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+            let compact_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("resident visibility compact bind group"),
+                layout: &layout,
+                entries: &[
+                    buffer_binding(0, &params),
+                    buffer_binding(1, &records),
+                    buffer_binding(2, &indices),
+                    buffer_binding(3, &indirect),
+                ],
+            });
+            ResidentCompaction::Standard {
+                pipeline: compact_pipeline,
+                bind_group: compact_bind_group,
+            }
+        };
         Ok(Self {
             queue: ctx.queue().clone(),
             capacity,
@@ -222,8 +274,7 @@ impl GpuResidentVisibility {
             indirect,
             visibility,
             visibility_bind_group,
-            compact_pipeline,
-            compact_bind_group,
+            compaction,
         })
     }
 
@@ -286,6 +337,40 @@ impl GpuResidentVisibility {
         Ok(())
     }
 
+    /// Queues a changed density policy without scanning/reuploading proxies.
+    /// Submit the previous frame first, as for camera and column writes. Policy
+    /// is validated by its constructor; this never allocates GPU resources.
+    pub fn write_density(&mut self, policy: DensityPolicy) -> Result<(), GpuResidentError> {
+        match &mut self.compaction {
+            ResidentCompaction::Density(density) => {
+                density.write(&self.queue, policy);
+                Ok(())
+            }
+            ResidentCompaction::Standard { .. } => Err(GpuResidentError::DensityNotEnabled),
+        }
+    }
+
+    /// Current optional policy, independent of the camera/count upload cache.
+    #[must_use]
+    pub fn density_policy(&self) -> Option<DensityPolicy> {
+        match &self.compaction {
+            ResidentCompaction::Density(density) => Some(density.policy()),
+            ResidentCompaction::Standard { .. } => None,
+        }
+    }
+
+    /// One f32 coverage per dense source slot after encode, valid only for the
+    /// current active prefix. Never index by compact instance order. Zero-count
+    /// frames reset indirect count but leave inactive coverage bytes unspecified.
+    /// Stable rendering phase should come from content identity, not this slot.
+    #[must_use]
+    pub fn density_coverage(&self) -> Option<&wgpu::Buffer> {
+        match &self.compaction {
+            ResidentCompaction::Density(density) => Some(&density.coverage),
+            ResidentCompaction::Standard { .. } => None,
+        }
+    }
+
     /// Only records reset + visibility + compact into the caller's encoder.
     /// Never uploads, submits, polls, maps, reads back, or creates GPU resources.
     /// For a nonempty frame, `write_camera(camera)` must have uploaded this
@@ -305,14 +390,21 @@ impl GpuResidentVisibility {
         encoder.clear_buffer(&self.indirect, 4, Some(4));
         self.visibility
             .encode(encoder, &self.visibility_bind_group, self.count);
-        if self.count != 0 {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("resident visibility compact pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.compact_pipeline);
-            pass.set_bind_group(0, &self.compact_bind_group, &[]);
-            pass.dispatch_workgroups(self.count.div_ceil(WORKGROUP_SIZE), 1, 1);
+        match &self.compaction {
+            ResidentCompaction::Density(density) => density.encode(encoder, self.count),
+            ResidentCompaction::Standard {
+                pipeline,
+                bind_group,
+            } if self.count != 0 => {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("resident visibility compact pass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.dispatch_workgroups(self.count.div_ceil(WORKGROUP_SIZE), 1, 1);
+            }
+            ResidentCompaction::Standard { .. } => {}
         }
         Ok(())
     }
@@ -351,7 +443,11 @@ impl GpuResidentVisibility {
         ]
         .iter()
         .map(|buffer| buffer.size())
-        .sum()
+        .sum::<u64>()
+            + match &self.compaction {
+                ResidentCompaction::Density(density) => density.allocated_buffer_bytes(),
+                ResidentCompaction::Standard { .. } => 0,
+            }
     }
 
     /// Read-only downstream storage: packed u32 source slots, in arbitrary order.

@@ -28,6 +28,8 @@ decoder 收到校验后、已去除 header 的原始 payload；格式和内容�
 
 scratch 预留 `48 × capacity` 字节列载荷，固定 GPU buffers 为 `72 × max(capacity,1) + 144` 字节。另有 registry 向量、sector map、resident 初始化追踪、pipeline/bind group 和 wgpu staging。这些是逻辑载荷/descriptor 字节，不是 VRAM、RSS 或物理传输。`ProxyUploadStats` 明确报告区间数、转置行数、逻辑列字节和当前 count。构造先验证设备限制，再分配容量级 CPU 存储；upload/encode 不创建 GPU 资源，不提交、等待或回读。
 
+`with_sector_capacity_and_density` 可选开启固定 GPU coverage，额外逻辑 buffer 为 `4 × max(capacity,1) + 16` 字节；`write_density` 保留与 camera/encode 相同的 pending edit 和 registry 身份门禁。策略变化只写 16 字节，不重新上传列，幸存代理在交换压紧后保持相同 tuple rank。原几何 record 不变，下游以 compact source slot 消费 coverage 和导出 dither。API、退化数值规则、实机像素验证和限定新基准见 `prism_world_density_zh.md`。
+
 ## 回归证据
 
 2026-10-15，Apple M2、Metal、IntegratedGpu、无额外必需 device feature。严格真实 GPU 测试不允许无 adapter、CPU adapter 或 backend 不符时跳过。
@@ -85,4 +87,4 @@ cargo test --offline -p prism_world_runtime --features reactor,proxy_host -j1
 
 ## 保持独立验收的内容
 
-这条链路不生成 GPU 散布候选，不做密度淡入、HZB、风或交互场，也不实现多材质/多网格 draw 分桶。位置由 decoder 提供一致的 camera-relative 空间，不自动进行全局 i64 坐标转换。产品 scene/ECS decoder、renderer graph、完整资产包、异步 reactor 与 GPU 的同场产品验收、物理显存峰值和多后端测试仍须分别完成。之前 resident 百万实例 encode/submit 基准不包含本注册表与 host 开销，不能移作本链路的吞吐数字。
+这条链路不生成 GPU 散布候选；可选密度 coverage/距离淡出与最小 dither consumer 已实现，但不包含 domain-warp/作者密度场、HZB、风或交互场，也不实现多材质/多网格 draw 分桶。位置由 decoder 提供一致的 camera-relative 空间，不自动进行全局 i64 坐标转换。产品 scene/ECS decoder、renderer graph、完整资产包、异步 reactor 与 GPU 的同场产品验收、物理显存峰值和多后端测试仍须分别完成。resident 百万实例 encode/submit 基准不包含本注册表与 host 开销，不能移作本链路的吞吐数字。

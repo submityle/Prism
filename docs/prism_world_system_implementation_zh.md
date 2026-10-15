@@ -49,12 +49,20 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 `prism_world_runtime/proxy_host` 在 header 校验后借用项目 decoder、原 `SceneHost` 与同一注册表，先派生 admission 后调用权威 host。load 错误或 unwind 仅补偿新增派生 sector，不能回滚 host 的部分修改；evict 成功后才删代理，失败/unwind 保留。它不另立 scene 真相、不规定 payload 格式、不启用 wgpu。真实 stream demand/coordinator→decoder/host→上传→间接绘制与策略驱逐像素回归已接通；合约、测试方法与性能边界见 `prism_world_sector_proxies_zh.md`。这不是产品 ECS decoder/render graph 的完整接入。
 
+### M4：GPU 密度覆盖与距离淡出
+
+`DensityPolicy` 以 `(proxy_id, cluster_id, seed)` 的稳定 PCG rank 计算平滑 coverage，不依赖可变 dense slot；可选距离 fade 与 quality coverage 相乘。构造器校验有限 normal/零参数，明确拒绝非零 subnormal；CPU/WGSL 使用相同 f32 缩放 norm、退化 width 与结果规范化规则。普通 resident 不增加资源；可选路径额外 `4×max(capacity,1)+16` 逻辑 buffer 字节，策略变化只写 16 字节 uniform，不遍历/重传列。原几何 record ABI 不变，compact 取几何可见与正 coverage 交集。下游按 compact source slot 读取 coverage，并可调用导出的 4×4 ordered-dither WGSL；部分 coverage 不被材质消费时不构成连续淡出。
+
+2026-10-15 Apple M2/Metal 原始源码 harness 最终 96 项通过、0 失败/忽略（库 79、density 8、resident 6、parity 1、WGSL 2）。真实 draw_indirect 读取 GPU coverage 并逐像素对拍；另测两 seed、129 尾部、交换压紧、全卸载、固定资源、极小 normal range 与大坐标。实机回归发现并修复窄 transition 消减、极小距离 subnormal 余量及 smoothstep 中间平方冲零；明确检查微小正 coverage 仍在 compact 集合内。release 百万实例 density 模式输出 416,295 个 source slot，record+finish P50/P95/P99 为 48.750/57.125/64.125 µs，submit+wait 为 2058.625/2107.625/2136.208 µs；不含上传、回读或绘制，不是 GPU timestamp/产品帧时或严格 A/B 比较。API、三档双模式实测、harness 隔离说明和边界见 `prism_world_density_zh.md`。GPU 散布生成、密度场、风/交互、HZB 与产品 renderer graph 尚须继续完成。
+
+补充验证：no-default 原始库源码 73 项 CPU 测试通过；原始源码 harness all-target clippy 和正常 workspace GPU lib clippy 均通过 `-D warnings`。这两项局部结论不代表全 workspace 或完整产品集成通过。
+
 ### M4：可再生 CPU 散布 kernel
 
 - `prism_world_residency::scatter` 在全局整数毫米三维格中每格生成一个 hash-jitter 候选；显式 seed/version/salt 与完整结构化 candidate key 决定位置。半开位置范围负责唯一归属，负坐标使用 Euclidean 除法；任意拆分、合并和请求顺序不会改变成员集合。完整 cache key 包含 kernel 版本、配置与范围，丢弃后可重建，不充当持久对象身份。
 - 可选最小距离采用 jittered lattice 上的 Matérn type-II 式筛选，重建未请求邻格的原始候选，以 `(priority hash, full key)` 排名消除边界依赖；不是 Poisson 输入、蓝噪声保证、最大填充或递归 dart throwing。距离比较使用宽整数，等于半径允许保留。
 - 预检工作量上界为 `N × (2 × ceil(radius/spacing) + 1)^3`，无筛选时为 `N`；输出数量和 Vec 容量载荷字节另有硬限制。checked 算术、一次 fallible exact reservation，超限整体失败，不返回随预算变化的截断前缀；字节限制不含分配器元数据、栈或外部消费者副本。
-- no-default 测试 35 项（其中散布新增 20 项）、all-target clippy `-D warnings` 和格式检查通过，覆盖全局参考筛选、跨 cell 最小距离、未请求邻格阻挡、任意分区双向请求、缓存重建、预算与 i64 极值。这是 CPU 派生数据 kernel；尚无 GPU 散布生成、proxy 渲染/密度淡入、地表投影或百万点性能验收结论。
+- no-default 测试 35 项（其中散布新增 20 项）、all-target clippy `-D warnings` 和格式检查通过，覆盖全局参考筛选、跨 cell 最小距离、未请求邻格阻挡、任意分区双向请求、缓存重建、预算与 i64 极值。这是 CPU 派生数据 kernel；独立 proxy renderer/密度 coverage 接缝已实现，但未将此 CPU kernel 完整接入产品散布渲染，也无 GPU 散布生成、地表投影或百万散布点性能验收结论。
 
 ### M5：持久化
 
@@ -170,7 +178,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
 - M3：资产包解压、mmap schema 视图、GPU 直传和产品级吞吐仍需实现或独立运行时验证；共享动态优先级已接入但不提供抢占或跨队列无饥饿保证。任务池 Future/共享取消、固定 worker 及宿主原生 reactor → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md` 与 `prism_world_native_io_zh.md`，不能代替冷盘、资产包或产品负载验收。
-- M4 散布：GPU 候选生成/proxy 流、连续密度切换和大规模性能验收；当前完成的是内容中立、可再生且有界的 CPU 散布 kernel。
+- M4 散布：GPU 候选生成、密度场与产品 proxy renderer 接线及大规模散布性能验收；已有内容中立有界 CPU kernel、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。

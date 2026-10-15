@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod contract;
+mod density;
 mod packing;
 mod registry;
 
@@ -19,14 +20,23 @@ pub use contract::{
     Cluster, FrustumPlane, ProxyInstance, VisibilityInput, VisibilityOutput, ERROR_QUANTUM,
     LOD_THRESHOLDS,
 };
+pub use density::{density_dither_visible, DensityPolicy, DensityPolicyError};
 pub use packing::{ClusterSoa, ProxySoa, SoaBufferPack};
 pub use registry::{ProxyHandle, ProxyRegistry, ProxyRegistryError};
+
+/// Renderer-side ordered coverage test. Concatenate this WGSL with a draw
+/// shader and call `world_density_survives(coverage, pixel, stable_phase)`.
+/// Coverage is read from the resident dense source slot, not compact draw order.
+pub const DENSITY_DITHER_WGSL: &str = include_str!("shaders/density_dither.wgsl");
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
 #[cfg(feature = "gpu")]
 pub mod resident;
+
+#[cfg(feature = "gpu")]
+mod resident_density;
 
 #[cfg(feature = "gpu")]
 mod sector_proxies;

@@ -36,6 +36,19 @@ only derived proxy insertion, not partial authoritative-host changes. See
 `docs/prism_world_sector_proxies_zh.md` for budgets, call ordering, failure
 semantics, real file/coordinator-to-indirect-pixel evidence, and CPU benchmarks.
 
+`DensityPolicy` adds stable tuple-seeded coverage, optional distance fading,
+and a CPU twin of the exported `DENSITY_DITHER_WGSL` 4x4 ordered-dither helper.
+`GpuResidentVisibility::new_with_density` and
+`GpuSectorProxies::with_sector_capacity_and_density` opt into fixed GPU coverage
+resources; ordinary constructors retain their original cost. `write_density`
+updates only a 16-byte policy, without walking or uploading proxy columns.
+The original geometric visibility record is unchanged; density compaction
+intersects it with positive coverage. Raster consumers must fetch coverage by
+compact **source slot** and apply alpha/discard to show partial fading.
+See `docs/prism_world_density_zh.md` for numeric boundaries, resource budgets,
+real indirect-pixel tests, and three-scale release measurements. This does not
+generate scatter candidates or integrate a product renderer graph.
+
 ## Verification
 
 CPU-only contract and packing tests:
@@ -51,6 +64,7 @@ WGSL parse/validation and real backend tests:
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test wgsl_compile
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test gpu_parity -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test resident_visibility -- --nocapture
+cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test density_visibility -- --nocapture
 ```
 
 The parity test is a strict real-device gate: missing adapter/device acquisition

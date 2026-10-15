@@ -29,6 +29,8 @@ compact 使用工作组共享原子计数，为每个非空 64-lane 工作组执
 
 固定逻辑 buffer 字节数为 `72 × max(capacity, 1) + 144`：三个输入列 48 字节/槽、可见性 record 20 字节/槽、compact slot 4 字节/槽、uniform 128 字节、indirect 16 字节。`allocated_buffer_bytes()` 累加实际 buffer descriptor 大小；这不是驱动分配、物理 VRAM 峰值或驻留测量，尤其统一内存 GPU 不能把它当作专用显存占用。另有每槽一个 CPU bool 的初始化追踪、pipeline/bind group、wgpu staging 和调用方持有的源数据。
 
+可选 `new_with_density` 额外固定分配 `4 × max(capacity, 1) + 16` 字节，增加 GPU coverage stage 并使用 density-aware compact，普通构造器不增加成本。`write_density` 只在策略位模式变化时写 16 字节；原几何 record ABI 不变。下游以 compact source slot 读取 `density_coverage()` 并消费 alpha/discard 才有部分 coverage 的视觉淡出。数值规则、dither、实机测试与新基准见 `prism_world_density_zh.md`；下表是原普通模式的历史独立测量，不代表可选密度路径。
+
 首次输入上传为 `48N + 128` 字节；每个增量区间为 `48K` 字节，camera/count 改变额外 128 字节。相同 count/camera 且无实例变化的帧上传为零。`write_range` 的检查与上传正比于本次 K；encode 的 CPU 工作不遍历实例，GPU 两个 pass 的工作正比于 active N。零逻辑容量使用一个不可寻址的物理槽。
 
 ## 验证与复现
@@ -59,4 +61,4 @@ benchmark 生成确定性 75% 可见数据；每档一次上传，8 次预热、
 
 ## 不扩大的验收结论
 
-已验证固定容量驻留、增量上传、GPU 视锥/距离/误差 LOD、compact 与真实单 draw 消费，且生产 encode 零回读。sector ownership、coordinator/host 生命周期与真实间接绘制已通过 `GpuSectorProxies`/`ProxyCellHost` 接通，见 `prism_world_sector_proxies_zh.md`。产品 scene/ECS decoder/render graph、GPU 散布生成、HZB 遮挡、密度/风/交互场、多 draw 分桶、LOD 连续几何切换、虚拟几何/纹理或 GPU 直传仍须各自实现并进行端到端验收；不能以本切片宣布 M4 或整个 world 系统完成。
+已验证固定容量驻留、增量上传、GPU 视锥/距离/误差 LOD、compact 与真实单 draw 消费，且生产 encode 零回读。sector ownership、coordinator/host 生命周期与真实间接绘制已通过 `GpuSectorProxies`/`ProxyCellHost` 接通，见 `prism_world_sector_proxies_zh.md`；后续可选密度覆盖、距离淡出和 ordered dither 证据见 `prism_world_density_zh.md`。产品 scene/ECS decoder/render graph、GPU 散布生成、HZB 遮挡、domain-warp/作者密度场、风/交互场、多 draw 分桶、LOD 连续几何切换、虚拟几何/纹理或 GPU 直传仍须各自实现并进行端到端验收；不能以本切片宣布 M4 或整个 world 系统完成。

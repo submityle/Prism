@@ -1,8 +1,8 @@
 //! Sector ownership and incremental uploads into fixed resident GPU buffers.
 
 use crate::{
-    GpuContext, GpuResidentError, GpuResidentVisibility, ProxyRegistry, ProxyRegistryError,
-    ProxySoa, VisibilityInput,
+    DensityPolicy, GpuContext, GpuResidentError, GpuResidentVisibility, ProxyRegistry,
+    ProxyRegistryError, ProxySoa, VisibilityInput,
 };
 
 /// Errors detected by the ownership/upload boundary.
@@ -109,7 +109,32 @@ impl GpuSectorProxies {
         sector_capacity: usize,
         vertex_count: u32,
     ) -> Result<Self, GpuSectorProxyError> {
+        Self::build(ctx, capacity, sector_capacity, vertex_count, None)
+    }
+
+    /// Adds fixed GPU density/coverage resources with independent sector budget.
+    /// Renderers must consume the resident coverage column to display fades.
+    pub fn with_sector_capacity_and_density(
+        ctx: &GpuContext,
+        capacity: usize,
+        sector_capacity: usize,
+        vertex_count: u32,
+        policy: DensityPolicy,
+    ) -> Result<Self, GpuSectorProxyError> {
+        Self::build(ctx, capacity, sector_capacity, vertex_count, Some(policy))
+    }
+
+    fn build(
+        ctx: &GpuContext,
+        capacity: usize,
+        sector_capacity: usize,
+        vertex_count: u32,
+        density: Option<DensityPolicy>,
+    ) -> Result<Self, GpuSectorProxyError> {
         crate::resident::validate_capacity(capacity, &ctx.device().limits())?;
+        if density.is_some() {
+            crate::resident_density::validate_limits(&ctx.device().limits())?;
+        }
         let registry = ProxyRegistry::with_sector_capacity(capacity, sector_capacity)?;
         let registry_identity = registry.identity().clone();
         let mut scratch = ProxySoa {
@@ -129,7 +154,12 @@ impl GpuSectorProxies {
             .metadata
             .try_reserve_exact(capacity)
             .map_err(|_| GpuSectorProxyError::StagingAllocation)?;
-        let resident = GpuResidentVisibility::new(ctx, capacity, vertex_count)?;
+        let resident = match density {
+            Some(policy) => {
+                GpuResidentVisibility::new_with_density(ctx, capacity, vertex_count, policy)?
+            }
+            None => GpuResidentVisibility::new(ctx, capacity, vertex_count)?,
+        };
         Ok(Self {
             registry,
             registry_identity,
@@ -206,6 +236,13 @@ impl GpuSectorProxies {
     pub fn write_camera(&mut self, camera: VisibilityInput) -> Result<(), GpuSectorProxyError> {
         self.ensure_uploaded()?;
         self.resident.write_camera(camera)?;
+        Ok(())
+    }
+
+    /// Updates only policy after ownership is synchronized; never rescans rows.
+    pub fn write_density(&mut self, policy: DensityPolicy) -> Result<(), GpuSectorProxyError> {
+        self.ensure_uploaded()?;
+        self.resident.write_density(policy)?;
         Ok(())
     }
 

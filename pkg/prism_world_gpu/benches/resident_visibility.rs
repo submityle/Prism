@@ -4,7 +4,8 @@
 use std::time::Instant;
 
 use prism_world_gpu::{
-    FrustumPlane, GpuContext, GpuResidentVisibility, ProxyInstance, ProxySoa, VisibilityInput,
+    DensityPolicy, FrustumPlane, GpuContext, GpuResidentVisibility, ProxyInstance, ProxySoa,
+    VisibilityInput,
 };
 
 const WARMUP: usize = 8;
@@ -80,18 +81,33 @@ fn verify(ctx: &GpuContext, resident: &GpuResidentVisibility, input: VisibilityI
         seen[slot] = true;
     }
     for (slot, actual) in seen.into_iter().enumerate() {
-        assert_eq!(actual, input.evaluate(&proxy(slot)).visible, "slot {slot}");
+        let proxy = proxy(slot);
+        let expected = input.evaluate(&proxy).visible
+            && resident
+                .density_policy()
+                .is_none_or(|policy| policy.coverage(&proxy, &input) > 0.0);
+        assert_eq!(actual, expected, "slot {slot}");
     }
     drop(mapped);
     staging.unmap();
     visible
 }
 
-fn run(ctx: &GpuContext, count: usize) {
+fn run(ctx: &GpuContext, count: usize, density: bool) {
     let input = camera();
     let proxies: Vec<_> = (0..count).map(proxy).collect();
     let soa = ProxySoa::from_proxies(&proxies).expect("valid benchmark proxies");
-    let mut resident = GpuResidentVisibility::new(ctx, count, 3).expect("capacity supported");
+    let mut resident = if density {
+        GpuResidentVisibility::new_with_density(
+            ctx,
+            count,
+            3,
+            DensityPolicy::new(0.5, 0.1, 17, 32.0).unwrap(),
+        )
+    } else {
+        GpuResidentVisibility::new(ctx, count, 3)
+    }
+    .expect("capacity supported");
     resident.write_range(0, &soa).expect("initial upload");
     resident.set_dense_count(count).expect("initialized prefix");
     resident.write_camera(input).expect("camera upload");
@@ -117,11 +133,16 @@ fn run(ctx: &GpuContext, count: usize) {
     let visible = verify(ctx, &resident, input);
     let record = percentiles(record_finish);
     let submit = percentiles(submit_wait);
-    assert_eq!(resident.allocated_buffer_bytes(), 72 * count as u64 + 144);
-    println!(
-        "{count},{visible},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+    let extra = if density { 4 * count as u64 + 16 } else { 0 };
+    assert_eq!(
         resident.allocated_buffer_bytes(),
-        48 * count as u64 + 128,
+        72 * count as u64 + 144 + extra
+    );
+    println!(
+        "{},{count},{visible},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+        if density { "density_half" } else { "geometric" },
+        resident.allocated_buffer_bytes(),
+        48 * count as u64 + 128 + if density { 16 } else { 0 },
         record[0],
         record[1],
         record[2],
@@ -149,8 +170,10 @@ fn main() {
     println!("adapter={evidence:?}; warmup={WARMUP}; samples={SAMPLES}; nearest-rank percentiles");
     println!("host wall clocks in us; record_finish excludes encoder creation; submit_wait includes submission and device polling; no timestamp queries");
     println!("one initial SoA/camera upload; zero timed uploads/readbacks/draws; logical bytes exclude driver/staging/CPU memory");
-    println!("count,visible,logical_buffer_bytes,initial_upload_bytes,record_finish_p50_us,record_finish_p95_us,record_finish_p99_us,submit_wait_p50_us,submit_wait_p95_us,submit_wait_p99_us");
+    println!("density_half uses (density=0.5,transition=0.1,seed=17,distance_fade=32); no rasterization/coverage consumption in timed work");
+    println!("mode,count,visible,logical_buffer_bytes,initial_upload_bytes,record_finish_p50_us,record_finish_p95_us,record_finish_p99_us,submit_wait_p50_us,submit_wait_p95_us,submit_wait_p99_us");
     for count in [10_000, 100_000, 1_000_000] {
-        run(&ctx, count);
+        run(&ctx, count, false);
+        run(&ctx, count, true);
     }
 }
