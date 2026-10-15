@@ -147,9 +147,11 @@ impl<'a> SceneWorldReplication<'a> {
     pub fn despawn(self, replication: &mut EcsReplication) -> usize {
         let removed = despawn_instance(self.world, self.spawn);
         for binding in self.identities.bindings() {
-            if self.spawn.resolve(binding.local).is_some() {
-                replication.forget_entity(EntityId::from_u128(binding.persistent.to_u128()));
-            }
+            // `despawn_instance` invalidates the scene remap before returning.
+            // Forget every identity unconditionally: the mapping removal is
+            // idempotent, while checking `spawn.resolve` after the despawn
+            // would leave all adopted mappings behind as stale entries.
+            replication.forget_entity(EntityId::from_u128(binding.persistent.to_u128()));
         }
         removed
     }
@@ -160,7 +162,15 @@ mod tests {
     use super::*;
     use alloc::boxed::Box;
     use alloc::vec;
+    use prism_ecs::component::Component;
+    use prism_reflect::Reflect;
     use prism_scene::{spawn_plan, ArchetypeGroup, ArchetypeSignature, InstantiationPlan};
+
+    #[derive(Clone, Debug, PartialEq, Reflect)]
+    struct ReplicatedTransform {
+        x: i32,
+    }
+    impl Component for ReplicatedTransform {}
 
     fn spawn_one(world: &mut World) -> SceneSpawn {
         let local = LocalEntityId::new(0);
@@ -194,6 +204,46 @@ mod tests {
             .unwrap();
         assert!(world.contains(entity));
         assert_eq!(despawn_instance(&mut world, &spawn), 1);
+        assert!(!world.contains(entity));
+    }
+
+    #[test]
+    fn scene_despawn_forgets_adopted_replication_mappings_after_remap_invalidation() {
+        let mut world = World::new();
+        let spawn = spawn_one(&mut world);
+        let persistent = PersistentId::from_u128(88);
+        let identities = PersistentEntityMap::new(vec![prism_scene::EntityBinding::new(
+            LocalEntityId::new(0),
+            persistent,
+        )])
+        .unwrap();
+        let stable = EntityId::from_u128(persistent.to_u128());
+        let entity = SceneEntityResolver::new(&spawn, &identities)
+            .resolve(stable)
+            .unwrap();
+        assert!(world.insert(entity, ReplicatedTransform { x: 4 }));
+
+        let key = crate::mapping::ComponentKey::new(crate::mapping::SchemaId::from_u128(9), 1);
+        let mut replication = EcsReplication::new(
+            crate::ecs::EcsReplicationLimits::default(),
+            crate::mapping::MappingLimits::new(2, 8),
+        );
+        replication
+            .register_component::<ReplicatedTransform>(&mut world, key, 1)
+            .unwrap();
+        let mut bridge = SceneWorldReplication::new(&mut world, &spawn, &identities);
+        bridge
+            .adopt(
+                &mut replication,
+                stable,
+                AuthorityId::from_u128(3),
+                Revision::new(1),
+            )
+            .unwrap();
+        assert_eq!(replication.mapping().entry_len(), 1);
+
+        assert_eq!(bridge.despawn(&mut replication), 1);
+        assert_eq!(replication.mapping().entry_len(), 0);
         assert!(!world.contains(entity));
     }
 }
