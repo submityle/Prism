@@ -15,6 +15,7 @@ mod contract;
 mod density;
 mod packing;
 mod registry;
+mod world_placement_graph;
 
 pub use contract::{
     Cluster, FrustumPlane, ProxyInstance, VisibilityInput, VisibilityOutput, ERROR_QUANTUM,
@@ -23,6 +24,10 @@ pub use contract::{
 pub use density::{density_dither_visible, DensityPolicy, DensityPolicyError};
 pub use packing::{ClusterSoa, ProxySoa, SoaBufferPack};
 pub use registry::{ProxyHandle, ProxyRegistry, ProxyRegistryError};
+pub use world_placement_graph::{
+    PlacementGraphError, PlacementGraphPass, PlacementGraphResource, PlacementGraphStage,
+    PlacementRenderGraph, PlacementStream,
+};
 
 /// Renderer-side ordered coverage test. Concatenate this WGSL with a draw
 /// shader and call `world_density_survives(coverage, pixel, stable_phase)`.

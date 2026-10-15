@@ -73,8 +73,12 @@ This path explicitly requires five storage bindings; acquire the context using
 `GpuContext::try_headless_with_limits` with that limit. The ordinary context
 retains its four-binding downlevel baseline. Production encode does not upload,
 submit, wait or read back. See `docs/prism_world_gpu_scatter_field_zh.md` for the
-exact ABI, budgets, queue lifecycle and physical-device evidence. Surface
-placement and product scene/render-graph integration remain separate work.
+exact ABI, budgets, queue lifecycle and physical-device evidence. The
+world-facing `PlacementRenderGraph` contract now describes deterministic
+multi-cell `Upload → Project → Compact → DrawIndirect` ordering and explicit
+source/placement/compact/indirect/scene hazards. It is backend-neutral: the
+real renderer/device pass registration and product scene decoder remain
+separate work and are not claimed by the CPU graph-plan tests.
 
 The optional `terrain_scatter` feature adds `GpuScatterHeightfield`: source
 generation, author field and exact triangle-height/vertical-clearance/slope

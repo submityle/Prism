@@ -1,7 +1,8 @@
 //! Explicit capability boundary for the engine-neutral world runtime.
 //!
-//! The runtime owns bounded cell streaming and its traceable load/reload/evict
-//! lifecycle. It is not a complete scene-owned World Partition implementation.
+//! The runtime owns bounded cell streaming, stable cross-cell identity
+//! indexing, restart snapshots, and its traceable load/reload/evict lifecycle.
+//! It is not a complete scene-owned World Partition implementation.
 //! Callers that need a broader product capability can fail closed with a typed
 //! error instead of silently treating this vertical slice as equivalent.
 
@@ -44,7 +45,11 @@ impl WorldPartitionCapability {
     pub const fn is_supported(self) -> bool {
         matches!(
             self,
-            Self::CellStreaming | Self::CellReload | Self::CellEviction | Self::TraceReplay
+            Self::CellStreaming
+                | Self::CellReload
+                | Self::CellEviction
+                | Self::TraceReplay
+                | Self::CrossCellReferences
         )
     }
 
@@ -104,6 +109,7 @@ mod tests {
             WorldPartitionCapability::CellReload,
             WorldPartitionCapability::CellEviction,
             WorldPartitionCapability::TraceReplay,
+            WorldPartitionCapability::CrossCellReferences,
         ] {
             assert!(capability.is_supported());
             assert_eq!(capability.require(), Ok(()));
