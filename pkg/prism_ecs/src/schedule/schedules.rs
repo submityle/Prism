@@ -123,6 +123,28 @@ impl World {
         }
     }
 
+    /// Run a labeled schedule with a remaining frame budget. Only Background
+    /// systems may be deferred. A missing schedule returns zero.
+    #[cfg(feature = "std")]
+    pub fn run_schedule_budgeted(
+        &mut self,
+        label: impl ScheduleLabel,
+        budget: core::time::Duration,
+    ) -> usize {
+        let boxed = BoxedScheduleLabel::new(label);
+        let Some(mut schedule) = self
+            .get_resource_mut::<Schedules>()
+            .and_then(|schedules| schedules.remove_boxed(&boxed))
+        else {
+            return 0;
+        };
+        let deferred = schedule.run_budgeted(self, budget);
+        if let Some(schedules) = self.get_resource_mut::<Schedules>() {
+            schedules.insert_boxed(boxed, schedule);
+        }
+        deferred
+    }
+
     /// Run the schedule registered under `label` against this world, dispatching
     /// its conflict-free system waves across `pool` (design §8.2).
     ///
@@ -149,5 +171,27 @@ impl World {
         if let Some(schedules) = self.get_resource_mut::<Schedules>() {
             schedules.insert_boxed(boxed, schedule);
         }
+    }
+    /// Parallel labeled execution with the remaining frame budget. Returns
+    /// the number of deferred Background systems, or zero for a missing label.
+    #[cfg(feature = "multi_thread")]
+    pub fn run_schedule_parallel_budgeted(
+        &mut self,
+        label: impl ScheduleLabel,
+        pool: &prism_tasks::TaskPool,
+        budget: core::time::Duration,
+    ) -> usize {
+        let boxed = BoxedScheduleLabel::new(label);
+        let Some(mut schedule) = self
+            .get_resource_mut::<Schedules>()
+            .and_then(|schedules| schedules.remove_boxed(&boxed))
+        else {
+            return 0;
+        };
+        let deferred = schedule.run_parallel_budgeted(pool, self, budget);
+        if let Some(schedules) = self.get_resource_mut::<Schedules>() {
+            schedules.insert_boxed(boxed, schedule);
+        }
+        deferred
     }
 }
