@@ -78,6 +78,21 @@ impl AppendOnlyLog {
     /// Appends a transaction after validating uniqueness, sequence, clock,
     /// and field data. No mutation occurs when validation fails.
     pub fn append(&mut self, transaction: Transaction) -> Result<(), LogError> {
+        self.validate_append(&transaction)?;
+
+        let index = self.entries.len();
+        self.entries.push(transaction.clone());
+        self.transaction_ids.insert(transaction.id());
+        self.object_index
+            .entry(transaction.object())
+            .or_default()
+            .push(index);
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.last_clock = Some(transaction.clock());
+        Ok(())
+    }
+
+    pub(crate) fn validate_append(&self, transaction: &Transaction) -> Result<(), LogError> {
         if self.transaction_ids.contains(&transaction.id()) {
             return Err(LogError::DuplicateTransaction(transaction.id()));
         }
@@ -101,16 +116,6 @@ impl AppendOnlyLog {
         transaction
             .validate()
             .map_err(LogError::InvalidTransaction)?;
-
-        let index = self.entries.len();
-        self.entries.push(transaction.clone());
-        self.transaction_ids.insert(transaction.id());
-        self.object_index
-            .entry(transaction.object())
-            .or_default()
-            .push(index);
-        self.next_sequence = self.next_sequence.saturating_add(1);
-        self.last_clock = Some(transaction.clock());
         Ok(())
     }
 

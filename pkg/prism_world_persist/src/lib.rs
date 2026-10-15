@@ -11,13 +11,15 @@
 //! The crate is suitable for embedded builds because its only allocation
 //! dependency is `alloc`.
 #![forbid(unsafe_code)]
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
 
 extern crate alloc;
 
 mod codec;
 mod crdt;
+#[cfg(feature = "std")]
+mod durable;
 mod hash;
 mod log;
 mod timeline;
@@ -28,6 +30,10 @@ pub use codec::{
     encode_snapshot, encode_transaction, CodecError,
 };
 pub use crdt::{CrdtError, CrdtState, LwwRegister, MergeKey};
+#[cfg(feature = "std")]
+pub use durable::{
+    FileJournal, JournalError, JournalRecovery, RecoveryReason, SnapshotError, SnapshotStore,
+};
 pub use hash::{checksum32, hash64};
 pub use log::{AppendOnlyLog, LogError, ObjectLogIter};
 pub use timeline::{Snapshot, Timeline, TimelineError};
@@ -38,3 +44,6 @@ pub use types::{
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "std"))]
+mod durable_tests;

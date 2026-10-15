@@ -1,0 +1,493 @@
+//! Durable std-backed journal and atomic snapshot files.
+//!
+//! The journal keeps the deterministic AppendOnlyLog as its in-memory index
+//! and stores each transaction as one self-checking record. Opening a journal
+//! replays the valid prefix and truncates only the first incomplete or invalid
+//! tail record. A snapshot is encoded completely before it is written to a
+//! sibling temporary file, flushed, synced, and renamed into place.
+
+use alloc::vec::Vec;
+use core::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::hash::checksum32;
+use crate::{
+    decode_snapshot, decode_transaction, encode_snapshot, encode_transaction, AppendOnlyLog,
+    CodecError, LogError, Snapshot, Transaction,
+};
+
+const JOURNAL_MAGIC: [u8; 4] = *b"PWRJ";
+const JOURNAL_VERSION: u32 = 1;
+const JOURNAL_HEADER_LEN: u64 = 8;
+const RECORD_HEADER_LEN: u64 = 12;
+const RECORD_TRAILER_LEN: u64 = 4;
+const MAX_RECORD_PAYLOAD: u32 = 16 * 1024 * 1024;
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Why a journal tail was discarded while opening it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryReason {
+    /// The record header, payload, or checksum was cut short.
+    Truncated,
+    /// The record checksum did not match its header and payload.
+    ChecksumMismatch,
+    /// The payload was not a valid transaction frame.
+    InvalidPayload,
+    /// The record sequence and transaction sequence disagreed.
+    SequenceMismatch,
+    /// The transaction violated append-only log ordering or uniqueness.
+    LogValidation,
+}
+
+/// Details about a valid-prefix recovery performed during journal opening.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JournalRecovery {
+    truncated_bytes: u64,
+    reason: RecoveryReason,
+}
+
+impl JournalRecovery {
+    /// Returns the number of bytes removed from the invalid tail.
+    pub const fn truncated_bytes(self) -> u64 {
+        self.truncated_bytes
+    }
+
+    /// Returns the reason that caused tail recovery.
+    pub const fn reason(self) -> RecoveryReason {
+        self.reason
+    }
+}
+
+/// Errors from opening or appending a durable transaction journal.
+#[derive(Debug)]
+pub enum JournalError {
+    /// The operating system rejected a file operation.
+    Io(io::Error),
+    /// The file was shorter than its fixed version header.
+    TruncatedHeader,
+    /// The file magic did not identify a Prism world journal.
+    InvalidHeader,
+    /// The file was written by a journal version this crate cannot read.
+    UnsupportedVersion(u32),
+    /// A record declared a payload larger than the safety limit.
+    RecordTooLarge(u32),
+    /// A transaction could not be encoded or decoded.
+    Codec(CodecError),
+    /// The in-memory log rejected a transaction.
+    Log(LogError),
+    /// The record sequence did not match the transaction sequence.
+    RecordSequenceMismatch {
+        /// Sequence stored in the journal record header.
+        record: u64,
+        /// Sequence stored in the decoded transaction.
+        transaction: u64,
+    },
+}
+
+impl fmt::Display for JournalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "journal I/O error: {error}"),
+            Self::TruncatedHeader => formatter.write_str("journal version header is truncated"),
+            Self::InvalidHeader => formatter.write_str("journal version header is invalid"),
+            Self::UnsupportedVersion(version) => {
+                write!(formatter, "unsupported journal version {version}")
+            }
+            Self::RecordTooLarge(length) => {
+                write!(formatter, "journal record is too large: {length}")
+            }
+            Self::Codec(error) => write!(formatter, "journal codec error: {error:?}"),
+            Self::Log(error) => write!(formatter, "journal log error: {error:?}"),
+            Self::RecordSequenceMismatch {
+                record,
+                transaction,
+            } => write!(
+                formatter,
+                "journal record sequence {record} differs from transaction sequence {transaction}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for JournalError {}
+
+impl From<io::Error> for JournalError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<CodecError> for JournalError {
+    fn from(error: CodecError) -> Self {
+        Self::Codec(error)
+    }
+}
+
+impl From<LogError> for JournalError {
+    fn from(error: LogError) -> Self {
+        Self::Log(error)
+    }
+}
+
+/// Errors from encoding, atomically replacing, or restoring a snapshot file.
+#[derive(Debug)]
+pub enum SnapshotError {
+    /// The operating system rejected a file operation.
+    Io(io::Error),
+    /// The snapshot bytes failed the versioned codec validation.
+    Codec(CodecError),
+    /// The target path has no usable file name for its sibling temporary file.
+    InvalidPath,
+}
+
+impl fmt::Display for SnapshotError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "snapshot I/O error: {error}"),
+            Self::Codec(error) => write!(formatter, "snapshot codec error: {error:?}"),
+            Self::InvalidPath => formatter.write_str("snapshot path has no usable file name"),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotError {}
+
+impl From<io::Error> for SnapshotError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<CodecError> for SnapshotError {
+    fn from(error: CodecError) -> Self {
+        Self::Codec(error)
+    }
+}
+
+/// A durable append-only file journal backed by a validated in-memory log.
+pub struct FileJournal {
+    file: File,
+    path: PathBuf,
+    log: AppendOnlyLog,
+    end_offset: u64,
+    recovery: Option<JournalRecovery>,
+}
+
+impl FileJournal {
+    /// Opens or creates a journal and recovers its valid transaction prefix.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
+        let path = path.as_ref().to_path_buf();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let file_len = file.metadata()?.len();
+
+        if file_len == 0 {
+            file.write_all(&journal_header())?;
+            file.flush()?;
+            file.sync_all()?;
+            return Ok(Self {
+                file,
+                path,
+                log: AppendOnlyLog::new(),
+                end_offset: JOURNAL_HEADER_LEN,
+                recovery: None,
+            });
+        }
+
+        if file_len < JOURNAL_HEADER_LEN {
+            return Err(JournalError::TruncatedHeader);
+        }
+        file.seek(SeekFrom::Start(0))?;
+        let mut header = [0_u8; 8];
+        file.read_exact(&mut header)?;
+        if header[..4] != JOURNAL_MAGIC {
+            return Err(JournalError::InvalidHeader);
+        }
+        let version = u32::from_le_bytes(header[4..8].try_into().expect("fixed header"));
+        if version != JOURNAL_VERSION {
+            return Err(JournalError::UnsupportedVersion(version));
+        }
+
+        let mut log = AppendOnlyLog::new();
+        let mut offset = JOURNAL_HEADER_LEN;
+        let mut recovery = None;
+        while offset < file_len {
+            let record_start = offset;
+            let remaining = file_len - record_start;
+            if remaining < RECORD_HEADER_LEN + RECORD_TRAILER_LEN {
+                recovery = Some((record_start, RecoveryReason::Truncated));
+                break;
+            }
+
+            file.seek(SeekFrom::Start(record_start))?;
+            let mut record_header = [0_u8; 12];
+            if !read_exact_or_truncated(&mut file, &mut record_header)? {
+                recovery = Some((record_start, RecoveryReason::Truncated));
+                break;
+            }
+            let payload_len =
+                u32::from_le_bytes(record_header[..4].try_into().expect("fixed record"));
+            if payload_len > MAX_RECORD_PAYLOAD {
+                recovery = Some((record_start, RecoveryReason::InvalidPayload));
+                break;
+            }
+            let total_len = RECORD_HEADER_LEN
+                .checked_add(u64::from(payload_len))
+                .and_then(|value| value.checked_add(RECORD_TRAILER_LEN))
+                .expect("bounded record length");
+            if total_len > remaining {
+                recovery = Some((record_start, RecoveryReason::Truncated));
+                break;
+            }
+
+            let record_sequence = u64::from_le_bytes(
+                record_header[4..12]
+                    .try_into()
+                    .expect("fixed record sequence"),
+            );
+            let mut payload = vec![0_u8; payload_len as usize];
+            if !read_exact_or_truncated(&mut file, &mut payload)? {
+                recovery = Some((record_start, RecoveryReason::Truncated));
+                break;
+            }
+            let mut checksum_bytes = [0_u8; 4];
+            if !read_exact_or_truncated(&mut file, &mut checksum_bytes)? {
+                recovery = Some((record_start, RecoveryReason::Truncated));
+                break;
+            }
+            let expected_checksum = u32::from_le_bytes(checksum_bytes);
+            let mut checksum_input = Vec::with_capacity(12 + payload.len());
+            checksum_input.extend_from_slice(&record_header);
+            checksum_input.extend_from_slice(&payload);
+            if checksum32(&checksum_input) != expected_checksum {
+                recovery = Some((record_start, RecoveryReason::ChecksumMismatch));
+                break;
+            }
+
+            let transaction = match decode_transaction(&payload) {
+                Ok(transaction) => transaction,
+                Err(_) => {
+                    recovery = Some((record_start, RecoveryReason::InvalidPayload));
+                    break;
+                }
+            };
+            if transaction.sequence() != record_sequence {
+                recovery = Some((record_start, RecoveryReason::SequenceMismatch));
+                break;
+            }
+            if log.validate_append(&transaction).is_err() {
+                recovery = Some((record_start, RecoveryReason::LogValidation));
+                break;
+            }
+            log.append(transaction).map_err(JournalError::Log)?;
+            offset = record_start + total_len;
+        }
+
+        let recovery = recovery.map(|(valid_end, reason)| {
+            let recovered = JournalRecovery {
+                truncated_bytes: file_len - valid_end,
+                reason,
+            };
+            (valid_end, recovered)
+        });
+        let (end_offset, recovery) = if let Some((valid_end, recovery)) = recovery {
+            file.set_len(valid_end)?;
+            file.flush()?;
+            file.sync_all()?;
+            (valid_end, Some(recovery))
+        } else {
+            (offset, None)
+        };
+        file.seek(SeekFrom::Start(end_offset))?;
+
+        Ok(Self {
+            file,
+            path,
+            log,
+            end_offset,
+            recovery,
+        })
+    }
+
+    /// Returns the path backing this journal.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the currently loaded validated log.
+    pub const fn log(&self) -> &AppendOnlyLog {
+        &self.log
+    }
+
+    /// Returns details of the tail recovery performed during Self::open.
+    pub const fn recovery(&self) -> Option<JournalRecovery> {
+        self.recovery
+    }
+
+    /// Appends one transaction, flushes it, and calls sync_all before return.
+    pub fn append(&mut self, transaction: Transaction) -> Result<(), JournalError> {
+        self.log.validate_append(&transaction)?;
+        let record = encode_record(&transaction)?;
+        let start = self.end_offset;
+        if let Err(error) = self.write_durable(start, &record) {
+            self.rollback_to(start);
+            return Err(error);
+        }
+        if let Err(error) = self.log.append(transaction) {
+            self.rollback_to(start);
+            return Err(JournalError::Log(error));
+        }
+        self.end_offset = start + record.len() as u64;
+        Ok(())
+    }
+
+    /// Appends a batch with one flush and one sync_all for better throughput.
+    pub fn append_batch(&mut self, transactions: &[Transaction]) -> Result<(), JournalError> {
+        if transactions.is_empty() {
+            return Ok(());
+        }
+        let mut candidate = self.log.clone();
+        let mut bytes = Vec::new();
+        for transaction in transactions {
+            candidate.validate_append(transaction)?;
+            bytes.extend_from_slice(&encode_record(transaction)?);
+            candidate.append(transaction.clone())?;
+        }
+        let start = self.end_offset;
+        if let Err(error) = self.write_durable(start, &bytes) {
+            self.rollback_to(start);
+            return Err(error);
+        }
+        self.log = candidate;
+        self.end_offset = start + bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Flushes the journal's operating-system file handle without syncing it.
+    pub fn flush(&mut self) -> Result<(), JournalError> {
+        self.file.flush().map_err(JournalError::Io)
+    }
+
+    /// Requests durable persistence of all journal bytes written so far.
+    pub fn sync(&mut self) -> Result<(), JournalError> {
+        self.file.sync_all().map_err(JournalError::Io)
+    }
+
+    fn write_durable(&mut self, start: u64, bytes: &[u8]) -> Result<(), JournalError> {
+        self.file.seek(SeekFrom::Start(start))?;
+        self.file.write_all(bytes)?;
+        self.flush()?;
+        self.sync()?;
+        Ok(())
+    }
+
+    fn rollback_to(&mut self, offset: u64) {
+        let _ = self.file.set_len(offset);
+        let _ = self.file.seek(SeekFrom::Start(offset));
+        self.end_offset = offset;
+    }
+}
+
+/// Stateless atomic snapshot writer and loader.
+pub struct SnapshotStore;
+
+impl SnapshotStore {
+    /// Writes a complete snapshot through a flushed and synced sibling file.
+    pub fn save(path: impl AsRef<Path>, snapshot: &Snapshot) -> Result<(), SnapshotError> {
+        let path = path.as_ref();
+        let bytes = encode_snapshot(snapshot)?;
+        let temporary = create_temporary_path(path)?;
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            file.write_all(&bytes)?;
+            file.flush()?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, path)?;
+            sync_parent_directory(path)?;
+            Ok::<(), io::Error>(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result.map_err(SnapshotError::Io)
+    }
+
+    /// Loads and validates a snapshot written by Self::save.
+    pub fn load(path: impl AsRef<Path>) -> Result<Snapshot, SnapshotError> {
+        let bytes = fs::read(path)?;
+        decode_snapshot(&bytes).map_err(SnapshotError::Codec)
+    }
+}
+
+fn journal_header() -> [u8; 8] {
+    let mut header = [0_u8; 8];
+    header[..4].copy_from_slice(&JOURNAL_MAGIC);
+    header[4..].copy_from_slice(&JOURNAL_VERSION.to_le_bytes());
+    header
+}
+
+fn encode_record(transaction: &Transaction) -> Result<Vec<u8>, JournalError> {
+    let payload = encode_transaction(transaction)?;
+    let payload_len =
+        u32::try_from(payload.len()).map_err(|_| JournalError::RecordTooLarge(u32::MAX))?;
+    if payload_len > MAX_RECORD_PAYLOAD {
+        return Err(JournalError::RecordTooLarge(payload_len));
+    }
+    let mut record = Vec::with_capacity(12 + payload.len() + 4);
+    record.extend_from_slice(&payload_len.to_le_bytes());
+    record.extend_from_slice(&transaction.sequence().to_le_bytes());
+    record.extend_from_slice(&payload);
+    record.extend_from_slice(&checksum32(&record).to_le_bytes());
+    Ok(record)
+}
+
+fn read_exact_or_truncated(file: &mut File, bytes: &mut [u8]) -> io::Result<bool> {
+    match file.read_exact(bytes) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn create_temporary_path(path: &Path) -> Result<PathBuf, SnapshotError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().ok_or(SnapshotError::InvalidPath)?;
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary_name = std::format!(
+        ".{}.tmp-{}-{}",
+        name.to_string_lossy(),
+        std::process::id(),
+        counter
+    );
+    Ok(parent.join(temporary_name))
+}
+
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    #[cfg(unix)]
+    {
+        File::open(parent)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+        Ok(())
+    }
+}
