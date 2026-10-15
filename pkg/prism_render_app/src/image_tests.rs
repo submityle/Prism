@@ -5,16 +5,14 @@ use alloc::vec::Vec;
 
 use prism_image::{Image, ImageArtifact};
 use prism_render_driver::{
-    DeviceDescriptor, Extent3d, Instance, RequestAdapterOptions, TextureFormat,
+    DeviceDescriptor, Extent3d, Instance, RenderQueue, RequestAdapterOptions, SamplerDescriptor,
+    TextureFormat,
 };
 use prism_render_driver_null::NullInstance;
 
 use crate::image::{prepare_image, GpuImage};
 
-fn null_device() -> (
-    prism_render_driver_null::NullDevice,
-    impl prism_render_driver::RenderQueue,
-) {
+fn null_device() -> (prism_render_driver_null::NullDevice, impl RenderQueue) {
     let options = RequestAdapterOptions::default();
     let adapter = NullInstance::new()
         .request_adapter(&options)
@@ -27,16 +25,21 @@ fn null_device() -> (
 /// A `width`×`height` image whose texels encode their own coordinates, so a
 /// readback can be checked texel by texel.
 fn coordinated_image(width: u32, height: u32) -> Image {
+    coordinated_image_with_sampler(width, height, SamplerDescriptor::default())
+}
+
+fn coordinated_image_with_sampler(width: u32, height: u32, sampler: SamplerDescriptor) -> Image {
     let mut data = Vec::new();
     for y in 0..height {
         for x in 0..width {
             data.extend_from_slice(&[x as u8, y as u8, 0x40, 0xFF]);
         }
     }
-    Image::new(
+    Image::with_sampler(
         Extent3d::new_2d(width, height),
         TextureFormat::Rgba8Unorm,
         data,
+        sampler,
     )
     .expect("the fixture image is valid")
 }
@@ -58,28 +61,41 @@ fn preparing_an_image_creates_its_texture_view_and_sampler() {
     );
 }
 
-/// A re-prepare that still fits keeps the texture and only re-uploads; one that
-/// changes size (or format) releases what it had.
+/// A re-prepare always uploads into a private texture, then publishes it and
+/// releases the previous texture/view. An unchanged sampler can be shared.
 #[test]
-fn a_re_prepare_reuses_a_fitting_texture_and_releases_one_that_changed() {
+fn a_re_prepare_publishes_a_private_texture_before_releasing_the_previous_one() {
     let (device, queue) = null_device();
     let first = prepare_image(&device, &queue, &coordinated_image(4, 3), None);
     let first_texture = first.texture;
+    let first_view = first.view;
     let first_sampler = first.sampler;
 
-    // Same extents and format: the texture and the sampler are kept.
+    // Same extents and format: the upload still targets a private texture, so
+    // a failed upload cannot mutate the last-known-good representation.
     let second = prepare_image(&device, &queue, &coordinated_image(4, 3), Some(&first));
-    assert_eq!(second.texture, first_texture, "the texture is reused");
+    assert_ne!(second.texture, first_texture, "the texture is replaced");
+    assert_ne!(second.view, first_view, "the view follows the replacement");
     assert_eq!(second.sampler, first_sampler, "the sampler is reused");
     assert_eq!(device.live_resource_count(), 3, "nothing new was allocated");
 
-    // Different extents: the old texture goes, a new one takes its place.
+    // Different extents follow the same publish-then-release ordering.
     let third = prepare_image(&device, &queue, &coordinated_image(8, 1), Some(&second));
-    assert_ne!(third.texture, first_texture);
+    assert_ne!(third.texture, second.texture);
+    assert_ne!(third.view, second.view);
     assert_eq!(
         device.live_resource_count(),
         3,
         "the old texture and view were released, not leaked"
+    );
+
+    let changed_sampler = coordinated_image_with_sampler(8, 1, SamplerDescriptor::linear_repeat());
+    let fourth = prepare_image(&device, &queue, &changed_sampler, Some(&third));
+    assert_ne!(fourth.sampler, third.sampler, "the sampler is replaced");
+    assert_eq!(
+        device.live_resource_count(),
+        3,
+        "the old sampler was released"
     );
 }
 

@@ -16,6 +16,74 @@ use prism_render_driver::{
 
 use crate::render_asset::{PrepareAssetError, RenderAsset};
 
+/// Owns resources created during one image replacement until the upload commits.
+///
+/// The RHI currently exposes fire-and-forget creation and upload methods, so a
+/// backend failure is reported as an unwind rather than a typed `Result`. This
+/// guard still gives successful resource creations transactional cleanup on
+/// unwind and, more importantly, keeps the previous representation untouched
+/// until the replacement upload has returned.
+struct ImageResourceTransaction<'a> {
+    device: &'a dyn RenderDevice,
+    texture: Option<TextureId>,
+    view: Option<TextureViewId>,
+    sampler: Option<SamplerId>,
+    committed: bool,
+}
+
+impl<'a> ImageResourceTransaction<'a> {
+    fn new(device: &'a dyn RenderDevice) -> Self {
+        Self {
+            device,
+            texture: None,
+            view: None,
+            sampler: None,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+
+    fn create_texture(&mut self, descriptor: &TextureDescriptor) -> TextureId {
+        let texture = self.device.create_texture(descriptor);
+        self.texture = Some(texture);
+        texture
+    }
+
+    fn create_view(&mut self, texture: TextureId) -> TextureViewId {
+        let view = self
+            .device
+            .create_texture_view(texture, &TextureViewDescriptor::default());
+        self.view = Some(view);
+        view
+    }
+
+    fn create_sampler(&mut self, descriptor: &SamplerDescriptor) -> SamplerId {
+        let sampler = self.device.create_sampler(descriptor);
+        self.sampler = Some(sampler);
+        sampler
+    }
+}
+
+impl Drop for ImageResourceTransaction<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Some(sampler) = self.sampler.take() {
+            self.device.destroy_sampler(sampler);
+        }
+        if let Some(view) = self.view.take() {
+            self.device.destroy_texture_view(view);
+        }
+        if let Some(texture) = self.texture.take() {
+            self.device.destroy_texture(texture);
+        }
+    }
+}
+
 /// The usages an image texture is created with.
 ///
 /// It is sampled by a shader and uploaded into, which is all an image needs; a
@@ -50,11 +118,11 @@ impl GpuImage {
 
 /// Creates, reuses, or releases an image's texture/view/sampler and uploads it.
 ///
-/// The ownership rule from [`RenderAsset::prepare`] lives here: a texture from
-/// `previous` that already has the right extent and format is reused (and
-/// re-uploaded into), while a replacement is fully created and uploaded before
-/// the old objects are released. That preserves the last-known-good GPU form
-/// until the new form is ready.
+/// The ownership rule from [`RenderAsset::prepare`] lives here: every prepare
+/// that has a previous representation builds a private texture/view first, so
+/// uploading new texels never mutates the last-known-good representation. The
+/// old texture/view are released only after the new upload returns successfully;
+/// an unchanged sampler descriptor may be shared because it is immutable.
 pub fn prepare_image(
     device: &dyn RenderDevice,
     queue: &dyn RenderQueue,
@@ -63,36 +131,23 @@ pub fn prepare_image(
 ) -> GpuImage {
     let extent = source.extent();
     let format = source.format();
-    let reusable =
-        previous.is_some_and(|previous| previous.extent == extent && previous.format == format);
-
-    let (texture, view, old_texture) = if reusable {
-        let previous = previous.expect("checked above");
-        (previous.texture, previous.view, None)
-    } else {
-        let texture = device.create_texture(&TextureDescriptor::new_2d(
-            extent,
-            format,
-            IMAGE_TEXTURE_USAGES,
-        ));
-        let view = device.create_texture_view(texture, &TextureViewDescriptor::default());
-        (
-            texture,
-            view,
-            previous.map(|previous| (previous.texture, previous.view)),
-        )
-    };
+    let mut transaction = ImageResourceTransaction::new(device);
+    let texture = transaction.create_texture(&TextureDescriptor::new_2d(
+        extent,
+        format,
+        IMAGE_TEXTURE_USAGES,
+    ));
+    let view = transaction.create_view(texture);
 
     let desired_sampler = source.sampler();
-    let (sampler, old_sampler) = match previous {
+    let (sampler, reuses_previous_sampler) = match previous {
         Some(previous) if previous.sampler_descriptor == *desired_sampler => {
-            (previous.sampler, None)
+            (previous.sampler, true)
         }
-        Some(previous) => (
-            device.create_sampler(desired_sampler),
-            Some(previous.sampler),
-        ),
-        None => (device.create_sampler(desired_sampler), None),
+        _ => {
+            let sampler = transaction.create_sampler(desired_sampler);
+            (sampler, false)
+        }
     };
 
     queue.write_texture(
@@ -110,12 +165,13 @@ pub fn prepare_image(
         },
     );
 
-    if let Some((old_texture, old_view)) = old_texture {
-        device.destroy_texture_view(old_view);
-        device.destroy_texture(old_texture);
-    }
-    if let Some(old_sampler) = old_sampler {
-        device.destroy_sampler(old_sampler);
+    transaction.commit();
+    if let Some(previous) = previous {
+        device.destroy_texture_view(previous.view);
+        device.destroy_texture(previous.texture);
+        if !reuses_previous_sampler {
+            device.destroy_sampler(previous.sampler);
+        }
     }
 
     GpuImage {
@@ -150,5 +206,37 @@ impl RenderAsset for GpuImage {
         device.destroy_sampler(prepared.sampler);
         device.destroy_texture_view(prepared.view);
         device.destroy_texture(prepared.texture);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prism_render_driver::{DeviceDescriptor, Instance, RequestAdapterOptions};
+    use prism_render_driver_null::NullInstance;
+
+    #[test]
+    fn an_aborted_transaction_reclaims_real_null_resources() {
+        let options = RequestAdapterOptions::default();
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&options)
+            .expect("the null backend always has an adapter");
+        let (device, _) = instance
+            .create_device(&adapter, &DeviceDescriptor::default())
+            .expect("the null device always comes up");
+
+        let mut transaction = ImageResourceTransaction::new(&device);
+        let texture = transaction.create_texture(&TextureDescriptor::new_2d(
+            Extent3d::new_2d(4, 3),
+            TextureFormat::Rgba8Unorm,
+            IMAGE_TEXTURE_USAGES,
+        ));
+        transaction.create_view(texture);
+        transaction.create_sampler(&SamplerDescriptor::default());
+        assert_eq!(device.live_resource_count(), 3);
+
+        drop(transaction);
+        assert_eq!(device.live_resource_count(), 0);
     }
 }
