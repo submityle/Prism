@@ -20,6 +20,7 @@ mod async_io;
 mod demand;
 mod io;
 mod page_residency;
+mod range_assembly;
 
 pub use async_io::{AsyncStreamIoExecutor, AsyncStreamTask};
 pub use demand::{
@@ -30,6 +31,10 @@ pub use page_residency::{
     PageAdmissionError, PageBudget, PageBudgetError, PageFailure, PageId, PageKey, PageLoadError,
     PageRangeError, PageRequestError, PageResidency, PageSize, PageSizeError, PageState,
     PageTransitionError, PageUsage,
+};
+pub use range_assembly::{
+    assemble_ranges, assemble_ranges_async, RangeAssemblyCancellation, RangeAssemblyError,
+    RangeAssemblyLimits, RangeAssemblyPlan, RangeAssemblyPlanError, RangeAssemblyTicket, RangePart,
 };
 
 /// The three independently bounded residency pools tracked by the decision

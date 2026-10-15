@@ -389,7 +389,17 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 
 ### 16.4 Blob 资产
 
-不可变、可共享、可被多实体引用的大块数据（碰撞网格、曲线、动画片段），按引用计数 + 内容寻址存储。
+不可变、可共享、可被多实体引用的大块数据（碰撞网格、曲线、动画片段），由
+`prism_ecs::blob::BlobStore` 提供进程内闭环：
+
+- `insert_bytes` / `try_insert_bytes` 按确定性的内容哈希分桶，并对候选执行完整字节比较；哈希碰撞不会导致错误别名。
+- `BlobHandle` 是 slot index + generation 的轻量句柄；槽位回收会递增 generation，旧句柄的 `get`、`retain`、`release` 均安全失败。
+- `insert_bytes` 与 `retain` 都增加引用；`try_release` 返回本次是否回收了存储，引用归零才从内容索引移除、释放载荷并回收槽位。
+- `BlobId` 只表达“哈希 + 长度”的内容身份；它不是无碰撞证明，跨哈希桶的最终身份仍由完整字节比较确认。`find` / `contains` 不改变引用计数，适合只读查询。
+- 需要错误分支的调用方使用 `try_insert_bytes`、`try_retain`、`try_release`；旧的布尔/句柄入口保留作便捷 API。引用计数溢出、槽位索引溢出和陈旧句柄不得静默回绕。
+- `insert_pod` / `get_pod` 是 `unsafe` 便利层：调用者必须保证完整对象表示对 `T` 有效；任意原始字节应使用 `get`，不可把它们用于 `bool`、引用、`NonZero*` 或枚举等有额外有效性约束的类型。
+
+物理列的 `storage::BlobVec` 不是 Blob 资产索引，而是 ECS 类型擦除列的块存储。它保留稳定块地址和 borrowed-table ownership；`try_reserve`、`try_attach_block`、`try_detach_block` 将容量溢出、借用列欠配和非法块生命周期提升为可检查错误，避免只在 debug 构建中依赖断言。
 
 ### 16.5 Snapshot / 多 World / 反射桥
 

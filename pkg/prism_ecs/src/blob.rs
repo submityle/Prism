@@ -33,6 +33,7 @@
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::fmt;
 use core::mem::{align_of, size_of};
 
 use crate::collections::HashMap;
@@ -67,6 +68,60 @@ pub struct BlobHandle {
     index: u32,
     /// Generation guard; must match the slot's current generation to be valid.
     generation: u32,
+}
+
+/// A stable content identity for a blob payload.
+///
+/// The hash is only a lookup key: callers that need collision-proof identity
+/// must still use [`BlobStore::contains`] or [`BlobStore::find`], which compare
+/// the full bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct BlobId {
+    hash: u64,
+    len: usize,
+}
+
+impl BlobId {
+    /// The deterministic content hash used for indexing.
+    #[inline]
+    pub const fn hash(self) -> u64 {
+        self.hash
+    }
+
+    /// The payload length included in this identity.
+    #[inline]
+    pub const fn len(self) -> usize {
+        self.len
+    }
+}
+
+/// Errors returned by fallible blob operations.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlobError {
+    /// The handle does not refer to a live blob in this store.
+    InvalidHandle(BlobHandle),
+    /// A reference count cannot be incremented without wrapping.
+    RefcountOverflow(BlobHandle),
+    /// A new slot cannot be represented by the compact handle index.
+    SlotIndexOverflow,
+    /// The generation guard cannot be incremented without reusing a stale
+    /// handle value, so the last reference is retained instead of reclaiming.
+    GenerationExhausted(BlobHandle),
+}
+
+impl fmt::Display for BlobError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidHandle(handle) => write!(f, "invalid blob handle {handle:?}"),
+            Self::RefcountOverflow(handle) => {
+                write!(f, "blob reference count overflow for {handle:?}")
+            }
+            Self::SlotIndexOverflow => f.write_str("blob slot index exceeds u32::MAX"),
+            Self::GenerationExhausted(handle) => {
+                write!(f, "blob generation exhausted for {handle:?}")
+            }
+        }
+    }
 }
 
 impl BlobHandle {
@@ -192,12 +247,55 @@ impl BlobStore {
         self.live == 0
     }
 
+    /// Return the collision-safe content identity for `bytes`.
+    #[inline]
+    pub fn content_id(bytes: &[u8]) -> BlobId {
+        BlobId {
+            hash: fnv1a_64(bytes),
+            len: bytes.len(),
+        }
+    }
+
+    /// Return the content identity of a live handle, or `None` when stale.
+    #[inline]
+    pub fn id(&self, handle: BlobHandle) -> Option<BlobId> {
+        let slot = self.slots.get(handle.index as usize)?;
+        (slot.generation == handle.generation)
+            .then(|| {
+                slot.entry.as_ref().map(|entry| BlobId {
+                    hash: entry.hash,
+                    len: entry.len,
+                })
+            })
+            .flatten()
+    }
+
+    /// Find an existing payload without creating or retaining a reference.
+    pub fn find(&self, bytes: &[u8]) -> Option<BlobHandle> {
+        let id = Self::content_id(bytes);
+        let candidates = self.by_hash.get(&id.hash)?;
+        candidates.iter().copied().find_map(|index| {
+            let slot = self.slots.get(index as usize)?;
+            let entry = slot.entry.as_ref()?;
+            (entry.len == id.len && entry.bytes() == bytes).then_some(BlobHandle {
+                index,
+                generation: slot.generation,
+            })
+        })
+    }
+
+    /// Whether `bytes` already has a live, collision-safe entry.
+    #[inline]
+    pub fn contains(&self, bytes: &[u8]) -> bool {
+        self.find(bytes).is_some()
+    }
+
     /// Insert `bytes`, deduplicating by content.
     ///
     /// If an identical payload is already stored, its refcount is incremented
     /// and the existing [`BlobHandle`] is returned (the bytes are *not* stored
     /// again). Otherwise a fresh blob is created at refcount `1`.
-    pub fn insert_bytes(&mut self, bytes: &[u8]) -> BlobHandle {
+    pub fn try_insert_bytes(&mut self, bytes: &[u8]) -> Result<BlobHandle, BlobError> {
         let hash = fnv1a_64(bytes);
 
         if let Some(candidates) = self.by_hash.get(&hash) {
@@ -206,11 +304,15 @@ impl BlobStore {
                 if let Some(entry) = slot.entry.as_mut()
                     && entry.bytes() == bytes
                 {
-                    entry.refcount += 1;
-                    return BlobHandle {
+                    let handle = BlobHandle {
                         index,
                         generation: slot.generation,
                     };
+                    entry.refcount = entry
+                        .refcount
+                        .checked_add(1)
+                        .ok_or(BlobError::RefcountOverflow(handle))?;
+                    return Ok(handle);
                 }
             }
         }
@@ -228,7 +330,7 @@ impl BlobStore {
             index
         } else {
             let index =
-                u32::try_from(self.slots.len()).expect("BlobStore slot count exceeds u32::MAX");
+                u32::try_from(self.slots.len()).map_err(|_| BlobError::SlotIndexOverflow)?;
             self.slots.push(Slot {
                 entry: Some(entry),
                 generation: 0,
@@ -238,10 +340,18 @@ impl BlobStore {
 
         self.by_hash.entry(hash).or_default().push(index);
         self.live += 1;
-        BlobHandle {
+        Ok(BlobHandle {
             index,
             generation: self.slots[index as usize].generation,
-        }
+        })
+    }
+
+    /// Insert `bytes`, panicking only for allocation failure or an impossible
+    /// compact-index exhaustion. Use [`try_insert_bytes`](Self::try_insert_bytes)
+    /// when the caller needs explicit error handling.
+    pub fn insert_bytes(&mut self, bytes: &[u8]) -> BlobHandle {
+        self.try_insert_bytes(bytes)
+            .unwrap_or_else(|error| panic!("blob insertion failed: {error}"))
     }
 
     /// Insert the raw bytes of a plain `Copy` value `T`, deduplicated by
@@ -257,8 +367,10 @@ impl BlobStore {
     /// no gaps). Passing a `T` with padding is not memory-unsafe here — the
     /// bytes are merely copied — but the padding contents are unspecified and
     /// will participate in dedup.
-    pub fn insert_pod<T: Copy + 'static>(&mut self, value: &T) -> BlobHandle {
-        // SAFETY: `T: Copy` is `Sized`, and `value` is a valid reference to a
+    pub unsafe fn insert_pod<T: Copy + 'static>(&mut self, value: &T) -> BlobHandle {
+        // SAFETY: the caller guarantees that copying the complete object
+        // representation, including any padding, is intended for this type.
+        // `T: Copy` is `Sized`, and `value` is a valid reference to a
         // fully initialized `T`, so `size_of::<T>()` bytes starting at its
         // address are readable for the duration of this call. Reinterpreting
         // them as `u8` is sound (any byte pattern is a valid `u8`). The slice
@@ -272,17 +384,25 @@ impl BlobStore {
     /// Explicitly add a reference to an existing blob, returning `true` on
     /// success or `false` if the handle is stale/invalid.
     pub fn retain(&mut self, handle: BlobHandle) -> bool {
-        match self.slots.get_mut(handle.index as usize) {
-            Some(slot) if slot.generation == handle.generation => {
-                if let Some(entry) = slot.entry.as_mut() {
-                    entry.refcount += 1;
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => false,
+        self.try_retain(handle).is_ok()
+    }
+
+    /// Explicitly add a reference, preserving the store on every error path.
+    pub fn try_retain(&mut self, handle: BlobHandle) -> Result<(), BlobError> {
+        let Some(slot) = self.slots.get_mut(handle.index as usize) else {
+            return Err(BlobError::InvalidHandle(handle));
+        };
+        if slot.generation != handle.generation {
+            return Err(BlobError::InvalidHandle(handle));
         }
+        let Some(entry) = slot.entry.as_mut() else {
+            return Err(BlobError::InvalidHandle(handle));
+        };
+        entry.refcount = entry
+            .refcount
+            .checked_add(1)
+            .ok_or(BlobError::RefcountOverflow(handle))?;
+        Ok(())
     }
 
     /// Alias for [`retain`](Self::retain) that returns a fresh copy of the
@@ -296,28 +416,31 @@ impl BlobStore {
         }
     }
 
-    /// Remove one reference to a blob.
-    ///
-    /// Returns `true` if the handle was valid (whether or not this call freed
-    /// the blob), or `false` if it was stale/invalid. When the refcount
-    /// reaches zero the backing storage is dropped, the slot is recycled, and
-    /// its generation is bumped so the (now dangling) handle no longer
-    /// resolves.
-    pub fn release(&mut self, handle: BlobHandle) -> bool {
+    /// Release one reference, returning a precise error for stale handles.
+    pub fn try_release(&mut self, handle: BlobHandle) -> Result<bool, BlobError> {
         let index = handle.index as usize;
         let Some(slot) = self.slots.get_mut(index) else {
-            return false;
+            return Err(BlobError::InvalidHandle(handle));
         };
         if slot.generation != handle.generation {
-            return false;
+            return Err(BlobError::InvalidHandle(handle));
         }
         let Some(entry) = slot.entry.as_mut() else {
-            return false;
+            return Err(BlobError::InvalidHandle(handle));
         };
-
+        if entry.refcount == 0 {
+            return Err(BlobError::InvalidHandle(handle));
+        }
+        if entry.refcount == 1 && slot.generation == u32::MAX {
+            return Err(BlobError::GenerationExhausted(handle));
+        }
+        debug_assert!(
+            entry.refcount > 0,
+            "live blob must own at least one reference"
+        );
         entry.refcount -= 1;
         if entry.refcount != 0 {
-            return true;
+            return Ok(false);
         }
 
         let hash = entry.hash;
@@ -334,7 +457,18 @@ impl BlobStore {
                 self.by_hash.remove(&hash);
             }
         }
-        true
+        Ok(true)
+    }
+
+    /// Remove one reference to a blob.
+    ///
+    /// Returns `true` if the handle was valid (whether or not this call freed
+    /// the blob), or `false` if it was stale/invalid. When the refcount
+    /// reaches zero the backing storage is dropped, the slot is recycled, and
+    /// its generation is bumped so the (now dangling) handle no longer
+    /// resolves.
+    pub fn release(&mut self, handle: BlobHandle) -> bool {
+        self.try_release(handle).is_ok()
     }
 
     /// Resolve a handle to the blob's immutable bytes, or `None` if the handle
@@ -353,7 +487,12 @@ impl BlobStore {
     /// not exactly `size_of::<T>()`, or if the backing storage is not
     /// sufficiently aligned for `T` (the arena guarantees 8-byte alignment, so
     /// any `T` with `align_of::<T>() <= 8` always passes the alignment check).
-    pub fn get_pod<T: Copy + 'static>(&self, handle: BlobHandle) -> Option<&T> {
+    ///
+    /// # Safety
+    /// The referenced bytes must be a valid initialized representation of `T`.
+    /// This must not be used to reinterpret arbitrary bytes as types with
+    /// validity invariants such as `bool`, references, `NonZero*`, or enums.
+    pub unsafe fn get_pod<T: Copy + 'static>(&self, handle: BlobHandle) -> Option<&T> {
         let bytes = self.get(handle)?;
         if bytes.len() != size_of::<T>() {
             return None;
@@ -365,9 +504,9 @@ impl BlobStore {
         // SAFETY: we verified `bytes.len() == size_of::<T>()` and that `ptr` is
         // aligned for `T`; the bytes are an initialized copy of a `T`'s bytes
         // (written by `insert_pod`/`insert_bytes`) that lives as long as `&self`.
-        // Any `T: Copy` is valid for every bit pattern this API can produce for
-        // a padding-free type; the returned reference borrows `self` so it
-        // cannot outlive the storage.
+        // The caller's safety contract establishes that the bytes are a valid
+        // initialized representation of `T`; the returned reference borrows
+        // `self` so it cannot outlive the storage.
         Some(unsafe { &*ptr.cast::<T>() })
     }
 
@@ -543,31 +682,123 @@ mod tests {
             b: 42,
             c: 0x0123_4567_89ab_cdef,
         };
-        let h = store.insert_pod(&value);
-        assert_eq!(store.get_pod::<Pod>(h), Some(&value));
+        // SAFETY: `Pod` is repr(C), Copy, and has no padding.
+        let h = unsafe { store.insert_pod(&value) };
+        // SAFETY: the blob was produced from the same valid `Pod` type.
+        assert_eq!(unsafe { store.get_pod::<Pod>(h) }, Some(&value));
         assert_eq!(store.len(h), Some(size_of::<Pod>()));
 
         // Scalar POD round-trip too.
-        let hn = store.insert_pod(&12345u32);
-        assert_eq!(store.get_pod::<u32>(hn), Some(&12345u32));
+        // SAFETY: u32 has no invalid bit patterns or padding.
+        let hn = unsafe { store.insert_pod(&12345u32) };
+        // SAFETY: the blob was produced from u32.
+        assert_eq!(unsafe { store.get_pod::<u32>(hn) }, Some(&12345u32));
     }
 
     #[test]
     fn get_pod_rejects_length_mismatch() {
         let mut store = BlobStore::new();
-        let h = store.insert_pod(&0xAABB_CCDDu32);
+        // SAFETY: u32 has no invalid bit patterns or padding.
+        let h = unsafe { store.insert_pod(&0xAABB_CCDDu32) };
         // Correct type succeeds...
-        assert!(store.get_pod::<u32>(h).is_some());
+        // SAFETY: the blob was produced from u32.
+        assert!(unsafe { store.get_pod::<u32>(h) }.is_some());
         // ...but a wrongly-sized type is rejected rather than mis-read.
-        assert_eq!(store.get_pod::<u64>(h), None);
-        assert_eq!(store.get_pod::<u16>(h), None);
+        // SAFETY: size validation prevents a read for these types.
+        assert_eq!(unsafe { store.get_pod::<u64>(h) }, None);
+        // SAFETY: size validation prevents a read for these types.
+        assert_eq!(unsafe { store.get_pod::<u16>(h) }, None);
     }
 
     #[test]
     fn get_pod_alignment_guarantee_holds_for_u64() {
         let mut store = BlobStore::new();
         // 8-byte-aligned backing means an 8-aligned type always resolves.
-        let h = store.insert_pod(&0x1122_3344_5566_7788u64);
-        assert_eq!(store.get_pod::<u64>(h), Some(&0x1122_3344_5566_7788u64));
+        // SAFETY: u64 has no invalid bit patterns or padding.
+        let h = unsafe { store.insert_pod(&0x1122_3344_5566_7788u64) };
+        // SAFETY: the blob was produced from u64.
+        assert_eq!(
+            unsafe { store.get_pod::<u64>(h) },
+            Some(&0x1122_3344_5566_7788u64)
+        );
+    }
+
+    #[test]
+    fn content_id_find_and_contains_do_not_change_lifetime() {
+        let mut store = BlobStore::new();
+        let payload = b"shared immutable payload";
+        let id = BlobStore::content_id(payload);
+        assert_eq!(id.len(), payload.len());
+        assert!(store.find(payload).is_none());
+        assert!(!store.contains(payload));
+
+        let handle = store.insert_bytes(payload);
+        assert_eq!(store.id(handle), Some(id));
+        assert_eq!(store.find(payload), Some(handle));
+        assert!(store.contains(payload));
+        assert_eq!(store.refcount(handle), Some(1));
+    }
+
+    #[test]
+    fn fallible_lifecycle_rejects_stale_handle_without_mutation() {
+        let mut store = BlobStore::new();
+        let handle = store.insert_bytes(b"payload");
+        assert_eq!(store.try_release(handle), Ok(true));
+        assert_eq!(
+            store.try_retain(handle),
+            Err(BlobError::InvalidHandle(handle))
+        );
+        assert_eq!(
+            store.try_release(handle),
+            Err(BlobError::InvalidHandle(handle))
+        );
+        assert_eq!(store.blob_count(), 0);
+    }
+
+    #[test]
+    fn release_reports_whether_storage_was_reclaimed() {
+        let mut store = BlobStore::new();
+        let handle = store.insert_bytes(b"payload");
+        store.retain(handle);
+        assert_eq!(store.try_release(handle), Ok(false));
+        assert_eq!(store.try_release(handle), Ok(true));
+        assert_eq!(store.get(handle), None);
+    }
+
+    #[test]
+    fn generation_exhaustion_keeps_last_reference_live() {
+        let mut store = BlobStore::new();
+        let mut handle = store.insert_bytes(b"never alias");
+        store.slots[handle.index() as usize].generation = u32::MAX;
+        handle.generation = u32::MAX;
+
+        assert_eq!(
+            store.try_release(handle),
+            Err(BlobError::GenerationExhausted(handle))
+        );
+        assert_eq!(store.refcount(handle), Some(1));
+        assert_eq!(store.get(handle), Some(&b"never alias"[..]));
+    }
+
+    #[test]
+    fn refcount_overflow_is_rejected_without_wrapping() {
+        let mut store = BlobStore::new();
+        let handle = store.insert_bytes(b"bounded refs");
+        store.slots[handle.index() as usize]
+            .entry
+            .as_mut()
+            .expect("live entry")
+            .refcount = u32::MAX;
+
+        assert_eq!(
+            store.try_retain(handle),
+            Err(BlobError::RefcountOverflow(handle))
+        );
+        assert_eq!(
+            store.try_insert_bytes(b"bounded refs"),
+            Err(BlobError::RefcountOverflow(handle))
+        );
+        assert_eq!(store.refcount(handle), Some(u32::MAX));
+        assert_eq!(store.get(handle), Some(&b"bounded refs"[..]));
     }
 }

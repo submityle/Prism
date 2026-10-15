@@ -35,6 +35,7 @@
 use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use alloc::vec::Vec;
 use core::alloc::Layout;
+use core::fmt;
 use core::ptr::NonNull;
 
 use crate::component::DropFn;
@@ -43,6 +44,36 @@ use crate::storage::chunk::TARGET_CHUNK_BYTES;
 /// Minimum alignment of every block, matching a common SIMD register / cache
 /// line width so the kernels can use aligned loads where it helps.
 const BLOCK_ALIGN: usize = 64;
+
+/// Errors reported by the fallible `BlobVec` plumbing helpers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlobVecError {
+    /// The requested length cannot be represented by `usize`.
+    CapacityOverflow,
+    /// The configured element size and row window cannot form one block.
+    BlockLayoutOverflow,
+    /// A borrowed column was asked to grow beyond blocks owned by its table.
+    BorrowedCapacity { capacity: usize, required: usize },
+    /// A borrowed block attachment was null or incorrectly aligned.
+    InvalidBlockPointer,
+    /// Detaching a block would violate the borrowed-column lifecycle.
+    NoAttachedBlock,
+}
+
+impl fmt::Display for BlobVecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CapacityOverflow => f.write_str("BlobVec capacity overflow"),
+            Self::BlockLayoutOverflow => f.write_str("BlobVec block layout overflow"),
+            Self::BorrowedCapacity { capacity, required } => write!(
+                f,
+                "borrowed BlobVec capacity {capacity} is smaller than required {required}"
+            ),
+            Self::InvalidBlockPointer => f.write_str("invalid BlobVec block pointer"),
+            Self::NoAttachedBlock => f.write_str("no attached BlobVec block to detach"),
+        }
+    }
+}
 
 /// A type-erased, owning, growable array of `item_layout`-sized values stored in
 /// fixed-slot blocks (design §5.3 physical chunks).
@@ -155,13 +186,24 @@ impl BlobVec {
     /// must point at a live slice of at least `rows_per_block` slots inside a
     /// chunk block the owner keeps alive for this column's lifetime.
     pub unsafe fn attach_block(&mut self, ptr: *mut u8) {
-        debug_assert!(!self.owns_blocks, "attach_block on an owning column");
-        debug_assert!(
-            ptr.is_null() || (ptr as usize).is_multiple_of(self.item_layout.align()),
-            "attached block must be aligned for the column's element type",
-        );
+        // SAFETY: forwarded from this function's caller contract.
+        unsafe { self.try_attach_block(ptr) }
+            .unwrap_or_else(|error| panic!("BlobVec block attachment failed: {error}"));
+    }
+
+    /// Fallible form of [`attach_block`](Self::attach_block).
+    ///
+    /// The caller still owns the unsafe lifetime/alising contract; this method
+    /// checks the pointer invariants before it records the block.
+    pub unsafe fn try_attach_block(&mut self, ptr: *mut u8) -> Result<(), BlobVecError> {
+        if self.owns_blocks {
+            return Err(BlobVecError::InvalidBlockPointer);
+        }
         if self.item_layout.size() == 0 {
-            return;
+            return Ok(());
+        }
+        if ptr.is_null() || !(ptr as usize).is_multiple_of(self.item_layout.align()) {
+            return Err(BlobVecError::InvalidBlockPointer);
         }
         self.blocks.push(Block {
             // SAFETY: the caller guarantees `ptr` is non-null and aligned (a
@@ -169,18 +211,28 @@ impl BlobVec {
             // past the live rows.
             ptr: unsafe { NonNull::new_unchecked(ptr) },
         });
+        Ok(())
     }
 
     /// Detach the trailing chunk block (its storage is owned by the table, so it
     /// is not freed here) after the block's last live row was removed.
     pub fn detach_block(&mut self) {
-        debug_assert!(!self.owns_blocks, "detach_block on an owning column");
+        self.try_detach_block()
+            .unwrap_or_else(|error| panic!("BlobVec block detachment failed: {error}"));
+    }
+
+    /// Fallible form of [`detach_block`](Self::detach_block).
+    pub fn try_detach_block(&mut self) -> Result<(), BlobVecError> {
+        if self.owns_blocks {
+            return Err(BlobVecError::NoAttachedBlock);
+        }
         if self.item_layout.size() == 0 {
-            return;
+            return Ok(());
         }
         self.blocks
             .pop()
-            .expect("detach_block on a column with no blocks");
+            .map(|_| ())
+            .ok_or(BlobVecError::NoAttachedBlock)
     }
 
     /// Number of live elements.
@@ -224,7 +276,7 @@ impl BlobVec {
         if self.item_layout.size() == 0 {
             return usize::MAX;
         }
-        self.blocks.len() * self.rows_per_block
+        self.blocks.len().saturating_mul(self.rows_per_block)
     }
 
     /// The block index owning `row`, and the row-within-block offset.
@@ -236,30 +288,25 @@ impl BlobVec {
     /// The layout of one block (its slot count times the element size), with the
     /// block alignment.
     fn block_layout(&self) -> Layout {
+        self.try_block_layout()
+            .expect("BlobVec block layout invariant violated")
+    }
+
+    /// Compute one block's allocation layout without panicking.
+    fn try_block_layout(&self) -> Result<Layout, BlobVecError> {
         let size = self
             .item_layout
             .size()
             .checked_mul(self.rows_per_block)
-            .expect("column block size overflow");
+            .ok_or(BlobVecError::BlockLayoutOverflow)?;
         let align = self.item_layout.align().max(BLOCK_ALIGN);
-        Layout::from_size_align(size, align).expect("invalid column block layout")
-    }
-
-    /// Allocate one fresh block and append it to `blocks`.
-    fn push_block(&mut self) {
-        debug_assert!(self.item_layout.size() != 0);
-        let layout = self.block_layout();
-        // SAFETY: `layout.size()` is non-zero (a non-ZST item with at least one
-        // slot per block), as `alloc` requires.
-        let ptr = unsafe { alloc(layout) };
-        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        self.blocks.push(Block { ptr });
+        Layout::from_size_align(size, align).map_err(|_| BlobVecError::BlockLayoutOverflow)
     }
 
     /// Free and drop the trailing block (used when a removal empties it).
     fn pop_block(&mut self) {
-        let block = self.blocks.pop().expect("pop_block on an empty column");
         let layout = self.block_layout();
+        let block = self.blocks.pop().expect("pop_block on an empty column");
         // SAFETY: `block.ptr` was allocated with this exact layout by
         // `push_block`, and no value in the block is live (the caller only calls
         // this after the block's last row was removed).
@@ -268,24 +315,41 @@ impl BlobVec {
 
     /// Ensure there is capacity for at least `additional` more elements.
     pub fn reserve(&mut self, additional: usize) {
+        self.try_reserve(additional)
+            .unwrap_or_else(|error| panic!("BlobVec reserve failed: {error}"));
+    }
+
+    /// Fallible reserve path used by callers that need to reject malformed
+    /// lengths or a borrowed-column ownership violation without entering an
+    /// unsafe write path.
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), BlobVecError> {
         if self.item_layout.size() == 0 {
-            return; // no blocks are ever needed for a ZST
+            return Ok(()); // no blocks are ever needed for a ZST
         }
-        let required = self.len + additional;
+        let required = self
+            .len
+            .checked_add(additional)
+            .ok_or(BlobVecError::CapacityOverflow)?;
         if !self.owns_blocks {
-            // The owning table grew the chunk blocks before filling; assert the
-            // capacity is in place instead of allocating here.
-            debug_assert!(
-                self.capacity() >= required,
-                "borrowed column under-provisioned: capacity {} < required {required}",
-                self.capacity(),
-            );
-            return;
+            // The owning table grew the chunk blocks before filling. Refuse an
+            // under-provisioned borrowed column in release builds too.
+            let capacity = self.capacity();
+            return if capacity >= required {
+                Ok(())
+            } else {
+                Err(BlobVecError::BorrowedCapacity { capacity, required })
+            };
         }
         let needed_blocks = required.div_ceil(self.rows_per_block);
         while self.blocks.len() < needed_blocks {
-            self.push_block();
+            let layout = self.try_block_layout()?;
+            // SAFETY: the checked layout is non-zero for a non-ZST item and has
+            // a valid alignment for the global allocator.
+            let ptr = unsafe { alloc(layout) };
+            let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+            self.blocks.push(Block { ptr });
         }
+        Ok(())
     }
 
     /// Free every trailing block that no longer holds a live row.
@@ -616,6 +680,9 @@ impl Drop for BlobVec {
             // Borrowed blocks are owned (and freed) by the table.
             return;
         }
+        if self.blocks.is_empty() {
+            return;
+        }
         let layout = self.block_layout();
         while let Some(block) = self.blocks.pop() {
             // SAFETY: every block was allocated with `layout` by `push_block`
@@ -751,6 +818,38 @@ mod tests {
         // SAFETY: index < len.
         unsafe { v.swap_remove_and_drop(0) };
         assert_eq!(v.len(), 999);
+    }
+
+    #[test]
+    fn borrowed_column_rejects_growth_without_attached_capacity() {
+        let mut v = BlobVec::new_borrowed(layout_of::<u32>(), None, 4);
+        assert_eq!(
+            v.try_reserve(1),
+            Err(BlobVecError::BorrowedCapacity {
+                capacity: 0,
+                required: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn borrowed_block_lifecycle_reports_invalid_operations() {
+        let mut v = BlobVec::new_borrowed(layout_of::<u32>(), None, 4);
+        // SAFETY: null is intentionally supplied to verify the checked error
+        // path; no pointer is recorded on failure.
+        assert_eq!(
+            unsafe { v.try_attach_block(core::ptr::null_mut()) },
+            Err(BlobVecError::InvalidBlockPointer)
+        );
+        assert_eq!(v.try_detach_block(), Err(BlobVecError::NoAttachedBlock));
+    }
+
+    #[test]
+    fn block_layout_overflow_is_rejected_before_allocation() {
+        let layout = Layout::from_size_align(isize::MAX as usize, 1).expect("valid layout");
+        let mut v = BlobVec::new_with_rows_per_block(layout, None, 2);
+        assert_eq!(v.try_reserve(1), Err(BlobVecError::BlockLayoutOverflow));
+        assert_eq!(v.block_count(), 0);
     }
 
     // --- block (physical chunk) behaviour -----------------------------------

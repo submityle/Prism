@@ -114,7 +114,7 @@ mod world_reactions_tests;
 /// Commonly used exports. Mirrors the ergonomics of `bevy_ecs::prelude` to keep
 /// the eventual migration a near "change-the-import" exercise.
 pub mod prelude {
-    pub use crate::blob::{BlobHandle, BlobStore};
+    pub use crate::blob::{BlobError, BlobHandle, BlobId, BlobStore};
     pub use crate::bundle::Bundle;
     pub use crate::change::{ComponentTicks, DetectChanges, DetectChangesMut, Mut, Ref, Tick};
     pub use crate::change_observers::ChangeContext;
