@@ -15,8 +15,15 @@ use prism_world_io::ReadRequest;
 use prism_world_stream::{CellManifest, DemandSource, SectorId, StreamAction, StreamBudget};
 
 #[cfg(feature = "std")]
+mod file_provider;
+#[cfg(feature = "std")]
 mod io_adapter;
 
+#[cfg(all(test, feature = "std"))]
+mod file_provider_tests;
+
+#[cfg(feature = "std")]
+pub use file_provider::FileCellProvider;
 #[cfg(feature = "std")]
 pub use io_adapter::{IoAdapterEvent, IoRequestId, IoSchedulerAdapter};
 
@@ -30,12 +37,19 @@ const CELL_HEADER_MAGIC: [u8; 4] = *b"PRWC";
 pub struct CellReadRequest {
     manifest: CellManifest,
     priority: u32,
+    byte_offset: u64,
+    expected_checksum: Option<u64>,
 }
 
 impl CellReadRequest {
     /// Creates a cell request for the given manifest and stream priority.
     pub const fn new(manifest: CellManifest, priority: u32) -> Self {
-        Self { manifest, priority }
+        Self {
+            manifest,
+            priority,
+            byte_offset: 0,
+            expected_checksum: None,
+        }
     }
 
     /// Returns the target manifest.
@@ -56,10 +70,29 @@ impl CellReadRequest {
         self.priority
     }
 
+    /// Adds an optional FNV-1a checksum for the complete cell stream.
+    #[must_use]
+    pub const fn with_expected_checksum(mut self, checksum: u64) -> Self {
+        self.expected_checksum = Some(checksum);
+        self
+    }
+
+    /// Selects a cell's starting offset within a file or byte-range provider.
+    #[must_use]
+    pub const fn with_byte_offset(mut self, offset: u64) -> Self {
+        self.byte_offset = offset;
+        self
+    }
+
     /// Returns the corresponding engine-neutral world IO request.
     #[must_use]
     pub fn io_request(self) -> ReadRequest {
-        ReadRequest::new(0, self.manifest.io_bytes).with_priority(self.priority)
+        let request =
+            ReadRequest::new(self.byte_offset, self.manifest.io_bytes).with_priority(self.priority);
+        match self.expected_checksum {
+            Some(checksum) => request.with_expected_checksum(checksum),
+            None => request,
+        }
     }
 }
 

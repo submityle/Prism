@@ -42,6 +42,15 @@ pub enum IoAdapterEvent {
         /// Concatenated bytes returned by the provider.
         bytes: Vec<u8>,
     },
+    /// A provider or scheduler validation failure associated with one request.
+    Failed {
+        /// Scheduler request identity.
+        request_id: IoRequestId,
+        /// World request metadata.
+        request: CellReadRequest,
+        /// Failure returned by the scheduler.
+        error: IoError,
+    },
 }
 
 struct PendingRead {
@@ -51,32 +60,13 @@ struct PendingRead {
 
 struct TrackingProvider<P> {
     provider: P,
-    failed_requests: Arc<Mutex<VecDeque<IoRequestId>>>,
+    callback_request: Arc<Mutex<Option<IoRequestId>>>,
 }
 
 struct TrackingOperation<O> {
     request_id: IoRequestId,
-    request: ReadRequest,
     operation: O,
-    next_offset: u64,
-    delivered: u64,
-    checksum: u64,
-    failed_requests: Arc<Mutex<VecDeque<IoRequestId>>>,
-    failure_recorded: bool,
-}
-
-fn record_failure(
-    failed_requests: &Arc<Mutex<VecDeque<IoRequestId>>>,
-    request_id: IoRequestId,
-    recorded: &mut bool,
-) {
-    if *recorded {
-        return;
-    }
-    if let Ok(mut failed) = failed_requests.lock() {
-        failed.push_back(request_id);
-        *recorded = true;
-    }
+    callback_request: Arc<Mutex<Option<IoRequestId>>>,
 }
 
 impl<O: ChunkedRead> ChunkedRead for TrackingOperation<O> {
@@ -84,47 +74,13 @@ impl<O: ChunkedRead> ChunkedRead for TrackingOperation<O> {
         &mut self,
         context: &mut Context<'_>,
     ) -> Poll<Result<Option<ReadChunk>, IoError>> {
-        let result = self.operation.poll_chunk(context);
-        match &result {
-            Poll::Pending => {}
-            Poll::Ready(Err(_)) => record_failure(
-                &self.failed_requests,
-                self.request_id,
-                &mut self.failure_recorded,
-            ),
-            Poll::Ready(Ok(Some(chunk))) => {
-                let remaining = self.request.length().saturating_sub(self.delivered);
-                if chunk.offset() != self.next_offset || chunk.bytes().len() as u64 > remaining {
-                    record_failure(
-                        &self.failed_requests,
-                        self.request_id,
-                        &mut self.failure_recorded,
-                    );
-                } else {
-                    self.next_offset += chunk.bytes().len() as u64;
-                    self.delivered += chunk.bytes().len() as u64;
-                    for byte in chunk.bytes() {
-                        self.checksum ^= *byte as u64;
-                        self.checksum = self.checksum.wrapping_mul(0x100000001b3);
-                    }
-                }
-            }
-            Poll::Ready(Ok(None)) => {
-                if self.delivered != self.request.length()
-                    || self
-                        .request
-                        .expected_checksum()
-                        .is_some_and(|expected| expected != self.checksum)
-                {
-                    record_failure(
-                        &self.failed_requests,
-                        self.request_id,
-                        &mut self.failure_recorded,
-                    );
-                }
-            }
+        match self.callback_request.lock() {
+            Ok(mut current) => *current = Some(self.request_id),
+            Err(_) => return Poll::Ready(Err(internal_error("request tracking poisoned"))),
         }
-        result
+        self.operation
+            .poll_chunk(context)
+            .map(|result| result.map_err(|error| normalize_cancellation(error, self.request_id)))
     }
 
     fn cancel(&mut self) {
@@ -140,24 +96,18 @@ impl<P: ReadProvider> ReadProvider for TrackingProvider<P> {
         request: &ReadRequest,
         request_id: IoRequestId,
     ) -> Result<Self::Operation, IoError> {
-        match self.provider.start(request, request_id) {
-            Ok(operation) => Ok(TrackingOperation {
+        *self
+            .callback_request
+            .lock()
+            .map_err(|_| internal_error("request tracking poisoned"))? = Some(request_id);
+        self.provider
+            .start(request, request_id)
+            .map_err(|error| normalize_cancellation(error, request_id))
+            .map(|operation| TrackingOperation {
                 request_id,
-                request: request.clone(),
                 operation,
-                next_offset: request.offset(),
-                delivered: 0,
-                checksum: prism_world_io::checksum(&[]),
-                failed_requests: Arc::clone(&self.failed_requests),
-                failure_recorded: false,
-            }),
-            Err(error) => {
-                if let Ok(mut failed) = self.failed_requests.lock() {
-                    failed.push_back(request_id);
-                }
-                Err(error)
-            }
-        }
+                callback_request: Arc::clone(&self.callback_request),
+            })
     }
 }
 
@@ -165,7 +115,8 @@ struct AdapterState<P: ReadProvider> {
     scheduler: IoScheduler<TrackingProvider<P>>,
     pending: BTreeMap<IoRequestId, PendingRead>,
     ready: VecDeque<IoAdapterEvent>,
-    failed_requests: Arc<Mutex<VecDeque<IoRequestId>>>,
+    callback_request: Arc<Mutex<Option<IoRequestId>>>,
+    blocking: BTreeMap<IoRequestId, Waker>,
 }
 
 /// A std adapter that exposes [`prism_world_io::IoScheduler`] through world cell requests.
@@ -176,6 +127,8 @@ struct AdapterState<P: ReadProvider> {
 pub struct IoSchedulerAdapter<P: ReadProvider> {
     state: Mutex<AdapterState<P>>,
     chunk_size: usize,
+    capacity: usize,
+    wake: Arc<SchedulerWake>,
 }
 
 impl<P: ReadProvider> IoSchedulerAdapter<P> {
@@ -194,10 +147,10 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
         if chunk_size == 0 {
             return Err(ConfigError::ZeroChunkSize);
         }
-        let failed_requests = Arc::new(Mutex::new(VecDeque::new()));
+        let callback_request = Arc::new(Mutex::new(None));
         let tracking_provider = TrackingProvider {
             provider,
-            failed_requests: Arc::clone(&failed_requests),
+            callback_request: Arc::clone(&callback_request),
         };
         let scheduler = IoScheduler::new(tracking_provider, max_in_flight, capacity)?;
         Ok(Self {
@@ -205,15 +158,34 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
                 scheduler,
                 pending: BTreeMap::new(),
                 ready: VecDeque::new(),
-                failed_requests,
+                callback_request,
+                blocking: BTreeMap::new(),
             }),
             chunk_size,
+            capacity,
+            wake: Arc::new(SchedulerWake::default()),
         })
     }
 
     /// Submits a world cell request to the underlying scheduler.
     pub fn submit(&self, request: CellReadRequest) -> Result<IoRequestId, IoError> {
         let mut state = self.lock_state()?;
+        let id = self.submit_locked(&mut state, request)?;
+        drop(state);
+        self.wake.wake_by_ref();
+        Ok(id)
+    }
+
+    fn submit_locked(
+        &self,
+        state: &mut AdapterState<P>,
+        request: CellReadRequest,
+    ) -> Result<IoRequestId, IoError> {
+        if state.pending.len() >= self.capacity {
+            return Err(IoError::Backpressure {
+                capacity: self.capacity,
+            });
+        }
         let io_request = request
             .io_request()
             .with_chunk_size(self.chunk_size)
@@ -233,17 +205,22 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
 
     /// Cancels a queued or active scheduler request.
     pub fn cancel(&self, request_id: IoRequestId) -> bool {
-        self.state
+        let cancelled = self
+            .state
             .lock()
             .map(|mut state| state.scheduler.cancel(request_id))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if cancelled {
+            self.wake.wake_by_ref();
+        }
+        cancelled
     }
 
     /// Returns the number of requests not yet reported to the caller.
     pub fn len(&self) -> usize {
         self.state
             .lock()
-            .map(|state| state.scheduler.len())
+            .map(|state| state.pending.len())
             .unwrap_or(0)
     }
 
@@ -252,33 +229,177 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
         self.len() == 0
     }
 
-    /// Polls one chunk, completion, cancellation, or provider error.
+    /// Polls one chunk, completion, or request-associated failure (including cancellation).
+    ///
+    /// Request failures are [`IoAdapterEvent::Failed`]; `Err` is reserved for
+    /// an internal adapter failure. Events reserved by blocking readers are not
+    /// exposed here. All waiting readers are woken when any provider makes progress.
     pub fn poll(&self, context: &mut Context<'_>) -> Poll<Result<IoAdapterEvent, IoError>> {
+        self.poll_for(context, None)
+    }
+
+    fn poll_for(
+        &self,
+        context: &mut Context<'_>,
+        target: Option<IoRequestId>,
+    ) -> Poll<Result<IoAdapterEvent, IoError>> {
+        self.wake.register(context.waker());
         let mut state = match self.lock_state() {
             Ok(state) => state,
-            Err(error) => return Poll::Ready(Err(error)),
+            Err(error) => {
+                self.wake.unregister(context.waker());
+                return Poll::Ready(Err(error));
+            }
         };
-        if let Some(event) = state.ready.pop_front() {
+        let accepts = |event: &IoAdapterEvent, state: &AdapterState<P>| match target {
+            Some(id) => event.request_id() == id,
+            None => !state.blocking.contains_key(&event.request_id()),
+        };
+        if let Some(index) = state.ready.iter().position(|event| accepts(event, &state)) {
+            let event = state.ready.remove(index).expect("ready event index");
+            state.retire(&event);
+            self.wake.unregister(context.waker());
             return Poll::Ready(Ok(event));
         }
-        match state.scheduler.poll(context) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => {
-                let request_id = match error {
-                    IoError::Cancelled { request_id } => Some(request_id),
-                    _ => state
-                        .failed_requests
-                        .lock()
-                        .ok()
-                        .and_then(|mut failed| failed.pop_front()),
-                };
-                if let Some(request_id) = request_id {
-                    state.pending.remove(&request_id);
+        let scheduler_waker = Waker::from(Arc::clone(&self.wake));
+        let mut scheduler_context = Context::from_waker(&scheduler_waker);
+        let result = state.poll_scheduler(&mut scheduler_context);
+        match result {
+            Poll::Ready(Ok(event)) if !accepts(&event, &state) => {
+                let waiter = state.blocking.get(&event.request_id()).cloned();
+                state.ready.push_back(event);
+                drop(state);
+                if let Some(waiter) = waiter {
+                    waiter.wake();
                 }
+                // Progress was made even if this event belongs to another reader.
+                self.wake.wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Ready(Ok(event)) => {
+                state.retire(&event);
+                self.wake.unregister(context.waker());
+                Poll::Ready(Ok(event))
+            }
+            Poll::Ready(Err(error)) => {
+                self.wake.unregister(context.waker());
                 Poll::Ready(Err(error))
             }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    /// Reads one cell to completion using the scheduler's wake-up contract.
+    ///
+    /// Other requests remain observable through [`Self::poll`], including failures.
+    /// Blocking readers reserve their own events so concurrent readers cannot
+    /// consume one another's results. The file provider performs bounded blocking
+    /// reads; this method does not turn filesystem calls into worker-thread IO.
+    pub fn read_to_completion(
+        &self,
+        request: &CellReadRequest,
+        cancel: CancellationToken,
+    ) -> Result<Vec<u8>, IoError> {
+        if cancel.is_cancelled() {
+            return Err(internal_error(
+                "cell request was cancelled before submission",
+            ));
+        }
+        let parker = Arc::new(BlockingWaker::new());
+        let waker = Waker::from(Arc::clone(&parker));
+        let request_id = {
+            let mut state = self.lock_state()?;
+            let id = self.submit_locked(&mut state, *request)?;
+            state.blocking.insert(id, waker.clone());
+            id
+        };
+        let mut context = Context::from_waker(&waker);
+        loop {
+            match self.poll_for(&mut context, Some(request_id)) {
+                Poll::Pending => parker.park(),
+                Poll::Ready(Err(error)) => return Err(error),
+                Poll::Ready(Ok(IoAdapterEvent::Chunk { .. })) => {}
+                Poll::Ready(Ok(IoAdapterEvent::Completed { bytes, .. })) => return Ok(bytes),
+                Poll::Ready(Ok(IoAdapterEvent::Failed { error, .. })) => return Err(error),
+            }
+        }
+    }
+
+    fn lock_state(&self) -> Result<MutexGuard<'_, AdapterState<P>>, IoError> {
+        self.state
+            .lock()
+            .map_err(|_| internal_error("adapter state poisoned"))
+    }
+}
+
+impl IoAdapterEvent {
+    /// Returns the identity of the request that produced this event.
+    #[must_use]
+    pub const fn request_id(&self) -> IoRequestId {
+        match self {
+            Self::Chunk { request_id, .. }
+            | Self::Completed { request_id, .. }
+            | Self::Failed { request_id, .. } => *request_id,
+        }
+    }
+}
+
+impl<P: ReadProvider> AdapterState<P> {
+    fn retire(&mut self, event: &IoAdapterEvent) {
+        if matches!(
+            event,
+            IoAdapterEvent::Completed { .. } | IoAdapterEvent::Failed { .. }
+        ) {
+            self.pending.remove(&event.request_id());
+            self.blocking.remove(&event.request_id());
+        }
+    }
+
+    fn poll_scheduler(
+        &mut self,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<IoAdapterEvent, IoError>> {
+        // The scheduler is serialized under the adapter lock. Every provider
+        // callback records its identity, so a subsequent validation failure is
+        // associated with that exact callback, not a stale failure FIFO.
+        match self.callback_request.lock() {
+            Ok(mut current) => *current = None,
+            Err(_) => return Poll::Ready(Err(internal_error("request tracking poisoned"))),
+        }
+        match self.scheduler.poll(context) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => {
+                let callback = match self.callback_request.lock() {
+                    Ok(mut current) => current.take(),
+                    Err(_) => return Poll::Ready(Err(internal_error("request tracking poisoned"))),
+                };
+                // Scheduler cancellation can bypass operation polling after it
+                // starts a different queued request. Its explicit ID wins over
+                // the last provider callback; provider cancellations have been
+                // normalized by the tracking wrapper above.
+                let request_id = match error {
+                    IoError::Cancelled { request_id } => Some(request_id),
+                    _ => callback,
+                };
+                let Some(request_id) = request_id else {
+                    return Poll::Ready(Err(error));
+                };
+                let Some(pending) = self.pending.get_mut(&request_id) else {
+                    return Poll::Ready(Err(internal_error("failure has no pending request")));
+                };
+                pending.bytes.clear();
+                let error = match error {
+                    IoError::Cancelled { .. } => IoError::Cancelled { request_id },
+                    other => other,
+                };
+                Poll::Ready(Ok(IoAdapterEvent::Failed {
+                    request_id,
+                    request: pending.request,
+                    error,
+                }))
+            }
             Poll::Ready(Ok(IoEvent::Chunk { request_id, chunk })) => {
-                let Some(pending) = state.pending.get_mut(&request_id) else {
+                let Some(pending) = self.pending.get_mut(&request_id) else {
                     return Poll::Ready(Err(internal_error("chunk has no pending request")));
                 };
                 pending.bytes.extend_from_slice(chunk.bytes());
@@ -290,74 +411,16 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
                 }))
             }
             Poll::Ready(Ok(IoEvent::Completed(summary))) => {
-                let Some(pending) = state.pending.remove(&summary.request_id()) else {
+                let Some(pending) = self.pending.get_mut(&summary.request_id()) else {
                     return Poll::Ready(Err(internal_error("completion has no pending request")));
                 };
                 Poll::Ready(Ok(IoAdapterEvent::Completed {
                     request_id: summary.request_id(),
                     request: pending.request,
                     summary,
-                    bytes: pending.bytes,
+                    bytes: core::mem::take(&mut pending.bytes),
                 }))
             }
-        }
-    }
-
-    /// Reads one cell to completion using the scheduler's wake-up contract.
-    pub fn read_to_completion(
-        &self,
-        request: &CellReadRequest,
-        cancel: CancellationToken,
-    ) -> Result<Vec<u8>, IoError> {
-        if cancel.is_cancelled() {
-            return Err(IoError::Provider {
-                message: String::from("cell request was cancelled before submission"),
-            });
-        }
-        let request_id = self.submit(*request)?;
-        let parker = Arc::new(BlockingWaker::new());
-        let waker = Waker::from(Arc::clone(&parker));
-        let mut context = Context::from_waker(&waker);
-        let mut deferred = VecDeque::new();
-        loop {
-            match self.poll(&mut context) {
-                Poll::Pending => parker.park(),
-                Poll::Ready(Err(error)) => {
-                    self.requeue(deferred);
-                    return Err(error);
-                }
-                Poll::Ready(Ok(event)) => match event {
-                    IoAdapterEvent::Chunk {
-                        request_id: event_id,
-                        ..
-                    } if event_id == request_id => {}
-                    IoAdapterEvent::Completed {
-                        request_id: event_id,
-                        bytes,
-                        ..
-                    } if event_id == request_id => {
-                        self.requeue(deferred);
-                        return Ok(bytes);
-                    }
-                    other => deferred.push_back(other),
-                },
-            }
-        }
-    }
-
-    fn lock_state(&self) -> Result<MutexGuard<'_, AdapterState<P>>, IoError> {
-        self.state
-            .lock()
-            .map_err(|_| internal_error("adapter state poisoned"))
-    }
-
-    fn requeue(&self, mut deferred: VecDeque<IoAdapterEvent>) {
-        if deferred.is_empty() {
-            return;
-        }
-        if let Ok(mut state) = self.state.lock() {
-            deferred.append(&mut state.ready);
-            state.ready = deferred;
         }
     }
 }
@@ -380,9 +443,58 @@ fn internal_error(message: &str) -> IoError {
     }
 }
 
+fn normalize_cancellation(error: IoError, request_id: IoRequestId) -> IoError {
+    match error {
+        IoError::Cancelled { .. } => IoError::Cancelled { request_id },
+        other => other,
+    }
+}
+
 struct BlockingWaker {
     thread: Thread,
     notified: AtomicBool,
+}
+
+#[derive(Default)]
+struct SchedulerWake {
+    waiters: Mutex<Vec<Waker>>,
+}
+
+impl SchedulerWake {
+    fn register(&self, waker: &Waker) {
+        let mut waiters = self
+            .waiters
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !waiters.iter().any(|waiting| waiting.will_wake(waker)) {
+            waiters.push(waker.clone());
+        }
+    }
+
+    fn unregister(&self, waker: &Waker) {
+        self.waiters
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|waiting| !waiting.will_wake(waker));
+    }
+}
+
+impl Wake for SchedulerWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let waiters = core::mem::take(
+            &mut *self
+                .waiters
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
 }
 
 impl BlockingWaker {
@@ -412,6 +524,10 @@ impl Wake for BlockingWaker {
 }
 
 #[cfg(test)]
+#[path = "io_adapter_tests.rs"]
+mod correlation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{ManifestHeader, SceneHost, StreamBudget, WorldFrameCoordinator};
@@ -419,7 +535,7 @@ mod tests {
     use prism_world_stream::{AabbI64, CellManifest, DemandSource, GlobalPos, SectorId};
     use std::sync::Arc;
 
-    fn manifest(io_bytes: usize) -> CellManifest {
+    pub(super) fn manifest(io_bytes: usize) -> CellManifest {
         CellManifest {
             sector: SectorId::new(0, 0, 0, 0),
             bounds: AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1))
@@ -431,7 +547,7 @@ mod tests {
         }
     }
 
-    struct MemoryOperation {
+    pub struct MemoryOperation {
         request_id: IoRequestId,
         bytes: Vec<u8>,
         offset: usize,
@@ -464,8 +580,8 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct MemoryProvider {
-        bytes: Arc<Vec<u8>>,
+    pub(super) struct MemoryProvider {
+        pub(super) bytes: Arc<Vec<u8>>,
     }
 
     impl ReadProvider for MemoryProvider {
@@ -502,7 +618,7 @@ mod tests {
         }
     }
 
-    fn context() -> Context<'static> {
+    pub(super) fn context() -> Context<'static> {
         Context::from_waker(Waker::noop())
     }
 
@@ -545,6 +661,9 @@ mod tests {
                     break;
                 }
                 Poll::Ready(Err(error)) => panic!("unexpected IO error: {error}"),
+                Poll::Ready(Ok(IoAdapterEvent::Failed { error, .. })) => {
+                    panic!("unexpected request failure: {error}")
+                }
                 Poll::Pending => panic!("memory provider should be immediately ready"),
             }
         }
@@ -572,7 +691,7 @@ mod tests {
         assert!(adapter.cancel(request_id));
         let mut context = context();
         assert!(
-            matches!(adapter.poll(&mut context), Poll::Ready(Err(IoError::Cancelled { request_id: cancelled })) if cancelled == request_id)
+            matches!(adapter.poll(&mut context), Poll::Ready(Ok(IoAdapterEvent::Failed { request_id: cancelled, error: IoError::Cancelled { .. }, .. })) if cancelled == request_id)
         );
         assert!(adapter.is_empty());
     }
@@ -585,7 +704,7 @@ mod tests {
         let mut context = context();
         assert!(matches!(
             adapter.poll(&mut context),
-            Poll::Ready(Err(IoError::Provider { .. }))
+            Poll::Ready(Ok(IoAdapterEvent::Failed { request_id: failed, error: IoError::Provider { .. }, .. })) if failed == request_id
         ));
         assert_eq!(
             adapter.len(),

@@ -39,7 +39,9 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 - `prism_world_io`：分块读取请求、稳定优先级/FIFO 排序、显式容量背压、可取消 poll 操作、连续 chunk/short-read/checksum 校验和 std 文件 provider。
 - 默认构建保持 `no_std + alloc`；`std` 只增加 scheduler 与文件系统 provider，不把 IO、资产数据库或 ECS 引入 world policy core。
 - `prism_world_runtime`：真实调用 `StreamScheduler` 生成 load/evict 动作，并通过有界、可取消、优先级排序的 provider 队列提交 cell；完成后执行固定 manifest header 校验，再进入 `SceneHost::load_cell`，失败/驱逐写入可 replay trace。std 构建新增 `IoSchedulerAdapter`，实际桥接 `prism_world_io::IoScheduler` 的 chunk/completion/cancel/backpressure/error 事件，并保留同步 `ChunkProvider` 兼容路径。
-- `FileProvider` 已通过 `prism_world_io/std` 的真实临时文件测试；`IoSchedulerAdapter` 的 chunk 聚合、短读/checksum/provider error 会释放对应请求，失败请求队列按 request id 保留，不再用单个共享槽覆盖并发错误。runtime 端到端测试覆盖 manifest header、payload 进入 `SceneHost`、取消、背压和 provider error。
+- `FileCellProvider` 复用 `prism_world_io/std` 的真实 `FileProvider`，以 sector 注册完整 manifest/文件 offset/checksum，拒绝过期 manifest 并保留调度优先级。真实临时文件测试覆盖文件→分块 scheduler→header/checksum→`SceneHost`，及短读、打开失败、取消和错误隔离；底层每次 poll 为有界阻塞读取，不宣称已变成线程池异步文件 IO。
+- `IoSchedulerAdapter` 以带 ID/原始请求的 `Failed` 终态关联错误；scheduler 串行锁内跟踪实际 start/poll 回调，scheduler 的显式取消 ID 优先，provider 不能伪造其他请求的取消 ID。并发 blocking reader 保留各自结果、共享 provider 唤醒可唤醒全部等待者，public poll 不抢占其结果；终态被消费前仍计入 capacity，取消会唤醒停驻 reader。capacity 当前限请求数而非累计字节，不宣称是全内存上限。
+- runtime 全 feature 测试 19 项、no-default 测试 3 项、两种 feature 的 all-target clippy/check/fmt 通过；5 项并发/关联测试额外重复 100 轮通过。上述验证不依赖 `prism_asset`。
 
 ### M6-M8：地形、仿真与网络边界
 
