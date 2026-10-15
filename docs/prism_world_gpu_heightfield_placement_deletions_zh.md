@@ -70,6 +70,7 @@ workgroup storage 和 dispatch 上限。零容量仍分配一个不可寻址物�
 cargo check -p prism_world_gpu --features terrain_scatter --tests
 cargo test -p prism_world_gpu --features terrain_scatter --test wgsl_compile --no-fail-fast
 WGPU_BACKEND=metal cargo test -p prism_world_gpu --features terrain_scatter --test heightfield_placement_deletion -- --nocapture
+WGPU_BACKEND=metal cargo test -p prism_world_gpu --features terrain_scatter --test scatter_deletion_composed -- --nocapture
 ```
 
 物理 GPU 测试要求真实 `IntegratedGpu` 或 `DiscreteGpu`，不会把无 adapter、软件 adapter

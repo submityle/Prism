@@ -50,13 +50,13 @@ host scratch、Arc 快照、Vec header、分配器元数据和驱动内部显存
 ## 验证证据
 
 2026-10-16，在 Apple M2 IntegratedGpu / Metal 上使用 `WGPU_BACKEND=metal
-PRISM_REQUIRE_GPU=1`，`tests/heightfield_placement.rs` 的 7 项测试全部通过：精确三角
+PRISM_REQUIRE_GPU=1`，`tests/heightfield_placement.rs` 的 9 项测试全部通过：精确三角
 投影、signed normal、闭区间和坡度、跨零半毫米整体取整、最终 Y 作者场、噪声/warp/brush、
 反向非对齐分区、i64 边缘、完整缓存身份、固定尾部、失败事务、投影溢出整体失效，以及
 真实 indirect draw 的离屏像素对照。测试严格拒绝 CPU adapter、错误 backend、缺少物理
 设备和 map/readback 错误，不把 skip 算通过。
 
-同次无设备 Naga 闸门为 6 项通过，验证两个新 WGSL 的解析、core capabilities、入口、
+同次无设备 Naga 闸门为 7 项通过，验证三个新 WGSL 的解析、core capabilities、入口、
 binding access、uniform span、64 字节 record/sample stride 和无 float/wide scalar。
 
 同次真实设备还通过了独立的 `heightfield_placement_deletion` 端到端回归：它由
@@ -91,6 +91,7 @@ kernel、full-key deletion 及其真实设备闭环。
 ```text
 cargo test --offline -p prism_world_gpu --features terrain_scatter --test wgsl_compile
 WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_world_gpu --features terrain_scatter --test heightfield_placement -- --nocapture
-WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_world_gpu --features terrain_scatter --test heightfield_placement_deletion --test scatter_deletion_composed -- --nocapture
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_world_gpu --features terrain_scatter --test heightfield_placement_deletion -- --nocapture
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_world_gpu --features terrain_scatter --test scatter_deletion_composed -- --nocapture
 WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo bench --offline -p prism_world_gpu --features terrain_scatter --bench heightfield_placement -- --nocapture
 ```
