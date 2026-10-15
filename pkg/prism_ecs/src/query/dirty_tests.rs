@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use crate::change::Tick;
 use crate::component::Component;
 use crate::entity::Entity;
-use crate::query::{Changed, DirtyChunk, With};
+use crate::query::{Changed, DirtyChunk, Or, With, Without};
 use crate::storage::rows_per_chunk;
 use crate::world::World;
 
@@ -38,6 +38,10 @@ struct SparseDirty(u32);
 impl Component for SparseDirty {
     const STORAGE: crate::component::StorageType = crate::component::StorageType::SparseSet;
 }
+
+#[derive(Clone, Copy)]
+struct Tag;
+impl Component for Tag {}
 
 /// Advance the world as if a system had just finished a run: the next window
 /// starts where this one ended, and the frame tick advances by one.
@@ -339,4 +343,89 @@ fn sparse_dirty_fallback_is_empty_for_a_clean_window() {
     assert!(report.chunks.is_empty());
     assert_eq!(report.stats.sparse_entities_checked, 5);
     assert_eq!(report.stats.sparse_chunk_candidates, 0);
+}
+
+#[test]
+fn sparse_membership_filters_feed_dirty_candidates_across_archetypes() {
+    let mut w = World::new();
+    let plain = [w.spawn(Big::new(0)), w.spawn(Big::new(1))];
+    let tagged = [w.spawn((Big::new(2), Tag)), w.spawn((Big::new(3), Tag))];
+    let with = w.query_filtered::<Entity, With<SparseDirty>>();
+    let without = w.query_filtered::<Entity, Without<SparseDirty>>();
+
+    // Prime both match caches before sparse membership changes. The sparse
+    // component does not create an archetype, so the new dirty source must be
+    // responsible for discovering both current row windows.
+    assert!(with.iter(&w).next().is_none());
+    assert_eq!(without.iter(&w).count(), 4);
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+
+    assert!(w.insert(plain[0], SparseDirty(10)));
+    assert!(w.insert(tagged[0], SparseDirty(20)));
+
+    let with_report = with.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(with_report.stats.filter_sources, 1);
+    assert_eq!(with_report.stats.access_columns, 0);
+    assert_eq!(with_report.stats.sparse_entities_checked, 2);
+    assert_eq!(with_report.stats.sparse_chunk_candidates, 2);
+    assert_eq!(with_report.chunks.len(), 2);
+    assert!(with_report
+        .chunks
+        .iter()
+        .any(|chunk| chunk.archetype == w.entities().location(plain[0]).unwrap().archetype_id));
+    assert!(with_report
+        .chunks
+        .iter()
+        .any(|chunk| chunk.archetype == w.entities().location(tagged[0]).unwrap().archetype_id));
+
+    // Without<SparseDirty> shares the same candidate source. Its coarse result
+    // is intentionally conservative: the changed chunks are still reported,
+    // while exact row admission remains the normal per-row filter's job.
+    let without_report = without.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(without_report.stats.filter_sources, 1);
+    assert_eq!(without_report.chunks.len(), 2);
+}
+
+#[test]
+fn sparse_filter_source_merges_with_dirty_table_columns() {
+    let mut w = World::new();
+    let entity = w.spawn((Big::new(0), Tag));
+    let query = w.query_filtered::<&Big, With<SparseDirty>>();
+    assert!(query.iter(&w).next().is_none());
+
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+    assert!(w.insert(entity, SparseDirty(7)));
+    w.get_mut::<Big>(entity).unwrap().tag += 1;
+
+    let report = query.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(report.stats.access_columns, 1);
+    assert_eq!(report.stats.filter_sources, 1);
+    assert_eq!(report.stats.sparse_entities_checked, 1);
+    assert_eq!(report.stats.sparse_chunk_candidates, 1);
+    assert_eq!(report.stats.column_candidates, 1);
+    assert_eq!(report.stats.merged_candidates, 1);
+    assert_eq!(report.chunks.len(), 1);
+}
+
+#[test]
+fn sparse_filter_source_propagates_through_or() {
+    let mut w = World::new();
+    let entity = w.spawn(Big::new(0));
+    let query = w.query_filtered::<Entity, Or<(With<SparseDirty>, With<Tag>)>>();
+    assert!(query.iter(&w).next().is_none());
+
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+    assert!(w.insert(entity, SparseDirty(9)));
+
+    let report = query.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(report.stats.filter_sources, 1);
+    assert_eq!(report.stats.sparse_entities_checked, 1);
+    assert_eq!(report.stats.sparse_chunk_candidates, 1);
+    assert_eq!(report.chunks.len(), 1);
 }

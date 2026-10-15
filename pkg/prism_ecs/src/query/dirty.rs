@@ -44,6 +44,9 @@ pub struct DirtyChunkStats {
     pub matched_archetypes: usize,
     /// Number of distinct component ids in the query's read/write access.
     pub access_columns: usize,
+    /// Number of distinct component ids contributed by sparse membership
+    /// filters as entity-indexed dirty sources.
+    pub filter_sources: usize,
     /// Number of accessed ids resolved to table columns in the current
     /// archetype. Sparse/shared-only access has no table row-window source.
     pub table_columns: usize,
@@ -163,6 +166,20 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         access_ids.sort_unstable();
         access_ids.dedup();
         report.stats.access_columns = access_ids.len();
+
+        // Sparse membership is not part of QueryData's component access: the
+        // filter only gates entities. It still changes the candidate set when
+        // an entity gains or loses the sparse component, so merge its explicit
+        // dirty sources into the same entity-to-row fallback used by sparse
+        // data terms.
+        let mut filter_sources = Vec::new();
+        F::dirty_sources(self.filter_state(), &mut filter_sources);
+        filter_sources.sort_unstable();
+        filter_sources.dedup();
+        report.stats.filter_sources = filter_sources.len();
+        access_ids.extend(filter_sources);
+        access_ids.sort_unstable();
+        access_ids.dedup();
 
         // Sparse components do not own table chunks. Resolve their changed
         // entities once, then route each entity through the live location table

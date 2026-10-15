@@ -15,6 +15,7 @@ use crate::{
 };
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use prism_platform::topology::CoreKind;
+use prism_platform::{current_thread_affinity, set_current_thread_affinity_mask};
 
 #[test]
 fn probe_agrees_with_runtime_or_refuses_honestly() {
@@ -71,11 +72,29 @@ fn numa_nodes_are_real_or_structurally_unavailable() {
 fn node_binding_never_reports_success_without_a_real_mask() {
     match probe_numa_nodes() {
         Ok(nodes) => {
-            let Some(node) = nodes.iter().find(|node| !node.cpus.is_empty()) else {
+            let Ok(original_mask) = current_thread_affinity() else {
+                return;
+            };
+            let Some(node) = nodes.iter().find(|node| {
+                !node.cpus.is_empty()
+                    && node
+                        .cpus
+                        .iter()
+                        .any(|cpu| original_mask.contains(&(*cpu as usize)))
+            }) else {
                 return;
             };
             match bind_current_thread_to_node(node.id) {
-                Ok(()) => {}
+                Ok(()) => {
+                    let effective = current_thread_affinity()
+                        .expect("successful NUMA binding must have an affinity read-back");
+                    assert!(!effective.is_empty());
+                    assert!(effective
+                        .iter()
+                        .all(|cpu| node.cpus.contains(&(*cpu as u32))));
+                    set_current_thread_affinity_mask(&original_mask)
+                        .expect("NUMA binding test must restore the original affinity mask");
+                }
                 Err(
                     NumaAffinityError::Unsupported
                     | NumaAffinityError::Skipped { .. }

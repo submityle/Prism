@@ -17,7 +17,7 @@
     reason = "acceptance diagnostics are intentionally emitted to stderr"
 )]
 
-use prism_platform::{current_thread_affinity, set_current_thread_affinity_mask};
+use prism_platform::{current_thread_affinity, set_current_thread_affinity_mask, NumaPlacement};
 use prism_platform_os::{bind_current_thread_to_node, probe_numa_nodes, probe_topology};
 use prism_tasks::{CoreClassPolicy, TaskPool, TaskPoolConfig};
 
@@ -205,5 +205,33 @@ fn real_os_numa_affinity_and_worker_placement_are_verified() {
             placement.fallback,
             arenas.len()
         ));
+    }
+
+    // The arena must retain the worker's requested node, and a successful
+    // placement must name that same node. A fallback is valid only as an
+    // explicit capability result; it is never evidence of locality.
+    for (worker, arena) in
+        (0..arenas.len()).filter_map(|worker| arenas.arena(worker).map(|arena| (worker, arena)))
+    {
+        let assignment = assignments[worker];
+        assert_eq!(arena.node(), assignment.node);
+        match arena.placement() {
+            NumaPlacement::Bound { node } => {
+                assert_eq!(node, assignment.node.index());
+                assert!(capabilities.numa_memory_binding);
+            }
+            NumaPlacement::Fallback { requested_node, .. } => {
+                assert_eq!(requested_node, assignment.node.index());
+                assert!(!arena.is_numa_bound());
+            }
+        }
+    }
+
+    if !capabilities.numa_memory_binding {
+        assert_eq!(placement.bound, 0);
+        assert_eq!(placement.fallback, arenas.len());
+        eprintln!(
+            "PASS NUMA memory-policy boundary: capability=false, all arenas explicitly fell back"
+        );
     }
 }

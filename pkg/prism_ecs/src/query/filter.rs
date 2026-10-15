@@ -64,6 +64,16 @@ pub unsafe trait QueryFilter {
     /// (via [`Access::add_filter_read`]). Archetype-only filters record nothing.
     fn update_access(state: &Self::State, access: &mut Access);
 
+    /// Add component ids whose entity-level changes can create or remove
+    /// candidates for the coarse dirty-window pass.
+    ///
+    /// Most filters are either archetype-static or already represented by a
+    /// normal data/filter tick read. Sparse membership filters are different:
+    /// their presence changes without creating a new archetype, so the dirty
+    /// pass needs their entity-indexed fallback as an additional source.
+    #[inline]
+    fn dirty_sources(_state: &Self::State, _out: &mut alloc::vec::Vec<ComponentId>) {}
+
     /// Resolve the per-archetype fetch cursor for the observer window
     /// `(last_run, this_run]`.
     ///
@@ -192,6 +202,12 @@ unsafe impl<T: Component> QueryFilter for With<T> {
 
     fn update_access(_state: &Self::State, _access: &mut Access) {}
 
+    fn dirty_sources(state: &Self::State, out: &mut alloc::vec::Vec<ComponentId>) {
+        if T::STORAGE == StorageType::SparseSet {
+            out.push(*state);
+        }
+    }
+
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
@@ -249,6 +265,12 @@ unsafe impl<T: Component> QueryFilter for Without<T> {
     }
 
     fn update_access(_state: &Self::State, _access: &mut Access) {}
+
+    fn dirty_sources(state: &Self::State, out: &mut alloc::vec::Vec<ComponentId>) {
+        if T::STORAGE == StorageType::SparseSet {
+            out.push(*state);
+        }
+    }
 
     unsafe fn init_fetch<'w>(
         state: &Self::State,
@@ -495,6 +517,14 @@ macro_rules! impl_filter_tuple {
                 $($F::update_access($F, access);)+
             }
 
+            fn dirty_sources(
+                state: &Self::State,
+                out: &mut alloc::vec::Vec<ComponentId>,
+            ) {
+                let ($($F,)+) = state;
+                $($F::dirty_sources($F, out);)+
+            }
+
             unsafe fn init_fetch<'w>(
                 state: &Self::State,
                 archetype: &'w Archetype,
@@ -556,6 +586,14 @@ macro_rules! impl_filter_tuple {
             fn update_access(state: &Self::State, access: &mut Access) {
                 let ($($F,)+) = state;
                 $($F::update_access($F, access);)+
+            }
+
+            fn dirty_sources(
+                state: &Self::State,
+                out: &mut alloc::vec::Vec<ComponentId>,
+            ) {
+                let ($($F,)+) = state;
+                $($F::dirty_sources($F, out);)+
             }
 
             unsafe fn init_fetch<'w>(
