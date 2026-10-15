@@ -31,7 +31,10 @@ mod surface;
 mod bindless_tests;
 
 pub use device::{BackendError, ShaderSourceKind, WgpuDevice};
-pub use instance::{DeviceCreationError, WgpuAdapter, WgpuInstance};
+pub use instance::{
+    require_hardware_gpu, AdapterClass, AdapterEvidence, DeviceCreationError, HardwareDeviceError,
+    WgpuAdapter, WgpuInstance,
+};
 pub use prism_render_driver::DeviceLostReason;
 pub use queue::WgpuQueue;
 pub use surface::{SurfaceCreateError, WgpuFrame, WgpuSurface};

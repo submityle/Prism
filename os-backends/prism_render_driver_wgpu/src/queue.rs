@@ -9,6 +9,7 @@
 
 use alloc::vec::Vec;
 use core::any::Any;
+use std::sync::{Arc as StdArc, Mutex};
 
 use prism_render_driver as rhi;
 use rhi::RenderQueue;
@@ -80,6 +81,29 @@ fn texture_copy_info(
 }
 
 impl WgpuQueue {
+    /// Maps a staging buffer and returns the backend's actual map result.
+    ///
+    /// Readback is an acceptance hook, so a rejected map must be surfaced
+    /// instead of being turned into an apparent successful read.
+    fn map_read(&self, staging: &wgpu::Buffer) {
+        let result = StdArc::new(Mutex::new(None));
+        let callback_result = StdArc::clone(&result);
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |status| {
+                *callback_result.lock().expect("map callback lock") = Some(status);
+            });
+        self.inner
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll must complete readback mapping");
+        match result.lock().expect("map result lock").take() {
+            Some(Ok(())) => {}
+            Some(Err(error)) => panic!("GPU readback mapping failed: {error}"),
+            None => panic!("GPU readback mapping callback did not run"),
+        }
+    }
+
     /// Wraps a ready wgpu queue sharing `inner` with its device.
     #[must_use]
     pub(crate) fn from_parts(queue: wgpu::Queue, inner: Arc<DeviceInner>) -> Self {
@@ -565,10 +589,11 @@ impl WgpuQueue {
             },
         );
         self.queue.submit([encoder.finish()]);
-        let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
-
-        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
+        self.inner
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll must complete texture readback");
+        self.map_read(&staging);
 
         let view = staging
             .slice(..)
@@ -615,10 +640,11 @@ impl WgpuQueue {
                 });
         encoder.copy_buffer_to_buffer(&buffer, 0, &staging, 0, copy_size);
         self.queue.submit([encoder.finish()]);
-        let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
-
-        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
+        self.inner
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll must complete buffer readback");
+        self.map_read(&staging);
 
         let view = staging
             .slice(..)
@@ -661,12 +687,39 @@ mod tests {
     /// Brings up a device/queue pair, or `None` when no GPU is available so the
     /// suite passes without hardware.
     fn device_or_skip() -> Option<(WgpuDevice, WgpuQueue)> {
-        WgpuInstance::new().request_default_device().ok()
+        match WgpuInstance::new().request_default_hardware_device() {
+            Ok(pair) => {
+                eprintln!(
+                    "wgpu REAL HARDWARE GPU: {:?}",
+                    pair.0.wgpu_adapter().get_info()
+                );
+                Some(pair)
+            }
+            Err(crate::HardwareDeviceError::NoAdapter) => {
+                assert!(
+                    !require_gpu(),
+                    "PRISM_REQUIRE_GPU=1 but no wgpu adapter was found"
+                );
+                eprintln!("SKIPPED wgpu REAL HARDWARE GPU test: no adapter");
+                None
+            }
+            Err(crate::HardwareDeviceError::NonHardware(evidence)) => {
+                assert!(
+                    !require_gpu(),
+                    "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
+                );
+                eprintln!("SOFTWARE/VIRTUAL adapter; skipped physical-GPU evidence: {evidence}");
+                None
+            }
+            Err(crate::HardwareDeviceError::Device(error)) => {
+                panic!("physical GPU adapter was found but device creation failed: {error}");
+            }
+        }
     }
 
     /// Whether a missing adapter must fail the test instead of skipping it.
     fn require_gpu() -> bool {
-        std::env::var_os("PRISM_REQUIRE_GPU").is_some()
+        crate::require_hardware_gpu()
     }
 
     #[test]

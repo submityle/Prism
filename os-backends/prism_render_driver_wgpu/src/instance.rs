@@ -26,6 +26,103 @@ pub struct WgpuAdapter {
     caps: rhi::DeviceCapabilities,
 }
 
+/// The acceptance classification of a wgpu adapter.
+///
+/// This is intentionally stricter than merely obtaining a logical device:
+/// null/software paths can create a device too, but they are not evidence that
+/// a render slice executed on physical GPU hardware.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AdapterClass {
+    /// An integrated or discrete physical GPU.
+    Hardware,
+    /// A CPU/software rasterizer.
+    Software,
+    /// A virtual or paravirtualized GPU.
+    Virtual,
+    /// An adapter whose type is not known well enough for hardware claims.
+    Unknown,
+}
+
+/// Adapter identity and the acceptance classification derived from it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AdapterEvidence {
+    /// The backend-reported adapter identity.
+    pub info: rhi::AdapterInfo,
+    /// The conservative acceptance class.
+    pub class: AdapterClass,
+}
+
+/// Returns whether acceptance tests must require a physical GPU adapter.
+#[must_use]
+pub fn require_hardware_gpu() -> bool {
+    matches!(std::env::var("PRISM_REQUIRE_GPU"), Ok(value) if value == "1")
+}
+
+impl AdapterEvidence {
+    /// Classifies an RHI adapter description without creating a device.
+    #[must_use]
+    pub fn from_info(info: &rhi::AdapterInfo) -> Self {
+        let class = match info.device_type {
+            rhi::DeviceType::IntegratedGpu | rhi::DeviceType::DiscreteGpu => AdapterClass::Hardware,
+            rhi::DeviceType::Cpu => AdapterClass::Software,
+            rhi::DeviceType::VirtualGpu => AdapterClass::Virtual,
+            rhi::DeviceType::Other => AdapterClass::Unknown,
+        };
+        Self {
+            info: info.clone(),
+            class,
+        }
+    }
+
+    /// Returns whether this adapter is suitable for a physical-GPU acceptance
+    /// claim.
+    #[must_use]
+    pub const fn is_hardware(&self) -> bool {
+        matches!(self.class, AdapterClass::Hardware)
+    }
+}
+
+#[cfg(test)]
+mod adapter_evidence_tests {
+    use super::*;
+
+    fn info(device_type: rhi::DeviceType) -> rhi::AdapterInfo {
+        rhi::AdapterInfo {
+            name: "test-adapter".into(),
+            backend: rhi::Backend::Metal,
+            device_type,
+            vendor_id: 1,
+            device_id: 2,
+            driver: Some("test-driver".into()),
+        }
+    }
+
+    #[test]
+    fn physical_gpu_classes_are_the_only_hardware_acceptance_class() {
+        assert!(AdapterEvidence::from_info(&info(rhi::DeviceType::IntegratedGpu)).is_hardware());
+        assert!(AdapterEvidence::from_info(&info(rhi::DeviceType::DiscreteGpu)).is_hardware());
+        assert!(!AdapterEvidence::from_info(&info(rhi::DeviceType::Cpu)).is_hardware());
+        assert!(!AdapterEvidence::from_info(&info(rhi::DeviceType::VirtualGpu)).is_hardware());
+        assert!(!AdapterEvidence::from_info(&info(rhi::DeviceType::Other)).is_hardware());
+    }
+}
+
+impl fmt::Display for AdapterEvidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "name={:?} backend={:?} device_type={:?} vendor=0x{:04x} device=0x{:04x} driver={:?} class={:?}",
+            self.info.name,
+            self.info.backend,
+            self.info.device_type,
+            self.info.vendor_id,
+            self.info.device_id,
+            self.info.driver,
+            self.class,
+        )
+    }
+}
+
 impl WgpuAdapter {
     /// Wraps a wgpu adapter and derives its RHI description and capabilities.
     #[must_use]
@@ -90,6 +187,38 @@ pub enum DeviceCreationError {
     RequestDevice(wgpu::RequestDeviceError),
 }
 
+/// Why a physical-GPU acceptance device could not be created.
+#[derive(Debug)]
+pub enum HardwareDeviceError {
+    /// No adapter was visible to wgpu.
+    NoAdapter,
+    /// An adapter was visible, but it is not physical-GPU evidence.
+    NonHardware(AdapterEvidence),
+    /// The adapter was hardware-classed but logical-device creation failed.
+    Device(DeviceCreationError),
+}
+
+impl fmt::Display for HardwareDeviceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoAdapter => f.write_str("no wgpu adapter was found"),
+            Self::NonHardware(evidence) => {
+                write!(f, "adapter is not physical-GPU evidence: {evidence}")
+            }
+            Self::Device(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for HardwareDeviceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Device(error) => Some(error),
+            Self::NoAdapter | Self::NonHardware(_) => None,
+        }
+    }
+}
+
 impl fmt::Display for DeviceCreationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -139,6 +268,14 @@ impl WgpuInstance {
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<wgpu::Adapter> {
         futures_lite::future::block_on(self.instance.enumerate_adapters(wgpu::Backends::all()))
+    }
+
+    /// Returns the adapter selected by wgpu's explicit software fallback gate,
+    /// classified for diagnostics without creating a logical device.
+    #[must_use]
+    pub fn fallback_adapter_evidence(&self) -> Option<AdapterEvidence> {
+        self.request_adapter(wgpu::PowerPreference::HighPerformance, true)
+            .map(|adapter| AdapterEvidence::from_info(&WgpuAdapter::new(adapter).info))
     }
 
     /// Requests an adapter matching `power_preference`, blocking until the
@@ -271,6 +408,46 @@ impl WgpuInstance {
     /// and never name a `wgpu` type directly.
     pub fn request_default_device(&self) -> Result<(WgpuDevice, WgpuQueue), DeviceCreationError> {
         self.request_device(wgpu::PowerPreference::HighPerformance)
+    }
+
+    /// Requests a device only when the selected adapter is classified as an
+    /// integrated or discrete physical GPU.
+    ///
+    /// This gate is for acceptance tests and diagnostics. The ordinary
+    /// [`Self::request_default_device`] path remains permissive because some
+    /// applications intentionally opt into software or virtual adapters.
+    pub fn request_default_hardware_device(
+        &self,
+    ) -> Result<(WgpuDevice, WgpuQueue), HardwareDeviceError> {
+        let mut non_hardware = None;
+        let mut integrated = None;
+        let mut discrete = None;
+        for adapter in self.enumerate_adapters() {
+            let evidence = AdapterEvidence::from_info(&WgpuAdapter::new(adapter.clone()).info);
+            if !evidence.is_hardware() {
+                non_hardware.get_or_insert(evidence);
+                continue;
+            }
+            match evidence.info.device_type {
+                rhi::DeviceType::DiscreteGpu => discrete = Some(adapter),
+                rhi::DeviceType::IntegratedGpu => integrated = Some(adapter),
+                _ => unreachable!("hardware adapter classification is exhaustive"),
+            }
+        }
+        let Some(adapter) = discrete.or(integrated) else {
+            return Err(non_hardware
+                .map(HardwareDeviceError::NonHardware)
+                .unwrap_or(HardwareDeviceError::NoAdapter));
+        };
+        self.create_device(&adapter)
+            .map_err(HardwareDeviceError::Device)
+    }
+
+    /// Returns evidence for the adapter chosen by the normal permissive path.
+    #[must_use]
+    pub fn default_adapter_evidence(&self) -> Option<AdapterEvidence> {
+        self.request_adapter(wgpu::PowerPreference::HighPerformance, false)
+            .map(|adapter| AdapterEvidence::from_info(&WgpuAdapter::new(adapter).info))
     }
 }
 

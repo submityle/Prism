@@ -15,8 +15,11 @@
 extern crate alloc;
 
 use prism_render_driver as rhi;
-use prism_render_driver_wgpu::{DeviceLostReason, WgpuDevice, WgpuInstance, WgpuQueue};
-use rhi::{FrameSync, RenderDevice, RenderQueue};
+use prism_render_driver_wgpu::{
+    require_hardware_gpu, AdapterEvidence, DeviceLostReason, HardwareDeviceError, WgpuDevice,
+    WgpuInstance, WgpuQueue,
+};
+use rhi::{Adapter, FrameSync, RenderDevice, RenderQueue};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -25,7 +28,64 @@ use alloc::sync::Arc;
 
 /// Brings up a device/queue pair, or returns `None` when no GPU is available.
 fn device_or_skip() -> Option<(WgpuDevice, WgpuQueue)> {
-    WgpuInstance::new().request_default_device().ok()
+    match WgpuInstance::new().request_default_hardware_device() {
+        Ok(pair) => {
+            eprintln!(
+                "wgpu integration REAL HARDWARE GPU: {:?}",
+                pair.0.wgpu_adapter().get_info()
+            );
+            Some(pair)
+        }
+        Err(HardwareDeviceError::NoAdapter) => {
+            assert!(
+                !require_gpu(),
+                "PRISM_REQUIRE_GPU=1 but no wgpu adapter was found"
+            );
+            eprintln!("SKIPPED wgpu integration REAL HARDWARE GPU test: no adapter");
+            None
+        }
+        Err(HardwareDeviceError::NonHardware(evidence)) => {
+            assert!(
+                !require_gpu(),
+                "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
+            );
+            eprintln!("SOFTWARE/VIRTUAL adapter; skipped physical-GPU evidence: {evidence}");
+            None
+        }
+        Err(HardwareDeviceError::Device(error)) => {
+            panic!("physical GPU adapter was found but device creation failed: {error}");
+        }
+    }
+}
+
+#[test]
+fn adapter_inventory_reports_hardware_and_software_boundaries() {
+    let instance = WgpuInstance::new();
+    let evidence: Vec<_> = <WgpuInstance as rhi::Instance>::enumerate_adapters(&instance)
+        .iter()
+        .map(|adapter| AdapterEvidence::from_info(adapter.info()))
+        .collect();
+    for adapter in &evidence {
+        eprintln!("wgpu adapter evidence: {adapter}");
+    }
+    if evidence.is_empty() {
+        assert!(
+            !require_hardware_gpu(),
+            "PRISM_REQUIRE_GPU=1 but no wgpu adapter was found"
+        );
+        eprintln!("SKIPPED adapter inventory: no adapter");
+    } else {
+        if let Some(fallback) = instance.fallback_adapter_evidence() {
+            assert!(!fallback.is_hardware());
+            eprintln!("wgpu SOFTWARE/VIRTUAL fallback evidence: {fallback}");
+        } else {
+            eprintln!("wgpu fallback adapter: unavailable");
+        }
+        assert!(
+            !require_hardware_gpu() || evidence.iter().any(AdapterEvidence::is_hardware),
+            "PRISM_REQUIRE_GPU=1 requires a physical GPU adapter; observed: {evidence:?}"
+        );
+    }
 }
 
 /// Whether a missing adapter must fail the test instead of skipping it.
@@ -33,7 +93,7 @@ fn device_or_skip() -> Option<(WgpuDevice, WgpuQueue)> {
 /// Set `PRISM_REQUIRE_GPU` to opt into strictness so a run meant to exercise
 /// hardware cannot silently degrade into a no-op.
 fn require_gpu() -> bool {
-    std::env::var_os("PRISM_REQUIRE_GPU").is_some()
+    require_hardware_gpu()
 }
 
 #[test]
