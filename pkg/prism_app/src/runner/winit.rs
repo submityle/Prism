@@ -39,7 +39,9 @@ use prism_window_winit::{FrameOutcome, WindowConfig, WinitBackend, WinitRunner a
 
 use crate::app::App;
 use crate::exit::{AppExit, AppExitRequest};
-use crate::lifecycle::{FocusChanged, LowMemory, SuspendResumeAdapter, WillRenderFirstFrame};
+use crate::lifecycle::{
+    FocusChanged, LowMemory, Resumed, SuspendResumeAdapter, Suspended, WillRenderFirstFrame,
+};
 use crate::pacing::{FrameLimit, FramePacer};
 
 /// An action the windowed runner derives from a frame's window events.
@@ -153,10 +155,13 @@ impl WinitApp for WindowedHost {
                 }
             }
             SuspendEventKind::Suspended => {
-                super::window_bridge::publish(&mut self.app, backend, &self.open, true);
                 // The adapter records the real host timestamp before the next
                 // automatic frame and forwards the App lifecycle edge.
                 self.suspend_resume.forward(&mut self.app, event);
+                // Release window-backed render resources only after the App
+                // has accepted the platform edge. This keeps the lifecycle
+                // contract installed before an optional render bridge runs.
+                super::window_bridge::publish(&mut self.app, backend, &self.open, true);
             }
         }
     }
@@ -419,6 +424,7 @@ mod tests {
             pacer: FramePacer::new(FrameLimit::Off),
             first_frame_sent: false,
             exit: Rc::new(Cell::new(None)),
+            suspend_resume: SuspendResumeAdapter,
         };
         (host, trace)
     }
@@ -458,9 +464,10 @@ mod tests {
             pacer: FramePacer::new(FrameLimit::Off),
             first_frame_sent: false,
             exit,
+            suspend_resume: SuspendResumeAdapter,
         };
         let mut backend = WinitBackend::new();
-        host.suspended(&mut backend);
+        host.lifecycle(SuspendEvent::suspended(prism_platform::now()), &mut backend);
         let events = host
             .app
             .world()
@@ -479,6 +486,7 @@ mod tests {
             pacer: FramePacer::new(FrameLimit::Off),
             first_frame_sent: false,
             exit,
+            suspend_resume: SuspendResumeAdapter,
         };
         let mut backend = WinitBackend::new();
         host.low_memory(&mut backend);
@@ -504,15 +512,16 @@ mod tests {
             pacer: FramePacer::new(FrameLimit::Off),
             first_frame_sent: false,
             exit,
+            suspend_resume: SuspendResumeAdapter,
         };
         let mut backend = WinitBackend::new();
         // A suspend/resume cycle must leave the app able to run again: each
         // resume re-delivers `Resumed`, so a mobile background→foreground
         // transition is not stuck paused after the first resume.
-        host.suspended(&mut backend);
-        host.resumed(&mut backend);
-        host.suspended(&mut backend);
-        host.resumed(&mut backend);
+        host.lifecycle(SuspendEvent::suspended(prism_platform::now()), &mut backend);
+        host.lifecycle(SuspendEvent::resumed(prism_platform::now()), &mut backend);
+        host.lifecycle(SuspendEvent::suspended(prism_platform::now()), &mut backend);
+        host.lifecycle(SuspendEvent::resumed(prism_platform::now()), &mut backend);
         let resumed = host
             .app
             .world()
