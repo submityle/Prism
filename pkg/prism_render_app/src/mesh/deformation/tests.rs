@@ -169,6 +169,65 @@ fn null_cache_releases_every_owned_resource_and_rejects_bad_frames() {
 }
 
 #[test]
+fn deformation_source_shares_immutable_gpu_resources_between_instances() {
+    let instance = NullInstance::new();
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .unwrap();
+    let (device, queue) = instance
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .unwrap();
+    let device = Arc::new(device);
+    let baseline = device.live_resource_count();
+    let source = Arc::new(DeformationSource::new(device.clone(), &queue, fixture(65)).unwrap());
+    let source_resources = device.live_resource_count() - baseline;
+    assert_eq!(
+        source_resources, 7,
+        "three streams plus four pipeline objects"
+    );
+
+    let mut first = DeformationCache::from_source(source.clone(), &queue).unwrap();
+    let mut second = DeformationCache::from_source(source.clone(), &queue).unwrap();
+    assert!(Arc::ptr_eq(first.source(), second.source()));
+    assert_eq!(first.source().allocated_bytes(), source.allocated_bytes());
+    assert_eq!(
+        device.live_resource_count(),
+        baseline + source_resources + 16,
+        "each instance owns six buffers and two bind groups; immutable streams are shared"
+    );
+
+    let joints = joints();
+    let pose = DeformationPose {
+        morph_weights: &[0.25, -0.5],
+        joints: &joints,
+        corrections: None,
+    };
+    let first_output = first.submit_pose(&queue, 1, pose).unwrap();
+    let second_output = second.submit_pose(&queue, 1, pose).unwrap();
+    assert_eq!(
+        first_output.vertex_count,
+        second.source().mesh().vertex_count()
+    );
+    assert_ne!(first_output.current, second_output.current);
+    assert_ne!(first_output.previous, second_output.previous);
+
+    drop(first);
+    assert_eq!(
+        device.live_resource_count(),
+        baseline + source_resources + 8,
+        "dropping one instance must not release the shared source"
+    );
+    drop(second);
+    assert_eq!(
+        device.live_resource_count(),
+        baseline + source_resources,
+        "the explicit source owner keeps immutable resources alive"
+    );
+    drop(source);
+    assert_eq!(device.live_resource_count(), baseline);
+}
+
+#[test]
 fn batch_deformation_matches_cpu_on_a_real_gpu_and_retains_history() {
     let Ok(runtime) =
         prism_render_runtime::RenderRuntime::<WgpuInstance>::wgpu(Extent3d::new_2d(8, 8))

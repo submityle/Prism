@@ -16,6 +16,9 @@ use prism_mesh::deformation::{
 use prism_render_driver as rhi;
 use rhi::{RenderDevice, RenderQueue};
 
+mod source;
+pub use source::DeformationSource;
+
 /// Validation failure before any GPU write, dispatch, or history mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeformationCacheError {
@@ -82,14 +85,10 @@ impl DeformationOutput {
 /// One mesh instance's persistent compute resources and double-buffered output.
 /// Different instances may use the same authored mesh with independent poses.
 pub struct DeformationCache {
-    device: Arc<dyn RenderDevice + Send + Sync>,
-    mesh: DeformationMesh,
+    source: Arc<DeformationSource>,
+    // First three IDs are borrowed from source; the remaining six are owned.
     buffers: [rhi::BufferId; 9],
     groups: [rhi::BindGroupId; 2],
-    layout: rhi::BindGroupLayoutId,
-    pipeline_layout: rhi::PipelineLayoutId,
-    shader: rhi::ShaderModuleId,
-    pipeline: rhi::ComputePipelineId,
     current: usize,
     frame: Option<u64>,
     history_valid: bool,
@@ -107,8 +106,24 @@ impl DeformationCache {
         queue: &dyn RenderQueue,
         mesh: DeformationMesh,
     ) -> Result<Self, DeformationCacheError> {
-        let sizes = Self::buffer_sizes(&mesh, device.capabilities().limits)?;
+        let source = Arc::new(DeformationSource::new(device, queue, mesh)?);
+        Self::from_source(source, queue)
+    }
+
+    /// Allocates only this instance's pose/history resources. Immutable inputs,
+    /// CPU validation data and pipeline remain shared with every source owner.
+    /// The queue must belong to the source's device.
+    pub fn from_source(
+        source: Arc<DeformationSource>,
+        queue: &dyn RenderQueue,
+    ) -> Result<Self, DeformationCacheError> {
+        let device = &source.device;
+        let mesh = &source.mesh;
+        let sizes = Self::buffer_sizes(mesh, device.capabilities().limits)?;
         let buffers = core::array::from_fn(|i| {
+            if i < 3 {
+                return source.buffers[i];
+            }
             let usage = if i == 8 {
                 rhi::BufferUsages::UNIFORM | rhi::BufferUsages::COPY_DST
             } else if i == 6 || i == 7 {
@@ -118,62 +133,15 @@ impl DeformationCache {
             };
             device.create_buffer(&rhi::BufferDescriptor::new(sizes[i], usage))
         });
-        for (i, bytes) in [
-            bytemuck::cast_slice(mesh.vertices()),
-            bytemuck::cast_slice(mesh.morphs()),
-            bytemuck::cast_slice(mesh.influences()),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if !bytes.is_empty() {
-                queue.write_buffer(buffers[i], 0, bytes);
-            }
-        }
         queue.write_buffer(
             buffers[8],
             0,
             bytemuck::cast_slice(&[mesh.vertex_count(), 0, 0, 0]),
         );
-        let layout = device.create_bind_group_layout(&rhi::BindGroupLayoutDescriptor {
-            label: Some("mesh-deformation-layout".into()),
-            entries: (0..8)
-                .map(|binding| rhi::BindGroupLayoutEntry {
-                    binding,
-                    visibility: rhi::ShaderStages::COMPUTE,
-                    ty: rhi::BindingType::Buffer {
-                        ty: if binding == 7 {
-                            rhi::BufferBindingType::Uniform
-                        } else {
-                            rhi::BufferBindingType::Storage {
-                                read_only: binding != 6,
-                            }
-                        },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                })
-                .collect(),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&rhi::PipelineLayoutDescriptor {
-            label: Some("mesh-deformation-pipeline-layout".into()),
-            bind_group_layouts: vec![layout],
-            push_constant_ranges: vec![],
-        });
-        let shader = device.create_shader_module(&rhi::ShaderModuleDescriptor::wgsl(include_str!(
-            "shaders/deformation.wgsl"
-        )));
-        let pipeline = device.create_compute_pipeline(&rhi::ComputePipelineDescriptor {
-            label: Some("mesh-deformation".into()),
-            layout: Some(pipeline_layout),
-            module: shader,
-            entry_point: "main".into(),
-        });
         let groups = core::array::from_fn(|output| {
             device.create_bind_group(&rhi::BindGroupDescriptor {
                 label: Some("mesh-deformation-bindings".into()),
-                layout: Some(layout),
+                layout: Some(source.layout),
                 entries: (0..8)
                     .map(|binding| rhi::BindGroupEntry {
                         binding,
@@ -196,21 +164,16 @@ impl DeformationCache {
             queue.write_buffer(buffers[5], 0, bytemuck::cast_slice(&zero_corrections));
         }
         Ok(Self {
-            device,
-            mesh,
+            source,
             buffers,
             groups,
-            layout,
-            pipeline_layout,
-            shader,
-            pipeline,
             current: 1,
             frame: None,
             history_valid: false,
             reset_history: false,
             zero_corrections,
             had_corrections: false,
-            allocated_bytes: sizes.iter().sum(),
+            allocated_bytes: sizes[3..].iter().sum(),
         })
     }
 
@@ -248,9 +211,17 @@ impl DeformationCache {
         Ok(sizes)
     }
 
-    /// Logical GPU allocation bytes, including both output frames and padding.
+    /// This instance's exclusive GPU buffer bytes, including both output frames
+    /// and padding. Count `source().allocated_bytes()` once per shared source;
+    /// opaque driver pipeline memory is not included.
     pub fn allocated_bytes(&self) -> u64 {
         self.allocated_bytes
+    }
+
+    /// Shared immutable resource identity. Clone this Arc to create independent
+    /// poses without re-uploading streams or recompiling the compute pipeline.
+    pub fn source(&self) -> &Arc<DeformationSource> {
+        &self.source
     }
 
     /// Marks a teleport/rebind. Previous output aliases current until a fresh
@@ -271,7 +242,7 @@ impl DeformationCache {
             }],
             history_valid: self.history_valid,
             frame: self.frame?,
-            vertex_count: self.mesh.vertex_count(),
+            vertex_count: self.source.mesh.vertex_count(),
         })
     }
 
@@ -287,7 +258,8 @@ impl DeformationCache {
         if self.frame.is_some_and(|previous| frame <= previous) {
             return Err(DeformationCacheError::FrameNotIncreasing);
         }
-        self.mesh
+        self.source
+            .mesh
             .validate_pose(pose)
             .map_err(DeformationCacheError::Input)?;
         if !pose.morph_weights.is_empty() {
@@ -308,19 +280,19 @@ impl DeformationCache {
             );
         }
         let next = 1 - self.current;
-        if self.mesh.vertex_count() != 0 {
+        if self.source.mesh.vertex_count() != 0 {
             let mut encoder = rhi::CommandEncoder::labeled("mesh-deformation");
             encoder.push_compute_pass(
                 Some("mesh-deformation".into()),
                 vec![
-                    rhi::ComputeCommand::SetPipeline(self.pipeline),
+                    rhi::ComputeCommand::SetPipeline(self.source.pipeline),
                     rhi::ComputeCommand::SetBindGroup {
                         index: 0,
                         bind_group: self.groups[next],
                         dynamic_offsets: vec![],
                     },
                     rhi::ComputeCommand::Dispatch {
-                        x: self.mesh.vertex_count().div_ceil(64),
+                        x: self.source.mesh.vertex_count().div_ceil(64),
                         y: 1,
                         z: 1,
                     },
@@ -341,14 +313,10 @@ impl DeformationCache {
 impl Drop for DeformationCache {
     fn drop(&mut self) {
         for group in self.groups {
-            self.device.destroy_bind_group(group);
+            self.source.device.destroy_bind_group(group);
         }
-        self.device.destroy_compute_pipeline(self.pipeline);
-        self.device.destroy_shader_module(self.shader);
-        self.device.destroy_pipeline_layout(self.pipeline_layout);
-        self.device.destroy_bind_group_layout(self.layout);
-        for buffer in self.buffers {
-            self.device.destroy_buffer(buffer);
+        for &buffer in &self.buffers[3..] {
+            self.source.device.destroy_buffer(buffer);
         }
     }
 }

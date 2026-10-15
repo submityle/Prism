@@ -906,12 +906,14 @@ pub fn select_raster_path(
 
 `prism_mesh::deformation` 导出 `DeformationMesh::new(positions, normals, targets, skin, max_influences)`、`DeformationPose { morph_weights, joints, corrections }`、`JointTransform`、`DeformationCorrection` 与 `DeformedVertex`。`validate_pose` 在任何 GPU 写入之前校验数量、数值、矩阵与保守算术包络；`evaluate` 提供批量 CPU reference。四/八影响 profile 均拒绝超量输入，不截断。
 
-`prism_render_app` 在 crate 根公开 `DeformationCache`、`DeformationCacheError`、`DeformationOutput`：
+`prism_render_app` 在 crate 根公开 `DeformationSource`、`DeformationCache`、`DeformationCacheError`、`DeformationOutput`。`DeformationSource` 一次上传 immutable authored streams、创建绑定布局和 compute pipeline；同一设备上的多个实例通过 `Arc<DeformationSource>` 共享这些资源，每个实例只拥有 pose、correction、双输出和 bind group。`DeformationCache::new` 是单实例便捷入口，`from_source` 用于显式复用：
 
 ```rust
 impl DeformationCache {
     pub fn new(device: Arc<dyn RenderDevice + Send + Sync>, queue: &dyn RenderQueue,
         mesh: DeformationMesh) -> Result<Self, DeformationCacheError>;
+    pub fn from_source(source: Arc<DeformationSource>, queue: &dyn RenderQueue)
+        -> Result<Self, DeformationCacheError>;
     pub fn submit_pose(&mut self, queue: &dyn RenderQueue, frame: u64,
         pose: DeformationPose<'_>) -> Result<DeformationOutput, DeformationCacheError>;
     pub fn output(&self) -> Option<DeformationOutput>;
@@ -920,7 +922,7 @@ impl DeformationCache {
 }
 ```
 
-缓存拥有 `Arc` 设备与 GPU 资源，满足 `Send + Sync + 'static`。输出 32 字节 stride，位置 offset 0、法线 offset 16；`current` 与 `previous` 都可作为 vertex/storage 输入。双缓冲要求所有消费者在同一有序队列的下一次姿态更新前提交；没有无限历史保留。失败不写 buffer、不推进 frame。全运行时消费者接线与设备丢失重建分别验收，不由此 API 的存在推定完成。
+缓存拥有 `Arc` 共享 source 与 GPU 资源，满足 `Send + Sync + 'static`；source 的 immutable buffer、绑定布局和 pipeline 只创建/上传一次，实例 Drop 不会提前释放仍被其他实例引用的资源。输出 32 字节 stride，位置 offset 0、法线 offset 16；`current` 与 `previous` 都可作为 vertex/storage 输入。双缓冲要求所有消费者在同一有序队列的下一次姿态更新前提交；没有无限历史保留。失败不写 buffer、不推进 frame。当前测试已验证两个实例共享 source、各自拥有独立输出与绑定资源，并验证 source 最后释放时才释放 immutable GPU 资源。
 
 共享预算调度继续使用 `prism_render_architecture::deformation`：
 
