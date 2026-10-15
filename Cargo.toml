@@ -78,6 +78,11 @@ members = [
   # Device twin of the CPU direct-lighting golden (WGSL base-lobe mirror + PBR surface pass).
   "pkg/prism_render_visibility",
   "pkg/prism_scene",
+  # World-system policy crates: deterministic stream, residency, and persistence cores.
+  "pkg/prism_world_stream",
+  "pkg/prism_world_residency",
+  "pkg/prism_world_persist",
+  "pkg/prism_world",
   "pkg/prism_state_tree_core",
   "pkg/prism_state_tree_ecs",
   "pkg/prism_state_tree_gpu",

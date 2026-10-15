@@ -1,0 +1,13 @@
+[package]
+name = "prism_world_stream"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic no_std streaming VM and large-world spatial contracts for Prism."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = []
+
+[lints]
+workspace = true

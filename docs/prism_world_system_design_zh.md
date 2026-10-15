@@ -13,7 +13,7 @@
 > - **全局距离场**：UE Global Distance Field / Lumen SDF（稀疏 brick + mip 环，一场多用）
 > 本文为纯经典数据结构 + 空间算法 + 流送调度路线（Morton/Hilbert、四叉/八叉树、CDLOD/clipmap、Transvoxel/Dual Contouring/SDF、domain warp 噪声、水力/热力侵蚀 PDE、泊松盘/蓝噪声、D8 流向、并查集、CRDT），**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/其他引擎源码或衍生代码。
 
-- 版本： v3.2（在 v3.1 基础上重构：网络框架整体剥离至独立文档 `prism_network`——原 §12「网络复制 / 权威 / AOI」正文改为「网络接缝」，只定义 world 向网络暴露的数据与方向；原 §25.3「服务器网格分片」移交 `prism_network`，§25 其余子节顺延重编号；与仓库「一子系统一文档」惯例对齐。去 Bevy、多 crate、架在 `prism_scene` 契约之上。设计阶段，未进入编码，无旧 API 需保留）
+- 版本： v3.3（在 v3.2 基础上进入核心实现：网络框架仍独立于 `prism_network`；新增 `prism_world` facade、`prism_world_stream`、`prism_world_residency`、`prism_world_persist` 四个 workspace crate。空间/流送/常驻策略/持久化核心已由 Rust 单测和 no-default-features 检查验证；GPU、文件系统、Scene 物化、网络传输仍按本文 provider 接缝接入，不将设计目标写成实测完成）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（作者内容单元 / spawn·despawn·materialize API / override delta / PersistentId，见 `prism_scene_design_zh.md`）、`prism_asset`（`StableGuid`/软引用/依赖闭包/单文件包/mmap/内容寻址）、`prism_ecs`（物化边界的批量预留/列写入）、`prism_transform`（层级）、`prism_tasks`（并行流送/烘焙）、`prism_math`（定点/空间编码/噪声）、`prism_diagnostic`（计数器/trace）；向上接 `prism_render`/`prism_physics`/`prism_gi`（经 GPU 常驻实例流 + ECS 物化两个边界，均已去 Bevy）
 - 层级定位： 基座层 L6；下接 `prism_scene`/`prism_asset`/`prism_ecs`，上驱动渲染/物理/GI；与 `prism_terrain_world_design_zh.md`（地形多表示细节）互为上下位

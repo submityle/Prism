@@ -1,0 +1,690 @@
+//! Deterministic spatial indexing and budgeted streaming for Prism worlds.
+//!
+//! This crate owns policy only: it turns demand sources and cell manifests into
+//! a stable, budgeted action list. IO, decompression, GPU upload, and scene
+//! mutation are providers outside the crate. The core is `no_std + alloc` and
+//! contains no engine or operating-system dependency.
+#![no_std]
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+
+/// A signed, lossless world-space sector identity.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SectorId {
+    /// Quadtree/octree level, where zero is the root grid.
+    pub level: u8,
+    /// Signed sector coordinate along X.
+    pub x: i64,
+    /// Signed sector coordinate along Y.
+    pub y: i64,
+    /// Signed sector coordinate along Z.
+    pub z: i64,
+}
+
+impl SectorId {
+    /// Creates a sector identity.
+    pub const fn new(level: u8, x: i64, y: i64, z: i64) -> Self {
+        Self { level, x, y, z }
+    }
+
+    /// Returns the signed Chebyshev distance between two sectors at one level.
+    pub fn distance(self, other: Self) -> u64 {
+        let dx = self.x.abs_diff(other.x);
+        let dy = self.y.abs_diff(other.y);
+        let dz = self.z.abs_diff(other.z);
+        dx.max(dy).max(dz)
+    }
+
+    /// Returns a locality-preserving 21-bit-per-axis Morton hint.
+    ///
+    /// The hint is deliberately not the identity: full signed coordinates are
+    /// retained by [`SectorId`], while this compact value is used only for
+    /// ordering nearby cells in caches and traces.
+    pub fn morton_hint(self) -> u64 {
+        let x = zigzag21(self.x);
+        let y = zigzag21(self.y);
+        let z = zigzag21(self.z);
+        morton_encode_21(x, y, z) ^ (u64::from(self.level) << 63)
+    }
+}
+
+fn zigzag21(value: i64) -> u64 {
+    // Perform the shift in unsigned space: `i64::MIN << 1` is a debug-build
+    // overflow even though its ZigZag representation is perfectly defined.
+    let mapped = (value as u64).wrapping_shl(1) ^ ((value >> 63) as u64);
+    mapped & ((1 << 21) - 1)
+}
+
+fn morton_encode_21(x: u64, y: u64, z: u64) -> u64 {
+    let mut out = 0;
+    let mut bit = 0;
+    while bit < 21 {
+        out |= ((x >> bit) & 1) << (bit * 3);
+        out |= ((y >> bit) & 1) << (bit * 3 + 1);
+        out |= ((z >> bit) & 1) << (bit * 3 + 2);
+        bit += 1;
+    }
+    out
+}
+
+/// Encodes three unsigned 21-bit coordinates into a Morton key.
+pub const fn morton_encode(x: u32, y: u32, z: u32) -> u64 {
+    let x = (x & 0x1f_ffff) as u64;
+    let y = (y & 0x1f_ffff) as u64;
+    let z = (z & 0x1f_ffff) as u64;
+    let mut out = 0;
+    let mut bit = 0;
+    while bit < 21 {
+        out |= ((x >> bit) & 1) << (bit * 3);
+        out |= ((y >> bit) & 1) << (bit * 3 + 1);
+        out |= ((z >> bit) & 1) << (bit * 3 + 2);
+        bit += 1;
+    }
+    out
+}
+
+/// Decodes a 21-bit-per-axis Morton key.
+pub const fn morton_decode(key: u64) -> (u32, u32, u32) {
+    let mut x = 0;
+    let mut y = 0;
+    let mut z = 0;
+    let mut bit = 0;
+    while bit < 21 {
+        x |= ((key >> (bit * 3)) & 1) << bit;
+        y |= ((key >> (bit * 3 + 1)) & 1) << bit;
+        z |= ((key >> (bit * 3 + 2)) & 1) << bit;
+        bit += 1;
+    }
+    (x as u32, y as u32, z as u32)
+}
+
+/// Global position in signed millimetres.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct GlobalPos {
+    /// X millimetres.
+    pub x: i64,
+    /// Y millimetres.
+    pub y: i64,
+    /// Z millimetres.
+    pub z: i64,
+}
+
+impl GlobalPos {
+    /// Creates a global position.
+    pub const fn new(x: i64, y: i64, z: i64) -> Self {
+        Self { x, y, z }
+    }
+}
+
+/// Sector-local position in millimetres.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LocalPos {
+    /// X millimetres from the sector origin.
+    pub x: i64,
+    /// Y millimetres from the sector origin.
+    pub y: i64,
+    /// Z millimetres from the sector origin.
+    pub z: i64,
+}
+
+/// Fixed-size sector grid used for lossless global/local conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SectorGrid {
+    sector_size_mm: i64,
+}
+
+impl SectorGrid {
+    /// Creates a grid; zero and negative sizes are rejected.
+    pub const fn new(sector_size_mm: i64) -> Option<Self> {
+        if sector_size_mm > 0 {
+            Some(Self { sector_size_mm })
+        } else {
+            None
+        }
+    }
+
+    /// Returns the configured sector width in millimetres.
+    pub const fn sector_size_mm(self) -> i64 {
+        self.sector_size_mm
+    }
+
+    /// Converts a global position into a sector and non-negative local offset.
+    pub fn locate(self, level: u8, position: GlobalPos) -> (SectorId, LocalPos) {
+        let size = self.sector_size_mm;
+        let sector = SectorId::new(
+            level,
+            position.x.div_euclid(size),
+            position.y.div_euclid(size),
+            position.z.div_euclid(size),
+        );
+        let local = LocalPos {
+            x: position.x.rem_euclid(size),
+            y: position.y.rem_euclid(size),
+            z: position.z.rem_euclid(size),
+        };
+        (sector, local)
+    }
+
+    /// Reconstructs a global position from a sector and local offset.
+    pub fn global(self, sector: SectorId, local: LocalPos) -> Option<GlobalPos> {
+        if local.x < 0
+            || local.x >= self.sector_size_mm
+            || local.y < 0
+            || local.y >= self.sector_size_mm
+            || local.z < 0
+            || local.z >= self.sector_size_mm
+        {
+            return None;
+        }
+        Some(GlobalPos {
+            x: sector
+                .x
+                .checked_mul(self.sector_size_mm)?
+                .checked_add(local.x)?,
+            y: sector
+                .y
+                .checked_mul(self.sector_size_mm)?
+                .checked_add(local.y)?,
+            z: sector
+                .z
+                .checked_mul(self.sector_size_mm)?
+                .checked_add(local.z)?,
+        })
+    }
+}
+
+/// Inclusive integer bounds for a cell manifest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AabbI64 {
+    /// Minimum corner.
+    pub min: GlobalPos,
+    /// Maximum corner.
+    pub max: GlobalPos,
+}
+
+impl AabbI64 {
+    /// Creates bounds, rejecting inverted axes.
+    pub const fn new(min: GlobalPos, max: GlobalPos) -> Option<Self> {
+        if min.x <= max.x && min.y <= max.y && min.z <= max.z {
+            Some(Self { min, max })
+        } else {
+            None
+        }
+    }
+}
+
+/// Stream metadata that does not own scene content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CellManifest {
+    /// Spatial identity.
+    pub sector: SectorId,
+    /// Authoritative bounds.
+    pub bounds: AabbI64,
+    /// Stable scene/template key.
+    pub scene_key: u128,
+    /// Scene schema/content version.
+    pub content_version: u64,
+    /// Hash of all derived payloads for cache invalidation.
+    pub derived_hash: u128,
+    /// Approximate bytes required by the requested representation.
+    pub io_bytes: u64,
+}
+
+/// A source of world interest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DemandSource {
+    /// Center sector.
+    pub center: SectorId,
+    /// Radius in sectors at which cells are requested.
+    pub load_radius: u16,
+    /// Radius in sectors at which cells may be evicted.
+    pub unload_radius: u16,
+    /// Base priority, with larger values winning.
+    pub priority: u16,
+    /// Optional predicted next sector for one-step prefetch.
+    pub predicted: Option<SectorId>,
+}
+
+impl DemandSource {
+    /// Creates an interest source, rejecting an unload radius below load.
+    pub const fn new(
+        center: SectorId,
+        load_radius: u16,
+        unload_radius: u16,
+        priority: u16,
+    ) -> Option<Self> {
+        if unload_radius >= load_radius {
+            Some(Self {
+                center,
+                load_radius,
+                unload_radius,
+                priority,
+                predicted: None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Adds a predicted sector used for prefetch.
+    pub const fn with_prediction(mut self, predicted: SectorId) -> Self {
+        self.predicted = Some(predicted);
+        self
+    }
+}
+
+/// Priority class for one stream request.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StreamPriority(pub u16);
+
+/// Reason for an action.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum StreamKind {
+    /// Required by the current load radius.
+    Required,
+    /// Predicted one-step prefetch.
+    Prefetch,
+}
+
+/// A deterministic request candidate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamRequest {
+    /// Target sector.
+    pub sector: SectorId,
+    /// Required IO bytes.
+    pub io_bytes: u64,
+    /// Priority class.
+    pub priority: StreamPriority,
+    /// Distance from the closest demand source.
+    pub distance: u64,
+    /// Request kind.
+    pub kind: StreamKind,
+}
+
+/// Per-frame streaming budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamBudget {
+    /// Maximum bytes admitted this frame.
+    pub io_bytes: u64,
+    /// Maximum action count admitted this frame.
+    pub max_actions: usize,
+}
+
+/// A streaming operation emitted by the scheduler.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamAction {
+    /// Begin loading a sector.
+    Load(StreamRequest),
+    /// Load a predicted sector when budget remains.
+    Prefetch(StreamRequest),
+    /// Evict a sector outside all unload radii.
+    Unload(SectorId),
+}
+
+/// Result of one deterministic scheduling pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamPlan {
+    /// Ordered actions.
+    pub actions: Vec<StreamAction>,
+    /// Total bytes admitted by load/prefetch actions.
+    pub admitted_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResidentState {
+    Loading,
+    Resident,
+}
+
+/// Budgeted streaming VM state.
+#[derive(Clone, Debug, Default)]
+pub struct StreamScheduler {
+    resident: BTreeMap<SectorId, ResidentState>,
+    frame: u64,
+}
+
+impl StreamScheduler {
+    /// Creates an empty scheduler.
+    pub const fn new() -> Self {
+        Self {
+            resident: BTreeMap::new(),
+            frame: 0,
+        }
+    }
+
+    /// Marks a sector as resident after its provider completes IO.
+    pub fn mark_resident(&mut self, sector: SectorId) {
+        self.resident.insert(sector, ResidentState::Resident);
+    }
+
+    /// Marks a sector as no longer resident.
+    pub fn mark_unloaded(&mut self, sector: SectorId) {
+        self.resident.remove(&sector);
+    }
+
+    /// Returns whether a sector is resident or loading.
+    pub fn contains(&self, sector: SectorId) -> bool {
+        self.resident.contains_key(&sector)
+    }
+
+    /// Produces a deterministic plan from demand sources and manifests.
+    pub fn plan(
+        &mut self,
+        demands: &[DemandSource],
+        manifests: &[CellManifest],
+        budget: StreamBudget,
+    ) -> StreamPlan {
+        self.frame = self.frame.saturating_add(1);
+        let mut requests = BTreeMap::<SectorId, StreamRequest>::new();
+        for manifest in manifests {
+            let mut best: Option<(u16, u64, StreamKind)> = None;
+            for demand in demands {
+                if demand.center.level != manifest.sector.level {
+                    continue;
+                }
+                let distance = demand.center.distance(manifest.sector);
+                let kind = if distance <= u64::from(demand.load_radius) {
+                    StreamKind::Required
+                } else if demand.predicted == Some(manifest.sector) {
+                    StreamKind::Prefetch
+                } else {
+                    continue;
+                };
+                if kind == StreamKind::Prefetch && distance > u64::from(demand.unload_radius) + 1 {
+                    continue;
+                }
+                let score = demand.priority.saturating_add(
+                    demand
+                        .load_radius
+                        .saturating_sub(distance.min(u64::from(u16::MAX)) as u16),
+                );
+                if best.is_none_or(|(p, d, k)| {
+                    score > p
+                        || (score == p && distance < d)
+                        || (score == p
+                            && distance == d
+                            && kind == StreamKind::Required
+                            && k == StreamKind::Prefetch)
+                }) {
+                    best = Some((score, distance, kind));
+                }
+            }
+            if let Some((score, distance, kind)) = best {
+                requests.insert(
+                    manifest.sector,
+                    StreamRequest {
+                        sector: manifest.sector,
+                        io_bytes: manifest.io_bytes,
+                        priority: StreamPriority(score),
+                        distance,
+                        kind,
+                    },
+                );
+            }
+        }
+
+        let mut actions = Vec::new();
+        let mut candidates: Vec<StreamRequest> = requests
+            .values()
+            .copied()
+            .filter(|r| !self.contains(r.sector))
+            .collect();
+        candidates.sort_by(request_order);
+        let mut admitted_bytes: u64 = 0;
+        for request in candidates {
+            if actions.len() >= budget.max_actions
+                || admitted_bytes.saturating_add(request.io_bytes) > budget.io_bytes
+            {
+                break;
+            }
+            self.resident.insert(request.sector, ResidentState::Loading);
+            admitted_bytes = admitted_bytes.saturating_add(request.io_bytes);
+            actions.push(if request.kind == StreamKind::Required {
+                StreamAction::Load(request)
+            } else {
+                StreamAction::Prefetch(request)
+            });
+        }
+
+        let mut evictions: Vec<SectorId> = self
+            .resident
+            .keys()
+            .copied()
+            .filter(|sector| !within_unload(*sector, demands))
+            .collect();
+        evictions.sort_unstable();
+        for sector in evictions {
+            if actions.len() >= budget.max_actions {
+                break;
+            }
+            self.resident.remove(&sector);
+            actions.push(StreamAction::Unload(sector));
+        }
+        StreamPlan {
+            actions,
+            admitted_bytes,
+        }
+    }
+
+    /// Returns the frame counter used in VM traces.
+    pub const fn frame(&self) -> u64 {
+        self.frame
+    }
+}
+
+fn request_order(a: &StreamRequest, b: &StreamRequest) -> Ordering {
+    b.priority
+        .cmp(&a.priority)
+        .then_with(|| a.distance.cmp(&b.distance))
+        .then_with(|| a.kind.cmp(&b.kind))
+        .then_with(|| a.sector.cmp(&b.sector))
+}
+
+fn within_unload(sector: SectorId, demands: &[DemandSource]) -> bool {
+    demands.iter().any(|d| {
+        d.center.level == sector.level && d.center.distance(sector) <= u64::from(d.unload_radius)
+    })
+}
+
+/// A replayable VM instruction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmInstruction {
+    /// Starts a frame.
+    BeginFrame(u64),
+    /// Records a demand source.
+    Demand(SectorId),
+    /// Admits an action.
+    Admit(SectorId),
+    /// Evicts a sector.
+    Evict(SectorId),
+    /// Ends a frame with admitted bytes.
+    EndFrame {
+        /// Frame number.
+        frame: u64,
+        /// Bytes admitted by the frame plan.
+        admitted_bytes: u64,
+    },
+}
+
+/// Append-only deterministic VM trace.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VmTrace {
+    instructions: Vec<VmInstruction>,
+}
+
+impl VmTrace {
+    /// Creates an empty trace.
+    pub const fn new() -> Self {
+        Self {
+            instructions: Vec::new(),
+        }
+    }
+
+    /// Records an instruction.
+    pub fn push(&mut self, instruction: VmInstruction) {
+        self.instructions.push(instruction);
+    }
+
+    /// Returns the recorded instruction stream.
+    pub fn as_slice(&self) -> &[VmInstruction] {
+        &self.instructions
+    }
+
+    /// Validates frame nesting and returns the number of valid frames.
+    pub fn replay(&self) -> Result<usize, TraceError> {
+        let mut open = None;
+        let mut count = 0;
+        for instruction in &self.instructions {
+            match *instruction {
+                VmInstruction::BeginFrame(frame) => {
+                    if open.is_some() {
+                        return Err(TraceError::NestedFrame);
+                    }
+                    open = Some(frame);
+                }
+                VmInstruction::EndFrame { frame, .. } => {
+                    if open != Some(frame) {
+                        return Err(TraceError::FrameMismatch);
+                    }
+                    open = None;
+                    count += 1;
+                }
+                VmInstruction::Demand(_) | VmInstruction::Admit(_) | VmInstruction::Evict(_) => {
+                    if open.is_none() {
+                        return Err(TraceError::InstructionOutsideFrame);
+                    }
+                }
+            }
+        }
+        if open.is_some() {
+            return Err(TraceError::UnclosedFrame);
+        }
+        Ok(count)
+    }
+}
+
+/// Errors detected while replaying a stream VM trace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TraceError {
+    /// A frame began while another frame was open.
+    NestedFrame,
+    /// An end marker did not match the active frame.
+    FrameMismatch,
+    /// An operation appeared outside a frame.
+    InstructionOutsideFrame,
+    /// The trace ended while a frame was open.
+    UnclosedFrame,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn morton_round_trip_and_negative_sector_hint_are_stable() {
+        let key = morton_encode(0x1f_ffff, 17, 91);
+        assert_eq!(morton_decode(key), (0x1f_ffff, 17, 91));
+        assert_eq!(
+            SectorId::new(2, -4, 7, 9).morton_hint(),
+            SectorId::new(2, -4, 7, 9).morton_hint()
+        );
+        assert_ne!(
+            SectorId::new(2, i64::MIN, i64::MAX, -1).morton_hint(),
+            SectorId::new(2, 0, 0, 0).morton_hint()
+        );
+    }
+
+    #[test]
+    fn coordinate_conversion_is_lossless_across_zero() {
+        let grid = SectorGrid::new(1000).unwrap();
+        for position in [
+            GlobalPos::new(-1001, -1, 1000),
+            GlobalPos::new(0, 0, 0),
+            GlobalPos::new(1999, 2000, -2001),
+        ] {
+            let (sector, local) = grid.locate(0, position);
+            assert_eq!(grid.global(sector, local), Some(position));
+        }
+    }
+
+    #[test]
+    fn scheduler_is_budgeted_hysteretic_and_deterministic() {
+        let center = SectorId::new(0, 0, 0, 0);
+        let demand = DemandSource::new(center, 1, 2, 10).unwrap();
+        let bounds = AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1)).unwrap();
+        let manifests = [
+            CellManifest {
+                sector: center,
+                bounds,
+                scene_key: 1,
+                content_version: 1,
+                derived_hash: 2,
+                io_bytes: 50,
+            },
+            CellManifest {
+                sector: SectorId::new(0, 1, 0, 0),
+                bounds,
+                scene_key: 2,
+                content_version: 1,
+                derived_hash: 3,
+                io_bytes: 60,
+            },
+            CellManifest {
+                sector: SectorId::new(0, 4, 0, 0),
+                bounds,
+                scene_key: 3,
+                content_version: 1,
+                derived_hash: 4,
+                io_bytes: 70,
+            },
+        ];
+        let mut scheduler = StreamScheduler::new();
+        let plan = scheduler.plan(
+            &[demand],
+            &manifests,
+            StreamBudget {
+                io_bytes: 100,
+                max_actions: 8,
+            },
+        );
+        assert_eq!(plan.admitted_bytes, 50);
+        assert!(matches!(
+            plan.actions[0],
+            StreamAction::Load(StreamRequest {
+                sector: SectorId { x: 0, .. },
+                ..
+            })
+        ));
+        scheduler.mark_resident(center);
+        let plan = scheduler.plan(
+            &[demand],
+            &manifests,
+            StreamBudget {
+                io_bytes: 100,
+                max_actions: 8,
+            },
+        );
+        assert!(plan
+            .actions
+            .iter()
+            .all(|a| !matches!(a, StreamAction::Unload(_))));
+    }
+
+    #[test]
+    fn trace_replay_rejects_unclosed_frames() {
+        let mut trace = VmTrace::new();
+        trace.push(VmInstruction::BeginFrame(1));
+        assert_eq!(trace.replay(), Err(TraceError::UnclosedFrame));
+        trace.push(VmInstruction::EndFrame {
+            frame: 1,
+            admitted_bytes: 0,
+        });
+        assert_eq!(trace.replay(), Ok(1));
+    }
+}
