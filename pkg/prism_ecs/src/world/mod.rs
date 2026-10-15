@@ -167,9 +167,9 @@ impl World {
     /// Advance the structural generation, invalidating archetype-id-keyed
     /// caches (called by snapshot `restore` after replacing the registry).
     #[inline]
-    pub(crate) fn bump_archetype_generation(&mut self) {
+    pub(crate) fn bump_archetype_generation(&mut self) -> crate::change_index::ChangeCursor {
         self.archetype_generation = self.archetype_generation.wrapping_add(1);
-        self.change_tracker.reset();
+        self.change_tracker.reset()
     }
 
     /// The world's current change tick (the tick new writes are stamped with).

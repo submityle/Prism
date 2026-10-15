@@ -47,7 +47,7 @@ pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
     // The registry was wholesale replaced, so every archetype id a
     // `QueryState` cached is now stale; bump the structural generation so those
     // caches rebuild instead of dereferencing freed/renumbered columns.
-    world.bump_archetype_generation();
+    let change_cursor = world.bump_archetype_generation();
     world.sparse_sets = SparseSets::new();
     world.sparse_sets.set_tracker(&world.change_tracker);
     // Reset the shared-value pools too: restore re-interns every captured shared
@@ -62,6 +62,13 @@ pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
     // 3. Restore the change-tick cursors so change detection resumes exactly.
     world.change_tick = snapshot.change_tick;
     world.last_change_tick = snapshot.last_change_tick;
+    // Restore is an authoritative time-travel boundary. Discard deliveries
+    // collected from the abandoned timeline and rebase observers to the
+    // restored tick. The cursor is captured at the same reset point, so writes
+    // made after restore are visible in the next delivery window.
+    world
+        .change_observers
+        .reset_after_restore(world.change_tick, change_cursor);
     // Replace both indexes and kind policies together, preserving adjacency
     // ordering and full generational handles without firing gameplay cleanup.
     world.relations = snapshot.relations.registry.clone();

@@ -517,9 +517,7 @@ fn host_failure_is_reported_without_retiring_binding_and_host_panic_never_unwind
     )
     .unwrap();
     poll(&mut panicking).unwrap();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        panicking.run(7, &mut world)
-    }));
+    let result = catch_unwind(AssertUnwindSafe(|| panicking.run(7, &mut world)));
     assert!(
         result.is_err(),
         "panic resumed on Rust side of callback boundary"
@@ -544,8 +542,7 @@ fn library_limit_rejects_before_mapping_and_cross_world_bindings_reject_before_r
     let mut first = world();
     schedule.run(&mut first);
     let mut second = world();
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| schedule.run(&mut second)));
+    let result = catch_unwind(AssertUnwindSafe(|| schedule.run(&mut second)));
     assert!(result.is_err());
     assert_eq!(second.resource::<Counter>().0, 0);
 }

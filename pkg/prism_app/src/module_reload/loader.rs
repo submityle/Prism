@@ -93,6 +93,9 @@ pub(super) struct LoadedModule {
 }
 
 impl LoadedModule {
+    /// # Safety
+    /// `source` and `bytes` must identify trusted native code that obeys the
+    /// complete module ABI. Loading native code cannot sandbox callback behavior.
     pub(super) unsafe fn load(
         source: &Path,
         bytes: &[u8],

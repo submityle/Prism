@@ -145,11 +145,26 @@ struct ChangeEntry {
 /// order* — and therefore deterministic firing order — is preserved across
 /// remove/re-add churn, and so an index captured while a callback runs stays
 /// valid even if that callback registers or removes observers.
-#[derive(Default)]
 pub(crate) struct ChangeObservers {
     slots: Vec<ChangeEntry>,
     active: usize,
     pub(crate) flushing: bool,
+    restore_generation: u64,
+    restore_tick: Tick,
+    restore_cursor: crate::change_index::ChangeCursor,
+}
+
+impl Default for ChangeObservers {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            active: 0,
+            flushing: false,
+            restore_generation: 0,
+            restore_tick: Tick::ZERO,
+            restore_cursor: crate::change_index::ChangeCursor::default(),
+        }
+    }
 }
 
 impl ChangeObservers {
@@ -212,6 +227,31 @@ impl ChangeObservers {
             .iter()
             .find(|entry| entry.active && entry.id == id)
             .map(|entry| entry.component)
+    }
+
+    /// Invalidate delivery state after an authoritative storage restore.
+    /// Batches from the abandoned timeline must not be replayed, while writes
+    /// made after the restored baseline remain visible to the next flush.
+    pub(crate) fn reset_after_restore(
+        &mut self,
+        tick: Tick,
+        cursor: crate::change_index::ChangeCursor,
+    ) {
+        self.restore_generation = self.restore_generation.wrapping_add(1);
+        self.restore_tick = tick;
+        self.restore_cursor = cursor;
+        // Restore keeps the snapshot's exact change tick. A write made
+        // immediately afterwards is stamped with that same tick, so the
+        // delivery window starts one logical tick earlier. The tracker was
+        // reset above, so this cannot replay restored values.
+        let baseline = Tick::new(tick.get().wrapping_sub(1));
+        for entry in &mut self.slots {
+            if let Some(slot) = entry.slot.as_mut() {
+                slot.pending.clear();
+                slot.last_run = baseline;
+                slot.cursor = cursor;
+            }
+        }
     }
 }
 
@@ -296,6 +336,7 @@ impl World {
         }
         let count = self.change_observers.slot_count();
         let world_id = self.id();
+        let restore_generation = self.change_observers.restore_generation;
         self.change_observers.flushing = true;
         let flush = ChangeFlush {
             world: self,
@@ -312,6 +353,7 @@ impl World {
                 world_id,
                 index,
                 slot: Some(slot),
+                restore_generation,
             };
             let slot = guard.slot.as_mut().expect("owned change observer");
             // A previous flush may have left an undelivered batch here after a
@@ -347,6 +389,7 @@ impl World {
                 world_id,
                 index,
                 slot: Some(slot),
+                restore_generation,
             };
             let slot = guard.slot.as_mut().expect("owned change observer");
             if !slot.pending.is_empty() {
@@ -359,7 +402,9 @@ impl World {
                 // retry. Successful callbacks are never replayed on retry.
                 slot.pending.clear();
                 fired += 1;
-                if guard.world.id() != world_id {
+                if guard.world.id() != world_id
+                    || guard.world.change_observers.restore_generation != restore_generation
+                {
                     return fired;
                 }
             }
@@ -377,6 +422,7 @@ struct ChangeSlotGuard<'w> {
     world_id: WorldId,
     index: usize,
     slot: Option<ChangeSlot>,
+    restore_generation: u64,
 }
 
 impl Drop for ChangeSlotGuard<'_> {
@@ -384,6 +430,18 @@ impl Drop for ChangeSlotGuard<'_> {
         if self.world.id() == self.world_id
             && let Some(slot) = self.slot.take()
         {
+            let mut slot = slot;
+            if self.world.change_observers.restore_generation != self.restore_generation {
+                slot.pending.clear();
+                slot.last_run = Tick::new(
+                    self.world
+                        .change_observers
+                        .restore_tick
+                        .get()
+                        .wrapping_sub(1),
+                );
+                slot.cursor = self.world.change_observers.restore_cursor;
+            }
             self.world.change_observers.put_back(self.index, slot);
         }
     }

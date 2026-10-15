@@ -103,7 +103,7 @@ pub type Entry = unsafe extern "C" fn(u32, *mut ModuleApi, usize) -> u32;
 /// Fixed-layout descriptor. All fields are copied while the library is pinned.
 /// `Option<extern fn>` represents a nullable C function pointer.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct ModuleApi {
     /// [`MAGIC`].
     pub magic: [u8; 8],
@@ -133,25 +133,4 @@ pub struct ModuleApi {
     pub export: Option<ExportState>,
     /// Run a named system against the host operation table.
     pub run: Option<RunSystem>,
-}
-
-impl Default for ModuleApi {
-    fn default() -> Self {
-        Self {
-            magic: [0; 8],
-            abi_version: 0,
-            struct_size: 0,
-            module_id: 0,
-            host_contract: 0,
-            module_version: 0,
-            state_schema: 0,
-            flags: 0,
-            system_count: 0,
-            system_id: None,
-            create: None,
-            destroy: None,
-            export: None,
-            run: None,
-        }
-    }
 }

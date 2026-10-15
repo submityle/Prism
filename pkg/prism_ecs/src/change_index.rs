@@ -88,7 +88,7 @@ struct TrackerState {
 }
 
 /// Cursor into one component's exact change log.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct ChangeCursor {
     pub(crate) epoch: u64,
     pub(crate) next_batch: usize,
@@ -255,11 +255,15 @@ impl ChangeTracker {
 
     /// Drop all old log storage after a snapshot restore while preserving the
     /// registered observer set. Existing cursors detect the epoch transition.
-    pub(crate) fn reset(&self) {
+    pub(crate) fn reset(&self) -> ChangeCursor {
         let mut state = self.state.lock();
         state.epoch = state.epoch.wrapping_add(1);
         for log in state.logs.iter_mut().flatten() {
             log.batches.clear();
+        }
+        ChangeCursor {
+            epoch: state.epoch,
+            next_batch: 0,
         }
     }
 }

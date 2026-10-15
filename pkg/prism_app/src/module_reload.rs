@@ -279,7 +279,6 @@ impl ModuleReload {
     }
 
     /// The configured application module identity.
-    #[must_use]
     pub fn module_id(&self) -> Result<u64, ModuleReloadError> {
         Ok(lock(&self.runtime)?.config.module_id)
     }
@@ -310,10 +309,10 @@ impl ModuleReload {
         // SAFETY: caller trusts the source and all callbacks under the ABI contract.
         let candidate = unsafe { loader::LoadedModule::load(&self.path, &bytes, config)? };
         let mut runtime = lock(&self.runtime)?;
-        if let Some(old) = &runtime.active {
-            if old.systems() != candidate.systems() {
-                return Err(ModuleReloadError::SystemSetChanged);
-            }
+        if let Some(old) = &runtime.active
+            && old.systems() != candidate.systems()
+        {
+            return Err(ModuleReloadError::SystemSetChanged);
         }
         // Export is read-only; candidate construction has no World capability.
         let previous = runtime

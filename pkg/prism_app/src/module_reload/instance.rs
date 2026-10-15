@@ -159,6 +159,9 @@ impl Collector {
     }
 }
 
+/// # Safety
+/// `context` must be the live [`Collector`] pointer returned by [`Collector::sink`]
+/// and `bytes` must remain valid for the duration of this synchronous callback.
 unsafe extern "C" fn collect(context: *mut c_void, bytes: ByteSlice) -> u32 {
     // SAFETY: sinks are used synchronously and never retained under ABI rules.
     let collector = unsafe { &mut *context.cast::<Collector>() };
@@ -183,6 +186,9 @@ struct HostBridge<'a> {
     panic: Option<Box<dyn Any + Send>>,
 }
 
+/// # Safety
+/// `context` must be the live invocation-local [`HostBridge`] pointer and
+/// `input`/`reply` must obey the synchronous ABI lifetime and ownership rules.
 unsafe extern "C" fn call_host(
     context: *mut c_void,
     operation: u64,
@@ -235,6 +241,9 @@ unsafe extern "C" fn call_host(
     status
 }
 
+/// # Safety
+/// The caller must ensure that `bytes.ptr..bytes.ptr + bytes.len` is readable,
+/// initialized memory for the duration of the returned borrow.
 unsafe fn borrowed<'a>(bytes: ByteSlice, limit: usize) -> Result<&'a [u8], u32> {
     if bytes.len > limit || bytes.len > isize::MAX as usize {
         return Err(abi::LIMIT_EXCEEDED);

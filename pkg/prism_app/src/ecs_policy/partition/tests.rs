@@ -153,7 +153,7 @@ fn lod_rejects_invalid_populations_before_callbacks_or_sleep_transitions() {
     );
     assert_eq!(
         app.drive_ecs_lod([f32::MAX; 3], &[(live, [-f32::MAX; 3])], 0, |_, _, _| {
-            calls += 1
+            calls += 1;
         })
         .err(),
         Some(EcsPolicyError::InvalidPosition)

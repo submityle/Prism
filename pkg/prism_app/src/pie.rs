@@ -1600,12 +1600,12 @@ mod tests {
         let instance = instances.get_mut(id).unwrap();
         // Stop before readiness or Startup; host stop still tears down build
         // resources, and does not let an exit-confirmation veto prevent removal.
-        instance
-            .app_mut()
-            .unwrap()
-            .add_systems(ExitConfirmation, |mut exit: ResMut<AppExitRequest>| {
-                exit.cancel()
-            });
+        instance.app_mut().unwrap().add_systems(
+            ExitConfirmation,
+            |mut exit: ResMut<AppExitRequest>| {
+                exit.cancel();
+            },
+        );
         assert_eq!(instance.stop(), AppExit::Success);
         assert_eq!(instance.app().world().resource::<Counts>().startup, 0);
         assert_eq!(instance.app().world().resource::<Counts>().shutdown, 1);
@@ -1636,7 +1636,7 @@ mod tests {
             .create(|app| {
                 configured(app);
                 app.add_systems(Update, |mut exit: ResMut<AppExitRequest>| {
-                    exit.send(AppExit::error())
+                    exit.send(AppExit::error());
                 });
                 app.add_systems(
                     ExitConfirmation,
@@ -1669,7 +1669,7 @@ mod tests {
             .create(|app| {
                 configured(app);
                 app.add_systems(Startup, |mut exit: ResMut<AppExitRequest>| {
-                    exit.send_success()
+                    exit.send_success();
                 });
             })
             .unwrap();
