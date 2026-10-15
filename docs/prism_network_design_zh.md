@@ -12,9 +12,9 @@
 > - **反作弊形态**：服务器唯一权威、输入与运动约束校验、速率限制、重放序号/nonce 防重放、确定性仿真交叉对账（审计用事件日志重放）
 > 本文为纯经典网络工程 + 数据结构 + 确定性算法路线（可靠 UDP ARQ、滑动窗口、delta/位域压缩、定点量化、Morton AOI 裁剪、Lamport 定序、CRDT 合并、回滚重放），**不含任何 AI/ML 内容**（反作弊为确定性权威校验与统计阈值，非机器学习），不含任何 Unreal/Unity/Valve/其他引擎源码或衍生代码。
 
-- 版本： v0.1（设计阶段，未进入编码，无旧 API 需保留；内容源自 `prism_world_system_design_zh.md` v3.1 剥离的「网络复制 / 权威 / AOI」与「服务器网格分片」，按「一子系统一文档」惯例独立重构深化；去 Bevy、多 crate、架在 `prism_scene` / persist 契约之上；v0.2：反作弊独立为可替换 provider 并剥离至 `prism_anticheat`（本文 §14 改为接缝），确立「传输 / 复制 / AOI / 预测 / 权威 / 反作弊皆为可替换 provider」的模块化立场；v0.3：把权威事件流的底层存储抽象为具名 provider，引入可选服务端后端 `uwu_event_mesh`（权威事件流 / 回放 / 编排，`feature evmesh`，仅 `std`/`server`，不进 core/client，§5.1 / §13 / §18）；v0.4：把 RPC 提升为与事件流 / 快照并列的第三类复制原语（命令式控制面，§7.4），统一调用形态 / 定向 / 幂等去重 / 默认安全 / provider 接缝，并明确「RPC 不另立真相、权威改动仍以 override delta 固化」；v0.5：深化延迟与体验工程——时钟同步 + 命令帧提前量（§9.1）、自适应插值 / 抖动缓冲 / 可视平滑（§10.5）、motion-to-photon 延迟预算分解（§11.1）、内存零分配热路径与向量化量化（§15）、从单机到联机不分叉的开发者工作流（§17.1）；并复核 `uwu_event_mesh` 2.0.0-dev.1 的 durable log / at-least-once / timeline / Process-RPC 立场仍准确、仅用于服务端权威事件流与编排）
-- 落地状态（2026-10 补记）：**纯逻辑内核 + `prism_app` 接线已落地**——新 crate `pkg/prism_replication`（`no_std + alloc`，已入 workspace；`std`/`app` 为 feature）：`sequence`（`LamportClock` 定序 + `DeliveryWindow<T>` 逐源有界按序交付，拒绝 stale/duplicate/out-of-window）、`bitpack`/`quantize`（线格式原语）、`delta`（baseline 相对字段 delta + 整条快照编解码）、`snapshot`（baseline 环 + delta 前滚 + late-join seed）、`aoi`（均匀网格 + enter/leave 增量）、`prediction`（客户端预测 + 权威和解）、`transport`（`Transport` provider seam + **确定性 loopback link** + `std` 下的 `InMemoryTransport` 对）、`frame`（LEB128 长度前缀分帧 + 增量解码器）、`arq`（可靠按序层：序号 + ACK + 超时重传 + RTT 自适应 RTO，Karn 规则）、`session`（**模块间接线**：`ServerSession` 权威 / `ClientSession` 预测，只交换 framed 字节）、**`plugin`（`app` feature）**：`ReplicationPlugin` 把 `Replication` 资源装进 `prism_app` 并用 `First` 系统每帧 drain 入站帧进预测；`ReplicationStrategy` 由 app 提供"输入如何推进记录"。**仍待落地**：真实传输 provider（多通道 + 拥塞控制 + 加密，需 `std`/平台）、与 `prism_scene` 的实体/组件映射（复制策略 provider）——均为本文设计，**不造假**。
-- 网络传输补记（2026-10）：**真实传输 + 可靠层已起步**——`prism_replication::udp::UdpTransport`（`std` feature）用真实 `UdpSocket` 实现 `Transport` seam（非阻塞轮询；send 尽力而为、丢包交给上层）；loopback 真机测试通过（`PRISM_REQUIRE_NET=1` 时强制要求 socket，沙箱无权限时诚实 skip）。**可靠 ARQ 已落地**：`prism_replication::arq`（`ReliableSender` 序号 + ACK + 超时重传 + RTT 自适应 RTO（Karn 规则），`ReliableReceiver` 基于 `DeliveryWindow` 按序交付并重 ACK 重复包；固定窗口 stop-and-go，非选择性重传）——在丢包/抖动 loopback 上端到端验证「每包恰好一次、按序、全部 ACK」。**仍待做**：多通道、拥塞控制、加密。
+- 版本：实现复核版（2026-10；保留 v0.x 设计历史，不再把本文标成“未进入编码”）。内容源自 `prism_world_system_design_zh.md` v3.1 的网络复制 / 权威 / AOI / 服务器网格分片设计，并已按 Prism 当前 crate 契约拆分；所有状态以下面的“代码路径 / 验证证据 / 未完成能力”三层为准。
+- 落地状态（2026-10 复核）：**纯逻辑内核、`prism_app` 接线、真实 UDP、ARQ、可靠通道、多路复用和 input/bulk 通道已有代码路径**。`pkg/prism_replication` 的 `sequence`、`bitpack`/`quantize`、`delta`、`snapshot`、`aoi`、`prediction`、`frame`、`arq`、`reliable`、`multiplex`、`session` 和 `plugin` 均不再是设计占位；`plugin::ecs` 把固定步输入、World snapshot、回滚重放和对端 hash audit 接到真实 ECS 路径。`security` 已实现握手、session nonce、方向绑定、序号和 anti-replay 的协议不变量，但它是要求调用方提供经过审查的 `SessionSecurityProvider` 的安全边界，当前不能宣称已有默认生产密码套件。
+- 网络传输补记（2026-10）：`prism_replication::udp::UdpTransport` 使用真实非阻塞 `UdpSocket`；`ReliableChannel` 在其上运行 ARQ，`ChannelMux` 提供事件/RPC/bulk 可靠通道、state/input 有界通道和共享预算。已完成的 loopback/UDP 证据只证明当前实现的单机链路语义；仍未完成或未验收的是拥塞控制、内置密码 provider、QUIC/WebTransport、NAT/ICE/relay、连接迁移/多 peer 生产 demux、跨进程/跨机器验收，以及 `prism_scene` 实体/组件复制映射。
 - 可靠通道接线补记（2026-10）：`prism_replication::reliable::ReliableChannel` 把 `arq` 架到 `Transport` datagram 之上（`[kind][seq u64][payload]` 数据报），每帧 `tick` 收包 / 重传 / 回 ACK；`ReplicationPlugin`（`app` feature）默认在调用方传入的 transport 外包一层，客户端 `First` 系统每帧推进它，丢包在后续帧重传而非丢失；客户端 ACK 也经同一通道回到权威端。序号由 `u32` 加宽到 `u64`（与 `DeliveryWindow` 对齐，避免回绕误 ACK），发送窗口有界并回压（`send` 满窗口返回 `None`）。真机验证：两个 `ReliableChannel` 走真实 loopback UDP（`PRISM_REQUIRE_NET=1`）端到端「每包恰好一次、按序、全部 ACK」。同时加固 `frame`：畸形长度前缀使解码器 poison 化（不再无界增长、不再重复误解析），长度越界在编码端与解码端都拒绝，varint 不再是 debug 溢出 panic 面。
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（override delta / `PersistentId` / spawn·despawn·materialize 契约 / 网络复制对称 §16.4）、`prism_world`（sector 树与空间索引 §5、HLOD 确定性簇 id §10、需求源 §7.1、persist 事务接口 §11）、`prism_ecs`（复制组件的列读写 / `serialize` / `determinism`）、`prism_time`（tick / 固定步长 / 时间线 §4D）、`prism_tasks`（并行序列化 / 分片编排）、`prism_math`（定点量化 / 空间编码）、`prism_reflect`（复制字段路径 / 增量脏标）、`prism_diagnostic`（网络计数器 / trace / 回放）、`prism_anticheat`（反作弊 provider 接缝，§14，另文）；可选外部后端 `uwu_event_mesh`（服务端权威事件流 / 回放 / 编排的可替换 provider 后端，`feature evmesh`，仅 `std`/`server`，§5.1 / §13 / §18）
@@ -568,22 +568,25 @@ prism_network/              (伞 crate,re-export + prelude + feature 聚合)
 路线图（M 对齐 world/scene 的里程碑编号惯例）：
 
 ```text
-M1 传输: 可靠 UDP + 多通道 + 拥塞 + 丢包/延迟注入(diag)
-M2 复制骨架: 权威 delta 事件流(复用 persist) + 瞬时快照 delta + baseline
-M3 AOI: 空间裁剪 + 簇分级 + relevancy/dormancy(消费 world 空间)
-M4 预测与和解: 客户端预测 + 回滚重放 + 平滑校正(prediction/rollback)
-M5 延迟补偿: 历史位姿环 + 回溯命中 + 窗口有界(lag_comp)
-M6 反作弊接缝: 权威回路钩子点 + 确定性对账根基(provider 与默认实现归 prism_anticheat)
-M7 规模: 服务器网格分片 + 权威移交 + 过载降级 + 容灾(server_mesh)
-M8 工具: 事件流录制/回放 + 网络剖析 + 预测可视化 + QUIC 适配
-M9 后端 provider: uwu_event_mesh 适配(durable log/游标/DLQ/timeline) 作权威事件流/回放/编排可选后端(evmesh,仅服务端)
+M1 传输: 可靠 UDP + 多通道 + 丢包/延迟注入（✅机制；🚧拥塞控制与生产网络验收）
+M2 复制骨架: 权威 delta 事件流(复用 persist) + 瞬时快照 delta + baseline（✅核心逻辑）
+M3 AOI: 空间裁剪 + 簇分级 + relevancy/dormancy（✅均匀网格逻辑；🚧与 scene/world 实体映射）
+M4 预测与和解: 客户端预测 + 回滚重放 + 平滑校正（✅纯逻辑与 ECS bridge；🚧跨机验证）
+M5 延迟补偿: 历史位姿环 + 回溯命中 + 窗口有界(lag_comp)（⬜未实现）
+M6 反作弊接缝: 权威回路钩子点 + 确定性对账根基（🚧hash audit 已有；provider/策略未完成）
+M7 规模: 服务器网格分片 + 权威移交 + 过载降级 + 容灾(server_mesh)（⬜未实现）
+M8 工具: 事件流录制/回放 + 网络剖析 + 预测可视化 + QUIC 适配（⬜未实现；QUIC 未接入）
+M9 后端 provider: uwu_event_mesh 适配(durable log/游标/DLQ/timeline) 作权威事件流/回放/编排可选后端(evmesh,仅服务端)（⬜未实现）
 ```
 
 基准即规格（全部 design target，本机无多端实测，如实标注）：每客户端稳态带宽、支持并发连接数、权威 tick 率、端到端输入延迟（预测隐藏后感知）、回滚重放帧数上限、延迟补偿窗口、分片移交无中断时长。可验证的 CPU 纯函数部分（定序/CRDT/delta/量化/回滚）设确定性单测门槛。
 
 诚实边界：
 
-- 本机无多端网络环境，一切吞吐/延迟/丢包恢复为 design target，不是实测。
+- 当前已有单机 loopback 和真实 UDP/ARQ 测试，但没有跨进程、跨机器或真实公网链路证据；吞吐、延迟、丢包恢复、并发连接数和拥塞行为仍是 design target，不是验收结果。
+- `security` 的握手、nonce、方向绑定和 anti-replay 只证明协议边界；在没有默认密码 provider、密钥生命周期、跨机器身份验证和密钥轮换前，不能称为生产级加密传输已完成。
+- `prism_replication` 的 ECS bridge 已接入 World snapshot/固定步回滚路径，但真实服务器权威 ECS、scene/component 复制和跨机 reconciliation 仍需端到端验收。
+- `lag_comp`、`server_mesh`、QUIC/WebTransport、NAT/ICE/relay、事件流 durable provider 和完整反作弊策略仍未实现，不得用设计章节替代代码完成声明。
 - 反作弊上限由「服务器权威 + 确定性对账」决定，客户端侧检测可被破解、仅作噪声过滤；**不含任何 ML**。
 - 浮点仿真参与权威必须定点化，否则无法保证跨平台确定性与回滚收敛。
 - QUIC/中继/NAT 穿透依赖部署环境，设计只定接缝与回退策略，不保证所有网络拓扑可直连。
