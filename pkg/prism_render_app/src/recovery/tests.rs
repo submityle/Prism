@@ -662,3 +662,59 @@ fn recovery_replacement_lost_during_startup_never_publishes_restored() {
         1
     );
 }
+
+#[test]
+fn recovery_replays_latest_transform_before_restored_and_rejects_invalid_publication() {
+    let (mut app, controls) = app();
+    let handle = prism_render_architecture::gpu_scene::SceneHandle::new(3, 1);
+    app.world_mut().spawn((
+        prism_transform::Transform::from_xyz(0.25, 0.0, 0.0),
+        crate::RenderTransformBinding(handle),
+    ));
+    app.update();
+    let old_device = runtime(&app).device_handle();
+    controls.lose();
+    app.update();
+    let duplicate = app.world_mut().spawn((
+        prism_transform::Transform::from_xyz(0.75, 0.0, 0.0),
+        crate::RenderTransformBinding(handle),
+    ));
+    app.update();
+    app.update();
+    assert!(app.world().resource::<DeviceRecoveryStatus>().recovering);
+    assert!(app
+        .world()
+        .resource::<DeviceRecoveryStatus>()
+        .last_error
+        .as_ref()
+        .unwrap()
+        .contains("duplicate"));
+    let mut restored = EventCursor::<DeviceRestored>::new();
+    assert_eq!(
+        restored
+            .read(app.world().resource::<Events<DeviceRestored>>())
+            .count(),
+        0
+    );
+
+    app.world_mut().despawn(duplicate);
+    app.update();
+    let render = app.get_sub_app(RenderApp).unwrap();
+    let transforms = render.world.resource::<crate::RenderTransforms>();
+    assert_eq!(transforms.stats().uploaded_bytes, 48);
+    assert!(transforms.last_error().is_none());
+    assert!(!Arc::ptr_eq(&old_device, &runtime(&app).device_handle()));
+    let writes = runtime(&app).queue().writes.lock().unwrap();
+    assert!(writes.iter().any(|(_, offset, bytes)| *offset == 0
+        && bytes.len() == 48
+        && f32::from_le_bytes(bytes[12..16].try_into().unwrap()) == 0.25));
+    drop(writes);
+    app.update();
+    assert!(!app.world().resource::<DeviceRecoveryStatus>().recovering);
+    assert_eq!(
+        restored
+            .read(app.world().resource::<Events<DeviceRestored>>())
+            .count(),
+        1
+    );
+}

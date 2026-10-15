@@ -378,6 +378,13 @@ impl MeshPipelineProvider for MeshPipelines {
     fn descriptor(&self, variant: &MeshPipelineKey) -> RenderPipelineDescriptor {
         self.provider.descriptor(variant)
     }
+
+    fn transformed_descriptor(
+        &self,
+        variant: &MeshPipelineKey,
+    ) -> Option<RenderPipelineDescriptor> {
+        self.provider.transformed_descriptor(variant)
+    }
 }
 
 /// The spine's stand-in pipeline: position in, one colour out.
@@ -398,6 +405,12 @@ impl SpineMeshPipeline {
     const WGSL: &'static str = "\
 @vertex fn vs(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {\n\
     return vec4<f32>(position, 1.0);\n\
+}\n\
+@vertex fn vs_transform(@location(0) position: vec3<f32>,\n\
+    @location(13) row0: vec4<f32>, @location(14) row1: vec4<f32>,\n\
+    @location(15) row2: vec4<f32>) -> @builtin(position) vec4<f32> {\n\
+    let p = vec4<f32>(position, 1.0);\n\
+    return vec4<f32>(dot(row0, p), dot(row1, p), dot(row2, p), 1.0);\n\
 }\n\
 @fragment fn fs() -> @location(0) vec4<f32> {\n\
     return vec4<f32>(1.0, 1.0, 1.0, 1.0);\n\
@@ -421,6 +434,15 @@ impl SpineMeshPipeline {
 }
 
 impl MeshPipelineProvider for SpineMeshPipeline {
+    fn transformed_descriptor(
+        &self,
+        variant: &MeshPipelineKey,
+    ) -> Option<RenderPipelineDescriptor> {
+        let mut descriptor = self.descriptor(variant);
+        descriptor.vertex.entry_point = "vs_transform".into();
+        Some(descriptor)
+    }
+
     fn descriptor(&self, variant: &MeshPipelineKey) -> RenderPipelineDescriptor {
         RenderPipelineDescriptor {
             label: Some("prism-spine-mesh".into()),

@@ -153,6 +153,16 @@ pub trait MeshPipelineProvider {
     /// accidentally build a pipeline whose vertex stage disagrees with its own
     /// cache key.
     fn descriptor(&self, variant: &MeshPipelineKey) -> RenderPipelineDescriptor;
+
+    /// Opts into the row-major affine instance stream at shader locations
+    /// 13, 14 and 15 (three `vec4<f32>` rows, stride 48). Providers that do
+    /// not implement this contract reject transform-bound draws explicitly.
+    fn transformed_descriptor(
+        &self,
+        _variant: &MeshPipelineKey,
+    ) -> Option<RenderPipelineDescriptor> {
+        None
+    }
 }
 
 /// Fills `descriptor`'s vertex stage from the mesh's layout.

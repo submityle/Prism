@@ -3327,7 +3327,7 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
 /// The scene fixture the queue-stage tests draw: a mesh in the simulation's
 /// arena, a geometry + material + binding in the render world's registry, and a
 /// visible work item naming the instance.
-fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
+pub(super) fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
     use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
     use prism_render_architecture::geometry::{
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,

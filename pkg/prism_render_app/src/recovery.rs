@@ -124,6 +124,7 @@ where
             return Ok(false);
         }
         world.run_schedule(PrepareRecoveredAssets);
+        crate::transforms::prepare_transform_buffer::<I>(world)?;
         if recovered_assets_pending(world) {
             return Err(
                 "render asset recovery is awaiting source data or successful preparation".into(),

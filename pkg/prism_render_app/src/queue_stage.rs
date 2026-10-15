@@ -11,6 +11,7 @@ use prism_ecs::prelude::{Res, ResMut};
 use prism_render_driver::{FrameSync, Instance};
 
 use crate::draw::canonical;
+use crate::mesh_pipeline::MeshPipelineProvider;
 use crate::mesh_pipeline::MeshPipelineSpecializer;
 use crate::mesh_pipelines::MeshPipelines;
 use crate::queue::RenderQueues;
@@ -47,6 +48,7 @@ pub(crate) fn fill_queues<I>(
     mut queues: ResMut<RenderQueues>,
     mut stats: ResMut<RenderFrameStats>,
     runtime: Res<RenderRuntimeResource<I>>,
+    mut transforms: ResMut<crate::RenderTransforms>,
 ) where
     I: Instance + Send + Sync + 'static,
     I::Adapter: Send + Sync + 'static,
@@ -59,20 +61,58 @@ pub(crate) fn fill_queues<I>(
     if work.is_empty() {
         return;
     }
-    let queued = queues.fill_from_visibility(
-        runtime.runtime().device(),
-        &mut specializer,
-        &registry,
-        &meshes,
-        work.items(),
-        // The frame has a depth attachment, so the variants must declare the
-        // matching depth state: a pipeline and the pass it records into have to
-        // agree on the attachment set.
-        Some(RENDER_DEPTH_FORMAT),
-        1,
-        canonical::MESH,
-        &*pipelines,
-    );
+    let mut queued = 0;
+    for work_item in work.items() {
+        let Some(requests) = registry.resolve_passes(
+            work_item,
+            &meshes,
+            Some(RENDER_DEPTH_FORMAT),
+            1,
+            canonical::MESH,
+        ) else {
+            continue;
+        };
+        for mut request in requests {
+            let Ok(transformed) = transforms.decorate(&mut request, &pipelines) else {
+                continue;
+            };
+            let pipeline = specializer
+                .specialize_with(
+                    runtime.runtime().device(),
+                    request.variant,
+                    &request.layout,
+                    |variant| {
+                        if transformed {
+                            pipelines
+                                .transformed_descriptor(variant)
+                                .expect("validated transform stream provider")
+                        } else {
+                            pipelines.descriptor(variant)
+                        }
+                    },
+                )
+                .id();
+            queues.push(
+                request.phase,
+                crate::PhaseItem {
+                    pipeline,
+                    draw: request.draw,
+                    geometry: request.geometry,
+                    vertices: request.vertices,
+                    indices: request.indices,
+                    first: request.first,
+                    count: request.count,
+                    base_vertex: request.base_vertex,
+                    indirect: None,
+                    lod_level: request.lod_level,
+                    material: request.material,
+                    scene: request.scene,
+                    order: request.order,
+                },
+            );
+            queued += 1;
+        }
+    }
     queues.sort();
     stats.draws_queued += queued as u64;
 }

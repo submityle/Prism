@@ -129,6 +129,15 @@ impl DrawFunctions {
         id
     }
 
+    /// Replaces a registered function while preserving phase items' stable id.
+    pub(crate) fn replace(
+        &mut self,
+        id: DrawFunctionId,
+        function: impl Fn(&PhaseItem, &mut dyn MeshRecorder) + Send + Sync + 'static,
+    ) {
+        self.functions[id.0 as usize] = alloc::sync::Arc::new(function);
+    }
+
     /// The number of registered draw functions.
     #[must_use]
     pub fn len(&self) -> usize {

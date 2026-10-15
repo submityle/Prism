@@ -174,6 +174,12 @@ where
             .insert_resource(RenderMaterials::new(config.material_capacity));
         render.world.insert_resource(material_buffers);
         render.world.insert_resource(MaterialUploadStats::default());
+        render
+            .world
+            .insert_resource(crate::RenderTransforms::default());
+        render
+            .world
+            .insert_resource(crate::ExtractedTransforms::default());
         render.world.insert_resource(device_loss.clone());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
@@ -192,6 +198,9 @@ where
             // Order the render stages/phases first, then hang the frame system
             // off the record stage so later renderer plugins slot in by set.
             configure_render_sets(schedule);
+            schedule.add_systems(
+                crate::transforms::prepare_transform_resources::<I>.in_set(RenderSystems::Extract),
+            );
             // Materialize the view family before the record stage consumes it.
             schedule.add_systems(build_view_family.in_set(RenderSystems::CreateViews));
             // The visible set becomes this frame's queue before anything records.
@@ -230,6 +239,9 @@ where
         // would drop a family registered by another plugin.
         app.insert_resource(RenderIntent::from_extent(config.extent));
         app.add_extract(RenderApp, extract_render_record);
+        app.init_resource::<crate::PublishedTransforms>();
+        app.add_systems(Last, crate::transforms::publish_transforms);
+        app.add_extract(RenderApp, crate::transforms::extract_transforms);
         // The spine's frame draws meshes, so the plugin owns that family: its
         // extract, its prepared table, and its prepare stage. Registering it
         // again elsewhere is a no-op.

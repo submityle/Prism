@@ -22,6 +22,7 @@ prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
 prism_render_graph = { path = "../prism_render_graph" }
 prism_render_runtime = { path = "../prism_render_runtime" }
 prism_tasks = { path = "../prism_tasks" }
+prism_transform = { path = "../prism_transform", features = ["ecs"] }
 
 [dev-dependencies]
 # The headless reference backend: drives the extract + render path in CI with
