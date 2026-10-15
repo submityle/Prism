@@ -1,9 +1,14 @@
 use super::*;
 
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use prism_asset::StableGuid;
 use prism_asset_container::{
-    ContainerReader, ContainerWriter, ManifestReadError, OverlaySet, RuntimeManifest,
+    ContainerReader, ContainerWriter, ManifestReadError, MemoryRangeSource, OverlaySet,
+    RangeSource, RangeSourceError, RuntimeManifest,
 };
+use prism_world_io::checksum;
 use prism_world_stream::{AabbI64, CellManifest, GlobalPos, SectorId};
 
 use crate::{CellProvider, CellReadRequest, ChunkProvider, ManifestHeader, CELL_HEADER_SIZE};
@@ -37,11 +42,31 @@ fn mounted(
         writer.add(guid, cell.clone()).expect("raw entry");
     }
     let bytes = writer.finish().expect("container bytes");
-    let reader = ContainerReader::new(bytes).expect("validated container");
+    let reader = ContainerReader::from_range_source(Arc::new(MemoryRangeSource::new(bytes)))
+        .expect("validated range-backed container");
     let mut overlays = OverlaySet::new();
     overlays.mount("world", 7, reader);
     let manifest = overlays.runtime_manifest().expect("runtime manifest");
     (manifest, overlays, cell)
+}
+
+#[derive(Debug)]
+struct ToggleRangeSource {
+    bytes: Arc<[u8]>,
+    fail: AtomicBool,
+}
+
+impl RangeSource for ToggleRangeSource {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError> {
+        if self.fail.load(Ordering::Acquire) {
+            return Err(RangeSourceError::Io("injected range failure".into()));
+        }
+        MemoryRangeSource::new(self.bytes.clone()).read_range(offset, out)
+    }
 }
 
 #[test]
@@ -162,6 +187,69 @@ fn cancellation_and_bounds_are_checked_before_container_read() {
     assert!(matches!(
         error,
         AssetContainerProviderError::InvalidDeclaredLength { .. }
+    ));
+}
+
+#[test]
+fn rejects_nonzero_range_offset_and_bad_checksum_before_success() {
+    let expected_manifest = cell_manifest(0x6789, CELL_HEADER_SIZE + 5);
+    let (runtime_manifest, overlays, expected) = mounted(expected_manifest, b"hello", false);
+    let provider = AssetContainerCellProvider::new(runtime_manifest, overlays);
+
+    let offset_error = provider
+        .read_cell(
+            &CellReadRequest::new(expected_manifest, 0).with_byte_offset(1),
+            CancellationToken::new(false),
+        )
+        .expect_err("logical manifest routing must reject physical offsets");
+    assert!(matches!(
+        offset_error,
+        AssetContainerProviderError::InvalidByteOffset { byte_offset: 1 }
+    ));
+
+    let checksum_error = provider
+        .read_cell(
+            &CellReadRequest::new(expected_manifest, 0)
+                .with_expected_checksum(checksum(&expected) ^ 1),
+            CancellationToken::new(false),
+        )
+        .expect_err("checksum mismatch must fail closed");
+    assert!(matches!(
+        checksum_error,
+        AssetContainerProviderError::ChecksumMismatch { .. }
+    ));
+}
+
+#[test]
+fn propagates_range_source_failure_after_manifest_validation() {
+    let expected_manifest = cell_manifest(0x789a, CELL_HEADER_SIZE + 5);
+    let mut cell = ManifestHeader::from_manifest(expected_manifest).encode();
+    cell.extend_from_slice(b"hello");
+    let guid = StableGuid::from_u128(expected_manifest.scene_key);
+    let mut writer = ContainerWriter::new();
+    writer.add(guid, cell).expect("entry");
+    let bytes: Arc<[u8]> = writer.finish().expect("container").into();
+    let source = Arc::new(ToggleRangeSource {
+        bytes,
+        fail: AtomicBool::new(false),
+    });
+    let reader = ContainerReader::from_range_source(Arc::clone(&source)).expect("reader");
+    source.fail.store(true, Ordering::Release);
+    let mut overlays = OverlaySet::new();
+    overlays.mount("world", 7, reader);
+    let runtime_manifest = overlays.runtime_manifest().expect("manifest");
+    let provider = AssetContainerCellProvider::new(runtime_manifest, overlays);
+
+    let error = provider
+        .read_cell(
+            &CellReadRequest::new(expected_manifest, 0),
+            CancellationToken::new(false),
+        )
+        .expect_err("range source failure must not produce partial bytes");
+    assert!(matches!(
+        error,
+        AssetContainerProviderError::Manifest(inner)
+            if matches!(*inner, ManifestReadError::Container(_))
     ));
 }
 

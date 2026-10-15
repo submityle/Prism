@@ -76,6 +76,23 @@ The existing file provider opens one file per operation and performs bounded
 **blocking** filesystem reads during polling; this is not worker-thread async IO.
 The request-count capacity and byte admission limits are separate controls.
 
+## Asset-container cells
+
+With the optional `asset_container` feature, `AssetContainerCellProvider` routes
+`CellReadRequest::manifest().scene_key` through a validated
+`prism_asset_container::RuntimeManifest` and `OverlaySet`. It reads the complete
+cell payload through the container's `ManifestReader`, so raw, compressed, and
+range-backed `ContainerReader` mounts share the same route, identity, range, and
+payload validation. The provider rejects non-zero physical offsets, stale or
+missing routes, declared-length mismatches, allocator/admission overflow, header
+mismatches, optional checksum mismatches, and cancellation without returning
+partial bytes. The read is synchronous compatibility IO: cancellation cannot
+interrupt a container read already in progress.
+
+The feature is opt-in and keeps the default runtime dependency graph unchanged.
+It does not parse scene payloads, upload to a GPU, or provide GPU-direct IO;
+those remain owned by the downstream `SceneHost` and renderer layers.
+
 ## Byte admission and memory scope
 
 `IoSchedulerAdapter::with_byte_limits` and `FileCellProvider::with_byte_limits`

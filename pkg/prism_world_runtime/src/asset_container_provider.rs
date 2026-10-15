@@ -17,6 +17,7 @@ use core::fmt;
 
 use prism_asset::StableGuid;
 use prism_asset_container::{ManifestReadError, ManifestReader, OverlaySet, RuntimeManifest};
+use prism_world_io::checksum;
 use prism_world_stream::CellManifest;
 
 use crate::{
@@ -68,6 +69,12 @@ pub enum AssetContainerProviderError {
         /// Minimum legal complete stream length.
         minimum: u64,
     },
+    /// The request contains a non-zero file/range offset, which is not valid
+    /// for a manifest-routed logical cell payload.
+    InvalidByteOffset {
+        /// Unsupported request offset.
+        byte_offset: u64,
+    },
     /// The request exceeds the provider's explicit admission bound.
     RequestTooLarge {
         /// Declared complete stream length.
@@ -108,6 +115,13 @@ pub enum AssetContainerProviderError {
     Manifest(Box<ManifestReadError>),
     /// The returned complete stream failed the existing `PRWC` header check.
     Header(HeaderError),
+    /// The returned bytes failed the optional request checksum.
+    ChecksumMismatch {
+        /// Checksum requested by the caller.
+        expected: u64,
+        /// Checksum computed from the complete returned cell stream.
+        actual: u64,
+    },
 }
 
 impl fmt::Display for AssetContainerProviderError {
@@ -124,6 +138,10 @@ impl fmt::Display for AssetContainerProviderError {
             Self::InvalidDeclaredLength { io_bytes, minimum } => write!(
                 formatter,
                 "cell declares {io_bytes} bytes, below minimum {minimum}"
+            ),
+            Self::InvalidByteOffset { byte_offset } => write!(
+                formatter,
+                "manifest-routed cell request has unsupported byte offset {byte_offset}"
             ),
             Self::RequestTooLarge {
                 io_bytes,
@@ -158,6 +176,10 @@ impl fmt::Display for AssetContainerProviderError {
             ),
             Self::Manifest(error) => error.fmt(formatter),
             Self::Header(error) => error.fmt(formatter),
+            Self::ChecksumMismatch { expected, actual } => write!(
+                formatter,
+                "asset-container cell checksum mismatch: expected {expected:#x}, got {actual:#x}"
+            ),
         }
     }
 }
@@ -236,8 +258,20 @@ impl AssetContainerCellProvider {
 
     fn validate_request(
         &self,
-        manifest: CellManifest,
-    ) -> Result<usize, AssetContainerProviderError> {
+        request: &CellReadRequest,
+    ) -> Result<(CellManifest, usize, Option<u64>), AssetContainerProviderError> {
+        let manifest = request.manifest();
+        let io_request = request.io_request();
+        if io_request.offset() != 0 {
+            return Err(AssetContainerProviderError::InvalidByteOffset {
+                byte_offset: io_request.offset(),
+            });
+        }
+        if io_request.length() != manifest.io_bytes {
+            return Err(AssetContainerProviderError::LengthOverflow {
+                io_bytes: manifest.io_bytes,
+            });
+        }
         let minimum = u64::try_from(CELL_HEADER_SIZE).expect("cell header size fits u64");
         let payload_bytes = manifest.io_bytes.checked_sub(minimum).ok_or(
             AssetContainerProviderError::InvalidDeclaredLength {
@@ -261,11 +295,12 @@ impl AssetContainerCellProvider {
                 max_io_bytes: self.limits.max_io_bytes,
             });
         }
-        usize::try_from(manifest.io_bytes).map_err(|_| {
+        let length = usize::try_from(manifest.io_bytes).map_err(|_| {
             AssetContainerProviderError::LengthOverflow {
                 io_bytes: manifest.io_bytes,
             }
-        })
+        })?;
+        Ok((manifest, length, io_request.expected_checksum()))
     }
 
     fn read_bound(
@@ -323,8 +358,7 @@ impl CellProvider for AssetContainerCellProvider {
         if cancel.is_cancelled() {
             return Err(AssetContainerProviderError::Cancelled);
         }
-        let manifest = request.manifest();
-        let length = self.validate_request(manifest)?;
+        let (manifest, length, expected_checksum) = self.validate_request(request)?;
         if cancel.is_cancelled() {
             return Err(AssetContainerProviderError::Cancelled);
         }
@@ -338,6 +372,12 @@ impl CellProvider for AssetContainerCellProvider {
         let bytes = self.read_bound(reader, manifest, length)?;
         if cancel.is_cancelled() {
             return Err(AssetContainerProviderError::Cancelled);
+        }
+        if let Some(expected) = expected_checksum {
+            let actual = checksum(&bytes);
+            if actual != expected {
+                return Err(AssetContainerProviderError::ChecksumMismatch { expected, actual });
+            }
         }
         Ok(bytes)
     }
