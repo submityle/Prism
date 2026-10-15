@@ -195,10 +195,15 @@ impl VertexFormat {
     #[must_use]
     pub const fn size(self) -> u64 {
         match self {
-            Self::Unorm8x4 | Self::Snorm8x4 | Self::Float32 | Self::Uint32 | Self::Sint32 => 4,
-            Self::Float16x2 | Self::Float32x2 | Self::Uint32x2 => 8,
+            Self::Unorm8x4
+            | Self::Snorm8x4
+            | Self::Float16x2
+            | Self::Float32
+            | Self::Uint32
+            | Self::Sint32 => 4,
+            Self::Float16x4 | Self::Float32x2 | Self::Uint32x2 => 8,
             Self::Float32x3 => 12,
-            Self::Float16x4 | Self::Float32x4 | Self::Uint32x4 => 16,
+            Self::Float32x4 | Self::Uint32x4 => 16,
         }
     }
 

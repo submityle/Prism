@@ -461,6 +461,15 @@ fn every_rhi_vertex_format_has_a_matching_authoring_variant() {
         assert_eq!(values.len(), 1);
         assert_eq!(values.format(), format);
         assert!(values.matches(format));
+        let gathered = values.gather_bytes(&[0, 0]).expect("valid indices");
+        assert_eq!(gathered.len(), 2 * format.size() as usize);
+        let mesh = Mesh::new(PrimitiveTopology::PointList)
+            .with_attribute(MeshVertexAttribute::new("Value", format, 0), values.clone())
+            .unwrap();
+        assert_eq!(mesh.vertex_buffer_data().len(), format.size() as usize);
+        assert_eq!(mesh.vertex_layout().unwrap().array_stride, format.size());
+        assert_eq!(values.gather_bytes(&[1]), None);
+        assert_eq!(values.gather_bytes(&[]), Some(vec![]));
         if format != VertexFormat::Float32 {
             assert!(!values.matches(VertexFormat::Float32));
         }
@@ -490,4 +499,29 @@ fn packed_bytes_preserve_integer_and_half_float_bit_patterns() {
         mesh.vertex_buffer_data(),
         [0x00, 0x3c, 0x00, 0xbc, 0xfe, 0xff, 0xff, 0xff, 0x80, 0xff, 0x00, 0x7f]
     );
+    let layout = mesh.vertex_layout().unwrap();
+    assert_eq!(layout.array_stride, 12);
+    assert_eq!(
+        layout
+            .attributes
+            .iter()
+            .map(|attribute| attribute.offset)
+            .collect::<Vec<_>>(),
+        vec![0, 4, 8]
+    );
+    for (layout, bytes) in mesh.stream_buffers(&StreamLayoutProfile::default()) {
+        assert_eq!(bytes.len(), layout.array_stride as usize);
+    }
+}
+
+#[test]
+fn gather_preserves_vertex_order_and_duplicate_indices() {
+    let values = VertexAttributeValues::Float16x2(vec![[0x3c00, 0xbc00], [0x4000, 0xc000]]);
+    assert_eq!(
+        values.gather_bytes(&[1, 0, 1]),
+        Some(vec![
+            0x00, 0x40, 0x00, 0xc0, 0x00, 0x3c, 0x00, 0xbc, 0x00, 0x40, 0x00, 0xc0,
+        ])
+    );
+    assert_eq!(values.gather_bytes(&[0, u32::MAX]), None);
 }

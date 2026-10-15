@@ -3,13 +3,20 @@
 use prism_render_architecture::gpu_scene::SceneBounds;
 use prism_render_architecture::paging::{RequestBatch, UNMAPPED_SLOT};
 use prism_render_architecture::virtual_geometry::{
-    ClusterNode, GeometryPageKey, VirtualGeometryAsset, VirtualGeometryAssetHeader,
+    decode_cluster_payload, encode_cluster_payload_with_attributes, ClusterNode,
+    ClusterVertexAttribute, GeometryPageKey, VirtualGeometryAsset, VirtualGeometryAssetHeader,
     VirtualGeometryClusterRecord, VirtualGeometryCompression, VirtualGeometryPage,
     VirtualGeometryPageRecord, VirtualGeometryPageStream, VIRTUAL_GEOMETRY_ASSET_SCHEMA,
 };
+use prism_render_driver::VertexFormat;
 use prism_virtual_geometry_gpu::{GpuContext, GpuPageStorage, GpuPageTable};
 
-fn stream() -> (VirtualGeometryPageStream, GeometryPageKey) {
+fn stream() -> (
+    VirtualGeometryPageStream,
+    GeometryPageKey,
+    Vec<u8>,
+    SceneBounds,
+) {
     let key = GeometryPageKey::new(7, 0);
     let bounds = SceneBounds {
         center: [0.0; 3],
@@ -17,10 +24,38 @@ fn stream() -> (VirtualGeometryPageStream, GeometryPageKey) {
         half_extents: [1.0; 3],
         _padding: 0.0,
     };
-    let raw = prism_render_architecture::virtual_geometry::encode_cluster_payload(
+    let attributes = vec![
+        ClusterVertexAttribute {
+            semantic: "Vertex_Normal".into(),
+            shader_location: 1,
+            format: VertexFormat::Snorm8x4,
+            data: vec![0, 0, 127, 0].repeat(3),
+        },
+        ClusterVertexAttribute {
+            semantic: "Vertex_Uv".into(),
+            shader_location: 2,
+            format: VertexFormat::Float16x2,
+            data: [0u16, 0, 0x3c00, 0, 0, 0x3c00]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        },
+        ClusterVertexAttribute {
+            semantic: "AuthoredId".into(),
+            shader_location: 3,
+            format: VertexFormat::Uint32,
+            data: [u32::MAX, 0x1234_5678, 16_777_217]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect(),
+        },
+    ];
+    let raw = encode_cluster_payload_with_attributes(
         bounds,
         &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
         &[0, 1, 2],
+        0,
+        &attributes,
     )
     .expect("valid CLST fixture");
     let compressed = prism_render_architecture::compression::gdeflate_compress(&raw);
@@ -65,7 +100,7 @@ fn stream() -> (VirtualGeometryPageStream, GeometryPageKey) {
     requests.record(key, 10.0);
     stream.reconcile(&requests, 1);
     assert_eq!(stream.resident_count(), 1);
-    (stream, key)
+    (stream, key, raw, bounds)
 }
 
 #[test]
@@ -74,7 +109,7 @@ fn gpu_page_table_and_storage_match_the_stream_cpu_contract() {
         eprintln!("skipping virtual-geometry page parity: no GPU adapter");
         return;
     };
-    let (stream, key) = stream();
+    let (stream, key, raw, bounds) = stream();
     let entries = stream.entries();
     let queries = vec![key, GeometryPageKey::new(7, 99)];
     let resolved = GpuPageTable::new(&ctx)
@@ -86,7 +121,12 @@ fn gpu_page_table_and_storage_match_the_stream_cpu_contract() {
         .iter()
         .map(|(_, slot)| (*slot, stream.storage().slot_words(*slot).unwrap()))
         .collect();
-    let fetches = vec![(entries[0].1, 0), (entries[0].1, 1), (99, 0)];
+    // Fetch the entire slot, not only its magic/version words: the footer and
+    // every authored attribute must survive compression, residency and GPU IO.
+    let mut fetches: Vec<_> = (0..stream.storage().page_words())
+        .map(|word| (entries[0].1, word))
+        .collect();
+    fetches.push((99, 0));
     let fetched = GpuPageStorage::new(&ctx).round_trip(
         &ctx,
         stream.storage().page_words(),
@@ -94,12 +134,16 @@ fn gpu_page_table_and_storage_match_the_stream_cpu_contract() {
         &uploads,
         &fetches,
     );
+    let mut expected = stream.storage().slot_words(entries[0].1).unwrap().to_vec();
+    expected.push(0);
+    assert_eq!(fetched, expected);
+    let bytes: Vec<_> = fetched[..fetched.len() - 1]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    assert_eq!(&bytes[..raw.len()], raw.as_slice());
     assert_eq!(
-        fetched,
-        vec![
-            stream.storage().fetch(entries[0].1, 0).unwrap(),
-            stream.storage().fetch(entries[0].1, 1).unwrap(),
-            0,
-        ]
+        decode_cluster_payload(bounds, &bytes[..raw.len()]),
+        decode_cluster_payload(bounds, &raw)
     );
 }

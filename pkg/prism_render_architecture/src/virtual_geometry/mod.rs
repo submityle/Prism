@@ -50,7 +50,9 @@ pub use asset::{
 };
 pub use bins::{bin_cut, RasterBins};
 pub use cluster_payload::{
-    decode_cluster_payload, encode_cluster_payload, ClusterPayloadError, QuantizedClusterPayload,
+    decode_cluster_payload, encode_cluster_payload, encode_cluster_payload_with_attributes,
+    ClusterPayloadError, ClusterVertexAttribute, QuantizedClusterPayload, MAX_CLUSTER_ATTRIBUTES,
+    MAX_CLUSTER_ATTRIBUTE_NAME_BYTES, POSITION_ONLY_CLUSTER_PAYLOAD_VERSION,
     STATIC_CLUSTER_PAYLOAD_MAGIC, STATIC_CLUSTER_PAYLOAD_VERSION,
 };
 pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};

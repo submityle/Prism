@@ -306,6 +306,15 @@ fn a_mesh_family_prepares_through_the_frame() {
 /// bytes and the layout agree.
 #[test]
 fn a_prepared_mesh_draws_with_its_layout_on_a_gpu() {
+    draw_prepared_mesh_on_gpu(false);
+}
+
+#[test]
+fn half_attributes_and_the_following_color_draw_with_their_derived_offsets_on_a_gpu() {
+    draw_prepared_mesh_on_gpu(true);
+}
+
+fn draw_prepared_mesh_on_gpu(with_half_attributes: bool) {
     use prism_render_driver::{
         BufferState, ColorTargetState, Extent3d, FragmentState, MultisampleState, PrimitiveState,
         RenderDevice, RenderPipelineDescriptor, ShaderModuleDescriptor, TextureDescriptor,
@@ -330,7 +339,7 @@ fn a_prepared_mesh_draws_with_its_layout_on_a_gpu() {
 
     // A clip-space quad: positions are the vertex data under test, so the draw
     // needs no transform and every pixel difference is the buffer's doing.
-    let mesh = Mesh::new(PrimitiveTopology::TriangleList)
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList)
         .with_attribute(
             POSITION,
             VertexAttributeValues::Float32x3(vec![
@@ -342,6 +351,25 @@ fn a_prepared_mesh_draws_with_its_layout_on_a_gpu() {
         )
         .expect("positions fit")
         .indexed(Indices::Uint16(vec![0, 1, 2, 0, 2, 3]));
+    if with_half_attributes {
+        for (attribute, values) in [
+            (
+                MeshVertexAttribute::new("Half2", VertexFormat::Float16x2, 1),
+                VertexAttributeValues::Float16x2(vec![[0x3800, 0x3400]; 4]),
+            ),
+            (
+                MeshVertexAttribute::new("Half4", VertexFormat::Float16x4, 2),
+                VertexAttributeValues::Float16x4(vec![[0x3c00, 0x0000, 0x0000, 0x3c00]; 4]),
+            ),
+            (
+                MeshVertexAttribute::new("Color", VertexFormat::Unorm8x4, 3),
+                VertexAttributeValues::Unorm8x4(vec![[255, 0, 0, 255]; 4]),
+            ),
+        ] {
+            mesh.insert_attribute(attribute, values)
+                .expect("valid half/color data");
+        }
+    }
     let prepared = RenderMesh::prepare(
         &mesh,
         AssetId::new(prism_asset::AssetIndex::from_parts(0, 1)),
@@ -350,15 +378,37 @@ fn a_prepared_mesh_draws_with_its_layout_on_a_gpu() {
         None,
     )
     .expect("the quad prepares");
+    if with_half_attributes {
+        assert_eq!(prepared.layout.len(), 2);
+        assert_eq!(prepared.layout[1].array_stride, 16);
+        assert_eq!(
+            prepared.layout[1]
+                .attributes
+                .iter()
+                .map(|attribute| attribute.offset)
+                .collect::<Vec<_>>(),
+            vec![0, 4, 12],
+        );
+    }
 
-    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+    let shader = if with_half_attributes {
+        "struct Vertex { @builtin(position) position: vec4<f32>, @location(0) color: vec4<f32> };\n\
+         @vertex fn vs(@location(0) pos: vec3<f32>, @location(1) half2: vec2<f32>,\n\
+             @location(2) half4: vec4<f32>, @location(3) color: vec4<f32>) -> Vertex {\n\
+             var out: Vertex; out.position = vec4<f32>(pos, 1.0);\n\
+             let valid = all(half2 == vec2<f32>(0.5, 0.25)) && all(half4 == vec4<f32>(1.0, 0.0, 0.0, 1.0));\n\
+             out.color = select(vec4<f32>(0.0, 1.0, 0.0, 1.0), color, valid); return out;\n\
+         }\n\
+         @fragment fn fs(in: Vertex) -> @location(0) vec4<f32> { return in.color; }"
+    } else {
         "@vertex fn vs(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {\n\
              return vec4<f32>(pos, 1.0);\n\
          }\n\
          @fragment fn fs() -> @location(0) vec4<f32> {\n\
              return vec4<f32>(1.0, 0.0, 0.0, 1.0);\n\
-         }",
-    ));
+         }"
+    };
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(shader));
     let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
         label: Some("mesh-gpu-test".into()),
         layout: None,
@@ -389,7 +439,6 @@ fn a_prepared_mesh_draws_with_its_layout_on_a_gpu() {
         prepared.buffers.vertices,
         prepared.buffers.indices.expect("the quad is indexed").0,
     );
-    let vertex_bytes = prepared.vertex_count as u64 * prepared.layout[0].array_stride;
     let index_bytes = mesh.indices().expect("indexed").to_bytes().len() as u64;
 
     let mut graph = RenderGraph::new(extent);
@@ -405,14 +454,23 @@ fn a_prepared_mesh_draws_with_its_layout_on_a_gpu() {
             array_layers: 1,
         },
     );
-    let vertex_handle = graph.import_buffer(
-        "mesh-vertices",
-        BufferDesc::new(vertex_bytes, prism_render_driver::BufferUsages::VERTEX),
-        ImportedBuffer {
-            buffer: vertices[0],
-            entry_state: BufferState::initial(),
-        },
-    );
+    let vertex_handles: Vec<_> = vertices
+        .iter()
+        .zip(&prepared.layout)
+        .map(|(&buffer, layout)| {
+            graph.import_buffer(
+                "mesh-vertices",
+                BufferDesc::new(
+                    prepared.vertex_count as u64 * layout.array_stride,
+                    prism_render_driver::BufferUsages::VERTEX,
+                ),
+                ImportedBuffer {
+                    buffer,
+                    entry_state: BufferState::initial(),
+                },
+            )
+        })
+        .collect();
     let index_handle = graph.import_buffer(
         "mesh-indices",
         BufferDesc::new(index_bytes, prism_render_driver::BufferUsages::INDEX),
@@ -423,12 +481,16 @@ fn a_prepared_mesh_draws_with_its_layout_on_a_gpu() {
     );
     graph.add_raster_pass("mesh-draw", PassFlags::SIDE_EFFECT, move |builder| {
         let _ = builder.color_attachment(target);
-        let _ = builder.read_vertex(vertex_handle);
+        for &vertex_handle in &vertex_handles {
+            let _ = builder.read_vertex(vertex_handle);
+        }
         let _ = builder.read_index(index_handle);
         move |ctx| {
             ctx.set_render_pipeline(pipeline);
-            let vertices = ctx.buffer(vertex_handle);
-            ctx.set_vertex_buffer(0, vertices, 0);
+            for (slot, &vertex_handle) in vertex_handles.iter().enumerate() {
+                let vertices = ctx.buffer(vertex_handle);
+                ctx.set_vertex_buffer(slot as u32, vertices, 0);
+            }
             let indices = ctx.buffer(index_handle);
             ctx.set_index_buffer(indices, IndexFormat::Uint16, 0);
             ctx.draw_indexed(0..6, 0, 0..1);

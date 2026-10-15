@@ -175,6 +175,30 @@ impl VertexAttributeValues {
         }
     }
 
+    /// Gathers the requested vertices into tightly packed little-endian bytes.
+    ///
+    /// Request order and repeated indices are preserved. Returns `None` if an
+    /// index is out of range or the byte count cannot be represented; all indices
+    /// are checked before allocation. This does not change or convert the format.
+    #[must_use]
+    pub fn gather_bytes(&self, vertex_indices: &[u32]) -> Option<Vec<u8>> {
+        if vertex_indices
+            .iter()
+            .any(|index| *index as usize >= self.len())
+        {
+            return None;
+        }
+        let capacity = vertex_indices
+            .len()
+            .checked_mul(self.format().size() as usize)?;
+        let mut bytes = Vec::with_capacity(capacity);
+        for index in vertex_indices {
+            self.write_vertex(*index as usize, &mut bytes);
+        }
+        debug_assert_eq!(bytes.len(), capacity);
+        Some(bytes)
+    }
+
     /// Writes vertex `index`'s value into `out` as `format`'s bytes.
     ///
     /// The caller has already checked the format ([`matches`](Self::matches)),

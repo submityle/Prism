@@ -174,10 +174,20 @@ impl Mesh {
         let stride = usize::try_from(layout.array_stride).ok()?;
         let total_len = self.vertex_count().checked_mul(stride)?;
         let mut data = vec![0_u8; total_len];
+        // Reuse one tiny staging vector for the whole stream rather than
+        // allocating once per vertex/attribute in large imported meshes.
+        let mut encoded = Vec::with_capacity(
+            layout
+                .attributes
+                .iter()
+                .map(|attribute| attribute.format.size() as usize)
+                .max()
+                .unwrap_or(0),
+        );
         for vertex in 0..self.vertex_count() {
             let vertex_base = vertex.checked_mul(stride)?;
             for (attribute, value) in layout.attributes.iter().zip(values.iter()) {
-                let mut encoded = Vec::with_capacity(attribute.format.size() as usize);
+                encoded.clear();
                 value.write_vertex(vertex, &mut encoded);
                 let offset = usize::try_from(attribute.offset).ok()?;
                 let start = vertex_base.checked_add(offset)?;

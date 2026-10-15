@@ -4,10 +4,19 @@ use alloc::vec::Vec;
 
 use crate::gpu_scene::SceneBounds;
 
+mod attributes;
+pub use attributes::{
+    encode_cluster_payload_with_attributes, ClusterVertexAttribute, MAX_CLUSTER_ATTRIBUTES,
+    MAX_CLUSTER_ATTRIBUTE_NAME_BYTES,
+};
+
 /// Cluster payload signature.
 pub const STATIC_CLUSTER_PAYLOAD_MAGIC: [u8; 4] = *b"CLST";
-/// Quantized position payload schema.
-pub const STATIC_CLUSTER_PAYLOAD_VERSION: u16 = 2;
+/// Current quantized position and lossless attribute payload schema.
+pub const STATIC_CLUSTER_PAYLOAD_VERSION: u16 = 3;
+/// Legacy position-only schema accepted by the decoder and emitted by
+/// [`encode_cluster_payload`].
+pub const POSITION_ONLY_CLUSTER_PAYLOAD_VERSION: u16 = 2;
 
 /// Decoded quantized cluster payload.
 #[derive(Clone, Debug, PartialEq)]
@@ -16,10 +25,16 @@ pub struct QuantizedClusterPayload {
     pub positions: Vec<[f32; 3]>,
     /// Local triangle indices.
     pub indices: Vec<u16>,
+    /// Authored shader location of `Vertex_Position` (zero in legacy v2).
+    pub position_shader_location: u32,
+    /// Losslessly preserved non-position attributes in shader-location order.
+    pub attributes: Vec<ClusterVertexAttribute>,
     /// Conservative upper bound on squared position quantization error.
     // The original unquantized positions are not stored in the payload, so the
     // decoder cannot measure the realized per-vertex error. This value is the
-    // worst-case half-step bound for the three quantized axes.
+    // worst-case half-step plus reconstruction rounding bound. Positive
+    // infinity represents a finite coordinate range whose squared error cannot
+    // fit in f32; it must never be interpreted as zero or as a passing budget.
     pub max_error_squared: f32,
 }
 
@@ -36,6 +51,12 @@ pub enum ClusterPayloadError {
     NonFinite,
     /// Payload bounds disagree with the caller's cluster bounds.
     BoundsMismatch,
+    /// An attribute descriptor, semantic, format, or data length is invalid.
+    InvalidAttribute,
+    /// A shader location or semantic is repeated, including the position.
+    DuplicateAttribute,
+    /// Nonzero reserved/padding bytes, noncanonical ordering, or trailing data.
+    InvalidFraming,
 }
 
 impl core::fmt::Display for ClusterPayloadError {
@@ -46,11 +67,15 @@ impl core::fmt::Display for ClusterPayloadError {
             Self::InvalidCounts => f.write_str("invalid cluster payload counts"),
             Self::NonFinite => f.write_str("cluster payload contains non-finite data"),
             Self::BoundsMismatch => f.write_str("cluster payload bounds do not match metadata"),
+            Self::InvalidAttribute => f.write_str("invalid cluster vertex attribute"),
+            Self::DuplicateAttribute => f.write_str("duplicate cluster vertex attribute"),
+            Self::InvalidFraming => f.write_str("noncanonical cluster payload framing"),
         }
     }
 }
 
-/// Encodes local positions as normalized `u16x3` values within `bounds`.
+/// Encodes a legacy v2 position-only payload as normalized `u16x3` values.
+/// Use [`encode_cluster_payload_with_attributes`] for the current v3 schema.
 #[must_use]
 pub fn encode_cluster_payload(
     bounds: SceneBounds,
@@ -86,7 +111,7 @@ pub fn encode_cluster_payload(
     }
     let mut bytes = Vec::with_capacity(10 + 24 + positions.len() * 6 + indices.len() * 2);
     bytes.extend_from_slice(&STATIC_CLUSTER_PAYLOAD_MAGIC);
-    bytes.extend_from_slice(&STATIC_CLUSTER_PAYLOAD_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&POSITION_ONLY_CLUSTER_PAYLOAD_VERSION.to_le_bytes());
     bytes.extend_from_slice(&(positions.len() as u16).to_le_bytes());
     bytes.extend_from_slice(&((indices.len() / 3) as u16).to_le_bytes());
     for value in min.into_iter().chain(max) {
@@ -94,13 +119,15 @@ pub fn encode_cluster_payload(
     }
     for position in positions {
         for axis in 0..3 {
-            let extent = max[axis] - min[axis];
+            let extent = f64::from(max[axis]) - f64::from(min[axis]);
             let normalized = if extent > 0.0 {
-                ((position[axis] - min[axis]) / extent).clamp(0.0, 1.0)
+                ((f64::from(position[axis]) - f64::from(min[axis])) / extent).clamp(0.0, 1.0)
             } else {
                 0.0
             };
-            bytes.extend_from_slice(&((normalized * u16::MAX as f32).round() as u16).to_le_bytes());
+            bytes.extend_from_slice(
+                &((normalized * f64::from(u16::MAX)).round() as u16).to_le_bytes(),
+            );
         }
     }
     for index in indices {
@@ -126,12 +153,21 @@ pub fn decode_cluster_payload(
         });
     }
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != STATIC_CLUSTER_PAYLOAD_VERSION || !bounds_finite(bounds) {
-        return Err(if version == STATIC_CLUSTER_PAYLOAD_VERSION {
-            ClusterPayloadError::NonFinite
-        } else {
-            ClusterPayloadError::InvalidHeader
-        });
+    if !matches!(
+        version,
+        POSITION_ONLY_CLUSTER_PAYLOAD_VERSION | STATIC_CLUSTER_PAYLOAD_VERSION
+    ) || !bounds_finite(bounds)
+    {
+        return Err(
+            if matches!(
+                version,
+                POSITION_ONLY_CLUSTER_PAYLOAD_VERSION | STATIC_CLUSTER_PAYLOAD_VERSION
+            ) {
+                ClusterPayloadError::NonFinite
+            } else {
+                ClusterPayloadError::InvalidHeader
+            },
+        );
     }
     let vertex_count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
     let triangle_count = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
@@ -141,9 +177,18 @@ pub fn decode_cluster_payload(
     let header_end = FIXED_HEADER_SIZE;
     let position_end = header_end + vertex_count * 6;
     let index_end = position_end + triangle_count * 3 * 2;
-    if bytes.len() != index_end {
+    if bytes.len() < index_end {
         return Err(ClusterPayloadError::Truncated);
     }
+    let (position_shader_location, attributes) = if version == POSITION_ONLY_CLUSTER_PAYLOAD_VERSION
+    {
+        if bytes.len() != index_end {
+            return Err(ClusterPayloadError::InvalidFraming);
+        }
+        (0, Vec::new())
+    } else {
+        attributes::decode_attributes(vertex_count, bytes, index_end)?
+    };
     let mut cursor = 10;
     let mut stored_min = [0.0; 3];
     let mut stored_max = [0.0; 3];
@@ -168,20 +213,33 @@ pub fn decode_cluster_payload(
         for axis in 0..3 {
             let quantized = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
             cursor += 2;
-            let normalized = quantized as f32 / u16::MAX as f32;
-            position[axis] = stored_min[axis] + (stored_max[axis] - stored_min[axis]) * normalized;
+            let normalized = f64::from(quantized) / f64::from(u16::MAX);
+            position[axis] = (f64::from(stored_min[axis])
+                + (f64::from(stored_max[axis]) - f64::from(stored_min[axis])) * normalized)
+                as f32;
         }
         positions.push(position);
     }
-    let quantization_step = [
-        (stored_max[0] - stored_min[0]) / u16::MAX as f32,
-        (stored_max[1] - stored_min[1]) / u16::MAX as f32,
-        (stored_max[2] - stored_min[2]) / u16::MAX as f32,
-    ];
-    let max_error_squared = 0.25
-        * (quantization_step[0] * quantization_step[0]
-            + quantization_step[1] * quantization_step[1]
-            + quantization_step[2] * quantization_step[2]);
+    let squared_error: f64 = (0..3)
+        .map(|axis| {
+            let min = f64::from(stored_min[axis]);
+            let max = f64::from(stored_max[axis]);
+            if min == max {
+                return 0.0;
+            }
+            let half_step = (max - min) / (2.0 * f64::from(u16::MAX));
+            // Include conversion-to-f32 rounding, including subnormal coordinates.
+            let rounding =
+                min.abs().max(max.abs()) * f64::from(f32::EPSILON) + f64::from(f32::from_bits(1));
+            (half_step + rounding).powi(2)
+        })
+        .sum();
+    let rounded_error = squared_error as f32;
+    let max_error_squared = if f64::from(rounded_error) < squared_error {
+        f32::from_bits(rounded_error.to_bits() + 1)
+    } else {
+        rounded_error
+    };
     let mut indices = Vec::with_capacity(triangle_count * 3);
     for _ in 0..triangle_count * 3 {
         let index = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
@@ -194,6 +252,8 @@ pub fn decode_cluster_payload(
     Ok(QuantizedClusterPayload {
         positions,
         indices,
+        position_shader_location,
+        attributes,
         max_error_squared,
     })
 }
@@ -228,7 +288,6 @@ fn bounds_finite(bounds: SceneBounds) -> bool {
 
     let (min, max) = bounds_min_max(bounds);
     min.iter().chain(max.iter()).all(|value| value.is_finite())
-        && (0..3).all(|axis| (max[axis] - min[axis]).is_finite())
 }
 
 #[cfg(test)]
@@ -295,5 +354,30 @@ mod tests {
                 Err(ClusterPayloadError::Truncated)
             );
         }
+    }
+
+    #[test]
+    fn extreme_finite_coordinates_never_decode_to_nan_or_wrap_the_error_bound() {
+        let bounds = SceneBounds {
+            center: [0.0; 3],
+            half_extents: [f32::MAX; 3],
+            radius: f32::MAX,
+            _padding: 0.0,
+        };
+        let source = [[-f32::MAX; 3], [f32::MAX; 3], [0.0; 3]];
+        let bytes = encode_cluster_payload(bounds, &source, &[0, 1, 2]).unwrap();
+        let decoded = decode_cluster_payload(bounds, &bytes).unwrap();
+        assert_eq!(decoded.positions[0], source[0]);
+        assert_eq!(decoded.positions[1], source[1]);
+        assert!(decoded
+            .positions
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite()));
+        assert_eq!(
+            decoded.max_error_squared,
+            f32::INFINITY,
+            "unrepresentable squared bounds remain conservative"
+        );
     }
 }

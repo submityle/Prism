@@ -90,7 +90,9 @@ pub use virtual_geometry_lod::{
     StaticVirtualGeometryLodError, StaticVirtualGeometryLodSet,
 };
 pub use virtual_geometry_payload::{
-    decode_cluster_payload, encode_cluster_payload, ClusterPayloadError, QuantizedClusterPayload,
+    decode_cluster_payload, encode_cluster_payload, encode_cluster_payload_with_attributes,
+    ClusterPayloadError, ClusterVertexAttribute, QuantizedClusterPayload, MAX_CLUSTER_ATTRIBUTES,
+    MAX_CLUSTER_ATTRIBUTE_NAME_BYTES, POSITION_ONLY_CLUSTER_PAYLOAD_VERSION,
     STATIC_CLUSTER_PAYLOAD_MAGIC as QUANTIZED_CLUSTER_PAYLOAD_MAGIC,
     STATIC_CLUSTER_PAYLOAD_VERSION as QUANTIZED_CLUSTER_PAYLOAD_VERSION,
 };

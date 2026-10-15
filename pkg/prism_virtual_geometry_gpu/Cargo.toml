@@ -13,6 +13,7 @@ bytemuck = { version = "1.5", features = ["derive"] }
 futures-lite = "2"
 
 [dev-dependencies]
+prism_render_driver = { path = "../prism_render_driver" }
 prism_virtual_geometry_gpu = { path = "." }
 
 [features]

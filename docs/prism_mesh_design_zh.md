@@ -228,7 +228,7 @@ MeshIR
 | 语义类别 | 推荐语义名 | 授权类型 | `Compatible`/`Standard` 出货格式 | `Ultra` 出货格式 | 字节/顶点 |
 |---|---|---|---|---|---|
 | 位置 | `Vertex_Position` | `[f32;3]` | `Float32x3` | CLST payload：局部 `Unorm16x3` 编码；标准/蒙皮：`Float32x3` | 12 / 6（payload） |
-| 法线 | `Vertex_Normal` | `[f32;3]` | `Float32x3` / 显式 `Snorm8x4` | 标准网格保留；CLST v2 不存该属性 | 12 / 4 |
+| 法线 | `Vertex_Normal` | `[f32;3]` | `Float32x3` / 显式 `Snorm8x4` | 标准网格与 CLST v3 保留原始格式和值 | 12 / 4 |
 | 切线 | `Vertex_Tangent` | `[f32;4]` | `Float32x4` / 显式 `Snorm8x4` | 标准网格保留 | 16 / 4 |
 | UV | `Vertex_Uv0..3` | `[f32;2]` | `Float32x2` / `Float16x2` | 标准网格保留 | 8 / 4 |
 | 顶点色 | `Vertex_Color` | `[f32;4]` | `Unorm8x4` / `Snorm8x4` | `Unorm8x4` | 4 |
@@ -338,19 +338,28 @@ pub struct SubMesh {
 | 变体 | 位置 | 法线/切线 | UV | 备注 |
 |---|---|---|---|---|
 | 静态标准网格 | `Float32x3` | `Snorm8x4` / 八面体 | `Float16x2` | 兼容性优先，量化可选 |
-| 静态虚拟几何 CLST v2 | Cluster 空间 `Unorm16x3`（局部量化） | 由几何三角形导出 | 不写入 CLST v2 | payload 只存位置与局部索引；额外顶点属性会被类型化错误拒绝，不会静默丢失 |
+| 静态虚拟几何 CLST v3 | Cluster 空间 `Unorm16x3`（局部量化） | 保留授权格式和值 | 保留授权格式和值 | 直接 Cluster 构建保留全部 12 种 RHI 属性格式、语义与 shader location；解码兼容 v2 |
 | 蒙皮网格 | `Float32x3` | `Snorm8x4` | `Float16x2` | 位置不量化：形变需要精度且每帧被 GPU 写 |
 | Morph 顶点 | `Float32x3`（目标空间） | 由法线重建 | 同基网格 | 增量幅度小，可选 `Float16x3` |
 | 地形 | clipmap/heightfield 专用 | 由高度差分 | 无 | 不走通用网格量化 |
 | 毛发/草 | 程序化生成 | 程序化 | 程序化 | 不落静态页 |
 
-说明：`Unorm16x3`、`Float16x3` 等编码不属于 `prism_render_driver::VertexFormat` 顶点输入；CLST v2 直接以 Cluster AABB 对位置执行 `u16` 归一化编码。法线、切线、UV、颜色、自定义属性由标准网格产物承载；CLST v2 构建入口只接受 position-only Mesh，并以 `UnsupportedAttribute` 拒绝其余语义。标准网格使用 RHI 当前的 `Float32/x2/x3/x4`、`Float16x2/4`、`Uint32/x2/x4`、`Sint32`、`Unorm8x4`、`Snorm8x4`，并在构建 profile 中记录实际格式。
+说明：`Unorm16x3`、`Float16x3` 等编码不属于 `prism_render_driver::VertexFormat` 顶点输入；CLST v3 以 Cluster AABB 对位置执行 `u16` 归一化编码，其他属性按 Cluster 局部顶点映射无损采集，不做隐式格式转换。标准网格和 CLST v3 使用 RHI 当前的 `Float32/x2/x3/x4`、`Float16x2/4`、`Uint32/x2/x4`、`Sint32`、`Unorm8x4`、`Snorm8x4`。`Float16x2/x4` 的实际 stride 为 4/8 字节；CPU 布局及 Metal 实际绘制共同锁定该值。
+
+#### 7.2.1 CLST 版本化字节布局
+
+- v2 的 `encode_cluster_payload` 继续输出 position-only 兼容字节；`encode_cluster_payload_with_attributes` 与直接 Cluster 构建输出 v3，统一 decoder 接受两者。
+- 两版几何布局相同：34 字节固定头（magic/version/counts/min/max），每顶点 6 字节位置，每索引 2 字节。v3 在几何末尾补零到 4 字节对齐，再写 `position_location:u32 / attribute_count:u16 / reserved:u16`。
+- 每条属性按 shader location 严格升序写入 `name_len:u16 / format_tag:u16 / location:u32 / data_len:u32`、UTF-8 语义名、4 字节对齐补零、紧凑 LE 顶点数据。总属性数含位置最多 32，语义名 1–255 字节，禁止控制字符、重复语义或重复 location。
+- 持久化格式标签独立于 Rust 枚举：`Float32/x2/x3/x4=0/1/2/3`，`Float16x2/x4=4/5`，`Uint32/x2/x4=6/7/8`，`Sint32=9`，`Unorm8x4=10`，`Snorm8x4=11`。未知标签、NaN/Inf（含 half）、错误长度、非零 padding/reserved、乱序和尾随字节均返回类型化错误。
+- 分簇预算包含属性头、语义名与全部属性值，追加三角形前以 O(1) 计算实际大小；单三角形仍超页时拒绝构建。设置哈希绑定 CLST schema 与 domain tag，v2 旧缓存不会命中 v3 构建。
 
 ### 7.3 量化与误差界
 
 - **位置量化**基于 Cluster/页的局部包围盒，把位置映射到归一化整数；解码用页头部的 `scale/offset`。误差上界 = `局部extent / (2^bits - 1)`，必须并入该 Cluster 的 `object_error`，使 LOD 选择能感知量化误差。
-- **法线/切线/UV**由标准网格的分流布局与格式矩阵编码；CLST v2 不接受这些属性，因此不存在构建过程中静默重采样或丢失。
-- **UV** 由标准网格格式矩阵编码；当前紧凑格式是 `Float16x2`，不执行基于 UV 包围盒的隐式归一化。CLST v2 不存储 UV，输入含 UV 时返回 `UnsupportedAttribute`。
+- **法线/切线/UV**由标准网格分流布局和 CLST v3 属性表按授权格式存储；直接分簇保留原值，不重采样。
+- **UV** 当前紧凑格式是 `Float16x2`，不执行基于 UV 包围盒的隐式归一化；Cluster 局部映射保留接缝两侧的独立顶点。
+- **极端位置**量化与 CPU 重建使用 f64 中间运算，误差上界包含重建舍入；若平方误差不能表示为 f32，报告正无穷而不是零或伪造可通过预算的有限值。
 - 量化是构建期设置的一部分；改变量化必须改变 `build_settings_hash` 并触发重建，禁止运行时“就地量化”。
 
 ### 7.4 缓冲对齐与 GPU 限制
@@ -487,7 +496,7 @@ position-only Mesh → 完整校验（索引、拓扑、有限值、SubMesh 覆�
 硬约束：
 
 - **材质槽不可跨**：简化不得合并不同材质槽的三角形。
-- **属性不静默丢失**：CLST v2 与 QEM LOD 构建器只接受 `Vertex_Position: Float32x3`；法线、UV、蒙皮或自定义语义返回 `UnsupportedAttribute`，调用方改走标准网格产物。
+- **属性不静默丢失**：直接 Cluster 构建以 CLST v3 保存法线、UV、颜色和自定义属性；QEM LOD 简化入口仍只接受 `Vertex_Position: Float32x3`，其他语义返回 `UnsupportedAttribute`。直接分簇属性保留不能作为属性感知简化已实现的证据。
 - **确定性**：同一输入、设置与目标序列生成相同资产身份、页顺序与编码字节；材质分区按索引区间顺序处理。
 - **误差定义**：QEM LOD 记录“授权顶点到简化三角面的最大单向距离”，并拒绝 NaN/Inf；该值不是完整 Hausdorff 距离。
 - **误差单调**：层级资产的父节点误差不得小于子节点，违反则构建失败；固定分区 root 的 `self_error=0`，不参与简化误差比较。
@@ -507,6 +516,7 @@ VirtualGeometryAsset
 ├─ GeometryPages
 │  ├─ 量化位置（Cluster 局部）
 │  ├─ 局部三角形索引（`u16`）
+│  ├─ CLST v3 属性语义、格式、shader location 与局部顶点值
 │  ├─ Cluster 描述符（顶点/三角形计数、payload 范围、材质槽）
 │  └─ Cluster 包围体 + 法线锥
 ├─ DependencyTable      页之间的父子/依赖关系（用于预取）
@@ -517,7 +527,7 @@ VirtualGeometryAsset
 - 页存储可压缩（zstd/GDeflate 形态），运行时经 `prism_gdeflate_gpu` 直通解压或 CPU 解压。
 - 必须使用显式 `schema_version` 与 `build_settings_hash`；旧缓存可检测并重建，禁止静默错读。
 
-当前代码已对 header、层级节点、页排序/大小、cluster 范围、非空 cluster、cluster/node page identity、层级/Cluster AABB 包含关系、材质槽、payload 引用和确定性编解码做校验；CLST v2 量化 payload 已由运行时架构 crate 统一持有，构建器通过兼容导出复用同一 codec；页面进入 `VirtualGeometryPageStream` 前会校验 magic/version、精确 framing、bounds、索引以及 descriptor 的顶点/三角形计数，错误不会污染 resident storage。position-only 输入契约由直接 Cluster 构建和 QEM LOD 构建的反例测试共同锁定，防止属性在派生链中静默消失；构建器的 Cluster 分区、QEM LOD 资产集合和 `prism_gdeflate_gpu` 的逐字节解压校验均属于资产产物的强制验证规则。
+当前代码已对 header、层级节点、页排序/大小、cluster 范围、非空 cluster、cluster/node page identity、层级/Cluster AABB 包含关系、材质槽、payload 引用和确定性编解码做校验；CLST v2/v3 codec 由运行时架构 crate 统一持有，构建器通过兼容导出复用。页面进入 `VirtualGeometryPageStream` 前校验 magic/version、精确 framing、bounds、索引、属性表及 descriptor 计数，错误不会污染 resident storage。直接构建的属性保留、QEM 简化的 position-only 拒绝契约与压缩页逐字节一致性分别有正反测试，不能把其中一项外推为其他链路。
 
 ### 11.3 运行时 cut 与剔除
 
@@ -728,8 +738,8 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 
 测试分成“当前完成性证据”和“产品级持续回归协议”，两者不得混写：
 
-1. **当前 CPU 契约证据**：`cargo test -p prism_mesh` 的 32 项库单测、14 项集成测试通过，`cargo test -p prism_asset_build_core --lib` 122 项通过；覆盖属性/索引/拓扑、包围体、内容哈希、分流布局、Morph/4–8 影响 LBS/修正顺序、共享 ABI、溢出输入拒绝、CLST v2 局部量化、固定 Cluster 分区、QEM LOD、非有限误差和不支持属性的反例。
-2. **当前真实 GPU 证据**：沙盒外执行 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh:: -- --nocapture`，14 项通过，其中标准网格 8×8 像素读回、批量形变 CPU/GPU 对照、形变 current/previous 直接绑定的 16×16 绘制实际执行 GPU 工作；其余项验证生命周期、限制与上传语义，不计为 GPU 画质证据。数学蒙皮以 `PRISM_MATH_GPU_REQUIRED=1` 强制 CPU/GPU parity，4 项通过；虚拟几何、GDeflate、OMM 使用 `PRISM_REQUIRE_GPU=1` 的 suites 通过。
+1. **当前 CPU 契约证据**：`cargo test -p prism_mesh` 的 33 项库单测、14 项集成测试通过，`cargo test -p prism_asset_build_core --lib` 124 项通过；定向 `cargo test -p prism_render_architecture cluster_payload --lib` 11 项通过。覆盖属性/索引/拓扑、包围体、哈希、分流布局、批量形变、溢出拒绝、CLST v2/v3、12 种格式、截断/损坏载荷、含属性分簇、压缩页、QEM LOD 与错误契约。
+2. **当前真实 GPU 证据**：2026-10-15 沙盒外执行 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh:: -- --nocapture`，15 项通过，其中标准与 half2/half4/后续颜色的 8×8 绘制、批量形变对照、current/previous 的 16×16 绘制实际执行 GPU 工作。数学蒙皮强制 parity 4 项通过；虚拟几何、GDeflate、OMM 强制 suites 通过。CLST v3 整页 Metal storage roundtrip 逐字节一致只证明压缩/驻留/读取，不作为 shader 属性解码或最终材质着色的证据。
 3. **产品级图像回归协议**：标准网格、虚拟几何、蒙皮、Morph、LOD 过渡按质量档采集 Golden 图和 TAA 稳定性帧；只有生成捕获物并通过误差阈值时才形成图像质量结论。
 4. **产品级压力协议**：百万级 Cluster、极端顶点数、极端尺度、非有限输入、退化/越界索引和超预算场景按固定种子执行；结果必须绑定测试日志与捕获物。
 5. **确定性协议**：同输入多次构建哈希一致、不同线程数结果一致；跨平台差异必须由版本化量化规则解释并记录。
@@ -979,10 +989,10 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 | 能力 | 当前证据 | 失败/降级语义 |
 |---|---|---|
-| Mesh 数据与批量形变 reference | `cargo test -p prism_mesh`：32 项库单测、14 项集成测试通过 | 返回结构化错误，不创建 GPU 表示；不截断影响列表 |
-| 分流布局、实际字节打包与标准 draw | RenderMesh tests 通过；Apple M2/Metal 上 8×8 GPU 像素读回实际运行 1 项并通过 | 选择兼容单流 profile 或拒绝超出 `Limits` 的布局 |
-| 虚拟几何构建 | `cargo test -p prism_asset_build_core --lib`：122 项通过；覆盖固定 Cluster、CLST v2、QEM LOD 与反例 | 不支持属性返回 `UnsupportedAttribute`；非有限误差拒绝构建 |
-| 原生批量形变与历史 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh::`：14 项通过；其中批量对照与 current/previous 光栅像素测试执行真实 GPU | pose/限制校验失败保留资源与历史；首帧/跳帧/teleport previous 别名 current；Drop 释放全部自有资源 |
+| Mesh 数据与批量形变 reference | `cargo test -p prism_mesh`：33 项库单测、14 项集成测试通过 | 返回结构化错误，不创建 GPU 表示；不截断影响列表 |
+| 分流布局、实际字节打包与标准 draw | Apple M2/Metal 上标准和 half2/half4/后续颜色的 8×8 GPU 绘制通过；流打包复用一次临时分配 | 选择兼容单流 profile 或拒绝超出 `Limits` 的布局 |
+| 虚拟几何构建 | 构建侧 124 项通过；CLST 定向 11 项通过；v3 属性保留、固定 Cluster、QEM LOD 与反例 | QEM 属性拒绝与直接分簇属性保留分别验证；非有限误差拒绝构建 |
+| 原生批量形变与历史 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh::`：15 项通过；其中批量对照与 current/previous 光栅像素测试执行真实 GPU | pose/限制校验失败保留资源与历史；首帧/跳帧/teleport previous 别名 current；Drop 释放全部自有资源 |
 | 固定页 GPU 池事务 | `prism_render_app` page pool tests 通过 | 事务失败回滚，保留旧 resident range |
 | 虚拟几何 CPU 决策 | `prism_render_architecture` tests 通过 | 空/损坏层级生成空计划并记录诊断 |
 | 虚拟几何、GDeflate、OMM GPU twin | Apple M2/Metal 上以 `PRISM_REQUIRE_GPU=1` 强制执行对应 suites 并通过 | 缺少适配器/特性时保持 CPU reference 与标准路径 |
@@ -996,13 +1006,13 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 | 维度 | 产品级验收标准 | 本轮证据与结论 |
 |---|---|---|
-| 数据模型 | 属性/拓扑/索引/子网格/包围体/哈希有正反单测；格式矩阵覆盖 RHI 变体 | `prism_mesh` 32 项库单测与 14 项集成测试通过；该维度形成契约证据 |
-| 布局与标准路径 | 同属性集产生确定布局，上传字节与 draw 布局一致 | CPU 契约测试通过；Apple M2/Metal 8×8 像素读回 1 项通过。它证明标准 draw 闭环，不等同于全档位 Golden 图集 |
-| 虚拟几何 | 固定 Cluster、CLST v2、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | 构建侧 122 项通过；虚拟几何强制 GPU suite 通过；已有算法与 ABI 证据，CLST v2 仍只保存位置，不能外推为完整材质属性载荷 |
+| 数据模型 | 属性/拓扑/索引/子网格/包围体/哈希有正反单测；格式矩阵覆盖 RHI 变体 | `prism_mesh` 33 项库单测与 14 项集成测试通过；该维度形成契约证据 |
+| 布局与标准路径 | 同属性集产生确定布局，上传字节与 draw 布局一致 | CPU 契约与 Metal 标准/半精度分流 8×8 像素测试通过；不等同于全档位 Golden 图集 |
+| 虚拟几何 | 固定 Cluster、CLST v3、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | 构建侧 124 项、CLST codec 11 项通过；直接分簇保留材质属性，QEM 简化仍拒绝属性；整页 IO 一致不等同于属性 shader 着色 |
 | 形变 | Skin/Morph、缓存、预算与深度/阴影/速度/RT 消费一致 | 批量 Morph/LBS/修正的 CPU/GPU 对照（含 50,000 顶点）与 16×16 current/previous 直接绘制通过；数学蒙皮 parity 4 项通过。全部引擎 pass/RT 消费接线和跨档位 Golden 图不由这些独立测试证明 |
 | 光追派生 | OMM 与派生几何使用版本化资产契约；无 RT 能力时选择光栅路径 | OMM 强制 GPU parity 通过；不把它扩张为完整 RT 场景画质结论 |
 | 带宽与性能 | §18 固定场景输出 P50/P95/P99、GPU timestamp、VRAM、上传、缺页与功耗字段 | 已记录 CPU 构建/LOD P50/P95/P99；完整场景 GPU 字段无本轮 artifact，因此预算表保持回归门槛而非达标声明 |
-| 维护性 | 扩展点遵守 §20.2，schema/ABI 显式版本化，错误类型稳定 | crate 分层、CLST v2、资产 schema、`UnsupportedAttribute` 与非有限值错误由代码和测试锁定 |
+| 维护性 | 扩展点遵守 §20.2，schema/ABI 显式版本化，错误类型稳定 | CLST v3/v2 兼容、稳定格式标签、缓存失效、精确 framing 与类型化错误由代码和测试锁定 |
 | 诊断 | 每条降级可解释，诊断字段可导出 | 通用 `GpuSceneDebugView` 与状态机诊断作为现有入口；Mesh 专用视图只有产生实际捕获物时才计入图像证据 |
 
 ## 27. 结论

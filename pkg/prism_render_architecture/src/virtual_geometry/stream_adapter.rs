@@ -157,7 +157,7 @@ pub enum VirtualGeometryStreamingError {
     PageSizeNotWordAligned(u32),
     /// GDeflate decode failed before the page entered physical storage.
     Decompression(GDeflateError),
-    /// A decompressed cluster slice failed the CLST v2 codec or descriptor checks.
+    /// A decompressed cluster slice failed the versioned CLST codec or descriptor checks.
     InvalidClusterPayload {
         /// Page identity.
         key: GeometryPageKey,

@@ -11,9 +11,13 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::virtual_geometry_payload::{
-    encode_cluster_payload as encode_quantized_cluster_payload, ClusterPayloadError,
+    encode_cluster_payload_with_attributes, ClusterPayloadError, ClusterVertexAttribute,
+    MAX_CLUSTER_ATTRIBUTES, MAX_CLUSTER_ATTRIBUTE_NAME_BYTES,
 };
-use prism_mesh::{content_hash, Mesh, MeshBounds, MeshError, POSITION_ATTRIBUTE};
+use prism_mesh::{
+    content_hash, Mesh, MeshBounds, MeshError, MeshVertexAttribute, VertexAttributeValues,
+    POSITION_ATTRIBUTE,
+};
 use prism_render_architecture::gpu_scene::SceneBounds;
 use prism_render_architecture::virtual_geometry::{
     ClusterNode, GeometryPageKey, VirtualGeometryAsset, VirtualGeometryAssetError,
@@ -62,11 +66,6 @@ pub enum StaticClusterBuildError {
     RequiresIndices,
     /// The source has no finite Float32x3 position attribute.
     MissingPositions,
-    /// CLST v2 stores positions and local triangle indices only.
-    UnsupportedAttribute {
-        /// First unsupported authored semantic in shader-location order.
-        name: &'static str,
-    },
     /// Settings violate the runtime ABI limits.
     InvalidSettings(&'static str),
     /// A single cluster cannot fit within one page.
@@ -104,10 +103,6 @@ impl core::fmt::Display for StaticClusterBuildError {
             Self::MissingPositions => {
                 f.write_str("mesh has no finite Float32x3 position attribute")
             }
-            Self::UnsupportedAttribute { name } => write!(
-                f,
-                "CLST v2 accepts position-only geometry; unsupported attribute {name}"
-            ),
             Self::InvalidSettings(field) => write!(f, "invalid cluster build setting {field}"),
             Self::ClusterTooLarge { bytes, page_size } => {
                 write!(
@@ -148,19 +143,41 @@ pub fn build_static_virtual_geometry(
     let indices = mesh
         .indices()
         .ok_or(StaticClusterBuildError::RequiresIndices)?;
-    let positions = mesh
+    let (position_attribute, position_values) = mesh
         .attributes()
         .find(|(attribute, _)| attribute.name == POSITION_ATTRIBUTE)
-        .and_then(|(_, values)| values.as_positions())
         .ok_or(StaticClusterBuildError::MissingPositions)?;
-    if let Some((attribute, _)) = mesh
+    let positions = position_values
+        .as_positions()
+        .ok_or(StaticClusterBuildError::MissingPositions)?;
+    let attributes: Vec<_> = mesh
         .attributes()
-        .find(|(attribute, _)| attribute.name != POSITION_ATTRIBUTE)
+        .filter(|(attribute, _)| attribute.name != POSITION_ATTRIBUTE)
+        .map(|(attribute, values)| (attribute, values))
+        .collect();
+    if attributes.len() >= MAX_CLUSTER_ATTRIBUTES
+        || attributes.iter().any(|(attribute, _)| {
+            attribute.name.is_empty()
+                || attribute.name.len() > MAX_CLUSTER_ATTRIBUTE_NAME_BYTES
+                || attribute.name.chars().any(char::is_control)
+        })
     {
-        return Err(StaticClusterBuildError::UnsupportedAttribute {
-            name: attribute.name,
-        });
+        return Err(StaticClusterBuildError::InvalidPayload(
+            ClusterPayloadError::InvalidAttribute,
+        ));
     }
+    let source_attributes = SourceAttributes {
+        position_shader_location: position_attribute.shader_location,
+        attribute_header_bytes: attributes
+            .iter()
+            .map(|(attribute, _)| 12 + ((attribute.name.len() + 3) & !3))
+            .sum(),
+        attribute_stride: attributes
+            .iter()
+            .map(|(attribute, _)| attribute.format.size() as usize)
+            .sum(),
+        attributes,
+    };
     if positions
         .iter()
         .any(|position| !position.iter().all(|value| value.is_finite()))
@@ -181,6 +198,7 @@ pub fn build_static_virtual_geometry(
     for (start, end, material_slot) in ranges {
         let mut local_indices = Vec::new();
         let mut local_vertices = Vec::new();
+        let mut local_source_indices = Vec::new();
         let mut remap = BTreeMap::new();
         let mut triangle_count = 0u16;
         for triangle in (start as usize..end as usize).step_by(3) {
@@ -191,17 +209,27 @@ pub fn build_static_virtual_geometry(
             ];
             let additional_vertices = source_triangle
                 .iter()
-                .filter(|index| !remap.contains_key(*index))
+                .enumerate()
+                .filter(|(corner, index)| {
+                    !remap.contains_key(*index) && !source_triangle[..*corner].contains(index)
+                })
                 .count();
+            let next_payload_bytes = source_attributes.payload_size(
+                local_vertices.len() + additional_vertices,
+                local_indices.len() + 3,
+            );
             if triangle_count == settings.max_triangles_per_cluster
                 || (!local_indices.is_empty()
-                    && local_vertices.len() + additional_vertices
-                        > settings.max_vertices_per_cluster as usize)
+                    && (local_vertices.len() + additional_vertices
+                        > settings.max_vertices_per_cluster as usize
+                        || next_payload_bytes > settings.page_size as usize))
             {
                 flush_cluster(
                     material_slot,
                     &local_vertices,
                     &local_indices,
+                    &local_source_indices,
+                    &source_attributes,
                     settings,
                     &mut page_key,
                     &mut page_payload,
@@ -213,6 +241,7 @@ pub fn build_static_virtual_geometry(
                 )?;
                 local_indices.clear();
                 local_vertices.clear();
+                local_source_indices.clear();
                 remap.clear();
                 triangle_count = 0;
             }
@@ -225,6 +254,7 @@ pub fn build_static_virtual_geometry(
                     })?;
                     remap.insert(source_index, local_index);
                     local_vertices.push(positions[source_index as usize]);
+                    local_source_indices.push(source_index);
                     local_index
                 };
                 local_indices.push(local_index);
@@ -236,6 +266,8 @@ pub fn build_static_virtual_geometry(
                 material_slot,
                 &local_vertices,
                 &local_indices,
+                &local_source_indices,
+                &source_attributes,
                 settings,
                 &mut page_key,
                 &mut page_payload,
@@ -358,6 +390,8 @@ fn flush_cluster(
     material_slot: u16,
     vertices: &[[f32; 3]],
     indices: &[u16],
+    source_indices: &[u32],
+    source_attributes: &SourceAttributes<'_>,
     settings: StaticClusterBuildSettings,
     page_key: &mut GeometryPageKey,
     page_payload: &mut Vec<u8>,
@@ -368,8 +402,32 @@ fn flush_cluster(
     compression: VirtualGeometryCompression,
 ) -> Result<(), StaticClusterBuildError> {
     let bounds = cluster_bounds(vertices);
-    let payload = encode_quantized_cluster_payload(bounds, vertices, indices)
-        .map_err(StaticClusterBuildError::InvalidPayload)?;
+    let attributes = source_attributes
+        .attributes
+        .iter()
+        .map(|(attribute, values)| {
+            Ok(ClusterVertexAttribute {
+                semantic: attribute.name.into(),
+                shader_location: attribute.shader_location,
+                format: attribute.format,
+                data: values.gather_bytes(source_indices).ok_or(
+                    StaticClusterBuildError::InvalidPayload(ClusterPayloadError::InvalidAttribute),
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, StaticClusterBuildError>>()?;
+    let payload = encode_cluster_payload_with_attributes(
+        bounds,
+        vertices,
+        indices,
+        source_attributes.position_shader_location,
+        &attributes,
+    )
+    .map_err(StaticClusterBuildError::InvalidPayload)?;
+    debug_assert_eq!(
+        payload.len(),
+        source_attributes.payload_size(vertices.len(), indices.len())
+    );
     if payload.len() > settings.page_size as usize {
         return Err(StaticClusterBuildError::ClusterTooLarge {
             bytes: abi_u32(payload.len(), "payload byte")?,
@@ -403,7 +461,6 @@ fn flush_cluster(
         .map_err(|_| StaticClusterBuildError::AbiCountOverflow("cluster triangle"))?;
     let node_index = abi_u32(nodes.len(), "node")?;
     page_payload.extend_from_slice(&payload);
-    let bounds = cluster_bounds(vertices);
     let normal_cone = normal_cone(vertices, indices);
     nodes.push(ClusterNode::leaf(bounds, 0.0, *page_key));
     clusters.push(VirtualGeometryClusterRecord {
@@ -534,7 +591,30 @@ fn settings_hash(settings: StaticClusterBuildSettings) -> [u8; 32] {
     bytes[4..6].copy_from_slice(&settings.max_vertices_per_cluster.to_le_bytes());
     bytes[6..8].copy_from_slice(&settings.max_triangles_per_cluster.to_le_bytes());
     bytes[8] = settings.compression as u8;
-    *blake3::hash(&bytes).as_bytes()
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"Prism.StaticClusterBuild.CLST");
+    hasher.update(&STATIC_CLUSTER_PAYLOAD_VERSION.to_le_bytes());
+    hasher.update(&bytes);
+    *hasher.finalize().as_bytes()
+}
+
+/// Borrow authored streams once; clusters only gather their referenced vertices.
+struct SourceAttributes<'a> {
+    position_shader_location: u32,
+    attributes: Vec<(&'a MeshVertexAttribute, &'a VertexAttributeValues)>,
+    attribute_header_bytes: usize,
+    attribute_stride: usize,
+}
+
+impl SourceAttributes<'_> {
+    fn payload_size(&self, vertices: usize, indices: usize) -> usize {
+        // Source and cluster counts are validated before use; at most 31
+        // descriptors of 255 bytes and 64 vertices of 16 bytes each.
+        ((34 + vertices * 6 + indices * 2 + 3) & !3)
+            + 8
+            + self.attribute_header_bytes
+            + vertices * self.attribute_stride
+    }
 }
 
 #[cfg(test)]
@@ -715,16 +795,183 @@ mod tests {
     }
 
     #[test]
-    fn clusterizer_rejects_attributes_the_payload_cannot_preserve() {
-        let source = mesh(1)
+    fn attributed_clusters_preserve_remaps_materials_and_compressed_stream_bytes() {
+        let mut source = mesh(30)
             .with_attribute(
-                MeshVertexAttribute::new("Vertex_Uv0", VertexFormat::Float32x2, 1),
-                VertexAttributeValues::Float32x2(vec![[0.0, 0.0]; 3]),
+                MeshVertexAttribute::new("Vertex_Normal", VertexFormat::Float32x3, 1),
+                VertexAttributeValues::Float32x3(vec![[0.0, 0.0, 1.0]; 90]),
             )
-            .expect("UV count matches positions");
-        assert_eq!(
-            build_static_virtual_geometry(1, &source, StaticClusterBuildSettings::default()),
-            Err(StaticClusterBuildError::UnsupportedAttribute { name: "Vertex_Uv0" })
+            .unwrap()
+            .with_attribute(
+                MeshVertexAttribute::new("Vertex_Uv0", VertexFormat::Float32x2, 2),
+                VertexAttributeValues::Float32x2(
+                    (0..90)
+                        .map(|vertex| [vertex as f32, -(vertex as f32)])
+                        .collect(),
+                ),
+            )
+            .unwrap()
+            .with_attribute(
+                MeshVertexAttribute::new("Half", VertexFormat::Float16x2, 3),
+                VertexAttributeValues::Float16x2(vec![[0x3c00, 0xbc00]; 90]),
+            )
+            .unwrap()
+            .with_attribute(
+                MeshVertexAttribute::new("SourceIndex", VertexFormat::Uint32, 4),
+                VertexAttributeValues::Uint32((0..90).collect()),
+            )
+            .unwrap()
+            .submeshed(vec![SubMesh::new(2, 0..45), SubMesh::new(3, 45..90)]);
+        let reordered: Vec<u32> = (0..30)
+            .flat_map(|triangle| [triangle * 3 + 2, triangle * 3, triangle * 3 + 1])
+            .collect();
+        source.with_indices(Indices::Uint32(reordered.clone()));
+        for compression in [
+            VirtualGeometryCompression::None,
+            VirtualGeometryCompression::GDeflate,
+        ] {
+            let settings = StaticClusterBuildSettings {
+                page_size: 1024,
+                compression,
+                ..Default::default()
+            };
+            let asset = build_static_virtual_geometry(1, &source, settings).unwrap();
+            assert!(
+                asset.clusters.len() > 2,
+                "page-size-aware splitting must apply before codec rejection"
+            );
+            assert_eq!(
+                build_static_virtual_geometry(1, &source, settings)
+                    .unwrap()
+                    .encode()
+                    .unwrap(),
+                asset.encode().unwrap()
+            );
+            let mut restored_indices = Vec::new();
+            for cluster in &asset.clusters {
+                let page = &asset.pages[cluster.page.page as usize];
+                let raw = match compression {
+                    VirtualGeometryCompression::None => page.payload.clone(),
+                    _ => prism_render_architecture::compression::gdeflate_decompress(&page.payload)
+                        .unwrap(),
+                };
+                let payload = &raw[cluster.payload_offset as usize
+                    ..(cluster.payload_offset + cluster.payload_size) as usize];
+                assert_eq!(payload.len() % 4, 0);
+                assert_eq!(&payload[4..6], &3u16.to_le_bytes());
+                let decoded = crate::decode_cluster_payload(cluster.bounds, payload).unwrap();
+                assert_eq!(decoded.attributes.len(), 4);
+                let ids: Vec<_> = decoded
+                    .attributes
+                    .iter()
+                    .find(|attribute| attribute.semantic == "SourceIndex")
+                    .unwrap()
+                    .data
+                    .chunks_exact(4)
+                    .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+                    .collect();
+                for (attribute, values) in source
+                    .attributes()
+                    .filter(|(attribute, _)| attribute.name != POSITION_ATTRIBUTE)
+                {
+                    let restored = decoded
+                        .attributes
+                        .iter()
+                        .find(|restored| restored.semantic == attribute.name)
+                        .unwrap();
+                    assert_eq!(restored.shader_location, attribute.shader_location);
+                    assert_eq!(restored.format, attribute.format);
+                    assert_eq!(restored.data, values.gather_bytes(&ids).unwrap());
+                }
+                for local_index in decoded.indices {
+                    let source_index = ids[local_index as usize];
+                    assert_eq!(cluster.material_slot, if source_index < 45 { 2 } else { 3 });
+                    restored_indices.push(source_index);
+                }
+            }
+            assert_eq!(restored_indices, reordered);
+            let mut requests = prism_render_architecture::paging::RequestBatch::new();
+            for page in &asset.pages {
+                requests.record(page.record.key, 1.0);
+            }
+            let page_count = asset.pages.len();
+            let mut stream =
+                prism_render_architecture::virtual_geometry::VirtualGeometryPageStream::from_asset(
+                    asset.clone(),
+                    page_count as u32,
+                    page_count,
+                )
+                .unwrap();
+            stream.reconcile(&requests, 1);
+            assert_eq!(stream.resident_count(), page_count);
+            for (key, slot) in stream.entries() {
+                let page = &asset.pages[key.page as usize];
+                let raw = match compression {
+                    VirtualGeometryCompression::None => page.payload.clone(),
+                    _ => prism_render_architecture::compression::gdeflate_decompress(&page.payload)
+                        .unwrap(),
+                };
+                let stored: Vec<_> = stream
+                    .storage()
+                    .slot_words(slot)
+                    .unwrap()
+                    .iter()
+                    .flat_map(|word| word.to_le_bytes())
+                    .collect();
+                assert_eq!(&stored[..raw.len()], raw.as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn position_location_is_preserved_and_settings_hash_versions_the_codec() {
+        let source = Mesh::new(PrimitiveTopology::TriangleList)
+            .with_attribute(
+                MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 7),
+                VertexAttributeValues::Float32x3(vec![[0.0; 3]; 3]),
+            )
+            .unwrap()
+            .indexed(Indices::Uint16(vec![0, 1, 2]));
+        let settings = StaticClusterBuildSettings::default();
+        let asset = build_static_virtual_geometry(1, &source, settings).unwrap();
+        let cluster = &asset.clusters[0];
+        let decoded =
+            crate::decode_cluster_payload(cluster.bounds, &asset.pages[0].payload).unwrap();
+        assert_eq!(decoded.position_shader_location, 7);
+        let mut old_settings = [0u8; 9];
+        old_settings[0..4].copy_from_slice(&settings.page_size.to_le_bytes());
+        old_settings[4..6].copy_from_slice(&settings.max_vertices_per_cluster.to_le_bytes());
+        old_settings[6..8].copy_from_slice(&settings.max_triangles_per_cluster.to_le_bytes());
+        old_settings[8] = settings.compression as u8;
+        assert_ne!(
+            asset.header.build_settings_hash,
+            *blake3::hash(&old_settings).as_bytes()
+        );
+    }
+
+    #[test]
+    fn an_indivisible_triangle_larger_than_the_page_is_reported() {
+        let mut source = mesh(1);
+        for location in 1..32 {
+            // Distinct stable semantics, with deliberately large per-triangle data.
+            const NAMES: [&str; 31] = [
+                "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10", "A11", "A12", "A13",
+                "A14", "A15", "A16", "A17", "A18", "A19", "A20", "A21", "A22", "A23", "A24", "A25",
+                "A26", "A27", "A28", "A29", "A30", "A31",
+            ];
+            source = source
+                .with_attribute(
+                    MeshVertexAttribute::new(
+                        NAMES[location as usize - 1],
+                        VertexFormat::Float32x4,
+                        location,
+                    ),
+                    VertexAttributeValues::Float32x4(vec![[1.0; 4]; 3]),
+                )
+                .unwrap();
+        }
+        assert!(
+            matches!(build_static_virtual_geometry(1, &source, StaticClusterBuildSettings { page_size: 1024, ..Default::default() }), Err(StaticClusterBuildError::ClusterTooLarge { bytes, page_size: 1024 }) if bytes > 1024)
         );
     }
 }
