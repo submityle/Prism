@@ -178,6 +178,7 @@ crates/bevy_mesh                      Bevy 接入与兼容路径；原生 Prism 
 - `VirtualGeometryVersion=1` 已提供 Cluster 资产契约、量化 payload 编解码、层级/包围体校验、页表、驻留页存储、LOD 选择、滞回、速度预取、Cluster cull、RasterPath 分类、软件光栅与逐帧计划组合；构建侧同时提供固定 Cluster 分区和独立 QEM LOD 资产集合。
 - 静态 LOD 使用属性感知 endpoint-QEM，保留幸存授权顶点的全部属性位模式、材质分区、开放边与重合拆分缝；输出请求/实际三角形数、源内容哈希、版本化配方哈希及包含位置量化的采样误差包络。策略允许按语义注册连续代价、分类约束或仅保留，不以新增格式硬编码新的简化分支。
 - `GeometryTable` 已提供 generation 句柄、代际回收、LOD 驻留回退与 ABI 检查；`RenderMesh` 已把分流数据接入 queue、frame graph、draw slot 与固定页 GPU 池。
+- 多消费者选择已收敛到 `prism_render_architecture::geometry::{MeshConsumerBinding, MeshConsumer, MeshRepresentation}`；`prism_render_app::mesh::consumer` 将静态 RenderMesh、共享形变 current/previous 输出和虚拟几何页绑定为同一份 GPU source contract。主视图、深度、阴影、Motion Vector、Ray Tracing 使用同一 current/previous identity；缺页只使用显式 fallback，Collision 与 Derived Geometry 必须使用带 schema 的版本化派生制品。
 - `prism_render_scene::geometry::shading` 已迁移到 `prism_mesh::Mesh`；Bevy 主世界 Mesh 只在 `geometry::mesh_adapter` 中转换一次，几何解析、拓扑处理与单测不再依赖 Bevy Mesh 数据结构。
 - CPU 证据包括 `prism_mesh`、`prism_render_architecture`、资产流式化与渲染资产页池测试；GPU twin 证据覆盖虚拟几何计算内核与 GDeflate 去交错内核。RenderApp、虚拟几何、GDeflate、OMM 测试使用 `PRISM_REQUIRE_GPU=1`；数学蒙皮使用 `PRISM_MATH_GPU_REQUIRED=1`。强制运行时无适配器即失败，Null RHI 不计为 GPU 通过。
 - `prism_mesh::deformation` 与 `prism_render_app::DeformationCache` 已验证批量 Morph → 4/8 影响 LBS → 外部修正，包含 50,000 顶点 CPU/GPU 对照、历史失效与直接顶点绘制像素读回；该证据不替代全部运行时阴影/深度/RT 消费者的集成验收。
@@ -621,6 +622,23 @@ barycentrics = 可重建 / 原生输出 / 额外紧凑目标
 - 遮挡：两级 HiZ（上一帧最小/最大深度）用于保守剔除；虚拟几何与标准网格共用同一 HZB 生成。
 - 提交侧禁止每 Cluster/每实例一次 CPU draw call；一律间接。
 
+### 13.1 统一 Mesh consumer contract
+
+Mesh 表示不能由主视图、深度、阴影、速度、光追和派生几何各自重新选择。统一入口已经落在两个层次：
+
+| 层 | 实现入口 | 责任 |
+|---|---|---|
+| 设备无关选择 | `prism_render_architecture::geometry::consumer` | 校验 `GeometryHandle`、revision、current/previous history、页缺失 fallback 与派生 artifact schema；输出 `MeshConsumerSelection` |
+| RHI 绑定 | `prism_render_app::mesh::consumer` | 将 `RenderMesh`、`DeformationOutput`、`GeometryPageKey` 解析为静态、形变或虚拟 Cluster GPU source，并保持 current/previous/fallback 的身份一致 |
+
+规则如下：
+
+- `MainView`、`Depth`、`Shadow`、`RayTracing` 共享同一个 current representation；不能在某个 pass 中私自换成另一份 Mesh。
+- `MotionVector` 始终返回 current/previous 成对表示；首帧、跳帧或 teleport 时 previous 等同 current 且 `history_valid=false`，由速度 pass 输出零速度。
+- 虚拟几何页未驻留时，渲染消费者只绑定 `fallback`，并将 `used_fallback=true` 传递给诊断；不得返回空 draw 或未校验页。
+- `Collision` 与 `DerivedGeometry` 不直接消费虚拟 Cluster；它们必须消费 `MeshDerivedArtifact { key, kind, schema }`，用制品身份和 schema 防止碰撞、SDF、导航、OMM 等派生数据错配。
+- 新增消费者只能扩展 `MeshConsumer` 与对应选择测试；GPU 后端不得复制一套独立的 Mesh 选择逻辑。
+
 ## 14. 材质 / 着色 ABI 与 PSO 复用
 
 几何与材质的相交面只有一个：**顶点布局 + 属性语义 + 图元拓扑**。为保证 PSO 可缓存且不爆炸：
@@ -654,6 +672,8 @@ barycentrics = 可重建 / 原生输出 / 额外紧凑目标
 | SDF | 构建期体素化 | 中 | 用于软件追踪与 GI 代理 |
 
 规则：所有派生几何在 `prism_asset_build_core` 的 Artifact DAG 中显式表达依赖（资产构建文档 §12.2），不以“渲染时临时转换”替代构建。
+
+运行时绑定由 `MeshDerivedArtifact` 传递制品 key、kind 和 schema。绑定校验失败时返回结构化错误，不允许把当前渲染 LOD、虚拟 Cluster 或过期 revision 当作碰撞/导航/SDF/OMM 输入；这保证派生消费者与渲染消费者共享几何 revision，但保持各自产物的精度和生命周期。
 
 ## 16. 压缩与带宽
 
@@ -743,8 +763,8 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 
 测试分成“当前完成性证据”和“产品级持续回归协议”，两者不得混写：
 
-1. **当前 CPU 契约证据**：`cargo test -p prism_mesh` 的 34 项库单测、14 项集成测试通过，`cargo test -p prism_asset_build_core --lib` 132 项通过（整个构建 crate 的快照，不全属于 Mesh）；定向 `cargo test -p prism_render_architecture cluster_payload --lib` 12 项、`mesh_decimation` 19 项通过。覆盖属性/索引/拓扑、包围体、哈希、分流布局、批量形变、溢出拒绝、CLST v2/v3、12 种格式精确 gather、截断/损坏载荷、含属性分簇、压缩页、endpoint-QEM 实际简化、材质/缝/分类约束、版本化身份、f64 BVH 与跨尺度量化误差。构建侧 LOD/surface 定向测试为 12 项。
-2. **当前真实 GPU 证据**：2026-10-15 沙盒外执行 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh:: -- --nocapture`，15 项通过，其中标准与 half2/half4/后续颜色的 8×8 绘制、批量形变对照、current/previous 的 16×16 绘制实际执行 GPU 工作。数学蒙皮强制 parity 4 项通过；虚拟几何、GDeflate、OMM 强制 suites 通过。CLST v3 整页 Metal storage roundtrip 逐字节一致只证明压缩/驻留/读取；本轮新增 `prism_virtual_geometry_gpu --test cluster_vertex_pull_parity` 在真实 render pass 中从原始 CLST v3 字节解码位置与 `Unorm8x4` 属性并读回颜色，补足 shader 属性解码证据，但仍不代替完整场景材质 Golden 图。
+1. **当前 CPU 契约证据**：`cargo test -p prism_mesh` 的 34 项库单测、14 项集成测试通过，`cargo test -p prism_asset_build_core` 的 149 项全包测试通过（其中 134 项 library tests，整个构建 crate 的快照，不全属于 Mesh）；定向 `cargo test -p prism_render_architecture cluster_payload --lib` 12 项、`mesh_decimation` 19 项通过。覆盖属性/索引/拓扑、包围体、哈希、分流布局、批量形变、溢出拒绝、CLST v2/v3、12 种格式精确 gather、截断/损坏载荷、含属性分簇、压缩页、endpoint-QEM 实际简化、材质/缝/分类约束、版本化身份、f64 BVH 与跨尺度量化误差。构建侧 LOD/surface 定向测试为 12 项。
+2. **当前真实 GPU 证据**：2026-10-15 沙盒外执行 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh:: -- --nocapture`，本轮 Mesh 过滤集 20 项通过，其中标准与 half2/half4/后续颜色的 8×8 绘制、批量形变对照、current/previous 的 16×16 绘制实际执行 GPU 工作。数学蒙皮强制 parity 4 项通过；虚拟几何、GDeflate、OMM 强制 suites 通过。CLST v3 整页 Metal storage roundtrip 逐字节一致只证明压缩/驻留/读取；本轮新增 `prism_virtual_geometry_gpu --test cluster_vertex_pull_parity` 在真实 render pass 中从原始 CLST v3 字节解码位置与 `Unorm8x4` 属性并读回颜色，补足 shader 属性解码证据，但仍不代替完整场景材质 Golden 图。
 3. **产品级图像回归协议**：标准网格、虚拟几何、蒙皮、Morph、LOD 过渡按质量档采集 Golden 图和 TAA 稳定性帧；只有生成捕获物并通过误差阈值时才形成图像质量结论。
 4. **产品级压力协议**：百万级 Cluster、极端顶点数、极端尺度、非有限输入、退化/越界索引和超预算场景按固定种子执行；结果必须绑定测试日志与捕获物。
 5. **确定性协议**：同输入多次构建哈希一致、不同线程数结果一致；跨平台差异必须由版本化量化规则解释并记录。
@@ -934,7 +954,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 ## 22. 实施与验收矩阵
 
-路线已改为可重复执行的能力矩阵；每一行都有代码入口、验证入口和运行时回退，不用日期或“下一阶段”表示完成状态。
+路线已改为可重复执行的能力矩阵；每一行都有代码入口、验证入口和运行时回退，不用时间线措辞表示完成状态。
 
 | 能力包 | 代码入口 | 验证入口 | 运行时行为 |
 |---|---|---|---|
@@ -943,6 +963,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 | 几何表与 LOD 驻留 | `prism_render_architecture::geometry` | geometry table tests | 请求 LOD 未驻留时选择已驻留祖先或 fallback |
 | 虚拟几何决策层 | `virtual_geometry::{hierarchy,lod,cull,frame}` | module tests + GPU parity suites | 以 `GeometryFramePlan` 统一 cut、bins 与 page requests |
 | 属性感知静态 LOD | `virtual_geometry_lod`、`mesh_decimation::vertex_preserving` | LOD/拓扑/typed gather/BVH/量化测试及 attributed-grid 基准 | 精确 source remap，策略可注册；拓扑阻止简化时报告实际数量；不合法策略或误差拒绝构建 |
+| 多消费者 Mesh 绑定 | `geometry::consumer`、`mesh::consumer` | architecture geometry tests + `cargo test -p prism_render_app mesh:: --lib` | 主视图/深度/阴影/RT 共享 current；Motion 使用 current/previous；缺页使用显式 fallback；派生消费者要求版本化 artifact |
 | 虚拟几何 GPU twin | `prism_virtual_geometry_gpu` | `cargo test -p prism_virtual_geometry_gpu` | 适配器缺少所需特性时回退 CPU/标准网格路径 |
 | 页驻留与 GPU 池 | `prism_asset::streaming`、`prism_render_app::render_asset` | page residency/page pool tests | 预算不足驱逐低优先级页，祖先覆盖画面 |
 | GDeflate GPU twin | `prism_gdeflate_gpu` | `cargo test -p prism_gdeflate_gpu` | GPU 解码不可用时使用 CPU 解码，保持同一 payload ABI |
@@ -1004,8 +1025,8 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 |---|---|---|
 | Mesh 数据与批量形变 reference | `cargo test -p prism_mesh`：34 项库单测、14 项集成测试通过 | 返回结构化错误，不创建 GPU 表示；不截断影响列表 |
 | 分流布局、实际字节打包与标准 draw | Apple M2/Metal 上标准和 half2/half4/后续颜色的 8×8 GPU 绘制通过；流打包复用一次临时分配 | 选择兼容单流 profile 或拒绝超出 `Limits` 的布局 |
-| 虚拟几何构建 | 构建 crate 132 项通过；CLST 定向 12 项、mesh_decimation 19 项通过；v3 属性保留、endpoint-QEM、精确 remap、BVH/量化误差与反例 | 拓扑保护导致目标不可达时记录实际数量；坏策略/身份/非有限误差拒绝构建 |
-| 原生批量形变与历史 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh::`：15 项通过；其中批量对照与 current/previous 光栅像素测试执行真实 GPU | pose/限制校验失败保留资源与历史；首帧/跳帧/teleport previous 别名 current；Drop 释放全部自有资源 |
+| 虚拟几何构建 | 构建 crate 149 项通过；CLST 定向 12 项、mesh_decimation 19 项通过；v3 属性保留、endpoint-QEM、精确 remap、BVH/量化误差与反例 | 拓扑保护导致目标不可达时记录实际数量；坏策略/身份/非有限误差拒绝构建 |
+| 原生批量形变与历史 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh::`：本轮 Mesh 过滤集 20 项通过；其中批量对照与 current/previous 光栅像素测试执行真实 GPU | pose/限制校验失败保留资源与历史；首帧/跳帧/teleport previous 别名 current；Drop 释放全部自有资源 |
 | 固定页 GPU 池事务 | `prism_render_app` page pool tests 通过 | 事务失败回滚，保留旧 resident range |
 | 虚拟几何 CPU 决策 | `prism_render_architecture` tests 通过 | 空/损坏层级生成空计划并记录诊断 |
 | 虚拟几何、GDeflate、OMM GPU twin | Apple M2/Metal 上以 `PRISM_REQUIRE_GPU=1` 强制执行对应 suites 并通过 | 缺少适配器/特性时保持 CPU reference 与标准路径 |
@@ -1021,8 +1042,9 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 |---|---|---|
 | 数据模型 | 属性/拓扑/索引/子网格/包围体/哈希有正反单测；格式矩阵覆盖 RHI 变体 | `prism_mesh` 34 项库单测与 14 项集成测试通过；该维度形成契约证据 |
 | 布局与标准路径 | 同属性集产生确定布局，上传字节与 draw 布局一致 | CPU 契约与 Metal 标准/半精度分流 8×8 像素测试通过；不等同于全档位 Golden 图集 |
-| 虚拟几何 | 固定 Cluster、CLST v3、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | 构建 crate 132 项、CLST codec 12 项、mesh_decimation 19 项通过；属性感知简化保留精确源顶点与全部 typed 属性；原始 CLST v3 vertex-pulling render pass 已通过颜色读回，整页 IO 一致不再被误写成属性 shader 着色证据，但仍不替代完整场景 Golden 图 |
+| 虚拟几何 | 固定 Cluster、CLST v3、QEM LOD、CPU 计划、页 ABI、LOD/cull/raster GPU twin 一致 | 构建 crate 149 项、CLST codec 12 项、mesh_decimation 19 项通过；属性感知简化保留精确源顶点与全部 typed 属性；原始 CLST v3 vertex-pulling render pass 已通过颜色读回，整页 IO 一致不再被误写成属性 shader 着色证据，但仍不替代完整场景 Golden 图 |
 | 形变 | Skin/Morph、缓存、预算与深度/阴影/速度/RT 消费一致 | 批量 Morph/LBS/修正的 CPU/GPU 对照（含 50,000 顶点）与 16×16 current/previous 直接绘制通过；数学蒙皮 parity 4 项通过。全部引擎 pass/RT 消费接线和跨档位 Golden 图不由这些独立测试证明 |
+| 多消费者绑定 | 主视图、深度、阴影、Motion Vector、RT、Collision、Derived Geometry 使用统一身份与明确回退 | `geometry::consumer` 契约测试与 `prism_render_app::mesh::consumer` 20 项 Mesh 过滤测试通过；验证共享 current/previous、页缺失 fallback、派生 source 不误绑渲染源与 schema 校验。完整场景各 pass 的画质 Golden 图仍须以实际捕获物判定 |
 | 光追派生 | OMM 与派生几何使用版本化资产契约；无 RT 能力时选择光栅路径 | OMM 强制 GPU parity 通过；不把它扩张为完整 RT 场景画质结论 |
 | 带宽与性能 | §18 固定场景输出 P50/P95/P99、GPU timestamp、VRAM、上传、缺页与功耗字段 | 已记录 CPU 构建/LOD P50/P95/P99；完整场景 GPU 字段无本轮 artifact，因此预算表保持回归门槛而非达标声明 |
 | 维护性 | 扩展点遵守 §20.2，schema/ABI 显式版本化，错误类型稳定 | CLST v3/v2 兼容、稳定格式标签、缓存失效、精确 framing 与类型化错误由代码和测试锁定 |

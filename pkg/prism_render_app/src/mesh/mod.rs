@@ -9,6 +9,7 @@
 //! knowing anything about the mesh's authoring types.
 
 pub mod deformation;
+pub mod consumer;
 mod prepare;
 
 #[cfg(test)]

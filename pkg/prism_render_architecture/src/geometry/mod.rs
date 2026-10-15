@@ -4,7 +4,12 @@ use crate::gpu_scene::GeometryHandle;
 
 pub mod residency;
 pub mod table;
+pub mod consumer;
 
+pub use consumer::{
+    MeshConsumer, MeshConsumerBinding, MeshConsumerBindingError, MeshConsumerSelection,
+    MeshDerivedArtifact, MeshRepresentation, MeshTemporal, MESH_CONSUMER_CONTRACT_VERSION,
+};
 pub use residency::{LodResidencyPolicy, ResidencyPlan};
 pub use table::{check_abi, CullBatchEntry, GeometryAbiError, GeometryLookupError, GeometryTable};
 
