@@ -184,10 +184,13 @@ fn a_reused_buffer_keeps_capacity_for_a_later_growth() {
     let smaller = RenderMesh::prepare(&quad(3, false), id, &device, &queue, Some(&first))
         .expect("smaller mesh reuses");
     assert_eq!(smaller.buffers.vertices, first.buffers.vertices);
+    assert_eq!(smaller.vertex_capacity, first.vertex_capacity);
+    assert_eq!(smaller.vertex_capacity, vec![6 * 12]);
 
     let restored = RenderMesh::prepare(&quad(6, false), id, &device, &queue, Some(&smaller))
         .expect("capacity still fits");
     assert_eq!(restored.buffers.vertices, first.buffers.vertices);
+    assert_eq!(restored.vertex_capacity, first.vertex_capacity);
     assert_eq!(device.live_resource_count(), 1);
 }
 

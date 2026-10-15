@@ -43,6 +43,7 @@ pub fn prepare_mesh_buffers(
             .and_then(|mesh| mesh.vertex_capacity.get(stream_index).copied())
             .unwrap_or(0);
         let reusable = previous_buffer.filter(|_| previous_capacity >= byte_len);
+        let capacity = reusable.map_or(byte_len.max(4), |_| previous_capacity);
         let buffer = reusable.unwrap_or_else(|| {
             create_buffer(device, "mesh vertex stream", byte_len, BufferUsages::VERTEX)
         });
@@ -53,7 +54,7 @@ pub fn prepare_mesh_buffers(
             }
         }
         vertices.push(buffer);
-        vertex_capacity.push(reusable.map_or(byte_len.max(4), |_| previous_capacity));
+        vertex_capacity.push(capacity);
     }
     if let Some(previous) = previous {
         for old in previous.buffers.vertices.iter().skip(vertex_streams.len()) {
