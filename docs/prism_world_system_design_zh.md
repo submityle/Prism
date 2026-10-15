@@ -633,6 +633,13 @@ CPU地形新增`filter_heightfield_scatter`，对齐检查后稳定原地压紧�
 - **D8 流向 + flow accumulation**：从高度场算每格水流去向与汇流量，提取河网/流域，驱动河流样条（§14.3）与侵蚀（§16.1）。
 - 水体与 `prism_water_engine_design_zh.md` 接缝：世界系统提供流向/水位场，水引擎做表面模拟与渲染。
 
+当前已交付 `prism_world_sim::HydrologyField::analyze_d8` 的 CPU 拓扑分析
+primitive：只在同一 Y 层的 X/Z 平面选择严格下降邻居，固定探测八邻居，按
+`(elevation, CellCoord)` 稳定处理同高候选，返回 downstream、汇流量、终端流域
+出口和阈值河网。分析区域同时裁剪源与下游候选，`u64` 汇流量和所有预算乘法均
+显式 checked；失败不返回部分结果，也不修改原场。该切片仍不是 GPU 水面/侵蚀
+stencil、河流样条作者数据或 `prism_water` 渲染接线。
+
 ### 16.5 仿真调度与预算
 
 仿真全走 `prism_tasks` 异步作业，按 tier 定 tick 频率与空间范围（只仿真玩家附近 + 低频全局）；超预算降频或缩范围。仿真的脏传播（§14.2）保证只重烘受影响区域。关闭 `sim` 时世界静态，破坏退化为预断裂切换（无实时解算）。

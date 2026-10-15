@@ -24,7 +24,10 @@ pub use codec::{
     decode_delta, decode_delta_with_limits, encode_delta, CodecError, DeltaDecodeLimits,
 };
 pub use ecology::{EcologyCell, EcologyConfig, EcologyDelta, EcologyField};
-pub use hydrology::{FlowDelta, HydrologyCell, HydrologyField};
+pub use hydrology::{
+    FlowDelta, HydrologyAnalysis, HydrologyAnalysisBudget, HydrologyAnalysisCell,
+    HydrologyAnalysisError, HydrologyCell, HydrologyDirection, HydrologyField,
+};
 #[cfg(feature = "persist")]
 pub use persist::{
     simulation_delta_to_transaction, transaction_to_simulation_delta, SimulationPersistError,
