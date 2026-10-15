@@ -18,7 +18,8 @@
 //! - **Unix (Linux / macOS)**: `mmap`/`munmap`/`mprotect`/`madvise`/`sysconf`.
 //!   Reservation is `mmap(PROT_NONE)`; commit is `mprotect` to the requested
 //!   protection (physical pages arrive on first touch); decommit is
-//!   `madvise(DONTNEED/FREE)` + `mprotect(PROT_NONE)`.
+//!   `madvise(DONTNEED/FREE)` + `mprotect(PROT_NONE)`. Linux also provides the
+//!   mirrored-ring backend through `memfd_create` and two shared mappings.
 //! - **Windows**: `VirtualAlloc`/`VirtualFree`/`VirtualProtect` with
 //!   `MEM_RESERVE`/`MEM_COMMIT`/`MEM_DECOMMIT`/`MEM_RELEASE`, plus
 //!   `GlobalMemoryStatusEx`/`GetSystemInfo`/`GetLargePageMinimum`.

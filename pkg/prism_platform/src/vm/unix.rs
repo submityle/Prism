@@ -497,22 +497,165 @@ pub(super) use mirror::{
     map as mirror_map, release as mirror_release, SUPPORTED as MIRROR_SUPPORTED,
 };
 
-#[cfg(not(target_vendor = "apple"))]
-/// This build can mirror-map a magic ring buffer.
-///
-/// A real Linux backend (`memfd_create` + `ftruncate` + two `mmap` views over
-/// one anonymous file) is PLANNED but not shipped unverified from a macOS host;
-/// see the design doc's honest-boundary note.
+#[cfg(target_os = "linux")]
+mod linux_mirror {
+    //! Linux mirrored-mapping backend built on a sealed-size memfd.
+    //!
+    //! The kernel first reserves one contiguous `2N` virtual span as
+    //! `PROT_NONE`, then maps the same `memfd` at both halves with
+    //! `MAP_FIXED | MAP_SHARED`. The reservation prevents another mapping
+    //! from taking the upper half between the two view replacements, while
+    //! the shared file offset makes both views alias the same physical pages.
+
+    use super::{is_map_failed, mmap, munmap, Region, Result, VmError};
+    use core::ffi::{c_char, c_int, c_void};
+
+    const MAP_SHARED: c_int = 0x01;
+    const MFD_CLOEXEC: u32 = 0x0001;
+
+    unsafe extern "C" {
+        fn memfd_create(name: *const c_char, flags: u32) -> c_int;
+        fn ftruncate(fd: c_int, length: i64) -> c_int;
+        fn close(fd: c_int) -> c_int;
+    }
+
+    /// This build has a working mirrored-mapping backend.
+    pub const SUPPORTED: bool = true;
+
+    fn close_fd(fd: c_int) -> Result<()> {
+        // SAFETY: `fd` was returned by `memfd_create` and is owned by this
+        // function until this call. Linux closes the descriptor on success;
+        // an error is surfaced instead of silently leaking the handle.
+        if unsafe { close(fd) } == 0 {
+            Ok(())
+        } else {
+            Err(super::os_error())
+        }
+    }
+
+    pub fn map(size: usize) -> Result<Region> {
+        let double = size.checked_mul(2).ok_or(VmError::InvalidArgument)?;
+        let file_len = i64::try_from(size).map_err(|_| VmError::InvalidArgument)?;
+        let name = c"prism-mirrored-ring";
+
+        // SAFETY: `name` is a valid NUL-terminated string and the flags are a
+        // documented memfd flag. The returned descriptor is owned below.
+        let fd = unsafe { memfd_create(name.as_ptr(), MFD_CLOEXEC) };
+        if fd < 0 {
+            return Err(super::os_error());
+        }
+
+        // SAFETY: the descriptor is a live memfd and `file_len` is nonnegative
+        // and representable as Linux `off_t`.
+        if unsafe { ftruncate(fd, file_len) } != 0 {
+            let error = super::os_error();
+            let _ = close_fd(fd);
+            return Err(error);
+        }
+
+        // Reserve both halves before installing either shared view. This keeps
+        // the two MAP_FIXED replacements adjacent and prevents an unrelated
+        // mapping from occupying the second half between calls.
+        let reservation = unsafe {
+            mmap(
+                core::ptr::null_mut(),
+                double,
+                super::PROT_NONE,
+                super::MAP_PRIVATE | super::sys::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if is_map_failed(reservation) {
+            let error = super::os_error();
+            let _ = close_fd(fd);
+            return Err(error);
+        }
+
+        let first = unsafe {
+            mmap(
+                reservation,
+                size,
+                super::PROT_READ | super::PROT_WRITE,
+                super::MAP_FIXED | MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        if first != reservation {
+            let error = super::os_error();
+            // SAFETY: `reservation`/`double` is the exact span just reserved;
+            // unmapping it also discards any partial first-view replacement.
+            unsafe {
+                munmap(reservation, double);
+            }
+            let _ = close_fd(fd);
+            return Err(error);
+        }
+
+        let second_addr = reservation.wrapping_byte_add(size);
+        let second = unsafe {
+            mmap(
+                second_addr,
+                size,
+                super::PROT_READ | super::PROT_WRITE,
+                super::MAP_FIXED | MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        if second != second_addr {
+            let error = super::os_error();
+            // SAFETY: both views occupy the exact reservation span.
+            unsafe {
+                munmap(reservation, double);
+            }
+            let _ = close_fd(fd);
+            return Err(error);
+        }
+
+        if let Err(error) = close_fd(fd) {
+            // SAFETY: the mappings remain valid until this exact span is
+            // unmapped; no Rust reference has escaped yet.
+            unsafe {
+                munmap(reservation, double);
+            }
+            return Err(error);
+        }
+
+        Ok(Region {
+            base: reservation.cast::<u8>(),
+            base_len: double,
+            ptr: reservation.cast::<u8>(),
+            len: size,
+        })
+    }
+
+    pub fn release(region: Region) {
+        // SAFETY: `base`/`base_len` is the exact `2N` span returned by `map`;
+        // unmapping once releases both adjacent aliases.
+        unsafe {
+            munmap(region.base.cast::<c_void>(), region.base_len);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) use linux_mirror::{
+    map as mirror_map, release as mirror_release, SUPPORTED as MIRROR_SUPPORTED,
+};
+
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+/// Other Unix targets still report the capability honestly until their exact
+/// `memfd`/mapping ABI is implemented and verified.
 pub(super) const MIRROR_SUPPORTED: bool = false;
 
-#[cfg(not(target_vendor = "apple"))]
-/// Map a mirrored ring (not yet implemented on this Unix).
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
 pub(super) fn mirror_map(_size: usize) -> Result<Region> {
     Err(VmError::Unsupported)
 }
 
-#[cfg(not(target_vendor = "apple"))]
-/// Release a mirrored ring (no-op until this platform's backend lands).
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
 pub(super) fn mirror_release(_region: Region) {}
 
 #[cfg(target_vendor = "apple")]

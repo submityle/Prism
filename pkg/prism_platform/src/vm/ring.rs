@@ -26,8 +26,10 @@
 //!   replacement with `MapViewOfFile3`; older Windows uses a bounded retry loop
 //!   around two exact `MapViewOfFileEx` views. The latter is a real aliasing
 //!   fallback, never a copied or single-view buffer.
-//! - **Other platforms**: honestly [`VmError::Unsupported`]. Linux remains
-//!   planned because it is not implemented in this slice. Query
+//! - **Linux**: a sealed-size `memfd_create` file is mapped twice at adjacent
+//!   addresses after reserving the complete `2N` span. Both views are
+//!   `MAP_SHARED` aliases of offset zero, so writes wrap without copying.
+//! - **Other platforms**: honestly [`VmError::Unsupported`]. Query
 //!   [`MirroredRing::is_supported`] before relying on it.
 //!
 //! ## Lifecycle contract

@@ -597,11 +597,11 @@ impl Queue {
         let mut head = unsafe { ptr::read_volatile(self.cq_head_ptr()) };
         let tail = self.cq_tail();
         // `cq_off.ring_mask` is a byte offset in the mmap, not the mask value.
-        let mask = unsafe {
+        let mask: u32 = unsafe {
             ptr::read_volatile(
                 self.cq_ring
                     .add(self.params.cq_off.ring_mask as usize)
-                    .cast(),
+                    .cast::<u32>(),
             )
         };
         let mut out = Vec::new();
