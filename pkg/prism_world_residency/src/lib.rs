@@ -60,8 +60,8 @@ pub use scatter_field::{
 };
 pub use scheduler::{ResidencyAction, ResidencyKeepReason, ResidencyPlan, ResidencyScheduler};
 pub use sdf::{
-    BrickCoord, SdfBounds, SdfError, SdfQueryConsumer, SdfQueryResult, SparseSdfBrickGrid,
-    SparseSdfQuery,
+    BrickCoord, SdfBounds, SdfBrickExport, SdfError, SdfExportBrick, SdfExportBudget,
+    SdfExportResource, SdfQueryConsumer, SdfQueryResult, SparseSdfBrickGrid, SparseSdfQuery,
 };
 
 #[cfg(test)]

@@ -40,6 +40,94 @@ pub enum SdfError {
     },
     /// The dirty region minimum is greater than its maximum.
     InvalidRegion,
+    /// The requested export exceeds its caller-provided bound.
+    ExportBudgetExceeded {
+        /// Export item being bounded.
+        resource: SdfExportResource,
+        /// Number of items required by the export.
+        requested: usize,
+        /// Maximum number of items allowed by the export budget.
+        limit: usize,
+    },
+    /// An export offset or count does not fit the packed `u32` ABI.
+    ExportIndexOverflow,
+}
+
+/// Export resource whose caller-provided bound was exceeded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SdfExportResource {
+    /// Allocated brick metadata records.
+    Bricks,
+    /// Quantized brick samples.
+    Samples,
+}
+
+/// Caller-owned bounds for a deterministic sparse-brick export.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SdfExportBudget {
+    /// Maximum number of allocated bricks to export.
+    pub max_bricks: usize,
+    /// Maximum number of packed samples to export.
+    pub max_samples: usize,
+}
+
+impl SdfExportBudget {
+    /// Creates an export budget from brick and sample limits.
+    pub const fn new(max_bricks: usize, max_samples: usize) -> Self {
+        Self {
+            max_bricks,
+            max_samples,
+        }
+    }
+}
+
+/// Packed metadata for one brick in [`SdfBrickExport`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SdfExportBrick {
+    /// Coordinate of the exported brick.
+    pub coord: BrickCoord,
+    /// Start index into [`SdfBrickExport::samples`].
+    pub sample_offset: u32,
+    /// Number of samples owned by this brick.
+    pub sample_count: u32,
+}
+
+/// Deterministic CPU export suitable for a future GPU upload adapter.
+///
+/// Metadata follows [`BrickCoord`] order from the grid's `BTreeMap`. Samples
+/// retain the grid's z-major, y-next, x-fastest layout. This type contains no
+/// device handle and does not claim that a GPU sampling path has run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SdfBrickExport {
+    bricks: Vec<SdfExportBrick>,
+    samples: Vec<i16>,
+}
+
+impl SdfBrickExport {
+    /// Returns packed brick metadata in deterministic order.
+    pub fn bricks(&self) -> &[SdfExportBrick] {
+        &self.bricks
+    }
+
+    /// Returns packed quantized samples.
+    pub fn samples(&self) -> &[i16] {
+        &self.samples
+    }
+
+    /// Returns the number of exported bricks.
+    pub fn brick_count(&self) -> usize {
+        self.bricks.len()
+    }
+
+    /// Returns the number of exported samples.
+    pub fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Returns the packed sample payload size in bytes.
+    pub fn sample_bytes(&self) -> usize {
+        self.samples.len() * core::mem::size_of::<i16>()
+    }
 }
 
 /// Result of a read-only SDF consumer query.
@@ -185,6 +273,15 @@ impl fmt::Display for SdfError {
             Self::InvalidMip => f.write_str("SDF mip is outside the grid"),
             Self::SampleCount { .. } => f.write_str("SDF brick sample count is incorrect"),
             Self::InvalidRegion => f.write_str("SDF dirty region is inverted"),
+            Self::ExportBudgetExceeded {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "SDF export {resource:?} budget exceeded: requested {requested}, limit {limit}"
+            ),
+            Self::ExportIndexOverflow => f.write_str("SDF export index does not fit packed ABI"),
         }
     }
 }
@@ -238,6 +335,75 @@ impl SparseSdfBrickGrid {
     /// Returns the number of allocated bricks.
     pub fn brick_count(&self) -> usize {
         self.bricks.len()
+    }
+
+    /// Returns the number of samples stored in every allocated brick.
+    pub fn sample_count(&self) -> usize {
+        self.sample_count_for_edge()
+    }
+
+    /// Returns allocated brick coordinates in deterministic map order.
+    pub fn allocated_bricks(&self) -> Vec<BrickCoord> {
+        self.bricks.keys().copied().collect()
+    }
+
+    /// Returns the samples for one allocated brick without copying them.
+    pub fn brick_samples(&self, coord: BrickCoord) -> Result<Option<&[i16]>, SdfError> {
+        self.validate_mip(coord.mip)?;
+        Ok(self
+            .bricks
+            .get(&coord)
+            .map(|brick| brick.samples.as_slice()))
+    }
+
+    /// Exports every allocated brick into bounded, deterministic packed data.
+    ///
+    /// The export performs all budget and packed-index checks before building
+    /// output, so an error never returns a partial export. It is a CPU staging
+    /// contract for an external adapter; this crate does not acquire an
+    /// adapter, allocate GPU resources, or execute GPU sampling.
+    pub fn export_allocated_bricks(
+        &self,
+        budget: SdfExportBudget,
+    ) -> Result<SdfBrickExport, SdfError> {
+        let brick_count = self.bricks.len();
+        if brick_count > budget.max_bricks {
+            return Err(SdfError::ExportBudgetExceeded {
+                resource: SdfExportResource::Bricks,
+                requested: brick_count,
+                limit: budget.max_bricks,
+            });
+        }
+        let sample_count = self
+            .sample_count_for_edge()
+            .checked_mul(brick_count)
+            .ok_or(SdfError::ExportIndexOverflow)?;
+        if sample_count > budget.max_samples {
+            return Err(SdfError::ExportBudgetExceeded {
+                resource: SdfExportResource::Samples,
+                requested: sample_count,
+                limit: budget.max_samples,
+            });
+        }
+        let sample_count_u32 = u32::try_from(self.sample_count_for_edge())
+            .map_err(|_| SdfError::ExportIndexOverflow)?;
+        if u32::try_from(sample_count).is_err() {
+            return Err(SdfError::ExportIndexOverflow);
+        }
+
+        let mut bricks = Vec::with_capacity(brick_count);
+        let mut samples = Vec::with_capacity(sample_count);
+        for (coord, brick) in &self.bricks {
+            let sample_offset =
+                u32::try_from(samples.len()).map_err(|_| SdfError::ExportIndexOverflow)?;
+            bricks.push(SdfExportBrick {
+                coord: *coord,
+                sample_offset,
+                sample_count: sample_count_u32,
+            });
+            samples.extend_from_slice(&brick.samples);
+        }
+        Ok(SdfBrickExport { bricks, samples })
     }
 
     /// Returns the number of dirty brick coordinates.
@@ -440,7 +606,7 @@ impl SparseSdfBrickGrid {
         Ok(result)
     }
 
-    fn sample_count(&self) -> usize {
+    fn sample_count_for_edge(&self) -> usize {
         let edge = usize::from(self.brick_size);
         edge * edge * edge
     }
@@ -583,5 +749,53 @@ mod tests {
             Err(SdfError::InvalidRegion)
         );
         assert_eq!(query.query_sample([0, 0, 0], 1), Err(SdfError::InvalidMip));
+    }
+
+    #[test]
+    fn bounded_export_is_sorted_and_packs_samples_without_reordering() {
+        let mut grid = SparseSdfBrickGrid::new(2, 1).unwrap();
+        grid.insert_brick(BrickCoord::new(2, -1, 0, 0), vec![20; 8])
+            .unwrap();
+        grid.insert_brick(
+            BrickCoord::new(-1, 0, 0, 0),
+            vec![-10, -9, -8, -7, -6, -5, -4, -3],
+        )
+        .unwrap();
+
+        let export = grid
+            .export_allocated_bricks(SdfExportBudget::new(2, 16))
+            .unwrap();
+        assert_eq!(export.brick_count(), 2);
+        assert_eq!(export.sample_count(), 16);
+        assert_eq!(export.sample_bytes(), 32);
+        assert_eq!(export.bricks()[0].coord, BrickCoord::new(-1, 0, 0, 0));
+        assert_eq!(export.bricks()[0].sample_offset, 0);
+        assert_eq!(export.bricks()[1].coord, BrickCoord::new(2, -1, 0, 0));
+        assert_eq!(export.bricks()[1].sample_offset, 8);
+        assert_eq!(&export.samples()[..8], &[-10, -9, -8, -7, -6, -5, -4, -3]);
+        assert_eq!(&export.samples()[8..], &[20; 8]);
+    }
+
+    #[test]
+    fn bounded_export_rejects_bricks_or_samples_before_returning_partial_data() {
+        let mut grid = SparseSdfBrickGrid::new(2, 1).unwrap();
+        grid.insert_brick(BrickCoord::new(0, 0, 0, 0), vec![1; 8])
+            .unwrap();
+        assert_eq!(
+            grid.export_allocated_bricks(SdfExportBudget::new(0, 8)),
+            Err(SdfError::ExportBudgetExceeded {
+                resource: SdfExportResource::Bricks,
+                requested: 1,
+                limit: 0,
+            })
+        );
+        assert_eq!(
+            grid.export_allocated_bricks(SdfExportBudget::new(1, 7)),
+            Err(SdfError::ExportBudgetExceeded {
+                resource: SdfExportResource::Samples,
+                requested: 8,
+                limit: 7,
+            })
+        );
     }
 }
