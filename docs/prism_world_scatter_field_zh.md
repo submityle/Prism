@@ -69,4 +69,4 @@ bench 对 10,000 个真实 source scatter 三维 jitter 点，执行 8 次预热
 
 ## 尚未扩大的边界
 
-本切片是完整可调用的 CPU 作者场及 source scatter 过滤，不是 GPU field twin、GPU 刷子上传、运行时笔刷空间索引、编辑器工具或 scene schema 接入。已有 `GpuScatter` 仍生成未消费作者场的源候选；已有 resident coverage/dither 是另一层显示策略。地表/坡度/高度/SDF 过滤、朝向生成、风/交互、蓝噪声目标与产品 renderer graph 都需要各自实现和验收，不能由本场的局部测试替代。
+本切片是完整可调用的 CPU 作者场及 source scatter 过滤。GPU twin 与固定容量笔刷上传另由 `GpuScatterField` 实现，精确 ABI、五 storage binding 要求及设备验证见 `prism_world_gpu_scatter_field_zh.md`；普通 `GpuScatter` 仍只生成源候选。已有 resident coverage/dither 是另一层显示策略。运行时笔刷空间索引、编辑器工具、scene schema、地表/坡度/高度/SDF 过滤、朝向生成、风/交互、蓝噪声目标与产品 renderer graph 都需要各自实现和验收，不能由本场的局部测试替代。

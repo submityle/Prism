@@ -56,6 +56,12 @@ mod scatter;
 #[cfg(feature = "gpu")]
 pub use scatter::{GpuScatter, GpuScatterError};
 
+#[cfg(feature = "gpu")]
+mod scatter_field;
+
+#[cfg(feature = "gpu")]
+pub use scatter_field::{GpuScatterField, GpuScatterFieldError};
+
 #[cfg(test)]
 mod tests {
     use super::*;

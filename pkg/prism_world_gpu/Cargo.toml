@@ -38,3 +38,8 @@ harness = false
 name = "scatter_generation"
 harness = false
 required-features = ["gpu"]
+
+[[bench]]
+name = "scatter_field"
+harness = false
+required-features = ["gpu"]

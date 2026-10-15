@@ -76,7 +76,15 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 `scatter_with_density_field` 原地过滤已有源散布，不重填空洞，保持源最小距离和半开范围的分区/逆序求值不变性。构造预算包括原 brush Vec 的 spare capacity，场工作上界在枚举前检查；合计输出预算计算两个 Vec 的实际容量载荷，不是峰值分配/RSS 上限。每次 sample/rank 无分配；尚无笔刷空间索引，逐点采样成本为 O(B+固定噪声成本)。
 
-no-default 完整回归 65 项单测与 1 项文档测试通过，其中作者场新增 30 项；all-target clippy `-D warnings` 通过。覆盖独立整数 oracle/golden、全部 UNORM16 权重与密度、i64 边缘 warp、完整缓存字段与三轴任意分区双向求值。Apple M2/macOS release 的 10k 点、8 预热/64 样本：constant sample+rank P50/P95/P99 为 200.459/217.209/234.625 µs，warp+32 重叠刷子为 5392.875/32179.334/55792.958 µs；完整源生成+过滤+属性为 5878.709/12008.041/17783.000 µs、恰为两个 Vec 分配、880,000 字节输出容量载荷。并行负载干扰明显，不是 GPU 时间、产品帧时或严格优化 A/B。API、精确取整与完整基准见 `prism_world_scatter_field_zh.md`；作者场 GPU twin、地表过滤和产品 renderer 仍须独立验收。
+no-default 完整回归 65 项单测与 1 项文档测试通过，其中作者场新增 30 项；all-target clippy `-D warnings` 通过。覆盖独立整数 oracle/golden、全部 UNORM16 权重与密度、i64 边缘 warp、完整缓存字段与三轴任意分区双向求值。Apple M2/macOS release 的 10k 点、8 预热/64 样本：constant sample+rank P50/P95/P99 为 200.459/217.209/234.625 µs，warp+32 重叠刷子为 5392.875/32179.334/55792.958 µs；完整源生成+过滤+属性为 5878.709/12008.041/17783.000 µs、恰为两个 Vec 分配、880,000 字节输出容量载荷。并行负载干扰明显，不是 GPU 时间、产品帧时或严格优化 A/B。API、精确取整与完整基准见 `prism_world_scatter_field_zh.md`；该段是 CPU 基线验收，GPU twin 的独立验收见下节，地表过滤和产品 renderer 仍未由这些测试覆盖。
+
+### M4：GPU 作者密度与种类场
+
+`GpuScatterField` 在 `GpuScatter` 后记录精确整数 field pass，复用 CPU revision 1 的 noise/domain warp、brush ID 顺序、平方距离 smoothstep、signed Add 取整、species 阈值和独立 rank；无 float 坐标、shader-i64 或 optional feature。生产路径无 CPU 逐点生成/采样/回读。显式五 storage binding，因此新增严格 required-limits context acquisition；原 downlevel 四 binding 默认值保持不变。
+
+source 64 字节 record 保留源 accepted；新增 source-slot 对齐16字节属性和最终 compact/indirect。下游必须消费场输出，不能只用源 accepted。复合 owned 逻辑 GPU buffer 为 `88×max(capacity,1)+64×max(max_brushes,1)+352` 字节，另一次 fallible 预留 host 刷子 scratch。源/场工作、容量、brush 数与 dispatch 均在任何 queue write 前验证，可恢复错误保留旧请求。变更驱动上传 source192字节、field uniform128字节、brush64×B字节；不变刷子不随源范围重传。encode 无 owned allocation/upload/submit/wait/readback，调用者仍须先提交当前 encoder 再更新下次请求。
+
+2026-10-15 Apple M2/Metal 原始源码隔离 harness 完整定向回归 113 项通过、0 失败/忽略（库84、scatter5、field7、density8、resident6、parity1、WGSL2）；no-default 库73项通过，harness all-target 与正常 workspace GPU lib Clippy 均通过 `-D warnings`。新场测试逐 slot 对 CPU 全记录/属性/rank，对 compact 唯一集合与 indirect count，并在同一 encoder 内直接消费 GPU records/attributes/compact/indirect 作实际像素验证。覆盖世界角点、u32 极值、最大 brush 半径、signed rounding、尾部/空请求/重复 encode/无 wait 连续提交和失败保留完整旧请求；非完整 workspace 或多后端验收。release 基准覆盖10k/100k三维完整 voxel、constant/noise/warp/warp+32重叠刷子，每档8预热/64样本，全部576次派发逐点对CPU。100k constant 的 submit+wait P50/P95/P99 为911.333/965.750/1211.250 µs；warp+32刷子为6437.792/6715.792/7302.500 µs，owned GPU逻辑buffer为8,802,400字节，host刷子scratch为2,048字节。计时排除上传/回读/校验/绘制，不是GPU timestamp或产品帧时。完整八档分位数、资源与digest见 `prism_world_gpu_scatter_field_zh.md`。
 
 ### M5：持久化
 
@@ -192,7 +200,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
 - M3：资产包解压、mmap schema 视图、GPU 直传和产品级吞吐仍需实现或独立运行时验证；共享动态优先级已接入但不提供抢占或跨队列无饥饿保证。任务池 Future/共享取消、固定 worker 及宿主原生 reactor → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md` 与 `prism_world_native_io_zh.md`，不能代替冷盘、资产包或产品负载验收。
-- M4 散布：作者场 GPU twin、地表/坡度/高度过滤、风与交互、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；已有内容中立有界 CPU/GPU 源散布、CPU 作者密度/种类场、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
+- M4 散布：地表/坡度/高度过滤、风与交互、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。

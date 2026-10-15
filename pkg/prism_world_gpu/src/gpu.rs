@@ -99,6 +99,16 @@ impl GpuContext {
     /// An adapter/device acquisition error is returned to the caller so a
     /// strict real-device test can fail with the acquisition evidence.
     pub fn try_headless() -> Result<Option<Self>, GpuAcquireError> {
+        Self::try_headless_with_limits(Limits::downlevel_defaults())
+    }
+
+    /// Acquires a device with explicit required limits and no optional features.
+    /// Unsupported limits fail device acquisition; they are never silently
+    /// reduced. The author-field scatter pass requires five storage bindings,
+    /// whereas [`Self::try_headless`] retains four-binding downlevel defaults.
+    pub fn try_headless_with_limits(
+        required_limits: Limits,
+    ) -> Result<Option<Self>, GpuAcquireError> {
         let instance = Instance::new(
             InstanceDescriptor {
                 backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
@@ -116,7 +126,7 @@ impl GpuContext {
         let descriptor = DeviceDescriptor {
             label: Some("prism_world_gpu_device"),
             required_features: Features::empty(),
-            required_limits: Limits::downlevel_defaults(),
+            required_limits,
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,

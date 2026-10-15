@@ -61,6 +61,21 @@ This does not add surface projection, author density fields, or product graph
 integration. See `docs/prism_world_gpu_scatter_zh.md` for ABI, lifecycle,
 real-device tests and bounded release measurements.
 
+`GpuScatterField` composes that source generator with an exact integer twin of
+the CPU author density/species recipe: value noise, three-channel domain warp,
+ordered density/species brushes and independent stable candidate rank. It owns
+`88 * max(capacity, 1) + 64 * max(max_brushes, 1) + 352` logical GPU-buffer bytes
+plus reusable host brush-upload scratch. Source and field work are preflighted
+before any request upload; returned validation errors preserve the old request.
+Generated source records stay unchanged; consumers must use the field compact
+and indirect buffers and fetch aligned 16-byte attributes by source slot.
+This path explicitly requires five storage bindings; acquire the context using
+`GpuContext::try_headless_with_limits` with that limit. The ordinary context
+retains its four-binding downlevel baseline. Production encode does not upload,
+submit, wait or read back. See `docs/prism_world_gpu_scatter_field_zh.md` for the
+exact ABI, budgets, queue lifecycle and physical-device evidence. Surface
+placement and product scene/render-graph integration remain separate work.
+
 ## Verification
 
 CPU-only contract and packing tests:
@@ -78,6 +93,7 @@ cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test 
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test resident_visibility -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test density_visibility -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test scatter_generation -- --nocapture
+cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test scatter_field -- --nocapture
 ```
 
 The parity test is a strict real-device gate: missing adapter/device acquisition

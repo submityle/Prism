@@ -17,7 +17,7 @@ fn proxy_visibility_shader_parses_and_validates() {
 
 #[cfg(feature = "gpu")]
 #[test]
-fn density_shaders_validate_with_four_storage_bindings_per_stage() {
+fn world_shaders_validate_and_match_declared_binding_counts() {
     for (name, source, storage, uniform) in [
         (
             "density",
@@ -36,6 +36,12 @@ fn density_shaders_validate_with_four_storage_bindings_per_stage() {
             "integer scatter",
             include_str!("../src/shaders/scatter.wgsl"),
             3,
+            1,
+        ),
+        (
+            "integer scatter author field",
+            include_str!("../src/shaders/scatter_field.wgsl"),
+            5,
             1,
         ),
     ] {

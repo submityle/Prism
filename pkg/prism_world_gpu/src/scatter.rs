@@ -246,6 +246,24 @@ impl GpuScatter {
         Ok(())
     }
 
+    /// Sibling GPU stages can validate an entire composite request before any
+    /// stage enqueues a queue write. This does not change the active request.
+    pub(super) fn validate_request(
+        &self,
+        config: ScatterConfig,
+        region: ScatterRegion,
+        max_candidate_evaluations: u64,
+    ) -> Result<(), GpuScatterError> {
+        prepare(
+            config,
+            region,
+            max_candidate_evaluations,
+            self.capacity,
+            self.max_groups,
+        )?;
+        Ok(())
+    }
+
     /// Clears the count and records generation/compaction. No allocation, upload,
     /// submit, CPU sample generation, wait, mapping or readback is performed.
     /// Tail storage beyond the current candidate/count prefixes remains stale.
@@ -293,7 +311,11 @@ impl GpuScatter {
     }
 }
 
-fn check(limit: &'static str, required: u64, available: u64) -> Result<(), GpuScatterError> {
+pub(super) fn check(
+    limit: &'static str,
+    required: u64,
+    available: u64,
+) -> Result<(), GpuScatterError> {
     if required > available {
         Err(GpuScatterError::DeviceLimit {
             limit,
@@ -305,7 +327,7 @@ fn check(limit: &'static str, required: u64, available: u64) -> Result<(), GpuSc
     }
 }
 
-fn dispatch(count: u64, max_groups: u32) -> Result<[u32; 2], GpuScatterError> {
+pub(super) fn dispatch(count: u64, max_groups: u32) -> Result<[u32; 2], GpuScatterError> {
     if count == 0 {
         return Ok([0, 0]);
     }
@@ -337,7 +359,7 @@ fn dispatch(count: u64, max_groups: u32) -> Result<[u32; 2], GpuScatterError> {
     Ok([x as u32, y as u32])
 }
 
-fn validate_capacity(
+pub(super) fn validate_capacity(
     capacity: usize,
     budget: u64,
     limits: &wgpu::Limits,
