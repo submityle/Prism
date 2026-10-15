@@ -530,7 +530,7 @@ header_message = \"Examples (WebGL2)\"
                     continue;
                 }
 
-                if !to_show.wasm {
+                if !to_show.wasm_support.supports(api) {
                     continue;
                 }
 
@@ -653,6 +653,11 @@ required_features = {:?}
             api,
         } => {
             let api = format!("{api}");
+            let web_api = match api.as_str() {
+                "webgl2" => WebApi::Webgl2,
+                "webgpu" => WebApi::Webgpu,
+                other => panic!("unsupported wasm API {other:?}"),
+            };
             let examples_to_build = parse_examples();
 
             let root_path = Path::new(&content_folder);
@@ -693,7 +698,7 @@ required_features = {:?}
             let work_to_do = || {
                 examples_to_build
                     .iter()
-                    .filter(|to_build| to_build.wasm)
+                    .filter(|to_build| to_build.wasm_support.supports(web_api))
                     .filter(|to_build| to_build.example_type == ExampleType::Bin)
                     .skip(cli.page.unwrap_or(0) * cli.per_page.unwrap_or(0))
                     .take(cli.per_page.unwrap_or(usize::MAX))
@@ -827,7 +832,7 @@ fn parse_examples() -> Vec<Example> {
                 name: metadata["name"].as_str().unwrap().to_string(),
                 description: metadata["description"].as_str().unwrap().to_string(),
                 category: metadata["category"].as_str().unwrap().to_string(),
-                wasm: metadata["wasm"].as_bool().unwrap(),
+                wasm_support: WasmSupport::from_metadata(metadata),
                 required_features: val
                     .get("required-features")
                     .map(|rf| {
@@ -878,15 +883,104 @@ struct Example {
     description: String,
     /// Pretty category name, matching the folder containing the example
     category: String,
-    /// Does this example work in Wasm?
-    // TODO: be able to differentiate between WebGL2, WebGPU, both, or neither (for examples that could run on Wasm without a renderer)
-    wasm: bool,
+    /// Which browser rendering APIs can run this example in Wasm.
+    wasm_support: WasmSupport,
     /// Type of example
     example_type: ExampleType,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+enum WasmSupport {
+    None,
+    Webgl2,
+    Webgpu,
+    Both,
+}
+
+impl WasmSupport {
+    fn supports(self, api: WebApi) -> bool {
+        matches!(
+            (self, api),
+            (Self::Webgl2 | Self::Both, WebApi::Webgl2)
+                | (Self::Webgpu | Self::Both, WebApi::Webgpu)
+        )
+    }
+
+    fn from_metadata(metadata: &Item) -> Self {
+        let wasm = metadata
+            .get("wasm")
+            .and_then(Item::as_bool)
+            .unwrap_or(false);
+        if !wasm {
+            return Self::None;
+        }
+
+        // Existing metadata used `wasm = true` for examples that supported
+        // both browser APIs. Optional per-API flags refine that contract
+        // without requiring a repository-wide metadata rewrite.
+        let webgl2 = metadata
+            .get("webgl2")
+            .and_then(Item::as_bool)
+            .unwrap_or(true);
+        let webgpu = metadata
+            .get("webgpu")
+            .and_then(Item::as_bool)
+            .unwrap_or(true);
+        match (webgl2, webgpu) {
+            (false, false) => Self::None,
+            (true, false) => Self::Webgl2,
+            (false, true) => Self::Webgpu,
+            (true, true) => Self::Both,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 enum ExampleType {
     Lib,
     Bin,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata(webgl2: Option<bool>, webgpu: Option<bool>) -> Item {
+        let mut table = toml_edit::Table::new();
+        table.insert("wasm", toml_edit::value(true));
+        if let Some(enabled) = webgl2 {
+            table.insert("webgl2", toml_edit::value(enabled));
+        }
+        if let Some(enabled) = webgpu {
+            table.insert("webgpu", toml_edit::value(enabled));
+        }
+        Item::Table(table)
+    }
+
+    #[test]
+    fn legacy_wasm_metadata_supports_both_apis() {
+        let support = WasmSupport::from_metadata(&metadata(None, None));
+        assert!(support.supports(WebApi::Webgl2));
+        assert!(support.supports(WebApi::Webgpu));
+    }
+
+    #[test]
+    fn per_api_metadata_filters_the_wasm_build() {
+        let webgl2_only = WasmSupport::from_metadata(&metadata(Some(true), Some(false)));
+        assert!(webgl2_only.supports(WebApi::Webgl2));
+        assert!(!webgl2_only.supports(WebApi::Webgpu));
+
+        let webgpu_only = WasmSupport::from_metadata(&metadata(Some(false), Some(true)));
+        assert!(!webgpu_only.supports(WebApi::Webgl2));
+        assert!(webgpu_only.supports(WebApi::Webgpu));
+    }
+
+    #[test]
+    fn disabled_wasm_metadata_is_not_buildable() {
+        let mut table = toml_edit::Table::new();
+        table.insert("wasm", toml_edit::value(false));
+        let support = WasmSupport::from_metadata(&Item::Table(table));
+        assert!(!support.supports(WebApi::Webgl2));
+        assert!(!support.supports(WebApi::Webgpu));
+    }
 }
