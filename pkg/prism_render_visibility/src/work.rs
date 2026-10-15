@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn sort_key_rejects_reserved_class_values_without_packing_them() {
+    fn work_sort_key_class_has_headroom() {
         for (class, args) in [
             (WorkSortKeyClass::Pass, (u8::MAX, 0, 0, 0, 0)),
             (WorkSortKeyClass::Pipeline, (0, u8::MAX, 0, 0, 0)),

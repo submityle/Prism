@@ -255,7 +255,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shading_graph_orders_raster_classification_and_resolve_hazards() {
+    fn declared_pass_count_matches_runtime_assertion() {
         let graph = shading_frame_graph();
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.execution_order.len(), graph.passes().len());

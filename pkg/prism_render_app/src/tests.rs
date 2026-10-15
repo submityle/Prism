@@ -2841,7 +2841,7 @@ fn packed_bin_streams_offset_the_indirect_arguments() {
 /// Unknown descriptor IDs remain drawable through the complete fallback;
 /// temporarily absent geometry is still counted as unresolved.
 #[test]
-fn undecodable_and_unresolved_bins_are_counted() {
+fn unknown_class_is_zero_or_loud() {
     use prism_render_visibility::build_view_draw_bins;
 
     let options = RequestAdapterOptions::default();

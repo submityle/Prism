@@ -196,7 +196,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_graph_declares_visibility_hazards() {
+    fn declared_pass_count_matches_runtime_assertion_for_visibility() {
         let graph = visibility_frame_graph();
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.execution_order.len(), 3);
