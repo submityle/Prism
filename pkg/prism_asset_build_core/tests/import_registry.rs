@@ -82,11 +82,11 @@ fn registration_and_selection_are_deterministic_and_ambiguity_is_explicit() {
     assert_eq!(
         identities,
         vec![
-            ProcessorIdentity::new(0x5745_4250, 1),
             ProcessorIdentity::new(
                 prism_asset_build_core::import::CanonicalPngProcessor::IMPORTER_ID,
                 2
             ),
+            ProcessorIdentity::new(0x5745_4250, 1),
         ]
     );
 
