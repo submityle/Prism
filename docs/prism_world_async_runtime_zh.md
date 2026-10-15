@@ -53,6 +53,8 @@ adapter 的 public poll 保留一个最新 Context 的 waker；并发 blocking r
 
 ## 任务公平性
 
+本节 FIFO 描述针对普通 `spawn_async`/`spawn_future`。后续新增的 `spawn_future_with_priority` 复用显式 priority inbox，零 worker 使用独立 live-priority ready queue；同 lane FIFO，但高 lane 可以饿死低 lane/普通队列。共享 PriorityCell、IO 准入与逐 native chunk 采样的当前能力见 `prism_world_shared_priority_zh.md`，不受本节历史“未引入动态优先级”的切片说明限制。
+
 `spawn_async` 的 harness 每次 scheduler dispatch 最多执行 32 次 `poll`。只有 `Pending` 且 poll 期间收到 wake 才继续消耗量子；未收到 wake 的 `Pending` 保存 Future 并进入 Idle，等待外部唤醒。第 32 次 poll 若仍为已通知的 `Pending`，在同一锁内保存 Future 并转为 Queued，再解锁入队；并发 wake 合并为一个 continuation，不重复入队、不丢失通知。`Ready` 或 panic 优先结束任务，即使最后一次 poll 同时发出 wake，也不会因量子耗尽而重新入队；完成后的旧 waker 不再触发 poll。
 
 有 worker 时，harness 的首次提交、Idle 唤醒与量子 continuation 都进入全局 injector 的 FIFO 队尾，包括从该池 worker 发起的提交。这样，自唤醒任务不能借本地 LIFO 立即重新执行、越过已在 injector 中等待的普通计算任务或其他 async harness。FIFO 只保证该队列内的取出顺序：调度器仍优先处理 priority inbox、本地 deque，再取 injector，fibers 还会先恢复就绪 fiber；多 worker 的执行/完成顺序也不是全局 FIFO。持续高优先级或本地工作造成的跨队列饥饿不属于本补丁解决范围。

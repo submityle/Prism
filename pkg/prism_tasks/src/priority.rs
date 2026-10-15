@@ -17,6 +17,12 @@
 //! Boosts are **monotonic**: a cell's effective priority only ever rises, so an
 //! inheritance never accidentally demotes work that another waiter already
 //! promoted.
+//!
+//! Explicit priority queues are separate from ordinary FIFO work, not merged
+//! with it at [`Priority::Normal`]. Even [`Priority::Background`] entries are
+//! selected ahead of ordinary queued work. Continually runnable priority work
+//! can therefore starve lower-priority and ordinary work. Selection affects
+//! queued work only; it does not preempt a running job or a future's poll.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -35,10 +41,10 @@ pub enum Priority {
     Background = 0,
     /// Below-normal work that should yield to interactive jobs.
     Low = 1,
-    /// Default priority for ordinary work.
+    /// Default explicit priority; ordinary FIFO work is a separate queue.
     #[default]
     Normal = 2,
-    /// Above-normal work that should preempt background lanes.
+    /// Above-normal work selected ahead of queued background lanes.
     High = 3,
     /// Highest: must-run-now work (e.g. the frame's critical path).
     Critical = 4,
@@ -196,6 +202,14 @@ impl PriorityGroup {
     #[must_use]
     pub fn effective_priority(&self) -> Priority {
         self.cell.get()
+    }
+
+    /// Clone the shared cell for dependent futures or IO work, preserving live
+    /// priority inheritance via [`TaskPool::spawn_future_with_priority`].
+    /// Sharing priority does not add work to this group's completion counter.
+    #[must_use]
+    pub fn priority_cell(&self) -> Arc<PriorityCell> {
+        Arc::clone(&self.cell)
     }
 
     /// The fork-join counter tracking this group's jobs.

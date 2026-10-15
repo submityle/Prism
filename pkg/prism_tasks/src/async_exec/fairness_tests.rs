@@ -197,7 +197,7 @@ fn pop_dispatch(shared: &Shared, single: bool) -> Option<Job> {
     }
 }
 
-fn last_quantum_poll(ready: bool) {
+fn last_quantum_poll(ready: bool, prioritized: bool) {
     for single in [true, false] {
         let shared = Arc::new(Shared::new(usize::from(!single)));
         let polls = Arc::new(AtomicUsize::new(0));
@@ -226,6 +226,7 @@ fn last_quantum_poll(ready: bool) {
             }),
             shared: Arc::clone(&shared),
             single,
+            priority: prioritized.then(|| Arc::new(crate::PriorityCell::new(crate::Priority::Low))),
             on_panic: Box::new(|payload| std::panic::resume_unwind(payload)),
         });
         Arc::clone(&harness).enqueue();
@@ -266,15 +267,25 @@ fn last_quantum_poll(ready: bool) {
 
 #[test]
 fn ready_on_last_quantum_poll_does_not_requeue_even_when_woken() {
-    last_quantum_poll(true);
+    last_quantum_poll(true, false);
 }
 
 #[test]
 fn unwoken_pending_on_last_quantum_poll_waits_for_an_external_wake() {
-    last_quantum_poll(false);
+    last_quantum_poll(false, false);
 }
 
-fn concurrent_wakes_across_quantum(single: bool) {
+#[test]
+fn prioritized_ready_on_last_quantum_poll_does_not_requeue_even_when_woken() {
+    last_quantum_poll(true, true);
+}
+
+#[test]
+fn prioritized_unwoken_pending_on_last_quantum_poll_waits_for_an_external_wake() {
+    last_quantum_poll(false, true);
+}
+
+fn concurrent_wakes_across_quantum(single: bool, prioritized: bool) {
     // Drive queues manually: no scheduling luck can hide an extra entry or a
     // lost wake. The only runner thread is held inside the last quantum poll.
     let shared = Arc::new(Shared::new(usize::from(!single)));
@@ -312,6 +323,7 @@ fn concurrent_wakes_across_quantum(single: bool) {
         }),
         shared: Arc::clone(&shared),
         single,
+        priority: prioritized.then(|| Arc::new(crate::PriorityCell::new(crate::Priority::Low))),
         on_panic: Box::new(|payload| std::panic::resume_unwind(payload)),
     });
     Arc::clone(&harness).enqueue();
@@ -358,12 +370,22 @@ fn concurrent_wakes_across_quantum(single: bool) {
 
 #[test]
 fn concurrent_wakes_are_coalesced_on_the_zero_worker_ready_queue() {
-    concurrent_wakes_across_quantum(true);
+    concurrent_wakes_across_quantum(true, false);
 }
 
 #[test]
 fn concurrent_wakes_are_coalesced_on_the_worker_injector() {
-    concurrent_wakes_across_quantum(false);
+    concurrent_wakes_across_quantum(false, false);
+}
+
+#[test]
+fn prioritized_concurrent_wakes_are_coalesced_on_the_zero_worker_ready_queue() {
+    concurrent_wakes_across_quantum(true, true);
+}
+
+#[test]
+fn prioritized_concurrent_wakes_are_coalesced_on_the_worker_priority_inbox() {
+    concurrent_wakes_across_quantum(false, true);
 }
 
 struct DropSignal(mpsc::Sender<()>);

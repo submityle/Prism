@@ -184,6 +184,23 @@ impl<P: ReadProvider> CellIo for ScheduledCellIo<P> {
     }
 }
 
+#[cfg(feature = "tasks")]
+impl<P: ReadProvider> crate::PriorityCellIo for ScheduledCellIo<P> {
+    fn submit_with_priority(
+        &mut self,
+        request: CellReadRequest,
+        priority: alloc::sync::Arc<prism_tasks::PriorityCell>,
+    ) -> Result<RequestId, SubmitError> {
+        let scheduler_id = self
+            .adapter
+            .submit_with_priority(request, priority)
+            .map_err(submit_error)?;
+        let request_id = RequestId(scheduler_id.get());
+        self.requests.insert(request_id, scheduler_id);
+        Ok(request_id)
+    }
+}
+
 fn submit_error(error: IoError) -> SubmitError {
     match error {
         IoError::Backpressure { capacity } => SubmitError::Backpressure { capacity },

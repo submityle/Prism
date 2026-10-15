@@ -27,14 +27,38 @@ impl fmt::Display for RequestId {
 }
 
 /// A deterministic, bounded read request.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ReadRequest {
     offset: u64,
     length: u64,
     chunk_size: usize,
     priority: u32,
     expected_checksum: Option<u64>,
+    #[cfg(feature = "tasks")]
+    shared_priority: Option<alloc::sync::Arc<prism_tasks::PriorityCell>>,
 }
+
+// Equality compares stable request metadata and shared-cell identity, never a
+// mutable priority snapshot. Boosting a request cannot change its equality.
+impl PartialEq for ReadRequest {
+    fn eq(&self, other: &Self) -> bool {
+        let equal = self.offset == other.offset
+            && self.length == other.length
+            && self.chunk_size == other.chunk_size
+            && self.priority == other.priority
+            && self.expected_checksum == other.expected_checksum;
+        #[cfg(feature = "tasks")]
+        let equal = equal
+            && match (&self.shared_priority, &other.shared_priority) {
+                (Some(left), Some(right)) => alloc::sync::Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            };
+        equal
+    }
+}
+
+impl Eq for ReadRequest {}
 
 impl ReadRequest {
     /// Creates a request using the default 64 KiB chunk size and priority zero.
@@ -45,11 +69,26 @@ impl ReadRequest {
             chunk_size: 64 * 1024,
             priority: 0,
             expected_checksum: None,
+            #[cfg(feature = "tasks")]
+            shared_priority: None,
         }
     }
 
     /// Sets the maximum number of bytes returned by one poll.
+    #[cfg(not(feature = "tasks"))]
     pub const fn with_chunk_size(mut self, chunk_size: usize) -> Result<Self, ConfigError> {
+        if chunk_size == 0 {
+            return Err(ConfigError::ZeroChunkSize);
+        }
+        self.chunk_size = chunk_size;
+        Ok(self)
+    }
+
+    /// Sets the maximum number of bytes returned by one poll.
+    ///
+    /// With `tasks` this cannot be const: a rejected request drops its shared cell.
+    #[cfg(feature = "tasks")]
+    pub fn with_chunk_size(mut self, chunk_size: usize) -> Result<Self, ConfigError> {
         if chunk_size == 0 {
             return Err(ConfigError::ZeroChunkSize);
         }
@@ -61,6 +100,36 @@ impl ReadRequest {
     pub const fn with_priority(mut self, priority: u32) -> Self {
         self.priority = priority;
         self
+    }
+
+    /// Shares a live urgency lane with tasks and other reads.
+    ///
+    /// At each admission decision the current lane wins first, followed by the
+    /// static [`Self::priority`] score and FIFO identity. Requests without a
+    /// shared cell use `Priority::Normal`. Boosts are monotonic, do not wake an
+    /// idle provider, and never preempt an active read. No callback is installed
+    /// on the cell: a queued request already has a driver or active dependency.
+    #[cfg(feature = "tasks")]
+    pub fn with_shared_priority(
+        mut self,
+        priority: alloc::sync::Arc<prism_tasks::PriorityCell>,
+    ) -> Self {
+        self.shared_priority = Some(priority);
+        self
+    }
+
+    /// The exact shared owner, retained through provider turns and cancellation.
+    #[cfg(feature = "tasks")]
+    pub fn shared_priority(&self) -> Option<&alloc::sync::Arc<prism_tasks::PriorityCell>> {
+        self.shared_priority.as_ref()
+    }
+
+    /// Current urgency lane; static-only requests use the normal lane.
+    #[cfg(feature = "tasks")]
+    pub fn effective_lane(&self) -> prism_tasks::Priority {
+        self.shared_priority
+            .as_ref()
+            .map_or(prism_tasks::Priority::Normal, |cell| cell.get())
     }
 
     /// Sets an optional FNV-1a checksum to verify when the read completes.
@@ -347,6 +416,10 @@ mod std_support {
     ///
     /// Priority does not preempt already active operations. Each active operation is
     /// visited at most once per poll; a ready chunk rotates the next poll's first turn.
+    /// With `tasks`, admission compares the live urgency lane before static
+    /// priority and FIFO. Ordinary requests use `Normal`. Static-only admission
+    /// keeps its heap fast path; each decision scans at most `capacity` shared
+    /// requests. Repeated higher-lane work can starve lower lanes.
     pub struct IoScheduler<P: ReadProvider> {
         provider: P,
         max_in_flight: usize,
@@ -354,6 +427,10 @@ mod std_support {
         next_request_id: Option<u64>,
         last_polled: Option<RequestId>,
         queue: BinaryHeap<QueuedRequest>,
+        // A mutable atomic priority must never be an Ord key inside a heap.
+        // Only shared requests pay the bounded linear scan at admission.
+        #[cfg(feature = "tasks")]
+        shared_queue: Vec<QueuedRequest>,
         active: BTreeMap<RequestId, ActiveOperation<P::Operation>>,
         cancelled_ready: BTreeSet<RequestId>,
     }
@@ -378,6 +455,8 @@ mod std_support {
                 next_request_id: Some(1),
                 last_polled: None,
                 queue: BinaryHeap::new(),
+                #[cfg(feature = "tasks")]
+                shared_queue: Vec::new(),
                 active: BTreeMap::new(),
                 cancelled_ready: BTreeSet::new(),
             })
@@ -406,6 +485,11 @@ mod std_support {
                 request,
                 request_id,
             };
+            #[cfg(feature = "tasks")]
+            if queued.request.shared_priority.is_some() {
+                self.shared_queue.push(queued);
+                return Ok(request_id);
+            }
             self.queue.push(queued);
             Ok(request_id)
         }
@@ -427,6 +511,15 @@ mod std_support {
                 }
                 queued.request_id != request_id
             });
+            #[cfg(feature = "tasks")]
+            self.shared_queue.retain(|queued| {
+                if queued.request_id == request_id {
+                    found = true;
+                    false
+                } else {
+                    true
+                }
+            });
             if found {
                 self.cancelled_ready.insert(request_id);
             }
@@ -435,7 +528,10 @@ mod std_support {
 
         /// Returns the number of queued or active requests not yet reported.
         pub fn len(&self) -> usize {
-            self.queue.len() + self.active.len() + self.cancelled_ready.len()
+            let len = self.queue.len() + self.active.len() + self.cancelled_ready.len();
+            #[cfg(feature = "tasks")]
+            let len = len + self.shared_queue.len();
+            len
         }
 
         /// Returns whether there is no outstanding work.
@@ -449,7 +545,7 @@ mod std_support {
                 return Poll::Ready(Err(IoError::Cancelled { request_id }));
             }
             while self.active.len() < self.max_in_flight {
-                let Some(queued) = self.queue.pop() else {
+                let Some(queued) = self.pop_queued() else {
                     break;
                 };
                 let request_id = queued.request_id;
@@ -492,6 +588,34 @@ mod std_support {
                 }
             }
             Poll::Pending
+        }
+
+        fn pop_queued(&mut self) -> Option<QueuedRequest> {
+            #[cfg(feature = "tasks")]
+            {
+                // Each atomic is sampled once. Concurrent boosts may affect the
+                // next decision; admission is not a global atomic snapshot.
+                let key = |queued: &QueuedRequest| {
+                    (
+                        queued.request.effective_lane(),
+                        queued.request.priority,
+                        core::cmp::Reverse(queued.request_id),
+                    )
+                };
+                let mut best = self.queue.peek().map(key);
+                let mut shared = None;
+                for (index, queued) in self.shared_queue.iter().enumerate() {
+                    let candidate = key(queued);
+                    if best.is_none_or(|best| candidate > best) {
+                        best = Some(candidate);
+                        shared = Some(index);
+                    }
+                }
+                if let Some(index) = shared {
+                    return Some(self.shared_queue.swap_remove(index));
+                }
+            }
+            self.queue.pop()
         }
     }
 
@@ -690,6 +814,9 @@ pub use reactor::{
 
 #[cfg(all(test, feature = "reactor", unix))]
 mod reactor_tests;
+
+#[cfg(all(test, feature = "tasks"))]
+mod priority_tests;
 
 #[cfg(all(test, feature = "std"))]
 mod threaded_file_tests;

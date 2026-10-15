@@ -43,12 +43,12 @@ pub(crate) struct Shared {
     deques: Vec<Mutex<VecDeque<Job>>>,
     /// Global MPMC FIFO queue for off-pool jobs and async harness dispatches.
     injector: Mutex<VecDeque<Job>>,
-    /// Priority-ordered inbox for jobs spawned into a [`crate::PriorityGroup`];
+    /// Priority-ordered inbox for group jobs and explicitly prioritized futures;
     /// drained highest-priority-first ahead of the ordinary deques.
     priority_inbox: PriorityInbox,
     /// Ready-to-poll async task harnesses for the single-threaded fallback,
     /// drained by [`crate::TaskPool::block_on`] (multi-threaded pools re-enqueue
-    /// harnesses as ordinary jobs instead).
+    /// harnesses as jobs instead, using the priority inbox when requested).
     async_ready: Mutex<AsyncReady>,
     async_cvar: Condvar,
     /// Count of jobs currently queued anywhere (for park/wake decisions).
@@ -72,7 +72,10 @@ pub(crate) struct Shared {
 
 #[derive(Default)]
 struct AsyncReady {
+    /// Ordinary futures keep their existing FIFO policy.
     queue: VecDeque<Arc<dyn RunnableTask>>,
+    /// Insertion order is retained so a live-priority scan breaks ties FIFO.
+    prioritized: VecDeque<(Arc<PriorityCell>, Arc<dyn RunnableTask>)>,
     epoch: u64,
 }
 
@@ -125,7 +128,7 @@ impl Shared {
         core::ptr::from_ref::<Shared>(self) as usize
     }
 
-    /// Enqueue a prioritized job into the priority inbox under its group's
+    /// Enqueue a prioritized job or future dispatch under its
     /// shared priority `cell`, then wake one idle worker. Drained ahead of the
     /// ordinary deques by [`Self::find_task`], giving high-priority groups
     /// precedence and letting in-place boosts implement priority inheritance.
@@ -167,9 +170,9 @@ impl Shared {
         self.cvar.notify_one();
     }
 
-    /// Try to obtain one job: local LIFO, then injector FIFO, then steal.
+    /// Obtain a job: live priority first, then local LIFO, injector FIFO, steal.
     pub(crate) fn find_task(&self, hint: Option<usize>) -> Option<Job> {
-        // Highest-priority groups run first and may preempt ordinary work.
+        // Prioritized dispatches run first (no preemption of a running poll).
         if let Some(job) = self.priority_inbox.pop_highest() {
             self.queued.fetch_sub(1, Ordering::Release);
             return Some(job);
@@ -363,21 +366,47 @@ impl Shared {
     }
 
     /// Enqueue a ready async task harness (single-threaded fallback only).
-    pub(crate) fn push_async_ready(&self, task: Arc<dyn RunnableTask>) {
+    pub(crate) fn push_async_ready(
+        &self,
+        task: Arc<dyn RunnableTask>,
+        priority: Option<Arc<PriorityCell>>,
+    ) {
         let mut ready = self.async_ready.lock().unwrap();
-        ready.queue.push_back(task);
+        if let Some(priority) = priority {
+            ready.prioritized.push_back((priority, task));
+        } else {
+            ready.queue.push_back(task);
+        }
         ready.epoch = ready.epoch.wrapping_add(1);
         self.async_cvar.notify_all();
     }
 
     /// Pop one ready async task harness, if any (single-threaded fallback).
+    /// Explicit priority entries, even Background, precede the ordinary FIFO;
+    /// this mirrors the worker inbox, not a unified Normal-priority queue.
     pub(crate) fn pop_async_ready(&self) -> Option<Arc<dyn RunnableTask>> {
-        self.async_ready.lock().unwrap().queue.pop_front()
+        let mut ready = self.async_ready.lock().unwrap();
+        if let Some((cell, _)) = ready.prioritized.front() {
+            let mut best = 0;
+            let mut priority = cell.get();
+            for (index, (cell, _)) in ready.prioritized.iter().enumerate().skip(1) {
+                let live = cell.get();
+                if live > priority {
+                    best = index;
+                    priority = live;
+                }
+            }
+            // Unlike swap-remove, removal retains FIFO order among ties after
+            // earlier dispatches (and boosts). No task is run under the lock.
+            return ready.prioritized.remove(best).map(|(_, task)| task);
+        }
+        ready.queue.pop_front()
     }
 
     /// Whether the single-threaded async ready queue is empty.
     pub(crate) fn async_ready_is_empty(&self) -> bool {
-        self.async_ready.lock().unwrap().queue.is_empty()
+        let ready = self.async_ready.lock().unwrap();
+        ready.queue.is_empty() && ready.prioritized.is_empty()
     }
 
     /// Observe before polling/draining so wake-before-wait cannot be lost.
@@ -400,10 +429,10 @@ impl Shared {
         let (ready, _) = self
             .async_cvar
             .wait_timeout_while(ready, timeout, |ready| {
-                ready.queue.is_empty() && ready.epoch == epoch
+                ready.queue.is_empty() && ready.prioritized.is_empty() && ready.epoch == epoch
             })
             .unwrap();
-        !ready.queue.is_empty() || ready.epoch != epoch
+        !ready.queue.is_empty() || !ready.prioritized.is_empty() || ready.epoch != epoch
     }
 
     pub(crate) fn id(&self) -> usize {

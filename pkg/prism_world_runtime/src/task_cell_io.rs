@@ -168,6 +168,21 @@ impl<I: CellIo> Drop for TaskCellIo<I> {
     }
 }
 
+impl<I: crate::PriorityCellIo> crate::PriorityCellIo for TaskCellIo<I> {
+    fn submit_with_priority(
+        &mut self,
+        request: CellReadRequest,
+        priority: alloc::sync::Arc<prism_tasks::PriorityCell>,
+    ) -> Result<RequestId, SubmitError> {
+        if self.token.is_cancelled() {
+            return Err(SubmitError::Cancelled);
+        }
+        let id = self.io.submit_with_priority(request, priority)?;
+        self.outstanding.insert(id);
+        Ok(id)
+    }
+}
+
 fn discard_panic(payload: Box<dyn core::any::Any + Send>) {
     if let Err(nested) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload))) {
         // A second panicking destructor cannot safely be executed here.

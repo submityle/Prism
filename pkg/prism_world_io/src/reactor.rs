@@ -555,12 +555,11 @@ impl Work {
         let file = self.file.as_ref().expect("IO worker opened file");
         // Build the infallible internal waker before submitting any native op.
         let waker = Waker::from(Arc::new(WorkerWake(thread::current())));
-        let future = reactor.read_into(
-            file.as_raw_fd(),
-            offset,
-            IoPriority::Normal,
-            bytes.into_boxed_slice(),
-        );
+        let priority = native_priority(self.request.effective_lane());
+        #[cfg(test)]
+        shared.event(TestEvent::Priority(priority));
+        let future =
+            reactor.read_into(file.as_raw_fd(), offset, priority, bytes.into_boxed_slice());
         let mut pending = PendingRead {
             future,
             waker,
@@ -639,6 +638,15 @@ impl Drop for PendingRead {
     }
 }
 
+fn native_priority(priority: prism_tasks::Priority) -> IoPriority {
+    use prism_tasks::Priority;
+    match priority {
+        Priority::Background | Priority::Low => IoPriority::Low,
+        Priority::Normal => IoPriority::Normal,
+        Priority::High | Priority::Critical => IoPriority::High,
+    }
+}
+
 #[cfg(test)]
 type TestHook = Arc<dyn Fn(TestEvent) + Send + Sync>;
 
@@ -646,6 +654,7 @@ type TestHook = Arc<dyn Fn(TestEvent) + Send + Sync>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TestEvent {
     BeforeOpen,
+    Priority(IoPriority),
     Submitted,
     Reaped { file_alive: bool },
     Closed,

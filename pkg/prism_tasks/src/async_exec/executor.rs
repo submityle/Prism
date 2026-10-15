@@ -14,10 +14,15 @@
 //! A harness is enqueued at most once at a time (a small [`RunState`] machine
 //! guards against double-enqueue and handles a wake that lands *during* a poll
 //! by re-polling within the quantum or re-queuing at its end). Continuations
-//! use the global FIFO injector, not a worker's local LIFO deque, so yielding
-//! cannot overtake already-injected jobs. Priority work and local deques still
+//! without an explicit priority use the global FIFO injector, not a worker's
+//! local LIFO deque, so yielding cannot overtake already-injected jobs.
+//! Priority work and local deques still
 //! take precedence over the injector; this is not strict scheduler-wide FIFO.
 //! This is cooperative: a single long-running poll cannot be preempted.
+//! Explicitly prioritized futures use the existing priority inbox with a live
+//! shared cell on every enqueue. These queues can starve lower-priority work
+//! (including ordinary work); the poll quantum does not guarantee fairness
+//! across priority levels.
 //! [`TaskPool::block_on`] parks the calling thread on a condvar and is woken
 //! by the future's own waker, so it
 //! does not spin on an unwoken pending root. In the single-threaded fallback
@@ -32,6 +37,7 @@ use std::task::{Context, Poll};
 
 use super::task::{ResultCell, Task};
 use super::waker::{waker_of, WakeTask};
+use crate::priority::PriorityCell;
 use crate::scheduler::Shared;
 use crate::TaskPool;
 
@@ -73,6 +79,9 @@ struct TaskHarness {
     shared: Arc<Shared>,
     /// Whether the owning pool is the single-threaded fallback (no workers).
     single: bool,
+    /// Kept by identity across initial dispatch, external wakes and yields.
+    /// `None` preserves the ordinary future's FIFO scheduling policy.
+    priority: Option<Arc<PriorityCell>>,
     /// Completes the task's result cell with a captured panic payload if the
     /// future panics while being polled (so waiters never hang).
     on_panic: Box<dyn Fn(Box<dyn core::any::Any + Send>) + Send + Sync>,
@@ -90,7 +99,12 @@ impl TaskHarness {
     fn enqueue(self: Arc<Self>) {
         if self.single {
             let shared = Arc::clone(&self.shared);
-            shared.push_async_ready(self);
+            let priority = self.priority.clone();
+            shared.push_async_ready(self, priority);
+        } else if let Some(priority) = &self.priority {
+            let shared = Arc::clone(&self.shared);
+            let priority = Arc::clone(priority);
+            shared.push_prioritized(priority, Box::new(move || self.run_boxed()));
         } else {
             let shared = Arc::clone(&self.shared);
             // A continuation put on the worker's local LIFO deque could
@@ -263,6 +277,55 @@ impl TaskPool {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        self.spawn_future_inner(None, future)
+    }
+
+    /// Spawn an ordinary future, with the same FIFO policy as
+    /// [`TaskPool::spawn_async`].
+    pub fn spawn_future<F>(&self, future: F) -> Task<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.spawn_async(future)
+    }
+
+    /// Spawn a future sharing the live, monotonically boostable `priority`.
+    ///
+    /// Initial dispatch, wakeups and poll-quantum continuations all retain the
+    /// same cell. Boosts affect queued dispatches without another wake, including
+    /// on zero-worker pools driven by [`TaskPool::block_on`]. Equal-priority
+    /// dispatches are FIFO in their queue; running polls are never preempted.
+    /// Explicit priority and ordinary FIFO queues are separate; ordinary futures
+    /// are not implicitly Normal. Prioritized dispatches precede ordinary work,
+    /// even at Background, and can starve it or lower priorities if continually
+    /// runnable.
+    /// The quantum bounds poll count, not time or cross-priority starvation.
+    ///
+    /// A cell from [`crate::PriorityGroup::priority_cell`] shares inheritance
+    /// with that group's jobs, but the future is tracked by its own
+    /// [`Task::counter`], not by the group's completion counter.
+    pub fn spawn_future_with_priority<F>(
+        &self,
+        priority: Arc<PriorityCell>,
+        future: F,
+    ) -> Task<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.spawn_future_inner(Some(priority), future)
+    }
+
+    fn spawn_future_inner<F>(
+        &self,
+        priority: Option<Arc<PriorityCell>>,
+        future: F,
+    ) -> Task<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
         let cell = ResultCell::<F::Output>::new();
         let cell_for_future = Arc::clone(&cell);
         let cell_for_panic = Arc::clone(&cell);
@@ -278,6 +341,7 @@ impl TaskPool {
             }),
             shared: Arc::clone(self.shared_state()),
             single: self.is_single_threaded(),
+            priority,
             on_panic: Box::new(move |payload| cell_for_panic.complete_panic(payload)),
         });
         harness.enqueue();
@@ -372,6 +436,10 @@ mod single_wake_tests;
 #[cfg(test)]
 #[path = "fairness_tests.rs"]
 mod fairness_tests;
+
+#[cfg(test)]
+#[path = "priority_tests.rs"]
+mod priority_tests;
 
 #[cfg(test)]
 mod tests {

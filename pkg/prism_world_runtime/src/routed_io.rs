@@ -89,3 +89,19 @@ impl<I: CellIo> CellIo for RoutedCellIo<I> {
         self.io.poll_completion(cx)
     }
 }
+
+#[cfg(feature = "tasks")]
+impl<I: crate::PriorityCellIo> crate::PriorityCellIo for RoutedCellIo<I> {
+    fn submit_with_priority(
+        &mut self,
+        request: CellReadRequest,
+        priority: alloc::sync::Arc<prism_tasks::PriorityCell>,
+    ) -> Result<RequestId, SubmitError> {
+        let request = self
+            .resolve(request)
+            .map_err(|error| SubmitError::Provider {
+                message: error.to_string(),
+            })?;
+        self.io.submit_with_priority(request, priority)
+    }
+}

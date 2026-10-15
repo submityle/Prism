@@ -245,7 +245,28 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
     /// requested/limit values; it has no request ID and consumes no quota.
     pub fn submit(&self, request: CellReadRequest) -> Result<IoRequestId, IoError> {
         let mut state = self.lock_state()?;
-        let id = self.submit_locked(&mut state, request)?;
+        let id = self.submit_locked(&mut state, request, request.io_request())?;
+        drop(state);
+        self.wake.wake_by_ref();
+        Ok(id)
+    }
+
+    /// Submits with a shared, monotonically boostable task urgency lane.
+    ///
+    /// A boost is observed at the next scheduler admission, without waking or
+    /// preempting an active request. Static stream priority breaks lane ties.
+    #[cfg(feature = "tasks")]
+    pub fn submit_with_priority(
+        &self,
+        request: CellReadRequest,
+        priority: Arc<prism_tasks::PriorityCell>,
+    ) -> Result<IoRequestId, IoError> {
+        let mut state = self.lock_state()?;
+        let id = self.submit_locked(
+            &mut state,
+            request,
+            request.io_request().with_shared_priority(priority),
+        )?;
         drop(state);
         self.wake.wake_by_ref();
         Ok(id)
@@ -255,6 +276,7 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
         &self,
         state: &mut AdapterState<P>,
         request: CellReadRequest,
+        io_request: ReadRequest,
     ) -> Result<IoRequestId, IoError> {
         if state.pending.len() >= self.capacity {
             return Err(IoError::Backpressure {
@@ -292,12 +314,12 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
                 ),
             });
         }
-        let io_request = request
-            .io_request()
-            .with_chunk_size(self.chunk_size)
-            .map_err(|_| IoError::Provider {
-                message: String::from("adapter chunk size is invalid"),
-            })?;
+        let io_request =
+            io_request
+                .with_chunk_size(self.chunk_size)
+                .map_err(|_| IoError::Provider {
+                    message: String::from("adapter chunk size is invalid"),
+                })?;
         let request_id = state.scheduler.submit(io_request)?;
         state.pending.insert(
             request_id,
@@ -437,7 +459,7 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
         let waker = Waker::from(Arc::clone(&parker));
         let request_id = {
             let mut state = self.lock_state()?;
-            let id = self.submit_locked(&mut state, *request)?;
+            let id = self.submit_locked(&mut state, *request, request.io_request())?;
             state.blocking.insert(id);
             id
         };

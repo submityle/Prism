@@ -62,4 +62,4 @@ cargo bench --offline -p prism_world_runtime --features reactor --bench threaded
 
 ## 边界
 
-已完成原生 reactor → 有界 scheduler → manifest/header/checksum → opaque `SceneHost` 和任务 scope 的接线。仍不代表资产包解压、mmap schema 视图、GPU 直传、动态优先级继承、完整 scene/ECS/GPU 产品管线或跨平台后端已经实现。同步 `FileProvider` 兼容路径仍独立存在；此次没有改变它的阻塞语义。
+已完成原生 reactor → 有界 scheduler → manifest/header/checksum → opaque `SceneHost` 和任务 scope 的接线。后续共享动态优先级已贯通任务、准入和逐 chunk kernel hint，限制与验证见 `prism_world_shared_priority_zh.md`；不会提升物理 FIFO 等待或抢占活动操作。仍不代表资产包解压、mmap schema 视图、GPU 直传、完整 scene/ECS/GPU 产品管线或跨平台后端已经实现。同步 `FileProvider` 兼容路径仍独立存在；此次没有改变它的阻塞语义。

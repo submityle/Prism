@@ -19,6 +19,45 @@ use std::{
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
+#[test]
+fn reactor_samples_shared_priority_on_each_acknowledged_native_chunk() {
+    use prism_platform::aio::IoPriority;
+    use prism_tasks::{Priority, PriorityCell};
+    let Some(services) = Services::new() else {
+        return;
+    };
+    let source = Source::new(b"abcdef");
+    let provider = services.provider(&source.0, config(1, 2));
+    let (tx, observed) = mpsc::channel();
+    test_support::set_hook(
+        &provider,
+        Arc::new(move |event| {
+            if let TestEvent::Priority(priority) = event {
+                tx.send(priority).unwrap();
+            }
+        }),
+    );
+    let cell = Arc::new(PriorityCell::new(Priority::Background));
+    let request = ReadRequest::new(0, 6)
+        .with_priority(u32::MAX)
+        .with_shared_priority(Arc::clone(&cell));
+    let mut operation = provider.start(&request, RequestId(1)).unwrap();
+    assert_eq!(next(&mut operation).unwrap().unwrap().bytes(), b"ab");
+    assert_eq!(observed.recv_timeout(DEADLINE).unwrap(), IoPriority::Low);
+    assert!(observed.try_recv().is_err());
+    cell.boost_to(Priority::Normal);
+    assert_eq!(next(&mut operation).unwrap().unwrap().bytes(), b"cd");
+    assert_eq!(observed.recv_timeout(DEADLINE).unwrap(), IoPriority::Normal);
+    assert_eq!(provider.reserved_bytes(), 6);
+    cell.boost_to(Priority::Critical);
+    assert_eq!(next(&mut operation).unwrap().unwrap().bytes(), b"ef");
+    assert_eq!(observed.recv_timeout(DEADLINE).unwrap(), IoPriority::High);
+    assert_eq!(provider.reserved_bytes(), 0);
+    assert_eq!(next(&mut operation).unwrap(), None);
+    assert_eq!(provider.reserved_bytes(), 0);
+    assert_eq!(provider.in_flight(), 0);
+}
+
 // Declaration order joins the existing workers before the final reactor drop.
 struct Services {
     workers: NamedThreads,
@@ -438,6 +477,7 @@ fn reactor_cancel_after_submission_keeps_fd_and_quota_through_reap_and_close() {
         observed.iter().map(|(event, _)| *event).collect::<Vec<_>>(),
         vec![
             TestEvent::BeforeOpen,
+            TestEvent::Priority(prism_platform::aio::IoPriority::Normal),
             TestEvent::Submitted,
             TestEvent::Reaped { file_alive: true },
             TestEvent::Closed,
