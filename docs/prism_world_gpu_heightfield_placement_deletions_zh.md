@@ -3,6 +3,18 @@
 验收日期：2026-10-16。本文件记录 `prism_world_gpu` 中独立的
 `heightfield placement deletion` GPU 切片，不表示整个 World 系统或产品运行时已经完成。
 
+## 独立交付提交
+
+实现链由以下独立提交组成：
+
+- `1ebd0674c`：精确二维 heightfield placement GPU 管线；
+- `aab96181b`：56-byte 完整键 placement deletion GPU 管线及端到端测试；
+- `a53b4fa76`：删除交付的资源、失败事务和测试边界加固；
+- `231a9643b`：同步 placement/deletion 验收文档。
+
+本文件只记录本切片的实现与验收边界；不把这些提交扩展解释为其他 World 模块或整个
+产品运行时的完成证明。
+
 ## 已交付范围
 
 `GpuHeightfieldPlacementDeletions` 自己拥有一个 `GpuHeightfieldPlacement` 上游对象，
@@ -67,10 +79,10 @@ workgroup storage 和 dispatch 上限。零容量仍分配一个不可寻址物�
 静态检查、WGSL/Naga ABI 检查和 placement deletion 物理 GPU 测试分别运行：
 
 ```bash
-cargo check -p prism_world_gpu --features terrain_scatter --tests
-cargo test -p prism_world_gpu --features terrain_scatter --test wgsl_compile --no-fail-fast
-WGPU_BACKEND=metal cargo test -p prism_world_gpu --features terrain_scatter --test heightfield_placement_deletion -- --nocapture
-WGPU_BACKEND=metal cargo test -p prism_world_gpu --features terrain_scatter --test scatter_deletion_composed -- --nocapture
+cargo check --offline -p prism_world_gpu --features terrain_scatter --tests
+cargo test --offline -p prism_world_gpu --features terrain_scatter --test wgsl_compile --no-fail-fast
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_world_gpu --features terrain_scatter --test heightfield_placement_deletion -- --nocapture
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_world_gpu --features terrain_scatter --test scatter_deletion_composed -- --nocapture
 ```
 
 物理 GPU 测试要求真实 `IntegratedGpu` 或 `DiscreteGpu`，不会把无 adapter、软件 adapter
