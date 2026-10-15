@@ -38,6 +38,31 @@ use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider};
 pub struct MeshPipelines {
     provider: Box<dyn MeshPipelineProvider + Send + Sync>,
     response_modules: ResponseModuleCache,
+    recovery: MeshPipelineRecovery,
+}
+
+#[derive(Clone, Copy)]
+enum MeshPipelineRecovery {
+    Spine { color_format: TextureFormat },
+    Unavailable,
+}
+
+/// Why the mesh pipeline provider could not be rebuilt for a replacement
+/// device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MeshPipelineRecoveryError {
+    /// A custom provider was installed without a device-rebuild recipe.
+    CustomProvider,
+}
+
+impl core::fmt::Display for MeshPipelineRecoveryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::CustomProvider => f.write_str(
+                "the installed custom mesh pipeline provider has no device recovery recipe",
+            ),
+        }
+    }
 }
 
 /// A response module declaration plus its resident RHI shader module.
@@ -259,6 +284,7 @@ impl MeshPipelines {
         Self {
             provider: Box::new(provider),
             response_modules: ResponseModuleCache::new(),
+            recovery: MeshPipelineRecovery::Unavailable,
         }
     }
 
@@ -292,6 +318,7 @@ impl MeshPipelines {
         Self {
             provider: Box::new(SpineMeshPipeline::from_module(shader_module, color_format)),
             response_modules,
+            recovery: MeshPipelineRecovery::Spine { color_format },
         }
     }
 
@@ -310,6 +337,40 @@ impl MeshPipelines {
     /// Releases resident shader modules after all dependent PSOs are gone.
     pub fn clear_response_modules<D: RenderDevice + ?Sized>(&mut self, device: &D) {
         self.response_modules.clear(device);
+    }
+
+    /// Rebuilds the provider and its resident shader modules on `device`.
+    ///
+    /// The built-in spine carries a complete recipe. A custom provider created
+    /// with [`Self::new`] is rejected instead of being silently replaced by the
+    /// spine, so recovery remains observable and the app stays paused.
+    pub(crate) fn recover(
+        &mut self,
+        device: &dyn RenderDevice,
+    ) -> Result<(), MeshPipelineRecoveryError> {
+        match self.recovery {
+            MeshPipelineRecovery::Spine { color_format } => {
+                for module in self.response_modules.modules.values_mut() {
+                    module.shader_module = device.create_shader_module(&module.descriptor);
+                }
+                self.provider = match self.response_modules.get(ModuleId::SPINE) {
+                    Some(module) => Box::new(SpineMeshPipeline::from_module(
+                        module.shader_module,
+                        color_format,
+                    )),
+                    None => Box::new(SpineMeshPipeline::new(device, color_format)),
+                };
+                Ok(())
+            }
+            MeshPipelineRecovery::Unavailable => Err(MeshPipelineRecoveryError::CustomProvider),
+        }
+    }
+
+    pub(crate) fn check_recovery(&self) -> Result<(), MeshPipelineRecoveryError> {
+        match self.recovery {
+            MeshPipelineRecovery::Spine { .. } => Ok(()),
+            MeshPipelineRecovery::Unavailable => Err(MeshPipelineRecoveryError::CustomProvider),
+        }
     }
 }
 

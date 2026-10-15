@@ -57,6 +57,9 @@ pub use prepare::{
     prepare_extracted_assets, prepare_extracted_assets_with_context, AssetSyncReport,
     PrepareAssetError,
 };
+pub(crate) use stage::{
+    invalidate_registered_render_assets, recovered_assets_pending, PrepareRecoveredAssets,
+};
 pub use stage::{prepare_assets, register_render_assets, AssetSyncStats};
 pub use table::RenderAssets;
 

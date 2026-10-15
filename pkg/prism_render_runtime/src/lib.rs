@@ -203,8 +203,8 @@ impl<I: Instance> RenderRuntime<I> {
         Arc::clone(&self.device)
     }
 
-    /// Returns why the GPU device was lost, clearing the record so a caller acts
-    /// on it once, or `None` when no loss has been reported.
+    /// Returns why the GPU device was lost, retaining the record until recovery
+    /// succeeds, or `None` when no loss has been reported.
     ///
     /// Delegates to the backend device's
     /// [`RenderDevice::take_device_lost`](prism_render_driver::RenderDevice::take_device_lost).
@@ -213,7 +213,14 @@ impl<I: Instance> RenderRuntime<I> {
     /// (design §24.3).
     #[must_use]
     pub fn device_lost(&self) -> Option<DeviceLostReason> {
-        self.device.take_device_lost()
+        let mut pending = self
+            .pending_device_loss
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.is_none() {
+            *pending = self.device.take_device_lost();
+        }
+        *pending
     }
 
     /// The RHI render queue.

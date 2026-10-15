@@ -80,6 +80,7 @@ mod plugin;
 mod queue;
 mod queue_stage;
 mod record;
+mod recovery;
 mod render_asset;
 mod runtime_resource;
 mod scene;
@@ -101,7 +102,7 @@ mod tests;
 
 pub use bin_queue::{bin_indirect_args, BinQueueOutcome};
 pub use config::RenderAppConfig;
-pub use device_loss::DeviceLossSignal;
+pub use device_loss::{DeviceLossSignal, DeviceRecoveryStatus};
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
 pub use frame::{RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT};
 pub use image::GpuImage;

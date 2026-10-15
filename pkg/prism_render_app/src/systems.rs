@@ -49,7 +49,17 @@ pub(crate) fn extract_render_record(main: &mut World, render: &mut World) {
 /// [`RenderStartup`] runs first (once per device): a plugin registered its GPU
 /// resources from any plugin, in any order, and they must exist before the first
 /// frame reads them.
-pub(crate) fn drive_render_schedule(world: &mut World) {
+pub(crate) fn drive_render_schedule<I>(world: &mut World)
+where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    if crate::recovery::recover_before_render::<I>(world) {
+        return;
+    }
     ensure_render_startup(world);
     world.run_schedule(Render);
 }

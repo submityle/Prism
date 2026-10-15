@@ -46,6 +46,11 @@ where
     pub fn runtime(&self) -> &RenderRuntime<I> {
         &self.runtime
     }
+
+    /// Mutable access to the wrapped runtime for device recovery.
+    pub(crate) fn runtime_mut(&mut self) -> &mut RenderRuntime<I> {
+        &mut self.runtime
+    }
 }
 
 impl<I> Resource for RenderRuntimeResource<I>

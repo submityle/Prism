@@ -2,9 +2,12 @@
 
 use core::marker::PhantomData;
 
+use alloc::vec::Vec;
 use prism_app::App;
+use prism_asset::AssetId;
 use prism_ecs::prelude::{Res, ResMut, Resource};
-use prism_ecs::schedule::{IntoSystemConfigs, Schedules};
+use prism_ecs::schedule::{IntoSystemConfigs, Schedule, Schedules};
+use prism_ecs::world::World;
 use prism_render_driver::{FrameSync, Instance};
 
 use crate::label::{Render, RenderApp};
@@ -15,6 +18,93 @@ use super::extract::{extract_assets, ExtractedAssets};
 use super::prepare::{prepare_extracted_assets, AssetSyncReport};
 use super::table::RenderAssets;
 use super::RenderAsset;
+
+type InvalidateRenderAssets = fn(&mut World);
+
+/// Type-erased invalidators for every render-asset family registered with the
+/// render app.
+#[derive(Resource, Default)]
+pub(crate) struct RenderAssetRecoveryRegistry {
+    invalidators: Vec<InvalidateRenderAssets>,
+    pending: Vec<fn(&World) -> bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PrepareRecoveredAssets;
+
+/// Source ids that must be extracted again after a device replacement.
+pub(crate) struct RenderAssetRecoveryState<A: RenderAsset> {
+    pub(super) pending: Vec<AssetId<A::SourceAsset>>,
+}
+
+impl<A: RenderAsset> Default for RenderAssetRecoveryState<A> {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl<A: RenderAsset> Resource for RenderAssetRecoveryState<A> {}
+
+impl<A: RenderAsset> RenderAssetRecoveryState<A> {
+    pub(crate) fn pending(&self) -> &[AssetId<A::SourceAsset>] {
+        &self.pending
+    }
+}
+
+fn invalidate_render_assets<A: RenderAsset>(world: &mut World) {
+    let mut pending = world
+        .get_resource::<RenderAssets<A>>()
+        .map(|assets| assets.iter().map(|(id, _)| id).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if let Some(state) = world.get_resource::<RenderAssetRecoveryState<A>>() {
+        for id in &state.pending {
+            if !pending.contains(id) {
+                pending.push(*id);
+            }
+        }
+    }
+    if let Some(extracted) = world.get_resource::<ExtractedAssets<A>>() {
+        for (id, _) in extracted.extracted() {
+            if !pending.contains(id) {
+                pending.push(*id);
+            }
+        }
+    }
+    world.insert_resource(RenderAssets::<A>::new());
+    // Pending CPU snapshots (including prepare retries) are still valid.
+    world.insert_resource(RenderAssetRecoveryState::<A> { pending });
+    world.insert_resource(AssetSyncStats::<A>::default());
+}
+
+/// Invalidates every registered GPU asset table without calling unload hooks
+/// against the replacement device.
+pub(crate) fn invalidate_registered_render_assets(world: &mut World) {
+    let registry = world
+        .remove_resource::<RenderAssetRecoveryRegistry>()
+        .unwrap_or_default();
+    for invalidate in &registry.invalidators {
+        invalidate(world);
+    }
+    world.insert_resource(registry);
+}
+
+fn recovery_pending<A: RenderAsset>(world: &World) -> bool {
+    world
+        .resource::<RenderAssetRecoveryState<A>>()
+        .pending
+        .iter()
+        .any(|id| !world.resource::<RenderAssets<A>>().contains(*id))
+        || !world.resource::<ExtractedAssets<A>>().is_empty()
+        || world.resource::<AssetSyncStats<A>>().last.unpreparable != 0
+}
+
+pub(crate) fn recovered_assets_pending(world: &World) -> bool {
+    world
+        .get_resource::<RenderAssetRecoveryRegistry>()
+        .is_some_and(|registry| registry.pending.iter().any(|pending| pending(world)))
+}
 
 /// The last sync pass's report for one asset family.
 ///
@@ -111,7 +201,29 @@ where
         .expect("the render sub-app was just checked");
     render.world.insert_resource(ExtractedAssets::<A>::new());
     render.world.insert_resource(RenderAssets::<A>::new());
+    render
+        .world
+        .insert_resource(RenderAssetRecoveryState::<A>::default());
     render.world.insert_resource(AssetSyncStats::<A>::default());
+    render.world.init_resource::<RenderAssetRecoveryRegistry>();
+    render
+        .world
+        .resource_mut::<RenderAssetRecoveryRegistry>()
+        .invalidators
+        .push(invalidate_render_assets::<A>);
+    render
+        .world
+        .resource_mut::<RenderAssetRecoveryRegistry>()
+        .pending
+        .push(recovery_pending::<A>);
+    let schedules = render.world.resource_mut::<Schedules>();
+    if !schedules.contains(PrepareRecoveredAssets) {
+        schedules.insert(PrepareRecoveredAssets, Schedule::new());
+    }
+    schedules
+        .get_mut(PrepareRecoveredAssets)
+        .expect("recovery asset schedule")
+        .add_systems(prepare_assets::<I, A>);
     render
         .world
         .resource_mut::<Schedules>()

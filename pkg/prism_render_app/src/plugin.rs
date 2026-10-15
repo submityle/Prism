@@ -8,7 +8,7 @@ use prism_render_driver::{FrameSync, Instance};
 use prism_render_runtime::RenderRuntime;
 
 use crate::config::RenderAppConfig;
-use crate::device_loss::{poll_device_loss, DeviceLossSignal};
+use crate::device_loss::{DeviceLossSignal, DeviceRecoveryStatus};
 use crate::intent::RenderIntent;
 use crate::label::{Render, RenderApp, RenderStartup};
 use crate::material::{
@@ -127,7 +127,7 @@ where
             panic!("PrismRenderPlugin: render backend bring-up failed: {error}")
         });
 
-        // Device-loss bridge (design §12/§24.3): one cell, cloned into both the
+        // Device-loss bridge (design §12/§24.3): one queue, cloned into both the
         // render world (which owns the GPU runtime) and the main world (which
         // owns the app lifecycle).
         let device_loss = DeviceLossSignal::new();
@@ -203,16 +203,13 @@ where
             schedule.add_systems(fill_queues::<I>.in_set(RenderSystems::Queue));
             schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));
             schedule.add_systems(clear_queues.in_set(RenderSystems::Cleanup));
-            // Poll the runtime for a lost device after the frame; the value
-            // crosses to the main world through the shared signal.
-            schedule.add_systems(poll_device_loss::<I>.in_set(RenderSystems::Cleanup));
         }
         render
             .world
             .resource_mut::<Schedules>()
             .get_mut(Last)
             .expect("the Last schedule was just inserted")
-            .add_systems(drive_render_schedule);
+            .add_systems(drive_render_schedule::<I>);
 
         app.insert_sub_app(RenderApp, render);
 
@@ -220,8 +217,11 @@ where
         // emit `DeviceLost`, which `drive_app_lifecycle` folds into
         // `AppLifecycle::Recovering` (pausing simulation for the rebuild).
         app.insert_resource(device_loss);
+        app.insert_resource(DeviceRecoveryStatus::default());
         app.add_event::<prism_app::lifecycle::DeviceLost>();
-        app.add_systems(First, crate::device_loss::forward_device_loss);
+        app.add_event::<prism_app::lifecycle::DeviceRestored>();
+        app.add_systems(First, crate::device_loss::forward_device_recovery);
+        app.add_lifecycle_events();
 
         // The main world's authoritative render intent, and the one-way feeds.
         //
@@ -254,6 +254,17 @@ where
         let Some(render) = app.sub_app_mut(RenderApp) else {
             return;
         };
+        // A partially rebuilt target may still name the previous generation.
+        // Release the device with the world instead of waiting on a lost GPU
+        // or destroying those ids against its replacement.
+        if crate::recovery::is_recovering(&render.world)
+            || render
+                .world
+                .get_resource::<RenderRuntimeResource<I>>()
+                .is_some_and(|runtime| runtime.runtime().device_lost().is_some())
+        {
+            return;
+        }
         // Drain the pipeline, then release the frame target. The device itself
         // is dropped with the runtime when the app's worlds are torn down.
         if let Some(runtime) = render.world.get_resource::<RenderRuntimeResource<I>>() {

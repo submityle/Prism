@@ -352,6 +352,26 @@ impl MaterialParameterBuffers {
         self.textures = None;
     }
 
+    /// Recreates all three buffers on a replacement device and restores their
+    /// contents from the CPU mirrors.
+    ///
+    /// Old ids are deliberately forgotten without being destroyed: after
+    /// device loss they belong to the dead device generation and must never be
+    /// passed to the replacement device.
+    pub(crate) fn recover<D: RenderDevice, Q: RenderQueue>(&mut self, device: &D, queue: &Q) {
+        self.headers = None;
+        self.parameters = None;
+        self.textures = None;
+        self.allocate(
+            device,
+            self.header_capacity.max(1),
+            self.parameter_capacity_words.max(1),
+            self.texture_capacity_rows.max(1),
+            self.extra_usage,
+        );
+        self.upload_all(queue);
+    }
+
     /// Grows the header buffer so it has at least `needed` rows, preserving the
     /// mirror. Returns whether it reallocated.
     fn ensure_header<D: RenderDevice>(&mut self, device: &D, needed: u32) -> bool {

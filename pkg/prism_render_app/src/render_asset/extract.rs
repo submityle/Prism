@@ -12,6 +12,7 @@ use prism_asset::{AssetEvent, AssetId, AssetServer, Assets};
 use prism_ecs::prelude::Resource;
 use prism_ecs::world::World;
 
+use super::stage::RenderAssetRecoveryState;
 use super::RenderAsset;
 
 /// The assets a frame carried into the render world.
@@ -113,15 +114,53 @@ pub fn extract_assets<A: RenderAsset>(main: &mut World, render: &mut World) {
     let server_batch = main
         .get_resource::<AssetServer>()
         .and_then(AssetServer::drain_events_with_snapshots::<A::SourceAsset>);
+    let use_server = server_batch.is_some();
     let (events, snapshots) = match server_batch {
         Some(batch) => batch,
         None => match main.get_resource_mut::<Assets<A::SourceAsset>>() {
             Some(assets) => assets.drain_events_with_snapshots(),
-            // No arena in the main world: nothing of this family exists yet.
+            // Keep recovery requests until the source arena is available.
             None => return,
         },
     };
-    if events.is_empty() {
+    let recovery_ids = render
+        .get_resource::<RenderAssetRecoveryState<A>>()
+        .map(|state| state.pending().to_vec())
+        .unwrap_or_default();
+    let recovery_ids: Vec<_> = recovery_ids
+        .into_iter()
+        .filter(|id| {
+            !render
+                .get_resource::<super::RenderAssets<A>>()
+                .is_some_and(|assets| assets.contains(*id))
+                && !events
+                    .iter()
+                    .any(|event| matches!(event, AssetEvent::Removed { .. }) && event.id() == *id)
+        })
+        .collect();
+    if let Some(state) = render.get_resource_mut::<RenderAssetRecoveryState<A>>() {
+        state.pending = recovery_ids.clone();
+    }
+    let recovery_snapshots = if use_server {
+        let server = main.resource::<AssetServer>();
+        recovery_ids
+            .iter()
+            .filter_map(|id| {
+                server
+                    .with_asset::<A::SourceAsset, _>(*id, Clone::clone)
+                    .map(|asset| (*id, asset))
+            })
+            .collect::<Vec<_>>()
+    } else if let Some(assets) = main.get_resource::<Assets<A::SourceAsset>>() {
+        recovery_ids
+            .iter()
+            .filter_map(|id| assets.get(*id).cloned().map(|asset| (*id, asset)))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    if events.is_empty() && recovery_snapshots.is_empty() {
         return;
     }
 
@@ -129,6 +168,9 @@ pub fn extract_assets<A: RenderAsset>(main: &mut World, render: &mut World) {
         render.insert_resource(ExtractedAssets::<A>::new());
     }
     let mut frame = core::mem::take(render.resource_mut::<ExtractedAssets<A>>());
+    for (id, asset) in recovery_snapshots {
+        frame.push_extracted(id, asset);
+    }
     for event in events {
         let id = event.id();
         match event {
