@@ -39,12 +39,17 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 - `prism_world_io`：分块读取请求、稳定优先级/FIFO 排序、显式容量背压、可取消 poll 操作、连续 chunk/short-read/checksum 校验和 std 文件 provider。
 - 默认构建保持 `no_std + alloc`；`std` 只增加 scheduler 与文件系统 provider，不把 IO、资产数据库或 ECS 引入 world policy core。
 - `prism_world_runtime`：真实调用 `StreamScheduler` 生成 load/evict 动作，并通过有界、可取消、优先级排序的 provider 队列提交 cell；完成后执行固定 manifest header 校验，再进入 `SceneHost::load_cell`，失败/驱逐写入可 replay trace。std 构建新增 `IoSchedulerAdapter`，实际桥接 `prism_world_io::IoScheduler` 的 chunk/completion/cancel/backpressure/error 事件，并保留同步 `ChunkProvider` 兼容路径。
+- `FileProvider` 已通过 `prism_world_io/std` 的真实临时文件测试；`IoSchedulerAdapter` 的 chunk 聚合、短读/checksum/provider error 会释放对应请求，失败请求队列按 request id 保留，不再用单个共享槽覆盖并发错误。runtime 端到端测试覆盖 manifest header、payload 进入 `SceneHost`、取消、背压和 provider error。
 
 ### M6-M8：地形、仿真与网络边界
 
 - `prism_world_terrain`：cube-sphere 六面映射、四叉树 tile/跨面邻接、连续 screen-space LOD/morph、i64/Q32.32 局部坐标误差界、确定性高度采样和小端体素布局。
+- M6 纵切已补齐：`TerrainStreamAdapter` 将 `TileKey` 映射为稳定 `SectorId`，计算保守行星毫米 AABB，生成稳定 `CellManifest`/derived hash，并可直接交给 `StreamScheduler`；12 项 terrain 测试、fmt/check/clippy 通过。
 - `prism_world_sim`：统一 tick/output/dirty-region budget，确定性局部侵蚀、持久体素/碎片 delta、水文容量约束、生态 biomass 更新和小端 delta codec。
+- M7 持久接缝已补齐：`simulation_delta_to_transaction` 将 `SimulationDelta` 编码为稳定 opaque `Bytes` forward + 同字段 `Delete` inverse，`WorldRuntime::append_simulation_delta` 自动使用 log next sequence 并写入 append-only log；simulation feature 测试覆盖 round-trip、错误和 facade 入口。
+- M7 SDF 只读接缝已补齐：`SparseSdfQuery`/`SdfQueryConsumer` 为多个消费者共享同一 sparse grid，明确区分 `Value`、`Miss` 与缺 brick 的 `Unknown`，覆盖负坐标、范围和缺失数据测试；不会把未知场误报为空场。
 - `prism_world_network`：复用 stream/persist 身份的 AOI、delta envelope、authority/read-only/shared-LWW policy、sector handoff ledger 和顺序无关 PersistentId 合并；不拥有传输层或第二份世界真相。
+- M8 session seam 已补齐：`Session` 提供 token gate、有限 outbound/inbound 队列、序号、累计 ACK、retry deadline、duplicate suppression 和失败状态；`MemoryTransport` 提供 no_std 可运行的双端测试传输。9 项 network 测试及 no-default-features/clippy 通过。真实 socket/加密 transport 仍由宿主提供。
 - 这些 crate 已加入根 workspace，均有可运行算法和单测；它们是 world 接缝的 engine-neutral 实现，不宣称已经完成整个 renderer/physics/network transport 端到端产品。
 - `SparseSdfBrickGrid` 已支持负坐标采样、跨 mip dirty propagation、删除后的父 mip 失效，以及 brick/region 的保守 i16 min/max 查询；查询返回 `None` 时表示稀疏数据未知，不能当作空场。
 - terrain 在最大 quadtree 层级返回显式 `NoChildren`，LOD 非有限值和高度乘法溢出有确定性错误/饱和行为；simulation 的 tick、hydrology 和 delta codec 增加回绕/溢出、canonical record、输入大小和记录数限制；network merge 以 `TransactionId -> PersistentId` 索引去重，避免按对象桶线性扫描。
@@ -62,7 +67,7 @@ cargo test -p prism_world_gpu --features gpu --test wgsl_compile
 cargo check -p prism_world_gpu --features gpu
 CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_io -p prism_world_network -p prism_world_sim -p prism_world_terrain --no-default-features
 cargo test -p prism_world_io --features std
-cargo test -p prism_world_network -p prism_world_sim -p prism_world_terrain
+cargo test -p prism_world_network -p prism_world_sim --features prism_world_sim/persist -p prism_world_terrain
 CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo clippy -p prism_world_io --features std --all-targets -- -D warnings
 CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo clippy -p prism_world_network -p prism_world_sim -p prism_world_terrain --all-targets -- -D warnings
 CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_stream -p prism_world_residency -p prism_world_persist -p prism_world --no-default-features
@@ -86,13 +91,13 @@ CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_stre
 
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
-- M3：真实文件/资产 provider 到 SceneHost 的产品级异步吞吐、解压和 GPU 直传链路仍需独立运行时验证；`IoSchedulerAdapter` 的内存 provider 端到端测试已通过。
-- M6：terrain 多表示、增量重烘以及 terrain-to-render/world streaming 的端到端接入。
-- M7：simulation-to-world persistence、SDF 一场多用和大规模实时调度接入。
-- M8：真实传输层、多人会话、认证/重试、跨 sector handoff 的端到端一致性验证。
+- M3：真实资产包解压、GPU 直传和产品级吞吐仍需独立运行时验证；当前已完成文件 provider、scheduler、manifest/payload、SceneHost 的 CPU 端到端验证。
+- M6：terrain 多表示、增量重烘以及 terrain-to-render 的端到端接入；terrain-to-world-stream manifest 接缝已完成。
+- M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
+- M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。
 - GPU proxy 的真实 adapter、dispatch/readback 正确性已有上述 Apple M2/Metal 证据；P50/P95/P99 性能、显存峰值、多厂商/后端与 renderer 端到端集成仍未验收。
 
-这些边界不是占位 API；每一项必须以可运行算法、明确契约、单测和真实调用路径交付后才从本节移除。
+这些边界已有明确契约和可运行基础；只有补齐对应真实运行时证据后，才从本节移除。
 
 ## 不变量
 

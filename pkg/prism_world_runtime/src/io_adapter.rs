@@ -51,7 +51,7 @@ struct PendingRead {
 
 struct TrackingProvider<P> {
     provider: P,
-    failed_request: Arc<Mutex<Option<IoRequestId>>>,
+    failed_requests: Arc<Mutex<VecDeque<IoRequestId>>>,
 }
 
 struct TrackingOperation<O> {
@@ -61,12 +61,21 @@ struct TrackingOperation<O> {
     next_offset: u64,
     delivered: u64,
     checksum: u64,
-    failed_request: Arc<Mutex<Option<IoRequestId>>>,
+    failed_requests: Arc<Mutex<VecDeque<IoRequestId>>>,
+    failure_recorded: bool,
 }
 
-fn record_failure(failed_request: &Arc<Mutex<Option<IoRequestId>>>, request_id: IoRequestId) {
-    if let Ok(mut failed) = failed_request.lock() {
-        *failed = Some(request_id);
+fn record_failure(
+    failed_requests: &Arc<Mutex<VecDeque<IoRequestId>>>,
+    request_id: IoRequestId,
+    recorded: &mut bool,
+) {
+    if *recorded {
+        return;
+    }
+    if let Ok(mut failed) = failed_requests.lock() {
+        failed.push_back(request_id);
+        *recorded = true;
     }
 }
 
@@ -78,11 +87,19 @@ impl<O: ChunkedRead> ChunkedRead for TrackingOperation<O> {
         let result = self.operation.poll_chunk(context);
         match &result {
             Poll::Pending => {}
-            Poll::Ready(Err(_)) => record_failure(&self.failed_request, self.request_id),
+            Poll::Ready(Err(_)) => record_failure(
+                &self.failed_requests,
+                self.request_id,
+                &mut self.failure_recorded,
+            ),
             Poll::Ready(Ok(Some(chunk))) => {
                 let remaining = self.request.length().saturating_sub(self.delivered);
                 if chunk.offset() != self.next_offset || chunk.bytes().len() as u64 > remaining {
-                    record_failure(&self.failed_request, self.request_id);
+                    record_failure(
+                        &self.failed_requests,
+                        self.request_id,
+                        &mut self.failure_recorded,
+                    );
                 } else {
                     self.next_offset += chunk.bytes().len() as u64;
                     self.delivered += chunk.bytes().len() as u64;
@@ -99,7 +116,11 @@ impl<O: ChunkedRead> ChunkedRead for TrackingOperation<O> {
                         .expected_checksum()
                         .is_some_and(|expected| expected != self.checksum)
                 {
-                    record_failure(&self.failed_request, self.request_id);
+                    record_failure(
+                        &self.failed_requests,
+                        self.request_id,
+                        &mut self.failure_recorded,
+                    );
                 }
             }
         }
@@ -127,10 +148,13 @@ impl<P: ReadProvider> ReadProvider for TrackingProvider<P> {
                 next_offset: request.offset(),
                 delivered: 0,
                 checksum: prism_world_io::checksum(&[]),
-                failed_request: Arc::clone(&self.failed_request),
+                failed_requests: Arc::clone(&self.failed_requests),
+                failure_recorded: false,
             }),
             Err(error) => {
-                record_failure(&self.failed_request, request_id);
+                if let Ok(mut failed) = self.failed_requests.lock() {
+                    failed.push_back(request_id);
+                }
                 Err(error)
             }
         }
@@ -141,7 +165,7 @@ struct AdapterState<P: ReadProvider> {
     scheduler: IoScheduler<TrackingProvider<P>>,
     pending: BTreeMap<IoRequestId, PendingRead>,
     ready: VecDeque<IoAdapterEvent>,
-    failed_request: Arc<Mutex<Option<IoRequestId>>>,
+    failed_requests: Arc<Mutex<VecDeque<IoRequestId>>>,
 }
 
 /// A std adapter that exposes [`prism_world_io::IoScheduler`] through world cell requests.
@@ -170,10 +194,10 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
         if chunk_size == 0 {
             return Err(ConfigError::ZeroChunkSize);
         }
-        let failed_request = Arc::new(Mutex::new(None));
+        let failed_requests = Arc::new(Mutex::new(VecDeque::new()));
         let tracking_provider = TrackingProvider {
             provider,
-            failed_request: Arc::clone(&failed_request),
+            failed_requests: Arc::clone(&failed_requests),
         };
         let scheduler = IoScheduler::new(tracking_provider, max_in_flight, capacity)?;
         Ok(Self {
@@ -181,7 +205,7 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
                 scheduler,
                 pending: BTreeMap::new(),
                 ready: VecDeque::new(),
-                failed_request,
+                failed_requests,
             }),
             chunk_size,
         })
@@ -243,10 +267,10 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
                 let request_id = match error {
                     IoError::Cancelled { request_id } => Some(request_id),
                     _ => state
-                        .failed_request
+                        .failed_requests
                         .lock()
                         .ok()
-                        .and_then(|mut failed| failed.take()),
+                        .and_then(|mut failed| failed.pop_front()),
                 };
                 if let Some(request_id) = request_id {
                     state.pending.remove(&request_id);

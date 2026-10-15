@@ -21,6 +21,11 @@ use prism_world_stream::{
     CellManifest, DemandSource, SectorId, StreamAction, StreamBudget, StreamPlan, StreamScheduler,
 };
 
+#[cfg(feature = "simulation")]
+use prism_world_persist::{ActorId, LogicalClock};
+#[cfg(feature = "simulation")]
+use prism_world_sim::{simulation_delta_to_transaction, SimulationDelta, SimulationPersistError};
+
 #[cfg(feature = "scene_host")]
 pub use scene_host::{
     ResidencyBinding, SceneEcsHost, SceneEcsHostConfigError, SceneEcsHostError, SceneEcsProvider,
@@ -67,6 +72,16 @@ pub trait SceneHost {
 pub enum ApplyError<E> {
     /// The host rejected an operation.
     Host(E),
+}
+
+/// Failure while converting and appending a simulation result.
+#[cfg(feature = "simulation")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SimulationAppendError {
+    /// The simulation delta could not be encoded as a persistence transaction.
+    Conversion(SimulationPersistError),
+    /// The world log rejected the converted transaction.
+    Persistence(LogError),
 }
 
 /// World policy runtime with one owner for each responsibility.
@@ -144,6 +159,31 @@ impl WorldRuntime {
     /// Appends one validated persistent override transaction.
     pub fn append(&mut self, transaction: Transaction) -> Result<(), LogError> {
         self.persist.append(transaction)
+    }
+
+    /// Converts one simulation delta into the world persistence format and
+    /// appends it at the log's next sequence number.
+    #[cfg(feature = "simulation")]
+    pub fn append_simulation_delta(
+        &mut self,
+        transaction_id: prism_world_persist::TransactionId,
+        actor: ActorId,
+        clock: LogicalClock,
+        object: prism_world_persist::PersistentId,
+        delta: &SimulationDelta,
+    ) -> Result<(), SimulationAppendError> {
+        let transaction = simulation_delta_to_transaction(
+            transaction_id,
+            actor,
+            clock,
+            self.persist.next_sequence(),
+            object,
+            delta,
+        )
+        .map_err(SimulationAppendError::Conversion)?;
+        self.persist
+            .append(transaction)
+            .map_err(SimulationAppendError::Persistence)
     }
 
     /// Returns the append-only persistence log.
@@ -255,5 +295,29 @@ mod tests {
         };
         world.apply_plan(&plan, &mut host).unwrap();
         assert_eq!(host.calls, alloc::vec![0, 1_007]);
+    }
+
+    #[cfg(feature = "simulation")]
+    #[test]
+    fn simulation_delta_enters_the_world_persistence_log() {
+        let policy = ResidencyPolicy::new(1, 2, 3, 4, 0).unwrap();
+        let mut world = WorldRuntime::new(ResidencyScheduler::new(policy));
+        world
+            .append_simulation_delta(
+                prism_world_persist::TransactionId(10),
+                ActorId(11),
+                LogicalClock(12),
+                prism_world_persist::PersistentId(13),
+                &SimulationDelta::default(),
+            )
+            .unwrap();
+        assert_eq!(world.persistence().len(), 1);
+        let transaction = world.persistence().get(0).unwrap();
+        assert_eq!(transaction.sequence(), 0);
+        assert_eq!(transaction.object(), prism_world_persist::PersistentId(13));
+        assert_eq!(
+            prism_world_sim::transaction_to_simulation_delta(transaction).unwrap(),
+            SimulationDelta::default()
+        );
     }
 }

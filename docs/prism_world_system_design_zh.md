@@ -13,11 +13,11 @@
 > - **全局距离场**：UE Global Distance Field / Lumen SDF（稀疏 brick + mip 环，一场多用）
 > 本文为纯经典数据结构 + 空间算法 + 流送调度路线（Morton/Hilbert、四叉/八叉树、CDLOD/clipmap、Transvoxel/Dual Contouring/SDF、domain warp 噪声、水力/热力侵蚀 PDE、泊松盘/蓝噪声、D8 流向、并查集、CRDT），**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/其他引擎源码或衍生代码。
 
-- 版本： v3.3（在 v3.2 基础上进入核心实现：网络框架仍独立于 `prism_network`；新增 `prism_world` facade、`prism_world_stream`、`prism_world_residency`、`prism_world_persist` 四个 workspace crate。空间/流送/常驻策略/持久化核心已由 Rust 单测和 no-default-features 检查验证；GPU、文件系统、Scene 物化、网络传输仍按本文 provider 接缝接入，不将设计目标写成实测完成）
+- 版本： v3.5（在 v3.4 基础上补齐 terrain→world-stream manifest、simulation→world persistence、共享 SDF 只读查询和 no_std reliable session seam；网络框架仍独立于 `prism_network`。完整 GPU world scene、资产解压/GPU 直传、多表示地形烘焙和真实加密传输仍需独立运行时验收，不把窄纵切扩大为产品完成声明）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（作者内容单元 / spawn·despawn·materialize API / override delta / PersistentId，见 `prism_scene_design_zh.md`）、`prism_asset`（`StableGuid`/软引用/依赖闭包/单文件包/mmap/内容寻址）、`prism_ecs`（物化边界的批量预留/列写入）、`prism_transform`（层级）、`prism_tasks`（并行流送/烘焙）、`prism_math`（定点/空间编码/噪声）、`prism_diagnostic`（计数器/trace）；向上接 `prism_render`/`prism_physics`/`prism_gi`（经 GPU 常驻实例流 + ECS 物化两个边界，均已去 Bevy）
 - 层级定位： 基座层 L6；下接 `prism_scene`/`prism_asset`/`prism_ecs`，上驱动渲染/物理/GI；与 `prism_terrain_world_design_zh.md`（地形多表示细节）互为上下位
-- 明确约束： 核心 `no_std + alloc`；`std`/`async_io`/`gpu_stream`/`persist`/`pcg`/`sim`/`sdf`/`planet`/`vgeo`/`vtex`/`bake_farm` 为 feature（网络相关 feature `network`/`server_mesh` 移至 `prism_network`）；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**；GPU/IO 吞吐/显存/带宽均为 design target（本机无 GPU，非实测，如实标注），可验证部分限 CPU 纯函数
+- 明确约束：核心 `no_std + alloc`；`std`/`async_io`/`gpu_stream`/`persist`/`pcg`/`sim`/`sdf`/`planet`/`vgeo`/`vtex`/`bake_farm` 为 feature（网络相关 feature `network`/`server_mesh` 移至 `prism_network`）；工作区核心 crate `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**；GPU/IO 吞吐/显存/带宽仍是 design target，当前只把 `prism_world_gpu` 的 shader/dispatch/readback parity 作为真实设备证据，不把它扩大为完整性能结论
 - 架构立场： **scene 是单一逻辑真相，世界系统是其上的流送/常驻/持久化基座，不另立平行真相源**；世界持久数据 = 确定性可再生的派生缓存 + override delta 事务日志
 - 烘焙归属： 本文所述“烘焙期”派生数据（空间索引 / HLOD 代理 / 全局 SDF / 导航网格 / 散布 proxy 列 / 烘焙 GI / PCG 产物）为 `OfflineShipped`，其 DAG、缓存键、DDC/CAS 归 `Prism Asset Build`（`prism_asset_build_design_zh.md` §2.7/§4.6/§12.8）；运行时破坏/编辑触发的局部重算为 `RuntimeDerived`，与离线路径共用同一 Bake Kernel（该文 §6.6）。逐项契约登记见 `prism_derived_data_contract_zh.md`（B 组 / C 组）
 
@@ -345,7 +345,7 @@ scene template / manifest / override delta(CPU 路径, async_io):
 
 IO 子系统有显式带宽预算（design target，如 PCIe 4.0 NVMe ≈ 7 GB/s、直传解压后等效更高），残留引擎（§7）按此预算裁剪本帧 IO 指令；队列积压时产生背压，残留引擎自动降预取、降细节，保证热路径（交互半径）IO 优先完成。
 
-> IO/带宽/显存数字均为 design target，本机无 GPU 与高速存储实测环境，如实标注；可验证部分限于 CPU 侧的 mmap 零解析、调度与预算裁剪逻辑的纯函数单测。
+> IO/带宽/显存数字均为 design target；当前已在沙盒外 Apple M2 Metal 上验证 `prism_world_gpu` 的 proxy visibility/cull/LOD shader、dispatch 和 readback parity，但没有把该窄测试扩大为完整 world streaming 或性能实测。其余可验证部分包括 CPU 侧的调度、预算裁剪、PCG graph、durable recovery 与 scene ownership 单测。
 
 ---
 

@@ -42,6 +42,141 @@ pub enum SdfError {
     InvalidRegion,
 }
 
+/// Result of a read-only SDF consumer query.
+///
+/// `Value` means that the requested data is resident and the returned value is
+/// valid. `Miss` means that the query was fully resident, but the requested
+/// condition was not present. `Unknown` means that at least one brick needed
+/// to answer the query is not resident; it must not be treated as an empty
+/// field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SdfQueryResult<T> {
+    /// The query produced a resident value.
+    Value(T),
+    /// The query was fully known and did not match.
+    Miss,
+    /// The query cannot be decided because required data is missing.
+    Unknown,
+}
+
+/// Conservative quantized bounds returned by a surface-region query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SdfBounds {
+    /// Minimum stored sample in the queried brick coverage.
+    pub min: i16,
+    /// Maximum stored sample in the queried brick coverage.
+    pub max: i16,
+}
+
+/// Read-only query contract shared by SDF consumers.
+pub trait SdfQueryConsumer {
+    /// Samples one voxel. A missing brick returns [`SdfQueryResult::Unknown`].
+    fn query_sample(&self, voxel: [i32; 3], mip: u8) -> Result<SdfQueryResult<i16>, SdfError>;
+
+    /// Tests whether the conservative SDF bounds for an inclusive region
+    /// contain zero. A complete non-intersecting region returns `Miss`; a
+    /// region with missing bricks returns `Unknown`.
+    fn query_surface_region(
+        &self,
+        min_voxel: [i32; 3],
+        max_voxel: [i32; 3],
+        mip: u8,
+    ) -> Result<SdfQueryResult<SdfBounds>, SdfError>;
+}
+
+/// A copyable, read-only view over one [`SparseSdfBrickGrid`].
+///
+/// Consumers can create independent views over the same grid without taking
+/// ownership or mutating residency state. The view deliberately exposes only
+/// query operations through [`SdfQueryConsumer`].
+#[derive(Clone, Copy, Debug)]
+pub struct SparseSdfQuery<'a> {
+    grid: &'a SparseSdfBrickGrid,
+}
+
+impl<'a> SparseSdfQuery<'a> {
+    /// Creates a read-only query view over a sparse grid.
+    pub const fn new(grid: &'a SparseSdfBrickGrid) -> Self {
+        Self { grid }
+    }
+}
+
+impl SdfQueryConsumer for SparseSdfQuery<'_> {
+    fn query_sample(&self, voxel: [i32; 3], mip: u8) -> Result<SdfQueryResult<i16>, SdfError> {
+        Ok(match self.grid.sample(voxel, mip)? {
+            Some(value) => SdfQueryResult::Value(value),
+            None => SdfQueryResult::Unknown,
+        })
+    }
+
+    fn query_surface_region(
+        &self,
+        min_voxel: [i32; 3],
+        max_voxel: [i32; 3],
+        mip: u8,
+    ) -> Result<SdfQueryResult<SdfBounds>, SdfError> {
+        self.grid.validate_mip(mip)?;
+        if min_voxel[0] > max_voxel[0] || min_voxel[1] > max_voxel[1] || min_voxel[2] > max_voxel[2]
+        {
+            return Err(SdfError::InvalidRegion);
+        }
+
+        let size = i32::from(self.grid.brick_size);
+        let min = [
+            floor_div(min_voxel[0], size),
+            floor_div(min_voxel[1], size),
+            floor_div(min_voxel[2], size),
+        ];
+        let max = [
+            floor_div(max_voxel[0], size),
+            floor_div(max_voxel[1], size),
+            floor_div(max_voxel[2], size),
+        ];
+        let mut bounds: Option<(i16, i16)> = None;
+        let mut z = min[2];
+        loop {
+            let mut y = min[1];
+            loop {
+                let mut x = min[0];
+                loop {
+                    let coord = BrickCoord::new(x, y, z, mip);
+                    let Some((local_min, local_max)) = self.grid.min_max(coord)? else {
+                        return Ok(SdfQueryResult::Unknown);
+                    };
+                    bounds = Some(match bounds {
+                        Some((current_min, current_max)) => {
+                            (current_min.min(local_min), current_max.max(local_max))
+                        }
+                        None => (local_min, local_max),
+                    });
+                    if x == max[0] {
+                        break;
+                    }
+                    x += 1;
+                }
+                if y == max[1] {
+                    break;
+                }
+                y += 1;
+            }
+            if z == max[2] {
+                break;
+            }
+            z += 1;
+        }
+
+        let Some((min, max)) = bounds else {
+            return Ok(SdfQueryResult::Unknown);
+        };
+        let result = SdfBounds { min, max };
+        if min <= 0 && max >= 0 {
+            Ok(SdfQueryResult::Value(result))
+        } else {
+            Ok(SdfQueryResult::Miss)
+        }
+    }
+}
+
 impl fmt::Display for SdfError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -362,5 +497,91 @@ fn floor_div(value: i32, divisor: i32) -> i32 {
         quotient - 1
     } else {
         quotient
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::*;
+
+    fn brick(samples: &[i16; 8]) -> Vec<i16> {
+        samples.to_vec()
+    }
+
+    #[test]
+    fn read_only_consumers_share_negative_and_boundary_samples() {
+        let mut grid = SparseSdfBrickGrid::new(2, 1).unwrap();
+        let mut samples = [0_i16; 8];
+        samples[0] = -9;
+        samples[1] = 7;
+        grid.insert_brick(BrickCoord::new(-1, 0, 0, 0), brick(&samples))
+            .unwrap();
+
+        let first = SparseSdfQuery::new(&grid);
+        let second = SparseSdfQuery::new(&grid);
+        assert_eq!(
+            first.query_sample([-2, 0, 0], 0).unwrap(),
+            SdfQueryResult::Value(-9)
+        );
+        assert_eq!(
+            second.query_sample([-1, 0, 0], 0).unwrap(),
+            SdfQueryResult::Value(7)
+        );
+        assert_eq!(
+            first.query_sample([0, 0, 0], 0).unwrap(),
+            SdfQueryResult::Unknown
+        );
+        assert_eq!(
+            second.query_sample([i32::MIN, 0, 0], 0).unwrap(),
+            SdfQueryResult::Unknown
+        );
+    }
+
+    #[test]
+    fn range_query_distinguishes_value_miss_and_unknown() {
+        let mut grid = SparseSdfBrickGrid::new(2, 1).unwrap();
+        grid.insert_brick(BrickCoord::new(-1, 0, 0, 0), vec![-2; 8])
+            .unwrap();
+        {
+            let query = SparseSdfQuery::new(&grid);
+            assert_eq!(
+                query.query_surface_region([-2, 0, 0], [-1, 1, 1], 0),
+                Ok(SdfQueryResult::Miss)
+            );
+            assert_eq!(
+                query.query_surface_region([-2, 0, 0], [0, 1, 1], 0),
+                Ok(SdfQueryResult::Unknown)
+            );
+        }
+
+        grid.insert_brick(BrickCoord::new(0, 0, 0, 0), vec![3; 8])
+            .unwrap();
+        {
+            let query = SparseSdfQuery::new(&grid);
+            assert_eq!(
+                query.query_surface_region([0, 0, 0], [1, 1, 1], 0),
+                Ok(SdfQueryResult::Miss)
+            );
+        }
+        grid.insert_brick(BrickCoord::new(-1, 0, 0, 0), vec![-3, 2, 2, 2, 2, 2, 2, 2])
+            .unwrap();
+        let query = SparseSdfQuery::new(&grid);
+        assert_eq!(
+            query.query_surface_region([-2, 0, 0], [1, 1, 1], 0),
+            Ok(SdfQueryResult::Value(SdfBounds { min: -3, max: 3 }))
+        );
+    }
+
+    #[test]
+    fn range_query_rejects_inverted_regions_and_invalid_mips() {
+        let grid = SparseSdfBrickGrid::new(2, 1).unwrap();
+        let query = SparseSdfQuery::new(&grid);
+        assert_eq!(
+            query.query_surface_region([1, 0, 0], [0, 0, 0], 0),
+            Err(SdfError::InvalidRegion)
+        );
+        assert_eq!(query.query_sample([0, 0, 0], 1), Err(SdfError::InvalidMip));
     }
 }

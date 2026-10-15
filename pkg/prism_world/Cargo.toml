@@ -13,10 +13,12 @@ prism_world_stream = { path = "../prism_world_stream" }
 prism_asset = { path = "../prism_asset", optional = true }
 prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std"], optional = true }
 prism_scene = { path = "../prism_scene", default-features = false, features = ["std", "materialize"], optional = true }
+prism_world_sim = { path = "../prism_world_sim", default-features = false, features = ["persist"], optional = true }
 
 [features]
 default = []
 scene_host = ["dep:prism_asset", "dep:prism_ecs", "dep:prism_scene"]
+simulation = ["dep:prism_world_sim"]
 
 [[bench]]
 name = "world_tick"

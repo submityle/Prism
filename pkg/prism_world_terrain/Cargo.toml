@@ -9,3 +9,6 @@ publish = false
 
 [features]
 default = []
+
+[dependencies]
+prism_world_stream = { path = "../prism_world_stream", default-features = false }

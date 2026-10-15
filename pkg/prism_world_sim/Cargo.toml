@@ -9,3 +9,7 @@ publish = false
 
 [features]
 default = []
+persist = ["dep:prism_world_persist"]
+
+[dependencies]
+prism_world_persist = { path = "../prism_world_persist", default-features = false, optional = true }

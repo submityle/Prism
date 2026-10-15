@@ -33,7 +33,10 @@ pub use residency::{
     ResidencyTier,
 };
 pub use scheduler::{ResidencyAction, ResidencyKeepReason, ResidencyPlan, ResidencyScheduler};
-pub use sdf::{BrickCoord, SdfError, SparseSdfBrickGrid};
+pub use sdf::{
+    BrickCoord, SdfBounds, SdfError, SdfQueryConsumer, SdfQueryResult, SparseSdfBrickGrid,
+    SparseSdfQuery,
+};
 
 #[cfg(test)]
 mod tests {

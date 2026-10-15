@@ -1,13 +1,16 @@
 //! Deterministic world-to-network policy contracts for Prism.
 //!
-//! The crate owns neither transport nor world state. It joins the spatial
-//! contracts from [`prism_world_stream`] to the durable identity and field
-//! merge contracts from [`prism_world_persist`].
+//! The crate owns no sockets or world state. It joins the spatial contracts
+//! from [`prism_world_stream`] to durable identity and field merge contracts
+//! from [`prism_world_persist`], and exposes a host-provided reliable session
+//! seam over those messages.
 #![no_std]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 extern crate alloc;
+
+mod session;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -18,6 +21,11 @@ pub use prism_world_persist::{
     PersistentId, Transaction, TransactionId,
 };
 pub use prism_world_stream::{AabbI64, GlobalPos, SectorId};
+pub use session::{
+    AuthToken, FlushError, FlushReport, MemoryTransport, MemoryTransportError, ReceiveError,
+    ReceiveOutcome, Session, SessionConfig, SessionConfigError, SessionError, SessionId,
+    SessionState, Transport, TransportPacket, WorldMessage,
+};
 
 /// Stable identity for an AOI subscription.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]

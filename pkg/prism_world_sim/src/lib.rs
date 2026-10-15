@@ -14,6 +14,8 @@ extern crate alloc;
 mod codec;
 mod ecology;
 mod hydrology;
+#[cfg(feature = "persist")]
+mod persist;
 mod sim;
 mod types;
 mod voxel;
@@ -23,6 +25,11 @@ pub use codec::{
 };
 pub use ecology::{EcologyCell, EcologyConfig, EcologyDelta, EcologyField};
 pub use hydrology::{FlowDelta, HydrologyCell, HydrologyField};
+#[cfg(feature = "persist")]
+pub use persist::{
+    simulation_delta_to_transaction, transaction_to_simulation_delta, SimulationPersistError,
+    SIMULATION_DELTA_FIELD,
+};
 pub use sim::{
     BudgetUsage, SimulationDelta, SimulationError, TickBudget, TickReport, WorldSim, WorldSimConfig,
 };
