@@ -18,5 +18,10 @@ prism_world_residency = { path = "../prism_world_residency" }
 default = ["std"]
 std = ["prism_world_io/std", "prism_world_persist/std"]
 
+[[bench]]
+name = "threaded_archive"
+harness = false
+required-features = ["std"]
+
 [lints.rust]
 unsafe_code = "forbid"

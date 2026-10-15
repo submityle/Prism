@@ -675,7 +675,10 @@ pub use std_support::{FileProviderExport as FileProvider, IoSchedulerExport as I
 #[cfg(feature = "std")]
 mod threaded_file;
 #[cfg(feature = "std")]
-pub use threaded_file::{ThreadedFileConfig, ThreadedFileProvider, ThreadedFileReadOperation};
+pub use threaded_file::{
+    QueuedThreadedFileProvider, QueuedThreadedFileReadOperation, ThreadedFileConfig,
+    ThreadedFileProvider, ThreadedFileReadOperation,
+};
 
 #[cfg(all(test, feature = "std"))]
 mod threaded_file_tests;

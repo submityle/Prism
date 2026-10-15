@@ -2,6 +2,8 @@
 
 日期：2026-10-15。验证源码基线：world IO 调度修复工作树（随后由独立 commit 固化）。
 
+本文保留最初独立 provider 验证快照。同日后续的有界容量等待、异步 coordinator 到 `SceneHost` 接线、唤醒回归及 release archive 测量见 `prism_world_async_runtime_zh.md`；下文“尚未形成链路”只描述本次历史快照。
+
 本次只验证 `prism_world_io` 调度与 threaded provider，验证后仅整理相关文档，不混入其他任务的暂存内容。
 
 ## 环境与命令

@@ -1,15 +1,17 @@
 //! Standard-library bridge from world cell requests to the chunked IO scheduler.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::{Deref, DerefMut};
 use core::task::{Context, Poll, Waker};
 
 use prism_world_io::{
     ChunkedRead, ConfigError, IoError, IoEvent, IoScheduler, ReadChunk, ReadProvider, ReadRequest,
     ReadSummary,
 };
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::Wake;
@@ -132,7 +134,7 @@ struct AdapterState<P: ReadProvider> {
     pending: BTreeMap<IoRequestId, PendingRead>,
     ready: VecDeque<IoAdapterEvent>,
     callback_request: Arc<Mutex<Option<IoRequestId>>>,
-    blocking: BTreeMap<IoRequestId, Waker>,
+    blocking: BTreeSet<IoRequestId>,
     admitted_bytes: u64,
 }
 
@@ -147,6 +149,27 @@ pub struct IoSchedulerAdapter<P: ReadProvider> {
     capacity: usize,
     byte_limits: Option<IoByteLimits>,
     wake: Arc<SchedulerWake>,
+}
+
+// Fields drop in declaration order: unlock adapter state before dispatching any
+// wake deferred by a provider callback (including on unwinding/early returns).
+struct AdapterGuard<'a, P: ReadProvider> {
+    state: MutexGuard<'a, AdapterState<P>>,
+    _busy: WakeBusy<'a>,
+}
+
+impl<P: ReadProvider> Deref for AdapterGuard<'_, P> {
+    type Target = AdapterState<P>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl<P: ReadProvider> DerefMut for AdapterGuard<'_, P> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
 }
 
 impl<P: ReadProvider> IoSchedulerAdapter<P> {
@@ -206,7 +229,7 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
                 pending: BTreeMap::new(),
                 ready: VecDeque::new(),
                 callback_request,
-                blocking: BTreeMap::new(),
+                blocking: BTreeSet::new(),
                 admitted_bytes: 0,
             }),
             chunk_size,
@@ -305,8 +328,7 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
     /// Cancels a queued or active scheduler request.
     pub fn cancel(&self, request_id: IoRequestId) -> bool {
         let cancelled = self
-            .state
-            .lock()
+            .lock_state()
             .map(|mut state| state.scheduler.cancel(request_id))
             .unwrap_or(false);
         if cancelled {
@@ -317,8 +339,7 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
 
     /// Returns the number of requests not yet reported to the caller.
     pub fn len(&self) -> usize {
-        self.state
-            .lock()
+        self.lock_state()
             .map(|state| state.pending.len())
             .unwrap_or(0)
     }
@@ -333,6 +354,12 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
     /// Request failures are [`IoAdapterEvent::Failed`]; `Err` is reserved for
     /// an internal adapter failure. Events reserved by blocking readers are not
     /// exposed here. All waiting readers are woken when any provider makes progress.
+    ///
+    /// Public polling supports one asynchronous consumer. Each call replaces
+    /// that consumer's registered Waker with the supplied Context's Waker;
+    /// after `Pending`, only the latest registration receives the next wake.
+    /// Independent tasks must not rely on separate public poll registrations.
+    /// Blocking readers retain separate registrations for their request IDs.
     pub fn poll(&self, context: &mut Context<'_>) -> Poll<Result<IoAdapterEvent, IoError>> {
         self.poll_for(context, None)
     }
@@ -342,49 +369,51 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
         context: &mut Context<'_>,
         target: Option<IoRequestId>,
     ) -> Poll<Result<IoAdapterEvent, IoError>> {
-        self.wake.register(context.waker());
+        let registration = self.wake.register(target, context.waker());
+        let scheduler_waker = Waker::from(Arc::clone(&self.wake));
+        let mut scheduler_context = Context::from_waker(&scheduler_waker);
         let mut state = match self.lock_state() {
             Ok(state) => state,
             Err(error) => {
-                self.wake.unregister(context.waker());
+                self.wake.unregister(&registration);
                 return Poll::Ready(Err(error));
             }
         };
         let accepts = |event: &IoAdapterEvent, state: &AdapterState<P>| match target {
             Some(id) => event.request_id() == id,
-            None => !state.blocking.contains_key(&event.request_id()),
+            None => !state.blocking.contains(&event.request_id()),
         };
         if let Some(index) = state.ready.iter().position(|event| accepts(event, &state)) {
             let event = state.ready.remove(index).expect("ready event index");
             state.retire(&event);
-            self.wake.unregister(context.waker());
+            drop(state);
+            self.wake.unregister(&registration);
             return Poll::Ready(Ok(event));
         }
-        let scheduler_waker = Waker::from(Arc::clone(&self.wake));
-        let mut scheduler_context = Context::from_waker(&scheduler_waker);
         let result = state.poll_scheduler(&mut scheduler_context);
         match result {
             Poll::Ready(Ok(event)) if !accepts(&event, &state) => {
-                let waiter = state.blocking.get(&event.request_id()).cloned();
                 state.ready.push_back(event);
                 drop(state);
-                if let Some(waiter) = waiter {
-                    waiter.wake();
-                }
                 // Progress was made even if this event belongs to another reader.
                 self.wake.wake_by_ref();
                 Poll::Pending
             }
             Poll::Ready(Ok(event)) => {
                 state.retire(&event);
-                self.wake.unregister(context.waker());
+                drop(state);
+                self.wake.unregister(&registration);
                 Poll::Ready(Ok(event))
             }
             Poll::Ready(Err(error)) => {
-                self.wake.unregister(context.waker());
+                drop(state);
+                self.wake.unregister(&registration);
                 Poll::Ready(Err(error))
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                drop(state);
+                Poll::Pending
+            }
         }
     }
 
@@ -409,7 +438,7 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
         let request_id = {
             let mut state = self.lock_state()?;
             let id = self.submit_locked(&mut state, *request)?;
-            state.blocking.insert(id, waker.clone());
+            state.blocking.insert(id);
             id
         };
         let mut context = Context::from_waker(&waker);
@@ -424,10 +453,13 @@ impl<P: ReadProvider> IoSchedulerAdapter<P> {
         }
     }
 
-    fn lock_state(&self) -> Result<MutexGuard<'_, AdapterState<P>>, IoError> {
-        self.state
+    fn lock_state(&self) -> Result<AdapterGuard<'_, P>, IoError> {
+        let busy = self.wake.begin_busy();
+        let state = self
+            .state
             .lock()
-            .map_err(|_| internal_error("adapter state poisoned"))
+            .map_err(|_| internal_error("adapter state poisoned"))?;
+        Ok(AdapterGuard { state, _busy: busy })
     }
 }
 
@@ -599,27 +631,161 @@ struct BlockingWaker {
     notified: AtomicBool,
 }
 
+// Only Arc handles move under the notification lock. Foreign Waker callbacks,
+// including clone and final drop, always run after both metadata locks release.
+struct RegisteredWaker(Option<Waker>);
+
+impl RegisteredWaker {
+    fn wake(&self) {
+        if let Some(waker) = &self.0 {
+            let _ = catch_unwind(AssertUnwindSafe(|| waker.wake_by_ref()));
+        }
+    }
+}
+
+impl Drop for RegisteredWaker {
+    fn drop(&mut self) {
+        if let Some(waker) = self.0.take() {
+            let _ = catch_unwind(AssertUnwindSafe(|| drop(waker)));
+        }
+    }
+}
+
+#[derive(Default)]
+struct Waiters {
+    // Public polling has one consumer; changing its Context replaces this slot.
+    public: Option<Arc<RegisteredWaker>>,
+    // A blocking reader retains its own slot, even when contexts share a Waker.
+    blocking: BTreeMap<IoRequestId, Arc<RegisteredWaker>>,
+}
+
+impl Waiters {
+    fn wake(self) {
+        if let Some(waiter) = self.public {
+            waiter.wake();
+        }
+        for waiter in self.blocking.into_values() {
+            waiter.wake();
+        }
+    }
+}
+
+#[derive(Default)]
+struct WakeState {
+    waiters: Waiters,
+    busy: usize,
+    notified: bool,
+    dispatching: bool,
+}
+
+impl WakeState {
+    fn take_notification(&mut self) -> Option<Waiters> {
+        if self.busy != 0 || self.dispatching || !self.notified {
+            return None;
+        }
+        self.notified = false;
+        self.dispatching = true;
+        Some(core::mem::take(&mut self.waiters))
+    }
+}
+
 #[derive(Default)]
 struct SchedulerWake {
-    waiters: Mutex<Vec<Waker>>,
+    state: Mutex<WakeState>,
+}
+
+struct Registration {
+    target: Option<IoRequestId>,
+    waiter: Arc<RegisteredWaker>,
+}
+
+struct WakeBusy<'a> {
+    wake: &'a SchedulerWake,
+}
+
+impl Drop for WakeBusy<'_> {
+    fn drop(&mut self) {
+        let waiters = {
+            let mut state = self.wake.lock();
+            state.busy -= 1;
+            state.take_notification()
+        };
+        self.wake.dispatch(waiters);
+    }
 }
 
 impl SchedulerWake {
-    fn register(&self, waker: &Waker) {
-        let mut waiters = self
-            .waiters
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if !waiters.iter().any(|waiting| waiting.will_wake(waker)) {
-            waiters.push(waker.clone());
-        }
+    fn lock(&self) -> MutexGuard<'_, WakeState> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 
-    fn unregister(&self, waker: &Waker) {
-        self.waiters
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .retain(|waiting| !waiting.will_wake(waker));
+    fn register(&self, target: Option<IoRequestId>, waker: &Waker) -> Registration {
+        let waiter = Arc::new(RegisteredWaker(Some(waker.clone())));
+        let retained = Arc::clone(&waiter);
+        let previous = {
+            let mut state = self.lock();
+            match target {
+                None => state.waiters.public.replace(retained),
+                Some(id) => state.waiters.blocking.insert(id, retained),
+            }
+        };
+        drop(previous);
+        Registration { target, waiter }
+    }
+
+    fn unregister(&self, registration: &Registration) {
+        let removed = {
+            let mut state = self.lock();
+            let current = match registration.target {
+                None => state.waiters.public.as_ref(),
+                Some(id) => state.waiters.blocking.get(&id),
+            };
+            // A wake/drop callback may have registered a newer poll already.
+            if current.is_some_and(|waiter| Arc::ptr_eq(waiter, &registration.waiter)) {
+                match registration.target {
+                    None => state.waiters.public.take(),
+                    Some(id) => state.waiters.blocking.remove(&id),
+                }
+            } else {
+                None
+            }
+        };
+        drop(removed);
+    }
+
+    fn begin_busy(&self) -> WakeBusy<'_> {
+        self.lock().busy += 1;
+        WakeBusy { wake: self }
+    }
+
+    fn notify(&self) {
+        let waiters = {
+            let mut state = self.lock();
+            state.notified = true;
+            state.take_notification()
+        };
+        self.dispatch(waiters);
+    }
+
+    fn dispatch(&self, waiters: Option<Waiters>) {
+        let Some(mut waiters) = waiters else {
+            return;
+        };
+        loop {
+            waiters.wake();
+            let next = {
+                let mut state = self.lock();
+                state.dispatching = false;
+                // A concurrent worker or reentrant callback may have notified
+                // during dispatch. Taking the next batch under this same lock
+                // prevents a lost wake at the busy/dispatch handoff.
+                state.take_notification()
+            };
+            match next {
+                Some(next) => waiters = next,
+                None => return,
+            }
+        }
     }
 }
 
@@ -629,15 +795,7 @@ impl Wake for SchedulerWake {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        let waiters = core::mem::take(
-            &mut *self
-                .waiters
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-        );
-        for waiter in waiters {
-            waiter.wake();
-        }
+        self.notify();
     }
 }
 
@@ -674,6 +832,10 @@ mod correlation_tests;
 #[cfg(test)]
 #[path = "io_budget_tests.rs"]
 mod budget_tests;
+
+#[cfg(test)]
+#[path = "io_waker_tests.rs"]
+mod waker_tests;
 
 #[cfg(test)]
 mod tests {

@@ -22,7 +22,8 @@ pub struct ThreadedFileConfig {
     /// Fixed number of workers; no replacement or per-request threads are spawned.
     pub workers: usize,
     /// Maximum admitted operations, including parked results and cancelled reads
-    /// that have not yet returned from the OS. Also bounds the ready queue.
+    /// that have not yet returned from the OS. Also bounds the ready queue and
+    /// the separate admission table used by [`QueuedThreadedFileProvider`].
     pub capacity: usize,
     /// Maximum payload per operation. Requests' chunk sizes are capped at this limit.
     pub max_chunk_size: usize,
@@ -49,6 +50,45 @@ pub struct ThreadedFileProvider {
     owner: Arc<Owner>,
 }
 
+/// A filesystem provider with cancellation-safe, bounded capacity waiting.
+///
+/// Created by [`ThreadedFileProvider::queued`]. `start` owns an admission record;
+/// polling acquires a worker slot or registers for the next available slot. All
+/// clones and wrappers of the same pool share exactly `config.capacity` admission
+/// records in addition to `config.capacity` worker slots. Unpolled starts and
+/// granted-but-unpolled admissions occupy records too. A full admission table
+/// returns `IoError::Backpressure`, even if a worker slot is free.
+///
+/// Thus at most `2 * capacity` unfinished operations are registered, at most
+/// `capacity` have worker-owned payloads/files, and provider-owned payload remains
+/// bounded by `capacity * max_chunk_size` (excluding chunks already delivered).
+/// There are still exactly `config.workers` threads. Waiting records have no
+/// payload or file. Polling waiters receive slots in registration order; a slot
+/// stays charged through cancellation cleanup and is handed off before waking.
+/// No self-wakes or polling timers are used. Mixing direct and queued clones
+/// shares these limits, but direct starts can still report worker backpressure.
+///
+/// For an exclusive scheduler with in-flight limit at most `capacity`, canceled
+/// worker cleanup cannot make replacement starts exhaust the admission table.
+/// Multiple schedulers must budget their aggregate waiting operations; excess
+/// waiting is explicitly rejected. Operations do not keep the provider owner
+/// alive: dropping its last direct/queued clone cancels active and waiting work.
+#[derive(Clone)]
+pub struct QueuedThreadedFileProvider {
+    provider: ThreadedFileProvider,
+}
+
+/// An owned bounded admission, followed by a normal threaded read stream.
+/// Cancellation and drop unregister pending admission immediately. An already
+/// granted worker slot remains charged until its worker completes cleanup.
+pub struct QueuedThreadedFileReadOperation {
+    shared: Arc<Shared>,
+    control: Arc<Control>,
+    request_id: RequestId,
+    admission: Option<usize>,
+    active: Option<ThreadedFileReadOperation>,
+}
+
 struct Owner {
     shared: Arc<Shared>,
 }
@@ -68,6 +108,15 @@ struct PoolState {
     // These collections reserve their entire configured capacity at construction.
     slots: Vec<Option<Entry>>,
     queue: VecDeque<usize>,
+    admissions: Vec<Option<Admission>>,
+    waiting: VecDeque<usize>,
+}
+
+struct Admission {
+    control: Arc<Control>,
+    work: Option<Work>,
+    slot: Option<usize>,
+    waker: Option<Waker>,
 }
 
 struct Control {
@@ -180,6 +229,15 @@ impl ThreadedFileProvider {
         queue
             .try_reserve_exact(config.capacity)
             .map_err(io::Error::other)?;
+        let mut admissions = Vec::new();
+        admissions
+            .try_reserve_exact(config.capacity)
+            .map_err(io::Error::other)?;
+        admissions.resize_with(config.capacity, || None);
+        let mut waiting = VecDeque::new();
+        waiting
+            .try_reserve_exact(config.capacity)
+            .map_err(io::Error::other)?;
         let shared = Arc::new(Shared {
             path: path.into(),
             config,
@@ -187,6 +245,8 @@ impl ThreadedFileProvider {
                 closed: false,
                 slots,
                 queue,
+                admissions,
+                waiting,
             }),
             ready: Condvar::new(),
             workers_alive: AtomicUsize::new(0),
@@ -224,6 +284,12 @@ impl ThreadedFileProvider {
         self.owner.shared.config
     }
 
+    /// Wraps this pool with bounded asynchronous admission. This consumes one
+    /// provider handle; existing direct clones keep their original start contract.
+    pub fn queued(self) -> QueuedThreadedFileProvider {
+        QueuedThreadedFileProvider { provider: self }
+    }
+
     /// Cancels admitted operations and rejects further starts across all clones.
     /// Idempotent and non-joining; already blocked OS calls cannot be interrupted.
     pub fn shutdown(&self) {
@@ -247,6 +313,215 @@ impl ThreadedFileProvider {
             .iter()
             .flatten()
             .count()
+    }
+}
+
+impl QueuedThreadedFileProvider {
+    /// Returns the source path without touching the filesystem.
+    pub fn path(&self) -> &Path {
+        self.provider.path()
+    }
+
+    /// Returns the worker limits; the admission record limit is also `capacity`.
+    pub fn config(&self) -> ThreadedFileConfig {
+        self.provider.config()
+    }
+
+    /// Cancels all active and waiting work across every clone without joining.
+    pub fn shutdown(&self) {
+        self.provider.shutdown();
+    }
+
+    /// Reports whether shutdown has begun.
+    pub fn is_shutdown(&self) -> bool {
+        self.provider.is_shutdown()
+    }
+
+    /// Reports whether shutdown has begun and every worker has exited.
+    pub fn is_shutdown_complete(&self) -> bool {
+        self.provider.is_shutdown_complete()
+    }
+
+    /// Counts worker slots, including grants and canceled worker cleanup.
+    pub fn outstanding(&self) -> usize {
+        self.provider.outstanding()
+    }
+
+    /// Counts admission records, including unpolled starts and unconsumed grants.
+    pub fn pending_admissions(&self) -> usize {
+        lock(&self.provider.owner.shared.state)
+            .admissions
+            .iter()
+            .flatten()
+            .count()
+    }
+}
+
+impl ReadProvider for QueuedThreadedFileProvider {
+    type Operation = QueuedThreadedFileReadOperation;
+
+    fn start(
+        &self,
+        request: &ReadRequest,
+        request_id: RequestId,
+    ) -> Result<Self::Operation, IoError> {
+        request.validate()?;
+        let shared = &self.provider.owner.shared;
+        let mut state = lock(&shared.state);
+        if state.closed {
+            return Err(provider_error("threaded file provider is shut down"));
+        }
+        let admission =
+            state
+                .admissions
+                .iter()
+                .position(Option::is_none)
+                .ok_or(IoError::Backpressure {
+                    capacity: shared.config.capacity,
+                })?;
+        let control = Arc::new(Control {
+            cancelled: AtomicBool::new(false),
+        });
+        state.admissions[admission] = Some(Admission {
+            control: Arc::clone(&control),
+            work: Some(Work {
+                request: request.clone(),
+                request_id,
+                file: None,
+                delivered: 0,
+                chunk_size: request.chunk_size().min(shared.config.max_chunk_size),
+            }),
+            slot: None,
+            waker: None,
+        });
+        Ok(QueuedThreadedFileReadOperation {
+            shared: Arc::clone(shared),
+            control,
+            request_id,
+            admission: Some(admission),
+            active: None,
+        })
+    }
+}
+
+impl ChunkedRead for QueuedThreadedFileReadOperation {
+    fn poll_chunk(
+        &mut self,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<Option<ReadChunk>, IoError>> {
+        if let Some(active) = &mut self.active {
+            return active.poll_chunk(context);
+        }
+        if self.control.cancelled.load(Ordering::Acquire) {
+            return Poll::Ready(Err(IoError::Cancelled {
+                request_id: self.request_id,
+            }));
+        }
+        // Clone can reenter or panic. Do it before locking or mutating admission.
+        let new_waker = context.waker().clone();
+        let mut state = lock(&self.shared.state);
+        if self.control.cancelled.load(Ordering::Acquire) {
+            drop(state);
+            discard_waker(Some(new_waker));
+            return Poll::Ready(Err(IoError::Cancelled {
+                request_id: self.request_id,
+            }));
+        }
+        let index = self.admission.expect("live admission");
+        let admission = state.admissions[index]
+            .as_ref()
+            .expect("registered admission");
+        let slot = admission
+            .slot
+            .or_else(|| state.slots.iter().position(Option::is_none));
+        let Some(slot) = slot else {
+            let admission = state.admissions[index].as_mut().unwrap();
+            let old_waker = admission.waker.replace(new_waker);
+            if old_waker.is_none() {
+                state.waiting.push_back(index);
+            }
+            drop(state);
+            discard_waker(old_waker);
+            return Poll::Pending;
+        };
+        let mut admission = state.admissions[index].take().unwrap();
+        state.waiting.retain(|waiting| *waiting != index);
+        if let Some(work) = admission.work.take() {
+            state.enqueue(slot, Arc::clone(&self.control), work);
+        }
+        self.admission = None;
+        self.active = Some(ThreadedFileReadOperation {
+            shared: Arc::clone(&self.shared),
+            control: Arc::clone(&self.control),
+            slot,
+            request_id: self.request_id,
+            finished: false,
+        });
+        drop(state);
+        self.shared.ready.notify_one();
+        discard_waker(admission.waker.take());
+        discard_waker(Some(new_waker));
+        self.active.as_mut().unwrap().poll_chunk(context)
+    }
+
+    fn cancel(&mut self) {
+        if let Some(active) = &mut self.active {
+            active.cancel();
+            return;
+        }
+        let Some(index) = self.admission.take() else {
+            return;
+        };
+        let mut state = lock(&self.shared.state);
+        let mut admission = state.admissions[index]
+            .take()
+            .expect("registered admission");
+        state.waiting.retain(|waiting| *waiting != index);
+        self.control.cancelled.store(true, Ordering::Release);
+        drop(state);
+        if let Some(slot) = admission.slot {
+            self.shared.cancel(slot, &self.control);
+        }
+        // Waiting Work has never owned a file or payload. Callback destruction
+        // and wake both happen after unregistering and releasing the pool lock.
+        wake(admission.waker.take());
+    }
+}
+
+impl Drop for QueuedThreadedFileReadOperation {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+impl PoolState {
+    fn enqueue(&mut self, slot: usize, control: Arc<Control>, work: Work) {
+        debug_assert!(self.slots[slot].is_none());
+        self.slots[slot] = Some(Entry {
+            control,
+            work: Some(work),
+            phase: Phase::Queued,
+            waker: None,
+        });
+        self.queue.push_back(slot);
+    }
+
+    // Every slot release hands capacity to a registered waiter under the same
+    // lock as registration. Taking its waker only after reserving the slot avoids
+    // lost wakes, capacity theft and repeated wake-all storms across schedulers.
+    fn release(&mut self, slot: usize) -> Option<Waker> {
+        self.slots[slot] = None;
+        if self.closed {
+            return None;
+        }
+        let index = self.waiting.pop_front()?;
+        let admission = self.admissions[index].as_mut().expect("waiting admission");
+        admission.slot = Some(slot);
+        let work = admission.work.take().expect("waiting work");
+        let control = Arc::clone(&admission.control);
+        let waker = admission.waker.take();
+        self.enqueue(slot, control, work);
+        waker
     }
 }
 
@@ -319,6 +594,8 @@ impl ChunkedRead for ThreadedFileReadOperation {
         // A completion before registration is observed; one after it takes this waker.
         let mut state = lock(&self.shared.state);
         if self.control.cancelled.load(Ordering::Acquire) {
+            drop(state);
+            discard_waker(Some(new_waker));
             return Poll::Ready(Err(IoError::Cancelled {
                 request_id: self.request_id,
             }));
@@ -333,12 +610,15 @@ impl ChunkedRead for ThreadedFileReadOperation {
                 unreachable!();
             };
             let old_waker = entry.waker.take();
+            let mut capacity_waker = None;
             if entry.work.is_none() {
                 // The worker has already closed the file on terminal publication.
-                state.slots[self.slot] = None;
+                capacity_waker = state.release(self.slot);
                 self.finished = true;
             }
             drop(state);
+            self.shared.ready.notify_one();
+            wake(capacity_waker);
             discard_waker(old_waker);
             discard_waker(Some(new_waker));
             return Poll::Ready(result);
@@ -409,12 +689,21 @@ impl Shared {
                 state.queue.push_back(slot);
             }
         }
+        for admission in state.admissions.iter_mut().flatten() {
+            admission.control.cancelled.store(true, Ordering::Release);
+        }
         drop(state);
         self.ready.notify_all();
         for slot in 0..self.config.capacity {
             let waker = lock(&self.state).slots[slot]
                 .as_mut()
                 .and_then(|e| e.waker.take());
+            wake(waker);
+        }
+        for index in 0..self.config.capacity {
+            let waker = lock(&self.state).admissions[index]
+                .as_mut()
+                .and_then(|admission| admission.waker.take());
             wake(waker);
         }
     }
@@ -543,8 +832,10 @@ fn worker_loop(shared: Arc<Shared>) {
             drop(result);
             drop(work);
             let mut state = lock(&shared.state);
-            state.slots[slot] = None;
+            let capacity_waker = state.release(slot);
             drop(state);
+            shared.ready.notify_one();
+            wake(capacity_waker);
         } else {
             entry.work = work.take();
             entry.phase = Phase::Ready(result.expect("noncancelled worker result"));

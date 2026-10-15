@@ -1,5 +1,5 @@
 use super::*;
-use crate::threaded_file::test_support;
+use crate::threaded_file::{test_support, QueuedThreadedFileProvider};
 use std::{
     fs,
     path::PathBuf,
@@ -69,7 +69,7 @@ fn signal() -> (Waker, mpsc::Receiver<()>) {
     (Waker::from(Arc::new(Signal(tx))), rx)
 }
 
-fn next(operation: &mut ThreadedFileReadOperation) -> Result<Option<ReadChunk>, IoError> {
+fn next(operation: &mut impl ChunkedRead) -> Result<Option<ReadChunk>, IoError> {
     let (waker, rx) = signal();
     let mut context = Context::from_waker(&waker);
     let end = Instant::now() + DEADLINE;
@@ -552,4 +552,494 @@ fn threaded_worker_read_panic_is_terminal_and_pool_can_recover() {
         .start(&ReadRequest::new(0, 1), RequestId(2))
         .unwrap();
     assert_eq!(next(&mut retry).unwrap().unwrap().bytes(), b"a");
+}
+
+fn scheduler_next(
+    scheduler: &mut IoScheduler<QueuedThreadedFileProvider>,
+) -> Result<IoEvent, IoError> {
+    let (waker, rx) = signal();
+    let end = Instant::now() + DEADLINE;
+    loop {
+        match scheduler.poll(&mut Context::from_waker(&waker)) {
+            Poll::Ready(result) => return result,
+            Poll::Pending => rx
+                .recv_timeout(end.saturating_duration_since(Instant::now()))
+                .unwrap(),
+        }
+    }
+}
+
+#[test]
+fn queued_scheduler_retries_exhausted_cancellation_cleanup_and_reads_two_mib() {
+    let bytes = vec![0x5a; 2 * 1024 * 1024];
+    let source = Source::new(&bytes);
+    let direct = source.provider(1, 64 * 1024);
+    let gate = Gate::install(&direct);
+    let provider = direct.clone().queued();
+    let mut scheduler = IoScheduler::new(provider.clone(), 1, 1).unwrap();
+    let first = scheduler.submit(ReadRequest::new(0, 1)).unwrap();
+    let (waker, rx) = signal();
+    assert!(scheduler
+        .poll(&mut Context::from_waker(&waker))
+        .is_pending());
+    gate.entered();
+    assert!(scheduler.cancel(first));
+    assert_eq!(
+        scheduler_next(&mut scheduler),
+        Err(IoError::Cancelled { request_id: first })
+    );
+    let retry = scheduler
+        .submit(ReadRequest::new(0, bytes.len() as u64).with_expected_checksum(checksum(&bytes)))
+        .unwrap();
+    while rx.try_recv().is_ok() {}
+    assert!(scheduler
+        .poll(&mut Context::from_waker(&waker))
+        .is_pending());
+    assert_eq!(provider.outstanding(), 1);
+    assert_eq!(provider.pending_admissions(), 1);
+    assert!(matches!(
+        direct.start(&ReadRequest::new(0, 1), RequestId(99)),
+        Err(IoError::Backpressure { capacity: 1 })
+    ));
+    assert!(rx.try_recv().is_err(), "waiting must not self-wake");
+    gate.open();
+    rx.recv_timeout(DEADLINE).unwrap();
+    let mut actual = Vec::new();
+    loop {
+        match scheduler_next(&mut scheduler).unwrap() {
+            IoEvent::Chunk { request_id, chunk } => {
+                assert_eq!(request_id, retry);
+                actual.extend_from_slice(chunk.bytes());
+            }
+            IoEvent::Completed(summary) => {
+                assert_eq!(summary.request_id, retry);
+                assert_eq!(summary.length, bytes.len() as u64);
+                break;
+            }
+        }
+    }
+    assert_eq!(actual, bytes);
+    assert!(scheduler.is_empty());
+    assert_eq!(provider.outstanding(), 0);
+    assert_eq!(provider.pending_admissions(), 0);
+    provider.shutdown();
+    until(|| provider.is_shutdown_complete());
+}
+
+#[test]
+fn queued_start_is_lazy_bounded_and_cancel_drop_unregister_before_poll() {
+    let source = Source::new(b"ab");
+    let provider = source.provider(1, 1).queued();
+    assert_eq!(provider.path(), source.0.as_path());
+    assert_eq!(provider.config().capacity, 1);
+    assert!(matches!(
+        provider.start(&ReadRequest::new(u64::MAX, 1), RequestId(0)),
+        Err(IoError::RangeOverflow)
+    ));
+    let mut first = provider
+        .start(&ReadRequest::new(0, 1), RequestId(1))
+        .unwrap();
+    assert_eq!(provider.outstanding(), 0, "start must not enqueue IO");
+    assert_eq!(provider.pending_admissions(), 1);
+    assert!(matches!(
+        provider
+            .clone()
+            .start(&ReadRequest::new(0, 1), RequestId(2)),
+        Err(IoError::Backpressure { capacity: 1 })
+    ));
+    first.cancel();
+    first.cancel();
+    assert_eq!(provider.pending_admissions(), 0);
+    assert_eq!(
+        next(&mut first),
+        Err(IoError::Cancelled {
+            request_id: RequestId(1)
+        })
+    );
+    let second = provider
+        .start(&ReadRequest::new(0, 1), RequestId(1))
+        .unwrap();
+    drop(first); // Reusing an admission index or request identity is safe.
+    assert_eq!(provider.pending_admissions(), 1);
+    drop(second);
+    assert_eq!(provider.pending_admissions(), 0);
+    let mut third = provider
+        .start(&ReadRequest::new(1, 1), RequestId(1))
+        .unwrap();
+    assert_eq!(next(&mut third).unwrap().unwrap().bytes(), b"b");
+}
+
+#[test]
+fn queued_cancel_registered_waiter_replaces_waker_without_spin_or_stale_wake() {
+    let source = Source::new(b"ab");
+    let direct = source.provider(1, 1);
+    let gate = Gate::install(&direct);
+    let occupied = direct.start(&ReadRequest::new(0, 1), RequestId(1)).unwrap();
+    gate.entered();
+    let provider = direct.clone().queued();
+    let mut waiting = provider
+        .start(&ReadRequest::new(1, 1), RequestId(1))
+        .unwrap();
+    let (old, old_rx) = signal();
+    let (current, current_rx) = signal();
+    assert!(waiting
+        .poll_chunk(&mut Context::from_waker(&old))
+        .is_pending());
+    assert!(waiting
+        .poll_chunk(&mut Context::from_waker(&current))
+        .is_pending());
+    assert!(old_rx.try_recv().is_err());
+    assert!(current_rx.try_recv().is_err());
+    waiting.cancel();
+    current_rx.recv_timeout(DEADLINE).unwrap();
+    assert!(old_rx.try_recv().is_err());
+    assert_eq!(provider.pending_admissions(), 0);
+    let mut live = provider
+        .start(&ReadRequest::new(1, 1), RequestId(1))
+        .unwrap();
+    drop(waiting);
+    assert!(live
+        .poll_chunk(&mut Context::from_waker(&current))
+        .is_pending());
+    drop(occupied);
+    gate.open();
+    current_rx.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(next(&mut live).unwrap().unwrap().bytes(), b"b");
+    assert!(old_rx.try_recv().is_err());
+}
+
+#[test]
+fn queued_terminal_consumption_grants_slot_before_wake_and_drop_cleans_grant() {
+    let source = Source::new(b"ab");
+    let direct = source.provider(1, 1);
+    let mut occupied = direct.start(&ReadRequest::new(0, 1), RequestId(1)).unwrap();
+    test_support::wait_ready(&direct);
+    let provider = direct.clone().queued();
+    let mut waiting = provider
+        .start(&ReadRequest::new(1, 1), RequestId(2))
+        .unwrap();
+    let (waker, rx) = signal();
+    assert!(waiting
+        .poll_chunk(&mut Context::from_waker(&waker))
+        .is_pending());
+    assert_eq!(next(&mut occupied).unwrap().unwrap().bytes(), b"a");
+    rx.recv_timeout(DEADLINE).unwrap();
+    // The grant itself owns the slot even if its scheduler hasn't polled again.
+    assert_eq!(provider.outstanding(), 1);
+    assert!(matches!(
+        direct.start(&ReadRequest::new(0, 1), RequestId(3)),
+        Err(IoError::Backpressure { capacity: 1 })
+    ));
+    drop(waiting);
+    assert_eq!(provider.pending_admissions(), 0);
+    until(|| provider.outstanding() == 0);
+    let mut replacement = provider
+        .start(&ReadRequest::new(1, 1), RequestId(2))
+        .unwrap();
+    assert_eq!(next(&mut replacement).unwrap().unwrap().bytes(), b"b");
+}
+
+#[test]
+fn queued_capacity_freed_before_registration_is_seen_without_a_wake() {
+    let source = Source::new(b"ab");
+    let direct = source.provider(1, 1);
+    let mut occupied = direct.start(&ReadRequest::new(0, 1), RequestId(1)).unwrap();
+    let provider = direct.clone().queued();
+    let mut waiting = provider
+        .start(&ReadRequest::new(1, 1), RequestId(2))
+        .unwrap();
+    assert_eq!(next(&mut occupied).unwrap().unwrap().bytes(), b"a");
+    assert_eq!(next(&mut waiting).unwrap().unwrap().bytes(), b"b");
+}
+
+#[test]
+fn queued_multiple_schedulers_share_fifo_grants_with_colliding_request_ids() {
+    let source = Source::new(b"ab");
+    let direct = source.provider(2, 1);
+    let gate = Gate::install(&direct);
+    let first = direct.start(&ReadRequest::new(0, 1), RequestId(1)).unwrap();
+    gate.entered();
+    let second = direct.start(&ReadRequest::new(0, 1), RequestId(1)).unwrap();
+    let provider = direct.clone().queued();
+    let mut a = IoScheduler::new(provider.clone(), 1, 1).unwrap();
+    let mut b = IoScheduler::new(direct.clone().queued(), 1, 1).unwrap();
+    assert_eq!(a.submit(ReadRequest::new(0, 1)).unwrap(), RequestId(1));
+    assert_eq!(b.submit(ReadRequest::new(1, 1)).unwrap(), RequestId(1));
+    let (aw, arx) = signal();
+    let (bw, brx) = signal();
+    assert!(a.poll(&mut Context::from_waker(&aw)).is_pending());
+    assert!(b.poll(&mut Context::from_waker(&bw)).is_pending());
+    assert_eq!(provider.pending_admissions(), 2);
+    assert!(arx.try_recv().is_err());
+    assert!(brx.try_recv().is_err());
+    drop(first);
+    drop(second);
+    gate.open();
+    arx.recv_timeout(DEADLINE).unwrap();
+    brx.recv_timeout(DEADLINE).unwrap();
+    for (scheduler, expected) in [(&mut a, b"a"), (&mut b, b"b")] {
+        assert!(
+            matches!(scheduler_next(scheduler), Ok(IoEvent::Chunk { chunk, .. }) if chunk.bytes() == expected)
+        );
+        assert!(matches!(
+            scheduler_next(scheduler),
+            Ok(IoEvent::Completed(_))
+        ));
+    }
+    assert_eq!(provider.outstanding(), 0);
+    assert_eq!(provider.pending_admissions(), 0);
+}
+
+#[test]
+fn queued_fifo_grants_only_head_and_canceling_grant_advances_next_waiter() {
+    let source = Source::new(b"ab");
+    let direct = source.provider(2, 1);
+    let mut occupied = direct.start(&ReadRequest::new(0, 1), RequestId(1)).unwrap();
+    test_support::wait_ready(&direct);
+    let blocker = direct.start(&ReadRequest::new(0, 2), RequestId(2)).unwrap();
+    let provider = direct.clone().queued();
+    // FIFO follows poll registration, not allocation index or request identity.
+    let mut second = provider
+        .start(&ReadRequest::new(1, 1), RequestId(1))
+        .unwrap();
+    let mut first = provider
+        .start(&ReadRequest::new(0, 1), RequestId(1))
+        .unwrap();
+    let (first_waker, first_rx) = signal();
+    let (second_waker, second_rx) = signal();
+    assert!(first
+        .poll_chunk(&mut Context::from_waker(&first_waker))
+        .is_pending());
+    assert!(second
+        .poll_chunk(&mut Context::from_waker(&second_waker))
+        .is_pending());
+    assert_eq!(next(&mut occupied).unwrap().unwrap().bytes(), b"a");
+    first_rx.recv_timeout(DEADLINE).unwrap();
+    assert!(second_rx.try_recv().is_err(), "only FIFO head gets a slot");
+    assert_eq!(provider.outstanding(), 2);
+    drop(first); // Cancel the grant before its scheduler polls again.
+    second_rx.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(next(&mut second).unwrap().unwrap().bytes(), b"b");
+    drop(blocker);
+    until(|| provider.outstanding() == 0);
+}
+
+#[test]
+fn queued_shutdown_wakes_every_waiter_despite_reentrant_panicking_callback() {
+    let source = Source::new(b"ab");
+    let direct = source.provider(2, 1);
+    let gate = Gate::install(&direct);
+    let occupied = direct.start(&ReadRequest::new(0, 1), RequestId(1)).unwrap();
+    gate.entered();
+    let other = direct.start(&ReadRequest::new(0, 1), RequestId(2)).unwrap();
+    let provider = direct.clone().queued();
+    let mut first = provider
+        .start(&ReadRequest::new(0, 1), RequestId(3))
+        .unwrap();
+    let mut second = provider
+        .start(&ReadRequest::new(1, 1), RequestId(4))
+        .unwrap();
+    let (tx, rx) = mpsc::channel();
+    let host = Waker::from(Arc::new(HostWake {
+        provider: direct.clone(),
+        called: AtomicUsize::new(0),
+        panic: AtomicBool::new(true),
+        tx,
+    }));
+    let (waker, other_rx) = signal();
+    assert!(first
+        .poll_chunk(&mut Context::from_waker(&host))
+        .is_pending());
+    assert!(second
+        .poll_chunk(&mut Context::from_waker(&waker))
+        .is_pending());
+    provider.shutdown();
+    provider.shutdown();
+    rx.recv_timeout(DEADLINE).unwrap();
+    other_rx.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(
+        next(&mut first),
+        Err(IoError::Cancelled {
+            request_id: RequestId(3)
+        })
+    );
+    assert_eq!(
+        next(&mut second),
+        Err(IoError::Cancelled {
+            request_id: RequestId(4)
+        })
+    );
+    assert!(matches!(
+        provider.start(&ReadRequest::new(0, 1), RequestId(5)),
+        Err(IoError::Provider { .. })
+    ));
+    drop((first, second, occupied, other));
+    assert_eq!(provider.pending_admissions(), 0);
+    gate.open();
+    until(|| provider.is_shutdown_complete());
+}
+
+#[test]
+fn queued_last_owner_drop_wakes_surviving_admission_without_join() {
+    let source = Source::new(b"ab");
+    let direct = source.provider(1, 1);
+    let gate = Gate::install(&direct);
+    let occupied = direct.start(&ReadRequest::new(0, 1), RequestId(1)).unwrap();
+    gate.entered();
+    let provider = direct.queued();
+    let mut waiting = provider
+        .start(&ReadRequest::new(1, 1), RequestId(2))
+        .unwrap();
+    let (waker, rx) = signal();
+    assert!(waiting
+        .poll_chunk(&mut Context::from_waker(&waker))
+        .is_pending());
+    drop(provider);
+    rx.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(
+        next(&mut waiting),
+        Err(IoError::Cancelled {
+            request_id: RequestId(2)
+        })
+    );
+    drop((waiting, occupied));
+    gate.open();
+}
+
+#[test]
+fn queued_capacity_wake_panic_reenters_pool_without_killing_worker() {
+    let source = Source::new(b"ab");
+    let direct = source.provider(1, 1);
+    let gate = Gate::install(&direct);
+    let occupied = direct.start(&ReadRequest::new(0, 1), RequestId(1)).unwrap();
+    gate.entered();
+    let provider = direct.clone().queued();
+    let mut waiting = provider
+        .start(&ReadRequest::new(1, 1), RequestId(2))
+        .unwrap();
+    let (tx, rx) = mpsc::channel();
+    let host = Arc::new(HostWake {
+        provider: direct,
+        called: AtomicUsize::new(0),
+        panic: AtomicBool::new(true),
+        tx,
+    });
+    let waker = Waker::from(Arc::clone(&host));
+    assert!(waiting
+        .poll_chunk(&mut Context::from_waker(&waker))
+        .is_pending());
+    drop(occupied);
+    gate.open();
+    rx.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(next(&mut waiting).unwrap().unwrap().bytes(), b"b");
+    assert_eq!(host.called.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.outstanding(), 0);
+}
+
+struct HostDrop {
+    provider: QueuedThreadedFileProvider,
+    tx: mpsc::Sender<()>,
+}
+
+#[allow(
+    clippy::manual_noop_waker,
+    reason = "custom final drop tests reentry and panic isolation"
+)]
+impl Wake for HostDrop {
+    fn wake(self: Arc<Self>) {}
+}
+
+impl Drop for HostDrop {
+    fn drop(&mut self) {
+        let _ = self.provider.outstanding();
+        let _ = self.provider.pending_admissions();
+        self.tx.send(()).unwrap();
+        panic!("injected host waker drop panic");
+    }
+}
+
+#[test]
+fn queued_replaced_and_canceled_waker_drop_can_reenter_and_panic() {
+    let source = Source::new(b"ab");
+    let direct = source.provider(1, 1);
+    let gate = Gate::install(&direct);
+    let occupied = direct.start(&ReadRequest::new(0, 1), RequestId(1)).unwrap();
+    gate.entered();
+    let provider = direct.queued();
+    let mut waiting = provider
+        .start(&ReadRequest::new(1, 1), RequestId(2))
+        .unwrap();
+    for cancel in [false, true] {
+        let (tx, rx) = mpsc::channel();
+        let host = Waker::from(Arc::new(HostDrop {
+            provider: provider.clone(),
+            tx,
+        }));
+        assert!(waiting
+            .poll_chunk(&mut Context::from_waker(&host))
+            .is_pending());
+        drop(host); // The pool now owns the final waker reference.
+        if cancel {
+            waiting.cancel();
+        } else {
+            let (replacement, _) = signal();
+            assert!(waiting
+                .poll_chunk(&mut Context::from_waker(&replacement))
+                .is_pending());
+        }
+        rx.recv_timeout(DEADLINE).unwrap();
+    }
+    assert_eq!(provider.pending_admissions(), 0);
+    drop(occupied);
+    gate.open();
+    until(|| provider.outstanding() == 0);
+    let mut retry = provider
+        .start(&ReadRequest::new(1, 1), RequestId(3))
+        .unwrap();
+    assert_eq!(next(&mut retry).unwrap().unwrap().bytes(), b"b");
+}
+
+#[test]
+fn queued_concurrent_schedulers_cancel_and_retry_within_shared_bounds() {
+    let source = Source::new(b"abcdefgh");
+    let provider = source.provider(4, 1).queued();
+    let mut threads = Vec::new();
+    for _ in 0..4 {
+        let provider = provider.clone();
+        threads.push(thread::spawn(move || {
+            let mut scheduler = IoScheduler::new(provider.clone(), 1, 1).unwrap();
+            let (waker, _) = signal();
+            for _ in 0..32 {
+                let canceled = scheduler.submit(ReadRequest::new(0, 8)).unwrap();
+                let _ = scheduler.poll(&mut Context::from_waker(&waker));
+                assert!(scheduler.cancel(canceled));
+                assert_eq!(
+                    scheduler_next(&mut scheduler),
+                    Err(IoError::Cancelled {
+                        request_id: canceled
+                    })
+                );
+                scheduler.submit(ReadRequest::new(0, 2)).unwrap();
+                for _ in 0..2 {
+                    assert!(matches!(
+                        scheduler_next(&mut scheduler),
+                        Ok(IoEvent::Chunk { .. })
+                    ));
+                }
+                assert!(matches!(
+                    scheduler_next(&mut scheduler),
+                    Ok(IoEvent::Completed(_))
+                ));
+                assert!(provider.outstanding() <= 4);
+                assert!(provider.pending_admissions() <= 4);
+            }
+        }));
+    }
+    for worker in threads {
+        worker.join().unwrap();
+    }
+    until(|| provider.outstanding() == 0);
+    assert_eq!(provider.pending_admissions(), 0);
+    provider.shutdown();
+    until(|| provider.is_shutdown_complete());
 }

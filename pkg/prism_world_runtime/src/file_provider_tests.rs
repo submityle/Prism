@@ -72,6 +72,112 @@ impl SceneHost for Host {
     }
 }
 
+#[test]
+fn worker_archive_routes_validates_and_commits_without_blocking_frame_io() {
+    use prism_world_io::ThreadedFileConfig;
+    use std::sync::{mpsc, Arc};
+    use std::task::Wake;
+    use std::time::{Duration, Instant};
+
+    struct Signal(mpsc::SyncSender<()>);
+    impl Wake for Signal {
+        fn wake(self: Arc<Self>) {
+            let _ = self.0.try_send(());
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            let _ = self.0.try_send(());
+        }
+    }
+
+    // One worker slot, multiple logical requests, and headers split over chunks.
+    let payloads: [&[u8]; 3] = [b"opaque-one", b"checksum-rejected", b"header-rejected"];
+    let manifests: Vec<_> = payloads
+        .iter()
+        .enumerate()
+        .map(|(index, payload)| manifest(index as i64, CELL_HEADER_SIZE + payload.len()))
+        .collect();
+    let mut archive = b"prefix".to_vec();
+    let mut sources = Vec::new();
+    for (index, &m) in manifests.iter().enumerate() {
+        let mut header = m;
+        if index == 2 {
+            header.content_version += 1;
+        }
+        let bytes = cell_bytes(header, payloads[index]);
+        let checksum = checksum(&bytes) ^ u64::from(index == 1);
+        sources.push(
+            CellReadRequest::new(m, 0)
+                .with_byte_offset(archive.len() as u64)
+                .with_expected_checksum(checksum),
+        );
+        archive.extend_from_slice(&bytes);
+        archive.extend_from_slice(b"gap");
+    }
+    let file = TempFile::new(&archive);
+    let mut io = ThreadedCellIo::threaded(
+        &file.0,
+        ThreadedFileConfig {
+            workers: 1,
+            capacity: 1,
+            max_chunk_size: 7,
+        },
+        1,
+        3,
+        IoByteLimits {
+            max_request_bytes: 128,
+            max_total_bytes: 384,
+        },
+    )
+    .unwrap();
+    for source in sources {
+        io.register(source).unwrap();
+    }
+    let mut coordinator = CellFrameCoordinator::with_io(io);
+    let mut host = Host::default();
+    let demands: Vec<_> = manifests
+        .iter()
+        .map(|m| DemandSource::new(m.sector, 0, 1, 10).unwrap())
+        .collect();
+    assert_eq!(
+        coordinator
+            .plan_frame(
+                &demands,
+                &manifests,
+                &[],
+                StreamBudget {
+                    io_bytes: 384,
+                    max_actions: 3
+                },
+                &mut host
+            )
+            .submitted,
+        3
+    );
+    let (send, receive) = mpsc::sync_channel(1);
+    let waker = Waker::from(Arc::new(Signal(send)));
+    let mut cx = Context::from_waker(&waker);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while coordinator.in_flight() != 0 {
+        match coordinator.poll_io_with_context(&mut cx, &mut host) {
+            Poll::Ready(result) => result.unwrap(),
+            Poll::Pending => receive
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("worker completion must wake frame driver"),
+        }
+    }
+    assert_eq!(host.0.len(), 1);
+    assert_eq!(host.0[&manifests[0].sector], payloads[0]);
+    assert_eq!(coordinator.trace().replay(), Ok(1));
+    for stage in [FailureStage::Provider, FailureStage::ManifestHeader] {
+        assert!(coordinator
+            .trace()
+            .as_slice()
+            .iter()
+            .any(|event| matches!(event,
+            TraceEvent::Failed { stage: actual, .. } if *actual == stage)));
+    }
+}
+
 fn run_frame(provider: FileCellProvider, manifests: &[CellManifest]) -> (Host, Trace) {
     let mut coordinator = WorldFrameCoordinator::new(provider, manifests.len()).expect("runtime");
     let mut host = Host::default();

@@ -10,22 +10,39 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
+use core::num::NonZeroU64;
+use core::task::{Context, Poll};
 
 use prism_world_io::ReadRequest;
 use prism_world_stream::{CellManifest, DemandSource, SectorId, StreamAction, StreamBudget};
+
+mod routed_io;
+pub use routed_io::RoutedCellIo;
+#[cfg(test)]
+mod async_coordinator_tests;
 
 #[cfg(feature = "std")]
 mod file_provider;
 #[cfg(feature = "std")]
 mod io_adapter;
+#[cfg(feature = "std")]
+mod scheduled_io;
+#[cfg(feature = "std")]
+mod threaded_cell_io;
 
 #[cfg(all(test, feature = "std"))]
 mod file_provider_tests;
+#[cfg(all(test, feature = "std"))]
+mod scheduled_io_tests;
 
 #[cfg(feature = "std")]
 pub use file_provider::FileCellProvider;
 #[cfg(feature = "std")]
 pub use io_adapter::{IoAdapterEvent, IoByteLimits, IoRequestId, IoSchedulerAdapter};
+#[cfg(feature = "std")]
+pub use scheduled_io::ScheduledCellIo;
+#[cfg(feature = "std")]
+pub use threaded_cell_io::ThreadedCellIo;
 
 /// The byte width of the fixed cell manifest header.
 pub const CELL_HEADER_SIZE: usize = 44;
@@ -183,12 +200,19 @@ impl LoadedCell {
 }
 
 /// A bounded submission failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SubmitError {
     /// The runtime has reached its outstanding request capacity.
     Backpressure {
         /// Maximum outstanding requests.
         capacity: usize,
+    },
+    /// All nonzero request identities have been used by this backend.
+    RequestIdExhausted,
+    /// Request metadata or provider admission was rejected.
+    Provider {
+        /// Human-readable failure detail.
+        message: String,
     },
 }
 
@@ -198,15 +222,24 @@ impl fmt::Display for SubmitError {
             Self::Backpressure { capacity } => {
                 write!(formatter, "IO capacity {capacity} is full")
             }
+            Self::RequestIdExhausted => formatter.write_str("IO request identities exhausted"),
+            Self::Provider { message } => formatter.write_str(message),
         }
     }
 }
 
 /// Stable identity for one IO request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RequestId(u64);
+pub struct RequestId(pub(crate) u64);
 
 impl RequestId {
+    /// Creates an identity for a custom [`CellIo`] backend.
+    ///
+    /// The backend must never reuse this value during its lifetime.
+    pub const fn new(value: NonZeroU64) -> Self {
+        Self(value.get())
+    }
+
     /// Returns the numeric identity.
     #[must_use]
     pub const fn get(self) -> u64 {
@@ -281,16 +314,17 @@ impl<E: fmt::Debug> fmt::Debug for IoCompletion<E> {
 struct PendingRequest {
     request_id: RequestId,
     request: CellReadRequest,
-    sequence: u64,
     cancelled: bool,
 }
 
-/// A bounded, deterministic, poll-driven IO runtime.
+/// A bounded synchronous compatibility runtime.
+///
+/// Polling invokes the provider directly and may block. Use [`CellIo`] with a
+/// worker-backed provider when coordinating filesystem IO on a frame thread.
 pub struct IoRuntime<P: ChunkProvider> {
     provider: P,
     capacity: usize,
-    next_request_id: u64,
-    next_sequence: u64,
+    next_request_id: Option<u64>,
     pending: Vec<PendingRequest>,
 }
 
@@ -303,8 +337,7 @@ impl<P: ChunkProvider> IoRuntime<P> {
         Ok(Self {
             provider,
             capacity,
-            next_request_id: 1,
-            next_sequence: 0,
+            next_request_id: Some(1),
             pending: Vec::new(),
         })
     }
@@ -316,15 +349,16 @@ impl<P: ChunkProvider> IoRuntime<P> {
                 capacity: self.capacity,
             });
         }
-        let request_id = RequestId(self.next_request_id);
-        self.next_request_id = self.next_request_id.wrapping_add(1);
+        let value = self
+            .next_request_id
+            .ok_or(SubmitError::RequestIdExhausted)?;
+        let request_id = RequestId(value);
+        self.next_request_id = value.checked_add(1);
         self.pending.push(PendingRequest {
             request_id,
             request,
-            sequence: self.next_sequence,
             cancelled: false,
         });
-        self.next_sequence = self.next_sequence.wrapping_add(1);
         Ok(request_id)
     }
 
@@ -362,7 +396,7 @@ impl<P: ChunkProvider> IoRuntime<P> {
                 left.request
                     .priority()
                     .cmp(&right.request.priority())
-                    .then_with(|| right.sequence.cmp(&left.sequence))
+                    .then_with(|| right.request_id.cmp(&left.request_id))
             })?
             .0;
         let pending = self.pending.swap_remove(index);
@@ -387,6 +421,54 @@ impl<P: ChunkProvider> IoRuntime<P> {
                 error,
             },
         })
+    }
+}
+
+/// Bounded cell IO driven by the caller's task context.
+///
+/// Accepted requests retain their admission until a terminal completion is
+/// consumed. A pending nonempty backend must arrange a wake when it can progress.
+/// Identities are nonzero, never reused within a backend, and local to that backend.
+pub trait CellIo {
+    /// Provider or backend failure type.
+    type Error;
+
+    /// Admits a request without waiting for its bytes.
+    fn submit(&mut self, request: CellReadRequest) -> Result<RequestId, SubmitError>;
+    /// Requests cancellation; terminal retirement occurs during polling.
+    fn cancel(&mut self, id: RequestId) -> bool;
+    /// Counts accepted requests whose terminal event has not been consumed.
+    fn in_flight(&self) -> usize;
+    /// Polls a terminal cell event or an internal backend error.
+    fn poll_completion(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<IoCompletion<Self::Error>, Self::Error>>;
+}
+
+impl<P: ChunkProvider> CellIo for IoRuntime<P> {
+    type Error = P::Error;
+
+    fn submit(&mut self, request: CellReadRequest) -> Result<RequestId, SubmitError> {
+        IoRuntime::submit(self, request)
+    }
+
+    fn cancel(&mut self, id: RequestId) -> bool {
+        IoRuntime::cancel(self, id)
+    }
+
+    fn in_flight(&self) -> usize {
+        IoRuntime::in_flight(self)
+    }
+
+    fn poll_completion(
+        &mut self,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<IoCompletion<Self::Error>, Self::Error>> {
+        match self.poll() {
+            Some(completion) => Poll::Ready(Ok(completion)),
+            None => Poll::Pending,
+        }
     }
 }
 
@@ -706,8 +788,8 @@ struct PendingLoad {
 }
 
 /// Coordinates stream policy, bounded IO, manifest validation, and scene host calls.
-pub struct WorldFrameCoordinator<P: ChunkProvider> {
-    io: IoRuntime<P>,
+pub struct CellFrameCoordinator<I: CellIo> {
+    io: I,
     stream: prism_world_stream::StreamScheduler,
     known_loaded: BTreeMap<SectorId, CellManifest>,
     pending: BTreeMap<RequestId, PendingLoad>,
@@ -715,17 +797,39 @@ pub struct WorldFrameCoordinator<P: ChunkProvider> {
     frame: u64,
 }
 
-impl<P: ChunkProvider> WorldFrameCoordinator<P> {
+/// Synchronous compatibility coordinator over a [`ChunkProvider`].
+pub type WorldFrameCoordinator<P> = CellFrameCoordinator<IoRuntime<P>>;
+
+impl<P: ChunkProvider> CellFrameCoordinator<IoRuntime<P>> {
     /// Creates a coordinator with a bounded IO runtime.
     pub fn new(provider: P, io_capacity: usize) -> Result<Self, SubmitError> {
-        Ok(Self {
-            io: IoRuntime::new(provider, io_capacity)?,
+        Ok(Self::with_io(IoRuntime::new(provider, io_capacity)?))
+    }
+
+    /// Runs one synchronous provider request and applies its terminal result.
+    pub fn poll_io<H: SceneHost>(&mut self, host: &mut H) -> bool
+    where
+        P::Error: fmt::Debug,
+    {
+        let Some(completion) = self.io.poll() else {
+            return false;
+        };
+        self.apply_completion(completion, host);
+        true
+    }
+}
+
+impl<I: CellIo> CellFrameCoordinator<I> {
+    /// Creates a coordinator using an explicitly selected IO backend.
+    pub fn with_io(io: I) -> Self {
+        Self {
+            io,
             stream: prism_world_stream::StreamScheduler::new(),
             known_loaded: BTreeMap::new(),
             pending: BTreeMap::new(),
             trace: Trace::new(),
             frame: 0,
-        })
+        }
     }
 
     /// Plans a frame, submits load actions, and applies evictions to `host`.
@@ -781,14 +885,18 @@ impl<P: ChunkProvider> WorldFrameCoordinator<P> {
                             });
                             report.submitted += 1;
                         }
-                        Err(SubmitError::Backpressure { capacity }) => {
+                        Err(error) => {
                             self.stream.mark_unloaded(request.sector);
+                            let stage = match &error {
+                                SubmitError::Backpressure { .. } => FailureStage::Backpressure,
+                                _ => FailureStage::Provider,
+                            };
                             self.record_failure(
                                 frame,
                                 request.sector,
                                 TraceOp::Load,
-                                FailureStage::Backpressure,
-                                &format!("IO capacity {capacity} is full"),
+                                stage,
+                                &error.to_string(),
                             );
                             report.failed += 1;
                         }
@@ -821,25 +929,44 @@ impl<P: ChunkProvider> WorldFrameCoordinator<P> {
         report
     }
 
-    /// Polls one submitted IO request and, on success, commits it to `host`.
-    pub fn poll_io<H: SceneHost>(&mut self, host: &mut H) -> bool
+    /// Polls the backend once and commits one validated terminal result to `host`.
+    ///
+    /// `Pending` preserves all pending loads. Internal backend errors are returned
+    /// to the caller; per-request failures are recorded in the trace and retired.
+    /// Polling is nonblocking when the selected [`CellIo`] implementation is.
+    pub fn poll_io_with_context<H: SceneHost>(
+        &mut self,
+        cx: &mut Context<'_>,
+        host: &mut H,
+    ) -> Poll<Result<(), I::Error>>
     where
-        P::Error: fmt::Debug,
+        I::Error: fmt::Debug,
     {
-        let Some(completion) = self.io.poll() else {
-            return false;
-        };
+        match self.io.poll_completion(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(completion)) => {
+                self.apply_completion(completion, host);
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    fn apply_completion<H: SceneHost>(&mut self, completion: IoCompletion<I::Error>, host: &mut H)
+    where
+        I::Error: fmt::Debug,
+    {
         match completion {
             IoCompletion::Completed {
                 request_id,
-                request,
+                request: _,
                 bytes,
             } => {
                 let pending = self.pending.remove(&request_id);
                 let Some(pending) = pending else {
-                    return true;
+                    return;
                 };
-                match validate_header(request.manifest(), &bytes) {
+                match validate_header(pending.manifest, &bytes) {
                     Ok(payload) => match host.load_cell(&pending.manifest, payload) {
                         Ok(()) => {
                             self.known_loaded
@@ -906,7 +1033,6 @@ impl<P: ChunkProvider> WorldFrameCoordinator<P> {
                 );
             }
         }
-        true
     }
 
     /// Cancels the pending request for `sector`, if any.

@@ -13,7 +13,7 @@
 - 本批运行的是指定文件的 `rustfmt --edition 2024 --config skip_children=true --check` 和 `git diff --check`，仅验证格式、解析及补丁空白，不等同于类型检查、clippy 或测试。
 - `prism_world_io` 全部 target clippy 与 `prism_world_terrain` no-default 全部 target clippy 已通过；terrain `mesh` feature clippy 在编译依赖 `prism_asset` 时因磁盘耗尽中断。性能/GPU 验证及全 workspace 测试仍未运行；本批使用 `/private/tmp` 隔离 target，没有清理或覆盖共享 target。
 
-本批提交是源码交接，不是完整系统验收；异步 world runtime 接线、任务池整合、跨 LOD 地形接缝和性能目标仍按下文边界保留。
+后续异步 runtime 接线已补齐至固定 worker 文件到 `SceneHost` 的链路，详见 M3 和 `prism_world_async_runtime_zh.md`；任务池整合、跨 LOD 地形接缝和产品性能目标仍按下文边界保留。本记录不构成完整系统验收。
 
 ## 已交付切片
 
@@ -59,8 +59,11 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 - `prism_world_runtime`：真实调用 `StreamScheduler` 生成 load/evict 动作，并通过有界、可取消、优先级排序的 provider 队列提交 cell；完成后执行固定 manifest header 校验，再进入 `SceneHost::load_cell`，失败/驱逐写入可 replay trace。std 构建新增 `IoSchedulerAdapter`，实际桥接 `prism_world_io::IoScheduler` 的 chunk/completion/cancel/backpressure/error 事件，并保留同步 `ChunkProvider` 兼容路径。
 - `FileCellProvider` 复用 `prism_world_io/std` 的真实 `FileProvider`，以 sector 注册完整 manifest/文件 offset/checksum，拒绝过期 manifest 并保留调度优先级。真实临时文件测试覆盖文件→分块 scheduler→header/checksum→`SceneHost`，及短读、打开失败、取消和错误隔离；底层每次 poll 为有界阻塞读取，不宣称已变成线程池异步文件 IO。
 - 本批新增独立的 `ThreadedFileProvider` 源码：固定 std worker、预留槽位/队列、受限 chunk、ACK 驱动的后续读取、worker 内文件打开/读取/关闭，以及非 joining 的取消/shutdown。取消的 Ready 缓冲区交由 worker 清理；槽位在结果和文件销毁后才释放。waker 克隆/替换后的销毁及唤醒位于 metadata 锁外，worker/批量 shutdown 隔离唤醒回调 panic。逻辑 payload 约束为 `capacity × max_chunk_size`，不包含调用方已取走的 chunk、线程栈、元数据、分配器开销或 RSS；阻塞 OS 调用只能合作取消，返回前仍占槽位。16 项回归覆盖范围/短读/打开失败、准入、parked ACK、queued/running/ready 取消、重复 shutdown、last-owner drop、唤醒时序及 panic，已与 crate 其余测试合计 28 项通过。
-- 上述独立 provider 尚未替换 `FileCellProvider` 的阻塞后端，未接入 `prism_tasks`。`ChunkProvider::read_chunk` 返回完整 cell，`IoRuntime::poll` 仍直接同步调用它；仅将后端换成 threaded provider 再 `read_to_completion` 仍会阻塞 coordinator。真正的异步端到端路径还需要 Pending/completion 与共享取消句柄，不能把独立 provider 当作 runtime 已异步化。IO crate 已独立验证活动请求公平轮询与请求 ID 耗尽保护；scheduler 的 provider 临时背压重试和 runtime adapter waker 生命周期仍未通过本批端到端验证。
+- 新增 `CellIo`/`CellFrameCoordinator` 的 task-context poll 接口；`ScheduledCellIo` 聚合完整 cell，每次最多消费 16 个 chunk，随后唤醒并让出。`WorldFrameCoordinator<P>` 是同步兼容别名，保留 `new/poll_io`；旧路径仍可能阻塞，不把兼容 API 称为异步。同步 runtime 的 ID 也改为单调非零、耗尽显式失败，并用 ID 保持同优先级 FIFO。
+- `RoutedCellIo` 在提交前检查完整 manifest 版本，保留注册的 offset/checksum 与调用方优先级；`ThreadedCellIo::threaded` 将其接入独占固定 worker pool，要求 active limit 不超过物理槽位。真实 archive 回归从 stream demand 到 worker 分块、checksum/header 校验和 `SceneHost` 提交，错误内容不会进入 host；不是 scene/ECS 或 GPU 端到端验收。
+- `QueuedThreadedFileProvider` 提供取消清理后的有界容量等待：所有 clone 共享 `capacity` 条准入记录与 `capacity` 个物理槽位，FIFO 授予槽位后再唤醒；等待中不保留 payload/file、不使用自唤醒重试。直接 `ThreadedFileProvider::start` 仍保留立即背压契约。IO crate 42 项测试通过，包含阻塞清理后的替换请求、2 MiB 文件校验、多 scheduler、FIFO grant、取消/drop、shutdown 及重入/panic waker。
 - `IoSchedulerAdapter` 以带 ID/原始请求的 `Failed` 终态关联错误；scheduler 串行锁内跟踪实际 start/poll 回调，scheduler 的显式取消 ID 优先，provider 不能伪造其他请求的取消 ID。并发 blocking reader 保留各自结果、共享 provider 唤醒可唤醒全部等待者，public poll 不抢占其结果；终态被消费前仍计入 capacity，取消会唤醒停驻 reader。
+- adapter public poll 的 waker 由最新 Context 替换，blocking reader 按请求 ID 各有一个注册；锁外执行 clone/drop/wake，锁内 provider 的同步通知延迟到 adapter guard 解锁后派发，隔离回调 panic 并保留重入注册与并发通知。本轮 IO 42 项、runtime 53 项及 no-default runtime 6 项测试通过；两种 feature 的 all-target clippy 通过 `-D warnings`。真实 archive release 测量与限定条件见 `prism_world_async_runtime_zh.md`。
 - `IoByteLimits` 为 adapter/file provider 增加独立的单请求和累计声明字节准入，包含 44 字节 header；mutex 内在分配请求 ID/启动 IO 前检查上限及累计溢出，拒绝不消耗 quota/ID。queued、active 和未消费的 Completed/Failed 均保留完整配额，消费 Chunk 不释放；兼容构造器保留无配置字节上限行为，但仍拒绝算术溢出。
 - 聚合首次 chunk 时 fallible reserve 完整声明大小，后续 append 也为 fallible；分配失败取消底层操作，待 scheduler 移除后才以原 request ID/分配错误报告终态。累计上限 B 限制逻辑准入，不是 RSS 硬上限：保留 Chunk 副本与聚合结果的逻辑长度可接近 2B，Vec 实际容量/分配器、provider、事件元数据及交还调用方后的缓冲区不在计数内。
 - 预算补丁在并行任务验证快照中通过 runtime 全 feature 测试 27 项、no-default 测试 3 项及两种 feature 的 all-target clippy/check/fmt；预算批新增 8 项预算/文件验证，既有 5 项并发/关联测试先前额外重复 100 轮通过。历史收尾重跑曾因并行修改使用 `error.to_string()` 而触发泛型错误类型缺少 Display 的 E0599；后续已恢复 Debug 格式化，并在本批 threaded provider 修改之前通过 runtime 全 feature 27 项测试。该记录不代表本批新 provider 已被编译，也不将当前共享工作区误报为全部通过。上述 runtime 验证不依赖 `prism_asset`。
@@ -151,7 +154,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
-- M3：真实异步 world facade、`prism_tasks` 生命周期/取消整合、资产包解压、GPU 直传和产品级吞吐仍需实现或独立运行时验证；当前已有阻塞文件 provider、scheduler、manifest/payload、SceneHost 的 CPU 端到端证据。新增独立 threaded provider 已完成 28 项 crate 测试，但尚未替换 runtime 的阻塞后端或接入 `prism_tasks`。
+- M3：`prism_tasks` 生命周期/取消整合、资产包解压、mmap schema 视图、GPU 直传和产品级吞吐仍需实现或独立运行时验证；固定 worker → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md`，不能代替冷盘、资产包或产品负载验收。
 - M4 散布：GPU 候选生成/proxy 流、连续密度切换和大规模性能验收；当前完成的是内容中立、可再生且有界的 CPU 散布 kernel。
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
