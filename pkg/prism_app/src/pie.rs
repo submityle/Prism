@@ -50,6 +50,7 @@ use crate::fixed::{
     AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
     FixedPreUpdate, FixedUpdate,
 };
+use crate::frame::{FrameContinueReport, FrameSession, FrameStepReport, FrameSystem};
 use crate::schedule::{
     ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
     Startup, StateTransition, Update,
@@ -115,6 +116,12 @@ pub enum PieError {
     PluginsNotReady,
     /// Close the existing session before editing the App or running frames.
     DebugSessionActive,
+    /// A complete-frame stepping session is already open.
+    FrameSessionActive,
+    /// No complete-frame stepping session is open.
+    NoFrameSession,
+    /// The complete-frame session still has systems to execute.
+    IncompleteFrame,
     /// No schedule is currently being debugged.
     NoDebugSession,
     /// Finish the schedule pass or explicitly discard its remaining work.
@@ -136,6 +143,11 @@ impl std::fmt::Display for PieError {
             Self::Stopped(exit) => write!(f, "PIE instance stopped: {exit:?}"),
             Self::PluginsNotReady => f.write_str("PIE plugins are not ready"),
             Self::DebugSessionActive => f.write_str("close the schedule debug session first"),
+            Self::FrameSessionActive => f.write_str("close the complete-frame session first"),
+            Self::NoFrameSession => f.write_str("no complete-frame stepping session"),
+            Self::IncompleteFrame => {
+                f.write_str("complete-frame session still has uncompleted work")
+            }
             Self::NoDebugSession => f.write_str("no schedule debug session"),
             Self::IncompleteSchedule => f.write_str("schedule pass still has uncompleted work"),
             Self::MissingSchedule(label) => write!(f, "missing schedule {label:?}"),
@@ -180,6 +192,7 @@ impl PieInstances {
             app: embedded_app(),
             state: PieState::Paused,
             debug: None,
+            frame: None,
         };
         build(&mut instance.app);
         instance.app.set_run_mode(RunMode::EditorEmbedded);
@@ -236,6 +249,7 @@ pub struct PieInstance {
     app: App,
     state: PieState,
     debug: Option<PieScheduleDebug>,
+    frame: Option<FrameSession>,
 }
 
 impl PieInstance {
@@ -263,6 +277,7 @@ impl PieInstance {
     pub fn app_mut(&mut self) -> Result<&mut App, PieError> {
         self.require_paused()?;
         self.require_no_debug()?;
+        self.require_no_frame()?;
         self.app.sync_sub_apps();
         Ok(&mut self.app)
     }
@@ -287,6 +302,7 @@ impl PieInstance {
     /// Does not change any virtual clock's own pause flag.
     pub fn pause(&mut self) -> Result<(), PieError> {
         self.require_live()?;
+        self.require_no_frame()?;
         self.app.sync_sub_apps();
         self.state = PieState::Paused;
         Ok(())
@@ -297,6 +313,7 @@ impl PieInstance {
     pub fn resume(&mut self) -> Result<(), PieError> {
         self.require_live()?;
         self.require_no_debug()?;
+        self.require_no_frame()?;
         self.state = PieState::Running;
         Ok(())
     }
@@ -307,6 +324,7 @@ impl PieInstance {
     pub fn update(&mut self, delta: Duration) -> Result<PieFrameOutcome, PieError> {
         self.require_live()?;
         self.require_no_debug()?;
+        self.require_no_frame()?;
         if self.state == PieState::Paused {
             return Ok(PieFrameOutcome::Paused);
         }
@@ -319,7 +337,78 @@ impl PieInstance {
     pub fn step_frame(&mut self, delta: Duration) -> Result<PieFrameOutcome, PieError> {
         self.require_paused()?;
         self.require_no_debug()?;
+        self.require_no_frame()?;
         self.advance_frame(delta)
+    }
+
+    /// Open a persistent complete-frame session without executing its first
+    /// system. The instance remains paused while the host advances it through
+    /// [`step_frame_system`](Self::step_frame_system) or
+    /// [`continue_frame`](Self::continue_frame).
+    pub fn begin_frame(&mut self, delta: Duration) -> Result<(), PieError> {
+        self.require_paused()?;
+        self.require_no_debug()?;
+        if self.frame.is_some() {
+            return Err(PieError::FrameSessionActive);
+        }
+        match self.prepare() {
+            Ok(true) => {}
+            Ok(false) => return Err(PieError::PluginsNotReady),
+            Err(error) => return Err(error),
+        }
+        self.frame = Some(FrameSession::start(&mut self.app, delta));
+        Ok(())
+    }
+
+    /// Execute one system, extract event, or frame-boundary event in the open
+    /// complete-frame session.
+    pub fn step_frame_system(&mut self) -> Result<FrameStepReport, PieError> {
+        self.require_paused()?;
+        self.require_no_debug()?;
+        let session = self.frame.as_mut().ok_or(PieError::NoFrameSession)?;
+        Ok(session.step(&mut self.app))
+    }
+
+    /// Continue the open frame to its next break-before breakpoint or complete
+    /// frame boundary.
+    pub fn continue_frame(&mut self) -> Result<FrameContinueReport, PieError> {
+        self.require_paused()?;
+        self.require_no_debug()?;
+        let session = self.frame.as_mut().ok_or(PieError::NoFrameSession)?;
+        Ok(session.continue_frame(&mut self.app))
+    }
+
+    /// Add a break-before breakpoint to the current complete-frame session.
+    pub fn add_frame_breakpoint(&mut self, breakpoint: FrameSystem) -> Result<bool, PieError> {
+        let session = self.frame.as_mut().ok_or(PieError::NoFrameSession)?;
+        Ok(session.add_breakpoint(breakpoint))
+    }
+
+    /// Remove a complete-frame breakpoint.
+    pub fn remove_frame_breakpoint(&mut self, breakpoint: FrameSystem) -> Result<bool, PieError> {
+        let session = self.frame.as_mut().ok_or(PieError::NoFrameSession)?;
+        Ok(session.remove_breakpoint(breakpoint))
+    }
+
+    /// Abandon the current frame session. Executed systems remain applied and
+    /// no implicit rollback or replay occurs.
+    pub fn abort_frame(&mut self) -> Result<(), PieError> {
+        self.require_paused()?;
+        self.require_no_debug()?;
+        let mut session = self.frame.take().ok_or(PieError::NoFrameSession)?;
+        session.abort();
+        self.app.sync_sub_apps();
+        Ok(())
+    }
+
+    /// Close a frame session after it reached its complete-frame boundary.
+    pub fn end_frame(&mut self) -> Result<(), PieError> {
+        let session = self.frame.as_ref().ok_or(PieError::NoFrameSession)?;
+        if !session.is_complete() {
+            return Err(PieError::IncompleteFrame);
+        }
+        self.frame = None;
+        Ok(())
     }
 
     /// Force an editor stop: discard any debug remainder, synchronize an
@@ -495,6 +584,14 @@ impl PieInstance {
         }
     }
 
+    fn require_no_frame(&self) -> Result<(), PieError> {
+        if self.frame.is_some() {
+            Err(PieError::FrameSessionActive)
+        } else {
+            Ok(())
+        }
+    }
+
     fn advance_frame(&mut self, delta: Duration) -> Result<PieFrameOutcome, PieError> {
         match self.prepare() {
             Ok(false) => return Ok(PieFrameOutcome::WaitingForPlugins),
@@ -524,6 +621,7 @@ impl PieInstance {
         // shutdown path entered before running those systems too.
         self.state = PieState::Stopped(exit);
         self.debug = None;
+        self.frame = None;
         self.app.sync_sub_apps();
         self.app.run_shutdown();
         exit
@@ -689,6 +787,7 @@ mod tests {
     use prism_ecs::schedule::{ContinueStop, IntoSystemConfigs};
     use prism_ecs::system::{Res, ResMut};
 
+    use crate::frame::{FrameApp, FrameContinueStop, FrameStepReport};
     use crate::{Plugin, SubApp};
 
     #[derive(Default)]
@@ -705,6 +804,19 @@ mod tests {
     struct Trace(Vec<&'static str>);
     impl Resource for Trace {}
 
+    #[derive(Default)]
+    struct CompleteFrameCounts {
+        update: usize,
+        fixed: usize,
+        first: usize,
+        second: usize,
+    }
+    impl Resource for CompleteFrameCounts {}
+
+    #[derive(Clone)]
+    struct FrameEventLog(Arc<Mutex<Vec<&'static str>>>);
+    impl Resource for FrameEventLog {}
+
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     struct DebugPass(u8);
 
@@ -713,6 +825,24 @@ mod tests {
     }
     fn update(mut counts: ResMut<Counts>) {
         counts.updates += 1;
+    }
+
+    fn complete_frame_update(mut counts: ResMut<CompleteFrameCounts>) {
+        counts.update += 1;
+    }
+
+    fn complete_frame_fixed(mut counts: ResMut<CompleteFrameCounts>, clocks: Res<EngineClocks>) {
+        assert_eq!(clocks.source(), prism_time::DefaultSource::Fixed);
+        assert_eq!(clocks.default_time().delta(), Duration::from_millis(10));
+        counts.fixed += 1;
+    }
+
+    fn complete_frame_first(mut counts: ResMut<CompleteFrameCounts>) {
+        counts.first += 1;
+    }
+
+    fn complete_frame_second(mut counts: ResMut<CompleteFrameCounts>) {
+        counts.second += 1;
     }
     fn shutdown(mut counts: ResMut<Counts>) {
         counts.shutdown += 1;
@@ -981,6 +1111,262 @@ mod tests {
                 .0,
             ["secondary-start", "extract", "secondary-update"]
         );
+    }
+
+    #[test]
+    fn complete_frame_step_advances_clock_once_and_runs_each_fixed_tick_once() {
+        let mut instances = PieInstances::new();
+        let id = instances
+            .create(|app| {
+                app.init_resource::<CompleteFrameCounts>()
+                    .set_fixed_timestep(Duration::from_millis(10))
+                    .add_systems(Update, complete_frame_update)
+                    .add_systems(FixedUpdate, complete_frame_fixed);
+            })
+            .unwrap();
+        let instance = instances.get_mut(id).unwrap();
+
+        instance.begin_frame(Duration::from_millis(20)).unwrap();
+        assert_eq!(elapsed(instance), Duration::from_millis(20));
+
+        let mut reports = Vec::new();
+        loop {
+            let report = instance.step_frame_system().unwrap();
+            let complete = matches!(report, FrameStepReport::Complete);
+            reports.push(report);
+            assert_eq!(elapsed(instance), Duration::from_millis(20));
+            if complete {
+                break;
+            }
+        }
+
+        let counts = instance.app().world().resource::<CompleteFrameCounts>();
+        assert_eq!(counts.update, 1);
+        assert_eq!(counts.fixed, 2);
+        assert_eq!(
+            reports
+                .iter()
+                .filter(|report| matches!(report, FrameStepReport::Ran(_)))
+                .count(),
+            3
+        );
+        instance.end_frame().unwrap();
+        assert_eq!(elapsed(instance), Duration::from_millis(20));
+    }
+
+    #[test]
+    fn complete_frame_continue_does_not_replay_prefix_and_breakpoint_is_before_execution() {
+        let mut instances = PieInstances::new();
+        let id = instances
+            .create(|app| {
+                app.init_resource::<CompleteFrameCounts>().add_systems(
+                    Update,
+                    (complete_frame_first, complete_frame_second).chain(),
+                );
+            })
+            .unwrap();
+        let instance = instances.get_mut(id).unwrap();
+
+        instance.begin_frame(Duration::from_millis(1)).unwrap();
+        let first = match instance.step_frame_system().unwrap() {
+            FrameStepReport::Ran(system) => system,
+            report => panic!("expected first system to run, got {report:?}"),
+        };
+        assert_eq!(first.app, FrameApp::Main);
+
+        let second = FrameSystem {
+            app: first.app,
+            phase: first.phase,
+            node: first.node + 1,
+        };
+        assert!(instance.add_frame_breakpoint(second).unwrap());
+
+        let stopped = instance.continue_frame().unwrap();
+        assert_eq!(stopped.ran, Vec::<FrameSystem>::new());
+        assert_eq!(stopped.stop, FrameContinueStop::Breakpoint(second));
+        let counts = instance.app().world().resource::<CompleteFrameCounts>();
+        assert_eq!((counts.first, counts.second), (1, 0));
+
+        assert!(instance.remove_frame_breakpoint(second).unwrap());
+        let completed = instance.continue_frame().unwrap();
+        assert_eq!(completed.ran, [second]);
+        assert_eq!(completed.stop, FrameContinueStop::Complete);
+        let counts = instance.app().world().resource::<CompleteFrameCounts>();
+        assert_eq!((counts.first, counts.second), (1, 1));
+        instance.end_frame().unwrap();
+    }
+
+    #[test]
+    fn complete_frame_reports_secondary_extracts_in_insertion_order() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut instances = PieInstances::new();
+        let id = instances
+            .create({
+                let log = log.clone();
+                move |app| {
+                    app.insert_resource(FrameEventLog(log.clone()));
+                    app.add_systems(Last, |events: ResMut<FrameEventLog>| {
+                        events.0.lock().unwrap().push("main-last");
+                    });
+
+                    let mut first = SubApp::new();
+                    first.world.insert_resource(FrameEventLog(log.clone()));
+                    let mut startup = Schedule::new();
+                    startup.add_systems(|events: ResMut<FrameEventLog>| {
+                        events.0.lock().unwrap().push("secondary-0-start");
+                    });
+                    first
+                        .world
+                        .resource_mut::<Schedules>()
+                        .insert(Startup, startup);
+                    first.set_extract(|_main, world| {
+                        world
+                            .resource_mut::<FrameEventLog>()
+                            .0
+                            .lock()
+                            .unwrap()
+                            .push("extract-0");
+                    });
+                    let mut update = Schedule::new();
+                    update.add_systems(|events: ResMut<FrameEventLog>| {
+                        events.0.lock().unwrap().push("secondary-0-update");
+                    });
+                    first
+                        .world
+                        .resource_mut::<Schedules>()
+                        .insert(Update, update);
+                    app.insert_sub_app("preview-0", first);
+
+                    let mut second = SubApp::new();
+                    second.world.insert_resource(FrameEventLog(log.clone()));
+                    let mut startup = Schedule::new();
+                    startup.add_systems(|events: ResMut<FrameEventLog>| {
+                        events.0.lock().unwrap().push("secondary-1-start");
+                    });
+                    second
+                        .world
+                        .resource_mut::<Schedules>()
+                        .insert(Startup, startup);
+                    second.set_extract(|_main, world| {
+                        world
+                            .resource_mut::<FrameEventLog>()
+                            .0
+                            .lock()
+                            .unwrap()
+                            .push("extract-1");
+                    });
+                    let mut update = Schedule::new();
+                    update.add_systems(|events: ResMut<FrameEventLog>| {
+                        events.0.lock().unwrap().push("secondary-1-update");
+                    });
+                    second
+                        .world
+                        .resource_mut::<Schedules>()
+                        .insert(Update, update);
+                    app.insert_sub_app("preview-1", second);
+                }
+            })
+            .unwrap();
+        let instance = instances.get_mut(id).unwrap();
+
+        instance.begin_frame(Duration::from_millis(1)).unwrap();
+        log.lock().unwrap().clear();
+
+        let mut reports = Vec::new();
+        loop {
+            let report = instance.step_frame_system().unwrap();
+            let complete = matches!(report, FrameStepReport::Complete);
+            reports.push(report);
+            if complete {
+                break;
+            }
+        }
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "main-last",
+                "extract-0",
+                "secondary-0-update",
+                "extract-1",
+                "secondary-1-update",
+            ]
+        );
+        let extract_0 = reports
+            .iter()
+            .position(|report| *report == FrameStepReport::Extracted(0))
+            .unwrap();
+        let secondary_0 = reports
+            .iter()
+            .position(|report| {
+                matches!(
+                    report,
+                    FrameStepReport::Ran(FrameSystem {
+                        app: FrameApp::Secondary(0),
+                        ..
+                    })
+                )
+            })
+            .unwrap();
+        let extract_1 = reports
+            .iter()
+            .position(|report| *report == FrameStepReport::Extracted(1))
+            .unwrap();
+        let secondary_1 = reports
+            .iter()
+            .position(|report| {
+                matches!(
+                    report,
+                    FrameStepReport::Ran(FrameSystem {
+                        app: FrameApp::Secondary(1),
+                        ..
+                    })
+                )
+            })
+            .unwrap();
+        assert!(extract_0 < secondary_0 && secondary_0 < extract_1 && extract_1 < secondary_1);
+        instance.end_frame().unwrap();
+    }
+
+    #[test]
+    fn complete_frame_abort_preserves_prefix_and_end_frame_requires_completion() {
+        let mut instances = PieInstances::new();
+        let id = instances
+            .create(|app| {
+                app.init_resource::<CompleteFrameCounts>().add_systems(
+                    Update,
+                    (complete_frame_first, complete_frame_second).chain(),
+                );
+            })
+            .unwrap();
+        let instance = instances.get_mut(id).unwrap();
+
+        instance.begin_frame(Duration::from_millis(5)).unwrap();
+        assert!(matches!(
+            instance.step_frame_system().unwrap(),
+            FrameStepReport::Ran(_)
+        ));
+        assert_eq!(instance.end_frame(), Err(PieError::IncompleteFrame));
+        assert_eq!(instance.abort_frame(), Ok(()));
+        let counts = instance.app().world().resource::<CompleteFrameCounts>();
+        assert_eq!((counts.first, counts.second), (1, 0));
+        assert_eq!(instance.end_frame(), Err(PieError::NoFrameSession));
+        assert_eq!(instance.step_frame_system(), Err(PieError::NoFrameSession));
+
+        instance.begin_frame(Duration::from_millis(5)).unwrap();
+        loop {
+            if matches!(
+                instance.step_frame_system().unwrap(),
+                FrameStepReport::Complete
+            ) {
+                break;
+            }
+        }
+        let counts = instance.app().world().resource::<CompleteFrameCounts>();
+        assert_eq!((counts.first, counts.second), (2, 1));
+        assert_eq!(elapsed(instance), Duration::from_millis(10));
+        instance.end_frame().unwrap();
+        assert_eq!(instance.end_frame(), Err(PieError::NoFrameSession));
     }
 
     fn gate(mut counts: ResMut<Counts>) -> bool {
