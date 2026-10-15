@@ -14,10 +14,12 @@ mod coordinates;
 mod cube_sphere;
 mod height;
 mod lod;
+mod planet_mesh;
 mod rebake;
 mod representation;
 mod stream_adapter;
 mod tile;
+mod volume_bake;
 mod voxel;
 
 pub use bake::{BakeError, BakeLimits, GridChange, HeightfieldMesh, HeightfieldTile, SampleBounds};
@@ -29,6 +31,7 @@ pub use cube_sphere::{
 };
 pub use height::{DeterministicHeightSampler, HeightSample, HeightSampleValue, HeightSampler};
 pub use lod::{evaluate_lod, LodError, LodEvaluation, LodMetric};
+pub use planet_mesh::{PlanetHeightfieldMesh, PlanetMeshConfig};
 pub use rebake::{
     DirtyRegion, RebakeBudget, RebakeError, RebakePlan, RebakePlanner, RebakeRequest, RebakeTask,
 };
@@ -39,6 +42,10 @@ pub use representation::{
 };
 pub use stream_adapter::{TerrainStreamAdapter, TerrainStreamConfig, TerrainStreamError};
 pub use tile::{TileEdge, TileError, TileKey, TileQuadrant, MAX_TILE_LEVEL};
+pub use volume_bake::{
+    quantize_sdf_mm, SdfField, SdfGrid, SdfGridChange, VolumeBakeCost, VolumeBakeError,
+    VolumeBakeLimits, VolumeError, VolumeRegion, VoxelSdfSource,
+};
 pub use voxel::{
     VoxelBuffer, VoxelComponentFormat, VoxelError, VoxelField, VoxelLayout, VoxelSample,
 };

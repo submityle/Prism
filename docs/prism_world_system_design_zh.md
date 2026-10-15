@@ -13,7 +13,7 @@
 > - **全局距离场**：UE Global Distance Field / Lumen SDF（稀疏 brick + mip 环，一场多用）
 > 本文为纯经典数据结构 + 空间算法 + 流送调度路线（Morton/Hilbert、四叉/八叉树、CDLOD/clipmap、Transvoxel/Dual Contouring/SDF、domain warp 噪声、水力/热力侵蚀 PDE、泊松盘/蓝噪声、D8 流向、并查集、CRDT），**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/其他引擎源码或衍生代码。
 
-- 版本： v3.6（增加有界 heightfield 全量/原子局部烘焙、原生 Mesh 输出、Metal indexed raster/局部上传像素对拍与分位耗时；表示选择/重烘预算按实际网格覆盖计量。terrain→world-stream、simulation→persistence、共享 SDF 查询和 no_std reliable session 已有纵切；完整 GPU world scene、资产解压/GPU 直传、多表示曲面提取和真实加密传输仍需独立运行时验收，证据见实现记录）
+- 版本： v3.7（增加 f64 cube-sphere 行星网格、局部 f32 位置误差预算及 level-30 精度回归；有界 Q16.16 SDF 全量/原子局部烘焙与精确 Q8.8 适配。已有 heightfield 原生 Mesh、Metal indexed raster/局部上传像素对拍；terrain→world-stream、simulation→persistence、共享 SDF 查询和 no_std reliable session 已有纵切。完整 GPU world scene、资产解压/GPU 直传、多表示曲面提取、LOD 接缝和真实加密传输仍需独立运行时验收，证据见实现记录）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（作者内容单元 / spawn·despawn·materialize API / override delta / PersistentId，见 `prism_scene_design_zh.md`）、`prism_asset`（`StableGuid`/软引用/依赖闭包/单文件包/mmap/内容寻址）、`prism_ecs`（物化边界的批量预留/列写入）、`prism_transform`（层级）、`prism_tasks`（并行流送/烘焙）、`prism_math`（定点/空间编码/噪声）、`prism_diagnostic`（计数器/trace）；向上接 `prism_render`/`prism_physics`/`prism_gi`（经 GPU 常驻实例流 + ECS 物化两个边界，均已去 Bevy）
 - 层级定位： 基座层 L6；下接 `prism_scene`/`prism_asset`/`prism_ecs`，上驱动渲染/物理/GI；与 `prism_terrain_world_design_zh.md`（地形多表示细节）互为上下位

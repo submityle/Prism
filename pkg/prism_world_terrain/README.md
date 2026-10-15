@@ -14,6 +14,13 @@ Engine-neutral, `no_std + alloc` terrain and planetary primitives for Prism.
 - Voxel storage is a validated little-endian, row-major byte contract with X as the fastest-changing axis and power-of-two streaming bricks.
 - Representation selection covers heightfield, voxel, and signed-distance data with validated dimensions, deterministic query-driven selection, and explicit conversion metadata.
 - Incremental rebake planning merges tile-local dirty regions deterministically and admits work through task, abstract-work, and output-byte budgets without allocating in the geometry hot path.
+- Heightfield baking supports bounded full builds and atomic local resampling;
+  its indexed planar mesh updates only the dirty vertices and normal halo.
+- Planet mesh baking projects those heights using f64 tile coordinates and an
+  integer-millimetre origin, checks local f32 position error against a caller
+  budget, and preserves level-30 tile detail. The optional `mesh` feature emits
+  validated native Prism meshes for both planar and planet geometry.
+- Bounded SDF volume baking stores signed Q16.16 samples in an X-fastest packed grid, stages local resamples before publication, and exposes an exact Q8.8 voxel adapter without pretending to reconstruct missing metric data.
 - `TerrainStreamAdapter` projects each valid cube-sphere `TileKey` into a stable
   `prism_world_stream::CellManifest`, including an exact tile identity sector,
   conservative signed-millimetre planetary bounds, content metadata, and a
@@ -21,9 +28,9 @@ Engine-neutral, `no_std + alloc` terrain and planetary primitives for Prism.
 
 ## Performance layout
 
-The hot-path keys and geometry values are small `Copy` structs with no heap allocation. Tile traversal uses integer coordinates; only face-to-sphere conversion uses scalar `f32` normalization. Cross-face adjacency is a fixed table lookup plus one optional integer index reversal, so it does not require a floating-point direction round trip. Voxel data is contiguous, two bytes per component, X-major, and suitable for direct upload or brick-local staging. `alloc` is used only by the optional `VoxelBuffer` owner; the geometry, LOD, coordinate, and sampling contracts do not allocate.
+The hot-path keys and geometry values are small `Copy` structs with no heap allocation. Tile traversal uses integer coordinates. The direction contract uses scalar `f32` normalization; planet mesh projection keeps tile coordinates and normalization in `f64` until origin-relative metre encoding. Cross-face adjacency is a fixed table lookup plus one optional integer index reversal, so it does not require a floating-point direction round trip. Voxel data is contiguous, two bytes per component, X-major, and suitable for direct upload or brick-local staging. Buffer owners, baking, and planning use `alloc`; the basic key, LOD, coordinate, and sampling contracts do not allocate.
 
-The crate intentionally stops at data and algorithm contracts. Engine scheduling,
+The crate owns data contracts and executable geometry/data kernels. Engine scheduling,
 render submission, collision, persistence, and GPU formats remain external
 adapters. The terrain-to-stream adapter is the narrow exception: it only emits
 validated stream manifests and does not perform IO, decompression, residency,
@@ -43,6 +50,15 @@ representation work and output bytes with checked arithmetic, and admits only
 the tasks that fit the caller's budget. Deferred regions remain explicit in the
 returned plan and can be submitted again with a later budget without changing
 the ordering.
+
+`SdfGrid` applies the same admission discipline to volumetric data: dimensions,
+sample calls, full-grid bytes, and local-update scratch bytes are checked before
+sampling. A local update reads only its half-open XYZ region into a temporary
+buffer, then copies it into the packed grid and increments the revision; a
+source failure leaves both the bytes and revision unchanged. `VoxelSdfSource`
+adapts an existing signed-distance Q8.8 voxel field by an exact 256x fractional
+expansion. It rejects density/unsigned formats and does not infer a physical
+distance transform from voxel values.
 
 ## Terrain-to-stream adapter
 
@@ -69,3 +85,21 @@ cargo fmt --manifest-path pkg/prism_world_terrain/Cargo.toml -- --check
 cargo test --manifest-path pkg/prism_world_terrain/Cargo.toml --no-default-features
 cargo clippy --manifest-path pkg/prism_world_terrain/Cargo.toml --no-default-features -- -D warnings
 ```
+
+The volumetric baker is covered by the same test command, including singleton
+axes, extreme signed encodings, exact budget admission, overflow rejection,
+atomic local resampling, revision overflow, source failures, and voxel-format
+validation.
+
+Planet meshes use 32 bytes per vertex plus 24 per quad, with checked budgets and
+fallible reservations. Six-face outward winding, unit normals, same-resolution
+tile boundaries, a level-30 Earth-radius precision case, and native mesh
+validation are tested. The checked error covers projection arithmetic and f32
+encoding, not height quantization or surface approximation. Boundary normals are
+one-sided; mixed-LOD stitching and cross-tile normal continuity are separate
+operations, not guarantees of this baker.
+
+The release benchmark `cargo bench -p prism_world_terrain --bench heightfield_bake`
+reports nearest-rank P50/P95/P99 for full/local heightfield and SDF baking,
+planar mesh builds/updates, and full planet mesh projection. Logical payload
+sizes are printed separately from timings; they are not allocator/RSS peaks.

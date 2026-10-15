@@ -48,8 +48,10 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 - `prism_world_terrain`：cube-sphere 六面映射、四叉树 tile/跨面邻接、连续 screen-space LOD/morph、i64/Q32.32 局部坐标误差界、确定性高度采样和小端体素布局。
 - M6 纵切已补齐：`TerrainStreamAdapter` 将 `TileKey` 映射为稳定 `SectorId`，计算保守行星毫米 AABB，生成稳定 `CellManifest`/derived hash，并可直接交给 `StreamScheduler`；12 项 terrain 测试、fmt/check/clippy 通过。
 - M6 可执行 heightfield kernel：全量烘焙为带正毫米比例的 signed i16 高度，超范围明确失败；`BakeLimits` 在采样和分配前限制数量/载荷字节，分配失败可返回错误。局部脏区按网格 floor/ceil 保守覆盖，先完成 scratch 采样再提交；失败不改变高度或 revision。`GridChange` 是单个稳定 cache owner 的有序 token，不是跨缓存的全局身份。
-- `HeightfieldMesh` 输出本地 XZ 米制索引网格，+Y 三角绕序和有限差分单位法线；更新覆盖脏高度及一圈法线邻域、不重分配原 mesh。载荷为 `32×顶点数 + 24×quad数` 字节。`mesh` feature 输出真实 `prism_mesh::Mesh`，不是渲染占位数据；本地平面不宣称已做 cube-sphere 投影或 LOD 接缝。
-- 表示选择和重烘规划现按实际 XY 网格覆盖乘 Z 深度计算工作量/字节，覆盖位置敏感的 floor/ceil 边界、溢出、完整规格比较及输入排列无关的脏区合并。当前 terrain 默认测试 31 项、启用原生 mesh 后 32 项通过，no-default/all-target clippy（含基准）通过。
+- `HeightfieldMesh` 输出本地 XZ 米制索引网格，+Y 三角绕序和有限差分单位法线；更新覆盖脏高度及一圈法线邻域、不重分配原 mesh。载荷为 `32×顶点数 + 24×quad数` 字节。`mesh` feature 输出真实 `prism_mesh::Mesh`，不是渲染占位数据。
+- `PlanetHeightfieldMesh` 将已烘焙高度投影为六面 cube-sphere 索引网格；TileKey 整数身份经 f64 UV/归一化投影，减 i64 毫米 origin 后编码为局部 f32 米制位置。半径限 `1..=2^52` 毫米，非正半径+高度、非有限值、载荷超限和超过位置误差预算均失败；误差界包含浮点运算及编码，不包含高度量化、三角插值和 LOD 接缝。测试覆盖六面向外绕序/单位法线、同级相邻 tile 与跨面边界位置、地球半径第 30 层 tile 小于 0.001 mm 的数值误差界及原生 Mesh。边缘法线为单侧差分，尚非跨 tile 平滑法线或混合 LOD 缝合；当前为全量投影。
+- `SdfGrid` 全量烘焙 signed Q16.16 到 X-fast 小端 i32；半开 XYZ 局部区域先 scratch 采样、成功才覆盖并递增 revision。按完整 dimensions、实际 source 调用数、输出+scratch 逻辑峰值字节预检，checked 算术及 fallible allocation 拒绝溢出/分配失败；任何采样失败保留原 bytes/revision。`quantize_sdf_mm` 用 i128 最近舍入、ties-away、超范围拒绝；`VoxelSdfSource` 只将声明为 Q8.8 的距离精确扩展 256 倍，拒绝 density/格式或规格不匹配，不伪造距离变换。空间 embedding 由 source 保持稳定；这一步没有执行曲面提取。
+- 表示选择和重烘规划现按实际 XY 网格覆盖乘 Z 深度计算工作量/字节，覆盖位置敏感的 floor/ceil 边界、溢出、完整规格比较及输入排列无关的脏区合并。当前 terrain 默认测试 49 项、启用原生 mesh 后 51 项通过，no-default/all-target clippy（含基准）通过；原生 mesh 的依赖 `prism_asset` 仍有既有文档告警。
 - `prism_world_sim`：统一 tick/output/dirty-region budget，确定性局部侵蚀、持久体素/碎片 delta、水文容量约束、生态 biomass 更新和小端 delta codec。
 - M7 持久接缝已补齐：`simulation_delta_to_transaction` 将 `SimulationDelta` 编码为稳定 opaque `Bytes` forward + 同字段 `Delete` inverse，`WorldRuntime::append_simulation_delta` 自动使用 log next sequence 并写入 append-only log；simulation feature 测试覆盖 round-trip、错误和 facade 入口。
 - M7 SDF 只读接缝已补齐：`SparseSdfQuery`/`SdfQueryConsumer` 为多个消费者共享同一 sparse grid，明确区分 `Value`、`Miss` 与缺 brick 的 `Unknown`，覆盖负坐标、范围和缺失数据测试；不会把未知场误报为空场。
@@ -106,6 +108,19 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 | 129² | 33,282 / 925,728 | 119,583 / 184,458 / 222,334 | 265,625 / 412,167 / 494,209 | 167 / 500 / 1,500 | 333 / 541 / 667 |
 | 257² | 132,098 / 3,686,432 | 323,416 / 994,083 / 1,312,042 | 761,709 / 1,625,917 / 2,512,334 | 500 / 2,708 / 3,416 | 292 / 1,292 / 1,417 |
 
+新增行星/SDF release 基准同为 16 次预热、128 次测量，2026-10-15 在其他并行任务存在时实测；不可与上表推导为无干扰加速比。行星测试投影地球半径整面，origin 为面中心，允许误差 2,000 mm 以容纳整面远坐标的 f32 编码；它不是局部毫米精度用例，精度由上文独立回归验证。
+
+| 操作 | 逻辑输出字节 | P50 / P95 / P99（ns） |
+|---|---:|---:|
+| 行星 mesh 129² 全量投影 | 925,728 | 1,783,125 / 6,531,834 / 9,624,625 |
+| 行星 mesh 257² 全量投影 | 3,686,432 | 5,563,375 / 10,421,000 / 15,644,250 |
+| SDF 33³ 全量 | 143,748 | 14,667 / 33,625 / 40,792 |
+| SDF 33³ 局部 27 样本 | 143,748（另加 108 scratch） | 166 / 625 / 2,500 |
+| SDF 65³ 全量 | 1,098,500 | 127,500 / 240,291 / 283,083 |
+| SDF 65³ 局部 27 样本 | 1,098,500（另加 108 scratch） | 167 / 833 / 2,291 |
+
+行星法线当前每顶点读取邻域并重新投影，耗时明显高于平面 mesh；数据保留 P99，不把该 CPU 烘焙耗时写成产品帧时目标达标。SDF 基准 source 为廉价轴对齐平面，实际复杂 source 成本需要另测；所有字节数为逻辑载荷，不是 allocator/RSS 峰值。
+
 `cargo clippy -D warnings` 在包含 `prism_world` 依赖闭包时会进入仓库其他并行改动的 `prism_asset`/`prism_ecs`，当前被这些既有告警阻断；world 自身新增代码已按相应 crate 的局部检查验证，不能把依赖闭包失败误报为全 workspace 通过。
 
 ## 尚未交付的边界
@@ -113,7 +128,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
 - M3：真实资产包解压、GPU 直传和产品级吞吐仍需独立运行时验证；当前已完成文件 provider、scheduler、manifest/payload、SceneHost 的 CPU 端到端验证。
-- M6：多表示曲面提取/转换、LOD 接缝、行星投影及实际 renderer graph 接入；heightfield 原子局部重烘、native Mesh 和离屏真实 GPU 绘制、terrain-to-world-stream manifest 接缝已完成。
+- M6：多表示曲面提取/转换、LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝已完成。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。
 - GPU proxy 的真实 adapter、dispatch/readback 正确性已有上述 Apple M2/Metal 证据；P50/P95/P99 性能、显存峰值、多厂商/后端与 renderer 端到端集成仍未验收。
