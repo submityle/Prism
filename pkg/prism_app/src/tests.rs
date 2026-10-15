@@ -6092,6 +6092,7 @@ mod crash_tests {
             location: Some("src/sim.rs:42:9".to_string()),
             backtrace: None,
             snapshot: CrashSnapshot::default(),
+            recent_logs: Vec::new(),
         };
         let rendered = report.render();
         assert!(rendered.starts_with("=== prism_app crash report ===\n"));
@@ -6110,6 +6111,7 @@ mod crash_tests {
             location: None,
             backtrace: Some("frame#0\nframe#1".to_string()),
             snapshot: CrashSnapshot::default(),
+            recent_logs: Vec::new(),
         };
         let rendered = report.render();
         assert!(rendered.contains("location:      <unknown>"));

@@ -15,6 +15,7 @@ libm = "0.2"
 prism_tasks = { path = "../prism_tasks", optional = true }
 prism_window = { path = "../prism_window", optional = true }
 prism_window_winit = { path = "../prism_window_winit", optional = true }
+prism_diagnostic = { path = "../prism_diagnostic", optional = true }
 # Schema validation / range clamping for reflected configuration (§25.3).
 # `math` is off (prism_app configs are not prism_math value types).
 prism_reflect = { path = "../prism_reflect", default-features = false, features = ["std"], optional = true }
@@ -74,6 +75,10 @@ trace = ["std"]
 # through the `User` cascade layer whenever its contents change. std-only (file
 # I/O); off by default so a shipped build pays nothing.
 hot-reload = ["std"]
+
+# Capture bounded recent diagnostic events in crash reports. Global logger
+# installation remains explicit; the adapter can forward to an existing sink.
+diagnostic = ["std", "dep:prism_diagnostic"]
 
 # Roadmap §22 "基准即规格": measure the empty frame-loop cost and assert
 # fixed-timestep determinism under identical jitter input. Custom harness, so it

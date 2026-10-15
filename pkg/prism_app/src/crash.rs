@@ -28,22 +28,12 @@
 //! [`CrashSink`], defaulting to standard error; a custom sink (file, log
 //! pipeline, telemetry) is a plain closure.
 //!
-//! # Honestly deferred
-//!
-//! - **Per-system panic isolation** (design §24.7 "单 system panic 可捕获…隔离
-//!   该 system") must happen inside the `prism_ecs` executor that owns the
-//!   per-system call site; `prism_app` cannot catch a panic *around one system*
-//!   from the outside without the executor's cooperation, so it is not faked
-//!   here.
-//! - **Watchdog / frame-timeout detection** (design §24.7 "主循环卡死检测") now
-//!   lives in the sibling [`watchdog`](crate::watchdog) module: a background
-//!   thread observes a per-frame heartbeat and reports a stall. Its stall
-//!   handler pairs naturally with the published-snapshot discipline here (dump
-//!   the last [`CrashSnapshot`] when the loop wedges).
-//! - **"Recent logs" capture** depends on a `prism_log` ring buffer that does
-//!   not exist in this crate; the report carries the state `prism_app` actually
-//!   owns (run mode, tier, world size, settings) rather than inventing a log
-//!   feed.
+//! Per-system isolation runs inside the ECS executor and is selected with
+//! [`App::set_system_panic_policy`]. The sibling [`watchdog`](crate::watchdog)
+//! observes frame stalls. Recent logs use a bounded, clone-shared buffer; the
+//! optional `diagnostic` feature supplies a composable `prism_diagnostic` sink.
+
+mod logs;
 
 use std::backtrace::{Backtrace, BacktraceStatus};
 use std::fmt::Write as _;
@@ -56,6 +46,11 @@ use crate::app::App;
 use crate::capability::QualityTier;
 use crate::run_mode::RunMode;
 use crate::settings::{SettingValue, Settings};
+use logs::RecentLogs;
+
+pub use prism_ecs::schedule::{
+    SystemFailure, SystemFailureStage, SystemFailures, SystemPanicPolicy,
+};
 
 /// A cheap, owned snapshot of the shell's state at a point in time, suitable
 /// for a panic hook to read without borrowing the [`World`](prism_ecs::world::World).
@@ -129,6 +124,8 @@ pub struct CrashReport {
     pub backtrace: Option<String>,
     /// The last-published shell state at the time of the crash.
     pub snapshot: CrashSnapshot,
+    /// Recent log lines, oldest first, bounded by the reporter configuration.
+    pub recent_logs: Vec<String>,
 }
 
 impl CrashReport {
@@ -145,6 +142,15 @@ impl CrashReport {
             None => out.push_str("location:      <unknown>\n"),
         }
         self.snapshot.render_into(&mut out);
+        if !self.recent_logs.is_empty() {
+            out.push_str("recent logs:\n");
+            for line in &self.recent_logs {
+                out.push_str(line);
+                if !line.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+        }
         match &self.backtrace {
             Some(bt) => {
                 out.push_str("backtrace:\n");
@@ -182,6 +188,7 @@ fn stderr_sink() -> CrashSink {
 pub struct CrashReporter {
     snapshot: Arc<Mutex<CrashSnapshot>>,
     sink: CrashSink,
+    logs: Arc<Mutex<RecentLogs>>,
 }
 
 impl Resource for CrashReporter {}
@@ -196,19 +203,42 @@ impl CrashReporter {
     /// A reporter with an empty snapshot that writes dumps to standard error.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            snapshot: Arc::new(Mutex::new(CrashSnapshot::default())),
-            sink: stderr_sink(),
-        }
+        Self::with_sink(stderr_sink())
     }
 
     /// A reporter that writes dumps through `sink` instead of standard error.
     #[must_use]
     pub fn with_sink(sink: CrashSink) -> Self {
+        Self::with_log_capacity(sink, 128, 4096)
+    }
+
+    /// Configure retained log count and the maximum UTF-8 bytes per line.
+    /// Either bound may be zero to disable retention. No global hook or sink
+    /// is installed by construction.
+    #[must_use]
+    pub fn with_log_capacity(sink: CrashSink, capacity: usize, max_line_bytes: usize) -> Self {
         Self {
             snapshot: Arc::new(Mutex::new(CrashSnapshot::default())),
             sink,
+            logs: Arc::new(Mutex::new(RecentLogs::new(capacity, max_line_bytes))),
         }
+    }
+
+    /// Retain a bounded log line, shared with clones and the panic hook.
+    pub fn record_log(&self, line: &str) {
+        self.logs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(line);
+    }
+
+    /// Snapshot retained lines in arrival order without touching the world.
+    #[must_use]
+    pub fn recent_logs(&self) -> Vec<String> {
+        self.logs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .snapshot()
     }
 
     /// Replace the last-published snapshot. The next crash dump reads this.
@@ -249,6 +279,7 @@ impl CrashReporter {
             location,
             backtrace,
             snapshot: self.snapshot(),
+            recent_logs: self.recent_logs(),
         };
         let dump = report.render();
         (self.sink)(&dump);
@@ -299,6 +330,15 @@ fn capture_backtrace() -> Option<String> {
 }
 
 impl App {
+    /// Select the main world's per-system panic policy. The default propagates
+    /// panics. Isolation disables the failed system and discards unapplied
+    /// commands, but cannot roll back direct writes or catch aborting panics.
+    /// Sub-apps may independently insert the policy into their own worlds.
+    pub fn set_system_panic_policy(&mut self, policy: SystemPanicPolicy) -> &mut Self {
+        self.world_mut().insert_resource(policy);
+        self
+    }
+
     /// Capture the current shell state as a [`CrashSnapshot`] (design §24.7).
     ///
     /// Reads the main world's [`RunMode`] and [`QualityTier`], its live entity

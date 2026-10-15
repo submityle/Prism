@@ -88,6 +88,12 @@ pub struct ChunkVersions {
     cells: Vec<*mut Tick>,
 }
 
+// SAFETY: the pointers reference heap-allocated chunk blocks owned by the same
+// table. Moving the owner to another thread does not relocate those blocks;
+// unique ownership transfers all access to the cells. Shared access is governed
+// by the Sync discipline below, and cells are detached before blocks are freed.
+unsafe impl Send for ChunkVersions {}
+
 // SAFETY: the only non-`Sync` field is the raw cell-pointer vector. The cells
 // live in the owning chunk blocks and are mutated under the same unique-per-row
 // discipline that governs the per-row ticks on `Column` (itself `unsafe impl
@@ -121,8 +127,16 @@ impl ChunkVersions {
     /// Attach the changed-version cell of a newly-allocated chunk block.
     ///
     /// # Safety
-    /// `cell` must point at a live, aligned `Tick` inside a chunk block the
-    /// owner keeps alive for as long as this column references it.
+    /// `cell` must point at a live, aligned, initialized `Tick` in writable,
+    /// stable-address storage. Its owner must keep that storage alive until
+    /// the cell is detached or this tracker is dropped, including when the
+    /// tracker or its owner moves to another thread.
+    ///
+    /// Access through external aliases must obey the tracker's borrowing and
+    /// synchronization discipline: no read may overlap a write to the same
+    /// cell, and no two writes to that cell may overlap. Disjoint rows within
+    /// one chunk share this cell and do not by themselves permit concurrent
+    /// writes; only distinct cells can be accessed independently.
     #[inline]
     pub unsafe fn attach_cell(&mut self, cell: *mut Tick) {
         self.cells.push(cell);

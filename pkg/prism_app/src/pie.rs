@@ -919,16 +919,22 @@ mod tests {
                 phase!(Last, "last");
                 let mut secondary = SubApp::new();
                 secondary.world.insert_resource(Trace::default());
-                secondary.add_systems(Startup, |mut trace: ResMut<Trace>| {
-                    trace.0.push("secondary-start")
-                });
+                let mut startup = Schedule::new();
+                startup.add_systems(|mut trace: ResMut<Trace>| trace.0.push("secondary-start"));
+                secondary
+                    .world
+                    .resource_mut::<Schedules>()
+                    .insert(Startup, startup);
                 secondary.set_extract(|main, world| {
                     assert_eq!(main.resource::<Trace>().0.last(), Some(&"last"));
                     world.resource_mut::<Trace>().0.push("extract");
                 });
-                secondary.add_systems(Update, |mut trace: ResMut<Trace>| {
-                    trace.0.push("secondary-update")
-                });
+                let mut update = Schedule::new();
+                update.add_systems(|mut trace: ResMut<Trace>| trace.0.push("secondary-update"));
+                secondary
+                    .world
+                    .resource_mut::<Schedules>()
+                    .insert(Update, update);
                 app.insert_sub_app("preview", secondary);
             })
             .unwrap();
