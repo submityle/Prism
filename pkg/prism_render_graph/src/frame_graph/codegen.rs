@@ -101,6 +101,8 @@ pub struct GeneratedPass {
 /// Errors found before a declaration mutates the graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CodegenError {
+    /// The generated table exceeds the graph's checked admission limits.
+    Graph(super::CompileError),
     /// A pass name was repeated.
     DuplicatePass(String),
     /// A resource name was repeated with incompatible ownership/shape.
@@ -134,12 +136,19 @@ pub enum CodegenError {
 ///
 /// Existing graph resources are accepted as inputs, which lets a generated
 /// post chain consume the resident HDR target created by the shading graph.
-/// Validation completes before any pass is inserted, so a malformed generated
-/// table cannot leave a partially registered graph behind.
+/// Dependencies may name any pass in the set, regardless of declaration order.
+/// Admission is transactional: validation or capacity errors leave the graph
+/// unchanged. Cycles are diagnosed by the shared compiler at compile time.
 pub fn declare_passes(
     graph: &mut GpuFrameGraphBuilder,
     declarations: &[PassSkeletonDeclaration],
 ) -> Result<Vec<GeneratedPass>, CodegenError> {
+    crate::capacity::GraphLimits::check_count(
+        "passes",
+        graph.passes().len().saturating_add(declarations.len()),
+        u32::MAX as usize,
+    )
+    .map_err(CodegenError::Graph)?;
     let base_pass = graph.passes().len() as u32;
     let mut resources = BTreeMap::<&'static str, ResourceId>::new();
     let mut pass_names = BTreeMap::<String, PassId>::new();
@@ -166,6 +175,9 @@ pub fn declare_passes(
                 actual: declaration.bind_groups.bindings_per_group.len(),
             });
         }
+    }
+    // Resolve against the entire table, not just the prefix visited so far.
+    for declaration in declarations {
         for dependency in declaration.depends_on {
             if !pass_names.contains_key(*dependency) {
                 return Err(CodegenError::UnknownDependency {
@@ -224,31 +236,34 @@ pub fn declare_passes(
         }
     }
 
+    let mut staged = graph.clone();
     for declaration in declarations {
         for resource in declaration.resources {
-            if let Some(existing) = resource_id(graph, &resources, resource.name) {
+            if let Some(existing) = resource_id(&staged, &resources, resource.name) {
                 resources.insert(resource.name, existing);
             } else {
-                let id = graph.add_resource(ResourceDescriptor {
-                    name: resource.name.into(),
-                    lifetime: resource.lifetime,
-                    size: resource.size,
-                    alignment: resource.alignment,
-                });
+                let id = staged
+                    .try_add_resource(ResourceDescriptor {
+                        name: resource.name.into(),
+                        lifetime: resource.lifetime,
+                        size: resource.size,
+                        alignment: resource.alignment,
+                    })
+                    .map_err(CodegenError::Graph)?;
                 resources.insert(resource.name, id);
             }
         }
     }
 
     for declaration in declarations {
-        graph.add_pass(PassDescriptor {
+        let descriptor = PassDescriptor {
             name: declaration.name.into(),
             queue: declaration.queue,
             accesses: declaration
                 .accesses
                 .iter()
                 .map(|access| ResourceAccess {
-                    resource: resource_id(graph, &resources, access.resource)
+                    resource: resource_id(&staged, &resources, access.resource)
                         .expect("validated generated resource"),
                     kind: access.kind,
                 })
@@ -263,9 +278,13 @@ pub fn declare_passes(
                         .expect("validated generated dependency")
                 })
                 .collect(),
-        });
+        };
+        staged
+            .try_add_pass(descriptor)
+            .map_err(CodegenError::Graph)?;
     }
 
+    *graph = staged;
     Ok(declarations
         .iter()
         .enumerate()
@@ -376,5 +395,118 @@ mod tests {
             declare_passes(&mut GpuFrameGraphBuilder::default(), &[invalid]),
             Err(CodegenError::UnknownDependency { .. })
         ));
+    }
+
+    #[test]
+    fn forward_dependencies_lower_into_real_hazards_and_queue_waits() {
+        let mut consumer = SPECS[1];
+        consumer.depends_on = &["generated_a"];
+        consumer.queue = QueueClass::Graphics;
+        let mut producer = SPECS[0];
+        producer.accesses = &[AccessDeclaration {
+            resource: "generated_params",
+            kind: AccessKind::StorageWrite,
+        }];
+        let mut graph = GpuFrameGraphBuilder::default();
+        let generated = declare_passes(&mut graph, &[consumer, producer]).unwrap();
+        assert_eq!(generated[0].id, PassId(0));
+        assert_eq!(generated[1].id, PassId(1));
+        let compiled = graph.compile().unwrap();
+        assert_eq!(compiled.execution_order, [PassId(1), PassId(0)]);
+        assert_eq!(compiled.resource_versions.len(), 1);
+        assert_eq!(compiled.resource_versions[0].writer, PassId(1));
+        assert_eq!(compiled.resource_versions[0].version, 1);
+        assert_eq!(compiled.barriers.len(), 1);
+        let barrier = compiled.barriers[0];
+        assert_eq!(
+            (barrier.source, barrier.destination),
+            (PassId(1), PassId(0))
+        );
+        assert_eq!(
+            (barrier.before, barrier.after),
+            (AccessKind::StorageWrite, AccessKind::StorageRead)
+        );
+        assert!(barrier.queue_transfer);
+        assert_eq!(compiled.queue_batches[1].waits_for, [0]);
+    }
+
+    #[test]
+    fn forward_dependency_cycles_reach_shared_compiler_diagnostics() {
+        let mut first = SPECS[0];
+        first.depends_on = &["generated_b"];
+        let mut graph = GpuFrameGraphBuilder::default();
+        declare_passes(&mut graph, &[first, SPECS[1]]).unwrap();
+        let Err(super::super::CompileError::Cycle { cycle, names, .. }) = graph.compile() else {
+            panic!("explicit cycle must be diagnosed by the shared compiler");
+        };
+        assert_eq!(cycle, [0, 1, 0]);
+        assert_eq!(names, ["generated_a", "generated_b", "generated_a"]);
+    }
+
+    #[test]
+    fn declaration_capacity_failure_preserves_existing_graph() {
+        use crate::{capacity::GraphLimits, CompileError};
+
+        for (limits, kind) in [
+            (
+                GraphLimits {
+                    resources: 1,
+                    ..GraphLimits::default()
+                },
+                "resources",
+            ),
+            (
+                GraphLimits {
+                    passes: 2,
+                    ..GraphLimits::default()
+                },
+                "passes",
+            ),
+            (
+                GraphLimits {
+                    accesses_per_pass: 0,
+                    ..GraphLimits::default()
+                },
+                "accesses",
+            ),
+        ] {
+            let mut graph = GpuFrameGraphBuilder::with_limits(limits);
+            graph.add_resource(ResourceDescriptor {
+                name: "existing".into(),
+                lifetime: ResourceLifetime::Imported,
+                size: 0,
+                alignment: 1,
+            });
+            graph.add_pass(PassDescriptor {
+                name: "existing".into(),
+                queue: QueueClass::Graphics,
+                accesses: Vec::new(),
+                depends_on: Vec::new(),
+            });
+            let resources = graph.resources().to_vec();
+            let result = declare_passes(&mut graph, SPECS);
+            assert!(
+                matches!(result, Err(CodegenError::Graph(CompileError::Capacity { kind: actual, .. })) if actual == kind)
+            );
+            assert_eq!(graph.resources(), resources);
+            assert_eq!(graph.passes().len(), 1);
+            assert_eq!(graph.passes()[0].name, "existing");
+            assert_eq!(graph.compile().unwrap().execution_order, [PassId(0)]);
+
+            // Neither failed pass/resource admission nor a forward reference
+            // may consume IDs or discard dependencies on existing passes.
+            let mut retry = SPECS[0];
+            retry.resources = &[];
+            retry.accesses = &[];
+            retry.depends_on = &["existing"];
+            let generated = declare_passes(&mut graph, &[retry]).unwrap();
+            assert_eq!(generated[0].id, PassId(1));
+            assert_eq!(graph.passes()[1].depends_on, [PassId(0)]);
+            assert_eq!(graph.resources(), resources);
+            assert_eq!(
+                graph.compile().unwrap().execution_order,
+                [PassId(0), PassId(1)]
+            );
+        }
     }
 }

@@ -97,6 +97,9 @@ pub struct ResourceAccess {
 
 #[derive(Clone, Debug)]
 /// A startup pass declaration; prerequisites supplement resource hazards.
+/// Implicit resource versions follow a stable topological order of explicit
+/// prerequisites, with original pass IDs breaking ties. Table order alone
+/// therefore never overrides an explicit prerequisite.
 pub struct PassDescriptor {
     /// Human-readable diagnostic name.
     pub name: Cow<'static, str>,

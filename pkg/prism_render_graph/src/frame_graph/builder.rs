@@ -6,7 +6,7 @@ use crate::capacity::GraphLimits;
 use alloc::vec::Vec;
 
 /// Startup topology declaration builder backed by the authoritative SSA kernel.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct GpuFrameGraphBuilder {
     resources: Vec<ResourceDescriptor>,
     passes: Vec<PassDescriptor>,

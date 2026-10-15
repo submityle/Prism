@@ -57,13 +57,21 @@ impl CompiledGpuFrameGraph {
                 }
             }
         }
-        let accesses = normalize_with_limits(resources, passes, limits)?;
         let explicit: Vec<_> = passes
             .iter()
             .map(|p| p.depends_on.iter().map(|p| p.0 as usize).collect())
             .collect();
         let names: Vec<String> = passes.iter().map(|p| p.name.clone().into_owned()).collect();
-        let solved = kernel::solve(&accesses, &vec![true; passes.len()], &explicit, &names)?;
+        let alive = vec![true; passes.len()];
+        // Declarations have implicit resource versions. Establish their order
+        // from explicit dependencies first; assigning versions in table order
+        // would turn a legal forward dependency into a false hazard cycle.
+        // Use the authoritative kernel for both steps, retaining insertion
+        // order as the deterministic tie-break for unconstrained passes.
+        let declaration_order =
+            kernel::solve(&vec![Vec::new(); passes.len()], &alive, &explicit, &names)?.order;
+        let accesses = normalize_with_limits(resources, passes, &declaration_order, limits)?;
+        let solved = kernel::solve(&accesses, &alive, &explicit, &names)?;
         let execution_order: Vec<_> = solved.order.iter().map(|&p| PassId(p as u32)).collect();
         let mut resource_versions = Vec::new();
         for &p in &solved.order {
@@ -111,30 +119,31 @@ impl CompiledGpuFrameGraph {
 fn normalize_with_limits(
     resources: &[ResourceDescriptor],
     passes: &[PassDescriptor],
+    order: &[usize],
     limits: GraphLimits,
 ) -> Result<Vec<Vec<Access>>, CompileError> {
     let mut versions = vec![0; resources.len()];
-    passes
-        .iter()
-        .map(|p| {
-            p.accesses
-                .iter()
-                .map(|a| {
-                    let input = versions[a.resource.0 as usize];
-                    let output = if a.kind.writes() {
-                        let version = limits.next_version(input)?;
-                        versions[a.resource.0 as usize] = version;
-                        Some(version)
-                    } else {
-                        None
-                    };
-                    Ok(Access {
-                        resource: a.resource.0 as usize,
-                        input,
-                        output,
-                    })
+    let mut accesses = vec![Vec::new(); passes.len()];
+    for &p in order {
+        accesses[p] = passes[p]
+            .accesses
+            .iter()
+            .map(|a| {
+                let input = versions[a.resource.0 as usize];
+                let output = if a.kind.writes() {
+                    let version = limits.next_version(input)?;
+                    versions[a.resource.0 as usize] = version;
+                    Some(version)
+                } else {
+                    None
+                };
+                Ok(Access {
+                    resource: a.resource.0 as usize,
+                    input,
+                    output,
                 })
-                .collect()
-        })
-        .collect()
+            })
+            .collect::<Result<_, CompileError>>()?;
+    }
+    Ok(accesses)
 }

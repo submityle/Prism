@@ -185,6 +185,106 @@ fn declaration_validates_resources_dependencies_and_versions() {
     ));
 }
 
+/// Explicit dependencies, not table layout, choose implicit SSA versions.
+#[test]
+fn declaration_versions_follow_dependencies_before_deriving_hazards() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    let r = graph.add_resource(resource(256, 256));
+    for (name, kind, dependency) in [
+        ("consume", AccessKind::StorageRead, Some(PassId(1))),
+        ("overwrite", AccessKind::StorageWrite, Some(PassId(2))),
+        ("produce", AccessKind::StorageWrite, None),
+    ] {
+        graph.add_pass(pass(
+            name,
+            QueueClass::Compute,
+            vec![ResourceAccess { resource: r, kind }],
+            dependency.into_iter().collect(),
+        ));
+    }
+    let compiled = graph.compile().unwrap();
+    assert_eq!(compiled.execution_order, [PassId(2), PassId(1), PassId(0)]);
+    assert_eq!(
+        compiled
+            .resource_versions
+            .iter()
+            .map(|v| (v.writer, v.version))
+            .collect::<Vec<_>>(),
+        [(PassId(2), 1), (PassId(1), 2)]
+    );
+    assert!(compiled
+        .barriers
+        .iter()
+        .any(|b| b.source == PassId(2) && b.destination == PassId(1)));
+    assert!(compiled
+        .barriers
+        .iter()
+        .any(|b| b.source == PassId(1) && b.destination == PassId(0)));
+    assert_eq!(compiled.transient_bytes, 256);
+}
+
+/// A dependency can deliberately read the imported version before a write;
+/// unconstrained declarations still retain their original ordering semantics.
+#[test]
+fn declaration_forward_war_and_unconstrained_ties_are_stable() {
+    for forward in [false, true] {
+        let mut graph = GpuFrameGraphBuilder::default();
+        let r = graph.add_resource(ResourceDescriptor {
+            lifetime: ResourceLifetime::Imported,
+            ..resource(256, 256)
+        });
+        graph.add_pass(pass(
+            "write",
+            QueueClass::Compute,
+            vec![ResourceAccess {
+                resource: r,
+                kind: AccessKind::StorageWrite,
+            }],
+            if forward { vec![PassId(1)] } else { vec![] },
+        ));
+        graph.add_pass(pass(
+            "read",
+            QueueClass::Graphics,
+            vec![ResourceAccess {
+                resource: r,
+                kind: AccessKind::StorageRead,
+            }],
+            vec![],
+        ));
+        let compiled = graph.compile().unwrap();
+        let (source, destination, before, after) = if forward {
+            (
+                PassId(1),
+                PassId(0),
+                AccessKind::StorageRead,
+                AccessKind::StorageWrite,
+            )
+        } else {
+            (
+                PassId(0),
+                PassId(1),
+                AccessKind::StorageWrite,
+                AccessKind::StorageRead,
+            )
+        };
+        assert_eq!(compiled.execution_order, [source, destination]);
+        assert_eq!(compiled.barriers.len(), 1);
+        let barrier = compiled.barriers[0];
+        assert_eq!(
+            (
+                barrier.source,
+                barrier.destination,
+                barrier.before,
+                barrier.after
+            ),
+            (source, destination, before, after)
+        );
+        assert!(barrier.queue_transfer);
+        assert_eq!(compiled.queue_batches[1].waits_for, [0]);
+        assert_eq!(compiled.transient_bytes, 0);
+    }
+}
+
 /// Real frontends with matching footprints must project the same kernel result.
 #[test]
 fn real_frontends_project_identical_kernel_products() {
