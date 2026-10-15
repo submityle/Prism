@@ -74,13 +74,13 @@ impl ProxySoa {
     }
 }
 
-/// Packs cluster records as `id, first, count, radius` plus a centre/error
-/// column, using the same stable order as the caller supplied.
+/// Packs clusters into span/error-bit words and centre/radius floats,
+/// using the same stable order as the caller supplied.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClusterSoa {
-    /// Identity and span words.
+    /// `cluster_id, first_proxy, proxy_count, geometric_error.to_bits()`.
     pub spans: Vec<[u32; 4]>,
-    /// Centre, radius, and geometric error words.
+    /// `center.x, center.y, center.z, radius`.
     pub bounds: Vec<[f32; 4]>,
 }
 
@@ -97,7 +97,7 @@ impl ClusterSoa {
                 cluster.cluster_id,
                 cluster.first_proxy,
                 cluster.proxy_count,
-                0,
+                cluster.geometric_error.to_bits(),
             ]);
             bounds.push([
                 cluster.center[0],

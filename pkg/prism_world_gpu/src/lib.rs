@@ -6,9 +6,8 @@
 //! geometric error, LOD selection, and fixed-point error quantisation.
 //!
 //! The `gpu` feature adds a native `wgpu` compute implementation. Its output is
-//! read back into the same four-word record produced by [`VisibilityOutput`],
-//! so parity is checked at the contract boundary rather than by comparing
-//! implementation-specific objects.
+//! read back as canonical four-word visibility plus the unquantized screen
+//! error. Parity checks both representations at the contract boundary.
 
 #![forbid(unsafe_code)]
 
@@ -107,5 +106,48 @@ mod tests {
         let proxy = ProxyInstance::new(1, 0, [f32::NAN, 0.0, 0.0], 1.0, 1.0, 1.0);
         let error = ProxySoa::from_proxies(&[proxy]).expect_err("NaN is not a GPU contract value");
         assert!(error.contains("finite"));
+    }
+
+    #[test]
+    fn cluster_columns_preserve_every_field_in_input_order() {
+        let clusters = [
+            Cluster {
+                cluster_id: 9,
+                first_proxy: 3,
+                proxy_count: 5,
+                center: [1.0, 2.0, 3.0],
+                radius: 4.0,
+                geometric_error: 7.25,
+            },
+            Cluster {
+                cluster_id: 2,
+                first_proxy: 8,
+                proxy_count: 1,
+                center: [-3.0, 0.0, 2.0],
+                radius: 0.5,
+                geometric_error: 0.125,
+            },
+        ];
+        let soa = ClusterSoa::from_clusters(&clusters).unwrap();
+        for (index, cluster) in clusters.iter().enumerate() {
+            assert_eq!(
+                soa.spans[index],
+                [
+                    cluster.cluster_id,
+                    cluster.first_proxy,
+                    cluster.proxy_count,
+                    cluster.geometric_error.to_bits()
+                ]
+            );
+            assert_eq!(
+                soa.bounds[index],
+                [
+                    cluster.center[0],
+                    cluster.center[1],
+                    cluster.center[2],
+                    cluster.radius
+                ]
+            );
+        }
     }
 }

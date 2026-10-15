@@ -12,6 +12,7 @@ struct VisibilityRecord {
     lod: u32,
     error_quantized: u32,
     proxy_id: u32,
+    screen_error: f32,
 };
 
 @group(0) @binding(0)
@@ -76,12 +77,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var lod = 0u;
     var error_quantized = 0u;
+    var screen_error = 0.0;
     if visible == 1u {
         let distance = sqrt(max(distance_squared, 1.0e-8));
-        let screen_error = error_range.x * params.projection_scale / distance;
+        screen_error = error_range.x * params.projection_scale / distance;
         lod = lod_for_error(screen_error);
         error_quantized = quantise_error(screen_error);
     }
 
-    output[index] = VisibilityRecord(visible, lod, error_quantized, proxy_id);
+    output[index] = VisibilityRecord(visible, lod, error_quantized, proxy_id, screen_error);
 }

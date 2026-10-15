@@ -1,5 +1,7 @@
 //! Optional real-device `wgpu` implementation of the world visibility twin.
 
+use std::time::{Duration, Instant};
+
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
@@ -55,6 +57,34 @@ pub struct AdapterEvidence {
     pub required_features: String,
 }
 
+/// Resource and host wall-clock measurements for one real-device evaluation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuTelemetry {
+    /// Number of proxy records supplied to the dispatch.
+    pub input_proxy_count: usize,
+    /// Bytes uploaded for the camera parameters and proxy SoA columns.
+    pub upload_bytes: u64,
+    /// Bytes copied from the GPU output into the host-visible staging buffer.
+    pub readback_bytes: u64,
+    /// Number of one-dimensional workgroups submitted to the compute pass.
+    pub dispatch_workgroups: u32,
+    /// Adapter metadata captured for the dispatch.
+    pub adapter_evidence: AdapterEvidence,
+    /// Host wall-clock time from queue submission through GPU completion.
+    pub dispatch_wall_time: Duration,
+    /// Host wall-clock time for mapping and copying the readback records.
+    pub readback_wall_time: Duration,
+}
+
+/// GPU outputs paired with the telemetry for the same contract evaluation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GpuEvaluation {
+    /// Canonical visibility records returned by the GPU.
+    pub outputs: Vec<VisibilityOutput>,
+    /// Resource and timing data for this evaluation.
+    pub telemetry: GpuTelemetry,
+}
+
 /// Native `wgpu` instance, adapter, device, and queue kept alive together.
 pub struct GpuContext {
     instance: Instance,
@@ -66,17 +96,19 @@ pub struct GpuContext {
 impl GpuContext {
     /// Attempts to acquire a native headless adapter.
     ///
-    /// An adapter/device acquisition error is the normal result on a GPU-less
-    /// host. The caller decides whether that should skip or fail by checking
-    /// `PRISM_REQUIRE_GPU`.
+    /// An adapter/device acquisition error is returned to the caller so a
+    /// strict real-device test can fail with the acquisition evidence.
     pub fn try_headless() -> Result<Option<Self>, GpuAcquireError> {
-        let instance = Instance::new(InstanceDescriptor {
-            backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
-            flags: InstanceFlags::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display: None,
-            backend_options: BackendOptions::default(),
-        });
+        let instance = Instance::new(
+            InstanceDescriptor {
+                backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
+                flags: InstanceFlags::default(),
+                memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+                display: None,
+                backend_options: BackendOptions::default(),
+            }
+            .with_env(),
+        );
         let adapter = futures_lite::future::block_on(
             instance.request_adapter(&RequestAdapterOptions::default()),
         )
@@ -159,6 +191,7 @@ struct GpuRecord {
     lod: u32,
     error_quantized: u32,
     proxy_id: u32,
+    screen_error: f32,
 }
 
 /// Reusable compute pipeline for deterministic proxy visibility and LOD.
@@ -207,7 +240,7 @@ impl GpuVisibility {
         }
     }
 
-    /// Executes visibility/LOD and reads back the canonical four-word records.
+    /// Reads back canonical visibility words and the unquantized screen error.
     #[must_use]
     pub fn evaluate(
         &self,
@@ -215,11 +248,40 @@ impl GpuVisibility {
         input: VisibilityInput,
         proxies: &[ProxyInstance],
     ) -> Vec<VisibilityOutput> {
+        self.evaluate_with_telemetry(ctx, input, proxies).outputs
+    }
+
+    /// Executes visibility/LOD and returns canonical records with resource and
+    /// host wall-clock telemetry for the same dispatch.
+    #[must_use]
+    pub fn evaluate_with_telemetry(
+        &self,
+        ctx: &GpuContext,
+        input: VisibilityInput,
+        proxies: &[ProxyInstance],
+    ) -> GpuEvaluation {
+        let input_proxy_count = proxies.len();
+        let adapter_evidence = ctx.evidence();
         if proxies.is_empty() {
-            return Vec::new();
+            return GpuEvaluation {
+                outputs: Vec::new(),
+                telemetry: GpuTelemetry {
+                    input_proxy_count,
+                    upload_bytes: 0,
+                    readback_bytes: 0,
+                    dispatch_workgroups: 0,
+                    adapter_evidence,
+                    dispatch_wall_time: Duration::ZERO,
+                    readback_wall_time: Duration::ZERO,
+                },
+            };
         }
         let soa = ProxySoa::from_proxies(proxies).expect("validated proxy data is uploadable");
         let device = ctx.device();
+        let upload_bytes = (std::mem::size_of_val(soa.positions.as_slice())
+            + std::mem::size_of_val(soa.errors.as_slice())
+            + std::mem::size_of_val(soa.metadata.as_slice())
+            + std::mem::size_of::<GpuParams>()) as u64;
         let positions = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("prism_world_proxy_positions"),
             contents: bytemuck::cast_slice(&soa.positions),
@@ -261,6 +323,7 @@ impl GpuVisibility {
             usage: BufferUsages::UNIFORM,
         });
         let output_size = (proxies.len() * std::mem::size_of::<GpuRecord>()) as u64;
+        let dispatch_workgroups = (proxies.len() as u32).div_ceil(WORKGROUP_SIZE);
         let output = device.create_buffer(&BufferDescriptor {
             label: Some("prism_world_visibility_output"),
             size: output_size,
@@ -294,29 +357,48 @@ impl GpuVisibility {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups((proxies.len() as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
+            pass.dispatch_workgroups(dispatch_workgroups, 1, 1);
         }
         encoder.copy_buffer_to_buffer(&output, 0, &staging, 0, output_size);
+        let dispatch_started = Instant::now();
         ctx.queue().submit([encoder.finish()]);
-        staging.slice(..).map_async(MapMode::Read, |_| {});
         ctx.wait();
-        let mapped = staging
-            .slice(..)
+        let dispatch_wall_time = dispatch_started.elapsed();
+
+        let readback_started = Instant::now();
+        let readback = staging.slice(..);
+        readback.map_async(MapMode::Read, |_| {});
+        ctx.wait();
+        let mapped = readback
             .get_mapped_range()
             .expect("world visibility readback must be mapped after device wait");
         let records: Vec<GpuRecord> = bytemuck::cast_slice(&mapped).to_vec();
         drop(mapped);
         staging.unmap();
-        records
+        let readback_wall_time = readback_started.elapsed();
+        let outputs = records
             .into_iter()
             .map(|record| VisibilityOutput {
                 proxy_id: record.proxy_id,
                 visible: record.visible != 0,
                 lod: record.lod,
-                screen_error: record.error_quantized as f32 / crate::ERROR_QUANTUM,
+                screen_error: record.screen_error,
                 error_quantized: record.error_quantized,
             })
-            .collect()
+            .collect();
+
+        GpuEvaluation {
+            outputs,
+            telemetry: GpuTelemetry {
+                input_proxy_count,
+                upload_bytes,
+                readback_bytes: output_size,
+                dispatch_workgroups,
+                adapter_evidence,
+                dispatch_wall_time,
+                readback_wall_time,
+            },
+        }
     }
 
     /// Ensures the shader module remains owned alongside the pipeline.

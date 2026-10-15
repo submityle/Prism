@@ -14,9 +14,12 @@ The CPU contract owns:
 
 The optional `gpu` feature compiles `src/shaders/proxy_visibility.wgsl` with
 `wgpu` 30. The kernel reads position/error/metadata SoA columns, executes the
-same visibility and LOD policy, writes four `u32` words per proxy, and the host
+same visibility and LOD policy, writes four `u32` words and one unquantized `f32`
+screen-space error per proxy (20-byte stride), and the host
 copies those records into a `MAP_READ` staging buffer. The parity test compares
-every readback word against the CPU golden.
+every canonical word and the unquantized error against the CPU golden.
+`ClusterSoa` preserves geometric error as float bits in its fourth span word;
+its bounds column contains centre and radius.
 
 ## Verification
 
@@ -34,15 +37,20 @@ cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test 
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test gpu_parity -- --nocapture
 ```
 
-Without `PRISM_REQUIRE_GPU`, the parity test returns successfully when no native
-adapter is available. When `PRISM_REQUIRE_GPU` exists (including `0`), missing
-adapter/device acquisition is a test failure. With an adapter, the test logs
-backend, device type, vendor, device, driver, and driver-info evidence, creates
-the compute pipeline, dispatches the kernel, waits for the queue, maps the
-readback buffer, and compares all four words for every proxy.
+The parity test is a strict real-device gate: missing adapter/device acquisition
+always fails, independent of environment variables. With an adapter, the test
+logs one stable telemetry record containing input proxy count, upload bytes,
+readback bytes, dispatch workgroups, fixed-unit wall-clock dispatch/readback
+timings, and backend/device/driver evidence. `GpuVisibility::evaluate_with_telemetry`
+returns the same telemetry alongside the canonical output records.
 
 The pipeline requires no optional device feature. The test records the actual
 adapter metadata and uses the device's native WGSL validation path; a passing
 GPU result therefore proves shader compilation, pipeline creation, dispatch,
-and readback on that adapter. Throughput, frame-time, and memory figures remain
-benchmark measurements rather than claims made by this contract test.
+and readback on that adapter. Upload bytes cover the parameter block and the
+three proxy SoA columns (48 bytes per proxy plus 128 parameter bytes); readback
+bytes cover the 20-byte output record per proxy. `WGPU_BACKEND` is honored and
+checked by the real-device test, which rejects CPU adapters. Tests cover all LOD
+thresholds, error saturation, a 129-proxy multi-workgroup tail, and empty inputs.
+Timings are host wall-clock measurements around queue completion and
+staging-buffer map/readback, not GPU timestamp-query measurements.

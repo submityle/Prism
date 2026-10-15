@@ -15,15 +15,15 @@
 ### M4：GPU proxy visibility contract
 
 - `prism_world_gpu` 已纳入根 workspace。
-- CPU contract、SoA little-endian upload layout、WGSL compute shader、readback 四字记录和 CPU golden 对拍已具备。
+- CPU contract、SoA little-endian upload layout、WGSL compute shader 和 CPU golden 对拍已具备。GPU 物理输出为四个规范 `u32` 与一个未量化 `f32 screen_error`（20 字节步长），原始误差直接来自 GPU，不由 CPU 重算或从量化值还原；cluster SoA 保留几何误差位模式。
 - WGSL parse/validation、CPU tests 和 `cargo check --features gpu` 已通过。
 - 严格门禁命令：
 
 ```text
-WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_world_gpu --features gpu --test gpu_parity -- --nocapture
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --features gpu --test gpu_parity -- --nocapture
 ```
 
-本 checkout 的受控环境结果为失败：`No suitable graphics adapter found`，其中 Metal 没有返回 adapter。该结果是环境限制，不构成 GPU 通过证据；默认无 GPU 测试只允许显式非严格模式跳过。
+2026-10-15 跨沙盒实机结果通过：Apple M2、Metal、IntegratedGpu、无额外必需 feature；真实创建 pipeline、dispatch、map/readback，并逐项比较规范四字与原始屏幕误差。测试覆盖 5 个可见/不可见对象、129 个对象的 3-workgroup 尾部、LOD 阈值、量化半步/饱和与空输入。5 个对象上传 368 字节、读回 100 字节；一般非空上传量 `128 + 48×N`、读回量 `20×N`。测试严格拒绝缺少 adapter/device、CPU adapter 或未遵守 `WGPU_BACKEND`，不把跳过算通过。telemetry 耗时是主机墙钟，不是 GPU timestamp，也不构成吞吐或 P50/P95/P99 性能达标证据。
 
 ### M5：持久化
 
@@ -74,7 +74,7 @@ CARGO_TARGET_DIR=/private/tmp/prism-world-target cargo check -p prism_world_stre
 - M6：terrain 多表示、增量重烘以及 terrain-to-render/world streaming 的端到端接入。
 - M7：simulation-to-world persistence、SDF 一场多用和大规模实时调度接入。
 - M8：真实传输层、多人会话、认证/重试、跨 sector handoff 的端到端一致性验证。
-- GPU proxy 的真实 adapter、dispatch、readback 和 P50/P95/P99 性能数据仍需在有 GPU 的环境执行。
+- GPU proxy 的真实 adapter、dispatch/readback 正确性已有上述 Apple M2/Metal 证据；P50/P95/P99 性能、显存峰值、多厂商/后端与 renderer 端到端集成仍未验收。
 
 这些边界不是占位 API；每一项必须以可运行算法、明确契约、单测和真实调用路径交付后才从本节移除。
 
