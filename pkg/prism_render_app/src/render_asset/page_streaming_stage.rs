@@ -17,7 +17,7 @@ use prism_render_driver::{FrameSync, Instance};
 use crate::label::RenderApp;
 use crate::render_asset::{
     FixedPagePoolDescriptor, FixedPageRenderQueue, FixedPageResidencyBridge,
-    FixedPageStreamingSource, GpuPrepareBudget, PrepareCancellation,
+    FixedPageStreamingSource, GpuPrepareBudget, PageResidencyBridgeError, PrepareCancellation,
 };
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::sets::RenderSystems;
@@ -32,6 +32,23 @@ pub struct FixedPageStreamingConfig {
     pub max_io_pages_per_frame: usize,
     /// Maximum number of owned payloads uploaded in one render prepare pass.
     pub max_uploads_per_frame: usize,
+}
+
+/// Last-frame diagnostics for the fixed-page streaming bridge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Resource)]
+pub struct FixedPageStreamingStats {
+    /// Number of CPU page reads attempted by the last main-world pump.
+    pub io_attempted: usize,
+    /// Number of CPU page reads completed by the last main-world pump.
+    pub io_loaded: usize,
+    /// Number of CPU page read/admission errors observed by the last pump.
+    pub io_errors: usize,
+    /// Number of page uploads committed by the last render prepare pass.
+    pub uploads: usize,
+    /// Number of page uploads rejected by the last render prepare pass.
+    pub upload_errors: usize,
+    /// The last explicit GPU bridge error, if any.
+    pub last_upload_error: Option<PageResidencyBridgeError>,
 }
 
 impl FixedPageStreamingConfig {
@@ -128,6 +145,7 @@ pub fn register_fixed_page_streaming<I>(
 {
     app.insert_resource(source);
     app.insert_resource(config.clone());
+    app.insert_resource(FixedPageStreamingStats::default());
     app.add_systems(PostUpdate, pump_fixed_page_streaming_io);
     app.add_extract(RenderApp, extract_fixed_page_streaming);
 
@@ -135,6 +153,9 @@ pub fn register_fixed_page_streaming<I>(
         .sub_app_mut(RenderApp)
         .expect("PrismRenderPlugin must be installed before fixed-page streaming");
     render.world.insert_resource(FixedPageRenderQueue::new());
+    render
+        .world
+        .insert_resource(FixedPageStreamingStats::default());
     render
         .world
         .insert_resource(FixedPageStreamingRenderConfig {
@@ -157,8 +178,12 @@ pub fn register_fixed_page_streaming<I>(
 fn pump_fixed_page_streaming_io(
     mut source: ResMut<FixedPageStreamingSource>,
     config: Res<FixedPageStreamingConfig>,
+    mut stats: ResMut<FixedPageStreamingStats>,
 ) {
-    let _ = source.pump_io(config.max_io_pages_per_frame);
+    let report = source.pump_io(config.max_io_pages_per_frame);
+    stats.io_attempted = report.attempted;
+    stats.io_loaded = report.loaded;
+    stats.io_errors = report.errors.len();
 }
 
 fn extract_fixed_page_streaming(main: &mut World, render: &mut World) {
@@ -192,6 +217,7 @@ fn extract_fixed_page_streaming(main: &mut World, render: &mut World) {
 fn prepare_fixed_page_streaming<I>(
     mut queue: ResMut<FixedPageRenderQueue>,
     mut gpu: ResMut<FixedPageStreamingGpu<I>>,
+    mut stats: ResMut<FixedPageStreamingStats>,
     runtime: Res<RenderRuntimeResource<I>>,
 ) where
     I: Instance + Send + Sync + 'static,
@@ -200,6 +226,9 @@ fn prepare_fixed_page_streaming<I>(
     I::Queue: Send + Sync + FrameSync + 'static,
     I::Surface: Send + Sync + 'static,
 {
+    stats.uploads = 0;
+    stats.upload_errors = 0;
+    stats.last_upload_error = None;
     let completed = GpuCompletionValue(runtime.runtime().completed_value());
     let _ = gpu.bridge.reclaim_completed(completed);
     let reclaim_after = GpuCompletionValue(runtime.runtime().next_completion_value());
@@ -215,11 +244,14 @@ fn prepare_fixed_page_streaming<I>(
             runtime.runtime().queue(),
         ) {
             Ok(event) => {
+                stats.uploads += 1;
                 if matches!(event, crate::FixedPagePoolEvent::Replaced { .. }) {
                     gpu.pending_submission = true;
                 }
             }
-            Err(_) => {
+            Err(error) => {
+                stats.upload_errors += 1;
+                stats.last_upload_error = Some(error);
                 queue.push_front(payload);
                 break;
             }
@@ -262,7 +294,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        render_asset::{FixedPagePoolDescriptor, FixedPageRenderQueue, FixedPageStreamingSource},
+        render_asset::{
+            FixedPagePoolDescriptor, FixedPageRenderQueue, FixedPageStreamingSource,
+            FixedPageStreamingStats,
+        },
         PrismRenderPlugin, RenderApp,
     };
 
@@ -292,8 +327,15 @@ mod tests {
         );
         app.update();
 
+        let main_stats = app.world().resource::<FixedPageStreamingStats>();
+        assert_eq!(main_stats.io_attempted, 1);
+        assert_eq!(main_stats.io_loaded, 1);
+        assert_eq!(main_stats.io_errors, 0);
         let render = app.sub_app_mut(RenderApp).unwrap();
         assert!(render.world.resource::<FixedPageRenderQueue>().is_empty());
+        let render_stats = render.world.resource::<FixedPageStreamingStats>();
+        assert_eq!(render_stats.uploads, 1);
+        assert_eq!(render_stats.upload_errors, 0);
         let gpu = render
             .world
             .resource::<FixedPageStreamingGpu<NullInstance>>();

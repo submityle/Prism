@@ -4,7 +4,7 @@
 //! bytes into an owned render queue, while the render-side upload contract is
 //! deliberately explicit about bytes and silent about GPU completion.
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 
 use prism_asset::{
@@ -23,7 +23,7 @@ use prism_tasks::Priority;
 pub struct FixedPageStreamingSource {
     sources: AssetSources,
     residency: PageResidency,
-    extracted: Vec<PageId>,
+    extracted: BTreeMap<PageId, u64>,
 }
 
 /// Compatibility name for callers that prefer to describe this value as a
@@ -37,7 +37,7 @@ impl FixedPageStreamingSource {
         Self {
             sources,
             residency,
-            extracted: Vec::new(),
+            extracted: BTreeMap::new(),
         }
     }
 
@@ -113,27 +113,32 @@ impl FixedPageStreamingSource {
     /// Copies each newly resident page's bytes and source revision into the
     /// supplied render-side queue.
     ///
-    /// Page IDs are tracked after a successful copy, so repeated extraction
-    /// calls do not enqueue the same resident revision twice. A failed or
-    /// cancelled page is never extracted because it has no resident bytes.
+    /// Page IDs and revisions are tracked after a successful copy, so repeated
+    /// extraction calls do not enqueue the same resident revision twice. The
+    /// tracking table drops evicted records so long-running sessions do not
+    /// accumulate historical page IDs.
     pub fn extract_to_render(&mut self, queue: &mut FixedPageRenderQueue) -> usize {
         let mut extracted = 0;
-        for page in self.residency.eviction_candidates() {
-            if self.extracted.contains(&page) {
-                continue;
-            }
+        let residents = self.residency.eviction_candidates();
+        let resident_ids = residents.iter().copied().collect::<BTreeSet<_>>();
+        self.extracted.retain(|page, _| resident_ids.contains(page));
+        for page in residents {
             let Some(key) = self.residency.key(page).cloned() else {
                 continue;
             };
+            let revision = key.source_revision();
+            if self.extracted.get(&page) == Some(&revision) {
+                continue;
+            }
             let Some(bytes) = self.residency.resident_bytes(page) else {
                 continue;
             };
             queue.push(FixedPageRenderPayload {
                 page,
-                revision: key.source_revision(),
+                revision,
                 bytes: bytes.to_vec(),
             });
-            self.extracted.push(page);
+            self.extracted.insert(page, revision);
             extracted += 1;
         }
         extracted
@@ -240,7 +245,7 @@ impl FixedPageStreamingSource {
     /// Returns whether a resident page has already been extracted.
     #[must_use]
     pub fn was_extracted(&self, page: PageId) -> bool {
-        self.extracted.contains(&page)
+        self.extracted.contains_key(&page)
     }
 
     /// Returns the number of page payloads extracted so far.

@@ -139,10 +139,10 @@ pub use render_asset::{
     FixedPageDeferredReplacement, FixedPageIoReport, FixedPagePool, FixedPagePoolDescriptor,
     FixedPagePoolEvent, FixedPageReclaimEvent, FixedPageRenderPayload, FixedPageRenderQueue,
     FixedPageResidencyBridge, FixedPageStreamingConfig, FixedPageStreamingGpu,
-    FixedPageStreamingManager, FixedPageStreamingSource, FixedPageUpload, GpuPrepareBudget,
-    PageAllocation, PagePoolError, PageReleaseTransaction, PageReplaceTransaction,
-    PageResidencyBridgeError, PageUploadTransaction, PrepareAssetError, PrepareCancellation,
-    PrepareContext, PrepareContextError, RenderAsset, RenderAssets,
+    FixedPageStreamingManager, FixedPageStreamingSource, FixedPageStreamingStats, FixedPageUpload,
+    GpuPrepareBudget, PageAllocation, PagePoolError, PageReleaseTransaction,
+    PageReplaceTransaction, PageResidencyBridgeError, PageUploadTransaction, PrepareAssetError,
+    PrepareCancellation, PrepareContext, PrepareContextError, RenderAsset, RenderAssets,
 };
 pub use runtime_resource::RenderRuntimeResource;
 pub use scene::{MeshClass, SceneRegistry, VisibilityWorkList};
@@ -198,9 +198,10 @@ pub mod prelude {
         FixedPagePoolDescriptor, FixedPagePoolEvent, FixedPageReclaimEvent, FixedPageRenderPayload,
         FixedPageRenderQueue, FixedPageResidencyBridge, FixedPageStreamingConfig,
         FixedPageStreamingGpu, FixedPageStreamingManager, FixedPageStreamingSource,
-        FixedPageUpload, GpuPrepareBudget, PageAllocation, PagePoolError, PageReleaseTransaction,
-        PageReplaceTransaction, PageResidencyBridgeError, PageUploadTransaction, PrepareAssetError,
-        PrepareCancellation, PrepareContext, PrepareContextError, RenderAsset, RenderAssets,
+        FixedPageStreamingStats, FixedPageUpload, GpuPrepareBudget, PageAllocation, PagePoolError,
+        PageReleaseTransaction, PageReplaceTransaction, PageResidencyBridgeError,
+        PageUploadTransaction, PrepareAssetError, PrepareCancellation, PrepareContext,
+        PrepareContextError, RenderAsset, RenderAssets,
     };
     pub use crate::scene::{MeshClass, SceneRegistry, VisibilityWorkList};
     pub use crate::sets::{

@@ -50,6 +50,24 @@ fn request_load_extract_copies_owned_bytes_and_revision() {
 }
 
 #[test]
+fn extraction_tracking_drops_evicted_page_ids() {
+    let mut streaming = streaming(4);
+    let page = streaming
+        .request_page("memory://payload.bin", 0, Priority::Normal, 0)
+        .expect("request is registered");
+    let _ = streaming.pump_io(1);
+    let mut queue = FixedPageRenderQueue::new();
+    assert_eq!(streaming.extract_to_render(&mut queue), 1);
+    assert_eq!(streaming.extracted_page_count(), 1);
+    streaming
+        .residency_mut()
+        .evict(page)
+        .expect("resident page evicts");
+    assert_eq!(streaming.extract_to_render(&mut queue), 0);
+    assert_eq!(streaming.extracted_page_count(), 0);
+}
+
+#[test]
 fn pump_is_bounded_and_reports_budget_blocking() {
     let mut streaming = streaming(4);
     streaming

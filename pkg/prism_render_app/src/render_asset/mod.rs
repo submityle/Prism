@@ -51,6 +51,7 @@ pub use page_streaming::{
 };
 pub use page_streaming_stage::{
     register_fixed_page_streaming, FixedPageStreamingConfig, FixedPageStreamingGpu,
+    FixedPageStreamingStats,
 };
 pub use prepare::{
     prepare_extracted_assets, prepare_extracted_assets_with_context, AssetSyncReport,
