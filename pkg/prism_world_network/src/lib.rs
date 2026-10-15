@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+mod server_mesh;
 mod session;
 
 use alloc::collections::BTreeMap;
@@ -21,6 +22,13 @@ pub use prism_world_persist::{
     PersistentId, Transaction, TransactionId,
 };
 pub use prism_world_stream::{AabbI64, GlobalPos, SectorId};
+pub use server_mesh::{
+    AbortOutcome, AdmissionError, ApplyOutcome, AuthorityEpoch, AuthorityLease, AuthorityLoad,
+    BatchPrepareResult, CommitOutcome, EpochError, HandoffCommand,
+    HandoffError as ServerMeshHandoffError, HandoffReceipt, HandoffTicket, HandoffTransactionId,
+    LeaseError, LeaseId, LeaseRole, MeshConfigError, MeshError, PartitionRecord, PrepareOutcome,
+    ServerMesh, ServerMeshConfig,
+};
 pub use session::{
     AuthToken, FlushError, FlushReport, MemoryTransport, MemoryTransportError, ReceiveError,
     ReceiveOutcome, Session, SessionConfig, SessionConfigError, SessionError, SessionId,

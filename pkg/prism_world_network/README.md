@@ -2,8 +2,9 @@
 
 `prism_world_network` is the M8 world-to-network seam. It is a `no_std +
 alloc` crate with no socket, serializer, ECS, scene, or filesystem dependency.
-It includes a small reliable session seam and a deterministic in-memory
-transport for host integration tests.
+It includes a small reliable session seam, a deterministic in-memory transport
+for host integration tests, and the bounded M7 server-mesh authority-handoff
+contract.
 
 ## Single-source-of-truth boundary
 
@@ -19,6 +20,12 @@ transport for host integration tests.
   object-indexed merge facade, and the transport-independent session contract.
 - Merge duplicate detection is indexed by `TransactionId`, so replaying a
   large batch does not scan every object bucket linearly.
+- `ServerMesh` owns bounded partition-authority metadata only. It fences old
+  authorities with `(authority, epoch, lease)` matching, reserves target
+  capacity during prepare, and rechecks the source fence during commit.
+- `HandoffTransactionId` is retained for the configured transaction bound, so
+  exact command replay stays idempotent for the lifetime of that mesh state;
+  conflicting reuse of one id is rejected.
 
 The world remains authoritative for spatial placement and persistence remains
 authoritative for object state. An envelope carries a validated persistence
@@ -59,3 +66,33 @@ The transport packet carries a `SessionId`, while token verification is a
 session-establishment contract rather than a wire encryption scheme. Hosts
 that need confidentiality or tamper resistance must bind this seam to an
 authenticated/encrypted transport.
+
+## Server mesh and authority handoff seam
+
+`ServerMesh` maps the existing `prism_world_stream::SectorId` partition identity
+to an `AuthorityLease`. A lease has an opaque lease id, a monotonically
+increasing `AuthorityEpoch`, and an exclusive logical expiry tick. The mesh
+does not choose a clock or a server-discovery policy; the host supplies both
+the tick and the authority identities.
+
+Handoffs use a bounded prepare/commit/abort transaction:
+
+- `prepare_handoff` validates the current source authority, requires the target
+  epoch to be exactly the next epoch, and reserves the target authority's
+  partition slot and the configured in-flight window.
+- `commit_handoff` revalidates the source fence before changing the partition
+  record. A command prepared by an authority that has since lost the partition
+  is rejected, even if its transaction was previously admitted.
+- Exact command and commit replays are idempotent. A transaction id reused with
+  different command contents is rejected. `prepare_batch` sorts commands before
+  admission, so arrival order does not select a different winner.
+- `max_transactions` is a bounded idempotency history. It deliberately does
+  not evict old receipts; once full, new transaction ids are rejected while
+  exact replays remain safe.
+
+This is a control-plane contract, not a deployment implementation. It does not
+provide cross-machine sockets, QUIC/TCP framing, encryption, authentication,
+failure detection, leader election, clock synchronization, durable journal or
+provider recovery, state transfer, object streaming, or network partitions/
+reconciliation. A host must bind the values to its own authenticated channel,
+durable provider, failure detector, and world-state transfer protocol.
