@@ -119,6 +119,21 @@ impl GDeflateDecoder {
         })
     }
 
+    /// Decodes with an optional GPU context and reports a deterministic CPU
+    /// fallback when the host has no usable adapter.
+    pub fn decode_auto(
+        ctx: Option<&GpuContext>,
+        input: &[u8],
+    ) -> Result<DecodedGDeflate, DecoderError> {
+        let Some(ctx) = ctx else {
+            let mut decoded = Self::decode_cpu(input)?;
+            decoded.report.path = DecodePath::CpuFallback;
+            decoded.report.fallback = Some(GpuFallbackReason::NoDevice);
+            return Ok(decoded);
+        };
+        Self::new(ctx).decode(ctx, input)
+    }
+
     /// Attempts GPU de-interleave plus CPU Huffman inflate, falling back to
     /// the CPU golden decoder on shape/limit/device-side failures.
     pub fn decode(&self, ctx: &GpuContext, input: &[u8]) -> Result<DecodedGDeflate, DecoderError> {
@@ -297,6 +312,16 @@ mod tests {
         assert_eq!(decoded.report.compressed_bytes, input.len());
         assert_eq!(decoded.report.uncompressed_bytes, 14);
         assert_eq!(decoded.report.fallback, None);
+    }
+
+    #[test]
+    fn optional_gpu_context_reports_no_device_fallback() {
+        let input = gdeflate_compress(b"no adapter");
+        let decoded = GDeflateDecoder::decode_auto(None, &input).unwrap();
+        assert_eq!(decoded.bytes, b"no adapter");
+        assert_eq!(decoded.report.path, DecodePath::CpuFallback);
+        assert!(!decoded.report.gpu_attempted);
+        assert_eq!(decoded.report.fallback, Some(GpuFallbackReason::NoDevice));
     }
 
     #[test]

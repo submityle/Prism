@@ -604,7 +604,7 @@ mount("assets", patch_pak,priority=30)   // 热补丁
 
 大世界/高清资产装不下显存，必须按需换入换出。`StreamingManager` 对标 DOOM Eternal / Decima 的预算驱动流送：
 
-> **当前实现边界**：`prism_asset` 已实现预算控制器、同步 `StreamIoExecutor` 和使用现有 `TaskPool` 的锁外 `AsyncStreamIoExecutor`，两者都会真实调用 `AssetSources::read_range`；异步 executor 会在成功、取消、失败等请求终态清理 gate，并把重复执行/重复取消映射为明确错误，但只负责有界范围读取与状态提交，仍不包含解码器、GPU 资源上传或 DirectStorage 形态批量队列。完整预取、GPU 反馈闭环和按 Chunk 流送调度仍未实现。容器层已有文件 `RangeSource`、确定性 range batching、raw-DEFLATE per-payload 解码和按范围读取，但压缩 payload 仍需完整解码，不能替代完整流送系统。`prism_gdeflate_gpu` 现在提供统一 `GDeflateDecoder`：有设备时真实执行 GPU de-interleave、CPU Huffman inflate，并返回 `DecodeReport`；设备限制、完整性失败或无设备均显式走 CPU fallback。它仍不是 GPU Huffman、DirectStorage 队列或资产运行时的完整直通接线。
+> **当前实现边界**：`prism_asset` 已实现预算控制器、同步 `StreamIoExecutor` 和使用现有 `TaskPool` 的锁外 `AsyncStreamIoExecutor`，两者都会真实调用 `AssetSources::read_range`；异步 executor 会在成功、取消、失败等请求终态清理 gate，并把重复执行/重复取消映射为明确错误，但只负责有界范围读取与状态提交，仍不包含解码器、GPU 资源上传或 DirectStorage 形态批量队列。完整预取、GPU 反馈闭环和按 Chunk 流送调度仍未实现。`prism_gdeflate_gpu` 现在提供统一 `GDeflateDecoder`：有设备时真实执行 GPU de-interleave、CPU Huffman inflate，并返回 `DecodeReport`；设备限制、完整性失败或无设备均显式走 CPU fallback，`decode_auto(None, ...)` 也会保留无设备诊断。它仍不是 GPU Huffman、DirectStorage 队列或资产运行时的完整直通接线。
 
 - **可流送资产声明分级**：纹理按 mip、网格按 LOD、虚拟纹理按 page。资产值内只常驻「低清兜底 + 元数据」，高清层级按需 `read_range` 流入。
 - **预算驱动驻留**：`StreamingBudget`（显存上限、每帧 I/O 带宽、并发解码）。管理器维护「每个可流送资产的目标层级」，由**请求器**（相机距离、屏幕占比、可见性、显式 pin）打分，预算内尽量满足高分请求，超预算则驱逐低分层级。
