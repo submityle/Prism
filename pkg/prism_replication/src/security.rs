@@ -196,6 +196,410 @@ pub struct RingPskProvider {
     session_key: Option<[u8; 32]>,
 }
 
+/// Stable identifier for [`RingPskKeyringProvider`].
+#[cfg(feature = "crypto")]
+pub const RING_PSK_KEYRING_PROVIDER_ID: u16 = 0x524b;
+
+/// Maximum number of previous credentials retained for reconnects after a
+/// rotation. Existing sessions keep their derived session key; retained keys
+/// only authorize new handshakes during the bounded overlap window.
+#[cfg(feature = "crypto")]
+pub const MAX_RETAINED_PSK_KEYS: usize = 3;
+
+/// An application-owned PSK with an explicit deployment key id.
+#[cfg(feature = "crypto")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PskCredential {
+    id: u32,
+    secret: [u8; 32],
+}
+
+#[cfg(feature = "crypto")]
+impl PskCredential {
+    /// Construct a credential. The secret is never formatted by this type.
+    #[must_use]
+    pub const fn new(id: u32, secret: [u8; 32]) -> Self {
+        Self { id, secret }
+    }
+
+    /// Stable key id carried inside the authenticated handshake proof.
+    #[must_use]
+    pub const fn id(self) -> u32 {
+        self.id
+    }
+}
+
+/// Errors from the bounded in-process credential lifecycle.
+#[cfg(feature = "crypto")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PskKeyringError {
+    /// The key id is already active or retained.
+    DuplicateId(u32),
+    /// The bounded overlap window is full.
+    Capacity,
+    /// The requested key is not retained by this keyring.
+    UnknownId(u32),
+    /// The active key cannot be retired while it is serving new handshakes.
+    ActiveKey(u32),
+}
+
+/// Bounded active/previous PSK lifecycle for reconnects during key rotation.
+///
+/// `rotate` makes the new credential active and retains the old one. The
+/// caller explicitly retires old credentials once every deployment has moved
+/// to the new key. This is intentionally a provider-level primitive: storage,
+/// access control, identity attestation and KMS integration remain owned by
+/// the deployment application.
+#[cfg(feature = "crypto")]
+#[derive(Clone)]
+pub struct PskKeyring {
+    active: PskCredential,
+    previous: Vec<PskCredential>,
+}
+
+#[cfg(feature = "crypto")]
+impl PskKeyring {
+    /// Start a keyring with one active credential.
+    #[must_use]
+    pub fn new(active: PskCredential) -> Self {
+        Self {
+            active,
+            previous: Vec::new(),
+        }
+    }
+
+    /// Return the credential used for new handshakes.
+    #[must_use]
+    pub const fn active(&self) -> PskCredential {
+        self.active
+    }
+
+    /// Return a retained credential by id, including the active one.
+    #[must_use]
+    fn resolve(&self, id: u32) -> Option<PskCredential> {
+        if self.active.id == id {
+            return Some(self.active);
+        }
+        self.previous.iter().copied().find(|key| key.id == id)
+    }
+
+    /// Make `next` active and retain the previous active credential.
+    pub fn rotate(&mut self, next: PskCredential) -> Result<(), PskKeyringError> {
+        if self.resolve(next.id).is_some() {
+            return Err(PskKeyringError::DuplicateId(next.id));
+        }
+        if self.previous.len() >= MAX_RETAINED_PSK_KEYS {
+            return Err(PskKeyringError::Capacity);
+        }
+        let old = core::mem::replace(&mut self.active, next);
+        self.previous.insert(0, old);
+        Ok(())
+    }
+
+    /// Retire a previous credential so it can no longer authenticate a new
+    /// session. Existing sessions are unaffected because they use a derived
+    /// session key rather than consulting the keyring again.
+    pub fn retire(&mut self, id: u32) -> Result<(), PskKeyringError> {
+        if self.active.id == id {
+            return Err(PskKeyringError::ActiveKey(id));
+        }
+        let Some(index) = self.previous.iter().position(|key| key.id == id) else {
+            return Err(PskKeyringError::UnknownId(id));
+        };
+        self.previous.remove(index);
+        Ok(())
+    }
+
+    /// Number of active and retained credentials.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        1 + self.previous.len()
+    }
+}
+
+/// A PSK provider with an authenticated key id and bounded rotation overlap.
+///
+/// New clients use the keyring's active credential. Servers accept the active
+/// credential and retained previous credentials, but the selected credential
+/// is committed to the session transcript and cannot change mid-session.
+#[cfg(feature = "crypto")]
+pub struct RingPskKeyringProvider {
+    keyring: PskKeyring,
+    selected_id: Option<u32>,
+    client_nonce: Option<SessionNonce>,
+    server_nonce: Option<SessionNonce>,
+    session_key: Option<[u8; 32]>,
+}
+
+#[cfg(feature = "crypto")]
+impl RingPskKeyringProvider {
+    /// Construct a provider from an application-owned keyring.
+    #[must_use]
+    pub fn new(keyring: PskKeyring) -> Self {
+        Self {
+            keyring,
+            selected_id: None,
+            client_nonce: None,
+            server_nonce: None,
+            session_key: None,
+        }
+    }
+
+    /// Inspect the provider's credential lifecycle state.
+    #[must_use]
+    pub const fn keyring(&self) -> &PskKeyring {
+        &self.keyring
+    }
+
+    /// Rotate credentials for future handshakes made with this provider.
+    pub fn rotate(&mut self, next: PskCredential) -> Result<(), PskKeyringError> {
+        self.keyring.rotate(next)
+    }
+
+    /// Retire a previous credential for future handshakes.
+    pub fn retire(&mut self, id: u32) -> Result<(), PskKeyringError> {
+        self.keyring.retire(id)
+    }
+
+    fn mac(secret: &[u8; 32], domain: &[u8], fields: &[&[u8]]) -> [u8; 32] {
+        use ring::hmac;
+        let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
+        let mut context = Vec::new();
+        context.extend_from_slice(domain);
+        for field in fields {
+            context.extend_from_slice(field);
+        }
+        let tag = hmac::sign(&key, &context);
+        let mut output = [0; 32];
+        output.copy_from_slice(tag.as_ref());
+        output
+    }
+
+    fn verify_mac(secret: &[u8; 32], expected: &[u8], domain: &[u8], fields: &[&[u8]]) -> bool {
+        use ring::hmac;
+        let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
+        let mut context = Vec::new();
+        context.extend_from_slice(domain);
+        for field in fields {
+            context.extend_from_slice(field);
+        }
+        hmac::verify(&key, &context, expected).is_ok()
+    }
+
+    fn derive_session_key(
+        secret: &[u8; 32],
+        key_id: u32,
+        client_nonce: SessionNonce,
+        server_nonce: SessionNonce,
+    ) -> [u8; 32] {
+        Self::mac(
+            secret,
+            b"prism/replication/keyring-session-key/v1",
+            &[
+                &RING_PSK_KEYRING_PROVIDER_ID.to_le_bytes(),
+                &key_id.to_le_bytes(),
+                &client_nonce.0,
+                &server_nonce.0,
+            ],
+        )
+    }
+
+    fn client_auth(credential: PskCredential, nonce: SessionNonce) -> Vec<u8> {
+        let provider_id = RING_PSK_KEYRING_PROVIDER_ID.to_le_bytes();
+        let key_id = credential.id.to_le_bytes();
+        let mac = Self::mac(
+            &credential.secret,
+            b"prism/replication/keyring-client-hello/v1",
+            &[&provider_id, &key_id, &nonce.0],
+        );
+        let mut auth = Vec::with_capacity(4 + mac.len());
+        auth.extend_from_slice(&key_id);
+        auth.extend_from_slice(&mac);
+        auth
+    }
+
+    fn server_auth(
+        credential: PskCredential,
+        client_nonce: SessionNonce,
+        server_nonce: SessionNonce,
+    ) -> Vec<u8> {
+        let provider_id = RING_PSK_KEYRING_PROVIDER_ID.to_le_bytes();
+        let key_id = credential.id.to_le_bytes();
+        let mac = Self::mac(
+            &credential.secret,
+            b"prism/replication/keyring-server-accept/v1",
+            &[&provider_id, &key_id, &client_nonce.0, &server_nonce.0],
+        );
+        let mut auth = Vec::with_capacity(4 + mac.len());
+        auth.extend_from_slice(&key_id);
+        auth.extend_from_slice(&mac);
+        auth
+    }
+
+    fn parse_keyed_auth(auth: &[u8]) -> Option<(u32, &[u8])> {
+        if auth.len() != 4 + 32 {
+            return None;
+        }
+        let id = u32::from_le_bytes(auth[..4].try_into().ok()?);
+        Some((id, &auth[4..]))
+    }
+
+    fn key(&self) -> Result<ring::aead::LessSafeKey, SecurityError> {
+        let key = self.session_key.ok_or(SecurityError::NotEstablished)?;
+        let unbound = ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &key)
+            .map_err(|_| SecurityError::ProviderRejected)?;
+        Ok(ring::aead::LessSafeKey::new(unbound))
+    }
+
+    fn fresh_nonce() -> Result<SessionNonce, SecurityError> {
+        RingPskProvider::fresh_nonce()
+    }
+}
+
+#[cfg(feature = "crypto")]
+impl SessionSecurityProvider for RingPskKeyringProvider {
+    fn provider_id(&self) -> u16 {
+        RING_PSK_KEYRING_PROVIDER_ID
+    }
+
+    fn max_seal_overhead(&self) -> usize {
+        ring::aead::AES_256_GCM.tag_len()
+    }
+
+    fn create_client_hello(&mut self) -> Result<ClientHello, SecurityError> {
+        let nonce = Self::fresh_nonce()?;
+        let credential = self.keyring.active();
+        self.selected_id = Some(credential.id);
+        self.client_nonce = Some(nonce);
+        self.server_nonce = None;
+        self.session_key = None;
+        Ok(ClientHello {
+            provider_id: self.provider_id(),
+            nonce,
+            authenticator: Self::client_auth(credential, nonce),
+        })
+    }
+
+    fn accept_client_hello(&mut self, hello: &ClientHello) -> Result<ServerAccept, SecurityError> {
+        if hello.provider_id != self.provider_id() {
+            return Err(SecurityError::ProviderRejected);
+        }
+        let Some((key_id, mac)) = Self::parse_keyed_auth(&hello.authenticator) else {
+            return Err(SecurityError::ProviderRejected);
+        };
+        let Some(credential) = self.keyring.resolve(key_id) else {
+            return Err(SecurityError::ProviderRejected);
+        };
+        let provider_id = self.provider_id().to_le_bytes();
+        let key_id_bytes = key_id.to_le_bytes();
+        if !Self::verify_mac(
+            &credential.secret,
+            mac,
+            b"prism/replication/keyring-client-hello/v1",
+            &[&provider_id, &key_id_bytes, &hello.nonce.0],
+        ) {
+            return Err(SecurityError::ProviderRejected);
+        }
+        let server_nonce = Self::fresh_nonce()?;
+        self.selected_id = Some(key_id);
+        self.client_nonce = Some(hello.nonce);
+        self.server_nonce = Some(server_nonce);
+        self.session_key = Some(Self::derive_session_key(
+            &credential.secret,
+            key_id,
+            hello.nonce,
+            server_nonce,
+        ));
+        Ok(ServerAccept {
+            provider_id: self.provider_id(),
+            nonce: server_nonce,
+            authenticator: Self::server_auth(credential, hello.nonce, server_nonce),
+        })
+    }
+
+    fn finish_client(
+        &mut self,
+        hello: &ClientHello,
+        accept: &ServerAccept,
+    ) -> Result<(), SecurityError> {
+        if hello.provider_id != self.provider_id() || accept.provider_id != self.provider_id() {
+            return Err(SecurityError::ProviderRejected);
+        }
+        let Some((key_id, mac)) = Self::parse_keyed_auth(&accept.authenticator) else {
+            return Err(SecurityError::ProviderRejected);
+        };
+        let Some(credential) = self.keyring.resolve(key_id) else {
+            return Err(SecurityError::ProviderRejected);
+        };
+        let provider_id = self.provider_id().to_le_bytes();
+        let key_id_bytes = key_id.to_le_bytes();
+        if !Self::verify_mac(
+            &credential.secret,
+            mac,
+            b"prism/replication/keyring-server-accept/v1",
+            &[&provider_id, &key_id_bytes, &hello.nonce.0, &accept.nonce.0],
+        ) {
+            return Err(SecurityError::ProviderRejected);
+        }
+        self.selected_id = Some(key_id);
+        self.client_nonce = Some(hello.nonce);
+        self.server_nonce = Some(accept.nonce);
+        self.session_key = Some(Self::derive_session_key(
+            &credential.secret,
+            key_id,
+            hello.nonce,
+            accept.nonce,
+        ));
+        Ok(())
+    }
+
+    fn seal(
+        &mut self,
+        direction: SecurityDirection,
+        _client_nonce: SessionNonce,
+        _server_nonce: SessionNonce,
+        sequence: u64,
+        aad: &[u8],
+        plaintext: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), SecurityError> {
+        let key = self.key()?;
+        out.clear();
+        out.extend_from_slice(plaintext);
+        key.seal_in_place_append_tag(
+            RingPskProvider::payload_nonce(direction, sequence),
+            ring::aead::Aad::from(aad),
+            out,
+        )
+        .map_err(|_| SecurityError::ProviderRejected)
+    }
+
+    fn open(
+        &mut self,
+        direction: SecurityDirection,
+        _client_nonce: SessionNonce,
+        _server_nonce: SessionNonce,
+        sequence: u64,
+        aad: &[u8],
+        ciphertext: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), SecurityError> {
+        let key = self.key()?;
+        out.clear();
+        out.extend_from_slice(ciphertext);
+        let plaintext = key
+            .open_in_place(
+                RingPskProvider::payload_nonce(direction, sequence),
+                ring::aead::Aad::from(aad),
+                out,
+            )
+            .map_err(|_| SecurityError::ProviderRejected)?;
+        let length = plaintext.len();
+        out.truncate(length);
+        Ok(())
+    }
+}
+
 #[cfg(feature = "crypto")]
 impl RingPskProvider {
     /// Construct a provider from an application-owned 256-bit pre-shared key.
@@ -1280,5 +1684,107 @@ mod tests {
             Some(SecurityError::ProviderRejected)
         );
         assert!(!client.established());
+    }
+
+    #[cfg(feature = "crypto")]
+    fn connect_keyring(
+        client_keys: PskKeyring,
+        server_keys: PskKeyring,
+    ) -> (
+        SecureTransport<MockTransport, RingPskKeyringProvider>,
+        SecureTransport<MockTransport, RingPskKeyringProvider>,
+    ) {
+        let mut client = SecureTransport::new_client(
+            MockTransport::default(),
+            RingPskKeyringProvider::new(client_keys),
+        )
+        .expect("keyring client hello should be generated");
+        let mut server = SecureTransport::new_server(
+            MockTransport::default(),
+            RingPskKeyringProvider::new(server_keys),
+        );
+        server.inner.inbox.extend(client.inner.outbox.drain(..));
+        assert!(server.recv().is_none());
+        client.inner.inbox.extend(server.inner.outbox.drain(..));
+        assert!(client.recv().is_none());
+        assert!(client.established());
+        assert!(server.established());
+        (client, server)
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn keyring_accepts_old_and_new_credentials_during_bounded_rotation() {
+        let old = PskCredential::new(11, [0x11; 32]);
+        let next = PskCredential::new(12, [0x12; 32]);
+        let mut server_keys = PskKeyring::new(old);
+        server_keys.rotate(next).unwrap();
+        assert_eq!(server_keys.active().id(), 12);
+        assert_eq!(server_keys.len(), 2);
+
+        let (mut old_client, mut old_server) =
+            connect_keyring(PskKeyring::new(old), server_keys.clone());
+        old_client.send(b"old-session");
+        old_server
+            .inner
+            .inbox
+            .extend(old_client.inner.outbox.drain(..));
+        assert_eq!(old_server.recv(), Some(b"old-session".to_vec()));
+
+        let (mut new_client, mut new_server) = connect_keyring(PskKeyring::new(next), server_keys);
+        new_client.send(b"new-session");
+        new_server
+            .inner
+            .inbox
+            .extend(new_client.inner.outbox.drain(..));
+        assert_eq!(new_server.recv(), Some(b"new-session".to_vec()));
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn keyring_retirement_blocks_new_old_key_handshakes() {
+        let old = PskCredential::new(21, [0x21; 32]);
+        let next = PskCredential::new(22, [0x22; 32]);
+        let mut server_keys = PskKeyring::new(old);
+        server_keys.rotate(next).unwrap();
+        server_keys.retire(old.id()).unwrap();
+        assert_eq!(server_keys.len(), 1);
+
+        let mut client = SecureTransport::new_client(
+            MockTransport::default(),
+            RingPskKeyringProvider::new(PskKeyring::new(old)),
+        )
+        .unwrap();
+        let mut server = SecureTransport::new_server(
+            MockTransport::default(),
+            RingPskKeyringProvider::new(server_keys),
+        );
+        server.inner.inbox.extend(client.inner.outbox.drain(..));
+        assert!(server.recv().is_none());
+        assert_eq!(server.security_state(), TransportSecurity::Rejected);
+        assert_eq!(
+            server.take_security_error(),
+            Some(SecurityError::ProviderRejected)
+        );
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn keyring_rotation_is_bounded_and_rejects_duplicate_ids() {
+        let mut keyring = PskKeyring::new(PskCredential::new(30, [0x30; 32]));
+        assert_eq!(
+            keyring.rotate(PskCredential::new(30, [0x30; 32])),
+            Err(PskKeyringError::DuplicateId(30))
+        );
+        for id in 31..=33 {
+            keyring
+                .rotate(PskCredential::new(id, [id as u8; 32]))
+                .unwrap();
+        }
+        assert_eq!(keyring.len(), 4);
+        assert_eq!(
+            keyring.rotate(PskCredential::new(34, [0x34; 32])),
+            Err(PskKeyringError::Capacity)
+        );
     }
 }
