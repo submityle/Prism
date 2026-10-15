@@ -230,6 +230,7 @@ release两组完整记录共864次dispatch逐全键/位置对CPU，10k/100k候�
 - `prism_world_sim`：统一 tick/output/dirty-region budget，确定性局部侵蚀、持久体素/碎片 delta、水文容量约束、D8 流向/汇流量/流域分析、生态 biomass 更新和小端 delta codec。
 - 2026-10-16 D8 分析切片验证：默认配置 20 项测试、`persist` 配置 25 项测试和 all-target/all-features strict Clippy 均通过；独立 `/private/tmp/prism-world-sim-d8-20261016` target 验证固定八邻居预算、区域裁剪、同高 tie-break、流域出口、河网阈值、`i32` 坐标边界及失败不变性。该证据只覆盖 CPU 拓扑分析，不代表 GPU 水面、侵蚀反馈或水引擎接线。
 - M7 持久接缝已补齐：`simulation_delta_to_transaction` 将 `SimulationDelta` 编码为稳定 opaque `Bytes` forward + 同字段 `Delete` inverse，`WorldRuntime::append_simulation_delta` 自动使用 log next sequence 并写入 append-only log；simulation feature 测试覆盖 round-trip、错误和 facade 入口。
+- M7 仿真状态回放已闭合：`WorldSim::apply_delta` 的正向校验与 `WorldSim::reverse_delta` 的反向校验均在写入前完成；`VoxelDelta` revision 2 保留 hardness，`WorldSim::fragments` 保留 stable-key 碎片，使质量归零的体素和已生成碎片可以无损回滚。no-default 22 项、persist 27 项单测和 all-target/all-features strict Clippy 通过。该切片仍不包含 GPU stencil、SDF 重烘或产品级时间轴调度。
 - M7 SDF 只读接缝已补齐：`SparseSdfQuery`/`SdfQueryConsumer` 为多个消费者共享同一 sparse grid，明确区分 `Value`、`Miss` 与缺 brick 的 `Unknown`，覆盖负坐标、范围和缺失数据测试；不会把未知场误报为空场。
 - `prism_world_network`：复用 stream/persist 身份的 AOI、delta envelope、authority/read-only/shared-LWW policy、sector handoff ledger 和顺序无关 PersistentId 合并；不拥有传输层或第二份世界真相。
 - M8 session seam 已补齐：`Session` 提供 token gate、有限 outbound/inbound 队列、序号、累计 ACK、retry deadline、duplicate suppression 和失败状态；`MemoryTransport` 提供 no_std 可运行的双端测试传输。9 项 network 测试及 no-default-features/clippy 通过。真实 socket/加密 transport 仍由宿主提供。

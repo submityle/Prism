@@ -119,6 +119,7 @@ mod tests {
             voxel_deltas: vec![VoxelDelta {
                 coord: CellCoord::new(-2, 1, 4),
                 material: 3,
+                hardness: 2,
                 before_mass: 9,
                 after_mass: 6,
                 removed_mass: 3,
@@ -191,6 +192,7 @@ mod tests {
             voxel_deltas: vec![VoxelDelta {
                 coord: CellCoord::new(0, 0, 0),
                 material: 1,
+                hardness: 0,
                 before_mass: 1,
                 after_mass: 1,
                 removed_mass: 1,

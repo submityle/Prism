@@ -85,6 +85,8 @@ pub struct VoxelDelta {
     pub coord: CellCoord,
     /// Material identifier retained by the delta.
     pub material: u16,
+    /// Hardness retained from the voxel before the change.
+    pub hardness: u16,
     /// Mass before the change.
     pub before_mass: u32,
     /// Mass after the change.
@@ -106,6 +108,46 @@ pub struct FragmentDelta {
     pub material: u16,
     /// Integer initial velocity hint, in engine-neutral units.
     pub velocity: [i16; 3],
+}
+
+/// Sparse fragment state owned by the simulation host.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FragmentField {
+    fragments: BTreeMap<u64, FragmentDelta>,
+}
+
+impl FragmentField {
+    /// Creates an empty fragment field.
+    pub const fn new() -> Self {
+        Self {
+            fragments: BTreeMap::new(),
+        }
+    }
+
+    /// Inserts or replaces a fragment by its stable key.
+    pub fn set(&mut self, fragment: FragmentDelta) {
+        self.fragments.insert(fragment.stable_key, fragment);
+    }
+
+    /// Returns a fragment by stable key.
+    pub fn get(&self, stable_key: u64) -> Option<FragmentDelta> {
+        self.fragments.get(&stable_key).copied()
+    }
+
+    /// Removes a fragment and returns its previous value.
+    pub fn remove(&mut self, stable_key: u64) -> Option<FragmentDelta> {
+        self.fragments.remove(&stable_key)
+    }
+
+    /// Returns the number of stored fragments.
+    pub fn len(&self) -> usize {
+        self.fragments.len()
+    }
+
+    /// Returns whether no fragments are stored.
+    pub fn is_empty(&self) -> bool {
+        self.fragments.is_empty()
+    }
 }
 
 /// Derives a stable fragment key without a random hash seed.

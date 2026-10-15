@@ -8,7 +8,7 @@ use crate::types::CellCoord;
 use crate::voxel::{FragmentDelta, VoxelDelta};
 
 const MAGIC: [u8; 4] = *b"PWSM";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 
 /// Stable binary codec failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,6 +86,7 @@ pub fn encode_delta(delta: &SimulationDelta) -> Result<Vec<u8>, CodecError> {
     for item in &delta.voxel_deltas {
         put_coord(&mut output, item.coord);
         put_u16(&mut output, item.material);
+        put_u16(&mut output, item.hardness);
         put_u32(&mut output, item.before_mass);
         put_u32(&mut output, item.after_mass);
         put_u32(&mut output, item.removed_mass);
@@ -135,7 +136,7 @@ pub fn decode_delta_with_limits(
         return Err(CodecError::UnsupportedVersion);
     }
     let tick = reader.u64()?;
-    let voxel_count = reader.count(26)?;
+    let voxel_count = reader.count(28)?;
     let fragment_count = reader.count(32)?;
     let flow_count = reader.count(28)?;
     let ecology_count = reader.count(24)?;
@@ -157,6 +158,7 @@ pub fn decode_delta_with_limits(
     for _ in 0..voxel_count {
         let coord = reader.coord()?;
         let material = reader.u16()?;
+        let hardness = reader.u16()?;
         let before_mass = reader.u32()?;
         let after_mass = reader.u32()?;
         let removed_mass = reader.u32()?;
@@ -166,6 +168,7 @@ pub fn decode_delta_with_limits(
         delta.voxel_deltas.push(VoxelDelta {
             coord,
             material,
+            hardness,
             before_mass,
             after_mass,
             removed_mass,
@@ -335,6 +338,7 @@ mod tests {
             voxel_deltas: vec![VoxelDelta {
                 coord: CellCoord::new(-2, 1, 4),
                 material: 3,
+                hardness: 2,
                 before_mass: 9,
                 after_mass: 6,
                 removed_mass: 3,
@@ -370,6 +374,7 @@ mod tests {
             voxel_deltas: vec![VoxelDelta {
                 coord: CellCoord::new(0, 0, 0),
                 material: 1,
+                hardness: 0,
                 before_mass: 1,
                 after_mass: 1,
                 removed_mass: 1,

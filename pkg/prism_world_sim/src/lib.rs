@@ -39,7 +39,9 @@ pub use sim::{
     WorldSim, WorldSimConfig,
 };
 pub use types::{CellCoord, DirtyRegion, Region};
-pub use voxel::{stable_fragment_key, FragmentDelta, VoxelCell, VoxelDelta, VoxelField};
+pub use voxel::{
+    stable_fragment_key, FragmentDelta, FragmentField, VoxelCell, VoxelDelta, VoxelField,
+};
 
 #[cfg(test)]
 mod tests {
@@ -154,6 +156,38 @@ mod tests {
 
         assert_eq!(replay, source);
         assert_eq!(replay.current_tick(), report.delta.tick);
+    }
+
+    #[test]
+    fn emitted_delta_reverses_exactly_and_restores_deleted_voxel_state() {
+        let mut source = populated_sim();
+        source.voxels.set(
+            CellCoord::new(0, 0, 0),
+            VoxelCell::new(7, 1, 37).expect("positive mass"),
+        );
+        let before = source.clone();
+        let report = source.step(TickBudget::new(64, 64, 16)).unwrap();
+
+        source.reverse_delta(&report.delta).unwrap();
+
+        assert_eq!(source, before);
+        assert_eq!(source.current_tick(), 0);
+        assert_eq!(source.fragments.len(), 0);
+    }
+
+    #[test]
+    fn reverse_rejects_tampered_post_state_without_mutation() {
+        let mut source = populated_sim();
+        let report = source.step(TickBudget::new(64, 64, 16)).unwrap();
+        let before = source.clone();
+        let mut tampered = report.delta.clone();
+        tampered.voxel_deltas[0].hardness = tampered.voxel_deltas[0].hardness.saturating_add(1);
+
+        assert!(matches!(
+            source.reverse_delta(&tampered),
+            Err(SimulationApplyError::VoxelHardnessMismatch { .. })
+        ));
+        assert_eq!(source, before);
     }
 
     #[test]

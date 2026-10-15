@@ -1,8 +1,8 @@
 # Prism World 仿真 delta 确定性回放
 
 `prism_world_sim` 生成的 `SimulationDelta` 既是当前 tick 的持久变更，也是
-时间轴、FileJournal 和网络重放的输入。此前 codec 与 persist bridge 能保存和
-恢复 bytes，但没有把 delta 安全地应用回权威 `WorldSim`；本切片补上这一条
+时间轴、FileJournal 和网络重放的输入。codec 与 persist bridge 负责稳定保存和
+恢复 bytes；`WorldSim` 现在同时支持严格正向应用与事务式反向回滚，形成可验证的
 状态闭环。
 
 ## `WorldSim::apply_delta`
@@ -19,12 +19,24 @@
 - ecology 坐标不能重复，`before_biomass` 必须匹配，`after_biomass` 不能超过
   cell capacity；同时校验 replay 后的水分、stress、邻域拥挤和固定点增长方程，
   不能只伪造一个合法范围内的 biomass。
-- fragment 记录必须保持正质量；fragment 是外部派生事件，不被错误地伪造为
-  `WorldSim` 内部第二份存储。
+- fragment 记录必须保持正质量、stable key 唯一，并进入 `WorldSim::fragments`；
+  这样正向重放和反向回滚都不会丢失或重复生成碎片状态。
 
-验证失败不会改变 tick、hydrology、voxel 或 ecology。成功后只更新真实字段并把
-tick 推进到 delta 携带的值，因此从同一初始状态执行一步和应用该步 delta 得到
-位级相同的稀疏状态。
+验证失败不会改变 tick、hydrology、voxel、ecology 或 fragments。成功后只更新真实
+字段并把 tick 推进到 delta 携带的值，因此从同一初始状态执行一步和应用该步 delta
+得到位级相同的稀疏状态。体素 delta 同时保存 hardness，即使质量降为零、体素从
+稀疏表移除，回滚也能恢复完整 cell。
+
+## `WorldSim::reverse_delta`
+
+反向操作只接受当前 tick 等于 delta.tick 的记录。它先验证 flow 的逆向水量、体素
+的 `after_mass/material/hardness`、生态的 `after_biomass` 和 fragment 的完整
+payload，再一次性发布逆向调整；任一失败都不改变 tick、字段或 fragment 表。
+成功后恢复所有 `before_*` 状态、移除本 delta 生成的 fragment，并把 tick 回退一格。
+反向路径按 delta 实际触碰坐标建立有界调整表，不克隆完整 sparse world。
+
+codec revision 已升至 2，voxel record 从 26 字节扩展为 28 字节以携带 hardness；旧
+revision 不会被静默解释为可逆记录。
 
 ## 资源边界
 
@@ -43,4 +55,5 @@ cargo clippy --manifest-path pkg/prism_world_sim/Cargo.toml --all-targets --all-
 ```
 
 这不是 GPU stencil、SDF 重烘或产品 renderer 接线；这些仍由各自的 world
-边界独立验收。本切片只关闭仿真 delta 的确定性状态回放缺口。
+边界独立验收。本切片关闭的是仿真 delta 的确定性正向回放与反向回滚缺口，不代表
+整个仿真、GPU 水文或产品级时间轴已经完成。

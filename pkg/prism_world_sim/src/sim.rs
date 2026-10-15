@@ -4,7 +4,9 @@ use alloc::vec::Vec;
 use crate::ecology::{EcologyConfig, EcologyDelta, EcologyField};
 use crate::hydrology::{FlowDelta, HydrologyField};
 use crate::types::{CellCoord, DirtyRegion, DirtyRegions, Region};
-use crate::voxel::{stable_fragment_key, FragmentDelta, VoxelCell, VoxelDelta, VoxelField};
+use crate::voxel::{
+    stable_fragment_key, FragmentDelta, FragmentField, VoxelCell, VoxelDelta, VoxelField,
+};
 
 /// Per-tick admission limits shared by all simulation phases.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -221,7 +223,7 @@ pub enum SimulationApplyError {
         /// Material carried by the delta.
         expected: u16,
     },
-    /// A voxel record's before mass differs from the receiver.
+    /// A voxel record's mass differs from the receiver.
     VoxelMassMismatch {
         /// Voxel coordinate.
         coord: CellCoord,
@@ -229,6 +231,15 @@ pub enum SimulationApplyError {
         actual: u32,
         /// Before mass carried by the delta.
         expected: u32,
+    },
+    /// A voxel record's hardness differs from the receiver.
+    VoxelHardnessMismatch {
+        /// Voxel coordinate.
+        coord: CellCoord,
+        /// Hardness in the receiver.
+        actual: u16,
+        /// Hardness carried by the delta.
+        expected: u16,
     },
     /// A voxel record does not satisfy before-after-removed arithmetic.
     InvalidVoxelTransition,
@@ -301,6 +312,19 @@ pub enum SimulationApplyError {
     },
     /// A fragment record has no positive mass.
     InvalidFragment,
+    /// More than one fragment record uses the same stable key.
+    DuplicateFragmentKey(u64),
+    /// A reverse operation expected a fragment that is not present.
+    MissingFragmentKey(u64),
+    /// A reverse operation found a different fragment for the same key.
+    FragmentMismatch(u64),
+    /// A reverse operation was requested for a delta other than the current tick.
+    ReverseTickMismatch {
+        /// Current simulation tick.
+        expected: u64,
+        /// Tick carried by the delta.
+        actual: u64,
+    },
     /// Internal checked arithmetic could not represent a replay adjustment.
     ArithmeticOverflow,
 }
@@ -314,6 +338,8 @@ pub struct WorldSim {
     pub hydrology: HydrologyField,
     /// Sparse ecological state.
     pub ecology: EcologyField,
+    /// Sparse fragments emitted by destructive simulation.
+    pub fragments: FragmentField,
     config: WorldSimConfig,
     tick: u64,
 }
@@ -334,6 +360,7 @@ impl WorldSim {
             voxels: VoxelField::new(),
             hydrology: HydrologyField::new(),
             ecology: EcologyField::new(),
+            fragments: FragmentField::new(),
             config,
             tick: 0,
         })
@@ -526,6 +553,13 @@ impl WorldSim {
                     expected: voxel.material,
                 });
             }
+            if current.hardness != voxel.hardness {
+                return Err(SimulationApplyError::VoxelHardnessMismatch {
+                    coord: voxel.coord,
+                    actual: current.hardness,
+                    expected: voxel.hardness,
+                });
+            }
             if current.mass != voxel.before_mass {
                 return Err(SimulationApplyError::VoxelMassMismatch {
                     coord: voxel.coord,
@@ -574,9 +608,17 @@ impl WorldSim {
             }
         }
 
+        let mut fragment_keys = BTreeSet::new();
         for fragment in &delta.fragment_deltas {
             if fragment.mass == 0 {
                 return Err(SimulationApplyError::InvalidFragment);
+            }
+            if !fragment_keys.insert(fragment.stable_key)
+                || self.fragments.get(fragment.stable_key).is_some()
+            {
+                return Err(SimulationApplyError::DuplicateFragmentKey(
+                    fragment.stable_key,
+                ));
             }
         }
 
@@ -707,7 +749,214 @@ impl WorldSim {
                 },
             );
         }
+        for fragment in &delta.fragment_deltas {
+            self.fragments.set(*fragment);
+        }
         self.tick = delta.tick;
+        Ok(())
+    }
+
+    /// Reverses one previously applied simulation delta without rerunning the
+    /// simulation.
+    ///
+    /// The receiver must currently be at `delta.tick`. Validation completes
+    /// against the post-delta state before any field is mutated, so a failed
+    /// rollback leaves the simulation unchanged. Voxel hardness and fragment
+    /// payloads are part of the delta because restoring only mass would lose
+    /// the state needed by a later deterministic tick.
+    pub fn reverse_delta(&mut self, delta: &SimulationDelta) -> Result<(), SimulationApplyError> {
+        if self.tick != delta.tick {
+            return Err(SimulationApplyError::ReverseTickMismatch {
+                expected: self.tick,
+                actual: delta.tick,
+            });
+        }
+        let previous_tick = delta
+            .tick
+            .checked_sub(1)
+            .ok_or(SimulationApplyError::ArithmeticOverflow)?;
+
+        let mut water_adjustments = BTreeMap::<CellCoord, i64>::new();
+        let mut flow_sources = BTreeSet::new();
+        let mut previous_source = None;
+        for flow in &delta.flow_deltas {
+            if flow.amount == 0 || flow.from == flow.to {
+                return Err(SimulationApplyError::InvalidFlow);
+            }
+            if let Some(previous) = previous_source
+                && previous >= flow.from
+            {
+                return Err(SimulationApplyError::NonCanonicalFlowOrder {
+                    previous,
+                    current: flow.from,
+                });
+            }
+            previous_source = Some(flow.from);
+            if !flow_sources.insert(flow.from) {
+                return Err(SimulationApplyError::DuplicateFlowSource(flow.from));
+            }
+            self.hydrology
+                .get(flow.from)
+                .ok_or(SimulationApplyError::MissingHydrologyCell(flow.from))?;
+            let destination = self
+                .hydrology
+                .get(flow.to)
+                .ok_or(SimulationApplyError::MissingHydrologyCell(flow.to))?;
+            if destination.water < flow.amount {
+                return Err(SimulationApplyError::WaterUnderflow {
+                    coord: flow.to,
+                    available: destination.water,
+                    required: flow.amount,
+                });
+            }
+            adjust_water(&mut water_adjustments, flow.from, i64::from(flow.amount))?;
+            adjust_water(&mut water_adjustments, flow.to, -i64::from(flow.amount))?;
+        }
+
+        let mut voxel_coordinates = BTreeSet::new();
+        for voxel in &delta.voxel_deltas {
+            if voxel.before_mass < voxel.after_mass
+                || voxel.before_mass - voxel.after_mass != voxel.removed_mass
+                || voxel.before_mass == 0
+            {
+                return Err(SimulationApplyError::InvalidVoxelTransition);
+            }
+            if !voxel_coordinates.insert(voxel.coord) {
+                return Err(SimulationApplyError::DuplicateVoxelCoordinate(voxel.coord));
+            }
+            match self.voxels.get(voxel.coord) {
+                Some(current) => {
+                    if current.material != voxel.material {
+                        return Err(SimulationApplyError::VoxelMaterialMismatch {
+                            coord: voxel.coord,
+                            actual: current.material,
+                            expected: voxel.material,
+                        });
+                    }
+                    if current.hardness != voxel.hardness {
+                        return Err(SimulationApplyError::VoxelHardnessMismatch {
+                            coord: voxel.coord,
+                            actual: current.hardness,
+                            expected: voxel.hardness,
+                        });
+                    }
+                    if current.mass != voxel.after_mass {
+                        return Err(SimulationApplyError::VoxelMassMismatch {
+                            coord: voxel.coord,
+                            actual: current.mass,
+                            expected: voxel.after_mass,
+                        });
+                    }
+                }
+                None if voxel.after_mass == 0 => {}
+                None => {
+                    return Err(SimulationApplyError::MissingVoxelCell(voxel.coord));
+                }
+            }
+            let water_cost = voxel
+                .removed_mass
+                .checked_mul(self.config.water_cost_per_mass)
+                .ok_or(SimulationApplyError::ArithmeticOverflow)?;
+            adjust_water(&mut water_adjustments, voxel.coord, i64::from(water_cost))?;
+        }
+
+        let mut fragment_keys = BTreeSet::new();
+        for fragment in &delta.fragment_deltas {
+            if fragment.mass == 0 {
+                return Err(SimulationApplyError::InvalidFragment);
+            }
+            if !fragment_keys.insert(fragment.stable_key) {
+                return Err(SimulationApplyError::DuplicateFragmentKey(
+                    fragment.stable_key,
+                ));
+            }
+            let current = self.fragments.get(fragment.stable_key).ok_or(
+                SimulationApplyError::MissingFragmentKey(fragment.stable_key),
+            )?;
+            if current != *fragment {
+                return Err(SimulationApplyError::FragmentMismatch(fragment.stable_key));
+            }
+        }
+
+        let mut ecology_coordinates = BTreeSet::new();
+        for ecology in &delta.ecology_deltas {
+            if !ecology_coordinates.insert(ecology.coord) {
+                return Err(SimulationApplyError::DuplicateEcologyCoordinate(
+                    ecology.coord,
+                ));
+            }
+            let current = self
+                .ecology
+                .get(ecology.coord)
+                .ok_or(SimulationApplyError::MissingEcologyCell(ecology.coord))?;
+            if current.biomass != ecology.after_biomass {
+                return Err(SimulationApplyError::EcologyBiomassMismatch {
+                    coord: ecology.coord,
+                    actual: current.biomass,
+                    expected: ecology.after_biomass,
+                });
+            }
+            if ecology.before_biomass > current.capacity {
+                return Err(SimulationApplyError::EcologyCapacityExceeded {
+                    coord: ecology.coord,
+                    biomass: ecology.before_biomass,
+                    capacity: current.capacity,
+                });
+            }
+        }
+
+        for (coord, adjustment) in &water_adjustments {
+            let cell = self
+                .hydrology
+                .get(*coord)
+                .ok_or(SimulationApplyError::MissingHydrologyCell(*coord))?;
+            let water = adjusted_water(cell.water, *adjustment)?;
+            if water > i64::from(cell.capacity) {
+                return Err(SimulationApplyError::WaterCapacityExceeded {
+                    coord: *coord,
+                    current: cell.water,
+                    incoming: u32::try_from(*adjustment).unwrap_or(u32::MAX),
+                    capacity: cell.capacity,
+                });
+            }
+        }
+
+        for (coord, adjustment) in water_adjustments {
+            let cell = self
+                .hydrology
+                .cells_mut()
+                .get_mut(&coord)
+                .ok_or(SimulationApplyError::MissingHydrologyCell(coord))?;
+            cell.water = u32::try_from(adjusted_water(cell.water, adjustment)?)
+                .map_err(|_| SimulationApplyError::ArithmeticOverflow)?;
+        }
+        for voxel in &delta.voxel_deltas {
+            self.voxels.set(
+                voxel.coord,
+                VoxelCell {
+                    material: voxel.material,
+                    mass: voxel.before_mass,
+                    hardness: voxel.hardness,
+                },
+            );
+        }
+        for ecology in &delta.ecology_deltas {
+            let current = self
+                .ecology
+                .get(ecology.coord)
+                .ok_or(SimulationApplyError::MissingEcologyCell(ecology.coord))?;
+            self.ecology.set(
+                ecology.coord,
+                crate::ecology::EcologyCell {
+                    biomass: ecology.before_biomass,
+                    ..current
+                },
+            );
+        }
+        for fragment in &delta.fragment_deltas {
+            self.fragments.remove(fragment.stable_key);
+        }
+        self.tick = previous_tick;
         Ok(())
     }
 
@@ -762,17 +1011,20 @@ impl WorldSim {
             voxel_output.push(VoxelDelta {
                 coord,
                 material: before.material,
+                hardness: before.hardness,
                 before_mass: before.mass,
                 after_mass,
                 removed_mass: removed,
             });
-            fragment_output.push(FragmentDelta {
+            let fragment = FragmentDelta {
                 stable_key: stable_fragment_key(self.tick, coord, 0),
                 origin: coord,
                 mass: removed,
                 material: before.material,
                 velocity: [0, -1, 0],
-            });
+            };
+            fragment_output.push(fragment);
+            self.fragments.set(fragment);
         }
     }
 }
