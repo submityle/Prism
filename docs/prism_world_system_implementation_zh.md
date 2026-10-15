@@ -19,8 +19,9 @@
 
 ### M0-M2：空间、流送和常驻
 
-- `prism_world_stream`：`i64` 毫米坐标、负坐标 `div_euclid/rem_euclid`、sector/Morton locality、cell manifest、需求集、预测预取、优先级、预算、迟滞驱逐和可回放 frame trace。
+- `prism_world_stream`：`i64` 毫米坐标、负坐标 `div_euclid/rem_euclid`、sector/Morton locality、cell manifest、需求集、预测预取、优先级、预算、迟滞驱逐和可回放 frame trace。当前 scheduler 还记录已提交的 `scene_key/content_version/derived_hash`；同一 sector 的 manifest revision 变化会重新进入既有 load admission，而不会被“按 sector 已驻留”短路。
 - `prism_world_residency`：A/B/C 三档状态、物化预算、确定性 promotion/demotion、HLOD 连续 alpha/dither、QoS governor、稀疏 SDF brick 和 PCG 图求值/脏传播/cache key。
+- `prism_world_runtime` 的 cell reload 缺口已补齐：`CellFrameCoordinator` 用 manifest revision 识别 replacement，仍复用既有 `SceneHost::load_cell` 边界，成功后提交新 manifest；header、provider、取消、背压或 host 失败时恢复旧 manifest 的 resident 状态。该片只覆盖 cell payload replacement，不冒充 `prism_scene::SceneReloadPlan` 的模板级增量 ECS 传播，也不提供 host 内部原子回滚。
 - `prism_world`：组合 policy core 的 `WorldRuntime`，并提供 feature-gated `SceneEcsHost`；cell 加载通过真实 `prism_scene::spawn_typed_plan`/`SceneSpawn::attach_instance`，卸载通过 `prism_scene::despawn_instance`，驻留升降级通过 typed provider 回调，不直接写第二份 scene 真相。
 - `SceneEcsHost` 的 ownership registry 已覆盖真实 ECS despawn hook panic：token/binding 在 despawn 成功返回前保持可见；shutdown 逐 cell 提交，失败 cell 与待处理 cell 可由兼容 provider 接手后重试。`WorldRuntime::apply_scene_plan` 只在同一应用内跳过已成功卸载目标的后续 tier action，仍是 fail-fast、非事务接口。
 
@@ -127,7 +128,7 @@ release两轮每档8预热/64测量，共288次dispatch全部逐点对CPU。10k/
 - `prism_world_runtime/reactor` 提供 `ReactorCellIo`，借用宿主既有 `IoReactor`/`NamedThreads`，IO worker 独占 fd/native future 并在 reap 后关闭；compute 只 poll。取消终态不提前退还原生清理配额，有界 FIFO 同时保留槽与声明字节后锁外唤醒，不自旋重试。真实 native archive 在 0/1/2 compute worker 完成校验和 host 链路，IO 63/runtime 67 测试通过；Apple M2/macOS 的 2 MiB cached archive release P50/P95/P99 为 4.413/4.511/4.525 ms。IO worker 会 park，非全部线程无阻塞；当前 backend 仅 Apple。所有权、2×capacity 准入界、复现与限定测量见 `prism_world_native_io_zh.md`。
 - `prism_world_io`：分块读取请求、稳定优先级/FIFO 准入、活动读取 round-robin、单调请求 ID 的 fail-closed 耗尽保护、显式容量背压、可取消 poll 操作、连续 chunk/short-read/checksum 校验和 std 文件 provider。
 - 默认构建保持 `no_std + alloc`；`std` 只增加 scheduler 与文件系统 provider，不把 IO、资产数据库或 ECS 引入 world policy core。
-- `prism_world_runtime`：真实调用 `StreamScheduler` 生成 load/evict 动作，并通过有界、可取消、优先级排序的 provider 队列提交 cell；完成后执行固定 manifest header 校验，再进入 `SceneHost::load_cell`，失败/驱逐写入可 replay trace。std 构建新增 `IoSchedulerAdapter`，实际桥接 `prism_world_io::IoScheduler` 的 chunk/completion/cancel/backpressure/error 事件，并保留同步 `ChunkProvider` 兼容路径。
+- `prism_world_runtime`：真实调用 `StreamScheduler` 生成 load/reload/evict 动作，并通过有界、可取消、优先级排序的 provider 队列提交 cell；完成后执行固定 manifest header 校验，再进入 `SceneHost::load_cell`，失败/驱逐/reload 失败写入可 replay trace。std 构建新增 `IoSchedulerAdapter`，实际桥接 `prism_world_io::IoScheduler` 的 chunk/completion/cancel/backpressure/error 事件，并保留同步 `ChunkProvider` 兼容路径。
 - `FileCellProvider` 复用 `prism_world_io/std` 的真实 `FileProvider`，以 sector 注册完整 manifest/文件 offset/checksum，拒绝过期 manifest 并保留调度优先级。真实临时文件测试覆盖文件→分块 scheduler→header/checksum→`SceneHost`，及短读、打开失败、取消和错误隔离；底层每次 poll 为有界阻塞读取，不宣称已变成线程池异步文件 IO。
 - 本批新增独立的 `ThreadedFileProvider` 源码：固定 std worker、预留槽位/队列、受限 chunk、ACK 驱动的后续读取、worker 内文件打开/读取/关闭，以及非 joining 的取消/shutdown。取消的 Ready 缓冲区交由 worker 清理；槽位在结果和文件销毁后才释放。waker 克隆/替换后的销毁及唤醒位于 metadata 锁外，worker/批量 shutdown 隔离唤醒回调 panic。逻辑 payload 约束为 `capacity × max_chunk_size`，不包含调用方已取走的 chunk、线程栈、元数据、分配器开销或 RSS；阻塞 OS 调用只能合作取消，返回前仍占槽位。16 项回归覆盖范围/短读/打开失败、准入、parked ACK、queued/running/ready 取消、重复 shutdown、last-owner drop、唤醒时序及 panic，已与 crate 其余测试合计 28 项通过。
 - 新增 `CellIo`/`CellFrameCoordinator` 的 task-context poll 接口；`ScheduledCellIo` 聚合完整 cell，每次最多消费 16 个 chunk，随后唤醒并让出。`WorldFrameCoordinator<P>` 是同步兼容别名，保留 `new/poll_io`；旧路径仍可能阻塞，不把兼容 API 称为异步。同步 runtime 的 ID 也改为单调非零、耗尽显式失败，并用 ID 保持同优先级 FIFO。
@@ -160,6 +161,8 @@ release两轮每档8预热/64测量，共288次dispatch全部逐点对CPU。10k/
 - terrain 在最大 quadtree 层级返回显式 `NoChildren`，LOD 非有限值和高度乘法溢出有确定性错误/饱和行为；simulation 的 tick、hydrology 和 delta codec 增加回绕/溢出、canonical record、输入大小和记录数限制；network merge 以 `TransactionId -> PersistentId` 索引去重，避免按对象桶线性扫描。
 
 ## 当前验证
+
+本轮 scene/world streaming 切片的定向验证：`rustfmt --edition 2024 --check pkg/prism_world_stream/src/lib.rs pkg/prism_world_runtime/src/lib.rs`，以及 `cargo test --offline -p prism_world_stream -p prism_world_runtime --lib --no-fail-fast`；结果为 `prism_world_stream` 5 项、`prism_world_runtime` 79 项通过。新增回归覆盖 manifest revision 触发 replacement、成功提交新 cell，以及坏 header 后旧 resident 状态可重试。工作树的全量 `cargo fmt --all -- --check` 仍会报告其他并行改动文件，本轮没有格式化或修改这些非目标包。
 
 通过：
 

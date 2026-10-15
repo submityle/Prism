@@ -210,7 +210,11 @@ pub trait SceneHost {
     /// Host-specific failure type.
     type Error;
 
-    /// Commits a validated cell payload to the host.
+    /// Commits or replaces a validated cell payload in the host.
+    ///
+    /// A second call for the same sector is the streaming hot-reload path. The
+    /// host owns replacement atomicity and may reject the operation; the
+    /// coordinator keeps the previous manifest resident until success.
     fn load_cell(&mut self, manifest: &CellManifest, payload: &[u8]) -> Result<(), Self::Error>;
 
     /// Removes a cell from the host.
@@ -687,6 +691,8 @@ fn validate_header(manifest: CellManifest, bytes: &[u8]) -> Result<&[u8], Header
 pub enum TraceOp {
     /// A required or prefetched load was admitted.
     Load,
+    /// A resident cell revision replacement was admitted.
+    Reload,
     /// A loaded cell was evicted.
     Evict,
     /// An operation failed.
@@ -854,6 +860,8 @@ pub struct FrameReport {
 struct PendingLoad {
     frame: u64,
     manifest: CellManifest,
+    previous: Option<CellManifest>,
+    operation: TraceOp,
 }
 
 /// Coordinates stream policy, bounded IO, manifest validation, and scene host calls.
@@ -929,14 +937,25 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                         self.record_failure(
                             frame,
                             request.sector,
-                            TraceOp::Failed,
+                            TraceOp::Load,
                             FailureStage::Provider,
                             "stream action has no manifest",
                         );
-                        self.stream.mark_unloaded(request.sector);
+                        self.restore_stream_state(request.sector, None);
                         report.failed += 1;
                         continue;
                     };
+                    let previous = self.known_loaded.get(&request.sector).copied();
+                    let operation = if previous.is_some_and(|old| {
+                        old.scene_key != manifest.scene_key
+                            || old.content_version != manifest.content_version
+                            || old.derived_hash != manifest.derived_hash
+                    }) {
+                        TraceOp::Reload
+                    } else {
+                        TraceOp::Load
+                    };
+                    let previous = (operation == TraceOp::Reload).then_some(previous).flatten();
                     let io_request = CellReadRequest::new(*manifest, u32::from(request.priority.0));
                     match self.io.submit(io_request) {
                         Ok(request_id) => {
@@ -945,6 +964,8 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                                 PendingLoad {
                                     frame,
                                     manifest: *manifest,
+                                    previous,
+                                    operation,
                                 },
                             );
                             self.trace.push(TraceEvent::LoadSubmitted {
@@ -955,7 +976,7 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                             report.submitted += 1;
                         }
                         Err(error) => {
-                            self.stream.mark_unloaded(request.sector);
+                            self.restore_stream_state(request.sector, previous);
                             let stage = match &error {
                                 SubmitError::Backpressure { .. } => FailureStage::Backpressure,
                                 _ => FailureStage::Provider,
@@ -963,7 +984,7 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                             self.record_failure(
                                 frame,
                                 request.sector,
-                                TraceOp::Load,
+                                operation,
                                 stage,
                                 &error.to_string(),
                             );
@@ -977,7 +998,7 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                         self.trace.push(TraceEvent::Evicted { frame, sector });
                     } else {
                         if let Some(manifest) = self.known_loaded.get(&sector).copied() {
-                            self.stream.mark_resident(manifest.sector);
+                            self.stream.mark_resident_manifest(manifest);
                         }
                         self.record_failure(
                             frame,
@@ -1035,34 +1056,36 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                 let Some(pending) = pending else {
                     return;
                 };
+                let previous = pending.previous;
+                let operation = pending.operation;
                 match validate_header(pending.manifest, &bytes) {
                     Ok(payload) => match host.load_cell(&pending.manifest, payload) {
                         Ok(()) => {
                             self.known_loaded
                                 .insert(pending.manifest.sector, pending.manifest);
-                            self.stream.mark_resident(pending.manifest.sector);
+                            self.stream.mark_resident_manifest(pending.manifest);
                             self.trace.push(TraceEvent::Loaded {
                                 frame: pending.frame,
                                 sector: pending.manifest.sector,
                             });
                         }
                         Err(_) => {
-                            self.stream.mark_unloaded(pending.manifest.sector);
+                            self.restore_stream_state(pending.manifest.sector, previous);
                             self.record_failure(
                                 pending.frame,
                                 pending.manifest.sector,
-                                TraceOp::Load,
+                                operation,
                                 FailureStage::LoadHost,
                                 "scene host rejected load",
                             );
                         }
                     },
                     Err(error) => {
-                        self.stream.mark_unloaded(pending.manifest.sector);
+                        self.restore_stream_state(pending.manifest.sector, previous);
                         self.record_failure(
                             pending.frame,
                             pending.manifest.sector,
-                            TraceOp::Load,
+                            operation,
                             FailureStage::ManifestHeader,
                             &error.to_string(),
                         );
@@ -1073,12 +1096,16 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                 request_id,
                 request,
             } => {
-                self.pending.remove(&request_id);
-                self.stream.mark_unloaded(request.sector());
+                let pending = self.pending.remove(&request_id);
+                let (frame, previous, operation) = pending
+                    .map_or((self.frame, None, TraceOp::Load), |pending| {
+                        (pending.frame, pending.previous, pending.operation)
+                    });
+                self.restore_stream_state(request.sector(), previous);
                 self.record_failure(
-                    self.frame,
+                    frame,
                     request.sector(),
-                    TraceOp::Load,
+                    operation,
                     FailureStage::Cancelled,
                     "IO request cancelled",
                 );
@@ -1088,15 +1115,16 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                 request,
                 error,
             } => {
-                let frame = self
-                    .pending
-                    .remove(&request_id)
-                    .map_or(self.frame, |pending| pending.frame);
-                self.stream.mark_unloaded(request.sector());
+                let pending = self.pending.remove(&request_id);
+                let (frame, previous, operation) = pending
+                    .map_or((self.frame, None, TraceOp::Load), |pending| {
+                        (pending.frame, pending.previous, pending.operation)
+                    });
+                self.restore_stream_state(request.sector(), previous);
                 self.record_failure(
                     frame,
                     request.sector(),
-                    TraceOp::Load,
+                    operation,
                     FailureStage::Provider,
                     &format!("{error:?}"),
                 );
@@ -1144,7 +1172,14 @@ impl<I: CellIo> CellFrameCoordinator<I> {
         for cell in loaded {
             self.known_loaded
                 .insert(cell.manifest.sector, cell.manifest);
-            self.stream.mark_resident(cell.manifest.sector);
+            self.stream.mark_resident_manifest(cell.manifest);
+        }
+    }
+
+    fn restore_stream_state(&mut self, sector: SectorId, previous: Option<CellManifest>) {
+        match previous {
+            Some(manifest) => self.stream.mark_resident_manifest(manifest),
+            None => self.stream.mark_unloaded(sector),
         }
     }
 
@@ -1287,6 +1322,83 @@ mod tests {
         assert_eq!(report.actions, 1);
         assert_eq!(host.evicted, vec![loaded_manifest.sector]);
         assert_eq!(coordinator.trace().replay(), Ok(2));
+    }
+
+    #[test]
+    fn changed_manifest_reloads_existing_cell_and_keeps_old_state_on_failure() {
+        let old = manifest(0, 7, 1, 9);
+        let updated = manifest(0, 7, 2, 10);
+        let mut bytes_by_sector = BTreeMap::new();
+        bytes_by_sector.insert(updated.sector, bytes(updated, b"new"));
+        let provider = MemoryProvider {
+            bytes: bytes_by_sector,
+            calls: AtomicUsize::new(0),
+        };
+        let mut coordinator = WorldFrameCoordinator::new(provider, 1).expect("runtime config");
+        let mut host = Host::default();
+        let demand = DemandSource::new(updated.sector, 0, 1, 10).expect("demand");
+
+        let report = coordinator.plan_frame(
+            &[demand],
+            &[updated],
+            &[LoadedCell::new(old)],
+            StreamBudget {
+                io_bytes: 1,
+                max_actions: 1,
+            },
+            &mut host,
+        );
+        assert_eq!(report.submitted, 1);
+        assert!(coordinator.poll_io(&mut host));
+        assert_eq!(host.loaded, vec![updated.sector]);
+        assert!(coordinator
+            .trace()
+            .as_slice()
+            .iter()
+            .any(|event| matches!(event, TraceEvent::Loaded { .. })));
+
+        // A later revision with a bad header must not make the already loaded
+        // revision disappear from the coordinator's residency state.
+        let broken = manifest(0, 7, 3, 11);
+        let mut bytes_by_sector = BTreeMap::new();
+        bytes_by_sector.insert(broken.sector, bytes(updated, b"stale-header"));
+        let provider = MemoryProvider {
+            bytes: bytes_by_sector,
+            calls: AtomicUsize::new(0),
+        };
+        let mut failing = WorldFrameCoordinator::new(provider, 1).expect("runtime config");
+        let mut failing_host = Host::default();
+        let first = failing.plan_frame(
+            &[demand],
+            &[broken],
+            &[LoadedCell::new(updated)],
+            StreamBudget {
+                io_bytes: 1,
+                max_actions: 1,
+            },
+            &mut failing_host,
+        );
+        assert_eq!(first.submitted, 1);
+        assert!(failing.poll_io(&mut failing_host));
+        assert!(failing.trace().as_slice().iter().any(|event| matches!(
+            event,
+            TraceEvent::Failed {
+                operation: TraceOp::Reload,
+                stage: FailureStage::ManifestHeader,
+                ..
+            }
+        )));
+        let retry = failing.plan_frame(
+            &[demand],
+            &[broken],
+            &[LoadedCell::new(updated)],
+            StreamBudget {
+                io_bytes: 1,
+                max_actions: 1,
+            },
+            &mut failing_host,
+        );
+        assert_eq!(retry.submitted, 1);
     }
 
     #[test]

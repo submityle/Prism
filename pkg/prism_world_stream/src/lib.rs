@@ -10,7 +10,7 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
@@ -332,7 +332,7 @@ pub enum StreamAction {
 pub struct StreamPlan {
     /// Ordered actions.
     pub actions: Vec<StreamAction>,
-    /// Total bytes admitted by load/prefetch actions.
+    /// Total bytes admitted by load, reload, and prefetch actions.
     pub admitted_bytes: u64,
     /// The exact VM instruction stream that produced this plan.
     pub trace: VmTrace,
@@ -341,7 +341,19 @@ pub struct StreamPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResidentState {
     Loading,
-    Resident,
+    Resident(Option<CellManifest>),
+}
+
+impl ResidentState {
+    fn is_stale(self, manifest: CellManifest) -> bool {
+        matches!(
+            self,
+            Self::Resident(Some(previous))
+                if previous.content_version != manifest.content_version
+                    || previous.derived_hash != manifest.derived_hash
+                    || previous.scene_key != manifest.scene_key
+        )
+    }
 }
 
 /// Budgeted streaming VM state.
@@ -362,7 +374,14 @@ impl StreamScheduler {
 
     /// Marks a sector as resident after its provider completes IO.
     pub fn mark_resident(&mut self, sector: SectorId) {
-        self.resident.insert(sector, ResidentState::Resident);
+        self.resident.insert(sector, ResidentState::Resident(None));
+    }
+
+    /// Marks a sector resident and records the manifest revision that was
+    /// actually committed by the provider/host.
+    pub fn mark_resident_manifest(&mut self, manifest: CellManifest) {
+        self.resident
+            .insert(manifest.sector, ResidentState::Resident(Some(manifest)));
     }
 
     /// Marks a sector as no longer resident.
@@ -389,6 +408,7 @@ impl StreamScheduler {
             trace.push(VmInstruction::Demand(demand.center));
         }
         let mut requests = BTreeMap::<SectorId, StreamRequest>::new();
+        let mut stale_sectors = BTreeSet::new();
         for manifest in manifests {
             let mut best: Option<(u16, u64, StreamKind)> = None;
             for demand in demands {
@@ -396,15 +416,26 @@ impl StreamScheduler {
                     continue;
                 }
                 let distance = demand.center.distance(manifest.sector);
-                let kind = if distance <= u64::from(demand.load_radius) {
+                let requested_kind = if distance <= u64::from(demand.load_radius) {
                     StreamKind::Required
                 } else if demand.predicted == Some(manifest.sector) {
                     StreamKind::Prefetch
                 } else {
                     continue;
                 };
-                if kind == StreamKind::Prefetch && distance > u64::from(demand.unload_radius) + 1 {
+                if requested_kind == StreamKind::Prefetch
+                    && distance > u64::from(demand.unload_radius) + 1
+                {
                     continue;
+                }
+                let stale = self
+                    .resident
+                    .get(&manifest.sector)
+                    .copied()
+                    .filter(|state| state.is_stale(*manifest))
+                    .is_some();
+                if stale {
+                    stale_sectors.insert(manifest.sector);
                 }
                 let score = demand.priority.saturating_add(
                     demand
@@ -416,10 +447,10 @@ impl StreamScheduler {
                         || (score == p && distance < d)
                         || (score == p
                             && distance == d
-                            && kind == StreamKind::Required
+                            && requested_kind == StreamKind::Required
                             && k == StreamKind::Prefetch)
                 }) {
-                    best = Some((score, distance, kind));
+                    best = Some((score, distance, requested_kind));
                 }
             }
             if let Some((score, distance, kind)) = best {
@@ -440,7 +471,7 @@ impl StreamScheduler {
         let mut candidates: Vec<StreamRequest> = requests
             .values()
             .copied()
-            .filter(|r| !self.contains(r.sector))
+            .filter(|r| !self.contains(r.sector) || stale_sectors.contains(&r.sector))
             .collect();
         candidates.sort_by(request_order);
         let mut admitted_bytes: u64 = 0;
@@ -599,6 +630,7 @@ pub enum TraceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn morton_round_trip_and_negative_sector_hint_are_stable() {
@@ -701,5 +733,49 @@ mod tests {
             admitted_bytes: 0,
         });
         assert_eq!(trace.replay(), Ok(1));
+    }
+
+    #[test]
+    fn resident_manifest_revision_emits_reload_without_duplicate_load() {
+        let sector = SectorId::new(0, 0, 0, 0);
+        let demand = DemandSource::new(sector, 0, 1, 10).expect("demand");
+        let bounds = AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1)).unwrap();
+        let old = CellManifest {
+            sector,
+            bounds,
+            scene_key: 7,
+            content_version: 1,
+            derived_hash: 10,
+            io_bytes: 4,
+        };
+        let new = CellManifest {
+            content_version: 2,
+            derived_hash: 11,
+            ..old
+        };
+        let mut scheduler = StreamScheduler::new();
+        scheduler.mark_resident_manifest(old);
+
+        let plan = scheduler.plan(
+            &[demand],
+            &[new],
+            StreamBudget {
+                io_bytes: 4,
+                max_actions: 1,
+            },
+        );
+
+        assert_eq!(plan.admitted_bytes, 4);
+        assert_eq!(
+            plan.actions,
+            vec![StreamAction::Load(StreamRequest {
+                sector,
+                io_bytes: 4,
+                priority: StreamPriority(10),
+                distance: 0,
+                kind: StreamKind::Required,
+            })]
+        );
+        assert_eq!(plan.trace.replay(), Ok(1));
     }
 }
