@@ -13,8 +13,8 @@
 //! clones, so command replay (in [`crate::queue`]) resolves an id by briefly
 //! locking a map, cloning the handle, and releasing the lock.
 
-use alloc::borrow::Cow;
 use alloc::sync::Arc;
+use core::fmt;
 use core::num::NonZeroU64;
 use std::sync::Mutex;
 
@@ -24,6 +24,85 @@ use rhi::RenderDevice;
 
 use crate::convert;
 use crate::loss::map_device_lost;
+
+/// The source representation understood by a shader conversion boundary.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ShaderSourceKind {
+    /// WGSL source text.
+    Wgsl,
+    /// Prism WESL source text, which is passed to wgpu as WGSL text.
+    Wesl,
+    /// Pre-compiled SPIR-V words.
+    SpirV,
+}
+
+/// A structured error raised by the fallible wgpu backend creation interface.
+///
+/// `Unsupported*` means the RHI value is valid but this backend cannot
+/// represent it. `Invalid*` means the descriptor itself violates an RHI
+/// invariant. `CapabilityMismatch` means the descriptor is valid but the
+/// selected device does not expose the capability required to honor it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BackendError {
+    /// The RHI texture format has no representation in this wgpu backend.
+    UnsupportedTextureFormat(rhi::TextureFormat),
+    /// The RHI vertex format has no representation in this wgpu backend.
+    UnsupportedVertexFormat(rhi::VertexFormat),
+    /// The shader source kind is not enabled by this backend build.
+    UnsupportedShaderSource(ShaderSourceKind),
+    /// A bind-group layout entry violates the RHI array/count invariant.
+    InvalidBindGroupLayoutEntry {
+        /// The malformed binding number.
+        binding: u32,
+        /// The invariant that was violated.
+        reason: rhi::BindGroupLayoutEntryError,
+    },
+    /// Two layout entries use the same binding number.
+    DuplicateBinding(u32),
+    /// A bind group was created without a layout.
+    MissingBindGroupLayout,
+    /// The device lacks a capability required by a valid descriptor.
+    CapabilityMismatch {
+        /// Features the descriptor requires.
+        required: rhi::Features,
+        /// Features the device actually exposes.
+        available: rhi::Features,
+    },
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedTextureFormat(format) => {
+                write!(f, "unsupported RHI texture format for wgpu backend: {format:?}")
+            }
+            Self::UnsupportedVertexFormat(format) => {
+                write!(f, "unsupported RHI vertex format for wgpu backend: {format:?}")
+            }
+            Self::UnsupportedShaderSource(kind) => {
+                write!(f, "unsupported shader source for wgpu backend: {kind:?}")
+            }
+            Self::InvalidBindGroupLayoutEntry { binding, reason } => {
+                write!(f, "invalid bind-group layout entry @binding({binding}): {reason}")
+            }
+            Self::DuplicateBinding(binding) => {
+                write!(f, "invalid bind-group layout: duplicate binding {binding}")
+            }
+            Self::MissingBindGroupLayout => {
+                f.write_str("invalid bind-group configuration: an explicit layout is required")
+            }
+            Self::CapabilityMismatch {
+                required,
+                available,
+            } => write!(
+                f,
+                "wgpu device capability mismatch: required features {required:?}, available {available:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BackendError {}
 
 /// Private marker for buffer slots.
 enum BufferMarker {}
@@ -106,6 +185,47 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Returns the RHI feature bit required to create a binding type on wgpu.
+fn required_features_for_binding(ty: rhi::BindingType) -> rhi::Features {
+    match ty {
+        rhi::BindingType::BufferArray { .. } => rhi::Features::BINDLESS_BUFFER_ARRAY,
+        rhi::BindingType::SamplerArray(_) => rhi::Features::BINDLESS_SAMPLER_ARRAY,
+        rhi::BindingType::TextureArray { .. } => rhi::Features::BINDLESS_TEXTURE_ARRAY,
+        rhi::BindingType::StorageTextureArray { .. } => {
+            rhi::Features::BINDLESS_STORAGE_TEXTURE_ARRAY
+        }
+        rhi::BindingType::Buffer { .. }
+        | rhi::BindingType::Sampler(_)
+        | rhi::BindingType::Texture { .. }
+        | rhi::BindingType::StorageTexture { .. } => rhi::Features::NONE,
+    }
+}
+
+/// Validates that a device can honor a descriptor's optional feature needs.
+pub(crate) fn validate_capabilities(
+    caps: &rhi::DeviceCapabilities,
+    required: rhi::Features,
+) -> Result<(), BackendError> {
+    if caps.features.contains(required) {
+        Ok(())
+    } else {
+        Err(BackendError::CapabilityMismatch {
+            required,
+            available: caps.features,
+        })
+    }
+}
+
+/// Converts an error from a new fallible method for the legacy infallible RHI
+/// trait surface. The old trait cannot return `Result`; callers that need
+/// recoverable configuration errors must migrate to the `try_create_*`
+/// methods instead of treating a failed resource as a valid id.
+fn legacy<T>(result: Result<T, BackendError>) -> T {
+    result.unwrap_or_else(|error| {
+        panic!("{error}; use WgpuDevice::try_create_* for recoverable errors")
+    })
 }
 
 impl DeviceInner {
@@ -332,6 +452,230 @@ impl WgpuDevice {
     pub fn wait_for_submission(&self, index: &wgpu::SubmissionIndex) -> bool {
         self.inner.wait_for_submission(index)
     }
+
+    /// Creates a texture while returning unsupported-format errors instead of
+    /// panicking.
+    pub fn try_create_texture(
+        &self,
+        descriptor: &rhi::TextureDescriptor,
+    ) -> Result<rhi::TextureId, BackendError> {
+        let texture = self.inner.device.create_texture(&wgpu::TextureDescriptor {
+            label: descriptor.label.as_deref(),
+            size: convert::extent3d(descriptor.size),
+            mip_level_count: descriptor.mip_level_count,
+            sample_count: descriptor.sample_count,
+            dimension: convert::texture_dimension(descriptor.dimension),
+            format: convert::try_texture_format(descriptor.format)?,
+            usage: convert::texture_usages(descriptor.usage),
+            view_formats: &[],
+        });
+        let id = lock(&self.inner.textures).insert(StoredTexture { texture });
+        Ok(convert::convert_id(id))
+    }
+
+    /// Creates a texture view while returning unsupported-format errors
+    /// instead of panicking.
+    pub fn try_create_texture_view(
+        &self,
+        texture: rhi::TextureId,
+        descriptor: &rhi::TextureViewDescriptor,
+    ) -> Result<rhi::TextureViewId, BackendError> {
+        let handle = self.inner.resolve_texture(texture);
+        let view = handle.create_view(&wgpu::TextureViewDescriptor {
+            label: descriptor.label.as_deref(),
+            format: descriptor
+                .format
+                .map(convert::try_texture_format)
+                .transpose()?,
+            dimension: Some(convert::texture_view_dimension(descriptor.dimension)),
+            usage: None,
+            aspect: convert::texture_aspect(descriptor.aspect),
+            base_mip_level: descriptor.base_mip_level,
+            mip_level_count: descriptor.mip_level_count,
+            base_array_layer: descriptor.base_array_layer,
+            array_layer_count: descriptor.array_layer_count,
+        });
+        let id = lock(&self.inner.texture_views).insert(view);
+        Ok(convert::convert_id(id))
+    }
+
+    /// Creates a WGSL/WESL shader module while reporting unsupported source
+    /// kinds as a structured error.
+    pub fn try_create_shader_module(
+        &self,
+        descriptor: &rhi::ShaderModuleDescriptor,
+    ) -> Result<rhi::ShaderModuleId, BackendError> {
+        let module = self
+            .inner
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: descriptor.label.as_deref(),
+                source: convert::shader_source(&descriptor.source)?,
+            });
+        let id = lock(&self.inner.shaders).insert(module);
+        Ok(convert::convert_id(id))
+    }
+
+    /// Creates a bind-group layout while distinguishing malformed descriptors
+    /// from devices that lack the requested descriptor-array capability.
+    pub fn try_create_bind_group_layout(
+        &self,
+        descriptor: &rhi::BindGroupLayoutDescriptor,
+    ) -> Result<rhi::BindGroupLayoutId, BackendError> {
+        if !descriptor.has_unique_bindings() {
+            let duplicate = descriptor
+                .entries
+                .iter()
+                .enumerate()
+                .find_map(|(index, entry)| {
+                    descriptor.entries[..index]
+                        .iter()
+                        .any(|previous| previous.binding == entry.binding)
+                        .then_some(entry.binding)
+                })
+                .expect("duplicate binding was checked above");
+            return Err(BackendError::DuplicateBinding(duplicate));
+        }
+
+        let mut required = rhi::Features::NONE;
+        for entry in &descriptor.entries {
+            if let Err(reason) = entry.validate() {
+                return Err(BackendError::InvalidBindGroupLayoutEntry {
+                    binding: entry.binding,
+                    reason,
+                });
+            }
+            required |= required_features_for_binding(entry.ty);
+        }
+        validate_capabilities(&self.inner.caps, required)?;
+
+        let entries: Vec<wgpu::BindGroupLayoutEntry> = descriptor
+            .entries
+            .iter()
+            .map(convert::bind_group_layout_entry)
+            .collect::<Result<_, _>>()?;
+        let layout = self
+            .inner
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: descriptor.label.as_deref(),
+                entries: &entries,
+            });
+        let id = lock(&self.inner.bind_group_layouts).insert(layout);
+        Ok(convert::convert_id(id))
+    }
+
+    /// Creates a render pipeline while returning unsupported format errors.
+    pub fn try_create_render_pipeline(
+        &self,
+        descriptor: &rhi::RenderPipelineDescriptor,
+    ) -> Result<rhi::RenderPipelineId, BackendError> {
+        let vertex_module = lock(&self.inner.shaders)
+            .get(convert::convert_id(descriptor.vertex.module))
+            .expect("stale vertex ShaderModuleId")
+            .clone();
+        let fragment_module = descriptor.fragment.as_ref().map(|frag| {
+            lock(&self.inner.shaders)
+                .get(convert::convert_id(frag.module))
+                .expect("stale fragment ShaderModuleId")
+                .clone()
+        });
+        let layout = descriptor.layout.map(|id| {
+            lock(&self.inner.pipeline_layouts)
+                .get(convert::convert_id(id))
+                .expect("stale PipelineLayoutId")
+                .clone()
+        });
+
+        let attribute_sets: Vec<Vec<wgpu::VertexAttribute>> = descriptor
+            .vertex
+            .buffers
+            .iter()
+            .map(|layout| {
+                layout
+                    .attributes
+                    .iter()
+                    .map(|attr| {
+                        Ok(wgpu::VertexAttribute {
+                            format: convert::try_vertex_format(attr.format)?,
+                            offset: attr.offset,
+                            shader_location: attr.shader_location,
+                        })
+                    })
+                    .collect::<Result<_, BackendError>>()
+            })
+            .collect::<Result<_, _>>()?;
+        let vertex_buffers: Vec<Option<wgpu::VertexBufferLayout>> = descriptor
+            .vertex
+            .buffers
+            .iter()
+            .zip(attribute_sets.iter())
+            .map(|(layout, attributes)| {
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: layout.array_stride,
+                    step_mode: convert::vertex_step_mode(layout.step_mode),
+                    attributes,
+                })
+            })
+            .collect();
+
+        let color_targets: Vec<Option<wgpu::ColorTargetState>> = descriptor
+            .fragment
+            .as_ref()
+            .map(|frag| {
+                frag.targets
+                    .iter()
+                    .map(|target| {
+                        target
+                            .map(|t| {
+                                Ok(wgpu::ColorTargetState {
+                                    format: convert::try_texture_format(t.format)?,
+                                    blend: t.blend.map(convert::blend_state),
+                                    write_mask: convert::color_writes(t.write_mask),
+                                })
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<_, BackendError>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        let fragment_state = fragment_module
+            .as_ref()
+            .zip(descriptor.fragment.as_ref())
+            .map(|(module, frag)| wgpu::FragmentState {
+                module,
+                entry_point: Some(frag.entry_point.as_ref()),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &color_targets,
+            });
+
+        let pipeline = self
+            .inner
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: descriptor.label.as_deref(),
+                layout: layout.as_ref(),
+                vertex: wgpu::VertexState {
+                    module: &vertex_module,
+                    entry_point: Some(descriptor.vertex.entry_point.as_ref()),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &vertex_buffers,
+                },
+                primitive: convert::primitive_state(descriptor.primitive),
+                depth_stencil: descriptor
+                    .depth_stencil
+                    .map(convert::depth_stencil_state)
+                    .transpose()?,
+                multisample: convert::multisample_state(descriptor.multisample),
+                fragment: fragment_state,
+                multiview_mask: None,
+                cache: None,
+            });
+        let id = lock(&self.inner.render_pipelines).insert(pipeline);
+        Ok(convert::convert_id(id))
+    }
 }
 
 impl RenderDevice for WgpuDevice {
@@ -355,18 +699,7 @@ impl RenderDevice for WgpuDevice {
     }
 
     fn create_texture(&self, descriptor: &rhi::TextureDescriptor) -> rhi::TextureId {
-        let texture = self.inner.device.create_texture(&wgpu::TextureDescriptor {
-            label: descriptor.label.as_deref(),
-            size: convert::extent3d(descriptor.size),
-            mip_level_count: descriptor.mip_level_count,
-            sample_count: descriptor.sample_count,
-            dimension: convert::texture_dimension(descriptor.dimension),
-            format: convert::texture_format(descriptor.format),
-            usage: convert::texture_usages(descriptor.usage),
-            view_formats: &[],
-        });
-        let id = lock(&self.inner.textures).insert(StoredTexture { texture });
-        convert::convert_id(id)
+        legacy(self.try_create_texture(descriptor))
     }
 
     fn create_texture_view(
@@ -374,20 +707,7 @@ impl RenderDevice for WgpuDevice {
         texture: rhi::TextureId,
         descriptor: &rhi::TextureViewDescriptor,
     ) -> rhi::TextureViewId {
-        let handle = self.inner.resolve_texture(texture);
-        let view = handle.create_view(&wgpu::TextureViewDescriptor {
-            label: descriptor.label.as_deref(),
-            format: descriptor.format.map(convert::texture_format),
-            dimension: Some(convert::texture_view_dimension(descriptor.dimension)),
-            usage: None,
-            aspect: convert::texture_aspect(descriptor.aspect),
-            base_mip_level: descriptor.base_mip_level,
-            mip_level_count: descriptor.mip_level_count,
-            base_array_layer: descriptor.base_array_layer,
-            array_layer_count: descriptor.array_layer_count,
-        });
-        let id = lock(&self.inner.texture_views).insert(view);
-        convert::convert_id(id)
+        legacy(self.try_create_texture_view(texture, descriptor))
     }
 
     fn create_sampler(&self, descriptor: &rhi::SamplerDescriptor) -> rhi::SamplerId {
@@ -413,49 +733,14 @@ impl RenderDevice for WgpuDevice {
         &self,
         descriptor: &rhi::ShaderModuleDescriptor,
     ) -> rhi::ShaderModuleId {
-        let text = descriptor.source.as_text().unwrap_or_else(|| {
-            panic!("the wgpu backend requires WGSL/WESL text; SpirV source is unsupported")
-        });
-        let module = self
-            .inner
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: descriptor.label.as_deref(),
-                source: wgpu::ShaderSource::Wgsl(Cow::Owned(text.to_owned())),
-            });
-        let id = lock(&self.inner.shaders).insert(module);
-        convert::convert_id(id)
+        legacy(self.try_create_shader_module(descriptor))
     }
 
     fn create_bind_group_layout(
         &self,
         descriptor: &rhi::BindGroupLayoutDescriptor,
     ) -> rhi::BindGroupLayoutId {
-        // wgpu encodes array-ness as `count`, so an RHI entry that declares an
-        // array type without a length (or the reverse) would silently change
-        // meaning under translation. Reject it instead of translating it.
-        for entry in &descriptor.entries {
-            if let Err(error) = entry.validate() {
-                panic!(
-                    "bind group layout entry @binding({}) is malformed: {error}",
-                    entry.binding
-                );
-            }
-        }
-        let entries: Vec<wgpu::BindGroupLayoutEntry> = descriptor
-            .entries
-            .iter()
-            .map(convert::bind_group_layout_entry)
-            .collect();
-        let layout = self
-            .inner
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: descriptor.label.as_deref(),
-                entries: &entries,
-            });
-        let id = lock(&self.inner.bind_group_layouts).insert(layout);
-        convert::convert_id(id)
+        legacy(self.try_create_bind_group_layout(descriptor))
     }
 
     fn create_bind_group(&self, descriptor: &rhi::BindGroupDescriptor) -> rhi::BindGroupId {
@@ -599,105 +884,7 @@ impl RenderDevice for WgpuDevice {
         &self,
         descriptor: &rhi::RenderPipelineDescriptor,
     ) -> rhi::RenderPipelineId {
-        // Clone the shader modules and optional layout out of their maps up
-        // front so the borrowed pipeline descriptor outlives the locks.
-        let vertex_module = lock(&self.inner.shaders)
-            .get(convert::convert_id(descriptor.vertex.module))
-            .expect("stale vertex ShaderModuleId")
-            .clone();
-        let fragment_module = descriptor.fragment.as_ref().map(|frag| {
-            lock(&self.inner.shaders)
-                .get(convert::convert_id(frag.module))
-                .expect("stale fragment ShaderModuleId")
-                .clone()
-        });
-        let layout = descriptor.layout.map(|id| {
-            lock(&self.inner.pipeline_layouts)
-                .get(convert::convert_id(id))
-                .expect("stale PipelineLayoutId")
-                .clone()
-        });
-
-        // Vertex buffer attributes need stable owned storage referenced by the
-        // `VertexBufferLayout`s.
-        let attribute_sets: Vec<Vec<wgpu::VertexAttribute>> = descriptor
-            .vertex
-            .buffers
-            .iter()
-            .map(|layout| {
-                layout
-                    .attributes
-                    .iter()
-                    .map(|attr| wgpu::VertexAttribute {
-                        format: convert::vertex_format(attr.format),
-                        offset: attr.offset,
-                        shader_location: attr.shader_location,
-                    })
-                    .collect()
-            })
-            .collect();
-        let vertex_buffers: Vec<Option<wgpu::VertexBufferLayout>> = descriptor
-            .vertex
-            .buffers
-            .iter()
-            .zip(attribute_sets.iter())
-            .map(|(layout, attributes)| {
-                Some(wgpu::VertexBufferLayout {
-                    array_stride: layout.array_stride,
-                    step_mode: convert::vertex_step_mode(layout.step_mode),
-                    attributes,
-                })
-            })
-            .collect();
-
-        let color_targets: Vec<Option<wgpu::ColorTargetState>> = descriptor
-            .fragment
-            .as_ref()
-            .map(|frag| {
-                frag.targets
-                    .iter()
-                    .map(|target| {
-                        target.map(|t| wgpu::ColorTargetState {
-                            format: convert::texture_format(t.format),
-                            blend: t.blend.map(convert::blend_state),
-                            write_mask: convert::color_writes(t.write_mask),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let fragment_state = fragment_module
-            .as_ref()
-            .zip(descriptor.fragment.as_ref())
-            .map(|(module, frag)| wgpu::FragmentState {
-                module,
-                entry_point: Some(frag.entry_point.as_ref()),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &color_targets,
-            });
-
-        let pipeline = self
-            .inner
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: descriptor.label.as_deref(),
-                layout: layout.as_ref(),
-                vertex: wgpu::VertexState {
-                    module: &vertex_module,
-                    entry_point: Some(descriptor.vertex.entry_point.as_ref()),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: &vertex_buffers,
-                },
-                primitive: convert::primitive_state(descriptor.primitive),
-                depth_stencil: descriptor.depth_stencil.map(convert::depth_stencil_state),
-                multisample: convert::multisample_state(descriptor.multisample),
-                fragment: fragment_state,
-                multiview_mask: None,
-                cache: None,
-            });
-        let id = lock(&self.inner.render_pipelines).insert(pipeline);
-        convert::convert_id(id)
+        legacy(self.try_create_render_pipeline(descriptor))
     }
 
     fn create_compute_pipeline(
@@ -889,5 +1076,65 @@ impl OwnedBinding {
             Self::TextureView(_) => "texture view",
             Self::TextureViewArray(_) => "texture view array",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bindless_layout_capability_mismatch_is_structured() {
+        let caps = rhi::DeviceCapabilities {
+            backend: rhi::Backend::Metal,
+            features: rhi::Features::NONE,
+            limits: rhi::Limits::baseline(),
+        };
+        let required = rhi::Features::BINDLESS_TEXTURE_ARRAY;
+        assert_eq!(
+            validate_capabilities(&caps, required),
+            Err(BackendError::CapabilityMismatch {
+                required,
+                available: rhi::Features::NONE,
+            })
+        );
+    }
+
+    #[test]
+    fn capability_validation_accepts_the_exact_supported_set() {
+        let caps = rhi::DeviceCapabilities {
+            backend: rhi::Backend::Vulkan,
+            features: rhi::Features::BINDLESS_TEXTURE_ARRAY,
+            limits: rhi::Limits::baseline(),
+        };
+        assert_eq!(
+            validate_capabilities(&caps, rhi::Features::BINDLESS_TEXTURE_ARRAY),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn invalid_bind_group_array_configuration_is_not_a_capability_fallback() {
+        let entry = rhi::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: rhi::ShaderStages::COMPUTE,
+            ty: rhi::BindingType::TextureArray {
+                sample_type: rhi::TextureSampleType::Float,
+                view_dimension: rhi::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let error = entry.validate().unwrap_err();
+        assert_eq!(
+            BackendError::InvalidBindGroupLayoutEntry {
+                binding: 7,
+                reason: error,
+            },
+            BackendError::InvalidBindGroupLayoutEntry {
+                binding: 7,
+                reason: rhi::BindGroupLayoutEntryError::ArrayWithoutCount,
+            }
+        );
     }
 }

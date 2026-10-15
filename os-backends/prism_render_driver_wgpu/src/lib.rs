@@ -30,7 +30,7 @@ mod surface;
 #[cfg(test)]
 mod bindless_tests;
 
-pub use device::WgpuDevice;
+pub use device::{BackendError, ShaderSourceKind, WgpuDevice};
 pub use instance::{DeviceCreationError, WgpuAdapter, WgpuInstance};
 pub use prism_render_driver::DeviceLostReason;
 pub use queue::WgpuQueue;

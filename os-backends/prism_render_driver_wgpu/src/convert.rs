@@ -10,6 +10,8 @@ use core::num::{NonZeroU32, NonZeroU64};
 
 use prism_render_driver as rhi;
 
+use crate::device::{BackendError, ShaderSourceKind};
+
 /// Reinterprets a generational id from one resource kind to another.
 ///
 /// The RHI's `*Kind` marker types are not re-exported, so the backend stores
@@ -19,11 +21,13 @@ pub(crate) fn convert_id<A: ?Sized, B: ?Sized>(id: rhi::ResourceId<A>) -> rhi::R
     rhi::ResourceId::from_parts(id.index(), id.generation())
 }
 
-/// Translates a texture format.
-pub(crate) fn texture_format(format: rhi::TextureFormat) -> wgpu::TextureFormat {
+/// Translates a texture format without silently substituting another format.
+pub(crate) fn try_texture_format(
+    format: rhi::TextureFormat,
+) -> Result<wgpu::TextureFormat, BackendError> {
     use rhi::TextureFormat as F;
     use wgpu::TextureFormat as W;
-    match format {
+    Ok(match format {
         F::R8Unorm => W::R8Unorm,
         F::R8Uint => W::R8Uint,
         F::R16Float => W::R16Float,
@@ -45,15 +49,27 @@ pub(crate) fn texture_format(format: rhi::TextureFormat) -> wgpu::TextureFormat 
         // The RHI format set is `#[non_exhaustive]`; every variant known at
         // this crate's pin is handled above. A future RHI format with no wgpu
         // analogue is a hard configuration error rather than a silent default.
-        other => panic!("unsupported RHI texture format for wgpu backend: {other:?}"),
-    }
+        other => return Err(BackendError::UnsupportedTextureFormat(other)),
+    })
 }
 
-/// Translates a vertex attribute format.
-pub(crate) fn vertex_format(format: rhi::VertexFormat) -> wgpu::VertexFormat {
+/// Compatibility wrapper for code that still uses the infallible conversion.
+///
+/// New resource creation paths must use [`try_texture_format`]. The wrapper is
+/// retained because surface configuration predates the fallible backend API;
+/// it never substitutes a different format.
+pub(crate) fn texture_format(format: rhi::TextureFormat) -> wgpu::TextureFormat {
+    try_texture_format(format)
+        .unwrap_or_else(|error| panic!("{error}; use the fallible wgpu backend creation API"))
+}
+
+/// Translates a vertex attribute format without silently changing its layout.
+pub(crate) fn try_vertex_format(
+    format: rhi::VertexFormat,
+) -> Result<wgpu::VertexFormat, BackendError> {
     use rhi::VertexFormat as F;
     use wgpu::VertexFormat as W;
-    match format {
+    Ok(match format {
         F::Float32 => W::Float32,
         F::Float32x2 => W::Float32x2,
         F::Float32x3 => W::Float32x3,
@@ -66,7 +82,24 @@ pub(crate) fn vertex_format(format: rhi::VertexFormat) -> wgpu::VertexFormat {
         F::Sint32 => W::Sint32,
         F::Unorm8x4 => W::Unorm8x4,
         F::Snorm8x4 => W::Snorm8x4,
-        other => panic!("unsupported RHI vertex format for wgpu backend: {other:?}"),
+        other => return Err(BackendError::UnsupportedVertexFormat(other)),
+    })
+}
+
+/// Translates an RHI shader source into the WGSL source form accepted by this
+/// wgpu backend. WESL is already lowered to WGSL before it reaches the RHI;
+/// SPIR-V is deliberately rejected because this crate does not enable wgpu's
+/// SPIR-V frontend.
+pub(crate) fn shader_source<'a>(
+    source: &'a rhi::ShaderSource,
+) -> Result<wgpu::ShaderSource<'a>, BackendError> {
+    match source {
+        rhi::ShaderSource::Wgsl(text) | rhi::ShaderSource::Wesl(text) => {
+            Ok(wgpu::ShaderSource::Wgsl(text.as_ref().into()))
+        }
+        rhi::ShaderSource::SpirV(_) => Err(BackendError::UnsupportedShaderSource(
+            ShaderSourceKind::SpirV,
+        )),
     }
 }
 
@@ -313,12 +346,12 @@ fn storage_texture_binding(
     access: rhi::StorageTextureAccess,
     format: rhi::TextureFormat,
     view_dimension: rhi::TextureViewDimension,
-) -> wgpu::BindingType {
-    wgpu::BindingType::StorageTexture {
+) -> Result<wgpu::BindingType, BackendError> {
+    Ok(wgpu::BindingType::StorageTexture {
         access: storage_texture_access(access),
-        format: texture_format(format),
+        format: try_texture_format(format)?,
         view_dimension: texture_view_dimension(view_dimension),
-    }
+    })
 }
 
 /// Translates a single binding slot type.
@@ -331,7 +364,7 @@ fn storage_texture_binding(
 /// two halves of the RHI's array invariant
 /// ([`BindGroupLayoutEntry::validate`](rhi::BindGroupLayoutEntry::validate))
 /// enforced in one place instead of two.
-pub(crate) fn binding_type(ty: rhi::BindingType) -> wgpu::BindingType {
+pub(crate) fn binding_type(ty: rhi::BindingType) -> Result<wgpu::BindingType, BackendError> {
     match ty {
         rhi::BindingType::Buffer {
             ty,
@@ -342,9 +375,9 @@ pub(crate) fn binding_type(ty: rhi::BindingType) -> wgpu::BindingType {
             ty,
             has_dynamic_offset,
             min_binding_size,
-        } => buffer_binding(ty, has_dynamic_offset, min_binding_size),
+        } => Ok(buffer_binding(ty, has_dynamic_offset, min_binding_size)),
         rhi::BindingType::Sampler(ty) | rhi::BindingType::SamplerArray(ty) => {
-            wgpu::BindingType::Sampler(sampler_binding_type(ty))
+            Ok(wgpu::BindingType::Sampler(sampler_binding_type(ty)))
         }
         rhi::BindingType::Texture {
             sample_type,
@@ -355,7 +388,7 @@ pub(crate) fn binding_type(ty: rhi::BindingType) -> wgpu::BindingType {
             sample_type,
             view_dimension,
             multisampled,
-        } => texture_binding(sample_type, view_dimension, multisampled),
+        } => Ok(texture_binding(sample_type, view_dimension, multisampled)),
         rhi::BindingType::StorageTexture {
             access,
             format,
@@ -378,13 +411,13 @@ pub(crate) fn binding_type(ty: rhi::BindingType) -> wgpu::BindingType {
 /// rejects a zero count before translation.
 pub(crate) fn bind_group_layout_entry(
     entry: &rhi::BindGroupLayoutEntry,
-) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
+) -> Result<wgpu::BindGroupLayoutEntry, BackendError> {
+    Ok(wgpu::BindGroupLayoutEntry {
         binding: entry.binding,
         visibility: shader_stages(entry.visibility),
-        ty: binding_type(entry.ty),
+        ty: binding_type(entry.ty)?,
         count: entry.count.and_then(NonZeroU32::new),
-    }
+    })
 }
 
 /// Translates a blend factor.
@@ -542,14 +575,16 @@ pub(crate) fn depth_bias_state(state: rhi::DepthBiasState) -> wgpu::DepthBiasSta
 }
 
 /// Translates depth/stencil attachment state.
-pub(crate) fn depth_stencil_state(state: rhi::DepthStencilState) -> wgpu::DepthStencilState {
-    wgpu::DepthStencilState {
-        format: texture_format(state.format),
+pub(crate) fn depth_stencil_state(
+    state: rhi::DepthStencilState,
+) -> Result<wgpu::DepthStencilState, BackendError> {
+    Ok(wgpu::DepthStencilState {
+        format: try_texture_format(state.format)?,
         depth_write_enabled: Some(state.depth_write_enabled),
         depth_compare: Some(compare_function(state.depth_compare)),
         stencil: stencil_state(state.stencil),
         bias: depth_bias_state(state.bias),
-    }
+    })
 }
 
 /// Translates multisample resolve state.
@@ -995,10 +1030,28 @@ mod tests {
 
     #[test]
     fn texture_format_mapping_is_exhaustive() {
-        // Translating every RHI texture format must not panic, and a few
-        // representative formats must land on the expected wgpu format.
+        // Every format known to this RHI pin must translate successfully. The
+        // wildcard in `try_texture_format` remains an explicit unsupported
+        // result for future non-exhaustive variants.
         let cases = [
             (rhi::TextureFormat::R8Unorm, wgpu::TextureFormat::R8Unorm),
+            (rhi::TextureFormat::R8Uint, wgpu::TextureFormat::R8Uint),
+            (rhi::TextureFormat::R16Float, wgpu::TextureFormat::R16Float),
+            (rhi::TextureFormat::R32Float, wgpu::TextureFormat::R32Float),
+            (rhi::TextureFormat::R32Uint, wgpu::TextureFormat::R32Uint),
+            (rhi::TextureFormat::Rg8Unorm, wgpu::TextureFormat::Rg8Unorm),
+            (
+                rhi::TextureFormat::Rg16Float,
+                wgpu::TextureFormat::Rg16Float,
+            ),
+            (
+                rhi::TextureFormat::Rg32Float,
+                wgpu::TextureFormat::Rg32Float,
+            ),
+            (
+                rhi::TextureFormat::Rgba8Unorm,
+                wgpu::TextureFormat::Rgba8Unorm,
+            ),
             (
                 rhi::TextureFormat::Rgba8UnormSrgb,
                 wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -1008,8 +1061,20 @@ mod tests {
                 wgpu::TextureFormat::Bgra8Unorm,
             ),
             (
+                rhi::TextureFormat::Bgra8UnormSrgb,
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+            ),
+            (
+                rhi::TextureFormat::Rgb10a2Unorm,
+                wgpu::TextureFormat::Rgb10a2Unorm,
+            ),
+            (
                 rhi::TextureFormat::Rgba16Float,
                 wgpu::TextureFormat::Rgba16Float,
+            ),
+            (
+                rhi::TextureFormat::Rgba32Float,
+                wgpu::TextureFormat::Rgba32Float,
             ),
             (
                 rhi::TextureFormat::Depth32Float,
@@ -1026,7 +1091,7 @@ mod tests {
             ),
         ];
         for (rhi_format, wgpu_format) in cases {
-            assert_eq!(texture_format(rhi_format), wgpu_format);
+            assert_eq!(try_texture_format(rhi_format), Ok(wgpu_format));
         }
     }
 
@@ -1055,8 +1120,30 @@ mod tests {
             (F::Snorm8x4, W::Snorm8x4),
         ];
         for (rhi_format, wgpu_format) in cases {
-            assert_eq!(vertex_format(rhi_format), wgpu_format);
+            assert_eq!(try_vertex_format(rhi_format), Ok(wgpu_format));
         }
+    }
+
+    #[test]
+    fn shader_source_conversion_accepts_wgsl_and_wesl_but_not_spirv() {
+        let wgsl = rhi::ShaderSource::Wgsl("@compute".into());
+        let wesl = rhi::ShaderSource::Wesl("@compute".into());
+        assert!(matches!(
+            shader_source(&wgsl),
+            Ok(wgpu::ShaderSource::Wgsl(_))
+        ));
+        assert!(matches!(
+            shader_source(&wesl),
+            Ok(wgpu::ShaderSource::Wgsl(_))
+        ));
+
+        let spirv = rhi::ShaderSource::SpirV(vec![0x0723_0203]);
+        assert!(matches!(
+            shader_source(&spirv),
+            Err(BackendError::UnsupportedShaderSource(
+                ShaderSourceKind::SpirV
+            ))
+        ));
     }
 
     #[test]
@@ -1166,7 +1253,7 @@ mod tests {
                 Ok(()),
                 "an array entry with a count is well formed"
             );
-            let translated = bind_group_layout_entry(&entry);
+            let translated = bind_group_layout_entry(&entry).unwrap();
             assert_eq!(translated.binding, 2);
             assert_eq!(translated.visibility, wgpu::ShaderStages::COMPUTE);
             assert_eq!(translated.ty, expected_wgpu_ty);
@@ -1177,7 +1264,7 @@ mod tests {
     #[test]
     fn single_binding_types_translate_without_a_count() {
         let entry = rhi::BindGroupLayoutEntry::texture_2d(0, rhi::ShaderStages::FRAGMENT);
-        let translated = bind_group_layout_entry(&entry);
+        let translated = bind_group_layout_entry(&entry).unwrap();
         assert_eq!(translated.count, None);
         assert!(matches!(translated.ty, wgpu::BindingType::Texture { .. }));
     }
