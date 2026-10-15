@@ -27,6 +27,9 @@ use crate::snapshot::{SnapshotError, SnapshotStore};
 /// A session-level failure.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionError {
+    /// The replication session has no authenticated transport or its provider
+    /// rejected the security handshake.
+    Security(crate::security::SecurityError),
     /// A plugin's configured MTU cannot carry its control messages.
     Transport(crate::multiplex::MuxSendError),
     /// Prediction was attempted after a plugin connection was rejected.
@@ -265,14 +268,29 @@ impl<F: Clone> ClientSession<F> {
     pub fn receive(
         &mut self,
         bytes: &[u8],
+        simulate: impl FnMut(&mut Record, &F),
+    ) -> Result<Vec<u32>, SessionError> {
+        self.receive_with_observer(bytes, simulate, |_, _| {})
+    }
+
+    /// Feed received stream bytes, reconcile each complete delta frame, and
+    /// observe every authoritative post-step record before prediction replay.
+    pub fn receive_with_observer(
+        &mut self,
+        bytes: &[u8],
         mut simulate: impl FnMut(&mut Record, &F),
+        mut observe_authority: impl FnMut(u32, &Record),
     ) -> Result<Vec<u32>, SessionError> {
         self.decoder.feed(bytes);
         let mut revisions = Vec::new();
         // Peek so a frame that fails reconciliation stays buffered; only a frame
         // that applied cleanly is consumed.
         while let Some(frame) = self.decoder.peek_frame()? {
-            let revision = self.prediction.reconcile(&frame, &mut simulate)?;
+            let revision = self.prediction.reconcile_with_observer(
+                &frame,
+                &mut simulate,
+                &mut observe_authority,
+            )?;
             self.decoder.next_frame()?;
             revisions.push(revision);
         }

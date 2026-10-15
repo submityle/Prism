@@ -32,11 +32,29 @@
 use alloc::vec::Vec;
 
 use crate::multiplex::{MuxConfig, NegotiatedProtocol, NetChannel, ProtocolError, ProtocolOffer};
+use crate::session::SessionError;
+use crate::transport::Transport;
 
+#[cfg(feature = "determinism")]
+mod audit;
 mod client;
+mod ecs;
 mod server;
 
-pub use client::{Replication, ReplicationPlugin, ReplicationStrategy};
+#[cfg(feature = "determinism")]
+pub use audit::{
+    FrameHashAudit, FrameHashAuditError, FrameHashComparison, FrameHashReceipt, FrameHashUpdate,
+};
+
+pub use crate::security::{
+    ClientHello, SecureTransport, SecurityDirection, SecurityError, ServerAccept, SessionNonce,
+    SessionSecurityProvider,
+};
+pub use client::{
+    AuthorityUpdate, EcsReplicationStrategy, NetworkRollbackSimulation, Replication,
+    ReplicationPlugin, ReplicationStrategy,
+};
+pub use ecs::{EcsReplication, EcsReplicationError, EcsReplicationPlugin, NetworkRollbackDriver};
 pub use server::{ReplicationServerPlugin, ServerReplication, ServerStrategy};
 
 /// The retransmit floor (in frames) both plugins use for their channel.
@@ -117,6 +135,8 @@ const RPC_PAYLOAD: u8 = 3;
 const EVENT_DELTA: u8 = 0;
 const EVENT_PAYLOAD: u8 = 1;
 const EVENT_SNAPSHOT: u8 = 2;
+#[cfg(feature = "determinism")]
+const EVENT_FRAME_HASH: u8 = 3;
 const STATE_PAYLOAD: u8 = 0;
 
 pub(super) enum RpcEnvelope<'a> {
@@ -130,6 +150,8 @@ pub(super) enum EventEnvelope<'a> {
     Delta(&'a [u8]),
     Payload(&'a [u8]),
     Snapshot(&'a [u8]),
+    #[cfg(feature = "determinism")]
+    FrameHash(FrameHashUpdate),
 }
 
 pub(super) fn encode_hello(offer: ProtocolOffer) -> Vec<u8> {
@@ -158,6 +180,7 @@ pub(super) fn encode_reject(error: ProtocolError) -> Vec<u8> {
         | ProtocolError::UnexpectedHandshake => {
             bytes.push(2);
         }
+        ProtocolError::SecurityFailure => bytes.push(3),
     }
     bytes
 }
@@ -200,6 +223,7 @@ pub(super) fn decode_rpc(bytes: &[u8]) -> Result<RpcEnvelope<'_>, ProtocolError>
                     offered: u32::from_le_bytes([detail[0], detail[1], detail[2], detail[3]]),
                 },
                 2 if detail.is_empty() => ProtocolError::UnexpectedHandshake,
+                3 if detail.is_empty() => ProtocolError::SecurityFailure,
                 _ => return Err(malformed(NetChannel::RpcReliable)),
             };
             Ok(RpcEnvelope::Reject(error))
@@ -238,8 +262,17 @@ pub(super) fn decode_event(bytes: &[u8]) -> Result<EventEnvelope<'_>, ProtocolEr
             }
         }
         EVENT_PAYLOAD => Ok(EventEnvelope::Payload(payload)),
+        #[cfg(feature = "determinism")]
+        EVENT_FRAME_HASH => FrameHashUpdate::decode(payload)
+            .map(EventEnvelope::FrameHash)
+            .ok_or_else(|| malformed(NetChannel::EventsReliable)),
         _ => Err(malformed(NetChannel::EventsReliable)),
     }
+}
+
+#[cfg(feature = "determinism")]
+pub(super) fn encode_frame_hash(update: FrameHashUpdate) -> Vec<u8> {
+    encode_payload(EVENT_FRAME_HASH, &update.encode())
 }
 
 pub(super) fn encode_state(payload: &[u8]) -> Vec<u8> {
@@ -287,6 +320,26 @@ pub(super) const fn malformed(channel: NetChannel) -> ProtocolError {
     ProtocolError::MalformedMessage { channel }
 }
 
+pub(super) fn require_secure_transport(transport: &dyn Transport) -> Result<(), SessionError> {
+    if transport.supports_secure_session() {
+        Ok(())
+    } else {
+        Err(SessionError::Security(SecurityError::ProviderRequired))
+    }
+}
+
 fn capacity_to_window(capacity: usize) -> u32 {
     u32::try_from(capacity.max(1)).unwrap_or(u32::MAX)
+}
+
+#[cfg(all(test, not(feature = "determinism")))]
+#[test]
+fn unaudited_contract_keeps_v1_and_rejects_hash_envelopes() {
+    assert_eq!(crate::multiplex::CURRENT_PROTOCOL_VERSION, 1);
+    assert!(matches!(
+        decode_event(&[3; 25]),
+        Err(ProtocolError::MalformedMessage {
+            channel: NetChannel::EventsReliable
+        })
+    ));
 }

@@ -45,6 +45,10 @@ pub struct ServerReplication<S: ServerStrategy> {
     connection: ConnectionState,
     next_rpc_id: u64,
     pending_commands: VecDeque<Vec<u8>>,
+    #[cfg(feature = "determinism")]
+    audit: super::FrameHashAudit,
+    #[cfg(feature = "determinism")]
+    last_audit_error: Option<super::FrameHashAuditError>,
     inbound_events: VecDeque<Vec<u8>>,
     inbound_inputs: VecDeque<Vec<u8>>,
     inbound_bulk: VecDeque<Vec<u8>>,
@@ -97,6 +101,7 @@ impl<S: ServerStrategy> ServerReplication<S> {
         transport: Box<dyn Transport>,
         config: ReplicationConfig,
     ) -> Result<Self, SessionError> {
+        super::require_secure_transport(transport.as_ref())?;
         let config = config.for_session(capacity);
         let mut mux = ChannelMux::new(transport, config.mux);
         // Accept is the largest fixed-size handshake envelope (seven bytes).
@@ -119,6 +124,10 @@ impl<S: ServerStrategy> ServerReplication<S> {
             connection,
             next_rpc_id: 0,
             pending_commands: VecDeque::new(),
+            #[cfg(feature = "determinism")]
+            audit: super::FrameHashAudit::new(capacity),
+            #[cfg(feature = "determinism")]
+            last_audit_error: None,
             inbound_events: VecDeque::new(),
             inbound_inputs: VecDeque::new(),
             inbound_bulk: VecDeque::new(),
@@ -149,6 +158,12 @@ impl<S: ServerStrategy> ServerReplication<S> {
     pub fn pump(&mut self) -> usize {
         self.last_error = None;
         self.mux.tick();
+        if self.mux.security_state() == crate::transport::TransportSecurity::Rejected
+            || self.mux.take_security_error().is_some()
+        {
+            self.reject(ProtocolError::SecurityFailure, false);
+            return 0;
+        }
         if matches!(self.connection, ConnectionState::Rejected(_)) {
             return 0;
         }
@@ -209,6 +224,8 @@ impl<S: ServerStrategy> ServerReplication<S> {
                 }
             }
         }
+        #[cfg(feature = "determinism")]
+        self.flush_frame_hashes();
         advanced
     }
 
@@ -277,6 +294,12 @@ impl<S: ServerStrategy> ServerReplication<S> {
             match decode_event(&bytes) {
                 Ok(EventEnvelope::Payload(event)) => {
                     self.inbound_events.push_back(event.to_vec());
+                }
+                #[cfg(feature = "determinism")]
+                Ok(EventEnvelope::FrameHash(update)) => {
+                    if let Err(error) = self.audit.receive(update) {
+                        self.last_audit_error.get_or_insert(error);
+                    }
                 }
                 Ok(EventEnvelope::Delta(_) | EventEnvelope::Snapshot(_)) => {
                     self.reject(
@@ -380,6 +403,61 @@ impl<S: ServerStrategy> ServerReplication<S> {
         let event = encode_event(bytes);
         let result = self.mux.send(NetChannel::EventsReliable, &event);
         self.record_send(result)
+    }
+
+    /// Retained ECS hashes received from this client. A record-only server has
+    /// no ECS World to hash: supply its actual history via `sync_frame_hashes`.
+    #[cfg(feature = "determinism")]
+    #[must_use]
+    pub fn frame_hash_audit(&self) -> &super::FrameHashAudit {
+        &self.audit
+    }
+
+    /// Publish authoritative ECS pre-input snapshot hashes, never a hash of the
+    /// record proxy. Call after capture/replay; `pump` retries queued sends.
+    /// Hash coverage requires registered semantic glue on both peers.
+    #[cfg(feature = "determinism")]
+    pub fn sync_frame_hashes(
+        &mut self,
+        history: &prism_app::SnapshotHistory,
+        from: u64,
+    ) -> Result<(), super::FrameHashAuditError> {
+        self.audit.sync_history(history, from)
+    }
+
+    /// First unconsumed expired/outside-window/conflicting audit packet error.
+    #[cfg(feature = "determinism")]
+    pub fn take_audit_error(&mut self) -> Option<super::FrameHashAuditError> {
+        self.last_audit_error.take()
+    }
+
+    /// Queue an explicit connection-sequenced hash envelope. Prefer
+    /// `sync_frame_hashes` for the retained/coalesced capture path.
+    /// Do not mix caller-assigned sequences with `sync_frame_hashes` on the same
+    /// connection: the automatic audit owns its own sequence namespace.
+    #[cfg(feature = "determinism")]
+    pub fn send_frame_hash(
+        &mut self,
+        update: super::FrameHashUpdate,
+    ) -> Result<QueueOutcome, MuxSendError> {
+        self.require_established()?;
+        let bytes = super::encode_frame_hash(update);
+        let result = self.mux.send(NetChannel::EventsReliable, &bytes);
+        self.record_send(result)
+    }
+
+    /// Retry retained hashes without losing updates to transport backpressure.
+    #[cfg(feature = "determinism")]
+    pub fn flush_frame_hashes(&mut self) {
+        if self.negotiated().is_none() {
+            return;
+        }
+        while let Some(update) = self.audit.next_pending() {
+            match self.send_frame_hash(update) {
+                Ok(_) => self.audit.sent(update),
+                Err(_) => break,
+            }
+        }
     }
 
     /// Queue a reliable RPC response/control payload.
@@ -652,7 +730,7 @@ mod tests {
         client_config: ReplicationConfig,
         server_config: ReplicationConfig,
     ) -> (Replication<AddClient>, ServerReplication<AddAuthority>) {
-        let (a, b) = InMemoryTransport::pair();
+        let (a, b) = InMemoryTransport::pair_secure();
         (
             Replication::new_with_config(
                 schema(),
@@ -803,7 +881,7 @@ mod tests {
 
     #[test]
     fn memory_plugins_exchange_events_rpcs_state_and_prediction() {
-        let (a, b) = InMemoryTransport::pair();
+        let (a, b) = InMemoryTransport::pair_secure();
         exercise_plugins(Box::new(a), Box::new(b), false);
     }
 
@@ -856,6 +934,15 @@ mod tests {
         };
         a.connect_to(b.local_addr().unwrap()).unwrap();
         b.connect_to(a.local_addr().unwrap()).unwrap();
+        let a = crate::security::SecureTransport::new_client(
+            a,
+            crate::security::test_support::Provider::new(0x31, 1),
+        )
+        .unwrap();
+        let b = crate::security::SecureTransport::new_server(
+            b,
+            crate::security::test_support::Provider::new(0x31, 9),
+        );
         exercise_plugins(Box::new(a), Box::new(b), true);
     }
 
@@ -898,7 +985,7 @@ mod tests {
 
     #[test]
     fn zero_rollback_offer_is_rejected_and_never_applies_commands() {
-        let (a, b) = InMemoryTransport::pair();
+        let (a, b) = InMemoryTransport::pair_secure();
         let config = ReplicationConfig::for_capacity(8);
         let mut peer = ChannelMux::new(a, config.mux);
         let mut server = ServerReplication::new_with_config(
@@ -960,7 +1047,7 @@ mod tests {
 
     #[test]
     fn reliable_event_backpressure_does_not_advance_authority() {
-        let (a, b) = InMemoryTransport::pair();
+        let (a, b) = InMemoryTransport::pair_secure();
         let mut config = ReplicationConfig::for_capacity(8);
         config.mux.reliable_queue = 1;
         config.mux.reliable_window = 1;
@@ -1012,7 +1099,7 @@ mod tests {
 
     #[test]
     fn malformed_event_rejects_before_queued_commands_can_mutate_authority() {
-        let (a, b) = InMemoryTransport::pair();
+        let (a, b) = InMemoryTransport::pair_secure();
         let config = ReplicationConfig::for_capacity(8);
         let mut peer = ChannelMux::new(a, config.mux);
         let mut server =
@@ -1047,7 +1134,7 @@ mod tests {
     /// driven by the two frame loops, no manual pumping.
     #[test]
     fn a_client_command_reaches_authority_and_its_delta_reconciles_the_client() {
-        let (client_end, server_end) = InMemoryTransport::pair();
+        let (client_end, server_end) = InMemoryTransport::pair_secure();
 
         let mut client_app = App::new();
         client_app.add_plugins(ReplicationPlugin::new(
@@ -1102,7 +1189,7 @@ mod tests {
     /// authority's revision does not move.
     #[test]
     fn a_malformed_command_does_not_advance_authority() {
-        let (client_end, server_end) = InMemoryTransport::pair();
+        let (client_end, server_end) = InMemoryTransport::pair_secure();
         let mut client_app = App::new();
         client_app.add_plugins(ReplicationPlugin::new(
             schema(),
@@ -1141,7 +1228,7 @@ mod tests {
     /// resync path `receive` (which only understands deltas) cannot serve.
     #[test]
     fn a_seed_frame_reseeds_a_client_to_the_authoritative_revision() {
-        let (client_end, server_end) = InMemoryTransport::pair();
+        let (client_end, server_end) = InMemoryTransport::pair_secure();
         let mut server = ServerReplication::new(
             schema(),
             8,
@@ -1185,7 +1272,7 @@ mod tests {
     /// pending.
     #[test]
     fn a_predicted_command_that_matches_authority_is_not_rolled_back() {
-        let (client_end, server_end) = InMemoryTransport::pair();
+        let (client_end, server_end) = InMemoryTransport::pair_secure();
         let mut client_app = App::new();
         client_app.add_plugins(ReplicationPlugin::new(
             schema(),

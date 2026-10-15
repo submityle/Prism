@@ -17,6 +17,21 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use crate::security::SecurityError;
+
+/// Whether a transport can carry a replication session safely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportSecurity {
+    /// Raw bytes with no authenticated session boundary.
+    Unprotected,
+    /// A secure wrapper is present but its handshake is still in flight.
+    Pending,
+    /// The authenticated session is established.
+    Established,
+    /// The secure wrapper rejected the peer or a protected datagram.
+    Rejected,
+}
+
 /// The transport provider seam (design §6): bytes out, bytes in.
 ///
 /// A real provider (reliable UDP / QUIC) implements this over a socket; the
@@ -28,6 +43,30 @@ pub trait Transport: Send + Sync {
     fn send(&mut self, bytes: &[u8]);
     /// Take the next inbound message, if any.
     fn recv(&mut self) -> Option<Vec<u8>>;
+
+    /// Whether this transport has an explicit authenticated-session wrapper.
+    /// Plain transports deliberately return `false`; replication constructors
+    /// reject them instead of silently sending gameplay data in cleartext.
+    fn supports_secure_session(&self) -> bool {
+        false
+    }
+
+    /// Current security state for diagnostics and plugin fail-closed behavior.
+    fn security_state(&self) -> TransportSecurity {
+        TransportSecurity::Unprotected
+    }
+
+    /// Bytes added around a multiplex payload by the security wrapper. The
+    /// multiplex uses this to keep the physical datagram within the path MTU.
+    fn security_overhead(&self) -> usize {
+        0
+    }
+
+    /// Retrieve a provider/wire error without changing the basic `Transport`
+    /// send/recv ABI.
+    fn take_security_error(&mut self) -> Option<SecurityError> {
+        None
+    }
 }
 
 /// A boxed transport is itself a transport, so a caller can erase the concrete
@@ -39,6 +78,22 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
     }
     fn recv(&mut self) -> Option<Vec<u8>> {
         (**self).recv()
+    }
+
+    fn supports_secure_session(&self) -> bool {
+        (**self).supports_secure_session()
+    }
+
+    fn security_state(&self) -> TransportSecurity {
+        (**self).security_state()
+    }
+
+    fn security_overhead(&self) -> usize {
+        (**self).security_overhead()
+    }
+
+    fn take_security_error(&mut self) -> Option<SecurityError> {
+        (**self).take_security_error()
     }
 }
 
@@ -80,6 +135,28 @@ pub mod memory {
                     inboxes,
                     as_a: false,
                 },
+            )
+        }
+
+        /// Test-only authenticated pair used by replication plugin tests. The
+        /// ordinary [`pair`](Self::pair) remains a raw transport and is useful
+        /// for testing this lower-level byte seam itself.
+        #[cfg(test)]
+        pub(crate) fn pair_secure() -> (
+            crate::security::SecureTransport<Self, crate::security::test_support::Provider>,
+            crate::security::SecureTransport<Self, crate::security::test_support::Provider>,
+        ) {
+            let (client, server) = Self::pair();
+            (
+                crate::security::SecureTransport::new_client(
+                    client,
+                    crate::security::test_support::Provider::new(0x31, 1),
+                )
+                .expect("test provider creates a non-zero client nonce"),
+                crate::security::SecureTransport::new_server(
+                    server,
+                    crate::security::test_support::Provider::new(0x31, 9),
+                ),
             )
         }
 
@@ -138,6 +215,144 @@ pub mod memory {
             assert_eq!(b.recv(), Some(b"from-a".to_vec()));
             assert_eq!(a.recv(), None);
             assert_eq!(b.pending(), 0);
+        }
+    }
+}
+
+/// A bounded cross-thread byte transport backed by standard-library channels.
+///
+/// Each endpoint owns one bounded outbound queue and one inbound receiver. The
+/// implementation is `Send + Sync`, so one endpoint can be moved to a worker
+/// thread while the peer stays on the app thread. `send` is deliberately
+/// non-blocking: a full or disconnected queue drops the datagram and increments
+/// [`ThreadTransport::dropped`]. Reliable delivery remains the responsibility of
+/// the multiplex/ARQ layer above this datagram seam.
+#[cfg(feature = "std")]
+pub mod threaded {
+    use super::Transport;
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+    use std::sync::Mutex;
+
+    /// A bounded, non-blocking endpoint for cross-thread replication tests or
+    /// an in-process network worker.
+    pub struct ThreadTransport {
+        outbound: SyncSender<Vec<u8>>,
+        inbound: Mutex<Receiver<Vec<u8>>>,
+        dropped: Arc<AtomicU64>,
+        capacity: usize,
+    }
+
+    impl ThreadTransport {
+        /// Create a connected pair with `capacity` datagrams per direction.
+        ///
+        /// # Panics
+        /// Panics when `capacity` is zero because an unbuffered channel would
+        /// make the non-blocking `Transport::send` contract unusable.
+        #[must_use]
+        pub fn pair(capacity: usize) -> (Self, Self) {
+            assert!(capacity > 0, "thread transport capacity must be positive");
+            let (a_tx, a_rx) = mpsc::sync_channel(capacity);
+            let (b_tx, b_rx) = mpsc::sync_channel(capacity);
+            (
+                Self {
+                    outbound: a_tx,
+                    inbound: Mutex::new(b_rx),
+                    dropped: Arc::new(AtomicU64::new(0)),
+                    capacity,
+                },
+                Self {
+                    outbound: b_tx,
+                    inbound: Mutex::new(a_rx),
+                    dropped: Arc::new(AtomicU64::new(0)),
+                    capacity,
+                },
+            )
+        }
+
+        /// Number of datagrams that could not be queued by this endpoint.
+        #[must_use]
+        pub fn dropped(&self) -> u64 {
+            self.dropped.load(Ordering::Relaxed)
+        }
+
+        /// Configured datagram capacity per direction.
+        #[must_use]
+        pub const fn capacity(&self) -> usize {
+            self.capacity
+        }
+
+        #[cfg(test)]
+        pub(crate) fn pair_secure(
+            capacity: usize,
+        ) -> (
+            crate::security::SecureTransport<Self, crate::security::test_support::Provider>,
+            crate::security::SecureTransport<Self, crate::security::test_support::Provider>,
+        ) {
+            let (client, server) = Self::pair(capacity);
+            (
+                crate::security::SecureTransport::new_client(
+                    client,
+                    crate::security::test_support::Provider::new(0x31, 1),
+                )
+                .expect("test provider creates a non-zero client nonce"),
+                crate::security::SecureTransport::new_server(
+                    server,
+                    crate::security::test_support::Provider::new(0x31, 9),
+                ),
+            )
+        }
+    }
+
+    impl Transport for ThreadTransport {
+        fn send(&mut self, bytes: &[u8]) {
+            match self.outbound.try_send(bytes.to_vec()) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        fn recv(&mut self) -> Option<Vec<u8>> {
+            let receiver = self
+                .inbound
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match receiver.try_recv() {
+                Ok(bytes) => Some(bytes),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::thread;
+
+        #[test]
+        fn endpoint_can_move_between_threads_without_blocking() {
+            let (mut worker, mut app) = ThreadTransport::pair(2);
+            let handle = thread::spawn(move || {
+                worker.send(b"from worker");
+                worker
+            });
+            worker = handle.join().expect("worker thread completes");
+            assert_eq!(app.recv(), Some(b"from worker".to_vec()));
+            assert_eq!(worker.dropped(), 0);
+        }
+
+        #[test]
+        fn bounded_send_reports_backpressure_without_blocking() {
+            let (mut a, mut b) = ThreadTransport::pair(1);
+            a.send(b"first");
+            a.send(b"second");
+            assert_eq!(a.dropped(), 1);
+            assert_eq!(b.recv(), Some(b"first".to_vec()));
+            assert_eq!(b.recv(), None);
         }
     }
 }

@@ -5,7 +5,9 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use std::sync::Mutex;
 
-use prism_app::{App, First, Plugin};
+use prism_app::{
+    App, First, FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate, Plugin,
+};
 use prism_ecs::resource::Resource;
 use prism_ecs::system::ResMut;
 
@@ -34,6 +36,55 @@ pub trait ReplicationStrategy: Send + Sync + 'static {
     fn encode(&self, input: &Self::Input) -> Vec<u8>;
 }
 
+/// A replication strategy that can project the record protocol onto an ECS
+/// World. The record remains the wire/prediction representation; the World is
+/// the authoritative local simulation state.
+pub trait EcsReplicationStrategy: ReplicationStrategy {
+    /// Apply one local predicted input to the ECS World.
+    fn apply_input(&self, world: &mut prism_ecs::world::World, input: &Self::Input);
+    /// Replace the ECS World with an authoritative post-step record.
+    fn apply_authority(&self, world: &mut prism_ecs::world::World, state: &Record);
+}
+
+/// The fixed-tick projection used by the ECS rollback bridge.
+///
+/// A normal prediction is applied by [`Self::apply_input`] inside the live
+/// `FixedFirst` schedule. During reconciliation the bridge has to reproduce the
+/// same tick without re-entering its network system, so the default projection
+/// applies the input and then runs the complete `FixedMain` phase sequence.
+/// Applications with a different fixed-tick contract may override this method
+/// (for example, to install a replay input resource before the phases run).
+pub trait NetworkRollbackSimulation: EcsReplicationStrategy {
+    /// Re-simulate one fixed tick from the current World state.
+    fn replay_fixed_tick(&self, world: &mut prism_ecs::world::World, input: &Self::Input) {
+        self.apply_input(world, input);
+        world.run_schedule(FixedFirst);
+        world.run_schedule(FixedPreUpdate);
+        world.run_schedule(FixedUpdate);
+        world.run_schedule(FixedPostUpdate);
+        world.run_schedule(FixedLast);
+    }
+}
+
+impl<T: EcsReplicationStrategy> NetworkRollbackSimulation for T {}
+
+/// One authoritative post-step record delivered to an app integration.
+///
+/// `revision` is one-based relative to the seeded baseline: revision `1` is
+/// the authoritative result of the first predicted input. The record is
+/// cloned before the session replays local pending inputs, so an ECS bridge can
+/// apply the authority to its own World without observing the predicted tail.
+#[derive(Clone, Debug)]
+pub struct AuthorityUpdate<I> {
+    /// The authoritative post-input revision.
+    pub revision: u32,
+    /// The authoritative state at `revision`.
+    pub state: Record,
+    /// The input type carried by the owning session. This phantom field keeps
+    /// the update tied to the session's strategy without duplicating wire data.
+    pub(crate) _input: core::marker::PhantomData<fn() -> I>,
+}
+
 /// The app-facing replication resource.
 pub struct Replication<S: ReplicationStrategy> {
     session: ClientSession<S::Input>,
@@ -46,6 +97,14 @@ pub struct Replication<S: ReplicationStrategy> {
     inbound_rpcs: VecDeque<Vec<u8>>,
     inbound_inputs: VecDeque<Vec<u8>>,
     inbound_bulk: VecDeque<Vec<u8>>,
+    authority_updates: VecDeque<AuthorityUpdate<S::Input>>,
+    /// Raw authority deltas held until an ECS bridge has committed the World
+    /// rollback. The record session is advanced only after that commit.
+    deferred_authority: VecDeque<Vec<u8>>,
+    #[cfg(feature = "determinism")]
+    audit: super::FrameHashAudit,
+    #[cfg(feature = "determinism")]
+    last_audit_error: Option<super::FrameHashAuditError>,
     newest_state: Option<Vec<u8>>,
     /// The first error from the most recent [`pump`](Self::pump), readable by the
     /// app; a malformed or rejected frame must not panic the frame loop.
@@ -91,6 +150,7 @@ impl<S: ReplicationStrategy> Replication<S> {
         transport: Box<dyn Transport>,
         config: ReplicationConfig,
     ) -> Result<Self, SessionError> {
+        super::require_secure_transport(transport.as_ref())?;
         let config = config.for_session(capacity);
         let mut mux = ChannelMux::new(transport, config.mux);
         let hello = encode_hello(config.protocol);
@@ -114,6 +174,12 @@ impl<S: ReplicationStrategy> Replication<S> {
             inbound_rpcs: VecDeque::new(),
             inbound_inputs: VecDeque::new(),
             inbound_bulk: VecDeque::new(),
+            authority_updates: VecDeque::new(),
+            deferred_authority: VecDeque::new(),
+            #[cfg(feature = "determinism")]
+            audit: super::FrameHashAudit::new(capacity),
+            #[cfg(feature = "determinism")]
+            last_audit_error: None,
             newest_state: None,
             last_error: None,
             last_protocol_error: match connection {
@@ -132,8 +198,27 @@ impl<S: ReplicationStrategy> Replication<S> {
     /// [`take_last_error`](Self::take_last_error) rather than propagated, so a bad
     /// frame cannot unwind the frame loop.
     pub fn pump(&mut self) -> usize {
+        self.pump_inner(false)
+    }
+
+    /// Pump transport traffic while deferring authoritative deltas.
+    ///
+    /// [`EcsReplicationPlugin`](super::EcsReplicationPlugin) uses this mode so
+    /// the record prediction is not acknowledged before the corresponding ECS
+    /// World rollback/replay has succeeded.
+    pub(crate) fn pump_deferred(&mut self) -> usize {
+        self.pump_inner(true)
+    }
+
+    fn pump_inner(&mut self, defer_authority: bool) -> usize {
         self.last_error = None;
         self.mux.tick();
+        if self.mux.security_state() == crate::transport::TransportSecurity::Rejected
+            || self.mux.take_security_error().is_some()
+        {
+            self.reject(ProtocolError::SecurityFailure);
+            return 0;
+        }
         if matches!(self.connection, ConnectionState::Rejected(_)) {
             return 0;
         }
@@ -151,18 +236,39 @@ impl<S: ReplicationStrategy> Replication<S> {
                 // A failed delta remains buffered. Do not grow that decoder
                 // indefinitely; only a subsequent ordered snapshot can resync it.
                 Ok(EventEnvelope::Delta(_)) if self.session.buffered() != 0 => {}
-                Ok(EventEnvelope::Delta(delta)) => match self
-                    .session
-                    .receive(delta, |record, input| self.strategy.simulate(record, input))
-                {
-                    Ok(revisions) => applied += revisions.len(),
-                    Err(error) => {
-                        self.last_error = Some(error);
-                        break;
+                Ok(EventEnvelope::Delta(delta)) if defer_authority => {
+                    self.deferred_authority.push_back(delta.to_vec());
+                }
+                Ok(EventEnvelope::Delta(delta)) => {
+                    let mut updates = Vec::new();
+                    let result = self.session.receive_with_observer(
+                        delta,
+                        |record, input| self.strategy.simulate(record, input),
+                        |revision, state| {
+                            updates.push(AuthorityUpdate {
+                                revision,
+                                state: state.clone(),
+                                _input: core::marker::PhantomData,
+                            });
+                        },
+                    );
+                    match result {
+                        Ok(revisions) => applied += revisions.len(),
+                        Err(error) => {
+                            self.last_error = Some(error);
+                            break;
+                        }
                     }
-                },
+                    self.authority_updates.extend(updates);
+                }
                 Ok(EventEnvelope::Payload(event)) => {
                     self.inbound_events.push_back(event.to_vec());
+                }
+                #[cfg(feature = "determinism")]
+                Ok(EventEnvelope::FrameHash(update)) => {
+                    if let Err(error) = self.audit.receive(update) {
+                        self.last_audit_error.get_or_insert(error);
+                    }
                 }
                 Ok(EventEnvelope::Snapshot(snapshot)) => {
                     if let Err(error) = self.session.reseed(snapshot) {
@@ -203,7 +309,59 @@ impl<S: ReplicationStrategy> Replication<S> {
             };
             self.inbound_bulk.push_back(bulk);
         }
+        #[cfg(feature = "determinism")]
+        self.flush_frame_hashes();
         applied
+    }
+
+    /// Reconcile one deferred authority delta together with an ECS World.
+    ///
+    /// The client record session is cloned before applying the delta. If the
+    /// ECS bridge refuses the corresponding World transaction, the record
+    /// session and the raw wire delta are both left untouched, allowing a
+    /// caller to surface the error or resync without creating a split-brain
+    /// predicted state.
+    pub(crate) fn reconcile_deferred_ecs(
+        &mut self,
+        world: &mut prism_ecs::world::World,
+        driver: &mut super::ecs::NetworkRollbackDriver<S::Input>,
+    ) -> Result<bool, super::ecs::DeferredEcsError>
+    where
+        S: EcsReplicationStrategy + NetworkRollbackSimulation,
+    {
+        let Some(delta) = self.deferred_authority.front().cloned() else {
+            return Ok(false);
+        };
+        let previous_session = self.session.clone();
+        let mut rollback_error = None;
+        let result = self.session.receive_with_observer(
+            &delta,
+            |record, input| self.strategy.simulate(record, input),
+            |revision, state| {
+                if rollback_error.is_some() {
+                    return;
+                }
+                let strategy = &self.strategy;
+                if let Err(error) = driver.rebase_authority(
+                    world,
+                    revision as u64,
+                    |world| strategy.apply_authority(world, state),
+                    |world, input| strategy.replay_fixed_tick(world, input),
+                ) {
+                    rollback_error = Some(error);
+                }
+            },
+        );
+        if let Some(error) = rollback_error {
+            self.session = previous_session;
+            return Err(super::ecs::DeferredEcsError::Rollback(error));
+        }
+        if let Err(error) = result {
+            self.session = previous_session;
+            return Err(super::ecs::DeferredEcsError::Session(error));
+        }
+        self.deferred_authority.pop_front();
+        Ok(true)
     }
 
     fn drain_control(&mut self) {
@@ -306,6 +464,47 @@ impl<S: ReplicationStrategy> Replication<S> {
         session.predict(input, |record, input| strategy.simulate(record, input))
     }
 
+    /// Whether one more local prediction fits in the negotiated rollback
+    /// window. This is exposed for an ECS driver so it can commit its World
+    /// snapshot only when the network prediction can be admitted as well.
+    #[must_use]
+    pub fn can_predict(&self) -> bool {
+        self.ensure_prediction_capacity().is_ok()
+    }
+
+    /// Explain why another local prediction cannot currently be admitted.
+    pub fn check_prediction_capacity(&self) -> Result<(), SessionError> {
+        self.ensure_prediction_capacity()
+    }
+
+    /// Queue the command bytes for an input that has already been predicted.
+    ///
+    /// [`predict`](Self::predict) and this method are intentionally separate
+    /// for ECS integrations: the World snapshot is committed between the two
+    /// operations, so a failed snapshot never leaves a network-only prediction.
+    pub fn send_predicted(&mut self, input: &S::Input) -> Result<u64, MuxSendError> {
+        let bytes = self.strategy.encode(input);
+        self.try_send_rpc(&bytes)
+    }
+
+    /// Apply a predicted input to an ECS World through an ECS-capable strategy.
+    pub fn apply_input_to_world(&self, world: &mut prism_ecs::world::World, input: &S::Input)
+    where
+        S: EcsReplicationStrategy,
+    {
+        self.strategy.apply_input(world, input);
+    }
+
+    /// Apply an authoritative record to an ECS World through an ECS-capable
+    /// strategy. The record is the post-step authority state, before pending
+    /// local inputs are replayed.
+    pub fn apply_authority_to_world(&self, world: &mut prism_ecs::world::World, state: &Record)
+    where
+        S: EcsReplicationStrategy,
+    {
+        self.strategy.apply_authority(world, state);
+    }
+
     /// Predict `input` locally **and** send it to authority in one call — the
     /// client half of the command path.
     ///
@@ -381,6 +580,63 @@ impl<S: ReplicationStrategy> Replication<S> {
         self.record_send(result)
     }
 
+    /// Retained ECS hash comparison, independent of application event traffic.
+    #[cfg(feature = "determinism")]
+    #[must_use]
+    pub fn frame_hash_audit(&self) -> &super::FrameHashAudit {
+        &self.audit
+    }
+
+    /// Copy actual captured hashes into the bounded outgoing audit. `from` is
+    /// the first changed pre-input tick; rollback callers must also invoke this
+    /// after partial replay failures to discard the abandoned future.
+    /// Only registered snapshot hash glue covers values; see [`super::FrameHashAudit`].
+    #[cfg(feature = "determinism")]
+    pub fn sync_frame_hashes(
+        &mut self,
+        history: &prism_app::SnapshotHistory,
+        from: u64,
+    ) -> Result<(), super::FrameHashAuditError> {
+        self.audit.sync_history(history, from)
+    }
+
+    /// First unconsumed audit admission error. Divergence is queried through
+    /// `frame_hash_audit().comparison()` and can clear after correction.
+    #[cfg(feature = "determinism")]
+    pub fn take_audit_error(&mut self) -> Option<super::FrameHashAuditError> {
+        self.last_audit_error.take()
+    }
+
+    /// Queue an explicit peer hash envelope. Normal ECS bridge captures use the
+    /// retained retry queue instead. The sender owns the connection sequence.
+    /// Do not mix caller-assigned sequences with `sync_frame_hashes` on the same
+    /// connection: the automatic audit owns its own sequence namespace.
+    #[cfg(feature = "determinism")]
+    pub fn send_frame_hash(
+        &mut self,
+        update: super::FrameHashUpdate,
+    ) -> Result<QueueOutcome, MuxSendError> {
+        self.require_established()?;
+        let bytes = super::encode_frame_hash(update);
+        let result = self.mux.send(NetChannel::EventsReliable, &bytes);
+        self.record_send(result)
+    }
+
+    /// Flush retained/coalesced hashes. Backpressure never removes an update;
+    /// a later pump retries it. Retention expiry is an explicit audit error.
+    #[cfg(feature = "determinism")]
+    pub fn flush_frame_hashes(&mut self) {
+        if self.negotiated().is_none() {
+            return;
+        }
+        while let Some(update) = self.audit.next_pending() {
+            match self.send_frame_hash(update) {
+                Ok(_) => self.audit.sent(update),
+                Err(_) => break,
+            }
+        }
+    }
+
     /// Queue newest-wins transient state. A newer unsent value replaces the
     /// previous one rather than adding latency. Requires an established connection.
     pub fn send_state(&mut self, bytes: &[u8]) -> Result<QueueOutcome, MuxSendError> {
@@ -431,6 +687,13 @@ impl<S: ReplicationStrategy> Replication<S> {
     /// Take the next received reliable bulk payload.
     pub fn recv_bulk(&mut self) -> Option<Vec<u8>> {
         self.inbound_bulk.pop_front()
+    }
+
+    /// Take the next authoritative post-step record for an ECS or gameplay
+    /// integration. The update is ordered exactly like the underlying delta
+    /// stream and is consumed only once.
+    pub fn recv_authority_update(&mut self) -> Option<AuthorityUpdate<S::Input>> {
+        self.authority_updates.pop_front()
     }
 
     /// Whether the outbound send window is full (a [`send`](Self::send) would
@@ -654,7 +917,7 @@ mod tests {
 
     #[test]
     fn plugins_negotiate_then_reconcile_a_predicted_rpc() {
-        let (client_end, server_end) = InMemoryTransport::pair();
+        let (client_end, server_end) = InMemoryTransport::pair_secure();
         let client_config = ReplicationConfig {
             protocol: crate::multiplex::ProtocolOffer::current(12),
             ..ReplicationConfig::default()
@@ -715,7 +978,7 @@ mod tests {
 
     #[test]
     fn predict_and_send_refuses_without_predicting_under_rpc_backpressure() {
-        let (client_end, _server_end) = InMemoryTransport::pair();
+        let (client_end, _server_end) = InMemoryTransport::pair_secure();
         let config = ReplicationConfig {
             mux: crate::multiplex::MuxConfig {
                 reliable_queue: 2,
@@ -747,14 +1010,14 @@ mod tests {
 
     #[test]
     fn constructors_refuse_an_mtu_that_cannot_carry_the_handshake() {
-        let (a, b) = InMemoryTransport::pair();
+        let (a, b) = InMemoryTransport::pair_secure();
         let mut config = ReplicationConfig::for_capacity(8);
         config.mux.path_mtu = 18;
         assert!(matches!(
             Replication::new_with_config(schema(), 8, &snapshot_at(0, 0), Add, Box::new(a), config),
             Err(SessionError::Transport(MuxSendError::TooLarge {
                 len: 7,
-                max: 6
+                max: 0
             }))
         ));
         assert!(matches!(
@@ -768,16 +1031,27 @@ mod tests {
             ),
             Err(SessionError::Transport(MuxSendError::TooLarge {
                 len: 7,
-                max: 6
+                max: 0
             }))
         ));
     }
 
     #[test]
-    fn rpc_envelope_overhead_is_checked_before_prediction() {
+    fn constructor_rejects_a_raw_transport_without_a_provider() {
         let (a, _b) = InMemoryTransport::pair();
+        assert!(matches!(
+            Replication::new(schema(), 8, &snapshot_at(0, 0), Add, Box::new(a),),
+            Err(SessionError::Security(
+                crate::security::SecurityError::ProviderRequired
+            ))
+        ));
+    }
+
+    #[test]
+    fn rpc_envelope_overhead_is_checked_before_prediction() {
+        let (a, _b) = InMemoryTransport::pair_secure();
         let mut config = ReplicationConfig::for_capacity(8);
-        config.mux.path_mtu = 20; // eight payload bytes; RPC adds one envelope byte
+        config.mux.path_mtu = 35; // eight payload bytes after security + mux headers
         let mut client =
             Replication::new_with_config(schema(), 8, &snapshot_at(0, 0), Add, Box::new(a), config)
                 .unwrap();
@@ -792,7 +1066,7 @@ mod tests {
 
     #[test]
     fn rollback_offer_is_clamped_to_the_real_snapshot_ring() {
-        let (a, b) = InMemoryTransport::pair();
+        let (a, b) = InMemoryTransport::pair_secure();
         let config = ReplicationConfig {
             protocol: crate::multiplex::ProtocolOffer::current(1024),
             ..ReplicationConfig::default()
@@ -875,7 +1149,7 @@ mod tests {
             ),
         ];
         for (bytes, error) in cases {
-            let (a, b) = InMemoryTransport::pair();
+            let (a, b) = InMemoryTransport::pair_secure();
             let mut client =
                 Replication::new(schema(), 8, &snapshot_at(0, 0), Add, Box::new(a)).unwrap();
             let mut peer = ChannelMux::new(b, config.mux);
@@ -905,7 +1179,7 @@ mod tests {
                 super::super::encode_delta(&payload),
                 super::super::encode_snapshot(&payload),
             ] {
-                let (a, b) = InMemoryTransport::pair();
+                let (a, b) = InMemoryTransport::pair_secure();
                 let mut client =
                     Replication::new(schema(), 8, &snapshot_at(0, 0), Add, Box::new(a)).unwrap();
                 let mut peer = ChannelMux::new(b, config.mux);
@@ -939,7 +1213,7 @@ mod tests {
 
     #[test]
     fn zero_local_rollback_capacity_is_observable_without_sending_an_offer() {
-        let (a, mut b) = InMemoryTransport::pair();
+        let (a, mut b) = InMemoryTransport::pair_secure();
         let config = ReplicationConfig {
             protocol: crate::multiplex::ProtocolOffer::current(0),
             ..ReplicationConfig::default()

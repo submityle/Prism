@@ -11,7 +11,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
 use crate::arq::{ReliableReceiver, ReliableSender};
-use crate::transport::Transport;
+use crate::transport::{Transport, TransportSecurity};
 
 const WIRE_VERSION: u8 = 1;
 const KIND_DATA: u8 = 0;
@@ -27,7 +27,12 @@ pub const DEFAULT_PATH_MTU: usize = 1_200;
 /// This is intentionally separate from the private multiplex packet format:
 /// changing channel framing does not silently claim compatibility with a
 /// different replication schema or RPC contract.
+#[cfg(not(feature = "determinism"))]
 pub const CURRENT_PROTOCOL_VERSION: u16 = 1;
+/// Audit-enabled application contract. Hash envelopes are not silently sent to
+/// version-one peers. Explicit custom versions must preserve this distinction.
+#[cfg(feature = "determinism")]
+pub const CURRENT_PROTOCOL_VERSION: u16 = 2;
 
 /// One endpoint's handshake offer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +93,8 @@ pub enum ProtocolError {
     /// The peer sent a handshake message that is invalid for this endpoint's
     /// role or current connection state.
     UnexpectedHandshake,
+    /// The authenticated transport failed after construction.
+    SecurityFailure,
 }
 
 /// Select an exact protocol version and a mutually supportable rollback window.
@@ -380,7 +387,9 @@ impl<D: Transport> ChannelMux<D> {
     /// Maximum payload that fits one datagram without IP fragmentation.
     #[must_use]
     pub fn max_payload(&self) -> usize {
-        self.config.path_mtu - HEADER_LEN
+        self.config
+            .path_mtu
+            .saturating_sub(HEADER_LEN.saturating_add(self.datagram.security_overhead()))
     }
 
     /// Queue a message. Reliable queues apply explicit bounded backpressure;
@@ -469,6 +478,17 @@ impl<D: Transport> ChannelMux<D> {
         self.admit_reliable();
         self.flush_reliable();
         self.flush_unreliable();
+    }
+
+    /// Security state of the wrapped datagram transport.
+    #[must_use]
+    pub fn security_state(&self) -> TransportSecurity {
+        self.datagram.security_state()
+    }
+
+    /// Take a security-provider failure reported by the wrapped transport.
+    pub fn take_security_error(&mut self) -> Option<crate::security::SecurityError> {
+        self.datagram.take_security_error()
     }
 
     /// Take one delivered message from `channel`.
@@ -634,7 +654,9 @@ impl<D: Transport> ChannelMux<D> {
                 else {
                     break;
                 };
-                let wire_len = HEADER_LEN.saturating_add(payload_len);
+                let wire_len = HEADER_LEN
+                    .saturating_add(self.datagram.security_overhead())
+                    .saturating_add(payload_len);
                 if !self.congestion.can_admit(wire_len)
                     || self.reliable_lane_mut(channel).sender.is_full()
                 {
@@ -701,7 +723,9 @@ impl<D: Transport> ChannelMux<D> {
                 let Some(payload) = lane.pending.front() else {
                     break;
                 };
-                let wire_len = HEADER_LEN.saturating_add(payload.len());
+                let wire_len = HEADER_LEN
+                    .saturating_add(self.datagram.security_overhead())
+                    .saturating_add(payload.len());
                 if wire_len > budget {
                     // State is superseded by the next snapshot. Input is retained
                     // in its small bounded tail for a later tick.

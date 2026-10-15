@@ -27,8 +27,12 @@ pub const MAX_DATAGRAM: usize = 65_507;
 pub struct UdpTransport {
     socket: UdpSocket,
     peer: SocketAddr,
+    connected: bool,
     /// The receive scratch buffer, reused across polls.
     buffer: Vec<u8>,
+    last_error: Option<io::ErrorKind>,
+    dropped: u64,
+    received: u64,
 }
 
 impl UdpTransport {
@@ -43,7 +47,11 @@ impl UdpTransport {
         Ok(Self {
             socket,
             peer: SocketAddr::from(([0, 0, 0, 0], 0)),
+            connected: false,
             buffer: vec![0u8; MAX_DATAGRAM],
+            last_error: None,
+            dropped: 0,
+            received: 0,
         })
     }
 
@@ -52,9 +60,12 @@ impl UdpTransport {
     /// # Errors
     /// [`io::ErrorKind::InvalidInput`] when `peer` resolves to no address.
     pub fn connect_to(&mut self, peer: impl ToSocketAddrs) -> io::Result<()> {
-        self.peer = peer.to_socket_addrs()?.next().ok_or_else(|| {
+        let peer = peer.to_socket_addrs()?.next().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "peer resolved to nothing")
         })?;
+        self.socket.connect(peer)?;
+        self.peer = peer;
+        self.connected = true;
         Ok(())
     }
 
@@ -72,6 +83,32 @@ impl UdpTransport {
         self.peer
     }
 
+    /// Whether [`connect_to`](Self::connect_to) completed successfully. An
+    /// unconnected endpoint refuses sends instead of silently targeting the
+    /// placeholder `0.0.0.0:0` address.
+    #[must_use]
+    pub fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Take the last socket error observed by send/receive polling.
+    pub fn take_error_kind(&mut self) -> Option<io::ErrorKind> {
+        self.last_error.take()
+    }
+
+    /// Number of datagrams rejected by the local socket or by an unconnected
+    /// endpoint.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Number of datagrams received from the connected peer.
+    #[must_use]
+    pub fn received(&self) -> u64 {
+        self.received
+    }
+
     /// Set a receive timeout (for a blocking-style caller).
     ///
     /// # Errors
@@ -82,18 +119,29 @@ impl UdpTransport {
 }
 
 impl Transport for UdpTransport {
-    /// Best-effort send: a datagram error (a full send buffer, an unreachable
-    /// peer) is dropped, exactly as a datagram transport loses packets.
+    /// Best-effort send to the connected peer. A datagram error is recorded and
+    /// counted as a local drop; higher layers may retransmit it.
     fn send(&mut self, bytes: &[u8]) {
-        let _ = self.socket.send_to(bytes, self.peer);
+        if !self.connected {
+            self.last_error = Some(io::ErrorKind::NotConnected);
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        if let Err(error) = self.socket.send(bytes) {
+            self.last_error = Some(error.kind());
+            self.dropped = self.dropped.saturating_add(1);
+        }
     }
 
-    /// Take the next datagram, or `None` when none has arrived (`WouldBlock` /
-    /// timeout). A datagram too large for the buffer is truncated by the OS; a
-    /// well-behaved sender never exceeds [`MAX_DATAGRAM`].
+    /// Take the next datagram from the connected peer, or `None` when none has
+    /// arrived (`WouldBlock` / timeout). Connecting the socket makes the OS
+    /// discard datagrams from other peers before they reach this seam.
     fn recv(&mut self) -> Option<Vec<u8>> {
-        match self.socket.recv_from(&mut self.buffer) {
-            Ok((len, _from)) => Some(self.buffer[..len].to_vec()),
+        match self.socket.recv(&mut self.buffer) {
+            Ok(len) => {
+                self.received = self.received.saturating_add(1);
+                Some(self.buffer[..len].to_vec())
+            }
             Err(ref error)
                 if matches!(
                     error.kind(),
@@ -102,7 +150,10 @@ impl Transport for UdpTransport {
             {
                 None
             }
-            Err(_) => None,
+            Err(error) => {
+                self.last_error = Some(error.kind());
+                None
+            }
         }
     }
 }
@@ -156,6 +207,8 @@ mod tests {
         let b_addr = b.local_addr().expect("local addr");
         a.connect_to(b_addr).expect("peer");
         b.connect_to(a_addr).expect("peer");
+        assert!(a.is_connected());
+        assert!(b.is_connected());
 
         a.send(b"hello over udp");
         let received = recv_within(|| b.recv());
@@ -163,5 +216,20 @@ mod tests {
 
         // Nothing else is pending.
         assert_eq!(b.recv(), None);
+        assert_eq!(a.dropped(), 0);
+        assert_eq!(b.received(), 1);
+    }
+
+    #[test]
+    fn an_unconnected_socket_reports_send_failure() {
+        let Some(mut transport) = bind_or_skip() else {
+            return;
+        };
+        transport.send(b"not connected");
+        assert_eq!(transport.dropped(), 1);
+        assert_eq!(
+            transport.take_error_kind(),
+            Some(io::ErrorKind::NotConnected)
+        );
     }
 }

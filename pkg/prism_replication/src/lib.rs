@@ -29,10 +29,12 @@
 //! - [`prediction`] — client-side prediction and reconciliation: apply a local
 //!   input at once, then roll back to authority and replay the un-acknowledged
 //!   inputs when the correction arrives (design §10).
-//! - [`transport`] — the transport seam and a deterministic in-memory
-//!   [`LoopbackLink`](transport::LoopbackLink) with latency, jitter and loss, so
-//!   the sequencing layer can be exercised against a real reordering/lossy channel
-//!   without a socket (design §6).
+//! - [`transport`] — the transport seam, a bounded cross-thread
+//!   [`ThreadTransport`](transport::threaded::ThreadTransport), and a
+//!   deterministic in-memory [`LoopbackLink`](transport::LoopbackLink) with
+//!   latency, jitter and loss, so the sequencing layer can be exercised against
+//!   real queue/reordering/loss behavior without an external dependency
+//!   (design §6).
 //! - [`frame`] — LEB128 length-prefixed message framing with an incremental
 //!   decoder, the boundary a stream transport needs (design §6).
 //! - [`arq`] — reliable ordered delivery over the unreliable transport: sequence,
@@ -62,6 +64,10 @@
 //! they land; nothing here is a stub.
 //!
 //! The core is `no_std` + `alloc`.
+//!
+//! The `std` feature additionally exposes [`udp::UdpTransport`] for a real
+//! cross-process UDP socket. It is connected to one configured peer before use;
+//! reliability and retransmission remain above this datagram layer.
 #![no_std]
 
 extern crate alloc;
@@ -86,6 +92,8 @@ pub mod snapshot;
 pub mod prediction;
 
 pub mod transport;
+
+pub mod security;
 
 pub mod reliable;
 

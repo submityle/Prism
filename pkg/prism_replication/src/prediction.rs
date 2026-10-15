@@ -171,6 +171,23 @@ impl<F: Clone> Prediction<F> {
         authoritative: &[u8],
         simulate: impl FnMut(&mut Record, &F),
     ) -> Result<u32, PredictionError> {
+        self.reconcile_with_observer(authoritative, simulate, |_, _| {})
+    }
+
+    /// Reconcile and expose the authoritative post-step record before local
+    /// unacknowledged inputs are replayed.
+    ///
+    /// The observer is the bridge used by an ECS integration: it can replace
+    /// the ECS world with the same authoritative state before the pending local
+    /// inputs are simulated again. The ordinary [`reconcile`](Self::reconcile)
+    /// path remains allocation-free beyond the existing prediction work by
+    /// using a no-op observer.
+    pub fn reconcile_with_observer(
+        &mut self,
+        authoritative: &[u8],
+        simulate: impl FnMut(&mut Record, &F),
+        mut observe_authority: impl FnMut(u32, &Record),
+    ) -> Result<u32, PredictionError> {
         let expected = self
             .acked
             .checked_add(1)
@@ -194,6 +211,12 @@ impl<F: Clone> Prediction<F> {
         if !self.pending.is_empty() {
             self.pending.remove(0);
         }
+        let authority = self
+            .store
+            .record(new_acked)
+            .cloned()
+            .ok_or(PredictionError::MissingState(new_acked))?;
+        observe_authority(new_acked, &authority);
         self.replay(simulate)?;
         Ok(self.predicted())
     }
