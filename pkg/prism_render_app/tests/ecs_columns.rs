@@ -388,6 +388,91 @@ fn real_gpu_dirty_only_upload_preserves_clean_gpu_bytes() {
 }
 
 #[test]
+fn real_gpu_resident_column_acceptance_matrix() {
+    let Some((device, queue)) = gpu() else { return };
+    let mut world = World::new();
+    let entities: Vec<_> = (0..64).map(|i| world.spawn(row(i))).collect();
+    let archetype = arch(&world, entities[0]);
+    let mut cache = EcsResidentColumns::<Row>::new(device.clone(), &mut world).unwrap();
+
+    let initial = cache.sync(&queue, &world).unwrap();
+    assert_eq!(
+        initial,
+        EcsColumnUploadStats {
+            allocations: 1,
+            upload_calls: 2,
+            uploaded_bytes: 64 * 512,
+        }
+    );
+    let initial_view = cache.column(archetype).unwrap();
+    let initial_buffer = initial_view.buffer_id().unwrap();
+    let initial_generation = initial_view.generation();
+    assert_eq!(
+        queue.read_buffer(initial_buffer, initial_view.live_bytes()),
+        expected(&world, archetype),
+        "initial resident allocation must be readable from the real wgpu device"
+    );
+
+    // Poison an untouched row in chunk zero. The next writes stay in chunk
+    // one, so a hidden whole-column upload would erase this sentinel.
+    let sentinel = row(0xfeed_face);
+    queue.write_buffer(initial_buffer, 5 * 512, bytemuck::bytes_of(&sentinel));
+    world.increment_change_tick();
+    *world.get_mut::<Row>(entities[40]).unwrap() = row(4_040);
+    *world.get_mut::<Row>(entities[63]).unwrap() = row(6_363);
+    let dirty = cache.sync(&queue, &world).unwrap();
+    assert_eq!(
+        dirty,
+        EcsColumnUploadStats {
+            allocations: 0,
+            upload_calls: 1,
+            uploaded_bytes: 32 * 512,
+        }
+    );
+    let dirty_view = cache.column(archetype).unwrap();
+    assert_eq!(dirty_view.buffer_id(), Some(initial_buffer));
+    assert_eq!(dirty_view.generation(), initial_generation);
+    let mut dirty_expected = expected(&world, archetype);
+    dirty_expected[5 * 512..6 * 512].copy_from_slice(bytemuck::bytes_of(&sentinel));
+    assert_eq!(
+        queue.read_buffer(initial_buffer, dirty_view.live_bytes()),
+        dirty_expected,
+        "dirty upload must preserve clean GPU bytes and update the changed chunk"
+    );
+
+    assert_eq!(
+        cache.sync(&queue, &world).unwrap(),
+        EcsColumnUploadStats::default(),
+        "a clean frame must not enqueue another resident-column upload"
+    );
+
+    world.increment_change_tick();
+    world.spawn(row(6_464));
+    let grown = cache.sync(&queue, &world).unwrap();
+    assert_eq!(
+        grown,
+        EcsColumnUploadStats {
+            allocations: 1,
+            upload_calls: 3,
+            uploaded_bytes: 65 * 512,
+        }
+    );
+    let grown_view = cache.column(archetype).unwrap();
+    assert_ne!(grown_view.buffer_id(), Some(initial_buffer));
+    assert!(grown_view.generation() > initial_generation);
+    assert_eq!(
+        queue.read_buffer(grown_view.buffer_id().unwrap(), grown_view.live_bytes()),
+        expected(&world, archetype),
+        "growth must initialize the replacement persistent buffer completely"
+    );
+    assert!(device.poll_wait());
+    eprintln!(
+        "PASS resident-column REAL WGPU acceptance: initial={initial_buffer:?}, replacement={:?}",
+        grown_view.buffer_id()
+    );
+}
+
+#[test]
 fn real_gpu_growth_shrink_swap_remove_empty_and_retained_views() {
     let Some((device, queue)) = gpu() else { return };
     let mut world = World::new();
