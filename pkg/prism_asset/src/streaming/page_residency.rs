@@ -1,7 +1,7 @@
 //! CPU-side fixed-page range residency.
 //!
 //! This module owns page identity, CPU bytes, admission, and deterministic
-//! reclamation. It performs real AssetSources::read_range calls but creates no
+//! reclamation. It performs real `AssetSources::read_range` calls but creates no
 //! GPU resources, performs no GPU upload/decode, and depends on no renderer.
 
 use super::super::{AssetPath, AssetSources, ReadError};
@@ -37,7 +37,9 @@ impl PageSize {
 /// Invalid fixed page size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageSizeError {
+    /// The requested page size was zero.
     Zero,
+    /// The requested page size was not a power of two.
     NotPowerOfTwo(u64),
 }
 
@@ -73,11 +75,13 @@ impl PageBudget {
         })
     }
 
+    /// Returns the maximum CPU bytes admitted by this budget.
     #[must_use]
     pub const fn max_bytes(self) -> u64 {
         self.max_bytes
     }
 
+    /// Returns the maximum number of simultaneous loads.
     #[must_use]
     pub const fn max_in_flight(self) -> usize {
         self.max_in_flight
@@ -102,9 +106,22 @@ impl PageBudget {
 /// Invalid page budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageBudgetError {
+    /// The in-flight limit was zero.
     ZeroInFlight,
-    SmallerThanPage { budget: u64, page_size: u64 },
-    NotPageAligned { budget: u64, page_size: u64 },
+    /// The byte budget is smaller than one page.
+    SmallerThanPage {
+        /// Configured byte budget.
+        budget: u64,
+        /// Fixed page size.
+        page_size: u64,
+    },
+    /// The byte budget is not an integer number of pages.
+    NotPageAligned {
+        /// Configured byte budget.
+        budget: u64,
+        /// Fixed page size.
+        page_size: u64,
+    },
 }
 
 impl fmt::Display for PageBudgetError {
@@ -164,11 +181,13 @@ impl PageKey {
         self.source_revision
     }
 
+    /// Returns the source path associated with this page.
     #[must_use]
     pub fn path(&self) -> &AssetPath {
         &self.path
     }
 
+    /// Returns the zero-based page index.
     #[must_use]
     pub const fn page_index(&self) -> u64 {
         self.page_index
@@ -195,8 +214,20 @@ impl PageKey {
 /// A page offset that cannot be represented in u64.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageRangeError {
-    OffsetOverflow { page_index: u64, page_size: u64 },
-    EndOverflow { offset: u64, page_size: u64 },
+    /// Multiplying the page index by the page size overflowed.
+    OffsetOverflow {
+        /// Page index that overflowed when multiplied.
+        page_index: u64,
+        /// Page size used for multiplication.
+        page_size: u64,
+    },
+    /// Adding the page size to the offset overflowed.
+    EndOverflow {
+        /// Computed page offset.
+        offset: u64,
+        /// Page size added to the offset.
+        page_size: u64,
+    },
 }
 
 impl fmt::Display for PageRangeError {
@@ -224,6 +255,7 @@ impl std::error::Error for PageRangeError {}
 pub struct PageId(u64);
 
 impl PageId {
+    /// Returns the numeric page identity.
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
@@ -233,26 +265,42 @@ impl PageId {
 /// Page lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageState {
+    /// Requested but not yet admitted.
     Pending,
+    /// Admitted and being loaded.
     Loading,
+    /// Loaded and retaining page bytes.
     Resident,
+    /// Load failed and retained a diagnostic.
     Failed,
+    /// Cancelled before becoming resident.
     Cancelled,
 }
 
 /// Failure retained by a terminal page record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageFailure {
+    /// The source read returned an error.
     Read(ReadError),
-    ShortRead { expected: u64, actual: u64 },
+    /// The source returned fewer bytes than the fixed page size.
+    ShortRead {
+        /// Required page byte count.
+        expected: u64,
+        /// Bytes returned by the source.
+        actual: u64,
+    },
+    /// The source panicked during the read.
     SourcePanicked,
+    /// An external subsystem reported its numeric failure code.
     External(u32),
 }
 
 /// Error while requesting a page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageRequestError {
+    /// The fixed page range could not be represented.
     Range(PageRangeError),
+    /// No more page ids can be allocated.
     IdExhausted,
 }
 
@@ -270,19 +318,30 @@ impl std::error::Error for PageRequestError {}
 /// Error while reserving a pending page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageAdmissionError {
+    /// The page id is not known.
     Unknown(PageId),
+    /// The page is not pending.
     InvalidState {
+        /// Page whose state was rejected.
         id: PageId,
+        /// State observed at rejection.
         state: PageState,
     },
+    /// The CPU byte budget would be exceeded.
     BudgetExceeded {
+        /// Aggregate bytes after admission.
         requested: u64,
+        /// Configured byte limit.
         limit: u64,
     },
+    /// The in-flight page limit would be exceeded.
     Backpressure {
+        /// Current in-flight page count.
         in_flight: usize,
+        /// Configured in-flight limit.
         max_in_flight: usize,
     },
+    /// Page accounting overflowed.
     BudgetOverflow,
 }
 
@@ -316,8 +375,15 @@ impl std::error::Error for PageAdmissionError {}
 /// Error for a non-admission state transition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageTransitionError {
+    /// The page id is not known.
     Unknown(PageId),
-    InvalidState { id: PageId, state: PageState },
+    /// The page is not valid for the requested transition.
+    InvalidState {
+        /// Page whose transition was rejected.
+        id: PageId,
+        /// State observed at rejection.
+        state: PageState,
+    },
 }
 
 impl fmt::Display for PageTransitionError {
@@ -336,19 +402,30 @@ impl std::error::Error for PageTransitionError {}
 /// Error from a real synchronous page read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageLoadError {
+    /// Admission failed before reading.
     Admission(PageAdmissionError),
+    /// The source read failed.
     Read {
+        /// Page whose read failed.
         id: PageId,
+        /// Source error.
         error: ReadError,
     },
+    /// The source returned fewer bytes than one page.
     ShortRead {
+        /// Page whose read was short.
         id: PageId,
+        /// Required page size.
         expected: u64,
+        /// Bytes actually returned.
         actual: u64,
     },
+    /// The source panicked during the read.
     SourcePanicked {
+        /// Page whose source panicked.
         id: PageId,
     },
+    /// The terminal transition could not be committed.
     Transition(PageTransitionError),
 }
 
@@ -377,8 +454,11 @@ impl std::error::Error for PageLoadError {}
 /// CPU budget usage.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PageUsage {
+    /// Bytes held by resident pages.
     pub resident_bytes: u64,
+    /// Bytes reserved by loading pages.
     pub loading_bytes: u64,
+    /// Number of pages currently loading.
     pub in_flight_pages: usize,
 }
 
@@ -396,8 +476,8 @@ struct PageRecord {
 /// Deterministic CPU fixed-page residency authority.
 ///
 /// A key is deduplicated while pending, loading, or resident. Callers can
-/// split begin_load and complete_load around asynchronous I/O, or use load for
-/// a real synchronous AssetSources::read_range call.
+/// split `begin_load` and `complete_load` around asynchronous I/O, or use load for
+/// a real synchronous `AssetSources::read_range` call.
 pub struct PageResidency {
     page_size: PageSize,
     budget: PageBudget,
@@ -436,16 +516,19 @@ impl PageResidency {
         })
     }
 
+    /// Returns the configured fixed page size.
     #[must_use]
     pub const fn page_size(&self) -> PageSize {
         self.page_size
     }
 
+    /// Returns the configured page budget.
     #[must_use]
     pub const fn budget(&self) -> PageBudget {
         self.budget
     }
 
+    /// Returns current resident/loading byte usage.
     #[must_use]
     pub const fn usage(&self) -> PageUsage {
         self.usage
@@ -706,7 +789,7 @@ impl PageResidency {
         }
     }
 
-    /// Performs one real synchronous AssetSources::read_range call.
+    /// Performs one real synchronous `AssetSources::read_range` call.
     pub fn load(&mut self, sources: &AssetSources, id: PageId) -> Result<(), PageLoadError> {
         self.begin_load(id).map_err(PageLoadError::Admission)?;
         let (key, offset) = {
@@ -741,11 +824,13 @@ impl PageResidency {
         id.map(|id| self.load(sources, id).map(|()| id)).transpose()
     }
 
+    /// Returns the current state of a page, if known.
     #[must_use]
     pub fn state(&self, id: PageId) -> Option<PageState> {
         self.records.get(&id).map(|record| record.state)
     }
 
+    /// Returns the retained failure for a page, if any.
     #[must_use]
     pub fn failure(&self, id: PageId) -> Option<&PageFailure> {
         self.records
@@ -753,11 +838,13 @@ impl PageResidency {
             .and_then(|record| record.failure.as_ref())
     }
 
+    /// Returns the key associated with a page, if known.
     #[must_use]
     pub fn key(&self, id: PageId) -> Option<&PageKey> {
         self.records.get(&id).map(|record| &record.key)
     }
 
+    /// Returns resident bytes for a page, if it is resident.
     #[must_use]
     pub fn resident_bytes(&self, id: PageId) -> Option<&[u8]> {
         self.records
@@ -766,6 +853,7 @@ impl PageResidency {
             .and_then(|record| record.bytes.as_deref())
     }
 
+    /// Returns the effective scheduling priority for a page.
     #[must_use]
     pub fn priority(&self, id: PageId) -> Option<Priority> {
         self.records.get(&id).map(|record| record.priority)

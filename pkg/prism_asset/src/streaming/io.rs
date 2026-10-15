@@ -4,7 +4,7 @@
 //! [`AssetSources::read_range`](crate::AssetSources::read_range) operation and
 //! uses the controller's CPU/GPU/staging values only as residency accounting.
 //! It does not allocate GPU resources, perform GPU upload, or imply
-//! DirectStorage support.
+//! `DirectStorage` support.
 
 use super::{
     StreamError, StreamFailure, StreamRequest, StreamRequestId, StreamState, StreamingController,
@@ -22,21 +22,30 @@ pub enum StreamIoError {
     /// Admission failed before any bytes were read. The request remains
     /// pending so the caller may retry after making residency available.
     AdmissionRejected {
+        /// Request whose admission was rejected.
         id: StreamRequestId,
+        /// Admission error.
         error: StreamError,
     },
     /// The request was cancelled before execution.
-    Cancelled { id: StreamRequestId },
+    Cancelled {
+        /// Cancelled request.
+        id: StreamRequestId,
+    },
     /// A request can only be executed once. Resident, failed, cancelled, and
     /// evicted requests are never read again by this adapter.
     AlreadyExecuted {
+        /// Request that was already processed.
         id: StreamRequestId,
+        /// State that prevents another execution.
         state: StreamState,
     },
     /// The source read failed. The controller has already transitioned the
     /// request to `Failed` and released its loading residency.
     Read {
+        /// Request whose source read failed.
         id: StreamRequestId,
+        /// Source read error.
         error: ReadError,
     },
 }

@@ -175,24 +175,40 @@ impl RangeAssemblyPlan {
 /// Why a range assembly plan was rejected before I/O.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeAssemblyPlanError {
+    /// The plan allowed no physical ranges.
     ZeroPartLimit,
+    /// The async plan allowed no concurrent reads.
     ZeroParallelLimit,
+    /// The number of physical ranges exceeded the configured limit.
     TooManyParts {
+        /// Number of supplied ranges.
         actual: usize,
+        /// Maximum allowed ranges.
         limit: usize,
     },
+    /// A range end overflowed `u64`.
     RangeOverflow {
+        /// Range start offset.
         offset: u64,
+        /// Range length.
         len: u64,
     },
+    /// A range extended beyond the declared source length.
     OutOfBounds {
+        /// Range start offset.
         offset: u64,
+        /// Range length.
         len: u64,
+        /// Declared source length.
         source_len: u64,
     },
+    /// The total byte count overflowed `u64`.
     ByteBudgetOverflow,
+    /// The total byte count exceeded the configured limit.
     ByteBudgetExceeded {
+        /// Total requested bytes.
         requested: u64,
+        /// Maximum allowed bytes.
         limit: u64,
     },
 }
@@ -233,18 +249,28 @@ impl std::error::Error for RangeAssemblyPlanError {}
 /// Why an otherwise valid range assembly failed during I/O.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RangeAssemblyError {
+    /// A source read failed.
     Read {
+        /// Zero-based range index in the plan.
         part: usize,
+        /// Source error.
         error: ReadError,
     },
+    /// A source returned fewer bytes than requested.
     ShortRead {
+        /// Zero-based range index in the plan.
         part: usize,
+        /// Requested byte count.
         expected: u64,
+        /// Returned byte count.
         actual: u64,
     },
+    /// The source panicked during a read.
     SourcePanicked {
+        /// Zero-based range index in the plan.
         part: usize,
     },
+    /// Cancellation was requested before the payload was published.
     Cancelled,
 }
 
@@ -417,14 +443,16 @@ pub fn assemble_ranges_async(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AssetReader, MemSource};
+    use crate::{AssetSources, MemSource};
     use alloc::sync::Arc;
     use prism_tasks::TaskPool;
 
     fn source() -> AssetSources {
         let mut source = MemSource::new();
         source.insert("payload.bin", Arc::<[u8]>::from(&b"0123456789"[..]));
-        AssetSources::from_reader("memory", source)
+        let mut sources = AssetSources::new();
+        sources.mount("memory", Arc::new(source), 0);
+        sources
     }
 
     fn limits() -> RangeAssemblyLimits {

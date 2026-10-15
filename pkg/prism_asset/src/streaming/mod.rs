@@ -7,7 +7,7 @@
 //! controller. [`AsyncStreamIoExecutor`] schedules the same operation on an
 //! existing [`prism_tasks::TaskPool`] without holding the controller lock
 //! during the blocking read. Neither adapter creates GPU resources or claims
-//! DirectStorage support; GPU and staging values are budget-ledger entries
+//! `DirectStorage` support; GPU and staging values are budget-ledger entries
 //! only.
 
 use crate::AssetPath;
@@ -41,20 +41,27 @@ pub use range_assembly::{
 /// layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BudgetKind {
+    /// CPU-resident bytes.
     Cpu,
+    /// GPU-resident bytes.
     Gpu,
+    /// Temporary staging bytes used while transferring or decoding.
     Staging,
 }
 
 /// A checked three-dimensional byte quantity.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Residency {
+    /// CPU-resident bytes requested or accounted for.
     pub cpu: u64,
+    /// GPU-resident bytes requested or accounted for.
     pub gpu: u64,
+    /// Temporary staging bytes requested or accounted for.
     pub staging: u64,
 }
 
 impl Residency {
+    /// Creates a residency quantity in bytes for each pool.
     #[must_use]
     pub const fn new(cpu: u64, gpu: u64, staging: u64) -> Self {
         Self { cpu, gpu, staging }
@@ -101,12 +108,16 @@ impl Residency {
 /// Hard CPU, GPU, and staging byte ceilings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResidencyLimits {
+    /// Maximum CPU-resident bytes.
     pub cpu: u64,
+    /// Maximum GPU-resident bytes.
     pub gpu: u64,
+    /// Maximum staging bytes.
     pub staging: u64,
 }
 
 impl ResidencyLimits {
+    /// Creates independent byte limits for CPU, GPU, and staging pools.
     #[must_use]
     pub const fn new(cpu: u64, gpu: u64, staging: u64) -> Self {
         Self { cpu, gpu, staging }
@@ -119,15 +130,22 @@ impl ResidencyLimits {
 /// A request that maps to the existing `AssetReader::read_range` contract.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamRequest {
+    /// Source asset path to read.
     pub path: AssetPath,
+    /// Byte offset of the requested range.
     pub offset: u64,
+    /// Number of bytes to read.
     pub len: u64,
+    /// Residency charged while this request is loading or resident.
     pub residency: Residency,
+    /// Initial scheduling priority.
     pub priority: Priority,
+    /// Caller-defined tie-breaking importance.
     pub importance: u32,
 }
 
 impl StreamRequest {
+    /// Validates and returns the `(offset, length)` source range.
     pub fn read_range(&self) -> Result<(u64, u64), StreamError> {
         self.offset
             .checked_add(self.len)
@@ -141,6 +159,7 @@ impl StreamRequest {
 pub struct StreamRequestId(u64);
 
 impl StreamRequestId {
+    /// Returns the numeric request identity.
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
@@ -150,36 +169,56 @@ impl StreamRequestId {
 /// Explicit request lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamState {
+    /// Accepted but not yet admitted for loading.
     Pending,
+    /// Admitted and performing its external load operation.
     Loading,
+    /// Successfully loaded and occupying residency.
     Resident,
+    /// Load failed and retained its diagnostic.
     Failed,
+    /// Cancelled before becoming resident.
     Cancelled,
+    /// Resident data is being released by the caller.
     Evicting,
+    /// Eviction completed; the request record remains queryable.
     Evicted,
 }
 
 /// Terminal failure reported by the external reader/decoder/upload path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StreamFailure {
+    /// The source read failed.
     Read,
+    /// An external decode step failed.
     Decode,
+    /// An external subsystem reported its numeric failure code.
     External(u32),
 }
 
 /// Errors raised by request admission or state transitions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StreamError {
+    /// The request offset plus length overflowed `u64`.
     RangeOverflow,
+    /// Residency accounting overflowed `u64`.
     BudgetOverflow,
+    /// Admission would exceed one of the configured limits.
     BudgetExceeded {
+        /// Pool whose limit would be exceeded.
         kind: BudgetKind,
+        /// Aggregate requested bytes after admission.
         requested: u64,
+        /// Configured limit for `kind`.
         limit: u64,
     },
+    /// The request id is not present in the controller.
     UnknownRequest(StreamRequestId),
+    /// The operation is not valid for the request's current state.
     InvalidTransition {
+        /// Request whose transition was rejected.
         id: StreamRequestId,
+        /// State observed at the time of rejection.
         state: StreamState,
     },
 }
@@ -212,7 +251,9 @@ impl std::error::Error for StreamError {}
 /// Errors raised while submitting a request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubmitError {
+    /// Request validation failed.
     Invalid(StreamError),
+    /// No more request ids can be allocated.
     IdExhausted,
 }
 
@@ -230,11 +271,14 @@ impl std::error::Error for SubmitError {}
 /// Priority hysteresis policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hysteresis {
+    /// Consecutive stronger observations required to promote priority.
     pub promote_after: u32,
+    /// Consecutive weaker observations required to demote priority.
     pub demote_after: u32,
 }
 
 impl Hysteresis {
+    /// Creates a policy; zero thresholds are normalized to one.
     #[must_use]
     pub const fn new(promote_after: u32, demote_after: u32) -> Self {
         Self {
@@ -276,11 +320,13 @@ pub struct StreamingController {
 }
 
 impl StreamingController {
+    /// Creates a controller using the default priority hysteresis policy.
     #[must_use]
     pub fn new(limits: ResidencyLimits) -> Self {
         Self::with_hysteresis(limits, Hysteresis::default())
     }
 
+    /// Creates a controller with an explicit priority hysteresis policy.
     #[must_use]
     pub fn with_hysteresis(limits: ResidencyLimits, hysteresis: Hysteresis) -> Self {
         Self {
@@ -293,16 +339,19 @@ impl StreamingController {
         }
     }
 
+    /// Returns the configured residency limits.
     #[must_use]
     pub const fn limits(&self) -> ResidencyLimits {
         self.limits
     }
 
+    /// Returns aggregate residency currently charged to requests.
     #[must_use]
     pub const fn used(&self) -> Residency {
         self.used
     }
 
+    /// Records a pending request and assigns it a stable id.
     pub fn submit(&mut self, request: StreamRequest) -> Result<StreamRequestId, SubmitError> {
         request.read_range().map_err(SubmitError::Invalid)?;
         let id = StreamRequestId(self.next_id);
@@ -330,6 +379,7 @@ impl StreamingController {
         Ok(id)
     }
 
+    /// Returns the highest-priority pending request and its id.
     #[must_use]
     pub fn next_pending(&self) -> Option<(StreamRequestId, &StreamRequest)> {
         self.records
@@ -375,6 +425,7 @@ impl StreamingController {
             .collect()
     }
 
+    /// Reserves residency and moves a pending request to `Loading`.
     pub fn begin_load(&mut self, id: StreamRequestId) -> Result<(), StreamError> {
         let record = self.record(id)?;
         if record.state != StreamState::Pending {
@@ -401,6 +452,7 @@ impl StreamingController {
         Ok(())
     }
 
+    /// Moves a loading request to `Resident`.
     pub fn complete_load(&mut self, id: StreamRequestId) -> Result<(), StreamError> {
         let record = self.record(id)?;
         if record.state != StreamState::Loading {
@@ -413,6 +465,7 @@ impl StreamingController {
         Ok(())
     }
 
+    /// Records a terminal failure and releases loading residency if needed.
     pub fn fail(&mut self, id: StreamRequestId, failure: StreamFailure) -> Result<(), StreamError> {
         let record = self.record(id)?;
         match record.state {
@@ -426,6 +479,7 @@ impl StreamingController {
         Ok(())
     }
 
+    /// Cancels a pending or loading request and releases loading residency.
     pub fn cancel(&mut self, id: StreamRequestId) -> Result<(), StreamError> {
         let record = self.record(id)?;
         match record.state {
@@ -437,6 +491,7 @@ impl StreamingController {
         Ok(())
     }
 
+    /// Starts eviction of a resident request.
     pub fn begin_evict(&mut self, id: StreamRequestId) -> Result<(), StreamError> {
         let record = self.record(id)?;
         if record.state != StreamState::Resident {
@@ -449,6 +504,7 @@ impl StreamingController {
         Ok(())
     }
 
+    /// Completes eviction and releases the request's residency.
     pub fn finish_evict(&mut self, id: StreamRequestId) -> Result<(), StreamError> {
         let record = self.record(id)?;
         if record.state != StreamState::Evicting {
@@ -462,6 +518,7 @@ impl StreamingController {
         Ok(())
     }
 
+    /// Cancels an in-progress eviction and restores `Resident`.
     pub fn cancel_evict(&mut self, id: StreamRequestId) -> Result<(), StreamError> {
         let record = self.record(id)?;
         if record.state != StreamState::Evicting {
@@ -474,6 +531,7 @@ impl StreamingController {
         Ok(())
     }
 
+    /// Applies one priority observation through the configured hysteresis.
     pub fn observe_priority(
         &mut self,
         id: StreamRequestId,
@@ -502,11 +560,13 @@ impl StreamingController {
         Ok(record.effective_priority)
     }
 
+    /// Returns the current request state, if the id is known.
     #[must_use]
     pub fn state(&self, id: StreamRequestId) -> Option<StreamState> {
         self.records.get(&id).map(|record| record.state)
     }
 
+    /// Returns the retained terminal failure, if any.
     #[must_use]
     pub fn failure(&self, id: StreamRequestId) -> Option<&StreamFailure> {
         self.records
@@ -514,6 +574,7 @@ impl StreamingController {
             .and_then(|record| record.failure.as_ref())
     }
 
+    /// Returns the submitted request, if the id is known.
     #[must_use]
     pub fn request(&self, id: StreamRequestId) -> Option<&StreamRequest> {
         self.records.get(&id).map(|record| &record.request)
