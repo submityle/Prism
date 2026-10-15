@@ -182,10 +182,12 @@ fn view_layout_entries() -> BindGroupLayoutEntries<15> {
 /// headers/vertices/primitives, the per-instance current `world_from_local`
 /// transforms the resolve uses to lift local-space geometry into world space,
 /// and the matching *previous*-frame transforms used only to place that surface
-/// in last frame's world space for the motion vector).
+/// in last frame's world space for the motion vector, followed by the compiled
+/// response-bucket table used to translate a dynamic bucket id to its current
+/// response entry).
 /// `None` min-binding-size keeps the layout agnostic to the run-time array
 /// length; the shader guards every index.
-fn scene_layout_entries() -> BindGroupLayoutEntries<10> {
+fn scene_layout_entries() -> BindGroupLayoutEntries<11> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -202,6 +204,10 @@ fn scene_layout_entries() -> BindGroupLayoutEntries<10> {
             // per 32-light cluster word). Read-only here; the light-routing
             // cull pass writes it. A pipeline-owned all-ones dummy is bound
             // when the opt-in subsystem is off so every light stays visible.
+            storage_buffer_read_only_sized(false, None),
+            // 10: dynamic response-bucket table. The resolve keeps the bucket
+            // id for worklist addressing and projects it to the legacy shader
+            // arm only at the final switch.
             storage_buffer_read_only_sized(false, None),
         ),
     )

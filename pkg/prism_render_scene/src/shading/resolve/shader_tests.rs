@@ -642,7 +642,11 @@ fn shading_resolve_switch_covers_every_registered_shading_class() {
         ("CUSTOM", "shade_principled("),
     ];
 
-    assert!(source.contains("switch params.shading_class"));
+    // Classification now dispatches by the runtime bucket id and the resolve
+    // shader maps that id through the immutable bucket table before selecting
+    // the finite legacy implementation arm.
+    assert!(source.contains("let response_class = response_class_for_bucket(params.shading_class)"));
+    assert!(source.contains("switch response_class"));
     for (name, implementation) in classes {
         let constant = format!("const SHADING_CLASS_{name}:");
         let arm = format!("case SHADING_CLASS_{name}:");

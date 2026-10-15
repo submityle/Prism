@@ -212,6 +212,10 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                     || pipeline.scene_dummy_visible_lights.as_entire_binding(),
                     |routing| routing.visible_buffer().as_entire_binding(),
                 ),
+                // 10: the same immutable response-bucket table used by the
+                // classification pass. It keeps dynamic bucket ids separate
+                // from the compiled response-arm discriminants.
+                buffers.buckets.as_entire_binding(),
             )),
         );
         // group 6: virtual-shadow-map sample bindings. The VSM branch fires

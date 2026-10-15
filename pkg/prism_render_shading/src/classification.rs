@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use prism_render_material::{
     BuiltinProgram, ClosureKind, GpuMaterialHeader, LobeLayout, MaterialExecutionTables,
     MaterialFeatureFlags, MaterialRenderClass, ProgramRef, RenderDomain, ResponseProgramLayout,
@@ -15,7 +15,196 @@ pub enum Illumination {
     Custom,
 }
 
-pub const MAX_SHADING_CLASSES: usize = 9;
+/// Compatibility capacity for the legacy response-function projection.
+///
+/// The live work plan no longer uses this value to size its buckets.  It is
+/// retained only for the old `MaterialShadingClass` diagnostics and for the
+/// shader switch that is being replaced by compiled response entries.
+pub const LEGACY_SHADING_CLASS_COUNT: usize = 9;
+#[deprecated(
+    note = "use LEGACY_SHADING_CLASS_COUNT for the compatibility projection; live plans use ResponseBucketTable"
+)]
+pub const MAX_SHADING_CLASSES: usize = LEGACY_SHADING_CLASS_COUNT;
+
+/// The phase dimension of a response bucket.  This is deliberately a small
+/// execution concern, not a material-model enum; the app-level render phase
+/// can be projected into this ABI without making the shading crate depend on
+/// the ECS scheduler.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RenderPhase {
+    Opaque,
+    Transparent,
+    Stylized,
+    Custom,
+}
+
+/// The complete key used to group work for one compiled response entry.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ResponseBucketKey {
+    pub execution_family: prism_render_material::ExecutionFamily,
+    pub program_id: prism_render_material::ProgramId,
+    pub render_phase: RenderPhase,
+}
+
+impl ResponseBucketKey {
+    #[must_use]
+    pub const fn new(
+        execution_family: prism_render_material::ExecutionFamily,
+        program_id: prism_render_material::ProgramId,
+        render_phase: RenderPhase,
+    ) -> Self {
+        Self {
+            execution_family,
+            program_id,
+            render_phase,
+        }
+    }
+
+    /// Stable program identity for the three built-in response entries and
+    /// registered response programs. Built-ins occupy the same compact
+    /// namespace as the GPU response-kind table; `execution_family` keeps a
+    /// built-in identity distinct from a project registration reusing a raw
+    /// custom id.
+    #[must_use]
+    pub const fn from_program(
+        family: prism_render_material::ExecutionFamily,
+        program: prism_render_material::ProgramRef,
+        render_phase: RenderPhase,
+    ) -> Self {
+        use prism_render_material::{BuiltinProgram, ProgramId, ProgramRef};
+        let id = match program {
+            ProgramRef::Builtin(BuiltinProgram::Lit) => ProgramId(0),
+            ProgramRef::Builtin(BuiltinProgram::Npr) => ProgramId(1),
+            ProgramRef::Builtin(BuiltinProgram::Unlit) => ProgramId(2),
+            ProgramRef::Registered(id) => id,
+        };
+        Self::new(family, id, render_phase)
+    }
+}
+
+/// One deterministic response bucket. `legacy_class` is only the transition
+/// bridge for the existing compiled shader entry switch; the bucket identity
+/// itself is the three-field key above.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ResponseBucket {
+    pub bucket_id: u32,
+    pub execution_family: prism_render_material::ExecutionFamily,
+    pub program_id: prism_render_material::ProgramId,
+    pub render_phase: RenderPhase,
+    pub legacy_class: u32,
+}
+
+impl ResponseBucket {
+    #[must_use]
+    pub const fn key(self) -> ResponseBucketKey {
+        ResponseBucketKey::new(self.execution_family, self.program_id, self.render_phase)
+    }
+}
+
+/// Deterministic, variable-length bucket table.
+///
+/// Construction sorts by the complete execution key and deduplicates keys.
+/// The table is immutable after creation so CPU replay, GPU upload and indirect
+/// dispatch all consume the same bucket ids.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ResponseBucketTable {
+    buckets: Vec<ResponseBucket>,
+    by_key: BTreeMap<ResponseBucketKey, u32>,
+    by_legacy_class: BTreeMap<u32, u32>,
+}
+
+impl ResponseBucketTable {
+    pub fn from_keys<I>(keys: I) -> Self
+    where
+        I: IntoIterator<Item = (ResponseBucketKey, u32)>,
+    {
+        let mut entries: Vec<_> = keys.into_iter().collect();
+        entries.sort_by_key(|(key, legacy_class)| (*key, *legacy_class));
+        let mut table = Self::default();
+        for (key, legacy_class) in entries {
+            if table.by_key.contains_key(&key) {
+                continue;
+            }
+            let bucket_id = table.buckets.len() as u32;
+            table.buckets.push(ResponseBucket {
+                bucket_id,
+                execution_family: key.execution_family,
+                program_id: key.program_id,
+                render_phase: key.render_phase,
+                legacy_class,
+            });
+            table.by_key.insert(key, bucket_id);
+            table.by_legacy_class.entry(legacy_class).or_insert(bucket_id);
+        }
+        table
+    }
+
+    #[must_use]
+    pub fn builtin_compatibility() -> Self {
+        use prism_render_material::{ExecutionFamily, ProgramId};
+        let entries: Vec<_> = (0..LEGACY_SHADING_CLASS_COUNT as u32)
+            .map(|legacy_class| {
+                (
+                    ResponseBucketKey::new(
+                        ExecutionFamily::FusedBuiltin,
+                        ProgramId(legacy_class),
+                        RenderPhase::Opaque,
+                    ),
+                    legacy_class,
+                )
+            })
+            .collect();
+        Self::from_keys(entries)
+    }
+
+    #[must_use]
+    pub fn buckets(&self) -> &[ResponseBucket] {
+        &self.buckets
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.buckets.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
+    }
+
+    #[must_use]
+    pub fn bucket_id(&self, key: ResponseBucketKey) -> Option<u32> {
+        self.by_key.get(&key).copied()
+    }
+
+    #[must_use]
+    pub fn bucket_for_legacy_class(&self, class: u32) -> Option<u32> {
+        self.by_legacy_class.get(&class).copied()
+    }
+
+    /// Every live bucket must resolve to a compiled entry. The resolver is
+    /// supplied by the package registry because this crate must not own the
+    /// backend's package catalogue.
+    pub fn validate_compiled_entries(
+        &self,
+        mut is_compiled: impl FnMut(ResponseBucketKey) -> bool,
+    ) -> Result<(), ResponseBucketValidationError> {
+        for bucket in &self.buckets {
+            if !is_compiled(bucket.key()) {
+                return Err(ResponseBucketValidationError::MissingCompiledEntry {
+                    bucket: *bucket,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseBucketValidationError {
+    MissingCompiledEntry { bucket: ResponseBucket },
+}
+
 
 /// The runtime shading bucket a pixel is binned into for the deferred/compute
 /// shading pass. This is a *derived* projection of the orthogonal material axes
@@ -66,8 +255,12 @@ pub struct ShadingWorkItem {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ShadingWorkPlan {
-    pub offsets: [u32; MAX_SHADING_CLASSES],
-    pub counts: [u32; MAX_SHADING_CLASSES],
+    /// One offset per live response bucket, in `buckets` order.
+    pub offsets: Vec<u32>,
+    /// One count per live response bucket, in `buckets` order.
+    pub counts: Vec<u32>,
+    /// The immutable execution identities consumed by this plan.
+    pub buckets: ResponseBucketTable,
     pub work: Vec<ShadingWorkItem>,
 }
 
@@ -98,7 +291,26 @@ impl ShadingWorkPlan {
         materials: &[GpuMaterialHeader],
         capacity: u32,
     ) -> Self {
-        let mut classified: [Vec<ShadingWorkItem>; MAX_SHADING_CLASSES] = Default::default();
+        Self::build_with_region_and_buckets(
+            pixels,
+            materials,
+            capacity,
+            &ResponseBucketTable::builtin_compatibility(),
+        )
+    }
+
+    /// Build a plan against a variable-length response bucket table. The
+    /// transition classifier still supplies a legacy response entry id, but
+    /// all storage, offsets and dispatch ids are owned by the dynamic table.
+    pub fn build_with_region_and_buckets(
+        pixels: impl IntoIterator<Item = (u32, super::VisibilityPixel, u32)>,
+        materials: &[GpuMaterialHeader],
+        capacity: u32,
+        buckets: &ResponseBucketTable,
+    ) -> Self {
+        let mut classified: Vec<Vec<ShadingWorkItem>> = (0..buckets.len())
+            .map(|_| Vec::new())
+            .collect();
         let mut accepted = 0usize;
         for (pixel_index, pixel, region_illumination) in pixels {
             if !pixel.is_valid() || accepted >= capacity as usize {
@@ -114,15 +326,23 @@ impl ShadingWorkPlan {
             else {
                 continue;
             };
-            classified[class.index()].push(ShadingWorkItem {
+            let Some(bucket_id) = buckets.bucket_for_legacy_class(class as u32) else {
+                continue;
+            };
+            classified[bucket_id as usize].push(ShadingWorkItem {
                 pixel_index,
                 material_index: pixel.material_index,
-                shading_class: class as u32,
+                shading_class: bucket_id,
                 flags: header.feature_flags,
             });
             accepted += 1;
         }
-        let mut plan = Self::default();
+        let mut plan = Self {
+            offsets: vec![0; buckets.len()],
+            counts: vec![0; buckets.len()],
+            buckets: buckets.clone(),
+            work: Vec::new(),
+        };
         for (class, items) in classified.into_iter().enumerate() {
             plan.offsets[class] = plan.work.len() as u32;
             plan.counts[class] = items.len() as u32;
@@ -1243,6 +1463,103 @@ mod tests {
                 capacity: MAX_SHADING_CLASSES - 1,
             })
         );
+    }
+
+    #[test]
+    fn response_buckets_are_variable_length_and_deterministic() {
+        use prism_render_material::{ExecutionFamily, ProgramId};
+
+        let keys = [
+            (
+                ResponseBucketKey::new(
+                    ExecutionFamily::SplitResponse,
+                    ProgramId(41),
+                    RenderPhase::Transparent,
+                ),
+                8,
+            ),
+            (
+                ResponseBucketKey::new(
+                    ExecutionFamily::FusedBuiltin,
+                    ProgramId(1),
+                    RenderPhase::Opaque,
+                ),
+                7,
+            ),
+            (
+                ResponseBucketKey::new(
+                    ExecutionFamily::SplitResponse,
+                    ProgramId(7),
+                    RenderPhase::Opaque,
+                ),
+                0,
+            ),
+        ];
+        let forward = ResponseBucketTable::from_keys(keys);
+        let reverse = ResponseBucketTable::from_keys(keys.into_iter().rev());
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.len(), 3);
+        assert_eq!(
+            forward.bucket_id(ResponseBucketKey::new(
+                ExecutionFamily::FusedBuiltin,
+                ProgramId(1),
+                RenderPhase::Opaque,
+            )),
+            Some(0)
+        );
+        assert!(forward
+            .validate_compiled_entries(|key| key.program_id.0 != 41)
+            .is_err());
+        assert!(forward.validate_compiled_entries(|_| true).is_ok());
+    }
+
+    #[test]
+    fn dynamic_plan_uses_bucket_offsets_in_sorted_key_order() {
+        let table = ResponseBucketTable::from_keys([
+            (
+                ResponseBucketKey::new(
+                    prism_render_material::ExecutionFamily::SplitResponse,
+                    prism_render_material::ProgramId(9),
+                    RenderPhase::Custom,
+                ),
+                MaterialShadingClass::Npr as u32,
+            ),
+            (
+                ResponseBucketKey::new(
+                    prism_render_material::ExecutionFamily::FusedBuiltin,
+                    prism_render_material::ProgramId(0),
+                    RenderPhase::Opaque,
+                ),
+                MaterialShadingClass::Principled as u32,
+            ),
+        ]);
+        let mut material = fallback_material_header(1);
+        material.generation = 1;
+        let pixel = super::super::VisibilityPixel::new(
+            GenerationalHandle {
+                index: 0,
+                generation: 1,
+            },
+            0,
+            0,
+            GenerationalHandle {
+                index: 0,
+                generation: 1,
+            },
+            [1.0, 0.0, 0.0],
+            1,
+        )
+        .unwrap();
+        let plan = ShadingWorkPlan::build_with_region_and_buckets(
+            [(0, pixel, u32::MAX)],
+            &[material],
+            1,
+            &table,
+        );
+        assert_eq!(plan.buckets, table);
+        assert_eq!(plan.offsets.len(), 2);
+        assert_eq!(plan.counts.iter().sum::<u32>(), 1);
+        assert_eq!(plan.work[0].shading_class, 0);
     }
 
     #[test]

@@ -3,16 +3,18 @@ use bevy_image::ToExtents;
 use bevy_render::{
     camera::ExtractedCamera,
     render_resource::{
-        BindGroup, Buffer, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension,
-        TextureFormat, TextureUsages,
+        BindGroup, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages, TextureDescriptor,
+        TextureDimension, TextureFormat, TextureUsages,
     },
     renderer::RenderDevice,
     texture::{CachedTexture, TextureCache},
     view::Msaa,
 };
-use prism_render_shading::{ShadingWorkItem, MAX_SHADING_CLASSES};
+use prism_render_shading::ShadingWorkItem;
 
-use super::classification_gpu::{GpuShadingDispatchArgs, GpuShadingPixelClass};
+use super::classification_gpu::{
+    gpu_bucket_rows, builtin_shading_bucket_table, GpuShadingDispatchArgs, GpuShadingPixelClass,
+};
 
 pub(crate) const VISIBILITY_ID_FORMAT: TextureFormat = TextureFormat::Rgba32Uint;
 
@@ -144,6 +146,7 @@ pub(crate) struct ViewShadingBuffers {
     pub(crate) class_cursors: Buffer,
     pub(crate) dispatch_args: Buffer,
     pub(crate) diagnostics: Buffer,
+    pub(crate) buckets: Buffer,
     pub(crate) input_bind_group: Option<BindGroup>,
     pub(crate) output_bind_group: Option<BindGroup>,
     pub(crate) size: bevy_math::UVec2,
@@ -153,6 +156,7 @@ pub(crate) struct ViewShadingBuffers {
 impl ViewShadingBuffers {
     fn new(device: &RenderDevice, size: bevy_math::UVec2) -> Self {
         let capacity = size.x.saturating_mul(size.y).max(1);
+        let bucket_count = builtin_shading_bucket_table().len() as u32;
         Self {
             pixel_classes: storage_buffer::<GpuShadingPixelClass>(
                 device,
@@ -169,28 +173,33 @@ impl ViewShadingBuffers {
             class_counts: storage_buffer::<u32>(
                 device,
                 "prism class counts",
-                MAX_SHADING_CLASSES as u32,
+                bucket_count,
                 false,
             ),
             class_offsets: storage_buffer::<u32>(
                 device,
                 "prism class offsets",
-                MAX_SHADING_CLASSES as u32,
+                bucket_count,
                 false,
             ),
             class_cursors: storage_buffer::<u32>(
                 device,
                 "prism class cursors",
-                MAX_SHADING_CLASSES as u32,
+                bucket_count,
                 false,
             ),
             dispatch_args: storage_buffer::<GpuShadingDispatchArgs>(
                 device,
                 "prism shading dispatch",
-                MAX_SHADING_CLASSES as u32,
+                bucket_count,
                 true,
             ),
             diagnostics: storage_buffer::<u32>(device, "prism classification diagnostics", 4, true),
+            buckets: device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("prism response bucket table"),
+                contents: bytemuck::cast_slice(&gpu_bucket_rows()),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            }),
             input_bind_group: None,
             output_bind_group: None,
             size,

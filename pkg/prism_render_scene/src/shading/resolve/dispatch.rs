@@ -18,13 +18,12 @@ use bevy_render::{
     view::ExtractedView,
 };
 
-use prism_render_shading::MAX_SHADING_CLASSES;
-
 use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 
 use super::super::shadow::ShadowBindGroup;
 
 use super::super::classification_gpu::GpuShadingDispatchArgs;
+use super::super::classification_gpu::builtin_shading_class_count;
 use super::super::ibl::EnvPrefilterBindGroups;
 use super::super::resources::ViewShadingBuffers;
 use super::abi::{GpuShadingResolveParams, RESOLVE_FLAG_GTAO, RESOLVE_FLAG_IBL_SPECULAR};
@@ -133,7 +132,7 @@ pub(crate) fn dispatch_shading_resolve(
     pass.set_bind_group(8, &groups.shade_cache, &[]);
 
     let stride = size_of::<GpuShadingDispatchArgs>() as u64;
-    for class in 0..MAX_SHADING_CLASSES as u32 {
+    for class in 0..builtin_shading_class_count() {
         params.shading_class = class;
         pass.set_immediates(0, bytemuck::bytes_of(&params));
         pass.dispatch_workgroups_indirect(&buffers.dispatch_args, class as u64 * stride);

@@ -181,6 +181,13 @@ struct WorkItem {
     flags: u32,
 }
 
+struct ResponseBucket {
+    execution_family: u32,
+    program_id: u32,
+    render_phase: u32,
+    legacy_class: u32,
+}
+
 // Current + previous frame view-projection matrices for motion-vector output.
 // Mirrors `MotionMatrices` in `resolve/motion.rs` (128 bytes: two column-major
 // mat4x4<f32>).
@@ -290,6 +297,7 @@ fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfacePara
 // visible and shading is byte-for-byte unchanged. Indices past the mask's
 // length are treated as visible (fewer routing records than scene lights).
 @group(2) @binding(9) var<storage, read> visible_lights: array<u32>;
+@group(2) @binding(10) var<storage, read> response_buckets: array<ResponseBucket>;
 
 // --- group 3: analytic lights (shared LightBindGroup layout) ---
 @group(3) @binding(0) var<storage, read> directional_lights: array<DirectionalLight>;
@@ -1879,6 +1887,13 @@ fn shade_cache_channel_for_class(shading_class: u32) -> u32 {
     return 0u;
 }
 
+fn response_class_for_bucket(bucket_id: u32) -> u32 {
+    if bucket_id >= arrayLength(&response_buckets) {
+        return 0xffffffffu;
+    }
+    return response_buckets[bucket_id].legacy_class;
+}
+
 fn shade_chart_key_less(
     row: ShadeChartInfo,
     object_id: u32,
@@ -2131,6 +2146,10 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let item = work[work_index];
     if item.shading_class != params.shading_class {
+        return;
+    }
+    let response_class = response_class_for_bucket(params.shading_class);
+    if response_class == 0xffffffffu {
         return;
     }
 
@@ -2489,7 +2508,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         material_header.material_epoch_high,
         primitive_index,
         geometry.uv,
-        params.shading_class,
+        response_class,
     );
     if cached_irradiance.w > 0.5 {
         let occlusion = clamp(lit.ambient_occlusion, 0.0, 1.0);
@@ -2531,7 +2550,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         lobe_factors.y,
     );
     var color: vec3<f32>;
-    switch params.shading_class {
+    switch response_class {
         case SHADING_CLASS_PRINCIPLED: {
             color = shade_principled(
                 lit,

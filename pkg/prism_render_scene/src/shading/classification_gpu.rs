@@ -15,7 +15,8 @@ use bevy_material::{
 };
 use bevy_render::{
     render_resource::{
-        BindGroupEntries, BindGroupLayout, CachedComputePipelineId, ComputePassDescriptor,
+        BindGroupEntries, BindGroupLayout, CachedComputePipelineId,
+        ComputePassDescriptor,
         ComputePipelineDescriptor, PipelineCache, ShaderStages, TextureSampleType,
     },
     renderer::{RenderContext, RenderDevice, ViewQuery},
@@ -23,7 +24,7 @@ use bevy_render::{
 use bevy_shader::Shader;
 use bytemuck::{Pod, Zeroable};
 
-use prism_render_shading::MAX_SHADING_CLASSES;
+use prism_render_shading::{ResponseBucketTable, LEGACY_SHADING_CLASS_COUNT};
 
 pub const CLASSIFICATION_WORKGROUP_SIZE: u32 = 64;
 
@@ -34,20 +35,38 @@ pub const CLASSIFICATION_WORKGROUP_SIZE: u32 = 64;
 /// arrays — so `MAX_SHADING_CLASSES` stays the *capacity*, while the number of
 /// buckets actually dispatched comes from the class table. A catalogue that
 /// would not fit is a construction error, caught where the table is built.
-fn builtin_shading_class_count() -> u32 {
-    use prism_render_shading::ShadingClassTable;
+pub(crate) fn builtin_shading_class_count() -> u32 {
     use std::sync::OnceLock;
     static COUNT: OnceLock<u32> = OnceLock::new();
-    *COUNT.get_or_init(|| {
-        let registry = prism_material_pcm::builtin::builtin_registry();
-        let table =
-            ShadingClassTable::from_registry(&registry, &prism_render_material::SURFACE_LOBES)
-                .expect("the built-in response-mode catalogue must be fully implemented");
-        table
-            .validate(MAX_SHADING_CLASSES)
-            .expect("the built-in class set must fit the shader-side capacity");
-        table.class_count()
-    })
+    *COUNT.get_or_init(|| ResponseBucketTable::builtin_compatibility().len() as u32)
+}
+
+pub(crate) fn builtin_shading_bucket_table() -> &'static ResponseBucketTable {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<ResponseBucketTable> = OnceLock::new();
+    TABLE.get_or_init(ResponseBucketTable::builtin_compatibility)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq, Eq)]
+pub(crate) struct GpuShadingBucket {
+    pub execution_family: u32,
+    pub program_id: u32,
+    pub render_phase: u32,
+    pub legacy_class: u32,
+}
+
+pub(crate) fn gpu_bucket_rows() -> Vec<GpuShadingBucket> {
+    builtin_shading_bucket_table()
+        .buckets()
+        .iter()
+        .map(|bucket| GpuShadingBucket {
+            execution_family: bucket.execution_family as u32,
+            program_id: bucket.program_id.0,
+            render_phase: bucket.render_phase as u32,
+            legacy_class: bucket.legacy_class,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -90,11 +109,13 @@ pub(crate) const fn classification_dispatch(pixel_count: u32) -> GpuShadingDispa
 }
 
 #[cfg(test)]
-fn class_prefix_sum(counts: [u32; MAX_SHADING_CLASSES]) -> ([u32; MAX_SHADING_CLASSES], u32) {
-    let mut offsets = [0; MAX_SHADING_CLASSES];
+fn class_prefix_sum(
+    counts: [u32; LEGACY_SHADING_CLASS_COUNT],
+) -> ([u32; LEGACY_SHADING_CLASS_COUNT], u32) {
+    let mut offsets = [0; LEGACY_SHADING_CLASS_COUNT];
     let mut cursor = 0_u32;
     let mut index = 0;
-    while index < MAX_SHADING_CLASSES {
+    while index < LEGACY_SHADING_CLASS_COUNT {
         offsets[index] = cursor;
         cursor = cursor.saturating_add(counts[index]);
         index += 1;
@@ -135,6 +156,9 @@ pub(crate) fn init_material_classification_pipeline(
             storage_buffer::<u32>(false),
             storage_buffer::<u32>(false),
             storage_buffer::<u32>(false),
+            // The bucket record is four u32 words; the layout is intentionally
+            // unsized because the live table is runtime-sized.
+            storage_buffer::<u32>(true),
         ),
     );
     let visibility_descriptor =
@@ -198,6 +222,7 @@ pub(crate) fn prepare_material_classification_bind_groups(
                 buffers.class_cursors.as_entire_binding(),
                 buffers.dispatch_args.as_entire_binding(),
                 buffers.diagnostics.as_entire_binding(),
+                buffers.buckets.as_entire_binding(),
             )),
         ));
     }
@@ -319,7 +344,7 @@ mod tests {
 
     #[test]
     fn prefix_sum_is_contiguous_and_bounded() {
-        let mut counts = [0; MAX_SHADING_CLASSES];
+        let mut counts = [0; LEGACY_SHADING_CLASS_COUNT];
         counts[0] = 3;
         counts[2] = 4;
         let (offsets, total) = class_prefix_sum(counts);

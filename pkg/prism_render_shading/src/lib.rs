@@ -99,7 +99,9 @@ pub use chromatic_aberration::{
 pub use classification::{
     classify_material_header, classify_material_header_with_execution, ClassTableError,
     ClassificationError, MaterialShadingClass, ShadingClassRow, ShadingClassRule,
-    ShadingClassTable, ShadingWorkItem, ShadingWorkPlan, MAX_SHADING_CLASSES,
+    RenderPhase, ResponseBucket, ResponseBucketKey, ResponseBucketTable,
+    ResponseBucketValidationError, ShadingClassTable, ShadingWorkItem, ShadingWorkPlan,
+    LEGACY_SHADING_CLASS_COUNT, MAX_SHADING_CLASSES,
 };
 pub use clearcoat::evaluate_clearcoat_direct;
 pub use cloth::evaluate_cloth_direct;

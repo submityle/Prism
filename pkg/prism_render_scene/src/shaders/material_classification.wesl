@@ -43,6 +43,13 @@ struct WorkItem {
     flags: u32,
 }
 
+struct ResponseBucket {
+    execution_family: u32,
+    program_id: u32,
+    render_phase: u32,
+    legacy_class: u32,
+}
+
 struct ExecutionPlanRow {
     left_program: u32,
     right_program: u32,
@@ -68,6 +75,7 @@ struct ExecutionProgramRow {
 @group(2) @binding(4) var<storage, read_write> class_cursors: array<atomic<u32>>;
 @group(2) @binding(5) var<storage, read_write> dispatch_args: array<u32>;
 @group(2) @binding(6) var<storage, read_write> diagnostics: array<atomic<u32>>;
+@group(2) @binding(7) var<storage, read> response_buckets: array<ResponseBucket>;
 
 var<immediate> params: ClassificationParams;
 
@@ -161,6 +169,15 @@ fn material_class(header: MaterialHeader, region_illumination: u32) -> u32 {
     return lit_class_from_closures(header.closure_mask);
 }
 
+fn response_bucket_for_legacy_class(legacy_class: u32) -> u32 {
+    for (var bucket = 0u; bucket < arrayLength(&response_buckets); bucket = bucket + 1u) {
+        if response_buckets[bucket].legacy_class == legacy_class {
+            return bucket;
+        }
+    }
+    return 0xffffffffu;
+}
+
 @compute @workgroup_size(64)
 fn classify_count(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = id.x;
@@ -191,7 +208,8 @@ fn classify_count(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     // `metadata.z` is the visibility raster's Lit/Stylized selector
     // (`0`/`1`), or `0xffffffff` when the material has no region mask.
-    let shading_class = material_class(header, metadata.z);
+    let legacy_class = material_class(header, metadata.z);
+    let shading_class = response_bucket_for_legacy_class(legacy_class);
     if shading_class >= params.class_count {
         pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 8u);
         atomicAdd(&diagnostics[2], 1u);
