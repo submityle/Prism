@@ -443,6 +443,23 @@ impl EntitiesState {
     pub(crate) fn live_len(&self) -> u32 {
         self.len
     }
+
+    /// Fold the allocator state in canonical capture order for deterministic
+    /// world-snapshot hashes. Generation/liveness slots and the free-list are
+    /// both part of entity identity: omitting either would let two worlds with
+    /// different stale-handle behavior compare equal.
+    pub(crate) fn hash_state(&self, hasher: &mut impl core::hash::Hasher) {
+        hasher.write_u32(self.len);
+        hasher.write_u64(self.slots.len() as u64);
+        for slot in &self.slots {
+            hasher.write_u32(slot.generation.get());
+            hasher.write_u8(slot.alive as u8);
+        }
+        hasher.write_u64(self.free.len() as u64);
+        for &index in &self.free {
+            hasher.write_u32(index);
+        }
+    }
 }
 
 #[cfg(test)]

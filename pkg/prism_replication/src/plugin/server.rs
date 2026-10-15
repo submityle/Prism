@@ -46,6 +46,8 @@ pub struct ServerReplication<S: ServerStrategy> {
     next_rpc_id: u64,
     pending_commands: VecDeque<Vec<u8>>,
     inbound_events: VecDeque<Vec<u8>>,
+    inbound_inputs: VecDeque<Vec<u8>>,
+    inbound_bulk: VecDeque<Vec<u8>>,
     newest_state: Option<Vec<u8>>,
     /// The first error from the most recent [`pump`](Self::pump), readable by the
     /// app; a rejected command must not panic the frame loop.
@@ -118,6 +120,8 @@ impl<S: ServerStrategy> ServerReplication<S> {
             next_rpc_id: 0,
             pending_commands: VecDeque::new(),
             inbound_events: VecDeque::new(),
+            inbound_inputs: VecDeque::new(),
+            inbound_bulk: VecDeque::new(),
             newest_state: None,
             last_error: None,
             applied: 0,
@@ -301,11 +305,17 @@ impl<S: ServerStrategy> ServerReplication<S> {
                 }
             }
         }
-        for channel in [NetChannel::InputUnreliable, NetChannel::BulkReliable] {
-            if self.mux.recv(channel).is_some() {
-                self.reject(super::malformed(channel), true);
+        while self.inbound_inputs.len() < self.config.mux.input_queue.max(1) {
+            let Some(input) = self.mux.recv(NetChannel::InputUnreliable) else {
                 break;
-            }
+            };
+            self.inbound_inputs.push_back(input);
+        }
+        while self.inbound_bulk.len() < self.config.mux.reliable_queue.max(1) {
+            let Some(bulk) = self.mux.recv(NetChannel::BulkReliable) else {
+                break;
+            };
+            self.inbound_bulk.push_back(bulk);
         }
     }
 
@@ -391,6 +401,24 @@ impl<S: ServerStrategy> ServerReplication<S> {
         self.record_send(result)
     }
 
+    /// Queue one latency-sensitive input on the bounded unreliable input lane.
+    /// Older unsent inputs may be discarded when the lane is full. Requires an
+    /// established connection.
+    pub fn send_input(&mut self, bytes: &[u8]) -> Result<QueueOutcome, MuxSendError> {
+        self.require_established()?;
+        let result = self.mux.send(NetChannel::InputUnreliable, bytes);
+        self.record_send(result)
+    }
+
+    /// Queue one reliable, ordered bulk payload. The bounded reliable queue
+    /// applies explicit backpressure and retransmits until acknowledged.
+    /// Requires an established connection.
+    pub fn send_bulk(&mut self, bytes: &[u8]) -> Result<QueueOutcome, MuxSendError> {
+        self.require_established()?;
+        let result = self.mux.send(NetChannel::BulkReliable, bytes);
+        self.record_send(result)
+    }
+
     /// Take one client event/proposal.
     pub fn recv_event(&mut self) -> Option<Vec<u8>> {
         self.inbound_events.pop_front()
@@ -399,6 +427,16 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// Take the newest client state/input-side payload.
     pub fn recv_state(&mut self) -> Option<Vec<u8>> {
         self.newest_state.take()
+    }
+
+    /// Take the oldest received input still retained by the bounded input lane.
+    pub fn recv_input(&mut self) -> Option<Vec<u8>> {
+        self.inbound_inputs.pop_front()
+    }
+
+    /// Take the next received reliable bulk payload.
+    pub fn recv_bulk(&mut self) -> Option<Vec<u8>> {
+        self.inbound_bulk.pop_front()
     }
 
     /// The current authoritative revision.
@@ -767,6 +805,32 @@ mod tests {
     fn memory_plugins_exchange_events_rpcs_state_and_prediction() {
         let (a, b) = InMemoryTransport::pair();
         exercise_plugins(Box::new(a), Box::new(b), false);
+    }
+
+    #[test]
+    fn plugins_deliver_input_and_bulk_channels_without_protocol_rejection() {
+        let (mut client, mut server) = memory_pair(
+            ReplicationConfig::for_capacity(8),
+            ReplicationConfig::for_capacity(8),
+        );
+        drive(&mut client, &mut server);
+
+        assert_eq!(client.send_input(b"client input"), Ok(QueueOutcome::Queued));
+        assert_eq!(client.send_bulk(b"client bulk"), Ok(QueueOutcome::Queued));
+        assert_eq!(server.send_input(b"server input"), Ok(QueueOutcome::Queued));
+        assert_eq!(server.send_bulk(b"server bulk"), Ok(QueueOutcome::Queued));
+
+        for _ in 0..16 {
+            client.pump();
+            server.pump();
+        }
+
+        assert_eq!(server.recv_input(), Some(b"client input".to_vec()));
+        assert_eq!(server.recv_bulk(), Some(b"client bulk".to_vec()));
+        assert_eq!(client.recv_input(), Some(b"server input".to_vec()));
+        assert_eq!(client.recv_bulk(), Some(b"server bulk".to_vec()));
+        assert_eq!(client.take_protocol_error(), None);
+        assert_eq!(server.take_protocol_error(), None);
     }
 
     #[test]

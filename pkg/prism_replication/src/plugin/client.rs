@@ -44,6 +44,8 @@ pub struct Replication<S: ReplicationStrategy> {
     next_rpc_id: u64,
     inbound_events: VecDeque<Vec<u8>>,
     inbound_rpcs: VecDeque<Vec<u8>>,
+    inbound_inputs: VecDeque<Vec<u8>>,
+    inbound_bulk: VecDeque<Vec<u8>>,
     newest_state: Option<Vec<u8>>,
     /// The first error from the most recent [`pump`](Self::pump), readable by the
     /// app; a malformed or rejected frame must not panic the frame loop.
@@ -110,6 +112,8 @@ impl<S: ReplicationStrategy> Replication<S> {
             next_rpc_id: 0,
             inbound_events: VecDeque::new(),
             inbound_rpcs: VecDeque::new(),
+            inbound_inputs: VecDeque::new(),
+            inbound_bulk: VecDeque::new(),
             newest_state: None,
             last_error: None,
             last_protocol_error: match connection {
@@ -187,11 +191,17 @@ impl<S: ReplicationStrategy> Replication<S> {
             }
         }
 
-        for channel in [NetChannel::InputUnreliable, NetChannel::BulkReliable] {
-            if self.mux.recv(channel).is_some() {
-                self.reject(super::malformed(channel));
+        while self.inbound_inputs.len() < self.config.mux.input_queue.max(1) {
+            let Some(input) = self.mux.recv(NetChannel::InputUnreliable) else {
                 break;
-            }
+            };
+            self.inbound_inputs.push_back(input);
+        }
+        while self.inbound_bulk.len() < self.config.mux.reliable_queue.max(1) {
+            let Some(bulk) = self.mux.recv(NetChannel::BulkReliable) else {
+                break;
+            };
+            self.inbound_bulk.push_back(bulk);
         }
         applied
     }
@@ -380,6 +390,24 @@ impl<S: ReplicationStrategy> Replication<S> {
         self.record_send(result)
     }
 
+    /// Queue one latency-sensitive input on the bounded unreliable input lane.
+    /// Older unsent inputs may be discarded when the lane is full, preserving
+    /// the newest-input latency contract. Requires an established connection.
+    pub fn send_input(&mut self, bytes: &[u8]) -> Result<QueueOutcome, MuxSendError> {
+        self.require_established()?;
+        let result = self.mux.send(NetChannel::InputUnreliable, bytes);
+        self.record_send(result)
+    }
+
+    /// Queue one reliable, ordered bulk payload. The bounded reliable queue
+    /// applies explicit backpressure and retransmits until acknowledged.
+    /// Requires an established connection.
+    pub fn send_bulk(&mut self, bytes: &[u8]) -> Result<QueueOutcome, MuxSendError> {
+        self.require_established()?;
+        let result = self.mux.send(NetChannel::BulkReliable, bytes);
+        self.record_send(result)
+    }
+
     /// Take one reliable event delivered by the authority.
     pub fn recv_event(&mut self) -> Option<Vec<u8>> {
         self.inbound_events.pop_front()
@@ -393,6 +421,16 @@ impl<S: ReplicationStrategy> Replication<S> {
     /// Take the newest transient state received since the previous call.
     pub fn recv_state(&mut self) -> Option<Vec<u8>> {
         self.newest_state.take()
+    }
+
+    /// Take the oldest received input still retained by the bounded input lane.
+    pub fn recv_input(&mut self) -> Option<Vec<u8>> {
+        self.inbound_inputs.pop_front()
+    }
+
+    /// Take the next received reliable bulk payload.
+    pub fn recv_bulk(&mut self) -> Option<Vec<u8>> {
+        self.inbound_bulk.pop_front()
     }
 
     /// Whether the outbound send window is full (a [`send`](Self::send) would
