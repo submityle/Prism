@@ -97,6 +97,38 @@ fn validate(store: &Path, package: &Path) -> Output {
     ])
 }
 
+fn package_with_signing_key(store: &Path, output: &Path, key: &Path) -> Output {
+    run(&[
+        "package",
+        "--store",
+        store.to_str().expect("temporary paths are UTF-8"),
+        "--output",
+        output.to_str().expect("temporary paths are UTF-8"),
+        "--asset-id",
+        ASSET_ID,
+        "--logical-path",
+        LOGICAL_PATH,
+        "--signing-key-file",
+        key.to_str().expect("temporary paths are UTF-8"),
+    ])
+}
+
+fn validate_with_verification_key(store: &Path, package: &Path, key: &Path) -> Output {
+    run(&[
+        "validate",
+        "--store",
+        store.to_str().expect("temporary paths are UTF-8"),
+        "--package",
+        package.to_str().expect("temporary paths are UTF-8"),
+        "--asset-id",
+        ASSET_ID,
+        "--logical-path",
+        LOGICAL_PATH,
+        "--verification-key-file",
+        key.to_str().expect("temporary paths are UTF-8"),
+    ])
+}
+
 fn explicit_mapping(root: &Path) -> PathBuf {
     let path = root.join("mapping.txt");
     fs::write(
@@ -267,6 +299,54 @@ fn cli_validate_rejects_tampered_runtime_container() {
     let validated = validate(&store, &package_dir);
     assert!(!validated.status.success(), "tampered package was accepted");
     assert!(String::from_utf8_lossy(&validated.stderr).contains("failed"));
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
+fn cli_package_and_validate_round_trip_signed_release() {
+    let root = temp_dir("signed-release");
+    let (_source, store, package_dir) = build(&root);
+    let signing_key = root.join("release-seed.bin");
+    let verification_key = root.join("release-public.bin");
+    fs::write(&signing_key, [7; 32]).expect("seed should be written");
+    let signer = prism_asset_build_core::ReleaseSigner::from_seed(&[7; 32]).unwrap();
+    fs::write(&verification_key, signer.public_key().public_key)
+        .expect("public key should be written");
+
+    let packaged = package_with_signing_key(&store, &package_dir, &signing_key);
+    assert!(
+        packaged.status.success(),
+        "signed package failed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+    assert!(package_dir.join("release.sig").is_file());
+
+    let validated = validate_with_verification_key(&store, &package_dir, &verification_key);
+    assert!(
+        validated.status.success(),
+        "signed validation failed: {}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
+fn cli_validate_rejects_signed_release_with_wrong_key() {
+    let root = temp_dir("signed-release-wrong-key");
+    let (_source, store, package_dir) = build(&root);
+    let signing_key = root.join("release-seed.bin");
+    let wrong_key = root.join("wrong-public.bin");
+    fs::write(&signing_key, [7; 32]).expect("seed should be written");
+    let wrong_signer = prism_asset_build_core::ReleaseSigner::from_seed(&[8; 32]).unwrap();
+    fs::write(&wrong_key, wrong_signer.public_key().public_key)
+        .expect("public key should be written");
+
+    let packaged = package_with_signing_key(&store, &package_dir, &signing_key);
+    assert!(packaged.status.success());
+    let validated = validate_with_verification_key(&store, &package_dir, &wrong_key);
+    assert!(!validated.status.success());
+    assert!(String::from_utf8_lossy(&validated.stderr)
+        .contains("release signature verification failed"));
     fs::remove_dir_all(root).expect("test outputs should be cleaned up");
 }
 

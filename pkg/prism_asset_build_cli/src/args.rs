@@ -98,6 +98,9 @@ pub struct Package {
     /// explicit versioned runtime mapping file
     #[argh(option)]
     pub mapping: Option<PathBuf>,
+    /// raw 32-byte Ed25519 seed file; writes release.sig without logging key material
+    #[argh(option)]
+    pub signing_key_file: Option<PathBuf>,
 }
 
 /// Build an incremental runtime patch from a published base package to the
@@ -144,6 +147,9 @@ pub struct Validate {
     /// explicit versioned runtime mapping file
     #[argh(option)]
     pub mapping: Option<PathBuf>,
+    /// raw 32-byte Ed25519 public key file used to verify release.sig
+    #[argh(option)]
+    pub verification_key_file: Option<PathBuf>,
 }
 
 /// Inspect the current local revision and its published artifact descriptors.

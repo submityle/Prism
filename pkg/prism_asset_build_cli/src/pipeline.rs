@@ -7,8 +7,9 @@ use prism_asset_build_core::import::{
 };
 use prism_asset_build_core::{
     ArtifactQualityGate, AssetId, BuildExecutor, BuildGraph, BuildRevision, ContentHash,
-    DerivedDataCache, ImportRecipe, JobId, PackageRequest, PublicationDescriptor, RevisionStore,
-    RuntimePackage, SourceSnapshot,
+    DerivedDataCache, ImportRecipe, JobId, PackageRequest, PublicationDescriptor,
+    ReleaseDescriptor, ReleaseSignatureError, ReleaseSigner, ReleaseVerifier, RevisionStore,
+    RuntimePackage, SignedReleaseDescriptor, SourceSnapshot,
 };
 use prism_asset_container::{ContainerReader, RuntimeManifest};
 use std::collections::BTreeMap;
@@ -149,6 +150,9 @@ pub fn package(command: Package) -> Result<(), CommandError> {
         command.logical_path.as_deref(),
     )?;
     write_package(&command.output, &prepared)?;
+    if let Some(path) = command.signing_key_file.as_deref() {
+        write_release_signature(&command.output, &prepared, path)?;
+    }
     print_package_summary(&prepared);
     Ok(())
 }
@@ -161,6 +165,11 @@ pub fn validate(command: Validate) -> Result<(), CommandError> {
         command.logical_path.as_deref(),
     )?;
     validate_package_output(&command.package, &prepared)?;
+    validate_release_signature(
+        &command.package,
+        &prepared,
+        command.verification_key_file.as_deref(),
+    )?;
     println!("validated_revision={}", prepared.revision.0);
     println!(
         "build_manifest_hash={}",
@@ -335,6 +344,87 @@ fn write_package(output: &Path, prepared: &PreparedPackage) -> Result<(), Comman
         write_immutable(containers.join(name), bytes)?;
     }
     Ok(())
+}
+
+fn release_descriptor(prepared: &PreparedPackage) -> Result<ReleaseDescriptor, CommandError> {
+    let publication_bytes = prepared
+        .publication
+        .encode()
+        .map_err(CommandError::Publication)?;
+    Ok(ReleaseDescriptor {
+        revision: prepared.revision,
+        manifest_hash: prepared.build_manifest_hash,
+        publication_hash: Some(ContentHash::digest(&publication_bytes)),
+    })
+}
+
+fn read_exact_key<const N: usize>(path: &Path, kind: &str) -> Result<[u8; N], CommandError> {
+    let bytes = fs::read(path).map_err(|error| {
+        CommandError::InvalidInput(format!(
+            "cannot read {kind} file {}: {error}",
+            path.display()
+        ))
+    })?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        CommandError::InvalidInput(format!(
+            "{kind} file {} must contain exactly {N} raw bytes, got {}",
+            path.display(),
+            bytes.len()
+        ))
+    })
+}
+
+fn write_release_signature(
+    output: &Path,
+    prepared: &PreparedPackage,
+    signing_key_file: &Path,
+) -> Result<(), CommandError> {
+    let seed = read_exact_key::<32>(signing_key_file, "Ed25519 signing key")?;
+    let signer = ReleaseSigner::from_seed(&seed).map_err(signature_error)?;
+    let signed = signer.sign(release_descriptor(prepared)?);
+    write_immutable(output.join("release.sig"), &signed.encode())
+}
+
+fn validate_release_signature(
+    output: &Path,
+    prepared: &PreparedPackage,
+    verification_key_file: Option<&Path>,
+) -> Result<(), CommandError> {
+    let signature_path = output.join("release.sig");
+    let signature_bytes = match fs::read(&signature_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if verification_key_file.is_some() {
+                return Err(CommandError::InvalidInput(
+                    "--verification-key-file requires package release.sig".into(),
+                ));
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(CommandError::Io(error)),
+    };
+    let key_path = verification_key_file.ok_or_else(|| {
+        CommandError::InvalidInput(
+            "package contains release.sig; --verification-key-file is required".into(),
+        )
+    })?;
+    let public_key = read_exact_key::<32>(key_path, "Ed25519 verification key")?;
+    let signed = SignedReleaseDescriptor::decode(&signature_bytes).map_err(|reason| {
+        CommandError::InvalidInput(format!("release.sig is invalid: {reason}"))
+    })?;
+    let expected = release_descriptor(prepared)?;
+    if signed.descriptor != expected {
+        return Err(CommandError::InvalidInput(
+            "release.sig descriptor differs from deterministic package output".into(),
+        ));
+    }
+    ReleaseVerifier::from_public_key(public_key)
+        .verify(&signed)
+        .map_err(signature_error)
+}
+
+fn signature_error(error: ReleaseSignatureError) -> CommandError {
+    CommandError::InvalidInput(format!("release signature verification failed: {error}"))
 }
 
 fn validate_package_output(output: &Path, prepared: &PreparedPackage) -> Result<(), CommandError> {
