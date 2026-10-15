@@ -505,7 +505,7 @@ v2 文档 §6.2 描述的"四档子系统注册表"是**文档产物，不是代
 
 **同一场景里并存三套"图"概念**（v2 未澄清）：`prism_render_graph`（**被执行**：`RenderGraph` / `PassNode` / `PassFlags` / `ExecutionPlan`，经 `add_raster_pass` 等组装，作者是 `prism_render_app/src/frame.rs:121,155` 与 `prism_render_gpudriven/src/scene_draw.rs:407,421,456`，合计 ≤8 个 pass）、架构侧 `frame_graph`（**只用于校验/诊断**：编译结果仅被 `debug_assert` 与诊断读取）、以及 Bevy 的 `RenderGraph` 调度标签。收口时需要一张能力并集表，而不是再造第四套。
 
-**已知缺陷（已确认）**：`prism_render_scene/src/shading/runtime.rs:386` 断言编译序长度 == 5，而 `shading/graph.rs` 注册了 6 个 pass（其自带测试断言 6，`:188`）；编译器不做裁剪（`frame_graph/compiler.rs:42-62`，实测 `validate → dependencies → topological_order`，无裁剪步骤），`prepare_shading_work`（`plugin.rs:626`）在 debug 构建下**必然 panic**。收口方向见 `docs/refactoring-dev/04-frame-graph_refactor_zh.md` §2-P5（pass 计数必须有单一事实源）。
+**已修复的历史缺陷**：shading graph、编译结果和 runtime 现已共用 `declared_pass_count`；`graph.passes().len()`、编译执行序和 runtime 校验对当前 6 个 pass 一致，`prepare_shading_work` 不再因旧的 5 vs 6 固定断言 panic。回归门禁为 `shading_graph_execution_order_assertion_is_single_sourced`，详见 `docs/refactoring-dev/04-frame-graph_refactor_zh.md` §1.4。
 
 ## 10. 诚实的固有摩擦与风险
 
