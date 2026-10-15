@@ -745,7 +745,9 @@ fn package_runtime_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_asset_container::{Codec, ContainerReader, FORMAT_VERSION};
+    use prism_asset_container::{
+        ChunkPolicy, Codec, ContainerReader, CHUNK_FORMAT_VERSION, FORMAT_VERSION,
+    };
     use tempfile::tempdir;
 
     fn key(n: u8) -> ArtifactKey {
@@ -1001,6 +1003,41 @@ mod tests {
         );
         let decoded = RuntimeManifest::decode(&package.runtime_manifest_bytes).unwrap();
         assert_eq!(decoded, package.runtime_manifest);
+    }
+
+    #[test]
+    fn package_runtime_can_emit_independently_compressed_chunks() {
+        let (manifest, cas, mut mappings) = manifest_and_cas();
+        mappings[1].container_name = mappings[0].container_name.clone();
+        let package = package_runtime_with_options(
+            PackageRequest {
+                manifest: &manifest,
+                cas: &cas,
+                mappings,
+            },
+            PackageOptions {
+                chunk_policy: ChunkPolicy {
+                    max_chunk_size: 64,
+                    chunk_alignment: 64,
+                    max_chunks: 2,
+                },
+                codec: Codec::Raw,
+                chunk_codec: Some(Codec::Deflate),
+            },
+        )
+        .unwrap();
+        let container = package.container_bytes("z.container").unwrap();
+        let reader = ContainerReader::new(container.to_vec()).unwrap();
+        assert_eq!(reader.info().version, CHUNK_FORMAT_VERSION);
+        assert_eq!(reader.info().chunk_count, 2);
+        for guid in [StableGuid::from_u128(101), StableGuid::from_u128(202)] {
+            assert_eq!(reader.entry(guid).unwrap().codec, Codec::Deflate);
+            assert!(!reader.read_all(guid).unwrap().is_empty());
+            assert_eq!(
+                package.runtime_manifest.metadata(guid).unwrap().codec,
+                Codec::Deflate
+            );
+        }
     }
 
     #[test]

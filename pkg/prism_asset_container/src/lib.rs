@@ -2,11 +2,10 @@
 //!
 //! This crate owns runtime consumption only. It does not cook assets,
 //! authenticate publishers, or submit data to a GPU. The writer and reader
-//! support deterministic raw and raw-DEFLATE payloads; higher-level chunk
-//! compression indexes, encryption, signatures, and GPU decompression remain
-//! outside this crate. Only [`FORMAT_VERSION`] is a supported container wire
-//! version; planned versions are rejected until their complete semantics are
-//! specified and implemented.
+//! support deterministic raw and raw-DEFLATE payloads in both the legacy
+//! per-payload [`FORMAT_VERSION`] layout and the independently compressed
+//! [`CHUNK_FORMAT_VERSION`] chunk-table layout. Encryption, signatures,
+//! remote delivery, and GPU decompression remain outside this crate.
 
 extern crate alloc;
 

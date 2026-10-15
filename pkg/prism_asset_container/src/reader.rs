@@ -138,8 +138,11 @@ impl ContainerReader {
             if chunk.codec == Codec::Deflate {
                 let decoded = self.decode_chunk(chunk)?;
                 let start = usize::try_from(entry.raw_offset)
-                    .and_then(|base| usize::try_from(offset).map(|local| base + local))
-                    .map_err(|_| ContainerError::IntegerOverflow)?;
+                    .map_err(|_| ContainerError::IntegerOverflow)?
+                    .checked_add(
+                        usize::try_from(offset).map_err(|_| ContainerError::IntegerOverflow)?,
+                    )
+                    .ok_or(ContainerError::IntegerOverflow)?;
                 let finish = start
                     .checked_add(out.len())
                     .ok_or(ContainerError::IntegerOverflow)?;
@@ -230,8 +233,15 @@ impl ContainerReader {
             outputs.push(vec![0; len]);
             if len != 0 {
                 let entry = self.entries[&request.guid];
-                let start = entry
+                let base = entry
                     .offset
+                    .checked_add(if self.info.version == CHUNK_FORMAT_VERSION {
+                        entry.raw_offset
+                    } else {
+                        0
+                    })
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                let start = base
                     .checked_add(request.offset)
                     .ok_or(ContainerError::IntegerOverflow)?;
                 let end = start
@@ -685,7 +695,7 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
     if let Some(last) = chunks.values().max_by_key(|chunk| chunk.offset) {
         let expected_end = last
             .offset
-            .checked_add(last.raw_len)
+            .checked_add(last.raw_len.max(last.stored_len))
             .ok_or(ContainerError::IntegerOverflow)?;
         if expected_end != total_len {
             return Err(ContainerError::InvalidDirectory);
@@ -701,7 +711,6 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
     for record in directory.chunks_exact(CHUNK_RECORD_SIZE) {
         let guid = StableGuid::from_u128(u128::from_le_bytes(record[0..16].try_into().unwrap()));
         if entries.contains_key(&guid) || previous_guid.is_some_and(|previous| previous >= guid) {
-            eprintln!("v2 guid ordering");
             return Err(ContainerError::InvalidDirectory);
         }
         previous_guid = Some(guid);
@@ -719,7 +728,6 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
             || record[76..80].iter().any(|byte| *byte != 0)
             || raw_end > chunk.raw_len
         {
-            eprintln!("v2 entry bounds guid={guid:?} chunk={chunk_id} raw={raw_offset}+{raw_len} chunkraw={}", chunk.raw_len);
             return Err(ContainerError::InvalidDirectory);
         }
         let hash = record[40..72].try_into().unwrap();
@@ -729,7 +737,6 @@ fn parse_v2(source: &dyn crate::RangeSource) -> Result<ParsedContainer, Containe
             .checked_add(raw_offset)
             .ok_or(ContainerError::IntegerOverflow)?;
         if alignment == 0 || !alignment.is_power_of_two() || absolute % u64::from(alignment) != 0 {
-            eprintln!("v2 alignment guid={guid:?} absolute={absolute} alignment={alignment}");
             return Err(ContainerError::InvalidDirectory);
         }
         if chunk.codec == Codec::Raw {

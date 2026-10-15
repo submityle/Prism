@@ -563,8 +563,21 @@ impl ContainerWriter {
             table.extend_from_slice(&0_u32.to_le_bytes());
         }
 
+        let stored_end = plan.chunks.iter().zip(raw_chunks.iter()).try_fold(
+            0_u64,
+            |end, (chunk, (_, stored))| {
+                chunk
+                    .offset
+                    .checked_add(
+                        u64::try_from(stored.len()).map_err(|_| ContainerError::IntegerOverflow)?,
+                    )
+                    .map(|chunk_end| end.max(chunk_end))
+                    .ok_or(ContainerError::IntegerOverflow)
+            },
+        )?;
+        let physical_end = previous_end.max(stored_end);
         let total_len_u64 = payload_start
-            .checked_add(previous_end)
+            .checked_add(physical_end)
             .ok_or(ContainerError::IntegerOverflow)?;
         let mut out =
             vec![0; usize::try_from(total_len_u64).map_err(|_| ContainerError::IntegerOverflow)?];

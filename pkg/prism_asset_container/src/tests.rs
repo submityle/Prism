@@ -1202,6 +1202,83 @@ fn version_two_chunk_table_round_trips_and_is_a_closed_set() {
 }
 
 #[test]
+fn version_two_raw_range_batching_uses_chunk_local_offsets() {
+    let first = guid("chunk-range-first");
+    let second = guid("chunk-range-second");
+    let policy = ChunkPolicy {
+        max_chunk_size: 64,
+        chunk_alignment: 16,
+        max_chunks: 1,
+    };
+    let plan = ChunkPlanner::new(policy)
+        .plan([
+            ChunkInput {
+                guid: first,
+                size: 5,
+                alignment: 1,
+                dependencies: vec![],
+                priority: 0,
+            },
+            ChunkInput {
+                guid: second,
+                size: 7,
+                alignment: 1,
+                dependencies: vec![],
+                priority: 0,
+            },
+        ])
+        .unwrap();
+    let mut writer = ContainerWriter::new();
+    writer.add(first, b"first".to_vec()).unwrap();
+    writer.add(second, b"second!".to_vec()).unwrap();
+    let bytes = writer
+        .finish_with_chunk_compression(&plan, policy.chunk_alignment, Codec::Raw)
+        .unwrap();
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    let first_entry = reader.entry(first).unwrap();
+    let second_entry = reader.entry(second).unwrap();
+    assert_eq!(first_entry.chunk_id, second_entry.chunk_id);
+    assert_ne!(first_entry.raw_offset, second_entry.raw_offset);
+    requests.lock().unwrap().clear();
+
+    let output = reader
+        .read_ranges(
+            &[
+                RangeRequest::new(second, 1, 4),
+                RangeRequest::new(first, 0, 5),
+            ],
+            RangeBatchPolicy {
+                max_batch_bytes: 32,
+                max_gap_bytes: 16,
+            },
+        )
+        .unwrap();
+    assert_eq!(output, vec![b"econd"[..4].to_vec(), b"first".to_vec()]);
+
+    let first_start = first_entry
+        .offset
+        .checked_add(first_entry.raw_offset)
+        .unwrap();
+    let second_start = second_entry
+        .offset
+        .checked_add(second_entry.raw_offset)
+        .unwrap();
+    let expected_start = first_start.min(second_start);
+    let expected_end = first_start
+        .checked_add(first_entry.raw_len)
+        .unwrap()
+        .max(second_start.checked_add(5).unwrap());
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        &[(
+            expected_start,
+            usize::try_from(expected_end - expected_start).unwrap()
+        )]
+    );
+}
+
+#[test]
 fn version_two_rejects_chunk_payload_tampering() {
     let id = guid("chunk-table-corrupt");
     let policy = ChunkPolicy {
@@ -1687,6 +1764,130 @@ fn manifest_reader_batches_ranges_per_container_and_preserves_logical_order() {
         )
         .unwrap();
     assert_eq!(output, vec![b"payload".to_vec(), b"first".to_vec()]);
+}
+
+#[test]
+fn manifest_reader_reads_ranges_from_a_version_two_chunk_container() {
+    let logical = guid("logical-v2-range");
+    let local = guid("local-v2-range");
+    let policy = ChunkPolicy {
+        max_chunk_size: 64,
+        chunk_alignment: 16,
+        max_chunks: 1,
+    };
+    let plan = ChunkPlanner::new(policy)
+        .plan([ChunkInput {
+            guid: local,
+            size: 16,
+            alignment: 1,
+            dependencies: vec![],
+            priority: 0,
+        }])
+        .unwrap();
+    let mut writer = ContainerWriter::new();
+    writer.add(local, b"manifest-v2-data".to_vec()).unwrap();
+    let bytes = writer
+        .finish_with_chunk_compression(&plan, policy.chunk_alignment, Codec::Raw)
+        .unwrap();
+
+    let mut overlays = OverlaySet::new();
+    overlays.mount("v2-range", 3, ContainerReader::new(bytes.clone()).unwrap());
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert(ManifestRoute {
+            guid: logical,
+            container_name: "v2-range".into(),
+            priority: 3,
+            container_guid: local,
+        })
+        .unwrap();
+    manifest
+        .bind_container("v2-range", identity(&bytes))
+        .unwrap();
+    let reader = manifest.bind(&overlays).unwrap();
+
+    let mut range = [0; 6];
+    reader.read_range(logical, 9, &mut range).unwrap();
+    assert_eq!(&range, b"v2-dat");
+    assert_eq!(
+        reader
+            .read_ranges(
+                &[ManifestRangeRequest::new(logical, 0, 8)],
+                RangeBatchPolicy::default(),
+            )
+            .unwrap(),
+        vec![b"manifest".to_vec()]
+    );
+}
+
+#[test]
+fn manifest_reader_accepts_compressed_v2_entries_after_a_large_raw_offset() {
+    let first = guid("manifest-v2-compressed-first");
+    let logical = guid("logical-v2-compressed-range");
+    let second = guid("local-v2-compressed-range");
+    let policy = ChunkPolicy {
+        max_chunk_size: 2048,
+        chunk_alignment: 16,
+        max_chunks: 1,
+    };
+    let plan = ChunkPlanner::new(policy)
+        .plan([
+            ChunkInput {
+                guid: first,
+                size: 1024,
+                alignment: 1,
+                dependencies: vec![],
+                priority: 1,
+            },
+            ChunkInput {
+                guid: second,
+                size: 128,
+                alignment: 1,
+                dependencies: vec![],
+                priority: 0,
+            },
+        ])
+        .unwrap();
+    let mut writer = ContainerWriter::new();
+    writer.add(first, vec![b'a'; 1024]).unwrap();
+    writer.add(second, vec![b'b'; 128]).unwrap();
+    let bytes = writer
+        .finish_with_chunk_compression(&plan, policy.chunk_alignment, Codec::Deflate)
+        .unwrap();
+    let container = ContainerReader::new(bytes.clone()).unwrap();
+    let entry = container.entry(second).unwrap();
+    assert_eq!(entry.codec, Codec::Deflate);
+    assert!(entry.raw_offset > entry.stored_len);
+
+    let mut overlays = OverlaySet::new();
+    overlays.mount(
+        "v2-compressed-range",
+        4,
+        ContainerReader::new(bytes.clone()).unwrap(),
+    );
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert(ManifestRoute {
+            guid: logical,
+            container_name: "v2-compressed-range".into(),
+            priority: 4,
+            container_guid: second,
+        })
+        .unwrap();
+    manifest
+        .bind_container("v2-compressed-range", identity(&bytes))
+        .unwrap();
+
+    let reader = manifest.bind(&overlays).unwrap();
+    assert_eq!(
+        reader
+            .read_ranges(
+                &[ManifestRangeRequest::new(logical, 0, 128)],
+                RangeBatchPolicy::default(),
+            )
+            .unwrap(),
+        vec![vec![b'b'; 128]]
+    );
 }
 
 #[test]

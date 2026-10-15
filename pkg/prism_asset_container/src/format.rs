@@ -4,8 +4,9 @@ use core::fmt;
 pub const MAGIC: [u8; 8] = *b"PRISMCN\0";
 /// Current on-disk format version. Incompatible versions are rejected.
 pub const FORMAT_VERSION: u16 = 1;
-/// The complete set of container versions accepted by this crate.
+/// Version of the independent chunk-table container layout.
 pub const CHUNK_FORMAT_VERSION: u16 = 2;
+/// The complete set of container versions accepted by this crate.
 pub const SUPPORTED_FORMAT_VERSIONS: &[u16] = &[FORMAT_VERSION, CHUNK_FORMAT_VERSION];
 
 pub(crate) const HEADER_SIZE: usize = 96;

@@ -12,6 +12,7 @@ use prism_asset::StableGuid;
 use crate::range_batch::{checked_physical_range_within, validate_range, RangeBatchPolicy};
 use crate::{
     ContainerError, ContainerReader, ManifestRoute, OverlaySet, RangeRequest, RuntimeManifest,
+    CHUNK_FORMAT_VERSION,
 };
 
 /// Errors raised while binding or reading a logical manifest route.
@@ -268,20 +269,41 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
                     error,
                 )
             })?;
-            checked_physical_range_within(
-                entry.offset,
-                request.offset,
-                request.len,
-                reader.info().total_len,
-            )
-            .map_err(|error| {
-                self.map_read_error(
-                    request.logical_guid,
+            // Raw payloads are served by direct physical range I/O. A
+            // Deflate payload is decoded from its complete stored record, so
+            // its logical raw offset must not be compared with the shorter
+            // compressed byte range in the container.
+            if entry.codec == crate::Codec::Raw {
+                checked_physical_range_within(
+                    entry
+                        .offset
+                        .checked_add(if reader.info().version == CHUNK_FORMAT_VERSION {
+                            entry.raw_offset
+                        } else {
+                            0
+                        })
+                        .ok_or(ContainerError::IntegerOverflow)
+                        .map_err(|error| {
+                            self.map_read_error(
+                                request.logical_guid,
+                                request.offset,
+                                usize::try_from(request.len).unwrap_or(usize::MAX),
+                                error,
+                            )
+                        })?,
                     request.offset,
-                    usize::try_from(request.len).unwrap_or(usize::MAX),
-                    error,
+                    request.len,
+                    reader.info().total_len,
                 )
-            })?;
+                .map_err(|error| {
+                    self.map_read_error(
+                        request.logical_guid,
+                        request.offset,
+                        usize::try_from(request.len).unwrap_or(usize::MAX),
+                        error,
+                    )
+                })?;
+            }
             reader.validate_range_request(local).map_err(|error| {
                 self.map_read_error(
                     request.logical_guid,
