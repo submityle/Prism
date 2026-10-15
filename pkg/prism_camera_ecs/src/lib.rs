@@ -18,8 +18,6 @@ use prism_camera::{
     derive_view, publish_view, CameraError, CameraIntent, CameraPose, ViewData, ViewHandle,
     ViewHistory,
 };
-#[cfg(any(feature = "director", feature = "rig"))]
-use prism_ecs::prelude::IntoSystemConfigs;
 use prism_ecs::prelude::{
     Bundle, Component, Entity, IntoSystemConfigs, Query, Res, ResMut, Resource, SystemSet,
 };
