@@ -15,7 +15,10 @@
 //! cancellation stops that caller from waiting but does not kill shared or
 //! already-running work.
 
-use crate::server::{AsyncLoadPreparation, AsyncReloadCommitError, AsyncReloadPlan};
+use crate::server::{
+    AsyncLoadPreparation, AsyncReloadCandidate, AsyncReloadCandidateAsset,
+    AsyncReloadCommitError, AsyncReloadPlan,
+};
 use crate::{AssetPath, AssetServer, AssetTypeId, UntypedHandle};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -905,28 +908,18 @@ async fn execute_async_reload(
         Ok(Err(error)) => return Err(LoadFailure::AssemblyFailed(error)),
         Err(_) => return Err(LoadFailure::WorkerPanicked),
     };
-    let mut dependencies = Vec::with_capacity(output.primary.dependencies.len());
-    for dependency in &output.primary.dependencies {
-        // A reload has no revision-local catalog or graph journal yet. Do not
-        // route dependencies through ordinary load: that would publish new
-        // live slots even when this reload later fails or is superseded.
-        let dependency = server
-            .resident_async_dependency(&dependency.path, dependency.expected_type)
-            .map_err(LoadFailure::AssemblyFailed)?;
-        dependencies.push(dependency);
-    }
-    let mut labeled_dependencies = Vec::with_capacity(output.labeled.len());
-    for labeled in &output.labeled {
-        let mut resolved = Vec::with_capacity(labeled.dependencies.len());
-        for dependency in &labeled.dependencies {
-            let dependency = server
-                .resident_async_dependency(&dependency.path, dependency.expected_type)
-                .map_err(LoadFailure::AssemblyFailed)?;
-            resolved.push(dependency);
-        }
-        labeled_dependencies.push(resolved);
-    }
-    match server.commit_async_reload(plan, output, dependencies, labeled_dependencies) {
+    // The commit path resolves all dependency requests against the resident
+    // graph while the server lock is held. Keeping the decoded root as one
+    // candidate preserves atomic publication and avoids a second lock/lookup
+    // pass between assembly and commit.
+    let candidate = AsyncReloadCandidate {
+        assets: vec![AsyncReloadCandidateAsset {
+            path: plan.path.clone(),
+            type_id: plan.type_id,
+            output,
+        }],
+    };
+    match server.commit_async_reload(plan, candidate) {
         Ok(handle) => Ok(handle),
         Err(AsyncReloadCommitError::Superseded) => Err(LoadFailure::Superseded),
         Err(AsyncReloadCommitError::Rejected(error)) => Err(LoadFailure::AssemblyFailed(error)),
