@@ -150,6 +150,9 @@ pub struct Validate {
     /// raw 32-byte Ed25519 public key file used to verify release.sig
     #[argh(option)]
     pub verification_key_file: Option<PathBuf>,
+    /// persisted canonical ReleaseTrustStore file used to verify release.sig
+    #[argh(option)]
+    pub trust_policy_file: Option<PathBuf>,
 }
 
 /// Inspect the current local revision and its published artifact descriptors.

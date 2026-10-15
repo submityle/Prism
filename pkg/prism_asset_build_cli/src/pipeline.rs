@@ -8,8 +8,8 @@ use prism_asset_build_core::import::{
 use prism_asset_build_core::{
     ArtifactQualityGate, AssetId, BuildExecutor, BuildGraph, BuildRevision, ContentHash,
     DerivedDataCache, ImportRecipe, JobId, PackageRequest, PublicationDescriptor,
-    ReleaseDescriptor, ReleaseSignatureError, ReleaseSigner, ReleaseVerifier, RevisionStore,
-    RuntimePackage, SignedReleaseDescriptor, SourceSnapshot,
+    ReleaseDescriptor, ReleaseSignatureError, ReleaseSigner, ReleaseTrustStore, ReleaseVerifier,
+    RevisionStore, RuntimePackage, SignedReleaseDescriptor, SourceSnapshot,
 };
 use prism_asset_container::{ContainerReader, RuntimeManifest};
 use std::collections::BTreeMap;
@@ -170,6 +170,7 @@ pub fn validate(command: Validate) -> Result<(), CommandError> {
         &command.package,
         &prepared,
         command.verification_key_file.as_deref(),
+        command.trust_policy_file.as_deref(),
     )?;
     println!("validated_revision={}", prepared.revision.0);
     println!(
@@ -390,26 +391,26 @@ fn validate_release_signature(
     output: &Path,
     prepared: &PreparedPackage,
     verification_key_file: Option<&Path>,
+    trust_policy_file: Option<&Path>,
 ) -> Result<(), CommandError> {
+    if verification_key_file.is_some() && trust_policy_file.is_some() {
+        return Err(CommandError::InvalidInput(
+            "--verification-key-file cannot be combined with --trust-policy-file".into(),
+        ));
+    }
     let signature_path = output.join("release.sig");
     let signature_bytes = match fs::read(&signature_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if verification_key_file.is_some() {
+            if verification_key_file.is_some() || trust_policy_file.is_some() {
                 return Err(CommandError::InvalidInput(
-                    "--verification-key-file requires package release.sig".into(),
+                    "release verification options require package release.sig".into(),
                 ));
             }
             return Ok(());
         }
         Err(error) => return Err(CommandError::Io(error)),
     };
-    let key_path = verification_key_file.ok_or_else(|| {
-        CommandError::InvalidInput(
-            "package contains release.sig; --verification-key-file is required".into(),
-        )
-    })?;
-    let public_key = read_exact_key::<32>(key_path, "Ed25519 verification key")?;
     let signed = SignedReleaseDescriptor::decode(&signature_bytes).map_err(|reason| {
         CommandError::InvalidInput(format!("release.sig is invalid: {reason}"))
     })?;
@@ -419,9 +420,32 @@ fn validate_release_signature(
             "release.sig descriptor differs from deterministic package output".into(),
         ));
     }
-    ReleaseVerifier::from_public_key(public_key)
-        .verify(&signed)
-        .map_err(signature_error)
+    match (verification_key_file, trust_policy_file) {
+        (Some(key_path), None) => {
+            let public_key = read_exact_key::<32>(key_path, "Ed25519 verification key")?;
+            ReleaseVerifier::from_public_key(public_key)
+                .verify(&signed)
+                .map_err(signature_error)
+        }
+        (None, Some(policy_path)) => {
+            let trust = ReleaseTrustStore::open(policy_path).map_err(|error| {
+                CommandError::InvalidInput(format!(
+                    "cannot open release trust policy {}: {error}",
+                    policy_path.display()
+                ))
+            })?;
+            trust.verify(&signed).map_err(|error| {
+                CommandError::InvalidInput(format!(
+                    "release trust policy verification failed: {error}"
+                ))
+            })
+        }
+        (None, None) => Err(CommandError::InvalidInput(
+            "package contains release.sig; --verification-key-file or --trust-policy-file is required"
+                .into(),
+        )),
+        (Some(_), Some(_)) => unreachable!("verification options are mutually exclusive"),
+    }
 }
 
 fn signature_error(error: ReleaseSignatureError) -> CommandError {

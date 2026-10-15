@@ -129,6 +129,22 @@ fn validate_with_verification_key(store: &Path, package: &Path, key: &Path) -> O
     ])
 }
 
+fn validate_with_trust_policy(store: &Path, package: &Path, policy: &Path) -> Output {
+    run(&[
+        "validate",
+        "--store",
+        store.to_str().expect("temporary paths are UTF-8"),
+        "--package",
+        package.to_str().expect("temporary paths are UTF-8"),
+        "--asset-id",
+        ASSET_ID,
+        "--logical-path",
+        LOGICAL_PATH,
+        "--trust-policy-file",
+        policy.to_str().expect("temporary paths are UTF-8"),
+    ])
+}
+
 fn explicit_mapping(root: &Path) -> PathBuf {
     let path = root.join("mapping.txt");
     fs::write(
@@ -347,6 +363,110 @@ fn cli_validate_rejects_signed_release_with_wrong_key() {
     assert!(!validated.status.success());
     assert!(String::from_utf8_lossy(&validated.stderr)
         .contains("release signature verification failed"));
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
+fn cli_validate_uses_persisted_release_trust_policy() {
+    let root = temp_dir("signed-release-trust-policy");
+    let (_source, store, package_dir) = build(&root);
+    let signing_key = root.join("release-seed.bin");
+    let policy_path = root.join("release.trust");
+    fs::write(&signing_key, [7; 32]).expect("seed should be written");
+    let signer = prism_asset_build_core::ReleaseSigner::from_seed(&[7; 32]).unwrap();
+
+    let packaged = package_with_signing_key(&store, &package_dir, &signing_key);
+    assert!(
+        packaged.status.success(),
+        "signed package failed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+    let mut policy =
+        prism_asset_build_core::TrustPolicy::new(0, prism_asset_build_core::BuildRevision(0));
+    policy.add_key(signer.public_key()).unwrap();
+    prism_asset_build_core::ReleaseTrustStore::create(&policy_path, policy).unwrap();
+
+    let validated = validate_with_trust_policy(&store, &package_dir, &policy_path);
+    assert!(
+        validated.status.success(),
+        "persisted trust policy validation failed: {}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
+fn cli_validate_rejects_revoked_key_from_persisted_release_trust_policy() {
+    let root = temp_dir("signed-release-revoked-policy");
+    let (_source, store, package_dir) = build(&root);
+    let signing_key = root.join("release-seed.bin");
+    let policy_path = root.join("release.trust");
+    fs::write(&signing_key, [7; 32]).expect("seed should be written");
+    let signer = prism_asset_build_core::ReleaseSigner::from_seed(&[7; 32]).unwrap();
+    let mut policy =
+        prism_asset_build_core::TrustPolicy::new(0, prism_asset_build_core::BuildRevision(0));
+    policy.add_key(signer.public_key()).unwrap();
+    let mut trust =
+        prism_asset_build_core::ReleaseTrustStore::create(&policy_path, policy).unwrap();
+
+    let packaged = package_with_signing_key(&store, &package_dir, &signing_key);
+    assert!(packaged.status.success());
+    trust.revoke_key(signer.public_key().key_id).unwrap();
+
+    let validated = validate_with_trust_policy(&store, &package_dir, &policy_path);
+    assert!(
+        !validated.status.success(),
+        "revoked release key was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&validated.stderr).contains("revoked key"),
+        "{}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
+fn cli_validate_rejects_both_release_verification_modes() {
+    let root = temp_dir("signed-release-verification-options");
+    let (_source, store, package_dir) = build(&root);
+    let signing_key = root.join("release-seed.bin");
+    let verification_key = root.join("release-public.bin");
+    let policy_path = root.join("release.trust");
+    fs::write(&signing_key, [7; 32]).expect("seed should be written");
+    let signer = prism_asset_build_core::ReleaseSigner::from_seed(&[7; 32]).unwrap();
+    fs::write(&verification_key, signer.public_key().public_key)
+        .expect("public key should be written");
+    let mut policy =
+        prism_asset_build_core::TrustPolicy::new(0, prism_asset_build_core::BuildRevision(0));
+    policy.add_key(signer.public_key()).unwrap();
+    prism_asset_build_core::ReleaseTrustStore::create(&policy_path, policy).unwrap();
+
+    let packaged = package_with_signing_key(&store, &package_dir, &signing_key);
+    assert!(packaged.status.success());
+    let output = run(&[
+        "validate",
+        "--store",
+        store.to_str().expect("temporary paths are UTF-8"),
+        "--package",
+        package_dir.to_str().expect("temporary paths are UTF-8"),
+        "--asset-id",
+        ASSET_ID,
+        "--logical-path",
+        LOGICAL_PATH,
+        "--verification-key-file",
+        verification_key
+            .to_str()
+            .expect("temporary paths are UTF-8"),
+        "--trust-policy-file",
+        policy_path.to_str().expect("temporary paths are UTF-8"),
+    ]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot be combined"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     fs::remove_dir_all(root).expect("test outputs should be cleaned up");
 }
 
