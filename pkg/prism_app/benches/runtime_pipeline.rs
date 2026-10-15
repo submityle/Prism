@@ -62,6 +62,35 @@ struct OverlapStats {
 struct PipelineReport {
     outputs: Vec<(usize, u64)>,
     overlap: OverlapStats,
+    frame_p99_ns: u128,
+    overlap_ratio: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PerformanceThresholds {
+    max_frame_p99_ns: u128,
+    min_overlap_ratio: f64,
+}
+
+impl PerformanceThresholds {
+    fn from_environment() -> Option<Self> {
+        let max_frame_p99_ns = std::env::var("PRISM_PIPELINE_MAX_FRAME_P99_NS")
+            .ok()?
+            .parse()
+            .expect("PRISM_PIPELINE_MAX_FRAME_P99_NS must be an unsigned integer");
+        let min_overlap_ratio: f64 = std::env::var("PRISM_PIPELINE_MIN_OVERLAP_RATIO")
+            .ok()?
+            .parse()
+            .expect("PRISM_PIPELINE_MIN_OVERLAP_RATIO must be a finite float");
+        assert!(
+            min_overlap_ratio.is_finite() && (0.0..=1.0).contains(&min_overlap_ratio),
+            "PRISM_PIPELINE_MIN_OVERLAP_RATIO must be between 0 and 1"
+        );
+        Some(Self {
+            max_frame_p99_ns,
+            min_overlap_ratio,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -234,11 +263,14 @@ fn drive(mode: Mode, iterations: usize) -> PipelineReport {
             mode.name()
         );
     }
+    let frame_percentiles = percentiles(&frame_times);
     println!("{{\"kind\":\"pipeline\",\"mode\":\"{}\",\"samples\":{},\"elapsed_ns\":{},\"frame_ns_p50_p95_p99\":{:?},\"input_to_render_done_ns_p50_p95_p99\":{:?},\"overlap_ns\":{},\"overlap_samples\":{},\"overlap_candidates\":{},\"overlap_ratio\":{:.6},\"overlap_observed\":{}}}",
-        mode.name(), SAMPLES, elapsed.as_nanos(), percentiles(&frame_times), percentiles(&latencies), overlap.overlap.as_nanos(), overlap.overlap_samples, overlap.eligible_samples, overlap_ratio, overlap.overlap > Duration::ZERO);
+        mode.name(), SAMPLES, elapsed.as_nanos(), frame_percentiles, percentiles(&latencies), overlap.overlap.as_nanos(), overlap.overlap_samples, overlap.eligible_samples, overlap_ratio, overlap.overlap > Duration::ZERO);
     PipelineReport {
         outputs: trace.render.iter().map(|r| (r.frame, r.digest)).collect(),
         overlap,
+        frame_p99_ns: frame_percentiles[2],
+        overlap_ratio,
     }
 }
 
@@ -278,6 +310,7 @@ fn scaling(workers: usize, iterations: usize) {
 
 fn main() {
     let iterations = calibrated_iterations();
+    let thresholds = PerformanceThresholds::from_environment();
     println!("{{\"kind\":\"environment\",\"os\":\"{}\",\"arch\":\"{}\",\"available_parallelism\":{},\"iterations_per_system\":{iterations},\"warmup\":{WARMUP},\"samples\":{SAMPLES}}}",
         std::env::consts::OS, std::env::consts::ARCH, std::thread::available_parallelism().map_or(1, |n| n.get()));
     let serial = drive(Mode::Serial, iterations);
@@ -294,6 +327,27 @@ fn main() {
     for workers in [1, 2, 4, 8] {
         scaling(workers, iterations);
     }
-    println!("{{\"kind\":\"acceptance\",\"output_parity\":true,\"frame_sequence\":true,\"serial_overlap_ns\":{},\"dedicated_overlap_ns\":{},\"task_lane_overlap_ns\":{},\"overlap_is_observed\":{{\"dedicated\":{},\"task_lane\":{}}},\"performance_thresholds\":false}}",
-        serial.overlap.overlap.as_nanos(), dedicated.overlap.overlap.as_nanos(), tasks.overlap.overlap.as_nanos(), dedicated.overlap.overlap > Duration::ZERO, tasks.overlap.overlap > Duration::ZERO);
+    let thresholds_passed = thresholds.is_some_and(|thresholds| {
+        let frame_ok = dedicated.frame_p99_ns <= thresholds.max_frame_p99_ns
+            && tasks.frame_p99_ns <= thresholds.max_frame_p99_ns;
+        let overlap_ok = dedicated.overlap_ratio >= thresholds.min_overlap_ratio
+            && tasks.overlap_ratio >= thresholds.min_overlap_ratio;
+        assert!(
+            frame_ok,
+            "pipeline frame P99 exceeded PRISM_PIPELINE_MAX_FRAME_P99_NS: dedicated={} task_lane={} limit={}",
+            dedicated.frame_p99_ns,
+            tasks.frame_p99_ns,
+            thresholds.max_frame_p99_ns
+        );
+        assert!(
+            overlap_ok,
+            "pipeline overlap ratio below PRISM_PIPELINE_MIN_OVERLAP_RATIO: dedicated={:.6} task_lane={:.6} limit={:.6}",
+            dedicated.overlap_ratio,
+            tasks.overlap_ratio,
+            thresholds.min_overlap_ratio
+        );
+        true
+    });
+    println!("{{\"kind\":\"acceptance\",\"output_parity\":true,\"frame_sequence\":true,\"serial_overlap_ns\":{},\"dedicated_overlap_ns\":{},\"task_lane_overlap_ns\":{},\"overlap_is_observed\":{{\"dedicated\":{},\"task_lane\":{}}},\"performance_thresholds_configured\":{},\"performance_thresholds_passed\":{}}}",
+        serial.overlap.overlap.as_nanos(), dedicated.overlap.overlap.as_nanos(), tasks.overlap.overlap.as_nanos(), dedicated.overlap.overlap > Duration::ZERO, tasks.overlap.overlap > Duration::ZERO, thresholds.is_some(), thresholds_passed);
 }

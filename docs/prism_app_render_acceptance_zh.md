@@ -172,7 +172,12 @@ cargo bench -p prism_app --bench runtime_pipeline \
   --features multi_thread,pipelined-tasks
 ```
 
-本次机器样本：macOS/aarch64，8 logical workers，`--locked`，合成 workload。输出验证 `output_parity=true`、`frame_sequence=true`；dedicated/task lane 的相邻帧 overlap ratio 分别为 `0.996305` / `0.988263`，serial 为 `0`。frame P50/P95/P99 分别为 dedicated `1008333/1031625/1063375 ns`、task lane `1015042/1364083/1398333 ns`；schedule scaling 的 P50（1/2/4/8 workers）为 `4038083/3184208/2628916/2023833 ns`。benchmark 明确输出 `performance_thresholds=false`，这些数值仅用于当前机器和当前构造负载的回归参考，不能外推为跨机或生产性能结论。
+本次机器样本：macOS/aarch64，8 logical workers，`--locked`，合成 workload。输出验证 `output_parity=true`、`frame_sequence=true`；dedicated/task lane 的相邻帧 overlap ratio 分别为 `0.998054` / `0.995512`，serial 为 `0`。frame P50/P95/P99 分别为 dedicated `1033000/1055416/1072625 ns`、task lane `1031500/1063083/1125917 ns`；schedule scaling 的 P50（1/2/4/8 workers）为 `4089375/3159750/2121667/1460375 ns`。benchmark 默认不启用阈值，显式配置后输出 `performance_thresholds_passed=true`；这些数值仅用于当前机器和当前构造负载的回归参考，不能外推为跨机或生产性能结论。
+
+benchmark 支持通过 `PRISM_PIPELINE_MAX_FRAME_P99_NS` 与
+`PRISM_PIPELINE_MIN_OVERLAP_RATIO` 启用显式门禁；本机以 `1500000` ns / `0.90`
+运行时 `performance_thresholds_configured=true` 且
+`performance_thresholds_passed=true`。这些门槛是本次验收配置，不是跨机器或生产统一标准。
 
 ## 尚未闭环的缺口
 
