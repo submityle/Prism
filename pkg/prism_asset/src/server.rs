@@ -361,10 +361,11 @@ impl AssetServer {
         plan: AsyncReloadPlan,
         output: FullLoadOutput,
         dependencies: Vec<UntypedHandle>,
+        labeled_dependencies: Vec<Vec<UntypedHandle>>,
     ) -> Result<UntypedHandle, AsyncReloadCommitError> {
-        if !output.labeled.is_empty() {
+        if output.labeled.len() != labeled_dependencies.len() {
             return Err(AsyncReloadCommitError::Rejected(
-                "labeled assets are not supported by async reload".into(),
+                "async reload labeled dependency staging is incomplete".into(),
             ));
         }
         if output.primary.type_id != plan.type_id {
@@ -382,6 +383,7 @@ impl AssetServer {
             epoch,
             source_revision,
         } = plan;
+        let FullLoadOutput { primary, labeled } = output;
         let mut inner = self.lock();
         match epoch.commit(|| {
             if inner.source_revision != source_revision {
@@ -394,26 +396,108 @@ impl AssetServer {
                     "async reload target is no longer ready: {path}"
                 )));
             }
+
+            let previous_labels = inner.labels_for_source(&path);
+            let mut provisional_labels = Vec::new();
+            let mut label_paths = BTreeSet::new();
+            let mut staged_labels = Vec::with_capacity(labeled.len());
+            for (sub, sub_dependencies) in labeled.into_iter().zip(labeled_dependencies) {
+                let sub_path = path.clone().with_label(sub.label.clone());
+                if !label_paths.insert(sub_path.clone()) {
+                    inner.rollback_staged_labels(&provisional_labels);
+                    return Err(AsyncReloadCommitError::Rejected(
+                        "async reload emitted a duplicate labeled asset".into(),
+                    ));
+                }
+                let handle = if let Some(existing) = inner
+                    .interned
+                    .get(&sub_path)
+                    .and_then(UntypedWeakHandle::upgrade)
+                {
+                    if existing.id().type_id() != sub.type_id {
+                        inner.rollback_staged_labels(&provisional_labels);
+                        return Err(AsyncReloadCommitError::Rejected(format!(
+                            "async reload labeled asset type changed at {sub_path}"
+                        )));
+                    }
+                    existing
+                } else {
+                    inner.stores.register_erased(sub.type_id, sub.make_store);
+                    let Some(handle) = inner.stores.reserve_by_type(sub.type_id) else {
+                        inner.rollback_staged_labels(&provisional_labels);
+                        return Err(AsyncReloadCommitError::Rejected(
+                            "async reload labeled asset arena unavailable".into(),
+                        ));
+                    };
+                    inner.retained.entry(handle.id()).or_default();
+                    inner.owner_weaks.insert(handle.id(), handle.downgrade());
+                    inner.interned.insert(sub_path.clone(), handle.downgrade());
+                    inner.catalog.insert(
+                        StableGuid::from_path(&sub_path.to_string()),
+                        sub_path.clone(),
+                    );
+                    provisional_labels.push((sub_path.clone(), handle.id()));
+                    handle
+                };
+                staged_labels.push(StagedLabeledAsset {
+                    path: sub_path,
+                    id: handle.id(),
+                    value: sub.value,
+                    dependencies: sub_dependencies,
+                    handle,
+                });
+            }
+
             let dependency_ids: Vec<_> = dependencies.iter().map(UntypedHandle::id).collect();
             let mut candidate = inner.graph.clone();
             if let Err(error) = candidate.replace_dependencies(id, dependency_ids) {
+                inner.rollback_staged_labels(&provisional_labels);
                 return Err(AsyncReloadCommitError::Rejected(format!(
                     "async reload dependency cycle: {error:?}"
                 )));
             }
+            for staged in &staged_labels {
+                let label_dependencies = staged
+                    .dependencies
+                    .iter()
+                    .map(UntypedHandle::id)
+                    .chain(core::iter::once(id));
+                if let Err(error) = candidate.replace_dependencies(staged.id, label_dependencies) {
+                    inner.rollback_staged_labels(&provisional_labels);
+                    return Err(AsyncReloadCommitError::Rejected(format!(
+                        "async reload labeled dependency cycle: {error:?}"
+                    )));
+                }
+            }
+
+            let mut retained: Vec<UntypedHandle> = dependencies
+                .into_iter()
+                .filter(|dependency| dependency.id() != id)
+                .collect();
+            for staged in staged_labels {
+                inner
+                    .stores
+                    .fulfill_erased(staged.id, staged.value)
+                    .map_err(|error| AsyncReloadCommitError::Rejected(error.to_string()))?;
+                let _ = candidate.set_self_state(staged.id, LoadState::Loaded);
+                retained.extend(
+                    staged
+                        .dependencies
+                        .into_iter()
+                        .filter(|dependency| dependency.id() != id && dependency.id() != staged.id),
+                );
+                if inner.promoted_labels.get(&staged.id) != Some(&id) {
+                    retained.push(staged.handle);
+                }
+            }
             inner
                 .stores
-                .fulfill_erased(id, output.primary.value)
+                .fulfill_erased(id, primary.value)
                 .map_err(|error| AsyncReloadCommitError::Rejected(error.to_string()))?;
+            let _ = candidate.set_self_state(id, LoadState::Loaded);
             inner.graph = candidate;
-            let _ = inner.graph.set_self_state(id, LoadState::Loaded);
-            inner.retained.insert(
-                id,
-                dependencies
-                    .into_iter()
-                    .filter(|dependency| dependency.id() != id)
-                    .collect(),
-            );
+            inner.retained.insert(id, retained);
+            inner.retire_removed_labels(&path, &previous_labels, &label_paths);
             Ok(handle.clone())
         }) {
             ReloadCommit::Committed(result) => result,

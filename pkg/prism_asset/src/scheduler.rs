@@ -777,11 +777,6 @@ async fn execute_async_reload(
         Ok(Err(error)) => return Err(LoadFailure::AssemblyFailed(error)),
         Err(_) => return Err(LoadFailure::WorkerPanicked),
     };
-    if !output.labeled.is_empty() {
-        return Err(LoadFailure::AssemblyFailed(
-            "labeled assets are not supported by async reload".into(),
-        ));
-    }
     let mut dependencies = Vec::with_capacity(output.primary.dependencies.len());
     for dependency in &output.primary.dependencies {
         // A reload has no revision-local catalog or graph journal yet. Do not
@@ -792,7 +787,18 @@ async fn execute_async_reload(
             .map_err(LoadFailure::AssemblyFailed)?;
         dependencies.push(dependency);
     }
-    match server.commit_async_reload(plan, output, dependencies) {
+    let mut labeled_dependencies = Vec::with_capacity(output.labeled.len());
+    for labeled in &output.labeled {
+        let mut resolved = Vec::with_capacity(labeled.dependencies.len());
+        for dependency in &labeled.dependencies {
+            let dependency = server
+                .resident_async_dependency(&dependency.path, dependency.expected_type)
+                .map_err(LoadFailure::AssemblyFailed)?;
+            resolved.push(dependency);
+        }
+        labeled_dependencies.push(resolved);
+    }
+    match server.commit_async_reload(plan, output, dependencies, labeled_dependencies) {
         Ok(handle) => Ok(handle),
         Err(AsyncReloadCommitError::Superseded) => Err(LoadFailure::Superseded),
         Err(AsyncReloadCommitError::Rejected(error)) => Err(LoadFailure::AssemblyFailed(error)),
