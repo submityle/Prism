@@ -4,6 +4,7 @@
 //! Plans with payload columns or entity-valued byte slots must be materialized
 //! through `TypedSpawnPlan`, which constructs actual typed Bundles.
 
+use crate::audio::AudioSourceNode;
 use crate::identity::LocalEntityId;
 use crate::instance::SceneInstance;
 use crate::plan::{InstantiationPlan, PlanError};
@@ -137,6 +138,22 @@ impl TypedSpawnPlan {
             Box::new(move |context, entity, _| {
                 context
                     .spawn_at(entity, bundle)
+                    .map_err(|_| TypedSpawnError { code: u32::MAX })
+            }),
+        ));
+        self
+    }
+
+    /// Materializes a scene audio source descriptor as a concrete component.
+    /// The descriptor is data-only; a runtime audio bridge must still resolve
+    /// its bank entry and build a real source route.
+    #[must_use]
+    pub fn with_audio_source(mut self, local: LocalEntityId, source: AudioSourceNode) -> Self {
+        self.entries.push((
+            local,
+            Box::new(move |context, entity, _| {
+                context
+                    .spawn_at(entity, source)
                     .map_err(|_| TypedSpawnError { code: u32::MAX })
             }),
         ));

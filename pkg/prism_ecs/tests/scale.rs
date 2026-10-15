@@ -508,8 +508,10 @@ mod perf_gate {
     use prism_ecs::storage::SparseSets;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     static MATCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static MATCH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct CountMatches;
 
@@ -548,6 +550,7 @@ mod perf_gate {
 
     #[test]
     fn perf_contract_query_matching_is_incremental_and_restore_invalidates() {
+        let _lock = MATCH_TEST_LOCK.lock().unwrap();
         let mut world = World::new();
         world.register_snapshot_component::<Pos>();
         world.register_snapshot_component::<Vel>();
@@ -778,6 +781,7 @@ mod perf_gate {
     /// the external gate because shared runners do not provide hardware isolation.
     #[test]
     fn portable_complexity_samples() {
+        let _lock = MATCH_TEST_LOCK.lock().unwrap();
         let mut world = World::new();
         world.spawn((Pos(1.0, 0.0, 0.0),));
         world.spawn((Pos(2.0, 0.0, 0.0), Vel(1.0, 0.0, 0.0)));

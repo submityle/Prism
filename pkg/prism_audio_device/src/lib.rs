@@ -40,6 +40,7 @@
 // chunk vectors) even though the crate links `std` for device and file I/O.
 extern crate alloc;
 
+pub mod backend;
 pub mod capture;
 pub mod error;
 pub mod file_sink;
@@ -49,6 +50,7 @@ pub mod render;
 #[cfg(feature = "cpal-backend")]
 pub mod cpal_backend;
 
+pub use backend::{AudioDeviceBackend, DeviceEvent, DeviceRecovery, DeviceState, FakeAudioBackend};
 pub use capture::{capture_ring, CaptureConsumer, CaptureSink};
 pub use error::DeviceError;
 pub use file_sink::render_to_wav;

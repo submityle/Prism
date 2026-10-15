@@ -51,6 +51,7 @@
 
 extern crate alloc;
 
+pub mod audio;
 pub mod cost;
 pub mod identity;
 pub mod instance;
@@ -81,6 +82,7 @@ pub mod streaming;
 pub mod template;
 pub mod template_codec;
 
+pub use audio::AudioSourceNode;
 pub use cost::ScenePlanCost;
 pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
 pub use instance::SceneInstance;
@@ -138,6 +140,7 @@ pub use template_codec::{
 
 /// The common types most consumers import.
 pub mod prelude {
+    pub use crate::audio::AudioSourceNode;
     pub use crate::cost::ScenePlanCost;
     pub use crate::identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
     pub use crate::instance::SceneInstance;

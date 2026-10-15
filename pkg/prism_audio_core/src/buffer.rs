@@ -194,6 +194,54 @@ impl AudioBuffer {
         }
     }
 
+    /// Copies samples from `other`, converting between output layouts when the
+    /// caller's device layout differs from the graph's master layout.
+    ///
+    /// This is intentionally a small, allocation-free delivery-stage adapter;
+    /// graph-internal edges still require an exact layout match. Mono sources
+    /// are duplicated to every destination channel, a mono destination is the
+    /// arithmetic mean of all source channels, and all other mismatched
+    /// layouts preserve the common leading channels while clearing additional
+    /// destination channels. The rule is deterministic and keeps the real-time
+    /// callback free of temporary buffers.
+    pub fn copy_from_converted(&mut self, other: &AudioBuffer) {
+        let frames = self.active_frames.min(other.active_frames);
+        if self.layout == other.layout {
+            self.copy_from(other);
+            return;
+        }
+
+        if other.channels == 1 {
+            let src = other.channel(0);
+            for dst_channel in 0..self.channels {
+                self.channel_mut(dst_channel)[..frames].copy_from_slice(&src[..frames]);
+            }
+            return;
+        }
+
+        if self.channels == 1 {
+            let dst = self.channel_mut(0);
+            let divisor = other.channels as Sample;
+            for frame in 0..frames {
+                let mut sum = 0.0;
+                for src_channel in 0..other.channels {
+                    sum += other.channel(src_channel)[frame];
+                }
+                dst[frame] = sum / divisor;
+            }
+            return;
+        }
+
+        for dst_channel in 0..self.channels {
+            let dst = self.channel_mut(dst_channel);
+            if let Some(src) = (dst_channel < other.channels).then(|| other.channel(dst_channel)) {
+                dst[..frames].copy_from_slice(&src[..frames]);
+            } else {
+                dst[..frames].fill(0.0);
+            }
+        }
+    }
+
     /// Adds the active samples of `other` into `self`, scaled by `gain`.
     ///
     /// This is the fundamental mixing primitive used when several graph edges
@@ -255,5 +303,29 @@ mod tests {
         l[0] = 0.3;
         assert_eq!(buf.channel(1)[0], 0.7);
         assert_eq!(buf.channel(0)[0], 0.3);
+    }
+
+    #[test]
+    fn converted_copy_duplicates_mono_into_stereo() {
+        let mut mono = AudioBuffer::new(ChannelLayout::Mono, 3);
+        mono.channel_mut(0).copy_from_slice(&[0.25, -0.5, 1.0]);
+        let mut stereo = AudioBuffer::new(ChannelLayout::Stereo, 3);
+
+        stereo.copy_from_converted(&mono);
+
+        assert_eq!(stereo.channel(0), &[0.25, -0.5, 1.0]);
+        assert_eq!(stereo.channel(1), &[0.25, -0.5, 1.0]);
+    }
+
+    #[test]
+    fn converted_copy_downmixes_stereo_to_mono() {
+        let mut stereo = AudioBuffer::new(ChannelLayout::Stereo, 3);
+        stereo.channel_mut(0).copy_from_slice(&[1.0, -1.0, 0.5]);
+        stereo.channel_mut(1).copy_from_slice(&[0.0, 1.0, 0.5]);
+        let mut mono = AudioBuffer::new(ChannelLayout::Mono, 3);
+
+        mono.copy_from_converted(&stereo);
+
+        assert_eq!(mono.channel(0), &[0.5, 0.0, 0.5]);
     }
 }

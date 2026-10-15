@@ -488,9 +488,12 @@ impl AudioGraph {
             self.nodes[i].node.process(&ctx, &mut io);
         }
 
-        // Copy the designated master output into the caller's buffer.
+        // Deliver the designated master output into the caller's device buffer.
+        // The graph may be compiled for a different endpoint layout (for
+        // example a stereo default graph rendered into a mono test/device
+        // buffer), so only this outer boundary performs conversion.
         let master = self.master.expect("master validated at compile");
-        master_out.copy_from(&self.outputs[master.node.0][master.port]);
+        master_out.copy_from_converted(&self.outputs[master.node.0][master.port]);
     }
 
     /// Number of nodes in the graph.

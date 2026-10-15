@@ -26,8 +26,13 @@ use prism_audio_core::buffer::ChannelLayout;
 use prism_audio_core::math::Sample;
 use prism_audio_rt::AudioRuntime;
 
+use crate::backend::DeviceEvent;
 use crate::error::DeviceError;
 use crate::render::BlockRenderer;
+
+const EVENT_UNDERRUN: u64 = 1;
+const EVENT_DISCONNECTED: u64 = 2;
+const EVENT_RECOVERY_FAILED: u64 = 4;
 
 /// Maps a device channel count onto the engine [`ChannelLayout`] with the same
 /// number of channels.
@@ -78,6 +83,9 @@ pub struct CpalOutput {
     /// Count of stream errors reported by the platform error callback
     /// (underruns, device disconnects). Shared with the error callback.
     errors: Arc<AtomicU64>,
+    /// Coalesced callback events. The control thread drains this bitset with
+    /// [`CpalOutput::poll_event`]; the callback never allocates or locks.
+    events: Arc<AtomicU64>,
 }
 
 impl CpalOutput {
@@ -93,6 +101,27 @@ impl CpalOutput {
     #[must_use]
     pub fn error_count(&self) -> u64 {
         self.errors.load(Ordering::Relaxed)
+    }
+
+    /// Drains one coalesced callback event for a control-thread recovery loop.
+    ///
+    /// CPAL does not provide an xrun frame count through `StreamError`, so
+    /// underrun events report `frames: 0`. Reopen/retry policy remains outside
+    /// the callback and must create a new [`CpalOutput`] after observing a
+    /// disconnect or invalidated stream.
+    #[must_use]
+    pub fn poll_event(&self) -> Option<DeviceEvent> {
+        for (mask, event) in [
+            (EVENT_DISCONNECTED, DeviceEvent::Disconnected),
+            (EVENT_UNDERRUN, DeviceEvent::Underrun { frames: 0 }),
+            (EVENT_RECOVERY_FAILED, DeviceEvent::RecoveryFailed),
+        ] {
+            let previous = self.events.fetch_and(!mask, Ordering::AcqRel);
+            if previous & mask != 0 {
+                return Some(event);
+            }
+        }
+        None
     }
 
     /// Resumes playback after [`CpalOutput::pause`].
@@ -178,6 +207,7 @@ pub fn open_default_output(
 
     let renderer = BlockRenderer::new(runtime, layout, block_frames);
     let errors = Arc::new(AtomicU64::new(0));
+    let events = Arc::new(AtomicU64::new(0));
 
     let stream = build_output_stream(
         &device,
@@ -186,6 +216,7 @@ pub fn open_default_output(
         renderer,
         block_frames,
         Arc::clone(&errors),
+        Arc::clone(&events),
     )?;
     stream
         .play()
@@ -195,6 +226,7 @@ pub fn open_default_output(
         stream,
         info,
         errors,
+        events,
     })
 }
 
@@ -206,15 +238,30 @@ fn build_output_stream(
     renderer: BlockRenderer,
     block_frames: usize,
     errors: Arc<AtomicU64>,
+    events: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, DeviceError> {
     match format {
-        SampleFormat::F32 => build_typed::<f32>(device, config, renderer, block_frames, errors),
-        SampleFormat::F64 => build_typed::<f64>(device, config, renderer, block_frames, errors),
-        SampleFormat::I16 => build_typed::<i16>(device, config, renderer, block_frames, errors),
-        SampleFormat::U16 => build_typed::<u16>(device, config, renderer, block_frames, errors),
-        SampleFormat::I32 => build_typed::<i32>(device, config, renderer, block_frames, errors),
-        SampleFormat::I8 => build_typed::<i8>(device, config, renderer, block_frames, errors),
-        SampleFormat::U8 => build_typed::<u8>(device, config, renderer, block_frames, errors),
+        SampleFormat::F32 => {
+            build_typed::<f32>(device, config, renderer, block_frames, errors, events)
+        }
+        SampleFormat::F64 => {
+            build_typed::<f64>(device, config, renderer, block_frames, errors, events)
+        }
+        SampleFormat::I16 => {
+            build_typed::<i16>(device, config, renderer, block_frames, errors, events)
+        }
+        SampleFormat::U16 => {
+            build_typed::<u16>(device, config, renderer, block_frames, errors, events)
+        }
+        SampleFormat::I32 => {
+            build_typed::<i32>(device, config, renderer, block_frames, errors, events)
+        }
+        SampleFormat::I8 => {
+            build_typed::<i8>(device, config, renderer, block_frames, errors, events)
+        }
+        SampleFormat::U8 => {
+            build_typed::<u8>(device, config, renderer, block_frames, errors, events)
+        }
         other => Err(DeviceError::UnsupportedSampleFormat(alloc::format!(
             "{other:?}"
         ))),
@@ -229,6 +276,7 @@ fn build_typed<T>(
     mut renderer: BlockRenderer,
     block_frames: usize,
     errors: Arc<AtomicU64>,
+    events: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, DeviceError>
 where
     T: SizedSample + FromSample<f32> + Send + 'static,
@@ -236,6 +284,7 @@ where
     let channels = renderer.channels();
     let mut scratch = vec![0.0 as Sample; block_frames.max(1) * channels];
     let err_counter = Arc::clone(&errors);
+    let event_flags = Arc::clone(&events);
 
     device
         .build_output_stream(
@@ -243,10 +292,17 @@ where
             move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
                 fill_output(&mut renderer, &mut scratch, data);
             },
-            move |_err| {
-                // Count stream errors (underruns, disconnects) for diagnostics;
-                // the host may layer richer logging on top of `error_count`.
+            move |err| {
+                // CPAL invokes this callback off the control thread. Keep it
+                // bounded: count and publish a bit only; never reopen here.
                 err_counter.fetch_add(1, Ordering::Relaxed);
+                let flag = match err {
+                    cpal::StreamError::BufferUnderrun => EVENT_UNDERRUN,
+                    cpal::StreamError::DeviceNotAvailable
+                    | cpal::StreamError::StreamInvalidated => EVENT_DISCONNECTED,
+                    cpal::StreamError::BackendSpecific { .. } => EVENT_RECOVERY_FAILED,
+                };
+                event_flags.fetch_or(flag, Ordering::Release);
             },
             None,
         )
