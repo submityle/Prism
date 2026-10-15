@@ -14,7 +14,7 @@
 
 - 版本：实现复核版（2026-10；保留 v0.x 设计历史，不再把本文标成“未进入编码”）。内容源自 `prism_world_system_design_zh.md` v3.1 的网络复制 / 权威 / AOI / 服务器网格分片设计，并已按 Prism 当前 crate 契约拆分；所有状态以下面的“代码路径 / 验证证据 / 未完成能力”三层为准。
 - 落地状态（2026-10-16 复核）：**纯逻辑内核、`prism_app` 接线、真实 UDP、ARQ、可靠通道、多路复用、input/bulk 通道和显式 crypto provider 已有代码路径**。`pkg/prism_replication` 的 `sequence`、`bitpack`/`quantize`、`delta`、`snapshot`、`aoi`、`prediction`、`frame`、`arq`、`reliable`、`multiplex`、`session` 和 `plugin` 均不再是设计占位；`plugin::ecs` 把固定步输入、World snapshot、回滚重放和对端 hash audit 接到真实 ECS 路径。`security` 的 `RingPskProvider` 通过 `ring` 提供 PSK 握手、随机 session nonce、AES-256-GCM、方向/序号绑定和 anti-replay；密钥轮换和身份体系仍由上层应用负责。
-- 网络传输补记（2026-10-16）：`prism_replication::udp::UdpTransport` 使用真实非阻塞 `UdpSocket`；`ReliableChannel` 在其上运行 ARQ，`ChannelMux` 提供事件/RPC/bulk 可靠通道、state/input 有界通道和共享预算。已完成的 loopback/UDP 证据只证明当前实现的单机链路语义；仍未完成或未验收的是自适应拥塞控制、QUIC/WebTransport、NAT/ICE/relay、连接迁移/多 peer 生产 demux、跨进程/跨机器验收，以及 `prism_scene` 实体/组件复制映射。
+- 网络传输补记（2026-10-16）：`prism_replication::udp::UdpTransport` 使用真实非阻塞 `UdpSocket`；`ReliableChannel` 在其上运行 ARQ，`ChannelMux` 提供事件/RPC/bulk 可靠通道、state/input 有界通道和共享预算。当前切片已补齐确定性的自适应拥塞/发送预算：新鲜 RTT/交付率样本平滑更新可靠窗口与不可靠预算，RTO 重传触发乘性减小，可靠流量优先于可丢弃流量；并有丢包与 RTT 变化单测。已完成的 loopback/UDP 证据只证明当前实现的单机链路语义；仍未完成或未验收的是 QUIC/WebTransport、NAT/ICE/relay、连接迁移/多 peer 生产 demux、跨进程/跨机器验收，以及 `prism_scene` 实体/组件复制映射。
 - 可靠通道接线补记（2026-10）：`prism_replication::reliable::ReliableChannel` 把 `arq` 架到 `Transport` datagram 之上（`[kind][seq u64][payload]` 数据报），每帧 `tick` 收包 / 重传 / 回 ACK；`ReplicationPlugin`（`app` feature）默认在调用方传入的 transport 外包一层，客户端 `First` 系统每帧推进它，丢包在后续帧重传而非丢失；客户端 ACK 也经同一通道回到权威端。序号由 `u32` 加宽到 `u64`（与 `DeliveryWindow` 对齐，避免回绕误 ACK），发送窗口有界并回压（`send` 满窗口返回 `None`）。真机验证：两个 `ReliableChannel` 走真实 loopback UDP（`PRISM_REQUIRE_NET=1`）端到端「每包恰好一次、按序、全部 ACK」。同时加固 `frame`：畸形长度前缀使解码器 poison 化（不再无界增长、不再重复误解析），长度越界在编码端与解码端都拒绝，varint 不再是 debug 溢出 panic 面。
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（override delta / `PersistentId` / spawn·despawn·materialize 契约 / 网络复制对称 §16.4）、`prism_world`（sector 树与空间索引 §5、HLOD 确定性簇 id §10、需求源 §7.1、persist 事务接口 §11）、`prism_ecs`（复制组件的列读写 / `serialize` / `determinism`）、`prism_time`（tick / 固定步长 / 时间线 §4D）、`prism_tasks`（并行序列化 / 分片编排）、`prism_math`（定点量化 / 空间编码）、`prism_reflect`（复制字段路径 / 增量脏标）、`prism_diagnostic`（网络计数器 / trace / 回放）、`prism_anticheat`（反作弊 provider 接缝，§14，另文）；可选外部后端 `uwu_event_mesh`（服务端权威事件流 / 回放 / 编排的可替换 provider 后端，`feature evmesh`，仅 `std`/`server`，§5.1 / §13 / §18）
@@ -203,15 +203,15 @@ prism_net_diag      诊断: 计数器、带宽剖析、丢包/延迟注入、网
   ch_bulk              大块传输(初始世界基线、资产句柄) —— 可靠、低优先、可抢占
 ```
 
-- **可靠 UDP ARQ**：选择性确认（SACK）+ 快速重传 + RTT 自适应 RTO；可靠通道独立滑动窗口，互不队头阻塞。
-- **拥塞控制**：BBR 形态（带宽-RTT 估计）优先于丢包型，避免 bufferbloat；拥塞时先降瞬时态频率（§15）而非丢事件。
+- **可靠 UDP ARQ**：当前实现为有界 go-back-N/超时重传、逐包 ACK 与 RTT 自适应 RTO；可靠通道独立窗口，互不队头阻塞。完整 SACK/快速重传仍是后续生产化缺口。
+- **拥塞控制**：`ChannelMux` 内置一个确定性的 BBR-shaped 近似控制器：对未重传 ACK 采样 RTT/交付率，平滑调整可靠字节窗口；RTO 重传立即做乘性减小，并同步降低瞬时态发送预算。它是可验证的复制层机制，不等同于完整 BBR 实现，也不替代公网链路验收。
 - **QUIC/WebTransport**（feature `transport_quic`）：复用成熟的 0-RTT 重连、连接迁移（切网不断线）、内建 TLS，面向浏览器端与 NAT 复杂环境；语义上把上述 channel 映射到 QUIC stream（可靠）与 datagram（不可靠）。
 - **NAT 穿透**：ICE/打洞 + 中继回退（§16），`listen_server` 房主优先直连、失败走中继。
 - **加密**（feature `crypto`）：DTLS/QUIC-TLS 握手 + 会话密钥；握手阶段做身份签名（§14 反作弊前置）。
 - **MTU 与分片**：探测路径 MTU，事件流大 delta 在应用层分片重组，避免 IP 层分片丢失放大。
 - **RPC / 控制面通道**：`ch_rpc_reliable` 承载请求-响应与控制信令，per-RPC 可按需降级为 unordered 或 unreliable 单发，大载荷借 `ch_bulk` 应用层分片；完整的调用形态 / 定向 / 幂等 / 安全模型见 §7.4。
 
-> 传输吞吐/RTT/丢包恢复时间均为 design target，本机无多端环境；可验证部分限 ARQ 窗口、SACK、重排缓冲的纯函数单测。
+> 传输吞吐/RTT/丢包恢复时间均为 design target，本机无多端环境；当前可验证部分限 ARQ 窗口、ACK/RTO、重排缓冲，以及自适应窗口/发送预算的确定性单测。
 
 ## 7. 复制模型：权威 delta 事件流 + 瞬时状态快照 delta + RPC 控制面
 
@@ -451,7 +451,7 @@ RTT 采样(周期性 ping/pong,带发送戳):
 - **delta 压缩**：瞬时态相对 baseline 只发变化字段（§7.2）；事件流本就是「只发改动」（§7.1）。
 - **定点量化 + 位域打包**：位置用 world 定点坐标分段量化、角度/法锥低位编码、速度按预算位宽，位域紧打包（借 Source/UE 量化形态）。
 - **优先级填充预算**：每客户端每 tick 带宽预算，AOI 内对象按「距离 × 新鲜度 × 交互性」排序填充，溢出降频/延后（§8）。
-- **QoS 调速**：拥塞或过载时按序降级——先降远处快照频率 → 降量化精度 → 扩插值延迟 → 分片时间膨胀（§12），**永不丢必达事件**。
+- **QoS 调速**：拥塞或过载时按序降级——可靠通道先受自适应字节窗口约束，RTO 重传后收缩窗口与不可靠每 tick 预算；再由上层先降远处快照频率 → 降量化精度 → 扩插值延迟 → 分片时间膨胀（§12），**永不丢必达事件**。`ChannelMux::unreliable_budget_bytes()` 可用于诊断当前可丢弃流量预算。
 - **批处理与合并**：同 tick 多事件合并一包；小包聚合（Nagle 式但带时限，不拖延迟）。
 - **零拷贝序列化**：复制单元按 `prism_ecs` 列块直接编码，避免中间对象（接 scene 数据导向快路径）。
 - **内存零分配热路径**：序列化 / 量化 / AOI 填充的每 tick 热路径走预分配 ring buffer / arena 与双缓冲对象池，稳态零堆分配，避免 GC 式停顿污染 tick 边界；包缓冲用定长环复用，优化尾部延迟（p99 / p999 而非仅均值，borrowed from 实时音视频工程）。
@@ -568,7 +568,7 @@ prism_network/              (伞 crate,re-export + prelude + feature 聚合)
 路线图（M 对齐 world/scene 的里程碑编号惯例）：
 
 ```text
-M1 传输: 可靠 UDP + 多通道 + 丢包/延迟注入（✅机制；🚧拥塞控制与生产网络验收）
+M1 传输: 可靠 UDP + 多通道 + 丢包/延迟注入（✅机制；✅自适应拥塞/发送预算单测；🚧生产网络验收）
 M2 复制骨架: 权威 delta 事件流(复用 persist) + 瞬时快照 delta + baseline（✅核心逻辑）
 M3 AOI: 空间裁剪 + 簇分级 + relevancy/dormancy（✅均匀网格逻辑；🚧与 scene/world 实体映射）
 M4 预测与和解: 客户端预测 + 回滚重放 + 平滑校正（✅纯逻辑与 ECS bridge；🚧跨机验证）
@@ -583,7 +583,7 @@ M9 后端 provider: uwu_event_mesh 适配(durable log/游标/DLQ/timeline) 作�
 
 诚实边界：
 
-- 当前已有单机 loopback 和真实 UDP/ARQ 测试，但没有跨进程、跨机器或真实公网链路证据；吞吐、延迟、丢包恢复、并发连接数和拥塞行为仍是 design target，不是验收结果。
+- 当前已有单机 loopback、真实 UDP/ARQ 测试，以及对自适应窗口/发送预算在确定性丢包与 RTT 变化下的单测；但没有跨进程、跨机器或真实公网链路证据。因此吞吐、尾延迟、丢包恢复时间、并发连接数和公网拥塞行为仍是 design target，不是生产验收结果。
 - `security` 的 `RingPskProvider` 已提供可复核的 PSK/AES-256-GCM 密码实现和 144 项全 feature 回归；但密钥托管/轮换、跨机器身份验证、部署级信任根和公网安全验收仍未完成，不能据此宣称生产部署安全闭环已完成。
 - `prism_replication` 的 ECS bridge 已接入 World snapshot/固定步回滚路径，但真实服务器权威 ECS、scene/component 复制和跨机 reconciliation 仍需端到端验收。
 - `lag_comp`、`server_mesh`、QUIC/WebTransport、NAT/ICE/relay、事件流 durable provider 和完整反作弊策略仍未实现，不得用设计章节替代代码完成声明。

@@ -315,22 +315,29 @@ struct Flight {
 #[derive(Clone, Debug)]
 struct CongestionController {
     mtu: usize,
+    min_cwnd: usize,
     cwnd: usize,
     max_cwnd: usize,
     bytes_in_flight: usize,
     min_rtt: Option<u64>,
     bandwidth_bytes_per_tick: usize,
+    unreliable_budget: usize,
+    max_unreliable_budget: usize,
 }
 
 impl CongestionController {
     fn new(config: MuxConfig) -> Self {
+        let min_cwnd = config.path_mtu.saturating_mul(2);
         Self {
             mtu: config.path_mtu,
+            min_cwnd,
             cwnd: config.initial_cwnd_bytes,
             max_cwnd: config.max_cwnd_bytes,
             bytes_in_flight: 0,
             min_rtt: None,
             bandwidth_bytes_per_tick: config.path_mtu,
+            unreliable_budget: config.unreliable_budget_per_tick,
+            max_unreliable_budget: config.unreliable_budget_per_tick,
         }
     }
 
@@ -342,11 +349,35 @@ impl CongestionController {
         self.bytes_in_flight = self.bytes_in_flight.saturating_add(bytes);
     }
 
-    fn acknowledged(&mut self, bytes: usize, rtt: u64) {
+    /// Return the per-tick budget available to expendable datagrams after
+    /// reliable traffic has reserved its congestion window share.
+    fn unreliable_budget(&self) -> usize {
+        self.unreliable_budget
+            .min(self.cwnd.saturating_sub(self.bytes_in_flight))
+    }
+
+    /// A timeout is an explicit congestion signal. Keep the outstanding bytes
+    /// charged until their ACK arrives, but reduce future admission and
+    /// expendable traffic immediately so a lossy path does not amplify its own
+    /// queue.
+    fn loss(&mut self) {
+        self.cwnd = (self.cwnd / 2).max(self.min_cwnd);
+        self.bandwidth_bytes_per_tick = (self.bandwidth_bytes_per_tick / 2).max(self.mtu);
+        self.unreliable_budget = (self.unreliable_budget / 2).max(self.mtu);
+    }
+
+    /// Retire one reliable flight. RTT and delivery-rate samples are accepted
+    /// only for a flight acknowledged without retransmission (Karn's rule), so
+    /// a delayed ACK cannot make a timed-out path look faster than it is.
+    fn acknowledged(&mut self, bytes: usize, rtt: u64, sample_rtt: bool) {
         self.bytes_in_flight = self.bytes_in_flight.saturating_sub(bytes);
+        if !sample_rtt {
+            return;
+        }
         let rtt = rtt.max(1);
         self.min_rtt = Some(self.min_rtt.map_or(rtt, |old| old.min(rtt)));
-        let sample_rate = bytes.saturating_add(rtt as usize - 1) / rtt as usize;
+        let rtt_ticks = rtt.min(usize::MAX as u64) as usize;
+        let sample_rate = bytes.saturating_add(rtt_ticks - 1) / rtt_ticks;
         self.bandwidth_bytes_per_tick = self
             .bandwidth_bytes_per_tick
             .saturating_mul(7)
@@ -362,7 +393,22 @@ impl CongestionController {
             .saturating_mul(2);
         let target = bdp.clamp(self.mtu.saturating_mul(2), self.max_cwnd);
         self.cwnd = self.cwnd.saturating_mul(7).saturating_add(target) / 8;
-        self.cwnd = self.cwnd.clamp(self.mtu.saturating_mul(2), self.max_cwnd);
+        self.cwnd = self.cwnd.clamp(self.min_cwnd, self.max_cwnd);
+
+        // The delivery-rate estimate is also the signal for the expendable
+        // per-tick budget. It recovers gradually and never exceeds the
+        // configured ceiling, while a loss halves it immediately.
+        let target_budget = self
+            .bandwidth_bytes_per_tick
+            .clamp(self.mtu, self.max_unreliable_budget);
+        self.unreliable_budget = self
+            .unreliable_budget
+            .saturating_mul(7)
+            .saturating_add(target_budget)
+            / 8;
+        self.unreliable_budget = self
+            .unreliable_budget
+            .clamp(self.mtu, self.max_unreliable_budget);
     }
 }
 
@@ -531,6 +577,13 @@ impl<D: Transport> ChannelMux<D> {
         self.congestion.cwnd
     }
 
+    /// Current per-tick budget for unreliable state/input datagrams after
+    /// reliable traffic has reserved its share of the adaptive window.
+    #[must_use]
+    pub fn unreliable_budget_bytes(&self) -> usize {
+        self.congestion.unreliable_budget()
+    }
+
     /// Transport counters.
     #[must_use]
     pub fn stats(&self) -> MuxStats {
@@ -600,8 +653,11 @@ impl<D: Transport> ChannelMux<D> {
                     && self.reliable_lane_mut(channel).sender.ack(seq, now)
                     && let Some(flight) = self.flights.remove(&(channel, seq))
                 {
-                    self.congestion
-                        .acknowledged(flight.bytes, now.saturating_sub(flight.first_sent));
+                    self.congestion.acknowledged(
+                        flight.bytes,
+                        now.saturating_sub(flight.first_sent),
+                        flight.transmissions == 1,
+                    );
                 }
                 continue;
             }
@@ -716,6 +772,7 @@ impl<D: Transport> ChannelMux<D> {
             for (seq, payload) in outgoing {
                 if let Some(flight) = self.flights.get_mut(&(channel, seq)) {
                     if flight.transmissions > 0 {
+                        self.congestion.loss();
                         self.stats.retransmissions = self.stats.retransmissions.saturating_add(1);
                     }
                     flight.transmissions = flight.transmissions.saturating_add(1);
@@ -728,7 +785,7 @@ impl<D: Transport> ChannelMux<D> {
     }
 
     fn flush_unreliable(&mut self) {
-        let mut budget = self.config.unreliable_budget_per_tick;
+        let mut budget = self.congestion.unreliable_budget();
         // Current input is more latency-sensitive than a state snapshot.
         for channel in [NetChannel::InputUnreliable, NetChannel::StateUnreliable] {
             loop {
@@ -901,6 +958,78 @@ mod tests {
         a.tick();
         assert!(a.bytes_in_flight() <= a.congestion_window());
         assert!(a.stats().datagrams_sent >= 4);
+    }
+
+    #[test]
+    fn adaptive_budget_tracks_rtt_and_recovers_after_a_loss() {
+        let config = MuxConfig {
+            path_mtu: 64,
+            initial_cwnd_bytes: 512,
+            max_cwnd_bytes: 2_048,
+            unreliable_budget_per_tick: 512,
+            ..MuxConfig::default()
+        };
+        let mut controller = CongestionController::new(config);
+        let initial_budget = controller.unreliable_budget;
+
+        // A slower RTT lowers the delivery-rate estimate and therefore the
+        // expendable per-tick budget, even though the path did not drop yet.
+        controller.acknowledged(512, 1, true);
+        let fast_rtt_budget = controller.unreliable_budget;
+        controller.acknowledged(512, 8, true);
+        assert!(controller.min_rtt == Some(1));
+        assert!(
+            controller.unreliable_budget < fast_rtt_budget,
+            "higher RTT must lower the smoothed send budget"
+        );
+
+        let before_loss = controller.cwnd;
+        controller.loss();
+        assert!(controller.cwnd < before_loss, "loss must reduce cwnd");
+        let after_loss_budget = controller.unreliable_budget;
+        assert!(after_loss_budget < fast_rtt_budget);
+
+        // Several clean, high-rate samples recover gradually, never exceeding
+        // the configured ceiling.
+        for _ in 0..32 {
+            controller.acknowledged(2_048, 1, true);
+        }
+        assert!(controller.unreliable_budget > after_loss_budget);
+        assert!(controller.unreliable_budget <= initial_budget);
+        assert!(controller.cwnd <= config.max_cwnd_bytes);
+    }
+
+    #[test]
+    fn retransmission_after_a_deterministic_loss_reduces_the_window() {
+        let config = MuxConfig {
+            min_rto: 2,
+            path_mtu: 128,
+            initial_cwnd_bytes: 512,
+            max_cwnd_bytes: 2_048,
+            ..MuxConfig::default()
+        };
+        let mut a = ChannelMux::new(MockTransport::default(), config);
+        let mut b = ChannelMux::new(MockTransport::default(), config);
+        let initial_cwnd = a.congestion_window();
+
+        a.send(NetChannel::EventsReliable, b"loss-me").unwrap();
+        a.tick_at(1);
+        b.datagram.inbox.extend(a.datagram.outbox.drain(..));
+        b.tick_at(1);
+        // B's ACK is intentionally held back. At t=3 A sees the timeout and
+        // retransmits, which is the deterministic loss signal for the
+        // congestion controller.
+        a.tick_at(3);
+
+        assert_eq!(a.stats().retransmissions, 1);
+        assert!(a.congestion_window() < initial_cwnd);
+        assert!(a.unreliable_budget_bytes() < config.unreliable_budget_per_tick);
+
+        // The delayed ACK still retires the flight, but must not undo the loss
+        // response or create a fresh RTT sample from a retransmitted packet.
+        a.datagram.inbox.extend(b.datagram.outbox.drain(..));
+        a.tick_at(4);
+        assert_eq!(a.bytes_in_flight(), 0);
     }
 
     #[test]
