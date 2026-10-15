@@ -100,8 +100,6 @@ pub enum BuildExecutionError {
     InvalidOutput(JobId, &'static str),
     /// Two fresh executions of the same job produced different bytes.
     NonDeterministic(DeterminismDifference),
-    /// The caller cancelled execution before the next side-effect boundary.
-    Cancelled,
 }
 
 impl fmt::Display for BuildExecutionError {
@@ -123,7 +121,6 @@ impl fmt::Display for BuildExecutionError {
                 write!(f, "job {} has invalid output: {reason}", id.0)
             }
             Self::NonDeterministic(difference) => difference.fmt(f),
-            Self::Cancelled => f.write_str("build execution was cancelled"),
         }
     }
 }
@@ -298,36 +295,6 @@ impl BuildExecutor {
         verify_determinism: bool,
         budget: BuildResources,
     ) -> Result<BuildExecution, BuildExecutionError> {
-        let artifacts = self.execute_artifacts_with_limit(
-            graph,
-            specs,
-            store,
-            ddc,
-            max_concurrency,
-            verify_determinism,
-            budget,
-            None,
-        )?;
-        self.publish_artifacts(store, graph, specs, revision, artifacts)
-    }
-
-    /// Executes a graph into verified CAS/DDC artifacts without entering the
-    /// revision publication boundary. This is the shared execution contract
-    /// for bounded in-process consumers such as [`crate::BakeService`].
-    pub(crate) fn execute_artifacts_with_limit(
-        &self,
-        graph: &BuildGraph,
-        specs: &BTreeMap<JobId, ArtifactSpec>,
-        store: &RevisionStore,
-        ddc: &mut DerivedDataCache,
-        max_concurrency: usize,
-        verify_determinism: bool,
-        budget: BuildResources,
-        cancelled: Option<&dyn Fn() -> bool>,
-    ) -> Result<BuildArtifacts, BuildExecutionError> {
-        if cancelled.is_some_and(|is_cancelled| is_cancelled()) {
-            return Err(BuildExecutionError::Cancelled);
-        }
         if max_concurrency == 0 {
             return Err(BuildExecutionError::Graph(BuildError::InvalidConcurrency));
         }
@@ -372,9 +339,6 @@ impl BuildExecutor {
 
         let mut completed = BTreeSet::new();
         while completed.len() < order.len() {
-            if cancelled.is_some_and(|is_cancelled| is_cancelled()) {
-                return Err(BuildExecutionError::Cancelled);
-            }
             let mut available = budget;
             let wave: Vec<_> = ready
                 .iter()
@@ -472,10 +436,6 @@ impl BuildExecutor {
                     .collect::<Vec<_>>()
             });
 
-            if cancelled.is_some_and(|is_cancelled| is_cancelled()) {
-                return Err(BuildExecutionError::Cancelled);
-            }
-
             // Canonicalize at the side-effect boundary, independently of the
             // collector's arrival/join order. No cache mutation or failure
             // selection may happen before this ordering step.
@@ -523,55 +483,22 @@ impl BuildExecutor {
             }
         }
 
-        if cancelled.is_some_and(|is_cancelled| is_cancelled()) {
-            return Err(BuildExecutionError::Cancelled);
-        }
-
-        Ok(BuildArtifacts {
-            artifact_keys,
-            descriptors,
-            outputs,
-            cache_hits,
-        })
-    }
-
-    fn publish_artifacts(
-        &self,
-        store: &RevisionStore,
-        graph: &BuildGraph,
-        specs: &BTreeMap<JobId, ArtifactSpec>,
-        revision: BuildRevision,
-        mut artifacts: BuildArtifacts,
-    ) -> Result<BuildExecution, BuildExecutionError> {
-        let order = graph.execution_order()?;
         let expected_current = store.current_revision()?;
         let mut transaction = store.begin(revision, expected_current);
         for id in order {
             transaction.stage(
                 specs[&id].asset,
-                artifacts.descriptors[&id].clone(),
-                artifacts
-                    .outputs
-                    .remove(&id)
-                    .expect("completed output exists"),
+                descriptors[&id].clone(),
+                outputs.remove(&id).expect("completed output exists"),
             )?;
         }
         let published = transaction.commit()?;
         Ok(BuildExecution {
             published,
-            artifact_keys: artifacts.artifact_keys,
-            cache_hits: artifacts.cache_hits,
+            artifact_keys,
+            cache_hits,
         })
     }
-}
-
-/// Verified outputs from graph execution before any revision publication.
-#[derive(Debug)]
-pub(crate) struct BuildArtifacts {
-    pub(crate) artifact_keys: BTreeMap<JobId, ArtifactKey>,
-    pub(crate) descriptors: BTreeMap<JobId, ArtifactDescriptor>,
-    pub(crate) outputs: BTreeMap<JobId, Vec<u8>>,
-    pub(crate) cache_hits: BTreeSet<JobId>,
 }
 
 struct PreparedJob {
