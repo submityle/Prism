@@ -65,6 +65,9 @@ pub mod plan_codec;
 pub mod property_apply;
 pub mod remap;
 pub mod residency;
+#[cfg(feature = "materialize")]
+pub mod runtime;
+pub mod streaming;
 pub mod template;
 pub mod template_codec;
 
@@ -101,6 +104,11 @@ pub use plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits}
 pub use property_apply::{apply_property_override, apply_property_overrides, PropertyApplyError};
 pub use remap::RemapTable;
 pub use residency::{ResidencyPlan, ResidencyTier};
+#[cfg(feature = "materialize")]
+pub use runtime::{spawn_scene, SceneSpawnError};
+pub use streaming::{
+    ResidencyAction, ResidencyBudget, ResidencyRequest, ResidencyScheduler,
+};
 pub use template::{NestedSlot, SceneTemplate, TemplateError};
 pub use template_codec::{
     decode_template, encode_template, TemplateCodecError, TemplateDecodeLimits,
@@ -132,6 +140,11 @@ pub mod prelude {
     pub use crate::plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits};
     pub use crate::remap::RemapTable;
     pub use crate::residency::{ResidencyPlan, ResidencyTier};
+    #[cfg(feature = "materialize")]
+    pub use crate::runtime::{spawn_scene, SceneSpawnError};
+    pub use crate::streaming::{
+        ResidencyAction, ResidencyBudget, ResidencyRequest, ResidencyScheduler,
+    };
     pub use crate::template::{NestedSlot, SceneTemplate, TemplateError};
     pub use crate::template_codec::{
         decode_template, encode_template, TemplateCodecError, TemplateDecodeLimits,
