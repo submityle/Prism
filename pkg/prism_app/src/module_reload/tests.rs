@@ -1,8 +1,10 @@
 //! Integration coverage using real, independently compiled cdylib fixtures.
 
 use super::*;
+use crate::App;
 use prism_ecs::resource::Resource;
 use prism_ecs::schedule::{IntoSystemConfigs, Schedule, StepReport, Stepping};
+use prism_reflect::DynamicStruct;
 use std::fs;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -88,6 +90,22 @@ impl Drop for TestDir {
 struct Counter(u64);
 impl Resource for Counter {}
 
+#[derive(prism_reflect::Reflect, Clone)]
+struct LegacyState {
+    count: u64,
+}
+
+#[derive(prism_reflect::Reflect, Clone)]
+struct RenamedState {
+    total: u64,
+}
+
+#[derive(prism_reflect::Reflect, Clone)]
+struct ExpandedState {
+    total: u64,
+    bonus: u64,
+}
+
 fn host(world: &mut World, operation: u64, input: &[u8]) -> Result<Vec<u8>, String> {
     if operation != 1 || input.len() != 8 {
         return Err("unknown operation/payload".into());
@@ -107,9 +125,170 @@ fn watcher(path: PathBuf) -> ModuleReload {
     ModuleReload::new(path, ModuleReloadConfig::new(42, 84), host).unwrap()
 }
 
+fn reflect_watcher(path: PathBuf) -> ModuleReload {
+    let mut contract = ReflectStateContract::new("module-state");
+    contract
+        .register::<LegacyState, _, _>(
+            1,
+            |bytes| {
+                if bytes.len() != 8 {
+                    return Err("legacy state must contain one u64".into());
+                }
+                Ok(LegacyState {
+                    count: u64::from_le_bytes(bytes.try_into().unwrap()),
+                })
+            },
+            |state| Ok(state.count.to_le_bytes().to_vec()),
+        )
+        .unwrap();
+    contract
+        .register::<RenamedState, _, _>(
+            2,
+            |bytes| {
+                if bytes.len() != 16 || &bytes[..8] != b"V2STATE!" {
+                    return Err("renamed state has an invalid native envelope".into());
+                }
+                Ok(RenamedState {
+                    total: u64::from_le_bytes(bytes[8..].try_into().unwrap()),
+                })
+            },
+            |state| {
+                let mut bytes = b"V2STATE!".to_vec();
+                bytes.extend_from_slice(&state.total.to_le_bytes());
+                Ok(bytes)
+            },
+        )
+        .unwrap();
+    contract
+        .register::<ExpandedState, _, _>(
+            3,
+            |bytes| {
+                if bytes.len() != 24 || &bytes[..8] != b"V3STATE!" {
+                    return Err("expanded state has an invalid native envelope".into());
+                }
+                Ok(ExpandedState {
+                    total: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                    bonus: u64::from_le_bytes(bytes[16..].try_into().unwrap()),
+                })
+            },
+            |state| {
+                let mut bytes = b"V3STATE!".to_vec();
+                bytes.extend_from_slice(&state.total.to_le_bytes());
+                bytes.extend_from_slice(&state.bonus.to_le_bytes());
+                Ok(bytes)
+            },
+        )
+        .unwrap();
+    contract
+        .migration(1, 2, |value: &mut DynamicStruct| {
+            let count = value
+                .remove("count")
+                .ok_or_else(|| "missing count during rename".to_owned())?;
+            value.insert_boxed("total", count);
+            Ok(())
+        })
+        .unwrap();
+    contract
+        .migration(2, 3, |value: &mut DynamicStruct| {
+            value.insert("bonus", 7_u64);
+            Ok(())
+        })
+        .unwrap();
+    ModuleReload::new(path, ModuleReloadConfig::new(42, 84), host)
+        .unwrap()
+        .with_reflect_state(contract)
+}
+
 fn poll(watch: &mut ModuleReload) -> Result<ModuleReloadOutcome, ModuleReloadError> {
     // SAFETY: fixtures above are trusted code implementing this exact ABI.
     unsafe { watch.poll() }
+}
+
+#[test]
+fn host_reflect_migration_renames_adds_default_and_rejects_state_loss() {
+    let directory = TestDir::new();
+    let v1 = directory.build("v1", &[]);
+    let corrupt = directory.build("corrupt", &["fixture_v3", "fixture_corrupt_state"]);
+    let v3 = directory.build("v3", &["fixture_v3"]);
+    let mut watch = reflect_watcher(directory.publish(&v1));
+    poll(&mut watch).unwrap();
+    directory.publish(&corrupt);
+    assert!(matches!(
+        poll(&mut watch),
+        Err(ModuleReloadError::Reflect(_))
+    ));
+    assert_eq!(watch.active().unwrap().unwrap().module_version, 1);
+    directory.publish(&v3);
+    let info = match poll(&mut watch).unwrap() {
+        ModuleReloadOutcome::Activated(info) => info,
+        ModuleReloadOutcome::Unchanged => panic!("changed binary was not activated"),
+    };
+    assert_eq!((info.module_version, info.state_schema), (20, 3));
+    let exported = watch.export_state().unwrap();
+    assert_eq!(&exported[..8], b"V3STATE!");
+    assert_eq!(&exported[8..16], &0_u64.to_le_bytes());
+    assert_eq!(&exported[16..], &7_u64.to_le_bytes());
+
+    let mut world = world();
+    let entity = world.spawn(());
+    watch.run(7, &mut world).unwrap();
+    assert_eq!(world.resource::<Counter>().0, 20);
+    assert!(world.entities().contains(entity));
+    let exported = watch.export_state().unwrap();
+    assert_eq!(&exported[8..16], &20_u64.to_le_bytes());
+    assert_eq!(&exported[16..], &7_u64.to_le_bytes());
+}
+
+#[test]
+fn app_update_polls_at_the_boundary_and_keeps_old_module_on_failure() {
+    let directory = TestDir::new();
+    let v1 = directory.build("v1", &[]);
+    let bad = directory.build("bad", &["fixture_v2", "fixture_fail_create"]);
+    let v2 = directory.build("v2", &["fixture_v2"]);
+    let mut app = App::new();
+    app.add_module_reload(watcher(directory.publish(&v1)))
+        .unwrap();
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<ModuleReloadRegistry>()
+            .active(42)
+            .unwrap()
+            .unwrap()
+            .module_version,
+        1
+    );
+
+    directory.publish(&bad);
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<ModuleReloadRegistry>()
+            .active(42)
+            .unwrap()
+            .unwrap()
+            .module_version,
+        1
+    );
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<ModuleReloadRegistry>()
+            .take_failures()
+            .len(),
+        1
+    );
+
+    directory.publish(&v2);
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<ModuleReloadRegistry>()
+            .active(42)
+            .unwrap()
+            .unwrap()
+            .module_version,
+        10
+    );
 }
 
 #[test]

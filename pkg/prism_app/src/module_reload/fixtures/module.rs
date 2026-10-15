@@ -8,12 +8,26 @@ use abi::{ByteSink, ByteSlice, HostApi, ModuleApi};
 use std::ffi::c_void;
 use std::io::Write;
 
-const VERSION: u64 = if cfg!(fixture_v2) { 10 } else { 1 };
-const SCHEMA: u64 = if cfg!(fixture_v2) { 2 } else { 1 };
+const VERSION: u64 = if cfg!(fixture_v3) {
+    20
+} else if cfg!(fixture_v2) {
+    10
+} else {
+    1
+};
+const SCHEMA: u64 = if cfg!(fixture_v3) {
+    3
+} else if cfg!(fixture_v2) {
+    2
+} else {
+    1
+};
 const V2_PREFIX: &[u8; 8] = b"V2STATE!";
+const V3_PREFIX: &[u8; 8] = b"V3STATE!";
 
 struct State {
     count: u64,
+    bonus: u64,
 }
 
 unsafe extern "C" fn create(schema: u64, previous: ByteSlice, output: *mut *mut c_void) -> u32 {
@@ -23,16 +37,27 @@ unsafe extern "C" fn create(schema: u64, previous: ByteSlice, output: *mut *mut 
     } else {
         unsafe { std::slice::from_raw_parts(previous.ptr, previous.len) }
     };
-    let count = match schema {
-        0 if bytes.is_empty() => 0,
-        1 if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().unwrap()),
+    let (count, bonus) = match schema {
+        0 if bytes.is_empty() => (0, 0),
+        1 if bytes.len() == 8 => (u64::from_le_bytes(bytes.try_into().unwrap()), 0),
         2 if bytes.len() == 16 && &bytes[..8] == V2_PREFIX => {
-            u64::from_le_bytes(bytes[8..].try_into().unwrap())
+            (u64::from_le_bytes(bytes[8..].try_into().unwrap()), 7)
         }
+        3 if bytes.len() == 24 && &bytes[..8] == V3_PREFIX => (
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            u64::from_le_bytes(bytes[16..].try_into().unwrap()),
+        ),
         _ => return abi::REJECTED,
     };
     // Return a destroyable partial state on intentional migration failure.
-    let state = Box::new(State { count });
+    let state = Box::new(State {
+        count,
+        bonus: if cfg!(fixture_corrupt_state) {
+            99
+        } else {
+            bonus
+        },
+    });
     unsafe { *output = Box::into_raw(state).cast() };
     if cfg!(fixture_fail_create) {
         return abi::REJECTED;
@@ -69,6 +94,27 @@ unsafe extern "C" fn export(state: *const c_void, sink: ByteSink) -> u32 {
         if status != abi::OK {
             return status;
         }
+    }
+    if SCHEMA == 3 {
+        let status = unsafe { (sink.write)(sink.context, ByteSlice::from_bytes(V3_PREFIX)) };
+        if status != abi::OK {
+            return status;
+        }
+        let status = unsafe {
+            (sink.write)(
+                sink.context,
+                ByteSlice::from_bytes(&state.count.to_le_bytes()),
+            )
+        };
+        if status != abi::OK {
+            return status;
+        }
+        return unsafe {
+            (sink.write)(
+                sink.context,
+                ByteSlice::from_bytes(&state.bonus.to_le_bytes()),
+            )
+        };
     }
     unsafe {
         (sink.write)(

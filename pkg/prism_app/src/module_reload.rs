@@ -1,8 +1,10 @@
 //! Native module reload through a versioned host contract (`module-reload`).
 //!
 //! [`ModuleReload::poll`] snapshots a real dynamic library, checks its ABI and
-//! stable system IDs, exports the current state, and asks the candidate to
-//! migrate it. Only a fully prepared candidate replaces the active instance.
+//! stable system IDs, exports the current state, and either passes it through
+//! the ABI contract or migrates it through a host-owned
+//! [`ReflectStateContract`]. Only a fully prepared candidate replaces the
+//! active instance.
 //! Preparation cannot access the World; failed loads and migrations preserve
 //! the old module. World entities, resources and schedule nodes stay in place.
 //!
@@ -14,24 +16,31 @@
 //! The ABI is deliberately a host operation protocol: ECS values, allocators,
 //! Rust `TypeId`s, function objects and module-owned drop glue never cross it.
 //! Application-specific operations live in a [`ModuleHost`] compiled into the
-//! host. Migration concerns the module's opaque state; the World is retained.
+//! [`ReflectStateContract`] gives module state typed schema evolution while the
+//! ABI remains opaque bytes; the World is retained.
 //! Loading native code requires a trusted module obeying [`abi`]'s contract.
 
 pub mod abi;
 mod instance;
 mod loader;
+mod reflect_state;
 mod system;
 
+pub use reflect_state::{PreparedState, ReflectStateContract, ReflectStateError};
 pub use system::{IsModuleSystem, ModuleSystem};
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use prism_ecs::resource::Resource;
 use prism_ecs::world::{World, WorldId};
 
 use instance::Instance;
+
+use crate::{App, Plugin};
 
 /// Application-owned operations available to module systems. Implementations
 /// must not put library-owned pointers or drop glue into the World. An operation
@@ -104,12 +113,16 @@ pub enum ModuleReloadError {
     NotLoaded,
     /// The requested stable ID is not exported.
     UnknownSystem(u64),
+    /// No automatic watcher has the requested module identity.
+    UnknownModule(u64),
     /// Reload would remove or add schedule bindings.
     SystemSetChanged,
     /// A previous unexpected host unwind poisoned the runtime lock.
     Poisoned,
     /// Host operation rejected execution or panicked.
     Host(String),
+    /// Host-owned typed reflect state could not be migrated or verified.
+    Reflect(String),
 }
 
 impl fmt::Display for ModuleReloadError {
@@ -219,6 +232,7 @@ pub struct ModuleReload {
     path: PathBuf,
     runtime: Arc<Mutex<Runtime>>,
     applied_bytes: Option<Vec<u8>>,
+    reflect: Option<Arc<ReflectStateContract>>,
 }
 
 impl ModuleReload {
@@ -251,7 +265,23 @@ impl ModuleReload {
                 failures: VecDeque::new(),
             })),
             applied_bytes: None,
+            reflect: None,
         })
+    }
+
+    /// Attach a host-owned typed reflect contract for state migration. The
+    /// native ABI remains unchanged; adapters and migrations run before the
+    /// candidate receives any state bytes.
+    #[must_use]
+    pub fn with_reflect_state(mut self, contract: ReflectStateContract) -> Self {
+        self.reflect = Some(Arc::new(contract));
+        self
+    }
+
+    /// The configured application module identity.
+    #[must_use]
+    pub fn module_id(&self) -> Result<u64, ModuleReloadError> {
+        Ok(lock(&self.runtime)?.config.module_id)
     }
 
     /// Source library path, whose contents are polled rather than its mtime.
@@ -291,11 +321,54 @@ impl ModuleReload {
             .as_ref()
             .map(|old| old.export(config.max_state_bytes))
             .transpose()?;
-        let schema = runtime
+        let previous_schema = runtime
             .active
             .as_ref()
             .map_or(0, |old| old.api().state_schema);
-        let replacement = Instance::create(candidate, schema, previous.as_deref().unwrap_or(&[]))?;
+        let has_previous = runtime.active.is_some();
+        let (create_schema, create_bytes, expected) =
+            match (&self.reflect, runtime.active.as_ref(), previous.as_deref()) {
+                (Some(contract), Some(_), Some(previous)) => {
+                    let prepared = catch_unwind(AssertUnwindSafe(|| {
+                        contract.prepare(previous_schema, candidate.api.state_schema, previous)
+                    }))
+                    .map_err(|_| ModuleReloadError::Reflect("reflect migration panicked".into()))?
+                    .map_err(|error| ModuleReloadError::Reflect(error.to_string()))?;
+                    (prepared.schema, prepared.payload, Some(prepared.expected))
+                }
+                _ => (previous_schema, previous.unwrap_or_default(), None),
+            };
+        if create_bytes.len() > config.max_state_bytes {
+            return Err(ModuleReloadError::Limit("state"));
+        }
+        let replacement = Instance::create(candidate, create_schema, &create_bytes)?;
+        if let Some(contract) = &self.reflect {
+            let exported = replacement.export(config.max_state_bytes)?;
+            if let Some(expected) = expected.as_deref() {
+                catch_unwind(AssertUnwindSafe(|| {
+                    contract.validate_import(create_schema, &exported, expected)
+                }))
+                .map_err(|_| {
+                    ModuleReloadError::Reflect("reflect import validation panicked".into())
+                })?
+                .map_err(|error| ModuleReloadError::Reflect(error.to_string()))?;
+            } else {
+                catch_unwind(AssertUnwindSafe(|| {
+                    contract.validate_export(
+                        if has_previous {
+                            create_schema
+                        } else {
+                            replacement.api().state_schema
+                        },
+                        &exported,
+                    )
+                }))
+                .map_err(|_| {
+                    ModuleReloadError::Reflect("reflect export validation panicked".into())
+                })?
+                .map_err(|error| ModuleReloadError::Reflect(error.to_string()))?;
+            }
+        }
         let old = runtime.active.replace(replacement);
         runtime.generation = runtime.generation.saturating_add(1);
         self.applied_bytes = Some(bytes);
@@ -340,6 +413,216 @@ impl ModuleReload {
     pub fn take_run_failures(&self) -> Result<Vec<ModuleRunFailure>, ModuleReloadError> {
         Ok(lock(&self.runtime)?.failures.drain(..).collect())
     }
+}
+
+/// A set of reload watchers polled by [`poll_app_modules`] at an App frame
+/// boundary. Each watcher keeps its old instance active when its candidate
+/// fails, so one broken module cannot stop the remaining watchers.
+pub struct ModuleReloadRegistry {
+    watchers: Vec<ModuleReload>,
+    failures: VecDeque<ModulePollFailure>,
+}
+
+impl Resource for ModuleReloadRegistry {}
+
+/// A host-owned report retained when automatic polling rejects a candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModulePollFailure {
+    /// Module identity configured for the watcher.
+    pub module_id: u64,
+    /// Source path being watched.
+    pub path: PathBuf,
+    /// The candidate rejection or loader failure.
+    pub error: ModuleReloadError,
+}
+
+impl ModuleReloadRegistry {
+    /// Create an empty polling registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            watchers: Vec::new(),
+            failures: VecDeque::new(),
+        }
+    }
+
+    /// Add a watcher, rejecting duplicate configured module identities.
+    pub fn add(&mut self, watcher: ModuleReload) -> Result<(), ModuleReloadError> {
+        let module_id = watcher.module_id()?;
+        if self
+            .watchers
+            .iter()
+            .filter_map(|watcher| watcher.module_id().ok())
+            .any(|id| id == module_id)
+        {
+            return Err(ModuleReloadError::Abi(
+                "duplicate module reload identity".into(),
+            ));
+        }
+        self.watchers.push(watcher);
+        Ok(())
+    }
+
+    /// Number of registered watchers.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.watchers.len()
+    }
+
+    /// Whether no watcher is registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.watchers.is_empty()
+    }
+
+    /// Read active metadata for one configured module identity.
+    pub fn active(&self, module_id: u64) -> Result<Option<ModuleInfo>, ModuleReloadError> {
+        let watcher = self
+            .watchers
+            .iter()
+            .find(|watcher| watcher.module_id().ok() == Some(module_id))
+            .ok_or(ModuleReloadError::UnknownModule(module_id))?;
+        watcher.active()
+    }
+
+    /// Create a stable schedule binding for a system in a configured module.
+    pub fn system(
+        &self,
+        module_id: u64,
+        system_id: u64,
+    ) -> Result<ModuleSystem, ModuleReloadError> {
+        let watcher = self
+            .watchers
+            .iter()
+            .find(|watcher| watcher.module_id().ok() == Some(module_id))
+            .ok_or(ModuleReloadError::UnknownModule(module_id))?;
+        watcher.system(system_id)
+    }
+
+    /// Remove and return all automatic poll failures.
+    pub fn take_failures(&mut self) -> Vec<ModulePollFailure> {
+        self.failures.drain(..).collect()
+    }
+
+    fn poll(&mut self) {
+        for watcher in &mut self.watchers {
+            // SAFETY: the registry is an explicit trusted-code installation
+            // point; every watcher enforces its documented native ABI contract.
+            let failure = match unsafe { watcher.poll() } {
+                Ok(_) => None,
+                Err(error) => Some((
+                    watcher.module_id().unwrap_or(0),
+                    watcher.path().to_owned(),
+                    error,
+                )),
+            };
+            if let Some((module_id, path, error)) = failure {
+                if self.failures.len() == 128 {
+                    self.failures.pop_front();
+                }
+                self.failures.push_back(ModulePollFailure {
+                    module_id,
+                    path,
+                    error,
+                });
+            }
+        }
+    }
+}
+
+impl Default for ModuleReloadRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Explicit plugin that installs one or more trusted module watchers.
+pub struct ModuleReloadPlugin {
+    watchers: Mutex<Vec<ModuleReload>>,
+}
+
+impl ModuleReloadPlugin {
+    /// Create a plugin with no watchers; callers may add them before assembly.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            watchers: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Add a watcher to this plugin.
+    #[must_use]
+    pub fn with_watcher(mut self, watcher: ModuleReload) -> Self {
+        self.watchers
+            .get_mut()
+            .expect("module reload plugin mutex is not poisoned")
+            .push(watcher);
+        self
+    }
+}
+
+impl Default for ModuleReloadPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Plugin for ModuleReloadPlugin {
+    fn build(&self, app: &mut App) {
+        let watchers = self
+            .watchers
+            .lock()
+            .expect("module reload plugin mutex is not poisoned")
+            .drain(..)
+            .collect::<Vec<_>>();
+        for watcher in watchers {
+            app.add_module_reload(watcher)
+                .expect("module reload plugin contains a duplicate watcher");
+        }
+    }
+
+    fn is_unique(&self) -> bool {
+        false
+    }
+}
+
+impl App {
+    /// Install a watcher into the automatic frame-boundary polling registry.
+    pub fn add_module_reload(
+        &mut self,
+        watcher: ModuleReload,
+    ) -> Result<&mut Self, ModuleReloadError> {
+        if self
+            .world()
+            .get_resource::<ModuleReloadRegistry>()
+            .is_none()
+        {
+            self.insert_resource(ModuleReloadRegistry::new());
+        }
+        self.world_mut()
+            .resource_mut::<ModuleReloadRegistry>()
+            .add(watcher)?;
+        Ok(self)
+    }
+}
+
+/// Poll installed module watchers before the next frame's systems run.
+///
+/// This is `pub(crate)` so the App loop and PIE/stepping integration share one
+/// boundary hook without exposing an unsafe native-load operation as a public
+/// free function. No sync is performed when no watcher is installed.
+pub(crate) fn poll_app_modules(app: &mut App) {
+    let has_watchers = app
+        .world()
+        .get_resource::<ModuleReloadRegistry>()
+        .is_some_and(|registry| !registry.is_empty());
+    if !has_watchers {
+        return;
+    }
+    app.sync_sub_apps();
+    app.world_mut()
+        .resource_mut::<ModuleReloadRegistry>()
+        .poll();
 }
 
 fn lock(runtime: &Mutex<Runtime>) -> Result<MutexGuard<'_, Runtime>, ModuleReloadError> {
