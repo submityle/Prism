@@ -76,6 +76,25 @@ impl<I: Clone> NetworkRollbackDriver<I> {
         Ok(frame)
     }
 
+    /// Undo the most recent [`commit`](Self::commit), restoring its pre-input
+    /// snapshot and rewinding the history cursor. This is used to keep the ECS
+    /// timeline transactional if a later prediction/send step unexpectedly
+    /// refuses the input.
+    pub fn abort_commit(&mut self, world: &mut World, frame: u64) -> bool {
+        let Some(mut history) = world.remove_resource::<SnapshotHistory>() else {
+            return false;
+        };
+        let valid = history.next_frame() == frame.saturating_add(1)
+            && history.contains(frame)
+            && history.rollback(world, frame);
+        if valid {
+            history.truncate_after(frame);
+            history.seek(frame);
+        }
+        world.insert_resource(history);
+        valid
+    }
+
     /// Rebase the World on one authoritative post-input record and replay the
     /// still-pending local inputs through the complete fixed tick.
     pub fn rebase_authority(
@@ -431,13 +450,6 @@ fn drive_ecs_input<S: EcsReplicationStrategy>(world: &mut World) {
             bridge.inputs.push_front(input);
             break;
         }
-        if let Err(missing) = world.try_snapshot() {
-            bridge.record_error(EcsReplicationError::Rollback(
-                EcsRollbackError::MissingSnapshotComponents(missing),
-            ));
-            bridge.inputs.push_front(input);
-            break;
-        }
         if world.get_resource::<SnapshotHistory>().is_none() {
             bridge.record_error(EcsReplicationError::Rollback(
                 EcsRollbackError::MissingHistory,
@@ -445,29 +457,32 @@ fn drive_ecs_input<S: EcsReplicationStrategy>(world: &mut World) {
             bridge.inputs.push_front(input);
             break;
         }
-        match bridge.replication.predict_and_send(input.clone()) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                if let Some(error) = bridge.replication.take_send_error() {
-                    bridge.record_error(EcsReplicationError::Send(error));
-                }
-                bridge.inputs.push_front(input);
-                break;
-            }
-            Err(error) => {
-                bridge.record_error(EcsReplicationError::Prediction(error));
-                bridge.inputs.push_front(input);
-                break;
-            }
+        if let Err(error) = bridge.replication.check_predicted_send(&input) {
+            bridge.record_error(EcsReplicationError::Send(error));
+            bridge.inputs.push_front(input);
+            break;
+        }
+        if let Err(error) = bridge.replication.predict(input.clone()) {
+            bridge.record_error(EcsReplicationError::Prediction(error));
+            bridge.inputs.push_front(input);
+            break;
         }
         let _frame = match bridge.rollback.commit(world, input.clone()) {
             Ok(frame) => frame,
             Err(error) => {
+                bridge.replication.cancel_last_prediction();
                 bridge.record_error(EcsReplicationError::Rollback(error));
                 bridge.inputs.push_front(input);
                 break;
             }
         };
+        if let Err(error) = bridge.replication.send_predicted(&input) {
+            bridge.replication.cancel_last_prediction();
+            bridge.rollback.abort_commit(world, _frame);
+            bridge.record_error(EcsReplicationError::Send(error));
+            bridge.inputs.push_front(input);
+            break;
+        }
         #[cfg(feature = "determinism")]
         bridge.sync_audit(world, _frame);
         bridge.replication.apply_input_to_world(world, &input);
@@ -492,6 +507,8 @@ mod tests {
     use prism_ecs::component::Component;
     use prism_ecs::entity::Entity;
     use prism_ecs::system::ResMut;
+    #[cfg(feature = "multi_thread")]
+    use prism_ecs::world::snapshot::WorldSnapshot;
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     struct Counter(i64);
@@ -580,9 +597,9 @@ mod tests {
         let (client_transport, server_transport) = InMemoryTransport::pair_secure();
         let mut client_app = App::new();
         client_app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(
-            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(10),
         ));
-        client_app.set_fixed_timestep_hz(60.0);
+        client_app.set_fixed_timestep(std::time::Duration::from_millis(10));
         let entity = client_app.world_mut().spawn(Counter(0));
         client_app
             .world_mut()
@@ -623,12 +640,8 @@ mod tests {
             bridge.queue_input(1);
         }
 
-        for _ in 0..64 {
+        for _ in 0..24 {
             client_app.update();
-            // Drive one fixed step explicitly so the test is independent of
-            // wall-clock accumulator policy while still exercising the plugin's
-            // `BeforeFixedMainLoop` and `FixedFirst` systems.
-            client_app.world_mut().run_schedule(FixedFirst);
             server_app.update();
         }
 
@@ -662,6 +675,135 @@ mod tests {
             .resource::<crate::plugin::ServerReplication<AuthorityStrategy>>();
         assert_eq!(server.revision(), Some(2));
         assert_eq!(record_value(server.record().expect("authority record")), 6);
+    }
+
+    #[cfg(feature = "multi_thread")]
+    struct E2eResult {
+        final_snapshot: WorldSnapshot,
+        history: Vec<WorldSnapshot>,
+        final_hashes: Vec<Option<u64>>,
+    }
+
+    #[cfg(feature = "multi_thread")]
+    fn run_e2e(worker_count: usize) -> E2eResult {
+        let (client_transport, server_transport) = InMemoryTransport::pair_secure();
+        let mut client_app = App::new();
+        client_app.set_task_pool_threads(worker_count);
+        client_app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(
+            std::time::Duration::from_millis(10),
+        ));
+        client_app.set_fixed_timestep(std::time::Duration::from_millis(10));
+        let entity = client_app.world_mut().spawn(Counter(0));
+        client_app
+            .world_mut()
+            .register_snapshot_component_hashable::<Counter>();
+        client_app
+            .world_mut()
+            .register_snapshot_component_equatable::<Counter>();
+        client_app.add_plugins(EcsReplicationPlugin::new(
+            schema(),
+            8,
+            seed(),
+            ClientStrategy { entity },
+            Box::new(client_transport),
+        ));
+
+        let mut server_app = App::new();
+        server_app.set_task_pool_threads(worker_count);
+        server_app.add_plugins(ReplicationServerPlugin::new(
+            schema(),
+            8,
+            seed(),
+            AuthorityStrategy,
+            Box::new(server_transport),
+        ));
+        for _ in 0..8 {
+            client_app.update();
+            server_app.update();
+        }
+        {
+            let bridge = client_app
+                .world_mut()
+                .resource_mut::<EcsReplication<ClientStrategy>>();
+            bridge.queue_input(5);
+            bridge.queue_input(1);
+        }
+        for _ in 0..24 {
+            client_app.update();
+            server_app.update();
+        }
+
+        let world = client_app.world();
+        let history = world.resource::<SnapshotHistory>();
+        let history_snapshots = (0..history.next_frame())
+            .map(|frame| history.snapshot(frame).expect("retained e2e frame"))
+            .collect();
+        let final_hashes = (0..history.next_frame())
+            .map(|frame| history.state_hash(frame))
+            .collect();
+        E2eResult {
+            final_snapshot: world.try_snapshot().expect("registered e2e snapshot"),
+            history: history_snapshots,
+            final_hashes,
+        }
+    }
+
+    #[cfg(feature = "multi_thread")]
+    #[test]
+    fn ecs_e2e_is_structurally_equal_for_one_and_eight_workers() {
+        let one = run_e2e(1);
+        let eight = run_e2e(8);
+        assert!(one.final_snapshot.structurally_eq(&eight.final_snapshot));
+        assert_eq!(one.history.len(), eight.history.len());
+        for (left, right) in one.history.iter().zip(&eight.history) {
+            assert!(left.structurally_eq(right));
+        }
+        assert_eq!(one.final_hashes, eight.final_hashes);
+    }
+
+    #[test]
+    fn failed_ecs_commit_leaves_session_history_and_input_untouched() {
+        struct Unregistered;
+        impl Component for Unregistered {}
+
+        let (client_transport, _server_transport) = InMemoryTransport::pair_secure();
+        let mut world = World::new();
+        let entity = world.spawn(Counter(0));
+        world.register_snapshot_component_hashable::<Counter>();
+        world.spawn(Unregistered);
+        world.insert_resource(SnapshotHistory::new(8));
+        let bridge = EcsReplication::new(
+            schema(),
+            8,
+            &seed(),
+            ClientStrategy { entity },
+            Box::new(client_transport),
+        )
+        .unwrap();
+        world.insert_resource(bridge);
+        world
+            .resource_mut::<EcsReplication<ClientStrategy>>()
+            .queue_input(5);
+        drive_ecs_input::<ClientStrategy>(&mut world);
+
+        {
+            let bridge = world.resource::<EcsReplication<ClientStrategy>>();
+            assert_eq!(bridge.queued_inputs(), 1);
+            assert_eq!(bridge.replication().acked(), 0);
+            assert_eq!(bridge.replication().predicted(), 0);
+            assert_eq!(bridge.replication().unacked(), 1, "hello only");
+            assert_eq!(bridge.rollback().inputs(), &[]);
+        }
+        assert_eq!(world.resource::<SnapshotHistory>().next_frame(), 0);
+        let error = world
+            .resource_mut::<EcsReplication<ClientStrategy>>()
+            .take_last_error();
+        assert!(matches!(
+            error,
+            Some(EcsReplicationError::Rollback(
+                EcsRollbackError::MissingSnapshotComponents(_)
+            ))
+        ));
     }
 
     #[test]

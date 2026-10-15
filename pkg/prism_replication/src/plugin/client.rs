@@ -487,6 +487,21 @@ impl<S: ReplicationStrategy> Replication<S> {
         self.try_send_rpc(&bytes)
     }
 
+    /// Remove the newest local prediction after an external ECS transaction
+    /// fails. The caller must invoke this only for the immediately preceding
+    /// [`predict`](Self::predict) call.
+    pub(crate) fn cancel_last_prediction(&mut self) {
+        self.session.cancel_last_prediction();
+    }
+
+    /// Check whether the command for an input can be queued without mutating
+    /// the transport. This is the send-side half of the ECS transaction.
+    pub(crate) fn check_predicted_send(&mut self, input: &S::Input) -> Result<(), MuxSendError> {
+        let bytes = self.strategy.encode(input);
+        let frame = encode_rpc(&bytes);
+        self.mux.check_send(NetChannel::RpcReliable, frame.len())
+    }
+
     /// Apply a predicted input to an ECS World through an ECS-capable strategy.
     pub fn apply_input_to_world(&self, world: &mut prism_ecs::world::World, input: &S::Input)
     where

@@ -150,6 +150,12 @@ impl<F: Clone> Prediction<F> {
         Ok(revision)
     }
 
+    pub(crate) fn cancel_last_prediction(&mut self) {
+        if self.pending.pop().is_some() {
+            self.store.truncate_after(self.predicted());
+        }
+    }
+
     /// Reconcile with the server's authoritative change for the next step: apply
     /// it, drop the confirmed local input, and replay the rest.
     ///

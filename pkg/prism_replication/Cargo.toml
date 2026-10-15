@@ -35,6 +35,10 @@ ecs = [
     "prism_ecs/reflect",
     "prism_ecs/serialize",
 ]
+# Test-only app schedule parallelism; the ECS bridge remains usable in the
+# serial `app` build, while its worker-count comparison opts into the real
+# prism_app multi-thread executor.
+multi_thread = ["app", "prism_app/multi_thread"]
 # Scene/world identity and ownership adapters. The world facade remains the
 # owner of streaming/residency policy; this feature only consumes its real
 # scene-host types at the boundary.
