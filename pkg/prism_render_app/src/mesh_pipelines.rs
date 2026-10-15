@@ -17,6 +17,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -41,18 +42,39 @@ pub struct MeshPipelines {
     recovery: MeshPipelineRecovery,
 }
 
-#[derive(Clone, Copy)]
 enum MeshPipelineRecovery {
-    Spine { color_format: TextureFormat },
+    Spine {
+        color_format: TextureFormat,
+    },
+    Custom {
+        factory: Box<MeshPipelineRecoveryFactory>,
+        modules_rebuilt: bool,
+    },
     Unavailable,
 }
 
+/// Rebuilds a custom mesh provider against a replacement device.
+///
+/// The factory runs after all response modules have been recreated in the
+/// supplied cache. It must return a provider whose descriptors reference only
+/// resources owned by `device`; returning an error leaves the render app in
+/// `Recovering` and retries the same replacement device on the next frame.
+type MeshPipelineRecoveryFactory = dyn Fn(
+        &dyn RenderDevice,
+        &ResponseModuleCache,
+    ) -> Result<Box<dyn MeshPipelineProvider + Send + Sync>, String>
+    + Send
+    + Sync
+    + 'static;
+
 /// Why the mesh pipeline provider could not be rebuilt for a replacement
 /// device.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MeshPipelineRecoveryError {
     /// A custom provider was installed without a device-rebuild recipe.
     CustomProvider,
+    /// The host-provided recovery factory rejected this replacement device.
+    Factory(String),
 }
 
 impl core::fmt::Display for MeshPipelineRecoveryError {
@@ -61,6 +83,7 @@ impl core::fmt::Display for MeshPipelineRecoveryError {
             Self::CustomProvider => f.write_str(
                 "the installed custom mesh pipeline provider has no device recovery recipe",
             ),
+            Self::Factory(error) => write!(f, "custom mesh pipeline recovery failed: {error}"),
         }
     }
 }
@@ -288,6 +311,35 @@ impl MeshPipelines {
         }
     }
 
+    /// Wraps a custom provider with an explicit replacement-device factory.
+    ///
+    /// A provider may own shader modules, bind groups, or other device-scoped
+    /// state that cannot be cloned across device loss. The factory is the
+    /// host's recovery boundary for that state; it receives the recreated
+    /// response-module cache so descriptors can use the new shader ids.
+    pub fn with_recovery_factory<F>(
+        provider: impl MeshPipelineProvider + Send + Sync + 'static,
+        factory: F,
+    ) -> Self
+    where
+        F: Fn(
+                &dyn RenderDevice,
+                &ResponseModuleCache,
+            ) -> Result<Box<dyn MeshPipelineProvider + Send + Sync>, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            provider: Box::new(provider),
+            response_modules: ResponseModuleCache::new(),
+            recovery: MeshPipelineRecovery::Custom {
+                factory: Box::new(factory),
+                modules_rebuilt: false,
+            },
+        }
+    }
+
     /// The spine's default: a flat pass-through pipeline.
     ///
     /// Built against `device` because a pipeline descriptor names a shader
@@ -348,18 +400,29 @@ impl MeshPipelines {
         &mut self,
         device: &dyn RenderDevice,
     ) -> Result<(), MeshPipelineRecoveryError> {
-        match self.recovery {
+        match &mut self.recovery {
             MeshPipelineRecovery::Spine { color_format } => {
-                for module in self.response_modules.modules.values_mut() {
-                    module.shader_module = device.create_shader_module(&module.descriptor);
-                }
+                Self::rebuild_response_modules(&mut self.response_modules, device);
                 self.provider = match self.response_modules.get(ModuleId::SPINE) {
                     Some(module) => Box::new(SpineMeshPipeline::from_module(
                         module.shader_module,
-                        color_format,
+                        *color_format,
                     )),
-                    None => Box::new(SpineMeshPipeline::new(device, color_format)),
+                    None => Box::new(SpineMeshPipeline::new(device, *color_format)),
                 };
+                Ok(())
+            }
+            MeshPipelineRecovery::Custom {
+                factory,
+                modules_rebuilt,
+            } => {
+                if !*modules_rebuilt {
+                    Self::rebuild_response_modules(&mut self.response_modules, device);
+                    *modules_rebuilt = true;
+                }
+                let provider = factory(device, &self.response_modules)
+                    .map_err(MeshPipelineRecoveryError::Factory)?;
+                self.provider = provider;
                 Ok(())
             }
             MeshPipelineRecovery::Unavailable => Err(MeshPipelineRecoveryError::CustomProvider),
@@ -367,9 +430,27 @@ impl MeshPipelines {
     }
 
     pub(crate) fn check_recovery(&self) -> Result<(), MeshPipelineRecoveryError> {
-        match self.recovery {
-            MeshPipelineRecovery::Spine { .. } => Ok(()),
+        match &self.recovery {
+            MeshPipelineRecovery::Spine { .. } | MeshPipelineRecovery::Custom { .. } => Ok(()),
             MeshPipelineRecovery::Unavailable => Err(MeshPipelineRecoveryError::CustomProvider),
+        }
+    }
+
+    /// Starts a fresh provider rebuild for a newly created device. A failed
+    /// factory retry on the same device intentionally keeps its rebuilt module
+    /// ids, while a later device loss must recreate them again.
+    pub(crate) fn begin_recovery(&mut self) {
+        if let MeshPipelineRecovery::Custom {
+            modules_rebuilt, ..
+        } = &mut self.recovery
+        {
+            *modules_rebuilt = false;
+        }
+    }
+
+    fn rebuild_response_modules(cache: &mut ResponseModuleCache, device: &dyn RenderDevice) {
+        for module in cache.modules.values_mut() {
+            module.shader_module = device.create_shader_module(&module.descriptor);
         }
     }
 }

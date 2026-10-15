@@ -89,6 +89,7 @@ where
                     if state.replacement.is_none() {
                         return Err("recovery has no replacement device".into());
                     }
+                    world.resource_mut::<MeshPipelines>().begin_recovery();
                 }
                 let runtime = runtime.runtime();
                 let extent = world.resource::<RenderTarget>().viewport().extent();
@@ -181,5 +182,7 @@ fn panic_message(payload: Box<dyn core::any::Any + Send>) -> String {
     format!("device recovery panicked: {detail}")
 }
 
+#[cfg(test)]
+mod hardware_tests;
 #[cfg(test)]
 mod tests;

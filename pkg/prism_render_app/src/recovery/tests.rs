@@ -430,6 +430,52 @@ fn recovery_custom_provider_fails_before_replacing_device() {
 }
 
 #[test]
+fn recovery_custom_provider_factory_retries_on_the_same_replacement_device() {
+    let (mut app, controls) = app();
+    let factory_calls = Arc::new(AtomicUsize::new(0));
+    let fail_factory = Arc::new(AtomicBool::new(true));
+    let calls = factory_calls.clone();
+    let fail = fail_factory.clone();
+    let provider = SpineMeshPipeline::new(runtime(&app).device(), crate::RENDER_TARGET_FORMAT);
+    app.sub_app_mut(RenderApp).unwrap().world.insert_resource(
+        MeshPipelines::with_recovery_factory(provider, move |device, _modules| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            if fail.load(Ordering::SeqCst) {
+                return Err("provider is warming up".into());
+            }
+            Ok(
+                Box::new(SpineMeshPipeline::new(device, crate::RENDER_TARGET_FORMAT))
+                    as Box<dyn crate::MeshPipelineProvider + Send + Sync>,
+            )
+        }),
+    );
+    app.update();
+    controls.lose();
+    for _ in 0..4 {
+        app.update();
+    }
+
+    assert_eq!(runtime(&app).device_generation(), 1);
+    assert_eq!(controls.created.load(Ordering::SeqCst), 2);
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+    assert!(app.world().resource::<DeviceRecoveryStatus>().recovering);
+    assert!(app
+        .world()
+        .resource::<DeviceRecoveryStatus>()
+        .last_error
+        .as_ref()
+        .unwrap()
+        .contains("provider is warming up"));
+
+    fail_factory.store(false, Ordering::SeqCst);
+    app.update();
+    app.update();
+    assert_eq!(runtime(&app).device_generation(), 1);
+    assert_eq!(factory_calls.load(Ordering::SeqCst), 2);
+    assert!(!app.world().resource::<DeviceRecoveryStatus>().recovering);
+}
+
+#[test]
 fn recovery_material_buffers_restore_bytes_and_preserve_allocations() {
     let (app, _) = app();
     let old_device = runtime(&app).device();
