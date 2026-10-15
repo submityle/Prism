@@ -73,6 +73,8 @@ pub(super) struct PropagationState {
     ticks: ChangeTicks,
     propagator: DirtyPropagator,
     last_run: Tick,
+    needs_rebuild: bool,
+    pending_removals: BTreeSet<Entity>,
 }
 
 impl Resource for PropagationState {}
@@ -93,6 +95,8 @@ impl PropagationState {
             ticks: ChangeTicks::new(),
             propagator: DirtyPropagator::new(),
             last_run: Tick::ZERO,
+            needs_rebuild: false,
+            pending_removals: BTreeSet::new(),
         }
     }
 
@@ -104,8 +108,12 @@ impl PropagationState {
         if self.world_id != world.id() {
             *self = Self::new(world);
         }
+        if restored {
+            self.pending_removals.clear();
+        }
+        let rebuild = restored || self.needs_rebuild;
         let signals = world.resource::<super::PropagationSignals>();
-        let membership_dirty = signals.membership_dirty || restored;
+        let membership_dirty = signals.membership_dirty || rebuild;
         let mut stats = EcsPropagationStats::default();
         let new_entities = if membership_dirty {
             stats.membership_scans = 1;
@@ -165,9 +173,10 @@ impl PropagationState {
         self.last_run = now;
         self.relation_edges = relation_edges;
         self.generation = generation;
+        self.needs_rebuild = false;
         let mut removed = Vec::new();
         let mut dirty = false;
-        if topology_changed || restored {
+        if topology_changed || rebuild {
             let mut ticks = ChangeTicks::new();
             let mut locals = Vec::with_capacity(entities.len());
             let mut globals = Vec::with_capacity(entities.len());
@@ -175,7 +184,7 @@ impl PropagationState {
             for (i, &entity) in entities.iter().enumerate() {
                 ticks.push();
                 let old = self.indices.get(&entity).map(|node| node.index());
-                let local = if restored || old.is_none() || locals_changed.contains(&entity) {
+                let local = if rebuild || old.is_none() || locals_changed.contains(&entity) {
                     stats.local_reads += 1;
                     *world.get::<Transform>(entity).expect("queried local")
                 } else {
@@ -187,7 +196,7 @@ impl PropagationState {
                     .and_then(|j| self.parents[j])
                     .map(|parent| self.entities[parent.index()]);
                 let new_parent = parents[i].map(|parent| entities[parent.index()]);
-                if restored
+                if rebuild
                     || old.is_none_or(|j| self.locals[j] != local)
                     || old_parent != new_parent
                     || current != cached
@@ -253,7 +262,8 @@ impl PropagationState {
         if let Some(hierarchy) = hierarchy {
             self.hierarchy = hierarchy;
         }
-        if !dirty && removed.is_empty() {
+        self.pending_removals.extend(removed);
+        if !dirty && self.pending_removals.is_empty() {
             world.increment_change_tick();
             return Ok(stats);
         }
@@ -276,11 +286,14 @@ impl PropagationState {
         // Every publication must be newer than consumers' last flush, including
         // two manual propagation calls with no intervening scheduled system.
         world.increment_change_tick();
-        for entity in removed {
+        while let Some(&entity) = self.pending_removals.first() {
             if world.has::<GlobalTransform>(entity) {
                 world.remove::<GlobalTransform>(entity);
                 stats.removed += 1;
             }
+            // Remove observers run before deletion and may unwind. Keep this
+            // entity queued until the removal returns so retry cannot miss it.
+            self.pending_removals.remove(&entity);
             if world.id() != self.world_id || world.archetype_generation() != generation {
                 return Ok(stats);
             }
@@ -349,14 +362,43 @@ pub struct EcsPropagationStats {
 /// relations and retry; the previous valid propagation baseline is retained.
 pub fn propagate_transforms(world: &mut World) -> Result<EcsPropagationStats, TransformEcsError> {
     super::install(world);
-    let mut state = world
+    let state = world
         .remove_resource::<PropagationState>()
         .expect("installed");
-    let result = state.propagate(world);
-    if state.world_id == world.id() && world.contains_resource::<super::Registration>() {
-        world.insert_resource(state);
-    }
+    let mut guard = PropagationGuard {
+        world,
+        state: Some(state),
+        completed: false,
+    };
+    let result = guard
+        .state
+        .as_mut()
+        .expect("owned cache")
+        .propagate(guard.world);
+    guard.completed = true;
     result
+}
+
+// Lifecycle observers execute during publication. Preserve both the cache and
+// outstanding removals if one unwinds, and re-read authoritative values on retry.
+struct PropagationGuard<'w> {
+    world: &'w mut World,
+    state: Option<PropagationState>,
+    completed: bool,
+}
+
+impl Drop for PropagationGuard<'_> {
+    fn drop(&mut self) {
+        let Some(mut state) = self.state.take() else {
+            return;
+        };
+        if state.world_id == self.world.id()
+            && self.world.contains_resource::<super::Registration>()
+        {
+            state.needs_rebuild |= !self.completed;
+            self.world.insert_resource(state);
+        }
+    }
 }
 
 /// Exclusive schedule system; order after all local/hierarchy writers.

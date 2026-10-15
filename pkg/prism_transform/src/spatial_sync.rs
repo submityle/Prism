@@ -333,23 +333,28 @@ impl SpatialSync {
     /// Panics if a tracked dirty `node` index is out of bounds for `globals`.
     pub fn observe(&mut self, dirty: &[NodeId], globals: &[GlobalTransform]) {
         for &node in dirty {
-            let index = node.index();
-            let Some(Some(proxy)) = self.entries.get(index) else {
-                continue;
-            };
-            if proxy.removing {
-                continue;
-            }
-            let local = proxy.local;
-            let world = world_aabb(&globals[index], local);
-            // Re-borrow mutably now that the immutable read is done.
-            if let Some(Some(proxy)) = self.entries.get_mut(index) {
-                if proxy.pending.is_none() {
-                    self.touched.push(index);
-                }
-                proxy.pending = Some(world);
+            if self.contains(node) {
+                self.observe_one(node, &globals[node.index()]);
             }
         }
+    }
+
+    /// Observe one proxy without requiring a dense world-transform buffer.
+    ///
+    /// Useful for generational ECS entities or other sparse owners. Untracked
+    /// and removing proxies are ignored, just as in [`Self::observe`].
+    pub fn observe_one(&mut self, node: NodeId, world: &GlobalTransform) {
+        let index = node.index();
+        let Some(Some(proxy)) = self.entries.get_mut(index) else {
+            return;
+        };
+        if proxy.removing {
+            return;
+        }
+        if proxy.pending.is_none() {
+            self.touched.push(index);
+        }
+        proxy.pending = Some(world_aabb(world, proxy.local));
     }
 
     /// Emit the ordered command stream for everything that changed since the

@@ -3,14 +3,15 @@ name = "prism_transform"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-description = "Prism transform algebra: local Transform (TRS) and world GlobalTransform (Affine3) with composition, inverse, and helpers. M0 is the standalone algebra layer; ECS-driven hierarchy propagation lands in later milestones. Depends on prism_math (plus libm for no_std scalar sqrt/floor); no bevy_* crate."
+description = "Prism transform algebra and incremental hierarchy propagation, with optional prism_ecs observer-driven spatial integration. no_std + alloc; no bevy_* crate."
 license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-prism_math = { path = "../prism_math" }
+prism_math = { path = "../prism_math", default-features = false }
 libm = "0.2"
 prism_tasks = { path = "../prism_tasks", optional = true }
+prism_ecs = { path = "../prism_ecs", default-features = false, optional = true }
 
 [features]
 default = ["std"]
@@ -21,6 +22,8 @@ f64 = []
 determinism = []
 # Bevy-shaped prelude: glam-named re-exports and compatibility helpers (design doc §19).
 compat-bevy = []
+# Optional no_std ECS components, ChildOf propagation and observer-driven spatial sync.
+ecs = ["dep:prism_ecs"]
 
 [[bench]]
 name = "hierarchy_propagation"

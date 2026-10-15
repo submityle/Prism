@@ -358,3 +358,28 @@ fn stored_bounds_tracks_live_box() {
         1e-6
     ));
 }
+
+#[test]
+fn sparse_observation_matches_dense_path_without_an_indexed_global_buffer() {
+    let proxy = node(37);
+    let local = aabb([-1.0; 3], [1.0; 3]);
+    let pose = translated(4.0, -2.0, 7.0);
+    let mut sparse = SpatialSync::new();
+    let mut dense = SpatialSync::new();
+    sparse.register(proxy, local);
+    dense.register(proxy, local);
+    sparse.observe_one(proxy, &pose);
+    let mut globals = vec![GlobalTransform::IDENTITY; 38];
+    globals[37] = pose;
+    dense.observe(&[proxy], &globals);
+    assert_eq!(sparse.drain(), dense.drain());
+
+    sparse.remove(proxy);
+    sparse.observe_one(proxy, &translated(100.0, 0.0, 0.0));
+    assert!(
+        matches!(sparse.drain().0[..], [SpatialCommand::Remove { old, .. }]
+        if old == world_aabb(&pose, local))
+    );
+    sparse.observe_one(node(1000), &pose);
+    assert!(sparse.drain().0.is_empty());
+}

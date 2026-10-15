@@ -21,8 +21,8 @@
 //!   affine space so non-uniform scale survives), and [`change`] (per-node
 //!   change ticks so a pass knows what changed and a later pass can skip clean
 //!   subtrees). [`TransformGraph`] ties them together. The hierarchy here is a
-//!   self-contained computational core; binding it to `prism_ecs` `ChildOf`
-//!   relations is deferred to M6.
+//!   self-contained computational core; the optional `ecs` feature binds it to
+//!   `prism_ecs` `ChildOf` relations and the changed-observer spatial bus.
 //! - **M2 (this update, done):** dirty-subtree *incremental* propagation. The
 //!   [`dirty`] module adds a [`dirty::DirtyPropagator`] that reads the M1 change
 //!   ticks, collects the minimal set of dirty roots (changed nodes with no
@@ -110,6 +110,8 @@ pub mod constraint;
 pub mod determinism;
 pub mod dirty;
 pub mod double_buffer;
+#[cfg(feature = "ecs")]
+pub mod ecs;
 pub mod gpu_upload;
 pub mod hierarchy;
 pub mod interpolation;
