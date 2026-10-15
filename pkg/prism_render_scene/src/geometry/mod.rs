@@ -1,5 +1,6 @@
 mod bindings;
 mod buffers;
+mod mesh_adapter;
 pub(crate) mod rows;
 mod runtime;
 mod shading;

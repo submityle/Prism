@@ -1,11 +1,12 @@
 //! Render-world rows for the compute-friendly surface reconstruction table.
 
-use bevy_mesh::{Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy_render::{
     impl_atomic_pod,
     render_resource::{AtomicPod, ShaderType},
 };
 use bytemuck::{Pod, Zeroable};
+use prism_mesh::{Mesh, VertexAttributeValues, POSITION_ATTRIBUTE};
+use prism_render_driver::PrimitiveTopology;
 use prism_render_shading::{GpuShadingPrimitive, GpuShadingVertex};
 
 /// Geometry-table header addressed by a stable geometry index.
@@ -67,17 +68,14 @@ pub enum ShadingGeometryBuildError {
 pub fn build_shading_geometry(
     mesh: &Mesh,
 ) -> Result<RenderShadingGeometry, ShadingGeometryBuildError> {
-    let positions = match mesh
-        .try_attribute_option(Mesh::ATTRIBUTE_POSITION)
-        .map_err(|_| ShadingGeometryBuildError::MissingPositions)?
-    {
+    let positions = match attribute_values(mesh, POSITION_ATTRIBUTE) {
         Some(VertexAttributeValues::Float32x3(values)) => values,
         Some(_) => return Err(ShadingGeometryBuildError::UnsupportedPositions),
         None => return Err(ShadingGeometryBuildError::MissingPositions),
     };
-    let normals = optional_float3(mesh, Mesh::ATTRIBUTE_NORMAL)?;
-    let uvs = optional_float2(mesh, Mesh::ATTRIBUTE_UV_0)?;
-    let tangents = optional_float4(mesh, Mesh::ATTRIBUTE_TANGENT)?;
+    let normals = optional_float3(mesh, "Vertex_Normal")?;
+    let uvs = optional_float2(mesh, "Vertex_Uv0")?;
+    let tangents = optional_float4(mesh, "Vertex_Tangent")?;
     if normals.is_some_and(|values| values.len() != positions.len())
         || uvs.is_some_and(|values| values.len() != positions.len())
         || tangents.is_some_and(|values| values.len() != positions.len())
@@ -108,13 +106,10 @@ pub fn build_shading_geometry(
             _padding: 0,
         })
         .collect();
-    let indices: Vec<usize> = mesh
-        .try_indices_option()
-        .map_err(|_| ShadingGeometryBuildError::InvalidIndex)?
-        .map_or_else(
-            || (0..positions.len()).collect(),
-            |indices| indices.iter().collect(),
-        );
+    let indices: Vec<usize> = mesh.indices().map_or_else(
+        || (0..positions.len()).collect(),
+        |indices| indices.iter().collect(),
+    );
     let primitives = triangle_indices(mesh.primitive_topology(), &indices)?
         .into_iter()
         .map(|[a, b, c]| {
@@ -136,12 +131,9 @@ pub fn build_shading_geometry(
 
 fn optional_float3<'a>(
     mesh: &'a Mesh,
-    attribute: bevy_mesh::MeshVertexAttribute,
+    attribute: &'static str,
 ) -> Result<Option<&'a Vec<[f32; 3]>>, ShadingGeometryBuildError> {
-    match mesh
-        .try_attribute_option(attribute)
-        .map_err(|_| ShadingGeometryBuildError::MismatchedAttributeLength)?
-    {
+    match attribute_values(mesh, attribute) {
         None => Ok(None),
         Some(VertexAttributeValues::Float32x3(values)) => Ok(Some(values)),
         Some(_) => Err(ShadingGeometryBuildError::MismatchedAttributeLength),
@@ -150,12 +142,9 @@ fn optional_float3<'a>(
 
 fn optional_float2<'a>(
     mesh: &'a Mesh,
-    attribute: bevy_mesh::MeshVertexAttribute,
+    attribute: &'static str,
 ) -> Result<Option<&'a Vec<[f32; 2]>>, ShadingGeometryBuildError> {
-    match mesh
-        .try_attribute_option(attribute)
-        .map_err(|_| ShadingGeometryBuildError::MismatchedAttributeLength)?
-    {
+    match attribute_values(mesh, attribute) {
         None => Ok(None),
         Some(VertexAttributeValues::Float32x2(values)) => Ok(Some(values)),
         Some(_) => Err(ShadingGeometryBuildError::MismatchedAttributeLength),
@@ -164,16 +153,19 @@ fn optional_float2<'a>(
 
 fn optional_float4<'a>(
     mesh: &'a Mesh,
-    attribute: bevy_mesh::MeshVertexAttribute,
+    attribute: &'static str,
 ) -> Result<Option<&'a Vec<[f32; 4]>>, ShadingGeometryBuildError> {
-    match mesh
-        .try_attribute_option(attribute)
-        .map_err(|_| ShadingGeometryBuildError::MismatchedAttributeLength)?
-    {
+    match attribute_values(mesh, attribute) {
         None => Ok(None),
         Some(VertexAttributeValues::Float32x4(values)) => Ok(Some(values)),
         Some(_) => Err(ShadingGeometryBuildError::MismatchedAttributeLength),
     }
+}
+
+fn attribute_values<'a>(mesh: &'a Mesh, name: &'static str) -> Option<&'a VertexAttributeValues> {
+    mesh.attributes()
+        .find(|(attribute, _)| attribute.name == name)
+        .map(|(_, values)| values)
 }
 
 fn triangle_indices(
@@ -209,8 +201,8 @@ pub const SHADING_GEOMETRY_FLAG_MISSING_TANGENT: u32 = 1 << 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_asset::RenderAssetUsages;
-    use bevy_mesh::Indices;
+    use prism_mesh::{Indices, MeshVertexAttribute};
+    use prism_render_driver::VertexFormat;
 
     #[test]
     fn rows_match_compute_surface_abi() {
@@ -233,15 +225,17 @@ mod tests {
 
     #[test]
     fn builds_indexed_mesh_and_marks_missing_attributes() {
-        let mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::MAIN_WORLD,
-        )
-        .with_inserted_attribute(
-            Mesh::ATTRIBUTE_POSITION,
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-        )
-        .with_inserted_indices(Indices::U16(vec![0, 1, 2]));
+        let mesh = Mesh::new(PrimitiveTopology::TriangleList)
+            .with_attribute(
+                MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 0),
+                VertexAttributeValues::Float32x3(vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                ]),
+            )
+            .unwrap()
+            .indexed(Indices::Uint16(vec![0, 1, 2]));
         let table = build_shading_geometry(&mesh).unwrap();
         assert_eq!(table.vertices.len(), 3);
         assert_eq!(

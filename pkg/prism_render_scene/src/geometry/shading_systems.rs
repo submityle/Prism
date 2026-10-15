@@ -20,6 +20,7 @@ use bevy_render::{
 };
 
 use super::{
+    mesh_adapter::to_prism_mesh,
     shading::{build_shading_geometry, RenderShadingGeometry},
     shading_buffers::RenderShadingGeometryBuffers,
     shading_registry::RenderShadingGeometryRegistry,
@@ -100,7 +101,9 @@ pub(crate) fn extract_shading_geometry(
         };
         // Unsupported topology or attribute layouts keep any prior table
         // intact and are retried the next time the asset changes.
-        if let Ok(geometry) = build_shading_geometry(mesh) {
+        if let Ok(prism_mesh) = to_prism_mesh(mesh)
+            && let Ok(geometry) = build_shading_geometry(&prism_mesh)
+        {
             staging.stage(asset, geometry);
             built.insert(asset);
         }

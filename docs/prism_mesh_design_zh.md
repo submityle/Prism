@@ -5,7 +5,7 @@
 > 目标读者：渲染、资产工具链、平台、动画/物理与性能工程人员
 > 本文依据：当前仓库代码、CPU 单测、RenderApp 资产上传测试、虚拟几何 GPU twin 与 GDeflate GPU twin 的验证结果；性能门槛采用可复现基准协议记录，设备实测写入同一验证记录
 > 关联文档：`prism_rendering_architecture_zh.md`（全局渲染架构）、`prism_asset_design_zh.md`（资产内核）、`prism_asset_build_design_zh.md`（构建/烘焙）、`prism_material_pipeline_refactor_zh.md`（材质与着色 ABI）、`prism_scene_design_zh.md`（场景与实例）、`prism_aaa_advanced_features_zh.md`（AAA 特性总表）
-> 最后更新：2026-10-14
+> 最后更新：2026-10-15
 
 ## 0. 阅读地图与本文责任范围
 
@@ -57,7 +57,7 @@
 - **注册表而非分支**：新增顶点语义、拓扑种类、形变器、LOD 选择器、压缩器通过注册项扩展，不改 `Mesh` 核心类型、不改既有匹配分支。
 - **显式版本化**：所有落盘几何制品（虚拟几何页、meshlet、压缩流）必须带 `magic + schema_version + build_settings_hash`，旧缓存可检测并重建，禁止静默错读。
 - **可解释性**：任何“换了一条路径 / 降了一级 LOD / 丢了一页”的决定都能在诊断视图中说明原因。
-- **弃用纪律**：`crates/bevy_mesh` 仅服务旧示例与旧兼容路径；新 RHI 代码统一使用 `pkg/prism_mesh`，迁移与删除条件见 §20、§22。
+- **弃用纪律**：原生 Prism RHI 统一使用 `pkg/prism_mesh`；`crates/bevy_mesh` 仅位于 Bevy 接入与兼容路径，转换规则与替代条件见 §20、§22。
 
 ### 2.4 非目标
 
@@ -162,12 +162,12 @@ pkg/prism_render_architecture
   ├─ virtual_geometry/ Cluster cull、屏幕空间误差 LOD、页表、光栅路径、软件光栅、cut 选择
   ├─ deformation/     DeformationHandle / Kind / Budget，形变调度
   └─ gpu_scene/       实例身份与上传（几何只引用其句柄）
-pkg/prism_render_scene/src/geometry   几何资产生命周期与 consumer API（ECS 侧）
+pkg/prism_render_scene/src/geometry   Bevy 接入层；几何算法消费 `prism_mesh`，`mesh_adapter` 只负责源资产转换
 pkg/prism_math_gpu/src/skinning       GPU 蒙皮内核（CPU golden → GPU twin 校验）
 pkg/prism_micromap(_gpu)              OMM 烘焙与孪生
 pkg/prism_virtual_geometry_gpu        vis-buffer 软件光栅 GPU 孪生（元/逐像素校验）
 pkg/prism_gdeflate_gpu                页解压的去交错 GPU 孪生
-crates/bevy_mesh                      仅保留给旧示例与兼容路径；RHI 路径以 prism_mesh 为准（§20）
+crates/bevy_mesh                      Bevy 接入与兼容路径；原生 Prism RHI 以 prism_mesh 为准（§20）
 ```
 
 ### 5.3 当前实现与验证基线（2026-10-14）
@@ -175,6 +175,7 @@ crates/bevy_mesh                      仅保留给旧示例与兼容路径；RHI
 - `prism_mesh::Mesh` 已提供属性、索引、拓扑、单流布局、分流布局、字节打包、包围体、校验、Morph、Skin、SubMesh 与确定性内容哈希；`#![forbid(unsafe_code)]`、无 ECS、无 GPU 句柄。
 - `VirtualGeometryVersion=1` 已提供 Cluster 资产契约、量化 payload 编解码、层级/包围体校验、页表、驻留页存储、LOD 选择、滞回、速度预取、Cluster cull、RasterPath 分类、软件光栅与逐帧计划组合。
 - `GeometryTable` 已提供 generation 句柄、代际回收、LOD 驻留回退与 ABI 检查；`RenderMesh` 已把分流数据接入 queue、frame graph、draw slot 与固定页 GPU 池。
+- `prism_render_scene::geometry::shading` 已迁移到 `prism_mesh::Mesh`；Bevy 主世界 Mesh 只在 `geometry::mesh_adapter` 中转换一次，几何解析、拓扑处理与单测不再依赖 Bevy Mesh 数据结构。
 - CPU 证据包括 `prism_mesh`、`prism_render_architecture`、资产流式化与渲染资产页池测试；GPU twin 证据覆盖虚拟几何计算内核与 GDeflate 去交错内核。真实设备测试使用 `PRISM_REQUIRE_GPU=1` 强制适配器存在，未暴露适配器时直接失败而不把 Null RHI 计为 GPU 通过。
 - 本文把已验证契约、运行时降级、性能门槛和演进规则统一成可执行规格；代码实现以这些契约和测试作为唯一判定来源。
 
@@ -751,9 +752,10 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 
 ### 20.3 弃用与迁移
 
-- `crates/bevy_mesh` 只保留给旧示例与 `bevy_pbr` 兼容路径；新代码一律用 `prism_mesh`。
-- `prism_mesh` 与 `bevy_mesh` 之间**不保留**格式转换桥；迁移通过重导入（构建期）完成，避免长期维护两套格式。
-- 删除条件：当（a）示例与 `bevy_pbr` 不再引用 `bevy_mesh`，且（b）RHI 路径的几何消费全部走 `prism_mesh` + 虚拟几何，即可移除旧兼容路径。
+- `prism_mesh` 是 Prism 原生资产与几何算法的唯一真相；`prism_render_app`、`prism_asset_build_core` 和虚拟几何路径直接消费它。
+- `prism_render_scene` 是 Bevy 接入层：ECS 组件、`Assets<Mesh>`、`RenderAssets<RenderMesh>` 和 Bevy PBR 专用接口继续使用 Bevy 类型，几何算法通过 `geometry::mesh_adapter` 转为 `prism_mesh` 后执行。
+- Bevy 接入层的转换必须集中在适配器并有契约测试；禁止在剔除、拓扑、量化、打包或着色几何算法中重新读取 `bevy_mesh` 数据。
+- 当 Bevy 接入层被 `prism_app`/原生 RHI 管线替代后，可删除适配器及其 Bevy Mesh 资产接缝；原生几何契约无需改变。
 - API 弃用遵循仓库策略：先标记、后告警、再删除；每个阶段有迁移说明。
 
 ### 20.4 代码组织纪律
@@ -934,7 +936,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 | 量化误差累积到轮廓 | 画质下降 | 误差并入 `object_error`；构建期报告与门禁 |
 | PSO 爆炸 | 首帧卡顿 | 顶点布局哈希 + 材质域声明；数量告警 |
 | 显存超配 | 掉帧/崩溃 | 预算驱动驱逐；超配可诊断；禁止 OOM |
-| 与 `bevy_mesh` 双轨维护 | 维护成本 | 新 RHI 代码只依赖 `prism_mesh`；旧路径通过重导入保持兼容 |
+| 与 `bevy_mesh` 双轨维护 | 维护成本 | 原生 RHI 只依赖 `prism_mesh`；Bevy 接入层集中适配并以契约测试锁定 |
 
 ### 25.2 已验证能力矩阵
 

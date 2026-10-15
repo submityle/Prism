@@ -30,6 +30,7 @@ bevy_shader = { path = "../../crates/bevy_shader", version = "0.20.0-dev" }
 wgpu-types = { version = "30", default-features = false }
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
+prism_mesh = { path = "../prism_mesh" }
 prism_render_material = { path = "../prism_render_material", features = ["bevy"] }
 prism_render_shading = { path = "../prism_render_shading" }
 # P2-j: the material-classification pass takes its live class count from the
