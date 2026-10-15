@@ -75,9 +75,17 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 
 `ScatterDensityField` 是不可变、可丢弃重建的派生描述，使用全局整数毫米、三维 value noise 和三通道 domain warp；跨 i64 边缘的 warp 先扩宽再采样，仅虚拟格 hash 有明确的 2^64 周期。唯一稳定 brush ID 决定 Replace/Add 的合成顺序，球形刷子按平方距离 smoothstep 与 opacity 衰减；species 在有效权重至少 32768 时替换。候选 rank 只依赖完整 candidate key 与 field seed，固定 seed 时密度选择单调，0/65535 端点精确。全结构缓存键不使用摘要充当身份，field clone O(1)、独立配方比较最坏 O(B)。
 
-`scatter_with_density_field` 原地过滤已有源散布，不重填空洞，保持源最小距离和半开范围的分区/逆序求值不变性。构造预算包括原 brush Vec 的 spare capacity，场工作上界在枚举前检查；合计输出预算计算两个 Vec 的实际容量载荷，不是峰值分配/RSS 上限。每次 sample/rank 无分配；尚无笔刷空间索引，逐点采样成本为 O(B+固定噪声成本)。
+`scatter_with_density_field` 原地过滤已有源散布，不重填空洞，保持源最小距离和半开范围的分区/逆序求值不变性。构造预算包括原 brush Vec 的 spare capacity，场工作上界在枚举前检查；合计输出预算计算两个 Vec 的实际容量载荷，不是峰值分配/RSS 上限。每次 sample/rank 无分配；该线性路径逐点采样成本为 O(B+固定噪声成本)，显式 CPU 空间索引路径见下节。
 
 no-default 完整回归 65 项单测与 1 项文档测试通过，其中作者场新增 30 项；all-target clippy `-D warnings` 通过。覆盖独立整数 oracle/golden、全部 UNORM16 权重与密度、i64 边缘 warp、完整缓存字段与三轴任意分区双向求值。Apple M2/macOS release 的 10k 点、8 预热/64 样本：constant sample+rank P50/P95/P99 为 200.459/217.209/234.625 µs，warp+32 重叠刷子为 5392.875/32179.334/55792.958 µs；完整源生成+过滤+属性为 5878.709/12008.041/17783.000 µs、恰为两个 Vec 分配、880,000 字节输出容量载荷。并行负载干扰明显，不是 GPU 时间、产品帧时或严格优化 A/B。API、精确取整与完整基准见 `prism_world_scatter_field_zh.md`；该段是 CPU 基线验收，GPU twin 的独立验收见下节，地表过滤和产品 renderer 仍未由这些测试覆盖。
+
+### M4：CPU 作者刷子空间索引
+
+`ScatterBrushIndex` 共享完整不可变 `ScatterDensityField`，以确定性空间 BVH、前序 escape 节点和显式可复用 scratch 裁剪笔刷。i128 包围盒端点夹到 i64 世界域；候选 brush index 在合成前恢复 canonical ID 顺序，复用基线整数 noise/warp/距离/取整/species kernel，不改 field 算法版本或完整缓存身份。
+
+索引与 scratch 分别限制实际 Vec 容量载荷，fallible 预留，采样不分配。`scatter_with_indexed_density_field` 在枚举前以 primary×最坏单样本 work 准入，输出原地稳定压紧、两列容量共同预算；点/属性/cache/source counter 与基线相同，实际 `field_work` 另按节点/精确刷子探针计数。复杂度为 O(访问节点+K log K+K+固定噪声)，全部重叠时可能慢于线性扫描；不是增量编辑、GPU 索引或产品帧时承诺。API、预算、独立对照与 release 复现入口见 `prism_world_scatter_brush_index_zh.md`。
+
+2026-10-16 no-default 通过 99 库+16 集成+1 文档测试，all-target strict Clippy 通过。Apple M2 release：10000稀疏刷子/256查询批次的线性与索引 P50/P95/P99 为 5158.000/11220.250/15476.208 和 88.834/199.500/216.458 µs；全重叠索引更慢，三档负载均保留线性基线。1024稀疏刷子/10000 primary的完整散布为 21017.125/22018.583/25264.375 与 3504.917/3692.458/3754.917 µs，两边4750点、两个分配、880000字节输出容量并且完整输出一致。宿主并行负载、无最小距离邻居探测，不扩张成产品帧时结论。
 
 ### M4：GPU 作者密度与种类场
 
@@ -239,7 +247,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 以下项目仍需要独立硬件或端到端证据，不能用 policy primitive 冒充完成：
 
 - M3：资产包解压、mmap schema 视图、GPU 直传和产品级吞吐仍需实现或独立运行时验证；共享动态优先级已接入但不提供抢占或跨队列无饥饿保证。任务池 Future/共享取消、固定 worker 及宿主原生 reactor → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md` 与 `prism_world_native_io_zh.md`，不能代替冷盘、资产包或产品负载验收。
-- M4 散布：贴地放置、曲率/数据层/跨散布层规则、风与交互、逐键并发删除协议、笔刷空间索引、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场、真实heightfield的CPU/GPU高度/离地带/坡度精确稳定过滤、CPU源/作者场/地形及GPU完整键删除与CPU持久文件恢复、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
+- M4 散布：贴地放置、曲率/数据层/跨散布层规则、风与交互、逐键并发删除协议、GPU笔刷空间索引、索引增量编辑、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场与CPU刷子空间索引、真实heightfield的CPU/GPU高度/离地带/坡度精确稳定过滤、CPU源/作者场/地形及GPU完整键删除与CPU持久文件恢复、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
 - M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。

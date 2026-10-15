@@ -20,6 +20,7 @@ mod pcg;
 mod qos;
 mod residency;
 mod scatter;
+mod scatter_brush_index;
 mod scatter_deletion;
 mod scatter_field;
 mod scheduler;
@@ -39,6 +40,10 @@ pub use scatter::{
     estimate_scatter_work, scatter, ScatterBudget, ScatterCacheKey, ScatterCandidateKey,
     ScatterConfig, ScatterError, ScatterOutput, ScatterPoint, ScatterRegion, ScatterWorkEstimate,
     SCATTER_KERNEL_VERSION,
+};
+pub use scatter_brush_index::{
+    scatter_with_indexed_density_field, IndexedFieldSample, ScatterBrushIndex,
+    ScatterBrushIndexBudget, ScatterBrushIndexError, ScatterBrushScratch,
 };
 pub use scatter_deletion::{
     DeletionFilteredFieldScatter, DeletionFilteredScatter, ScatterDeletionBudget,

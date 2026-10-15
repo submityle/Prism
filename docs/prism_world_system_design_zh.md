@@ -13,7 +13,7 @@
 > - **全局距离场**：UE Global Distance Field / Lumen SDF（稀疏 brick + mip 环，一场多用）
 > 本文为纯经典数据结构 + 空间算法 + 流送调度路线（Morton/Hilbert、四叉/八叉树、CDLOD/clipmap、Transvoxel/Dual Contouring/SDF、domain warp 噪声、水力/热力侵蚀 PDE、泊松盘/蓝噪声、D8 流向、并查集、CRDT），**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/其他引擎源码或衍生代码。
 
-- 版本： v3.20（完整键删除扩展至CPU地形与GPU源/作者场/地形组合：稳定原地CPU适配、GPU最终compact二分全键过滤、固定整链资源/工作预算、逻辑设备身份与失败预检。Apple M2/Metal冻结源码定向139项、真实间接绘制像素及两组完整release记录通过，见prism_world_gpu_scatter_deletions_zh.md。持久恢复仍由scene作者节点字段的PSDL快照及既有日志负责；字段LWW不是逐键并发union，内存Timeline与FileJournal不自动原子。真实heightfield精确CPU/GPU双路径见prism_world_gpu_heightfield_scatter_zh.md。已有coverage/dither、sector所有权、ProxyCellHost、共享PriorityCell、原生reactor、行星网格和有界SDF。贴地放置、风/交互、产品scene/ECS decoder/render graph、资产解压/GPU直传、多表示产品接线、LOD接缝和真实加密传输仍须独立验收，不能把局部内核视为整个系统完成）
+- 版本： v3.21（新增CPU作者刷子空间BVH：全域整数裁剪、稳定ID合成、显式索引/scratch预算、零分配采样与完整散布组合，见prism_world_scatter_brush_index_zh.md；GPU仍逐点线性扫描，重叠负载不保证加速。既有CPU/GPU完整键删除及Apple M2/Metal定向139项验收见prism_world_gpu_scatter_deletions_zh.md，真实heightfield精确双路径见prism_world_gpu_heightfield_scatter_zh.md。scene仍是唯一作者真相，字段LWW不是逐键并发union，Timeline与FileJournal不自动原子。贴地放置、风/交互、产品scene/ECS decoder/render graph、资产解压/GPU直传、多表示产品接线、LOD接缝和真实加密传输仍须独立验收，不能把局部内核视为整个系统完成）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（作者内容单元 / spawn·despawn·materialize API / override delta / PersistentId，见 `prism_scene_design_zh.md`）、`prism_asset`（`StableGuid`/软引用/依赖闭包/单文件包/mmap/内容寻址）、`prism_ecs`（物化边界的批量预留/列写入）、`prism_transform`（层级）、`prism_tasks`（并行流送/烘焙）、`prism_math`（定点/空间编码/噪声）、`prism_diagnostic`（计数器/trace）；向上接 `prism_render`/`prism_physics`/`prism_gi`（经 GPU 常驻实例流 + ECS 物化两个边界，均已去 Bevy）
 - 层级定位： 基座层 L6；下接 `prism_scene`/`prism_asset`/`prism_ecs`，上驱动渲染/物理/GI；与 `prism_terrain_world_design_zh.md`（地形多表示细节）互为上下位
@@ -577,7 +577,7 @@ CPU 只按 sector 流送 proxy 列的加载/卸载（§7），实例的剔除/LO
 - **规则过滤**：按坡度、高度、曲率、数据层、其他散布层（如树下不长树）过滤采样点。
 - **密度场**：domain-warp 噪声 + 作者刷子（刷密度/种类）叠加成密度场，驱动采样。
 
-已实现 CPU 基线：`prism_world_residency::ScatterDensityField` 以全局 i64 毫米和版本化整数取整定义单 band value noise/domain warp，按唯一 brush ID 顺序叠加 Replace/Add 与离散 species。warp 在扩宽坐标上计算，不夹断世界边缘；笔刷采用平方距离 smoothstep 与 UNORM16 opacity。`scatter_with_density_field` 对源候选作稳定 rank 筛选，不重填空洞，保持源最小距离与分区独立性；完整缓存键包含全部场描述，inactive 参数也影响失效。工作上界在枚举前检查；采样无分配，逐点笔刷扫描仍为 O(B)，并非百万刷子空间索引。规则、预算边界、回归与限定 P50/P95/P99 见 `prism_world_scatter_field_zh.md`；GPU twin、地表过滤与产品 scene/render 接线不在该 CPU 基线验收范围。
+已实现 CPU 基线：`prism_world_residency::ScatterDensityField` 以全局 i64 毫米和版本化整数取整定义单 band value noise/domain warp，按唯一 brush ID 顺序叠加 Replace/Add 与离散 species。warp 在扩宽坐标上计算，不夹断世界边缘；笔刷采用平方距离 smoothstep 与 UNORM16 opacity。`scatter_with_density_field` 对源候选作稳定 rank 筛选，不重填空洞，保持源最小距离与分区独立性；完整缓存键包含全部场描述，inactive 参数也影响失效。工作上界在枚举前检查；采样无分配，线性基线逐点扫描为 O(B)。另有显式 `ScatterBrushIndex` CPU空间BVH：先整数AABB裁剪，再将候选恢复稳定ID顺序，复用精确原kernel；调用者提供有界可复用scratch，无逐点分配。完整索引散布仍保留源key/最小距离/分区/cache，逻辑work增加节点探针；全重叠可能慢于线性。规则与两类负载限定P50/P95/P99见 `prism_world_scatter_field_zh.md`、`prism_world_scatter_brush_index_zh.md`；GPU索引与产品scene/render接线仍独立验收。
 
 GPU twin 已另由 `GpuScatterField` 交付：源整数生成后直接在 GPU 完成 noise/warp/笔刷合成、rank 过滤、最终 compact/indirect，生产路径不逐点 CPU 求值或读回。source 64 字节记录保持原源接受标记，新增 16 字节 density/species/最终接受/rank 属性；必须消费 field 的 compact/indirect，不能只看源标记。显式五 storage binding，无 shader-i64 feature，完整复合资源/源工作/场工作/刷子容量先检后写。Apple M2/Metal 完整定向 113 项及实际间接绘制像素通过；ABI、上传量、生命周期、性能与未集成边界见 `prism_world_gpu_scatter_field_zh.md`。这仍不包含地表过滤、笔刷空间索引、风/交互、蓝噪声或产品 scene/render 接线。
 

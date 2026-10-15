@@ -13,3 +13,7 @@ harness = false
 [[bench]]
 name = "scatter_field"
 harness = false
+
+[[bench]]
+name = "scatter_brush_index"
+harness = false

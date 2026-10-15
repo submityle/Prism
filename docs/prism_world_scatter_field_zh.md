@@ -1,6 +1,6 @@
 # World 作者密度与种类场
 
-日期：2026-10-15
+日期：2026-10-16
 
 ## 所属层与确定性契约
 
@@ -35,7 +35,7 @@
 
 构造预算分别限制 brush 数与调用者移交 Vec 的 `capacity*size_of::<DensityBrush>()`，包括 spare capacity。排序原地进行，不复制第二个 brush buffer；Arc 元数据采用普通分配/OOM 处理，不属于可恢复预算错误。
 
-每个 field sample 的逻辑 work 为 `1 + B + 8*noise_enabled + 24*warp_enabled`：1 表示选取 rank，B 包括全部刷子；噪声 amplitude 为零时不计 noise/warp。它是保守逻辑探针数，不是 CPU 指令数、毫秒上限或 brush 空间索引。当前逐点遍历 B 个刷子，故采样为 O(B+噪声固定成本)，不承诺百万笔刷实时编辑。
+线性路径每个 field sample 的逻辑 work 为 `1 + B + 8*noise_enabled + 24*warp_enabled`：1 表示选取 rank，B 包括全部刷子；噪声 amplitude 为零时不计 noise/warp。它是保守逻辑探针数，不是 CPU 指令数或毫秒上限。该路径逐点遍历 B 个刷子，采样为 O(B+噪声固定成本)。另有显式 `ScatterBrushIndex` CPU BVH 路径，复用本文整数 kernel，先空间裁剪再按稳定 ID 合成，使用独立索引/scratch 预算与节点/刷子 work；契约与稀疏/重叠对照见 `prism_world_scatter_brush_index_zh.md`。两条路径均不承诺百万笔刷实时编辑。
 
 field scatter 在枚举前检查 `primary_candidates*work_per_sample` 的 checked 乘法与显式工作预算。源 scatter 自己的 work/count/byte 限额仍在密度筛选前生效，低密度不能绕过源预算。返回的 `field_work` 为实际源幸存者数量乘单样本逻辑 work，可能低于预检上界。
 
@@ -69,4 +69,4 @@ bench 对 10,000 个真实 source scatter 三维 jitter 点，执行 8 次预热
 
 ## 尚未扩大的边界
 
-本切片是完整可调用的 CPU 作者场及 source scatter 过滤。GPU twin 与固定容量笔刷上传另由 `GpuScatterField` 实现，精确 ABI、五 storage binding 要求及设备验证见 `prism_world_gpu_scatter_field_zh.md`；普通 `GpuScatter` 仍只生成源候选。已有 resident coverage/dither 是另一层显示策略。运行时笔刷空间索引、编辑器工具、scene schema、地表/坡度/高度/SDF 过滤、朝向生成、风/交互、蓝噪声目标与产品 renderer graph 都需要各自实现和验收，不能由本场的局部测试替代。
+本切片是完整可调用的 CPU 作者场及 source scatter 过滤。CPU 笔刷空间索引另见 `prism_world_scatter_brush_index_zh.md`。GPU twin 与固定容量笔刷上传另由 `GpuScatterField` 实现，精确 ABI、五 storage binding 要求及设备验证见 `prism_world_gpu_scatter_field_zh.md`；普通 `GpuScatter` 仍只生成源候选。已有 resident coverage/dither 是另一层显示策略，真实 heightfield 精确高度/离地带/坡度稳定过滤另见 `prism_world_heightfield_scatter_zh.md`。GPU 笔刷空间索引、编辑器工具、scene schema、曲率/数据层/跨层/SDF 过滤、朝向生成、风/交互、蓝噪声目标与产品 renderer graph 仍需各自实现和验收，不能由本场的局部测试替代。

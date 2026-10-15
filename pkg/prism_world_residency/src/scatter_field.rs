@@ -138,7 +138,10 @@ pub struct FieldScatterCacheKey {
 /// Independent field-work and total returned Vec payload limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FieldScatterBudget {
-    /// Conservative primary count times [`ScatterDensityField::work_per_sample`].
+    /// Logical work limit, preflighted against all primary candidates.
+    /// Linear sampling multiplies by [`ScatterDensityField::work_per_sample`];
+    /// indexed sampling multiplies by [`crate::ScatterBrushIndex::max_sample_work`].
+    /// These are probe units, not instruction, sorting-comparison, or time bounds.
     pub max_field_work: u64,
     /// Total capacity bytes of points plus aligned field attributes.
     /// Includes spare capacity, excludes Vec/Arc headers, metadata and stack.
@@ -156,7 +159,9 @@ pub struct FieldScatterOutput {
     pub cache_key: FieldScatterCacheKey,
     /// Actual source primary and halo candidate evaluations.
     pub candidate_evaluations: u64,
-    /// Number of source survivors sampled times the per-sample work bound.
+    /// Logical work for all sampled source survivors, including rejected ones.
+    /// Linear sampling charges the fixed `work_per_sample()` bound per survivor;
+    /// indexed sampling sums actual base noise/rank, node, and brush probes.
     pub field_work: u64,
 }
 
@@ -310,11 +315,15 @@ impl ScatterDensityField {
     /// warp adds 24. It is not CPU instruction count or a time bound. Sampling
     /// skips disabled noise, but still charges all configured brushes.
     pub fn work_per_sample(&self) -> u64 {
+        self.base_sample_work() + self.0.brushes.len() as u64
+    }
+
+    pub(crate) fn base_sample_work(&self) -> u64 {
         let noise_work = match self.0.config.noise {
             Some(n) if n.amplitude != 0 => 8 + if n.warp_amplitude_mm == 0 { 0 } else { 24 },
             _ => 0,
         };
-        1 + noise_work + self.0.brushes.len() as u64
+        1 + noise_work
     }
 
     /// Samples with integer Euclidean lattice coordinates and UNORM16 rounding.
@@ -322,6 +331,14 @@ impl ScatterDensityField {
     /// at world edges. The lattice hash has an explicit period of 2^64 cells
     /// per axis; widened virtual neighbours use their low 64 coordinate bits.
     pub fn sample(&self, position_mm: [i64; 3]) -> ScatterFieldSample {
+        let mut sample = self.sample_base(position_mm);
+        for brush in &self.0.brushes {
+            sample.apply_brush(*brush, position_mm);
+        }
+        sample
+    }
+
+    pub(crate) fn sample_base(&self, position_mm: [i64; 3]) -> ScatterFieldSample {
         let config = self.0.config;
         let mut density = i64::from(config.base_density);
         if let Some(noise) = config.noise.filter(|n| n.amplitude != 0) {
@@ -346,27 +363,9 @@ impl ScatterDensityField {
             density =
                 (density + signed * i64::from(noise.amplitude) / ONE as i64).clamp(0, ONE as i64);
         }
-        let mut species = config.base_species;
-        for brush in &self.0.brushes {
-            let weight = brush_weight(*brush, position_mm);
-            if weight == 0 {
-                continue;
-            }
-            density = match brush.density {
-                DensityBrushOp::Replace(target) => lerp(density as u16, target, weight) as i64,
-                DensityBrushOp::Add(delta) => (density
-                    + i64::from(delta) * i64::from(weight) / ONE as i64)
-                    .clamp(0, ONE as i64),
-            };
-            if weight >= 32768
-                && let Some(value) = brush.species
-            {
-                species = value;
-            }
-        }
         ScatterFieldSample {
             density: density as u16,
-            species,
+            species: config.base_species,
         }
     }
 
@@ -394,6 +393,26 @@ impl ScatterDensityField {
     pub fn accepts(&self, key: ScatterCandidateKey, density: u16) -> bool {
         density == u16::MAX
             || (density != 0 && self.candidate_rank(key) < u32::from(density) * 65537)
+    }
+}
+
+impl ScatterFieldSample {
+    pub(crate) fn apply_brush(&mut self, brush: DensityBrush, position_mm: [i64; 3]) {
+        let weight = brush_weight(brush, position_mm);
+        if weight == 0 {
+            return;
+        }
+        self.density = match brush.density {
+            DensityBrushOp::Replace(target) => lerp(self.density, target, weight),
+            DensityBrushOp::Add(delta) => (i64::from(self.density)
+                + i64::from(delta) * i64::from(weight) / ONE as i64)
+                .clamp(0, ONE as i64) as u16,
+        };
+        if weight >= 32768
+            && let Some(value) = brush.species
+        {
+            self.species = value;
+        }
     }
 }
 
