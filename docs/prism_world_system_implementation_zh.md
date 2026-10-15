@@ -235,6 +235,7 @@ release两组完整记录共864次dispatch逐全键/位置对CPU，10k/100k候�
 - M8 session seam 已补齐：`Session` 提供 token gate、有限 outbound/inbound 队列、序号、累计 ACK、retry deadline、duplicate suppression 和失败状态；`MemoryTransport` 提供 no_std 可运行的双端测试传输。9 项 network 测试及 no-default-features/clippy 通过。真实 socket/加密 transport 仍由宿主提供。
 - 这些 crate 已加入根 workspace，均有可运行算法和单测；它们是 world 接缝的 engine-neutral 实现，不宣称已经完成整个 renderer/physics/network transport 端到端产品。
 - `SparseSdfBrickGrid` 已支持负坐标采样、跨 mip dirty propagation、删除后的父 mip 失效，以及 brick/region 的保守 i16 min/max 查询；查询返回 `None` 时表示稀疏数据未知，不能当作空场。
+- `CpuSdfClipmap` 已补齐固定容量、确定性排序和事务式中心滚动：每个 mip 保持固定 X/Z 方形覆盖，负坐标使用 floor 除法，更新只返回新进入的 brick，坐标/容量/分配失败不会提交半成品布局。它是 SDF clipmap 的 CPU 布局与 residency 输入契约，不包含 GPU 纹理分配、SDF 采样、上传或 renderer graph 接线；这些仍需独立实现和真机验收。
 - terrain 在最大 quadtree 层级返回显式 `NoChildren`，LOD 非有限值和高度乘法溢出有确定性错误/饱和行为；simulation 的 tick、hydrology 和 delta codec 增加回绕/溢出、canonical record、输入大小和记录数限制；network merge 以 `TransactionId -> PersistentId` 索引去重，避免按对象桶线性扫描。
 
 ## 当前验证
