@@ -1,0 +1,26 @@
+[package]
+name = "prism_world_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Engine-neutral world proxy visibility contract with a real wgpu compute parity backend."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# This crate is intentionally standalone: the parent workspace is not edited
+# for this optional GPU contract, so it can be validated without changing any
+# existing package membership or lockfile.
+[workspace]
+
+[features]
+default = []
+gpu = ["dep:bytemuck", "dep:futures-lite", "dep:wgpu"]
+
+[dependencies]
+bytemuck = { version = "1.5", features = ["derive"], optional = true }
+futures-lite = { version = "2", optional = true }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12"], optional = true }
+
+[dev-dependencies]
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12"] }
