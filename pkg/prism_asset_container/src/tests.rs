@@ -1111,6 +1111,42 @@ fn overlay_priority_ties_latest_mount_wins_and_unmount_falls_back() {
 }
 
 #[test]
+fn patch_tombstones_hide_lower_priority_assets_and_restore_on_unmount() {
+    let id = guid("deleted-by-patch.asset");
+    let mut overlays = OverlaySet::new();
+    overlays.mount(
+        "base",
+        0,
+        ContainerReader::new(build(&[("deleted-by-patch.asset", b"base")])).unwrap(),
+    );
+    overlays.mount_tombstones("patch", 1, [id]);
+    assert!(!overlays.contains(id));
+    assert_eq!(overlays.source(id), None);
+    assert_eq!(overlays.read_all(id), Err(ContainerError::MissingAsset(id)));
+    assert!(overlays.unmount("patch"));
+    assert_eq!(overlays.read_all(id).unwrap(), b"base");
+}
+
+#[test]
+fn later_higher_priority_mount_can_restore_a_tombstoned_asset() {
+    let id = guid("restored-by-hotfix.asset");
+    let mut overlays = OverlaySet::new();
+    overlays.mount(
+        "base",
+        0,
+        ContainerReader::new(build(&[("restored-by-hotfix.asset", b"base")])).unwrap(),
+    );
+    overlays.mount_tombstones("patch", 1, [id]);
+    overlays.mount(
+        "hotfix",
+        2,
+        ContainerReader::new(build(&[("restored-by-hotfix.asset", b"hotfix")])).unwrap(),
+    );
+    assert_eq!(overlays.source(id), Some("hotfix"));
+    assert_eq!(overlays.read_all(id).unwrap(), b"hotfix");
+}
+
+#[test]
 fn remounting_a_container_name_replaces_its_previous_guid_set() {
     let old_guid = guid("remount-old");
     let new_guid = guid("remount-new");

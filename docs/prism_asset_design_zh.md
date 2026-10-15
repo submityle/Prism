@@ -756,7 +756,7 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 - 容器格式（ToC + 压缩分块 blob）与 patch/DLC：Asset Build §14.3/§14.5。
 - 本 crate 侧：按内容目录（`StableGuid → ChunkId → 容器`）定位、挂载优先级（§10.4）、按段异步读取（§10.3/§10.5）、解压与 GPU 直通（§11.2）。
 
-> **当前实现边界**：当前运行时消费切片只覆盖 raw 容器、ToC/范围/哈希校验、文件 `RangeSource`、Manifest 路由和 overlay；BLAKE3 是未认证完整性摘要，不是防篡改签名。发行 publication 边界已额外严格证明 Build Manifest 的每个 `AssetId` 都有唯一的 `StableGuid` runtime route，防止发布内部自洽但缺少运行时资产的包。压缩、加密、密钥/nonce/tag、Manifest/容器签名、Merkle root、anti-rollback、远程 CDN 按段读取及 package-level rollback 均未完成。
+> **当前实现边界**：当前运行时消费切片覆盖 raw 容器、ToC/范围/哈希校验、文件 `RangeSource`、Manifest 路由、overlay 和显式 Patch tombstone（高优先级删除标记可隐藏底层 GUID，卸载后恢复）；BLAKE3 是未认证完整性摘要，不是防篡改签名。发行 publication 边界已额外严格证明 Build Manifest 的每个 `AssetId` 都有唯一的 `StableGuid` runtime route，防止发布内部自洽但缺少运行时资产的包。压缩、加密、密钥/nonce/tag、Manifest/容器签名、Merkle root、anti-rollback、远程 CDN 按段读取及 package-level rollback 均未完成。
 
 ---
 
