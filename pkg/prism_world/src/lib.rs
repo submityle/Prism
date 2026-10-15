@@ -10,12 +10,20 @@
 
 extern crate alloc;
 
+#[cfg(feature = "scene_host")]
+pub mod scene_host;
+
 use prism_world_persist::{AppendOnlyLog, LogError, Transaction};
 use prism_world_residency::{
     MaterializationBudget, ResidencyPlan, ResidencyRecord, ResidencyScheduler,
 };
 use prism_world_stream::{
     CellManifest, DemandSource, SectorId, StreamAction, StreamBudget, StreamPlan, StreamScheduler,
+};
+
+#[cfg(feature = "scene_host")]
+pub use scene_host::{
+    ResidencyBinding, SceneEcsHost, SceneEcsHostConfigError, SceneEcsHostError, SceneEcsProvider,
 };
 
 /// Per-frame budgets for the two hot policy paths.
