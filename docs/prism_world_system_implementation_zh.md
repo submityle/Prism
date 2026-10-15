@@ -11,7 +11,7 @@
 - 地形曲面提取使用 `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/private/tmp/prism-world-terrain-target cargo test --offline -j 1 -p prism_world_terrain --no-default-features`：59 passed、0 failed；随后启用 `mesh` feature 重跑为 62 passed、0 failed，包含原生 Mesh 转换回归。
 - 新增 threaded 文件 provider 与 16 项回归测试源码，使用 `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/private/tmp/prism-world-io-target cargo test --offline -j 1 -p prism_world_io` 完成 28 passed、0 failed（其中 threaded 回归 16 项）。
 - 本批运行的是指定文件的 `rustfmt --edition 2024 --config skip_children=true --check` 和 `git diff --check`，仅验证格式、解析及补丁空白，不等同于类型检查、clippy 或测试。
-- 未运行新代码 clippy、性能/GPU 验证及全 workspace 测试；共享 target 仍有并行任务，故本批只使用 `/private/tmp` 隔离 target，没有清理或覆盖其他任务产物。
+- `prism_world_io` 全部 target clippy 与 `prism_world_terrain` no-default 全部 target clippy 已通过；terrain `mesh` feature clippy 在编译依赖 `prism_asset` 时因磁盘耗尽中断。性能/GPU 验证及全 workspace 测试仍未运行；本批使用 `/private/tmp` 隔离 target，没有清理或覆盖共享 target。
 
 本批提交是源码交接，不是完整系统验收；异步 world runtime 接线、任务池整合、跨 LOD 地形接缝和性能目标仍按下文边界保留。
 
@@ -75,7 +75,7 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -j 1 -p prism_world_gpu --feat
 - `SdfGrid` 全量烘焙 signed Q16.16 到 X-fast 小端 i32；半开 XYZ 局部区域先 scratch 采样、成功才覆盖并递增 revision。按完整 dimensions、实际 source 调用数、输出+scratch 逻辑峰值字节预检，checked 算术及 fallible allocation 拒绝溢出/分配失败；任何采样失败保留原 bytes/revision。`quantize_sdf_mm` 用 i128 最近舍入、ties-away、超范围拒绝；`VoxelSdfSource` 只将声明为 Q8.8 的距离精确扩展 256 倍，拒绝 density/格式或规格不匹配，不伪造距离变换。空间 embedding 由 source 保持稳定；这一步没有执行曲面提取。
 - 新增 `SdfSurfaceMesh` 在同分辨率的固定六四面体格上提取零等值面，规范 sample/edge key 焊接顶点并消除重复端点退化面；半开 cube 区域读取一圈 sample halo，任意等分辨率分区与全量提取的有向三角集合一致。负值在内、零在外，输出外向 CCW 索引与按实际编码三角面面积加权的单位法线；开放区域边界法线仍为单侧平均。i128 先减整数毫米 origin，再作 f64 插值及局部 f32 米制编码，拒绝精度超限、面翻转/塌缩、无定义法线和坐标超界；误差界不覆盖采样、量化或曲面近似误差。
 - 曲面构建对 cube/triangle/vertex/逻辑峰值字节设硬限制，checked 算术与 fallible reservation，失败不修改源 grid。非空构建三次遍历，排序/查边复杂度 `O(C + T log T + T log V)`；输出载荷 `24V + 12T`，峰值 `max(60T + 12V, 12T + 48V)`，不含借用 grid、旧 mesh、分配器开销/容量取整和固定遍历栈。no-default 回归 59 项及 `mesh` feature 回归 62 项已通过：覆盖 256 种符号 mask、距离极值、各向异性平面、零点焊接、闭球流形/Euler、任意区域分区、极大共用 origin、精确预算、错误路径与原生 Mesh 转换；这不是 Dual Contouring、Transvoxel 或混合 LOD 接缝实现，也尚未进入 renderer/physics 产品链路。
-- 表示选择和重烘规划现按实际 XY 网格覆盖乘 Z 深度计算工作量/字节，覆盖位置敏感的 floor/ceil 边界、溢出、完整规格比较及输入排列无关的脏区合并；本批 terrain no-default 59 项、启用原生 mesh 后 62 项通过。新代码 clippy、性能/GPU 仍未验收；原生 mesh 的依赖 `prism_asset` 仍有既有文档告警。
+- 表示选择和重烘规划现按实际 XY 网格覆盖乘 Z 深度计算工作量/字节，覆盖位置敏感的 floor/ceil 边界、溢出、完整规格比较及输入排列无关的脏区合并；本批 terrain no-default 59 项、启用原生 mesh 后 62 项通过。IO 与 terrain no-default clippy 已通过，terrain mesh clippy 受磁盘耗尽阻断；性能/GPU 仍未验收，原生 mesh 的依赖 `prism_asset` 仍有既有文档告警。
 - `prism_world_sim`：统一 tick/output/dirty-region budget，确定性局部侵蚀、持久体素/碎片 delta、水文容量约束、生态 biomass 更新和小端 delta codec。
 - M7 持久接缝已补齐：`simulation_delta_to_transaction` 将 `SimulationDelta` 编码为稳定 opaque `Bytes` forward + 同字段 `Delete` inverse，`WorldRuntime::append_simulation_delta` 自动使用 log next sequence 并写入 append-only log；simulation feature 测试覆盖 round-trip、错误和 facade 入口。
 - M7 SDF 只读接缝已补齐：`SparseSdfQuery`/`SdfQueryConsumer` 为多个消费者共享同一 sparse grid，明确区分 `Value`、`Miss` 与缺 brick 的 `Unknown`，覆盖负坐标、范围和缺失数据测试；不会把未知场误报为空场。

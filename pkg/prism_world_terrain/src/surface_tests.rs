@@ -91,9 +91,9 @@ fn planes_have_outward_normals_with_anisotropic_spacing() {
             for (p, n) in mesh.positions().iter().zip(mesh.normals()) {
                 assert!((f64::from(p[axis]) - 1.5 * f64::from(spacing[axis]) * 0.001).abs() < 1e-6);
                 assert!((n[axis] - sign as f32).abs() < 1e-6);
-                for i in 0..3 {
+                for (i, component) in n.iter().enumerate() {
                     if i != axis {
-                        assert!(n[i].abs() < 1e-6);
+                        assert!(component.abs() < 1e-6);
                     }
                 }
             }
