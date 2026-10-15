@@ -23,5 +23,5 @@ mod waker;
 pub(crate) use executor::RunnableTask;
 
 pub use counter_bridge::CounterFuture;
-pub use io_bridge::{AioReadFuture, AioWriteFuture, IoError, IoReactor, ReadBuf};
+pub use io_bridge::{AioReadFuture, AioSyncFuture, AioWriteFuture, IoError, IoReactor, ReadBuf};
 pub use task::Task;

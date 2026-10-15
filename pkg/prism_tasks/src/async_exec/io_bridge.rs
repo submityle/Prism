@@ -38,7 +38,10 @@
 //! on Apple/BSD today (POSIX AIO). On every other platform [`IoReactor::new`]
 //! returns [`IoError::Unsupported`] and spawns no thread. Both batched reads
 //! ([`IoReactor::read`]) and batched writes ([`IoReactor::write`]) are
-//! supported; other opcodes (e.g. `fsync`) are PLANNED.
+//! supported. [`IoReactor::fsync`] is a completion-tracked durability barrier
+//! executed by the reactor after all earlier queued operations have settled;
+//! POSIX AIO has no portable `fsync` list opcode, so this keeps the caller
+//! asynchronous without pretending that the platform queue supports one.
 //!
 //! ## Caller contract
 //! As with [`AioQueue::submit`], the caller must keep the file descriptor open
@@ -52,6 +55,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::fmt;
 use core::future::Future;
+use core::mem::ManuallyDrop;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
@@ -145,6 +149,8 @@ enum OpKind {
     Read,
     /// Kernel writes the slot buffer out to the file.
     Write,
+    /// Flush all writes that precede this request on the reactor.
+    Fsync,
 }
 
 /// An I/O request handed to the reactor thread. Every field is `Send`.
@@ -336,6 +342,39 @@ impl IoReactor {
 
         AioWriteFuture { slot, done: false }
     }
+
+    /// Queue a durability barrier for `fd`.
+    ///
+    /// The barrier is ordered after all requests already queued on this
+    /// reactor. It runs on the reactor thread, so the caller remains
+    /// asynchronous and the reactor never reports completion before the file
+    /// descriptor's data and metadata have reached the platform's sync
+    /// boundary. The file descriptor remains borrowed; ownership is never
+    /// transferred to the future.
+    pub fn fsync(&self, fd: RawFd) -> AioSyncFuture {
+        let user_data = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let slot = Arc::new(IoSlot {
+            inner: Mutex::new(SlotInner {
+                buf: None,
+                result: None,
+                waker: None,
+            }),
+        });
+        let submission = Submission {
+            fd,
+            offset: 0,
+            len: 0,
+            priority: IoPriority::High,
+            user_data,
+            kind: OpKind::Fsync,
+            slot: Arc::clone(&slot),
+        };
+        match &self.tx {
+            Some(tx) if tx.send(submission).is_ok() => {}
+            _ => complete_slot(&slot, Err(IoError::ReactorGone)),
+        }
+        AioSyncFuture { slot, done: false }
+    }
 }
 
 impl Drop for IoReactor {
@@ -425,6 +464,35 @@ pub struct AioWriteFuture {
     done: bool,
 }
 
+/// The future returned by [`IoReactor::fsync`].
+#[must_use = "an AioSyncFuture does nothing unless awaited or blocked on"]
+pub struct AioSyncFuture {
+    slot: Arc<IoSlot>,
+    done: bool,
+}
+
+impl Future for AioSyncFuture {
+    type Output = Result<()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.done {
+            return Poll::Pending;
+        }
+        let mut inner = self.slot.inner.lock().unwrap();
+        if let Some(result) = inner.result.take() {
+            drop(inner.buf.take());
+            drop(inner);
+            self.done = true;
+            return Poll::Ready(result.map(|_| ()));
+        }
+        match &mut inner.waker {
+            Some(existing) if existing.will_wake(cx.waker()) => {}
+            slot => *slot = Some(cx.waker().clone()),
+        }
+        Poll::Pending
+    }
+}
+
 impl Future for AioWriteFuture {
     type Output = Result<usize>;
 
@@ -477,6 +545,18 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
         //    rejected ones are requeued at the front and retried after a reap.
         while let Some(front) = pending.front() {
             let kind = front.kind;
+            if kind == OpKind::Fsync {
+                // POSIX AIO has no portable fsync list opcode. Wait until all
+                // earlier queued reads/writes have settled, then execute the
+                // durability barrier on this dedicated reactor thread. This
+                // preserves ordering without blocking the caller's executor.
+                if !inflight.is_empty() {
+                    break;
+                }
+                let sub = pending.pop_front().expect("front fsync exists");
+                complete_slot(&sub.slot, sync_fd(sub.fd));
+                continue;
+            }
             // Length of the maximal front run sharing this opcode (reads and
             // writes use different `AioQueue` entry points, so a batch is
             // single-opcode).
@@ -512,6 +592,7 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
                         user_data: sub.user_data,
                         priority: sub.priority,
                     }),
+                    OpKind::Fsync => unreachable!("fsync is handled before batch construction"),
                 }
             }
 
@@ -542,6 +623,7 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
                         queue.submit_write(&write_ops)
                     }
                 }
+                OpKind::Fsync => unreachable!("fsync is handled before queue submission"),
             };
 
             match outcome {
@@ -633,6 +715,37 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
     }
     for sub in pending.drain(..) {
         complete_slot(&sub.slot, Err(shutdown_err.clone()));
+    }
+}
+
+/// Execute a durability barrier without taking ownership of the caller's fd.
+fn sync_fd(fd: RawFd) -> Result<usize> {
+    if fd < 0 {
+        return Err(IoError::Platform(AioError::InvalidArgument));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::fs::File;
+        use std::os::fd::FromRawFd;
+
+        // SAFETY: the caller contract requires `fd` to remain open while the
+        // future is pending. `ManuallyDrop` prevents this borrowed descriptor
+        // from being closed when the temporary `File` is released.
+        #[expect(
+            unsafe_code,
+            reason = "borrow the caller-owned file descriptor without closing it"
+        )]
+        let file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+        file.sync_all()
+            .map(|_| 0)
+            .map_err(|error| IoError::Platform(AioError::Io(error.raw_os_error().unwrap_or(-1))))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(IoError::Unsupported)
     }
 }
 

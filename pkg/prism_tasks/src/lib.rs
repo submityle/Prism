@@ -132,7 +132,8 @@ pub use affinity::{
 };
 pub use arena::{FrameArena, FrameArenas, DEFAULT_ARENA_CAPACITY};
 pub use async_exec::{
-    AioReadFuture, AioWriteFuture, CounterFuture, IoError as AioIoError, IoReactor, ReadBuf, Task,
+    AioReadFuture, AioSyncFuture, AioWriteFuture, CounterFuture, IoError as AioIoError, IoReactor,
+    ReadBuf, Task,
 };
 pub use cancel::{CancelOutcome, CancelToken, Cancelled};
 #[cfg(feature = "compat-bevy")]

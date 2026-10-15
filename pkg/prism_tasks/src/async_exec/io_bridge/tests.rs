@@ -285,6 +285,40 @@ fn write_at_offset_then_read_back_via_bridge() {
 }
 
 #[test]
+fn fsync_is_ordered_after_prior_write_and_does_not_take_fd_ownership() {
+    if !IoReactor::supported() {
+        return;
+    }
+    let path = make_pattern_file(0);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .expect("open writable file");
+    let fd = file.as_raw_fd();
+    let reactor = IoReactor::new().expect("start reactor");
+    let pool = TaskPool::new();
+    let payload: Vec<u8> = (0..4096).map(pattern_byte).collect();
+
+    // Await the barrier first. Its ordering guarantee must force the earlier
+    // write to settle before sync_all runs, even though both futures are live.
+    let write = reactor.write(fd, 0, &payload, IoPriority::Normal);
+    let sync = reactor.fsync(fd);
+    pool.block_on(sync).expect("fsync completes");
+    assert_eq!(
+        pool.block_on(write).expect("write completes"),
+        payload.len()
+    );
+    assert_eq!(fs::read(&path).expect("read synced file"), payload);
+
+    // The descriptor is still owned by `file`; the bridge must not close it.
+    file.metadata().expect("borrowed fd remains open");
+    drop(file);
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
 fn dropping_a_write_future_before_completion_is_safe() {
     if !IoReactor::supported() {
         return;
