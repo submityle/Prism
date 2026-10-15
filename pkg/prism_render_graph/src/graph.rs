@@ -14,6 +14,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use prism_render_driver::{
@@ -362,7 +363,49 @@ impl RenderGraph {
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
         Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
+        self.try_add_pass_with_dependencies(name, kind, flags, Vec::new(), setup)
+            .map(|_| ())
+    }
+
+    pub(crate) fn add_topology_pass<Setup>(
+        &mut self,
+        name: impl Into<String>,
+        kind: PassKind,
+        flags: PassFlags,
+        dependencies: Vec<usize>,
+        setup: Setup,
+    ) -> Result<usize, CompileError>
+    where
+        Setup: FnOnce(&mut PassBuilder<'_>),
+    {
+        self.try_add_pass_with_dependencies(name, kind, flags, dependencies, |builder| {
+            setup(builder);
+            |_| {}
+        })
+    }
+
+    fn try_add_pass_with_dependencies<Setup, Exec>(
+        &mut self,
+        name: impl Into<String>,
+        kind: PassKind,
+        flags: PassFlags,
+        dependencies: Vec<usize>,
+        setup: Setup,
+    ) -> Result<usize, CompileError>
+    where
+        Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
+        Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
+    {
         GraphLimits::next_id("passes", self.passes.len(), self.limits.passes)?;
+        let pass_id = self.passes.len();
+        for &dependency in &dependencies {
+            if dependency >= pass_id {
+                return Err(CompileError::InvalidDependency {
+                    pass: crate::frame_graph::PassId(pass_id as u32),
+                    dependency: crate::frame_graph::PassId(dependency as u32),
+                });
+            }
+        }
         let mut builder = PassBuilder::new(
             &mut self.textures,
             &mut self.buffers,
@@ -376,11 +419,245 @@ impl RenderGraph {
             name: name.into(),
             kind,
             flags,
+            dependencies,
             texture_accesses,
             buffer_accesses,
             execute: Some(Box::new(exec)),
         });
-        Ok(())
+        Ok(pass_id)
+    }
+
+    /// Lowers a startup declaration frontend into this graph's authoritative
+    /// SSA compiler. The declaration records remain backend-neutral; all
+    /// scheduling, hazards, lifetimes, aliasing and barriers are derived by
+    /// [`Self::compile`] after lowering.
+    pub(crate) fn compile_declarations(
+        resources: &[crate::frame_graph::ResourceDescriptor],
+        passes: &[crate::frame_graph::PassDescriptor],
+        limits: GraphLimits,
+    ) -> Result<ExecutionPlan, CompileError> {
+        use crate::compile::kernel;
+        use crate::frame_graph::{AccessKind, QueueClass, ResourceLifetime};
+        use crate::resource::{BufferResource, Lifetime, TextureResource};
+        use prism_render_driver::{BufferUsages, TextureFormat, TextureUsages};
+
+        GraphLimits::check_count("resources", resources.len(), limits.resources)?;
+        GraphLimits::check_count("passes", passes.len(), limits.passes)?;
+        for (pass_index, pass) in passes.iter().enumerate() {
+            GraphLimits::check_count("accesses", pass.accesses.len(), limits.accesses_per_pass)?;
+            for access in &pass.accesses {
+                if access.resource.0 as usize >= resources.len() {
+                    return Err(CompileError::InvalidResource {
+                        pass: crate::frame_graph::PassId(pass_index as u32),
+                        resource: access.resource,
+                    });
+                }
+            }
+            for &dependency in &pass.depends_on {
+                if dependency.0 as usize >= passes.len() || dependency.0 as usize == pass_index {
+                    return Err(CompileError::InvalidDependency {
+                        pass: crate::frame_graph::PassId(pass_index as u32),
+                        dependency,
+                    });
+                }
+            }
+        }
+
+        let explicit: Vec<Vec<usize>> = passes
+            .iter()
+            .map(|pass| pass.depends_on.iter().map(|id| id.0 as usize).collect())
+            .collect();
+        let names = passes
+            .iter()
+            .map(|pass| pass.name.clone().into_owned())
+            .collect::<Vec<_>>();
+        let declaration_order = kernel::solve(
+            &vec![Vec::new(); passes.len()],
+            &vec![true; passes.len()],
+            &explicit,
+            &names,
+        )?
+        .order;
+
+        // The topology frontend uses the infallible setup helpers below for
+        // its bounded startup declarations. Validate every SSA write first so
+        // a configured version cap is reported as a compile error rather than
+        // becoming a panic halfway through lowering.
+        let mut versions = vec![0; resources.len()];
+        for &pass_index in &declaration_order {
+            for access in &passes[pass_index].accesses {
+                if access.kind.writes() {
+                    versions[access.resource.0 as usize] =
+                        limits.next_version(versions[access.resource.0 as usize])?;
+                }
+            }
+        }
+
+        let mut graph = Self::with_limits(Extent3d::new_2d(1, 1), limits);
+
+        // A topology resource has no driver object at startup. It is typed as
+        // a texture when its declaration requires sampling/attachments and as
+        // a buffer otherwise; the type only supplies the unified access/state
+        // vocabulary, while the actual scene owner binds the real resource.
+        #[derive(Clone, Copy)]
+        enum Handle {
+            Texture(TextureHandle),
+            Buffer(BufferHandle),
+        }
+        let mut handles = Vec::with_capacity(resources.len());
+        let mut texture_count = 0u32;
+        let mut buffer_count = 0u32;
+        for (index, resource) in resources.iter().enumerate() {
+            let uses_texture = passes.iter().any(|pass| {
+                pass.accesses.iter().any(|access| {
+                    access.resource.0 as usize == index
+                        && matches!(
+                            access.kind,
+                            AccessKind::SampledRead
+                                | AccessKind::ColorAttachment
+                                | AccessKind::DepthAttachment
+                        )
+                })
+            });
+            let lifetime = match resource.lifetime {
+                ResourceLifetime::Transient => Lifetime::Transient,
+                ResourceLifetime::Imported => Lifetime::Imported,
+                ResourceLifetime::Persistent => Lifetime::Persistent,
+            };
+            if uses_texture {
+                let depth = passes.iter().any(|pass| {
+                    pass.accesses.iter().any(|access| {
+                        access.resource.0 as usize == index
+                            && access.kind == AccessKind::DepthAttachment
+                    })
+                });
+                let desc = if depth {
+                    TextureDesc::depth(TextureFormat::Depth32Float)
+                } else {
+                    TextureDesc::color(TextureFormat::Rgba8Unorm)
+                };
+                // Texture and buffer handles use separate namespaces. The
+                // declaration API exposes one ResourceId namespace, so assign
+                // dense local indices while lowering and keep the global
+                // declaration index only in `handles`.
+                let handle = TextureHandle::new(ResourceIndex(texture_count), 0);
+                texture_count += 1;
+                graph.textures.push(TextureResource {
+                    name: resource.name.clone().into_owned(),
+                    desc,
+                    lifetime,
+                    imported: None,
+                    inferred_usage: TextureUsages::NONE,
+                    version: 0,
+                    realized: None,
+                });
+                handles.push(Handle::Texture(handle));
+            } else {
+                let handle = BufferHandle::new(ResourceIndex(buffer_count), 0);
+                buffer_count += 1;
+                graph.buffers.push(BufferResource {
+                    name: resource.name.clone().into_owned(),
+                    desc: BufferDesc::new(resource.size.max(1), BufferUsages::NONE),
+                    lifetime,
+                    imported: None,
+                    inferred_usage: BufferUsages::NONE,
+                    version: 0,
+                    realized: None,
+                });
+                handles.push(Handle::Buffer(handle));
+            }
+        }
+
+        let mut original_to_graph = vec![usize::MAX; passes.len()];
+        for (graph_index, &original_index) in declaration_order.iter().enumerate() {
+            original_to_graph[original_index] = graph_index;
+        }
+
+        for &original_index in &declaration_order {
+            let pass = &passes[original_index];
+            let dependencies = pass
+                .depends_on
+                .iter()
+                .map(|id| original_to_graph[id.0 as usize])
+                .collect::<Vec<_>>();
+            let kind = match pass.queue {
+                QueueClass::Transfer => PassKind::Transfer,
+                QueueClass::Compute => PassKind::Compute,
+                QueueClass::Graphics => {
+                    if pass.accesses.iter().any(|access| {
+                        matches!(
+                            access.kind,
+                            AccessKind::ColorAttachment | AccessKind::DepthAttachment
+                        )
+                    }) {
+                        PassKind::Raster
+                    } else {
+                        PassKind::Compute
+                    }
+                }
+            };
+            let mut flags = PassFlags::NEVER_CULL;
+            if pass.queue == QueueClass::Compute {
+                flags = flags.union(PassFlags::ASYNC_COMPUTE);
+            }
+            let accesses = pass.accesses.clone();
+            graph.add_topology_pass(pass.name.clone(), kind, flags, dependencies, |builder| {
+                for access in accesses {
+                    let index = access.resource.0 as usize;
+                    let current = handles[index];
+                    handles[index] = match (current, access.kind) {
+                        (Handle::Texture(handle), AccessKind::SampledRead) => {
+                            Handle::Texture(builder.sample(handle))
+                        }
+                        (Handle::Texture(handle), AccessKind::StorageRead) => {
+                            Handle::Texture(builder.read_storage_texture(handle))
+                        }
+                        (Handle::Texture(handle), AccessKind::StorageWrite) => {
+                            Handle::Texture(builder.write_storage_texture(handle))
+                        }
+                        (Handle::Texture(handle), AccessKind::ColorAttachment) => {
+                            Handle::Texture(builder.color_attachment(handle))
+                        }
+                        (Handle::Texture(handle), AccessKind::DepthAttachment) => {
+                            Handle::Texture(builder.depth_attachment(handle))
+                        }
+                        (Handle::Texture(handle), AccessKind::IndirectRead) => {
+                            Handle::Texture(builder.read_storage_texture(handle))
+                        }
+                        (Handle::Texture(handle), AccessKind::TransferRead) => {
+                            Handle::Texture(builder.copy_src_texture(handle))
+                        }
+                        (Handle::Texture(handle), AccessKind::TransferWrite) => {
+                            Handle::Texture(builder.copy_dst_texture(handle))
+                        }
+                        (Handle::Buffer(handle), AccessKind::SampledRead) => {
+                            Handle::Buffer(builder.read_storage_buffer(handle))
+                        }
+                        (Handle::Buffer(handle), AccessKind::StorageRead) => {
+                            Handle::Buffer(builder.read_storage_buffer(handle))
+                        }
+                        (Handle::Buffer(handle), AccessKind::StorageWrite) => {
+                            Handle::Buffer(builder.write_storage_buffer(handle))
+                        }
+                        (Handle::Buffer(handle), AccessKind::IndirectRead) => {
+                            Handle::Buffer(builder.read_indirect(handle))
+                        }
+                        (Handle::Buffer(handle), AccessKind::TransferRead) => {
+                            Handle::Buffer(builder.copy_src_buffer(handle))
+                        }
+                        (Handle::Buffer(handle), AccessKind::TransferWrite) => {
+                            Handle::Buffer(builder.copy_dst_buffer(handle))
+                        }
+                        (Handle::Buffer(_), AccessKind::ColorAttachment)
+                        | (Handle::Buffer(_), AccessKind::DepthAttachment) => {
+                            unreachable!("attachment declarations are lowered as textures")
+                        }
+                    };
+                }
+            })?;
+        }
+
+        graph.compile()
     }
 
     /// Compiles the declared frame into an immutable [`ExecutionPlan`] without

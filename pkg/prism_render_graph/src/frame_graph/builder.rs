@@ -1,8 +1,7 @@
 //! Admission-checked declaration frontend; no graph algorithms live here.
-use super::{
-    CompileError, CompiledGpuFrameGraph, PassDescriptor, PassId, ResourceDescriptor, ResourceId,
-};
+use super::{PassDescriptor, PassId, ResourceDescriptor, ResourceId};
 use crate::capacity::GraphLimits;
+use crate::plan::{CompileError, ExecutionPlan};
 use alloc::vec::Vec;
 
 /// Startup topology declaration builder backed by the authoritative SSA kernel.
@@ -78,8 +77,8 @@ impl GpuFrameGraphBuilder {
         &self.passes
     }
     /// Compiles through the same SSA kernel used by executable `RenderGraph`.
-    pub fn compile(&self) -> Result<CompiledGpuFrameGraph, CompileError> {
-        CompiledGpuFrameGraph::compile(&self.resources, &self.passes, self.limits)
+    pub fn compile(&self) -> Result<ExecutionPlan, CompileError> {
+        crate::graph::RenderGraph::compile_declarations(&self.resources, &self.passes, self.limits)
     }
     /// Clears declarations, retaining the configured limits.
     pub fn clear(&mut self) {

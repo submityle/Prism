@@ -4,6 +4,7 @@ use prism_material_pcm::{
     Capability as PcmCapability, CapabilitySet as PcmCapabilities, ExtensionManifest,
     ExtensionRegistry, Kind as PcmKind, Namespace, Stability,
 };
+use prism_render_graph::ExecutionPlan;
 
 const PROVIDER: FeatureId = FeatureId(901);
 const RESPONSE: FeatureId = FeatureId(902);
@@ -478,7 +479,7 @@ fn only_graph_extension_kinds_bridge_and_material_lobes_remain_pcm_owned() {
 
 #[test]
 fn manifest_sidecar_catalog_selection_pass_spec_execution_is_one_chain() {
-    use crate::frame_graph::{Barrier, CompiledGpuFrameGraph, ResourceLifetime};
+    use crate::frame_graph::{Barrier, ResourceLifetime};
     struct Sink {
         passes: Vec<(FeatureId, VariantId, PassKey)>,
         barriers: Vec<Barrier>,
@@ -489,7 +490,7 @@ fn manifest_sidecar_catalog_selection_pass_spec_execution_is_one_chain() {
             &mut self,
             resources: &[BoundResource],
             _: &[FrameRenderItem],
-            plan: &CompiledGpuFrameGraph,
+            plan: &ExecutionPlan,
         ) -> Result<(), ()> {
             assert_eq!(resources.len(), 2);
             assert_eq!(plan.declared_pass_count, 2);
@@ -505,7 +506,7 @@ fn manifest_sidecar_catalog_selection_pass_spec_execution_is_one_chain() {
             assert!(pass.accesses().iter().all(|access| access.ssa_version == 1));
             Ok(())
         }
-        fn finish(&mut self, _: &CompiledGpuFrameGraph) -> Result<(), ()> {
+        fn finish(&mut self, _: &ExecutionPlan) -> Result<(), ()> {
             Ok(())
         }
     }
@@ -533,7 +534,7 @@ fn manifest_sidecar_catalog_selection_pass_spec_execution_is_one_chain() {
         .unwrap()
         .compile(&selection, 10, &[], &[], GraphLimits::default())
         .unwrap();
-    let expected_barriers = graph.plan().barriers.clone();
+    let expected_barriers = graph.barriers().to_vec();
     assert_eq!(expected_barriers.len(), 1);
     let mut sink = Sink {
         passes: Vec::new(),

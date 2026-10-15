@@ -1,5 +1,6 @@
 use super::*;
 use crate::{frame_graph::*, gpu_scene::SceneHandle, motion::MotionSource};
+use prism_render_graph::{ExecutionPlan, LogicalResource};
 
 const ROOT: FeatureId = FeatureId(700);
 const A: ResourceKey = ResourceKey::of(ROOT, 0);
@@ -149,11 +150,11 @@ fn derived_order_and_every_barrier_match_authoritative_resource_graph() {
         .unwrap();
     for (name, queue, accesses) in [
         (
-            "write-a",
-            QueueClass::Transfer,
+            "read-b",
+            QueueClass::Graphics,
             vec![ResourceAccess {
-                resource: a,
-                kind: AccessKind::TransferWrite,
+                resource: b,
+                kind: AccessKind::IndirectRead,
             }],
         ),
         (
@@ -171,11 +172,11 @@ fn derived_order_and_every_barrier_match_authoritative_resource_graph() {
             ],
         ),
         (
-            "read-b",
-            QueueClass::Graphics,
+            "write-a",
+            QueueClass::Transfer,
             vec![ResourceAccess {
-                resource: b,
-                kind: AccessKind::IndirectRead,
+                resource: a,
+                kind: AccessKind::TransferWrite,
             }],
         ),
     ] {
@@ -195,50 +196,42 @@ fn derived_order_and_every_barrier_match_authoritative_resource_graph() {
             .iter()
             .map(PassSpec::key)
             .collect::<Vec<_>>(),
-        vec![PassKey(1), PassKey(2), PassKey(3)]
+        vec![PassKey(3), PassKey(2), PassKey(1)]
     );
-    assert_eq!(compiled.plan().execution_order, expected.execution_order);
-    assert_eq!(compiled.plan().barriers, expected.barriers);
-    assert_eq!(
-        compiled.plan().barriers,
-        vec![
-            Barrier {
-                resource: a,
-                source: PassId(0),
-                destination: PassId(1),
-                before: AccessKind::TransferWrite,
-                after: AccessKind::StorageRead,
-                queue_transfer: true
-            },
-            Barrier {
-                resource: b,
-                source: PassId(1),
-                destination: PassId(2),
-                before: AccessKind::StorageWrite,
-                after: AccessKind::IndirectRead,
-                queue_transfer: true
-            },
-        ]
-    );
-    assert_eq!(
-        compiled.plan().resource_versions,
-        expected.resource_versions
-    );
+    assert_eq!(compiled.plan().order, expected.order);
+    assert_eq!(compiled.barriers(), vec![
+        Barrier {
+            resource: b,
+            source: PassId(0),
+            destination: PassId(1),
+            before: AccessKind::IndirectRead,
+            after: AccessKind::StorageWrite,
+            queue_transfer: true
+        },
+        Barrier {
+            resource: a,
+            source: PassId(1),
+            destination: PassId(2),
+            before: AccessKind::StorageRead,
+            after: AccessKind::TransferWrite,
+            queue_transfer: true
+        },
+    ]);
     assert_eq!(compiled.plan().queue_batches, expected.queue_batches);
     assert_eq!(
-        compiled.plan().transient_offsets,
-        expected.transient_offsets
+        compiled.plan().alias.buffer_slots,
+        expected.alias.buffer_slots
     );
-    assert_eq!(compiled.plan().transient_bytes, expected.transient_bytes);
+    assert_eq!(compiled.plan().alias.heap_size, expected.alias.heap_size);
     assert_eq!(compiled.resource_id(A, 10), Some(a));
     assert_eq!(compiled.resource_id(A, 9), None);
     assert_eq!(
         compiled.versions()[0],
         FrameResourceVersion {
-            key: A,
+            key: B,
             frame: 10,
-            resource: a,
-            writer: PassKey(1),
+            resource: b,
+            writer: PassKey(2),
             ssa_version: 1,
             content_version: 1
         }
@@ -359,12 +352,13 @@ fn spray_foam_history_is_a_real_imported_frame_binding_not_a_same_frame_edge() {
         compiled.passes()[0].descriptor().accesses[0].resource,
         history
     );
-    assert_eq!(compiled.plan().barriers.len(), 1);
-    assert!(compiled
-        .plan()
-        .barriers
-        .iter()
-        .all(|barrier| barrier.resource != history && barrier.resource != current));
+    assert!(compiled.plan().logical_barriers.iter().all(|barrier| {
+        !matches!(
+            barrier.resource,
+            LogicalResource::Buffer(index)
+                if index.get() == history.0 || index.get() == current.0
+        )
+    }));
     assert_eq!(
         compiled
             .versions()
@@ -374,8 +368,8 @@ fn spray_foam_history_is_a_real_imported_frame_binding_not_a_same_frame_edge() {
             .content_version,
         6
     );
-    assert!(compiled.plan().transient_offsets[history.0 as usize].is_none());
-    assert!(compiled.plan().transient_offsets[current.0 as usize].is_none());
+    assert!(compiled.plan().alias.buffer_slots[history.0 as usize].is_none());
+    assert!(compiled.plan().alias.buffer_slots[current.0 as usize].is_none());
 }
 
 #[test]
@@ -604,7 +598,7 @@ fn read_requires_producer_or_external_initial_storage() {
         )
         .unwrap();
     assert!(compiled.versions().is_empty());
-    assert!(compiled.plan().barriers.is_empty());
+    assert_eq!(compiled.plan().barrier_count(), 0);
 }
 
 #[test]
@@ -870,7 +864,7 @@ fn execution_uses_bound_passes_and_exact_barriers_and_stops_on_sink_errors() {
             &mut self,
             resources: &[BoundResource],
             items: &[FrameRenderItem],
-            plan: &CompiledGpuFrameGraph,
+            plan: &ExecutionPlan,
         ) -> Result<(), Self::Error> {
             assert_eq!(resources.len(), 2);
             assert!(items.is_empty());
@@ -894,17 +888,17 @@ fn execution_uses_bound_passes_and_exact_barriers_and_stops_on_sink_errors() {
                 Ok(())
             }
         }
-        fn finish(&mut self, _: &CompiledGpuFrameGraph) -> Result<(), Self::Error> {
+        fn finish(&mut self, _: &ExecutionPlan) -> Result<(), Self::Error> {
             self.events.push(999);
             Ok(())
         }
     }
     let graph = compile_fixture(GraphLimits::default()).unwrap();
-    let expected = graph.plan().barriers.clone();
+    let expected = graph.barriers().to_vec();
     let mut sink = Sink::default();
     graph.execute(&mut sink).unwrap();
     assert_eq!(sink.barriers, expected);
-    assert_eq!(sink.events, vec![0, 1, 101, 2, 102, 3, 999]);
+    assert_eq!(sink.events, vec![0, 3, 101, 2, 102, 1, 999]);
     let mut sink = Sink {
         fail: true,
         ..Sink::default()
@@ -915,7 +909,7 @@ fn execution_uses_bound_passes_and_exact_barriers_and_stops_on_sink_errors() {
             .execute(&mut sink),
         Err("recording failed")
     );
-    assert_eq!(sink.events, vec![0, 1]);
+    assert_eq!(sink.events, vec![0, 3]);
 }
 
 #[test]
@@ -943,9 +937,9 @@ fn compiling_frames_does_not_mutate_frozen_selection_or_roots() {
 fn bound_accesses_project_authority_outputs_and_history_content_versions() {
     let graph = compile_fixture(GraphLimits::default()).unwrap();
     for (pass, expected) in graph.passes().iter().zip([
-        vec![(A, PassKey(1))],
-        vec![(A, PassKey(1)), (B, PassKey(2))],
         vec![(B, PassKey(2))],
+        vec![(A, PassKey(1)), (B, PassKey(2))],
+        vec![(A, PassKey(1))],
     ]) {
         assert_eq!(pass.accesses().len(), pass.descriptor().accesses.len());
         for (access, (key, producer)) in pass.accesses().iter().zip(expected) {
@@ -1030,7 +1024,7 @@ fn multiple_history_lags_and_read_only_external_versions_are_bound_and_checked()
         vec![(8, 3, 0, None), (10, 7, 0, None), (9, 5, 0, None)]
     );
     assert!(graph.versions().is_empty());
-    assert!(graph.plan().barriers.is_empty());
+    assert_eq!(graph.plan().barrier_count(), 0);
     assert_eq!(
         resources
             .compile(
@@ -1462,14 +1456,10 @@ fn foreign_selection_is_rejected_and_template_binding_order_does_not_change_plan
         .compile(&select(&catalog), 10, &[], &[], GraphLimits::default())
         .unwrap();
     assert_eq!(
-        expected.plan().execution_order,
-        reordered.plan().execution_order
+        expected.plan().order,
+        reordered.plan().order
     );
-    assert_eq!(expected.plan().barriers, reordered.plan().barriers);
-    assert_eq!(
-        expected.plan().resource_versions,
-        reordered.plan().resource_versions
-    );
+    assert_eq!(expected.barriers(), reordered.barriers());
     assert_eq!(expected.versions(), reordered.versions());
     assert_eq!(
         expected
@@ -1562,7 +1552,7 @@ fn validated_frame_items_reach_the_execution_sink_without_a_second_extraction() 
             &mut self,
             _: &[BoundResource],
             items: &[FrameRenderItem],
-            _: &CompiledGpuFrameGraph,
+            _: &ExecutionPlan,
         ) -> Result<(), ()> {
             self.items.extend_from_slice(items);
             Ok(())
@@ -1573,7 +1563,7 @@ fn validated_frame_items_reach_the_execution_sink_without_a_second_extraction() 
         fn pass(&mut self, _: &PassSpec) -> Result<(), ()> {
             Ok(())
         }
-        fn finish(&mut self, _: &CompiledGpuFrameGraph) -> Result<(), ()> {
+        fn finish(&mut self, _: &ExecutionPlan) -> Result<(), ()> {
             Ok(())
         }
     }

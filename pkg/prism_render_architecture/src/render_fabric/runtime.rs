@@ -1,13 +1,13 @@
 //! Typed lowering to the existing graph runtime, not another executor.
 use super::*;
-use crate::frame_graph::{Barrier, ResourceId};
+use crate::frame_graph::ResourceId;
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::fmt;
 use prism_render_driver::{Extent3d, RenderDevice, RenderQueue};
 use prism_render_graph::{
     full_range, BufferDesc, BufferHandle, BufferUse, CompileError, ExecuteContext, ExecutionPlan,
-    ImportedBuffer, ImportedTexture, LogicalResource, PassBuilder, PassFlags, RenderGraph,
-    SizeClass, TextureDesc, TextureHandle, TextureUse,
+    ImportedBuffer, ImportedTexture, PassBuilder, PassFlags, RenderGraph, SizeClass, TextureDesc,
+    TextureHandle, TextureUse,
 };
 
 /// Entry/exit state and default view supplied by the external resource owner.
@@ -78,12 +78,6 @@ impl RuntimeResourceHandle {
         match self {
             Self::Buffer { handle, .. } => handle.version(),
             Self::Texture(handle) => handle.version(),
-        }
-    }
-    fn namespace_index(self) -> (u8, u32) {
-        match self {
-            Self::Texture(handle) => (0, handle.resource().get()),
-            Self::Buffer { handle, .. } => (1, handle.resource().get()),
         }
     }
 }
@@ -345,7 +339,7 @@ impl CompiledFeatureGraph {
             }
         }
         let plan = graph.compile()?;
-        verify_plan(&self, &plan, &handles, &lowered)?;
+        verify_plan(&self, &plan)?;
         Ok(RuntimeFeatureGraph {
             graph,
             plan,
@@ -521,77 +515,12 @@ fn lower_access(
 fn verify_plan(
     declaration: &CompiledFeatureGraph,
     plan: &ExecutionPlan,
-    handles: &[Option<RuntimeResourceHandle>],
-    lowered: &[Vec<RuntimeResourceUse>],
 ) -> Result<(), FabricRuntimeError> {
-    if plan.order
-        != declaration
-            .plan()
-            .execution_order
-            .iter()
-            .map(|id| id.0 as usize)
-            .collect::<Vec<_>>()
+    if plan.order != declaration.plan().order
         || plan.alive.iter().any(|alive| !alive)
         || plan.queue_batches != declaration.plan().queue_batches
+        || plan.logical_barriers != declaration.plan().logical_barriers
     {
-        return Err(FabricRuntimeError::PlanMismatch);
-    }
-    let resources: BTreeMap<_, _> = handles
-        .iter()
-        .enumerate()
-        .filter_map(|(id, handle)| {
-            handle.map(|handle| (handle.namespace_index(), ResourceId(id as u32)))
-        })
-        .collect();
-    let ordinals: Vec<Vec<_>> = lowered
-        .iter()
-        .map(|accesses| {
-            accesses
-                .iter()
-                .filter(|a| matches!(a.handle, RuntimeResourceHandle::Texture(_)))
-                .chain(
-                    accesses
-                        .iter()
-                        .filter(|a| matches!(a.handle, RuntimeResourceHandle::Buffer { .. })),
-                )
-                .collect()
-        })
-        .collect();
-    let mut projected = Vec::new();
-    for barrier in &plan.logical_barriers {
-        let namespace_index = match barrier.resource {
-            LogicalResource::Texture(id) => (0, id.get()),
-            LogicalResource::Buffer(id) => (1, id.get()),
-        };
-        projected.push(Barrier {
-            resource: resources[&namespace_index],
-            source: crate::frame_graph::PassId(barrier.source as u32),
-            destination: crate::frame_graph::PassId(barrier.destination as u32),
-            before: ordinals[barrier.source][barrier.before]
-                .bound
-                .declaration
-                .access,
-            after: ordinals[barrier.destination][barrier.after]
-                .bound
-                .declaration
-                .access,
-            queue_transfer: barrier.queue_transfer,
-        });
-    }
-    let key = |barrier: &Barrier| {
-        (
-            barrier.resource.0,
-            barrier.source.0,
-            barrier.destination.0,
-            barrier.before as u8,
-            barrier.after as u8,
-            barrier.queue_transfer,
-        )
-    };
-    projected.sort_by_key(key);
-    let mut expected = declaration.plan().barriers.clone();
-    expected.sort_by_key(key);
-    if projected != expected {
         return Err(FabricRuntimeError::PlanMismatch);
     }
     Ok(())

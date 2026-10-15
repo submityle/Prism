@@ -190,6 +190,8 @@ pub struct RasterAttachments {
 /// The compiled plan for one frame.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct ExecutionPlan {
+    /// Number of passes admitted before culling.
+    pub declared_pass_count: usize,
     /// Surviving pass indices (into the graph's pass list) in execution order.
     pub order: Vec<usize>,
     /// Per-original-pass liveness, indexed by pass index.

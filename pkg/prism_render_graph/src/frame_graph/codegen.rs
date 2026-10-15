@@ -412,22 +412,14 @@ mod tests {
         assert_eq!(generated[0].id, PassId(0));
         assert_eq!(generated[1].id, PassId(1));
         let compiled = graph.compile().unwrap();
-        assert_eq!(compiled.execution_order, [PassId(1), PassId(0)]);
-        assert_eq!(compiled.resource_versions.len(), 1);
-        assert_eq!(compiled.resource_versions[0].writer, PassId(1));
-        assert_eq!(compiled.resource_versions[0].version, 1);
-        assert_eq!(compiled.barriers.len(), 1);
-        let barrier = compiled.barriers[0];
-        assert_eq!(
-            (barrier.source, barrier.destination),
-            (PassId(1), PassId(0))
-        );
-        assert_eq!(
-            (barrier.before, barrier.after),
-            (AccessKind::StorageWrite, AccessKind::StorageRead)
-        );
+        assert_eq!(compiled.order, [0, 1]);
+        assert_eq!(compiled.declared_pass_count, 2);
+        assert_eq!(compiled.logical_barriers.len(), 1);
+        let barrier = compiled.logical_barriers[0];
+        assert_eq!((barrier.source, barrier.destination), (0, 1));
         assert!(barrier.queue_transfer);
         assert_eq!(compiled.queue_batches[1].waits_for, [0]);
+        assert_eq!(compiled.alias.heap_size, 0);
     }
 
     #[test]
@@ -491,7 +483,7 @@ mod tests {
             assert_eq!(graph.resources(), resources);
             assert_eq!(graph.passes().len(), 1);
             assert_eq!(graph.passes()[0].name, "existing");
-            assert_eq!(graph.compile().unwrap().execution_order, [PassId(0)]);
+            assert_eq!(graph.compile().unwrap().order, [0]);
 
             // Neither failed pass/resource admission nor a forward reference
             // may consume IDs or discard dependencies on existing passes.
@@ -503,10 +495,7 @@ mod tests {
             assert_eq!(generated[0].id, PassId(1));
             assert_eq!(graph.passes()[1].depends_on, [PassId(0)]);
             assert_eq!(graph.resources(), resources);
-            assert_eq!(
-                graph.compile().unwrap().execution_order,
-                [PassId(0), PassId(1)]
-            );
+            assert_eq!(graph.compile().unwrap().order, [0, 1]);
         }
     }
 }

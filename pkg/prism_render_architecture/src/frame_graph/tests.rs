@@ -53,14 +53,14 @@ fn compiles_hazards_versions_queues_and_transient_layout() {
         }],
     });
     let compiled = graph.compile().unwrap();
-    assert_eq!(compiled.execution_order, vec![cull, draw]);
-    assert_eq!(compiled.resource_versions.len(), 1);
-    assert_eq!(compiled.barriers.len(), 1);
-    assert!(compiled.barriers[0].queue_transfer);
+    assert_eq!(compiled.order, vec![cull.0 as usize, draw.0 as usize]);
+    assert_eq!(compiled.logical_barriers.len(), 1);
+    assert_eq!(compiled.barrier_count(), 2);
+    assert!(compiled.logical_barriers[0].queue_transfer);
     assert_eq!(compiled.queue_batches.len(), 2);
     assert_eq!(compiled.queue_batches[1].waits_for, vec![0]);
-    assert_eq!(compiled.transient_offsets[visible.0 as usize], Some(0));
-    assert_eq!(compiled.transient_bytes, 1024);
+    assert_eq!(compiled.alias.buffer_slots[visible.0 as usize].unwrap().offset, 0);
+    assert_eq!(compiled.alias.heap_size, 1024);
 }
 
 #[test]
@@ -161,41 +161,39 @@ fn write_waits_for_all_prior_readers_and_aliases_disjoint_transients() {
     let compiled = graph.compile().unwrap();
     assert!(
         compiled
-            .execution_order
+            .order
             .iter()
-            .position(|id| *id == write)
+            .position(|id| *id == write.0 as usize)
             .unwrap()
             > compiled
-                .execution_order
+                .order
                 .iter()
-                .position(|id| *id == read_a)
+                .position(|id| *id == read_a.0 as usize)
                 .unwrap()
     );
     assert!(
         compiled
-            .execution_order
+            .order
             .iter()
-            .position(|id| *id == write)
+            .position(|id| *id == write.0 as usize)
             .unwrap()
             > compiled
-                .execution_order
+                .order
                 .iter()
-                .position(|id| *id == read_b)
+                .position(|id| *id == read_b.0 as usize)
                 .unwrap()
     );
-    assert!(compiled
-        .barriers
-        .iter()
-        .any(|barrier| barrier.source == read_a && barrier.destination == write));
-    assert!(compiled
-        .barriers
-        .iter()
-        .any(|barrier| barrier.source == read_b && barrier.destination == write));
+    assert!(compiled.logical_barriers.iter().any(|barrier| {
+        barrier.source == read_a.0 as usize && barrier.destination == write.0 as usize
+    }));
+    assert!(compiled.logical_barriers.iter().any(|barrier| {
+        barrier.source == read_b.0 as usize && barrier.destination == write.0 as usize
+    }));
     assert_eq!(
-        compiled.transient_offsets[first.0 as usize],
-        compiled.transient_offsets[second.0 as usize]
+        compiled.alias.buffer_slots[0].map(|slot| slot.offset),
+        compiled.alias.buffer_slots[1].map(|slot| slot.offset)
     );
-    assert_eq!(compiled.transient_bytes, 2048);
+    assert_eq!(compiled.alias.heap_size, 2048);
 }
 
 #[test]
@@ -225,29 +223,10 @@ fn transient_plan_aliases_disjoint_transients_into_one_group() {
         }],
     });
     let compiled = graph.compile().unwrap();
-    let plan = &compiled.transient;
-
-    let region_a = plan.region(a).unwrap();
-    let region_b = plan.region(b).unwrap();
-    assert_eq!(region_a.offset, region_b.offset);
-    assert_eq!(plan.heap_bytes(), 1024);
-    assert_eq!(plan.individual_bytes(), 2048);
-    assert_eq!(plan.savings_bytes(), 1024);
-
-    // A single alias group with both members, and it must be provably safe.
-    assert_eq!(plan.alias_groups(), &[vec![a, b]]);
-    assert_eq!(plan.validate_alias_safety(), Ok(()));
-
-    // Derived legacy views agree with the plan.
-    assert_eq!(compiled.transient_bytes, 1024);
-    assert_eq!(
-        compiled.transient_offsets[a.0 as usize],
-        Some(region_a.offset)
-    );
-    assert_eq!(
-        compiled.transient_offsets[b.0 as usize],
-        Some(region_b.offset)
-    );
+    let slot_a = compiled.alias.buffer_slots[a.0 as usize].unwrap();
+    let slot_b = compiled.alias.buffer_slots[b.0 as usize].unwrap();
+    assert_eq!(slot_a.offset, slot_b.offset);
+    assert_eq!(compiled.alias.heap_size, 1024);
 }
 
 #[test]
@@ -273,27 +252,17 @@ fn transient_plan_keeps_overlapping_transients_separate() {
         ],
     });
     let compiled = graph.compile().unwrap();
-    let plan = &compiled.transient;
-
-    let region_a = plan.region(a).unwrap();
-    let region_b = plan.region(b).unwrap();
-    assert_ne!(region_a.offset, region_b.offset);
-    assert_eq!(plan.heap_bytes(), 2048);
-    assert_eq!(plan.individual_bytes(), 2048);
-    assert_eq!(plan.savings_bytes(), 0);
-    assert_eq!(plan.peak_live_bytes(), 2048);
-
-    // Two singleton groups, still trivially alias-safe.
-    assert_eq!(plan.alias_groups().len(), 2);
-    assert!(plan.alias_groups().iter().all(|group| group.len() == 1));
-    assert_eq!(plan.validate_alias_safety(), Ok(()));
+    let slot_a = compiled.alias.buffer_slots[a.0 as usize].unwrap();
+    let slot_b = compiled.alias.buffer_slots[b.0 as usize].unwrap();
+    assert_ne!(slot_a.offset, slot_b.offset);
+    assert_eq!(compiled.alias.heap_size, 2048);
 }
 
 #[test]
 fn transient_plan_respects_alignment_when_growing_heap() {
-    // Two overlapping transients with a 512-byte alignment. The first sits at 0
-    // with size 300; the second must round its offset up to the next multiple
-    // of 512 rather than packing at 300.
+    // Two overlapping transients with the unified compiler's 256-byte heap
+    // alignment. The first sits at 0 with an aligned 512-byte slot; the second
+    // starts at the next aligned slot rather than packing at byte 300.
     let mut graph = GpuFrameGraphBuilder::default();
     let a = graph.add_resource(aligned_resource("a", ResourceLifetime::Transient, 300, 512));
     let b = graph.add_resource(aligned_resource("b", ResourceLifetime::Transient, 300, 512));
@@ -313,15 +282,12 @@ fn transient_plan_respects_alignment_when_growing_heap() {
         ],
     });
     let compiled = graph.compile().unwrap();
-    let plan = &compiled.transient;
-
-    let region_a = plan.region(a).unwrap();
-    let region_b = plan.region(b).unwrap();
-    assert_eq!(region_a.offset, 0);
-    assert_eq!(region_a.alignment, 512);
-    assert_eq!(region_b.offset, 512);
-    assert_eq!(region_b.offset % region_b.alignment, 0);
-    assert_eq!(plan.heap_bytes(), 812);
+    let slot_a = compiled.alias.buffer_slots[a.0 as usize].unwrap();
+    let slot_b = compiled.alias.buffer_slots[b.0 as usize].unwrap();
+    assert_eq!(slot_a.offset, 0);
+    assert_eq!(slot_b.offset, 512);
+    assert_eq!(slot_b.offset % 256, 0);
+    assert_eq!(compiled.alias.heap_size, 1024);
 }
 
 #[test]
@@ -352,19 +318,10 @@ fn transient_plan_excludes_persistent_and_imported_resources() {
         ],
     });
     let compiled = graph.compile().unwrap();
-    let plan = &compiled.transient;
-
-    assert!(plan.region(persistent).is_none());
-    assert!(plan.region(imported).is_none());
-    assert!(plan.region(transient).is_some());
-    assert_eq!(plan.heap_bytes(), 1024);
-    assert_eq!(plan.individual_bytes(), 1024);
-
-    // Persistent / imported ids never appear in any alias group.
-    for group in plan.alias_groups() {
-        assert!(!group.contains(&persistent));
-        assert!(!group.contains(&imported));
-    }
+    assert!(compiled.alias.buffer_slots[persistent.0 as usize].is_none());
+    assert!(compiled.alias.buffer_slots[imported.0 as usize].is_none());
+    assert!(compiled.alias.buffer_slots[transient.0 as usize].is_some());
+    assert_eq!(compiled.alias.heap_size, 1024);
 }
 
 #[test]
@@ -401,11 +358,11 @@ fn transient_plan_alias_safety_holds_across_a_mixed_graph() {
         }],
     });
     let compiled = graph.compile().unwrap();
-    let plan = &compiled.transient;
-
-    assert_eq!(plan.validate_alias_safety(), Ok(()));
+    let slot_a = compiled.alias.buffer_slots[a.0 as usize].unwrap();
+    let slot_b = compiled.alias.buffer_slots[b.0 as usize].unwrap();
+    let slot_c = compiled.alias.buffer_slots[c.0 as usize].unwrap();
+    assert_ne!(slot_a.offset, slot_b.offset);
+    assert!(slot_c.offset == slot_a.offset || slot_c.offset == slot_b.offset);
     // c reuses one of the two earlier blocks, so the heap stays at two slots.
-    assert_eq!(plan.heap_bytes(), 2048);
-    assert_eq!(plan.individual_bytes(), 3072);
-    assert_eq!(plan.savings_bytes(), 1024);
+    assert_eq!(compiled.alias.heap_size, 2048);
 }

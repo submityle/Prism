@@ -55,7 +55,10 @@ pub(crate) fn schedule(
     accesses: &[Vec<kernel::Access>],
 ) -> Result<kernel::Solved, CompileError> {
     let names = passes.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
-    let explicit = vec![Vec::new(); passes.len()];
+    let explicit: Vec<Vec<usize>> = passes
+        .iter()
+        .map(|pass| pass.dependencies.clone())
+        .collect();
     kernel::solve(accesses, alive, &explicit, &names)
 }
 

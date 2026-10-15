@@ -89,6 +89,16 @@ pub(crate) fn compile(
             }
         }
     }
+    for (pass_index, pass) in passes.iter().enumerate() {
+        for &dependency in &pass.dependencies {
+            if dependency >= passes.len() || dependency == pass_index {
+                return Err(CompileError::InvalidDependency {
+                    pass: crate::frame_graph::PassId(pass_index as u32),
+                    dependency: crate::frame_graph::PassId(dependency as u32),
+                });
+            }
+        }
+    }
     let alive = cull::cull(passes, textures, buffers);
     let accesses = schedule::normalize(passes, textures.len());
     let solved = schedule::schedule(passes, &alive, &accesses)?;
@@ -154,6 +164,7 @@ pub(crate) fn compile(
     let attachments = derive_attachments(passes, textures, &order, &consumed);
 
     Ok(ExecutionPlan {
+        declared_pass_count: passes.len(),
         order,
         alive,
         logical_barriers,

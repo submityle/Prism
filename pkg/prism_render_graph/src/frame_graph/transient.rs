@@ -14,7 +14,8 @@
 //! so this stays pure logic. A backend that gains heap aliasing consumes
 //! [`TransientAllocation::alias_groups`] to bind several resources to the same
 //! memory, relying on [`TransientAllocation::validate_alias_safety`] to prove
-//! the reuse is lifetime-safe.
+//! the reuse is lifetime-safe. Executable `RenderGraph` plans use
+//! [`crate::AliasPlan`] as their authoritative alias product.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -40,10 +41,9 @@ pub struct TransientRegion {
 
 /// A validated, aliased allocation plan for the frame graph's transient heap.
 ///
-/// Built by the authoritative compiler from the resource table and shared
-/// lifetime intervals. Every accessor is derived from the
-/// same first-fit assignment the compiler already relied on, so the plan can
-/// never disagree with `transient_offsets` / `transient_bytes`.
+/// Built by the declaration adapter from the resource table and shared
+/// lifetime intervals. Executable `RenderGraph` plans expose the authoritative
+/// [`crate::AliasPlan`] instead of duplicating this projection.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TransientAllocation {
     /// Total heap size in bytes (the peak the first-fit assignment reached).
@@ -162,8 +162,8 @@ impl TransientAllocation {
         &self.alias_groups
     }
 
-    /// Raw offsets indexed by `ResourceId`, matching the legacy
-    /// `transient_offsets` product the topology check consumed.
+    /// Raw offsets indexed by `ResourceId` for declaration-front-end
+    /// diagnostics.
     pub fn offsets(&self) -> Vec<Option<u64>> {
         self.regions
             .iter()

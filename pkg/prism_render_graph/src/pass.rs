@@ -221,6 +221,12 @@ pub struct PassNode {
     pub kind: PassKind,
     /// Compiler-steering flags.
     pub flags: PassFlags,
+    /// Explicit prerequisites supplied by a declaration frontend.
+    ///
+    /// Executable passes normally leave this empty and rely on SSA resource
+    /// dependencies. Startup topology declarations may use it for ordering
+    /// constraints that do not have a resource edge of their own.
+    pub(crate) dependencies: Vec<usize>,
     /// Texture accesses in declaration order.
     pub texture_accesses: Vec<TextureAccessRecord>,
     /// Buffer accesses in declaration order.

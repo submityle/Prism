@@ -58,11 +58,7 @@ pub(super) fn order(
             .map_err(map_compile_error)?;
     }
     match graph.compile() {
-        Ok(compiled) => Ok(compiled
-            .execution_order
-            .iter()
-            .map(|pass| nodes[pass.0 as usize])
-            .collect()),
+        Ok(compiled) => Ok(compiled.order.iter().map(|&pass| nodes[pass]).collect()),
         Err(error) => Err(map_compile_error(error)),
     }
 }

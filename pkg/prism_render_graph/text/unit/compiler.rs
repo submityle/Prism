@@ -203,24 +203,25 @@ fn declaration_versions_follow_dependencies_before_deriving_hazards() {
         ));
     }
     let compiled = graph.compile().unwrap();
-    assert_eq!(compiled.execution_order, [PassId(2), PassId(1), PassId(0)]);
+    assert_eq!(compiled.order, [0, 1, 2]);
+    assert_eq!(compiled.declared_pass_count, 3);
     assert_eq!(
         compiled
-            .resource_versions
+            .logical_barriers
             .iter()
-            .map(|v| (v.writer, v.version))
+            .map(|barrier| (barrier.source, barrier.destination))
             .collect::<Vec<_>>(),
-        [(PassId(2), 1), (PassId(1), 2)]
+        [(0, 1), (1, 2)]
     );
     assert!(compiled
-        .barriers
+        .logical_barriers
         .iter()
-        .any(|b| b.source == PassId(2) && b.destination == PassId(1)));
+        .any(|b| b.source == 0 && b.destination == 1));
     assert!(compiled
-        .barriers
+        .logical_barriers
         .iter()
-        .any(|b| b.source == PassId(1) && b.destination == PassId(0)));
-    assert_eq!(compiled.transient_bytes, 256);
+        .any(|b| b.source == 1 && b.destination == 2));
+    assert_eq!(compiled.alias.heap_size, 256);
 }
 
 /// A dependency can deliberately read the imported version before a write;
@@ -252,36 +253,20 @@ fn declaration_forward_war_and_unconstrained_ties_are_stable() {
             vec![],
         ));
         let compiled = graph.compile().unwrap();
-        let (source, destination, before, after) = if forward {
-            (
-                PassId(1),
-                PassId(0),
-                AccessKind::StorageRead,
-                AccessKind::StorageWrite,
-            )
-        } else {
-            (
-                PassId(0),
-                PassId(1),
-                AccessKind::StorageWrite,
-                AccessKind::StorageRead,
-            )
-        };
-        assert_eq!(compiled.execution_order, [source, destination]);
-        assert_eq!(compiled.barriers.len(), 1);
-        let barrier = compiled.barriers[0];
+        assert_eq!(compiled.order, [0, 1]);
+        assert_eq!(compiled.logical_barriers.len(), 1);
+        let barrier = compiled.logical_barriers[0];
         assert_eq!(
             (
                 barrier.source,
                 barrier.destination,
-                barrier.before,
-                barrier.after
+                barrier.queue_transfer,
             ),
-            (source, destination, before, after)
+            (0, 1, true)
         );
         assert!(barrier.queue_transfer);
         assert_eq!(compiled.queue_batches[1].waits_for, [0]);
-        assert_eq!(compiled.transient_bytes, 0);
+        assert_eq!(compiled.alias.heap_size, 0);
     }
 }
 
@@ -327,28 +312,29 @@ fn real_frontends_project_identical_kernel_products() {
     let decl = declaration.compile().unwrap();
     assert_eq!(
         exec.order,
-        decl.execution_order
+        decl.order
             .iter()
-            .map(|p| p.0 as usize)
+            .copied()
             .collect::<Vec<_>>()
     );
     assert_eq!(exec.queue_batches, decl.queue_batches);
-    assert_eq!(exec.alias.heap_size, decl.transient_bytes);
+    assert_eq!(exec.alias.heap_size, decl.alias.heap_size);
     assert_eq!(
         exec.alias.buffer_slots[0].unwrap().offset,
-        decl.transient_offsets[0].unwrap()
+        decl.alias.buffer_slots[0].unwrap().offset
     );
-    assert_eq!(exec.logical_barriers.len(), decl.barriers.len());
+    assert_eq!(exec.logical_barriers.len(), decl.logical_barriers.len());
     let edge = exec.logical_barriers[0];
+    let declaration_edge = decl.logical_barriers[0];
     assert_eq!(
         (edge.source, edge.destination, edge.queue_transfer),
         (
-            decl.barriers[0].source.0 as usize,
-            decl.barriers[0].destination.0 as usize,
-            decl.barriers[0].queue_transfer
+            declaration_edge.source,
+            declaration_edge.destination,
+            declaration_edge.queue_transfer
         )
     );
-    assert_eq!(decl.resource_versions[0].version, 1);
+    assert_eq!(decl.alias.buffer_slots.len(), 1);
 }
 
 /// A reader declared late still observes its SSA version before replacement.

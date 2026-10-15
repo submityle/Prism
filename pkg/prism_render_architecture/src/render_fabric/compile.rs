@@ -9,6 +9,7 @@ use alloc::{
 };
 use core::fmt;
 pub use prism_render_graph::capacity::GraphLimits;
+use prism_render_graph::{ExecutionPlan, LogicalResource};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FabricCompileError {
@@ -204,7 +205,7 @@ impl<'a> ResourceTemplates<'a> {
                     .collect(),
             })?;
         }
-        let admission_order = admission.compile()?.execution_order;
+        let admission_order = admission.compile()?.order;
         let mut supplied = BTreeMap::new();
         for binding in external {
             if !needed.contains(&(binding.key, binding.frame))
@@ -290,7 +291,7 @@ impl<'a> ResourceTemplates<'a> {
         }
         let mut passes = Vec::new();
         for admitted in admission_order {
-            let (feature, variant, template) = declarations[admitted.0 as usize];
+            let (feature, variant, template) = declarations[admitted];
             let accesses = template
                 .accesses
                 .iter()
@@ -324,24 +325,36 @@ impl<'a> ResourceTemplates<'a> {
         }
         let plan = graph.compile()?;
         let mut versions = Vec::new();
-        for version in &plan.resource_versions {
-            let resource = &resources[version.resource.0 as usize];
-            let base = resource.external.map_or(0, |binding| binding.version);
-            let content_version = base
-                .checked_add(version.version)
-                .filter(|v| *v <= limits.versions)
-                .ok_or(CompileError::VersionOverflow {
-                    version: base,
-                    limit: limits.versions,
-                })?;
-            versions.push(FrameResourceVersion {
-                key: resource.key,
-                frame: resource.frame,
-                resource: resource.id,
-                writer: passes[version.writer.0 as usize].key(),
-                ssa_version: version.version,
-                content_version,
-            });
+        let mut write_versions = BTreeMap::<u32, u32>::new();
+        for &pass_index in &plan.order {
+            let pass = &passes[pass_index];
+            for access in &pass.descriptor.accesses {
+                if !access.kind.writes() {
+                    continue;
+                }
+                let resource = &resources[access.resource.0 as usize];
+                let ssa_version = write_versions
+                    .entry(resource.id.0)
+                    .and_modify(|version| *version += 1)
+                    .or_insert(1);
+                let ssa_version = *ssa_version;
+                let base = resource.external.map_or(0, |binding| binding.version);
+                let content_version = base
+                    .checked_add(ssa_version)
+                    .filter(|v| *v <= limits.versions)
+                    .ok_or(CompileError::VersionOverflow {
+                        version: base,
+                        limit: limits.versions,
+                    })?;
+                versions.push(FrameResourceVersion {
+                    key: resource.key,
+                    frame: resource.frame,
+                    resource: resource.id,
+                    writer: passes[pass_index].key(),
+                    ssa_version,
+                    content_version,
+                });
+            }
         }
         // Project versions produced by the authority, not a second SSA solver.
         // A current-frame resource has at most one writer (checked above),
@@ -373,6 +386,7 @@ impl<'a> ResourceTemplates<'a> {
                 })
                 .collect();
         }
+        let barriers = project_barriers(&plan, &passes, resources.len());
         let mut compiled = CompiledFeatureGraph {
             frame,
             limits,
@@ -381,11 +395,12 @@ impl<'a> ResourceTemplates<'a> {
             passes,
             versions,
             plan,
+            barriers,
             barriers_by_destination: Vec::new(),
             items: Vec::new(),
         };
         compiled.barriers_by_destination = vec![Vec::new(); compiled.plan.declared_pass_count];
-        for (index, barrier) in compiled.plan.barriers.iter().enumerate() {
+        for (index, barrier) in compiled.barriers.iter().enumerate() {
             compiled.barriers_by_destination[barrier.destination.0 as usize].push(index);
         }
         for item in items {
@@ -525,7 +540,8 @@ pub struct CompiledFeatureGraph {
     ids: BTreeMap<(ResourceKey, u64), ResourceId>,
     passes: Vec<PassSpec>,
     versions: Vec<FrameResourceVersion>,
-    plan: CompiledGpuFrameGraph,
+    plan: ExecutionPlan,
+    barriers: Vec<Barrier>,
     barriers_by_destination: Vec<Vec<usize>>,
     items: Vec<FrameRenderItem>,
 }
@@ -551,8 +567,11 @@ impl CompiledFeatureGraph {
     pub fn items(&self) -> &[FrameRenderItem] {
         &self.items
     }
-    pub const fn plan(&self) -> &CompiledGpuFrameGraph {
+    pub const fn plan(&self) -> &ExecutionPlan {
         &self.plan
+    }
+    pub fn barriers(&self) -> &[Barrier] {
+        &self.barriers
     }
 
     /// Consume a compiled plan once. The sink realizes resources and records
@@ -560,11 +579,11 @@ impl CompiledFeatureGraph {
     /// No callback accepts a replacement access list or resolves variants.
     pub fn execute<S: FeatureGraphSink>(self, sink: &mut S) -> Result<(), S::Error> {
         sink.begin(&self.resources, &self.items, &self.plan)?;
-        for &id in &self.plan.execution_order {
-            for &barrier in &self.barriers_by_destination[id.0 as usize] {
-                sink.barrier(&self.plan.barriers[barrier])?;
+        for &id in &self.plan.order {
+            for &barrier in &self.barriers_by_destination[id] {
+                sink.barrier(&self.barriers[barrier])?;
             }
-            sink.pass(&self.passes[id.0 as usize])?;
+            sink.pass(&self.passes[id])?;
         }
         sink.finish(&self.plan)
     }
@@ -577,9 +596,86 @@ pub trait FeatureGraphSink {
         &mut self,
         resources: &[BoundResource],
         items: &[FrameRenderItem],
-        plan: &CompiledGpuFrameGraph,
+        plan: &ExecutionPlan,
     ) -> Result<(), Self::Error>;
     fn barrier(&mut self, barrier: &Barrier) -> Result<(), Self::Error>;
     fn pass(&mut self, pass: &PassSpec) -> Result<(), Self::Error>;
-    fn finish(&mut self, plan: &CompiledGpuFrameGraph) -> Result<(), Self::Error>;
+    fn finish(&mut self, plan: &ExecutionPlan) -> Result<(), Self::Error>;
+}
+
+/// Projects the unified graph's logical hazards into the semantic render
+/// fabric barrier type. The graph remains the sole scheduler and hazard
+/// solver; this function only restores the feature graph's resource IDs and
+/// access vocabulary for its sink contract.
+fn project_barriers(
+    plan: &ExecutionPlan,
+    passes: &[PassSpec],
+    resource_count: usize,
+) -> Vec<Barrier> {
+    let mut resource_is_texture = vec![false; resource_count];
+    for access in passes
+        .iter()
+        .flat_map(|pass| pass.descriptor.accesses.iter())
+    {
+        if matches!(
+            access.kind,
+            AccessKind::SampledRead | AccessKind::ColorAttachment | AccessKind::DepthAttachment
+        ) {
+            resource_is_texture[access.resource.0 as usize] = true;
+        }
+    }
+    // `ExecutionPlan` keeps texture and buffer resource indices in separate
+    // namespaces. `PassSpec` still exposes the feature-graph's single
+    // ResourceId namespace, so build dense namespace-local projections before
+    // lowering logical barriers.
+    let texture_resource_ids: Vec<_> = resource_is_texture
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &is_texture)| {
+            is_texture.then_some(ResourceId(index as u32))
+        })
+        .collect();
+    let buffer_resource_ids: Vec<_> = resource_is_texture
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &is_texture)| {
+            (!is_texture).then_some(ResourceId(index as u32))
+        })
+        .collect();
+    let normalized: Vec<Vec<AccessKind>> = passes
+        .iter()
+        .map(|pass| {
+            pass.descriptor
+                .accesses
+                .iter()
+                .filter(|access| resource_is_texture[access.resource.0 as usize])
+                .map(|access| access.kind)
+                .chain(
+                    pass.descriptor
+                        .accesses
+                        .iter()
+                        .filter(|access| !resource_is_texture[access.resource.0 as usize])
+                        .map(|access| access.kind),
+                )
+                .collect()
+        })
+        .collect();
+
+    plan.logical_barriers
+        .iter()
+        .map(|barrier| {
+            let resource = match barrier.resource {
+                LogicalResource::Texture(index) => texture_resource_ids[index.get() as usize],
+                LogicalResource::Buffer(index) => buffer_resource_ids[index.get() as usize],
+            };
+            Barrier {
+                resource,
+                source: PassId(barrier.source as u32),
+                destination: PassId(barrier.destination as u32),
+                before: normalized[barrier.source][barrier.before],
+                after: normalized[barrier.destination][barrier.after],
+                queue_transfer: barrier.queue_transfer,
+            }
+        })
+        .collect()
 }
