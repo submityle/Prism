@@ -53,6 +53,9 @@
 //! - [`mapping`] — a bounded, deterministic bridge from local generational ECS
 //!   handles to stable scene/entity/component identities, with authority and
 //!   revision checks plus a versioned snapshot codec.
+//! - [`replay`] — bounded, versioned logical event recording with deterministic
+//!   encoding and cursor playback; durable storage and byte-stream integrity
+//!   remain backend concerns.
 //!
 //! With the `app` feature, [`plugin`] wires replication into a `prism_app` `App`
 //! as plugins (design §25.2): [`ReplicationPlugin`](plugin::ReplicationPlugin) is

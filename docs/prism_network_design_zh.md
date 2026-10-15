@@ -13,13 +13,13 @@
 > 本文为纯经典网络工程 + 数据结构 + 确定性算法路线（可靠 UDP ARQ、滑动窗口、delta/位域压缩、定点量化、Morton AOI 裁剪、Lamport 定序、CRDT 合并、回滚重放），**不含任何 AI/ML 内容**（反作弊为确定性权威校验与统计阈值，非机器学习），不含任何 Unreal/Unity/Valve/其他引擎源码或衍生代码。
 
 - 版本：实现复核版（2026-10；保留 v0.x 设计历史，不再把本文标成“未进入编码”）。内容源自 `prism_world_system_design_zh.md` v3.1 的网络复制 / 权威 / AOI / 服务器网格分片设计，并已按 Prism 当前 crate 契约拆分；所有状态以下面的“代码路径 / 验证证据 / 未完成能力”三层为准。
-- 落地状态（2026-10-16 复核）：**纯逻辑内核、`prism_app` 接线、真实 UDP、ARQ、可靠通道、多路复用、input/bulk 通道、显式 crypto provider、bounded scene/entity/component mapping core，以及 bounded server-mesh authority-handoff core 已有代码路径**。`pkg/prism_replication` 的 `sequence`、`bitpack`/`quantize`、`delta`、`snapshot`、`aoi`、`prediction`、`frame`、`arq`、`reliable`、`multiplex`、`session`、`mapping` 和 `plugin` 均不再是设计占位；`plugin::ecs` 把固定步输入、World snapshot、回滚重放和对端 hash audit 接到真实 ECS 路径。`security` 的 `RingPskProvider` 通过 `ring` 提供 PSK 握手、随机 session nonce、AES-256-GCM、方向/序号绑定和 anti-replay；`RingPskKeyringProvider` 进一步提供有界 active/previous credential 轮换与显式 retire。部署级身份、密钥托管、信任根和访问控制仍由上层应用负责。server-mesh 当前已具备有界分片登记、租约 fencing、两阶段 authority handoff、幂等事务、容量回压、快照恢复、可替换 transport/failure-detector/persistence provider 以及进程内 node 协调器；真实跨机传输、认证、成员发现、共识、时钟同步和跨机器容灾仍未完成。
+- 落地状态（2026-10-16 复核）：**纯逻辑内核、`prism_app` 接线、真实 UDP、ARQ、可靠通道、多路复用、input/bulk 通道、显式 crypto provider、bounded scene/entity/component mapping core，以及 bounded server-mesh authority-handoff core 已有代码路径**。`pkg/prism_replication` 的 `sequence`、`bitpack`/`quantize`、`delta`、`snapshot`、`aoi`、`prediction`、`frame`、`arq`、`reliable`、`multiplex`、`session`、`mapping`、`net_diagnostics` 和 `plugin` 均不再是设计占位；`replay` 现提供有界、版本化、确定性的逻辑事件记录/编码/游标回放核心，但尚未宣称已接入 durable `EventLogBackend`。`plugin::ecs` 把固定步输入、World snapshot、回滚重放和对端 hash audit 接到真实 ECS 路径。`security` 的 `RingPskProvider` 通过 `ring` 提供 PSK 握手、随机 session nonce、AES-256-GCM、方向/序号绑定和 anti-replay；`RingPskKeyringProvider` 进一步提供有界 active/previous credential 轮换与显式 retire。部署级身份、密钥托管、信任根和访问控制仍由上层应用负责。server-mesh 当前已具备有界分片登记、租约 fencing、两阶段 authority handoff、幂等事务、容量回压、快照恢复、可替换 transport/failure-detector/persistence provider 以及进程内 node 协调器；真实跨机传输、认证、成员发现、共识、时钟同步和跨机器容灾仍未完成。
 - 网络传输补记（2026-10-16）：`prism_replication::udp::UdpTransport` 使用真实非阻塞 `UdpSocket`；`ReliableChannel` 在其上运行 ARQ，`ChannelMux` 提供事件/RPC/bulk 可靠通道、state/input 有界通道和共享预算。当前切片已补齐确定性的自适应拥塞/发送预算：新鲜 RTT/交付率样本平滑更新可靠窗口与不可靠预算，RTO 重传触发乘性减小，可靠流量优先于可丢弃流量；并有丢包与 RTT 变化单测。`UdpMultiPeer` 进一步提供有界的真实 UDP 多 Peer demux：显式 peer admission、每 peer/全局队列上限、未知 peer 丢弃、双 loopback peer 收发回归，并在 `PRISM_REQUIRE_NET=1` 下强制证明真实 socket 路径。`mapping` 现在提供项目无关的稳定 `EntityId`/`AuthorityId`、`SchemaId + version`、manifest `ComponentKey`、ECS generation-preserving local handle bridge、revision 单调更新、容量边界和确定性快照编解码；`scene_world::SceneWorldReplication` 还已用真实 `SceneSpawn` remap 验证 adopt 与 despawn 后 mapping 清理。该多 Peer 代码只闭合了单机 bounded UDP 基础，不等同于生产连接迁移或公网拓扑；仍未完成或未验收的是 QUIC/WebTransport、NAT/ICE/relay、连接迁移/生产 demux、跨进程/跨机器验收，以及真实服务器权威 ECS/AOI 生命周期接线。
 - 可靠通道接线补记（2026-10）：`prism_replication::reliable::ReliableChannel` 把 `arq` 架到 `Transport` datagram 之上（`[kind][seq u64][payload]` 数据报），每帧 `tick` 收包 / 重传 / 回 ACK；`ReplicationPlugin`（`app` feature）默认在调用方传入的 transport 外包一层，客户端 `First` 系统每帧推进它，丢包在后续帧重传而非丢失；客户端 ACK 也经同一通道回到权威端。序号由 `u32` 加宽到 `u64`（与 `DeliveryWindow` 对齐，避免回绕误 ACK），发送窗口有界并回压（`send` 满窗口返回 `None`）。真机验证：两个 `ReliableChannel` 走真实 loopback UDP（`PRISM_REQUIRE_NET=1`）端到端「每包恰好一次、按序、全部 ACK」。同时加固 `frame`：畸形长度前缀使解码器 poison 化（不再无界增长、不再重复误解析），长度越界在编码端与解码端都拒绝，varint 不再是 debug 溢出 panic 面。
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_scene`（override delta / `PersistentId` / spawn·despawn·materialize 契约 / 网络复制对称 §16.4）、`prism_world`（sector 树与空间索引 §5、HLOD 确定性簇 id §10、需求源 §7.1、persist 事务接口 §11）、`prism_ecs`（复制组件的列读写 / `serialize` / `determinism`）、`prism_time`（tick / 固定步长 / 时间线 §4D）、`prism_tasks`（并行序列化 / 分片编排）、`prism_math`（定点量化 / 空间编码）、`prism_reflect`（复制字段路径 / 增量脏标）、`prism_diagnostic`（网络计数器 / trace / 回放）、`prism_anticheat`（反作弊 provider 接缝，§14，另文）；可选外部后端 `uwu_event_mesh`（服务端权威事件流 / 回放 / 编排的可替换 provider 后端，`feature evmesh`，仅 `std`/`server`，§5.1 / §13 / §18）
 - 层级定位： 横切复制层 L6.5；下接 `prism_scene` / persist / `prism_world` / `prism_ecs` / `prism_time`，向上为 `prism_gameplay` 提供 RPC / 复制组件 / 权威事件；与 `prism_world` 以「接缝」解耦（world §12），不侵入其 stream/residency 热路径
-- 明确约束： 核心 `no_std + alloc`（仅定序 / delta / CRDT 纯逻辑）；`std` / `transport_udp` / `transport_quic` / `server` / `client` / `listen_server` / `prediction` / `rollback` / `lag_comp` / `server_mesh` / `replay` / `crypto` / `anticheat` 为 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**；吞吐 / 延迟 / 带宽 / 并发连接数均为 design target（本机无多端实测环境，如实标注），可验证部分限于定序 / CRDT 合并 / delta 编解码 / 回滚重放的 CPU 纯函数单测
+- 明确约束：核心 `no_std + alloc`（仅定序 / delta / CRDT 纯逻辑）；`std` / `transport_udp` / `transport_quic` / `server` / `client` / `listen_server` / `prediction` / `rollback` / `lag_comp` / `server_mesh` / `crypto` / `anticheat` 为 feature，`replay` 当前是 `prism_replication` 核心模块而非独立 Cargo feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**；吞吐 / 延迟 / 带宽 / 并发连接数均为 design target（本机无多端实测环境，如实标注），可验证部分限于定序 / CRDT 合并 / delta 编解码 / 回滚重放的 CPU 纯函数单测
 - 架构立场： **scene 是单一逻辑真相，persist 的 override delta 是唯一持久变更语义，网络复用它作权威事件流、不另立网络专属真相源**；瞬时仿真态走独立快照通道、本身不入存档
 
 ---
@@ -123,7 +123,7 @@ prism_net_predict   预测与和解: 输入缓冲、本地预测、回滚重放�
 prism_net_authority 服务器权威: tick 定序、command frame、提议校验、仿真对账
 prism_net_mesh      服务器网格: 分片划分、权威移交、重叠带、容灾(feature server_mesh)
 prism_net_acheat_api 反作弊接缝: AntiCheatProvider trait + 钩子点 + 默认 no-op(实现归 prism_anticheat)
-prism_net_replay    录制/回放: 事件流落盘、确定性重放、对账(feature replay)
+prism_net_replay    录制/回放: 事件流落盘、确定性重放、对账（对应 `prism_replication::replay`）
 prism_net_evmesh    uwu_event_mesh 适配: 服务端权威事件流/回放/编排后端(feature evmesh,仅 std/server)
 prism_net_diag      诊断: 计数器、带宽剖析、丢包/延迟注入、网络可视化
 ```
@@ -522,7 +522,7 @@ RTT 采样(周期性 ping/pong,带发送戳):
 
 - **网络剖析**（`prism_net_diag`）：每通道带宽、包率、RTT、重传率、丢包率、AOI 订阅规模、每实体复制开销，接 `prism_diagnostic` 计数器与 trace。
 - **RPC 剖析**：每 RPC 的调用率、往返延迟、失败率、重试率、超时率、限流拒绝率，定位控制面热点与被刷接口（§7.4）。
-- **事件流录制与回放**（feature `replay`）：权威事件流落盘，可确定性重放整局（§13、world §18），用于复现 bug、反作弊审计、观战/回放系统。
+- **事件流录制与回放**（`prism_replication::replay`）：`ReplayLog` 记录解密后的逻辑事件（tick、方向、通道、序号、可选 authority hash 与 payload），提供有界 append、显式 record/payload decode bounds、版本化 deterministic codec、严格 trailing-byte 检查和游标回放；`authority hash` 是逻辑状态元数据，不是编码字节 checksum，字节完整性由 durable backend/transport framing 负责。它可作为 `prism_world_persist::EventLogBackend` 的上层 payload/接缝，但当前尚未把 replication plugin 的真实 authority event producer 接到 durable journal。
 - **durable 日志与时间线后端**（feature `evmesh`，仅服务端）：录制/回放的落盘与游标可委托 `uwu_event_mesh`，复用其 durable log、消费游标、timeline 分支/差异比较/投影重放/快照恢复（§5.1），用于长局审计、分支复盘与断点续放，无需自建第二套日志。
 - **网络条件注入**：开发期注入延迟/抖动/丢包/乱序/带宽上限，本机单端模拟多端劣化条件（弥补无真实多端环境）。
 - **预测/和解可视化**：显示预测态与权威态的偏差、回滚发生点与重放帧数，调参延迟补偿与插值窗口。
@@ -554,7 +554,7 @@ prism_network/              (伞 crate,re-export + prelude + feature 聚合)
   prism_net_authority/      tick 定序、command frame、提议校验、对账
   prism_net_mesh/           分片、权威移交、重叠带、容灾(feature server_mesh)
   prism_net_acheat_api/     反作弊接缝: AntiCheatProvider trait + 钩子点 + 默认 no-op(实现归 prism_anticheat)
-  prism_net_replay/         事件流录制/确定性回放(feature replay)
+  prism_net_replay/         事件流录制/确定性回放（对应 `prism_replication::replay`）
   prism_net_evmesh/         uwu_event_mesh 适配: 权威事件流/回放/编排后端(feature evmesh,仅 std/server)
   prism_net_diag/           带宽剖析、网络条件注入、预测可视化
 ```
@@ -587,7 +587,7 @@ M4 预测与和解: 客户端预测 + 回滚重放 + 快照插值/受限外推 +
 M5 延迟补偿: 历史位姿环 + 回溯命中 + 窗口有界(lag_comp)（✅纯逻辑 AABB 射线核；🚧接入权威 ECS/窄相碰撞与跨机验证）
 M6 反作弊接缝: 权威回路钩子点 + 确定性对账根基（🚧hash audit 已有；provider/策略未完成）
 M7 规模: 服务器网格分片 + 权威移交 + 过载降级 + 容灾(server_mesh)（✅有界控制面、provider/node 协调与快照恢复；🚧真实跨机传输/成员发现/共识/容灾验收）
-M8 工具: 事件流录制/回放 + 网络剖析 + 预测可视化 + QUIC 适配（🚧 网络剖析 telemetry 已落地；事件流 replay、durable journal 接缝、预测可视化和 QUIC 仍未接入）
+M8 工具: 事件流录制/回放 + 网络剖析 + 预测可视化 + QUIC 适配（🚧 网络剖析 telemetry 与 bounded logical replay core 已落地；authority producer/durable journal 接缝、预测可视化和 QUIC 仍未接入）
 M9 后端 provider: `EventLogBackend`/`FileJournal` 本地 durable 核心 + uwu_event_mesh 适配(durable log/游标/DLQ/timeline) 作权威事件流/回放/编排可选后端(evmesh,仅服务端)（✅本地核心；⬜evmesh 适配）
 ```
 
@@ -597,7 +597,7 @@ M9 后端 provider: `EventLogBackend`/`FileJournal` 本地 durable 核心 + uwu_
 
 - 当前已有单机 loopback、真实 UDP/ARQ 测试和 bounded 多 Peer demux 测试（显式 admission、未知 peer 丢弃、peer/队列上限、双 peer 双向收发），以及对自适应窗口/发送预算在确定性丢包与 RTT 变化下的单测；但没有跨进程、跨机器或真实公网链路证据。因此吞吐、尾延迟、丢包恢复时间、并发连接数和公网拥塞行为仍是 design target，不是生产验收结果。
 - `security` 的 `RingPskProvider` 已提供可复核的 PSK/AES-256-GCM 密码实现，`RingPskKeyringProvider` 已提供有界 active/previous credential 轮换、重连重叠窗口和显式 retire，并有全 feature 回归；但密钥托管/KMS、跨机器身份验证、部署级信任根、访问控制和公网安全验收仍未完成，不能据此宣称生产部署安全闭环已完成。
-- `prism_replication` 的 ECS bridge 已接入 World snapshot/固定步回滚路径，`mapping` 已提供稳定 identity/schema/component/authority/revision 的 bounded core，`scene_world` 已覆盖真实 `SceneSpawn` remap 下的 adopt、scene despawn 与 mapping 清理；但真实服务器权威 ECS、组件字段序列化、AOI 接线和跨机 reconciliation 仍需端到端验收。
+- `prism_replication` 的 ECS bridge 已接入 World snapshot/固定步回滚路径，`mapping` 已提供稳定 identity/schema/component/authority/revision 的 bounded core，`scene_world` 已覆盖真实 `SceneSpawn` remap 下的 adopt、scene despawn 与 mapping 清理；`net_diagnostics` 已提供连接/通道级数值快照，`replay` 已提供 bounded logical event codec 与 cursor playback；但 replication plugin 的真实 authority event producer、durable `EventLogBackend` 接线、真实服务器权威 ECS、组件字段序列化、AOI 接线和跨机 reconciliation 仍需端到端验收。
 - `server_mesh` 的有界控制面已实现，当前已有快照持久化/provider 接缝，但真实节点传输、故障探测、过载降级、跨机容灾和公网验收仍未完成；QUIC/WebTransport、NAT/ICE/relay、`uwu_event_mesh` durable provider 适配和完整反作弊策略仍未实现。`lag_comp` 已有有界历史 AABB 射线核，`interp` 已有有界快照插值/受限外推核，但权威 ECS/窄相碰撞接入、真实视觉平滑和跨机验证仍未完成，不得用设计章节替代代码完成声明。
 - 反作弊上限由「服务器权威 + 确定性对账」决定，客户端侧检测可被破解、仅作噪声过滤；**不含任何 ML**。
 - 浮点仿真参与权威必须定点化，否则无法保证跨平台确定性与回滚收敛。
