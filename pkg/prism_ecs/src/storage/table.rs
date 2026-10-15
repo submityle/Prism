@@ -13,6 +13,7 @@ use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::change::{ComponentTicks, Tick};
 use crate::collections::HashMap;
@@ -21,6 +22,13 @@ use crate::entity::Entity;
 use crate::storage::arena::ChunkArena;
 use crate::storage::blob_vec::BlobVec;
 use crate::storage::chunk::{rows_per_chunk, ChunkBounds, ChunkMeta, ChunkVersions};
+
+static NEXT_CHUNK_INCARNATION: AtomicU64 = AtomicU64::new(1);
+
+#[inline]
+fn next_chunk_incarnation() -> u64 {
+    NEXT_CHUNK_INCARNATION.fetch_add(1, Ordering::Relaxed)
+}
 
 /// A single type-erased component column within a [`Table`].
 ///
@@ -422,6 +430,7 @@ pub struct Table {
 /// [`ChunkArena`](crate::storage::arena::ChunkArena), which frees it.
 struct ChunkBlock {
     ptr: NonNull<u8>,
+    incarnation: u64,
 }
 
 // SAFETY: a chunk block only holds component data for `Component: Send + Sync`
@@ -438,6 +447,12 @@ unsafe impl Sync for ChunkBlock {}
 /// [`Table::iter_chunks`] (design §5.3 / §13 / §15).
 #[derive(Clone, Copy)]
 pub struct ChunkInfo<'a> {
+    /// Stable identity of this physical block allocation.
+    ///
+    /// This is distinct from [`ChunkMeta::structural_epoch`]: an allocator may
+    /// recycle the same address and a restored table may reuse the same epoch,
+    /// but a newly-created block must still invalidate resident GPU mirrors.
+    pub incarnation: u64,
     /// Absolute row of the window's first live entity.
     pub first_row: usize,
     /// Number of live rows in the window (`<= rows_per_chunk`).
@@ -570,6 +585,7 @@ impl Table {
         while self.chunks.len() < needed {
             let block = ChunkBlock {
                 ptr: self.arena.alloc(),
+                incarnation: next_chunk_incarnation(),
             };
             // Embed a default `ChunkMeta` in the block's header.
             // SAFETY: `meta_offset` is laid out inside `block_layout` and aligned
@@ -644,6 +660,7 @@ impl Table {
             // SAFETY: the block's header embeds a `ChunkMeta` at `meta_offset`.
             let meta = unsafe { &*block.ptr.as_ptr().add(meta_offset).cast::<ChunkMeta>() };
             ChunkInfo {
+                incarnation: block.incarnation,
                 first_row,
                 rows: total.saturating_sub(first_row).min(rows_per_chunk),
                 meta,
