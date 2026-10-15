@@ -90,6 +90,12 @@ pub mod delta;
 
 pub mod mapping;
 
+#[cfg(feature = "ecs")]
+pub mod ecs;
+
+#[cfg(feature = "scene_world")]
+pub mod scene_world;
+
 pub mod quantize;
 
 pub mod snapshot;

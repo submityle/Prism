@@ -390,6 +390,57 @@ impl ReplicationMapping {
         self.locals.get(&local).copied()
     }
 
+    /// Resolve a stable entity identity to its current local ECS handle.
+    ///
+    /// The mapping table is component-keyed, so this walks the bounded entry
+    /// set and returns the first deterministic match. A lifecycle provider can
+    /// then use the returned local handle for an update or despawn.
+    #[must_use]
+    pub fn resolve_entity(&self, entity: EntityId) -> Option<LocalEntityId> {
+        self.entries
+            .values()
+            .find(|entry| entry.entity == entity)
+            .map(|entry| entry.local)
+    }
+
+    /// Remove every component mapping owned by one stable entity.
+    ///
+    /// Returns the number of removed component mappings. Removing an unknown
+    /// entity is an idempotent no-op, which lets a retransmitted despawn be
+    /// handled without rebinding a recycled ECS handle.
+    pub fn remove_entity(&mut self, entity: EntityId) -> usize {
+        let keys: Vec<_> = self
+            .entries
+            .keys()
+            .copied()
+            .filter(|key| key.entity == entity)
+            .collect();
+        let removed = keys.len();
+        for key in keys {
+            self.entries.remove(&key);
+        }
+        self.locals.retain(|_, owner| *owner != entity);
+        removed
+    }
+
+    /// Remove one entity/component mapping, if present.
+    pub fn remove_component(
+        &mut self,
+        entity: EntityId,
+        component: ComponentKey,
+    ) -> Option<MappingEntry> {
+        let key = MappingKey { entity, component };
+        let entry = self.entries.remove(&key)?;
+        if !self
+            .entries
+            .values()
+            .any(|candidate| candidate.local == entry.local)
+        {
+            self.locals.remove(&entry.local);
+        }
+        Some(entry)
+    }
+
     /// Register a schema manifest entry. Re-registering the same version is
     /// idempotent; changing the version is rejected.
     pub fn register_schema(&mut self, schema: SchemaDescriptor) -> Result<(), MappingError> {

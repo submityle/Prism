@@ -11,6 +11,9 @@ publish = false
 prism_math = { path = "../prism_math", default-features = false }
 prism_app = { path = "../prism_app", optional = true }
 prism_ecs = { path = "../prism_ecs", optional = true }
+prism_reflect = { path = "../prism_reflect", optional = true }
+prism_scene = { path = "../prism_scene", default-features = false, optional = true }
+prism_world = { path = "../prism_world", optional = true }
 ring = { version = "0.17.14", optional = true }
 
 [features]
@@ -22,6 +25,27 @@ std = []
 app = ["std", "dep:prism_app", "prism_app/determinism", "dep:prism_ecs"]
 # Opt-in ECS snapshot hash exchange. Peers must enable the same wire contract.
 determinism = ["app", "prism_ecs/determinism"]
+# Real ECS replication provider. This is separate from `app`: callers that
+# already own their frame loop can use the provider without pulling in the app
+# plugin or its rollback policy.
+ecs = [
+    "std",
+    "dep:prism_ecs",
+    "dep:prism_reflect",
+    "prism_ecs/reflect",
+    "prism_ecs/serialize",
+]
+# Scene/world identity and ownership adapters. The world facade remains the
+# owner of streaming/residency policy; this feature only consumes its real
+# scene-host types at the boundary.
+scene_world = [
+    "ecs",
+    "dep:prism_scene",
+    "dep:prism_world",
+    "prism_scene/std",
+    "prism_scene/materialize",
+    "prism_world/scene_host",
+]
 # A reviewed production provider: PSK-authenticated handshake plus AES-256-GCM.
 # The provider remains explicit so callers choose their credential and rotation
 # policy instead of silently falling back to a shared test key.
