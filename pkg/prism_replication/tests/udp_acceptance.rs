@@ -23,7 +23,10 @@ struct UdpFaultProxy {
     left_client: SocketAddr,
     right_client: SocketAddr,
     drop_first_left_to_right: bool,
+    drop_first_right_to_left: bool,
     dropped: usize,
+    dropped_data: usize,
+    dropped_ack: usize,
     forwarded: usize,
 }
 
@@ -39,7 +42,10 @@ impl UdpFaultProxy {
             left_client,
             right_client,
             drop_first_left_to_right: true,
+            drop_first_right_to_left: true,
             dropped: 0,
+            dropped_data: 0,
+            dropped_ack: 0,
             forwarded: 0,
         })
     }
@@ -63,6 +69,7 @@ impl UdpFaultProxy {
                     if self.drop_first_left_to_right {
                         self.drop_first_left_to_right = false;
                         self.dropped += 1;
+                        self.dropped_data += 1;
                         continue;
                     }
                     self.right.send_to(&buffer[..len], self.right_client)?;
@@ -78,6 +85,12 @@ impl UdpFaultProxy {
             match self.right.recv_from(&mut buffer) {
                 Ok((len, source)) => {
                     assert_eq!(source, self.right_client, "unexpected right UDP source");
+                    if self.drop_first_right_to_left {
+                        self.drop_first_right_to_left = false;
+                        self.dropped += 1;
+                        self.dropped_ack += 1;
+                        continue;
+                    }
                     self.left.send_to(&buffer[..len], self.left_client)?;
                     forwarded_now += 1;
                     self.forwarded += 1;
@@ -162,9 +175,11 @@ fn real_udp_loss_retransmit_is_ordered_and_exactly_once() {
     }
 
     assert_eq!(
-        proxy.dropped, 1,
-        "the proxy dropped exactly the first datagram"
+        proxy.dropped, 2,
+        "the proxy dropped exactly one data packet and one ACK"
     );
+    assert_eq!(proxy.dropped_data, 1, "the first data datagram was dropped");
+    assert_eq!(proxy.dropped_ack, 1, "the first reverse ACK was dropped");
     assert!(
         proxy.forwarded > expected.len(),
         "a retransmission crossed the proxy"
