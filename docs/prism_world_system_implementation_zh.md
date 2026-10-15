@@ -44,3 +44,5 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test -p prism_render_driver_wgpu --
 ```
 
 仅获得 adapter 或默认测试 skip 不构成 world GPU 完成证据；性能报告需要单独记录 CPU/GPU P50/P95/P99、上传字节、显存和 pass 时间。
+
+本次在受控环境执行严格 Metal 门禁的结果是：`PRISM_REQUIRE_GPU=1` 下 wgpu 没有返回 adapter，4 个基础 GPU 测试均按严格模式失败。该结果只说明当前执行环境不能提供 GPU 证据，不把 GPU 后端标记为通过，也不影响上面的 CPU/no-std 核心验证。
