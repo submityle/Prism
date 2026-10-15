@@ -127,7 +127,7 @@ fn app(report: Arc<Mutex<Report>>) -> App {
             JITTER_US[0],
         )))
         .insert_resource(Content {
-            rng: DeterministicRng::seeded(0x5052_4953_4d),
+            rng: DeterministicRng::seeded(0x0050_5249_534d),
             values: [0; 256],
             frame: 0,
             steps: 0,
@@ -191,8 +191,10 @@ fn main() {
     let exit = if headless_only {
         HeadlessRunner::with_max_frames(FRAMES as u64 + 1).run(other)
     } else {
-        let mut settings = WindowSettings::default();
-        settings.title = "Prism runner parity — 128 deterministic frames".into();
+        let settings = WindowSettings {
+            title: "Prism runner parity — 128 deterministic frames".into(),
+            ..WindowSettings::default()
+        };
         WinitRunner::new(other).with_settings(settings).run()
     };
     assert_eq!(exit, AppExit::Success);

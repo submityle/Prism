@@ -66,7 +66,7 @@ fn manual_clock_phase_order_and_secondary_world_work_without_platform_services()
         .set_fixed_timestep(Duration::from_millis(10))
         .add_systems(Startup, |mut calls: ResMut<Calls>| calls.0.push("startup"))
         .add_systems(FixedUpdate, |mut calls: ResMut<Calls>| {
-            calls.0.push("fixed")
+            calls.0.push("fixed");
         })
         .add_systems(Custom, |mut calls: ResMut<Calls>| calls.0.push("custom"))
         .add_systems(Update, |mut calls: ResMut<Calls>| calls.0.push("update"));
