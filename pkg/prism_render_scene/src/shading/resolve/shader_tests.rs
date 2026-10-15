@@ -186,6 +186,39 @@ fn brdf_wesl_compiles_and_resolves_lighting_import() {
         .unwrap_or_else(|error| panic!("brdf.wesl failed to compile/resolve imports: {error}"));
 }
 
+#[test]
+fn production_principled_brdf_consumes_clearcoat_normal_and_tangent() {
+    let brdf = include_str!("../../shaders/brdf.wesl");
+    let principled = brdf
+        .split_once("fn principled_direct_channels_with(")
+        .map(|(_, body)| body)
+        .expect("production principled function must exist");
+    for marker in [
+        "surface.coat_normal",
+        "surface.coat_tangent",
+        "coat_n_dot_h",
+        "coat_d = distribution_ggx_anisotropic",
+        "coat_single_scatter",
+    ] {
+        assert!(
+            principled.contains(marker),
+            "production principled path does not consume {marker}"
+        );
+    }
+
+    let resolve = include_str!("../../shaders/shading_resolve.wesl");
+    for marker in [
+        "sampled.has_clearcoat_normal",
+        "sampled.clearcoat_normal_tangent",
+        "surface.coat_normal = apply_tangent_space_normal(",
+    ] {
+        assert!(
+            resolve.contains(marker),
+            "production resolve path does not publish {marker}"
+        );
+    }
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `cloth.wesl` under their canonical
 /// module paths and compiles `cloth.wesl`, forcing the importer to resolve the
 /// `prism_render_scene::shaders::{lighting, brdf}::{...}` imports the cloth lobe

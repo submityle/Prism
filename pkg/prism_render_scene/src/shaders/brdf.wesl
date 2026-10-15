@@ -201,6 +201,27 @@ fn brdf_normalize_or(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     return fallback;
 }
 
+// `geometry_coat_tangent` is an optional shade-time input. The zero vector
+// inherits the base frame, preserving the pre-existing anisotropic result.
+fn clearcoat_tangent_or(coat_tangent: vec3<f32>, base_tangent: vec3<f32>) -> vec3<f32> {
+    if dot(coat_tangent, coat_tangent) > 0.0 {
+        return brdf_normalize_or(coat_tangent, base_tangent);
+    }
+    return base_tangent;
+}
+
+fn clearcoat_bitangent_or(
+    coat_tangent: vec3<f32>,
+    coat_normal: vec3<f32>,
+    base_tangent: vec3<f32>,
+    base_bitangent: vec3<f32>,
+) -> vec3<f32> {
+    if dot(coat_tangent, coat_tangent) > 0.0 {
+        return cross(coat_normal, brdf_normalize_or(coat_tangent, base_tangent));
+    }
+    return base_bitangent;
+}
+
 // Schlick's Fresnel approximation. Mirrors `fresnel_schlick`.
 fn fresnel_schlick(f0: vec3<f32>, v_dot_h: f32) -> vec3<f32> {
     let one_minus = 1.0 - clamp(v_dot_h, 0.0, 1.0);
@@ -1097,11 +1118,63 @@ fn principled_direct_channels_with(
     let coat_f0 = pow((clamp(surface.coat_ior, 1.0 + 1.0e-3, 3.0) - 1.0)
         / (clamp(surface.coat_ior, 1.0 + 1.0e-3, 3.0) + 1.0), 2.0);
     let coat_f = fresnel_schlick(vec3<f32>(coat_f0), v_dot_h);
+    // The coat owns its interface normal for microfacet geometry only. The
+    // base layer and the slab attenuation below intentionally keep `n`.
+    let coat_n = if dot(surface.coat_normal, surface.coat_normal) > 0.0 {
+        brdf_normalize_or(surface.coat_normal, n)
+    } else {
+        n
+    };
+    let coat_n_dot_h = dot(coat_n, h);
+    let coat_n_dot_v = dot(coat_n, v);
+    let coat_n_dot_l = dot(coat_n, l);
+    var coat_d = 0.0;
+    var coat_g = 0.0;
+    if coat_n_dot_l > 0.0 && coat_n_dot_v > 0.0 && coat_n_dot_h > 0.0 {
+        let coat_anisotropy = clamp(surface.coat_roughness_anisotropy, 0.0, 1.0);
+        if coat_anisotropy > 0.0 {
+            let axes = anisotropic_axes(
+                coat_n,
+                clearcoat_tangent_or(surface.coat_tangent, frame.tangent),
+                clearcoat_bitangent_or(
+                    surface.coat_tangent,
+                    coat_n,
+                    frame.tangent,
+                    frame.bitangent,
+                ),
+                surface.anisotropy_rotation,
+            );
+            let one_minus = 1.0 - coat_anisotropy;
+            let stretch = sqrt(2.0 / (1.0 + one_minus * one_minus));
+            let ax = max(coat_alpha * stretch, MIN_ANISOTROPIC_ALPHA);
+            let ay = max(one_minus * coat_alpha * stretch, MIN_ANISOTROPIC_ALPHA);
+            coat_d = distribution_ggx_anisotropic(
+                dot(axes.tangent, h),
+                dot(axes.bitangent, h),
+                coat_n_dot_h,
+                ax,
+                ay,
+            );
+            coat_g = vis_smith_anisotropic(
+                dot(axes.tangent, v),
+                dot(axes.bitangent, v),
+                dot(axes.tangent, l),
+                dot(axes.bitangent, l),
+                max(coat_n_dot_v, MIN_N_DOT),
+                coat_n_dot_l,
+                ax,
+                ay,
+            );
+        } else {
+            coat_d = distribution_ggx(coat_n_dot_h, coat_alpha);
+            coat_g = vis_smith(max(coat_n_dot_v, MIN_N_DOT), coat_n_dot_l, coat_alpha);
+        }
+    }
     let coat_single_scatter = coat_f
         * (coat
-            * distribution_ggx(n_dot_h, coat_alpha)
-            * vis_smith(n_dot_v, n_dot_l, coat_alpha)
-            * n_dot_l);
+            * coat_d
+            * coat_g
+            * coat_n_dot_l);
     // Coat energy closure: the base keeps the closed-form slab transmittance
     // `t_slab = (1−f_v)(1−f_l)/(1−f_v·f_l)` and the coat carries the complementary
     // reflectance `r_slab = f_l + (1−f_l)²f_v/(1−f_v·f_l)` (they sum to exactly 1

@@ -1051,6 +1051,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - **刻意偏差**：KHR 规定"无 clearcoat 法线图时 coat 用**网格**法线而非基础 bump 后的法线"；本引擎在无图时仍用基础着色法线，**为保持既有材质外观逐位不变**。若要改回 KHR 语义，需要一次显式的金标准重基线——这是产品决策（外观连续性 vs 规范字面），不是遗漏。
   - **已验证的接线范围**：本项在 CPU 行为测试 + 双线（CPU/WESL）编译链接两层验证；**GPU readback 逐位对拍**是独立门禁（P2-d），不属本项。
 
+- **P1-f（coat 组消费闭环）生产 principled Lit 路径补齐 `coat_normal` / `coat_tangent`**（§4.4 / §17.2）
+  - **审计发现**：上一条记录证明了独立 `clearcoat` 瓣路径能够消费 coat 法线/切线，但生产 `RESPONSE_LIT → shade_principled → principled_direct_channels_with` 的主 BSDF 仍有一段只读基础法线；因此材质采样与 resolve 已经发布的 `SurfaceSample.coat_normal` 可能在实际 Lit 响应中成为死数据。这不是文档缺口，而是生产消费者缺口。
+  - **修复**：CPU `lighting.rs` 与 GPU `brdf.wesl` 逐式接入 coat 自身的 `n·h / n·v / n·l`、各向异性 GGX `D/G` 与可选 `coat_tangent`。coat normal 只改变 coat 微表面高光；base BSDF 与两程 slab attenuation 仍使用基础法线，背光 coat 只归零 coat 高光而不误伤 base。零 coat normal/tangent 继续作为继承基础帧的恒等哨兵。
+  - **门禁**：新增 CPU 行为测试，验证倾斜 coat normal 改变生产 principled 高光但不改变 base contribution，且独立 coat tangent 会改变各向异性离峰高光；新增 `shader_tests` 源码门禁，检查 `brdf.wesl` 的生产 principled 消费链与 `shading_resolve.wesl` 的 clearcoat-normal 发布链，并继续通过 WESL 编译/链接门禁。
+  - **边界**：本切片不修改 `prism_reflect`、GPU benchmark 或材质 ABI；GPU 硬件 readback 对拍仍按独立门禁执行，不在本地无 GPU 环境中虚报结果。
+
 - **P1-f（首个 lobe 组）OpenPBR coat 字段：`coat_ior` + `coat_color` 端到端落地**（§4.4 / §17.2）
   - 范围：把 clearcoat 瓣从"固定 `F0 = 0.04` 的白 dielectric"升级为 OpenPBR `coat` 组的真参数化子集——`coat_ior` 驱动**精确介质 Fresnel**（含 TIR 分支），`coat_color` 逐通道给 coat 高光着色；同时把 base 衰减从 `(1 - coat·F(v·h))²` 对齐为参考 PT 的**两宏观角**形式 `(1 - coat·F(n·v))·(1 - coat·F(n·l))`。默认 `coat_ior = 1.5`（法向入射恰为 0.04）+ 白色 `coat_color`，故仅"作者改了 IOR/颜色"才改变外观。
   - 依据：仓库自带的 path-traced 参考 `pkg/prism_render_architecture/src/reference_pt/coat.rs`（`CoatLayer` 的 `coat_ior`/`coat_color`/`fresnel_dielectric(cos, 1, ior)`）——实时金标准与 WESL 孪生都照它落地，不臆造公式。

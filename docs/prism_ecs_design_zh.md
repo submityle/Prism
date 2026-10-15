@@ -17,7 +17,9 @@
 - 关键依赖: `prism_math`（glam SIMD）、`prism_tasks`（work-stealing + fiber 作业图，`std`/`multi_thread`）、`prism_reflect`（可选，序列化/反射/脚本桥）
 - 明确约束: 核心 `no_std + alloc`；`std` / `multi_thread` / `serialize` / `reflect` / `trace` / `determinism` / `simd` / `partition` 为 feature；**不依赖任何 `bevy_*` crate**
 
-> **现状核查口径（2026-10-15）**：本文同时保留完整设计目标与当前实现边界。「源码已有」包括当前工作树中的未提交实现，**不表示已合入、已通过本轮测试或整项目完成**；本次仅核对源码并更新本文，未构建、未运行测试。§17.1 与历史修复段落中的数值/通过次数是既有记录，不是本次复测结果；并行开发中的安全修复仍须主流程统一验证。
+> **现状核查口径（2026-10-16，`main` @ `6b9964234`）**：本文同时保留完整设计目标与当前实现边界。「已实现」与「已验证」分开记录；提交历史中的测试入口或历史验收记录不等于本次重跑，也不等于跨机、NAT、真实 GPU 或性能目标完成。本轮只同步文档，未修改源码、未重跑测试。§17.1 与历史修复段落中的数值/通过次数仍是既有记录；并行开发中的安全修复仍须主流程统一验证。
+
+> **本次 main 历史同步依据**：UDP/ACK/rebind：`39bd3806a`、`0bf59f55a`、`d6000586b`、`c7201323e`；NUMA acceptance：`9390b7a5e`、`07a3d5b9c`；audio/source-route 与 event-log：`ea2ed8026`、`cd03b14c7`、`3e503dd38`；GPU resident/wgpu gate 与 benchmark：`22aebe26b`、`a288cf12e`、`c7201323e`、`3a8120874`、`0e7e67259`；CPU SDF clipmap planner：`7e99fa30f`、`90ff7a89a`。
 
 ---
 
@@ -354,8 +356,8 @@ world.observe::<OnRemove, RelationFilter<ChildOf>>(|t| { /* 级联清理 */ });
 ## 15. GPU 驱动
 
 - 目标：标记"GPU 常驻"组件列（如 `GpuInstance`），维护 GPU 列镜像并按**脏块增量上传**，减少 CPU 逐实体打包；不要求所有后端都能把普通 ECS 分配直接持久映射给 GPU。
-- 内核提供脏块 + 列指针访问器；`pkg/prism_render_app/src/ecs_columns.rs` 已有实际提取消费，`plugin.rs` 安装该提取链，设备上传与同步由渲染侧负责，不是「渲染侧完全待接」。
-- 对接 GPU 驱动剔除/合批（§6 SharedComponent 批次键 + §13 cell 可见位）。**CPU 侧已有 chunk 粒度机制**：`Table::iter_chunks()` 产出行窗口及 `ChunkMeta`，`GpuBatchBuilder::build_from_table(table)` 按 `batch_key`/`visible` 生成 `GpuBatchPlan`；`slot` 对应 GPU 列镜像的实体行号。`Table::column_upload_spans(id, last_upload, now, out)` 检查每列各 chunk 的 `change_version`，产出 `(buffer_offset, src, len)`，渲染侧按 span 复制。**发现仍为 O(该列 chunk 总数)，复制量才随脏窗口的 payload 增长**；不可把总成本写成仅 O(脏 chunk 数)。`World::recompute_chunk_bounds::<T>` / `Table::recompute_chunk_bounds` 按投影计算 AABB，以结构 epoch + 变更版本决定是否重扫该窗口；干净帧仍逐窗口判定。**设备级验收仍需补证据**：CPU 回归不能证明 GPU 映射/同步、常驻生命周期、上传收益和端到端帧时，本轮未运行 CPU 或 GPU 验证。
+- 内核提供脏块 + 列指针访问器；`pkg/prism_render_app/src/ecs_columns.rs` 已有实际提取消费，`plugin.rs` 安装该提取链，设备上传与同步由渲染侧负责，不是「渲染侧完全待接」。`pkg/prism_render_app/tests/ecs_columns.rs` 已有 resident-column 回读、局部脏列上传、设备丢失恢复与旧缓冲释放的验收入口（`22aebe26b`）；`os-backends/prism_render_driver_wgpu/tests/gpu.rs` 已要求 physical GPU evidence，缺少真实 adapter 时明确 `SKIPPED`，`PRISM_REQUIRE_GPU=1` 时失败（`a288cf12e`）。这些是实现与验收入口，不是本次重跑或当前主机真实 GPU 通过证明。
+- 对接 GPU 驱动剔除/合批（§6 SharedComponent 批次键 + §13 cell 可见位）。**CPU 侧已有 chunk 粒度机制**：`Table::iter_chunks()` 产出行窗口及 `ChunkMeta`，`GpuBatchBuilder::build_from_table(table)` 按 `batch_key`/`visible` 生成 `GpuBatchPlan`；`slot` 对应 GPU 列镜像的实体行号。`Table::column_upload_spans(id, last_upload, now, out)` 检查每列各 chunk 的 `change_version`，产出 `(buffer_offset, src, len)`，渲染侧按 span 复制。**发现仍为 O(该列 chunk 总数)，复制量才随脏窗口的 payload 增长**；不可把总成本写成仅 O(脏 chunk 数)。`World::recompute_chunk_bounds::<T>` / `Table::recompute_chunk_bounds` 按投影计算 AABB，以结构 epoch + 变更版本决定是否重扫该窗口；干净帧仍逐窗口判定。`benches/benches/prism_virtual_texture/main.rs`（`c7201323e`，并由 `3a8120874` 扩展）已有 CPU feedback/residency 与真实 adapter 条件下的 page-table lookup、feedback-decode readback benchmark；无真实 adapter 时是 `SKIPPED`，严格模式失败。当前仍不能宣称物理 GPU 已通过、GPU mapping/sync 生命周期、上传收益、端到端帧性能或 GPU SDF 已完成；本轮未重跑这些入口。
 
 ---
 
@@ -425,7 +427,7 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 - **owning group**：超热查询完美打包，迭代线性零分支。
 - **命令排序回放**：并行录制 + 确定键排序批量应用，合并同原型迁移。
 - **fiber 作业图**：重 system 内 chunk 子作业并行；减少同步开销与多核近线性是性能目标，不是所有工作负载的保证。
-- **内存**：原型预热**已落地**为 `World::prewarm::<B>(entities) -> ArchetypeId`——按 bundle（**含 required components**）解析/创建目标 archetype，并预留每个表列、实体列与 chunk 版本窗口的容量；**不生成实体、不跑 hook/observer/构造器**，因此可以在加载时预热预计 burst 的 bundle（有对应回归源码）。共享组件 bundle 会**明确 panic**：共享值参与 archetype 身份，单凭 bundle 类型不能解析。实体/原型空槽回收已有 free list + 空原型复用。**大页竞技场分配已有实现**（`vm` feature，`storage/arena.rs`）：`ChunkArena` 从 `prism_platform` VM 层预留页对齐 segment 并 bump 切块，支持时尝试大页/巨页，释放块复用；无相应后端时回退逐块全局分配。**NUMA 仍缺显式节点绑定及拓扑感知分配/调度契约**：当前代码不能保证 worker 本地页。OS 的 first-touch 行为依赖平台/内存策略，初始化线程、任务迁移与页迁移也会改变局部性；不能将「未绑定」描述成已实现 NUMA 就近或性能保证。
+- **内存**：原型预热**已落地**为 `World::prewarm::<B>(entities) -> ArchetypeId`——按 bundle（**含 required components**）解析/创建目标 archetype，并预留每个表列、实体列与 chunk 版本窗口的容量；**不生成实体、不跑 hook/observer/构造器**，因此可以在加载时预热预计 burst 的 bundle（有对应回归源码）。共享组件 bundle 会**明确 panic**：共享值参与 archetype 身份，单凭 bundle 类型不能解析。实体/原型空槽回收已有 free list + 空原型复用。**大页竞技场分配已有实现**（`vm` feature，`storage/arena.rs`）：`ChunkArena` 从 `prism_platform` VM 层预留页对齐 segment 并 bump 切块，支持时尝试大页/巨页，释放块复用；无相应后端时回退逐块全局分配。NUMA/亲和已有真实 OS acceptance 入口：`prism_platform_os` topology/affinity readback、worker binding outcome 与 arena placement fallback 由 `pkg/prism_tasks/tests/numa_acceptance.rs` 验收（`9390b7a5e`、`07a3d5b9c`）；默认缺能力输出 `SKIPPED`，`PRISM_REQUIRE_NUMA=1` 时失败，arena 对 requested node 的 `Bound`/`Fallback` 结果有明确断言。它不等于 ECS arena 已证明 node-local pages，也不等于 Linux strict success、拓扑感知调度或 NUMA 性能已验证。
 - **GPU 常驻列直传**：脏块增量上传，省 CPU 打包。
 - **成本 ∝ 变化量（目标）**：Table chunk 的正常写入源发现已推进为 tick→chunk 索引，存储层窗口查询接近严格变化量；但匹配 archetype/访问列枚举、多列合并、观察注册项、绑定信号及下游执行/上传仍有独立成本。须分别量测发现、精炼、执行与上传，不能把这一切片等同于全链路零扫描。
 
@@ -541,7 +543,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 ## 22. 诚实边界与风险
 
 - **当前源码包含的机制（含未提交实现，不等于整章验收）**：物理单块 chunk / chunk-aware fetch / 四态存储 / ParamSet / 调度与作业图 / fragmenting relations / observer、hook 与反应图 / 快照回滚 / partition 与 LOD / 动态活值及布局迁移 / prefab 字段 override 与 V3 存档 / VM arena 均有实现入口。跨 crate 也已有 App 可选流水线与渲染提取、显式 policy 配置、transform observer 与 BVH/grid 消费、原生 UI 桥和场景物化，以及策略驱动的 ECS 网络回滚/帧哈希审计；不能再统一标为 PLANNED。各项安全契约与限制见对应章节，本次只核对源码，不报告编译/测试通过。
-- **尚未实现或未充分验收的关键范围**：Table chunk 正常写入的脏块源发现已不再是 O(匹配 chunk 总数)，并已补上 SparseSet 变化实体到当前 archetype 行窗口的 fallback；query 的匹配/多列合并、日志缺口 fallback、push 的其他源轮询、UI signal→ECS 绑定检查仍未统一为严格变化量。当前 change observer 已有按组件/实体/tick 的写入索引，覆盖 `Mut<T>`、spawn 和 insert，并以实体 tick 复核作为安全 fallback；本切片已闭环 snapshot restore 后的 change-index epoch、pending batch 丢弃及 observer cursor 重基线，恢复前时间线不会重放，恢复后同 tick 的首次写入仍可见；完整结构变更矩阵与端到端量具仍需继续验收。transform 每次传播仍收集并排序关系边，本任务未修改 `pkg/prism_transform`，因此不能声称该部分已完成。M6 的音频 native ECS/facade 已有局部验证（`prism_audio_ecs`：30 个 unit tests、22 个 integration tests；`prism_audio_bevy` facade：4 个 facade integration tests），但完整应用场景、旧资产与编辑工作流仍需联合对拍。NUMA 显式绑定与拓扑感知策略缺失。当前 checkout 的受控多核扩展、端到端 GPU 常驻/同步收益、跨平台浮点确定性及 P50/P95/P99 证据仍待补齐；历史量具输出不代替这些验收。
+- **尚未实现或未充分验收的关键范围**：Table chunk 正常写入的脏块源发现已不再是 O(匹配 chunk 总数)，并已补上 SparseSet 变化实体到当前 archetype 行窗口的 fallback；query 的匹配/多列合并、日志缺口 fallback、push 的其他源轮询、UI signal→ECS 绑定检查仍未统一为严格变化量。当前 change observer 已有按组件/实体/tick 的写入索引，覆盖 `Mut<T>`、spawn 和 insert，并以实体 tick 复核作为安全 fallback；本切片已闭环 snapshot restore 后的 change-index epoch、pending batch 丢弃及 observer cursor 重基线，恢复前时间线不会重放，恢复后同 tick 的首次写入仍可见；完整结构变更矩阵与端到端量具仍需继续验收。transform 每次传播仍收集并排序关系边，本任务未修改 `pkg/prism_transform`，因此不能声称该部分已完成。M6 的音频 native ECS/facade、source-route/scene adapter/full-chain 有实现和局部测试（依据 `ea2ed8026`、`cd03b14c7`），但真实 device callback、完整应用/旧资产/editor 联合验收仍未完成；bounded memory/file `EventLogBackend` 与 replay bridge 已实现（`3e503dd38`），replication plugin durable-log 接线、生产恢复及跨进程/跨机持久化仍未完成。NUMA acceptance gate 已实现，但 Linux strict success、ECS arena local-page proof、拓扑感知调度和 NUMA 性能仍未验证。`prism_world_residency` 当前是 CPU deterministic SDF clipmap planner（`7e99fa30f`、`90ff7a89a`），不是 GPU SDF sampling 或 ECS GPU 集成。当前 checkout 的受控多核扩展、端到端 GPU 常驻/同步收益、跨平台浮点确定性及 P50/P95/P99 证据仍待补齐；历史量具输出不代替这些验收。
 - **并行安全收口**：chunk 元数据并发访问、写屏障与版本回绕属于需集中验证的安全面；本文不因有脏块 API 就宣称其并发证明或本轮修复已通过。系统 panic 隔离亦不回滚已发生的普通写入/用户外部副作用，不能泛化为任意操作的事务回滚。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
@@ -668,7 +670,9 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 **已有可执行对拍夹具，非本次验证结果**：`pkg/prism_ecs/tests/determinism_link.rs`（需 `--features multi_thread`）把 `TickClock` 的 1/60 有理步长/整数 tick、并行 `Schedule` 快照哈希、tasks 非交换确定归并、transform 整数定点层级传播串联；测试源码对比 1 与 8 worker，`determinism` feature 下用 `FrameHashLog::first_divergence` 定位。即使该夹具通过也只覆盖这个场景，不能证明任意浮点业务、SIMD/平台组合都位等价；本次未重跑。
 
-**本次端到端切片验证**：`prism_replication` 的 ECS 测试使用 secure in-memory transport、固定 `10ms` `ManualDelta`/fixed timestep，并只调用 `client_app.update()` / `server_app.update()`；没有手动补跑 `FixedFirst`。`ecs_e2e_is_structurally_equal_for_one_and_eight_workers` 在 `determinism,ecs,multi_thread` 下比较 1 与 8 worker 的最终 `WorldSnapshot`、每个 retained history snapshot 的 `structurally_eq`，hash 只作辅助对照。`failed_ecs_commit_leaves_session_history_and_input_untouched` 验证未注册 snapshot component 时 World/history cursor、prediction、input timeline 和待处理输入均保持可重试状态；已有 replay-failure 测试继续覆盖权威回滚失败清理。该证据只覆盖单进程、内存传输、注册了 clone/equality/hash glue 的测试 World；不等价于真实网络、跨平台硬件/浮点位级证明，也不覆盖未注册 snapshot glue 的业务 World。
+**本次端到端切片验证**：`prism_replication` 的 ECS 测试使用 secure in-process transport、固定 `10ms` `ManualDelta`/fixed timestep，并只调用 `client_app.update()` / `server_app.update()`；没有手动补跑 `FixedFirst`。`ecs_e2e_is_structurally_equal_for_one_and_eight_workers` 在 `determinism,ecs,multi_thread` 下比较 1 与 8 worker 的最终 `WorldSnapshot`、每个 retained history snapshot 的 `structurally_eq`，hash 只作辅助对照。`failed_ecs_commit_leaves_session_history_and_input_untouched` 验证未注册 snapshot component 时 World/history cursor、prediction、input timeline 和待处理输入均保持可重试状态；已有 replay-failure 测试继续覆盖权威回滚失败清理。该证据只覆盖单进程/in-process、注册了 clone/equality/hash glue 的测试 World；不等价于真实网络、跨平台硬件/浮点位级证明，也不覆盖未注册 snapshot glue 的业务 World。
+
+`pkg/prism_replication/tests/udp_acceptance.rs` 另有独立真实 loopback UDP 验收：fault proxy 丢弃首个 data 与反向 ACK，验证 ARQ 重传、顺序和 exactly-once；另一个测试关闭旧 socket，经显式 ticket 提交 peer rebind，验证候选端点在提交前被拒、稳定 peer id 保持、重连后双向收发恢复（`39bd3806a`、`0bf59f55a`、`c7201323e`、`d6000586b`）。这仍不是跨进程/跨机、公网、NAT/ICE、relay 或生产迁移证据。
 
 **网络审计也已有实际链路**：`pkg/prism_replication/src/plugin/audit.rs` 的 `FrameHashAudit` 审计有限保留窗口内的 **input 前 ECS `WorldSnapshot::state_hash()`**，不是 wire 记录哈希；`plugin/ecs.rs` 从 `SnapshotHistory` 同步，回滚修正后重新发布，client/server 通过可靠事件通道发送/接收帧哈希。单调序号区分修正与旧包，pending 合并并在 backpressure 后重试；重复冲突、未来/过期窗口与未送达过期均有显式结果。比较只给出**保留且已知共同 tick 内最早发散**，缺包/过期不代表相同，也不能证明没有更早发散。组件值仅覆盖已注册的语义 hash glue，clone-only 不提供语义哈希、资源须显式注册；双方 schema、实体 id、ticks 与存储布局须一致，哈希相等仍是概率性证据。回归入口 `plugin/audit/tests.rs` 与 `plugin/ecs/tests/audit_tests.rs` 已有源码，未在本次运行。
 
@@ -676,4 +680,13 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 本章职责对齐已有真实跨 crate 消费，不能再概括成「仅 ECS 侧实现」：§24.1 tasks lane/预算，§24.2 transform 空间消费者与原生 UI 桥，§24.3 动态 ABI/反射桥/字段策略/V3 prefab 存档，§24.4 原生 App 网络回滚与有限窗口审计均见上述入口；§23.5 App/渲染流水线也已有源码。**这些包含当前未提交实现，未在本次编译或重跑，机制存在不等于所有 feature/平台/失败路径验收完成。**
 
-完整目标继续保留：脏块的正常写入源发现已推进到 tick→chunk 索引，但 query 端到端、rebuild/restore/fallback、push 源轮询与 UI signal 扫描尚非统一的严格变化量成本；关系边收集/排序仍有全量项。音频原生 ECS/facade 已有局部验证，但 source-route、真实设备回调、场景 source-node 接线及场景/旧资产/编辑流程联合验收仍待完成。Linux NUMA 后端已有实现，但真实 Linux 成功路径、拓扑感知调度和 NUMA 性能证据仍待完成。受控性能回归门槛、真实 GPU 常驻/同步压测与跨平台浮点确定性证据仍不足；本次 replication 切片没有把 memory transport 当作真实 UDP/丢包/重连/跨进程验收。有限窗口/注册范围的哈希相等不能替代整个仿真链路正确性证明；主 App 接线、固定 tick、预测/和解/回滚、失败清理和 1/8 worker structural equality 仅有上述限定证据。本章仍用于固定职责与引用，而非将原范围缩减为现有机制清单。实现仅借鉴公开架构形态与经典数值，不引入 Unreal Engine / Unity 源码。
+完整目标继续保留：脏块的正常写入源发现已推进到 tick→chunk 索引，但 query 端到端、rebuild/restore/fallback、push 源轮询与 UI signal 扫描尚非统一的严格变化量成本；关系边收集/排序仍有全量项。音频 native ECS/source-route/scene adapter/full-chain 与 bounded event-log provider 已有实现，但真实 device callback、完整应用/旧资产/editor 工作流、durable replication recovery 及跨进程/跨机持久化仍待验收。NUMA acceptance gate 已有，但真实 Linux strict pass、ECS arena local-page proof、拓扑感知调度和 NUMA 性能仍未证明。GPU resident-column/physical-adapter gate、virtual-texture benchmark harness 与 CPU SDF planner 已有入口，但真实 GPU 通过、同步/收益压测和 GPU SDF sampling/ECS 集成仍未验证。真实 loopback UDP 的丢包、ACK、顺序/确传与 peer rebind 已有独立验收入口，但不覆盖跨机/NAT/ICE/relay/生产迁移。有限窗口/注册范围的哈希相等不能替代整个仿真链路正确性证明；主 App 接线、固定 tick、预测/和解/回滚、失败清理和 1/8 worker structural equality 仅有上述限定证据。本章仍用于固定职责与引用，而非将原范围缩减为现有机制清单。实现仅借鉴公开架构形态与经典数值，不引入 Unreal Engine / Unity 源码。
+
+### 24.6 当前 `main` 的实现/验证/未验证矩阵
+
+| 范围 | 已实现 | 已验证或已有验收入口 | 仍未验证/不可宣称 |
+|---|---|---|---|
+| UDP / ACK / rebind | 有限可靠 UDP、ACK 重传、候选端点与稳定 peer rebind | 真实 loopback fault-proxy 测试覆盖 data/ACK 丢包、顺序/exactly-once 与旧 socket 关闭后的 rebind | 跨进程/跨机、公网、NAT/ICE/relay、生产迁移与本轮重跑结果 |
+| NUMA / affinity | OS topology/affinity readback、worker outcome、arena fallback 语义；策略层拓扑模型 | `numa_acceptance` 入口；默认 `SKIPPED`，`PRISM_REQUIRE_NUMA=1` 严格失败 | 当前机器 Linux strict pass、ECS node-local pages、拓扑感知调度收益与 NUMA 性能 |
+| audio / event-log | audio source-route/scene adapter/full-chain；bounded memory/file event-log 与 replay bridge | 既有局部 unit/integration/full-chain 入口 | 真实设备回调、完整应用/旧资产/editor 联合流程、durable plugin recovery、跨进程/跨机持久化 |
+| GPU resident / benchmark / SDF | CPU resident-column extraction；physical-GPU gate；virtual-texture CPU/GPU benchmark harness（`3a8120874`、`0e7e67259`）；CPU deterministic SDF planner | resident-column readback、wgpu hardware-evidence、benchmark 入口均存在，缺设备明确 skip/strict fail | 当前真实 adapter 通过、GPU sync/upload benefit、性能数字、GPU SDF sampling/ECS 集成 |

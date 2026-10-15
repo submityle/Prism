@@ -650,12 +650,59 @@ pub fn evaluate_principled_direct_channels_with(
         r * r
     };
     let coat_f = fresnel_schlick([coat_f0; 3], v_dot_h);
-    let coat_specular = mul_scalar(
-        coat_f,
-        coat * distribution_ggx(n_dot_h, coat_alpha)
-            * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, coat_alpha)
-            * n_dot_l,
-    );
+    // `OpenPBR` `coat_normal` owns only the coat microfacet geometry. The base
+    // layer and its slab attenuation below intentionally keep the base normal,
+    // so a coat normal map cannot blacken or otherwise reshape the substrate.
+    let coat_n = coat_interface_normal(surface.coat_normal, n);
+    let coat_n_dot_h = dot(coat_n, h);
+    let coat_n_dot_v = dot(coat_n, v);
+    let coat_n_dot_l = dot(coat_n, l);
+    let (coat_d, coat_g) = if coat_n_dot_l > 0.0 && coat_n_dot_v > 0.0 && coat_n_dot_h > 0.0 {
+        let coat_anisotropy = surface.coat_roughness_anisotropy.clamp(0.0, 1.0);
+        if coat_anisotropy > 0.0 {
+            let (coat_tangent, coat_bitangent) = anisotropic_axes(
+                coat_n,
+                coat_tangent_or(surface.coat_tangent, frame.tangent),
+                coat_bitangent_or(surface.coat_tangent, coat_n, frame.tangent, frame.bitangent),
+                surface.anisotropy_rotation,
+            );
+            let (ax, ay) = openpbr_anisotropy_to_alpha(coat_alpha, coat_anisotropy);
+            (
+                distribution_ggx_anisotropic(
+                    dot(coat_tangent, h),
+                    dot(coat_bitangent, h),
+                    coat_n_dot_h,
+                    ax,
+                    ay,
+                ),
+                visibility_smith_ggx_anisotropic(
+                    dot(coat_tangent, v),
+                    dot(coat_bitangent, v),
+                    dot(coat_tangent, l),
+                    dot(coat_bitangent, l),
+                    coat_n_dot_v.max(MIN_N_DOT),
+                    coat_n_dot_l,
+                    ax,
+                    ay,
+                ),
+            )
+        } else {
+            // The zero-anisotropy path remains the historical isotropic coat.
+            (
+                distribution_ggx(coat_n_dot_h, coat_alpha),
+                visibility_smith_ggx_correlated(
+                    coat_n_dot_v.max(MIN_N_DOT),
+                    coat_n_dot_l,
+                    coat_alpha,
+                ),
+            )
+        }
+    } else {
+        // A coat interface facing away from either endpoint contributes no coat
+        // highlight, but the base response remains valid and is still evaluated.
+        (0.0, 0.0)
+    };
+    let coat_specular = mul_scalar(coat_f, coat * coat_d * coat_g * coat_n_dot_l);
     // Coat energy closure. The coat is a two-interface dielectric slab, so the
     // base keeps the closed-form slab transmittance
     // `t_slab = (1−f_v)(1−f_l)/(1−f_v·f_l)` and the coat must carry the
@@ -1034,6 +1081,47 @@ pub(crate) fn anisotropic_axes(
     let tangent = add(mul_scalar(tangent0, cos_r), mul_scalar(bitangent0, sin_r));
     let bitangent = sub(mul_scalar(bitangent0, cos_r), mul_scalar(tangent0, sin_r));
     (tangent, bitangent)
+}
+
+/// The coat interface normal, with the all-zero shade-time input as the exact
+/// identity sentinel for the base shading normal.
+#[inline]
+fn coat_interface_normal(coat_normal: [f32; 3], base_normal: [f32; 3]) -> [f32; 3] {
+    let [x, y, z] = coat_normal;
+    if x * x + y * y + z * z > 0.0 {
+        normalize_or(coat_normal, base_normal)
+    } else {
+        base_normal
+    }
+}
+
+/// The coat's optional anisotropy tangent, falling back to the base tangent
+/// when the shade-time input is absent.
+#[inline]
+fn coat_tangent_or(coat_tangent: [f32; 3], base_tangent: [f32; 3]) -> [f32; 3] {
+    let [x, y, z] = coat_tangent;
+    if x * x + y * y + z * z > 0.0 {
+        normalize_or(coat_tangent, base_tangent)
+    } else {
+        base_tangent
+    }
+}
+
+/// The coat bitangent paired with [`coat_tangent_or`], preserving the base
+/// frame when no independent coat tangent was authored.
+#[inline]
+fn coat_bitangent_or(
+    coat_tangent: [f32; 3],
+    coat_normal: [f32; 3],
+    base_tangent: [f32; 3],
+    base_bitangent: [f32; 3],
+) -> [f32; 3] {
+    let [x, y, z] = coat_tangent;
+    if x * x + y * y + z * z > 0.0 {
+        cross(coat_normal, normalize_or(coat_tangent, base_tangent))
+    } else {
+        base_bitangent
+    }
 }
 
 /// Anisotropic GGX/Trowbridge-Reitz distribution (UE `D_GGXaniso`). Reduces to
@@ -1768,6 +1856,86 @@ mod tests {
             },
         );
         assert_eq!(shadowed, [0.0; 3]);
+    }
+
+    #[test]
+    fn principled_coat_normal_changes_only_the_coat_highlight() {
+        let off_peak = DirectLightSample {
+            direction: normalize_or([0.6, 0.8, 0.0], [0.0, 1.0, 0.0]),
+            ..light()
+        };
+        let base = SurfaceSample {
+            clearcoat: 1.0,
+            clearcoat_roughness: 0.5,
+            ..Default::default()
+        };
+        let tilted_normal = normalize_or([0.6, 0.8, 0.0], [0.0, 1.0, 0.0]);
+        let full = |surface: SurfaceSample| evaluate_principled_direct(surface, frame(), off_peak);
+        let coat_only = |surface: SurfaceSample| {
+            evaluate_principled_direct(
+                SurfaceSample {
+                    base_weight: 0.0,
+                    ..surface
+                },
+                frame(),
+                off_peak,
+            )
+        };
+
+        let zero = full(base);
+        let tilted = full(SurfaceSample {
+            coat_normal: tilted_normal,
+            ..base
+        });
+        let zero_coat = coat_only(base);
+        let tilted_coat = coat_only(SurfaceSample {
+            coat_normal: tilted_normal,
+            ..base
+        });
+        assert!(
+            tilted_coat != zero_coat,
+            "the production principled coat must consume coat_normal"
+        );
+        for channel in 0..3 {
+            let full_delta = tilted[channel] - zero[channel];
+            let coat_delta = tilted_coat[channel] - zero_coat[channel];
+            assert!(
+                (full_delta - coat_delta).abs() < 2.0e-6,
+                "coat normal changed the base channel {channel}: full={zero:?}/{tilted:?}, coat={zero_coat:?}/{tilted_coat:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn principled_coat_tangent_drives_anisotropic_highlight() {
+        let off_peak = DirectLightSample {
+            direction: normalize_or([0.6, 0.8, 0.0], [0.0, 1.0, 0.0]),
+            ..light()
+        };
+        let isotropic_frame = frame();
+        let surface = SurfaceSample {
+            clearcoat: 1.0,
+            clearcoat_roughness: 0.5,
+            coat_roughness_anisotropy: 1.0,
+            ..Default::default()
+        };
+        let inherited = evaluate_principled_direct(surface, isotropic_frame, off_peak);
+        let rotated = evaluate_principled_direct(
+            SurfaceSample {
+                // A quarter-turn in the tangent plane makes the elongated axis
+                // follow the coat tangent instead of the base tangent.
+                coat_tangent: [0.0, 0.0, 1.0],
+                ..surface
+            },
+            isotropic_frame,
+            off_peak,
+        );
+        assert!(
+            (rotated[0] + rotated[1] + rotated[2] - inherited[0] - inherited[1] - inherited[2])
+                .abs()
+                > 1.0e-4,
+            "the production principled coat must consume coat_tangent: inherited={inherited:?} rotated={rotated:?}"
+        );
     }
 
     #[test]
