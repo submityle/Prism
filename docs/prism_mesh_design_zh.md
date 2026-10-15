@@ -190,9 +190,12 @@ crates/bevy_mesh                      Bevy 接入与兼容路径；原生 Prism 
 Mesh、静态 LOD、RenderApp Mesh、RenderScene 几何适配和几何表相关 Rust 源文件的 `rustfmt --check` 全部通过。
 真实 GPU 复核在沙盒外执行 `PRISM_REQUIRE_GPU=1 cargo test -p prism_virtual_geometry_gpu --test cluster_vertex_pull_parity -- --nocapture`，
 1 项通过，确认 CLST v3 顶点拉取与 `Unorm8x4` 属性解码经过真实 Metal render pass 并完成颜色读回。
-RenderApp Mesh 过滤测试本次仍未进入测试阶段：当前并行工作树新增的
-`pkg/prism_render_app/src/recovery.rs` 在 `:123` 声明了缺失的 `recovery/tests.rs`，并在 `:15`
-直接访问私有的 `render_asset::stage` 模块；这些恢复功能编译错误不属于 Mesh 实现，也未被计入 Mesh 通过项。
+RenderApp Mesh 过滤集已在当前工作树源码快照的隔离验证副本中执行：
+`CARGO_BUILD_JOBS=1 PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh:: --lib -- --nocapture`
+共 20 项全部通过，包含真实 GPU 绘制、half 属性、批量形变和 current/previous 历史读回。
+当前主工作树的完整 RenderApp 编译仍被并行 ECS 列同步改动在
+`pkg/prism_render_app/src/ecs_columns.rs:451` 读取不存在的 `ChunkInfo::incarnation` 所阻断；隔离副本只将
+该非 Mesh 字段读取替换为稳定的临时 chunk index，未修改 Mesh 生产代码，也未将该验证副本改动提交。
 
 ## 6. 核心数据模型：一件 Mesh 是什么
 
@@ -814,7 +817,7 @@ Source(FBX/USD/glTF) → Scene Source IR → Mesh IR
 测试分成“当前完成性证据”和“产品级持续回归协议”，两者不得混写：
 
 1. **当前 CPU 契约证据**：`cargo test -p prism_mesh` 的 34 项库单测、14 项集成测试通过，`cargo test -p prism_asset_build_core --lib` 的 136 项 library tests 通过；定向 `virtual_geometry_lod` 测试 12 项通过。覆盖属性/索引/拓扑、包围体、哈希、分流布局、批量形变、溢出拒绝、CLST v2/v3、12 种格式精确 gather、截断/损坏载荷、含属性分簇、压缩页、endpoint-QEM 实际简化、材质/缝/分类约束、版本化身份、f64 BVH 与跨尺度量化误差。
-2. **真实 GPU 证据**：已保存的 2026-10-15 沙盒外验证中，`PRISM_REQUIRE_GPU=1 cargo test -p prism_render_app mesh:: -- --nocapture` 的 Mesh 过滤集 20 项通过，其中标准与 half2/half4/附加颜色属性的 8×8 绘制、批量形变对照、current/previous 的 16×16 绘制实际执行 GPU 工作；数学蒙皮强制 parity 4 项通过；虚拟几何、GDeflate、OMM 强制 suites 通过。当前工作树新增的非 Mesh `recovery.rs` 编译错误使该 RenderApp 过滤命令无法再次进入测试阶段，因此本条保留已验证 GPU 证据，不把当前工作树的编译阻断误写成 Mesh 失败。CLST v3 整页 Metal storage roundtrip 逐字节一致只证明压缩/驻留/读取；`prism_virtual_geometry_gpu --test cluster_vertex_pull_parity` 已在真实 render pass 中从原始 CLST v3 字节解码位置与 `Unorm8x4` 属性并读回颜色，补足 shader 属性解码证据，但不扩写为完整场景材质 Golden 图结论。
+2. **真实 GPU 证据**：2026-10-15 沙盒外验证中，RenderApp Mesh 过滤集 20 项全部通过，其中标准与 half2/half4/附加颜色属性的 8×8 绘制、批量形变对照、current/previous 的 16×16 绘制实际执行 GPU 工作；数学蒙皮强制 parity 4 项通过；虚拟几何、GDeflate、OMM 强制 suites 通过。当前主工作树的完整 RenderApp 编译被非 Mesh 的 `ecs_columns.rs:451` API 不匹配阻断，20 项 Mesh 过滤集已在仅隔离该非 Mesh 编译问题的当前源码副本中完成验证；不把临时副本改动计入产品实现。CLST v3 整页 Metal storage roundtrip 逐字节一致只证明压缩/驻留/读取；`prism_virtual_geometry_gpu --test cluster_vertex_pull_parity` 已在真实 render pass 中从原始 CLST v3 字节解码位置与 `Unorm8x4` 属性并读回颜色，补足 shader 属性解码证据，但不扩写为完整场景材质 Golden 图结论。
 3. **产品级图像回归协议**：标准网格、虚拟几何、蒙皮、Morph、LOD 过渡按质量档采集 Golden 图和 TAA 稳定性帧；只有生成捕获物并通过误差阈值时才形成图像质量结论。
 4. **产品级压力协议**：百万级 Cluster、极端顶点数、极端尺度、非有限输入、退化/越界索引和超预算场景按固定种子执行；结果必须绑定测试日志与捕获物。
 5. **确定性协议**：同输入多次构建哈希一致、不同线程数结果一致；跨平台差异必须由版本化量化规则解释并记录。
