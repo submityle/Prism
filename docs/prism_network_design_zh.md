@@ -587,11 +587,11 @@ M4 预测与和解: 客户端预测 + 回滚重放 + 快照插值/受限外推 +
 M5 延迟补偿: 历史位姿环 + 回溯命中 + 窗口有界(lag_comp)（✅纯逻辑 AABB 射线核；🚧接入权威 ECS/窄相碰撞与跨机验证）
 M6 反作弊接缝: 权威回路钩子点 + 确定性对账根基（🚧hash audit 已有；provider/策略未完成）
 M7 规模: 服务器网格分片 + 权威移交 + 过载降级 + 容灾(server_mesh)（✅有界控制面、provider/node 协调与快照恢复；🚧真实跨机传输/成员发现/共识/容灾验收）
-M8 工具: 事件流录制/回放 + 网络剖析 + 预测可视化 + QUIC 适配（⬜未实现；QUIC 未接入）
+M8 工具: 事件流录制/回放 + 网络剖析 + 预测可视化 + QUIC 适配（🚧 网络剖析 telemetry 已落地；事件流 replay、durable journal 接缝、预测可视化和 QUIC 仍未接入）
 M9 后端 provider: `EventLogBackend`/`FileJournal` 本地 durable 核心 + uwu_event_mesh 适配(durable log/游标/DLQ/timeline) 作权威事件流/回放/编排可选后端(evmesh,仅服务端)（✅本地核心；⬜evmesh 适配）
 ```
 
-基准即规格（全部 design target，本机无多端实测，如实标注）：每客户端稳态带宽、支持并发连接数、权威 tick 率、端到端输入延迟（预测隐藏后感知）、回滚重放帧数上限、延迟补偿窗口、分片移交无中断时长。可验证的 CPU 纯函数部分（定序/CRDT/delta/量化/回滚）设确定性单测门槛。
+基准即规格（全部 design target，本机无多端实测，如实标注）：每客户端稳态带宽、支持并发连接数、权威 tick 率、端到端输入延迟（预测隐藏后感知）、回滚重放帧数上限、延迟补偿窗口、分片移交无中断时长。可验证的 CPU 纯函数部分（定序/CRDT/delta/量化/回滚）设确定性单测门槛。当前 `ChannelMux::telemetry()` 已提供无分配、按通道的包/字节/消息/丢弃/背压/重传统计，以及 RTT、拥塞窗口、in-flight、unreliable budget 和队列深度快照；它是诊断采样接缝，不等同于网络后端、事件流回放或预测可视化。
 
 诚实边界：
 

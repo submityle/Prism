@@ -114,6 +114,10 @@ pub mod reliable;
 
 pub mod multiplex;
 
+pub mod net_diagnostics;
+
+pub mod replay;
+
 pub mod frame;
 
 pub mod session;

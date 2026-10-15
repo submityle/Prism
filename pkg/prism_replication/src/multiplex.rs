@@ -11,6 +11,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
 use crate::arq::{ReliableReceiver, ReliableSender};
+use crate::net_diagnostics::{MuxTelemetrySnapshot, NetTelemetry};
 use crate::transport::{Transport, TransportSecurity};
 
 const WIRE_VERSION: u8 = 1;
@@ -425,6 +426,7 @@ pub struct ChannelMux<D: Transport> {
     flights: BTreeMap<(NetChannel, u64), Flight>,
     now: u64,
     stats: MuxStats,
+    telemetry: NetTelemetry,
 }
 
 impl<D: Transport> ChannelMux<D> {
@@ -444,6 +446,7 @@ impl<D: Transport> ChannelMux<D> {
             flights: BTreeMap::new(),
             now: 0,
             stats: MuxStats::default(),
+            telemetry: NetTelemetry::default(),
         }
     }
 
@@ -474,9 +477,11 @@ impl<D: Transport> ChannelMux<D> {
             let lane = self.reliable_lane_mut(channel);
             if lane.pending.len() >= queue_limit {
                 self.stats.backpressure_events = self.stats.backpressure_events.saturating_add(1);
+                self.telemetry.record_backpressure(channel);
                 return Err(MuxSendError::Backpressured(channel));
             }
             lane.pending.push_back(payload.to_vec());
+            self.telemetry.record_accepted(channel);
             return Ok(QueueOutcome::Queued);
         }
 
@@ -484,8 +489,11 @@ impl<D: Transport> ChannelMux<D> {
             NetChannel::StateUnreliable => {
                 let replaced = self.state.pending.pop_back().is_some();
                 self.state.pending.push_back(payload.to_vec());
+                self.telemetry.record_accepted(NetChannel::StateUnreliable);
                 if replaced {
                     self.stats.unreliable_dropped = self.stats.unreliable_dropped.saturating_add(1);
+                    self.telemetry
+                        .record_dropped(NetChannel::StateUnreliable, 1);
                     Ok(QueueOutcome::ReplacedOlder)
                 } else {
                     Ok(QueueOutcome::Queued)
@@ -495,11 +503,14 @@ impl<D: Transport> ChannelMux<D> {
                 let replaced = if self.input.pending.len() >= self.config.input_queue {
                     self.input.pending.pop_front();
                     self.stats.unreliable_dropped = self.stats.unreliable_dropped.saturating_add(1);
+                    self.telemetry
+                        .record_dropped(NetChannel::InputUnreliable, 1);
                     true
                 } else {
                     false
                 };
                 self.input.pending.push_back(payload.to_vec());
+                self.telemetry.record_accepted(NetChannel::InputUnreliable);
                 Ok(if replaced {
                     QueueOutcome::ReplacedOlder
                 } else {
@@ -590,6 +601,26 @@ impl<D: Transport> ChannelMux<D> {
         self.stats
     }
 
+    /// Copy a bounded numeric telemetry snapshot for diagnostics or profiling.
+    #[must_use]
+    pub fn telemetry(&self) -> MuxTelemetrySnapshot {
+        let queued_messages = [
+            self.queued(NetChannel::EventsReliable),
+            self.queued(NetChannel::StateUnreliable),
+            self.queued(NetChannel::InputUnreliable),
+            self.queued(NetChannel::RpcReliable),
+            self.queued(NetChannel::BulkReliable),
+        ];
+        self.telemetry.snapshot(
+            self.now,
+            self.congestion.bytes_in_flight,
+            self.congestion.cwnd,
+            self.congestion.unreliable_budget(),
+            self.congestion.min_rtt,
+            queued_messages,
+        )
+    }
+
     /// Messages accepted on `channel` but not yet acknowledged by the peer.
     /// For unreliable channels this is the number waiting for the next send
     /// budget; delivered unreliable messages are never tracked as outstanding.
@@ -641,13 +672,16 @@ impl<D: Transport> ChannelMux<D> {
         while let Some(packet) = self.datagram.recv() {
             if packet.len() > self.config.path_mtu {
                 self.stats.malformed_datagrams = self.stats.malformed_datagrams.saturating_add(1);
+                self.telemetry.record_malformed();
                 continue;
             }
             let Some((kind, channel, seq, payload)) = decode_packet(&packet) else {
                 self.stats.malformed_datagrams = self.stats.malformed_datagrams.saturating_add(1);
+                self.telemetry.record_malformed();
                 continue;
             };
             self.stats.datagrams_received = self.stats.datagrams_received.saturating_add(1);
+            self.telemetry.record_received(channel, packet.len());
             if kind == KIND_ACK {
                 if channel.is_reliable()
                     && self.reliable_lane_mut(channel).sender.ack(seq, now)
@@ -663,48 +697,69 @@ impl<D: Transport> ChannelMux<D> {
             }
             if kind != KIND_DATA {
                 self.stats.malformed_datagrams = self.stats.malformed_datagrams.saturating_add(1);
+                self.telemetry.record_malformed();
                 continue;
             }
 
             if channel.is_reliable() {
                 let queue_limit = self.config.reliable_queue;
-                let lane = self.reliable_lane_mut(channel);
                 // Do not acknowledge new data when the application stops
                 // consuming. A contiguous run can release at most one receive
                 // window in addition to this bounded delivery queue. Stale
                 // packets are still re-ACKed so a lost ACK cannot stall a peer.
-                if lane.inbound.len() >= queue_limit && seq >= lane.receiver.next() {
+                let queue_full = {
+                    let lane = self.reliable_lane(channel);
+                    lane.inbound.len() >= queue_limit && seq >= lane.receiver.next()
+                };
+                if queue_full {
+                    self.telemetry.record_dropped(channel, 1);
                     continue;
                 }
-                let (delivered, ack) = lane.receiver.receive(seq, payload.to_vec());
-                lane.inbound.extend(delivered);
+                let (delivered_count, ack) = {
+                    let lane = self.reliable_lane_mut(channel);
+                    let (delivered, ack) = lane.receiver.receive(seq, payload.to_vec());
+                    let delivered_count = delivered.len();
+                    lane.inbound.extend(delivered);
+                    (delivered_count, ack)
+                };
+                self.telemetry.record_delivered(channel, delivered_count);
                 if let Some(ack) = ack {
                     let packet = encode_packet(KIND_ACK, channel, ack, &[]);
                     self.datagram.send(&packet);
                     self.stats.datagrams_sent = self.stats.datagrams_sent.saturating_add(1);
+                    self.telemetry
+                        .record_sent(channel, packet.len(), false, false);
                 }
             } else {
-                let lane = match channel {
-                    NetChannel::StateUnreliable => &mut self.state,
-                    NetChannel::InputUnreliable => &mut self.input,
-                    _ => unreachable!(),
-                };
-                if lane.newest_received.is_none_or(|newest| seq > newest) {
-                    lane.newest_received = Some(seq);
-                    if channel == NetChannel::StateUnreliable {
-                        if !lane.inbound.is_empty() {
-                            self.stats.unreliable_dropped =
-                                self.stats.unreliable_dropped.saturating_add(1);
+                let (dropped, delivered) = {
+                    let lane = match channel {
+                        NetChannel::StateUnreliable => &mut self.state,
+                        NetChannel::InputUnreliable => &mut self.input,
+                        _ => unreachable!(),
+                    };
+                    if lane.newest_received.is_none_or(|newest| seq > newest) {
+                        lane.newest_received = Some(seq);
+                        let mut dropped = 0;
+                        if channel == NetChannel::StateUnreliable {
+                            dropped = lane.inbound.len();
+                            lane.inbound.clear();
+                        } else if lane.inbound.len() >= self.config.input_queue {
+                            lane.inbound.pop_front();
+                            dropped = 1;
                         }
-                        lane.inbound.clear();
-                    } else if lane.inbound.len() >= self.config.input_queue {
-                        lane.inbound.pop_front();
-                        self.stats.unreliable_dropped =
-                            self.stats.unreliable_dropped.saturating_add(1);
+                        lane.inbound.push_back(payload.to_vec());
+                        (dropped, 1)
+                    } else {
+                        (1, 0)
                     }
-                    lane.inbound.push_back(payload.to_vec());
-                } else {
-                    self.stats.unreliable_dropped = self.stats.unreliable_dropped.saturating_add(1);
+                };
+                if dropped > 0 {
+                    self.stats.unreliable_dropped =
+                        self.stats.unreliable_dropped.saturating_add(dropped as u64);
+                    self.telemetry.record_dropped(channel, dropped);
+                }
+                if delivered > 0 {
+                    self.telemetry.record_delivered(channel, delivered);
                 }
             }
         }
@@ -770,6 +825,10 @@ impl<D: Transport> ChannelMux<D> {
                 .sender
                 .tick(now, &mut outgoing);
             for (seq, payload) in outgoing {
+                let retransmission = self
+                    .flights
+                    .get(&(channel, seq))
+                    .is_some_and(|flight| flight.transmissions > 0);
                 if let Some(flight) = self.flights.get_mut(&(channel, seq)) {
                     if flight.transmissions > 0 {
                         self.congestion.loss();
@@ -780,6 +839,8 @@ impl<D: Transport> ChannelMux<D> {
                 let packet = encode_packet(KIND_DATA, channel, seq, &payload);
                 self.datagram.send(&packet);
                 self.stats.datagrams_sent = self.stats.datagrams_sent.saturating_add(1);
+                self.telemetry
+                    .record_sent(channel, packet.len(), !retransmission, retransmission);
             }
         }
     }
@@ -816,6 +877,8 @@ impl<D: Transport> ChannelMux<D> {
                 let packet = encode_packet(KIND_DATA, channel, seq, &payload);
                 self.datagram.send(&packet);
                 self.stats.datagrams_sent = self.stats.datagrams_sent.saturating_add(1);
+                self.telemetry
+                    .record_sent(channel, packet.len(), true, false);
                 budget -= wire_len;
             }
         }
@@ -1051,6 +1114,55 @@ mod tests {
             Err(MuxSendError::Backpressured(NetChannel::EventsReliable))
         );
         assert_eq!(mux.stats().backpressure_events, 1);
+    }
+
+    #[test]
+    fn telemetry_tracks_loopback_packets_messages_and_backpressure() {
+        let config = MuxConfig {
+            reliable_queue: 1,
+            ..MuxConfig::default()
+        };
+        let mut a = ChannelMux::new(MockTransport::default(), config);
+        let mut b = ChannelMux::new(MockTransport::default(), config);
+
+        a.send(NetChannel::EventsReliable, b"event").unwrap();
+        assert_eq!(
+            a.send(NetChannel::EventsReliable, b"blocked"),
+            Err(MuxSendError::Backpressured(NetChannel::EventsReliable))
+        );
+        a.tick();
+        let sent = a.telemetry();
+        assert_eq!(sent.datagrams_sent, 1);
+        assert_eq!(
+            sent.channel(NetChannel::EventsReliable).messages_accepted,
+            1
+        );
+        assert_eq!(sent.channel(NetChannel::EventsReliable).messages_sent, 1);
+        assert_eq!(
+            sent.channel(NetChannel::EventsReliable).backpressure_events,
+            1
+        );
+
+        exchange(&mut a, &mut b);
+        b.tick();
+        assert_eq!(b.recv(NetChannel::EventsReliable), Some(b"event".to_vec()));
+        let received = b.telemetry();
+        assert_eq!(received.datagrams_received, 1);
+        assert_eq!(
+            received
+                .channel(NetChannel::EventsReliable)
+                .messages_received,
+            1
+        );
+        assert_eq!(
+            received.channel(NetChannel::EventsReliable).messages_sent,
+            0
+        );
+
+        exchange(&mut a, &mut b);
+        a.tick();
+        assert_eq!(a.telemetry().bytes_in_flight, 0);
+        assert_eq!(a.telemetry().datagrams_received, 1);
     }
 
     #[test]
