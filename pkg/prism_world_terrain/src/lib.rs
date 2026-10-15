@@ -18,6 +18,9 @@ mod planet_mesh;
 mod rebake;
 mod representation;
 mod stream_adapter;
+mod surface;
+#[cfg(test)]
+mod surface_tests;
 mod tile;
 mod volume_bake;
 mod voxel;
@@ -41,6 +44,7 @@ pub use representation::{
     TerrainRepresentationSelector, VoxelSpec,
 };
 pub use stream_adapter::{TerrainStreamAdapter, TerrainStreamConfig, TerrainStreamError};
+pub use surface::{SdfSurfaceMesh, SurfaceCost, SurfaceError, SurfaceGeometry, SurfaceLimits};
 pub use tile::{TileEdge, TileError, TileKey, TileQuadrant, MAX_TILE_LEVEL};
 pub use volume_bake::{
     quantize_sdf_mm, SdfField, SdfGrid, SdfGridChange, VolumeBakeCost, VolumeBakeError,

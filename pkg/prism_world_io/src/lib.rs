@@ -557,7 +557,10 @@ mod std_support {
         cancelled: bool,
     }
 
-    pub(super) fn read_chunk_fully<R: Read>(reader: &mut R, bytes: &mut [u8]) -> Result<(), IoError> {
+    pub(super) fn read_chunk_fully<R: Read>(
+        reader: &mut R,
+        bytes: &mut [u8],
+    ) -> Result<(), IoError> {
         let mut actual = 0;
         while actual < bytes.len() {
             match reader.read(&mut bytes[actual..]) {
@@ -641,6 +644,14 @@ mod std_support {
 
 #[cfg(feature = "std")]
 pub use std_support::{FileProviderExport as FileProvider, IoSchedulerExport as IoScheduler};
+
+#[cfg(feature = "std")]
+mod threaded_file;
+#[cfg(feature = "std")]
+pub use threaded_file::{ThreadedFileConfig, ThreadedFileProvider, ThreadedFileReadOperation};
+
+#[cfg(all(test, feature = "std"))]
+mod threaded_file_tests;
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
