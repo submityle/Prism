@@ -169,7 +169,8 @@ pub mod prelude {
     pub use crate::partition::world_partition::WorldPartition;
     pub use crate::prefab::IsA;
     pub use crate::query::{
-        Added, AnyOf, Changed, Has, Or, QueryEntityError, QuerySingleError, With, Without,
+        Added, AnyOf, Changed, DirtyChunk, DirtyChunkReport, DirtyChunkStats, Has, Or,
+        QueryEntityError, QuerySingleError, With, Without,
     };
     pub use crate::reaction::{NodeId, ReactionGraph};
     pub use crate::relation::{

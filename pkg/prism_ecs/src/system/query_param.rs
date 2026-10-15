@@ -20,8 +20,8 @@ use core::ptr::NonNull;
 
 use crate::entity::Entity;
 use crate::query::{
-    Access, QueryData, QueryEntityError, QueryFilter, QueryIter, QueryManyIter, QuerySingleError,
-    QueryState, ReadOnlyQueryData,
+    Access, DirtyChunkReport, QueryData, QueryEntityError, QueryFilter, QueryIter, QueryManyIter,
+    QuerySingleError, QueryState, ReadOnlyQueryData,
 };
 #[cfg(feature = "multi_thread")]
 use crate::query::{ArchetypalFilter, ColumnSliceData};
@@ -289,6 +289,17 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         let world: &World = unsafe { &*self.world.as_ptr() };
         self.state()
             .dirty_chunks(world, self.world.last_run(), self.world.this_run())
+    }
+
+    /// The coarse dirty windows plus measurable traversal counters for this
+    /// system's own change window. The report is still conservative; exact
+    /// entity changes belong to `Changed<T>` or `World::observe_changed`.
+    #[inline]
+    pub fn dirty_chunks_with_stats(&self) -> DirtyChunkReport {
+        // SAFETY: same world and scheduler guarantees as `dirty_chunks`.
+        let world: &World = unsafe { &*self.world.as_ptr() };
+        self.state()
+            .dirty_chunks_with_stats(world, self.world.last_run(), self.world.this_run())
     }
 
     /// Iterate a caller-provided entity list with exclusive access, permitting

@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use crate::change::Tick;
 use crate::component::Component;
 use crate::entity::Entity;
-use crate::query::{Changed, DirtyChunk};
+use crate::query::{Changed, DirtyChunk, With};
 use crate::storage::rows_per_chunk;
 use crate::world::World;
 
@@ -246,4 +246,52 @@ fn write_set_component_marks_chunk_dirty_for_read_query() {
     // {Big, Marker} share one rpc from the summed row bytes
     // (4096 + 4 = 4100 => 16 KiB / 4100 = 3 rows per chunk), so chunk 0 is [0,3).
     assert_eq!((dirty_marker[0].start, dirty_marker[0].end), (0, 3));
+}
+
+#[test]
+fn multiple_access_columns_merge_the_same_chunk_once() {
+    #[derive(Clone, Copy)]
+    struct Marker(u32);
+    impl Component for Marker {}
+
+    let mut w = World::new();
+    let entities: Vec<Entity> = (0..6).map(|i| w.spawn((Big::new(i), Marker(0)))).collect();
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+    w.get_mut::<Big>(entities[0]).unwrap().tag += 1;
+    w.get_mut::<Marker>(entities[1]).unwrap().0 += 1;
+
+    let state = w.query::<(&Big, &Marker)>();
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(report.chunks.len(), 1, "both columns share one chunk");
+    assert_eq!(report.stats.table_columns, 2);
+    assert_eq!(report.stats.column_candidates, 2);
+    assert_eq!(report.stats.merged_candidates, 1);
+    assert_eq!(report.stats.reported_chunks, 1);
+}
+
+#[test]
+fn filter_chunk_rejects_a_changed_column_that_is_not_in_the_filter_window() {
+    #[derive(Clone, Copy)]
+    struct NeverChanged;
+    impl Component for NeverChanged {}
+
+    let mut w = World::new();
+    let entities: Vec<Entity> = (0..10)
+        .map(|i| w.spawn((Big::new(i), NeverChanged)))
+        .collect();
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+    w.get_mut::<Big>(entities[1]).unwrap().tag += 1;
+
+    // The access column is dirty, but the independent Changed filter is clean
+    // for a different component present on every row. It must conservatively
+    // reject the merged chunk instead of manufacturing a dirty result.
+    let state = w.query_filtered::<&Big, (With<Big>, Changed<NeverChanged>)>();
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert!(report.chunks.is_empty());
+    assert_eq!(report.stats.merged_candidates, 1);
+    assert_eq!(report.stats.filter_rejected, 1);
 }

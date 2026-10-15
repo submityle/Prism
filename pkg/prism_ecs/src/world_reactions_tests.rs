@@ -60,6 +60,28 @@ fn component_changes_settle_a_diamond_once_with_consistent_inputs() {
 }
 
 #[test]
+fn reaction_batch_is_the_exact_entity_boundary_after_coarse_query_discovery() {
+    let mut world = World::new();
+    let first = world.spawn(Input(1));
+    let second = world.spawn(Input(2));
+    let source = world.reaction_source::<Input>();
+    let delivered = alloc::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let delivered_copy = delivered.clone();
+    world.add_reaction(&[source], move |world| {
+        delivered_copy
+            .lock()
+            .unwrap()
+            .push(world.reaction_changes(source).to_vec());
+    });
+
+    world.get_mut::<Input>(second).unwrap().0 += 1;
+    world.get_mut::<Input>(first).unwrap().0 += 1;
+    world.get_mut::<Input>(first).unwrap().0 += 1;
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(*delivered.lock().unwrap(), vec![vec![first, second]]);
+}
+
+#[test]
 fn unrelated_sources_and_equal_writes_do_not_execute_effects() {
     let mut world = World::new();
     let entity = world.spawn((Input(1), SparseInput(5)));

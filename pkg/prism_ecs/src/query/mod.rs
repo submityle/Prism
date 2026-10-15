@@ -35,7 +35,7 @@ mod state;
 
 pub use access::Access;
 pub use combinations::QueryCombinationsIter;
-pub use dirty::DirtyChunk;
+pub use dirty::{DirtyChunk, DirtyChunkReport, DirtyChunkStats};
 pub use fetch::{AnyOf, Has, QueryData, ReadOnlyQueryData};
 pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
 pub use iter::QueryIter;

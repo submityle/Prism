@@ -139,7 +139,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     /// component ids as this query's types, which is undefined behaviour.
     /// Panicking on misuse is the only sound option for a safe API.
     #[inline]
-    fn validate_world(&self, world: &World) {
+    pub(crate) fn validate_world(&self, world: &World) {
         assert_eq!(
             self.world_id,
             world.id(),
@@ -152,6 +152,12 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     #[inline]
     pub fn access(&self) -> &Access {
         &self.access
+    }
+
+    /// Resolved filter state for query-internal incremental consumers.
+    #[inline]
+    pub(crate) fn filter_state(&self) -> &F::State {
+        &self.filter_state
     }
 
     /// Whether `entity` is matched by this query (live and satisfying every
