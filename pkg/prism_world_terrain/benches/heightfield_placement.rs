@@ -609,7 +609,10 @@ fn benchmark(surface: &PlanarHeightfieldSurface, field: &ScatterDensityField, ra
 
 fn main() {
     if cfg!(debug_assertions) {
-        panic!("run this benchmark with a release/bench profile");
+        eprintln!(
+            "heightfield_placement: skipped under debug; run with cargo bench for release measurements"
+        );
+        return;
     }
     println!("# CPU host wall clock only; release; per case {WARMUP} warmups + {SAMPLES} samples; nearest-rank P50/P95/P99 (ranks16/31/32); no timing pass/fail threshold");
     println!("# Timed: black_box complete production scatter_on_heightfield call including two output allocations; excludes fixture/oracle construction, Result handling, all validation, printing and drops");

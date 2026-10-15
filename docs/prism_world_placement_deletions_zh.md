@@ -127,6 +127,11 @@ cargo bench --offline --locked -j1 -p prism_world_runtime --features placement -
 
 本切片只交付 CPU 放置删除及权威字段持久恢复，不是 GPU 二维贴地放置、风/交互、
 产品 scene decoder/render graph 接线、蓝噪声质量保证或整个 World 系统验收。
+runtime 对完整 World Partition 的边界由 `WorldPartitionCapability::require` 明确表达：
+当前只接受 cell streaming、manifest reload、eviction 和 trace replay；Data Layers、
+HLOD、OFPA、Level Instance、跨 cell 引用、world-origin rebasing、多人 handoff、
+跨资源崩溃原子性和完整 World Partition 均返回
+`WorldPartitionCapabilityError::Unsupported { capability }`，不会静默降级或伪装已实现。
 
 ## 定向验收与测量口径
 

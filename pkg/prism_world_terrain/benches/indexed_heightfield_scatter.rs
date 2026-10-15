@@ -369,7 +369,10 @@ fn benchmark(surface: &PlanarHeightfieldSurface, overlap: bool) {
 
 fn main() {
     if cfg!(debug_assertions) {
-        panic!("run this benchmark with a release/bench profile");
+        eprintln!(
+            "indexed_heightfield_scatter: skipped under debug; run with cargo bench for release measurements"
+        );
+        return;
     }
     println!("# CPU host wall clock only; release; {WARMUP} warmup pairs + {SAMPLES} measured pairs; alternating AB/BA; nearest-rank P50/P95/P99 (ranks16/31/32); no performance pass/fail threshold");
     println!("# Timed: complete production scatter call (source+field+terrain), output Vec allocations included; construction, reference generation, full result/capacity checks, printing and drops excluded");

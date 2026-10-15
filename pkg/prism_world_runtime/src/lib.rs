@@ -18,6 +18,8 @@ use prism_world_stream::{CellManifest, DemandSource, SectorId, StreamAction, Str
 
 mod routed_io;
 pub use routed_io::RoutedCellIo;
+mod world_partition_capability;
+pub use world_partition_capability::{WorldPartitionCapability, WorldPartitionCapabilityError};
 #[cfg(feature = "placement")]
 mod placement_persist;
 #[cfg(feature = "placement")]
