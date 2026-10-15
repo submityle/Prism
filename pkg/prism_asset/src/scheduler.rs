@@ -154,8 +154,17 @@ struct SchedulerState {
     in_flight: BTreeMap<FlightKey, Arc<Flight>>,
     running: BTreeMap<FlightKey, Arc<Flight>>,
     queued: VecDeque<QueuedFlight>,
-    admission_waiters: Vec<(Arc<()>, Priority, Waker)>,
+    admission_waiters: Vec<AdmissionWaiter>,
+    next_admission_seq: u64,
     next_reload_serial: u64,
+}
+
+struct AdmissionWaiter {
+    token: Arc<()>,
+    priority: Priority,
+    seq: u64,
+    waker: Waker,
+    granted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -236,6 +245,7 @@ impl LoadScheduler {
                 running: BTreeMap::new(),
                 queued: VecDeque::new(),
                 admission_waiters: Vec::new(),
+                next_admission_seq: 0,
                 next_reload_serial: 0,
             })),
         }
@@ -511,7 +521,7 @@ impl LoadScheduler {
                 state.in_flight.remove(&key);
             }
             let queued = self.admit_queued_locked(&mut state);
-            let admission_wakers = self.take_admission_wakers_locked(&mut state);
+            let admission_wakers = self.grant_admission_locked(&mut state);
             (wakers, admission_wakers, queued)
         };
         Flight::wake_all(wakers);
@@ -562,7 +572,7 @@ impl LoadScheduler {
                 state.running.remove(key);
             }
             let queued = self.admit_queued_locked(&mut state);
-            let admission_wakers = self.take_admission_wakers_locked(&mut state);
+            let admission_wakers = self.grant_admission_locked(&mut state);
             (admission_wakers, queued)
         };
         for queued in queued {
@@ -592,21 +602,41 @@ impl LoadScheduler {
         }
     }
 
-    fn take_admission_wakers_locked(&self, state: &mut SchedulerState) -> Vec<Waker> {
-        let available = self.limit.saturating_sub(state.running.len());
+    /// Reserve available execution slots for the highest-priority waiters.
+    ///
+    /// The waiter stays in the admission list until it polls again and consumes
+    /// its reservation. This is an explicit handoff: a newly-created waiter
+    /// cannot observe the temporarily-free slot and bypass a waiter that has
+    /// already been selected. Wakers are returned for notification after the
+    /// scheduler lock is released.
+    fn grant_admission_locked(&self, state: &mut SchedulerState) -> Vec<Waker> {
+        let granted = state
+            .admission_waiters
+            .iter()
+            .filter(|waiter| waiter.granted)
+            .count();
+        let available = self
+            .limit
+            .saturating_sub(state.running.len().saturating_add(granted));
         let mut wakers = Vec::with_capacity(available.min(state.admission_waiters.len()));
         for _ in 0..available {
             let Some(index) = state
                 .admission_waiters
                 .iter()
                 .enumerate()
-                .max_by_key(|(_, (_, priority, _))| *priority)
+                .filter(|(_, waiter)| !waiter.granted)
+                .max_by(|(_, left), (_, right)| {
+                    left.priority
+                        .cmp(&right.priority)
+                        .then_with(|| right.seq.cmp(&left.seq))
+                })
                 .map(|(index, _)| index)
             else {
                 break;
             };
-            let (_, _, waker) = state.admission_waiters.remove(index);
-            wakers.push(waker);
+            let waiter = &mut state.admission_waiters[index];
+            waiter.granted = true;
+            wakers.push(waiter.waker.clone());
         }
         wakers
     }
@@ -849,50 +879,117 @@ impl Future for ExecutionSlotFuture {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let mut state = this
-            .scheduler
-            .state
-            .lock()
-            .expect("load scheduler poisoned");
-        if state.running.len() < this.scheduler.limit && state.queued.is_empty() {
-            state
-                .running
-                .insert(this.key.clone(), Arc::clone(&this.flight));
-            state
+        let (result, wakers) = {
+            let mut state = this
+                .scheduler
+                .state
+                .lock()
+                .expect("load scheduler poisoned");
+            let own_index = state
                 .admission_waiters
-                .retain(|(token, _, _)| !Arc::ptr_eq(token, &this.token));
-            return Poll::Ready(());
-        }
-        if let Some((_, priority, waker)) = state
-            .admission_waiters
-            .iter_mut()
-            .find(|(token, _, _)| Arc::ptr_eq(token, &this.token))
-        {
-            *priority = this.priority;
-            if !waker.will_wake(cx.waker()) {
-                *waker = cx.waker().clone();
+                .iter()
+                .position(|waiter| Arc::ptr_eq(&waiter.token, &this.token));
+
+            if own_index.is_some_and(|index| state.admission_waiters[index].granted) {
+                let index = own_index.expect("granted waiter must have an index");
+                state.admission_waiters.remove(index);
+                state
+                    .running
+                    .insert(this.key.clone(), Arc::clone(&this.flight));
+                (Poll::Ready(()), Vec::new())
+            } else if own_index.is_none()
+                && state.running.len() < this.scheduler.limit
+                && state.queued.is_empty()
+                && state.admission_waiters.is_empty()
+            {
+                state
+                    .running
+                    .insert(this.key.clone(), Arc::clone(&this.flight));
+                (Poll::Ready(()), Vec::new())
+            } else {
+                if let Some(index) = own_index {
+                    let waiter = &mut state.admission_waiters[index];
+                    waiter.priority = this.priority;
+                    if !waiter.waker.will_wake(cx.waker()) {
+                        waiter.waker = cx.waker().clone();
+                    }
+                } else {
+                    let seq = state.next_admission_seq;
+                    state.next_admission_seq = state.next_admission_seq.saturating_add(1);
+                    state.admission_waiters.push(AdmissionWaiter {
+                        token: Arc::clone(&this.token),
+                        priority: this.priority,
+                        seq,
+                        waker: cx.waker().clone(),
+                        granted: false,
+                    });
+                }
+                let wakers = if state.queued.is_empty() {
+                    this.scheduler.grant_admission_locked(&mut state)
+                } else {
+                    Vec::new()
+                };
+                let own_granted = state
+                    .admission_waiters
+                    .iter()
+                    .position(|waiter| Arc::ptr_eq(&waiter.token, &this.token))
+                    .is_some_and(|index| state.admission_waiters[index].granted);
+                if own_granted {
+                    let index = state
+                        .admission_waiters
+                        .iter()
+                        .position(|waiter| Arc::ptr_eq(&waiter.token, &this.token))
+                        .expect("granted waiter must have an index");
+                    state.admission_waiters.remove(index);
+                    state
+                        .running
+                        .insert(this.key.clone(), Arc::clone(&this.flight));
+                    (Poll::Ready(()), wakers)
+                } else {
+                    (Poll::Pending, wakers)
+                }
             }
-        } else {
-            state.admission_waiters.push((
-                Arc::clone(&this.token),
-                this.priority,
-                cx.waker().clone(),
-            ));
-        }
-        Poll::Pending
+        };
+        Flight::wake_all(wakers);
+        result
     }
 }
 
 impl Drop for ExecutionSlotFuture {
     fn drop(&mut self) {
-        let mut state = self
-            .scheduler
-            .state
-            .lock()
-            .expect("load scheduler poisoned");
-        state
-            .admission_waiters
-            .retain(|(token, _, _)| !Arc::ptr_eq(token, &self.token));
+        let (wakers, queued) = {
+            let mut state = self
+                .scheduler
+                .state
+                .lock()
+                .expect("load scheduler poisoned");
+            let was_granted = state
+                .admission_waiters
+                .iter()
+                .position(|waiter| Arc::ptr_eq(&waiter.token, &self.token))
+                .map(|index| {
+                    let waiter = state.admission_waiters.remove(index);
+                    waiter.granted
+                })
+                .unwrap_or(false);
+            if was_granted {
+                let queued = self.scheduler.admit_queued_locked(&mut state);
+                let wakers = self.scheduler.grant_admission_locked(&mut state);
+                (wakers, queued)
+            } else {
+                (Vec::new(), Vec::new())
+            }
+        };
+        for queued in queued {
+            self.scheduler.spawn_flight(
+                queued.key,
+                queued.flight,
+                queued.priority,
+                queued.ancestors,
+                queued.reload,
+            );
+        }
+        Flight::wake_all(wakers);
     }
 }
 
@@ -1688,6 +1785,128 @@ mod tests {
             panic!("synthetic async worker panic")
         }));
         assert_eq!(result, Err(()));
+    }
+
+    fn test_scheduler(limit: usize) -> LoadScheduler {
+        LoadScheduler::with_io_cpu_pools(
+            Arc::new(AssetServer::new()),
+            TaskPool::with_threads(0),
+            TaskPool::with_threads(0),
+            limit,
+        )
+    }
+
+    fn test_flight(scheduler: &LoadScheduler, priority: Priority) -> Arc<Flight> {
+        Arc::new(Flight {
+            notification: Mutex::new(FlightNotification {
+                result: None,
+                waiters: Vec::new(),
+            }),
+            priority: scheduler.cpu_pool.priority_group(priority),
+            requested_type: None,
+        })
+    }
+
+    fn test_waker() -> Waker {
+        Waker::from(Arc::new(CountWake(Arc::new(AtomicUsize::new(0)))))
+    }
+
+    #[test]
+    fn execution_slot_handoff_cannot_be_stolen_by_a_new_waiter() {
+        let scheduler = test_scheduler(1);
+        let blocker_key = FlightKey::Load(AssetPath::parse("blocker.sched"));
+        let blocker = test_flight(&scheduler, Priority::Normal);
+        scheduler
+            .state
+            .lock()
+            .expect("load scheduler poisoned")
+            .running
+            .insert(blocker_key.clone(), Arc::clone(&blocker));
+
+        let first_key = FlightKey::Load(AssetPath::parse("first.sched"));
+        let first_flight = test_flight(&scheduler, Priority::Normal);
+        let first = scheduler.acquire_execution_slot(
+            first_key.clone(),
+            Arc::clone(&first_flight),
+            Priority::Normal,
+        );
+        let second_key = FlightKey::Load(AssetPath::parse("second.sched"));
+        let second_flight = test_flight(&scheduler, Priority::Critical);
+        let second = scheduler.acquire_execution_slot(
+            second_key.clone(),
+            Arc::clone(&second_flight),
+            Priority::Critical,
+        );
+        let third_key = FlightKey::Load(AssetPath::parse("third.sched"));
+        let third_flight = test_flight(&scheduler, Priority::Low);
+        let third =
+            scheduler.acquire_execution_slot(third_key, Arc::clone(&third_flight), Priority::Low);
+        let mut first = Box::pin(first);
+        let mut second = Box::pin(second);
+        let mut third = Box::pin(third);
+        let waker = test_waker();
+        let mut context = Context::from_waker(&waker);
+
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        assert!(second.as_mut().poll(&mut context).is_pending());
+        scheduler.release_execution_slot(&blocker_key, &blocker);
+
+        // The critical waiter owns the released slot even before its waker is
+        // polled. A newly-arrived low-priority waiter must remain pending.
+        assert!(third.as_mut().poll(&mut context).is_pending());
+        assert!(second.as_mut().poll(&mut context).is_ready());
+        assert!(first.as_mut().poll(&mut context).is_pending());
+
+        scheduler.release_execution_slot(&second_key, &second_flight);
+        assert!(first.as_mut().poll(&mut context).is_ready());
+    }
+
+    #[test]
+    fn execution_slot_handoff_is_priority_first_and_fifo_within_a_priority() {
+        let scheduler = test_scheduler(1);
+        let blocker_key = FlightKey::Load(AssetPath::parse("blocker.sched"));
+        let blocker = test_flight(&scheduler, Priority::Normal);
+        scheduler
+            .state
+            .lock()
+            .expect("load scheduler poisoned")
+            .running
+            .insert(blocker_key.clone(), Arc::clone(&blocker));
+
+        let entries = [
+            ("normal.sched", Priority::Normal),
+            ("critical-a.sched", Priority::Critical),
+            ("critical-b.sched", Priority::Critical),
+            ("low.sched", Priority::Low),
+        ];
+        let mut futures = Vec::new();
+        let mut flights = Vec::new();
+        let mut keys = Vec::new();
+        for (path, priority) in entries {
+            let key = FlightKey::Load(AssetPath::parse(path));
+            let flight = test_flight(&scheduler, priority);
+            futures.push(Box::pin(scheduler.acquire_execution_slot(
+                key.clone(),
+                Arc::clone(&flight),
+                priority,
+            )));
+            keys.push(key);
+            flights.push(flight);
+        }
+        let waker = test_waker();
+        let mut context = Context::from_waker(&waker);
+        for future in &mut futures {
+            assert!(future.as_mut().poll(&mut context).is_pending());
+        }
+
+        scheduler.release_execution_slot(&blocker_key, &blocker);
+        assert!(futures[1].as_mut().poll(&mut context).is_ready());
+        scheduler.release_execution_slot(&keys[1], &flights[1]);
+        assert!(futures[2].as_mut().poll(&mut context).is_ready());
+        scheduler.release_execution_slot(&keys[2], &flights[2]);
+        assert!(futures[0].as_mut().poll(&mut context).is_ready());
+        scheduler.release_execution_slot(&keys[0], &flights[0]);
+        assert!(futures[3].as_mut().poll(&mut context).is_ready());
     }
 
     #[test]
