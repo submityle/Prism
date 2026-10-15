@@ -88,6 +88,10 @@ pub unsafe trait SystemParam {
     /// Called with exclusive `&mut World` access after the system body returns.
     #[inline]
     fn apply(_state: &mut Self::State, _world: &mut World) {}
+
+    /// Discard unapplied effects and release their world-owned reservations.
+    /// Called with exclusive world access when a failed system is retired.
+    fn discard(_state: &mut Self::State, _world: &mut World) {}
 }
 
 /// Convenience alias for the item a [`SystemParam`] yields.
@@ -330,6 +334,10 @@ unsafe impl SystemParam for Commands<'_, '_> {
     fn apply(state: &mut CommandQueue, world: &mut World) {
         state.apply(world);
     }
+
+    fn discard(state: &mut CommandQueue, world: &mut World) {
+        state.discard(world);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +443,12 @@ macro_rules! impl_system_param_tuple {
             fn apply(state: &mut Self::State, world: &mut World) {
                 let ($($param,)*) = state;
                 $($param::apply($param, world);)*
+            }
+
+            #[inline]
+            fn discard(state: &mut Self::State, world: &mut World) {
+                let ($($param,)*) = state;
+                $($param::discard($param, world);)*
             }
         }
     };

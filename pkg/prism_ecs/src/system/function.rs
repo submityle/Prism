@@ -80,6 +80,12 @@ pub trait System: Send + Sync + 'static {
     /// into `world`.
     fn apply_deferred(&mut self, world: &mut World);
 
+    /// Discard unapplied effects when the scheduler retires a failed system.
+    ///
+    /// Implementors buffering world-owned reservations must release them here.
+    /// Direct world writes and commands already applied are not rolled back.
+    fn discard_deferred(&mut self, _world: &mut World) {}
+
     /// Run the system exclusively against `world` and immediately apply its
     /// deferred effects. This is the simple, always-sound entry point used by
     /// the sequential schedule.
@@ -292,6 +298,13 @@ where
         self.assert_world_id(world.id());
         if let Some(state) = self.param_state.as_mut() {
             <F::Param as SystemParam>::apply(state, world);
+        }
+    }
+
+    fn discard_deferred(&mut self, world: &mut World) {
+        self.assert_world_id(world.id());
+        if let Some(state) = self.param_state.as_mut() {
+            <F::Param as SystemParam>::discard(state, world);
         }
     }
 }

@@ -16,6 +16,7 @@ use crate::world::World;
 #[derive(Default)]
 pub struct CommandQueue {
     commands: Vec<Command>,
+    reserved: Vec<Entity>,
 }
 
 impl CommandQueue {
@@ -24,6 +25,7 @@ impl CommandQueue {
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
+            reserved: Vec::new(),
         }
     }
 
@@ -63,6 +65,26 @@ impl CommandQueue {
         for command in self.commands.drain(..) {
             command(world);
         }
+        self.reserved.clear();
+    }
+
+    /// Discard unapplied commands and release this queue's unplaced spawns.
+    ///
+    /// Already applied changes remain. Reservations owned by other queues are
+    /// preserved, even when this flush materialises their allocator slots.
+    /// Use the same world that supplied the queue's entity handles.
+    pub fn discard(&mut self, world: &mut World) {
+        world.flush_reserved();
+        for entity in self.reserved.drain(..) {
+            if world
+                .entities()
+                .location(entity)
+                .is_some_and(|location| location.is_empty())
+            {
+                world.despawn(entity);
+            }
+        }
+        self.commands.clear();
     }
 }
 
@@ -77,6 +99,11 @@ pub struct Commands<'w, 's> {
 }
 
 impl<'w, 's> Commands<'w, 's> {
+    /// Queue arbitrary world code in recorded order.
+    pub fn queue(&mut self, command: impl FnOnce(&mut World) + Send + Sync + 'static) {
+        self.queue.commands.push(Box::new(command));
+    }
+
     /// Reserve a fresh entity and queue a spawn of `bundle` onto it.
     ///
     /// The returned [`Entity`] is valid immediately (for later commands and for
@@ -84,6 +111,7 @@ impl<'w, 's> Commands<'w, 's> {
     /// [applied](CommandQueue::apply).
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
         let entity = self.entities.reserve_entity();
+        self.queue.reserved.push(entity);
         self.queue.commands.push(Box::new(move |world: &mut World| {
             world.spawn_at(entity, bundle);
         }));

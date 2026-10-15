@@ -93,6 +93,10 @@ impl System for Not {
         self.inner.initialize(world);
     }
 
+    fn validate_world(&self, world: &World) {
+        self.inner.validate_world(world);
+    }
+
     #[inline]
     fn access(&self) -> &Access {
         self.inner.access()
@@ -113,6 +117,10 @@ impl System for Not {
     #[inline]
     fn apply_deferred(&mut self, world: &mut World) {
         self.inner.apply_deferred(world);
+    }
+
+    fn discard_deferred(&mut self, world: &mut World) {
+        self.inner.discard_deferred(world);
     }
 
     #[inline]
@@ -183,6 +191,11 @@ impl System for Combined {
         &self.access
     }
 
+    fn validate_world(&self, world: &World) {
+        self.a.validate_world(world);
+        self.b.validate_world(world);
+    }
+
     #[inline]
     fn is_exclusive(&self) -> bool {
         self.a.is_exclusive() || self.b.is_exclusive()
@@ -208,8 +221,14 @@ impl System for Combined {
         self.b.apply_deferred(world);
     }
 
+    fn discard_deferred(&mut self, world: &mut World) {
+        self.a.discard_deferred(world);
+        self.b.discard_deferred(world);
+    }
+
     #[inline]
     fn run(&mut self, world: &mut World) -> bool {
+        self.validate_world(world);
         let a = self.a.run(world);
         let b = self.b.run(world);
         match self.op {

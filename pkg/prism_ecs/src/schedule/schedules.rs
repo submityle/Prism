@@ -101,6 +101,24 @@ impl Schedules {
 }
 
 impl World {
+    fn with_schedule<R>(
+        &mut self,
+        label: impl ScheduleLabel,
+        run: impl FnOnce(&mut Schedule, &mut World) -> R,
+    ) -> Option<R> {
+        let label = BoxedScheduleLabel::new(label);
+        let schedule = self.get_resource_mut::<Schedules>()?.remove_boxed(&label)?;
+        let mut running = RunningSchedule {
+            world: self,
+            label: Some(label),
+            schedule: Some(schedule),
+        };
+        Some(run(
+            running.schedule.as_mut().expect("running schedule"),
+            running.world,
+        ))
+    }
+
     /// Run the schedule registered under `label` against this world.
     ///
     /// The schedule is temporarily **removed** from the [`Schedules`] resource
@@ -110,17 +128,7 @@ impl World {
     /// a no-op, and a schedule that recursively asks to run itself finds its own
     /// slot temporarily empty and safely no-ops.
     pub fn run_schedule(&mut self, label: impl ScheduleLabel) {
-        let boxed = BoxedScheduleLabel::new(label);
-        let Some(mut schedule) = self
-            .get_resource_mut::<Schedules>()
-            .and_then(|schedules| schedules.remove_boxed(&boxed))
-        else {
-            return;
-        };
-        schedule.run(self);
-        if let Some(schedules) = self.get_resource_mut::<Schedules>() {
-            schedules.insert_boxed(boxed, schedule);
-        }
+        self.with_schedule(label, |schedule, world| schedule.run(world));
     }
 
     /// Run a labeled schedule with a remaining frame budget. Only Background
@@ -131,18 +139,10 @@ impl World {
         label: impl ScheduleLabel,
         budget: core::time::Duration,
     ) -> usize {
-        let boxed = BoxedScheduleLabel::new(label);
-        let Some(mut schedule) = self
-            .get_resource_mut::<Schedules>()
-            .and_then(|schedules| schedules.remove_boxed(&boxed))
-        else {
-            return 0;
-        };
-        let deferred = schedule.run_budgeted(self, budget);
-        if let Some(schedules) = self.get_resource_mut::<Schedules>() {
-            schedules.insert_boxed(boxed, schedule);
-        }
-        deferred
+        self.with_schedule(label, |schedule, world| {
+            schedule.run_budgeted(world, budget)
+        })
+        .unwrap_or(0)
     }
 
     /// Run the schedule registered under `label` against this world, dispatching
@@ -160,18 +160,9 @@ impl World {
         label: impl ScheduleLabel,
         pool: &prism_tasks::TaskPool,
     ) {
-        let boxed = BoxedScheduleLabel::new(label);
-        let Some(mut schedule) = self
-            .get_resource_mut::<Schedules>()
-            .and_then(|schedules| schedules.remove_boxed(&boxed))
-        else {
-            return;
-        };
-        schedule.run_parallel(pool, self);
-        if let Some(schedules) = self.get_resource_mut::<Schedules>() {
-            schedules.insert_boxed(boxed, schedule);
-        }
+        self.with_schedule(label, |schedule, world| schedule.run_parallel(pool, world));
     }
+
     /// Parallel labeled execution with the remaining frame budget. Returns
     /// the number of deferred Background systems, or zero for a missing label.
     #[cfg(feature = "multi_thread")]
@@ -181,17 +172,29 @@ impl World {
         pool: &prism_tasks::TaskPool,
         budget: core::time::Duration,
     ) -> usize {
-        let boxed = BoxedScheduleLabel::new(label);
-        let Some(mut schedule) = self
-            .get_resource_mut::<Schedules>()
-            .and_then(|schedules| schedules.remove_boxed(&boxed))
-        else {
-            return 0;
-        };
-        let deferred = schedule.run_parallel_budgeted(pool, self, budget);
-        if let Some(schedules) = self.get_resource_mut::<Schedules>() {
-            schedules.insert_boxed(boxed, schedule);
+        self.with_schedule(label, |schedule, world| {
+            schedule.run_parallel_budgeted(pool, world, budget)
+        })
+        .unwrap_or(0)
+    }
+}
+
+// Restore ownership even when a system unwinds, so a caught panic does not
+// silently unregister its entire phase. The schedule remains outside the world
+// while its systems execute, preventing recursive aliases.
+struct RunningSchedule<'w> {
+    world: &'w mut World,
+    label: Option<BoxedScheduleLabel>,
+    schedule: Option<Schedule>,
+}
+
+impl Drop for RunningSchedule<'_> {
+    fn drop(&mut self) {
+        if let Some(schedules) = self.world.get_resource_mut::<Schedules>() {
+            schedules.insert_boxed(
+                self.label.take().expect("running label"),
+                self.schedule.take().expect("running schedule"),
+            );
         }
-        deferred
     }
 }

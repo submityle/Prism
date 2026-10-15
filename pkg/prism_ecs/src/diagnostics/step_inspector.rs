@@ -64,7 +64,7 @@ impl StepObservation {
     #[inline]
     pub fn node(&self) -> Option<usize> {
         match self.report {
-            StepReport::Ran(idx) | StepReport::Skipped(idx) => Some(idx),
+            StepReport::Ran(idx) | StepReport::Failed(idx) | StepReport::Skipped(idx) => Some(idx),
             StepReport::FrameBoundary => None,
         }
     }

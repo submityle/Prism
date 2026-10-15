@@ -243,6 +243,17 @@ fn skinning(mut q: Query<(&mut SkinnedMesh, &Pose)>, jobs: JobGraph) {
 
 ---
 
+### 8.5 System panic 隔离（已实现）
+
+- 默认 `SystemPanicPolicy::FailFast` 保持 panic 传播。`std` 构建可向 World 插入 `SystemPanicPolicy::DisableAndContinue`：系统体、延迟命令或私有 run condition 发生 unwind 时，永久停用对应节点并继续执行后续系统；共享 set condition 失败后永久关闭该条件。
+- 串行、并行、预算执行和单步执行共用隔离策略；并行执行等待当前 wave 全部任务结束，再按调度顺序记录失败和清理。`SystemFailures` 提供有界、UTF-8 安全的失败记录，`StepReport::Failed` 标明单步失败。
+- 隔离不回滚已发生的直接写入或已执行命令。失败系统通过 `System::discard_deferred` / `SystemParam::discard` 丢弃未执行命令，并仅回收其自身尚未放入 archetype 的 spawn 预留；其他队列的预留和已成功 spawn 的空实体均保留。自定义缓冲参数需实现 `discard` 回收自己拥有的预留。
+- 初始化错误、非法调度图、跨 World 误用仍然 fail-fast；`panic = "abort"` 无法隔离。清理回调及析构函数应避免再次 panic。labeled schedule 的暂时移出使用作用域守卫，普通 unwind 后仍归还原注册表。
+- 回归位于 `pkg/prism_ecs/tests/panic_isolation.rs`，覆盖失败停用、条件组合、延迟回放中断、预留回收、generation 复用、并行同 wave 成功保留，以及 labeled schedule 的 unwind 恢复。
+- 此切片不保证任意构造、析构或结构写入中途 panic 后 World 仍可继续使用；存储层的完整 unwind 安全需要独立完善，`catch_unwind` 本身不恢复这些不变量。
+
+---
+
 ## 9. 命令与结构性变更
 
 - **Commands / 并行 ECB**：每线程独立命令缓冲，sync point 按**确定键排序**合并回放，合并同原型迁移，降原型图抖动与同步点数量。

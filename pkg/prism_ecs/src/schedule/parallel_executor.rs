@@ -44,7 +44,6 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::any::Any;
 use core::time::Duration;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Mutex;
@@ -57,6 +56,7 @@ use crate::query::Access;
 use crate::schedule::ambiguity;
 use crate::schedule::graph::Schedule;
 use crate::schedule::lane::SystemLane;
+use crate::schedule::panic::{PanicPayload, SystemFailureStage, SystemPanicPolicy};
 use crate::schedule::set::SystemSetId;
 use crate::system::function::{BoxedSystem, System};
 use crate::system::world_cell::UnsafeWorldCell;
@@ -144,7 +144,7 @@ impl MultiThreadedExecutor {
             // executor's gating semantics exactly.
             let mut should_run: Vec<bool> = Vec::with_capacity(wave.len());
             for &idx in wave {
-                let mut run = eval_should_run(schedule, idx, &mut set_cache, world);
+                let mut run = schedule.eval_gates(idx, &mut set_cache, world);
                 // Frame-budget gate (design §24.1): once the budget is spent, a
                 // Background-lane system is deferred. Critical/Normal always run.
                 if run
@@ -203,7 +203,8 @@ impl MultiThreadedExecutor {
             // --- Dispatch the passing bodies in parallel. The `&mut World`
             // borrow is confined to this block so it is released before the
             // deferred-command flush below.
-            {
+            let policy = SystemPanicPolicy::read(world);
+            let failures = {
                 let cell = UnsafeWorldCell::new_mutable(world);
 
                 // Dispatch each passing system onto its declared QoS lane
@@ -219,13 +220,14 @@ impl MultiThreadedExecutor {
                 //   * every group is joined below before `cell` is dropped, so
                 //     no job (and none of its borrows) outlives the `&mut World`
                 //     borrow the cell stands for; and
-                //   * each body is `catch_unwind`-guarded and the first panic is
-                //     re-raised on this thread after the join, so a panicking
-                //     system never aborts a pool worker.
-                let panic_slot: Mutex<Option<Box<dyn Any + Send + 'static>>> = Mutex::new(None);
+                //   * each body is `catch_unwind`-guarded and failures are
+                //     handled according to the world's policy after every
+                //     join, so a panicking system never aborts a pool worker.
+                let panic_slots: Mutex<Vec<Option<PanicPayload>>> =
+                    Mutex::new((0..wave.len()).map(|_| None).collect());
                 let mut groups: [Option<PriorityGroup>; 3] = [None, None, None];
 
-                for (system, run, last_run, this_run, lane) in &tasks {
+                for (slot, (system, run, last_run, this_run, lane)) in tasks.iter().enumerate() {
                     if !*run {
                         continue;
                     }
@@ -237,7 +239,7 @@ impl MultiThreadedExecutor {
                     // window before wrapping it for the task.
                     let cell = SendCell(cell.with_ticks(*last_run, *this_run));
                     let system = SendSystem(system.0);
-                    let panic_ref = &panic_slot;
+                    let panic_ref = &panic_slots;
 
                     // Build the borrowed body, then erase its lifetime so it can
                     // ride the pool's `'static` priority inbox.
@@ -258,14 +260,12 @@ impl MultiThreadedExecutor {
                             (*system.0).run_unsafe(cell.0);
                         }));
                         if let Err(payload) = result {
-                            let mut slot = panic_ref.lock().unwrap();
-                            if slot.is_none() {
-                                *slot = Some(payload);
-                            }
+                            panic_ref.lock().unwrap_or_else(|e| e.into_inner())[slot] =
+                                Some(payload);
                         }
                     });
                     // SAFETY: the body only borrows `cell` (valid for the whole
-                    // dispatch) and `panic_ref` (this block's `panic_slot`). We
+                    // dispatch) and `panic_ref` (this block's `panic_slots`). We
                     // join every group below before either goes out of scope, so
                     // erasing the borrow lifetime to `'static` for transport
                     // through the inbox never lets a borrow outlive its referent
@@ -285,9 +285,18 @@ impl MultiThreadedExecutor {
                     }
                 }
 
-                // Re-raise the first captured panic, matching `scope` semantics.
-                if let Some(payload) = panic_slot.lock().unwrap().take() {
-                    panic::resume_unwind(payload);
+                panic_slots.into_inner().unwrap_or_else(|e| e.into_inner())
+            };
+
+            // Every worker has joined before systems are retired or the world
+            // is borrowed again. Visit failures in deterministic schedule order.
+            for (slot, payload) in failures.into_iter().enumerate() {
+                if let Some(payload) = payload {
+                    if policy == SystemPanicPolicy::FailFast {
+                        panic::resume_unwind(payload);
+                    }
+                    should_run[slot] = false;
+                    schedule.isolate_failure(wave[slot], world, SystemFailureStage::Run, payload);
                 }
             }
 
@@ -296,7 +305,11 @@ impl MultiThreadedExecutor {
             for (slot, &idx) in wave.iter().enumerate() {
                 if should_run[slot] {
                     schedule.nodes[idx].system.set_last_run(windows[slot].1);
-                    schedule.nodes[idx].system.apply_deferred(world);
+                    if let Err(payload) =
+                        policy.invoke(|| schedule.nodes[idx].system.apply_deferred(world))
+                    {
+                        schedule.isolate_failure(idx, world, SystemFailureStage::Deferred, payload);
+                    }
                 }
             }
         }
@@ -369,44 +382,6 @@ pub(crate) fn compute_waves(
     }
 
     waves
-}
-
-/// Evaluate whether node `idx` should run this tick, matching the
-/// single-threaded executor: all of its sets' conditions (cached, no
-/// short-circuit so their state advances once) AND its own conditions
-/// (short-circuit).
-fn eval_should_run(
-    schedule: &mut Schedule,
-    idx: usize,
-    set_cache: &mut HashMap<SystemSetId, bool>,
-    world: &mut World,
-) -> bool {
-    // Clone the id list so the immutable borrow of `nodes` is released before
-    // `eval_set_conditions` takes a mutable borrow of the schedule.
-    let node_sets = schedule.nodes[idx].sets.clone();
-    let mut should_run = true;
-    for set in node_sets {
-        let value = match set_cache.get(&set) {
-            Some(&cached) => cached,
-            None => {
-                let value = schedule.eval_set_conditions(set, world);
-                set_cache.insert(set, value);
-                value
-            }
-        };
-        should_run &= value;
-    }
-
-    if should_run {
-        for condition in &mut schedule.nodes[idx].conditions {
-            if !condition.run(world) {
-                should_run = false;
-                break;
-            }
-        }
-    }
-
-    should_run
 }
 
 /// Dense `0..3` index for the three QoS lanes, in ascending urgency.

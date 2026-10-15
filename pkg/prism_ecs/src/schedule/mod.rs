@@ -41,6 +41,8 @@ pub mod executor;
 pub mod graph;
 pub mod label;
 pub mod lane;
+#[cfg(feature = "std")]
+pub mod panic;
 #[cfg(feature = "multi_thread")]
 pub mod parallel_executor;
 pub mod phase;
@@ -58,6 +60,8 @@ pub use executor::SingleThreadedExecutor;
 pub use graph::Schedule;
 pub use label::{BoxedScheduleLabel, ScheduleLabel};
 pub use lane::SystemLane;
+#[cfg(feature = "std")]
+pub use panic::{SystemFailure, SystemFailureStage, SystemFailures, SystemPanicPolicy};
 #[cfg(feature = "multi_thread")]
 pub use parallel_executor::MultiThreadedExecutor;
 pub use phase::Phase;

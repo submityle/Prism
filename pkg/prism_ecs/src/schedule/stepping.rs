@@ -13,8 +13,7 @@
 //! [`Schedule::order`](crate::schedule::Schedule) exactly as the single-threaded
 //! executor does and reuses the schedule's own
 //! [`run`](crate::system::System::run) / condition machinery. The gate logic in
-//! [`Stepping::eval_gates`] is a line-for-line mirror of
-//! [`executor::run_inner`](crate::schedule::executor): per-set conditions are
+//! the schedule's gate evaluator is shared with both executors: per-set conditions are
 //! evaluated **without** short-circuit (so each set-condition's internal state
 //! advances exactly once per frame) and memoised in a frame-scoped cache, while
 //! a system's own `run_if` conditions short-circuit with AND. Driving a full
@@ -57,6 +56,8 @@ use crate::world::World;
 pub enum StepReport {
     /// The system at this node index passed its gates and its body ran.
     Ran(usize),
+    /// The system panicked and was retired by the world's isolation policy.
+    Failed(usize),
     /// The system at this node index was gated off (a set or `run_if`
     /// condition returned `false`) and was skipped, exactly as the executor
     /// would have skipped it.
@@ -191,7 +192,8 @@ impl Stepping {
     ///   running anything;
     /// * otherwise evaluates the system's gates exactly as the executor does
     ///   and returns [`StepReport::Ran`] (body executed, deferred commands
-    ///   applied) or [`StepReport::Skipped`] (gated off).
+    ///   applied), [`StepReport::Skipped`] (gated off), or [`StepReport::Failed`]
+    ///   (panic captured and node retired).
     ///
     /// Breakpoints are ignored: this is the finest-grained manual step and
     /// always advances past wherever the cursor is parked.
@@ -205,9 +207,15 @@ impl Stepping {
         }
         let idx = schedule.order[self.cursor];
         self.cursor += 1;
-        if Self::eval_gates(schedule, idx, &mut self.set_cache, world) {
-            schedule.nodes[idx].system.run(world);
-            StepReport::Ran(idx)
+        let was_disabled = schedule.nodes[idx].disabled;
+        if schedule.eval_gates(idx, &mut self.set_cache, world) {
+            if schedule.run_node(idx, world) {
+                StepReport::Ran(idx)
+            } else {
+                StepReport::Failed(idx)
+            }
+        } else if !was_disabled && schedule.nodes[idx].disabled {
+            StepReport::Failed(idx)
         } else {
             StepReport::Skipped(idx)
         }
@@ -245,8 +253,8 @@ impl Stepping {
                 };
             }
             self.cursor += 1;
-            if Self::eval_gates(schedule, idx, &mut self.set_cache, world) {
-                schedule.nodes[idx].system.run(world);
+            if schedule.eval_gates(idx, &mut self.set_cache, world) && schedule.run_node(idx, world)
+            {
                 ran.push(idx);
             }
         }
@@ -267,53 +275,13 @@ impl Stepping {
         while self.cursor < schedule.order.len() {
             let idx = schedule.order[self.cursor];
             self.cursor += 1;
-            if Self::eval_gates(schedule, idx, &mut self.set_cache, world) {
-                schedule.nodes[idx].system.run(world);
+            if schedule.eval_gates(idx, &mut self.set_cache, world) && schedule.run_node(idx, world)
+            {
                 ran.push(idx);
             }
         }
         self.cursor = 0;
         self.set_cache.clear();
         ran
-    }
-
-    /// Evaluate whether the system at `idx` should run, mirroring
-    /// [`executor::run_inner`](crate::schedule::executor) exactly: every set the
-    /// system belongs to is evaluated without short-circuit (memoised in
-    /// `set_cache` so a shared set condition fires once per frame), ANDed
-    /// together, and only then are the system's own conditions evaluated with
-    /// short-circuit AND.
-    fn eval_gates(
-        schedule: &mut Schedule,
-        idx: usize,
-        set_cache: &mut HashMap<SystemSetId, bool>,
-        world: &mut World,
-    ) -> bool {
-        // Clone the id list so the immutable borrow of `nodes` is released
-        // before `eval_set_conditions` takes a mutable borrow of the schedule.
-        let node_sets = schedule.nodes[idx].sets.clone();
-        let mut should_run = true;
-        for set in node_sets {
-            let value = match set_cache.get(&set) {
-                Some(&cached) => cached,
-                None => {
-                    let value = schedule.eval_set_conditions(set, world);
-                    set_cache.insert(set, value);
-                    value
-                }
-            };
-            // Keep evaluating remaining sets even once gated off, so every
-            // set-condition's state advances exactly once this frame.
-            should_run &= value;
-        }
-        if should_run {
-            for condition in &mut schedule.nodes[idx].conditions {
-                if !condition.run(world) {
-                    should_run = false;
-                    break;
-                }
-            }
-        }
-        should_run
     }
 }

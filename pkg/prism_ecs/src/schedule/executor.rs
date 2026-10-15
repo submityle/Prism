@@ -19,13 +19,8 @@
 //!
 //! A system runs only when every gate passes.
 //!
-//! # Honestly deferred
-//!
-//! The parallel conflict-graph executor and fiber job graph (design §8.2–§8.3,
-//! which need `prism_tasks`) are future milestones. They are absent, not
-//! stubbed; the per-system [`Access`](crate::query::Access) recorded by the
-//! system layer already carries everything a parallel executor needs, and it
-//! will become a sibling of this type selected by the schedule.
+//! With `std`, a world's [`SystemPanicPolicy`](crate::schedule::SystemPanicPolicy)
+//! can opt into retiring failed systems and continuing the remaining schedule.
 
 use hashbrown::HashMap;
 
@@ -42,8 +37,8 @@ use core::time::Duration;
 /// per-set and per-system run-conditions.
 ///
 /// This is a zero-sized dispatcher rather than a stored strategy so a
-/// [`Schedule`] stays trivially movable; the future parallel conflict-graph
-/// executor (§8.2) will be a sibling type selected by the schedule.
+/// [`Schedule`] stays trivially movable; the parallel conflict-graph executor
+/// (§8.2) is selected separately by the schedule.
 pub struct SingleThreadedExecutor;
 
 impl SingleThreadedExecutor {
@@ -124,37 +119,8 @@ impl SingleThreadedExecutor {
         for i in 0..schedule.order.len() {
             let idx = schedule.order[i];
 
-            // Evaluate every set this system belongs to. Clone the id list so
-            // the immutable borrow of `nodes` is released before
-            // `eval_set_conditions` takes a mutable borrow of the schedule.
-            let node_sets = schedule.nodes[idx].sets.clone();
-            let mut should_run = true;
-            for set in node_sets {
-                let value = match set_cache.get(&set) {
-                    Some(&cached) => cached,
-                    None => {
-                        // Evaluate all of the set's conditions (no
-                        // short-circuit) so their internal state advances
-                        // deterministically, then cache the AND.
-                        let value = schedule.eval_set_conditions(set, world);
-                        set_cache.insert(set, value);
-                        value
-                    }
-                };
-                // Keep evaluating remaining sets even once gated off, so every
-                // set-condition's state advances exactly once this run.
-                should_run &= value;
-            }
-
-            // Evaluate the system's own conditions with short-circuit AND.
-            if should_run {
-                for condition in &mut schedule.nodes[idx].conditions {
-                    if !condition.run(world) {
-                        should_run = false;
-                        break;
-                    }
-                }
-            }
+            #[cfg_attr(not(feature = "std"), allow(unused_mut))]
+            let mut should_run = schedule.eval_gates(idx, &mut set_cache, world);
 
             // Frame-budget gate (design §24.1): once the budget is spent, a
             // Background-lane system is deferred to a later frame. Critical and
@@ -170,12 +136,8 @@ impl SingleThreadedExecutor {
             }
 
             if should_run {
-                let system = &mut schedule.nodes[idx].system;
-                // `name()` is a shared reborrow that ends before `run` takes
-                // the exclusive borrow, so the instrument sees the system label
-                // without aliasing the subsequent mutable run.
-                instrument.begin(system.name());
-                system.run(world);
+                instrument.begin(schedule.nodes[idx].system.name());
+                schedule.run_node(idx, world);
                 instrument.end();
             }
         }

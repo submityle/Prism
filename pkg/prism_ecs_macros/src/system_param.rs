@@ -124,6 +124,15 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         TokenStream::new()
     };
 
+    let discard_body = if has_fields {
+        quote! {
+            let ( #( #bindings, )* ) = state;
+            #( <#field_types as prism_ecs::system::SystemParam>::discard(#bindings, world); )*
+        }
+    } else {
+        TokenStream::new()
+    };
+
     Ok(quote! {
         // SAFETY: each field is itself a `SystemParam` that declares its own
         // access in `update_access` and builds its own disjoint item in
@@ -160,6 +169,11 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
             #[inline]
             fn apply(state: &mut Self::State, world: &mut prism_ecs::world::World) {
                 #apply_body
+            }
+
+            #[inline]
+            fn discard(state: &mut Self::State, world: &mut prism_ecs::world::World) {
+                #discard_body
             }
         }
     })

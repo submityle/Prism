@@ -48,6 +48,7 @@ use crate::world::World;
 /// One scheduled system plus the resolved metadata the executor needs.
 pub(crate) struct Node {
     pub(crate) system: BoxedSystem,
+    pub(crate) disabled: bool,
     pub(crate) sets: Vec<SystemSetId>,
     pub(crate) before: Vec<SystemSetId>,
     pub(crate) after: Vec<SystemSetId>,
@@ -136,6 +137,13 @@ impl Schedule {
         self.nodes.is_empty()
     }
 
+    /// Whether this node was permanently retired after an isolated panic.
+    /// Returns `None` when the node index is out of range.
+    #[must_use]
+    pub fn is_system_disabled(&self, node: usize) -> Option<bool> {
+        self.nodes.get(node).map(|node| node.disabled)
+    }
+
     /// Flatten a [`SystemConfigs`] tree into schedule nodes, returning the leaf
     /// node indices it contributed (in order) so a parent chain can wire edges.
     fn flatten(&mut self, configs: SystemConfigs) -> Vec<usize> {
@@ -203,6 +211,7 @@ impl Schedule {
         let idx = self.nodes.len();
         self.nodes.push(Node {
             system,
+            disabled: false,
             sets,
             before,
             after,
@@ -324,12 +333,150 @@ impl Schedule {
         };
         let mut result = true;
         for condition in &mut config.conditions {
+            // World identity is a caller contract, not an isolated failure.
+            condition.validate_world(world);
             // Evaluate every condition (no short-circuit) so any internal state
             // advances deterministically.
+            #[cfg(not(feature = "std"))]
             let value = condition.run(world);
+            #[cfg(feature = "std")]
+            let value = {
+                use super::panic::{
+                    failure, RetiredSystem, SystemFailureStage, SystemFailures, SystemPanicPolicy,
+                };
+                match SystemPanicPolicy::read(world).invoke(|| condition.run(world)) {
+                    Ok(value) => value,
+                    Err(payload) => {
+                        SystemFailures::record(
+                            world,
+                            failure(
+                                condition.name(),
+                                None,
+                                SystemFailureStage::SetCondition,
+                                &payload,
+                            ),
+                        );
+                        condition.discard_deferred(world);
+                        *condition =
+                            alloc::boxed::Box::new(RetiredSystem::<bool>::new(condition.name()));
+                        false
+                    }
+                }
+            };
             result &= value;
         }
         result
+    }
+
+    /// Shared gate evaluation for serial, parallel, budgeted, and stepped runs.
+    pub(crate) fn eval_gates(
+        &mut self,
+        idx: usize,
+        cache: &mut HashMap<SystemSetId, bool>,
+        world: &mut World,
+    ) -> bool {
+        if self.nodes[idx].disabled {
+            return false;
+        }
+        let sets = self.nodes[idx].sets.clone();
+        let mut should_run = true;
+        for set in sets {
+            let value = match cache.get(&set) {
+                Some(&value) => value,
+                None => {
+                    let value = self.eval_set_conditions(set, world);
+                    cache.insert(set, value);
+                    value
+                }
+            };
+            should_run &= value;
+        }
+        if should_run {
+            for condition_idx in 0..self.nodes[idx].conditions.len() {
+                let condition = &mut self.nodes[idx].conditions[condition_idx];
+                condition.validate_world(world);
+                #[cfg(not(feature = "std"))]
+                let value = condition.run(world);
+                #[cfg(feature = "std")]
+                let value = {
+                    use super::panic::{
+                        failure, SystemFailureStage, SystemFailures, SystemPanicPolicy,
+                    };
+                    match SystemPanicPolicy::read(world).invoke(|| condition.run(world)) {
+                        Ok(value) => value,
+                        Err(payload) => {
+                            SystemFailures::record(
+                                world,
+                                failure(
+                                    condition.name(),
+                                    Some(idx),
+                                    SystemFailureStage::Condition,
+                                    &payload,
+                                ),
+                            );
+                            self.retire_node(idx, world);
+                            return false;
+                        }
+                    }
+                };
+                if !value {
+                    return false;
+                }
+            }
+        }
+        should_run
+    }
+
+    /// Run a node and return whether it completed successfully.
+    pub(crate) fn run_node(&mut self, idx: usize, world: &mut World) -> bool {
+        if self.nodes[idx].disabled {
+            return false;
+        }
+        // Cross-world misuse is a caller error in every executor, not a
+        // recoverable gameplay failure. Reject it before entering isolation.
+        self.nodes[idx].system.validate_world(world);
+        #[cfg(not(feature = "std"))]
+        self.nodes[idx].system.run(world);
+        #[cfg(feature = "std")]
+        {
+            use super::panic::{SystemFailureStage, SystemPanicPolicy};
+            if let Err(payload) =
+                SystemPanicPolicy::read(world).invoke(|| self.nodes[idx].system.run(world))
+            {
+                self.isolate_failure(idx, world, SystemFailureStage::Run, payload);
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn isolate_failure(
+        &mut self,
+        idx: usize,
+        world: &mut World,
+        stage: super::panic::SystemFailureStage,
+        payload: super::panic::PanicPayload,
+    ) {
+        use super::panic::{failure, SystemFailures};
+        SystemFailures::record(
+            world,
+            failure(self.nodes[idx].system.name(), Some(idx), stage, &payload),
+        );
+        self.retire_node(idx, world);
+    }
+
+    #[cfg(feature = "std")]
+    fn retire_node(&mut self, idx: usize, world: &mut World) {
+        let node = &mut self.nodes[idx];
+        node.disabled = true;
+        node.system.discard_deferred(world);
+        for condition in &mut node.conditions {
+            condition.discard_deferred(world);
+        }
+        node.system =
+            alloc::boxed::Box::new(super::panic::RetiredSystem::<()>::new(node.system.name()));
+        node.conditions.clear();
     }
 
     /// Build the full set of ordering edges `(from, to)` implied by phase,
