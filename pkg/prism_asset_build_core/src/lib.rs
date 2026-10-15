@@ -23,6 +23,8 @@ pub mod import;
 pub mod job;
 /// Deterministic bridge from build manifests/CAS blobs to runtime containers.
 pub mod package;
+/// Deterministic diff and byte-accounting plans between build revisions.
+pub mod patch;
 /// Immutable binding between a build revision and its runtime package outputs.
 pub mod publication;
 /// Explicit importer/cook recipe identity.
@@ -56,6 +58,7 @@ pub use package::{
     package_runtime, package_runtime_with_options, AssetPackageMapping, PackageError,
     PackageOptions, PackageRequest, RuntimePackage,
 };
+pub use patch::{plan_patch, PatchChange, PatchEntry, PatchPlan, PatchPlanError};
 pub use publication::{PublicationDescriptor, PublishedContainer};
 pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError};
 pub use release::{ReleaseDescriptor, ReleaseError, ReleaseGate, ReleaseVerification};
@@ -78,7 +81,7 @@ pub use virtual_geometry_builder::{
 };
 pub use virtual_geometry_lod::{
     build_static_virtual_geometry_lod_chain, StaticVirtualGeometryLod,
-    StaticVirtualGeometryLodError,
+    StaticVirtualGeometryLodError, StaticVirtualGeometryLodSet,
 };
 pub use virtual_geometry_payload::{
     decode_cluster_payload, encode_cluster_payload, ClusterPayloadError, QuantizedClusterPayload,
