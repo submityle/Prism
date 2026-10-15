@@ -222,10 +222,10 @@ impl FrameHashAudit {
         self.remote
             .retain(|tick, _| *tick >= self.oldest && *tick < end);
         for tick in from.max(self.oldest)..self.next_tick {
-            if let Some(hash) = history.state_hash(tick) {
-                if let Err(record_error) = self.record_retained(tick, hash) {
-                    error.get_or_insert(record_error);
-                }
+            if let Some(hash) = history.state_hash(tick)
+                && let Err(record_error) = self.record_retained(tick, hash)
+            {
+                error.get_or_insert(record_error);
             }
         }
         self.missing_local = (self.oldest..self.next_tick)

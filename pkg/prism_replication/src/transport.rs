@@ -233,7 +233,7 @@ pub mod threaded {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+    use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
     use std::sync::Mutex;
 
     /// A bounded, non-blocking endpoint for cross-thread replication tests or
@@ -321,10 +321,7 @@ pub mod threaded {
                 .inbound
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match receiver.try_recv() {
-                Ok(bytes) => Some(bytes),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-            }
+            receiver.try_recv().ok()
         }
     }
 
@@ -371,6 +368,307 @@ pub mod threaded {
                 server.security_state(),
                 super::super::TransportSecurity::Established
             );
+        }
+    }
+}
+
+/// A deterministic, bounded transport harness that exercises the same
+/// [`Transport`] seam used by UDP and secure sessions.
+#[cfg(feature = "std")]
+pub mod simulated {
+    use super::Transport;
+    use alloc::collections::VecDeque;
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use std::sync::Mutex;
+
+    /// Faults applied to every datagram admitted by a simulated link.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct FaultConfig {
+        /// Minimum logical ticks before a datagram becomes due.
+        pub latency: u32,
+        /// Additional deterministic delay in `0..=jitter` ticks.
+        pub jitter: u32,
+        /// Drop every `n`th attempted send; `None` disables loss.
+        pub drop_every: Option<u64>,
+        /// Reverse each due batch when true, making reordering explicit.
+        pub reorder_due_batches: bool,
+        /// Maximum queued datagrams per endpoint.
+        pub queue_limit: usize,
+    }
+
+    impl Default for FaultConfig {
+        fn default() -> Self {
+            Self {
+                latency: 1,
+                jitter: 0,
+                drop_every: None,
+                reorder_due_batches: false,
+                queue_limit: 256,
+            }
+        }
+    }
+
+    impl FaultConfig {
+        fn normalized(self) -> Self {
+            Self {
+                latency: self.latency,
+                jitter: self.jitter,
+                drop_every: self.drop_every.filter(|value| *value != 0),
+                reorder_due_batches: self.reorder_due_batches,
+                queue_limit: self.queue_limit.max(1),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct State {
+        tick: u64,
+        sends: u64,
+        dropped: u64,
+        queue_drops: u64,
+        in_flight: Vec<Packet>,
+        queues: [VecDeque<Vec<u8>>; 2],
+        rng: SplitMix64,
+    }
+
+    struct Packet {
+        deliver_at: u64,
+        order: u64,
+        endpoint: usize,
+        bytes: Vec<u8>,
+    }
+
+    /// Shared deterministic network clock and fault injector.
+    #[derive(Clone)]
+    pub struct SimulatedNetwork {
+        config: FaultConfig,
+        state: Arc<Mutex<State>>,
+    }
+
+    impl SimulatedNetwork {
+        /// Create two connected endpoints sharing one deterministic link.
+        #[must_use]
+        pub fn pair(config: FaultConfig) -> (Self, SimulatedTransport, SimulatedTransport) {
+            let network = Self {
+                config: config.normalized(),
+                state: Arc::new(Mutex::new(State {
+                    rng: SplitMix64::new(0x5EED_1234_ABCD_0001),
+                    ..State::default()
+                })),
+            };
+            let a = SimulatedTransport {
+                network: network.clone(),
+                endpoint: 0,
+            };
+            let b = SimulatedTransport {
+                network: network.clone(),
+                endpoint: 1,
+            };
+            (network, a, b)
+        }
+
+        /// Advance one logical tick and deliver all due datagrams.
+        pub fn advance(&self) {
+            let mut state = lock(&self.state);
+            state.tick = state.tick.saturating_add(1);
+            let tick = state.tick;
+            let mut due = [Vec::new(), Vec::new()];
+            let mut kept = Vec::with_capacity(state.in_flight.len());
+            for packet in state.in_flight.drain(..) {
+                if packet.deliver_at <= tick {
+                    due[packet.endpoint].push(packet);
+                } else {
+                    kept.push(packet);
+                }
+            }
+            state.in_flight = kept;
+            for (endpoint, packets) in due.iter_mut().enumerate() {
+                packets.sort_by_key(|packet| (packet.deliver_at, packet.order));
+                if self.config.reorder_due_batches {
+                    packets.reverse();
+                }
+                for packet in packets.drain(..) {
+                    if state.queues[endpoint].len() >= self.config.queue_limit {
+                        state.queue_drops = state.queue_drops.saturating_add(1);
+                    } else {
+                        state.queues[endpoint].push_back(packet.bytes);
+                    }
+                }
+            }
+        }
+
+        /// Drop all queued/in-flight packets and reset the logical clock.
+        ///
+        /// Callers create fresh `SecureTransport` wrappers after this method;
+        /// this models a reconnect without allowing old authenticated packets
+        /// to cross into a new session.
+        pub fn reset(&self) {
+            let mut state = lock(&self.state);
+            state.tick = 0;
+            state.in_flight.clear();
+            state.queues[0].clear();
+            state.queues[1].clear();
+        }
+
+        /// Current logical tick.
+        #[must_use]
+        pub fn tick(&self) -> u64 {
+            lock(&self.state).tick
+        }
+
+        /// Datagrams rejected by deterministic loss or bounded queues.
+        #[must_use]
+        pub fn dropped(&self) -> u64 {
+            let state = lock(&self.state);
+            state.dropped.saturating_add(state.queue_drops)
+        }
+
+        /// Datagrams rejected by the configured deterministic loss rule.
+        #[must_use]
+        pub fn fault_drops(&self) -> u64 {
+            lock(&self.state).dropped
+        }
+
+        /// Datagrams rejected because an endpoint receive queue was full.
+        #[must_use]
+        pub fn queue_drops(&self) -> u64 {
+            lock(&self.state).queue_drops
+        }
+
+        /// Number of datagrams still waiting for delivery or receive polling.
+        #[must_use]
+        pub fn pending(&self) -> usize {
+            let state = lock(&self.state);
+            state.in_flight.len() + state.queues[0].len() + state.queues[1].len()
+        }
+    }
+
+    /// One endpoint of a [`SimulatedNetwork`]. Cloning an endpoint preserves
+    /// its endpoint identity and is useful when reconnecting a fresh secure
+    /// wrapper after [`SimulatedNetwork::reset`].
+    #[derive(Clone)]
+    pub struct SimulatedTransport {
+        network: SimulatedNetwork,
+        endpoint: usize,
+    }
+
+    impl SimulatedTransport {
+        /// Endpoint index (`0` or `1`).
+        #[must_use]
+        pub const fn endpoint(&self) -> usize {
+            self.endpoint
+        }
+    }
+
+    impl Transport for SimulatedTransport {
+        fn send(&mut self, bytes: &[u8]) {
+            let mut state = lock(&self.network.state);
+            state.sends = state.sends.saturating_add(1);
+            if self
+                .network
+                .config
+                .drop_every
+                .is_some_and(|n| state.sends.is_multiple_of(n))
+            {
+                state.dropped = state.dropped.saturating_add(1);
+                return;
+            }
+            let extra = if self.network.config.jitter == 0 {
+                0
+            } else {
+                state
+                    .rng
+                    .next_below(u64::from(self.network.config.jitter) + 1)
+            };
+            let endpoint = 1 - self.endpoint;
+            let deliver_at = state
+                .tick
+                .saturating_add(u64::from(self.network.config.latency))
+                .saturating_add(extra);
+            let order = state.sends;
+            state.in_flight.push(Packet {
+                deliver_at,
+                order,
+                endpoint,
+                bytes: bytes.to_vec(),
+            });
+        }
+
+        fn recv(&mut self) -> Option<Vec<u8>> {
+            lock(&self.network.state).queues[self.endpoint].pop_front()
+        }
+    }
+
+    fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[derive(Default)]
+    struct SplitMix64(u64);
+
+    impl SplitMix64 {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        fn next_below(&mut self, bound: u64) -> u64 {
+            if bound == 0 {
+                0
+            } else {
+                self.next_u64() % bound
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn deterministic_faults_drop_and_reverse_without_unbounded_growth() {
+            let config = FaultConfig {
+                latency: 1,
+                jitter: 2,
+                drop_every: Some(5),
+                reorder_due_batches: true,
+                queue_limit: 8,
+            };
+            let (network, mut a, mut b) = SimulatedNetwork::pair(config);
+            for value in 0..20_u8 {
+                a.send(&[value]);
+            }
+            for _ in 0..16 {
+                network.advance();
+            }
+            let mut received = Vec::new();
+            while let Some(bytes) = b.recv() {
+                received.push(bytes[0]);
+            }
+            assert_eq!(network.fault_drops(), 4);
+            assert_eq!(network.queue_drops(), 8);
+            assert_eq!(network.dropped(), 12);
+            assert!(received.len() <= 8);
+            assert!(received.windows(2).any(|window| window[0] > window[1]));
+        }
+
+        #[test]
+        fn reset_discards_old_packets_for_reconnect() {
+            let (network, mut a, mut b) = SimulatedNetwork::pair(FaultConfig::default());
+            a.send(b"old");
+            network.reset();
+            network.advance();
+            assert_eq!(b.recv(), None);
         }
     }
 }

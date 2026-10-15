@@ -224,9 +224,7 @@ impl<T> SnapshotBuffer<T> {
         }
 
         let lower = self.lower_bound(tick);
-        let next_tick = tick
-            .checked_add(u64::from(fraction > 0.0))
-            .unwrap_or(u64::MAX);
+        let next_tick = tick.saturating_add(u64::from(fraction > 0.0));
         let upper = self.upper_bound(next_tick);
 
         if let Some(lower_index) = lower {

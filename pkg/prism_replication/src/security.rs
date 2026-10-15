@@ -66,6 +66,36 @@ pub enum SecurityError {
     HandshakeBackpressure,
 }
 
+/// Numeric diagnostics for one authenticated session.
+///
+/// This snapshot intentionally contains no peer identity, key material, nonce,
+/// or payload data. It is safe to export to a connection-health dashboard and
+/// remains useful after a reconnect because each [`SecureTransport`] owns one
+/// session's counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SecurityTelemetrySnapshot {
+    /// Current authenticated-session state.
+    pub state: TransportSecurity,
+    /// Handshake frames sent, including retransmissions.
+    pub handshake_transmissions: u64,
+    /// Handshake frames sent after the initial offer/accept.
+    pub handshake_retries: u64,
+    /// Protected application datagrams successfully sealed.
+    pub protected_datagrams_sent: u64,
+    /// Protected application datagrams that passed authentication.
+    pub protected_datagrams_received: u64,
+    /// Authenticated duplicates or packets outside the replay window.
+    pub replayed_datagrams: u64,
+    /// Frames rejected by the security wire decoder.
+    pub malformed_frames: u64,
+    /// Frames rejected by provider authentication/decryption.
+    pub authentication_failures: u64,
+    /// Number of completed authenticated handshakes.
+    pub handshakes_completed: u64,
+    /// First/most recent terminal security error, if any.
+    pub last_error: Option<SecurityError>,
+}
+
 /// A direction used as authenticated-encryption associated data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecurityDirection {
@@ -314,6 +344,12 @@ impl PskKeyring {
     #[must_use]
     pub fn len(&self) -> usize {
         1 + self.previous.len()
+    }
+
+    /// Whether the keyring contains no credentials.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -901,6 +937,13 @@ pub struct SecureTransport<T, P> {
     poll_ticks: u32,
     last_error: Option<SecurityError>,
     replayed: u64,
+    handshake_transmissions: u64,
+    handshake_retries: u64,
+    protected_datagrams_sent: u64,
+    protected_datagrams_received: u64,
+    malformed_frames: u64,
+    authentication_failures: u64,
+    handshakes_completed: u64,
 }
 
 impl<T, P> SecureTransport<T, P>
@@ -936,6 +979,13 @@ where
             poll_ticks: 0,
             last_error: None,
             replayed: 0,
+            handshake_transmissions: 0,
+            handshake_retries: 0,
+            protected_datagrams_sent: 0,
+            protected_datagrams_received: 0,
+            malformed_frames: 0,
+            authentication_failures: 0,
+            handshakes_completed: 0,
         };
         transport.send_handshake();
         Ok(transport)
@@ -960,6 +1010,13 @@ where
             poll_ticks: 0,
             last_error: None,
             replayed: 0,
+            handshake_transmissions: 0,
+            handshake_retries: 0,
+            protected_datagrams_sent: 0,
+            protected_datagrams_received: 0,
+            malformed_frames: 0,
+            authentication_failures: 0,
+            handshakes_completed: 0,
         }
     }
 
@@ -972,6 +1029,23 @@ where
     #[must_use]
     pub fn replayed_datagrams(&self) -> u64 {
         self.replayed
+    }
+
+    /// Copy numeric connection-health counters without exposing secrets.
+    #[must_use]
+    pub fn telemetry(&self) -> SecurityTelemetrySnapshot {
+        SecurityTelemetrySnapshot {
+            state: self.security_state(),
+            handshake_transmissions: self.handshake_transmissions,
+            handshake_retries: self.handshake_retries,
+            protected_datagrams_sent: self.protected_datagrams_sent,
+            protected_datagrams_received: self.protected_datagrams_received,
+            replayed_datagrams: self.replayed,
+            malformed_frames: self.malformed_frames,
+            authentication_failures: self.authentication_failures,
+            handshakes_completed: self.handshakes_completed,
+            last_error: self.last_error,
+        }
     }
 
     /// Whether the authenticated handshake has completed.
@@ -990,6 +1064,10 @@ where
         let Some(hello) = self.client_hello.as_ref() else {
             return;
         };
+        if self.handshake_transmissions > 0 {
+            self.handshake_retries = self.handshake_retries.saturating_add(1);
+        }
+        self.handshake_transmissions = self.handshake_transmissions.saturating_add(1);
         self.inner.send(&encode_hello(hello));
     }
 
@@ -1046,6 +1124,7 @@ where
         )?;
         frame.extend_from_slice(&sealed);
         self.inner.send(&frame);
+        self.protected_datagrams_sent = self.protected_datagrams_sent.saturating_add(1);
         Ok(())
     }
 
@@ -1055,6 +1134,7 @@ where
             || frame[..2] != WIRE_MAGIC
             || frame[2] != WIRE_VERSION
         {
+            self.malformed_frames = self.malformed_frames.saturating_add(1);
             self.set_error(SecurityError::MalformedFrame);
             return;
         }
@@ -1071,10 +1151,12 @@ where
             return;
         }
         let Some(hello) = decode_hello(frame) else {
+            self.malformed_frames = self.malformed_frames.saturating_add(1);
             self.set_error(SecurityError::MalformedFrame);
             return;
         };
         if validate_hello(&hello, self.provider.provider_id()).is_err() {
+            self.authentication_failures = self.authentication_failures.saturating_add(1);
             self.set_error(SecurityError::VersionMismatch);
             return;
         }
@@ -1089,11 +1171,13 @@ where
         let accept = match self.provider.accept_client_hello(&hello) {
             Ok(accept) => accept,
             Err(error) => {
+                self.authentication_failures = self.authentication_failures.saturating_add(1);
                 self.set_error(error);
                 return;
             }
         };
         if validate_accept(&accept, self.provider.provider_id(), hello.nonce).is_err() {
+            self.malformed_frames = self.malformed_frames.saturating_add(1);
             self.set_error(SecurityError::InvalidNonce);
             return;
         }
@@ -1102,6 +1186,7 @@ where
         self.client_hello = Some(hello);
         self.server_accept = Some(accept);
         self.state = State::Established;
+        self.handshakes_completed = self.handshakes_completed.saturating_add(1);
         self.send_accept();
         self.flush_pending();
     }
@@ -1111,6 +1196,7 @@ where
             return;
         }
         let Some(accept) = decode_accept(frame) else {
+            self.malformed_frames = self.malformed_frames.saturating_add(1);
             self.set_error(SecurityError::MalformedFrame);
             return;
         };
@@ -1119,21 +1205,25 @@ where
             return;
         };
         if validate_accept(&accept, self.provider.provider_id(), hello.nonce).is_err() {
+            self.malformed_frames = self.malformed_frames.saturating_add(1);
             self.set_error(SecurityError::VersionMismatch);
             return;
         }
         if let Err(error) = self.provider.finish_client(hello, &accept) {
+            self.authentication_failures = self.authentication_failures.saturating_add(1);
             self.set_error(error);
             return;
         }
         self.server_nonce = Some(accept.nonce);
         self.server_accept = Some(accept);
         self.state = State::Established;
+        self.handshakes_completed = self.handshakes_completed.saturating_add(1);
         self.flush_pending();
     }
 
     fn process_data(&mut self, frame: &[u8]) {
         if self.state != State::Established || frame.len() < DATA_HEADER_LEN {
+            self.malformed_frames = self.malformed_frames.saturating_add(1);
             self.set_error(if self.state == State::Established {
                 SecurityError::MalformedFrame
             } else {
@@ -1143,6 +1233,7 @@ where
         }
         let provider_id = u16::from_le_bytes([frame[4], frame[5]]);
         if provider_id != self.provider.provider_id() {
+            self.authentication_failures = self.authentication_failures.saturating_add(1);
             self.set_error(SecurityError::VersionMismatch);
             return;
         }
@@ -1173,9 +1264,11 @@ where
             )
             .is_err()
         {
+            self.authentication_failures = self.authentication_failures.saturating_add(1);
             self.set_error(SecurityError::ProviderRejected);
             return;
         }
+        self.protected_datagrams_received = self.protected_datagrams_received.saturating_add(1);
         match self.replay.observe(sequence) {
             ReplayResult::Fresh => self.inbound.push_back(plaintext),
             ReplayResult::Duplicate | ReplayResult::TooOld => {
@@ -1186,7 +1279,7 @@ where
 
     fn drive(&mut self) {
         self.poll_ticks = self.poll_ticks.wrapping_add(1);
-        if self.state == State::ClientHelloSent && self.poll_ticks % 4 == 0 {
+        if self.state == State::ClientHelloSent && self.poll_ticks.is_multiple_of(4) {
             self.send_handshake();
         }
         if self.state == State::Established {

@@ -51,7 +51,7 @@ pub struct MuxTelemetrySnapshot {
     pub congestion_window: usize,
     /// Current expendable per-tick byte budget.
     pub unreliable_budget_bytes: usize,
-    /// Smoothed minimum RTT, when a non-retransmitted flight has been ACKed.
+    /// Smoothed minimum RTT, when a non-retransmitted flight has been `ACKed`.
     pub min_rtt_ticks: Option<u64>,
     /// Current queued/unacknowledged message count for each channel.
     pub queued_messages: [usize; NET_CHANNEL_COUNT],

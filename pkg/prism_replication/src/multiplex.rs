@@ -773,15 +773,12 @@ impl<D: Transport> ChannelMux<D> {
             NetChannel::RpcReliable,
             NetChannel::BulkReliable,
         ] {
-            loop {
-                let Some(payload_len) = self
-                    .reliable_lane_mut(channel)
-                    .pending
-                    .front()
-                    .map(Vec::len)
-                else {
-                    break;
-                };
+            while let Some(payload_len) = self
+                .reliable_lane_mut(channel)
+                .pending
+                .front()
+                .map(Vec::len)
+            {
                 let wire_len = HEADER_LEN
                     .saturating_add(self.datagram.security_overhead())
                     .saturating_add(payload_len);

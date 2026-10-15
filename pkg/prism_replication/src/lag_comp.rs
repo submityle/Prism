@@ -260,13 +260,13 @@ impl LagCompensator {
         tick: u64,
         samples: &[(EntityId, Aabb3)],
     ) -> Result<(), LagCompError> {
-        if let Some(current) = self.current_tick {
-            if tick < current {
-                return Err(LagCompError::NonMonotonicFrame {
-                    current,
-                    received: tick,
-                });
-            }
+        if let Some(current) = self.current_tick
+            && tick < current
+        {
+            return Err(LagCompError::NonMonotonicFrame {
+                current,
+                received: tick,
+            });
         }
 
         let mut seen = BTreeSet::new();
@@ -290,14 +290,13 @@ impl LagCompensator {
                 .histories
                 .get(&entity)
                 .and_then(EntityHistory::last_tick)
+                && tick < previous
             {
-                if tick < previous {
-                    return Err(LagCompError::NonMonotonicEntity {
-                        entity,
-                        previous,
-                        received: tick,
-                    });
-                }
+                return Err(LagCompError::NonMonotonicEntity {
+                    entity,
+                    previous,
+                    received: tick,
+                });
             }
         }
 

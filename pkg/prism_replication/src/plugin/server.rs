@@ -207,7 +207,10 @@ impl<S: ServerStrategy> ServerReplication<S> {
                     self.applied = self.applied.saturating_add(1);
                     advanced += 1;
                 }
-                Err(error @ MuxSendError::Backpressured(_)) => {
+                Err(
+                    error @ (MuxSendError::Backpressured(_)
+                    | MuxSendError::ConnectionNotEstablished),
+                ) => {
                     self.last_send_error = Some(error);
                     break;
                 }
@@ -217,10 +220,6 @@ impl<S: ServerStrategy> ServerReplication<S> {
                     self.last_send_error = Some(error);
                     self.pending_commands.pop_front();
                     self.rejected = self.rejected.saturating_add(1);
-                }
-                Err(error @ MuxSendError::ConnectionNotEstablished) => {
-                    self.last_send_error = Some(error);
-                    break;
                 }
             }
         }
