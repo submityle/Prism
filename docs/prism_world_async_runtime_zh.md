@@ -49,4 +49,18 @@ adapter 的 public poll 保留一个最新 Context 的 waker；并发 blocking r
 
 真实 archive 回归在 0/1/2 个计算 worker 上运行：3 个 cell、每个 512 字节 payload、1 个文件槽、7 字节 chunk，核对 archive offset、checksum、header 和 host payload。过程中修复零 worker fallback 的外部唤醒：ready queue 与直接 Future 的通知共同推进带 epoch 的 condvar，多个 `block_on` driver 各自观察通知，不再等待 5 秒 stall timer 才继续。定向测试覆盖提前通知、直接 Future、排队 harness 与并发 driver。
 
-本轮启用 tasks 的 runtime 63 项通过；`prism_tasks` 默认配置及 `--no-default-features --features std` 均为 264 项单测与 11 项文档测试通过。runtime no-default 的 6 项通过；tasks/std 与 runtime/tasks 联合 all-target clippy、runtime no-default all-target clippy 均通过 `-D warnings`，指定文件格式检查与 `git diff --check` 通过。仍未接通共享动态优先级、原生 IO reactor、资产包解压、mmap 或 GPU 直传；取消集成不构成这些功能的验收。
+本轮启用 tasks 的 runtime 63 项通过；`prism_tasks` 默认配置及 `--no-default-features --features std` 的公平性收尾后计数为 273 项单测与 11 项文档测试（原 264 项，加已有公平性补丁 6 项及收尾新增 3 项）。runtime no-default 的 6 项通过；tasks/std 与 runtime/tasks 联合 all-target clippy、runtime no-default all-target clippy 均通过 `-D warnings`，指定文件格式检查与 `git diff --check` 通过。仍未接通共享动态优先级、原生 IO reactor、资产包解压、mmap 或 GPU 直传；取消集成不构成这些功能的验收。
+
+## 任务公平性
+
+`spawn_async` 的 harness 每次 scheduler dispatch 最多执行 32 次 `poll`。只有 `Pending` 且 poll 期间收到 wake 才继续消耗量子；未收到 wake 的 `Pending` 保存 Future 并进入 Idle，等待外部唤醒。第 32 次 poll 若仍为已通知的 `Pending`，在同一锁内保存 Future 并转为 Queued，再解锁入队；并发 wake 合并为一个 continuation，不重复入队、不丢失通知。`Ready` 或 panic 优先结束任务，即使最后一次 poll 同时发出 wake，也不会因量子耗尽而重新入队；完成后的旧 waker 不再触发 poll。
+
+有 worker 时，harness 的首次提交、Idle 唤醒与量子 continuation 都进入全局 injector 的 FIFO 队尾，包括从该池 worker 发起的提交。这样，自唤醒任务不能借本地 LIFO 立即重新执行、越过已在 injector 中等待的普通计算任务或其他 async harness。FIFO 只保证该队列内的取出顺序：调度器仍优先处理 priority inbox、本地 deque，再取 injector，fibers 还会先恢复就绪 fiber；多 worker 的执行/完成顺序也不是全局 FIFO。持续高优先级或本地工作造成的跨队列饥饿不属于本补丁解决范围。
+
+零 worker fallback 中，`block_on` 每批最多执行 32 个 ready harness dispatch，再 poll 一次直接传入的 root Future；ready queue 持续非空也不会把 root 饿死。每批最多为 `32 × 32 = 1024` 次 harness poll，root poll 不计入其中。其他 ready harness 通过 FIFO 插入连续自唤醒任务之间；普通同步 job 在零 worker 下仍由提交线程 inline 执行。root 返回 Pending 后，队列有工作就继续下一批，无工作时沿用通知/epoch 等待机制；多 worker 下 root 由调用线程 poll，Pending 时等待自身 waker，不承担 caller-side help。
+
+以上都是合作式、以 poll/dispatch 次数计的边界，不是毫秒延迟或硬实时保证。执行器无法抢占单次 poll；不返回的 poll、阻塞调用、长时间计算、析构以及 root 自己的单次 poll 都可能阻塞所在 driver/worker。调用方仍需分段工作并主动让出；本补丁不引入抢占、动态优先级或 IO 容量等待策略。
+
+公平性回归共 9 项：零 worker 下自唤醒与 root/计算进展，单 worker 下本地及 injector 普通任务的进展与 root 唤醒，worker 内首次 async 提交的 FIFO 顺序，两种 ready 队列的并发 wake 合并，量子末尾恰好 Ready 或无 wake 的 Pending，以及让出后 panic/旧 waker 隔离。顺序和 poll 次数通过显式握手、手动队列驱动及原子计数断言，不以时间片快慢判定公平性；超时仅保护测试握手，poll fuse 让饥饿回归以计数超限失败。
+
+本次独立验证使用 `/private/tmp/prism-task-fairness-vGTao8`，离线、单构建 job，关闭 incremental/debug info。`cargo test --offline -p prism_tasks -j 1` 通过 273 单测与 11 doc；`--no-default-features --features std` 加 `-- --test-threads=1` 同样通过 273 + 11。std-only 首次并行全量跑在范围外的 `tests::m3::main_lane_runs_only_when_pumped` 挂起超过 60 秒，随后终止；不将那次运行记为通过，也未修改该测试或 named lane。定向 `fairness_tests` 在 `--no-default-features --features single` 下 6 项、`--features fibers` 下 9 项通过（实际强制单线程 feature 名为 `single`）。std-only `cargo clippy --offline -p prism_tasks --all-targets --no-default-features --features std -j 1 -- -D warnings` 通过；fibers all-target clippy 被未改动的 `fiber/stack.rs:92` 与 `fiber/mod.rs:102,241` 三处 `undocumented_unsafe_blocks` 拦住，不声称该配置 lint 通过。三个 Rust 文件的定向 rustfmt 检查与四个文件的 diff 空白检查通过。上文 runtime 63、no-default 6 及联合 clippy 是主代理已有验证，本次公平性收尾未重跑 runtime，也未修改 IO 接入。

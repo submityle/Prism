@@ -5,19 +5,24 @@
 //! Spawning a future wraps it in a non-generic [`TaskHarness`] (the typed
 //! output is funneled into a [`ResultCell`] shared with the [`Task`] handle).
 //! The harness is a [`WakeTask`]: when its waker fires it re-enqueues itself.
-//! A multi-threaded pool runs each poll as an ordinary job on a worker (so a
+//! A multi-threaded pool runs a bounded poll quantum as a job on a worker (so a
 //! future shares the work-stealing load balancer with the job graph, exactly as
 //! the design intends); the single-threaded fallback keeps a ready queue that
-//! [`TaskPool::block_on`] drains inline.
+//! [`TaskPool::block_on`] drives in bounded batches inline.
 //!
 //! ## Deadlock-freedom
 //! A harness is enqueued at most once at a time (a small [`RunState`] machine
 //! guards against double-enqueue and handles a wake that lands *during* a poll
-//! by re-polling instead of re-queuing). [`TaskPool::block_on`] parks the
-//! calling thread on a condvar and is woken by the future's own waker, so it
-//! never busy-spins; in the single-threaded fallback it instead drives the
-//! ready queue and fails fast if a future can make no progress, so it can never
-//! hang.
+//! by re-polling within the quantum or re-queuing at its end). Continuations
+//! use the global FIFO injector, not a worker's local LIFO deque, so yielding
+//! cannot overtake already-injected jobs. Priority work and local deques still
+//! take precedence over the injector; this is not strict scheduler-wide FIFO.
+//! This is cooperative: a single long-running poll cannot be preempted.
+//! [`TaskPool::block_on`] parks the calling thread on a condvar and is woken
+//! by the future's own waker, so it
+//! does not spin on an unwoken pending root. In the single-threaded fallback
+//! it drives the ready queue and detects a stalled pending future after a
+//! bounded wait when no work is runnable.
 
 use alloc::sync::{Arc, Weak};
 use std::future::Future;
@@ -30,10 +35,18 @@ use super::waker::{waker_of, WakeTask};
 use crate::scheduler::Shared;
 use crate::TaskPool;
 
+/// Maximum polls in one scheduler dispatch, even if every poll wakes itself.
+const POLL_QUANTUM: usize = 32;
+
+/// Maximum harness dispatches before a zero-worker driver polls its root again.
+/// Together with `POLL_QUANTUM`, bounds each batch to 1024 harness polls, not
+/// elapsed time. The directly-polled root is outside the harness quantum.
+const SINGLE_READY_BATCH: usize = 32;
+
 /// A type-erased, re-schedulable unit the scheduler can run without knowing the
 /// future's output type.
 pub(crate) trait RunnableTask: Send + Sync {
-    /// Poll the underlying future once (driving the task forward).
+    /// Poll the underlying future for at most one cooperative quantum.
     fn run_boxed(self: Arc<Self>);
 }
 
@@ -80,7 +93,10 @@ impl TaskHarness {
             shared.push_async_ready(self);
         } else {
             let shared = Arc::clone(&self.shared);
-            shared.push(Box::new(move || self.run_boxed()));
+            // A continuation put on the worker's local LIFO deque could
+            // immediately win again forever, starving the injector. Use FIFO
+            // for all harness enqueues, including wakes from a pool worker.
+            shared.push_injected(Box::new(move || self.run_boxed()));
         }
     }
 
@@ -131,7 +147,7 @@ impl RunnableTask for TaskHarness {
         let waker = waker_of(Arc::clone(&self));
         let mut cx = Context::from_waker(&waker);
 
-        loop {
+        for poll_index in 0..POLL_QUANTUM {
             // Isolate a panicking future: complete the result cell with the
             // panic so `block_on`/await re-raise it instead of hanging, and
             // never unwind the worker (CR-found).
@@ -162,8 +178,18 @@ impl RunnableTask for TaskHarness {
                             return;
                         }
                         RunState::RunningNotified => {
-                            // A wake arrived mid-poll: poll again right away
-                            // rather than bouncing through the queue.
+                            if poll_index + 1 == POLL_QUANTUM {
+                                // Publish the future and the Queued state
+                                // together. Racing wakes then coalesce with
+                                // this continuation; none can enqueue a
+                                // second runner or lose the pending wake.
+                                inner.future = Some(future);
+                                inner.run = RunState::Queued;
+                                drop(inner);
+                                self.enqueue();
+                                return;
+                            }
+                            // Coalesce wakes within the remaining quantum.
                             inner.run = RunState::Running;
                             drop(inner);
                         }
@@ -289,9 +315,9 @@ impl TaskPool {
         }
     }
 
-    /// Single-threaded `block_on`: interleave draining the ready queue with
-    /// polling the target future. Fails fast (never hangs) if the future is
-    /// pending with nothing left to run.
+    /// Single-threaded `block_on`: interleave bounded batches of ready harnesses
+    /// with polling the target future, even when the queue never becomes empty.
+    /// Detect a pending future with no runnable work after a bounded wait.
     fn block_on_single<F>(
         &self,
         mut future: Pin<&mut F>,
@@ -304,7 +330,10 @@ impl TaskPool {
         let shared = self.shared_state();
         loop {
             let epoch = shared.async_epoch();
-            while let Some(task) = shared.pop_async_ready() {
+            for _ in 0..SINGLE_READY_BATCH {
+                let Some(task) = shared.pop_async_ready() else {
+                    break;
+                };
                 task.run_boxed();
             }
             if let Poll::Ready(output) = future.as_mut().poll(cx) {
@@ -339,6 +368,10 @@ fn block_on_stall_timeout() -> core::time::Duration {
 #[cfg(test)]
 #[path = "single_wake_tests.rs"]
 mod single_wake_tests;
+
+#[cfg(test)]
+#[path = "fairness_tests.rs"]
+mod fairness_tests;
 
 #[cfg(test)]
 mod tests {

@@ -41,7 +41,7 @@ thread_local! {
 pub(crate) struct Shared {
     /// One deque per worker; owner uses the back, stealers the front.
     deques: Vec<Mutex<VecDeque<Job>>>,
-    /// Global MPMC injection queue for jobs spawned off-pool.
+    /// Global MPMC FIFO queue for off-pool jobs and async harness dispatches.
     injector: Mutex<VecDeque<Job>>,
     /// Priority-ordered inbox for jobs spawned into a [`crate::PriorityGroup`];
     /// drained highest-priority-first ahead of the ordinary deques.
@@ -152,6 +152,18 @@ impl Shared {
                 self.injector.lock().unwrap().push_back(job);
             }
         }
+        self.cvar.notify_one();
+    }
+
+    /// Publish a job at the global FIFO tail even when called on a worker.
+    /// Async poll continuations use this so a cooperative yield cannot turn
+    /// into immediate local-LIFO re-entry ahead of ordinary injected jobs.
+    /// Priority work and local deques retain precedence; FIFO applies only
+    /// within the injector, not across all scheduler queues.
+    pub(crate) fn push_injected(&self, job: Job) {
+        // As with `push`, reserve before publishing to avoid count underflow.
+        self.queued.fetch_add(1, Ordering::Release);
+        self.injector.lock().unwrap().push_back(job);
         self.cvar.notify_one();
     }
 
