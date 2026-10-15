@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 blake3 = "1.8"
+ring = "0.17.14"
 png = "0.18.1"
 prism_asset = { path = "../prism_asset" }
 prism_image = { path = "../prism_image" }

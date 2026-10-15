@@ -10,9 +10,16 @@ use crate::publication::PublicationDescriptor;
 use crate::transaction::{PublishError, PublishedManifest, RevisionStore};
 use crate::types::{BuildRevision, ContentHash};
 use crate::validation::{ArtifactQualityGate, ValidationError, ValidationReport};
+use ring::signature::{self, KeyPair};
 use std::io::ErrorKind;
+use std::mem::size_of;
 
 const MAGIC: &[u8] = b"PRISM-RELEASE\0\x01";
+const SIGNED_MAGIC: &[u8] = b"PRISM-RELEASE-SIGNED\0\x01";
+const SIGNING_CONTEXT: &[u8] = b"Prism.AssetRelease.Ed25519.v1\0";
+const ED25519_PUBLIC_KEY_BYTES: usize = 32;
+const ED25519_SIGNATURE_BYTES: usize = 64;
+const RELEASE_KEY_ID_BYTES: usize = 16;
 
 /// Deterministic identity of a release candidate.
 ///
@@ -29,6 +36,230 @@ pub struct ReleaseDescriptor {
     pub manifest_hash: ContentHash,
     /// BLAKE3 digest of the canonical publication descriptor, if packaged.
     pub publication_hash: Option<ContentHash>,
+}
+
+/// Stable identifier for a release verification key.
+///
+/// The identifier is derived from the public key, so it can be recorded in a
+/// package index without treating a caller-supplied label as an identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ReleaseKeyId(pub [u8; RELEASE_KEY_ID_BYTES]);
+
+impl ReleaseKeyId {
+    /// Derives the key id from the canonical Ed25519 public key bytes.
+    #[must_use]
+    pub fn from_public_key(public_key: &[u8; ED25519_PUBLIC_KEY_BYTES]) -> Self {
+        let digest = blake3::hash(public_key);
+        let mut id = [0; RELEASE_KEY_ID_BYTES];
+        id.copy_from_slice(&digest.as_bytes()[..RELEASE_KEY_ID_BYTES]);
+        Self(id)
+    }
+}
+
+/// Public verification material for a signed release descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleasePublicKey {
+    /// Content-derived key identifier used by the signed envelope.
+    pub key_id: ReleaseKeyId,
+    /// Raw Ed25519 public key bytes.
+    pub public_key: [u8; ED25519_PUBLIC_KEY_BYTES],
+}
+
+impl ReleasePublicKey {
+    /// Creates public verification material and derives its key id.
+    #[must_use]
+    pub fn from_bytes(public_key: [u8; ED25519_PUBLIC_KEY_BYTES]) -> Self {
+        Self {
+            key_id: ReleaseKeyId::from_public_key(&public_key),
+            public_key,
+        }
+    }
+}
+
+/// A release descriptor plus its Ed25519 signature.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedReleaseDescriptor {
+    /// The integrity descriptor covered by the signature.
+    pub descriptor: ReleaseDescriptor,
+    /// Identifier of the key that produced the signature.
+    pub key_id: ReleaseKeyId,
+    /// Ed25519 signature over the domain-separated canonical descriptor.
+    pub signature: [u8; ED25519_SIGNATURE_BYTES],
+}
+
+impl SignedReleaseDescriptor {
+    /// Encodes a strict, deterministic signed release envelope.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let descriptor = self.descriptor.encode();
+        let mut bytes = Vec::with_capacity(
+            SIGNED_MAGIC.len()
+                + RELEASE_KEY_ID_BYTES
+                + size_of::<u32>()
+                + descriptor.len()
+                + ED25519_SIGNATURE_BYTES,
+        );
+        bytes.extend_from_slice(SIGNED_MAGIC);
+        bytes.extend_from_slice(&self.key_id.0);
+        bytes.extend_from_slice(&(descriptor.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&descriptor);
+        bytes.extend_from_slice(&self.signature);
+        bytes
+    }
+
+    /// Decodes only the canonical signed envelope representation.
+    pub fn decode(bytes: &[u8]) -> Result<Self, &'static str> {
+        let mut cursor = Cursor { bytes, offset: 0 };
+        if cursor.take(SIGNED_MAGIC.len())? != SIGNED_MAGIC {
+            return Err("invalid signed release magic/version");
+        }
+        let key_id = ReleaseKeyId(cursor.array()?);
+        let descriptor_length = cursor.u32()? as usize;
+        let descriptor_bytes = cursor.take(descriptor_length)?;
+        let descriptor = ReleaseDescriptor::decode(descriptor_bytes)?;
+        let signature = cursor.array()?;
+        if cursor.remaining() != 0 {
+            return Err("signed release envelope has trailing bytes");
+        }
+        let signed = Self {
+            descriptor,
+            key_id,
+            signature,
+        };
+        if signed.encode() != bytes {
+            return Err("signed release envelope is not canonical");
+        }
+        Ok(signed)
+    }
+
+    /// Content identity of the canonical signed envelope.
+    #[must_use]
+    pub fn content_hash(&self) -> ContentHash {
+        ContentHash::digest(&self.encode())
+    }
+}
+
+/// Errors raised while signing or verifying a release envelope.
+#[derive(Debug, Eq, PartialEq)]
+pub enum ReleaseSignatureError {
+    /// The signed envelope names a different key than the verifier supplied.
+    KeyIdMismatch {
+        expected: ReleaseKeyId,
+        actual: ReleaseKeyId,
+    },
+    /// The Ed25519 signature is invalid for the descriptor and public key.
+    InvalidSignature,
+    /// The signing key could not be constructed from the supplied seed.
+    InvalidPrivateKey,
+}
+
+impl std::fmt::Display for ReleaseSignatureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KeyIdMismatch { .. } => {
+                f.write_str("signed release key id does not match the verification key")
+            }
+            Self::InvalidSignature => f.write_str("signed release signature is invalid"),
+            Self::InvalidPrivateKey => f.write_str("invalid Ed25519 private key seed"),
+        }
+    }
+}
+
+impl std::error::Error for ReleaseSignatureError {}
+
+/// Ed25519 release signer backed by caller-owned key material.
+///
+/// Key storage, rotation, and trust policy remain outside this crate. The
+/// signer never reads a key from disk or silently invents one.
+pub struct ReleaseSigner {
+    key_pair: signature::Ed25519KeyPair,
+    public: ReleasePublicKey,
+}
+
+impl ReleaseSigner {
+    /// Builds a signer from a raw 32-byte Ed25519 seed.
+    pub fn from_seed(seed: &[u8; 32]) -> Result<Self, ReleaseSignatureError> {
+        let key_pair = signature::Ed25519KeyPair::from_seed_unchecked(seed)
+            .map_err(|_| ReleaseSignatureError::InvalidPrivateKey)?;
+        let public_key = key_pair
+            .public_key()
+            .as_ref()
+            .try_into()
+            .map_err(|_| ReleaseSignatureError::InvalidPrivateKey)?;
+        let public = ReleasePublicKey::from_bytes(public_key);
+        Ok(Self { key_pair, public })
+    }
+
+    /// Returns the public verification material for this signer.
+    #[must_use]
+    pub fn public_key(&self) -> ReleasePublicKey {
+        self.public
+    }
+
+    /// Signs a release descriptor using a domain-separated canonical message.
+    #[must_use]
+    pub fn sign(&self, descriptor: ReleaseDescriptor) -> SignedReleaseDescriptor {
+        let message = signing_message(&descriptor);
+        let signature = self.key_pair.sign(&message);
+        let signature = signature
+            .as_ref()
+            .try_into()
+            .expect("ring Ed25519 signatures are always 64 bytes");
+        SignedReleaseDescriptor {
+            descriptor,
+            key_id: self.public.key_id,
+            signature,
+        }
+    }
+}
+
+/// Stateless Ed25519 release verifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleaseVerifier {
+    public: ReleasePublicKey,
+}
+
+impl ReleaseVerifier {
+    /// Creates a verifier from raw Ed25519 public key bytes.
+    #[must_use]
+    pub fn from_public_key(public_key: [u8; ED25519_PUBLIC_KEY_BYTES]) -> Self {
+        Self {
+            public: ReleasePublicKey::from_bytes(public_key),
+        }
+    }
+
+    /// Creates a verifier from explicit public verification material.
+    #[must_use]
+    pub fn new(public: ReleasePublicKey) -> Self {
+        Self { public }
+    }
+
+    /// Returns the public verification material.
+    #[must_use]
+    pub fn public_key(&self) -> ReleasePublicKey {
+        self.public
+    }
+
+    /// Verifies key identity and the Ed25519 signature.
+    pub fn verify(&self, signed: &SignedReleaseDescriptor) -> Result<(), ReleaseSignatureError> {
+        if signed.key_id != self.public.key_id {
+            return Err(ReleaseSignatureError::KeyIdMismatch {
+                expected: self.public.key_id,
+                actual: signed.key_id,
+            });
+        }
+        let key = signature::UnparsedPublicKey::new(&signature::ED25519, self.public.public_key);
+        key.verify(&signing_message(&signed.descriptor), &signed.signature)
+            .map_err(|_| ReleaseSignatureError::InvalidSignature)
+    }
+}
+
+fn signing_message(descriptor: &ReleaseDescriptor) -> Vec<u8> {
+    let encoded = descriptor.encode();
+    let mut message = Vec::with_capacity(SIGNING_CONTEXT.len() + encoded.len());
+    message.extend_from_slice(SIGNING_CONTEXT);
+    message.extend_from_slice(&encoded);
+    message
 }
 
 impl ReleaseDescriptor {
@@ -411,6 +642,10 @@ impl<'a> Cursor<'a> {
     fn u64(&mut self) -> Result<u64, &'static str> {
         Ok(u64::from_le_bytes(self.array()?))
     }
+
+    fn u32(&mut self) -> Result<u32, &'static str> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
 }
 
 #[cfg(test)]
@@ -469,6 +704,60 @@ mod tests {
         let mut invalid_flag = encoded;
         *invalid_flag.last_mut().unwrap() = 2;
         assert!(ReleaseDescriptor::decode(&invalid_flag).is_err());
+    }
+
+    #[test]
+    fn ed25519_release_signatures_are_deterministic_and_verifiable() {
+        let signer = ReleaseSigner::from_seed(&[7; 32]).unwrap();
+        let descriptor = ReleaseDescriptor {
+            revision: BuildRevision(3),
+            manifest_hash: ContentHash::digest(b"manifest"),
+            publication_hash: Some(ContentHash::digest(b"publication")),
+        };
+        let signed = signer.sign(descriptor.clone());
+        let encoded = signed.encode();
+        assert_eq!(
+            ReleaseVerifier::new(signer.public_key()).verify(&signed),
+            Ok(())
+        );
+        assert_eq!(
+            ReleaseVerifier::new(signer.public_key())
+                .verify(&ReleaseSigner::from_seed(&[7; 32]).unwrap().sign(descriptor)),
+            Ok(())
+        );
+        assert_eq!(SignedReleaseDescriptor::decode(&encoded).unwrap(), signed);
+        assert_eq!(signed.content_hash(), ContentHash::digest(&encoded));
+    }
+
+    #[test]
+    fn ed25519_release_signatures_reject_tampering_and_wrong_keys() {
+        let signer = ReleaseSigner::from_seed(&[11; 32]).unwrap();
+        let signed = signer.sign(ReleaseDescriptor {
+            revision: BuildRevision(4),
+            manifest_hash: ContentHash::digest(b"manifest"),
+            publication_hash: None,
+        });
+        let wrong_key = ReleaseVerifier::from_public_key(
+            ReleaseSigner::from_seed(&[12; 32])
+                .unwrap()
+                .public_key()
+                .public_key,
+        );
+        assert!(matches!(
+            wrong_key.verify(&signed),
+            Err(ReleaseSignatureError::KeyIdMismatch { .. })
+        ));
+
+        let mut tampered = signed.clone();
+        tampered.descriptor.revision = BuildRevision(5);
+        assert_eq!(
+            ReleaseVerifier::new(signer.public_key()).verify(&tampered),
+            Err(ReleaseSignatureError::InvalidSignature)
+        );
+
+        let mut encoded = signed.encode();
+        encoded[0] ^= 1;
+        assert!(SignedReleaseDescriptor::decode(&encoded).is_err());
     }
 
     #[test]

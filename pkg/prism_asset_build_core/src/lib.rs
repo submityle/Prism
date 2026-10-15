@@ -65,7 +65,11 @@ pub use package::{
 pub use patch::{plan_patch, PatchChange, PatchEntry, PatchPlan, PatchPlanError};
 pub use publication::{PublicationDescriptor, PublishedContainer};
 pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError};
-pub use release::{ReleaseDescriptor, ReleaseError, ReleaseGate, ReleaseVerification};
+pub use release::{
+    ReleaseDescriptor, ReleaseError, ReleaseGate, ReleaseKeyId, ReleasePublicKey,
+    ReleaseSignatureError, ReleaseSigner, ReleaseVerification, ReleaseVerifier,
+    SignedReleaseDescriptor,
+};
 pub use runtime_patch::{
     package_runtime_patch, package_runtime_patch_with_options, RuntimePatchError,
     RuntimePatchPackage, RuntimePatchRequest,
