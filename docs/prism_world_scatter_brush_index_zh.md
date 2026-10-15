@@ -4,7 +4,7 @@
 
 ## 权威与用途
 
-`prism_world_residency::ScatterBrushIndex` 是 `ScatterDensityField` 的可重建 CPU 查询加速结构。它共享完整不可变场配方，不引入第二份 scene 真相、持久对象身份、编辑器状态或随机状态。原 `ScatterDensityField::sample` 保留为线性基线；调用者显式选择索引路径，GPU 作者场仍使用自己的线性笔刷扫描。
+`prism_world_residency::ScatterBrushIndex` 是 `ScatterDensityField` 的可重建 CPU 查询加速结构。它共享完整不可变场配方，不引入第二份 scene 真相、持久对象身份、编辑器状态或随机状态。原 `ScatterDensityField::sample` 保留为线性基线；调用者显式选择索引路径。GPU 另有保持 canonical 连续区间的可选 AABB 树，不复用本 CPU 空间中位数拓扑，见 `prism_world_gpu_scatter_brush_index_zh.md`。
 
 索引不改变 field 算法版本、candidate rank、密度选取或输出缓存身份。完整 field 配方（包括零 opacity、未覆盖查询位置、关闭噪声等 inactive 输入）仍由 `FieldScatterCacheKey` 保留并按值比较。索引拓扑、分配地址和 scratch 容量不进入语义缓存键。
 
@@ -77,4 +77,4 @@ benchmark 对 B=32/1024/10000 各测稀疏和全部重叠配方，启用 noise/w
 
 ## 仍独立的边界
 
-本切片仅实现 CPU 作者刷子空间查询及其 source scatter 组合。GPU 刷子空间索引、增量编辑重拟合、产品 scene/ECS/render graph 接线、贴地放置、曲率/数据层/跨层规则、风/交互和蓝噪声目标须各自交付。CPU 索引可以随配方重建，不将全量构造冒充增量编辑。
+本切片仅实现 CPU 作者刷子空间查询及其 source scatter 组合。GPU 可选索引已另行交付；增量编辑重拟合、产品 scene/ECS/render graph 接线、贴地放置、曲率/数据层/跨层规则、风/交互和蓝噪声目标仍须各自交付。CPU 索引可以随配方重建，不将全量构造冒充增量编辑。

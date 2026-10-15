@@ -47,6 +47,11 @@ harness = false
 required-features = ["gpu"]
 
 [[bench]]
+name = "scatter_brush_index"
+harness = false
+required-features = ["gpu"]
+
+[[bench]]
 name = "scatter_heightfield"
 harness = false
 required-features = ["terrain_scatter"]

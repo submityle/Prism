@@ -4,6 +4,8 @@
 持久化格式、权威字段、真实文件回放与撤销边界见
 `prism_world_scatter_deletions_zh.md`；GPU 不拥有第二份持久状态。
 
+上游也可由 `GpuScatterField::new_indexed` 或 `GpuScatterHeightfield::new_indexed` 构造；删除层仍仅消费最终 compact/count，不另存刷子索引。作者场 work 预算需使用上游 `max_sample_work` 的索引上界，组合实机对照见 `prism_world_gpu_scatter_brush_index_zh.md`。
+
 ## 上游所有权与完整键
 
 `GpuScatterDeletions<U>` 接收并独占已有的 `GpuScatter`、`GpuScatterField`

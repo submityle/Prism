@@ -2,6 +2,52 @@
 
 #[cfg(feature = "gpu")]
 #[test]
+fn field_brush_hierarchy_uses_core_integer_types_and_the_existing_binding_abi() {
+    let source = include_str!("../src/shaders/scatter_field.wgsl");
+    let module = wgpu::naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|error| panic!("field parse: {}", error.emit_to_string(source)));
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .expect("indexed field requires no optional capabilities");
+    assert_eq!(module.entry_points.len(), 1);
+    assert_eq!(module.entry_points[0].workgroup_size, [64, 1, 1]);
+    let mut bindings = std::collections::BTreeMap::new();
+    for (_, var) in module.global_variables.iter() {
+        if let Some(binding) = var.binding {
+            assert_eq!(binding.group, 0);
+            assert!(bindings.insert(binding.binding, var.space).is_none());
+        }
+    }
+    assert_eq!(bindings.len(), 6);
+    assert_eq!(bindings[&0], wgpu::naga::AddressSpace::Uniform);
+    for binding in 1..=5 {
+        let mut access = wgpu::naga::StorageAccess::LOAD;
+        if binding >= 3 {
+            access |= wgpu::naga::StorageAccess::STORE;
+        }
+        assert_eq!(
+            bindings[&binding],
+            wgpu::naga::AddressSpace::Storage { access }
+        );
+    }
+    for (_, ty) in module.types.iter() {
+        match ty.inner {
+            wgpu::naga::TypeInner::Scalar(scalar)
+            | wgpu::naga::TypeInner::Atomic(scalar)
+            | wgpu::naga::TypeInner::Vector { scalar, .. } => {
+                assert_ne!(scalar.kind, wgpu::naga::ScalarKind::Float);
+                assert!(scalar.width <= 4);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+#[test]
 fn deletion_scatter_uses_core_integer_features_and_exact_binding_access() {
     let source = include_str!("../src/shaders/scatter_deletion.wgsl");
     let module = wgpu::naga::front::wgsl::parse_str(source)

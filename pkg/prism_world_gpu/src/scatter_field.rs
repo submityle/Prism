@@ -93,6 +93,7 @@ pub struct GpuScatterField {
     source: GpuScatter,
     queue: wgpu::Queue,
     max_brushes: usize,
+    indexed: bool,
     max_groups: u32,
     allocated_bytes: u64,
     params: wgpu::Buffer,
@@ -124,12 +125,57 @@ impl GpuScatterField {
         vertex_count: u32,
         max_buffer_bytes: u64,
     ) -> Result<Self, GpuScatterFieldError> {
+        Self::create(
+            ctx,
+            capacity,
+            max_brushes,
+            vertex_count,
+            max_buffer_bytes,
+            false,
+        )
+    }
+
+    /// Opt-in canonical-order AABB hierarchy. Keeps the same five storage
+    /// bindings and exact field semantics as [`Self::new`]. For `B` brushes,
+    /// the fixed upload/storage capacity adds `64*(2*B-1)` bytes if `B>0`.
+    /// Each query has no scratch or sorting; spatially incoherent IDs and
+    /// overlapping bounds can make this slower than the linear path.
+    pub fn new_indexed(
+        ctx: &GpuContext,
+        capacity: usize,
+        max_brushes: usize,
+        vertex_count: u32,
+        max_buffer_bytes: u64,
+    ) -> Result<Self, GpuScatterFieldError> {
+        Self::create(
+            ctx,
+            capacity,
+            max_brushes,
+            vertex_count,
+            max_buffer_bytes,
+            true,
+        )
+    }
+
+    fn create(
+        ctx: &GpuContext,
+        capacity: usize,
+        max_brushes: usize,
+        vertex_count: u32,
+        max_buffer_bytes: u64,
+        indexed: bool,
+    ) -> Result<Self, GpuScatterFieldError> {
         let device = ctx.device();
         let limits = device.limits();
-        let bytes = validate(capacity, max_brushes, max_buffer_bytes, &limits)?;
+        let bytes = if indexed {
+            validate_with_index(capacity, max_brushes, max_buffer_bytes, &limits, true)?
+        } else {
+            validate(capacity, max_brushes, max_buffer_bytes, &limits)?
+        };
+        let records = brush_records(max_brushes, indexed)?;
         let mut brush_scratch = Vec::new();
         brush_scratch
-            .try_reserve_exact(max_brushes)
+            .try_reserve_exact(records as usize)
             .map_err(|_| GpuScatterFieldError::AllocationFailed)?;
         let source = GpuScatter::new(ctx, capacity, vertex_count, max_buffer_bytes)?;
         let storage = |label, size, upload| {
@@ -146,7 +192,7 @@ impl GpuScatterField {
         };
         let brushes = storage(
             "world scatter author brushes",
-            BRUSH_BYTES * max_brushes.max(1) as u64,
+            BRUSH_BYTES * u64::from(records.max(1)),
             true,
         );
         let attributes = storage(
@@ -217,6 +263,7 @@ impl GpuScatterField {
             source,
             queue: ctx.queue().clone(),
             max_brushes,
+            indexed,
             max_groups: limits.max_compute_workgroups_per_dimension,
             allocated_bytes: bytes,
             params,
@@ -233,7 +280,8 @@ impl GpuScatterField {
 
     /// Validates source/field work and complete brush capacity before any write.
     /// No CPU sample generation. Source changes upload 192 bytes, field uniform
-    /// changes 128 bytes, changed brush lists 64 bytes per supplied brush. Equal
+    /// changes 128 bytes, changed brush lists 64 bytes per supplied brush plus
+    /// 64 bytes per hierarchy node in indexed mode. Equal
     /// recipes/requests upload nothing; recipe comparison is worst-case O(B),
     /// not O(1). Source edits never require retransmitting unchanged brushes.
     pub fn write_request(
@@ -274,6 +322,11 @@ impl GpuScatterField {
         words[16] = config.salt as u32;
         words[17] = (config.salt >> 32) as u32;
         words[18] = SCATTER_KERNEL_VERSION;
+        if self.indexed {
+            words[19] = words[9];
+            // The complete capacity was validated at construction/preflight.
+            words[20] = crate::scatter_brush_index::node_count(field.brushes().len())?;
+        }
         let key = FieldScatterCacheKey {
             scatter: ScatterCacheKey {
                 kernel_version: SCATTER_KERNEL_VERSION,
@@ -299,6 +352,9 @@ impl GpuScatterField {
             self.brush_scratch.clear();
             self.brush_scratch
                 .extend(field.brushes().iter().map(brush_words));
+            if self.indexed {
+                crate::scatter_brush_index::append_nodes(field.brushes(), &mut self.brush_scratch);
+            }
             if !self.brush_scratch.is_empty() {
                 self.queue.write_buffer(
                     &self.brushes,
@@ -342,16 +398,11 @@ impl GpuScatterField {
     ) -> Result<(u32, [u32; 2]), GpuScatterFieldError> {
         self.source
             .validate_request(config, region, max_candidate_evaluations)?;
-        if field.brushes().len() > self.max_brushes {
-            return Err(GpuScatterFieldError::BrushCapacityExceeded {
-                required: field.brushes().len(),
-                capacity: self.max_brushes,
-            });
-        }
+        let sample_work = self.max_sample_work(field)?;
         let estimate = estimate_scatter_work(config, region).map_err(GpuScatterError::from)?;
         let required = estimate
             .primary_candidates
-            .checked_mul(field.work_per_sample())
+            .checked_mul(sample_work)
             .ok_or(ScatterFieldError::ArithmeticOverflow)?;
         if required > max_field_work {
             return Err(ScatterFieldError::WorkBudgetExceeded {
@@ -364,6 +415,35 @@ impl GpuScatterField {
             .map_err(|_| GpuScatterError::ArithmeticOverflow)?;
         let groups = dispatch(estimate.primary_candidates, self.max_groups)?;
         Ok((count, groups))
+    }
+
+    /// Whether this object uses the optional canonical-order brush hierarchy.
+    pub fn brush_index_enabled(&self) -> bool {
+        self.indexed
+    }
+
+    /// Conservative logical work per primary candidate, including every
+    /// possible hierarchy visit. Checks brush capacity without mutating or
+    /// uploading. Multiply by the primary candidate count for admission.
+    pub fn max_sample_work(
+        &self,
+        field: &ScatterDensityField,
+    ) -> Result<u64, GpuScatterFieldError> {
+        if field.brushes().len() > self.max_brushes {
+            return Err(GpuScatterFieldError::BrushCapacityExceeded {
+                required: field.brushes().len(),
+                capacity: self.max_brushes,
+            });
+        }
+        let nodes = if self.indexed {
+            crate::scatter_brush_index::node_count(field.brushes().len())?
+        } else {
+            0
+        };
+        field
+            .work_per_sample()
+            .checked_add(u64::from(nodes))
+            .ok_or_else(|| ScatterFieldError::ArithmeticOverflow.into())
     }
 
     /// Records source generation then field filtering/compaction. No owned
@@ -415,7 +495,8 @@ impl GpuScatterField {
     pub fn allocated_buffer_bytes(&self) -> u64 {
         self.allocated_bytes
     }
-    /// Actual reusable host scratch payload capacity; excludes Vec metadata.
+    /// Actual reusable host upload scratch payload capacity, including hierarchy
+    /// records in indexed mode; excludes Vec metadata and allocator overhead.
     pub fn brush_scratch_bytes(&self) -> usize {
         self.brush_scratch.capacity() * 64
     }
@@ -464,8 +545,30 @@ pub(crate) fn validate(
     budget: u64,
     limits: &wgpu::Limits,
 ) -> Result<u64, GpuScatterFieldError> {
+    validate_with_index(capacity, brushes, budget, limits, false)
+}
+
+fn brush_records(brushes: usize, indexed: bool) -> Result<u32, GpuScatterError> {
+    let count = u32::try_from(brushes).map_err(|_| GpuScatterError::ArithmeticOverflow)?;
+    let nodes = if indexed {
+        crate::scatter_brush_index::node_count(brushes)?
+    } else {
+        0
+    };
+    count
+        .checked_add(nodes)
+        .ok_or(GpuScatterError::ArithmeticOverflow)
+}
+
+pub(crate) fn validate_with_index(
+    capacity: usize,
+    brushes: usize,
+    budget: u64,
+    limits: &wgpu::Limits,
+    indexed: bool,
+) -> Result<u64, GpuScatterFieldError> {
     let source_bytes = validate_capacity(capacity, budget, limits)?;
-    let brush_count = u32::try_from(brushes).map_err(|_| GpuScatterError::ArithmeticOverflow)?;
+    let brush_count = brush_records(brushes, indexed)?;
     let brush_bytes = BRUSH_BYTES * u64::from(brush_count.max(1));
     let bytes = source_bytes + 20 * capacity.max(1) as u64 + brush_bytes + PARAM_BYTES + 16;
     if bytes > budget {
@@ -526,6 +629,44 @@ mod tests {
         small.max_storage_buffer_binding_size = 64;
         assert!(matches!(
             validate(1, 2, 4096, &small),
+            Err(GpuScatterFieldError::Scatter(
+                GpuScatterError::DeviceLimit {
+                    limit: "max_storage_buffer_binding_size",
+                    ..
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn indexed_composite_budget_and_address_space_include_every_node() {
+        let limits = wgpu::Limits::default();
+        for (capacity, brushes) in [(0, 0), (1, 1), (129, 17), (10_000, 32)] {
+            let nodes = crate::scatter_brush_index::node_count(brushes).unwrap();
+            let records = (brushes as u64 + u64::from(nodes)).max(1);
+            let expected = 88 * capacity.max(1) as u64 + 64 * records + 352;
+            assert_eq!(
+                validate_with_index(capacity, brushes, expected, &limits, true),
+                Ok(expected)
+            );
+            assert!(matches!(
+                validate_with_index(capacity, brushes, expected - 1, &limits, true),
+                Err(GpuScatterFieldError::Scatter(
+                    GpuScatterError::BufferBudgetExceeded { .. }
+                ))
+            ));
+        }
+        // Combined brush/node addressing must fit, even if node count alone fits.
+        let brushes = (u32::MAX as usize / 3) + 1;
+        assert!(crate::scatter_brush_index::node_count(brushes).is_ok());
+        assert!(matches!(
+            brush_records(brushes, true),
+            Err(GpuScatterError::ArithmeticOverflow)
+        ));
+        let mut small = limits;
+        small.max_storage_buffer_binding_size = 127;
+        assert!(matches!(
+            validate_with_index(1, 1, 4096, &small, true),
             Err(GpuScatterFieldError::Scatter(
                 GpuScatterError::DeviceLimit {
                     limit: "max_storage_buffer_binding_size",

@@ -3,7 +3,11 @@
 // Only core WGSL u32 arithmetic is used: no floats, i64, or optional features.
 // The host validates the recipe, sorts brushes by ID, sizes all buffers, uses
 // dispatch Z = 1, and clears indirect[1] before dispatch. Source flags are never
-// mutated. Uniform words 19..31 and brush word 15 are reserved zeroes.
+// mutated. Uniform words 19/20 hold the hierarchy base/count (count=0 uses
+// linear sampling); 21..31 and brush word 15 remain reserved zeroes.
+// Hierarchy nodes share the brush buffer after the canonical brush prefix.
+// Node words 0..5=minXYZ i64 limbs, 6..11=maxXYZ; 12=relative exclusive
+// subtree escape, 13=leaf brush index or 0xffffffff for a branch; 14/15=0.
 struct Params {
     // 0..1 field seed, 2 base density, 3 base species, 4 noise enabled,
     // 5 cell size, 6 amplitude, 7 warp cell size, 8 warp amplitude,
@@ -377,6 +381,44 @@ fn brush_weight(brush: Record, position: array<vec2<u32>, 3>) -> u32 {
     return (radial * opacity + 32767u) / 65535u;
 }
 
+fn compose_brush(current: vec2<u32>, brush: Record, position: array<vec2<u32>, 3>) -> vec2<u32> {
+    let weight = brush_weight(brush, position);
+    if weight == 0u {
+        return current;
+    }
+    var density = current.x;
+    var species = current.y;
+    if brush.words[11] == 0u {
+        density = lerp16(density, brush.words[12], weight);
+    } else {
+        let encoded = brush.words[12];
+        let negative = (encoded & 0x80000000u) != 0u;
+        var magnitude = encoded;
+        if negative {
+            magnitude = 0u - encoded;
+        }
+        // Validated |Add| <= ONE: product <= ONE^2 fits u32. Unsigned
+        // division of the magnitude gives signed truncation toward zero.
+        let delta = SignedOffset(magnitude * weight / 65535u, negative);
+        density = apply_density_offset(density, delta);
+    }
+    if weight >= 32768u && brush.words[13] != 0u {
+        species = brush.words[14];
+    }
+    return vec2<u32>(density, species);
+}
+
+fn node_contains(node: Record, position: array<vec2<u32>, 3>) -> bool {
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        let low = vec2<u32>(node.words[axis * 2u], node.words[axis * 2u + 1u]);
+        let high = vec2<u32>(node.words[6u + axis * 2u], node.words[7u + axis * 2u]);
+        if signed_less64(position[axis], low) || signed_less64(high, position[axis]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn sample_field(position: array<vec2<u32>, 3>) -> vec2<u32> {
     var density = param_word(2u);
     if param_word(4u) != 0u {
@@ -394,33 +436,32 @@ fn sample_field(position: array<vec2<u32>, 3>) -> vec2<u32> {
         let value = value_noise(position, param_word(5u), 0u, offsets);
         density = apply_density_offset(density, noise_offset(value, param_word(6u)));
     }
-    var species = param_word(3u);
+    var sample = vec2<u32>(density, param_word(3u));
     // The host uploads canonical ascending-ID order. IDs do not enter math.
-    for (var brush_index = 0u; brush_index < param_word(9u); brush_index += 1u) {
-        let brush = brushes[brush_index];
-        let weight = brush_weight(brush, position);
-        if weight == 0u {
-            continue;
+    if param_word(20u) == 0u {
+        for (var brush_index = 0u; brush_index < param_word(9u); brush_index += 1u) {
+            sample = compose_brush(sample, brushes[brush_index], position);
         }
-        if brush.words[11] == 0u {
-            density = lerp16(density, brush.words[12], weight);
-        } else {
-            let encoded = brush.words[12];
-            let negative = (encoded & 0x80000000u) != 0u;
-            var magnitude = encoded;
-            if negative {
-                magnitude = 0u - encoded;
+    } else {
+        // Leaves are contiguous canonical ranges, not spatially reordered.
+        // Preorder escape traversal preserves noncommutative Replace/Add.
+        var node_index = 0u;
+        loop {
+            if node_index >= param_word(20u) {
+                break;
             }
-            // Validated |Add| <= ONE: product <= ONE^2 fits u32. Unsigned
-            // division of the magnitude gives signed truncation toward zero.
-            let delta = SignedOffset(magnitude * weight / 65535u, negative);
-            density = apply_density_offset(density, delta);
-        }
-        if weight >= 32768u && brush.words[13] != 0u {
-            species = brush.words[14];
+            let node = brushes[param_word(19u) + node_index];
+            if !node_contains(node, position) {
+                node_index = node.words[12];
+                continue;
+            }
+            if node.words[13] != 0xffffffffu {
+                sample = compose_brush(sample, brushes[node.words[13]], position);
+            }
+            node_index += 1u;
         }
     }
-    return vec2<u32>(density, species);
+    return sample;
 }
 
 fn candidate_rank(grid: array<vec2<u32>, 3>) -> u32 {

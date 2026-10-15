@@ -57,6 +57,8 @@ mod scatter;
 pub use scatter::{GpuScatter, GpuScatterError};
 
 #[cfg(feature = "gpu")]
+mod scatter_brush_index;
+#[cfg(feature = "gpu")]
 mod scatter_field;
 
 #[cfg(feature = "gpu")]

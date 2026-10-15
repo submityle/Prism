@@ -35,7 +35,9 @@
 
 令 `C=max(capacity,1)`、`B=max(max_brushes,1)`、`S=max(max_surface_samples,1)`，
 包含源、场和地形三级的 owned 逻辑 GPU buffer 总计 `108C+64B+4S+496` 字节。
-另预留 height upload scratch `4*max_surface_samples` 字节及作者场刷子 scratch；
+`GpuScatterHeightfield::new_indexed` 提供相同参数的可选作者刷子 AABB 树，仍为六 storage binding，地形语义、输出 ABI 和完整缓存键不变。令 `b=max_brushes`、`T(b)=0`（b=0）否则 `2b-1`，上述线性公式中的刷子容量项替换为 `64*max(b+T(b),1)`，构造前检查完整三级资源，不能仅预算地形增量。`brush_index_enabled()` 查询模式，`max_sample_work(field)?` 返回作者场每 primary 的保守 work（索引另加实际 B 的 T(B)），地形读取预算仍独立为 `4*primary`。索引为显式选项，全重叠或 ID 空间不相干时可能更慢；详见 `prism_world_gpu_scatter_brush_index_zh.md`。
+
+另预留 height upload scratch `4*max_surface_samples` 字节及作者场刷子/可选节点 scratch；
 实际容量可通过 getter 查看。共享原 i16 地形快照、元数据、allocator/driver
 内部存储另计；这些不是物理 VRAM 或 RSS 上限。
 
@@ -154,6 +156,8 @@ terrain128 + height16,900），构造的三级 indirect 初始化另为 48B，�
 测试/基准，不属于生产 buffer 预算；这些容量载荷不是物理显存、RSS 或峰值内存。
 
 这是精确 GPU 地表过滤，不是完整产品散布。贴地放置、曲率/SDF/数据层和跨散布层
-规则、风/交互、持久 override 删除、笔刷空间索引、scene schema/编辑器、产品
+规则、风/交互、scene schema/编辑器、产品
 renderer graph、蓝噪声频谱与混合 LOD 画质仍需各自实现并验收。局部 parity、
 像素和限定基准不能替代这些工作或整个 world 系统的完成证据。
+
+GPU 完整键删除与可选刷子索引已分别交付，并覆盖 indexed 作者场→真实 heightfield→managed 删除的 CPU 对照，见 `prism_world_gpu_scatter_deletions_zh.md` 与 `prism_world_gpu_scatter_brush_index_zh.md`；不把这些过滤 pass 当成贴地放置或产品接线。

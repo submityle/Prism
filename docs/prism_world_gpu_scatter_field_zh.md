@@ -1,6 +1,6 @@
 # World GPU 作者密度与种类场
 
-日期：2026-10-15
+日期：2026-10-16
 
 ## 实现与能力边界
 
@@ -25,6 +25,8 @@ scatter.encode(&mut encoder)?;
 
 不支持所需 limit 时 device acquisition 或构造器显式失败，不偷偷降级为 CPU、忽略刷子或改变配方。
 
+`GpuScatterField::new_indexed` 提供同参数的显式可选索引路径，仍为五 storage binding、同一输出 ABI 和语义缓存键。它按 canonical brush ID 连续区间建立 AABB 树，保留非交换合成顺序，无 GPU 查询 scratch/排序。`new` 保持线性基线；ID 与空间无关或全部重叠时索引可能更慢，不自动启用。完整契约、真实 GPU A/B 与资源说明见 `prism_world_gpu_scatter_brush_index_zh.md`。
+
 ## 输出 ABI 与消费规则
 
 | buffer | 每 source slot / 固定载荷 | 语义 |
@@ -48,13 +50,15 @@ scatter.encode(&mut encoder)?;
 
 包含源 kernel 的 `68*N+208`、field attributes/compact `20*N`、128 字节 field uniform、64*M 笔刷和16字节最终 indirect。零容量仍保留合法 sentinel buffer。容量覆盖所有 primary slot，不按低密度/源幸存数缩减；全部笔刷必须放入固定容量，不能截断后当成功。构造器先检查复合预算、各 buffer/device limit 与 binding 数，再分配；host 另一次 fallible 预留 `max_brushes` 个64字节刷子 scratch record，实际容量可由 `brush_scratch_bytes()` 查询。逻辑字节不含 pipeline/driver 内存、物理 VRAM、Vec 元数据或 RSS。
 
-`write_request` 在任何 queue write 前检查源配置/范围/源工作量/容量、笔刷容量、`primary_candidates*field.work_per_sample()` checked 乘法与场工作预算以及 dispatch limit。返回的可恢复错误保留完整旧 source/field 请求与输出资源；设备丢失、driver OOM 等仍属于 wgpu 设备错误，不在此原子预检承诺内。
+以上公式适用于线性构造器。索引构造器令 `T(b)=0`（b=0）否则 `2b-1`，将 `M` 替换为 `max(max_brushes+T(max_brushes),1)`；host scratch 同时预留全部刷子及节点 record，组合 record 数必须适合 u32 索引。`brush_index_enabled()` 可查询模式。
 
-上传为变更驱动：源请求变化最多192字节；field uniform 变化128字节；规范笔刷列表变化64×brush_count字节。相同请求/描述不上传，不变笔刷不随源范围变化重传；空笔刷列表不写 scratch buffer。完整 cache key 包含源完整描述、field 算法版本与不可变配方，inactive 参数也参与失效；caller version 变化可只改变 key 而不改变 shader 数值。配方 clone O(1)，完整比较最坏 O(B)，不是固定 O(1) 的摘要比较。
+`write_request` 在任何 queue write 前检查源配置/范围/源工作量/容量、笔刷容量、`primary_candidates*max_sample_work(field)?` checked 乘法与场工作预算以及 dispatch limit。线性模式 `max_sample_work` 等于 `field.work_per_sample()`，索引模式另加实际刷子数的全部节点 `T(B)`，不是构造容量的节点数。返回的可恢复错误保留完整旧 source/field 请求与输出资源；设备丢失、driver OOM 等仍属于 wgpu 设备错误，不在此原子预检承诺内。
+
+上传为变更驱动：源请求变化最多192字节；field uniform 变化128字节；规范笔刷列表变化64×brush_count字节，索引模式另加64×T(brush_count)字节节点并作 O(B) 全量重建。相同请求/描述不上传，不变笔刷不随源范围变化重传；空笔刷列表不写 scratch buffer。完整 cache key 包含源完整描述、field 算法版本与不可变配方，inactive 参数也参与失效；caller version 变化可只改变 key 而不改变 shader 数值。配方 clone O(1)，完整比较最坏 O(B)，不是固定 O(1) 的摘要比较。
 
 `encode` 不分配 owned buffer/scratch、不上传、不 submit/wait/map/readback；驱动内部命令和 queue upload 临时存储不在 owned-allocation 承诺内。调用者必须先提交当前 encoder，再更新或 encode 下一个请求；按此顺序连续提交不需要 host wait。不能先记录多个不同请求，随后才一起提交并指望 uniform/brush 自动保留旧版本。
 
-场逻辑预算是保守的 `primary*(1+B+8*noise_enabled+24*warp_enabled)`，不是 GPU 指令数或毫秒限额。源拒绝 slot 会跳过实际 field/rank 计算；每个源幸存者仍线性遍历 B 个刷子，无运行时笔刷空间索引。作者场只作 thinning，不补洞、不重新判断之前的源阻挡关系。
+线性场逻辑预算是保守的 `primary*(1+B+8*noise_enabled+24*warp_enabled)`，索引模式再加 `primary*T(B)`，不是 GPU 指令数或毫秒限额。源拒绝 slot 会跳过实际 field/rank 计算；线性模式每个源幸存者遍历 B 个刷子，索引模式先裁剪 AABB，最坏仍遍历全树及 B 个刷子。作者场只作 thinning，不补洞、不重新判断之前的源阻挡关系。
 
 ## 验证与复现
 
@@ -100,4 +104,4 @@ WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo bench --offline -p prism_world_gpu 
 
 ## 产品边界
 
-这是可调用的整数 GPU 作者场，不是完整产品散布。尚不包含 scene schema/编辑器工具、笔刷空间索引、地表投影/坡度/高度/SDF 过滤、朝向/缩放生成、风/交互、持久 override 删除、蓝噪声频谱、HZB、impostor/HLOD 或产品 renderer graph 接线。既有 resident coverage/dither 是另一层显示策略；本 pass 的 density 是生成选取参数，不自动变成 raster alpha。局部 parity、像素测试和限定基准不能冒充这些系统或完整画质/帧时目标完成。
+这是可调用的整数 GPU 作者场，不是完整产品散布。可选刷子索引、真实 heightfield 高度/离地带/坡度过滤及完整键删除已分别交付，见 `prism_world_gpu_scatter_brush_index_zh.md`、`prism_world_gpu_heightfield_scatter_zh.md`、`prism_world_gpu_scatter_deletions_zh.md`。尚不包含 scene schema/编辑器工具、地表投影/SDF 过滤、朝向/缩放生成、风/交互、蓝噪声频谱、HZB、impostor/HLOD 或产品 renderer graph 接线。既有 resident coverage/dither 是另一层显示策略；本 pass 的 density 是生成选取参数，不自动变成 raster alpha。局部 parity、像素测试和限定基准不能冒充这些系统或完整画质/帧时目标完成。

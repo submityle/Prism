@@ -134,21 +134,84 @@ impl GpuScatterHeightfield {
         vertex_count: u32,
         max_buffer_bytes: u64,
     ) -> Result<Self, GpuScatterHeightfieldError> {
-        let device = ctx.device();
-        let limits = device.limits();
-        let allocated_bytes = validate(
+        Self::create(
+            ctx,
             capacity,
             max_brushes,
             max_surface_samples,
+            vertex_count,
             max_buffer_bytes,
-            &limits,
-        )?;
+            false,
+        )
+    }
+
+    /// Same terrain pipeline with the opt-in canonical-order brush hierarchy.
+    /// Adds `64*(2*max_brushes-1)` bytes for nonzero brush capacity, in the
+    /// existing field binding. Terrain work/semantics are unchanged.
+    pub fn new_indexed(
+        ctx: &GpuContext,
+        capacity: usize,
+        max_brushes: usize,
+        max_surface_samples: usize,
+        vertex_count: u32,
+        max_buffer_bytes: u64,
+    ) -> Result<Self, GpuScatterHeightfieldError> {
+        Self::create(
+            ctx,
+            capacity,
+            max_brushes,
+            max_surface_samples,
+            vertex_count,
+            max_buffer_bytes,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create(
+        ctx: &GpuContext,
+        capacity: usize,
+        max_brushes: usize,
+        max_surface_samples: usize,
+        vertex_count: u32,
+        max_buffer_bytes: u64,
+        indexed: bool,
+    ) -> Result<Self, GpuScatterHeightfieldError> {
+        let device = ctx.device();
+        let limits = device.limits();
+        let allocated_bytes = if indexed {
+            validate_with_index(
+                capacity,
+                max_brushes,
+                max_surface_samples,
+                max_buffer_bytes,
+                &limits,
+                true,
+            )?
+        } else {
+            validate(
+                capacity,
+                max_brushes,
+                max_surface_samples,
+                max_buffer_bytes,
+                &limits,
+            )?
+        };
         let mut height_scratch = Vec::new();
         height_scratch
             .try_reserve_exact(max_surface_samples)
             .map_err(|_| GpuScatterHeightfieldError::AllocationFailed)?;
-        let field =
-            GpuScatterField::new(ctx, capacity, max_brushes, vertex_count, max_buffer_bytes)?;
+        let field = if indexed {
+            GpuScatterField::new_indexed(
+                ctx,
+                capacity,
+                max_brushes,
+                vertex_count,
+                max_buffer_bytes,
+            )?
+        } else {
+            GpuScatterField::new(ctx, capacity, max_brushes, vertex_count, max_buffer_bytes)?
+        };
         let storage = |label, size, upload| {
             let mut usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
             if upload {
@@ -442,9 +505,22 @@ impl GpuScatterHeightfield {
     pub fn height_scratch_bytes(&self) -> usize {
         self.height_scratch.capacity() * size_of::<i32>()
     }
-    /// Actual reusable brush-upload scratch capacity.
+    /// Actual reusable brush/node-upload scratch capacity.
     pub fn brush_scratch_bytes(&self) -> usize {
         self.field.brush_scratch_bytes()
+    }
+
+    /// Whether the author-field stage uses the optional brush hierarchy.
+    pub fn brush_index_enabled(&self) -> bool {
+        self.field.brush_index_enabled()
+    }
+
+    /// Conservative author-field work per candidate, including hierarchy visits.
+    pub fn max_sample_work(
+        &self,
+        field: &ScatterDensityField,
+    ) -> Result<u64, GpuScatterFieldError> {
+        self.field.max_sample_work(field)
     }
 
     /// Fixed primary source-slot capacity.
@@ -472,7 +548,22 @@ fn validate(
     budget: u64,
     limits: &wgpu::Limits,
 ) -> Result<u64, GpuScatterHeightfieldError> {
-    let field_bytes = crate::scatter_field::validate(capacity, brushes, budget, limits)?;
+    validate_with_index(capacity, brushes, samples, budget, limits, false)
+}
+
+fn validate_with_index(
+    capacity: usize,
+    brushes: usize,
+    samples: usize,
+    budget: u64,
+    limits: &wgpu::Limits,
+    indexed: bool,
+) -> Result<u64, GpuScatterHeightfieldError> {
+    let field_bytes = if indexed {
+        crate::scatter_field::validate_with_index(capacity, brushes, budget, limits, true)?
+    } else {
+        crate::scatter_field::validate(capacity, brushes, budget, limits)?
+    };
     let sample_count = u32::try_from(samples).map_err(|_| GpuScatterError::ArithmeticOverflow)?;
     let height_bytes = 4 * u64::from(sample_count.max(1));
     let bytes = field_bytes + 20 * capacity.max(1) as u64 + height_bytes + PARAM_BYTES + 16;
@@ -664,6 +755,27 @@ mod tests {
         }
         assert_eq!(&words[20..22], &[u32::MAX; 2]);
         assert_eq!(&words[22..], &[0; 10]);
+    }
+
+    #[test]
+    fn indexed_resource_preflight_includes_the_full_field_hierarchy() {
+        let limits = wgpu::Limits::default();
+        for (capacity, brushes, samples) in [(0, 0, 0), (1, 1, 4), (129, 17, 289)] {
+            let nodes = u64::from(crate::scatter_brush_index::node_count(brushes).unwrap());
+            let records = (brushes as u64 + nodes).max(1);
+            let expected =
+                108 * capacity.max(1) as u64 + 64 * records + 4 * samples.max(1) as u64 + 496;
+            assert_eq!(
+                validate_with_index(capacity, brushes, samples, expected, &limits, true),
+                Ok(expected)
+            );
+            assert!(matches!(
+                validate_with_index(capacity, brushes, samples, expected - 1, &limits, true),
+                Err(GpuScatterHeightfieldError::Field(
+                    GpuScatterFieldError::Scatter(GpuScatterError::BufferBudgetExceeded { .. })
+                ))
+            ));
+        }
     }
 
     #[test]
