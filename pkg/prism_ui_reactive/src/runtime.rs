@@ -85,6 +85,115 @@ impl Inner {
 #[derive(Clone)]
 pub struct Runtime(pub(crate) Rc<RefCell<Inner>>);
 
+// Guards only restore graph bookkeeping. They never execute user code during
+// unwinding, and work with `alloc` alone (no catch_unwind/std dependency).
+struct ObserverScope<'a> {
+    runtime: &'a Runtime,
+    depth: usize,
+}
+
+impl<'a> ObserverScope<'a> {
+    fn new(runtime: &'a Runtime, observer: NodeId) -> Self {
+        let mut inner = runtime.0.borrow_mut();
+        let depth = inner.observer_stack.len();
+        inner.observer_stack.push(observer);
+        Self { runtime, depth }
+    }
+}
+
+impl Drop for ObserverScope<'_> {
+    fn drop(&mut self) {
+        self.runtime
+            .0
+            .borrow_mut()
+            .observer_stack
+            .truncate(self.depth);
+    }
+}
+
+struct BatchScope<'a>(&'a Runtime);
+
+impl Drop for BatchScope<'_> {
+    fn drop(&mut self) {
+        self.0 .0.borrow_mut().batch_depth -= 1;
+    }
+}
+
+struct ComputationScope<'a> {
+    runtime: &'a Runtime,
+    id: NodeId,
+    computation: Computation,
+    old_sources: Vec<NodeId>,
+    completed: bool,
+}
+
+impl Drop for ComputationScope<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.runtime.0.borrow_mut();
+        // A callback may dispose this node and reuse its slot. Never repair a
+        // different computation that happens to have the same numeric ID.
+        let same_computation = inner.node(self.id).is_some_and(|node| {
+            node.computation
+                .as_ref()
+                .is_some_and(|call| Rc::ptr_eq(call, &self.computation))
+        });
+        for &source in &self.old_sources {
+            if self.completed || !same_computation {
+                // Disposal during the callback could not see the old sources
+                // taken by this scope. Remove those reverse edges too, unless
+                // a replacement node legitimately established the same edge.
+                if !inner
+                    .node(self.id)
+                    .is_some_and(|node| node.sources.contains(&source))
+                    && let Some(node) = inner.node_mut(source)
+                {
+                    node.observers.retain(|&observer| observer != self.id);
+                }
+            } else if inner
+                .node(source)
+                .is_some_and(|node| node.observers.contains(&self.id))
+            {
+                // Keep both old and partially collected dependencies after a
+                // failed run, including a panic before the first source read.
+                // A disposed/recycled source without this edge is not revived.
+                let node = inner.node_mut(self.id).unwrap();
+                if !node.sources.contains(&source) {
+                    node.sources.push(source);
+                }
+            }
+        }
+    }
+}
+
+struct EffectRetry<'a> {
+    runtime: &'a Runtime,
+    id: NodeId,
+    computation: Option<Computation>,
+    completed: bool,
+}
+
+impl Drop for EffectRetry<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut inner = self.runtime.0.borrow_mut();
+        let same = inner.node(self.id).is_some_and(|node| {
+            node.kind == NodeKind::Effect
+                && node
+                    .computation
+                    .as_ref()
+                    .zip(self.computation.as_ref())
+                    .is_some_and(|(a, b)| Rc::ptr_eq(a, b))
+        });
+        if same && !inner.pending_effects.contains(&self.id) {
+            // Retry before the untouched tail at the next normal flush. This
+            // also covers a dependency memo panicking before the effect runs.
+            inner.pending_effects.insert(0, self.id);
+        }
+    }
+}
+
 impl Default for Runtime {
     fn default() -> Self {
         Self::new()
@@ -201,31 +310,35 @@ impl Runtime {
     /// Recompute a memo/effect, re-collecting its dependencies, and dirty its
     /// observers if its output actually changed.
     fn run_computation(&self, id: NodeId) {
-        let computation = {
+        let (computation, old_sources) = {
             let mut inner = self.0.borrow_mut();
-            let old_sources = match inner.node_mut(id) {
-                Some(node) => core::mem::take(&mut node.sources),
-                None => return,
+            let Some(node) = inner.node_mut(id) else {
+                return;
             };
-            for source in &old_sources {
-                if let Some(source_node) = inner.node_mut(*source) {
-                    source_node.observers.retain(|observer| *observer != id);
-                }
-            }
-            inner.observer_stack.push(id);
-            inner.node(id).and_then(|node| node.computation.clone())
+            let Some(computation) = node.computation.clone() else {
+                return;
+            };
+            // Leave the reverse edges installed until the run succeeds. On
+            // failure they identify still-live old sources for recovery.
+            (computation, core::mem::take(&mut node.sources))
         };
-
-        let changed = match computation {
-            Some(computation) => {
-                let mut call = computation.borrow_mut();
-                (*call)()
-            }
-            None => false,
+        let mut recovery = ComputationScope {
+            runtime: self,
+            id,
+            computation: computation.clone(),
+            old_sources,
+            completed: false,
         };
+        let observer = ObserverScope::new(self, id);
+        let changed = {
+            let mut call = computation.borrow_mut();
+            (*call)()
+        };
+        drop(observer);
+        recovery.completed = true;
+        drop(recovery);
 
         let mut inner = self.0.borrow_mut();
-        inner.observer_stack.pop();
         if changed {
             let observers = inner
                 .node(id)
@@ -252,7 +365,20 @@ impl Runtime {
                 }
             };
             match next {
-                Some(id) => self.update_if_necessary(id),
+                Some(id) => {
+                    let mut retry = EffectRetry {
+                        runtime: self,
+                        id,
+                        computation: self
+                            .0
+                            .borrow()
+                            .node(id)
+                            .and_then(|node| node.computation.clone()),
+                        completed: false,
+                    };
+                    self.update_if_necessary(id);
+                    retry.completed = true;
+                }
                 None => break,
             }
             iterations += 1;
@@ -265,16 +391,16 @@ impl Runtime {
 
     /// Group multiple writes so observers see a single, consistent update and
     /// effects run at most once at the end. Batches may nest; effects flush when
-    /// the outermost batch completes.
+    /// the outermost batch completes. A panicking body restores the batch depth
+    /// without running effects during unwinding; pending work retries at the
+    /// next successful outer batch or signal write. User side effects are not
+    /// rolled back.
     pub fn batch<R>(&self, f: impl FnOnce() -> R) -> R {
         self.0.borrow_mut().batch_depth += 1;
+        let scope = BatchScope(self);
         let result = f();
-        let depth = {
-            let mut inner = self.0.borrow_mut();
-            inner.batch_depth -= 1;
-            inner.batch_depth
-        };
-        if depth == 0 {
+        drop(scope);
+        if self.0.borrow().batch_depth == 0 {
             self.flush_effects();
         }
         result
@@ -282,9 +408,9 @@ impl Runtime {
 
     /// Run `f` without recording dependencies on anything it reads.
     pub fn untrack<R>(&self, f: impl FnOnce() -> R) -> R {
-        self.0.borrow_mut().observer_stack.push(NO_OBSERVER);
+        let scope = ObserverScope::new(self, NO_OBSERVER);
         let result = f();
-        self.0.borrow_mut().observer_stack.pop();
+        drop(scope);
         result
     }
 

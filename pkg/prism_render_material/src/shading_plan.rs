@@ -24,6 +24,32 @@ pub enum BuiltinProgram {
     Unlit,
 }
 
+/// Exact canonical identity of the optional stylized response lobe.
+///
+/// This is deliberately not the surface-field owner `npr_face`: that owner is
+/// also present in ordinary material records and says nothing about which
+/// response contract is being built.
+pub const STYLIZED_LOBE_NAME: &str = "org.prism.lobe.stylized";
+
+/// Const-friendly exact-name predicate used by build-time contract gates.
+pub const fn is_exact_stylized_lobe_name(name: &str) -> bool {
+    let actual = name.as_bytes();
+    let expected = STYLIZED_LOBE_NAME.as_bytes();
+    if actual.len() != expected.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < expected.len() {
+        if actual[index] != expected[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(is_exact_stylized_lobe_name(STYLIZED_LOBE_NAME));
+
 /// Registry identity, not a permutation or material-instance identity.
 /// Raw construction permits decoding; every registry boundary rejects MAX.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -227,6 +253,10 @@ pub struct CacheContract {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponseManifest {
+    /// Explicit response-lobe identity. `npr_face` surface fields do not
+    /// infer this name; stylized responders must publish the exact canonical
+    /// name above.
+    pub response_lobe_name: Option<String>,
     pub surface: SurfaceContract,
     pub lighting: LightingContract,
     pub output: OutputContract,
@@ -252,6 +282,9 @@ pub enum ContractError {
     RequiredFieldAbsent(FieldId),
     SupportedLobeWithoutMapping(String),
     MappingOnIgnoredLobe(FieldId),
+    StylizedLobeNameRequired,
+    InvalidStylizedLobeName(String),
+    StylizedLobeNameWithoutNprFace,
     InvalidOutput,
     InvalidExecution,
     InvalidTemporal,
@@ -329,7 +362,7 @@ fn lobe_bit(id: &str) -> Result<u32, ContractError> {
     SURFACE_LOBES
         .iter()
         .find(|lobe| lobe.id == id)
-        .map(|lobe| 1 << lobe.registry_slot)
+        .map(|lobe| lobe.mask_bits)
         .ok_or_else(|| ContractError::UnknownLobe(id.to_string()))
 }
 
@@ -430,6 +463,10 @@ impl ResponseManifest {
             .collect();
 
         Ok(Self {
+            response_lobe_name: match program {
+                BuiltinProgram::Npr => Some(STYLIZED_LOBE_NAME.to_string()),
+                BuiltinProgram::Lit | BuiltinProgram::Unlit => None,
+            },
             surface,
             lighting: LightingContract {
                 direct_light: layout.direct_light,
@@ -539,6 +576,18 @@ impl ResponseManifest {
                 return Err(ContractError::SupportedLobeWithoutMapping(lobe.clone()));
             }
         }
+        let supports_npr_face = surface
+            .supported_lobes
+            .iter()
+            .any(|lobe| lobe == "npr_face");
+        match (self.response_lobe_name.as_deref(), supports_npr_face) {
+            (Some(name), _) if !is_exact_stylized_lobe_name(name) => {
+                return Err(ContractError::InvalidStylizedLobeName(name.to_string()));
+            }
+            (Some(_), false) => return Err(ContractError::StylizedLobeNameWithoutNprFace),
+            (None, true) => return Err(ContractError::StylizedLobeNameRequired),
+            (None, false) | (Some(_), true) => {}
+        }
         let output = self.output;
         if output.produced_channels.0 == 0
             || !ChannelMask::known().contains(output.produced_channels)
@@ -588,7 +637,7 @@ impl ResponseManifest {
             return Err(ContractError::UnknownActiveLobes(unknown));
         }
         for lobe in &SURFACE_LOBES {
-            if active_lobes.bits() & (1 << lobe.registry_slot) != 0
+            if active_lobes.bits() & lobe.mask_bits != 0
                 && !self.surface.supported_lobes.iter().any(|id| id == lobe.id)
                 && !self
                     .surface
@@ -618,6 +667,22 @@ pub struct PlanValidationContext {
     pub lighting_inputs: LightingContract,
     pub cache_channels: Vec<CacheChannel>,
     pub temporal_history_available: bool,
+}
+
+/// Build-time feature switches for response-program registration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseRegistryConfig {
+    /// Whether the exact [`STYLIZED_LOBE_NAME`] contract is available to this
+    /// product build.
+    pub stylized_lobe_enabled: bool,
+}
+
+impl Default for ResponseRegistryConfig {
+    fn default() -> Self {
+        Self {
+            stylized_lobe_enabled: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -802,6 +867,8 @@ pub enum RegistryError {
     Compile(CompiledEntryError),
     PackageAbi(RejectionReason),
     Contract(ContractError),
+    BuiltinContractMismatch(BuiltinProgram),
+    StylizedLobeDisabled,
     CustomRequiresSplit,
 }
 
@@ -865,15 +932,25 @@ pub struct ValidatedPlan<'a> {
 pub struct ResponseRegistry {
     fields: SurfaceFieldCatalog,
     abi_expectation: ManifestExpectation,
+    config: ResponseRegistryConfig,
     programs: BTreeMap<ProgramRef, RegisteredResponse>,
     retired: BTreeSet<ProgramId>,
 }
 
 impl ResponseRegistry {
     pub fn new(fields: SurfaceFieldCatalog, abi_expectation: ManifestExpectation) -> Self {
+        Self::new_with_config(fields, abi_expectation, ResponseRegistryConfig::default())
+    }
+
+    pub fn new_with_config(
+        fields: SurfaceFieldCatalog,
+        abi_expectation: ManifestExpectation,
+        config: ResponseRegistryConfig,
+    ) -> Self {
         Self {
             fields,
             abi_expectation,
+            config,
             programs: BTreeMap::new(),
             retired: BTreeSet::new(),
         }
@@ -906,6 +983,7 @@ impl ResponseRegistry {
             return Err(RegistryError::CustomRequiresSplit);
         }
         manifest.validate(&self.fields)?;
+        self.ensure_enabled(&manifest)?;
 
         let compiled = CompiledEntry::from_spirv(package_manifest, spirv)?;
         let package_id = compiled.package_manifest().id.clone();
@@ -952,8 +1030,14 @@ impl ResponseRegistry {
             if manifest.execution.supports_fused || !manifest.execution.supports_split {
                 return Err(RegistryError::CustomRequiresSplit);
             }
+        } else if let ProgramRef::Builtin(builtin) = program {
+            let expected = ResponseManifest::from_builtin(builtin)?;
+            if manifest != expected {
+                return Err(RegistryError::BuiltinContractMismatch(builtin));
+            }
         }
         manifest.validate(&self.fields)?;
+        self.ensure_enabled(&manifest)?;
         self.check_binding(&compiled, packages)?;
         self.programs
             .insert(program, RegisteredResponse { manifest, compiled });
@@ -969,6 +1053,7 @@ impl ResponseRegistry {
             .programs
             .get(&program)
             .ok_or(RegistryError::StaleProgram(program))?;
+        self.ensure_enabled(&entry.manifest)?;
         self.check_binding(&entry.compiled, packages)?;
         Ok(entry)
     }
@@ -1011,7 +1096,8 @@ impl ResponseRegistry {
             || actual.entry_point != expected.entry_point
             || actual.abi_version != expected.abi_version
             || actual.abi_hash != expected.abi_hash
-            || actual.permutation_count != expected.permutation_count
+            || actual.permutation_count() != expected.permutation_count()
+            || actual.variants != expected.variants
         {
             return Err(RegistryError::PackageChanged);
         }
@@ -1023,6 +1109,13 @@ impl ResponseRegistry {
             .ok_or(RegistryError::PackageNotVerified)?;
         if artifact.digest() != compiled.digest() {
             return Err(RegistryError::PackageCodeChanged);
+        }
+        Ok(())
+    }
+
+    fn ensure_enabled(&self, manifest: &ResponseManifest) -> Result<(), RegistryError> {
+        if !self.config.stylized_lobe_enabled && manifest.is_stylized() {
+            return Err(RegistryError::StylizedLobeDisabled);
         }
         Ok(())
     }
@@ -1115,6 +1208,7 @@ impl ResponseRegistry {
         packages: &ShaderPackageRegistry,
     ) -> Result<&RegisteredResponse, RegistryError> {
         let entry = self.resolve(program, packages)?;
+        self.ensure_enabled(&entry.manifest)?;
         entry
             .manifest
             .validate_for_surface(&self.fields, context.active_lobes)?;
@@ -1147,6 +1241,16 @@ impl ResponseRegistry {
             }
         }
         Ok(entry)
+    }
+}
+
+impl ResponseManifest {
+    /// Whether this manifest carries the exact, already-validated stylized
+    /// response identity.
+    pub fn is_stylized(&self) -> bool {
+        self.response_lobe_name
+            .as_deref()
+            .is_some_and(is_exact_stylized_lobe_name)
     }
 }
 

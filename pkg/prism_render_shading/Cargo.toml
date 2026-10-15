@@ -15,5 +15,9 @@ prism_render_material = { path = "../prism_render_material" }
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in"] }
 
+[[bench]]
+name = "response_composition_perf"
+harness = false
+
 [lints]
 workspace = true

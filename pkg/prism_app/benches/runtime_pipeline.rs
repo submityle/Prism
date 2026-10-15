@@ -51,6 +51,19 @@ struct Trace {
     render: Vec<RenderSample>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct OverlapStats {
+    overlap: Duration,
+    eligible_render_work: Duration,
+    overlap_samples: usize,
+    eligible_samples: usize,
+}
+
+struct PipelineReport {
+    outputs: Vec<(usize, u64)>,
+    overlap: OverlapStats,
+}
+
 #[derive(Clone, Copy)]
 enum Mode {
     Serial,
@@ -92,7 +105,7 @@ fn percentiles(values: &[Duration]) -> [u128; 3] {
     [50, 95, 99].map(|p| sorted[(sorted.len() * p).div_ceil(100).saturating_sub(1)])
 }
 
-fn drive(mode: Mode, iterations: usize) -> Vec<(usize, u64)> {
+fn drive(mode: Mode, iterations: usize) -> PipelineReport {
     let trace = Arc::new(Mutex::new(Trace::default()));
     let pool = TaskPool::with_threads(if matches!(mode, Mode::Tasks) { 2 } else { 1 });
     let mut app = App::new();
@@ -160,29 +173,73 @@ fn drive(mode: Mode, iterations: usize) -> Vec<(usize, u64)> {
     let trace = trace.lock().unwrap();
     assert_eq!(trace.render.len(), WARMUP + SAMPLES);
     let rendered: Vec<_> = trace.render.iter().filter(|r| r.frame > WARMUP).collect();
+    assert_eq!(rendered.len(), SAMPLES);
+    assert_eq!(
+        rendered
+            .iter()
+            .map(|sample| sample.frame)
+            .collect::<Vec<_>>(),
+        (WARMUP + 1..=WARMUP + SAMPLES).collect::<Vec<_>>(),
+        "render must consume every frame exactly once"
+    );
+    assert_eq!(
+        trace
+            .simulation
+            .iter()
+            .map(|(frame, _)| *frame)
+            .collect::<Vec<_>>(),
+        (1..=WARMUP + SAMPLES).collect::<Vec<_>>(),
+        "simulation must execute every frame exactly once"
+    );
     let latencies: Vec<_> = rendered.iter().map(|r| r.interval.end - r.input).collect();
-    // Intersect actual non-overlapping simulation and render intervals. This
-    // measures concurrent work, rather than deriving overlap from join wait.
-    let mut overlap = Duration::ZERO;
-    let mut render_work = Duration::ZERO;
+    // A render of frame N is only eligible to overlap simulation of frame N+1.
+    // Pairing adjacent frames avoids counting unrelated intervals as pipeline
+    // overlap and makes the reported value auditable from the trace.
+    let mut overlap = OverlapStats::default();
     for r in &rendered {
-        render_work += r.interval.end - r.interval.start;
-        for (_, s) in trace.simulation.iter().filter(|(frame, _)| *frame > WARMUP) {
-            let start = s.start.max(r.interval.start);
-            let end = s.end.min(r.interval.end);
-            if end > start {
-                overlap += end - start;
-            }
+        assert!(r.interval.end > r.interval.start);
+        if r.frame == WARMUP + SAMPLES {
+            continue;
+        }
+        let (_, simulation) = trace
+            .simulation
+            .iter()
+            .find(|(frame, _)| *frame == r.frame + 1)
+            .expect("every measured render frame except the tail has a successor");
+        let render_work = r.interval.end - r.interval.start;
+        overlap.eligible_samples += 1;
+        overlap.eligible_render_work += render_work;
+        let start = simulation.start.max(r.interval.start);
+        let end = simulation.end.min(r.interval.end);
+        if end > start {
+            overlap.overlap_samples += 1;
+            overlap.overlap += end - start;
         }
     }
-    let overlap_ratio = overlap.as_secs_f64() / render_work.as_secs_f64().max(f64::MIN_POSITIVE);
+    assert_eq!(overlap.eligible_samples, SAMPLES - 1);
+    assert!(overlap.overlap <= overlap.eligible_render_work);
+    let overlap_ratio = overlap.overlap.as_secs_f64()
+        / overlap
+            .eligible_render_work
+            .as_secs_f64()
+            .max(f64::MIN_POSITIVE);
     assert!((0.0..=1.000_001).contains(&overlap_ratio));
     if matches!(mode, Mode::Serial) {
-        assert_eq!(overlap, Duration::ZERO);
+        assert_eq!(overlap.overlap, Duration::ZERO);
+        assert_eq!(overlap.overlap_samples, 0);
+    } else {
+        assert!(
+            overlap.overlap_samples > 0,
+            "{} pipeline did not observe any adjacent-frame overlap",
+            mode.name()
+        );
     }
-    println!("{{\"kind\":\"pipeline\",\"mode\":\"{}\",\"samples\":{},\"elapsed_ns\":{},\"frame_ns_p50_p95_p99\":{:?},\"input_to_render_done_ns_p50_p95_p99\":{:?},\"render_work_overlap\":{:.6}}}",
-        mode.name(), SAMPLES, elapsed.as_nanos(), percentiles(&frame_times), percentiles(&latencies), overlap_ratio);
-    trace.render.iter().map(|r| (r.frame, r.digest)).collect()
+    println!("{{\"kind\":\"pipeline\",\"mode\":\"{}\",\"samples\":{},\"elapsed_ns\":{},\"frame_ns_p50_p95_p99\":{:?},\"input_to_render_done_ns_p50_p95_p99\":{:?},\"overlap_ns\":{},\"overlap_samples\":{},\"overlap_candidates\":{},\"overlap_ratio\":{:.6},\"overlap_observed\":{}}}",
+        mode.name(), SAMPLES, elapsed.as_nanos(), percentiles(&frame_times), percentiles(&latencies), overlap.overlap.as_nanos(), overlap.overlap_samples, overlap.eligible_samples, overlap_ratio, overlap.overlap > Duration::ZERO);
+    PipelineReport {
+        outputs: trace.render.iter().map(|r| (r.frame, r.digest)).collect(),
+        overlap,
+    }
 }
 
 fn scaling(workers: usize, iterations: usize) {
@@ -224,18 +281,19 @@ fn main() {
     println!("{{\"kind\":\"environment\",\"os\":\"{}\",\"arch\":\"{}\",\"available_parallelism\":{},\"iterations_per_system\":{iterations},\"warmup\":{WARMUP},\"samples\":{SAMPLES}}}",
         std::env::consts::OS, std::env::consts::ARCH, std::thread::available_parallelism().map_or(1, |n| n.get()));
     let serial = drive(Mode::Serial, iterations);
+    let dedicated = drive(Mode::Dedicated, iterations);
     assert_eq!(
-        serial,
-        drive(Mode::Dedicated, iterations),
+        serial.outputs, dedicated.outputs,
         "dedicated pipeline output diverged"
     );
+    let tasks = drive(Mode::Tasks, iterations);
     assert_eq!(
-        serial,
-        drive(Mode::Tasks, iterations),
+        serial.outputs, tasks.outputs,
         "task pipeline output diverged"
     );
     for workers in [1, 2, 4, 8] {
         scaling(workers, iterations);
     }
-    println!("{{\"kind\":\"acceptance\",\"output_parity\":true,\"frame_counts\":true}}");
+    println!("{{\"kind\":\"acceptance\",\"output_parity\":true,\"frame_sequence\":true,\"serial_overlap_ns\":{},\"dedicated_overlap_ns\":{},\"task_lane_overlap_ns\":{},\"overlap_is_observed\":{{\"dedicated\":{},\"task_lane\":{}}},\"performance_thresholds\":false}}",
+        serial.overlap.overlap.as_nanos(), dedicated.overlap.overlap.as_nanos(), tasks.overlap.overlap.as_nanos(), dedicated.overlap.overlap > Duration::ZERO, tasks.overlap.overlap > Duration::ZERO);
 }

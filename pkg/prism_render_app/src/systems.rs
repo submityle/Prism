@@ -120,7 +120,14 @@ pub(crate) fn execute_frame<I>(
     I::Queue: Send + Sync + FrameSync + 'static,
     I::Surface: Send + Sync + 'static,
 {
-    if windows.drive(runtime.runtime(), &requests, &overrides, &queues, &functions, &mut stats) {
+    if windows.drive(
+        runtime.runtime(),
+        &requests,
+        &overrides,
+        &queues,
+        &functions,
+        &mut stats,
+    ) {
         return;
     }
     let viewport = record.viewport;

@@ -260,7 +260,7 @@ fn water_surface_raster_wesl_encodes_hybrid_overlay_for_composition() {
     let src = include_str!("../shaders/water_surface_raster.wesl");
     assert!(src.contains("let overlay = water_hybrid_overlay_factor"));
     assert!(src.contains("let blended = mix(pbr, npr, weights.npr_weight)"));
-    assert!(src.contains("write_response_planes(in, blended, npr, overlay)"));
+    assert!(src.contains("write_response_planes(in, blended, npr, overlay, color.a)"));
 }
 
 /// Regression guard for the water-surface `SSGI` wiring: the merged `@group(6)`

@@ -120,7 +120,7 @@ pub fn project_to_openpbr(block: &SurfaceParameterBlock) -> OpenPbrProjection {
     let mut dropped = Vec::new();
     let mut named = LobeMask::default();
     for lobe in SURFACE_LOBES {
-        let bit = LobeMask(1 << lobe.registry_slot);
+        let bit = LobeMask(lobe.mask_bits);
         if !block.lobe_mask.contains(bit) {
             continue;
         }

@@ -19,7 +19,8 @@ use prism_render_driver::{
     VertexBufferLayout,
 };
 use prism_render_material::{
-    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, RenderDomain,
+    material_pipeline_state, pipeline_state_for_material, MaterialRecord, MaterialRenderClass,
+    MaterialRenderPhase,
 };
 
 use crate::draw::{DrawFunctionId, DrawFunctions};
@@ -75,15 +76,11 @@ pub struct DrawRequest {
 /// draws of those materials.
 #[must_use]
 pub fn phase_for_render_class(class: MaterialRenderClass) -> RenderPhase {
-    match class {
-        MaterialRenderClass::Opaque
-        | MaterialRenderClass::OpaqueTwoSided
-        | MaterialRenderClass::Masked
-        | MaterialRenderClass::MaskedTwoSided => RenderPhase::Opaque,
-        MaterialRenderClass::Transmissive
-        | MaterialRenderClass::Transparent
-        | MaterialRenderClass::Additive => RenderPhase::Transparent,
-    }
+    phase_from_material(pipeline_state_for_material(
+        prism_render_architecture::render_fabric::RenderDomain::Surface,
+        class,
+        prism_render_material::MaterialFeatureFlags::default(),
+    ))
 }
 
 /// Resolve the complete pipeline-state family from the domain, blend class,
@@ -91,19 +88,14 @@ pub fn phase_for_render_class(class: MaterialRenderClass) -> RenderPhase {
 /// domain migration cannot silently change phase ordering.
 #[must_use]
 pub fn phase_for_material(record: &MaterialRecord) -> RenderPhase {
-    match record.render_domain {
-        RenderDomain::Surface => {
-            if record.features.contains(MaterialFeatureFlags::WATER) {
-                // Water writes premultiplied alpha into the transparent HDR
-                // target; it must sort with transparent work.
-                RenderPhase::Transparent
-            } else {
-                phase_for_render_class(record.render_class)
-            }
-        }
-        RenderDomain::Particle | RenderDomain::Hair => RenderPhase::Opaque,
-        RenderDomain::Volume => RenderPhase::Custom,
-        RenderDomain::Decal => RenderPhase::Transparent,
+    phase_from_material(material_pipeline_state(record))
+}
+
+const fn phase_from_material(state: prism_render_material::MaterialPipelineState) -> RenderPhase {
+    match state.phase {
+        MaterialRenderPhase::Opaque => RenderPhase::Opaque,
+        MaterialRenderPhase::Transparent => RenderPhase::Transparent,
+        MaterialRenderPhase::Custom => RenderPhase::Custom,
     }
 }
 

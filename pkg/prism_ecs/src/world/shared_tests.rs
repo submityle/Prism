@@ -107,6 +107,74 @@ fn pool_len(w: &World, c: ComponentId) -> usize {
 }
 
 #[test]
+fn inserting_table_components_preserves_shared_keys_and_neighbor_locations() {
+    let mut w = World::new();
+    let moved = w.spawn((Position(1), BatchKey(10), Layer(2), Charge(3)));
+    let neighbor = w.spawn((Position(4), BatchKey(10), Layer(2), Charge(5)));
+    let batch = cid::<BatchKey>(&w);
+    let layer = cid::<Layer>(&w);
+    let batch_value = shared_sid(&w, moved, batch);
+    let layer_value = shared_sid(&w, moved, layer);
+
+    assert!(w.insert(moved, Velocity(6)));
+    for entity in [moved, neighbor] {
+        assert_eq!(w.get::<BatchKey>(entity), Some(&BatchKey(10)));
+        assert_eq!(w.get::<Layer>(entity), Some(&Layer(2)));
+        assert_eq!(shared_sid(&w, entity, batch), batch_value);
+        assert_eq!(shared_sid(&w, entity, layer), layer_value);
+    }
+    assert_eq!(w.get::<Position>(moved), Some(&Position(1)));
+    assert_eq!(w.get::<Charge>(moved), Some(&Charge(3)));
+    assert_eq!(w.get::<Velocity>(moved), Some(&Velocity(6)));
+    assert_eq!(w.get::<Position>(neighbor), Some(&Position(4)));
+    assert_eq!(w.get::<Charge>(neighbor), Some(&Charge(5)));
+    assert_eq!(refcount(&w, batch, batch_value), 2);
+    assert_eq!(refcount(&w, layer, layer_value), 2);
+    assert_eq!(w.query::<(&BatchKey, &Layer)>().iter(&w).count(), 2);
+    assert!(w.despawn(moved));
+    assert_eq!(refcount(&w, batch, batch_value), 1);
+    assert_eq!(refcount(&w, layer, layer_value), 1);
+    assert!(w.despawn(neighbor));
+    assert_eq!(refcount(&w, batch, batch_value), 0);
+    assert_eq!(refcount(&w, layer, layer_value), 0);
+}
+
+#[test]
+fn command_fallback_preserves_shared_only_entity_and_drops_once() {
+    use crate::command::CommandQueue;
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Owned(Arc<AtomicUsize>);
+    impl Component for Owned {}
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut w = World::new();
+    let entity = w.spawn((BatchKey(7), Layer(3)));
+    let batch = cid::<BatchKey>(&w);
+    let value = shared_sid(&w, entity, batch);
+    let mut queue = CommandQueue::new();
+    queue
+        .commands(w.entities())
+        .entity(entity)
+        .insert(Owned(drops.clone()));
+    queue.apply(&mut w);
+    assert!(w.has::<Owned>(entity));
+    assert_eq!(w.get::<BatchKey>(entity), Some(&BatchKey(7)));
+    assert_eq!(w.get::<Layer>(entity), Some(&Layer(3)));
+    assert_eq!(refcount(&w, batch, value), 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert!(w.despawn(entity));
+    assert_eq!(refcount(&w, batch, value), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn same_value_shares_archetype_distinct_value_splits() {
     let mut w = World::new();
     // Same table set {Position} + same shared value -> SAME archetype.
@@ -317,6 +385,8 @@ fn snapshot_roundtrips_shared_values() {
     let mut w = World::new();
     w.register_snapshot_component_hashable::<Position>();
     w.register_snapshot_component_hashable::<BatchKey>();
+    w.register_snapshot_component_equatable::<Position>();
+    w.register_snapshot_component_equatable::<BatchKey>();
 
     let _a = w.spawn((Position(1), BatchKey(10)));
     let _b = w.spawn((Position(2), BatchKey(10)));
@@ -547,6 +617,8 @@ fn snapshot_restore_does_not_compound_refcounts() {
     let mut w = World::new();
     w.register_snapshot_component_hashable::<Position>();
     w.register_snapshot_component_hashable::<BatchKey>();
+    w.register_snapshot_component_equatable::<Position>();
+    w.register_snapshot_component_equatable::<BatchKey>();
 
     let a = w.spawn((Position(1), BatchKey(10)));
     let _b = w.spawn((Position(2), BatchKey(10)));
@@ -578,6 +650,10 @@ fn snapshot_restore_does_not_compound_refcounts() {
             "restore rebuilds refcounts to match live holders, never compounds"
         );
         // Round-trips byte-for-byte.
-        assert!(snap.structurally_eq(&w.snapshot()));
+        let after = w.snapshot();
+        assert!(
+            snap.structurally_eq(&after),
+            "restore reproduces shared bindings and dedup exactly"
+        );
     }
 }

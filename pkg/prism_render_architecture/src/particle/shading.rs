@@ -4,7 +4,7 @@
 //! Shading is an emitter- (or per-particle-) level axis with four first-class
 //! citizens — `Unlit`, `PBR`, `NPR`, and a user `Custom` closure — plus a
 //! per-particle `Hybrid` blend (design §16). Whichever citizen an emitter
-//! picks, it consumes the *same* shared base services (clustered + ray-traced
+//! picks, it consumes the *same* common lighting services (clustered + ray-traced
 //! lighting, virtual shadow maps, global illumination); the shading axis only
 //! decides *how* the surface responds to that lighting, so `NPR` is not a
 //! second-class effect (design §16-§19). This module turns a shading model plus
@@ -38,7 +38,11 @@
 use super::lod::ParticleQuality;
 use super::sort_cull::{choose_sort_strategy, BlendMode, SortDecision};
 use super::{EmberShadingModel, ShadingBasis, SortStrategy, Vec3};
-use crate::render_fabric::{ServiceId, ServiceSet};
+use crate::render_fabric::ServiceSet;
+pub use crate::render_fabric::{
+    PARTICLE_CLUSTERED_LIGHTS, PARTICLE_GLOBAL_ILLUMINATION, PARTICLE_LIGHTING_CAPABILITIES,
+    PARTICLE_LIGHTING_SERVICE_IDS, PARTICLE_RAY_TRACING, PARTICLE_SHADOW_MAPS,
+};
 
 /// The render phase a particle renderer submits into (design §15).
 ///
@@ -143,22 +147,6 @@ pub fn attribute_footprint(model: EmberShadingModel) -> ShadingAttributeFootprin
         }
     }
 }
-
-/// Stable semantic service identity for the particle shading declarations.
-pub const PARTICLE_CLUSTERED_LIGHTS: ServiceId = ServiceId(20);
-/// Stable semantic service identity for virtual shadow-map reception.
-pub const PARTICLE_SHADOW_MAPS: ServiceId = ServiceId(4);
-/// Stable semantic service identity for global illumination.
-pub const PARTICLE_GLOBAL_ILLUMINATION: ServiceId = ServiceId(2);
-/// Stable semantic service identity for ray-traced lighting.
-pub const PARTICLE_RAY_TRACING: ServiceId = ServiceId(21);
-
-/// The platform capability declaration accepted by particle shading.
-pub const PARTICLE_LIGHTING_SERVICES: ServiceSet = ServiceSet::new(&[
-    PARTICLE_SHADOW_MAPS,
-    PARTICLE_GLOBAL_ILLUMINATION,
-    PARTICLE_RAY_TRACING,
-]);
 
 const CLUSTERED: ServiceSet = ServiceSet::new(&[PARTICLE_CLUSTERED_LIGHTS]);
 const CLUSTERED_SHADOW: ServiceSet =
@@ -521,7 +509,7 @@ mod tests {
     use super::*;
 
     fn all_caps() -> ServiceSet {
-        PARTICLE_LIGHTING_SERVICES
+        PARTICLE_LIGHTING_CAPABILITIES
     }
 
     #[test]

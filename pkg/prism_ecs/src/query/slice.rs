@@ -173,7 +173,7 @@ unsafe impl<T: Component> ColumnSliceData for &mut T {
             // of this chunk.
             unsafe {
                 *col.changed_tick_ptr(row) = this_run;
-                *col.chunk_changed_ptr(row) = this_run;
+                (&*col.chunk_changed_ptr(row)).record(this_run);
             }
         }
         // SAFETY: `T` is this column's type; `start <= end <= len`; the caller

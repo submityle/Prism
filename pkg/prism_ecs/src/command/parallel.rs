@@ -39,7 +39,6 @@
 //! convenience is provided behind the `std` feature for callers that want to
 //! map the running thread onto a producer slot.
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::Command;
@@ -210,9 +209,7 @@ impl ParallelCommandBuffers {
             }
         }
         keyed.sort_by_key(|(key, _)| *key);
-        for (_, command) in keyed {
-            command(world);
-        }
+        super::coalescing::replay(world, keyed.into_iter().map(|(_, command)| command));
     }
 
     /// Map the currently running thread onto a producer slot in `0..producer_count()`.
@@ -252,6 +249,12 @@ pub struct ParallelCommands<'w, 's> {
 }
 
 impl<'w, 's> ParallelCommands<'w, 's> {
+    /// Queue arbitrary world code at this producer's next deterministic key.
+    /// All preceding structural changes are committed before it runs.
+    pub fn queue(&mut self, command: impl FnOnce(&mut World) + Send + Sync + 'static) {
+        self.buffer.commands.push(Command::opaque(command));
+    }
+
     /// The index of the producer buffer this handle records into.
     #[inline]
     pub fn producer(&self) -> u32 {
@@ -266,7 +269,7 @@ impl<'w, 's> ParallelCommands<'w, 's> {
         let entity = self.entities.reserve_entity();
         self.buffer
             .commands
-            .push(Box::new(move |world: &mut World| {
+            .push(Command::opaque(move |world: &mut World| {
                 world.spawn_at(entity, bundle);
             }));
         entity
@@ -311,9 +314,7 @@ impl ParallelEntityCommands<'_, '_, '_> {
         self.commands
             .buffer
             .commands
-            .push(Box::new(move |world: &mut World| {
-                world.insert(entity, bundle);
-            }));
+            .push(Command::insert(entity, bundle));
         self
     }
 
@@ -324,9 +325,7 @@ impl ParallelEntityCommands<'_, '_, '_> {
         self.commands
             .buffer
             .commands
-            .push(Box::new(move |world: &mut World| {
-                world.remove::<B>(entity);
-            }));
+            .push(Command::remove::<B>(entity));
         self
     }
 
@@ -336,7 +335,7 @@ impl ParallelEntityCommands<'_, '_, '_> {
         self.commands
             .buffer
             .commands
-            .push(Box::new(move |world: &mut World| {
+            .push(Command::opaque(move |world: &mut World| {
                 world.despawn(entity);
             }));
     }

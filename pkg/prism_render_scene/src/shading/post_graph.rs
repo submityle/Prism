@@ -11,10 +11,97 @@ use prism_render_graph::frame_graph::{
     ResourceDeclaration, ResourceLifetime, SkeletonAbi,
 };
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum PostExecutorKind {
+    ExposureHistogram,
+    ExposureAverage,
+    Bloom,
+    Dof,
+    MotionBlur,
+    SsrPrepass,
+    SsrHzb,
+    SsrRepack,
+    SsrColorMips,
+    SsrTrace,
+    SsrReconstruct,
+    SsrTemporal,
+    SsrComposite,
+    SsgiTrace,
+    SsgiDenoise,
+    SsgiComposite,
+    SpecDenoiseReproject,
+    SpecDenoiseHistoryClamp,
+    SpecDenoiseSpatial,
+    TaaResolve,
+    Posterize,
+    Outline,
+    Hatching,
+    Halftone,
+    Kuwahara,
+    ColorGrade,
+    ChromaticAberration,
+    Vignette,
+    FilmGrain,
+    Cas,
+    GamutMap,
+    OrderedDither,
+    LensFlare,
+    Tonemap,
+    Upscale,
+}
+
+impl PostExecutorKind {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ExposureHistogram => "exposure_histogram_pass",
+            Self::ExposureAverage => "exposure_average_pass",
+            Self::Bloom => "bloom_pass",
+            Self::Dof => "dof_pass",
+            Self::MotionBlur => "motion_blur_pass",
+            Self::SsrPrepass => "ssr_prepass_pass",
+            Self::SsrHzb => "ssr_hzb_pass",
+            Self::SsrRepack => "ssr_repack_pass",
+            Self::SsrColorMips => "ssr_color_mips_pass",
+            Self::SsrTrace => "ssr_trace_pass",
+            Self::SsrReconstruct => "ssr_reconstruct_pass",
+            Self::SsrTemporal => "ssr_temporal_pass",
+            Self::SsrComposite => "ssr_composite_pass",
+            Self::SsgiTrace => "ssgi_trace_pass",
+            Self::SsgiDenoise => "ssgi_denoise_pass",
+            Self::SsgiComposite => "ssgi_composite_pass",
+            Self::SpecDenoiseReproject => "spec_denoise_reproject_pass",
+            Self::SpecDenoiseHistoryClamp => "spec_denoise_history_clamp_pass",
+            Self::SpecDenoiseSpatial => "spec_denoise_spatial_pass",
+            Self::TaaResolve => "taa_resolve_pass",
+            Self::Posterize => "posterize_pass",
+            Self::Outline => "outline_pass",
+            Self::Hatching => "hatching_pass",
+            Self::Halftone => "halftone_pass",
+            Self::Kuwahara => "kuwahara_pass",
+            Self::ColorGrade => "color_grade_pass",
+            Self::ChromaticAberration => "chromatic_aberration_pass",
+            Self::Vignette => "vignette_pass",
+            Self::FilmGrain => "film_grain_pass",
+            Self::Cas => "cas_pass",
+            Self::GamutMap => "gamut_map_pass",
+            Self::OrderedDither => "ordered_dither_pass",
+            Self::LensFlare => "lens_flare_pass",
+            Self::Tonemap => "tonemap_pass",
+            Self::Upscale => "upscale_pass",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PostExecutionBinding {
+    /// The concrete `shading` module that owns the effect.
+    pub(crate) module: &'static str,
     pub(crate) declaration: &'static str,
-    pub(crate) executors: &'static [&'static str],
+    /// Tokens that must occur in the production plugin's registration source.
+    /// The test-only repository audit checks these against `plugin.rs`; the
+    /// runtime gate checks the typed executor chain below.
+    pub(crate) registration_markers: &'static [&'static str],
+    pub(crate) executors: &'static [PostExecutorKind],
 }
 
 // The declaration frontend has one graph-wide resource table, while each pass
@@ -676,124 +763,316 @@ pub(crate) const POST_PROCESS_DECLARATIONS: &[PassSkeletonDeclaration] = post_pa
     ("post_upscale", 0x17, "post_tonemap", ACCESS_UPSCALE),
 ];
 
-const EXEC_EXPOSURE: &[&str] = &["exposure_histogram_pass", "exposure_average_pass"];
-const EXEC_BLOOM: &[&str] = &["bloom_pass"];
-const EXEC_DOF: &[&str] = &["dof_pass"];
-const EXEC_MOTION_BLUR: &[&str] = &["motion_blur_pass"];
-const EXEC_SSR: &[&str] = &[
-    "ssr_prepass_pass",
-    "ssr_hzb_pass",
-    "ssr_repack_pass",
-    "ssr_color_mips_pass",
-    "ssr_trace_pass",
-    "ssr_reconstruct_pass",
-    "ssr_temporal_pass",
-    "ssr_composite_pass",
+const EXEC_EXPOSURE: &[PostExecutorKind] = &[
+    PostExecutorKind::ExposureHistogram,
+    PostExecutorKind::ExposureAverage,
 ];
-const EXEC_SSGI: &[&str] = &[
-    "ssgi_trace_pass",
-    "ssgi_denoise_pass",
-    "ssgi_composite_pass",
+const EXEC_BLOOM: &[PostExecutorKind] = &[PostExecutorKind::Bloom];
+const EXEC_DOF: &[PostExecutorKind] = &[PostExecutorKind::Dof];
+const EXEC_MOTION_BLUR: &[PostExecutorKind] = &[PostExecutorKind::MotionBlur];
+const EXEC_SSR: &[PostExecutorKind] = &[
+    PostExecutorKind::SsrPrepass,
+    PostExecutorKind::SsrHzb,
+    PostExecutorKind::SsrRepack,
+    PostExecutorKind::SsrColorMips,
+    PostExecutorKind::SsrTrace,
+    PostExecutorKind::SsrReconstruct,
+    PostExecutorKind::SsrTemporal,
+    PostExecutorKind::SsrComposite,
 ];
-const EXEC_SPEC_DENOISE: &[&str] = &[
-    "spec_denoise_reproject_pass",
-    "spec_denoise_history_clamp_pass",
-    "spec_denoise_spatial_pass",
+const EXEC_SSGI: &[PostExecutorKind] = &[
+    PostExecutorKind::SsgiTrace,
+    PostExecutorKind::SsgiDenoise,
+    PostExecutorKind::SsgiComposite,
 ];
-const EXEC_TAA: &[&str] = &["taa_resolve_pass"];
+const EXEC_SPEC_DENOISE: &[PostExecutorKind] = &[
+    PostExecutorKind::SpecDenoiseReproject,
+    PostExecutorKind::SpecDenoiseHistoryClamp,
+    PostExecutorKind::SpecDenoiseSpatial,
+];
+const EXEC_TAA: &[PostExecutorKind] = &[PostExecutorKind::TaaResolve];
+
+const REG_EXPOSURE: &[&str] = &[
+    "init_exposure_histogram_pipeline",
+    "init_exposure_average_pipeline",
+    "prepare_exposure_buffers",
+    "prepare_exposure_histogram_bind_groups",
+    "prepare_exposure_average_bind_groups",
+];
+const REG_BLOOM: &[&str] = &[
+    "init_bloom_pipelines",
+    "prepare_bloom_textures",
+    "prepare_bloom_bind_groups",
+];
+const REG_DOF: &[&str] = &[
+    "init_dof_pipeline",
+    "prepare_dof_textures",
+    "prepare_dof_bind_groups",
+];
+const REG_MOTION_BLUR: &[&str] = &[
+    "init_motion_blur_pipeline",
+    "prepare_motion_blur_textures",
+    "prepare_motion_blur_bind_groups",
+];
+const REG_SSR: &[&str] = &[
+    "init_ssr_prepass_pipeline",
+    "init_ssr_hzb_pipeline",
+    "init_ssr_repack_pipeline",
+    "init_ssr_color_mips_pipeline",
+    "init_ssr_trace_pipeline",
+    "init_ssr_reconstruct_pipeline",
+    "init_ssr_temporal_pipeline",
+    "init_ssr_composite_pipeline",
+    "prepare_ssr_textures",
+    "prepare_ssr_temporal_textures",
+    "prepare_ssr_prepass_bind_groups",
+    "prepare_ssr_hzb_bind_groups",
+    "prepare_ssr_repack_bind_groups",
+    "prepare_ssr_color_mips_bind_groups",
+    "prepare_ssr_trace_bind_groups",
+    "prepare_ssr_reconstruct_bind_groups",
+    "prepare_ssr_temporal_bind_groups",
+    "prepare_ssr_composite_bind_groups",
+];
+const REG_SSGI: &[&str] = &[
+    "init_ssgi_trace_pipeline",
+    "init_ssgi_denoise_pipeline",
+    "init_ssgi_composite_pipeline",
+    "prepare_ssgi_textures",
+    "prepare_ssgi_trace_bind_groups",
+    "prepare_ssgi_denoise_bind_groups",
+    "prepare_ssgi_composite_bind_groups",
+];
+const REG_SPEC_DENOISE: &[&str] = &[
+    "init_spec_denoise_spatial_pipeline",
+    "init_spec_denoise_reproject_pipeline",
+    "init_spec_denoise_history_clamp_pipeline",
+    "prepare_spec_denoise_resources",
+    "prepare_spec_denoise_temporal_resources",
+    "prepare_spec_denoise_bind_groups",
+    "prepare_spec_denoise_reproject_bind_groups",
+    "prepare_spec_denoise_history_clamp_bind_groups",
+];
+const REG_TAA: &[&str] = &[
+    "init_taa_resolve_pipeline",
+    "prepare_taa_textures",
+    "prepare_taa_bind_groups",
+    "prepare_taa_jitter",
+];
+const REG_POSTERIZE: &[&str] = &[
+    "init_posterize_pipeline",
+    "prepare_posterize_textures",
+    "prepare_posterize_bind_groups",
+];
+const REG_OUTLINE: &[&str] = &[
+    "init_outline_pipeline",
+    "prepare_outline_textures",
+    "prepare_outline_bind_groups",
+];
+const REG_HATCHING: &[&str] = &[
+    "init_hatching_pipeline",
+    "prepare_hatching_textures",
+    "prepare_hatching_bind_groups",
+];
+const REG_HALFTONE: &[&str] = &[
+    "init_halftone_pipeline",
+    "prepare_halftone_textures",
+    "prepare_halftone_bind_groups",
+];
+const REG_KUWAHARA: &[&str] = &[
+    "init_kuwahara_pipeline",
+    "prepare_kuwahara_textures",
+    "prepare_kuwahara_bind_groups",
+];
+const REG_COLOR_GRADE: &[&str] = &[
+    "init_color_grade_pipeline",
+    "prepare_color_grade_textures",
+    "prepare_color_grade_bind_groups",
+];
+const REG_CHROMATIC_ABERRATION: &[&str] = &[
+    "init_chromatic_aberration_pipeline",
+    "prepare_chromatic_aberration_textures",
+    "prepare_chromatic_aberration_bind_groups",
+];
+const REG_VIGNETTE: &[&str] = &[
+    "init_vignette_pipeline",
+    "prepare_vignette_textures",
+    "prepare_vignette_bind_groups",
+];
+const REG_FILM_GRAIN: &[&str] = &[
+    "init_film_grain_pipeline",
+    "prepare_film_grain_textures",
+    "prepare_film_grain_bind_groups",
+];
+const REG_CAS: &[&str] = &[
+    "init_cas_pipeline",
+    "prepare_cas_textures",
+    "prepare_cas_bind_groups",
+];
+const REG_GAMUT_MAP: &[&str] = &[
+    "init_gamut_map_pipeline",
+    "prepare_gamut_map_textures",
+    "prepare_gamut_map_bind_groups",
+];
+const REG_ORDERED_DITHER: &[&str] = &[
+    "init_ordered_dither_pipeline",
+    "prepare_ordered_dither_textures",
+    "prepare_ordered_dither_bind_groups",
+];
+const REG_LENS_FLARE: &[&str] = &[
+    "init_lens_flare_pipeline",
+    "prepare_lens_flare_textures",
+    "prepare_lens_flare_bind_groups",
+];
+const REG_TONEMAP: &[&str] = &[
+    "init_tonemap_pipeline",
+    "prepare_tonemap_textures",
+    "prepare_tonemap_bind_groups",
+];
+const REG_UPSCALE: &[&str] = &[
+    "init_upscale_pipeline",
+    "prepare_upscale_textures",
+    "prepare_upscale_bind_groups",
+];
 
 pub(crate) const POST_EXECUTION_BINDINGS: &[PostExecutionBinding] = &[
     PostExecutionBinding {
+        module: "exposure",
         declaration: "post_exposure",
+        registration_markers: REG_EXPOSURE,
         executors: EXEC_EXPOSURE,
     },
     PostExecutionBinding {
+        module: "bloom",
         declaration: "post_bloom",
+        registration_markers: REG_BLOOM,
         executors: EXEC_BLOOM,
     },
     PostExecutionBinding {
+        module: "dof",
         declaration: "post_dof",
+        registration_markers: REG_DOF,
         executors: EXEC_DOF,
     },
     PostExecutionBinding {
+        module: "motion_blur",
         declaration: "post_motion_blur",
+        registration_markers: REG_MOTION_BLUR,
         executors: EXEC_MOTION_BLUR,
     },
     PostExecutionBinding {
+        module: "ssr",
         declaration: "post_ssr",
+        registration_markers: REG_SSR,
         executors: EXEC_SSR,
     },
     PostExecutionBinding {
+        module: "ssgi",
         declaration: "post_ssgi",
+        registration_markers: REG_SSGI,
         executors: EXEC_SSGI,
     },
     PostExecutionBinding {
+        module: "spec_denoise",
         declaration: "post_spec_denoise",
+        registration_markers: REG_SPEC_DENOISE,
         executors: EXEC_SPEC_DENOISE,
     },
     PostExecutionBinding {
+        module: "taa",
         declaration: "post_taa",
+        registration_markers: REG_TAA,
         executors: EXEC_TAA,
     },
     PostExecutionBinding {
+        module: "posterize",
         declaration: "post_posterize",
-        executors: &["posterize_pass"],
+        registration_markers: REG_POSTERIZE,
+        executors: &[PostExecutorKind::Posterize],
     },
     PostExecutionBinding {
+        module: "outline",
         declaration: "post_outline",
-        executors: &["outline_pass"],
+        registration_markers: REG_OUTLINE,
+        executors: &[PostExecutorKind::Outline],
     },
     PostExecutionBinding {
+        module: "hatching",
         declaration: "post_hatching",
-        executors: &["hatching_pass"],
+        registration_markers: REG_HATCHING,
+        executors: &[PostExecutorKind::Hatching],
     },
     PostExecutionBinding {
+        module: "halftone",
         declaration: "post_halftone",
-        executors: &["halftone_pass"],
+        registration_markers: REG_HALFTONE,
+        executors: &[PostExecutorKind::Halftone],
     },
     PostExecutionBinding {
+        module: "kuwahara",
         declaration: "post_kuwahara",
-        executors: &["kuwahara_pass"],
+        registration_markers: REG_KUWAHARA,
+        executors: &[PostExecutorKind::Kuwahara],
     },
     PostExecutionBinding {
+        module: "color_grade",
         declaration: "post_color_grade",
-        executors: &["color_grade_pass"],
+        registration_markers: REG_COLOR_GRADE,
+        executors: &[PostExecutorKind::ColorGrade],
     },
     PostExecutionBinding {
+        module: "chromatic_aberration",
         declaration: "post_chromatic_aberration",
-        executors: &["chromatic_aberration_pass"],
+        registration_markers: REG_CHROMATIC_ABERRATION,
+        executors: &[PostExecutorKind::ChromaticAberration],
     },
     PostExecutionBinding {
+        module: "vignette",
         declaration: "post_vignette",
-        executors: &["vignette_pass"],
+        registration_markers: REG_VIGNETTE,
+        executors: &[PostExecutorKind::Vignette],
     },
     PostExecutionBinding {
+        module: "film_grain",
         declaration: "post_film_grain",
-        executors: &["film_grain_pass"],
+        registration_markers: REG_FILM_GRAIN,
+        executors: &[PostExecutorKind::FilmGrain],
     },
     PostExecutionBinding {
+        module: "cas",
         declaration: "post_cas",
-        executors: &["cas_pass"],
+        registration_markers: REG_CAS,
+        executors: &[PostExecutorKind::Cas],
     },
     PostExecutionBinding {
+        module: "gamut_map",
         declaration: "post_gamut_map",
-        executors: &["gamut_map_pass"],
+        registration_markers: REG_GAMUT_MAP,
+        executors: &[PostExecutorKind::GamutMap],
     },
     PostExecutionBinding {
+        module: "ordered_dither",
         declaration: "post_ordered_dither",
-        executors: &["ordered_dither_pass"],
+        registration_markers: REG_ORDERED_DITHER,
+        executors: &[PostExecutorKind::OrderedDither],
     },
     PostExecutionBinding {
+        module: "lens_flare",
         declaration: "post_lens_flare",
-        executors: &["lens_flare_pass"],
+        registration_markers: REG_LENS_FLARE,
+        executors: &[PostExecutorKind::LensFlare],
     },
     PostExecutionBinding {
+        module: "tonemap",
         declaration: "post_tonemap",
-        executors: &["tonemap_pass"],
+        registration_markers: REG_TONEMAP,
+        executors: &[PostExecutorKind::Tonemap],
     },
     PostExecutionBinding {
+        module: "upscale",
         declaration: "post_upscale",
-        executors: &["upscale_pass"],
+        registration_markers: REG_UPSCALE,
+        executors: &[PostExecutorKind::Upscale],
     },
 ];
 
@@ -811,6 +1090,23 @@ pub(crate) fn validate_post_execution_bindings(graph: &GpuFrameGraphBuilder) -> 
             "post declaration/binding order mismatch: {declarations:?} != {bindings:?}"
         ));
     }
+    let unique_modules = POST_EXECUTION_BINDINGS
+        .iter()
+        .map(|binding| binding.module)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if unique_modules != POST_EXECUTION_BINDINGS.len() {
+        return Err("post module inventory contains a duplicate module".into());
+    }
+    if POST_EXECUTION_BINDINGS.iter().any(|binding| {
+        binding.declaration != format!("post_{}", binding.module)
+            || binding.registration_markers.is_empty()
+    }) {
+        return Err(
+            "post module inventory has an invalid declaration/module pair or no registration markers"
+                .into(),
+        );
+    }
     if POST_EXECUTION_BINDINGS
         .iter()
         .any(|binding| binding.executors.is_empty())
@@ -827,7 +1123,20 @@ pub(crate) fn validate_post_execution_bindings(graph: &GpuFrameGraphBuilder) -> 
         .map(|binding| binding.executors.len())
         .sum::<usize>();
     if unique != total {
-        return Err("post execution ledger reuses an executor".into());
+        let names = POST_EXECUTION_BINDINGS
+            .iter()
+            .flat_map(|binding| binding.executors.iter().map(|executor| executor.name()))
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "post execution ledger reuses an executor: {names:?}"
+        ));
+    }
+    if POST_EXECUTION_BINDINGS
+        .iter()
+        .flat_map(|binding| binding.registration_markers.iter())
+        .any(|marker| marker.is_empty())
+    {
+        return Err("post module inventory contains an empty registration marker".into());
     }
     let graph_suffix = graph
         .passes()
@@ -853,6 +1162,7 @@ pub(crate) fn append_post_process_passes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn every_shared_post_pass_is_generated_from_one_table() {
@@ -872,6 +1182,79 @@ mod tests {
     fn every_declared_post_pass_has_one_unique_executor_chain() {
         let graph = crate::shading::graph::shading_frame_graph();
         validate_post_execution_bindings(&graph).unwrap();
+    }
+
+    #[test]
+    fn repository_inventory_names_every_production_post_module() {
+        // This is deliberately a repository-source audit, not a miniature
+        // graph assembled by the test. The production module root and plugin
+        // source are included here so a module cannot disappear from either
+        // the real Rust module tree or its real registration path while the
+        // declaration/executor table remains green.
+        let shading_source = include_str!("mod.rs");
+        let plugin_source = include_str!("plugin.rs");
+        let modules = POST_EXECUTION_BINDINGS
+            .iter()
+            .map(|binding| binding.module)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(POST_EXECUTION_BINDINGS.len(), 23);
+        assert_eq!(modules.len(), POST_EXECUTION_BINDINGS.len());
+
+        for binding in POST_EXECUTION_BINDINGS {
+            assert!(
+                shading_source.contains(&format!("mod {};", binding.module)),
+                "post module {} is not declared by shading/mod.rs",
+                binding.module
+            );
+            assert!(
+                plugin_source.contains(&format!("{}::", binding.module)),
+                "post module {} is not imported by shading/plugin.rs",
+                binding.module
+            );
+            for marker in binding.registration_markers {
+                assert!(
+                    plugin_source.contains(marker),
+                    "post module {} is missing production registration marker {}",
+                    binding.module,
+                    marker
+                );
+            }
+            for executor in binding.executors {
+                assert!(
+                    plugin_source.contains(executor.name()),
+                    "post module {} is missing executor {} from production plugin",
+                    binding.module,
+                    executor.name()
+                );
+            }
+        }
+
+        let documented_post_modules = [
+            "bloom",
+            "cas",
+            "chromatic_aberration",
+            "color_grade",
+            "dof",
+            "exposure",
+            "film_grain",
+            "gamut_map",
+            "halftone",
+            "hatching",
+            "kuwahara",
+            "lens_flare",
+            "motion_blur",
+            "ordered_dither",
+            "outline",
+            "posterize",
+            "tonemap",
+            "vignette",
+        ];
+        for module in documented_post_modules {
+            assert!(
+                modules.contains(module),
+                "documented production post module {module} is absent from inventory"
+            );
+        }
     }
 
     #[test]

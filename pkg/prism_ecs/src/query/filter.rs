@@ -82,6 +82,26 @@ pub unsafe trait QueryFilter {
         this_run: Tick,
     ) -> Self::Fetch<'w>;
 
+    /// Conservative acceptance for a physical table chunk. Returning `false`
+    /// must imply that every live row in the chunk fails this filter; `true`
+    /// still requires the per-row predicate. The default preserves custom
+    /// filters that only implement row filtering.
+    ///
+    /// `chunk` indexes a live chunk of the archetype used to build `fetch`.
+    #[inline]
+    fn filter_chunk<'w>(_fetch: Self::Fetch<'w>, _chunk: usize) -> bool {
+        true
+    }
+
+    /// First conservative candidate in the live chunk range `[start, end)`.
+    /// Must not skip a chunk containing an accepted row, and must return an
+    /// index in that range or `None`. The default preserves custom coarse
+    /// predicates; indexed filters can jump over entire clean subtrees.
+    #[inline]
+    fn next_candidate_chunk<'w>(fetch: Self::Fetch<'w>, start: usize, end: usize) -> Option<usize> {
+        (start..end).find(|&chunk| Self::filter_chunk(fetch, chunk))
+    }
+
     /// Decide whether the row passes this filter.
     ///
     /// # Safety
@@ -189,6 +209,13 @@ unsafe impl<T: Component> QueryFilter for With<T> {
         }
     }
 
+    fn filter_chunk<'w>(fetch: Self::Fetch<'w>, _chunk: usize) -> bool {
+        match fetch {
+            MembershipFetch::Table(present) => present,
+            MembershipFetch::Sparse(set) => set.is_some(),
+        }
+    }
+
     unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, _row: usize) -> bool {
         match fetch {
             MembershipFetch::Table(present) => present,
@@ -237,6 +264,13 @@ unsafe impl<T: Component> QueryFilter for Without<T> {
             StorageType::Shared => {
                 MembershipFetch::Table(archetype.shared_binding(*state).is_none())
             }
+        }
+    }
+
+    fn filter_chunk<'w>(fetch: Self::Fetch<'w>, _chunk: usize) -> bool {
+        match fetch {
+            MembershipFetch::Table(absent) => absent,
+            MembershipFetch::Sparse(_) => true,
         }
     }
 
@@ -297,6 +331,13 @@ unsafe impl<T: Component> QueryFilter for Added<T> {
             }
             // `init_state` already rejected a shared component for this filter.
             StorageType::Shared => unreachable!("shared storage rejected at init_state"),
+        }
+    }
+
+    fn filter_chunk<'w>(fetch: Self::Fetch<'w>, _chunk: usize) -> bool {
+        match fetch {
+            ChangeFilterFetch::Table(column) => column.is_some(),
+            ChangeFilterFetch::Sparse(set, _, _) => set.is_some(),
         }
     }
 
@@ -362,6 +403,30 @@ unsafe impl<T: Component> QueryFilter for Changed<T> {
             }
             // `init_state` already rejected a shared component for this filter.
             StorageType::Shared => unreachable!("shared storage rejected at init_state"),
+        }
+    }
+
+    fn filter_chunk<'w>(fetch: Self::Fetch<'w>, chunk: usize) -> bool {
+        match fetch {
+            ChangeFilterFetch::Table(Some((column, last_run, this_run))) => {
+                column.chunk_may_have_changed(chunk, last_run, this_run)
+            }
+            ChangeFilterFetch::Table(None) => false,
+            // Sparse membership/ticks are entity-indexed, not table-chunk
+            // indexed. An allocated set still requires per-row evaluation.
+            ChangeFilterFetch::Sparse(set, _, _) => set.is_some(),
+        }
+    }
+
+    fn next_candidate_chunk<'w>(fetch: Self::Fetch<'w>, start: usize, end: usize) -> Option<usize> {
+        match fetch {
+            ChangeFilterFetch::Table(Some((column, last_run, this_run))) => {
+                column.next_changed_chunk(start, end, last_run, this_run)
+            }
+            ChangeFilterFetch::Table(None) => None,
+            // Sparse metadata is entity-indexed, so table chunks remain
+            // conservative candidates until a per-entity predicate runs.
+            ChangeFilterFetch::Sparse(set, _, _) => (set.is_some() && start < end).then_some(start),
         }
     }
 
@@ -442,6 +507,25 @@ macro_rules! impl_filter_tuple {
                 unsafe { ($($F::init_fetch($F, archetype, sparse_sets, last_run, this_run),)+) }
             }
 
+            fn filter_chunk<'w>(fetch: Self::Fetch<'w>, chunk: usize) -> bool {
+                let ($($F,)+) = fetch;
+                $($F::filter_chunk($F, chunk))&&+
+            }
+
+            fn next_candidate_chunk<'w>(fetch: Self::Fetch<'w>, start: usize, end: usize) -> Option<usize> {
+                let ($($F,)+) = fetch;
+                let mut candidate = start;
+                while candidate < end {
+                    let mut next = candidate;
+                    $(next = $F::next_candidate_chunk($F, next, end)?;)+
+                    // Every branch accepted this same index. If one advanced,
+                    // revisit earlier branches from the new lower bound.
+                    if next == candidate { return Some(next); }
+                    candidate = next;
+                }
+                None
+            }
+
             unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> bool {
                 let ($($F,)+) = fetch;
                 // SAFETY: forwarded — same row for every element.
@@ -452,14 +536,13 @@ macro_rules! impl_filter_tuple {
         // SAFETY: `Or` over the same element set differs only in the combinator
         // (OR). `matches` admits the archetype when *any* branch admits it, and
         // the real per-row decision is deferred to `filter_fetch`, which ORs the
-        // branches. Each branch's `Fetch` independently encodes its own
-        // archetype match (e.g. `With` -> bool, `Added` -> `Option`), so a
-        // branch that does not apply to this archetype simply contributes
-        // `false` instead of forcing the whole `Or` to skip it.
+        // branches. Only matching branches are initialised, preserving each
+        // branch's `init_fetch` contract, including for custom filters. An
+        // absent branch contributes false to both chunk and row predicates.
         #[allow(non_snake_case)]
         unsafe impl<$($F: QueryFilter),+> QueryFilter for Or<($($F,)+)> {
             type State = ($($F::State,)+);
-            type Fetch<'w> = ($($F::Fetch<'w>,)+);
+            type Fetch<'w> = ($(Option<$F::Fetch<'w>>,)+);
 
             fn init_state(components: &mut Components) -> Self::State {
                 ($($F::init_state(components),)+)
@@ -483,17 +566,30 @@ macro_rules! impl_filter_tuple {
                 this_run: Tick,
             ) -> Self::Fetch<'w> {
                 let ($($F,)+) = state;
-                // SAFETY: forwarded. A branch whose component is absent from the
-                // archetype builds a "no-match" fetch (e.g. `None`) rather than
-                // being unsound, because each leaf `init_fetch` tolerates a
-                // missing column for the `Or` case.
-                unsafe { ($($F::init_fetch($F, archetype, sparse_sets, last_run, this_run),)+) }
+                ($($F::matches($F, archetype).then(|| {
+                    // SAFETY: this branch independently matches the archetype.
+                    unsafe { $F::init_fetch($F, archetype, sparse_sets, last_run, this_run) }
+                }),)+)
+            }
+
+            fn filter_chunk<'w>(fetch: Self::Fetch<'w>, chunk: usize) -> bool {
+                let ($($F,)+) = fetch;
+                $($F.is_some_and(|fetch| $F::filter_chunk(fetch, chunk)))||+
+            }
+
+            fn next_candidate_chunk<'w>(fetch: Self::Fetch<'w>, start: usize, end: usize) -> Option<usize> {
+                let ($($F,)+) = fetch;
+                let mut candidate: Option<usize> = None;
+                $(if let Some(next) = $F.and_then(|fetch| $F::next_candidate_chunk(fetch, start, end)) {
+                    candidate = Some(candidate.map_or(next, |previous| previous.min(next)));
+                })+
+                candidate
             }
 
             unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> bool {
                 let ($($F,)+) = fetch;
-                // SAFETY: forwarded — same row for every element.
-                $((unsafe { $F::filter_fetch($F, entity, row) }))||+
+                // SAFETY: same live row, and only matching branches have fetches.
+                $($F.is_some_and(|fetch| unsafe { $F::filter_fetch(fetch, entity, row) }))||+
             }
         }
     };

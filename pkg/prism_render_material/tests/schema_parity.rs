@@ -9,9 +9,11 @@
 
 use prism_material_schema::{surface_schema, FieldType, SurfaceSchema};
 use prism_render_material::{
-    openpbr_conformance, project_to_openpbr, GpuSurfaceParameters, LobeMask, LobeRegion,
-    OpenPbrConformance, SurfaceParameterBlock, MATERIAL_ABI_VERSION, SURFACE_CORE_WORDS,
-    SURFACE_LOBES, SURFACE_LOBE_WORDS, SURFACE_LOBE_WORDS_BY_SLOT,
+    openpbr_conformance, project_to_openpbr, GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe,
+    GpuGlintLobe, GpuMeasuredBrdfLobe, GpuNprFaceLobe, GpuSheenLobe, GpuSubsurfaceLobe,
+    GpuSurfaceCore, GpuSurfaceParameters, GpuThinFilmLobe, GpuTransmissionLobe, LobeMask,
+    LobeRegion, OpenPbrConformance, SurfaceParameterBlock, MATERIAL_ABI_VERSION,
+    SURFACE_CORE_WORDS, SURFACE_LOBES, SURFACE_LOBE_WORDS, SURFACE_LOBE_WORDS_BY_SLOT,
 };
 
 #[test]
@@ -242,6 +244,142 @@ fn generated_surface_fields_match_schema_layout_metadata() {
         })
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
+}
+
+fn typed_field_offset(lobe: Option<&str>, name: &str) -> (usize, usize) {
+    macro_rules! field {
+        ($ty:ty, $member:ident) => {
+            (
+                std::mem::offset_of!($ty, $member),
+                std::mem::size_of::<$ty>(),
+            )
+        };
+    }
+
+    match (lobe, name) {
+        (None, "base_color") => field!(GpuSurfaceCore, base_color),
+        (None, "base_metalness") => field!(GpuSurfaceCore, base_metalness),
+        (None, "specular_roughness") => field!(GpuSurfaceCore, specular_roughness),
+        (None, "specular_weight") => field!(GpuSurfaceCore, specular_weight),
+        (None, "ambient_occlusion") => field!(GpuSurfaceCore, ambient_occlusion),
+        (None, "normal_scale") => field!(GpuSurfaceCore, normal_scale),
+        (None, "alpha_cutoff") => field!(GpuSurfaceCore, alpha_cutoff),
+        (None, "base_weight") => field!(GpuSurfaceCore, base_weight),
+        (None, "base_diffuse_roughness") => field!(GpuSurfaceCore, base_diffuse_roughness),
+        (None, "specular_color") => field!(GpuSurfaceCore, specular_color),
+        (None, "specular_ior") => field!(GpuSurfaceCore, specular_ior),
+        (None, "geometry_thin_walled") => field!(GpuSurfaceCore, thin_walled),
+        (None, "geometry_opacity") => field!(GpuSurfaceCore, geometry_opacity),
+        (Some("emission"), "emission_color") => field!(GpuEmissionLobe, emission_color),
+        (Some("emission"), "emission_luminance") => field!(GpuEmissionLobe, emission_luminance),
+        (Some("clearcoat"), "coat_weight") => field!(GpuClearCoatLobe, coat_weight),
+        (Some("clearcoat"), "coat_roughness") => field!(GpuClearCoatLobe, coat_roughness),
+        (Some("clearcoat"), "coat_ior") => field!(GpuClearCoatLobe, coat_ior),
+        (Some("clearcoat"), "coat_color") => field!(GpuClearCoatLobe, coat_color),
+        (Some("clearcoat"), "coat_roughness_anisotropy") => {
+            field!(GpuClearCoatLobe, coat_roughness_anisotropy)
+        }
+        (Some("clearcoat"), "coat_darkening") => field!(GpuClearCoatLobe, coat_darkening),
+        (Some("anisotropy"), "specular_roughness_anisotropy") => {
+            field!(GpuAnisotropyLobe, anisotropy)
+        }
+        (Some("anisotropy"), "anisotropy_rotation") => {
+            field!(GpuAnisotropyLobe, anisotropy_rotation)
+        }
+        (Some("sheen"), "fuzz_weight") => field!(GpuSheenLobe, fuzz_weight),
+        (Some("sheen"), "fuzz_roughness") => field!(GpuSheenLobe, fuzz_roughness),
+        (Some("sheen"), "fuzz_color") => field!(GpuSheenLobe, fuzz_color),
+        (Some("subsurface"), "subsurface_weight") => field!(GpuSubsurfaceLobe, subsurface_weight),
+        (Some("subsurface"), "subsurface_radius") => field!(GpuSubsurfaceLobe, subsurface_radius),
+        (Some("subsurface"), "subsurface_color") => field!(GpuSubsurfaceLobe, subsurface_color),
+        (Some("subsurface"), "subsurface_radius_scale") => {
+            field!(GpuSubsurfaceLobe, subsurface_radius_scale)
+        }
+        (Some("subsurface"), "subsurface_scatter_anisotropy") => {
+            field!(GpuSubsurfaceLobe, subsurface_scatter_anisotropy)
+        }
+        (Some("transmission"), "transmission_weight") => {
+            field!(GpuTransmissionLobe, transmission_weight)
+        }
+        (Some("transmission"), "transmission_depth") => field!(GpuTransmissionLobe, thickness),
+        (Some("transmission"), "index_of_refraction") => {
+            field!(GpuTransmissionLobe, index_of_refraction)
+        }
+        (Some("transmission"), "transmission_dispersion_scale") => {
+            field!(GpuTransmissionLobe, transmission_dispersion_scale)
+        }
+        (Some("transmission"), "transmission_color") => {
+            field!(GpuTransmissionLobe, transmission_color)
+        }
+        (Some("transmission"), "transmission_scatter") => {
+            field!(GpuTransmissionLobe, transmission_scatter)
+        }
+        (Some("transmission"), "transmission_scatter_anisotropy") => {
+            field!(GpuTransmissionLobe, transmission_scatter_anisotropy)
+        }
+        (Some("transmission"), "transmission_dispersion_abbe_number") => {
+            field!(GpuTransmissionLobe, transmission_dispersion_abbe_number)
+        }
+        (Some("thin_film"), "thin_film_weight") => field!(GpuThinFilmLobe, thin_film_weight),
+        (Some("thin_film"), "thin_film_thickness") => {
+            field!(GpuThinFilmLobe, thin_film_thickness)
+        }
+        (Some("thin_film"), "thin_film_ior") => field!(GpuThinFilmLobe, thin_film_ior),
+        (Some("npr_face"), "softness") => field!(GpuNprFaceLobe, softness),
+        (Some("npr_face"), "ramp_softness") => field!(GpuNprFaceLobe, ramp_softness),
+        (Some("npr_face"), "specular_scale") => field!(GpuNprFaceLobe, specular_scale),
+        (Some("npr_face"), "rim_scale") => field!(GpuNprFaceLobe, rim_scale),
+        (Some("glint"), "glint_weight") => field!(GpuGlintLobe, glint_weight),
+        (Some("glint"), "glint_roughness") => field!(GpuGlintLobe, glint_roughness),
+        (Some("glint"), "glint_density") => field!(GpuGlintLobe, glint_density),
+        (Some("glint"), "glint_bin_half_width") => field!(GpuGlintLobe, glint_bin_half_width),
+        (Some("measured_brdf"), "measured_weight") => {
+            field!(GpuMeasuredBrdfLobe, measured_weight)
+        }
+        (Some("measured_brdf"), "measured_phi_d") => field!(GpuMeasuredBrdfLobe, measured_phi_d),
+        (Some("measured_brdf"), "measured_scale") => field!(GpuMeasuredBrdfLobe, measured_scale),
+        other => panic!("schema field {other:?} has no typed ABI member"),
+    }
+}
+
+#[test]
+fn typed_surface_struct_offsets_match_schema_pack_slots() {
+    let schema = schema();
+    for field in schema
+        .core
+        .fields
+        .iter()
+        .filter(|field| field.ty != FieldType::Pad)
+    {
+        let (offset, size) = typed_field_offset(None, &field.name);
+        assert_eq!(
+            offset / std::mem::size_of::<u32>(),
+            field.pack_slot as usize
+        );
+        assert!(offset + field.ty.words() as usize * std::mem::size_of::<u32>() <= size);
+    }
+    for lobe in schema.canonical_lobes() {
+        for field in lobe
+            .fields
+            .iter()
+            .filter(|field| field.ty != FieldType::Pad)
+        {
+            let (offset, size) = typed_field_offset(Some(&lobe.id), &field.name);
+            assert_eq!(
+                offset / std::mem::size_of::<u32>(),
+                field.pack_slot as usize,
+                "{}.{}/typed offset",
+                lobe.id,
+                field.name
+            );
+            assert!(
+                offset + field.ty.words() as usize * std::mem::size_of::<u32>() <= size,
+                "{}.{}/typed field exceeds struct",
+                lobe.id,
+                field.name
+            );
+        }
+    }
 }
 
 #[test]

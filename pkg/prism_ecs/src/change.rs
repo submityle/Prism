@@ -259,12 +259,12 @@ pub struct Mut<'w, T: ?Sized> {
     changed: &'w mut Tick,
     // Raw pointer (not `&mut`) to the owning chunk's shared change-version cell
     // (design §7/§10 coarse layer). It is shared by every row in the chunk, so
-    // two `Mut`s into one chunk would alias a `&mut`; a raw write of `this_run`
-    // is sound because the value written is identical and monotonic. `None`
+    // two `Mut`s into one chunk would alias a `&mut`. All shared access to this
+    // cell is atomic, including distinct-row parallel batches. `None`
     // when the fetch has no chunk layer — i.e. a SparseSet-backed term (design
     // §6), whose change detection is purely the per-row ticks with no coarse
     // chunk-version layer.
-    chunk_changed: Option<*mut Tick>,
+    chunk_changed: Option<*mut crate::storage::ChunkChange>,
     added: Tick,
     last_run: Tick,
     this_run: Tick,
@@ -277,7 +277,7 @@ impl<'w, T: ?Sized> Mut<'w, T> {
     pub(crate) fn new(
         value: &'w mut T,
         changed: &'w mut Tick,
-        chunk_changed: Option<*mut Tick>,
+        chunk_changed: Option<*mut crate::storage::ChunkChange>,
         added: Tick,
         last_run: Tick,
         this_run: Tick,
@@ -301,16 +301,9 @@ impl<'w, T: ?Sized> Mut<'w, T> {
         if let Some(chunk_changed) = self.chunk_changed {
             // SAFETY: `chunk_changed` was handed to us by the column fetch for
             // this row and stays valid for `'w` (no structural change occurs
-            // while the `Mut` is live). We only ever *write* `this_run`, the
-            // newest tick, so concurrent `Mut`s into the same chunk
-            // (single-threaded iteration, or a parallel split over disjoint
-            // chunks) write the identical value to the same cell — never a torn
-            // or lowered value — upholding the chunk upper-bound invariant
-            // without forming an aliasing `&mut`. SparseSet-backed terms pass
-            // `None` here (no chunk layer) and skip this write entirely.
-            unsafe {
-                *chunk_changed = self.this_run;
-            }
+            // while the `Mut` is live). Only a shared reference is formed;
+            // metadata merges are atomic even for writers in the same chunk.
+            unsafe { (&*chunk_changed).record(self.this_run) };
         }
     }
 
@@ -372,14 +365,9 @@ impl<'w, T: ?Sized> Mut<'w, T> {
     pub fn set_last_changed(&mut self, last_changed: Tick) {
         *self.changed = last_changed;
         if let Some(chunk_changed) = self.chunk_changed {
-            // SAFETY: same invariant as `record_change` — `chunk_changed` is a
-            // live per-chunk cell for `'w` and we only raise it monotonically to
-            // the newest observed tick, never tearing or lowering it.
-            unsafe {
-                if last_changed.is_newer_than(*chunk_changed, self.this_run) {
-                    *chunk_changed = last_changed;
-                }
-            }
+            // SAFETY: same live-cell contract as `record_change`. Explicit old
+            // ticks must enter the summary too (historical observers are valid).
+            unsafe { (&*chunk_changed).record(last_changed) };
         }
     }
 

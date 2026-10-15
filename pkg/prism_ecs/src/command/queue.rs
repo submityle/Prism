@@ -1,7 +1,6 @@
 //! The single-threaded, insertion-ordered [`CommandQueue`] and its ergonomic
 //! [`Commands`] / [`EntityCommands`] builders (design §9, M0 layer).
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::Command;
@@ -62,9 +61,7 @@ impl CommandQueue {
     /// slots.
     pub fn apply(&mut self, world: &mut World) {
         world.flush_reserved();
-        for command in self.commands.drain(..) {
-            command(world);
-        }
+        super::coalescing::replay(world, self.commands.drain(..));
         self.reserved.clear();
     }
 
@@ -99,9 +96,10 @@ pub struct Commands<'w, 's> {
 }
 
 impl<'w, 's> Commands<'w, 's> {
-    /// Queue arbitrary world code in recorded order.
+    /// Queue arbitrary world code. This is a replay barrier: every preceding
+    /// structural batch is committed before `command` observes the world.
     pub fn queue(&mut self, command: impl FnOnce(&mut World) + Send + Sync + 'static) {
-        self.queue.commands.push(Box::new(command));
+        self.queue.commands.push(Command::opaque(command));
     }
 
     /// Reserve a fresh entity and queue a spawn of `bundle` onto it.
@@ -112,9 +110,11 @@ impl<'w, 's> Commands<'w, 's> {
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
         let entity = self.entities.reserve_entity();
         self.queue.reserved.push(entity);
-        self.queue.commands.push(Box::new(move |world: &mut World| {
-            world.spawn_at(entity, bundle);
-        }));
+        self.queue
+            .commands
+            .push(Command::opaque(move |world: &mut World| {
+                world.spawn_at(entity, bundle);
+            }));
         entity
     }
 
@@ -157,9 +157,7 @@ impl<'a, 'w, 's> EntityCommands<'a, 'w, 's> {
         self.commands
             .queue
             .commands
-            .push(Box::new(move |world: &mut World| {
-                world.insert(entity, bundle);
-            }));
+            .push(Command::insert(entity, bundle));
         self
     }
 
@@ -170,9 +168,7 @@ impl<'a, 'w, 's> EntityCommands<'a, 'w, 's> {
         self.commands
             .queue
             .commands
-            .push(Box::new(move |world: &mut World| {
-                world.remove::<B>(entity);
-            }));
+            .push(Command::remove::<B>(entity));
         self
     }
 
@@ -182,7 +178,7 @@ impl<'a, 'w, 's> EntityCommands<'a, 'w, 's> {
         self.commands
             .queue
             .commands
-            .push(Box::new(move |world: &mut World| {
+            .push(Command::opaque(move |world: &mut World| {
                 world.despawn(entity);
             }));
     }
@@ -197,7 +193,7 @@ impl<'a, 'w, 's> EntityCommands<'a, 'w, 's> {
         self.commands
             .queue
             .commands
-            .push(Box::new(move |world: &mut World| {
+            .push(Command::opaque(move |world: &mut World| {
                 world.register_child_of();
                 world.add_relation::<crate::hierarchy::ChildOf>(child, parent);
             }));
@@ -259,7 +255,7 @@ impl<'w, 's> ChildBuilder<'_, 'w, 's> {
         self.commands
             .queue
             .commands
-            .push(Box::new(move |world: &mut World| {
+            .push(Command::opaque(move |world: &mut World| {
                 world.register_child_of();
                 world.add_relation::<crate::hierarchy::ChildOf>(child, parent);
             }));

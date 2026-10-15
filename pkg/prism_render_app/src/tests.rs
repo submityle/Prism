@@ -8,23 +8,28 @@
 
 use prism_app::App;
 use prism_ecs::schedule::Schedules;
-use prism_render_driver::{CommandBuffer, Extent3d, ImageDataLayout, RenderQueue, TextureWrite};
+use prism_render_driver::{
+    Adapter, CommandBuffer, Extent3d, ImageDataLayout, RenderQueue, TextureWrite,
+};
 use prism_render_driver_null::NullInstance;
 use prism_render_runtime::RenderRuntime;
+use std::collections::BTreeSet;
 
 use crate::config::RenderAppConfig;
 use crate::intent::{RenderIntent, RenderViewport};
 use crate::label::{Render, RenderApp};
-use crate::plugin::PrismRenderPlugin;
+use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::stats::RenderFrameStats;
 use crate::target::RenderTarget;
 
+use crate::bin_queue::bin_indirect_args;
 use crate::draw::{DrawFunctionId, DrawFunctions};
 use crate::mesh_pipeline::{full_lobe_fallback, MeshPipelineKey, MeshPipelineSpecializer};
 use crate::pipeline_cache::{
-    hash_vertex_layouts, PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution,
+    hash_vertex_layouts, pso_device_fingerprint, PipelineCache, PipelineCachePersistenceStatus,
+    PipelineCompiler, PipelineKey, PipelineResolution,
 };
 use crate::queue::DrawRequest;
 use crate::queue::{phase_for_material, phase_for_render_class};
@@ -38,16 +43,68 @@ use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
 use prism_render_architecture::shader_package::{
     ArtifactDigest, ExecutionFamily, ModuleId, ModuleIdentity, PermutationIndex, PermutationSpace,
-    ShaderPackageId,
+    PersistedPsoCache, PipelineStateHash, PsoCacheKey, ShaderPackageId,
 };
 use prism_render_architecture::view_family::ViewKind;
-use prism_render_material::{MaterialRenderClass, RenderDomain};
+use prism_render_material::{
+    material_pipeline_state, MaterialBlendMode, MaterialDepthTest, MaterialRenderClass,
+    MaterialRenderPhase, MaterialRenderTarget, RenderDomain,
+};
 
 fn dense(index: u64) -> PermutationIndex {
     PermutationSpace::try_new([64])
         .unwrap()
         .check_index(index)
         .unwrap()
+}
+
+#[test]
+fn pso_persistence_is_wired_through_startup_explicit_save_and_shutdown() {
+    let path = std::env::temp_dir().join(format!("prism-plugin-pso-{}", std::process::id()));
+    let adapter = NullInstance::new()
+        .request_adapter(&Default::default())
+        .expect("the null backend has an adapter");
+    let fingerprint = pso_device_fingerprint(adapter.info());
+    let mut persisted = PersistedPsoCache::new(fingerprint.clone());
+    persisted.insert(
+        PsoCacheKey::new(ShaderPackageId::new("plugin-pso"), 4, PipelineStateHash(8)),
+        vec![9, 8, 7],
+    );
+    std::fs::write(&path, persisted.encode()).expect("write startup image");
+
+    let mut app = App::new();
+    app.add_plugins(PrismRenderPlugin::new(NullInstance::new()).with_pso_cache_path(path.clone()));
+    assert!(app.try_finish(), "the render plugin finishes synchronously");
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let status = render.world.resource::<PipelineCachePersistenceStatus>();
+    assert_eq!(status.load, Some(Ok(1)));
+    assert_eq!(
+        render
+            .world
+            .resource::<MeshPipelineSpecializer>()
+            .pending_persisted_pipeline_count(),
+        1
+    );
+
+    save_persisted_pso_cache::<NullInstance>(&mut app.sub_app_mut(RenderApp).unwrap().world);
+    assert_eq!(
+        app.get_sub_app(RenderApp)
+            .unwrap()
+            .world
+            .resource::<PipelineCachePersistenceStatus>()
+            .save,
+        Some(Ok(0))
+    );
+
+    app.run_shutdown();
+    let bytes = std::fs::read(&path).expect("shutdown wrote destination");
+    assert_eq!(
+        PersistedPsoCache::load_for(&bytes, &fingerprint)
+            .expect("shutdown image remains valid")
+            .len(),
+        0
+    );
+    let _ = std::fs::remove_file(path);
 }
 
 use prism_render_visibility::GpuRenderWorkItem;
@@ -926,6 +983,12 @@ fn material_render_class_selects_the_phase() {
         prism_render_material::fallback_material_record(GenerationalHandle::new(90, 1), 1);
     water.features |= prism_render_material::MaterialFeatureFlags::WATER;
     assert_eq!(phase_for_material(&water), RenderPhase::Transparent);
+    let water_state = material_pipeline_state(&water);
+    assert_eq!(water_state.phase, MaterialRenderPhase::Transparent);
+    assert_eq!(water_state.target, MaterialRenderTarget::HdrTransparent);
+    assert_eq!(water_state.blend, MaterialBlendMode::PremultipliedAlpha);
+    assert_eq!(water_state.depth_test, MaterialDepthTest::LessEqual);
+    assert!(!water_state.depth_write);
     water.render_domain = RenderDomain::Hair;
     water.features = prism_render_material::MaterialFeatureFlags::default();
     assert_eq!(phase_for_material(&water), RenderPhase::Opaque);
@@ -1084,11 +1147,18 @@ fn response_modules_are_interned_dense_checked_and_composition_resident() {
         "composition is a resident module, not a per-material package"
     );
 
-    let mut fused_custom = spec;
+    let mut fused_custom = spec.clone();
     fused_custom.execution_family = ExecutionFamily::FusedBuiltin;
     assert_eq!(
         modules.intern(&device, fused_custom),
         Err(ResponseModuleCacheError::FusedCustom)
+    );
+    let mut changed_execution = spec.clone();
+    changed_execution.execution_family = ExecutionFamily::Composition;
+    changed_execution.builtin = true;
+    assert_eq!(
+        modules.intern(&device, changed_execution),
+        Err(ResponseModuleCacheError::ExecutionDeclarationChanged(first))
     );
 
     let mut specializer = MeshPipelineSpecializer::new();
@@ -2710,6 +2780,124 @@ fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
         multi,
         vec![(1, 0), (1, 20)],
         "one multi-draw per bin, in packed slot order"
+    );
+}
+
+/// A split material owns three pass descriptors: both response arms and the
+/// resident composition kernel.  The bin path must preserve that pass set,
+/// reuse the same indirect range for every item, and never collapse the split
+/// material back to one surface pipeline.
+#[test]
+fn split_bin_expands_to_three_work_items_with_one_indirect_range() {
+    use prism_render_visibility::build_view_draw_bins;
+
+    let adapter = NullInstance::new()
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("the null backend always has an adapter");
+    let (device, queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let mut fixture = bin_fixture(&device, &queue);
+    let material = fixture.work[0].material;
+    fixture
+        .registry
+        .set_material_passes(
+            material,
+            vec![
+                crate::PassDescriptor {
+                    role: PassRole::ResponseLeft,
+                    execution_family: ExecutionFamily::SplitResponse,
+                    response_module_id: ModuleId(10),
+                    permutation_index: dense(1),
+                    fallback_permutation: Some(dense(63)),
+                    render_phase: RenderPhase::Opaque,
+                    draw: Some(DrawFunctionId(0)),
+                    sort_class: crate::PassDescriptorClass::SURFACE,
+                },
+                crate::PassDescriptor {
+                    role: PassRole::ResponseRight,
+                    execution_family: ExecutionFamily::SplitResponse,
+                    response_module_id: ModuleId(11),
+                    permutation_index: dense(1),
+                    fallback_permutation: Some(dense(63)),
+                    render_phase: RenderPhase::Opaque,
+                    draw: Some(DrawFunctionId(0)),
+                    sort_class: crate::PassDescriptorClass::SURFACE,
+                },
+                crate::PassDescriptor {
+                    role: PassRole::Composition,
+                    execution_family: ExecutionFamily::Composition,
+                    response_module_id: ModuleId(12),
+                    permutation_index: PermutationIndex::ZERO,
+                    fallback_permutation: None,
+                    render_phase: RenderPhase::Opaque,
+                    draw: Some(DrawFunctionId(1)),
+                    sort_class: crate::PassDescriptorClass::SURFACE,
+                },
+            ],
+        )
+        .expect("the split pass set is a valid resident descriptor shape");
+
+    let candidates = fixture
+        .registry
+        .bin_candidates(&fixture.meshes, &fixture.work);
+    let bins = build_view_draw_bins(GenerationalHandle::new(0, 1), 8, candidates);
+    assert_eq!(bins.bins.len(), 2, "the split material remains one bin");
+    let split_bin = bins
+        .bins
+        .iter()
+        .find(|range| range.representative_scene == fixture.opaque)
+        .expect("the split material bin is present");
+
+    let mut queues = RenderQueues::new();
+    let mut specializer = MeshPipelineSpecializer::new();
+    let provider = StubProvider::new(&device);
+    let outcome = queues.fill_bins(
+        &device,
+        &mut specializer,
+        &fixture.registry,
+        &fixture.meshes,
+        &fixture.instances,
+        declared_args_buffer(&device),
+        &bins,
+        None,
+        1,
+        DrawFunctionId(0),
+        &provider,
+    );
+
+    assert_eq!(outcome.queued, 2);
+    assert_eq!(
+        outcome.work_items, 4,
+        "one fused bin plus three split items"
+    );
+    assert_eq!(outcome.unknown_class, 0);
+    assert_eq!(outcome.unresolved, 0);
+
+    let split_items: Vec<_> = queues
+        .phase(RenderPhase::Opaque)
+        .iter()
+        .filter(|item| item.scene == fixture.opaque)
+        .collect();
+    assert_eq!(split_items.len(), 3);
+    let expected = bin_indirect_args(
+        split_items[0]
+            .indirect
+            .expect("split item has indirect args")
+            .args,
+        split_bin,
+        bins.command_buffer_start,
+    );
+    for item in &split_items {
+        assert_eq!(item.indirect, Some(expected));
+    }
+    assert_eq!(
+        split_items
+            .iter()
+            .map(|item| item.draw)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([DrawFunctionId(0), DrawFunctionId(1)]),
+        "the composition item keeps its distinct draw function"
     );
 }
 

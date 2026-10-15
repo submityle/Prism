@@ -64,6 +64,7 @@ mod bin_queue;
 mod config;
 mod device_loss;
 mod draw;
+mod ecs_columns;
 mod frame;
 mod image;
 mod intent;
@@ -96,6 +97,7 @@ mod transforms;
 mod view_driver;
 mod view_query;
 mod views;
+pub mod visibility;
 
 #[cfg(test)]
 mod image_tests;
@@ -106,6 +108,10 @@ pub use bin_queue::{bin_indirect_args, BinQueueOutcome};
 pub use config::RenderAppConfig;
 pub use device_loss::{DeviceLossSignal, DeviceRecoveryStatus};
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
+pub use ecs_columns::{
+    register_gpu_column, EcsColumnUploadError, EcsColumnUploadStats, EcsResidentColumns,
+    GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
+};
 pub use frame::{RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT};
 pub use image::GpuImage;
 pub use intent::{RenderIntent, RenderViewport};
@@ -128,18 +134,20 @@ pub use mesh_pipelines::{
     ResponseModuleSpec, SpineMeshPipeline,
 };
 pub use pipeline_cache::{
-    cold_key_from_pipeline_key, hash_vertex_layouts, PipelineBinaryCacheError, PipelineCache,
-    PipelineCompiler, PipelineKey, PipelineKeyMappingError, PipelineLookupStatus,
-    PipelineResolution,
+    cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,
+    PipelineBinaryCacheError, PipelineCache, PipelineCachePersistenceConfig,
+    PipelineCachePersistenceError, PipelineCachePersistenceStatus, PipelineCompiler, PipelineKey,
+    PipelineKeyMappingError, PipelineLookupStatus, PipelineResolution,
+    MAX_PERSISTED_PSO_CACHE_BYTES, PSO_CACHE_ABI_VERSION,
 };
 pub use pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
-pub use plugin::PrismRenderPlugin;
+pub use plugin::{save_persisted_pso_cache, PrismRenderPlugin};
+#[cfg(feature = "winit")]
+pub use presentation::WinitPresentationPlugin;
 pub use presentation::{
     WindowFrameStatus, WindowId, WindowRenderError, WindowRenderQueues, WindowRenderRequests,
     WindowRenderTargets, WindowSurfaceOptions,
 };
-#[cfg(feature = "winit")]
-pub use presentation::WinitPresentationPlugin;
 pub use queue::{
     phase_for_bin_class, phase_for_render_class, DrawRequest, IndirectArgs, PhaseItem, RenderQueues,
 };
@@ -181,6 +189,10 @@ pub mod prelude {
     pub use crate::bin_queue::{bin_indirect_args, BinQueueOutcome};
     pub use crate::config::RenderAppConfig;
     pub use crate::draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
+    pub use crate::ecs_columns::{
+        register_gpu_column, EcsColumnUploadError, EcsColumnUploadStats, EcsResidentColumns,
+        GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
+    };
     pub use crate::intent::{RenderIntent, RenderViewport};
     pub use crate::label::{Render, RenderApp, RenderStartup};
     pub use crate::material::{
@@ -196,18 +208,20 @@ pub mod prelude {
         ResponseModuleSpec, SpineMeshPipeline,
     };
     pub use crate::pipeline_cache::{
-        cold_key_from_pipeline_key, hash_vertex_layouts, PipelineBinaryCacheError, PipelineCache,
-        PipelineCompiler, PipelineKey, PipelineKeyMappingError, PipelineLookupStatus,
-        PipelineResolution,
+        cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,
+        PipelineBinaryCacheError, PipelineCache, PipelineCachePersistenceConfig,
+        PipelineCachePersistenceError, PipelineCachePersistenceStatus, PipelineCompiler,
+        PipelineKey, PipelineKeyMappingError, PipelineLookupStatus, PipelineResolution,
+        MAX_PERSISTED_PSO_CACHE_BYTES, PSO_CACHE_ABI_VERSION,
     };
     pub use crate::pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
-    pub use crate::plugin::PrismRenderPlugin;
+    pub use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};
+    #[cfg(feature = "winit")]
+    pub use crate::presentation::WinitPresentationPlugin;
     pub use crate::presentation::{
         WindowFrameStatus, WindowId, WindowRenderError, WindowRenderQueues, WindowRenderRequests,
         WindowRenderTargets, WindowSurfaceOptions,
     };
-    #[cfg(feature = "winit")]
-    pub use crate::presentation::WinitPresentationPlugin;
     pub use crate::queue::{
         phase_for_bin_class, phase_for_render_class, DrawRequest, IndirectArgs, PhaseItem,
         RenderQueues,

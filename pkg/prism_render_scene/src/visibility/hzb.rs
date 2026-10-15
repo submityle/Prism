@@ -13,7 +13,7 @@ use bevy_render::{
     renderer::RenderContext,
 };
 
-use super::runtime::UnifiedVisibilityState;
+use super::runtime::{UnifiedVisibilityState, VisibilityFrameGraph, VisibilityPass};
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 enum PrismHzbSystems {
@@ -64,9 +64,13 @@ fn dispatch_previous_hzb(
     pipeline: Res<super::hzb_gpu::HzbVisibilityPipeline>,
     pipeline_cache: Res<PipelineCache>,
     buffers: Res<super::hzb_gpu::HzbVisibilityBuffers>,
+    frame_graph: Res<VisibilityFrameGraph>,
     mut ctx: RenderContext,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
+    if !frame_graph.permits(VisibilityPass::PreviousHzb) {
+        return;
+    }
     let retained = current_view.into_inner().retained_view_entity;
     let Some((output_start, candidate_count)) = buffers.view_range(retained) else {
         return;
@@ -125,9 +129,13 @@ fn dispatch_current_hzb(
     pipeline: Res<super::hzb_gpu::HzbVisibilityPipeline>,
     pipeline_cache: Res<PipelineCache>,
     buffers: Res<super::hzb_gpu::HzbVisibilityBuffers>,
+    frame_graph: Res<VisibilityFrameGraph>,
     mut ctx: RenderContext,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
+    if !frame_graph.permits(VisibilityPass::CurrentHzb) {
+        return;
+    }
     let retained = current_view.into_inner().retained_view_entity;
     let Some((output_start, candidate_count)) = buffers.view_range(retained) else {
         return;

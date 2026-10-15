@@ -99,6 +99,8 @@ pub struct ResidentResponseModule {
     pub permutations: PermutationSpace,
     /// The checked full-lobe fallback, when this module supports one.
     pub full_lobe_fallback: Option<PermutationIndex>,
+    /// The execution path this module is legal to serve.
+    pub execution_family: ExecutionFamily,
     /// Whether this module belongs to the closed built-in fused set.
     pub builtin: bool,
     /// The interned package/module identity used to create this resident.
@@ -132,6 +134,11 @@ pub enum ResponseModuleCacheError {
     DescriptorChanged(ModuleId),
     /// A custom response attempted to use the fused path.
     FusedCustom,
+    /// A reserved spine declaration must be a built-in fused module.
+    InvalidReserved,
+    /// An already resident module was offered under a different execution
+    /// family or built-in classification.
+    ExecutionDeclarationChanged(ModuleId),
 }
 
 /// The render-world cache for response modules and the resident composition
@@ -172,6 +179,13 @@ impl ResponseModuleCache {
             if existing.descriptor != spec.descriptor {
                 return Err(ResponseModuleCacheError::DescriptorChanged(module_id));
             }
+            if existing.execution_family != spec.execution_family
+                || existing.builtin != spec.builtin
+            {
+                return Err(ResponseModuleCacheError::ExecutionDeclarationChanged(
+                    module_id,
+                ));
+            }
             return Ok(module_id);
         }
         let shader_module = device.create_shader_module(&spec.descriptor);
@@ -182,6 +196,7 @@ impl ResponseModuleCache {
                 shader_module,
                 permutations: spec.permutations,
                 full_lobe_fallback: spec.full_lobe_fallback,
+                execution_family: spec.execution_family,
                 builtin: spec.builtin,
                 identity: spec.identity,
                 descriptor: spec.descriptor,
@@ -204,9 +219,28 @@ impl ResponseModuleCache {
             ModuleId::SPINE,
             "only the spine may use the reserved module id"
         );
+        if spec.execution_family != ExecutionFamily::FusedBuiltin || !spec.builtin {
+            return Err(ResponseModuleCacheError::InvalidReserved);
+        }
+        let module_id = self
+            .interner
+            .reserve(
+                module_id,
+                spec.identity.clone(),
+                spec.permutations.clone(),
+                spec.full_lobe_fallback,
+            )
+            .map_err(ResponseModuleCacheError::Intern)?;
         if let Some(existing) = self.modules.get(&module_id) {
             if existing.descriptor != spec.descriptor {
                 return Err(ResponseModuleCacheError::DescriptorChanged(module_id));
+            }
+            if existing.execution_family != spec.execution_family
+                || existing.builtin != spec.builtin
+            {
+                return Err(ResponseModuleCacheError::ExecutionDeclarationChanged(
+                    module_id,
+                ));
             }
             return Ok(module_id);
         }
@@ -218,6 +252,7 @@ impl ResponseModuleCache {
                 shader_module,
                 permutations: spec.permutations,
                 full_lobe_fallback: spec.full_lobe_fallback,
+                execution_family: spec.execution_family,
                 builtin: spec.builtin,
                 identity: spec.identity,
                 descriptor: spec.descriptor,

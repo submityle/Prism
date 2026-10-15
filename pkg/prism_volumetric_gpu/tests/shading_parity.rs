@@ -45,7 +45,7 @@
 use prism_render_architecture::particle::lod::ParticleQuality;
 use prism_render_architecture::particle::shading::{
     DeepShadowMode, MotionVectorInput, OitRoute, ParticleRenderPhase, ShadingAttributeFootprint,
-    SixWayLuminance, PARTICLE_GLOBAL_ILLUMINATION, PARTICLE_LIGHTING_SERVICES,
+    SixWayLuminance, PARTICLE_GLOBAL_ILLUMINATION, PARTICLE_LIGHTING_CAPABILITIES,
     PARTICLE_RAY_TRACING, PARTICLE_SHADOW_MAPS,
 };
 use prism_render_architecture::particle::sort_cull::{BlendMode, SortDecision};
@@ -77,7 +77,7 @@ fn close(a: f32, b: f32) -> bool {
 
 /// All lighting capabilities enabled.
 fn all_caps() -> ServiceSet {
-    PARTICLE_LIGHTING_SERVICES
+    PARTICLE_LIGHTING_CAPABILITIES
 }
 
 fn caps_for_mask(mask: u32) -> ServiceSet {
@@ -89,7 +89,7 @@ fn caps_for_mask(mask: u32) -> ServiceSet {
         4 => ServiceSet::new(&[PARTICLE_RAY_TRACING]),
         5 => ServiceSet::new(&[PARTICLE_SHADOW_MAPS, PARTICLE_RAY_TRACING]),
         6 => ServiceSet::new(&[PARTICLE_GLOBAL_ILLUMINATION, PARTICLE_RAY_TRACING]),
-        _ => PARTICLE_LIGHTING_SERVICES,
+        _ => PARTICLE_LIGHTING_CAPABILITIES,
     }
 }
 

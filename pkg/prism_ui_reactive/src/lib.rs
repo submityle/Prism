@@ -58,6 +58,7 @@ extern crate alloc;
 
 mod effect;
 pub mod introspect;
+mod invalidation;
 mod memo;
 mod node;
 pub mod order;
@@ -66,6 +67,7 @@ mod signal;
 
 pub use effect::Effect;
 pub use introspect::{GraphSnapshot, NodeInfo, NodeKindInfo};
+pub use invalidation::{SignalChangeBatch, SignalChangeId, SignalChangeQueue, SignalSubscription};
 pub use memo::Memo;
 pub use node::NodeId;
 pub use runtime::Runtime;

@@ -63,7 +63,7 @@ pub struct QueryIter<'w, 's, D: QueryData, F: QueryFilter = ()> {
     /// End row (exclusive) of the chunk currently being walked.
     chunk_end: usize,
     /// The current archetype's resolved fetch cursor (`None` before the first
-    /// archetype is entered, or for a zero-row archetype that is skipped).
+    /// archetype is entered, or for a chunk rejected by the coarse filter).
     current_fetch: Option<D::Fetch<'w>>,
     /// The current archetype's resolved filter fetch cursor (parallel to
     /// `current_fetch`). `None` before the first archetype is entered.
@@ -229,8 +229,8 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
             if self.row < self.chunk_end {
                 let row = self.row;
                 self.row += 1;
-                // SAFETY: entering a chunk sets `chunk_end` and *both* fetch
-                // cursors together, so whenever a row remains
+                // SAFETY: an accepted chunk initialises both fetch cursors;
+                // a rejected chunk sets `row = chunk_end`. Whenever a row remains
                 // (`row < chunk_end <= row_len`) the cursors are initialised; and
                 // `row < chunk_end <= archetype.len() == current_entities.len()`.
                 // Taking the row entity unchecked, and the cursors without the
@@ -314,22 +314,46 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
             self.row_len = len;
             self.current_entities = archetype.table().entities();
             self.rows_per_chunk = archetype.table().rows_per_chunk().max(1);
+            // SAFETY: this archetype satisfies F::matches. Resolve the filter
+            // once per archetype; its metadata cursor is independent of chunks.
+            self.current_filter_fetch = Some(unsafe {
+                F::init_fetch(
+                    self.filter_state,
+                    archetype,
+                    world.sparse_sets(),
+                    self.last_run,
+                    self.this_run,
+                )
+            });
             self.enter_chunk(0);
             return true;
         }
     }
 
-    /// Enter chunk window `chunk` of the current archetype: set the row and
-    /// chunk-end cursors and resolve both fetch cursors for that window.
+    /// Enter the first candidate at or after `chunk`, skipping clean subtrees
+    /// through the filter's index. Exhaustion advances to the archetype's end.
     ///
     /// Table-backed data terms cache the window's value base and
     /// changed-version cell here (design §5.3), so the per-row
     /// [`QueryData::fetch`] is plain offset arithmetic.
     #[inline(always)]
     fn enter_chunk(&mut self, chunk: usize) {
+        let filter_fetch = self
+            .current_filter_fetch
+            .expect("the archetype filter is initialised before entering chunks");
+        let Some(chunk) = F::next_candidate_chunk(
+            filter_fetch,
+            chunk,
+            self.row_len.div_ceil(self.rows_per_chunk),
+        ) else {
+            self.row = self.row_len;
+            self.chunk_end = self.row_len;
+            self.current_fetch = None;
+            return;
+        };
         let first = chunk * self.rows_per_chunk;
         self.row = first;
-        self.chunk_end = (first + self.rows_per_chunk).min(self.row_len);
+        self.chunk_end = first + self.rows_per_chunk.min(self.row_len - first);
 
         // SAFETY: `self.world` is valid and borrowed for `'w`; only a shared
         // `&'w World` is formed. `arch_cursor - 1` is the archetype just entered.
@@ -351,18 +375,6 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
                 self.last_run,
                 self.this_run,
                 chunk,
-            )
-        });
-        // SAFETY: the same `arch_id` also satisfies `F::matches` for
-        // `filter_state` (guaranteed by `matched_archetypes`), the contract of
-        // `F::init_fetch`. Filters have no per-chunk cursor.
-        self.current_filter_fetch = Some(unsafe {
-            F::init_fetch(
-                self.filter_state,
-                archetype,
-                sparse_sets,
-                self.last_run,
-                self.this_run,
             )
         });
     }

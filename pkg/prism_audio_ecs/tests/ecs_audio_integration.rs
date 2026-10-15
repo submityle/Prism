@@ -638,3 +638,474 @@ fn despawn_disposition_tears_down_voice_and_entity() {
 fn pose(position: Vec3) -> GlobalTransform {
     GlobalTransform::from(Transform::from_translation(position))
 }
+
+/// Drain real command/telemetry rings, allowing bounded queues to converge.
+fn settle(app: &mut App, out: &mut AudioBuffer, expected: usize) {
+    for _ in 0..24 {
+        app.update();
+        pump(app, out);
+    }
+    assert_eq!(runtime_active(app), expected);
+    assert_eq!(
+        app.world().resource::<VoiceMirror>().active_count(),
+        expected
+    );
+    assert_eq!(app.world().resource::<LiveVoices>().len(), expected);
+    assert!(app.world().resource::<PendingStops>().is_empty());
+}
+
+fn handles(app: &App, entities: &[prism_ecs::entity::Entity]) -> Vec<VoiceHandle> {
+    entities
+        .iter()
+        .map(|&entity| {
+            let handle = app
+                .world()
+                .get::<AudioEmitter>(entity)
+                .unwrap()
+                .voice
+                .unwrap();
+            assert_eq!(
+                app.world().resource::<LiveVoices>().get(entity),
+                Some(handle)
+            );
+            assert!(app.world().resource::<VoiceMirror>().get(handle).is_some());
+            assert!(app
+                .world()
+                .get_non_send::<AudioRuntimeHost>()
+                .unwrap()
+                .runtime()
+                .voices()
+                .get(handle)
+                .is_some());
+            handle
+        })
+        .collect()
+}
+
+#[test]
+fn repeated_restore_with_full_ring_retires_every_old_handle_before_rebuilding() {
+    use prism_audio_rt::AudioCommand;
+
+    let mut app = app_with(AudioRuntimeConfig {
+        command_capacity: 1,
+        ..base_config()
+    });
+    app.world_mut()
+        .register_snapshot_component::<GlobalTransform>();
+    let entities: Vec<_> = (0..3)
+        .map(|group| {
+            app.world_mut()
+                .spawn((AudioEmitter::new(VoiceGroup(group), 1.0), pose(Vec3::ZERO)))
+        })
+        .collect();
+    let mut out = AudioBuffer::new(ChannelLayout::Stereo, 64);
+    settle(&mut app, &mut out, 3);
+    let snapshot = app.world().snapshot();
+
+    for _ in 0..12 {
+        let old = handles(&app, &entities);
+        app.world()
+            .resource::<AudioClient>()
+            .send(AudioCommand::SetMasterGain {
+                linear: 1.0,
+                at_frame: 0,
+                ramp_frames: 0,
+            })
+            .unwrap();
+        // No callback runs between these restores. Each stop must remain
+        // pending exactly once, and no replacement allocation may bypass it.
+        for _ in 0..4 {
+            app.world_mut().restore(&snapshot);
+            app.update();
+            assert_eq!(app.world().resource::<PendingStops>().len(), 3);
+            assert!(app.world().resource::<LiveVoices>().is_empty());
+            assert_eq!(app.world().resource::<VoiceMirror>().active_count(), 3);
+            assert_eq!(runtime_active(&mut app), 3);
+            for &entity in &entities {
+                assert!(app
+                    .world()
+                    .get::<AudioEmitter>(entity)
+                    .unwrap()
+                    .voice
+                    .is_none());
+            }
+        }
+        pump(&mut app, &mut out);
+        settle(&mut app, &mut out, 3);
+        let new = handles(&app, &entities);
+        for old in old {
+            assert!(!new.contains(&old));
+            assert!(app
+                .world()
+                .get_non_send::<AudioRuntimeHost>()
+                .unwrap()
+                .runtime()
+                .voices()
+                .get(old)
+                .is_none());
+        }
+    }
+    for entity in entities {
+        app.world_mut().despawn(entity);
+    }
+    settle(&mut app, &mut out, 0);
+}
+
+#[test]
+fn restore_before_callback_consumes_spawn_preserves_fifo_handle_generations() {
+    let mut app = app_with(base_config());
+    app.world_mut()
+        .register_snapshot_component::<GlobalTransform>();
+    let entity = app
+        .world_mut()
+        .spawn((AudioEmitter::new(VoiceGroup(1), 0.75), pose(Vec3::ZERO)));
+    app.update();
+    let old = app
+        .world()
+        .get::<AudioEmitter>(entity)
+        .unwrap()
+        .voice
+        .unwrap();
+    assert_eq!(runtime_active(&mut app), 0);
+    let snapshot = app.world().snapshot();
+    for _ in 0..5 {
+        app.world_mut().restore(&snapshot);
+        app.update();
+    }
+    let mut out = AudioBuffer::new(ChannelLayout::Stereo, 64);
+    pump(&mut app, &mut out);
+    assert_eq!(runtime_active(&mut app), 1);
+    let new = handles(&app, &[entity])[0];
+    assert_ne!(old, new);
+    assert!(app
+        .world()
+        .get_non_send::<AudioRuntimeHost>()
+        .unwrap()
+        .runtime()
+        .voices()
+        .get(old)
+        .is_none());
+}
+
+#[test]
+fn restore_reapplies_gain_and_budget_through_backpressure_to_real_runtime() {
+    let mut app = app_with(AudioRuntimeConfig {
+        command_capacity: 1,
+        ..base_config()
+    });
+    app.world_mut()
+        .register_snapshot_component::<GlobalTransform>();
+    publish_unity_dc_graph(&app);
+    app.world_mut().resource_mut::<MasterGain>().linear = 0.25;
+    app.world_mut().resource_mut::<PhysicalVoiceBudget>().max = 3;
+    for group in 0..3 {
+        app.world_mut()
+            .spawn((AudioEmitter::new(VoiceGroup(group), 1.0), pose(Vec3::ZERO)));
+    }
+    let mut out = AudioBuffer::new(ChannelLayout::Mono, 64);
+    settle(&mut app, &mut out, 3);
+    let snapshot = app.world().snapshot();
+    app.world_mut().resource_mut::<MasterGain>().linear = 0.75;
+    app.world_mut().resource_mut::<PhysicalVoiceBudget>().max = 1;
+    settle(&mut app, &mut out, 3);
+    assert_eq!(runtime_physical(&mut app), 1);
+    assert!(close(pump(&mut app, &mut out).master_peak, 0.75));
+
+    app.world_mut().restore(&snapshot);
+    settle(&mut app, &mut out, 3);
+    // Restore rebuilds the voices under the restored budget. A plain budget
+    // increase does not itself revive virtual voices in the current runtime.
+    assert_eq!(runtime_physical(&mut app), 3);
+    let frame = pump(&mut app, &mut out);
+    assert_eq!((frame.physical_voices, frame.virtual_voices), (3, 0));
+    assert!(close(frame.master_peak, 0.25));
+    assert!(out.channel(0).iter().all(|&sample| close(sample, 0.25)));
+}
+
+#[test]
+fn removal_replacement_and_pose_loss_retry_stops_without_orphaning_voices() {
+    use prism_audio_rt::AudioCommand;
+
+    let mut app = app_with(AudioRuntimeConfig {
+        command_capacity: 1,
+        ..base_config()
+    });
+    let entity = app
+        .world_mut()
+        .spawn((AudioEmitter::new(VoiceGroup(1), 1.0), pose(Vec3::ZERO)));
+    let mut out = AudioBuffer::new(ChannelLayout::Stereo, 64);
+    settle(&mut app, &mut out, 1);
+    let old = handles(&app, &[entity])[0];
+    app.world()
+        .resource::<AudioClient>()
+        .send(AudioCommand::SetMasterGain {
+            linear: 1.0,
+            at_frame: 0,
+            ramp_frames: 0,
+        })
+        .unwrap();
+    app.world_mut().remove::<AudioEmitter>(entity);
+    app.world_mut()
+        .insert(entity, AudioEmitter::new(VoiceGroup(2), 0.5));
+    app.update();
+    assert_eq!(app.world().resource::<PendingStops>().len(), 1);
+    assert!(app
+        .world()
+        .get::<AudioEmitter>(entity)
+        .unwrap()
+        .voice
+        .is_none());
+    pump(&mut app, &mut out);
+    settle(&mut app, &mut out, 1);
+    assert_ne!(handles(&app, &[entity])[0], old);
+    app.world_mut().remove::<GlobalTransform>(entity);
+    settle(&mut app, &mut out, 0);
+    app.world_mut().insert(entity, pose(Vec3::ZERO));
+    settle(&mut app, &mut out, 1);
+    app.world_mut().despawn(entity);
+    settle(&mut app, &mut out, 0);
+}
+
+#[test]
+fn shutdown_closes_retained_clients_and_reclaims_all_graph_lifecycle_states() {
+    use prism_audio_rt::AudioCommand;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct Tracked(Arc<AtomicUsize>);
+    impl AudioNode for Tracked {
+        fn process(&mut self, _ctx: &RenderContext, io: &mut ProcessIo<'_>) {
+            io.output(0).clear();
+        }
+    }
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    fn graph(drops: &Arc<AtomicUsize>) -> Box<AudioGraph> {
+        let mut graph = AudioGraph::new(48_000, 64);
+        let node = graph.add_node(
+            Box::new(Tracked(drops.clone())),
+            vec![],
+            vec![ChannelLayout::Mono],
+        );
+        graph.set_master(PortRef::new(node, 0)).unwrap();
+        graph.compile().unwrap();
+        Box::new(graph)
+    }
+
+    let mut app = app_with(AudioRuntimeConfig {
+        retire_capacity: 1,
+        ..base_config()
+    });
+    let client = app.world().resource::<AudioClient>().clone();
+    let drops = Arc::new(AtomicUsize::new(0));
+    assert!(client.publish_graph(graph(&drops)).is_none());
+    let mut out = AudioBuffer::new(ChannelLayout::Mono, 64);
+    pump(&mut app, &mut out);
+    // Skip the host's normal off-thread collection to fill the retirement
+    // queue, then force a pending-retire holdover in the real runtime.
+    for _ in 0..2 {
+        assert!(client.publish_graph(graph(&drops)).is_none());
+        app.world_mut()
+            .get_non_send_mut::<AudioRuntimeHost>()
+            .unwrap()
+            .runtime_mut()
+            .process_block(&mut out);
+    }
+    assert!(client.publish_graph(graph(&drops)).is_none());
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    app.run_shutdown();
+    app.run_shutdown();
+    assert!(!client.is_open());
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        4,
+        "live, retired, pending-retire and unconsumed graphs must all be reclaimed"
+    );
+    assert!(client
+        .send(AudioCommand::SetMasterGain {
+            linear: 1.0,
+            at_frame: 0,
+            ramp_frames: 0
+        })
+        .is_err());
+    assert!(client.recv_telemetry().is_none());
+    let returned = client
+        .publish_graph(graph(&drops))
+        .expect("closed facade returns ownership");
+    assert_eq!(drops.load(Ordering::SeqCst), 4);
+    drop(returned);
+    assert_eq!(drops.load(Ordering::SeqCst), 5);
+    app.update();
+    assert!(app.world().get_non_send::<AudioRuntimeHost>().is_none());
+}
+
+#[test]
+fn shutdown_and_explicit_reinstall_reset_handles_and_telemetry_not_authoring() {
+    use prism_audio_ecs::plugin::{install, shutdown};
+    use prism_audio_rt::AudioCommand;
+
+    let config = AudioRuntimeConfig {
+        command_capacity: 1,
+        ..base_config()
+    };
+    let mut app = app_with(config);
+    app.world_mut()
+        .insert_resource(AudioTelemetry::with_capacity(3));
+    app.world_mut().resource_mut::<MasterGain>().linear = 0.25;
+    app.world_mut().resource_mut::<PhysicalVoiceBudget>().max = 1;
+    let entity = app
+        .world_mut()
+        .spawn((AudioEmitter::new(VoiceGroup(0), 1.0), pose(Vec3::ZERO)));
+    let mut out = AudioBuffer::new(ChannelLayout::Mono, 64);
+    settle(&mut app, &mut out, 1);
+    let client = app.world().resource::<AudioClient>().clone();
+    client
+        .send(AudioCommand::SetMasterGain {
+            linear: 0.5,
+            at_frame: 0,
+            ramp_frames: 0,
+        })
+        .unwrap();
+    app.world_mut()
+        .get_mut::<AudioEmitter>(entity)
+        .unwrap()
+        .stop_requested = true;
+    app.update();
+    assert_eq!(app.world().resource::<PendingStops>().len(), 1);
+    shutdown(app.world_mut());
+    shutdown(app.world_mut());
+    assert!(!client.is_open());
+    assert!(app
+        .world()
+        .get::<AudioEmitter>(entity)
+        .unwrap()
+        .voice
+        .is_none());
+    assert!(app.world().get_resource::<LiveVoices>().is_none());
+    app.update();
+    assert!(app.world().get_non_send::<AudioRuntimeHost>().is_none());
+
+    app.world_mut()
+        .get_mut::<AudioEmitter>(entity)
+        .unwrap()
+        .playing = true;
+    install(app.world_mut(), config);
+    assert_eq!(app.world().resource::<AudioTelemetry>().capacity(), 3);
+    assert_eq!(app.world().resource::<AudioTelemetry>().received(), 0);
+    assert_eq!(app.world().resource::<MasterGain>().linear, 0.25);
+    assert_eq!(app.world().resource::<PhysicalVoiceBudget>().max, 1);
+    assert!(
+        !client.is_open(),
+        "old clients cannot command the reinstalled runtime"
+    );
+    publish_unity_dc_graph(&app);
+    settle(&mut app, &mut out, 1);
+    handles(&app, &[entity]);
+    assert!(close(pump(&mut app, &mut out).master_peak, 0.25));
+    app.world_mut().remove::<AudioEmitter>(entity);
+    settle(&mut app, &mut out, 0);
+}
+
+#[test]
+fn dropping_non_send_host_closes_old_clients_and_next_frame_reinstalls() {
+    let mut app = app_with(base_config());
+    let entity = app
+        .world_mut()
+        .spawn((AudioEmitter::new(VoiceGroup(0), 1.0), pose(Vec3::ZERO)));
+    let mut out = AudioBuffer::new(ChannelLayout::Stereo, 64);
+    settle(&mut app, &mut out, 1);
+    let client = app.world().resource::<AudioClient>().clone();
+    drop(app.world_mut().remove_non_send::<AudioRuntimeHost>());
+    assert!(!client.is_open());
+    app.update();
+    pump(&mut app, &mut out);
+    handles(&app, &[entity]);
+    assert_eq!(runtime_active(&mut app), 1);
+    assert!(app.world().resource::<AudioClient>().is_open());
+}
+
+#[test]
+fn post_update_hierarchy_propagation_reaches_audio_in_the_same_frame() {
+    use prism_app::{PostUpdate, Update};
+    use prism_ecs::{hierarchy::ChildOf, prelude::World};
+
+    let mut app = app_with(base_config());
+    prism_transform::ecs::install(app.world_mut());
+    app.add_systems(PostUpdate, prism_transform::ecs::transform_system);
+    app.world_mut().spawn((AudioListener, Transform::default()));
+    let parent = app.world_mut().spawn(Transform::default());
+    let child = app.world_mut().spawn((
+        AudioEmitter::new(VoiceGroup(0), 1.0).with_distance(1.0, 5.0),
+        Transform::from_translation(Vec3::X),
+    ));
+    app.world_mut().add_relation::<ChildOf>(child, parent);
+    app.add_systems(Update, move |world: &mut World| {
+        world.get_mut::<Transform>(parent).unwrap().translation.x += 1.0;
+    });
+    let mut out = AudioBuffer::new(ChannelLayout::Stereo, 64);
+    for (position, importance) in [(2.0, 0.75), (3.0, 0.5), (4.0, 0.25), (5.0, 0.0)] {
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<GlobalTransform>(child)
+                .unwrap()
+                .translation()
+                .x,
+            position
+        );
+        pump(&mut app, &mut out);
+        let handle = handles(&app, &[child])[0];
+        assert!(close(runtime_importance(&mut app, handle), importance));
+    }
+}
+
+#[test]
+fn stop_before_allocation_and_player_removal_do_not_resurrect_or_delete_authored_emitters() {
+    let mut app = app_with(AudioRuntimeConfig {
+        command_capacity: 1,
+        ..base_config()
+    });
+    let entity = app
+        .world_mut()
+        .spawn((AudioPlayer::new(VoiceGroup(0)), pose(Vec3::ZERO)));
+    app.world_mut()
+        .get_mut::<AudioPlayer>(entity)
+        .unwrap()
+        .stop();
+    let authored = app.world_mut().spawn((
+        AudioPlayer::new(VoiceGroup(1)),
+        AudioEmitter::new(VoiceGroup(1), 1.0),
+        pose(Vec3::ZERO),
+    ));
+    app.update();
+    app.world_mut().remove::<AudioPlayer>(authored);
+    let mut out = AudioBuffer::new(ChannelLayout::Stereo, 64);
+    settle(&mut app, &mut out, 1);
+    assert!(!app.world().get::<AudioEmitter>(entity).unwrap().playing);
+    assert!(app
+        .world()
+        .get::<AudioEmitter>(entity)
+        .unwrap()
+        .voice
+        .is_none());
+    assert!(app
+        .world()
+        .get::<AudioEmitter>(authored)
+        .unwrap()
+        .voice
+        .is_some());
+    app.world_mut()
+        .get_mut::<AudioEmitter>(entity)
+        .unwrap()
+        .playing = true;
+    settle(&mut app, &mut out, 2);
+    app.world_mut().remove::<AudioPlayer>(entity);
+    settle(&mut app, &mut out, 1);
+    assert!(app.world().get::<AudioEmitter>(entity).is_none());
+    assert!(app.world().get::<AudioEmitter>(authored).is_some());
+}

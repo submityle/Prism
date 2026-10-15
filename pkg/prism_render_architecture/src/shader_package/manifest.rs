@@ -15,7 +15,7 @@ use alloc::string::String;
 
 use crate::abi::{AbiHash, AbiVersion};
 
-use super::ShaderPackageManifest;
+use super::{ShaderPackageManifest, VariantManifestError};
 
 /// The `ABI` binding and constraints a manifest must satisfy.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,6 +73,8 @@ pub enum RejectionReason {
     },
     /// The manifest declares zero permutations, so nothing can be selected.
     NoPermutations,
+    /// The package's complete variant table is malformed.
+    VariantManifest(VariantManifestError),
 }
 
 /// Result of validating a manifest against a [`ManifestExpectation`].
@@ -128,8 +130,11 @@ impl ShaderPackageManifest {
                 found: self.entry_point.clone(),
             });
         }
-        if self.permutation_count == 0 {
+        if self.permutation_count() == 0 {
             return ValidationOutcome::Rejected(RejectionReason::NoPermutations);
+        }
+        if let Err(error) = self.validate_variant_manifest() {
+            return ValidationOutcome::Rejected(RejectionReason::VariantManifest(error));
         }
         ValidationOutcome::Accepted
     }
@@ -138,7 +143,9 @@ impl ShaderPackageManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shader_package::ShaderPackageId;
+    use crate::shader_package::{
+        ArtifactDigest, PermutationSpace, ShaderPackageId, ShaderPackageVariantManifest,
+    };
     use alloc::string::ToString;
 
     fn manifest(version: AbiVersion, hash: AbiHash, permutations: u32) -> ShaderPackageManifest {
@@ -148,7 +155,15 @@ mod tests {
             entry_point: "main".to_string(),
             abi_version: version,
             abi_hash: hash,
-            permutation_count: permutations,
+            variants: if permutations == 0 {
+                ShaderPackageVariantManifest::default()
+            } else {
+                ShaderPackageVariantManifest::from_digests(
+                    &PermutationSpace::new([permutations]),
+                    (0..permutations).map(|index| ArtifactDigest([index as u8 + 1; 32])),
+                )
+                .unwrap()
+            },
         }
     }
 

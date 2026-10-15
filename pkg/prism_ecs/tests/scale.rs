@@ -11,8 +11,10 @@
 //!
 //! They **assert correctness** (the arithmetic must be exact) and *print*
 //! timings; they deliberately do not assert a wall-clock threshold, so they
-//! stay informative on any machine instead of flaky. The numbers are recorded
-//! in `docs/prism_ecs_design_zh.md` as measured evidence.
+//! stay informative on any machine instead of flaky. `perf_gate` below adds
+//! non-ignored operation-count contracts and an ignored machine-readable sample
+//! producer for `tools/ecs-perf/gate.py`. Only that external, fingerprint-checked
+//! comparator enforces timing regressions on a controlled machine.
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -494,5 +496,352 @@ fn scale_simd_kernels_vs_scalar() {
             ns_per(scalar_sum),
             scalar_sum.as_secs_f64() / vector_sum.as_secs_f64(),
         );
+    }
+}
+
+mod perf_gate {
+    use super::*;
+    use prism_ecs::archetype::Archetype;
+    use prism_ecs::change::Tick;
+    use prism_ecs::component::Components;
+    use prism_ecs::query::{Access, QueryFilter};
+    use prism_ecs::storage::SparseSets;
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static MATCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    struct CountMatches;
+
+    // SAFETY: this is an always-true filter; it accesses no component values or
+    // ticks and only counts calls to the archetype predicate.
+    unsafe impl QueryFilter for CountMatches {
+        type State = ();
+        type Fetch<'w> = ();
+
+        fn init_state(_: &mut Components) -> Self::State {}
+
+        fn matches(_: &(), _: &Archetype) -> bool {
+            MATCH_CALLS.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+
+        fn update_access(_: &(), _: &mut Access) {}
+
+        unsafe fn init_fetch<'w>(
+            _: &Self::State,
+            _: &'w Archetype,
+            _: &'w SparseSets,
+            _: Tick,
+            _: Tick,
+        ) -> Self::Fetch<'w> {
+        }
+
+        unsafe fn filter_fetch<'w>(_: Self::Fetch<'w>, _: Entity, _: usize) -> bool {
+            true
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct Marker;
+    impl Component for Marker {}
+
+    #[test]
+    fn perf_contract_query_matching_is_incremental_and_restore_invalidates() {
+        let mut world = World::new();
+        world.register_snapshot_component::<Pos>();
+        world.register_snapshot_component::<Vel>();
+        world.spawn((Pos(1.0, 0.0, 0.0),));
+        world.spawn((Pos(2.0, 0.0, 0.0), Vel(1.0, 0.0, 0.0)));
+        let snapshot = world.snapshot();
+        // Entity data matches every archetype, so short-circuiting D::matches
+        // cannot hide any filter predicate calls, including empty archetypes.
+        let query = world.query_filtered::<Entity, CountMatches>();
+        MATCH_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(query.iter(&world).count(), 2);
+        assert_eq!(
+            MATCH_CALLS.swap(0, Ordering::Relaxed),
+            world.archetypes().len()
+        );
+
+        for _ in 0..32 {
+            assert_eq!(query.iter(&world).count(), 2);
+        }
+        assert_eq!(MATCH_CALLS.swap(0, Ordering::Relaxed), 0);
+
+        world.spawn((Pos(3.0, 0.0, 0.0), Marker));
+        assert_eq!(query.iter(&world).count(), 3);
+        assert_eq!(MATCH_CALLS.swap(0, Ordering::Relaxed), 1);
+        world.spawn((Pos(4.0, 0.0, 0.0), Marker));
+        assert_eq!(query.iter(&world).count(), 4);
+        assert_eq!(MATCH_CALLS.swap(0, Ordering::Relaxed), 0);
+
+        world.restore(&snapshot);
+        assert_eq!(query.iter(&world).count(), 2);
+        assert_eq!(
+            MATCH_CALLS.swap(0, Ordering::Relaxed),
+            world.archetypes().len()
+        );
+        assert_eq!(query.iter(&world).count(), 2);
+        assert_eq!(MATCH_CALLS.swap(0, Ordering::Relaxed), 0);
+    }
+
+    // These assertions bound *reported output*, not the internal chunk-version
+    // scan. dirty_chunks currently visits every matched chunk (O(chunks)).
+    #[test]
+    fn perf_contract_dirty_output_tracks_touched_chunks_not_world_rows() {
+        for count in [256usize, 16_384] {
+            let mut world = World::new();
+            let entities = world.spawn_batch((0..count).map(|i| (Pos(i as f32, 0.0, 0.0),)));
+            let query = world.query::<&Pos>();
+            let last = world.change_tick();
+            world.set_last_change_tick(last);
+            world.increment_change_tick();
+            let now = world.change_tick();
+            assert!(query.dirty_chunks(&world, last, now).is_empty());
+
+            let touched = [entities[0], entities[count / 2], entities[count - 1]];
+            let mut expected = BTreeSet::new();
+            for entity in touched {
+                world.get_mut::<Pos>(entity).unwrap().0 += 1.0;
+                let loc = world.entities().location(entity).unwrap();
+                let rpc = world
+                    .archetypes()
+                    .get(loc.archetype_id)
+                    .unwrap()
+                    .table()
+                    .rows_per_chunk();
+                expected.insert((loc.archetype_id, loc.row as usize / rpc * rpc));
+            }
+            let dirty = query.dirty_chunks(&world, last, now);
+            assert_eq!(dirty.len(), expected.len());
+            assert_eq!(
+                dirty
+                    .iter()
+                    .map(|d| (d.archetype, d.start))
+                    .collect::<BTreeSet<_>>(),
+                expected
+            );
+            assert_eq!(
+                world
+                    .query_filtered::<&Pos, Changed<Pos>>()
+                    .iter(&world)
+                    .count(),
+                3
+            );
+            world.set_last_change_tick(now);
+            world.increment_change_tick();
+            assert!(query
+                .dirty_chunks(&world, now, world.change_tick())
+                .is_empty());
+        }
+    }
+
+    #[cfg(all(feature = "multi_thread", feature = "simd"))]
+    const SAMPLES: usize = 9;
+
+    #[cfg(all(feature = "multi_thread", feature = "simd"))]
+    fn emit_samples(metric: &str, units: usize, mut run: impl FnMut() -> Duration) {
+        black_box(run()); // Untimed warmup, excluded from the persisted sample set.
+        for sample in 0..SAMPLES {
+            let ns = run().as_nanos();
+            assert!(ns > 0, "sample is below clock resolution");
+            println!(
+                "PRISM_ECS_PERF_V1 {{\"metric\":\"{metric}\",\"sample\":{sample},\"ns\":{ns},\"units\":{units}}}"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "multi_thread", feature = "simd"))]
+    fn sample_body(metric: &str, units: usize, mut body: impl FnMut()) {
+        emit_samples(metric, units, || {
+            let start = Instant::now();
+            body();
+            start.elapsed()
+        });
+    }
+
+    #[cfg(all(feature = "multi_thread", feature = "simd"))]
+    #[test]
+    #[ignore = "controlled-machine sample producer; invoke through tools/ecs-perf/gate.py"]
+    fn controlled_samples() {
+        assert!(
+            !cfg!(debug_assertions),
+            "performance samples require --release"
+        );
+        emit_samples("spawn_batch", ENTITIES, || {
+            let mut world = World::new();
+            let start = Instant::now();
+            let entities = world
+                .spawn_batch((0..ENTITIES).map(|i| (Pos(i as f32, 0.0, 0.0), Vel(1.0, 2.0, 3.0))));
+            let elapsed = start.elapsed();
+            assert_eq!(entities.len(), ENTITIES);
+            assert_eq!(world.entity_count(), ENTITIES as u32);
+            black_box(&world);
+            elapsed // World/Vec destruction is outside the timed interval.
+        });
+
+        let (mut world, _) = spawn_world();
+        let query = world.query::<(&Vel, &mut Pos)>();
+        assert_eq!(query.iter_mut(&mut world).count(), ENTITIES);
+        sample_body("serial_propagate", ENTITIES, || {
+            for (v, mut p) in query.iter_mut(&mut world) {
+                p.0 += v.0;
+                p.1 += v.1;
+                p.2 += v.2;
+            }
+        });
+        for threads in [1, 4] {
+            let pool = prism_tasks::TaskPool::with_threads(threads);
+            sample_body(&format!("parallel_propagate_{threads}"), ENTITIES, || {
+                query.par_for_each_mut(&mut world, &pool, 1024, |(v, mut p)| {
+                    p.0 += v.0;
+                    p.1 += v.1;
+                    p.2 += v.2;
+                });
+            });
+        }
+        let runs = (3 * (SAMPLES + 1)) as f32;
+        for (i, p) in world.query::<&Pos>().iter(&world).enumerate() {
+            assert_eq!((p.0, p.1, p.2), (i as f32 + runs, 2.0 * runs, 3.0 * runs));
+        }
+
+        let query = world.query::<&Pos>();
+        sample_body("query_cache_idle", 1024, || {
+            for _ in 0..1024 {
+                black_box(query.iter(&world));
+            }
+        });
+        let mut last = world.change_tick();
+        world.set_last_change_tick(last);
+        world.increment_change_tick();
+        sample_body("dirty_idle", 1, || {
+            assert!(query
+                .dirty_chunks(&world, last, world.change_tick())
+                .is_empty());
+        });
+
+        let entities: Vec<_> = world.query::<Entity>().iter(&world).collect();
+        for (metric, stride) in [("dirty_clustered", 1), ("dirty_scattered", 100)] {
+            last = world.change_tick();
+            world.set_last_change_tick(last);
+            world.increment_change_tick();
+            for k in 0..10_000 {
+                world.get_mut::<Pos>(entities[k * stride]).unwrap().1 += 1.0;
+            }
+            let changed = world.query_filtered::<&Pos, Changed<Pos>>();
+            assert_eq!(changed.iter(&world).count(), 10_000);
+            sample_body(metric, 1, || {
+                let dirty = query.dirty_chunks(&world, last, world.change_tick());
+                assert!(!dirty.is_empty());
+                black_box(dirty);
+            });
+            if stride == 100 {
+                sample_body("changed_scan", ENTITIES, || {
+                    assert_eq!(black_box(changed.iter(&world).count()), 10_000);
+                });
+            }
+        }
+
+        let mut dst = vec![1.0f32; ENTITIES];
+        let src = vec![2.0f32; ENTITIES];
+        sample_body("simd_add", ENTITIES, || {
+            prism_ecs::query::add_assign(black_box(&mut dst), black_box(&src));
+        });
+        assert!(dst.iter().all(|&v| v == 1.0 + 2.0 * (SAMPLES + 1) as f32));
+    }
+
+    const PORTABLE_PREFIX: &str = "PRISM_ECS_COMPLEXITY_V1 ";
+    const PORTABLE_TIMING_PREFIX: &str = "PRISM_ECS_TIMING_V1 ";
+    const PORTABLE_SAMPLES: usize = 9;
+
+    fn emit_complexity(metric: &str, world_units: usize, changed_units: usize, value: usize) {
+        println!(
+            "{PORTABLE_PREFIX}{{\"metric\":\"{metric}\",\"world_units\":{world_units},\"changed_units\":{changed_units},\"value\":{value}}}"
+        );
+    }
+
+    fn emit_timing(metric: &str, units: usize, mut run: impl FnMut() -> usize) {
+        black_box(run());
+        for sample in 0..PORTABLE_SAMPLES {
+            let start = Instant::now();
+            black_box(run());
+            let ns = start.elapsed().as_nanos();
+            assert!(ns > 0, "portable sample is below clock resolution");
+            println!(
+                "{PORTABLE_TIMING_PREFIX}{{\"metric\":\"{metric}\",\"sample\":{sample},\"ns\":{ns},\"units\":{units}}}"
+            );
+        }
+    }
+
+    /// Portable regression input. Complexity records are the blocking contract;
+    /// timing records are diagnostic and deliberately reported as percentiles by
+    /// the external gate because shared runners do not provide hardware isolation.
+    #[test]
+    fn portable_complexity_samples() {
+        let mut world = World::new();
+        world.spawn((Pos(1.0, 0.0, 0.0),));
+        world.spawn((Pos(2.0, 0.0, 0.0), Vel(1.0, 0.0, 0.0)));
+        let query = world.query_filtered::<Entity, CountMatches>();
+
+        MATCH_CALLS.store(0, Ordering::Relaxed);
+        assert_eq!(query.iter(&world).count(), 2);
+        let cold_calls = MATCH_CALLS.swap(0, Ordering::Relaxed);
+        assert_eq!(cold_calls, world.archetypes().len());
+        emit_complexity("query_match_cold_calls", world.archetypes().len(), 0, cold_calls);
+
+        for _ in 0..8 {
+            assert_eq!(query.iter(&world).count(), 2);
+        }
+        let warm_calls = MATCH_CALLS.swap(0, Ordering::Relaxed);
+        assert_eq!(warm_calls, 0);
+        emit_complexity("query_match_warm_calls", world.archetypes().len(), 0, warm_calls);
+
+        world.spawn((Pos(3.0, 0.0, 0.0), Marker));
+        assert_eq!(query.iter(&world).count(), 3);
+        let new_archetype_calls = MATCH_CALLS.swap(0, Ordering::Relaxed);
+        assert_eq!(new_archetype_calls, 1);
+        emit_complexity(
+            "query_match_new_archetype_calls",
+            world.archetypes().len(),
+            1,
+            new_archetype_calls,
+        );
+
+        for count in [256usize, 16_384] {
+            let mut world = World::new();
+            let entities = world.spawn_batch((0..count).map(|i| (Pos(i as f32, 0.0, 0.0),)));
+            let query = world.query::<&Pos>();
+            let last = world.change_tick();
+            world.set_last_change_tick(last);
+            world.increment_change_tick();
+            let now = world.change_tick();
+            let mut expected = BTreeSet::new();
+            for entity in [entities[0], entities[count / 2], entities[count - 1]] {
+                world.get_mut::<Pos>(entity).expect("live entity").0 += 1.0;
+                let location = world.entities().location(entity).expect("live location");
+                let archetype = world.archetypes().get(location.archetype_id).unwrap();
+                let rows_per_chunk = archetype.table().rows_per_chunk();
+                expected.insert((location.archetype_id, location.row as usize / rows_per_chunk));
+            }
+
+            let dirty = query.dirty_chunks(&world, last, now);
+            let changed_rows = world
+                .query_filtered::<&Pos, Changed<Pos>>()
+                .iter(&world)
+                .count();
+            assert_eq!(changed_rows, 3);
+            assert_eq!(dirty.len(), expected.len());
+            emit_complexity("dirty_chunks_output", count, 3, dirty.len());
+            emit_complexity("changed_scan_rows", count, 3, changed_rows);
+
+            emit_timing(&format!("dirty_chunks_{count}"), count, || {
+                black_box(query.dirty_chunks(&world, last, now).len())
+            });
+            let changed = world.query_filtered::<&Pos, Changed<Pos>>();
+            emit_timing(&format!("changed_scan_{count}"), count, || {
+                black_box(changed.iter(&world).count())
+            });
+        }
     }
 }

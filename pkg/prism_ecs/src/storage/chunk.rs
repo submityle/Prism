@@ -1,12 +1,10 @@
-//! Logical chunk change-versions: the coarse half of the double-layer change
+//! Physical chunk change summaries: the coarse half of double-layer change
 //! detection described in the design doc (§7 脏块访问器, §10 chunk 版本号).
 //!
 //! # What a "chunk" is here
 //!
-//! The design's end state is a physical 16 KiB chunk ([`§5.3`]). M2 does not yet
-//! re-layout storage into physical chunks: each archetype is still ONE
-//! contiguous [`Table`](crate::storage::Table). Instead this module layers a
-//! *logical* chunk model over that contiguous storage — a chunk is simply a
+//! Storage uses physical chunk blocks owned by [`Table`](crate::storage::Table).
+//! A chunk is a
 //! fixed-size window of `rows_per_chunk` consecutive rows — and tracks one
 //! change-version [`Tick`] per window. Every column of a table is sliced into
 //! the same windows (same `rows_per_chunk`), so chunk index `c` always maps to
@@ -17,15 +15,12 @@
 //! For every chunk `c`:
 //!
 //! ```text
-//! version(c) is at least as recent as the newest changed-tick of any row
-//!            currently stored in chunk c's row window
+//! summary(c) contains every changed-tick of every live row in chunk c
 //! ```
 //!
-//! ("At least as recent" is measured in the wrapping sense of
-//! [`Tick::is_newer_than`].) This makes the chunk version a correct *upper
-//! bound*: if any row in the chunk was changed within a system's
-//! `(last_run, this_run]` window, the chunk version also falls in (or after)
-//! that window, so a chunk-level test never produces a false negative. It may
+//! The summary is a conservative circular interval over all u32 ticks, not a
+//! numeric maximum. Intersecting it with the observer window never produces a
+//! false negative, including for historical windows and tick wraparound. It may
 //! over-approximate (flag a chunk whose only recently-changed row has since been
 //! removed), which the design explicitly permits — the coarse layer yields a
 //! *superset* of changed rows and the per-row ticks remain the fine filter.
@@ -37,14 +32,187 @@
 //! `Mut`s into the same chunk (e.g. `iter_mut().collect()`) would alias the one
 //! cell, which is undefined behaviour. Each cell therefore lives **inside its
 //! chunk block's header** (design §5.3) and is reached and bumped through a raw
-//! `*mut Tick`, exactly as the per-row ticks on [`Column`](crate::storage::Column)
-//! are. Single-threaded iteration writes `this_run` to the shared cell
-//! sequentially (idempotent); a parallel iterator splits *disjoint* chunks
-//! across threads, so each thread writes a distinct cell.
+//! pointer to [`ChunkChange`]. All shared accesses use atomics: parallel row
+//! batches may split the SAME chunk. The metadata does not synchronize component
+//! bytes; the scheduler still provides unique access to each written row.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use crate::change::Tick;
+use crate::component::ComponentId;
+
+/// An atomic, conservative circular interval of changed ticks plus a write
+/// revision. Embedded in a physical block, shared by every row of its column.
+///
+/// The interval includes obsolete ticks until the periodic clamping pass;
+/// false positives are allowed, false negatives are not. `revision` is separate
+/// from the tick summary: replaying an older tick still invalidates caches.
+pub struct ChunkChange {
+    range: AtomicU64,
+    revision: AtomicU64,
+    // Non-owning link into the enclosing ChunkVersions' stable boxed tree.
+    // Structural edits and dropping the tracker require exclusive access;
+    // detach/drop clear leaf links before the tree's allocations are released.
+    parent: AtomicPtr<ChunkChange>,
+}
+
+impl Default for ChunkChange {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChunkChange {
+    // start=MAX,length=MAX is reserved for empty. A full interval is canonical
+    // start=0,length=MAX, so no inhabited interval collides with this sentinel.
+    const EMPTY: u64 = u64::MAX;
+
+    /// An initialized, empty summary.
+    pub const fn new() -> Self {
+        Self {
+            range: AtomicU64::new(Self::EMPTY),
+            revision: AtomicU64::new(0),
+            parent: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+
+    fn pack(start: u32, length: u32) -> u64 {
+        if length == u32::MAX {
+            u64::from(length) << 32
+        } else {
+            u64::from(start) | (u64::from(length) << 32)
+        }
+    }
+
+    fn unpack(range: u64) -> (u32, u32) {
+        (range as u32, (range >> 32) as u32)
+    }
+
+    fn contains(start: u32, length: u32, tick: u32) -> bool {
+        tick.wrapping_sub(start) <= length
+    }
+
+    /// Include a changed tick. Safe for concurrent writers of distinct rows in
+    /// one chunk. Relaxed atomics suffice: ECS access barriers synchronize the
+    /// values themselves; these atomics only merge metadata without lost writes.
+    #[inline]
+    pub fn record(&self, tick: Tick) {
+        self.include(Self::pack(tick.get(), 0));
+        self.revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Smallest of the two start-anchored arcs containing both complete arcs.
+    // Merely inserting their endpoints is insufficient for wide/wrapping arcs.
+    fn union(a: u64, b: u64) -> u64 {
+        if a == Self::EMPTY {
+            return b;
+        }
+        if b == Self::EMPTY {
+            return a;
+        }
+        let (a_start, a_len) = Self::unpack(a);
+        let (b_start, b_len) = Self::unpack(b);
+        let from_a = u64::from(b_start.wrapping_sub(a_start)) + u64::from(b_len);
+        let from_b = u64::from(a_start.wrapping_sub(b_start)) + u64::from(a_len);
+        let a_length = from_a.max(u64::from(a_len));
+        let b_length = from_b.max(u64::from(b_len));
+        if a_length <= b_length {
+            Self::pack(a_start, a_length.min(u64::from(u32::MAX)) as u32)
+        } else {
+            Self::pack(b_start, b_length.min(u64::from(u32::MAX)) as u32)
+        }
+    }
+
+    fn include(&self, interval: u64) {
+        if interval == Self::EMPTY {
+            return;
+        }
+        let mut old = self.range.load(Ordering::Relaxed);
+        loop {
+            let new = Self::union(old, interval);
+            if old == new {
+                return;
+            }
+            match self
+                .range
+                .compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    let parent = self.parent.load(Ordering::Relaxed);
+                    if !parent.is_null() {
+                        // SAFETY: ChunkVersions owns every ancestor in stable
+                        // boxed storage. Its exclusive structural operations
+                        // cannot overlap shared recording or traversal.
+                        unsafe { (&*parent).include(new) };
+                    }
+                    return;
+                }
+                Err(actual) => old = actual,
+            }
+        }
+    }
+
+    /// Representative upper endpoint. Not an ordered maximum: use
+    /// [`may_have_changed`](Self::may_have_changed) for observer-window tests.
+    pub fn version(&self) -> Tick {
+        let range = self.range.load(Ordering::Relaxed);
+        if range == Self::EMPTY {
+            return Tick::ZERO;
+        }
+        let (start, length) = Self::unpack(range);
+        Tick::new(start.wrapping_add(length))
+    }
+
+    /// Write revision, independent of explicit or wrapping tick values.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Relaxed)
+    }
+
+    /// Whether the summary intersects the exact modular window used by
+    /// [`Tick::is_newer_than`]. This also supports observers of historical ticks.
+    #[inline]
+    pub fn may_have_changed(&self, last_run: Tick, this_run: Tick) -> bool {
+        let width = last_run.age_since(this_run).min(Tick::MAX_CHANGE_AGE);
+        if width == 0 {
+            return false;
+        }
+        let range = self.range.load(Ordering::Relaxed);
+        if range == Self::EMPTY {
+            return false;
+        }
+        let (start, length) = Self::unpack(range);
+        let window_start = this_run.get().wrapping_sub(width - 1);
+        // Two inhabited circular arcs intersect iff one contains the other's
+        // start (including when an arc is the entire ring).
+        Self::contains(start, length, window_start)
+            || Self::contains(window_start, width - 1, start)
+    }
+
+    fn check_tick(&mut self, now: Tick) {
+        let range = *self.range.get_mut();
+        if range == Self::EMPTY {
+            return;
+        }
+        let (start, length) = Self::unpack(range);
+        let end = start.wrapping_add(length);
+        let start_age = Tick::new(start).age_since(now).min(Tick::MAX_CHANGE_AGE);
+        let end_age = Tick::new(end).age_since(now).min(Tick::MAX_CHANGE_AGE);
+        let youngest = if Self::contains(start, length, now.get()) {
+            0
+        } else {
+            start_age.min(end_age)
+        };
+        let oldest = if Self::contains(start, length, now.get().wrapping_sub(Tick::MAX_CHANGE_AGE))
+        {
+            Tick::MAX_CHANGE_AGE
+        } else {
+            start_age.max(end_age)
+        };
+        *self.range.get_mut() = Self::pack(now.get().wrapping_sub(oldest), oldest - youngest);
+    }
+}
 
 /// Target physical chunk size the logical windows approximate (design §5.3).
 ///
@@ -85,7 +253,25 @@ pub struct ChunkVersions {
     /// One pointer per chunk window, into that chunk's header cell. `cells[c]`
     /// upper-bounds the newest changed-tick among rows
     /// `[c * rpc, (c + 1) * rpc)`.
-    cells: Vec<*mut Tick>,
+    cells: Vec<*mut ChunkChange>,
+    // Heap-indexed binary summaries: slot i-1 describes heap node i. Leaves
+    // occupy [leaf_capacity, leaf_capacity + cells.len()) in the same heap,
+    // but remain embedded in physical blocks. Boxes keep parent links stable
+    // when this vector or the enclosing column moves.
+    branches: Vec<Box<ChunkChange>>,
+    leaf_capacity: usize,
+}
+
+/// Work performed by an indexed dirty-chunk traversal.
+///
+/// Counts metadata reads, not payload bytes, so complexity regressions can be
+/// tested without machine-dependent timing thresholds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChunkVisitStats {
+    /// Number of atomic interval summaries inspected, including internal nodes.
+    pub summaries_tested: usize,
+    /// Number of conservative matching leaf chunks delivered to the visitor.
+    pub chunks_returned: usize,
 }
 
 // SAFETY: the pointers reference heap-allocated chunk blocks owned by the same
@@ -95,12 +281,8 @@ pub struct ChunkVersions {
 unsafe impl Send for ChunkVersions {}
 
 // SAFETY: the only non-`Sync` field is the raw cell-pointer vector. The cells
-// live in the owning chunk blocks and are mutated under the same unique-per-row
-// discipline that governs the per-row ticks on `Column` (itself `unsafe impl
-// Sync`): a writer stamping a row holds unique access to that row and writes
-// `this_run` through a raw pointer, and no reader observes a cell mid-write.
-// Distinct chunks are distinct cells, so a parallel split over disjoint chunks
-// never races.
+// live in the owning chunk blocks; all shared reads and writes are atomic.
+// Attachment, detachment and clamping require exclusive access to the tracker.
 unsafe impl Sync for ChunkVersions {}
 
 impl ChunkVersions {
@@ -115,6 +297,8 @@ impl ChunkVersions {
         Self {
             rows_per_chunk,
             cells: Vec::new(),
+            branches: Vec::new(),
+            leaf_capacity: 1,
         }
     }
 
@@ -127,27 +311,227 @@ impl ChunkVersions {
     /// Attach the changed-version cell of a newly-allocated chunk block.
     ///
     /// # Safety
-    /// `cell` must point at a live, aligned, initialized `Tick` in writable,
+    /// `cell` must point at a live, aligned, initialized `ChunkChange` in writable,
     /// stable-address storage. Its owner must keep that storage alive until
     /// the cell is detached or this tracker is dropped, including when the
     /// tracker or its owner moves to another thread.
     ///
-    /// Access through external aliases must obey the tracker's borrowing and
-    /// synchronization discipline: no read may overlap a write to the same
-    /// cell, and no two writes to that cell may overlap. Disjoint rows within
-    /// one chunk share this cell and do not by themselves permit concurrent
-    /// writes; only distinct cells can be accessed independently.
+    /// External aliases may call shared atomic methods, but must not replace or
+    /// exclusively borrow the cell while any tracker/row handle can access it.
+    /// The cell must not already be attached to this or any other tracker.
     #[inline]
-    pub unsafe fn attach_cell(&mut self, cell: *mut Tick) {
+    pub unsafe fn attach_cell(&mut self, cell: *mut ChunkChange) {
+        if self.cells.len() == self.leaf_capacity {
+            self.grow_index();
+        }
         self.cells.push(cell);
+        self.link_leaf(self.cells.len() - 1);
     }
 
     /// Detach the trailing chunk's cell (its block is freed by the owner).
     #[inline]
     pub fn detach_cell(&mut self) {
-        self.cells
+        let cell = self
+            .cells
             .pop()
             .expect("detach_cell on a version set with no chunks");
+        // SAFETY: the owner detaches the live cell before freeing its block.
+        unsafe { &*cell }
+            .parent
+            .store(core::ptr::null_mut(), Ordering::Relaxed);
+        self.refresh_ancestors(self.leaf_capacity + self.cells.len());
+    }
+
+    fn grow_index(&mut self) {
+        let capacity = self
+            .leaf_capacity
+            .checked_mul(2)
+            .expect("chunk index capacity overflow");
+        let branches = (1..capacity)
+            .map(|_| Box::new(ChunkChange::new()))
+            .collect();
+        // Allocate first. From here on rewiring is infallible and exclusively
+        // borrowed, so no row writer can follow an old parent during the swap.
+        self.branches = branches;
+        self.leaf_capacity = capacity;
+        for node in 2..capacity {
+            let parent = &mut *self.branches[node / 2 - 1] as *mut ChunkChange;
+            self.branches[node - 1]
+                .parent
+                .store(parent, Ordering::Relaxed);
+        }
+        for chunk in 0..self.cells.len() {
+            self.link_leaf(chunk);
+        }
+    }
+
+    fn link_leaf(&self, chunk: usize) {
+        let parent = if self.leaf_capacity == 1 {
+            core::ptr::null_mut()
+        } else {
+            (&*self.branches[(self.leaf_capacity + chunk) / 2 - 1] as *const ChunkChange).cast_mut()
+        };
+        // SAFETY: attached cells and stable boxed ancestors are live. This is
+        // called only with exclusive structural access to the tracker.
+        let cell = unsafe { &*self.cells[chunk] };
+        cell.parent.store(parent, Ordering::Relaxed);
+        if !parent.is_null() {
+            // SAFETY: parent is a live branch owned by self.
+            unsafe { &*parent }.include(cell.range.load(Ordering::Relaxed));
+        }
+    }
+
+    fn node(&self, node: usize) -> Option<&ChunkChange> {
+        if node < self.leaf_capacity {
+            Some(&self.branches[node - 1])
+        } else {
+            self.cells.get(node - self.leaf_capacity).map(|&cell| {
+                // SAFETY: every attached cell stays live until detachment.
+                unsafe { &*cell }
+            })
+        }
+    }
+
+    fn refresh_branch(&mut self, node: usize) {
+        let range =
+            [node * 2, node * 2 + 1]
+                .into_iter()
+                .fold(ChunkChange::EMPTY, |range, child| {
+                    ChunkChange::union(
+                        range,
+                        self.node(child).map_or(ChunkChange::EMPTY, |cell| {
+                            cell.range.load(Ordering::Relaxed)
+                        }),
+                    )
+                });
+        *self.branches[node - 1].range.get_mut() = range;
+    }
+
+    fn refresh_ancestors(&mut self, mut node: usize) {
+        while node > 1 {
+            node /= 2;
+            self.refresh_branch(node);
+        }
+    }
+
+    /// Visit conservative matching chunks in ascending row order, pruning
+    /// entire clean subtrees instead of checking every physical chunk.
+    ///
+    /// A clean nonempty column tests one root summary. Sparse changes visit
+    /// their ancestor paths and matching leaves; overlapping/wide historical
+    /// intervals can conservatively require visiting the entire tree. Traversal
+    /// allocates nothing, and does not consume changes from other observers.
+    pub fn visit_changed(
+        &self,
+        last: Tick,
+        now: Tick,
+        mut visit: impl FnMut(usize),
+    ) -> ChunkVisitStats {
+        let mut stats = ChunkVisitStats::default();
+        if !self.cells.is_empty() {
+            self.visit_node(1, last, now, &mut visit, &mut stats);
+        }
+        stats
+    }
+
+    /// Find the first conservative matching chunk in `[start, end)`, bounded
+    /// by the live chunk count. Clean subtrees are pruned without allocation.
+    ///
+    /// Testing the starting leaf first keeps dense iteration constant-work per
+    /// chunk; a cold gap uses the interval tree instead of a linear scan. The
+    /// returned statistics count all summary reads, including that first leaf.
+    pub fn next_changed(
+        &self,
+        start: usize,
+        end: usize,
+        last: Tick,
+        now: Tick,
+    ) -> (Option<usize>, ChunkVisitStats) {
+        let end = end.min(self.cells.len());
+        let mut stats = ChunkVisitStats::default();
+        if start >= end {
+            return (None, stats);
+        }
+        stats.summaries_tested = 1;
+        if self.may_have_changed(start, last, now) {
+            stats.chunks_returned = 1;
+            return (Some(start), stats);
+        }
+        let found = self.find_changed_node(
+            1,
+            0,
+            self.leaf_capacity,
+            start + 1,
+            end,
+            last,
+            now,
+            &mut stats,
+        );
+        stats.chunks_returned = usize::from(found.is_some());
+        (found, stats)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn find_changed_node(
+        &self,
+        node: usize,
+        first: usize,
+        width: usize,
+        start: usize,
+        end: usize,
+        last: Tick,
+        now: Tick,
+        stats: &mut ChunkVisitStats,
+    ) -> Option<usize> {
+        if first >= end || first + width <= start {
+            return None;
+        }
+        let cell = self.node(node)?;
+        stats.summaries_tested += 1;
+        if !cell.may_have_changed(last, now) {
+            return None;
+        }
+        if width == 1 {
+            return Some(first);
+        }
+        let half = width / 2;
+        self.find_changed_node(node * 2, first, half, start, end, last, now, stats)
+            .or_else(|| {
+                self.find_changed_node(
+                    node * 2 + 1,
+                    first + half,
+                    half,
+                    start,
+                    end,
+                    last,
+                    now,
+                    stats,
+                )
+            })
+    }
+
+    fn visit_node(
+        &self,
+        node: usize,
+        last: Tick,
+        now: Tick,
+        visit: &mut impl FnMut(usize),
+        stats: &mut ChunkVisitStats,
+    ) {
+        let Some(cell) = self.node(node) else {
+            return;
+        };
+        stats.summaries_tested += 1;
+        if !cell.may_have_changed(last, now) {
+            return;
+        }
+        if node >= self.leaf_capacity {
+            stats.chunks_returned += 1;
+            visit(node - self.leaf_capacity);
+        } else {
+            self.visit_node(node * 2, last, now, visit, stats);
+            self.visit_node(node * 2 + 1, last, now, visit, stats);
+        }
     }
 
     /// No-op: the cell storage lives in the table's chunk blocks, so the table
@@ -178,10 +562,20 @@ impl ChunkVersions {
     /// Panics if `chunk >= chunk_count()`.
     #[inline]
     pub fn version(&self, chunk: usize) -> Tick {
-        // SAFETY: the pointer targets a live chunk-block header cell; any writer
-        // holds unique access to the chunk's rows and writes through the raw
-        // pointer, so no `&mut` aliases this read (mirrors `Column::changed_tick`).
-        unsafe { *self.cells[chunk] }
+        // SAFETY: attached cell stays live; the shared read is atomic.
+        unsafe { (&*self.cells[chunk]).version() }
+    }
+
+    /// Conservative observer-window predicate for one chunk.
+    pub fn may_have_changed(&self, chunk: usize, last: Tick, now: Tick) -> bool {
+        // SAFETY: attached cell stays live; the shared read is atomic.
+        unsafe { (&*self.cells[chunk]).may_have_changed(last, now) }
+    }
+
+    /// Revision of one chunk's column, including writes with explicit old ticks.
+    pub fn revision(&self, chunk: usize) -> u64 {
+        // SAFETY: attached cell stays live; the shared read is atomic.
+        unsafe { (&*self.cells[chunk]).revision() }
     }
 
     /// Raw pointer to the changed-version cell owning `row`, for interior-mutable
@@ -191,11 +585,10 @@ impl ChunkVersions {
     /// `row` must be `< len` of the owning column, and the caller must hold
     /// unique access to `row` (the same discipline as
     /// [`Column::changed_tick_ptr`](crate::storage::Column::changed_tick_ptr)).
-    /// The returned pointer must only be *written* (never used to form a shared
-    /// `&Tick` that outlives a concurrent write) and only with `this_run`, which
-    /// is the newest tick and so preserves the upper-bound invariant.
+    /// Only shared atomic methods may be used through the returned pointer;
+    /// callers must not replace the cell or form an exclusive reference to it.
     #[inline]
-    pub unsafe fn chunk_changed_ptr(&self, row: usize) -> *mut Tick {
+    pub unsafe fn chunk_changed_ptr(&self, row: usize) -> *mut ChunkChange {
         let chunk = self.chunk_of(row);
         // SAFETY: the caller guarantees `row < len` of the owning column, so
         // `chunk < cells.len()`; the pointer targets a live header cell.
@@ -220,17 +613,9 @@ impl ChunkVersions {
     #[inline]
     fn bump_chunk(&mut self, chunk: usize, tick: Tick) {
         let cell = self.cells[chunk];
-        // A newer write wins. Raw comparison is exact while `this_run` has not
-        // wrapped past the stored value; `check_ticks` keeps every stored tick
-        // within one `MAX_CHANGE_AGE` window so the version can only ever
-        // over-approximate (a correct superset), never skip a changed chunk.
-        // SAFETY: `cell` is a live chunk-block header cell, mutated under the
-        // unique-per-chunk discipline.
-        unsafe {
-            if tick.get() > (*cell).get() {
-                *cell = tick;
-            }
-        }
+        // SAFETY: the attached cell stays live. Atomic merging also handles
+        // old structural ticks and wrap without assuming a half-ring ordering.
+        unsafe { (&*cell).record(tick) };
     }
 
     /// Account for a freshly appended row (the column just grew to `new_len`),
@@ -272,7 +657,49 @@ impl ChunkVersions {
     pub fn check_ticks(&mut self, this_run: Tick) {
         for &cell in &self.cells {
             // SAFETY: live chunk-block header cell.
-            unsafe { (*cell).check_tick(this_run) };
+            unsafe { (&mut *cell).check_tick(this_run) };
+        }
+        for node in (1..self.leaf_capacity).rev() {
+            self.refresh_branch(node);
+        }
+    }
+
+    /// Rebuild from live, already clamped row ticks during the periodic pass.
+    /// Dropped/overwritten rows no longer widen the summary after this pass.
+    pub(crate) fn rebuild(&mut self, chunk: usize, ticks: impl Iterator<Item = Tick>, now: Tick) {
+        let mut youngest = u32::MAX;
+        let mut oldest = 0;
+        for tick in ticks {
+            let age = tick.age_since(now).min(Tick::MAX_CHANGE_AGE);
+            youngest = youngest.min(age);
+            oldest = oldest.max(age);
+        }
+        // SAFETY: the owner holds exclusive access to the column; no row handle
+        // survives the periodic tick-clamping pass.
+        let cell = unsafe { &mut *self.cells[chunk] };
+        *cell.range.get_mut() = if youngest == u32::MAX {
+            ChunkChange::EMPTY
+        } else {
+            ChunkChange::pack(now.get().wrapping_sub(oldest), oldest - youngest)
+        };
+        // Clamped added ticks can change even if changed ticks do not. Snapshot
+        // keys must invalidate for either metadata change, not just endpoint edits.
+        *cell.revision.get_mut() = cell.revision.get_mut().wrapping_add(1);
+        self.refresh_ancestors(self.leaf_capacity + chunk);
+    }
+}
+
+impl Drop for ChunkVersions {
+    fn drop(&mut self) {
+        // The attach contract keeps physical headers alive until tracker drop.
+        // Row metadata may outlive this index in low-level storage consumers;
+        // clearing links prevents future writes following freed branch boxes.
+        for &cell in &self.cells {
+            // SAFETY: cells are still live and no shared traversal or recording
+            // can overlap exclusive destruction of their owning tracker.
+            unsafe { &*cell }
+                .parent
+                .store(core::ptr::null_mut(), Ordering::Relaxed);
         }
     }
 }
@@ -352,6 +779,10 @@ pub struct ChunkMeta {
     /// The chunk's `change_version` when `bounds` was computed, so a producer can
     /// tell whether any value moved since (design §15 fat-bounds update).
     bounds_version: Tick,
+    bounds_revision: u64,
+    /// Column whose values produced the cached bounds. Revisions are local to
+    /// a column, so equal revisions from different columns are not equivalent.
+    bounds_source: Option<ComponentId>,
     /// Cached world-space bounds for this window, or `None` when a consumer has
     /// not (re)computed them for the current epoch.
     pub bounds: Option<ChunkBounds>,
@@ -374,6 +805,8 @@ impl Default for ChunkMeta {
             structural_epoch: 0,
             bounds_epoch: 0,
             bounds_version: Tick::default(),
+            bounds_revision: 0,
+            bounds_source: None,
             bounds: None,
             visible: true,
             lod: 0,
@@ -411,6 +844,17 @@ impl ChunkMeta {
         self.bounds_version
     }
 
+    /// Write revision at which the cached bounds were computed.
+    pub fn bounds_revision(&self) -> u64 {
+        self.bounds_revision
+    }
+
+    /// Source column of bounds produced by `Table::recompute_chunk_bounds`.
+    /// Manually supplied bounds have no column provenance.
+    pub fn bounds_source(&self) -> Option<ComponentId> {
+        self.bounds_source
+    }
+
     /// Store freshly computed bounds together with the structural epoch and
     /// change-version they were computed from, so a later pass can skip this
     /// window while nothing has moved.
@@ -419,6 +863,21 @@ impl ChunkMeta {
         self.bounds = bounds;
         self.bounds_epoch = epoch;
         self.bounds_version = version;
+        self.bounds_revision = 0;
+        self.bounds_source = None;
+    }
+
+    pub(crate) fn set_column_bounds(
+        &mut self,
+        bounds: Option<ChunkBounds>,
+        epoch: u64,
+        version: Tick,
+        revision: u64,
+        source: ComponentId,
+    ) {
+        self.set_bounds(bounds, epoch, version);
+        self.bounds_revision = revision;
+        self.bounds_source = Some(source);
     }
 }
 
@@ -438,17 +897,17 @@ mod tests {
 
     /// A backing store for version cells (standing in for the chunk block
     /// header) plus a `ChunkVersions` whose cells point into it. The backing
-    /// vector is reserved up front so attaching cells never invalidates them.
+    /// cells are boxed so growing the fixture never invalidates attached cells.
     struct Fixture {
-        backing: Vec<Tick>,
         cv: ChunkVersions,
+        backing: Vec<Box<ChunkChange>>,
     }
 
     impl Fixture {
         fn new(rows_per_chunk: usize) -> Self {
             Self {
-                backing: Vec::with_capacity(32),
                 cv: ChunkVersions::new(rows_per_chunk),
+                backing: Vec::new(),
             }
         }
 
@@ -456,14 +915,13 @@ mod tests {
         fn cover(&mut self, len: usize) {
             let needed = len.div_ceil(self.cv.rows_per_chunk());
             while self.backing.len() < needed {
-                self.backing.push(Tick::ZERO);
+                self.backing.push(Box::new(ChunkChange::new()));
             }
             while self.cv.chunk_count() < needed {
                 let i = self.cv.chunk_count();
-                // SAFETY: the backing vector will not reallocate (reserved), so
-                // the cell pointer stays valid for the fixture's lifetime.
-                let ptr = unsafe { self.backing.as_mut_ptr().add(i) };
-                // SAFETY: `ptr` targets a live, aligned `Tick`.
+                let ptr = &mut *self.backing[i] as *mut ChunkChange;
+                // SAFETY: the boxed cell stays live until after cv is dropped,
+                // and each cell is attached to exactly one tracker.
                 unsafe { self.cv.attach_cell(ptr) };
             }
         }
@@ -540,6 +998,252 @@ mod tests {
         let now = Tick::new(Tick::MAX_CHANGE_AGE + 100);
         f.cv.check_ticks(now);
         assert_eq!(f.cv.version(0).age_since(now), Tick::MAX_CHANGE_AGE);
+    }
+
+    fn indexed(f: &Fixture, last: Tick, now: Tick) -> (Vec<usize>, ChunkVisitStats) {
+        let mut chunks = Vec::new();
+        let stats = f.cv.visit_changed(last, now, |chunk| chunks.push(chunk));
+        (chunks, stats)
+    }
+
+    fn assert_index_matches_leaves(f: &Fixture, last: Tick, now: Tick) {
+        let expected: Vec<_> = (0..f.cv.chunk_count())
+            .filter(|&chunk| f.cv.may_have_changed(chunk, last, now))
+            .collect();
+        let (actual, stats) = indexed(f, last, now);
+        assert_eq!(actual, expected, "window {last:?}..{now:?}");
+        assert_eq!(stats.chunks_returned, actual.len());
+    }
+
+    #[test]
+    fn indexed_clean_and_sparse_work_does_not_scan_all_chunks() {
+        let mut f = Fixture::new(1);
+        f.cover(4097);
+        for chunk in 0..f.cv.chunk_count() {
+            f.cv.bump_row(chunk, Tick::new(1));
+        }
+        let (chunks, clean) = indexed(&f, Tick::new(1), Tick::new(2));
+        assert!(chunks.is_empty());
+        assert_eq!(clean.summaries_tested, 1);
+
+        f.backing[2048].record(Tick::new(2));
+        let (chunks, sparse) = indexed(&f, Tick::new(1), Tick::new(2));
+        assert_eq!(chunks, [2048]);
+        assert!(sparse.summaries_tested <= 27, "{sparse:?}");
+        // Traversal is non-consuming: independent observers see the same set.
+        assert_eq!(indexed(&f, Tick::new(1), Tick::new(2)), (chunks, sparse));
+        assert_eq!(
+            indexed(&f, Tick::new(2), Tick::new(3)).1.summaries_tested,
+            1
+        );
+    }
+
+    #[test]
+    fn indexed_growth_detach_reuse_clamp_and_historical_windows() {
+        let mut f = Fixture::new(1);
+        let mut random = 0x9e37_79b9_u32;
+        let boundaries = [
+            0,
+            1,
+            2,
+            Tick::MAX_CHANGE_AGE,
+            1 << 31,
+            u32::MAX - 1,
+            u32::MAX,
+        ];
+        for len in 1..=133 {
+            f.cover(len);
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            f.cv.bump_row(len - 1, Tick::new(random));
+            for &last in &boundaries {
+                for &now in &boundaries {
+                    assert_index_matches_leaves(&f, Tick::new(last), Tick::new(now));
+                }
+            }
+        }
+        for count in (0..133).rev() {
+            f.cv.detach_cell();
+            assert!(f.backing[count].parent.load(Ordering::Relaxed).is_null());
+            f.backing[count].record(Tick::new(700));
+            assert_index_matches_leaves(&f, Tick::new(699), Tick::new(700));
+        }
+        assert_eq!(
+            indexed(&f, Tick::ZERO, Tick::new(701)).1,
+            ChunkVisitStats::default()
+        );
+        f.cover(79);
+        f.cv.check_ticks(Tick::new(1000));
+        for chunk in 0..79 {
+            f.cv.rebuild(chunk, [Tick::new(1000)].into_iter(), Tick::new(1000));
+        }
+        assert_eq!(
+            indexed(&f, Tick::new(1000), Tick::new(1001))
+                .1
+                .summaries_tested,
+            1
+        );
+        f.backing[78].record(Tick::new(1001));
+        assert_eq!(indexed(&f, Tick::new(1000), Tick::new(1001)).0, [78]);
+        for &last in &boundaries {
+            for &now in &boundaries {
+                assert_index_matches_leaves(&f, Tick::new(last), Tick::new(now));
+            }
+        }
+    }
+
+    #[test]
+    fn tracker_drop_unlinks_live_headers() {
+        let mut cell = Box::new(ChunkChange::new());
+        let mut other = Box::new(ChunkChange::new());
+        {
+            let mut cv = ChunkVersions::new(1);
+            // SAFETY: distinct live boxed cells outlive the tracker.
+            unsafe {
+                cv.attach_cell(&mut *cell);
+                cv.attach_cell(&mut *other);
+            }
+            assert!(!cell.parent.load(Ordering::Relaxed).is_null());
+        }
+        assert!(cell.parent.load(Ordering::Relaxed).is_null());
+        assert!(other.parent.load(Ordering::Relaxed).is_null());
+        cell.record(Tick::new(12));
+        other.record(Tick::new(13));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn parallel_leaf_writes_propagate_to_shared_ancestors() {
+        let mut f = Fixture::new(1);
+        f.cover(257);
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let backing = &f.backing;
+                scope.spawn(move || {
+                    for chunk in (worker..backing.len()).step_by(8) {
+                        for tick in 1..=16 {
+                            backing[chunk].record(Tick::new(tick));
+                        }
+                    }
+                });
+            }
+        });
+        for tick in 1..=16 {
+            let (chunks, _) = indexed(&f, Tick::new(tick - 1), Tick::new(tick));
+            assert_eq!(chunks, (0..257).collect::<Vec<_>>());
+        }
+        assert_eq!(
+            indexed(&f, Tick::new(16), Tick::new(17)).1.summaries_tested,
+            1
+        );
+    }
+
+    #[test]
+    fn wrap_and_historical_windows_never_miss() {
+        let cell = ChunkChange::new();
+        assert!(!cell.may_have_changed(Tick::MAX, Tick::new(1)));
+        cell.record(Tick::MAX);
+        cell.record(Tick::new(1));
+        assert_eq!(cell.version(), Tick::new(1));
+        assert!(cell.may_have_changed(Tick::MAX, Tick::new(1)));
+        assert!(cell.may_have_changed(Tick::new(u32::MAX - 1), Tick::MAX));
+        assert!(!cell.may_have_changed(Tick::new(1), Tick::new(2)));
+        assert!(!cell.may_have_changed(Tick::new(1), Tick::new(1)));
+        let revision = cell.revision();
+        cell.record(Tick::MAX); // explicit older write, even if already covered
+        assert_eq!(cell.revision(), revision + 1);
+        assert!(cell.may_have_changed(Tick::new(u32::MAX - 1), Tick::MAX));
+    }
+
+    #[test]
+    fn arbitrary_tick_summaries_and_clamping_match_row_oracle() {
+        let boundaries = [
+            0,
+            1,
+            2,
+            Tick::CHECK_TICK_THRESHOLD,
+            Tick::MAX_CHANGE_AGE,
+            Tick::MAX_CHANGE_AGE + 1,
+            1 << 31,
+            u32::MAX - 2,
+            u32::MAX - 1,
+            u32::MAX,
+        ];
+        let mut random = 0x89ab_cdef_u32;
+        for case in 0..64 {
+            let mut cell = ChunkChange::new();
+            let mut rows = Vec::new();
+            for i in 0..20 {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                let tick = Tick::new(if i < boundaries.len() {
+                    boundaries[(i + case) % boundaries.len()]
+                } else {
+                    random
+                });
+                rows.push(tick);
+                cell.record(tick);
+                for &now in &boundaries {
+                    for &last in &boundaries {
+                        let now = Tick::new(now);
+                        let last = Tick::new(last);
+                        assert!(
+                            !rows.iter().any(|t| t.is_newer_than(last, now))
+                                || cell.may_have_changed(last, now),
+                            "miss before clamp: case={case} row={i} last={last:?} now={now:?}"
+                        );
+                    }
+                }
+            }
+            for &now in &boundaries {
+                let mut clamped = ChunkChange::new();
+                for &row in &rows {
+                    clamped.record(row);
+                }
+                let now = Tick::new(now);
+                clamped.check_tick(now);
+                let expected: Vec<_> = rows
+                    .iter()
+                    .map(|&t| {
+                        let mut t = t;
+                        t.check_tick(now);
+                        t
+                    })
+                    .collect();
+                for &observer in &boundaries {
+                    for &last in &boundaries {
+                        let last = Tick::new(last);
+                        let observer = Tick::new(observer);
+                        assert!(!expected.iter().any(|t| t.is_newer_than(last, observer))
+                            || clamped.may_have_changed(last, observer),
+                            "miss after clamp: case={case} last={last:?} now={now:?} observer={observer:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn concurrent_rows_merge_one_atomic_chunk_summary() {
+        let cell = ChunkChange::new();
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let cell = &cell;
+                scope.spawn(move || {
+                    for row in 0..1024 {
+                        cell.record(Tick::new(1 + worker * 1024 + row));
+                    }
+                });
+            }
+        });
+        assert_eq!(cell.revision(), 8 * 1024);
+        for tick in 1..=8 * 1024 {
+            assert!(cell.may_have_changed(Tick::new(tick - 1), Tick::new(tick)));
+        }
+        assert!(!cell.may_have_changed(Tick::new(8 * 1024), Tick::new(8 * 1024 + 1)));
     }
 
     #[test]

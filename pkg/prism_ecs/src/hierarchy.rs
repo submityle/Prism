@@ -40,9 +40,9 @@ use crate::world::World;
 /// - **`on_delete_target = Delete`**: destroying a parent destroys its children
 ///   through the relation cascade (design §23.2), so a plain
 ///   [`World::despawn`] of a parent can never leave orphaned children behind.
-/// - **fragmenting**: hierarchies are low-cardinality, which is the case design
-///   §11 routes into the archetype. (The flag is metadata today: the relation
-///   index stores the edges while the fragmenting storage path is built out.)
+/// - **fragmenting**: the `(ChildOf, parent)` pair is part of each child's
+///   archetype identity. Siblings with equal component/shared sets batch
+///   together; reparenting relocates values without changing component ticks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ChildOf;
 

@@ -107,6 +107,9 @@ pub mod schedule;
 pub mod storage;
 pub mod system;
 pub mod world;
+pub mod world_reactions;
+#[cfg(test)]
+mod world_reactions_tests;
 
 /// Commonly used exports. Mirrors the ergonomics of `bevy_ecs::prelude` to keep
 /// the eventual migration a near "change-the-import" exercise.
@@ -180,13 +183,17 @@ pub mod prelude {
         NextState, OnEnter, OnExit, Phase, Schedule, ScheduleLabel, Schedules, SetConfig, State,
         States, StepReport, Stepping, SystemConfigs, SystemLane, SystemSet,
     };
-    pub use crate::system::{IntoSystem, Local, Query, Res, ResMut, System, SystemParam};
+    pub use crate::system::{IntoSystem, Local, ParamSet, Query, Res, ResMut, System, SystemParam};
     #[cfg(feature = "determinism")]
     pub use crate::world::snapshot::{
         locate_divergence, FrameHash, FrameHashLog, SnapshotDivergence, TickDivergence,
     };
     pub use crate::world::snapshot::{FnvHasher, SnapshotDelta, SnapshotRing, WorldSnapshot};
-    pub use crate::world::{EntityRef, World, WorldId};
+    pub use crate::world::{
+        DynamicComponentError, DynamicComponentLayout, DynamicReloadError, DynamicReloadReport,
+        DynamicValueRef, DynamicValueSlot, EntityRef, World, WorldId,
+    };
+    pub use crate::world_reactions::ReactionId;
     // Derive macros. These live in the macro namespace and coexist with the
     // same-named traits (`Component`, `Bundle`) re-exported above.
     pub use prism_ecs_macros::{

@@ -61,8 +61,8 @@ struct WaterSurfaceView {
     // NPR ramp step count (x), toon foam threshold (y), author tint strength
     // (z), hybrid shore blend bias (w).
     style_params: vec4<f32>,
-    // Framebuffer size in pixels (xy) for the refraction screen lookup; zw
-    // unused.
+    // Framebuffer size in pixels (xy) for the refraction screen lookup; z is
+    // the authored hybrid overlay opacity and w is reserved.
     viewport: vec4<f32>,
 }
 
@@ -1667,9 +1667,10 @@ fn shade_npr_core(in: VertexOutput) -> vec4<f32> {
 // `water::shading::hybrid::resolve_hybrid_weights`: both inputs are normalized
 // region signals, the stylized weight is their maximum, and the physical
 // weight is its complement. The current raster ABI exposes the resolved foam
-// signal plus one authored hybrid scalar in `style_params.w`; the latter is
-// consumed as the shallow-region signal and the overlay opacity so the
-// existing 144-byte view uniform remains stable.
+// signal plus two authored hybrid scalars: `style_params.w` is the shallow
+// region bias and `viewport.z` is the independent overlay opacity. Keeping the
+// overlay in an existing 16-byte lane preserves the 144-byte view ABI while
+// ensuring the authored value reaches the actual WESL/runtime path.
 struct WaterHybridWeights {
     npr_weight: f32,
     pbr_weight: f32,
@@ -1720,11 +1721,8 @@ fn water_hybrid_overlay_factor(
 fn water_hybrid_apply_overlay(
     blended: vec4<f32>,
     npr: vec4<f32>,
-    weights: WaterHybridWeights,
-    foam: f32,
-    motion: vec2<f32>,
+    overlay: f32,
 ) -> vec4<f32> {
-    let overlay = water_hybrid_overlay_factor(blended.a, weights, foam, motion);
     return mix(blended, npr, overlay);
 }
 
@@ -1743,7 +1741,13 @@ fn response_value(color: vec4<f32>) -> ResponseOutput {
 // response allocation. A coverage bit is the ownership signal: the compositor
 // ignores stale response values outside water geometry, so no full-view clears
 // of the 64-byte planes are required.
-fn write_response_planes(in: VertexOutput, left: vec4<f32>, right: vec4<f32>, mask: f32) {
+fn write_response_planes(
+    in: VertexOutput,
+    left: vec4<f32>,
+    right: vec4<f32>,
+    mask: f32,
+    output_alpha: f32,
+) {
     let pixel = u32(in.clip_position.y) * u32(max(view.viewport.x, 1.0))
         + u32(in.clip_position.x);
     if pixel >= arrayLength(&response_left)
@@ -1754,21 +1758,26 @@ fn write_response_planes(in: VertexOutput, left: vec4<f32>, right: vec4<f32>, ma
     }
     response_left[pixel] = response_value(left);
     response_right[pixel] = response_value(right);
-    response_controls[pixel] = CompositionControl(mask, 1u, left.a, 0u);
+    // The response plane stores five consecutive RGB channels (direct,
+    // indirect diffuse, reflection, transmission, and emission).  A hybrid
+    // overlay is a radiance-wide operation, so the producer must select all
+    // five channels; `1u` would silently blend only the direct channel in the
+    // resident CompositionPass.
+    response_controls[pixel] = CompositionControl(mask, 31u, output_alpha, 0u);
     water_coverage[pixel] = 1u;
 }
 
 @fragment
 fn water_surface_fs_pbr(in: VertexOutput) -> FragmentOutput {
     let pbr = shade_pbr_core(in);
-    write_response_planes(in, pbr, pbr, 0.0);
+    write_response_planes(in, pbr, pbr, 0.0, pbr.a);
     return FragmentOutput(pbr, water_motion_vector(in));
 }
 
 @fragment
 fn water_surface_fs_npr(in: VertexOutput) -> FragmentOutput {
     let npr = shade_npr_core(in);
-    write_response_planes(in, npr, npr, 0.0);
+    write_response_planes(in, npr, npr, 0.0, npr.a);
     return FragmentOutput(npr, water_motion_vector(in));
 }
 
@@ -1779,23 +1788,23 @@ fn water_surface_fs_custom(in: VertexOutput) -> FragmentOutput {
     let pbr = shade_pbr_core(in);
     let tint = view.water_color.rgb * view.style_params.z;
     let color = vec4<f32>(pbr.rgb + tint * pbr.a, pbr.a);
-    write_response_planes(in, color, color, 0.0);
+    write_response_planes(in, color, color, 0.0, color.a);
     return FragmentOutput(color, water_motion_vector(in));
 }
 
 @fragment
-fn water_surface_fs_hybrid(in: VertexOutput) -> FragmentOutput {
+fn water_surface_fs_mask_blend(in: VertexOutput) -> FragmentOutput {
     let pbr = shade_pbr_core(in);
     let npr = shade_npr_core(in);
     let motion = water_motion_vector(in);
-    let weights = water_hybrid_weight_contract(in.foam, view.style_params.w, view.style_params.w);
+    let weights = water_hybrid_weight_contract(in.foam, view.style_params.w, view.viewport.z);
     let blended = mix(pbr, npr, weights.npr_weight);
     let overlay = water_hybrid_overlay_factor(blended.a, weights, in.foam, motion);
-    let color = water_hybrid_apply_overlay(blended, npr, weights, in.foam, motion);
+    let color = water_hybrid_apply_overlay(blended, npr, overlay);
     // Encode the two-stage hybrid as one resident composition: the first arm
     // is the PBR/NPR region blend and the second arm is the stylized overlay.
     // This makes the post-raster HDR export equal to the legacy MRT colour
     // while retaining the typed response producer contract.
-    write_response_planes(in, blended, npr, overlay);
+    write_response_planes(in, blended, npr, overlay, color.a);
     return FragmentOutput(color, motion);
 }

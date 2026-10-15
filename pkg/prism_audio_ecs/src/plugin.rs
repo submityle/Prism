@@ -1,11 +1,13 @@
 //! Plugin wiring for the Prism ECS audio bridge.
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::AtomicBool;
 
-use prism_app::prelude::{App, Plugin, Update};
+use prism_app::prelude::{App, Last, Plugin};
 use prism_audio_rt::AudioRuntimeConfig;
-use prism_ecs::prelude::{IntoScheduleConfigs, LifecycleEvent};
+use prism_ecs::{observer::ObserverId, prelude::*, world::WorldId};
+use prism_transform::GlobalTransform;
 
 use crate::budget::PhysicalVoiceBudget;
 use crate::client_resource::{AudioClient, AudioRuntimeHost};
@@ -14,13 +16,21 @@ use crate::listener::AudioListener;
 use crate::master_gain::MasterGain;
 use crate::playback::PlaybackSettings;
 use crate::player::AudioPlayer;
-use crate::player_systems::{apply_player_disposition, sync_audio_players};
-use crate::systems::{
-    apply_master_gain, apply_physical_budget, flush_pending_stops, pump_telemetry, spawn_voices,
-    stop_flagged_voices, stop_removed_voices, update_importance, AudioSystems,
-};
+use crate::systems::{audio_frame, AudioSystems};
 use crate::telemetry::AudioTelemetry;
 use crate::voice_registry::{LiveVoices, PendingStops, RemovedAudioEmitters, VoiceMirror};
+
+#[derive(Resource)]
+pub(crate) struct BridgeState {
+    pub world: WorldId,
+    pub generation: u64,
+    pub gain: Option<(u32, u32)>,
+    pub budget: Option<usize>,
+    observers: Vec<ObserverId>,
+}
+
+#[derive(Resource)]
+struct AudioStopped;
 
 /// Plugin that constructs and wires a [`prism_audio_rt`] runtime.
 #[derive(Debug, Clone, Copy, Default)]
@@ -38,55 +48,122 @@ impl AudioRuntimePlugin {
     }
 }
 
-fn record_removed_emitter(ctx: &mut prism_ecs::prelude::ObserverContext<'_>) {
+fn record_removed_emitter(ctx: &mut ObserverContext<'_>) {
     if let Some(removed) = ctx.world.get_resource_mut::<RemovedAudioEmitters>() {
         removed.push(ctx.entity);
     }
 }
 
+/// Installs a runtime and lifecycle observers into a World, idempotently.
+/// Preserves authoring gain/budget. Calling this after [`shutdown`] explicitly
+/// restarts audio with a new pool; retained old clients stay closed.
+///
+/// This function does not install schedules: standalone Worlds call
+/// [`audio_frame`]. Replacing an App's World also requires transferring its App
+/// schedules (or constructing a new App/plugin), not just its audio resources.
+pub fn install(world: &mut World, config: AudioRuntimeConfig) {
+    if world
+        .get_resource::<BridgeState>()
+        .is_some_and(|state| state.world == world.id())
+        && world
+            .get_resource::<AudioClient>()
+            .is_some_and(AudioClient::is_open)
+    {
+        return;
+    }
+    shutdown(world);
+    world.remove_resource::<AudioStopped>();
+    let (runtime, client, collector) = prism_audio_rt::runtime(config);
+    let open = Arc::new(AtomicBool::new(true));
+    let client = AudioClient::new(client, open);
+    world.insert_resource(client.clone());
+    world.insert_non_send(AudioRuntimeHost::new(runtime, collector, client));
+    world.insert_resource(VoiceMirror::new(
+        config.voice_capacity,
+        config.max_physical_voices,
+    ));
+    world.insert_resource(LiveVoices::default());
+    world.insert_resource(PendingStops::default());
+    world.insert_resource(RemovedAudioEmitters::default());
+    world.init_resource::<MasterGain>();
+    if world.get_resource::<PhysicalVoiceBudget>().is_none() {
+        world.insert_resource(PhysicalVoiceBudget::new(config.max_physical_voices));
+    }
+    // Preserve the caller's history capacity, but do not mix independent
+    // runtime block/playhead epochs after an explicit restart or host loss.
+    let capacity = world
+        .get_resource::<AudioTelemetry>()
+        .map(AudioTelemetry::capacity);
+    if let Some(capacity) = capacity {
+        world.insert_resource(AudioTelemetry::with_capacity(capacity));
+    } else {
+        world.init_resource::<AudioTelemetry>();
+    }
+    world.register_snapshot_component_equatable::<AudioEmitter>();
+    world.register_snapshot_component_equatable::<AudioListener>();
+    world.register_snapshot_component_equatable::<AudioPlayer>();
+    world.register_snapshot_component_equatable::<PlaybackSettings>();
+    world.register_snapshot_component_equatable::<crate::player_systems::DerivedEmitter>();
+    world.register_snapshot_resource_equatable::<MasterGain>();
+    world.register_snapshot_resource_equatable::<PhysicalVoiceBudget>();
+    let observers = alloc::vec![
+        world.observe::<AudioEmitter, _>(LifecycleEvent::Replace, record_removed_emitter),
+        world.observe::<GlobalTransform, _>(LifecycleEvent::Remove, record_removed_emitter),
+    ];
+    world.insert_resource(BridgeState {
+        world: world.id(),
+        generation: world.archetype_generation(),
+        gain: None,
+        budget: None,
+        observers,
+    });
+}
+
+/// Stops this control plane, closes retained client clones, drops the non-send
+/// runtime/collector, unregisters observers, and clears cached voice handles.
+/// Idempotent. Pending commands are discarded by runtime destruction rather
+/// than depending on a possibly full command ring to deliver shutdown stops.
+pub fn shutdown(world: &mut World) {
+    if let Some(client) = world.remove_resource::<AudioClient>() {
+        client.close();
+    }
+    world.remove_non_send::<AudioRuntimeHost>();
+    if let Some(state) = world.remove_resource::<BridgeState>() {
+        for observer in state.observers {
+            world.remove_observer(observer);
+        }
+    }
+    world.remove_resource::<VoiceMirror>();
+    world.remove_resource::<LiveVoices>();
+    world.remove_resource::<PendingStops>();
+    world.remove_resource::<RemovedAudioEmitters>();
+    let query = world.query::<&mut AudioEmitter>();
+    for mut emitter in query.iter_mut(world) {
+        emitter.voice = None;
+        emitter.sent_importance = None;
+    }
+    world.insert_resource(AudioStopped);
+}
+
 impl Plugin for AudioRuntimePlugin {
     fn build(&self, app: &mut App) {
         let config = self.config;
-        let (runtime, client, collector) = prism_audio_rt::runtime(config);
-        let open = Arc::new(AtomicBool::new(true));
-
-        app.insert_resource(AudioClient::new(client, Arc::clone(&open)))
-            .insert_resource(VoiceMirror::new(
-                config.voice_capacity,
-                config.max_physical_voices,
-            ))
-            .insert_resource(PhysicalVoiceBudget::new(config.max_physical_voices))
-            .init_resource::<LiveVoices>()
-            .init_resource::<PendingStops>()
-            .init_resource::<RemovedAudioEmitters>()
-            .init_resource::<MasterGain>()
-            .init_resource::<AudioTelemetry>();
-
-        let world = app.world_mut();
-        world.insert_non_send(AudioRuntimeHost::new(runtime, collector, open));
-        world.register_component::<AudioEmitter>();
-        world.register_component::<AudioListener>();
-        world.register_component::<AudioPlayer>();
-        world.register_component::<PlaybackSettings>();
-        world.observe::<AudioEmitter, _>(LifecycleEvent::Remove, record_removed_emitter);
-
+        install(app.world_mut(), config);
         app.add_systems(
-            Update,
-            (
-                sync_audio_players,
-                flush_pending_stops,
-                spawn_voices,
-                update_importance,
-                stop_flagged_voices,
-                stop_removed_voices,
-                apply_player_disposition,
-                apply_master_gain,
-                apply_physical_budget,
-                pump_telemetry,
-            )
-                .chain()
-                .in_set(AudioSystems),
+            Last,
+            (move |world: &mut World| {
+                if world.get_resource::<AudioStopped>().is_some() {
+                    return;
+                }
+                install(world, config);
+                audio_frame(world);
+            })
+            .in_set(AudioSystems),
         );
+    }
+
+    fn shutdown(&self, app: &mut App) {
+        shutdown(app.world_mut());
     }
 }
 

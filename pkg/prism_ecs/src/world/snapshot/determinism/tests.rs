@@ -36,6 +36,9 @@ fn world() -> World {
     w.register_snapshot_component_hashable::<Pos>();
     w.register_snapshot_component_hashable::<Vel>();
     w.register_snapshot_component_hashable::<Charge>();
+    w.register_snapshot_component_equatable::<Pos>();
+    w.register_snapshot_component_equatable::<Vel>();
+    w.register_snapshot_component_equatable::<Charge>();
     w
 }
 
@@ -281,10 +284,12 @@ fn resource_divergence() {
 
     let mut a = world();
     a.register_snapshot_resource_hashable::<Score>();
+    a.register_snapshot_resource_equatable::<Score>();
     a.spawn(Pos { x: 1, y: 2 });
     a.insert_resource(Score(1));
     let mut b = world();
     b.register_snapshot_resource_hashable::<Score>();
+    b.register_snapshot_resource_equatable::<Score>();
     b.spawn(Pos { x: 1, y: 2 });
     b.insert_resource(Score(2));
 

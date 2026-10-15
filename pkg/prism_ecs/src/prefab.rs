@@ -13,26 +13,53 @@
 //! inheritance with no clone/v-table. It composes with the relation system
 //! (§11): `IsA` is a transitive relation, so prefab-of-prefab chains resolve
 //! through the transitive closure, nearest ancestor first, and the walk is
-//! cycle-safe. Scene serialization of prefabs + per-field overrides is handled
-//! by `prism_reflect` (design §16.3, §24.3); this module provides the kernel
-//! inheritance primitives those layers build on.
+//! cycle-safe. With the `reflect` feature, `prefab::reflect` composes inherited
+//! components with tracked field patches without materializing components on
+//! instances. Ordinary typed reads retain whole-component override semantics.
 //!
 //! # Example
 //!
 //! ```ignore
 //! let goblin = world.spawn((Health(30), Speed(5)));          // prefab template
 //! let scout  = world.spawn_instance_of(goblin);              // instance
-//! world.insert(scout, Speed(9));                             // per-field override
+//! world.insert(scout, Speed(9));                             // component override
 //! assert_eq!(world.get_inherited::<Health>(scout).unwrap().0, 30); // inherited
 //! assert_eq!(world.get_inherited::<Speed>(scout).unwrap().0, 9);   // overridden
 //! ```
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+use crate::collections::HashMap;
 use crate::component::Component;
 use crate::entity::Entity;
 use crate::relation::RelationKind;
 use crate::world::World;
+
+/// Reflected field overrides, enabled independently of the `no_std` core.
+#[cfg(feature = "reflect")]
+#[path = "prefab_reflect.rs"]
+pub mod reflect;
+
+/// Invalid prefab ancestry, reported by checked inheritance operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefabError {
+    /// An entity or a referenced ancestor is no longer live.
+    MissingEntity(Entity),
+    /// An inheritance edge closes a cycle through this entity.
+    Cycle(Entity),
+}
+
+impl core::fmt::Display for PrefabError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MissingEntity(entity) => write!(f, "prefab entity {entity:?} is not live"),
+            Self::Cycle(entity) => write!(f, "prefab ancestry cycles through {entity:?}"),
+        }
+    }
+}
+
+impl core::error::Error for PrefabError {}
 
 /// Built-in prefab-inheritance relation (design §16.3).
 ///
@@ -85,7 +112,55 @@ impl World {
     #[inline]
     pub fn add_prefab(&mut self, instance: Entity, prefab: Entity) {
         self.ensure_isa_registered();
-        self.add_relation::<IsA>(instance, prefab);
+        let id = self
+            .components()
+            .id_of::<IsA>()
+            .expect("IsA relation is registered by ensure_isa_registered");
+        self.add_relation_by_id_unchecked(id, instance, prefab);
+    }
+
+    /// Add an inheritance edge only if both ancestries are live and acyclic.
+    ///
+    /// Validation precedes registration or mutation. Unlike the low-level
+    /// [`add_prefab`](Self::add_prefab), this rejects self-inheritance and
+    /// indirect cycles, including malformed ancestry added through raw relations.
+    pub fn try_add_prefab(&mut self, instance: Entity, prefab: Entity) -> Result<(), PrefabError> {
+        self.validate_prefab_ancestry(instance)?;
+        self.validate_prefab_ancestry(prefab)?;
+        if instance == prefab || self.prefab_chain(prefab).contains(&instance) {
+            return Err(PrefabError::Cycle(instance));
+        }
+        self.add_prefab(instance, prefab);
+        Ok(())
+    }
+
+    /// Check all reachable ancestors for dangling references and cycles.
+    ///
+    /// An iterative depth-first walk distinguishes a shared ancestor in a
+    /// diamond from a back edge. Deep chains do not consume the call stack.
+    pub fn validate_prefab_ancestry(&self, entity: Entity) -> Result<(), PrefabError> {
+        let mut states = HashMap::new();
+        let mut stack = alloc::vec![(entity, false)];
+        while let Some((current, exiting)) = stack.pop() {
+            if exiting {
+                states.insert(current, false);
+                continue;
+            }
+            if !self.contains(current) {
+                return Err(PrefabError::MissingEntity(current));
+            }
+            match states.get(&current) {
+                Some(true) => return Err(PrefabError::Cycle(current)),
+                Some(false) => continue,
+                None => {}
+            }
+            states.insert(current, true);
+            stack.push((current, true));
+            for &parent in self.prefabs_of(current).iter().rev() {
+                stack.push((parent, false));
+            }
+        }
+        Ok(())
     }
 
     /// Resolve component `T` for `entity` through the [`IsA`] chain
@@ -96,12 +171,13 @@ impl World {
     /// `IsA` closure (nearest prefab first). Returns `None` if neither the
     /// entity nor any ancestor has `T`. The walk is cycle-safe.
     pub fn get_inherited<T: Component>(&self, entity: Entity) -> Option<&T> {
+        if !self.contains(entity) {
+            return None;
+        }
         if let Some(own) = self.get::<T>(entity) {
             return Some(own);
         }
-        // `query_transitive` returns an owned, cycle-safe, nearest-first chain,
-        // so there is no borrow conflict with the immutable `get` below.
-        for ancestor in self.query_transitive::<IsA>(entity) {
+        for ancestor in self.prefab_chain(entity) {
             if let Some(found) = self.get::<T>(ancestor) {
                 return Some(found);
             }
@@ -112,22 +188,20 @@ impl World {
     /// Whether `entity` has `T` either directly or by [`IsA`] inheritance.
     #[inline]
     pub fn has_inherited<T: Component>(&self, entity: Entity) -> bool {
-        if self.has::<T>(entity) {
-            return true;
-        }
-        self.query_transitive::<IsA>(entity)
-            .into_iter()
-            .any(|ancestor| self.has::<T>(ancestor))
+        self.get_inherited::<T>(entity).is_some()
     }
 
     /// The entity that actually provides `entity`'s inherited `T`: `entity`
     /// itself if it overrides `T`, otherwise the nearest `IsA` ancestor that
     /// supplies it, or `None` if nobody does.
     pub fn inherited_source<T: Component>(&self, entity: Entity) -> Option<Entity> {
+        if !self.contains(entity) {
+            return None;
+        }
         if self.has::<T>(entity) {
             return Some(entity);
         }
-        self.query_transitive::<IsA>(entity)
+        self.prefab_chain(entity)
             .into_iter()
             .find(|&ancestor| self.has::<T>(ancestor))
     }
@@ -141,15 +215,28 @@ impl World {
 
     /// Whether `instance` inherits from `prefab`, directly or transitively.
     pub fn is_instance_of(&self, instance: Entity, prefab: Entity) -> bool {
-        self.has_relation::<IsA>(instance, prefab)
-            || self.query_transitive::<IsA>(instance).contains(&prefab)
+        self.prefab_chain(instance).contains(&prefab)
     }
 
     /// The full `IsA` ancestry of `entity` (its transitive prefab chain,
     /// nearest first, excluding `entity`). Cycle-safe.
-    #[inline]
     pub fn prefab_chain(&self, entity: Entity) -> Vec<Entity> {
-        self.query_transitive::<IsA>(entity)
+        let mut out = Vec::new();
+        if !self.contains(entity) {
+            return out;
+        }
+        let mut seen = HashMap::new();
+        seen.insert(entity, ());
+        let mut queue = VecDeque::from([entity]);
+        while let Some(current) = queue.pop_front() {
+            for &parent in self.prefabs_of(current) {
+                if self.contains(parent) && seen.insert(parent, ()).is_none() {
+                    out.push(parent);
+                    queue.push_back(parent);
+                }
+            }
+        }
+        out
     }
 }
 

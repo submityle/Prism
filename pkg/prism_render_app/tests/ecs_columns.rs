@@ -177,6 +177,147 @@ fn roundtrip(
     );
 }
 
+fn exercise_same_tick_writes(
+    device: Arc<dyn RenderDevice + Send + Sync>,
+    queue: &dyn RenderQueue,
+    mut verify: impl FnMut(&EcsResidentColumns<Row>, &World, ArchetypeId),
+) {
+    let mut world = World::new();
+    let entities: Vec<_> = (0..65).map(|i| world.spawn(row(i))).collect();
+    let archetype = arch(&world, entities[0]);
+    let tick = world.change_tick();
+    let mut cache = EcsResidentColumns::<Row>::new(device, &mut world).unwrap();
+    assert_eq!(cache.sync(queue, &world).unwrap().uploaded_bytes, 65 * 512);
+    let original = cache.column(archetype).unwrap();
+    verify(&cache, &world, archetype);
+
+    // Include repeated writes to one row and the partial tail chunk. No tick,
+    // entity identity, row extent or structural epoch changes between syncs.
+    for (index, seed, uploaded_rows) in [(40, 100, 32), (40, 200, 32), (64, 300, 1), (1, 400, 32)] {
+        assert_eq!(
+            cache.sync(queue, &world).unwrap(),
+            EcsColumnUploadStats::default()
+        );
+        let stamp = chunk_stamp(&world, archetype, index / 32);
+        *world.get_mut::<Row>(entities[index]).unwrap() = row(seed);
+        assert_eq!(world.change_tick(), tick);
+        assert_eq!(chunk_stamp(&world, archetype, index / 32), stamp);
+        assert_eq!(
+            cache.sync(queue, &world).unwrap(),
+            EcsColumnUploadStats {
+                allocations: 0,
+                upload_calls: 1,
+                uploaded_bytes: uploaded_rows * 512,
+            }
+        );
+        verify(&cache, &world, archetype);
+        let current = cache.column(archetype).unwrap();
+        assert_eq!(current.buffer_id(), original.buffer_id());
+        assert_eq!(current.generation(), original.generation());
+    }
+    assert_eq!(
+        cache.sync(queue, &world).unwrap(),
+        EcsColumnUploadStats::default()
+    );
+    world.increment_change_tick();
+    assert_eq!(
+        cache.sync(queue, &world).unwrap(),
+        EcsColumnUploadStats::default()
+    );
+    verify(&cache, &world, archetype);
+}
+
+fn exercise_backdated_writes(
+    device: Arc<dyn RenderDevice + Send + Sync>,
+    queue: &dyn RenderQueue,
+    mut verify: impl FnMut(&EcsResidentColumns<Row>, &World, ArchetypeId),
+) {
+    let mut world = World::new();
+    let entities: Vec<_> = (0..65).map(|i| world.spawn(row(i))).collect();
+    let archetype = arch(&world, entities[0]);
+    let historical = world.change_tick();
+    world.increment_change_tick();
+    world.increment_change_tick();
+    let mut cache = EcsResidentColumns::<Row>::new(device, &mut world).unwrap();
+    cache.sync(queue, &world).unwrap();
+    let original = cache.column(archetype).unwrap();
+    verify(&cache, &world, archetype);
+
+    for (index, seed, uploaded_rows) in [(40, 500, 32), (40, 600, 32), (64, 700, 1)] {
+        let last_sync = world.change_tick();
+        world.increment_change_tick();
+        let stamp = chunk_stamp(&world, archetype, index / 32);
+        {
+            let mut value = world.get_mut::<Row>(entities[index]).unwrap();
+            // Replay explicitly records the old tick, not the current one.
+            // The row tick remains equal even though its value changed.
+            *value.bypass_change_detection() = row(seed);
+            value.set_last_changed(historical);
+            assert_eq!(value.changed_tick(), historical);
+        }
+        assert_eq!(chunk_stamp(&world, archetype, index / 32), stamp);
+        let mut spans = Vec::new();
+        world
+            .archetypes()
+            .get(archetype)
+            .unwrap()
+            .table()
+            .column_upload_spans(
+                world.components().id_of::<Row>().unwrap(),
+                last_sync,
+                world.change_tick(),
+                &mut spans,
+            );
+        assert!(spans.is_empty(), "tick windows cannot detect this replay");
+        assert_eq!(
+            cache.sync(queue, &world).unwrap(),
+            EcsColumnUploadStats {
+                allocations: 0,
+                upload_calls: 1,
+                uploaded_bytes: uploaded_rows * 512,
+            }
+        );
+        verify(&cache, &world, archetype);
+        let current = cache.column(archetype).unwrap();
+        assert_eq!(current.buffer_id(), original.buffer_id());
+        assert_eq!(current.generation(), original.generation());
+        assert_eq!(
+            cache.sync(queue, &world).unwrap(),
+            EcsColumnUploadStats::default()
+        );
+    }
+}
+
+#[test]
+fn same_tick_writes_upload_only_revised_chunks() {
+    let (device, queue) = null();
+    exercise_same_tick_writes(device, &queue, |_, _, _| {});
+}
+
+#[test]
+fn backdated_writes_upload_only_revised_chunks() {
+    let (device, queue) = null();
+    exercise_backdated_writes(device, &queue, |_, _, _| {});
+}
+
+#[test]
+fn real_gpu_same_tick_writes_roundtrip() {
+    let Some((device, queue)) = gpu() else { return };
+    exercise_same_tick_writes(device.clone(), &queue, |cache, world, archetype| {
+        roundtrip(cache, &queue, world, archetype);
+    });
+    assert!(device.poll_wait());
+}
+
+#[test]
+fn real_gpu_backdated_writes_roundtrip() {
+    let Some((device, queue)) = gpu() else { return };
+    exercise_backdated_writes(device.clone(), &queue, |cache, world, archetype| {
+        roundtrip(cache, &queue, world, archetype);
+    });
+    assert!(device.poll_wait());
+}
+
 #[test]
 fn real_gpu_dirty_only_upload_preserves_clean_gpu_bytes() {
     let Some((device, queue)) = gpu() else { return };
@@ -774,6 +915,7 @@ mod automatic_recovery {
     #[derive(Default)]
     struct Probe {
         loss: Mutex<Option<rhi::DeviceLostReason>>,
+        buffers: Mutex<std::collections::HashMap<rhi::BufferId, Vec<u8>>>,
         columns: Mutex<Vec<rhi::BufferId>>,
         writes: Mutex<Vec<(rhi::BufferId, u64, Vec<u8>)>>,
     }
@@ -791,6 +933,20 @@ mod automatic_recovery {
 
         fn lose(&self) {
             *self.current().loss.lock().unwrap() = Some(rhi::DeviceLostReason::Destroyed);
+        }
+
+        fn read_buffer(&self, id: rhi::BufferId, len: usize) -> Vec<u8> {
+            let buffers = self.buffers.lock().unwrap();
+            buffers
+                .get(&id)
+                .unwrap_or_else(|| panic!("software buffer {id:?} was destroyed"))
+                .get(..len)
+                .unwrap_or_else(|| panic!("software buffer {id:?} is shorter than {len} bytes"))
+                .to_vec()
+        }
+
+        fn buffer_count(&self) -> usize {
+            self.buffers.lock().unwrap().len()
         }
     }
 
@@ -820,6 +976,11 @@ mod automatic_recovery {
 
         fn create_buffer(&self, descriptor: &rhi::BufferDescriptor) -> rhi::BufferId {
             let id = self.inner.create_buffer(descriptor);
+            self.probe
+                .buffers
+                .lock()
+                .unwrap()
+                .insert(id, vec![0; descriptor.size as usize]);
             if descriptor
                 .label
                 .as_deref()
@@ -854,7 +1015,6 @@ mod automatic_recovery {
         }
 
         destroy! {
-            destroy_buffer(rhi::BufferId);
             destroy_texture(rhi::TextureId);
             destroy_texture_view(rhi::TextureViewId);
             destroy_sampler(rhi::SamplerId);
@@ -865,19 +1025,30 @@ mod automatic_recovery {
             destroy_render_pipeline(rhi::RenderPipelineId);
             destroy_compute_pipeline(rhi::ComputePipelineId);
         }
+
+        fn destroy_buffer(&self, id: rhi::BufferId) {
+            self.inner.destroy_buffer(id);
+            self.probe.buffers.lock().unwrap().remove(&id);
+        }
     }
 
     struct Queue(Arc<Probe>);
 
     impl RenderQueue for Queue {
         fn write_buffer(&self, buffer: rhi::BufferId, offset: u64, data: &[u8]) {
-            if self.0.columns.lock().unwrap().contains(&buffer) {
-                self.0
-                    .writes
-                    .lock()
-                    .unwrap()
-                    .push((buffer, offset, data.to_vec()));
-            }
+            let end = offset as usize + data.len();
+            let mut buffers = self.0.buffers.lock().unwrap();
+            let destination = buffers
+                .get_mut(&buffer)
+                .unwrap_or_else(|| panic!("software buffer {buffer:?} is not live"));
+            assert!(end <= destination.len(), "software buffer upload exceeds allocation");
+            destination[offset as usize..end].copy_from_slice(data);
+            drop(buffers);
+            self.0
+                .writes
+                .lock()
+                .unwrap()
+                .push((buffer, offset, data.to_vec()));
             NullQueue.write_buffer(buffer, offset, data);
         }
 

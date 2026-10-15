@@ -200,6 +200,16 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                     || pipeline.response_dummy.as_entire_binding(),
                     |value| value.left_buffer().as_entire_binding(),
                 ),
+                // 16: right structured response for continuous two-arm plans.
+                responses.map_or_else(
+                    || pipeline.response_dummy.as_entire_binding(),
+                    |value| value.right_buffer().as_entire_binding(),
+                ),
+                // 17: per-pixel composition controls.
+                responses.map_or_else(
+                    || pipeline.response_control_dummy.as_entire_binding(),
+                    |value| value.controls_buffer().as_entire_binding(),
+                ),
             )),
         );
         let scene_group = device.create_bind_group(

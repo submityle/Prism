@@ -95,6 +95,8 @@ fn extent_mip_math() {
     assert_eq!((m1.width, m1.height), (128, 64));
     let big = e.mip_level_size(100, TextureDimension::D2);
     assert_eq!((big.width, big.height), (1, 1));
+    let odd = Extent3d::new_2d(3, 5).mip_level_size(1, TextureDimension::D2);
+    assert_eq!((odd.width, odd.height), (2, 3));
 }
 
 #[test]

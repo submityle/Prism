@@ -51,6 +51,10 @@ pub struct PackageOptions {
     pub chunk_policy: ChunkPolicy,
     /// Per-payload encoding used by the runtime container writer.
     pub codec: prism_asset_container::Codec,
+    /// Optional independent chunk encoding. When set, the package uses the
+    /// chunk-table v2 layout and stores all payloads raw inside the planned
+    /// chunks before encoding each chunk independently.
+    pub chunk_codec: Option<prism_asset_container::Codec>,
 }
 
 impl Default for PackageOptions {
@@ -58,6 +62,7 @@ impl Default for PackageOptions {
         Self {
             chunk_policy: ChunkPolicy::default(),
             codec: prism_asset_container::Codec::Raw,
+            chunk_codec: None,
         }
     }
 }
@@ -585,12 +590,16 @@ fn package_runtime_impl(
             });
 
         let writer = writers.entry(mapping.container_name.clone()).or_default();
-        match options.codec {
-            prism_asset_container::Codec::Raw => {
-                writer.add_aligned(mapping.guid, payload, descriptor.alignment)
-            }
-            prism_asset_container::Codec::Deflate => {
-                writer.add_deflate_aligned(mapping.guid, payload, descriptor.alignment)
+        if options.chunk_codec.is_some() {
+            writer.add_aligned(mapping.guid, payload, descriptor.alignment)
+        } else {
+            match options.codec {
+                prism_asset_container::Codec::Raw => {
+                    writer.add_aligned(mapping.guid, payload, descriptor.alignment)
+                }
+                prism_asset_container::Codec::Deflate => {
+                    writer.add_deflate_aligned(mapping.guid, payload, descriptor.alignment)
+                }
             }
         }
         .map_err(|source| PackageError::Container {
@@ -607,7 +616,9 @@ fn package_runtime_impl(
                 name: name.clone(),
                 source,
             })?;
-        let bytes = if options.codec == prism_asset_container::Codec::Raw {
+        let bytes = if let Some(codec) = options.chunk_codec {
+            writer.finish_with_chunk_compression(&plan, options.chunk_policy.chunk_alignment, codec)
+        } else if options.codec == prism_asset_container::Codec::Raw {
             writer.finish_with_chunk_plan(&plan, options.chunk_policy.chunk_alignment)
         } else {
             writer.finish()
@@ -667,6 +678,17 @@ fn package_runtime_impl(
                 })?
                 .into_iter()
                 .collect::<Vec<_>>();
+        let entry_codec = ContainerReader::new(container.clone())
+            .map_err(|source| PackageError::Container {
+                name: mapping.container_name.clone(),
+                source,
+            })?
+            .entry(mapping.guid)
+            .ok_or_else(|| PackageError::Container {
+                name: mapping.container_name.clone(),
+                source: ContainerError::MissingAsset(mapping.guid),
+            })?
+            .codec;
         runtime_manifest
             .insert_with_metadata(
                 ManifestRoute {
@@ -680,7 +702,7 @@ fn package_runtime_impl(
                     optional_dependencies: Vec::new(),
                     initial_residency: 0,
                     streaming_level: 0,
-                    codec: options.codec,
+                    codec: entry_codec,
                     schema: descriptor.schema,
                     install_capabilities: 0,
                 },
@@ -910,6 +932,7 @@ mod tests {
                     chunk_alignment: 64,
                     max_chunks: 2,
                 },
+                chunk_codec: None,
                 codec: prism_asset_container::Codec::Raw,
             },
         )
@@ -953,6 +976,7 @@ mod tests {
             PackageOptions {
                 chunk_policy: ChunkPolicy::default(),
                 codec: prism_asset_container::Codec::Deflate,
+                chunk_codec: None,
             },
         )
         .unwrap();
@@ -995,6 +1019,7 @@ mod tests {
                         chunk_alignment: 4,
                         max_chunks: 1,
                     },
+                    chunk_codec: None,
                     codec: prism_asset_container::Codec::Raw,
                 },
             ),
@@ -1016,6 +1041,7 @@ mod tests {
                         chunk_alignment: 64,
                         max_chunks: 1,
                     },
+                    chunk_codec: None,
                     codec: prism_asset_container::Codec::Raw,
                 },
             ),

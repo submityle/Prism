@@ -24,7 +24,7 @@ use crate::{
         },
         runtime::{
             PrismVisibilityDiagnostics, UnifiedVisibilityEnabled, UnifiedVisibilitySettings,
-            UnifiedVisibilityState, VisibilityFrameGraph,
+            UnifiedVisibilityState, VisibilityFrameGraph, VisibilityPass,
         },
     },
 };
@@ -55,7 +55,10 @@ pub(crate) fn build_unified_visibility(
         buffers.stage([], [], [], 0);
         return;
     }
-    debug_assert!(!frame_graph.compiled.execution_order.is_empty());
+    if !frame_graph.permits(VisibilityPass::PreviousHzb) {
+        buffers.stage([], [], [], 0);
+        return;
+    }
 
     let handles = scene.mirror().live_handles();
     let geometry = geometry_lods(scene.mirror(), &handles, &geometries);
@@ -252,10 +255,15 @@ pub(crate) fn dispatch_unified_visibility_for_view(
     output_bindings: Res<VisibilityComputeBindGroup>,
     hzb_buffers: Res<super::hzb_gpu::HzbVisibilityBuffers>,
     buffers: Res<UnifiedVisibilityBuffers>,
+    frame_graph: Res<VisibilityFrameGraph>,
     mut ctx: RenderContext,
     mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
 ) {
-    if !enabled.0 || state.views.is_empty() || scene.mirror().capacity() == 0 {
+    if !frame_graph.permits(VisibilityPass::PreviousHzb)
+        || !enabled.0
+        || state.views.is_empty()
+        || scene.mirror().capacity() == 0
+    {
         return;
     }
     let Some(compute_pipeline) = cache.get_compute_pipeline(pipeline.pipeline) else {

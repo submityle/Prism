@@ -4,7 +4,9 @@ use prism_ecs::change::Tick;
 use prism_ecs::component::Component;
 use prism_ecs::entity::Entity;
 use prism_ecs::hierarchy::ChildOf;
+use prism_ecs::observer::ObserverId;
 use prism_ecs::query::{QueryState, With};
+use prism_ecs::relation::RelationIndexVersion;
 use prism_ecs::resource::Resource;
 use prism_ecs::world::{World, WorldId};
 
@@ -15,24 +17,28 @@ use crate::{GlobalTransform, Transform};
 
 type Inputs = QueryState<Entity, With<Transform>>;
 
-// The current relation API exposes edges, but no mutation revision. Comparing
-// canonical ChildOf edges also detects raw index edits and registry replacement.
-fn hierarchy_edges(world: &World) -> Vec<(Entity, Entity)> {
+// Only invoked when the index-owned version changes. Canonicalization avoids
+// rebuilding topology for unrelated relation edits or an equivalent replacement.
+fn hierarchy_edges(world: &World, stats: &mut EcsPropagationStats) -> Vec<(Entity, Entity)> {
     let Some(child_of) = world.components().id_of::<ChildOf>() else {
         return Vec::new();
     };
-    let mut edges = world
-        .relations()
-        .index()
-        .iter_edges()
-        .filter_map(|(relation, source, target)| (relation == child_of).then_some((source, target)))
-        .collect::<Vec<_>>();
+    stats.relation_scans += 1;
+    let mut edges = Vec::new();
+    for (relation, source, target) in world.relations().index().iter_edges() {
+        stats.relation_edges_scanned += 1;
+        if relation == child_of {
+            edges.push((source, target));
+        }
+    }
+    stats.relation_sorts += 1;
     edges.sort_unstable();
     edges
 }
 
-// Chunk versions are upper bounds on row ticks, so static chunks never need
-// their individual rows inspected. No component value is borrowed here.
+// The column-owned interval index skips cold chunk subtrees before examining
+// row ticks. No component value is borrowed here. The row check remains
+// necessary because a chunk summary is deliberately conservative.
 fn changed_entities<T: Component>(world: &World, last: Tick, now: Tick) -> BTreeSet<Entity> {
     let mut changed = BTreeSet::new();
     let Some(id) = world.components().id_of::<T>() else {
@@ -43,10 +49,7 @@ fn changed_entities<T: Component>(world: &World, last: Tick, now: Tick) -> BTree
         let Some(column) = table.column(id) else {
             continue;
         };
-        for chunk in 0..column.chunk_count() {
-            if !column.chunk_version(chunk).is_newer_than(last, now) {
-                continue;
-            }
+        column.visit_changed_chunks(last, now, |chunk| {
             let start = chunk * column.rows_per_chunk();
             let end = (start + column.rows_per_chunk()).min(table.entities().len());
             for row in start..end {
@@ -54,7 +57,7 @@ fn changed_entities<T: Component>(world: &World, last: Tick, now: Tick) -> BTree
                     changed.insert(table.entities()[row]);
                 }
             }
-        }
+        });
     }
     changed
 }
@@ -63,6 +66,7 @@ pub(super) struct PropagationState {
     query: Inputs,
     world_id: WorldId,
     generation: u64,
+    relation_version: Option<RelationIndexVersion>,
     relation_edges: Vec<(Entity, Entity)>,
     entities: Vec<Entity>,
     indices: BTreeMap<Entity, NodeId>,
@@ -85,7 +89,8 @@ impl PropagationState {
             query: world.query_filtered(),
             world_id: world.id(),
             generation: world.archetype_generation(),
-            relation_edges: hierarchy_edges(world),
+            relation_version: None,
+            relation_edges: Vec::new(),
             entities: Vec::new(),
             indices: BTreeMap::new(),
             parents: Vec::new(),
@@ -100,10 +105,13 @@ impl PropagationState {
         }
     }
 
-    fn propagate(&mut self, world: &mut World) -> Result<EcsPropagationStats, TransformEcsError> {
+    fn propagate(
+        &mut self,
+        world: &mut World,
+        registration: ObserverId,
+    ) -> Result<EcsPropagationStats, TransformEcsError> {
         let now = world.change_tick();
         let generation = world.archetype_generation();
-        let relation_edges = hierarchy_edges(world);
         let restored = self.generation != generation || self.world_id != world.id();
         if self.world_id != world.id() {
             *self = Self::new(world);
@@ -115,6 +123,12 @@ impl PropagationState {
         let signals = world.resource::<super::PropagationSignals>();
         let membership_dirty = signals.membership_dirty || rebuild;
         let mut stats = EcsPropagationStats::default();
+        let relation_version = world.relations().index().version();
+        let new_relation_edges = (self.relation_version != Some(relation_version))
+            .then(|| hierarchy_edges(world, &mut stats));
+        let relations_changed = new_relation_edges
+            .as_ref()
+            .is_some_and(|edges| edges != &self.relation_edges);
         let new_entities = if membership_dirty {
             stats.membership_scans = 1;
             let mut entities = self.query.iter(world).collect::<Vec<_>>();
@@ -132,7 +146,7 @@ impl PropagationState {
                 .collect::<BTreeMap<_, _>>()
         });
         let indices = new_indices.as_ref().unwrap_or(&self.indices);
-        let new_parents = if membership_dirty || self.relation_edges != relation_edges {
+        let new_parents = if membership_dirty || relations_changed {
             let mut parents = Vec::with_capacity(entities.len());
             for &entity in entities {
                 stats.relation_checks += 1;
@@ -171,7 +185,10 @@ impl PropagationState {
         signals.membership_dirty = false;
         signals.globals.clear();
         self.last_run = now;
-        self.relation_edges = relation_edges;
+        if let Some(edges) = new_relation_edges {
+            self.relation_edges = edges;
+        }
+        self.relation_version = Some(relation_version);
         self.generation = generation;
         self.needs_rebuild = false;
         let mut removed = Vec::new();
@@ -294,7 +311,10 @@ impl PropagationState {
             // Remove observers run before deletion and may unwind. Keep this
             // entity queued until the removal returns so retry cannot miss it.
             self.pending_removals.remove(&entity);
-            if world.id() != self.world_id || world.archetype_generation() != generation {
+            if world.id() != self.world_id
+                || world.archetype_generation() != generation
+                || super::registration_id(world) != Some(registration)
+            {
                 return Ok(stats);
             }
         }
@@ -311,7 +331,10 @@ impl PropagationState {
                 }
                 stats.written += 1;
             }
-            if world.id() != self.world_id || world.archetype_generation() != generation {
+            if world.id() != self.world_id
+                || world.archetype_generation() != generation
+                || super::registration_id(world) != Some(registration)
+            {
                 return Ok(stats);
             }
         }
@@ -336,8 +359,15 @@ pub enum TransformEcsError {
 pub struct EcsPropagationStats {
     /// Full membership queries (zero unless lifecycle or restore invalidated it).
     pub membership_scans: usize,
+    /// Full relation-index traversals to refresh canonical ChildOf edges.
+    /// Zero on clean frames; initial collection is included, not hidden at install.
+    pub relation_scans: usize,
+    /// All index edges visited by those traversals, including unrelated kinds.
+    pub relation_edges_scanned: usize,
+    /// Canonical ChildOf edge sort calls (including empty/single-edge inputs).
+    pub relation_sorts: usize,
     /// Entities whose ChildOf targets were inspected after topology invalidation.
-    /// Excludes the relation-index scan used to detect changed ChildOf edges.
+    /// Separate from relation-index traversals, counted by `relation_scans`.
     pub relation_checks: usize,
     /// Authoritative local values read from ECS after chunk/row tick filtering.
     pub local_reads: usize,
@@ -362,19 +392,21 @@ pub struct EcsPropagationStats {
 /// relations and retry; the previous valid propagation baseline is retained.
 pub fn propagate_transforms(world: &mut World) -> Result<EcsPropagationStats, TransformEcsError> {
     super::install(world);
+    let registration = super::registration_id(world).expect("installed subscribers");
     let state = world
         .remove_resource::<PropagationState>()
         .expect("installed");
     let mut guard = PropagationGuard {
         world,
         state: Some(state),
+        registration,
         completed: false,
     };
     let result = guard
         .state
         .as_mut()
         .expect("owned cache")
-        .propagate(guard.world);
+        .propagate(guard.world, registration);
     guard.completed = true;
     result
 }
@@ -384,6 +416,7 @@ pub fn propagate_transforms(world: &mut World) -> Result<EcsPropagationStats, Tr
 struct PropagationGuard<'w> {
     world: &'w mut World,
     state: Option<PropagationState>,
+    registration: ObserverId,
     completed: bool,
 }
 
@@ -393,7 +426,7 @@ impl Drop for PropagationGuard<'_> {
             return;
         };
         if state.world_id == self.world.id()
-            && self.world.contains_resource::<super::Registration>()
+            && super::registration_id(self.world) == Some(self.registration)
         {
             state.needs_rebuild |= !self.completed;
             self.world.insert_resource(state);

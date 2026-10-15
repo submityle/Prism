@@ -49,8 +49,13 @@ impl RenderTarget {
 
     /// Creates a target of `viewport` in the crate's frame-target formats.
     fn create<D: RenderDevice>(device: &D, viewport: RenderViewport) -> Self {
-        let mut pending = TargetAllocation { device, texture: None, view: None,
-            depth_texture: None, depth_view: None };
+        let mut pending = TargetAllocation {
+            device,
+            texture: None,
+            view: None,
+            depth_texture: None,
+            depth_view: None,
+        };
         let format = crate::RENDER_TARGET_FORMAT;
         let texture = device.create_texture(&TextureDescriptor::new_2d(
             viewport.extent(),
@@ -163,9 +168,17 @@ struct TargetAllocation<'a, D: RenderDevice> {
 
 impl<D: RenderDevice> Drop for TargetAllocation<'_, D> {
     fn drop(&mut self) {
-        if let Some(id) = self.depth_view { self.device.destroy_texture_view(id); }
-        if let Some(id) = self.depth_texture { self.device.destroy_texture(id); }
-        if let Some(id) = self.view { self.device.destroy_texture_view(id); }
-        if let Some(id) = self.texture { self.device.destroy_texture(id); }
+        if let Some(id) = self.depth_view {
+            self.device.destroy_texture_view(id);
+        }
+        if let Some(id) = self.depth_texture {
+            self.device.destroy_texture(id);
+        }
+        if let Some(id) = self.view {
+            self.device.destroy_texture_view(id);
+        }
+        if let Some(id) = self.texture {
+            self.device.destroy_texture(id);
+        }
     }
 }

@@ -15,10 +15,15 @@
 //!   on drop). This is the backend exercised by this crate's test-suite on the
 //!   Apple-silicon CI host. `kqueue` is already owned by the file watcher, so
 //!   `lio_listio` is the honest macOS realization of "batch submit N reads".
-//! - **Every other OS** (Linux `io_uring`, Windows IOCP, Web): honestly
-//!   returns [`AioError::Unsupported`] from [`AioQueue::new`]. Those real
-//!   backends are PLANNED; this crate ships no stub that pretends to read.
-//!   Query [`AioQueue::supported`] first.
+//! - **Linux**: real `io_uring` syscall/mmap backend with SQE batch submit,
+//!   CQE reaping, async cancellation, and bounded SQ backpressure.
+//! - **Windows**: real IOCP (`CreateIoCompletionPort` + overlapped
+//!   `ReadFile`/`WriteFile` + `GetQueuedCompletionStatusEx`) with bounded
+//!   submission, completion draining, and cancellation on drop. The caller's
+//!   `RawFd` must refer to a handle opened with `FILE_FLAG_OVERLAPPED`.
+//! - **Other OSes** (Web and BSD variants whose AIO ABI is not wired here):
+//!   honestly return [`AioError::Unsupported`] from [`AioQueue::new`]. Query
+//!   [`AioQueue::supported`] first.
 //!
 //! ## Safety contract
 //! [`AioQueue::submit`] / [`AioQueue::submit_write`] are `unsafe`: each
@@ -34,7 +39,10 @@
 
 use core::fmt;
 use core::time::Duration;
+#[cfg(not(windows))]
 use std::os::fd::RawFd;
+#[cfg(windows)]
+type RawFd = i32;
 
 // Only Apple is wired to the real backend: `posix.rs` implements the Darwin
 // `aiocb`/`sigevent` ABI, which differs from FreeBSD/NetBSD/DragonFly. Rather
@@ -45,11 +53,23 @@ use std::os::fd::RawFd;
 #[path = "posix.rs"]
 mod backend;
 
-#[cfg(not(all(feature = "std", target_vendor = "apple")))]
+#[cfg(all(feature = "std", target_os = "linux"))]
+#[path = "uring.rs"]
+mod backend;
+
+#[cfg(all(feature = "std", target_os = "windows"))]
+#[path = "windows.rs"]
+mod backend;
+
+#[cfg(not(any(
+    all(feature = "std", target_vendor = "apple"),
+    all(feature = "std", target_os = "linux"),
+    all(feature = "std", target_os = "windows")
+)))]
 mod backend {
     //! Fallback backend for platforms without a batch async-I/O primitive wired
-    //! up yet (Linux `io_uring`, Windows IOCP, Web). Every entry point honestly
-    //! reports [`super::AioError::Unsupported`] rather than faking a read.
+    //! up yet. Every entry point honestly reports [`super::AioError::Unsupported`]
+    //! rather than faking a read.
 
     use super::{AioError, Completion, ReadOp, Result, SubmitOutcome, WriteOp};
     use core::time::Duration;
@@ -107,7 +127,8 @@ pub enum AioError {
     Unsupported,
     /// A [`ReadOp`] was malformed (e.g. a negative file descriptor).
     InvalidArgument,
-    /// An OS error occurred; the payload is the raw `errno`.
+    /// An OS error occurred; the payload is the raw native error code
+    /// (`errno` on Unix and a Win32 `GetLastError` code on Windows).
     Io(i32),
 }
 
@@ -116,7 +137,7 @@ impl fmt::Display for AioError {
         match self {
             Self::Unsupported => f.write_str("async I/O is unsupported on this platform"),
             Self::InvalidArgument => f.write_str("invalid async-I/O request"),
-            Self::Io(code) => write!(f, "async I/O OS error (errno {code})"),
+            Self::Io(code) => write!(f, "async I/O OS error (native code {code})"),
         }
     }
 }

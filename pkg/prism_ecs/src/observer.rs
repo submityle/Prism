@@ -40,9 +40,11 @@
 //! changes, trigger further events, or register new observers. To hand the
 //! callback `&mut World` while the observer list lives *inside* that world, the
 //! firing path temporarily moves each matching callback out of its slot, runs
-//! it, then restores it. Consequently a callback may remove **other**
-//! observers synchronously, but a request to remove the **currently firing**
-//! observer takes effect only after that callback returns.
+//! it, then restores it, including on unwind. Removing the currently firing
+//! observer prevents that restoration. A running callback is not re-entered.
+//! Each dispatch snapshots its registration boundary; callbacks registered
+//! during delivery start with the next dispatch. Replacing or restoring the
+//! world stops the abandoned delivery and its enclosing structural operation.
 //!
 //! [`hooks`]: crate::component_hooks
 //! [`World`]: crate::world::World
@@ -53,7 +55,7 @@ use alloc::vec::Vec;
 
 use crate::component::ComponentId;
 use crate::entity::Entity;
-use crate::world::World;
+use crate::world::{World, WorldId};
 
 /// The lifecycle transition an observer watches (design §12).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -68,7 +70,7 @@ pub enum LifecycleEvent {
     Remove,
 }
 
-/// A stable, process-unique identifier for a registered observer, returned by
+/// A stable, world-local identifier for a registered observer, returned by
 /// the `observe*` registration methods and accepted by
 /// [`World::remove_observer`](crate::world::World::remove_observer).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -139,10 +141,8 @@ impl EventContext<'_> {
 /// A boxed custom-event observer callback.
 pub type EventCallback = Box<dyn FnMut(&mut EventContext<'_>) + Send + Sync>;
 
-/// One registered lifecycle observer. Stored in an `Option` slot so a firing
-/// callback can be moved out and restored without disturbing other slots.
+/// One registered lifecycle observer.
 struct LifecycleEntry {
-    id: ObserverId,
     event: LifecycleEvent,
     component: ComponentId,
     callback: ObserverCallback,
@@ -151,9 +151,59 @@ struct LifecycleEntry {
 /// One registered custom-event observer, keyed by the event-type
 /// [`ComponentId`] used as the event marker.
 struct EventEntry {
-    id: ObserverId,
     event: ComponentId,
     callback: EventCallback,
+}
+
+/// Identity stays in the registry while the callback is detached. This lets
+/// removal cancel a running callback's restoration without reusing its slot.
+struct ObserverSlot<T> {
+    id: Option<ObserverId>,
+    entry: Option<T>,
+}
+
+impl<T> ObserverSlot<T> {
+    fn new(id: ObserverId, entry: T) -> Self {
+        Self {
+            id: Some(id),
+            entry: Some(entry),
+        }
+    }
+
+    fn remove(&mut self, id: ObserverId) -> bool {
+        if self.id != Some(id) {
+            return false;
+        }
+        self.id = None;
+        self.entry = None;
+        true
+    }
+}
+
+/// Borrowing the world through the guard keeps restoration safe on unwind
+/// without raw pointers. Neither an identically numbered slot in another world
+/// nor a cancelled registration can receive the detached callback.
+struct ObserverGuard<'w, T> {
+    world: &'w mut World,
+    world_id: WorldId,
+    index: usize,
+    id: ObserverId,
+    entry: Option<T>,
+    slots: fn(&mut Observers) -> &mut Vec<ObserverSlot<T>>,
+}
+
+impl<T> Drop for ObserverGuard<'_, T> {
+    fn drop(&mut self) {
+        if self.world.id() != self.world_id {
+            return;
+        }
+        if let Some(slot) = (self.slots)(&mut self.world.observers).get_mut(self.index)
+            && slot.id == Some(self.id)
+            && slot.entry.is_none()
+        {
+            slot.entry = self.entry.take();
+        }
+    }
 }
 
 /// The observer registry owned by the [`World`] (design §12).
@@ -164,8 +214,8 @@ struct EventEntry {
 /// sites beyond a single emptiness check.
 #[derive(Default)]
 pub struct Observers {
-    lifecycle: Vec<Option<LifecycleEntry>>,
-    events: Vec<Option<EventEntry>>,
+    lifecycle: Vec<ObserverSlot<LifecycleEntry>>,
+    events: Vec<ObserverSlot<EventEntry>>,
 }
 
 impl Observers {
@@ -178,7 +228,8 @@ impl Observers {
     /// Whether no observers of any kind are registered.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.lifecycle.iter().all(Option::is_none) && self.events.iter().all(Option::is_none)
+        self.lifecycle.iter().all(|slot| slot.id.is_none())
+            && self.events.iter().all(|slot| slot.id.is_none())
     }
 
     /// Whether any lifecycle observer watches any component in `ids`. Used as a
@@ -187,7 +238,7 @@ impl Observers {
     pub(crate) fn watches_any_lifecycle(&self, ids: &[ComponentId]) -> bool {
         self.lifecycle
             .iter()
-            .flatten()
+            .filter_map(|slot| slot.entry.as_ref())
             .any(|e| ids.contains(&e.component))
     }
 
@@ -200,12 +251,14 @@ impl Observers {
         component: ComponentId,
         callback: ObserverCallback,
     ) -> ObserverId {
-        self.lifecycle.push(Some(LifecycleEntry {
+        self.lifecycle.push(ObserverSlot::new(
             id,
-            event,
-            component,
-            callback,
-        }));
+            LifecycleEntry {
+                event,
+                component,
+                callback,
+            },
+        ));
         id
     }
 
@@ -216,26 +269,21 @@ impl Observers {
         event: ComponentId,
         callback: EventCallback,
     ) -> ObserverId {
-        self.events.push(Some(EventEntry {
-            id,
-            event,
-            callback,
-        }));
+        self.events
+            .push(ObserverSlot::new(id, EventEntry { event, callback }));
         id
     }
 
     /// Remove the observer with `id` from either registry. Returns whether it
-    /// was found. A no-op for the currently-firing observer (see module docs).
+    /// was found, including when its callback is currently running.
     pub(crate) fn remove(&mut self, id: ObserverId) -> bool {
         for slot in &mut self.lifecycle {
-            if slot.as_ref().is_some_and(|e| e.id == id) {
-                *slot = None;
+            if slot.remove(id) {
                 return true;
             }
         }
         for slot in &mut self.events {
-            if slot.as_ref().is_some_and(|e| e.id == id) {
-                *slot = None;
+            if slot.remove(id) {
                 return true;
             }
         }
@@ -302,7 +350,13 @@ impl World {
         let Some(event) = self.components().id_of::<E>() else {
             return;
         };
-        if self.observers.events.iter().all(Option::is_none) {
+        let count = self.observers.events.len();
+        if self
+            .observers
+            .events
+            .iter()
+            .all(|slot| slot.entry.is_none())
+        {
             return;
         }
         let relation = self.components().id_of::<R>();
@@ -315,7 +369,7 @@ impl World {
             }
             visited.push(entity);
 
-            let stopped = self.fire_event_observers(event, target, entity);
+            let stopped = self.fire_event_observers(event, target, entity, count);
             if stopped || !bubble {
                 break;
             }
@@ -335,10 +389,13 @@ impl World {
         &mut self.observers
     }
 
-    /// Allocate the next process-unique observer id.
+    /// Allocate the next world-local observer id, never reusing an identity.
     pub(crate) fn alloc_observer_id(&mut self) -> ObserverId {
         let id = ObserverId(self.next_observer_id);
-        self.next_observer_id += 1;
+        self.next_observer_id = self
+            .next_observer_id
+            .checked_add(1)
+            .expect("observer ids exhausted");
         id
     }
 
@@ -347,79 +404,105 @@ impl World {
     ///
     /// Each callback is moved out of its slot for the duration of its run so it
     /// can receive `&mut World`, then restored unless it was removed. Dispatch
-    /// stops early if a callback despawns `entity`.
+    /// returns false if a callback despawns `entity`, replaces the world, or
+    /// restores its storage. Callers must then abandon their old operation.
     pub(crate) fn fire_lifecycle_observers(
         &mut self,
         event: LifecycleEvent,
         entity: Entity,
         ids: &[ComponentId],
-    ) {
-        if self.observers.lifecycle.is_empty() {
-            return;
-        }
-        let mut i = 0;
-        while i < self.observers.lifecycle.len() {
+    ) -> bool {
+        let world_id = self.id();
+        let generation = self.archetype_generation();
+        let count = self.observers.lifecycle.len();
+        for i in 0..count {
             let matches = self.observers.lifecycle[i]
+                .entry
                 .as_ref()
                 .is_some_and(|e| e.event == event && ids.contains(&e.component));
             if matches {
-                // Move the entry out so the callback can borrow `&mut World`.
-                let mut entry = self.observers.lifecycle[i]
-                    .take()
-                    .expect("slot checked present");
+                let slot = &mut self.observers.lifecycle[i];
+                let entry = slot.entry.take().expect("slot checked present");
+                let id = slot.id.expect("active slot");
                 let component = entry.component;
-                let mut ctx = ObserverContext {
+                let mut guard = ObserverGuard {
                     world: self,
+                    world_id,
+                    index: i,
+                    id,
+                    entry: Some(entry),
+                    slots: |observers| &mut observers.lifecycle,
+                };
+                let mut ctx = ObserverContext {
+                    world: guard.world,
                     entity,
                     component,
                     event,
                 };
-                (entry.callback)(&mut ctx);
-                // Restore unless a nested call removed this observer.
-                if self.observers.lifecycle[i].is_none() {
-                    self.observers.lifecycle[i] = Some(entry);
-                }
-                // A callback may have despawned the entity; stop delivering.
-                if !self.contains(entity) {
-                    break;
+                (guard.entry.as_mut().expect("detached callback").callback)(&mut ctx);
+                drop(guard);
+                if self.id() != world_id
+                    || self.archetype_generation() != generation
+                    || !self.contains(entity)
+                {
+                    return false;
                 }
             }
-            i += 1;
         }
+        self.contains(entity)
     }
 
     /// Fire every custom-event observer for marker `event` against `entity`
     /// (the current bubbling position; `target` is the original). Returns
     /// whether a callback stopped propagation.
-    fn fire_event_observers(&mut self, event: ComponentId, target: Entity, entity: Entity) -> bool {
+    fn fire_event_observers(
+        &mut self,
+        event: ComponentId,
+        target: Entity,
+        entity: Entity,
+        count: usize,
+    ) -> bool {
+        if !self.contains(entity) {
+            return true;
+        }
+        let world_id = self.id();
+        let generation = self.archetype_generation();
         let mut stopped = false;
-        let mut i = 0;
-        while i < self.observers.events.len() {
+        for i in 0..count {
             let matches = self.observers.events[i]
+                .entry
                 .as_ref()
                 .is_some_and(|e| e.event == event);
             if matches {
-                let mut entry = self.observers.events[i]
-                    .take()
-                    .expect("slot checked present");
-                let mut ctx = EventContext {
+                let slot = &mut self.observers.events[i];
+                let entry = slot.entry.take().expect("slot checked present");
+                let id = slot.id.expect("active slot");
+                let mut guard = ObserverGuard {
                     world: self,
+                    world_id,
+                    index: i,
+                    id,
+                    entry: Some(entry),
+                    slots: |observers| &mut observers.events,
+                };
+                let mut ctx = EventContext {
+                    world: guard.world,
                     entity,
                     target,
                     stop: false,
                 };
-                (entry.callback)(&mut ctx);
+                (guard.entry.as_mut().expect("detached callback").callback)(&mut ctx);
                 if ctx.stop {
                     stopped = true;
                 }
-                if self.observers.events[i].is_none() {
-                    self.observers.events[i] = Some(entry);
-                }
-                if stopped {
-                    break;
+                drop(guard);
+                if self.id() != world_id
+                    || self.archetype_generation() != generation
+                    || !self.contains(entity)
+                {
+                    return true;
                 }
             }
-            i += 1;
         }
         stopped
     }
@@ -451,6 +534,14 @@ mod tests {
     /// Marker relation standing in for a `ChildOf` hierarchy.
     struct ChildOf;
     impl Component for ChildOf {}
+
+    #[test]
+    #[should_panic(expected = "observer ids exhausted")]
+    fn observer_identity_exhaustion_panics_before_reusing_an_id() {
+        let mut world = World::new();
+        world.next_observer_id = u64::MAX;
+        world.observe::<Watched, _>(LifecycleEvent::Add, |_| {});
+    }
 
     /// Records every observer firing in call order so tests can assert both the
     /// set and the ordering of deliveries. Routed through a world resource so

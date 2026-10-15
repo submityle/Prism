@@ -23,19 +23,19 @@
 //!    capture a [`WorldSnapshot`](super::WorldSnapshot) of each run at that tick
 //!    and call [`locate_divergence`] (or
 //!    [`WorldSnapshot::locate_divergence`](super::WorldSnapshot::locate_divergence)).
-//!    It walks the two snapshots in the *same* deterministic fold order
+//!    It walks the two snapshots in a deterministic diagnostic order matching
 //!    [`state_hash`](super::WorldSnapshot::state_hash) uses — tick cursors,
 //!    allocator liveness, entity list ascending by [`Entity::to_bits`], then
 //!    columns ascending by [`ComponentId`] and holders by row — and returns the
 //!    first [`SnapshotDivergence`]: the precise structural or value coordinate
-//!    where the two frames stop being byte-equal.
+//!    where state differs or typed value comparison is unavailable.
 //!
 //! [`locate_divergence`] is the localizing counterpart of
 //! [`WorldSnapshot::structurally_eq`](super::WorldSnapshot::structurally_eq):
 //! `structurally_eq` answers the yes/no question, this answers the *where*
 //! question, over the identical comparison set (tick cursors, allocator state,
-//! entity list, every column's holders/ticks/value bytes, and opt-in
-//! resources). The two therefore agree exactly: `structurally_eq` returns
+//! entity list, every column's holders/ticks/semantic values, opt-in resources,
+//! and relation metadata/ordered adjacency). The two agree exactly: `structurally_eq` returns
 //! `true` iff `locate_divergence` returns [`None`].
 //!
 //! # Honesty boundary
@@ -43,10 +43,10 @@
 //! that guarantee is produced by stable ordering (§8.4), stable allocation
 //! (§14), and the deterministic fold in [`hash`](super::hash). The auditor
 //! only *observes* divergence that already happened; it cannot prevent it.
-//! Value-level localization is subject to the same honesty boundary as the
-//! hash: it compares the *bytes* every captured column carries, so it detects
-//! value drift for any snapshotted component regardless of hash registration
-//! (unlike the hash, which only folds values for hash-registered components).
+//! Value-level localization requires separately registered typed comparison
+//! callbacks, independent of hash registration. Missing or incompatible glue
+//! is reported as incomparable, never as proof of equal or differing values.
+//! PartialEq defines value equivalence; no raw object bytes are inspected.
 
 use alloc::vec::Vec;
 
@@ -205,14 +205,23 @@ pub enum TickDivergence {
     },
 }
 
-/// The first coordinate at which two [`WorldSnapshot`]s stop being byte-equal,
-/// produced by [`locate_divergence`]. Variants are ordered to match the
-/// deterministic fold order of [`state_hash`](WorldSnapshot::state_hash): tick
+/// The first differing or incomparable coordinate in two [`WorldSnapshot`]s,
+/// produced by [`locate_divergence`]. Diagnostics follow a deterministic order
+/// related to [`state_hash`](WorldSnapshot::state_hash): tick
 /// cursors, then allocator liveness, then the entity list, then columns
-/// (component set, holders, change ticks, value bytes), then opt-in resources.
+/// (component set, holders, change ticks, semantic values), then opt-in resources
+/// and relations. The entity-list coordinate takes precedence over deeper
+/// allocator-state differences for a more actionable diagnostic.
 /// `left` refers to the first snapshot argument, `right` to the second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotDivergence {
+    /// Runtime component schema replacements differed between the two runs.
+    SchemaGeneration {
+        /// The left snapshot's runtime schema revision.
+        left: u64,
+        /// The right snapshot's runtime schema revision.
+        right: u64,
+    },
     /// The two snapshots were captured at different world change ticks.
     ChangeTick {
         /// The left snapshot's change tick.
@@ -249,6 +258,13 @@ pub enum SnapshotDivergence {
     /// the captured entity list matched (a deeper allocator-state desync that
     /// would surface as mismatched entity reuse on a later frame).
     AllocatorState,
+    /// Relationship metadata or ordered forward/reverse adjacency differs.
+    Relations,
+    /// Storage strategy or captured ABI layout differs for a column.
+    ColumnLayout {
+        /// The component whose storage contract differs.
+        component: ComponentId,
+    },
     /// The column sets first differ at column position `index` (columns are
     /// ordered ascending by [`ComponentId`]): either the component ids differ,
     /// or one snapshot has no column at that position (`None`).
@@ -285,12 +301,19 @@ pub enum SnapshotDivergence {
         /// The right cell's `(added, changed)` ticks.
         right: (u64, u64),
     },
-    /// A component value's raw bytes differ for `entity` — the classic value
+    /// A component value differs under its typed comparison for `entity` — a value
     /// desync (two peers computed a different result for the same component).
     Value {
-        /// The component whose stored bytes differ for `entity`.
+        /// The component whose value differs for `entity`.
         component: ComponentId,
         /// The entity whose component value diverged.
+        entity: Entity,
+    },
+    /// A component lacks compatible typed comparison glue for `entity`.
+    ValueIncomparable {
+        /// The component lacking compatible typed comparison glue.
+        component: ComponentId,
+        /// The entity whose value cannot be compared.
         entity: Entity,
     },
     /// The opt-in resource sets first differ at resource position `index`.
@@ -298,29 +321,39 @@ pub enum SnapshotDivergence {
         /// The resource position at which the two resource lists first differ.
         index: usize,
     },
-    /// A captured resource's identity, type, or value hash differs at position
-    /// `index`.
+    /// A captured resource's semantic value differs at position `index`.
     Resource {
         /// The resource position whose captured value diverges.
+        index: usize,
+    },
+    /// A resource lacks compatible typed comparison glue.
+    ResourceIncomparable {
+        /// The resource position whose value cannot be compared.
         index: usize,
     },
 }
 
 /// Locate the first point at which snapshots `left` and `right` stop being
-/// byte-equal, in the deterministic fold order of
+/// semantically equal (or cannot be compared), in a diagnostic order following
 /// [`state_hash`](WorldSnapshot::state_hash), or [`None`] if they are
 /// structurally identical (design §24.4).
 ///
 /// This is the localizing form of
 /// [`WorldSnapshot::structurally_eq`](WorldSnapshot::structurally_eq): it
 /// compares the identical set of state (tick cursors, allocator liveness,
-/// entity list, every column's holders / change ticks / value bytes, and opt-in
-/// resources) but returns *where* the first difference is instead of a bool.
+/// entity list, every column's holders / change ticks / semantic values, opt-in
+/// resources, and relations) but returns a coordinate instead of a bool.
 /// Consequently `locate_divergence(a, b).is_none() == a.structurally_eq(b)`.
 pub fn locate_divergence(
     left: &WorldSnapshot,
     right: &WorldSnapshot,
 ) -> Option<SnapshotDivergence> {
+    if left.schema_generation != right.schema_generation {
+        return Some(SnapshotDivergence::SchemaGeneration {
+            left: left.schema_generation,
+            right: right.schema_generation,
+        });
+    }
     // 1. Tick cursors (folded first by `state_hash`).
     if left.change_tick != right.change_tick {
         return Some(SnapshotDivergence::ChangeTick {
@@ -400,8 +433,10 @@ pub fn locate_divergence(
         if lr.id() != rr.id() || lr.type_id() != rr.type_id() {
             return Some(SnapshotDivergence::ResourceSet { index });
         }
-        if lr.value_hash() != rr.value_hash() {
-            return Some(SnapshotDivergence::Resource { index });
+        match lr.value_eq(rr) {
+            Some(true) => {}
+            Some(false) => return Some(SnapshotDivergence::Resource { index }),
+            None => return Some(SnapshotDivergence::ResourceIncomparable { index }),
         }
     }
     if left.resources.len() != right.resources.len() {
@@ -410,10 +445,14 @@ pub fn locate_divergence(
         });
     }
 
+    if !left.relations.equivalent(&right.relations) {
+        return Some(SnapshotDivergence::Relations);
+    }
+
     None
 }
 
-/// Compare the holder sets, change ticks, and value bytes of two columns that
+/// Compare the holder sets, change ticks, and semantic values of two columns that
 /// already share a [`ComponentId`], returning the first divergent cell. The
 /// holder entities are read from each snapshot's own entity list (columns index
 /// into it by row), matching the fold in
@@ -425,6 +464,9 @@ fn locate_column_divergence(
     rc: &super::column::SnapshotColumn,
 ) -> Option<SnapshotDivergence> {
     let component = lc.component;
+    if lc.storage != rc.storage || lc.layout != rc.layout {
+        return Some(SnapshotDivergence::ColumnLayout { component });
+    }
     let shared = lc.len().min(rc.len());
     for i in 0..shared {
         let lrow = lc.rows[i] as usize;
@@ -447,14 +489,18 @@ fn locate_column_divergence(
                 right: (rc.added[i].get() as u64, rc.changed[i].get() as u64),
             });
         }
-        // SAFETY: `i < shared <= lc.len()` and `i < shared <= rc.len()`.
-        let (lb, rb) = unsafe { (lc.value_bytes(i), rc.value_bytes(i)) };
-        if lb != rb {
-            return Some(SnapshotDivergence::Value {
+        let divergence = match lc.value_eq(i, rc, i) {
+            Some(true) => continue,
+            Some(false) => SnapshotDivergence::Value {
                 component,
                 entity: lentity,
-            });
-        }
+            },
+            None => SnapshotDivergence::ValueIncomparable {
+                component,
+                entity: lentity,
+            },
+        };
+        return Some(divergence);
     }
     if lc.len() != rc.len() {
         return Some(SnapshotDivergence::Holder {
@@ -468,8 +514,8 @@ fn locate_column_divergence(
 }
 
 impl WorldSnapshot {
-    /// Locate the first point at which `self` and `other` stop being byte-equal
-    /// (design §24.4), or [`None`] if they are structurally identical. The
+    /// Locate the first difference or incomparable value (design §24.4), or
+    /// [`None`] if structure and all typed value comparisons agree. The
     /// ergonomic method form of [`locate_divergence`]; see it for the exact
     /// comparison set and ordering.
     #[inline]

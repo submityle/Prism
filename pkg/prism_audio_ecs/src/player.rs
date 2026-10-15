@@ -38,9 +38,10 @@ const NON_SPATIAL_DISTANCE: f32 = f32::MAX;
 /// An [`AudioPlayer`] names *which* logical source plays (its
 /// [`VoiceGroup`], used by the runtime for per-source playback limiting) and
 /// its scheduling [`priority`](AudioPlayer::priority). Pair it with a
-/// [`PlaybackSettings`] to describe loudness,
-/// looping, and spatialization; the sync system then owns the derived
-/// [`AudioEmitter`].
+/// [`PlaybackSettings`] to describe importance attenuation, virtualization,
+/// and explicit-stop disposition; the sync system then owns the derived
+/// [`AudioEmitter`]. A group is not a decoded source binding: sample playback
+/// and natural-completion events are not supplied by the underlying runtime.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioPlayer {
     /// Logical source group, forwarded to the runtime for playback limiting.

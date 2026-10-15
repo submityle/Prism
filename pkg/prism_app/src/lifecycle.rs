@@ -44,8 +44,63 @@
 use prism_ecs::event::{Event, EventCursor, Events};
 use prism_ecs::resource::Resource;
 use prism_ecs::system::{Local, Res, ResMut};
+use prism_platform::suspend::{SuspendEvent, SuspendEventKind};
+use prism_time::Duration;
 
+use crate::app::App;
 use crate::time::EngineClocks;
+
+/// The result of forwarding one host suspend/resume edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SuspendResumeReport {
+    /// Running time folded into the clock at a suspend edge.
+    pub applied: Duration,
+    /// Wall time excluded at a resume edge.
+    pub skipped: Duration,
+}
+
+/// Injectable bridge from a timestamped platform callback to the App
+/// lifecycle and its suspend-aware real clock.
+///
+/// The adapter has no OS dependency and does not manufacture events from a
+/// CPU timer. A real backend (currently the winit host lifecycle callback) or
+/// a deterministic test must provide [`SuspendEvent`] explicitly. Forwarding
+/// also installs the App lifecycle contract idempotently, so a windowed runner
+/// cannot silently emit events without the state transition system behind
+/// them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SuspendResumeAdapter;
+
+impl SuspendResumeAdapter {
+    /// Forward one platform event into `app` and update its suspend-aware
+    /// clock at the event's host timestamp.
+    pub fn forward(&mut self, app: &mut App, event: SuspendEvent) -> SuspendResumeReport {
+        app.add_lifecycle_events();
+
+        let at = Duration::from_nanos(event.timestamp().0);
+        let mut report = SuspendResumeReport::default();
+        if let Some(clocks) = app.world_mut().get_resource_mut::<EngineClocks>() {
+            match event.kind() {
+                SuspendEventKind::Suspended => {
+                    report.applied = clocks.suspendable_mut().suspend(at);
+                }
+                SuspendEventKind::Resumed => {
+                    report.skipped = clocks.suspendable_mut().resume(at);
+                }
+            }
+        }
+
+        match event.kind() {
+            SuspendEventKind::Suspended => {
+                app.send_event(Suspended);
+            }
+            SuspendEventKind::Resumed => {
+                app.send_event(Resumed);
+            }
+        }
+        report
+    }
+}
 
 /// The host asked the process to suspend (mobile backgrounding, console sleep).
 ///
@@ -302,5 +357,68 @@ pub(crate) fn drive_app_lifecycle(
             }
         }
         AppLifecycle::Idle | AppLifecycle::WillExit => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prism_platform::MonotonicNanos;
+
+    #[test]
+    fn injected_edges_update_clock_and_app_state_without_an_os() {
+        let mut app = App::new();
+        let mut adapter = SuspendResumeAdapter;
+
+        let suspended = adapter.forward(&mut app, SuspendEvent::suspended(MonotonicNanos(100)));
+        assert_eq!(suspended.applied, Duration::ZERO);
+        assert!(app
+            .world()
+            .resource::<EngineClocks>()
+            .suspendable()
+            .is_suspended());
+
+        app.update();
+        assert_eq!(
+            *app.world().resource::<AppLifecycle>(),
+            AppLifecycle::Suspended
+        );
+
+        let resumed = adapter.forward(&mut app, SuspendEvent::resumed(MonotonicNanos(1_100)));
+        assert_eq!(resumed.skipped, Duration::from_nanos(1_000));
+        assert!(!app
+            .world()
+            .resource::<EngineClocks>()
+            .suspendable()
+            .is_suspended());
+
+        app.update();
+        assert_eq!(
+            *app.world().resource::<AppLifecycle>(),
+            AppLifecycle::Running
+        );
+    }
+
+    #[test]
+    fn the_first_post_resume_advance_excludes_the_gap() {
+        let mut app = App::new();
+        let mut adapter = SuspendResumeAdapter;
+
+        adapter.forward(&mut app, SuspendEvent::suspended(MonotonicNanos(10)));
+        adapter.forward(&mut app, SuspendEvent::resumed(MonotonicNanos(1_010)));
+
+        let applied = app
+            .world_mut()
+            .resource_mut::<EngineClocks>()
+            .suspendable_mut()
+            .advance_to(Duration::from_nanos(1_026));
+        assert_eq!(applied, Duration::from_nanos(16));
+        assert_eq!(
+            app.world()
+                .resource::<EngineClocks>()
+                .suspendable()
+                .elapsed(),
+            Duration::from_nanos(16)
+        );
     }
 }

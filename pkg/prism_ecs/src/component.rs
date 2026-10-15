@@ -369,6 +369,9 @@ impl core::hash::Hasher for HasherShim<'_> {
 pub struct Components {
     infos: Vec<ComponentInfo>,
     by_type: HashMap<TypeId, ComponentId>,
+    /// Advanced only when a runtime component's ABI/glue is replaced. Adding
+    /// unrelated types does not invalidate registry-bound snapshots.
+    schema_generation: u64,
     /// Set once any component gains a non-empty [`ComponentHooks`] set, letting
     /// the structural paths skip all hook bookkeeping with a single branch in
     /// the overwhelmingly common hook-free case (design §12).
@@ -388,6 +391,7 @@ impl Components {
         Self {
             infos: Vec::new(),
             by_type: HashMap::default(),
+            schema_generation: 0,
             hooks_registered: false,
             direct_required: HashMap::default(),
             required_registered: false,
@@ -404,6 +408,31 @@ impl Components {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.infos.is_empty()
+    }
+
+    /// The runtime schema revision used to validate snapshot restoration.
+    #[inline]
+    pub fn schema_generation(&self) -> u64 {
+        self.schema_generation
+    }
+
+    /// Publish a validated replacement after every live value has migrated.
+    /// The caller reserves the next generation before moving any old value.
+    pub(crate) fn replace_dynamic_layout(
+        &mut self,
+        id: ComponentId,
+        layout: Layout,
+        drop: Option<DropFn>,
+        clone: Option<CloneFn>,
+        hash: Option<SnapshotHashFn>,
+        generation: u64,
+    ) {
+        let info = &mut self.infos[id.index() as usize];
+        info.layout = layout;
+        info.drop = drop;
+        info.clone = clone;
+        info.snapshot_hash = hash;
+        self.schema_generation = generation;
     }
 
     /// Register the Rust component type `T` (idempotently) and return its id.

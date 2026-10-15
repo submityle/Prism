@@ -65,9 +65,7 @@ impl Plugin for PrismVisibilityPlugin {
             .init_resource::<PrismVisibilityDiagnostics>()
             .init_resource::<VisibilityParityReadback>()
             .init_resource::<HzbLateCompactBindGroup>()
-            .insert_resource(VisibilityFrameGraph {
-                compiled: compiled_graph,
-            })
+            .insert_resource(VisibilityFrameGraph::new(compiled_graph))
             .add_systems(
                 RenderStartup,
                 (

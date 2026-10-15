@@ -16,6 +16,7 @@ mod normal_map;
 mod openpbr;
 mod record;
 mod registry;
+pub mod render_state;
 mod resources;
 pub mod response_source;
 pub mod shading_plan;
@@ -76,21 +77,27 @@ pub use openpbr::{
     openpbr_conformance, project_to_openpbr, DroppedLobe, OpenPbrConformance, OpenPbrProjection,
 };
 pub use record::{
-    decode_illumination_blend_weight, fallback_material_header, fallback_material_record,
-    inactive_material_header, DynamicChannels, GpuMaterialHeader, GpuMaterialTexture,
-    GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags, MaterialRecord,
-    MaterialRenderClass, RenderDomain, FALLBACK_MATERIAL_HANDLE, ILLUMINATION_BLEND_SENTINEL,
-    ILLUMINATION_BLEND_UNORM_MAX, NO_VIRTUAL_TEXTURE, PORTABLE_TEXTURE_ATLAS,
+    decode_illumination_blend_weight, decode_illumination_blend_weight_strict,
+    fallback_material_header, fallback_material_record, inactive_material_header, DynamicChannels,
+    GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, IlluminationBlendMetadataError,
+    MaterialDomain, MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, RenderDomain,
+    FALLBACK_MATERIAL_HANDLE, ILLUMINATION_BLEND_SENTINEL, ILLUMINATION_BLEND_UNORM_MAX,
+    NO_VIRTUAL_TEXTURE, PORTABLE_TEXTURE_ATLAS,
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
+pub use render_state::{
+    material_pipeline_state, pipeline_state_for_material, MaterialBlendMode, MaterialCullMode,
+    MaterialDepthTest, MaterialPipelineState, MaterialRenderPhase, MaterialRenderTarget,
+};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};
 pub use shading_plan::{
-    BlendDomain, BuiltinProgram, CacheChannel, CacheContract, ChannelMask, CompiledEntry,
-    CompiledEntryError, ContractError, CostClass, CustomResponseReceipt, ExecutionContract,
-    ExecutionFamily, FieldId, FieldMapping, LightingContract, LobeId,
-    MaskSource as ResponseMaskSource, OutputContract, PlanValidationContext, ProgramId, ProgramRef,
-    Reason, RegisteredResponse, RegistryError, ResponseChannel, ResponseManifest, ResponseRegistry,
-    ShadingPlan, SurfaceContract, SurfaceFieldCatalog, TemporalRequirement, ValidatedPlan,
+    is_exact_stylized_lobe_name, BlendDomain, BuiltinProgram, CacheChannel, CacheContract,
+    ChannelMask, CompiledEntry, CompiledEntryError, ContractError, CostClass,
+    CustomResponseReceipt, ExecutionContract, ExecutionFamily, FieldId, FieldMapping,
+    LightingContract, LobeId, MaskSource as ResponseMaskSource, OutputContract,
+    PlanValidationContext, ProgramId, ProgramRef, Reason, RegisteredResponse, RegistryError,
+    ResponseChannel, ResponseManifest, ResponseRegistry, ResponseRegistryConfig, ShadingPlan,
+    SurfaceContract, SurfaceFieldCatalog, TemporalRequirement, ValidatedPlan, STYLIZED_LOBE_NAME,
 };
 pub use surface::{
     GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuGlintLobe, GpuMeasuredBrdfLobe,

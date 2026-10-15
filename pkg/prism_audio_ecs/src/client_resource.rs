@@ -4,7 +4,10 @@
 //!
 //! [`AudioClient`] is an ordinary [`Resource`] wrapping an
 //! [`AudioRuntimeClient`]; it is `Send + Sync` because every ring half is an
-//! `Arc<ArrayQueue<_>>`. [`AudioRuntimeHost`] is a non-`Send` resource holding
+//! `Arc<ArrayQueue<_>>`. A control-side mutex serializes facade operations and
+//! releases their shared raw producer at shutdown, even with retained clones.
+//! The audio callback never acquires this mutex: it owns separate ring halves.
+//! [`AudioRuntimeHost`] is a non-`Send` resource holding
 //! the real-time [`AudioRuntime`] and its [`Collector`]; a device backend would
 //! take it and drive it from the audio-callback thread, while this crate's
 //! systems never touch it.
@@ -22,6 +25,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use prism_audio_core::buffer::AudioBuffer;
 use prism_audio_core::graph::AudioGraph;
@@ -30,14 +34,13 @@ use prism_ecs::prelude::Resource;
 
 /// ECS resource wrapping the clonable [`AudioRuntimeClient`].
 ///
-/// Systems read this resource (never mutably) to enqueue commands and drain
-/// telemetry; the underlying rings are internally synchronized, so shared
-/// (`Res`) access is sufficient and lets command-producing systems run without
-/// contending on exclusive access.
+/// Systems read this resource to enqueue commands and drain telemetry. The
+/// facade serializes control-thread calls with shutdown; the actual runtime
+/// consumer remains lock-free. Do not call this facade from an audio callback.
 #[derive(Resource, Clone, Debug)]
 pub struct AudioClient {
     /// The wrapped runtime client handle.
-    client: AudioRuntimeClient,
+    client: Arc<Mutex<Option<AudioRuntimeClient>>>,
     open: Arc<AtomicBool>,
 }
 
@@ -46,7 +49,10 @@ impl AudioClient {
     #[must_use]
     #[inline]
     pub(crate) fn new(client: AudioRuntimeClient, open: Arc<AtomicBool>) -> Self {
-        Self { client, open }
+        Self {
+            client: Arc::new(Mutex::new(Some(client))),
+            open,
+        }
     }
 
     /// Borrows this guarded facade, never the raw command producer.
@@ -72,10 +78,10 @@ impl AudioClient {
     }
 
     pub(crate) fn send_managed(&self, command: AudioCommand) -> Result<(), AudioCommand> {
-        if !self.is_open() {
-            return Err(command);
+        match self.raw().as_ref() {
+            Some(client) => client.send(command),
+            None => Err(command),
         }
-        self.client.send(command)
     }
 
     /// Whether the owning host has not been shut down or dropped.
@@ -83,14 +89,27 @@ impl AudioClient {
         self.open.load(Ordering::Acquire)
     }
 
+    pub(crate) fn close(&self) {
+        let client = self.raw().take();
+        self.open.store(false, Ordering::Release);
+        // Destruct the producer outside the control-side guard. Its graph
+        // handoff is no longer retained by any facade clone after this point.
+        drop(client);
+    }
+
+    fn raw(&self) -> MutexGuard<'_, Option<AudioRuntimeClient>> {
+        self.client
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Publishes a freshly compiled graph for the audio thread to swap in,
     /// returning any superseded graph for the caller to drop off-thread.
     #[inline]
     pub fn publish_graph(&self, graph: Box<AudioGraph>) -> Option<Box<AudioGraph>> {
-        if self.is_open() {
-            self.client.publish_graph(graph)
-        } else {
-            Some(graph)
+        match self.raw().as_ref() {
+            Some(client) => client.publish_graph(graph),
+            None => Some(graph),
         }
     }
 
@@ -98,7 +117,7 @@ impl AudioClient {
     #[must_use]
     #[inline]
     pub fn recv_telemetry(&self) -> Option<TelemetryFrame> {
-        self.client.recv_telemetry()
+        self.raw().as_ref()?.recv_telemetry()
     }
 }
 
@@ -115,18 +134,18 @@ pub struct AudioRuntimeHost {
     /// The deferred-reclamation collector that drops resources the runtime
     /// retires (for example superseded graphs) off the audio thread.
     collector: Collector,
-    open: Arc<AtomicBool>,
+    client: AudioClient,
 }
 
 impl AudioRuntimeHost {
     /// Parks a runtime and its collector together.
     #[must_use]
     #[inline]
-    pub(crate) fn new(runtime: AudioRuntime, collector: Collector, open: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(runtime: AudioRuntime, collector: Collector, client: AudioClient) -> Self {
         Self {
             runtime,
             collector,
-            open,
+            client,
         }
     }
 
@@ -165,6 +184,6 @@ impl AudioRuntimeHost {
 
 impl Drop for AudioRuntimeHost {
     fn drop(&mut self) {
-        self.open.store(false, Ordering::Release);
+        self.client.close();
     }
 }

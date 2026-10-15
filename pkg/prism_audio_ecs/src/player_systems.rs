@@ -1,67 +1,95 @@
 //! Systems that project high-level players onto [`AudioEmitter`].
 
-use prism_ecs::prelude::{Changed, Commands, Entity, Or, Query};
+use alloc::vec::Vec;
+use prism_ecs::prelude::{Component, Entity, World};
 
 use crate::emitter::AudioEmitter;
 use crate::playback::{PlaybackMode, PlaybackSettings};
 use crate::player::{apply_to_emitter, derive_emitter, AudioPlayer};
 
-/// Inserts or updates the derived emitter for changed player settings.
-pub fn sync_audio_players(
-    mut commands: Commands,
-    mut players: Query<
-        (
-            Entity,
-            &AudioPlayer,
-            Option<&PlaybackSettings>,
-            Option<&mut AudioEmitter>,
-        ),
-        Or<(Changed<AudioPlayer>, Changed<PlaybackSettings>)>,
-    >,
-) {
-    for (entity, player, settings, emitter) in &mut players {
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DerivedEmitter;
+
+/// Projects players and settings (including settings removal) into emitters.
+/// Removing a player removes only an emitter originally created by this bridge;
+/// a pre-existing low-level emitter remains caller-owned.
+pub fn sync_audio_players(world: &mut World) {
+    let query = world.query::<(Entity, &DerivedEmitter, Option<&AudioPlayer>)>();
+    let removed: Vec<_> = query
+        .iter(world)
+        .filter_map(|(entity, _, player)| player.is_none().then_some(entity))
+        .collect();
+    for entity in removed {
+        world.remove::<AudioEmitter>(entity);
+        world.remove::<DerivedEmitter>(entity);
+    }
+    let query = world.query::<(Entity, &AudioPlayer, Option<&PlaybackSettings>)>();
+    let players: Vec<_> = query
+        .iter(world)
+        .map(|(entity, player, settings)| (entity, *player, settings.copied().unwrap_or_default()))
+        .collect();
+    for (entity, player, settings) in players {
         if player.stop_requested {
             continue;
         }
-        let settings = settings.copied().unwrap_or_default();
-        match emitter {
-            Some(mut emitter) => apply_to_emitter(player, &settings, &mut emitter),
-            None => {
-                commands
-                    .entity(entity)
-                    .insert(derive_emitter(player, &settings));
+        if let Some(emitter) = world.get::<AudioEmitter>(entity).copied() {
+            let mut desired = emitter;
+            apply_to_emitter(&player, &settings, &mut desired);
+            if desired != emitter {
+                *world
+                    .get_mut::<AudioEmitter>(entity)
+                    .expect("existing emitter") = desired;
             }
+        } else {
+            world.insert(entity, (derive_emitter(&player, &settings), DerivedEmitter));
         }
     }
 }
 
-/// Applies a player's requested end-of-playback disposition.
-pub fn apply_player_disposition(
-    mut commands: Commands,
-    mut players: Query<(
-        Entity,
-        &mut AudioPlayer,
-        Option<&PlaybackSettings>,
-        Option<&mut AudioEmitter>,
-    )>,
-) {
-    for (entity, mut player, settings, emitter) in &mut players {
-        if !player.stop_requested {
-            continue;
-        }
-        let mode = settings.map(|settings| settings.mode).unwrap_or_default();
+/// Applies a player's explicitly requested stop disposition.
+pub fn apply_player_disposition(world: &mut World) {
+    let query = world.query::<(Entity, &AudioPlayer, Option<&PlaybackSettings>)>();
+    let stopped: Vec<_> = query
+        .iter(world)
+        .filter_map(|(entity, player, settings)| {
+            player.stop_requested.then_some((
+                entity,
+                *player,
+                settings.copied().unwrap_or_default(),
+            ))
+        })
+        .collect();
+    for (entity, player, settings) in stopped {
+        let mode = settings.mode;
         match mode {
-            PlaybackMode::Despawn => commands.entity(entity).despawn(),
+            PlaybackMode::Despawn => {
+                world.despawn(entity);
+            }
             PlaybackMode::Remove => {
-                commands
-                    .entity(entity)
-                    .remove::<(AudioPlayer, PlaybackSettings, AudioEmitter)>();
+                world.remove::<AudioPlayer>(entity);
+                world.remove::<PlaybackSettings>(entity);
+                world.remove::<AudioEmitter>(entity);
+                world.remove::<DerivedEmitter>(entity);
             }
             PlaybackMode::Once | PlaybackMode::Loop => {
-                if let Some(mut emitter) = emitter {
-                    emitter.stop_requested = true;
+                if world.get::<AudioEmitter>(entity).is_none() {
+                    world.insert(
+                        entity,
+                        (
+                            derive_emitter(&player, &settings).playing(false),
+                            DerivedEmitter,
+                        ),
+                    );
                 }
-                player.stop_requested = false;
+                let mut emitter = world
+                    .get_mut::<AudioEmitter>(entity)
+                    .expect("emitter inserted");
+                emitter.stop_requested = true;
+                emitter.playing = false;
+                world
+                    .get_mut::<AudioPlayer>(entity)
+                    .expect("queried player")
+                    .stop_requested = false;
             }
         }
     }
@@ -70,9 +98,8 @@ pub fn apply_player_disposition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_app::prelude::{App, Update};
+    use prism_app::prelude::App;
     use prism_audio_core::voice::VoiceGroup;
-    use prism_ecs::prelude::IntoSystemConfigs;
     use prism_transform::GlobalTransform;
 
     use crate::plugin::AudioRuntimePlugin;
@@ -81,10 +108,6 @@ mod tests {
     fn test_app() -> App {
         let mut app = App::new();
         app.add_plugins(AudioRuntimePlugin::default());
-        app.add_systems(
-            Update,
-            (sync_audio_players, apply_player_disposition).chain(),
-        );
         app
     }
 

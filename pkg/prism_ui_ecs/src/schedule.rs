@@ -1,4 +1,4 @@
-//! Bevy scheduler integration that drives an [`EcsBridge`] from a real frame
+//! Prism scheduler integration that drives an [`EcsBridge`] from a real frame
 //! loop.
 //!
 //! The bridge owns `Box<dyn Fn>` reader/writer closures that are **not**
@@ -16,8 +16,9 @@
 //! non-send resource. To obtain both the bridge *and* the rest of the world at
 //! once we use the safe `remove -> call -> reinsert` pattern: taking ownership
 //! of the bridge releases the world borrow, so the subsequent
-//! `pull_all(&World)` / `push_all(&mut World)` call type-checks with no
-//! `unsafe` code.
+//! incremental pull/push calls type-check with no `unsafe` code. An ownership
+//! guard restores the bridge on panic, but never into a replacement World or
+//! over a bridge installed by a callback.
 //!
 //! # Ordering
 //!
@@ -70,8 +71,10 @@
 //! ```
 
 use prism_ecs::prelude::{IntoScheduleConfigs, Schedule, SetConfig, SystemSet, World};
+use prism_ecs::world::WorldId;
 
 use crate::bridge::EcsBridge;
+use crate::cleanup_bridge_observers;
 
 /// System set labels for the Loom synchronisation passes.
 ///
@@ -88,10 +91,11 @@ pub enum LoomSyncSet {
 
 /// Installs `bridge` into `world` as a non-send resource.
 ///
-/// This is a thin, discoverable wrapper around [`World::insert_non_send`]; the
-/// bridge must be installed before [`loom_pull_system`] or [`loom_push_system`]
-/// can act on it. Installing a bridge replaces any previously installed one.
-pub fn insert_bridge(world: &mut World, bridge: EcsBridge) {
+/// The bridge must be installed before the sync systems can act on it.
+/// Replacing a bridge releases the previous bridge's observer registrations.
+pub fn insert_bridge(world: &mut World, mut bridge: EcsBridge) {
+    remove_bridge(world);
+    bridge.detach(world);
     world.insert_non_send(bridge);
 }
 
@@ -100,33 +104,70 @@ pub fn insert_bridge(world: &mut World, bridge: EcsBridge) {
 /// Returns the owned bridge so callers can inspect or reconfigure it, mirroring
 /// [`World::remove_non_send`].
 pub fn remove_bridge(world: &mut World) -> Option<EcsBridge> {
-    world.remove_non_send::<EcsBridge>()
+    let mut bridge = world.remove_non_send::<EcsBridge>()?;
+    bridge.detach(world);
+    Some(bridge)
+}
+
+struct BridgeScope<'w> {
+    world: &'w mut World,
+    identity: WorldId,
+    bridge: Option<EcsBridge>,
+}
+
+impl Drop for BridgeScope<'_> {
+    fn drop(&mut self) {
+        let Some(mut bridge) = self.bridge.take() else {
+            return;
+        };
+        if self.world.id() != self.identity {
+            // Its weak callback leases belonged to the destroyed World.
+            return;
+        }
+        if self.world.contains_non_send::<EcsBridge>() {
+            bridge.detach(self.world);
+        } else {
+            self.world.insert_non_send(bridge);
+        }
+    }
+}
+
+fn with_bridge(world: &mut World, sync: impl FnOnce(&mut EcsBridge, &mut World)) {
+    cleanup_bridge_observers(world);
+    let Some(bridge) = world.remove_non_send::<EcsBridge>() else {
+        return;
+    };
+    let mut scope = BridgeScope {
+        identity: world.id(),
+        world,
+        bridge: Some(bridge),
+    };
+    sync(scope.bridge.as_mut().expect("owned bridge"), scope.world);
 }
 
 /// Exclusive system that runs the bridge's frame-start pull pass.
 ///
 /// It takes ownership of the installed [`EcsBridge`] (releasing the world
-/// borrow), refreshes every bound signal from its component via
-/// [`EcsBridge::pull_all`], and reinstalls the bridge. If no bridge is
+/// borrow), refreshes only notified bindings via
+/// [`EcsBridge::pull_changed`], and reinstalls the bridge. If no bridge is
 /// installed the system is a no-op, so it is always safe to schedule.
 pub fn loom_pull_system(world: &mut World) {
-    if let Some(mut bridge) = world.remove_non_send::<EcsBridge>() {
-        bridge.pull_all(world);
-        world.insert_non_send(bridge);
-    }
+    with_bridge(world, |bridge, world| {
+        // World replacement inside a callback intentionally retires this bridge.
+        let _ = bridge.pull_changed(world);
+    });
 }
 
 /// Exclusive system that runs the bridge's frame-end push pass.
 ///
 /// It takes ownership of the installed [`EcsBridge`] (releasing the world
-/// borrow), writes every two-way signal back into its component via
-/// [`EcsBridge::push_all`], and reinstalls the bridge. If no bridge is
+/// borrow), writes changed two-way signals via
+/// [`EcsBridge::push_changed`], and reinstalls the bridge. If no bridge is
 /// installed the system is a no-op, so it is always safe to schedule.
 pub fn loom_push_system(world: &mut World) {
-    if let Some(bridge) = world.remove_non_send::<EcsBridge>() {
-        bridge.push_all(world);
-        world.insert_non_send(bridge);
-    }
+    with_bridge(world, |bridge, world| {
+        let _ = bridge.push_changed(world);
+    });
 }
 
 /// Adds both Loom sync systems to `schedule` with the correct frame ordering.

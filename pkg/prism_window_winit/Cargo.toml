@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 prism_window = { path = "../prism_window" }
+prism_platform = { path = "../prism_platform" }
 # winit's default features already include rwh_06 (raw-window-handle 0.6) plus
 # the x11/wayland Linux backends; macOS/Windows backends are target-gated.
 winit = "0.30"

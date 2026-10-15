@@ -43,64 +43,54 @@ struct PrismMaterialHeader {
 struct PrismSurfaceParameters {
     base_color: vec4<f32>,
     emission_color: vec4<f32>,
-    // `OpenPBR` `emission_luminance` (nits); radiance = emissive * luminance.
     emission_luminance: f32,
     base_metalness: f32,
     specular_roughness: f32,
-    // `OpenPBR` specular group (see `brdf.wesl::SurfaceSample`).
     specular_weight: f32,
-    specular_color: vec4<f32>,
-    specular_ior: f32,
-    // `OpenPBR` `geometry_thin_walled` (single-interface open surface).
-    thin_walled: f32,
-    // `OpenPBR` `geometry_opacity` in [0, 1].
-    geometry_opacity: f32,
     ambient_occlusion: f32,
     normal_scale: f32,
     alpha_cutoff: f32,
-    // `OpenPBR` base group: `base_weight` scales the base layer and
-    // `diffuse_roughness` drives the Oren-Nayar diffuse lobe.
     base_weight: f32,
     base_diffuse_roughness: f32,
+    specular_color: vec4<f32>,
+    specular_ior: f32,
+    thin_walled: f32,
+    geometry_opacity: f32,
     transmission_weight: f32,
     thickness: f32,
     coat_weight: f32,
     coat_roughness: f32,
-    // OpenPBR `coat_ior` (relative coat index) and `coat_color` (highlight
-    // tint). Mirrors `GpuSurfaceParameters::coat_ior` / `coat_color`.
     coat_ior: f32,
     coat_color: vec4<f32>,
+    coat_roughness_anisotropy: f32,
+    coat_darkening: f32,
     anisotropy: f32,
     anisotropy_rotation: f32,
     fuzz_weight: f32,
+    fuzz_roughness: f32,
+    fuzz_color: vec4<f32>,
     subsurface_weight: f32,
-    // `OpenPBR` subsurface group (see `brdf.wesl::SurfaceSample`).
     subsurface_color: vec4<f32>,
     subsurface_radius: f32,
     subsurface_radius_scale: vec4<f32>,
+    subsurface_scatter_anisotropy: f32,
     index_of_refraction: f32,
     transmission_dispersion_scale: f32,
-    // `OpenPBR` `transmission_color`: tint of the refracted light.
     transmission_color: vec4<f32>,
     transmission_scatter: vec4<f32>,
+    thin_film_weight: f32,
+    thin_film_thickness: f32,
+    thin_film_ior: f32,
     transmission_scatter_anisotropy: f32,
     transmission_dispersion_abbe_number: f32,
-    coat_darkening: f32,
-    subsurface_scatter_anisotropy: f32,
     npr_face_softness: f32,
-    // Per-material NPR modifiers; 1.0 is the frame-global identity.
     npr_stylized_ramp_softness: f32,
     npr_stylized_specular_scale: f32,
     npr_stylized_rim_scale: f32,
-    // Prism glint lobe (§17.6): a discrete microfacet estimator blended into the
-    // specular lobe. `glint_weight == 0` (the default) keeps it inert, so the
-    // fields cost 4 words of übers only for materials that declare the lobe.
     glint_weight: f32,
     glint_roughness: f32,
     glint_density: f32,
     glint_bin_half_width: f32,
-    // Measured (tabulated) BRDF/BTF lobe (§17.6). The table itself is a material
-    // texture (a provider); these are the authored response parameters.
     measured_weight: f32,
     measured_phi_d: f32,
     measured_scale: f32,

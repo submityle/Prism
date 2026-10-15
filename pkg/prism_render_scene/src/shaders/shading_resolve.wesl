@@ -197,7 +197,7 @@ struct ResolveParams {
 const RESOLVE_FLAG_GTAO: u32 = 1u;
 const RESOLVE_FLAG_IBL_SPECULAR: u32 = 2u;
 
-// One compacted work item. Mirrors `ShadingWorkItem` (16 bytes) and the
+// One compacted work item. Mirrors `ShadingWorkItem` (32 bytes) and the
 // `WorkItem` produced by `material_classification.wesl`.
 struct WorkItem {
     pixel_index: u32,
@@ -205,6 +205,16 @@ struct WorkItem {
     shading_class: u32,
     response_kind: u32,
     flags: u32,
+    right_shading_class: u32,
+    right_response_kind: u32,
+    response_meta: u32,
+}
+
+struct CompositionControl {
+    mask: f32,
+    channels: u32,
+    shared_alpha: f32,
+    alpha_rule: u32,
 }
 
 struct ResponseBucket {
@@ -282,10 +292,15 @@ struct MotionMatrices {
 // energy-conserving substitution rather than a double-counting add. Always
 // bound because the resolve writes it every pixel.
 @group(0) @binding(14) var world_restir_direct: texture_storage_2d<rgba16float, write>;
-// 15: structured response written by the resolve producer. A one-element
+// 15: structured left response written by the resolve producer. A one-element
 // fallback is bound when the resident per-view allocation is not ready; the
 // producer checks the array length before writing.
 @group(0) @binding(15) var<storage, read_write> response_left: array<ResponseOutput>;
+// 16: optional right response for a continuous two-arm plan.
+@group(0) @binding(16) var<storage, read_write> response_right: array<ResponseOutput>;
+// 17: per-pixel resident composition control. Single-arm work writes a neutral
+// control so a stale split control can never survive a material change.
+@group(0) @binding(17) var<storage, read_write> response_controls: array<CompositionControl>;
 
 // --- group 1: material tables (shared MaterialBindGroup layout) ---
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
@@ -2178,6 +2193,162 @@ fn shade_cache_sample(
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 
+struct ResponseArm {
+    valid: u32,
+    registered: u32,
+    evaluated: DirectResponse,
+    indirect_diffuse: vec3<f32>,
+    reflection: vec3<f32>,
+    output: ResponseOutput,
+}
+
+fn neutral_response_output() -> ResponseOutput {
+    var output: ResponseOutput;
+    output.words = array<f32, 16>(
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    );
+    return output;
+}
+
+fn evaluate_response_arm(
+    response_kind: u32,
+    response_program_id: u32,
+    surface: SurfaceSample,
+    lit: SurfaceSample,
+    frame: ShadingFrame,
+    geometry: SurfaceSampleGeometry,
+    parameters: PrismSurfaceParameters,
+    material_header: PrismMaterialHeader,
+    indirect_result: IndirectResult,
+    indirect: vec3<f32>,
+    emissive: vec3<f32>,
+    env: LightEnvironment,
+    slice: ClusterSlice,
+    measured_slot: u32,
+    measured_params: vec4<f32>,
+    face_forward: vec3<f32>,
+    face_right: vec3<f32>,
+    face_up: vec3<f32>,
+    view_position: vec3<f32>,
+    coord: vec2<u32>,
+    width: u32,
+    height: u32,
+    frame_index: u32,
+) -> ResponseArm {
+    var arm = ResponseArm(
+        0u,
+        0u,
+        DirectResponse(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0)),
+        vec3<f32>(0.0),
+        vec3<f32>(0.0),
+        neutral_response_output(),
+    );
+    if response_kind > RESPONSE_REGISTERED {
+        return arm;
+    }
+    if response_kind == RESPONSE_REGISTERED {
+        arm.output = registered_response(
+            surface,
+            frame,
+            geometry,
+            parameters,
+            material_header,
+            indirect_result,
+            view_position,
+            coord,
+            vec2<u32>(width, height),
+            frame_index,
+            response_program_id,
+            material_header.execution_permutation_low,
+            material_header.execution_permutation_high,
+        );
+        arm.valid = 1u;
+        arm.registered = 1u;
+        return arm;
+    }
+
+    var face = face_shadow_disabled();
+    if response_kind == RESPONSE_NPR
+        && (material_header.feature_flags & MATERIAL_FEATURE_FACE_SHADOW) != 0u {
+        face.enabled = 1u;
+        face.softness = parameters.npr_face_softness;
+        face.forward = face_forward;
+        face.right = face_right;
+        face.up = face_up;
+        face.tex_offset = material_header.texture_offset;
+        face.tex_count = material_header.texture_count;
+        face.uv = geometry.uv;
+    }
+
+    var evaluated: DirectResponse;
+    var response_indirect_diffuse = indirect_result.diffuse;
+    var response_reflection = indirect_result.env_specular;
+    switch response_kind {
+        case RESPONSE_LIT: {
+            if material_header.render_domain == 3u {
+                evaluated = shade_hair(lit, frame, geometry.position, indirect, emissive, env, slice);
+            } else if (material_header.feature_flags & (1u << 8u)) != 0u {
+                evaluated = shade_water(lit, frame, geometry.position, indirect, emissive, env, slice);
+            } else {
+                evaluated = shade_principled(
+                    lit,
+                    frame,
+                    geometry.position,
+                    indirect,
+                    emissive,
+                    env,
+                    slice,
+                    measured_slot,
+                    measured_params,
+                );
+            }
+        }
+        case RESPONSE_UNLIT: {
+            evaluated = DirectResponse(surface.base_color + emissive, surface.base_color, vec3<f32>(0.0));
+            response_indirect_diffuse = vec3<f32>(0.0);
+            response_reflection = vec3<f32>(0.0);
+        }
+        case RESPONSE_NPR: {
+            evaluated = shade_toon(
+                lit,
+                frame,
+                geometry.position,
+                indirect,
+                emissive,
+                env,
+                slice,
+                parameters,
+                face,
+            );
+        }
+        default: { return arm; }
+    }
+    arm.evaluated = evaluated;
+    arm.indirect_diffuse = response_indirect_diffuse;
+    arm.reflection = response_reflection;
+    arm.output = ResponseOutput(array<f32, 16>(
+        evaluated.direct.x,
+        evaluated.direct.y,
+        evaluated.direct.z,
+        response_indirect_diffuse.x,
+        response_indirect_diffuse.y,
+        response_indirect_diffuse.z,
+        response_reflection.x,
+        response_reflection.y,
+        response_reflection.z,
+        evaluated.transmission.x,
+        evaluated.transmission.y,
+        evaluated.transmission.z,
+        emissive.x,
+        emissive.y,
+        emissive.z,
+        clamp(surface.geometry_opacity, 0.0, 1.0),
+    ));
+    arm.valid = 1u;
+    return arm;
+}
+
 @compute @workgroup_size(64)
 fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let local = id.x;
@@ -2201,6 +2372,13 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let response_kind = item.response_kind;
     if response_kind > RESPONSE_REGISTERED {
+        return;
+    }
+    let split_response = item.right_shading_class != 0xffffffffu
+        && item.response_meta != 0xffffffffu;
+    if split_response
+        && (item.right_shading_class >= arrayLength(&response_buckets)
+            || item.right_response_kind > RESPONSE_REGISTERED) {
         return;
     }
 
@@ -2604,99 +2782,110 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     var response_program_id = 0u;
     if params.shading_class < arrayLength(&response_buckets) {
         response_program_id = response_buckets[params.shading_class].program_id;
+    } else {
+        return;
     }
-    var evaluated: DirectResponse;
-    var response_indirect_diffuse = indirect_result.diffuse;
-    var response_reflection = indirect_result.env_specular;
-    switch response_kind {
-        case RESPONSE_LIT: {
-            if material_header.render_domain == 3u {
-                evaluated = shade_hair(lit, frame, geometry.position, indirect, emissive, env, slice);
-            } else if (material_header.feature_flags & (1u << 8u)) != 0u {
-                evaluated = shade_water(lit, frame, geometry.position, indirect, emissive, env, slice);
-            } else {
-                evaluated = shade_principled(
-                    lit,
-                    frame,
-                    geometry.position,
-                    indirect,
-                    emissive,
-                    env,
-                    slice,
-                    measured_slot,
-                    measured_params,
-                );
-            }
-        }
-        case RESPONSE_UNLIT: {
-            evaluated = DirectResponse(surface.base_color + emissive, surface.base_color, vec3<f32>(0.0));
-            response_indirect_diffuse = vec3<f32>(0.0);
-            response_reflection = vec3<f32>(0.0);
-        }
-        case RESPONSE_NPR: {
-            var face = face_shadow_disabled();
-            if (material_header.feature_flags & MATERIAL_FEATURE_FACE_SHADOW) != 0u {
-                face.enabled = 1u;
-                face.softness = parameters.npr_face_softness;
-                face.forward = face_forward;
-                face.right = face_right;
-                face.up = face_up;
-                face.tex_offset = material_header.texture_offset;
-                face.tex_count = material_header.texture_count;
-                face.uv = geometry.uv;
-            }
-            evaluated = shade_toon(lit, frame, geometry.position, indirect, emissive, env, slice, parameters, face);
-        }
-        case RESPONSE_REGISTERED: {
-            let registered = registered_response(
-                surface,
-                frame,
-                geometry,
-                parameters,
-                material_header,
-                indirect_result,
-                params.view_position.xyz,
-                vec2<u32>(u32(coord.x), u32(coord.y)),
-                vec2<u32>(params.width, params.height),
-                params.frame_index,
-                response_program_id,
-                material_header.execution_permutation_low,
-                material_header.execution_permutation_high,
-            );
-            if item.pixel_index < arrayLength(&response_left) {
-                response_left[item.pixel_index] = registered;
-            }
-            textureStore(scene_color, coord, vec4<f32>(
-                registered.words[12], registered.words[13], registered.words[14], 1.0));
+    var right_program_id = 0u;
+    if split_response {
+        right_program_id = response_buckets[item.right_shading_class].program_id;
+    }
+    let left_arm = evaluate_response_arm(
+        response_kind,
+        response_program_id,
+        surface,
+        lit,
+        frame,
+        geometry,
+        parameters,
+        material_header,
+        indirect_result,
+        indirect,
+        emissive,
+        env,
+        slice,
+        measured_slot,
+        measured_params,
+        face_forward,
+        face_right,
+        face_up,
+        params.view_position.xyz,
+        vec2<u32>(u32(coord.x), u32(coord.y)),
+        params.width,
+        params.height,
+        params.frame_index,
+    );
+    if left_arm.valid == 0u {
+        return;
+    }
+    var right_arm = ResponseArm(
+        1u,
+        0u,
+        left_arm.evaluated,
+        left_arm.indirect_diffuse,
+        left_arm.reflection,
+        left_arm.output,
+    );
+    if split_response {
+        right_arm = evaluate_response_arm(
+            item.right_response_kind,
+            right_program_id,
+            surface,
+            lit,
+            frame,
+            geometry,
+            parameters,
+            material_header,
+            indirect_result,
+            indirect,
+            emissive,
+            env,
+            slice,
+            measured_slot,
+            measured_params,
+            face_forward,
+            face_right,
+            face_up,
+            params.view_position.xyz,
+            vec2<u32>(u32(coord.x), u32(coord.y)),
+            params.width,
+            params.height,
+            params.frame_index,
+        );
+        if right_arm.valid == 0u {
             return;
         }
-        default: { return; }
+    }
+
+    if item.pixel_index < arrayLength(&response_left) {
+        response_left[item.pixel_index] = left_arm.output;
+    }
+    if item.pixel_index < arrayLength(&response_right) {
+        response_right[item.pixel_index] = right_arm.output;
+    }
+    if item.pixel_index < arrayLength(&response_controls) {
+        var control = CompositionControl(
+            0.0,
+            0u,
+            left_arm.output.words[15],
+            1u,
+        );
+        if split_response {
+            let mask_word = item.response_meta & 0xffffu;
+            control.mask = f32(mask_word) / 65535.0;
+            control.channels = item.response_meta >> 16u;
+        }
+        response_controls[item.pixel_index] = control;
     }
 
     // Each contribution is accumulated at its source. In particular Unlit
     // exports no lighting channels and transmission is not folded into direct.
-    let color = evaluated.radiance;
-    var response: ResponseOutput;
-    response.words = array<f32, 16>(
-        evaluated.direct.x,
-        evaluated.direct.y,
-        evaluated.direct.z,
-        response_indirect_diffuse.x,
-        response_indirect_diffuse.y,
-        response_indirect_diffuse.z,
-        response_reflection.x,
-        response_reflection.y,
-        response_reflection.z,
-        evaluated.transmission.x,
-        evaluated.transmission.y,
-        evaluated.transmission.z,
-        emissive.x,
-        emissive.y,
-        emissive.z,
-        clamp(surface.geometry_opacity, 0.0, 1.0),
-    );
-    if item.pixel_index < arrayLength(&response_left) {
-        response_left[item.pixel_index] = response;
+    var color = left_arm.evaluated.radiance;
+    if left_arm.registered != 0u {
+        color = vec3<f32>(
+            left_arm.output.words[12],
+            left_arm.output.words[13],
+            left_arm.output.words[14],
+        );
     }
     textureStore(scene_color, coord, vec4<f32>(color, 1.0));
     // SSR energy-conservation exports: the IBL specular this pixel already

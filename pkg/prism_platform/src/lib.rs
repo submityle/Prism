@@ -158,6 +158,8 @@ pub mod topology;
 ///
 /// Pure `core`+`alloc`; available in every build configuration.
 pub mod security;
+/// Timestamped host suspend/resume events and honest target capability.
+pub mod suspend;
 
 #[cfg(feature = "std")]
 pub use aio::{AioError, AioQueue, Completion, IoPriority, ReadOp, Result as AioResult};
@@ -185,6 +187,7 @@ pub use security::{
 };
 #[cfg(feature = "std")]
 pub use stdio::{StandardError, StandardInput, StandardOutput, Stream};
+pub use suspend::{suspend_capability, PlatformSuspendCapability, SuspendEvent, SuspendEventKind};
 #[cfg(feature = "std")]
 pub use thread::{
     affinity_supported, current_id, hardware_concurrency, set_current_thread_affinity,

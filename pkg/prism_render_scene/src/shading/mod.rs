@@ -10,6 +10,7 @@ mod composite;
 pub mod composition;
 mod ddgi;
 mod dof;
+mod execution;
 mod exposure;
 mod film_grain;
 mod gamut_map;

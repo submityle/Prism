@@ -12,16 +12,21 @@
 //!
 //! This makes rollback history cost scale with *change*, not world size: keep
 //! one anchor [`WorldSnapshot`] plus a chain of deltas, and
-//! [`apply`](SnapshotDelta::apply) reconstructs any target snapshot byte- and
-//! tick-identically to a direct capture (design §20: 快照 roundtrip 等价).
+//! [`apply`](SnapshotDelta::apply) reconstructs the captured target's values and
+//! ticks using its clone/comparison contracts (design §20: 快照 roundtrip 等价).
+//! Explicit immutable chunks use buffer identity, without value comparisons or
+//! extra clones. A new dirty buffer is retained even if some individual values
+//! compare equal, preserving its capture provenance for subsequent frames.
+//! Clone-only cells without typed comparison glue are conservatively fresh.
+//! Metadata remains proportional to holders; these are not byte-cost metrics.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::change::Tick;
 use crate::collections::HashMap;
-use crate::component::{CloneFn, ComponentId, DropFn, SnapshotHashFn, StorageType};
+use crate::component::ComponentId;
 use crate::entity::EntitiesState;
-use core::alloc::Layout;
 
 use super::column::SnapshotColumn;
 use super::resource::{clone_resources, SnapshotResource};
@@ -44,16 +49,6 @@ enum CellSource {
 struct ColumnDelta {
     /// Which component this column captures (matches the target column).
     component: ComponentId,
-    /// How the component is stored in the live world (table vs sparse set).
-    storage: StorageType,
-    /// The component's memory layout.
-    layout: Layout,
-    /// Type-erased clone glue (shared with the base/target columns).
-    clone: CloneFn,
-    /// Type-erased drop glue carried by any reconstructed column.
-    drop: Option<DropFn>,
-    /// Optional deterministic hash glue.
-    hash: Option<SnapshotHashFn>,
     /// Owning-entity index (into the target snapshot's entity list) for each
     /// holder, ascending — identical to the target column's `rows`.
     target_rows: Vec<u32>,
@@ -68,6 +63,12 @@ struct ColumnDelta {
 /// base, so a rollback history costs memory ∝ change. Reconstruct the target
 /// with [`apply`](Self::apply) against the same base.
 pub struct SnapshotDelta {
+    base_identity: Arc<()>,
+    target_identity: Arc<()>,
+    base_world_id: crate::world::WorldId,
+    base_schema_generation: u64,
+    world_id: crate::world::WorldId,
+    schema_generation: u64,
     /// The target world change tick.
     change_tick: Tick,
     /// The target world one-shot-read baseline tick.
@@ -80,9 +81,10 @@ pub struct SnapshotDelta {
     columns: Vec<ColumnDelta>,
     /// The target's opt-in resources, copied in full (design §14/§16.5).
     /// Resources are singletons, so they are not delta-compressed — carrying
-    /// them verbatim keeps a reconstructed snapshot byte/tick-identical to a
+    /// them verbatim keeps a reconstructed snapshot value/tick-equivalent to a
     /// direct capture at negligible cost.
     resources: Vec<SnapshotResource>,
+    relations: super::SnapshotRelations,
 }
 
 impl SnapshotDelta {
@@ -92,8 +94,9 @@ impl SnapshotDelta {
         self.columns.len()
     }
 
-    /// The number of cells this delta *owns* a fresh copy of (changed or added
-    /// relative to the base). This is the metric rollback memory scales with.
+    /// The number of fresh logical cells (changed, newly added, or in a newly
+    /// captured immutable chunk). Shared-buffer references need not own a new
+    /// value allocation, so this is not an exact retained-byte count.
     pub fn changed_cell_count(&self) -> usize {
         self.columns.iter().map(|c| c.fresh.len()).sum()
     }
@@ -113,26 +116,34 @@ impl SnapshotDelta {
 
     /// Reconstruct the target [`WorldSnapshot`] from this delta against `base`.
     ///
-    /// The result is byte- and tick-identical to the snapshot the delta was
+    /// The result preserves the values and ticks of the snapshot the delta was
     /// [diffed](WorldSnapshot::diff) from (design §20 roundtrip 等价): unchanged
-    /// cells are cloned from `base`'s matching column, changed/added cells from
-    /// the delta's own `fresh` store.
+    /// cells come from `base`'s matching column, changed/added cells from the
+    /// delta's own `fresh` store. Immutable buffers share ownership; Clone-only
+    /// cells are cloned into independently owned storage.
     ///
     /// # Panics
-    /// Panics if `base` is not the snapshot this delta was diffed against (a
-    /// [`CellSource::Base`] cell references a column `base` does not hold).
+    /// Panics before cloning any value if `base` does not have the exact capture
+    /// lineage this delta was diffed against. An independently captured snapshot
+    /// is rejected even if its hash and values match. Applying a preceding delta
+    /// preserves its target lineage, so reconstructed snapshots support chains.
     pub fn apply(&self, base: &WorldSnapshot) -> WorldSnapshot {
+        assert!(
+            Arc::ptr_eq(&base.identity, &self.base_identity),
+            "delta requires the exact base snapshot it was diffed against"
+        );
+        assert_eq!(
+            base.world_id, self.base_world_id,
+            "delta base belongs to another world"
+        );
+        assert_eq!(
+            base.schema_generation, self.base_schema_generation,
+            "delta base schema mismatch"
+        );
         let mut columns = Vec::with_capacity(self.columns.len());
         for cd in &self.columns {
             let base_col = base.columns.iter().find(|c| c.component == cd.component);
-            let mut col = SnapshotColumn::new(
-                cd.component,
-                cd.storage,
-                cd.layout,
-                cd.clone,
-                cd.drop,
-                cd.hash,
-            );
+            let mut col = cd.fresh.empty_like();
             for (i, &target_row) in cd.target_rows.iter().enumerate() {
                 match cd.source[i] {
                     CellSource::Base(bs) => {
@@ -155,29 +166,38 @@ impl SnapshotDelta {
         }
 
         WorldSnapshot {
+            identity: self.target_identity.clone(),
+            world_id: self.world_id,
+            schema_generation: self.schema_generation,
             change_tick: self.change_tick,
             last_change_tick: self.last_change_tick,
             entities_state: self.entities_state.clone(),
             entities: self.entities.clone(),
             columns,
             resources: clone_resources(&self.resources),
+            relations: self.relations.clone(),
         }
     }
 }
 
 impl WorldSnapshot {
     /// Encode the difference from `self` (the base) to `target` as a
-    /// [`SnapshotDelta`] (design §14). Only cells whose value *or* ticks differ
-    /// from the base — plus cells for components the base lacks — are owned by
-    /// the delta; everything else back-references the base. Components the
-    /// target no longer holds simply vanish (not emitted).
+    /// [`SnapshotDelta`] (design §14). Unchanged immutable buffer cells or
+    /// Clone-only cells proven equal by typed comparison back-reference the
+    /// base. New immutable buffers remain fresh, preserving storage provenance.
+    /// Missing/incompatible comparison glue on Clone-only cells is conservative.
+    /// Components the target no longer holds simply vanish (not emitted).
     pub fn diff(&self, target: &WorldSnapshot) -> SnapshotDelta {
         let mut columns = Vec::with_capacity(target.columns.len());
+        let same_schema =
+            self.world_id == target.world_id && self.schema_generation == target.schema_generation;
 
         // Target columns are already ascending by component id, so the delta's
         // columns inherit that deterministic order.
         for tc in &target.columns {
-            let base_col = self.columns.iter().find(|c| c.component == tc.component);
+            let base_col = same_schema
+                .then(|| self.columns.iter().find(|c| c.component == tc.component))
+                .flatten();
 
             // Map base owning-entity bits -> base holder slot, for O(1) reuse
             // lookup. Empty when the base lacks this component entirely.
@@ -188,14 +208,7 @@ impl WorldSnapshot {
                 }
             }
 
-            let mut fresh = SnapshotColumn::new(
-                tc.component,
-                tc.storage,
-                tc.layout,
-                tc.clone,
-                tc.drop,
-                tc.hash,
-            );
+            let mut fresh = tc.empty_like();
             let mut target_rows: Vec<u32> = Vec::with_capacity(tc.rows.len());
             let mut source: Vec<CellSource> = Vec::with_capacity(tc.rows.len());
 
@@ -206,9 +219,10 @@ impl WorldSnapshot {
                         base_col.expect("base_slot_of is only populated when base_col is Some");
                     let ticks_eq = bc.added[bslot] == tc.added[tslot]
                         && bc.changed[bslot] == tc.changed[tslot];
-                    // SAFETY: `bslot < bc.len()` and `tslot < tc.len()`.
-                    let bytes_eq = unsafe { bc.value_bytes(bslot) == tc.value_bytes(tslot) };
-                    ticks_eq && bytes_eq
+                    ticks_eq
+                        && (bc.shares_value(bslot, tc, tslot)
+                            || (!tc.uses_shared_values()
+                                && bc.value_eq(bslot, tc, tslot) == Some(true)))
                 });
 
                 match reuse {
@@ -229,11 +243,6 @@ impl WorldSnapshot {
 
             columns.push(ColumnDelta {
                 component: tc.component,
-                storage: tc.storage,
-                layout: tc.layout,
-                clone: tc.clone,
-                drop: tc.drop,
-                hash: tc.hash,
                 target_rows,
                 source,
                 fresh,
@@ -241,12 +250,19 @@ impl WorldSnapshot {
         }
 
         SnapshotDelta {
+            base_identity: self.identity.clone(),
+            target_identity: target.identity.clone(),
+            base_world_id: self.world_id,
+            base_schema_generation: self.schema_generation,
+            world_id: target.world_id,
+            schema_generation: target.schema_generation,
             change_tick: target.change_tick,
             last_change_tick: target.last_change_tick,
             entities_state: target.entities_state.clone(),
             entities: target.entities.clone(),
             columns,
             resources: clone_resources(&target.resources),
+            relations: target.relations.clone(),
         }
     }
 }

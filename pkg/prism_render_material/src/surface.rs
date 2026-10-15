@@ -998,7 +998,10 @@ mod tests {
             (LobeMask::SHEEN, size_of::<GpuSheenLobe>()),
             (LobeMask::SUBSURFACE, size_of::<GpuSubsurfaceLobe>()),
             (LobeMask::TRANSMISSION, size_of::<GpuTransmissionLobe>()),
+            (LobeMask::THIN_FILM, size_of::<GpuThinFilmLobe>()),
             (LobeMask::NPR_FACE, size_of::<GpuNprFaceLobe>()),
+            (LobeMask::GLINT, size_of::<GpuGlintLobe>()),
+            (LobeMask::MEASURED_BRDF, size_of::<GpuMeasuredBrdfLobe>()),
         ];
         for (bit, bytes) in expected {
             assert_eq!(

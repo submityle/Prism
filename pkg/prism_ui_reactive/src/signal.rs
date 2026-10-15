@@ -3,6 +3,7 @@
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
+use crate::invalidation::{SignalChangeQueue, SignalSubscribers, SignalSubscription};
 use crate::node::{NodeId, NodeKind, State};
 use crate::runtime::Runtime;
 
@@ -16,6 +17,7 @@ pub struct Signal<T: 'static> {
     runtime: Runtime,
     id: NodeId,
     value: Rc<RefCell<T>>,
+    subscribers: Rc<RefCell<SignalSubscribers>>,
 }
 
 impl<T: 'static> Clone for Signal<T> {
@@ -24,6 +26,7 @@ impl<T: 'static> Clone for Signal<T> {
             runtime: self.runtime.clone(),
             id: self.id,
             value: self.value.clone(),
+            subscribers: self.subscribers.clone(),
         }
     }
 }
@@ -35,12 +38,21 @@ impl<T: 'static> Signal<T> {
             runtime: runtime.clone(),
             id,
             value: Rc::new(RefCell::new(value)),
+            subscribers: Rc::default(),
         }
     }
 
     /// The runtime this signal belongs to.
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
+    }
+
+    /// Subscribe to value-free write invalidations, including one initial
+    /// notification. Repeated writes coalesce in the queue, independently of
+    /// reactive batching. Drop the lease to detach. Notifications are enqueued
+    /// before effects run, including when a mutation unwinds after writing.
+    pub fn subscribe_changes(&self, queue: &SignalChangeQueue) -> SignalSubscription {
+        SignalSubscribers::subscribe(&self.subscribers, queue)
     }
 
     /// Read a clone of the value, recording a dependency on this signal.
@@ -73,13 +85,23 @@ impl<T: 'static> Signal<T> {
 
     /// Replace the value and notify dependents unconditionally.
     pub fn set(&self, value: T) {
-        *self.value.borrow_mut() = value;
+        {
+            let mut current = self.value.borrow_mut();
+            let _notify = NotifyOnDrop(&self.subscribers);
+            *current = value;
+        }
         self.runtime.notify_changed(self.id);
     }
 
-    /// Mutate the value in place through `f`, then notify dependents.
+    /// Mutate the value in place through `f`, then notify dependents. If `f`
+    /// panics, deferred change queues are still invalidated (the value may have
+    /// changed); reactive effects are not executed while unwinding.
     pub fn update(&self, f: impl FnOnce(&mut T)) {
-        f(&mut self.value.borrow_mut());
+        {
+            let mut current = self.value.borrow_mut();
+            let _notify = NotifyOnDrop(&self.subscribers);
+            f(&mut current);
+        }
         self.runtime.notify_changed(self.id);
     }
 
@@ -97,6 +119,15 @@ impl<T: 'static> Signal<T> {
         }
         self.set(value);
         true
+    }
+}
+
+// Only queue bookkeeping runs from Drop: no user callbacks or value access.
+struct NotifyOnDrop<'a>(&'a RefCell<SignalSubscribers>);
+
+impl Drop for NotifyOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.borrow().notify();
     }
 }
 

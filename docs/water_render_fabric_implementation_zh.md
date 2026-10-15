@@ -19,7 +19,7 @@
 | WaterMaskBlend | Graphics | surface/foam/spray 读取，response left/right/controls/coverage 写入 | 是 | 否 |
 | WaterComposition | Compute | left 写入，right/controls/coverage 读取，auxiliary 与 scene color 写入 | 是 | 否 |
 
-\`WaterFabricPlan::is_link_complete()\` 校验服务闭包、四个 resident pass、队列、访问集合和依赖顺序。 \`legacy_hybrid_entry = true\` 仅表示四个 legacy shader entry 与 color/motion MRT 仍是稳定 ABI；它不表示 response producer 未接通。
+\`WaterFabricPlan::is_link_complete()\` 校验服务闭包、四个 resident pass、队列、访问集合和依赖顺序。MaskBlend 现在直接使用 \`water_surface_fs_mask_blend\` resident entry；color/motion MRT 与 typed response planes 在同一生产路径中保持稳定 ABI。
 
 MaskBlend 的 producer 访问集合明确包含：
 

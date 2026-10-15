@@ -194,7 +194,10 @@ pub(crate) fn prepare_material_classification_bind_groups(
 
 pub(crate) fn dispatch_material_classification(
     settings: Res<super::runtime::PrismShadingSettings>,
-    view: ViewQuery<&super::resources::ViewShadingBuffers>,
+    view: ViewQuery<(
+        &super::resources::ViewShadingBuffers,
+        Option<&super::composition::ViewResponseComposition>,
+    )>,
     material_bindings: Res<crate::MaterialBindGroup>,
     materials: Res<crate::material::runtime::RenderMaterialRegistry>,
     pipeline: Res<MaterialClassificationPipeline>,
@@ -204,7 +207,7 @@ pub(crate) fn dispatch_material_classification(
     if !settings.enable_visibility_buffer {
         return;
     }
-    let buffers = view.into_inner();
+    let (buffers, responses) = view.into_inner();
     let (Some(input), Some(output), Some(materials_group)) = (
         buffers.input_bind_group.as_ref(),
         buffers.output_bind_group.as_ref(),
@@ -235,6 +238,9 @@ pub(crate) fn dispatch_material_classification(
     }
     let groups = classification_dispatch(params.pixel_count).workgroups_x;
     buffers.clear_transient_state(ctx.command_encoder());
+    if let Some(responses) = responses {
+        responses.clear_frame_outputs(ctx.command_encoder());
+    }
     {
         let mut pass = ctx
             .command_encoder()

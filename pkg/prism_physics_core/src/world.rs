@@ -13,6 +13,8 @@ use crate::pipeline::detect_contacts;
 use crate::soft::rigid_coupling::{
     couple_cloth_to_rigid, ClothRigidCouplingConfig, CouplingReport,
 };
+use crate::soft::solver::{SoftContacts, SoftSolver};
+use crate::soft::{SoftBody, SoftBodyHandle, SoftBodyStorage};
 use crate::state::body::BodyDesc;
 use crate::state::handle::BodyHandle;
 use crate::state::storage::BodyStorage;
@@ -35,6 +37,9 @@ pub struct PhysicsWorld {
     /// Opt-in configuration for the cloth-rigid two-way coupling stage.
     /// Defaults to disabled so rigid-only worlds stay bit-identical.
     pub cloth_coupling: ClothRigidCouplingConfig,
+    /// World-owned deformable state. Entries are advanced by
+    /// [`crate::solver::XpbdSolver`] in deterministic slot order.
+    pub soft_bodies: SoftBodyStorage,
 }
 
 impl PhysicsWorld {
@@ -48,6 +53,7 @@ impl PhysicsWorld {
             config,
             contact_events: ContactEventTracker::new(),
             cloth_coupling: ClothRigidCouplingConfig::disabled(),
+            soft_bodies: SoftBodyStorage::new(),
         }
     }
 
@@ -61,6 +67,20 @@ impl PhysicsWorld {
     /// Spawns a body described by `desc`, returning its handle.
     pub fn spawn(&mut self, desc: BodyDesc) -> BodyHandle {
         self.bodies.insert(desc)
+    }
+
+    /// Inserts a project-independent soft body into world-owned storage.
+    ///
+    /// The body may represent cloth, rope, hair, a volumetric body, or any
+    /// other particle/constraint authoring. Its state is then advanced by the
+    /// world solver at the same fixed substep boundary as rigid bodies.
+    pub fn spawn_soft_body(&mut self, body: SoftBody) -> SoftBodyHandle {
+        self.soft_bodies.insert(body)
+    }
+
+    /// Removes a world-owned soft body and invalidates its handle.
+    pub fn remove_soft_body(&mut self, handle: SoftBodyHandle) -> bool {
+        self.soft_bodies.remove(handle)
     }
 
     /// Spawns a joint described by `desc`, returning its handle.
@@ -88,6 +108,57 @@ impl PhysicsWorld {
         dt: Real,
     ) -> CouplingReport {
         couple_cloth_to_rigid(self, positions, inverse_masses, dt)
+    }
+
+    /// Runs the existing two-way coupling driver against one world-owned soft
+    /// body. The body is temporarily detached from storage only to satisfy the
+    /// borrow boundary between particle state and rigid-world writeback; its
+    /// handle and deterministic slot are unchanged.
+    pub fn resolve_soft_body_coupling(
+        &mut self,
+        handle: SoftBodyHandle,
+        dt: Real,
+    ) -> Option<CouplingReport> {
+        let mut body = self.soft_bodies.take(handle)?;
+        let (positions, inverse_masses) = body.particles.positions_and_inverse_masses_mut();
+        let report = self.resolve_cloth_coupling(positions, inverse_masses, dt);
+        self.soft_bodies.put(handle, body);
+        Some(report)
+    }
+
+    /// Advances one fixed substep for every world-owned soft body.
+    ///
+    /// The order is fixed: soft prediction and internal projection, proxy
+    /// gather/two-way coupling/reaction writeback when enabled, then particle
+    /// velocity recovery. Empty storage is a no-op. With coupling disabled the
+    /// rigid-only path is not entered and existing rigid worlds remain
+    /// bit-identical.
+    pub(crate) fn step_soft_bodies_substep(&mut self, h: Real) {
+        let handles: Vec<SoftBodyHandle> = self.soft_bodies.handles().collect();
+        let solver = SoftSolver::new();
+        for handle in handles {
+            let Some(mut body) = self.soft_bodies.take(handle) else {
+                continue;
+            };
+            solver.step_substep_before_velocity_recovery(
+                &mut body.particles,
+                &mut body.constraints,
+                &body.config,
+                &SoftContacts::EMPTY,
+                h,
+            );
+            self.soft_bodies.put(handle, body);
+
+            if self.cloth_coupling.is_enabled() {
+                let _ = self.resolve_soft_body_coupling(handle, h);
+            }
+
+            let Some(mut body) = self.soft_bodies.take(handle) else {
+                continue;
+            };
+            solver.recover_substep_velocities(&mut body.particles, h);
+            self.soft_bodies.put(handle, body);
+        }
     }
 
     /// Detects the current contacts and diffs them against the previous call to

@@ -23,11 +23,10 @@ use super::distance::NumaDistanceMatrix;
 /// ascending node index. `from` itself ranks first (its self-distance is the
 /// row minimum). Returns an empty vector if `from` is out of range.
 pub fn rank_nodes_by_distance(matrix: &NumaDistanceMatrix, from: NumaNodeId) -> Vec<NumaNodeId> {
-    let n = matrix.node_count();
-    if (from.index() as usize) >= n {
+    if matrix.get(from, from).is_none() {
         return Vec::new();
     }
-    let mut nodes: Vec<NumaNodeId> = (0..n as u16).map(NumaNodeId::new).collect();
+    let mut nodes = matrix.node_ids().to_vec();
     nodes.sort_by_key(|&node| (matrix.distance(from, node), node.index()));
     nodes
 }
@@ -52,7 +51,7 @@ pub fn nearest_node(
 /// Choose a target node for work homed on `home`, balancing distance against
 /// current load.
 ///
-/// `loads[i]` is the current load of node `i`; only the first
+/// `loads[i]` is the current load of `matrix.node_ids()[i]`; only the first
 /// `min(loads.len(), node_count)` nodes are considered. The winner minimizes
 /// `(distance(home, node), load, index)`: nearest first, then least loaded,
 /// then lowest index — a total, deterministic order. Returns `None` if `home`
@@ -63,14 +62,17 @@ pub fn choose_balanced_node(
     loads: &[u32],
 ) -> Option<NumaNodeId> {
     let n = matrix.node_count().min(loads.len());
-    if n == 0 || (home.index() as usize) >= matrix.node_count() {
+    if n == 0 || matrix.get(home, home).is_none() {
         return None;
     }
-    (0..n as u16)
-        .map(NumaNodeId::new)
-        .map(|node| {
+    matrix
+        .node_ids()
+        .iter()
+        .copied()
+        .take(n)
+        .zip(loads)
+        .map(|(node, &load)| {
             let distance = matrix.distance(home, node);
-            let load = loads[node.index() as usize];
             (distance, load, node.index(), node)
         })
         .min_by_key(|&(distance, load, idx, _)| (distance, load, idx))

@@ -425,6 +425,16 @@ impl ViewResponseComposition {
         encoder.clear_buffer(&self.water_coverage, 0, None);
     }
 
+    /// Clears per-frame producer outputs that are not guaranteed to be
+    /// overwritten for uncovered pixels. In particular, composition controls
+    /// must not retain a prior split plan when the current visibility buffer
+    /// contains a single-arm or background pixel.
+    pub(crate) fn clear_frame_outputs(&self, encoder: &mut CommandEncoder) {
+        encoder.clear_buffer(&self.right, 0, None);
+        encoder.clear_buffer(&self.controls, 0, None);
+        encoder.clear_buffer(&self.water_coverage, 0, None);
+    }
+
     /// Typed storage buffers filled by GPU producers. Auxiliary is absent when empty.
     pub fn plane(&self, plane: CompositionPlane) -> Option<&Buffer> {
         match plane {

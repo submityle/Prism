@@ -1,9 +1,9 @@
-//! Archetypes: the canonical grouping of entities by their exact component set.
+//! Archetypes: canonical grouping by components, shared values and relation pairs.
 //!
 //! An [`Archetype`] owns the [`Table`] that stores every entity sharing one
-//! [`ComponentSet`]. The [`Archetypes`] registry maps each distinct component
-//! set to a stable [`ArchetypeId`] so that any two entities with the same
-//! components land in the same archetype and are iterated together.
+//! [`ComponentSet`], shared bindings and fragmenting [`RelationPair`]s. The
+//! [`Archetypes`] registry maps each distinct identity to a stable
+//! [`ArchetypeId`] so entities with the same identity are iterated together.
 //!
 //! Structural changes (adding/removing a component) move an entity from one
 //! archetype to another. For M0 the destination archetype is resolved by a
@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 
 use crate::collections::HashMap;
 use crate::component::{ComponentId, ComponentSet, Components};
+use crate::entity::Entity;
 use crate::storage::{SharedValue, SharedValueId, Table};
 
 /// A stable, dense identifier for an [`Archetype`] within a world.
@@ -52,13 +53,19 @@ impl ArchetypeId {
 /// is canonical.
 pub type SharedBinding = (ComponentId, SharedValueId, Arc<dyn SharedValue>);
 
+/// A fragmenting relation's archetype key: its kind and full generational
+/// target. Unlike a packed pair key, this never aliases a recycled target.
+pub type RelationPair = (ComponentId, Entity);
+
 /// One archetype: a (non-shared) component set plus the table storing its
 /// entities, together with the shared-component value bindings that split it
-/// from otherwise-identical archetypes (design §6).
+/// from otherwise-identical archetypes (design §6), and fragmenting relation
+/// pairs (design §11).
 pub struct Archetype {
     id: ArchetypeId,
     components: ComponentSet,
     shared: Box<[SharedBinding]>,
+    pairs: Box<[RelationPair]>,
     table: Table,
 }
 
@@ -114,6 +121,13 @@ impl Archetype {
         &self.shared
     }
 
+    /// Fragmenting relation pairs shared by every entity in this archetype.
+    /// Sorted and duplicate-free; pairs are identity, not component columns.
+    #[inline]
+    pub fn relation_pairs(&self) -> &[RelationPair] {
+        &self.pairs
+    }
+
     /// Number of entities in this archetype.
     #[inline]
     pub fn len(&self) -> usize {
@@ -146,33 +160,42 @@ impl Archetype {
 }
 
 /// The canonical identity of an archetype: its non-shared [`ComponentSet`]
-/// plus its sorted shared-value bindings. Two archetypes with the same table
-/// component set but different shared values have distinct keys, which is how
-/// a shared component splits an archetype by value (design §6). Shared bindings
+/// plus its sorted shared-value bindings and fragmenting relation pairs. Two
+/// archetypes with different shared values or pairs have distinct keys
+/// (design §6, §11). Shared bindings
 /// are reduced to `(ComponentId, SharedValueId)` here (the [`Arc`] handle is
 /// identity-irrelevant and lives on the [`Archetype`]).
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 struct ArchetypeKey {
     set: ComponentSet,
     shared: Box<[(ComponentId, SharedValueId)]>,
+    pairs: Box<[RelationPair]>,
 }
 
 impl ArchetypeKey {
     /// Build a canonical key, sorting the shared bindings by [`ComponentId`].
-    fn new(set: ComponentSet, mut shared: Vec<(ComponentId, SharedValueId)>) -> Self {
+    fn new(
+        set: ComponentSet,
+        mut shared: Vec<(ComponentId, SharedValueId)>,
+        mut pairs: Vec<RelationPair>,
+    ) -> Self {
         shared.sort_unstable_by_key(|&(cid, _)| cid);
+        pairs.sort_unstable();
+        pairs.dedup();
         Self {
             set,
             shared: shared.into_boxed_slice(),
+            pairs: pairs.into_boxed_slice(),
         }
     }
 
     /// Derive the key for an archetype's table set and (already-materialized)
     /// shared bindings.
-    fn from_bindings(set: &ComponentSet, shared: &[SharedBinding]) -> Self {
+    fn from_bindings(set: &ComponentSet, shared: &[SharedBinding], pairs: &[RelationPair]) -> Self {
         Self::new(
             set.clone(),
             shared.iter().map(|&(cid, sid, _)| (cid, sid)).collect(),
+            pairs.to_vec(),
         )
     }
 }
@@ -192,7 +215,7 @@ impl Archetypes {
             by_key: HashMap::default(),
         };
         let empty = ComponentSet::default();
-        let id = this.insert(empty, &[], &Components::new());
+        let id = this.insert(empty, &[], &[], &Components::new());
         debug_assert_eq!(id, ArchetypeId::EMPTY);
         this
     }
@@ -276,11 +299,24 @@ impl Archetypes {
         bindings: &[SharedBinding],
         components: &Components,
     ) -> ArchetypeId {
-        let key = ArchetypeKey::from_bindings(set, bindings);
+        self.get_or_create_with_pairs(set, bindings, &[], components)
+    }
+
+    /// Resolve an archetype by components, shared bindings and fragmenting
+    /// relation pairs. Input pairs may be unsorted or repeated. No column or
+    /// component lifecycle is created for a pair.
+    pub fn get_or_create_with_pairs(
+        &mut self,
+        set: &ComponentSet,
+        bindings: &[SharedBinding],
+        pairs: &[RelationPair],
+        components: &Components,
+    ) -> ArchetypeId {
+        let key = ArchetypeKey::from_bindings(set, bindings, pairs);
         if let Some(&id) = self.by_key.get(&key) {
             return id;
         }
-        self.insert(set.clone(), bindings, components)
+        self.insert(set.clone(), bindings, &key.pairs, components)
     }
 
     /// Drop the `by_key` lookup entry of every **empty** archetype whose shared
@@ -317,6 +353,7 @@ impl Archetypes {
         &mut self,
         set: ComponentSet,
         bindings: &[SharedBinding],
+        pairs: &[RelationPair],
         components: &Components,
     ) -> ArchetypeId {
         let id = ArchetypeId(self.archetypes.len() as u32);
@@ -330,11 +367,13 @@ impl Archetypes {
         let mut shared: Vec<SharedBinding> = bindings.to_vec();
         shared.sort_unstable_by_key(|&(cid, _, _)| cid);
         let shared = shared.into_boxed_slice();
-        let key = ArchetypeKey::from_bindings(&set, &shared);
+        let key = ArchetypeKey::from_bindings(&set, &shared, pairs);
+        let pairs = key.pairs.clone();
         self.archetypes.push(Archetype {
             id,
             components: set,
             shared,
+            pairs,
             table,
         });
         self.by_key.insert(key, id);

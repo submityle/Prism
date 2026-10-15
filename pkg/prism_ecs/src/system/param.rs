@@ -46,7 +46,12 @@ use core::ops::{Deref, DerefMut};
 ///   [`update_access`](SystemParam::update_access) *every* component and
 ///   resource it will access (so the conflict analysis that upholds
 ///   non-aliasing is complete), and
-/// * only materialise references consistent with that declared access.
+/// * only materialise references consistent with that declared access, and
+/// * bound references derived from the world by the supplied `'w` and those
+///   derived from the cached state by `'s`, including references obtainable
+///   by consuming the item. Composite parameters such as [`super::ParamSet`]
+///   rely on fetching with shorter lifetimes to end one member's access
+///   before fetching another.
 ///
 /// Implementing it incorrectly can create aliasing `&mut` references and is
 /// undefined behaviour.
@@ -75,6 +80,8 @@ pub unsafe trait SystemParam {
     /// Build the live value for one run.
     ///
     /// # Safety
+    /// `state` must be the state initialized for this parameter type against
+    /// the same world (and its world-scoped ids must still be valid).
     /// `world` must be a live [`UnsafeWorldCell`] valid for `'w`, and the caller
     /// must guarantee that the access this param declared in
     /// [`update_access`](SystemParam::update_access) does not alias any other

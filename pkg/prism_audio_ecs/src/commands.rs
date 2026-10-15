@@ -5,8 +5,8 @@
 //! The functions here hold the whole policy for turning an
 //! [`AudioEmitter`] plus listener geometry into a
 //! runtime-ready [`VoiceRequest`] and effective [`Importance`]. Distance
-//! attenuation uses only [`libm`] so results are deterministic across
-//! targets. The send helpers encode the mirror invariant: enqueue first, then
+//! attenuation uses [`libm`]; cross-platform float identity is not claimed.
+//! The send helpers encode the mirror invariant: enqueue first, then
 //! mutate the mirror only on acceptance.
 //!
 //! # Provenance
@@ -64,6 +64,9 @@ pub fn effective_importance(
     }
 
     let distance = libm::sqrtf((emitter_pos - listener_pos).length_squared());
+    if !distance.is_finite() {
+        return 0.0;
+    }
     let reference = emitter.reference_distance.max(0.0);
     if distance <= reference {
         return base;

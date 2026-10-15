@@ -26,7 +26,7 @@ pub use chunk::{
     ChunkInput, ChunkPlacement, ChunkPlan, ChunkPlanError, ChunkPlanner, ChunkPolicy, PlannedChunk,
 };
 pub use format::{
-    Codec, ContainerError, ContainerInfo, EntryInfo, FORMAT_VERSION, MAGIC,
+    ChunkInfo, Codec, ContainerError, ContainerInfo, EntryInfo, CHUNK_FORMAT_VERSION, FORMAT_VERSION, MAGIC,
     SUPPORTED_FORMAT_VERSIONS,
 };
 pub use install::{install_runtime_package, InstallError, InstallMount, InstallTombstones};

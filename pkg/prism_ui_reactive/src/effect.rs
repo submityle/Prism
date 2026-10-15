@@ -27,8 +27,25 @@ impl Effect {
             runtime: runtime.clone(),
             id,
         };
+        struct InitialRun<'a> {
+            effect: &'a Effect,
+            completed: bool,
+        }
+        impl Drop for InitialRun<'_> {
+            fn drop(&mut self) {
+                if !self.completed {
+                    self.effect.runtime.dispose(self.effect.id);
+                }
+            }
+        }
+        let mut initial = InitialRun {
+            effect: &effect,
+            completed: false,
+        };
         // Run eagerly so dependencies are captured straight away.
         runtime.update_if_necessary(id);
+        initial.completed = true;
+        drop(initial);
         effect
     }
 

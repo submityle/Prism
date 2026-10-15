@@ -142,7 +142,7 @@ pub fn lobe_registry() -> ExtensionRegistry {
 pub fn digest_for(lobe_mask: LobeMask) -> ExtensionSet {
     let mut set = ExtensionSet::EMPTY;
     for lobe in &SURFACE_LOBES {
-        if lobe_mask.bits() & (1u32 << lobe.registry_slot) == 0 {
+        if lobe_mask.bits() & lobe.mask_bits == 0 {
             continue;
         }
         if lobe.namespace == SPECIFICATION_NAMESPACE {
@@ -179,7 +179,7 @@ pub fn extension_ids(lobe_mask: LobeMask) -> Vec<&'static str> {
     SURFACE_LOBES
         .iter()
         .filter(|lobe| lobe.namespace != SPECIFICATION_NAMESPACE)
-        .filter(|lobe| lobe_mask.bits() & (1u32 << lobe.registry_slot) != 0)
+        .filter(|lobe| lobe_mask.bits() & lobe.mask_bits != 0)
         .map(|lobe| lobe.id)
         .collect()
 }

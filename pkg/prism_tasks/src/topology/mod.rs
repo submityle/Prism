@@ -7,8 +7,8 @@
 //!
 //! - A **portable, injectable topology descriptor** ([`TopologyDescriptor`])
 //!   that bundles cores, an inter-node [`NumaDistanceMatrix`], and a
-//!   [`CacheTopology`]. It probes nothing; `prism_platform` injects the real
-//!   values, and every query is a pure function of the stored data.
+//!   [`CacheTopology`]. Detection delegates to `prism_platform`; every policy
+//!   query is a pure function of the resulting data.
 //! - **Workload-class placement** ([`WorkloadClass`], [`plan_placement`],
 //!   [`plan_partitioned`]): map latency-sensitive work onto performance (P)
 //!   cores, background work onto efficiency (E) cores, and throughput work
@@ -28,15 +28,13 @@
 //! [`TopologyDescriptor::from_numa_topology`].
 //!
 //! ## Honest degradation
-//! Real topology probing (NUMA distances, P/E maps, cache geometry) is the job
-//! of `prism_platform`, which today exposes only a logical-core count. Until it
-//! injects a full [`TopologyDescriptor`], callers build
-//! [`TopologyDescriptor::uniform`] — one node, all performance cores, a
-//! single-node distance matrix, no cache map — exactly the "缺失时退化为均匀池"
-//! fallback §24.6 calls for. All the mechanism here (distance ranking, cache
-//! closeness, class placement) is fully present and tested; it simply sees a
-//! uniform machine until the platform layer describes more. No topology is ever
-//! fabricated.
+//! Linux platform detection retains allowed CPU ids, NUMA/SMT geometry, and
+//! optional capacity/cache/distance evidence. Unsupported/failed probes are
+//! explicitly marked by [`TopologyDescriptor::platform_source`]. Unknown core
+//! classes use the ordinary scheduling lane, and unavailable distances use
+//! synthetic policy costs (see [`TopologyDescriptor::has_platform_distances`]);
+//! neither is presented as measured hardware. Placement's memory-node output
+//! remains a suggestion, not an OS memory binding.
 
 #![forbid(unsafe_code)]
 

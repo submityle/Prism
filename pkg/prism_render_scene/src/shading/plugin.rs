@@ -1,7 +1,10 @@
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_core_pipeline::schedule::camera_driver;
-use bevy_ecs::schedule::IntoScheduleConfigs;
+use bevy_ecs::{
+    schedule::IntoScheduleConfigs,
+    system::{BoxedSystem, IntoSystem},
+};
 use bevy_pbr::MeshPipelineSystems;
 use bevy_render::{
     init_gpu_resource,
@@ -63,6 +66,10 @@ use super::{
         dof_pass, init_dof_pipeline, prepare_dof_bind_groups, prepare_dof_textures,
         PrismDofSettings,
     },
+    execution::{
+        run_shading_post_driver, run_shading_pre_resolve_driver, run_shading_resolve_driver,
+        run_shading_response_driver, ShadingExecutionPlan, ShadingPassBinding,
+    },
     exposure::{
         exposure_average_pass, exposure_histogram_pass, init_exposure_average_pipeline,
         init_exposure_histogram_pipeline, prepare_exposure_average_bind_groups,
@@ -115,7 +122,7 @@ use super::{
         init_outline_pipeline, outline_pass, prepare_outline_bind_groups, prepare_outline_textures,
         PrismOutlineSettings,
     },
-    post_graph::{validate_post_execution_bindings, POST_EXECUTION_BINDINGS},
+    post_graph::{validate_post_execution_bindings, PostExecutorKind, POST_EXECUTION_BINDINGS},
     posterize::{
         init_posterize_pipeline, posterize_pass, prepare_posterize_bind_groups,
         prepare_posterize_textures, PrismPosterizeSettings,
@@ -256,6 +263,157 @@ use super::{
     },
 };
 
+fn boxed_shading_system<S, M>(system: S) -> BoxedSystem
+where
+    S: IntoSystem<(), (), M> + 'static,
+{
+    Box::new(IntoSystem::into_system(system))
+}
+
+fn boxed_post_executor(kind: PostExecutorKind) -> BoxedSystem {
+    match kind {
+        PostExecutorKind::ExposureHistogram => boxed_shading_system(exposure_histogram_pass),
+        PostExecutorKind::ExposureAverage => boxed_shading_system(exposure_average_pass),
+        PostExecutorKind::Bloom => boxed_shading_system(bloom_pass),
+        PostExecutorKind::Dof => boxed_shading_system(dof_pass),
+        PostExecutorKind::MotionBlur => boxed_shading_system(motion_blur_pass),
+        PostExecutorKind::SsrPrepass => boxed_shading_system(ssr_prepass_pass),
+        PostExecutorKind::SsrHzb => boxed_shading_system(ssr_hzb_pass),
+        PostExecutorKind::SsrRepack => boxed_shading_system(ssr_repack_pass),
+        PostExecutorKind::SsrColorMips => boxed_shading_system(ssr_color_mips_pass),
+        PostExecutorKind::SsrTrace => boxed_shading_system(ssr_trace_pass),
+        PostExecutorKind::SsrReconstruct => boxed_shading_system(ssr_reconstruct_pass),
+        PostExecutorKind::SsrTemporal => boxed_shading_system(ssr_temporal_pass),
+        PostExecutorKind::SsrComposite => boxed_shading_system(ssr_composite_pass),
+        PostExecutorKind::SsgiTrace => boxed_shading_system(ssgi_trace_pass),
+        PostExecutorKind::SsgiDenoise => boxed_shading_system(ssgi_denoise_pass),
+        PostExecutorKind::SsgiComposite => boxed_shading_system(ssgi_composite_pass),
+        PostExecutorKind::SpecDenoiseReproject => boxed_shading_system(spec_denoise_reproject_pass),
+        PostExecutorKind::SpecDenoiseHistoryClamp => {
+            boxed_shading_system(spec_denoise_history_clamp_pass)
+        }
+        PostExecutorKind::SpecDenoiseSpatial => boxed_shading_system(spec_denoise_spatial_pass),
+        PostExecutorKind::TaaResolve => boxed_shading_system(taa_resolve_pass),
+        PostExecutorKind::Posterize => boxed_shading_system(posterize_pass),
+        PostExecutorKind::Outline => boxed_shading_system(outline_pass),
+        PostExecutorKind::Hatching => boxed_shading_system(hatching_pass),
+        PostExecutorKind::Halftone => boxed_shading_system(halftone_pass),
+        PostExecutorKind::Kuwahara => boxed_shading_system(kuwahara_pass),
+        PostExecutorKind::ColorGrade => boxed_shading_system(color_grade_pass),
+        PostExecutorKind::ChromaticAberration => boxed_shading_system(chromatic_aberration_pass),
+        PostExecutorKind::Vignette => boxed_shading_system(vignette_pass),
+        PostExecutorKind::FilmGrain => boxed_shading_system(film_grain_pass),
+        PostExecutorKind::Cas => boxed_shading_system(cas_pass),
+        PostExecutorKind::GamutMap => boxed_shading_system(gamut_map_pass),
+        PostExecutorKind::OrderedDither => boxed_shading_system(ordered_dither_pass),
+        PostExecutorKind::LensFlare => boxed_shading_system(lens_flare_pass),
+        PostExecutorKind::Tonemap => boxed_shading_system(tonemap_pass),
+        PostExecutorKind::Upscale => boxed_shading_system(upscale_pass),
+    }
+}
+
+fn shading_execution_bindings() -> Vec<ShadingPassBinding> {
+    let mut bindings = vec![
+        ShadingPassBinding {
+            declaration: "visibility_raster",
+            executor_group: "visibility_raster",
+            executors: vec![boxed_shading_system(visibility_raster_pass)],
+        },
+        ShadingPassBinding {
+            declaration: "material_classification_count",
+            executor_group: "material_classification",
+            executors: vec![boxed_shading_system(dispatch_material_classification)],
+        },
+        ShadingPassBinding {
+            declaration: "material_classification_prefix",
+            executor_group: "material_classification",
+            executors: Vec::new(),
+        },
+        ShadingPassBinding {
+            declaration: "material_classification_scatter",
+            executor_group: "material_classification",
+            executors: Vec::new(),
+        },
+        ShadingPassBinding {
+            declaration: "texel_space_shade_cache",
+            executor_group: "texel_space_shade_cache",
+            executors: vec![boxed_shading_system(shade_dispatch_pass)],
+        },
+        ShadingPassBinding {
+            declaration: "shading_resolve",
+            executor_group: "shading_resolve",
+            executors: vec![boxed_shading_system(dispatch_shading_resolve)],
+        },
+        ShadingPassBinding {
+            declaration: "water_surface_raster",
+            executor_group: "water_surface_raster",
+            executors: Vec::new(),
+        },
+        ShadingPassBinding {
+            declaration: "response_composition",
+            executor_group: "response_composition",
+            executors: vec![boxed_shading_system(response_composition_pass)],
+        },
+    ];
+
+    for binding in POST_EXECUTION_BINDINGS {
+        let executors = binding
+            .executors
+            .iter()
+            .map(|kind| boxed_post_executor(*kind))
+            .collect();
+        bindings.push(ShadingPassBinding {
+            declaration: binding.declaration,
+            executor_group: binding.declaration,
+            executors,
+        });
+    }
+    bindings
+}
+
+fn validate_post_execution_registration(
+    graph: &prism_render_graph::frame_graph::GpuFrameGraphBuilder,
+    bindings: &[ShadingPassBinding],
+) -> Result<(), String> {
+    validate_post_execution_bindings(graph)?;
+
+    let mut registered_post_bindings = 0usize;
+    for expected in POST_EXECUTION_BINDINGS {
+        let Some(actual) = bindings
+            .iter()
+            .find(|binding| binding.declaration == expected.declaration)
+        else {
+            return Err(format!(
+                "post module {} is missing its production execution registration",
+                expected.module
+            ));
+        };
+        registered_post_bindings += 1;
+        if actual.executor_group != expected.declaration {
+            return Err(format!(
+                "post module {} uses executor group {} instead of {}",
+                expected.module, actual.executor_group, expected.declaration
+            ));
+        }
+        if actual.executors.len() != expected.executors.len() {
+            return Err(format!(
+                "post module {} executor count {} != inventory count {}",
+                expected.module,
+                actual.executors.len(),
+                expected.executors.len()
+            ));
+        }
+    }
+    if registered_post_bindings != POST_EXECUTION_BINDINGS.len() {
+        return Err(format!(
+            "production post registration count {} != inventory count {}",
+            registered_post_bindings,
+            POST_EXECUTION_BINDINGS.len()
+        ));
+    }
+    Ok(())
+}
+
 use super::texel_cache::{
     extract_shade_dispatch_inputs, prepare_shade_dispatch, shade_dispatch_pass,
     ShadeDispatchProductionGpu, ShadeDispatchProductionSettings,
@@ -365,11 +523,15 @@ impl Plugin for PrismShadingPlugin {
             return;
         };
         let frame_graph = shading_frame_graph();
-        validate_post_execution_bindings(&frame_graph)
-            .expect("Prism post-process execution ledger must cover the graph");
         let compiled_graph = frame_graph
             .compile()
             .expect("Prism shading frame graph must be valid");
+        let execution_bindings = shading_execution_bindings();
+        validate_post_execution_registration(&frame_graph, &execution_bindings)
+            .expect("Prism post-process inventory and registration must be complete");
+        let execution_plan =
+            ShadingExecutionPlan::new(&frame_graph, compiled_graph.clone(), execution_bindings)
+                .expect("Prism shading execution ledger must cover the compiled graph");
         // The pass is installed once, irrespective of scene/split contents.
         // These constraints express actual resource dependencies, independent
         // of the tuple grouping used by the older stages below.
@@ -388,12 +550,29 @@ impl Plugin for PrismShadingPlugin {
             )
             .add_systems(
                 bevy_core_pipeline::Core3d,
-                response_composition_pass
+                run_shading_pre_resolve_driver.before(bevy_core_pipeline::Core3dSystems::MainPass),
+            )
+            .add_systems(
+                bevy_core_pipeline::Core3d,
+                run_shading_resolve_driver
+                    .after(run_shading_pre_resolve_driver)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+            )
+            .add_systems(
+                bevy_core_pipeline::Core3d,
+                run_shading_response_driver
                     .in_set(ResponseCompositionSystems::Compose)
-                    .after(dispatch_shading_resolve)
+                    .after(run_shading_resolve_driver)
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)
                     .after(crate::water::WaterSurfaceSystems::Draw)
-                    .before(ssr_color_mips_pass)
+                    .before(run_shading_post_driver)
+                    .before(composite_shading)
+                    .before(bevy_core_pipeline::Core3dSystems::PostProcess),
+            )
+            .add_systems(
+                bevy_core_pipeline::Core3d,
+                run_shading_post_driver
+                    .after(run_shading_response_driver)
                     .before(composite_shading)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
             );
@@ -470,6 +649,7 @@ impl Plugin for PrismShadingPlugin {
                 compiled: compiled_graph,
                 post_execution_bindings: POST_EXECUTION_BINDINGS,
             })
+            .insert_resource(execution_plan)
             .add_render_command::<Visibility3d, DrawVisibilityRaster>()
             .add_render_command::<TransparentOit3d, DrawTransparentOit>()
             .add_systems(RenderStartup, detect_shading_capabilities)
@@ -1270,84 +1450,37 @@ impl Plugin for PrismShadingPlugin {
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
             (
-                shadow_depth_pass.before(visibility_raster_pass),
-                visibility_raster_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
-                // The production texel writer has no current resolve/material
-                // consumer, but its explicit integration seam still records
-                // before resolve/main when a real input frame is supplied.
-                // Publication remains completion-gated in the producer.
-                shade_dispatch_pass.before(dispatch_shading_resolve),
-                dispatch_material_classification
-                    .after(visibility_raster_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                shadow_depth_pass.before(run_shading_pre_resolve_driver),
                 // Nested to keep the Core3d tuple within Bevy's 20-element
                 // limit: the three GTAO passes chain prepass -> horizon kernel
                 // -> spatial denoise, all feeding the shading resolve.
                 (
                     gtao_prepass_pass
-                        .after(visibility_raster_pass)
-                        .before(dispatch_shading_resolve),
+                        .after(run_shading_pre_resolve_driver)
+                        .before(run_shading_resolve_driver),
                     gtao_compute_pass
                         .after(gtao_prepass_pass)
-                        .before(dispatch_shading_resolve),
+                        .before(run_shading_resolve_driver),
                     gtao_denoise_pass
                         .after(gtao_compute_pass)
-                        .before(dispatch_shading_resolve),
+                        .before(run_shading_resolve_driver),
                     gtao_temporal_pass
                         .after(gtao_denoise_pass)
-                        .before(dispatch_shading_resolve),
+                        .before(run_shading_resolve_driver),
                 ),
-                ssr_prepass_pass
-                    .after(visibility_raster_pass)
-                    .before(dispatch_shading_resolve),
-                ssr_hzb_pass
-                    .after(ssr_prepass_pass)
-                    .before(dispatch_shading_resolve),
-                ssr_repack_pass
-                    .after(ssr_prepass_pass)
-                    .before(dispatch_shading_resolve),
                 // Nested to keep the Core3d tuple within Bevy's 20-element
                 // limit: the IBL precomputes and the light-routing cull all
                 // feed the shading resolve and so must run before it.
                 (
-                    dfg_lut_precompute_pass.before(dispatch_shading_resolve),
-                    env_prefilter_precompute_pass.before(dispatch_shading_resolve),
+                    dfg_lut_precompute_pass.before(run_shading_resolve_driver),
+                    env_prefilter_precompute_pass.before(run_shading_resolve_driver),
                     // Light-routing (Lighting Channels) cull refines the
                     // per-word punctual-light visibility mask the resolve's
                     // channel gate reads, so it must run before the resolve
                     // dispatch. No-op unless the opt-in subsystem is enabled.
-                    light_routing_cull_pass.before(dispatch_shading_resolve),
+                    light_routing_cull_pass.before(run_shading_resolve_driver),
                 ),
-                dispatch_shading_resolve
-                    .after(dispatch_material_classification)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                ssr_color_mips_pass
-                    .after(dispatch_shading_resolve)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                ssr_trace_pass
-                    .after(ssr_color_mips_pass)
-                    .after(ssr_hzb_pass)
-                    .after(ssr_repack_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                ssr_reconstruct_pass
-                    .after(ssr_trace_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                ssr_temporal_pass
-                    .after(ssr_reconstruct_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                // Nested to keep the Core3d tuple within Bevy's 20-element
-                // limit: the SSR composite folds reflections into scene_color,
-                // then TAA resolves that composited buffer before the main pass.
-                // Nested to keep the Core3d tuple within Bevy's 20-element
-                // limit: the SSR composite folds reflections into scene_color,
-                // then the SSGI gather traces indirect diffuse off the same
-                // rebuilt inputs and its composite substitutes that gather for
-                // the resolve's flat ambient (reading the SSR-composited base),
-                // before TAA resolves the fully composited buffer.
                 (
-                    ssr_composite_pass
-                        .after(ssr_temporal_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     // Glossy-specular ReSTIR reuse: reconstructs each
                     // pixel's glossy point off the SSR prepass depth +
                     // repacked `normal_roughness`, streams the SSR trace's
@@ -1359,8 +1492,7 @@ impl Plugin for PrismShadingPlugin {
                     // unless `enable_spec_gi` and the SSR/visibility gate
                     // held in resource prep.
                     spec_gi_reuse_pass
-                        .after(ssr_trace_pass)
-                        .after(ssr_repack_pass)
+                        .after(run_shading_resolve_driver)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     // Glossy-specular ReSTIR composite (UE option C): folds
                     // the reuse pass's resolved specular back over scene_color,
@@ -1390,58 +1522,21 @@ impl Plugin for PrismShadingPlugin {
                         spec_gi_spatial_pass
                             .after(spec_gi_reuse_pass)
                             .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                        // Temporal reproject: stages this frame's SSR depth for
-                        // next frame and reprojects last frame's converged
-                        // specular history. Runs right after the spatially pooled
-                        // resolve it fuses with the history.
-                        spec_denoise_reproject_pass
-                            .after(spec_gi_reuse_pass)
-                            .after(spec_gi_spatial_pass)
-                            .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                        // History-clamp: fuses the reprojected history with this
-                        // frame's noisy resolve under an AABB colour clamp and
-                        // writes the `denoised` plane the spatial pass filters.
-                        spec_denoise_history_clamp_pass
-                            .after(spec_denoise_reproject_pass)
-                            .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                        // Spatial filter: now cleans the temporally accumulated
-                        // (anti-ghosted) specular rather than the raw resolve, so
-                        // it orders after the history-clamp pass.
-                        spec_denoise_spatial_pass
-                            .after(spec_denoise_history_clamp_pass)
-                            .before(bevy_core_pipeline::Core3dSystems::MainPass),
                         spec_gi_composite_pass
                             .after(spec_gi_reuse_pass)
                             .after(spec_gi_spatial_pass)
-                            .after(spec_denoise_spatial_pass)
-                            .after(ssr_color_mips_pass)
-                            .after(ssr_composite_pass)
+                            .after(run_shading_resolve_driver)
                             .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     ),
-                    ssgi_trace_pass
-                        .after(ssr_color_mips_pass)
-                        .after(ssr_hzb_pass)
-                        .after(ssr_repack_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    ssgi_denoise_pass
-                        .after(ssgi_trace_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    ssgi_composite_pass
-                        .after(ssr_composite_pass)
-                        .after(spec_gi_composite_pass)
-                        .after(ssgi_trace_pass)
-                        .after(ssgi_denoise_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     // World-space GI gathers screen probes off the fully
-                    // SSR/SSGI-composited scene_color, then its own composite
+                    // resolve-fed scene_color, then its own composite
                     // folds the indirect diffuse back in (energy-conserving
                     // ambient substitution) before TAA resolves the buffer.
                     world_space_gi_pass
-                        .after(ssgi_composite_pass)
+                        .after(run_shading_resolve_driver)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     world_space_gi_composite_pass
                         .after(world_space_gi_pass)
-                        .after(ssgi_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     // DDGI resolves the persistent octahedral probe field.
                     // Probe-update populates the octahedral irradiance + depth
@@ -1475,90 +1570,14 @@ impl Plugin for PrismShadingPlugin {
                     surface_cache_composite_pass
                         .after(surface_cache_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    taa_resolve_pass
-                        .after(ssr_composite_pass)
-                        .after(spec_gi_composite_pass)
-                        .after(ssgi_composite_pass)
-                        .after(world_space_gi_composite_pass)
-                        .after(ddgi_composite_pass)
-                        .after(surface_cache_composite_pass)
-                        // TAA resolves the fully composited HDR scene_color, so
-                        // it must also run after the world_restir composite
-                        // folds its direct-illumination substitution in.
-                        .after(world_restir_composite_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                ),
-                // Nested to keep the Core3d tuple within Bevy's 20-element
-                // limit: auto-exposure meters the fully composited HDR
-                // scene_color (after SSR/SSGI composite and TAA resolve), then a
-                // single-invocation resolve writes the eye-adaptation multiplier
-                // the composite applies, all before the main pass.
-                (
-                    exposure_histogram_pass
-                        .after(ssgi_composite_pass)
-                        .after(taa_resolve_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    exposure_average_pass
-                        .after(exposure_histogram_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    // Bloom scatters glow from the metered HDR scene_color after
-                    // the exposure resolve (so metering saw the clean scene) and
-                    // before the main pass composites it.
-                    bloom_pass
-                        .after(exposure_average_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    // Motion blur reconstructs the shutter streak from the
-                    // velocity G-buffer after bloom has scattered its glow,
-                    // still before the main pass composites.
-                    motion_blur_pass
-                        .after(bloom_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    // DoF is the final pre-MainPass scene_color writer: it
-                    // defocuses the fogged, motion-blurred HDR image (fog applies
-                    // after motion blur, DoF after fog) before the composite
-                    // reads scene_color. Serialised after volumetrics so the
-                    // three scene_color copy-backs never race.
-                    dof_pass
-                        .after(volumetrics_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    // Chromatic aberration then vignette close the pre-MainPass
-                    // scene_color chain: CA fringes the defocused image after
-                    // DoF, vignette darkens its edges last. Serialised after the
-                    // prior writer so the scene_color copy-backs never race.
-                    chromatic_aberration_pass
-                        .after(dof_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    vignette_pass
-                        .after(chromatic_aberration_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    // Colour grade regrades the finished HDR image after
-                    // vignette, then film grain adds sensor grain last. Both
-                    // serialised after the prior writer so the scene_color
-                    // copy-backs never race, before the main pass composites.
-                    color_grade_pass
-                        .after(vignette_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    film_grain_pass
-                        .after(color_grade_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    // Temporal upscale is the final scene_color consumer: it
-                    // reconstructs the fully post-processed HDR image onto the
-                    // display grid (native-resolution TAAU) and RCAS-sharpens the
-                    // result into `upscale_out`, which the composite reads in
-                    // place of the raw scene_color. Ordered after the last
-                    // scene_color writer (film grain) and before the composite.
-                    // Opt-in: a no-op unless the `UpscaleSettings` resource is
-                    // present, so the default renderer is unchanged.
-                    upscale_pass
-                        .after(film_grain_pass)
-                        .before(composite_shading),
                 ),
                 composite_shading
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)
                     .after(ResponseCompositionSystems::Compose)
+                    .after(run_shading_post_driver)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
                 transparent_forward_pass
-                    .after(dispatch_shading_resolve)
+                    .after(run_shading_resolve_driver)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 oit_composite
                     .after(composite_shading)
@@ -1570,7 +1589,7 @@ impl Plugin for PrismShadingPlugin {
                 // both before the main pass.
                 (
                     vsm_receiver_gen_pass
-                        .after(ssr_prepass_pass)
+                        .after(run_shading_resolve_driver)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     vsm_mark_pages_pass
                         .after(vsm_receiver_gen_pass)
@@ -1584,54 +1603,11 @@ impl Plugin for PrismShadingPlugin {
                     // Froxel fog is self-contained (its own per-view volumes),
                     // so it only needs to finish before the main pass composites.
                     volumetrics_pass
-                        .after(motion_blur_pass)
+                        .after(run_shading_resolve_driver)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
             ),
         );
-        // The nine additional post-process passes (display-referred finishing +
-        // stylized NPR). The primary Core3d tuple is already at Bevy's
-        // 20-element limit, so these live in their own `add_systems` call and
-        // chain off `film_grain_pass` (the previous last pre-MainPass
-        // scene_color writer). Every pass copies its result back into
-        // scene_color, so they are serialised into a single linear chain to
-        // keep the copy-backs from racing, all before the main pass composites.
-        render_app.add_systems(
-            bevy_core_pipeline::Core3d,
-            (
-                kuwahara_pass
-                    .after(film_grain_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                hatching_pass
-                    .after(kuwahara_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                halftone_pass
-                    .after(hatching_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                outline_pass
-                    .after(halftone_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                lens_flare_pass
-                    .after(outline_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                tonemap_pass
-                    .after(lens_flare_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                gamut_map_pass
-                    .after(tonemap_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                ordered_dither_pass
-                    .after(gamut_map_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                cas_pass
-                    .after(ordered_dither_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                posterize_pass
-                    .after(cas_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
-            ),
-        );
-
         // Volumetric-cloud compute solve. A self-contained device node: it
         // records the eight cloud kernels (five view-independent domain passes
         // once, three per-view passes per sized view) into its own compute
@@ -1694,5 +1670,26 @@ impl Plugin for PrismShadingPlugin {
                 map_submitted_classification_readback.in_set(RenderGraphSystems::Finish),
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_post_registration_covers_the_repository_inventory() {
+        let graph = shading_frame_graph();
+        let bindings = shading_execution_bindings();
+        validate_post_execution_registration(&graph, &bindings).unwrap();
+    }
+
+    #[test]
+    fn production_post_registration_rejects_a_missing_module() {
+        let graph = shading_frame_graph();
+        let mut bindings = shading_execution_bindings();
+        bindings.retain(|binding| binding.declaration != "post_bloom");
+        let error = validate_post_execution_registration(&graph, &bindings).unwrap_err();
+        assert!(error.contains("bloom"), "unexpected error: {error}");
     }
 }

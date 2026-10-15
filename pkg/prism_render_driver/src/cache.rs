@@ -19,6 +19,20 @@
 
 use alloc::collections::BTreeMap;
 
+/// Why a backend could not import or export an opaque driver-owned pipeline
+/// binary. The cache seam is optional because not every graphics API exposes
+/// portable pipeline-library handles, but the unsupported capability is
+/// reported by the backend rather than guessed by the renderer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PipelineBinaryCacheError {
+    /// The backend/API does not expose driver-owned pipeline binaries.
+    Unsupported,
+    /// The supplied binary is not accepted by the backend.
+    InvalidBinary,
+    /// The device was lost while servicing the cache operation.
+    DeviceLost,
+}
+
 /// An entry in the cache: the cached value plus how many live references hold
 /// it.
 struct Entry<V> {
@@ -84,6 +98,14 @@ impl<K: Ord + Clone, V: Copy> ContentCache<K, V> {
                 None
             }
         }
+    }
+
+    /// Looks up a resident value without changing reference counts or cache
+    /// statistics. This is for stable hot-path queries whose ownership was
+    /// established when the entry was first created.
+    #[must_use]
+    pub fn get(&self, key: &K) -> Option<V> {
+        self.entries.get(key).map(|entry| entry.value)
     }
 
     /// Returns the cached value for `key`, incrementing its reference count. If

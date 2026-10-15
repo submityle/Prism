@@ -45,6 +45,7 @@ fn platform_current_is_consistent() {
         cfg!(feature = "std") && cfg!(not(target_family = "wasm"))
     );
     assert_eq!(p.caps.has_wall_clock, cfg!(feature = "std"));
+    assert_eq!(p.caps.suspend_resume, suspend_capability());
     let _ = (spin_hint(), full_fence());
 }
 

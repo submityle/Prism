@@ -246,7 +246,7 @@ Runner 经 `app.set_runner(..)` 注入；默认按 capability（有无显示器�
 
 主机/移动端认证关注项，经窗口插件转成 App 事件：
 
-- `Startup`（一次）/ `Suspended`（移动端后台/主机休眠：暂停仿真、释放瞬态 GPU 资源）/ `Resumed`（重建交换链/上下文）/ `AppExit`（优雅退出：flush 命令、保存、关设备）。
+- `Startup`（一次）/ `Suspended`（移动端后台/主机休眠：暂停仿真、释放瞬态 GPU 资源）/ `Resumed`（重建交换链/上下文）/ `AppExit`（优雅退出：flush 命令、保存、关设备）。真实 host callback 通过 `SuspendEvent` → `SuspendResumeAdapter` 同时更新 `SuspendableClock` 与 `AppLifecycle`；无头/测试仍可注入固定时间戳，不能用纯 CPU 手动调用声称 OS 接线。
 - `LowMemory`（移动端：主动卸载流送 cell）、`FocusChanged`、`WillRenderFirstFrame`。
 - 退出有**优雅路径**：排空命令队列、运行 `Last` 收尾 system、按插件逆序 `cleanup`，保证存档/网络断连一致。
 
@@ -373,7 +373,7 @@ pkg/prism_app/
 - **M1 调度序 + 状态**（✅）：完整 Main 阶段序、PluginGroup/依赖解析/去重（`plugin_group`/`plugin_graph`）、States/OnEnter/OnExit（`state/*`）、Events 更新（`event`）。
 - **M2 固定步长**（✅）：累加器 + alpha + 死亡螺旋熔断（`fixed`）、`Time<Fixed/Virtual/Real>`（`time`）、FixedMain tick 组。
 - **M3 子应用 + 流水线**（✅ 机制；🚧 性能验收）：`sub_app` 的 extract 接线与 `pipelined` feature 已落地；渲染车道为**常驻单线程**（首帧惰性创建、逐帧经通道复用同一 worker，不每帧 `spawn`），保证提取语义与串行逐位等价。**`prism_tasks` 车道已接线**（`pipelined-tasks` feature）：可选 `TaskLane` 把每帧渲染作业投到 `prism_tasks` 工作窃取池（`App::enable_pipelined_rendering_with_task_pool`），管线跑在统一作业图上；两条车道共享同一 submit/collect 语义与等价性测试。尚未形成真实负载下的重叠率、尾延迟和吞吐基线。
-- **M4 窗口 Runner + 生命周期**（✅ 机制；🚧 集成验收）：`lifecycle`/`exit`/`pacing`、`WinitRunner`、多窗口、平台 suspend / low-memory 回调和设备丢失通知均已落地。设备替换、渲染核心资源重建、资源重放和恢复期间跳过普通 Render schedule 的路径也已有实现。`prism_render_app::presentation` 已提供 `WindowRenderRequests` / `WindowRenderTargets`，每窗口独立 surface、color/depth target、present 与 pacing target；真实 Metal/wgpu 全量 RenderApp 门禁已通过，当前仍待真实 Winit compositor、移动设备和跨平台后端验收，不再把设备恢复写成“未实现”。
+- **M4 窗口 Runner + 生命周期**（✅ 机制；🚧 集成验收）：`lifecycle`/`exit`/`pacing`、`WinitRunner`、多窗口、带单调时间戳的 `SuspendEvent` 转发、平台 suspend / low-memory 回调和设备丢失通知均已落地。设备替换、渲染核心资源重建、资源重放和恢复期间跳过普通 Render schedule 的路径也已有实现。`prism_render_app::presentation` 已提供 `WindowRenderRequests` / `WindowRenderTargets`，每窗口独立 surface、color/depth target、present 与 pacing target；真实 Metal/wgpu 全量 RenderApp 门禁已通过，当前仍待真实 Winit compositor、移动设备和跨平台后端验收，macOS 原生睡眠/唤醒真机演练未完成。
 - **M5 确定性 + 服务器**（🚧）：`determinism`（种子 RNG / 每帧状态哈希 / 逐固定步输入录放）、`DedicatedServerRunner`、`settings` 分层、基础 transport（memory/threaded/UDP）、可靠通道、多路复用、回滚窗口协商和显式 PSK/AES-GCM security provider 已落地；**world-snapshot 回滚已落地并接入 `App`/`SubApp`**（`rollback::SnapshotHistory` 复用 `prism_ecs` 的 `WorldSnapshot`/`SnapshotRing`，带上界环形历史、`try_capture` 缺 glue 上报、按帧回滚与逐帧状态哈希；`App`/`SubApp` 暴露 `init_snapshot_history` / `capture_snapshot` / `rollback_to`）；**late-input 回滚+重放环已落地**（`rollback_replay::RollbackReplay`：commit 记录快照+输入、rollback 还原到某帧并给出待重放输入序列、`reconcile` 用修正后的输入重放整段、重提交原地覆盖旧分支）；**对端同步编排已落地**（`peer_sync::reconcile_with_peer`：比对本地/对端逐帧帧哈希定位保留窗口内首个分歧帧、取对端权威输入驱动 `reconcile`，对端输入缺失或帧已淘汰则不动作并如实返回 `Unreconciled`）。**仍待做**：QUIC/WebTransport、NAT/ICE/relay、连接迁移/生产多 peer demux、跨机验收、scene/entity replication 映射和部署级密钥生命周期。
 - **M6 迁移/工具**（🚧）：`prelude`（贴近 `bevy_app`）、`diagnostics`（帧统计/启动耗时）、**阶段火焰图**（`trace` feature 的 `PhaseTrace`，逐帧逐阶段事件 + Chrome trace JSON 导出）、**配置热重载**（`hot-reload` feature 的 `ConfigHotReload`：文件哈希监视 + 逐帧经用户层重放）、**系统/模块热重载**（`module-reload` feature：受信任 dylib、稳定 system ID、ABI 校验、状态导出/迁移、帧边界自动轮询）与 **PIE 多实例**（`PieInstances`）均已有实现。旧 `prism_bevy` 桥接层已完成消费者审计并从 workspace 移除；M6 当前剩余的是跨平台/发行构建验证，而不是该桥接层退役。
 
@@ -388,7 +388,7 @@ pkg/prism_app/
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：当前以 `ExtractFn` 作为跨 World 单向接缝，并已有串行/并行等价路径；剩余风险是大负载下的重叠率、尾延迟和跨线程生命周期验收，而不是缺少提取实现。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。
   2. **固定步长熔断（M2）**：死亡螺旋参数（max_frame_dt/max_substeps）需按内容压测标定，错配会在卡顿时放大为慢放或卡死。
-  3. **窗口生命周期（M4）**：移动端 Suspended/Resumed 下 GPU 上下文/交换链重建极易崩；桌面 Metal recovery 已通过，但仍需与真实移动 RHI/窗口层联调并完成 Android/iOS 设备演练。
+  3. **窗口生命周期（M4）**：移动端 Suspended/Resumed 下 GPU 上下文/交换链重建极易崩；当前 winit lifecycle → App adapter 的接线已有 host-independent tests，桌面原生 sleep/power 通知仍是 callback-only，仍需与真实移动 RHI/窗口层联调并完成 Android/iOS 设备演练。
   4. **确定性（M5）**：跨平台浮点一致仅在 `determinism` 档 + 定点/软件数学路径保证；录制重放靠逐固定步输入 + 周期快照，快照频率权衡内存与回放精度。
   5. **插件依赖解析（M1）**：循环依赖/缺失依赖须在装配期静态报错，不能拖到运行期；去重语义要明确（显式报错 vs 静默忽略）。
 - **与既有文档关系**：本层是 `prism_loom_runtime_framework`（L7 游戏运行时）的**地基**，二者不重叠——Loom 作为插件挂到本层；旧 `prism_bevy` 过渡桥已退役，渲染提取与 ECS 文档 §23.5 为同一接缝的两侧表述，须保持契约一致。

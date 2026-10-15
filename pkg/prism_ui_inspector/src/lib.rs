@@ -59,11 +59,15 @@
 
 extern crate alloc;
 
+#[cfg(feature = "ecs")]
+pub mod ecs;
 pub mod graph;
 pub mod path;
 pub mod perf;
 pub mod query;
 
+#[cfg(feature = "ecs")]
+pub use ecs::{EcsComponentInspection, EcsInspection, EcsInspectorError, EcsInspectorSession};
 pub use graph::DependencyGraph;
 pub use path::{paths_of, resolve, resolve_in_node, NodePath, ParsePathError};
 pub use perf::{PerfReport, TreeMetrics};

@@ -21,7 +21,9 @@ use crate::component::{Component, ComponentId, DropFn};
 use crate::entity::Entity;
 use crate::storage::arena::ChunkArena;
 use crate::storage::blob_vec::BlobVec;
-use crate::storage::chunk::{rows_per_chunk, ChunkBounds, ChunkMeta, ChunkVersions};
+use crate::storage::chunk::{
+    rows_per_chunk, ChunkBounds, ChunkChange, ChunkMeta, ChunkVersions, ChunkVisitStats,
+};
 
 static NEXT_CHUNK_INCARNATION: AtomicU64 = AtomicU64::new(1);
 
@@ -78,9 +80,9 @@ impl Column {
     /// block header next to the data).
     ///
     /// # Safety
-    /// `cell` must point at an aligned `Tick` and `slice` at the aligned slice
+    /// `cell` must point at an initialized, aligned `ChunkChange` and `slice` at the aligned slice
     /// base, both inside a live chunk block (see [`BlobVec::attach_block`]).
-    unsafe fn attach_chunk(&mut self, cell: *mut Tick, slice: *mut u8) {
+    unsafe fn attach_chunk(&mut self, cell: *mut ChunkChange, slice: *mut u8) {
         // SAFETY: forwarded contract for the header cell.
         unsafe { self.chunk.attach_cell(cell) };
         // SAFETY: forwarded contract for the value slice.
@@ -340,21 +342,59 @@ impl Column {
     ///
     /// # Safety
     /// `row < len()` and the caller must hold unique access to this row (the
-    /// same discipline as [`Column::changed_tick_ptr`]). The pointer must only
-    /// be written with `this_run`, which upholds the chunk upper-bound invariant.
+    /// same discipline as [`Column::changed_tick_ptr`]). Only shared atomic
+    /// methods may be used through the pointer; never replace the cell.
     #[inline]
-    pub unsafe fn chunk_changed_ptr(&self, row: usize) -> *mut Tick {
+    pub unsafe fn chunk_changed_ptr(&self, row: usize) -> *mut ChunkChange {
         // SAFETY: forwarded contract (`row < len`, unique access to the row).
         unsafe { self.chunk.chunk_changed_ptr(row) }
     }
 
-    /// The changed-version of chunk `chunk` within this column.
+    /// Representative endpoint of chunk `chunk`'s changed-tick interval.
+    /// Use [`Self::chunk_may_have_changed`] for filtering and
+    /// [`Self::chunk_revision`] for cache invalidation, not tick ordering.
     ///
     /// # Panics
     /// Panics if `chunk >= chunk_count()`.
     #[inline]
     pub fn chunk_version(&self, chunk: usize) -> Tick {
         self.chunk.version(chunk)
+    }
+
+    /// Whether this chunk can contain a row changed within the observer window.
+    #[inline]
+    pub fn chunk_may_have_changed(&self, chunk: usize, last: Tick, now: Tick) -> bool {
+        self.chunk.may_have_changed(chunk, last, now)
+    }
+
+    /// Visit matching chunks through the column's hierarchical interval index.
+    /// Clean subtrees are skipped without inspecting their individual chunks.
+    pub fn visit_changed_chunks(
+        &self,
+        last: Tick,
+        now: Tick,
+        visit: impl FnMut(usize),
+    ) -> ChunkVisitStats {
+        self.chunk.visit_changed(last, now, visit)
+    }
+
+    /// First possibly changed chunk in `[start, end)`, using the hierarchical
+    /// interval index to skip cold gaps. The range is clamped to live chunks.
+    #[inline]
+    pub fn next_changed_chunk(
+        &self,
+        start: usize,
+        end: usize,
+        last: Tick,
+        now: Tick,
+    ) -> Option<usize> {
+        self.chunk.next_changed(start, end, last, now).0
+    }
+
+    /// Write revision independent of replayed or wrapping ticks.
+    #[inline]
+    pub fn chunk_revision(&self, chunk: usize) -> u64 {
+        self.chunk.revision(chunk)
     }
 
     /// Number of logical chunk windows this column currently spans.
@@ -389,7 +429,19 @@ impl Column {
         for cell in &mut self.changed_ticks {
             cell.get_mut().check_tick(this_run);
         }
-        self.chunk.check_ticks(this_run);
+        let rpc = self.rows_per_chunk();
+        for chunk in 0..self.chunk_count() {
+            let start = chunk * rpc;
+            let end = ((chunk + 1) * rpc).min(self.len());
+            self.chunk.rebuild(
+                chunk,
+                self.changed_ticks[start..end].iter().map(|cell| {
+                    // SAFETY: the exclusive column borrow prevents live row handles.
+                    unsafe { *cell.get() }
+                }),
+                this_run,
+            );
+        }
     }
 }
 
@@ -506,7 +558,7 @@ impl Table {
             .max()
             .unwrap_or(1)
             .max(64);
-        let tick_size = size_of::<Tick>();
+        let tick_size = size_of::<ChunkChange>();
         let versions_bytes = ncols * tick_size;
         let meta_offset = versions_bytes.next_multiple_of(align_of::<ChunkMeta>());
         let values_offset = (meta_offset + size_of::<ChunkMeta>()).next_multiple_of(block_align);
@@ -599,10 +651,11 @@ impl Table {
             for (id, cell_offset, slice_offset) in &self.column_slots {
                 if let Some(column) = self.columns.get_mut(id) {
                     // SAFETY: both offsets were laid out inside `block_layout`,
-                    // the cell is aligned for `Tick` and the slice base for the
+                    // the cell is aligned for `ChunkChange` and the slice base for the
                     // column's element type; the block is kept alive in `chunks`.
                     unsafe {
-                        let cell = block.ptr.as_ptr().add(*cell_offset).cast::<Tick>();
+                        let cell = block.ptr.as_ptr().add(*cell_offset).cast::<ChunkChange>();
+                        core::ptr::write(cell, ChunkChange::new());
                         let base = block.ptr.as_ptr().add(*slice_offset);
                         column.attach_chunk(cell, base);
                     }
@@ -705,14 +758,12 @@ impl Table {
         let before = out.len();
         let rows_per_chunk = self.rows_per_chunk;
         let total = self.entities.len();
-        for (chunk, block) in self.chunks.iter().enumerate() {
-            if !column.chunk_version(chunk).is_newer_than(last_upload, now) {
-                continue;
-            }
+        column.visit_changed_chunks(last_upload, now, |chunk| {
+            let block = &self.chunks[chunk];
             let first_row = chunk * rows_per_chunk;
             let rows = total.saturating_sub(first_row).min(rows_per_chunk);
             if rows == 0 {
-                continue;
+                return;
             }
             out.push(ColumnUploadSpan {
                 buffer_offset: first_row * stride,
@@ -722,7 +773,7 @@ impl Table {
                 src: unsafe { block.ptr.as_ptr().add(slice_offset).cast_const() },
                 len: rows * stride,
             });
-        }
+        });
         out.len() - before
     }
 
@@ -732,15 +783,21 @@ impl Table {
     /// `point` projects a component value to a world-space point; each chunk's
     /// bounds is the union of its rows' points. A window is recomputed **only
     /// when it is stale** — its cached `bounds_epoch` no longer matches the
-    /// chunk's structural epoch (a row moved in/out), or the chunk's
-    /// `change_version` moved past the version the bounds were computed at (some
-    /// value changed) — so an untouched frame costs one staleness test per chunk
-    /// and nothing else. Pass `force` to recompute every window regardless.
+    /// chunk's structural epoch (a row moved in/out), the source column differs,
+    /// or the column's independent write revision differs (including writes in
+    /// the same tick). An untouched frame costs one staleness test per chunk.
+    /// Pass `force` when the projection changes, including captured parameters;
+    /// a closure's semantics cannot be inferred from its type or address.
     /// Returns the number of windows recomputed.
-    pub fn recompute_chunk_bounds<T: Component>(
+    ///
+    /// # Safety
+    /// If `id` is present, its column must contain initialized values of `T`.
+    /// A matching size or alignment alone does not establish type identity.
+    /// Prefer the checked `World::recompute_chunk_bounds` entry point.
+    pub unsafe fn recompute_chunk_bounds<T: Component>(
         &mut self,
         id: ComponentId,
-        now: Tick,
+        _now: Tick,
         point: &mut impl FnMut(&T) -> [f32; 3],
         force: bool,
     ) -> usize {
@@ -761,9 +818,11 @@ impl Table {
             // `&mut self` makes this the only access to it.
             let meta = unsafe { &mut *block.ptr.as_ptr().add(meta_offset).cast::<ChunkMeta>() };
             let version = column.chunk_version(chunk);
+            let revision = column.chunk_revision(chunk);
             let stale = force
+                || meta.bounds_source() != Some(id)
                 || meta.bounds_epoch() != meta.structural_epoch()
-                || version.is_newer_than(meta.bounds_version(), now);
+                || revision != meta.bounds_revision();
             if !stale {
                 continue;
             }
@@ -775,7 +834,7 @@ impl Table {
             let mut bounds: Option<ChunkBounds> = None;
             for row in first_row..first_row + rows {
                 // SAFETY: `row < total == column.len()` and the column stores `T`
-                // (checked above), so this reads a live value of the right type.
+                // (the caller's contract), so this reads a live value of T.
                 let p = point(unsafe { column.get::<T>(row) });
                 match &mut bounds {
                     Some(b) => b.union(&ChunkBounds::new(p, p)),
@@ -783,7 +842,7 @@ impl Table {
                 }
             }
             let epoch = meta.structural_epoch();
-            meta.set_bounds(bounds, epoch, version);
+            meta.set_column_bounds(bounds, epoch, version, revision, id);
             recomputed += 1;
         }
         recomputed
@@ -1405,6 +1464,113 @@ mod tests {
     #[derive(Clone, Copy)]
     struct Pt([f32; 3], [u8; 500]);
     impl Component for Pt {}
+
+    #[test]
+    fn bounds_cache_distinguishes_source_columns_with_equal_revisions() {
+        struct OtherPoint([f32; 3]);
+        impl Component for OtherPoint {}
+
+        let mut world = World::new();
+        let entity = world.spawn((Pt([1.0, 2.0, 3.0], [0; 500]), OtherPoint([9.0; 3])));
+        let arch = world.entities().location(entity).unwrap().archetype_id;
+        let first = world.components().id_of::<Pt>().unwrap();
+        let second = world.components().id_of::<OtherPoint>().unwrap();
+        let table = world.archetypes().get(arch).unwrap().table();
+        assert_eq!(
+            table.column(first).unwrap().chunk_revision(0),
+            table.column(second).unwrap().chunk_revision(0),
+            "different columns may legitimately have the same revision",
+        );
+        let now = world.change_tick();
+        assert_eq!(
+            world.recompute_chunk_bounds::<Pt>(arch, now, &mut |p| p.0, false),
+            1
+        );
+        assert_eq!(
+            world.recompute_chunk_bounds::<Pt>(arch, now, &mut |p| p.0, false),
+            0
+        );
+        assert_eq!(
+            world.recompute_chunk_bounds::<OtherPoint>(arch, now, &mut |p| p.0, false),
+            1,
+        );
+        let meta = world.chunk_meta(arch, 0).unwrap();
+        assert_eq!(meta.bounds, Some(ChunkBounds::new([9.0; 3], [9.0; 3])));
+        assert_eq!(meta.bounds_source(), Some(second));
+        assert_eq!(
+            world.recompute_chunk_bounds::<Pt>(arch, now, &mut |p| p.0, false),
+            1
+        );
+        assert_eq!(
+            world.chunk_meta(arch, 0).unwrap().bounds_source(),
+            Some(first)
+        );
+        assert_eq!(
+            world.chunk_meta(arch, 0).unwrap().bounds,
+            Some(ChunkBounds::new([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])),
+        );
+    }
+
+    #[test]
+    fn bounds_cache_observes_same_tick_writes_with_historical_change_stamp() {
+        let mut world = World::new();
+        let entity = world.spawn(Pt([1.0; 3], [0; 500]));
+        let arch = world.entities().location(entity).unwrap().archetype_id;
+        let now = world.change_tick();
+        assert_eq!(
+            world.recompute_chunk_bounds::<Pt>(arch, now, &mut |p| p.0, false),
+            1
+        );
+        for coordinate in [5.0, 10.0] {
+            let mut value = world.get_mut::<Pt>(entity).unwrap();
+            value.0 = [coordinate; 3];
+            value.set_last_changed(Tick::new(0));
+            assert_eq!(world.change_tick(), now);
+            assert_eq!(
+                world.recompute_chunk_bounds::<Pt>(arch, now, &mut |p| p.0, false),
+                1
+            );
+            assert_eq!(
+                world.chunk_meta(arch, 0).unwrap().bounds,
+                Some(ChunkBounds::new([coordinate; 3], [coordinate; 3])),
+            );
+            assert_eq!(
+                world.recompute_chunk_bounds::<Pt>(arch, now, &mut |p| p.0, false),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn bounds_cache_invalidates_manual_bounds_and_supports_projection_changes() {
+        let mut world = World::new();
+        let entity = world.spawn(Pt([2.0; 3], [0; 500]));
+        let arch = world.entities().location(entity).unwrap().archetype_id;
+        let now = world.change_tick();
+        assert_eq!(
+            world.recompute_chunk_bounds::<Pt>(arch, now, &mut |p| p.0, false),
+            1
+        );
+        let meta = world.chunk_meta_mut(arch, 0).unwrap();
+        let epoch = meta.structural_epoch();
+        meta.set_bounds(Some(ChunkBounds::new([-1.0; 3], [-1.0; 3])), epoch, now);
+        assert_eq!(meta.bounds_source(), None);
+        assert_eq!(
+            world.recompute_chunk_bounds::<Pt>(arch, now, &mut |p| p.0, false),
+            1
+        );
+        // The source has not changed, but the caller changes the projection.
+        // `force` is the explicit invalidation contract for captured state.
+        let offset = 8.0;
+        assert_eq!(
+            world.recompute_chunk_bounds::<Pt>(arch, now, &mut |p| p.0.map(|x| x + offset), true),
+            1,
+        );
+        assert_eq!(
+            world.chunk_meta(arch, 0).unwrap().bounds,
+            Some(ChunkBounds::new([10.0; 3], [10.0; 3])),
+        );
+    }
 
     #[test]
     fn recompute_chunk_bounds_produces_and_caches_aabbs() {

@@ -14,29 +14,26 @@
 //!    (P) cores from efficiency (E) cores so latency-sensitive work can prefer
 //!    P-cores and background work E-cores (design §24.6).
 //!
-//! ## Honest degradation
-//! Real topology probing must come from [`prism_platform`]. Today that crate
-//! exposes logical-core *count* and best-effort affinity, but **no NUMA map and
-//! no P/E-core map** (see `prism_platform::cpu`). Rather than invent a fake
-//! topology, [`Topology::detect`] degrades to a single NUMA node of uniform
-//! performance cores — exactly the "缺失时退化为均匀池" fallback the design
-//! calls for (§24.6). The mechanism (per-node arenas, steal ordering, class
-//! assignment) is fully present and tested; it simply sees one node until the
-//! platform layer can describe more. Tests build explicit multi-node / hybrid
-//! topologies with [`Topology::from_cores`] to exercise the real logic.
+//! ## Probe and fallback
+//! [`Topology::detect`] consumes [`prism_platform::topology::CpuTopology`],
+//! retaining OS CPU/node ids, optional cache/distance data and provenance.
+//! Linux probes sysfs and the calling thread's allowed CPUs; unsupported or
+//! failed probes explicitly fall back. Unknown hardware classes use the
+//! ordinary Performance *scheduling lane*, not a claim that P cores were found.
+//! Inspect [`Topology::platform`] for the original class and probe source.
 //!
-//! The `numa` cargo feature records that NUMA-aware scheduling was requested;
-//! [`Topology::numa_enabled`] reflects it. Without a platform NUMA map the
-//! feature cannot change the *detected* node count, which stays honest at 1.
+//! The `numa` feature enables local-first stealing for affinity-planned workers.
+//! Pinning is best-effort; neither topology nor stealing binds physical memory
+//! or guarantees locality when a pin fails. Unpinned pools retain flat stealing.
 
 use core::fmt;
 
-/// Identifier of a NUMA node. A plain index; node 0 always exists.
+/// OS NUMA node identifier; ids may be sparse and need not include zero.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct NumaNodeId(u16);
 
 impl NumaNodeId {
-    /// The always-present first node (the only node on non-NUMA systems).
+    /// The conventional single-node fallback id, not necessarily a real node.
     pub const ZERO: NumaNodeId = NumaNodeId(0);
 
     /// Construct a node id from a raw index.
@@ -92,18 +89,50 @@ pub struct Topology {
     cores: Vec<CoreInfo>,
     node_count: usize,
     numa_enabled: bool,
+    platform: Option<prism_platform::topology::CpuTopology>,
 }
 
 impl Topology {
-    /// Probe the current machine, degrading honestly to a uniform single-node,
-    /// all-performance topology when the platform exposes no NUMA / hybrid map
-    /// (see the module docs). The core count comes from
-    /// [`prism_platform::CpuInfo`].
+    /// Probe through the platform backend, retaining explicit fallback status.
     pub fn detect() -> Self {
-        let cores = prism_platform::CpuInfo::detect().logical_cores.max(1);
-        let mut topo = Self::uniform(cores);
+        Self::from_platform(prism_platform::topology::CpuTopology::detect())
+    }
+
+    /// Consume a validated platform probe (or injected topology). Unknown
+    /// classes use the neutral ordinary lane; original evidence is retained.
+    pub fn from_platform(platform: prism_platform::topology::CpuTopology) -> Self {
+        use prism_platform::topology::CoreKind;
+        let mut topo = Self::from_cores(
+            platform
+                .cores()
+                .iter()
+                .map(|core| CoreInfo {
+                    id: core.logical_id as usize,
+                    node: NumaNodeId::new(core.numa_node),
+                    class: match core.kind {
+                        CoreKind::Efficiency => CoreClass::Efficiency,
+                        CoreKind::Performance | CoreKind::Unknown => CoreClass::Performance,
+                    },
+                })
+                .collect(),
+        );
         topo.numa_enabled = cfg!(feature = "numa");
+        topo.platform = Some(platform);
         topo
+    }
+
+    /// Original platform evidence, including unknown classes/fallback reason.
+    /// Explicit [`Self::from_cores`] data has no platform probe attached.
+    pub fn platform(&self) -> Option<&prism_platform::topology::CpuTopology> {
+        self.platform.as_ref()
+    }
+
+    /// Sorted distinct OS node ids, not a dense `0..node_count` range.
+    pub fn node_ids(&self) -> Vec<NumaNodeId> {
+        let mut nodes: Vec<_> = self.cores.iter().map(|core| core.node).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes
     }
 
     /// A uniform topology: `cores` performance cores (ids `0..cores`), all on
@@ -121,24 +150,31 @@ impl Topology {
             cores,
             node_count: 1,
             numa_enabled: false,
+            platform: None,
         }
     }
 
     /// Build a topology from an explicit core list (used by tests and by any
-    /// future platform probe). The node count is derived as `max(node)+1`.
+    /// platform adapter). Counts distinct nodes without renumbering OS ids.
     ///
-    /// Panics if `cores` is empty.
+    /// Panics if `cores` is empty or contains duplicate logical ids.
     pub fn from_cores(cores: Vec<CoreInfo>) -> Self {
         assert!(!cores.is_empty(), "topology needs at least one core");
-        let node_count = cores
-            .iter()
-            .map(|c| c.node.index() as usize + 1)
-            .max()
-            .unwrap_or(1);
+        let mut ids: Vec<_> = cores.iter().map(|c| c.id).collect();
+        ids.sort_unstable();
+        assert!(
+            !ids.windows(2).any(|pair| pair[0] == pair[1]),
+            "duplicate logical core id"
+        );
+        let mut nodes: Vec<_> = cores.iter().map(|c| c.node).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        let node_count = nodes.len();
         Self {
             cores,
             node_count,
             numa_enabled: node_count > 1,
+            platform: None,
         }
     }
 
@@ -222,16 +258,23 @@ mod tests {
     }
 
     #[test]
-    fn detect_degrades_to_single_node() {
+    fn detect_preserves_platform_evidence() {
         let topo = Topology::detect();
-        assert_eq!(topo.node_count(), 1);
         assert!(topo.core_count() >= 1);
-        // Single node => never "numa_enabled" regardless of the cargo feature.
-        assert!(!topo.numa_enabled());
-        assert!(topo
-            .cores()
-            .iter()
-            .all(|c| c.class == CoreClass::Performance));
+        let platform = topo.platform().unwrap();
+        assert_eq!(topo.node_count(), platform.node_ids().len());
+        assert_eq!(
+            topo.numa_enabled(),
+            cfg!(feature = "numa") && topo.node_count() > 1
+        );
+        assert_eq!(topo.core_count(), platform.logical_core_count());
+        if !platform.is_probed() {
+            assert_eq!(topo.node_count(), 1);
+            assert!(topo
+                .cores()
+                .iter()
+                .all(|c| c.class == CoreClass::Performance));
+        }
     }
 
     #[test]

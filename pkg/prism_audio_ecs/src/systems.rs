@@ -1,24 +1,27 @@
-//! Ordered ECS systems that translate audio state into runtime commands.
+//! Exclusive, deterministic control-plane reconciliation. No audio-thread work
+//! or locking is added: only accepted bounded-ring commands mutate the mirror.
+//! Temporary collections and ECS scans run on the App thread, not the callback.
 
+use alloc::vec::Vec;
+use prism_audio_core::voice::VoiceHandle;
 use prism_audio_rt::AudioCommand;
-use prism_ecs::prelude::{Entity, Local, Query, Res, ResMut, With};
-use prism_ecs::schedule::{SystemSet, SystemSetId};
+use prism_ecs::{
+    prelude::*,
+    schedule::{SystemSet, SystemSetId},
+};
+use prism_math::Vec3;
 use prism_transform::GlobalTransform;
 
-use crate::budget::PhysicalVoiceBudget;
-use crate::client_resource::AudioClient;
 use crate::commands::{
     build_request, effective_importance, set_importance, spawn_voice, stop_voice,
 };
-use crate::emitter::AudioEmitter;
-use crate::listener::AudioListener;
-use crate::master_gain::MasterGain;
-use crate::telemetry::AudioTelemetry;
-use crate::voice_registry::{LiveVoices, PendingStops, RemovedAudioEmitters, VoiceMirror};
+use crate::plugin::BridgeState;
+use crate::{
+    AudioClient, AudioEmitter, AudioListener, AudioTelemetry, LiveVoices, MasterGain, PendingStops,
+    PhysicalVoiceBudget, RemovedAudioEmitters, VoiceMirror,
+};
 
-const IMPORTANCE_EPSILON: f32 = 1.0e-4;
-
-/// Ordering set containing the complete audio bridge.
+/// Ordering set for the native audio bridge in `prism_app::Last`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AudioSystems;
 
@@ -28,157 +31,268 @@ impl SystemSet for AudioSystems {
     }
 }
 
-/// Retries stops rejected by a full command ring.
-pub fn flush_pending_stops(
-    client: Res<AudioClient>,
-    mut mirror: ResMut<VoiceMirror>,
-    mut pending: ResMut<PendingStops>,
-) {
-    if pending.is_empty() {
+/// Executes the whole bridge after transform propagation and deferred commands.
+/// Stops precede allocation. Restore never rewinds the runtime pool: it retires
+/// old handles through the FIFO before minting replacements. Tick values and
+/// component handle copies are not treated as proof of runtime ownership.
+pub fn audio_frame(world: &mut World) {
+    if !world
+        .get_resource::<AudioClient>()
+        .is_some_and(AudioClient::is_open)
+        || world.get_resource::<BridgeState>().is_none()
+    {
         return;
     }
-    for handle in pending.take_all() {
-        if !stop_voice(&client, &mut mirror, handle) {
-            pending.push(handle);
+    crate::player_systems::sync_audio_players(world);
+    crate::player_systems::apply_player_disposition(world);
+    stop_removed_voices(world);
+    stop_flagged_voices(world);
+    flush_pending_stops(world);
+    apply_physical_budget(world);
+    apply_master_gain(world);
+    spawn_voices(world);
+    update_importance(world);
+    prune_stolen(world);
+    pump_telemetry(world);
+}
+
+fn detach(world: &mut World, entity: Entity, handle: VoiceHandle) {
+    world.resource_mut::<LiveVoices>().remove(entity);
+    world.resource_mut::<PendingStops>().push(handle);
+    if let Some(mut emitter) = world.get_mut::<AudioEmitter>(entity) {
+        emitter.voice = None;
+        emitter.sent_importance = None;
+    }
+}
+
+/// Reconciles authoritative ownership against removals, replacements, missing
+/// poses, request changes, and wholesale snapshot restore, including same-frame
+/// remove/reinsert. Clears copied or restored handle caches before spawning.
+pub fn stop_removed_voices(world: &mut World) {
+    let generation = world.archetype_generation();
+    let reset = world.resource::<BridgeState>().generation != generation;
+    if reset {
+        let state = world.resource_mut::<BridgeState>();
+        state.generation = generation;
+        state.gain = None;
+        state.budget = None;
+    }
+    let removed = world.resource_mut::<RemovedAudioEmitters>().take_all();
+    let live: Vec<_> = world
+        .resource::<LiveVoices>()
+        .map
+        .iter()
+        .map(|(&e, &h)| (e, h))
+        .collect();
+    for (entity, handle) in live {
+        let emitter = world.get::<AudioEmitter>(entity);
+        let info = world.resource::<VoiceMirror>().get(handle);
+        let invalid = reset
+            || removed.contains(&entity)
+            || world.get::<GlobalTransform>(entity).is_none()
+            || emitter.is_none_or(|emitter| {
+                emitter.voice != Some(handle)
+                    || info.is_none_or(|info| {
+                        info.group != emitter.group
+                            || info.priority != emitter.priority
+                            || info.behavior != emitter.behavior
+                    })
+            });
+        if invalid {
+            detach(world, entity, handle);
+        }
+    }
+    let query = world.query::<(Entity, &AudioEmitter)>();
+    let stale: Vec<_> = query
+        .iter(world)
+        .filter_map(|(entity, emitter)| {
+            let expected = world.resource::<LiveVoices>().get(entity);
+            (emitter.voice != expected || (expected.is_none() && emitter.sent_importance.is_some()))
+                .then_some(entity)
+        })
+        .collect();
+    for entity in stale {
+        let expected = world.resource::<LiveVoices>().get(entity);
+        let mut emitter = world
+            .get_mut::<AudioEmitter>(entity)
+            .expect("queried emitter");
+        emitter.voice = expected;
+        emitter.sent_importance = None;
+    }
+}
+
+/// Consumes explicit stop requests even before allocation; a stopped emitter
+/// remains stopped until the caller explicitly sets `playing = true`.
+pub fn stop_flagged_voices(world: &mut World) {
+    let query = world.query::<(Entity, &AudioEmitter)>();
+    let stopped: Vec<_> = query
+        .iter(world)
+        .filter_map(|(entity, emitter)| {
+            (!emitter.playing || emitter.stop_requested).then_some(entity)
+        })
+        .collect();
+    for entity in stopped {
+        if let Some(handle) = world.resource::<LiveVoices>().get(entity) {
+            detach(world, entity, handle);
+        }
+        let mut emitter = world
+            .get_mut::<AudioEmitter>(entity)
+            .expect("queried emitter");
+        emitter.playing = false;
+        emitter.stop_requested = false;
+    }
+}
+
+/// Retries pending stops, retaining mirror slots until the FIFO accepts them.
+/// Stolen/already-killed handles need no stop command: their generations no
+/// longer resolve in either pool. Allocations wait until this queue is empty.
+pub fn flush_pending_stops(world: &mut World) {
+    let client = world.resource::<AudioClient>().clone();
+    let handles = world.resource_mut::<PendingStops>().take_all();
+    for handle in handles {
+        let mirror = world.resource_mut::<VoiceMirror>();
+        if mirror.get(handle).is_some() && !stop_voice(&client, mirror, handle) {
+            world.resource_mut::<PendingStops>().push(handle);
         }
     }
 }
 
-/// Spawns every emitter that is playing without a mirrored live handle.
-pub fn spawn_voices(
-    client: Res<AudioClient>,
-    mut mirror: ResMut<VoiceMirror>,
-    mut live: ResMut<LiveVoices>,
-    listeners: Query<&GlobalTransform, With<AudioListener>>,
-    mut emitters: Query<(Entity, &mut AudioEmitter, &GlobalTransform)>,
-) {
-    let listener_pos = listeners.iter().next().map(GlobalTransform::translation);
-    for (entity, mut emitter, transform) in &mut emitters {
-        if !emitter.wants_voice() {
-            continue;
-        }
-        let importance = effective_importance(&emitter, transform.translation(), listener_pos);
-        let request = build_request(&emitter, importance);
-        if let Some(handle) = spawn_voice(&client, &mut mirror, request) {
-            emitter.voice = Some(handle);
-            emitter.sent_importance = Some(importance);
-            live.insert(entity, handle);
-        }
-    }
+fn listener_pos(world: &mut World) -> Option<Vec3> {
+    let query = world.query::<(Entity, &AudioListener, &GlobalTransform)>();
+    query
+        .iter(world)
+        .min_by_key(|(entity, _, _)| *entity)
+        .map(|(_, _, transform)| transform.translation())
 }
 
-/// Updates live voice importance only after it crosses the configured epsilon.
-pub fn update_importance(
-    client: Res<AudioClient>,
-    mut mirror: ResMut<VoiceMirror>,
-    listeners: Query<&GlobalTransform, With<AudioListener>>,
-    mut emitters: Query<(&mut AudioEmitter, &GlobalTransform)>,
-) {
-    let listener_pos = listeners.iter().next().map(GlobalTransform::translation);
-    for (mut emitter, transform) in &mut emitters {
-        let Some(handle) = emitter.voice else {
-            continue;
-        };
-        if emitter.stop_requested || !emitter.playing {
-            continue;
-        }
-        let importance = effective_importance(&emitter, transform.translation(), listener_pos);
-        let changed = emitter
-            .sent_importance
-            .is_none_or(|previous| (importance - previous).abs() > IMPORTANCE_EPSILON);
-        if changed && set_importance(&client, &mut mirror, handle, importance) {
-            emitter.sent_importance = Some(importance);
-        }
+/// Allocates playing emitters in stable entity order after pending stops clear.
+pub fn spawn_voices(world: &mut World) {
+    if !world.resource::<PendingStops>().is_empty() {
+        return;
     }
-}
-
-/// Stops emitters that no longer want to play and clears their bookkeeping.
-pub fn stop_flagged_voices(
-    client: Res<AudioClient>,
-    mut mirror: ResMut<VoiceMirror>,
-    mut live: ResMut<LiveVoices>,
-    mut emitters: Query<(Entity, &mut AudioEmitter)>,
-) {
-    for (entity, mut emitter) in &mut emitters {
-        if !emitter.wants_stop() {
-            continue;
-        }
-        let Some(handle) = emitter.voice else {
-            continue;
-        };
-        if stop_voice(&client, &mut mirror, handle) {
-            emitter.voice = None;
-            emitter.sent_importance = None;
-            emitter.stop_requested = false;
-            live.remove(entity);
-        }
-    }
-}
-
-/// Stops voices whose emitter was removed, using the lifecycle-observer queue.
-pub fn stop_removed_voices(
-    client: Res<AudioClient>,
-    mut mirror: ResMut<VoiceMirror>,
-    mut live: ResMut<LiveVoices>,
-    mut pending: ResMut<PendingStops>,
-    mut removed: ResMut<RemovedAudioEmitters>,
-) {
-    for entity in removed.take_all() {
-        if let Some(handle) = live.remove(entity)
-            && !stop_voice(&client, &mut mirror, handle)
+    let listener = listener_pos(world);
+    let query = world.query::<(Entity, &AudioEmitter, &GlobalTransform)>();
+    let mut requests: Vec<_> = query
+        .iter(world)
+        .filter_map(|(entity, emitter, pose)| {
+            emitter.wants_voice().then(|| {
+                let importance = effective_importance(emitter, pose.translation(), listener);
+                (entity, build_request(emitter, importance))
+            })
+        })
+        .collect();
+    requests.sort_unstable_by_key(|(entity, _)| *entity);
+    let client = world.resource::<AudioClient>().clone();
+    for (entity, request) in requests {
+        let handle = spawn_voice(&client, world.resource_mut::<VoiceMirror>(), request);
+        if let Some(handle) = handle
+            && world.resource::<VoiceMirror>().get(handle).is_some()
         {
-            pending.push(handle);
+            world.resource_mut::<LiveVoices>().insert(entity, handle);
+            let mut emitter = world
+                .get_mut::<AudioEmitter>(entity)
+                .expect("queried emitter");
+            emitter.voice = Some(handle);
+            emitter.sent_importance = Some(request.importance);
         }
     }
 }
 
-/// Forwards a changed master gain, retrying if the command ring is full.
-pub fn apply_master_gain(
-    client: Res<AudioClient>,
-    master: Res<MasterGain>,
-    mut last: Local<Option<MasterGain>>,
-    mut retry: Local<bool>,
-) {
-    if !*retry && last.as_ref().is_some_and(|previous| *previous == *master) {
-        return;
-    }
-    let command = AudioCommand::SetMasterGain {
-        linear: master.linear,
-        at_frame: 0,
-        ramp_frames: master.ramp_frames,
-    };
-    *retry = client.send(command).is_err();
-    if !*retry {
-        *last = Some(*master);
-    }
-}
-
-/// Forwards a changed physical budget and updates the mirror only on success.
-pub fn apply_physical_budget(
-    client: Res<AudioClient>,
-    mut mirror: ResMut<VoiceMirror>,
-    budget: Res<PhysicalVoiceBudget>,
-    mut last: Local<Option<PhysicalVoiceBudget>>,
-    mut retry: Local<bool>,
-) {
-    if !*retry && last.as_ref().is_some_and(|previous| *previous == *budget) {
-        return;
-    }
-    match client.send_managed(AudioCommand::SetMaxPhysicalVoices {
-        max_physical: budget.max,
-    }) {
-        Ok(()) => {
-            mirror.set_max_physical(budget.max);
-            *last = Some(*budget);
-            *retry = false;
+/// Sends exact importance changes, including sub-epsilon changes, retrying a
+/// rejected enqueue without advancing the acknowledged component cache.
+pub fn update_importance(world: &mut World) {
+    let listener = listener_pos(world);
+    let query = world.query::<(Entity, &AudioEmitter, &GlobalTransform)>();
+    let updates: Vec<_> = query
+        .iter(world)
+        .filter_map(|(entity, emitter, pose)| {
+            let handle = emitter.voice?;
+            let importance = effective_importance(emitter, pose.translation(), listener);
+            (emitter.playing
+                && !emitter.stop_requested
+                && emitter.sent_importance.map(f32::to_bits) != Some(importance.to_bits()))
+            .then_some((entity, handle, importance))
+        })
+        .collect();
+    let client = world.resource::<AudioClient>().clone();
+    for (entity, handle, importance) in updates {
+        if set_importance(
+            &client,
+            world.resource_mut::<VoiceMirror>(),
+            handle,
+            importance,
+        ) {
+            world
+                .get_mut::<AudioEmitter>(entity)
+                .expect("queried emitter")
+                .sent_importance = Some(importance);
         }
-        Err(_) => *retry = true,
     }
 }
 
-/// Drains all available runtime telemetry into the bounded ECS history.
-pub fn pump_telemetry(client: Res<AudioClient>, mut telemetry: ResMut<AudioTelemetry>) {
+fn prune_stolen(world: &mut World) {
+    let dead: Vec<_> = world
+        .resource::<LiveVoices>()
+        .map
+        .iter()
+        .filter_map(|(&entity, &handle)| {
+            world
+                .resource::<VoiceMirror>()
+                .get(handle)
+                .is_none()
+                .then_some((entity, handle))
+        })
+        .collect();
+    for (entity, handle) in dead {
+        detach(world, entity, handle);
+    }
+    // Newly pruned handles do not resolve, so they can be discarded immediately
+    // without issuing commands, even if the command ring is currently full.
+    flush_pending_stops(world);
+}
+
+/// Forwards desired master gain using exact acknowledged bits, not ECS ticks.
+/// Restore clears this acknowledgement; a full FIFO leaves it pending.
+pub fn apply_master_gain(world: &mut World) {
+    let master = *world.resource::<MasterGain>();
+    let key = (master.linear.to_bits(), master.ramp_frames);
+    if world.resource::<BridgeState>().gain == Some(key) {
+        return;
+    }
+    if world
+        .resource::<AudioClient>()
+        .send_managed(AudioCommand::SetMasterGain {
+            linear: master.linear,
+            at_frame: 0,
+            ramp_frames: master.ramp_frames,
+        })
+        .is_ok()
+    {
+        world.resource_mut::<BridgeState>().gain = Some(key);
+    }
+}
+
+/// Forwards budget changes, mirroring only accepted commands. This runs before
+/// allocation so both pools apply the same budget to every new request.
+pub fn apply_physical_budget(world: &mut World) {
+    let max = world.resource::<PhysicalVoiceBudget>().max;
+    if world.resource::<BridgeState>().budget == Some(max) {
+        return;
+    }
+    if world
+        .resource::<AudioClient>()
+        .send_managed(AudioCommand::SetMaxPhysicalVoices { max_physical: max })
+        .is_ok()
+    {
+        world.resource_mut::<VoiceMirror>().set_max_physical(max);
+        world.resource_mut::<BridgeState>().budget = Some(max);
+    }
+}
+
+/// Drains available telemetry into the bounded ECS history on the App thread.
+pub fn pump_telemetry(world: &mut World) {
+    let client = world.resource::<AudioClient>().clone();
     while let Some(frame) = client.recv_telemetry() {
-        telemetry.push(frame);
+        world.resource_mut::<AudioTelemetry>().push(frame);
     }
 }

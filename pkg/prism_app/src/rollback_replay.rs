@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 
 use crate::determinism::RecordedInput;
 use crate::rollback::SnapshotHistory;
+use prism_ecs::component::ComponentId;
 use prism_ecs::world::World;
 
 /// A deterministic session that can be rolled back and re-simulated.
@@ -39,6 +40,148 @@ use prism_ecs::world::World;
 pub struct RollbackReplay<F> {
     history: SnapshotHistory,
     inputs: Vec<RecordedInput<F>>,
+}
+
+/// The result of a failed ECS rollback operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EcsRollbackError {
+    /// The app did not install a [`SnapshotHistory`] resource.
+    MissingHistory,
+    /// A resident component has no registered snapshot clone glue.
+    MissingSnapshotComponents(Vec<ComponentId>),
+    /// The requested authority revision is outside the retained timeline.
+    UnavailableFrame {
+        /// The one-based authority revision that was requested.
+        frame: u64,
+        /// The current local timeline cursor.
+        current: u64,
+    },
+    /// The authority revision is zero; revision zero is the seed, not a step.
+    InvalidAuthorityRevision,
+}
+
+/// ECS-owned rollback/replay coordination.
+///
+/// Unlike [`RollbackReplay`], this type does not own a second snapshot ring.
+/// The ring is the [`SnapshotHistory`] resource in the ECS [`World`], while this
+/// value owns only the small input timeline. That makes the World resource the
+/// single source of truth shared by app systems and network integration.
+pub struct EcsRollbackReplay<F> {
+    inputs: Vec<RecordedInput<F>>,
+}
+
+impl<F: Clone> EcsRollbackReplay<F> {
+    /// Create an empty coordinator. The caller installs the World history with
+    /// [`crate::App::init_snapshot_history`] before committing a frame.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { inputs: Vec::new() }
+    }
+
+    /// The recorded input timeline, indexed by absolute frame number.
+    #[must_use]
+    pub fn inputs(&self) -> &[RecordedInput<F>] {
+        &self.inputs
+    }
+
+    /// Commit one predicted frame by capturing the pre-input World state.
+    pub fn commit(&mut self, world: &mut World, input: F) -> Result<u64, EcsRollbackError> {
+        let mut history = world
+            .remove_resource::<SnapshotHistory>()
+            .ok_or(EcsRollbackError::MissingHistory)?;
+        let frame = match history.try_capture(world) {
+            Ok(frame) => frame,
+            Err(missing) => {
+                world.insert_resource(history);
+                return Err(EcsRollbackError::MissingSnapshotComponents(missing));
+            }
+        };
+        world.insert_resource(history);
+        self.store_input(frame, input);
+        Ok(frame)
+    }
+
+    /// Rebase the ECS timeline on an authoritative post-input state and replay
+    /// every still-unconfirmed local input.
+    ///
+    /// `authority_frame` is a one-based authoritative revision: revision `1`
+    /// replaces local frame `0`, revision `2` replaces local frame `1`, etc.
+    /// The history therefore restores `authority_frame - 1`, applies the
+    /// authoritative state there, and replays inputs beginning at
+    /// `authority_frame`.
+    pub fn rebase_authority(
+        &mut self,
+        world: &mut World,
+        authority_frame: u64,
+        mut apply_authority: impl FnMut(&mut World),
+        mut simulate: impl FnMut(&mut World, &F),
+    ) -> Result<u64, EcsRollbackError> {
+        if authority_frame == 0 {
+            return Err(EcsRollbackError::InvalidAuthorityRevision);
+        }
+        let Some(mut history) = world.remove_resource::<SnapshotHistory>() else {
+            return Err(EcsRollbackError::MissingHistory);
+        };
+        let current = history.next_frame();
+        let anchor = authority_frame - 1;
+        if authority_frame > current || !history.contains(anchor) {
+            world.insert_resource(history);
+            return Err(EcsRollbackError::UnavailableFrame {
+                frame: authority_frame,
+                current,
+            });
+        }
+        let Some(replay_slice) = self.inputs.get(authority_frame as usize..current as usize) else {
+            world.insert_resource(history);
+            return Err(EcsRollbackError::UnavailableFrame {
+                frame: authority_frame,
+                current,
+            });
+        };
+        let replay_inputs: Vec<F> = replay_slice
+            .iter()
+            .map(|recorded| recorded.frame.clone())
+            .collect();
+        let replay_count = replay_inputs.len() as u64;
+        if !history.rollback(world, anchor) {
+            world.insert_resource(history);
+            return Err(EcsRollbackError::UnavailableFrame {
+                frame: authority_frame,
+                current,
+            });
+        }
+        // The authority state represents the result of the step immediately
+        // before the first input we replay.
+        apply_authority(world);
+        history.truncate_after(anchor);
+        history.seek(authority_frame);
+        world.insert_resource(history);
+
+        for input in replay_inputs {
+            self.commit(world, input.clone())?;
+            simulate(world, &input);
+        }
+        Ok(authority_frame + replay_count)
+    }
+
+    fn store_input(&mut self, frame: u64, input: F) {
+        let recorded = RecordedInput {
+            step: frame,
+            frame: input,
+        };
+        let index = frame as usize;
+        if index < self.inputs.len() {
+            self.inputs[index] = recorded;
+        } else {
+            self.inputs.push(recorded);
+        }
+    }
+}
+
+impl<F: Clone> Default for EcsRollbackReplay<F> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<F: Clone> RollbackReplay<F> {
@@ -341,5 +484,43 @@ mod tests {
             .reconcile(&mut w, 0, &[9, 9, 9], |w, input| sim(w, e, *input))
             .is_none());
         assert_eq!(counter(&w, e), 6);
+    }
+
+    #[test]
+    fn ecs_rebase_uses_world_history_and_replays_pending_inputs() {
+        let (mut w, e) = world(0);
+        w.insert_resource(SnapshotHistory::new(8));
+        let mut rr = EcsRollbackReplay::<i32>::new();
+
+        rr.commit(&mut w, 1).expect("frame 0 snapshot");
+        sim(&mut w, e, 1);
+        rr.commit(&mut w, 2).expect("frame 1 snapshot");
+        sim(&mut w, e, 2);
+        assert_eq!(counter(&w, e), 3);
+
+        let result = rr
+            .rebase_authority(
+                &mut w,
+                1,
+                |world| world.get_mut::<Counter>(e).unwrap().0 = 10,
+                |world, input| sim(world, e, *input),
+            )
+            .expect("authority revision 1 is retained");
+
+        assert_eq!(result, 2);
+        assert_eq!(counter(&w, e), 12);
+        assert_eq!(w.resource::<SnapshotHistory>().next_frame(), 2);
+        assert_eq!(rr.inputs().len(), 2);
+    }
+
+    #[test]
+    fn ecs_rebase_rejects_missing_history_without_mutating_world() {
+        let (mut w, e) = world(7);
+        let mut rr = EcsRollbackReplay::<i32>::new();
+        let error = rr
+            .rebase_authority(&mut w, 1, |_| {}, |world, input| sim(world, e, *input))
+            .expect_err("history was not installed");
+        assert_eq!(error, EcsRollbackError::MissingHistory);
+        assert_eq!(counter(&w, e), 7);
     }
 }

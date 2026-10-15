@@ -156,7 +156,7 @@ impl PermutationSpace {
 }
 
 /// A concrete selection of one option per axis.
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PermutationKey {
     coords: Vec<u32>,
 }

@@ -5,9 +5,8 @@
 //! resident and the resources the live water path actually reads or writes.
 //! `MaskBlend` is kept as a resident pipeline variant and declares the
 //! response-plane producer contract that the composition pass depends on.
-//! The raster entry still emits the legacy colour/motion MRT for ABI
-//! compatibility, while the same fragment invocation writes the typed
-//! response planes and coverage sidecar.
+//! The resident MaskBlend raster entry writes the typed response planes and
+//! coverage sidecar alongside the stable colour/motion ABI outputs.
 
 use crate::render_fabric::{
     AccessKind, FrameLag, PassKey, QueueClass, ResourceKey, ResourceScope, ResourceUse, ServiceSet,
@@ -255,9 +254,6 @@ pub struct WaterFabricPlan {
     pub passes: &'static [WaterFabricPass],
     /// Whether the active body asks for the MaskBlend variant.
     pub mask_blend_active: bool,
-    /// Whether the legacy hybrid colour/motion entry remains retained for ABI
-    /// compatibility while the response producer is active.
-    pub legacy_hybrid_entry: bool,
 }
 
 impl Default for WaterFabricPlan {
@@ -275,7 +271,6 @@ impl WaterFabricPlan {
             required_services: WATER_FABRIC_SERVICES,
             passes: RESIDENT_PASSES,
             mask_blend_active: matches!(shading, WaterShadingPlan::MaskBlend { .. }),
-            legacy_hybrid_entry: true,
         }
     }
 
@@ -379,10 +374,9 @@ mod tests {
     }
 
     #[test]
-    fn mask_blend_keeps_legacy_entry_until_equivalence() {
+    fn mask_blend_is_the_resident_response_producer() {
         let plan = WaterFabricPlan::for_shading(WaterShadingPlan::hybrid());
         assert!(plan.mask_blend_active);
-        assert!(plan.legacy_hybrid_entry);
         assert!(plan.is_link_complete());
     }
 
@@ -533,9 +527,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_hybrid_entry_is_kept_until_equivalence() {
+    fn mask_blend_remains_active_for_hybrid_shading() {
         let plan = WaterFabricPlan::for_shading(WaterShadingPlan::hybrid());
-        assert!(plan.legacy_hybrid_entry);
         assert!(plan.mask_blend_active);
     }
 

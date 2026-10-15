@@ -13,6 +13,7 @@
 
 use crate::binding::{BindGroupDescriptor, BindGroupLayoutDescriptor};
 use crate::buffer::BufferDescriptor;
+use crate::cache::PipelineBinaryCacheError;
 use crate::capabilities::DeviceCapabilities;
 use crate::command::CommandBuffer;
 use crate::loss::DeviceLostReason;
@@ -26,6 +27,7 @@ use crate::resource::{
 use crate::sampler::SamplerDescriptor;
 use crate::shader::ShaderModuleDescriptor;
 use crate::texture::{Extent3d, TextureDescriptor, TextureViewDescriptor};
+use alloc::vec::Vec;
 
 /// The byte layout of a linear image buffer used for texture uploads.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -88,6 +90,32 @@ pub trait RenderDevice {
     fn create_pipeline_layout(&self, descriptor: &PipelineLayoutDescriptor) -> PipelineLayoutId;
     /// Creates a render pipeline.
     fn create_render_pipeline(&self, descriptor: &RenderPipelineDescriptor) -> RenderPipelineId;
+
+    /// Imports an opaque driver-owned render-pipeline binary.
+    ///
+    /// The binary is produced by the same backend and device family. Backends
+    /// that do not expose a pipeline-library API return
+    /// [`PipelineBinaryCacheError::Unsupported`] instead of pretending that a
+    /// renderer-side descriptor or pipeline id is a binary.
+    fn import_render_pipeline_binary(
+        &self,
+        binary: &[u8],
+    ) -> Result<RenderPipelineId, PipelineBinaryCacheError> {
+        let _ = binary;
+        Err(PipelineBinaryCacheError::Unsupported)
+    }
+
+    /// Exports an opaque driver-owned render-pipeline binary for `pipeline`.
+    ///
+    /// The default is explicit capability negotiation; concrete backends may
+    /// override it when their native pipeline library supports export.
+    fn export_render_pipeline_binary(
+        &self,
+        pipeline: RenderPipelineId,
+    ) -> Result<Vec<u8>, PipelineBinaryCacheError> {
+        let _ = pipeline;
+        Err(PipelineBinaryCacheError::Unsupported)
+    }
     /// Creates a compute pipeline.
     fn create_compute_pipeline(&self, descriptor: &ComputePipelineDescriptor) -> ComputePipelineId;
 

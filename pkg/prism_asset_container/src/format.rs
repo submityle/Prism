@@ -5,10 +5,14 @@ pub const MAGIC: [u8; 8] = *b"PRISMCN\0";
 /// Current on-disk format version. Incompatible versions are rejected.
 pub const FORMAT_VERSION: u16 = 1;
 /// The complete set of container versions accepted by this crate.
-pub const SUPPORTED_FORMAT_VERSIONS: &[u16] = &[FORMAT_VERSION];
+pub const CHUNK_FORMAT_VERSION: u16 = 2;
+pub const SUPPORTED_FORMAT_VERSIONS: &[u16] = &[FORMAT_VERSION, CHUNK_FORMAT_VERSION];
 
 pub(crate) const HEADER_SIZE: usize = 96;
 pub(crate) const RECORD_SIZE: usize = 80;
+pub(crate) const CHUNK_HEADER_SIZE: usize = 160;
+pub(crate) const CHUNK_RECORD_SIZE: usize = 80;
+pub(crate) const CHUNK_TABLE_RECORD_SIZE: usize = 64;
 
 /// Payload encoding identifier stored in each directory/chunk-table record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +41,8 @@ pub struct ContainerInfo {
     pub version: u16,
     /// Number of entries in the table of contents.
     pub entry_count: u32,
+    /// Number of independently stored chunks. This is zero for v1.
+    pub chunk_count: u32,
     /// Exact container byte length.
     pub total_len: u64,
     /// BLAKE3 digest of the exact immutable container bytes.
@@ -53,6 +59,10 @@ pub struct ContainerInfo {
 pub struct EntryInfo {
     /// Stable identity of the asset.
     pub guid: prism_asset::StableGuid,
+    /// Zero-based chunk ordinal for v2; zero for v1.
+    pub chunk_id: u32,
+    /// Decoded byte offset within the chunk for v2; zero for v1.
+    pub raw_offset: u64,
     /// Absolute byte offset of the stored payload.
     pub offset: u64,
     /// Number of bytes stored in the container.
@@ -65,6 +75,23 @@ pub struct EntryInfo {
     pub hash: [u8; 32],
     /// Required absolute payload alignment in the container.
     pub alignment: u32,
+}
+
+/// Validated metadata for one independently stored chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkInfo {
+    /// Zero-based chunk ordinal.
+    pub id: u32,
+    /// Absolute offset of the stored chunk bytes.
+    pub offset: u64,
+    /// Number of stored bytes.
+    pub stored_len: u64,
+    /// Number of decoded bytes, including layout padding.
+    pub raw_len: u64,
+    /// Chunk encoding.
+    pub codec: Codec,
+    /// BLAKE3 digest of the decoded chunk bytes.
+    pub hash: [u8; 32],
 }
 
 /// Errors produced by strict container validation and reads.

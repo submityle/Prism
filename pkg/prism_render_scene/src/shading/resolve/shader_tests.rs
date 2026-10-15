@@ -20,7 +20,10 @@ use bevy_shader::{
 };
 use prism_render_architecture::{
     abi::{AbiHash, AbiVersion},
-    shader_package::{ShaderPackageId, ShaderPackageManifest},
+    shader_package::{
+        ArtifactDigest, PermutationSpace, ShaderPackageId, ShaderPackageManifest,
+        ShaderPackageVariantManifest,
+    },
 };
 use prism_render_material::{
     response_source::RESPONSE_FUNCTION_ABI, CompiledEntry, GpuMaterialTexture,
@@ -653,7 +656,11 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
         entry_point: "main".into(),
         abi_version: AbiVersion::from_parts(1, 0),
         abi_hash: AbiHash::from_bytes(RESPONSE_FUNCTION_ABI.as_bytes()),
-        permutation_count: 2,
+        variants: ShaderPackageVariantManifest::from_digests(
+            &PermutationSpace::new([2]),
+            [ArtifactDigest([1; 32]), ArtifactDigest([2; 32])],
+        )
+        .unwrap(),
     };
     let compiled = CompiledEntry::from_response_wgsl(
         manifest,
@@ -702,11 +709,14 @@ fn shading_resolve_dispatches_program_kinds_without_lobe_classes() {
     assert!(source.contains("switch response_kind"));
     for name in ["LIT", "NPR", "UNLIT", "REGISTERED"] {
         assert!(source.contains(&format!("const RESPONSE_{name}:")));
+    }
+    assert!(source.contains("if response_kind == RESPONSE_REGISTERED"));
+    for name in ["LIT", "NPR", "UNLIT"] {
         assert!(source.contains(&format!("case RESPONSE_{name}:")));
     }
     assert!(source.contains("evaluated = shade_principled("));
     assert!(source.contains("material_header.render_domain == 3u"));
-    assert!(source.contains("default: { return; }"));
+    assert!(source.contains("default: { return arm; }"));
     assert!(!source.contains("SHADING_CLASS_"));
     assert!(!source.contains("MaterialShadingClass"));
     assert!(!source.contains("switch material_header.closure_mask"));

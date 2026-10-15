@@ -1,11 +1,25 @@
 //! Immutable, fully validated shader bytes; metadata alone is not executable.
 
-use super::ShaderPackageManifest;
+use super::{ShaderPackageManifest, VariantManifestError};
 use alloc::{string::String, sync::Arc, vec::Vec};
 
 /// BLAKE3 digest of canonical little-endian SPIR-V words, not of a filename.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ArtifactDigest(pub [u8; 32]);
+
+impl ArtifactDigest {
+    /// Derives a digest for portable source/variant identity bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(*blake3::hash(bytes).as_bytes())
+    }
+
+    /// Reports whether this is the reserved absent digest.
+    #[must_use]
+    pub fn is_zero(self) -> bool {
+        self.0 == [0; 32]
+    }
+}
 
 /// A shader artifact was not valid for Prism's Naga-backed runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,6 +34,8 @@ pub enum ArtifactValidationError {
     EntryMissing(String),
     /// One entry name is exported with multiple shader stages.
     AmbiguousEntry(String),
+    /// The package does not carry a complete, structurally valid variant table.
+    VariantManifest(VariantManifestError),
 }
 
 /// Proof of Naga parsing and full validation, bound to immutable code bytes.
@@ -50,6 +66,9 @@ impl VerifiedShaderArtifact {
         {
             return Err(ArtifactValidationError::EmptyProvenance);
         }
+        manifest
+            .validate_variant_manifest()
+            .map_err(ArtifactValidationError::VariantManifest)?;
         let module = naga::front::spv::Frontend::new(
             words.iter().copied(),
             &naga::front::spv::Options::default(),

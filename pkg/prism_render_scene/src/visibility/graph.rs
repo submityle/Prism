@@ -199,7 +199,7 @@ mod tests {
     fn declared_pass_count_matches_runtime_assertion_for_visibility() {
         let graph = visibility_frame_graph();
         let compiled = graph.compile().unwrap();
-        assert_eq!(compiled.execution_order.len(), 3);
+        assert_eq!(compiled.order.len(), 3);
         assert_eq!(compiled.declared_pass_count, graph.passes().len());
         assert_eq!(graph.passes()[0].accesses.len(), 10);
         assert_eq!(graph.passes()[1].depends_on[0].0, 0);

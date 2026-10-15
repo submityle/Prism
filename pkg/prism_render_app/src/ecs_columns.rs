@@ -5,30 +5,31 @@
 //! be multiples of four. This bridge does not translate Rust layouts to WGSL.
 //! It borrows physical chunk slices; it never packs entities into a CPU mirror.
 //!
-//! Synchronize after all simulation writers, once per change tick, before
-//! submitting GPU consumers on the same device's queue. Advance the world's
-//! tick before subsequent value writes. Snapshot restore is detected through
-//! the world's archetype generation, including equal restored tick/epochs.
+//! Synchronize after simulation writers before submitting GPU consumers on the
+//! same device's queue. Independent column revisions detect tracked writes even
+//! across multiple syncs in one tick or writes stamped with historical ticks.
+//! Snapshot restore is detected through the world's archetype generation,
+//! including equal restored tick/epochs.
 //! Call [`EcsResidentColumns::reset`] for external invalidation not reflected
 //! in that generation. Ordinary structural edits are detected automatically,
 //! including moves that preserve component ticks.
 
 use std::any::TypeId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bytemuck::Pod;
 use prism_app::App;
 use prism_ecs::archetype::ArchetypeId;
-use prism_ecs::change::Tick;
 use prism_ecs::component::{Component, ComponentId, StorageType};
 use prism_ecs::entity::Entity;
 use prism_ecs::gpu_resident::{GpuResidentColumn, GpuUpload};
 use prism_ecs::query::QueryState;
 use prism_ecs::resource::Resource;
-use prism_ecs::storage::{ColumnUploadSpan, TARGET_CHUNK_BYTES};
+use prism_ecs::storage::TARGET_CHUNK_BYTES;
 use prism_ecs::world::{World, WorldId};
+use prism_render_architecture::gpu_scene::SceneHandle;
 use prism_render_driver::{
     BufferDescriptor, BufferId, BufferUsages, FrameSync, Instance, RenderDevice, RenderQueue,
 };
@@ -41,6 +42,124 @@ type SyncColumn =
 #[derive(Default)]
 struct GpuColumnDeclarations(Vec<(TypeId, SyncColumn)>);
 impl Resource for GpuColumnDeclarations {}
+
+struct TransformColumnDeclaration {
+    id: TypeId,
+    contains: fn(&World, Entity) -> bool,
+    extract: fn(&mut World, &World, &mut ResidentTransformRows),
+}
+
+#[derive(Default)]
+struct TransformColumnDeclarations(Vec<TransformColumnDeclaration>);
+impl Resource for TransformColumnDeclarations {}
+
+/// A retained physical column row, not a second packed transform allocation.
+#[derive(Clone)]
+pub(crate) struct ResidentTransformRow {
+    pub column: ResidentEcsColumn,
+    pub row: usize,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ResidentTransformRows(
+    pub BTreeMap<SceneHandle, Result<ResidentTransformRow, String>>,
+);
+impl Resource for ResidentTransformRows {}
+
+impl ResidentTransformRows {
+    /// A draw closure owns these views only until the next preparation. Drain
+    /// submitted reads before dropping the last view of a replaced allocation.
+    /// In-place updates use the same queue, so unchanged allocations need no wait.
+    pub(crate) fn releases_on_device(
+        &self,
+        next: &Self,
+        device: &Arc<dyn RenderDevice + Send + Sync>,
+    ) -> bool {
+        if self.0.len() == next.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&next.0)
+                .all(|((old_handle, old), (new_handle, new))| {
+                    old_handle == new_handle
+                        && match (old, new) {
+                            (Ok(old), Ok(new)) => match (&old.column.buffer, &new.column.buffer) {
+                                (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+                                (None, None) => true,
+                                _ => false,
+                            },
+                            (Err(_), _) => true,
+                            _ => false,
+                        }
+                })
+        {
+            return false;
+        }
+        let retained: BTreeSet<_> = next
+            .0
+            .values()
+            .filter_map(|row| row.as_ref().ok())
+            .filter_map(|row| row.column.buffer.as_ref())
+            .filter(|buffer| Arc::ptr_eq(&buffer.device, device))
+            .map(|buffer| buffer.id)
+            .collect();
+        self.0
+            .values()
+            .filter_map(|row| row.as_ref().ok())
+            .filter_map(|row| row.column.buffer.as_ref())
+            .any(|buffer| Arc::ptr_eq(&buffer.device, device) && !retained.contains(&buffer.id))
+    }
+}
+
+pub(crate) fn has_resident_transform(world: &World, entity: Entity) -> bool {
+    world
+        .get_resource::<TransformColumnDeclarations>()
+        .is_some_and(|declarations| declarations.0.iter().any(|d| (d.contains)(world, entity)))
+}
+
+fn extract_transform_rows<T: Component + Pod>(
+    main: &mut World,
+    render: &World,
+    output: &mut ResidentTransformRows,
+) {
+    let mut query = main.query::<(Entity, &crate::RenderTransformBinding, &T)>();
+    for (entity, binding, _) in query.iter(main) {
+        let row = (|| {
+            let report = render
+                .get_resource::<GpuColumnSyncReport<T>>()
+                .ok_or_else(|| "resident transform column has not been synchronized".to_owned())?;
+            report
+                .result
+                .map_err(|error| format!("resident transform upload: {error:?}"))?;
+            let location = main
+                .entities()
+                .location(entity)
+                .expect("live transform entity");
+            let column = render
+                .resource::<EcsResidentColumns<T>>()
+                .column(location.archetype_id)
+                .filter(|column| {
+                    column.buffer_id().is_some() && (location.row as usize) < column.rows
+                })
+                .ok_or_else(|| "resident transform row is not uploaded".to_owned())?;
+            Ok(ResidentTransformRow {
+                column,
+                row: location.row as usize,
+            })
+        })();
+        match output.0.entry(binding.0) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(row);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let _ = entry.insert(Err(format!(
+                    "duplicate resident transform scene binding: {:?}",
+                    binding.0
+                )));
+            }
+        }
+    }
+}
 
 /// Declare a table component for automatic main-world → render-world upload.
 ///
@@ -71,6 +190,19 @@ pub trait GpuColumnAppExt {
     fn register_gpu_column<T: Component + Pod>(
         &mut self,
     ) -> Result<&mut Self, EcsColumnUploadError>;
+
+    /// Use a resident column directly as the production mesh affine instance stream.
+    ///
+    /// `T` must contain exactly three row-major `[f32; 4]` affine rows (48 bytes).
+    /// This is an explicit shader-layout contract, not an automatic conversion.
+    /// Attach [`crate::RenderTransformBinding`] to select the scene instance.
+    /// These entities bypass the legacy `GlobalTransform` packing/upload path;
+    /// the application owns their world-space affine values. The mesh provider
+    /// must support the existing transform locations 13..15. Indirect/bin draws
+    /// are not supported by this direct-mesh contract and are rejected.
+    fn register_gpu_transform_column<T: Component + Pod>(
+        &mut self,
+    ) -> Result<&mut Self, EcsColumnUploadError>;
 }
 
 impl GpuColumnAppExt for App {
@@ -78,6 +210,31 @@ impl GpuColumnAppExt for App {
         &mut self,
     ) -> Result<&mut Self, EcsColumnUploadError> {
         register_gpu_column::<T>(self)?;
+        Ok(self)
+    }
+
+    fn register_gpu_transform_column<T: Component + Pod>(
+        &mut self,
+    ) -> Result<&mut Self, EcsColumnUploadError> {
+        validate_layout::<T>()?;
+        if size_of::<T>() != 48 {
+            return Err(EcsColumnUploadError::InvalidTransformStride {
+                stride: size_of::<T>(),
+            });
+        }
+        register_gpu_column::<T>(self)?;
+        self.world_mut()
+            .init_resource::<TransformColumnDeclarations>();
+        let declarations = self
+            .world_mut()
+            .resource_mut::<TransformColumnDeclarations>();
+        if !declarations.0.iter().any(|d| d.id == TypeId::of::<T>()) {
+            declarations.0.push(TransformColumnDeclaration {
+                id: TypeId::of::<T>(),
+                contains: |world, entity| world.has::<T>(entity),
+                extract: extract_transform_rows::<T>,
+            });
+        }
         Ok(self)
     }
 }
@@ -153,6 +310,9 @@ where
     I::Surface: Send + Sync + 'static,
 {
     app.add_extract(RenderApp, |main, render| {
+        // Replace every extraction, including a replacement main world with no
+        // declarations, so stale scene bindings cannot outlive their source.
+        render.insert_resource(ResidentTransformRows::default());
         let Some(declarations) = main.get_resource::<GpuColumnDeclarations>() else {
             return;
         };
@@ -177,6 +337,15 @@ where
             );
         }
         render.insert_resource(runtime);
+        let callbacks: Vec<_> = main
+            .get_resource::<TransformColumnDeclarations>()
+            .map(|declarations| declarations.0.iter().map(|d| d.extract).collect())
+            .unwrap_or_default();
+        let mut rows = ResidentTransformRows::default();
+        for extract in callbacks {
+            extract(main, render, &mut rows);
+        }
+        render.insert_resource(rows);
     });
 }
 
@@ -198,6 +367,11 @@ pub enum EcsColumnUploadError {
     /// No column writes or dirty-state acknowledgements were issued. A healthy
     /// replacement device triggers full initialization on a later extraction.
     DeviceLost,
+    /// The direct mesh affine stream consists of exactly three float4 rows.
+    InvalidTransformStride {
+        /// Rejected CPU/GPU element size.
+        stride: usize,
+    },
 }
 
 /// Actual work queued by one synchronization (clean frames report zero copies).
@@ -276,6 +450,7 @@ struct ChunkState {
     incarnation: u64,
     epoch: u64,
     rows: usize,
+    revision: u64,
 }
 
 /// Mirrors one nominated component type, with one buffer per source archetype.
@@ -285,10 +460,10 @@ struct ChunkState {
 /// can own this cache while `sync` borrows the authoritative source world during
 /// extraction. [`register_gpu_column`] installs automatic plugin synchronization.
 /// GPU copies are dirty-only. Structural validation inspects one structural
-/// epoch and live row count per chunk, without scanning entity identities or
-/// repacking component bytes. A world archetype-generation change resets the
-/// cache before this per-chunk validation, so recreated physical blocks cannot
-/// inherit upload history.
+/// epoch, live row count, and column write revision per chunk, without scanning
+/// entity identities or repacking component bytes. A world archetype-generation
+/// change resets the cache before this per-chunk validation, so recreated
+/// physical blocks cannot inherit upload history.
 pub struct EcsResidentColumns<T: Component + Pod> {
     device: Arc<dyn RenderDevice + Send + Sync>,
     world_id: WorldId,
@@ -296,7 +471,6 @@ pub struct EcsResidentColumns<T: Component + Pod> {
     component: ComponentId,
     query: QueryState<(Entity, &'static T)>,
     columns: BTreeMap<ArchetypeId, ColumnState>,
-    last_upload: Tick,
     generation: u64,
 }
 
@@ -318,7 +492,6 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
             component,
             query,
             columns: BTreeMap::new(),
-            last_upload: Tick::ZERO,
             generation: 0,
         })
     }
@@ -339,7 +512,6 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
     /// data. Previously exported views retain their own allocations.
     pub fn reset(&mut self) {
         self.columns.clear();
-        self.last_upload = Tick::ZERO;
     }
 
     /// Reset after device replacement. Pass the replacement device's queue to
@@ -351,8 +523,10 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
     }
 
     /// Queue only dirty physical chunks, plus chunks whose row membership or
-    /// live extent changed. Growth fully initializes a new allocation; shrink
-    /// retains its high-water capacity. Submission belongs to the render driver.
+    /// live extent changed. Write revisions, not observer tick windows, detect
+    /// same-tick and explicitly backdated writes. Growth fully initializes a new
+    /// allocation; shrink retains its high-water capacity. Submission belongs to
+    /// the render driver.
     ///
     /// The queue must belong to the device passed at construction/reset; the RHI
     /// does not expose queue identity or recoverable upload errors. A host must
@@ -406,12 +580,7 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
             self.reset();
             self.world_generation = world.archetype_generation();
         }
-        let now = world.change_tick();
-        // Backward/ambiguous tick windows need a full refresh. Ordinary u32
-        // wraparound within MAX_CHANGE_AGE remains an incremental window.
-        let refresh = self.last_upload.age_since(now) > Tick::MAX_CHANGE_AGE;
         let mut plans: BTreeMap<ArchetypeId, GpuUpload> = BTreeMap::new();
-        let mut spans: Vec<ColumnUploadSpan> = Vec::new();
         let mut stats = EcsColumnUploadStats::default();
         self.columns.retain(|id, _| {
             world
@@ -421,9 +590,9 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
         });
         for archetype in world.archetypes().iter() {
             let table = archetype.table();
-            if table.column(self.component).is_none() {
+            let Some(column) = table.column(self.component) else {
                 continue;
-            }
+            };
             let state = self
                 .columns
                 .entry(archetype.id())
@@ -437,13 +606,6 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
             if stride == 0 {
                 continue; // markers have rows, but never allocate or upload
             }
-            spans.clear();
-            table.column_upload_spans(self.component, self.last_upload, now, &mut spans);
-            for span in &spans {
-                state
-                    .resident
-                    .mark_range(span.buffer_offset / stride, span.len / stride);
-            }
             for (chunk_index, chunk) in table.iter_chunks().enumerate() {
                 if chunk.rows == 0 {
                     continue; // reserved physical blocks need not contain rows
@@ -452,9 +614,10 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
                     incarnation: chunk.incarnation,
                     epoch: chunk.meta.structural_epoch(),
                     rows: chunk.rows,
+                    revision: column.chunk_revision(chunk_index),
                 };
                 let changed = state.chunks.get(chunk_index) != Some(&current);
-                if refresh || changed {
+                if changed {
                     state.resident.mark_range(chunk.first_row, chunk.rows);
                 }
                 if chunk_index == state.chunks.len() {
@@ -470,7 +633,10 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
                 let capacity_bytes = allocation.capacity_bytes as u64;
                 let mut descriptor = BufferDescriptor::new(
                     capacity_bytes,
-                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                    BufferUsages::STORAGE
+                        | BufferUsages::COPY_DST
+                        | BufferUsages::COPY_SRC
+                        | BufferUsages::VERTEX,
                 );
                 descriptor.label = Some(format!(
                     "ecs-column-{}-{}",
@@ -494,8 +660,7 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
         if !plans.is_empty() {
             // K exceeds every nonzero component's physical chunk row count.
             // Entity's first row identifies each slice without relying on query
-            // archetype ordering. `cast_slice` is safe because T is Pod. Raw
-            // ColumnUploadSpan pointers are used only as dirty-range metadata.
+            // archetype ordering. `cast_slice` is safe because T is Pod.
             for (entities, values) in self.query.simd_iter::<TARGET_CHUNK_BYTES>(world) {
                 let location = world
                     .entities()
@@ -526,7 +691,6 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
                 }
             }
         }
-        self.last_upload = now;
         Ok(stats)
     }
 }

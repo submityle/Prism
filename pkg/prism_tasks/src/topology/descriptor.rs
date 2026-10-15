@@ -3,8 +3,8 @@
 //! [`TopologyDescriptor`] is the single data model the scheduler reasons about:
 //! a list of logical cores (with NUMA node and performance class), an inter-node
 //! [`NumaDistanceMatrix`], and a [`CacheTopology`]. It is deliberately *data
-//! only* — it probes nothing. On a real machine `prism_platform` would populate
-//! it from the OS; this crate consumes it through the pure placement and
+//! only*; [`TopologyDescriptor::detect`] delegates probing to `prism_platform`.
+//! This crate consumes it through the pure placement and
 //! scheduling functions so that none of that logic needs a live machine to be
 //! tested.
 //!
@@ -12,15 +12,15 @@
 //! carries cores + node count for steal ordering) by adding the §24.6 pieces
 //! the scheduler was missing: the distance matrix and cache hierarchy. A
 //! descriptor can be derived from a [`Topology`] with
-//! [`TopologyDescriptor::from_numa_topology`] (uniform distances, no cache map)
-//! for callers that only have the simpler model.
+//! [`TopologyDescriptor::from_numa_topology`], preserving measured data when
+//! present and using explicitly synthetic distances otherwise.
 
 use alloc::vec::Vec;
 use core::fmt;
 
 use crate::numa::{CoreClass, CoreInfo, NumaNodeId, Topology};
 
-use super::cache::CacheTopology;
+use super::cache::{CacheInfo, CacheLevel, CacheTopology};
 use super::distance::NumaDistanceMatrix;
 
 /// A validated, portable description of a machine's cores, NUMA distances, and
@@ -31,6 +31,8 @@ pub struct TopologyDescriptor {
     node_count: usize,
     distances: NumaDistanceMatrix,
     caches: CacheTopology,
+    platform_source: Option<prism_platform::topology::TopologySource>,
+    platform_distances: bool,
 }
 
 /// Why building a [`TopologyDescriptor`] failed.
@@ -46,7 +48,7 @@ pub enum TopologyError {
     /// The distance matrix describes `matrix_nodes` nodes but the cores span
     /// `cores_nodes` nodes.
     DistanceNodeMismatch {
-        /// Node count derived from the core list (`max(node) + 1`).
+        /// Number of distinct OS nodes in the core list.
         cores_nodes: usize,
         /// Node count of the supplied distance matrix.
         matrix_nodes: usize,
@@ -77,14 +79,6 @@ impl fmt::Display for TopologyError {
     }
 }
 
-fn derive_node_count(cores: &[CoreInfo]) -> usize {
-    cores
-        .iter()
-        .map(|c| c.node.index() as usize + 1)
-        .max()
-        .unwrap_or(1)
-}
-
 impl TopologyDescriptor {
     /// A uniform descriptor: `cores` performance cores (ids `0..cores`) on a
     /// single NUMA node, a single-node distance matrix, and no cache map. The
@@ -103,6 +97,8 @@ impl TopologyDescriptor {
             node_count: 1,
             distances: NumaDistanceMatrix::single(),
             caches: CacheTopology::empty(),
+            platform_source: None,
+            platform_distances: false,
         }
     }
 
@@ -129,8 +125,11 @@ impl TopologyDescriptor {
                 return Err(TopologyError::DuplicateCoreId { id: pair[0] });
             }
         }
-        let node_count = derive_node_count(&cores);
-        if node_count != distances.node_count() {
+        let mut nodes: Vec<_> = cores.iter().map(|core| core.node).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        let node_count = nodes.len();
+        if nodes != distances.node_ids() {
             return Err(TopologyError::DistanceNodeMismatch {
                 cores_nodes: node_count,
                 matrix_nodes: distances.node_count(),
@@ -148,26 +147,82 @@ impl TopologyDescriptor {
             node_count,
             distances,
             caches,
+            platform_source: None,
+            platform_distances: false,
         })
     }
 
-    /// Derive a descriptor from the simpler [`Topology`] model: the same cores,
-    /// a uniform distance matrix over its node count, and no cache map. The
-    /// bridge for callers that only have a [`Topology`].
+    /// Detect platform topology. `remote_distance` is a policy fallback, used
+    /// only when measured distances are unavailable (see [`Self::has_platform_distances`]).
+    pub fn detect(remote_distance: u16) -> Self {
+        Self::from_numa_topology(&Topology::detect(), remote_distance)
+    }
+
+    /// Bridge to placement/cache policies without discarding platform evidence.
+    /// Missing distances use a uniform policy cost; missing caches stay empty.
+    /// OS cache levels above L3 are omitted, not relabeled as L3.
     pub fn from_numa_topology(topology: &Topology, remote_distance: u16) -> Self {
         let cores = topology.cores().to_vec();
         let node_count = topology.node_count();
-        let distances = if node_count <= 1 {
-            NumaDistanceMatrix::single()
-        } else {
-            NumaDistanceMatrix::uniform(node_count, remote_distance)
-        };
+        let nodes = topology.node_ids();
+        let platform = topology.platform();
+        let measured = platform.and_then(|p| p.numa_distances());
+        let rows = measured.map(<[_]>::to_vec).unwrap_or_else(|| {
+            (0..node_count)
+                .map(|row| {
+                    (0..node_count)
+                        .map(|col| {
+                            if row == col {
+                                super::distance::LOCAL_DISTANCE
+                            } else {
+                                remote_distance.max(super::distance::LOCAL_DISTANCE)
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        });
+        let distances = NumaDistanceMatrix::from_node_rows(nodes, rows)
+            .expect("validated topology has valid node ids and distances");
+        let caches = CacheTopology::new(
+            platform
+                .into_iter()
+                .flat_map(|p| p.caches())
+                .filter_map(|cache| {
+                    let level = match cache.level {
+                        1 => CacheLevel::L1,
+                        2 => CacheLevel::L2,
+                        3 => CacheLevel::L3,
+                        _ => return None,
+                    };
+                    Some(CacheInfo {
+                        level,
+                        size_bytes: cache.size_bytes,
+                        line_bytes: cache.line_bytes,
+                        cores: cache.cores.iter().map(|&id| id as usize).collect(),
+                    })
+                })
+                .collect(),
+        );
         Self {
             cores,
             node_count,
             distances,
-            caches: CacheTopology::empty(),
+            caches,
+            platform_source: platform.map(|p| p.source()),
+            platform_distances: measured.is_some(),
         }
+    }
+
+    /// Original platform provenance; `None` for directly constructed data.
+    pub fn platform_source(&self) -> Option<prism_platform::topology::TopologySource> {
+        self.platform_source
+    }
+
+    /// Whether distances came from the platform rather than uniform policy
+    /// costs. An explicit caller matrix is not claimed as a hardware probe.
+    pub fn has_platform_distances(&self) -> bool {
+        self.platform_distances
     }
 
     /// All logical cores, in the order supplied.

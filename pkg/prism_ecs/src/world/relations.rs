@@ -7,17 +7,83 @@
 //! type whose [`ComponentId`] keys both the kind metadata and the edge index,
 //! so relations never need a parallel type registry.
 //!
-//! All edges stored here are **non-fragmenting** (design §23.3): they live in
-//! the bypass index rather than in the archetype graph, which keeps
-//! high-cardinality relations (equipment, targeting, ownership) cheap to add
-//! and remove without archetype churn.
+//! Every edge is indexed for reverse lookup and cascading. Fragmenting pairs
+//! additionally participate in archetype identity; non-fragmenting edges do
+//! not relocate component data (design §11 / §23.3).
 
 use alloc::vec::Vec;
 
 use super::World;
-use crate::component::Component;
+use crate::archetype::RelationPair;
+use crate::component::{Component, ComponentId};
 use crate::entity::Entity;
 use crate::relation::{Relation, RelationKind, RelationTarget, Relations};
+
+/// A staged bulk edit: forgetting the guard leaves the live world unchanged.
+/// Publishing relocates bytes only; no component hooks or destructors run,
+/// including when the guard is dropped during unwinding.
+#[must_use = "relation edits publish when the guard is dropped"]
+struct RelationsMut<'w> {
+    world: &'w mut World,
+    staged: Relations,
+}
+
+impl core::ops::Deref for RelationsMut<'_> {
+    type Target = Relations;
+
+    fn deref(&self) -> &Relations {
+        &self.staged
+    }
+}
+
+impl core::ops::DerefMut for RelationsMut<'_> {
+    fn deref_mut(&mut self) -> &mut Relations {
+        &mut self.staged
+    }
+}
+
+impl Drop for RelationsMut<'_> {
+    fn drop(&mut self) {
+        let mut staged = core::mem::take(&mut self.staged);
+        // Raw edits must not smuggle dead/reserved endpoints into a live
+        // world's index. Removing invalid edges is deterministic and invokes
+        // no cleanup policies (there is no live target to delete).
+        let invalid: Vec<_> = staged
+            .index()
+            .iter_edges()
+            .filter(|&(_, s, t)| {
+                !self.world.relation_endpoint_is_live(s) || !self.world.relation_endpoint_is_live(t)
+            })
+            .collect();
+        for (r, s, t) in invalid {
+            staged.remove(r, s, t);
+        }
+        let exclusive: Vec<_> = staged
+            .iter_kinds()
+            .filter_map(|(id, kind)| kind.exclusive.then_some(id))
+            .collect();
+        for id in exclusive {
+            staged.normalize_exclusive(id);
+        }
+        // Include old holders as well, so deleting all edges or turning
+        // fragmenting off merges entities back into their base archetypes.
+        let mut sources: Vec<_> = self
+            .world
+            .relations
+            .index()
+            .iter_edges()
+            .chain(staged.index().iter_edges())
+            .map(|(_, s, _)| s)
+            .collect();
+        sources.sort_unstable();
+        sources.dedup();
+        for source in sources {
+            self.world
+                .move_relation_pairs(source, &staged.fragmenting_pairs(source));
+        }
+        self.world.relations = staged;
+    }
+}
 
 impl World {
     /// Shared access to the relation registry (design §11).
@@ -26,25 +92,34 @@ impl World {
         &self.relations
     }
 
-    /// Mutable access to the relation registry.
+    /// Stage bulk or dynamic edits to the relation registry.
     ///
     /// Prefer the typed helpers ([`World::add_relation`] and friends) for
-    /// everyday use; this escape hatch is for bulk or dynamic edits.
+    /// everyday use. Edits publish when the returned guard is dropped, also
+    /// during unwinding; forgetting it discards the edits. Publication repairs
+    /// fragmenting archetype identities and exclusivity (last target wins),
+    /// and discards edges whose endpoints are dead or not yet placed.
     #[inline]
-    pub fn relations_mut(&mut self) -> &mut Relations {
-        &mut self.relations
+    pub fn relations_mut(&mut self) -> impl core::ops::DerefMut<Target = Relations> + '_ {
+        let staged = self.relations.clone();
+        RelationsMut {
+            world: self,
+            staged,
+        }
     }
 
     /// Register the relation-kind metadata for marker component `R` (design
-    /// §11, §23.2/§23.3), registering `R` as a component if needed. Returns the
-    /// relation's [`ComponentId`](crate::component::ComponentId).
+    /// §11, §23.2/§23.3), registering `R` as a component if needed.
     ///
     /// Re-registering overwrites the previous [`RelationKind`]. A relation that
     /// is never registered behaves as the default kind (non-exclusive,
     /// non-transitive, [`CleanupPolicy::Remove`](crate::relation::CleanupPolicy)).
     pub fn register_relation<R: Component>(&mut self, kind: RelationKind) {
         let id = self.components.register::<R>();
-        self.relations.register(id, kind);
+        if self.relations.kind(id) == Some(&kind) {
+            return;
+        }
+        self.relations_mut().register(id, kind);
     }
 
     /// Register a statically-typed [`Relation`] kind using the metadata pinned
@@ -64,8 +139,44 @@ impl World {
     /// `R` is registered as a component on demand. If `R` was registered as an
     /// [`exclusive`](RelationKind::exclusive) relation, any previous target of
     /// `source` is evicted and returned.
+    ///
+    /// # Panics
+    /// Both endpoints must be live and placed in this world. Reserved but
+    /// unmaterialized handles and stale generations are rejected before edits.
     pub fn add_relation<R: Component>(&mut self, source: Entity, target: Entity) -> Option<Entity> {
+        assert!(
+            self.relation_endpoint_is_live(source),
+            "relation source must be live and placed"
+        );
+        assert!(
+            self.relation_endpoint_is_live(target),
+            "relation target must be live and placed"
+        );
         let id = self.components.register::<R>();
+        self.add_relation_by_id_unchecked(id, source, target)
+    }
+
+    /// Insert a relation edge without validating endpoint liveness.
+    ///
+    /// This is intentionally crate-private and is reserved for the prefab
+    /// low-level escape hatch, which must be able to preserve malformed
+    /// ancestry for diagnostics. Ordinary relation callers must use
+    /// [`World::add_relation`], whose live-endpoint checks protect the relation
+    /// registry invariant.
+    pub(crate) fn add_relation_by_id_unchecked(
+        &mut self,
+        id: ComponentId,
+        source: Entity,
+        target: Entity,
+    ) -> Option<Entity> {
+        if self.relations.kind(id).is_some_and(|kind| kind.fragmenting) {
+            let mut pairs = self.relations.fragmenting_pairs(source);
+            if self.relations.is_exclusive(id) {
+                pairs.retain(|&(r, _)| r != id);
+            }
+            pairs.push((id, target));
+            self.move_relation_pairs(source, &pairs);
+        }
         self.relations.add(id, source, target)
     }
 
@@ -75,8 +186,122 @@ impl World {
     /// returns `false` without allocating.
     pub fn remove_relation<R: Component>(&mut self, source: Entity, target: Entity) -> bool {
         match self.components.id_of::<R>() {
-            Some(id) => self.relations.remove(id, source, target),
+            Some(id) => self.remove_relation_by_id(id, source, target),
             None => false,
+        }
+    }
+
+    fn relation_endpoint_is_live(&self, entity: Entity) -> bool {
+        self.entities
+            .location(entity)
+            .is_some_and(|loc| !loc.is_empty())
+    }
+
+    /// Shared edge removal used by typed APIs and cascade cleanup. Removing
+    /// a pair is not removal of its marker component and runs no value hooks.
+    pub(crate) fn remove_relation_by_id(
+        &mut self,
+        relation: ComponentId,
+        source: Entity,
+        target: Entity,
+    ) -> bool {
+        if !self
+            .relations
+            .index()
+            .targets(relation, source)
+            .contains(&target)
+        {
+            return false;
+        }
+        if self
+            .relations
+            .kind(relation)
+            .is_some_and(|kind| kind.fragmenting)
+        {
+            let mut pairs = self.relations.fragmenting_pairs(source);
+            pairs.retain(|&pair| pair != (relation, target));
+            self.move_relation_pairs(source, &pairs);
+        }
+        self.relations.remove(relation, source, target)
+    }
+
+    /// Relocate all table columns without cloning, dropping, changing ticks,
+    /// touching sparse order or changing shared-value reference counts.
+    fn move_relation_pairs(&mut self, entity: Entity, pairs: &[RelationPair]) {
+        let Some(loc) = self.entities.location(entity).filter(|loc| !loc.is_empty()) else {
+            return;
+        };
+        let source = self
+            .archetypes
+            .get(loc.archetype_id)
+            .expect("placed entity");
+        let current = source.components().clone();
+        let bindings = source.shared_bindings().to_vec();
+        let dst_id =
+            self.archetypes
+                .get_or_create_with_pairs(&current, &bindings, pairs, &self.components);
+        if dst_id == loc.archetype_id {
+            return;
+        }
+        let dst = self
+            .archetypes
+            .get_mut(dst_id)
+            .expect("destination archetype");
+        // Complete allocation before transferring ownership. The following
+        // move/forget sequence has no user callbacks or fallible allocation.
+        dst.reserve(1);
+        let dst_row = dst.table_mut().allocate(entity);
+        let (src, dst) = self.archetypes.get_pair_mut(loc.archetype_id, dst_id);
+        // SAFETY: identical component sets and ABI, reserved empty destination
+        // row, initialized source. finish_move forgets every transferred value
+        // and patches both entity locations before any user code can run.
+        unsafe {
+            dst.table_mut()
+                .move_shared_columns_from(src.table_mut(), loc.row as usize);
+        }
+        self.finish_move(
+            entity,
+            loc,
+            loc.archetype_id,
+            current.ids(),
+            dst_id,
+            dst_row,
+        );
+    }
+
+    /// Rebuild derived pair identities after snapshot entity materialization.
+    /// The restored relation registry is authoritative; this operation is
+    /// idempotent and preserves all component values and exact ticks.
+    pub(crate) fn rebuild_fragmenting_archetypes(&mut self) {
+        let entities: Vec<_> = self
+            .archetypes
+            .iter()
+            .flat_map(|arch| arch.table().entities().iter().copied())
+            .collect();
+        for entity in entities {
+            self.move_relation_pairs(entity, &self.relations.fragmenting_pairs(entity));
+        }
+    }
+
+    /// Apply the preflighted cascade before component teardown. Re-plan after
+    /// deleting holders: their lifecycle hooks may attach fresh edges to this
+    /// still-live target. No dangling pair may survive the eventual free.
+    pub(crate) fn cleanup_relations_for_despawn(&mut self, entity: Entity) {
+        while !self.relations.index().is_empty() {
+            let plan = self.relations.plan_cascade(entity);
+            assert!(
+                plan.panics.is_empty(),
+                "despawn of a relation target violated a `CleanupPolicy::Panic` policy",
+            );
+            if plan.removals.is_empty() {
+                break;
+            }
+            for edge in plan.removals {
+                self.remove_relation_by_id(edge.relation, edge.source, edge.target);
+            }
+            for holder in plan.deletions {
+                self.despawn(holder);
+            }
         }
     }
 
@@ -136,6 +361,10 @@ impl World {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "fragmenting_tests.rs"]
+mod fragmenting_tests;
 
 #[cfg(test)]
 mod tests {

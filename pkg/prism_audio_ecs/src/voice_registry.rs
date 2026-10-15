@@ -8,7 +8,7 @@
 //! entity-to-handle mapping and [`PendingStops`] retains stops that could not
 //! enter a full command ring.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use prism_audio_core::voice::{Importance, VoiceHandle, VoiceInfo, VoicePool, VoiceRequest};
@@ -168,20 +168,20 @@ impl PendingStops {
 /// update, allowing the voice stop path to remain centralized.
 #[derive(Resource, Debug, Default)]
 pub struct RemovedAudioEmitters {
-    entities: Vec<Entity>,
+    entities: BTreeSet<Entity>,
 }
 
 impl RemovedAudioEmitters {
     /// Records one removed emitter entity.
     #[inline]
     pub(crate) fn push(&mut self, entity: Entity) {
-        self.entities.push(entity);
+        self.entities.insert(entity);
     }
 
-    /// Takes all pending removals in lifecycle delivery order.
+    /// Takes deduplicated pending removals in stable entity order.
     #[must_use]
     #[inline]
-    pub(crate) fn take_all(&mut self) -> Vec<Entity> {
+    pub(crate) fn take_all(&mut self) -> BTreeSet<Entity> {
         core::mem::take(&mut self.entities)
     }
 }

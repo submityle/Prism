@@ -12,6 +12,7 @@ use crate::TaskPool;
 use alloc::string::String;
 #[cfg(feature = "trace")]
 use alloc::vec::Vec;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
@@ -94,6 +95,33 @@ fn trace_captures_parent_for_nested_spans() {
     let inner = spans.iter().find(|s| s.name == "inner").unwrap();
     assert_eq!(inner.parent, Some(outer.id), "inner span parent is outer");
     assert_eq!(outer.parent, None, "outer span has no parent");
+}
+
+#[test]
+fn trace_closes_panicking_spans_and_restores_parent_context() {
+    let pool = TaskPool::with_threads(2);
+    let trace = pool.new_job_trace();
+
+    trace.record("outer", || {
+        let panic_result = catch_unwind(AssertUnwindSafe(|| {
+            trace.record("panic", || panic!("trace body panic"));
+        }));
+        assert!(panic_result.is_err());
+
+        // The panic was resumed by the inner trace after it committed its
+        // span. The outer span must still be the parent of later work.
+        trace.record("after", || {});
+    });
+
+    let spans = trace.spans();
+    assert_eq!(spans.len(), 3, "panic still produces a closed span");
+    let outer = spans.iter().find(|s| s.name == "outer").unwrap();
+    let panicking = spans.iter().find(|s| s.name == "panic").unwrap();
+    let after = spans.iter().find(|s| s.name == "after").unwrap();
+    assert!(panicking.end_nanos >= panicking.start_nanos);
+    assert_eq!(panicking.parent, Some(outer.id));
+    assert_eq!(after.parent, Some(outer.id));
+    assert_eq!(trace.total_jobs(), 3);
 }
 
 #[test]

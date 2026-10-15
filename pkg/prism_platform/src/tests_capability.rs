@@ -2,6 +2,7 @@
 
 use crate::capability::{Capability, CapabilityDatabase, Category, Selection, SupportLevel};
 use crate::platform::{Os, PlatformCaps};
+use crate::suspend::PlatformSuspendCapability;
 
 /// A capability-flag snapshot for a fully-featured desktop build.
 fn desktop_caps() -> PlatformCaps {
@@ -14,6 +15,7 @@ fn desktop_caps() -> PlatformCaps {
         has_subprocess: true,
         has_wall_clock: true,
         has_crash_capture: true,
+        suspend_resume: PlatformSuspendCapability::HostCallbackOnly,
     }
 }
 
@@ -28,6 +30,7 @@ fn bare_caps() -> PlatformCaps {
         has_subprocess: false,
         has_wall_clock: false,
         has_crash_capture: false,
+        suspend_resume: PlatformSuspendCapability::Unsupported,
     }
 }
 
@@ -43,6 +46,7 @@ fn portable_std_caps() -> PlatformCaps {
         has_subprocess: true,
         has_wall_clock: true,
         has_crash_capture: false,
+        suspend_resume: PlatformSuspendCapability::HostCallbackOnly,
     }
 }
 
@@ -183,6 +187,7 @@ fn web_build_truth_table() {
         has_subprocess: false,
         has_wall_clock: true,
         has_crash_capture: false,
+        suspend_resume: PlatformSuspendCapability::Unsupported,
     };
     let db = CapabilityDatabase::from_platform(Os::Web, caps);
     assert_eq!(db.level(Capability::Subprocess), SupportLevel::Unsupported);

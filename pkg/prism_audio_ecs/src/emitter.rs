@@ -39,10 +39,9 @@ const DEFAULT_MAX_DISTANCE: f32 = 100.0;
 /// effective [`Importance`] forwarded to the runtime. The live voice, once the
 /// runtime has allocated it, is mirrored into [`AudioEmitter::voice`].
 ///
-/// Mutating any desired field through a `Query` marks the component changed so
-/// the importance system can re-evaluate it; the systems never clear fields the
-/// user owns, only the runtime-managed [`AudioEmitter::voice`] and
-/// [`AudioEmitter::sent_importance`] bookkeeping.
+/// The bridge reconciles desired fields every frame. It owns the cached handle
+/// and importance, and consumes `stop_requested` by clearing `playing`, keeping
+/// an explicitly stopped voice stopped until the caller restarts it.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct AudioEmitter {
     /// Group used by the runtime for per-source playback limiting.

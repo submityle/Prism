@@ -108,102 +108,138 @@ impl SoftSolver {
             return;
         }
         for _ in 0..substeps {
-            let mut columns = particles.columns_mut();
-            integrate::predict(&mut columns, config.gravity, config.damping, h);
-            constraints.reset();
-            for _ in 0..iterations {
-                constraints.project(columns.positions, columns.inverse_masses, h);
-            }
-            if let Some(contact) = config.self_collision {
-                if contact.friction > 0.0 {
-                    resolve_self_collision_with_friction(
-                        columns.positions,
-                        columns.prev_positions,
-                        columns.inverse_masses,
-                        contact.cell_size,
-                        contact.thickness,
-                        contact.friction,
-                    );
-                } else {
-                    resolve_self_collision(
-                        columns.positions,
-                        columns.inverse_masses,
-                        contact.cell_size,
-                        contact.thickness,
-                    );
-                }
-            }
-            if let Some(vp_params) = config.virtual_self_collision
-                && !contacts.virtual_particles.is_empty()
-            {
-                if config.self_collision.is_some() {
-                    resolve_self_collision_virtual_augment(
-                        columns.positions,
-                        columns.inverse_masses,
-                        contacts.virtual_particles,
-                        vp_params.cell_size,
-                        vp_params.thickness,
-                    );
-                } else {
-                    resolve_self_collision_virtual(
-                        columns.positions,
-                        columns.inverse_masses,
-                        contacts.virtual_particles,
-                        vp_params.cell_size,
-                        vp_params.thickness,
-                    );
-                }
-            }
-            if let Some(params) = config.self_ccd {
-                resolve_self_ccd(
+            self.step_substep_before_velocity_recovery(
+                particles, constraints, config, contacts, h,
+            );
+            self.recover_substep_velocities(particles, h);
+        }
+    }
+
+    /// Runs one soft-body substep through prediction, constraint projection,
+    /// and position-level contacts, leaving velocity recovery for the caller.
+    ///
+    /// This is the deterministic insertion point used by
+    /// [`crate::solver::XpbdSolver`]: the world-owned soft body is predicted
+    /// and projected, then the world gathers rigid proxies and performs its
+    /// two-way coupling, and only then are particle velocities recovered from
+    /// the final positions. Standalone callers should normally use [`Self::step`]
+    /// or [`crate::soft::body::SoftBody::step`].
+    pub fn step_substep_before_velocity_recovery(
+        &self,
+        particles: &mut ParticleStorage,
+        constraints: &mut ConstraintSet,
+        config: &SoftSolverConfig,
+        contacts: &SoftContacts<'_>,
+        h: Real,
+    ) {
+        if particles.is_empty() || h <= 0.0 {
+            return;
+        }
+
+        let iterations = config.iterations.max(1);
+        let mut columns = particles.columns_mut();
+        integrate::predict(&mut columns, config.gravity, config.damping, h);
+        constraints.reset();
+        for _ in 0..iterations {
+            constraints.project(columns.positions, columns.inverse_masses, h);
+        }
+        if let Some(contact) = config.self_collision {
+            if contact.friction > 0.0 {
+                resolve_self_collision_with_friction(
                     columns.positions,
                     columns.prev_positions,
-                    columns.velocities,
                     columns.inverse_masses,
-                    params,
-                    h,
+                    contact.cell_size,
+                    contact.thickness,
+                    contact.friction,
+                );
+            } else {
+                resolve_self_collision(
+                    columns.positions,
+                    columns.inverse_masses,
+                    contact.cell_size,
+                    contact.thickness,
                 );
             }
-            if !contacts.body_colliders.is_empty() {
-                if contacts.body_friction > 0.0 {
-                    resolve_body_collisions_with_friction(
-                        columns.positions,
-                        columns.prev_positions,
-                        columns.inverse_masses,
-                        contacts.body_colliders,
-                        contacts.body_friction,
-                    );
-                } else {
-                    resolve_body_collisions(
-                        columns.positions,
-                        columns.inverse_masses,
-                        contacts.body_colliders,
-                    );
-                }
+        }
+        if let Some(vp_params) = config.virtual_self_collision
+            && !contacts.virtual_particles.is_empty()
+        {
+            if config.self_collision.is_some() {
+                resolve_self_collision_virtual_augment(
+                    columns.positions,
+                    columns.inverse_masses,
+                    contacts.virtual_particles,
+                    vp_params.cell_size,
+                    vp_params.thickness,
+                );
+            } else {
+                resolve_self_collision_virtual(
+                    columns.positions,
+                    columns.inverse_masses,
+                    contacts.virtual_particles,
+                    vp_params.cell_size,
+                    vp_params.thickness,
+                );
             }
-            if let Some(params) = config.ccd
-                && !contacts.body_colliders.is_empty()
-            {
-                resolve_ccd(
+        }
+        if let Some(params) = config.self_ccd {
+            resolve_self_ccd(
+                columns.positions,
+                columns.prev_positions,
+                columns.velocities,
+                columns.inverse_masses,
+                params,
+                h,
+            );
+        }
+        if !contacts.body_colliders.is_empty() {
+            if contacts.body_friction > 0.0 {
+                resolve_body_collisions_with_friction(
                     columns.positions,
                     columns.prev_positions,
-                    columns.velocities,
                     columns.inverse_masses,
                     contacts.body_colliders,
-                    params,
-                    h,
                     contacts.body_friction,
                 );
-            }
-            if !contacts.backstops.is_empty() {
-                resolve_backstops(
+            } else {
+                resolve_body_collisions(
                     columns.positions,
                     columns.inverse_masses,
-                    contacts.backstops,
+                    contacts.body_colliders,
                 );
             }
-            integrate::finalize_velocities(&mut columns, h);
         }
+        if let Some(params) = config.ccd
+            && !contacts.body_colliders.is_empty()
+        {
+            resolve_ccd(
+                columns.positions,
+                columns.prev_positions,
+                columns.velocities,
+                columns.inverse_masses,
+                contacts.body_colliders,
+                params,
+                h,
+                contacts.body_friction,
+            );
+        }
+        if !contacts.backstops.is_empty() {
+            resolve_backstops(
+                columns.positions,
+                columns.inverse_masses,
+                contacts.backstops,
+            );
+        }
+    }
+
+    /// Recovers particle velocities from the final position of one substep.
+    pub fn recover_substep_velocities(&self, particles: &mut ParticleStorage, h: Real) {
+        if particles.is_empty() || h <= 0.0 {
+            return;
+        }
+        let mut columns = particles.columns_mut();
+        integrate::finalize_velocities(&mut columns, h);
     }
 }
 

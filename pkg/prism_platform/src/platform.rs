@@ -1,6 +1,7 @@
 //! Platform description and capability flags.
 
 use crate::cpu::CpuInfo;
+use crate::suspend::{suspend_capability, PlatformSuspendCapability};
 
 /// Coarse operating-system family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +89,10 @@ pub struct PlatformCaps {
     /// degrade gracefully. The in-process [`crate::crash::mock`] backend is
     /// independent of this bit.
     pub has_crash_capture: bool,
+    /// How suspend/resume edges can enter the engine. Desktop targets are
+    /// callback-only until a native sleep/power watcher is added; mobile
+    /// targets use the process lifecycle callback supplied by the window host.
+    pub suspend_resume: PlatformSuspendCapability,
 }
 
 impl PlatformCaps {
@@ -109,6 +114,7 @@ impl PlatformCaps {
             has_subprocess: cfg!(feature = "std") && cfg!(not(target_family = "wasm")),
             has_wall_clock: cfg!(feature = "std"),
             has_crash_capture: crate::crash::SUPPORTED,
+            suspend_resume: suspend_capability(),
         }
     }
 }

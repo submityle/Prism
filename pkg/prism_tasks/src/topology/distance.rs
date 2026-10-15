@@ -36,12 +36,15 @@ pub const LOCAL_DISTANCE: u16 = 10;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NumaDistanceMatrix {
     node_count: usize,
+    node_ids: Vec<NumaNodeId>,
     rows: Vec<u16>,
 }
 
 /// Why building a [`NumaDistanceMatrix`] from explicit rows failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DistanceError {
+    /// OS node ids must be unique, sorted, and match the number of rows.
+    InvalidNodeIds,
     /// No rows were supplied; a matrix needs at least one node.
     Empty,
     /// Row `row` has `cols` entries but the matrix has `rows` nodes, so it is
@@ -73,6 +76,9 @@ pub enum DistanceError {
 impl fmt::Display for DistanceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DistanceError::InvalidNodeIds => {
+                f.write_str("node ids must be sorted, unique and match distance rows")
+            }
             DistanceError::Empty => f.write_str("distance matrix needs at least one node"),
             DistanceError::NotSquare { rows, cols, row } => write!(
                 f,
@@ -97,6 +103,7 @@ impl NumaDistanceMatrix {
     pub fn single() -> Self {
         Self {
             node_count: 1,
+            node_ids: vec![NumaNodeId::ZERO],
             rows: vec![LOCAL_DISTANCE],
         }
     }
@@ -107,12 +114,19 @@ impl NumaDistanceMatrix {
     /// never cheaper than a local one.
     pub fn uniform(node_count: usize, remote: u16) -> Self {
         let node_count = node_count.max(1);
+        assert!(node_count <= u16::MAX as usize + 1, "too many NUMA nodes");
         let remote = remote.max(LOCAL_DISTANCE);
         let mut rows = vec![remote; node_count * node_count];
         for n in 0..node_count {
             rows[n * node_count + n] = LOCAL_DISTANCE;
         }
-        Self { node_count, rows }
+        Self {
+            node_count,
+            node_ids: (0..node_count)
+                .map(|id| NumaNodeId::new(id as u16))
+                .collect(),
+            rows,
+        }
     }
 
     /// Build a matrix from explicit rows (as a platform probe or a test would).
@@ -121,9 +135,27 @@ impl NumaDistanceMatrix {
     /// Returns [`DistanceError`] if the input is empty, not square, contains a
     /// zero distance, or has a self-distance that is not its row's minimum.
     pub fn from_rows(rows: Vec<Vec<u16>>) -> Result<Self, DistanceError> {
+        if rows.len() > u16::MAX as usize + 1 {
+            return Err(DistanceError::InvalidNodeIds);
+        }
+        let node_ids = (0..rows.len())
+            .map(|id| NumaNodeId::new(id as u16))
+            .collect();
+        Self::from_node_rows(node_ids, rows)
+    }
+
+    /// Build rows indexed by sorted, distinct OS node ids. Sparse ids are
+    /// preserved (node 9 need not imply that nodes 0 through 8 exist).
+    pub fn from_node_rows(
+        node_ids: Vec<NumaNodeId>,
+        rows: Vec<Vec<u16>>,
+    ) -> Result<Self, DistanceError> {
         let node_count = rows.len();
         if node_count == 0 {
             return Err(DistanceError::Empty);
+        }
+        if node_ids.len() != node_count || node_ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(DistanceError::InvalidNodeIds);
         }
         let mut flat = Vec::with_capacity(node_count * node_count);
         for (r, row) in rows.iter().enumerate() {
@@ -147,6 +179,7 @@ impl NumaDistanceMatrix {
         }
         Ok(Self {
             node_count,
+            node_ids,
             rows: flat,
         })
     }
@@ -156,15 +189,16 @@ impl NumaDistanceMatrix {
         self.node_count
     }
 
+    /// OS node ids in row/column order, also the indexing order for node loads.
+    pub fn node_ids(&self) -> &[NumaNodeId] {
+        &self.node_ids
+    }
+
     #[inline]
     fn flat_index(&self, a: NumaNodeId, b: NumaNodeId) -> Option<usize> {
-        let a = a.index() as usize;
-        let b = b.index() as usize;
-        if a < self.node_count && b < self.node_count {
-            Some(a * self.node_count + b)
-        } else {
-            None
-        }
+        let a = self.node_ids.binary_search(&a).ok()?;
+        let b = self.node_ids.binary_search(&b).ok()?;
+        Some(a * self.node_count + b)
     }
 
     /// The distance from node `a` to node `b`, or `None` if either index is out

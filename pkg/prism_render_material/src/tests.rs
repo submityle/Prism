@@ -22,6 +22,46 @@ fn record(
 }
 
 #[test]
+fn material_pipeline_state_covers_every_domain_and_render_class() {
+    use MaterialRenderClass::*;
+    use RenderDomain::*;
+
+    let classes = [
+        Opaque,
+        OpaqueTwoSided,
+        Masked,
+        MaskedTwoSided,
+        Transmissive,
+        Transparent,
+        Additive,
+    ];
+    let domains = [Surface, Particle, Volume, Hair, Decal];
+    for domain in domains {
+        for class in classes {
+            let state = pipeline_state_for_material(domain, class, MaterialFeatureFlags::default());
+            assert_eq!(state.domain, domain);
+            assert_eq!(state.render_class, class);
+        }
+    }
+}
+
+#[test]
+fn water_material_state_is_the_transparent_hdr_contract() {
+    let state = pipeline_state_for_material(
+        RenderDomain::Surface,
+        MaterialRenderClass::Opaque,
+        MaterialFeatureFlags::WATER,
+    );
+    assert_eq!(state.phase, MaterialRenderPhase::Transparent);
+    assert_eq!(state.target, MaterialRenderTarget::HdrTransparent);
+    assert_eq!(state.blend, MaterialBlendMode::PremultipliedAlpha);
+    assert_eq!(state.depth_test, MaterialDepthTest::LessEqual);
+    assert!(!state.depth_write);
+    assert_eq!(state.cull_mode, MaterialCullMode::None);
+    assert!(state.is_transparent());
+}
+
+#[test]
 fn registry_rejects_stale_revision_and_reuses_after_completion() {
     let mut registry = MaterialRegistry::new(4);
     let first = registry.allocate().unwrap();

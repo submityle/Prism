@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_base_declaration_is_complete() {
+    fn service_declaration_is_complete() {
         let required = crate::render_fabric::volume_required_services();
         assert_eq!(required.as_slice().len(), 7);
         assert!(required.contains(VOLUMETRIC_HYBRID_GI));

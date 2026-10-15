@@ -73,6 +73,8 @@ pub struct World {
     /// deterministic derived-update bus flushed once per schedule run (or on
     /// demand). Empty by default.
     pub(crate) change_observers: crate::change_observers::ChangeObservers,
+    /// Observer-bound dependency graph, empty on worlds without reactions.
+    pub(crate) reactions: crate::world_reactions::WorldReactions,
     /// Reflected-component registry (design §16.5 / §24.3): dynamic component
     /// access by `prism_reflect::StableTypeId`. Empty unless the `reflect`
     /// feature registered a type.
@@ -125,6 +127,7 @@ impl World {
             relations: Relations::new(),
             observers: Observers::new(),
             change_observers: crate::change_observers::ChangeObservers::default(),
+            reactions: crate::world_reactions::WorldReactions::default(),
             #[cfg(feature = "reflect")]
             reflect: crate::reflect_bridge::ReflectRegistry::default(),
             next_observer_id: 0,
@@ -265,9 +268,9 @@ impl World {
     /// AABB.
     ///
     /// Only **stale** windows are recomputed — those whose cached bounds no
-    /// longer match the chunk's structural epoch, or whose change-version moved
-    /// past the version the bounds were computed at — so a frame that touched
-    /// nothing costs one test per chunk. `force` recomputes every window.
+    /// longer match the source component, chunk's structural epoch, or source
+    /// column's write revision — so a frame that touched nothing costs one test
+    /// per chunk. Use `force` if the projection or its captured parameters change.
     /// Returns 0 when the archetype or the column is absent.
     ///
     /// See [`Table::recompute_chunk_bounds`](crate::storage::Table::recompute_chunk_bounds).
@@ -284,7 +287,9 @@ impl World {
         let Some(table) = self.archetypes.get_mut(archetype).map(|a| a.table_mut()) else {
             return 0;
         };
-        table.recompute_chunk_bounds::<T>(id, now, point, force)
+        // SAFETY: `id_of::<T>` resolved this World's registered Rust type; its
+        // archetype column therefore contains T, not merely a matching layout.
+        unsafe { table.recompute_chunk_bounds::<T>(id, now, point, force) }
     }
 
     /// Cull `archetype`'s chunk windows against `frustum`, writing every window's
@@ -634,7 +639,9 @@ impl World {
         let change_tick = self.change_tick;
 
         let mut spawned = Vec::new();
-        for bundle in bundles {
+        let context = (self.id(), self.archetype_generation());
+        let mut bundles = bundles.into_iter();
+        while let Some(bundle) = bundles.next() {
             let entity = self.entities.alloc();
             let row = self.fill_row(
                 entity,
@@ -648,6 +655,12 @@ impl World {
             );
             self.finish_spawn(entity, archetype_id, row as u32, &all_ids);
             spawned.push(entity);
+            if context != (self.id(), self.archetype_generation()) {
+                // A callback replaced/restored storage. The old component ids,
+                // constructors and archetype plan cannot be used in that world.
+                spawned.extend(bundles.map(|bundle| self.spawn(bundle)));
+                break;
+            }
         }
         spawned
     }
@@ -840,6 +853,12 @@ impl World {
         self.entities
             .set_location(entity, EntityLocation { archetype_id, row });
 
+        // Storage is already committed. Maintain groups before user code can
+        // unwind, replace this world, or perform nested structural operations.
+        if !self.owning_groups.is_empty() {
+            self.update_owning_groups(entity, all_ids);
+        }
+
         // Lifecycle hooks (design §12): a fresh spawn newly adds every component
         // (explicit and required), so fire on_add then on_insert for all of them
         // with the world fully consistent. Gated so hook-free spawns pay nothing.
@@ -848,20 +867,15 @@ impl World {
             let add = self.collect_hooks(all_ids, crate::component_hooks::ComponentHooks::on_add);
             let insert =
                 self.collect_hooks(all_ids, crate::component_hooks::ComponentHooks::on_insert);
-            self.run_hooks(entity, &add);
-            if fire_obs {
-                self.fire_lifecycle_observers(LifecycleEvent::Add, entity, all_ids);
+            if !self.run_hooks(entity, &add)
+                || (fire_obs
+                    && !self.fire_lifecycle_observers(LifecycleEvent::Add, entity, all_ids))
+                || !self.run_hooks(entity, &insert)
+                || (fire_obs
+                    && !self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, all_ids))
+            {
+                return;
             }
-            self.run_hooks(entity, &insert);
-            if fire_obs {
-                self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, all_ids);
-            }
-        }
-
-        // Owning-group maintenance (design §6 / §17): a fresh spawn newly holds
-        // every id in `all_ids`, which may complete one or more owning groups.
-        if !self.owning_groups.is_empty() {
-            self.update_owning_groups(entity, all_ids);
         }
     }
 
@@ -1128,9 +1142,13 @@ impl World {
                 dst_bindings.push((*cid, *sid, arc.clone()));
             }
         }
-        let dst_id =
-            self.archetypes
-                .get_or_create_shared(&table_set, &dst_bindings, &self.components);
+        let pairs = self.relations.fragmenting_pairs(entity);
+        let dst_id = self.archetypes.get_or_create_with_pairs(
+            &table_set,
+            &dst_bindings,
+            &pairs,
+            &self.components,
+        );
 
         // The shared cids this insert (re-)interned in phase 1 (+1 each). Their
         // prior src-archetype binding must be released after the write to
@@ -1242,14 +1260,19 @@ impl World {
     /// Fire a previously-collected batch of lifecycle hooks for `entity`, in
     /// order. Each hook sees a fully consistent world; see
     /// [`crate::component_hooks`] for the re-entrancy contract.
-    fn run_hooks(&mut self, entity: Entity, hooks: &[(ComponentId, ComponentHook)]) {
+    fn run_hooks(&mut self, entity: Entity, hooks: &[(ComponentId, ComponentHook)]) -> bool {
+        let context = (self.id(), self.archetype_generation());
         for &(component, hook) in hooks {
             hook(HookContext {
                 world: self,
                 entity,
                 component,
             });
+            if context != (self.id(), self.archetype_generation()) || !self.contains(entity) {
+                return false;
+            }
         }
+        self.contains(entity)
     }
 
     /// Whether any component in `ids` has *any* lifecycle hook registered —
@@ -1384,12 +1407,10 @@ impl World {
             let present = self.present_ids(entity, &ids, &storages);
             let replace =
                 self.collect_hooks(&present, crate::component_hooks::ComponentHooks::on_replace);
-            self.run_hooks(entity, &replace);
-            if obs_active {
-                self.fire_lifecycle_observers(LifecycleEvent::Replace, entity, &present);
-            }
-            // A hook may have despawned the entity; abort without writing.
-            if !self.entities.contains(entity) {
+            if !self.run_hooks(entity, &replace)
+                || (obs_active
+                    && !self.fire_lifecycle_observers(LifecycleEvent::Replace, entity, &present))
+            {
                 return false;
             }
             self.present_ids(entity, &ids, &storages)
@@ -1564,7 +1585,22 @@ impl World {
             for &id in &add_ids {
                 new_set = new_set.with(id);
             }
-            let dst_id = self.archetypes.get_or_create(&new_set, &self.components);
+            // The incoming bundle need not mention existing Shared keys. They
+            // still identify the destination archetype and remain owned by this
+            // entity throughout the move, without reinterning or refcount edits.
+            let bindings = self
+                .archetypes
+                .get(src_id)
+                .expect("live entity archetype")
+                .shared_bindings()
+                .to_vec();
+            let pairs = self.relations.fragmenting_pairs(entity);
+            let dst_id = self.archetypes.get_or_create_with_pairs(
+                &new_set,
+                &bindings,
+                &pairs,
+                &self.components,
+            );
 
             let dst_row = self
                 .archetypes
@@ -1662,6 +1698,13 @@ impl World {
         // newly added to the entity on this call, then on_insert for every
         // written component. Both observe a fully consistent world.
         let req_ids: Vec<ComponentId> = required.iter().map(|(id, _, _)| *id).collect();
+        // The write is committed even if an Add/Insert callback panics. Group
+        // membership must describe that storage before handing out &mut World.
+        if !self.owning_groups.is_empty() {
+            let mut touched = ids.clone();
+            touched.extend(req_ids.iter().copied());
+            self.update_owning_groups(entity, &touched);
+        }
         let obs_post = obs_active || self.observers.watches_any_lifecycle(&req_ids);
         if hooks_active || self.any_hooks(&req_ids) || obs_post {
             // on_add fires for every component newly resident on this call:
@@ -1678,24 +1721,18 @@ impl World {
             inserted.extend(req_ids.iter().copied());
             let insert =
                 self.collect_hooks(&inserted, crate::component_hooks::ComponentHooks::on_insert);
-            self.run_hooks(entity, &add);
-            if obs_post {
-                self.fire_lifecycle_observers(LifecycleEvent::Add, entity, &added);
-            }
-            self.run_hooks(entity, &insert);
-            if obs_post {
-                self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, &inserted);
+            if !self.run_hooks(entity, &add)
+                || (obs_post && !self.fire_lifecycle_observers(LifecycleEvent::Add, entity, &added))
+                || !self.run_hooks(entity, &insert)
+                || (obs_post
+                    && !self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, &inserted))
+            {
+                // The write completed before these callbacks. Do not dispatch
+                // remaining old phases in the new timeline.
+                return true;
             }
         }
 
-        // Owning-group maintenance (design §6 / §17): the written set
-        // (explicit bundle ids plus required additions) may complete a
-        // group for `entity`.
-        if !self.owning_groups.is_empty() {
-            let mut touched = ids.clone();
-            touched.extend(req_ids.iter().copied());
-            self.update_owning_groups(entity, &touched);
-        }
         true
     }
 
@@ -1723,16 +1760,13 @@ impl World {
                 self.collect_hooks(&present, crate::component_hooks::ComponentHooks::on_replace);
             let remove =
                 self.collect_hooks(&present, crate::component_hooks::ComponentHooks::on_remove);
-            self.run_hooks(entity, &replace);
-            if obs_active {
-                self.fire_lifecycle_observers(LifecycleEvent::Replace, entity, &present);
-            }
-            self.run_hooks(entity, &remove);
-            if obs_active {
-                self.fire_lifecycle_observers(LifecycleEvent::Remove, entity, &present);
-            }
-            // A hook may have despawned the entity; nothing remains to remove.
-            if !self.entities.contains(entity) {
+            if !self.run_hooks(entity, &replace)
+                || (obs_active
+                    && !self.fire_lifecycle_observers(LifecycleEvent::Replace, entity, &present))
+                || !self.run_hooks(entity, &remove)
+                || (obs_active
+                    && !self.fire_lifecycle_observers(LifecycleEvent::Remove, entity, &present))
+            {
                 return false;
             }
         }
@@ -1800,9 +1834,13 @@ impl World {
             .filter(|(cid, _, _)| !shared_to_remove.contains(cid))
             .cloned()
             .collect();
-        let dst_id =
-            self.archetypes
-                .get_or_create_shared(&new_set, &dst_bindings, &self.components);
+        let pairs = self.relations.fragmenting_pairs(entity);
+        let dst_id = self.archetypes.get_or_create_with_pairs(
+            &new_set,
+            &dst_bindings,
+            &pairs,
+            &self.components,
+        );
 
         let dst_row = self
             .archetypes
@@ -1849,39 +1887,12 @@ impl World {
             return false;
         }
 
-        // Owning-group maintenance (design §6 / §17): the entity ceases to
-        // exist, so drop it from every group up front — this covers all of
-        // despawn's later early-return paths and recursive relation
-        // cascades (each recursive despawn drops itself).
-        if !self.owning_groups.is_empty() {
-            self.owning_groups.remove_entity(entity);
-        }
-
-        // Relation cascade (design §11 / §23.2): before tearing `entity` down,
-        // plan how its despawn propagates over the relation graph, then unlink
-        // every planned edge and recursively despawn holders governed by
-        // `CleanupPolicy::Delete`. Planning is side-effect-free; `World` applies
-        // the plan here. The index-empty fast path keeps relation-free worlds
-        // allocation-free.
-        if !self.relations.index().is_empty() {
-            let plan = self.relations.plan_cascade(entity);
-            debug_assert!(
-                plan.panics.is_empty(),
-                "despawn of a relation target violated a `CleanupPolicy::Panic` policy",
-            );
-            for edge in &plan.removals {
-                self.relations
-                    .index_mut()
-                    .remove(edge.relation, edge.source, edge.target);
-            }
-            // Edges are already unlinked, so each recursive despawn re-plans to
-            // an empty cascade and cannot loop back into `entity`.
-            for holder in plan.deletions {
-                self.despawn(holder);
-            }
-            // Drop any surviving index entries for `entity` (e.g. `Panic` edges
-            // left intact above) so no dead entity lingers in the index.
-            self.relations.index_mut().remove_all_for_entity(entity);
+        // Reject Panic policies before changing groups or component storage;
+        // cascade removals also rekey every surviving fragmenting holder.
+        let context = (self.id(), self.archetype_generation());
+        self.cleanup_relations_for_despawn(entity);
+        if context != (self.id(), self.archetype_generation()) {
+            return true;
         }
 
         // Re-fetch the location: a recursive cascade despawn above may have
@@ -1902,19 +1913,23 @@ impl World {
                     self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_replace);
                 let remove =
                     self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_remove);
-                self.run_hooks(entity, &replace);
-                if obs_active {
-                    self.fire_lifecycle_observers(LifecycleEvent::Replace, entity, &ids);
-                }
-                self.run_hooks(entity, &remove);
-                if obs_active {
-                    self.fire_lifecycle_observers(LifecycleEvent::Remove, entity, &ids);
-                }
-                // A hook may already have despawned the entity; it is gone.
-                if !self.entities.contains(entity) {
+                if !self.run_hooks(entity, &replace)
+                    || (obs_active
+                        && !self.fire_lifecycle_observers(LifecycleEvent::Replace, entity, &ids))
+                    || !self.run_hooks(entity, &remove)
+                    || (obs_active
+                        && !self.fire_lifecycle_observers(LifecycleEvent::Remove, entity, &ids))
+                {
                     return true;
                 }
             }
+        }
+
+        // Hooks can attach new incoming/outgoing pairs while entity is live.
+        // Re-apply policies so freeing it never leaves a dangling pair.
+        self.cleanup_relations_for_despawn(entity);
+        if context != (self.id(), self.archetype_generation()) {
+            return true;
         }
 
         // Re-fetch and free the (possibly hook-mutated) location.
@@ -1924,11 +1939,9 @@ impl World {
         // Drop out-of-band sparse components regardless of archetype shape; even
         // an empty-archetype entity may still hold sparse components (§6).
         self.sparse_sets.remove_entity_from_all(entity);
-        // Second owning-group drop *after* the free: the up-front
-        // `remove_entity` ran before lifecycle hooks, and a group-completing
-        // hook (e.g. one that `insert`s the final owned component) could have
-        // re-tracked this still-live entity. Dropping it again once it is truly
-        // freed guarantees no dead handle lingers in a packed prefix.
+        // Pre-remove callbacks can panic while the entity is still live, so
+        // retain its groups until the allocator free actually commits. Nested
+        // callbacks may also have completed a group before this point.
         if !self.owning_groups.is_empty() {
             self.owning_groups.remove_entity(entity);
         }
@@ -2489,7 +2502,15 @@ impl World {
     }
 }
 
+mod coalescing;
+mod dynamic_reload;
 mod relations;
+
+pub use dynamic_reload::DynamicValueMut;
+pub use dynamic_reload::{
+    DynamicComponentError, DynamicComponentLayout, DynamicReloadError, DynamicReloadReport,
+    DynamicValueRef, DynamicValueSlot,
+};
 
 mod id;
 pub use id::WorldId;

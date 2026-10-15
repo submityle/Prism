@@ -6,7 +6,7 @@
 //! Immediate structural operations on a [`World`](crate::world::World) (spawn /
 //! insert / remove / despawn) require `&mut World`, which a running system does
 //! not hold while it is iterating queries. The builders in this module record
-//! those same operations as closures and hand back [`Entity`](crate::entity::Entity)
+//! typed insert/remove commands and opaque operations, and hand back [`Entity`](crate::entity::Entity)
 //! handles *immediately* (via the lock-free
 //! [`Entities::reserve_entity`](crate::entity::Entities::reserve_entity)
 //! reservation path), so a system can queue spawns and edits without taking an
@@ -29,20 +29,21 @@
 //! same reserved-entity discipline: reserved handles are materialised by
 //! [`World::flush_reserved`](crate::world::World::flush_reserved) before any
 //! deferred spawn lands.
+//!
+//! Adjacent edits to the same entity share one final archetype migration when
+//! no lifecycle hooks, observers, required constructors, owning groups, shared
+//! edits or component destructors can observe intermediate states. Other edits
+//! replay immediately. Arbitrary [`Commands::queue`] / [`ParallelCommands::queue`]
+//! callbacks, spawns, despawns and entity changes are replay barriers.
 
-use alloc::boxed::Box;
-
-use crate::world::World;
-
+pub(crate) mod coalescing;
 mod parallel;
 mod queue;
 
-/// A boxed, type-erased structural mutation applied to a [`World`].
-///
-/// Shared by both the single-threaded [`CommandQueue`] and the parallel
-/// [`ParallelCommandBuffers`]. The `Send + Sync` bound lets a buffer (and the
-/// commands it holds) be recorded on one worker and replayed on another.
-pub(crate) type Command = Box<dyn FnOnce(&mut World) + Send + Sync>;
+#[cfg(test)]
+mod coalescing_tests;
+
+use coalescing::Command;
 
 pub use parallel::{CommandKey, ParallelCommandBuffers, ParallelCommands, ParallelEntityCommands};
 pub use queue::{ChildBuilder, CommandQueue, Commands, EntityCommands};

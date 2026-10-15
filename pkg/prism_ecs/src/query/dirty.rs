@@ -4,8 +4,8 @@
 //! Where [`Changed<T>`](crate::query::Changed) filters row-by-row, the
 //! dirty-chunk accessor answers the *coarse* question "which row windows of
 //! which archetypes contain anything this query touched since `last_run`?" by
-//! consulting one [`ChunkVersions`](crate::storage::ChunkVersions) tick per
-//! chunk instead of scanning every row. A GPU-resident uploader (design §15) or
+//! traversing a hierarchical [`ChunkVersions`](crate::storage::ChunkVersions)
+//! interval index, pruning entire clean subtrees. A GPU-resident uploader (design §15) or
 //! a push-reaction pass walks the returned [`DirtyChunk`]s to upload / react to
 //! only the changed windows; the per-row ticks remain available to refine
 //! within a flagged window.
@@ -83,22 +83,27 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             let table = archetype.table();
             let rpc = table.rows_per_chunk();
             let len = table.len();
-            for chunk in 0..table.chunk_count() {
-                let is_dirty = access
-                    .reads()
-                    .iter()
-                    .chain(access.writes().iter())
-                    .filter_map(|&id| table.column(id))
-                    .any(|col| col.chunk_version(chunk).is_newer_than(last_run, this_run));
-                if is_dirty {
-                    let start = chunk * rpc;
-                    let end = ((chunk + 1) * rpc).min(len);
-                    dirty.push(DirtyChunk {
-                        archetype: archetype_id,
-                        start,
-                        end,
-                    });
-                }
+            let mut chunks = Vec::new();
+            for column in access
+                .reads()
+                .iter()
+                .chain(access.writes().iter())
+                .filter_map(|&id| table.column(id))
+            {
+                column.visit_changed_chunks(last_run, this_run, |chunk| chunks.push(chunk));
+            }
+            // Multiple accessed columns may invalidate the same chunk. Keep
+            // the existing deterministic, duplicate-free row-window order.
+            chunks.sort_unstable();
+            chunks.dedup();
+            for chunk in chunks {
+                let start = chunk * rpc;
+                let end = ((chunk + 1) * rpc).min(len);
+                dirty.push(DirtyChunk {
+                    archetype: archetype_id,
+                    start,
+                    end,
+                });
             }
         }
         dirty

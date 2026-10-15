@@ -96,7 +96,7 @@ pub use texture::{
 pub use vertex::{VertexAttribute, VertexBufferLayout, VertexStepMode};
 
 pub use budget::{HeapUsage, MemoryBudget, MemoryHeap};
-pub use cache::{CacheStats, ContentCache};
+pub use cache::{CacheStats, ContentCache, PipelineBinaryCacheError};
 pub use reclaim::{DeferredDeleter, FrameIndex};
 pub use slotmap::GenerationalSlotMap;
 pub use suballoc::{

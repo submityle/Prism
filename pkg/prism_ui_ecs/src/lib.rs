@@ -4,34 +4,35 @@
 //! # Architecture
 //!
 //! Loom's reactivity and the ECS already both track change. This crate wires
-//! them together at *field granularity* and reuses the ECS **tick-based change
-//! detection** as the transport for reactivity instead of inventing a parallel
-//! dirty-flag scheme:
+//! them together at *field granularity*, using the ECS changed/lifecycle
+//! observers to invalidate only bindings of the affected entities:
 //!
 //! * A [`FieldBinding`] projects a single field of a component `C` to and from a
 //!   `Signal<T>` through a `reader` (and optional `writer`) closure.
-//! * **Pulling** (ECS → signal) consults each component's change tick: a field
-//!   is only re-read when the component changed since the binding last observed
-//!   it, so idle entities cost nothing.
+//! * **Pulling** (ECS → signal) routes coalesced entity notifications to bound
+//!   fields. Quiet frames read no bound values. First attachment and snapshot
+//!   restore refresh all bindings once. Explicit `pull_all` uses tick checks.
 //! * **Pushing** (signal → ECS) uses an equality guard: the component is only
 //!   mutated when the projected field actually differs from the signal, so a
 //!   write never advances a change tick needlessly.
 //! * [`EntityBinding`] attaches a binding to a concrete entity and erases its
 //!   types behind the object-safe [`SyncBinding`] trait; [`EcsBridge`] collects
-//!   many such bindings and drives whole-frame `pull_all`/`push_all` passes.
+//!   many such bindings and owns their observer subscriptions. Scheduled pushes
+//!   drain value-free signal notifications; clean frames visit no bindings and
+//!   neither read nor clone signal values.
 //!
 //! Because both directions are equality-guarded, an `ECS → signal → ECS` round
 //! trip settles rather than oscillating.
 //!
-//! The [`schedule`] module adapts the bridge to a real Bevy frame loop: it is
+//! The [`schedule`] module adapts the bridge to a Prism frame loop: it is
 //! installed as a non-send resource and driven by two exclusive systems
 //! ([`loom_pull_system`] at frame start, [`loom_push_system`] at frame end).
 //!
 //! # `std`-only exception
 //!
 //! Unlike the other Loom crates, this is an **engine-integration bridge** and is
-//! deliberately `std`-only: it links `prism_ecs`, which itself requires `std`, so
-//! there is no `no_std` build to support and the crate omits the usual
+//! deliberately `std`-only: it enables `prism_ecs/std` and uses synchronized
+//! observer routes, so there is no `no_std` build to support and it omits the usual
 //! `no_std`/`alloc` crate attributes.
 //!
 //! # Example
@@ -75,12 +76,14 @@
 pub mod binding;
 pub mod bridge;
 pub mod entity_binding;
+mod invalidation;
 pub mod schedule;
 pub mod structural;
 
 pub use binding::FieldBinding;
-pub use bridge::EcsBridge;
+pub use bridge::{BindingId, BridgeWorldMismatch, EcsBridge};
 pub use entity_binding::{EntityBinding, SyncBinding};
+pub use invalidation::cleanup_bridge_observers;
 pub use schedule::{
     add_loom_sync_systems, insert_bridge, loom_pull_system, loom_push_system, remove_bridge,
     LoomSyncSet,

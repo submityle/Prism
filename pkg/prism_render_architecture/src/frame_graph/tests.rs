@@ -59,7 +59,12 @@ fn compiles_hazards_versions_queues_and_transient_layout() {
     assert!(compiled.logical_barriers[0].queue_transfer);
     assert_eq!(compiled.queue_batches.len(), 2);
     assert_eq!(compiled.queue_batches[1].waits_for, vec![0]);
-    assert_eq!(compiled.alias.buffer_slots[visible.0 as usize].unwrap().offset, 0);
+    assert_eq!(
+        compiled.alias.buffer_slots[visible.0 as usize]
+            .unwrap()
+            .offset,
+        0
+    );
     assert_eq!(compiled.alias.heap_size, 1024);
 }
 

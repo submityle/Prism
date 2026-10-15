@@ -47,10 +47,10 @@ impl Extent3d {
     #[must_use]
     pub const fn mip_level_size(self, level: u32, dimension: TextureDimension) -> Self {
         let shift = level;
-        let width = max_u32(shr_or_zero(self.width, shift), 1);
-        let height = max_u32(shr_or_zero(self.height, shift), 1);
+        let width = max_u32(ceil_shr_or_zero(self.width, shift), 1);
+        let height = max_u32(ceil_shr_or_zero(self.height, shift), 1);
         let depth = match dimension {
-            TextureDimension::D3 => max_u32(shr_or_zero(self.depth_or_array_layers, shift), 1),
+            TextureDimension::D3 => max_u32(ceil_shr_or_zero(self.depth_or_array_layers, shift), 1),
             _ => self.depth_or_array_layers,
         };
         Self {
@@ -70,14 +70,14 @@ const fn max_u32(a: u32, b: u32) -> u32 {
     }
 }
 
-/// `const`-friendly right shift that saturates to `0` once `shift` reaches the
-/// bit width, avoiding the shift-overflow panic for mip levels beyond the
-/// smallest extent.
-const fn shr_or_zero(value: u32, shift: u32) -> u32 {
+/// `const`-friendly ceil-halving shift that saturates to `0` once `shift`
+/// reaches the bit width. Ceil-halving keeps the trailing texel of odd-sized
+/// dimensions in the generated mip chain instead of dropping it.
+const fn ceil_shr_or_zero(value: u32, shift: u32) -> u32 {
     if shift >= u32::BITS {
         0
     } else {
-        value >> shift
+        (((value as u64) + ((1u64 << shift) - 1)) >> shift) as u32
     }
 }
 

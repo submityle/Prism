@@ -8,6 +8,28 @@ use prism_reflect::Reflect;
 use crate::component::Component;
 use crate::world::World;
 
+// An independent V2 envelope fixture. Using today's writer here would only
+// exercise V3 and could silently lose compatibility with existing save files.
+fn legacy_v2(entity: crate::entity::Entity, value: &dyn Reflect) -> Vec<u8> {
+    let name = value.type_name().as_bytes();
+    let blob = prism_reflect::to_binary(value).unwrap();
+    let mut bytes = b"PECA".to_vec();
+    bytes.push(2);
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&entity.to_bits().to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(name);
+    bytes.extend_from_slice(
+        &prism_reflect::StableTypeId::of_path(value.type_name())
+            .value()
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(&(blob.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&blob);
+    bytes
+}
+
 /// A reflected component with two integer fields.
 #[derive(Reflect, Clone, Copy, Debug, PartialEq, Eq)]
 struct Health {
@@ -43,6 +65,37 @@ struct HealthV2 {
     shield: i32,
 }
 impl Component for HealthV2 {}
+
+fn register_health_migration(world: &mut World) {
+    use prism_reflect::{DynamicStruct, Migration, TypeSchema, Typed};
+    world.register_reflect_component::<HealthV2>();
+    let schemas = world.reflect_schemas_mut();
+    schemas.register_version(
+        "Health",
+        TypeSchema::new(
+            core::any::type_name::<HealthV1>(),
+            1,
+            <HealthV1 as Typed>::type_info(),
+        ),
+    );
+    schemas.register_version(
+        "Health",
+        TypeSchema::new(
+            core::any::type_name::<HealthV2>(),
+            2,
+            <HealthV2 as Typed>::type_info(),
+        ),
+    );
+    schemas
+        .register_migration(
+            "Health",
+            Migration::new(1, 2, |value: &mut DynamicStruct| {
+                value.insert("shield", 0i32);
+                Ok(())
+            }),
+        )
+        .unwrap();
+}
 
 #[test]
 fn save_then_load_into_an_empty_world_round_trips_every_component() {
@@ -192,7 +245,7 @@ fn an_absurd_entity_count_is_rejected_without_huge_allocation() {
 
     let mut blob = Vec::new();
     blob.extend_from_slice(b"PECA");
-    blob.push(2); // current envelope version
+    blob.push(2); // legacy envelope version
     blob.extend_from_slice(&u32::MAX.to_le_bytes()); // entity_count
                                                      // No records at all: the first read runs out of bytes immediately.
     assert!(matches!(
@@ -207,8 +260,6 @@ fn an_absurd_entity_count_is_rejected_without_huge_allocation() {
 /// migration chain upgrades it before it meets today's type.
 #[test]
 fn an_older_schema_version_is_migrated_on_load() {
-    use prism_reflect::{DynamicStruct, Migration, TypeSchema, Typed};
-
     // ---- the build that wrote the save: only V1 exists ----
     let mut old = World::new();
     old.register_reflect_component::<HealthV1>();
@@ -217,45 +268,75 @@ fn an_older_schema_version_is_migrated_on_load() {
 
     // ---- today's build: V2 is live, and the catalogue knows both shapes ----
     let mut new = World::new();
-    new.register_reflect_component::<HealthV2>();
-    {
-        let schemas = new.reflect_schemas_mut();
-        schemas.register_version(
-            "Health",
-            TypeSchema::new(
-                core::any::type_name::<HealthV1>(),
-                1,
-                <HealthV1 as Typed>::type_info(),
-            ),
-        );
-        schemas.register_version(
-            "Health",
-            TypeSchema::new(
-                core::any::type_name::<HealthV2>(),
-                2,
-                <HealthV2 as Typed>::type_info(),
-            ),
-        );
-        schemas
-            .register_migration(
-                "Health",
-                Migration::new(1, 2, |value: &mut DynamicStruct| {
-                    value.insert("shield", 0i32);
-                    Ok(())
-                }),
-            )
-            .expect("a single-version step");
-    }
+    register_health_migration(&mut new);
 
-    let landed = new.load_reflect_archive(&bytes).expect("migrates on load");
-    assert_eq!(landed.len(), 1);
+    for archive in [legacy_v2(e, &HealthV1 { hp: 7 }), bytes] {
+        let landed = new
+            .load_reflect_archive(&archive)
+            .expect("migrates on load");
+        assert_eq!(landed.len(), 1);
+        assert_eq!(
+            new.get::<HealthV2>(landed[0]),
+            Some(&HealthV2 { hp: 7, shield: 0 }),
+            "both V2 and V3 preserve the concrete-component migration chain"
+        );
+        assert!(new.get::<HealthV1>(landed[0]).is_none());
+    }
+}
+
+#[test]
+fn migrated_components_can_supply_bases_alongside_other_prefab_policies() {
+    let mut old = World::new();
+    old.register_reflect_component::<HealthV1>();
+    let speed_id = old.register_reflect_component::<Speed>();
+    let base = old.spawn((HealthV1 { hp: 7 }, Speed(2)));
+    let child = old.spawn_instance_of(base);
+    old.override_prefab_field(child, speed_id, "#0", &9i32)
+        .unwrap();
+    let bytes = old.save_reflect_archive([child]).unwrap();
+    let mut new = World::new();
+    register_health_migration(&mut new);
+    new.register_reflect_component::<Speed>();
+    let landed = new.load_reflect_archive(&bytes).unwrap();
     assert_eq!(
-        new.get::<HealthV2>(landed[0]),
-        Some(&HealthV2 { hp: 7, shield: 0 }),
-        "the old value must arrive as today's type, with the new field defaulted"
+        new.get::<HealthV2>(landed[1]),
+        Some(&HealthV2 { hp: 7, shield: 0 })
     );
-    // The old type is not a component in this world at all.
-    assert!(new.get::<HealthV1>(landed[0]).is_none());
+    let speed = new
+        .get_inherited_reflect(landed[0], speed_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        <Speed as prism_reflect::FromReflect>::from_reflect(&*speed),
+        Some(Speed(9))
+    );
+    // Migrated represented names also have to work with callbacks and re-save.
+    let no_op: super::reflect_archive::ReflectArchiveRemapFn = |_, _, _, _| Ok(());
+    let landed = new
+        .load_reflect_archive_with_options(
+            &bytes,
+            super::reflect_archive::ReflectArchiveLoadOptions {
+                remap: Some(no_op),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(new.save_reflect_archive([landed[0].1]).is_ok());
+}
+
+#[test]
+fn field_ownership_is_not_silently_migrated_with_a_different_component_schema() {
+    let mut old = World::new();
+    let id = old.register_reflect_component::<HealthV1>();
+    let base = old.spawn(HealthV1 { hp: 7 });
+    let child = old.spawn_instance_of(base);
+    old.override_prefab_field(child, id, "hp", &9i32).unwrap();
+    let bytes = old.save_reflect_archive([child]).unwrap();
+    let mut new = World::new();
+    register_health_migration(&mut new);
+    assert!(matches!(new.load_reflect_archive(&bytes),
+        Err(super::reflect_archive::ReflectArchiveError::PrefabSchemaMismatch(got)) if got == id));
+    assert_eq!(new.entity_count(), 0);
 }
 
 /// Without a registered catalogue, the same old-shape save cannot be matched to

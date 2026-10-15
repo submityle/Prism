@@ -116,9 +116,9 @@
 //!   [`Suspended`] / [`Resumed`] / [`LowMemory`] / [`FocusChanged`] /
 //!   [`WillRenderFirstFrame`] and an [`AppLifecycle`] run-state resource,
 //!   registered together by [`App::add_lifecycle_events`] and emittable from a
-//!   runner or test via [`App::send_event`]. The windowed runner that forwards
-//!   these from the OS is a later M4 increment and is documented as absent, not
-//!   stubbed.
+//!   runner or test via [`App::send_event`]. The `winit` runner forwards these
+//!   from the host lifecycle; platform-specific suspend/resume semantics still
+//!   require integration evidence on each target OS.
 //! - A graceful-shutdown path (design §12/§21/§24.5):
 //!   [`App::run_shutdown`] runs the dedicated [`Shutdown`] schedule once
 //!   (draining each system's deferred commands), materialises reserved
@@ -191,10 +191,11 @@
 //!
 //! Everything on the public surface is a **real, working implementation** —
 //! no `todo!()`, `unimplemented!()`, or hollow stubs. Later milestones (sub-app
-//! pipelining, the windowed runner) layer on top without rewriting these
-//! foundations. For record/replay determinism, the seeded RNG, frame hash, and
-//! input record/replay have landed, while World-snapshot rollback stays
-//! deferred. Deferred features are documented as absent, never faked.
+//! pipelining and the windowed runner are implemented on these foundations.
+//! Seeded determinism, frame hashing, input record/replay, and World-snapshot
+//! rollback are also implemented. Real device/mobile/production performance
+//! acceptance remains an integration concern and is documented as such rather
+//! than inferred from unit tests.
 //!
 //! # `std`
 //!
@@ -229,9 +230,12 @@ pub mod cvar;
 pub mod determinism;
 #[cfg(feature = "std")]
 pub mod diagnostics;
+pub mod ecs_policy;
 pub mod event;
 pub mod exit;
 pub mod fixed;
+#[cfg(feature = "std")]
+pub mod frame;
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
 pub mod lifecycle;
@@ -297,8 +301,11 @@ pub use fixed::{
     AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
     FixedPreUpdate, FixedUpdate,
 };
+#[cfg(feature = "std")]
+pub use frame::{FrameApp, FrameContinueReport, FrameContinueStop, FrameStepReport, FrameSystem};
 pub use lifecycle::{
-    AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+    AppLifecycle, FocusChanged, LowMemory, Resumed, SuspendResumeAdapter, SuspendResumeReport,
+    Suspended, WillRenderFirstFrame,
 };
 #[cfg(feature = "std")]
 pub use pacing::{
@@ -324,7 +331,7 @@ pub use reflect_config::{
 };
 pub use rollback::SnapshotHistory;
 #[cfg(feature = "determinism")]
-pub use rollback_replay::RollbackReplay;
+pub use rollback_replay::{EcsRollbackError, EcsRollbackReplay, RollbackReplay};
 pub use run_mode::RunMode;
 pub use runner::{run_once, HeadlessRunner, ScheduleRunnerOnce};
 #[cfg(feature = "winit")]
@@ -381,8 +388,8 @@ pub mod prelude {
     #[cfg(feature = "hot-reload")]
     pub use crate::hot_reload::{ConfigHotReload, ReloadOutcome};
     pub use crate::lifecycle::{
-        AppLifecycle, DeviceLost, DeviceRestored, FocusChanged, LowMemory, Resumed, Suspended,
-        WillRenderFirstFrame,
+        AppLifecycle, DeviceLost, DeviceRestored, FocusChanged, LowMemory, Resumed,
+        SuspendResumeAdapter, SuspendResumeReport, Suspended, WillRenderFirstFrame,
     };
     #[cfg(feature = "std")]
     pub use crate::pacing::{

@@ -25,9 +25,9 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod linux;
 pub mod power;
 pub mod qos;
-pub mod linux;
 
 /// Why a real topology could not be obtained.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,7 +191,10 @@ impl CpuTopology {
     pub fn detect() -> Self {
         #[cfg(all(feature = "std", any(target_os = "linux", target_os = "android")))]
         {
-            linux::probe_or_fallback(|path| std::fs::read_to_string(path).ok(), logical_core_count())
+            linux::probe_or_fallback(
+                |path| std::fs::read_to_string(path).ok(),
+                logical_core_count(),
+            )
         }
         #[cfg(not(all(feature = "std", any(target_os = "linux", target_os = "android"))))]
         {

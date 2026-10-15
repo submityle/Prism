@@ -4,8 +4,8 @@ use prism_material_schema::surface_schema;
 use prism_render_architecture::{
     abi::{AbiHash, AbiVersion},
     shader_package::{
-        ManifestExpectation, PackageState, ShaderPackageId, ShaderPackageManifest,
-        ShaderPackageRegistry,
+        ArtifactDigest, ManifestExpectation, PackageState, PermutationSpace, ShaderPackageId,
+        ShaderPackageManifest, ShaderPackageRegistry, ShaderPackageVariantManifest,
     },
 };
 use prism_render_material::shading_plan::*;
@@ -152,7 +152,7 @@ fn unlit_contract_and_execution_row_are_decode_only_and_unlit_typed() {
             ShadingPlan::single_builtin(BuiltinProgram::Unlit),
             program,
             None,
-            ExecutionFamily::FusedBuiltin,
+            ExecutionFamily::SplitResponse,
             ChannelMask::default(),
         )
         .unwrap();
@@ -162,7 +162,7 @@ fn unlit_contract_and_execution_row_are_decode_only_and_unlit_typed() {
         vec![[
             program.get(),
             u32::MAX,
-            ExecutionFamily::FusedBuiltin as u32,
+            ExecutionFamily::SplitResponse as u32,
             0,
             0,
             0,
@@ -183,6 +183,7 @@ fn unlit_contract_and_execution_row_are_decode_only_and_unlit_typed() {
 // implementation or a claim that the real responders have semantic coverage.
 fn manifest() -> ResponseManifest {
     ResponseManifest {
+        response_lobe_name: None,
         surface: SurfaceContract {
             ignored_fields_with_reason: catalog()
                 .fields()
@@ -236,7 +237,11 @@ fn package() -> ShaderPackageManifest {
         entry_point: "main".into(),
         abi_version: expectation().abi_version,
         abi_hash: expectation().abi_hash,
-        permutation_count: 1,
+        variants: ShaderPackageVariantManifest::from_digests(
+            &PermutationSpace::new([1]),
+            [ArtifactDigest([1; 32])],
+        )
+        .unwrap(),
     }
 }
 
@@ -390,7 +395,13 @@ fn context() -> PlanValidationContext {
             transmission: true,
             temporal_history: true,
         },
-        cache_channels: vec![],
+        // The generated Lit manifest reads these two response caches.  A
+        // fully-capable validation context must advertise them; tests that
+        // exercise missing-cache failures remove or omit the specific entry.
+        cache_channels: vec![
+            CacheChannel::Response(ResponseChannel::IndirectDiffuse),
+            CacheChannel::Response(ResponseChannel::Reflection),
+        ],
         temporal_history_available: true,
     }
 }
@@ -400,13 +411,62 @@ fn registered(id: u32) -> ProgramRef {
 fn registry(programs: &[ProgramRef], fused: bool) -> ResponseRegistry {
     let mut registry = ResponseRegistry::new(catalog(), expectation());
     for program in programs {
-        let mut manifest = manifest();
-        manifest.execution.supports_fused = fused;
+        let mut manifest = match program {
+            ProgramRef::Builtin(builtin) => ResponseManifest::from_builtin(*builtin).unwrap(),
+            ProgramRef::Registered(_) => manifest(),
+        };
+        if matches!(program, ProgramRef::Registered(_)) {
+            manifest.execution.supports_fused = fused;
+        }
         registry
             .register(*program, manifest, compiled(), &packages())
             .unwrap();
     }
     registry
+}
+
+#[test]
+fn npr_builtin_publishes_the_exact_stylized_lobe_name() {
+    let npr = ResponseManifest::from_builtin(BuiltinProgram::Npr).unwrap();
+    assert_eq!(npr.response_lobe_name.as_deref(), Some(STYLIZED_LOBE_NAME));
+    assert_ne!(STYLIZED_LOBE_NAME, "npr_face");
+    npr.validate(&catalog()).unwrap();
+}
+
+#[test]
+fn npr_face_support_without_the_exact_name_is_rejected() {
+    let mut missing = ResponseManifest::from_builtin(BuiltinProgram::Npr).unwrap();
+    missing.response_lobe_name = None;
+    assert_eq!(
+        missing.validate(&catalog()),
+        Err(ContractError::StylizedLobeNameRequired)
+    );
+
+    let mut alias = ResponseManifest::from_builtin(BuiltinProgram::Npr).unwrap();
+    alias.response_lobe_name = Some("npr_face".into());
+    assert_eq!(
+        alias.validate(&catalog()),
+        Err(ContractError::InvalidStylizedLobeName("npr_face".into()))
+    );
+}
+
+#[test]
+fn disabled_stylized_lobe_rejects_the_builtin_at_registration() {
+    let mut registry = ResponseRegistry::new_with_config(
+        catalog(),
+        expectation(),
+        ResponseRegistryConfig {
+            stylized_lobe_enabled: false,
+        },
+    );
+    let result = registry.register(
+        ProgramRef::Builtin(BuiltinProgram::Npr),
+        ResponseManifest::from_builtin(BuiltinProgram::Npr).unwrap(),
+        compiled(),
+        &packages(),
+    );
+    assert_eq!(result, Err(RegistryError::StylizedLobeDisabled));
+    assert!(registry.is_empty());
 }
 fn blend(
     left: ProgramRef,
@@ -530,6 +590,9 @@ fn mapped_fields_require_semantics_and_test_evidence() {
                 .ignored_lobes_with_reason
                 .retain(|(id, _)| id != lobe);
             manifest.surface.supported_lobes.push(lobe.clone());
+            if lobe == "npr_face" {
+                manifest.response_lobe_name = Some(STYLIZED_LOBE_NAME.into());
+            }
         }
         manifest.validate(&catalog()).unwrap();
         manifest.surface.field_mappings[0].test.clear();
@@ -714,7 +777,12 @@ fn builtin_trio_is_available_only_after_explicit_binding() {
         let plan = ShadingPlan::Single { program };
         let packages = packages();
         let validated = r.validate_plan(&plan, &context(), &packages).unwrap();
-        assert_eq!(validated.execution_family, ExecutionFamily::FusedBuiltin);
+        let expected_family = if builtin == BuiltinProgram::Lit {
+            ExecutionFamily::FusedBuiltin
+        } else {
+            ExecutionFamily::SplitResponse
+        };
+        assert_eq!(validated.execution_family, expected_family);
         assert!(validated.right.is_none());
     }
 }
@@ -896,18 +964,40 @@ fn all_mask_variants_and_domains_are_exercised() {
         MaskSource::RegionMask,
         MaskSource::Channel(SURFACE_CHANNELS[0].id.into()),
     ] {
-        for domain in [
-            BlendDomain::FullRadiance,
-            BlendDomain::DirectOnly,
-            BlendDomain::CustomChannelMask(ChannelMask::one(ResponseChannel::Emission)),
-        ] {
-            assert_eq!(
-                r.validate_plan(&blend(a, b, mask.clone(), domain), &context(), &p)
-                    .unwrap()
-                    .execution_family,
-                ExecutionFamily::FusedBuiltin
-            );
-        }
+        assert_eq!(
+            r.validate_plan(
+                &blend(a, b, mask.clone(), BlendDomain::DirectOnly),
+                &context(),
+                &p
+            )
+            .unwrap()
+            .execution_family,
+            ExecutionFamily::Composition
+        );
+        assert_eq!(
+            r.validate_plan(
+                &blend(
+                    a,
+                    b,
+                    mask.clone(),
+                    BlendDomain::CustomChannelMask(ChannelMask::one(ResponseChannel::Emission)),
+                ),
+                &context(),
+                &p
+            )
+            .unwrap()
+            .execution_family,
+            ExecutionFamily::Composition
+        );
+        assert_eq!(
+            r.validate_plan(
+                &blend(a, b, mask, BlendDomain::FullRadiance),
+                &context(),
+                &p
+            )
+            .unwrap_err(),
+            RegistryError::Contract(ContractError::IncompatibleBlendOutput)
+        );
     }
     for mask in [
         MaskSource::Texture(" ".into()),

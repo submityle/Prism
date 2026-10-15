@@ -298,7 +298,9 @@ pub use shadow::{
     ReceiverProjection, Residency, ShadowPageKey, VirtualPageTable, VirtualShadowMap,
     VirtualShadowSettings,
 };
-pub use stylized::{evaluate_stylized_direct, evaluate_toon_direct, StylizedParams};
+pub use stylized::{
+    evaluate_stylized_direct, evaluate_toon_direct, StylizedParams, STYLIZED_LOBE_NAME,
+};
 pub use stylized_hair::{evaluate_stylized_hair_direct, StylizedHairParams};
 pub use subsurface::evaluate_subsurface_direct;
 pub use surface::{

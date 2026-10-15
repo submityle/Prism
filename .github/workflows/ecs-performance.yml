@@ -1,0 +1,39 @@
+name: ECS performance contracts
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+      - release-*
+
+concurrency:
+  group: ecs-performance-contracts-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  contracts:
+    name: ECS deterministic complexity and comparator
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      PYTHONDONTWRITEBYTECODE: 1
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Comparator rejects regressions and incompatible machines
+        run: python3 -m unittest discover -s tools/ecs-perf -p 'test_*.py' -v
+      - uses: ./.github/actions/install-rust
+      - name: Exact operation-count and dirty-output contracts (no timing assertions)
+        run: cargo test --locked -p prism_ecs --features multi_thread,simd --test scale perf_contract_ -- --test-threads=1
+      - name: Query, dirty-chunk and SIMD correctness
+        run: |
+          cargo test --locked -p prism_ecs --features multi_thread,simd --lib query::

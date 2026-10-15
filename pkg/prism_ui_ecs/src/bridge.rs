@@ -1,8 +1,9 @@
-//! A registry of synchronisation bindings plus whole-frame sync passes.
+//! Observer-driven field binding registry, with explicit full-pass fallbacks.
 //!
 //! [`EcsBridge`] owns a collection of type-erased [`SyncBinding`]s and drives
-//! them together: [`EcsBridge::pull_all`] refreshes every signal from its
-//! component, and [`EcsBridge::push_all`] writes every two-way signal back.
+//! them together: [`EcsBridge::pull_changed`] refreshes notified bindings and
+//! [`EcsBridge::push_changed`] writes UI-side changes back. Explicit
+//! [`EcsBridge::pull_all`] / [`EcsBridge::push_all`] remain available.
 //!
 //! # Feedback-loop protection
 //!
@@ -19,24 +20,58 @@
 //! value just written equals the signal), and after a `pull_all` the next
 //! `push_all` finds the component already equal to the signal.
 
+use std::any::TypeId;
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use prism_ecs::prelude::{Component, Entity, World};
-use prism_ui_reactive::Signal;
+use prism_ecs::world::WorldId;
+use prism_ui_reactive::{Signal, SignalChangeId, SignalChangeQueue, SignalSubscription};
 
 use crate::binding::FieldBinding;
 use crate::entity_binding::{EntityBinding, SyncBinding};
+use crate::invalidation::{cleanup_bridge_observers, lock, Subscription};
+
+/// Process-unique registration token. A token from another bridge never aliases
+/// a binding here, even after removal or bridge replacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BindingId(u64);
+
+/// The bridge is still attached to a different World. Detach it explicitly
+/// before moving it; entity handles alone do not identify a World.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BridgeWorldMismatch;
+
+impl std::fmt::Display for BridgeWorldMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EcsBridge belongs to a different World; detach before reattaching")
+    }
+}
+
+impl std::error::Error for BridgeWorldMismatch {}
+
+struct BindingEntry {
+    entity: Entity,
+    component: TypeId,
+    binding: Box<dyn SyncBinding>,
+    signal_subscription: Option<SignalSubscription>,
+}
 
 /// A registry of entity/field bindings with frame-level sync passes.
 #[derive(Default)]
 pub struct EcsBridge {
-    bindings: Vec<Box<dyn SyncBinding>>,
+    bindings: BTreeMap<BindingId, BindingEntry>,
+    subscriptions: BTreeMap<TypeId, Subscription>,
+    world: Cell<Option<(WorldId, u64)>>,
+    signal_changes: SignalChangeQueue,
+    signal_bindings: BTreeMap<SignalChangeId, BindingId>,
 }
 
 impl EcsBridge {
     /// Creates an empty bridge.
     pub fn new() -> Self {
-        Self {
-            bindings: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Registers a one-way binding from `entity`'s component field into
@@ -46,13 +81,13 @@ impl EcsBridge {
         entity: Entity,
         signal: Signal<T>,
         reader: impl Fn(&C) -> T + 'static,
-    ) where
+    ) -> BindingId
+    where
         C: Component,
         T: Clone + PartialEq + 'static,
     {
         let binding = FieldBinding::read_only(signal, reader);
-        self.bindings
-            .push(Box::new(EntityBinding::new(entity, binding)));
+        self.register::<C>(entity, Box::new(EntityBinding::new(entity, binding)), None)
     }
 
     /// Registers a two-way binding between `entity`'s component field and
@@ -63,13 +98,172 @@ impl EcsBridge {
         signal: Signal<T>,
         reader: impl Fn(&C) -> T + 'static,
         writer: impl Fn(&mut C, &T) + 'static,
-    ) where
+    ) -> BindingId
+    where
         C: Component,
         T: Clone + PartialEq + 'static,
     {
+        let subscription = signal.subscribe_changes(&self.signal_changes);
         let binding = FieldBinding::read_write(signal, reader, writer);
-        self.bindings
-            .push(Box::new(EntityBinding::new(entity, binding)));
+        self.register::<C>(
+            entity,
+            Box::new(EntityBinding::new(entity, binding)),
+            Some(subscription),
+        )
+    }
+
+    fn register<C: Component>(
+        &mut self,
+        entity: Entity,
+        binding: Box<dyn SyncBinding>,
+        signal_subscription: Option<SignalSubscription>,
+    ) -> BindingId {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = BindingId(
+            NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .expect("binding identity exhausted"),
+        );
+        let component = TypeId::of::<C>();
+        let subscription = self
+            .subscriptions
+            .entry(component)
+            .or_insert_with(Subscription::new::<C>);
+        let mut routes = lock(&subscription.routes);
+        routes.entities.entry(entity).or_default().insert(id);
+        routes.dirty.insert(id);
+        if let Some(subscription) = &signal_subscription {
+            self.signal_bindings.insert(subscription.id(), id);
+        }
+        self.bindings.insert(
+            id,
+            BindingEntry {
+                entity,
+                component,
+                binding,
+                signal_subscription,
+            },
+        );
+        id
+    }
+
+    /// Remove one registration and immediately release its observers when the
+    /// last binding of that component type is removed. Other bridges and World
+    /// observers are unaffected. The supplied World is used only for cleanup.
+    pub fn unbind(&mut self, world: &mut World, id: BindingId) -> bool {
+        let Some(entry) = self.bindings.remove(&id) else {
+            return false;
+        };
+        if let Some(subscription) = &entry.signal_subscription {
+            self.signal_bindings.remove(&subscription.id());
+        }
+        let subscription = self
+            .subscriptions
+            .get(&entry.component)
+            .expect("binding subscription");
+        let empty = {
+            let mut routes = lock(&subscription.routes);
+            routes.dirty.remove(&id);
+            if let Some(ids) = routes.entities.get_mut(&entry.entity) {
+                ids.remove(&id);
+                if ids.is_empty() {
+                    routes.entities.remove(&entry.entity);
+                }
+            }
+            routes.entities.is_empty()
+        };
+        if empty {
+            self.subscriptions.remove(&entry.component);
+        }
+        cleanup_bridge_observers(world);
+        true
+    }
+
+    /// Release observer leases but keep bindings for later reattachment. If the
+    /// old World is not available, its expired observers are harmless and can
+    /// be reclaimed by [`cleanup_bridge_observers`] on that World later.
+    pub fn detach(&mut self, world: &mut World) {
+        for subscription in self.subscriptions.values_mut() {
+            subscription.reset();
+        }
+        self.world.set(None);
+        cleanup_bridge_observers(world);
+    }
+
+    fn attach(&mut self, world: &mut World) -> Result<(), BridgeWorldMismatch> {
+        let stamp = (world.id(), world.archetype_generation());
+        if self.world.get().is_some_and(|(id, _)| id != stamp.0) {
+            return Err(BridgeWorldMismatch);
+        }
+        if self.world.get() != Some(stamp) {
+            for subscription in self.subscriptions.values_mut() {
+                subscription.reset();
+            }
+            self.world.set(Some(stamp));
+        }
+        cleanup_bridge_observers(world);
+        for subscription in self.subscriptions.values_mut() {
+            subscription.install(world);
+        }
+        Ok(())
+    }
+
+    /// Refresh only bindings invalidated by changed/insert/remove observers.
+    /// First attachment and snapshot restoration refresh every binding once.
+    /// Repeated notifications coalesce; refreshes run in registration order.
+    /// Missing components preserve the signal until insertion/restoration.
+    ///
+    /// This flushes the World's change bus (including unrelated callbacks).
+    /// Callback writes follow that bus's next-flush semantics. A reader panic
+    /// leaves its notification pending for retry. A World replaced by a callback
+    /// is rejected before reading any of its entities.
+    pub fn pull_changed(&mut self, world: &mut World) -> Result<usize, BridgeWorldMismatch> {
+        self.attach(world)?;
+        world.flush_changed_observers();
+        // Flush callbacks can restore or replace the World.
+        self.attach(world)?;
+        let pending: BTreeSet<_> = self
+            .subscriptions
+            .values()
+            .flat_map(|subscription| lock(&subscription.routes).dirty.clone())
+            .collect();
+        let mut changed = 0;
+        for id in pending {
+            let entry = self.bindings.get_mut(&id).expect("live invalidation route");
+            changed += usize::from(entry.binding.refresh(world));
+            lock(&self.subscriptions[&entry.component].routes)
+                .dirty
+                .remove(&id);
+        }
+        Ok(changed)
+    }
+
+    /// Process only notified two-way signals, coalesced in registration order.
+    /// A clean pass does not visit bindings or read/clone signal values. A
+    /// panicking reader/writer leaves its entry and the remaining batch pending;
+    /// already completed entries stay acknowledged. This is retry, not rollback
+    /// of partial component writes or external side effects. Signal writes made
+    /// during a push are retained for the next pass, even for the current entry.
+    /// With the scheduled pull-before-push order, attachment/restoration imports
+    /// the ECS baseline first and equality checks suppress its signal echoes.
+    pub fn push_changed(&self, world: &mut World) -> Result<usize, BridgeWorldMismatch> {
+        if self.world.get().is_some_and(|(id, _)| id != world.id()) {
+            return Err(BridgeWorldMismatch);
+        }
+        // Even a push-first bridge must not accept an aliased entity in a
+        // second World. Pull installs the actual ECS observer leases later.
+        if self.world.get().is_none() {
+            self.world
+                .set(Some((world.id(), world.archetype_generation())));
+        }
+        let mut pending = self.signal_changes.take_pending();
+        let mut written = 0;
+        while let Some(signal_id) = pending.first() {
+            if let Some(id) = self.signal_bindings.get(&signal_id) {
+                written += usize::from(self.bindings[id].binding.push_changed(world));
+            }
+            pending.acknowledge(signal_id);
+        }
+        Ok(written)
     }
 
     /// Number of registered bindings.
@@ -85,8 +279,8 @@ impl EcsBridge {
     /// Pulls every binding, returning how many signals changed.
     pub fn pull_all(&mut self, world: &World) -> usize {
         let mut changed = 0;
-        for binding in &mut self.bindings {
-            if binding.pull(world) {
+        for entry in self.bindings.values_mut() {
+            if entry.binding.pull(world) {
                 changed += 1;
             }
         }
@@ -96,8 +290,8 @@ impl EcsBridge {
     /// Pushes every binding, returning how many components were mutated.
     pub fn push_all(&self, world: &mut World) -> usize {
         let mut written = 0;
-        for binding in &self.bindings {
-            if binding.push(world) {
+        for entry in self.bindings.values() {
+            if entry.binding.push(world) {
                 written += 1;
             }
         }

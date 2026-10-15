@@ -12,6 +12,17 @@ use prism_render_scene::response_gpu::{
 use prism_render_shading::response_output::*;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
+const PERF_SAMPLES: usize = 32;
+
+fn percentile(samples: &[u128], quantile: f64) -> u128 {
+    assert!(!samples.is_empty());
+    assert!((0.0..=1.0).contains(&quantile));
+    let mut ordered = samples.to_vec();
+    ordered.sort_unstable();
+    let rank = ((ordered.len() - 1) as f64 * quantile).ceil() as usize;
+    ordered[rank]
+}
+
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12,
@@ -184,13 +195,6 @@ fn fixture() -> (ResponseOutput, ResponseOutput, AuxiliaryMergeRules) {
     (left, right, rules)
 }
 
-fn near(a: f32, b: f32) {
-    assert!(
-        (a - b).abs() <= 2e-6 * b.abs().max(1.0),
-        "GPU {a} != CPU {b}"
-    );
-}
-
 #[test]
 fn production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary() {
     let Some((device, queue)) = device() else {
@@ -243,11 +247,19 @@ fn production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary() {
             }
         }
     }
-    let left_buffer = upload(
+    let left_seed = upload(
         &device,
         "left responses",
         &jobs.iter().map(|j| j.left).collect::<Vec<_>>(),
     );
+    let left_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("left response work buffer"),
+        size: left_seed.size(),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let right_buffer = upload(
         &device,
         "right responses",
@@ -263,7 +275,7 @@ fn production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary() {
         "water coverage",
         &vec![GpuWaterCoverage(1); jobs.len()],
     );
-    let auxiliary = upload(
+    let auxiliary_seed = upload(
         &device,
         "typed auxiliary",
         &jobs
@@ -271,6 +283,14 @@ fn production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary() {
             .flat_map(|j| j.auxiliary.iter().copied())
             .collect::<Vec<_>>(),
     );
+    let auxiliary_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("typed auxiliary work buffer"),
+        size: auxiliary_seed.size(),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("production radiance bindings"),
         layout: &pipelines.radiance.get_bind_group_layout(0),
@@ -298,7 +318,7 @@ fn production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary() {
         layout: &pipelines.auxiliary.get_bind_group_layout(0),
         entries: &[wgpu::BindGroupEntry {
             binding: 4,
-            resource: auxiliary.as_entire_binding(),
+            resource: auxiliary_buffer.as_entire_binding(),
         }],
     });
     let staging = |size| {
@@ -310,74 +330,132 @@ fn production_composition_gpu_matches_cpu_all_domains_alpha_and_auxiliary() {
         })
     };
     let radiance_stage = staging(left_buffer.size());
-    let auxiliary_stage = staging(auxiliary.size());
-    let start = std::time::Instant::now();
-    let mut encoder = device.create_command_encoder(&Default::default());
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("response composition parity"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&pipelines.radiance);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups((jobs.len() as u32).div_ceil(64), 1, 1);
-        pass.set_pipeline(&pipelines.auxiliary);
-        pass.set_bind_group(0, &aux_bind, &[]);
-        pass.dispatch_workgroups((auxiliary.size() / 64).div_ceil(64) as u32, 1, 1);
+    let auxiliary_stage = staging(auxiliary_buffer.size());
+    let dispatch = || {
+        let start = std::time::Instant::now();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&left_seed, 0, &left_buffer, 0, left_seed.size());
+        encoder.copy_buffer_to_buffer(
+            &auxiliary_seed,
+            0,
+            &auxiliary_buffer,
+            0,
+            auxiliary_seed.size(),
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("response composition parity"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipelines.radiance);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups((jobs.len() as u32).div_ceil(64), 1, 1);
+            pass.set_pipeline(&pipelines.auxiliary);
+            pass.set_bind_group(0, &aux_bind, &[]);
+            pass.dispatch_workgroups((auxiliary_buffer.size() / 64).div_ceil(64) as u32, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&left_buffer, 0, &radiance_stage, 0, left_buffer.size());
+        encoder.copy_buffer_to_buffer(
+            &auxiliary_buffer,
+            0,
+            &auxiliary_stage,
+            0,
+            auxiliary_buffer.size(),
+        );
+        queue.submit([encoder.finish()]);
+        (
+            start.elapsed().as_nanos(),
+            read::<GpuResponseOutput>(&device, &radiance_stage),
+            read::<GpuAuxiliaryMerge>(&device, &auxiliary_stage),
+        )
+    };
+
+    // Warm the pipelines and allocator before collecting the fixed workload.
+    let _ = dispatch();
+    let mut samples = Vec::with_capacity(PERF_SAMPLES);
+    let mut radiance = Vec::new();
+    let mut auxiliary = Vec::new();
+    for _ in 0..PERF_SAMPLES {
+        let (elapsed, next_radiance, next_auxiliary) = dispatch();
+        samples.push(elapsed);
+        radiance = next_radiance;
+        auxiliary = next_auxiliary;
     }
-    encoder.copy_buffer_to_buffer(&left_buffer, 0, &radiance_stage, 0, left_buffer.size());
-    encoder.copy_buffer_to_buffer(&auxiliary, 0, &auxiliary_stage, 0, auxiliary.size());
-    queue.submit([encoder.finish()]);
-    let radiance = read::<GpuResponseOutput>(&device, &radiance_stage);
-    let auxiliary = read::<GpuAuxiliaryMerge>(&device, &auxiliary_stage);
+    let p50 = percentile(&samples, 0.50);
+    let p95 = percentile(&samples, 0.95);
+    let p99 = percentile(&samples, 0.99);
+    assert!(samples.iter().all(|sample| *sample > 0));
     eprintln!(
-        "{} cases, {} auxiliary jobs, host submit+readback {:?}, radiance {} bytes",
+        "{} cases, {} auxiliary jobs, host submit+readback P50={:.3}ms P95={:.3}ms P99={:.3}ms, radiance {} bytes",
         jobs.len(),
         auxiliary.len(),
-        start.elapsed(),
+        p50 as f64 / 1_000_000.0,
+        p95 as f64 / 1_000_000.0,
+        p99 as f64 / 1_000_000.0,
         left_buffer.size() + right_buffer.size()
     );
     let mut offset = 0;
+    let mut case_index = 0;
     for ((job, actual), expected) in jobs.iter().zip(radiance).zip(expected) {
         let aux = job
             .decode_auxiliary(&auxiliary[offset..offset + job.auxiliary.len()])
             .unwrap();
         offset += job.auxiliary.len();
         let actual = actual.unpack(aux);
-        for (a, b) in [
+        let channels = [
             actual.direct,
             actual.indirect_diffuse,
             actual.reflection,
             actual.transmission,
             actual.emission,
         ]
-        .into_iter()
-        .flatten()
-        .zip(
-            [
-                expected.direct,
-                expected.indirect_diffuse,
-                expected.reflection,
-                expected.transmission,
-                expected.emission,
-            ]
-            .into_iter()
-            .flatten(),
-        ) {
-            near(a, b);
+        .into_iter();
+        let expected_channels = [
+            expected.direct,
+            expected.indirect_diffuse,
+            expected.reflection,
+            expected.transmission,
+            expected.emission,
+        ]
+        .into_iter();
+        for (channel_index, (actual_channel, expected_channel)) in
+            channels.zip(expected_channels).enumerate()
+        {
+            for (component_index, (a, b)) in
+                actual_channel.into_iter().zip(expected_channel).enumerate()
+            {
+                assert!(
+                    (a - b).abs() <= 2e-6 * b.abs().max(1.0),
+                    "GPU response mismatch: case={case_index} channel={channel_index} component={component_index} control={:?} GPU={a} CPU={b}",
+                    job.control
+                );
+            }
         }
-        assert_eq!(actual.alpha, expected.alpha);
+        assert_eq!(
+            actual.alpha, expected.alpha,
+            "GPU alpha mismatch: case={case_index} control={:?} GPU={} CPU={}",
+            job.control, actual.alpha, expected.alpha
+        );
         for (name, value) in &actual.auxiliary.fields {
             match (value, &expected.auxiliary.fields[name]) {
-                (AuxiliaryValue::Scalar(a), AuxiliaryValue::Scalar(b)) => near(*a, *b),
+                (AuxiliaryValue::Scalar(a), AuxiliaryValue::Scalar(b)) => assert!(
+                    (*a - *b).abs() <= 2e-6 * b.abs().max(1.0),
+                    "GPU auxiliary mismatch: case={case_index} field={name} control={:?} GPU={a} CPU={b}",
+                    job.control
+                ),
                 (AuxiliaryValue::Vector3(a), AuxiliaryValue::Vector3(b)) => {
-                    for (a, b) in a.iter().zip(b) {
-                        near(*a, *b);
+                    for (component_index, (a, b)) in a.iter().zip(b).enumerate() {
+                        assert!(
+                            (*a - *b).abs() <= 2e-6 * b.abs().max(1.0),
+                            "GPU auxiliary mismatch: case={case_index} field={name} component={component_index} control={:?} GPU={a} CPU={b}",
+                            job.control
+                        );
                     }
                 }
                 (a, b) => assert_eq!(a, b),
             }
         }
+        case_index += 1;
     }
 }
 

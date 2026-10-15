@@ -96,7 +96,7 @@ impl CompiledEntry {
         let fail = |message: String| CompiledEntryError::ResponseSource(message);
         if bodies.is_empty()
             || bodies.len() > MAX_RESPONSE_VARIANTS
-            || bodies.len() != manifest.permutation_count as usize
+            || bodies.len() as u64 != manifest.permutation_count()
         {
             return Err(fail(
                 "finite variant count must match the manifest (1..=256)".into(),
@@ -159,7 +159,9 @@ mod tests {
     use super::*;
     use prism_render_architecture::{
         abi::{AbiHash, AbiVersion},
-        shader_package::ShaderPackageId,
+        shader_package::{
+            ArtifactDigest, PermutationSpace, ShaderPackageId, ShaderPackageVariantManifest,
+        },
     };
     pub fn manifest(count: u32) -> ShaderPackageManifest {
         ShaderPackageManifest {
@@ -168,7 +170,11 @@ mod tests {
             entry_point: "main".into(),
             abi_version: AbiVersion::from_parts(1, 0),
             abi_hash: AbiHash::from_bytes(RESPONSE_FUNCTION_ABI.as_bytes()),
-            permutation_count: count,
+            variants: ShaderPackageVariantManifest::from_digests(
+                &PermutationSpace::new([count]),
+                (0..count).map(|index| ArtifactDigest([index as u8 + 1; 32])),
+            )
+            .unwrap(),
         }
     }
     #[test]

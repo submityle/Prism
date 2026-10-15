@@ -23,9 +23,10 @@ use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent as WinitWindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window as WinitWindow, WindowId as WinitWindowId};
 
+use prism_platform::suspend::SuspendEvent;
 use prism_window::envelope::{
     EventSource, MonotonicTimestamp, PlatformEventSequence, PlatformEventStamp, WindowEventEnvelope,
 };
@@ -251,6 +252,16 @@ pub trait WinitApp {
     /// window(s)) with its own flag.
     fn resumed(&mut self, backend: &mut WinitBackend);
 
+    /// Receive the timestamped host lifecycle edge. The default preserves the
+    /// original split callbacks, while platform-aware hosts can consume the
+    /// same event for deterministic suspend-clock rebasing.
+    fn lifecycle(&mut self, event: SuspendEvent, backend: &mut WinitBackend) {
+        match event.kind() {
+            prism_platform::suspend::SuspendEventKind::Resumed => self.resumed(backend),
+            prism_platform::suspend::SuspendEventKind::Suspended => self.suspended(backend),
+        }
+    }
+
     /// Called when the platform is about to suspend the process (for example
     /// when a mobile app is backgrounded). The host should pause simulation and
     /// release transient resources; a later [`resumed`](Self::resumed) rebuilds
@@ -267,6 +278,13 @@ pub trait WinitApp {
     /// desired window state, and may request or destroy windows. Returning
     /// [`FrameOutcome::Exit`] tears the loop down.
     fn frame(&mut self, backend: &mut WinitBackend) -> FrameOutcome;
+
+    /// Optional deadline for the next host frame. The runner uses a native
+    /// event-loop timer instead of a thread sleep or polling loop; returning
+    /// `None` means wait for an OS/backend event.
+    fn next_wakeup(&self, _backend: &WinitBackend) -> Option<Instant> {
+        None
+    }
 }
 
 /// Binds a [`WinitApp`] host to winit's [`ApplicationHandler`] and owns the
@@ -304,14 +322,20 @@ impl<A: WinitApp> WinitRunner<A> {
     /// out of the winit callback so the forwarding logic is testable without a
     /// live event loop.
     fn handle_resumed(&mut self) {
-        self.app.resumed(&mut self.backend);
+        self.app.lifecycle(
+            SuspendEvent::resumed(prism_platform::now()),
+            &mut self.backend,
+        );
     }
 
     /// Notify the host that the platform is suspending the process. Factored
     /// out of the winit callback so the forwarding logic is testable without a
     /// live event loop.
     fn handle_suspended(&mut self) {
-        self.app.suspended(&mut self.backend);
+        self.app.lifecycle(
+            SuspendEvent::suspended(prism_platform::now()),
+            &mut self.backend,
+        );
     }
 
     /// Notify the host of OS memory pressure. Factored out of the winit
@@ -401,6 +425,10 @@ impl<A: WinitApp> ApplicationHandler for WinitRunner<A> {
 
         if matches!(outcome, FrameOutcome::Exit) {
             event_loop.exit();
+        } else if let Some(deadline) = self.app.next_wakeup(&self.backend) {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 }

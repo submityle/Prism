@@ -152,6 +152,7 @@ pub(crate) fn dispatch_hzb_late_compact(
     enabled: Res<super::runtime::UnifiedVisibilityEnabled>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
     state: Res<super::runtime::UnifiedVisibilityState>,
+    frame_graph: Res<super::runtime::VisibilityFrameGraph>,
     hzb: Res<super::hzb_gpu::HzbVisibilityBuffers>,
     pipeline: Res<HzbLateCompactPipeline>,
     cache: Res<bevy_render::render_resource::PipelineCache>,
@@ -160,7 +161,9 @@ pub(crate) fn dispatch_hzb_late_compact(
     mut ctx: RenderContext,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
-    if !super::runtime::hzb_runtime_gate(*enabled, &settings) {
+    if !frame_graph.permits(super::runtime::VisibilityPass::LateCompact)
+        || !super::runtime::hzb_runtime_gate(*enabled, &settings)
+    {
         return;
     }
     let retained = view.into_inner().retained_view_entity;

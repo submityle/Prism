@@ -25,9 +25,10 @@
 //! Observers and component hooks (design §12, [`crate::observer`]) are the
 //! *imperative* reactive bus — they fire callbacks at structural-change sites.
 //! The reaction graph is the *declarative* dataflow layer that sits beside
-//! them: a system (or an observer) marks source nodes dirty as components are
-//! written, then flushes the graph once per stage to settle all derived values
-//! with no redundant work. The graph is deliberately `World`-independent so it
+//! them. [`World::reaction_source`](crate::world::World::reaction_source) binds
+//! component observations to sources, and the schedule settles their effects
+//! after collecting all source batches. Explicit graph users can also mark
+//! sources and flush with their own context. The graph is `World`-independent so it
 //! can be unit-tested in isolation and reused for UI signals
 //! (`prism_ui_reactive`), spatial-index invalidation, and GPU dirty tracking.
 //!
@@ -38,6 +39,10 @@
 //! façade over the `World` (or a scratch cache); in tests it is a plain struct.
 //! The graph never inspects `C`; it only guarantees *when* and *how often* each
 //! callback runs.
+//!
+//! After a topology rebuild, a flush sorts and visits only dirty nodes:
+//! `O(d log d)` work for `d` affected nodes, and `O(1)` on a clean frame.
+//! Callbacks are `Send + Sync`, allowing an owning World to cross task lanes.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -62,7 +67,7 @@ impl NodeId {
 
 /// A derived node's recompute callback: an effectful closure over the
 /// caller-chosen context `C`.
-type Recompute<C> = Box<dyn FnMut(&mut C)>;
+type Recompute<C> = Box<dyn FnMut(&mut C) + Send + Sync>;
 
 /// One graph node. Private: constructed only through the graph's builder API.
 struct Node<C> {
@@ -97,6 +102,10 @@ pub struct ReactionGraph<C> {
     topo: Vec<usize>,
     /// Whether [`topo`](Self::topo) is up to date with the current edge set.
     topo_valid: bool,
+    /// Cached node-to-topological-position mapping.
+    rank: Vec<usize>,
+    /// Only dirty nodes; clean frames never scan the node array.
+    pending: Vec<usize>,
 }
 
 impl<C> Default for ReactionGraph<C> {
@@ -106,6 +115,8 @@ impl<C> Default for ReactionGraph<C> {
             nodes: Vec::new(),
             topo: Vec::new(),
             topo_valid: true,
+            rank: Vec::new(),
+            pending: Vec::new(),
         }
     }
 }
@@ -130,6 +141,13 @@ impl<C> ReactionGraph<C> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Number of dirty source and derived nodes awaiting the next flush.
+    #[inline]
+    #[must_use]
+    pub fn dirty_count(&self) -> usize {
+        self.pending.len()
     }
 
     /// Add a **source** node: a raw change signal with no recompute logic.
@@ -158,8 +176,12 @@ impl<C> ReactionGraph<C> {
     /// on it (or on any upstream dependency) to schedule its first recompute.
     pub fn add_derived<F>(&mut self, deps: &[NodeId], recompute: F) -> NodeId
     where
-        F: FnMut(&mut C) + 'static,
+        F: FnMut(&mut C) + Send + Sync + 'static,
     {
+        assert!(
+            deps.iter().all(|dep| dep.0 < self.nodes.len()),
+            "unknown reaction dependency"
+        );
         let id = self.nodes.len();
         self.nodes.push(Node {
             deps: Vec::new(),
@@ -184,12 +206,21 @@ impl<C> ReactionGraph<C> {
     /// Insert the directed edge `dep → node` (dep is recomputed before node),
     /// deduplicating so in-degree accounting stays correct.
     fn add_edge(&mut self, dep: usize, node: usize) {
+        assert!(
+            dep < self.nodes.len() && node < self.nodes.len(),
+            "unknown reaction node"
+        );
         if self.nodes[node].deps.contains(&dep) {
             return;
         }
         self.nodes[node].deps.push(dep);
         self.nodes[dep].dependents.push(node);
         self.topo_valid = false;
+        // Adding an edge after a source was dirtied must not lose the new
+        // dependent merely because the source is already in the pending set.
+        if self.nodes[dep].dirty {
+            self.mark_dirty(NodeId(node));
+        }
     }
 
     /// Whether `node` is currently scheduled to recompute on the next flush.
@@ -213,6 +244,7 @@ impl<C> ReactionGraph<C> {
                 continue;
             }
             self.nodes[i].dirty = true;
+            self.pending.push(i);
             for k in 0..self.nodes[i].dependents.len() {
                 let d = self.nodes[i].dependents[k];
                 if !self.nodes[d].dirty {
@@ -231,22 +263,39 @@ impl<C> ReactionGraph<C> {
     /// node's dependencies are settled before it runs (glitch-free) and no node
     /// runs more than once (dedup).
     pub fn flush(&mut self, ctx: &mut C) -> usize {
+        self.flush_while(ctx, |_| true)
+    }
+
+    /// Stop before the next node if the context no longer belongs to this graph.
+    /// Completed nodes stay clean; unvisited nodes remain available for retry.
+    /// The World bridge uses this to stop after a callback replaces its World.
+    pub(crate) fn flush_while(
+        &mut self,
+        ctx: &mut C,
+        mut keep_running: impl FnMut(&C) -> bool,
+    ) -> usize {
+        if self.pending.is_empty() {
+            return 0;
+        }
         self.ensure_topo();
+        // Reverse rank so the next dependency is at the end. This sorts only
+        // the affected subgraph, rather than scanning every clean node.
+        self.pending
+            .sort_unstable_by_key(|&i| core::cmp::Reverse(self.rank[i]));
         let mut recomputed = 0;
-        for idx in 0..self.topo.len() {
-            let i = self.topo[idx];
-            if !self.nodes[i].dirty {
-                continue;
+        while let Some(&i) = self.pending.last() {
+            if !keep_running(ctx) {
+                break;
             }
-            self.nodes[i].dirty = false;
-            // Take the callback out so the call cannot alias the node slot; a
-            // recompute only touches `ctx`, never the graph, but this keeps the
-            // borrow trivially sound and re-entrancy-safe.
-            if let Some(mut cb) = self.nodes[i].recompute.take() {
+            // Keep both the callback and its dirty entry until it succeeds.
+            // An unwind therefore leaves this node and its downstream work
+            // retryable instead of silently discarding the callback.
+            if let Some(cb) = self.nodes[i].recompute.as_mut() {
                 cb(ctx);
-                self.nodes[i].recompute = Some(cb);
                 recomputed += 1;
             }
+            self.nodes[i].dirty = false;
+            self.pending.pop();
         }
         recomputed
     }
@@ -298,6 +347,10 @@ impl<C> ReactionGraph<C> {
             }
         }
         self.topo = topo;
+        self.rank.resize(n, 0);
+        for (rank, &node) in self.topo.iter().enumerate() {
+            self.rank[node] = rank;
+        }
         self.topo_valid = true;
     }
 }
@@ -448,6 +501,27 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_flush_counts_completed_effects_and_retains_unvisited_work() {
+        let mut graph = ReactionGraph::<Recorder>::new();
+        let source = graph.add_source();
+        let first = graph.add_derived(&[source], |ctx| ctx.order.push(1));
+        let second = graph.add_derived(&[first], |ctx| ctx.order.push(2));
+        graph.mark_dirty(source);
+        let mut ctx = Recorder::default();
+        assert_eq!(graph.flush_while(&mut ctx, |_| false), 0);
+        assert_eq!(graph.dirty_count(), 3);
+        assert_eq!(graph.flush_while(&mut ctx, |ctx| ctx.order.is_empty()), 1);
+        assert_eq!(ctx.order, alloc::vec![1]);
+        assert!(!graph.is_dirty(source));
+        assert!(!graph.is_dirty(first));
+        assert!(graph.is_dirty(second));
+        assert_eq!(graph.dirty_count(), 1);
+        assert_eq!(graph.flush(&mut ctx), 1);
+        assert_eq!(ctx.order, alloc::vec![1, 2]);
+        assert_eq!(graph.flush(&mut ctx), 0);
+    }
+
+    #[test]
     fn edges_are_deduplicated() {
         let mut g = ReactionGraph::<Recorder>::new();
         let a = g.add_source();
@@ -458,5 +532,64 @@ mod tests {
         let mut ctx = Recorder::default();
         assert_eq!(g.flush(&mut ctx), 1);
         assert_eq!(ctx.order, alloc::vec![1]);
+    }
+
+    #[test]
+    fn a_dependency_added_after_marking_includes_its_new_dependent() {
+        let mut graph = ReactionGraph::<Recorder>::new();
+        let source = graph.add_source();
+        let derived = graph.add_derived(&[], |ctx| ctx.order.push(1));
+        graph.mark_dirty(source);
+        graph.add_dependency(derived, source);
+        assert_eq!(graph.dirty_count(), 2);
+        let mut ctx = Recorder::default();
+        assert_eq!(graph.flush(&mut ctx), 1);
+        assert_eq!(ctx.order, alloc::vec![1]);
+        assert_eq!(graph.dirty_count(), 0);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn invalid_dependencies_leave_the_existing_graph_unchanged() {
+        let mut graph = ReactionGraph::<Recorder>::new();
+        let source = graph.add_source();
+        let invalid = NodeId(20);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            graph.add_derived(&[source, invalid], |_| {});
+        }))
+        .is_err());
+        assert_eq!(graph.len(), 1);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            graph.add_dependency(source, invalid);
+        }))
+        .is_err());
+        graph.mark_dirty(source);
+        assert_eq!(graph.flush(&mut Recorder::default()), 0);
+        assert_eq!(graph.dirty_count(), 0);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn panic_preserves_the_callback_without_replaying_completed_nodes() {
+        let mut graph = ReactionGraph::<Recorder>::new();
+        let source = graph.add_source();
+        let before = graph.add_derived(&[source], |ctx| ctx.order.push(1));
+        let mut fail_once = true;
+        let failed = graph.add_derived(&[before], move |ctx| {
+            assert!(!core::mem::take(&mut fail_once), "effect failed");
+            ctx.order.push(2);
+        });
+        graph.add_derived(&[failed], |ctx| ctx.order.push(3));
+        let mut ctx = Recorder::default();
+        graph.mark_dirty(source);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            graph.flush(&mut ctx);
+        }))
+        .is_err());
+        assert_eq!(ctx.order, alloc::vec![1]);
+        assert_eq!(graph.dirty_count(), 2);
+        assert_eq!(graph.flush(&mut ctx), 2);
+        assert_eq!(ctx.order, alloc::vec![1, 2, 3]);
+        assert_eq!(graph.flush(&mut ctx), 0);
     }
 }

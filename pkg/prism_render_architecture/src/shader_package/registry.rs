@@ -173,6 +173,7 @@ impl ShaderPackageRegistry {
 mod tests {
     use super::*;
     use crate::abi::{AbiHash, AbiVersion};
+    use crate::shader_package::{ArtifactDigest, PermutationSpace, ShaderPackageVariantManifest};
     use alloc::string::ToString;
     use alloc::vec::Vec;
 
@@ -183,7 +184,11 @@ mod tests {
             entry_point: "main".to_string(),
             abi_version: AbiVersion::from_parts(2, 4),
             abi_hash: hash,
-            permutation_count: 2,
+            variants: ShaderPackageVariantManifest::from_digests(
+                &PermutationSpace::new([2]),
+                [ArtifactDigest([1; 32]), ArtifactDigest([2; 32])],
+            )
+            .unwrap(),
         }
     }
 

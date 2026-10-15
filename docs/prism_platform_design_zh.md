@@ -73,7 +73,7 @@
 | Breakpad/Crashpad | minidump 捕获与越进程转储 | 借形态做 `platform::crash`，为 `prism_diagnostic` §12 供料 |
 | hwloc | CPU 拓扑 / NUMA / 核心亲和性 | 借拓扑模型供 `prism_tasks` 线程池绑核 |
 
-**不做**：不做窗口/输入（归 `prism_window`/`prism_input`）；不做图形 API（归 `prism_render_driver`）；不做网络协议栈（仅暴露 socket 原语给上层网络 crate）。
+**不做**：不做窗口/输入（归 `prism_window`/`prism_input`）；不做图形 API（归 `prism_render_driver`）；不做网络协议栈（仅暴露 socket 原语给上层网络 crate）。生命周期事件只提供跨层值契约与能力声明，真实回调仍由窗口/宿主 backend 产生。
 
 ---
 
@@ -211,6 +211,7 @@
 | 动态库 | ✅ | 🟡(iOS 禁) | ✅ | 🟡 | ❌ |
 | 子进程 | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | minidump | ✅ | ✅(mach) | ✅ | 定制 | ❌ |
+| 进程挂起/恢复事件 | 🟡 宿主 callback 注入 | ✅ winit lifecycle | ✅ winit lifecycle | SDK callback | ❌ |
 
 - **原则**：能力缺失处由 `PlatformCaps` 运行时标注 + 上层优雅降级；Web/主机后端为可插拔抽象，细节随 SDK（本文不含任何受限 SDK 代码）。
 
@@ -219,7 +220,7 @@
 ## 15. 与 app / window / tasks / asset 集成
 
 - **`prism_app`**：启动即建 `Platform`；命令行/环境变量/退出钩子/主循环节流（高精度 sleep）全走本 crate。
-- **`prism_window` / `prism_input`**：窗口系统需要的进程/线程/时间原语由本 crate 供给（窗口与输入设备本身不在此）。
+- **`prism_window` / `prism_input`**：窗口系统需要的进程/线程/时间原语由本 crate 供给（窗口与输入设备本身不在此）。`prism_window_winit` 在真实 winit `resumed/suspended` 回调处生成 `SuspendEvent`；`prism_platform` 只定义值、单调时间戳和 `PlatformSuspendCapability`，不把轮询或手动 CPU 调用冒充 OS 事件源。
 - **`prism_tasks`**：线程创建/绑核/futex/TLS/CPU 拓扑是其调度器全部底座。
 - **`prism_asset`**：文件/mmap/watch 是其 VFS 与热重载底座。
 - **`prism_time`**：单调时钟是其定点步长底座。
@@ -307,7 +308,7 @@ pkg/prism_platform/
 
 - **单一入口不变量**：全引擎只有一个 `Platform` 实例；上层 crate 禁止直接 `std::fs`/`libc` 调用（评审 + 可选 lint 约束）。
 - **单调时钟不回退**：`Instant` 保证单调不减，否则 time/剖析逻辑错乱；TSC 失配必回退 OS 时钟。
-- **能力探测只读稳定**：`PlatformCaps`/CPU 探测启动后不变，上层可缓存分支判断。
+- **能力探测只读稳定**：`PlatformCaps`/CPU 探测启动后不变，上层可缓存分支判断；`suspend_resume` 必须明确区分 `ProcessLifecycle`、`HostCallbackOnly` 与 `Unsupported`。
 - **页级原语配对**：reserve/commit/decommit/release 的生命周期配对不变量；错配即 UB，由门面 + 文档约束。
 - **动态库卸载安全**：卸载前上层必须保证无悬垂函数指针/静态引用（契约在 `prism_script` 侧落实）。
 - **版本化**：路径规范化规则、minidump 格式、能力位布局、后端 ABI 均为版本化契约；跨版本需迁移说明。
@@ -322,7 +323,7 @@ pkg/prism_platform/
 - **M3 虚拟内存**：reserve/commit/大页/对齐/保护页/内存信息 → 基准（页管理 vs malloc、大页 TLB 收益）。**是 utils 分配器前置**。
 - **M4 mmap + watch + 动态库**：零拷贝映射、文件监视、热重载 → 热重载闭环（接 asset/script）。
 - **M5 进程/环境/标准流 + 墙钟**：argv/env/子进程/stdout → 接 app CLI 与 diagnostic 日志。
-- **M6 崩溃捕获 + Web/移动后端 + mock**：minidump（三桌面）+ 移动/Web 后端 + mock 后端 → 崩溃闭环（接 diagnostic）+ 跨平台 CI。
+- **M6 崩溃捕获 + Web/移动后端 + mock**：minidump（三桌面）+ 移动/Web 后端 + mock 后端 → 崩溃闭环（接 diagnostic）+ 跨平台 CI；挂起/恢复值契约与 capability 已落地，native desktop sleep/power watcher 仍由宿主补齐。
 
 **基准即规格**：高精度时钟取时成本（ns）、单调性验证、锁争用吞吐、绑核缓存命中改善、页/大页分配 vs malloc、mmap 零拷贝加速、CPU 探测正确性、minidump 可符号化。核心价值在 **M0（math/tasks 探测前置）+ M1/M2/M3（asset/tasks/utils 三大地基前置）**。
 
@@ -337,7 +338,7 @@ pkg/prism_platform/
   3. **TSC 可靠性（M0）**：TSC 频率随平台/节能/多核不一定稳定（非不变 TSC、核间漂移），误用即计时错乱；必须频率标定 + 失配检测 + 回退 OS 单调时钟。
   4. **动态库卸载悬垂（M4）**：热重载卸载旧库时若仍有函数指针/静态在用即崩溃；卸载安全契约复杂，发行版应可编译期关闭。
   5. **虚拟内存生命周期（M3）**：reserve/commit/release 错配、提前 release 正在用的区段即 UB；门面需强约束 + debug 保护页兜底。
-  6. **Web/主机能力缺口（M6）**：wasm 无 mmap/绑核/动态库/子进程，主机受 SDK 限制；大量能力需优雅降级，上层若未按 `PlatformCaps` 分支则在这些平台崩溃。
+  6. **Web/主机能力缺口（M6）**：wasm 无 mmap/绑核/动态库/子进程/挂起事件，主机受 SDK 限制；大量能力需优雅降级，上层若未按 `PlatformCaps` 分支则在这些平台崩溃。
 - **与既有文档关系**：本 crate 与 `prism_math_design_zh.md` / `prism_utils_design_zh.md` 并列为依赖图根；高精度时钟是 `prism_time_design_zh.md` 定点步长底座；线程/绑核/futex/拓扑是 `prism_tasks_design_zh.md` 调度器底座；文件/mmap/watch 是 `prism_asset` VFS 底座；CPU 指令集探测驱动 `prism_math_design_zh.md` 的 SIMD dispatch；minidump 供 `prism_diagnostic_design_zh.md` §12 崩溃转储；命令行/环境/退出钩子/主循环节流接 `prism_app_design_zh.md`；页级原语供 `prism_utils_design_zh.md` 分配器。四方确定性中的 time 一维（单调时钟）由本 crate 托底。整体组件缺口见 `prism_engine_component_gap_zh.md`。
 - 所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
 
@@ -345,7 +346,7 @@ pkg/prism_platform/
 
 本章补齐顶级平台抽象层在真实 AAA 项目里缺一不可的能力。均 feature/能力位门控，默认不付成本；与前文的文件/时钟/线程/虚存/动态库内核互补。
 
-### 24.1 高级异步 I/O（io_uring / IOCP / 批量提交）—— 🟡 批量提交/完成队列门面已交付并真机验证（macOS POSIX AIO `lio_listio`）
+### 24.1 高级异步 I/O（io_uring / IOCP / 批量提交）—— 🟡 三桌面真实后端已落地，macOS/Linux 已验证，Windows 待实机
 
 AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 
@@ -354,9 +355,13 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 - **优先级 I/O**：关键流送（镜头前方区块）高优先，预取低优先，接 `prism_tasks` §24.5 异步 I/O 桥。
 - **I/O 带宽预算**：限速 + 背压，防流送挤垮磁盘/网络，供 `prism_asset` 流送调度。
 
-**交付状态（已落地提交/完成队列门面 + macOS 真实后端，真机验证）**：`pkg/prism_platform/src/aio/`（`mod` 门面 + `posix` 后端两个独立模块，`#[cfg(feature="std")]` 门控）落地了 §24.1 的核心形态——「一次调用批量提交 N 个读、乱序 reap 完成」的提交/完成队列。公共门面 `AioQueue`：`new()`（无真实后端处诚实返回 `AioError::Unsupported`）、`unsafe submit(&[ReadOp]) -> SubmitOutcome`（`SubmitOutcome{accepted,rejected:Vec<u64>}`：`accepted` 为内核实际纳入在飞集合的请求数、`rejected` 以提交序列出未被接受 op 的 `user_data`——含部分 `lio_listio` 拒收者与背压未尝试尾部，空集即全收；因 macOS 接受集是任意子集而非前缀，显式拒收集让调用方精确重投被拒 op 而不扰动已在飞者）、同形 `unsafe submit_write(&[WriteOp]) -> SubmitOutcome`、`wait(max, timeout) -> Vec<Completion>`（阻塞到 ≥1 完成，乱序经 `Completion::user_data` 关联）、`pending()`、`supported()`。`ReadOp{fd,offset,buf,len,user_data,priority}` + `IoPriority{High,Normal,Low}`（映射 POSIX `aio_reqprio` 增量，best-effort，macOS 多半忽略，已诚实注明；排序正确性不依赖它）。`submit` 标 `unsafe`——调用方须保证 `fd` 与 `buf/len` 活到对应 `Completion` 被 reap（或队列被 Drop）；`AioQueue` Drop 时对每个在飞请求 `aio_cancel` + 阻塞排空 + `aio_return` 收尾，保证内核停止写入已释放缓冲。**macOS/BSD 真实后端用 POSIX AIO**：`lio_listio(LIO_NOWAIT)` 一次 syscall 批量提交（>内核 `AIO_LISTIO_MAX` 自动分块、尊重 `AIO_MAX` 背压上限），`aio_suspend` 阻塞到完成，`aio_error`/`aio_return` 逐个 reap（每个完成的控制块恰好 `aio_return` 一次以释放内核资源），控制块以 `Box<Aiocb>` 保地址稳定；全部为无依赖 `extern "C"` FFI（无 `libc` crate），每处 `unsafe` 带 `#[expect]`+`// SAFETY:`。覆盖 `src/aio/tests.rs` 10 项真机测试（批量乱序读回逐字节校验并断言 `SubmitOutcome.all_accepted()`、超 `AIO_LISTIO_MAX` 的分块+背压重投全读回、空读/写提交 no-op（`accepted==0`、`rejected` 空）、负 fd 读/写校验、空在飞 wait 超时、能力诚实、批量写乱序回放逐字节校验、经桥写后读回），`cargo test -p prism_platform aio::` 真机 10/10 全绿、`cargo clippy -p prism_platform --all-targets` 零告警、无桩。
+**交付状态（提交/完成队列门面 + Apple POSIX AIO、Linux io_uring、Windows IOCP）**：`pkg/prism_platform/src/aio/`（`mod` 门面 + 平台独立 backend，统一 `#[cfg(feature="std")]` 门控）落地了 §24.1 的核心形态——「一次调用批量提交 N 个读/写、乱序 reap 完成」的提交/完成队列。公共门面 `AioQueue`：`new()`（无真实后端处诚实返回 `AioError::Unsupported`）、`unsafe submit(&[ReadOp]) -> SubmitOutcome`（`SubmitOutcome{accepted,rejected:Vec<u64>}`：`accepted` 为内核实际纳入在飞集合的请求数、`rejected` 以提交序列出未被接受 op 的 `user_data`，用于精确重投）、同形 `unsafe submit_write(&[WriteOp]) -> SubmitOutcome`、`wait(max, timeout) -> Vec<Completion>`（阻塞到完成或超时，乱序经 `Completion::user_data` 关联）、`pending()`、`supported()`。`ReadOp{fd,offset,buf,len,user_data,priority}` + `IoPriority{High,Normal,Low}` 保持不变；`AioError::Io(code)` 携带原生 `errno`/Win32 `GetLastError` 代码。`submit` 标 `unsafe`——调用方须保证 `fd` 与 `buf/len` 活到对应 `Completion` 被 reap（或队列被 Drop）。
 
-**诚实边界 / 仍属 PLANNED**：真实后端仅在已验证的 Apple（macOS）给出，其余平台 `AioQueue::supported()==false` 且 `AioQueue::new()` 返回 `AioError::Unsupported`（而非返回不读的假缓冲）。**Linux `io_uring`**（`io_uring_setup`+SQ/CQ 环映射+`io_uring_enter`）与 **Windows IOCP**（`CreateIoCompletionPort`+`ReadFile(OVERLAPPED)`+`GetQueuedCompletionStatusEx`）的真实后端为 PLANNED——本机为 macOS 无法真机验证，诚实留空而非下发未验证代码。**零拷贝 / 对齐直读**（Linux `O_DIRECT`、macOS `F_NOCACHE`、Windows `FILE_FLAG_NO_BUFFERING`，接 §9 虚存页对齐缓冲）与 **I/O 带宽预算**（限速+背压的字节/时间片配额）属 PLANNED，待接 `prism_asset` 流送调度；当前仅暴露 best-effort 优先级提示。接 `prism_tasks` §24.5 异步 I/O 桥（把 `Completion` 唤醒接入任务系统）为下一步接线项。
+**平台实现**：Apple 使用 `lio_listio`/`aio_suspend`/`aio_error`/`aio_return`/`aio_cancel`；Linux 使用直接 syscall/mmap 的 SQE/CQE `io_uring`，含有界 SQ 背压与取消 drain；Windows 使用 `CreateIoCompletionPort` 关联 caller-owned 的 `FILE_FLAG_OVERLAPPED` handle，以 `ReadFile`/`WriteFile` 提交、`GetQueuedCompletionStatusEx` 批量等待，并在 drop 中 `CancelIoEx` 后排空 completion port。Windows `RawFd` 经 `_get_osfhandle` 转为 Win32 handle，backend 不接管文件句柄；固定在飞上限为 256，超限通过既有 `SubmitOutcome.rejected` 返回。每个请求的 `OVERLAPPED` 由 backend 稳定持有，避免 completion 尚未取出时控制块悬空。
+
+`src/aio/tests.rs` 新增 Windows-only 的真实 overlapped 文件读/写、IOCP 批量背压重投、invalid fd 和 drop cancel/drain 测试；本机 Apple/Linux 后端测试继续覆盖真实文件 round-trip。已完成 `cargo check --offline -p prism_platform --target x86_64-pc-windows-msvc`，但当前主机无法运行 Windows 测试；Windows `--tests` 编译还受到工作树既有 `vm/tests.rs` 私有函数可见性错误阻断，未将其改动混入本切片。
+
+**诚实边界 / 仍属 PLANNED**：Windows backend 已有真实 Win32 FFI、target 编译和 Windows-only 逻辑测试源码，但 Windows 实机/CI 尚未运行，因此不宣称 Windows runtime 已验证；尤其需要实机确认 CRT fd 到 overlapped handle 的组合、同步完成与取消完成包顺序、短读/短写、共享句柄策略和 drop drain。**零拷贝 / 对齐直读**（Linux `O_DIRECT`、macOS `F_NOCACHE`、Windows `FILE_FLAG_NO_BUFFERING`，接 §9 虚存页对齐缓冲）与 **I/O 带宽预算**（限速+背压的字节/时间片配额）仍属 PLANNED，待接 `prism_asset` 流送调度；当前仅暴露 best-effort 优先级提示。接 `prism_tasks` §24.5 异步 I/O 桥（把 `Completion` 唤醒接入任务系统）为下一步接线项。
 
 ### 24.2 虚拟内存进阶（稀疏堆 / 按需提交 / GPU 共享内存）—— 🟡 环形流送堆（magic ring buffer）已交付并真机验证（macOS Mach VM）
 

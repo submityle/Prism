@@ -178,6 +178,12 @@ impl XpbdSolver {
             // once for whichever solve path executed above.
             sleep_solve::update_after_solve(&mut view, &islands, &active_islands, &sleep_config, h);
         }
+
+        // World-owned soft bodies share the same fixed substep boundary. Their
+        // internal projection runs first, then the opt-in driver gathers rigid
+        // proxies, performs two-way coupling, writes reactions back to rigid
+        // bodies, and finally recovers particle velocities.
+        world.step_soft_bodies_substep(h);
     }
 }
 

@@ -303,13 +303,13 @@ mod tests {
     use super::*;
     use crate::particle::lod::ParticleQuality;
     use crate::particle::shading::{
-        resolve_shading_program, ShadingProgramInput, PARTICLE_LIGHTING_SERVICES,
+        resolve_shading_program, ShadingProgramInput, PARTICLE_LIGHTING_CAPABILITIES,
     };
     use crate::particle::sort_cull::BlendMode;
 
     /// Full lighting capabilities so lit closures subscribe to every service.
     fn all_caps() -> crate::render_fabric::ServiceSet {
-        PARTICLE_LIGHTING_SERVICES
+        PARTICLE_LIGHTING_CAPABILITIES
     }
 
     /// Resolves a program for a model with full caps, non-volumetric, high quality.

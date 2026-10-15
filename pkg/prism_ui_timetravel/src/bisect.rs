@@ -226,6 +226,7 @@ impl Bisection {
 mod tests {
     use super::*;
     use crate::frame::Frame;
+    use alloc::vec::Vec;
     use prism_ui::Element;
 
     struct SplitMix64(u64);

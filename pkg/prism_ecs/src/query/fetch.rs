@@ -90,7 +90,7 @@ pub struct TableFetch<'w> {
     base: *const u8,
     /// The chunk's changed-version cell, for `&mut T` stamping (null for an
     /// empty chunk).
-    chunk_cell: *mut Tick,
+    chunk_cell: *mut crate::storage::ChunkChange,
 }
 
 impl<'w> TableFetch<'w> {
@@ -131,7 +131,7 @@ impl<'w> TableFetch<'w> {
 
     /// The chunk's changed-version cell (for `&mut T`).
     #[inline]
-    fn chunk_changed_ptr(&self) -> *mut Tick {
+    fn chunk_changed_ptr(&self) -> *mut crate::storage::ChunkChange {
         self.chunk_cell
     }
 

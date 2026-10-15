@@ -17,15 +17,11 @@
 //! registered ones round-trip value-for-value.
 //!
 //! # Honesty boundary
-//! A resource value is type-erased behind `Box<dyn Any>` and carries no raw
-//! column bytes and no `PartialEq`, so — unlike components —
-//! [`structurally_eq`](super::WorldSnapshot::structurally_eq) cannot byte-compare
-//! two captured resources. It therefore compares resource *presence* and type
-//! for every registered resource, and additionally compares a deterministic
-//! value hash for resources registered as *hashable*
-//! ([`register_snapshot_resource_hashable`](crate::world::World::register_snapshot_resource_hashable)).
-//! Clone-only resources thus contribute presence/type to equality and the state
-//! hash, but not their value bytes.
+//! Captured resources compare through separately opted-in typed `PartialEq`
+//! callbacks (`World::register_snapshot_resource_equatable`). Hashes still
+//! contribute to state hashing, but matching hashes do not establish equality.
+//! Clone-only resources remain fully capturable/restorable; without comparison
+//! glue their value equality is unknown, rather than silently presence-only.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -34,6 +30,7 @@ use core::any::{Any, TypeId};
 use crate::resource::{ResourceCloneFn, ResourceId};
 use crate::world::World;
 
+use super::hash::{resource_equality, SnapshotEq};
 use super::FnvHasher;
 
 /// One captured resource: its id + dynamic type, an owned clone of its value,
@@ -46,6 +43,7 @@ pub(super) struct SnapshotResource {
     value: Box<dyn Any + Send + Sync>,
     value_hash: Option<u64>,
     clone: ResourceCloneFn,
+    equality: Option<SnapshotEq>,
 }
 
 impl SnapshotResource {
@@ -67,8 +65,23 @@ impl SnapshotResource {
         self.value_hash
     }
 
-    /// Clone this entry into an independent copy (fresh owned value via the
-    /// stored clone glue). Used by [`SnapshotDelta`](super::SnapshotDelta),
+    /// Semantic equality, or `None` when either capture lacks a compatible
+    /// comparison contract. Neither allocation identity nor hash equality is a
+    /// substitute for comparing the captured values.
+    pub(super) fn value_eq(&self, other: &Self) -> Option<bool> {
+        if self.id != other.id || self.type_id != other.type_id {
+            return Some(false);
+        }
+        let (left, right) = (self.equality?, other.equality?);
+        if !left.compatible(&right) {
+            return None;
+        }
+        left.compare_any(&*self.value, &*other.value)
+    }
+
+    /// Clone this entry into a fresh owned value via the stored clone glue
+    /// (with the concrete type's usual Clone semantics, not guaranteed deep
+    /// isolation). Used by [`SnapshotDelta`](super::SnapshotDelta),
     /// whose `apply` must hand back an owned snapshot.
     pub(super) fn clone_entry(&self) -> SnapshotResource {
         SnapshotResource {
@@ -80,11 +93,12 @@ impl SnapshotResource {
             value: (self.clone)(&*self.value),
             value_hash: self.value_hash,
             clone: self.clone,
+            equality: self.equality,
         }
     }
 }
 
-/// Clone a captured resource list element-for-element (deep copy of each value).
+/// Clone a captured resource list element-for-element using each value's Clone.
 pub(super) fn clone_resources(src: &[SnapshotResource]) -> Vec<SnapshotResource> {
     src.iter().map(SnapshotResource::clone_entry).collect()
 }
@@ -121,6 +135,7 @@ pub(super) fn capture_resources(world: &World) -> Vec<SnapshotResource> {
             value,
             value_hash,
             clone,
+            equality: resource_equality(world, id),
         });
     }
     out

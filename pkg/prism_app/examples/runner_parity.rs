@@ -24,6 +24,9 @@ const JITTER_US: [u64; 8] = [0, 10_000, 19_000, 1_000, 33_000, 27_000, 17_000, 4
 struct Report {
     startup: u32,
     shutdown: u32,
+    first: u32,
+    update: u32,
+    last: u32,
     samples: Vec<(u64, u64, u64, u64)>,
 }
 
@@ -33,6 +36,9 @@ struct Content {
     frame: usize,
     steps: u64,
     phase: u8,
+    first_runs: u32,
+    update_runs: u32,
+    last_runs: u32,
     report: Arc<Mutex<Report>>,
 }
 impl Resource for Content {}
@@ -49,11 +55,12 @@ fn first(world: &mut World) {
     let content = world.resource_mut::<Content>();
     assert_eq!(content.phase, 0);
     content.phase = 1;
+    content.first_runs += 1;
 }
 
 fn fixed(world: &mut World) {
     assert_eq!(
-        world.resource::<EngineClocks>().delta(),
+        world.resource::<EngineClocks>().fixed().delta(),
         Duration::from_micros(STEP_US)
     );
     let content = world.resource_mut::<Content>();
@@ -72,6 +79,7 @@ fn update(world: &mut World) {
     let content = world.resource_mut::<Content>();
     assert_eq!(content.phase, 1);
     content.phase = 2;
+    content.update_runs += 1;
 }
 
 fn last(world: &mut World) {
@@ -81,6 +89,7 @@ fn last(world: &mut World) {
     let content = world.resource_mut::<Content>();
     assert_eq!(content.phase, 2);
     content.phase = 0;
+    content.last_runs += 1;
     let mut hash = FrameHash::with_window(1);
     for &value in &content.values {
         hash.write_u64(value);
@@ -103,7 +112,12 @@ fn last(world: &mut World) {
 }
 
 fn shutdown(world: &mut World) {
-    world.resource::<Content>().report.lock().unwrap().shutdown += 1;
+    let content = world.resource::<Content>();
+    let mut report = content.report.lock().unwrap();
+    report.shutdown += 1;
+    report.first = content.first_runs;
+    report.update = content.update_runs;
+    report.last = content.last_runs;
 }
 
 fn app(report: Arc<Mutex<Report>>) -> App {
@@ -118,6 +132,9 @@ fn app(report: Arc<Mutex<Report>>) -> App {
             frame: 0,
             steps: 0,
             phase: 0,
+            first_runs: 0,
+            update_runs: 0,
+            last_runs: 0,
             report,
         })
         .add_systems(Startup, startup)
@@ -131,8 +148,15 @@ fn app(report: Arc<Mutex<Report>>) -> App {
 
 fn validate(report: &Report) {
     assert_eq!(
-        (report.startup, report.shutdown, report.samples.len()),
-        (1, 1, FRAMES)
+        (
+            report.startup,
+            report.shutdown,
+            report.first,
+            report.update,
+            report.last,
+            report.samples.len()
+        ),
+        (1, 1, FRAMES as u32, FRAMES as u32, FRAMES as u32, FRAMES)
     );
     let mut elapsed = 0;
     for (frame, &(_, steps, actual_elapsed, overstep)) in report.samples.iter().enumerate() {
@@ -142,6 +166,17 @@ fn validate(report: &Report) {
             (elapsed / STEP_US, elapsed, elapsed % STEP_US)
         );
     }
+}
+
+fn trace_hash(report: &Report) -> u64 {
+    let mut hash = FrameHash::with_window(1);
+    for &(frame_hash, steps, elapsed, overstep) in &report.samples {
+        hash.write_u64(frame_hash);
+        hash.write_u64(steps);
+        hash.write_u64(elapsed);
+        hash.write_u64(overstep);
+    }
+    hash.current()
 }
 
 fn main() {
@@ -166,10 +201,19 @@ fn main() {
     validate(&reference);
     validate(&actual);
     assert_eq!(*reference, *actual, "runner simulation/lifecycle diverged");
+    let reference_trace = trace_hash(&reference);
+    let actual_trace = trace_hash(&actual);
+    assert_eq!(
+        reference_trace, actual_trace,
+        "runner trace digest diverged"
+    );
     println!(
-        "runner_parity: frames={FRAMES} fixed_steps={} final_hash={:016x} windowed={} parity=true",
+        "runner_parity: frames={FRAMES} fixed_steps={} final_hash={:016x} trace_hash={reference_trace:016x} first={} update={} last={} windowed={} parity=true",
         reference.samples[FRAMES - 1].1,
         reference.samples[FRAMES - 1].0,
+        reference.first,
+        reference.update,
+        reference.last,
         !headless_only
     );
 }

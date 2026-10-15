@@ -72,7 +72,58 @@ pub(crate) struct UnifiedVisibilityState {
 
 #[derive(Resource)]
 pub(crate) struct VisibilityFrameGraph {
-    pub compiled: prism_render_graph::frame_graph::CompiledGpuFrameGraph,
+    pub compiled: prism_render_graph::ExecutionPlan,
+    pass_positions: [Option<usize>; VisibilityPass::COUNT],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VisibilityPass {
+    /// Previous-HZB classification and the main visibility cull dispatch.
+    PreviousHzb,
+    /// Current-HZB retest after the early depth pyramid is rebuilt.
+    CurrentHzb,
+    /// Late command/bin compaction for candidates that survived the retest.
+    LateCompact,
+}
+
+impl VisibilityPass {
+    pub(crate) const COUNT: usize = 3;
+
+    const fn index(self) -> usize {
+        match self {
+            Self::PreviousHzb => 0,
+            Self::CurrentHzb => 1,
+            Self::LateCompact => 2,
+        }
+    }
+}
+
+impl VisibilityFrameGraph {
+    pub(crate) fn new(compiled: prism_render_graph::ExecutionPlan) -> Self {
+        let mut pass_positions = [None; VisibilityPass::COUNT];
+        for (position, pass) in compiled.order.iter().copied().enumerate() {
+            if pass < VisibilityPass::COUNT {
+                pass_positions[pass] = Some(position);
+            }
+        }
+        Self {
+            compiled,
+            pass_positions,
+        }
+    }
+
+    /// Returns whether the compiled plan retained this runtime stage.
+    ///
+    /// The lookup is precomputed once at startup, so per-view dispatch checks
+    /// are constant-time and do not scan the plan on every frame.
+    pub(crate) fn permits(&self, pass: VisibilityPass) -> bool {
+        self.pass_positions[pass.index()].is_some()
+    }
+
+    #[cfg(test)]
+    fn position(&self, pass: VisibilityPass) -> Option<usize> {
+        self.pass_positions[pass.index()]
+    }
 }
 
 impl UnifiedVisibilityState {
@@ -301,5 +352,56 @@ mod diagnostics_tests {
             UnifiedVisibilityEnabled(false),
             &settings
         ));
+    }
+}
+
+#[cfg(test)]
+mod frame_graph_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_dispatch_gate_consumes_compiled_plan_survivors() {
+        let graph = VisibilityFrameGraph::new(prism_render_graph::ExecutionPlan {
+            order: vec![
+                VisibilityPass::PreviousHzb.index(),
+                VisibilityPass::LateCompact.index(),
+            ],
+            ..Default::default()
+        });
+
+        assert!(graph.permits(VisibilityPass::PreviousHzb));
+        assert!(!graph.permits(VisibilityPass::CurrentHzb));
+        assert!(graph.permits(VisibilityPass::LateCompact));
+    }
+
+    #[test]
+    fn runtime_dispatch_gate_keeps_compiled_order_metadata() {
+        let graph = VisibilityFrameGraph::new(prism_render_graph::ExecutionPlan {
+            order: vec![
+                VisibilityPass::CurrentHzb.index(),
+                VisibilityPass::PreviousHzb.index(),
+                VisibilityPass::LateCompact.index(),
+            ],
+            ..Default::default()
+        });
+
+        assert_eq!(graph.position(VisibilityPass::CurrentHzb), Some(0));
+        assert_eq!(graph.position(VisibilityPass::PreviousHzb), Some(1));
+        assert_eq!(graph.position(VisibilityPass::LateCompact), Some(2));
+    }
+
+    #[test]
+    fn real_visibility_graph_drives_all_runtime_stages() {
+        let compiled = super::super::graph::visibility_frame_graph()
+            .compile()
+            .unwrap();
+        let graph = VisibilityFrameGraph::new(compiled);
+
+        assert!(graph.permits(VisibilityPass::PreviousHzb));
+        assert!(graph.permits(VisibilityPass::CurrentHzb));
+        assert!(graph.permits(VisibilityPass::LateCompact));
+        assert_eq!(graph.position(VisibilityPass::PreviousHzb), Some(0));
+        assert_eq!(graph.position(VisibilityPass::CurrentHzb), Some(1));
+        assert_eq!(graph.position(VisibilityPass::LateCompact), Some(2));
     }
 }

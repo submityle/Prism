@@ -6,7 +6,7 @@
 //!   argument, declaring its component/resource access and building its live
 //!   value from an [`UnsafeWorldCell`] under the kernel's non-aliasing
 //!   discipline. Implemented for [`Res`], [`ResMut`],
-//!   [`Commands`](crate::command::Commands), [`Query`], and tuples of up to
+//!   [`Commands`](crate::command::Commands), [`Query`], [`ParamSet`], and tuples of up to
 //!   twelve params, plus the renderer's per-view lookup: [`CurrentView`] and
 //!   the `Option`-wrapped [`ViewQuery`].
 //! * [`System`] — a runnable unit, implemented by [`FunctionSystem`] (ordinary
@@ -37,6 +37,7 @@ pub mod job_dag;
 #[cfg(feature = "multi_thread")]
 pub mod job_graph;
 pub mod param;
+pub mod param_set;
 pub mod query_param;
 pub mod view_query;
 pub mod world_cell;
@@ -46,6 +47,7 @@ pub use function::{
     BoxedSystem, FunctionSystem, IntoSystem, IsFunctionSystem, System, SystemParamFunction,
 };
 pub use param::{Local, Res, ResMut, SystemParam, SystemParamItem};
+pub use param_set::ParamSet;
 pub use query_param::Query;
 pub use view_query::{CurrentView, ViewQuery, ViewQueryState};
 pub use world_cell::UnsafeWorldCell;

@@ -5,15 +5,14 @@ use bevy_platform::future::block_on;
 use prism_render_architecture::{
     abi::{AbiHash, AbiVersion},
     shader_package::{
-        ManifestExpectation, ModuleId, PermutationSpace, ShaderPackageId, ShaderPackageManifest,
-        ShaderPackageRegistry,
+        ArtifactDigest, ManifestExpectation, ModuleId, PermutationSpace, ShaderPackageId,
+        ShaderPackageManifest, ShaderPackageRegistry, ShaderPackageVariantManifest,
     },
 };
 use prism_render_material::{
     fallback_material_header, BlendDomain, BuiltinProgram, ChannelMask, ClosureKind, CompiledEntry,
     ExecutionFamily, GpuMaterialHeader, LobeMask, MaterialExecutionTables, MaterialFeatureFlags,
-    ProgramId, ProgramRef,
-    ResponseMaskSource, ShadingPlan,
+    ProgramId, ProgramRef, ResponseMaskSource, ShadingPlan,
 };
 use prism_render_shading::{
     ClassificationError, ResponseBucketTable, ShadingWorkPlan, ShadingWorkPlanError,
@@ -96,7 +95,11 @@ fn fixture() -> Fixture {
         entry_point: "main".into(),
         abi_version: AbiVersion::from_parts(1, 0),
         abi_hash: AbiHash::from_bytes(b"classification-gpu-parity"),
-        permutation_count: 2,
+        variants: ShaderPackageVariantManifest::from_digests(
+            &PermutationSpace::new([2]),
+            [ArtifactDigest([1; 32]), ArtifactDigest([2; 32])],
+        )
+        .unwrap(),
     };
     let compiled = CompiledEntry::from_spirv(
         manifest.clone(),
@@ -255,10 +258,8 @@ fn fixture() -> Fixture {
     let mut visibility: Vec<_> = (0..PIXELS)
         .map(|pixel| {
             let material = pixel as usize % good_materials;
-            let is_continuous = materials[material]
-                .feature_flags
-                & MaterialFeatureFlags::ILLUMINATION_BLEND.0
-                != 0;
+            let is_continuous =
+                materials[material].feature_flags & MaterialFeatureFlags::ILLUMINATION_BLEND.0 != 0;
             let region = if is_continuous {
                 [0, 32_768, u16::MAX as u32][pixel as usize / good_materials % 3]
             } else {
@@ -654,7 +655,10 @@ fn assert_parity(fixture: &Fixture, cpu: &ShadingWorkPlan, result: &[Vec<u32>], 
     assert_eq!(buckets, &expected_buckets, "uploaded CPU bucket keys");
     for item in cpu.work.iter().filter(|item| item.response_meta != INVALID) {
         assert_ne!(item.right_shading_class, INVALID);
-        assert_eq!(item.right_response_kind, 1, "continuous blend right arm is NPR");
+        assert_eq!(
+            item.right_response_kind, 1,
+            "continuous blend right arm is NPR"
+        );
         assert_eq!(
             item.response_meta & u16::MAX as u32,
             fixture.visibility[item.pixel_index as usize]
@@ -745,8 +749,8 @@ fn assert_parity(fixture: &Fixture, cpu: &ShadingWorkPlan, result: &[Vec<u32>], 
     );
     for expected in &cpu.work {
         let pixel = expected.pixel_index as usize;
-        let record = &pixels
-            [pixel * PIXEL_CLASS_WORDS..pixel * PIXEL_CLASS_WORDS + PIXEL_CLASS_WORDS];
+        let record =
+            &pixels[pixel * PIXEL_CLASS_WORDS..pixel * PIXEL_CLASS_WORDS + PIXEL_CLASS_WORDS];
         assert_eq!(
             [record[0], record[2], record[3], record[4]],
             [
@@ -864,10 +868,16 @@ fn real_gpu_classification_matches_program_ref_cpu_plan() {
         .iter()
         .filter(|item| item.response_meta != INVALID)
         .collect();
-    assert!(!continuous_items.is_empty(), "continuous MaskBlend fixture coverage");
+    assert!(
+        !continuous_items.is_empty(),
+        "continuous MaskBlend fixture coverage"
+    );
     for item in continuous_items {
         assert_ne!(item.right_shading_class, INVALID);
-        assert_eq!(item.right_response_kind, 1, "continuous blend right arm is NPR");
+        assert_eq!(
+            item.right_response_kind, 1,
+            "continuous blend right arm is NPR"
+        );
         assert_eq!(
             item.response_meta & u16::MAX as u32,
             fixture.visibility[item.pixel_index as usize]

@@ -138,8 +138,8 @@ pub(crate) struct GpuWaterSurfaceView {
     /// `NPR` ramp step count (`x`), toon foam threshold (`y`), author tint
     /// strength (`z`), hybrid shore blend bias (`w`).
     pub style_params: [f32; 4],
-    /// Framebuffer size in pixels (`xy`) for the refraction screen lookup; `zw`
-    /// unused.
+    /// Framebuffer size in pixels (`xy`) for the refraction screen lookup;
+    /// `z` is the hybrid overlay opacity and `w` is reserved.
     pub viewport: [f32; 4],
 }
 
@@ -183,6 +183,9 @@ pub(crate) struct SurfaceViewParams {
     /// Hybrid-frontend shore blend bias added to foam coverage when crossfading
     /// the `PBR` body into the stylized shallows.
     pub hybrid_shore_bias: f32,
+    /// Hybrid-frontend stylized overlay opacity, forwarded to the WESL raster
+    /// stage through the otherwise-unused `viewport.z` lane.
+    pub hybrid_overlay_opacity: f32,
     /// Framebuffer size in pixels (`width`, `height`) for the refraction screen
     /// lookup.
     pub viewport_size: [f32; 2],
@@ -198,16 +201,17 @@ pub(crate) struct SurfaceViewParams {
 /// * `surface_params = (roughness, reflectance, optical_thickness, foam_whiten)`,
 /// * `water_color = (albedo_rgb, min_alpha)`,
 /// * `style_params = (npr_ramp_steps, toon_foam_threshold, tint_strength, hybrid_shore_bias)`,
-/// * `viewport = (width, height, 0, 0)`.
+/// * `viewport = (width, height, hybrid_overlay_opacity, 0)`.
 ///
 /// Pure: the same inputs always produce the same bytes, so the uniform upload
-/// is deterministic frame to frame. The unused `vec4` lanes (`viewport.zw`)
-/// are zeroed rather than left undefined.
+/// is deterministic frame to frame. The reserved `viewport.w` lane is zeroed
+/// rather than left undefined.
 #[must_use]
 pub(crate) fn build_surface_view(params: &SurfaceViewParams) -> GpuWaterSurfaceView {
     let [cx, cy, cz] = params.camera_world_position;
     let [ar, ag, ab] = params.water_albedo;
     let [vw, vh] = params.viewport_size;
+    let hybrid_overlay_opacity = params.hybrid_overlay_opacity.clamp(0.0, 1.0);
 
     GpuWaterSurfaceView {
         clip_from_world: params.clip_from_world,
@@ -225,7 +229,7 @@ pub(crate) fn build_surface_view(params: &SurfaceViewParams) -> GpuWaterSurfaceV
             params.tint_strength,
             params.hybrid_shore_bias,
         ],
-        viewport: [vw, vh, 0.0, 0.0],
+        viewport: [vw, vh, hybrid_overlay_opacity, 0.0],
     }
 }
 
@@ -508,6 +512,7 @@ mod tests {
             toon_foam_threshold: 0.6,
             tint_strength: 0.5,
             hybrid_shore_bias: 0.1,
+            hybrid_overlay_opacity: 0.7,
             viewport_size: [1920.0, 1080.0],
         }
     }
@@ -546,8 +551,19 @@ mod tests {
     fn build_packs_the_viewport_with_zero_tail_lanes() {
         let params = sample_params();
         let view_uniform = build_surface_view(&params);
-        // Only xy (framebuffer size) are read; zw must be zeroed, not undefined.
-        assert_eq!(view_uniform.viewport, [1920.0, 1080.0, 0.0, 0.0]);
+        // xy is the framebuffer size, z carries the hybrid overlay opacity,
+        // and w is explicitly zeroed rather than left undefined.
+        assert_eq!(view_uniform.viewport, [1920.0, 1080.0, 0.7, 0.0]);
+    }
+
+    #[test]
+    fn build_clamps_hybrid_overlay_opacity_before_abi_upload() {
+        let mut params = sample_params();
+        params.hybrid_overlay_opacity = 1.5;
+        assert_eq!(build_surface_view(&params).viewport[2], 1.0);
+
+        params.hybrid_overlay_opacity = -0.5;
+        assert_eq!(build_surface_view(&params).viewport[2], 0.0);
     }
 
     #[test]

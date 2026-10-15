@@ -196,6 +196,9 @@ pub struct ExecutionPlan {
     pub order: Vec<usize>,
     /// Per-original-pass liveness, indexed by pass index.
     pub alive: Vec<bool>,
+    /// Scheduled position for each original pass index. `None` means the pass
+    /// was culled. This is the constant-time runtime gate for ECS frontends.
+    pub position_by_pass: Vec<Option<usize>>,
     /// Logical hazards from the shared SSA kernel; backend transitions below
     /// additionally account for layouts, subresources and imported states.
     pub logical_barriers: Vec<LogicalBarrier>,
@@ -224,6 +227,18 @@ impl ExecutionPlan {
     #[must_use]
     pub fn pass_count(&self) -> usize {
         self.order.len()
+    }
+
+    /// Returns whether an original pass survived culling.
+    #[must_use]
+    pub fn is_alive(&self, pass: usize) -> bool {
+        self.alive.get(pass).copied().unwrap_or(false)
+    }
+
+    /// Returns the scheduled position of an original pass in constant time.
+    #[must_use]
+    pub fn position(&self, pass: usize) -> Option<usize> {
+        self.position_by_pass.get(pass).copied().flatten()
     }
 
     /// The total number of barriers across every surviving pass plus the final

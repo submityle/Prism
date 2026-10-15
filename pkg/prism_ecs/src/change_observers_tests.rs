@@ -20,6 +20,11 @@ use crate::world::World;
 struct Health(i32);
 impl Component for Health {}
 
+struct SparseHealth(i32);
+impl Component for SparseHealth {
+    const STORAGE: crate::component::StorageType = crate::component::StorageType::SparseSet;
+}
+
 /// A distinct component so a second observer can watch something else.
 #[derive(Debug, PartialEq, Clone, Copy)]
 struct Shield(i32);
@@ -101,6 +106,141 @@ fn changes_before_registration_do_not_fire() {
     w.observe_changed::<Health, _>(record(0));
     assert_eq!(w.flush_changed_observers(), 0);
     assert!(w.resource::<Log>().0.is_empty());
+}
+
+#[test]
+fn table_registration_excludes_prior_writes_and_includes_immediate_writes() {
+    let mut world = World::new();
+    world.insert_resource(Log::default());
+    let before = world.spawn(Health(0));
+    let after = world.spawn(Health(0));
+    let both = world.spawn(Health(0));
+    world.get_mut::<Health>(before).unwrap().0 += 1;
+    world.get_mut::<Health>(both).unwrap().0 += 1;
+    world.observe_changed::<Health, _>(record(0));
+    // No manual tick advance or intermediate flush after registration.
+    world.get_mut::<Health>(after).unwrap().0 += 1;
+    world.get_mut::<Health>(both).unwrap().0 += 1;
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(
+        world.resource::<Log>().0,
+        alloc::vec![Delivery {
+            label: 0,
+            changed: alloc::vec![after, both],
+        }]
+    );
+    assert_eq!(world.flush_changed_observers(), 0);
+}
+
+#[test]
+fn sparse_registration_excludes_prior_writes_and_includes_immediate_writes() {
+    let mut world = World::new();
+    world.insert_resource(Log::default());
+    let before = world.spawn(SparseHealth(0));
+    let after = world.spawn(SparseHealth(0));
+    let both = world.spawn(SparseHealth(0));
+    world.get_mut::<SparseHealth>(before).unwrap().0 += 1;
+    world.get_mut::<SparseHealth>(both).unwrap().0 += 1;
+    world.observe_changed::<SparseHealth, _>(record(0));
+    world.get_mut::<SparseHealth>(after).unwrap().0 += 1;
+    world.get_mut::<SparseHealth>(both).unwrap().0 += 1;
+    assert_eq!(world.flush_changed_observers(), 1);
+    assert_eq!(
+        world.resource::<Log>().0,
+        alloc::vec![Delivery {
+            label: 0,
+            changed: alloc::vec![after, both],
+        }]
+    );
+    assert_eq!(world.flush_changed_observers(), 0);
+}
+
+fn populate_observer_replacement(world: &mut World) -> Entity {
+    world.insert_resource(Log::default());
+    let entity = world.spawn(Health(0));
+    world.observe_changed::<Health, _>(record(10));
+    world.observe_changed::<Health, _>(record(20));
+    let source = world.reaction_source::<Health>();
+    world.add_reaction(&[source], move |world| {
+        let changed = world.reaction_changes(source).to_vec();
+        world
+            .resource_mut::<Log>()
+            .0
+            .push(Delivery { label: 30, changed });
+    });
+    world.get_mut::<Health>(entity).unwrap().0 += 1;
+    entity
+}
+
+fn observer_replacement_case(populated: bool, panic_after: bool, flush: impl FnOnce(&mut World)) {
+    let mut replacement = World::new();
+    let mut entity = populated.then(|| populate_observer_replacement(&mut replacement));
+    let replacement_id = replacement.id();
+    let replacement_tick = replacement.change_tick();
+    let mut replacement = Some(replacement);
+    let mut world = World::new();
+    let old_entity = world.spawn(Health(0));
+    world.observe_changed::<Health, _>(move |ctx| {
+        *ctx.world = replacement
+            .take()
+            .expect("old observer must not be restored");
+        assert!(!panic_after, "observer replaced world");
+    });
+    world.observe_changed::<Health, _>(|_| panic!("old later observer ran"));
+    let old_source = world.reaction_source::<Health>();
+    world.add_reaction(&[old_source], |_| panic!("old reaction ran"));
+    world.mark_reaction_dirty(old_source);
+    world.get_mut::<Health>(old_entity).unwrap().0 += 1;
+    flush(&mut world);
+    assert_eq!(world.id(), replacement_id);
+    assert_eq!(world.change_tick(), replacement_tick);
+    if populated {
+        assert!(world.resource::<Log>().0.is_empty());
+    } else {
+        // Empty replacements must remain usable, without stale slots or flags.
+        assert_eq!(world.flush_changed_observers(), 0);
+        assert_eq!(world.flush_reactions(), 0);
+        entity = Some(populate_observer_replacement(&mut world));
+    }
+    assert_eq!(world.flush_changed_observers(), 3);
+    let entity = entity.unwrap();
+    assert_eq!(
+        world.resource::<Log>().0,
+        [10, 20, 30]
+            .into_iter()
+            .map(|label| Delivery {
+                label,
+                changed: alloc::vec![entity],
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(world.flush_changed_observers(), 0);
+}
+
+#[test]
+fn replacing_world_discards_old_observers_and_preserves_replacement_registries() {
+    for populated in [false, true] {
+        observer_replacement_case(populated, false, |world| {
+            assert_eq!(world.flush_changed_observers(), 1);
+        });
+    }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn replacing_world_then_panicking_does_not_restore_old_observer_slots() {
+    for populated in [false, true] {
+        observer_replacement_case(populated, true, |world| {
+            let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                world.flush_changed_observers();
+            }))
+            .expect_err("replacement callback must panic");
+            assert_eq!(
+                error.downcast_ref::<&str>(),
+                Some(&"observer replaced world")
+            );
+        });
+    }
 }
 
 #[test]
@@ -193,4 +333,85 @@ fn schedule_run_flushes_change_observers() {
             changed: alloc::vec![a, b],
         }]
     );
+}
+
+#[test]
+fn an_observer_can_remove_itself_and_recursive_flush_does_not_reenter() {
+    struct OwnObserver(crate::observer::ObserverId);
+    impl Resource for OwnObserver {}
+    let mut world = World::new();
+    world.insert_resource(Log::default());
+    let entity = world.spawn(Health(1));
+    let id = world.observe_changed::<Health, _>(move |ctx| {
+        let id = ctx.world.resource::<OwnObserver>().0;
+        assert!(ctx.world.remove_change_observer(id));
+        assert!(!ctx.world.remove_change_observer(id));
+        assert_eq!(ctx.world.flush_changed_observers(), 0);
+        let changed = ctx.changed().to_vec();
+        ctx.world
+            .resource_mut::<Log>()
+            .0
+            .push(Delivery { label: 0, changed });
+    });
+    world.insert_resource(OwnObserver(id));
+    next_frame(&mut world);
+    world.get_mut::<Health>(entity).unwrap().0 += 1;
+    assert_eq!(world.flush_changed_observers(), 1);
+    next_frame(&mut world);
+    world.get_mut::<Health>(entity).unwrap().0 += 1;
+    assert_eq!(world.flush_changed_observers(), 0);
+    assert_eq!(world.resource::<Log>().0.len(), 1);
+}
+
+#[test]
+fn later_observers_receive_the_batch_collected_before_callback_mutation() {
+    let mut world = World::new();
+    world.insert_resource(Log::default());
+    let entity = world.spawn(Health(1));
+    world.observe_changed::<Health, _>(move |ctx| {
+        ctx.world.remove::<Health>(entity);
+        assert_eq!(ctx.world.flush_changed_observers(), 0);
+    });
+    world.observe_changed::<Health, _>(record(1));
+    next_frame(&mut world);
+    world.get_mut::<Health>(entity).unwrap().0 += 1;
+    assert_eq!(world.flush_changed_observers(), 2);
+    assert_eq!(world.resource::<Log>().0[0].changed, alloc::vec![entity]);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn a_panicking_observer_is_preserved_and_retried_without_replaying_successes() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    let mut world = World::new();
+    world.insert_resource(Log::default());
+    let entity = world.spawn(Health(1));
+    world.observe_changed::<Health, _>(record(0));
+    let panic_once = Arc::new(AtomicBool::new(true));
+    world.observe_changed::<Health, _>(move |ctx| {
+        assert!(
+            !panic_once.swap(false, Ordering::Relaxed),
+            "change callback failed"
+        );
+        record(1)(ctx);
+    });
+    world.observe_changed::<Health, _>(record(2));
+    next_frame(&mut world);
+    world.get_mut::<Health>(entity).unwrap().0 += 1;
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.flush_changed_observers();
+    }))
+    .is_err());
+    assert_eq!(world.flush_changed_observers(), 2);
+    assert_eq!(
+        world
+            .resource::<Log>()
+            .0
+            .iter()
+            .map(|batch| batch.label)
+            .collect::<Vec<_>>(),
+        alloc::vec![0, 1, 2]
+    );
+    assert_eq!(world.flush_changed_observers(), 0);
 }

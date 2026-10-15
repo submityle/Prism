@@ -58,14 +58,25 @@ pub struct ComponentSparseSet {
     added_ticks: Vec<UnsafeCell<Tick>>,
     /// Dense-row → tick the value was last written.
     changed_ticks: Vec<UnsafeCell<Tick>>,
+    /// Snapshot identity follows each value through swap-removal. Unlike ticks,
+    /// these revisions cannot be reset by replay or change-detection overrides.
+    snapshot_revisions: Vec<SparseSnapshotRevision>,
+    /// Allocated only with exclusive set access; never reset by remove/clear.
+    next_snapshot_incarnation: u64,
     /// Entity index → dense row, or [`NOT_PRESENT`]. Grows to cover the largest
     /// entity index ever inserted.
     sparse: Vec<u32>,
 }
 
+struct SparseSnapshotRevision {
+    incarnation: u64,
+    writes: UnsafeCell<u64>,
+}
+
 // SAFETY: identical discipline to `Column` (which is `unsafe impl Sync`): the
-// only non-`Sync` fields are the `UnsafeCell<Tick>` vectors, mutated solely
-// under unique per-row access, and no reader observes a cell mid-write.
+// tick and snapshot-revision cells are mutated solely under unique per-row
+// access, and no reader observes a cell mid-write. Distinct rows never mutate a
+// shared revision counter; insertion identities require exclusive set access.
 unsafe impl Sync for ComponentSparseSet {}
 
 impl ComponentSparseSet {
@@ -78,6 +89,8 @@ impl ComponentSparseSet {
             entities: Vec::new(),
             added_ticks: Vec::new(),
             changed_ticks: Vec::new(),
+            snapshot_revisions: Vec::new(),
+            next_snapshot_incarnation: 0,
             sparse: Vec::new(),
         }
     }
@@ -126,7 +139,9 @@ impl ComponentSparseSet {
     ///
     /// # Safety
     /// The returned pointer must only be accessed as the component type this set
-    /// stores.
+    /// stores. Writes must also obtain [`changed_tick_ptr`](Self::changed_tick_ptr)
+    /// or call [`set_changed_tick`](Self::set_changed_tick) before snapshot
+    /// capture, even if the desired changed tick is unchanged.
     #[inline]
     pub unsafe fn get_ptr(&self, entity: Entity) -> Option<*mut u8> {
         let dense = self.dense_index(entity)?;
@@ -154,6 +169,9 @@ impl ComponentSparseSet {
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_mut<T>(&self, entity: Entity) -> Option<&mut T> {
+        let dense = self.dense_index(entity)?;
+        // SAFETY: caller guarantees exclusive access to this row.
+        unsafe { self.record_snapshot_write(dense) };
         // SAFETY: forwarded contract on `T` and unique access.
         let ptr = unsafe { self.get_ptr(entity) }?;
         // SAFETY: caller guarantees unique access, so `&mut` does not alias.
@@ -168,6 +186,39 @@ impl ComponentSparseSet {
         }
     }
 
+    fn push_snapshot_revision(&mut self) {
+        self.next_snapshot_incarnation = self.next_snapshot_incarnation.saturating_add(1);
+        self.snapshot_revisions.push(SparseSnapshotRevision {
+            incarnation: self.next_snapshot_incarnation,
+            writes: UnsafeCell::new(0),
+        });
+    }
+
+    /// Invalidate at write-capable access acquisition, independently of whether
+    /// the caller subsequently stamps a current, old, or identical tick. This
+    /// conservatively recaptures fetched-but-unwritten rows too.
+    ///
+    /// # Safety
+    /// The caller must hold exclusive access to the live row at `dense`.
+    #[inline]
+    unsafe fn record_snapshot_write(&self, dense: usize) {
+        // SAFETY: the caller owns this row; other rows have independent cells.
+        let writes = unsafe { &mut *self.snapshot_revisions[dense].writes.get() };
+        *writes = writes.saturating_add(1);
+    }
+
+    /// Independent insertion/write identity, or None once either counter is
+    /// exhausted. An exhausted row must be freshly cloned on every capture;
+    /// saturation must never turn into a reusable ABA identity.
+    #[inline]
+    pub(crate) fn snapshot_revision(&self, entity: Entity) -> Option<(u64, u64)> {
+        let revision = &self.snapshot_revisions[self.dense_index(entity)?];
+        // SAFETY: snapshot readers exclude concurrent writers to this row.
+        let writes = unsafe { *revision.writes.get() };
+        (revision.incarnation != u64::MAX && writes != u64::MAX)
+            .then_some((revision.incarnation, writes))
+    }
+
     /// Insert or overwrite `entity`'s value, stamping change ticks with
     /// `change_tick`. Returns `true` if this was a fresh insert, `false` if an
     /// existing value was overwritten (last-wins, added tick preserved).
@@ -177,6 +228,8 @@ impl ComponentSparseSet {
     /// type; ownership transfers into the set.
     pub unsafe fn insert(&mut self, entity: Entity, value: *const u8, change_tick: Tick) -> bool {
         if let Some(dense) = self.dense_index(entity) {
+            // SAFETY: exclusive set access also excludes all row readers.
+            unsafe { self.record_snapshot_write(dense) };
             // SAFETY: `dense < len` and `value` is a valid owned value of the
             // stored type (forwarded contract); `replace` drops the old value.
             unsafe { self.dense.replace(dense, value) };
@@ -191,6 +244,7 @@ impl ComponentSparseSet {
         self.entities.push(entity);
         self.added_ticks.push(UnsafeCell::new(change_tick));
         self.changed_ticks.push(UnsafeCell::new(change_tick));
+        self.push_snapshot_revision();
         self.sparse[index] = dense as u32;
         true
     }
@@ -224,6 +278,7 @@ impl ComponentSparseSet {
         self.entities.push(entity);
         self.added_ticks.push(UnsafeCell::new(added));
         self.changed_ticks.push(UnsafeCell::new(changed));
+        self.push_snapshot_revision();
         self.sparse[index] = dense as u32;
     }
 
@@ -239,8 +294,35 @@ impl ComponentSparseSet {
         self.entities.swap_remove(dense);
         self.added_ticks.swap_remove(dense);
         self.changed_ticks.swap_remove(dense);
+        self.snapshot_revisions.swap_remove(dense);
         self.sparse[entity.index() as usize] = NOT_PRESENT;
         // If a row moved into `dense`, repoint its sparse entry to the new slot.
+        if dense < self.entities.len() {
+            let moved = self.entities[dense];
+            self.sparse[moved.index() as usize] = dense as u32;
+        }
+        true
+    }
+
+    /// Move an owned value out without running user drop glue. Repairs dense
+    /// indices and tick arrays before returning, so subsequent cleanup may
+    /// unwind without leaving this set inconsistent.
+    ///
+    /// # Safety
+    /// `dst` must be aligned, uninitialized storage for this set's exact type,
+    /// disjoint from the set's allocations. On success the caller owns the
+    /// value written there; on absence nothing is written.
+    pub(crate) unsafe fn remove_and_copy_out(&mut self, entity: Entity, dst: *mut u8) -> bool {
+        let Some(dense) = self.dense_index(entity) else {
+            return false;
+        };
+        // SAFETY: live dense index and destination supplied by the caller.
+        unsafe { self.dense.swap_remove_and_copy_out(dense, dst) };
+        self.entities.swap_remove(dense);
+        self.added_ticks.swap_remove(dense);
+        self.changed_ticks.swap_remove(dense);
+        self.snapshot_revisions.swap_remove(dense);
+        self.sparse[entity.index() as usize] = NOT_PRESENT;
         if dense < self.entities.len() {
             let moved = self.entities[dense];
             self.sparse[moved.index() as usize] = dense as u32;
@@ -279,6 +361,8 @@ impl ComponentSparseSet {
     /// Raw pointer to `entity`'s changed-tick cell, for interior-mutable
     /// stamping through a shared `&ComponentSparseSet` (the `&mut T` /
     /// [`Mut`](crate::change::Mut) fetch), or `None` if absent.
+    /// Granting this write-capable access also invalidates snapshot reuse for
+    /// the row, without modifying its added/changed ticks.
     ///
     /// # Safety
     /// The caller must hold unique access to `entity`'s row and only *write*
@@ -288,6 +372,8 @@ impl ComponentSparseSet {
     #[inline]
     pub unsafe fn changed_tick_ptr(&self, entity: Entity) -> Option<*mut Tick> {
         let dense = self.dense_index(entity)?;
+        // SAFETY: the caller guarantees exclusive row access.
+        unsafe { self.record_snapshot_write(dense) };
         Some(self.changed_ticks[dense].get())
     }
 
@@ -298,6 +384,8 @@ impl ComponentSparseSet {
         let Some(dense) = self.dense_index(entity) else {
             return false;
         };
+        // SAFETY: exclusive set access also excludes all row readers.
+        unsafe { self.record_snapshot_write(dense) };
         *self.changed_ticks[dense].get_mut() = change_tick;
         true
     }
@@ -320,6 +408,7 @@ impl ComponentSparseSet {
         self.entities.clear();
         self.added_ticks.clear();
         self.changed_ticks.clear();
+        self.snapshot_revisions.clear();
         // Reset sparse to all-absent without giving back the allocation.
         for slot in &mut self.sparse {
             *slot = NOT_PRESENT;
@@ -452,5 +541,103 @@ mod tests {
             set.changed_tick(a).unwrap().age_since(now),
             Tick::MAX_CHANGE_AGE
         );
+    }
+
+    #[test]
+    fn snapshot_revision_tracks_mutable_access_not_tick_identity() {
+        let mut entities = Entities::new();
+        let entity = entities.alloc();
+        let mut set = u32_set();
+        let tick = Tick::new(7);
+        insert_u32(&mut set, entity, 1, tick);
+        let inserted = set.snapshot_revision(entity).unwrap();
+        assert_eq!(read_u32(&set, entity), Some(1));
+        assert_eq!(set.snapshot_revision(entity), Some(inserted));
+
+        // SAFETY: u32 storage, unique access to the row.
+        unsafe { *set.get_mut::<u32>(entity).unwrap() = 2 };
+        let mutated = set.snapshot_revision(entity).unwrap();
+        assert_eq!(mutated.0, inserted.0);
+        assert!(mutated.1 > inserted.1);
+        // SAFETY: unique access to the row and its tick cell.
+        unsafe { *set.changed_tick_ptr(entity).unwrap() = tick };
+        let fetched = set.snapshot_revision(entity).unwrap();
+        assert_eq!(fetched.0, inserted.0);
+        assert!(fetched.1 > mutated.1);
+        assert_eq!(set.changed_tick(entity), Some(tick));
+
+        set.set_changed_tick(entity, tick);
+        let stamped = set.snapshot_revision(entity).unwrap();
+        assert!(stamped.1 > fetched.1);
+        assert!(!insert_u32(&mut set, entity, 3, tick));
+        let replaced = set.snapshot_revision(entity).unwrap();
+        assert_eq!(replaced.0, inserted.0);
+        assert!(replaced.1 > stamped.1);
+        assert_eq!(set.added_tick(entity), Some(tick));
+        assert_eq!(set.changed_tick(entity), Some(tick));
+    }
+
+    #[test]
+    fn snapshot_revision_follows_swap_removal_and_never_reuses_insertions() {
+        let mut entities = Entities::new();
+        let a = entities.alloc();
+        let b = entities.alloc();
+        let c = entities.alloc();
+        let mut set = u32_set();
+        let tick = Tick::new(7);
+        for (entity, value) in [(a, 1), (b, 2), (c, 3)] {
+            insert_u32(&mut set, entity, value, tick);
+        }
+        let a_revision = set.snapshot_revision(a).unwrap();
+        let b_revision = set.snapshot_revision(b).unwrap();
+        let c_revision = set.snapshot_revision(c).unwrap();
+        assert!(set.remove(b));
+        assert_eq!(set.entities(), &[a, c]);
+        assert_eq!(set.snapshot_revision(c), Some(c_revision));
+        insert_u32(&mut set, b, 20, tick);
+        assert_ne!(set.snapshot_revision(b), Some(b_revision));
+
+        let mut removed = core::mem::MaybeUninit::<u32>::uninit();
+        let reinserted_b = set.snapshot_revision(b);
+        // SAFETY: disjoint, aligned uninitialized u32 storage.
+        assert!(unsafe { set.remove_and_copy_out(a, removed.as_mut_ptr().cast()) });
+        // SAFETY: successful removal initialized the destination with a u32.
+        assert_eq!(unsafe { removed.assume_init() }, 1);
+        assert_eq!(set.entities(), &[b, c]);
+        assert_eq!(set.snapshot_revision(b), reinserted_b);
+        assert_eq!(set.snapshot_revision(c), Some(c_revision));
+
+        set.clear();
+        let replacement = 10u32;
+        // SAFETY: initialized u32 value, absent entity, matching set layout.
+        unsafe { set.insert_with_ticks(a, (&raw const replacement).cast(), tick, tick) };
+        assert_ne!(set.snapshot_revision(a), Some(a_revision));
+        assert_eq!(read_u32(&set, a), Some(10));
+    }
+
+    #[test]
+    fn snapshot_revision_exhaustion_disables_reuse_without_wrapping() {
+        let mut entities = Entities::new();
+        let a = entities.alloc();
+        let b = entities.alloc();
+        let mut set = u32_set();
+        set.next_snapshot_incarnation = u64::MAX - 2;
+        insert_u32(&mut set, a, 1, Tick::ZERO);
+        assert!(set.snapshot_revision(a).is_some());
+        insert_u32(&mut set, b, 2, Tick::ZERO);
+        assert_eq!(set.snapshot_revision(b), None);
+        set.clear();
+        insert_u32(&mut set, b, 3, Tick::ZERO);
+        assert_eq!(set.snapshot_revision(b), None);
+
+        let mut set = u32_set();
+        insert_u32(&mut set, a, 1, Tick::ZERO);
+        *set.snapshot_revisions[0].writes.get_mut() = u64::MAX - 1;
+        assert!(set.snapshot_revision(a).is_some());
+        set.set_changed_tick(a, Tick::ZERO);
+        assert_eq!(set.snapshot_revision(a), None);
+        set.set_changed_tick(a, Tick::ZERO);
+        assert_eq!(set.snapshot_revision(a), None);
+        assert_eq!(*set.snapshot_revisions[0].writes.get_mut(), u64::MAX);
     }
 }

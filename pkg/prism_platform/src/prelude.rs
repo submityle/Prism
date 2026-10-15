@@ -11,6 +11,9 @@ pub use crate::security::{
     Access, IntegrityPolicy, LoadDecision, Mitigation, MitigationStatus, SandboxCapabilities,
     SandboxModel, SecurityPosture, SigningStatus, SigningStrictness,
 };
+pub use crate::suspend::{
+    suspend_capability, PlatformSuspendCapability, SuspendEvent, SuspendEventKind,
+};
 pub use crate::topology::power::{PowerPolicy, PowerSource, PowerState, ThermalState};
 pub use crate::topology::qos::{qos_hint, EngineQos, OsQosHint};
 pub use crate::topology::{CoreKind, CpuTopology, TopologyBuilder, TopologyCore};

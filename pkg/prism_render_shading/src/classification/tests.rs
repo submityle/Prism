@@ -3,13 +3,13 @@ use crate::VisibilityPixel;
 use prism_render_architecture::{
     abi::{AbiHash, AbiVersion},
     shader_package::{
-        ManifestExpectation, ModuleId, PermutationSpace, ShaderPackageId, ShaderPackageManifest,
-        ShaderPackageRegistry,
+        ArtifactDigest, ManifestExpectation, ModuleId, PermutationSpace, ShaderPackageId,
+        ShaderPackageManifest, ShaderPackageRegistry, ShaderPackageVariantManifest,
     },
 };
 use prism_render_material::{
     fallback_material_header, BlendDomain, ChannelMask, ClosureKind, CompiledEntry,
-    MaterialFeatureFlags, ResponseMaskSource, ShadingPlan,
+    MaterialFeatureFlags, ResponseChannel, ResponseMaskSource, ShadingPlan,
 };
 
 /// A verified executable fixture, not a fabricated dense execution tuple.
@@ -22,7 +22,11 @@ pub(crate) fn execution_fixture(
         entry_point: "main".into(),
         abi_version: AbiVersion::from_parts(1, 0),
         abi_hash: AbiHash::from_bytes(b"shading-test"),
-        permutation_count: 2,
+        variants: ShaderPackageVariantManifest::from_digests(
+            &PermutationSpace::new([2]),
+            [ArtifactDigest([1; 32]), ArtifactDigest([2; 32])],
+        )
+        .unwrap(),
     };
     let binary = vec![
         0x07230203,
@@ -160,14 +164,18 @@ fn response_buckets_are_variable_length_and_deterministic() {
 
 #[test]
 fn builtin_ids_and_response_kinds_match_execution_upload() {
-    let (tables, _) =
-        execution_fixture(&BUILTINS.map(|program| (program, ExecutionFamily::FusedBuiltin)));
-    for (program, row) in BUILTINS.into_iter().zip(tables.gpu_program_rows()) {
-        let key = ResponseBucketKey::from_program(
-            ExecutionFamily::FusedBuiltin,
-            program,
-            RenderPhase::Opaque,
-        );
+    let families = [
+        ExecutionFamily::FusedBuiltin,
+        ExecutionFamily::SplitResponse,
+        ExecutionFamily::SplitResponse,
+    ];
+    let (tables, _) = execution_fixture(&BUILTINS.into_iter().zip(families).collect::<Vec<_>>());
+    for ((program, family), row) in BUILTINS
+        .into_iter()
+        .zip(families)
+        .zip(tables.gpu_program_rows())
+    {
+        let key = ResponseBucketKey::from_program(family, program, RenderPhase::Opaque);
         assert_eq!(key.program_id.0, response_kind_for_program(program));
         assert_eq!(row[0], response_kind_for_program(program));
         assert_eq!(row[4], key.program_id.0);
@@ -176,20 +184,23 @@ fn builtin_ids_and_response_kinds_match_execution_upload() {
         response_kind_for_program(ProgramRef::Registered(ProgramId(0))),
         3
     );
-    assert_eq!(size_of::<ShadingWorkItem>(), 20);
+    assert_eq!(size_of::<ShadingWorkItem>(), 32);
     assert_eq!(core::mem::offset_of!(ShadingWorkItem, response_kind), 12);
+    assert_eq!(
+        core::mem::offset_of!(ShadingWorkItem, right_shading_class),
+        20
+    );
+    assert_eq!(core::mem::offset_of!(ShadingWorkItem, response_meta), 28);
 }
 
 #[test]
 fn binary_selector_changes_both_real_builtin_entry_and_phase() {
+    let registered = ProgramRef::Registered(ProgramId(3));
     let (tables, headers) = execution_fixture(&[
         (BUILTINS[0], ExecutionFamily::FusedBuiltin),
-        (BUILTINS[1], ExecutionFamily::FusedBuiltin),
-        (BUILTINS[2], ExecutionFamily::FusedBuiltin),
-        (
-            ProgramRef::Registered(ProgramId(0)),
-            ExecutionFamily::SplitResponse,
-        ),
+        (BUILTINS[1], ExecutionFamily::SplitResponse),
+        (BUILTINS[2], ExecutionFamily::SplitResponse),
+        (registered, ExecutionFamily::SplitResponse),
     ]);
     let buckets = ResponseBucketTable::from_execution_tables(&tables).unwrap();
     for (original, header) in headers.iter().enumerate() {
@@ -199,7 +210,7 @@ fn binary_selector_changes_both_real_builtin_entry_and_phase() {
             } else if original < 3 {
                 BUILTINS[original]
             } else {
-                ProgramRef::Registered(ProgramId(0))
+                registered
             };
             assert_eq!(
                 classify_material_header_with_context(header, Some(&tables), selector),
@@ -275,7 +286,7 @@ fn opaque_eligibility_matches_gpu_render_classes_and_domains() {
 fn composition_table_contains_both_verified_endpoints_and_selected_phases() {
     let (mut tables, headers) = execution_fixture(&[
         (BUILTINS[0], ExecutionFamily::FusedBuiltin),
-        (BUILTINS[1], ExecutionFamily::FusedBuiltin),
+        (BUILTINS[1], ExecutionFamily::SplitResponse),
     ]);
     let left = ResponseProgramIndex::from_raw(0, tables.programs()).unwrap();
     let right = ResponseProgramIndex::from_raw(1, tables.programs()).unwrap();
@@ -285,12 +296,12 @@ fn composition_table_contains_both_verified_endpoints_and_selected_phases() {
                 left: BUILTINS[0],
                 right: BUILTINS[1],
                 mask: ResponseMaskSource::RegionMask,
-                domain: BlendDomain::FullRadiance,
+                domain: BlendDomain::DirectOnly,
             },
             left,
             Some(right),
             ExecutionFamily::Composition,
-            ChannelMask::default(),
+            ChannelMask::one(ResponseChannel::Direct),
         )
         .unwrap();
     let buckets = ResponseBucketTable::from_execution_tables(&tables).unwrap();
@@ -351,7 +362,7 @@ fn mixed_closures_hair_domain_and_water_feature_never_change_identity() {
 fn unknown_stale_partial_and_wrong_owner_execution_are_hard_errors() {
     let (tables, headers) = execution_fixture(&[
         (BUILTINS[0], ExecutionFamily::FusedBuiltin),
-        (BUILTINS[2], ExecutionFamily::FusedBuiltin),
+        (BUILTINS[2], ExecutionFamily::SplitResponse),
     ]);
     assert_eq!(
         classify_material_header(&headers[0]),
@@ -460,7 +471,7 @@ fn work_plan_is_bucket_contiguous_generation_safe_and_capacity_bounded() {
             .iter()
             .map(|w| (w.pixel_index, w.response_kind))
             .collect::<Vec<_>>(),
-        [(3, 0), (12, 1), (9, 3)]
+        [(3, 0), (9, 3), (12, 1)]
     );
     assert_eq!(plan.counts.iter().sum::<u32>(), 3);
     for bucket in buckets.buckets() {
@@ -555,5 +566,138 @@ fn missing_dispatch_and_live_invalid_execution_do_not_silently_drop_work() {
     assert_eq!(
         classify_material_header(&unsupported),
         Err(ClassificationError::NonSurfaceClass)
+    );
+}
+
+#[test]
+fn continuous_blend_emits_two_verified_arms_and_packed_response_meta() {
+    let (mut tables, mut headers) = execution_fixture(&[
+        (BUILTINS[0], ExecutionFamily::FusedBuiltin),
+        (BUILTINS[1], ExecutionFamily::SplitResponse),
+    ]);
+    let left = ResponseProgramIndex::from_raw(0, tables.programs()).unwrap();
+    let right = ResponseProgramIndex::from_raw(1, tables.programs()).unwrap();
+    let channels = ChannelMask::one(ResponseChannel::Direct);
+    let plan = tables
+        .register_plan(
+            ShadingPlan::MaskBlend {
+                left: BUILTINS[0],
+                right: BUILTINS[1],
+                mask: ResponseMaskSource::RegionMask,
+                domain: BlendDomain::DirectOnly,
+            },
+            left,
+            Some(right),
+            ExecutionFamily::Composition,
+            ChannelMask::one(ResponseChannel::Direct),
+        )
+        .unwrap();
+    headers[0].execution_plan_index = plan.get();
+    headers[0].feature_flags |= MaterialFeatureFlags::ILLUMINATION_BLEND.0;
+    let buckets = ResponseBucketTable::from_execution_tables(&tables).unwrap();
+    let mut continuous_pixel = pixel(0, headers[0].generation);
+    continuous_pixel.coverage_and_flags = 32_768;
+    let plan = ShadingWorkPlan::build_with_region_and_buckets_and_execution(
+        [(5, continuous_pixel, 0)],
+        &headers,
+        1,
+        &buckets,
+        Some(&tables),
+    )
+    .unwrap();
+    let work = &plan.work[0];
+    let left_key = ResponseBucketKey::from_program(
+        ExecutionFamily::Composition,
+        BUILTINS[0],
+        RenderPhase::Opaque,
+    );
+    let right_key = ResponseBucketKey::from_program(
+        ExecutionFamily::Composition,
+        BUILTINS[1],
+        RenderPhase::Stylized,
+    );
+    assert_eq!(work.shading_class, buckets.bucket_id(left_key).unwrap());
+    assert_eq!(
+        work.right_shading_class,
+        buckets.bucket_id(right_key).unwrap()
+    );
+    assert_eq!(work.response_kind, response_kind_for_program(BUILTINS[0]));
+    assert_eq!(
+        work.right_response_kind,
+        response_kind_for_program(BUILTINS[1])
+    );
+    assert_eq!(work.response_meta, 32_768 | (channels.0 << 16));
+}
+
+#[test]
+fn continuous_blend_rejects_missing_or_malformed_metadata_and_single_plans() {
+    let (mut tables, mut headers) = execution_fixture(&[
+        (BUILTINS[0], ExecutionFamily::FusedBuiltin),
+        (BUILTINS[1], ExecutionFamily::SplitResponse),
+    ]);
+    let left = ResponseProgramIndex::from_raw(0, tables.programs()).unwrap();
+    let right = ResponseProgramIndex::from_raw(1, tables.programs()).unwrap();
+    let plan = tables
+        .register_plan(
+            ShadingPlan::MaskBlend {
+                left: BUILTINS[0],
+                right: BUILTINS[1],
+                mask: ResponseMaskSource::RegionMask,
+                domain: BlendDomain::DirectOnly,
+            },
+            left,
+            Some(right),
+            ExecutionFamily::Composition,
+            ChannelMask::one(ResponseChannel::Direct),
+        )
+        .unwrap();
+    headers[0].execution_plan_index = plan.get();
+    let buckets = ResponseBucketTable::from_execution_tables(&tables).unwrap();
+    headers[0].feature_flags |= MaterialFeatureFlags::ILLUMINATION_BLEND.0;
+    for metadata in [u32::MAX, 1 << 16] {
+        let result = ShadingWorkPlan::build_with_region_and_buckets_and_execution(
+            [(
+                7,
+                {
+                    let mut value = pixel(0, headers[0].generation);
+                    value.coverage_and_flags = metadata;
+                    value
+                },
+                0,
+            )],
+            &headers,
+            1,
+            &buckets,
+            Some(&tables),
+        );
+        assert_eq!(
+            result,
+            Err(ShadingWorkPlanError::Classification {
+                pixel_index: 7,
+                error: ClassificationError::InvalidContinuousMask,
+            })
+        );
+    }
+
+    let mut single_plan_headers =
+        execution_fixture(&[(BUILTINS[0], ExecutionFamily::FusedBuiltin)]).1;
+    single_plan_headers[0].feature_flags |= MaterialFeatureFlags::ILLUMINATION_BLEND.0;
+    let mut valid_metadata = pixel(0, single_plan_headers[0].generation);
+    valid_metadata.coverage_and_flags = 32_768;
+    assert_eq!(
+        ShadingWorkPlan::build_with_region_and_buckets_and_execution(
+            [(8, valid_metadata, 0)],
+            &single_plan_headers,
+            1,
+            &ResponseBucketTable::from_execution_tables(
+                &execution_fixture(&[(BUILTINS[0], ExecutionFamily::FusedBuiltin,)]).0,
+            )
+            .unwrap(),
+            Some(&tables),
+        ),
+        Err(ShadingWorkPlanError::Classification {
+            pixel_index: 8,
+            error: ClassificationError::InvalidContinuousPlan,
+        })
     );
 }

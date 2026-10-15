@@ -379,7 +379,7 @@ pub(crate) fn detect_shading_capabilities(
 
 #[derive(Resource)]
 pub(crate) struct ShadingFrameGraph {
-    pub(crate) compiled: prism_render_graph::frame_graph::CompiledGpuFrameGraph,
+    pub(crate) compiled: prism_render_graph::ExecutionPlan,
     pub(crate) post_execution_bindings: &'static [PostExecutionBinding],
 }
 
@@ -391,7 +391,11 @@ pub(crate) fn prepare_shading_work(
     mut diagnostics: ResMut<PrismShadingDiagnostics>,
 ) {
     debug_assert_eq!(
-        frame_graph.compiled.execution_order.len(),
+        frame_graph.compiled.order.len(),
+        frame_graph.compiled.pass_count(),
+    );
+    debug_assert_eq!(
+        frame_graph.compiled.position_by_pass.len(),
         frame_graph.compiled.declared_pass_count,
     );
     debug_assert_eq!(frame_graph.post_execution_bindings, POST_EXECUTION_BINDINGS);

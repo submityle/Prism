@@ -10,6 +10,9 @@
 //! references two different tasks form can never alias the same column slot —
 //! the same per-row fetch discipline as the serial
 //! [`QueryIter`](crate::query::QueryIter), just partitioned across threads.
+//! Chunk predicates are evaluated before dispatch: batches touching only
+//! rejected chunks are never allocated or spawned. The surviving batches keep
+//! the original row-batch grid, trimmed to their first/last accepted chunk.
 //!
 //! # Soundness model
 //!
@@ -82,25 +85,65 @@ struct Batch {
     end: usize,
 }
 
-/// Partition the matched archetypes into row batches of at most `batch_size`.
-fn build_batches(world: &World, archetypes: &[ArchetypeId], batch_size: usize) -> Vec<Batch> {
+/// Partition candidate chunks on the original row-batch grid. Cold chunks do
+/// not create batches, even when a small batch size would split one cold chunk
+/// into many tasks. Two accepted chunks in the same logical batch share one
+/// task; `run_batch` still skips any rejected chunks between them.
+///
+/// # Safety
+/// Every id in `archetypes` must satisfy `F::matches` for `filter_state`.
+unsafe fn build_batches<F: QueryFilter>(
+    world: &World,
+    filter_state: &F::State,
+    archetypes: &[ArchetypeId],
+    last_run: Tick,
+    this_run: Tick,
+    batch_size: usize,
+) -> Vec<Batch> {
     let batch_size = batch_size.max(1);
-    let mut batches = Vec::new();
+    let mut batches: Vec<Batch> = Vec::new();
     for &archetype in archetypes {
-        let len = world
+        let arch = world
             .archetypes()
             .get(archetype)
-            .expect("matched archetype id must resolve")
-            .len();
-        let mut start = 0;
-        while start < len {
-            let end = (start + batch_size).min(len);
-            batches.push(Batch {
-                archetype,
-                start,
-                end,
-            });
-            start = end;
+            .expect("matched archetype id must resolve");
+        let len = arch.len();
+        if len == 0 {
+            continue;
+        }
+        // SAFETY: matched archetypes satisfy F::matches (caller contract).
+        // This cursor stays on the dispatching thread and is dropped before
+        // tasks start; F::Fetch need not be Send or Sync.
+        let filter_fetch =
+            unsafe { F::init_fetch(filter_state, arch, world.sparse_sets(), last_run, this_run) };
+        let rows_per_chunk = arch.table().rows_per_chunk().max(1);
+        let mut next_chunk = 0;
+        while let Some(chunk) =
+            F::next_candidate_chunk(filter_fetch, next_chunk, len.div_ceil(rows_per_chunk))
+        {
+            let chunk_start = chunk * rows_per_chunk;
+            let chunk_end = chunk_start + rows_per_chunk.min(len - chunk_start);
+            let mut start = chunk_start;
+            while start < chunk_end {
+                // Keep the original grid, including partial physical
+                // chunks, without overflowing for batch_size=usize::MAX.
+                let remaining_in_batch = batch_size - start % batch_size;
+                let end = start + remaining_in_batch.min(chunk_end - start);
+                if let Some(previous) = batches.last_mut().filter(|previous| {
+                    previous.archetype == archetype
+                        && previous.start / batch_size == start / batch_size
+                }) {
+                    previous.end = end;
+                } else {
+                    batches.push(Batch {
+                        archetype,
+                        start,
+                        end,
+                    });
+                }
+                start = end;
+            }
+            next_chunk = chunk + 1;
         }
     }
     batches
@@ -152,9 +195,20 @@ unsafe fn run_batch<D, F, Func>(
     let rows_per_chunk = archetype.table().rows_per_chunk().max(1);
     let mut start = batch.start;
     while start < batch.end {
-        let chunk = start / rows_per_chunk;
-        let chunk_end = ((chunk + 1) * rows_per_chunk).min(archetype.len());
+        let Some(chunk) = F::next_candidate_chunk(
+            filter_fetch,
+            start / rows_per_chunk,
+            batch.end.div_ceil(rows_per_chunk),
+        ) else {
+            break;
+        };
+        let chunk_start = chunk * rows_per_chunk;
+        start = start.max(chunk_start);
+        let chunk_end = chunk_start + rows_per_chunk.min(archetype.len() - chunk_start);
         let end = chunk_end.min(batch.end);
+        // The verdict covers the entire physical chunk, so it is also valid
+        // for a batch starting or ending in its middle. Do not initialise D's
+        // cursor (or evaluate row predicates) for a rejected chunk.
         // SAFETY: `batch.archetype` satisfies `D::matches` (caller contract) —
         // the precondition of `init_fetch_for_chunk`.
         let fetch = unsafe {
@@ -212,9 +266,19 @@ pub(crate) unsafe fn par_for_each_raw<D, F, Func>(
     F: QueryFilter,
     Func: Fn(D::Item<'_>) + Send + Sync,
 {
-    // SAFETY: forming a shared `&World` to size the batches is sound under the
-    // caller's validity contract.
-    let batches = build_batches(unsafe { &*world }, archetypes, batch_size);
+    // SAFETY: the caller guarantees a valid shared world view and every id
+    // satisfies F::matches. Planning reads only filter metadata, before any
+    // task can initialise D's cursor or stamp its mutable component columns.
+    let batches = unsafe {
+        build_batches::<F>(
+            &*world,
+            filter_state,
+            archetypes,
+            last_run,
+            this_run,
+            batch_size,
+        )
+    };
     if batches.is_empty() {
         return;
     }

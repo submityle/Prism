@@ -103,6 +103,8 @@ pub struct GpuImage {
     pub extent: Extent3d,
     /// The texture's format.
     pub format: TextureFormat,
+    /// Number of uploaded mip levels.
+    pub mip_level_count: u32,
     /// The sampler descriptor the current sampler was created from, so a
     /// re-prepare knows whether it can keep it.
     sampler_descriptor: SamplerDescriptor,
@@ -132,11 +134,9 @@ pub fn prepare_image(
     let extent = source.extent();
     let format = source.format();
     let mut transaction = ImageResourceTransaction::new(device);
-    let texture = transaction.create_texture(&TextureDescriptor::new_2d(
-        extent,
-        format,
-        IMAGE_TEXTURE_USAGES,
-    ));
+    let mut descriptor = TextureDescriptor::new_2d(extent, format, IMAGE_TEXTURE_USAGES);
+    descriptor.mip_level_count = source.mip_level_count();
+    let texture = transaction.create_texture(&descriptor);
     let view = transaction.create_view(texture);
 
     let desired_sampler = source.sampler();
@@ -150,20 +150,28 @@ pub fn prepare_image(
         }
     };
 
-    queue.write_texture(
-        TextureWrite {
-            texture,
-            mip_level: 0,
-            origin: [0, 0, 0],
-            size: extent,
-        },
-        source.data(),
-        ImageDataLayout {
-            offset: 0,
-            bytes_per_row: Some(source.bytes_per_row()),
-            rows_per_image: Some(extent.height),
-        },
-    );
+    for mip_level in 0..source.mip_level_count() {
+        let mip_extent = source
+            .mip_extent(mip_level)
+            .expect("validated image must expose every mip extent");
+        let data = source
+            .mip_data(mip_level)
+            .expect("validated image must expose every mip payload");
+        queue.write_texture(
+            TextureWrite {
+                texture,
+                mip_level,
+                origin: [0, 0, 0],
+                size: mip_extent,
+            },
+            data,
+            ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(mip_extent.width * format.bytes_per_texel()),
+                rows_per_image: Some(mip_extent.height),
+            },
+        );
+    }
 
     transaction.commit();
     if let Some(previous) = previous {
@@ -180,6 +188,7 @@ pub fn prepare_image(
         sampler,
         extent,
         format,
+        mip_level_count: source.mip_level_count(),
         sampler_descriptor: desired_sampler.clone(),
     }
 }

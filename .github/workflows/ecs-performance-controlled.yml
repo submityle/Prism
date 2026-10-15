@@ -1,0 +1,101 @@
+name: ECS controlled performance regression
+
+# Never execute unreviewed PRs automatically on a persistent self-hosted runner.
+# Configure a protected `ecs-performance` environment and an exclusive Linux
+# x64 runner labelled `ecs-perf-exclusive`. Set these environment variables:
+# ECS_PERF_MACHINE_ID, ECS_PERF_BASELINE_PATH (persistent absolute path),
+# ECS_PERF_TARGET_DIR (shared absolute Cargo target path). Baseline creation and
+# replacement are explicit operator actions, never a compare fallback.
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Compare against accepted baseline, or explicitly accept a new baseline
+        type: choice
+        options:
+          - compare
+          - create-baseline
+          - replace-baseline
+        default: compare
+      max_regression_percent:
+        description: Maximum allowed median slowdown percent (operator-selected, not an absolute hardware target)
+        type: string
+        required: true
+
+# The entire runner is reserved across ECS perf runs, including baseline writes.
+concurrency:
+  group: ecs-controlled-performance
+  cancel-in-progress: false
+
+jobs:
+  controlled:
+    name: Fingerprinted baseline regression gate
+    environment: ecs-performance
+    runs-on: [self-hosted, linux, x64, ecs-perf-exclusive]
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: 0
+      PYTHONDONTWRITEBYTECODE: 1
+      ECS_PERF_MACHINE_ID: ${{ vars.ECS_PERF_MACHINE_ID }}
+      ECS_PERF_BASELINE_PATH: ${{ vars.ECS_PERF_BASELINE_PATH }}
+      ECS_PERF_TARGET_DIR: ${{ vars.ECS_PERF_TARGET_DIR }}
+      OPERATION: ${{ inputs.operation }}
+      THRESHOLD: ${{ inputs.max_regression_percent }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Require explicit runner configuration
+        shell: bash
+        run: |
+          test -n "$ECS_PERF_MACHINE_ID"
+          test -n "$THRESHOLD"
+          case "$ECS_PERF_BASELINE_PATH" in /*) ;; *) echo 'Baseline path must be absolute'; exit 2 ;; esac
+          case "$ECS_PERF_TARGET_DIR" in /*) ;; *) echo 'Shared target path must be absolute'; exit 2 ;; esac
+          if [ "$OPERATION" = compare ]; then
+            test -f "$ECS_PERF_BASELINE_PATH"
+          fi
+      - name: Comparator self-tests
+        run: python3 -m unittest discover -s tools/ecs-perf -p 'test_*.py' -v
+      - uses: ./.github/actions/install-rust
+      - name: Verify deterministic contracts before accepting any timings
+        run: |
+          cargo test --locked --release --target-dir "$ECS_PERF_TARGET_DIR" \
+            -p prism_ecs --features multi_thread,simd --test scale perf_contract_ -- --test-threads=1
+      - name: Collect real release-mode samples
+        run: |
+          python3 tools/ecs-perf/gate.py measure --controlled-machine \
+            --machine-id "$ECS_PERF_MACHINE_ID" --target-dir "$ECS_PERF_TARGET_DIR" \
+            --output "$RUNNER_TEMP/ecs-perf-${{ github.run_id }}-${{ github.run_attempt }}.json"
+      - name: Reject regression or incompatible runner
+        if: inputs.operation == 'compare'
+        run: |
+          python3 tools/ecs-perf/gate.py compare \
+            --baseline "$ECS_PERF_BASELINE_PATH" \
+            --measurement "$RUNNER_TEMP/ecs-perf-${{ github.run_id }}-${{ github.run_attempt }}.json" \
+            --max-regression-percent "$THRESHOLD" \
+            --report "$RUNNER_TEMP/ecs-perf-report-${{ github.run_id }}-${{ github.run_attempt }}.json"
+      - name: Create baseline without overwriting an existing acceptance
+        if: inputs.operation == 'create-baseline'
+        run: |
+          python3 tools/ecs-perf/gate.py record-baseline \
+            --baseline "$ECS_PERF_BASELINE_PATH" \
+            --measurement "$RUNNER_TEMP/ecs-perf-${{ github.run_id }}-${{ github.run_attempt }}.json"
+      - name: Explicitly replace accepted baseline
+        if: inputs.operation == 'replace-baseline'
+        run: |
+          python3 tools/ecs-perf/gate.py record-baseline --replace \
+            --baseline "$ECS_PERF_BASELINE_PATH" \
+            --measurement "$RUNNER_TEMP/ecs-perf-${{ github.run_id }}-${{ github.run_attempt }}.json"
+      - name: Preserve measurement and comparison evidence (also on regression)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ecs-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/ecs-perf-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/ecs-perf-report-${{ github.run_id }}-${{ github.run_attempt }}.json

@@ -109,6 +109,51 @@ fn from_rows_rejects_bad_input() {
 }
 
 #[test]
+fn sparse_node_rows_preserve_os_ids_and_descriptor_alignment() {
+    // Fixture only: sparse ids model a platform probe result, but this test
+    // does not claim that this host has nodes 2 and 9 or that the distances
+    // are measured hardware values.
+    let distances = NumaDistanceMatrix::from_node_rows(
+        vec![node(2), node(9)],
+        vec![vec![10, 31], vec![29, 10]],
+    )
+    .unwrap();
+    assert_eq!(distances.node_ids(), &[node(2), node(9)]);
+    assert_eq!(distances.distance(node(2), node(9)), 31);
+    assert_eq!(distances.distance(node(9), node(2)), 29);
+    assert_eq!(distances.get(node(0), node(9)), None);
+
+    let descriptor = TopologyDescriptor::new(
+        vec![pcore(0, 2), ecore(1, 9)],
+        distances,
+        CacheTopology::empty(),
+    )
+    .unwrap();
+    assert_eq!(descriptor.node_count(), 2);
+    assert_eq!(descriptor.distances().node_ids(), &[node(2), node(9)]);
+
+    // Same number of matrix rows is not enough: the OS ids must align with
+    // the core list so a sparse probe cannot silently be renumbered.
+    let wrong_ids = NumaDistanceMatrix::from_node_rows(
+        vec![node(0), node(1)],
+        vec![vec![10, 31], vec![29, 10]],
+    )
+    .unwrap();
+    assert_eq!(
+        TopologyDescriptor::new(
+            vec![pcore(0, 2), ecore(1, 9)],
+            wrong_ids,
+            CacheTopology::empty(),
+        )
+        .unwrap_err(),
+        TopologyError::DistanceNodeMismatch {
+            cores_nodes: 2,
+            matrix_nodes: 2,
+        }
+    );
+}
+
+#[test]
 #[should_panic(expected = "out of range")]
 fn distance_panics_out_of_range() {
     let m = NumaDistanceMatrix::uniform(2, 20);

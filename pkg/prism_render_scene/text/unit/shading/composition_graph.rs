@@ -27,12 +27,16 @@ fn composition_is_resident_and_follows_water_response_producer() {
         .iter()
         .position(|resource| resource.name == "hdr_scene_color")
         .unwrap();
-    assert!(compiled
-        .barriers
-        .iter()
-        .any(|barrier| barrier.resource.0 as usize == hdr
-            && barrier.source.0 as usize == water
-            && barrier.destination.0 as usize == composition));
+    let (hdr_is_texture, hdr_local_index) = logical_resource_index(&graph, hdr);
+    assert!(hdr_is_texture);
+    assert!(compiled.logical_barriers.iter().any(|barrier| {
+        matches!(
+            barrier.resource,
+            prism_render_graph::plan::LogicalResource::Texture(resource)
+                if resource.get() as usize == hdr_local_index
+        ) && barrier.source == water
+            && barrier.destination == composition
+    }));
     for plane in [
         CompositionPlane::Left,
         CompositionPlane::Right,
@@ -68,13 +72,7 @@ fn composition_is_resident_and_follows_water_response_producer() {
             .kind,
         AccessKind::StorageRead
     );
-    let position = |pass| {
-        compiled
-            .execution_order
-            .iter()
-            .position(|id| id.0 as usize == pass)
-            .unwrap()
-    };
+    let position = |pass| compiled.order.iter().position(|id| *id == pass).unwrap();
     assert!(position(resolve) < position(composition));
     assert!(position(water) < position(composition));
 

@@ -8,6 +8,8 @@
 //! [`FieldBinding::push`] only mutates the component when the projected field
 //! differs from the signal's value, so it never sets a spurious change tick.
 
+use std::cell::RefCell;
+
 use prism_ecs::prelude::Tick;
 use prism_ecs::prelude::{Component, Entity, World};
 use prism_ui_reactive::Signal;
@@ -23,6 +25,7 @@ pub struct FieldBinding<C: Component, T: Clone + PartialEq + 'static> {
     reader: Box<dyn Fn(&C) -> T>,
     writer: Option<Box<dyn Fn(&mut C, &T)>>,
     last_tick: Option<Tick>,
+    last_signal: RefCell<Option<T>>,
 }
 
 impl<C: Component, T: Clone + PartialEq + 'static> FieldBinding<C, T> {
@@ -34,6 +37,7 @@ impl<C: Component, T: Clone + PartialEq + 'static> FieldBinding<C, T> {
             reader: Box::new(reader),
             writer: None,
             last_tick: None,
+            last_signal: RefCell::new(None),
         }
     }
 
@@ -49,6 +53,7 @@ impl<C: Component, T: Clone + PartialEq + 'static> FieldBinding<C, T> {
             reader: Box::new(reader),
             writer: Some(Box::new(writer)),
             last_tick: None,
+            last_signal: RefCell::new(None),
         }
     }
 
@@ -76,9 +81,11 @@ impl<C: Component, T: Clone + PartialEq + 'static> FieldBinding<C, T> {
     /// already equal to the signal's current value.
     pub fn pull(&mut self, world: &World, entity: Entity) -> bool {
         let Ok(entity_ref) = world.get_entity(entity) else {
+            self.last_tick = None;
             return false;
         };
         let Some(component) = entity_ref.get_ref::<C>() else {
+            self.last_tick = None;
             return false;
         };
 
@@ -92,7 +99,29 @@ impl<C: Component, T: Clone + PartialEq + 'static> FieldBinding<C, T> {
 
         let value = (self.reader)(&component);
         self.last_tick = Some(component.last_changed());
+        *self.last_signal.borrow_mut() = Some(value.clone());
         self.signal.set_if_changed(value)
+    }
+
+    /// Read a notified value even if its tick equals a previous observation.
+    /// Lifecycle replacement and snapshot restoration need this path: neither
+    /// is required to have a strictly newer component tick.
+    pub(crate) fn refresh(&mut self, world: &World, entity: Entity) -> bool {
+        self.last_tick = None;
+        self.pull(world, entity)
+    }
+
+    /// Push only if the signal differs from the last successful synchronization.
+    /// Quiet two-way bindings therefore do not read ECS storage at all.
+    pub(crate) fn push_changed(&self, world: &mut World, entity: Entity) -> bool {
+        if self.writer.is_none() {
+            return false;
+        }
+        let value = self.signal.get_untracked();
+        if self.last_signal.borrow().as_ref() == Some(&value) {
+            return false;
+        }
+        self.push_value(world, entity, value)
     }
 
     /// Writes the signal's value back onto the component field when they differ.
@@ -105,10 +134,17 @@ impl<C: Component, T: Clone + PartialEq + 'static> FieldBinding<C, T> {
     where
         C: Component,
     {
+        if self.writer.is_none() {
+            return false;
+        }
+        let value = self.signal.get_untracked();
+        self.push_value(world, entity, value)
+    }
+
+    fn push_value(&self, world: &mut World, entity: Entity, value: T) -> bool {
         let Some(writer) = self.writer.as_ref() else {
             return false;
         };
-        let value = self.signal.get_untracked();
         let Some(mut component) = world.get_mut::<C>(entity) else {
             return false;
         };
@@ -118,9 +154,11 @@ impl<C: Component, T: Clone + PartialEq + 'static> FieldBinding<C, T> {
         // conditional and avoids spurious change detection.
         let current = (self.reader)(&component);
         if current == value {
+            *self.last_signal.borrow_mut() = Some(value);
             return false;
         }
         writer(&mut component, &value);
+        *self.last_signal.borrow_mut() = Some(value);
         true
     }
 }

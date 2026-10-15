@@ -6,7 +6,10 @@ use flate2::{write::DeflateEncoder, Compression};
 use prism_asset::StableGuid;
 
 use crate::chunk::ChunkPlan;
-use crate::format::{Codec, ContainerError, FORMAT_VERSION, HEADER_SIZE, MAGIC, RECORD_SIZE};
+use crate::format::{
+    Codec, ContainerError, CHUNK_FORMAT_VERSION, CHUNK_HEADER_SIZE, CHUNK_RECORD_SIZE,
+    CHUNK_TABLE_RECORD_SIZE, FORMAT_VERSION, HEADER_SIZE, MAGIC, RECORD_SIZE,
+};
 
 /// One uncompressed asset supplied to the deterministic writer.
 #[derive(Clone, Debug)]
@@ -374,6 +377,153 @@ impl ContainerWriter {
                 .copy_from_slice(bytes);
         }
         Ok(out)
+    }
+
+    /// Emits the v2 chunk-table layout. Each planned chunk is encoded
+    /// independently, preserving raw offsets inside the chunk so a request
+    /// touches only its owning chunk.
+    pub fn finish_with_chunk_compression(
+        self,
+        plan: &ChunkPlan,
+        chunk_alignment: u64,
+        codec: Codec,
+    ) -> Result<Vec<u8>, ContainerError> {
+        if chunk_alignment == 0 || !chunk_alignment.is_power_of_two() {
+            return Err(ContainerError::InvalidAlignment);
+        }
+        if !matches!(codec, Codec::Raw | Codec::Deflate) {
+            return Err(ContainerError::UnsupportedCodec(codec as u8));
+        }
+        if self.entries.values().any(|entry| entry.codec != Codec::Raw)
+            || plan.assignments.len() != self.entries.len()
+        {
+            return Err(ContainerError::InvalidDirectory);
+        }
+
+        let mut placements = BTreeMap::new();
+        let mut previous_end = 0_u64;
+        for (index, chunk) in plan.chunks.iter().enumerate() {
+            if chunk.id != index
+                || chunk.start_alignment == 0
+                || !chunk.start_alignment.is_power_of_two()
+                || chunk.offset
+                    != align_up(previous_end, chunk_alignment.max(chunk.start_alignment))?
+                || chunk.placements.is_empty()
+            {
+                return Err(ContainerError::InvalidDirectory);
+            }
+            let mut cursor = 0_u64;
+            for placement in &chunk.placements {
+                if plan.assignments.get(&placement.guid) != Some(&chunk.id)
+                    || placements
+                        .insert(placement.guid, (chunk.id, *placement))
+                        .is_some()
+                {
+                    return Err(ContainerError::InvalidDirectory);
+                }
+                let entry = self
+                    .entries
+                    .get(&placement.guid)
+                    .ok_or(ContainerError::InvalidDirectory)?;
+                if placement.offset != align_up(cursor, chunk_alignment.max(u64::from(entry.alignment)))?
+                    || placement.size != u64::try_from(entry.raw.len()).map_err(|_| ContainerError::IntegerOverflow)?
+                {
+                    return Err(ContainerError::InvalidDirectory);
+                }
+                cursor = placement
+                    .offset
+                    .checked_add(placement.size)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                if cursor > chunk.raw_size { return Err(ContainerError::OutOfBounds); }
+            }
+            if cursor != chunk.raw_size { return Err(ContainerError::InvalidDirectory); }
+            previous_end = chunk.offset.checked_add(chunk.raw_size).ok_or(ContainerError::IntegerOverflow)?;
+        }
+        if placements.len() != self.entries.len() { return Err(ContainerError::InvalidDirectory); }
+
+        let count = u32::try_from(self.entries.len()).map_err(|_| ContainerError::IntegerOverflow)?;
+        let chunk_count = u32::try_from(plan.chunks.len()).map_err(|_| ContainerError::IntegerOverflow)?;
+        let directory_len = self.entries.len().checked_mul(CHUNK_RECORD_SIZE).ok_or(ContainerError::IntegerOverflow)?;
+        let table_len = plan.chunks.len().checked_mul(CHUNK_TABLE_RECORD_SIZE).ok_or(ContainerError::IntegerOverflow)?;
+        let directory_end = CHUNK_HEADER_SIZE.checked_add(directory_len).ok_or(ContainerError::IntegerOverflow)?;
+        let table_offset = align_up(u64::try_from(directory_end).map_err(|_| ContainerError::IntegerOverflow)?, 8)?;
+        let table_end = table_offset.checked_add(u64::try_from(table_len).map_err(|_| ContainerError::IntegerOverflow)?).ok_or(ContainerError::IntegerOverflow)?;
+        let payload_alignment = plan.chunks.iter().fold(chunk_alignment, |a, c| a.max(c.start_alignment));
+        let payload_start = align_up(table_end, payload_alignment)?;
+
+        let mut raw_chunks = Vec::with_capacity(plan.chunks.len());
+        for chunk in &plan.chunks {
+            let mut raw = vec![0; usize::try_from(chunk.raw_size).map_err(|_| ContainerError::IntegerOverflow)?];
+            for placement in &chunk.placements {
+                let bytes = &self.entries.get(&placement.guid).ok_or(ContainerError::InvalidDirectory)?.raw;
+                let start = usize::try_from(placement.offset).map_err(|_| ContainerError::IntegerOverflow)?;
+                let end = start.checked_add(bytes.len()).ok_or(ContainerError::IntegerOverflow)?;
+                raw.get_mut(start..end).ok_or(ContainerError::OutOfBounds)?.copy_from_slice(bytes);
+            }
+            let stored = encode_chunk(&raw, codec)?;
+            raw_chunks.push((raw, stored));
+        }
+
+        let mut directory = Vec::with_capacity(directory_len);
+        for (guid, entry) in &self.entries {
+            let (chunk_id, placement) = placements.get(guid).copied().ok_or(ContainerError::InvalidDirectory)?;
+            let chunk = plan.chunks.get(chunk_id).ok_or(ContainerError::InvalidDirectory)?;
+            let absolute = payload_start.checked_add(chunk.offset).and_then(|v| v.checked_add(placement.offset)).ok_or(ContainerError::IntegerOverflow)?;
+            if absolute % u64::from(entry.alignment) != 0 { return Err(ContainerError::InvalidDirectory); }
+            directory.extend_from_slice(&guid.to_u128().to_le_bytes());
+            directory.extend_from_slice(&u32::try_from(chunk_id).map_err(|_| ContainerError::IntegerOverflow)?.to_le_bytes());
+            directory.extend_from_slice(&0_u32.to_le_bytes());
+            directory.extend_from_slice(&placement.offset.to_le_bytes());
+            directory.extend_from_slice(&placement.size.to_le_bytes());
+            directory.extend_from_slice(blake3::hash(&entry.raw).as_bytes());
+            directory.extend_from_slice(&entry.alignment.to_le_bytes());
+            directory.extend_from_slice(&0_u32.to_le_bytes());
+        }
+        let mut table = Vec::with_capacity(table_len);
+        for (chunk, (raw, stored)) in plan.chunks.iter().zip(raw_chunks.iter()) {
+            table.extend_from_slice(&payload_start.checked_add(chunk.offset).ok_or(ContainerError::IntegerOverflow)?.to_le_bytes());
+            table.extend_from_slice(&u64::try_from(stored.len()).map_err(|_| ContainerError::IntegerOverflow)?.to_le_bytes());
+            table.extend_from_slice(&u64::try_from(raw.len()).map_err(|_| ContainerError::IntegerOverflow)?.to_le_bytes());
+            table.push(codec as u8);
+            table.extend_from_slice(&[0; 3]);
+            table.extend_from_slice(blake3::hash(raw).as_bytes());
+            table.extend_from_slice(&0_u32.to_le_bytes());
+        }
+
+        let total_len_u64 = payload_start.checked_add(previous_end).ok_or(ContainerError::IntegerOverflow)?;
+        let mut out = vec![0; usize::try_from(total_len_u64).map_err(|_| ContainerError::IntegerOverflow)?];
+        out[0..8].copy_from_slice(&MAGIC);
+        out[8..10].copy_from_slice(&CHUNK_FORMAT_VERSION.to_le_bytes());
+        out[10..12].copy_from_slice(&(CHUNK_HEADER_SIZE as u16).to_le_bytes());
+        out[16..20].copy_from_slice(&count.to_le_bytes());
+        out[20..24].copy_from_slice(&chunk_count.to_le_bytes());
+        out[24..32].copy_from_slice(&(CHUNK_HEADER_SIZE as u64).to_le_bytes());
+        out[32..40].copy_from_slice(&(directory_len as u64).to_le_bytes());
+        out[40..48].copy_from_slice(&table_offset.to_le_bytes());
+        out[48..56].copy_from_slice(&(table_len as u64).to_le_bytes());
+        out[56..64].copy_from_slice(&payload_start.to_le_bytes());
+        out[64..72].copy_from_slice(&total_len_u64.to_le_bytes());
+        out[72..104].copy_from_slice(blake3::hash(&directory).as_bytes());
+        out[104..136].copy_from_slice(blake3::hash(&table).as_bytes());
+        out[CHUNK_HEADER_SIZE..directory_end].copy_from_slice(&directory);
+        let table_start = usize::try_from(table_offset).map_err(|_| ContainerError::IntegerOverflow)?;
+        out[table_start..table_start + table_len].copy_from_slice(&table);
+        for (chunk, (_, stored)) in plan.chunks.iter().zip(raw_chunks.iter()) {
+            let start = usize::try_from(payload_start.checked_add(chunk.offset).ok_or(ContainerError::IntegerOverflow)?).map_err(|_| ContainerError::IntegerOverflow)?;
+            out[start..start + stored.len()].copy_from_slice(stored);
+        }
+        Ok(out)
+    }
+}
+
+fn encode_chunk(raw: &[u8], codec: Codec) -> Result<Vec<u8>, ContainerError> {
+    match codec {
+        Codec::Raw => Ok(raw.to_vec()),
+        Codec::Deflate => {
+            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(raw).map_err(|_| ContainerError::CompressionFailed)?;
+            encoder.finish().map_err(|_| ContainerError::CompressionFailed)
+        }
     }
 }
 

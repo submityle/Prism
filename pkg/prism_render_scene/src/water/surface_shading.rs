@@ -66,6 +66,9 @@ pub(crate) struct WaterSurfaceShading {
     /// Hybrid-frontend shore blend bias added to foam coverage when crossfading
     /// the `PBR` body into the stylized shallows.
     pub(crate) hybrid_shore_bias: f32,
+    /// Hybrid-frontend stylized overlay opacity, applied after the shore/depth
+    /// response blend and forwarded to the raster/composition ABI.
+    pub(crate) hybrid_overlay_opacity: f32,
 }
 
 impl WaterSurfaceShading {
@@ -97,6 +100,7 @@ impl WaterSurfaceShading {
             toon_foam_threshold: 0.6,
             tint_strength: 0.0,
             hybrid_shore_bias: 0.0,
+            hybrid_overlay_opacity: 0.35,
         }
     }
 
@@ -122,6 +126,7 @@ impl WaterSurfaceShading {
             toon_foam_threshold: self.toon_foam_threshold,
             tint_strength: self.tint_strength,
             hybrid_shore_bias: self.hybrid_shore_bias,
+            hybrid_overlay_opacity: self.hybrid_overlay_opacity,
             viewport_size: view.viewport_size,
         }
     }
@@ -202,6 +207,7 @@ mod tests {
             toon_foam_threshold: 0.55,
             tint_strength: 0.6,
             hybrid_shore_bias: 0.15,
+            hybrid_overlay_opacity: 0.45,
         };
         let view = fixture_view();
 
@@ -227,6 +233,10 @@ mod tests {
         assert_eq!(params.toon_foam_threshold, shading.toon_foam_threshold);
         assert_eq!(params.tint_strength, shading.tint_strength);
         assert_eq!(params.hybrid_shore_bias, shading.hybrid_shore_bias);
+        assert_eq!(
+            params.hybrid_overlay_opacity,
+            shading.hybrid_overlay_opacity
+        );
     }
 
     #[test]

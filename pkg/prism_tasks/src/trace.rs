@@ -26,6 +26,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU64, Ordering};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -152,7 +153,11 @@ impl JobTrace {
             let exec_worker = trace.inner.pool.current_worker_index();
             let start = trace.now_nanos();
             let previous = CURRENT_SPAN.with(|c| c.replace(Some(id)));
-            let result = body();
+            // Catch only long enough to restore the thread-local parent and
+            // commit the end timestamp/counters. Resume the original payload
+            // after the span is complete so TaskPool's panic propagation
+            // contract remains unchanged.
+            let result = catch_unwind(AssertUnwindSafe(body));
             CURRENT_SPAN.with(|c| c.set(previous));
             let end = trace.now_nanos();
             trace.commit(Span {
@@ -169,7 +174,10 @@ impl JobTrace {
             if exec_worker != origin_worker {
                 trace.inner.migrated[bucket].fetch_add(1, Ordering::Relaxed);
             }
-            result
+            match result {
+                Ok(result) => result,
+                Err(payload) => resume_unwind(payload),
+            }
         }
     }
 

@@ -1,21 +1,65 @@
-//! A type-erased, owned snapshot column: one cloned value per entity that holds
-//! a given component, kept densely with its exact change ticks (design §14).
+//! A type-erased snapshot column: one immutable value reference per holder,
+//! kept densely with its exact change ticks (design §14).
 //!
 //! The live world stores component values it owns; a snapshot must own an
 //! independent copy so the world can keep mutating (predict) while the snapshot
 //! stays frozen (authoritative), and so a snapshot can be restored repeatedly
-//! (rollback replays the same confirmed frame many times). We therefore clone
-//! each captured value through the component's type-erased [`CloneFn`] glue into
-//! our own [`BlobVec`], which also carries the component's [`DropFn`] so the
-//! cloned values are released when the snapshot is dropped.
+//! (rollback replays the same confirmed frame many times). Clone-only values
+//! live in independent [`BlobVec`] storage. Explicit SnapshotValue registration
+//! also permits sharing frozen, snapshot-owned chunk buffers across captures,
+//! deltas and reconstructed history. These buffers never alias live storage.
 
 use alloc::alloc::{alloc, dealloc};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 
 use crate::change::Tick;
 use crate::component::{CloneFn, ComponentId, DropFn, SnapshotHashFn, StorageType};
 use crate::storage::BlobVec;
+
+use super::hash::SnapshotEq;
+use super::reuse::ChunkOrigin;
+
+/// Values in this buffer are never exposed mutably or moved out. Arc shares
+/// ownership only after SnapshotValue registration, not arbitrary Clone data.
+pub(super) struct SnapshotChunk {
+    data: BlobVec,
+    pub(super) origin: Option<ChunkOrigin>,
+}
+
+struct SharedCell {
+    chunk: Arc<SnapshotChunk>,
+    slot: usize,
+}
+
+enum SnapshotData {
+    Owned(BlobVec),
+    Shared(Vec<SharedCell>),
+}
+
+impl SnapshotData {
+    fn len(&self) -> usize {
+        match self {
+            Self::Owned(data) => data.len(),
+            Self::Shared(cells) => cells.len(),
+        }
+    }
+
+    /// # Safety
+    /// slot must index an initialized value.
+    unsafe fn get_ptr(&self, slot: usize) -> *const u8 {
+        match self {
+            // SAFETY: forwarded initialized-slot contract.
+            Self::Owned(data) => unsafe { data.get_ptr(slot) },
+            Self::Shared(cells) => {
+                let cell = &cells[slot];
+                // SAFETY: shared cells retain their buffer and a valid slot.
+                unsafe { cell.chunk.data.get_ptr(cell.slot) }
+            }
+        }
+    }
+}
 
 /// Allocate scratch storage for one value of `layout`, tolerating zero-sized
 /// types (for which `alloc` is UB) by returning a dangling-but-aligned pointer.
@@ -61,7 +105,7 @@ pub(super) struct SnapshotColumn {
     pub(super) component: ComponentId,
     /// How the component is stored in the live world (table vs sparse set).
     pub(super) storage: StorageType,
-    /// The component's memory layout (also the stride of `data`).
+    /// The component's memory layout (also the stride within value buffers).
     pub(super) layout: Layout,
     /// Type-erased clone glue used both to capture (clone live → snapshot) and
     /// restore (clone snapshot → live).
@@ -70,8 +114,10 @@ pub(super) struct SnapshotColumn {
     pub(super) drop: Option<DropFn>,
     /// Optional deterministic hash glue for [`state_hash`](super::WorldSnapshot::state_hash).
     pub(super) hash: Option<SnapshotHashFn>,
-    /// The cloned, owned component values, one per holder.
-    pub(super) data: BlobVec,
+    /// Optional field-semantic comparison, captured alongside the value glue.
+    pub(super) equality: Option<SnapshotEq>,
+    /// Independent values or immutable chunk references, one per holder.
+    data: SnapshotData,
     /// Per-value "added" tick, parallel to `data`.
     pub(super) added: Vec<Tick>,
     /// Per-value "changed" tick, parallel to `data`.
@@ -97,7 +143,8 @@ impl SnapshotColumn {
             clone,
             drop,
             hash,
-            data: BlobVec::new(layout, drop),
+            equality: None,
+            data: SnapshotData::Owned(BlobVec::new(layout, drop)),
             added: Vec::new(),
             changed: Vec::new(),
             rows: Vec::new(),
@@ -108,6 +155,82 @@ impl SnapshotColumn {
     #[inline]
     pub(super) fn len(&self) -> usize {
         self.data.len()
+    }
+
+    /// An empty owning column with the same captured type/value contracts.
+    /// Delta fresh storage and reconstructed columns must preserve these even
+    /// after the original world and target snapshot have been dropped.
+    pub(super) fn empty_like(&self) -> Self {
+        let mut column = Self::new(
+            self.component,
+            self.storage,
+            self.layout,
+            self.clone,
+            self.drop,
+            self.hash,
+        );
+        column.equality = self.equality;
+        if matches!(&self.data, SnapshotData::Shared(_)) {
+            column.enable_sharing();
+        }
+        column
+    }
+
+    pub(super) fn enable_sharing(&mut self) {
+        assert_eq!(self.len(), 0, "sharing must be selected before capture");
+        self.data = SnapshotData::Shared(Vec::new());
+    }
+
+    pub(super) fn uses_shared_values(&self) -> bool {
+        matches!(&self.data, SnapshotData::Shared(_))
+    }
+
+    pub(super) fn shared_chunks(&self) -> impl Iterator<Item = &Arc<SnapshotChunk>> {
+        let cells = match &self.data {
+            SnapshotData::Shared(cells) => cells.as_slice(),
+            SnapshotData::Owned(_) => &[],
+        };
+        cells.iter().map(|cell| &cell.chunk)
+    }
+
+    pub(super) fn into_chunk(self, origin: Option<ChunkOrigin>) -> Arc<SnapshotChunk> {
+        let SnapshotData::Owned(data) = self.data else {
+            panic!("capture buffers must be independently owned before freezing");
+        };
+        Arc::new(SnapshotChunk { data, origin })
+    }
+
+    pub(super) fn push_shared(
+        &mut self,
+        chunk: Arc<SnapshotChunk>,
+        slot: usize,
+        added: Tick,
+        changed: Tick,
+        row: u32,
+    ) {
+        assert!(
+            slot < chunk.data.len(),
+            "shared snapshot slot out of bounds"
+        );
+        let SnapshotData::Shared(cells) = &mut self.data else {
+            panic!("shared capture requires value-semantic registration");
+        };
+        cells.push(SharedCell { chunk, slot });
+        self.added.push(added);
+        self.changed.push(changed);
+        self.rows.push(row);
+    }
+
+    /// Identity of the very same frozen value proves reuse without invoking
+    /// user comparison or inspecting value bytes (including heap payloads).
+    pub(super) fn shares_value(&self, slot: usize, other: &Self, other_slot: usize) -> bool {
+        match (&self.data, &other.data) {
+            (SnapshotData::Shared(a), SnapshotData::Shared(b)) => {
+                a[slot].slot == b[other_slot].slot
+                    && Arc::ptr_eq(&a[slot].chunk, &b[other_slot].chunk)
+            }
+            _ => false,
+        }
     }
 
     /// Clone a *live* value at `src` into this column, recording its ticks and
@@ -131,7 +254,19 @@ impl SnapshotColumn {
         unsafe { (self.clone)(src, tmp) };
         // SAFETY: `tmp` now holds an initialized, owned value of the column's
         // type; `push` moves (memcpy) it into `data`, which takes ownership.
-        unsafe { self.data.push(tmp) };
+        match &mut self.data {
+            // SAFETY: clone glue initialized tmp with this column's type.
+            SnapshotData::Owned(data) => unsafe { data.push(tmp) },
+            SnapshotData::Shared(cells) => {
+                let mut data = BlobVec::new(self.layout, self.drop);
+                // SAFETY: tmp owns one initialized value, transferred to data.
+                unsafe { data.push(tmp) };
+                cells.push(SharedCell {
+                    chunk: Arc::new(SnapshotChunk { data, origin: None }),
+                    slot: 0,
+                });
+            }
+        }
         // SAFETY: the value was moved into `data`; free the raw scratch without
         // dropping it (ownership already transferred).
         unsafe { free_scratch(tmp, self.layout) };
@@ -144,7 +279,8 @@ impl SnapshotColumn {
     /// column, carrying over its exact added/changed ticks and recording the
     /// owning-entity index `row`. Used by [`SnapshotDelta`](super::SnapshotDelta)
     /// to assemble a column from a mix of base-snapshot and freshly-captured
-    /// cells — cloning (never moving) so both `src` and this column stay valid.
+    /// cells. Explicit immutable buffers are shared; other values are cloned
+    /// (never moved), so both `src` and this column stay valid.
     ///
     /// # Safety
     /// `src_slot < src.len()`, and `src` must share this column's component
@@ -156,6 +292,19 @@ impl SnapshotColumn {
         src_slot: usize,
         row: u32,
     ) {
+        if let (SnapshotData::Shared(target), SnapshotData::Shared(source)) =
+            (&mut self.data, &src.data)
+        {
+            let cell = &source[src_slot];
+            target.push(SharedCell {
+                chunk: cell.chunk.clone(),
+                slot: cell.slot,
+            });
+            self.added.push(src.added[src_slot]);
+            self.changed.push(src.changed[src_slot]);
+            self.rows.push(row);
+            return;
+        }
         // SAFETY: scratch is a single `layout`-sized aligned slot.
         let tmp = unsafe { alloc_scratch(self.layout) };
         // SAFETY: `src_slot < src.len()` (contract); `tmp` is uninitialized,
@@ -163,7 +312,19 @@ impl SnapshotColumn {
         unsafe { src.clone_value_into(src_slot, tmp) };
         // SAFETY: `tmp` now holds an initialized owned value of the column's
         // type; `push` moves (memcpy) it into `data`, which takes ownership.
-        unsafe { self.data.push(tmp) };
+        match &mut self.data {
+            // SAFETY: tmp contains a clone of the same component type.
+            SnapshotData::Owned(data) => unsafe { data.push(tmp) },
+            SnapshotData::Shared(cells) => {
+                let mut data = BlobVec::new(self.layout, self.drop);
+                // SAFETY: tmp owns one initialized value, transferred to data.
+                unsafe { data.push(tmp) };
+                cells.push(SharedCell {
+                    chunk: Arc::new(SnapshotChunk { data, origin: None }),
+                    slot: 0,
+                });
+            }
+        }
         // SAFETY: the value was moved into `data`; free the raw scratch without
         // dropping it (ownership already transferred).
         unsafe { free_scratch(tmp, self.layout) };
@@ -214,17 +375,29 @@ impl SnapshotColumn {
         out
     }
 
-    /// Raw bytes of the stored value at `slot`, for byte-exact delta/equality
-    /// comparison (design §14 delta encoding is conservative: any byte change
-    /// marks the cell changed).
-    ///
-    /// # Safety
-    /// `slot < len()`.
-    pub(super) unsafe fn value_bytes(&self, slot: usize) -> &[u8] {
-        // SAFETY: `slot < len()` (contract).
-        let ptr = unsafe { self.data.get_ptr(slot) };
-        // SAFETY: `ptr` is valid for `layout.size()` initialized bytes.
-        unsafe { core::slice::from_raw_parts(ptr, self.layout.size()) }
+    /// Compare two owned values through captured typed glue. `None` means no
+    /// compatible comparison contract is available: callers must not infer
+    /// equality from matching ticks, hashes, layouts, or pointer addresses.
+    /// In particular, delta encoding must clone a fresh value in that case.
+    pub(super) fn value_eq(&self, slot: usize, other: &Self, other_slot: usize) -> Option<bool> {
+        assert!(slot < self.len(), "snapshot comparison slot out of bounds");
+        assert!(
+            other_slot < other.len(),
+            "snapshot comparison slot out of bounds"
+        );
+        if self.component != other.component || self.layout != other.layout {
+            return Some(false);
+        }
+        let (left, right) = (self.equality?, other.equality?);
+        if !left.compatible(&right) {
+            return None;
+        }
+        // SAFETY: the checked slots contain initialized owned values. Capture
+        // validates the callbacks against their concrete type and layout, and
+        // empty_like preserves that contract across delta reconstruction.
+        let (a, b) = unsafe { (self.data.get_ptr(slot), other.data.get_ptr(other_slot)) };
+        // SAFETY: both captured callbacks describe the same concrete Rust type.
+        Some(unsafe { left.compare_ptr(a, b) })
     }
 
     /// Fold the value at `slot` into `hasher` via the component's hash glue, if
@@ -249,3 +422,7 @@ impl SnapshotColumn {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "value_semantics_tests.rs"]
+mod value_semantics_tests;

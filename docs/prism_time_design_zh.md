@@ -425,7 +425,7 @@ time.schedule_every(Duration::from_millis(500), |w| tick_regen(w));
 - **诚实边界（payload 而非闭包）**：本层不存 `FnMut` 闭包（闭包无法确定性 `Clone` 做双跑比对，也无法在无分配器 `no_std` 内核落地），而是拥有时间内核能确定性拥有的部分——按精确触发时间定序、携带用户 payload 的优先队列；由 payload 映射回 gameplay 动作（刷怪 / buff 到期 / 冷却）属 gameplay 层接线（见 §24.9）。走 Virtual（受暂停/缩放）或 Real（UI/心跳）时钟由调用方选择喂哪条 delta。
 - `no_std + alloc`（堆为 `alloc::collections::BinaryHeap`）、无 `unsafe`。单测见 `tests_scheduler.rs`（准点单发、同刻按序、大 delta 时序、周期追帧、取消、重调度保句柄、槽位复用不复活陈旧句柄、触发上限分批、双跑一致、零周期 panic 等）。
 
-### 24.7 挂起 / 恢复与后台暂停 ✅ 已部分交付（`suspend`，CPU 可做部分）
+### 24.7 挂起 / 恢复与后台暂停 ✅ 已交付（确定性核心 + OS 回调接线）
 
 进程挂起（移动端切后台、主机休眠、窗口最小化）后恢复：
 
@@ -433,12 +433,12 @@ time.schedule_every(Duration::from_millis(500), |w| tick_regen(w));
 - 可配置后台行为:暂停 Virtual(游戏冻结)、Real 照走(网络心跳不断)、或低频后台更新。
 - 平台挂起/恢复事件由 `prism_platform`/`prism_app` 转发给时间系统。
 
-**交付状态（已落地：纯 CPU 可做部分）**：`pkg/prism_time/src/suspend.rs`（对调用方喂入的时间戳做确定性修正，不调用任何 OS 挂起 API）。
+**交付状态**：`pkg/prism_time/src/suspend.rs` 仍保持纯 CPU、无 OS 依赖；`prism_app::lifecycle::SuspendResumeAdapter` 接收平台后端提供的带单调时间戳事件，将它同时转发到 `AppLifecycle` 并更新 `EngineClocks` 内的 `SuspendableClock`。自动实时驱动使用同一 `prism_platform::clock` 时间基准，因此恢复后的首帧只折入恢复后的运行区间。手动 `ManualDelta` 与 headless 测试仍完全不读 OS。
 - **挂起期 elapsed 不计入**：`SuspendableClock` 消费单调递增的墙钟时间戳（`Duration`，自任意 epoch 起），**只在运行区间**把墙钟差折进模拟 elapsed；`suspend(at)` 先把挂起瞬刻前的运行部分计入再停表，`resume(at)` 以 resume 瞬刻为新基准重开——`[suspend, resume]` 这段挂起墙钟差对 elapsed/tick 贡献为零，故恢复瞬间**不产生巨 delta 跳变**（避免物理穿墙/动画跳跃）。
 - **elapsed/tick 确定性修正**：权威 elapsed 为整数纳秒（`u128`），`elapsed()`/`elapsed_nanos()`/`ticks(tick)=⌊elapsed/tick⌋` 均由其派生；挂起/恢复的修正体现在同一权威量上，tick 视图与 elapsed 恒一致。
 - **可选最大追帧钳制**：`with_max_delta`（接 §12 最大 delta 钳制）把任一次运行步长的折入上限钳住，超额部分丢弃并计入 `total_clamped`——既吸收普通卡顿，也兜底任何异常长步；`total_suspended` 报告累计被排除的挂起时长。挂起态下喂入的时间戳被忽略（`advance_to` 返回零），非单调回退时间戳饱和为零 delta。
 - 全程整数纳秒运算，内部不读墙钟、无浮点：同一时间戳序列跨运行产出位相同的模拟时间线。`no_std + alloc`、无 `unsafe`。单测见 `tests_suspend.rs`（运行累加、挂起恢复排除间隙且无尖峰、首观测前挂起、重复挂起/游离恢复幂等、最大 delta 钳制与丢弃计量、零钳制冻结、`reset` 保钳、双跑一致等）。
-- **诚实边界（PLANNED）**：真实 OS 挂起/恢复信号的接线（移动端切后台、主机休眠、窗口最小化）与后台策略选择（冻结 Virtual / Real 照走心跳 / 低频后台更新）由 `prism_platform`/`prism_app` 读取并转发给本时钟——该事件源接线仍为 **PLANNED**；本层只对调用方喂入的时间戳做确定性修正，不触碰任何 OS API 或系统时钟。
+- **诚实边界**：真实 OS 事件源不由时间内核伪造。`prism_window_winit` 的 winit `resumed/suspended` host 回调是当前实际接线；iOS/Android 能力标为 `ProcessLifecycle`，macOS/Windows 标为 `HostCallbackOnly`，表示需要原生宿主继续注入睡眠/电源通知，不能把 CPU 定时轮询当作 OS 接线。后台策略（冻结 Virtual / Real 照走心跳 / 低频后台更新）仍由 `prism_app`/消费方决定；本层只做确定性修正，不调用任何 OS 挂起 API。
 
 ### 24.8 多世界时间域隔离与确定性审计 ✅ 已交付（`multiworld`）
 
@@ -452,11 +452,11 @@ time.schedule_every(Duration::from_millis(500), |w| tick_regen(w));
 
 ### 24.9 诚实边界
 
-本章 **24.1 录制回放、24.4 帧预算自适应质量、24.5 长会话漂移修正、24.6 游戏内定时调度器、24.8 多世界时间域隔离/确定性审计已落地，24.7 挂起/恢复已落地纯 CPU 可做部分**（见各节「交付状态」，`recording` / `adaptive_quality` / `drift` / `scheduler` / `multiworld` / `suspend` 六模块，`cargo test -p prism_time` 全绿、`cargo clippy --all-targets` 零告警）；24.2 帧节奏 + 24.3 VRR 已落地纯 CPU 调度数据模型（`pacing`）。**24.1 录制回放 + 24.8 确定性审计**是确定性系统(物理/网络)的调试基石,已随 M4 确定性路线落地;**24.4 自适应质量**已交付纯 CPU 控制器（档位决策），真实 per-stage 耗时采集(`prism_profiler`/§16)与档位→渲染设置映射属消费方接线;**24.7 挂起/恢复**已交付时间戳层确定性修正（挂起期不计入 elapsed/tick、可选最大追帧钳制），真实 OS 挂起/恢复信号接线仍为 PLANNED,随平台接线落地;24.2 帧节奏 + 24.3 VRR 已交付纯 CPU 调度模型（`FramePacer`/`ReflexGate`/`VrrWindow`），真实 present 时间戳采集、显示 VRR 范围查询与 RHI 提交属 M2 主循环/平台接线。
+本章 **24.1 录制回放、24.4 帧预算自适应质量、24.5 长会话漂移修正、24.6 游戏内定时调度器、24.7 挂起/恢复、24.8 多世界时间域隔离/确定性审计已落地**（见各节「交付状态」，`recording` / `adaptive_quality` / `drift` / `scheduler` / `suspend` / `multiworld` 六模块）；24.2 帧节奏 + 24.3 VRR 已落地纯 CPU 调度模型（`pacing`）。24.7 的 OS 事件能力仍按平台 capability 分层：移动端 host lifecycle 已接入，macOS/Windows 的原生睡眠/电源通知仍需宿主 callback，当前 macOS 工作站未做真机睡眠恢复演练。
 
 **24.4 / 24.5 / 24.6 / 24.7 的诚实边界（硬件 / 接线归属）**：本层只提供**确定性算法 / 控制决策数据模型**,不碰任何真实硬件、渲染或墙钟。
 - **24.4 自适应质量**：`AdaptiveQualityController` 只产出整数质量档位与升降决策；真实 per-stage 帧耗时采集(`prism_profiler`/§16 可观测性)与把档位映射到动态分辨率/LOD/阴影级联/粒子上限等渲染设置,属渲染/gameplay 层接线,控制器自身不分配、不读时钟。
-- **24.7 挂起/恢复**：`SuspendableClock` 只对调用方喂入的单调时间戳做确定性修正(挂起期不计入 elapsed/tick、可选最大追帧钳制);真实 OS 挂起/恢复事件源与后台策略(冻结 Virtual / Real 照走 / 低频后台)由 `prism_platform`/`prism_app` 转发——该接线为 **PLANNED**,本层不调用任何 OS 挂起 API。
+- **24.7 挂起/恢复**：`SuspendableClock` 只对单调时间戳做确定性修正；平台后端通过 `SuspendEvent` 注入，`SuspendResumeAdapter` 负责 `SuspendableClock` + `AppLifecycle` 双写。移动端走 winit process lifecycle，macOS/Windows 暂为 host callback-only；本层不调用任何 OS 挂起 API。
 - **真实 OS 单调时钟 / 平台计数器频率与位宽**由 `prism_platform` 读取并注入；`MonotonicBaseline` 只对调用方喂入的原始计数值做回绕安全累加,位宽(`width_bits`)/频率(`ticks_per_sec`)为调用方声明的参数,本模块不探测硬件。
 - **NTP / 权威服务器参考样本**由 net 层(往返估计)或平台授时提供；`DriftCorrector` 只消费调用方给出的参考 `Duration`/偏移,执行有界 slew 修正,不发起网络请求、不读系统墙钟。真实网络条件下的收敛手感须联网实测,本层仅保证算法层面的单调性与确定性。
 - **调度器 payload→动作映射、Virtual/Real 时钟选择、World 调用**属 gameplay 层接线；`Scheduler` 不存闭包、不调用 World,只按精确触发时间定序派发携带 payload 的 `Fired` 事件(理由见 §24.6「诚实边界」)。喂哪条时钟的 delta 由调用方决定。

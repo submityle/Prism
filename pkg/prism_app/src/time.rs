@@ -28,7 +28,7 @@
 use core::ops::{Deref, DerefMut};
 
 use prism_ecs::resource::Resource;
-use prism_time::{Clocks, Duration};
+use prism_time::{Clocks, Duration, SuspendableClock};
 
 /// The engine's [`Clocks`] bundle, stored as a world
 /// resource.
@@ -41,7 +41,7 @@ use prism_time::{Clocks, Duration};
 /// [`Fixed`](prism_time::Fixed) inside the fixed loop (see
 /// [`crate::fixed`]).
 #[derive(Clone, Copy, Debug, Default)]
-pub struct EngineClocks(pub Clocks);
+pub struct EngineClocks(pub Clocks, SuspendableClock);
 
 impl Resource for EngineClocks {}
 
@@ -50,14 +50,29 @@ impl EngineClocks {
     /// [`Virtual`](prism_time::Virtual).
     #[inline]
     pub fn new() -> Self {
-        Self(Clocks::new())
+        Self(Clocks::new(), SuspendableClock::new())
     }
 
     /// Wrap an existing [`Clocks`] bundle (e.g. one
     /// pre-configured with a non-default fixed timestep).
     #[inline]
     pub fn from_clocks(clocks: Clocks) -> Self {
-        Self(clocks)
+        Self(clocks, SuspendableClock::new())
+    }
+
+    /// The deterministic suspend-aware real-time correction used by the live
+    /// automatic driver. It is separate from `Time<Real>` so callers can
+    /// inspect the exact excluded suspend span without coupling the time
+    /// kernel to an OS event source.
+    #[inline]
+    pub fn suspendable(&self) -> &SuspendableClock {
+        &self.1
+    }
+
+    /// Mutable access for the platform lifecycle adapter.
+    #[inline]
+    pub fn suspendable_mut(&mut self) -> &mut SuspendableClock {
+        &mut self.1
     }
 }
 
@@ -150,7 +165,14 @@ pub fn advance_time(world: &mut prism_ecs::world::World) {
 fn advance_real_automatic(clocks: &mut EngineClocks) {
     #[cfg(feature = "std")]
     {
-        clocks.real_mut().update();
+        // The platform timestamp is also the timestamp delivered to the
+        // suspend adapter. Once a host suspend edge rebases this clock, the
+        // first post-resume frame sees only the time since resume.
+        let at = prism_platform::now();
+        let delta = clocks
+            .suspendable_mut()
+            .advance_to(Duration::from_nanos(at.0));
+        clocks.real_mut().update_with_delta(delta);
     }
     #[cfg(not(feature = "std"))]
     {

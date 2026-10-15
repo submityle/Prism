@@ -52,11 +52,15 @@
 extern crate alloc;
 
 pub mod bisect;
+#[cfg(feature = "ecs")]
+pub mod ecs;
 pub mod frame;
 pub mod replay;
 pub mod timeline;
 
 pub use bisect::{first_matching, first_matching_index, Bisection};
+#[cfg(feature = "ecs")]
+pub use ecs::{EcsFrame, EcsHistoryError, EcsHistoryStorage, EcsTimeline};
 pub use frame::Frame;
 pub use replay::{Replay, ReplayStep, Replayer};
 pub use timeline::Timeline;

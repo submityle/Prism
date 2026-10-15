@@ -10,10 +10,14 @@ publish = false
 prism_ui = { path = "../prism_ui" }
 prism_ui_devtools = { path = "../prism_ui_devtools" }
 prism_ui_reactive = { path = "../prism_ui_reactive" }
+prism_ecs = { path = "../prism_ecs", default-features = false, features = ["reflect"], optional = true }
+prism_reflect = { path = "../prism_reflect", default-features = false, optional = true }
+prism_ui_timetravel = { path = "../prism_ui_timetravel", default-features = false, features = ["ecs"], optional = true }
 
 [features]
 default = ["std"]
 std = ["prism_ui/std", "prism_ui_devtools/std", "prism_ui_reactive/std"]
+ecs = ["std", "dep:prism_ecs", "dep:prism_reflect", "prism_reflect/std", "dep:prism_ui_timetravel"]
 
 [lints]
 workspace = true

@@ -9,12 +9,12 @@ use alloc::{string::String, vec::Vec};
 
 use prism_render_architecture::shader_package::{
     ArtifactDigest, ExecutionFamily, ModuleId, PackageState, PermutationError, PermutationIndex,
-    PermutationSpace, ShaderPackageManifest, ShaderPackageRegistry,
+    PermutationSpace, ShaderPackageManifest, ShaderPackageRegistry, VariantManifestError,
 };
 
 use crate::{
-    BuiltinProgram, ChannelMask, CompiledEntry, ProgramId, ProgramRef, ResponseMaskSource,
-    ShadingPlan,
+    BuiltinProgram, ChannelMask, CompiledEntry, ProgramId, ProgramRef, ResponseManifest,
+    ResponseMaskSource, ShadingPlan,
 };
 
 /// GPU response-program kind written by the execution-table upload.
@@ -127,9 +127,10 @@ pub enum MaterialExecutionError {
     InvalidExecutionFamily,
     Permutation(PermutationError),
     PermutationCountMismatch {
-        declared: u32,
+        declared: u64,
         actual: u64,
     },
+    VariantManifest(VariantManifestError),
     UnresolvedMaskSource(String),
 }
 
@@ -306,7 +307,8 @@ impl MaterialExecutionTables {
             || registered.manifest.entry_point != manifest.entry_point
             || registered.manifest.abi_version != manifest.abi_version
             || registered.manifest.abi_hash != manifest.abi_hash
-            || registered.manifest.permutation_count != manifest.permutation_count
+            || registered.manifest.permutation_count() != manifest.permutation_count()
+            || registered.manifest.variants != manifest.variants
         {
             return Err(MaterialExecutionError::PackageChanged);
         }
@@ -369,9 +371,13 @@ impl MaterialExecutionTables {
         let actual = permutations
             .checked_total()
             .map_err(MaterialExecutionError::Permutation)?;
-        if actual != u64::from(compiled.package_manifest().permutation_count) {
+        compiled
+            .package_manifest()
+            .validate_variants_against(&permutations)
+            .map_err(MaterialExecutionError::VariantManifest)?;
+        if actual != compiled.package_manifest().permutation_count() {
             return Err(MaterialExecutionError::PermutationCountMismatch {
-                declared: compiled.package_manifest().permutation_count,
+                declared: compiled.package_manifest().permutation_count(),
                 actual,
             });
         }
@@ -441,7 +447,10 @@ impl MaterialExecutionTables {
                 }
                 if execution_family == ExecutionFamily::Composition
                     || (execution_family == ExecutionFamily::FusedBuiltin
-                        && !matches!(program, ProgramRef::Builtin(_)))
+                        && (!matches!(program, ProgramRef::Builtin(_))
+                            || !program_supports_fused(*program)))
+                    || (execution_family == ExecutionFamily::SplitResponse
+                        && !program_supports_split(*program))
                 {
                     return Err(MaterialExecutionError::InvalidExecutionFamily);
                 }
@@ -467,6 +476,12 @@ impl MaterialExecutionTables {
                     && matches!(source_right, ProgramRef::Builtin(_));
                 if execution_family == ExecutionFamily::SplitResponse
                     || (execution_family == ExecutionFamily::FusedBuiltin && !builtin_pair)
+                    || (execution_family == ExecutionFamily::FusedBuiltin
+                        && (!program_supports_fused(*source_left)
+                            || !program_supports_fused(*source_right)))
+                    || (execution_family == ExecutionFamily::Composition
+                        && (!program_supports_split(*source_left)
+                            || !program_supports_split(*source_right)))
                 {
                     return Err(MaterialExecutionError::InvalidExecutionFamily);
                 }
@@ -666,6 +681,31 @@ impl MaterialExecutionTables {
         Ok(self.plan(binding.shading_plan_index)?.execution_family)
     }
 
+    /// Returns the verified response endpoints and execution family for a
+    /// bound plan. Classification uses this cold-table lookup to build the
+    /// two-arm continuous Lit/NPR work item without materialising the entire
+    /// GPU plan table on every frame.
+    pub fn plan_endpoints(
+        &self,
+        plan: PlanIndex,
+    ) -> Result<(ProgramRef, Option<ProgramRef>, ExecutionFamily), MaterialExecutionError> {
+        let entry = self.plan(plan)?;
+        let left = self.program(entry.left)?.program();
+        let right = entry
+            .right
+            .map(|index| self.program(index).map(|program| program.program()))
+            .transpose()?;
+        Ok((left, right, entry.execution_family))
+    }
+
+    /// Returns the channel mask declared by a verified plan.
+    pub fn plan_blended_channels(
+        &self,
+        plan: PlanIndex,
+    ) -> Result<ChannelMask, MaterialExecutionError> {
+        Ok(self.plan(plan)?.blended_channels)
+    }
+
     /// Number of verified package rows exposed to the GPU bounds check.
     #[must_use]
     pub const fn gpu_package_count(&self) -> u32 {
@@ -734,13 +774,34 @@ fn checked_new_package_index(len: usize) -> Result<PackageIndex, MaterialExecuti
     Ok(PackageIndex(checked_raw(ExecutionTable::Package, len)?))
 }
 
+fn program_supports_fused(program: ProgramRef) -> bool {
+    match program {
+        ProgramRef::Builtin(builtin) => ResponseManifest::from_builtin(builtin)
+            .map(|manifest| manifest.execution.supports_fused)
+            .unwrap_or(false),
+        ProgramRef::Registered(_) => false,
+    }
+}
+
+fn program_supports_split(program: ProgramRef) -> bool {
+    match program {
+        ProgramRef::Builtin(builtin) => ResponseManifest::from_builtin(builtin)
+            .map(|manifest| manifest.execution.supports_split)
+            .unwrap_or(false),
+        // Registered programs are admitted by ResponseRegistry only when they
+        // explicitly support split execution; there is no fused custom path.
+        ProgramRef::Registered(_) => true,
+    }
+}
+
 fn same_manifest(left: &ShaderPackageManifest, right: &ShaderPackageManifest) -> bool {
     left.id == right.id
         && left.source_revision == right.source_revision
         && left.entry_point == right.entry_point
         && left.abi_version == right.abi_version
         && left.abi_hash == right.abi_hash
-        && left.permutation_count == right.permutation_count
+        && left.permutation_count() == right.permutation_count()
+        && left.variants == right.variants
 }
 
 #[cfg(test)]
@@ -748,7 +809,8 @@ mod tests {
     use super::*;
     use prism_render_architecture::abi::{AbiHash, AbiVersion};
     use prism_render_architecture::shader_package::{
-        ManifestExpectation, ShaderPackageId, ShaderPackageManifest,
+        ArtifactDigest, ManifestExpectation, PermutationSpace, ShaderPackageId,
+        ShaderPackageManifest, ShaderPackageVariantManifest,
     };
 
     fn package_manifest() -> ShaderPackageManifest {
@@ -758,7 +820,11 @@ mod tests {
             entry_point: "main".into(),
             abi_version: AbiVersion::from_parts(1, 0),
             abi_hash: AbiHash::from_bytes(b"execution-test"),
-            permutation_count: 2,
+            variants: ShaderPackageVariantManifest::from_digests(
+                &PermutationSpace::new([2]),
+                [ArtifactDigest([1; 32]), ArtifactDigest([2; 32])],
+            )
+            .unwrap(),
         }
     }
 
@@ -988,16 +1054,8 @@ mod tests {
                 ExecutionFamily::FusedBuiltin,
                 channels,
             );
-            if right == 1 {
-                let plan = fused.unwrap();
-                assert_eq!(
-                    tables.gpu_plan_rows()[plan.get() as usize][2],
-                    ExecutionFamily::FusedBuiltin as u32
-                );
-            } else {
-                assert_eq!(fused, Err(MaterialExecutionError::InvalidExecutionFamily));
-            }
-            tables
+            assert_eq!(fused, Err(MaterialExecutionError::InvalidExecutionFamily));
+            let composition = tables
                 .register_plan(
                     source,
                     programs[0],
@@ -1006,6 +1064,10 @@ mod tests {
                     channels,
                 )
                 .unwrap();
+            assert_eq!(
+                tables.gpu_plan_rows()[composition.get() as usize][2],
+                ExecutionFamily::Composition as u32
+            );
         }
         assert_eq!(
             tables.register_plan(

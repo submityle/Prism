@@ -1,17 +1,19 @@
 //! Executable Hybrid-water behavior goldens.
 //!
-//! The CPU values come from the public shading contract. The source checks pin
-//! the WESL consumer and the four legacy raster entries, while the optional GPU
-//! gate classifies adapter/device absence as an explicit skip unless
-//! `PRISM_REQUIRE_GPU=1` turns it into a failure.
+//! Each golden compares an independent CPU transcription of the
+//! `water_surface_fs_mask_blend` equations with the public `MaskBlend` composition
+//! contract. Source checks pin the WESL consumer and the four raster entries,
+//! while the optional GPU gate classifies adapter/device absence as an explicit
+//! skip unless `PRISM_REQUIRE_GPU=1` turns it into a failure.
 
 use bevy_asset::{uuid::Uuid, AssetId};
 use bevy_platform::future::block_on;
 use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use prism_render_architecture::water::shading::hybrid::{
-    compose_hybrid_scalar, hybrid_motion_vector, hybrid_reactive_mask, plan_hybrid,
-    resolve_hybrid_geometry_weights, resolve_hybrid_weights, HybridWeightInputs, HybridWeights,
+    compose_hybrid_scalar, compose_mask_blend, hybrid_motion_vector, hybrid_reactive_mask,
+    plan_hybrid, resolve_hybrid_geometry_weights, resolve_hybrid_weights, HybridCompositionInput,
+    HybridCompositionOutput, HybridResponseArm, HybridWeightInputs, HybridWeights,
 };
 use prism_render_architecture::water::shading::npr::plan_npr;
 use prism_render_architecture::water::shading::pbr::plan_pbr;
@@ -100,6 +102,14 @@ fn source() -> &'static str {
     include_str!("../src/shaders/water_surface_raster.wesl")
 }
 
+fn composition_source() -> &'static str {
+    include_str!("../src/shaders/response_composition.wgsl")
+}
+
+fn hdr_export_source() -> &'static str {
+    include_str!("../src/shaders/response_to_hdr.wgsl")
+}
+
 fn pbr_params() -> PbrShadingParams {
     PbrShadingParams {
         f0_override: 0.0,
@@ -149,8 +159,124 @@ fn inputs(depth: f32, dist_to_shore: f32) -> SurfaceShadingInputs {
     }
 }
 
+fn composition_input(
+    shore_signal: f32,
+    shallow_signal: f32,
+    foam: f32,
+    motion: [f32; 2],
+) -> HybridCompositionInput {
+    HybridCompositionInput {
+        pbr: HybridResponseArm {
+            color: [0.12, 0.28, 0.46, 0.42],
+            reflection: 0.82,
+            caustics: 0.18,
+        },
+        npr: HybridResponseArm {
+            color: [0.76, 0.91, 1.0, 0.88],
+            reflection: 0.31,
+            caustics: 0.74,
+        },
+        weights: HybridWeightInputs {
+            shore_signal,
+            shallow_signal,
+            overlay_opacity: 0.35,
+        },
+        foam,
+        motion,
+    }
+}
+
+fn legacy_mix_rgba(left: [f32; 4], right: [f32; 4], factor: f32) -> [f32; 4] {
+    [
+        left[0] * (1.0 - factor) + right[0] * factor,
+        left[1] * (1.0 - factor) + right[1] * factor,
+        left[2] * (1.0 - factor) + right[2] * factor,
+        left[3] * (1.0 - factor) + right[3] * factor,
+    ]
+}
+
+fn legacy_mix_scalar(left: f32, right: f32, factor: f32) -> f32 {
+    left * (1.0 - factor) + right * factor
+}
+
+/// Independent CPU transcription of the `water_surface_fs_mask_blend`
+/// equations.  It intentionally does not call the new composition helper;
+/// otherwise the gate could pass while both sides shared the same bug.
+fn legacy_hybrid_reference(input: HybridCompositionInput) -> HybridCompositionOutput {
+    let shore = input.weights.shore_signal.clamp(0.0, 1.0);
+    let shallow = input.weights.shallow_signal.clamp(0.0, 1.0);
+    let npr_weight = shore.max(shallow);
+    let pbr_weight = 1.0 - npr_weight;
+    let overlay_opacity = input.weights.overlay_opacity.clamp(0.0, 1.0);
+
+    let blended_color = legacy_mix_rgba(input.pbr.color, input.npr.color, npr_weight);
+    let blended_reflection =
+        legacy_mix_scalar(input.pbr.reflection, input.npr.reflection, npr_weight);
+    let blended_caustics = legacy_mix_scalar(input.pbr.caustics, input.npr.caustics, npr_weight);
+    let motion_strength =
+        (input.motion[0] * input.motion[0] + input.motion[1] * input.motion[1]).sqrt();
+    let reactive_mask = input
+        .foam
+        .clamp(0.0, 1.0)
+        .max((motion_strength * 32.0).clamp(0.0, 1.0))
+        .max((1.0 - blended_color[3]).clamp(0.0, 1.0));
+    let overlay_factor = (overlay_opacity * reactive_mask.max(0.25)).clamp(0.0, 1.0);
+    let color = legacy_mix_rgba(blended_color, input.npr.color, overlay_factor);
+
+    HybridCompositionOutput {
+        color,
+        reflection: legacy_mix_scalar(blended_reflection, input.npr.reflection, overlay_factor),
+        caustics: legacy_mix_scalar(blended_caustics, input.npr.caustics, overlay_factor),
+        transparency: color[3],
+        motion: input.motion,
+        npr_weight,
+        pbr_weight,
+        reactive_mask,
+        overlay_factor,
+    }
+}
+
+fn assert_close(actual: f32, expected: f32, label: &str) {
+    assert!(
+        (actual - expected).abs() <= 1.0e-6,
+        "{label}: actual={actual:?}, expected={expected:?}"
+    );
+}
+
+fn assert_composition_equivalent(input: HybridCompositionInput) -> HybridCompositionOutput {
+    let legacy = legacy_hybrid_reference(input);
+    let replacement = compose_mask_blend(input);
+    for (index, (actual, expected)) in replacement.color.into_iter().zip(legacy.color).enumerate() {
+        assert_close(actual, expected, &format!("color[{index}]"));
+    }
+    assert_close(replacement.reflection, legacy.reflection, "reflection");
+    assert_close(replacement.caustics, legacy.caustics, "caustics");
+    assert_close(
+        replacement.transparency,
+        legacy.transparency,
+        "transparency",
+    );
+    assert_eq!(replacement.motion, legacy.motion, "motion");
+    assert_close(replacement.npr_weight, legacy.npr_weight, "npr weight");
+    assert_close(replacement.pbr_weight, legacy.pbr_weight, "pbr weight");
+    assert_close(
+        replacement.reactive_mask,
+        legacy.reactive_mask,
+        "reactive mask",
+    );
+    assert_close(
+        replacement.overlay_factor,
+        legacy.overlay_factor,
+        "overlay factor",
+    );
+    replacement
+}
+
 #[test]
 fn golden_depth_mixing_contract() {
+    let replacement = assert_composition_equivalent(composition_input(0.0, 0.75, 0.0, [0.0, 0.0]));
+    assert_close(replacement.npr_weight, 0.75, "depth npr weight");
+    assert_close(replacement.pbr_weight, 0.25, "depth pbr weight");
     let shallow = resolve_hybrid_geometry_weights(blend_params(), inputs(0.0, 10.0));
     let deep = resolve_hybrid_geometry_weights(blend_params(), inputs(10.0, 10.0));
     assert_eq!(shallow.npr_weight, 1.0);
@@ -162,6 +288,9 @@ fn golden_depth_mixing_contract() {
 
 #[test]
 fn golden_shore_mixing_contract() {
+    let replacement = assert_composition_equivalent(composition_input(0.65, 0.0, 0.0, [0.0, 0.0]));
+    assert_close(replacement.npr_weight, 0.65, "shore npr weight");
+    assert_close(replacement.pbr_weight, 0.35, "shore pbr weight");
     let shore = plan_hybrid(
         blend_params(),
         pbr_params(),
@@ -182,6 +311,10 @@ fn golden_shore_mixing_contract() {
 
 #[test]
 fn golden_foam_contract() {
+    let calm = assert_composition_equivalent(composition_input(0.25, 0.0, 0.0, [0.0, 0.0]));
+    let foamy = assert_composition_equivalent(composition_input(0.25, 0.0, 0.8, [0.0, 0.0]));
+    assert!(foamy.reactive_mask > calm.reactive_mask);
+    assert!(foamy.overlay_factor > calm.overlay_factor);
     let mut flat = inputs(1.0, 1.0);
     flat.jacobian = 1.0;
     let mut folded = flat;
@@ -195,6 +328,12 @@ fn golden_foam_contract() {
 
 #[test]
 fn golden_caustics_contract() {
+    let mut sample = composition_input(0.4, 0.2, 0.0, [0.0, 0.0]);
+    sample.pbr.caustics = 0.11;
+    sample.npr.caustics = 0.93;
+    let replacement = assert_composition_equivalent(sample);
+    assert!(replacement.caustics > sample.pbr.caustics);
+    assert!(replacement.caustics < sample.npr.caustics);
     let mut low = inputs(1.0, 1.0);
     low.caustic_intensity = 0.1;
     let mut high = low;
@@ -208,6 +347,12 @@ fn golden_caustics_contract() {
 
 #[test]
 fn golden_reflection_contract() {
+    let mut sample = composition_input(0.4, 0.2, 0.0, [0.0, 0.0]);
+    sample.pbr.reflection = 0.95;
+    sample.npr.reflection = 0.15;
+    let replacement = assert_composition_equivalent(sample);
+    assert!(replacement.reflection > sample.npr.reflection);
+    assert!(replacement.reflection < sample.pbr.reflection);
     let mut ssr = inputs(1.0, 1.0);
     ssr.ssr_confidence = 0.9;
     assert_eq!(
@@ -231,6 +376,16 @@ fn golden_reflection_contract() {
 
 #[test]
 fn golden_transparency_and_overlay_contract() {
+    let mut sample = composition_input(0.25, 0.0, 0.0, [0.0, 0.0]);
+    sample.pbr.color[3] = 0.2;
+    sample.npr.color[3] = 0.9;
+    let replacement = assert_composition_equivalent(sample);
+    assert_close(
+        replacement.transparency,
+        replacement.color[3],
+        "alpha output",
+    );
+    assert!((0.2..=0.9).contains(&replacement.transparency));
     let weights = HybridWeights {
         npr_weight: 0.25,
         pbr_weight: 0.75,
@@ -248,11 +403,16 @@ fn golden_transparency_and_overlay_contract() {
     assert!(with_overlay > without_overlay);
     assert!(source().contains("water_hybrid_apply_overlay"));
     assert!(source().contains("weights.overlay_opacity"));
+    assert!(source().contains("view.viewport.z"));
+    assert!(source().contains("output_alpha"));
     assert!(source().contains("return FragmentOutput(color, motion)"));
 }
 
 #[test]
 fn golden_motion_vector_contract() {
+    let replacement =
+        assert_composition_equivalent(composition_input(0.25, 0.0, 0.0, [0.25, -0.75]));
+    assert_eq!(replacement.motion, [0.25, -0.75]);
     assert_eq!(
         hybrid_motion_vector([0.75, 0.25], [0.5, 0.5]),
         [0.25, -0.25]
@@ -264,6 +424,15 @@ fn golden_motion_vector_contract() {
 
 #[test]
 fn golden_reactive_mask_contract() {
+    let replacement = assert_composition_equivalent(composition_input(0.0, 0.0, 0.8, [0.0, 0.0]));
+    assert_close(replacement.reactive_mask, 0.8, "foam reactive mask");
+    let moving_replacement =
+        assert_composition_equivalent(composition_input(0.0, 0.0, 0.0, [0.1, 0.0]));
+    assert_close(
+        moving_replacement.reactive_mask,
+        1.0,
+        "motion reactive mask",
+    );
     let calm = hybrid_reactive_mask(0.0, [0.0, 0.0], 1.0);
     let moving = hybrid_reactive_mask(0.0, [0.1, 0.0], 1.0);
     let foamy = hybrid_reactive_mask(0.8, [0.0, 0.0], 1.0);
@@ -272,6 +441,28 @@ fn golden_reactive_mask_contract() {
     assert!(foamy > calm);
     assert!(source().contains("fn water_hybrid_reactive_mask("));
     assert!(source().contains("max(reactive, 0.25)"));
+}
+
+#[test]
+fn hybrid_composition_golden_grid_matches_legacy_reference() {
+    let region_signals = [-1.0, 0.0, 0.2, 0.75, 1.0, 2.0];
+    let foam_values = [-0.5, 0.0, 0.4, 1.0, 1.5];
+    let motions = [[0.0, 0.0], [0.01, -0.02], [0.1, 0.0], [-0.4, 0.3]];
+
+    for shore_signal in region_signals {
+        for shallow_signal in region_signals {
+            for foam in foam_values {
+                for motion in motions {
+                    assert_composition_equivalent(composition_input(
+                        shore_signal,
+                        shallow_signal,
+                        foam,
+                        motion,
+                    ));
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -418,7 +609,27 @@ fn hybrid_wesl_compiles_and_preserves_all_four_entries() {
     assert!(wgsl.contains("water_surface_fs_pbr"));
     assert!(wgsl.contains("water_surface_fs_npr"));
     assert!(wgsl.contains("water_surface_fs_custom"));
-    assert!(wgsl.contains("water_surface_fs_hybrid"));
+    assert!(wgsl.contains("water_surface_fs_mask_blend"));
+}
+
+#[test]
+fn hybrid_runtime_is_wired_through_resident_composition_and_hdr_export() {
+    let raster = source();
+    let composition = composition_source();
+    let hdr = hdr_export_source();
+
+    assert!(raster.contains("response_left[pixel] = response_value(left)"));
+    assert!(raster.contains("response_right[pixel] = response_value(right)"));
+    assert!(raster.contains("CompositionControl(mask, 31u, output_alpha, 0u)"));
+    assert!(!raster.contains("CompositionControl(mask, 1u, output_alpha, 0u)"));
+    assert!(raster.contains("water_coverage[pixel] = 1u"));
+
+    assert!(composition.contains("water_coverage"));
+    assert!(
+        composition.contains("out.words[word] = linear(out.words[word], b.words[word], c.mask)")
+    );
+    assert!(composition.contains("out.words[15] = c.shared_alpha"));
+    assert!(hdr.contains("textureStore(hdr, coord, vec4<f32>(rgb, words[15]))"));
 }
 
 fn try_device() -> Option<(Device, Queue)> {
@@ -484,5 +695,13 @@ fn hybrid_wesl_real_gpu_gate_is_explicitly_classified() {
         label: Some("water Hybrid raster golden"),
         source: ShaderSource::Wgsl(wgsl.into()),
     });
-    eprintln!("water Hybrid GPU gate: PASS (real adapter and shader module created)");
+    let _composition = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water Hybrid resident composition golden"),
+        source: ShaderSource::Wgsl(composition_source().into()),
+    });
+    let _hdr = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water Hybrid HDR export golden"),
+        source: ShaderSource::Wgsl(hdr_export_source().into()),
+    });
+    eprintln!("water Hybrid GPU gate: PASS (raster, composition, and HDR shader modules created)");
 }

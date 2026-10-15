@@ -14,6 +14,10 @@
 //! several disjoint params of one system (or several compatible systems) touch
 //! the same world at once under the kernel's access-conflict discipline.
 
+use alloc::boxed::Box;
+use core::marker::PhantomData;
+use core::ptr::NonNull;
+
 use crate::entity::Entity;
 use crate::query::{
     Access, QueryData, QueryEntityError, QueryFilter, QueryIter, QueryManyIter, QuerySingleError,
@@ -37,10 +41,21 @@ use crate::world::World;
 /// [`QueryState`](crate::query::QueryState).
 pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> {
     world: UnsafeWorldCell<'w>,
-    state: &'s QueryState<D, F>,
+    // The owner is borrowed for 's, but D/F's marker lifetimes need not
+    // outlive 's. Materialize a typed reference only while borrowing Query.
+    state: NonNull<QueryState<D, F>>,
+    _state_borrow: PhantomData<&'s ()>,
 }
 
 impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
+    #[inline]
+    fn state(&self) -> &QueryState<D, F> {
+        // SAFETY: get_param pairs this pointer with the borrow of its owning
+        // QueryParamState for 's. Borrowing self keeps that owner alive; this
+        // shared reference exposes only synchronized query-cache mutation.
+        unsafe { self.state.as_ref() }
+    }
+
     /// Iterate the matched rows with shared access. Available only when every
     /// data term is read-only (`D: `[`ReadOnlyQueryData`]), so multiple shared
     /// iterations may coexist.
@@ -54,7 +69,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // (upheld by the scheduler's conflict analysis) guarantees nothing
         // writes the columns we read for the duration of the iteration.
         unsafe {
-            self.state.iter_from_ptr(
+            self.state().iter_from_ptr(
                 self.world.as_ptr(),
                 self.world.last_run(),
                 self.world.this_run(),
@@ -72,7 +87,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // (upheld by the scheduler's conflict analysis) guarantees nothing else
         // touches the columns we write for the duration of the iteration.
         unsafe {
-            self.state.iter_from_ptr(
+            self.state().iter_from_ptr(
                 self.world.as_ptr(),
                 self.world.last_run(),
                 self.world.this_run(),
@@ -96,7 +111,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // `&mut` fetch is formed, and this system's declared read access
         // guarantees nothing writes the columns we read.
         unsafe {
-            self.state.get_from_ptr(
+            self.state().get_from_ptr(
                 self.world.as_ptr(),
                 entity,
                 self.world.last_run(),
@@ -117,7 +132,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // live fetch of this query, and the system's declared write access
         // guarantees nothing else touches the columns we write.
         unsafe {
-            self.state.get_from_ptr(
+            self.state().get_from_ptr(
                 self.world.as_ptr(),
                 entity,
                 self.world.last_run(),
@@ -155,7 +170,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // `&mut` fetch is formed, and this system's declared read access
         // guarantees nothing writes the columns we read.
         unsafe {
-            self.state.single_from_ptr(
+            self.state().single_from_ptr(
                 self.world.as_ptr(),
                 self.world.last_run(),
                 self.world.this_run(),
@@ -175,7 +190,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // live fetch of this query, and the system's declared write access
         // guarantees nothing else touches the columns we write.
         unsafe {
-            self.state.single_from_ptr(
+            self.state().single_from_ptr(
                 self.world.as_ptr(),
                 self.world.last_run(),
                 self.world.this_run(),
@@ -200,7 +215,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // `&mut` fetch is formed, and this system's declared read access
         // guarantees nothing writes the columns we read.
         unsafe {
-            self.state.get_many_from_ptr(
+            self.state().get_many_from_ptr(
                 self.world.as_ptr(),
                 entities,
                 self.world.last_run(),
@@ -225,7 +240,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // aliasing ids, while the system's declared write access guarantees
         // nothing else touches the columns we write.
         unsafe {
-            self.state.get_many_mut_from_ptr(
+            self.state().get_many_mut_from_ptr(
                 self.world.as_ptr(),
                 entities,
                 self.world.last_run(),
@@ -247,7 +262,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // `&mut` fetch is formed, and this system's declared read access
         // guarantees nothing writes the columns we read for the iteration.
         unsafe {
-            self.state.iter_many_from_ptr(
+            self.state().iter_many_from_ptr(
                 self.world.as_ptr(),
                 entities,
                 self.world.last_run(),
@@ -272,7 +287,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // archetype/chunk metadata relevant to this query's declared access,
         // which the scheduler has already made conflict-free.
         let world: &World = unsafe { &*self.world.as_ptr() };
-        self.state
+        self.state()
             .dirty_chunks(world, self.world.last_run(), self.world.this_run())
     }
 
@@ -290,7 +305,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // columns we write; the iterator's duplicate guard keeps each row
         // fetched at most once.
         unsafe {
-            self.state.iter_many_mut_from_ptr(
+            self.state().iter_many_mut_from_ptr(
                 self.world.as_ptr(),
                 entities,
                 self.world.last_run(),
@@ -354,7 +369,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // (upheld by the scheduler's conflict analysis) guarantees nothing
         // writes the columns we read for the duration of the dispatch.
         unsafe {
-            self.state.par_for_each_from_ptr(
+            self.state().par_for_each_from_ptr(
                 self.world.as_ptr(),
                 self.world.last_run(),
                 self.world.this_run(),
@@ -389,7 +404,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // touches the columns we write; disjoint batches keep each `&mut` term
         // unique across threads for the duration of the dispatch.
         unsafe {
-            self.state.par_for_each_from_ptr(
+            self.state().par_for_each_from_ptr(
                 self.world.as_ptr(),
                 self.world.last_run(),
                 self.world.this_run(),
@@ -424,7 +439,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // access (upheld by the scheduler's conflict analysis) guarantees
         // nothing writes the columns we read for the duration of the dispatch.
         unsafe {
-            self.state.par_chunks_from_ptr(
+            self.state().par_chunks_from_ptr(
                 self.world.as_ptr(),
                 self.world.this_run(),
                 pool,
@@ -462,7 +477,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // touches the columns we write; chunk-aligned disjoint batches keep each
         // `&mut [T]` slice unique across threads for the dispatch.
         unsafe {
-            self.state.par_chunks_from_ptr(
+            self.state().par_chunks_from_ptr(
                 self.world.as_ptr(),
                 self.world.this_run(),
                 pool,
@@ -473,16 +488,16 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     }
 }
 
-impl<'w, 's, D: ReadOnlyQueryData, F: QueryFilter> IntoIterator for &Query<'w, 's, D, F> {
+impl<'i, 'w, 's, D: ReadOnlyQueryData, F: QueryFilter> IntoIterator for &'i Query<'w, 's, D, F> {
     type Item = D::Item<'w>;
-    type IntoIter = QueryIter<'w, 's, D, F>;
+    type IntoIter = QueryIter<'w, 'i, D, F>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
         // SAFETY: identical to `Query::iter` — read-only data over a live world
         // cell under the scheduler's conflict discipline.
         unsafe {
-            self.state.iter_from_ptr(
+            self.state().iter_from_ptr(
                 self.world.as_ptr(),
                 self.world.last_run(),
                 self.world.this_run(),
@@ -510,19 +525,75 @@ impl<'w, 's, D: ReadOnlyQueryData, F: QueryFilter> IntoIterator for &Query<'w, '
 /// ```
 impl<'i, 'w, 's, D: QueryData, F: QueryFilter> IntoIterator for &'i mut Query<'w, 's, D, F> {
     type Item = D::Item<'i>;
-    type IntoIter = QueryIter<'i, 's, D, F>;
+    type IntoIter = QueryIter<'i, 'i, D, F>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
         // SAFETY: identical to `Query::iter_mut` — exclusive access via `&mut`
         // over a live world cell under the scheduler's conflict discipline.
         unsafe {
-            self.state.iter_from_ptr(
+            self.state().iter_from_ptr(
                 self.world.as_ptr(),
                 self.world.last_run(),
                 self.world.this_run(),
             )
         }
+    }
+}
+
+/// Owned query-parameter cache, with the query's marker lifetimes erased.
+///
+/// `QueryState<D, F>` stores only `D::State`, `F::State`, and kernel metadata;
+/// `D` and `F` themselves occur only in a phantom marker. Requiring the stored
+/// states to be `'static` is sufficient for ownership. Erasing the marker types
+/// here lets nested parameters spell `Query<&mut T>` without requiring the
+/// reference in that spelling to be `'static`.
+///
+/// The allocation keeps its original destructor. Only `Query::get_param` casts
+/// it back, under the requirement that a parameter is fetched with its own
+/// initialized state. Access replay needs no cast and remains safe even if
+/// caches from different query types are passed to `update_access`.
+pub struct QueryParamState {
+    query: NonNull<()>,
+    drop_query: unsafe fn(NonNull<()>),
+    access: Access,
+}
+
+impl QueryParamState {
+    fn new<D: QueryData, F: QueryFilter>(world: &mut World) -> Self
+    where
+        D::State: 'static,
+        F::State: 'static,
+    {
+        unsafe fn drop_query<D: QueryData, F: QueryFilter>(query: NonNull<()>) {
+            // SAFETY: this function is paired with the allocation of exactly
+            // `QueryState<D, F>` below and called exactly once by `Drop`.
+            unsafe { drop(Box::from_raw(query.cast::<QueryState<D, F>>().as_ptr())) };
+        }
+
+        let query = Box::new(QueryState::<D, F>::new(world));
+        let access = query.access().clone();
+        Self {
+            query: NonNull::from(Box::leak(query)).cast(),
+            drop_query: drop_query::<D, F>,
+            access,
+        }
+    }
+}
+
+// SAFETY: the erased allocation contains a `QueryState<D, F>`, whose actual
+// fields are Send + Sync and 'static (the term states and synchronized match
+// cache). Neither D nor F is stored. The pointer is owned, never exposed by a
+// safe API, and is only dereferenced while borrowing this cache.
+unsafe impl Send for QueryParamState {}
+// SAFETY: same ownership and synchronized-field reasoning as the Send impl.
+unsafe impl Sync for QueryParamState {}
+
+impl Drop for QueryParamState {
+    fn drop(&mut self) {
+        // SAFETY: `query` is the unique owned allocation paired with this
+        // destructor at construction; borrowing prevents dropping a live query.
+        unsafe { (self.drop_query)(self.query) };
     }
 }
 
@@ -532,22 +603,22 @@ impl<'i, 'w, 's, D: QueryData, F: QueryFilter> IntoIterator for &'i mut Query<'w
 // only ever materialises references consistent with that declared access.
 unsafe impl<D, F> SystemParam for Query<'_, '_, D, F>
 where
-    D: QueryData + 'static,
-    F: QueryFilter + 'static,
+    D: QueryData,
+    F: QueryFilter,
     D::State: 'static,
     F::State: 'static,
 {
-    type State = QueryState<D, F>;
+    type State = QueryParamState;
     type Item<'w, 's> = Query<'w, 's, D, F>;
 
     #[inline]
     fn init_state(world: &mut World) -> Self::State {
-        QueryState::new(world)
+        QueryParamState::new::<D, F>(world)
     }
 
     #[inline]
     fn update_access(state: &Self::State, access: &mut Access) {
-        let query_access = state.access();
+        let query_access = &state.access;
         for &id in query_access.reads() {
             access.add_read(id);
         }
@@ -561,6 +632,138 @@ where
         state: &'s mut Self::State,
         world: UnsafeWorldCell<'w>,
     ) -> Query<'w, 's, D, F> {
-        Query { world, state }
+        // The caller supplies the state initialized for this parameter, so
+        // this is exactly QueryState<D, F>. Its owner is borrowed for 's.
+        Query {
+            world,
+            state: state.query.cast(),
+            _state_borrow: PhantomData,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod cache_tests {
+    use super::*;
+    use alloc::rc::Rc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::archetype::Archetype;
+    use crate::change::Tick;
+    use crate::component::Components;
+    use crate::storage::SparseSets;
+
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+    struct DropProbe;
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    // A deliberately non-Send/non-Sync, non-static descriptor. Only its
+    // associated State is stored in the cache; no Rc or borrowed value is.
+    struct Tracked<'marker, const FAIL_FILTER: bool>(PhantomData<&'marker Rc<()>>);
+
+    // SAFETY: this unit-valued term matches every row and accesses no storage.
+    unsafe impl<const FAIL: bool> QueryData for Tracked<'_, FAIL> {
+        type Item<'w> = ();
+        type State = DropProbe;
+        type Fetch<'w> = ();
+
+        fn init_state(_: &mut Components) -> Self::State {
+            DropProbe
+        }
+
+        fn matches(_: &Self::State, _: &Archetype) -> bool {
+            true
+        }
+
+        fn update_access(_: &Self::State, _: &mut Access) {}
+
+        unsafe fn init_fetch<'w>(
+            _: &Self::State,
+            _: &'w Archetype,
+            _: &'w SparseSets,
+            _: Tick,
+            _: Tick,
+        ) -> Self::Fetch<'w> {
+        }
+
+        unsafe fn fetch<'w>(_: Self::Fetch<'w>, _: Entity, _: usize) -> Self::Item<'w> {}
+    }
+
+    // SAFETY: the unit-valued term never creates a mutable reference.
+    unsafe impl<const FAIL: bool> ReadOnlyQueryData for Tracked<'_, FAIL> {}
+
+    // SAFETY: the filter passes every row without reading ticks or values.
+    unsafe impl<const FAIL: bool> QueryFilter for Tracked<'_, FAIL> {
+        type State = DropProbe;
+        type Fetch<'w> = ();
+
+        fn init_state(_: &mut Components) -> Self::State {
+            assert!(!FAIL, "test filter initialization failure");
+            DropProbe
+        }
+
+        fn matches(_: &Self::State, _: &Archetype) -> bool {
+            true
+        }
+
+        fn update_access(_: &Self::State, _: &mut Access) {}
+
+        unsafe fn init_fetch<'w>(
+            _: &Self::State,
+            _: &'w Archetype,
+            _: &'w SparseSets,
+            _: Tick,
+            _: Tick,
+        ) -> Self::Fetch<'w> {
+        }
+
+        unsafe fn filter_fetch<'w>(_: Self::Fetch<'w>, _: Entity, _: usize) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn erased_cache_owns_static_states_and_drops_them_once_even_after_unwinding() {
+        fn cache<'marker>(_: &'marker Rc<()>, world: &mut World) -> QueryParamState {
+            type Term<'a> = Tracked<'a, false>;
+            let mut state = QueryParamState::new::<Term<'marker>, Term<'marker>>(world);
+            let cell = UnsafeWorldCell::new_mutable(world);
+            // SAFETY: this state belongs to exactly this query type and world;
+            // it declares no access and no other world borrows are live.
+            let query =
+                unsafe { Query::<Term<'marker>, Term<'marker>>::get_param(&mut state, cell) };
+            assert_eq!(query.count(), 1);
+            state
+        }
+
+        fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+        assert_send_sync_static::<QueryParamState>();
+
+        let mut world = World::new();
+        world.spawn(());
+        let marker = Rc::new(());
+        let state = cache(&marker, &mut world);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        drop(marker);
+        drop(world);
+        // Moving the owner to another thread and outliving both the marker
+        // and world is sound: it owns only static Send + Sync cached fields.
+        std::thread::spawn(move || drop(state)).join().unwrap();
+        assert_eq!(DROPS.load(Ordering::SeqCst), 2);
+
+        let mut world = World::new();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            QueryParamState::new::<Tracked<'_, false>, Tracked<'_, true>>(&mut world)
+        }));
+        assert!(failure.is_err());
+        // Data state initialized before the failing filter is still dropped;
+        // no partially constructed erased allocation is leaked.
+        assert_eq!(DROPS.load(Ordering::SeqCst), 3);
     }
 }

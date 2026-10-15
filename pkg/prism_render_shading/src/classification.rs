@@ -1,9 +1,31 @@
 //! Verified response identities and deterministic, variable-length work buckets.
 use alloc::{collections::BTreeMap, vec::Vec};
 use prism_render_material::{
-    BuiltinProgram, ExecutionFamily, GpuMaterialHeader, MaterialExecutionTables,
-    MaterialRenderClass, ProgramId, ProgramRef, RenderDomain, ResponseProgramIndex,
+    decode_illumination_blend_weight_strict, BuiltinProgram, ChannelMask, ExecutionFamily,
+    GpuMaterialHeader, IlluminationBlendMetadataError, MaterialExecutionBinding,
+    MaterialExecutionTables, MaterialFeatureFlags, MaterialRenderClass, ProgramId, ProgramRef,
+    RenderDomain, ResponseProgramIndex,
 };
+
+const RESPONSE_META_MASK: u32 = u16::MAX as u32;
+const RESPONSE_META_CHANNEL_SHIFT: u32 = 16;
+const RESPONSE_META_NONE: u32 = u32::MAX;
+const INVALID_RESPONSE_BUCKET: u32 = u32::MAX;
+
+#[inline]
+fn pack_response_meta(mask_word: u32, channels: ChannelMask) -> u32 {
+    (mask_word & RESPONSE_META_MASK) | (channels.0 << RESPONSE_META_CHANNEL_SHIFT)
+}
+
+fn validate_continuous_mask(mask_word: u32) -> Result<u32, ClassificationError> {
+    match decode_illumination_blend_weight_strict(mask_word) {
+        Ok(Some(_)) => Ok(mask_word),
+        Ok(None) => Err(ClassificationError::InvalidContinuousMask),
+        Err(IlluminationBlendMetadataError::ReservedBits(_)) => {
+            Err(ClassificationError::InvalidContinuousMask)
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RenderPhase {
@@ -114,9 +136,13 @@ impl ResponseBucketTable {
     #[must_use]
     pub fn builtin() -> Self {
         Self::from_keys(BUILTINS.into_iter().flat_map(|program| {
-            PHASES.into_iter().map(move |phase| {
-                ResponseBucketKey::from_program(ExecutionFamily::FusedBuiltin, program, phase)
-            })
+            builtin_families(program)
+                .into_iter()
+                .flat_map(move |family| {
+                    PHASES
+                        .into_iter()
+                        .map(move |phase| ResponseBucketKey::from_program(family, program, phase))
+                })
         }))
     }
 
@@ -147,9 +173,6 @@ impl ResponseBucketTable {
             );
             Ok(())
         };
-        for program in BUILTINS {
-            insert(ExecutionFamily::FusedBuiltin, program)?;
-        }
         for [left, right, family, _channels, _mask_kind, _mask_index, _domain, _reserved] in
             execution.gpu_plan_rows()
         {
@@ -169,13 +192,8 @@ impl ResponseBucketTable {
                     .program(index)
                     .map_err(|_| ResponseBucketValidationError::InvalidExecutionEntry)?
                     .program();
-                insert(family, program)?;
-                if matches!(
-                    program,
-                    ProgramRef::Builtin(BuiltinProgram::Lit | BuiltinProgram::Npr)
-                ) {
-                    insert(family, BUILTINS[0])?;
-                    insert(family, BUILTINS[1])?;
+                for selected in selectable_programs(program) {
+                    insert(execution_family_for_program(family, selected), selected)?;
                 }
             }
         }
@@ -215,6 +233,54 @@ impl ResponseBucketTable {
     }
 }
 
+fn builtin_families(program: ProgramRef) -> Vec<ExecutionFamily> {
+    match program {
+        ProgramRef::Builtin(builtin) => {
+            let manifest = prism_render_material::ResponseManifest::from_builtin(builtin)
+                .expect("generated builtin response manifest must exist");
+            let mut families = Vec::with_capacity(2);
+            if manifest.execution.supports_fused {
+                families.push(ExecutionFamily::FusedBuiltin);
+            }
+            if manifest.execution.supports_split {
+                families.push(ExecutionFamily::SplitResponse);
+            }
+            families
+        }
+        ProgramRef::Registered(_) => vec![ExecutionFamily::SplitResponse],
+    }
+}
+
+fn selectable_programs(program: ProgramRef) -> Vec<ProgramRef> {
+    match program {
+        ProgramRef::Builtin(BuiltinProgram::Lit | BuiltinProgram::Npr) => {
+            vec![BUILTINS[0], BUILTINS[1]]
+        }
+        _ => vec![program],
+    }
+}
+
+fn execution_family_for_program(family: ExecutionFamily, program: ProgramRef) -> ExecutionFamily {
+    if matches!(family, ExecutionFamily::Composition) {
+        return family;
+    }
+    if matches!(family, ExecutionFamily::SplitResponse) {
+        return family;
+    }
+    match program {
+        ProgramRef::Builtin(builtin) => {
+            let manifest = prism_render_material::ResponseManifest::from_builtin(builtin)
+                .expect("generated builtin response manifest must exist");
+            if manifest.execution.supports_fused {
+                ExecutionFamily::FusedBuiltin
+            } else {
+                ExecutionFamily::SplitResponse
+            }
+        }
+        ProgramRef::Registered(_) => ExecutionFamily::SplitResponse,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResponseBucketValidationError {
     MissingCompiledEntry {
@@ -237,6 +303,8 @@ pub enum ClassificationError {
     InvalidExecutionBinding,
     ExecutionContextRequired,
     InvalidProgramId,
+    InvalidContinuousMask,
+    InvalidContinuousPlan,
 }
 
 /// Four ABI response kinds, not closure identities.
@@ -257,9 +325,16 @@ pub struct ShadingWorkItem {
     pub material_index: u32,
     /// Dense id in the current dynamic bucket table.
     pub shading_class: u32,
-    /// Lit=0, Npr=1, Unlit=2, Registered=3.
+    /// Lit=0, Npr=1, Unlit=2, Registered=3 for the left arm.
     pub response_kind: u32,
     pub flags: u32,
+    /// Dense id for the right response arm, or `u32::MAX` for single-arm work.
+    pub right_shading_class: u32,
+    /// Response kind for the right response arm.
+    pub right_response_kind: u32,
+    /// Low 16 bits are the continuous mask UNORM; high bits are the channel
+    /// mask. `u32::MAX` means that this work item is not a blend.
+    pub response_meta: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -341,23 +416,80 @@ impl ShadingWorkPlan {
             if header.generation != pixel.material_generation {
                 continue;
             }
-            let (family, program) = selected_execution_identity(header, execution, region)
-                .map_err(|error| ShadingWorkPlanError::Classification { pixel_index, error })?;
-            let key = ResponseBucketKey::from_program(
-                family,
-                program,
-                render_phase_for_header(header, program),
-            );
-            let bucket_id = buckets
-                .bucket_id(key)
-                .ok_or(ShadingWorkPlanError::MissingBucket { pixel_index, key })?;
-            classified[bucket_id as usize].push(ShadingWorkItem {
-                pixel_index,
-                material_index: pixel.material_index,
-                shading_class: bucket_id,
-                response_kind: response_kind_for_program(program),
-                flags: header.feature_flags,
-            });
+            let item = if header.feature_flags & MaterialFeatureFlags::ILLUMINATION_BLEND.0 != 0 {
+                let (family, left, right, channels) =
+                    continuous_response_arms(header, execution, pixel.coverage_and_flags).map_err(
+                        |error| ShadingWorkPlanError::Classification { pixel_index, error },
+                    )?;
+                let left_key = ResponseBucketKey::from_program(
+                    family,
+                    left,
+                    render_phase_for_header(header, left),
+                );
+                let right_key = ResponseBucketKey::from_program(
+                    family,
+                    right,
+                    render_phase_for_header(header, right),
+                );
+                let left_bucket =
+                    buckets
+                        .bucket_id(left_key)
+                        .ok_or(ShadingWorkPlanError::MissingBucket {
+                            pixel_index,
+                            key: left_key,
+                        })?;
+                let right_bucket =
+                    buckets
+                        .bucket_id(right_key)
+                        .ok_or(ShadingWorkPlanError::MissingBucket {
+                            pixel_index,
+                            key: right_key,
+                        })?;
+                let response_meta = pack_response_meta(
+                    validate_continuous_mask(pixel.coverage_and_flags).map_err(|error| {
+                        ShadingWorkPlanError::Classification { pixel_index, error }
+                    })?,
+                    channels,
+                );
+                (
+                    left_bucket,
+                    ShadingWorkItem {
+                        pixel_index,
+                        material_index: pixel.material_index,
+                        shading_class: left_bucket,
+                        response_kind: response_kind_for_program(left),
+                        flags: header.feature_flags,
+                        right_shading_class: right_bucket,
+                        right_response_kind: response_kind_for_program(right),
+                        response_meta,
+                    },
+                )
+            } else {
+                let (family, program) = selected_execution_identity(header, execution, region)
+                    .map_err(|error| ShadingWorkPlanError::Classification { pixel_index, error })?;
+                let key = ResponseBucketKey::from_program(
+                    family,
+                    program,
+                    render_phase_for_header(header, program),
+                );
+                let bucket_id = buckets
+                    .bucket_id(key)
+                    .ok_or(ShadingWorkPlanError::MissingBucket { pixel_index, key })?;
+                (
+                    bucket_id,
+                    ShadingWorkItem {
+                        pixel_index,
+                        material_index: pixel.material_index,
+                        shading_class: bucket_id,
+                        response_kind: response_kind_for_program(program),
+                        flags: header.feature_flags,
+                        right_shading_class: INVALID_RESPONSE_BUCKET,
+                        right_response_kind: 0,
+                        response_meta: RESPONSE_META_NONE,
+                    },
+                )
+            };
+            classified[item.0 as usize].push(item.1);
             accepted += 1;
         }
         let mut plan = Self {
@@ -400,23 +532,11 @@ fn response_execution_identity(
     header: &GpuMaterialHeader,
     execution: Option<&MaterialExecutionTables>,
 ) -> Result<(ExecutionFamily, ProgramRef), ClassificationError> {
-    let words = header.execution_binding_words();
-    let sentinel = GpuMaterialHeader::EXECUTION_BINDING_SENTINEL;
-    if words.iter().all(|word| *word == sentinel) {
-        return Ok((ExecutionFamily::FusedBuiltin, BUILTINS[0]));
-    }
-    if words.contains(&sentinel) {
-        return Err(ClassificationError::InvalidExecutionBinding);
-    }
+    let binding = match response_execution_binding(header, execution)? {
+        Some(binding) => binding,
+        None => return Ok((ExecutionFamily::FusedBuiltin, BUILTINS[0])),
+    };
     let execution = execution.ok_or(ClassificationError::ExecutionContextRequired)?;
-    let binding = execution
-        .bind_raw(
-            words[0],
-            words[1],
-            words[2],
-            u64::from(words[3]) | (u64::from(words[4]) << 32),
-        )
-        .map_err(|_| ClassificationError::InvalidExecutionBinding)?;
     let family = execution
         .execution_family_for_binding(binding)
         .map_err(|_| ClassificationError::InvalidExecutionBinding)?;
@@ -425,6 +545,56 @@ fn response_execution_identity(
         .map_err(|_| ClassificationError::InvalidExecutionBinding)?
         .program();
     Ok((family, program))
+}
+
+fn response_execution_binding(
+    header: &GpuMaterialHeader,
+    execution: Option<&MaterialExecutionTables>,
+) -> Result<Option<MaterialExecutionBinding>, ClassificationError> {
+    let words = header.execution_binding_words();
+    let sentinel = GpuMaterialHeader::EXECUTION_BINDING_SENTINEL;
+    if words.iter().all(|word| *word == sentinel) {
+        return Ok(None);
+    }
+    if words.contains(&sentinel) {
+        return Err(ClassificationError::InvalidExecutionBinding);
+    }
+    let execution = execution.ok_or(ClassificationError::ExecutionContextRequired)?;
+    execution
+        .bind_raw(
+            words[0],
+            words[1],
+            words[2],
+            u64::from(words[3]) | (u64::from(words[4]) << 32),
+        )
+        .map(Some)
+        .map_err(|_| ClassificationError::InvalidExecutionBinding)
+}
+
+fn continuous_response_arms(
+    header: &GpuMaterialHeader,
+    execution: Option<&MaterialExecutionTables>,
+    mask_word: u32,
+) -> Result<(ExecutionFamily, ProgramRef, ProgramRef, ChannelMask), ClassificationError> {
+    validate_surface(header)?;
+    let execution = execution.ok_or(ClassificationError::ExecutionContextRequired)?;
+    let binding = response_execution_binding(header, Some(execution))?
+        .ok_or(ClassificationError::InvalidContinuousPlan)?;
+    let (left, right, family) = execution
+        .plan_endpoints(binding.shading_plan_index)
+        .map_err(|_| ClassificationError::InvalidContinuousPlan)?;
+    let right = right.ok_or(ClassificationError::InvalidContinuousPlan)?;
+    let channels = execution
+        .plan_blended_channels(binding.shading_plan_index)
+        .map_err(|_| ClassificationError::InvalidContinuousPlan)?;
+    if channels.0 > u16::MAX as u32 {
+        return Err(ClassificationError::InvalidContinuousPlan);
+    }
+    let mask_word = validate_continuous_mask(mask_word)?;
+    if pack_response_meta(mask_word, channels) == RESPONSE_META_NONE {
+        return Err(ClassificationError::InvalidContinuousPlan);
+    }
+    Ok((family, left, right, channels))
 }
 
 fn select_program(program: ProgramRef, region: u32) -> ProgramRef {
@@ -449,7 +619,8 @@ fn selected_execution_identity(
 ) -> Result<(ExecutionFamily, ProgramRef), ClassificationError> {
     validate_surface(header)?;
     let (family, program) = response_execution_identity(header, execution)?;
-    Ok((family, select_program(program, region)))
+    let selected = select_program(program, region);
+    Ok((execution_family_for_program(family, selected), selected))
 }
 
 fn render_phase_for_header(header: &GpuMaterialHeader, program: ProgramRef) -> RenderPhase {

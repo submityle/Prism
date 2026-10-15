@@ -10,7 +10,8 @@ use crate::{
     ContainerIdentity, ContainerReader, ContainerWriter, FileRangeSource, InstallMount,
     InstallTombstones, ManifestAssetReader, ManifestError, ManifestMetadata, ManifestRangeRequest,
     ManifestReadError, ManifestRoute, MemoryRangeSource, OverlaySet, RangeBatchPolicy,
-    RangeRequest, RangeSource, RangeSourceError, RuntimeManifest, FORMAT_VERSION, MAGIC,
+    RangeRequest, RangeSource, RangeSourceError, RuntimeManifest, CHUNK_FORMAT_VERSION,
+    FORMAT_VERSION, MAGIC,
     SUPPORTED_FORMAT_VERSIONS,
 };
 
@@ -1153,14 +1154,42 @@ fn version_one_reader_rejects_nonzero_directory_alignment_padding() {
 }
 
 #[test]
-fn version_two_is_rejected_and_supported_versions_are_a_closed_set() {
-    assert_eq!(SUPPORTED_FORMAT_VERSIONS, &[FORMAT_VERSION]);
-    let mut bytes = build(&[("version-two", b"payload")]);
-    bytes[8..10].copy_from_slice(&2_u16.to_le_bytes());
-    assert_eq!(
-        ContainerReader::new(bytes).unwrap_err(),
-        ContainerError::UnsupportedVersion(2)
-    );
+fn version_two_chunk_table_round_trips_and_is_a_closed_set() {
+    assert_eq!(SUPPORTED_FORMAT_VERSIONS, &[FORMAT_VERSION, CHUNK_FORMAT_VERSION]);
+    let first = guid("chunk-table-a");
+    let second = guid("chunk-table-b");
+    let policy = ChunkPolicy { max_chunk_size: 512, chunk_alignment: 64, max_chunks: 4 };
+    let plan = ChunkPlanner::new(policy).plan([
+        ChunkInput { guid: first, size: 300, alignment: 1, dependencies: vec![], priority: 1 },
+        ChunkInput { guid: second, size: 500, alignment: 1, dependencies: vec![], priority: 0 },
+    ]).unwrap();
+    let mut writer = ContainerWriter::new();
+    let first_bytes = b"A".repeat(300);
+    let second_bytes = b"B".repeat(500);
+    writer.add(first, first_bytes.clone()).unwrap();
+    writer.add(second, second_bytes.clone()).unwrap();
+    let bytes = writer.finish_with_chunk_compression(&plan, policy.chunk_alignment, Codec::Deflate).unwrap();
+    let reader = ContainerReader::new(bytes.clone()).unwrap();
+    assert_eq!(reader.info().version, CHUNK_FORMAT_VERSION);
+    assert_eq!(reader.info().chunk_count, plan.chunks.len() as u32);
+    assert_eq!(reader.read_all(first).unwrap(), first_bytes);
+    assert_eq!(reader.read_all(second).unwrap(), second_bytes);
+    let mut range = vec![0; 33];
+    reader.read_range(second, 101, &mut range).unwrap();
+    assert_eq!(range, second_bytes[101..134]);
+}
+
+#[test]
+fn version_two_rejects_chunk_payload_tampering() {
+    let id = guid("chunk-table-corrupt");
+    let policy = ChunkPolicy { max_chunk_size: 512, chunk_alignment: 64, max_chunks: 1 };
+    let plan = ChunkPlanner::new(policy).plan([ChunkInput { guid: id, size: 200, alignment: 1, dependencies: vec![], priority: 0 }]).unwrap();
+    let mut writer = ContainerWriter::new();
+    writer.add(id, vec![7; 200]).unwrap();
+    let mut bytes = writer.finish_with_chunk_compression(&plan, policy.chunk_alignment, Codec::Deflate).unwrap();
+    let payload_offset = u64::from_le_bytes(bytes[56..64].try_into().unwrap()) as usize;
+    bytes[payload_offset] ^= 0x80;
+    assert!(matches!(ContainerReader::new(bytes), Err(ContainerError::CompressionFailed | ContainerError::HashMismatch)));
 }
 
 #[test]

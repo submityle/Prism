@@ -37,6 +37,14 @@ use bevy_math::ops;
 use crate::vecmath::{add, dot, mul, mul_scalar, normalize_or};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
 
+/// Exact response-lobe identity owned by the material contract. The stylized
+/// math module does not infer this identity from `npr_face` fields or modifiers.
+pub const STYLIZED_LOBE_NAME: &str = prism_render_material::STYLIZED_LOBE_NAME;
+
+const _: () = assert!(prism_render_material::is_exact_stylized_lobe_name(
+    STYLIZED_LOBE_NAME
+));
+
 /// Roughness floor shared with the principled lobe (`MIN_ROUGHNESS`).
 const MIN_ROUGHNESS: f32 = 0.045;
 /// Lowest stylized specular exponent (broad, soft highlight at full roughness).

@@ -36,19 +36,20 @@
 //! winit host trait's one-shot `resumed` and repeatable `suspended` /
 //! `low_memory` callbacks become [`Resumed`](crate::lifecycle::Resumed),
 //! [`Suspended`](crate::lifecycle::Suspended), and
-//! [`LowMemory`](crate::lifecycle::LowMemory) app events. A platform
-//! *device-loss* signal (GPU context loss / swapchain recreation) is still
-//! absent from the renderer seam, so device-loss recovery remains deferred
-//! rather than stubbed.
+//! [`LowMemory`](crate::lifecycle::LowMemory) app events. Device-loss signaling
+//! is also exposed through the app lifecycle bridge and can trigger renderer
+//! recovery/recreation. The renderer owns device replacement and resource
+//! replay; this crate forwards the lifecycle event and keeps simulation state
+//! coherent.
 
 #[cfg(feature = "std")]
 mod dedicated_server;
 mod headless;
 mod once;
 #[cfg(feature = "winit")]
-mod winit;
-#[cfg(feature = "winit")]
 mod window_bridge;
+#[cfg(feature = "winit")]
+mod winit;
 #[cfg(feature = "winit")]
 pub use window_bridge::WindowRenderBridge;
 

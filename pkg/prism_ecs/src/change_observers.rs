@@ -32,7 +32,7 @@ use crate::component::Component;
 use crate::entity::Entity;
 use crate::observer::ObserverId;
 use crate::query::{Changed, QueryState};
-use crate::world::World;
+use crate::world::{World, WorldId};
 
 /// The context handed to a change observer when it fires.
 pub struct ChangeContext<'w> {
@@ -122,6 +122,13 @@ struct ChangeSlot {
     /// `(last_run, this_run]` and then advances this to `this_run`.
     last_run: Tick,
     observer: Box<dyn ChangeObserver>,
+    pending: Vec<Entity>,
+}
+
+struct ChangeEntry {
+    id: ObserverId,
+    active: bool,
+    slot: Option<ChangeSlot>,
 }
 
 /// The ordered change-observer registry (design §24.2).
@@ -132,13 +139,19 @@ struct ChangeSlot {
 /// valid even if that callback registers or removes observers.
 #[derive(Default)]
 pub(crate) struct ChangeObservers {
-    slots: Vec<Option<ChangeSlot>>,
+    slots: Vec<ChangeEntry>,
+    active: usize,
+    flushing: bool,
 }
 
 impl ChangeObservers {
     /// Whether no observers are currently registered.
     pub(crate) fn is_empty(&self) -> bool {
-        self.slots.iter().all(Option::is_none)
+        self.active == 0
+    }
+
+    pub(crate) fn is_flushing(&self) -> bool {
+        self.flushing
     }
 
     /// Number of slots ever occupied (including cleared ones).
@@ -147,21 +160,38 @@ impl ChangeObservers {
     }
 
     fn push(&mut self, slot: ChangeSlot) {
-        self.slots.push(Some(slot));
+        self.slots.push(ChangeEntry {
+            id: slot.id,
+            active: true,
+            slot: Some(slot),
+        });
+        self.active += 1;
     }
 
     fn take(&mut self, index: usize) -> Option<ChangeSlot> {
-        self.slots.get_mut(index)?.take()
+        let entry = self.slots.get_mut(index)?;
+        if entry.active {
+            entry.slot.take()
+        } else {
+            None
+        }
     }
 
     fn put_back(&mut self, index: usize, slot: ChangeSlot) {
-        self.slots[index] = Some(slot);
+        let Some(entry) = self.slots.get_mut(index) else {
+            return;
+        };
+        if entry.active && entry.id == slot.id && entry.slot.is_none() {
+            entry.slot = Some(slot);
+        }
     }
 
     pub(crate) fn remove(&mut self, id: ObserverId) -> bool {
-        for slot in &mut self.slots {
-            if slot.as_ref().is_some_and(|s| s.id == id) {
-                *slot = None;
+        for entry in &mut self.slots {
+            if entry.active && entry.id == id {
+                entry.active = false;
+                entry.slot = None;
+                self.active -= 1;
                 return true;
             }
         }
@@ -176,8 +206,9 @@ impl World {
     /// (or a [`Schedule`](crate::schedule::Schedule) run, which flushes for you),
     /// at most once per flush, with the entities whose `T` changed since the
     /// observer's previous delivery. `T` is registered on demand; the window is
-    /// baselined to the current tick so changes made *before* registration do
-    /// not fire it. Returns a stable [`ObserverId`] accepted by both
+    /// baselined to the current tick, then registration advances the tick so
+    /// earlier writes are excluded and immediate subsequent writes are included.
+    /// Returns a stable [`ObserverId`] accepted by both
     /// [`remove_change_observer`](World::remove_change_observer) and the shared
     /// [`remove_observer`](World::remove_observer).
     pub fn observe_changed<T, C>(&mut self, callback: C) -> ObserverId
@@ -198,7 +229,9 @@ impl World {
                 state: None,
                 _marker: PhantomData,
             }),
+            pending: Vec::new(),
         });
+        self.increment_change_tick();
         id
     }
 
@@ -216,50 +249,116 @@ impl World {
     /// Observers fire in registration order; each is invoked at most once, with
     /// its changed-entity set sorted ascending by entity index and deduplicated.
     /// Returns how many observers actually received a non-empty batch. A change
-    /// made *by* a callback lands in the next flush (the window advances before
-    /// the callback runs), so a callback cannot feed itself within one flush.
+    /// made *by* a callback lands in the next flush (every batch is collected
+    /// before callbacks run), so a callback cannot feed itself within one flush.
+    /// A later callback may receive an entity whose component an earlier
+    /// callback has removed; re-check current state before reading that value.
+    /// If a callback panics, its batch and callbacks not yet run are retained
+    /// for retry; successful callbacks are not replayed without new changes.
+    /// Replacing the World inside a callback ends this delivery; the replacement
+    /// retains its own observers and is not automatically flushed by this call.
     pub fn flush_changed_observers(&mut self) -> usize {
-        let count = self.change_observers.slot_count();
-        if count == 0 {
+        // Effects may explicitly request a flush. Their writes belong to the
+        // next delivery window and must not recursively re-enter this bus.
+        if self.reactions.is_flushing() || self.change_observers.flushing {
             return 0;
         }
-        let this_run = self.change_tick();
-        let mut batch: Vec<Entity> = Vec::new();
+        if self.change_observers.is_empty() {
+            self.flush_reactions();
+            return 0;
+        }
+        let count = self.change_observers.slot_count();
+        let world_id = self.id();
+        self.change_observers.flushing = true;
+        let flush = ChangeFlush {
+            world: self,
+            world_id,
+        };
+        let this_run = flush.world.change_tick();
         let mut fired = 0;
         for index in 0..count {
-            // Move the slot out so the callback can take `&mut World` while its
-            // own observer list lives inside that world; restore it afterwards.
-            let Some(mut slot) = self.change_observers.take(index) else {
+            let Some(slot) = flush.world.change_observers.take(index) else {
                 continue;
             };
-            slot.observer.ensure_state(self);
-
-            batch.clear();
+            let mut guard = ChangeSlotGuard {
+                world: &mut *flush.world,
+                world_id,
+                index,
+                slot: Some(slot),
+            };
+            let slot = guard.slot.as_mut().expect("owned change observer");
+            slot.observer.ensure_state(guard.world);
             slot.observer
-                .collect(&*self, slot.last_run, this_run, &mut batch);
-            // Deterministic delivery: ascending entity index, no duplicates even
-            // if a term could match a row twice.
-            batch.sort_unstable_by_key(|e| e.index());
-            batch.dedup();
+                .collect(guard.world, slot.last_run, this_run, &mut slot.pending);
+            slot.pending
+                .sort_unstable_by_key(|entity| (entity.index(), entity.generation()));
+            slot.pending.dedup();
             slot.last_run = this_run;
-
-            if !batch.is_empty() {
-                // Advance the tick before the callback runs so any component it
-                // writes is stamped *strictly later* than the window we just
-                // consumed. Without this a callback that touches the component
-                // it observes would write at exactly `this_run`, which the next
-                // window `(this_run, ..]` would then shadow — losing the change
-                // permanently. With it, callback writes are delivered next flush.
-                self.increment_change_tick();
+        }
+        // Snapshot every observer's batch before executing any callback. A
+        // callback may remove components or write values, but cannot change the
+        // already-collected delivery of a later observer in this flush.
+        flush.world.increment_change_tick();
+        for index in 0..count {
+            let Some(slot) = flush.world.change_observers.take(index) else {
+                continue;
+            };
+            let mut guard = ChangeSlotGuard {
+                world: &mut *flush.world,
+                world_id,
+                index,
+                slot: Some(slot),
+            };
+            let slot = guard.slot.as_mut().expect("owned change observer");
+            if !slot.pending.is_empty() {
                 let mut ctx = ChangeContext {
-                    world: &mut *self,
-                    changed: &batch,
+                    world: &mut *guard.world,
+                    changed: &slot.pending,
                 };
                 slot.observer.fire(&mut ctx);
+                // Preserve this batch if the callback unwinds, for an explicit
+                // retry. Successful callbacks are never replayed on retry.
+                slot.pending.clear();
                 fired += 1;
+                if guard.world.id() != world_id {
+                    return fired;
+                }
             }
-            self.change_observers.put_back(index, slot);
         }
+        // Release the delivery barrier only after every source callback has
+        // forwarded its batch. Explicit flushes inside callbacks are deferred.
+        drop(flush);
+        self.flush_reactions();
         fired
+    }
+}
+
+struct ChangeSlotGuard<'w> {
+    world: &'w mut World,
+    world_id: WorldId,
+    index: usize,
+    slot: Option<ChangeSlot>,
+}
+
+impl Drop for ChangeSlotGuard<'_> {
+    fn drop(&mut self) {
+        if self.world.id() == self.world_id {
+            if let Some(slot) = self.slot.take() {
+                self.world.change_observers.put_back(self.index, slot);
+            }
+        }
+    }
+}
+
+struct ChangeFlush<'w> {
+    world: &'w mut World,
+    world_id: WorldId,
+}
+
+impl Drop for ChangeFlush<'_> {
+    fn drop(&mut self) {
+        if self.world.id() == self.world_id {
+            self.world.change_observers.flushing = false;
+        }
     }
 }

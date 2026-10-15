@@ -28,6 +28,7 @@ pub mod constraint;
 pub mod damage;
 pub mod particle;
 pub mod rigid_coupling;
+pub mod storage;
 pub mod solver;
 pub mod vbd_sweep;
 
@@ -67,6 +68,7 @@ pub use rigid_coupling::{
     AngularCouplingReport, ClothRigidCouplingConfig, CouplingReport, FrictionCouplingReport,
     RigidProxy,
 };
+pub use storage::{SoftBodyHandle, SoftBodyStorage};
 pub use solver::{
     SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams,
 };

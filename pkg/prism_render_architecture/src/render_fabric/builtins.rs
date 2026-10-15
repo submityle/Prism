@@ -40,6 +40,28 @@ pub const VOLUME_SERVICE_IDS: [ServiceId; 7] = [
     ServiceId(107),
 ];
 
+/// Stable semantic service identities used by particle shading capability
+/// negotiation. These are global Render Fabric identities, not a private
+/// particle provider list: virtual-shadow-map and global-illumination entries
+/// intentionally alias the corresponding water identities. They are capability
+/// inputs, not provider outputs; particle feature closure still uses
+/// catalog-owned requirements.
+pub const PARTICLE_LIGHTING_SERVICE_IDS: [ServiceId; 4] = [
+    ServiceId(20), // clustered lights
+    ServiceId(4),  // virtual shadow maps
+    ServiceId(2),  // global illumination
+    ServiceId(21), // ray-traced lighting
+];
+pub const PARTICLE_CLUSTERED_LIGHTS: ServiceId = PARTICLE_LIGHTING_SERVICE_IDS[0];
+pub const PARTICLE_SHADOW_MAPS: ServiceId = PARTICLE_LIGHTING_SERVICE_IDS[1];
+pub const PARTICLE_GLOBAL_ILLUMINATION: ServiceId = PARTICLE_LIGHTING_SERVICE_IDS[2];
+pub const PARTICLE_RAY_TRACING: ServiceId = PARTICLE_LIGHTING_SERVICE_IDS[3];
+pub const PARTICLE_LIGHTING_CAPABILITIES: ServiceSet = ServiceSet::new(&[
+    PARTICLE_SHADOW_MAPS,
+    PARTICLE_GLOBAL_ILLUMINATION,
+    PARTICLE_RAY_TRACING,
+]);
+
 pub const WATER_FEATURE_ID: FeatureId = FeatureId(0x1000);
 pub const VOLUME_FEATURE_ID: FeatureId = FeatureId(0x1001);
 pub const PARTICLE_FEATURE_ID: FeatureId = FeatureId(0x1002);
@@ -494,8 +516,13 @@ static BUILTIN_FEATURES: [FeatureDefinition; 25] = [
     SERVICE_FEATURES[16],
 ];
 
-static BUILTIN_SUBSYSTEM_ROOTS: [FeatureId; 3] =
-    [WATER_FEATURE_ID, VOLUME_FEATURE_ID, PARTICLE_FEATURE_ID];
+static BUILTIN_SUBSYSTEM_ROOTS: [FeatureId; 5] = [
+    WATER_FEATURE_ID,
+    VOLUME_FEATURE_ID,
+    PARTICLE_FEATURE_ID,
+    HAIR_FEATURE_ID,
+    DECAL_FEATURE_ID,
+];
 static BUILTIN_RESPONSE_ROOTS: [FeatureId; 3] = [LIT_FEATURE_ID, NPR_FEATURE_ID, CUSTOM_FEATURE_ID];
 
 /// Build the immutable semantic catalog used by renderer/device setup.
@@ -552,5 +579,46 @@ mod tests {
             selection.provider(VOLUME_SERVICE_IDS[0]),
             Some(FeatureId(0x2010))
         );
+    }
+
+    #[test]
+    fn builtins_freeze_every_subsystem_and_response_root() {
+        let catalog = builtin_catalog().expect("built-in catalog is valid");
+        let roots = builtin_roots(&catalog).expect("all built-in roots are valid");
+        let expected = [
+            WATER_FEATURE_ID,
+            VOLUME_FEATURE_ID,
+            PARTICLE_FEATURE_ID,
+            HAIR_FEATURE_ID,
+            DECAL_FEATURE_ID,
+            LIT_FEATURE_ID,
+            NPR_FEATURE_ID,
+            CUSTOM_FEATURE_ID,
+        ];
+        assert_eq!(roots.ids(), &expected);
+
+        let selection = FeatureSelection::resolve(
+            &catalog,
+            &roots,
+            CapabilitySet::EMPTY,
+            RenderQualityTier::Low,
+        )
+        .expect("the complete built-in active-root fanout must resolve");
+        for feature in expected {
+            assert!(
+                selection.feature(feature).is_some(),
+                "active root {feature:?} must be selected"
+            );
+        }
+        assert!(selection.feature(HAIR_FEATURE_ID).is_some());
+        assert!(selection.feature(DECAL_FEATURE_ID).is_some());
+    }
+
+    #[test]
+    fn built_in_service_ids_have_one_shared_global_identity_per_capability() {
+        assert_eq!(PARTICLE_SHADOW_MAPS, WATER_SERVICE_IDS[3]);
+        assert_eq!(PARTICLE_GLOBAL_ILLUMINATION, WATER_SERVICE_IDS[1]);
+        assert_eq!(PARTICLE_LIGHTING_CAPABILITIES.len(), 3);
+        assert!(!PARTICLE_LIGHTING_CAPABILITIES.contains(PARTICLE_CLUSTERED_LIGHTS));
     }
 }

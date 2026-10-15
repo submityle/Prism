@@ -8,9 +8,10 @@
 //! `world.flush_changed_observers()` before draining.
 //!
 //! Locals remain authoritative. Lifecycle observers track membership and column
-//! chunk versions limit local-value reads to changed rows. Each propagation scans
-//! the relation index and compares sorted `ChildOf` edges to invalidate topology.
-//! Static frames check chunk versions and edge snapshots without querying
+//! chunk summaries limit local-value reads to changed rows. An index-owned
+//! identity/revision invalidates cached canonical `ChildOf` edges; only an
+//! invalidation collects and sorts edges, including after raw edits or restore.
+//! Static frames check chunk summaries and the relation version without querying
 //! membership or per-entity parents, rebuilding dense buffers, composing matrices
 //! or writing globals. Snapshot restore invalidates both the
 //! propagation cache and spatial baseline reconciliation through the world's
@@ -45,6 +46,14 @@ impl Component for GlobalTransform {}
 
 struct Registration(Vec<ObserverId>);
 impl Resource for Registration {}
+
+// The first subscriber's id identifies this installation within its World.
+// Paired with WorldId, it distinguishes uninstall/reinstall during a callback.
+fn registration_id(world: &World) -> Option<ObserverId> {
+    world
+        .get_resource::<Registration>()
+        .and_then(|registration| registration.0.first().copied())
+}
 
 pub(super) struct PropagationSignals {
     pub(super) membership_dirty: bool,

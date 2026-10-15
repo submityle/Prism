@@ -9,13 +9,12 @@
 //!
 //! This module is the **data / index / registry layer only**. It owns:
 //!
-//! - the compact encoded [`PairKey`] used as a fast hash-map key,
+//! - the compact encoded [`PairKey`] used for pair matching,
 //! - the per-kind [`RelationKind`] metadata (fragmenting / transitive /
 //!   exclusive flags plus [`CleanupPolicy`] cleanup rules),
 //! - the [`Relations`] registry that maps a relation kind to its metadata,
-//! - the global non-fragmenting bypass [`RelationIndex`] (bidirectional
-//!   adjacency) used for high-cardinality relations and reverse / cascade
-//!   queries, and
+//! - the global [`RelationIndex`] (generation-aware bidirectional adjacency)
+//!   used for non-fragmenting relations and every reverse / cascade query, and
 //! - pure [`CascadePlan`] planning for cascade-delete.
 //!
 //! Nothing here mutates a [`World`](crate::world::World); wiring the index into
@@ -24,6 +23,7 @@
 //! no `unsafe`.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::collections::HashMap;
 use crate::component::ComponentId;
@@ -72,8 +72,8 @@ impl RelationId {
 ///
 /// Holds either a live entity's slot index or the [`WILDCARD_TARGET`] sentinel.
 /// Only the slot index is stored; the full generational [`Entity`] handle is
-/// retained separately by the [`RelationIndex`] (the index only ever holds
-/// edges between currently-live entities, so an index resolves unambiguously).
+/// retained separately by the [`RelationIndex`], whose internal adjacency keys
+/// also include the generation so raw staged edits cannot alias recycled slots.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TargetId(u32);
 
@@ -251,8 +251,8 @@ pub enum CleanupPolicy {
     /// Cascade-destroy the holder (e.g. `ChildOf`: deleting a parent deletes
     /// its children).
     Delete,
-    /// Treat the dangling edge as a bug: a debug assertion / recorded violation
-    /// that catches illegal deletions.
+    /// Reject deletion of a referenced target before applying the cascade,
+    /// including in release builds.
     Panic,
 }
 
@@ -393,18 +393,72 @@ pub struct CascadePlan {
     /// The original root entity is *not* included; the caller already despawns
     /// it.
     pub deletions: Vec<Entity>,
-    /// Edges that violated a [`CleanupPolicy::Panic`] policy — a dangling
-    /// deletion the caller may assert on in debug builds.
+    /// Edges that violate a [`CleanupPolicy::Panic`] policy. The caller must
+    /// reject the deletion before applying any removals or deletions.
     pub panics: Vec<CascadeEdge>,
 }
 
-/// Internal adjacency value: the full anchor entity keyed by a [`PairKey`] plus
+/// Internal adjacency value: the full anchor entity keyed by an adjacency key plus
 /// its ordered list of neighbours. For forward edges the anchor is the source
 /// and the neighbours are its targets; for reverse edges the anchor is the
 /// target and the neighbours are its sources.
 type Adjacency = (Entity, Vec<Entity>);
 
-/// The global non-fragmenting bypass index for relations (design §11).
+/// The packed key deliberately omits generation for wildcard matching. The
+/// live adjacency must retain it: staged edits can contain both a stale handle
+/// and its replacement before the world filters invalid endpoints.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct AdjacencyKey {
+    pair: PairKey,
+    generation: u32,
+}
+
+impl AdjacencyKey {
+    fn relation(self) -> RelationId {
+        self.pair.relation()
+    }
+}
+
+/// An opaque cache key for one version of a relation index.
+///
+/// Compare the entire key, not just its revision. Clones and new indexes have
+/// distinct identities, and revision exhaustion rotates the identity rather
+/// than wrapping to a previously observable key. Keys are process-local, not
+/// deterministic simulation state or serialized identifiers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RelationIndexVersion {
+    identity: usize,
+    revision: u64,
+}
+
+fn allocate_index_identity(counter: &AtomicUsize) -> usize {
+    // Never wrap or reuse an identity, including after a caught panic.
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("relation index identity counter exhausted")
+}
+
+impl RelationIndexVersion {
+    fn fresh() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(1);
+        Self {
+            identity: allocate_index_identity(&NEXT),
+            revision: 0,
+        }
+    }
+
+    /// Process-unique identity of this index's current revision sequence.
+    pub fn identity(self) -> usize {
+        self.identity
+    }
+
+    /// Monotonic mutation revision within this identity.
+    pub fn revision(self) -> u64 {
+        self.revision
+    }
+}
+
+/// The bidirectional index for all relations (design §11).
 ///
 /// Maintains two mirrored adjacency maps so both directions are O(1) to query:
 ///
@@ -414,30 +468,51 @@ type Adjacency = (Entity, Vec<Entity>);
 /// The reverse map powers reverse queries and cascade-delete without scanning
 /// every entity. High-cardinality relations route here instead of fragmenting
 /// the archetype graph (design §23.3).
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 pub struct RelationIndex {
     /// `(relation, source) -> (source, [target...])`.
-    forward: HashMap<PairKey, Adjacency>,
+    forward: HashMap<AdjacencyKey, Adjacency>,
     /// `(relation, target) -> (target, [source...])`.
-    reverse: HashMap<PairKey, Adjacency>,
+    reverse: HashMap<AdjacencyKey, Adjacency>,
+    version: RelationIndexVersion,
+}
+
+impl Default for RelationIndex {
+    fn default() -> Self {
+        Self {
+            forward: HashMap::default(),
+            reverse: HashMap::default(),
+            version: RelationIndexVersion::fresh(),
+        }
+    }
+}
+
+impl Clone for RelationIndex {
+    fn clone(&self) -> Self {
+        Self {
+            forward: self.forward.clone(),
+            reverse: self.reverse.clone(),
+            version: RelationIndexVersion::fresh(),
+        }
+    }
 }
 
 /// Build the forward key for `(relation, source)`.
 #[inline]
-fn forward_key(relation: ComponentId, source: Entity) -> PairKey {
-    PairKey::encode(
-        RelationId::from_component(relation),
-        TargetId::from_entity(source),
-    )
+fn forward_key(relation: ComponentId, source: Entity) -> AdjacencyKey {
+    AdjacencyKey {
+        pair: PairKey::encode(
+            RelationId::from_component(relation),
+            TargetId::from_entity(source),
+        ),
+        generation: source.generation(),
+    }
 }
 
 /// Build the reverse key for `(relation, target)`.
 #[inline]
-fn reverse_key(relation: ComponentId, target: Entity) -> PairKey {
-    PairKey::encode(
-        RelationId::from_component(relation),
-        TargetId::from_entity(target),
-    )
+fn reverse_key(relation: ComponentId, target: Entity) -> AdjacencyKey {
+    forward_key(relation, target)
 }
 
 /// Push `edge` into `edges` only if an identical edge is not already present,
@@ -454,6 +529,37 @@ impl RelationIndex {
     #[inline]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Cache key covering all edge mutations, including raw registry edits.
+    ///
+    /// Moving an index preserves its key; cloning or replacing it with a new
+    /// index does not. A no-op insertion/removal/clear preserves the key.
+    #[inline]
+    pub fn version(&self) -> RelationIndexVersion {
+        self.version
+    }
+
+    fn mark_changed(&mut self) {
+        // Obtain a fresh identity before touching adjacency on exhaustion, so
+        // even a caught allocation-counter panic leaves the old graph intact.
+        self.version = match self.version.revision.checked_add(1) {
+            Some(revision) => RelationIndexVersion {
+                revision,
+                ..self.version
+            },
+            None => RelationIndexVersion::fresh(),
+        };
+    }
+
+    /// Remove all edges, retaining relation-kind metadata in the registry.
+    /// Clearing an already empty index is a no-op.
+    pub fn clear(&mut self) {
+        if !self.is_empty() {
+            self.mark_changed();
+            self.forward.clear();
+            self.reverse.clear();
+        }
     }
 
     /// Whether the index holds no edges at all.
@@ -515,12 +621,13 @@ impl RelationIndex {
         let fkey = forward_key(relation, source);
         let mut evicted = None;
 
+        let existing = self.targets(relation, source);
+        if (exclusive && existing == [target]) || (!exclusive && existing.contains(&target)) {
+            return None;
+        }
+        self.mark_changed();
         if exclusive {
             if let Some((_, existing)) = self.forward.get(&fkey) {
-                // Already pointing exactly at `target`: nothing to do.
-                if existing.len() == 1 && existing[0] == target {
-                    return None;
-                }
                 let olds: Vec<Entity> = existing.clone();
                 evicted = olds.first().copied();
                 for old in olds {
@@ -528,8 +635,6 @@ impl RelationIndex {
                 }
                 self.forward.remove(&fkey);
             }
-        } else if self.targets(relation, source).contains(&target) {
-            return None;
         }
 
         self.forward
@@ -549,6 +654,10 @@ impl RelationIndex {
     /// Remove the edge `source --relation--> target`. Returns whether it
     /// existed.
     pub fn remove(&mut self, relation: ComponentId, source: Entity, target: Entity) -> bool {
+        if !self.targets(relation, source).contains(&target) {
+            return false;
+        }
+        self.mark_changed();
         let removed = self.remove_from_forward(relation, source, target);
         if removed {
             self.remove_from_reverse(relation, source, target);
@@ -563,12 +672,21 @@ impl RelationIndex {
         let mut affected = Vec::new();
 
         // Edges where `entity` is the source.
-        let fkeys: Vec<PairKey> = self
+        let fkeys: Vec<AdjacencyKey> = self
             .forward
             .iter()
             .filter(|(_, (anchor, _))| *anchor == entity)
             .map(|(key, _)| *key)
             .collect();
+        let rkeys: Vec<AdjacencyKey> = self
+            .reverse
+            .iter()
+            .filter(|(_, (anchor, _))| *anchor == entity)
+            .map(|(key, _)| *key)
+            .collect();
+        if !fkeys.is_empty() || !rkeys.is_empty() {
+            self.mark_changed();
+        }
         for fkey in fkeys {
             if let Some((_, targets)) = self.forward.remove(&fkey) {
                 let relation = fkey.relation().component_id();
@@ -584,12 +702,6 @@ impl RelationIndex {
         }
 
         // Edges where `entity` is the target.
-        let rkeys: Vec<PairKey> = self
-            .reverse
-            .iter()
-            .filter(|(_, (anchor, _))| *anchor == entity)
-            .map(|(key, _)| *key)
-            .collect();
         for rkey in rkeys {
             if let Some((_, sources)) = self.reverse.remove(&rkey) {
                 let relation = rkey.relation().component_id();
@@ -611,8 +723,8 @@ impl RelationIndex {
     #[inline]
     pub fn targets(&self, relation: ComponentId, source: Entity) -> &[Entity] {
         match self.forward.get(&forward_key(relation, source)) {
-            Some((_, targets)) => targets.as_slice(),
-            None => &[],
+            Some((anchor, targets)) if *anchor == source => targets.as_slice(),
+            _ => &[],
         }
     }
 
@@ -620,8 +732,8 @@ impl RelationIndex {
     #[inline]
     pub fn sources(&self, relation: ComponentId, target: Entity) -> &[Entity] {
         match self.reverse.get(&reverse_key(relation, target)) {
-            Some((_, sources)) => sources.as_slice(),
-            None => &[],
+            Some((anchor, sources)) if *anchor == target => sources.as_slice(),
+            _ => &[],
         }
     }
 
@@ -782,6 +894,46 @@ impl Relations {
     #[inline]
     pub fn register(&mut self, relation: ComponentId, kind: RelationKind) {
         self.kinds.insert(relation, kind);
+        if kind.exclusive {
+            self.normalize_exclusive(relation);
+        }
+    }
+
+    /// Canonical fragmenting identity for a live source. Iterate registered
+    /// kinds, not all graph edges, so unrelated holders do not increase the
+    /// work of a single source's structural change.
+    pub fn fragmenting_pairs(&self, source: Entity) -> Vec<(ComponentId, Entity)> {
+        let mut pairs = Vec::new();
+        for (&relation, kind) in &self.kinds {
+            if kind.fragmenting {
+                pairs.extend(
+                    self.index
+                        .targets(relation, source)
+                        .iter()
+                        .map(|&t| (relation, t)),
+                );
+            }
+        }
+        pairs.sort_unstable();
+        pairs.dedup();
+        pairs
+    }
+
+    /// Bulk/raw index edits may bypass exclusive insertion. Keep the most
+    /// recently inserted target when enabling or reconciling exclusivity.
+    pub(crate) fn normalize_exclusive(&mut self, relation: ComponentId) {
+        let sources: Vec<_> = self
+            .index
+            .forward
+            .iter()
+            .filter(|(key, (_, targets))| {
+                key.relation().component_id() == relation && targets.len() > 1
+            })
+            .map(|(_, (source, targets))| (*source, *targets.last().unwrap()))
+            .collect();
+        for (source, target) in sources {
+            self.index.add(relation, source, target, true);
+        }
     }
 
     /// Look up the metadata for a relation kind, if registered.
@@ -936,6 +1088,137 @@ mod tests {
     }
 
     #[test]
+    fn index_version_tracks_effective_mutations_and_noops() {
+        let mut idx = RelationIndex::new();
+        let r = rel(1);
+        let (a, b, c) = (ent(1, 1), ent(2, 1), ent(3, 1));
+        let initial = idx.version();
+        idx.clear();
+        assert!(!idx.remove(r, a, b));
+        assert!(idx.remove_all_for_entity(a).is_empty());
+        assert_eq!(idx.version(), initial);
+        idx.add(r, a, b, false);
+        let first = idx.version();
+        assert_eq!(first.identity(), initial.identity());
+        assert_eq!(first.revision(), initial.revision() + 1);
+        idx.add(r, a, b, false);
+        idx.add(r, a, b, true);
+        assert_eq!(idx.version(), first);
+        idx.add(r, a, c, false);
+        assert_eq!(idx.version().revision(), first.revision() + 1);
+        // Normalizing a raw non-exclusive adjacency is a real mutation even
+        // when the chosen exclusive target was already present.
+        idx.add(r, a, b, true);
+        assert_eq!(idx.version().revision(), first.revision() + 2);
+        assert_eq!(idx.targets(r, a), &[b]);
+        assert!(idx.sources(r, c).is_empty());
+        assert_eq!(idx.add(r, a, c, true), Some(b));
+        assert_eq!(idx.version().revision(), first.revision() + 3);
+        assert!(idx.sources(r, b).is_empty());
+        assert!(idx.remove(r, a, c));
+        let empty = idx.version();
+        assert_eq!(empty.revision(), first.revision() + 4);
+        idx.clear();
+        assert_eq!(idx.version(), empty);
+    }
+
+    #[test]
+    fn index_version_remove_all_is_one_mutation_and_generation_safe() {
+        let mut idx = RelationIndex::new();
+        let r = rel(1);
+        let (a, b, next_a) = (ent(1, 1), ent(2, 1), ent(1, 2));
+        for (source, target) in [(a, a), (a, b), (b, a), (next_a, b)] {
+            idx.add(r, source, target, false);
+        }
+        let before = idx.version();
+        let removed = idx.remove_all_for_entity(a);
+        assert_eq!(removed.len(), 3); // Self-loop is reported only once.
+        assert_eq!(idx.version().revision(), before.revision() + 1);
+        assert_eq!(idx.edge_count(), 1);
+        assert_eq!(idx.targets(r, next_a), &[b]);
+        assert_eq!(idx.sources(r, b), &[next_a]);
+        let before = idx.version();
+        assert!(idx.remove_all_for_entity(a).is_empty());
+        assert_eq!(idx.version(), before);
+        idx.clear();
+        assert_eq!(idx.version().revision(), before.revision() + 1);
+        assert!(idx.is_empty());
+    }
+
+    #[test]
+    fn index_versions_distinguish_clones_and_raw_replacements() {
+        let mut registry = Relations::new();
+        let (r, a, b) = (rel(1), ent(1, 1), ent(2, 1));
+        let empty = registry.index().version();
+        registry.index_mut().add(r, a, b, true);
+        assert_ne!(registry.index().version(), empty);
+        let original = registry.index().version();
+        let mut cloned = registry.clone();
+        assert_ne!(cloned.index().version().identity(), original.identity());
+        assert_eq!(cloned.index().targets(r, a), &[b]);
+        let cloned_version = cloned.index().version();
+        cloned.index_mut().clear();
+        assert_ne!(cloned.index().version(), cloned_version);
+        assert_eq!(registry.index().targets(r, a), &[b]);
+        cloned.clone_from(&registry);
+        assert_ne!(cloned.index().version(), original);
+        assert_ne!(
+            cloned.index().version().identity(),
+            cloned_version.identity()
+        );
+        *registry.index_mut() = RelationIndex::new();
+        assert_ne!(registry.index().version().identity(), original.identity());
+        assert!(registry.index().is_empty());
+    }
+
+    #[test]
+    fn index_revision_exhaustion_rotates_identity_for_every_mutation() {
+        for mutation in 0..4 {
+            let mut idx = RelationIndex::new();
+            let (r, a, b, c) = (rel(1), ent(1, 1), ent(2, 1), ent(3, 1));
+            idx.add(r, a, b, true);
+            idx.version.revision = u64::MAX;
+            let exhausted = idx.version();
+            idx.add(r, a, b, true);
+            assert!(!idx.remove(r, a, c));
+            assert!(idx.remove_all_for_entity(c).is_empty());
+            assert_eq!(idx.version(), exhausted);
+            match mutation {
+                0 => {
+                    idx.add(r, a, c, true);
+                }
+                1 => {
+                    assert!(idx.remove(r, a, b));
+                }
+                2 => {
+                    assert_eq!(idx.remove_all_for_entity(a).len(), 1);
+                }
+                _ => idx.clear(),
+            }
+            assert_ne!(idx.version().identity(), exhausted.identity());
+            assert_eq!(idx.version().revision(), 0);
+            let remaining = [c];
+            assert_eq!(
+                idx.targets(r, a),
+                if mutation == 0 { &remaining[..] } else { &[] }
+            );
+            idx.add(r, b, a, true);
+            assert_eq!(idx.version().revision(), 1);
+        }
+    }
+
+    #[test]
+    fn index_identity_exhaustion_never_wraps_even_after_caught_panics() {
+        // Test an isolated allocator, never exhaust the process-global counter.
+        let counter = AtomicUsize::new(usize::MAX - 1);
+        assert_eq!(allocate_index_identity(&counter), usize::MAX - 1);
+        for _ in 0..2 {
+            assert!(std::panic::catch_unwind(|| allocate_index_identity(&counter)).is_err());
+            assert_eq!(counter.load(Ordering::Relaxed), usize::MAX);
+        }
+    }
+
+    #[test]
     fn pair_key_encode_decode_roundtrips() {
         let e = ent(7, 3);
         let pair = Pair::new(rel(5), e);
@@ -986,6 +1269,33 @@ mod tests {
         assert_eq!(idx.sources(r, b), &[] as &[Entity]);
 
         assert!(idx.remove(r, a, c));
+        assert!(idx.is_empty());
+    }
+
+    #[test]
+    fn adjacency_keys_isolate_generations_in_both_directions() {
+        let mut idx = RelationIndex::new();
+        let r = rel(1);
+        let (old_source, source) = (ent(1, 1), ent(1, 2));
+        let (old_target, target) = (ent(2, 1), ent(2, 2));
+        for s in [old_source, source] {
+            for t in [old_target, target] {
+                idx.add(r, s, t, false);
+            }
+        }
+        assert_eq!(idx.edge_count(), 4);
+        assert_eq!(idx.targets(r, source), &[old_target, target]);
+        assert_eq!(idx.sources(r, target), &[old_source, source]);
+        assert_eq!(idx.add(r, source, target, true), Some(old_target));
+        assert_eq!(idx.targets(r, source), &[target]);
+        assert_eq!(idx.targets(r, old_source), &[old_target, target]);
+        assert_eq!(idx.sources(r, old_target), &[old_source]);
+        idx.remove_all_for_entity(old_source);
+        assert_eq!(idx.sources(r, target), &[source]);
+        assert_eq!(idx.targets(r, source), &[target]);
+        assert!(!idx.remove(r, old_source, target));
+        assert!(!idx.remove(r, source, old_target));
+        assert!(idx.remove(r, source, target));
         assert!(idx.is_empty());
     }
 

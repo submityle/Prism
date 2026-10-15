@@ -279,9 +279,25 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     where
         D: ReadOnlyQueryData,
     {
+        self.iter_with_ticks(world, world.last_change_tick(), world.change_tick())
+    }
+
+    /// Iterate a read-only query using this consumer's own change window.
+    ///
+    /// Independent consumers such as render extraction retain their last
+    /// successful tick without changing the world's one-shot query baseline.
+    /// The window is `(last_run, this_run]`, with the usual wrapping tick rules.
+    #[inline]
+    pub fn iter_with_ticks<'w, 's>(
+        &'s self,
+        world: &'w World,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> QueryIter<'w, 's, D, F>
+    where
+        D: ReadOnlyQueryData,
+    {
         self.validate_world(world);
-        let last_run = world.last_change_tick();
-        let this_run = world.change_tick();
         let archetypes = self.matched_archetypes(world);
         let world_ptr = (world as *const World).cast_mut();
         // SAFETY: `D: ReadOnlyQueryData`, so no `&mut` fetch is ever formed and

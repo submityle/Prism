@@ -29,6 +29,7 @@
 use core::cell::Cell;
 use std::rc::Rc;
 
+use prism_platform::suspend::{SuspendEvent, SuspendEventKind};
 use prism_window::envelope::WindowEventEnvelope;
 use prism_window::event::WindowEvent as KernelWindowEvent;
 use prism_window::geometry::PhysicalSize;
@@ -38,7 +39,7 @@ use prism_window_winit::{FrameOutcome, WindowConfig, WinitBackend, WinitRunner a
 
 use crate::app::App;
 use crate::exit::{AppExit, AppExitRequest};
-use crate::lifecycle::{FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame};
+use crate::lifecycle::{FocusChanged, LowMemory, SuspendResumeAdapter, WillRenderFirstFrame};
 use crate::pacing::{FrameLimit, FramePacer};
 
 /// An action the windowed runner derives from a frame's window events.
@@ -112,6 +113,7 @@ struct WindowedHost {
     pacer: FramePacer,
     first_frame_sent: bool,
     exit: Rc<Cell<Option<AppExit>>>,
+    suspend_resume: SuspendResumeAdapter,
 }
 
 impl WindowedHost {
@@ -135,23 +137,28 @@ impl Drop for WindowedHost {
 
 impl WinitApp for WindowedHost {
     fn resumed(&mut self, backend: &mut WinitBackend) {
-        if !self.started {
-            self.started = true;
-            for settings in &self.windows {
-                let config = WindowConfig::new(settings.title.clone(), settings.inner_size);
-                self.open.push(backend.request_window(config));
-            }
-        }
-        self.app.send_event(Resumed);
+        self.lifecycle(SuspendEvent::resumed(prism_platform::now()), backend);
     }
 
-    fn suspended(&mut self, backend: &mut WinitBackend) {
-        super::window_bridge::publish(&mut self.app, backend, &self.open, true);
-        // A platform suspend pauses the app: `drive_app_lifecycle` (installed
-        // by `App::add_lifecycle_events`) moves `AppLifecycle` to `Suspended`,
-        // pauses virtual time, and stops advancing the fixed accumulator until
-        // the matching `Resumed` (design §12/§25.1).
-        self.app.send_event(Suspended);
+    fn lifecycle(&mut self, event: SuspendEvent, backend: &mut WinitBackend) {
+        match event.kind() {
+            SuspendEventKind::Resumed => {
+                self.suspend_resume.forward(&mut self.app, event);
+                if !self.started {
+                    self.started = true;
+                    for settings in &self.windows {
+                        let config = WindowConfig::new(settings.title.clone(), settings.inner_size);
+                        self.open.push(backend.request_window(config));
+                    }
+                }
+            }
+            SuspendEventKind::Suspended => {
+                super::window_bridge::publish(&mut self.app, backend, &self.open, true);
+                // The adapter records the real host timestamp before the next
+                // automatic frame and forwards the App lifecycle edge.
+                self.suspend_resume.forward(&mut self.app, event);
+            }
+        }
     }
 
     fn low_memory(&mut self, _backend: &mut WinitBackend) {
@@ -208,6 +215,10 @@ impl WinitApp for WindowedHost {
             self.pacer.throttle();
         }
         FrameOutcome::Continue
+    }
+
+    fn next_wakeup(&self, _backend: &WinitBackend) -> Option<std::time::Instant> {
+        crate::presentation::next_window_wakeup(&self.app)
     }
 }
 
@@ -280,6 +291,7 @@ impl WinitRunner {
             pacer: FramePacer::new(self.limit),
             first_frame_sent: false,
             exit: Rc::clone(&exit),
+            suspend_resume: SuspendResumeAdapter,
         };
         match PlatformRunner::new(host).run() {
             Ok(()) => exit.get().unwrap_or(AppExit::Success),

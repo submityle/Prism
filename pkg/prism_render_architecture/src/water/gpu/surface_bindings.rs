@@ -213,7 +213,8 @@ pub mod view {
     /// Offset of `style_params: vec4<f32>` (ramp steps, foam threshold, tint,
     /// hybrid bias).
     pub const STYLE_PARAMS_OFFSET: u32 = 112;
-    /// Offset of `viewport: vec4<f32>` (`xy` framebuffer pixel size).
+    /// Offset of `viewport: vec4<f32>` (`xy` framebuffer pixel size, `z`
+    /// hybrid overlay opacity, `w` reserved).
     pub const VIEWPORT_OFFSET: u32 = 128;
     /// Total size of the uniform block in bytes (`64 + 5 * 16`), already a
     /// multiple of 16 so it needs no tail padding.

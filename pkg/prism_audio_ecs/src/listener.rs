@@ -18,8 +18,9 @@ use prism_ecs::prelude::Component;
 /// [`GlobalTransform`](prism_transform::GlobalTransform) is the
 /// active listener pose.
 ///
-/// At most one listener is used; when several exist the first encountered in
-/// archetype order wins. When no listener exists, emitters fall back to their
+/// At most one listener is used; when several exist the lowest complete Entity
+/// identifier wins, independent of archetype iteration order. Without a listener,
+/// emitters fall back to their
 /// unattenuated base importance.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AudioListener;

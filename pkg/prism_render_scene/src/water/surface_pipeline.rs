@@ -270,6 +270,8 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
         // The entry points come straight from the deterministic `CPU` contract,
         // so the host pipeline and the device shader can never drift on names.
         let draw = plan_surface_plan(key.frontend);
+        draw.validate()
+            .expect("water surface pipeline must preserve its transparent pass contract");
         RenderPipelineDescriptor {
             label: Some(format!("prism water surface {:?}", key.frontend).into()),
             layout: vec![
@@ -613,6 +615,7 @@ mod tests {
         // Transparent composite: pre-multiplied alpha, reverse-Z depth test with
         // no depth write, both windings rastered.
         assert!(target.blend.is_some());
+        assert_eq!(target.blend, Some(premultiplied_alpha_blend()));
         let depth = desc.depth_stencil.expect("the surface tests opaque depth");
         assert_eq!(depth.depth_write_enabled, Some(false));
         assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));

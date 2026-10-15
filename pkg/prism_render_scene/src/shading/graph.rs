@@ -243,6 +243,33 @@ fn resource(
 #[path = "../../text/unit/shading/composition_graph.rs"]
 mod composition_tests;
 
+#[cfg(test)]
+fn logical_resource_index(graph: &GpuFrameGraphBuilder, resource_index: usize) -> (bool, usize) {
+    let is_texture = |index: usize| {
+        graph.passes().iter().any(|pass| {
+            pass.accesses.iter().any(|access| {
+                access.resource.0 as usize == index
+                    && matches!(
+                        access.kind,
+                        AccessKind::SampledRead
+                            | AccessKind::ColorAttachment
+                            | AccessKind::DepthAttachment
+                    )
+            })
+        })
+    };
+    let texture = is_texture(resource_index);
+    let local_index = graph
+        .resources()
+        .iter()
+        .enumerate()
+        .take(resource_index + 1)
+        .filter(|(index, _)| is_texture(*index) == texture)
+        .count()
+        - 1;
+    (texture, local_index)
+}
+
 fn access(
     resource: prism_render_graph::frame_graph::ResourceId,
     kind: AccessKind,
@@ -258,7 +285,7 @@ mod tests {
     fn declared_pass_count_matches_runtime_assertion() {
         let graph = shading_frame_graph();
         let compiled = graph.compile().unwrap();
-        assert_eq!(compiled.execution_order.len(), graph.passes().len());
+        assert_eq!(compiled.order.len(), graph.passes().len());
         assert_eq!(compiled.declared_pass_count, graph.passes().len());
         assert_eq!(graph.passes()[0].name, "visibility_raster");
         assert_eq!(graph.passes()[4].name, "texel_space_shade_cache");
@@ -292,7 +319,7 @@ mod tests {
             [prism_render_graph::frame_graph::PassId(4)]
         );
         assert!(compiled
-            .barriers
+            .logical_barriers
             .iter()
             .any(|barrier| barrier.queue_transfer));
         let resource = |name: &str| {
@@ -305,10 +332,19 @@ mod tests {
             )
         };
         let has_barrier = |name: &str, source: u32, destination: u32| {
-            compiled.barriers.iter().any(|barrier| {
-                barrier.resource == resource(name)
-                    && barrier.source == prism_render_graph::frame_graph::PassId(source)
-                    && barrier.destination == prism_render_graph::frame_graph::PassId(destination)
+            let resource_index = resource(name).0 as usize;
+            let (is_texture, local_index) = logical_resource_index(&graph, resource_index);
+            compiled.logical_barriers.iter().any(|barrier| {
+                let resource_matches = match (is_texture, barrier.resource) {
+                    (true, prism_render_graph::LogicalResource::Texture(id))
+                    | (false, prism_render_graph::LogicalResource::Buffer(id)) => {
+                        id.get() as usize == local_index
+                    }
+                    _ => false,
+                };
+                resource_matches
+                    && barrier.source == source as usize
+                    && barrier.destination == destination as usize
             })
         };
         assert!(has_barrier("visibility_ids", 0, 1));

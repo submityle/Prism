@@ -229,6 +229,13 @@ impl ParticleStorage {
         &self.inverse_masses
     }
 
+    /// Borrows the position column mutably together with the aligned inverse
+    /// masses for a position-level coupling pass.
+    #[must_use]
+    pub fn positions_and_inverse_masses_mut(&mut self) -> (&mut [Vec3], &[Real]) {
+        (&mut self.positions, &self.inverse_masses)
+    }
+
     /// Borrows every integration column at once so the substep integrator can
     /// update positions, previous positions, and velocities together while
     /// reading inverse masses.

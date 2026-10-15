@@ -188,13 +188,36 @@ impl Shared {
             self.queued.fetch_sub(1, Ordering::Release);
             return Some(job);
         }
-        for (j, dq) in self.deques.iter().enumerate() {
-            if Some(j) == hint {
-                continue;
-            }
-            if let Some(job) = dq.lock().unwrap().pop_front() {
-                self.queued.fetch_sub(1, Ordering::Release);
-                return Some(job);
+        // A plan supplies placement hints, not a guarantee that OS pinning
+        // succeeded. Without a plan (or for an external helper) there is no
+        // reliable home node: retain flat stealing. Two passes avoid a victim
+        // vector allocation on every idle probe and O(workers²) cached orders.
+        let home = if cfg!(feature = "numa") {
+            hint.filter(|&idx| idx < self.deques.len())
+                .and_then(|idx| self.affinity_plan.as_ref()?.assignment(idx))
+                .map(|assignment| assignment.node)
+        } else {
+            None
+        };
+        for pass in 0..if home.is_some() { 2 } else { 1 } {
+            for (j, dq) in self.deques.iter().enumerate() {
+                if Some(j) == hint {
+                    continue;
+                }
+                if let Some(home) = home {
+                    let local = self
+                        .affinity_plan
+                        .as_ref()
+                        .and_then(|plan| plan.assignment(j))
+                        .is_some_and(|assignment| assignment.node == home);
+                    if local != (pass == 0) {
+                        continue;
+                    }
+                }
+                if let Some(job) = dq.lock().unwrap().pop_front() {
+                    self.queued.fetch_sub(1, Ordering::Release);
+                    return Some(job);
+                }
             }
         }
         None

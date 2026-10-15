@@ -1,7 +1,8 @@
 //! Simulation publication → immutable extraction → mesh instance-stream consumption.
 //!
 //! Bind a simulation entity to its generational scene handle with
-//! [`RenderTransformBinding`]. The plugin propagates locals and publishes the
+//! [`RenderTransformBinding`]. Opt-in resident affine columns bind physical ECS
+//! rows directly; otherwise the plugin propagates locals and publishes the
 //! complete double-buffered pose in main `Last`; local/hierarchy writers must
 //! finish before that phase. Extraction only clones an immutable CPU snapshot.
 //! GPU writes run after the device-loss gate, and recovery uploads the current
@@ -23,13 +24,16 @@ use prism_transform::{
     GlobalTransform,
 };
 
+use crate::ecs_columns::{has_resident_transform, ResidentTransformRows};
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::{DrawFunctionId, DrawFunctions, DrawRequest, MeshPipelineProvider, MeshPipelines};
 
 const STRIDE: usize = 48;
 
-/// Associates an entity's propagated world pose with one render scene instance.
+/// Associates an entity's world pose with one render scene instance.
 /// Handles include the generation; reused scene slots never inherit old poses.
+/// A declared GPU transform column supplies its affine directly; other entities
+/// use the propagated `GlobalTransform` publication path.
 #[derive(Clone, Copy, Debug)]
 pub struct RenderTransformBinding(pub SceneHandle);
 impl Component for RenderTransformBinding {}
@@ -156,10 +160,15 @@ pub(crate) fn publish_transforms(world: &mut World) {
     bindings.sort_unstable();
     let mut rows = BTreeMap::new();
     let mut error = None;
-    for (i, &(handle, _)) in bindings.iter().enumerate() {
-        if rows.insert(handle, i).is_some() {
+    for pair in bindings.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            let handle = pair[0].0;
             error = Some(format!("duplicate transform scene binding: {handle:?}"));
         }
+    }
+    bindings.retain(|&(_, entity)| !has_resident_transform(world, entity));
+    for (i, &(handle, _)) in bindings.iter().enumerate() {
+        rows.insert(handle, i);
     }
     if !bindings.is_empty() && error.is_none() {
         if let Err(reason) = prism_transform::ecs::propagate_transforms(world) {
@@ -215,6 +224,10 @@ pub struct TransformUploadStats {
 #[derive(Default)]
 pub struct RenderTransforms {
     source: Arc<Snapshot>,
+    resident: ResidentTransformRows,
+    // Failed preparation retains both the old submitted views and the new
+    // binding identities, so newly bound scenes cannot fall back to bare meshes.
+    pending_resident: ResidentTransformRows,
     allocation: Option<Arc<Allocation>>,
     uploaded: Vec<u8>,
     last_upload: Option<Arc<[u8]>>,
@@ -245,6 +258,19 @@ impl RenderTransforms {
         self.allocation
             .as_ref()
             .is_some_and(|a| Arc::ptr_eq(&a.device, device) && bytes > a.capacity)
+    }
+
+    fn reject_preparation(
+        &mut self,
+        source: Arc<Snapshot>,
+        resident: ResidentTransformRows,
+        error: String,
+    ) {
+        self.source = source;
+        self.pending_resident = resident;
+        self.stats = TransformUploadStats::default();
+        self.error = Some(error);
+        self.prepared = false;
     }
 
     fn sync(
@@ -316,21 +342,41 @@ impl RenderTransforms {
     }
 
     fn install_draw(&mut self, functions: &mut DrawFunctions) {
-        let Some(allocation) = self.allocation.clone() else {
+        let allocation = self.allocation.clone();
+        let resident = self.resident.clone();
+        if allocation.is_none() && resident.0.is_empty() {
+            // Clear a previous closure's retained views even after all bindings
+            // disappear; its stable id may still be referenced by recorded work.
+            if let Some(id) = self.draw {
+                functions.replace(id, |_, _| {});
+            }
             return;
-        };
+        }
         let rows = self.source.rows.clone();
         let draw = move |item: &crate::PhaseItem, ctx: &mut dyn crate::MeshRecorder| {
-            let Some(&row) = rows.get(&item.scene) else {
-                return;
+            let (buffer, offset) = match resident.0.get(&item.scene) {
+                Some(Ok(binding)) => {
+                    let Some(buffer) = binding.column.buffer_id() else {
+                        return;
+                    };
+                    (buffer, (binding.row * STRIDE) as u64)
+                }
+                Some(Err(_)) => return,
+                None => {
+                    let (Some(&row), Some(allocation)) = (rows.get(&item.scene), &allocation)
+                    else {
+                        return;
+                    };
+                    (allocation.id, (row * STRIDE) as u64)
+                }
             };
-            if item.indirect.is_some() || item.vertices.last() != Some(&allocation.id) {
+            if item.indirect.is_some() || item.vertices.last() != Some(&buffer) {
                 return;
             }
             ctx.set_pipeline(item.pipeline);
             for (slot, &buffer) in item.vertices.iter().enumerate() {
                 let offset = if slot + 1 == item.vertices.len() {
-                    (row * STRIDE) as u64
+                    offset
                 } else {
                     0
                 };
@@ -354,7 +400,10 @@ impl RenderTransforms {
         request: &mut DrawRequest,
         provider: &MeshPipelines,
     ) -> Result<bool, String> {
-        if !self.source.rows.contains_key(&request.scene) {
+        if !self.source.rows.contains_key(&request.scene)
+            && !self.resident.0.contains_key(&request.scene)
+            && !self.pending_resident.0.contains_key(&request.scene)
+        {
             return Ok(false);
         }
         let fail = if !self.prepared {
@@ -365,6 +414,8 @@ impl RenderTransforms {
             )
         } else if self.source.error.is_some() {
             self.source.error.clone()
+        } else if let Some(Err(error)) = self.resident.0.get(&request.scene) {
+            Some(error.clone())
         } else if provider.transformed_descriptor(&request.variant).is_none() {
             Some("mesh provider does not support the affine transform stream".into())
         } else if crate::mesh_pipeline::full_lobe_fallback(request.variant)
@@ -388,7 +439,12 @@ impl RenderTransforms {
             self.error = Some(error.clone());
             return Err(error);
         }
-        let (Some(allocation), Some(draw)) = (&self.allocation, self.draw) else {
+        let buffer = match self.resident.0.get(&request.scene) {
+            Some(Ok(binding)) => binding.column.buffer_id(),
+            Some(Err(_)) => None,
+            None => self.allocation.as_ref().map(|a| a.id),
+        };
+        let (Some(buffer), Some(draw)) = (buffer, self.draw) else {
             let error = "transform buffer has not been prepared".to_owned();
             self.error = Some(error.clone());
             self.stats.draws_rejected += 1;
@@ -399,7 +455,7 @@ impl RenderTransforms {
             13,
             &[VertexFormat::Float32x4; 3],
         ));
-        request.vertices.push(allocation.id);
+        request.vertices.push(buffer);
         request.draw = draw;
         Ok(true)
     }
@@ -428,15 +484,23 @@ where
     let source = world
         .get_resource::<ExtractedTransforms>()
         .map_or_else(Arc::default, |e| e.0.clone());
+    let resident = world
+        .get_resource::<ResidentTransformRows>()
+        .cloned()
+        .unwrap_or_default();
     let runtime = world.resource::<RenderRuntimeResource<I>>().runtime();
     let device: Arc<dyn RenderDevice + Send + Sync> = runtime.device_handle();
     // Retire an old healthy allocation only after its submitted frames finish.
     // A replacement device owns a different queue and needs no old-device wait.
     let error = if runtime.device_lost().is_some() {
         Some("transform upload paused while the device is lost".to_owned())
-    } else if world
+    } else if (world
         .resource::<RenderTransforms>()
         .needs_retirement(&device, source.bytes.len())
+        || world
+            .resource::<RenderTransforms>()
+            .resident
+            .releases_on_device(&resident, &device))
         && !runtime.wait_idle()
     {
         Some("transform buffer retirement could not wait for submitted frames".to_owned())
@@ -445,15 +509,16 @@ where
     };
     if let Some(error) = error {
         let state = world.resource_mut::<RenderTransforms>();
-        state.source = source;
-        state.stats = TransformUploadStats::default();
-        state.error = Some(error.clone());
-        state.prepared = false;
+        // Keep prior views until a later successful retirement barrier. The old
+        // draw closure can still own buffers read by submitted frames.
+        state.reject_preparation(source, resident, error.clone());
         return Err(error);
     }
     let mut state = world
         .remove_resource::<RenderTransforms>()
         .expect("transform state");
+    state.resident = resident;
+    state.pending_resident = ResidentTransformRows::default();
     // A backend may panic during allocation/upload. Restore the resource before
     // the recovery gate handles the panic, so diagnostics and retries keep the
     // same CPU baseline instead of losing it with the unwinding stack.
@@ -490,3 +555,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod resident_tests;

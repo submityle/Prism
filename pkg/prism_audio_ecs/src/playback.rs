@@ -1,6 +1,6 @@
 //! The [`PlaybackMode`] enum and [`PlaybackSettings`] component: a declarative,
 //! component-shaped description of *how* an [`AudioPlayer`](crate::player::AudioPlayer)
-//! should sound and what becomes of its entity when the sound ends.
+//! should be scheduled and what becomes of its entity on an explicit stop.
 //!
 //! This is the ergonomic authoring facade over the lower-level
 //! [`AudioEmitter`](crate::emitter::AudioEmitter): instead of hand-choosing a
@@ -8,7 +8,9 @@
 //! [`AudioPlayer`](crate::player::AudioPlayer) with these settings and the
 //! [`sync_audio_players`](crate::player_systems::sync_audio_players) system
 //! derives the emitter. The field set is deliberately limited to knobs the
-//! current runtime can honor end to end, so no field is a silent no-op.
+//! current voice runtime can honor. The runtime has no per-source decoder,
+//! duration, or natural-completion event; these modes select virtualization
+//! policy and explicit-stop disposition, not automatic sample looping/EOS.
 //!
 //! # Provenance
 //!
@@ -36,43 +38,42 @@ const DEFAULT_REFERENCE_DISTANCE: f32 = 1.0;
 /// this radius the player fades to silence.
 const DEFAULT_MAX_DISTANCE: f32 = 100.0;
 
-/// What happens to a one-shot's entity when playback finishes, and whether the
-/// source repeats at all.
+/// Explicit-stop disposition and virtual-voice playhead policy.
 ///
-/// The looping variant keeps the voice advancing silently when culled so a
-/// revived voice stays in sync; the one-shot variants restart from the
-/// beginning on revival, matching short retriggerable sounds.
+/// There is no natural-completion event in the underlying runtime. Source
+/// decoding and sample looping are not provided by this component; the caller
+/// requests disposition through [`AudioPlayer::stop`](crate::AudioPlayer::stop).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlaybackMode {
-    /// Play once to completion and leave the entity and its components intact.
+    /// Restart the playhead on virtual revival; retain components on stop.
     #[default]
     Once,
-    /// Repeat continuously until explicitly stopped.
+    /// Advance the virtual playhead continuously; retain components on stop.
     Loop,
-    /// Play once, then despawn the whole entity.
+    /// Despawn the whole entity on an explicit stop request.
     Despawn,
-    /// Play once, then remove this crate's playback components from the entity,
+    /// On explicit stop, remove this crate's playback components from the entity,
     /// leaving the rest of the entity intact.
     Remove,
 }
 
 impl PlaybackMode {
-    /// Whether the source repeats continuously.
+    /// Whether continuous virtual playhead advancement is requested.
     #[must_use]
     #[inline]
     pub const fn loops(self) -> bool {
         matches!(self, PlaybackMode::Loop)
     }
 
-    /// Whether the entity should be despawned once playback finishes.
+    /// Whether an explicit stop should despawn the entity.
     #[must_use]
     #[inline]
     pub const fn despawns_entity(self) -> bool {
         matches!(self, PlaybackMode::Despawn)
     }
 
-    /// Whether the playback components should be removed once playback
-    /// finishes, leaving the entity otherwise intact.
+    /// Whether an explicit stop should remove playback components, leaving
+    /// the entity otherwise intact.
     #[must_use]
     #[inline]
     pub const fn removes_components(self) -> bool {
@@ -101,13 +102,12 @@ impl PlaybackMode {
 /// [`PlaybackSettings::REMOVE`]) and refine it with the chaining setters.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct PlaybackSettings {
-    /// Loop/one-shot behavior and the end-of-playback disposition of the
-    /// entity.
+    /// Virtual playhead behavior and explicit-stop disposition of the entity.
     pub mode: PlaybackMode,
     /// Authored loudness, folded into the derived emitter's base importance.
     pub volume: Volume,
-    /// When `true`, the voice is suspended (driven to silence) without being
-    /// torn down, so clearing the flag resumes it.
+    /// When `true`, drive importance to silence without tearing the voice
+    /// down. This is not a sample/playhead pause; the runtime still advances it.
     pub paused: bool,
     /// When `true`, the voice is driven to silence but otherwise kept alive and
     /// scheduled, matching a mute that preserves playback position.
@@ -126,13 +126,13 @@ pub struct PlaybackSettings {
 }
 
 impl PlaybackSettings {
-    /// Play once and keep the entity.
+    /// Restart virtual voices on revival and retain components on explicit stop.
     pub const ONCE: Self = Self::with_mode(PlaybackMode::Once);
-    /// Loop continuously.
+    /// Advance virtual voices continuously and retain components on explicit stop.
     pub const LOOP: Self = Self::with_mode(PlaybackMode::Loop);
-    /// Play once, then despawn the entity.
+    /// Despawn the entity on explicit stop.
     pub const DESPAWN: Self = Self::with_mode(PlaybackMode::Despawn);
-    /// Play once, then remove the playback components.
+    /// Remove playback components on explicit stop.
     pub const REMOVE: Self = Self::with_mode(PlaybackMode::Remove);
 
     /// Builds settings in `mode` at unity volume, unpaused, unmuted, and

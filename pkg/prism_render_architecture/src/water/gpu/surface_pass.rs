@@ -90,6 +90,15 @@ pub enum WaterRenderTarget {
     HdrOpaque,
 }
 
+/// Validation failures for a water-surface draw descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfacePassContractError {
+    /// A transparent target must use the water premultiplied composite.
+    TransparentTargetState,
+    /// An opaque target must replace color and write depth.
+    OpaqueTargetState,
+}
+
 /// The full contract for one water-surface raster draw.
 ///
 /// Carries the response/composition plan, blend mode, depth state, and render
@@ -109,6 +118,35 @@ pub struct SurfaceDrawDescriptor {
 }
 
 impl SurfaceDrawDescriptor {
+    /// Checks that target, blend and depth state describe one coherent pass.
+    ///
+    /// Keeping this check beside the CPU contract gives render backends and
+    /// tests one invariant to call before lowering the descriptor to an RHI
+    /// pipeline. In particular, a transparent water draw can never silently
+    /// become an opaque depth-writing pass.
+    pub fn validate(self) -> Result<(), SurfacePassContractError> {
+        match self.target {
+            WaterRenderTarget::HdrTransparent
+                if self.blend == SurfaceBlend::PremultipliedAlpha
+                    && self.depth.test == DepthTest::LessEqual
+                    && !self.depth.write =>
+            {
+                Ok(())
+            }
+            WaterRenderTarget::HdrOpaque
+                if self.blend == SurfaceBlend::Opaque
+                    && self.depth.test == DepthTest::LessEqual
+                    && self.depth.write =>
+            {
+                Ok(())
+            }
+            WaterRenderTarget::HdrTransparent => {
+                Err(SurfacePassContractError::TransparentTargetState)
+            }
+            WaterRenderTarget::HdrOpaque => Err(SurfacePassContractError::OpaqueTargetState),
+        }
+    }
+
     /// The stable `WESL` vertex entry-point name.
     ///
     /// Shared across all response plans: the displaced surface mesh geometry is
@@ -132,9 +170,11 @@ impl SurfaceDrawDescriptor {
                 ResponseProgram::Npr => "water_surface_fs_npr",
                 ResponseProgram::Custom => "water_surface_fs_custom",
             },
-            // Compatibility entry retained while the resident composition
-            // pass equivalence gate is being exercised.
-            WaterShadingPlan::MaskBlend { .. } => "water_surface_fs_hybrid",
+            // MaskBlend is the resident response producer.  Its name describes
+            // the semantic operation rather than the retired compatibility
+            // frontend, so the pipeline identity cannot accidentally revive the
+            // old standalone entry.
+            WaterShadingPlan::MaskBlend { .. } => "water_surface_fs_mask_blend",
         }
     }
 
@@ -162,7 +202,7 @@ pub fn plan_surface_draw(frontend: ResponseProgram) -> SurfaceDrawDescriptor {
 /// Plan a surface draw from the complete response/composition plan.
 #[must_use]
 pub fn plan_surface_plan(plan: WaterShadingPlan) -> SurfaceDrawDescriptor {
-    SurfaceDrawDescriptor {
+    let descriptor = SurfaceDrawDescriptor {
         plan,
         blend: SurfaceBlend::PremultipliedAlpha,
         depth: SurfaceDepth {
@@ -170,7 +210,9 @@ pub fn plan_surface_plan(plan: WaterShadingPlan) -> SurfaceDrawDescriptor {
             write: false,
         },
         target: WaterRenderTarget::HdrTransparent,
-    }
+    };
+    debug_assert!(descriptor.validate().is_ok());
+    descriptor
 }
 
 #[cfg(test)]
@@ -252,10 +294,10 @@ mod tests {
     }
 
     #[test]
-    fn mask_blend_is_composition_and_keeps_legacy_entry_until_equivalence_gate() {
+    fn mask_blend_uses_the_resident_composition_entry() {
         let draw = plan_surface_plan(WaterShadingPlan::hybrid());
         assert!(matches!(draw.plan, WaterShadingPlan::MaskBlend { .. }));
-        assert_eq!(draw.fragment_entry(), "water_surface_fs_hybrid");
+        assert_eq!(draw.fragment_entry(), "water_surface_fs_mask_blend");
     }
 
     #[test]
@@ -263,5 +305,29 @@ mod tests {
         assert!(SurfaceBlend::Opaque.is_opaque());
         assert!(!SurfaceBlend::PremultipliedAlpha.is_opaque());
         assert!(!SurfaceBlend::AlphaBlend.is_opaque());
+    }
+
+    #[test]
+    fn target_blend_and_depth_form_one_contract() {
+        for frontend in FRONTENDS {
+            assert_eq!(
+                plan_surface_draw(frontend).validate(),
+                Ok(()),
+                "every water response must use the transparent target contract"
+            );
+        }
+        let invalid = SurfaceDrawDescriptor {
+            plan: WaterShadingPlan::single(ResponseProgram::Pbr),
+            blend: SurfaceBlend::Opaque,
+            depth: SurfaceDepth {
+                test: DepthTest::LessEqual,
+                write: true,
+            },
+            target: WaterRenderTarget::HdrTransparent,
+        };
+        assert_eq!(
+            invalid.validate(),
+            Err(SurfacePassContractError::TransparentTargetState)
+        );
     }
 }

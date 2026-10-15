@@ -257,11 +257,7 @@ fn declaration_forward_war_and_unconstrained_ties_are_stable() {
         assert_eq!(compiled.logical_barriers.len(), 1);
         let barrier = compiled.logical_barriers[0];
         assert_eq!(
-            (
-                barrier.source,
-                barrier.destination,
-                barrier.queue_transfer,
-            ),
+            (barrier.source, barrier.destination, barrier.queue_transfer,),
             (0, 1, true)
         );
         assert!(barrier.queue_transfer);
@@ -310,13 +306,7 @@ fn real_frontends_project_identical_kernel_products() {
         vec![],
     ));
     let decl = declaration.compile().unwrap();
-    assert_eq!(
-        exec.order,
-        decl.order
-            .iter()
-            .copied()
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(exec.order, decl.order.iter().copied().collect::<Vec<_>>());
     assert_eq!(exec.queue_batches, decl.queue_batches);
     assert_eq!(exec.alias.heap_size, decl.alias.heap_size);
     assert_eq!(

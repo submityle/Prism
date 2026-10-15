@@ -71,6 +71,7 @@ type RunnerFn = Box<dyn FnOnce(App) -> AppExit>;
 /// The top-level engine instance.
 pub struct App {
     sub_apps: SubApps,
+    pub(crate) ecs_policy: Option<crate::ecs_policy::AppliedEcsPolicy>,
     runner: Option<RunnerFn>,
     plugins: Vec<Box<dyn Plugin>>,
     /// Every added plugin's [`name`](Plugin::name), so a unique plugin is
@@ -183,6 +184,7 @@ impl App {
     pub fn empty() -> Self {
         Self {
             sub_apps: SubApps::new(),
+            ecs_policy: None,
             runner: None,
             plugins: Vec::new(),
             plugin_names: HashSet::new(),
@@ -357,6 +359,11 @@ impl App {
     /// Mutable access to a labeled secondary sub-app, if present.
     pub fn sub_app_mut(&mut self, label: impl SubAppLabel) -> Option<&mut SubApp> {
         self.sub_apps.get_mut(label)
+    }
+
+    /// Internal PIE frame driver access to the complete sub-app collection.
+    pub(crate) fn sub_apps_mut(&mut self) -> &mut SubApps {
+        &mut self.sub_apps
     }
 
     /// Install the one-way [`ExtractFn`](crate::sub_app::ExtractFn) on a labeled
@@ -629,12 +636,18 @@ impl App {
 
     /// Run one variable-step frame of the main sub-app (design §7 M0 subset).
     pub fn update(&mut self) {
-        // Dev-time config hot-reload (design §24.2): no-op unless a watch was
-        // installed. Polled before the frame so a reloaded value applies to
-        // this frame's systems.
+        self.run_frame_boundary_hooks();
+        self.sub_apps.update();
+    }
+
+    /// Poll development-time reload sources at the same boundary used by the
+    /// normal runner. PIE frame sessions call this before advancing time so a
+    /// reloaded system/config applies to the frame they step.
+    pub(crate) fn run_frame_boundary_hooks(&mut self) {
         #[cfg(feature = "hot-reload")]
         self.poll_config_hot_reload();
-        self.sub_apps.update();
+        #[cfg(feature = "module-reload")]
+        crate::module_reload::poll_app_modules(self);
     }
 
     /// Opt into cross-thread pipelined rendering (design §9, §24.3, §25.2).
@@ -983,6 +996,13 @@ impl App {
     /// Mutable access to the main sub-app.
     pub fn main_mut(&mut self) -> &mut SubApp {
         &mut self.sub_apps.main
+    }
+
+    #[cfg(feature = "partition")]
+    pub(crate) fn ecs_policy_parts(
+        &mut self,
+    ) -> (&mut Option<crate::ecs_policy::AppliedEcsPolicy>, &mut World) {
+        (&mut self.ecs_policy, &mut self.sub_apps.main.world)
     }
 
     /// Shared access to the main world.

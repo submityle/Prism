@@ -37,7 +37,7 @@ pub enum MaterialDomain {
 /// This intentionally does not carry response-program variants: response
 /// execution is selected by [`ShadingPlan`], not by raster/blend classification.
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum MaterialRenderClass {
     #[default]
     Opaque,
@@ -80,6 +80,11 @@ pub const ILLUMINATION_BLEND_UNORM_MAX: u32 = u16::MAX as u32;
 /// Sentinel written when no continuous illumination mask was sampled.
 pub const ILLUMINATION_BLEND_SENTINEL: u32 = u32::MAX;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IlluminationBlendMetadataError {
+    ReservedBits(u32),
+}
+
 /// Decode the visibility raster's continuous Lit/NPR mask word.
 ///
 /// The word is a 16-bit UNORM in the low bits. Any other upper bits are
@@ -87,10 +92,22 @@ pub const ILLUMINATION_BLEND_SENTINEL: u32 = u32::MAX;
 /// the all-ones word is the explicit no-mask sentinel.
 #[must_use]
 pub fn decode_illumination_blend_weight(word: u32) -> Option<f32> {
-    if word == ILLUMINATION_BLEND_SENTINEL || word > ILLUMINATION_BLEND_UNORM_MAX {
-        return None;
+    decode_illumination_blend_weight_strict(word).ok().flatten()
+}
+
+/// Strict decoder used by classification. A sentinel means that the feature
+/// was not sampled; any other value outside the 16-bit UNORM is malformed
+/// metadata and must not silently turn into an ordinary Lit response.
+pub fn decode_illumination_blend_weight_strict(
+    word: u32,
+) -> Result<Option<f32>, IlluminationBlendMetadataError> {
+    if word == ILLUMINATION_BLEND_SENTINEL {
+        return Ok(None);
     }
-    Some(word as f32 / ILLUMINATION_BLEND_UNORM_MAX as f32)
+    if word > ILLUMINATION_BLEND_UNORM_MAX {
+        return Err(IlluminationBlendMetadataError::ReservedBits(word));
+    }
+    Ok(Some(word as f32 / ILLUMINATION_BLEND_UNORM_MAX as f32))
 }
 
 impl MaterialFeatureFlags {

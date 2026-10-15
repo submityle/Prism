@@ -43,6 +43,9 @@ struct WorkItem {
     shading_class: u32,
     response_kind: u32,
     flags: u32,
+    right_shading_class: u32,
+    right_response_kind: u32,
+    response_meta: u32,
 }
 
 struct ResponseBucket {
@@ -71,6 +74,15 @@ struct ExecutionProgramRow {
     program_id: u32,
 }
 
+struct BlendWorkData {
+    left_shading_class: u32,
+    left_response_kind: u32,
+    right_shading_class: u32,
+    right_response_kind: u32,
+    response_meta: u32,
+    valid: u32,
+}
+
 @group(0) @binding(0) var visibility_ids: texture_2d<u32>;
 @group(0) @binding(1) var visibility_metadata: texture_2d<u32>;
 @group(1) @binding(0) var<storage, read> materials: array<MaterialHeader>;
@@ -87,6 +99,9 @@ struct ExecutionProgramRow {
 @group(2) @binding(7) var<storage, read> response_buckets: array<ResponseBucket>;
 
 var<immediate> params: ClassificationParams;
+
+const FEATURE_ILLUMINATION_BLEND: u32 = 1u << 9u;
+const INVALID: u32 = 0xffffffffu;
 
 // Program kinds are the generated execution-table ABI, not lobe buckets.
 struct ExecutionIdentity {
@@ -138,6 +153,7 @@ fn execution_identity(header: MaterialHeader, region_selector: u32) -> Execution
         identity.program_id = region_selector;
         identity.response_kind = region_selector;
     }
+    identity.family = execution_family_for_program(identity.family, identity.response_kind);
     return identity;
 }
 
@@ -146,6 +162,19 @@ fn material_response_kind(header: MaterialHeader, identity: ExecutionIdentity) -
         && (header.render_domain == 0u || header.render_domain == 3u);
     if header.is_active == 0u || !surface { return 0xffffffffu; }
     return identity.response_kind;
+}
+
+fn execution_family_for_program(family: u32, response_kind: u32) -> u32 {
+    // Composition and split are explicit table families. A fused request can
+    // remain fused only for builtin Lit; NPR, Unlit, and custom programs use
+    // the split response contract, matching the CPU resolver.
+    if family == 2u || family == 1u {
+        return family;
+    }
+    if response_kind == 0u {
+        return 0u;
+    }
+    return 1u;
 }
 
 fn response_bucket_for_execution(header: MaterialHeader, identity: ExecutionIdentity) -> u32 {
@@ -179,6 +208,67 @@ fn response_bucket_for_execution(header: MaterialHeader, identity: ExecutionIden
     return 0xffffffffu;
 }
 
+// Continuous MaskBlend keeps the compact 20-byte PixelClass ABI.  Its right
+// arm and packed mask are derived again during scatter from the immutable
+// execution tables and the visibility metadata.  This helper is shared by
+// classify/count (validation + left bucket) and scatter (right bucket + meta),
+// so the two stages cannot silently disagree about the plan shape.
+fn blend_work_data(header: MaterialHeader, mask_word: u32) -> BlendWorkData {
+    let invalid = BlendWorkData(INVALID, INVALID, INVALID, INVALID, INVALID, 0u);
+    if (mask_word > 0xffffu
+        || header.execution_plan_index == INVALID
+        || header.execution_program_index == INVALID
+        || header.execution_package_index == INVALID
+        || header.execution_permutation_low == INVALID
+        || header.execution_permutation_high == INVALID
+        || header.execution_plan_index >= arrayLength(&execution_plans)) {
+        return invalid;
+    }
+
+    // Validate the material's bound tuple before using the plan endpoints.
+    let bound = execution_identity(header, INVALID);
+    if bound.response_kind == INVALID {
+        return invalid;
+    }
+    let plan = execution_plans[header.execution_plan_index];
+    if plan.right_program == INVALID
+        || plan.left_program >= arrayLength(&execution_programs)
+        || plan.right_program >= arrayLength(&execution_programs)
+        || plan.execution_family > 2u
+        || plan.blended_channels > 0xffffu {
+        return invalid;
+    }
+    let left = execution_programs[plan.left_program];
+    let right = execution_programs[plan.right_program];
+    if left.response_kind > 3u || right.response_kind > 3u {
+        return invalid;
+    }
+
+    let left_identity = ExecutionIdentity(
+        plan.execution_family,
+        left.program_id,
+        left.response_kind,
+    );
+    let right_identity = ExecutionIdentity(
+        plan.execution_family,
+        right.program_id,
+        right.response_kind,
+    );
+    let left_class = response_bucket_for_execution(header, left_identity);
+    let right_class = response_bucket_for_execution(header, right_identity);
+    if left_class == INVALID || right_class == INVALID {
+        return invalid;
+    }
+    return BlendWorkData(
+        left_class,
+        left.response_kind,
+        right_class,
+        right.response_kind,
+        (mask_word & 0xffffu) | (plan.blended_channels << 16u),
+        1u,
+    );
+}
+
 @compute @workgroup_size(64)
 fn classify_count(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = id.x;
@@ -210,8 +300,18 @@ fn classify_count(@builtin(global_invocation_id) id: vec3<u32>) {
     // `metadata.z` is the visibility raster's Lit/Stylized selector
     // (`0`/`1`), or `0xffffffff` when the material has no region mask.
     let identity = execution_identity(header, metadata.z);
-    let response_kind = material_response_kind(header, identity);
-    let shading_class = response_bucket_for_execution(header, identity);
+    var response_kind = material_response_kind(header, identity);
+    var shading_class = response_bucket_for_execution(header, identity);
+    if (header.feature_flags & FEATURE_ILLUMINATION_BLEND) != 0u {
+        let blend = blend_work_data(header, metadata.z);
+        if blend.valid == 0u {
+            pixels[pixel] = PixelClass(INVALID, INVALID, material_index, INVALID, 8u);
+            atomicAdd(&diagnostics[2], 1u);
+            return;
+        }
+        response_kind = blend.left_response_kind;
+        shading_class = blend.left_shading_class;
+    }
     if shading_class >= params.class_count {
         pixels[pixel] = PixelClass(0xffffffffu, 0xffffffffu, material_index, 0xffffffffu, 8u);
         atomicAdd(&diagnostics[2], 1u);
@@ -261,12 +361,37 @@ fn scatter_work(@builtin(global_invocation_id) id: vec3<u32>) {
         atomicAdd(&diagnostics[3], 1u);
         return;
     }
+    var right_shading_class = INVALID;
+    var right_response_kind = 0u;
+    var response_meta = INVALID;
+    if (record.flags & FEATURE_ILLUMINATION_BLEND) != 0u {
+        if record.material_index >= arrayLength(&materials) {
+            atomicAdd(&diagnostics[2], 1u);
+            return;
+        }
+        let coordinate = vec2<i32>(
+            i32(pixel % params.width),
+            i32(pixel / params.width),
+        );
+        let metadata = textureLoad(visibility_metadata, coordinate, 0);
+        let blend = blend_work_data(materials[record.material_index], metadata.z);
+        if blend.valid == 0u {
+            atomicAdd(&diagnostics[2], 1u);
+            return;
+        }
+        right_shading_class = blend.right_shading_class;
+        right_response_kind = blend.right_response_kind;
+        response_meta = blend.response_meta;
+    }
     work[destination] = WorkItem(
         pixel,
         record.material_index,
         record.shading_class,
         record.response_kind,
         record.flags,
+        right_shading_class,
+        right_response_kind,
+        response_meta,
     );
     pixels[pixel].work_index = destination;
 }

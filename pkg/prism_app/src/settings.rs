@@ -38,20 +38,18 @@
 //! under the determinism goal (design §15): two runs that insert the same
 //! settings resolve and iterate them identically.
 //!
-//! # Honestly deferred: `reflect`-backed typed validation
+//! # `reflect`-backed typed validation
 //!
 //! Design §25.3 (and §24.6) specify that per-field **range clamping, defaults,
 //! and rename compatibility** are delegated to `prism_reflect`'s attribute
 //! system (`clamp` / `default` / `rename`, reflect §24.7), and that illegal
 //! input is *rejected at a safe boundary rather than crashing* (reflect §24.8).
-//! That reflect attribute machinery is `prism_reflect`'s own in-flight
-//! milestone and the `reflect` feature is not yet wired into this crate's
-//! `Cargo.toml`. Rather than fake typed validation, this module implements the
-//! full layered *resolution* now with best-effort type **inference** on parse,
-//! and leaves reflect-backed typed read/write and schema validation **honestly
-//! absent** — to be layered on top without changing the cascade semantics once
-//! `prism_reflect`'s attribute system lands. Nothing here is stubbed; the
-//! deferred piece is simply not present and is documented as such.
+//! The optional `reflect` feature wires the field metadata path through
+//! `prism_reflect`: defaults, ranges/clamps, renames, categories, read-only
+//! and skip rules are converted into typed cvar specifications. Explicit
+//! [`CvarSpec`] registration remains available for callers that do not use
+//! derive metadata. Invalid input is rejected at the boundary; layered
+//! resolution semantics remain the same for both paths.
 //!
 //! [`Resource`]: prism_ecs::resource::Resource
 //! [`Event`]: prism_ecs::event::Event

@@ -71,9 +71,6 @@ pub struct SubApp {
     /// installed. [`set_extract`](SubApp::set_extract) replaces the list;
     /// [`add_extract`](SubApp::add_extract) appends to it.
     extracts: Vec<ExtractFn>,
-    /// Optional bounded world-snapshot history for rollback (design §14 / M5).
-    /// `None` until [`init_snapshot_history`](SubApp::init_snapshot_history).
-    snapshot_history: Option<SnapshotHistory>,
     #[cfg(feature = "std")]
     frame_budget_started: Option<std::time::Instant>,
 }
@@ -94,7 +91,6 @@ impl SubApp {
             world,
             phase_order: PhaseOrder::default(),
             extracts: Vec::new(),
-            snapshot_history: None,
             #[cfg(feature = "std")]
             frame_budget_started: None,
         }
@@ -246,14 +242,14 @@ impl SubApp {
     /// # Panics
     /// Panics if `capacity` is zero.
     pub fn init_snapshot_history(&mut self, capacity: usize) -> &mut Self {
-        self.snapshot_history = Some(SnapshotHistory::new(capacity));
+        self.world.insert_resource(SnapshotHistory::new(capacity));
         self
     }
 
     /// This sub-app's snapshot history, if one was installed.
     #[must_use]
     pub fn snapshot_history(&self) -> Option<&SnapshotHistory> {
-        self.snapshot_history.as_ref()
+        self.world.get_resource::<SnapshotHistory>()
     }
 
     /// Capture this sub-app's world at the next history frame.
@@ -265,8 +261,10 @@ impl SubApp {
     /// snapshot clone glue; use
     /// [`try_capture_snapshot`](SubApp::try_capture_snapshot) to report it.
     pub fn capture_snapshot(&mut self) -> Option<u64> {
-        let history = self.snapshot_history.as_mut()?;
-        Some(history.capture(&self.world))
+        let mut history = self.world.remove_resource::<SnapshotHistory>()?;
+        let frame = history.capture(&self.world);
+        self.world.insert_resource(history);
+        Some(frame)
     }
 
     /// Fallible [`capture_snapshot`](SubApp::capture_snapshot): `None` when no
@@ -275,8 +273,10 @@ impl SubApp {
     pub fn try_capture_snapshot(
         &mut self,
     ) -> Option<Result<u64, Vec<prism_ecs::component::ComponentId>>> {
-        let history = self.snapshot_history.as_mut()?;
-        Some(history.try_capture(&self.world))
+        let mut history = self.world.remove_resource::<SnapshotHistory>()?;
+        let result = history.try_capture(&self.world);
+        self.world.insert_resource(history);
+        Some(result)
     }
 
     /// Restore this sub-app's world to `frame` (design §14).
@@ -289,13 +289,16 @@ impl SubApp {
     /// Returns `false` when no history is installed or `frame` has been evicted
     /// or was never captured; the world is then left untouched.
     pub fn rollback_to(&mut self, frame: u64) -> bool {
-        let Some(history) = self.snapshot_history.as_mut() else {
+        let Some(mut history) = self.world.remove_resource::<SnapshotHistory>() else {
             return false;
         };
-        if !history.rollback(&mut self.world, frame) {
+        let restored = history.rollback(&mut self.world, frame);
+        if !restored {
+            self.world.insert_resource(history);
             return false;
         }
         history.truncate_after(frame);
+        self.world.insert_resource(history);
         true
     }
 

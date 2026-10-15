@@ -40,6 +40,10 @@ fn world_with_glue() -> World {
     w.register_snapshot_component_hashable::<Vel>();
     w.register_snapshot_component_hashable::<Tag>();
     w.register_snapshot_component_hashable::<Charge>();
+    w.register_snapshot_component_equatable::<Pos>();
+    w.register_snapshot_component_equatable::<Vel>();
+    w.register_snapshot_component_equatable::<Tag>();
+    w.register_snapshot_component_equatable::<Charge>();
     w
 }
 
@@ -242,7 +246,7 @@ fn rollback_ring_bounds_memory_and_restores_frames() {
     // Rolling back to a retained frame reproduces that frame exactly.
     let want = ring.get(3).unwrap();
     let want_hash = want.state_hash();
-    w.restore(want);
+    w.restore(&want);
     assert_eq!(w.get::<Pos>(e0), Some(&Pos { x: 3, y: 2 }));
     assert_eq!(w.snapshot().state_hash(), want_hash);
     assert_eq!(want_hash, hashes[3].1);
@@ -322,6 +326,8 @@ fn resources_roundtrip_through_restore() {
     let mut w = world_with_glue();
     w.register_snapshot_resource_hashable::<Score>();
     w.register_snapshot_resource_hashable::<RoundTimer>();
+    w.register_snapshot_resource_equatable::<Score>();
+    w.register_snapshot_resource_equatable::<RoundTimer>();
     w.insert_resource(Score(10));
     w.insert_resource(RoundTimer(5));
 
@@ -424,6 +430,7 @@ fn absent_registered_resource_is_cleared_on_restore() {
 fn delta_apply_preserves_resources() {
     let mut w = world_with_glue();
     w.register_snapshot_resource_hashable::<Score>();
+    w.register_snapshot_resource_equatable::<Score>();
     w.insert_resource(Score(3));
     let base = w.spawn((Pos { x: 1, y: 1 }, Vel(1)));
     let base_snap = w.snapshot();

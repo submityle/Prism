@@ -92,9 +92,7 @@ impl ChangeReport {
                 for &id in component_ids {
                     if let Some(column) = table.column(id)
                         && chunk < column.chunk_count()
-                        && column
-                            .chunk_version(chunk)
-                            .is_newer_than(reference, this_run)
+                        && column.chunk_may_have_changed(chunk, reference, this_run)
                     {
                         chunk_dirty = true;
                         break;

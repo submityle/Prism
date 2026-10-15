@@ -126,6 +126,10 @@ pub(crate) fn compile(
         })
         .collect();
     let order = solved.order;
+    let mut position_by_pass = vec![None; passes.len()];
+    for (position, &pass) in order.iter().enumerate() {
+        position_by_pass[pass] = Some(position);
+    }
 
     // A resource is "used" if any scheduled pass touches it; only used
     // resources are realized, state-tracked, and aliased.
@@ -167,6 +171,7 @@ pub(crate) fn compile(
         declared_pass_count: passes.len(),
         order,
         alive,
+        position_by_pass,
         logical_barriers,
         queue_batches,
         barriers: barrier_plan.per_pass,

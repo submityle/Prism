@@ -12,7 +12,8 @@
 //! Determinism: entities are placed in ascending [`Entity::to_bits`] order (the
 //! snapshot's entity order), and within an entity, table components fragment the
 //! same archetype a fresh spawn would. Hooks/observers do not fire and
-//! [`Resources`](crate::resource::Resources) are untouched (see [module docs](super)).
+//! unregistered resources are untouched; registered snapshot resources and
+//! relationship policies/indexes are restored (see [module docs](super)).
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -27,6 +28,18 @@ use super::WorldSnapshot;
 
 /// Restore `world` to `snapshot`. See [module docs](super) for scope.
 pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
+    // Check before dropping live storage: matching dense ids/layouts alone do
+    // not prove that old clone/drop glue still describes the current schema.
+    assert_eq!(
+        world.id(),
+        snapshot.world_id,
+        "snapshot belongs to another world"
+    );
+    assert_eq!(
+        world.components.schema_generation(),
+        snapshot.schema_generation,
+        "snapshot predates a runtime component schema replacement"
+    );
     // 1. Tear down live storage. Dropping the old registries runs their `Drop`,
     //    freeing every live component value exactly once; the empty archetype is
     //    re-seeded by `Archetypes::new`.
@@ -48,6 +61,9 @@ pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
     // 3. Restore the change-tick cursors so change detection resumes exactly.
     world.change_tick = snapshot.change_tick;
     world.last_change_tick = snapshot.last_change_tick;
+    // Replace both indexes and kind policies together, preserving adjacency
+    // ordering and full generational handles without firing gameplay cleanup.
+    world.relations = snapshot.relations.registry.clone();
 
     // 4. Invert the columnar layout into a per-entity plan: for each captured
     //    entity (by row index), the (column, slot) pairs it owns.
@@ -178,13 +194,17 @@ pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
         );
     }
 
-    // 7. Owning groups survive the restore as declarations, but their packed
+    // 7. Reapply relation-pair fragmentation before owning groups pack rows;
+    //    restored relation policies and edges must agree with archetype identity.
+    world.rebuild_fragmenting_archetypes();
+
+    // 8. Owning groups survive the restore as declarations, but their packed
     //    prefixes referenced the torn-down entities; rebuild each group's
     //    membership against the freshly re-materialised storage so iteration is
     //    correct post-rollback (design §6 / §14). No-op without groups.
     world.rebuild_all_owning_groups();
 
-    // 8. Restore opt-in resources (design §14/§16.5). Independent of entity /
+    // 9. Restore opt-in resources (design §14/§16.5). Independent of entity /
     //    component storage: snapshot-registered resources are overwritten (or
     //    cleared) to match the capture; unregistered resources are untouched.
     super::resource::restore_resources(world, &snapshot.resources);

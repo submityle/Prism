@@ -1,32 +1,56 @@
-//! A fixed-capacity ring of frame snapshots that bounds rollback memory
-//! (design §14: 回滚内存靠 chunk 增量快照控制 / 回滚到任意已确认帧并重放输入).
+//! Bounded rollback history: one full anchor followed by adjacent-frame deltas.
 //!
-//! Rollback networking (Quantum / GGPO form) keeps a sliding window of recently
-//! confirmed authoritative frames: when a late input arrives for frame `f`, the
-//! simulation restores the snapshot it stored for `f` and re-simulates forward.
-//! A [`SnapshotRing`] caps that window to a fixed number of frames, evicting the
-//! oldest when full, so history memory is bounded regardless of session length.
-//! Pair it with [`SnapshotDelta`](super::SnapshotDelta) to shrink per-frame cost
-//! to the changed cells.
+//! Frames are ordered by numeric key, not arrival order. Out-of-order insertion
+//! preserves other recorded states; at capacity the smallest key is discarded
+//! (including an incoming key older than the window). Replacing a key changes
+//! only that frame, not the independently recorded future.
+//!
+//! Reads reconstruct owned snapshots instead of caching a full copy per frame.
+//! Thus `get` and `latest` now return owned snapshots: callers of the borrowed
+//! API must pass `&snapshot` to `World::restore`. `oldest` still borrows the
+//! anchor. Use `latest_frame` to inspect the newest key without reconstruction.
+//!
+//! Component payload storage is one anchor plus each delta's fresh values.
+//! [`capture`](SnapshotRing::capture) reuses versioned immutable component
+//! chunks. Such buffers are also shared during diff/reconstruction, without
+//! cloning or comparing their values. Clone-only components remain conservative.
+//! Metadata still visits cells, resources/relations remain full copies, and
+//! reads still walk the delta prefix; this is not constant-time history access.
 
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 
-use super::WorldSnapshot;
+use super::{SnapshotDelta, WorldSnapshot};
+use crate::world::World;
 
-/// A bounded ring buffer mapping a frame number to its [`WorldSnapshot`],
-/// evicting the oldest frame once `capacity` is reached (design §14).
+enum StoredSnapshot {
+    Anchor(WorldSnapshot),
+    Delta(SnapshotDelta),
+}
+
+struct Frame {
+    number: u64,
+    snapshot: StoredSnapshot,
+    resource_values: usize,
+    relation_edges: usize,
+}
+
+/// Bounded, numerically ordered snapshot history (design §14).
+///
+/// Exactly the first retained frame is a full anchor; other frames are deltas
+/// against their immediate predecessors. Eviction promotes the second frame
+/// to an anchor, preserving its capture lineage so later deltas remain valid.
+/// Equal hashes never establish value equality or delta compatibility.
 pub struct SnapshotRing {
-    /// The maximum number of frames retained at once.
     capacity: usize,
-    /// Retained `(frame, snapshot)` pairs, oldest at the front.
-    frames: VecDeque<(u64, WorldSnapshot)>,
+    frames: VecDeque<Frame>,
 }
 
 impl SnapshotRing {
-    /// Create a ring that retains at most `capacity` frames.
+    /// Retain at most `capacity` distinct frame keys.
     ///
     /// # Panics
-    /// Panics if `capacity` is zero (a ring must retain at least one frame).
+    /// Panics if `capacity` is zero.
     pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "SnapshotRing capacity must be non-zero");
         Self {
@@ -35,81 +59,282 @@ impl SnapshotRing {
         }
     }
 
-    /// The maximum number of frames retained at once.
+    /// The maximum number of retained frames.
     #[inline]
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
-    /// The number of frames currently retained.
+    /// The number of retained frames.
     #[inline]
     pub fn len(&self) -> usize {
         self.frames.len()
     }
 
-    /// Whether no frames are currently retained.
+    /// Whether the history is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
     }
 
-    /// Store `snapshot` for `frame`, evicting the oldest frame if the ring is
-    /// full. Re-storing an already-present frame overwrites its snapshot in
-    /// place (idempotent re-confirmation) without touching eviction order.
+    /// Incrementally capture the live world and record a frame. Reusable
+    /// components share clean chunk buffers with the latest recorded capture;
+    /// diff, eviction and history reads retain those immutable buffers too.
+    /// This closes a world change-tick boundary on successful capture, as
+    /// documented by [`World::snapshot_incremental`](crate::world::World::snapshot_incremental).
+    pub fn capture(&mut self, frame: u64, world: &mut World) {
+        self.try_capture(frame, world)
+            .unwrap_or_else(|missing| panic!("history capture missing clone glue for {missing:?}"));
+    }
+
+    /// Fallible [`capture`](Self::capture). Missing clone glue does not alter
+    /// either the ring or the world change tick. The tick boundary is closed
+    /// only after history insertion succeeds, including any required rebasing.
+    pub fn try_capture(
+        &mut self,
+        frame: u64,
+        world: &mut World,
+    ) -> Result<(), Vec<crate::component::ComponentId>> {
+        let previous = self.latest().map(|(_, snapshot)| snapshot);
+        let snapshot = super::capture::capture_incremental(world, previous.as_ref())?;
+        self.push(frame, snapshot);
+        world.increment_change_tick();
+        Ok(())
+    }
+
+    /// Insert or replace exactly `frame`, retaining the greatest `capacity` keys.
+    ///
+    /// Insertion/replacement reconnects adjacent deltas without changing any
+    /// other frame's ticks, values, resources or relations. A full ring ignores
+    /// a new key smaller than its oldest key. To abandon a future branch, call
+    /// `truncate_after` explicitly.
+    ///
+    /// Value comparisons/clones, including eviction rebase, finish before the
+    /// history is changed. If one unwinds, keys and recorded states remain
+    /// unchanged. This assumes Clone/PartialEq do not mutate shared captured
+    /// values; destructor panics and allocator aborts are not rollbackable.
     pub fn push(&mut self, frame: u64, snapshot: WorldSnapshot) {
-        if let Some(slot) = self.frames.iter_mut().find(|(f, _)| *f == frame) {
-            slot.1 = snapshot;
+        let index = self
+            .frames
+            .iter()
+            .position(|entry| entry.number >= frame)
+            .unwrap_or(self.frames.len());
+        let replaces = self.frames.get(index).is_some_and(|f| f.number == frame);
+        let evicts = !replaces && self.frames.len() == self.capacity;
+        if evicts && index == 0 {
             return;
         }
-        if self.frames.len() == self.capacity {
-            self.frames.pop_front();
+
+        let successor_index = index + usize::from(replaces);
+        let successor = if successor_index < self.frames.len() {
+            let old = self.reconstruct_index(successor_index);
+            Some(snapshot.diff(&old))
+        } else {
+            None
+        };
+        // An insertion directly after the old anchor promotes the input itself.
+        // Otherwise materialize the old second frame before removing its base.
+        let promoted = if evicts && index > 1 {
+            Some(self.reconstruct_index(1))
+        } else {
+            None
+        };
+        let resource_values = snapshot.resource_count();
+        let relation_edges = snapshot.relation_count();
+        let incoming = if index == 0 || (evicts && index == 1) {
+            StoredSnapshot::Anchor(snapshot)
+        } else {
+            let predecessor = self.reconstruct_index(index - 1);
+            StoredSnapshot::Delta(predecessor.diff(&snapshot))
+        };
+        let incoming = Frame {
+            number: frame,
+            snapshot: incoming,
+            resource_values,
+            relation_edges,
+        };
+
+        // Reserve before commit. Keep displaced values alive until all edges
+        // are connected, so even their Drop observes a valid history.
+        if !replaces {
+            self.frames.reserve(1);
         }
-        self.frames.push_back((frame, snapshot));
+        let old_successor = successor.map(|delta| {
+            core::mem::replace(
+                &mut self.frames[successor_index].snapshot,
+                StoredSnapshot::Delta(delta),
+            )
+        });
+        let old_frame = if replaces {
+            Some(core::mem::replace(&mut self.frames[index], incoming))
+        } else {
+            self.frames.insert(index, incoming);
+            None
+        };
+        let evicted = if evicts {
+            self.frames.pop_front()
+        } else {
+            None
+        };
+        let old_promoted = promoted.map(|anchor| {
+            core::mem::replace(&mut self.frames[0].snapshot, StoredSnapshot::Anchor(anchor))
+        });
+        drop((old_successor, old_frame, evicted, old_promoted));
     }
 
-    /// Borrow the snapshot stored for `frame`, if still retained.
-    pub fn get(&self, frame: u64) -> Option<&WorldSnapshot> {
+    /// Reconstruct an owned snapshot for `frame`, without caching it.
+    ///
+    /// Returns `None` for an unrecorded/evicted key. Clone failures propagate
+    /// without changing history. Cost is proportional to cells materialized
+    /// along the prefix, not just this frame's changed cells.
+    /// Migrate `world.restore(ring.get(f).unwrap())` to binding the result and
+    /// passing `&snapshot`. The result outlives mutations of the ring.
+    pub fn get(&self, frame: u64) -> Option<WorldSnapshot> {
         self.frames
             .iter()
-            .find(|(f, _)| *f == frame)
-            .map(|(_, s)| s)
+            .position(|entry| entry.number == frame)
+            .map(|index| self.reconstruct_index(index))
     }
 
-    /// Whether `frame` is still retained.
+    /// Whether `frame` is retained, without reconstructing values.
     #[inline]
     pub fn contains(&self, frame: u64) -> bool {
-        self.frames.iter().any(|(f, _)| *f == frame)
+        self.frames.iter().any(|entry| entry.number == frame)
     }
 
-    /// The newest retained `(frame, snapshot)`, if any.
-    pub fn latest(&self) -> Option<(u64, &WorldSnapshot)> {
-        self.frames.back().map(|(f, s)| (*f, s))
+    /// The greatest retained frame number, without reconstruction.
+    pub fn latest_frame(&self) -> Option<u64> {
+        self.frames.back().map(|entry| entry.number)
     }
 
-    /// The oldest retained `(frame, snapshot)`, if any (the next to be evicted).
-    pub fn oldest(&self) -> Option<(u64, &WorldSnapshot)> {
-        self.frames.front().map(|(f, s)| (*f, s))
-    }
-
-    /// The retained frame numbers, oldest first.
-    pub fn frames(&self) -> impl Iterator<Item = u64> + '_ {
-        self.frames.iter().map(|(f, _)| *f)
-    }
-
-    /// Drop every retained frame strictly newer than `frame`, keeping `frame`
-    /// itself when present.
+    /// The greatest retained frame and its reconstructed owned snapshot.
     ///
-    /// Frames are stored oldest-first, so this pops the back of the deque. Used
-    /// by a rollback to discard the abandoned future branch, so its snapshots
-    /// can never be addressed again.
+    /// Use `latest_frame` when only the frame number is needed.
+    pub fn latest(&self) -> Option<(u64, WorldSnapshot)> {
+        let frame = self.latest_frame()?;
+        Some((frame, self.reconstruct_index(self.frames.len() - 1)))
+    }
+
+    /// Borrow the smallest retained frame and its full anchor.
+    pub fn oldest(&self) -> Option<(u64, &WorldSnapshot)> {
+        self.frames.front().map(|entry| match &entry.snapshot {
+            StoredSnapshot::Anchor(anchor) => (entry.number, anchor),
+            StoredSnapshot::Delta(_) => unreachable!("first retained frame is always an anchor"),
+        })
+    }
+
+    /// Retained frame keys in ascending numeric order, regardless of arrival.
+    pub fn frames(&self) -> impl Iterator<Item = u64> + '_ {
+        self.frames.iter().map(|entry| entry.number)
+    }
+
+    /// Drop all keys greater than `frame`, even if the cutoff was not recorded.
+    ///
+    /// Prefix deltas remain valid. A cutoff older than the anchor clears history.
     pub fn truncate_after(&mut self, frame: u64) {
-        while self.frames.back().is_some_and(|(f, _)| *f > frame) {
+        while self.frames.back().is_some_and(|f| f.number > frame) {
             self.frames.pop_back();
         }
     }
 
-    /// Drop every retained frame.
+    /// Drop all history, installing the empty state before values are dropped.
     pub fn clear(&mut self) {
-        self.frames.clear();
+        let old = core::mem::take(&mut self.frames);
+        drop(old);
+    }
+
+    /// Number of full snapshots retained internally (zero or one).
+    pub fn full_snapshot_count(&self) -> usize {
+        usize::from(!self.is_empty())
+    }
+
+    /// Number of retained delta frames, excluding the anchor.
+    pub fn delta_count(&self) -> usize {
+        self.len().saturating_sub(1)
+    }
+
+    /// Logical retained cells: anchor cells plus fresh cells in every delta.
+    ///
+    /// Immutable chunks may share allocations and retain additional buffer
+    /// slots, so this is NOT a physical value/byte/allocation count. Excludes per-cell selectors, entity
+    /// and allocator metadata, ticks, resources, relations, allocation capacity
+    /// and user-owned heap payload sizes. Reconstruction scratch and returned
+    /// snapshots are not retained internally and are also excluded.
+    pub fn stored_component_cell_count(&self) -> usize {
+        self.frames
+            .iter()
+            .map(|entry| match &entry.snapshot {
+                StoredSnapshot::Anchor(anchor) => anchor.columns.iter().map(|c| c.len()).sum(),
+                StoredSnapshot::Delta(delta) => delta.changed_cell_count(),
+            })
+            .sum()
+    }
+
+    /// Per-cell base references in retained deltas, not owned component values.
+    pub fn reused_component_cell_count(&self) -> usize {
+        self.frames
+            .iter()
+            .map(|entry| match &entry.snapshot {
+                StoredSnapshot::Anchor(_) => 0,
+                StoredSnapshot::Delta(delta) => delta.reused_cell_count(),
+            })
+            .sum()
+    }
+
+    /// Captured resource values across the anchor and deltas.
+    ///
+    /// Resources are copied in full per frame. Excludes their heap payload sizes;
+    /// this is not a total-memory measurement.
+    pub fn stored_resource_count(&self) -> usize {
+        self.frames.iter().map(|entry| entry.resource_values).sum()
+    }
+
+    /// Logical relation edges across frames, not bytes or index entries.
+    ///
+    /// Relations are copied in full per frame, with both ordered indexes and
+    /// canonical comparison data; each logical edge occupies multiple entries.
+    pub fn stored_relation_count(&self) -> usize {
+        self.frames.iter().map(|entry| entry.relation_edges).sum()
+    }
+
+    fn reconstruct_index(&self, index: usize) -> WorldSnapshot {
+        let (_, anchor) = self.oldest().expect("reconstructing a retained frame");
+        if index == 0 {
+            return clone_anchor(anchor);
+        }
+        let mut snapshot = None;
+        for entry in self.frames.iter().take(index + 1).skip(1) {
+            let StoredSnapshot::Delta(delta) = &entry.snapshot else {
+                unreachable!("only the first retained frame is an anchor");
+            };
+            snapshot = Some(delta.apply(snapshot.as_ref().unwrap_or(anchor)));
+        }
+        snapshot.expect("a non-anchor frame has a delta")
+    }
+}
+
+/// Clone the anchor without invoking equality or changing capture lineage.
+fn clone_anchor(anchor: &WorldSnapshot) -> WorldSnapshot {
+    let mut columns = Vec::with_capacity(anchor.columns.len());
+    for source in &anchor.columns {
+        let mut column = source.empty_like();
+        for (slot, &row) in source.rows.iter().enumerate() {
+            // SAFETY: slot is a live source cell; empty_like preserves every
+            // layout/type/glue contract. push_cloned_from also copies its ticks.
+            unsafe { column.push_cloned_from(source, slot, row) };
+        }
+        columns.push(column);
+    }
+    WorldSnapshot {
+        identity: anchor.identity.clone(),
+        world_id: anchor.world_id,
+        schema_generation: anchor.schema_generation,
+        change_tick: anchor.change_tick,
+        last_change_tick: anchor.last_change_tick,
+        entities_state: anchor.entities_state.clone(),
+        entities: anchor.entities.clone(),
+        columns,
+        resources: super::resource::clone_resources(&anchor.resources),
+        relations: anchor.relations.clone(),
     }
 }

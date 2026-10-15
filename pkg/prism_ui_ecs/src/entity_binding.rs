@@ -22,6 +22,18 @@ pub trait SyncBinding {
     /// Writes the signal value back onto the bound component field, returning
     /// whether the component was mutated. See [`FieldBinding::push`].
     fn push(&self, world: &mut World) -> bool;
+
+    /// Refresh a value named by an observer notification, bypassing an older
+    /// tick baseline. Custom implementations default to their ordinary pull.
+    fn refresh(&mut self, world: &World) -> bool {
+        self.pull(world)
+    }
+
+    /// Push a UI-side change. Implementors may avoid ECS reads when the signal
+    /// still matches its last synchronized value.
+    fn push_changed(&self, world: &mut World) -> bool {
+        self.push(world)
+    }
 }
 
 /// A [`FieldBinding`] bound to a specific [`Entity`].
@@ -58,6 +70,14 @@ where
 
     fn push(&self, world: &mut World) -> bool {
         self.inner.push(world, self.entity)
+    }
+
+    fn refresh(&mut self, world: &World) -> bool {
+        self.inner.refresh(world, self.entity)
+    }
+
+    fn push_changed(&self, world: &mut World) -> bool {
+        self.inner.push_changed(world, self.entity)
     }
 }
 

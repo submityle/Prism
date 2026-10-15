@@ -23,13 +23,7 @@ fn persistence_path(label: &str) -> std::path::PathBuf {
 }
 
 fn persistence_fingerprint(driver: u64) -> DeviceFingerprint {
-    DeviceFingerprint::new(
-        GraphicsBackend::Other(7),
-        1,
-        2,
-        driver,
-        AbiHash([3; 32]),
-    )
+    DeviceFingerprint::new(GraphicsBackend::Other(7), 1, 2, driver, AbiHash([3; 32]))
 }
 
 fn device() -> Arc<NullDevice> {
@@ -347,7 +341,10 @@ fn null_backend_reports_unsupported_binary_export_for_resident_pipeline() {
     let descriptor = descriptor();
     let key = key(1);
     cache
-        .register_module_package(key.response_module_id, ShaderPackageId::new("test.pipeline"))
+        .register_module_package(
+            key.response_module_id,
+            ShaderPackageId::new("test.pipeline"),
+        )
         .unwrap();
     cache.get_or_create(&*device, key, &descriptor);
     let path = persistence_path("unsupported");

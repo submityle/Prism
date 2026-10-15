@@ -42,6 +42,70 @@ pub struct HybridWeights {
     pub overlay_opacity: f32,
 }
 
+/// One resolved response arm consumed by the resident `MaskBlend`
+/// composition pass.
+///
+/// The raster response arms already contain their lighting decisions.  The
+/// compositor must not re-run a frontend, so the contract carries the final
+/// premultiplied colour together with the two scalar diagnostics that are
+/// commonly consumed by temporal and water-specific post-processing.  Alpha
+/// is the fourth colour component and therefore remains part of the same
+/// interpolation operation as the legacy `vec4` path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HybridResponseArm {
+    /// Premultiplied RGBA response produced by one frontend.
+    pub color: [f32; 4],
+    /// Reflection contribution represented by this response arm.
+    pub reflection: f32,
+    /// Focused-light caustic contribution represented by this response arm.
+    pub caustics: f32,
+}
+
+/// Unified CPU input/output contract for the legacy Hybrid and `MaskBlend`
+/// equivalence gate.
+///
+/// This is intentionally a resolved contract: geometry, reflection lookup,
+/// caustic projection, and response shading happen before composition on both
+/// paths.  Keeping those services out of this type prevents the golden from
+/// silently inventing a second water renderer while still making every value
+/// that the compositor can change explicit and testable.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HybridCompositionInput {
+    /// Physically based response arm.
+    pub pbr: HybridResponseArm,
+    /// Stylized response arm.
+    pub npr: HybridResponseArm,
+    /// Normalized shore/depth signals and authored overlay opacity.
+    pub weights: HybridWeightInputs,
+    /// Surface foam coverage used by the reactive history gate.
+    pub foam: f32,
+    /// Current-minus-previous screen-space motion.
+    pub motion: [f32; 2],
+}
+
+/// Resolved output of the resident `MaskBlend` composition contract.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HybridCompositionOutput {
+    /// Final premultiplied RGBA colour.
+    pub color: [f32; 4],
+    /// Final reflection diagnostic after the same two-stage blend as colour.
+    pub reflection: f32,
+    /// Final caustic diagnostic after the same two-stage blend as colour.
+    pub caustics: f32,
+    /// Explicit alpha/transparency output, equal to `color[3]`.
+    pub transparency: f32,
+    /// Motion vector forwarded without modification by composition.
+    pub motion: [f32; 2],
+    /// Resolved weight toward the stylized arm.
+    pub npr_weight: f32,
+    /// Resolved weight toward the physical arm.
+    pub pbr_weight: f32,
+    /// Reactive history-rejection coverage.
+    pub reactive_mask: f32,
+    /// Effective overlay factor after the reactive floor is applied.
+    pub overlay_factor: f32,
+}
+
 /// Resolve normalized hybrid weights.
 ///
 /// This is the behavior contract mirrored by `water_hybrid_weight_contract`
@@ -90,6 +154,54 @@ pub fn resolve_hybrid_geometry_weights(
 pub fn compose_hybrid_scalar(pbr: f32, npr: f32, weights: HybridWeights) -> f32 {
     let blended = pbr * weights.pbr_weight + npr * weights.npr_weight;
     blended * (1.0 - weights.overlay_opacity) + npr * weights.overlay_opacity
+}
+
+fn mix_rgba(left: [f32; 4], right: [f32; 4], factor: f32) -> [f32; 4] {
+    [
+        left[0] * (1.0 - factor) + right[0] * factor,
+        left[1] * (1.0 - factor) + right[1] * factor,
+        left[2] * (1.0 - factor) + right[2] * factor,
+        left[3] * (1.0 - factor) + right[3] * factor,
+    ]
+}
+
+fn mix_scalar(left: f32, right: f32, factor: f32) -> f32 {
+    left * (1.0 - factor) + right * factor
+}
+
+/// Evaluate the resident `MaskBlend` composition contract.
+///
+/// This is the CPU twin of the response-plane compositor.  It deliberately
+/// performs the two stages visible in the legacy shader: first blend PBR/NPR
+/// by the normalized region mask, then apply the stylized overlay using the
+/// reactive floor.  Keeping this function separate from the legacy test
+/// reference makes the S4b gate a real A/B comparison instead of a duplicate
+/// call to one implementation.
+#[must_use]
+pub fn compose_mask_blend(input: HybridCompositionInput) -> HybridCompositionOutput {
+    let weights = resolve_hybrid_weights(input.weights);
+    let blended_color = mix_rgba(input.pbr.color, input.npr.color, weights.npr_weight);
+    let blended_reflection = mix_scalar(
+        input.pbr.reflection,
+        input.npr.reflection,
+        weights.npr_weight,
+    );
+    let blended_caustics = mix_scalar(input.pbr.caustics, input.npr.caustics, weights.npr_weight);
+    let reactive_mask = hybrid_reactive_mask(input.foam, input.motion, blended_color[3]);
+    let overlay_factor = (weights.overlay_opacity * reactive_mask.max(0.25)).clamp(0.0, 1.0);
+    let color = mix_rgba(blended_color, input.npr.color, overlay_factor);
+
+    HybridCompositionOutput {
+        color,
+        reflection: mix_scalar(blended_reflection, input.npr.reflection, overlay_factor),
+        caustics: mix_scalar(blended_caustics, input.npr.caustics, overlay_factor),
+        transparency: color[3],
+        motion: input.motion,
+        npr_weight: weights.npr_weight,
+        pbr_weight: weights.pbr_weight,
+        reactive_mask,
+        overlay_factor,
+    }
 }
 
 /// Current-to-previous motion convention used by the water raster output.

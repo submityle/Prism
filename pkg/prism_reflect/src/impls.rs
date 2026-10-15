@@ -70,9 +70,9 @@ macro_rules! impl_reflect_value {
                 }
             }
 
-            impl $crate::registry::GetTypeRegistration for $ty {
-                fn get_type_registration() -> $crate::registry::TypeRegistration {
-                    $crate::registry::TypeRegistration::of::<$ty>()
+            impl $crate::GetTypeRegistration for $ty {
+                fn get_type_registration() -> $crate::TypeRegistration {
+                    $crate::TypeRegistration::of::<$ty>()
                 }
             }
         )*

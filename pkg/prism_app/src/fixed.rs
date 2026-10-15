@@ -1,7 +1,7 @@
 //! The fixed-timestep inner loop: the `RunFixedMainLoop` frame phase and the
 //! `FixedMain` tick group (design §8, §22 M2).
 //!
-//! # Fix-your-timestep, driven not implemented
+//! # Fix-your-timestep, driven by `prism_time`
 //!
 //! The accumulator, interpolation `overstep` (alpha), and death-spiral guard
 //! all live in [`Time<Fixed>`](prism_time::Time) inside `prism_time` — the

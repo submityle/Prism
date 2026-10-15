@@ -278,7 +278,7 @@ let mesh = tasks::block_on(handle);                // 或在作业图里 wait
 
 ## 16. 可观测性
 
-- **作业 trace**：每作业 begin/end span（名称/线程/时长/等待时长），导出 chrome-trace / tracy，接 `prism_diagnostic`。
+- **作业 trace**：每作业 begin/end span（名称/线程/时长/等待时长），导出 chrome-trace / tracy，接 `prism_diagnostic`；即使作业 body panic，也先闭合 span、恢复父上下文并记入 busy/迁移计数，再按原有契约重新抛出 panic。
 - **窃取率/占用率**：每 worker 的运行/窃取/空闲/park 时间占比，定位负载不均。
 - **火焰图**：作业图可视化（依赖链、关键路径），找并行度瓶颈（接 ECS §16.6 系统火焰图、App §16 阶段火焰图）。
 - **栈池/竞技场水位**：fiber 栈占用峰值、竞技场高水位，调容量。

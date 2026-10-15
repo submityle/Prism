@@ -1,0 +1,25 @@
+[package]
+name = "prism_transform_ecs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Optional incremental consumers of the Prism transform ECS observer bus for existing BVH and AOI grid indexes."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_transform = { path = "../prism_transform", default-features = false, features = ["ecs"] }
+prism_ecs = { path = "../prism_ecs", default-features = false }
+prism_math = { path = "../prism_math", default-features = false }
+prism_physics_geometry = { path = "../prism_physics_geometry", default-features = false, optional = true }
+prism_replication = { path = "../prism_replication", default-features = false, optional = true }
+
+[features]
+default = []
+std = ["prism_transform/std", "prism_math/std"]
+# The existing geometry crate requires std. The transform core does not.
+bvh = ["std", "dep:prism_physics_geometry", "prism_physics_geometry/std"]
+grid = ["dep:prism_replication"]
+
+[lints]
+workspace = true
