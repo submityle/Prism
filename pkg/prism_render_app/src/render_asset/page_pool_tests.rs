@@ -519,6 +519,20 @@ fn stable_slot_replacement_retires_old_revision_and_ignores_stale_release() {
             &recording_queue,
         )
         .expect("new revision replaces the stable slot");
+    assert_eq!(
+        bridge.upload_page_bytes_for_slot(
+            &slot,
+            old_page,
+            1,
+            &[9; 16],
+            GpuCompletionValue(8),
+            &recording_queue,
+        ),
+        Err(super::PageResidencyBridgeError::StaleRevision {
+            current: 2,
+            incoming: 1,
+        })
+    );
     assert_eq!(bridge.pool().resident_page_count(), 1);
     assert_eq!(bridge.pool().pending_reclaim_page_count(), 1);
 

@@ -29,6 +29,14 @@ pub enum PageResidencyBridgeError {
     Pool(PagePoolError),
     /// No GPU allocation is tracked for the requested CPU page.
     UnknownPage(PageId),
+    /// An older source revision arrived after a newer revision occupied its
+    /// stable logical slot.
+    StaleRevision {
+        /// The revision currently published for the slot.
+        current: u64,
+        /// The revision carried by the rejected payload.
+        incoming: u64,
+    },
 }
 
 /// A narrow, explicit CPU-page to GPU-page bridge.
@@ -36,6 +44,7 @@ pub struct FixedPageResidencyBridge {
     pool: FixedPagePool,
     allocations: BTreeMap<PageId, PageAllocation>,
     slot_allocations: BTreeMap<FixedPageSlotKey, PageAllocation>,
+    slot_revisions: BTreeMap<FixedPageSlotKey, u64>,
     page_slots: BTreeMap<PageId, FixedPageSlotKey>,
 }
 
@@ -50,6 +59,7 @@ impl FixedPageResidencyBridge {
             pool: FixedPagePool::new(context, descriptor)?,
             allocations: BTreeMap::new(),
             slot_allocations: BTreeMap::new(),
+            slot_revisions: BTreeMap::new(),
             page_slots: BTreeMap::new(),
         })
     }
@@ -248,6 +258,14 @@ impl FixedPageResidencyBridge {
         reclaim_after: GpuCompletionValue,
         queue: &dyn RenderQueue,
     ) -> Result<FixedPagePoolEvent, PageResidencyBridgeError> {
+        if let Some(current) = self.slot_revisions.get(slot).copied()
+            && revision < current
+        {
+            return Err(PageResidencyBridgeError::StaleRevision {
+                current,
+                incoming: revision,
+            });
+        }
         let expected = usize::try_from(self.pool.page_size()).unwrap_or(usize::MAX);
         if bytes.len() != expected {
             return Err(PageResidencyBridgeError::PageSizeMismatch {
@@ -300,6 +318,7 @@ impl FixedPageResidencyBridge {
         self.allocations.insert(page, allocation);
         self.page_slots.insert(page, slot.clone());
         self.slot_allocations.insert(slot.clone(), allocation);
+        self.slot_revisions.insert(slot.clone(), revision);
         Ok(event)
     }
 
@@ -336,6 +355,7 @@ impl FixedPageResidencyBridge {
         if let Some(slot) = self.page_slots.remove(&page) {
             if self.slot_allocations.get(&slot) == Some(&allocation) {
                 self.slot_allocations.remove(&slot);
+                self.slot_revisions.remove(&slot);
             }
         }
         Ok(event)
@@ -363,6 +383,7 @@ impl FixedPageResidencyBridge {
         if let Some(slot) = self.page_slots.remove(&page) {
             if self.slot_allocations.get(&slot) == Some(&allocation) {
                 self.slot_allocations.remove(&slot);
+                self.slot_revisions.remove(&slot);
             }
         }
         Ok(())
