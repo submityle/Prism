@@ -31,6 +31,7 @@ pub struct CameraIntent {
     pub active: bool,
     pub kind: ViewKind,
     pub target: RenderTarget,
+    pub clear: crate::ClearMode,
     pub viewport: Viewport,
     pub order: i32,
     pub projection: Projection,
@@ -48,6 +49,7 @@ impl Default for CameraIntent {
             active: true,
             kind: ViewKind::Main,
             target: RenderTarget::PrimaryWindow,
+            clear: crate::ClearMode::ColorAndDepth,
             viewport: Viewport::FULL,
             order: 0,
             projection: Projection::Perspective(Default::default()),
@@ -67,6 +69,7 @@ pub struct ViewData {
     pub handle: ViewHandle,
     pub kind: ViewKind,
     pub target: RenderTarget,
+    pub clear: crate::ClearMode,
     pub order: i32,
     pub view_from_world: Affine3,
     pub world_from_view: Affine3,
@@ -81,6 +84,7 @@ pub struct ViewData {
     pub exposure: f32,
     pub viewport_px: ViewportRect,
     pub world_position: DVec3,
+    pub world_origin: DVec3,
     pub status: ViewStatus,
 }
 
@@ -195,6 +199,7 @@ pub fn derive_view(
         handle: ViewHandle::INVALID,
         kind: intent.kind,
         target: intent.target,
+        clear: intent.clear,
         order: intent.order,
         view_from_world,
         world_from_view,
@@ -208,7 +213,8 @@ pub fn derive_view(
         frustum,
         exposure,
         viewport_px,
-        world_position: render_origin,
+        world_position: pose.position,
+        world_origin: render_origin,
         status: ViewStatus::Valid,
     })
 }
@@ -239,7 +245,7 @@ pub fn publish_view(
 
 impl ViewData {
     pub fn gpu_record(&self) -> GpuViewRecord {
-        let (hi, lo) = GpuViewRecord::split_origin(self.world_position);
+        let (hi, lo) = GpuViewRecord::split_origin(self.world_origin);
         GpuViewRecord {
             clip_from_world: GpuViewRecord::matrix(self.clip_from_world),
             clip_from_world_unjittered: GpuViewRecord::matrix(self.clip_from_world_unjittered),

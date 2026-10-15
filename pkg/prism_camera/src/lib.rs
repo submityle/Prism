@@ -26,6 +26,7 @@ pub use projection::{
     FovAxis, OrthographicProjection, PerspectiveProjection, Projection, ProjectionError,
 };
 pub use target::{ClearMode, RenderTarget, Viewport, ViewportRect};
+pub use prism_render_architecture::view_family::{ViewHandle, ViewImportance, ViewKind};
 pub use view::{
     derive_view, publish_view, CameraIntent, CameraPose, ViewData, ViewHistory, ViewStatus,
 };
@@ -36,6 +37,6 @@ pub mod prelude {
         derive_view, publish_view, CameraError, CameraErrorCode, CameraIntent, CameraPose,
         ClearMode, Exposure, Filmback, Frustum, GpuViewRecord, JitterSequence, JitterState,
         Lens, OrthographicProjection, PerspectiveProjection, Projection, RenderTarget, ViewData,
-        ViewHistory, Viewport, ViewportRect, ViewStatus,
+        ViewHandle, ViewHistory, ViewImportance, ViewKind, Viewport, ViewportRect, ViewStatus,
     };
 }
