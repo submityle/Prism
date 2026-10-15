@@ -55,6 +55,7 @@ impl SnapshotResource {
 
     /// The captured resource's dynamic type.
     #[inline]
+    #[cfg(feature = "determinism")]
     pub(super) fn type_id(&self) -> TypeId {
         self.type_id
     }

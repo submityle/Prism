@@ -840,22 +840,21 @@ impl PresentationRunner {
 /// Poll render-bridge feedback before this call. OS events continue to be
 /// processed while ECS input/simulation/render updates are held by the gate.
 ///
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "winit"))]
 pub(crate) fn run_window_frame(app: &mut App) -> bool {
     let Some(runner) = app.world().get_resource::<PresentationRunner>().copied() else {
         app.update();
         return false;
     };
-    let bridge_report =
-        if let Some(bridge) = app.world().get_resource::<PresentationBridge>().cloned() {
-            if let Some(pacing) = app.world_mut().get_resource_mut::<PresentationPacing>() {
-                Some(bridge.drain_into(pacing))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+    let bridge_report = app
+        .world()
+        .get_resource::<PresentationBridge>()
+        .cloned()
+        .and_then(|bridge| {
+            app.world_mut()
+                .get_resource_mut::<PresentationPacing>()
+                .map(|pacing| bridge.drain_into(pacing))
+        });
     if let Some(report) = bridge_report.filter(|report| report.last_error.is_some()) {
         if let Some(state) = app.world_mut().get_resource_mut::<PresentationRunner>() {
             state.last_error = report.last_error;
@@ -892,7 +891,7 @@ pub(crate) fn run_window_frame(app: &mut App) -> bool {
 /// adapter installs this as `ControlFlow::WaitUntil`; no thread sleep or 1 ms
 /// polling loop is used. A full queue wakes at its predicted fallback/display
 /// deadline and can also be interrupted by platform events.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "winit"))]
 pub(crate) fn next_window_wakeup(app: &App) -> Option<std::time::Instant> {
     let runner = app.world().get_resource::<PresentationRunner>()?;
     let plan = runner.last_plan?;
