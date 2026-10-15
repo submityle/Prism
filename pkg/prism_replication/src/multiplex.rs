@@ -22,6 +22,9 @@ const HEADER_LEN: usize = 12;
 /// avoids IP fragmentation on IPv6 and matches the QUIC minimum datagram size.
 pub const DEFAULT_PATH_MTU: usize = 1_200;
 
+/// Minimum rollback capacity that can retain the acknowledged baseline.
+pub const MIN_ROLLBACK_WINDOW: u32 = 1;
+
 /// Current application protocol spoken by the app plugins.
 ///
 /// This is intentionally separate from the private multiplex packet format:
@@ -53,6 +56,19 @@ impl ProtocolOffer {
             rollback_window,
         }
     }
+
+    /// Validate the offer before it is put on the wire or negotiated.
+    ///
+    /// The rollback window includes the acknowledged baseline, so zero cannot
+    /// represent a usable replication session.
+    pub fn validate(self) -> Result<(), ProtocolError> {
+        if self.rollback_window < MIN_ROLLBACK_WINDOW {
+            return Err(ProtocolError::InvalidRollbackWindow {
+                offered: self.rollback_window,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// The contract selected by a successful handshake.
@@ -63,6 +79,15 @@ pub struct NegotiatedProtocol {
     /// Smaller of the two rollback capacities, and therefore the maximum either
     /// endpoint may assume is retained by its peer.
     pub rollback_window: u32,
+}
+
+impl NegotiatedProtocol {
+    /// Maximum number of unconfirmed predictions retained alongside the
+    /// acknowledged baseline.
+    #[must_use]
+    pub const fn max_unconfirmed_predictions(self) -> u32 {
+        self.rollback_window.saturating_sub(MIN_ROLLBACK_WINDOW)
+    }
 }
 
 /// A handshake or plugin-envelope violation.
@@ -105,20 +130,12 @@ pub fn negotiate_protocol(
     local: ProtocolOffer,
     remote: ProtocolOffer,
 ) -> Result<NegotiatedProtocol, ProtocolError> {
+    local.validate()?;
+    remote.validate()?;
     if local.version != remote.version {
         return Err(ProtocolError::VersionMismatch {
             local: local.version,
             remote: remote.version,
-        });
-    }
-    if remote.rollback_window == 0 {
-        return Err(ProtocolError::InvalidRollbackWindow {
-            offered: remote.rollback_window,
-        });
-    }
-    if local.rollback_window == 0 {
-        return Err(ProtocolError::InvalidRollbackWindow {
-            offered: local.rollback_window,
         });
     }
     Ok(NegotiatedProtocol {
@@ -1087,11 +1104,34 @@ mod tests {
     fn protocol_negotiation_requires_equal_versions_and_nonzero_windows() {
         let local = ProtocolOffer::current(8);
         assert_eq!(
+            ProtocolOffer::current(MIN_ROLLBACK_WINDOW).validate(),
+            Ok(())
+        );
+        assert_eq!(
+            ProtocolOffer::current(0).validate(),
+            Err(ProtocolError::InvalidRollbackWindow { offered: 0 })
+        );
+        assert_eq!(
             negotiate_protocol(local, ProtocolOffer::current(3)),
             Ok(NegotiatedProtocol {
                 version: local.version,
                 rollback_window: 3
             })
+        );
+        assert_eq!(
+            negotiate_protocol(local, ProtocolOffer::current(3))
+                .expect("valid offers negotiate")
+                .max_unconfirmed_predictions(),
+            2
+        );
+        assert_eq!(
+            negotiate_protocol(
+                ProtocolOffer::current(8),
+                ProtocolOffer::current(MIN_ROLLBACK_WINDOW),
+            )
+            .expect("baseline-only offer negotiates")
+            .max_unconfirmed_predictions(),
+            0
         );
         assert_eq!(
             negotiate_protocol(local, ProtocolOffer::current(0)),

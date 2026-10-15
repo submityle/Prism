@@ -479,6 +479,8 @@ fn drive_ecs_input<S: EcsReplicationStrategy>(world: &mut World) {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
     use crate::delta::{encode_snapshot, FieldKind, FieldValue, Record};
     use crate::plugin::{ReplicationServerPlugin, ReplicationStrategy, ServerStrategy};

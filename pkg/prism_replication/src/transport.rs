@@ -354,6 +354,24 @@ pub mod threaded {
             assert_eq!(b.recv(), Some(b"first".to_vec()));
             assert_eq!(b.recv(), None);
         }
+
+        #[test]
+        fn secure_session_crosses_the_thread_transport_boundary() {
+            let (mut client, mut server) = ThreadTransport::pair_secure(8);
+            client.send(b"hello");
+
+            assert_eq!(server.recv(), None, "server consumes the client hello");
+            assert_eq!(client.recv(), None, "client consumes the server accept");
+            assert_eq!(server.recv(), Some(b"hello".to_vec()));
+            assert_eq!(
+                client.security_state(),
+                super::super::TransportSecurity::Established
+            );
+            assert_eq!(
+                server.security_state(),
+                super::super::TransportSecurity::Established
+            );
+        }
     }
 }
 
