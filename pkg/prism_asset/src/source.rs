@@ -30,7 +30,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 use std::path::Component;
 use std::path::{Path, PathBuf};
 
@@ -304,6 +304,13 @@ impl AssetReader for MemSource {
 /// A filesystem-backed [`AssetReader`] rooted at a directory. All reads are
 /// confined to the root: absolute paths and `..` traversal are rejected before
 /// any syscall (design §23.7).
+///
+/// On Unix, path components are opened relative to a directory descriptor with
+/// `O_NOFOLLOW`. On Windows, each operation opens a handle with
+/// `FILE_FLAG_OPEN_REPARSE_POINT` and verifies the final handle path before any
+/// bytes are read. Metadata is therefore advisory between calls: a caller must
+/// not use a successful metadata call as proof that a later independent open is
+/// unchanged.
 #[derive(Clone)]
 pub struct FsSource {
     root: PathBuf,
@@ -328,7 +335,7 @@ impl FsSource {
     /// This is retained for platforms without a directory-fd API. Unix reads
     /// use [`Self::open_relative_fd`] instead, so a metadata check can never be
     /// raced with the subsequent open.
-    #[cfg(not(unix))]
+    #[cfg(all(not(unix), not(windows)))]
     fn resolve(&self, path: &str) -> Result<PathBuf, ReadError> {
         let clean = sanitize_relative(path).ok_or(ReadError::InvalidPath)?;
         let mut full = self.root.clone();
@@ -411,6 +418,100 @@ impl FsSource {
         }
     }
 
+    #[cfg(windows)]
+    fn open_verified(&self, path: &str) -> Result<std::fs::File, ReadError> {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+        let clean = sanitize_relative(path).ok_or(ReadError::InvalidPath)?;
+        let root = std::fs::canonicalize(&self.root).map_err(|error| Self::map_io(&error))?;
+        let mut full = self.root.clone();
+        for segment in clean.split('/').filter(|segment| !segment.is_empty()) {
+            full.push(segment);
+        }
+
+        // OPEN_REPARSE_POINT prevents the final component from being followed;
+        // BACKUP_SEMANTICS permits the same handle-based validation for dirs.
+        // The final-handle path check below also catches an intermediate
+        // junction/symlink that redirected the lookup outside the mount.
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&full)
+            .map_err(|error| Self::map_io(&error))?;
+        let metadata = file.metadata().map_err(|error| Self::map_io(&error))?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(ReadError::InvalidPath);
+        }
+
+        let actual = Self::final_path(&file)?;
+        if !Self::windows_path_within(&root, &actual) {
+            return Err(ReadError::InvalidPath);
+        }
+        Ok(file)
+    }
+
+    #[cfg(windows)]
+    fn final_path(file: &std::fs::File) -> Result<PathBuf, ReadError> {
+        use std::os::windows::io::AsRawHandle;
+
+        const VOLUME_NAME_DOS: u32 = 0;
+
+        unsafe extern "system" {
+            fn GetFinalPathNameByHandleW(
+                hFile: *mut core::ffi::c_void,
+                lpszFilePath: *mut u16,
+                cchFilePath: u32,
+                dwFlags: u32,
+            ) -> u32;
+        }
+
+        let handle = file.as_raw_handle() as *mut core::ffi::c_void;
+        let mut capacity = 512u32;
+        loop {
+            let mut buffer = vec![0u16; capacity as usize];
+            let length = unsafe {
+                GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), capacity, VOLUME_NAME_DOS)
+            };
+            if length == 0 {
+                return Err(Self::map_io(&std::io::Error::last_os_error()));
+            }
+            if length < capacity {
+                buffer.truncate(length as usize);
+                return String::from_utf16(&buffer)
+                    .map(PathBuf::from)
+                    .map_err(|error| ReadError::Io(error.to_string()));
+            }
+            capacity = length.saturating_add(1);
+            if capacity == 1 {
+                return Err(ReadError::Io("final path length overflow".to_string()));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn windows_path_within(root: &Path, candidate: &Path) -> bool {
+        fn normalize(path: &Path) -> String {
+            let mut value = path.to_string_lossy().replace('/', "\\");
+            while value.ends_with('\\') && value.len() > 3 {
+                value.pop();
+            }
+            value.make_ascii_lowercase();
+            value
+        }
+
+        let root = normalize(root);
+        let candidate = normalize(candidate);
+        candidate == root
+            || candidate
+                .strip_prefix(&root)
+                .is_some_and(|suffix| suffix.starts_with('\\'))
+    }
+
     fn map_io(err: &std::io::Error) -> ReadError {
         if err.kind() == std::io::ErrorKind::NotFound {
             ReadError::NotFound
@@ -432,7 +533,16 @@ impl AssetReader for FsSource {
             Ok(bytes)
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let mut file = self.open_verified(path)?;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut bytes)
+                .map_err(|error| Self::map_io(&error))?;
+            Ok(bytes)
+        }
+
+        #[cfg(all(not(unix), not(windows)))]
         {
             let full = self.resolve(path)?;
             std::fs::read(&full).map_err(|e| Self::map_io(&e))
@@ -468,7 +578,27 @@ impl AssetReader for FsSource {
             Ok(buf)
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt;
+
+            let file = self.open_verified(path)?;
+            let size = file.metadata().map_err(|e| Self::map_io(&e))?.len();
+            let end = offset
+                .checked_add(len)
+                .ok_or(ReadError::OutOfRange { offset, len, size })?;
+            if end > size {
+                return Err(ReadError::OutOfRange { offset, len, size });
+            }
+            let buffer_len =
+                usize::try_from(len).map_err(|_| ReadError::OutOfRange { offset, len, size })?;
+            let mut buf = vec![0u8; buffer_len];
+            file.seek_read(&mut buf, offset)
+                .map_err(|e| Self::map_io(&e))?;
+            Ok(buf)
+        }
+
+        #[cfg(all(not(unix), not(windows)))]
         {
             use std::io::{Read, Seek, SeekFrom};
             let full = self.resolve(path)?;
@@ -508,7 +638,23 @@ impl AssetReader for FsSource {
             })
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let file = self.open_verified(path)?;
+            let meta = file.metadata().map_err(|e| Self::map_io(&e))?;
+            let modified_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+            Ok(AssetMeta {
+                size: meta.len(),
+                modified_ms,
+                is_dir: meta.is_dir(),
+            })
+        }
+
+        #[cfg(all(not(unix), not(windows)))]
         {
             let full = self.resolve(path)?;
             let meta = std::fs::metadata(&full).map_err(|e| Self::map_io(&e))?;
@@ -544,7 +690,13 @@ impl AssetReader for FsSource {
             Ok(names)
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let _ = dir;
+            Err(ReadError::Unsupported)
+        }
+
+        #[cfg(all(not(unix), not(windows)))]
         {
             let full = self.resolve(dir)?;
             let mut names = Vec::new();

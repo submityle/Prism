@@ -707,7 +707,7 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 
 `feature = "hot_reload"`，编辑器/迭代核心。
 
-> **当前实现边界**：已有 watcher 事件/去抖模型、`Arc<AssetServer>::watch` 托管后台消费入口和由调用方驱动的批次应用入口；锁外异步 reload 已有限支持 resident 根资产的 revision-local staging，并可递归纳入新普通依赖、label 对应源及 label 声明的依赖，所有候选在一次 commit 中发布。重复 label、类型变化、cycle、source overlay 变化、读取/解码失败、旧 epoch 和超出候选上限均拒绝发布并保留旧 revision；更大规模交错验证仍受边界约束。同步候选 staging 的 promotion/label 生命周期回归已覆盖。Unix `FsSource` 已使用目录 fd 相对打开与 `O_NOFOLLOW` 消除 metadata→open 的 TOCTOU 窗口；Windows reparse-point 防护及非 Unix 等价安全打开语义仍待实现。
+> **当前实现边界**：已有 watcher 事件/去抖模型、`Arc<AssetServer>::watch` 托管后台消费入口和由调用方驱动的批次应用入口；锁外异步 reload 已有限支持 resident 根资产的 revision-local staging，并可递归纳入新普通依赖、label 对应源及 label 声明的依赖，所有候选在一次 commit 中发布。重复 label、类型变化、cycle、source overlay 变化、读取/解码失败、旧 epoch 和超出候选上限均拒绝发布并保留旧 revision；更大规模交错验证仍受边界约束。同步候选 staging 的 promotion/label 生命周期回归已覆盖。Unix `FsSource` 使用目录 fd 相对打开与 `O_NOFOLLOW` 消除 metadata→open 的 TOCTOU 窗口；Windows 路径现使用 `FILE_FLAG_OPEN_REPARSE_POINT`、最终句柄路径约束和 reparse 属性拒绝，目录枚举仍明确返回 `Unsupported`。本机 macOS 已通过 `prism_asset` 编译；Windows 目标检查被工作区既有 `prism_tasks` 的 Unix fd 导入错误阻断，不能据此宣称 Windows 全 workspace 通过。
 
 - **变更侦测**：`AssetSource::watch` 接平台 FS 事件（inotify/FSEvents/ReadDirectoryChangesW，经 `prism_platform` 隔离），去抖后产出「路径 X 变更」。
 - **失效传播**：路径 → `StableGuid` → `AssetIndex`，经 §8.1 依赖图**反向遍历** dependents，把该资产及其所有传递依赖者标 `stale`。例：`tex.png` 改 → 用它的 `material` stale → 用该材质的 `scene` 的受影响部分 stale。
