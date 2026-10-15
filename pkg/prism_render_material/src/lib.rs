@@ -17,6 +17,7 @@ mod openpbr;
 mod record;
 mod registry;
 mod resources;
+pub mod response_source;
 pub mod shading_plan;
 mod surface;
 mod surface_layout;
@@ -46,9 +47,12 @@ pub use bevy_bridge::{
     TextureSemantic,
 };
 pub use execution::{
-    ExecutionTable, MaterialExecutionBinding, MaterialExecutionError, MaterialExecutionPackage,
-    MaterialExecutionProgram, MaterialExecutionTables, PackageIndex, PlanIndex, ProgramIndex,
-    ResponseProgramIndex, ShadingPlanIndex,
+    ExecutionTable, MaskSourceResolver, MaterialExecutionBinding, MaterialExecutionError,
+    MaterialExecutionPackage, MaterialExecutionProgram, MaterialExecutionTables, PackageIndex,
+    PlanIndex, ProgramIndex, ResponseProgramIndex, ShadingPlanIndex,
+    EXECUTION_MASK_DYNAMIC_CHANNEL, EXECUTION_MASK_NONE, EXECUTION_MASK_REGION,
+    EXECUTION_MASK_TEXTURE, EXECUTION_MASK_UV_CHANNEL, EXECUTION_MASK_VERTEX_ATTRIBUTE,
+    EXECUTION_PLAN_ROW_WORDS,
 };
 pub use handle::{MaterialCapacityError, MaterialHandleAllocator, MaterialHandleError};
 pub use ir::{

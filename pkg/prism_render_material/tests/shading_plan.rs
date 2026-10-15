@@ -162,7 +162,12 @@ fn unlit_contract_and_execution_row_are_decode_only_and_unlit_typed() {
         vec![[
             program.get(),
             u32::MAX,
-            ExecutionFamily::FusedBuiltin as u32
+            ExecutionFamily::FusedBuiltin as u32,
+            0,
+            0,
+            0,
+            0,
+            0,
         ]]
     );
     assert_eq!(

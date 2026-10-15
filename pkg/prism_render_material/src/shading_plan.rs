@@ -622,6 +622,7 @@ pub struct PlanValidationContext {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompiledEntryError {
+    ResponseSource(String),
     InvalidHeader,
     MalformedInstruction(usize),
     InvalidEntryName,
@@ -641,6 +642,7 @@ pub struct CompiledEntry {
     manifest: ShaderPackageManifest,
     artifact: VerifiedShaderArtifact,
     function_id: u32,
+    pub(crate) response_source: Option<crate::response_source::ResponseSource>,
 }
 
 impl CompiledEntry {
@@ -761,6 +763,7 @@ impl CompiledEntry {
             manifest,
             artifact,
             function_id,
+            response_source: None,
         })
     }
     pub fn package_manifest(&self) -> &ShaderPackageManifest {
@@ -777,6 +780,11 @@ impl CompiledEntry {
     }
     pub fn function_id(&self) -> u32 {
         self.function_id
+    }
+    /// Validated function bodies available for linking into the scene resolve.
+    /// A SPIR-V-only package has no implicit source or hash-based substitute.
+    pub fn response_source(&self) -> Option<&crate::response_source::ResponseSource> {
+        self.response_source.as_ref()
     }
 }
 

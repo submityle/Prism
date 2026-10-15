@@ -150,7 +150,9 @@ impl ResponseBucketTable {
         for program in BUILTINS {
             insert(ExecutionFamily::FusedBuiltin, program)?;
         }
-        for [left, right, family] in execution.gpu_plan_rows() {
+        for [left, right, family, _channels, _mask_kind, _mask_index, _domain, _reserved] in
+            execution.gpu_plan_rows()
+        {
             let family = match family {
                 0 => ExecutionFamily::FusedBuiltin,
                 1 => ExecutionFamily::SplitResponse,

@@ -621,7 +621,8 @@ mod tests {
     #[test]
     fn shared_base_declaration_is_complete() {
         let required = crate::render_fabric::water_required_services();
-        assert_eq!(required.as_slice().len(), 9);
+        assert_eq!(required.as_slice().len(), 10);
+        assert!(required.contains(crate::render_fabric::SPRAY_FEEDBACK_SERVICE));
         assert!(required.contains(WATER_VIRTUAL_GEOMETRY));
         assert!(required.contains(WATER_HYBRID_GI));
     }

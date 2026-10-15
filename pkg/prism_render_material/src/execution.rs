@@ -5,20 +5,34 @@
 //! [`CompiledEntry`], and every binding is checked against the owning plan,
 //! program, package and permutation space before it is returned.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use prism_render_architecture::shader_package::{
     ArtifactDigest, ExecutionFamily, ModuleId, PackageState, PermutationError, PermutationIndex,
     PermutationSpace, ShaderPackageManifest, ShaderPackageRegistry,
 };
 
-use crate::{BuiltinProgram, ChannelMask, CompiledEntry, ProgramId, ProgramRef, ShadingPlan};
+use crate::{
+    BuiltinProgram, ChannelMask, CompiledEntry, ProgramId, ProgramRef, ResponseMaskSource,
+    ShadingPlan,
+};
 
 /// GPU response-program kind written by the execution-table upload.
 pub const RESPONSE_PROGRAM_KIND_LIT: u32 = 0;
 pub const RESPONSE_PROGRAM_KIND_NPR: u32 = 1;
 pub const RESPONSE_PROGRAM_KIND_UNLIT: u32 = 2;
 pub const RESPONSE_PROGRAM_KIND_CUSTOM: u32 = 3;
+
+/// Fixed ABI width of one execution-plan row. Keeping the row a multiple of
+/// 16 bytes makes storage-buffer indexing portable and leaves explicit slots
+/// for mask resolution rather than encoding semantics in a hash.
+pub const EXECUTION_PLAN_ROW_WORDS: usize = 8;
+pub const EXECUTION_MASK_NONE: u32 = 0;
+pub const EXECUTION_MASK_TEXTURE: u32 = 1;
+pub const EXECUTION_MASK_VERTEX_ATTRIBUTE: u32 = 2;
+pub const EXECUTION_MASK_UV_CHANNEL: u32 = 3;
+pub const EXECUTION_MASK_REGION: u32 = 4;
+pub const EXECUTION_MASK_DYNAMIC_CHANNEL: u32 = 5;
 
 /// The kind of dense table index that failed validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +130,7 @@ pub enum MaterialExecutionError {
         declared: u32,
         actual: u64,
     },
+    UnresolvedMaskSource(String),
 }
 
 /// One verified package table entry.
@@ -145,6 +160,11 @@ pub struct MaterialExecutionProgram {
     module_id: ModuleId,
     permutations: PermutationSpace,
     digest: ArtifactDigest,
+    /// The validated executable and its response-function source payload.
+    /// Keeping this cold-path copy beside the dense identity lets the render
+    /// linker build the finite WESL dispatch table without re-opening an
+    /// authoring registry or inventing a fallback implementation.
+    compiled: CompiledEntry,
 }
 
 impl MaterialExecutionProgram {
@@ -172,6 +192,11 @@ impl MaterialExecutionProgram {
     pub const fn digest(&self) -> ArtifactDigest {
         self.digest
     }
+
+    #[must_use]
+    pub fn compiled_entry(&self) -> &CompiledEntry {
+        &self.compiled
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +206,50 @@ struct MaterialExecutionPlan {
     left: ResponseProgramIndex,
     right: Option<ResponseProgramIndex>,
     blended_channels: ChannelMask,
+    mask_kind: u32,
+    mask_index: u32,
+    blend_domain: u32,
+}
+
+/// Resolves authoring mask names to stable runtime indices. Intrinsic masks
+/// need no resolver; texture/channel names must be admitted by the owning
+/// asset/material registry before entering the GPU table.
+pub trait MaskSourceResolver {
+    fn texture_index(&self, semantic: &str) -> Option<u32>;
+}
+
+fn resolve_mask_source(
+    source: &ShadingPlan,
+    resolver: Option<&dyn MaskSourceResolver>,
+) -> Result<(u32, u32), MaterialExecutionError> {
+    let ShadingPlan::MaskBlend { mask, .. } = source else {
+        return Ok((EXECUTION_MASK_NONE, 0));
+    };
+    match mask {
+        ResponseMaskSource::VertexAttr => Ok((EXECUTION_MASK_VERTEX_ATTRIBUTE, 0)),
+        ResponseMaskSource::UvChannel => Ok((EXECUTION_MASK_UV_CHANNEL, 0)),
+        ResponseMaskSource::RegionMask => Ok((EXECUTION_MASK_REGION, 0)),
+        ResponseMaskSource::Channel(name) => crate::SURFACE_CHANNELS
+            .iter()
+            .find(|channel| channel.id == name)
+            .map(|channel| (EXECUTION_MASK_DYNAMIC_CHANNEL, channel.header_word))
+            .ok_or_else(|| MaterialExecutionError::UnresolvedMaskSource(name.clone())),
+        ResponseMaskSource::Texture(name) => resolver
+            .and_then(|resolver| resolver.texture_index(name))
+            .map(|index| (EXECUTION_MASK_TEXTURE, index))
+            .ok_or_else(|| MaterialExecutionError::UnresolvedMaskSource(name.clone())),
+    }
+}
+
+fn blend_domain_word(source: &ShadingPlan) -> u32 {
+    match source {
+        ShadingPlan::Single { .. } => 0,
+        ShadingPlan::MaskBlend { domain, .. } => match domain {
+            crate::BlendDomain::FullRadiance => 0,
+            crate::BlendDomain::DirectOnly => 1,
+            crate::BlendDomain::CustomChannelMask(_) => 2,
+        },
+    }
 }
 
 /// A fully checked hot-path execution binding.
@@ -316,6 +385,7 @@ impl MaterialExecutionTables {
             module_id,
             permutations,
             digest: compiled.digest(),
+            compiled: compiled.clone(),
         });
         Ok(index)
     }
@@ -331,6 +401,26 @@ impl MaterialExecutionTables {
         execution_family: ExecutionFamily,
         blended_channels: ChannelMask,
     ) -> Result<PlanIndex, MaterialExecutionError> {
+        self.register_plan_with_mask_resolver(
+            source,
+            left,
+            right,
+            execution_family,
+            blended_channels,
+            None,
+        )
+    }
+
+    pub fn register_plan_with_mask_resolver(
+        &mut self,
+        source: ShadingPlan,
+        left: ResponseProgramIndex,
+        right: Option<ResponseProgramIndex>,
+        execution_family: ExecutionFamily,
+        blended_channels: ChannelMask,
+        resolver: Option<&dyn MaskSourceResolver>,
+    ) -> Result<PlanIndex, MaterialExecutionError> {
+        let (mask_kind, mask_index) = resolve_mask_source(&source, resolver)?;
         let left_entry = self.program(left)?;
         if let Some(right) = right {
             self.program(right)?;
@@ -388,16 +478,23 @@ impl MaterialExecutionTables {
                 && entry.right == right
                 && entry.execution_family == execution_family
                 && entry.blended_channels == blended_channels
+                && entry.mask_kind == mask_kind
+                && entry.mask_index == mask_index
+                && entry.blend_domain == blend_domain_word(&source)
         }) {
             return Err(MaterialExecutionError::DuplicatePlan);
         }
         let index = checked_new_plan_index(self.plans.len())?;
+        let blend_domain = blend_domain_word(&source);
         self.plans.push(MaterialExecutionPlan {
             source,
             execution_family,
             left,
             right,
             blended_channels,
+            mask_kind,
+            mask_index,
+            blend_domain,
         });
         Ok(index)
     }
@@ -510,7 +607,7 @@ impl MaterialExecutionTables {
     /// all three words to reject a forged plan/program tuple and to derive the
     /// response bucket key without a legacy-class projection.
     #[must_use]
-    pub fn gpu_plan_rows(&self) -> Vec<[u32; 3]> {
+    pub fn gpu_plan_rows(&self) -> Vec<[u32; EXECUTION_PLAN_ROW_WORDS]> {
         self.plans
             .iter()
             .map(|plan| {
@@ -518,6 +615,11 @@ impl MaterialExecutionTables {
                     plan.left.get(),
                     plan.right.map_or(u32::MAX, |index| index.get()),
                     plan.execution_family as u32,
+                    plan.blended_channels.0,
+                    plan.mask_kind,
+                    plan.mask_index,
+                    plan.blend_domain,
+                    0,
                 ]
             })
             .collect()
@@ -811,7 +913,12 @@ mod tests {
             vec![[
                 program.get(),
                 u32::MAX,
-                ExecutionFamily::FusedBuiltin as u32
+                ExecutionFamily::FusedBuiltin as u32,
+                0,
+                0,
+                0,
+                0,
+                0,
             ]]
         );
         assert_eq!(

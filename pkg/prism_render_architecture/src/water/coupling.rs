@@ -18,7 +18,7 @@ use crate::render_fabric::{FeatureId, FrameLag, ResourceKey, ResourceScope, Reso
 
 /// Stable semantic owner for the water simulation feature declarations.
 pub const WATER_SIMULATION_FEATURE: FeatureId = FeatureId(0x1000);
-/// The persistent foam result consumed by the next frame's particle feedback.
+/// The water-owned foam result (not the particle feedback source).
 pub const WATER_FOAM_RESOURCE: ResourceKey = ResourceKey::of(WATER_SIMULATION_FEATURE, 2);
 
 /// Describes the particle-to-water foam feedback edge.
@@ -30,7 +30,7 @@ pub const WATER_FOAM_RESOURCE: ResourceKey = ResourceKey::of(WATER_SIMULATION_FE
 #[must_use]
 pub fn spray_foam_feedback_use() -> ResourceUse {
     ResourceUse {
-        key: WATER_FOAM_RESOURCE,
+        key: crate::render_fabric::PARTICLE_SPRAY_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: FrameLag::new(1),
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn spray_feedback_is_a_one_frame_lagged_persistent_read() {
         let usage = spray_foam_feedback_use();
-        assert_eq!(usage.key, WATER_FOAM_RESOURCE);
+        assert_eq!(usage.key, crate::render_fabric::PARTICLE_SPRAY_RESOURCE);
         assert_eq!(usage.access, AccessKind::StorageRead);
         assert_eq!(usage.scope, ResourceScope::Whole);
         assert_eq!(usage.frame_lag.map(|lag| lag.frames()), Some(1));

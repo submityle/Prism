@@ -14,7 +14,10 @@ use crate::backend::capability::CapabilitySet;
 use crate::frame_graph::ResourceLifetime;
 use prism_render_driver::BufferUsages;
 
-pub const WATER_SERVICE_IDS: [ServiceId; 9] = [
+pub const SPRAY_FEEDBACK_SERVICE: ServiceId = ServiceId(10);
+pub const SPRAY_FEEDBACK_FEATURE_ID: FeatureId = FeatureId(0x2020);
+
+pub const WATER_SERVICE_IDS: [ServiceId; 10] = [
     ServiceId(1),
     ServiceId(2),
     ServiceId(3),
@@ -24,6 +27,7 @@ pub const WATER_SERVICE_IDS: [ServiceId; 9] = [
     ServiceId(7),
     ServiceId(8),
     ServiceId(9),
+    SPRAY_FEEDBACK_SERVICE,
 ];
 
 pub const VOLUME_SERVICE_IDS: [ServiceId; 7] = [
@@ -46,13 +50,14 @@ pub const NPR_FEATURE_ID: FeatureId = FeatureId(0x1101);
 pub const CUSTOM_FEATURE_ID: FeatureId = FeatureId(0x1102);
 
 pub const WATER_SURFACE_RESOURCE: ResourceKey = ResourceKey::of(WATER_FEATURE_ID, 0);
-pub const WATER_SPRAY_RESOURCE: ResourceKey = ResourceKey::of(WATER_FEATURE_ID, 1);
+/// Compatibility name for the particle service's persistent foam feedback.
+pub const WATER_SPRAY_RESOURCE: ResourceKey = PARTICLE_SPRAY_RESOURCE;
 pub const WATER_FOAM_RESOURCE: ResourceKey = ResourceKey::of(WATER_FEATURE_ID, 2);
 pub const VOLUME_DENSITY_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 0);
 pub const VOLUME_FROXEL_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 1);
 pub const VOLUME_VELOCITY_RESOURCE: ResourceKey = ResourceKey::of(VOLUME_FEATURE_ID, 2);
 pub const PARTICLE_STREAM_RESOURCE: ResourceKey = ResourceKey::of(PARTICLE_FEATURE_ID, 0);
-pub const PARTICLE_SPRAY_RESOURCE: ResourceKey = ResourceKey::of(PARTICLE_FEATURE_ID, 1);
+pub const PARTICLE_SPRAY_RESOURCE: ResourceKey = ResourceKey::of(SPRAY_FEEDBACK_FEATURE_ID, 0);
 pub const PARTICLE_ALIVE_RESOURCE: ResourceKey = ResourceKey::of(PARTICLE_FEATURE_ID, 2);
 pub const HAIR_STRAND_RESOURCE: ResourceKey = ResourceKey::of(HAIR_FEATURE_ID, 0);
 pub const HAIR_VISIBILITY_RESOURCE: ResourceKey = ResourceKey::of(HAIR_FEATURE_ID, 1);
@@ -104,12 +109,6 @@ const VOLUME_ACCESSES: &[ResourceUse] = &[
 const PARTICLE_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
         key: PARTICLE_STREAM_RESOURCE,
-        access: AccessKind::StorageWrite,
-        scope: ResourceScope::Whole,
-        frame_lag: None,
-    },
-    ResourceUse {
-        key: PARTICLE_SPRAY_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
@@ -297,7 +296,42 @@ macro_rules! service_definition {
     }};
 }
 
-const SERVICE_FEATURES: [FeatureDefinition; 16] = [
+const SPRAY_FEEDBACK: FeatureDefinition = FeatureDefinition::service(
+    SPRAY_FEEDBACK_FEATURE_ID,
+    &[ServiceOutput {
+        service: SPRAY_FEEDBACK_SERVICE,
+        resources: &[PARTICLE_SPRAY_RESOURCE],
+    }],
+    ServiceSet::EMPTY,
+    &[FeatureVariant {
+        id: VariantId(0x6020),
+        rank: 0,
+        min_quality: RenderQualityTier::Low,
+        required_caps: CapabilitySet::EMPTY,
+        requires_services_extra: ServiceSet::EMPTY,
+        passes: &[PassTemplate {
+            id: PassKey(0x6020),
+            queue: QueueClass::Compute,
+            accesses: &[
+                ResourceUse {
+                    key: WATER_SURFACE_RESOURCE,
+                    access: AccessKind::StorageRead,
+                    scope: ResourceScope::Whole,
+                    frame_lag: None,
+                },
+                ResourceUse {
+                    key: PARTICLE_SPRAY_RESOURCE,
+                    access: AccessKind::StorageWrite,
+                    scope: ResourceScope::Whole,
+                    frame_lag: None,
+                },
+            ],
+        }],
+        shader_permutation: None,
+    }],
+);
+
+const SERVICE_FEATURES: [FeatureDefinition; 17] = [
     service_definition!(FeatureId(0x2000), VariantId(0x6000), WATER_SERVICE_IDS[0]),
     service_definition!(FeatureId(0x2001), VariantId(0x6001), WATER_SERVICE_IDS[1]),
     service_definition!(FeatureId(0x2002), VariantId(0x6002), WATER_SERVICE_IDS[2]),
@@ -314,11 +348,11 @@ const SERVICE_FEATURES: [FeatureDefinition; 16] = [
     service_definition!(FeatureId(0x2014), VariantId(0x6014), VOLUME_SERVICE_IDS[4]),
     service_definition!(FeatureId(0x2015), VariantId(0x6015), VOLUME_SERVICE_IDS[5]),
     service_definition!(FeatureId(0x2016), VariantId(0x6016), VOLUME_SERVICE_IDS[6]),
+    SPRAY_FEEDBACK,
 ];
 
-const BUILTIN_RESOURCE_KEYS: [ResourceKey; 31] = [
+const BUILTIN_RESOURCE_KEYS: [ResourceKey; 30] = [
     WATER_SURFACE_RESOURCE,
-    WATER_SPRAY_RESOURCE,
     WATER_FOAM_RESOURCE,
     VOLUME_DENSITY_RESOURCE,
     VOLUME_FROXEL_RESOURCE,
@@ -364,7 +398,6 @@ const fn resource_template(key: ResourceKey) -> ResourceTemplate {
 
 pub const BUILTIN_RESOURCE_TEMPLATES: &[ResourceTemplate] = &[
     resource_template(WATER_SURFACE_RESOURCE),
-    resource_template(WATER_SPRAY_RESOURCE),
     resource_template(WATER_FOAM_RESOURCE),
     resource_template(VOLUME_DENSITY_RESOURCE),
     resource_template(VOLUME_FROXEL_RESOURCE),
@@ -411,7 +444,7 @@ const VOLUME_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
 const PARTICLE_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
     PARTICLE_FEATURE_ID,
     RenderDomain::Particle,
-    ServiceSet::EMPTY,
+    ServiceSet::new(&[SPRAY_FEEDBACK_SERVICE]),
     PARTICLE_VARIANTS,
 );
 const HAIR_FEATURE: FeatureDefinition = FeatureDefinition::subsystem(
@@ -433,7 +466,7 @@ const NPR_FEATURE: FeatureDefinition =
 const CUSTOM_FEATURE: FeatureDefinition =
     FeatureDefinition::response(CUSTOM_FEATURE_ID, ServiceSet::EMPTY, CUSTOM_VARIANTS);
 
-static BUILTIN_FEATURES: [FeatureDefinition; 24] = [
+static BUILTIN_FEATURES: [FeatureDefinition; 25] = [
     WATER_FEATURE,
     VOLUME_FEATURE,
     PARTICLE_FEATURE,
@@ -458,9 +491,11 @@ static BUILTIN_FEATURES: [FeatureDefinition; 24] = [
     SERVICE_FEATURES[13],
     SERVICE_FEATURES[14],
     SERVICE_FEATURES[15],
+    SERVICE_FEATURES[16],
 ];
 
-static BUILTIN_SUBSYSTEM_ROOTS: [FeatureId; 2] = [WATER_FEATURE_ID, VOLUME_FEATURE_ID];
+static BUILTIN_SUBSYSTEM_ROOTS: [FeatureId; 3] =
+    [WATER_FEATURE_ID, VOLUME_FEATURE_ID, PARTICLE_FEATURE_ID];
 static BUILTIN_RESPONSE_ROOTS: [FeatureId; 3] = [LIT_FEATURE_ID, NPR_FEATURE_ID, CUSTOM_FEATURE_ID];
 
 /// Build the immutable semantic catalog used by renderer/device setup.

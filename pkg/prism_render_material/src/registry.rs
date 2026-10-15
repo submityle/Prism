@@ -1,7 +1,7 @@
 use crate::{
     DynamicChannels, GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters,
     MaterialCapacityError, MaterialExecutionBinding, MaterialExecutionTables,
-    MaterialHandleAllocator, MaterialHandleError, MaterialRecord,
+    MaterialHandleAllocator, MaterialHandleError, MaterialRecord, EXECUTION_PLAN_ROW_WORDS,
 };
 use alloc::{collections::BTreeSet, vec::Vec};
 use prism_render_architecture::{abi::GenerationalHandle, gpu_scene::GpuCompletionValue};
@@ -42,7 +42,7 @@ pub struct MaterialRegistry {
     /// Verified dense execution identities live beside the baked record. They
     /// are runtime table bindings and must not be reconstructed from a hash.
     execution_bindings: Vec<Option<MaterialExecutionBinding>>,
-    execution_plan_rows: Vec<[u32; 3]>,
+    execution_plan_rows: Vec<[u32; EXECUTION_PLAN_ROW_WORDS]>,
     execution_program_rows: Vec<[u32; 5]>,
     execution_package_count: u32,
     execution_table_version: u32,
@@ -300,7 +300,8 @@ impl MaterialRegistry {
             else {
                 return Err(MaterialRegistryError::InvalidExecutionBinding);
             };
-            if !plan.contains(&binding.response_program_index.get())
+            if plan[0] != binding.response_program_index.get()
+                && plan[1] != binding.response_program_index.get()
                 || program[1] != binding.package_index.get()
                 || binding.package_index.get() >= package_count
             {
@@ -325,7 +326,7 @@ impl MaterialRegistry {
     }
 
     #[must_use]
-    pub fn execution_plan_rows(&self) -> &[[u32; 3]] {
+    pub fn execution_plan_rows(&self) -> &[[u32; EXECUTION_PLAN_ROW_WORDS]] {
         &self.execution_plan_rows
     }
 
