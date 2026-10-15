@@ -26,6 +26,10 @@
 //!   resync.
 //! - [`aoi`] — interest management: a deterministic uniform spatial grid and the
 //!   enter/leave edges between two interest views (design §8).
+//! - [`authority_aoi`] — bounded authority-side per-peer AOI subscriptions,
+//!   nearest-first budgets, monotonic revisions and deterministic enter/leave
+//!   deltas; scene/world lifecycle remains outside this transport-independent
+//!   seam.
 //! - [`prediction`] — client-side prediction and reconciliation: apply a local
 //!   input at once, then roll back to authority and replay the un-acknowledged
 //!   inputs when the correction arrives (design §10).
@@ -88,6 +92,8 @@ extern crate std;
 pub mod sequence;
 
 pub mod aoi;
+
+pub mod authority_aoi;
 
 pub mod arq;
 
