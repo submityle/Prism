@@ -35,9 +35,17 @@ mod pod;
 mod primitive;
 mod ron;
 mod stable_id;
+mod stream;
 
 pub use binary::{from_binary, from_binary_with_limits, to_binary};
 pub use error::{DeserializeError, SerializeError};
 pub use limits::DeserializeLimits;
 pub use ron::{from_ron, to_ron};
 pub use stable_id::StableTypeId;
+#[cfg(feature = "std")]
+pub use stream::StdStreamDecoder;
+pub use stream::{
+    frame_binary, to_binary_frame, BinaryStreamDecoder, StreamDecodeError, StreamDecodeLimits,
+    StreamEncodeError, StreamFeed, StreamLimitsError, StreamOffer, StreamTimeoutKind,
+    StreamTimeoutPolicy, FRAME_PREFIX_BYTES,
+};

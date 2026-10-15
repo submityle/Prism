@@ -30,6 +30,9 @@
 //!   (a compact self-describing binary format) and [`to_ron`]/[`from_ron`]
 //!   (self-contained RON text), plus [`StableTypeId`], a deterministic
 //!   cross-build type id derived from the type path.
+//!   [`BinaryStreamDecoder`] adds a bounded, length-framed multi-chunk consume
+//!   contract with caller-supplied no-std ticks; [`StdStreamDecoder`] supplies
+//!   `std::time::Instant` ticks when the `std` feature is enabled.
 //!
 //! - **M4 metadata + schema:** attribute/field [`metadata`](schema::metadata)
 //!   ([`TypeMetadata`](schema::TypeMetadata)) queryable through the registry,
@@ -127,9 +130,13 @@ pub use path::{reflect_path, reflect_path_mut, Access, ParsePathError, ParsedPat
 pub use reflect::{Reflect, ReflectMut, ReflectRef, Struct, TupleStruct, Typed};
 pub use registry::{GetTypeRegistration, TypeRegistration, TypeRegistry};
 pub use runtime_type::{EnumTypeBuilder, StructTypeBuilder};
+#[cfg(feature = "std")]
+pub use ser::StdStreamDecoder;
 pub use ser::{
-    from_binary, from_binary_with_limits, from_ron, to_binary, to_ron, DeserializeError,
-    DeserializeLimits, SerializeError, StableTypeId,
+    frame_binary, from_binary, from_binary_with_limits, from_ron, to_binary, to_binary_frame,
+    to_ron, BinaryStreamDecoder, DeserializeError, DeserializeLimits, SerializeError, StableTypeId,
+    StreamDecodeError, StreamDecodeLimits, StreamEncodeError, StreamFeed, StreamLimitsError,
+    StreamOffer, StreamTimeoutKind, StreamTimeoutPolicy, FRAME_PREFIX_BYTES,
 };
 pub use static_info::{StaticField, StaticKind, StaticTypeInfo, StaticTyped};
 pub use type_data::{ReflectDefault, TypeData};
@@ -177,17 +184,22 @@ pub mod prelude {
         SchemaVersion, TypeMetadata, TypeSchema, ValidationError,
     };
     pub use crate::static_info::{StaticField, StaticKind, StaticTypeInfo, StaticTyped};
+    #[cfg(feature = "std")]
+    pub use crate::StdStreamDecoder;
     pub use crate::{
-        diff, from_binary, from_binary_with_limits, from_ron, merge, reflect_path,
-        reflect_path_mut, to_binary, to_ron, Access, ApplyError, ArgList, Array, ArrayInfo,
-        DeserializeError, DeserializeLimits, DiffError, DynamicArray, DynamicEnum, DynamicFunction,
-        DynamicList, DynamicMap, DynamicSet, DynamicStruct, DynamicTupleStruct, DynamicVariant,
-        Enum, EnumInfo, EnumTypeBuilder, FromReflect, FunctionError, FunctionInfo,
-        FunctionRegistry, GetTypeRegistration, IntoFunction, List, ListInfo, Map, MapInfo,
-        NamedField, ParsePathError, ParsedPath, Patch, Reflect, ReflectDefault, ReflectMut,
-        ReflectRef, SerializeError, Set, SetInfo, StableTypeId, Struct, StructInfo,
+        diff, frame_binary, from_binary, from_binary_with_limits, from_ron, merge, reflect_path,
+        reflect_path_mut, to_binary, to_binary_frame, to_ron, Access, ApplyError, ArgList, Array,
+        ArrayInfo, BinaryStreamDecoder, DeserializeError, DeserializeLimits, DiffError,
+        DynamicArray, DynamicEnum, DynamicFunction, DynamicList, DynamicMap, DynamicSet,
+        DynamicStruct, DynamicTupleStruct, DynamicVariant, Enum, EnumInfo, EnumTypeBuilder,
+        FromReflect, FunctionError, FunctionInfo, FunctionRegistry, GetTypeRegistration,
+        IntoFunction, List, ListInfo, Map, MapInfo, NamedField, ParsePathError, ParsedPath, Patch,
+        Reflect, ReflectDefault, ReflectMut, ReflectRef, SerializeError, Set, SetInfo,
+        StableTypeId, StreamDecodeError, StreamDecodeLimits, StreamEncodeError, StreamFeed,
+        StreamLimitsError, StreamOffer, StreamTimeoutKind, StreamTimeoutPolicy, Struct, StructInfo,
         StructTypeBuilder, TupleStruct, TupleStructInfo, TypeData, TypeInfo, TypeRegistration,
         TypeRegistry, Typed, UnnamedField, ValueInfo, VariantInfo, VariantKind, VariantType,
+        FRAME_PREFIX_BYTES,
     };
     pub use prism_reflect_macros::{Accessors, StaticTyped};
 }
