@@ -37,6 +37,7 @@ fn unsupported_platforms_report_honestly() {
         // Covered by the live-read tests below.
         return;
     }
+    assert!(matches!(IoReactor::new(), Err(IoError::Unsupported)));
     let reactor = IoReactor::new_with_fsync().expect("portable fsync reactor still starts");
     let pool = TaskPool::new();
     assert!(matches!(

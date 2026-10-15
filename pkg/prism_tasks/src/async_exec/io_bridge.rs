@@ -241,7 +241,7 @@ impl IoReactor {
         if !AioQueue::supported() {
             return Err(IoError::Unsupported);
         }
-        Self::new_with_fsync()
+        Self::new_inner(true)
     }
 
     /// Start a reactor with the portable [`IoReactor::fsync`] path enabled.
@@ -252,6 +252,11 @@ impl IoReactor {
     /// `File::sync_all`. A non-unsupported queue creation failure is returned
     /// as [`IoError::Platform`].
     pub fn new_with_fsync() -> Result<Self> {
+        Self::new_inner(false)
+    }
+
+    /// Start the reactor and optionally require the batch-AIO backend.
+    fn new_inner(require_batch_aio: bool) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<Submission>();
         let (init_tx, init_rx) = mpsc::channel::<core::result::Result<bool, AioError>>();
 
@@ -279,7 +284,15 @@ impl IoReactor {
             .map_err(|_| IoError::ReactorGone)?;
 
         match init_rx.recv() {
-            Ok(Ok(_has_aio)) => Ok(Self {
+            Ok(Ok(has_batch_aio)) if require_batch_aio && !has_batch_aio => {
+                // The capability probe and construction disagreed. Preserve
+                // `new()`'s batch-AIO contract, and stop the fallback reactor
+                // before returning the structured capability error.
+                drop(tx);
+                let _ = handle.join();
+                Err(IoError::Unsupported)
+            }
+            Ok(Ok(_has_batch_aio)) => Ok(Self {
                 tx: Some(tx),
                 handle: Some(handle),
                 next_id: AtomicU64::new(0),
