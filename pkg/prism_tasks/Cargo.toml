@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 prism_platform = { path = "../prism_platform" }
+prism_platform_os = { path = "../prism_platform_os" }
 
 [features]
 default = ["std", "multi_thread"]

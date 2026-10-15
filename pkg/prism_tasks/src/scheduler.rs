@@ -68,6 +68,10 @@ pub(crate) struct Shared {
     /// itself to its assigned core at startup (best-effort; see
     /// [`crate::affinity`]). `None` means run unpinned.
     affinity_plan: Option<crate::affinity::WorkerCorePlan>,
+    worker_bindings: Option<Vec<Mutex<Option<crate::affinity::WorkerBindingRecord>>>>,
+    binding_ready: AtomicUsize,
+    binding_wait: Mutex<()>,
+    binding_cvar: Condvar,
 }
 
 #[derive(Default)]
@@ -107,7 +111,13 @@ impl Shared {
             wait_set: WaitSet::new(),
             #[cfg(feature = "fibers")]
             stack_pool: StackPool::new(),
+            worker_bindings: affinity_plan
+                .as_ref()
+                .map(|plan| (0..plan.len()).map(|_| Mutex::new(None)).collect()),
             affinity_plan,
+            binding_ready: AtomicUsize::new(0),
+            binding_wait: Mutex::new(()),
+            binding_cvar: Condvar::new(),
         };
         // M4: pre-warm the large-stack free list with one stack per worker so
         // the first fork-join frame reuses stacks instead of paying allocation
@@ -239,7 +249,18 @@ impl Shared {
         // Best-effort — an unsupported platform (e.g. macOS) or an OS error
         // just leaves the worker unpinned; correctness never depends on it.
         if let Some(plan) = &self.affinity_plan {
-            let _ = plan.bind_current(index);
+            let outcome = plan.bind_current(index);
+            let effective_cpus = prism_platform::current_thread_affinity().ok();
+            if let Some(bindings) = &self.worker_bindings
+                && let Some(slot) = bindings.get(index)
+            {
+                *slot.lock().unwrap() = Some(crate::affinity::WorkerBindingRecord {
+                    outcome,
+                    effective_cpus,
+                });
+                self.binding_ready.fetch_add(1, Ordering::Release);
+                self.binding_cvar.notify_all();
+            }
         }
         #[cfg(feature = "fibers")]
         self.run_worker_fibers(index);
@@ -471,5 +492,30 @@ impl Shared {
     /// The worker->core pinning plan, if this pool was built with pinning.
     pub(crate) fn affinity_plan(&self) -> Option<&crate::affinity::WorkerCorePlan> {
         self.affinity_plan.as_ref()
+    }
+
+    pub(crate) fn wait_for_bindings(&self) {
+        let Some(bindings) = &self.worker_bindings else {
+            return;
+        };
+        let expected = bindings.len();
+        let mut guard = self.binding_wait.lock().unwrap();
+        while self.binding_ready.load(Ordering::Acquire) < expected {
+            guard = self.binding_cvar.wait(guard).unwrap();
+        }
+    }
+
+    pub(crate) fn worker_bindings(&self) -> Option<Vec<crate::affinity::WorkerBindingRecord>> {
+        self.worker_bindings.as_ref().map(|bindings| {
+            bindings
+                .iter()
+                .map(|slot| {
+                    slot.lock()
+                        .unwrap()
+                        .clone()
+                        .expect("worker binding not recorded")
+                })
+                .collect()
+        })
     }
 }

@@ -129,9 +129,9 @@ use std::thread::JoinHandle;
 
 pub use affinity::{
     affinity_supported, pin_current_thread_to_core, plan_worker_cores, CoreAssignment,
-    CoreClassPolicy, WorkerBindingOutcome, WorkerCorePlan,
+    CoreClassPolicy, WorkerBindingOutcome, WorkerBindingRecord, WorkerCorePlan,
 };
-pub use arena::{FrameArena, FrameArenas, DEFAULT_ARENA_CAPACITY};
+pub use arena::{FrameArena, FrameArenaPlacementSummary, FrameArenas, DEFAULT_ARENA_CAPACITY};
 pub use async_exec::{
     AioReadFuture, AioSyncFuture, AioWriteFuture, CounterFuture, IoError as AioIoError, IoReactor,
     ReadBuf, SyncError, Task,
@@ -274,6 +274,7 @@ impl TaskPool {
                 .expect("failed to spawn worker thread");
             handles.push(handle);
         }
+        shared.wait_for_bindings();
 
         Self {
             shared,
@@ -394,6 +395,20 @@ impl TaskPool {
     /// unsupported platforms). Forwarded from [`crate::affinity`].
     pub fn affinity_supported(&self) -> bool {
         affinity_supported()
+    }
+
+    /// Planned worker assignments, if this pool was created with pinning.
+    #[must_use]
+    pub fn worker_core_assignments(&self) -> Option<Vec<CoreAssignment>> {
+        self.shared
+            .affinity_plan()
+            .map(|plan| plan.assignments().to_vec())
+    }
+
+    /// Actual OS outcome for each worker's startup affinity request.
+    #[must_use]
+    pub fn worker_binding_outcomes(&self) -> Option<Vec<WorkerBindingRecord>> {
+        self.shared.worker_bindings()
     }
 
     /// Peak fiber-stack occupancy per size class since this pool was created

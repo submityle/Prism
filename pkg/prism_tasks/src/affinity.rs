@@ -95,6 +95,18 @@ pub enum WorkerBindingOutcome {
     },
 }
 
+/// Startup binding evidence for one worker. The requested assignment and the
+/// effective mask are kept together so a harness can distinguish an OS
+/// accepted singleton mask from a plan that was merely requested.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerBindingRecord {
+    /// Result of applying the planned affinity request.
+    pub outcome: WorkerBindingOutcome,
+    /// Effective mask read back from the current worker thread when the
+    /// platform exposes a read-back API.
+    pub effective_cpus: Option<Vec<usize>>,
+}
+
 impl WorkerBindingOutcome {
     /// Whether the OS accepted a real CPU-affinity binding.
     #[must_use]

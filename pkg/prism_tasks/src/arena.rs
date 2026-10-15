@@ -267,6 +267,15 @@ pub struct FrameArenas {
     arenas: Vec<FrameArena>,
 }
 
+/// Aggregate placement evidence for a set of frame arenas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameArenaPlacementSummary {
+    /// Number of arenas whose OS NUMA policy was accepted.
+    pub bound: usize,
+    /// Number of arenas using ordinary-memory fallback.
+    pub fallback: usize,
+}
+
 impl FrameArenas {
     /// Create `workers` arenas, each with `capacity` bytes, all on node 0.
     pub fn new(workers: usize, capacity: usize) -> Self {
@@ -308,6 +317,20 @@ impl FrameArenas {
     /// Sum of every arena's high-water mark (frame-memory diagnostics).
     pub fn total_high_water(&self) -> usize {
         self.arenas.iter().map(FrameArena::high_water).sum()
+    }
+
+    /// Count actual Bound versus explicit Fallback placements.
+    #[must_use]
+    pub fn placement_summary(&self) -> FrameArenaPlacementSummary {
+        let bound = self
+            .arenas
+            .iter()
+            .filter(|arena| arena.placement().is_bound())
+            .count();
+        FrameArenaPlacementSummary {
+            bound,
+            fallback: self.arenas.len().saturating_sub(bound),
+        }
     }
 
     /// Reset every arena for the next frame. O(workers), no destructors.

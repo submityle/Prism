@@ -95,7 +95,14 @@ pub struct Topology {
 impl Topology {
     /// Probe through the platform backend, retaining explicit fallback status.
     pub fn detect() -> Self {
-        Self::from_platform(prism_platform::topology::CpuTopology::detect())
+        // Prefer the real-OS twin so a Linux worker plan sees the same
+        // process-allowed CPU/NUMA snapshot as the harness. If the verified
+        // probe is unavailable, retain the portable platform fallback; the
+        // resulting source remains explicit and callers must not claim a
+        // binding that was not applied.
+        let platform = prism_platform_os::probe_topology()
+            .unwrap_or_else(|_| prism_platform::topology::CpuTopology::detect());
+        Self::from_platform(platform)
     }
 
     /// Consume a validated platform probe (or injected topology). Unknown

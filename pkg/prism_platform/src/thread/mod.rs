@@ -28,8 +28,8 @@ pub mod sync;
 pub mod tls;
 
 pub use affinity::{
-    affinity_supported, set_current_thread_affinity, set_current_thread_affinity_mask,
-    AffinityError,
+    affinity_supported, current_thread_affinity, set_current_thread_affinity,
+    set_current_thread_affinity_mask, AffinityError,
 };
 pub use park::{Parker, Unparker};
 pub use spawn::{

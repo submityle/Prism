@@ -66,6 +66,16 @@ pub fn set_current_thread_affinity_mask(cores: &[usize]) -> Result<(), AffinityE
     imp::set_mask(cores)
 }
 
+/// Read the calling thread's effective CPU-affinity mask.
+///
+/// This is primarily a verification/diagnostics primitive: a planned core is
+/// not evidence of a binding until the OS reports the mask. Unsupported
+/// targets return [`AffinityError::Unsupported`] rather than an invented
+/// singleton mask.
+pub fn current_thread_affinity() -> Result<Vec<usize>, AffinityError> {
+    imp::get_mask()
+}
+
 /// Returns `true` if this build can actually pin threads to cores.
 pub fn affinity_supported() -> bool {
     imp::SUPPORTED
@@ -84,6 +94,7 @@ mod imp {
 
     unsafe extern "C" {
         fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const u64) -> i32;
+        fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut u64) -> i32;
         fn __errno_location() -> *mut i32;
     }
 
@@ -112,6 +123,26 @@ mod imp {
             let errno = unsafe { *__errno_location() };
             Err(AffinityError::SystemError(errno))
         }
+    }
+
+    pub(super) fn get_mask() -> Result<Vec<usize>, AffinityError> {
+        let mut mask = [0u64; WORDS];
+        // SAFETY: `mask` is writable storage of the exact size passed to the
+        // kernel and targets the calling thread with pid 0.
+        let rc = unsafe { sched_getaffinity(0, core::mem::size_of_val(&mask), mask.as_mut_ptr()) };
+        if rc != 0 {
+            // SAFETY: `__errno_location` returns this thread's errno slot.
+            let errno = unsafe { *__errno_location() };
+            return Err(AffinityError::SystemError(errno));
+        }
+        Ok(mask
+            .iter()
+            .enumerate()
+            .flat_map(|(word, bits)| {
+                (0..64)
+                    .filter_map(move |bit| (bits & (1u64 << bit) != 0).then_some(word * 64 + bit))
+            })
+            .collect())
     }
 }
 
@@ -163,6 +194,10 @@ mod imp {
             Err(AffinityError::SystemError(code as i32))
         }
     }
+
+    pub(super) fn get_mask() -> Result<Vec<usize>, AffinityError> {
+        Err(AffinityError::Unsupported)
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -175,6 +210,10 @@ mod imp {
         if cores.is_empty() {
             return Err(AffinityError::InvalidCore);
         }
+        Err(AffinityError::Unsupported)
+    }
+
+    pub(super) fn get_mask() -> Result<Vec<usize>, AffinityError> {
         Err(AffinityError::Unsupported)
     }
 }

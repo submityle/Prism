@@ -190,10 +190,10 @@ pub use stdio::{StandardError, StandardInput, StandardOutput, Stream};
 pub use suspend::{suspend_capability, PlatformSuspendCapability, SuspendEvent, SuspendEventKind};
 #[cfg(feature = "std")]
 pub use thread::{
-    affinity_supported, current_id, hardware_concurrency, set_current_thread_affinity,
-    set_current_thread_affinity_mask, sleep as thread_sleep, spawn, yield_now, AffinityError,
-    Backoff, Builder as ThreadBuilder, JoinHandle, Once, Parker, SpinLock, SpinLockGuard, ThreadId,
-    ThreadLocal, Unparker,
+    affinity_supported, current_id, current_thread_affinity, hardware_concurrency,
+    set_current_thread_affinity, set_current_thread_affinity_mask, sleep as thread_sleep, spawn,
+    yield_now, AffinityError, Backoff, Builder as ThreadBuilder, JoinHandle, Once, Parker,
+    SpinLock, SpinLockGuard, ThreadId, ThreadLocal, Unparker,
 };
 pub use topology::power::{PowerPolicy, PowerSource, PowerState, ThermalState};
 pub use topology::qos::{qos_hint, EngineQos, OsQosHint};
