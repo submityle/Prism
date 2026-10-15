@@ -536,6 +536,25 @@ fn material_vt_sampling_gpu_matches_expected_fallback_contract() {
         contents: bytemuck::bytes_of(&GpuMaterialTexture::default()),
         usage: BufferUsages::STORAGE,
     });
+    // The production material layout also carries the execution-table ABI at
+    // bindings 10..12.  This VT wrapper does not consume those rows, but a
+    // real bind group must still provide every declared binding so the test
+    // exercises the same layout as the shipping material consumer.
+    let execution_plan_buffer = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("material-vt parity execution plans"),
+        contents: bytemuck::cast_slice(&[[u32::MAX; 8]]),
+        usage: BufferUsages::STORAGE,
+    });
+    let execution_program_buffer = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("material-vt parity execution programs"),
+        contents: bytemuck::cast_slice(&[[0_u32; 5]]),
+        usage: BufferUsages::STORAGE,
+    });
+    let execution_package_buffer = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("material-vt parity execution packages"),
+        contents: bytemuck::cast_slice(&[0_u32]),
+        usage: BufferUsages::STORAGE,
+    });
     let cases_bind_group = device.create_bind_group(&BindGroupDescriptor {
         label: Some("material-vt parity test-owned wrapper bind group"),
         layout: &cases_layout,
@@ -595,6 +614,18 @@ fn material_vt_sampling_gpu_matches_expected_fallback_contract() {
             BindGroupEntry {
                 binding: 9,
                 resource: generation_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 10,
+                resource: execution_plan_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 11,
+                resource: execution_program_buffer.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 12,
+                resource: execution_package_buffer.as_entire_binding(),
             },
         ],
     });
