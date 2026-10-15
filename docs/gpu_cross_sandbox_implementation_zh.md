@@ -27,7 +27,7 @@ response composition 测试在获取 adapter 后检查 compute workgroup 与 sto
 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_ui_render_backend --features gpu --test gpu_parity --offline -- --nocapture` | **0 passed / 7 failed**；每个用例报告 `could not acquire a usable WGPU device`。 |
 | `cargo test -p prism_ui_render_backend --features gpu --test dock_gpu_parity --offline -- --nocapture` | **0 passed / 1 failed**；报告 `dock GPU parity requires a real wgpu adapter; refusing to skip validation`。 |
 | `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_gpudriven --lib --offline -- --nocapture` | **11 passed / 7 failed**；7 个 GPU 用例真实报告 `PRISM_REQUIRE_GPU is set but no adapter was found`。 |
-| `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu --test water_hybrid_golden --offline -- --nocapture` | response composition **2 passed / 0 failed**，真实 Apple M2 Metal adapter/device 获取成功，1320 cases / 14520 auxiliary jobs GPU readback 通过；water Hybrid **14 passed / 1 failed**，唯一失败为真实能力门禁：`max_bind_groups=8`，所需 10。 |
+| `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test response_composition_gpu --test water_hybrid_golden --offline -- --nocapture` | response composition **2 passed / 0 failed**，真实 Apple M2 Metal adapter/device 获取成功，1320 cases / 14520 auxiliary jobs GPU readback 通过（host submit+readback 2.890209 ms）；water Hybrid **14 passed / 1 failed**，唯一失败为真实能力门禁：`max_bind_groups=8`，所需 10。 |
 
 跨沙盒主机本轮有 Apple M2 Metal adapter，response composition 已有真实 GPU readback 对拍通过；水体 Hybrid 因绑定组上限不足保留严格失败证据。resident composition 未在本轮命令中执行，不作通过声明。
 

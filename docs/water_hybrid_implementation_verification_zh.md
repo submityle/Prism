@@ -35,4 +35,4 @@ CPU 的物理单位输入由岸边距离和水深换算为归一化信号；rast
 
 测试同时检查 CPU 数值、WESL 接线、四个入口和 raster WESL 编译。真实 GPU gate 还检查设备的 `max_bind_groups`：水面 raster 当前需要 10 个 bind groups；本机真实适配器可用但只提供 8 个，因此普通运行明确输出 `SKIP`，并未冒充 GPU 通过。设置 `PRISM_REQUIRE_GPU=1` 时该能力不足会升级为测试失败，避免 CI 把不兼容设备误报为验证成功。
 
-真实验证结果（2026-10-15，沙盒外）：CPU/WESL 10 项全绿；真实适配器已发现，设备请求成功，但因 `max_bind_groups=8 < 10` 明确跳过 shader-module gate。此前设备级校验还发现水面 shader 写入了不存在的 `SurfaceSample.geometry_opacity` 字段，已删除该错误写入并重新通过 WESL 编译门禁。
+真实验证结果（2026-10-15，沙盒外）：CPU/WESL golden **14 项通过**；真实适配器为 Apple M2 Metal，设备请求成功，但因 `max_bind_groups=8 < 10`，严格 GPU gate **1 项失败**，没有把能力不足记为通过。此前设备级校验还发现水面 shader 写入了不存在的 `SurfaceSample.geometry_opacity` 字段，已删除该错误写入并重新通过 WESL 编译门禁。
