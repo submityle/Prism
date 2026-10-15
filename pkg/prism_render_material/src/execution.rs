@@ -349,7 +349,10 @@ impl MaterialExecutionTables {
                         program: left,
                     });
                 }
-                if execution_family == ExecutionFamily::Composition {
+                if execution_family == ExecutionFamily::Composition
+                    || (execution_family == ExecutionFamily::FusedBuiltin
+                        && !matches!(program, ProgramRef::Builtin(_)))
+                {
                     return Err(MaterialExecutionError::InvalidExecutionFamily);
                 }
             }
@@ -370,7 +373,11 @@ impl MaterialExecutionTables {
                         program: left,
                     });
                 }
-                if execution_family != ExecutionFamily::Composition {
+                let builtin_pair = matches!(source_left, ProgramRef::Builtin(_))
+                    && matches!(source_right, ProgramRef::Builtin(_));
+                if execution_family == ExecutionFamily::SplitResponse
+                    || (execution_family == ExecutionFamily::FusedBuiltin && !builtin_pair)
+                {
                     return Err(MaterialExecutionError::InvalidExecutionFamily);
                 }
             }
@@ -818,6 +825,92 @@ mod tests {
                 .unwrap()
                 .to_words(),
             [0, 0, 0, 1, 0]
+        );
+    }
+
+    #[test]
+    fn mask_blend_preserves_validated_fused_and_composition_families() {
+        use crate::{BlendDomain, ResponseChannel, ResponseMaskSource};
+
+        let entry = compiled();
+        let packages = ready_packages(&entry);
+        let mut tables = MaterialExecutionTables::new();
+        let package = tables.register_package(&entry, &packages).unwrap();
+        let references = [
+            ProgramRef::Builtin(BuiltinProgram::Lit),
+            ProgramRef::Builtin(BuiltinProgram::Npr),
+            ProgramRef::Registered(ProgramId(0)),
+        ];
+        let programs: Vec<_> = references
+            .into_iter()
+            .enumerate()
+            .map(|(index, program)| {
+                tables
+                    .register_program(
+                        program,
+                        &entry,
+                        package,
+                        ModuleId(index as u64),
+                        PermutationSpace::try_new([2]).unwrap(),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let channels = ChannelMask::one(ResponseChannel::Direct);
+        for right in [1, 2] {
+            let source = ShadingPlan::MaskBlend {
+                left: references[0],
+                right: references[right],
+                mask: ResponseMaskSource::RegionMask,
+                domain: BlendDomain::DirectOnly,
+            };
+            assert_eq!(
+                tables.register_plan(
+                    source.clone(),
+                    programs[0],
+                    Some(programs[right]),
+                    ExecutionFamily::SplitResponse,
+                    channels,
+                ),
+                Err(MaterialExecutionError::InvalidExecutionFamily),
+            );
+            let fused = tables.register_plan(
+                source.clone(),
+                programs[0],
+                Some(programs[right]),
+                ExecutionFamily::FusedBuiltin,
+                channels,
+            );
+            if right == 1 {
+                let plan = fused.unwrap();
+                assert_eq!(
+                    tables.gpu_plan_rows()[plan.get() as usize][2],
+                    ExecutionFamily::FusedBuiltin as u32
+                );
+            } else {
+                assert_eq!(fused, Err(MaterialExecutionError::InvalidExecutionFamily));
+            }
+            tables
+                .register_plan(
+                    source,
+                    programs[0],
+                    Some(programs[right]),
+                    ExecutionFamily::Composition,
+                    channels,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            tables.register_plan(
+                ShadingPlan::Single {
+                    program: references[2]
+                },
+                programs[2],
+                None,
+                ExecutionFamily::FusedBuiltin,
+                ChannelMask::default(),
+            ),
+            Err(MaterialExecutionError::InvalidExecutionFamily),
         );
     }
 }
