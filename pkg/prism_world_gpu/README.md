@@ -49,6 +49,18 @@ See `docs/prism_world_density_zh.md` for numeric boundaries, resource budgets,
 real indirect-pixel tests, and three-scale release measurements. This does not
 generate scatter candidates or integrate a product renderer graph.
 
+`GpuScatter` is the fixed-capacity integer GPU twin of
+`prism_world_residency::scatter` revision 1. It generates signed i64 millimetre
+positions and optional Matérn-II minimum-distance thinning with exact CPU
+membership, including unrequested neighbors and world-coordinate edges.
+Only a changed 192-byte request is uploaded; production generation, compaction,
+and indirect arguments stay on GPU. Consumers read 64-byte source records via
+the compact index, whose cross-workgroup order is unspecified. Logical buffers
+cost `68 * max(capacity, 1) + 208` bytes, with explicit candidate-work limits.
+This does not add surface projection, author density fields, or product graph
+integration. See `docs/prism_world_gpu_scatter_zh.md` for ABI, lifecycle,
+real-device tests and bounded release measurements.
+
 ## Verification
 
 CPU-only contract and packing tests:
@@ -65,6 +77,7 @@ cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test 
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test gpu_parity -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test resident_visibility -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test density_visibility -- --nocapture
+cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test scatter_generation -- --nocapture
 ```
 
 The parity test is a strict real-device gate: missing adapter/device acquisition

@@ -8,10 +8,11 @@ publish = false
 
 [features]
 default = []
-gpu = ["dep:bytemuck", "dep:futures-lite", "dep:wgpu"]
+gpu = ["dep:bytemuck", "dep:futures-lite", "dep:wgpu", "dep:prism_world_residency"]
 
 [dependencies]
 prism_world_stream = { path = "../prism_world_stream", default-features = false }
+prism_world_residency = { path = "../prism_world_residency", optional = true }
 bytemuck = { version = "1.5", features = ["derive"], optional = true }
 futures-lite = { version = "2", optional = true }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12"], optional = true }
@@ -32,3 +33,8 @@ required-features = ["gpu"]
 [[bench]]
 name = "registry"
 harness = false
+
+[[bench]]
+name = "scatter_generation"
+harness = false
+required-features = ["gpu"]

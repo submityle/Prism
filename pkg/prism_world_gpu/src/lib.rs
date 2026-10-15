@@ -50,6 +50,12 @@ pub use resident::{GpuResidentError, GpuResidentVisibility};
 #[cfg(feature = "gpu")]
 pub use sector_proxies::{GpuSectorProxies, GpuSectorProxyError, ProxyUploadStats};
 
+#[cfg(feature = "gpu")]
+mod scatter;
+
+#[cfg(feature = "gpu")]
+pub use scatter::{GpuScatter, GpuScatterError};
+
 #[cfg(test)]
 mod tests {
     use super::*;

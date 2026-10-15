@@ -32,6 +32,12 @@ fn density_shaders_validate_with_four_storage_bindings_per_stage() {
             1,
         ),
         ("dither", prism_world_gpu::DENSITY_DITHER_WGSL, 0, 0),
+        (
+            "integer scatter",
+            include_str!("../src/shaders/scatter.wgsl"),
+            3,
+            1,
+        ),
     ] {
         let module = wgpu::naga::front::wgsl::parse_str(source)
             .unwrap_or_else(|error| panic!("{name} parse: {error}"));
