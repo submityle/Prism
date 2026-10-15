@@ -1,5 +1,6 @@
 //! PNG import into a strict RGBA8 runtime artifact.
 
+use super::ImporterPlugin;
 use crate::job::{Processor, ProcessorError};
 use crate::recipe::ImportProcessor;
 use alloc::vec::Vec;
@@ -108,6 +109,11 @@ impl Processor for CanonicalPngProcessor {
 impl ImportProcessor for CanonicalPngProcessor {
     const IMPORTER_ID: u128 = 0x504e47;
     const IMPORTER_VERSION: u32 = 2;
+}
+
+impl ImporterPlugin for CanonicalPngProcessor {
+    const EXTENSIONS: &'static [&'static str] = &["png"];
+    const MIME_TYPES: &'static [&'static str] = &["image/png"];
 }
 
 #[cfg(test)]

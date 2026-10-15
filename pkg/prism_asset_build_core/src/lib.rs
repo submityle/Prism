@@ -65,6 +65,10 @@ pub use executor::{
 };
 pub use graph::{BuildError, BuildGraph, BuildOutputs};
 pub use hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
+pub use import::{
+    ImportSelector, ImporterDescriptor, ImporterHandle, ImporterPlugin, ImporterRegistry,
+    ImporterRegistryError, ImporterSelectionError,
+};
 pub use job::{BuildJob, JobId, Processor, ProcessorError};
 pub use package::{
     package_runtime, package_runtime_selected_with_options, package_runtime_with_options,
@@ -77,7 +81,7 @@ pub use profile::{
 };
 pub use provenance::{ProvenanceArtifact, ProvenanceContainer, ReleaseProvenance};
 pub use publication::{PublicationDescriptor, PublishedContainer};
-pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError};
+pub use recipe::{ImportPlan, ImportProcessor, ImportRecipe, ImportRecipeError, ProcessorIdentity};
 pub use release::{
     ReleaseDescriptor, ReleaseError, ReleaseGate, ReleaseKeyId, ReleaseKeyStatus, ReleasePublicKey,
     ReleaseSignatureError, ReleaseSigner, ReleaseTrustError, ReleaseTrustStore,

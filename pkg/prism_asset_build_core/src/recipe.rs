@@ -3,8 +3,25 @@
 use crate::executor::ArtifactSpec;
 use crate::hash::HashError;
 use crate::job::{BuildJob, JobId, Processor};
+use crate::profile::{EffectiveProfile, ProfileError};
 use crate::source::SourceSnapshot;
 use crate::types::{ArtifactKey, AssetId};
+
+/// Stable processor identity used by recipes, registries, and artifact keys.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ProcessorIdentity {
+    /// Stable protocol namespace for the processor.
+    pub id: u128,
+    /// Implementation/schema version included in cache identity.
+    pub version: u32,
+}
+
+impl ProcessorIdentity {
+    /// Creates a stable processor identity.
+    pub const fn new(id: u128, version: u32) -> Self {
+        Self { id, version }
+    }
+}
 
 /// Processor identity that can be checked against an [`ImportRecipe`].
 pub trait ImportProcessor: Processor {
@@ -12,10 +29,15 @@ pub trait ImportProcessor: Processor {
     const IMPORTER_ID: u128;
     /// Importer implementation/schema version.
     const IMPORTER_VERSION: u32;
+
+    /// Returns the identity represented by the associated constants.
+    fn identity() -> ProcessorIdentity {
+        ProcessorIdentity::new(Self::IMPORTER_ID, Self::IMPORTER_VERSION)
+    }
 }
 
 /// Failure while binding a recipe to a concrete importer processor.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ImportRecipeError {
     /// Recipe identity does not describe the processor that will run.
     ProcessorIdentityMismatch {
@@ -28,6 +50,10 @@ pub enum ImportRecipeError {
         /// Importer version declared by the concrete processor.
         processor_version: u32,
     },
+    /// Registry selection failed before a graph node could be created.
+    ImporterSelection(crate::import::ImporterSelectionError),
+    /// The selected importer profile dependencies could not be projected.
+    Profile(ProfileError),
 }
 
 impl std::fmt::Display for ImportRecipeError {
@@ -43,11 +69,25 @@ impl std::fmt::Display for ImportRecipeError {
                 "import recipe identifies {:032x} v{}, but processor is {:032x} v{}",
                 recipe_id, recipe_version, processor_id, processor_version
             ),
+            Self::ImporterSelection(error) => error.fmt(f),
+            Self::Profile(error) => error.fmt(f),
         }
     }
 }
 
 impl std::error::Error for ImportRecipeError {}
+
+impl From<crate::import::ImporterSelectionError> for ImportRecipeError {
+    fn from(value: crate::import::ImporterSelectionError) -> Self {
+        Self::ImporterSelection(value)
+    }
+}
+
+impl From<ProfileError> for ImportRecipeError {
+    fn from(value: ProfileError) -> Self {
+        Self::Profile(value)
+    }
+}
 
 /// The minimum executable import node: a source-dependent job and its output contract.
 pub struct ImportPlan {
@@ -105,6 +145,58 @@ impl ImportRecipe {
             job: BuildJob::new(job_id, vec![source_job], processor),
             spec: self.artifact_spec(asset, kind, schema, alignment),
         })
+    }
+
+    /// Plans an import by selecting a registered plugin from extension/MIME metadata.
+    pub fn plan_from_registry(
+        &self,
+        registry: &crate::import::ImporterRegistry,
+        asset: AssetId,
+        job_id: JobId,
+        source_job: JobId,
+        selector: &crate::import::ImportSelector,
+        kind: u128,
+        schema: u32,
+        alignment: u32,
+    ) -> Result<ImportPlan, ImportRecipeError> {
+        let importer = registry.select(selector)?;
+        if self.importer_id != importer.identity().id
+            || self.importer_version != importer.identity().version
+        {
+            return Err(ImportRecipeError::ProcessorIdentityMismatch {
+                recipe_id: self.importer_id,
+                recipe_version: self.importer_version,
+                processor_id: importer.identity().id,
+                processor_version: importer.identity().version,
+            });
+        }
+        Ok(ImportPlan {
+            job: BuildJob::new(job_id, vec![source_job], importer),
+            spec: self.artifact_spec(asset, kind, schema, alignment),
+        })
+    }
+
+    /// Returns a recipe whose profile hash covers exactly the selected fields.
+    pub fn with_profile_dependencies<I, S>(
+        mut self,
+        profile: &EffectiveProfile,
+        fields: I,
+    ) -> Result<Self, ProfileError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.profile_hash = profile.project(fields)?.hash();
+        Ok(self)
+    }
+
+    /// Returns a recipe whose profile hash covers a registered importer's fields.
+    pub fn with_importer_profile(
+        self,
+        profile: &EffectiveProfile,
+        importer: &crate::import::ImporterDescriptor,
+    ) -> Result<Self, ProfileError> {
+        self.with_profile_dependencies(profile, importer.profile_fields().iter())
     }
 
     /// Derives a recipe key using a neutral output contract.
@@ -266,5 +358,58 @@ mod tests {
                 processor_version: TestProcessor::IMPORTER_VERSION,
             })
         ));
+    }
+
+    #[test]
+    fn registry_plan_binds_selected_processor_and_profile_dependencies() {
+        let registry = crate::import::ImporterRegistry::with_builtin().unwrap();
+        let schema = crate::profile::ProfileSchema::new(
+            "test.profile",
+            1,
+            [(
+                "texture.semantic",
+                crate::profile::ProfileField::new(
+                    crate::profile::ProfileFieldType::String {
+                        min_bytes: 1,
+                        max_bytes: 16,
+                        allowed_values: None,
+                    },
+                    crate::profile::ProfileMergePolicy::ScalarOverride,
+                ),
+            )],
+        )
+        .unwrap();
+        let mut layer =
+            crate::profile::ProfileLayerValues::new(crate::profile::ProfileLayer::EngineBaseline);
+        layer
+            .set(
+                "texture.semantic",
+                crate::profile::ProfileValue::String("color".into()),
+            )
+            .unwrap();
+        let profile = schema.resolve(&[layer]).unwrap();
+        let mut recipe = recipe();
+        recipe.importer_id = crate::import::CanonicalPngProcessor::IMPORTER_ID;
+        recipe.importer_version = crate::import::CanonicalPngProcessor::IMPORTER_VERSION;
+        let recipe = recipe
+            .with_profile_dependencies(&profile, ["texture.semantic"])
+            .unwrap();
+        let plan = recipe
+            .plan_from_registry(
+                &registry,
+                AssetId(9),
+                JobId(10),
+                JobId(11),
+                &crate::import::ImportSelector::for_path("textures/hero.PNG", None),
+                crate::import::IMAGE_ARTIFACT_KIND,
+                2,
+                4,
+            )
+            .unwrap();
+        assert_eq!(plan.job.dependencies(), &[JobId(11)]);
+        assert_eq!(
+            plan.spec.profile_hash,
+            profile.project(["texture.semantic"]).unwrap().hash()
+        );
     }
 }
