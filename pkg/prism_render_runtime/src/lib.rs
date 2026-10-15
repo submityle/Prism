@@ -31,6 +31,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, MutexGuard};
 
 use prism_render_driver::{
@@ -106,6 +107,9 @@ pub struct RenderRuntime<I: Instance> {
     extent: Extent3d,
     /// The frames-in-flight bound and its outstanding completion tokens.
     pacer: Mutex<FramePacer<CompletionToken>>,
+    /// Submission values used by render resources for precise retirement.
+    submitted_value: AtomicU64,
+    completed_value: Arc<AtomicU64>,
     /// The window surface, once created.
     surface: Option<I::Surface>,
     /// The configuration the surface was last configured with, so an
@@ -157,6 +161,8 @@ impl<I: Instance> RenderRuntime<I> {
             queue,
             extent,
             pacer: Mutex::new(FramePacer::new(max_in_flight)),
+            submitted_value: AtomicU64::new(0),
+            completed_value: Arc::new(AtomicU64::new(0)),
             surface: None,
             surface_config: None,
         })
@@ -412,6 +418,24 @@ impl<I: Instance> RenderRuntime<I> {
         self.pacer().in_flight()
     }
 
+    /// Returns the value that the next successful submission will receive.
+    ///
+    /// The value is a planning hint for resources prepared before the frame
+    /// is submitted. It becomes valid only after [`Self::execute_tracked`]
+    /// succeeds.
+    #[must_use]
+    pub fn next_completion_value(&self) -> u64 {
+        self.submitted_value
+            .load(AtomicOrdering::Acquire)
+            .saturating_add(1)
+    }
+
+    /// Returns the greatest submission value whose completion callback ran.
+    #[must_use]
+    pub fn completed_value(&self) -> u64 {
+        self.completed_value.load(AtomicOrdering::Acquire)
+    }
+
     /// Compiles, realizes transients, records commands, and submits `graph`
     /// under the frames-in-flight bound.
     ///
@@ -429,6 +453,14 @@ impl<I: Instance> RenderRuntime<I> {
     where
         I::Queue: FrameSync,
     {
+        self.execute_tracked(graph).map(|_| ())
+    }
+
+    /// Executes and submits `graph`, returning its precise completion value.
+    pub fn execute_tracked(&self, graph: RenderGraph) -> Result<u64, CompileError>
+    where
+        I::Queue: FrameSync,
+    {
         // Record the graph into a command buffer without submitting it, so the
         // pacer can own the actual submission and receive its completion token.
         let capture = capture::CapturingQueue::new(&self.queue);
@@ -441,9 +473,17 @@ impl<I: Instance> RenderRuntime<I> {
             let _ = self.queue.wait_for(oldest.as_ref());
         }
 
+        let value = self
+            .submitted_value
+            .fetch_add(1, AtomicOrdering::AcqRel)
+            .saturating_add(1);
         let token = self.queue.submit_tracked(&commands);
         self.pacer().record(token);
-        Ok(())
+        let completed = Arc::clone(&self.completed_value);
+        self.queue.on_submitted_work_done(Box::new(move || {
+            completed.fetch_max(value, AtomicOrdering::Release);
+        }));
+        Ok(value)
     }
 
     /// Blocks until every outstanding frame has completed, leaving the pacer

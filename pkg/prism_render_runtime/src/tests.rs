@@ -84,6 +84,69 @@ fn surface_present_loop_runs_headless_on_the_null_backend() {
 }
 
 #[test]
+fn tracked_submission_exposes_monotonic_completion_values() {
+    let rt = RenderRuntime::headless(NullInstance::new(), rhi::Extent3d::new_2d(SIZE, SIZE))
+        .expect("the null device always comes up");
+    let texture = rt.device().create_texture(&rhi::TextureDescriptor::new_2d(
+        rhi::Extent3d::new_2d(SIZE, SIZE),
+        rhi::TextureFormat::Rgba8Unorm,
+        TextureUsages::RENDER_ATTACHMENT,
+    ));
+    let view = rt
+        .device()
+        .create_texture_view(texture, &rhi::TextureViewDescriptor::default());
+
+    let mut graph = rt.new_graph();
+    let target = graph.import_texture(
+        "tracked-target",
+        TextureDesc::color(rhi::TextureFormat::Rgba8Unorm),
+        ImportedTexture {
+            texture,
+            default_view: view,
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::initial(),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+    graph.add_raster_pass("tracked-clear", PassFlags::SIDE_EFFECT, |b| {
+        let _ = b.color_attachment(target);
+        |_ctx| {}
+    });
+
+    let first = rt
+        .execute_tracked(graph)
+        .expect("the tracked graph executes");
+    assert_eq!(first, 1);
+    assert_eq!(rt.completed_value(), first, "null completion is immediate");
+
+    let mut next = rt.new_graph();
+    let target = next.import_texture(
+        "tracked-target-2",
+        TextureDesc::color(rhi::TextureFormat::Rgba8Unorm),
+        ImportedTexture {
+            texture,
+            default_view: view,
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::initial(),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+    next.add_raster_pass("tracked-clear-2", PassFlags::SIDE_EFFECT, |b| {
+        let _ = b.color_attachment(target);
+        |_ctx| {}
+    });
+    let second = rt.execute_tracked(next).expect("the second graph executes");
+    assert_eq!(second, 2);
+    assert_eq!(rt.completed_value(), second);
+
+    rt.wait_idle();
+    rt.device().destroy_texture_view(view);
+    rt.device().destroy_texture(texture);
+}
+
+#[test]
 fn discarding_a_frame_reclaims_its_image_ids() {
     let mut rt = RenderRuntime::headless(NullInstance::new(), rhi::Extent3d::new_2d(SIZE, SIZE))
         .expect("the null device always comes up");

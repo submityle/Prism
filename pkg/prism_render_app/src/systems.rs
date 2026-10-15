@@ -126,8 +126,8 @@ pub(crate) fn execute_frame<I>(
     let graph = frame::target_graph(&target, &queues, &functions);
     let passes = graph.pass_count() as u64;
     let draws = queues.len() as u64;
-    match runtime.execute(graph) {
-        Ok(()) => {
+    match runtime.execute_tracked(graph) {
+        Ok(_) => {
             stats.frames_submitted += 1;
             stats.passes_declared += passes;
             stats.draws_recorded += draws;
