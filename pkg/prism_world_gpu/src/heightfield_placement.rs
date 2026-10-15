@@ -383,6 +383,12 @@ impl GpuHeightfieldPlacement {
             [self.capacity, self.max_brushes, self.max_surface_samples],
             self.max_groups,
         )?;
+        let next_generation =
+            self.request_generation
+                .checked_add(1)
+                .ok_or(GpuHeightfieldPlacementError::Gpu(
+                    GpuScatterError::ArithmeticOverflow,
+                ))?;
         let old = self.request.as_ref();
         if old.is_none_or(|r| r.source != next.source) {
             self.queue
@@ -420,7 +426,7 @@ impl GpuHeightfieldPlacement {
             }
         }
         self.request = Some(next);
-        self.request_generation = self.request_generation.wrapping_add(1).max(1);
+        self.request_generation = next_generation;
         Ok(())
     }
 

@@ -590,10 +590,22 @@ fn validate_capacity(
         limits.max_storage_buffer_binding_size,
     )?;
     gpu_check(
+        "max_storage_buffer_binding_size",
+        16,
+        limits.max_storage_buffer_binding_size,
+    )?;
+    gpu_check(
         "max_buffer_size",
         KEY_BYTES * u64::from(d.max(1)),
         limits.max_buffer_size,
     )?;
+    gpu_check(
+        "max_buffer_size",
+        4 * u64::from(c.max(1)),
+        limits.max_buffer_size,
+    )?;
+    gpu_check("max_buffer_size", PARAM_BYTES, limits.max_buffer_size)?;
+    gpu_check("max_buffer_size", 16, limits.max_buffer_size)?;
     gpu_check(
         "max_uniform_buffer_binding_size",
         PARAM_BYTES,

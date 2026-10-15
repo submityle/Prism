@@ -63,7 +63,7 @@ fn surface() -> PlanarHeightfieldSurface {
     PlanarHeightfieldSurface::new(
         Arc::new(tile),
         PlanarHeightfieldEmbedding {
-            sample_origin_mm: [0, 0, 0],
+            sample_origin_mm: [-3_000, 0, -3_000],
             sample_spacing_mm: 1_000,
         },
     )
@@ -100,7 +100,7 @@ fn config() -> HeightfieldPlacementConfig {
 }
 
 fn region() -> HeightfieldPlacementRegion {
-    HeightfieldPlacementRegion::new([0, 0], [3_000, 3_000]).unwrap()
+    HeightfieldPlacementRegion::new([-3_000, -3_000], [0, 0]).unwrap()
 }
 
 fn filters() -> HeightfieldPlacementFilters {
@@ -232,7 +232,11 @@ fn submit_read(
         4 * n as u64,
     );
     context.queue().submit([encoder.finish()]);
-    keys_from_compact(&read(context, &output), n, c)
+    let bytes = read(context, &output);
+    let all = words(&bytes);
+    assert_eq!(all[0], 3);
+    assert_eq!(&all[2..4], &[0, 0]);
+    keys_from_compact(&bytes, n, c)
 }
 
 #[test]
@@ -247,8 +251,9 @@ fn physical_gpu_filters_exact_full_placement_keys_and_preserves_upstream_records
     let cpu = scatter_on_heightfield(c, r, &f, &s, selection, cpu_budget).unwrap();
     assert!(cpu.points.len() > 2);
     let deletion_key = cpu.points[0].key;
+    let absent_key = placement_key(c, 99, 99);
     let one_deleted = HeightfieldPlacementDeletionSet::new(
-        vec![deletion_key, deletion_key],
+        vec![deletion_key, deletion_key, absent_key],
         HeightfieldPlacementDeletionBudget {
             max_keys: n,
             max_key_bytes: n * std::mem::size_of::<HeightfieldPlacementKey>(),
