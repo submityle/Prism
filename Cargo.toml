@@ -89,6 +89,9 @@ members = [
   "pkg/prism_world_network",
   "pkg/prism_world_sim",
   "pkg/prism_world_terrain",
+  # Engine-neutral frame coordinator connecting stream policy to cell providers
+  # and the scene host boundary.
+  "pkg/prism_world_runtime",
   "pkg/prism_state_tree_core",
   "pkg/prism_state_tree_ecs",
   "pkg/prism_state_tree_gpu",

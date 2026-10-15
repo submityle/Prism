@@ -187,10 +187,20 @@ mod tests {
         );
         assert_eq!(
             grid.mark_dirty_region([-1, -1, -1], [2, 1, 1], 0).unwrap(),
-            12
+            20
         );
-        assert_eq!(grid.take_dirty().len(), 12);
+        assert_eq!(grid.take_dirty().len(), 20);
         assert_eq!(grid.dirty_count(), 0);
+        assert_eq!(
+            grid.min_max(BrickCoord::new(-1, 0, 0, 0)).unwrap(),
+            Some((-7, 0))
+        );
+        assert_eq!(
+            grid.region_min_max([-2, 0, 0], [3, 1, 1], 0).unwrap(),
+            Some((-7, 2))
+        );
+        assert!(grid.remove_brick(BrickCoord::new(1, 0, 0, 0)).unwrap());
+        assert_eq!(grid.take_dirty(), vec![BrickCoord::new(0, 0, 0, 1)]);
     }
 
     #[test]

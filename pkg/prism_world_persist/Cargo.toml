@@ -12,3 +12,7 @@ std = []
 
 [lib]
 path = "src/lib.rs"
+
+[[bench]]
+name = "crdt_codec"
+harness = false

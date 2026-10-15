@@ -127,7 +127,11 @@ impl SparseSdfBrickGrid {
     /// Removes an allocated brick and returns whether one existed.
     pub fn remove_brick(&mut self, coord: BrickCoord) -> Result<bool, SdfError> {
         self.validate_mip(coord.mip)?;
-        Ok(self.bricks.remove(&coord).is_some())
+        let removed = self.bricks.remove(&coord).is_some();
+        if removed {
+            self.mark_parent_mips(coord);
+        }
+        Ok(removed)
     }
 
     /// Samples the nearest voxel at an integer world-voxel coordinate.
@@ -182,13 +186,93 @@ impl SparseSdfBrickGrid {
         for z in min[2]..=max[2] {
             for y in min[1]..=max[1] {
                 for x in min[0]..=max[0] {
-                    if self.dirty.insert(BrickCoord::new(x, y, z, mip)) {
-                        added += 1;
-                    }
+                    added += self.mark_dirty_with_parents(BrickCoord::new(x, y, z, mip));
                 }
             }
         }
         Ok(added)
+    }
+
+    /// Returns the exact quantized minimum and maximum stored in one brick.
+    ///
+    /// The result is conservative for culling and broad-phase queries because
+    /// it never excludes a stored sample. An unallocated brick has no bounds.
+    pub fn min_max(&self, coord: BrickCoord) -> Result<Option<(i16, i16)>, SdfError> {
+        self.validate_mip(coord.mip)?;
+        let Some(brick) = self.bricks.get(&coord) else {
+            return Ok(None);
+        };
+        let mut samples = brick.samples.iter().copied();
+        let Some(first) = samples.next() else {
+            return Ok(None);
+        };
+        let mut min = first;
+        let mut max = first;
+        for sample in samples {
+            min = min.min(sample);
+            max = max.max(sample);
+        }
+        Ok(Some((min, max)))
+    }
+
+    /// Returns conservative bounds over all allocated bricks intersecting a
+    /// voxel region at one mip.
+    ///
+    /// Missing bricks are ignored; callers must treat `None` as unknown rather
+    /// than as an empty field. The query scans only allocated brick keys and
+    /// therefore remains deterministic, at the cost of a sparse-map walk.
+    pub fn region_min_max(
+        &self,
+        min_voxel: [i32; 3],
+        max_voxel: [i32; 3],
+        mip: u8,
+    ) -> Result<Option<(i16, i16)>, SdfError> {
+        self.validate_mip(mip)?;
+        if min_voxel[0] > max_voxel[0] || min_voxel[1] > max_voxel[1] || min_voxel[2] > max_voxel[2]
+        {
+            return Err(SdfError::InvalidRegion);
+        }
+        let size = i32::from(self.brick_size);
+        let min = [
+            floor_div(min_voxel[0], size),
+            floor_div(min_voxel[1], size),
+            floor_div(min_voxel[2], size),
+        ];
+        let max = [
+            floor_div(max_voxel[0], size),
+            floor_div(max_voxel[1], size),
+            floor_div(max_voxel[2], size),
+        ];
+        let mut result: Option<(i16, i16)> = None;
+        for (coord, brick) in &self.bricks {
+            if coord.mip != mip
+                || coord.x < min[0]
+                || coord.x > max[0]
+                || coord.y < min[1]
+                || coord.y > max[1]
+                || coord.z < min[2]
+                || coord.z > max[2]
+            {
+                continue;
+            }
+            let mut samples = brick.samples.iter().copied();
+            let Some(first) = samples.next() else {
+                continue;
+            };
+            let mut local_min = first;
+            let mut local_max = first;
+            for sample in samples {
+                local_min = local_min.min(sample);
+                local_max = local_max.max(sample);
+            }
+            result = Some(match result {
+                Some((current_min, current_max)) => {
+                    (current_min.min(local_min), current_max.max(local_max))
+                }
+                None => (local_min, local_max),
+            });
+        }
+        Ok(result)
     }
 
     /// Returns dirty coordinates in deterministic order and clears the set.
@@ -231,6 +315,42 @@ impl SparseSdfBrickGrid {
             Err(SdfError::InvalidMip)
         } else {
             Ok(())
+        }
+    }
+
+    fn mark_dirty_with_parents(&mut self, coord: BrickCoord) -> usize {
+        let mut added = 0;
+        let mut current = coord;
+        loop {
+            if self.dirty.insert(current) {
+                added += 1;
+            }
+            if current.mip + 1 >= self.mip_levels {
+                break;
+            }
+            current = BrickCoord::new(
+                floor_div(current.x, 2),
+                floor_div(current.y, 2),
+                floor_div(current.z, 2),
+                current.mip + 1,
+            );
+        }
+        added
+    }
+
+    fn mark_parent_mips(&mut self, coord: BrickCoord) {
+        if coord.mip + 1 >= self.mip_levels {
+            return;
+        }
+        let mut current = coord;
+        while current.mip + 1 < self.mip_levels {
+            current = BrickCoord::new(
+                floor_div(current.x, 2),
+                floor_div(current.y, 2),
+                floor_div(current.z, 2),
+                current.mip + 1,
+            );
+            self.dirty.insert(current);
         }
     }
 }

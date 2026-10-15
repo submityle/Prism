@@ -5,3 +5,7 @@ edition = "2024"
 description = "Deterministic no_std world residency, HLOD, QoS, sparse SDF, and PCG primitives for Prism."
 license = "MIT OR Apache-2.0"
 publish = false
+
+[[bench]]
+name = "residency_schedule"
+harness = false

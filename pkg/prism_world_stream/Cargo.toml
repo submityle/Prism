@@ -9,5 +9,9 @@ publish = false
 [features]
 default = []
 
+[[bench]]
+name = "demand_solve"
+harness = false
+
 [lints]
 workspace = true
