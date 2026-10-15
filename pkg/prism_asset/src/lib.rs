@@ -128,11 +128,13 @@ pub use storage::Assets;
 pub use stores::{AssetStores, ErasedAssetStore, StoreError};
 #[cfg(feature = "std")]
 pub use streaming::{
-    AsyncStreamIoExecutor, AsyncStreamTask, BudgetKind, Hysteresis, PageAdmissionError, PageBudget,
-    PageBudgetError, PageFailure, PageId, PageKey, PageLoadError, PageRangeError, PageRequestError,
-    PageResidency, PageSize, PageSizeError, PageState, PageTransitionError, PageUsage, Residency,
-    ResidencyLimits, StreamError, StreamFailure, StreamIoError, StreamIoExecutor, StreamRequest,
-    StreamRequestId, StreamState, StreamingController, SubmitAndExecuteError, SubmitError,
+    AsyncStreamIoExecutor, AsyncStreamTask, BudgetKind, FeedbackAdmission, FeedbackDemand,
+    FeedbackDemandQueue, FeedbackDemandStats, FeedbackPush, Hysteresis, PageAdmissionError,
+    PageBudget, PageBudgetError, PageFailure, PageId, PageKey, PageLoadError, PageRangeError,
+    PageRequestError, PageResidency, PageSize, PageSizeError, PageState, PageTransitionError,
+    PageUsage, Residency, ResidencyLimits, StreamError, StreamFailure, StreamIoError,
+    StreamIoExecutor, StreamRequest, StreamRequestId, StreamState, StreamingController,
+    SubmitAndExecuteError, SubmitError,
 };
 pub use type_id::AssetTypeId;
 #[cfg(feature = "std")]

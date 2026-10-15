@@ -17,10 +17,14 @@ use core::fmt;
 use prism_tasks::Priority;
 
 mod async_io;
+mod demand;
 mod io;
 mod page_residency;
 
 pub use async_io::{AsyncStreamIoExecutor, AsyncStreamTask};
+pub use demand::{
+    FeedbackAdmission, FeedbackDemand, FeedbackDemandQueue, FeedbackDemandStats, FeedbackPush,
+};
 pub use io::{StreamIoError, StreamIoExecutor, SubmitAndExecuteError};
 pub use page_residency::{
     PageAdmissionError, PageBudget, PageBudgetError, PageFailure, PageId, PageKey, PageLoadError,
