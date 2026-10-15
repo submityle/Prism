@@ -7,7 +7,8 @@ use core::sync::atomic::AtomicBool;
 use prism_asset::{AssetSources, MemSource, PageBudget, PageKey, PageResidency, PageSize};
 use prism_render_architecture::gpu_scene::GpuCompletionValue;
 use prism_render_driver::{
-    BufferUsages, DeviceDescriptor, Instance, RenderQueue, RequestAdapterOptions,
+    BufferUsages, CommandEncoder, DeviceDescriptor, FrameSync, Instance, RenderQueue,
+    RequestAdapterOptions,
 };
 use prism_render_driver_null::{NullDevice, NullInstance, NullQueue};
 
@@ -613,15 +614,34 @@ fn null_rhi_rejects_stale_and_non_contiguous_allocations() {
 /// than a claim that the null backend proved hardware visibility.
 #[test]
 fn gpu_fixed_page_pool_upload_and_replace_are_readable() {
-    use prism_render_driver_wgpu::WgpuInstance;
+    use prism_render_driver_wgpu::{require_hardware_gpu, WgpuInstance};
 
-    let Some((device, queue)) = WgpuInstance::new().request_default_device().ok() else {
-        assert!(
-            std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
-            "PRISM_REQUIRE_GPU is set but no adapter was found"
-        );
-        return;
+    let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
+        Ok(pair) => pair,
+        Err(prism_render_driver_wgpu::HardwareDeviceError::NoAdapter) => {
+            assert!(
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 but no wgpu adapter was found"
+            );
+            eprintln!("SKIPPED fixed-page REAL HARDWARE GPU test: no adapter");
+            return;
+        }
+        Err(prism_render_driver_wgpu::HardwareDeviceError::NonHardware(evidence)) => {
+            assert!(
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
+            );
+            eprintln!("SOFTWARE/VIRTUAL adapter; skipped physical-GPU evidence: {evidence}");
+            return;
+        }
+        Err(prism_render_driver_wgpu::HardwareDeviceError::Device(error)) => {
+            panic!("physical GPU adapter was found but device creation failed: {error}");
+        }
     };
+    eprintln!(
+        "fixed-page REAL HARDWARE GPU: {:?}",
+        device.wgpu_adapter().get_info()
+    );
 
     let mut budget = GpuPrepareBudget::new(64);
     let cancellation = AtomicBool::new(false);
@@ -668,6 +688,99 @@ fn gpu_fixed_page_pool_upload_and_replace_are_readable() {
         .begin_release(second, 13)
         .expect("replacement is resident");
     release.commit().expect("release replacement");
+    pool.destroy(&device);
+}
+
+/// The deferred page state is retired by the same real queue completion token
+/// that ordered the upload. A bookkeeping value alone must not make the old
+/// range reusable before the native submission has completed.
+#[test]
+fn gpu_queue_completion_proves_deferred_page_reclaim() {
+    use prism_render_driver_wgpu::{require_hardware_gpu, WgpuInstance};
+
+    let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
+        Ok(pair) => pair,
+        Err(prism_render_driver_wgpu::HardwareDeviceError::NoAdapter) => {
+            assert!(
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 but no wgpu adapter was found"
+            );
+            eprintln!("SKIPPED page reclaim REAL HARDWARE GPU test: no adapter");
+            return;
+        }
+        Err(prism_render_driver_wgpu::HardwareDeviceError::NonHardware(evidence)) => {
+            assert!(
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
+            );
+            eprintln!("SOFTWARE/VIRTUAL adapter; skipped physical-GPU evidence: {evidence}");
+            return;
+        }
+        Err(prism_render_driver_wgpu::HardwareDeviceError::Device(error)) => {
+            panic!("physical GPU adapter was found but device creation failed: {error}");
+        }
+    };
+
+    let mut budget = GpuPrepareBudget::new(64);
+    let cancellation = AtomicBool::new(false);
+    let mut context = PrepareContext::new(&device, &queue, &mut budget, &cancellation);
+    let mut pool = FixedPagePool::new(
+        &mut context,
+        &FixedPagePoolDescriptor::new(16, 2, BufferUsages::COPY_DST | BufferUsages::COPY_SRC),
+    )
+    .expect("the real device accepts the fixed-page buffer");
+    context.commit();
+
+    let first = {
+        let mut upload = pool
+            .begin_upload(FixedPageUpload::new(1, &[1; 16]))
+            .expect("the first page fits");
+        let allocation = upload.allocation();
+        upload.upload(&queue).expect("first upload is accepted");
+        upload.commit().expect("first upload publishes");
+        allocation
+    };
+    let replacement = {
+        let mut upload = pool
+            .begin_replace(first, FixedPageUpload::new(2, &[2; 16]))
+            .expect("the second page stages the replacement");
+        let allocation = upload.allocation();
+        upload
+            .upload(&queue)
+            .expect("replacement upload is accepted");
+        upload
+            .commit_deferred(GpuCompletionValue(1))
+            .expect("replacement publishes with deferred reclaim");
+        allocation
+    };
+    assert_eq!(pool.pending_reclaim_page_count(), 1);
+    assert!(
+        pool.begin_upload(FixedPageUpload::new(3, &[3; 16]))
+            .is_err(),
+        "the retired page is not reusable before completion proof"
+    );
+    assert!(pool
+        .reclaim_completed(GpuCompletionValue(0))
+        .expect("incomplete proof is valid")
+        .is_empty());
+
+    let token = queue.submit_tracked(&[CommandEncoder::new().finish()]);
+    assert!(
+        queue.wait_for_submission(&token),
+        "native queue completion is confirmed"
+    );
+    assert_eq!(
+        pool.reclaim_completed(GpuCompletionValue(1))
+            .expect("completion proof reclaims the retired page")
+            .len(),
+        1
+    );
+    let reused = pool
+        .begin_upload(FixedPageUpload::new(3, &[3; 16]))
+        .expect("the page becomes reusable only after completion");
+    assert_eq!(reused.allocation().first_page(), first.first_page());
+    assert_ne!(reused.allocation().token(), replacement.token());
+    drop(reused);
     pool.destroy(&device);
 }
 

@@ -36,6 +36,7 @@ use alloc::vec::Vec;
 use prism_ecs::component::ComponentId;
 use prism_ecs::resource::Resource;
 use prism_ecs::world::snapshot::SnapshotRing;
+use prism_ecs::world::snapshot::WorldSnapshot;
 use prism_ecs::world::World;
 
 /// A bounded, frame-numbered history of [`World`] snapshots.
@@ -179,6 +180,14 @@ impl SnapshotHistory {
     #[must_use]
     pub fn state_hash(&self, frame: u64) -> Option<u64> {
         self.ring.get(frame).map(|snapshot| snapshot.state_hash())
+    }
+
+    /// Reconstruct an owned snapshot for a retained frame. This is the
+    /// equality-grade inspection API for rollback tests and diagnostics;
+    /// [`state_hash`](Self::state_hash) remains only a bounded diagnostic.
+    #[must_use]
+    pub fn snapshot(&self, frame: u64) -> Option<WorldSnapshot> {
+        self.ring.get(frame)
     }
 }
 

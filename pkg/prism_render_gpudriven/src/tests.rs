@@ -8,7 +8,9 @@
 
 use prism_render_driver::{DeviceDescriptor, Instance as _, RenderQueue, RequestAdapterOptions};
 use prism_render_driver_null::NullInstance;
-use prism_render_driver_wgpu::{WgpuDevice, WgpuInstance, WgpuQueue};
+use prism_render_driver_wgpu::{
+    require_hardware_gpu, HardwareDeviceError, WgpuDevice, WgpuInstance, WgpuQueue,
+};
 
 use crate::camera::{FrameUniform, OrthoCamera};
 use crate::cull::{CullParams, CullStage};
@@ -36,14 +38,41 @@ const SCENE_RESOLUTION: u32 = 512;
 
 /// Brings up a device/queue pair, or `None` when no GPU is available.
 fn device_or_skip() -> Option<(WgpuDevice, WgpuQueue)> {
-    WgpuInstance::new().request_default_device().ok()
+    match WgpuInstance::new().request_default_hardware_device() {
+        Ok(pair) => {
+            eprintln!(
+                "GPU-driven REAL HARDWARE GPU: {:?}",
+                pair.0.wgpu_adapter().get_info()
+            );
+            Some(pair)
+        }
+        Err(HardwareDeviceError::NoAdapter) => {
+            assert!(
+                !require_gpu(),
+                "PRISM_REQUIRE_GPU=1 but no wgpu adapter was found"
+            );
+            eprintln!("SKIPPED GPU-driven REAL HARDWARE GPU test: no adapter");
+            None
+        }
+        Err(HardwareDeviceError::NonHardware(evidence)) => {
+            assert!(
+                !require_gpu(),
+                "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
+            );
+            eprintln!("SOFTWARE/VIRTUAL adapter; skipped physical-GPU evidence: {evidence}");
+            None
+        }
+        Err(HardwareDeviceError::Device(error)) => {
+            panic!("physical GPU adapter was found but device creation failed: {error}");
+        }
+    }
 }
 
 /// When `PRISM_REQUIRE_GPU` is set, a missing adapter fails the test instead of
 /// skipping it, so a run meant to exercise hardware cannot silently degrade
 /// into a no-op.
 fn require_gpu() -> bool {
-    std::env::var_os("PRISM_REQUIRE_GPU").is_some()
+    require_hardware_gpu()
 }
 
 /// The default lattice must exercise both outcomes: some instances inside the

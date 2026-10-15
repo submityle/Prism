@@ -10,7 +10,9 @@ use prism_ecs::schedule::{IntoSystemConfigs, Schedules};
 use prism_ecs::system::ResMut;
 use prism_ecs::world::World;
 use prism_render_driver::{BufferUsages, RenderDevice, RenderQueue};
-use prism_render_driver_wgpu::{WgpuDevice, WgpuInstance};
+use prism_render_driver_wgpu::{
+    require_hardware_gpu, HardwareDeviceError, WgpuDevice, WgpuInstance,
+};
 use prism_render_material::{GpuMaterialHeader, GpuMaterialTexture};
 use prism_render_runtime::RenderRuntime;
 use prism_render_visibility::GpuRenderWorkItem;
@@ -72,15 +74,34 @@ fn wait_for_callback(world: &World) {
 }
 
 fn gpu_available() -> bool {
-    let extent = prism_render_driver::Extent3d::new_2d(SIZE, SIZE);
-    if RenderRuntime::<WgpuInstance>::wgpu(extent).is_ok() {
-        true
-    } else {
-        assert!(
-            std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
-            "PRISM_REQUIRE_GPU is set but no adapter was found"
-        );
-        false
+    match WgpuInstance::new().request_default_hardware_device() {
+        Ok((device, _queue)) => {
+            eprintln!(
+                "GPU recovery REAL HARDWARE GPU: {:?}",
+                device.wgpu_adapter().get_info()
+            );
+            true
+        }
+        Err(HardwareDeviceError::NoAdapter) => {
+            assert!(
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 but no wgpu adapter was found"
+            );
+            false
+        }
+        Err(HardwareDeviceError::NonHardware(evidence)) => {
+            assert!(
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
+            );
+            eprintln!(
+                "SOFTWARE/VIRTUAL adapter; skipped physical-GPU recovery evidence: {evidence}"
+            );
+            false
+        }
+        Err(HardwareDeviceError::Device(error)) => {
+            panic!("physical GPU adapter was found but device creation failed: {error}");
+        }
     }
 }
 

@@ -15,7 +15,9 @@ use prism_render_driver::{
     RenderDevice, RenderQueue, RequestAdapterOptions,
 };
 use prism_render_driver_null::{NullDevice, NullInstance};
-use prism_render_driver_wgpu::{WgpuDevice, WgpuInstance, WgpuQueue};
+use prism_render_driver_wgpu::{
+    require_hardware_gpu, HardwareDeviceError, WgpuDevice, WgpuInstance, WgpuQueue,
+};
 
 // A physical chunk holds 32 of these, but only 16 alongside Extra. Every lane
 // varies so stride, row order, chunk gaps, and tail corruption are observable.
@@ -59,21 +61,32 @@ struct Compact([u32; 3]);
 impl Component for Compact {}
 
 fn gpu() -> Option<(Arc<WgpuDevice>, WgpuQueue)> {
-    match WgpuInstance::new().request_default_device() {
+    match WgpuInstance::new().request_default_hardware_device() {
         Ok((device, queue)) => {
             eprintln!(
-                "resident-column GPU: {:?}",
+                "resident-column REAL HARDWARE GPU: {:?}",
                 device.wgpu_adapter().get_info()
             );
             Some((Arc::new(device), queue))
         }
-        Err(error) => {
+        Err(HardwareDeviceError::NoAdapter) => {
             assert!(
-                std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
-                "required GPU: {error}"
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 but no wgpu adapter was found"
             );
-            eprintln!("SKIPPED resident-column GPU test: {error}");
+            eprintln!("SKIPPED resident-column REAL HARDWARE GPU test: no adapter");
             None
+        }
+        Err(HardwareDeviceError::NonHardware(evidence)) => {
+            assert!(
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
+            );
+            eprintln!("SOFTWARE/VIRTUAL adapter; skipped physical-GPU evidence: {evidence}");
+            None
+        }
+        Err(HardwareDeviceError::Device(error)) => {
+            panic!("physical GPU adapter was found but device creation failed: {error}");
         }
     }
 }

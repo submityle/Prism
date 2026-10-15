@@ -39,9 +39,9 @@ use prism_window_winit::{FrameOutcome, WindowConfig, WinitBackend, WinitRunner a
 
 use crate::app::App;
 use crate::exit::{AppExit, AppExitRequest};
-use crate::lifecycle::{
-    FocusChanged, LowMemory, Resumed, SuspendResumeAdapter, Suspended, WillRenderFirstFrame,
-};
+use crate::lifecycle::{FocusChanged, LowMemory, SuspendResumeAdapter, WillRenderFirstFrame};
+#[cfg(test)]
+use crate::lifecycle::{Resumed, Suspended};
 use crate::pacing::{FrameLimit, FramePacer};
 
 /// An action the windowed runner derives from a frame's window events.

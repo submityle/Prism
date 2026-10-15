@@ -56,27 +56,26 @@ adapter was found`。因此默认通过不等于真实 GPU 已验收。
 resident-column gate：
 
 ```text
-CARGO_TARGET_DIR=/private/tmp/prism-render-gpu-target \
+CARGO_TARGET_DIR=/private/tmp/prism-render-validation \
 CARGO_BUILD_JOBS=1 \
-cargo test -p prism_render_app --test ecs_columns \
+cargo test --locked -p prism_render_app --all-features --test ecs_columns \
   -- --test-threads=1 --nocapture
 ```
 
-本次受限环境结果：`16 passed, 0 failed`，其中 11 个真实 GPU 测试因没有 adapter
-明确 skip。
+本机允许访问 Apple M2/Metal adapter 时结果为：`16 passed, 0 failed, 0 ignored`。
 
 强制门禁：
 
 ```text
 PRISM_REQUIRE_GPU=1 \
-CARGO_TARGET_DIR=/private/tmp/prism-render-gpu-target \
+CARGO_TARGET_DIR=/private/tmp/prism-render-validation \
 CARGO_BUILD_JOBS=1 \
-cargo test -p prism_render_app --test ecs_columns \
+cargo test --locked -p prism_render_app --all-features --test ecs_columns \
   -- --test-threads=1 --nocapture
 ```
 
-同一无 adapter 环境结果：`5 passed, 11 failed`；失败均为上述 required-GPU 错误，
-不是 silent pass。允许访问本机图形设备后，本次真实 adapter 为：
+没有物理 adapter 时该命令会因 required-GPU 错误失败，不会 silent pass。本次真实
+adapter 为：
 
 ```text
 name: Apple M2
@@ -99,31 +98,59 @@ retained consumer/readback、12-byte compact layout 和 buffer release。
 ```text
 CARGO_TARGET_DIR=/private/tmp/prism-app-acceptance \
 CARGO_BUILD_JOBS=1 \
-cargo test -p prism_app --lib
+cargo test --locked -p prism_app --all-features --lib
 ```
 
-结果：`343 passed, 0 failed`。
+结果：`477 passed, 0 failed, 0 ignored`。
 
 ### RenderApp 软件/null 路径
 
 ```text
 CARGO_TARGET_DIR=/private/tmp/prism-render-app-acceptance \
 CARGO_BUILD_JOBS=1 \
-cargo test -p prism_render_app --lib
+cargo test --locked -p prism_render_app --all-features --lib
 ```
 
-结果：`228 passed, 0 failed, 0 ignored`。该命令默认允许硬件门禁在没有 adapter 时返回，因此不能单独证明真实 GPU 路径。
+结果：`230 passed, 0 failed, 1 ignored`。唯一 ignored 项是需要真实 OS
+window/compositor 的 `real_window_presentation_acceptance_entry`。
 
 ### RenderApp 强制真实 GPU 门禁
 
 ```text
 PRISM_REQUIRE_GPU=1 \
-CARGO_TARGET_DIR=/private/tmp/prism-render-app-acceptance \
+CARGO_TARGET_DIR=/private/tmp/prism-render-validation \
 CARGO_BUILD_JOBS=1 \
-cargo test -p prism_render_app --lib
+cargo test --locked -p prism_render_app --all-features --lib
 ```
 
-在沙盒内运行时，16 个硬件门禁因无法访问 adapter 而失败；这证明沙盒不能作为本机 GPU 验收环境。允许沙盒外访问本机图形设备后，Metal/wgpu 路径实际启动；修复 material buffer 首次分配的全容量初始化后，完整门禁结果为 `228 passed, 0 failed, 0 ignored`。其中 `recovery::hardware_tests::gpu_recovery_rebuilds_resources_and_restores_pixels` 已验证设备替换、材质 buffer 全容量字节、replay buffer、像素和新 device generation 均恢复。
+允许沙盒外访问本机图形设备后，Metal/wgpu 路径实际启动，结果为
+`230 passed, 0 failed, 1 ignored`。其中
+`recovery::hardware_tests::gpu_recovery_rebuilds_resources_and_restores_pixels`
+已验证设备替换、材质 buffer 全容量字节、replay buffer、像素和新 device generation
+均恢复。
+
+### WGPU backend 与 GPU-driven
+
+```text
+PRISM_REQUIRE_GPU=1 \
+CARGO_TARGET_DIR=/private/tmp/prism-render-validation \
+CARGO_BUILD_JOBS=1 \
+cargo test --locked -p prism_render_driver_wgpu --all-features
+```
+
+结果：库测试 `27 passed, 0 failed`，真实 GPU 集成测试 `5 passed, 0 failed`。
+adapter inventory 记录为 Apple M2 / IntegratedGpu / Metal；CPU、virtual 和未知
+adapter 不会被计入物理 GPU 证据。
+
+```text
+PRISM_REQUIRE_GPU=1 \
+CARGO_TARGET_DIR=/private/tmp/prism-render-validation \
+CARGO_BUILD_JOBS=1 \
+cargo test --locked -p prism_render_gpudriven --all-features
+```
+
+结果：`18 passed, 0 failed`；GPU culling、indirect draw、multi-draw、图像 parity
+和重复提交稳定性均通过。
 
 ### Headless runner parity
 
@@ -149,9 +176,23 @@ cargo bench -p prism_app --bench runtime_pipeline \
 
 ## 尚未闭环的缺口
 
+### GPU 证据边界
+
+GPU 验收测试统一使用 wgpu adapter gate：只有 `IntegratedGpu` 或 `DiscreteGpu`
+才会进入“真实硬件 GPU”切片。`Cpu`、`VirtualGpu`、`Other` 会打印 adapter
+名称、backend、device type、vendor/device、driver 并标记为
+`SOFTWARE/VIRTUAL` 或 unknown，不会被计入 GPU 通过；没有 adapter 时普通运行明确
+输出 `SKIPPED ... no adapter`。设置 `PRISM_REQUIRE_GPU=1` 后，缺少 adapter 或只
+发现非物理 adapter 都会使测试失败。
+
+null backend 只覆盖 resident columns、dirty upload、device replacement 的状态机和
+事务语义；software adapter 只可作为软件执行/生命周期证据。它们都不能证明物理
+GPU 执行，也不能推出 GPU 性能收益。wgpu readback 在提交、poll、map callback 成功
+后才读取映射范围；map 失败或 callback 缺失会显式失败，不再伪造成功。
+
 1. `real_window_presentation_acceptance_entry` 仍是 `#[ignore]`，需要真实 OS window 和 display compositor；本次没有伪造窗口验收。
 2. `runner_parity` 本次只运行 `--headless-only`，没有执行 Winit 窗口分支。
-3. 真实 Metal/wgpu 的普通绘制、材质、mesh、transform 与 device-loss recovery 已在本机门禁通过；仍缺真实移动设备、其他后端和长时间运行证据。
+3. 真实 Metal/wgpu 的普通绘制、材质、mesh、transform、GPU-driven 与 device-loss recovery 已在本机门禁通过；仍缺真实移动设备、其他后端和长时间运行证据。
 4. benchmark 没有跨机器、长时间、真实游戏场景、present latency、功耗或 GPU 帧时间门槛；不能据此声称“超过 UE”或达到固定 FPS。
 5. 全仓测试不作为本记录门禁；`prism_replication` 的 `security.rs` 重复导入问题由 Dalton 处理，本次未修改或绕过它。
 

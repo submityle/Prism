@@ -739,6 +739,14 @@ impl App {
         self
     }
 
+    /// Install a task pool with an explicit worker count. This keeps tests and
+    /// headless hosts from depending on the task-pool crate just to compare
+    /// serial and parallel schedule execution.
+    #[cfg(feature = "multi_thread")]
+    pub fn set_task_pool_threads(&mut self, threads: usize) -> &mut Self {
+        self.set_task_pool(prism_tasks::TaskPool::with_threads(threads))
+    }
+
     /// Install a [`ConfigHotReload`](crate::hot_reload::ConfigHotReload) watch
     /// on `path` (design §24.2). While installed, [`update`](App::update)
     /// re-reads the file once per frame and re-applies it through the

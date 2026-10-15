@@ -91,6 +91,12 @@ impl PageAllocation {
         self.buffer
     }
 
+    /// The pool-private generation token, exposed for lifecycle assertions.
+    #[must_use]
+    pub const fn token(self) -> u64 {
+        self.token
+    }
+
     /// The first page in the allocation.
     #[must_use]
     pub const fn first_page(self) -> u32 {
