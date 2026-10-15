@@ -56,6 +56,7 @@ pub mod coupling;
 pub mod coupling_frame;
 pub mod dispersion;
 pub mod fabric;
+pub use fabric::WaterFabricPlan;
 pub mod fft;
 pub mod flip;
 pub mod flip_sort;
