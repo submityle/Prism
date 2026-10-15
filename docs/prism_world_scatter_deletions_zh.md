@@ -2,7 +2,8 @@
 
 日期：2026-10-16。实现位于 `prism_world_residency::ScatterDeletionSet` 与
 `prism_world_runtime::ScatterDeletionBinding`；核心保持 `no_std + alloc`、无 unsafe。
-这是 CPU 源散布/作者场到既有 override 日志的接缝，不是完整产品散布验收。
+这是源散布/作者场到既有 override 日志的接缝，并提供地形结果过滤适配；不是完整产品散布验收。
+GPU完整键删除及最终compact/indirect消费见`prism_world_gpu_scatter_deletions_zh.md`。
 
 ## 身份、权威与恢复
 
@@ -83,6 +84,21 @@ key **只描述上游生成**；下游缓存必须同时比较 snapshot。即使
 相同，不同请求外删除键或不同作者绑定也不等价。比较是完整结构比较，不以摘要
 或 Arc 地址代替正确性。
 
+启用`prism_world_terrain/scatter`后，`filter_heightfield_scatter`接收已有
+`HeightfieldScatterOutput`，先拒绝points/attributes不对齐，再稳定原地压紧两列。
+返回`DeletionFilteredHeightfieldScatter { source, deletions, removed }`，保留完整
+地形/作者场/源cache key、上游工作计数和两列指针/容量；完整集合包括请求外和已被
+上游剔除的键，始终为额外cache依赖。它只删不投影/补点，不重新烘焙或验证手工
+构造的上游cache，不引入runtime/persist依赖。传入source按值消费，错误也不返回
+原对象；misalignment包括空删除和单列为空的情况。其O(P log(D+1))过滤不分配
+points/attributes，删除快照仅Arc clone；P为输入幸存行数。
+
+2026-10-16正常workspace、offline/locked、独立target验证：terrain no-default
+78项、no-default+scatter 109项全部通过，含新增16项删除wrapper测试，两配置
+all-target Clippy `-D warnings`通过。新增测试覆盖公开bake/生成链、完整缓存所有
+payload/version及请求外键、重新烘焙快照、分区/最小距离/位置、两列顺序与capacity、
+全部移除、空输入和误对齐；不据此声称mesh feature或全workspace当前通过。
+
 令 D 为删除数、N 为输入 points：
 
 - 构建最坏 O(D log D)，每键 rebuild；单次 membership O(log D)。
@@ -142,9 +158,10 @@ cargo bench --offline --locked -p prism_world_runtime --bench scatter_deletions 
 30、proxy_host 98 单测，在并行流送修改之前均 0 失败/忽略。全 feature 在最后三项
 回归加入之前曾有 115 项通过。随后默认/no-default 的 all-target 严格 lint 和完整
 示例也通过：51 个重生成点，删除/undo/redo 分别移除 1/0/1 点、3 条事务回放成功。
-最新默认及全 feature 测试、全 feature lint 重跑被其他并行流送修改阻断：
-`prism_world/src/lib.rs:126` 尚未匹配新增 `StreamAction::Reload`。上述较早结果
-是本切片已执行的证据，不扩大为当前整个脏工作区所有配置通过。
+随后曾被并行流送修改中尚未匹配的 `StreamAction::Reload` 阻断；该阻塞已修复。
+2026-10-16 使用同一独立 target、`--offline --locked -j1 --lib` 重跑，runtime
+默认 **79** 项及全 feature **119** 项全部通过，0 失败/忽略。较早的 feature/lint
+结果保留其历史范围，不扩大为当前整个脏工作区或所有配置通过。
 
 回归覆盖 full key 全字段、namespace、任意分区、距离不变、不补点、属性对齐、
 spare capacity、无操作 Arc clone、预算/布局溢出、所有截断前缀/尾随字节、
@@ -174,7 +191,7 @@ release 基准每项 8 预热 + 64 样本，nearest-rank P50/P95/P99 的 1-based
 
 ## 尚须独立交付
 
-GPU 删除过滤及最终 compact/indirect 消费、保留 heightfield 完整缓存依赖的专用
-wrapper、产品 scene/ECS/renderer 接线和逐键并发协议不在本切片中。源 GPU、
-作者场 GPU 与地形 GPU 的既有测试不能替代删除 pass 的设备与性能证据；这里的
-真实文件回放同样不是完整产品存档 UI 或网络会话验收。
+产品 scene/ECS/renderer 接线和逐键并发协议仍需独立交付。地形专用wrapper已按
+上文交付，GPU删除pass的独立设备与性能证据见`prism_world_gpu_scatter_deletions_zh.md`，
+不以既有源/作者场/地形测试替代。这里的真实文件回放同样不是完整产品存档UI或
+网络会话验收；GPU只消费CPU恢复的完整集合，不拥有第二份持久权威状态。

@@ -244,29 +244,13 @@ impl GpuScatterField {
         field: &ScatterDensityField,
         max_field_work: u64,
     ) -> Result<(), GpuScatterFieldError> {
-        self.source
-            .validate_request(config, region, max_candidate_evaluations)?;
-        if field.brushes().len() > self.max_brushes {
-            return Err(GpuScatterFieldError::BrushCapacityExceeded {
-                required: field.brushes().len(),
-                capacity: self.max_brushes,
-            });
-        }
-        let estimate = estimate_scatter_work(config, region).map_err(GpuScatterError::from)?;
-        let required = estimate
-            .primary_candidates
-            .checked_mul(field.work_per_sample())
-            .ok_or(ScatterFieldError::ArithmeticOverflow)?;
-        if required > max_field_work {
-            return Err(ScatterFieldError::WorkBudgetExceeded {
-                required,
-                limit: max_field_work,
-            }
-            .into());
-        }
-        let count = u32::try_from(estimate.primary_candidates)
-            .map_err(|_| GpuScatterError::ArithmeticOverflow)?;
-        let groups = dispatch(estimate.primary_candidates, self.max_groups)?;
+        let (count, groups) = self.preflight_request(
+            config,
+            region,
+            max_candidate_evaluations,
+            field,
+            max_field_work,
+        )?;
         let mut words = [0_u32; 32];
         let fc = field.config();
         words[0] = fc.seed as u32;
@@ -327,6 +311,61 @@ impl GpuScatterField {
         Ok(())
     }
 
+    /// Pure composite preflight for sibling stages; never uploads or mutates.
+    pub(super) fn validate_request(
+        &self,
+        config: ScatterConfig,
+        region: ScatterRegion,
+        max_candidate_evaluations: u64,
+        field: &ScatterDensityField,
+        max_field_work: u64,
+    ) -> Result<(), GpuScatterFieldError> {
+        self.preflight_request(
+            config,
+            region,
+            max_candidate_evaluations,
+            field,
+            max_field_work,
+        )?;
+        Ok(())
+    }
+
+    // Single pure admission path for validation and upload. Keep every
+    // recoverable check here, before either stage can enqueue a queue write.
+    fn preflight_request(
+        &self,
+        config: ScatterConfig,
+        region: ScatterRegion,
+        max_candidate_evaluations: u64,
+        field: &ScatterDensityField,
+        max_field_work: u64,
+    ) -> Result<(u32, [u32; 2]), GpuScatterFieldError> {
+        self.source
+            .validate_request(config, region, max_candidate_evaluations)?;
+        if field.brushes().len() > self.max_brushes {
+            return Err(GpuScatterFieldError::BrushCapacityExceeded {
+                required: field.brushes().len(),
+                capacity: self.max_brushes,
+            });
+        }
+        let estimate = estimate_scatter_work(config, region).map_err(GpuScatterError::from)?;
+        let required = estimate
+            .primary_candidates
+            .checked_mul(field.work_per_sample())
+            .ok_or(ScatterFieldError::ArithmeticOverflow)?;
+        if required > max_field_work {
+            return Err(ScatterFieldError::WorkBudgetExceeded {
+                required,
+                limit: max_field_work,
+            }
+            .into());
+        }
+        let count = u32::try_from(estimate.primary_candidates)
+            .map_err(|_| GpuScatterError::ArithmeticOverflow)?;
+        let groups = dispatch(estimate.primary_candidates, self.max_groups)?;
+        Ok((count, groups))
+    }
+
     /// Records source generation then field filtering/compaction. No owned
     /// resource allocation, upload, submit, wait, mapping or readback.
     pub fn encode(&self, encoder: &mut wgpu::CommandEncoder) -> Result<(), GpuScatterFieldError> {
@@ -379,6 +418,23 @@ impl GpuScatterField {
     /// Actual reusable host scratch payload capacity; excludes Vec metadata.
     pub fn brush_scratch_bytes(&self) -> usize {
         self.brush_scratch.capacity() * 64
+    }
+
+    /// Fixed primary source-slot capacity.
+    pub fn capacity(&self) -> usize {
+        self.source.capacity()
+    }
+
+    pub(super) fn device_identity(&self) -> &std::sync::Arc<()> {
+        self.source.device_identity()
+    }
+
+    pub(super) fn draw_args(&self) -> [u32; 3] {
+        self.source.draw_args()
+    }
+
+    pub(super) fn request_generation(&self) -> u64 {
+        self.source.request_generation()
     }
 }
 

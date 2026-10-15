@@ -62,6 +62,20 @@ mod scatter_field;
 #[cfg(feature = "gpu")]
 pub use scatter_field::{GpuScatterField, GpuScatterFieldError};
 
+#[cfg(feature = "gpu")]
+mod scatter_deletion;
+
+#[cfg(feature = "gpu")]
+pub use scatter_deletion::{
+    GpuScatterDeletionCacheKey, GpuScatterDeletionCapacity, GpuScatterDeletionError,
+    GpuScatterDeletionUploadStats, GpuScatterDeletionUpstream, GpuScatterDeletionWorkBudget,
+    GpuScatterDeletions, GpuScatterFieldRequest, GpuScatterSourceRequest,
+    GPU_SCATTER_DELETION_KEY_ABI_VERSION, GPU_SCATTER_DELETION_VERSION,
+};
+
+#[cfg(feature = "terrain_scatter")]
+pub use scatter_deletion::GpuScatterHeightfieldRequest;
+
 #[cfg(feature = "terrain_scatter")]
 mod scatter_heightfield;
 

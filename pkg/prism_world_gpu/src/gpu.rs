@@ -1,6 +1,9 @@
 //! Optional real-device `wgpu` implementation of the world visibility twin.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -86,11 +89,15 @@ pub struct GpuEvaluation {
 }
 
 /// Native `wgpu` instance, adapter, device, and queue kept alive together.
+/// Clones share the same logical device identity; independent acquisitions do
+/// not, even when backend-local resource IDs happen to compare equal.
+#[derive(Clone)]
 pub struct GpuContext {
     instance: Instance,
     adapter: Adapter,
     device: Device,
     queue: Queue,
+    device_identity: Arc<()>,
 }
 
 impl GpuContext {
@@ -138,6 +145,7 @@ impl GpuContext {
             adapter,
             device,
             queue,
+            device_identity: Arc::new(()),
         }))
     }
 
@@ -160,6 +168,12 @@ impl GpuContext {
     #[must_use]
     pub fn device(&self) -> &Device {
         &self.device
+    }
+
+    // Private, unforgeable identity shared only by clones and resources built
+    // from this context. Do not substitute wgpu handle Eq across Instances.
+    pub(crate) fn device_identity(&self) -> &Arc<()> {
+        &self.device_identity
     }
 
     /// Returns the native submission queue.

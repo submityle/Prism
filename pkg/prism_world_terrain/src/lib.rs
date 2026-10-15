@@ -21,6 +21,8 @@ mod planet_mesh;
 mod rebake;
 mod representation;
 #[cfg(feature = "scatter")]
+mod scatter_deletion;
+#[cfg(feature = "scatter")]
 mod scatter_filter;
 #[cfg(all(test, feature = "scatter"))]
 mod scatter_filter_tests;
@@ -54,6 +56,8 @@ pub use representation::{
     RepresentationQuery, RepresentationSpec, RepresentationWork, SdfSpec,
     TerrainRepresentationSelector, VoxelSpec,
 };
+#[cfg(feature = "scatter")]
+pub use scatter_deletion::{filter_heightfield_scatter, DeletionFilteredHeightfieldScatter};
 #[cfg(feature = "scatter")]
 pub use scatter_filter::{
     scatter_with_heightfield, HeightfieldScatterBudget, HeightfieldScatterCacheKey,

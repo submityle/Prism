@@ -90,6 +90,21 @@ not projection or refill: source keys, distances and XYZ partition membership
 are preserved. See `docs/prism_world_gpu_heightfield_scatter_zh.md` for exact
 budgets, upload/cache identity, lifecycle and physical-device evidence.
 
+`GpuScatterDeletions<U>` owns a sealed source, author-field or heightfield chain
+and removes full structural candidate keys after its final compact stream.
+It requires six storage bindings, adds
+`52*max(max_keys,1)+4*max(capacity,1)+144` logical GPU-buffer bytes and reusable
+52-byte/key packing scratch, and preflights the entire chain before uploading.
+The byte budget covers the owned upstream too. Context clones share a private
+logical-device token; independently acquired contexts cannot mix resources even
+when backend-local IDs compare equal. Source records and attributes remain
+unchanged: only the deletion compact/indirect express the final survivors.
+Production encode never uploads, submits, waits or reads back. Submit the current
+request before writing/encoding the next one; sequential submits need no host
+wait. Full keys and the entire upstream snapshot are cache dependencies, not
+hash identities. See `docs/prism_world_gpu_scatter_deletions_zh.md` for API,
+budgets, failure semantics, physical-device tests and bounded measurements.
+
 ## Verification
 
 CPU-only contract and packing tests:
@@ -109,6 +124,7 @@ cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test 
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test scatter_generation -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features gpu --test scatter_field -- --nocapture
 cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test scatter_heightfield -- --nocapture
+cargo test --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test scatter_deletion --test scatter_deletion_composed -- --nocapture
 ```
 
 The parity test is a strict real-device gate: missing adapter/device acquisition

@@ -108,8 +108,11 @@ impl From<ScatterError> for GpuScatterError {
 /// preserve the last uploaded request; device loss/OOM follow normal wgpu error
 /// handling and are not represented as recoverable preflight errors here.
 pub struct GpuScatter {
+    device_identity: std::sync::Arc<()>,
     queue: wgpu::Queue,
     capacity: usize,
+    vertex_count: u32,
+    request_generation: u64,
     allocated_bytes: u64,
     max_groups: u32,
     params: wgpu::Buffer,
@@ -203,8 +206,11 @@ impl GpuScatter {
             ],
         });
         Ok(Self {
+            device_identity: ctx.device_identity().clone(),
             queue: ctx.queue().clone(),
             capacity,
+            vertex_count,
+            request_generation: 0,
             allocated_bytes: bytes,
             max_groups: limits.max_compute_workgroups_per_dimension,
             params,
@@ -227,12 +233,13 @@ impl GpuScatter {
         region: ScatterRegion,
         max_candidate_evaluations: u64,
     ) -> Result<(), GpuScatterError> {
-        let request = prepare(
+        let (request, generation) = prepare_next(
             config,
             region,
             max_candidate_evaluations,
             self.capacity,
             self.max_groups,
+            self.request_generation,
         )?;
         if self
             .request
@@ -243,6 +250,7 @@ impl GpuScatter {
                 .write_buffer(&self.params, 0, bytemuck::cast_slice(&request.words));
         }
         self.request = Some(request);
+        self.request_generation = generation;
         Ok(())
     }
 
@@ -254,12 +262,13 @@ impl GpuScatter {
         region: ScatterRegion,
         max_candidate_evaluations: u64,
     ) -> Result<(), GpuScatterError> {
-        prepare(
+        prepare_next(
             config,
             region,
             max_candidate_evaluations,
             self.capacity,
             self.max_groups,
+            self.request_generation,
         )?;
         Ok(())
     }
@@ -308,6 +317,23 @@ impl GpuScatter {
     /// Sum of owned logical buffer sizes; excludes wgpu/driver metadata.
     pub fn allocated_buffer_bytes(&self) -> u64 {
         self.allocated_bytes
+    }
+
+    /// Fixed primary source-slot capacity, independent of the active request.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub(super) fn device_identity(&self) -> &std::sync::Arc<()> {
+        &self.device_identity
+    }
+
+    pub(super) fn draw_args(&self) -> [u32; 3] {
+        [self.vertex_count, 0, 0]
+    }
+
+    pub(super) fn request_generation(&self) -> u64 {
+        self.request_generation
     }
 }
 
@@ -433,6 +459,29 @@ fn put64(words: &mut [u32; 48], index: usize, value: u64) {
     words[index + 1] = (value >> 32) as u32;
 }
 
+// Validation and upload share exactly the same checks and error ordering.
+// Computing the next epoch is pure: only a successful write commits it.
+fn prepare_next(
+    config: ScatterConfig,
+    region: ScatterRegion,
+    max_candidate_evaluations: u64,
+    capacity: usize,
+    max_groups: u32,
+    generation: u64,
+) -> Result<(Request, u64), GpuScatterError> {
+    let request = prepare(
+        config,
+        region,
+        max_candidate_evaluations,
+        capacity,
+        max_groups,
+    )?;
+    let next = generation
+        .checked_add(1)
+        .ok_or(GpuScatterError::ArithmeticOverflow)?;
+    Ok((request, next))
+}
+
 fn prepare(
     config: ScatterConfig,
     region: ScatterRegion,
@@ -506,6 +555,29 @@ mod tests {
             grid_spacing_mm: 17,
             min_distance_mm: 0,
         }
+    }
+
+    #[test]
+    fn pure_preflight_advances_epoch_without_wrapping_or_changing_semantic_key() {
+        let region = ScatterRegion::new([0; 3], [17; 3]).unwrap();
+        let (first, next) = prepare_next(config(), region, 1, 1, 65535, 0).unwrap();
+        assert_eq!(next, 1);
+        let (same, next) = prepare_next(config(), region, 1, 1, 65535, 1).unwrap();
+        assert_eq!(next, 2);
+        assert_eq!(first.key, same.key);
+        assert_eq!(first.words, same.words);
+        let (_, last) = prepare_next(config(), region, 1, 1, 65535, u64::MAX - 1).unwrap();
+        assert_eq!(last, u64::MAX);
+        assert!(matches!(
+            prepare_next(config(), region, 1, 1, 65535, u64::MAX),
+            Err(GpuScatterError::ArithmeticOverflow)
+        ));
+        assert!(matches!(
+            prepare_next(config(), region, 0, 1, 65535, 0),
+            Err(GpuScatterError::Scatter(
+                ScatterError::CandidateBudgetExceeded { .. }
+            ))
+        ));
     }
 
     #[test]

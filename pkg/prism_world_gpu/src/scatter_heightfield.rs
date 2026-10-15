@@ -274,17 +274,16 @@ impl GpuScatterHeightfield {
         filters: HeightfieldScatterFilters,
         surface_budget: HeightfieldScatterBudget,
     ) -> Result<(), GpuScatterHeightfieldError> {
-        let estimate = validate_terrain(
+        let (words, groups) = self.preflight_request(
             config,
             region,
+            max_candidate_evaluations,
+            field,
+            max_field_work,
             surface,
             filters,
             surface_budget,
-            self.max_surface_samples,
         )?;
-        let groups = dispatch(estimate, self.max_groups)?;
-        let count = u32::try_from(estimate).map_err(|_| GpuScatterError::ArithmeticOverflow)?;
-        let words = request_words(count, groups[0], surface, filters);
         // Field preflight itself queues nothing until all its checks pass.
         // No fallible operation follows this call: the scratch was reserved.
         self.field.write_request(
@@ -325,6 +324,66 @@ impl GpuScatterHeightfield {
             },
         });
         Ok(())
+    }
+
+    /// Pure full-chain preflight for sibling stages; never uploads or mutates.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn validate_request(
+        &self,
+        config: ScatterConfig,
+        region: ScatterRegion,
+        max_candidate_evaluations: u64,
+        field: &ScatterDensityField,
+        max_field_work: u64,
+        surface: &PlanarHeightfieldSurface,
+        filters: HeightfieldScatterFilters,
+        surface_budget: HeightfieldScatterBudget,
+    ) -> Result<(), GpuScatterHeightfieldError> {
+        self.preflight_request(
+            config,
+            region,
+            max_candidate_evaluations,
+            field,
+            max_field_work,
+            surface,
+            filters,
+            surface_budget,
+        )?;
+        Ok(())
+    }
+
+    // Same complete preflight for both validation and upload; no request state
+    // is touched until the entire source/field/surface chain has been admitted.
+    #[allow(clippy::too_many_arguments)]
+    fn preflight_request(
+        &self,
+        config: ScatterConfig,
+        region: ScatterRegion,
+        max_candidate_evaluations: u64,
+        field: &ScatterDensityField,
+        max_field_work: u64,
+        surface: &PlanarHeightfieldSurface,
+        filters: HeightfieldScatterFilters,
+        surface_budget: HeightfieldScatterBudget,
+    ) -> Result<([u32; 32], [u32; 2]), GpuScatterHeightfieldError> {
+        let count = validate_terrain(
+            config,
+            region,
+            surface,
+            filters,
+            surface_budget,
+            self.max_surface_samples,
+        )?;
+        let groups = dispatch(count, self.max_groups)?;
+        let count = u32::try_from(count).map_err(|_| GpuScatterError::ArithmeticOverflow)?;
+        self.field.validate_request(
+            config,
+            region,
+            max_candidate_evaluations,
+            field,
+            max_field_work,
+        )?;
+        Ok((request_words(count, groups[0], surface, filters), groups))
     }
 
     /// Records all three stages and clears only the final count before its
@@ -386,6 +445,23 @@ impl GpuScatterHeightfield {
     /// Actual reusable brush-upload scratch capacity.
     pub fn brush_scratch_bytes(&self) -> usize {
         self.field.brush_scratch_bytes()
+    }
+
+    /// Fixed primary source-slot capacity.
+    pub fn capacity(&self) -> usize {
+        self.field.capacity()
+    }
+
+    pub(super) fn device_identity(&self) -> &std::sync::Arc<()> {
+        self.field.device_identity()
+    }
+
+    pub(super) fn draw_args(&self) -> [u32; 3] {
+        self.field.draw_args()
+    }
+
+    pub(super) fn request_generation(&self) -> u64 {
+        self.field.request_generation()
     }
 }
 

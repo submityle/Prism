@@ -54,6 +54,14 @@ alone is not identity. Snapshot residency and structural comparison costs remain
 caller concerns. Exact contracts and benchmark methodology are documented in
 `docs/prism_world_heightfield_scatter_zh.md` at the repository root.
 
+`filter_heightfield_scatter` applies an immutable full-key `ScatterDeletionSet`
+after terrain selection. It stably compacts points and attributes together,
+preserves both allocations and the entire upstream cache key/work counters, and
+retains the complete deletion snapshot as an additional cache dependency. Keys
+absent from this output still invalidate the result. Unequal column lengths are
+rejected before filtering; no projection, refill, persistence policy or game
+object type is added. See `docs/prism_world_scatter_deletions_zh.md`.
+
 The crate owns data contracts and executable geometry/data kernels. Engine scheduling,
 render submission, collision, persistence, and GPU formats remain external
 adapters. The terrain-to-stream adapter is the narrow exception: it only emits
