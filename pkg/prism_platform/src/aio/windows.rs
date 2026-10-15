@@ -485,3 +485,25 @@ impl Drop for Queue {
         }
     }
 }
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{Overlapped, OverlappedEntry};
+    use core::mem::{align_of, size_of};
+
+    #[test]
+    fn win32_overlapped_abi_layout_matches_pointer_width() {
+        // OVERLAPPED is 20 bytes on Win32 and 32 bytes on Win64. The
+        // OVERLAPPED_ENTRY returned by GetQueuedCompletionStatusEx is 16
+        // bytes on Win32 and 32 bytes on Win64.
+        let (overlapped_size, entry_size) = if size_of::<usize>() == 8 {
+            (32, 32)
+        } else {
+            (20, 16)
+        };
+        assert_eq!(size_of::<Overlapped>(), overlapped_size);
+        assert_eq!(size_of::<OverlappedEntry>(), entry_size);
+        assert_eq!(align_of::<Overlapped>(), align_of::<usize>());
+        assert_eq!(align_of::<OverlappedEntry>(), align_of::<usize>());
+    }
+}
