@@ -332,7 +332,9 @@ impl ViewData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OrthographicProjection, PerspectiveProjection};
+    use crate::OrthographicProjection;
+    #[cfg(feature = "physical_lens")]
+    use crate::PerspectiveProjection;
 
     #[test]
     fn first_frame_clears_history_and_second_frame_reuses_it() {

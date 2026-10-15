@@ -708,8 +708,22 @@ fn _keep_lens_type_visible(_: Lens) {}
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(
+        feature = "cutscene",
+        feature = "determinism",
+        feature = "virtual_production",
+        feature = "occlusion_fade",
+        all(feature = "lookahead_stream", feature = "edge_stabilize")
+    ))]
     use super::*;
+    #[cfg(feature = "determinism")]
     use crate::{derive_view, CameraIntent, ViewHistory};
+    #[cfg(any(
+        feature = "cutscene",
+        feature = "determinism",
+        feature = "virtual_production",
+        all(feature = "lookahead_stream", feature = "edge_stabilize")
+    ))]
     use prism_math::DVec3;
 
     #[cfg(feature = "cutscene")]
