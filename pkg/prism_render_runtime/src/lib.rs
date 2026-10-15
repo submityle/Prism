@@ -29,6 +29,7 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -44,8 +45,10 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 mod capture;
 mod frame_pacing;
+mod replay;
 
 pub use frame_pacing::{FramePacer, DEFAULT_FRAMES_IN_FLIGHT};
+pub use replay::{ReplayError, ReplayFailure, ReplayHandle};
 // The waitable-submission contract is part of the RHI, so every backend can
 // satisfy it without depending on this crate. Re-exported for convenience.
 pub use prism_render_driver::{CompletionToken, FrameSync};
@@ -61,6 +64,32 @@ pub enum RenderInitError {
     /// The chosen adapter rejected the device request; the string carries the
     /// backend's diagnostic.
     Device(String),
+}
+
+/// Why rebuilding a lost render device could not complete.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum RecoveryError {
+    /// No adapter matching the retained selection policy was available.
+    NoAdapter,
+    /// The replacement device/queue request failed.
+    Device(String),
+    /// The retained window surface could not be recreated or reconfigured.
+    Surface(SurfaceError),
+    /// A registered GPU resource bundle could not be replayed.
+    Replay(ReplayFailure),
+}
+
+/// Evidence returned after a complete device-generation replacement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RecoveryReport {
+    /// The new runtime device generation. The initial device is generation 0.
+    pub generation: u64,
+    /// The backend-reported reason, when recovery was initiated by polling.
+    pub reason: Option<DeviceLostReason>,
+    /// Number of live typed replay entries rebuilt and committed.
+    pub replayed_resources: usize,
+    /// Whether a retained window surface was recreated and reconfigured.
+    pub surface_recreated: bool,
 }
 
 /// Why a [`RenderRuntime::render_frame`] call did not produce a presented frame.
@@ -94,11 +123,61 @@ impl fmt::Display for RenderInitError {
     }
 }
 
+impl fmt::Display for RecoveryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoAdapter => f.write_str("no usable graphics adapter during recovery"),
+            Self::Device(detail) => write!(f, "replacement device bring-up failed: {detail}"),
+            Self::Surface(error) => write!(f, "surface recovery failed: {error}"),
+            Self::Replay(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RecoveryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Replay(error) => Some(error),
+            Self::NoAdapter | Self::Device(_) | Self::Surface(_) => None,
+        }
+    }
+}
+
+trait SurfaceFactory<I: Instance>: Send + Sync {
+    fn create(
+        &self,
+        instance: &I,
+        device: &I::Device,
+        queue: &I::Queue,
+    ) -> Result<I::Surface, SurfaceError>;
+}
+
+struct WindowSurfaceFactory<W> {
+    window: Arc<W>,
+}
+
+impl<I, W> SurfaceFactory<I> for WindowSurfaceFactory<W>
+where
+    I: Instance,
+    W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+{
+    fn create(
+        &self,
+        instance: &I,
+        device: &I::Device,
+        queue: &I::Queue,
+    ) -> Result<I::Surface, SurfaceError> {
+        instance.create_surface(Arc::clone(&self.window), device, queue)
+    }
+}
+
 /// The RHI-backed render runtime: an adapter plus its device/queue, owned for
 /// the app's lifetime, with the frame extent graphs resolve against.
-pub struct RenderRuntime<I: Instance> {
+pub struct RenderRuntime<I: Instance + 'static> {
     instance: I,
     adapter: I::Adapter,
+    adapter_options: RequestAdapterOptions,
+    device_descriptor: DeviceDescriptor,
     /// The device is kept behind an `Arc` so background pipeline compilation
     /// can hold a handle while the runtime remains the owner of the render
     /// world's lifetime.
@@ -112,12 +191,18 @@ pub struct RenderRuntime<I: Instance> {
     completed_value: Arc<AtomicU64>,
     /// The window surface, once created.
     surface: Option<I::Surface>,
+    /// Retains the owned OS window so a replacement backend surface can be
+    /// created after the old device and its surface become unusable.
+    surface_factory: Option<Arc<dyn SurfaceFactory<I>>>,
     /// The configuration the surface was last configured with, so an
     /// `Outdated` surface can be reconfigured without the caller re-supplying it.
     surface_config: Option<SurfaceConfig>,
+    replay: replay::ReplayRegistry<I>,
+    device_generation: u64,
+    pending_device_loss: Mutex<Option<DeviceLostReason>>,
 }
 
-impl<I: Instance> RenderRuntime<I> {
+impl<I: Instance + 'static> RenderRuntime<I> {
     /// Brings up a headless runtime on a high-performance adapter from
     /// `instance`, keeping [`DEFAULT_FRAMES_IN_FLIGHT`] frames in flight.
     ///
@@ -148,15 +233,35 @@ impl<I: Instance> RenderRuntime<I> {
             power_preference: PowerPreference::HighPerformance,
             force_fallback: false,
         };
+        Self::with_device_configuration(
+            instance,
+            extent,
+            max_in_flight,
+            options,
+            DeviceDescriptor::default(),
+        )
+    }
+
+    /// Brings up a runtime and retains the exact adapter/device request so the
+    /// same requirements can be applied to a replacement device after loss.
+    pub fn with_device_configuration(
+        instance: I,
+        extent: Extent3d,
+        max_in_flight: usize,
+        adapter_options: RequestAdapterOptions,
+        device_descriptor: DeviceDescriptor,
+    ) -> Result<Self, RenderInitError> {
         let adapter = instance
-            .request_adapter(&options)
+            .request_adapter(&adapter_options)
             .ok_or(RenderInitError::NoAdapter)?;
         let (device, queue) = instance
-            .create_device(&adapter, &DeviceDescriptor::default())
+            .create_device(&adapter, &device_descriptor)
             .map_err(|error| RenderInitError::Device(format!("{error}")))?;
         Ok(Self {
             instance,
             adapter,
+            adapter_options,
+            device_descriptor,
             device: Arc::new(device),
             queue,
             extent,
@@ -164,7 +269,11 @@ impl<I: Instance> RenderRuntime<I> {
             submitted_value: AtomicU64::new(0),
             completed_value: Arc::new(AtomicU64::new(0)),
             surface: None,
+            surface_factory: None,
             surface_config: None,
+            replay: replay::ReplayRegistry::new(),
+            device_generation: 0,
+            pending_device_loss: Mutex::new(None),
         })
     }
 
@@ -223,6 +332,32 @@ impl<I: Instance> RenderRuntime<I> {
         *pending
     }
 
+    /// The current device generation. It increments only after device, queue,
+    /// surface, and every registered replay entry have all been rebuilt.
+    #[must_use]
+    pub const fn device_generation(&self) -> u64 {
+        self.device_generation
+    }
+
+    /// Registers and immediately creates a typed GPU resource bundle.
+    ///
+    /// The same recipe is executed against every replacement device. Recipes
+    /// should rebuild a self-contained dependency bundle (for example a
+    /// texture, its view, sampler, bind group, and pipeline) so the returned
+    /// handle can be replaced atomically after all registry entries succeed.
+    pub fn register_replay<T, F>(
+        &mut self,
+        label: impl Into<String>,
+        recipe: F,
+    ) -> Result<ReplayHandle<T>, ReplayFailure>
+    where
+        T: Send + Sync + 'static,
+        F: Fn(&I::Device, &I::Queue) -> Result<T, ReplayError> + Send + Sync + 'static,
+    {
+        self.replay
+            .register(label, &self.device, &self.queue, recipe)
+    }
+
     /// The RHI render queue.
     #[must_use]
     pub fn queue(&self) -> &I::Queue {
@@ -254,10 +389,10 @@ impl<I: Instance> RenderRuntime<I> {
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
-        let surface = self
-            .instance
-            .create_surface(window, &*self.device, &self.queue)?;
+        let factory: Arc<dyn SurfaceFactory<I>> = Arc::new(WindowSurfaceFactory { window });
+        let surface = factory.create(&self.instance, &self.device, &self.queue)?;
         self.surface = Some(surface);
+        self.surface_factory = Some(factory);
         self.surface_config = None;
         Ok(())
     }
@@ -327,6 +462,102 @@ impl<I: Instance> RenderRuntime<I> {
     fn reconfigure_surface(&mut self) -> Result<(), SurfaceError> {
         let config = self.surface_config.ok_or(SurfaceError::Unsupported)?;
         self.configure_surface(config)
+    }
+
+    /// Rebuilds the adapter, device, queue, retained window surface, and every
+    /// registered GPU resource bundle.
+    ///
+    /// Recovery is transactional from the caller's point of view: replacement
+    /// resources are staged first, and replay handles are updated only after
+    /// adapter/device creation and surface reconfiguration have all succeeded.
+    /// On failure the current generation and every replay handle remain
+    /// unchanged, and the precise failure is returned.
+    pub fn recover_device(&mut self) -> Result<RecoveryReport, RecoveryError> {
+        self.recover_device_with_reason(None)
+    }
+
+    /// Polls the backend's edge-triggered device-loss signal and performs a
+    /// complete recovery when one is present.
+    ///
+    /// A failed attempt retains the loss reason, so a later call retries rather
+    /// than silently treating the drained backend signal as recovered.
+    pub fn recover_if_lost(&mut self) -> Result<Option<RecoveryReport>, RecoveryError> {
+        let reason = {
+            let mut pending = self
+                .pending_device_loss
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if pending.is_none() {
+                *pending = self.device.take_device_lost();
+            }
+            *pending
+        };
+        let Some(reason) = reason else {
+            return Ok(None);
+        };
+        let report = self.recover_device_with_reason(Some(reason))?;
+        Ok(Some(report))
+    }
+
+    fn recover_device_with_reason(
+        &mut self,
+        reason: Option<DeviceLostReason>,
+    ) -> Result<RecoveryReport, RecoveryError> {
+        let adapter = match self.surface.as_ref() {
+            Some(surface) => self
+                .instance
+                .request_adapter_for_surface(&self.adapter_options, surface),
+            None => self.instance.request_adapter(&self.adapter_options),
+        }
+        .ok_or(RecoveryError::NoAdapter)?;
+        let (device, queue) = self
+            .instance
+            .create_device(&adapter, &self.device_descriptor)
+            .map_err(|error| RecoveryError::Device(format!("{error}")))?;
+
+        let mut surface = match &self.surface_factory {
+            Some(factory) => Some(
+                factory
+                    .create(&self.instance, &device, &queue)
+                    .map_err(RecoveryError::Surface)?,
+            ),
+            None => None,
+        };
+        if let Some(config) = self.surface_config {
+            surface
+                .as_mut()
+                .ok_or(RecoveryError::Surface(SurfaceError::Unsupported))?
+                .configure(&config)
+                .map_err(RecoveryError::Surface)?;
+        }
+
+        let staged = self
+            .replay
+            .stage(&device, &queue)
+            .map_err(RecoveryError::Replay)?;
+        let replayed_resources = staged.count();
+        staged.commit();
+
+        let max_in_flight = self.max_frames_in_flight();
+        self.adapter = adapter;
+        self.device = Arc::new(device);
+        self.queue = queue;
+        self.surface = surface;
+        self.pacer = Mutex::new(FramePacer::new(max_in_flight));
+        self.submitted_value.store(0, AtomicOrdering::Release);
+        self.completed_value = Arc::new(AtomicU64::new(0));
+        self.device_generation = self.device_generation.saturating_add(1);
+        *self
+            .pending_device_loss
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
+        Ok(RecoveryReport {
+            generation: self.device_generation,
+            reason,
+            replayed_resources,
+            surface_recreated: self.surface.is_some(),
+        })
     }
 
     /// Renders and presents one windowed frame.
