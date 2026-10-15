@@ -45,16 +45,42 @@ impl Frustum {
 
 pub fn extract_frustum(clip_from_world: &Mat4, reverse_z: bool, finite_far: bool) -> Frustum {
     let rows = [
-        Vec4::new(clip_from_world.x_axis.x, clip_from_world.y_axis.x, clip_from_world.z_axis.x, clip_from_world.w_axis.x),
-        Vec4::new(clip_from_world.x_axis.y, clip_from_world.y_axis.y, clip_from_world.z_axis.y, clip_from_world.w_axis.y),
-        Vec4::new(clip_from_world.x_axis.z, clip_from_world.y_axis.z, clip_from_world.z_axis.z, clip_from_world.w_axis.z),
-        Vec4::new(clip_from_world.x_axis.w, clip_from_world.y_axis.w, clip_from_world.z_axis.w, clip_from_world.w_axis.w),
+        Vec4::new(
+            clip_from_world.x_axis.x,
+            clip_from_world.y_axis.x,
+            clip_from_world.z_axis.x,
+            clip_from_world.w_axis.x,
+        ),
+        Vec4::new(
+            clip_from_world.x_axis.y,
+            clip_from_world.y_axis.y,
+            clip_from_world.z_axis.y,
+            clip_from_world.w_axis.y,
+        ),
+        Vec4::new(
+            clip_from_world.x_axis.z,
+            clip_from_world.y_axis.z,
+            clip_from_world.z_axis.z,
+            clip_from_world.w_axis.z,
+        ),
+        Vec4::new(
+            clip_from_world.x_axis.w,
+            clip_from_world.y_axis.w,
+            clip_from_world.z_axis.w,
+            clip_from_world.w_axis.w,
+        ),
     ];
     let mut out = Frustum::default();
     let candidates = [
-        rows[3] + rows[0], rows[3] - rows[0],
-        rows[3] + rows[1], rows[3] - rows[1],
-        if reverse_z { rows[3] - rows[2] } else { rows[2] },
+        rows[3] + rows[0],
+        rows[3] - rows[0],
+        rows[3] + rows[1],
+        rows[3] - rows[1],
+        if reverse_z {
+            rows[3] - rows[2]
+        } else {
+            rows[2]
+        },
     ];
     for plane in candidates {
         let n = Vec3::new(plane.x, plane.y, plane.z);
@@ -68,7 +94,11 @@ pub fn extract_frustum(clip_from_world: &Mat4, reverse_z: bool, finite_far: bool
         }
     }
     if finite_far {
-        let plane = if reverse_z { rows[2] } else { rows[3] - rows[2] };
+        let plane = if reverse_z {
+            rows[2]
+        } else {
+            rows[3] - rows[2]
+        };
         let n = Vec3::new(plane.x, plane.y, plane.z);
         let len = n.length();
         if len.is_finite() && len > 1.0e-8 {

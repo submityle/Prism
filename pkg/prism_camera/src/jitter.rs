@@ -27,7 +27,10 @@ impl JitterSequence {
             Self::Halton23 { length } | Self::Sobol2 { length } => length.max(1),
         };
         if length == 0 || extent[0] == 0 || extent[1] == 0 || scale == 0.0 {
-            return JitterState { phase: 0, value_pixels: Vec2::ZERO };
+            return JitterState {
+                phase: 0,
+                value_pixels: Vec2::ZERO,
+            };
         }
         let phase = (frame % u64::from(length)) as u32;
         let (x, y) = match self {
@@ -82,7 +85,12 @@ mod tests {
 
     #[test]
     fn disabled_jitter_is_zero() {
-        assert_eq!(JitterSequence::Off.sample(4, [1920, 1080], 1.0).value_pixels, Vec2::ZERO);
+        assert_eq!(
+            JitterSequence::Off
+                .sample(4, [1920, 1080], 1.0)
+                .value_pixels,
+            Vec2::ZERO
+        );
     }
 
     #[test]

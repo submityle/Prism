@@ -2,8 +2,8 @@ use prism_math::{Affine3, DQuat, DVec3, Mat4, Vec2, Vec3};
 use prism_render_architecture::view_family::{ViewHandle, ViewImportance, ViewKind, ViewRegistry};
 
 use crate::{
-    extract_frustum, CameraError, CameraErrorCode, Exposure, GpuViewRecord, JitterSequence,
-    Lens, Projection, RenderTarget, Viewport, ViewportRect,
+    extract_frustum, CameraError, CameraErrorCode, Exposure, GpuViewRecord, JitterSequence, Lens,
+    Projection, RenderTarget, Viewport, ViewportRect,
 };
 
 /// A validated world-space camera pose. The origin is the rebasing point used
@@ -130,13 +130,25 @@ pub fn derive_view(
     history: &mut ViewHistory,
 ) -> Result<ViewData, CameraError> {
     if !intent.active {
-        return Err(CameraError::new(CameraErrorCode::InvalidProjection, "active", 0.0));
+        return Err(CameraError::new(
+            CameraErrorCode::InvalidProjection,
+            "active",
+            0.0,
+        ));
     }
     if target_size[0] == 0 || target_size[1] == 0 {
-        return Err(CameraError::new(CameraErrorCode::InvalidTargetSize, "target_size", 0.0));
+        return Err(CameraError::new(
+            CameraErrorCode::InvalidTargetSize,
+            "target_size",
+            0.0,
+        ));
     }
     if !pose.position.is_finite() || !pose.world_origin.is_finite() || !pose.rotation.is_finite() {
-        return Err(CameraError::new(CameraErrorCode::NonFinitePose, "pose", 0.0));
+        return Err(CameraError::new(
+            CameraErrorCode::NonFinitePose,
+            "pose",
+            0.0,
+        ));
     }
     let viewport_px = intent.viewport.resolve(target_size)?;
     let mut projection = intent.projection;
@@ -151,16 +163,28 @@ pub fn derive_view(
     }
     let mut clip_from_view = projection.clip_from_view()?;
     let clip_from_view_unjittered = clip_from_view;
-    let (jitter_state, jitter_ndc) = intent
-        .jitter
-        .ndc_offset(frame, viewport_px.size, intent.jitter_scale);
+    let (jitter_state, jitter_ndc) =
+        intent
+            .jitter
+            .ndc_offset(frame, viewport_px.size, intent.jitter_scale);
     clip_from_view.w_axis.x += jitter_ndc.x;
     clip_from_view.w_axis.y += jitter_ndc.y;
 
-    let render_origin = if intent.relative_rendering { pose.world_origin } else { DVec3::ZERO };
+    let render_origin = if intent.relative_rendering {
+        pose.world_origin
+    } else {
+        DVec3::ZERO
+    };
     let local_position = pose.position - render_origin;
-    if !local_position.x.is_finite() || !local_position.y.is_finite() || !local_position.z.is_finite() {
-        return Err(CameraError::new(CameraErrorCode::NonFinitePose, "local_position", 0.0));
+    if !local_position.x.is_finite()
+        || !local_position.y.is_finite()
+        || !local_position.z.is_finite()
+    {
+        return Err(CameraError::new(
+            CameraErrorCode::NonFinitePose,
+            "local_position",
+            0.0,
+        ));
     }
     let rotation = pose.rotation.as_quat().normalize();
     let world_from_view = Affine3::from_mat3_translation(
@@ -178,17 +202,28 @@ pub fn derive_view(
     let stable = clip_from_view_unjittered * view_from_world.to_mat4();
     let current = clip_from_view * view_from_world.to_mat4();
     if !matrix_is_finite(stable) || !matrix_is_finite(current) {
-        return Err(CameraError::new(CameraErrorCode::NonFiniteDerivedView, "matrix", 0.0));
+        return Err(CameraError::new(
+            CameraErrorCode::NonFiniteDerivedView,
+            "matrix",
+            0.0,
+        ));
     }
-    let teleport = history.valid
-        && (pose.position - history.previous_position).length() > 10.0
+    let teleport = history.valid && (pose.position - history.previous_position).length() > 10.0
         || history.valid && pose.rotation.dot(history.previous_rotation).abs() < 0.5;
     let history_valid = history.valid && history.extent == target_size && !teleport;
-    let previous = if history_valid { history.previous_unjittered } else { stable };
+    let previous = if history_valid {
+        history.previous_unjittered
+    } else {
+        stable
+    };
     let frustum = extract_frustum(&stable, projection.reverse_z(), projection.far().is_some());
     let exposure = intent.exposure.multiplier();
     if !exposure.is_finite() {
-        return Err(CameraError::new(CameraErrorCode::NonFiniteDerivedView, "exposure", 0.0));
+        return Err(CameraError::new(
+            CameraErrorCode::NonFiniteDerivedView,
+            "exposure",
+            0.0,
+        ));
     }
     history.previous_unjittered = stable;
     history.previous_position = pose.position;
@@ -235,7 +270,9 @@ pub fn publish_view(
     if *handle == ViewHandle::INVALID {
         *handle = registry.register_with(data.kind, importance);
     } else if !registry.contains(*handle) {
-        return Err(CameraError::new(CameraErrorCode::StaleViewHandle, "handle", 0.0).with_handle(*handle));
+        return Err(
+            CameraError::new(CameraErrorCode::StaleViewHandle, "handle", 0.0).with_handle(*handle),
+        );
     } else {
         registry.set_importance(*handle, importance);
     }
@@ -256,7 +293,12 @@ impl ViewData {
             world_origin_lo: lo,
             exposure: self.exposure,
             schema_version: crate::VIEW_SCHEMA_VERSION,
-            flags: GpuViewRecord::flags(self.history_valid, self.teleport, self.frustum.count == 6, true),
+            flags: GpuViewRecord::flags(
+                self.history_valid,
+                self.teleport,
+                self.frustum.count == 6,
+                true,
+            ),
             view_index: self.handle.index,
             jitter: GpuViewRecord::jitter(self.jitter),
             viewport: [
@@ -265,7 +307,10 @@ impl ViewData {
                 self.viewport_px.size[0] as f32,
                 self.viewport_px.size[1] as f32,
             ],
-            frustum: self.frustum.planes.map(|p| [p.normal.x, p.normal.y, p.normal.z, p.d]),
+            frustum: self
+                .frustum
+                .planes
+                .map(|p| [p.normal.x, p.normal.y, p.normal.z, p.d]),
         }
     }
 }
@@ -284,13 +329,19 @@ mod tests {
         assert!(!first.history_valid);
         let second = derive_view(intent, pose, 1, [1920, 1080], &mut history).unwrap();
         assert!(second.history_valid);
-        assert_eq!(second.prev_clip_from_world, first.clip_from_world_unjittered);
+        assert_eq!(
+            second.prev_clip_from_world,
+            first.clip_from_world_unjittered
+        );
     }
 
     #[test]
     fn resize_invalidates_history() {
         let mut history = ViewHistory::default();
-        let intent = CameraIntent { projection: Projection::Orthographic(OrthographicProjection::default()), ..Default::default() };
+        let intent = CameraIntent {
+            projection: Projection::Orthographic(OrthographicProjection::default()),
+            ..Default::default()
+        };
         let pose = CameraPose::default();
         let _ = derive_view(intent, pose, 0, [100, 100], &mut history).unwrap();
         let next = derive_view(intent, pose, 1, [200, 100], &mut history).unwrap();
@@ -302,8 +353,21 @@ mod tests {
         let mut registry = ViewRegistry::new();
         let mut handle = registry.register(ViewKind::Main);
         registry.remove(handle);
-        let mut data = derive_view(Default::default(), Default::default(), 0, [64, 64], &mut ViewHistory::default()).unwrap();
-        let error = publish_view(&mut registry, &mut handle, &mut data, ViewKind::Main.default_importance()).unwrap_err();
+        let mut data = derive_view(
+            Default::default(),
+            Default::default(),
+            0,
+            [64, 64],
+            &mut ViewHistory::default(),
+        )
+        .unwrap();
+        let error = publish_view(
+            &mut registry,
+            &mut handle,
+            &mut data,
+            ViewKind::Main.default_importance(),
+        )
+        .unwrap_err();
         assert_eq!(error.code, CameraErrorCode::StaleViewHandle);
     }
 

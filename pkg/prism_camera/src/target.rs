@@ -25,7 +25,10 @@ mod tests {
     #[test]
     fn invalid_viewport_is_rejected() {
         let viewport = Viewport::new(Vec2::ZERO, Vec2::new(0.0, 1.0));
-        assert_eq!(viewport.resolve([100, 100]).unwrap_err().code, CameraErrorCode::InvalidViewport);
+        assert_eq!(
+            viewport.resolve([100, 100]).unwrap_err().code,
+            CameraErrorCode::InvalidViewport
+        );
     }
 }
 
@@ -64,11 +67,18 @@ impl Viewport {
 
     /// Builds a viewport expressed directly in physical target pixels.
     pub const fn from_pixels(origin: [u32; 2], size: [u32; 2]) -> Self {
-        Self { origin: Vec2::new(origin[0] as f32, origin[1] as f32), size: Vec2::new(size[0] as f32, size[1] as f32) }
+        Self {
+            origin: Vec2::new(origin[0] as f32, origin[1] as f32),
+            size: Vec2::new(size[0] as f32, size[1] as f32),
+        }
     }
 
     pub fn resolve(self, target: [u32; 2]) -> Result<ViewportRect, CameraError> {
-        if !self.origin.is_finite() || !self.size.is_finite() || self.size.x <= 0.0 || self.size.y <= 0.0 {
+        if !self.origin.is_finite()
+            || !self.size.is_finite()
+            || self.size.x <= 0.0
+            || self.size.y <= 0.0
+        {
             return Err(CameraError::new(
                 CameraErrorCode::InvalidViewport,
                 "viewport",
@@ -81,8 +91,14 @@ impl Viewport {
             && self.size.y <= 1.0;
         let (origin, size) = if normalized {
             (
-                Vec2::new(self.origin.x * target[0] as f32, self.origin.y * target[1] as f32),
-                Vec2::new(self.size.x * target[0] as f32, self.size.y * target[1] as f32),
+                Vec2::new(
+                    self.origin.x * target[0] as f32,
+                    self.origin.y * target[1] as f32,
+                ),
+                Vec2::new(
+                    self.size.x * target[0] as f32,
+                    self.size.y * target[1] as f32,
+                ),
             )
         } else {
             (self.origin, self.size)
@@ -98,6 +114,9 @@ impl Viewport {
                 0.0,
             ));
         }
-        Ok(ViewportRect { origin: [x0, y0], size: [x1 - x0, y1 - y0] })
+        Ok(ViewportRect {
+            origin: [x0, y0],
+            size: [x1 - x0, y1 - y0],
+        })
     }
 }

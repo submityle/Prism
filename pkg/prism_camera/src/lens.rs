@@ -8,8 +8,14 @@ pub struct Filmback {
 }
 
 impl Filmback {
-    pub const SUPER_35: Self = Self { sensor_width_mm: 24.89, sensor_height_mm: 18.66 };
-    pub const FULL_FRAME: Self = Self { sensor_width_mm: 36.0, sensor_height_mm: 24.0 };
+    pub const SUPER_35: Self = Self {
+        sensor_width_mm: 24.89,
+        sensor_height_mm: 18.66,
+    };
+    pub const FULL_FRAME: Self = Self {
+        sensor_width_mm: 36.0,
+        sensor_height_mm: 24.0,
+    };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,11 +29,23 @@ pub struct Lens {
 
 impl Lens {
     pub const fn cine_35mm() -> Self {
-        Self { filmback: Filmback::SUPER_35, focal_length_mm: 35.0, f_stop: 2.8, focus_distance_m: 3.0, blades: 9 }
+        Self {
+            filmback: Filmback::SUPER_35,
+            focal_length_mm: 35.0,
+            f_stop: 2.8,
+            focus_distance_m: 3.0,
+            blades: 9,
+        }
     }
 
     pub const fn full_frame_50mm() -> Self {
-        Self { filmback: Filmback::FULL_FRAME, focal_length_mm: 50.0, f_stop: 1.8, focus_distance_m: 3.0, blades: 9 }
+        Self {
+            filmback: Filmback::FULL_FRAME,
+            focal_length_mm: 50.0,
+            f_stop: 1.8,
+            focus_distance_m: 3.0,
+            blades: 9,
+        }
     }
 
     pub fn vertical_fov(self) -> f32 {
@@ -56,8 +74,14 @@ impl Lens {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Exposure {
-    ManualEv100 { ev100: f32 },
-    Physical { f_stop: f32, shutter_s: f32, iso: f32 },
+    ManualEv100 {
+        ev100: f32,
+    },
+    Physical {
+        f_stop: f32,
+        shutter_s: f32,
+        iso: f32,
+    },
 }
 
 impl Default for Exposure {
@@ -70,9 +94,14 @@ impl Exposure {
     pub fn ev100(self) -> f32 {
         match self {
             Self::ManualEv100 { ev100 } => ev100,
-            Self::Physical { f_stop, shutter_s, iso } => {
-                libm::log2f((f_stop.max(1.0e-4) * f_stop.max(1.0e-4)) / shutter_s.max(1.0e-6) * 100.0 / iso.max(1.0e-4))
-            }
+            Self::Physical {
+                f_stop,
+                shutter_s,
+                iso,
+            } => libm::log2f(
+                (f_stop.max(1.0e-4) * f_stop.max(1.0e-4)) / shutter_s.max(1.0e-6) * 100.0
+                    / iso.max(1.0e-4),
+            ),
         }
     }
 
@@ -87,7 +116,12 @@ mod tests {
 
     #[test]
     fn sunny_sixteen_anchor_is_ev_fifteen() {
-        let ev = Exposure::Physical { f_stop: 16.0, shutter_s: 1.0 / 125.0, iso: 100.0 }.ev100();
+        let ev = Exposure::Physical {
+            f_stop: 16.0,
+            shutter_s: 1.0 / 125.0,
+            iso: 100.0,
+        }
+        .ev100();
         assert!((ev - 15.0).abs() < 0.05);
     }
 

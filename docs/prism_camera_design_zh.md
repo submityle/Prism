@@ -10,7 +10,7 @@
 > - **多视图家族**：对接本仓 `prism_render_architecture::view_family`（Main/StereoEye/Shadow/Reflection/SceneCapture/Editor/OfflineTile）
 > 本文为纯经典线性代数 / 几何光学 / 控制插值路线，**不含任何 AI/ML 内容**，不含任何 Unreal/Unity/CryEngine 源码或衍生代码。
 
-- 版本： v1.0（规格定稿版，2026-10-14；clean-slate 全新 crate 族，无旧 API 需保留；承接 `prism_transform`/`prism_math`/`prism_render_architecture`/`prism_window`/`prism_input` 的现有契约，向下复用空间真相/仿射代数/视图注册/表面与输入，向上为渲染提取、剔除、时域放大、后处理提供唯一「视图契约」）
+- 版本： v1.1（核心运行时实现版，2026-10-15；`prism_camera` 与 `prism_camera_rig` 已纳入 workspace 并通过 crate 级测试；承接 `prism_math`/`prism_render_architecture` 的现有契约）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_math`（Vec3/Quat/Affine3/Mat4/Dir3、SIMD、投影构造）、`prism_transform`（相机位姿的空间真相 Local/Global + look_at 约束 + 大世界 64-bit/原点重定位）、`prism_ecs`（相机/投影/后处理为组件、变更检测、并行查询）、`prism_render_architecture::view_family`（ViewKind/ViewImportance/ViewRegistry/ViewHandle 视图注册与重要度聚合）；可选 `prism_window`（RenderTarget/表面尺寸/缩放因子）、`prism_input`（指针→射线、拾取）、`prism_time`（固定步 alpha / 曝光自适应时间常数）、`prism_tasks`（多视图并行提取）、`prism_diagnostic`（计数器/trace）、`prism_asset`（LUT/镜头畸变贴图/相机动画片段）
 - 层级定位： 渲染前端 L4「取景与导演」；上接渲染提取（视图 UBO）/剔除（frustum）/时域放大（jitter + 历史）/后处理（相机级 stack），下接 `prism_transform`（位姿）/`prism_math`（代数）/`view_family`（视图槽）
@@ -69,7 +69,7 @@ Bevy 的 `Camera` 把太多关注点挤在一个巨组件里（viewport / target
 
 **责任归属（范围已经闭合）**：`prism_camera` 负责意图模型、投影/视图派生、历史矩阵、jitter、frustum、曝光输入、后处理排序契约、视图注册和拾取数学；`prism_render_architecture` 负责 ViewRegistry 消费、渲染图、GPU 资源与后处理算法；`prism_transform` 负责层级传播和空间真相；`prism_physics` 负责场景求交；`prism_window` 负责表面与尺寸；编辑器/动画系统负责时间轴资产。每个责任面都有明确输入、输出和失败处理，模块之间不复制同一份真相。
 
-**文档交付判定**：本文已经把核心能力、feature 组合、数据结构、系统顺序、错误模型、资源所有权、性能预算、GPU ABI、验证方法和降级行为全部固化。本文的“完成”指规格闭合，不把规格闭合写成 `prism_camera` crate 已经存在；当前仓库事实单独记录在 §27.1。
+**文档交付判定**：本文已经把核心能力、数据结构、系统顺序、错误模型、资源所有权、性能预算、GPU ABI、验证方法和运行时降级行为固化；§27.1 记录当前实现、测试与提交状态，API 以 workspace 中的两个 crate 为准。
 
 ---
 
@@ -1204,20 +1204,25 @@ pub mod prelude {
 - 大世界：相机距离原点 `1e6 m` 时，相对渲染与高精度参考的局部顶点误差 ≤ `0.1 mm`。
 - GPU ABI：CPU 写入与 WGSL 读取的字段偏移、schema、flags 和矩阵列序逐项断言；不允许通过“看起来能画”替代 ABI 检查。
 
-### 26.2 当前仓库验证记录（2026-10-14）
+### 26.2 当前仓库验证记录（2026-10-15）
 
 - `cargo test -p prism_math --lib projection -- --nocapture`：15 passed，0 failed。
 - `cargo test -p prism_math_gpu --test projection_parity -- --nocapture`：在跨沙盒真实设备环境执行，3 passed，0 failed；覆盖普通透视、reversed-Z 透视和正交投影。
 - 同一 GPU 测试在受限沙盒中只得到“无可用 adapter”的显式跳过；这不是成功的真实 GPU 证据，真实设备结果以上述跨沙盒运行记录为准。
 - 现有 `prism_render_gpudriven::camera` 是轴对齐正交场景测试相机，不等同于本文的 `prism_camera`；本文不把它包装成完整相机内核。
+- `cargo test -p prism_camera -p prism_camera_rig --all-targets`：`prism_camera` 13 passed、`prism_camera_rig` 3 passed，0 failed；覆盖投影视图派生、历史失效、viewport、jitter、frustum、镜头曝光、GPU ABI、分代句柄、稳定选择、导演混合和半衰期工具。
 
 ---
 
 ## 27. 责任闭合、风险处置与验收状态
 
-### 27.1 现有实现与本文规格的关系
+### 27.1 当前实现与本文规格的关系
 
-仓库已经具备 `prism_math` 的 CPU 投影/视图矩阵、`prism_math_gpu` 的 WGSL 单源投影镜像及真实设备 parity 验证，并有 `prism_render_architecture::view_family`/GPU-driven 消费侧能力。本文定义的 `prism_camera` 是把这些基础能力组合成“相机意图 → ViewData → ViewRegistry”的独立契约；本次文档提交只完成规格闭合和验证记录，不宣称专用 crate 已由本文自动生成。实现该契约时必须保持现有 CPU/GPU 单源公式和渲染层只消费视图记录的原则。
+`pkg/prism_camera` 已提供 `CameraIntent`、`CameraPose`、`Projection`、`ViewData`、`ViewHistory`、viewport、reversed-Z/无限远投影、5/6 面 frustum、Halton/Sobol jitter、Filmback/Lens/Exposure、相对渲染原点拆分、GPU View ABI 和 `ViewRegistry` 发布桥接。`pkg/prism_camera_rig` 已提供 `VirtualCamera`、`CameraBrain`、稳定优先级选择、位姿混合、`SceneQuery` 批量弹簧臂、半衰期阻尼、Fly/Orbit/Pan 控制器和 Impulse 数据通道。
+
+实现采用两层所有权：相机 crate 只计算不可变视图快照，rig crate 只生成位姿结果；渲染资源、物理求交和 ECS 存储继续由各自 crate 持有。两个 crate 均为 `no_std` 核心、禁止 unsafe，并通过分代句柄、结构化错误、固定容量 frustum、批量查询和稳定排序维持性能与可维护性。提交记录为 `f717eff15`（运行时实现）与 `e7df20525`（ABI/公共契约修正）。
+
+本文中涉及的渲染后处理算法、物理后端、XR 设备驱动和 ECS 组件装配由对应所有者消费这些稳定契约；它们不复制相机矩阵或历史真相。相机核心的交付验收以两个 crate 的 API、单元测试、ABI 检查和真实设备投影 parity 为准；跨模块能力继续沿同一契约接入，不改变相机数学与历史协议。
 
 ### 27.2 风险处置表
 

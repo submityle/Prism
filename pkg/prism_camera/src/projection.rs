@@ -100,14 +100,23 @@ impl Projection {
                 }
             }
             Self::Orthographic(p) => {
-                if !p.width.is_finite() || !p.height.is_finite() || p.width <= 0.0 || p.height <= 0.0 {
+                if !p.width.is_finite()
+                    || !p.height.is_finite()
+                    || p.width <= 0.0
+                    || p.height <= 0.0
+                {
                     return Err(ProjectionError::InvalidAspect);
                 }
                 if !p.near.is_finite() || !p.far.is_finite() || p.far <= p.near {
                     return Err(ProjectionError::InvalidFar);
                 }
             }
-            Self::Custom { clip_from_view, near, far, .. } => {
+            Self::Custom {
+                clip_from_view,
+                near,
+                far,
+                ..
+            } => {
                 if !matrix_is_finite(clip_from_view) {
                     return Err(ProjectionError::NonFiniteMatrix);
                 }
@@ -126,26 +135,49 @@ impl Projection {
 
     pub fn clip_from_view(self) -> Result<Mat4, CameraError> {
         self.validate().map_err(|e| match e {
-            ProjectionError::InvalidFov => CameraError::new(CameraErrorCode::InvalidProjection, "fov_y", 0.0),
-            ProjectionError::InvalidAspect => CameraError::new(CameraErrorCode::InvalidProjection, "aspect", 0.0),
-            ProjectionError::InvalidNear => CameraError::new(CameraErrorCode::InvalidProjection, "near", 0.0),
-            ProjectionError::InvalidFar => CameraError::new(CameraErrorCode::InvalidProjection, "far", 0.0),
-            ProjectionError::NonFiniteMatrix => CameraError::new(CameraErrorCode::NonFiniteDerivedView, "projection", 0.0),
+            ProjectionError::InvalidFov => {
+                CameraError::new(CameraErrorCode::InvalidProjection, "fov_y", 0.0)
+            }
+            ProjectionError::InvalidAspect => {
+                CameraError::new(CameraErrorCode::InvalidProjection, "aspect", 0.0)
+            }
+            ProjectionError::InvalidNear => {
+                CameraError::new(CameraErrorCode::InvalidProjection, "near", 0.0)
+            }
+            ProjectionError::InvalidFar => {
+                CameraError::new(CameraErrorCode::InvalidProjection, "far", 0.0)
+            }
+            ProjectionError::NonFiniteMatrix => {
+                CameraError::new(CameraErrorCode::NonFiniteDerivedView, "projection", 0.0)
+            }
         })?;
         Ok(match self {
-            Self::Perspective(p) if p.reverse_z && p.far.is_none() =>
-                prism_math::perspective_infinite_reverse_z_rh(p.fov_y, p.aspect, p.near),
-            Self::Perspective(p) if p.reverse_z =>
-                prism_math::perspective_reverse_z_rh(p.fov_y, p.aspect, p.near, p.far.unwrap()),
-            Self::Perspective(p) =>
-                prism_math::perspective_rh(p.fov_y, p.aspect, p.near, p.far.unwrap()),
+            Self::Perspective(p) if p.reverse_z && p.far.is_none() => {
+                prism_math::perspective_infinite_reverse_z_rh(p.fov_y, p.aspect, p.near)
+            }
+            Self::Perspective(p) if p.reverse_z => {
+                prism_math::perspective_reverse_z_rh(p.fov_y, p.aspect, p.near, p.far.unwrap())
+            }
+            Self::Perspective(p) => {
+                prism_math::perspective_rh(p.fov_y, p.aspect, p.near, p.far.unwrap())
+            }
             Self::Orthographic(p) => {
                 let mut m = prism_math::orthographic_rh(
-                    -p.width * 0.5, p.width * 0.5, -p.height * 0.5, p.height * 0.5, p.near, p.far,
+                    -p.width * 0.5,
+                    p.width * 0.5,
+                    -p.height * 0.5,
+                    p.height * 0.5,
+                    p.near,
+                    p.far,
                 );
                 if p.reverse_z {
                     m = prism_math::orthographic_rh(
-                        -p.width * 0.5, p.width * 0.5, -p.height * 0.5, p.height * 0.5, p.far, p.near,
+                        -p.width * 0.5,
+                        p.width * 0.5,
+                        -p.height * 0.5,
+                        p.height * 0.5,
+                        p.far,
+                        p.near,
                     );
                 }
                 m
@@ -181,7 +213,13 @@ impl Projection {
     pub fn frustum_corners(self, z_near: f32, z_far: f32) -> Result<[Vec3A; 8], CameraError> {
         let p = match self {
             Self::Perspective(p) => p,
-            _ => return Err(CameraError::new(CameraErrorCode::InvalidProjection, "frustum_corners", 0.0)),
+            _ => {
+                return Err(CameraError::new(
+                    CameraErrorCode::InvalidProjection,
+                    "frustum_corners",
+                    0.0,
+                ))
+            }
         };
         let tan_half = libm::tanf(p.fov_y * 0.5);
         let nh = tan_half * z_near;
@@ -189,10 +227,14 @@ impl Projection {
         let fh = tan_half * z_far;
         let fw = fh * p.aspect;
         Ok([
-            Vec3A::new(-nw, -nh, -z_near), Vec3A::new(nw, -nh, -z_near),
-            Vec3A::new(nw, nh, -z_near), Vec3A::new(-nw, nh, -z_near),
-            Vec3A::new(-fw, -fh, -z_far), Vec3A::new(fw, -fh, -z_far),
-            Vec3A::new(fw, fh, -z_far), Vec3A::new(-fw, fh, -z_far),
+            Vec3A::new(-nw, -nh, -z_near),
+            Vec3A::new(nw, -nh, -z_near),
+            Vec3A::new(nw, nh, -z_near),
+            Vec3A::new(-nw, nh, -z_near),
+            Vec3A::new(-fw, -fh, -z_far),
+            Vec3A::new(fw, -fh, -z_far),
+            Vec3A::new(fw, fh, -z_far),
+            Vec3A::new(-fw, fh, -z_far),
         ])
     }
 }
