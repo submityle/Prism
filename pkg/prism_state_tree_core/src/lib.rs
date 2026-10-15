@@ -15,14 +15,18 @@ mod behavior_pack;
 mod binding;
 mod codec;
 mod counterfactual;
+mod debugger;
 mod frame;
+mod group_contract;
 mod model;
 mod model_verify;
+mod replication_contract;
 mod replay;
 mod resilience;
 mod revision;
 mod runtime;
 mod schema;
+mod spatial_query;
 mod snapshot;
 mod task_contract;
 mod telemetry;
@@ -48,7 +52,19 @@ pub use counterfactual::{
     CounterfactualTrace, DecisionTag, DecisionTagEdit, MAX_COUNTERFACTUAL_OVERRIDES,
     MAX_COUNTERFACTUAL_RECORDS,
 };
+pub use debugger::{
+    Breakpoint, CapacityKind as DebuggerCapacityKind, DebugEvent, DebugObservation, Debugger,
+    DebuggerCapacity, DebuggerError, HitRecord, MigrationCause, MigrationCauseId, MigrationChain,
+    TaskId, TaskOutcome, TraceCursor, MAX_DEBUGGER_BREAKPOINTS, MAX_DEBUGGER_HITS,
+    MAX_DEBUGGER_MIGRATION_CAUSES,
+};
 pub use frame::{FrameError, FrameField, FrameLayout, InstanceFrame};
+pub use group_contract::{
+    AccessContractError, AccessGrant, AccessMode, ActorId, BlackboardError, BlackboardKey, ClaimId,
+    ClaimLease, ClaimMode, ConcurrentWritePolicy, GroupAccessContract, GroupNode, GroupNodeId,
+    GroupTree, GroupTreeError, NegotiationDecision, NegotiationDecisionKind, NegotiationOperation,
+    NegotiationRejectReason, NegotiationRequest, RequestId, SharedBlackboard, SharedBlackboardKey,
+};
 pub use model::{
     EventId, GuardId, HistoryMode, NodeKind, Plan, PlanError, StateId, StateNode, Transition,
     TransitionKind, TransitionTarget, TreeDef, Trigger,
@@ -57,6 +73,13 @@ pub use model_verify::{
     verify, Diagnostic as ModelDiagnostic, DiagnosticCode as ModelDiagnosticCode,
     DiagnosticSeverity as ModelDiagnosticSeverity, PathStep, PathStepKind, TransitionCoverage,
     VerificationLimits, VerificationPath, VerificationReport,
+};
+pub use replication_contract::{
+    AuthorityMode, PlanRevisionHandshake, PlanRevisionHandshakeError,
+    PlanRevisionHandshakePolicy, PlanRevisionHandshakeStatus, PredictionSafety,
+    PredictionSafetyReason, ReplicationContractError, ReplicationPolicy, RollbackInput,
+    RollbackInputBuffer, RollbackInputContract, StateTreeReplicationPolicy, MAX_ROLLBACK_INPUTS,
+    MAX_ROLLBACK_INPUT_BYTES, MAX_ROLLBACK_INPUT_SIZE,
 };
 pub use replay::{
     active_state_digest, ActiveStateDigest, DivergenceReport, PlanDigest, ReplayError,
@@ -81,6 +104,11 @@ pub use schema::{
     ContextRef, Schema, SchemaCapabilities, SchemaDescriptor, SchemaError, SchemaId, SchemaVersion,
 };
 pub use snapshot::{RestoreError, Snapshot, SnapshotCodecError};
+pub use spatial_query::{
+    FixedVec3, QueryCandidate, QueryError, QueryEvaluator, QueryKind, QueryRequest, QueryResult,
+    QuerySample, QueryWeights, SampleSet, ScoredCandidate, MAX_QUERY_CANDIDATES, MAX_QUERY_RESULTS,
+    MAX_QUERY_SAMPLES, QUERY_SCORE_SCALE,
+};
 pub use task_contract::{
     AbortReason, AccessSet, Cadence, CadenceError, CancelWindow, CancelWindowError, InterruptTier,
     InterruptTierError, InterruptTierSet, Outcome, ReplaySafety, RequestKind, RequestQueue,
