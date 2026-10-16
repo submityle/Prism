@@ -139,7 +139,7 @@ prior/current reservoirs、specular/TAA history 是 Persistent；GI resolved、f
 
 `submission_gpu_tests.rs` 的两项真实设备回归为 `execute_owned_gpu_clone_preserves_buffers_through_completion_and_readback` 和 `execute_owned_gpu_early_drop_completes_copies_and_retires_callback_resources`。同一 runtime/device 上，非零 payload 经外部 upload → graph-owned Transient → graph-owned Persistent → 外部 readback 的实际 transfer；检查 readback、真实 callback、clone 保活与 early drop 后回收。释放最后 owner 后，重分配复用旧槽且 generation 加一，验证 backend 表旧 ID 不再存活；不宣称 OS/driver heap 已归还。无硬件时默认可 skip，但 `PRISM_REQUIRE_GPU=1` 下必须失败；设备创建错误始终失败。early-drop GPU 用例不假设快速硬件尚未完成，完成前保活由 controlled 测试补充。
 
-当前 Scene 证据对应 `SceneFabric` 冻结选择准入、`shading_frame_graph().compile()`、真实 BoxedSystem 与 Bevy 原生资源/提交路径。它不等同于同一 frozen selection 下 `DeviceFabric::compile → prepare_runtime → 真实 RHI 资源与 pass callbacks → Bevy 原生提交 → completion/history 回收` 的整帧集成证据；runtime 的独立 buffer GPU 验证也只证明其自身路径。FeatureDefinition/FeatureVariant/PassTemplate 仍是 Fabric 的单一声明权威，不能把专用 shading binding 表描述为另一套 Fabric 声明或完整替代编译链。
+当前 Scene 证据对应 `SceneFabric` 冻结选择准入、启动期一次 `DeviceFabric::compile`、每帧 `prepare_runtime`/真实 adapter callback/Bevy 原生提交，以及专用 `shading_frame_graph().compile()`、真实 BoxedSystem 与 Bevy 原生资源路径。它不等同于同一 frozen selection 下以真实 Scene payload、动态 FrameLag 和 completion/history 回收为约束的完整整帧集成证据；runtime 的独立 buffer GPU 验证也只证明其自身路径。FeatureDefinition/FeatureVariant/PassTemplate 仍是 Fabric 的单一声明权威，不能把专用 shading binding 表描述为另一套 Fabric 声明或完整替代编译链。
 
 ## 已执行检查点与证据限制
 

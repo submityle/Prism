@@ -25,13 +25,13 @@ use prism_render_material::MaterialRecord;
 use prism_render_visibility::{DrawBinCandidate, DrawBinKey, GpuRenderWorkItem};
 
 use crate::draw::DrawFunctionId;
-use crate::frame::RENDER_TARGET_FORMAT;
-use crate::mesh::RenderMesh;
-use crate::mesh_pipeline::MeshPipelineKey;
 use crate::feature_mapping::{
     FeatureMappingCache, FeatureMappingCacheStats, FeatureMappingError, FeaturePassBinding,
     FeatureSelectionMapper,
 };
+use crate::frame::RENDER_TARGET_FORMAT;
+use crate::mesh::RenderMesh;
+use crate::mesh_pipeline::MeshPipelineKey;
 use crate::mesh_pipelines::ResponseModuleCache;
 use crate::pipeline_pass::{
     PassDescriptor, PassDescriptorClass, PassDescriptorTable, PassRole, PassSetError,
@@ -214,11 +214,8 @@ impl SceneRegistry {
         feature_id: FeatureId,
         bindings: &[FeaturePassBinding],
     ) -> Result<u32, FeatureMappingError> {
-        let mut mapper = FeatureSelectionMapper::with_cache(
-            device,
-            modules,
-            &mut self.feature_mapping_cache,
-        );
+        let mut mapper =
+            FeatureSelectionMapper::with_cache(device, modules, &mut self.feature_mapping_cache);
         let pass_set = match mapper.map_feature(selection, feature_id, bindings) {
             Ok(pass_set) => pass_set,
             Err(error) => {
@@ -246,6 +243,21 @@ impl SceneRegistry {
     #[must_use]
     pub fn feature_mapping_cache_stats(&self) -> FeatureMappingCacheStats {
         self.feature_mapping_cache.stats()
+    }
+
+    /// Number of mappings awaiting reuse for the current module-cache
+    /// generation.
+    #[must_use]
+    pub fn feature_mapping_cache_len(&self) -> usize {
+        self.feature_mapping_cache.len()
+    }
+
+    /// Invalidates mappings whose pass descriptors were produced against a
+    /// previous device/module-cache generation. The material records remain
+    /// published; only future feature-selection ingestion is forced through
+    /// module validation again.
+    pub fn invalidate_feature_mapping_cache(&mut self) {
+        self.feature_mapping_cache.invalidate();
     }
 
     /// Binds an already resolved DriverLocal pass set. Both direct and bin
@@ -534,4 +546,37 @@ pub fn coarse_sort_key(
     prism_render_visibility::WorkSortKey(
         (key.0 & !(0xffu64 << 48)) | (u64::from(class.get()) << 48),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use prism_render_architecture::abi::GenerationalHandle;
+    use prism_render_material::fallback_material_record;
+
+    #[test]
+    fn failed_pass_set_install_does_not_publish_partial_material_state() {
+        let handle = GenerationalHandle::new(0x42, 1);
+        let material = fallback_material_record(handle, 1);
+        let mut registry = SceneRegistry::new();
+
+        assert_eq!(
+            registry.install_material_pass_set(material.clone(), Vec::new()),
+            Err(PassSetError::Empty)
+        );
+        assert_eq!(registry.material_count(), 0);
+        assert!(registry.material(handle).is_none());
+        assert!(registry.material_pass_index(handle).is_none());
+
+        registry.insert_material(material);
+        let old_index = registry.material_pass_index(handle);
+        assert_eq!(
+            registry.install_material_pass_set(fallback_material_record(handle, 2), Vec::new()),
+            Err(PassSetError::Empty)
+        );
+        assert_eq!(registry.material_count(), 1);
+        assert_eq!(registry.material_pass_index(handle), old_index);
+        assert_eq!(registry.material(handle).unwrap().handle, handle);
+    }
 }

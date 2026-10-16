@@ -55,6 +55,8 @@
 
 当前 `runtime.rs` 的 `prepare_runtime` 对 recorder/import 做 exact coverage 校验。PassKey 索引加顺序 callback 槽的 coverage 复杂度为 `O((P + R) log P)`，保留确定的 unexpected/duplicate/missing 错误，不再每 recorder 线性扫全部 pass。
 
+2026-10-16，Scene adapter 的 `gpu/fabric.rs` 已将 `DeviceFabric::compile` 移到 `RenderStartup`：启动期创建固定 probe 资源、绑定表和 `CompiledFeatureGraph`，Render 帧只克隆已冻结的声明并执行 `prepare_runtime → record → Bevy 原生提交`。`SceneFabricDiagnostics` 记录 compile/prepare 次数、缓存命中、录制帧数及 compile/prepare 错误；因此不会再把每帧 compile 当作正常路径。这里仍是固定 frame=1 的 adapter probe：每帧 prepare 仍会创建一次 move-only `PreparedGraph`，并未解决动态 FrameLag、真实 Scene payload、completion/history retirement 或 pass-specific production recorders。
+
 runtime 保留控制依赖，从每次访问的 `input_ssa_version` 取 handle，并核对写出的 authority 版本。`verify_plan` 对 order/liveness/position/queue batches、逐访问输入输出版本和 logical barriers 做语义投影核对：texture/buffer namespace 分离；源/目标 pass 与原始 access ordinal、重复访问的 multiplicity 均保留，不能只比较资源索引或 barrier 数量。
 
 `RuntimeFeatureGraph::record` 对接 graph 的 `PreparedGraph / RecordedGraph / GraphAllocations`：`RenderGraph::prepare` 编译一次并冻结计划，不创建 GPU 资源、不运行执行 callback；`PreparedGraph::record` 使用同一计划，不再编译、不 submit。裸 `RecordedGraph` 持有 commands、plan 与 allocation owner，可用 `into_parts` 交给外部提交方；graph/Fabric 的 `execute` 是 record 后提交的便捷入口。裸 owner 需要在确认完成后显式 release，单纯 Drop 不销毁 GPU 资源；imports 始终由外部持有。
@@ -69,7 +71,7 @@ PCM 使用真实 `ExtensionRegistry / ExtensionManifest / CapabilitySet`；静�
 
 Scene 已有实际接入：`gpu/fabric.rs::init_scene_fabric` 从拥有 Scene buffers 的 Bevy RenderDevice 冻结内建根与选择；`shading/plugin.rs` 显式在其后初始化 shading execution。shading/water 用冻结 variant 准入、真实 executor 和 WaterSurface 外部执行站点，不由可见水体或 extracted items 动态增删根。
 
-Scene 的当前生产执行仍是专用 shading 声明图、Core3d driver 与各 per-view resource owner。其 SSR→GI/denoise→SSGI→TAA 实际调用和资源见 `docs/frame_graph_implementation_zh.md`。这证明已有选择/执行接入，**不表示通用 ResourceTemplates→prepare_runtime→record→Scene 原生提交与完成回收的整条生产路径已经完成**。
+Scene 的当前生产执行仍是专用 shading 声明图、Core3d driver 与各 per-view resource owner。其 SSR→GI/denoise→SSGI→TAA 实际调用和资源见 `docs/frame_graph_implementation_zh.md`。本轮新增的 compile-once adapter 只证明冻结声明可以进入真实 Scene RHI 的 runtime prepare/record/submit 接缝，**不表示通用 ResourceTemplates→prepare_runtime→record→Scene 原生提交与完成回收的整条生产路径已经完成**。
 
 ## 已执行检查点与本次核对范围
 

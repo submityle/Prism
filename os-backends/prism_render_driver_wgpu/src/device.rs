@@ -302,6 +302,29 @@ impl DeviceInner {
             .clone()
     }
 
+    /// Registers an externally-created buffer (for example a host renderer's
+    /// persistent scene buffer) into the slot map and returns its RHI id.
+    ///
+    /// The RHI table stores only a clone of the native handle. The caller keeps
+    /// ownership of the underlying wgpu buffer and must release the returned
+    /// table entry with [`release_buffer`](Self::release_buffer) when the ID is
+    /// no longer used. This is deliberately separate from `create_buffer`:
+    /// releasing the registration never destroys the host-owned native buffer.
+    pub fn register_buffer(&self, buffer: &wgpu::Buffer) -> rhi::BufferId {
+        let id = lock(&self.inner.buffers).insert(StoredBuffer {
+            buffer: buffer.clone(),
+        });
+        convert::convert_id(id)
+    }
+
+    /// Releases a buffer registered with [`register_buffer`](Self::register_buffer).
+    ///
+    /// The ID is table-local and becomes stale immediately. The native buffer
+    /// remains alive through the host's handle and any command-buffer refs.
+    pub fn release_buffer(&self, id: rhi::BufferId) {
+        lock(&self.inner.buffers).remove(convert::convert_id(id));
+    }
+
     /// Registers an externally-created texture (e.g. a swapchain image) into the
     /// slot map and returns its RHI id.
     ///

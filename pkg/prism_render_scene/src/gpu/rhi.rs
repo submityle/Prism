@@ -93,6 +93,19 @@ impl SceneRhi {
         }
     }
 
+    /// Registers a Bevy-owned buffer without taking ownership of its native
+    /// allocation. The returned lease owns only the table entry; dropping it
+    /// removes the RHI ID and never destroys the Bevy buffer.
+    #[must_use]
+    pub fn import_buffer(&self, buffer: &Buffer) -> SceneRhiImportedBuffer {
+        let id = self.device.register_buffer(buffer.deref());
+        SceneRhiImportedBuffer {
+            device: Arc::clone(&self.device),
+            id,
+            buffer: buffer.clone(),
+        }
+    }
+
     /// Allocates through RHI and exports the exact native texture to Bevy.
     ///
     /// Backend conversion failures are returned; native validation retains the
@@ -139,6 +152,39 @@ pub struct SceneRhiBuffer {
     device: Arc<WgpuDevice>,
     id: rhi::BufferId,
     buffer: Buffer,
+}
+
+/// Non-owning RHI table lease for a buffer owned by Bevy's render resource
+/// system. The native handle is cloned only to keep the host allocation alive;
+/// the lease Drop path releases the table registration, not the native buffer.
+#[must_use = "retain the lease while its RHI ID is needed"]
+pub struct SceneRhiImportedBuffer {
+    device: Arc<WgpuDevice>,
+    id: rhi::BufferId,
+    buffer: Buffer,
+}
+
+impl SceneRhiImportedBuffer {
+    #[must_use]
+    pub fn id(&self) -> rhi::BufferId {
+        self.id
+    }
+
+    #[must_use]
+    pub fn device(&self) -> &Arc<WgpuDevice> {
+        &self.device
+    }
+
+    #[must_use]
+    pub fn buffer(&self) -> &Buffer {
+        &self.buffer
+    }
+}
+
+impl Drop for SceneRhiImportedBuffer {
+    fn drop(&mut self) {
+        self.device.release_buffer(self.id);
+    }
 }
 
 impl SceneRhiBuffer {
@@ -359,8 +405,56 @@ mod tests {
         resource::<SceneRhi>();
         send_sync::<SceneRhi>();
         send_sync::<SceneRhiBuffer>();
+        send_sync::<SceneRhiImportedBuffer>();
         send_sync::<SceneRhiTexture>();
         send_sync::<SceneRhiTextureView>();
+    }
+
+    #[test]
+    fn imported_buffer_lease_releases_only_the_table_entry() {
+        let Some(host) = host_or_skip() else { return };
+        let bridge = host.bridge();
+        let native = host.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene-rhi-imported-buffer"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let imported = bridge.import_buffer(&Buffer::from(native.clone()));
+        let id = imported.id();
+        assert_eq!(imported.buffer().size(), 16);
+        assert_eq!(imported.device().wgpu_buffer(id), native);
+        let device = Arc::clone(imported.device());
+        drop(imported);
+        assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_buffer(id))).is_err());
+        host.queue.write_buffer(&native, 0, &[9, 8, 7, 6]);
+        assert_eq!(&read_buffer(&host, &Buffer::from(native))[..4], &[9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn imported_buffer_ids_are_table_local_and_replacement_is_stale_safe() {
+        let Some(host) = host_or_skip() else { return };
+        let first = host.bridge();
+        let second = host.bridge();
+        let native = Buffer::from(host.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene-rhi-import-table-local"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }));
+        let old = first.import_buffer(&native);
+        let old_id = old.id();
+        let other = second.import_buffer(&native);
+        let other_id = other.id();
+        assert_eq!(first.device().wgpu_buffer(old_id), *native);
+        assert_eq!(second.device().wgpu_buffer(other_id), *native);
+        assert!(catch_unwind(AssertUnwindSafe(|| first.device().wgpu_buffer(other_id))).is_err());
+        drop(old);
+        assert!(catch_unwind(AssertUnwindSafe(|| first.device().wgpu_buffer(old_id))).is_err());
+        assert_eq!(second.device().wgpu_buffer(other_id), *native);
+        let replacement = first.import_buffer(&native);
+        assert_ne!(replacement.id(), old_id);
+        assert_eq!(first.device().wgpu_buffer(replacement.id()), *native);
     }
 
     #[test]

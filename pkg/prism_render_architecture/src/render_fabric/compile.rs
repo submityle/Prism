@@ -714,7 +714,7 @@ pub struct FrameResourceVersion {
     pub content_version: u32,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CompiledFeatureGraph {
     frame: u64,
     limits: GraphLimits,

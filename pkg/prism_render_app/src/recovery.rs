@@ -103,6 +103,13 @@ where
                         return Err("recovery has no replacement device".into());
                     }
                     world.resource_mut::<MeshPipelines>().begin_recovery();
+                    // A replacement device starts a new module generation.
+                    // Drop feature mappings before provider recovery can fail,
+                    // so no retry can observe pass descriptors from the old
+                    // generation.
+                    world
+                        .resource_mut::<crate::scene::SceneRegistry>()
+                        .invalidate_feature_mapping_cache();
                 }
                 let runtime = runtime.runtime();
                 let extent = world.resource::<RenderTarget>().viewport().extent();

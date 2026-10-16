@@ -1,0 +1,992 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="ALL" />
+  </component>
+  <component name="CargoProjects">
+    <cargoProject FILE="$PROJECT_DIR$/Cargo.toml">
+      <package file="$PROJECT_DIR$/examples/reflection/auto_register_static">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/benches">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_settings">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_a11y">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_android">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_animation">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_animation/macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_anti_alias">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_app">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_asset">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_asset/macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_audio">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_camera">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_camera_controller">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/examples/large_scenes/bevy_city">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_clipboard">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_color">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_core_pipeline">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_curve">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_derive">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_derive/compile_fail">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_dev_tools">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_diagnostic">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_dylib">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_ecs">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_ecs/compile_fail">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_ecs/macro_logic">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_ecs/macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_encase_derive">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_extract">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_extract/macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_feathers">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_gilrs">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_gizmos">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_gizmos/macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_gizmos_render">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_gltf">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_image">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_input">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_input_focus">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_internal">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_light">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_log">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_macro_utils">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_material">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_material/macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_math">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_mesh">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/examples/mobile">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_pbr">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_picking">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_platform">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_post_process">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_ptr">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_reflect">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_reflect/compile_fail">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_reflect/derive">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_remote">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_render">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_render/macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_scene">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_scene/macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_shader">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_shape">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_solari">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_sprite">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_sprite_render">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_state">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_state/macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_tasks">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_text">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_time">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_transform">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_ui">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_ui_render">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_ui_widgets">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_utils">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_window">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_winit">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/crates/bevy_world_serialization">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/examples/large_scenes/bistro">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/tools/build-easefunction-graphs">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/tools/build-templated-pages">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/tools/build-wasm-example">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/examples/large_scenes/caldera_hotel">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/tools/ci">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/tools/compile_fail_utils">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/errors">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/tools/example-showcase">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/tools/export-content">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/examples/large_scenes/mipmap_generator">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/examples/no_std/library">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_app">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_asset">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_asset_build_core">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_asset_container">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_accessibility">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_assets">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_authoring">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_bevy">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_codec">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_comm">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_conditioning">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_content">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_core">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_device">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_exec">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_geometry">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_geometry_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_governor">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_haptics">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_hrtf">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_immersive">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_midi">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_music">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_object">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_output">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_physics">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_procedural">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_profiler">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_remote">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_resample">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_rt">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_snapshot">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_spatial">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_audio_wave">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_bevy">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_diagnostic">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_dmm">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_dmm_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ecs">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ecs_macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_gdeflate_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_hair_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_image">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_input">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_material_pcm">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_material_schema">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_math">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_math_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_mesh">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_micromap">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_micromap_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_motion_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_physics_core">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_physics_geometry">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_physics_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_platform">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_platform_os">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_radiance_cascades_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ray_reorder_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_reflect">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_reflect_macros">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_app">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_architecture">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_driver">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/os-backends/prism_render_driver_null">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/os-backends/prism_render_driver_wgpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_gpudriven">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_graph">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_material">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_material_authoring">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_material_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_runtime">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_scene">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_shading">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_render_visibility">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_replication">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_scene">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_shader">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_state_tree_core">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_state_tree_ecs">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_tasks">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_time">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_transform">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_transform_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_a11y">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_anim">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_async">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_component">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_component_kit">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_devtools">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_dock">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_ecs">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_font">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_form">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_hotreload">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_i18n">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_input">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_inspector">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_layout">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_macro">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_motion">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_overlay">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_reactive">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_render_backend">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_router">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_scheduler">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_scoped">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_sdui">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_snapshot">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_store">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_style">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_text">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_theme">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_timetravel">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_tree">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_virtual">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_ui_workbench">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_utils">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_virtual_geometry_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_virtual_texture_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_volumetric_gpu">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_water_render">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_window">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/pkg/prism_window_winit">
+        <feature name="default" enabled="true" />
+      </package>
+      <package file="$PROJECT_DIR$/tools/render_triangle">
+        <feature name="default" enabled="true" />
+      </package>
+    </cargoProject>
+    <cargoProject FILE="$PROJECT_DIR$/crates/bevy_color/crates/gen_tests/Cargo.toml">
+      <package file="$PROJECT_DIR$/crates/bevy_color/crates/gen_tests">
+        <feature name="default" enabled="true" />
+      </package>
+    </cargoProject>
+    <cargoProject FILE="$PROJECT_DIR$/tests-integration/simple-ecs-test/Cargo.toml">
+      <package file="$PROJECT_DIR$/tests-integration/simple-ecs-test">
+        <feature name="default" enabled="true" />
+      </package>
+    </cargoProject>
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="650109ad-5ef3-4093-ab2d-dcdc00084313" name="更改" comment="" />
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:test" />
+  <component name="Git.Settings">
+    <option name="RECENT_BRANCH_BY_REPOSITORY">
+      <map>
+        <entry key="$PROJECT_DIR$" value="main" />
+      </map>
+    </option>
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="MacroExpansionManager">
+    <option name="directoryName" value="FX0VUhY2" />
+  </component>
+  <component name="ProjectColorInfo"><![CDATA[{
+  "associatedIndex": 2,
+  "fromUser": false
+}]]></component>
+  <component name="ProjectId" id="3KdoWMo52OQPQrb0jUIqq1deWZL" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "Git.Working.Tree.Tab.closed.by.user": "closed",
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.rust.reset.selective.auto.import": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "codeWithMe.voiceChat.enabledByDefault": "false",
+    "last_opened_file_path": "/Users/wangkailong/Documents/GitHub/Prism",
+    "nodejs_package_manager_path": "npm",
+    "org.rust.cargo.project.model.PROJECT_DISCOVERY": "true",
+    "org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon": "",
+    "org.rust.first.attach.projects": "true",
+    "vue.rearranger.settings.migration": "true"
+  }
+}]]></component>
+  <component name="RunManager" selected="Cargo.Test bevy">
+    <configuration name="Run bevy_city" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package bevy_city --bin bevy_city" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run bevy_mobile_example" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package bevy_mobile_example --bin bevy_mobile_example" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run bistro" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package bistro --bin bistro" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run build-easefunction-graphs" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package build-easefunction-graphs --bin build-easefunction-graphs" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run build-templated-pages" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package build-templated-pages --bin build-templated-pages" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run build-wasm-example" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package build-wasm-example --bin build-wasm-example" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run caldera_hotel" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package caldera_hotel --bin caldera_hotel" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run ci" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package ci --bin ci" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run example-showcase" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package example-showcase --bin example-showcase" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run export-content" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package export-content --bin export-content" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run main" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package auto_register_static --bin main" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run prism-material-codegen" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package prism_material_schema --bin prism-material-codegen" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Run render_triangle" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package render_triangle --bin render_triangle" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="Test bevy" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="buildProfileId" value="test" />
+      <option name="command" value="test --workspace" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+  </component>
+  <component name="RustProjectSettings">
+    <option name="toolchainHomeDirectory" value="$USER_HOME$/.cargo/bin" />
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="默认任务">
+      <changelist id="650109ad-5ef3-4093-ab2d-dcdc00084313" name="更改" comment="" />
+      <created>1791896838364</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1791896838364</updated>
+      <workItem from="1791896840560" duration="227000" />
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>

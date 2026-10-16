@@ -10,7 +10,9 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use core::fmt;
 
 use prism_render_architecture::render_fabric::{
-    FeatureId, FeatureSelection, PassKey, SelectedFeature, ShaderPermutationBinding, VariantId,
+    AccessKind, FeatureId, FeatureSelection, PassKey, PassTemplate, QueueClass, RenderQualityTier,
+    ResourceInput, ResourceKey, ResourceOwner, ResourceScope, ResourceUse, SelectedFeature,
+    ShaderPermutationBinding, VariantId,
 };
 use prism_render_architecture::shader_package::{
     PermutationError, PermutationIndex, PermutationKey, PermutationSpace,
@@ -187,9 +189,18 @@ impl FeatureMappingCache {
         }
     }
 
-    /// Drops all mappings after a device/module-cache replacement.
-    pub fn clear(&mut self) {
+    /// Invalidates every mapping after a device or response-module cache
+    /// recovery. Counters are retained so diagnostics can observe the
+    /// invalidation boundary without losing the preceding hit/miss history.
+    pub fn invalidate(&mut self) {
         self.entries.clear();
+    }
+
+    /// Compatibility alias for callers that used the cache as a plain
+    /// clearable container. New recovery code should call [`Self::invalidate`]
+    /// so the device/module lifecycle is explicit at the call site.
+    pub fn clear(&mut self) {
+        self.invalidate();
     }
 
     /// Number of resident semantic mappings.
@@ -330,16 +341,33 @@ impl<'a, D: RenderDevice + ?Sized> FeatureSelectionMapper<'a, D> {
         // device-wide closure. Keep the hot key compact and injective; shader
         // source descriptors are deliberately checked again by `intern` on a
         // hit so an ABI/source drift cannot be hidden by this cache.
-        let cache_key = mapping_cache_key(selected, &ordered);
+        let cache_key = mapping_cache_key(selection, selected, &ordered);
         if let Some(cache) = self.cache.as_deref_mut() {
             if let Some(cached) = cache.entries.get(&cache_key).cloned() {
-                for binding in &ordered {
-                    self.modules
-                        .intern(self.device, binding.module.clone())
-                        .map_err(FeatureMappingError::Module)?;
+                let mut valid = cached.passes().len() == ordered.len();
+                if valid {
+                    for (binding, pass) in ordered.iter().zip(cached.passes()) {
+                        let permutation = resolve_permutation(selected, binding)?;
+                        let module_id = self
+                            .modules
+                            .intern(self.device, binding.module.clone())
+                            .map_err(FeatureMappingError::Module)?;
+                        // A module cache may have been replaced rather than
+                        // rebuilt in place. Do not return descriptors carrying
+                        // module IDs from the old cache generation.
+                        if module_id != pass.response_module_id
+                            || permutation != pass.permutation_index
+                        {
+                            valid = false;
+                            break;
+                        }
+                    }
                 }
-                cache.hits = cache.hits.saturating_add(1);
-                return Ok(cached);
+                if valid {
+                    cache.hits = cache.hits.saturating_add(1);
+                    return Ok(cached);
+                }
+                cache.entries.remove(&cache_key);
             }
             cache.misses = cache.misses.saturating_add(1);
         }
@@ -388,8 +416,45 @@ fn push_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
     bytes.extend_from_slice(value);
 }
 
-fn mapping_cache_key(selected: &SelectedFeature, bindings: &[&FeaturePassBinding]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(192);
+fn mapping_cache_key(
+    selection: &FeatureSelection,
+    selected: &SelectedFeature,
+    bindings: &[&FeaturePassBinding],
+) -> Vec<u8> {
+    // The mapper is device-local, but the cache key must still describe the
+    // complete frozen selection. In particular, an author may replace a
+    // variant declaration while retaining its numeric feature/variant IDs.
+    // Encoding the public semantic identity prevents that replacement from
+    // reusing a stale pass set.
+    let mut key = Vec::with_capacity(512);
+    push_u32(&mut key, 0x504d_4348); // versioned "PMCH" key format
+    push_u64(&mut key, selection.roots().ids().len() as u64);
+    for id in selection.roots().ids() {
+        push_u32(&mut key, id.0);
+    }
+    push_u64(&mut key, selection.roots().subsystems().len() as u64);
+    for id in selection.roots().subsystems() {
+        push_u32(&mut key, id.0);
+    }
+    push_u64(&mut key, selection.roots().responses().len() as u64);
+    for id in selection.roots().responses() {
+        push_u32(&mut key, id.0);
+    }
+    push_u32(&mut key, selection.device_caps().bits());
+    push_u8(&mut key, quality_tag(selection.quality()));
+    push_ids(&mut key, selection.closure());
+    push_u64(&mut key, selection.selected().len() as u64);
+    for feature in selection.selected() {
+        push_selected_feature_identity(&mut key, feature);
+    }
+    let services: Vec<_> = selection.services().collect();
+    push_u64(&mut key, services.len() as u64);
+    for provider in services {
+        push_u32(&mut key, provider.service().0);
+        push_u32(&mut key, provider.feature().0);
+        push_resource_keys(&mut key, provider.output().resources);
+    }
+
     push_u32(&mut key, selected.feature_id().0);
     push_u32(&mut key, selected.variant_id().0);
     push_u64(&mut key, bindings.len() as u64);
@@ -415,7 +480,10 @@ fn mapping_cache_key(selected: &SelectedFeature, bindings: &[&FeaturePassBinding
             None => key.push(0),
         }
         key.push(binding.sort_class.get());
-        push_bytes(&mut key, binding.module.identity.package.as_str().as_bytes());
+        push_bytes(
+            &mut key,
+            binding.module.identity.package.as_str().as_bytes(),
+        );
         key.extend_from_slice(&binding.module.identity.digest.0);
         push_bytes(&mut key, binding.module.identity.entry_point.as_bytes());
         key.extend_from_slice(&binding.module.identity.binding_layout_digest);
@@ -440,14 +508,170 @@ fn mapping_cache_key(selected: &SelectedFeature, bindings: &[&FeaturePassBinding
         match binding.permutation {
             Some(permutation) => {
                 key.push(1);
-                for coordinate in permutation.key.coords() {
-                    push_u32(&mut key, *coordinate);
-                }
+                push_permutation_space(&mut key, permutation.space);
+                push_permutation_key(&mut key, permutation.key);
             }
             None => key.push(0),
         }
     }
     key
+}
+
+fn push_u8(bytes: &mut Vec<u8>, value: u8) {
+    bytes.push(value);
+}
+
+fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_ids(bytes: &mut Vec<u8>, ids: &[FeatureId]) {
+    push_u64(bytes, ids.len() as u64);
+    for id in ids {
+        push_u32(bytes, id.0);
+    }
+}
+
+fn push_selected_feature_identity(bytes: &mut Vec<u8>, selected: &SelectedFeature) {
+    push_u32(bytes, selected.feature_id().0);
+    push_u32(bytes, selected.variant_id().0);
+    let variant = selected.variant();
+    push_u16(bytes, variant.rank);
+    push_u8(bytes, quality_tag(variant.min_quality));
+    push_u32(bytes, variant.required_caps.bits());
+    push_service_ids(bytes, variant.requires_services_extra.as_slice());
+    push_pass_templates(bytes, variant.passes);
+    push_shader_permutation(bytes, variant.shader_permutation);
+}
+
+fn push_service_ids(
+    bytes: &mut Vec<u8>,
+    services: &[prism_render_architecture::render_fabric::ServiceId],
+) {
+    let mut sorted = services.to_vec();
+    sorted.sort_unstable();
+    push_u64(bytes, sorted.len() as u64);
+    for service in sorted {
+        push_u32(bytes, service.0);
+    }
+}
+
+fn push_pass_templates(bytes: &mut Vec<u8>, passes: &[PassTemplate]) {
+    push_u64(bytes, passes.len() as u64);
+    for pass in passes {
+        push_u32(bytes, pass.id.0);
+        push_u8(bytes, queue_tag(pass.queue));
+        push_u64(bytes, pass.accesses.len() as u64);
+        for access in pass.accesses {
+            push_resource_use(bytes, access);
+        }
+        push_u64(bytes, pass.depends_on.len() as u64);
+        for dependency in pass.depends_on {
+            push_u32(bytes, dependency.0);
+        }
+    }
+}
+
+fn push_resource_use(bytes: &mut Vec<u8>, usage: &ResourceUse) {
+    push_resource_key(bytes, usage.key);
+    push_u8(bytes, access_tag(usage.access));
+    push_u8(bytes, scope_tag(usage.scope));
+    match usage.frame_lag {
+        Some(lag) => {
+            push_u8(bytes, 1);
+            push_u32(bytes, lag.frames());
+        }
+        None => push_u8(bytes, 0),
+    }
+    match usage.input {
+        ResourceInput::Automatic => push_u8(bytes, 0),
+        ResourceInput::Initial => push_u8(bytes, 1),
+        ResourceInput::ProducedBy(pass) => {
+            push_u8(bytes, 2);
+            push_u32(bytes, pass.0);
+        }
+    }
+}
+
+fn push_resource_keys(bytes: &mut Vec<u8>, keys: &[ResourceKey]) {
+    push_u64(bytes, keys.len() as u64);
+    for key in keys {
+        push_resource_key(bytes, *key);
+    }
+}
+
+fn push_resource_key(bytes: &mut Vec<u8>, key: ResourceKey) {
+    match key.owner() {
+        ResourceOwner::Engine => {
+            push_u8(bytes, 0);
+        }
+        ResourceOwner::Feature(feature) => {
+            push_u8(bytes, 1);
+            push_u32(bytes, feature.0);
+        }
+    }
+    push_u16(bytes, key.slot());
+}
+
+fn push_shader_permutation(bytes: &mut Vec<u8>, permutation: Option<ShaderPermutationBinding>) {
+    match permutation {
+        Some(permutation) => {
+            push_u8(bytes, 1);
+            push_permutation_space(bytes, permutation.space);
+            push_permutation_key(bytes, permutation.key);
+        }
+        None => push_u8(bytes, 0),
+    }
+}
+
+fn push_permutation_space(bytes: &mut Vec<u8>, space: &PermutationSpace) {
+    push_u64(bytes, space.axis_count() as u64);
+    for axis in 0..space.axis_count() {
+        push_u32(bytes, space.axis_options(axis).expect("bounded axis"));
+    }
+}
+
+fn push_permutation_key(bytes: &mut Vec<u8>, key: &PermutationKey) {
+    push_u64(bytes, key.coords().len() as u64);
+    for coordinate in key.coords() {
+        push_u32(bytes, *coordinate);
+    }
+}
+
+fn quality_tag(quality: RenderQualityTier) -> u8 {
+    match quality {
+        RenderQualityTier::Low => 0,
+        RenderQualityTier::Medium => 1,
+        RenderQualityTier::High => 2,
+        RenderQualityTier::Ultra => 3,
+    }
+}
+
+fn queue_tag(queue: QueueClass) -> u8 {
+    match queue {
+        QueueClass::Graphics => 0,
+        QueueClass::Compute => 1,
+        QueueClass::Transfer => 2,
+    }
+}
+
+fn access_tag(access: AccessKind) -> u8 {
+    match access {
+        AccessKind::SampledRead => 0,
+        AccessKind::StorageRead => 1,
+        AccessKind::StorageWrite => 2,
+        AccessKind::ColorAttachment => 3,
+        AccessKind::DepthAttachment => 4,
+        AccessKind::IndirectRead => 5,
+        AccessKind::TransferRead => 6,
+        AccessKind::TransferWrite => 7,
+    }
+}
+
+fn scope_tag(scope: ResourceScope) -> u8 {
+    match scope {
+        ResourceScope::Whole => 0,
+    }
 }
 
 fn resolve_permutation(
@@ -509,11 +733,21 @@ mod tests {
         &'static PermutationSpace,
         &'static PermutationKey,
     ) {
+        selection_with_rank(0)
+    }
+
+    fn selection_with_rank(
+        rank: u16,
+    ) -> (
+        FeatureSelection,
+        &'static PermutationSpace,
+        &'static PermutationKey,
+    ) {
         let space = static_ref(PermutationSpace::new([2, 3]));
         let key = static_ref(PermutationKey::new([1, 2]));
         let variant = FeatureVariant {
             id: VARIANT,
-            rank: 0,
+            rank,
             min_quality: RenderQualityTier::Low,
             required_caps: CapabilitySet::EMPTY,
             requires_services_extra: ServiceSet::EMPTY,
@@ -600,7 +834,9 @@ mod tests {
                 "@compute @workgroup_size(1) fn main() {}",
             )),
         );
-        let mut mapper = FeatureSelectionMapper::new(&device, &mut modules);
+        let mut mapping_cache = FeatureMappingCache::default();
+        let mut mapper =
+            FeatureSelectionMapper::with_cache(&device, &mut modules, &mut mapping_cache);
         let first = mapper
             .map_feature(&selection, FEATURE, core::slice::from_ref(&binding))
             .unwrap();
@@ -610,6 +846,232 @@ mod tests {
         assert_eq!(first.passes()[0].permutation_index.get(), 5);
         assert_eq!(first.passes(), second.passes());
         assert_eq!(modules.len(), 1);
+        assert_eq!(mapping_cache.len(), 1);
+        assert_eq!(
+            mapping_cache.stats(),
+            FeatureMappingCacheStats { hits: 1, misses: 1 }
+        );
+    }
+
+    #[test]
+    fn explicit_invalidate_forces_rebuild_without_resetting_counters() {
+        let (selection, space, key) = selection();
+        let device = null_device();
+        let mut modules = ResponseModuleCache::new();
+        let binding = binding(
+            VARIANT,
+            Some(ShaderPermutationBinding { space, key }),
+            spec(prism_render_driver::ShaderModuleDescriptor::wgsl(
+                "@compute @workgroup_size(1) fn main() {}",
+            )),
+        );
+        let mut mapping_cache = FeatureMappingCache::default();
+        {
+            let mut mapper =
+                FeatureSelectionMapper::with_cache(&device, &mut modules, &mut mapping_cache);
+            mapper
+                .map_feature(&selection, FEATURE, core::slice::from_ref(&binding))
+                .unwrap();
+            mapper
+                .map_feature(&selection, FEATURE, core::slice::from_ref(&binding))
+                .unwrap();
+        }
+        mapping_cache.invalidate();
+        assert!(mapping_cache.is_empty());
+        {
+            let mut mapper =
+                FeatureSelectionMapper::with_cache(&device, &mut modules, &mut mapping_cache);
+            mapper
+                .map_feature(&selection, FEATURE, core::slice::from_ref(&binding))
+                .unwrap();
+        }
+        assert_eq!(mapping_cache.len(), 1);
+        assert_eq!(mapping_cache.stats().hits, 1);
+        assert_eq!(mapping_cache.stats().misses, 2);
+    }
+
+    #[test]
+    fn selection_identity_drift_does_not_reuse_mapping() {
+        let (low_selection, space, key) = selection();
+        let high_selection = {
+            let definition = static_ref(FeatureDefinition {
+                id: FEATURE,
+                kind: FeatureKind::Response,
+                domain: None,
+                requires_services: ServiceSet::EMPTY,
+                variants: static_ref([FeatureVariant {
+                    id: VARIANT,
+                    rank: 0,
+                    min_quality: RenderQualityTier::Low,
+                    required_caps: CapabilitySet::EMPTY,
+                    requires_services_extra: ServiceSet::EMPTY,
+                    passes: &[],
+                    shader_permutation: Some(ShaderPermutationBinding { space, key }),
+                }]),
+            });
+            let definitions = static_ref([*definition]);
+            let catalog = FeatureCatalog::new(definitions, &[]).unwrap();
+            let roots = FrozenRoots::from_build_profile(&catalog, &[], &[FEATURE]).unwrap();
+            FeatureSelection::resolve(
+                &catalog,
+                &roots,
+                CapabilitySet::EMPTY,
+                RenderQualityTier::High,
+            )
+            .unwrap()
+        };
+        let device = null_device();
+        let mut modules = ResponseModuleCache::new();
+        let binding = binding(
+            VARIANT,
+            Some(ShaderPermutationBinding { space, key }),
+            spec(prism_render_driver::ShaderModuleDescriptor::wgsl(
+                "@compute @workgroup_size(1) fn main() {}",
+            )),
+        );
+        let mut mapping_cache = FeatureMappingCache::default();
+        let mut mapper =
+            FeatureSelectionMapper::with_cache(&device, &mut modules, &mut mapping_cache);
+        mapper
+            .map_feature(&low_selection, FEATURE, core::slice::from_ref(&binding))
+            .unwrap();
+        mapper
+            .map_feature(&high_selection, FEATURE, core::slice::from_ref(&binding))
+            .unwrap();
+        assert_eq!(mapping_cache.stats().hits, 0);
+        assert_eq!(mapping_cache.stats().misses, 2);
+    }
+
+    #[test]
+    fn module_identity_drift_is_a_distinct_mapping_and_module() {
+        let (selection, space, key) = selection();
+        let device = null_device();
+        let mut modules = ResponseModuleCache::new();
+        let first = binding(
+            VARIANT,
+            Some(ShaderPermutationBinding { space, key }),
+            spec(prism_render_driver::ShaderModuleDescriptor::wgsl(
+                "@compute @workgroup_size(1) fn main() {}",
+            )),
+        );
+        let mut changed_spec = first.module.clone();
+        changed_spec.identity.digest = ArtifactDigest([0x92; 32]);
+        let changed = binding(
+            VARIANT,
+            Some(ShaderPermutationBinding { space, key }),
+            changed_spec,
+        );
+        let mut mapping_cache = FeatureMappingCache::default();
+        let mut mapper =
+            FeatureSelectionMapper::with_cache(&device, &mut modules, &mut mapping_cache);
+        let first_set = mapper
+            .map_feature(&selection, FEATURE, core::slice::from_ref(&first))
+            .unwrap();
+        let changed_set = mapper
+            .map_feature(&selection, FEATURE, core::slice::from_ref(&changed))
+            .unwrap();
+        assert_ne!(
+            first_set.passes()[0].response_module_id,
+            changed_set.passes()[0].response_module_id
+        );
+        assert_eq!(modules.len(), 2);
+        assert_eq!(mapping_cache.stats().hits, 0);
+        assert_eq!(mapping_cache.stats().misses, 2);
+    }
+
+    #[test]
+    fn cache_reuses_then_explicitly_invalidates_mapping() {
+        let (selection, space, key) = selection();
+        let device = null_device();
+        let mut modules = ResponseModuleCache::new();
+        let mut cache = FeatureMappingCache::default();
+        let binding = binding(
+            VARIANT,
+            Some(ShaderPermutationBinding { space, key }),
+            spec(prism_render_driver::ShaderModuleDescriptor::wgsl(
+                "@compute @workgroup_size(1) fn main() {}",
+            )),
+        );
+        {
+            let mut mapper = FeatureSelectionMapper::with_cache(&device, &mut modules, &mut cache);
+            mapper
+                .map_feature(&selection, FEATURE, core::slice::from_ref(&binding))
+                .unwrap();
+            mapper
+                .map_feature(&selection, FEATURE, core::slice::from_ref(&binding))
+                .unwrap();
+        }
+        assert_eq!(
+            cache.stats(),
+            FeatureMappingCacheStats { hits: 1, misses: 1 }
+        );
+        assert_eq!(cache.len(), 1);
+
+        cache.invalidate();
+        assert!(cache.is_empty());
+        {
+            let mut mapper = FeatureSelectionMapper::with_cache(&device, &mut modules, &mut cache);
+            mapper
+                .map_feature(&selection, FEATURE, core::slice::from_ref(&binding))
+                .unwrap();
+        }
+        assert_eq!(
+            cache.stats(),
+            FeatureMappingCacheStats { hits: 1, misses: 2 }
+        );
+    }
+
+    #[test]
+    fn cache_key_rejects_selection_declaration_identity_drift() {
+        let (first_selection, space, key) = selection_with_rank(0);
+        let (second_selection, _, _) = selection_with_rank(1);
+        let device = null_device();
+        let mut modules = ResponseModuleCache::new();
+        let mut cache = FeatureMappingCache::default();
+        let binding = binding(
+            VARIANT,
+            Some(ShaderPermutationBinding { space, key }),
+            spec(prism_render_driver::ShaderModuleDescriptor::wgsl(
+                "@compute @workgroup_size(1) fn main() {}",
+            )),
+        );
+        let mut mapper = FeatureSelectionMapper::with_cache(&device, &mut modules, &mut cache);
+        mapper
+            .map_feature(&first_selection, FEATURE, core::slice::from_ref(&binding))
+            .unwrap();
+        mapper
+            .map_feature(&second_selection, FEATURE, core::slice::from_ref(&binding))
+            .unwrap();
+        assert_eq!(
+            cache.stats(),
+            FeatureMappingCacheStats { hits: 0, misses: 2 }
+        );
+    }
+
+    #[test]
+    fn failed_install_does_not_publish_material_or_pass_set() {
+        let material = fallback_material_record(GenerationalHandle::new(8, 1), 1);
+        let mut registry = SceneRegistry::new();
+        let invalid = FeaturePassSet {
+            feature_id: FEATURE,
+            variant_id: VARIANT,
+            passes: vec![PassDescriptor {
+                role: PassRole::ResponseLeft,
+                execution_family: ExecutionFamily::SplitResponse,
+                response_module_id: prism_render_architecture::shader_package::ModuleId(7),
+                permutation_index: PermutationIndex::ZERO,
+                fallback_permutation: None,
+                render_phase: RenderPhase::Opaque,
+                draw: Some(DrawFunctionId(0)),
+                sort_class: PassDescriptorClass::SURFACE,
+            }],
+        };
+        assert!(matches!(
+            invalid.install(&mut registry, &material),
+            Err(FeatureMappingError::PassSet(PassSetError::InvalidShape))
+        ));
+        assert_eq!(registry.material_count(), 0);
+        assert_eq!(registry.material_pass_index(material.handle), None);
     }
 
     #[test]
@@ -734,5 +1196,36 @@ mod tests {
             )
         );
         assert_eq!(registry.pass_descriptors(table_index), Some(set.passes()));
+    }
+
+    #[test]
+    fn failed_feature_install_does_not_publish_material_or_pass_binding() {
+        let (selection, space, key) = selection();
+        let device = null_device();
+        let mut modules = ResponseModuleCache::new();
+        let mut registry = SceneRegistry::new();
+        let material = fallback_material_record(GenerationalHandle::new(8, 1), 1);
+        let result = registry.insert_material_with_feature_selection(
+            &device,
+            &mut modules,
+            material.clone(),
+            &selection,
+            FEATURE,
+            &[binding(
+                VariantId(0xdead),
+                Some(ShaderPermutationBinding { space, key }),
+                spec(prism_render_driver::ShaderModuleDescriptor::wgsl(
+                    "@compute @workgroup_size(1) fn main() {}",
+                )),
+            )],
+        );
+        assert!(matches!(
+            result,
+            Err(FeatureMappingError::SelectionBindingMismatch { .. })
+        ));
+        assert_eq!(registry.material_count(), 0);
+        assert!(registry.material(material.handle).is_none());
+        assert!(registry.material_pass_index(material.handle).is_none());
+        assert_eq!(registry.feature_mapping_cache_len(), 0);
     }
 }
