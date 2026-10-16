@@ -3,7 +3,80 @@
 use alloc::vec::Vec;
 use core::convert::Infallible;
 
-use crate::{BakeError, BakeLimits, CubeFace, HeightfieldTile, TileKey};
+use crate::{BakeError, BakeLimits, CubeFace, HeightfieldTile, TileEdge, TileKey};
+
+/// Borrowed one-ring samples from one neighboring planetary tile.
+///
+/// Heights are decoded millimetres in the neighboring tile's edge order.
+/// edge_mm is the shared edge and inner_mm is the adjacent row one sample
+/// inward from that edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanetHeightfieldBoundarySamples<'a> {
+    neighbor: TileKey,
+    neighbor_edge: TileEdge,
+    edge_mm: &'a [i128],
+    inner_mm: &'a [i128],
+}
+
+impl<'a> PlanetHeightfieldBoundarySamples<'a> {
+    /// Creates a borrowed boundary snapshot for one neighboring tile.
+    pub const fn new(
+        neighbor: TileKey,
+        neighbor_edge: TileEdge,
+        edge_mm: &'a [i128],
+        inner_mm: &'a [i128],
+    ) -> Self {
+        Self {
+            neighbor,
+            neighbor_edge,
+            edge_mm,
+            inner_mm,
+        }
+    }
+}
+
+/// One source for a cross-tile normal derivative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanetHeightfieldNeighbor<'a> {
+    /// Read the boundary and inner row from a complete baked neighboring tile.
+    Tile(&'a HeightfieldTile),
+    /// Read the boundary and inner row from a borrowed snapshot.
+    Boundary(PlanetHeightfieldBoundarySamples<'a>),
+}
+
+/// Optional west/east/south/north neighborhood for planetary normals.
+///
+/// Missing edges preserve the legacy one-sided normal. Supplied edges are
+/// validated before output allocation and are never partially published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanetHeightfieldNormalNeighborhood<'a> {
+    neighbors: [Option<PlanetHeightfieldNeighbor<'a>>; 4],
+}
+
+impl<'a> PlanetHeightfieldNormalNeighborhood<'a> {
+    /// Creates an empty neighborhood, preserving PlanetHeightfieldMesh::build.
+    pub const fn empty() -> Self {
+        Self {
+            neighbors: [None, None, None, None],
+        }
+    }
+
+    /// Creates a neighborhood in west, east, south, north order.
+    pub const fn new(
+        west: Option<PlanetHeightfieldNeighbor<'a>>,
+        east: Option<PlanetHeightfieldNeighbor<'a>>,
+        south: Option<PlanetHeightfieldNeighbor<'a>>,
+        north: Option<PlanetHeightfieldNeighbor<'a>>,
+    ) -> Self {
+        Self {
+            neighbors: [west, east, south, north],
+        }
+    }
+
+    fn get(self, edge: TileEdge) -> Option<PlanetHeightfieldNeighbor<'a>> {
+        self.neighbors[edge_index(edge)]
+    }
+}
 
 /// Cube-sphere placement with a checked bound on numeric position error.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,12 +143,33 @@ impl PlanetHeightfieldMesh {
     /// Tile coordinates remain f64 through projection, including level 30.
     /// No temporary full-sized position array is allocated. Payload admission
     /// uses 32 bytes per vertex plus 24 per quad, before any allocation.
-    /// Boundary normals are one-sided geometric derivatives; cross-tile smooth
-    /// normals and mixed-LOD stitching require neighboring source samples.
+    /// Boundary normals are one-sided unless a neighborhood is supplied to
+    /// build_with_neighborhood.
     pub fn build(
         field: &HeightfieldTile,
         config: PlanetMeshConfig,
         limits: BakeLimits,
+    ) -> Result<Self, BakeError<Infallible>> {
+        Self::build_with_neighborhood(
+            field,
+            config,
+            limits,
+            PlanetHeightfieldNormalNeighborhood::empty(),
+        )
+    }
+
+    /// Builds a mesh with optional cross-tile continuous boundary normals.
+    ///
+    /// Each supplied neighbor must be the declared same-level adjacent tile
+    /// with the same sample count and exact shared decoded edge. A boundary
+    /// snapshot must contain one complete shared edge and its adjacent inner
+    /// row, both in the neighboring tile's edge order. Invalid snapshots fail
+    /// with BakeError::InvalidGeometry before any output allocation.
+    pub fn build_with_neighborhood(
+        field: &HeightfieldTile,
+        config: PlanetMeshConfig,
+        limits: BakeLimits,
+        neighborhood: PlanetHeightfieldNormalNeighborhood<'_>,
     ) -> Result<Self, BakeError<Infallible>> {
         let count = field.samples().len();
         if count > u32::MAX as usize {
@@ -94,6 +188,7 @@ impl PlanetHeightfieldMesh {
         if count > limits.max_samples || bytes > limits.max_bytes {
             return Err(BakeError::BudgetExceeded);
         }
+        validate_neighborhood(field, neighborhood)?;
         let mut mesh = Self {
             config,
             error_bound_mm: 0.0,
@@ -126,10 +221,18 @@ impl PlanetHeightfieldMesh {
                     }
                     mesh.error_bound_mm = mesh.error_bound_mm.max(error);
                 }
-                let left = point(field, config.radius_mm, x.saturating_sub(1), y)?;
-                let right = point(field, config.radius_mm, (x + 1).min(side - 1), y)?;
-                let down = point(field, config.radius_mm, x, y.saturating_sub(1))?;
-                let up = point(field, config.radius_mm, x, (y + 1).min(side - 1))?;
+                let left =
+                    derivative_point(field, config.radius_mm, neighborhood, TileEdge::West, x, y)?
+                        .unwrap_or(point(field, config.radius_mm, x.saturating_sub(1), y)?);
+                let right =
+                    derivative_point(field, config.radius_mm, neighborhood, TileEdge::East, x, y)?
+                        .unwrap_or(point(field, config.radius_mm, (x + 1).min(side - 1), y)?);
+                let down =
+                    derivative_point(field, config.radius_mm, neighborhood, TileEdge::South, x, y)?
+                        .unwrap_or(point(field, config.radius_mm, x, y.saturating_sub(1))?);
+                let up =
+                    derivative_point(field, config.radius_mm, neighborhood, TileEdge::North, x, y)?
+                        .unwrap_or(point(field, config.radius_mm, x, (y + 1).min(side - 1))?);
                 let tangent_u = subtract(right, left);
                 let tangent_v = subtract(up, down);
                 let normal = cross(tangent_u, tangent_v);
@@ -215,14 +318,162 @@ fn reserve<T>(count: usize) -> Result<Vec<T>, BakeError<Infallible>> {
     Ok(values)
 }
 
+fn edge_index(edge: TileEdge) -> usize {
+    match edge {
+        TileEdge::West => 0,
+        TileEdge::East => 1,
+        TileEdge::South => 2,
+        TileEdge::North => 3,
+    }
+}
+
+fn edge_coordinate(edge: TileEdge, side: u32, index: u32, inward: bool) -> [u32; 2] {
+    let offset = if inward { 1 } else { 0 };
+    match edge {
+        TileEdge::West => [offset, index],
+        TileEdge::East => [side - 1 - offset, index],
+        TileEdge::South => [index, offset],
+        TileEdge::North => [index, side - 1 - offset],
+    }
+}
+
+fn neighbor_height(
+    field: &HeightfieldTile,
+    edge: TileEdge,
+    index: u32,
+    inward: bool,
+    source: PlanetHeightfieldNeighbor<'_>,
+) -> Result<(TileKey, TileEdge, u32, i128), BakeError<Infallible>> {
+    let side = field.spec().samples_per_edge();
+    let (neighbor, neighbor_edge, neighbor_index) = field
+        .tile()
+        .neighbor_edge_index(edge, side, index)
+        .ok_or(BakeError::InvalidGeometry)?;
+    let height = match source {
+        PlanetHeightfieldNeighbor::Tile(tile) => {
+            if tile.tile() != neighbor {
+                return Err(BakeError::InvalidGeometry);
+            }
+            tile.height_mm(edge_coordinate(neighbor_edge, side, neighbor_index, inward))
+                .ok_or(BakeError::InvalidGeometry)?
+        }
+        PlanetHeightfieldNeighbor::Boundary(snapshot) => {
+            if snapshot.neighbor != neighbor || snapshot.neighbor_edge != neighbor_edge {
+                return Err(BakeError::InvalidGeometry);
+            }
+            let values = if inward {
+                snapshot.inner_mm
+            } else {
+                snapshot.edge_mm
+            };
+            *values
+                .get(neighbor_index as usize)
+                .ok_or(BakeError::InvalidGeometry)?
+        }
+    };
+    Ok((neighbor, neighbor_edge, neighbor_index, height))
+}
+
+fn validate_neighborhood(
+    field: &HeightfieldTile,
+    neighborhood: PlanetHeightfieldNormalNeighborhood<'_>,
+) -> Result<(), BakeError<Infallible>> {
+    let side = field.spec().samples_per_edge();
+    for edge in TileEdge::ALL {
+        let Some(source) = neighborhood.get(edge) else {
+            continue;
+        };
+        match source {
+            PlanetHeightfieldNeighbor::Tile(tile) => {
+                if tile.spec().samples_per_edge() != side {
+                    return Err(BakeError::InvalidGeometry);
+                }
+            }
+            PlanetHeightfieldNeighbor::Boundary(snapshot) => {
+                if snapshot.edge_mm.len() != side as usize
+                    || snapshot.inner_mm.len() != side as usize
+                {
+                    return Err(BakeError::InvalidGeometry);
+                }
+            }
+        }
+        for index in 0..side {
+            let center = field
+                .height_mm(edge_coordinate(edge, side, index, false))
+                .ok_or(BakeError::InvalidGeometry)?;
+            let (neighbor, _, _, boundary) = neighbor_height(field, edge, index, false, source)?;
+            let expected = field
+                .tile()
+                .neighbor_edge_index(edge, side, index)
+                .ok_or(BakeError::InvalidGeometry)?
+                .0;
+            if neighbor != expected || boundary != center {
+                return Err(BakeError::InvalidGeometry);
+            }
+            neighbor_height(field, edge, index, true, source)?;
+        }
+    }
+    Ok(())
+}
+
+fn derivative_point(
+    field: &HeightfieldTile,
+    radius: i64,
+    neighborhood: PlanetHeightfieldNormalNeighborhood<'_>,
+    edge: TileEdge,
+    x: u32,
+    y: u32,
+) -> Result<Option<[f64; 3]>, BakeError<Infallible>> {
+    let index = match edge {
+        TileEdge::West if x == 0 => y,
+        TileEdge::East if x + 1 == field.spec().samples_per_edge() => y,
+        TileEdge::South if y == 0 => x,
+        TileEdge::North if y + 1 == field.spec().samples_per_edge() => x,
+        _ => return Ok(None),
+    };
+    let Some(source) = neighborhood.get(edge) else {
+        return Ok(None);
+    };
+    let (neighbor, neighbor_edge, neighbor_index, height) =
+        neighbor_height(field, edge, index, true, source)?;
+    let side = field.spec().samples_per_edge();
+    let coordinate = edge_coordinate(neighbor_edge, side, neighbor_index, true);
+    Ok(Some(point_at(
+        neighbor,
+        side,
+        radius,
+        coordinate[0],
+        coordinate[1],
+        height,
+    )?))
+}
+
 fn point(
     field: &HeightfieldTile,
     radius: i64,
     x: u32,
     y: u32,
 ) -> Result<[f64; 3], BakeError<Infallible>> {
-    let tile = field.tile();
-    let [u, v] = face_coordinate(tile, field.spec().samples_per_edge(), x, y);
+    let height = field.height_mm([x, y]).ok_or(BakeError::InvalidGeometry)?;
+    point_at(
+        field.tile(),
+        field.spec().samples_per_edge(),
+        radius,
+        x,
+        y,
+        height,
+    )
+}
+
+fn point_at(
+    tile: TileKey,
+    side: u32,
+    radius: i64,
+    x: u32,
+    y: u32,
+    height: i128,
+) -> Result<[f64; 3], BakeError<Infallible>> {
+    let [u, v] = face_coordinate(tile, side, x, y);
     let cube = match tile.face() {
         CubeFace::PositiveX => [1.0, v, -u],
         CubeFace::NegativeX => [-1.0, v, u],
@@ -231,7 +482,6 @@ fn point(
         CubeFace::PositiveZ => [u, v, 1.0],
         CubeFace::NegativeZ => [-u, v, -1.0],
     };
-    let height = field.height_mm([x, y]).ok_or(BakeError::InvalidGeometry)?;
     let radial_mm = i128::from(radius) + height;
     if radial_mm <= 0 {
         return Err(BakeError::InvalidGeometry);
@@ -271,6 +521,20 @@ mod tests {
             Ok(HeightSampleValue::from_millimetres(self.0))
         }
     }
+
+    struct AdjacentStep;
+    impl HeightSampler for AdjacentStep {
+        type Error = Infallible;
+
+        fn sample_height(&self, sample: HeightSample) -> Result<HeightSampleValue, Self::Error> {
+            let height = if sample.tile().x() == 0 || sample.u_q16() == 0 {
+                0
+            } else {
+                100
+            };
+            Ok(HeightSampleValue::from_millimetres(height))
+        }
+    }
     const LIMITS: BakeLimits = BakeLimits {
         max_samples: 1024,
         max_bytes: 100_000,
@@ -280,6 +544,16 @@ mod tests {
             tile,
             HeightfieldSpec::new(9, 1).unwrap(),
             &Constant(height),
+            LIMITS,
+        )
+        .unwrap()
+    }
+
+    fn adjacent_field(tile: TileKey) -> HeightfieldTile {
+        HeightfieldTile::bake(
+            tile,
+            HeightfieldSpec::new(9, 1).unwrap(),
+            &AdjacentStep,
             LIMITS,
         )
         .unwrap()
@@ -358,6 +632,115 @@ mod tests {
         for row in 0..9 {
             assert_eq!(z.positions()[row * 9 + 8], x.positions()[row * 9]);
         }
+    }
+
+    #[test]
+    fn neighborhood_uses_neighbor_inner_row_for_continuous_boundary_normal() {
+        let center_key = TileKey::new(CubeFace::PositiveZ, 1, 0, 0).unwrap();
+        let neighbor_key = center_key.neighbor(TileEdge::East);
+        let center = adjacent_field(center_key);
+        let neighbor = adjacent_field(neighbor_key);
+        let flat_neighbor = field(neighbor_key, 0);
+        let config = PlanetMeshConfig::new(1_000_000, [0; 3], 1.0).unwrap();
+        let legacy = PlanetHeightfieldMesh::build(&center, config, LIMITS).unwrap();
+        let smooth = PlanetHeightfieldMesh::build_with_neighborhood(
+            &center,
+            config,
+            LIMITS,
+            PlanetHeightfieldNormalNeighborhood::new(
+                None,
+                Some(PlanetHeightfieldNeighbor::Tile(&neighbor)),
+                None,
+                None,
+            ),
+        )
+        .unwrap();
+        let smooth_flat = PlanetHeightfieldMesh::build_with_neighborhood(
+            &center,
+            config,
+            LIMITS,
+            PlanetHeightfieldNormalNeighborhood::new(
+                None,
+                Some(PlanetHeightfieldNeighbor::Tile(&flat_neighbor)),
+                None,
+                None,
+            ),
+        )
+        .unwrap();
+        let index = 4 * 9 + 8;
+        assert_ne!(legacy.normals()[index], smooth.normals()[index]);
+        assert_ne!(smooth_flat.normals()[index], smooth.normals()[index]);
+    }
+
+    #[test]
+    fn boundary_snapshot_handles_cross_face_reversed_edge_order() {
+        let center_key = TileKey::new(CubeFace::PositiveX, 1, 0, 0).unwrap();
+        let center = field(center_key, 17);
+        let neighbor_key = center_key.neighbor(TileEdge::West);
+        let neighbor = field(neighbor_key, 17);
+        let side = neighbor.spec().samples_per_edge();
+        let (_, neighbor_edge, _) = center_key
+            .neighbor_edge_index(TileEdge::West, side, 0)
+            .unwrap();
+        let mut edge_mm = [0_i128; 9];
+        let mut inner_mm = [0_i128; 9];
+        for index in 0..side {
+            let (_, edge, mapped) = center_key
+                .neighbor_edge_index(TileEdge::West, side, index)
+                .unwrap();
+            edge_mm[index as usize] = neighbor
+                .height_mm(edge_coordinate(edge, side, mapped, false))
+                .unwrap();
+            inner_mm[index as usize] = neighbor
+                .height_mm(edge_coordinate(edge, side, mapped, true))
+                .unwrap();
+        }
+        let snapshot =
+            PlanetHeightfieldBoundarySamples::new(neighbor_key, neighbor_edge, &edge_mm, &inner_mm);
+        let config = PlanetMeshConfig::new(1_000_000, [0; 3], 1.0).unwrap();
+        let mesh = PlanetHeightfieldMesh::build_with_neighborhood(
+            &center,
+            config,
+            LIMITS,
+            PlanetHeightfieldNormalNeighborhood::new(
+                Some(PlanetHeightfieldNeighbor::Boundary(snapshot)),
+                None,
+                None,
+                None,
+            ),
+        )
+        .unwrap();
+        assert_eq!(mesh.normals().len(), 81);
+    }
+
+    #[test]
+    fn invalid_neighborhood_fails_before_publish_and_budget_error_precedes_it() {
+        let center_key = TileKey::new(CubeFace::PositiveZ, 1, 0, 0).unwrap();
+        let center = field(center_key, 0);
+        let wrong = field(TileKey::root(CubeFace::PositiveZ), 0);
+        let config = PlanetMeshConfig::new(1_000_000, [0; 3], 1.0).unwrap();
+        let neighborhood = PlanetHeightfieldNormalNeighborhood::new(
+            None,
+            Some(PlanetHeightfieldNeighbor::Tile(&wrong)),
+            None,
+            None,
+        );
+        assert_eq!(
+            PlanetHeightfieldMesh::build_with_neighborhood(
+                &center,
+                config,
+                BakeLimits {
+                    max_samples: 80,
+                    ..LIMITS
+                },
+                neighborhood,
+            ),
+            Err(BakeError::BudgetExceeded)
+        );
+        assert_eq!(
+            PlanetHeightfieldMesh::build_with_neighborhood(&center, config, LIMITS, neighborhood,),
+            Err(BakeError::InvalidGeometry)
+        );
     }
 
     #[test]

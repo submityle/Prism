@@ -67,7 +67,10 @@ pub use placement_deletion::{
     HeightfieldPlacementDeletionSet, HEIGHTFIELD_PLACEMENT_DELETION_VERSION,
 };
 pub use planet_boundary::{validate_planet_heightfield_edge, PlanetHeightfieldBoundaryError};
-pub use planet_mesh::{PlanetHeightfieldMesh, PlanetMeshConfig};
+pub use planet_mesh::{
+    PlanetHeightfieldBoundarySamples, PlanetHeightfieldMesh, PlanetHeightfieldNeighbor,
+    PlanetHeightfieldNormalNeighborhood, PlanetMeshConfig,
+};
 pub use planet_placement::{
     estimate_planet_placement_work, place_on_planet_heightfield, PlanetPlacementBudget,
     PlanetPlacementConfig, PlanetPlacementError, PlanetPlacementKey, PlanetPlacementOutput,
