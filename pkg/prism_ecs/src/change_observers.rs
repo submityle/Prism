@@ -139,6 +139,16 @@ struct ChangeEntry {
     slot: Option<ChangeSlot>,
 }
 
+/// Test-only operation counts: include vacant historical slots in both passes.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FlushStats {
+    revision_checks: usize,
+    slot_visits: usize,
+    collections: usize,
+    idle_fast_path: bool,
+}
+
 /// The ordered change-observer registry (design §24.2).
 ///
 /// Slots are never compacted: removal clears a slot in place so the *registration
@@ -152,6 +162,15 @@ pub(crate) struct ChangeObservers {
     restore_generation: u64,
     restore_tick: Tick,
     restore_cursor: crate::change_index::ChangeCursor,
+    /// Published before callbacks, valid only after a fully successful delivery.
+    /// Registration/removal/restore and unwind invalidate it. Callback writes
+    /// are newer than this snapshot and therefore cannot be acknowledged here.
+    clean_revision: Option<u64>,
+    /// Last skipped collection window and the old slots it applies to. New
+    /// registrations retain their own (later) baseline instead of inheriting it.
+    idle_baseline: Option<(Tick, usize)>,
+    #[cfg(test)]
+    stats: FlushStats,
 }
 
 impl Default for ChangeObservers {
@@ -163,6 +182,10 @@ impl Default for ChangeObservers {
             restore_generation: 0,
             restore_tick: Tick::ZERO,
             restore_cursor: crate::change_index::ChangeCursor::default(),
+            clean_revision: None,
+            idle_baseline: None,
+            #[cfg(test)]
+            stats: FlushStats::default(),
         }
     }
 }
@@ -190,6 +213,7 @@ impl ChangeObservers {
             slot: Some(slot),
         });
         self.active += 1;
+        self.clean_revision = None;
     }
 
     fn take(&mut self, index: usize) -> Option<ChangeSlot> {
@@ -216,6 +240,7 @@ impl ChangeObservers {
                 entry.active = false;
                 entry.slot = None;
                 self.active -= 1;
+                self.clean_revision = None;
                 return true;
             }
         }
@@ -240,6 +265,8 @@ impl ChangeObservers {
         self.restore_generation = self.restore_generation.wrapping_add(1);
         self.restore_tick = tick;
         self.restore_cursor = cursor;
+        self.clean_revision = None;
+        self.idle_baseline = None;
         // Restore keeps the snapshot's exact change tick. A write made
         // immediately afterwards is stamped with that same tick, so the
         // delivery window starts one logical tick earlier. The tracker was
@@ -324,27 +351,58 @@ impl World {
     /// for retry; successful callbacks are not replayed without new changes.
     /// Replacing the World inside a callback ends this delivery; the replacement
     /// retains its own observers and is not automatically flushed by this call.
+    /// After a successful delivery, an unchanged exact write-index revision
+    /// skips both slot passes in O(1), including removed historical slots. This
+    /// still advances the delivery tick and settles pending reaction effects.
     pub fn flush_changed_observers(&mut self) -> usize {
         // Effects may explicitly request a flush. Their writes belong to the
         // next delivery window and must not recursively re-enter this bus.
         if self.reactions.is_flushing() || self.change_observers.flushing {
             return 0;
         }
+        #[cfg(test)]
+        {
+            self.change_observers.stats = FlushStats::default();
+        }
         if self.change_observers.is_empty() {
             self.flush_reactions();
             return 0;
         }
         let count = self.change_observers.slot_count();
+        let revision = self.change_tracker.revision();
+        #[cfg(test)]
+        {
+            self.change_observers.stats.revision_checks += 1;
+        }
+        if revision.is_some() && revision == self.change_observers.clean_revision {
+            self.change_observers.idle_baseline = Some((self.change_tick(), count));
+            #[cfg(test)]
+            {
+                self.change_observers.stats.idle_fast_path = true;
+            }
+            // Preserve the old window boundary even without collecting slots:
+            // subsequent writes must start a new tick batch in ChangeTracker.
+            self.increment_change_tick();
+            self.flush_reactions();
+            return 0;
+        }
+        self.change_observers.clean_revision = None;
+        let idle_baseline = self.change_observers.idle_baseline;
         let world_id = self.id();
         let restore_generation = self.change_observers.restore_generation;
         self.change_observers.flushing = true;
-        let flush = ChangeFlush {
+        let mut flush = ChangeFlush {
             world: self,
             world_id,
+            completed: false,
         };
         let this_run = flush.world.change_tick();
         let mut fired = 0;
         for index in 0..count {
+            #[cfg(test)]
+            {
+                flush.world.change_observers.stats.slot_visits += 1;
+            }
             let Some(slot) = flush.world.change_observers.take(index) else {
                 continue;
             };
@@ -356,6 +414,15 @@ impl World {
                 restore_generation,
             };
             let slot = guard.slot.as_mut().expect("owned change observer");
+            if let Some((tick, old_count)) = idle_baseline
+                && index < old_count
+            {
+                slot.last_run = tick;
+            }
+            #[cfg(test)]
+            {
+                guard.world.change_observers.stats.collections += 1;
+            }
             // A previous flush may have left an undelivered batch here after a
             // callback panic. Collect only the new window into a separate
             // buffer so retry state is never re-filtered against a later
@@ -376,11 +443,20 @@ impl World {
             slot.pending.dedup();
             slot.last_run = this_run;
         }
+        flush.world.change_observers.idle_baseline = None;
+        // Publish only the pre-callback revision. Mutations of the registry in
+        // callbacks invalidate it; writes change the tracker revision. Unwind
+        // clears it so pending deliveries retry even without any new write.
+        flush.world.change_observers.clean_revision = revision;
         // Snapshot every observer's batch before executing any callback. A
         // callback may remove components or write values, but cannot change the
         // already-collected delivery of a later observer in this flush.
         flush.world.increment_change_tick();
         for index in 0..count {
+            #[cfg(test)]
+            {
+                flush.world.change_observers.stats.slot_visits += 1;
+            }
             let Some(slot) = flush.world.change_observers.take(index) else {
                 continue;
             };
@@ -411,6 +487,7 @@ impl World {
         }
         // Release the delivery barrier only after every source callback has
         // forwarded its batch. Explicit flushes inside callbacks are deferred.
+        flush.completed = true;
         drop(flush);
         self.flush_reactions();
         fired
@@ -450,12 +527,20 @@ impl Drop for ChangeSlotGuard<'_> {
 struct ChangeFlush<'w> {
     world: &'w mut World,
     world_id: WorldId,
+    completed: bool,
 }
 
 impl Drop for ChangeFlush<'_> {
     fn drop(&mut self) {
         if self.world.id() == self.world_id {
+            if !self.completed {
+                self.world.change_observers.clean_revision = None;
+            }
             self.world.change_observers.flushing = false;
         }
     }
 }
+
+#[cfg(test)]
+#[path = "change_observers_fast_path_tests.rs"]
+mod fast_path_tests;

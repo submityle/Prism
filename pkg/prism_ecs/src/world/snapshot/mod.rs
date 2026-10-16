@@ -74,7 +74,7 @@ pub use determinism::{
 };
 pub use hash::FnvHasher;
 pub use reuse::SnapshotValue;
-pub use rollback::SnapshotRing;
+pub use rollback::{SnapshotAppendUndo, SnapshotRetired, SnapshotRing};
 
 /// An owned, frozen copy of a [`World`]'s entity + component + tick state
 /// (design §14). See the [module docs](self) for scope and guarantees.

@@ -18,6 +18,7 @@
 //! reads still walk the delta prefix; this is not constant-time history access.
 
 use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::{SnapshotDelta, WorldSnapshot};
@@ -44,6 +45,28 @@ struct Frame {
 pub struct SnapshotRing {
     capacity: usize,
     frames: VecDeque<Frame>,
+    revision: u64,
+    identity: Arc<()>,
+}
+
+/// Ownership of the entries displaced by one strictly increasing append.
+/// Consumed by [`SnapshotRing::undo_append`] before any other ring mutation.
+pub struct SnapshotAppendUndo {
+    frame: u64,
+    revision: u64,
+    evicted: Option<Frame>,
+    promoted: Option<StoredSnapshot>,
+    identity: Arc<()>,
+}
+
+/// Displaced snapshot storage awaiting destruction after a history mutation.
+///
+/// Drop this only after publishing associated metadata (for example a history
+/// cursor). User destructors can panic; the ring mutation is already committed.
+#[must_use = "publish associated metadata before dropping displaced snapshots"]
+pub struct SnapshotRetired {
+    _snapshots: [Option<StoredSnapshot>; 2],
+    _frames: [Option<Frame>; 2],
 }
 
 impl SnapshotRing {
@@ -56,6 +79,8 @@ impl SnapshotRing {
         Self {
             capacity,
             frames: VecDeque::with_capacity(capacity),
+            revision: 0,
+            identity: Arc::new(()),
         }
     }
 
@@ -97,8 +122,9 @@ impl SnapshotRing {
     ) -> Result<(), Vec<crate::component::ComponentId>> {
         let previous = self.latest().map(|(_, snapshot)| snapshot);
         let snapshot = super::capture::capture_incremental(world, previous.as_ref())?;
-        self.push(frame, snapshot);
+        let retired = self.push_deferred(frame, snapshot);
         world.increment_change_tick();
+        drop(retired);
         Ok(())
     }
 
@@ -114,6 +140,20 @@ impl SnapshotRing {
     /// unchanged. This assumes Clone/PartialEq do not mutate shared captured
     /// values; destructor panics and allocator aborts are not rollbackable.
     pub fn push(&mut self, frame: u64, snapshot: WorldSnapshot) {
+        drop(self.push_deferred(frame, snapshot));
+    }
+
+    /// Like [`push`](Self::push), but defer destruction of displaced values
+    /// until the returned storage is dropped. Preparation panics leave the
+    /// ring unchanged; destruction panics happen after the mutation commits.
+    pub fn push_deferred(&mut self, frame: u64, snapshot: WorldSnapshot) -> SnapshotRetired {
+        if self.latest_frame().is_none_or(|latest| frame > latest) {
+            let undo = self.append_reversible(frame, snapshot);
+            return SnapshotRetired {
+                _snapshots: [undo.promoted, None],
+                _frames: [undo.evicted, None],
+            };
+        }
         let index = self
             .frames
             .iter()
@@ -122,7 +162,10 @@ impl SnapshotRing {
         let replaces = self.frames.get(index).is_some_and(|f| f.number == frame);
         let evicts = !replaces && self.frames.len() == self.capacity;
         if evicts && index == 0 {
-            return;
+            return SnapshotRetired {
+                _snapshots: [Some(StoredSnapshot::Anchor(snapshot)), None],
+                _frames: [None, None],
+            };
         }
 
         let successor_index = index + usize::from(replaces);
@@ -145,7 +188,10 @@ impl SnapshotRing {
             StoredSnapshot::Anchor(snapshot)
         } else {
             let predecessor = self.reconstruct_index(index - 1);
-            StoredSnapshot::Delta(predecessor.diff(&snapshot))
+            let delta = predecessor.diff(&snapshot);
+            // Do not leave the consumed input's destructor until after commit.
+            drop(snapshot);
+            StoredSnapshot::Delta(delta)
         };
         let incoming = Frame {
             number: frame,
@@ -179,7 +225,100 @@ impl SnapshotRing {
         let old_promoted = promoted.map(|anchor| {
             core::mem::replace(&mut self.frames[0].snapshot, StoredSnapshot::Anchor(anchor))
         });
-        drop((old_successor, old_frame, evicted, old_promoted));
+        self.advance_revision();
+        SnapshotRetired {
+            _snapshots: [old_successor, old_promoted],
+            _frames: [old_frame, evicted],
+        }
+    }
+
+    /// Append a frame newer than every retained key, retaining displaced
+    /// storage without cloning it so a failed downstream send can be undone.
+    ///
+    /// # Panics
+    /// Panics if `frame` is not strictly newer than the last retained key.
+    /// Preparation (including consuming the input snapshot) precedes commit;
+    /// dropping the returned token commits the append, not an automatic undo.
+    pub fn append_reversible(&mut self, frame: u64, snapshot: WorldSnapshot) -> SnapshotAppendUndo {
+        assert!(self.latest_frame().is_none_or(|latest| frame > latest));
+        let evicts = self.frames.len() == self.capacity;
+        let promoted = if evicts && self.frames.len() > 1 {
+            Some(self.reconstruct_index(1))
+        } else {
+            None
+        };
+        let resource_values = snapshot.resource_count();
+        let relation_edges = snapshot.relation_count();
+        let stored = if self.frames.is_empty() || (evicts && self.capacity == 1) {
+            StoredSnapshot::Anchor(snapshot)
+        } else {
+            let predecessor = self.reconstruct_index(self.frames.len() - 1);
+            let delta = predecessor.diff(&snapshot);
+            drop(snapshot);
+            StoredSnapshot::Delta(delta)
+        };
+        self.frames.reserve(1);
+        self.frames.push_back(Frame {
+            number: frame,
+            snapshot: stored,
+            resource_values,
+            relation_edges,
+        });
+        let evicted = if evicts {
+            self.frames.pop_front()
+        } else {
+            None
+        };
+        let promoted = promoted.map(|anchor| {
+            core::mem::replace(&mut self.frames[0].snapshot, StoredSnapshot::Anchor(anchor))
+        });
+        self.advance_revision();
+        SnapshotAppendUndo {
+            frame,
+            revision: self.revision,
+            evicted,
+            promoted,
+            identity: self.identity.clone(),
+        }
+    }
+
+    /// Undo precisely the immediately preceding append, including eviction and
+    /// delta-anchor promotion. A stale token is refused without changing keys.
+    pub fn undo_append(&mut self, undo: SnapshotAppendUndo) -> bool {
+        self.undo_append_deferred(undo).is_some()
+    }
+
+    /// Undo an append, deferring destruction until associated metadata can be
+    /// published. Returns `None` for a foreign or stale token without changing
+    /// the ring. Rejected tokens are consumed and their destructors may panic.
+    pub fn undo_append_deferred(&mut self, undo: SnapshotAppendUndo) -> Option<SnapshotRetired> {
+        if !Arc::ptr_eq(&self.identity, &undo.identity)
+            || self.revision != undo.revision
+            || self.latest_frame() != Some(undo.frame)
+        {
+            return None;
+        }
+        let removed = self.frames.pop_back();
+        let promoted = undo
+            .promoted
+            .map(|old| core::mem::replace(&mut self.frames[0].snapshot, old));
+        if let Some(evicted) = undo.evicted {
+            self.frames.push_front(evicted);
+        }
+        self.advance_revision();
+        Some(SnapshotRetired {
+            _snapshots: [promoted, None],
+            _frames: [removed, None],
+        })
+    }
+
+    fn advance_revision(&mut self) {
+        // Outstanding tokens keep the old allocation alive: wrapping a counter
+        // must not let an old token authenticate a different mutation (ABA).
+        if self.revision == u64::MAX {
+            self.identity = Arc::new(());
+        }
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Reconstruct an owned snapshot for `frame`, without caching it.
@@ -231,14 +370,17 @@ impl SnapshotRing {
     /// Drop all keys greater than `frame`, even if the cutoff was not recorded.
     ///
     /// Prefix deltas remain valid. A cutoff older than the anchor clears history.
+    /// The entire tail is detached before any user destructor is called.
     pub fn truncate_after(&mut self, frame: u64) {
-        while self.frames.back().is_some_and(|f| f.number > frame) {
-            self.frames.pop_back();
-        }
+        let keep = self.frames.partition_point(|entry| entry.number <= frame);
+        let retired = self.frames.split_off(keep);
+        self.advance_revision();
+        drop(retired);
     }
 
     /// Drop all history, installing the empty state before values are dropped.
     pub fn clear(&mut self) {
+        self.advance_revision();
         let old = core::mem::take(&mut self.frames);
         drop(old);
     }
@@ -336,5 +478,41 @@ fn clone_anchor(anchor: &WorldSnapshot) -> WorldSnapshot {
         columns,
         resources: super::resource::clone_resources(&anchor.resources),
         relations: anchor.relations.clone(),
+    }
+}
+
+#[cfg(test)]
+mod reversible_tests {
+    use super::*;
+
+    #[test]
+    fn revision_wrap_changes_identity_and_refuses_an_aba_token() {
+        let world = World::new();
+        let mut ring = SnapshotRing::new(4);
+        let stale = ring.append_reversible(1, world.snapshot());
+        ring.revision = u64::MAX;
+        ring.push(2, world.snapshot());
+        ring.truncate_after(1);
+        assert_eq!(ring.revision, stale.revision);
+        assert_eq!(ring.latest_frame(), Some(stale.frame));
+        assert!(!ring.undo_append(stale));
+        assert_eq!(ring.frames().collect::<Vec<_>>(), [1]);
+    }
+
+    #[test]
+    fn numeric_frame_keys_do_not_wrap_and_clear_invalidates_tokens() {
+        let world = World::new();
+        for capacity in [1, 4] {
+            let mut ring = SnapshotRing::new(capacity);
+            ring.push(u64::MAX - 1, world.snapshot());
+            let undo = ring.append_reversible(u64::MAX, world.snapshot());
+            assert!(ring.undo_append(undo));
+            assert_eq!(ring.latest_frame(), Some(u64::MAX - 1));
+            let stale = ring.append_reversible(u64::MAX, world.snapshot());
+            ring.clear();
+            ring.push(u64::MAX, world.snapshot());
+            assert!(!ring.undo_append(stale));
+            assert_eq!(ring.latest_frame(), Some(u64::MAX));
+        }
     }
 }

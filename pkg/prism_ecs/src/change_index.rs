@@ -84,6 +84,7 @@ struct ComponentLog {
 
 struct TrackerState {
     epoch: u64,
+    revision: u64,
     logs: Vec<Option<ComponentLog>>,
 }
 
@@ -161,6 +162,7 @@ impl ChangeTracker {
         Self {
             state: SpinLock::new(TrackerState {
                 epoch: 0,
+                revision: 0,
                 logs: Vec::new(),
             }),
         }
@@ -169,6 +171,14 @@ impl ChangeTracker {
     #[inline]
     pub(crate) fn recorder(&self, component: ComponentId) -> ChangeRecorder {
         ChangeRecorder::new(self as *const Self, component)
+    }
+
+    /// O(1) snapshot of all indexed writes and resets, independent of ticks and
+    /// per-component batch boundaries. A saturated counter disables clean-frame
+    /// skipping permanently rather than aliasing an earlier revision.
+    pub(crate) fn revision(&self) -> Option<u64> {
+        let revision = self.state.lock().revision;
+        (revision != u64::MAX).then_some(revision)
     }
 
     fn ensure_log(state: &mut TrackerState, component: ComponentId) -> &mut ComponentLog {
@@ -208,10 +218,14 @@ impl ChangeTracker {
     #[inline]
     pub(crate) fn record(&self, component: ComponentId, entity: Entity, tick: Tick) {
         let mut state = self.state.lock();
-        let log = Self::ensure_log(&mut state, component);
-        if log.active == 0 {
+        if Self::ensure_log(&mut state, component).active == 0 {
             return;
         }
+        // Count every append, including another write in the same tick batch.
+        state.revision = state.revision.saturating_add(1);
+        let log = state.logs[component.index() as usize]
+            .as_mut()
+            .expect("ensured component log");
         if let Some(batch) = log.batches.last_mut()
             && batch.tick == tick
         {
@@ -258,6 +272,7 @@ impl ChangeTracker {
     pub(crate) fn reset(&self) -> ChangeCursor {
         let mut state = self.state.lock();
         state.epoch = state.epoch.wrapping_add(1);
+        state.revision = state.revision.saturating_add(1);
         for log in state.logs.iter_mut().flatten() {
             log.batches.clear();
         }
@@ -265,5 +280,21 @@ impl ChangeTracker {
             epoch: state.epoch,
             next_batch: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    #[test]
+    fn saturated_revision_never_aliases_a_clean_baseline() {
+        let tracker = ChangeTracker::new();
+        tracker.state.lock().revision = u64::MAX - 1;
+        assert_eq!(tracker.revision(), Some(u64::MAX - 1));
+        tracker.reset();
+        assert_eq!(tracker.revision(), None);
+        tracker.reset();
+        assert_eq!(tracker.revision(), None);
     }
 }

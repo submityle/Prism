@@ -20,8 +20,8 @@
 //!
 //! # Scope, exactly as `prism_ecs` defines it
 //!
-//! A snapshot captures entity / component / change-tick state and **not**
-//! [`Resources`](prism_ecs::resource::Resource), and it is registry-bound:
+//! A snapshot captures entity / component / change-tick / relation state and
+//! explicitly registered snapshot resources, and it is registry-bound:
 //! register each component's clone glue with
 //! [`World::register_snapshot_component`] first. [`SnapshotHistory::capture`]
 //! panics on an unregistered resident component;
@@ -31,10 +31,12 @@
 //! ([`World::register_snapshot_component_hashable`]); a component with clone glue
 //! but no value hashing contributes structure but not its value to the hash.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use prism_ecs::component::ComponentId;
 use prism_ecs::resource::Resource;
+use prism_ecs::world::snapshot::SnapshotAppendUndo;
 use prism_ecs::world::snapshot::SnapshotRing;
 use prism_ecs::world::snapshot::WorldSnapshot;
 use prism_ecs::world::World;
@@ -48,6 +50,15 @@ use prism_ecs::world::World;
 pub struct SnapshotHistory {
     ring: SnapshotRing,
     next_frame: u64,
+    cursor_identity: Arc<()>,
+}
+
+/// A reversible, monotonically appended history frame. Keep this only until
+/// the operation following capture (for example a network send) succeeds.
+pub struct SnapshotCaptureUndo {
+    frame: u64,
+    ring: SnapshotAppendUndo,
+    cursor_identity: Arc<()>,
 }
 
 impl Resource for SnapshotHistory {}
@@ -63,6 +74,7 @@ impl SnapshotHistory {
         Self {
             ring: SnapshotRing::new(capacity),
             next_frame: 0,
+            cursor_identity: Arc::new(()),
         }
     }
 
@@ -84,8 +96,8 @@ impl SnapshotHistory {
         self.ring.is_empty()
     }
 
-    /// The frame number the next [`capture`](Self::capture) will record
-    /// (equivalently, the number of frames ever captured).
+    /// The frame number the next [`capture`](Self::capture) will record.
+    /// Frame keys do not wrap: `u64::MAX` denotes an exhausted cursor.
     #[must_use]
     pub fn next_frame(&self) -> u64 {
         self.next_frame
@@ -119,22 +131,94 @@ impl SnapshotHistory {
     /// # Panics
     /// Panics if a resident component has no snapshot clone glue; use
     /// [`try_capture`](Self::try_capture) to report that instead of panicking.
+    /// Also panics before capture if the frame cursor is exhausted. Destruction
+    /// of displaced values may panic after both the ring and cursor commit.
     pub fn capture(&mut self, world: &World) -> u64 {
-        let frame = self.next_frame;
-        self.ring.push(frame, world.snapshot());
-        self.next_frame += 1;
-        frame
+        self.checked_next_frame();
+        self.record_snapshot(world.snapshot())
     }
 
     /// Fallible [`capture`](Self::capture): on an unregistered component the
     /// snapshot is refused and the offending component ids are returned,
     /// leaving the history unchanged (the frame counter does not advance).
     pub fn try_capture(&mut self, world: &World) -> Result<u64, Vec<ComponentId>> {
+        self.checked_next_frame();
+        let snapshot = world.try_snapshot()?;
+        Ok(self.record_snapshot(snapshot))
+    }
+
+    /// Capture a strictly increasing frame with an eviction-preserving undo
+    /// token. The caller must not have sought into retained history. Exhausted
+    /// or non-increasing frame keys panic without changing the history.
+    pub fn try_capture_reversible(
+        &mut self,
+        world: &World,
+    ) -> Result<(u64, SnapshotCaptureUndo), Vec<ComponentId>> {
+        let next = self.checked_next_frame();
         let frame = self.next_frame;
         let snapshot = world.try_snapshot()?;
-        self.ring.push(frame, snapshot);
-        self.next_frame += 1;
-        Ok(frame)
+        let ring = self.ring.append_reversible(frame, snapshot);
+        self.next_frame = next;
+        Ok((
+            frame,
+            SnapshotCaptureUndo {
+                frame,
+                ring,
+                cursor_identity: self.cursor_identity.clone(),
+            },
+        ))
+    }
+
+    /// Refuse a stale token, or restore the preceding frame window and cursor.
+    /// Restoring the live World is the transaction owner's responsibility.
+    /// A successful undo publishes both before destroying displaced values;
+    /// destructor panics do not roll back external side effects.
+    pub fn undo_capture(&mut self, undo: SnapshotCaptureUndo) -> bool {
+        if undo.frame.checked_add(1) != Some(self.next_frame)
+            || !Arc::ptr_eq(&self.cursor_identity, &undo.cursor_identity)
+        {
+            return false;
+        }
+        let frame = undo.frame;
+        let Some(retired) = self.ring.undo_append_deferred(undo.ring) else {
+            return false;
+        };
+        self.next_frame = frame;
+        drop(retired);
+        true
+    }
+
+    /// Record an already captured snapshot at the cursor. Used to publish a
+    /// successful replay without executing gameplay a second time.
+    pub fn record_snapshot(&mut self, snapshot: WorldSnapshot) -> u64 {
+        let next = self.checked_next_frame();
+        let frame = self.next_frame;
+        let retired = self.ring.push_deferred(frame, snapshot);
+        self.next_frame = next;
+        drop(retired);
+        frame
+    }
+
+    fn checked_next_frame(&self) -> u64 {
+        self.next_frame
+            .checked_add(1)
+            .expect("snapshot history frame cursor exhausted")
+    }
+
+    /// Copy the retained prefix into a separate bounded branch. The original
+    /// remains intact until the caller publishes the completed replacement.
+    #[must_use]
+    pub fn branch_through(&self, frame: u64) -> Self {
+        let next = frame
+            .checked_add(1)
+            .expect("snapshot history frame cursor exhausted");
+        let mut branch = Self::new(self.capacity());
+        for key in self.ring.frames().take_while(|&key| key <= frame) {
+            branch.seek(key);
+            branch.record_snapshot(self.ring.get(key).expect("retained prefix key"));
+        }
+        branch.seek(next);
+        branch
     }
 
     /// Restore `world` to `frame` if it is still retained.
@@ -157,6 +241,8 @@ impl SnapshotHistory {
     /// snapshots are untouched, and seeking past the last frame is the caller's
     /// responsibility (it would leave a gap the ring never fills).
     pub fn seek(&mut self, frame: u64) {
+        // Even seeking away and back invalidates an outstanding undo token.
+        self.cursor_identity = Arc::new(());
         self.next_frame = frame;
     }
 
@@ -171,8 +257,10 @@ impl SnapshotHistory {
     /// (design §14/§15). `frame` itself is kept: its pre-input snapshot is what a
     /// re-simulation overwrites.
     pub fn truncate_after(&mut self, frame: u64) {
+        // Ring truncation detaches the entire tail before invoking destructors.
+        // Publish its associated cursor first so destructor panics stay coherent.
+        self.seek(frame);
         self.ring.truncate_after(frame);
-        self.next_frame = frame;
     }
 
     /// The deterministic state hash of a retained frame, for desync comparison
@@ -227,6 +315,313 @@ mod tests {
         w.get_mut::<Counter>(e).unwrap().0 = 42;
         assert!(history.rollback(&mut w, f0));
         assert_eq!(w.get::<Counter>(e).unwrap().0, 1);
+    }
+
+    #[test]
+    fn reversible_capture_restores_the_evicted_window_and_rejects_foreign_tokens() {
+        let mut w = world();
+        let entity = w.spawn(Counter(0));
+        let mut history = SnapshotHistory::new(2);
+        for value in 0..3 {
+            w.get_mut::<Counter>(entity).unwrap().0 = value;
+            history.capture(&w);
+        }
+        let old_hashes = [history.state_hash(1), history.state_hash(2)];
+        let (_, undo) = history.try_capture_reversible(&w).unwrap();
+        assert_eq!(history.oldest_frame(), Some(2));
+        assert!(history.undo_capture(undo));
+        assert_eq!(history.next_frame(), 3);
+        assert_eq!(history.oldest_frame(), Some(1));
+        assert_eq!([history.state_hash(1), history.state_hash(2)], old_hashes);
+
+        let mut other = SnapshotHistory::new(2);
+        other.capture(&w);
+        let (_, foreign) = other.try_capture_reversible(&w).unwrap();
+        let mut target = SnapshotHistory::new(2);
+        target.capture(&w);
+        target.capture(&w);
+        assert!(!target.undo_capture(foreign));
+        assert_eq!(target.next_frame(), 2);
+        assert_eq!(target.len(), 2);
+    }
+
+    #[test]
+    fn independent_branch_keeps_the_original_prefix_and_cursor() {
+        let mut w = world();
+        let entity = w.spawn(Counter(0));
+        let mut history = SnapshotHistory::new(4);
+        for value in 0..6 {
+            w.get_mut::<Counter>(entity).unwrap().0 = value;
+            history.capture(&w);
+        }
+        let mut branch = history.branch_through(3);
+        assert_eq!(branch.oldest_frame(), Some(2));
+        assert_eq!(branch.next_frame(), 4);
+        assert_eq!(branch.state_hash(3), history.state_hash(3));
+        w.get_mut::<Counter>(entity).unwrap().0 = 99;
+        branch.capture(&w);
+        assert_ne!(branch.state_hash(4), history.state_hash(4));
+        assert_eq!(history.next_frame(), 6);
+        assert!(history.contains(5));
+        assert!(!branch.contains(5));
+    }
+
+    #[test]
+    fn reversible_windows_restore_exact_states_at_capacities_one_and_four() {
+        for capacity in [1, 4] {
+            let mut w = world();
+            w.register_snapshot_component_equatable::<Counter>();
+            let entity = w.spawn(Counter(0));
+            let mut history = SnapshotHistory::new(capacity);
+            for frame in 0..12 {
+                w.get_mut::<Counter>(entity).unwrap().0 = frame;
+                history.capture(&w);
+            }
+            let before: Vec<_> = history
+                .ring
+                .frames()
+                .map(|key| (key, history.snapshot(key).unwrap()))
+                .collect();
+            w.get_mut::<Counter>(entity).unwrap().0 = 99;
+            let (_, undo) = history.try_capture_reversible(&w).unwrap();
+            assert_eq!(history.len(), capacity);
+            // Tokens follow the ring through a move, not its stack address.
+            let mut moved = history;
+            assert!(moved.undo_capture(undo));
+            assert_eq!(moved.next_frame(), 12);
+            assert_eq!(moved.len(), capacity);
+            for (key, snapshot) in before {
+                assert!(moved.snapshot(key).unwrap().structurally_eq(&snapshot));
+            }
+            assert_eq!(
+                w.get::<Counter>(entity).unwrap().0,
+                99,
+                "undo does not roll back the live World or external effects"
+            );
+        }
+    }
+
+    #[test]
+    fn exhausted_cursors_refuse_all_capture_paths_before_writing() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let w = world();
+        for capacity in [1, 4] {
+            let mut history = SnapshotHistory::new(capacity);
+            history.seek(u64::MAX - 1);
+            assert_eq!(history.capture(&w), u64::MAX - 1);
+            let before = history.state_hash(u64::MAX - 1);
+            for path in 0..4 {
+                assert!(catch_unwind(AssertUnwindSafe(|| {
+                    match path {
+                        0 => {
+                            history.capture(&w);
+                        }
+                        1 => {
+                            let _ = history.try_capture(&w);
+                        }
+                        2 => {
+                            let _ = history.try_capture_reversible(&w);
+                        }
+                        _ => {
+                            history.record_snapshot(w.snapshot());
+                        }
+                    }
+                }))
+                .is_err());
+                assert_eq!(history.next_frame(), u64::MAX);
+                assert_eq!(history.len(), 1);
+                assert!(!history.contains(u64::MAX));
+                assert_eq!(history.state_hash(u64::MAX - 1), before);
+            }
+            assert!(catch_unwind(AssertUnwindSafe(|| history.branch_through(u64::MAX))).is_err());
+        }
+    }
+
+    #[test]
+    fn seek_round_trips_and_later_mutations_invalidate_capture_tokens() {
+        let w = world();
+        for mutation in 0..4 {
+            let mut history = SnapshotHistory::new(4);
+            let (_, undo) = history.try_capture_reversible(&w).unwrap();
+            match mutation {
+                0 => {
+                    history.seek(9);
+                    history.seek(1);
+                }
+                1 => {
+                    history.seek(1);
+                }
+                2 => {
+                    history.capture(&w);
+                    history.truncate_after(0);
+                    history.seek(1);
+                }
+                _ => {
+                    let (_, newer) = history.try_capture_reversible(&w).unwrap();
+                    assert!(history.undo_capture(newer));
+                }
+            }
+            assert!(!history.undo_capture(undo));
+            assert_eq!(history.next_frame(), 1);
+            assert!(history.contains(0));
+        }
+    }
+
+    #[derive(Clone)]
+    struct DropBomb {
+        value: u64,
+        armed: Arc<core::sync::atomic::AtomicU64>,
+    }
+
+    impl Resource for DropBomb {}
+
+    impl PartialEq for DropBomb {
+        fn eq(&self, other: &Self) -> bool {
+            self.value == other.value
+        }
+    }
+
+    impl Drop for DropBomb {
+        fn drop(&mut self) {
+            use core::sync::atomic::Ordering::SeqCst;
+            if self
+                .armed
+                .compare_exchange(self.value, u64::MAX, SeqCst, SeqCst)
+                .is_ok()
+            {
+                panic!("injected snapshot destructor panic");
+            }
+        }
+    }
+
+    fn bomb_world() -> (World, Arc<core::sync::atomic::AtomicU64>) {
+        let armed = Arc::new(core::sync::atomic::AtomicU64::new(u64::MAX));
+        let mut w = world();
+        w.register_snapshot_resource_equatable::<DropBomb>();
+        w.insert_resource(DropBomb {
+            value: 0,
+            armed: armed.clone(),
+        });
+        (w, armed)
+    }
+
+    #[test]
+    fn destructor_panics_leave_capture_and_undo_cursors_committed() {
+        use core::sync::atomic::Ordering::SeqCst;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        for capacity in [1, 4] {
+            for undoing in [false, true] {
+                let (mut w, armed) = bomb_world();
+                let mut history = SnapshotHistory::new(capacity);
+                for frame in 0..capacity {
+                    w.resource_mut::<DropBomb>().value = frame as u64;
+                    history.capture(&w);
+                }
+                w.resource_mut::<DropBomb>().value = 99;
+                if undoing {
+                    let (_, undo) = history.try_capture_reversible(&w).unwrap();
+                    armed.store(99, SeqCst);
+                    assert!(catch_unwind(AssertUnwindSafe(|| history.undo_capture(undo))).is_err());
+                    assert_eq!(history.next_frame(), capacity as u64);
+                    assert_eq!(history.oldest_frame(), Some(0));
+                    assert!(!history.contains(capacity as u64));
+                } else {
+                    armed.store(0, SeqCst);
+                    assert!(catch_unwind(AssertUnwindSafe(|| history.capture(&w))).is_err());
+                    assert_eq!(history.next_frame(), capacity as u64 + 1);
+                    assert_eq!(history.oldest_frame(), Some(1));
+                    assert!(history.contains(capacity as u64));
+                }
+                assert_eq!(history.len(), capacity);
+                let restored = history.oldest_frame().unwrap();
+                assert!(history.rollback(&mut w, restored));
+                let expected = if restored == capacity as u64 {
+                    99
+                } else {
+                    restored
+                };
+                assert_eq!(w.resource::<DropBomb>().value, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn refused_capture_keeps_the_window_cursor_and_outstanding_token() {
+        struct Unregistered;
+        impl Component for Unregistered {}
+        for capacity in [1, 4] {
+            let mut w = world();
+            let mut history = SnapshotHistory::new(capacity);
+            for _ in 0..capacity {
+                history.capture(&w);
+            }
+            let (_, undo) = history.try_capture_reversible(&w).unwrap();
+            let oldest = history.oldest_frame();
+            let entity = w.spawn(Unregistered);
+            assert!(history.try_capture(&w).is_err());
+            assert!(history.try_capture_reversible(&w).is_err());
+            assert_eq!(history.next_frame(), capacity as u64 + 1);
+            assert_eq!(history.oldest_frame(), oldest);
+            assert_eq!(history.len(), capacity);
+            assert!(history.undo_capture(undo));
+            assert_eq!(history.next_frame(), capacity as u64);
+            assert!(w.get::<Unregistered>(entity).is_some());
+        }
+    }
+
+    #[test]
+    fn input_destructor_panics_before_commit_and_preserves_existing_token() {
+        use core::sync::atomic::Ordering::SeqCst;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let (mut w, armed) = bomb_world();
+        let mut history = SnapshotHistory::new(4);
+        history.capture(&w);
+        w.resource_mut::<DropBomb>().value = 1;
+        let (_, undo) = history.try_capture_reversible(&w).unwrap();
+        w.resource_mut::<DropBomb>().value = 99;
+        armed.store(99, SeqCst);
+        assert!(catch_unwind(AssertUnwindSafe(|| history.try_capture_reversible(&w))).is_err());
+        assert_eq!(history.next_frame(), 2);
+        assert_eq!(history.len(), 2);
+        assert!(history.undo_capture(undo));
+        assert_eq!(history.next_frame(), 1);
+    }
+
+    #[test]
+    fn replacement_destructor_panic_still_invalidates_the_ring_token() {
+        use core::sync::atomic::Ordering::SeqCst;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let (mut w, armed) = bomb_world();
+        let mut history = SnapshotHistory::new(4);
+        history.capture(&w);
+        w.resource_mut::<DropBomb>().value = 1;
+        let (_, undo) = history.try_capture_reversible(&w).unwrap();
+        w.resource_mut::<DropBomb>().value = 99;
+        armed.store(1, SeqCst);
+        assert!(catch_unwind(AssertUnwindSafe(|| history.ring.push(1, w.snapshot()))).is_err());
+        assert!(!history.undo_capture(undo));
+        assert_eq!(history.next_frame(), 2);
+        assert!(history.rollback(&mut w, 1));
+        assert_eq!(w.resource::<DropBomb>().value, 99);
+    }
+
+    #[test]
+    fn truncate_detaches_the_entire_tail_before_destructors_run() {
+        use core::sync::atomic::Ordering::SeqCst;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let (mut w, armed) = bomb_world();
+        let mut history = SnapshotHistory::new(4);
+        for frame in 0..5 {
+            w.resource_mut::<DropBomb>().value = frame;
+            history.capture(&w);
+        }
+        armed.store(4, SeqCst);
+        assert!(catch_unwind(AssertUnwindSafe(|| history.truncate_after(1))).is_err());
+        assert_eq!(history.next_frame(), 1);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.ring.frames().collect::<Vec<_>>(), [1]);
+        assert!(history.rollback(&mut w, 1));
+        assert_eq!(w.resource::<DropBomb>().value, 1);
     }
 
     #[test]
