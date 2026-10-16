@@ -9,8 +9,9 @@ use prism_replication::transport::Transport;
 use prism_replication::udp::{
     UdpMultiPeer, UdpMultiPeerConfig, UdpPeerBindingState, UdpPeerMigrationError, UdpTransport,
 };
-use std::io;
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, UdpSocket};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -133,6 +134,33 @@ fn wait_until(mut step: impl FnMut() -> bool) {
         thread::sleep(POLL_SLEEP);
     }
     panic!("real UDP acceptance condition did not converge within {MAX_STEPS} steps");
+}
+
+fn spawn_cross_process_worker(role: &str, client_addr: Option<SocketAddr>) -> Child {
+    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    command
+        .args(["--exact", "cross_process_udp_worker", "--nocapture"])
+        .env("PRISM_UDP_WORKER", role)
+        .stdout(Stdio::piped())
+        .stdin(Stdio::piped());
+    if let Some(client_addr) = client_addr {
+        command.env("PRISM_UDP_CLIENT_ADDR", client_addr.to_string());
+    }
+    command.spawn().expect("spawn cross-process UDP worker")
+}
+
+fn read_worker_line(reader: &mut BufReader<ChildStdout>, prefix: &str) -> String {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .expect("read cross-process worker output");
+        assert!(read > 0, "worker exited before printing {prefix}");
+        if let Some(value) = line.strip_prefix(prefix) {
+            return value.trim().to_owned();
+        }
+    }
 }
 
 #[test]
@@ -292,5 +320,116 @@ fn real_udp_peer_rebind_reconnects_after_old_socket_is_closed() {
         peer.request_rebind(new_addr),
         Err(UdpPeerMigrationError::InvalidEndpoint),
         "rebinding to the active endpoint is rejected"
+    );
+}
+
+#[test]
+fn cross_process_udp_worker() {
+    let Ok(role) = std::env::var("PRISM_UDP_WORKER") else {
+        return;
+    };
+    match role.as_str() {
+        "client" => {
+            let mut transport = UdpTransport::bind("127.0.0.1:0").expect("bind client worker");
+            let local = transport.local_addr().expect("client worker address");
+            println!("CLIENT_READY {local}");
+            io::stdout().flush().expect("flush client readiness");
+
+            let mut input = String::new();
+            BufReader::new(io::stdin())
+                .read_line(&mut input)
+                .expect("read server address");
+            let server_addr = input
+                .strip_prefix("SERVER_ADDR ")
+                .expect("server address handoff")
+                .trim()
+                .parse::<SocketAddr>()
+                .expect("parse server address");
+            transport
+                .connect_to(server_addr)
+                .expect("connect client worker");
+            let mut channel = ReliableChannel::new(transport, 2, 8);
+            channel.send(b"cross-process hello").expect("queue hello");
+            for tick in 1..=MAX_STEPS as u64 {
+                channel.tick_at(tick);
+                if channel
+                    .recv()
+                    .is_some_and(|payload| payload == b"cross-process world")
+                {
+                    assert_eq!(channel.unacked(), 0, "server response was acknowledged");
+                    println!("CLIENT_OK");
+                    io::stdout().flush().expect("flush client result");
+                    return;
+                }
+                thread::sleep(POLL_SLEEP);
+            }
+            panic!("cross-process client did not receive server response");
+        }
+        "server" => {
+            let client_addr = std::env::var("PRISM_UDP_CLIENT_ADDR")
+                .expect("server worker client address")
+                .parse::<SocketAddr>()
+                .expect("parse client worker address");
+            let mut transport = UdpTransport::bind("127.0.0.1:0").expect("bind server worker");
+            let local = transport.local_addr().expect("server worker address");
+            transport
+                .connect_to(client_addr)
+                .expect("connect server worker");
+            println!("SERVER_READY {local}");
+            io::stdout().flush().expect("flush server readiness");
+
+            let mut channel = ReliableChannel::new(transport, 2, 8);
+            let mut replied = false;
+            for tick in 1..=MAX_STEPS as u64 {
+                channel.tick_at(tick);
+                if channel
+                    .recv()
+                    .is_some_and(|payload| payload == b"cross-process hello")
+                {
+                    channel.send(b"cross-process world").expect("queue world");
+                    replied = true;
+                }
+                if replied && channel.unacked() == 0 {
+                    println!("SERVER_OK");
+                    io::stdout().flush().expect("flush server result");
+                    return;
+                }
+                thread::sleep(POLL_SLEEP);
+            }
+            panic!("cross-process server did not complete exchange");
+        }
+        other => panic!("unknown cross-process worker role: {other}"),
+    }
+}
+
+#[test]
+fn real_udp_cross_process_reliable_channel() {
+    let mut client = spawn_cross_process_worker("client", None);
+    let client_stdout = client.stdout.take().expect("client worker stdout");
+    let mut client_reader = BufReader::new(client_stdout);
+    let client_addr = read_worker_line(&mut client_reader, "CLIENT_READY ")
+        .parse::<SocketAddr>()
+        .expect("parse client readiness");
+
+    let mut server = spawn_cross_process_worker("server", Some(client_addr));
+    let server_stdout = server.stdout.take().expect("server worker stdout");
+    let mut server_reader = BufReader::new(server_stdout);
+    let server_addr = read_worker_line(&mut server_reader, "SERVER_READY ")
+        .parse::<SocketAddr>()
+        .expect("parse server readiness");
+
+    let mut client_stdin = client.stdin.take().expect("client worker stdin");
+    writeln!(client_stdin, "SERVER_ADDR {server_addr}").expect("send server address");
+    client_stdin.flush().expect("flush server address");
+
+    let client_status = client.wait().expect("wait for client worker");
+    let server_status = server.wait().expect("wait for server worker");
+    assert!(
+        client_status.success(),
+        "client worker failed: {client_status}"
+    );
+    assert!(
+        server_status.success(),
+        "server worker failed: {server_status}"
     );
 }
