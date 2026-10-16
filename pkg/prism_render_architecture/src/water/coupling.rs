@@ -14,7 +14,9 @@
 
 use super::EPS;
 use crate::frame_graph::AccessKind;
-use crate::render_fabric::{FeatureId, FrameLag, ResourceInput, ResourceKey, ResourceScope, ResourceUse};
+use crate::render_fabric::{
+    FeatureId, FrameLag, ResourceInput, ResourceKey, ResourceScope, ResourceUse,
+};
 
 /// Stable semantic owner for the water simulation feature declarations.
 pub const WATER_SIMULATION_FEATURE: FeatureId = FeatureId(0x1000);

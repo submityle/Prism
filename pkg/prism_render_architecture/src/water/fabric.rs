@@ -9,8 +9,9 @@
 //! coverage sidecar alongside the stable colour/motion ABI outputs.
 
 use crate::render_fabric::{
-    AccessKind, FrameLag, PassKey, QueueClass, ResourceInput, ResourceKey, ResourceScope, ResourceUse,
-    ServiceSet, WATER_FOAM_RESOURCE, WATER_SERVICE_IDS, WATER_SPRAY_RESOURCE, WATER_SURFACE_RESOURCE,
+    AccessKind, FrameLag, PassKey, QueueClass, ResourceInput, ResourceKey, ResourceScope,
+    ResourceUse, ServiceSet, WATER_FOAM_RESOURCE, WATER_SERVICE_IDS, WATER_SPRAY_RESOURCE,
+    WATER_SURFACE_RESOURCE,
 };
 
 use super::WaterShadingPlan;

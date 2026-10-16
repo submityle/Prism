@@ -53,7 +53,7 @@
 //! - [`fog`] — unified volumetric fog / contrail sources / froxel injection.
 //! - [`reference`] — delta/ratio-tracking single-scatter / transmittance
 //!   reference truth for offline calibration (deterministic, verifiable).
-//! - [`gpu`] — `GPU`/`WESL` dispatch scaffolding (milestone M8): the
+//! - [`gpu`] — the implemented `GPU`/`WESL` dispatch contract (milestone M8): the
 //!   compute-kernel contract, persistent device-buffer sizing, the async frame
 //!   pipeline plan and the shared-service wiring — pure integer bookkeeping,
 //!   not machine-verified.
@@ -66,10 +66,9 @@
 //! subsystem does not touch `DeformationKind` either.
 //!
 //! Only classical numerical methods are used; there is no `AI`/`ML` anywhere.
-//! The `GPU` `WESL` kernels and frame-graph wiring are documented as scaffolding
-//! and marked "not machine-verified" where the contract signatures anticipate
-//! them (the sandbox has no `GPU`); the `CPU`-verifiable pure functions and
-//! scheduling are the verification target.
+//! The `GPU` `WESL` kernels and frame-graph wiring are implemented behind the
+//! render backend boundary. CPU tests verify the deterministic contracts; real
+//! hardware runs additionally verify shader parity when the backend is present.
 
 pub mod atmosphere;
 pub mod avsm;

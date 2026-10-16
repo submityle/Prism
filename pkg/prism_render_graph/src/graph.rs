@@ -19,9 +19,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use prism_render_driver::{
-    BufferId, BufferUsages, ColorAttachment, CommandBuffer, CommandEncoder, DepthOperations, DepthStencilAttachment,
-    Extent3d, RenderDevice, RenderPassDescriptor, RenderQueue, TextureDimension, TextureUsages,
-    TextureViewDescriptor, TextureViewDimension,
+    BufferId, BufferUsages, ColorAttachment, CommandBuffer, CommandEncoder, DepthOperations,
+    DepthStencilAttachment, Extent3d, RenderDevice, RenderPassDescriptor, RenderQueue,
+    TextureDimension, TextureUsages, TextureViewDescriptor, TextureViewDimension,
 };
 
 use crate::blackboard::Blackboard;
@@ -1168,9 +1168,11 @@ impl RenderGraph {
                 default_view: view,
             };
             self.textures[i].realized = Some(realized);
-            allocations
-                .textures
-                .push((ResourceIndex(i as u32), self.textures[i].lifetime, realized));
+            allocations.textures.push((
+                ResourceIndex(i as u32),
+                self.textures[i].lifetime,
+                realized,
+            ));
         }
         for i in 0..self.buffers.len() {
             if !plan.used_buffers[i] || self.buffers[i].realized.is_some() {

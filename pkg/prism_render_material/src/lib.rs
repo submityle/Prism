@@ -78,8 +78,7 @@ pub use openpbr::{
     openpbr_conformance, project_to_openpbr, DroppedLobe, OpenPbrConformance, OpenPbrProjection,
 };
 pub use procedural_vt::{
-    bake_procedural_vt, ProceduralVtBakeConfig, ProceduralVtBakeError,
-    MAX_PROCEDURAL_VT_BAKE_BYTES,
+    bake_procedural_vt, ProceduralVtBakeConfig, ProceduralVtBakeError, MAX_PROCEDURAL_VT_BAKE_BYTES,
 };
 pub use record::{
     decode_illumination_blend_weight, decode_illumination_blend_weight_strict,
