@@ -25,6 +25,16 @@ pub enum FabricCompileError {
     HistoryNotPersistent(ResourceKey),
     ForeignSelection(FeatureId),
     MultipleWriters(ResourceKey),
+    MissingSelectedPass(PassKey),
+    InvalidProducer {
+        pass: PassKey,
+        resource: ResourceKey,
+        producer: PassKey,
+    },
+    HistoryProducer {
+        pass: PassKey,
+        resource: ResourceKey,
+    },
     MissingProducer(ResourceKey),
     ReadWriteSamePass {
         pass: PassKey,
@@ -158,7 +168,12 @@ impl<'a> ResourceTemplates<'a> {
                 declarations.push((feature.feature_id(), feature.variant_id(), pass));
             }
         }
-        let mut writers = BTreeMap::new();
+        let pass_indices: BTreeMap<_, _> = declarations
+            .iter()
+            .enumerate()
+            .map(|(index, (_, _, pass))| (pass.id, index))
+            .collect();
+        let mut writers = BTreeMap::<ResourceKey, Vec<usize>>::new();
         let mut needed = BTreeSet::new();
         for (index, &(_, _, pass)) in declarations.iter().enumerate() {
             GraphLimits::check_count("accesses", pass.accesses.len(), limits.accesses_per_pass)?;
@@ -169,52 +184,88 @@ impl<'a> ResourceTemplates<'a> {
                     GraphLimits::check_count("resources", needed.len() + 1, limits.resources)?;
                     needed.insert(address);
                 }
-                if usage.access.writes() && writers.insert(usage.key, index).is_some() {
-                    return Err(FabricCompileError::MultipleWriters(usage.key));
+                if usage.access.writes() {
+                    writers.entry(usage.key).or_default().push(index);
                 }
             }
         }
 
-        // The declaration facade normalizes SSA in declaration order. Ask the
-        // same authoritative compiler for producer-first admission order before
-        // lowering real accesses; never implement another topological sort.
+        // Preserve the producer-first Fabric pass identity required by runtime
+        // lowering. Ask the shared kernel only for control admission order;
+        // no resource lowering or full compilation is needed at this stage.
         let mut admission = GpuFrameGraphBuilder::with_limits(limits);
+        let mut sources = Vec::with_capacity(declarations.len());
+        let mut prerequisites = Vec::with_capacity(declarations.len());
+        let mut successors = BTreeSet::new();
         for (index, &(_, _, pass)) in declarations.iter().enumerate() {
             let mut dependencies = BTreeSet::new();
-            for usage in pass
-                .accesses
-                .iter()
-                .filter(|usage| !usage.access.writes() && usage.frame_lag.is_none())
-            {
-                if let Some(&writer) = writers.get(&usage.key) {
-                    if writer == index {
-                        return Err(FabricCompileError::ReadWriteSamePass {
-                            pass: pass.id,
-                            resource: usage.key,
+            for &dependency in pass.depends_on {
+                dependencies.insert(*pass_indices.get(&dependency)
+                    .ok_or(FabricCompileError::MissingSelectedPass(dependency))?);
+            }
+            let mut pass_sources = Vec::with_capacity(pass.accesses.len());
+            for usage in pass.accesses {
+                let resource_writers = writers.get(&usage.key).map(Vec::as_slice).unwrap_or(&[]);
+                let source = if usage.frame_lag.is_some() {
+                    if matches!(usage.input, ResourceInput::ProducedBy(_)) {
+                        return Err(FabricCompileError::HistoryProducer {
+                            pass: pass.id, resource: usage.key,
                         });
                     }
-                    dependencies.insert(writer);
-                } else if self
-                    .templates
-                    .get(&usage.key)
-                    .ok_or(FabricCompileError::MissingTemplate(usage.key))?
-                    .lifetime
-                    == ResourceLifetime::Transient
+                    None
+                } else {
+                    match usage.input {
+                        ResourceInput::Initial => None,
+                        ResourceInput::Automatic => {
+                            if resource_writers.len() > 1 {
+                                return Err(FabricCompileError::MultipleWriters(usage.key));
+                            }
+                            if usage.access.writes() { None } else { resource_writers.first().copied() }
+                        }
+                        ResourceInput::ProducedBy(producer) => {
+                            let source = pass_indices.get(&producer).copied()
+                                .filter(|source| *source != index && resource_writers.contains(source))
+                                .ok_or(FabricCompileError::InvalidProducer {
+                                    pass: pass.id, resource: usage.key, producer,
+                                })?;
+                            Some(source)
+                        }
+                    }
+                };
+                if let Some(source) = source {
+                    if source == index {
+                        return Err(FabricCompileError::ReadWriteSamePass {
+                            pass: pass.id, resource: usage.key,
+                        });
+                    }
+                    dependencies.insert(source);
+                } else if !usage.access.writes()
+                    && self.templates[&usage.key].lifetime == ResourceLifetime::Transient
                 {
                     return Err(FabricCompileError::MissingProducer(usage.key));
                 }
+                if usage.access.writes() && !successors.insert((usage.key, source)) {
+                    return Err(FabricCompileError::MultipleWriters(usage.key));
+                }
+                pass_sources.push(source);
             }
+            sources.push(pass_sources);
             admission.try_add_pass(PassDescriptor {
                 name: format!("feature-pass:{}", pass.id.0).into(),
                 queue: pass.queue,
                 accesses: Vec::new(),
                 depends_on: dependencies
-                    .into_iter()
+                    .iter().copied()
                     .map(|id| PassId(id as u32))
                     .collect(),
             })?;
+            prerequisites.push(dependencies);
         }
-        let admission_order = admission.compile()?.order;
+        let admission_order = admission
+            .dependency_order()?
+            .into_iter()
+            .map(|id| id.0 as usize)
+            .collect::<Vec<_>>();
         let mut supplied = BTreeMap::new();
         for binding in external {
             let Some(template) = self.templates.get(&binding.key) else {
@@ -307,8 +358,11 @@ impl<'a> ResourceTemplates<'a> {
                 external: binding,
             });
         }
+        let admitted_indices: BTreeMap<_, _> = admission_order.iter().enumerate()
+            .map(|(index, &original)| (original, PassId(index as u32)))
+            .collect();
         let mut passes = Vec::new();
-        for admitted in admission_order {
+        for &admitted in &admission_order {
             let (feature, variant, template) = declarations[admitted];
             let accesses = template
                 .accesses
@@ -327,7 +381,8 @@ impl<'a> ResourceTemplates<'a> {
                 name: format!("feature-pass:{}", template.id.0).into(),
                 queue: template.queue,
                 accesses,
-                depends_on: Vec::new(),
+                depends_on: prerequisites[admitted].iter()
+                    .map(|dependency| admitted_indices[dependency]).collect(),
             };
             let id = graph.try_add_pass(descriptor.clone())?;
             passes.push(PassSpec {
@@ -344,21 +399,48 @@ impl<'a> ResourceTemplates<'a> {
                 bound_accesses: Vec::new(),
             });
         }
-        let plan = graph.compile()?;
+        // Bind semantic producers to declaration access identities, not guessed
+        // SSA versions. The single full compile resolves these references from
+        // checked accessor outputs as it lowers the real graph.
+        let access_orders = normalized_access_orders(&passes, resources.len());
+        let mut writer_accesses = BTreeMap::new();
+        for pass in &passes {
+            for (ordinal, usage) in pass.template.accesses.iter().enumerate() {
+                if usage.access.writes() {
+                    writer_accesses.insert((pass.key(), usage.key), (pass.id, ordinal));
+                }
+            }
+        }
+        let inputs = admission_order
+            .iter()
+            .map(|&original| {
+                sources[original]
+                    .iter()
+                    .zip(declarations[original].2.accesses)
+                    .map(|(source, usage)| {
+                        let Some(source) = source else {
+                            return Ok(AccessInput::Version(0));
+                        };
+                        let producer = declarations[*source].2.id;
+                        let &(pass, access) = writer_accesses.get(&(producer, usage.key)).ok_or(
+                            FabricCompileError::InvalidProducer {
+                                pass: declarations[original].2.id,
+                                resource: usage.key,
+                                producer,
+                            },
+                        )?;
+                        Ok(AccessInput::ProducedBy { pass, access })
+                    })
+                    .collect::<Result<Vec<_>, FabricCompileError>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let plan = graph.compile_with_sources(&inputs)?;
         let mut versions = Vec::new();
-        let mut write_versions = BTreeMap::<u32, u32>::new();
         for &pass_index in &plan.order {
             let pass = &passes[pass_index];
-            for access in &pass.descriptor.accesses {
-                if !access.kind.writes() {
-                    continue;
-                }
-                let resource = &resources[access.resource.0 as usize];
-                let ssa_version = write_versions
-                    .entry(resource.id.0)
-                    .and_modify(|version| *version += 1)
-                    .or_insert(1);
-                let ssa_version = *ssa_version;
+            for (&ordinal, access) in access_orders[pass_index].iter().zip(&plan.accesses[pass_index]) {
+                let Some(ssa_version) = access.output_version else { continue };
+                let resource = &resources[pass.descriptor.accesses[ordinal].resource.0 as usize];
                 let base = resource.external.map_or(0, |binding| binding.version);
                 let content_version = base
                     .checked_add(ssa_version)
@@ -377,27 +459,40 @@ impl<'a> ResourceTemplates<'a> {
                 });
             }
         }
-        // Project versions produced by the authority, not a second SSA solver.
-        // A current-frame resource has at most one writer (checked above),
-        // admitted before all its readers. History resources have no writer.
+        // Retain every output; an older read must not be rebound to the final
+        // write of the frame. History and initial contents stay at SSA zero.
         let outputs: BTreeMap<_, _> = versions
             .iter()
-            .map(|version| (version.resource.0, *version))
+            .map(|version| ((version.resource.0, version.ssa_version), *version))
             .collect();
-        for pass in &mut passes {
+        for (index, pass) in passes.iter_mut().enumerate() {
+            let mut authority = vec![None; pass.template.accesses.len()];
+            for (&ordinal, access) in access_orders[index].iter().zip(&plan.accesses[index]) {
+                authority[ordinal] = Some(*access);
+            }
             pass.bound_accesses = pass
                 .template
                 .accesses
                 .iter()
                 .zip(&pass.descriptor.accesses)
-                .map(|(&declaration, access)| {
+                .zip(authority)
+                .map(|((&declaration, access), authority)| {
+                    let authority = authority.expect("authority preserves admitted accesses");
                     let resource = &resources[access.resource.0 as usize];
-                    let output = outputs.get(&access.resource.0);
+                    let version = authority.output_version.unwrap_or(authority.input_version);
+                    let output = outputs.get(&(access.resource.0, version));
+                    let input = outputs.get(&(access.resource.0, authority.input_version));
                     BoundResourceUse {
                         declaration,
                         resource: resource.id,
                         frame: resource.frame,
-                        ssa_version: output.map_or(0, |version| version.ssa_version),
+                        input_ssa_version: authority.input_version,
+                        input_content_version: input.map_or_else(
+                            || resource.external.map_or(0, |binding| binding.version),
+                            |version| version.content_version,
+                        ),
+                        input_producer: input.map(|version| version.writer),
+                        ssa_version: version,
                         content_version: output.map_or_else(
                             || resource.external.map_or(0, |binding| binding.version),
                             |version| version.content_version,
@@ -484,6 +579,25 @@ fn use_frame(frame: u64, usage: ResourceUse) -> Result<u64, FabricCompileError> 
     }
 }
 
+/// Original access ordinals in the authority's texture-then-buffer order.
+/// Resource namespace inference mirrors the declaration frontend; it does not
+/// assign versions or derive dependencies.
+fn normalized_access_orders(passes: &[PassSpec], resource_count: usize) -> Vec<Vec<usize>> {
+    let mut textures = vec![false; resource_count];
+    for access in passes.iter().flat_map(|pass| &pass.descriptor.accesses) {
+        if matches!(access.kind, AccessKind::SampledRead | AccessKind::ColorAttachment | AccessKind::DepthAttachment) {
+            textures[access.resource.0 as usize] = true;
+        }
+    }
+    passes.iter().map(|pass| {
+        pass.descriptor.accesses.iter().enumerate()
+            .filter(|(_, access)| textures[access.resource.0 as usize])
+            .chain(pass.descriptor.accesses.iter().enumerate()
+                .filter(|(_, access)| !textures[access.resource.0 as usize]))
+            .map(|(ordinal, _)| ordinal).collect()
+    }).collect()
+}
+
 #[derive(Clone, Debug)]
 pub struct BoundResource {
     pub id: ResourceId,
@@ -540,6 +654,10 @@ pub struct BoundResourceUse {
     pub declaration: ResourceUse,
     pub resource: ResourceId,
     pub frame: u64,
+    /// Input observed before this access; writes retain their predecessor too.
+    pub input_ssa_version: u32,
+    pub input_content_version: u32,
+    pub input_producer: Option<PassKey>,
     pub ssa_version: u32,
     pub content_version: u32,
     /// None denotes imported initial/history contents, never an implicit pass.

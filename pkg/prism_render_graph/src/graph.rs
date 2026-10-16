@@ -8,9 +8,10 @@
 //! driver commands once resources are realized.
 //!
 //! [`compile`](RenderGraph::compile) turns the declaration into an immutable
-//! [`ExecutionPlan`] without touching the GPU; [`execute`](RenderGraph::execute)
-//! realizes the surviving transients, replays each pass's execute closure into
-//! a driver [`CommandBuffer`](prism_render_driver::CommandBuffer), and submits it.
+//! [`ExecutionPlan`] without touching the GPU. [`prepare`](RenderGraph::prepare)
+//! freezes that plan; [`record`](RenderGraph::record) realizes resources and
+//! records commands without submitting. [`execute`](RenderGraph::execute) also
+//! submits, returning the same allocation owner for completion-time retirement.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -18,7 +19,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use prism_render_driver::{
-    BufferUsages, ColorAttachment, CommandEncoder, DepthOperations, DepthStencilAttachment,
+    BufferId, BufferUsages, ColorAttachment, CommandBuffer, CommandEncoder, DepthOperations, DepthStencilAttachment,
     Extent3d, RenderDevice, RenderPassDescriptor, RenderQueue, TextureDimension, TextureUsages,
     TextureViewDescriptor, TextureViewDimension,
 };
@@ -31,21 +32,167 @@ use crate::desc::{BufferDesc, TextureDesc};
 use crate::handle::{BufferHandle, ResourceIndex, TextureHandle};
 use crate::pass::{BoxedExecute, PassFlags, PassKind, PassNode, ThreadBound};
 use crate::plan::{CompileError, ExecutionPlan, RasterAttachments};
-use crate::record::PassCommands;
+use crate::record::{self, PassCommands};
 use crate::resource::{
     BufferResource, ImportedBuffer, ImportedTexture, Lifetime, RealizedTexture, TextureResource,
 };
 
 #[cfg(feature = "parallel")]
 use crate::parallel::{self, RecordUnit};
-#[cfg(any(test, not(feature = "parallel")))]
-use crate::record;
 
 /// The move-only closure a pass runs during execution to record its commands.
 ///
 /// Re-exported for callers that store execute closures in their own types; most
 /// code produces one implicitly by returning a closure from a pass's setup.
 pub type ExecuteFn = BoxedExecute;
+
+/// A compiled, move-only frame whose callbacks have not run and resources have
+/// not been allocated. Recording consumes this owner without compiling again.
+#[must_use = "record the prepared frame, or drop it to cancel before allocation"]
+pub struct PreparedGraph {
+    graph: RenderGraph,
+    plan: ExecutionPlan,
+}
+
+/// The move-only owner of physical allocations created by one graph recording.
+///
+/// Imported resources are never included. Indices retain the texture/buffer
+/// namespaces of the compiled plan, including synchronization metadata.
+///
+/// # Lifetime contract
+///
+/// Keep this owner until every submission using its resources has completed,
+/// then call [`Self::release`] on the creating device. For a cancelled frame,
+/// first discard all commands that could still reference these allocations.
+/// Dropping this data-only owner does **not** destroy GPU resources: it cannot
+/// observe external submission/completion, and an early destroy would invalidate
+/// in-flight commands. Omitting explicit release leaks until device teardown.
+#[derive(Debug, Default)]
+#[must_use = "retain until GPU completion, then explicitly release on the creating device"]
+pub struct GraphAllocations {
+    textures: Vec<(ResourceIndex, Lifetime, RealizedTexture)>,
+    buffers: Vec<(ResourceIndex, Lifetime, BufferId)>,
+}
+
+impl GraphAllocations {
+    /// Graph-created textures and default views, keyed by virtual texture index.
+    #[must_use]
+    pub fn textures(&self) -> &[(ResourceIndex, Lifetime, RealizedTexture)] {
+        &self.textures
+    }
+
+    /// Graph-created buffers, keyed by virtual buffer index.
+    #[must_use]
+    pub fn buffers(&self) -> &[(ResourceIndex, Lifetime, BufferId)] {
+        &self.buffers
+    }
+
+    /// Whether every graph-created allocation has been released or transferred.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.textures.is_empty() && self.buffers.is_empty()
+    }
+
+    /// Releases completed frame-local allocations, retaining persistent ones.
+    ///
+    /// The caller must establish completion on the actual submitting queue and
+    /// use the creating device. Persistent allocations remain owned here so a
+    /// history owner can reimport them in later frames and eventually release
+    /// them. This method does not submit, wait, or infer completion.
+    pub fn release_transients<D: RenderDevice>(&mut self, device: &D) {
+        self.textures.retain(|(_, lifetime, realized)| {
+            if *lifetime != Lifetime::Transient {
+                return true;
+            }
+            device.destroy_texture_view(realized.default_view);
+            device.destroy_texture(realized.texture);
+            false
+        });
+        self.buffers.retain(|(_, lifetime, buffer)| {
+            if *lifetime != Lifetime::Transient {
+                return true;
+            }
+            device.destroy_buffer(*buffer);
+            false
+        });
+    }
+
+    /// Releases all owned allocations, including persistent resources.
+    ///
+    /// Call only on the creating device after all GPU users have completed (or
+    /// after discarding an unsubmitted frame). Use [`Self::release_transients`]
+    /// instead when persistent history must outlive this frame. Imported
+    /// resources are never destroyed. Views are destroyed before their textures.
+    pub fn release<D: RenderDevice>(self, device: &D) {
+        for (_, _, realized) in &self.textures {
+            device.destroy_texture_view(realized.default_view);
+        }
+        for (_, _, realized) in self.textures {
+            device.destroy_texture(realized.texture);
+        }
+        for (_, _, buffer) in self.buffers {
+            device.destroy_buffer(buffer);
+        }
+    }
+}
+
+/// Recorded commands, their authoritative plan, and their physical allocations.
+///
+/// This owner is deliberately neither `Clone` nor `Copy`. Recording never
+/// submits; an external owner may encode the commands on its native device,
+/// submit them in plan order, and retire the allocations after actual GPU
+/// completion. Logical queue batches, waits and barriers remain in the plan;
+/// as before, the built-in executor uses one ordered command buffer on an
+/// auto-synchronizing queue, not independent physical queue submissions.
+///
+/// Dropping this packet does not destroy GPU resources. See [`GraphAllocations`]
+/// for the explicit completion/retirement contract.
+#[derive(Debug)]
+#[must_use = "retain the allocation owner until actual GPU completion, then release it"]
+pub struct RecordedGraph {
+    commands: CommandBuffer,
+    plan: ExecutionPlan,
+    allocations: GraphAllocations,
+}
+
+impl RecordedGraph {
+    /// The one ordered command buffer, without submitting or transferring it.
+    #[must_use]
+    pub fn commands(&self) -> &CommandBuffer {
+        &self.commands
+    }
+
+    /// The exact compiled plan used to realize and record this frame.
+    #[must_use]
+    pub fn plan(&self) -> &ExecutionPlan {
+        &self.plan
+    }
+
+    /// Physical graph-owned resources retained by this packet.
+    #[must_use]
+    pub fn allocations(&self) -> &GraphAllocations {
+        &self.allocations
+    }
+
+    /// Transfers commands, plan and allocation ownership to an external runtime.
+    ///
+    /// Native encoding/submission may consume `commands`; keep `allocations`
+    /// alive in the pending/submitted batch until its real completion signal.
+    #[must_use]
+    pub fn into_parts(self) -> (CommandBuffer, ExecutionPlan, GraphAllocations) {
+        (self.commands, self.plan, self.allocations)
+    }
+
+    /// Discards commands and releases all allocations on the creating device.
+    ///
+    /// The caller must first establish completion of every GPU use, or ensure
+    /// the commands were never submitted or handed off for later submission.
+    /// Persistent allocations are also released; use [`Self::into_parts`] and
+    /// [`GraphAllocations::release_transients`] to retain cross-frame history.
+    pub fn release<D: RenderDevice>(self, device: &D) {
+        self.allocations.release(device);
+    }
+}
 
 /// A declarative, backend-agnostic frame render graph.
 ///
@@ -442,21 +589,65 @@ impl RenderGraph {
         Ok(pass_id)
     }
 
+    /// Lightweight control-only admission using the same declaration-order
+    /// kernel as full compilation. Resource accesses are deliberately ignored.
+    pub(crate) fn declaration_dependency_order(
+        passes: &[crate::frame_graph::PassDescriptor],
+        limits: GraphLimits,
+    ) -> Result<Vec<crate::frame_graph::PassId>, CompileError> {
+        GraphLimits::check_count("passes", passes.len(), limits.passes)?;
+        for (pass_index, pass) in passes.iter().enumerate() {
+            GraphLimits::check_count("dependencies", pass.depends_on.len(), limits.passes)?;
+            for &dependency in &pass.depends_on {
+                if dependency.0 as usize >= passes.len() || dependency.0 as usize == pass_index {
+                    return Err(CompileError::InvalidDependency {
+                        pass: crate::frame_graph::PassId(pass_index as u32),
+                        dependency,
+                    });
+                }
+            }
+        }
+        let explicit = passes
+            .iter()
+            .map(|pass| pass.depends_on.iter().map(|id| id.0 as usize).collect())
+            .collect::<Vec<_>>();
+        Ok(Self::solve_declaration_dependencies(passes, &explicit)?
+            .into_iter()
+            .map(|id| crate::frame_graph::PassId(id as u32))
+            .collect())
+    }
+
+    fn solve_declaration_dependencies(
+        passes: &[crate::frame_graph::PassDescriptor],
+        explicit: &[Vec<usize>],
+    ) -> Result<Vec<usize>, CompileError> {
+        let names = passes
+            .iter()
+            .map(|pass| pass.name.clone().into_owned())
+            .collect::<Vec<_>>();
+        Ok(compile::kernel::solve(
+            &vec![Vec::new(); passes.len()],
+            &vec![true; passes.len()],
+            explicit,
+            &names,
+        )?
+        .order)
+    }
+
     /// Lowers a startup declaration frontend into this graph's authoritative
     /// SSA compiler. The declaration records remain backend-neutral; all
     /// scheduling, hazards, lifetimes, aliasing and barriers are derived by
     /// [`Self::compile`] after lowering. Optional input versions parallel the
     /// original pass/access table; writes always use the checked builder's
     /// version allocator regardless of their input version.
-    pub(crate) fn compile_declarations(
+    pub(crate) fn compile_declarations<Input: Copy + Into<crate::frame_graph::AccessInput>>(
         resources: &[crate::frame_graph::ResourceDescriptor],
         passes: &[crate::frame_graph::PassDescriptor],
         limits: GraphLimits,
-        inputs: Option<&[Vec<u32>]>,
+        inputs: Option<&[Vec<Input>]>,
     ) -> Result<ExecutionPlan, CompileError> {
         use crate::access::{BufferUse, TextureUse};
-        use crate::compile::kernel;
-        use crate::frame_graph::{AccessKind, QueueClass, ResourceLifetime};
+        use crate::frame_graph::{AccessInput, AccessKind, PassId, QueueClass, ResourceLifetime};
         use crate::resource::{BufferResource, Lifetime, TextureResource};
         use prism_render_driver::{BufferUsages, SubresourceRange, TextureFormat, TextureUsages};
 
@@ -473,7 +664,7 @@ impl RenderGraph {
             for (pass_index, pass) in passes.iter().enumerate() {
                 if inputs[pass_index].len() != pass.accesses.len() {
                     return Err(CompileError::InvalidInputShape {
-                        pass: Some(crate::frame_graph::PassId(pass_index as u32)),
+                        pass: Some(PassId(pass_index as u32)),
                         expected: pass.accesses.len(),
                         actual: inputs[pass_index].len(),
                     });
@@ -485,7 +676,7 @@ impl RenderGraph {
             for access in &pass.accesses {
                 if access.resource.0 as usize >= resources.len() {
                     return Err(CompileError::InvalidResource {
-                        pass: crate::frame_graph::PassId(pass_index as u32),
+                        pass: PassId(pass_index as u32),
                         resource: access.resource,
                     });
                 }
@@ -493,28 +684,74 @@ impl RenderGraph {
             for &dependency in &pass.depends_on {
                 if dependency.0 as usize >= passes.len() || dependency.0 as usize == pass_index {
                     return Err(CompileError::InvalidDependency {
-                        pass: crate::frame_graph::PassId(pass_index as u32),
+                        pass: PassId(pass_index as u32),
                         dependency,
                     });
                 }
             }
         }
 
-        let explicit: Vec<Vec<usize>> = passes
+        let mut explicit: Vec<Vec<usize>> = passes
             .iter()
             .map(|pass| pass.depends_on.iter().map(|id| id.0 as usize).collect())
             .collect();
-        let names = passes
-            .iter()
-            .map(|pass| pass.name.clone().into_owned())
-            .collect::<Vec<_>>();
-        let declaration_order = kernel::solve(
-            &vec![Vec::new(); passes.len()],
-            &vec![true; passes.len()],
-            &explicit,
-            &names,
-        )?
-        .order;
+        let mut has_sources = false;
+        if let Some(inputs) = inputs {
+            for (pass_index, pass) in passes.iter().enumerate() {
+                for (access_index, access) in pass.accesses.iter().enumerate() {
+                    let AccessInput::ProducedBy {
+                        pass: producer,
+                        access: producer_access,
+                    } = inputs[pass_index][access_index].into()
+                    else {
+                        continue;
+                    };
+                    let invalid = |reason| CompileError::InvalidInputSource {
+                        pass: PassId(pass_index as u32),
+                        access: access_index,
+                        producer,
+                        producer_access,
+                        reason,
+                    };
+                    if producer.0 as usize == pass_index {
+                        return Err(invalid("producer must be a different pass"));
+                    }
+                    let source = passes
+                        .get(producer.0 as usize)
+                        .and_then(|pass| pass.accesses.get(producer_access))
+                        .ok_or_else(|| invalid("producer access does not exist"))?;
+                    if source.resource != access.resource {
+                        return Err(invalid("producer uses a different resource"));
+                    }
+                    if !source.kind.writes() {
+                        return Err(invalid("producer access is not a write"));
+                    }
+                    has_sources = true;
+                    if !explicit[pass_index].contains(&(producer.0 as usize)) {
+                        explicit[pass_index].push(producer.0 as usize);
+                    }
+                }
+            }
+        }
+        if has_sources {
+            // References supplement (rather than duplicate) explicit edges.
+            // This is dependency normalization, not another scheduler.
+            for dependencies in &mut explicit {
+                dependencies.sort_unstable();
+                dependencies.dedup();
+            }
+        }
+        let declaration_order = Self::solve_declaration_dependencies(passes, &explicit)?;
+        // Only cache versions returned by checked write accessors. Neither
+        // semantic producers nor write counts allocate SSA versions here.
+        let mut outputs: Vec<Vec<Option<u32>>> = if has_sources {
+            passes
+                .iter()
+                .map(|pass| vec![None; pass.accesses.len()])
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let mut graph = Self::with_limits(Extent3d::new_2d(1, 1), limits);
 
@@ -598,10 +835,9 @@ impl RenderGraph {
 
         for &original_index in &declaration_order {
             let pass = &passes[original_index];
-            let dependencies = pass
-                .depends_on
+            let dependencies = explicit[original_index]
                 .iter()
-                .map(|id| original_to_graph[id.0 as usize])
+                .map(|&id| original_to_graph[id])
                 .collect::<Vec<_>>();
             let kind = match pass.queue {
                 QueueClass::Transfer => PassKind::Transfer,
@@ -627,42 +863,84 @@ impl RenderGraph {
             let mut setup_result: Result<(), CompileError> = Ok(());
             graph.add_topology_pass(pass.name.clone(), kind, flags, dependencies, |builder| {
                 // Checked builder accesses are the write-version authority in
-                // both modes. A failure only mutates this disposable local
+                // all input modes. A failure only mutates this disposable local
                 // graph; it is returned before any plan can escape.
                 setup_result = (|| {
                     for (access_index, access) in accesses.into_iter().enumerate() {
                         let index = access.resource.0 as usize;
-                        let input = inputs.map(|inputs| inputs[original_index][access_index]);
+                        let input =
+                            match inputs.map(|rows| rows[original_index][access_index].into()) {
+                                None => None,
+                                Some(AccessInput::Version(version)) => Some(version),
+                                Some(AccessInput::ProducedBy { pass, access }) => Some(
+                                    outputs
+                                        .get(pass.0 as usize)
+                                        .and_then(|row| row.get(access))
+                                        .copied()
+                                        .flatten()
+                                        .ok_or(CompileError::InvalidInputSource {
+                                            pass: PassId(original_index as u32),
+                                            access: access_index,
+                                            producer: pass,
+                                            producer_access: access,
+                                            reason: "producer output is unavailable",
+                                        })?,
+                                ),
+                            };
                         let next = match handles[index] {
                             Handle::Texture(handle) => {
                                 let usage = match access.kind {
                                     AccessKind::SampledRead => TextureUse::Sampled,
-                                    AccessKind::StorageRead | AccessKind::IndirectRead => TextureUse::StorageRead,
+                                    AccessKind::StorageRead | AccessKind::IndirectRead => {
+                                        TextureUse::StorageRead
+                                    }
                                     AccessKind::StorageWrite => TextureUse::StorageWrite,
                                     AccessKind::ColorAttachment => TextureUse::ColorAttachment,
                                     AccessKind::DepthAttachment => TextureUse::DepthAttachment,
                                     AccessKind::TransferRead => TextureUse::CopySrc,
                                     AccessKind::TransferWrite => TextureUse::CopyDst,
                                 };
-                                let handle = TextureHandle::new(handle.resource(), input.unwrap_or(handle.version()));
-                                Handle::Texture(builder.try_access_texture(handle, usage, SubresourceRange::all())?)
+                                let handle = TextureHandle::new(
+                                    handle.resource(),
+                                    input.unwrap_or(handle.version()),
+                                );
+                                Handle::Texture(builder.try_access_texture(
+                                    handle,
+                                    usage,
+                                    SubresourceRange::all(),
+                                )?)
                             }
                             Handle::Buffer(handle) => {
                                 let usage = match access.kind {
-                                    AccessKind::SampledRead | AccessKind::StorageRead => BufferUse::StorageRead,
+                                    AccessKind::SampledRead | AccessKind::StorageRead => {
+                                        BufferUse::StorageRead
+                                    }
                                     AccessKind::StorageWrite => BufferUse::StorageWrite,
                                     AccessKind::IndirectRead => BufferUse::Indirect,
                                     AccessKind::TransferRead => BufferUse::CopySrc,
                                     AccessKind::TransferWrite => BufferUse::CopyDst,
-                                    AccessKind::ColorAttachment | AccessKind::DepthAttachment => unreachable!("attachment declarations are lowered as textures"),
+                                    AccessKind::ColorAttachment | AccessKind::DepthAttachment => {
+                                        unreachable!(
+                                            "attachment declarations are lowered as textures"
+                                        )
+                                    }
                                 };
-                                let handle = BufferHandle::new(handle.resource(), input.unwrap_or(handle.version()));
+                                let handle = BufferHandle::new(
+                                    handle.resource(),
+                                    input.unwrap_or(handle.version()),
+                                );
                                 Handle::Buffer(builder.try_use_buffer(handle, usage)?)
                             }
                         };
                         // Retaining an older read input must not roll the
                         // resource's latest handle backwards for later uses.
                         if access.kind.writes() {
+                            if has_sources {
+                                outputs[original_index][access_index] = Some(match next {
+                                    Handle::Texture(handle) => handle.version(),
+                                    Handle::Buffer(handle) => handle.version(),
+                                });
+                            }
                             handles[index] = next;
                         }
                     }
@@ -703,9 +981,29 @@ impl RenderGraph {
         compile::compile(&self.passes, &self.textures, &self.buffers, self.swapchain)
     }
 
-    /// Compiles, realizes transients, replays every surviving pass into a
-    /// driver [`CommandBuffer`](prism_render_driver::CommandBuffer), and submits
-    /// it on `queue`.
+    /// Validates and freezes the frame without allocating or recording work.
+    ///
+    /// The returned owner is consumed by [`PreparedGraph::record`], which uses
+    /// this exact plan without compiling again. A compilation error runs no
+    /// execute callbacks and creates no driver objects.
+    pub fn prepare(self) -> Result<PreparedGraph, CompileError> {
+        let plan = self.compile()?;
+        Ok(PreparedGraph { graph: self, plan })
+    }
+
+    /// Compiles once, realizes resources and records without submitting.
+    ///
+    /// On [`CompileError`], no allocation or execute callback has occurred.
+    /// Resource creation and callbacks are otherwise infallible trait calls;
+    /// their panics are not converted into a recoverable compilation error.
+    /// Keep the returned owner until actual GPU completion, then release its
+    /// allocations on the creating device.
+    pub fn record<D: RenderDevice>(self, device: &D) -> Result<RecordedGraph, CompileError> {
+        Ok(self.prepare()?.record(device))
+    }
+
+    /// Compiles, realizes resources, records every surviving pass into one
+    /// driver [`CommandBuffer`], and submits it on `queue`.
     ///
     /// Consumes the graph: a frame's execute closures are move-only and run
     /// exactly once.
@@ -715,6 +1013,11 @@ impl RenderGraph {
     /// recorded concurrently on a worker pool and assembled in order. Both
     /// produce the same command buffer.
     ///
+    /// Submission is not completion. The returned [`RecordedGraph`] owns the
+    /// allocations until the caller observes completion on the real queue and
+    /// explicitly releases them. [`RenderQueue`] has no completion API, so
+    /// neither this function nor dropping the owner can retire them safely.
+    ///
     /// # Errors
     /// Returns [`CompileError`] when compilation fails; no GPU work is issued in
     /// that case.
@@ -722,7 +1025,7 @@ impl RenderGraph {
         self,
         device: &D,
         queue: &Q,
-    ) -> Result<(), CompileError> {
+    ) -> Result<RecordedGraph, CompileError> {
         #[cfg(feature = "parallel")]
         {
             self.execute_parallel(device, queue)
@@ -741,24 +1044,27 @@ impl RenderGraph {
     /// under the `parallel` feature for testing and comparison.
     #[cfg(any(test, not(feature = "parallel")))]
     pub(crate) fn execute_sequential<D: RenderDevice, Q: RenderQueue>(
-        mut self,
+        self,
         device: &D,
         queue: &Q,
-    ) -> Result<(), CompileError> {
-        let plan = self.compile()?;
-        self.realize(&plan, device);
+    ) -> Result<RecordedGraph, CompileError> {
+        let recorded = self.prepare()?.record_sequential(device);
+        queue.submit(core::slice::from_ref(recorded.commands()));
+        Ok(recorded)
+    }
 
+    /// The reference recording path, shared by record-only and submit APIs.
+    fn record_commands_sequential(&mut self, plan: &ExecutionPlan) -> CommandBuffer {
         let mut encoder = CommandEncoder::new();
         for (pos, &pidx) in plan.order.iter().enumerate() {
             let kind = self.passes[pidx].kind;
             // Take the move-only closure before the shared borrows below.
             let exec = self.passes[pidx].execute.take();
             let recorded = record::record_pass(exec, kind, &self.textures, &self.buffers);
-            self.encode_recorded(&mut encoder, &plan, pos, pidx, recorded);
+            self.encode_recorded(&mut encoder, plan, pos, pidx, recorded);
         }
 
-        queue.submit(&[encoder.finish()]);
-        Ok(())
+        encoder.finish()
     }
 
     /// Records every surviving pass concurrently on a worker pool, then
@@ -768,13 +1074,18 @@ impl RenderGraph {
     /// determinism guarantee this upholds.
     #[cfg(feature = "parallel")]
     pub(crate) fn execute_parallel<D: RenderDevice, Q: RenderQueue>(
-        mut self,
+        self,
         device: &D,
         queue: &Q,
-    ) -> Result<(), CompileError> {
-        let plan = self.compile()?;
-        self.realize(&plan, device);
+    ) -> Result<RecordedGraph, CompileError> {
+        let recorded = self.prepare()?.record_parallel(device);
+        queue.submit(core::slice::from_ref(recorded.commands()));
+        Ok(recorded)
+    }
 
+    /// Uses the existing worker pool and assembles in authoritative plan order.
+    #[cfg(feature = "parallel")]
+    fn record_commands_parallel(&mut self, plan: &ExecutionPlan) -> CommandBuffer {
         // Move every execute closure out of the graph up front so recording
         // reads the (now frozen) resource tables through shared borrows only
         // and each worker owns exactly the closures it records.
@@ -792,11 +1103,10 @@ impl RenderGraph {
 
         let mut encoder = CommandEncoder::new();
         for (pos, pidx, commands) in recorded {
-            self.encode_recorded(&mut encoder, &plan, pos, pidx, commands);
+            self.encode_recorded(&mut encoder, plan, pos, pidx, commands);
         }
 
-        queue.submit(&[encoder.finish()]);
-        Ok(())
+        encoder.finish()
     }
 
     /// Encodes one pass's recorded commands into `encoder` in plan order.
@@ -837,8 +1147,10 @@ impl RenderGraph {
 
     /// Creates the driver objects backing every used, not-yet-realized
     /// transient or persistent resource. Imported resources are already
-    /// realized at import and are skipped.
-    fn realize<D: RenderDevice>(&mut self, plan: &ExecutionPlan, device: &D) {
+    /// realized at import and are skipped. Returns ownership of exactly the
+    /// allocations created here, including persistent history resources.
+    fn realize<D: RenderDevice>(&mut self, plan: &ExecutionPlan, device: &D) -> GraphAllocations {
+        let mut allocations = GraphAllocations::default();
         for i in 0..self.textures.len() {
             if !plan.used_textures[i] || self.textures[i].realized.is_some() {
                 continue;
@@ -851,18 +1163,27 @@ impl RenderGraph {
                 texture,
                 &default_view_descriptor(self.textures[i].desc.dimension),
             );
-            self.textures[i].realized = Some(RealizedTexture {
+            let realized = RealizedTexture {
                 texture,
                 default_view: view,
-            });
+            };
+            self.textures[i].realized = Some(realized);
+            allocations
+                .textures
+                .push((ResourceIndex(i as u32), self.textures[i].lifetime, realized));
         }
         for i in 0..self.buffers.len() {
             if !plan.used_buffers[i] || self.buffers[i].realized.is_some() {
                 continue;
             }
             let descriptor = self.buffers[i].desc.lower(self.buffers[i].inferred_usage);
-            self.buffers[i].realized = Some(device.create_buffer(&descriptor));
+            let buffer = device.create_buffer(&descriptor);
+            self.buffers[i].realized = Some(buffer);
+            allocations
+                .buffers
+                .push((ResourceIndex(i as u32), self.buffers[i].lifetime, buffer));
         }
+        allocations
     }
 
     /// Builds a driver [`RenderPassDescriptor`] from a raster pass's resolved
@@ -909,6 +1230,63 @@ impl RenderGraph {
             });
         }
         descriptor
+    }
+}
+
+impl PreparedGraph {
+    /// The authoritative plan, available before any driver objects are created.
+    #[must_use]
+    pub fn plan(&self) -> &ExecutionPlan {
+        &self.plan
+    }
+
+    /// Realizes and records this prepared frame exactly once without submitting.
+    ///
+    /// No device or queue is sent to recording workers. Imported resources must
+    /// belong to this device, and must outlive all submissions that use them.
+    /// The caller retains responsibility for external completion and retirement.
+    ///
+    /// Resource sizes use the graph's compiled swapchain extent. Recording
+    /// cannot change it; resize requires preparing a new graph so the frozen
+    /// memory/alias plan and physical allocation sizes remain consistent.
+    #[must_use]
+    pub fn record<D: RenderDevice>(self, device: &D) -> RecordedGraph {
+        #[cfg(feature = "parallel")]
+        {
+            self.record_parallel(device)
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            self.record_sequential(device)
+        }
+    }
+
+    /// Records on the calling thread, including when `parallel` is enabled.
+    ///
+    /// Shares realization and command assembly with [`Self::record`]; it never
+    /// compiles again or submits. The same extent and retirement contracts apply.
+    #[must_use]
+    pub fn record_sequential<D: RenderDevice>(self, device: &D) -> RecordedGraph {
+        self.record_with(device, RenderGraph::record_commands_sequential)
+    }
+
+    #[cfg(feature = "parallel")]
+    pub(crate) fn record_parallel<D: RenderDevice>(self, device: &D) -> RecordedGraph {
+        self.record_with(device, RenderGraph::record_commands_parallel)
+    }
+
+    fn record_with<D: RenderDevice>(
+        mut self,
+        device: &D,
+        record_commands: fn(&mut RenderGraph, &ExecutionPlan) -> CommandBuffer,
+    ) -> RecordedGraph {
+        let allocations = self.graph.realize(&self.plan, device);
+        let commands = record_commands(&mut self.graph, &self.plan);
+        RecordedGraph {
+            commands,
+            plan: self.plan,
+            allocations,
+        }
     }
 }
 

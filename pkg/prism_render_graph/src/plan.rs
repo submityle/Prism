@@ -32,6 +32,20 @@ pub enum LogicalResource {
     Buffer(ResourceIndex),
 }
 
+/// An admitted SSA access projected from the authoritative access records.
+///
+/// This is declaration metadata, not a new resource allocation: an old input
+/// is retained by ordering its readers before the next physical overwrite.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CompiledAccess {
+    /// Resource identity in its texture or buffer namespace.
+    pub resource: LogicalResource,
+    /// Existing version observed by the access, including zero for initial contents.
+    pub input_version: u32,
+    /// Version allocated by the builder for a write; `None` for a read.
+    pub output_version: Option<u32>,
+}
+
 /// A logical barrier projected from the sole SSA solver, before backend lowering.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LogicalBarrier {
@@ -104,6 +118,29 @@ pub enum CompileError {
         pass: crate::frame_graph::PassId,
         /// Invalid prerequisite.
         dependency: crate::frame_graph::PassId,
+    },
+    /// Explicit declaration inputs must parallel the original pass/access table.
+    InvalidInputShape {
+        /// `None` means the number of pass rows differs; `Some` names the
+        /// original pass whose number of access columns differs.
+        pass: Option<crate::frame_graph::PassId>,
+        /// Required number of rows or columns.
+        expected: usize,
+        /// Supplied number of rows or columns.
+        actual: usize,
+    },
+    /// A symbolic input does not identify another pass's write to this resource.
+    InvalidInputSource {
+        /// Original consuming pass ID.
+        pass: crate::frame_graph::PassId,
+        /// Consumer's declared access ordinal.
+        access: usize,
+        /// Requested original producer pass ID.
+        producer: crate::frame_graph::PassId,
+        /// Requested producer declaration-access ordinal.
+        producer_access: usize,
+        /// Why the source cannot be used.
+        reason: &'static str,
     },
 }
 
@@ -199,6 +236,12 @@ pub struct ExecutionPlan {
     /// Scheduled position for each original pass index. `None` means the pass
     /// was culled. This is the constant-time runtime gate for ECS frontends.
     pub position_by_pass: Vec<Option<usize>>,
+    /// Authoritative SSA accesses for every original pass, including culled
+    /// passes. Rows are indexed by original pass index, not scheduled position;
+    /// columns use texture-first, then buffer access order, matching
+    /// [`LogicalBarrier::before`] and [`LogicalBarrier::after`]. Use
+    /// [`Self::is_alive`] to distinguish admitted metadata from executable work.
+    pub accesses: Vec<Vec<CompiledAccess>>,
     /// Logical hazards from the shared SSA kernel; backend transitions below
     /// additionally account for layouts, subresources and imported states.
     pub logical_barriers: Vec<LogicalBarrier>,

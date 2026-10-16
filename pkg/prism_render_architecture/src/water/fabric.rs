@@ -9,8 +9,8 @@
 //! coverage sidecar alongside the stable colour/motion ABI outputs.
 
 use crate::render_fabric::{
-    AccessKind, FrameLag, PassKey, QueueClass, ResourceKey, ResourceScope, ResourceUse, ServiceSet,
-    WATER_FOAM_RESOURCE, WATER_SERVICE_IDS, WATER_SPRAY_RESOURCE, WATER_SURFACE_RESOURCE,
+    AccessKind, FrameLag, PassKey, QueueClass, ResourceInput, ResourceKey, ResourceScope, ResourceUse,
+    ServiceSet, WATER_FOAM_RESOURCE, WATER_SERVICE_IDS, WATER_SPRAY_RESOURCE, WATER_SURFACE_RESOURCE,
 };
 
 use super::WaterShadingPlan;
@@ -49,18 +49,21 @@ pub const WATER_FABRIC_SERVICES: ServiceSet = ServiceSet::new(&WATER_SERVICE_IDS
 
 const SIMULATION_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_SURFACE_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_FOAM_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_SPRAY_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
@@ -70,30 +73,35 @@ const SIMULATION_ACCESSES: &[ResourceUse] = &[
 
 const SURFACE_RASTER_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_SURFACE_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_FOAM_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_SPRAY_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: FrameLag::new(1),
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: SCENE_COLOR_RESOURCE,
         access: AccessKind::ColorAttachment,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_DEPTH_RESOURCE,
         access: AccessKind::DepthAttachment,
         scope: ResourceScope::Whole,
@@ -109,42 +117,49 @@ const SURFACE_RASTER_ACCESSES: &[ResourceUse] = &[
 /// enabled in the same fragment invocation for ABI compatibility.
 const MASK_BLEND_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_SURFACE_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_FOAM_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_SPRAY_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: FrameLag::new(1),
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: RESPONSE_LEFT_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: RESPONSE_RIGHT_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: RESPONSE_CONTROLS_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_COVERAGE_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
@@ -154,36 +169,42 @@ const MASK_BLEND_ACCESSES: &[ResourceUse] = &[
 
 const COMPOSITION_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: RESPONSE_LEFT_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: RESPONSE_RIGHT_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: RESPONSE_CONTROLS_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: RESPONSE_AUXILIARY_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_COVERAGE_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: SCENE_COLOR_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,

@@ -73,6 +73,17 @@ impl FrozenRoots {
         &self.ids
     }
 
+    /// The build-profile subsystem roots, independent of the dependency closure.
+    pub fn subsystems(&self) -> &[FeatureId] {
+        &self.subsystems
+    }
+
+    /// Statically referenceable responses. A shared response executor admits
+    /// each enabled response, not every response declared in the catalog.
+    pub fn responses(&self) -> &[FeatureId] {
+        &self.responses
+    }
+
     /// Use at runtime when a material/program becomes referenceable. Membership
     /// in the dependency closure is NOT membership in the frozen root set.
     pub fn require_root(&self, id: FeatureId) -> Result<(), RootError> {

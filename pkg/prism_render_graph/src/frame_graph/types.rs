@@ -17,6 +17,30 @@ pub struct PassId(
     pub u32,
 );
 
+/// An existing version or a symbolic reference to an authoritative write.
+///
+/// Pass IDs and access ordinals use the original declaration tables, before
+/// lowering or texture-first access normalization. Outputs are always minted
+/// by the checked graph builder, never by this reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccessInput {
+    /// Initial contents (`0`) or a version already admitted during lowering.
+    Version(u32),
+    /// The output of a different pass's write to this same resource.
+    ProducedBy {
+        /// Original producer pass ID, not a scheduled position.
+        pass: PassId,
+        /// Producer's declared access ordinal, not a normalized ordinal.
+        access: usize,
+    },
+}
+
+impl From<u32> for AccessInput {
+    fn from(version: u32) -> Self {
+        Self::Version(version)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Logical queue class used to group consecutive scheduled passes.
 pub enum QueueClass {

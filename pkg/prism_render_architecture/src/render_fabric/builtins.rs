@@ -7,8 +7,9 @@
 
 use super::{
     AccessKind, FeatureCatalog, FeatureDefinition, FeatureId, FeatureVariant, FrameLag, PassKey,
-    PassTemplate, QueueClass, RenderDomain, RenderQualityTier, ResourceKey, ResourceLayout,
-    ResourceScope, ResourceTemplate, ResourceUse, ServiceId, ServiceOutput, ServiceSet, VariantId,
+    PassTemplate, QueueClass, RenderDomain, RenderQualityTier, ResourceInput, ResourceKey,
+    ResourceLayout, ResourceScope, ResourceTemplate, ResourceUse, ServiceId, ServiceOutput, ServiceSet,
+    VariantId,
 };
 use crate::backend::capability::CapabilitySet;
 use crate::frame_graph::ResourceLifetime;
@@ -71,6 +72,14 @@ pub const LIT_FEATURE_ID: FeatureId = FeatureId(0x1100);
 pub const NPR_FEATURE_ID: FeatureId = FeatureId(0x1101);
 pub const CUSTOM_FEATURE_ID: FeatureId = FeatureId(0x1102);
 
+/// Stable implementation identities shared by the catalog and host executors.
+/// A host must explicitly register support for a variant; selecting a new
+/// implementation must never silently reuse an executor for the old one.
+pub const WATER_VARIANT_ID: VariantId = VariantId(0x5000);
+pub const LIT_VARIANT_ID: VariantId = VariantId(0x5002);
+pub const NPR_VARIANT_ID: VariantId = VariantId(0x5003);
+pub const CUSTOM_VARIANT_ID: VariantId = VariantId(0x5004);
+
 pub const WATER_SURFACE_RESOURCE: ResourceKey = ResourceKey::of(WATER_FEATURE_ID, 0);
 /// Compatibility name for the particle service's persistent foam feedback.
 pub const WATER_SPRAY_RESOURCE: ResourceKey = PARTICLE_SPRAY_RESOURCE;
@@ -90,18 +99,21 @@ pub const DECAL_RESOLVE_RESOURCE: ResourceKey = ResourceKey::of(DECAL_FEATURE_ID
 
 const WATER_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_SURFACE_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_FOAM_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: WATER_SPRAY_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,
@@ -110,18 +122,21 @@ const WATER_ACCESSES: &[ResourceUse] = &[
 ];
 const VOLUME_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: VOLUME_DENSITY_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: VOLUME_FROXEL_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: VOLUME_VELOCITY_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
@@ -130,12 +145,14 @@ const VOLUME_ACCESSES: &[ResourceUse] = &[
 ];
 const PARTICLE_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: PARTICLE_STREAM_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: PARTICLE_ALIVE_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
@@ -144,18 +161,21 @@ const PARTICLE_ACCESSES: &[ResourceUse] = &[
 ];
 const HAIR_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: HAIR_STRAND_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: HAIR_VISIBILITY_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: HAIR_DEEP_OPACITY_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
@@ -164,18 +184,21 @@ const HAIR_ACCESSES: &[ResourceUse] = &[
 ];
 const DECAL_ACCESSES: &[ResourceUse] = &[
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: DECAL_INSTANCE_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: DECAL_INDIRECT_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
         frame_lag: None,
     },
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: DECAL_RESOLVE_RESOURCE,
         access: AccessKind::StorageWrite,
         scope: ResourceScope::Whole,
@@ -184,33 +207,38 @@ const DECAL_ACCESSES: &[ResourceUse] = &[
 ];
 
 const WATER_PASSES: &[PassTemplate] = &[PassTemplate {
+    depends_on: &[],
     id: PassKey(0x5000),
     accesses: WATER_ACCESSES,
     queue: QueueClass::Compute,
 }];
 const VOLUME_PASSES: &[PassTemplate] = &[PassTemplate {
+    depends_on: &[],
     id: PassKey(0x5001),
     accesses: VOLUME_ACCESSES,
     queue: QueueClass::Compute,
 }];
 const PARTICLE_PASSES: &[PassTemplate] = &[PassTemplate {
+    depends_on: &[],
     id: PassKey(0x5005),
     accesses: PARTICLE_ACCESSES,
     queue: QueueClass::Compute,
 }];
 const HAIR_PASSES: &[PassTemplate] = &[PassTemplate {
+    depends_on: &[],
     id: PassKey(0x5006),
     accesses: HAIR_ACCESSES,
     queue: QueueClass::Compute,
 }];
 const DECAL_PASSES: &[PassTemplate] = &[PassTemplate {
+    depends_on: &[],
     id: PassKey(0x5007),
     accesses: DECAL_ACCESSES,
     queue: QueueClass::Compute,
 }];
 
 const WATER_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
-    id: VariantId(0x5000),
+    id: WATER_VARIANT_ID,
     rank: 0,
     min_quality: RenderQualityTier::Low,
     required_caps: CapabilitySet::EMPTY,
@@ -255,7 +283,7 @@ const DECAL_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     shader_permutation: None,
 }];
 const LIT_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
-    id: VariantId(0x5002),
+    id: LIT_VARIANT_ID,
     rank: 0,
     min_quality: RenderQualityTier::Low,
     required_caps: CapabilitySet::EMPTY,
@@ -264,7 +292,7 @@ const LIT_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     shader_permutation: None,
 }];
 const NPR_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
-    id: VariantId(0x5003),
+    id: NPR_VARIANT_ID,
     rank: 0,
     min_quality: RenderQualityTier::Low,
     required_caps: CapabilitySet::EMPTY,
@@ -273,7 +301,7 @@ const NPR_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
     shader_permutation: None,
 }];
 const CUSTOM_VARIANTS: &[FeatureVariant] = &[FeatureVariant {
-    id: VariantId(0x5004),
+    id: CUSTOM_VARIANT_ID,
     rank: 0,
     min_quality: RenderQualityTier::Low,
     required_caps: CapabilitySet::EMPTY,
@@ -287,12 +315,14 @@ macro_rules! service_definition {
         const RESOURCE: ResourceKey = ResourceKey::of($feature, 0);
         const OUTPUT_RESOURCES: &[ResourceKey] = &[RESOURCE];
         const ACCESSES: &[ResourceUse] = &[ResourceUse {
+            input: ResourceInput::Automatic,
             key: RESOURCE,
             access: AccessKind::StorageWrite,
             scope: ResourceScope::Whole,
             frame_lag: None,
         }];
         const PASSES: &[PassTemplate] = &[PassTemplate {
+            depends_on: &[],
             id: PassKey($variant.0),
             accesses: ACCESSES,
             queue: QueueClass::Compute,
@@ -332,16 +362,19 @@ const SPRAY_FEEDBACK: FeatureDefinition = FeatureDefinition::service(
         required_caps: CapabilitySet::EMPTY,
         requires_services_extra: ServiceSet::EMPTY,
         passes: &[PassTemplate {
+            depends_on: &[],
             id: PassKey(0x6020),
             queue: QueueClass::Compute,
             accesses: &[
                 ResourceUse {
+                    input: ResourceInput::Automatic,
                     key: WATER_SURFACE_RESOURCE,
                     access: AccessKind::StorageRead,
                     scope: ResourceScope::Whole,
                     frame_lag: None,
                 },
                 ResourceUse {
+                    input: ResourceInput::Automatic,
                     key: PARTICLE_SPRAY_RESOURCE,
                     access: AccessKind::StorageWrite,
                     scope: ResourceScope::Whole,

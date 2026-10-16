@@ -6,8 +6,8 @@ use core::fmt;
 use prism_render_driver::{Extent3d, RenderDevice, RenderQueue};
 use prism_render_graph::{
     full_range, BufferDesc, BufferHandle, BufferUse, CompileError, ExecuteContext, ExecutionPlan,
-    ImportedBuffer, ImportedTexture, PassBuilder, PassFlags, RenderGraph, SizeClass, TextureDesc,
-    TextureHandle, TextureUse,
+    ImportedBuffer, ImportedTexture, LogicalResource, PassBuilder, PassFlags, PassKind,
+    PreparedGraph, RecordedGraph, RenderGraph, SizeClass, TextureDesc, TextureHandle, TextureUse,
 };
 
 /// Entry/exit state and default view supplied by the external resource owner.
@@ -165,27 +165,39 @@ impl RuntimePassBinding {
 /// Prepared existing RenderGraph plus its verified declaration provenance.
 /// All selected passes remain resident, including empty-domain composition.
 pub struct RuntimeFeatureGraph {
-    graph: RenderGraph,
-    plan: ExecutionPlan,
+    graph: PreparedGraph,
     declaration: CompiledFeatureGraph,
 }
 impl RuntimeFeatureGraph {
-    pub const fn plan(&self) -> &ExecutionPlan {
-        &self.plan
+    pub fn plan(&self) -> &ExecutionPlan {
+        self.graph.plan()
     }
     pub const fn declaration(&self) -> &CompiledFeatureGraph {
         &self.declaration
     }
 
-    /// Delegates realization, command recording and submission to RenderGraph.
-    /// Its auto-sync path submits one command buffer; logical queue batches do
-    /// not promise native multi-queue fences or external history publication.
+    /// Realizes and records with the exact plan verified during preparation.
+    /// No recompilation or submission occurs. The external frame owner submits
+    /// the commands on the creating device and retains the returned allocation
+    /// owner until real completion; imports remain externally owned.
+    #[must_use]
+    pub fn record<D: RenderDevice>(self, device: &D) -> RecordedGraph {
+        self.graph.record(device)
+    }
+
+    /// Records and submits one ordered command buffer on an auto-sync queue.
+    /// Submission is not completion: retain the returned owner until the real
+    /// queue confirms completion, then release it on the creating device.
+    /// Logical queue batches do not imply native multi-queue fences or history
+    /// publication. Use `record` when an external renderer owns submission.
     pub fn execute<D: RenderDevice, Q: RenderQueue>(
         self,
         device: &D,
         queue: &Q,
-    ) -> Result<(), CompileError> {
-        self.graph.execute(device, queue)
+    ) -> RecordedGraph {
+        let recorded = self.record(device);
+        queue.submit(core::slice::from_ref(recorded.commands()));
+        recorded
     }
 }
 
@@ -198,17 +210,26 @@ impl CompiledFeatureGraph {
         imports: &[RuntimeImport],
         recorders: Vec<RuntimePassBinding>,
     ) -> Result<RuntimeFeatureGraph, FabricRuntimeError> {
-        let mut callbacks = BTreeMap::new();
+        // Resolve stable keys once, then keep move-only recorders in pass order.
+        // Coverage is O((P + R) log P), not a full pass scan per recorder.
+        let pass_indices: BTreeMap<_, _> = self
+            .passes()
+            .iter()
+            .enumerate()
+            .map(|(index, pass)| (pass.key(), index))
+            .collect();
+        let mut callbacks: Vec<Option<Recorder>> = (0..self.passes().len()).map(|_| None).collect();
         for binding in recorders {
-            if !self.passes().iter().any(|pass| pass.key() == binding.key) {
-                return Err(FabricRuntimeError::UnexpectedRecorder(binding.key));
-            }
-            if callbacks.insert(binding.key, binding.record).is_some() {
+            let &index = pass_indices
+                .get(&binding.key)
+                .ok_or(FabricRuntimeError::UnexpectedRecorder(binding.key))?;
+            if callbacks[index].is_some() {
                 return Err(FabricRuntimeError::DuplicateRecorder(binding.key));
             }
+            callbacks[index] = Some(binding.record);
         }
-        for pass in self.passes() {
-            if !callbacks.contains_key(&pass.key()) {
+        for (pass, callback) in self.passes().iter().zip(&callbacks) {
+            if callback.is_none() {
                 return Err(FabricRuntimeError::MissingRecorder(pass.key()));
             }
             validate_pass(pass, self.resources())?;
@@ -230,6 +251,7 @@ impl CompiledFeatureGraph {
         }
         let mut graph = RenderGraph::with_limits(extent, self.limits());
         let mut handles = vec![None; self.resources().len()];
+        let mut versions = vec![BTreeMap::new(); self.resources().len()];
         for resource in self
             .resources()
             .iter()
@@ -268,13 +290,11 @@ impl CompiledFeatureGraph {
                 }
             };
             handles[resource.id.0 as usize] = Some(handle);
+            versions[resource.id.0 as usize].insert(0, handle);
         }
         let items: Arc<[FrameRenderItem]> = self.items().into();
-        let mut lowered = Vec::new();
-        for (index, pass) in self.passes().iter().enumerate() {
-            let callback = callbacks
-                .remove(&pass.key())
-                .expect("validated recorder coverage");
+        for (index, (pass, callback)) in self.passes().iter().zip(callbacks).enumerate() {
+            let callback = callback.expect("validated recorder coverage");
             let mut setup_error = None;
             let pass_items = Arc::clone(&items);
             let pass_spec = pass.clone();
@@ -285,12 +305,19 @@ impl CompiledFeatureGraph {
                 let result = (|| -> Result<(), FabricRuntimeError> {
                     if index == 0 {
                         create_transients(builder, self.resources(), &mut handles)?;
+                        for (resource, handle) in handles.iter().enumerate() {
+                            versions[resource].insert(0, handle.expect("created resource"));
+                        }
                     }
                     for &bound in pass.accesses() {
-                        let handle = &mut handles[bound.resource.0 as usize];
+                        let resource = bound.resource.0 as usize;
+                        let input = versions[resource].get(&bound.input_ssa_version).copied()
+                            .ok_or(FabricRuntimeError::VersionMismatch {
+                                pass: pass.key(), resource: bound.declaration.key,
+                            })?;
                         let next = lower_access(
                             builder,
-                            handle.expect("bound resource"),
+                            input,
                             bound.declaration.access,
                         )?;
                         if next.version() != bound.ssa_version {
@@ -299,7 +326,10 @@ impl CompiledFeatureGraph {
                                 resource: bound.declaration.key,
                             });
                         }
-                        *handle = Some(next);
+                        if bound.declaration.access.writes() {
+                            versions[resource].insert(next.version(), next);
+                            handles[resource] = Some(next);
+                        }
                         pass_accesses.push(RuntimeResourceUse {
                             bound,
                             handle: next,
@@ -310,7 +340,6 @@ impl CompiledFeatureGraph {
                 if let Err(error) = result {
                     setup_error = Some(error);
                 }
-                lowered.push(pass_accesses.clone());
                 move |commands: &mut ExecuteContext<'_>| {
                     callback(&mut RuntimePassContext {
                         pass: &pass_spec,
@@ -321,28 +350,24 @@ impl CompiledFeatureGraph {
                 }
             };
             let flags = PassFlags::NEVER_CULL;
-            match pass.template().queue {
-                QueueClass::Graphics => {
-                    graph.try_add_raster_pass(pass.descriptor().name.to_string(), flags, setup)?
-                }
-                QueueClass::Compute => graph.try_add_compute_pass(
-                    pass.descriptor().name.to_string(),
-                    flags | PassFlags::ASYNC_COMPUTE,
-                    setup,
-                )?,
-                QueueClass::Transfer => {
-                    graph.try_add_transfer_pass(pass.descriptor().name.to_string(), flags, setup)?
-                }
-            }
+            let (kind, flags) = match pass.template().queue {
+                QueueClass::Graphics => (PassKind::Raster, flags),
+                QueueClass::Compute => (PassKind::Compute, flags | PassFlags::ASYNC_COMPUTE),
+                QueueClass::Transfer => (PassKind::Transfer, flags),
+            };
+            graph.try_add_pass_with_dependencies(
+                pass.descriptor().name.to_string(), kind, flags,
+                pass.descriptor().depends_on.iter().map(|id| id.0 as usize).collect(),
+                setup,
+            )?;
             if let Some(error) = setup_error {
                 return Err(error);
             }
         }
-        let plan = graph.compile()?;
-        verify_plan(&self, &plan)?;
+        let graph = graph.prepare()?;
+        verify_plan(&self, graph.plan(), &handles)?;
         Ok(RuntimeFeatureGraph {
             graph,
-            plan,
             declaration: self,
         })
     }
@@ -510,18 +535,161 @@ fn lower_access(
     })
 }
 
-// Projection only: the authority solves both graphs. Compare every logical
-// hazard after undoing the typed runtime's texture-first access namespace.
-fn verify_plan(
+// Projection only: the authority solves both graphs. Namespace-local resource
+// indices and texture-first access ordinals are not semantic identities: the
+// runtime registers imports first and uses actual layouts, while declaration
+// lowering infers texture kinds from sampling/attachment uses.
+pub(super) fn verify_plan(
     declaration: &CompiledFeatureGraph,
     plan: &ExecutionPlan,
+    handles: &[Option<RuntimeResourceHandle>],
 ) -> Result<(), FabricRuntimeError> {
-    if plan.order != declaration.plan().order
-        || plan.alive.iter().any(|alive| !alive)
-        || plan.queue_batches != declaration.plan().queue_batches
-        || plan.logical_barriers != declaration.plan().logical_barriers
+    let expected = declaration.plan();
+    if plan.declared_pass_count != expected.declared_pass_count
+        || plan.order != expected.order
+        || plan.alive != expected.alive
+        || plan.position_by_pass != expected.position_by_pass
+        || plan.queue_batches != expected.queue_batches
+    {
+        return Err(FabricRuntimeError::PlanMismatch);
+    }
+
+    let mut declared_textures = vec![false; declaration.resources().len()];
+    for usage in declaration.passes().iter().flat_map(PassSpec::accesses) {
+        if matches!(
+            usage.declaration.access,
+            AccessKind::SampledRead | AccessKind::ColorAttachment | AccessKind::DepthAttachment
+        ) {
+            declared_textures[usage.resource.0 as usize] = true;
+        }
+    }
+    // (is_texture, namespace-local index), indexed by semantic ResourceId.
+    let mut next_texture = 0;
+    let mut next_buffer = 0;
+    let declared_resources: Vec<_> = declared_textures
+        .into_iter()
+        .map(|is_texture| {
+            let next = if is_texture {
+                &mut next_texture
+            } else {
+                &mut next_buffer
+            };
+            let identity = (is_texture, *next);
+            *next += 1;
+            identity
+        })
+        .collect();
+    let runtime_resources = handles
+        .iter()
+        .map(|handle| match handle {
+            Some(RuntimeResourceHandle::Buffer { handle, .. }) => {
+                Ok((false, handle.resource().get()))
+            }
+            Some(RuntimeResourceHandle::Texture(handle)) => Ok((true, handle.resource().get())),
+            None => Err(FabricRuntimeError::PlanMismatch),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if semantic_accesses(declaration.passes(), plan, &runtime_resources)?
+        != semantic_accesses(declaration.passes(), expected, &declared_resources)?
+    {
+        return Err(FabricRuntimeError::PlanMismatch);
+    }
+    if semantic_hazards(declaration.passes(), plan, &runtime_resources)?
+        != semantic_hazards(declaration.passes(), expected, &declared_resources)?
     {
         return Err(FabricRuntimeError::PlanMismatch);
     }
     Ok(())
+}
+
+type SemanticAccess = (u32, u32, Option<u32>);
+
+fn semantic_accesses(
+    passes: &[PassSpec],
+    plan: &ExecutionPlan,
+    resources: &[(bool, u32)],
+) -> Result<Vec<Vec<SemanticAccess>>, FabricRuntimeError> {
+    if plan.accesses.len() != passes.len() {
+        return Err(FabricRuntimeError::PlanMismatch);
+    }
+    passes.iter().zip(&plan.accesses).map(|(pass, compiled)| {
+        let mut order: Vec<_> = pass.accesses().iter().enumerate().collect();
+        order.sort_by_key(|(_, usage)| !resources[usage.resource.0 as usize].0);
+        if order.len() != compiled.len() {
+            return Err(FabricRuntimeError::PlanMismatch);
+        }
+        let mut result = vec![(0, 0, None); order.len()];
+        for ((ordinal, usage), access) in order.into_iter().zip(compiled) {
+            let identity = match access.resource {
+                LogicalResource::Texture(index) => (true, index.get()),
+                LogicalResource::Buffer(index) => (false, index.get()),
+            };
+            if resources[usage.resource.0 as usize] != identity {
+                return Err(FabricRuntimeError::PlanMismatch);
+            }
+            result[ordinal] = (usage.resource.0, access.input_version, access.output_version);
+        }
+        Ok(result)
+    }).collect()
+}
+
+// Original pass/access ordinals, semantic resource ID, and queue transfer.
+// Sorting removes only namespace-dependent iteration order, not multiplicity.
+type SemanticHazard = (usize, usize, usize, usize, u32, bool);
+
+fn semantic_hazards(
+    passes: &[PassSpec],
+    plan: &ExecutionPlan,
+    resources: &[(bool, u32)],
+) -> Result<Vec<SemanticHazard>, FabricRuntimeError> {
+    let normalized: Vec<Vec<_>> = passes
+        .iter()
+        .map(|pass| {
+            let accesses = pass.accesses();
+            let is_texture = |usage: &BoundResourceUse| resources[usage.resource.0 as usize].0;
+            // Keep each occurrence: repeated reads carry distinct destination
+            // ordinals for RAW hazards and distinct source ordinals for WAR.
+            accesses
+                .iter()
+                .enumerate()
+                .filter(|(_, usage)| is_texture(usage))
+                .chain(
+                    accesses
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, usage)| !is_texture(usage)),
+                )
+                .collect()
+        })
+        .collect();
+    let mut hazards = Vec::with_capacity(plan.logical_barriers.len());
+    for barrier in &plan.logical_barriers {
+        let &(before, source) = normalized
+            .get(barrier.source)
+            .and_then(|accesses| accesses.get(barrier.before))
+            .ok_or(FabricRuntimeError::PlanMismatch)?;
+        let &(after, destination) = normalized
+            .get(barrier.destination)
+            .and_then(|accesses| accesses.get(barrier.after))
+            .ok_or(FabricRuntimeError::PlanMismatch)?;
+        let identity = match barrier.resource {
+            LogicalResource::Texture(index) => (true, index.get()),
+            LogicalResource::Buffer(index) => (false, index.get()),
+        };
+        if source.resource != destination.resource
+            || resources[destination.resource.0 as usize] != identity
+        {
+            return Err(FabricRuntimeError::PlanMismatch);
+        }
+        hazards.push((
+            barrier.source,
+            before,
+            barrier.destination,
+            after,
+            destination.resource.0,
+            barrier.queue_transfer,
+        ));
+    }
+    hazards.sort_unstable();
+    Ok(hazards)
 }

@@ -14,7 +14,7 @@
 
 use super::EPS;
 use crate::frame_graph::AccessKind;
-use crate::render_fabric::{FeatureId, FrameLag, ResourceKey, ResourceScope, ResourceUse};
+use crate::render_fabric::{FeatureId, FrameLag, ResourceInput, ResourceKey, ResourceScope, ResourceUse};
 
 /// Stable semantic owner for the water simulation feature declarations.
 pub const WATER_SIMULATION_FEATURE: FeatureId = FeatureId(0x1000);
@@ -30,6 +30,7 @@ pub const WATER_FOAM_RESOURCE: ResourceKey = ResourceKey::of(WATER_SIMULATION_FE
 #[must_use]
 pub fn spray_foam_feedback_use() -> ResourceUse {
     ResourceUse {
+        input: ResourceInput::Automatic,
         key: crate::render_fabric::PARTICLE_SPRAY_RESOURCE,
         access: AccessKind::StorageRead,
         scope: ResourceScope::Whole,

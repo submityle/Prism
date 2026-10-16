@@ -36,8 +36,8 @@ use crate::access::TextureUse;
 use crate::capacity::GraphLimits;
 use crate::pass::{PassKind, PassNode};
 use crate::plan::{
-    ColorAttachmentPlan, CompileError, DepthAttachmentPlan, ExecutionPlan, LogicalBarrier,
-    LogicalResource, RasterAttachments,
+    ColorAttachmentPlan, CompileError, CompiledAccess, DepthAttachmentPlan, ExecutionPlan,
+    LogicalBarrier, LogicalResource, RasterAttachments,
 };
 use crate::resource::{BufferResource, Lifetime, TextureResource};
 
@@ -167,11 +167,33 @@ pub(crate) fn compile(
 
     let attachments = derive_attachments(passes, textures, &order, &consumed);
 
+    // Reuse the normalized authority records verbatim: consumers must not
+    // reconstruct versions by counting writes in the final scheduled order.
+    let compiled_accesses = accesses
+        .iter()
+        .map(|list| {
+            list.iter()
+                .map(|access| CompiledAccess {
+                    resource: if access.resource < textures.len() {
+                        LogicalResource::Texture(crate::ResourceIndex(access.resource as u32))
+                    } else {
+                        LogicalResource::Buffer(crate::ResourceIndex(
+                            (access.resource - textures.len()) as u32,
+                        ))
+                    },
+                    input_version: access.input,
+                    output_version: access.output,
+                })
+                .collect()
+        })
+        .collect();
+
     Ok(ExecutionPlan {
         declared_pass_count: passes.len(),
         order,
         alive,
         position_by_pass,
+        accesses: compiled_accesses,
         logical_barriers,
         queue_batches,
         barriers: barrier_plan.per_pass,

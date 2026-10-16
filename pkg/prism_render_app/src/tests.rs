@@ -2270,7 +2270,9 @@ fn mesh_draw_records_into_a_graph_pass() {
     let capture = CapturingQueue::default();
     graph
         .execute(&device, &capture)
-        .expect("the graph executes");
+        .expect("the graph executes")
+        // CapturingQueue only clones commands; it never starts GPU work.
+        .release(&device);
 
     let buffers: Vec<CommandBuffer> = capture.take();
     let commands = buffers
@@ -2415,7 +2417,9 @@ fn mesh_bin_draw_records_a_multi_draw() {
     let capture = CapturingQueue::default();
     graph
         .execute(&device, &capture)
-        .expect("the graph executes");
+        .expect("the graph executes")
+        // CapturingQueue only clones commands; it never starts GPU work.
+        .release(&device);
 
     let buffers: Vec<CommandBuffer> = capture.take();
     let commands = buffers
@@ -2760,7 +2764,9 @@ fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
     let capture = CapturingQueue::default();
     graph
         .execute(&device, &capture)
-        .expect("the graph executes");
+        .expect("the graph executes")
+        // CapturingQueue only clones commands; it never starts GPU work.
+        .release(&device);
     let buffers: Vec<CommandBuffer> = capture.take();
     let commands = buffers
         .iter()

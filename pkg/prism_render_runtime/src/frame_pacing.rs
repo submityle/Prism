@@ -101,6 +101,12 @@ impl<Token> FramePacer<Token> {
         self.outstanding.push_back(token);
     }
 
+    /// Restores the token removed by `begin_frame` when completion failed.
+    /// No replacement frame may be recorded before this token is confirmed.
+    pub(crate) fn restore_oldest(&mut self, token: Token) {
+        self.outstanding.push_front(token);
+    }
+
     /// Removes and returns every outstanding token, oldest first.
     ///
     /// Used by the runtime's idle/shutdown path to hand the backend a complete

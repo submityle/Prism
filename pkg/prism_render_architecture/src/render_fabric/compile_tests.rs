@@ -12,6 +12,7 @@ fn table<T>(values: Vec<T>) -> &'static [T] {
 }
 fn usage(key: ResourceKey, access: AccessKind) -> ResourceUse {
     ResourceUse {
+        input: ResourceInput::Automatic,
         key,
         access,
         scope: ResourceScope::Whole,
@@ -20,6 +21,7 @@ fn usage(key: ResourceKey, access: AccessKind) -> ResourceUse {
 }
 fn pass(key: u32, queue: QueueClass, accesses: Vec<ResourceUse>) -> PassTemplate {
     PassTemplate {
+        depends_on: &[],
         id: PassKey(key),
         queue,
         accesses: table(accesses),
@@ -179,7 +181,7 @@ fn derived_order_and_every_barrier_match_authoritative_resource_graph() {
                 kind: AccessKind::TransferWrite,
             }],
         ),
-    ] {
+    ].into_iter().rev() {
         baseline
             .try_add_pass(PassDescriptor {
                 name: name.into(),
@@ -196,26 +198,26 @@ fn derived_order_and_every_barrier_match_authoritative_resource_graph() {
             .iter()
             .map(PassSpec::key)
             .collect::<Vec<_>>(),
-        vec![PassKey(3), PassKey(2), PassKey(1)]
+        vec![PassKey(1), PassKey(2), PassKey(3)]
     );
     assert_eq!(compiled.plan().order, expected.order);
     assert_eq!(
         compiled.barriers(),
         vec![
             Barrier {
-                resource: b,
+                resource: a,
                 source: PassId(0),
                 destination: PassId(1),
-                before: AccessKind::IndirectRead,
-                after: AccessKind::StorageWrite,
+                before: AccessKind::TransferWrite,
+                after: AccessKind::StorageRead,
                 queue_transfer: true
             },
             Barrier {
-                resource: a,
+                resource: b,
                 source: PassId(1),
                 destination: PassId(2),
-                before: AccessKind::StorageRead,
-                after: AccessKind::TransferWrite,
+                before: AccessKind::StorageWrite,
+                after: AccessKind::IndirectRead,
                 queue_transfer: true
             },
         ]
@@ -231,10 +233,10 @@ fn derived_order_and_every_barrier_match_authoritative_resource_graph() {
     assert_eq!(
         compiled.versions()[0],
         FrameResourceVersion {
-            key: B,
+            key: A,
             frame: 10,
-            resource: b,
-            writer: PassKey(2),
+            resource: a,
+            writer: PassKey(1),
             ssa_version: 1,
             content_version: 1
         }
@@ -901,7 +903,7 @@ fn execution_uses_bound_passes_and_exact_barriers_and_stops_on_sink_errors() {
     let mut sink = Sink::default();
     graph.execute(&mut sink).unwrap();
     assert_eq!(sink.barriers, expected);
-    assert_eq!(sink.events, vec![0, 3, 101, 2, 102, 1, 999]);
+    assert_eq!(sink.events, vec![0, 1, 101, 2, 102, 3, 999]);
     let mut sink = Sink {
         fail: true,
         ..Sink::default()
@@ -912,7 +914,7 @@ fn execution_uses_bound_passes_and_exact_barriers_and_stops_on_sink_errors() {
             .execute(&mut sink),
         Err("recording failed")
     );
-    assert_eq!(sink.events, vec![0, 3]);
+    assert_eq!(sink.events, vec![0, 1]);
 }
 
 #[test]
@@ -940,9 +942,9 @@ fn compiling_frames_does_not_mutate_frozen_selection_or_roots() {
 fn bound_accesses_project_authority_outputs_and_history_content_versions() {
     let graph = compile_fixture(GraphLimits::default()).unwrap();
     for (pass, expected) in graph.passes().iter().zip([
-        vec![(B, PassKey(2))],
-        vec![(A, PassKey(1)), (B, PassKey(2))],
         vec![(A, PassKey(1))],
+        vec![(A, PassKey(1)), (B, PassKey(2))],
+        vec![(B, PassKey(2))],
     ]) {
         assert_eq!(pass.accesses().len(), pass.descriptor().accesses.len());
         for (access, (key, producer)) in pass.accesses().iter().zip(expected) {
@@ -1603,4 +1605,262 @@ fn validated_frame_items_reach_the_execution_sink_without_a_second_extraction() 
     let mut sink = Sink { items: Vec::new() };
     compiled.execute(&mut sink).unwrap();
     assert_eq!(sink.items, items);
+}
+
+#[test]
+fn explicit_writer_chain_keeps_initial_and_intermediate_read_provenance() {
+    let access = |kind, input| ResourceUse { input, ..usage(A, kind) };
+    let catalog = catalog(vec![variant(790, 0, vec![
+        pass(40, QueueClass::Compute, vec![access(AccessKind::StorageRead, ResourceInput::ProducedBy(PassKey(30)))]),
+        pass(30, QueueClass::Compute, vec![access(AccessKind::StorageWrite, ResourceInput::ProducedBy(PassKey(10)))]),
+        pass(20, QueueClass::Compute, vec![access(AccessKind::StorageRead, ResourceInput::ProducedBy(PassKey(10)))]),
+        pass(10, QueueClass::Compute, vec![access(AccessKind::StorageWrite, ResourceInput::Initial)]),
+        pass(5, QueueClass::Compute, vec![access(AccessKind::StorageRead, ResourceInput::Initial)]),
+    ])], vec![A]);
+    let a = buffer(A, ResourceLifetime::Imported);
+    let graph = ResourceTemplates::new(&catalog, &[a]).unwrap()
+        .compile(&select(&catalog), 10, &[binding(a, 10, 1)], &[], GraphLimits::default()).unwrap();
+    let keys: Vec<_> = graph.plan().order.iter().map(|&id| graph.passes()[id].key()).collect();
+    assert_eq!(keys, vec![PassKey(5), PassKey(10), PassKey(20), PassKey(30), PassKey(40)]);
+    for (key, input, output, input_producer) in [
+        (5, 0, 0, None), (10, 0, 1, None),
+        (20, 1, 1, Some(PassKey(10))),
+        (30, 1, 2, Some(PassKey(10))),
+        (40, 2, 2, Some(PassKey(30))),
+    ] {
+        let pass = graph.passes().iter().find(|pass| pass.key() == PassKey(key)).unwrap();
+        let bound = pass.accesses()[0];
+        assert_eq!(bound.input_ssa_version, input);
+        assert_eq!(bound.ssa_version, output);
+        assert_eq!(bound.input_content_version, 5 + input);
+        assert_eq!(bound.content_version, 5 + output);
+        assert_eq!(bound.input_producer, input_producer);
+    }
+    assert_eq!(graph.versions().len(), 2);
+    assert_eq!(graph.versions()[1].writer, PassKey(30));
+}
+
+#[test]
+fn symbolic_mixed_writer_chain_preserves_admission_ids_and_numeric_plan() {
+    let use_ = |key, access, input| ResourceUse {
+        input,
+        ..usage(key, access)
+    };
+    let writes = |input| {
+        vec![
+            use_(A, AccessKind::StorageWrite, input),
+            use_(B, AccessKind::StorageWrite, input),
+        ]
+    };
+    let reads = |producer| {
+        vec![
+            use_(
+                A,
+                AccessKind::StorageRead,
+                ResourceInput::ProducedBy(PassKey(producer)),
+            ),
+            use_(
+                B,
+                AccessKind::SampledRead,
+                ResourceInput::ProducedBy(PassKey(producer)),
+            ),
+        ]
+    };
+    let mut control = pass(50, QueueClass::Transfer, vec![]);
+    control.depends_on = table(vec![PassKey(40), PassKey(20)]);
+    let catalog = catalog(
+        vec![variant(
+            796,
+            0,
+            vec![
+                control,
+                pass(40, QueueClass::Compute, reads(30)),
+                pass(
+                    30,
+                    QueueClass::Compute,
+                    writes(ResourceInput::ProducedBy(PassKey(10))),
+                ),
+                pass(20, QueueClass::Compute, reads(10)),
+                pass(10, QueueClass::Compute, writes(ResourceInput::Initial)),
+            ],
+        )],
+        vec![A, B],
+    );
+    let texture = ResourceTemplate {
+        key: B,
+        lifetime: ResourceLifetime::Transient,
+        alignment: 256,
+        layout: ResourceLayout::Texture {
+            extent: [4, 4, 1],
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            mip_levels: 1,
+            samples: 1,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+        },
+    };
+    let resources =
+        ResourceTemplates::new(&catalog, &[buffer(A, ResourceLifetime::Transient), texture])
+            .unwrap();
+    let graph = resources
+        .compile(&select(&catalog), 10, &[], &[], GraphLimits::default())
+        .unwrap();
+    assert_eq!(
+        graph.passes().iter().map(PassSpec::key).collect::<Vec<_>>(),
+        [
+            PassKey(10),
+            PassKey(30),
+            PassKey(40),
+            PassKey(20),
+            PassKey(50)
+        ]
+    );
+    assert_eq!(
+        graph
+            .plan()
+            .order
+            .iter()
+            .map(|&id| graph.passes()[id].key())
+            .collect::<Vec<_>>(),
+        [
+            PassKey(10),
+            PassKey(20),
+            PassKey(30),
+            PassKey(40),
+            PassKey(50)
+        ]
+    );
+    let mut numeric = GpuFrameGraphBuilder::default();
+    for bound in graph.resources() {
+        assert_eq!(numeric.add_resource(bound.descriptor.clone()), bound.id);
+    }
+    let mut inputs = Vec::new();
+    for pass in graph.passes() {
+        assert_eq!(numeric.add_pass(pass.descriptor().clone()), pass.id());
+        inputs.push(
+            pass.accesses()
+                .iter()
+                .map(|bound| bound.input_ssa_version)
+                .collect(),
+        );
+        for dependency in &pass.descriptor().depends_on {
+            assert!(dependency.0 < pass.id().0);
+        }
+        if pass.key() == PassKey(50) {
+            assert!(pass.accesses().is_empty());
+            continue;
+        }
+        // Declaration columns are buffer then texture; authority columns are
+        // texture then buffer. Binding must preserve both resource identities.
+        assert_eq!(pass.accesses()[0].declaration.key, A);
+        assert_eq!(pass.accesses()[1].declaration.key, B);
+        for (ordinal, compiled) in [(0, 1), (1, 0)] {
+            let bound = pass.accesses()[ordinal];
+            let authority = graph.plan().accesses[pass.id().0 as usize][compiled];
+            assert_eq!(bound.input_ssa_version, authority.input_version);
+            assert_eq!(
+                bound.ssa_version,
+                authority.output_version.unwrap_or(authority.input_version)
+            );
+            assert_eq!(bound.input_content_version, bound.input_ssa_version);
+            assert_eq!(bound.content_version, bound.ssa_version);
+            let expected = match pass.key() {
+                PassKey(10) => (0, 1, None),
+                PassKey(30) => (1, 2, Some(PassKey(10))),
+                PassKey(20) => (1, 1, Some(PassKey(10))),
+                PassKey(40) => (2, 2, Some(PassKey(30))),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                (
+                    bound.input_ssa_version,
+                    bound.ssa_version,
+                    bound.input_producer
+                ),
+                expected
+            );
+        }
+    }
+    assert_eq!(&numeric.compile_with_inputs(&inputs).unwrap(), graph.plan());
+    assert_eq!(graph.versions().len(), 4);
+    assert!(matches!(
+        resources.compile(
+            &select(&catalog),
+            10,
+            &[],
+            &[],
+            GraphLimits {
+                versions: 1,
+                ..GraphLimits::default()
+            }
+        ),
+        Err(FabricCompileError::Graph(CompileError::VersionOverflow {
+            version: 1,
+            limit: 1
+        }))
+    ));
+}
+
+#[test]
+fn missing_wrong_and_unselected_producers_fail_before_recording() {
+    for (producer, write_key) in [(PassKey(99), B), (PassKey(2), B)] {
+        let mut read = usage(A, AccessKind::StorageRead);
+        read.input = ResourceInput::ProducedBy(producer);
+        let catalog = catalog(vec![variant(791, 0, vec![
+            pass(1, QueueClass::Compute, vec![read]),
+            pass(2, QueueClass::Compute, vec![usage(write_key, AccessKind::StorageWrite)]),
+        ])], vec![A, B]);
+        let result = ResourceTemplates::new(&catalog, &[
+            buffer(A, ResourceLifetime::Imported), buffer(B, ResourceLifetime::Transient),
+        ]).unwrap().compile(&select(&catalog), 10, &[], &[], GraphLimits::default());
+        assert_eq!(result.err(), Some(FabricCompileError::InvalidProducer {
+            pass: PassKey(1), resource: A, producer,
+        }));
+    }
+}
+
+#[test]
+fn transient_initial_reads_and_missing_control_prerequisites_are_rejected() {
+    let mut read = usage(A, AccessKind::StorageRead);
+    read.input = ResourceInput::Initial;
+    let catalog = catalog(vec![variant(792, 0, vec![
+        pass(1, QueueClass::Compute, vec![read]),
+        pass(2, QueueClass::Compute, vec![usage(A, AccessKind::StorageWrite)]),
+    ])], vec![A]);
+    assert_eq!(ResourceTemplates::new(&catalog, &[buffer(A, ResourceLifetime::Transient)])
+        .unwrap().compile(&select(&catalog), 0, &[], &[], GraphLimits::default()).err(),
+        Some(FabricCompileError::MissingProducer(A)));
+    let mut dependent = pass(3, QueueClass::Compute, vec![]);
+    dependent.depends_on = table(vec![PassKey(99)]);
+    let catalog = self::catalog(vec![variant(793, 0, vec![dependent])], vec![]);
+    assert_eq!(ResourceTemplates::new(&catalog, &[]).unwrap()
+        .compile(&select(&catalog), 0, &[], &[], GraphLimits::default()).err(),
+        Some(FabricCompileError::MissingSelectedPass(PassKey(99))));
+}
+
+#[test]
+fn explicit_resource_and_control_cycles_report_authoritative_diagnostics() {
+    let write = |producer| ResourceUse {
+        input: ResourceInput::ProducedBy(PassKey(producer)),
+        ..usage(A, AccessKind::StorageWrite)
+    };
+    let catalog = catalog(vec![variant(794, 0, vec![
+        pass(1, QueueClass::Compute, vec![write(2)]),
+        pass(2, QueueClass::Compute, vec![write(1)]),
+    ])], vec![A]);
+    let result = ResourceTemplates::new(&catalog, &[buffer(A, ResourceLifetime::Transient)])
+        .unwrap().compile(&select(&catalog), 0, &[], &[], GraphLimits::default());
+    let Some(FabricCompileError::Graph(CompileError::Cycle { cycle, names, .. })) = result.err() else {
+        panic!("resource cycle must be rejected by the authoritative scheduler");
+    };
+    assert_eq!(cycle.first(), cycle.last());
+    assert!(names.iter().all(|name| name.starts_with("feature-pass:")));
+    let mut first = pass(1, QueueClass::Compute, vec![]);
+    first.depends_on = table(vec![PassKey(2)]);
+    let mut second = pass(2, QueueClass::Compute, vec![]);
+    second.depends_on = table(vec![PassKey(1)]);
+    let catalog = self::catalog(vec![variant(795, 0, vec![first, second])], vec![]);
+    assert!(matches!(ResourceTemplates::new(&catalog, &[]).unwrap()
+        .compile(&select(&catalog), 0, &[], &[], GraphLimits::default()),
+        Err(FabricCompileError::Graph(CompileError::Cycle { .. }))));
 }

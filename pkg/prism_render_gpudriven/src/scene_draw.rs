@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 use prism_render_driver as rhi;
 use prism_render_graph::{
     BufferDesc, BufferHandle, CompileError, ImportedBuffer, ImportedTexture, PassFlags,
-    RenderGraph, SizeClass, TextureDesc,
+    RecordedGraph, RenderGraph, SizeClass, TextureDesc,
 };
 use rhi::{
     BindGroupDescriptor, BindGroupId, BindGroupLayoutDescriptor, BindGroupLayoutId,
@@ -496,6 +496,11 @@ impl SceneDrawStage {
 
     /// Declares the GPU-driven frame as a graph and executes it.
     ///
+    /// The returned owner retains the graph's physical allocations. Keep it
+    /// alive until the submitting queue confirms completion, then call
+    /// [`RecordedGraph::release`] with the creating device. Submission alone
+    /// is not completion, and dropping the owner does not destroy resources.
+    ///
     /// # Errors
     ///
     /// Returns a [`CompileError`] only when the declared frame cannot be
@@ -506,7 +511,7 @@ impl SceneDrawStage {
         queue: &Q,
         cull: &CullStage,
         mode: IndirectMode,
-    ) -> Result<(), CompileError> {
+    ) -> Result<RecordedGraph, CompileError> {
         self.graph_frame(cull, mode).execute(device, queue)
     }
 

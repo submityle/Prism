@@ -15,6 +15,6 @@ pub use codegen::{
 };
 pub use transient::{AliasOverlap, TransientAllocation, TransientRegion};
 pub use types::{
-    AccessKind, Barrier, PassDescriptor, PassId, QueueBatch, QueueClass, ResourceAccess,
-    ResourceDescriptor, ResourceId, ResourceLifetime, ResourceVersion,
+    AccessInput, AccessKind, Barrier, PassDescriptor, PassId, QueueBatch, QueueClass,
+    ResourceAccess, ResourceDescriptor, ResourceId, ResourceLifetime, ResourceVersion,
 };

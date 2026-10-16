@@ -404,6 +404,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         stats: &mut RenderFrameStats,
     ) -> bool
     where
+        I::Device: Send + Sync + 'static,
         I::Queue: FrameSync,
     {
         let obsolete: Vec<_> = self
@@ -494,6 +495,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         stats: &mut RenderFrameStats,
     ) -> Result<Option<u64>, WindowRenderError>
     where
+        I::Device: Send + Sync + 'static,
         I::Queue: FrameSync,
     {
         if request.viewport.is_empty() || !request.visible {

@@ -280,8 +280,9 @@ fn an_uploaded_image_is_sampleable_on_a_gpu() {
         }
     });
     let queue = runtime.runtime().queue();
-    graph.execute(device, queue).expect("the pass records");
+    let recorded = graph.execute(device, queue).expect("the pass records");
     assert!(runtime.runtime().wait_idle(), "the draw completes");
+    recorded.release(device);
 
     assert_eq!(
         queue.read_texture_rgba8(target_texture, WIDTH, HEIGHT),

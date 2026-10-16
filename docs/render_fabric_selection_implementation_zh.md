@@ -1,154 +1,91 @@
-# Render Fabric S1–S3 与内建资源/PCM 接入实跑记录
+# Render Fabric：冻结选择、资源版本链与运行时接入
 
-日期：2026-10-15。工作区：`/Users/wangkailong/Documents/GitHub/Prism`。
-需求：`docs/refactoring-dev/05-render-fabric_refactor_zh.md` 全文，重点 §4 / §9 / §12。
+日期：2026-10-16。工作区：`/Users/wangkailong/Documents/GitHub/Prism`。
 
-## 当前交付范围
+本文以当前源码描述接口，以主线已执行的结果记录验证检查点。基础设施、Scene 的专用生产接入与通用 Fabric 的整帧生产接线分别陈述；不再以历史 S1/S2/S3 切片或临时 harness 代表当前状态。
 
-`pkg/prism_render_architecture/src/render_fabric/` 已包含类型、静态校验、拓扑适配、冻结求解、真实资源模板、PCM 桥和测试；`Cargo.toml` 已直接依赖 `prism_material_pcm`，`render_fabric/mod.rs` 已公开 PCM 桥。
-内建目录已覆盖水体、体积、粒子、毛发、贴花资源模板，并把 provider variant 的写入集、持久生命周期和一帧历史读声明接入同一份资源契约。
+## 当前范围与架构边界
 
-## 已实现契约
+`pkg/prism_render_architecture/src/render_fabric/` 包含 catalog、冻结求解、内建资源模板、PCM 桥、声明编译、payload 与 runtime lowering。`Cargo.toml` 直接依赖 `prism_material_pcm`，`mod.rs` 已公开 PCM 桥，不再是仅靠独立 harness 加载的源码。
 
-- `FeatureId` / `VariantId` / `PassKey` / `ServiceId` 是显式稳定 ID；`ResourceKey` 为 `(ResourceOwner, slot)` 命名空间键，catalog 不发号。
-- 声明分为 `FeatureDefinition` / `FeatureVariant` / `PassTemplate`，访问仅存一份 `accesses`，队列只由 pass 声明。shader 置换引用已有 `PermutationSpace` / `PermutationKey`，从公共 reexports 导入。
-- `FeatureKind::Service` 独占 `provides`，只有 Subsystem 带 domain。catalog 建立全局唯一 provider 索引，拒绝无人提供、重复 provider 和非法 kind/domain。
-- 静态检查覆盖全部特性及全部变体：ID/rank/resource 冲突、未声明资源/所有者、硬环、重复 pass、不同模板复用 PassKey、无版本区分的多写者、历史帧写入和非法 shader 置换。
-- 每个服务输出资源必须由该服务的每一个变体写入；不能只检查当前可用变体。写入使用权威 `AccessKind::writes()` 判定。
-- 根只从静态构建档案的子系统及可引用响应程序集取得，私有冻结集合禁止增删；运行时新根越界硬失败。
-- 闭包只沿特性级硬需求扩张；按服务分层、硬图拓扑和显式 FeatureId 稳定破平局求解。候选按 `(rank, id)` 比较设备能力、静态质量和已选服务。软需求不扩闭包、不改变排序、不触发回溯；无准入候选返回具体拒绝原因。
-- 冻结 `FeatureSelection` 对消费者只读，包含根、能力、质量、闭包、选择及服务接口；未激活特性不参与设备求解。
-- `ServiceSet` 的相等性不依赖声明顺序。父代理迁移权威帧图编译器后，拓扑适配使用受检 `try_add_pass`，容量超限和图编译错误均返回诊断，不触发启动期 panic。
+- `FeatureId / VariantId / PassKey / ServiceId` 是显式稳定身份；`ResourceKey = (ResourceOwner, slot)`，不由注册顺序发号。
+- 访问只声明于 `accesses`；reads/writes 视图由它派生。队列归 pass 所有，写入性质使用权威 `AccessKind::writes()`。
+- 只有 Service 发布接口；provider 索引保持唯一。这是“每个服务一个 provider”的约束，**不是每个资源全局只有一个 writer**。
+- 静态构建档案冻结根、硬依赖闭包和设备 variant。求解按能力、质量、服务与稳定 ID 确定结果；软需求不扩根、不触发回溯，运行期不做第二次选择。
+- 编译时校验冻结选择的完整源声明；复用相同 variant 不能掩盖 feature 种类、硬依赖、服务接口或候选集改变。
+- 内建水体、体积、粒子、毛发、贴花模板及 provider 各 variant 的输出写集属于同一资源契约；登记模板本身不等于这些域均已走通用 Fabric 提交整帧。
 
-拓扑适配通过公开 `GpuFrameGraphBuilder` 委托已有编译器，使用无资源的语义依赖 pass，映射结果回 FeatureId；没有新增排序算法或第三图编译器。父代理迁移帧图权威后，architecture 公共兼容 reexport 仍是调用入口。
+源码入口：`types.rs`、`catalog.rs`、`selection.rs`、`topology.rs`、`builtins.rs`、`compile.rs`（均相对上述目录）。
 
-## 门禁对应与可证伪测试
+## 显式 ResourceInput 链与控制依赖
 
-| 门禁 | 实测覆盖 |
+| 输入 | 当前语义 |
 |---|---|
-| 18 / 19 / 20 / 26 | backend 能力类型；kind/domain 两向约束；重复键、未知所有者；插入闲置声明不漂移选择身份 |
-| 21 / 27 / 29 | 三种合法消费方指向 Service；非 Service 无法提供；缺失/重复 provider 均失败；传递硬闭包、硬自环/互环/未激活环 |
-| 22 / 28 | 4 特性声明的全部 24 种排列，变体和资源表逆序后整个选择逐项相等；空根、冻结根越界、闭包外不可用特性隔离 |
-| 25 / 32 | 每个变体写相同服务接口；缺写、只读、写错资源均失败；四种写访问和多写者冲突 |
-| 30 | Subsystem/Response 携带 provides 的两个 compile-fail 测试 |
-| 31 | 软需求服务未激活、已激活但尚未求解、已选、软环，验证拒选/回退且闭包不扩大 |
-| 冻结与设备求解 | 根/选择私有字段的两个 compile-fail；12 组能力×质量组合逐项检查变体和 pass ID；错误诊断内容 |
+| `Automatic` | read 消费唯一选中 writer；无 writer 时使用外部初始内容；write 从初始内容开始。多 writer 不能靠声明顺序或控制顺序消歧 |
+| `Initial` | 明确消费 SSA 0，包括外部历史帧初始内容 |
+| `ProducedBy(PassKey)` | 消费另一选中 pass 对同一当前帧资源的输出；可用于 read，也可作为后续 write 的输入 |
 
-当前实现已把资源、SSA 版本、历史帧导入、payload、执行 sink、PCM 能力映射和 provider 写入集纳入测试；真实 adapter 能力与整帧性能仍按设备实际结果记录，不能用抽象 `Limits` 代替真机能力。
+合法写链例如 `A: Initial → B: ProducedBy(A) → C: ProducedBy(B)`。读取者可以明确保留 A 或 B 的旧输出，不会被重新绑定为本帧最后一个 writer。每个版本只能有一个后继 writer；两个 Initial 写或两个消费同一 ProducedBy 的写均是分叉，附加 `depends_on` 不能使其合法。
 
-## 实跑结果（S1 检查点）
+`PassTemplate.depends_on` 是真实的额外控制依赖。编译适配把它与资源 producer 前置条件合并、映射到实际 PassId，**保留到最终 descriptor 与 runtime graph**，不是生成 SSA 后清空。无共享资源的控制边也必须生效。
 
-| 命令 | 结果 |
+### 校验责任
+
+- Catalog 检查全部 feature、全部 variant，包括能力/质量不满足或 root 闭包外的声明：同 pass 重复写、多 writer 的 Automatic/分叉、self producer、history producer、重复/self control dependency，以及服务每个 variant 的完整输出写集。
+- Catalog 的局部形状检查不冒充选中图检查。`ResourceTemplates::compile` 校验 producer 是否确实选中、是否写同一资源、控制前置 pass 是否存在；拒绝 transient 无来源读取及选中图中的跨 feature 分叉。
+- 正数 `FrameLag(n)` 映射为 `frame - n` 的独立 Imported 地址，仅 Persistent 模板可用。历史读使用初始版本，不建立同帧 ProducedBy 回边，历史写被拒绝。
+- 资源布局、usage、类型、逻辑 footprint、对齐与受检算术由模板/绑定校验承担。外部绑定只接受实际需要的非 transient 地址；重复、多余、缺失、物理重叠及类型/范围错误均有具体错误。
+
+对应回归位于 `tests.rs`、`compile_tests.rs`：既有 catalog 正负例覆盖 inactive variant；`explicit_writer_chain_keeps_initial_and_intermediate_read_provenance`、`missing_wrong_and_unselected_producers_fail_before_recording` 等直接检查版本来源。测试存在与某轮执行通过是两件事，结果边界见末节。
+
+## authority 版本与单内核 lowering
+
+当前 `compile.rs` 的流程：
+
+1. 用同一 `GpuFrameGraphBuilder::dependency_order()` 取得控制 admission 顺序；此调用不 lower 资源、不生成 SSA/hazard/alias。
+2. 以 `AccessInput::Version(0)` 或 `ProducedBy { pass, access }` 引用声明中确切的 producer 写访问；pass/access 使用原始声明身份。
+3. 一次完整 `compile_with_sources` 由 checked graph builder 分配输出版本，再由唯一编译内核生成 schedule、hazards、barriers、alias 与 queue batches。Fabric 不猜测或自行发放 SSA 输出版本。
+4. 将 authority 的 texture-first access 表投影回原始访问次序，保留重复访问及来源，不按资源去重。
+
+`BoundResourceUse` 分别保存 `input_ssa_version / input_content_version / input_producer` 和消费/产出侧 `ssa_version / content_version / producer`。write 的后者指向 authority 输出，read 指向输入；外部初始及历史内容为 SSA 0。content version 是 external base 加 authority SSA 的受检结果，不绕过 `GraphLimits.versions`。
+
+`FrameRenderItem / DomainPayload` 继续复用 SceneHandle、MotionSource 及实际选中访问做 layout/domain 校验；Value 仅为定宽 Copy 数值，不另开指针/参数块旁路。`FeatureGraphSink` 按权威顺序消费原 PassSpec 与对应 barrier，错误立即传播；逻辑 sink 测试不等于 GPU submit。
+
+## runtime 接缝及所有权
+
+当前 `runtime.rs` 的 `prepare_runtime` 对 recorder/import 做 exact coverage 校验。PassKey 索引加顺序 callback 槽的 coverage 复杂度为 `O((P + R) log P)`，保留确定的 unexpected/duplicate/missing 错误，不再每 recorder 线性扫全部 pass。
+
+runtime 保留控制依赖，从每次访问的 `input_ssa_version` 取 handle，并核对写出的 authority 版本。`verify_plan` 对 order/liveness/position/queue batches、逐访问输入输出版本和 logical barriers 做语义投影核对：texture/buffer namespace 分离；源/目标 pass 与原始 access ordinal、重复访问的 multiplicity 均保留，不能只比较资源索引或 barrier 数量。
+
+`RuntimeFeatureGraph::record` 对接 graph 的 `PreparedGraph / RecordedGraph / GraphAllocations`：`RenderGraph::prepare` 编译一次并冻结计划，不创建 GPU 资源、不运行执行 callback；`PreparedGraph::record` 使用同一计划，不再编译、不 submit。裸 `RecordedGraph` 持有 commands、plan 与 allocation owner，可用 `into_parts` 交给外部提交方；graph/Fabric 的 `execute` 是 record 后提交的便捷入口。裸 owner 需要在确认完成后显式 release，单纯 Drop 不销毁 GPU 资源；imports 始终由外部持有。
+
+`prism_render_runtime::RenderRuntime::execute_owned` 则返回 `FrameSubmission`：实际提交队列的 completion callback 保留一个 clone，调用方 early drop 不会提前销毁资源；实际 callback 已运行且最后一个 owner 释放后，才在创建资源的 device 上回收自有资源。显式 clone 可将 Transient/Persistent 保留到 completion 之后；history 发布方须一直保留 owner，直到后续所有 imported 使用均完成。`device_generation()` 标明创建代次，旧 owner 不把旧资源 ID 或迟到 callback 迁移到恢复后的设备。callback 被丢弃或 wait 失败均不构成完成证明，submit 也不自动发布 history。
+
+completion value 在同一设备代次内递增：`u64::MAX` 可发放一次，之后返回 `CompletionValueExhausted`，不环绕、不复用；饱和的 `next_completion_value()` 只是提示，不承诺下一提交成功。编译失败不动 pacer；值耗尽发生在 pacing wait 前；pacing wait 失败会把最老 token 恢复队首。这些拒绝路径均不创建 GPU 资源、不运行录制 callback、不发出新提交，也不推进提交值。`wait_idle` 仍执行真实 queue-wide barrier；若该 barrier 失败，按原顺序保留未确认 token 供重试。详细接口和回归范围见 `docs/frame_graph_implementation_zh.md`。
+
+## PCM 与 Scene 的生产接入界线
+
+PCM 使用真实 `ExtensionRegistry / ExtensionManifest / CapabilitySet`；静态 UID→FeatureId/kind/version sidecar 不以 slot/显示名/注册顺序代替身份。Provider→Service、ResponseMode/Composite→Response；能力没有设备词汇等价物时返回明确错误，不按位强转或静默丢弃要求。
+
+Scene 已有实际接入：`gpu/fabric.rs::init_scene_fabric` 从拥有 Scene buffers 的 Bevy RenderDevice 冻结内建根与选择；`shading/plugin.rs` 显式在其后初始化 shading execution。shading/water 用冻结 variant 准入、真实 executor 和 WaterSurface 外部执行站点，不由可见水体或 extracted items 动态增删根。
+
+Scene 的当前生产执行仍是专用 shading 声明图、Core3d driver 与各 per-view resource owner。其 SSR→GI/denoise→SSGI→TAA 实际调用和资源见 `docs/frame_graph_implementation_zh.md`。这证明已有选择/执行接入，**不表示通用 ResourceTemplates→prepare_runtime→record→Scene 原生提交与完成回收的整条生产路径已经完成**。
+
+## 已执行检查点与本次核对范围
+
+以下为主线已执行并反馈的检查点；本次仅核对源码与更新文档，没有运行 cargo。
+
+| 范围 | 主线反馈的执行结果与边界 |
 |---|---|
-| `cargo check -p prism_render_architecture --lib` | 通过，5.65 s |
-| `cargo test -p prism_render_architecture render_fabric --lib` | 34 passed / 0 failed；11,193 filtered；测试 0.01 s |
-| `cargo test -p prism_render_architecture --doc render_fabric` | 4 compile-fail passed / 0 failed；测试 0.40 s |
-| `cargo test -p prism_render_architecture --lib` | 11,227 passed / 0 failed / 0 ignored；测试 60.20 s |
-| `cargo clippy -p prism_render_architecture --lib --tests --message-format short` | exit 0，20.38 s；render_fabric 无警告 |
+| graph `--lib --all-features` | 最新重跑 78 passed，零 warning |
+| architecture Render Fabric | 本轮 122 passed / 0 failed |
+| runtime 严格 `PRISM_REQUIRE_GPU=1`、`--lib -- --test-threads=1` | 32 passed / 0 failed，包含 13 项 controlled retirement 与 2 项真实 GPU 测试 |
+| runtime 两项 GPU `--nocapture` 复跑 | 2 passed；实际 adapter 输出 Apple M2 / Metal / Hardware |
+| Scene `specular_` / plugin 定向测试 | 较早检查点分别为 14 / 13 通过 |
+| Apple M2 真实设备 startup | 较早检查点 1 通过 |
+| `cargo check -p prism_render_app --all-targets` 与 owner caller 回归 | check 已通过，有既存 warnings；修复 3 处新增 `RecordedGraph` unused 后，`mesh_draw_records_into_a_graph_pass` 1 项及 `records_a_multi_draw` 2 项均通过 |
+| gpudriven 严格 GPU `--lib -- --nocapture --test-threads=1` | 18 passed；7 条路径输出 Apple M2 / Metal 硬件证据 |
 
-以上是迁移前的 S1 检查点。迁移中的第一次 `cargo check` 因 graph crate 暂缺 `queue_batches` 未完成；父代理补齐该接口后，S1 适配新 `CompileError` 与 pass admission，并重新运行：
+runtime GPU 证据是同一真实设备上的 transfer 链、readback、completion callback、owner clone/early drop 与 backend 资源表项回收；通过槽位复用及 generation 递增验证旧表项已移除，不代表驱动 heap 已归还。controlled retirement 测试补充可控的完成前保活、失败 wait、代次隔离和溢出路径，不能冒充 GPU 执行。app 三项 caller 回归仅捕获命令、不提交 GPU，因此录制后立即 release，不计作 GPU 验证；gpudriven 的 18 项也不全部描述为硬件执行路径。上述结果不等于完整 Scene 帧、通用 Fabric 整帧生产接线、图像 golden、物理多队列或性能验收。逻辑 footprint 不代表后端 heap 放置大小，绑定元数据校验不替代真实 device allocation/format 限制。
 
-| 命令 | 迁移后结果 |
-|---|---|
-| `cargo test -p prism_render_architecture render_fabric --lib` | 36 passed / 0 failed / 11,191 filtered（新增服务集合顺序与权威图错误映射两项） |
-| `cargo test -p prism_render_architecture --lib --quiet` | 11,227 passed / 0 failed；53.68 s |
-| `cargo test -p prism_render_architecture --doc render_fabric --quiet` | 4 passed / 0 failed |
-| `cargo clippy -p prism_render_architecture --lib --tests --message-format short` | exit 0；34.55 s；render_fabric 无警告，其他模块仍有警告 |
-
-clippy 仍报告其他代理范围的 texture_streaming/virtual_geometry 既有警告；没有为本任务修改那些文件。首次编译发现 shader 置换私有模块导入，已改公共 reexports 后通过上述检查。
-格式化限定于新增模块：`rustfmt --edition 2024 pkg/prism_render_architecture/src/render_fabric/mod.rs`。全局 `git diff --check` 当前仅报其他代理文件 `docs/prism_material_pipeline_design_zh.md` 和 `pkg/prism_render_architecture/src/frame_graph/mod.rs` 的尾空行；本交付未修改这些文件。
-
-## 历史 S1 检查点（已被当前实现取代）
-
-`ResourceScope` 仅允许 Whole；正数 `FrameLag` / `ResourceUse` 已声明并受静态校验，但 S1 不把它们降级成同帧资源访问。历史版本、生命周期、真实资源绑定和 barrier/执行图的委托集成由父代理处理。S1 的 `passes()` 是选中模板视图，不宣称真实 GPU 帧执行已接入。
-
-以上内容保留为 2026-10-14 的历史检查点；当前代码已继续完成 S2/S3 资源与 PCM 公共接入。
-
-## S2/S3 资源委托与 PCM 桥接切片（2026-10-14）
-
-本节更新上面 S1 检查点的资源委托边界，但**不宣称 05 原文的整个 S2/S3 或全部 §12 门禁完成**。本次授权写域仅 `pkg/prism_render_architecture/src/render_fabric/` 与本文；没有修改 Cargo、lib.rs、graph 核心、PCM/material、water/volumetric/particle、shading、response GPU/WGSL 文件。旧三份服务集等价护栏、RenderLayers/相位分类与 shading 5/6 断言由父线程处理。
-
-### 已落地公共接口
-
-| 接口 | 实际契约 |
-|---|---|
-| `PassTemplate::{reads,writes}` / `FeatureDefinition::{accesses,reads,writes}` | 只从唯一 `accesses` 派生；遍历全部变体（包括未选中/设备不支持的变体），保留 FeatureId、VariantId、PassKey，不存第二份读写列表 |
-| `ResourceLayout` / `ResourceTemplate` | 语义键、生命周期、buffer/texture 精确元数据及对齐；所有变体访问均验证 usage/type/history 生命周期；纹理 mip/array/3D/sample 逻辑 footprint 检查及受检算术 |
-| `FrameResourceBinding` / `PhysicalResource` | `(ResourceKey, absolute frame)` 绑定外部真实 driver BufferId/TextureId、buffer offset、layout、alignment、已提交 content version；缺失/重复/类型错误/对齐错误/区间溢出/跨键或跨帧存储重叠均返回错误 |
-| `ResourceTemplates::compile` | 输入冻结选择、帧号、外部绑定、FrameRenderItem 与 GraphLimits；只验证并降级声明，不自己调度、生成 SSA、分配别名或推导 barrier |
-| `CompiledFeatureGraph` | 只读资源键到帧图 ResourceId 映射、PassSpec、版本、payload 及权威编译计划；没有第二次变体选择 |
-| `PassSpec::accesses` / `BoundResourceUse` | 每条原始访问关联 ResourceId、实际帧、SSA version、外部 base + SSA 的 content version、producer PassKey；历史/初始内容为 SSA 0、无 producer |
-| `FrameRenderItem` / `DomainPayload` | 复用已有 SceneHandle 与 MotionSource；Resource 支验证实际选中 pass 的当前帧引用、lifetime/size/alignment/layout/domain；Value 仅定宽 Copy 内联数值/向量/包围盒，无指针、handle 或参数块旁路 |
-| `CompiledFeatureGraph::execute` / `FeatureGraphSink` | 消费编译结果一次；begin 接收已校验资源、items 与计划，按权威 execution_order 调用原 PassSpec，并逐条提交 destination 对应的原始 Barrier，最后 finish；所有 sink 方法必实现，错误立即传播，不提供默认空实现 |
-
-当前帧全局唯一 writer，transient read 必须有 producer，同 pass 的独立 current read/write 拒绝为不明确反馈。正数 `FrameLag(n)` 解析为 `frame - n`，只允许 Persistent 模板；历史绑定在本帧权威图中作为独立 Imported 资源，而不是同帧回边。测试以 spray/foam 的两 pass 结构验证 lag=1 打断环；这是契约夹具，**没有修改或接入真实 water 管线**。
-
-外部 content version 与 SSA version 都受 GraphLimits.versions 约束，写入使用受检加法。资源/pass/access 容量在 admission 前检查；物理 buffer 范围和逻辑 footprint 运算不回绕。binding 声明仅能校验用户提供的元数据，不能取代 driver 查询实际 GPU allocation 长度/设备格式限制。纹理 size 是逻辑 footprint，**不是声称已获得后端 heap 放置大小或分配实际纹理**。
-
-### 对权威 frame_graph 的接口依赖
-
-现有接口足够，本切片不要求新增或修改 graph 核心：
-
-- `GpuFrameGraphBuilder::with_limits`、`try_add_resource(ResourceDescriptor)`、`try_add_pass(PassDescriptor)`、`compile()`。
-- `GraphLimits` / `check_count`，受检容量、VersionOverflow 与 MemoryOverflow 错误。
-- `CompiledGpuFrameGraph` 的 execution_order / resource_versions / barriers / queue_batches / transient_offsets / transient_bytes / transient / declared_pass_count。
-- 原有 `AccessKind::writes`、ResourceLifetime、ResourceAccess、Barrier、ResourceId、PassId。
-
-现有声明 facade 的 SSA 正规化依赖 pass admission 顺序，因此适配器先把当前 producer/read 关系交给**同一个** GpuFrameGraphBuilder 编译器取得 producer-first admission，再把真实资源访问交给同一编译器取得最终 SSA/barriers/alias/queues。没有自写 topological sort 或第三个图编译器。最终图的 `depends_on` 为空，依赖/barrier 来自真实 accesses。逐访问版本视图仅投影权威 resource_versions；唯一 writer 和 producer-first 是其前置检查。
-
-等价测试把反向声明的三个 pass 与直接手写权威 builder 的基线逐项比较：execution_order、每条 Barrier（含 queue_transfer）、resource_versions、queue_batches、transient_offsets、transient_bytes。该证据是声明适配等价，**不等价于已有 shading/water 全场景迁移 golden**。
-
-### PCM 桥：真实类型与公共模块均已接入
-
-`pcm.rs` 使用真实 `prism_material_pcm::{ExtensionRegistry, ExtensionManifest, Kind, CapabilitySet}`，没有复制 manifest 类型，也没有增加 ExtensionManifest 字段。`PcmFeatureBinding` 为独立的静态 UID→显式 FeatureId/kind/version sidecar；不从 slot、display id、namespace、注册顺序分配语义身份。`PcmFeatureCatalog` 保存不可变 catalog 与 manifest 快照，按 UID 查找，不写 registry，不自动扩根。
-
-显式映射 Provider→Service、ResponseMode/Composite→Response；其他 PCM kind 不伪造 graph feature。校验重复 UID/feature、未知引用、kind/version 错配。PCM BindlessTextures 映射设备 BindlessDescriptors，ComputeScatter 映射 WebGPU Compute 基线；VirtualTexture/ObjectSpaceCache/StorageF16/HeavySampling 无设备词汇等价物时返回 Unrepresentable，未知 bit 返回 UnknownBits，不做 `as` 位重释、不悄悄擦掉要求。每个 authored variant 都必须包含可映射的 manifest 设备要求，此后能力准入完全走已有 FeatureSelection resolver，没有第二个布尔门禁。
-
-当前 architecture 已声明 `prism_material_pcm = { path = "../prism_material_pcm" }`；`render_fabric/mod.rs` 已接入 `mod pcm; pub use pcm::*;` 与 `pcm_tests`。PCM 的 UID/kind/version sidecar、能力映射、冻结选择、资源模板、pass 访问和 execute sink 均走公共模块，不再依赖独立 harness 才能验证。
-
-为在依赖缺口下验证源码，创建 `/private/tmp/prism-fabric-pcm.Sy1nym` 独立 Cargo harness：依赖真实 architecture 与 PCM crate，reexport architecture::backend/frame_graph/render_fabric，并通过绝对 `#[path]` 加载本工作区的 **同一** pcm.rs / pcm_tests.rs。未复制生产桥逻辑、未改仓库 Cargo，也没有 feature-gate/假类型绕过。独立测试包含真实 manifest→sidecar→catalog→frozen selection→ResourceTemplates→PassSpec→execute sink 完整声明链、全 variant 读写、能力拒绝、晋升与 registry 顺序/slot 不变身份；执行 sink 记录逻辑事件，**不是 GPU submit**。
-
-### 本轮实跑证据
-
-| 命令 | 结果 |
-|---|---|
-| `cargo test -p prism_render_architecture render_fabric --lib` | **63 passed / 0 failed / 11,195 filtered**，独立临时 target；含 3 个 runtime bridge 测试 |
-| `cargo test --offline --manifest-path /private/tmp/prism-fabric-pcm.Sy1nym/Cargo.toml --target-dir /Users/wangkailong/Documents/GitHub/Prism/target render_fabric --lib` | **7 passed / 0 failed**，build 28.35 s、test 0.00 s；真实 PCM bridge 专用测试，**不是 architecture 已接入测试** |
-| `cargo test -p prism_render_architecture --doc render_fabric --quiet` | **4 passed / 0 failed**；独立临时 target，exit 0 |
-| `rustfmt --edition 2024 --check`（本次 runtime 写集） | exit 0 |
-| `cargo test -p prism_render_architecture --doc render_fabric --quiet` | 收尾复跑 **4 compile-fail passed / 0 failed**，独立临时 target，exit 0 |
-| `rustfmt --edition 2024 --check pkg/prism_render_architecture/src/render_fabric/mod.rs pkg/prism_render_architecture/src/render_fabric/pcm.rs pkg/prism_render_architecture/src/render_fabric/pcm_tests.rs` | exit 0；mod.rs 递归覆盖已挂接子模块，另显式检查未挂接 PCM 两文件 |
-| `cargo clippy --offline --manifest-path /private/tmp/prism-fabric-pcm.Sy1nym/Cargo.toml --target-dir /Users/wangkailong/Documents/GitHub/Prism/target --lib --tests --message-format short` | exit 0，18.83 s；真实 PCM 独立 harness，不代表 architecture 公共挂接完成 |
-
-第一次新增资源测试编译因测试引用不存在的 PayloadValue::U32 失败，改用实际 Scalar；随后 runtime bridge 测试使定向结果达到 63 项通过。本轮没有重跑整个 architecture 全量测试，前文全量结果只属于 S1 历史检查点。
-
-本轮 architecture clippy 首次执行 exit 0（40.36 s），报告本写域四处 lint，已修正文档反引号和测试 let-else 并得到以上 59 项复跑通过。修正后的第一次 clippy 复跑因 target 写入 `No space left on device (os error 28)` 失败，未清理共享 target。之后只读检查显示可用空间约 4.0 GiB，再次执行 `cargo clippy -p prism_render_architecture --lib --tests --message-format short` 时，在加载工作区 manifest 阶段 exit 101：`prism_render_scene/Cargo.toml` 继承 `thiserror` 失败，根 manifest 的 `workspace.dependencies` 未定义。该失败发生在上述最新两项测试通过之后，未进入本模块代码检查；未修改父线程 Cargo 文件，**不宣称修正后的 architecture clippy 最终全绿**。
-
-### 精确写集与提交边界
-
-共同前缀：`pkg/prism_render_architecture/src/render_fabric/`。
-
-- S1 基础：`types.rs`、`catalog.rs`、`selection.rs`、`topology.rs`、`tests.rs`。
-- S2/S3 资源适配：`accesses.rs`、`resources.rs`、`payload.rs`、`compile.rs`、`compile_tests.rs`、`runtime.rs`、`runtime_tests.rs`，以及 `mod.rs` 的模块/reexport 挂接；这部分已进入 architecture 编译与 63 项测试。
-- PCM 待集成源码：`pcm.rs`、`pcm_tests.rs`；独立真实依赖 harness 的 7 项验证通过，需父线程补直接依赖及 mod 挂接后才算公共接入。
-- 独立记录：`docs/render_fabric_selection_implementation_zh.md`。
-
-本轮无 lib.rs/Cargo/graph/material/GPU response 写入，无 commit/push。父线程可独立提交上述 render_fabric 目录与本文；若分批提交，PCM 两文件应单列为依赖集成待完成，不声称运行模块已启用。S1 的 lib.rs 一行模块声明如需一并暂存，由父线程从其拥有的 lib.rs 变更里选择，不包含该文件其他人的修改。
-
-交付检查点：15 个 Rust 文件与本文仍为未跟踪写集；无 staging/index 写入。RenderFabric runtime bridge 已接入现有 `RenderGraph` 的 import/setup/compile/execute 链路；不承担 04 graph runtime 或 resident composition 实现。
-
-### 当前接入事实
-
-1. PCM 直接依赖与公开模块已挂接。
-2. Render Fabric 复用现有 `RenderGraph::execute` 和 authority，不新增第二个 executor；真实后端 fence、allocator 和 adapter 限制由 driver/runtime 提供。
-3. Persistent 资源由调用方提交绝对帧绑定，Render Fabric 对其生命周期、content version、SSA 和物理区间执行受检验证。
-4. 水体、体积、粒子、毛发、贴花的内建资源键与模板已统一登记，服务 provider 的每个 variant 都通过写入集门禁。
-5. 设备初始化时一次性冻结根集合、依赖闭包和 variant；运行期只消费冻结选择，不重复选择。
-
-### 冻结选择来源与绑定准入复核（2026-10-15）
-
-冻结选择现在保留源 `FeatureDefinition`，编译消费时检查完整声明与所选变体；即使另一个 catalog 复用了同一个静态 variant，也不能改变硬依赖、provider 接口、特性种类或候选集后复用旧选择。选择的语义相等性仍只比较选中实现，保持声明重排后的确定性。
-
-外部绑定只准用于本帧图确实需要的非 transient 资源。向 transient 模板提供外部物理绑定会明确返回 `UnexpectedBinding`，不会被忽略或混用为图内分配。
-
-本批验证均使用 `CARGO_INCREMENTAL=0`：`cargo test -p prism_render_architecture --lib render_fabric::` 为 75 passed；`--lib render_layers` 为 2 passed；`--lib every_persistent_instance_field_has_a_delta_kind` 为 1 passed；`--doc render_fabric` 为 4 passed。三个变更源码文件的格式与 diff 检查通过。这些结果证明上述准入修复，不替代真实水体、粒子生产接线和 GPU 场景验收证据。
+本次只更新指定 tracked 文档，不改生产代码、不改 `docs/refactoring-dev/`、不提交。

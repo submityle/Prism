@@ -121,6 +121,8 @@ impl RenderDevice for MockDevice {
 }
 
 /// A record-only [`RenderQueue`] capturing submitted command buffers.
+/// Mock submission completes synchronously on the CPU, with no GPU work in
+/// flight, so tests may immediately release the returned `RecordedGraph` owner.
 struct MockQueue {
     submitted: RefCell<Vec<CommandBuffer>>,
 }
@@ -387,7 +389,9 @@ fn folds_inferred_usage_into_realized_descriptor() {
     let g = build_chain();
     let device = MockDevice::new();
     let queue = MockQueue::new();
-    g.execute(&device, &queue).expect("chain executes");
+    g.execute(&device, &queue)
+        .expect("chain executes")
+        .release(&device);
 
     // The offscreen target is both a color attachment (pass A) and sampled
     // (pass B); its realized descriptor must carry both usages.
@@ -409,7 +413,9 @@ fn execute_records_one_render_pass_per_surviving_raster_pass() {
     let g = build_chain();
     let device = MockDevice::new();
     let queue = MockQueue::new();
-    g.execute(&device, &queue).expect("chain executes");
+    g.execute(&device, &queue)
+        .expect("chain executes")
+        .release(&device);
 
     let submitted = queue.submitted.borrow();
     assert_eq!(submitted.len(), 1, "execution submits exactly one buffer");
@@ -440,7 +446,9 @@ fn present_pass_is_a_root_but_records_no_gpu_pass() {
 
     let device = MockDevice::new();
     let queue = MockQueue::new();
-    g.execute(&device, &queue).expect("present chain executes");
+    g.execute(&device, &queue)
+        .expect("present chain executes")
+        .release(&device);
 
     let submitted = queue.submitted.borrow();
     assert_eq!(submitted.len(), 1);
@@ -460,7 +468,9 @@ fn render_pass_carries_its_debug_label() {
     let g = build_chain();
     let device = MockDevice::new();
     let queue = MockQueue::new();
-    g.execute(&device, &queue).expect("chain executes");
+    g.execute(&device, &queue)
+        .expect("chain executes")
+        .release(&device);
 
     let submitted = queue.submitted.borrow();
     let cb = &submitted[0];
@@ -506,7 +516,9 @@ fn transfer_pass_records_copy_commands() {
 
     let device = MockDevice::new();
     let queue = MockQueue::new();
-    g.execute(&device, &queue).expect("transfer graph executes");
+    g.execute(&device, &queue)
+        .expect("transfer graph executes")
+        .release(&device);
 
     let submitted = queue.submitted.borrow();
     assert_eq!(submitted.len(), 1, "execution submits exactly one buffer");
@@ -565,7 +577,9 @@ fn culls_unconsumed_transfer_pass_unless_side_effecting() {
 
     let device = MockDevice::new();
     let queue = MockQueue::new();
-    g.execute(&device, &queue).expect("transfer graph executes");
+    g.execute(&device, &queue)
+        .expect("transfer graph executes")
+        .release(&device);
 
     let submitted = queue.submitted.borrow();
     assert_eq!(submitted.len(), 1);
@@ -637,7 +651,9 @@ fn transfer_pass_records_every_copy_variant() {
 
     let device = MockDevice::new();
     let queue = MockQueue::new();
-    g.execute(&device, &queue).expect("transfer graph executes");
+    g.execute(&device, &queue)
+        .expect("transfer graph executes")
+        .release(&device);
 
     let submitted = queue.submitted.borrow();
     let cb = &submitted[0];
@@ -770,7 +786,8 @@ fn submitted_by_active(graph: RenderGraph) -> Vec<CommandBuffer> {
     let queue = MockQueue::new();
     graph
         .execute(&device, &queue)
-        .expect("the active executor runs the graph");
+        .expect("the active executor runs the graph")
+        .release(&device);
     queue.submitted.borrow().clone()
 }
 
@@ -780,7 +797,8 @@ fn submitted_sequentially(graph: RenderGraph) -> Vec<CommandBuffer> {
     let queue = MockQueue::new();
     graph
         .execute_sequential(&device, &queue)
-        .expect("the sequential executor runs the graph");
+        .expect("the sequential executor runs the graph")
+        .release(&device);
     queue.submitted.borrow().clone()
 }
 
@@ -790,7 +808,8 @@ fn submitted_in_parallel(graph: RenderGraph) -> Vec<CommandBuffer> {
     let queue = MockQueue::new();
     graph
         .execute_parallel(&device, &queue)
-        .expect("the parallel executor runs the graph");
+        .expect("the parallel executor runs the graph")
+        .release(&device);
     queue.submitted.borrow().clone()
 }
 
@@ -949,7 +968,9 @@ fn raster_pass_records_indexed_and_multi_indirect_draws() {
 
     let device = MockDevice::new();
     let queue = MockQueue::new();
-    g.execute(&device, &queue).expect("indirect graph executes");
+    g.execute(&device, &queue)
+        .expect("indirect graph executes")
+        .release(&device);
 
     let submitted = queue.submitted.borrow();
     let cb = &submitted[0];
@@ -993,7 +1014,8 @@ fn compute_pass_records_indirect_dispatch() {
     let device = MockDevice::new();
     let queue = MockQueue::new();
     g.execute(&device, &queue)
-        .expect("indirect dispatch executes");
+        .expect("indirect dispatch executes")
+        .release(&device);
 
     let submitted = queue.submitted.borrow();
     let cb = &submitted[0];

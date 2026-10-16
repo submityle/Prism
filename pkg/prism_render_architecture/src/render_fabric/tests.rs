@@ -25,6 +25,7 @@ fn service_set_equality_ignores_declaration_order() {
 }
 fn usage(key: ResourceKey, access: AccessKind) -> ResourceUse {
     ResourceUse {
+        input: ResourceInput::Automatic,
         key,
         access,
         scope: ResourceScope::Whole,
@@ -33,6 +34,7 @@ fn usage(key: ResourceKey, access: AccessKind) -> ResourceUse {
 }
 fn pass(id: u32, accesses: Vec<ResourceUse>) -> PassTemplate {
     PassTemplate {
+        depends_on: &[],
         id: PassKey(id),
         accesses: table(accesses),
         queue: QueueClass::Compute,
@@ -111,6 +113,39 @@ fn replace_variants(
 ) -> FeatureDefinition {
     feature.variants = table(variants);
     feature
+}
+
+fn assert_catalog_pass_error_for_all_variant_states(
+    passes: Vec<PassTemplate>,
+    expected: CatalogError,
+) {
+    for (state, active, gated) in [
+        ("preferred active variant", true, false),
+        ("capability/quality-ineligible variant", true, true),
+        ("feature outside the root closure", false, false),
+    ] {
+        let mut checked = variant(100, 0, passes.clone());
+        if gated {
+            checked.required_caps = CapabilitySet::from_slice(&[Capability::RayQuery]);
+            checked.min_quality = RenderQualityTier::Ultra;
+        }
+        // A valid fallback must not hide an invalid candidate, even when the
+        // latter cannot be selected or its feature is outside the root closure.
+        let fallback = variant(
+            101,
+            1,
+            vec![pass(199, vec![usage(KA, AccessKind::StorageWrite)])],
+        );
+        let feature = replace_variants(provider(A, SA, KA, &[]), vec![checked, fallback]);
+        assert_eq!(
+            error(
+                vec![root(if active { &[SA] } else { &[] }), feature],
+                vec![KA]
+            ),
+            expected,
+            "{state}"
+        );
+    }
 }
 
 #[test]
@@ -563,6 +598,297 @@ fn ambiguous_writes_and_duplicate_passes_are_rejected() {
             pass: PassKey(100)
         }
     );
+}
+
+#[test]
+fn catalog_rejects_repeated_writes_within_one_pass() {
+    for input in [ResourceInput::Automatic, ResourceInput::Initial] {
+        let write = ResourceUse {
+            input,
+            ..usage(KA, AccessKind::StorageWrite)
+        };
+        for second_access in [AccessKind::StorageWrite, AccessKind::TransferWrite] {
+            assert_catalog_pass_error_for_all_variant_states(
+                vec![pass(
+                    100,
+                    vec![
+                        write,
+                        ResourceUse {
+                            access: second_access,
+                            ..write
+                        },
+                    ],
+                )],
+                CatalogError::AmbiguousWriter {
+                    feature: A,
+                    variant: VariantId(100),
+                    resource: KA,
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn catalog_rejects_two_initial_writers_despite_control_order() {
+    let write = ResourceUse {
+        input: ResourceInput::Initial,
+        ..usage(KA, AccessKind::StorageWrite)
+    };
+    let first = pass(100, vec![write]);
+    let second = PassTemplate {
+        depends_on: table(vec![first.id]),
+        ..pass(101, vec![write])
+    };
+    for passes in [vec![first, second], vec![second, first]] {
+        assert_catalog_pass_error_for_all_variant_states(
+            passes,
+            CatalogError::AmbiguousWriter {
+                feature: A,
+                variant: VariantId(100),
+                resource: KA,
+            },
+        );
+    }
+}
+
+#[test]
+fn catalog_rejects_same_produced_by_writer_fork_despite_control_order() {
+    let initial = ResourceUse {
+        input: ResourceInput::Initial,
+        ..usage(KA, AccessKind::StorageWrite)
+    };
+    let producer = pass(100, vec![initial]);
+    let fork = ResourceUse {
+        input: ResourceInput::ProducedBy(producer.id),
+        ..initial
+    };
+    let first = PassTemplate {
+        depends_on: table(vec![producer.id]),
+        ..pass(101, vec![fork])
+    };
+    let second = PassTemplate {
+        depends_on: table(vec![first.id]),
+        ..pass(102, vec![fork])
+    };
+    // Serial control edges cannot turn two successors of the same resource
+    // version into an explicit, non-branching resource chain.
+    for passes in [vec![producer, first, second], vec![second, first, producer]] {
+        assert_catalog_pass_error_for_all_variant_states(
+            passes,
+            CatalogError::AmbiguousWriter {
+                feature: A,
+                variant: VariantId(100),
+                resource: KA,
+            },
+        );
+    }
+}
+
+#[test]
+fn catalog_rejects_automatic_writer_in_control_ordered_multiwriter_chain() {
+    // The ordinary pair of Automatic writers is already covered above. These
+    // cases also reject partial annotation; control order is not SSA input.
+    for inputs in [
+        [ResourceInput::Automatic, ResourceInput::Automatic],
+        [ResourceInput::Initial, ResourceInput::Automatic],
+        [ResourceInput::Automatic, ResourceInput::Initial],
+        [
+            ResourceInput::Automatic,
+            ResourceInput::ProducedBy(PassKey(100)),
+        ],
+    ] {
+        let first = pass(
+            100,
+            vec![ResourceUse {
+                input: inputs[0],
+                ..usage(KA, AccessKind::StorageWrite)
+            }],
+        );
+        let second = PassTemplate {
+            depends_on: table(vec![first.id]),
+            ..pass(
+                102,
+                vec![ResourceUse {
+                    input: inputs[1],
+                    ..usage(KA, AccessKind::StorageWrite)
+                }],
+            )
+        };
+        assert_catalog_pass_error_for_all_variant_states(
+            vec![first, second],
+            CatalogError::AmbiguousWriter {
+                feature: A,
+                variant: VariantId(100),
+                resource: KA,
+            },
+        );
+    }
+}
+
+#[test]
+fn catalog_rejects_self_producer_for_reads_and_writes() {
+    let producer = pass(
+        99,
+        vec![ResourceUse {
+            input: ResourceInput::Initial,
+            ..usage(KA, AccessKind::StorageWrite)
+        }],
+    );
+    for access in [AccessKind::SampledRead, AccessKind::StorageWrite] {
+        assert_catalog_pass_error_for_all_variant_states(
+            vec![
+                producer,
+                pass(
+                    100,
+                    vec![ResourceUse {
+                        input: ResourceInput::ProducedBy(PassKey(100)),
+                        ..usage(KA, access)
+                    }],
+                ),
+            ],
+            CatalogError::InvalidResourceInput {
+                pass: PassKey(100),
+                resource: KA,
+            },
+        );
+    }
+}
+
+#[test]
+fn catalog_rejects_current_frame_producer_on_history_reads() {
+    let producer = pass(
+        100,
+        vec![ResourceUse {
+            input: ResourceInput::Initial,
+            ..usage(KA, AccessKind::StorageWrite)
+        }],
+    );
+    for access in [AccessKind::SampledRead, AccessKind::StorageRead] {
+        for lag in [1, 2] {
+            assert_catalog_pass_error_for_all_variant_states(
+                vec![
+                    producer,
+                    pass(
+                        102,
+                        vec![ResourceUse {
+                            input: ResourceInput::ProducedBy(producer.id),
+                            frame_lag: FrameLag::new(lag),
+                            ..usage(KA, access)
+                        }],
+                    ),
+                ],
+                CatalogError::InvalidResourceInput {
+                    pass: PassKey(102),
+                    resource: KA,
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn catalog_rejects_duplicate_control_dependencies() {
+    let producer = pass(100, vec![usage(KA, AccessKind::StorageWrite)]);
+    let consumer = PassTemplate {
+        depends_on: table(vec![producer.id, producer.id]),
+        ..pass(102, vec![])
+    };
+    assert_catalog_pass_error_for_all_variant_states(
+        vec![producer, consumer],
+        CatalogError::InvalidDependency {
+            pass: consumer.id,
+            dependency: producer.id,
+        },
+    );
+}
+
+#[test]
+fn catalog_rejects_self_control_dependency() {
+    let consumer = PassTemplate {
+        depends_on: table(vec![PassKey(102)]),
+        ..pass(102, vec![])
+    };
+    assert_catalog_pass_error_for_all_variant_states(
+        vec![
+            pass(100, vec![usage(KA, AccessKind::StorageWrite)]),
+            consumer,
+        ],
+        CatalogError::InvalidDependency {
+            pass: consumer.id,
+            dependency: consumer.id,
+        },
+    );
+}
+
+#[test]
+fn catalog_accepts_explicit_nonbranching_resource_chain_and_control_dependencies() {
+    let initial = ResourceUse {
+        input: ResourceInput::Initial,
+        ..usage(KA, AccessKind::StorageWrite)
+    };
+    let first = pass(100, vec![initial]);
+    let second = PassTemplate {
+        depends_on: table(vec![first.id]),
+        ..pass(
+            102,
+            vec![ResourceUse {
+                input: ResourceInput::ProducedBy(first.id),
+                ..initial
+            }],
+        )
+    };
+    let third = PassTemplate {
+        depends_on: table(vec![second.id]),
+        ..pass(
+            103,
+            vec![ResourceUse {
+                input: ResourceInput::ProducedBy(second.id),
+                access: AccessKind::TransferWrite,
+                ..initial
+            }],
+        )
+    };
+    let read = ResourceUse {
+        input: ResourceInput::ProducedBy(third.id),
+        ..usage(KA, AccessKind::SampledRead)
+    };
+    let reader = PassTemplate {
+        depends_on: table(vec![first.id, third.id]),
+        // Repeated read accesses are legitimate, unlike repeated writes. An
+        // Initial history read must coexist with the current-frame chain.
+        ..pass(
+            104,
+            vec![
+                read,
+                read,
+                ResourceUse {
+                    input: ResourceInput::Initial,
+                    frame_lag: FrameLag::new(1),
+                    ..read
+                },
+            ],
+        )
+    };
+    let control_only = PassTemplate {
+        depends_on: table(vec![second.id, reader.id]),
+        ..pass(105, vec![])
+    };
+    for passes in [
+        vec![first, second, third, reader, control_only],
+        vec![control_only, reader, third, second, first],
+    ] {
+        let definition = replace_variants(
+            provider(A, SA, KA, &[]),
+            vec![variant(100, 0, passes.clone())],
+        );
+        let valid = catalog(vec![root(&[SA]), definition], vec![KA]).unwrap();
+        let selection = resolve(&valid);
+        let selected = selection.feature(A).unwrap();
+        assert_eq!(selected.variant_id(), VariantId(100));
+        assert_eq!(selected.passes(), passes.as_slice());
+        assert_eq!(selection.service_resources(SA), Some([KA].as_slice()));
+    }
 }
 
 #[test]

@@ -123,11 +123,24 @@ impl FrameLag {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceInput {
+    /// Reads the unique selected writer, or imported initial contents when no
+    /// writer exists. Writes consume initial contents. Multiple writers require
+    /// explicit inputs; registration order never selects a producer.
+    Automatic,
+    /// Version zero, including an explicitly imported history frame.
+    Initial,
+    /// The output of a selected pass writing this same current-frame resource.
+    ProducedBy(PassKey),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResourceUse {
     pub key: ResourceKey,
     pub access: AccessKind,
     pub scope: ResourceScope,
     pub frame_lag: Option<FrameLag>,
+    pub input: ResourceInput,
 }
 
 #[repr(u32)]
@@ -201,6 +214,8 @@ pub struct PassTemplate {
     pub id: PassKey,
     pub accesses: &'static [ResourceUse],
     pub queue: QueueClass,
+    /// Semantic control prerequisites, retained even without resource hazards.
+    pub depends_on: &'static [PassKey],
 }
 
 /// Bind an existing shader permutation system, without another variant enum.

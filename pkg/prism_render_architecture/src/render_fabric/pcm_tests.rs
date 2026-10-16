@@ -34,6 +34,7 @@ fn table<T>(values: Vec<T>) -> &'static [T] {
 }
 fn usage(key: ResourceKey, access: AccessKind) -> ResourceUse {
     ResourceUse {
+        input: ResourceInput::Automatic,
         key,
         access,
         scope: ResourceScope::Whole,
@@ -55,6 +56,7 @@ fn variant(
         requires_services_extra: ServiceSet::EMPTY,
         shader_permutation: None,
         passes: table(vec![PassTemplate {
+            depends_on: &[],
             id: PassKey(key),
             queue: QueueClass::Compute,
             accesses: table(accesses),

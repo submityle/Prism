@@ -309,13 +309,14 @@ fn render_gpu_driven(
     scene.upload(queue, &FrameUniform::new(*camera, INDEX_COUNT), instances);
 
     let output = cull.run(queue);
-    scene
+    let recorded = scene
         .render_graph(device, queue, &cull, mode)
         .expect("the GPU-driven frame graph compiles");
     assert!(
         device.poll_wait(),
         "the device stays healthy after the GPU-driven scene draw"
     );
+    recorded.release(device);
     let pixels = queue.read_texture_rgba8(scene.target(), SCENE_RESOLUTION, SCENE_RESOLUTION);
 
     scene.destroy(device);
@@ -600,10 +601,11 @@ fn gpu_scene_draw_coverage_is_stable_across_resubmissions() {
     for _ in 0..3 {
         let output = cull.run(&queue);
         counts.push(output.args.instance_count);
-        scene
+        let recorded = scene
             .render_graph(&device, &queue, &cull, IndirectMode::Single)
             .expect("the resubmitted frame graph compiles");
         assert!(device.poll_wait(), "the device stays healthy across frames");
+        recorded.release(&device);
         let pixels = queue.read_texture_rgba8(scene.target(), SCENE_RESOLUTION, SCENE_RESOLUTION);
         coverage.push(count_lit_pixels(&pixels));
     }

@@ -33,7 +33,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use prism_render_driver::{
     Adapter, AdapterInfo, DeviceDescriptor, DeviceLostReason, Extent3d, Instance, PowerPreference,
@@ -43,18 +43,58 @@ use prism_render_driver::{
 use prism_render_graph::{CompileError, ImportedTexture, RenderGraph, TextureDesc, TextureHandle};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-mod capture;
 mod frame_pacing;
 mod replay;
+mod submission;
 
 pub use frame_pacing::{FramePacer, DEFAULT_FRAMES_IN_FLIGHT};
 pub use replay::{ReplayError, ReplayFailure, ReplayHandle};
+pub use submission::FrameSubmission;
 // The waitable-submission contract is part of the RHI, so every backend can
 // satisfy it without depending on this crate. Re-exported for convenience.
 pub use prism_render_driver::{CompletionToken, FrameSync};
 
 #[cfg(test)]
+mod retirement_tests;
+#[cfg(test)]
+mod submission_gpu_tests;
+#[cfg(test)]
 mod tests;
+
+/// Why a compiled frame could not be submitted safely.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SubmissionError {
+    /// The graph declaration could not be compiled; no work was submitted.
+    Compile(CompileError),
+    /// The oldest frame is still outstanding; no new work was recorded or
+    /// submitted and its completion token remains in the pacer for retry.
+    CompletionUnconfirmed,
+    /// This device generation has exhausted its strictly increasing values.
+    /// No allocation, recording, pacing wait, or submission was performed.
+    CompletionValueExhausted,
+}
+
+impl From<CompileError> for SubmissionError {
+    fn from(error: CompileError) -> Self {
+        Self::Compile(error)
+    }
+}
+
+impl fmt::Display for SubmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Compile(error) => write!(f, "frame graph failed to compile: {error:?}"),
+            Self::CompletionUnconfirmed => {
+                f.write_str("oldest frame completion could not be confirmed")
+            }
+            Self::CompletionValueExhausted => {
+                f.write_str("device generation completion values are exhausted")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SubmissionError {}
 
 /// Why a [`RenderRuntime`] could not be brought up.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -102,6 +142,10 @@ pub enum FrameError {
     Surface(SurfaceError),
     /// The frame graph failed to compile; no GPU work was submitted.
     Compile(CompileError),
+    /// Pacing could not confirm completion; this frame was not submitted.
+    CompletionUnconfirmed,
+    /// This device generation has no remaining completion values.
+    CompletionValueExhausted,
 }
 
 impl fmt::Display for FrameError {
@@ -110,6 +154,12 @@ impl fmt::Display for FrameError {
             Self::NoSurface => f.write_str("no surface is configured for this runtime"),
             Self::Surface(error) => write!(f, "surface error while presenting: {error}"),
             Self::Compile(error) => write!(f, "frame graph failed to compile: {error:?}"),
+            Self::CompletionUnconfirmed => {
+                f.write_str("oldest frame completion could not be confirmed")
+            }
+            Self::CompletionValueExhausted => {
+                f.write_str("device generation completion values are exhausted")
+            }
         }
     }
 }
@@ -189,6 +239,10 @@ pub struct RenderRuntime<I: Instance + 'static> {
     /// Submission values used by render resources for precise retirement.
     submitted_value: AtomicU64,
     completed_value: Arc<AtomicU64>,
+    /// Installed on the first tracked submission. Retains a shutdown barrier
+    /// without requiring non-executing Instance implementations to implement
+    /// FrameSync. It also drains the old queue before device replacement.
+    submission_barrier: OnceLock<fn(&I::Queue) -> bool>,
     /// The window surface, once created.
     surface: Option<I::Surface>,
     /// Retains the owned OS window so a replacement backend surface can be
@@ -268,6 +322,7 @@ impl<I: Instance + 'static> RenderRuntime<I> {
             pacer: Mutex::new(FramePacer::new(max_in_flight)),
             submitted_value: AtomicU64::new(0),
             completed_value: Arc::new(AtomicU64::new(0)),
+            submission_barrier: OnceLock::new(),
             surface: None,
             surface_factory: None,
             surface_config: None,
@@ -536,6 +591,9 @@ impl<I: Instance + 'static> RenderRuntime<I> {
             .stage(&device, &queue)
             .map_err(RecoveryError::Replay)?;
         let replayed_resources = staged.count();
+        if let Some(wait_idle) = self.submission_barrier.get() {
+            let _ = wait_idle(&self.queue);
+        }
         staged.commit();
 
         let max_in_flight = self.max_frames_in_flight();
@@ -578,6 +636,7 @@ impl<I: Instance + 'static> RenderRuntime<I> {
     where
         F: FnOnce(&mut RenderGraph, TextureHandle),
         I::Queue: FrameSync,
+        I::Device: Send + Sync + 'static,
     {
         let acquired = {
             let surface = self.surface.as_ref().ok_or(FrameError::NoSurface)?;
@@ -622,7 +681,11 @@ impl<I: Instance + 'static> RenderRuntime<I> {
                 .as_ref()
                 .expect("surface checked above")
                 .discard(frame);
-            return Err(FrameError::Compile(error));
+            return Err(match error {
+                SubmissionError::Compile(error) => FrameError::Compile(error),
+                SubmissionError::CompletionUnconfirmed => FrameError::CompletionUnconfirmed,
+                SubmissionError::CompletionValueExhausted => FrameError::CompletionValueExhausted,
+            });
         }
 
         self.surface
@@ -660,7 +723,9 @@ impl<I: Instance + 'static> RenderRuntime<I> {
     ///
     /// The value is a planning hint for resources prepared before the frame
     /// is submitted. It becomes valid only after [`Self::execute_tracked`]
-    /// succeeds.
+    /// succeeds. At `u64::MAX` this hint saturates; a subsequent submission
+    /// returns [`SubmissionError::CompletionValueExhausted`] instead of reusing
+    /// a value. Device recovery starts a new generation with fresh values.
     #[must_use]
     pub fn next_completion_value(&self) -> u64 {
         self.submitted_value
@@ -684,44 +749,82 @@ impl<I: Instance + 'static> RenderRuntime<I> {
     ///
     /// # Errors
     ///
-    /// Returns [`CompileError`] when the graph fails to compile (a dependency
-    /// cycle); no GPU work is issued and the pacer is left untouched in that
-    /// case.
-    pub fn execute(&self, graph: RenderGraph) -> Result<(), CompileError>
+    /// Returns [`SubmissionError`] without recording or submitting work when
+    /// compilation fails or the oldest frame's completion cannot be confirmed.
+    pub fn execute(&self, graph: RenderGraph) -> Result<(), SubmissionError>
     where
         I::Queue: FrameSync,
+        I::Device: Send + Sync + 'static,
     {
         self.execute_tracked(graph).map(|_| ())
     }
 
     /// Executes and submits `graph`, returning its precise completion value.
-    pub fn execute_tracked(&self, graph: RenderGraph) -> Result<u64, CompileError>
+    pub fn execute_tracked(&self, graph: RenderGraph) -> Result<u64, SubmissionError>
     where
         I::Queue: FrameSync,
+        I::Device: Send + Sync + 'static,
     {
-        // Record the graph into a command buffer without submitting it, so the
-        // pacer can own the actual submission and receive its completion token.
-        let capture = capture::CapturingQueue::new(&self.queue);
-        graph.execute(&*self.device, &capture)?;
-        let commands = capture.take();
+        self.execute_owned(graph)
+            .map(|frame| frame.completion_value())
+    }
 
-        // Retire the oldest frame if the pipeline is full; this is the only
-        // place the CPU blocks on the GPU.
-        if let Some(oldest) = self.pacer().begin_frame() {
-            let _ = self.queue.wait_for(oldest.as_ref());
-        }
+    /// Submits a graph and returns an explicit owner for its physical resources.
+    ///
+    /// The real queue's callback retains a second owner until GPU completion.
+    /// Dropping the returned handle early therefore cannot destroy in-flight
+    /// resources. Retain it beyond completion to publish persistent history;
+    /// release it only after every later imported use has completed.
+    pub fn execute_owned(
+        &self,
+        graph: RenderGraph,
+    ) -> Result<FrameSubmission<I::Device>, SubmissionError>
+    where
+        I::Queue: FrameSync,
+        I::Device: Send + Sync + 'static,
+    {
+        // Compile before touching the pacer, then record directly. No fake
+        // queue, intercepted submission, command-buffer clone, or recompile.
+        let prepared = graph.prepare()?;
 
+        // Serialize pacing, recording, value assignment and actual submission:
+        // completion values must follow queue order even for concurrent callers.
+        // Wait before realization so saturated frames do not allocate early.
+        let mut pacer = self.pacer();
         let value = self
             .submitted_value
-            .fetch_add(1, AtomicOrdering::AcqRel)
-            .saturating_add(1);
-        let token = self.queue.submit_tracked(&commands);
-        self.pacer().record(token);
+            .load(AtomicOrdering::Acquire)
+            .checked_add(1)
+            .ok_or(SubmissionError::CompletionValueExhausted)?;
+        if let Some(oldest) = pacer.begin_frame() {
+            if !self.queue.wait_for(oldest.as_ref()) {
+                pacer.restore_oldest(oldest);
+                return Err(SubmissionError::CompletionUnconfirmed);
+            }
+        }
+        let recorded = prepared.record(&*self.device);
+        let (commands, _plan, allocations) = recorded.into_parts();
+
+        self.submitted_value.store(value, AtomicOrdering::Release);
+        self.submission_barrier
+            .get_or_init(|| <I::Queue as FrameSync>::wait_idle);
+        let frame = FrameSubmission::new(
+            value,
+            self.device_generation,
+            Arc::clone(&self.device),
+            allocations,
+        );
+        let token = self.queue.submit_tracked(core::slice::from_ref(&commands));
+        pacer.record(token);
+        drop(pacer);
         let completed = Arc::clone(&self.completed_value);
+        let completion_owner = frame.clone();
         self.queue.on_submitted_work_done(Box::new(move || {
+            completion_owner.mark_complete();
+            drop(completion_owner);
             completed.fetch_max(value, AtomicOrdering::Release);
         }));
-        Ok(value)
+        Ok(frame)
     }
 
     /// Blocks until every outstanding frame has completed, leaving the pacer
@@ -733,14 +836,35 @@ impl<I: Instance + 'static> RenderRuntime<I> {
     where
         I::Queue: FrameSync,
     {
-        let outstanding: Vec<CompletionToken> = self.pacer().drain().collect();
-        let all_confirmed = outstanding
-            .iter()
-            .all(|token| self.queue.wait_for(token.as_ref()));
+        let mut pacer = self.pacer();
+        let outstanding: Vec<CompletionToken> = pacer.drain().collect();
+        let mut unconfirmed = Vec::new();
+        for token in outstanding {
+            if !self.queue.wait_for(token.as_ref()) {
+                unconfirmed.push(token);
+            }
+        }
         // Always reach for the queue-wide barrier too: it also covers work the
         // runtime did not submit through `execute`.
         let idle = self.queue.wait_idle();
-        all_confirmed && idle
+        if !idle {
+            for token in unconfirmed {
+                pacer.record(token);
+            }
+        }
+        idle
+    }
+}
+
+impl<I: Instance + 'static> Drop for RenderRuntime<I> {
+    fn drop(&mut self) {
+        // A registered callback owns allocations and its creating device. Drive
+        // the queue to completion before dropping its last runtime handle, so
+        // normal teardown does not leave callbacks retaining a device cycle.
+        // Failed waits do not authorize early resource destruction.
+        if let Some(wait_idle) = self.submission_barrier.get() {
+            let _ = wait_idle(&self.queue);
+        }
     }
 }
 

@@ -80,7 +80,7 @@ pub use access::{full_range, BufferUse, TextureUse};
 pub use blackboard::Blackboard;
 pub use builder::{ExecuteContext, PassBuilder};
 pub use desc::{BufferDesc, SizeClass, TextureDesc};
-pub use graph::{ExecuteFn, RenderGraph};
+pub use graph::{ExecuteFn, GraphAllocations, PreparedGraph, RecordedGraph, RenderGraph};
 pub use handle::{
     BufferHandle, BufferMarker, ResourceHandle, ResourceIndex, TextureHandle, TextureMarker,
 };
@@ -88,8 +88,8 @@ pub use pass::{
     BufferAccessRecord, PassFlags, PassKind, PassNode, TextureAccessRecord, ThreadBound,
 };
 pub use plan::{
-    AliasPlan, AliasSlot, ColorAttachmentPlan, CompileError, DepthAttachmentPlan, ExecutionPlan,
-    GraphBarrier, LogicalBarrier, LogicalResource, RasterAttachments,
+    AliasPlan, AliasSlot, ColorAttachmentPlan, CompileError, CompiledAccess, DepthAttachmentPlan,
+    ExecutionPlan, GraphBarrier, LogicalBarrier, LogicalResource, RasterAttachments,
 };
 pub use resource::{
     BufferResource, ImportedBuffer, ImportedTexture, Lifetime, RealizedTexture, TextureResource,
@@ -103,3 +103,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../text/unit/compiler.rs"]
 mod compiler_tests;
+
+#[cfg(test)]
+#[path = "../text/unit/recording.rs"]
+mod recording_tests;

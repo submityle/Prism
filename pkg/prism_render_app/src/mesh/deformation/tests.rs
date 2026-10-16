@@ -513,8 +513,9 @@ fn deformed_current_and_previous_are_vertex_inputs_for_a_real_gpu_draw() {
             ctx.draw(0..6, 0..1);
         }
     });
-    graph.execute(device, queue).unwrap();
+    let recorded = graph.execute(device, queue).unwrap();
     assert!(runtime.wait_idle());
+    recorded.release(device);
     let pixels = queue.read_texture_rgba8(texture, 16, 16);
     let pixel = |x: usize, y: usize| &pixels[(y * 16 + x) * 4..(y * 16 + x + 1) * 4];
     assert_eq!(

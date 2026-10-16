@@ -92,6 +92,14 @@ pub enum CatalogError {
         pass: PassKey,
         resource: ResourceKey,
     },
+    InvalidResourceInput {
+        pass: PassKey,
+        resource: ResourceKey,
+    },
+    InvalidDependency {
+        pass: PassKey,
+        dependency: PassKey,
+    },
     UnsupportedQueueAccess {
         pass: PassKey,
         queue: QueueClass,
@@ -200,6 +208,7 @@ impl FeatureCatalog {
                 }
                 let mut local_passes = BTreeSet::new();
                 let mut writes = BTreeSet::new();
+                let mut writer_inputs = BTreeMap::new();
                 for pass in variant.passes {
                     if !local_passes.insert(pass.id) {
                         return Err(CatalogError::DuplicatePass {
@@ -214,6 +223,16 @@ impl FeatureCatalog {
                     } else {
                         pass_keys.insert(pass.id, (feature.id, pass));
                     }
+                    let mut dependencies = BTreeSet::new();
+                    for &dependency in pass.depends_on {
+                        if dependency == pass.id || !dependencies.insert(dependency) {
+                            return Err(CatalogError::InvalidDependency {
+                                pass: pass.id,
+                                dependency,
+                            });
+                        }
+                    }
+                    let mut pass_writes = BTreeSet::new();
                     for usage in pass.accesses {
                         if (pass.queue == QueueClass::Transfer
                             && !matches!(
@@ -232,6 +251,14 @@ impl FeatureCatalog {
                             });
                         }
                         catalog.validate_resource(usage.key)?;
+                        if let ResourceInput::ProducedBy(producer) = usage.input
+                            && (producer == pass.id || usage.frame_lag.is_some())
+                        {
+                            return Err(CatalogError::InvalidResourceInput {
+                                pass: pass.id,
+                                resource: usage.key,
+                            });
+                        }
                         if usage.access.writes() {
                             if usage.frame_lag.is_some() {
                                 return Err(CatalogError::HistoryWrite {
@@ -240,13 +267,42 @@ impl FeatureCatalog {
                                     resource: usage.key,
                                 });
                             }
-                            if !writes.insert(usage.key) {
+                            if !pass_writes.insert(usage.key) {
                                 return Err(CatalogError::AmbiguousWriter {
                                     feature: feature.id,
                                     variant: variant.id,
                                     resource: usage.key,
                                 });
                             }
+                            writes.insert(usage.key);
+                            writer_inputs.entry(usage.key).or_insert_with(Vec::new)
+                                .push(usage.input);
+                        }
+                    }
+                }
+                for (resource, inputs) in writer_inputs {
+                    if inputs.len() <= 1 {
+                        continue;
+                    }
+                    let mut predecessors = BTreeSet::new();
+                    for input in inputs {
+                        let predecessor = match input {
+                            ResourceInput::Automatic => {
+                                return Err(CatalogError::AmbiguousWriter {
+                                    feature: feature.id,
+                                    variant: variant.id,
+                                    resource,
+                                });
+                            }
+                            ResourceInput::Initial => None,
+                            ResourceInput::ProducedBy(pass) => Some(pass),
+                        };
+                        if !predecessors.insert(predecessor) {
+                            return Err(CatalogError::AmbiguousWriter {
+                                feature: feature.id,
+                                variant: variant.id,
+                                resource,
+                            });
                         }
                     }
                 }

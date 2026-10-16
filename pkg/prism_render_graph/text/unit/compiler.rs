@@ -2,12 +2,12 @@
 use crate::capacity::GraphLimits;
 use crate::compile::kernel::{self, Access, AllocationRequest};
 use crate::frame_graph::{
-    AccessKind, GpuFrameGraphBuilder, PassDescriptor, PassId, QueueClass, ResourceAccess,
-    ResourceDescriptor, ResourceId, ResourceLifetime,
+    AccessInput, AccessKind, GpuFrameGraphBuilder, PassDescriptor, PassId, QueueBatch, QueueClass,
+    ResourceAccess, ResourceDescriptor, ResourceId, ResourceLifetime,
 };
 use crate::{
-    Blackboard, BufferDesc, BufferHandle, BufferUse, CompileError, PassBuilder, PassFlags,
-    PassKind, RenderGraph, ResourceIndex,
+    Blackboard, BufferDesc, BufferHandle, BufferUse, CompileError, CompiledAccess, LogicalBarrier,
+    LogicalResource, PassBuilder, PassFlags, PassKind, RenderGraph, ResourceIndex,
 };
 use alloc::collections::BTreeSet;
 use prism_render_driver::{BufferUsages, Extent3d};
@@ -33,6 +33,10 @@ fn pass(
         accesses,
         depends_on,
     }
+}
+
+fn access(resource: ResourceId, kind: AccessKind) -> ResourceAccess {
+    ResourceAccess { resource, kind }
 }
 
 /// Exercise natural handle bounds without allocating enormous resource tables.
@@ -203,24 +207,26 @@ fn declaration_versions_follow_dependencies_before_deriving_hazards() {
         ));
     }
     let compiled = graph.compile().unwrap();
-    assert_eq!(compiled.order, [0, 1, 2]);
+    assert_eq!(compiled.order, [2, 1, 0]);
     assert_eq!(compiled.declared_pass_count, 3);
+    assert_eq!(compiled.alive, [true; 3]);
+    assert_eq!(compiled.position_by_pass, [Some(2), Some(1), Some(0)]);
     assert_eq!(
         compiled
             .logical_barriers
             .iter()
             .map(|barrier| (barrier.source, barrier.destination))
             .collect::<Vec<_>>(),
-        [(0, 1), (1, 2)]
+        [(1, 0), (2, 1)]
     );
     assert!(compiled
         .logical_barriers
         .iter()
-        .any(|b| b.source == 0 && b.destination == 1));
+        .any(|b| b.source == 2 && b.destination == 1));
     assert!(compiled
         .logical_barriers
         .iter()
-        .any(|b| b.source == 1 && b.destination == 2));
+        .any(|b| b.source == 1 && b.destination == 0));
     assert_eq!(compiled.alias.heap_size, 256);
 }
 
@@ -253,16 +259,1194 @@ fn declaration_forward_war_and_unconstrained_ties_are_stable() {
             vec![],
         ));
         let compiled = graph.compile().unwrap();
-        assert_eq!(compiled.order, [0, 1]);
+        let expected = if forward { [1, 0] } else { [0, 1] };
+        assert_eq!(compiled.order, expected);
         assert_eq!(compiled.logical_barriers.len(), 1);
         let barrier = compiled.logical_barriers[0];
         assert_eq!(
             (barrier.source, barrier.destination, barrier.queue_transfer,),
-            (0, 1, true)
+            (expected[0], expected[1], true)
         );
         assert!(barrier.queue_transfer);
         assert_eq!(compiled.queue_batches[1].waits_for, [0]);
         assert_eq!(compiled.alias.heap_size, 0);
+    }
+}
+
+/// Regression: lowering visits producer (1) before consumer (0), but those
+/// temporary setup indices must never become the public declaration PassIds.
+#[test]
+fn declaration_indices_reverse_control_dependency() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    let consumer = graph.add_pass(pass(
+        "consumer",
+        QueueClass::Transfer,
+        vec![],
+        vec![PassId(1)],
+    ));
+    let producer = graph.add_pass(pass("producer", QueueClass::Compute, vec![], vec![]));
+    let plan = graph.compile().unwrap();
+
+    // Before the fix these were [0, 1] and [Some(0), Some(1)], naming
+    // the consumer as the producer even though no resource hazard exists.
+    assert_eq!(plan.order, [producer.0 as usize, consumer.0 as usize]);
+    assert_eq!(plan.declared_pass_count, 2);
+    assert_eq!(plan.alive, [true, true]);
+    assert_eq!(plan.position_by_pass, [Some(1), Some(0)]);
+    assert_eq!(plan.position(consumer.0 as usize), Some(1));
+    assert_eq!(plan.position(producer.0 as usize), Some(0));
+    assert!(plan.is_alive(consumer.0 as usize));
+    assert!(!plan.is_alive(2));
+    assert_eq!(plan.position(2), None);
+    assert!(plan.logical_barriers.is_empty());
+    assert_eq!(plan.attachments, [None, None]);
+    assert_eq!(plan.barriers.len(), 2);
+    assert!(plan.barriers.iter().all(Vec::is_empty));
+    assert_eq!(
+        plan.queue_batches,
+        [
+            QueueBatch {
+                queue: QueueClass::Compute,
+                pass_range: 0..1,
+                waits_for: vec![],
+            },
+            QueueBatch {
+                queue: QueueClass::Transfer,
+                pass_range: 1..2,
+                waits_for: vec![0],
+            },
+        ]
+    );
+    assert_eq!(graph.compile().unwrap(), plan);
+    assert_eq!(graph.passes()[consumer.0 as usize].name, "consumer");
+    assert_eq!(graph.passes()[consumer.0 as usize].depends_on, [producer]);
+}
+
+/// Multiple forward edges exercise both directions of the temporary mapping;
+/// independent ready passes still use the original declaration ID tie-break.
+#[test]
+fn declaration_indices_control_fanin_and_ready_ties() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    for descriptor in [
+        pass(
+            "sink",
+            QueueClass::Graphics,
+            vec![],
+            vec![PassId(1), PassId(2)],
+        ),
+        pass("branch", QueueClass::Transfer, vec![], vec![PassId(3)]),
+        pass("independent", QueueClass::Graphics, vec![], vec![]),
+        pass("source", QueueClass::Compute, vec![], vec![]),
+    ] {
+        graph.add_pass(descriptor);
+    }
+    let plan = graph.compile().unwrap();
+    assert_eq!(plan.order, [2, 3, 1, 0]);
+    assert_eq!(plan.position_by_pass, [Some(3), Some(2), Some(0), Some(1)]);
+    assert_eq!(plan.alive, [true; 4]);
+    assert!(plan.logical_barriers.is_empty());
+    for (position, &index) in plan.order.iter().enumerate() {
+        assert_eq!(plan.position(index), Some(position));
+        for &dependency in &graph.passes()[index].depends_on {
+            assert!(plan.position(dependency.0 as usize).unwrap() < position);
+        }
+    }
+    assert_eq!(
+        plan.queue_batches,
+        [
+            QueueBatch {
+                queue: QueueClass::Graphics,
+                pass_range: 0..1,
+                waits_for: vec![],
+            },
+            QueueBatch {
+                queue: QueueClass::Compute,
+                pass_range: 1..2,
+                waits_for: vec![],
+            },
+            QueueBatch {
+                queue: QueueClass::Transfer,
+                pass_range: 2..3,
+                waits_for: vec![1],
+            },
+            QueueBatch {
+                queue: QueueClass::Graphics,
+                pass_range: 3..4,
+                waits_for: vec![0, 2],
+            },
+        ]
+    );
+}
+
+/// Resource IDs, normalized access ordinals and scheduled-position metadata
+/// are separate namespaces from original PassIds and must not be remapped.
+#[test]
+fn declaration_indices_mixed_resources_preserve_hazards_and_schedule_metadata() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    let buffer = graph.add_resource(resource(256, 256));
+    let texture = graph.add_resource(resource(4, 256));
+    graph.add_resource(resource(64, 256)); // Unused buffer, not a pass slot.
+    for descriptor in [
+        pass(
+            "consumer",
+            QueueClass::Graphics,
+            vec![
+                ResourceAccess {
+                    resource: buffer,
+                    kind: AccessKind::StorageRead,
+                },
+                ResourceAccess {
+                    resource: texture,
+                    kind: AccessKind::SampledRead,
+                },
+            ],
+            vec![PassId(2)],
+        ),
+        pass(
+            "overwrite",
+            QueueClass::Compute,
+            vec![
+                ResourceAccess {
+                    resource: buffer,
+                    kind: AccessKind::StorageWrite,
+                },
+                ResourceAccess {
+                    resource: texture,
+                    kind: AccessKind::StorageWrite,
+                },
+            ],
+            vec![PassId(0)],
+        ),
+        pass(
+            "producer",
+            QueueClass::Graphics,
+            vec![
+                ResourceAccess {
+                    resource: buffer,
+                    kind: AccessKind::StorageWrite,
+                },
+                ResourceAccess {
+                    resource: texture,
+                    kind: AccessKind::ColorAttachment,
+                },
+            ],
+            vec![],
+        ),
+    ] {
+        graph.add_pass(descriptor);
+    }
+    let plan = graph.compile().unwrap();
+    assert_eq!(plan.order, [2, 0, 1]);
+    assert_eq!(plan.position_by_pass, [Some(1), Some(2), Some(0)]);
+    assert_eq!(plan.alive, [true; 3]);
+    assert_eq!(plan.logical_barriers.len(), 6);
+    for (source, destination, queue_transfer) in [(2, 0, false), (2, 1, true), (0, 1, true)] {
+        for (resource, ordinal) in [
+            (LogicalResource::Texture(ResourceIndex(0)), 0),
+            (LogicalResource::Buffer(ResourceIndex(0)), 1),
+        ] {
+            assert!(plan.logical_barriers.contains(&LogicalBarrier {
+                resource,
+                source,
+                destination,
+                before: ordinal,
+                after: ordinal,
+                queue_transfer,
+            }));
+        }
+    }
+    assert_eq!(plan.used_textures, [true]);
+    assert_eq!(plan.used_buffers, [true, false]);
+    assert_eq!(plan.alias.texture_slots.len(), 1);
+    assert!(plan.alias.texture_slots[0].is_some());
+    assert_eq!(plan.alias.buffer_slots.len(), 2);
+    assert!(plan.alias.buffer_slots[0].is_some());
+    assert_eq!(plan.alias.buffer_slots[1], None);
+    let producer_attachments = plan.attachments[plan.position(2).unwrap()]
+        .as_ref()
+        .unwrap();
+    assert_eq!(producer_attachments.colors.len(), 1);
+    assert_eq!(producer_attachments.colors[0].resource, ResourceIndex(0));
+    assert_eq!(producer_attachments.colors[0].output_version, 1);
+    assert_eq!(
+        producer_attachments.colors[0].store,
+        prism_render_driver::StoreOp::Store
+    );
+    assert_eq!(plan.attachments[plan.position(0).unwrap()], None);
+    assert_eq!(plan.attachments[plan.position(1).unwrap()], None);
+
+    // An identity-ordered declaration must produce identical positional and
+    // resource-indexed metadata, without post-processing any plan fields.
+    let mut forward = GpuFrameGraphBuilder::default();
+    for descriptor in graph.resources() {
+        forward.add_resource(descriptor.clone());
+    }
+    for (index, depends_on) in [(2, vec![]), (0, vec![PassId(0)]), (1, vec![PassId(1)])] {
+        forward.add_pass(PassDescriptor {
+            depends_on,
+            ..graph.passes()[index].clone()
+        });
+    }
+    let identity = forward.compile().unwrap();
+    assert_eq!(identity.order, [0, 1, 2]);
+    assert_eq!(identity.position_by_pass, [Some(0), Some(1), Some(2)]);
+    assert_eq!(plan.barriers, identity.barriers);
+    assert_eq!(plan.final_barriers, identity.final_barriers);
+    assert_eq!(plan.attachments, identity.attachments);
+    assert_eq!(plan.queue_batches, identity.queue_batches);
+    assert_eq!(plan.alias, identity.alias);
+    assert_eq!(plan.used_textures, identity.used_textures);
+    assert_eq!(plan.used_buffers, identity.used_buffers);
+}
+
+/// The preliminary solve reports original IDs even when the first blocked
+/// declaration is downstream of the cycle, not a cycle member itself.
+#[test]
+fn declaration_indices_cycle_diagnostics_name_original_passes() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    for descriptor in [
+        pass("downstream", QueueClass::Transfer, vec![], vec![PassId(2)]),
+        pass("independent", QueueClass::Graphics, vec![], vec![]),
+        pass("cycle-tail", QueueClass::Compute, vec![], vec![PassId(3)]),
+        pass("cycle-head", QueueClass::Graphics, vec![], vec![PassId(2)]),
+    ] {
+        graph.add_pass(descriptor);
+    }
+    let CompileError::Cycle {
+        unscheduled,
+        blocked,
+        cycle,
+        names,
+    } = graph.compile().unwrap_err()
+    else {
+        panic!("expected declaration dependency cycle");
+    };
+    assert_eq!(unscheduled, 3);
+    assert_eq!(blocked, [0, 2, 3]);
+    assert_eq!(cycle.len(), 3);
+    assert_eq!(cycle.first(), cycle.last());
+    assert!(!cycle.contains(&0));
+    assert!(!cycle.contains(&1));
+    assert_eq!(cycle.len(), names.len());
+    for (&index, name) in cycle.iter().zip(&names) {
+        assert_eq!(graph.passes()[index].name.as_ref(), name);
+    }
+    for edge in cycle.windows(2) {
+        assert!(graph.passes()[edge[1]]
+            .depends_on
+            .contains(&PassId(edge[0] as u32)));
+    }
+}
+
+/// Admission errors must name the original declaring pass, even when earlier
+/// declarations have forward dependencies and would lower in a different order.
+#[test]
+fn declaration_indices_invalid_declarations_keep_original_ids() {
+    for dependency in [PassId(1), PassId(9)] {
+        let mut graph = GpuFrameGraphBuilder::default();
+        graph.add_pass(pass(
+            "consumer",
+            QueueClass::Graphics,
+            vec![],
+            vec![PassId(2)],
+        ));
+        graph.add_pass(pass(
+            "invalid",
+            QueueClass::Compute,
+            vec![],
+            vec![dependency],
+        ));
+        graph.add_pass(pass("producer", QueueClass::Transfer, vec![], vec![]));
+        assert_eq!(
+            graph.compile(),
+            Err(CompileError::InvalidDependency {
+                pass: PassId(1),
+                dependency
+            })
+        );
+    }
+    let mut graph = GpuFrameGraphBuilder::default();
+    graph.add_pass(pass(
+        "consumer",
+        QueueClass::Graphics,
+        vec![],
+        vec![PassId(2)],
+    ));
+    graph.add_pass(pass(
+        "invalid-resource",
+        QueueClass::Compute,
+        vec![ResourceAccess {
+            resource: ResourceId(9),
+            kind: AccessKind::StorageRead,
+        }],
+        vec![],
+    ));
+    graph.add_pass(pass("producer", QueueClass::Transfer, vec![], vec![]));
+    assert_eq!(
+        graph.compile(),
+        Err(CompileError::InvalidResource {
+            pass: PassId(1),
+            resource: ResourceId(9)
+        })
+    );
+}
+
+#[test]
+fn declaration_indices_empty_graph_is_unchanged() {
+    let plan = GpuFrameGraphBuilder::default().compile().unwrap();
+    assert_eq!(plan, crate::ExecutionPlan::default());
+}
+
+/// Control admission reuses the compiler's ordering and diagnostics without
+/// lowering resources or deriving a second SSA solution.
+#[test]
+fn declaration_dependency_order_matches_empty_access_compilation() {
+    for dependencies in [
+        vec![],
+        vec![vec![]],
+        vec![vec![PassId(1)], vec![PassId(2)], vec![]],
+        vec![vec![PassId(2), PassId(3)], vec![], vec![PassId(3)], vec![]],
+        vec![vec![PassId(1)], vec![PassId(0)], vec![PassId(1)]],
+        vec![vec![PassId(0)]],
+        vec![vec![PassId(9)]],
+    ] {
+        let mut graph = GpuFrameGraphBuilder::default();
+        for (index, dependencies) in dependencies.into_iter().enumerate() {
+            let mut descriptor = pass("control", QueueClass::Compute, vec![], dependencies);
+            descriptor.name = alloc::format!("control-{index}").into();
+            graph.add_pass(descriptor);
+        }
+        assert_eq!(
+            graph.dependency_order(),
+            graph.compile().map(|plan| plan
+                .order
+                .into_iter()
+                .map(|id| PassId(id as u32))
+                .collect::<Vec<_>>())
+        );
+    }
+    let mut graph = GpuFrameGraphBuilder::default();
+    graph.add_pass(pass(
+        "not-lowered",
+        QueueClass::Compute,
+        vec![access(ResourceId(99), AccessKind::StorageWrite)],
+        vec![],
+    ));
+    assert_eq!(graph.dependency_order().unwrap(), [PassId(0)]);
+    assert!(matches!(
+        graph.compile(),
+        Err(CompileError::InvalidResource { .. })
+    ));
+}
+
+/// Source columns are declaration ordinals, even when texture normalization
+/// reverses their order. References also admit forward-declared producers.
+#[test]
+fn declaration_sources_match_numeric_authority_metadata_with_reverse_ids() {
+    let make = |numeric: bool| {
+        let mut graph = GpuFrameGraphBuilder::default();
+        let buffer = graph.add_resource(resource(256, 256));
+        let texture = graph.add_resource(resource(4, 256));
+        for descriptor in [
+            pass(
+                "reader",
+                QueueClass::Graphics,
+                vec![
+                    access(buffer, AccessKind::StorageRead),
+                    access(texture, AccessKind::SampledRead),
+                ],
+                if numeric {
+                    vec![PassId(1), PassId(3)]
+                } else {
+                    vec![]
+                },
+            ),
+            pass(
+                "second-buffer-write",
+                QueueClass::Compute,
+                vec![access(buffer, AccessKind::StorageWrite)],
+                if numeric { vec![PassId(3)] } else { vec![] },
+            ),
+            pass(
+                "stale-overwrite",
+                QueueClass::Graphics,
+                vec![
+                    access(buffer, AccessKind::StorageWrite),
+                    access(texture, AccessKind::ColorAttachment),
+                ],
+                vec![PassId(3)],
+            ),
+            pass(
+                "producer",
+                QueueClass::Graphics,
+                vec![
+                    access(buffer, AccessKind::StorageWrite),
+                    access(texture, AccessKind::ColorAttachment),
+                ],
+                vec![],
+            ),
+        ] {
+            graph.add_pass(descriptor);
+        }
+        graph
+    };
+    let source = |pass, access| AccessInput::ProducedBy {
+        pass: PassId(pass),
+        access,
+    };
+    let graph = make(false);
+    let inputs = [
+        vec![source(1, 0), source(3, 1)],
+        vec![source(3, 0)],
+        vec![AccessInput::Version(0); 2],
+        vec![AccessInput::Version(0); 2],
+    ];
+    let plan = graph.compile_with_sources(&inputs).unwrap();
+    assert_eq!(plan.order, [3, 1, 0, 2]);
+    assert_eq!(plan.position_by_pass, [Some(2), Some(1), Some(3), Some(0)]);
+    assert_eq!(
+        plan.accesses[0][0].resource,
+        LogicalResource::Texture(ResourceIndex(0))
+    );
+    assert_eq!(
+        plan.accesses[0][1].resource,
+        LogicalResource::Buffer(ResourceIndex(0))
+    );
+    assert_eq!(
+        plan.accesses[0][0].input_version,
+        plan.accesses[3][0].output_version.unwrap()
+    );
+    assert_eq!(
+        plan.accesses[0][1].input_version,
+        plan.accesses[1][0].output_version.unwrap()
+    );
+    assert_eq!(plan.accesses[2][1].input_version, 0);
+    assert_eq!(plan.accesses[2][1].output_version, Some(3));
+    let numeric: Vec<Vec<u32>> = plan
+        .accesses
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let columns = if index == 1 { vec![0] } else { vec![1, 0] };
+            columns
+                .into_iter()
+                .map(|column| row[column].input_version)
+                .collect()
+        })
+        .collect();
+    assert_eq!(make(true).compile_with_inputs(&numeric).unwrap(), plan);
+    assert_eq!(graph.compile_with_sources(&inputs).unwrap(), plan);
+}
+
+/// A producer may have several writes to one resource; the source identifies
+/// the exact accessor result rather than the producer's final resource handle.
+#[test]
+fn declaration_sources_use_exact_write_access_and_keep_older_inputs() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    let r = graph.add_resource(resource(256, 256));
+    graph.add_pass(pass(
+        "latest-reader",
+        QueueClass::Compute,
+        vec![access(r, AccessKind::StorageRead)],
+        vec![],
+    ));
+    graph.add_pass(pass(
+        "producer",
+        QueueClass::Compute,
+        vec![
+            access(r, AccessKind::StorageWrite),
+            access(r, AccessKind::StorageRead),
+            access(r, AccessKind::StorageWrite),
+        ],
+        vec![],
+    ));
+    let plan = graph
+        .compile_with_sources(&[
+            vec![AccessInput::ProducedBy {
+                pass: PassId(1),
+                access: 2,
+            }],
+            vec![AccessInput::Version(0); 3],
+        ])
+        .unwrap();
+    assert_eq!(plan.order, [1, 0]);
+    assert_eq!(
+        plan.accesses[0][0].input_version,
+        plan.accesses[1][2].output_version.unwrap()
+    );
+    assert_eq!(plan.accesses[1][1].input_version, 0);
+    assert_eq!(plan.accesses[1][0].output_version, Some(1));
+    assert_eq!(plan.accesses[1][2].output_version, Some(2));
+}
+
+#[test]
+fn declaration_sources_reject_invalid_producer_identities() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    let r = graph.add_resource(resource(256, 256));
+    let other = graph.add_resource(resource(256, 256));
+    graph.add_pass(pass(
+        "reader",
+        QueueClass::Compute,
+        vec![access(r, AccessKind::StorageRead)],
+        vec![],
+    ));
+    graph.add_pass(pass(
+        "source",
+        QueueClass::Compute,
+        vec![
+            access(r, AccessKind::StorageRead),
+            access(other, AccessKind::StorageWrite),
+            access(r, AccessKind::StorageWrite),
+        ],
+        vec![],
+    ));
+    for (producer, producer_access, reason) in [
+        (PassId(9), 0, "producer access does not exist"),
+        (PassId(1), usize::MAX, "producer access does not exist"),
+        (PassId(0), 0, "producer must be a different pass"),
+        (PassId(1), 0, "producer access is not a write"),
+        (PassId(1), 1, "producer uses a different resource"),
+    ] {
+        assert_eq!(
+            graph.compile_with_sources(&[
+                vec![AccessInput::ProducedBy {
+                    pass: producer,
+                    access: producer_access
+                }],
+                vec![AccessInput::Version(0); 3],
+            ]),
+            Err(CompileError::InvalidInputSource {
+                pass: PassId(0),
+                access: 0,
+                producer,
+                producer_access,
+                reason,
+            })
+        );
+    }
+}
+
+#[test]
+fn declaration_sources_validate_shape_and_numeric_future_inputs() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    let r = graph.add_resource(resource(256, 256));
+    graph.add_pass(pass(
+        "write",
+        QueueClass::Compute,
+        vec![access(r, AccessKind::StorageWrite)],
+        vec![],
+    ));
+    assert_eq!(
+        graph.compile_with_sources(&[]),
+        Err(CompileError::InvalidInputShape {
+            pass: None,
+            expected: 1,
+            actual: 0,
+        })
+    );
+    assert_eq!(
+        graph.compile_with_sources(&[vec![]]),
+        Err(CompileError::InvalidInputShape {
+            pass: Some(PassId(0)),
+            expected: 1,
+            actual: 0,
+        })
+    );
+    assert_eq!(
+        graph.compile_with_sources(&[vec![AccessInput::Version(1)]]),
+        graph.compile_with_inputs(&[vec![1]])
+    );
+    assert!(matches!(
+        graph.compile_with_sources(&[vec![AccessInput::Version(1)]]),
+        Err(CompileError::InvalidHandle { version: 1, .. })
+    ));
+    assert_eq!(
+        GpuFrameGraphBuilder::default()
+            .compile_with_sources(&[])
+            .unwrap(),
+        crate::ExecutionPlan::default()
+    );
+}
+
+#[test]
+fn declaration_sources_and_control_edges_share_original_cycle_diagnostics() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    let r = graph.add_resource(resource(256, 256));
+    graph.add_pass(pass(
+        "control-consumer",
+        QueueClass::Compute,
+        vec![access(r, AccessKind::StorageWrite)],
+        vec![PassId(1)],
+    ));
+    graph.add_pass(pass(
+        "source-consumer",
+        QueueClass::Compute,
+        vec![access(r, AccessKind::StorageWrite)],
+        vec![],
+    ));
+    let Err(CompileError::Cycle {
+        blocked,
+        cycle,
+        names,
+        ..
+    }) = graph.compile_with_sources(&[
+        vec![AccessInput::Version(0)],
+        vec![AccessInput::ProducedBy {
+            pass: PassId(0),
+            access: 0,
+        }],
+    ])
+    else {
+        panic!("expected a mixed control/source cycle")
+    };
+    assert_eq!(blocked, [0, 1]);
+    assert_eq!(cycle.first(), cycle.last());
+    assert_eq!(
+        names,
+        cycle
+            .iter()
+            .map(|&id| graph.passes()[id].name.clone().into_owned())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The input matrix chooses retained versions; physical writes remain globally
+/// monotonic even when their input is stale. Scheduling must not rewrite SSA.
+#[test]
+fn declaration_inputs_retained_read_and_stale_write() {
+    for overwrite_input in [0, 1] {
+        let mut graph = GpuFrameGraphBuilder::default();
+        let r = graph.add_resource(resource(256, 256));
+        for (name, queue, kind) in [
+            ("producer", QueueClass::Compute, AccessKind::StorageWrite),
+            ("overwrite", QueueClass::Compute, AccessKind::StorageWrite),
+            ("old-reader", QueueClass::Transfer, AccessKind::TransferRead),
+            (
+                "latest-reader",
+                QueueClass::Graphics,
+                AccessKind::StorageRead,
+            ),
+        ] {
+            graph.add_pass(pass(name, queue, vec![access(r, kind)], vec![]));
+        }
+        let implicit = graph.compile().unwrap();
+        assert_eq!(implicit.order, [0, 1, 2, 3]);
+        let inputs = [vec![0], vec![overwrite_input], vec![1], vec![2]];
+        let plan = graph.compile_with_inputs(&inputs).unwrap();
+        assert_eq!(plan.order, [0, 2, 1, 3]);
+        assert_eq!(plan.position_by_pass, [Some(0), Some(2), Some(1), Some(3)]);
+        assert_eq!(plan.alive, [true; 4]);
+        for (index, (input, output)) in [
+            (0, Some(1)),
+            (overwrite_input, Some(2)),
+            (1, None),
+            (2, None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                plan.accesses[index],
+                [CompiledAccess {
+                    resource: LogicalResource::Buffer(ResourceIndex(0)),
+                    input_version: input,
+                    output_version: output,
+                }]
+            );
+        }
+        assert_eq!(
+            plan.logical_barriers
+                .iter()
+                .map(|edge| (edge.source, edge.destination))
+                .collect::<Vec<_>>(),
+            [(0, 1), (0, 2), (1, 3), (2, 1)]
+        );
+        assert_eq!(plan.queue_batches[2].waits_for, [0, 1]);
+        assert_eq!(graph.compile_with_inputs(&inputs).unwrap(), plan);
+        let producer = |pass| AccessInput::ProducedBy {
+            pass: PassId(pass),
+            access: 0,
+        };
+        assert_eq!(
+            graph
+                .compile_with_sources(&[
+                    vec![AccessInput::Version(0)],
+                    vec![if overwrite_input == 0 {
+                        AccessInput::Version(0)
+                    } else {
+                        producer(0)
+                    }],
+                    vec![producer(0)],
+                    vec![producer(1)],
+                ])
+                .unwrap(),
+            plan
+        );
+        assert_eq!(graph.compile().unwrap(), implicit);
+    }
+}
+
+/// Both input rows and output rows retain original PassIds. Only output
+/// columns normalize texture/buffer namespaces, never the caller's matrix.
+#[test]
+fn declaration_inputs_mixed_resources_and_reverse_ids() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    let buffer = graph.add_resource(resource(256, 256));
+    let texture = graph.add_resource(resource(4, 256));
+    for descriptor in [
+        pass(
+            "reader",
+            QueueClass::Graphics,
+            vec![
+                access(buffer, AccessKind::StorageRead),
+                access(texture, AccessKind::SampledRead),
+            ],
+            vec![PassId(1)],
+        ),
+        pass(
+            "second-buffer-write",
+            QueueClass::Compute,
+            vec![access(buffer, AccessKind::StorageWrite)],
+            vec![PassId(3)],
+        ),
+        pass(
+            "stale-overwrite",
+            QueueClass::Graphics,
+            vec![
+                access(buffer, AccessKind::StorageWrite),
+                access(texture, AccessKind::ColorAttachment),
+            ],
+            vec![PassId(3)],
+        ),
+        pass(
+            "producer",
+            QueueClass::Graphics,
+            vec![
+                access(buffer, AccessKind::StorageWrite),
+                access(texture, AccessKind::ColorAttachment),
+            ],
+            vec![],
+        ),
+    ] {
+        graph.add_pass(descriptor);
+    }
+    let plan = graph
+        .compile_with_inputs(&[vec![2, 1], vec![1], vec![0, 0], vec![0, 0]])
+        .unwrap();
+    assert_eq!(plan.order, [3, 1, 0, 2]);
+    assert_eq!(plan.position_by_pass, [Some(2), Some(1), Some(3), Some(0)]);
+    let t = LogicalResource::Texture(ResourceIndex(0));
+    let b = LogicalResource::Buffer(ResourceIndex(0));
+    let compiled = |resource, input_version, output_version| CompiledAccess {
+        resource,
+        input_version,
+        output_version,
+    };
+    assert_eq!(
+        plan.accesses,
+        [
+            vec![compiled(t, 1, None), compiled(b, 2, None)],
+            vec![compiled(b, 1, Some(2))],
+            vec![compiled(t, 0, Some(2)), compiled(b, 0, Some(3))],
+            vec![compiled(t, 0, Some(1)), compiled(b, 0, Some(1))],
+        ]
+    );
+    for edge in &plan.logical_barriers {
+        assert_eq!(
+            plan.accesses[edge.source][edge.before].resource,
+            edge.resource
+        );
+        assert_eq!(
+            plan.accesses[edge.destination][edge.after].resource,
+            edge.resource
+        );
+        assert!(plan.position(edge.source).unwrap() < plan.position(edge.destination).unwrap());
+    }
+    for (id, version) in [(3, 1), (2, 2)] {
+        let attachment = &plan.attachments[plan.position(id).unwrap()]
+            .as_ref()
+            .unwrap()
+            .colors[0];
+        assert_eq!(attachment.output_version, version);
+        assert_eq!(attachment.resource, ResourceIndex(0));
+        assert!(matches!(
+            attachment.load,
+            prism_render_driver::LoadOp::Clear(_)
+        ));
+    }
+    // Swapping declaration columns is not silently interpreted as normalized
+    // texture-first inputs: the texture has no version 2 at this access.
+    assert_eq!(
+        graph.compile_with_inputs(&[vec![1, 2], vec![1], vec![0, 0], vec![0, 0]]),
+        Err(CompileError::InvalidHandle {
+            kind: "texture",
+            index: 0,
+            version: 2
+        })
+    );
+}
+
+#[test]
+fn declaration_inputs_reject_shape_mismatches_with_original_pass_ids() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    let r = graph.add_resource(resource(256, 256));
+    graph.add_pass(pass("empty", QueueClass::Graphics, vec![], vec![PassId(1)]));
+    graph.add_pass(pass(
+        "reader",
+        QueueClass::Compute,
+        vec![access(r, AccessKind::StorageRead)],
+        vec![],
+    ));
+    for rows in [0, 1, 3] {
+        assert_eq!(
+            graph.compile_with_inputs(&vec![vec![]; rows]),
+            Err(CompileError::InvalidInputShape {
+                pass: None,
+                expected: 2,
+                actual: rows
+            })
+        );
+    }
+    for (inputs, index, expected, actual) in [
+        (vec![vec![0], vec![0]], 0, 0, 1),
+        (vec![vec![], vec![]], 1, 1, 0),
+        (vec![vec![], vec![0, 0]], 1, 1, 2),
+    ] {
+        assert_eq!(
+            graph.compile_with_inputs(&inputs),
+            Err(CompileError::InvalidInputShape {
+                pass: Some(PassId(index)),
+                expected,
+                actual
+            })
+        );
+    }
+    let plan = graph.compile_with_inputs(&[vec![], vec![0]]).unwrap();
+    assert_eq!(plan.order, [1, 0]);
+    assert!(plan.accesses[0].is_empty());
+    assert_eq!(plan.accesses[1][0].input_version, 0);
+    assert_eq!(
+        GpuFrameGraphBuilder::default()
+            .compile_with_inputs(&[])
+            .unwrap(),
+        crate::ExecutionPlan::default()
+    );
+}
+
+/// A later producer cannot retroactively validate a future input, for reads
+/// or writes, in either resource namespace.
+#[test]
+fn declaration_inputs_reject_not_yet_existing_versions() {
+    for (kind, namespace) in [
+        (AccessKind::StorageRead, "buffer"),
+        (AccessKind::SampledRead, "texture"),
+    ] {
+        for first_kind in [kind, AccessKind::StorageWrite] {
+            let mut graph = GpuFrameGraphBuilder::default();
+            let r = graph.add_resource(resource(256, 256));
+            graph.add_pass(pass(
+                "future",
+                QueueClass::Compute,
+                vec![access(r, first_kind)],
+                vec![],
+            ));
+            graph.add_pass(pass(
+                "later-producer",
+                QueueClass::Graphics,
+                vec![access(r, AccessKind::StorageWrite), access(r, kind)],
+                vec![],
+            ));
+            assert_eq!(
+                graph.compile_with_inputs(&[vec![1], vec![0, 1]]),
+                Err(CompileError::InvalidHandle {
+                    kind: namespace,
+                    index: 0,
+                    version: 1
+                })
+            );
+        }
+    }
+}
+
+/// Within a pass, declared access order admits versions without creating
+/// self-hazards. Old reads do not roll back subsequent write allocation.
+#[test]
+fn declaration_inputs_same_pass_versions_follow_access_order() {
+    for read_kind in [AccessKind::StorageRead, AccessKind::SampledRead] {
+        let mut graph = GpuFrameGraphBuilder::default();
+        let r = graph.add_resource(resource(256, 256));
+        graph.add_pass(pass(
+            "intra-pass",
+            QueueClass::Graphics,
+            vec![
+                access(r, AccessKind::StorageWrite),
+                access(r, read_kind),
+                access(r, AccessKind::StorageWrite),
+                access(r, read_kind),
+            ],
+            vec![],
+        ));
+        let plan = graph.compile_with_inputs(&[vec![0, 0, 0, 2]]).unwrap();
+        assert_eq!(plan.order, [0]);
+        assert!(plan.logical_barriers.is_empty());
+        assert_eq!(
+            plan.accesses[0]
+                .iter()
+                .map(|a| (a.input_version, a.output_version))
+                .collect::<Vec<_>>(),
+            [(0, Some(1)), (0, None), (0, Some(2)), (2, None)]
+        );
+        let namespace = if read_kind == AccessKind::SampledRead {
+            "texture"
+        } else {
+            "buffer"
+        };
+        assert_eq!(
+            graph.compile_with_inputs(&[vec![0, 2, 0, 2]]),
+            Err(CompileError::InvalidHandle {
+                kind: namespace,
+                index: 0,
+                version: 2
+            })
+        );
+    }
+}
+
+/// The checked authority allocator reports capacity in both input modes;
+/// stale inputs must neither reset version allocation nor trigger a panic.
+#[test]
+fn declaration_inputs_version_capacity_is_fallible() {
+    for write_kind in [AccessKind::StorageWrite, AccessKind::ColorAttachment] {
+        for limit in [0, 1] {
+            let mut graph = GpuFrameGraphBuilder::with_limits(GraphLimits {
+                versions: limit,
+                ..Default::default()
+            });
+            let r = graph.add_resource(resource(256, 256));
+            for _ in 0..2 {
+                graph.add_pass(pass(
+                    "write",
+                    QueueClass::Graphics,
+                    vec![access(r, write_kind)],
+                    vec![],
+                ));
+            }
+            let expected = Err(CompileError::VersionOverflow {
+                version: limit,
+                limit,
+            });
+            assert_eq!(graph.compile_with_inputs(&[vec![0], vec![0]]), expected);
+            assert_eq!(
+                graph.compile_with_sources(&[
+                    vec![AccessInput::Version(0)],
+                    vec![AccessInput::ProducedBy {
+                        pass: PassId(0),
+                        access: 0
+                    }],
+                ]),
+                expected
+            );
+            assert_eq!(graph.compile(), expected);
+        }
+    }
+}
+
+/// Lowering succeeds, but a retained read of A conflicts with observing B's
+/// later writer. The final solver must report original IDs and real names.
+#[test]
+fn declaration_inputs_cycle_diagnostics_keep_original_ids() {
+    let mut graph = GpuFrameGraphBuilder::default();
+    let a = graph.add_resource(resource(256, 256));
+    let b = graph.add_resource(resource(256, 256));
+    for descriptor in [
+        pass(
+            "producer",
+            QueueClass::Compute,
+            vec![access(a, AccessKind::StorageWrite)],
+            vec![],
+        ),
+        pass(
+            "overwrite",
+            QueueClass::Compute,
+            vec![
+                access(a, AccessKind::StorageWrite),
+                access(b, AccessKind::StorageWrite),
+            ],
+            vec![],
+        ),
+        pass(
+            "old-reader",
+            QueueClass::Compute,
+            vec![
+                access(a, AccessKind::StorageRead),
+                access(b, AccessKind::StorageRead),
+            ],
+            vec![],
+        ),
+        pass(
+            "downstream",
+            QueueClass::Compute,
+            vec![access(a, AccessKind::StorageRead)],
+            vec![],
+        ),
+    ] {
+        graph.add_pass(descriptor);
+    }
+    let numeric_error = graph
+        .compile_with_inputs(&[vec![0], vec![1, 0], vec![1, 1], vec![2]])
+        .unwrap_err();
+    let producer = |pass, access| AccessInput::ProducedBy {
+        pass: PassId(pass),
+        access,
+    };
+    assert_eq!(
+        graph
+            .compile_with_sources(&[
+                vec![AccessInput::Version(0)],
+                vec![producer(0, 0), AccessInput::Version(0)],
+                vec![producer(0, 0), producer(1, 1)],
+                vec![producer(1, 0)],
+            ])
+            .unwrap_err(),
+        numeric_error
+    );
+    let CompileError::Cycle {
+        blocked,
+        cycle,
+        names,
+        ..
+    } = numeric_error
+    else {
+        panic!("expected a retained-version hazard cycle");
+    };
+    assert_eq!(blocked, [1, 2, 3]);
+    assert_eq!(cycle.len(), 3);
+    assert_eq!(cycle.first(), cycle.last());
+    assert!(!cycle.contains(&3));
+    assert!(cycle.contains(&1) && cycle.contains(&2));
+    for (&index, name) in cycle.iter().zip(&names) {
+        assert_eq!(graph.passes()[index].name.as_ref(), name);
+    }
+}
+
+#[test]
+fn executable_control_dependencies_preserve_edges_and_batch_waits() {
+    let mut graph = RenderGraph::new(Extent3d::new_2d(1, 1));
+    let producer = graph
+        .try_add_pass_with_dependencies(
+            "producer",
+            PassKind::Compute,
+            PassFlags::NEVER_CULL | PassFlags::ASYNC_COMPUTE,
+            vec![],
+            |_| |_: &mut crate::ExecuteContext<'_>| {},
+        )
+        .unwrap();
+    let consumer = graph
+        .try_add_pass_with_dependencies(
+            "consumer",
+            PassKind::Transfer,
+            PassFlags::NEVER_CULL,
+            vec![producer],
+            |_| |_: &mut crate::ExecuteContext<'_>| {},
+        )
+        .unwrap();
+    assert_eq!((producer, consumer), (0, 1));
+    let plan = graph.compile().unwrap();
+    assert_eq!(plan.order, [0, 1]);
+    assert_eq!(plan.alive, [true, true]);
+    assert_eq!(plan.accesses, [vec![], vec![]]);
+    assert!(plan.logical_barriers.is_empty());
+    assert_eq!(plan.queue_batches[1].waits_for, [0]);
+}
+
+#[test]
+fn executable_control_dependencies_reject_before_setup() {
+    let mut graph = RenderGraph::with_limits(
+        Extent3d::new_2d(1, 1),
+        GraphLimits {
+            passes: 2,
+            ..Default::default()
+        },
+    );
+    graph
+        .try_add_pass_with_dependencies(
+            "root",
+            PassKind::Compute,
+            PassFlags::NEVER_CULL,
+            vec![],
+            |_| |_: &mut crate::ExecuteContext<'_>| {},
+        )
+        .unwrap();
+    let called = core::cell::Cell::new(false);
+    for dependency in [1, 2, u32::MAX as usize] {
+        assert_eq!(
+            graph.try_add_pass_with_dependencies(
+                "invalid",
+                PassKind::Compute,
+                PassFlags::NEVER_CULL,
+                vec![dependency],
+                |_| {
+                    called.set(true);
+                    |_: &mut crate::ExecuteContext<'_>| {}
+                },
+            ),
+            Err(CompileError::InvalidDependency {
+                pass: PassId(1),
+                dependency: PassId(dependency as u32)
+            })
+        );
+        assert!(!called.get());
+        assert_eq!(graph.pass_count(), 1);
+    }
+    assert_eq!(
+        graph.try_add_pass_with_dependencies(
+            "too-many-dependencies",
+            PassKind::Compute,
+            PassFlags::NEVER_CULL,
+            vec![0, 0, 0],
+            |_| {
+                called.set(true);
+                |_: &mut crate::ExecuteContext<'_>| {}
+            },
+        ),
+        Err(CompileError::Capacity {
+            kind: "dependencies",
+            count: 3,
+            limit: 2
+        })
+    );
+    assert!(!called.get());
+    assert_eq!(graph.pass_count(), 1);
+}
+
+/// Compiled access rows describe admission, even when culling removes work.
+#[test]
+fn compiled_access_metadata_keeps_culled_rows() {
+    let mut graph = RenderGraph::new(Extent3d::new_2d(1, 1));
+    for (name, flags) in [
+        ("dead", PassFlags::default()),
+        ("live", PassFlags::SIDE_EFFECT),
+    ] {
+        graph.add_compute_pass(name, flags, |b| {
+            let zero = b.create_buffer(name, BufferDesc::new(256, BufferUsages::NONE));
+            b.write_storage_buffer(zero);
+            |_: &mut crate::ExecuteContext<'_>| {}
+        });
+    }
+    let plan = graph.compile().unwrap();
+    assert_eq!(plan.order, [1]);
+    assert_eq!(plan.alive, [false, true]);
+    assert_eq!(plan.position_by_pass, [None, Some(0)]);
+    assert_eq!(plan.accesses.len(), 2);
+    for (index, row) in plan.accesses.iter().enumerate() {
+        assert_eq!(
+            row,
+            &[CompiledAccess {
+                resource: LogicalResource::Buffer(ResourceIndex(index as u32)),
+                input_version: 0,
+                output_version: Some(1)
+            }]
+        );
     }
 }
 
@@ -307,6 +1491,7 @@ fn real_frontends_project_identical_kernel_products() {
     ));
     let decl = declaration.compile().unwrap();
     assert_eq!(exec.order, decl.order.iter().copied().collect::<Vec<_>>());
+    assert_eq!(exec.accesses, decl.accesses);
     assert_eq!(exec.queue_batches, decl.queue_batches);
     assert_eq!(exec.alias.heap_size, decl.alias.heap_size);
     assert_eq!(

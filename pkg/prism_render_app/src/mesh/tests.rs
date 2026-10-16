@@ -497,8 +497,9 @@ fn draw_prepared_mesh_on_gpu(with_half_attributes: bool) {
         }
     });
 
-    graph.execute(device, queue).expect("the pass records");
+    let recorded = graph.execute(device, queue).expect("the pass records");
     assert!(runtime.wait_idle(), "the submitted draw completes");
+    recorded.release(device);
 
     let pixels = queue.read_texture_rgba8(target_texture, SIZE, SIZE);
     let pixel = |x: u32, y: u32| {

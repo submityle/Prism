@@ -1,137 +1,131 @@
-# Frame Graph 单内核迁移实跑记录
+# Frame Graph：单内核基础设施与 Scene 生产接入
 
-> 版本：0.20.0-dev；适用引擎：Prism；日期：2026-10-14。
-> 对应规范：`docs/refactoring-dev/04-frame-graph_refactor_zh.md` §2、§3.4、§5 门禁 1/2、§7 S1→S2a→S2b。
-> 状态：S1 / S2a / S2b / S3 / S4 / S5 均已 **SHIPPED**。S5 的 23 个声明式后处理节点均已绑定到实际 Core3d executor；复杂效果以有序 executor 链表达，并由启动期与运行期账本校验覆盖、唯一性和顺序。
+日期：2026-10-16。工作区：`/Users/wangkailong/Documents/GitHub/Prism`。
 
-## 已交付接口与边界
+当前事实是：单内核、受检声明与执行接口已有实现；Scene shading/water/post 已有专用生产接入。不能据此把所有迁移阶段标为 SHIPPED，也不能等同于通用 Fabric 已接管生产整帧。本文区分源码契约、各范围已执行检查点与生产集成边界。
 
-- 唯一 SSA 依赖、RAW/WAR/WAW hazard、确定性拓扑排序、生命周期、checked first-fit 分配内核位于 `prism_render_graph::compile::kernel`。可执行 RenderGraph 与声明 facade 均委托它；queue batch 统一由 `compile::schedule::queue_batches` 产生。
-- `prism_render_architecture::frame_graph` 只重导出 `prism_render_graph::frame_graph`。architecture 的旧 builder/compiler/schedule/transient/types 实现删除，旧测试保留并迁移错误 API。
-- scene 的 shading / visibility 图直接使用 `prism_render_graph`。本阶段保持既有 6 / 3 pass 拓扑、资源版本、9 条具名 shading barrier 与队列批语义。
-- runtime 用 `CompiledGpuFrameGraph::declared_pass_count` 校验执行顺序，不再各自维护 5/6 常量。真实 ECS 系统连续执行两次的回归覆盖此路径，也覆盖已有 readback/native-barycentrics 状态保存。
-- 可执行 `ExecutionPlan` 增加 `logical_barriers` / `queue_batches`，既有 driver `StateTracker` 仅负责具体 layout、子资源以及 imported 入口/出口状态的 lowering；不再承担另一份 SSA 依赖求解。逻辑队列批不等于后端已支持多队列物理提交。
-- `GraphLimits` 与 `try_*` admission 在缩窄 ID、增长表、修改版本或调用 pass setup 之前校验。越界访问拒绝后，不改 usage/version/access table；非法未来版本拒绝，合法旧版本仍可使用。
-- checked admission 的原子性是单操作级，不是整个用户 setup closure 的事务回滚。句柄目前没有 graph identity；另一个 graph 的同范围 ID 无法区分。没有宣称覆盖这两个边界。
-- `CompileError::Cycle { unscheduled, blocked, cycle, names }` 提供实际闭合路径与名称；下游 blocked pass 不伪装成环成员。错误类型由 Copy 调整为 Clone；旧 `CyclicDependency` 匹配须迁移到 Cycle。
-- 旧版句柄的 overwrite 使用 output-1 的物理前驱建立 WAW/WAR，不漏掉迟声明的旧版本读者；同 pass 不产生自 hazard。含旧版本读者的可执行真实环已有回归。
-- allocator 生命周期端点包含使用 pass，只在 `last < first` 时复用。任意/零 alignment 及地址运算经过校验；heap 字节是地址范围而非 live-byte 之和。可执行 frontend 保留旧 256 字节 footprint padding；声明 frontend 保留 812 字节 golden。
-- 删除未使用的声明 normalize 与 `TransientAllocation::plan`，不留 dead-code 备用算法。可执行 `schedule::normalize` 是仍被调用的 SSA 输入适配器，不是第二份 solver。
+## 唯一 authority 与受检入口
 
-## 精确写集（本切片）
+- `prism_render_graph::compile::kernel` 统一 SSA、RAW/WAR/WAW、确定性拓扑、生命周期与 checked first-fit；queue batches 由 `compile::schedule::queue_batches` 派生。
+- 可执行 `RenderGraph` 与声明 `frame_graph::GpuFrameGraphBuilder` 共用该内核；`prism_render_architecture::frame_graph` 只重导出，不维护第二份 compiler。
+- `GraphLimits`、`try_*` admission 在缩窄 ID、增长表、修改版本或运行 pass setup 前检查。拒绝访问不改该操作的 usage/version/access table；这是单操作原子性，不是用户 setup closure 的全事务回滚。
+- `ExecutionPlan` 暴露逐访问 `CompiledAccess { resource, input_version, output_version }`、logical barriers、order/liveness/position 与 queue batches。`LogicalResource::Texture / Buffer` 保持各自 namespace，不以同数值索引冒充同一资源。
+- driver StateTracker lower 具体 layout、子资源及 imported 入口/出口状态，不重新求解 SSA。logical queue batches 不等于物理多队列提交。
+- `Cycle` 提供闭合路径、名称及 blocked 下游；旧版本 overwrite 仍按物理前驱建立 WAW/WAR，不丢迟声明旧版本读者。生命周期区间包含端点，仅 `last < first` 可复用。
 
-路径均相对仓库根。没有修改父线程 gpu_scene / material / response / app 实现，没有手工改根 Cargo.lock，没有 commit/push。
+`frame_graph/builder.rs` 的三种资源输入入口共用权威输出：
 
-### 修改
-
-```text
-pkg/prism_render_architecture/Cargo.toml
-pkg/prism_render_architecture/src/frame_graph/mod.rs
-pkg/prism_render_architecture/src/frame_graph/tests.rs
-pkg/prism_render_graph/src/builder.rs
-pkg/prism_render_graph/src/compile/alias.rs
-pkg/prism_render_graph/src/compile/barrier.rs
-pkg/prism_render_graph/src/compile/lifetime.rs
-pkg/prism_render_graph/src/compile/mod.rs
-pkg/prism_render_graph/src/compile/schedule.rs
-pkg/prism_render_graph/src/graph.rs
-pkg/prism_render_graph/src/lib.rs
-pkg/prism_render_graph/src/pass.rs
-pkg/prism_render_graph/src/plan.rs
-pkg/prism_render_graph/src/systems.rs
-pkg/prism_render_scene/Cargo.toml
-pkg/prism_render_scene/src/shading/graph.rs
-pkg/prism_render_scene/src/shading/runtime.rs
-pkg/prism_render_scene/src/visibility/graph.rs
-```
-
-两个 Cargo.toml 均仅增加本切片的 `prism_render_graph` path 依赖，其余并发变更不归本切片。
-
-### 删除
-
-```text
-pkg/prism_render_architecture/src/frame_graph/builder.rs
-pkg/prism_render_architecture/src/frame_graph/compiler.rs
-pkg/prism_render_architecture/src/frame_graph/compiler/schedule.rs
-pkg/prism_render_architecture/src/frame_graph/transient.rs
-pkg/prism_render_architecture/src/frame_graph/types.rs
-pkg/prism_render_graph/src/tests.rs
-```
-
-最后一项是原 1053 行测试迁移到 `text/unit/graph.rs`，不是删除测试或放宽门禁。
-
-### 新增
-
-```text
-pkg/prism_render_graph/src/capacity.rs
-pkg/prism_render_graph/src/compile/kernel.rs
-pkg/prism_render_graph/src/frame_graph.rs
-pkg/prism_render_graph/src/frame_graph/builder.rs
-pkg/prism_render_graph/src/frame_graph/compiler.rs
-pkg/prism_render_graph/src/frame_graph/transient.rs
-pkg/prism_render_graph/src/frame_graph/types.rs
-pkg/prism_render_graph/text/unit/compiler.rs
-pkg/prism_render_graph/text/unit/graph.rs
-pkg/prism_render_graph/text/unit/systems.rs
-pkg/prism_render_graph/text/unit/transient.rs
-docs/frame_graph_implementation_zh.md
-```
-
-建议集成顺序：graph 权威内核/API/原测试迁移一起；architecture 重导出及 API 测试迁移一起；scene 依赖/两个图/runtime 及本记录一起。不能只提交删除项或漏掉新增 kernel/capacity/facade 文件。
-
-## 实跑验证
-
-以下均在此工作区运行，2026-10-14 实际退出码为 0；计数是本次并发工作区快照，不推断后续父侧新增测试数量。
-
-| 命令 | 结果 |
+| 接口 | 输入与版本责任 |
 |---|---|
-| `cargo test -q -p prism_render_graph --all-features` | 38/38；doctest 1 通过、1 既有 ignored；文档落地前再次复跑同样通过 |
-| `cargo test -q -p prism_render_graph --no-default-features` | 35/35；doctest 1 通过、1 既有 ignored |
-| `cargo clippy -p prism_render_graph --all-targets --all-features -- -D warnings -D missing-docs` | 通过，零告警 |
-| `RUSTDOCFLAGS='-D warnings' cargo doc -p prism_render_graph --no-deps --all-features` | 通过，零告警；修正两处旧 CommandBuffer 链接后重跑 |
-| `cargo test -q -p prism_render_architecture --lib` | 11241/11241，无告警输出 |
-| `cargo test -q -p prism_render_architecture --lib gpu_scene` | 26/26；11215 filtered，无告警输出 |
-| `cargo test -q -p prism_render_scene --lib` | 1719/1719；存在范围外既有告警，不能称全链零告警 |
-| `cargo test -q -p prism_render_runtime -p prism_render_gpudriven -p prism_render_app --lib` | runtime 12/12、gpudriven 18/18、app 146/146；有范围外告警 |
+| `compile()` | 先按显式控制依赖规范化 lowering 顺序，再产生隐式资源输入 |
+| `compile_with_inputs()` | 每个原始 pass/access 提供数值输入版本；输入必须在 lowering 时存在，允许读旧版本或以旧输入写入；输出仍由 checked builder 分配 |
+| `compile_with_sources()` | 接受数值输入或 `AccessInput::ProducedBy { pass, access }`；引用另一 pass 对同资源的确切写，补入 producer 前置条件；不由调用者猜输出版本 |
 
-局部 rustfmt 使用 edition 2024 与 `skip_children=true`，只处理上述已修改/新增 Rust 文件；未运行 workspace 全量格式化。范围内 `git diff --check` 通过。
+`dependency_order()` 仅请求共享内核的控制顺序，不进行完整资源编译。Fabric 使用它安排 admission 后做一次完整 symbolic 编译，并在最终 descriptor/runtime 中保留 `depends_on`；不再要求全局唯一 writer，也不把最终控制边清空。详细 ResourceInput 链见 `docs/render_fabric_selection_implementation_zh.md`。
 
-scene 的范围外告警包括 lobe_sampling/virtual_texture/spec_denoise/texel_cache 的 qualification/unused/dead-method、world_restir 的 Mat4 deprecated、area_light 的 unmet lint；其他消费者还有 asset streaming missing-docs、app 测试 qualification/unused 和 page residency dead-method。本切片不越权修这些文件。graph 本身 missing-docs、严格 Clippy 与 rustdoc 门禁通过。
+## Scene startup 与真实 executor 准入
 
-新增 compiler 10 个回归覆盖：自然 u32/配置容量边界且不分配巨表；setup 前拒绝；失败访问的原子性；非法资源/自依赖/version；两 frontend 的 order/hazard/alias/queue 一致；迟声明旧版本读者；stale overwrite；真实可执行环与 blocked 下游；同 pass/fanout 确定性；812 golden/地址洞/非幂次 alignment/overflow。architecture 原 8 个测试和 graph 原测试保留。
+`gpu/fabric.rs::init_scene_fabric` 读取**实际拥有 Scene 资源的 Bevy RenderDevice** 特性，以静态 builtin roots 和质量档冻结 DeviceFabric，不使用另建的 PrismGpu 设备替代。根不随 extracted/visible bodies 变化。
 
-未运行完整 workspace tests/Clippy；未做 GPU 物理 alias、多队列 submit、帧时间或无分配基准。本记录不把纯编译器一致性测试当成这些性能/设备证据。
+`shading/plugin.rs` 注册 `init_shading_execution.after(init_scene_fabric)`，使 Commands 写入的 SceneFabric 在消费者前可见；`build_shading_execution` 编译 shading 图、校验实际 bindings，再创建 execution plan。water plugin 注册真实 `ExternalExecutionSite::WaterSurface`；缺失站点或冻结 variant 不匹配会拒绝启动，而非补空 executor。
 
-## 多维质量评估
+当前 `shading/graph.rs` 是 8 个基础声明加 `post_graph.rs` 的 23 个 post 声明，共 31 个声明，不是旧 6-pass shading 切片。编译表中的 declared count/order/liveness 为权威，不另存固定 5/6 执行数量。
 
-| 维度 | 状态与取舍 |
+Core3d 的实际边界是：
+
+`PreResolve → Resolve → WaterSurface → Response → Post`
+
+pre-resolve/resolve driver 在 MainPass 前；water 的 Draw 位于既有外部 schedule；response driver 在 MainPass 与 WaterSurface Draw 后，post driver 在 response 后。driver 只投影编译顺序到这些 phase，不另外排序。
+
+`shading/execution.rs` 检查：
+
+- declaration/binding 精确对应，编译表长度、order、position 与 liveness 一致。
+- Systems group 有且仅有一个非空 owner；GroupMember 必须指向该 owner。
+- group 不跨 phase、无部分存活、存活顺序连续且 owner 最先执行；拒绝 backwards phase 顺序。
+- WaterSurface 只能绑定对应声明与外部站点；运行时每帧重置执行状态，group 只执行一次，member 不能抢在 owner 前。
+
+`shading/plugin.rs::validate_post_execution_registration` 不只比对声明名或 debug 名：按位置核对系统数量及 `system.system_type()` 与真实 `boxed_post_executor` 的类型身份，debug names 关闭也能拒绝错绑。名称只用于诊断。该校验不宣称证明任意外来 compiled plan 的来源；调用方仍必须编译同一声明表。
+
+## Response / Water 的资源边界
+
+`shading/graph.rs` 中 resolve 写 left response、HDR，以及 SSR 使用的 env-specular/spec-weight。water 读取 resolve 后的 HDR/depth，写 left/right/controls/water-coverage。常驻 `response_composition` 在 water 后访问 response planes、visibility 与 coverage，写 left、auxiliary 及 `hdr_scene_color`，然后进入后处理。
+
+因此 composition 不是“resolve 后只消费四个 imported planes”的旧模型，也不是先完成 composition 再让 water 生产 response。资源仍由相应 per-view owner 管理；声明图不伪造固定纹理分配大小。
+
+## SSR → GI/denoise → SSGI → TAA：实际资源与调用
+
+`POST_PROCESS_DECLARATIONS` 的相关顺序是 `post_ssr → post_spec_denoise → post_ssgi → post_taa`；稳定语义 ID 不因顺序变化重新编号。前置 exposure/bloom/DoF/motion-blur 仍按声明链运行。
+
+| 生产者 → 消费者 | 精确资源与实际绑定证据 |
 |---|---|
-| 性能 | 部分：只保留一个 solver；BTreeSet 保证稳定排序，编译阶段仍分配，尚无帧预算/零分配证明 |
-| 效果 | 旧 topology/barrier/version/alias golden 保持；Composition 与后处理声明/执行账本已接入，设备图像质量仍由对应 GPU/golden 测试给出证据 |
-| 易用性 | 部分：旧 facade 仍可用且委托权威；新增 checked API，错误迁移与 panic 前置条件有文档 |
-| 易维护性 | 满足本切片：重复内核删除；graph 原测试收口 text；scene/architecture 既有测试布局没有扩大迁移 |
-| 易拓展性 | 逻辑 SSA 与 driver lowering 分离；跨 graph 句柄身份与物理多队列保持独立接口，不改变本图的确定性编译结果 |
-| 易迭代性 | 满足：S1–S2b 独立集成切片，写集与接口迁移明确；不混入父 response 实现 |
-| 健壮性 | 满足本切片：容量先验、checked 算术、Result、稳定顺序、具体 cycle 诊断均有回归；closure 全事务不在范围 |
-| 安全 | 满足本切片：无新增 unsafe；非法索引在表 lookup 前拒绝；未宣称任意 foreign graph 句柄可检出 |
+| `shading_resolve → post_ssr` | resolve 写 `post_ssr_env_specular / post_ssr_spec_weight`；`ssr/composite.rs` 绑定 visibility 的 env-specular/spec-weight 读视图；SSR 不冒充这两个资源的 writer |
+| `post_ssr → spec_gi_reuse` | `spec_gi/bind_groups.rs::prepare_spec_gi_reuse_bind_groups` 实际绑定 `scene_depth_sampled / normal_roughness_view / ssr_out_view`，对应 `post_ssr_depth / post_ssr_normal_roughness / post_ssr_trace` |
+| `post_ssr → spec_denoise` | `spec_denoise/bind_groups.rs` 绑定 `ssr_hit_view / normal_roughness_view / scene_depth_sampled`，含 `post_ssr_hit_distance`；这些是当帧输入，不是上一帧替代物 |
+| GI/denoise → specular composite | reuse 读 prior reservoir、写 current reservoir 与 `post_spec_gi_resolved`；降噪产生 `post_spec_filtered`；`spec_gi/composite.rs` 优先读 filtered，否则读 resolved，并读 SSR `color_mip_view(0)`（`post_ssr_color_mips`）及 resolve 的 env-specular，写 scene_color |
+| `post_spec_denoise → post_ssgi` | `ssgi/composite.rs` 先从 `visibility.scene_color_view()` 复制到 `post_ssgi_base`，再读 base、denoised GI、albedo/ambient 写 scene_color；复制必须晚于 specular composite |
+| `post_ssgi → post_taa` | `taa/bind_groups.rs` 绑定最终 scene_color、`taa.read_view()`、`taa.write_view()` 与 motion vectors；TAA 消费 SSGI 后的当帧 HDR |
 
-## 已验证范围与协作接口
+真实 executor 链由 `post_graph.rs` 列表、`plugin.rs::boxed_post_executor` 和生产 Systems bindings 共同确定：
 
-- S3 Composition 已常驻于 `shading_frame_graph()`：`response_composition` 消费四个 imported response plane，并在 `shading_resolve` 后、后处理前写回 `hdr_scene_color`；其资源所有权仍由各 producer 管理。
-- S4 codegen 已由 `post_graph.rs` 的声明表统一产出 ABI、bind-group、pipeline entry、资源访问和依赖边；声明错误在图变更前拒绝。
-- S5 已完成全量接入：`POST_PROCESS_DECLARATIONS` 的 23 个声明与 `POST_EXECUTION_BINDINGS` 一一对应。曝光、SSR、SSGI、spec denoise 等多 dispatch 效果记录完整 executor 链；账本拒绝缺失、重复或错序绑定。具体系统仍按 Bevy Core3d 的分组限制注册，但不再存在未消费的声明式 pass。
+- SSR：`ssr_prepass_pass → ssr_hzb_pass → ssr_repack_pass → ssr_color_mips_pass → ssr_trace_pass → ssr_reconstruct_pass → ssr_temporal_pass → ssr_composite_pass`。
+- GI/denoise：`spec_gi_reuse_pass → spec_gi_spatial_pass → spec_denoise_reproject_pass → spec_denoise_history_clamp_pass → spec_denoise_spatial_pass → spec_gi_composite_pass`。
+- SSGI：`ssgi_trace_pass → ssgi_denoise_pass → ssgi_composite_pass`；其后 `taa_resolve_pass`。
 
-## S5 执行账本
+`validate_specular_resource_contract` 逐项检查 SSR 当帧写→GI/denoise 读、resolve exports 的真实 writer、HDR 消费及三条控制前置边；仅有顺序注释不能替代 access 声明。`graph.rs::specular_pipeline_graph_tracks_real_raw_provenance` 检查具体 RAW 资源/端点；`post_graph.rs` 的负例删除输入、伪造/删除 resolve writer、删除 producer-order 边时必须拒绝；plugin 回归覆盖缺失、重复、错序与错类型 executor。
 
-`ShadingFrameGraph` 同时保存编译产物与 post executor 账本。启动时校验声明名称、图尾顺序、executor 非空以及 executor 唯一性；`prepare_shading_work` 每帧保留同一账本身份，避免运行期悄然换表。账本是稳定的诊断/验证接口，不把 Rust 系统类型名暴露为 ABI，也不在每帧重新分配或排序。
+prior/current reservoirs、specular/TAA history 是 Persistent；GI resolved、filtered、SSGI base 等帧内中间量是 Transient。per-view ping-pong 历史与 generic Fabric 的绝对帧导入是各自明确的所有权契约，不能只因同名“history”就认定已统一生产提交。
 
-这条校验不冒充 GPU 设备效果验证：设备能力、shader 编译、真实帧时间和图像质量仍由各专项 GPU/golden 门禁负责；本文件只确认声明图与实际 executor 装配一致。
-- 水体 Fabric 与 particle frame-lag/versioning 属于独立的 architecture/scene 切片，分别维护自身的资源提供者与验证报告；本图只消费它们最终导入的资源句柄。
+## PreparedGraph / RecordedGraph 与裸 allocation owner
 
-## 2026-10-15 增量：按效果拆分资源访问契约
+当前 `prism_render_graph/src/graph.rs` 提供：
 
-`post_graph.rs` 已从“所有 23 个声明共用一套 `POST_ACCESSES`”收敛为一张全局资源池加 11 组精确访问集：曝光、Bloom、DoF、Motion Blur、SSR、SSGI、specular denoise、TAA、普通风格化、outline、tonemap 和 upscale 分别声明自己的读写资源。资源生命周期遵循同一原则：TAA/specular history 为 `Persistent`，Bloom/SSR/SSGI/DoF 等帧内中间结果为 `Transient`，extent-dependent 资源的真实尺寸仍由各 per-view owner 在设备能力检查后分配，拓扑图不伪造固定显存大小。
+- `RenderGraph::prepare` 编译一次并冻结 ExecutionPlan，不创建 GPU 资源、不运行执行 callback；`PreparedGraph::record` 消费同一计划，不再编译、不 submit。编译过程仍可分配 CPU 计划数据，不能把此边界写成全程零分配。
+- `RecordedGraph` 持有有序 commands、plan 与 `GraphAllocations`；`into_parts` 可转交外部提交方，`execute` 是 record 后单队列 submit 的便捷入口。
+- allocation owner 必须保留到实际 GPU completion，再用创建资源的 device 释放；`release_transients` 保留 Persistent，`release` 释放全部自有资源，imports 不归它销毁。
+- 裸 `RecordedGraph / GraphAllocations` 的 Drop 不销毁 GPU 资源，漏掉显式 release 会留至 device teardown；取消帧须先确保相关 commands 不会再提交。此裸接口与下述 completion-owned runtime 接口不同，不能把两者都描述成必须手工 release。
 
-新增回归断言验证：曝光包含 histogram/state 写集；SSR 包含 HZB/trace/hit-distance；普通 stylized pass 不带 SSR 资源；persistent history 与 transient scratch 不混淆。这样不会把 executor 链误当成单一 bind group，也不会因所有声明共享资源数组而掩盖 RAW/WAR/WAW 关系。
+## runtime completion owner、代次与拒绝路径
 
-本次定向复验：`cargo test -p prism_render_scene --offline --lib shading::` 为 820/820 通过；`shading_resolve_wesl_compiles_and_resolves_all_imports` 为 1/1 通过。warning 仍来自既有范围外模块，不能表述为全 workspace 零 warning；当前机器没有可用 GPU adapter，因此本增量没有新增设备级 parity 结果。
+`prism_render_runtime/src/lib.rs::execute_owned` 先 prepare，再在 pacer 锁内完成容量等待、record、completion value 分配与真实提交，不经假 queue 或再次编译；返回 `submission.rs::FrameSubmission`。`execute_tracked / execute` 复用该路径，分别返回完成值或 `()`。
+
+- 真实 queue 的 completion callback 保留一个 owner clone；调用方提前 Drop 不会授权提前销毁。callback 标记完成，释放它持有的 clone；只有完成已确认且最后一个 owner Drop 时，才释放 graph-owned allocations。
+- 显式 clone 共享资源 owner，可在 completion 之后保留 Transient 与 Persistent。发布 Persistent history 时，必须保留 owner 直到之后所有 imported GPU 使用均已完成；不会因一次 submit 自动发布 history，imports 也不由该 owner 销毁。
+- owner 保留创建资源的 device `Arc`；`device_generation()` 表示创建代次，`completion_value()` 只在该代次内解释。runtime 恢复后，旧 owner 仍在旧设备回收，旧 ID 不可导入新设备，迟到旧 callback 不推进新代次完成状态。
+- callback 被后端丢弃不等于 callback 已执行；shutdown wait 失败不授权销毁。未确认完成的自有资源留给创建设备 teardown，而不是对可能仍在使用的资源发出 destroy。
+
+拒绝路径保持如下可重试边界：
+
+| 路径 | 当前行为 |
+|---|---|
+| compile 失败 | 在触碰 pacer 前返回；不取得 retirement token、不创建 GPU 资源、不运行执行 callback、不提交 |
+| completion value 耗尽 | `MAX - 1` 后允许一次 `u64::MAX`；再次提交返回 `CompletionValueExhausted`，在 dequeue/wait 前拒绝，不环绕、不复用、不推进值，也不创建 GPU 资源、record 或 submit |
+| pacing wait 未确认 | `CompletionUnconfirmed`；最老 token 恢复队首，保持在途顺序/数量及提交值；不创建 GPU 资源、record 或 submit，重试先等同一 token |
+| `wait_idle` 未确认 | 逐 token 等待后仍执行 queue-wide barrier；该 barrier 失败时，将未确认 token 按原顺序留供重试；barrier 成功则覆盖此前单 token 未确认状态 |
+
+`next_completion_value()` 在 MAX 饱和，仅是规划提示；实际 execute 用受检加法拒绝耗尽。设备恢复以新的 generation 和完成值状态开始，不在原代次复用值。
+
+`retirement_tests.rs` 的 13 项 controlled 测试覆盖 owner early drop/clone、runtime drop、callback 丢弃、失败 wait、恢复代次及溢出。其中 `failed_pacing_waits_restore_the_oldest_token_before_allocation_record_or_submit`、`failed_idle_wait_keeps_unconfirmed_tokens_in_original_order_for_retry`、`completion_values_never_wrap_or_reuse_the_final_value`、`compile_failure_has_no_retirement_token_allocation_recording_or_submission` 直接断言上述拒绝语义；受控后端计数与 token 顺序断言不充当 GPU 证据。
+
+`submission_gpu_tests.rs` 的两项真实设备回归为 `execute_owned_gpu_clone_preserves_buffers_through_completion_and_readback` 和 `execute_owned_gpu_early_drop_completes_copies_and_retires_callback_resources`。同一 runtime/device 上，非零 payload 经外部 upload → graph-owned Transient → graph-owned Persistent → 外部 readback 的实际 transfer；检查 readback、真实 callback、clone 保活与 early drop 后回收。释放最后 owner 后，重分配复用旧槽且 generation 加一，验证 backend 表旧 ID 不再存活；不宣称 OS/driver heap 已归还。无硬件时默认可 skip，但 `PRISM_REQUIRE_GPU=1` 下必须失败；设备创建错误始终失败。early-drop GPU 用例不假设快速硬件尚未完成，完成前保活由 controlled 测试补充。
+
+Scene 已有专用生产图/executor/设备冻结接入；**通用 Fabric 从声明资源、record 到 Scene 原生提交、completion 与 history 回收的完整生产接线仍未完成**。runtime 的独立 buffer GPU 验证不能替代这条整帧集成证据。
+
+## 已执行检查点与证据限制
+
+以下结果来自主线实际运行反馈，本次文档更新未运行 cargo：
+
+| 范围 | 已执行结果 |
+|---|---|
+| graph `--lib --all-features` | 最新重跑 78 passed，零 warning |
+| architecture Render Fabric | 本轮 122 passed / 0 failed |
+| `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_runtime --lib -- --test-threads=1` | 32 passed / 0 failed；含 13 项 controlled retirement、2 项真实 GPU 测试 |
+| runtime 两项 GPU `--nocapture` 复跑 | 2 passed；adapter 证据 Apple M2 / Metal / Hardware |
+| Scene `specular_` / plugin / Apple M2 startup | 较早检查点分别为 14 / 13 / 1 通过 |
+| `cargo check -p prism_render_app --all-targets` 与 owner caller 回归 | check 已通过，有既存 warnings；修复 3 处新增 `RecordedGraph` unused 后，`mesh_draw_records_into_a_graph_pass` 1 项及 `records_a_multi_draw` 2 项均通过 |
+| gpudriven 严格 GPU `--lib -- --nocapture --test-threads=1` | 18 passed；7 条路径输出 Apple M2 / Metal 硬件证据 |
+
+Graph/Fabric/runtime/app/gpudriven 结果按上述范围记录，不推断全 workspace 通过或其他范围零 warning；app 三项 caller 回归仅捕获命令、不提交 GPU，因此录制后立即 release，不计作 GPU 验证。Apple M2 startup 对应设备初始化、冻结选择与 executor 准入；runtime GPU 对应 transfer/readback/completion/owner 表项回收；gpudriven 的 18 项通过中记录了 7 条路径的硬件证据，不据此把全部测试都归为 GPU 路径。这些结果均不等于完整 Scene 帧 dispatch、通用 Fabric 整帧生产接线、图像质量或性能验收。旧“本机无 adapter”的环境陈述不再作为当前结论。
+
+保留边界：跨 graph 同范围 handle 尚无 graph identity 保证；单操作 admission 不提供 closure 全事务；逻辑 alias/footprint 不证明 GPU heap 物理 alias；logical queue 不证明多队列 fence/submit；P50/P95/P99、零分配及图像 golden 均需对应实际测量，不能从编译器单测推导。
+
+本次仅更新指定三份 tracked 文档，不改 `refactoring-dev`、不改代码、不构建、不提交。
