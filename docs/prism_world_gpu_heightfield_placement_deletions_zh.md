@@ -77,7 +77,7 @@ workgroup storage 和 dispatch 上限。零容量仍分配一个不可寻址物�
 
 ## 验证
 
-本次交付复验通过以下检查：
+历史交付验收通过以下检查：
 
 - `rustfmt --check`：通过；
 - `cargo check --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --tests`：通过；
@@ -96,10 +96,12 @@ CARGO_TARGET_DIR=/private/tmp/prism-world-heightfield-placement-deletion-gpu WGP
 ```
 
 物理 GPU 测试要求真实 `IntegratedGpu` 或 `DiscreteGpu`，不会把无 adapter、软件 adapter
-或 CPU 路径静默当作通过。本轮 Metal 真机命令在当前工作站识别到 `Apple M2`，3 个测试全部
-通过。测试对拍 CPU placement key 集合，并覆盖精确删除、重复键去重、不存在键、空删除集合、
-全量删除、负坐标完整 i64 键、indirect count 和 compact 输出；另覆盖 admission 失败时旧请求、
-缓存和上传统计保持不变，以及零容量构造约束。
+或 CPU 路径静默当作通过。历史 Metal 真机验收在 Apple M2 上 3 个测试全部通过。2026-10-16
+本轮复验的 rustfmt、`cargo check`、Clippy 和 WGSL/Naga 8/8 均通过；同一 Metal 命令因当前
+运行环境返回 `metal found no adapters`，未获得新的物理 GPU 结果，因此不把本轮记为 GPU 通过。
+测试对拍 CPU placement key 集合，并覆盖精确删除、重复键去重、不存在键、空删除集合、全量删除、
+负坐标完整 i64 键、indirect count 和 compact 输出；另覆盖 admission 失败时旧请求、缓存和上传
+统计保持不变，以及零容量构造约束。
 
 ## 明确边界
 
