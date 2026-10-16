@@ -88,6 +88,19 @@ render graph 为 response left、coverage 等资源生成 producer→consumer ba
 
 GPU gate 的 PASS 只证明真实设备能创建并接受当前 shader module；数学 golden、frame graph 和资源生命周期由各自测试单独证明。
 
+### 2026-10-16 收口边界
+
+- `water::frame_golden::whole_frame_plan_matches_the_golden_digest` 已按当前
+  canonical plan 重新固定为 `0x2d726174148032c7`，并以独立测试通过；这只证明
+  CPU frame-plan 的确定性，不替代 GPU 输出证据。
+- 新增的 `water_hybrid_gpu` integration target 直接编译生产 WESL，创建三种
+  raster pipeline，执行 render-FX、resident composition 与 HDR export，并对
+  storage/readback 结果做断言。它不是 CPU 重写 shader 的测试。
+- 当前开发机本轮未拿到可用硬件 adapter，且首次完整编译曾因 `No space left on
+  device` 中止；因此 `water_hybrid_gpu` 尚无本轮真实 dispatch/readback 通过证据。
+  只能把既有跨沙盒 Apple M2/Metal 的 shader-module gate 记为历史证据，不能将其
+  记作本 integration target 的输出通过。
+
 ## 结论
 
 水体 Fabric 已拥有可执行的 producer→composition 闭环：声明层、GPU buffer、shader storage write、coverage 清零、publication token、frame graph barrier 和 HDR consumer 相互一致。legacy entry/MRT 是兼容输出，不是未实现的替代路径；新增响应功能应继续通过现有 typed plane 与 Fabric resource contract 接入。
