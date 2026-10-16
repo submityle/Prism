@@ -104,8 +104,10 @@ impl From<GpuScatterError> for GpuPlanetPlacementError {
 /// Submit each encoder before uploading the next request on this object.
 /// Preflight errors enqueue no writes; device/OOM errors follow wgpu.
 pub struct GpuPlanetPlacement {
+    device_identity: std::sync::Arc<()>,
     queue: wgpu::Queue,
     capacity: usize,
+    vertex_count: u32,
     max_surface_samples: usize,
     max_groups: u32,
     allocated_bytes: u64,
@@ -237,8 +239,10 @@ impl GpuPlanetPlacement {
             ],
         });
         Ok(Self {
+            device_identity: ctx.device_identity().clone(),
             queue: ctx.queue().clone(),
             capacity,
+            vertex_count,
             max_surface_samples,
             max_groups: limits.max_compute_workgroups_per_dimension,
             allocated_bytes,
@@ -395,6 +399,33 @@ impl GpuPlanetPlacement {
     /// Nonwrapping upload epoch; failed writes leave it unchanged.
     pub fn request_generation(&self) -> u64 {
         self.request_generation
+    }
+
+    pub(super) fn device_identity(&self) -> &std::sync::Arc<()> {
+        &self.device_identity
+    }
+
+    pub(super) fn draw_args(&self) -> [u32; 3] {
+        [self.vertex_count, 0, 0]
+    }
+
+    pub(super) fn validate_request(
+        &self,
+        config: PlanetPlacementConfig,
+        region: PlanetPlacementRegion,
+        tile: &std::sync::Arc<HeightfieldTile>,
+        budget: GpuPlanetPlacementWorkBudget,
+    ) -> Result<(), GpuPlanetPlacementError> {
+        prepare(
+            config,
+            region,
+            tile,
+            budget,
+            self.capacity,
+            self.max_surface_samples,
+            self.max_groups,
+        )
+        .map(|_| ())
     }
 }
 

@@ -119,6 +119,17 @@ pub use planet_placement::{
 };
 
 #[cfg(feature = "terrain_scatter")]
+mod planet_placement_deletion;
+
+#[cfg(feature = "terrain_scatter")]
+pub use planet_placement_deletion::{
+    GpuPlanetPlacementDeletionCacheKey, GpuPlanetPlacementDeletionCapacity,
+    GpuPlanetPlacementDeletionError, GpuPlanetPlacementDeletionUploadStats,
+    GpuPlanetPlacementDeletionWorkBudget, GpuPlanetPlacementDeletions,
+    GPU_PLANET_PLACEMENT_DELETION_KEY_ABI_VERSION, GPU_PLANET_PLACEMENT_DELETION_VERSION,
+};
+
+#[cfg(feature = "terrain_scatter")]
 pub use heightfield_placement_deletion::{
     GpuHeightfieldPlacementDeletionCacheKey, GpuHeightfieldPlacementDeletionCapacity,
     GpuHeightfieldPlacementDeletionError, GpuHeightfieldPlacementDeletionUploadStats,
