@@ -38,9 +38,11 @@ fn x(world: &World, entity: Entity) -> f32 {
         .x
 }
 
-fn scan(stats: EcsPropagationStats, edges: usize) {
-    assert_eq!((stats.relation_scans, stats.relation_sorts), (1, 1));
-    assert_eq!(stats.relation_edges_scanned, edges);
+fn scan(stats: EcsPropagationStats, _legacy_edge_count: usize) {
+    assert_eq!(stats.relation_scans, 1);
+    // Transform topology refreshes are source-indexed. It must not enumerate
+    // or sort the global relation graph, which may contain unrelated kinds.
+    assert_eq!((stats.relation_edges_scanned, stats.relation_sorts), (0, 0));
 }
 
 fn no_scan(stats: EcsPropagationStats) {
@@ -82,6 +84,7 @@ fn static_frames_and_local_writes_never_collect_or_sort_edges() {
         (stats.local_reads, stats.recomputed, stats.written),
         (1, 129, 129)
     );
+    assert!(stats.change_rows_scanned > 0);
     assert_eq!(x(&world, parent), 148.0);
 }
 
@@ -154,7 +157,7 @@ fn cloned_registry_and_index_replacements_cannot_reuse_cache_identity() {
     *world.relations_mut() = registry;
     let stats = propagate_transforms(&mut world).unwrap();
     scan(stats, 1);
-    assert_eq!(stats.relation_checks, 0); // Equal canonical edges, no rebuild.
+    assert_eq!(stats.relation_checks, 2); // Version replacement still revalidates sources.
     assert_eq!(stats.recomputed, 0);
     let saved = world.relations().index().clone();
     *world.relations_mut().index_mut() = RelationIndex::new();
@@ -206,7 +209,7 @@ fn unrelated_edges_refresh_once_without_rebuilding_transform_topology() {
     world.add_relation::<Link>(parent, child);
     let stats = propagate_transforms(&mut world).unwrap();
     scan(stats, 2); // Counter measures all visited edges, not only ChildOf.
-    assert_eq!((stats.relation_checks, stats.recomputed), (0, 0));
+    assert_eq!((stats.relation_checks, stats.recomputed), (2, 0));
     assert_eq!(x(&world, child), 11.0);
     no_scan(propagate_transforms(&mut world).unwrap());
 
@@ -224,7 +227,7 @@ fn unrelated_edges_refresh_once_without_rebuilding_transform_topology() {
             stats.recomputed,
             stats.written
         ),
-        (0, 0, 0, 0)
+        (0, 2, 0, 0)
     );
     no_scan(propagate_transforms(&mut world).unwrap());
 
@@ -241,7 +244,7 @@ fn unrelated_edges_refresh_once_without_rebuilding_transform_topology() {
             stats.recomputed,
             stats.written
         ),
-        (0, 0, 0, 0)
+        (0, 2, 0, 0)
     );
     no_scan(propagate_transforms(&mut world).unwrap());
 }
@@ -268,7 +271,7 @@ fn rejected_cycle_does_not_commit_version_and_repair_retries_cleanly() {
         .remove(relation, parent, child);
     let stats = propagate_transforms(&mut world).unwrap();
     scan(stats, 1);
-    assert_eq!(stats.relation_checks, 0); // Repaired to the previous graph.
+    assert_eq!(stats.relation_checks, 2); // The repaired version is revalidated safely.
     no_scan(propagate_transforms(&mut world).unwrap());
 }
 

@@ -68,6 +68,9 @@ pub struct DirtyChunkStats {
     pub summaries_tested: usize,
     /// Number of entities inspected in sparse-set change sources.
     pub sparse_entities_checked: usize,
+    /// Number of sparse sets scanned because the requested window predates the
+    /// query's change-index activation boundary.
+    pub sparse_fallback_scans: usize,
     /// Number of sparse-derived chunk candidates after row-to-chunk deduplication.
     pub sparse_chunk_candidates: usize,
     /// Number of sparse writes/removals delivered from the exact change index.
@@ -189,8 +192,11 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // proportional to the sparse set's actual membership rather than to
         // every row in every matched archetype.
         let mut sparse_chunks: BTreeMap<ArchetypeId, Vec<usize>> = BTreeMap::new();
+        let sparse_fallback = self.sparse_fallback_needed(world, last_run, this_run);
         let mut indexed_entities = Vec::new();
-        self.collect_sparse_changes(last_run, this_run, &mut indexed_entities);
+        if !sparse_fallback {
+            self.collect_sparse_changes(last_run, this_run, &mut indexed_entities);
+        }
         report.stats.sparse_index_events = indexed_entities.len();
         for entity in indexed_entities {
             let Some(location) = world.entities().location(entity) else {
@@ -201,31 +207,35 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 .or_default()
                 .push(location.row as usize);
         }
-        for &id in &access_ids {
-            let Some(info) = world.components().info(id) else {
-                continue;
-            };
-            if info.storage() != StorageType::SparseSet {
-                continue;
-            }
-            let Some(set) = world.sparse_sets().get(id) else {
-                continue;
-            };
-            for &entity in set.entities() {
-                report.stats.sparse_entities_checked += 1;
-                let Some(ticks) = set.component_ticks(entity) else {
+        if sparse_fallback {
+            for &id in &access_ids {
+                let Some(info) = world.components().info(id) else {
                     continue;
                 };
-                if !ticks.changed.is_newer_than(last_run, this_run) {
+                if info.storage() != StorageType::SparseSet {
                     continue;
                 }
-                let Some(location) = world.entities().location(entity) else {
+                let Some(set) = world.sparse_sets().get(id) else {
                     continue;
                 };
-                let chunks = sparse_chunks.entry(location.archetype_id).or_default();
-                chunks.push(location.row as usize);
+                report.stats.sparse_fallback_scans += 1;
+                for &entity in set.entities() {
+                    report.stats.sparse_entities_checked += 1;
+                    let Some(ticks) = set.component_ticks(entity) else {
+                        continue;
+                    };
+                    if !ticks.changed.is_newer_than(last_run, this_run) {
+                        continue;
+                    }
+                    let Some(location) = world.entities().location(entity) else {
+                        continue;
+                    };
+                    let chunks = sparse_chunks.entry(location.archetype_id).or_default();
+                    chunks.push(location.row as usize);
+                }
             }
         }
+        self.remember_sparse_window(last_run, this_run);
         for rows in sparse_chunks.values_mut() {
             rows.sort_unstable();
             rows.dedup();

@@ -5,80 +5,76 @@ use prism_ecs::component::Component;
 use prism_ecs::entity::Entity;
 use prism_ecs::hierarchy::ChildOf;
 use prism_ecs::observer::ObserverId;
-use prism_ecs::query::{QueryState, With};
-use prism_ecs::relation::RelationIndexVersion;
+use prism_ecs::query::QueryState;
+use prism_ecs::relation::RelationChangeCursor;
 use prism_ecs::resource::Resource;
 use prism_ecs::world::{World, WorldId};
 
-use crate::change::ChangeTicks;
-use crate::dirty::DirtyPropagator;
-use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
+use crate::hierarchy::HierarchyError;
 use crate::{GlobalTransform, Transform};
 
-type Inputs = QueryState<Entity, With<Transform>>;
-
-// Only invoked when the index-owned version changes. Canonicalization avoids
-// rebuilding topology for unrelated relation edits or an equivalent replacement.
-fn hierarchy_edges(world: &World, stats: &mut EcsPropagationStats) -> Vec<(Entity, Entity)> {
-    let Some(child_of) = world.components().id_of::<ChildOf>() else {
-        return Vec::new();
-    };
-    stats.relation_scans += 1;
-    let mut edges = Vec::new();
-    for (relation, source, target) in world.relations().index().iter_edges() {
-        stats.relation_edges_scanned += 1;
-        if relation == child_of {
-            edges.push((source, target));
-        }
-    }
-    stats.relation_sorts += 1;
-    edges.sort_unstable();
-    edges
-}
+type Inputs = QueryState<(Entity, &'static Transform)>;
+type Globals = QueryState<(Entity, &'static GlobalTransform)>;
+type Membership = QueryState<Entity, prism_ecs::query::With<Transform>>;
 
 // The column-owned interval index skips cold chunk subtrees before examining
 // row ticks. No component value is borrowed here. The row check remains
 // necessary because a chunk summary is deliberately conservative.
-fn changed_entities<T: Component>(world: &World, last: Tick, now: Tick) -> BTreeSet<Entity> {
+fn changed_entities<T: Component>(
+    query: &QueryState<(Entity, &'static T)>,
+    world: &World,
+    last: Tick,
+    now: Tick,
+    stats: &mut EcsPropagationStats,
+) -> BTreeSet<Entity> {
     let mut changed = BTreeSet::new();
-    let Some(id) = world.components().id_of::<T>() else {
-        return changed;
-    };
-    for archetype in world.archetypes().iter() {
+    let id = query
+        .access()
+        .reads()
+        .first()
+        .copied()
+        .expect("transform change query reads its component");
+    let report = query.dirty_chunks_with_stats(world, last, now);
+    stats.change_chunk_summaries += report.stats.summaries_tested;
+    stats.change_chunks += report.stats.reported_chunks;
+    for dirty in report.chunks {
+        let archetype = world
+            .archetypes()
+            .get(dirty.archetype)
+            .expect("dirty chunk archetype disappeared during read");
         let table = archetype.table();
-        let Some(column) = table.column(id) else {
-            continue;
-        };
-        column.visit_changed_chunks(last, now, |chunk| {
-            let start = chunk * column.rows_per_chunk();
-            let end = (start + column.rows_per_chunk()).min(table.entities().len());
-            for row in start..end {
-                if column.changed_tick(row).is_newer_than(last, now) {
-                    changed.insert(table.entities()[row]);
-                }
+        let column = table
+            .column(id)
+            .expect("dirty query reported a chunk without its component");
+        for row in dirty.start..dirty.end {
+            stats.change_rows_scanned += 1;
+            if column.changed_tick(row).is_newer_than(last, now) {
+                changed.insert(table.entities()[row]);
             }
-        });
+        }
     }
     changed
 }
 
+struct CachedNode {
+    parent: Option<Entity>,
+    children: BTreeSet<Entity>,
+    local: Transform,
+    global: GlobalTransform,
+}
+
 pub(super) struct PropagationState {
-    query: Inputs,
+    query: Membership,
+    transform_changes: Inputs,
+    globals_query: Globals,
     world_id: WorldId,
     generation: u64,
-    relation_version: Option<RelationIndexVersion>,
-    relation_edges: Vec<(Entity, Entity)>,
-    entities: Vec<Entity>,
-    indices: BTreeMap<Entity, NodeId>,
-    parents: Vec<Option<NodeId>>,
-    hierarchy: Hierarchy,
-    locals: Vec<Transform>,
-    globals: Vec<GlobalTransform>,
-    ticks: ChangeTicks,
-    propagator: DirtyPropagator,
+    relation_cursor: Option<RelationChangeCursor>,
+    nodes: BTreeMap<Entity, CachedNode>,
     last_run: Tick,
     needs_rebuild: bool,
     pending_removals: BTreeSet<Entity>,
+    pending_publications: BTreeSet<Entity>,
 }
 
 impl Resource for PropagationState {}
@@ -87,21 +83,16 @@ impl PropagationState {
     pub(super) fn new(world: &mut World) -> Self {
         Self {
             query: world.query_filtered(),
+            transform_changes: world.query(),
+            globals_query: world.query(),
             world_id: world.id(),
             generation: world.archetype_generation(),
-            relation_version: None,
-            relation_edges: Vec::new(),
-            entities: Vec::new(),
-            indices: BTreeMap::new(),
-            parents: Vec::new(),
-            hierarchy: Hierarchy::new(),
-            locals: Vec::new(),
-            globals: Vec::new(),
-            ticks: ChangeTicks::new(),
-            propagator: DirtyPropagator::new(),
+            relation_cursor: None,
+            nodes: BTreeMap::new(),
             last_run: Tick::ZERO,
-            needs_rebuild: false,
+            needs_rebuild: true,
             pending_removals: BTreeSet::new(),
+            pending_publications: BTreeSet::new(),
         }
     }
 
@@ -124,11 +115,15 @@ impl PropagationState {
         let membership_dirty = signals.membership_dirty || rebuild;
         let mut stats = EcsPropagationStats::default();
         let relation_version = world.relations().index().version();
-        let new_relation_edges = (self.relation_version != Some(relation_version))
-            .then(|| hierarchy_edges(world, &mut stats));
-        let relations_changed = new_relation_edges
-            .as_ref()
-            .is_some_and(|edges| edges != &self.relation_edges);
+        let relation_dirty = self.relation_version != Some(relation_version);
+        // The relation index exposes a version but not a mutation journal.
+        // Refresh the parent cache through the authoritative per-source query
+        // on invalidation. This is deterministic and avoids traversing and
+        // sorting unrelated relation kinds. The committed cache is replaced
+        // only after hierarchy validation succeeds, so errors remain retryable.
+        if relation_dirty {
+            stats.relation_scans = 1;
+        }
         let new_entities = if membership_dirty {
             stats.membership_scans = 1;
             let mut entities = self.query.iter(world).collect::<Vec<_>>();
@@ -146,7 +141,7 @@ impl PropagationState {
                 .collect::<BTreeMap<_, _>>()
         });
         let indices = new_indices.as_ref().unwrap_or(&self.indices);
-        let new_parents = if membership_dirty || relations_changed {
+        let new_parents = if membership_dirty || relation_dirty {
             let mut parents = Vec::with_capacity(entities.len());
             for &entity in entities {
                 stats.relation_checks += 1;
@@ -178,16 +173,20 @@ impl PropagationState {
         } else {
             None
         };
-        let locals_changed = changed_entities::<Transform>(world, self.last_run, now);
-        let mut globals_changed = changed_entities::<GlobalTransform>(world, self.last_run, now);
+        let locals_changed = changed_entities(
+            &self.transform_changes,
+            world,
+            self.last_run,
+            now,
+            &mut stats,
+        );
+        let mut globals_changed =
+            changed_entities(&self.globals_query, world, self.last_run, now, &mut stats);
         globals_changed.extend(signals.globals.iter().copied());
         let signals = world.resource_mut::<super::PropagationSignals>();
         signals.membership_dirty = false;
         signals.globals.clear();
         self.last_run = now;
-        if let Some(edges) = new_relation_edges {
-            self.relation_edges = edges;
-        }
         self.relation_version = Some(relation_version);
         self.generation = generation;
         self.needs_rebuild = false;
@@ -362,16 +361,25 @@ pub enum TransformEcsError {
 pub struct EcsPropagationStats {
     /// Full membership queries (zero unless lifecycle or restore invalidated it).
     pub membership_scans: usize,
-    /// Full relation-index traversals to refresh canonical `ChildOf` edges.
-    /// Zero on clean frames; initial collection is included, not hidden at install.
+    /// Relation-cache refreshes after the global relation index version changes.
+    /// Each refresh checks the current transform sources (`O(V)`); stable
+    /// frames are zero. The cache never traverses unrelated relation edges.
     pub relation_scans: usize,
-    /// All index edges visited by those traversals, including unrelated kinds.
+    /// Global relation-index edges visited by propagation. Kept as an explicit
+    /// zero-valued guard so a regression to an all-edge walk is observable.
     pub relation_edges_scanned: usize,
-    /// Canonical `ChildOf` edge sort calls (including empty/single-edge inputs).
+    /// Global canonical edge sorts performed by propagation. The source cache
+    /// is already deterministic and therefore requires none.
     pub relation_sorts: usize,
     /// Entities whose `ChildOf` targets were inspected after topology invalidation.
     /// Separate from relation-index traversals, counted by `relation_scans`.
     pub relation_checks: usize,
+    /// Hierarchical dirty-chunk summary nodes tested by transform change scans.
+    pub change_chunk_summaries: usize,
+    /// Conservative dirty chunks returned by transform change scans.
+    pub change_chunks: usize,
+    /// Rows inspected after dirty chunks were reported.
+    pub change_rows_scanned: usize,
     /// Authoritative local values read from ECS after chunk/row tick filtering.
     pub local_reads: usize,
     /// World matrices composed, including descendants of dirty locals.

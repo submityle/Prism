@@ -309,16 +309,18 @@ fn filter_chunk_rejects_a_changed_column_that_is_not_in_the_filter_window() {
 fn sparse_changes_fallback_to_changed_entities_without_scanning_table_rows() {
     let mut w = World::new();
     let entities: Vec<Entity> = (0..5).map(|i| w.spawn(SparseDirty(i))).collect();
+    let state = w.query::<&SparseDirty>();
     advance_frame(&mut w);
     let last_run = w.last_change_tick();
     let this_run = w.change_tick();
     w.get_mut::<SparseDirty>(entities[3]).unwrap().0 += 1;
 
-    let state = w.query::<&SparseDirty>();
     let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
 
     assert_eq!(report.chunks.len(), 1, "one changed sparse row window");
-    assert_eq!(report.stats.sparse_entities_checked, entities.len());
+    assert_eq!(report.stats.sparse_entities_checked, 0);
+    assert_eq!(report.stats.sparse_fallback_scans, 0);
+    assert_eq!(report.stats.sparse_index_events, 1);
     assert_eq!(report.stats.sparse_chunk_candidates, 1);
     assert_eq!(report.stats.table_columns, 0);
     assert!(report.stats.non_table_columns > 0);
@@ -326,6 +328,65 @@ fn sparse_changes_fallback_to_changed_entities_without_scanning_table_rows() {
     assert_eq!(report.chunks[0].archetype, location.archetype_id);
     assert!(location.row as usize >= report.chunks[0].start);
     assert!((location.row as usize) < report.chunks[0].end);
+}
+
+#[test]
+fn sparse_dirty_query_uses_live_fallback_only_for_pre_activation_windows() {
+    let mut w = World::new();
+    let entities: Vec<Entity> = (0..32).map(|i| w.spawn(SparseDirty(i))).collect();
+    advance_frame(&mut w);
+
+    // This write predates the query, so an older observer window cannot rely
+    // on a cursor that did not exist yet. The bounded fallback preserves the
+    // historical query semantics and is visible in the report.
+    let this_run = w.change_tick();
+    w.get_mut::<SparseDirty>(entities[17]).unwrap().0 += 1;
+    let state = w.query::<&SparseDirty>();
+    let report = state.dirty_chunks_with_stats(&w, Tick::ZERO, this_run);
+
+    assert_eq!(report.chunks.len(), 1);
+    assert_eq!(report.stats.sparse_index_events, 0);
+    assert_eq!(report.stats.sparse_fallback_scans, 1);
+    assert_eq!(report.stats.sparse_entities_checked, entities.len());
+}
+
+#[test]
+fn sparse_dirty_query_falls_back_for_window_entirely_before_activation() {
+    let mut w = World::new();
+    let entity = w.spawn(SparseDirty(1));
+    let historical_end = w.change_tick();
+    w.increment_change_tick();
+    let state = w.query::<&SparseDirty>();
+
+    let report = state.dirty_chunks_with_stats(&w, Tick::ZERO, historical_end);
+
+    assert_eq!(report.chunks.len(), 1);
+    assert_eq!(report.stats.sparse_index_events, 0);
+    assert_eq!(report.stats.sparse_fallback_scans, 1);
+    assert_eq!(report.stats.sparse_entities_checked, 1);
+    let location = w.entities().location(entity).unwrap();
+    assert_eq!(report.chunks[0].archetype, location.archetype_id);
+}
+
+#[test]
+fn sparse_dirty_query_rewinds_to_live_fallback_after_index_consumption() {
+    let mut w = World::new();
+    let entity = w.spawn(SparseDirty(1));
+    let state = w.query::<&SparseDirty>();
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+    w.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
+
+    let first = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(first.stats.sparse_index_events, 1);
+    assert_eq!(first.stats.sparse_fallback_scans, 0);
+
+    let repeated = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(repeated.stats.sparse_index_events, 0);
+    assert_eq!(repeated.stats.sparse_fallback_scans, 1);
+    assert_eq!(repeated.stats.sparse_entities_checked, 1);
+    assert_eq!(repeated.chunks, first.chunks);
 }
 
 #[test]
@@ -342,6 +403,8 @@ fn sparse_dirty_fallback_is_empty_for_a_clean_window() {
     );
     assert!(report.chunks.is_empty());
     assert_eq!(report.stats.sparse_entities_checked, 5);
+    assert_eq!(report.stats.sparse_fallback_scans, 1);
+    assert_eq!(report.stats.sparse_index_events, 0);
     assert_eq!(report.stats.sparse_chunk_candidates, 0);
 }
 
@@ -368,7 +431,9 @@ fn sparse_membership_filters_feed_dirty_candidates_across_archetypes() {
     let with_report = with.dirty_chunks_with_stats(&w, last_run, this_run);
     assert_eq!(with_report.stats.filter_sources, 1);
     assert_eq!(with_report.stats.access_columns, 0);
-    assert_eq!(with_report.stats.sparse_entities_checked, 2);
+    assert_eq!(with_report.stats.sparse_entities_checked, 0);
+    assert_eq!(with_report.stats.sparse_fallback_scans, 0);
+    assert_eq!(with_report.stats.sparse_index_events, 2);
     assert_eq!(with_report.stats.sparse_chunk_candidates, 2);
     assert_eq!(with_report.chunks.len(), 2);
     assert!(with_report
@@ -385,6 +450,7 @@ fn sparse_membership_filters_feed_dirty_candidates_across_archetypes() {
     // while exact row admission remains the normal per-row filter's job.
     let without_report = without.dirty_chunks_with_stats(&w, last_run, this_run);
     assert_eq!(without_report.stats.filter_sources, 1);
+    assert_eq!(without_report.stats.sparse_index_events, 2);
     assert_eq!(without_report.chunks.len(), 2);
 }
 
@@ -404,7 +470,9 @@ fn sparse_filter_source_merges_with_dirty_table_columns() {
     let report = query.dirty_chunks_with_stats(&w, last_run, this_run);
     assert_eq!(report.stats.access_columns, 1);
     assert_eq!(report.stats.filter_sources, 1);
-    assert_eq!(report.stats.sparse_entities_checked, 1);
+    assert_eq!(report.stats.sparse_entities_checked, 0);
+    assert_eq!(report.stats.sparse_fallback_scans, 0);
+    assert_eq!(report.stats.sparse_index_events, 1);
     assert_eq!(report.stats.sparse_chunk_candidates, 1);
     assert_eq!(report.stats.column_candidates, 1);
     assert_eq!(report.stats.merged_candidates, 1);
@@ -450,7 +518,9 @@ fn sparse_filter_source_propagates_through_or() {
 
     let report = query.dirty_chunks_with_stats(&w, last_run, this_run);
     assert_eq!(report.stats.filter_sources, 1);
-    assert_eq!(report.stats.sparse_entities_checked, 1);
+    assert_eq!(report.stats.sparse_entities_checked, 0);
+    assert_eq!(report.stats.sparse_fallback_scans, 0);
+    assert_eq!(report.stats.sparse_index_events, 1);
     assert_eq!(report.stats.sparse_chunk_candidates, 1);
     assert_eq!(report.chunks.len(), 1);
 }

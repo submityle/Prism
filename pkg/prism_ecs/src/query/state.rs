@@ -113,6 +113,13 @@ pub struct QueryState<D: QueryData, F: QueryFilter = ()> {
     dirty_tracker: Option<Arc<ChangeTracker>>,
     dirty_sources: Vec<ComponentId>,
     dirty_cursors: SpinLock<Vec<ChangeCursor>>,
+    /// Last explicit dirty-window request. The change index is a forward-only
+    /// cursor, so overlapping or rewound requests must use the live fallback.
+    dirty_last_window: SpinLock<Option<(Tick, Tick)>>,
+    /// The tick at which this query began retaining sparse change-index
+    /// history. Windows that begin before this boundary need the conservative
+    /// live-set fallback; later windows are fully covered by the index.
+    dirty_activation_tick: Tick,
     _marker: PhantomData<fn() -> (D, F)>,
 }
 
@@ -126,6 +133,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     /// `&mut A` twice) — see [`Access`].
     pub fn new(world: &mut World) -> Self {
         let world_id = world.id();
+        let dirty_activation_tick = world.change_tick();
         let data_state = D::init_state(world.components_mut());
         let filter_state = F::init_state(world.components_mut());
         let mut access = Access::new();
@@ -167,6 +175,8 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             dirty_tracker,
             dirty_sources,
             dirty_cursors,
+            dirty_last_window: SpinLock::new(None),
+            dirty_activation_tick,
             _marker: PhantomData,
         }
     }
@@ -215,6 +225,32 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         for (index, &component) in self.dirty_sources.iter().enumerate() {
             tracker.collect(component, &mut cursors[index], last_run, this_run, out);
         }
+    }
+
+    /// Whether the exact sparse change index may be missing writes because the
+    /// requested window predates activation or overlaps a previous request.
+    /// The comparison uses the world's current tick rather than `this_run`:
+    /// callers may inspect an older window whose upper bound is before query
+    /// activation, and that window still needs the conservative fallback.
+    #[inline]
+    pub(crate) fn sparse_fallback_needed(
+        &self,
+        world: &World,
+        last_run: Tick,
+        _this_run: Tick,
+    ) -> bool {
+        let now = world.change_tick();
+        if self.dirty_activation_tick.is_newer_than(last_run, now) {
+            return true;
+        }
+        self.dirty_last_window
+            .lock()
+            .is_some_and(|(_, previous_this)| previous_this.is_newer_than(last_run, now))
+    }
+
+    #[inline]
+    pub(crate) fn remember_sparse_window(&self, last_run: Tick, this_run: Tick) {
+        *self.dirty_last_window.lock() = Some((last_run, this_run));
     }
 
     /// Whether `entity` is matched by this query (live and satisfying every
