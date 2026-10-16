@@ -173,6 +173,8 @@ Graph/Fabric/runtime/Scene/app/gpudriven 结果按上述范围记录，不推断
 
 2026-10-16 因磁盘空间告急，用户要求停止新的 Cargo 构建，仅收尾、白名单提交及轻量 Git 检查。因此上表的 shading 886 与 composition ECS 3 项仅属于迁移前检查点；当前 fixture 定义四项 ECS 测试，不记为四项通过。本轮格式化成功且工作区 `git diff --check` 通过；不据此推断类型检查、严格 GPU 或性能验收通过。
 
+2026-10-16 白名单收尾提交 `ad0413f77`（`feat(render): retain resident Scene texture leases`）仅包含 `shading/resources.rs` 的生产资源改动：七张导出纹理使用常驻 RHI lease，两张 `Rgba32Uint` ID/metadata 附件保持原生分配、未接入 RHI。提交采用隔离 index，已核实仅有该文件的 157 行新增、188 行删除；同文件两处 bindless 测试改动与其他工作区、暂存区内容均未夹带，`docs/refactoring-dev/` 未提交。该提交的轻量检查通过，未重新运行构建、测试、GPU 或性能测量，不改变以下完整验收状态。
+
 ## 原始文档目标尚未闭环的验收项
 
 1. 同一 frozen selection 的 Fabric compile → prepare_runtime → 真实 imports/recorders → Scene 原生整帧提交及 completion/history 回收。
