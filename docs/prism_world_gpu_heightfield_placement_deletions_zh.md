@@ -12,6 +12,7 @@
 - `a53b4fa76`：删除交付的资源、失败事务和测试边界加固；
 - `231a9643b`：同步 placement/deletion 验收文档。
 - `07fdaac3f`：补齐 admission、零容量和失败事务原子性测试。
+- `47ff0cecb`：记录此前的 placement deletion 复验结果。
 
 本文件只记录本切片的实现与验收边界；不把这些提交扩展解释为其他 World 模块或整个
 产品运行时的完成证明。
@@ -109,3 +110,12 @@ CARGO_TARGET_DIR=/private/tmp/prism-world-heightfield-placement-deletion-gpu WGP
 也没有接入 runtime persistence writer/reader、scene/editor command、网络复制、跨 GPU
 adapter 迁移或产品 renderer draw graph。没有新增 benchmark，因此不宣称吞吐、P99、功耗或
 与 UE/其他引擎的性能等价；本切片的 GPU parity 也不等于整个 World 系统完成。
+
+## 2026-10-16 收口复验
+
+本次收口使用隔离的 `CARGO_TARGET_DIR=/private/tmp/prism-world-heightfield-placement-deletion-gpu`，
+未触碰工作树中其他模块的已有改动。当前环境的定向结果为：rustfmt 通过，离线 `cargo check`
+通过，Clippy（`-D warnings`）通过，WGSL/Naga 测试 8/8 通过。物理 GPU 命令已实际执行，
+但当前运行环境没有 Metal adapter，3 个测试均在设备获取阶段返回
+`metal found no adapters`；因此本次没有新增物理 GPU 通过证据，历史 Apple M2 3/3 记录仍单独
+按历史结果保留。
