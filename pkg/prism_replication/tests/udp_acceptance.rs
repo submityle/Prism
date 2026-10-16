@@ -239,9 +239,18 @@ fn real_udp_peer_rebind_reconnects_after_old_socket_is_closed() {
     });
     assert_eq!(peer.recv(), None, "candidate is not active before commit");
 
+    peer.send_rebind_challenge(ticket)
+        .expect("send candidate path challenge");
+    let challenge = poll_until(|| recv_socket(&new_client), |packet| !packet.is_empty());
+    new_client
+        .send_to(&challenge, endpoint_addr)
+        .expect("echo candidate path challenge");
+
     drop(old_client);
-    peer.commit_rebind(ticket)
-        .expect("commit authorized rebind");
+    wait_until(|| {
+        endpoint.poll();
+        peer.commit_rebind(ticket).is_ok()
+    });
     assert_eq!(peer.id(), stable_id, "reconnect preserves peer identity");
     assert_eq!(peer.peer(), new_addr, "new socket is the active endpoint");
     assert_eq!(

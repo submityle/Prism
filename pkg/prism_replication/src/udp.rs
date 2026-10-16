@@ -14,6 +14,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use alloc::{collections::BTreeMap, collections::VecDeque, sync::Arc};
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::Mutex;
@@ -24,6 +26,9 @@ use crate::transport::{Transport, TransportMigrationCapability};
 /// The largest UDP payload (the IPv4 limit): a datagram larger than this can
 /// never arrive, so it bounds the receive buffer.
 pub const MAX_DATAGRAM: usize = 65_507;
+
+const PATH_CHALLENGE_MAGIC: [u8; 4] = *b"PRBV";
+const PATH_CHALLENGE_LEN: usize = PATH_CHALLENGE_MAGIC.len() + 16;
 
 /// Bounded receive limits for [`UdpMultiPeer`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,15 +115,25 @@ pub enum UdpPeerBindingState {
 
 /// An opaque, one-use authorization handle for a local endpoint rebind.
 ///
-/// Creating this value does not authenticate the remote endpoint. The caller
-/// must obtain authorization and validate the candidate path through an
-/// authenticated control protocol before calling [`UdpPeerTransport::commit_rebind`].
+/// The candidate must echo [`Self::challenge_packet`] from the candidate
+/// endpoint before [`UdpPeerTransport::commit_rebind`] succeeds. This proves
+/// reachability of that endpoint; caller-owned authentication and authorization
+/// remain separate concerns.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UdpPeerRebind {
     peer_id: UdpPeerId,
     from: SocketAddr,
     to: SocketAddr,
     generation: u64,
+    challenge: [u8; 16],
+}
+
+impl UdpPeerRebind {
+    /// Bytes a candidate endpoint must echo to prove it can receive traffic.
+    #[must_use]
+    pub fn challenge_packet(&self) -> [u8; PATH_CHALLENGE_LEN] {
+        path_challenge_packet(self.challenge)
+    }
 }
 
 /// Errors returned by the bounded peer endpoint migration state machine.
@@ -134,6 +149,8 @@ pub enum UdpPeerMigrationError {
     MigrationInProgress,
     /// The ticket does not match the current binding generation/state.
     StaleMigration,
+    /// The candidate endpoint has not completed the challenge/response step.
+    PathNotValidated,
 }
 
 impl core::fmt::Display for UdpPeerMigrationError {
@@ -144,6 +161,7 @@ impl core::fmt::Display for UdpPeerMigrationError {
             Self::EndpointInUse => "UDP peer endpoint is already active or reserved",
             Self::MigrationInProgress => "UDP peer already has a rebind in progress",
             Self::StaleMigration => "UDP peer rebind ticket is stale",
+            Self::PathNotValidated => "UDP peer rebind candidate path is not validated",
         };
         formatter.write_str(message)
     }
@@ -156,6 +174,7 @@ struct PeerEntry {
     queue: VecDeque<Vec<u8>>,
     generation: u64,
     pending_rebind: Option<UdpPeerRebind>,
+    path_validated: bool,
 }
 
 struct MultiPeerState {
@@ -166,6 +185,8 @@ struct MultiPeerState {
     total_queued: usize,
     dropped: u64,
     last_error: Option<io::ErrorKind>,
+    challenge_key: RandomState,
+    challenge_counter: u64,
 }
 
 impl MultiPeerState {
@@ -178,6 +199,8 @@ impl MultiPeerState {
             total_queued: 0,
             dropped: 0,
             last_error: None,
+            challenge_key: RandomState::new(),
+            challenge_counter: 0,
         }
     }
 }
@@ -194,10 +217,11 @@ impl MultiPeerState {
 /// observable through [`dropped`](Self::dropped).
 ///
 /// An admitted peer can be explicitly rebound to a new endpoint through
-/// [`UdpPeerTransport::request_rebind`], followed by an application-authorized
-/// [`UdpPeerTransport::commit_rebind`]. The stable [`UdpPeerId`] and all queued
-/// datagrams survive the move. This is a local endpoint map operation, not
-/// NAT/ICE/path validation or a replacement for QUIC connection migration.
+/// [`UdpPeerTransport::request_rebind`], [`UdpPeerTransport::send_rebind_challenge`],
+/// and a candidate echo before [`UdpPeerTransport::commit_rebind`]. The stable
+/// [`UdpPeerId`] and all queued datagrams survive the move. This validates
+/// candidate reachability, but is not NAT/ICE/relay or a replacement for QUIC
+/// connection migration.
 #[derive(Clone)]
 pub struct UdpMultiPeer {
     socket: Arc<UdpSocket>,
@@ -258,6 +282,7 @@ impl UdpMultiPeer {
                     queue: VecDeque::new(),
                     generation: 0,
                     pending_rebind: None,
+                    path_validated: false,
                 },
             );
             peer_id
@@ -286,6 +311,12 @@ impl UdpMultiPeer {
                 Ok((len, peer)) => {
                     received += 1;
                     let mut state = lock(&self.state);
+                    if state.reserved_endpoints.contains_key(&peer) {
+                        if !state.consume_path_response(peer, &buffer[..len]) {
+                            state.dropped = state.dropped.saturating_add(1);
+                        }
+                        continue;
+                    }
                     let total_full = state.total_queued >= self.config.max_total_queued;
                     let Some(peer_id) = state.endpoints.get(&peer).copied() else {
                         state.dropped = state.dropped.saturating_add(1);
@@ -327,6 +358,54 @@ impl UdpMultiPeer {
     /// Take the last socket error observed by [`poll`](Self::poll).
     pub fn take_error_kind(&self) -> Option<io::ErrorKind> {
         lock(&self.state).last_error.take()
+    }
+}
+
+impl MultiPeerState {
+    fn make_challenge(
+        &mut self,
+        peer_id: UdpPeerId,
+        from: SocketAddr,
+        to: SocketAddr,
+        generation: u64,
+    ) -> [u8; 16] {
+        self.challenge_counter = self.challenge_counter.wrapping_add(1);
+        let counter = self.challenge_counter;
+        let mut first = self.challenge_key.build_hasher();
+        0_u8.hash(&mut first);
+        peer_id.hash(&mut first);
+        from.hash(&mut first);
+        to.hash(&mut first);
+        generation.hash(&mut first);
+        counter.hash(&mut first);
+        let mut second = self.challenge_key.build_hasher();
+        1_u8.hash(&mut second);
+        peer_id.hash(&mut second);
+        from.hash(&mut second);
+        to.hash(&mut second);
+        generation.hash(&mut second);
+        counter.hash(&mut second);
+        let mut challenge = [0_u8; 16];
+        challenge[..8].copy_from_slice(&first.finish().to_le_bytes());
+        challenge[8..].copy_from_slice(&second.finish().to_le_bytes());
+        challenge
+    }
+
+    fn consume_path_response(&mut self, source: SocketAddr, bytes: &[u8]) -> bool {
+        let Some(peer_id) = self.reserved_endpoints.get(&source).copied() else {
+            return false;
+        };
+        let Some(entry) = self.peers.get_mut(&peer_id) else {
+            return false;
+        };
+        let Some(migration) = entry.pending_rebind else {
+            return false;
+        };
+        if migration.to != source || !valid_path_challenge(bytes, migration.challenge) {
+            return false;
+        }
+        entry.path_validated = true;
+        true
     }
 }
 
@@ -419,11 +498,13 @@ impl UdpPeerTransport {
             .get(&self.peer_id)
             .expect("peer checked above")
             .generation;
+        let challenge = state.make_challenge(self.peer_id, current, new_peer, generation);
         let migration = UdpPeerRebind {
             peer_id: self.peer_id,
             from: current,
             to: new_peer,
             generation,
+            challenge,
         };
         state.reserved_endpoints.insert(new_peer, self.peer_id);
         state
@@ -431,7 +512,38 @@ impl UdpPeerTransport {
             .get_mut(&self.peer_id)
             .expect("peer checked above")
             .pending_rebind = Some(migration);
+        state
+            .peers
+            .get_mut(&self.peer_id)
+            .expect("peer checked above")
+            .path_validated = false;
         Ok(migration)
+    }
+
+    /// Send the challenge packet to the candidate endpoint.
+    pub fn send_rebind_challenge(&self, migration: UdpPeerRebind) -> io::Result<()> {
+        let destination = {
+            let state = lock(&self.state);
+            let entry = state.peers.get(&self.peer_id).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    UdpPeerMigrationError::UnknownPeer,
+                )
+            })?;
+            if migration.peer_id != self.peer_id
+                || entry.pending_rebind != Some(migration)
+                || entry.generation != migration.generation
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    UdpPeerMigrationError::StaleMigration,
+                ));
+            }
+            migration.to
+        };
+        self.socket
+            .send_to(&migration.challenge_packet(), destination)
+            .map(|_| ())
     }
 
     /// Commit a previously requested endpoint rebind atomically.
@@ -446,6 +558,9 @@ impl UdpPeerTransport {
             .ok_or(UdpPeerMigrationError::UnknownPeer)?;
         if entry.pending_rebind != Some(migration) || entry.generation != migration.generation {
             return Err(UdpPeerMigrationError::StaleMigration);
+        }
+        if !entry.path_validated {
+            return Err(UdpPeerMigrationError::PathNotValidated);
         }
         if state
             .endpoints
@@ -486,6 +601,11 @@ impl UdpPeerTransport {
             .get_mut(&self.peer_id)
             .expect("peer checked above")
             .pending_rebind = None;
+        state
+            .peers
+            .get_mut(&self.peer_id)
+            .expect("peer checked above")
+            .path_validated = false;
         Ok(())
     }
 
@@ -535,6 +655,12 @@ impl Transport for UdpPeerTransport {
             match self.socket.recv_from(&mut buffer) {
                 Ok((len, peer)) => {
                     let mut state = lock(&self.state);
+                    if state.reserved_endpoints.contains_key(&peer) {
+                        if !state.consume_path_response(peer, &buffer[..len]) {
+                            state.dropped = state.dropped.saturating_add(1);
+                        }
+                        continue;
+                    }
                     let total_full = state.total_queued >= self.config.max_total_queued;
                     let Some(peer_id) = state.endpoints.get(&peer).copied() else {
                         state.dropped = state.dropped.saturating_add(1);
@@ -579,6 +705,17 @@ impl Transport for UdpPeerTransport {
 
 fn valid_peer_endpoint(endpoint: SocketAddr) -> bool {
     endpoint.port() != 0 && !endpoint.ip().is_unspecified()
+}
+
+fn path_challenge_packet(challenge: [u8; 16]) -> [u8; PATH_CHALLENGE_LEN] {
+    let mut packet = [0_u8; PATH_CHALLENGE_LEN];
+    packet[..PATH_CHALLENGE_MAGIC.len()].copy_from_slice(&PATH_CHALLENGE_MAGIC);
+    packet[PATH_CHALLENGE_MAGIC.len()..].copy_from_slice(&challenge);
+    packet
+}
+
+fn valid_path_challenge(bytes: &[u8], challenge: [u8; 16]) -> bool {
+    bytes == path_challenge_packet(challenge)
 }
 
 fn unspecified_peer() -> SocketAddr {
@@ -1001,6 +1138,22 @@ mod tests {
         assert_eq!(peer.recv(), Some(b"before-rebind".to_vec()));
         assert_eq!(peer.recv(), None);
 
+        assert_eq!(
+            peer.commit_rebind(ticket),
+            Err(UdpPeerMigrationError::PathNotValidated)
+        );
+        peer.send_rebind_challenge(ticket).expect("send challenge");
+        let mut challenge_buffer = [0_u8; MAX_DATAGRAM];
+        let challenge = recv_within(|| match new_client.recv_from(&mut challenge_buffer) {
+            Ok((len, _)) => Some(challenge_buffer[..len].to_vec()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => None,
+            Err(error) => panic!("unexpected challenge receive error: {error}"),
+        })
+        .expect("receive challenge");
+        new_client
+            .send_to(&challenge, endpoint_addr)
+            .expect("echo challenge");
+        assert_eq!(poll_within(&endpoint, 1), 1);
         peer.commit_rebind(ticket).expect("commit rebind");
         assert_eq!(peer.id(), peer_id);
         assert_eq!(peer.peer(), new_addr);
@@ -1081,6 +1234,32 @@ mod tests {
         let second_ticket = peer_a
             .request_rebind(candidate_addr)
             .expect("candidate released after cancel");
-        peer_a.commit_rebind(second_ticket).expect("second commit");
+        assert_eq!(
+            peer_a.commit_rebind(second_ticket),
+            Err(UdpPeerMigrationError::PathNotValidated)
+        );
+        peer_a
+            .send_rebind_challenge(second_ticket)
+            .expect("send second challenge");
+        let mut challenge_buffer = [0_u8; MAX_DATAGRAM];
+        let challenge = recv_within(|| match candidate.recv_from(&mut challenge_buffer) {
+            Ok((len, _)) => Some(challenge_buffer[..len].to_vec()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => None,
+            Err(error) => panic!("unexpected challenge receive error: {error}"),
+        })
+        .expect("receive second challenge");
+        candidate
+            .send_to(&challenge, endpoint.local_addr().expect("endpoint address"))
+            .expect("echo second challenge");
+        let mut committed = false;
+        for _ in 0..1_000 {
+            endpoint.poll();
+            if peer_a.commit_rebind(second_ticket).is_ok() {
+                committed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(committed, "second challenge response did not validate");
     }
 }
