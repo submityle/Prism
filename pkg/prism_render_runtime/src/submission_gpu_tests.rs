@@ -203,6 +203,45 @@ fn assert_backend_slots_retired(runtime: &WgpuRuntime, retired: [rhi::BufferId; 
     }
 }
 
+fn history_consumer_graph(
+    runtime: &WgpuRuntime,
+    source: rhi::BufferId,
+    readback: rhi::BufferId,
+) -> prism_render_graph::PreparedGraph {
+    let usage = rhi::BufferUsages::COPY_SRC | rhi::BufferUsages::COPY_DST;
+    let mut graph = runtime.new_graph();
+    let source = graph.import_buffer(
+        "imported persistent history",
+        BufferDesc::new(BUFFER_SIZE, usage),
+        ImportedBuffer {
+            buffer: source,
+            entry_state: rhi::BufferState::copy_dst(),
+        },
+    );
+    let destination = graph.import_buffer(
+        "history readback",
+        BufferDesc::new(BUFFER_SIZE, usage),
+        ImportedBuffer {
+            buffer: readback,
+            entry_state: rhi::BufferState::initial(),
+        },
+    );
+    graph.add_transfer_pass(
+        "imported history -> readback",
+        PassFlags::SIDE_EFFECT,
+        |builder| {
+            let source = builder.copy_src_buffer(source);
+            let destination = builder.copy_dst_buffer(destination);
+            move |context| {
+                context.copy_buffer_to_buffer(source, 0, destination, 0, BUFFER_SIZE);
+            }
+        },
+    );
+    graph
+        .prepare()
+        .expect("history consumer graph must prepare")
+}
+
 #[test]
 fn execute_owned_gpu_clone_preserves_buffers_through_completion_and_readback() {
     let Some(runtime) = hardware_runtime_or_skip() else {
@@ -280,6 +319,58 @@ fn execute_owned_gpu_early_drop_completes_copies_and_retires_callback_resources(
     assert_eq!(runtime.frames_in_flight(), 0);
     assert_payload(&runtime, readback);
     assert_backend_slots_retired(&runtime, buffers);
+    assert_payload(&runtime, upload);
+    assert_payload(&runtime, readback);
+    runtime.device().destroy_buffer(upload);
+    runtime.device().destroy_buffer(readback);
+}
+
+#[test]
+fn execute_prepared_owned_gpu_imports_completed_history_and_reads_it_back() {
+    let Some(runtime) = hardware_runtime_or_skip() else {
+        return;
+    };
+    let CopyFrame {
+        graph,
+        upload,
+        readback,
+    } = transfer_frame(&runtime);
+    let producer = runtime
+        .execute_owned(graph)
+        .expect("real GPU producer submission");
+    let producer_value = producer.completion_value();
+    let history = producer
+        .allocations()
+        .buffers()
+        .iter()
+        .find_map(|(_, lifetime, id)| (*lifetime == Lifetime::Persistent).then_some(*id))
+        .expect("producer must retain a persistent history buffer");
+    eprintln!("producer buffers before wait: {:?}", producer.allocations().buffers());
+
+    // The first frame must be complete before its persistent storage is used as
+    // an imported history input. The producer owner is intentionally retained
+    // and then passed explicitly to the consumer's completion owner.
+    assert!(runtime.wait_idle());
+    assert_eq!(runtime.completed_value(), producer_value);
+    eprintln!("producer buffers after wait: {:?}", producer.allocations().buffers());
+    assert_payload(&runtime, history);
+
+    let prepared = history_consumer_graph(&runtime, history, readback);
+    let consumer = runtime
+        .execute_prepared_owned(prepared, core::slice::from_ref(&producer))
+        .expect("history import must use the exact creating owner");
+    assert!(consumer.allocations().buffers().is_empty());
+    drop(producer);
+
+    assert!(runtime.wait_idle());
+    assert!(consumer.is_complete());
+    assert_payload(&runtime, readback);
+
+    // The source owner is retained by the consumer until its actual completion,
+    // but imported buffers never become graph-owned allocations. Both external
+    // imports remain valid and are cleaned up only by this test.
+    drop(consumer);
+    assert_payload(&runtime, history);
     assert_payload(&runtime, upload);
     assert_payload(&runtime, readback);
     runtime.device().destroy_buffer(upload);

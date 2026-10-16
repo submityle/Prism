@@ -93,10 +93,7 @@ impl RenderDevice for LossyNullDevice {
         self.inner.create_sampler(descriptor)
     }
 
-    fn create_shader_module(
-        &self,
-        descriptor: &rhi::ShaderModuleDescriptor,
-    ) -> rhi::ShaderModuleId {
+    fn create_shader_module(&self, descriptor: &ShaderModuleDescriptor) -> rhi::ShaderModuleId {
         self.inner.create_shader_module(descriptor)
     }
 
@@ -320,7 +317,13 @@ fn surface_present_loop_runs_headless_on_the_null_backend() {
     })
     .expect("the frame is acquired, drawn, and presented");
 
-    assert_eq!(rt.frames_in_flight(), 1, "the presented frame is tracked");
+    // The null queue invokes completion immediately, so a confirmed frame is
+    // not reported as in flight even though its owner remains in scope.
+    assert_eq!(
+        rt.frames_in_flight(),
+        0,
+        "completed frames are not in flight"
+    );
     assert!(rt.wait_idle(), "the paced pipeline drains");
     assert_eq!(rt.frames_in_flight(), 0);
 }

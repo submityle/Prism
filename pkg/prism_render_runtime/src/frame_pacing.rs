@@ -107,6 +107,19 @@ impl<Token> FramePacer<Token> {
         self.outstanding.push_front(token);
     }
 
+    /// Drops oldest tokens that the caller has independently confirmed as
+    /// complete. Completion is queue-ordered, so removing only from the front
+    /// preserves the pacing order and avoids retaining stale tokens.
+    pub(crate) fn discard_while(&mut self, mut is_complete: impl FnMut(&Token) -> bool) {
+        while self
+            .outstanding
+            .front()
+            .is_some_and(|token| is_complete(token))
+        {
+            self.outstanding.pop_front();
+        }
+    }
+
     /// Removes and returns every outstanding token, oldest first.
     ///
     /// Used by the runtime's idle/shutdown path to hand the backend a complete

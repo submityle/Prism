@@ -21,6 +21,10 @@ prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu"
 # The headless reference backend: lets the surface/present loop be exercised
 # end to end in CI without a window or a GPU.
 prism_render_driver_null = { path = "../../os-backends/prism_render_driver_null" }
+# The Render Fabric integration test compiles the real architecture selection
+# and lowers that exact plan into this runtime; it is dev-only to keep the
+# shipped runtime dependency direction one-way.
+prism_render_architecture = { path = "../prism_render_architecture" }
 
 [lints]
 workspace = true

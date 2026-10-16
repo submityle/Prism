@@ -9,12 +9,13 @@ use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+use prism_render_architecture::frame_graph::ResourceLifetime;
 use prism_render_architecture::render_fabric::{
     AccessKind, CapabilitySet, DeviceFabric, FeatureCatalog, FeatureDefinition, FeatureId,
     FeatureKind, FeatureVariant, FrameResourceBinding, FrozenRoots, GraphLimits, PassKey,
     PassTemplate, PhysicalResource, QueueClass, RenderDomain, RenderQualityTier, ResourceInput,
-    ResourceKey, ResourceLayout, ResourceLifetime, ResourceTemplate, ResourceUse, RuntimeImport,
-    RuntimePassBinding, RuntimeResourceHandle, ServiceSet, VariantId,
+    ResourceKey, ResourceLayout, ResourceTemplate, ResourceUse, RuntimeImport, RuntimePassBinding,
+    RuntimeResourceHandle, ServiceSet, VariantId,
 };
 use prism_render_driver as rhi;
 use prism_render_driver_null::{NullAdapter, NullDevice, NullInstance, NullQueue, NullSurface};
@@ -518,7 +519,9 @@ fn fabric_compile_prepare_and_runtime_submission_share_one_frozen_selection() {
                 ),
             );
             builder.write_storage_buffer(source);
-            move |commands| commands.dispatch(1, 1, 1)
+            move |commands| {
+                commands.dispatch(1, 1, 1);
+            }
         });
         graph
     };
@@ -607,6 +610,7 @@ fn fabric_compile_prepare_and_runtime_submission_share_one_frozen_selection() {
     drop(producer);
     instance.device(0).queue.complete_through(2);
     assert!(owner.is_complete());
+    assert!(runtime.wait_idle());
     assert_eq!(runtime.frames_in_flight(), 0);
     drop(owner);
     instance.device(0).device.assert_counts(2, 2);

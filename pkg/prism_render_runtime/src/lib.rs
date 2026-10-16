@@ -246,6 +246,14 @@ where
     }
 }
 
+/// A queue token paired with the runtime completion value assigned to it.
+/// The backend token remains opaque; the value lets the runtime discard
+/// callback-confirmed tokens from its pacing queue without downcasting them.
+struct PacedCompletion {
+    token: CompletionToken,
+    value: u64,
+}
+
 /// The RHI-backed render runtime: an adapter plus its device/queue, owned for
 /// the app's lifetime, with the frame extent graphs resolve against.
 pub struct RenderRuntime<I: Instance + 'static> {
@@ -260,7 +268,7 @@ pub struct RenderRuntime<I: Instance + 'static> {
     queue: I::Queue,
     extent: Extent3d,
     /// The frames-in-flight bound and its outstanding completion tokens.
-    pacer: Mutex<FramePacer<CompletionToken>>,
+    pacer: Mutex<FramePacer<PacedCompletion>>,
     /// Submission values used by render resources for precise retirement.
     submitted_value: AtomicU64,
     completed_value: Arc<AtomicU64>,
@@ -729,7 +737,7 @@ impl<I: Instance + 'static> RenderRuntime<I> {
     /// partially-updated state — every mutation is a single `VecDeque` push or
     /// pop — so recovering the guard is safe and keeps a single panicking frame
     /// from wedging the whole render loop.
-    fn pacer(&self) -> MutexGuard<'_, FramePacer<CompletionToken>> {
+    fn pacer(&self) -> MutexGuard<'_, FramePacer<PacedCompletion>> {
         self.pacer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -744,7 +752,10 @@ impl<I: Instance + 'static> RenderRuntime<I> {
     /// The number of frames submitted but not yet confirmed complete.
     #[must_use]
     pub fn frames_in_flight(&self) -> usize {
-        self.pacer().in_flight()
+        let completed = self.completed_value();
+        let mut pacer = self.pacer();
+        pacer.discard_while(|token| token.value <= completed);
+        pacer.in_flight()
     }
 
     /// Returns the value that the next successful submission will receive.
@@ -854,8 +865,11 @@ impl<I: Instance + 'static> RenderRuntime<I> {
             .load(AtomicOrdering::Acquire)
             .checked_add(1)
             .ok_or(SubmissionError::CompletionValueExhausted)?;
+        pacer.discard_while(|token| {
+            token.value <= self.completed_value.load(AtomicOrdering::Acquire)
+        });
         if let Some(oldest) = pacer.begin_frame() {
-            if !self.queue.wait_for(oldest.as_ref()) {
+            if !self.queue.wait_for(oldest.token.as_ref()) {
                 pacer.restore_oldest(oldest);
                 return Err(SubmissionError::CompletionUnconfirmed);
             }
@@ -874,7 +888,7 @@ impl<I: Instance + 'static> RenderRuntime<I> {
             imports.to_vec(),
         );
         let token = self.queue.submit_tracked(core::slice::from_ref(&commands));
-        pacer.record(token);
+        pacer.record(PacedCompletion { token, value });
         drop(pacer);
         let completed = Arc::clone(&self.completed_value);
         let completion_owner = frame.clone();
@@ -896,10 +910,10 @@ impl<I: Instance + 'static> RenderRuntime<I> {
         I::Queue: FrameSync,
     {
         let mut pacer = self.pacer();
-        let outstanding: Vec<CompletionToken> = pacer.drain().collect();
+        let outstanding: Vec<PacedCompletion> = pacer.drain().collect();
         let mut unconfirmed = Vec::new();
         for token in outstanding {
-            if !self.queue.wait_for(token.as_ref()) {
+            if !self.queue.wait_for(token.token.as_ref()) {
                 unconfirmed.push(token);
             }
         }
