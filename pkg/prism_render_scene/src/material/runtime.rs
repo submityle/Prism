@@ -160,10 +160,6 @@ impl RenderMaterialRegistry {
         self.textures.generation_table()
     }
 
-    pub(crate) fn texture_generation_version(&self) -> u32 {
-        self.textures.generation_version()
-    }
-
     /// Reclaims texture slots whose GPU completion proof has arrived.
     pub fn reclaim_completed_textures(
         &mut self,

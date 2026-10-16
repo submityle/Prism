@@ -20,8 +20,9 @@ use bevy_pbr::StandardMaterial;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::render_resource::{TextureDataOrder, TextureDimension, TextureFormat};
 use prism_render_material::{
-    MaterialVtError, MaterialVtFormat, MaterialVtSourceDescriptor, MaterialVtSourceSnapshot,
-    NO_VIRTUAL_TEXTURE,
+    bake_procedural_vt, MaterialGraph, MaterialVtError, MaterialVtFormat,
+    MaterialVtSourceDescriptor, MaterialVtSourceSnapshot, ProceduralVtBakeConfig,
+    ProceduralVtBakeError, NO_VIRTUAL_TEXTURE,
 };
 
 /// Default logical page edge used by the material source/producer seam.
@@ -583,6 +584,32 @@ impl MaterialVtSourceRegistry {
         identity
     }
 
+    /// Bakes a supported procedural material graph into a source snapshot and
+    /// publishes it through the same registry consumed by the VT producer.
+    ///
+    /// The registry owns the stable texture identity and default page size;
+    /// the caller supplies only the baked base dimensions. The graph is fully
+    /// evaluated before this method mutates the current source entry.
+    pub fn insert_procedural_graph(
+        &mut self,
+        asset_id: AssetId<Image>,
+        graph: &MaterialGraph,
+        width: u32,
+        height: u32,
+    ) -> Result<MaterialVtSourceIdentity, ProceduralVtBakeError> {
+        let source_config = self
+            .config_for_asset(asset_id)
+            .map_err(|_| ProceduralVtBakeError::TextureIdExhausted)?;
+        let config = ProceduralVtBakeConfig::new(
+            source_config.texture_id,
+            width,
+            height,
+            source_config.page_size,
+        );
+        let snapshot = bake_procedural_vt(graph, config)?;
+        Ok(self.insert_snapshot(asset_id, snapshot))
+    }
+
     /// Removes an image source after the owning main-world asset is removed.
     pub fn remove(&mut self, asset_id: AssetId<Image>) -> Option<MaterialVtSourceEntry> {
         self.entries.remove(&asset_id)
@@ -863,7 +890,8 @@ impl ImageMipLayout {
 mod tests {
     use super::*;
     use bevy_asset::{uuid::Uuid, Handle, RenderAssetUsages};
-    use prism_render_material::NO_VIRTUAL_TEXTURE;
+    use prism_render_material::{MaterialNode, MaterialNodeId, MaterialValue, NO_VIRTUAL_TEXTURE};
+    use std::collections::BTreeMap;
 
     fn image_id(value: u128) -> AssetId<Image> {
         Handle::<Image>::from(Uuid::from_u128(value)).id()
@@ -892,6 +920,53 @@ mod tests {
 
     fn config() -> MaterialVtSourceConfig {
         MaterialVtSourceConfig::new(17, 2)
+    }
+
+    #[test]
+    fn procedural_graph_enters_the_existing_source_registry() {
+        let id = image_id(0xE1);
+        let output = MaterialNodeId(1);
+        let graph = MaterialGraph {
+            nodes: BTreeMap::from([
+                (
+                    output,
+                    MaterialNode::Add(MaterialNodeId(2), MaterialNodeId(3)),
+                ),
+                (
+                    MaterialNodeId(2),
+                    MaterialNode::Noise {
+                        scale: 2.0,
+                        seed: 9,
+                    },
+                ),
+                (
+                    MaterialNodeId(3),
+                    MaterialNode::Constant(MaterialValue::Scalar(0.1)),
+                ),
+            ]),
+            output: Some(output),
+            plan: None,
+        };
+        let mut registry = MaterialVtSourceRegistry::default();
+        let identity = registry
+            .insert_procedural_graph(id, &graph, 4, 2)
+            .expect("supported graph should publish");
+
+        match registry.lookup(id) {
+            MaterialVtSourceLookup::Available {
+                identity: current,
+                snapshot,
+            } => {
+                assert_eq!(current, identity);
+                assert_eq!(snapshot.descriptor().texture_id(), 1);
+                assert_eq!(snapshot.descriptor().format(), MaterialVtFormat::Rgba8Unorm);
+                assert_eq!(snapshot.descriptor().mip_count(), 3);
+                assert!(registry.eligible_for_default_producer(id));
+            }
+            MaterialVtSourceLookup::Missing | MaterialVtSourceLookup::Unavailable { .. } => {
+                panic!("procedural source should be available")
+            }
+        }
     }
 
     #[test]

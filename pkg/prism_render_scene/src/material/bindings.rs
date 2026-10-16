@@ -49,7 +49,6 @@ pub struct MaterialBindGroup {
     generation_table_buffer_id: Option<BufferId>,
     buffer_version: u32,
     texture_version: u32,
-    generation_table_version: u32,
     execution_table_version: u32,
 }
 
@@ -194,7 +193,6 @@ impl FromWorld for MaterialBindGroup {
             generation_table_buffer_id: None,
             buffer_version: 0,
             texture_version: 0,
-            generation_table_version: 0,
             execution_table_version: 0,
         }
     }
@@ -222,7 +220,6 @@ impl MaterialBindGroup {
         let ids = [headers.id(), parameters.id(), textures.id()];
         let version = runtime.registry.snapshot().buffer_version;
         let texture_version = arrays.version();
-        let generation_table_version = runtime.texture_generation_version();
         let execution_table_version = runtime.registry.execution_table_version();
         let generation_table_buffer_id = self.generation_table_buffer.as_ref().map(Buffer::id);
         let virtual_texture_buffer_ids = [
@@ -233,18 +230,17 @@ impl MaterialBindGroup {
             && self.virtual_texture_buffer_ids == Some(virtual_texture_buffer_ids)
             && self.buffer_version == version
             && self.texture_version == texture_version
-            && self.generation_table_version == generation_table_version
             && self.execution_table_version == execution_table_version
             && self.generation_table_buffer_id == generation_table_buffer_id
         {
             return;
         }
-        if self.bindless && self.generation_table_version != generation_table_version {
+        if self.bindless && self.texture_version != texture_version {
             if let Some(buffer) = self.generation_table_buffer.as_ref() {
                 queue.write_buffer(
                     buffer,
                     0,
-                    bytemuck::cast_slice(runtime.texture_generation_table()),
+                    bytemuck::cast_slice(arrays.published_generations()),
                 );
             }
         }
@@ -328,7 +324,20 @@ impl MaterialBindGroup {
         self.generation_table_buffer_id = generation_table_buffer_id;
         self.buffer_version = version;
         self.texture_version = texture_version;
-        self.generation_table_version = generation_table_version;
         self.execution_table_version = execution_table_version;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn generation_table_upload_uses_only_published_texture_arrays() {
+        let source = include_str!("bindings.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("bindings production section");
+        assert!(production.contains("arrays.published_generations()"));
+        assert!(!production.contains("bytemuck::cast_slice(runtime.texture_generation_table())"));
     }
 }

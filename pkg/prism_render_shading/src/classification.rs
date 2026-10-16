@@ -597,7 +597,10 @@ fn continuous_response_arms(
     Ok((family, left, right, channels))
 }
 
-fn select_program(program: ProgramRef, region: u32) -> ProgramRef {
+fn select_program(header: &GpuMaterialHeader, program: ProgramRef, region: u32) -> ProgramRef {
+    if header.feature_flags & MaterialFeatureFlags::REGION_ILLUMINATION.0 == 0 {
+        return program;
+    }
     if matches!(
         program,
         ProgramRef::Builtin(BuiltinProgram::Lit | BuiltinProgram::Npr)
@@ -619,7 +622,7 @@ fn selected_execution_identity(
 ) -> Result<(ExecutionFamily, ProgramRef), ClassificationError> {
     validate_surface(header)?;
     let (family, program) = response_execution_identity(header, execution)?;
-    let selected = select_program(program, region);
+    let selected = select_program(header, program, region);
     Ok((execution_family_for_program(family, selected), selected))
 }
 
@@ -699,7 +702,7 @@ pub fn classify_material_header_with_program(
     if program == ProgramRef::Registered(ProgramId(u32::MAX)) {
         return Err(ClassificationError::InvalidProgramId);
     }
-    Ok(select_program(program, region))
+    Ok(select_program(header, program, region))
 }
 
 #[cfg(test)]

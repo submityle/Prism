@@ -47,6 +47,12 @@ fn visit(
             visit(graph, *a, visiting, visited)?;
             visit(graph, *b, visiting, visited)?;
         }
+        MaterialNode::Curve { input, .. } => visit(graph, *input, visiting, visited)?,
+        MaterialNode::Blend { a, b, weight } => {
+            visit(graph, *a, visiting, visited)?;
+            visit(graph, *b, visiting, visited)?;
+            visit(graph, *weight, visiting, visited)?;
+        }
         MaterialNode::Closure { inputs, .. } => {
             if inputs.is_empty() {
                 return Err(MaterialValidationError::EmptyClosure(id));

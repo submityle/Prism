@@ -35,6 +35,22 @@ pub enum ClosureKind {
 #[derive(Clone, Debug, PartialEq)]
 pub enum MaterialNode {
     Constant(MaterialValue),
+    /// The normalized two-dimensional texture coordinate (`x`, `y`).
+    Uv,
+    /// A deterministic value-noise source evaluated in texture space.
+    Noise {
+        /// Frequency applied to the normalized UV coordinate.
+        scale: f32,
+        /// Stable seed used by the hash; changing it changes the pattern.
+        seed: u32,
+    },
+    /// A piecewise-linear scalar remap used by procedural authoring.
+    Curve {
+        /// Input node whose first lane is remapped.
+        input: MaterialNodeId,
+        /// Sorted `(x, y)` control points. Values outside the endpoints clamp.
+        points: Vec<[f32; 2]>,
+    },
     Parameter {
         slot: u32,
         default: MaterialValue,
@@ -45,6 +61,12 @@ pub enum MaterialNode {
     },
     Add(MaterialNodeId, MaterialNodeId),
     Multiply(MaterialNodeId, MaterialNodeId),
+    /// Linear interpolation between two values using the first lane of `weight`.
+    Blend {
+        a: MaterialNodeId,
+        b: MaterialNodeId,
+        weight: MaterialNodeId,
+    },
     Closure {
         kind: ClosureKind,
         inputs: Vec<MaterialNodeId>,
@@ -154,6 +176,12 @@ fn collect_live(graph: &MaterialGraph, id: MaterialNodeId, live: &mut BTreeSet<M
         MaterialNode::Add(a, b) | MaterialNode::Multiply(a, b) => {
             collect_live(graph, *a, live);
             collect_live(graph, *b, live);
+        }
+        MaterialNode::Curve { input, .. } => collect_live(graph, *input, live),
+        MaterialNode::Blend { a, b, weight } => {
+            collect_live(graph, *a, live);
+            collect_live(graph, *b, live);
+            collect_live(graph, *weight, live);
         }
         MaterialNode::Closure { inputs, .. } => {
             for input in inputs {

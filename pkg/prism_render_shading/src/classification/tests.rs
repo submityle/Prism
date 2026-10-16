@@ -196,12 +196,15 @@ fn builtin_ids_and_response_kinds_match_execution_upload() {
 #[test]
 fn binary_selector_changes_both_real_builtin_entry_and_phase() {
     let registered = ProgramRef::Registered(ProgramId(3));
-    let (tables, headers) = execution_fixture(&[
+    let (tables, mut headers) = execution_fixture(&[
         (BUILTINS[0], ExecutionFamily::FusedBuiltin),
         (BUILTINS[1], ExecutionFamily::SplitResponse),
         (BUILTINS[2], ExecutionFamily::SplitResponse),
         (registered, ExecutionFamily::SplitResponse),
     ]);
+    for header in &mut headers {
+        header.feature_flags |= MaterialFeatureFlags::REGION_ILLUMINATION.0;
+    }
     let buckets = ResponseBucketTable::from_execution_tables(&tables).unwrap();
     for (original, header) in headers.iter().enumerate() {
         for selector in [0, 1, 2, u32::MAX] {
@@ -233,7 +236,9 @@ fn binary_selector_changes_both_real_builtin_entry_and_phase() {
         }
     }
     // In particular a fused Lit-only execution table must contain Npr/Stylized.
-    let (lit_only, headers) = execution_fixture(&[(BUILTINS[0], ExecutionFamily::FusedBuiltin)]);
+    let (lit_only, mut headers) =
+        execution_fixture(&[(BUILTINS[0], ExecutionFamily::FusedBuiltin)]);
+    headers[0].feature_flags |= MaterialFeatureFlags::REGION_ILLUMINATION.0;
     let key = response_bucket_key_for_header(&headers[0], Some(&lit_only), 1).unwrap();
     assert_eq!(key.program_id, ProgramId(1));
     assert_eq!(key.render_phase, RenderPhase::Stylized);
@@ -447,6 +452,7 @@ fn work_plan_is_bucket_contiguous_generation_safe_and_capacity_bounded() {
             ExecutionFamily::SplitResponse,
         ),
     ]);
+    headers[0].feature_flags |= MaterialFeatureFlags::REGION_ILLUMINATION.0;
     headers[0].generation = 2;
     headers[1].generation = 4;
     let buckets = ResponseBucketTable::from_execution_tables(&tables).unwrap();
@@ -487,7 +493,8 @@ fn work_plan_is_bucket_contiguous_generation_safe_and_capacity_bounded() {
 
 #[test]
 fn cpu_work_plan_honors_binary_region_and_dynamic_table_offsets() {
-    let header = fallback_material_header(1);
+    let mut header = fallback_material_header(1);
+    header.feature_flags |= MaterialFeatureFlags::REGION_ILLUMINATION.0;
     let table = ResponseBucketTable::builtin();
     let plan = ShadingWorkPlan::build_with_region(
         [
@@ -529,6 +536,36 @@ fn cpu_work_plan_honors_binary_region_and_dynamic_table_offsets() {
     .unwrap();
     assert_eq!(dynamic_plan.offsets.len(), dynamic.len());
     assert_eq!(dynamic_plan.buckets, dynamic);
+}
+
+#[test]
+fn binary_region_metadata_requires_the_declared_feature_and_valid_selector() {
+    let (tables, headers) = execution_fixture(&[(BUILTINS[1], ExecutionFamily::SplitResponse)]);
+    let header = headers[0];
+
+    // Metadata from an unrelated or stale visibility row must not override a
+    // material-wide NPR response when the header did not publish the feature.
+    assert_eq!(
+        classify_material_header_with_execution(&header, &tables, 0),
+        Ok(BUILTINS[1])
+    );
+
+    let mut region_header = header;
+    region_header.feature_flags |= MaterialFeatureFlags::REGION_ILLUMINATION.0;
+    assert_eq!(
+        classify_material_header_with_execution(&region_header, &tables, 0),
+        Ok(BUILTINS[0])
+    );
+    assert_eq!(
+        classify_material_header_with_execution(&region_header, &tables, 1),
+        Ok(BUILTINS[1])
+    );
+    for invalid in [2, u32::MAX] {
+        assert_eq!(
+            classify_material_header_with_execution(&region_header, &tables, invalid),
+            Ok(BUILTINS[1])
+        );
+    }
 }
 
 #[test]

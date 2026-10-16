@@ -35,7 +35,8 @@ use bevy_render::{
     get_adreno_model,
     render_asset::RenderAssets,
     render_resource::{
-        AddressMode, Extent3d, FilterMode, MipmapFilterMode, Sampler, SamplerDescriptor, Texture,
+        AddressMode, Extent3d, FilterMode, MipmapFilterMode, Sampler, SamplerDescriptor,
+        SamplerId, Texture,
         TextureDataOrder, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
         TextureView, TextureViewDescriptor, TextureViewId, WgpuFeatures, WgpuSampler,
         WgpuTextureView,
@@ -136,9 +137,17 @@ pub struct MaterialTextureArrays {
     /// Identity of every bound view last compose, used to bump `version` only on
     /// a real change.
     fingerprint: Vec<TextureViewId>,
+    /// Sampler identity paired with each bound view. The bind group must be
+    /// rebuilt when an image keeps its view but changes filtering/addressing.
+    sampler_fingerprint: Vec<SamplerId>,
     /// Monotonic counter incremented whenever the resolved view set changes, so
     /// the bind group is rebuilt lazily.
     version: u32,
+    /// Generation values for slots whose texture and sampler have actually
+    /// been published into `views`/`samplers`. A resident heap slot without a
+    /// `GpuImage` remains zero here even though its CPU allocation generation
+    /// is live; consumers must treat that row as unpublished and fall back.
+    published_generations: Vec<u32>,
 }
 
 impl FromWorld for MaterialTextureArrays {
@@ -195,7 +204,9 @@ impl FromWorld for MaterialTextureArrays {
             views: Vec::with_capacity(slots),
             samplers: Vec::with_capacity(slots),
             fingerprint: Vec::with_capacity(slots),
+            sampler_fingerprint: Vec::with_capacity(slots),
             version: 0,
+            published_generations: vec![0; slots],
         };
         if bindless {
             for slot in 0..capacity {
@@ -205,6 +216,9 @@ impl FromWorld for MaterialTextureArrays {
                 arrays.samplers.push(arrays.default_sampler.clone());
             }
             arrays.fingerprint = arrays.views.iter().map(TextureView::id).collect();
+            arrays.sampler_fingerprint = arrays.samplers.iter().map(Sampler::id).collect();
+            arrays.published_generations[..RESERVED_TEXTURE_COUNT]
+                .fill(super::texture_heap::RESERVED_GENERATION);
         }
         arrays
     }
@@ -261,6 +275,9 @@ impl MaterialTextureArrays {
             self.views[slot as usize] = fallback;
             self.samplers[slot as usize] = self.default_sampler.clone();
         }
+        let mut published_generations = vec![0_u32; self.capacity as usize];
+        published_generations[..RESERVED_TEXTURE_COUNT]
+            .fill(super::texture_heap::RESERVED_GENERATION);
         // Overlay the resident, uploaded images at their assigned slots.
         for (image, slot) in runtime.texture_slots() {
             if slot >= self.capacity {
@@ -269,16 +286,42 @@ impl MaterialTextureArrays {
             if let Some(gpu_image) = images.get(image) {
                 self.views[slot as usize] = gpu_image.texture_view.clone();
                 self.samplers[slot as usize] = gpu_image.sampler.clone();
+                let generation = runtime
+                    .texture_generation_table()
+                    .get(slot as usize)
+                    .copied()
+                    .unwrap_or(0);
+                if published_generation_matches(
+                    runtime.texture_generation_table(),
+                    slot,
+                    slot,
+                    generation,
+                ) {
+                    published_generations[slot as usize] = generation;
+                }
             }
             // Otherwise the image is resident in the heap but its GPU upload has
             // not landed yet; leave the white fallback until the RenderAsset
             // appears on a later frame.
         }
         let fingerprint: Vec<TextureViewId> = self.views.iter().map(TextureView::id).collect();
-        if fingerprint != self.fingerprint {
+        let sampler_fingerprint: Vec<SamplerId> =
+            self.samplers.iter().map(Sampler::id).collect();
+        if fingerprint != self.fingerprint
+            || sampler_fingerprint != self.sampler_fingerprint
+            || published_generations != self.published_generations
+        {
             self.fingerprint = fingerprint;
+            self.sampler_fingerprint = sampler_fingerprint;
+            self.published_generations = published_generations;
             self.version = self.version.wrapping_add(1);
         }
+    }
+
+    /// Dense generation table for texture/sampler pairs that are actually
+    /// published. Zero is the invalid/unpublished sentinel for dynamic slots.
+    pub(crate) fn published_generations(&self) -> &[u32] {
+        &self.published_generations
     }
 
     /// Borrows the raw texture views as the `&[&wgpu::TextureView]` slice the
@@ -294,6 +337,25 @@ impl MaterialTextureArrays {
     }
 }
 
+/// Mirrors the production WESL guard used by material sampling and visibility
+/// raster. The caller must separately prove that the corresponding image has
+/// produced a `GpuImage`; this function only validates the published table
+/// bounds, non-zero sentinel, and both texture/sampler generation identities.
+pub(crate) fn published_generation_matches(
+    published_generations: &[u32],
+    texture_index: u32,
+    sampler_index: u32,
+    generation: u32,
+) -> bool {
+    generation != 0
+        && published_generations
+            .get(texture_index as usize)
+            .is_some_and(|published| *published == generation)
+        && published_generations
+            .get(sampler_index as usize)
+            .is_some_and(|published| *published == generation)
+}
+
 /// Rebuilds [`MaterialTextureArrays`] from the current heap residency and GPU
 /// image cache each frame. Runs in `PrepareResources`; a no-op when bindless is
 /// unavailable.
@@ -303,4 +365,31 @@ pub(crate) fn prepare_material_texture_arrays(
     images: Res<RenderAssets<GpuImage>>,
 ) {
     arrays.compose(&runtime, &images);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::published_generation_matches;
+
+    #[test]
+    fn published_generation_accepts_matching_texture_and_sampler_rows() {
+        assert!(published_generation_matches(&[1, 7, 7], 1, 2, 7));
+    }
+
+    #[test]
+    fn published_generation_rejects_unpublished_zero_generation() {
+        assert!(!published_generation_matches(&[1, 0, 7], 1, 2, 0));
+    }
+
+    #[test]
+    fn published_generation_rejects_stale_texture_or_sampler_rows() {
+        assert!(!published_generation_matches(&[1, 6, 7], 1, 2, 7));
+        assert!(!published_generation_matches(&[1, 7, 6], 1, 2, 7));
+    }
+
+    #[test]
+    fn published_generation_rejects_out_of_range_texture_or_sampler_rows() {
+        assert!(!published_generation_matches(&[1, 7], 2, 1, 7));
+        assert!(!published_generation_matches(&[1, 7], 1, 2, 7));
+    }
 }

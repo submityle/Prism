@@ -14,6 +14,7 @@ mod handle;
 mod ir;
 mod normal_map;
 mod openpbr;
+pub mod procedural_vt;
 mod record;
 mod registry;
 pub mod render_state;
@@ -75,6 +76,10 @@ pub use normal_map::{
 };
 pub use openpbr::{
     openpbr_conformance, project_to_openpbr, DroppedLobe, OpenPbrConformance, OpenPbrProjection,
+};
+pub use procedural_vt::{
+    bake_procedural_vt, ProceduralVtBakeConfig, ProceduralVtBakeError,
+    MAX_PROCEDURAL_VT_BAKE_BYTES,
 };
 pub use record::{
     decode_illumination_blend_weight, decode_illumination_blend_weight_strict,
