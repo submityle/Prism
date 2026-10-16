@@ -38,6 +38,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
@@ -46,6 +47,7 @@ use core::mem::size_of;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
+use crate::archetype::{ArchetypeId, ColumnChange, ColumnJournal};
 use crate::change::Tick;
 use crate::component::ComponentId;
 
@@ -95,6 +97,7 @@ struct ChangeLog {
     batches: UnsafeCell<BTreeMap<u32, ChangeBatch>>,
     next_id: AtomicU64,
     next_visit: AtomicU64,
+    column_journal: Option<(Arc<ColumnJournal>, ArchetypeId, ComponentId)>,
 }
 
 // SAFETY: the log's spin lock serializes all access to its interior map, and
@@ -137,6 +140,7 @@ impl ChangeLog {
             batches: UnsafeCell::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             next_visit: AtomicU64::new(1),
+            column_journal: None,
         }
     }
 
@@ -152,6 +156,15 @@ impl ChangeLog {
     }
 
     fn append(&self, cell: &ChunkChange, tick: Tick) {
+        // Deliberately before tick-batch deduplication: two writes separated by
+        // an extraction in the SAME tick must both invalidate independent readers.
+        if let Some((journal, archetype, component)) = &self.column_journal {
+            journal.record(ColumnChange {
+                archetype: *archetype,
+                component: Some(*component),
+                chunk: Some(cell.event_chunk.load(Ordering::Relaxed)),
+            });
+        }
         let mut batches = self.lock();
         let key = tick.get();
         let id = if let Some(batch) = batches.get(&key) {
@@ -460,6 +473,15 @@ unsafe impl Send for ChunkVersions {}
 unsafe impl Sync for ChunkVersions {}
 
 impl ChunkVersions {
+    pub(crate) fn attach_column_journal(
+        &mut self,
+        journal: Arc<ColumnJournal>,
+        archetype: ArchetypeId,
+        component: ComponentId,
+    ) {
+        self.events.column_journal = Some((journal, archetype, component));
+    }
+
     /// A fresh, empty version set partitioning rows into `rows_per_chunk`
     /// windows.
     ///

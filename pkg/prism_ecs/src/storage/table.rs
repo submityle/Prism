@@ -8,6 +8,7 @@
 //! refinement layered on top of this representation; the row/column model and
 //! its invariants are unchanged by that work.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
@@ -15,6 +16,7 @@ use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::archetype::{ArchetypeId, ColumnChange, ColumnJournal};
 use crate::change::{ComponentTicks, Tick};
 use crate::collections::HashMap;
 use crate::component::{Component, ComponentId, DropFn};
@@ -475,6 +477,7 @@ pub struct Table {
     /// this is a page-aligned (and where available huge-page-backed) arena;
     /// otherwise it is a thin global-allocator wrapper.
     arena: ChunkArena,
+    column_journal: Option<(ArchetypeId, Arc<ColumnJournal>)>,
 }
 
 /// One physical chunk: a single allocation holding every column's slice for one
@@ -583,7 +586,21 @@ impl Table {
             column_slots: slots,
             meta_offset,
             arena: ChunkArena::new(block_layout),
+            column_journal: None,
         }
+    }
+
+    pub(crate) fn attach_column_journal(
+        &mut self,
+        archetype: ArchetypeId,
+        journal: Arc<ColumnJournal>,
+    ) {
+        for (&component, column) in &mut self.columns {
+            column
+                .chunk
+                .attach_column_journal(journal.clone(), archetype, component);
+        }
+        self.column_journal = Some((archetype, journal));
     }
 
     /// Rows per logical chunk window, shared by every column (design §7).
@@ -718,6 +735,22 @@ impl Table {
                 rows: total.saturating_sub(first_row).min(rows_per_chunk),
                 meta,
             }
+        })
+    }
+
+    /// Address one physical block in O(1), without traversing preceding chunks.
+    /// Reserved empty blocks have zero live rows; removed blocks return `None`.
+    pub fn chunk_info(&self, chunk: usize) -> Option<ChunkInfo<'_>> {
+        let block = self.chunks.get(chunk)?;
+        let first_row = chunk * self.rows_per_chunk;
+        Some(ChunkInfo {
+            incarnation: block.incarnation,
+            first_row,
+            rows: self
+                .len()
+                .saturating_sub(first_row)
+                .min(self.rows_per_chunk),
+            meta: self.chunk_meta_checked(chunk)?,
         })
     }
 
@@ -888,6 +921,15 @@ impl Table {
     #[inline]
     fn bump_chunk_meta(&mut self, row: usize) {
         let chunk = row / self.rows_per_chunk;
+        // Record even when shrink has just freed the trailing physical block:
+        // consumers must still truncate the resident row extent.
+        if let Some((archetype, journal)) = &self.column_journal {
+            journal.record(ColumnChange {
+                archetype: *archetype,
+                component: None,
+                chunk: Some(chunk),
+            });
+        }
         if chunk < self.chunks.len() {
             // SAFETY: `chunk` is in range and the header embeds a `ChunkMeta`.
             unsafe {
@@ -1089,6 +1131,26 @@ impl Table {
             self.bump_chunk_meta(last);
         }
         moved
+    }
+}
+
+impl crate::world::World {
+    /// Borrow exactly one physical table-column slice. The component id is
+    /// derived from THIS world's registry, not supplied by a caller; equal ids
+    /// from different worlds can therefore never forge a typed slice.
+    /// Returns `None` for missing/sparse columns or chunks without live rows.
+    pub fn column_chunk<T: Component>(&self, archetype: ArchetypeId, chunk: usize) -> Option<&[T]> {
+        let component = self.components().id_of::<T>()?;
+        let table = self.archetypes().get(archetype)?.table();
+        let info = table.chunk_info(chunk)?;
+        if info.rows == 0 {
+            return None;
+        }
+        let column = table.column(component)?;
+        // SAFETY: the world's registry binds this column to T; chunk_info
+        // supplies in-bounds live rows within ONE physical block. The shared
+        // World borrow excludes writers for the lifetime of the returned slice.
+        Some(unsafe { column.as_slice_range::<T>(info.first_row, info.first_row + info.rows) })
     }
 }
 

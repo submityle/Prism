@@ -12,13 +12,153 @@
 //! (design §5.3, §9).
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::collections::HashMap;
 use crate::component::{ComponentId, ComponentSet, Components};
 use crate::entity::Entity;
 use crate::storage::{SharedValue, SharedValueId, Table};
+
+/// Maximum retained write/structural events. Lagging readers explicitly rebuild.
+pub const COLUMN_CHANGE_LOG_CAPACITY: usize = 8192;
+static NEXT_COLUMN_LOG: AtomicU64 = AtomicU64::new(1);
+
+/// Independent extraction position, unrelated to simulation/change ticks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnChangeCursor {
+    log: u64,
+    revision: u64,
+}
+
+/// A physical column write or row-membership change. `component == None`
+/// affects every column; `chunk == None` announces a newly created archetype.
+#[derive(Clone, Copy, Debug)]
+pub struct ColumnChange {
+    /// Stable archetype address within this registry.
+    pub archetype: ArchetypeId,
+    /// Written component, or all components for structural changes.
+    pub component: Option<ComponentId>,
+    /// Affected chunk, including a removed tail chunk.
+    pub chunk: Option<usize>,
+}
+
+/// One non-destructive journal snapshot. Only acknowledge `cursor` after the
+/// consumer succeeds. A gap (including initial subscription/registry replacement)
+/// requires a full baseline; the returned events alone are then insufficient.
+pub struct ColumnChanges {
+    /// Position of this snapshot; other consumers have their own positions.
+    pub cursor: ColumnChangeCursor,
+    /// Whether retained events cannot establish a complete incremental delta.
+    pub gap: bool,
+    /// Events after the supplied cursor, in revision order. Empty on a gap.
+    pub events: Vec<ColumnChange>,
+}
+
+struct ColumnJournalState {
+    revision: u64,
+    events: VecDeque<ColumnChange>,
+}
+
+/// Shared by the registry, tables and stable boxed column write journals.
+/// No raw ownership links are added to physical chunk headers.
+pub(crate) struct ColumnJournal {
+    id: u64,
+    active: AtomicBool,
+    locked: AtomicBool,
+    state: UnsafeCell<ColumnJournalState>,
+}
+
+// SAFETY: all accesses to state are serialized by the acquire/release lock.
+unsafe impl Send for ColumnJournal {}
+// SAFETY: the state contains only owned events and is never accessed unlocked.
+unsafe impl Sync for ColumnJournal {}
+
+struct ColumnJournalGuard<'a>(&'a ColumnJournal);
+impl core::ops::Deref for ColumnJournalGuard<'_> {
+    type Target = ColumnJournalState;
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: this guard holds the lock until drop.
+        unsafe { &*self.0.state.get() }
+    }
+}
+impl core::ops::DerefMut for ColumnJournalGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: the lock provides exclusive access to state.
+        unsafe { &mut *self.0.state.get() }
+    }
+}
+impl Drop for ColumnJournalGuard<'_> {
+    fn drop(&mut self) {
+        self.0.locked.store(false, Ordering::Release);
+    }
+}
+
+impl ColumnJournal {
+    fn new() -> Self {
+        Self {
+            id: NEXT_COLUMN_LOG.fetch_add(1, Ordering::Relaxed),
+            active: AtomicBool::new(false),
+            locked: AtomicBool::new(false),
+            state: UnsafeCell::new(ColumnJournalState {
+                revision: 0,
+                events: VecDeque::new(),
+            }),
+        }
+    }
+
+    fn lock(&self) -> ColumnJournalGuard<'_> {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        ColumnJournalGuard(self)
+    }
+
+    pub(crate) fn record(&self, event: ColumnChange) {
+        // Unsubscribed worlds pay no journal allocation or additional lock.
+        if !self.active.load(Ordering::Acquire) {
+            return;
+        }
+        let mut state = self.lock();
+        state.revision = state
+            .revision
+            .checked_add(1)
+            .expect("column revision exhausted");
+        if state.events.len() == COLUMN_CHANGE_LOG_CAPACITY {
+            state.events.pop_front();
+        }
+        state.events.push_back(event);
+    }
+
+    fn since(&self, cursor: Option<ColumnChangeCursor>) -> ColumnChanges {
+        let state = self.lock();
+        self.active.store(true, Ordering::Release);
+        let current = ColumnChangeCursor {
+            log: self.id,
+            revision: state.revision,
+        };
+        let offset = cursor.filter(|c| c.log == self.id).and_then(|c| {
+            let first = state.revision - state.events.len() as u64;
+            (first..=state.revision)
+                .contains(&c.revision)
+                .then(|| (c.revision - first) as usize)
+        });
+        ColumnChanges {
+            cursor: current,
+            gap: offset.is_none(),
+            events: offset.map_or_else(Vec::new, |start| {
+                state.events.range(start..).copied().collect()
+            }),
+        }
+    }
+}
 
 /// A stable, dense identifier for an [`Archetype`] within a world.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -204,6 +344,7 @@ impl ArchetypeKey {
 pub struct Archetypes {
     archetypes: Vec<Archetype>,
     by_key: HashMap<ArchetypeKey, ArchetypeId>,
+    column_journal: Arc<ColumnJournal>,
 }
 
 impl Archetypes {
@@ -213,6 +354,7 @@ impl Archetypes {
         let mut this = Self {
             archetypes: Vec::new(),
             by_key: HashMap::default(),
+            column_journal: Arc::new(ColumnJournal::new()),
         };
         let empty = ComponentSet::default();
         let id = this.insert(empty, &[], &[], &Components::new());
@@ -269,6 +411,13 @@ impl Archetypes {
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &Archetype> {
         self.archetypes.iter()
+    }
+
+    /// Discover writes/structural edits in O(retained events since cursor), not
+    /// O(archetypes/chunks). Repeated same-tick writes advance this cursor too.
+    /// Payload access still requires the usual ECS read/write scheduling barrier.
+    pub fn column_changes_since(&self, cursor: Option<ColumnChangeCursor>) -> ColumnChanges {
+        self.column_journal.since(cursor)
     }
 
     /// All archetypes mutably, in id order.
@@ -338,7 +487,9 @@ impl Archetypes {
     /// so every archetype binding it is empty and unreferenced by any
     /// [`EntityLocation`](crate::entity::EntityLocation).
     pub fn evict_shared_binding(&mut self, cid: ComponentId, sid: SharedValueId) {
-        let Self { archetypes, by_key } = self;
+        let Self {
+            archetypes, by_key, ..
+        } = self;
         by_key.retain(|_key, id| {
             let arch = &archetypes[id.index() as usize];
             !(arch.is_empty()
@@ -363,7 +514,8 @@ impl Archetypes {
                 .expect("component in archetype set must be registered");
             (cid, info.layout(), info.drop_fn())
         });
-        let table = Table::new(columns);
+        let mut table = Table::new(columns);
+        table.attach_column_journal(id, self.column_journal.clone());
         let mut shared: Vec<SharedBinding> = bindings.to_vec();
         shared.sort_unstable_by_key(|&(cid, _, _)| cid);
         let shared = shared.into_boxed_slice();
@@ -377,6 +529,11 @@ impl Archetypes {
             table,
         });
         self.by_key.insert(key, id);
+        self.column_journal.record(ColumnChange {
+            archetype: id,
+            component: None,
+            chunk: None,
+        });
         id
     }
 }
@@ -396,6 +553,97 @@ mod tests {
     impl Component for A {}
     struct B(#[allow(dead_code)] u64);
     impl Component for B {}
+
+    fn column_event() -> ColumnChange {
+        ColumnChange {
+            archetype: ArchetypeId::EMPTY,
+            component: None,
+            chunk: Some(0),
+        }
+    }
+
+    #[test]
+    fn column_journal_is_lazy_and_cursors_are_independent() {
+        let journal = ColumnJournal::new();
+        journal.record(column_event());
+        assert_eq!(journal.lock().revision, 0);
+        assert!(journal.lock().events.is_empty());
+
+        let baseline = journal.since(None);
+        assert!(baseline.gap);
+        journal.record(column_event());
+        let first = journal.since(Some(baseline.cursor));
+        let independent = journal.since(Some(baseline.cursor));
+        assert!(!first.gap && !independent.gap);
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(independent.events.len(), 1);
+        assert_eq!(first.cursor, independent.cursor);
+        assert!(journal.since(Some(first.cursor)).events.is_empty());
+
+        let replacement = ColumnJournal::new().since(Some(first.cursor));
+        assert!(replacement.gap);
+        assert!(replacement.events.is_empty());
+    }
+
+    #[test]
+    fn column_journal_retention_boundary_requires_explicit_rebaseline() {
+        let journal = ColumnJournal::new();
+        let baseline = journal.since(None).cursor;
+        for _ in 0..COLUMN_CHANGE_LOG_CAPACITY {
+            journal.record(column_event());
+        }
+        let retained = journal.since(Some(baseline));
+        assert!(!retained.gap);
+        assert_eq!(retained.events.len(), COLUMN_CHANGE_LOG_CAPACITY);
+
+        journal.record(column_event());
+        let expired = journal.since(Some(baseline));
+        assert!(expired.gap);
+        assert!(expired.events.is_empty());
+        let recent = journal.since(Some(retained.cursor));
+        assert!(!recent.gap);
+        assert_eq!(recent.events.len(), 1);
+        assert!(!journal.since(Some(expired.cursor)).gap);
+    }
+
+    #[test]
+    fn column_journal_concurrent_writers_preserve_every_revision() {
+        let journal = ColumnJournal::new();
+        let baseline = journal.since(None).cursor;
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..1000 {
+                        journal.record(column_event());
+                    }
+                });
+            }
+        });
+        let delta = journal.since(Some(baseline));
+        assert!(!delta.gap);
+        assert_eq!(delta.events.len(), 4000);
+        assert_eq!(delta.cursor.revision, baseline.revision + 4000);
+    }
+
+    #[test]
+    fn column_journal_revision_exhaustion_panics_without_wrapping_or_lock_leak() {
+        let journal = ColumnJournal::new();
+        journal.since(None);
+        journal.lock().revision = u64::MAX - 1;
+        journal.record(column_event());
+        let last = journal.since(None).cursor;
+        assert_eq!(last.revision, u64::MAX);
+
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            journal.record(column_event());
+        }));
+        assert!(failed.is_err());
+        // Exhaustion is fail-stop, not rollover recovery. The RAII lock must
+        // nevertheless be released during unwinding, and no cursor may wrap.
+        let state = journal.lock();
+        assert_eq!(state.revision, u64::MAX);
+        assert_eq!(state.events.len(), 1);
+    }
 
     #[test]
     fn empty_archetype_exists_at_id_zero() {
