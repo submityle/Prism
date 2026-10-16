@@ -110,6 +110,15 @@ pub use heightfield_placement::{
 mod heightfield_placement_deletion;
 
 #[cfg(feature = "terrain_scatter")]
+mod planet_placement;
+
+#[cfg(feature = "terrain_scatter")]
+pub use planet_placement::{
+    GpuPlanetPlacement, GpuPlanetPlacementCacheKey, GpuPlanetPlacementError,
+    GpuPlanetPlacementWorkBudget,
+};
+
+#[cfg(feature = "terrain_scatter")]
 pub use heightfield_placement_deletion::{
     GpuHeightfieldPlacementDeletionCacheKey, GpuHeightfieldPlacementDeletionCapacity,
     GpuHeightfieldPlacementDeletionError, GpuHeightfieldPlacementDeletionUploadStats,
