@@ -59,7 +59,7 @@ const BLEND_SUM_EPS: f32 = 1.0e-4;
 // Updated with the resident MaskBlend/service-declaration plan after the
 // legacy hybrid entry was removed.  The structural invariants below remain
 // unchanged; this value pins the new canonical frame plan.
-const GOLDEN_FRAME_DIGEST: u64 = 0x5099_c9bb_279c_7f5a;
+const GOLDEN_FRAME_DIGEST: u64 = 0x2d72_6174_1480_32c7;
 
 /// Shared per-frame routing thresholds, budget layout, and clipmap rings for the
 /// golden scene. Fixed values so the plan is reproducible frame to frame.
