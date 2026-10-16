@@ -674,7 +674,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P2-d | **thin_film 虹彩瓣**落地（开放瓣首验：新位 + 3-word 块 + furnace/对拍） | 内部 enum 开放化 | P2 |
 | P2-e ◐ | 四线正交落地：`Illumination` 四值 + `custom_program` 钩子 + 混合线逐区域 illumination（per-tile 分类消化发散）；**逐区域 illumination 运行时首片已落地** | 运行时/分类 | P2 |
 | P2-a ◐ | OpenPBR/MaterialX 作者前端 + archetype 模板（兼作置换聚类锚点）；已落地受限结构解析与 loss-aware runtime adapter，见 §13.a.1 | 新 crate | P2 |
-| P2-b | 作者节点图烘焙到 VT（noise/curve/blend 固化） | 工具链 | P2 |
+| P2-b ◐ | 作者节点图烘焙到 VT（noise/curve/blend 固化）；**首片已落地**：受限 MaterialX procedural graph → runtime `MaterialGraph` → RGBA8 mip chain / Material-VT source snapshot | 工具链 | P2 |
 | P2-c | 开放瓣词汇表扩展机制（新 lobe 作为一等成员接入静态置换） | 内部 enum 开放化 | P2 |
 | P3-a | 解耦着色地基：纹理空间着色 pass，着色结果写入 VT 页缓存（复用 `texture_streaming`） | 新 pass/缓存，不改 ABI | P3 |
 | P3-b | 先解耦视角无关项（diffuse/SSS/emission/GI 辐照度），高光仍走屏幕空间 | 分离求值 | P3 |
@@ -1165,6 +1165,10 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > **P2-a 状态修订（2026-10-16）**：`pkg/prism_render_material_authoring` 已不再是空 crate。当前已实现受限 MaterialX IR、OpenPBR/Standard Surface 到 `prism_render_material::GpuSurfaceParameters` 的 loss-aware adapter，以及显式导出的 `evaluate_connection` 纯数值求值器（add/subtract/multiply/divide/mix/clamp/convert、图引用、graph interface、graph output、跨 graph 递归、环检测、断开/歧义、维度与有限值校验）；不支持的程序化/纹理节点返回 `UnsafeConnection`，不会静默回退。adapter 已真实消费该受限纯表达式子集；新增 `MaterialArchetype` 的 Metal/Skin/Cloth/Glass/Foliage/Toon/CarPaint/Water 八类稳定模板。当前作者层定向测试为 **26 项**（MaterialX 19、evaluator 5、archetype 2）并通过。完整节点图 bake/VT、nested graph instance 外部参数注入、`author_node`/`nodedef` 完整往返和编辑器集成仍未完成，不能将本首片记为完整 P2-a。
 
 
+> **P2-b 状态补记（2026-10-16）**：新增受限 procedural MaterialX 路径：parser 明确允许 `texcoord`/`texcoord2`、`noise`、`curve`/`ramp`、`add`/`plus`、`multiply`/`mult`、`mix`/`blend`，并允许曲线节点的 `points` 属性；`lower_procedural_graph` 将单输出图降低为 runtime `MaterialGraph`，`bake_procedural_graph` 复用生产 `bake_procedural_vt` 输出 `MaterialVtSourceSnapshot`。当前门禁覆盖 deterministic RGBA8 mip-chain / VT source bake，以及 unsupported node 的 fail-closed。仍未完成：完整 MaterialX 节点集、nested graph instance 外部参数注入、方差图烘焙、编辑器 authoring、`author_node`/`nodedef` 往返。
+
+> 本补记和上方 P2-b 状态表覆盖本节更早仍写“P2-b 未开始/仍是 TODO”的历史措辞；后续审计以本补记中的 bounded procedural slice 和明确剩余项为准。
+
 #### 13.a.1 code-truth 审计（剩余路线图项 · 逐项证据）
 
 下表是"**以代码为准**"的剩余工作清点。历史实现记录中的
@@ -1184,7 +1188,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P1-c** | 完成 | `bake.rs`（层栈 → 纹理空间混合）、硬顶删除记录 | — |
 | **P1-d 置换治理** | **完成（引擎侧）** | `pipeline_cache.rs`：内容键 + 引用计数 ✔、后台 `PipelineCompiler` worker、ready/pending/waiting/canceled 状态机、全瓣 über fallback、`MAX_IN_FLIGHT_COMPILES` 背压、每帧 `pump_pipeline_compiles` 接线、`prewarm` 批量预热 API；`bin_class` 扩到 19-bit lobe set ✔。真机 cold-compile 测试已落地 | archetype 模板内容/热门 key 集合由 P2-a 编辑器提供（引擎 API 已就位） |
 | **P2-a** | **部分完成（受限作者前端 + runtime adapter）** | `prism_render_material_authoring`：MaterialX 子集 IR、受限纯数值节点图求值、graph interface/output 与跨 graph 递归、OpenPBR/Standard Surface → `GpuSurfaceParameters` 映射、支持/不支持字段报告、八类稳定 archetype 模板；texture/procedural/conditional 节点仍结构化拒绝，反向 `clamp` bounds 返回 `InvalidValue` 而非 panic；`cargo test -p prism_render_material_authoring`：MaterialX 19、evaluator 5、archetype 2，共 26 项通过 | 完整 MaterialX 节点图求值/bake、VT 产线、nested graph instance 外部参数、`author_node`/`nodedef` 完整往返与编辑器集成 |
-| **P2-b** | 未开始 | 尚无 MaterialX 程序化节点到 VT 的 bake 接口 | noise/curve/blend 节点图求值和 VT 烘焙 |
+| **P2-b** | **部分完成（受限 procedural slice）** | `prism_render_material_authoring` 已提供 MaterialX procedural graph → runtime `MaterialGraph` → `MaterialVtSourceSnapshot` 的 bounded lowering/bake；parser 对已支持类别显式 allowlist，其他节点结构化拒绝 | 完整 MaterialX 节点集、nested graph instance 外部参数、方差图烘焙、编辑器集成与 `author_node`/`nodedef` 往返 |
 | **P2-c** | 完成（两个开放瓣） | glint + measured 的 ABI/双线/真机对拍（§17.6、§13.a） | MaterialX `author_node`/`nodedef` 完整往返（编辑器前端仍未完成） |
 | **P2-e 四线正交运行期** | **部分** | `Illumination` 四值 ✔、分类到 `Npr`/`Unlit`/`Custom` ✔、per-tile 9-way 分类 ✔；**逐区域 illumination 运行时首片已落地**：visibility raster 只接受 texture/sampler 的已发布 generation，stale/未发布/越界回 sentinel，并由分类 pass 在 header 声明 feature 时选择 Lit/Stylized；CPU 分类镜像同步（见本轮门禁）| 仅作者侧 `respond_custom` WESL，属编辑器 TODO |
 | **P2-g** | 完成 | header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha/OIT + 真机对拍（§17.1、§13.a） | — |

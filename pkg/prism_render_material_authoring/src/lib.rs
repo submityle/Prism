@@ -4,7 +4,9 @@
 //! IR and depends on Prism's runtime material crate only at the explicit
 //! OpenPBR/Standard Surface adapter boundary. That adapter evaluates literals,
 //! graph interfaces, graph outputs, and a bounded pure numeric expression
-//! subset; texture/procedural graphs are rejected instead of being treated as
+//! subset. The bounded procedural subset can also be lowered into the runtime
+//! material IR and baked into the production material-VT source contract;
+//! unsupported nodes remain explicit errors instead of being treated as
 //! defaults.
 
 #![allow(
@@ -20,6 +22,7 @@ mod export;
 mod import;
 mod ir;
 mod parse;
+mod procedural;
 
 pub use archetype::MaterialArchetype;
 pub use diagnostic::{AuthoringError, Diagnostic, DiagnosticCode, Severity, SourceLocation};
@@ -30,3 +33,4 @@ pub use import::{
 };
 pub use ir::{Connection, Document, Input, Node, NodeDef, NodeGraph, Output, TypedValue};
 pub use parse::parse_materialx;
+pub use procedural::{bake_procedural_graph, lower_procedural_graph, ProceduralGraphError};

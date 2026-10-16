@@ -26,7 +26,16 @@ const INPUT_ATTRIBUTES: &[&str] = &[
     "unit",
     "colorspace",
 ];
-const NODE_ATTRIBUTES: &[&str] = &["name", "type", "value", "nodedef", "doc", "namespace"];
+const NODE_ATTRIBUTES: &[&str] = &[
+    "name",
+    "type",
+    "value",
+    "nodedef",
+    "doc",
+    "namespace",
+    // Bounded procedural curve/ramp nodes carry their control points here.
+    "points",
+];
 
 /// Parses the explicitly supported MaterialX subset.
 ///
@@ -224,16 +233,23 @@ fn parse_node(xml: &XmlDocument<'_>, element: XmlNode<'_, '_>) -> Result<Node, A
     const SUPPORTED: &[&str] = &[
         "constant",
         "add",
+        "plus",
         "subtract",
         "multiply",
+        "mult",
         "divide",
         "mix",
+        "blend",
         "convert",
         "clamp",
+        "texcoord",
+        "texcoord2",
+        "noise",
+        "curve",
+        "ramp",
         "open_pbr_surface",
         "standard_surface",
         "image",
-        "texcoord",
         "normalmap",
         "dotproduct",
         "ifequal",

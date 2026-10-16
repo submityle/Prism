@@ -98,16 +98,15 @@ fn eval_node_inner(
                     output.unwrap()
                 ),
             ));
-        } else {
-            return Err(error(
-                DiagnosticCode::InvalidReference,
-                format!(
-                    "output '{}' does not exist on node '{}'",
-                    output.unwrap(),
-                    node.name
-                ),
-            ));
         }
+        return Err(error(
+            DiagnosticCode::InvalidReference,
+            format!(
+                "output '{}' does not exist on node '{}'",
+                output.unwrap(),
+                node.name
+            ),
+        ));
     }
     let mut values = Vec::with_capacity(node.inputs.len());
     for input in &node.inputs {
