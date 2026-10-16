@@ -2,6 +2,7 @@
 
 use crate::cas::CasError;
 use crate::ddc::{DdcError, DerivedDataCache};
+use crate::dirty::DirtySet;
 use crate::graph::{BuildError, BuildGraph};
 use crate::hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
 use crate::job::JobId;
@@ -92,6 +93,8 @@ pub enum BuildExecutionError {
     MissingSpec(JobId),
     /// The plan contains metadata that has no graph node.
     UnknownSpec(JobId),
+    /// The incremental plan contains a job that is not in this graph.
+    UnknownDirtyJob(JobId),
     /// More than one graph node publishes the same logical asset.
     DuplicateAsset(AssetId),
     /// Cached descriptor disagrees with this plan's expected artifact contract.
@@ -113,6 +116,9 @@ impl fmt::Display for BuildExecutionError {
             Self::Publish(error) => write!(f, "build publication failed: {error}"),
             Self::MissingSpec(id) => write!(f, "build job {} has no artifact spec", id.0),
             Self::UnknownSpec(id) => write!(f, "artifact spec references unknown job {}", id.0),
+            Self::UnknownDirtyJob(id) => {
+                write!(f, "incremental plan references unknown job {}", id.0)
+            }
             Self::DuplicateAsset(asset) => {
                 write!(f, "multiple build jobs publish asset {}", asset.0)
             }
@@ -181,6 +187,35 @@ impl BuildExecutor {
             1,
             false,
             BuildResources::UNLIMITED,
+            None,
+        )
+    }
+
+    /// Execute a deterministic incremental build serially.
+    ///
+    /// Jobs in `dirty` are always processed again, even when their semantic
+    /// key is already present in DDC. All other jobs use the same verified
+    /// DDC/CAS reuse path as [`Self::execute`]. The complete manifest is still
+    /// staged and published as one atomic revision after every job succeeds.
+    pub fn execute_incremental(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        dirty: &DirtySet,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+    ) -> Result<BuildExecution, BuildExecutionError> {
+        self.execute_incremental_with_resources(
+            graph,
+            specs,
+            dirty,
+            store,
+            ddc,
+            revision,
+            1,
+            BuildResources::UNLIMITED,
+            false,
         )
     }
 
@@ -222,6 +257,34 @@ impl BuildExecutor {
             max_concurrency,
             false,
             BuildResources::UNLIMITED,
+            None,
+        )
+    }
+
+    /// Execute a deterministic incremental build with a caller-selected
+    /// worker limit. Ready waves, dependency order, cache mutations, failure
+    /// selection, and publication staging are identical to the full parallel
+    /// executor; only the DDC policy differs for jobs in `dirty`.
+    pub fn execute_incremental_parallel_with_limit(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        dirty: &DirtySet,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+        max_concurrency: usize,
+    ) -> Result<BuildExecution, BuildExecutionError> {
+        self.execute_incremental_with_resources(
+            graph,
+            specs,
+            dirty,
+            store,
+            ddc,
+            revision,
+            max_concurrency,
+            BuildResources::UNLIMITED,
+            false,
         )
     }
 
@@ -252,6 +315,34 @@ impl BuildExecutor {
             max_concurrency,
             true,
             BuildResources::UNLIMITED,
+            None,
+        )
+    }
+
+    /// Run an incremental build through the existing two-run determinism
+    /// gate. As with [`Self::execute_verified_with_limit`], the gate bypasses
+    /// every cache hit so every node is executed twice; `dirty` remains an
+    /// explicit plan and is validated against the graph.
+    pub fn execute_incremental_verified_with_limit(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        dirty: &DirtySet,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+        max_concurrency: usize,
+    ) -> Result<BuildExecution, BuildExecutionError> {
+        self.execute_incremental_with_resources(
+            graph,
+            specs,
+            dirty,
+            store,
+            ddc,
+            revision,
+            max_concurrency,
+            BuildResources::UNLIMITED,
+            true,
         )
     }
 
@@ -281,6 +372,35 @@ impl BuildExecutor {
             max_concurrency,
             verify_determinism,
             budget,
+            None,
+        )
+    }
+
+    /// Execute an incremental build with worker and declared resource
+    /// admission limits. Resource validation is unchanged from the full
+    /// executor, including validation of cache-reused jobs.
+    pub fn execute_incremental_with_resources(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        dirty: &DirtySet,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+        max_concurrency: usize,
+        budget: BuildResources,
+        verify_determinism: bool,
+    ) -> Result<BuildExecution, BuildExecutionError> {
+        self.execute_with_limit(
+            graph,
+            specs,
+            store,
+            ddc,
+            revision,
+            max_concurrency,
+            verify_determinism,
+            budget,
+            Some(dirty),
         )
     }
 
@@ -294,12 +414,16 @@ impl BuildExecutor {
         max_concurrency: usize,
         verify_determinism: bool,
         budget: BuildResources,
+        dirty: Option<&DirtySet>,
     ) -> Result<BuildExecution, BuildExecutionError> {
         if max_concurrency == 0 {
             return Err(BuildExecutionError::Graph(BuildError::InvalidConcurrency));
         }
         let order = graph.execution_order()?;
         validate_specs(&order, specs)?;
+        if let Some(dirty) = dirty {
+            validate_dirty(&order, dirty)?;
+        }
         if budget.cpu_threads == 0 {
             return Err(BuildExecutionError::Resources(ResourceError::ZeroCpuBudget));
         }
@@ -379,6 +503,7 @@ impl BuildExecutor {
                     .map(|dependency| outputs[dependency].as_slice())
                     .collect();
                 let key = spec.artifact_key(self.protocol_version, &input_keys)?;
+                let force_rebuild = dirty.is_some_and(|dirty| dirty.contains(id));
                 work.push((
                     id,
                     key,
@@ -386,7 +511,7 @@ impl BuildExecutor {
                     input_keys,
                     job.processor(),
                     inputs,
-                    if verify_determinism {
+                    if verify_determinism || force_rebuild {
                         None
                     } else {
                         ddc.get(key)
@@ -649,6 +774,14 @@ fn validate_specs(
                 "alignment must be a non-zero power of two",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_dirty(order: &[JobId], dirty: &DirtySet) -> Result<(), BuildExecutionError> {
+    let ids: BTreeSet<_> = order.iter().copied().collect();
+    if let Some(id) = dirty.jobs().find(|id| !ids.contains(id)) {
+        return Err(BuildExecutionError::UnknownDirtyJob(id));
     }
     Ok(())
 }
