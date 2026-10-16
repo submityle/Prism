@@ -688,6 +688,6 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 |---|---|---|---|
 | ECS dirty query | 前向窗口 column journal；历史/缺口/重放保守 fallback；SparseSet 变化合并 | `cargo test -p prism_ecs --lib query::dirty_tests --offline`：20 项通过（`cb3a45e7b`） | query 全链路严格 `O(change)`、并发写屏障/回绕、所有 feature 组合与大规模性能 |
 | UDP / ACK / rebind | 有限可靠 UDP、ACK 重传、候选端点与稳定 peer rebind | 真实 loopback fault-proxy 测试覆盖 data/ACK 丢包、顺序/exactly-once 与旧 socket 关闭后的 rebind | 跨进程/跨机、公网、NAT/ICE/relay、生产迁移与本轮重跑结果 |
-| NUMA / affinity | OS topology/affinity readback、worker outcome、arena fallback 语义；策略层拓扑模型 | `numa_acceptance` 入口；默认 `SKIPPED`，`PRISM_REQUIRE_NUMA=1` 严格失败 | 当前机器 Linux strict pass、ECS node-local pages、拓扑感知调度收益与 NUMA 性能 |
+| NUMA / affinity | OS topology/affinity readback、worker outcome、显式 arena placement/fallback 语义；策略层拓扑模型 | `numa_acceptance` 入口；arena 默认测试 5 项、`vm` 测试 12 项、`--no-default-features` check 已通过；默认 acceptance 缺能力时 `SKIPPED`，`PRISM_REQUIRE_NUMA=1` 严格失败 | 当前机器 Linux strict pass、ECS node-local pages 的真实物理证明、拓扑感知调度收益与 NUMA 性能 |
 | audio / event-log | audio source-route/scene adapter/full-chain；bounded memory/file event-log 与 replay bridge | 既有局部 unit/integration/full-chain 入口 | 真实设备回调、完整应用/旧资产/editor 联合流程、durable plugin recovery、跨进程/跨机持久化 |
 | GPU resident / benchmark / SDF | CPU resident-column extraction；physical-GPU gate；virtual-texture CPU/GPU benchmark harness（`3a8120874`、`0e7e67259`）；CPU deterministic SDF planner | resident-column readback、wgpu hardware-evidence、benchmark 入口均存在，缺设备明确 skip/strict fail | 当前真实 adapter 通过、GPU sync/upload benefit、性能数字、GPU SDF sampling/ECS 集成 |
