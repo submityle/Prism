@@ -358,6 +358,93 @@ fn recovery_device_failure_stays_recovering_then_retries() {
 }
 
 #[test]
+fn injected_recovery_acceptance_gates_render_until_restored() {
+    let (mut app, controls) = app();
+    app.update();
+    let submitted_before_loss = app
+        .get_sub_app(RenderApp)
+        .unwrap()
+        .world
+        .resource::<RenderFrameStats>()
+        .frames_submitted;
+    let mut restored = EventCursor::<DeviceRestored>::new();
+
+    controls.lose();
+    controls.fail_device.store(true, Ordering::SeqCst);
+    for _ in 0..5 {
+        app.update();
+    }
+
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Recovering
+    );
+    assert!(app.world().resource::<DeviceRecoveryStatus>().recovering);
+    assert_eq!(
+        app.get_sub_app(RenderApp)
+            .unwrap()
+            .world
+            .resource::<RenderFrameStats>()
+            .frames_submitted,
+        submitted_before_loss,
+        "normal render work stays gated while replacement repeatedly fails"
+    );
+    assert_eq!(
+        restored
+            .read(app.world().resource::<Events<DeviceRestored>>())
+            .count(),
+        0
+    );
+
+    controls.fail_device.store(false, Ordering::SeqCst);
+    for _ in 0..8 {
+        app.update();
+        if !app.world().resource::<DeviceRecoveryStatus>().recovering {
+            break;
+        }
+    }
+
+    assert!(!app.world().resource::<DeviceRecoveryStatus>().recovering);
+    assert_eq!(
+        restored
+            .read(app.world().resource::<Events<DeviceRestored>>())
+            .count(),
+        1,
+        "the render layer publishes exactly one restoration edge"
+    );
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Running,
+        "the main world folds DeviceRestored into Running during the recovery update"
+    );
+    let frames_after_recovery = app
+        .get_sub_app(RenderApp)
+        .unwrap()
+        .world
+        .resource::<RenderFrameStats>()
+        .frames_submitted;
+    assert!(
+        frames_after_recovery > submitted_before_loss,
+        "normal render work resumes in the update that publishes DeviceRestored"
+    );
+
+    app.update();
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Running
+    );
+    assert!(
+        app.get_sub_app(RenderApp)
+            .unwrap()
+            .world
+            .resource::<RenderFrameStats>()
+            .frames_submitted
+            > submitted_before_loss,
+        "normal render work resumes only after the lifecycle returns to Running"
+    );
+}
+
+#[test]
 fn recovery_replay_failure_does_not_publish_restored_or_commit_generation() {
     let (mut app, controls) = app();
     let fail = Arc::new(AtomicBool::new(false));

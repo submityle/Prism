@@ -163,6 +163,27 @@ cargo run -p prism_app --features winit,determinism \
 
 结果：`frames=128 fixed_steps=177 final_hash=e679c6d9b125aadd trace_hash=49b156c395f0513f ... parity=true`。
 
+### M4 host-independent 生命周期验收
+
+本轮补齐了不依赖真实窗口或移动硬件的两条集成契约：
+
+- `prism_app::lifecycle::tests::long_suspend_resume_run_keeps_state_and_time_accounting_stable`
+  注入 4,096 次 `Suspended → Resumed` 边沿，验证每个挂起间隔只计入
+  `total_suspended`、运行间隔才进入模拟时间，且最终状态仍为 `Running`。
+- `prism_render_app::recovery::tests::injected_recovery_acceptance_gates_render_until_restored`
+  用 null RHI 注入设备丢失、替换设备连续失败和最终成功，验证失败期间普通 Render
+  帧不提交、只发布一次 `DeviceRestored`，成功恢复后主世界回到 `Running` 并继续提交帧。
+
+对应命令：
+
+```text
+cargo test --locked -p prism_app lifecycle::tests::long_suspend_resume_run_keeps_state_and_time_accounting_stable
+cargo test --locked -p prism_render_app recovery::tests::injected_recovery_acceptance_gates_render_until_restored
+```
+
+这两条是 host-independent acceptance seam；它们不能替代真实 Winit compositor、
+macOS sleep/wake 或 Android/iOS 设备演练。
+
 ### CPU pipeline benchmark
 
 ```text
@@ -195,7 +216,7 @@ null backend 只覆盖 resident columns、dirty upload、device replacement 的�
 GPU 执行，也不能推出 GPU 性能收益。wgpu readback 在提交、poll、map callback 成功
 后才读取映射范围；map 失败或 callback 缺失会显式失败，不再伪造成功。
 
-1. `real_window_presentation_acceptance_entry` 仍是 `#[ignore]`，需要真实 OS window 和 display compositor；本次没有伪造窗口验收。
+1. `real_window_presentation_acceptance_entry` 仍是 `#[ignore]`，需要真实 OS window 和 display compositor；本次没有伪造窗口验收。host-independent 的生命周期/recovery 长循环契约已由上节两条测试覆盖。
 2. `runner_parity` 本次只运行 `--headless-only`，没有执行 Winit 窗口分支。
 3. 真实 Metal/wgpu 的普通绘制、材质、mesh、transform、GPU-driven 与 device-loss recovery 已在本机门禁通过；仍缺真实移动设备、其他后端和长时间运行证据。
 4. benchmark 没有跨机器、长时间、真实游戏场景、present latency、功耗或 GPU 帧时间门槛；不能据此声称“超过 UE”或达到固定 FPS。

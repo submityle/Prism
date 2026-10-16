@@ -421,4 +421,69 @@ mod tests {
             Duration::from_nanos(16)
         );
     }
+
+    #[test]
+    fn long_suspend_resume_run_keeps_state_and_time_accounting_stable() {
+        let mut app = App::new();
+        let mut adapter = SuspendResumeAdapter;
+        let frame = 16_000_000_u64;
+        let gap = 500_000_000_u64;
+        let cycles = 4_096_u64;
+
+        for cycle in 0..cycles {
+            let suspend_at = frame + cycle * (frame + gap);
+            let suspended = adapter.forward(
+                &mut app,
+                SuspendEvent::suspended(MonotonicNanos(suspend_at)),
+            );
+            assert_eq!(
+                suspended.applied,
+                if cycle == 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_nanos(frame)
+                }
+            );
+            app.update();
+            assert_eq!(
+                *app.world().resource::<AppLifecycle>(),
+                AppLifecycle::Suspended
+            );
+
+            let resumed = adapter.forward(
+                &mut app,
+                SuspendEvent::resumed(MonotonicNanos(suspend_at + gap)),
+            );
+            assert_eq!(resumed.skipped, Duration::from_nanos(gap));
+            app.update();
+            assert_eq!(
+                *app.world().resource::<AppLifecycle>(),
+                AppLifecycle::Running
+            );
+        }
+
+        let clocks = app.world().resource::<EngineClocks>();
+        assert_eq!(
+            clocks.suspendable().total_suspended(),
+            Duration::from_nanos(cycles * gap),
+            "every host suspend gap is accounted exactly once"
+        );
+        assert_eq!(
+            clocks.suspendable().elapsed(),
+            Duration::from_nanos((cycles - 1) * frame),
+            "only running intervals contribute to simulated wall time"
+        );
+        assert!(!clocks.suspendable().is_suspended());
+        assert_eq!(
+            *app.world().resource::<AppLifecycle>(),
+            AppLifecycle::Running
+        );
+
+        let post_resume = app
+            .world_mut()
+            .resource_mut::<EngineClocks>()
+            .suspendable_mut()
+            .advance_to(Duration::from_nanos(cycles * (frame + gap) + frame));
+        assert_eq!(post_resume, Duration::from_nanos(frame));
+    }
 }

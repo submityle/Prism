@@ -388,7 +388,7 @@ pkg/prism_app/
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：当前以 `ExtractFn` 作为跨 World 单向接缝，并已有串行/并行等价路径；剩余风险是大负载下的重叠率、尾延迟和跨线程生命周期验收，而不是缺少提取实现。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。
   2. **固定步长熔断（M2）**：死亡螺旋参数（max_frame_dt/max_substeps）需按内容压测标定，错配会在卡顿时放大为慢放或卡死。
-  3. **窗口生命周期（M4）**：移动端 Suspended/Resumed 下 GPU 上下文/交换链重建极易崩；当前 winit lifecycle → App adapter 的接线已有 host-independent tests，桌面原生 sleep/power 通知仍是 callback-only，仍需与真实移动 RHI/窗口层联调并完成 Android/iOS 设备演练。
+  3. **窗口生命周期（M4）**：移动端 Suspended/Resumed 下 GPU 上下文/交换链重建极易崩；当前 winit lifecycle → App adapter 的接线已有 host-independent tests，并补有 4,096 次挂起/恢复长循环与 null RHI 设备恢复失败→重试→成功验收；桌面原生 sleep/power 通知仍是 callback-only，仍需与真实移动 RHI/窗口层联调并完成 Android/iOS 设备演练。
   4. **确定性（M5）**：跨平台浮点一致仅在 `determinism` 档 + 定点/软件数学路径保证；录制重放靠逐固定步输入 + 周期快照，快照频率权衡内存与回放精度。
   5. **插件依赖解析（M1）**：循环依赖/缺失依赖须在装配期静态报错，不能拖到运行期；去重语义要明确（显式报错 vs 静默忽略）。
 - **与既有文档关系**：本层是 `prism_loom_runtime_framework`（L7 游戏运行时）的**地基**，二者不重叠——Loom 作为插件挂到本层；旧 `prism_bevy` 过渡桥已退役，渲染提取与 ECS 文档 §23.5 为同一接缝的两侧表述，须保持契约一致。
