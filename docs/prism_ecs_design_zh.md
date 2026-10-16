@@ -17,7 +17,7 @@
 - 关键依赖: `prism_math`（glam SIMD）、`prism_tasks`（work-stealing + fiber 作业图，`std`/`multi_thread`）、`prism_reflect`（可选，序列化/反射/脚本桥）
 - 明确约束: 核心 `no_std + alloc`；`std` / `multi_thread` / `serialize` / `reflect` / `trace` / `determinism` / `simd` / `partition` 为 feature；**不依赖任何 `bevy_*` crate**
 
-> **现状核查口径（2026-10-16，当前 checkout HEAD @ `964c3a246`）**：本文同时保留完整设计目标与当前实现边界。「已实现」与「已验证」分开记录；提交历史中的测试入口或历史验收记录不等于本次重跑，也不等于跨机、NAT、真实 GPU 或性能目标完成。本轮已重跑并通过 `prism_ecs` 默认 feature 单元测试（860 项）与 `--all-features` 单元测试（1209 项）、`prism_world_runtime --lib`（97 项）以及 `prism_world_gpu --features gpu --lib`（112 项）。GPU feature 编译阻塞已收口，但这不等于真实 adapter、上传/同步收益或端到端 GPU 性能已验证；当前工作树仍含并行开发中的未提交改动，渲染/NUMA/GPU 改动仍须按文件归属统一验证。§17.1 与历史修复段落中的数值/通过次数仍是既有记录。
+> **现状核查口径（2026-10-16，当前 checkout HEAD @ `a8fd000e9dff`）**：本文同时保留完整设计目标与当前实现边界。「已实现」与「已验证」分开记录；提交历史中的测试入口或历史验收记录不等于本次重跑，也不等于跨机、NAT、真实 GPU 或性能目标完成。本轮已重跑并通过 `prism_ecs` 默认 feature 单元测试（860 项）与 `--all-features` 单元测试（1209 项）、`prism_world_runtime --lib`（97 项）以及 `prism_world_gpu --features gpu --lib`（112 项）。GPU feature 编译阻塞已收口，但这不等于真实 adapter、上传/同步收益或端到端 GPU 性能已验证；当前工作树仍含并行开发中的未提交改动，渲染/NUMA/GPU 改动仍须按文件归属统一验证。§17.1 与历史修复段落中的数值/通过次数仍是既有记录。
 
 > **本次 main 历史同步依据**：UDP/ACK/rebind：`39bd3806a`、`0bf59f55a`、`d6000586b`、`c7201323e`；NUMA acceptance：`9390b7a5e`、`07a3d5b9c`；audio/source-route 与 event-log：`ea2ed8026`、`cd03b14c7`、`3e503dd38`；GPU resident/wgpu gate 与 benchmark：`22aebe26b`、`a288cf12e`、`c7201323e`、`3a8120874`、`0e7e67259`；CPU SDF clipmap planner：`7e99fa30f`、`90ff7a89a`。
 

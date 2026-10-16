@@ -15,20 +15,23 @@
 //! * [`UnsafeWorldCell`] — the single `unsafe` chokepoint through which params
 //!   fetch disjoint borrows from one `&mut World`.
 //!
-//! # Not yet here (honestly deferred)
+//! # Execution boundary
 //!
-//! The parallel, conflict-graph executor and fiber job graph (§8.2–§8.3) are
-//! deferred until `prism_tasks` lands; the schedule layer currently runs
-//! single-threaded. `SystemSet`s and run-conditions-as-systems are also future
-//! work. Nothing here is stubbed — the deferred pieces are simply absent. The
-//! per-system [`Access`](crate::query::Access) is already recorded so that
-//! executor can be dropped in without touching the param layer.
+//! The system parameter layer records the complete access set and is consumed by
+//! both the single-threaded and `multi_thread` schedule executors. The
+//! conflict-graph executor, `SystemSet`s, and run conditions live in
+//! [`crate::schedule`]. System-internal row/slice fan-out and dependency DAGs
+//! are available through [`JobGraph`] when `multi_thread` is enabled. The
+//! remaining limitation is integration and workload validation: the kernel does
+//! not claim that every system is automatically parallel-safe, nor that every
+//! workload has near-linear scaling.
 //!
 //! [`Res`]: crate::system::param::Res
 //! [`ResMut`]: crate::system::param::ResMut
 //! [`Query`]: crate::system::query_param::Query
 //! [`FunctionSystem`]: crate::system::function::FunctionSystem
 //! [`ExclusiveFunctionSystem`]: crate::system::exclusive::ExclusiveFunctionSystem
+//! [`JobGraph`]: crate::system::JobGraph
 
 pub mod exclusive;
 pub mod function;

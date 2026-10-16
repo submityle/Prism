@@ -27,12 +27,14 @@
 //!   §24.1 dispatch base), preserving the single-threaded result for
 //!   ambiguity-free schedules.
 //!
-//! # Honestly deferred
+//! # Intra-system parallelism
 //!
-//! The fiber job graph for *intra*-system chunk parallelism (§8.3) is a future
-//! milestone (M3). It is absent, not stubbed; the per-system
-//! [`Access`](crate::query::Access) recorded by the system layer already
-//! carries the information both executors need.
+//! System-internal row/slice fan-out and heterogeneous dependency DAGs are
+//! implemented by [`crate::system::JobGraph`] and [`crate::system::JobDag`]
+//! under `multi_thread`. The schedule executor remains responsible for
+//! system-level conflict waves; `JobGraph` is an explicit system parameter and
+//! does not silently parallelize arbitrary user code. Performance claims still
+//! require controlled workload and hardware measurements.
 
 pub mod ambiguity;
 pub mod condition;

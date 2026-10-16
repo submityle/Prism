@@ -34,10 +34,13 @@
 //!   LOD and a 64-bit floating origin, snapshots with rollback, the
 //!   `determinism`/`trace` diagnostics, and GPU-resident columns.
 //!
-//! Still **PLANNED** (and recorded as such in the design doc): M6 migration and
-//! tooling, physical 16 KiB chunk arenas, large-page / NUMA-aware column
-//! allocation, the render side of the §23.5 extraction pipeline, and the
-//! `ParamSet` system param.
+//! The remaining work is integration and acceptance rather than hollow public
+//! stubs: M6 migration/tooling still needs full application and legacy-asset
+//! workflow validation; physical arena placement, NUMA locality, render
+//! extraction, and GPU upload behavior require platform-specific evidence; and
+//! `ParamSet`/job execution require feature-matrix and workload validation.
+//! The corresponding design-document sections deliberately distinguish
+//! implemented mechanisms from unverified production claims.
 //!
 //! # `no_std`
 //!
