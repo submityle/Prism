@@ -129,6 +129,10 @@ impl PlanetMeshConfig {
 /// Indexed planet patch. Positions are origin-relative metres, axes stay global.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlanetHeightfieldMesh {
+    cache_id: u64,
+    tile: TileKey,
+    spec: crate::HeightfieldSpec,
+    revision: u64,
     config: PlanetMeshConfig,
     error_bound_mm: f64,
     positions: Vec<[f32; 3]>,
@@ -190,6 +194,10 @@ impl PlanetHeightfieldMesh {
         }
         validate_neighborhood(field, neighborhood)?;
         let mut mesh = Self {
+            cache_id: field.cache_id(),
+            tile: field.tile(),
+            spec: field.spec(),
+            revision: field.revision(),
             config,
             error_bound_mm: 0.0,
             positions: reserve(count)?,
@@ -199,49 +207,10 @@ impl PlanetHeightfieldMesh {
         };
         for y in 0..side {
             for x in 0..side {
-                let absolute = point(field, config.radius_mm, x, y)?;
-                let mut position = [0.0; 3];
-                for axis in 0..3 {
-                    let local_mm = absolute[axis] - config.origin_mm[axis] as f64;
-                    position[axis] = (local_mm * 0.001) as f32;
-                    // A deliberately conservative operation-count bound covers
-                    // rational UV, normalization, radius/height and subtraction.
-                    let radial_mm = (i128::from(config.radius_mm)
-                        + field.height_mm([x, y]).ok_or(BakeError::InvalidGeometry)?)
-                        as f64;
-                    let arithmetic = 128.0
-                        * f64::EPSILON
-                        * (absolute[axis].abs()
-                            + (config.origin_mm[axis] as f64).abs()
-                            + radial_mm.abs()
-                            + 1.0);
-                    let error = (f64::from(position[axis]) * 1000.0 - local_mm).abs() + arithmetic;
-                    if !position[axis].is_finite() || error > config.max_error_mm {
-                        return Err(BakeError::InvalidGeometry);
-                    }
-                    mesh.error_bound_mm = mesh.error_bound_mm.max(error);
-                }
-                let left =
-                    derivative_point(field, config.radius_mm, neighborhood, TileEdge::West, x, y)?
-                        .unwrap_or(point(field, config.radius_mm, x.saturating_sub(1), y)?);
-                let right =
-                    derivative_point(field, config.radius_mm, neighborhood, TileEdge::East, x, y)?
-                        .unwrap_or(point(field, config.radius_mm, (x + 1).min(side - 1), y)?);
-                let down =
-                    derivative_point(field, config.radius_mm, neighborhood, TileEdge::South, x, y)?
-                        .unwrap_or(point(field, config.radius_mm, x, y.saturating_sub(1))?);
-                let up =
-                    derivative_point(field, config.radius_mm, neighborhood, TileEdge::North, x, y)?
-                        .unwrap_or(point(field, config.radius_mm, x, (y + 1).min(side - 1))?);
-                let tangent_u = subtract(right, left);
-                let tangent_v = subtract(up, down);
-                let normal = cross(tangent_u, tangent_v);
-                let length = libm::sqrt(normal.iter().map(|v| v * v).sum());
-                if !length.is_finite() || length <= 0.0 {
-                    return Err(BakeError::InvalidGeometry);
-                }
-                mesh.positions.push(position);
-                mesh.normals.push(normal.map(|v| (v / length) as f32));
+                let vertex = project_vertex(field, config, neighborhood, x, y)?;
+                mesh.error_bound_mm = mesh.error_bound_mm.max(vertex.error_bound_mm);
+                mesh.positions.push(vertex.position);
+                mesh.normals.push(vertex.normal);
                 mesh.uvs
                     .push([x as f32 / (side - 1) as f32, y as f32 / (side - 1) as f32]);
             }
@@ -255,6 +224,55 @@ impl PlanetHeightfieldMesh {
             }
         }
         Ok(mesh)
+    }
+
+    /// Applies the next committed heightfield rebake without reallocating mesh
+    /// storage or reprojecting unchanged vertices.
+    ///
+    /// Positions in the changed sample rectangle and normals in its one-sample
+    /// ring are recomputed. The returned rectangle is the conservative vertex
+    /// upload region. If a changed boundary uses cross-tile normals, the
+    /// supplied neighbor must already contain the matching shared edge; a
+    /// mismatch fails before any mesh state changes. Neighbor meshes affected
+    /// by the shared edge must be updated by their owner as a separate tile
+    /// operation.
+    pub fn update(
+        &mut self,
+        field: &HeightfieldTile,
+        change: crate::GridChange,
+        neighborhood: PlanetHeightfieldNormalNeighborhood<'_>,
+    ) -> Result<crate::SampleBounds, BakeError<Infallible>> {
+        if !change.matches(field, self.cache_id, self.revision)
+            || self.tile != field.tile()
+            || self.spec != field.spec()
+        {
+            return Err(BakeError::StaleChange);
+        }
+        validate_neighborhood(field, neighborhood)?;
+        let side = self.spec.samples_per_edge();
+        let updated = change.bounds().expanded(side);
+
+        // Preflight every affected vertex. This keeps the commit phase
+        // infallible, so a bad radial height or degenerate normal cannot leave
+        // a partially updated mesh visible to the caller.
+        for y in updated.min()[1]..=updated.max()[1] {
+            for x in updated.min()[0]..=updated.max()[0] {
+                let _ = project_vertex(field, self.config, neighborhood, x, y)?;
+            }
+        }
+        let mut next_error_bound = self.error_bound_mm;
+        for y in updated.min()[1]..=updated.max()[1] {
+            for x in updated.min()[0]..=updated.max()[0] {
+                let vertex = project_vertex(field, self.config, neighborhood, x, y)?;
+                let index = (y * side + x) as usize;
+                self.positions[index] = vertex.position;
+                self.normals[index] = vertex.normal;
+                next_error_bound = next_error_bound.max(vertex.error_bound_mm);
+            }
+        }
+        self.error_bound_mm = next_error_bound;
+        self.revision = change.revision();
+        Ok(updated)
     }
 
     /// Local position payload in metres.
@@ -280,6 +298,11 @@ impl PlanetHeightfieldMesh {
     /// Maximum per-coordinate arithmetic/encoding error bound in millimetres.
     pub const fn error_bound_mm(&self) -> f64 {
         self.error_bound_mm
+    }
+
+    /// Last consumed heightfield cache revision.
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Converts into a native Prism render mesh while preserving local positions.
@@ -490,6 +513,71 @@ fn point_at(
     Ok(cube.map(|v| v / length * radial_mm as f64))
 }
 
+struct ProjectedPlanetVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    error_bound_mm: f64,
+}
+
+fn project_vertex(
+    field: &HeightfieldTile,
+    config: PlanetMeshConfig,
+    neighborhood: PlanetHeightfieldNormalNeighborhood<'_>,
+    x: u32,
+    y: u32,
+) -> Result<ProjectedPlanetVertex, BakeError<Infallible>> {
+    let absolute = point(field, config.radius_mm, x, y)?;
+    let mut position = [0.0; 3];
+    let radial_mm = (i128::from(config.radius_mm)
+        + field.height_mm([x, y]).ok_or(BakeError::InvalidGeometry)?) as f64;
+    let mut error_bound_mm: f64 = 0.0;
+    for axis in 0..3 {
+        let local_mm = absolute[axis] - config.origin_mm[axis] as f64;
+        position[axis] = (local_mm * 0.001) as f32;
+        // A deliberately conservative operation-count bound covers rational
+        // UV, normalization, radius/height and subtraction.
+        let arithmetic = 128.0
+            * f64::EPSILON
+            * (absolute[axis].abs()
+                + (config.origin_mm[axis] as f64).abs()
+                + radial_mm.abs()
+                + 1.0);
+        let error = (f64::from(position[axis]) * 1000.0 - local_mm).abs() + arithmetic;
+        if !position[axis].is_finite() || error > config.max_error_mm {
+            return Err(BakeError::InvalidGeometry);
+        }
+        error_bound_mm = error_bound_mm.max(error);
+    }
+    let left = derivative_point(field, config.radius_mm, neighborhood, TileEdge::West, x, y)?
+        .unwrap_or(point(field, config.radius_mm, x.saturating_sub(1), y)?);
+    let right = derivative_point(field, config.radius_mm, neighborhood, TileEdge::East, x, y)?
+        .unwrap_or(point(
+            field,
+            config.radius_mm,
+            (x + 1).min(field.spec().samples_per_edge() - 1),
+            y,
+        )?);
+    let down = derivative_point(field, config.radius_mm, neighborhood, TileEdge::South, x, y)?
+        .unwrap_or(point(field, config.radius_mm, x, y.saturating_sub(1))?);
+    let up = derivative_point(field, config.radius_mm, neighborhood, TileEdge::North, x, y)?
+        .unwrap_or(point(
+            field,
+            config.radius_mm,
+            x,
+            (y + 1).min(field.spec().samples_per_edge() - 1),
+        )?);
+    let normal = cross(subtract(right, left), subtract(up, down));
+    let length = libm::sqrt(normal.iter().map(|v| v * v).sum());
+    if !length.is_finite() || length <= 0.0 {
+        return Err(BakeError::InvalidGeometry);
+    }
+    Ok(ProjectedPlanetVertex {
+        position,
+        normal: normal.map(|v| (v / length) as f32),
+        error_bound_mm,
+    })
+}
+
 fn face_coordinate(tile: TileKey, side: u32, x: u32, y: u32) -> [f64; 2] {
     let tiles = f64::from(tile.side_len());
     let segments = f64::from(side - 1);
@@ -670,6 +758,97 @@ mod tests {
         let index = 4 * 9 + 8;
         assert_ne!(legacy.normals()[index], smooth.normals()[index]);
         assert_ne!(smooth_flat.normals()[index], smooth.normals()[index]);
+    }
+
+    #[test]
+    fn incremental_projection_matches_full_rebuild_and_only_expands_normal_ring() {
+        let tile = TileKey::new(CubeFace::PositiveZ, 1, 0, 0).unwrap();
+        let mut field = field(tile, 0);
+        let config = PlanetMeshConfig::new(1_000_000, [0; 3], 1.0).unwrap();
+        let mut incremental = PlanetHeightfieldMesh::build(&field, config, LIMITS).unwrap();
+        let change = field
+            .rebake(
+                crate::DirtyRegion::new(tile, 32_768, 32_768, 32_768, 32_768).unwrap(),
+                &Constant(100),
+                LIMITS,
+            )
+            .unwrap();
+        let full = PlanetHeightfieldMesh::build(&field, config, LIMITS).unwrap();
+
+        let updated = incremental
+            .update(&field, change, PlanetHeightfieldNormalNeighborhood::empty())
+            .unwrap();
+        assert_eq!(updated.min(), [3, 3]);
+        assert_eq!(updated.max(), [6, 6]);
+        assert_eq!(incremental.positions(), full.positions());
+        assert_eq!(incremental.normals(), full.normals());
+        assert_eq!(incremental.uvs(), full.uvs());
+        assert_eq!(incremental.indices(), full.indices());
+        assert_eq!(incremental.revision(), field.revision());
+    }
+
+    #[test]
+    fn incremental_projection_rejects_stale_change_without_mutation() {
+        let tile = TileKey::root(CubeFace::PositiveZ);
+        let mut field = field(tile, 0);
+        let config = PlanetMeshConfig::new(1_000_000, [0; 3], 1.0).unwrap();
+        let mut mesh = PlanetHeightfieldMesh::build(&field, config, LIMITS).unwrap();
+        let old_positions = mesh.positions().to_vec();
+        let first = field
+            .rebake(
+                crate::DirtyRegion::new(tile, 1, 1, 1, 1).unwrap(),
+                &Constant(10),
+                LIMITS,
+            )
+            .unwrap();
+        let _second = field
+            .rebake(
+                crate::DirtyRegion::new(tile, 2, 2, 2, 2).unwrap(),
+                &Constant(20),
+                LIMITS,
+            )
+            .unwrap();
+
+        assert_eq!(
+            mesh.update(&field, first, PlanetHeightfieldNormalNeighborhood::empty(),),
+            Err(BakeError::StaleChange)
+        );
+        assert_eq!(mesh.revision(), 0);
+        assert_eq!(mesh.positions(), old_positions.as_slice());
+    }
+
+    #[test]
+    fn boundary_neighbor_mismatch_fails_before_incremental_projection_commit() {
+        let tile = TileKey::new(CubeFace::PositiveZ, 1, 0, 0).unwrap();
+        let neighbor_key = tile.neighbor(TileEdge::West);
+        let mut center = field(tile, 0);
+        let neighbor = field(neighbor_key, 0);
+        let config = PlanetMeshConfig::new(1_000_000, [0; 3], 1.0).unwrap();
+        let mut mesh = PlanetHeightfieldMesh::build(&center, config, LIMITS).unwrap();
+        let old_positions = mesh.positions().to_vec();
+        let change = center
+            .rebake(
+                crate::DirtyRegion::new(tile, 0, 0, 0, 0).unwrap(),
+                &Constant(100),
+                LIMITS,
+            )
+            .unwrap();
+
+        assert_eq!(
+            mesh.update(
+                &center,
+                change,
+                PlanetHeightfieldNormalNeighborhood::new(
+                    Some(PlanetHeightfieldNeighbor::Tile(&neighbor)),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+            Err(BakeError::InvalidGeometry)
+        );
+        assert_eq!(mesh.revision(), 0);
+        assert_eq!(mesh.positions(), old_positions.as_slice());
     }
 
     #[test]

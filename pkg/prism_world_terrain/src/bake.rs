@@ -71,7 +71,7 @@ impl SampleBounds {
         .map_err(|_| BakeError::SizeOverflow)
     }
 
-    fn expanded(self, side: u32) -> Self {
+    pub(crate) fn expanded(self, side: u32) -> Self {
         Self {
             min: [self.min[0].saturating_sub(1), self.min[1].saturating_sub(1)],
             max: [
@@ -106,6 +106,20 @@ impl GridChange {
     /// Revision after the change.
     pub const fn revision(self) -> u64 {
         self.revision
+    }
+
+    pub(crate) fn matches(
+        self,
+        field: &HeightfieldTile,
+        cache_id: u64,
+        current_revision: u64,
+    ) -> bool {
+        self.cache_id == field.cache_id
+            && self.cache_id == cache_id
+            && self.tile == field.tile
+            && self.spec == field.spec
+            && self.previous_revision == current_revision
+            && self.revision == field.revision
     }
 }
 
@@ -156,6 +170,10 @@ impl HeightfieldTile {
     /// Owning spatial tile.
     pub const fn tile(&self) -> TileKey {
         self.tile
+    }
+
+    pub(crate) const fn cache_id(&self) -> u64 {
+        self.cache_id
     }
 
     /// Validated encoded-height contract.
