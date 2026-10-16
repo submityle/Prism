@@ -16,7 +16,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use prism_asset::StableGuid;
-use prism_asset_container::{ManifestReadError, ManifestReader, OverlaySet, RuntimeManifest};
+use prism_asset_container::{
+    ManifestRangeRequest, ManifestReadError, ManifestReader, OverlaySet, RangeBatchPolicy,
+    RuntimeManifest,
+};
 use prism_world_io::checksum;
 use prism_world_stream::CellManifest;
 
@@ -27,6 +30,10 @@ use crate::{
 
 /// Default maximum size of one complete cell stream, including its header.
 pub const DEFAULT_ASSET_CONTAINER_MAX_IO_BYTES: u64 = 64 * 1024 * 1024;
+/// Default maximum decoded bytes in one logical cell range request.
+pub const DEFAULT_ASSET_CONTAINER_MAX_RANGE_BYTES: u64 = 64 * 1024;
+/// Default maximum number of logical ranges used to assemble one cell.
+pub const DEFAULT_ASSET_CONTAINER_MAX_RANGES: usize = 1024;
 
 /// Admission limits for [`AssetContainerCellProvider`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,13 +41,45 @@ pub struct AssetContainerProviderLimits {
     /// Maximum declared size of one complete cell stream, including the fixed
     /// [`crate::CELL_HEADER_SIZE`] byte header.
     pub max_io_bytes: u64,
+    /// Maximum decoded bytes in one logical range request.
+    pub max_range_bytes: u64,
+    /// Maximum number of logical ranges used to assemble one cell.
+    pub max_ranges: usize,
+    /// Maximum physical bytes in one container batch.
+    pub max_batch_bytes: u64,
+    /// Maximum physical gap coalesced between adjacent ranges.
+    pub max_gap_bytes: u64,
 }
 
 impl AssetContainerProviderLimits {
     /// Creates limits for one complete cell stream.
     #[must_use]
     pub const fn new(max_io_bytes: u64) -> Self {
-        Self { max_io_bytes }
+        Self {
+            max_io_bytes,
+            max_range_bytes: DEFAULT_ASSET_CONTAINER_MAX_RANGE_BYTES,
+            max_ranges: DEFAULT_ASSET_CONTAINER_MAX_RANGES,
+            max_batch_bytes: 1024 * 1024,
+            max_gap_bytes: 4096,
+        }
+    }
+
+    /// Creates limits with explicit range and physical batch budgets.
+    #[must_use]
+    pub const fn with_ranges(
+        max_io_bytes: u64,
+        max_range_bytes: u64,
+        max_ranges: usize,
+        max_batch_bytes: u64,
+        max_gap_bytes: u64,
+    ) -> Self {
+        Self {
+            max_io_bytes,
+            max_range_bytes,
+            max_ranges,
+            max_batch_bytes,
+            max_gap_bytes,
+        }
     }
 }
 
@@ -62,6 +101,15 @@ pub enum AssetContainerProviderError {
         /// Minimum legal complete stream length.
         minimum: u64,
     },
+    /// The configured range budget is invalid.
+    InvalidRangeLimits {
+        /// Configured maximum logical range size.
+        max_range_bytes: u64,
+        /// Configured maximum number of ranges.
+        max_ranges: usize,
+        /// Configured maximum physical batch size.
+        max_batch_bytes: u64,
+    },
     /// The request declares fewer bytes than the fixed cell header requires.
     InvalidDeclaredLength {
         /// Declared complete stream length.
@@ -81,6 +129,15 @@ pub enum AssetContainerProviderError {
         io_bytes: u64,
         /// Configured maximum.
         max_io_bytes: u64,
+    },
+    /// The cell cannot be represented by the configured range-count budget.
+    RangeCountExceeded {
+        /// Complete cell stream length.
+        io_bytes: u64,
+        /// Maximum logical range size.
+        max_range_bytes: u64,
+        /// Configured maximum number of ranges.
+        max_ranges: usize,
     },
     /// The declared length cannot be represented by the host allocator.
     LengthOverflow {
@@ -135,6 +192,14 @@ impl fmt::Display for AssetContainerProviderError {
                 formatter,
                 "asset-container max_io_bytes {max_io_bytes} is below minimum {minimum}"
             ),
+            Self::InvalidRangeLimits {
+                max_range_bytes,
+                max_ranges,
+                max_batch_bytes,
+            } => write!(
+                formatter,
+                "invalid asset-container range limits: range {max_range_bytes}, ranges {max_ranges}, batch {max_batch_bytes}"
+            ),
             Self::InvalidDeclaredLength { io_bytes, minimum } => write!(
                 formatter,
                 "cell declares {io_bytes} bytes, below minimum {minimum}"
@@ -149,6 +214,14 @@ impl fmt::Display for AssetContainerProviderError {
             } => write!(
                 formatter,
                 "cell declares {io_bytes} bytes, above provider limit {max_io_bytes}"
+            ),
+            Self::RangeCountExceeded {
+                io_bytes,
+                max_range_bytes,
+                max_ranges,
+            } => write!(
+                formatter,
+                "cell declares {io_bytes} bytes but needs more than {max_ranges} ranges at {max_range_bytes} bytes each"
             ),
             Self::LengthOverflow { io_bytes } => write!(
                 formatter,
@@ -184,6 +257,33 @@ impl fmt::Display for AssetContainerProviderError {
     }
 }
 
+/// A deterministic, budget-checked logical range plan for one complete cell.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetContainerCellRangePlan {
+    manifest: CellManifest,
+    requests: Vec<ManifestRangeRequest>,
+}
+
+impl AssetContainerCellRangePlan {
+    /// Returns the complete cell manifest represented by this plan.
+    #[must_use]
+    pub const fn manifest(&self) -> CellManifest {
+        self.manifest
+    }
+
+    /// Returns logical requests in deterministic declaration order.
+    #[must_use]
+    pub fn requests(&self) -> &[ManifestRangeRequest] {
+        &self.requests
+    }
+
+    /// Returns the number of bytes assembled by the plan.
+    #[must_use]
+    pub const fn total_bytes(&self) -> u64 {
+        self.manifest.io_bytes
+    }
+}
+
 impl std::error::Error for AssetContainerProviderError {}
 
 /// A bounded cell provider over a validated asset-container overlay.
@@ -216,6 +316,17 @@ impl AssetContainerCellProvider {
             return Err(AssetContainerProviderError::InvalidMaxIoBytes {
                 max_io_bytes: limits.max_io_bytes,
                 minimum,
+            });
+        }
+        if limits.max_range_bytes == 0
+            || limits.max_ranges == 0
+            || limits.max_batch_bytes == 0
+            || limits.max_range_bytes > limits.max_batch_bytes
+        {
+            return Err(AssetContainerProviderError::InvalidRangeLimits {
+                max_range_bytes: limits.max_range_bytes,
+                max_ranges: limits.max_ranges,
+                max_batch_bytes: limits.max_batch_bytes,
             });
         }
         Ok(Self {
@@ -303,6 +414,179 @@ impl AssetContainerCellProvider {
         Ok((manifest, length, io_request.expected_checksum()))
     }
 
+    fn make_plan(
+        &self,
+        manifest: CellManifest,
+        entry_len: u64,
+    ) -> Result<AssetContainerCellRangePlan, AssetContainerProviderError> {
+        if entry_len != manifest.io_bytes {
+            return Err(AssetContainerProviderError::PayloadLengthMismatch {
+                scene_key: manifest.scene_key,
+                expected_io_bytes: manifest.io_bytes,
+                actual_payload_bytes: entry_len,
+            });
+        }
+        let range_count = manifest
+            .io_bytes
+            .saturating_add(self.limits.max_range_bytes - 1)
+            / self.limits.max_range_bytes;
+        let range_count_usize = usize::try_from(range_count).map_err(|_| {
+            AssetContainerProviderError::RangeCountExceeded {
+                io_bytes: manifest.io_bytes,
+                max_range_bytes: self.limits.max_range_bytes,
+                max_ranges: self.limits.max_ranges,
+            }
+        })?;
+        if range_count_usize > self.limits.max_ranges {
+            return Err(AssetContainerProviderError::RangeCountExceeded {
+                io_bytes: manifest.io_bytes,
+                max_range_bytes: self.limits.max_range_bytes,
+                max_ranges: self.limits.max_ranges,
+            });
+        }
+        let guid = StableGuid::from_u128(manifest.scene_key);
+        let mut requests = Vec::new();
+        requests.try_reserve_exact(range_count_usize).map_err(|_| {
+            AssetContainerProviderError::AllocationFailed {
+                requested_bytes: range_count_usize
+                    .checked_mul(core::mem::size_of::<ManifestRangeRequest>())
+                    .unwrap_or(usize::MAX),
+            }
+        })?;
+        let mut offset = 0_u64;
+        while offset < manifest.io_bytes {
+            let len = (manifest.io_bytes - offset).min(self.limits.max_range_bytes);
+            requests.push(ManifestRangeRequest::new(guid, offset, len));
+            offset =
+                offset
+                    .checked_add(len)
+                    .ok_or(AssetContainerProviderError::LengthOverflow {
+                        io_bytes: manifest.io_bytes,
+                    })?;
+        }
+        Ok(AssetContainerCellRangePlan { manifest, requests })
+    }
+
+    /// Plans deterministic logical ranges after validating the current route.
+    pub fn plan_cell_ranges(
+        &self,
+        request: &CellReadRequest,
+    ) -> Result<AssetContainerCellRangePlan, AssetContainerProviderError> {
+        let (manifest, _, _) = self.validate_request(request)?;
+        let reader = self
+            .manifest
+            .bind(&self.overlays)
+            .map_err(|error| AssetContainerProviderError::Manifest(Box::new(error)))?;
+        let guid = StableGuid::from_u128(manifest.scene_key);
+        let entry = reader
+            .entry_info(guid)
+            .map_err(|error| AssetContainerProviderError::Manifest(Box::new(error)))?;
+        self.make_plan(manifest, entry.raw_len)
+    }
+
+    fn assemble_ranges(
+        &self,
+        reader: ManifestReader<'_, '_>,
+        plan: &AssetContainerCellRangePlan,
+    ) -> Result<Vec<u8>, AssetContainerProviderError> {
+        let policy = RangeBatchPolicy {
+            max_batch_bytes: self.limits.max_batch_bytes,
+            max_gap_bytes: self.limits.max_gap_bytes,
+        };
+        let ranges = reader
+            .read_ranges(plan.requests(), policy)
+            .map_err(|error| AssetContainerProviderError::Manifest(Box::new(error)))?;
+        let length = usize::try_from(plan.total_bytes()).map_err(|_| {
+            AssetContainerProviderError::LengthOverflow {
+                io_bytes: plan.total_bytes(),
+            }
+        })?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(length).map_err(|_| {
+            AssetContainerProviderError::AllocationFailed {
+                requested_bytes: length,
+            }
+        })?;
+        bytes.resize(length, 0);
+        let mut cursor = 0_usize;
+        for (request, range) in plan.requests().iter().zip(ranges) {
+            let range_len = usize::try_from(request.len).map_err(|_| {
+                AssetContainerProviderError::LengthOverflow {
+                    io_bytes: plan.total_bytes(),
+                }
+            })?;
+            if range.len() != range_len {
+                return Err(AssetContainerProviderError::ReadLengthMismatch {
+                    scene_key: plan.manifest().scene_key,
+                    expected_io_bytes: plan.total_bytes(),
+                    actual_bytes: range.len(),
+                });
+            }
+            let end = cursor.checked_add(range_len).ok_or(
+                AssetContainerProviderError::LengthOverflow {
+                    io_bytes: plan.total_bytes(),
+                },
+            )?;
+            let total_bytes = bytes.len();
+            let destination = bytes.get_mut(cursor..end).ok_or(
+                AssetContainerProviderError::ReadLengthMismatch {
+                    scene_key: plan.manifest().scene_key,
+                    expected_io_bytes: plan.total_bytes(),
+                    actual_bytes: total_bytes,
+                },
+            )?;
+            destination.copy_from_slice(&range);
+            cursor = end;
+        }
+        if cursor != bytes.len() {
+            return Err(AssetContainerProviderError::ReadLengthMismatch {
+                scene_key: plan.manifest().scene_key,
+                expected_io_bytes: plan.total_bytes(),
+                actual_bytes: cursor,
+            });
+        }
+        validate_header(plan.manifest(), &bytes).map_err(AssetContainerProviderError::Header)?;
+        Ok(bytes)
+    }
+
+    /// Reads and assembles a complete cell through bounded logical ranges.
+    pub fn read_cell_ranges(
+        &self,
+        request: &CellReadRequest,
+        cancel: CancellationToken,
+    ) -> Result<Vec<u8>, AssetContainerProviderError> {
+        if cancel.is_cancelled() {
+            return Err(AssetContainerProviderError::Cancelled);
+        }
+        let (manifest, _, expected_checksum) = self.validate_request(request)?;
+        if cancel.is_cancelled() {
+            return Err(AssetContainerProviderError::Cancelled);
+        }
+        let reader = self
+            .manifest
+            .bind(&self.overlays)
+            .map_err(|error| AssetContainerProviderError::Manifest(Box::new(error)))?;
+        let guid = StableGuid::from_u128(manifest.scene_key);
+        let entry = reader
+            .entry_info(guid)
+            .map_err(|error| AssetContainerProviderError::Manifest(Box::new(error)))?;
+        let plan = self.make_plan(manifest, entry.raw_len)?;
+        if cancel.is_cancelled() {
+            return Err(AssetContainerProviderError::Cancelled);
+        }
+        let bytes = self.assemble_ranges(reader, &plan)?;
+        if cancel.is_cancelled() {
+            return Err(AssetContainerProviderError::Cancelled);
+        }
+        if let Some(expected) = expected_checksum {
+            let actual = checksum(&bytes);
+            if actual != expected {
+                return Err(AssetContainerProviderError::ChecksumMismatch { expected, actual });
+            }
+        }
+        Ok(bytes)
+    }
+
     fn read_bound(
         &self,
         reader: ManifestReader<'_, '_>,
@@ -369,7 +653,16 @@ impl CellProvider for AssetContainerCellProvider {
         if cancel.is_cancelled() {
             return Err(AssetContainerProviderError::Cancelled);
         }
-        let bytes = self.read_bound(reader, manifest, length)?;
+        let guid = StableGuid::from_u128(manifest.scene_key);
+        let entry = reader
+            .entry_info(guid)
+            .map_err(|error| AssetContainerProviderError::Manifest(Box::new(error)))?;
+        let plan = self.make_plan(manifest, entry.raw_len)?;
+        let bytes = if plan.requests().len() == 1 {
+            self.read_bound(reader, manifest, length)?
+        } else {
+            self.assemble_ranges(reader, &plan)?
+        };
         if cancel.is_cancelled() {
             return Err(AssetContainerProviderError::Cancelled);
         }

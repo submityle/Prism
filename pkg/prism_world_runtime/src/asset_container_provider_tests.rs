@@ -94,6 +94,97 @@ fn reads_raw_and_deflate_cells_through_cell_and_chunk_seams() {
 }
 
 #[test]
+fn plans_nonzero_ranges_and_reassembles_in_declaration_order() {
+    let expected_manifest =
+        cell_manifest(0x1357, CELL_HEADER_SIZE + b"range assembly payload".len());
+    let (runtime_manifest, overlays, expected) =
+        mounted(expected_manifest, b"range assembly payload", false);
+    let limits = AssetContainerProviderLimits::with_ranges(expected.len() as u64, 7, 10, 32, 0);
+    let provider = AssetContainerCellProvider::with_limits(runtime_manifest, overlays, limits)
+        .expect("range limits");
+    let request = CellReadRequest::new(expected_manifest, 0);
+    let plan = provider.plan_cell_ranges(&request).expect("plan");
+    assert_eq!(plan.requests().first().map(|range| range.offset), Some(0));
+    assert!(plan.requests().iter().any(|range| range.offset > 0));
+    assert_eq!(
+        plan.requests().iter().map(|range| range.len).sum::<u64>(),
+        expected_manifest.io_bytes
+    );
+    assert_eq!(
+        provider
+            .read_cell_ranges(&request, CancellationToken::new(false))
+            .expect("assembled cell"),
+        expected
+    );
+}
+
+#[test]
+fn range_assembly_handles_deflate_entries_and_checksum() {
+    let expected_manifest = cell_manifest(
+        0x2468,
+        CELL_HEADER_SIZE + b"deflate range payload for cell".len(),
+    );
+    let (runtime_manifest, overlays, expected) =
+        mounted(expected_manifest, b"deflate range payload for cell", true);
+    let limits = AssetContainerProviderLimits::with_ranges(expected.len() as u64, 5, 16, 16, 0);
+    let provider = AssetContainerCellProvider::with_limits(runtime_manifest, overlays, limits)
+        .expect("range limits");
+    let request =
+        CellReadRequest::new(expected_manifest, 0).with_expected_checksum(checksum(&expected));
+    assert_eq!(
+        provider
+            .read_cell_ranges(&request, CancellationToken::new(false))
+            .expect("assembled compressed cell"),
+        expected
+    );
+}
+
+#[test]
+fn range_budget_fails_closed_before_allocating_requests() {
+    let expected_manifest = cell_manifest(0x369c, CELL_HEADER_SIZE + 9);
+    let (runtime_manifest, overlays, _) = mounted(expected_manifest, b"ninebytes", false);
+    let limits = AssetContainerProviderLimits::with_ranges(expected_manifest.io_bytes, 1, 8, 8, 0);
+    let provider = AssetContainerCellProvider::with_limits(runtime_manifest, overlays, limits)
+        .expect("range limits");
+    let error = provider
+        .plan_cell_ranges(&CellReadRequest::new(expected_manifest, 0))
+        .expect_err("range count budget");
+    assert!(matches!(
+        error,
+        AssetContainerProviderError::RangeCountExceeded { .. }
+    ));
+}
+
+#[test]
+fn invalid_range_limits_are_rejected_without_clamping() {
+    let manifest = RuntimeManifest::new();
+    let error = AssetContainerCellProvider::with_limits(
+        manifest,
+        OverlaySet::new(),
+        AssetContainerProviderLimits::with_ranges(CELL_HEADER_SIZE as u64, 0, 1, 1, 0),
+    )
+    .expect_err("zero range size");
+    assert!(matches!(
+        error,
+        AssetContainerProviderError::InvalidRangeLimits { .. }
+    ));
+}
+
+#[test]
+fn cancelled_range_assembly_never_returns_partial_bytes() {
+    let expected_manifest = cell_manifest(0x48ad, CELL_HEADER_SIZE + 5);
+    let (runtime_manifest, overlays, _) = mounted(expected_manifest, b"hello", false);
+    let provider = AssetContainerCellProvider::new(runtime_manifest, overlays);
+    assert_eq!(
+        provider.read_cell_ranges(
+            &CellReadRequest::new(expected_manifest, 0),
+            CancellationToken::new(true),
+        ),
+        Err(AssetContainerProviderError::Cancelled)
+    );
+}
+
+#[test]
 fn checks_entry_length_before_reading_and_rejects_stale_declaration() {
     let expected_manifest = cell_manifest(0x2345, CELL_HEADER_SIZE + 5);
     let (runtime_manifest, overlays, _) = mounted(expected_manifest, b"hello", false);

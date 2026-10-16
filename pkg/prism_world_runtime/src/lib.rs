@@ -92,8 +92,9 @@ mod task_cell_io_tests;
 
 #[cfg(feature = "asset_container")]
 pub use asset_container_provider::{
-    AssetContainerCellProvider, AssetContainerProviderError, AssetContainerProviderLimits,
-    DEFAULT_ASSET_CONTAINER_MAX_IO_BYTES,
+    AssetContainerCellProvider, AssetContainerCellRangePlan, AssetContainerProviderError,
+    AssetContainerProviderLimits, DEFAULT_ASSET_CONTAINER_MAX_IO_BYTES,
+    DEFAULT_ASSET_CONTAINER_MAX_RANGES, DEFAULT_ASSET_CONTAINER_MAX_RANGE_BYTES,
 };
 #[cfg(feature = "std")]
 pub use file_provider::FileCellProvider;
