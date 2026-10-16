@@ -76,13 +76,22 @@ workgroup storage 和 dispatch 上限。零容量仍分配一个不可寻址物�
 
 ## 验证
 
-静态检查、WGSL/Naga ABI 检查和 placement deletion 物理 GPU 测试分别运行：
+本次交付复验通过以下检查：
+
+- `rustfmt --check`：通过；
+- `cargo check --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --tests`：通过；
+- `cargo clippy --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --all-targets --no-deps -- -D warnings`：通过；
+- WGSL/Naga ABI 测试：8/8 通过；
+- Metal 真机 placement deletion：1/1 通过，设备为 Apple M2 IntegratedGpu。
+
+可复现命令：
 
 ```bash
-cargo check --offline -p prism_world_gpu --features terrain_scatter --tests
-cargo test --offline -p prism_world_gpu --features terrain_scatter --test wgsl_compile --no-fail-fast
-WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_world_gpu --features terrain_scatter --test heightfield_placement_deletion -- --nocapture
-WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_world_gpu --features terrain_scatter --test scatter_deletion_composed -- --nocapture
+rustfmt --check pkg/prism_world_gpu/src/heightfield_placement_deletion.rs pkg/prism_world_gpu/tests/heightfield_placement_deletion.rs
+cargo check --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --tests
+cargo clippy --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --all-targets --no-deps -- -D warnings
+cargo test --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test wgsl_compile --no-fail-fast
+WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test heightfield_placement_deletion -- --nocapture --test-threads=1
 ```
 
 物理 GPU 测试要求真实 `IntegratedGpu` 或 `DiscreteGpu`，不会把无 adapter、软件 adapter
