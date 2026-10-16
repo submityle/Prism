@@ -101,16 +101,16 @@ pub(crate) struct PassDescriptorTable {
 }
 
 impl PassDescriptorTable {
-    pub fn intern(&mut self, passes: Vec<PassDescriptor>) -> Result<u32, PassSetError> {
+    pub(crate) fn validate(passes: &[PassDescriptor]) -> Result<(), PassSetError> {
         if passes.is_empty() {
             return Err(PassSetError::Empty);
         }
-        match passes.as_slice() {
+        match passes {
             [single]
                 if single.execution_family != ExecutionFamily::Composition
                     && single.role == PassRole::Surface =>
             {
-                ()
+                Ok(())
             }
             [left, right, composition]
                 if left.execution_family == ExecutionFamily::SplitResponse
@@ -126,9 +126,14 @@ impl PassDescriptorTable {
                 if left.draw.is_none() || right.draw.is_none() {
                     return Err(PassSetError::InvalidShape);
                 }
+                Ok(())
             }
-            _ => return Err(PassSetError::InvalidShape),
+            _ => Err(PassSetError::InvalidShape),
         }
+    }
+
+    pub fn intern(&mut self, passes: Vec<PassDescriptor>) -> Result<u32, PassSetError> {
+        Self::validate(&passes)?;
         if let Some(index) = self.sets.iter().position(|set| *set == passes) {
             return u32::try_from(index).map_err(|_| PassSetError::TableExhausted);
         }

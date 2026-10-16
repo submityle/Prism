@@ -65,6 +65,7 @@ mod config;
 mod device_loss;
 mod draw;
 mod ecs_columns;
+mod feature_mapping;
 mod frame;
 mod image;
 mod intent;
@@ -111,6 +112,9 @@ pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
 pub use ecs_columns::{
     register_gpu_column, EcsColumnDiscoveryStats, EcsColumnUploadError, EcsColumnUploadStats,
     EcsResidentColumns, GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
+};
+pub use feature_mapping::{
+    FeatureMappingError, FeaturePassBinding, FeaturePassSet, FeatureSelectionMapper,
 };
 pub use frame::{RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT};
 pub use image::GpuImage;
@@ -192,6 +196,9 @@ pub mod prelude {
     pub use crate::ecs_columns::{
         register_gpu_column, EcsColumnDiscoveryStats, EcsColumnUploadError, EcsColumnUploadStats,
         EcsResidentColumns, GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
+    };
+    pub use crate::feature_mapping::{
+        FeatureMappingError, FeaturePassBinding, FeaturePassSet, FeatureSelectionMapper,
     };
     pub use crate::intent::{RenderIntent, RenderViewport};
     pub use crate::label::{Render, RenderApp, RenderStartup};
