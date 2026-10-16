@@ -102,7 +102,6 @@ impl GpuFeedbackReadback {
     ///
     /// The source must have `COPY_SRC` usage. This is a transfer/readback API
     /// only; feedback generation remains owned by the caller.
-    /// Copies external GPU feedback words into staging and reads them back.
     pub fn read_from(
         &self,
         ctx: &GpuContext,
