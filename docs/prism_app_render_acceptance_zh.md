@@ -111,7 +111,7 @@ CARGO_BUILD_JOBS=1 \
 cargo test --locked -p prism_render_app --all-features --lib
 ```
 
-结果：`230 passed, 0 failed, 1 ignored`。唯一 ignored 项是需要真实 OS
+结果：`231 passed, 0 failed, 1 ignored`。唯一 ignored 项是需要真实 OS
 window/compositor 的 `real_window_presentation_acceptance_entry`。
 
 ### RenderApp 强制真实 GPU 门禁
@@ -124,7 +124,7 @@ cargo test --locked -p prism_render_app --all-features --lib
 ```
 
 允许沙盒外访问本机图形设备后，Metal/wgpu 路径实际启动，结果为
-`230 passed, 0 failed, 1 ignored`。其中
+`231 passed, 0 failed, 1 ignored`。其中
 `recovery::hardware_tests::gpu_recovery_rebuilds_resources_and_restores_pixels`
 已验证设备替换、材质 buffer 全容量字节、replay buffer、像素和新 device generation
 均恢复。
