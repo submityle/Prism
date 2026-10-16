@@ -17,7 +17,7 @@
 - 关键依赖: `prism_math`（glam SIMD）、`prism_tasks`（work-stealing + fiber 作业图，`std`/`multi_thread`）、`prism_reflect`（可选，序列化/反射/脚本桥）
 - 明确约束: 核心 `no_std + alloc`；`std` / `multi_thread` / `serialize` / `reflect` / `trace` / `determinism` / `simd` / `partition` 为 feature；**不依赖任何 `bevy_*` crate**
 
-> **现状核查口径（2026-10-16，`main` @ `6b9964234`）**：本文同时保留完整设计目标与当前实现边界。「已实现」与「已验证」分开记录；提交历史中的测试入口或历史验收记录不等于本次重跑，也不等于跨机、NAT、真实 GPU 或性能目标完成。本轮只同步文档，未修改源码、未重跑测试。§17.1 与历史修复段落中的数值/通过次数仍是既有记录；并行开发中的安全修复仍须主流程统一验证。
+> **现状核查口径（2026-10-16，`main` @ `cb3a45e7b`）**：本文同时保留完整设计目标与当前实现边界。「已实现」与「已验证」分开记录；提交历史中的测试入口或历史验收记录不等于本次重跑，也不等于跨机、NAT、真实 GPU 或性能目标完成。本次已重跑并通过 `prism_ecs` 的 `query::dirty_tests`（20 项），并提交了 column-journal 前向脏查询切片；其余并行开发中的安全修复、渲染/NUMA/GPU 改动仍须主流程统一验证。§17.1 与历史修复段落中的数值/通过次数仍是既有记录。
 
 > **本次 main 历史同步依据**：UDP/ACK/rebind：`39bd3806a`、`0bf59f55a`、`d6000586b`、`c7201323e`；NUMA acceptance：`9390b7a5e`、`07a3d5b9c`；audio/source-route 与 event-log：`ea2ed8026`、`cd03b14c7`、`3e503dd38`；GPU resident/wgpu gate 与 benchmark：`22aebe26b`、`a288cf12e`、`c7201323e`、`3a8120874`、`0e7e67259`；CPU SDF clipmap planner：`7e99fa30f`、`90ff7a89a`。
 
@@ -543,6 +543,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 - **当前源码包含的机制（含未提交实现，不等于整章验收）**：物理单块 chunk / chunk-aware fetch / 四态存储 / ParamSet / 调度与作业图 / fragmenting relations / observer、hook 与反应图 / 快照回滚 / partition 与 LOD / 动态活值及布局迁移 / prefab 字段 override 与 V3 存档 / VM arena 均有实现入口。跨 crate 也已有 App 可选流水线与渲染提取、显式 policy 配置、transform observer 与 BVH/grid 消费、原生 UI 桥和场景物化，以及策略驱动的 ECS 网络回滚/帧哈希审计；不能再统一标为 PLANNED。各项安全契约与限制见对应章节，本次只核对源码，不报告编译/测试通过。
 - **尚未实现或未充分验收的关键范围**：Table chunk 正常写入的脏块源发现已不再是 O(匹配 chunk 总数)，并已补上 SparseSet 变化实体到当前 archetype 行窗口的 fallback；query 的匹配/多列合并、日志缺口 fallback、push 的其他源轮询、UI signal→ECS 绑定检查仍未统一为严格变化量。当前 change observer 已有按组件/实体/tick 的写入索引，覆盖 `Mut<T>`、spawn 和 insert，并以实体 tick 复核作为安全 fallback；本切片已闭环 snapshot restore 后的 change-index epoch、pending batch 丢弃及 observer cursor 重基线，恢复前时间线不会重放，恢复后同 tick 的首次写入仍可见；完整结构变更矩阵与端到端量具仍需继续验收。transform 每次传播仍收集并排序关系边，本任务未修改 `pkg/prism_transform`，因此不能声称该部分已完成。M6 的音频 native ECS/facade、source-route/scene adapter/full-chain 有实现和局部测试（依据 `ea2ed8026`、`cd03b14c7`），但真实 device callback、完整应用/旧资产/editor 联合验收仍未完成；bounded memory/file `EventLogBackend` 与 replay bridge 已实现（`3e503dd38`），replication plugin durable-log 接线、生产恢复及跨进程/跨机持久化仍未完成。NUMA acceptance gate 已实现，但 Linux strict success、ECS arena local-page proof、拓扑感知调度和 NUMA 性能仍未验证。`prism_world_residency` 当前是 CPU deterministic SDF clipmap planner（`7e99fa30f`、`90ff7a89a`），不是 GPU SDF sampling 或 ECS GPU 集成。当前 checkout 的受控多核扩展、端到端 GPU 常驻/同步收益、跨平台浮点确定性及 P50/P95/P99 证据仍待补齐；历史量具输出不代替这些验收。
+- **本次已收口的增量查询切片**：`cb3a45e7b` 让正常前向窗口优先消费保留的 column journal；首次请求、回退/重放、日志缺口和历史窗口仍保守走既有索引路径。`cargo test -p prism_ecs --lib query::dirty_tests --offline` 在独立 target 上通过 20 项，证明该切片的回归正确性，但不证明 query 端到端严格 `O(change)`、并发写屏障或所有 feature 组合已经完成。
 - **并行安全收口**：chunk 元数据并发访问、写屏障与版本回绕属于需集中验证的安全面；本文不因有脏块 API 就宣称其并发证明或本轮修复已通过。系统 panic 隔离亦不回滚已发生的普通写入/用户外部副作用，不能泛化为任意操作的事务回滚。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
@@ -685,6 +686,7 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 | 范围 | 已实现 | 已验证或已有验收入口 | 仍未验证/不可宣称 |
 |---|---|---|---|
+| ECS dirty query | 前向窗口 column journal；历史/缺口/重放保守 fallback；SparseSet 变化合并 | `cargo test -p prism_ecs --lib query::dirty_tests --offline`：20 项通过（`cb3a45e7b`） | query 全链路严格 `O(change)`、并发写屏障/回绕、所有 feature 组合与大规模性能 |
 | UDP / ACK / rebind | 有限可靠 UDP、ACK 重传、候选端点与稳定 peer rebind | 真实 loopback fault-proxy 测试覆盖 data/ACK 丢包、顺序/exactly-once 与旧 socket 关闭后的 rebind | 跨进程/跨机、公网、NAT/ICE/relay、生产迁移与本轮重跑结果 |
 | NUMA / affinity | OS topology/affinity readback、worker outcome、arena fallback 语义；策略层拓扑模型 | `numa_acceptance` 入口；默认 `SKIPPED`，`PRISM_REQUIRE_NUMA=1` 严格失败 | 当前机器 Linux strict pass、ECS node-local pages、拓扑感知调度收益与 NUMA 性能 |
 | audio / event-log | audio source-route/scene adapter/full-chain；bounded memory/file event-log 与 replay bridge | 既有局部 unit/integration/full-chain 入口 | 真实设备回调、完整应用/旧资产/editor 联合流程、durable plugin recovery、跨进程/跨机持久化 |
