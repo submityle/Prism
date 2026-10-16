@@ -1,16 +1,17 @@
 use bevy_ecs::prelude::*;
-use bevy_image::ToExtents;
 use bevy_render::{
     camera::ExtractedCamera,
     render_resource::{
-        BindGroup, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages, TextureDescriptor,
-        TextureDimension, TextureFormat, TextureUsages,
+        BindGroup, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages, Texture,
+        TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
     },
     renderer::RenderDevice,
-    texture::{CachedTexture, TextureCache},
     view::Msaa,
 };
+use prism_render_driver as rhi;
 use prism_render_shading::ShadingWorkItem;
+
+use crate::gpu::rhi::{SceneRhi, SceneRhiTexture, SceneRhiTextureView};
 
 use super::classification_gpu::{GpuShadingDispatchArgs, GpuShadingPixelClass};
 
@@ -29,41 +30,108 @@ pub(crate) const SCENE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// delta that is almost always a small fraction of the frame.
 pub(crate) const MOTION_VECTOR_FORMAT: TextureFormat = TextureFormat::Rg16Float;
 
+/// Native integer attachments retain their original shader ABI. The curated
+/// RHI format set does not represent Rgba32Uint, so these are not RHI imports.
+/// Like the RHI exports below, they are allocated once per resident view.
+struct VisibilityIdTexture {
+    default_view: TextureView,
+    texture: Texture,
+}
+
+impl VisibilityIdTexture {
+    fn new(device: &RenderDevice, size: bevy_math::UVec2, label: &'static str) -> Self {
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: size.x,
+                height: size.y,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: VISIBILITY_ID_FORMAT,
+            usage: TextureUsages::RENDER_ATTACHMENT
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::STORAGE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        Self {
+            default_view: texture.create_view(&Default::default()),
+            texture,
+        }
+    }
+}
+
+/// Owns both table entries for the exact texture consumed by native passes.
+/// No parallel/shadow allocation is made for the RHI graph. Native command
+/// buffers retain their handles after view replacement; table IDs are valid
+/// only while this owner remains resident on the view.
+struct VisibilityTexture {
+    default_view: SceneRhiTextureView,
+    texture: SceneRhiTexture,
+}
+
+impl VisibilityTexture {
+    fn new(
+        rhi: &SceneRhi,
+        size: bevy_math::UVec2,
+        label: &'static str,
+        format: rhi::TextureFormat,
+        usage: rhi::TextureUsages,
+    ) -> Self {
+        let mut descriptor =
+            rhi::TextureDescriptor::new_2d(rhi::Extent3d::new_2d(size.x, size.y), format, usage);
+        descriptor.label = Some(label.into());
+        let texture = rhi
+            .create_texture(&descriptor)
+            .expect("visibility texture descriptor must be supported by the host renderer");
+        let default_view = texture
+            .create_view(&rhi::TextureViewDescriptor::default())
+            .expect("visibility texture default view must match its allocation");
+        Self {
+            default_view,
+            texture,
+        }
+    }
+}
+
 #[derive(Component)]
 pub(crate) struct ViewVisibilityBuffer {
-    ids: CachedTexture,
-    metadata: CachedTexture,
+    ids: VisibilityIdTexture,
+    metadata: VisibilityIdTexture,
     /// Linear HDR radiance the shading-resolve pass stores into and the
     /// composite step samples from.
-    scene_color: CachedTexture,
+    scene_color: VisibilityTexture,
     /// SSR energy-conservation export: the IBL specular radiance the resolve
     /// folded into `scene_color` per pixel, so the SSR composite can subtract
     /// it before substituting the screen-space reflection.
-    ssr_env_specular: CachedTexture,
+    ssr_env_specular: VisibilityTexture,
     /// SSR energy-conservation export: the split-sum environment-BRDF weight
     /// `(f0 * dfg.x + dfg.y) * occlusion` the resolve scaled that specular by,
     /// reused by the composite to weight the SSR reflection identically.
-    ssr_spec_weight: CachedTexture,
+    ssr_spec_weight: VisibilityTexture,
     /// Per-pixel screen-space motion vector (`cur_uv - prev_uv`) the resolve
     /// pass writes for every covered pixel; consumed by the SSR temporal
     /// reprojection to follow object + camera motion instead of ghosting.
-    motion_vectors: CachedTexture,
+    motion_vectors: VisibilityTexture,
     /// Screen-space GI export: the pre-albedo diffuse *irradiance* the resolve
     /// evaluated per pixel. The SSGI hemisphere gather blends missed rays
     /// toward this so indirect light degrades to the IBL/SH ambient instead of
     /// to black.
-    ssgi_ambient: CachedTexture,
+    ssgi_ambient: VisibilityTexture,
     /// Screen-space GI export: the Lambertian albedo (`base_color *
     /// (1 - metallic)`) the SSGI composite multiplies the gathered pre-albedo
     /// radiance by before blending it over the IBL diffuse under confidence.
-    ssgi_albedo: CachedTexture,
+    ssgi_albedo: VisibilityTexture,
     /// World-space ReSTIR direct export: the raw cosine-weighted punctual
     /// *irradiance* the resolve evaluated per pixel (no 1/pi, Fresnel or
     /// albedo), in the same units as the ReSTIR resolve's `gi_out`. The
     /// world_restir composite subtracts the clustered punctual diffuse this
     /// reconstructs before folding in the reservoir estimate, so the
     /// substitution never double-counts the direct lighting the cache reused.
-    world_restir_direct: CachedTexture,
+    world_restir_direct: VisibilityTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -93,45 +161,52 @@ impl ViewVisibilityBuffer {
 
     /// Storage/sampling view of the linear HDR radiance target.
     pub(crate) fn scene_color_view(&self) -> &bevy_render::render_resource::TextureView {
-        &self.scene_color.default_view
+        self.scene_color.default_view.view()
     }
 
     /// The `scene_color` GPU texture itself, for a full-surface
     /// `copy_texture_to_texture` (an opt-in ping-pong post-process writes its
     /// result back in place here).
     pub(crate) fn scene_color_texture(&self) -> &bevy_render::render_resource::Texture {
+        self.scene_color_rhi().texture()
+    }
+
+    /// The owner of the HDR resource exported to the native composition pass.
+    /// Imports must use this lease's table and keep the view resident through
+    /// recording; its ID is not a native Bevy texture ID.
+    pub(crate) fn scene_color_rhi(&self) -> &SceneRhiTexture {
         &self.scene_color.texture
     }
 
     /// Storage/sampling view of the SSR IBL-specular export.
     pub(crate) fn ssr_env_specular_view(&self) -> &bevy_render::render_resource::TextureView {
-        &self.ssr_env_specular.default_view
+        self.ssr_env_specular.default_view.view()
     }
 
     /// Storage/sampling view of the SSR environment-BRDF weight export.
     pub(crate) fn ssr_spec_weight_view(&self) -> &bevy_render::render_resource::TextureView {
-        &self.ssr_spec_weight.default_view
+        self.ssr_spec_weight.default_view.view()
     }
 
     /// Storage/sampling view of the per-pixel motion-vector G-buffer.
     pub(crate) fn motion_vectors_view(&self) -> &bevy_render::render_resource::TextureView {
-        &self.motion_vectors.default_view
+        self.motion_vectors.default_view.view()
     }
 
     /// Storage/sampling view of the SSGI pre-albedo ambient-irradiance export.
     pub(crate) fn ssgi_ambient_view(&self) -> &bevy_render::render_resource::TextureView {
-        &self.ssgi_ambient.default_view
+        self.ssgi_ambient.default_view.view()
     }
 
     /// Storage/sampling view of the SSGI Lambertian-albedo export.
     pub(crate) fn ssgi_albedo_view(&self) -> &bevy_render::render_resource::TextureView {
-        &self.ssgi_albedo.default_view
+        self.ssgi_albedo.default_view.view()
     }
 
     /// Storage/sampling view of the world-space ReSTIR direct-light export
     /// (raw cosine-weighted punctual irradiance).
     pub(crate) fn world_restir_direct_view(&self) -> &bevy_render::render_resource::TextureView {
-        &self.world_restir_direct.default_view
+        self.world_restir_direct.default_view.view()
     }
 }
 
@@ -253,7 +328,7 @@ fn storage_buffer<T>(
 pub(crate) fn prepare_visibility_buffers(
     mut commands: Commands,
     settings: Res<super::runtime::PrismShadingSettings>,
-    mut texture_cache: ResMut<TextureCache>,
+    rhi: Res<SceneRhi>,
     device: Res<RenderDevice>,
     views: Query<(
         Entity,
@@ -263,181 +338,75 @@ pub(crate) fn prepare_visibility_buffers(
     )>,
 ) {
     for (entity, camera, msaa, existing) in &views {
-        if !settings.enable_visibility_buffer || msaa.is_some_and(|value| value.samples() != 1) {
+        let size = camera
+            .physical_viewport_size
+            .filter(|size| size.x != 0 && size.y != 0);
+        if !settings.enable_visibility_buffer
+            || msaa.is_some_and(|value| value.samples() != 1)
+            || size.is_none()
+        {
             if existing.is_some() {
                 commands.entity(entity).remove::<ViewVisibilityBuffer>();
             }
             continue;
         }
-        let Some(size) = camera.physical_viewport_size else {
-            continue;
-        };
-        if existing.is_some_and(|buffer| buffer.size == size) {
+        let size = size.expect("nonzero viewport checked above");
+        if existing.is_some_and(|buffer| {
+            buffer.size == size
+                && std::sync::Arc::ptr_eq(buffer.scene_color_rhi().device(), rhi.device())
+        }) {
             continue;
         }
-        let ids = texture_cache.get(
-            &device,
-            TextureDescriptor {
-                label: Some("prism visibility IDs"),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: VISIBILITY_ID_FORMAT,
-                usage: TextureUsages::RENDER_ATTACHMENT
-                    | TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::STORAGE_BINDING
-                    | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            },
-        );
-        let metadata = texture_cache.get(
-            &device,
-            TextureDescriptor {
-                label: Some("prism visibility metadata"),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: VISIBILITY_ID_FORMAT,
-                usage: TextureUsages::RENDER_ATTACHMENT
-                    | TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::STORAGE_BINDING
-                    | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            },
-        );
-        let scene_color = texture_cache.get(
-            &device,
-            TextureDescriptor {
-                label: Some("prism scene color (HDR)"),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: SCENE_COLOR_FORMAT,
-                // STORAGE_BINDING: written by the resolve compute pass.
-                // TEXTURE_BINDING: sampled by the later composite/tonemap step.
-                // COPY_DST: an opt-in ping-pong post-process (motion blur)
-                // copies its full-resolution result back over scene_color so the
-                // downstream composite reads the processed image.
-                usage: TextureUsages::STORAGE_BINDING
-                    | TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-        );
-        // SSR energy-conservation exports written alongside `scene_color` by
-        // the resolve pass. Allocated unconditionally so the resolve bind
-        // group is always valid (the pass runs even when SSR is disabled); the
-        // SSR composite reads them only when reflections are active.
-        let ssr_env_specular = texture_cache.get(
-            &device,
-            TextureDescriptor {
-                label: Some("prism SSR env specular export"),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: SCENE_COLOR_FORMAT,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-        );
-        let ssr_spec_weight = texture_cache.get(
-            &device,
-            TextureDescriptor {
-                label: Some("prism SSR spec weight export"),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: SCENE_COLOR_FORMAT,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-        );
-        // Motion-vector G-buffer, written every covered pixel by the resolve
-        // pass. STORAGE_BINDING: written by the resolve compute pass;
-        // TEXTURE_BINDING: sampled by the SSR temporal reprojection (and TAA).
-        let motion_vectors = texture_cache.get(
-            &device,
-            TextureDescriptor {
-                label: Some("prism motion vectors"),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: MOTION_VECTOR_FORMAT,
-                // RENDER_ATTACHMENT: the transparent water-surface raster pass
-                // writes its own screen-space motion as a second colour target
-                // over this G-buffer (MRT), on top of the resolve compute pass's
-                // STORAGE write for the opaque pixels behind the water.
-                usage: TextureUsages::RENDER_ATTACHMENT
-                    | TextureUsages::STORAGE_BINDING
-                    | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-        );
-        // Screen-space GI exports written alongside `scene_color` by the
-        // resolve pass. STORAGE_BINDING: written by the resolve compute pass;
-        // TEXTURE_BINDING: sampled by the SSGI trace (ambient) and composite
-        // (albedo). Allocated unconditionally so the resolve bind group is
-        // always valid; the SSGI pass reads them only when GI is active.
-        let ssgi_ambient = texture_cache.get(
-            &device,
-            TextureDescriptor {
-                label: Some("prism SSGI ambient export"),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: SCENE_COLOR_FORMAT,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-        );
-        let ssgi_albedo = texture_cache.get(
-            &device,
-            TextureDescriptor {
-                label: Some("prism SSGI albedo export"),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: SCENE_COLOR_FORMAT,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-        );
-        // World-space ReSTIR direct export written alongside `scene_color` by
-        // the resolve pass. STORAGE_BINDING: written by the resolve compute
-        // pass; TEXTURE_BINDING: sampled by the world_restir composite fold.
-        // Allocated unconditionally so the resolve bind group is always valid;
-        // the composite reads it only when world_restir is active.
-        let world_restir_direct = texture_cache.get(
-            &device,
-            TextureDescriptor {
-                label: Some("prism world-space ReSTIR direct export"),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: SCENE_COLOR_FORMAT,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-        );
+
+        // Keep the per-view allocation stable between frames, including views
+        // with equal extents. Replacing the host bridge also invalidates this
+        // owner, so table-local IDs never cross a device recovery.
+        let storage = rhi::TextureUsages::STORAGE_BINDING | rhi::TextureUsages::TEXTURE_BINDING;
+        let allocate =
+            |label, format, usage| VisibilityTexture::new(&rhi, size, label, format, usage);
         commands.entity(entity).insert(ViewVisibilityBuffer {
-            ids,
-            metadata,
-            scene_color,
-            ssr_env_specular,
-            ssr_spec_weight,
-            motion_vectors,
-            ssgi_ambient,
-            ssgi_albedo,
-            world_restir_direct,
+            ids: VisibilityIdTexture::new(&device, size, "prism visibility IDs"),
+            metadata: VisibilityIdTexture::new(&device, size, "prism visibility metadata"),
+            // COPY_DST receives ping-pong post-processing results. Consumers
+            // sample the same allocation; this is not an RHI mirror.
+            scene_color: allocate(
+                "prism scene color (HDR)",
+                rhi::TextureFormat::Rgba16Float,
+                storage | rhi::TextureUsages::COPY_DST,
+            ),
+            // Resolve always writes these exports, even when their optional
+            // downstream consumers are disabled.
+            ssr_env_specular: allocate(
+                "prism SSR env specular export",
+                rhi::TextureFormat::Rgba16Float,
+                storage,
+            ),
+            ssr_spec_weight: allocate(
+                "prism SSR spec weight export",
+                rhi::TextureFormat::Rgba16Float,
+                storage,
+            ),
+            // Transparent water writes its MRT over opaque resolve motion.
+            motion_vectors: allocate(
+                "prism motion vectors",
+                rhi::TextureFormat::Rg16Float,
+                storage | rhi::TextureUsages::RENDER_ATTACHMENT,
+            ),
+            ssgi_ambient: allocate(
+                "prism SSGI ambient export",
+                rhi::TextureFormat::Rgba16Float,
+                storage,
+            ),
+            ssgi_albedo: allocate(
+                "prism SSGI albedo export",
+                rhi::TextureFormat::Rgba16Float,
+                storage,
+            ),
+            world_restir_direct: allocate(
+                "prism world-space ReSTIR direct export",
+                rhi::TextureFormat::Rgba16Float,
+                storage,
+            ),
             size,
         });
     }
