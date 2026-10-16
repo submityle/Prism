@@ -74,6 +74,9 @@ pub enum TextureFormat {
     Depth32Float,
     /// 24-bit depth plus 8-bit stencil.
     Depth24PlusStencil8,
+    /// Four 32-bit unsigned integer channels, sampled without filtering.
+    /// Appended to preserve the numeric identities of existing formats.
+    Rgba32Uint = 18,
 }
 
 impl TextureFormat {
@@ -95,7 +98,7 @@ impl TextureFormat {
             | Self::Depth32Float
             | Self::Depth24PlusStencil8 => 4,
             Self::Rg32Float | Self::Rgba16Float => 8,
-            Self::Rgba32Float => 16,
+            Self::Rgba32Float | Self::Rgba32Uint => 16,
         }
     }
 
@@ -103,7 +106,7 @@ impl TextureFormat {
     #[must_use]
     pub const fn sample_type(self) -> TextureSampleType {
         match self {
-            Self::R8Uint | Self::R32Uint => TextureSampleType::Uint,
+            Self::R8Uint | Self::R32Uint | Self::Rgba32Uint => TextureSampleType::Uint,
             Self::R32Float | Self::Rg32Float | Self::Rgba32Float => {
                 TextureSampleType::UnfilterableFloat
             }

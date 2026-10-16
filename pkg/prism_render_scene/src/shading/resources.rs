@@ -2,8 +2,7 @@ use bevy_ecs::prelude::*;
 use bevy_render::{
     camera::ExtractedCamera,
     render_resource::{
-        BindGroup, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages, Texture,
-        TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
+        BindGroup, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages, TextureFormat,
     },
     renderer::RenderDevice,
     view::Msaa,
@@ -30,45 +29,13 @@ pub(crate) const SCENE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// delta that is almost always a small fraction of the frame.
 pub(crate) const MOTION_VECTOR_FORMAT: TextureFormat = TextureFormat::Rg16Float;
 
-/// Native integer attachments retain their original shader ABI. The curated
-/// RHI format set does not represent Rgba32Uint, so these are not RHI imports.
-/// Like the RHI exports below, they are allocated once per resident view.
-struct VisibilityIdTexture {
-    default_view: TextureView,
-    texture: Texture,
-}
-
-impl VisibilityIdTexture {
-    fn new(device: &RenderDevice, size: bevy_math::UVec2, label: &'static str) -> Self {
-        let texture = device.create_texture(&TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width: size.x,
-                height: size.y,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: VISIBILITY_ID_FORMAT,
-            usage: TextureUsages::RENDER_ATTACHMENT
-                | TextureUsages::TEXTURE_BINDING
-                | TextureUsages::STORAGE_BINDING
-                | TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        Self {
-            default_view: texture.create_view(&Default::default()),
-            texture,
-        }
-    }
-}
-
 /// Owns both table entries for the exact texture consumed by native passes.
 /// No parallel/shadow allocation is made for the RHI graph. Native command
 /// buffers retain their handles after view replacement; table IDs are valid
 /// only while this owner remains resident on the view.
 struct VisibilityTexture {
+    // Drop the view table entry before its texture entry. Neither lease
+    // destroys native handles retained by already encoded host commands.
     default_view: SceneRhiTextureView,
     texture: SceneRhiTexture,
 }
@@ -97,10 +64,13 @@ impl VisibilityTexture {
     }
 }
 
+/// All nine attachments belong to one SceneRhi table on the host device.
+/// Replace the complete owner on resize or bridge replacement; never mix
+/// table-local IDs from different owners, even on the same native device.
 #[derive(Component)]
 pub(crate) struct ViewVisibilityBuffer {
-    ids: VisibilityIdTexture,
-    metadata: VisibilityIdTexture,
+    ids: VisibilityTexture,
+    metadata: VisibilityTexture,
     /// Linear HDR radiance the shading-resolve pass stores into and the
     /// composite step samples from.
     scene_color: VisibilityTexture,
@@ -142,7 +112,10 @@ impl ViewVisibilityBuffer {
         &bevy_render::render_resource::TextureView,
         &bevy_render::render_resource::TextureView,
     ) {
-        (&self.ids.default_view, &self.metadata.default_view)
+        (
+            self.ids.default_view.view(),
+            self.metadata.default_view.view(),
+        )
     }
 
     /// The actual raster attachments used by the visibility pass.  The
@@ -156,7 +129,11 @@ impl ViewVisibilityBuffer {
         &bevy_render::render_resource::Texture,
         bevy_math::UVec2,
     ) {
-        (&self.ids.texture, &self.metadata.texture, self.size)
+        (
+            self.ids.texture.texture(),
+            self.metadata.texture.texture(),
+            self.size,
+        )
     }
 
     /// Storage/sampling view of the linear HDR radiance target.
@@ -329,7 +306,6 @@ pub(crate) fn prepare_visibility_buffers(
     mut commands: Commands,
     settings: Res<super::runtime::PrismShadingSettings>,
     rhi: Res<SceneRhi>,
-    device: Res<RenderDevice>,
     views: Query<(
         Entity,
         &ExtractedCamera,
@@ -365,8 +341,18 @@ pub(crate) fn prepare_visibility_buffers(
         let allocate =
             |label, format, usage| VisibilityTexture::new(&rhi, size, label, format, usage);
         commands.entity(entity).insert(ViewVisibilityBuffer {
-            ids: VisibilityIdTexture::new(&device, size, "prism visibility IDs"),
-            metadata: VisibilityIdTexture::new(&device, size, "prism visibility metadata"),
+            // Preserve the unsigned vec4 ABI, storage sampling and feedback
+            // copy usages on the exact RHI allocation exported to Bevy.
+            ids: allocate(
+                "prism visibility IDs",
+                rhi::TextureFormat::Rgba32Uint,
+                storage | rhi::TextureUsages::RENDER_ATTACHMENT | rhi::TextureUsages::COPY_SRC,
+            ),
+            metadata: allocate(
+                "prism visibility metadata",
+                rhi::TextureFormat::Rgba32Uint,
+                storage | rhi::TextureUsages::RENDER_ATTACHMENT | rhi::TextureUsages::COPY_SRC,
+            ),
             // COPY_DST receives ping-pong post-processing results. Consumers
             // sample the same allocation; this is not an RHI mirror.
             scene_color: allocate(
@@ -469,7 +455,377 @@ pub(crate) fn prepare_shading_buffers(
 mod tests {
     use super::*;
     use bevy_asset::{uuid::Uuid, AssetId};
-    use bevy_shader::{Shader, ShaderCache, ShaderCacheSource};
+    use bevy_camera::{CameraOutputMode, ClearColorConfig, MsaaWriteback};
+    use bevy_ecs::{schedule::ScheduleLabel, system::RunSystemOnce};
+    use bevy_math::UVec2;
+    use bevy_platform::future::block_on;
+    use bevy_render::renderer::{RenderAdapter, RenderQueue};
+    use bevy_shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
+    use core::ops::Deref;
+    use prism_render_driver_wgpu::{require_hardware_gpu, WgpuDevice, WgpuInstance};
+    use prism_render_shading::{VisibilityPixel, VisibilityPixelTargets};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::Arc;
+
+    struct Host {
+        _instance: WgpuInstance,
+        adapter: RenderAdapter,
+        device: RenderDevice,
+        queue: RenderQueue,
+    }
+
+    impl Host {
+        fn bridge(&self) -> SceneRhi {
+            SceneRhi::from_bevy(&self.adapter, &self.device, &self.queue)
+        }
+    }
+
+    fn host_or_skip() -> Option<Host> {
+        let skip = |reason: &str| {
+            assert!(!require_hardware_gpu(), "PRISM_REQUIRE_GPU=1: {reason}");
+            eprintln!("SKIPPED visibility attachment GPU test: {reason}");
+            None
+        };
+        let instance = WgpuInstance::new();
+        let Some(adapter) = instance.request_adapter(wgpu::PowerPreference::HighPerformance, false)
+        else {
+            return skip("no adapter");
+        };
+        let info = adapter.get_info();
+        if !matches!(
+            info.device_type,
+            wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::DiscreteGpu
+        ) {
+            return skip(&format!("not a physical GPU: {info:?}"));
+        }
+        let feature = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        if !adapter.features().contains(feature) {
+            return skip("Rg16Float storage needs TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES");
+        }
+        let storage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+        for (format, usage) in [
+            (
+                VISIBILITY_ID_FORMAT,
+                storage | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            ),
+            (SCENE_COLOR_FORMAT, storage | wgpu::TextureUsages::COPY_DST),
+            (MOTION_VECTOR_FORMAT, storage | wgpu::TextureUsages::RENDER_ATTACHMENT),
+        ] {
+            if !adapter.get_texture_format_features(format).allowed_usages.contains(usage) {
+                return skip(&format!("{format:?} lacks production usages {usage:?}"));
+            }
+        }
+        eprintln!("visibility attachments REAL HARDWARE GPU: {info:?}");
+        // Only the test host requests a device. The production prepare system
+        // receives its adopted bridge, never a second native allocator.
+        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: feature,
+            ..Default::default()
+        }))
+        .expect("physical GPU host device");
+        Some(Host {
+            _instance: instance,
+            adapter: RenderAdapter::new(adapter),
+            device: RenderDevice::new(device),
+            queue: RenderQueue::new(queue),
+        })
+    }
+
+    fn camera(size: UVec2) -> ExtractedCamera {
+        ExtractedCamera {
+            target: None,
+            physical_viewport_size: Some(size),
+            physical_target_size: Some(size),
+            viewport: None,
+            schedule: bevy_core_pipeline::Core3d.intern(),
+            order: 0,
+            output_mode: CameraOutputMode::default(),
+            msaa_writeback: MsaaWriteback::default(),
+            clear_color: ClearColorConfig::default(),
+            sorted_camera_index_for_target: 0,
+            exposure: 1.0,
+            hdr: true,
+        }
+    }
+
+    fn render_world(host: &Host) -> World {
+        let mut world = World::new();
+        world.insert_resource(host.bridge());
+        world.insert_resource(super::super::runtime::PrismShadingSettings {
+            enable_visibility_buffer: true,
+            ..Default::default()
+        });
+        // Intentionally no RenderDevice resource: all nine allocations must
+        // come from the adopted SceneRhi, not a native side path.
+        world
+    }
+
+    fn prepare(world: &mut World) {
+        world.run_system_once(prepare_visibility_buffers).unwrap();
+    }
+
+    fn attachments(buffer: &ViewVisibilityBuffer) -> [&VisibilityTexture; 9] {
+        [
+            &buffer.ids, &buffer.metadata, &buffer.scene_color,
+            &buffer.ssr_env_specular, &buffer.ssr_spec_weight, &buffer.motion_vectors,
+            &buffer.ssgi_ambient, &buffer.ssgi_albedo, &buffer.world_restir_direct,
+        ]
+    }
+
+    type OwnerIds = [(rhi::TextureId, rhi::TextureViewId); 9];
+
+    fn owner_ids(buffer: &ViewVisibilityBuffer) -> OwnerIds {
+        attachments(buffer).map(|owner| (owner.texture.id(), owner.default_view.id()))
+    }
+
+    fn assert_same_table(buffer: &ViewVisibilityBuffer, table: &Arc<WgpuDevice>) {
+        let formats = [
+            VISIBILITY_ID_FORMAT, VISIBILITY_ID_FORMAT, SCENE_COLOR_FORMAT,
+            SCENE_COLOR_FORMAT, SCENE_COLOR_FORMAT, MOTION_VECTOR_FORMAT,
+            SCENE_COLOR_FORMAT, SCENE_COLOR_FORMAT, SCENE_COLOR_FORMAT,
+        ];
+        let ids = owner_ids(buffer);
+        for (index, owner) in attachments(buffer).into_iter().enumerate() {
+            assert!(Arc::ptr_eq(owner.texture.device(), table));
+            assert!(Arc::ptr_eq(owner.default_view.device(), table));
+            let native = owner.texture.texture();
+            assert_eq!(table.wgpu_texture(owner.texture.id()), *native.deref());
+            assert_eq!(
+                table.wgpu_texture_view(owner.default_view.id()),
+                *owner.default_view.view().deref()
+            );
+            assert_eq!(native.format(), formats[index]);
+            assert_eq!(native.width(), buffer.size.x);
+            assert_eq!(native.height(), buffer.size.y);
+            for previous in &ids[..index] {
+                assert_ne!(ids[index].0, previous.0);
+                assert_ne!(ids[index].1, previous.1);
+            }
+        }
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC;
+        for owner in [&buffer.ids, &buffer.metadata] {
+            assert_eq!(owner.texture.texture().usage(), usage);
+        }
+        // The actual raster/feedback accessors must expose these exact objects.
+        assert_eq!(buffer.attachments().0.id(), buffer.ids.default_view.view().id());
+        assert_eq!(buffer.attachments().1.id(), buffer.metadata.default_view.view().id());
+        assert_eq!(buffer.feedback_sources().0.id(), buffer.ids.texture.texture().id());
+        assert_eq!(buffer.feedback_sources().1.id(), buffer.metadata.texture.texture().id());
+    }
+
+    fn assert_retired(table: &WgpuDevice, ids: OwnerIds) {
+        for (texture, view) in ids {
+            assert!(catch_unwind(AssertUnwindSafe(|| table.wgpu_texture(texture))).is_err());
+            assert!(catch_unwind(AssertUnwindSafe(|| table.wgpu_texture_view(view))).is_err());
+        }
+    }
+
+    #[test]
+    fn nine_visibility_leases_share_host_table_reuse_resize_and_retire() {
+        let Some(host) = host_or_skip() else { return };
+        let mut world = render_world(&host);
+        let table = Arc::clone(world.resource::<SceneRhi>().device());
+        assert_eq!(table.wgpu_device(), host.device.wgpu_device());
+        let size = UVec2::new(3, 2);
+        let first = world.spawn(camera(size)).id();
+        let second = world.spawn(camera(size)).id();
+        prepare(&mut world);
+        let first_buffer = world.get::<ViewVisibilityBuffer>(first).unwrap();
+        assert_same_table(first_buffer, &table);
+        let original = owner_ids(first_buffer);
+        let second_buffer = world.get::<ViewVisibilityBuffer>(second).unwrap();
+        assert_same_table(second_buffer, &table);
+        let other = owner_ids(second_buffer);
+        for (left, right) in original.into_iter().zip(other) {
+            assert_ne!(left.0, right.0, "equal extents must not alias textures");
+            assert_ne!(left.1, right.1, "equal extents must not alias views");
+        }
+        prepare(&mut world);
+        assert_eq!(owner_ids(world.get(first).unwrap()), original);
+        assert_eq!(owner_ids(world.get(second).unwrap()), other);
+
+        world.entity_mut(first).insert(camera(UVec2::new(5, 3)));
+        prepare(&mut world);
+        let resized = world.get::<ViewVisibilityBuffer>(first).unwrap();
+        assert_same_table(resized, &table);
+        let resized_ids = owner_ids(resized);
+        for (old, new) in original.into_iter().zip(resized_ids) {
+            assert_ne!(old.0, new.0);
+            assert_ne!(old.1, new.1);
+        }
+        assert_retired(&table, original);
+        assert_eq!(owner_ids(world.get(second).unwrap()), other);
+
+        // A new table on the SAME native host also invalidates all nine owners.
+        // Numeric IDs may coincide across tables; compare native objects too.
+        let natives = attachments(resized).map(|owner| owner.texture.texture().clone());
+        world.insert_resource(host.bridge());
+        let replacement = Arc::clone(world.resource::<SceneRhi>().device());
+        assert!(!Arc::ptr_eq(&table, &replacement));
+        assert_eq!(table.wgpu_device(), replacement.wgpu_device());
+        prepare(&mut world);
+        let replaced = world.get::<ViewVisibilityBuffer>(first).unwrap();
+        assert_same_table(replaced, &replacement);
+        assert_same_table(world.get(second).unwrap(), &replacement);
+        for (old, owner) in natives.iter().zip(attachments(replaced)) {
+            assert_ne!(*old.deref(), *owner.texture.texture().deref());
+            let _surviving_native_view = old.create_view(&Default::default());
+        }
+        assert_retired(&table, resized_ids);
+        assert_retired(&table, other);
+
+        // Every admission failure removes both texture AND view entries.
+        for invalid in [None, Some(UVec2::new(0, 3)), Some(UVec2::new(3, 0))] {
+            let ids = owner_ids(world.get(first).unwrap());
+            world.get_mut::<ExtractedCamera>(first).unwrap().physical_viewport_size = invalid;
+            prepare(&mut world);
+            assert!(world.get::<ViewVisibilityBuffer>(first).is_none());
+            assert_retired(&replacement, ids);
+            world.entity_mut(first).insert(camera(size));
+            prepare(&mut world);
+            assert_same_table(world.get(first).unwrap(), &replacement);
+        }
+        let ids = owner_ids(world.get(first).unwrap());
+        world.entity_mut(first).insert(Msaa::Sample4);
+        prepare(&mut world);
+        assert!(world.get::<ViewVisibilityBuffer>(first).is_none());
+        assert_retired(&replacement, ids);
+        world.entity_mut(first).insert(Msaa::Off);
+        prepare(&mut world);
+        let ids = owner_ids(world.get(first).unwrap());
+        let other = owner_ids(world.get(second).unwrap());
+        world.resource_mut::<super::super::runtime::PrismShadingSettings>()
+            .enable_visibility_buffer = false;
+        prepare(&mut world);
+        assert!(world.get::<ViewVisibilityBuffer>(first).is_none());
+        assert!(world.get::<ViewVisibilityBuffer>(second).is_none());
+        assert_retired(&replacement, ids);
+        assert_retired(&replacement, other);
+
+        world.resource_mut::<super::super::runtime::PrismShadingSettings>()
+            .enable_visibility_buffer = true;
+        prepare(&mut world);
+        let ids = owner_ids(world.get(first).unwrap());
+        world.despawn(first);
+        assert_retired(&replacement, ids);
+        let other = owner_ids(world.get(second).unwrap());
+        // The resident leases, not the SceneRhi resource, retain the table.
+        world.remove_resource::<SceneRhi>();
+        let weak = Arc::downgrade(&replacement);
+        drop(replacement);
+        assert_eq!(weak.strong_count(), 18, "nine texture/view lease pairs");
+        let table = weak.upgrade().unwrap();
+        assert_same_table(world.get(second).unwrap(), &table);
+        drop(world);
+        assert_retired(&table, other);
+        drop(table);
+        assert!(weak.upgrade().is_none());
+    }
+
+    fn integer_pixel() -> VisibilityPixel {
+        VisibilityPixel {
+            scene_index: 0x0100_0001,
+            scene_generation: 0x8000_0001,
+            primitive_id: u32::MAX,
+            geometry_lod_or_cluster: 0xdead_beef,
+            material_index: 0x8100_0001,
+            material_generation: 0xffff_fffe,
+            barycentrics_unorm16: 0x1234_abcd,
+            coverage_and_flags: 0xc000_00a5,
+        }
+    }
+
+    #[test]
+    fn visibility_integer_targets_preserve_channel_order_and_all_u32_bits() {
+        let pixel = integer_pixel();
+        let targets = pixel.targets();
+        assert_eq!(targets.ids, [0x0100_0001, 0x8000_0001, u32::MAX, 0xdead_beef]);
+        // GPU metadata.z is coverage/selector flags, NOT the preceding CPU
+        // field barycentrics_unorm16. A raw cast of VisibilityPixel is wrong.
+        assert_eq!(targets.metadata, [0x8100_0001, 0xffff_fffe, 0xc000_00a5, 0x1234_abcd]);
+        assert_eq!(VisibilityPixel::from_targets(targets), pixel);
+        assert_eq!(VisibilityPixel::from_targets(VisibilityPixel::INVALID.targets()), VisibilityPixel::INVALID);
+    }
+
+    #[test]
+    fn retired_visibility_integer_leases_leave_host_handles_usable_for_exact_readback() {
+        let Some(host) = host_or_skip() else { return };
+        let mut world = render_world(&host);
+        let entity = world.spawn(camera(UVec2::ONE)).id();
+        prepare(&mut world);
+        let table = Arc::clone(world.resource::<SceneRhi>().device());
+        let owner = world.get::<ViewVisibilityBuffer>(entity).unwrap();
+        let ids = owner_ids(owner);
+        let textures = [owner.feedback_sources().0.clone(), owner.feedback_sources().1.clone()];
+        let views = [owner.attachments().0.clone(), owner.attachments().1.clone()];
+        world.despawn(entity);
+        assert_retired(&table, ids);
+
+        // Attachment-boundary evidence only, not the production raster shader:
+        // clear exact integers through the surviving native views, then copy
+        // and decode both physical targets after the RHI owners have retired.
+        let expected = integer_pixel();
+        let targets = expected.targets();
+        let colors = [targets.ids, targets.metadata].map(|[r, g, b, a]| wgpu::Color {
+            r: f64::from(r), g: f64::from(g), b: f64::from(b), a: f64::from(a),
+        });
+        let color_attachments = std::array::from_fn::<_, 2, _>(|index| {
+            Some(wgpu::RenderPassColorAttachment {
+                view: views[index].deref(),
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(colors[index]),
+                    store: wgpu::StoreOp::Store,
+                },
+            })
+        });
+        let staging = host.device.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("retired visibility u32 readback"),
+            size: 512,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = host.device.create_command_encoder(&Default::default());
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &color_attachments,
+                ..Default::default()
+            });
+        }
+        for (index, texture) in textures.iter().enumerate() {
+            encoder.copy_texture_to_buffer(
+                texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &staging,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: index as u64 * 256,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
+                    },
+                },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            );
+        }
+        host.queue.submit([encoder.finish()]);
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |result| send.send(result).unwrap());
+        host.device.wgpu_device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        receive.recv().unwrap().unwrap();
+        let bytes = staging.slice(..).get_mapped_range().unwrap();
+        let channels = |offset| std::array::from_fn(|channel| {
+            let start = offset + channel * 4;
+            u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap())
+        });
+        let actual = VisibilityPixelTargets { ids: channels(0), metadata: channels(256) };
+        assert_eq!(actual, targets);
+        assert_eq!(VisibilityPixel::from_targets(actual), expected);
+        drop(bytes);
+        staging.unmap();
+    }
 
     fn load_source(
         _: &(),
@@ -527,5 +883,31 @@ fn decompress_vertex_position(position: vec4<f32>, center: vec3<f32>, half_exten
         cache
             .get(0, shader_id, &[])
             .unwrap_or_else(|error| panic!("visibility raster shader failed: {error}"));
+
+        let bindless_id = AssetId::Uuid {
+            uuid: Uuid::from_u128(0x5052_4953_4d56_4953_5241_5354_4552_0002),
+        };
+        cache.set_shader(
+            bindless_id,
+            Shader::from_wesl(
+                format!("enable wgpu_binding_array;\n{stubs}{source}"),
+                "shaders/prism_visibility_raster_bindless.wesl",
+            ),
+        );
+        let defs = [
+            ShaderDefVal::Bool("MATERIAL_BINDLESS".into(), true),
+            ShaderDefVal::Bool("REGION_ILLUMINATION".into(), true),
+            ShaderDefVal::Bool("ILLUMINATION_BLEND".into(), true),
+            ShaderDefVal::Bool("VERTEX_UVS".into(), true),
+        ];
+        cache
+            .get(1, bindless_id, &defs)
+            .unwrap_or_else(|error| panic!("bindless visibility raster shader failed: {error}"));
+
+        assert!(source.contains("visibility_material_texture_record_is_valid(record)"));
+        assert!(source.contains(
+            "material_texture_generation_table[record.sampler_index] != record.generation"
+        ));
+        assert!(source.contains("Only a validated row is terminal"));
     }
 }

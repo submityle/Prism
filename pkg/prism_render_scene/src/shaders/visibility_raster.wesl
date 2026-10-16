@@ -149,10 +149,7 @@ fn region_illumination_selector(material_index: u32, uv: vec2<f32>) -> u32 {
                             // or stale material rows must never index them out
                             // of bounds. Array lengths are the exact per-device
                             // bindless capacity from MaterialTextureArrays.
-                            if record.generation != 0u
-                                && record.index < arrayLength(&material_texture_generation_table)
-                                && record.sampler_index < arrayLength(&material_texture_generation_table) {
-                                if material_texture_generation_table[record.index] == record.generation {
+                            if visibility_material_texture_record_is_valid(record) {
                                     // A level-zero, linearly filtered sample is
                                     // intentional: this categorical mask has no
                                     // derivatives in visibility, and filtering
@@ -172,7 +169,6 @@ fn region_illumination_selector(material_index: u32, uv: vec2<f32>) -> u32 {
                                     // Only a validated row is terminal. A stale
                                     // mask must not hide a later valid mask row.
                                     break;
-                                }
                             }
                         }
                     }
@@ -181,6 +177,25 @@ fn region_illumination_selector(material_index: u32, uv: vec2<f32>) -> u32 {
         }
     }
     return selector;
+}
+
+// The visibility raster has a different material bind-group number from the
+// compute material sampler, so it cannot import material_sample's binding-aware
+// helper. Keep the same strict published-pair contract here and use this one
+// helper for both binary and continuous mask consumers below.
+fn visibility_material_texture_record_is_valid(record: MaterialTexture) -> bool {
+    if record.generation == 0u {
+        return false;
+    }
+    @if(MATERIAL_BINDLESS) {
+        if record.index >= arrayLength(&material_texture_generation_table)
+            || record.sampler_index >= arrayLength(&material_texture_generation_table)
+            || material_texture_generation_table[record.index] != record.generation
+            || material_texture_generation_table[record.sampler_index] != record.generation {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Continuous composition deliberately has its own entry point and feature
@@ -199,10 +214,7 @@ fn illumination_blend_weight(material_index: u32, uv: vec2<f32>) -> u32 {
                     i = i + 1u) {
                     let record = material_textures[i];
                     if record.semantic == SEMANTIC_ILLUMINATION_MASK
-                        && record.generation != 0u
-                        && record.index < arrayLength(&material_texture_generation_table)
-                        && record.sampler_index < arrayLength(&material_texture_generation_table)
-                        && material_texture_generation_table[record.index] == record.generation {
+                        && visibility_material_texture_record_is_valid(record) {
                         let mask = textureSampleLevel(
                             material_texture_heap[record.index],
                             material_sampler_heap[record.sampler_index],

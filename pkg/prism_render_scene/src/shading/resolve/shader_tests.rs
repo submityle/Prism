@@ -925,8 +925,9 @@ fn material_vt_production_layout_contract_is_linked_into_resolve() {
         sample.contains(
             "@if(MATERIAL_BINDLESS) @group(1) @binding(9) var<storage, read> material_texture_generation_table"
         )
-            && sample.contains("material_texture_generation_table[record.index] != record.generation"),
-        "bindless material sample must validate the published generation table",
+            && sample.contains("material_texture_generation_table[record.index] != record.generation")
+            && sample.contains("material_texture_generation_table[record.sampler_index] != record.generation"),
+        "bindless material sample must validate both published texture and sampler generations",
     );
     assert!(
         resolve.contains("sample_texture_slot(record, geometry.uv, lod)"),

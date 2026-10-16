@@ -79,6 +79,62 @@ fn texture_format_byte_sizes() {
 }
 
 #[test]
+fn texture_format_numeric_identities_are_append_only() {
+    use TextureFormat::*;
+    let existing = [
+        R8Unorm,
+        R8Uint,
+        R16Float,
+        R32Float,
+        R32Uint,
+        Rg8Unorm,
+        Rg16Float,
+        Rg32Float,
+        Rgba8Unorm,
+        Rgba8UnormSrgb,
+        Bgra8Unorm,
+        Bgra8UnormSrgb,
+        Rgb10a2Unorm,
+        Rg11b10Float,
+        Rgba16Float,
+        Rgba32Float,
+        Depth32Float,
+        Depth24PlusStencil8,
+    ];
+    for (identity, format) in existing.into_iter().enumerate() {
+        assert_eq!(format as usize, identity);
+    }
+    assert_eq!(Rgba32Uint as usize, 18);
+}
+
+#[test]
+fn rgba32uint_has_exact_unsigned_integer_layout() {
+    let format = TextureFormat::Rgba32Uint;
+    assert_eq!(format.bytes_per_texel(), 4 * 4);
+    assert_eq!(format.sample_type(), crate::TextureSampleType::Uint);
+    assert_eq!(format.aspects(), crate::FormatAspects::Color);
+    assert!(!format.is_filterable());
+    assert!(!format.is_srgb());
+    assert!(!format.has_depth());
+    assert!(!format.has_stencil());
+    assert!(!format.is_depth_stencil());
+
+    // Packed upload rows are not the 256-byte-aligned GPU copy rows.
+    let size = Extent3d {
+        width: 3,
+        height: 2,
+        depth_or_array_layers: 2,
+    };
+    let row_bytes = size.width * format.bytes_per_texel();
+    assert_eq!(row_bytes, 48);
+    assert_eq!(row_bytes * size.height * size.depth_or_array_layers, 192);
+    let target = ColorTargetState::opaque(format);
+    assert_eq!(target.format, format);
+    assert_eq!(target.blend, None);
+    assert_eq!(target.write_mask, ColorWrites::all());
+}
+
+#[test]
 fn vertex_format_size_and_components() {
     assert_eq!(VertexFormat::Float32x3.size(), 12);
     assert_eq!(VertexFormat::Float32x3.components(), 3);

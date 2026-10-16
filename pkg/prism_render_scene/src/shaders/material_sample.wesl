@@ -153,7 +153,8 @@ fn material_texture_record_is_valid(record: PrismMaterialTexture) -> bool {
         // bounds source; naga cannot take `arrayLength` of a binding array.
         if record.index >= arrayLength(&material_texture_generation_table)
             || record.sampler_index >= arrayLength(&material_texture_generation_table)
-            || material_texture_generation_table[record.index] != record.generation {
+            || material_texture_generation_table[record.index] != record.generation
+            || material_texture_generation_table[record.sampler_index] != record.generation {
             return false;
         }
     }

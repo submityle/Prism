@@ -35,11 +35,10 @@ use bevy_render::{
     get_adreno_model,
     render_asset::RenderAssets,
     render_resource::{
-        AddressMode, Extent3d, FilterMode, MipmapFilterMode, Sampler, SamplerDescriptor,
-        SamplerId, Texture,
-        TextureDataOrder, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-        TextureView, TextureViewDescriptor, TextureViewId, WgpuFeatures, WgpuSampler,
-        WgpuTextureView,
+        AddressMode, Extent3d, FilterMode, MipmapFilterMode, Sampler, SamplerDescriptor, SamplerId,
+        Texture, TextureDataOrder, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureUsages, TextureView, TextureViewDescriptor, TextureViewId, WgpuFeatures,
+        WgpuSampler, WgpuTextureView,
     },
     renderer::{RenderAdapterInfo, RenderDevice, RenderQueue},
     texture::GpuImage,
@@ -305,8 +304,7 @@ impl MaterialTextureArrays {
             // appears on a later frame.
         }
         let fingerprint: Vec<TextureViewId> = self.views.iter().map(TextureView::id).collect();
-        let sampler_fingerprint: Vec<SamplerId> =
-            self.samplers.iter().map(Sampler::id).collect();
+        let sampler_fingerprint: Vec<SamplerId> = self.samplers.iter().map(Sampler::id).collect();
         if fingerprint != self.fingerprint
             || sampler_fingerprint != self.sampler_fingerprint
             || published_generations != self.published_generations

@@ -3,8 +3,15 @@
 //! Each golden compares an independent CPU transcription of the
 //! `water_surface_fs_mask_blend` equations with the public `MaskBlend` composition
 //! contract. Source checks pin the WESL consumer and the four raster entries,
-//! while the optional GPU gate classifies adapter/device absence as an explicit
-//! skip unless `PRISM_REQUIRE_GPU=1` turns it into a failure.
+//! while the optional module-validation test classifies adapter/device absence
+//! as an explicit skip unless `PRISM_REQUIRE_GPU=1` turns it into a failure.
+//! Module validation is not output evidence. Actual production raster,
+//! render-FX, resident composition and HDR readbacks live in the sibling
+//! `water_hybrid_gpu` integration target.
+//! Geometry-to-region conversion here is a CPU contract: the current raster
+//! consumes resolved foam and an authored shallow scalar, not shore-distance
+//! or bathymetric-depth textures. Reactive reaches its overlay control rather
+//! than an independent temporal-history output.
 
 use bevy_asset::{uuid::Uuid, AssetId};
 use bevy_platform::future::block_on;
@@ -651,6 +658,22 @@ fn try_device() -> Option<(Device, Queue)> {
             return None;
         }
     };
+    let info = adapter.get_info();
+    if !matches!(
+        info.device_type,
+        wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::DiscreteGpu
+    ) {
+        assert!(
+            std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+            "PRISM_REQUIRE_GPU set: water Hybrid requires physical GPU hardware: {info:?}"
+        );
+        eprintln!("water Hybrid module-validation SKIP: non-hardware adapter: {info:?}");
+        return None;
+    }
+    eprintln!(
+        "water Hybrid module-validation adapter: {} / {:?} / {:?}",
+        info.name, info.backend, info.device_type
+    );
     if adapter.limits().max_bind_groups < REQUIRED_BIND_GROUPS {
         let message = format!(
             "adapter exposes max_bind_groups={}, but water raster requires {}",
@@ -685,9 +708,9 @@ fn try_device() -> Option<(Device, Queue)> {
 }
 
 #[test]
-fn hybrid_wesl_real_gpu_gate_is_explicitly_classified() {
+fn hybrid_wesl_gpu_shader_module_validation_only() {
     let Some((device, _queue)) = try_device() else {
-        eprintln!("hybrid_wesl_real_gpu_gate_is_explicitly_classified: SKIP");
+        eprintln!("hybrid_wesl_gpu_shader_module_validation_only: SKIP");
         return;
     };
     let wgsl = compile_raster_wgsl();
@@ -703,5 +726,7 @@ fn hybrid_wesl_real_gpu_gate_is_explicitly_classified() {
         label: Some("water Hybrid HDR export golden"),
         source: ShaderSource::Wgsl(hdr_export_source().into()),
     });
-    eprintln!("water Hybrid GPU gate: PASS (raster, composition, and HDR shader modules created)");
+    eprintln!(
+        "water Hybrid shader modules validated; no draw, dispatch, or output readback in this test"
+    );
 }

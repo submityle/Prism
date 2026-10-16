@@ -3,9 +3,11 @@ import super::{
 };
 enable wgpu_mesh_shader;
 
-// TODO: import these functions in the future when doing so does not crash the shader.
-// Convert ndc depth to linear view z.
-// Note: Depth values in front of the camera will be negative as -z is forward
+// Keep this helper local: importing the view-transform module currently expands
+// the standalone sample's bind-group contract. The local implementation keeps
+// the sample self-contained without silently changing its resource layout.
+// Convert NDC depth to linear view z.
+// Note: Depth values in front of the camera will be negative as -z is forward.
 fn depth_ndc_to_view_z(ndc_depth: f32, clip_from_view: mat4x4<f32>, view_from_clip: mat4x4<f32>) -> f32 {
 // #ifdef VIEW_PROJECTION_PERSPECTIVE
     return -perspective_camera_near(clip_from_view) / ndc_depth;

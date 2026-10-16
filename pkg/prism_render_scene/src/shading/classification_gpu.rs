@@ -343,5 +343,9 @@ mod tests {
         cache
             .get(0, shader_id, &[])
             .unwrap_or_else(|error| panic!("material classification shader failed: {error}"));
+
+        let source = include_str!("../shaders/material_classification.wesl");
+        assert!(source.contains("FEATURE_REGION_ILLUMINATION"));
+        assert!(source.contains("region_selector = INVALID"));
     }
 }

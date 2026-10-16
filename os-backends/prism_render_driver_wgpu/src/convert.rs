@@ -44,6 +44,7 @@ pub(crate) fn try_texture_format(
         F::Rg11b10Float => W::Rg11b10Ufloat,
         F::Rgba16Float => W::Rgba16Float,
         F::Rgba32Float => W::Rgba32Float,
+        F::Rgba32Uint => W::Rgba32Uint,
         F::Depth32Float => W::Depth32Float,
         F::Depth24PlusStencil8 => W::Depth24PlusStencil8,
         // The RHI format set is `#[non_exhaustive]`; every variant known at
@@ -1077,6 +1078,10 @@ mod tests {
                 wgpu::TextureFormat::Rgba32Float,
             ),
             (
+                rhi::TextureFormat::Rgba32Uint,
+                wgpu::TextureFormat::Rgba32Uint,
+            ),
+            (
                 rhi::TextureFormat::Depth32Float,
                 wgpu::TextureFormat::Depth32Float,
             ),
@@ -1093,6 +1098,42 @@ mod tests {
         for (rhi_format, wgpu_format) in cases {
             assert_eq!(try_texture_format(rhi_format), Ok(wgpu_format));
         }
+    }
+
+    #[test]
+    fn rgba32uint_preserves_native_footprint_and_integer_bindings() {
+        let format = rhi::TextureFormat::Rgba32Uint;
+        let native = try_texture_format(format).unwrap();
+        assert_eq!(native, wgpu::TextureFormat::Rgba32Uint);
+        assert_eq!(native.block_dimensions(), (1, 1));
+        assert_eq!(native.block_copy_size(None), Some(format.bytes_per_texel()));
+        assert_eq!(native.block_copy_size(None), Some(16));
+        assert_eq!(
+            binding_type(rhi::BindingType::Texture {
+                sample_type: format.sample_type(),
+                view_dimension: rhi::TextureViewDimension::D2,
+                multisampled: false,
+            }),
+            Ok(wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            }),
+        );
+        assert_eq!(
+            binding_type(rhi::BindingType::StorageTexture {
+                access: rhi::StorageTextureAccess::WriteOnly,
+                format,
+                view_dimension: rhi::TextureViewDimension::D2,
+            }),
+            Ok(wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: wgpu::TextureFormat::Rgba32Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            }),
+        );
+        // Integer render attachments are not presentable swapchain formats.
+        assert_eq!(surface_format_from_wgpu(native), None);
     }
 
     #[test]

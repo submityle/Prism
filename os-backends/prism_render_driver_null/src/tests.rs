@@ -116,6 +116,50 @@ fn instance_brings_up_null_device_and_recycles_slots() {
 }
 
 #[test]
+fn rgba32uint_texture_and_explicit_view_recycle_ids() {
+    let instance = NullInstance::new();
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .unwrap();
+    let (device, _queue) = instance
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .unwrap();
+    let descriptor = TextureDescriptor::new_2d(
+        Extent3d::new_2d(3, 2),
+        TextureFormat::Rgba32Uint,
+        TextureUsages::RENDER_ATTACHMENT
+            | TextureUsages::TEXTURE_BINDING
+            | TextureUsages::STORAGE_BINDING
+            | TextureUsages::COPY_SRC
+            | TextureUsages::COPY_DST,
+    );
+    let texture = device.create_texture(&descriptor);
+    let view_descriptor = rhi::TextureViewDescriptor {
+        format: Some(TextureFormat::Rgba32Uint),
+        ..Default::default()
+    };
+    let view = device.create_texture_view(texture, &view_descriptor);
+    assert_eq!(device.live_resource_count(), 2);
+    device.destroy_texture_view(view);
+    device.destroy_texture(texture);
+    assert_eq!(device.live_resource_count(), 0);
+
+    // Null validates only resource-table lifecycle, not GPU data semantics.
+    let next_texture = device.create_texture(&descriptor);
+    let next_view = device.create_texture_view(next_texture, &view_descriptor);
+    assert_eq!(next_texture.index(), texture.index());
+    assert_ne!(next_texture.generation(), texture.generation());
+    assert_eq!(next_view.index(), view.index());
+    assert_ne!(next_view.generation(), view.generation());
+    device.destroy_texture_view(view);
+    device.destroy_texture(texture);
+    assert_eq!(device.live_resource_count(), 2);
+    device.destroy_texture_view(next_view);
+    device.destroy_texture(next_texture);
+    assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
 fn surface_configure_acquire_present_cycle() {
     let instance = NullInstance::new();
     let window = Arc::new(FakeWindow);

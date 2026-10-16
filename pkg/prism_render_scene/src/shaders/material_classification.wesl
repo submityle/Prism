@@ -101,6 +101,7 @@ struct BlendWorkData {
 var<immediate> params: ClassificationParams;
 
 const FEATURE_ILLUMINATION_BLEND: u32 = 1u << 9u;
+const FEATURE_REGION_ILLUMINATION: u32 = 1u << 7u;
 const INVALID: u32 = 0xffffffffu;
 
 // Program kinds are the generated execution-table ABI, not lobe buckets.
@@ -146,6 +147,12 @@ fn execution_identity(header: MaterialHeader, region_selector: u32) -> Execution
                 && header.execution_permutation_low >= program.permutation_count_low);
         if after_limit { return invalid; }
         identity = ExecutionIdentity(plan.execution_family, program.program_id, program.response_kind);
+    }
+    // Visibility metadata is a trusted Lit/NPR selector only when the material
+    // explicitly declares the binary region-mask feature. Sentinel, malformed,
+    // and unrelated metadata preserve the material-wide execution identity.
+    if (header.feature_flags & FEATURE_REGION_ILLUMINATION) == 0u {
+        region_selector = INVALID;
     }
     // Binary region endpoints only change builtin Lit/Npr; registered ids,
     // including zero, and Unlit retain their verified implementation.
