@@ -275,7 +275,9 @@ impl FeatureCatalog {
                                 });
                             }
                             writes.insert(usage.key);
-                            writer_inputs.entry(usage.key).or_insert_with(Vec::new)
+                            writer_inputs
+                                .entry(usage.key)
+                                .or_insert_with(Vec::new)
                                 .push(usage.input);
                         }
                     }

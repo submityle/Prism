@@ -200,8 +200,11 @@ impl<'a> ResourceTemplates<'a> {
         for (index, &(_, _, pass)) in declarations.iter().enumerate() {
             let mut dependencies = BTreeSet::new();
             for &dependency in pass.depends_on {
-                dependencies.insert(*pass_indices.get(&dependency)
-                    .ok_or(FabricCompileError::MissingSelectedPass(dependency))?);
+                dependencies.insert(
+                    *pass_indices
+                        .get(&dependency)
+                        .ok_or(FabricCompileError::MissingSelectedPass(dependency))?,
+                );
             }
             let mut pass_sources = Vec::with_capacity(pass.accesses.len());
             for usage in pass.accesses {
@@ -209,7 +212,8 @@ impl<'a> ResourceTemplates<'a> {
                 let source = if usage.frame_lag.is_some() {
                     if matches!(usage.input, ResourceInput::ProducedBy(_)) {
                         return Err(FabricCompileError::HistoryProducer {
-                            pass: pass.id, resource: usage.key,
+                            pass: pass.id,
+                            resource: usage.key,
                         });
                     }
                     None
@@ -220,13 +224,23 @@ impl<'a> ResourceTemplates<'a> {
                             if resource_writers.len() > 1 {
                                 return Err(FabricCompileError::MultipleWriters(usage.key));
                             }
-                            if usage.access.writes() { None } else { resource_writers.first().copied() }
+                            if usage.access.writes() {
+                                None
+                            } else {
+                                resource_writers.first().copied()
+                            }
                         }
                         ResourceInput::ProducedBy(producer) => {
-                            let source = pass_indices.get(&producer).copied()
-                                .filter(|source| *source != index && resource_writers.contains(source))
+                            let source = pass_indices
+                                .get(&producer)
+                                .copied()
+                                .filter(|source| {
+                                    *source != index && resource_writers.contains(source)
+                                })
                                 .ok_or(FabricCompileError::InvalidProducer {
-                                    pass: pass.id, resource: usage.key, producer,
+                                    pass: pass.id,
+                                    resource: usage.key,
+                                    producer,
                                 })?;
                             Some(source)
                         }
@@ -235,7 +249,8 @@ impl<'a> ResourceTemplates<'a> {
                 if let Some(source) = source {
                     if source == index {
                         return Err(FabricCompileError::ReadWriteSamePass {
-                            pass: pass.id, resource: usage.key,
+                            pass: pass.id,
+                            resource: usage.key,
                         });
                     }
                     dependencies.insert(source);
@@ -255,7 +270,8 @@ impl<'a> ResourceTemplates<'a> {
                 queue: pass.queue,
                 accesses: Vec::new(),
                 depends_on: dependencies
-                    .iter().copied()
+                    .iter()
+                    .copied()
                     .map(|id| PassId(id as u32))
                     .collect(),
             })?;
@@ -358,7 +374,9 @@ impl<'a> ResourceTemplates<'a> {
                 external: binding,
             });
         }
-        let admitted_indices: BTreeMap<_, _> = admission_order.iter().enumerate()
+        let admitted_indices: BTreeMap<_, _> = admission_order
+            .iter()
+            .enumerate()
             .map(|(index, &original)| (original, PassId(index as u32)))
             .collect();
         let mut passes = Vec::new();
@@ -381,8 +399,10 @@ impl<'a> ResourceTemplates<'a> {
                 name: format!("feature-pass:{}", template.id.0).into(),
                 queue: template.queue,
                 accesses,
-                depends_on: prerequisites[admitted].iter()
-                    .map(|dependency| admitted_indices[dependency]).collect(),
+                depends_on: prerequisites[admitted]
+                    .iter()
+                    .map(|dependency| admitted_indices[dependency])
+                    .collect(),
             };
             let id = graph.try_add_pass(descriptor.clone())?;
             passes.push(PassSpec {
@@ -438,8 +458,13 @@ impl<'a> ResourceTemplates<'a> {
         let mut versions = Vec::new();
         for &pass_index in &plan.order {
             let pass = &passes[pass_index];
-            for (&ordinal, access) in access_orders[pass_index].iter().zip(&plan.accesses[pass_index]) {
-                let Some(ssa_version) = access.output_version else { continue };
+            for (&ordinal, access) in access_orders[pass_index]
+                .iter()
+                .zip(&plan.accesses[pass_index])
+            {
+                let Some(ssa_version) = access.output_version else {
+                    continue;
+                };
                 let resource = &resources[pass.descriptor.accesses[ordinal].resource.0 as usize];
                 let base = resource.external.map_or(0, |binding| binding.version);
                 let content_version = base
@@ -585,17 +610,32 @@ fn use_frame(frame: u64, usage: ResourceUse) -> Result<u64, FabricCompileError> 
 fn normalized_access_orders(passes: &[PassSpec], resource_count: usize) -> Vec<Vec<usize>> {
     let mut textures = vec![false; resource_count];
     for access in passes.iter().flat_map(|pass| &pass.descriptor.accesses) {
-        if matches!(access.kind, AccessKind::SampledRead | AccessKind::ColorAttachment | AccessKind::DepthAttachment) {
+        if matches!(
+            access.kind,
+            AccessKind::SampledRead | AccessKind::ColorAttachment | AccessKind::DepthAttachment
+        ) {
             textures[access.resource.0 as usize] = true;
         }
     }
-    passes.iter().map(|pass| {
-        pass.descriptor.accesses.iter().enumerate()
-            .filter(|(_, access)| textures[access.resource.0 as usize])
-            .chain(pass.descriptor.accesses.iter().enumerate()
-                .filter(|(_, access)| !textures[access.resource.0 as usize]))
-            .map(|(ordinal, _)| ordinal).collect()
-    }).collect()
+    passes
+        .iter()
+        .map(|pass| {
+            pass.descriptor
+                .accesses
+                .iter()
+                .enumerate()
+                .filter(|(_, access)| textures[access.resource.0 as usize])
+                .chain(
+                    pass.descriptor
+                        .accesses
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, access)| !textures[access.resource.0 as usize]),
+                )
+                .map(|(ordinal, _)| ordinal)
+                .collect()
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]

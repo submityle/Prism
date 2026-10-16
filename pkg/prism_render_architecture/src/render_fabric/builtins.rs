@@ -8,8 +8,8 @@
 use super::{
     AccessKind, FeatureCatalog, FeatureDefinition, FeatureId, FeatureVariant, FrameLag, PassKey,
     PassTemplate, QueueClass, RenderDomain, RenderQualityTier, ResourceInput, ResourceKey,
-    ResourceLayout, ResourceScope, ResourceTemplate, ResourceUse, ServiceId, ServiceOutput, ServiceSet,
-    VariantId,
+    ResourceLayout, ResourceScope, ResourceTemplate, ResourceUse, ServiceId, ServiceOutput,
+    ServiceSet, VariantId,
 };
 use crate::backend::capability::CapabilitySet;
 use crate::frame_graph::ResourceLifetime;

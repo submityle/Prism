@@ -190,11 +190,7 @@ impl RuntimeFeatureGraph {
     /// queue confirms completion, then release it on the creating device.
     /// Logical queue batches do not imply native multi-queue fences or history
     /// publication. Use `record` when an external renderer owns submission.
-    pub fn execute<D: RenderDevice, Q: RenderQueue>(
-        self,
-        device: &D,
-        queue: &Q,
-    ) -> RecordedGraph {
+    pub fn execute<D: RenderDevice, Q: RenderQueue>(self, device: &D, queue: &Q) -> RecordedGraph {
         let recorded = self.record(device);
         queue.submit(core::slice::from_ref(recorded.commands()));
         recorded
@@ -311,15 +307,14 @@ impl CompiledFeatureGraph {
                     }
                     for &bound in pass.accesses() {
                         let resource = bound.resource.0 as usize;
-                        let input = versions[resource].get(&bound.input_ssa_version).copied()
+                        let input = versions[resource]
+                            .get(&bound.input_ssa_version)
+                            .copied()
                             .ok_or(FabricRuntimeError::VersionMismatch {
-                                pass: pass.key(), resource: bound.declaration.key,
+                                pass: pass.key(),
+                                resource: bound.declaration.key,
                             })?;
-                        let next = lower_access(
-                            builder,
-                            input,
-                            bound.declaration.access,
-                        )?;
+                        let next = lower_access(builder, input, bound.declaration.access)?;
                         if next.version() != bound.ssa_version {
                             return Err(FabricRuntimeError::VersionMismatch {
                                 pass: pass.key(),
@@ -356,8 +351,14 @@ impl CompiledFeatureGraph {
                 QueueClass::Transfer => (PassKind::Transfer, flags),
             };
             graph.try_add_pass_with_dependencies(
-                pass.descriptor().name.to_string(), kind, flags,
-                pass.descriptor().depends_on.iter().map(|id| id.0 as usize).collect(),
+                pass.descriptor().name.to_string(),
+                kind,
+                flags,
+                pass.descriptor()
+                    .depends_on
+                    .iter()
+                    .map(|id| id.0 as usize)
+                    .collect(),
                 setup,
             )?;
             if let Some(error) = setup_error {
@@ -612,25 +613,33 @@ fn semantic_accesses(
     if plan.accesses.len() != passes.len() {
         return Err(FabricRuntimeError::PlanMismatch);
     }
-    passes.iter().zip(&plan.accesses).map(|(pass, compiled)| {
-        let mut order: Vec<_> = pass.accesses().iter().enumerate().collect();
-        order.sort_by_key(|(_, usage)| !resources[usage.resource.0 as usize].0);
-        if order.len() != compiled.len() {
-            return Err(FabricRuntimeError::PlanMismatch);
-        }
-        let mut result = vec![(0, 0, None); order.len()];
-        for ((ordinal, usage), access) in order.into_iter().zip(compiled) {
-            let identity = match access.resource {
-                LogicalResource::Texture(index) => (true, index.get()),
-                LogicalResource::Buffer(index) => (false, index.get()),
-            };
-            if resources[usage.resource.0 as usize] != identity {
+    passes
+        .iter()
+        .zip(&plan.accesses)
+        .map(|(pass, compiled)| {
+            let mut order: Vec<_> = pass.accesses().iter().enumerate().collect();
+            order.sort_by_key(|(_, usage)| !resources[usage.resource.0 as usize].0);
+            if order.len() != compiled.len() {
                 return Err(FabricRuntimeError::PlanMismatch);
             }
-            result[ordinal] = (usage.resource.0, access.input_version, access.output_version);
-        }
-        Ok(result)
-    }).collect()
+            let mut result = vec![(0, 0, None); order.len()];
+            for ((ordinal, usage), access) in order.into_iter().zip(compiled) {
+                let identity = match access.resource {
+                    LogicalResource::Texture(index) => (true, index.get()),
+                    LogicalResource::Buffer(index) => (false, index.get()),
+                };
+                if resources[usage.resource.0 as usize] != identity {
+                    return Err(FabricRuntimeError::PlanMismatch);
+                }
+                result[ordinal] = (
+                    usage.resource.0,
+                    access.input_version,
+                    access.output_version,
+                );
+            }
+            Ok(result)
+        })
+        .collect()
 }
 
 // Original pass/access ordinals, semantic resource ID, and queue transfer.

@@ -181,7 +181,10 @@ fn derived_order_and_every_barrier_match_authoritative_resource_graph() {
                 kind: AccessKind::TransferWrite,
             }],
         ),
-    ].into_iter().rev() {
+    ]
+    .into_iter()
+    .rev()
+    {
         baseline
             .try_add_pass(PassDescriptor {
                 name: name.into(),
@@ -1609,26 +1612,92 @@ fn validated_frame_items_reach_the_execution_sink_without_a_second_extraction() 
 
 #[test]
 fn explicit_writer_chain_keeps_initial_and_intermediate_read_provenance() {
-    let access = |kind, input| ResourceUse { input, ..usage(A, kind) };
-    let catalog = catalog(vec![variant(790, 0, vec![
-        pass(40, QueueClass::Compute, vec![access(AccessKind::StorageRead, ResourceInput::ProducedBy(PassKey(30)))]),
-        pass(30, QueueClass::Compute, vec![access(AccessKind::StorageWrite, ResourceInput::ProducedBy(PassKey(10)))]),
-        pass(20, QueueClass::Compute, vec![access(AccessKind::StorageRead, ResourceInput::ProducedBy(PassKey(10)))]),
-        pass(10, QueueClass::Compute, vec![access(AccessKind::StorageWrite, ResourceInput::Initial)]),
-        pass(5, QueueClass::Compute, vec![access(AccessKind::StorageRead, ResourceInput::Initial)]),
-    ])], vec![A]);
+    let access = |kind, input| ResourceUse {
+        input,
+        ..usage(A, kind)
+    };
+    let catalog = catalog(
+        vec![variant(
+            790,
+            0,
+            vec![
+                pass(
+                    40,
+                    QueueClass::Compute,
+                    vec![access(
+                        AccessKind::StorageRead,
+                        ResourceInput::ProducedBy(PassKey(30)),
+                    )],
+                ),
+                pass(
+                    30,
+                    QueueClass::Compute,
+                    vec![access(
+                        AccessKind::StorageWrite,
+                        ResourceInput::ProducedBy(PassKey(10)),
+                    )],
+                ),
+                pass(
+                    20,
+                    QueueClass::Compute,
+                    vec![access(
+                        AccessKind::StorageRead,
+                        ResourceInput::ProducedBy(PassKey(10)),
+                    )],
+                ),
+                pass(
+                    10,
+                    QueueClass::Compute,
+                    vec![access(AccessKind::StorageWrite, ResourceInput::Initial)],
+                ),
+                pass(
+                    5,
+                    QueueClass::Compute,
+                    vec![access(AccessKind::StorageRead, ResourceInput::Initial)],
+                ),
+            ],
+        )],
+        vec![A],
+    );
     let a = buffer(A, ResourceLifetime::Imported);
-    let graph = ResourceTemplates::new(&catalog, &[a]).unwrap()
-        .compile(&select(&catalog), 10, &[binding(a, 10, 1)], &[], GraphLimits::default()).unwrap();
-    let keys: Vec<_> = graph.plan().order.iter().map(|&id| graph.passes()[id].key()).collect();
-    assert_eq!(keys, vec![PassKey(5), PassKey(10), PassKey(20), PassKey(30), PassKey(40)]);
+    let graph = ResourceTemplates::new(&catalog, &[a])
+        .unwrap()
+        .compile(
+            &select(&catalog),
+            10,
+            &[binding(a, 10, 1)],
+            &[],
+            GraphLimits::default(),
+        )
+        .unwrap();
+    let keys: Vec<_> = graph
+        .plan()
+        .order
+        .iter()
+        .map(|&id| graph.passes()[id].key())
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            PassKey(5),
+            PassKey(10),
+            PassKey(20),
+            PassKey(30),
+            PassKey(40)
+        ]
+    );
     for (key, input, output, input_producer) in [
-        (5, 0, 0, None), (10, 0, 1, None),
+        (5, 0, 0, None),
+        (10, 0, 1, None),
         (20, 1, 1, Some(PassKey(10))),
         (30, 1, 2, Some(PassKey(10))),
         (40, 2, 2, Some(PassKey(30))),
     ] {
-        let pass = graph.passes().iter().find(|pass| pass.key() == PassKey(key)).unwrap();
+        let pass = graph
+            .passes()
+            .iter()
+            .find(|pass| pass.key() == PassKey(key))
+            .unwrap();
         let bound = pass.accesses()[0];
         assert_eq!(bound.input_ssa_version, input);
         assert_eq!(bound.ssa_version, output);
@@ -1806,16 +1875,38 @@ fn missing_wrong_and_unselected_producers_fail_before_recording() {
     for (producer, write_key) in [(PassKey(99), B), (PassKey(2), B)] {
         let mut read = usage(A, AccessKind::StorageRead);
         read.input = ResourceInput::ProducedBy(producer);
-        let catalog = catalog(vec![variant(791, 0, vec![
-            pass(1, QueueClass::Compute, vec![read]),
-            pass(2, QueueClass::Compute, vec![usage(write_key, AccessKind::StorageWrite)]),
-        ])], vec![A, B]);
-        let result = ResourceTemplates::new(&catalog, &[
-            buffer(A, ResourceLifetime::Imported), buffer(B, ResourceLifetime::Transient),
-        ]).unwrap().compile(&select(&catalog), 10, &[], &[], GraphLimits::default());
-        assert_eq!(result.err(), Some(FabricCompileError::InvalidProducer {
-            pass: PassKey(1), resource: A, producer,
-        }));
+        let catalog = catalog(
+            vec![variant(
+                791,
+                0,
+                vec![
+                    pass(1, QueueClass::Compute, vec![read]),
+                    pass(
+                        2,
+                        QueueClass::Compute,
+                        vec![usage(write_key, AccessKind::StorageWrite)],
+                    ),
+                ],
+            )],
+            vec![A, B],
+        );
+        let result = ResourceTemplates::new(
+            &catalog,
+            &[
+                buffer(A, ResourceLifetime::Imported),
+                buffer(B, ResourceLifetime::Transient),
+            ],
+        )
+        .unwrap()
+        .compile(&select(&catalog), 10, &[], &[], GraphLimits::default());
+        assert_eq!(
+            result.err(),
+            Some(FabricCompileError::InvalidProducer {
+                pass: PassKey(1),
+                resource: A,
+                producer,
+            })
+        );
     }
 }
 
@@ -1823,19 +1914,38 @@ fn missing_wrong_and_unselected_producers_fail_before_recording() {
 fn transient_initial_reads_and_missing_control_prerequisites_are_rejected() {
     let mut read = usage(A, AccessKind::StorageRead);
     read.input = ResourceInput::Initial;
-    let catalog = catalog(vec![variant(792, 0, vec![
-        pass(1, QueueClass::Compute, vec![read]),
-        pass(2, QueueClass::Compute, vec![usage(A, AccessKind::StorageWrite)]),
-    ])], vec![A]);
-    assert_eq!(ResourceTemplates::new(&catalog, &[buffer(A, ResourceLifetime::Transient)])
-        .unwrap().compile(&select(&catalog), 0, &[], &[], GraphLimits::default()).err(),
-        Some(FabricCompileError::MissingProducer(A)));
+    let catalog = catalog(
+        vec![variant(
+            792,
+            0,
+            vec![
+                pass(1, QueueClass::Compute, vec![read]),
+                pass(
+                    2,
+                    QueueClass::Compute,
+                    vec![usage(A, AccessKind::StorageWrite)],
+                ),
+            ],
+        )],
+        vec![A],
+    );
+    assert_eq!(
+        ResourceTemplates::new(&catalog, &[buffer(A, ResourceLifetime::Transient)])
+            .unwrap()
+            .compile(&select(&catalog), 0, &[], &[], GraphLimits::default())
+            .err(),
+        Some(FabricCompileError::MissingProducer(A))
+    );
     let mut dependent = pass(3, QueueClass::Compute, vec![]);
     dependent.depends_on = table(vec![PassKey(99)]);
     let catalog = self::catalog(vec![variant(793, 0, vec![dependent])], vec![]);
-    assert_eq!(ResourceTemplates::new(&catalog, &[]).unwrap()
-        .compile(&select(&catalog), 0, &[], &[], GraphLimits::default()).err(),
-        Some(FabricCompileError::MissingSelectedPass(PassKey(99))));
+    assert_eq!(
+        ResourceTemplates::new(&catalog, &[])
+            .unwrap()
+            .compile(&select(&catalog), 0, &[], &[], GraphLimits::default())
+            .err(),
+        Some(FabricCompileError::MissingSelectedPass(PassKey(99)))
+    );
 }
 
 #[test]
@@ -1844,13 +1954,22 @@ fn explicit_resource_and_control_cycles_report_authoritative_diagnostics() {
         input: ResourceInput::ProducedBy(PassKey(producer)),
         ..usage(A, AccessKind::StorageWrite)
     };
-    let catalog = catalog(vec![variant(794, 0, vec![
-        pass(1, QueueClass::Compute, vec![write(2)]),
-        pass(2, QueueClass::Compute, vec![write(1)]),
-    ])], vec![A]);
+    let catalog = catalog(
+        vec![variant(
+            794,
+            0,
+            vec![
+                pass(1, QueueClass::Compute, vec![write(2)]),
+                pass(2, QueueClass::Compute, vec![write(1)]),
+            ],
+        )],
+        vec![A],
+    );
     let result = ResourceTemplates::new(&catalog, &[buffer(A, ResourceLifetime::Transient)])
-        .unwrap().compile(&select(&catalog), 0, &[], &[], GraphLimits::default());
-    let Some(FabricCompileError::Graph(CompileError::Cycle { cycle, names, .. })) = result.err() else {
+        .unwrap()
+        .compile(&select(&catalog), 0, &[], &[], GraphLimits::default());
+    let Some(FabricCompileError::Graph(CompileError::Cycle { cycle, names, .. })) = result.err()
+    else {
         panic!("resource cycle must be rejected by the authoritative scheduler");
     };
     assert_eq!(cycle.first(), cycle.last());
@@ -1860,7 +1979,14 @@ fn explicit_resource_and_control_cycles_report_authoritative_diagnostics() {
     let mut second = pass(2, QueueClass::Compute, vec![]);
     second.depends_on = table(vec![PassKey(1)]);
     let catalog = self::catalog(vec![variant(795, 0, vec![first, second])], vec![]);
-    assert!(matches!(ResourceTemplates::new(&catalog, &[]).unwrap()
-        .compile(&select(&catalog), 0, &[], &[], GraphLimits::default()),
-        Err(FabricCompileError::Graph(CompileError::Cycle { .. }))));
+    assert!(matches!(
+        ResourceTemplates::new(&catalog, &[]).unwrap().compile(
+            &select(&catalog),
+            0,
+            &[],
+            &[],
+            GraphLimits::default()
+        ),
+        Err(FabricCompileError::Graph(CompileError::Cycle { .. }))
+    ));
 }

@@ -219,7 +219,9 @@ fn compiled_import(template: ResourceTemplate, physical: PhysicalResource) -> Co
     )
 }
 
-fn duplicate_access_plan(overwrite: bool) -> (
+fn duplicate_access_plan(
+    overwrite: bool,
+) -> (
     CompiledFeatureGraph,
     ExecutionPlan,
     [Option<RuntimeResourceHandle>; 2],
@@ -239,11 +241,20 @@ fn duplicate_access_plan(overwrite: bool) -> (
             usage(image, AccessKind::StorageRead),
             usage(RESOURCE, AccessKind::StorageRead),
         ]
-        .into_iter().map(|mut usage| { usage.input = input; usage }).collect()
+        .into_iter()
+        .map(|mut usage| {
+            usage.input = input;
+            usage
+        })
+        .collect()
     };
     let declaration = compile_passes(
         vec![
-            pass(1, QueueClass::Compute, repeated_reads(ResourceInput::Initial)),
+            pass(
+                1,
+                QueueClass::Compute,
+                repeated_reads(ResourceInput::Initial),
+            ),
             pass(
                 2,
                 QueueClass::Compute,
@@ -252,7 +263,11 @@ fn duplicate_access_plan(overwrite: bool) -> (
                     usage(image, AccessKind::StorageWrite),
                 ],
             ),
-            pass(3, QueueClass::Compute, repeated_reads(ResourceInput::ProducedBy(PassKey(2)))),
+            pass(
+                3,
+                QueueClass::Compute,
+                repeated_reads(ResourceInput::ProducedBy(PassKey(2))),
+            ),
         ],
         &[buffer_template, image_template],
         &[
@@ -1026,22 +1041,80 @@ fn runtime_imported_volume_uses_one_array_layer_not_depth_slices() {
 
 #[test]
 fn runtime_retains_initial_and_intermediate_handles_across_multiple_writes() {
-    let access = |kind, input| ResourceUse { input, ..usage(RESOURCE, kind) };
+    let access = |kind, input| ResourceUse {
+        input,
+        ..usage(RESOURCE, kind)
+    };
     let template = buffer(RESOURCE, ResourceLifetime::Imported);
     let id = BufferId::from_parts(7, 1);
-    let declaration = compile_passes(vec![
-        pass(40, QueueClass::Compute, vec![access(AccessKind::StorageRead, ResourceInput::ProducedBy(PassKey(30)))]),
-        pass(30, QueueClass::Compute, vec![access(AccessKind::StorageWrite, ResourceInput::ProducedBy(PassKey(10)))]),
-        pass(20, QueueClass::Compute, vec![access(AccessKind::StorageRead, ResourceInput::ProducedBy(PassKey(10)))]),
-        pass(10, QueueClass::Compute, vec![access(AccessKind::StorageWrite, ResourceInput::Initial)]),
-        pass(5, QueueClass::Compute, vec![access(AccessKind::StorageRead, ResourceInput::Initial)]),
-    ], &[template], &[binding(template, PhysicalResource::Buffer { id, offset: 0 })]);
-    let runtime = prepare(declaration, &[RuntimeImport::Buffer {
-        resource: ResourceId(0), imported: imported_buffer(id),
-    }], &[40, 30, 20, 10, 5]).unwrap();
-    let keys: Vec<_> = runtime.plan().order.iter()
-        .map(|&index| runtime.declaration().passes()[index].key()).collect();
-    assert_eq!(keys, vec![PassKey(5), PassKey(10), PassKey(20), PassKey(30), PassKey(40)]);
+    let declaration = compile_passes(
+        vec![
+            pass(
+                40,
+                QueueClass::Compute,
+                vec![access(
+                    AccessKind::StorageRead,
+                    ResourceInput::ProducedBy(PassKey(30)),
+                )],
+            ),
+            pass(
+                30,
+                QueueClass::Compute,
+                vec![access(
+                    AccessKind::StorageWrite,
+                    ResourceInput::ProducedBy(PassKey(10)),
+                )],
+            ),
+            pass(
+                20,
+                QueueClass::Compute,
+                vec![access(
+                    AccessKind::StorageRead,
+                    ResourceInput::ProducedBy(PassKey(10)),
+                )],
+            ),
+            pass(
+                10,
+                QueueClass::Compute,
+                vec![access(AccessKind::StorageWrite, ResourceInput::Initial)],
+            ),
+            pass(
+                5,
+                QueueClass::Compute,
+                vec![access(AccessKind::StorageRead, ResourceInput::Initial)],
+            ),
+        ],
+        &[template],
+        &[binding(
+            template,
+            PhysicalResource::Buffer { id, offset: 0 },
+        )],
+    );
+    let runtime = prepare(
+        declaration,
+        &[RuntimeImport::Buffer {
+            resource: ResourceId(0),
+            imported: imported_buffer(id),
+        }],
+        &[40, 30, 20, 10, 5],
+    )
+    .unwrap();
+    let keys: Vec<_> = runtime
+        .plan()
+        .order
+        .iter()
+        .map(|&index| runtime.declaration().passes()[index].key())
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            PassKey(5),
+            PassKey(10),
+            PassKey(20),
+            PassKey(30),
+            PassKey(40)
+        ]
+    );
     assert_eq!(runtime.declaration().versions().len(), 2);
 }
 
@@ -1051,9 +1124,19 @@ fn runtime_preserves_control_only_dependencies_without_synthetic_resource_edges(
     last.depends_on = table(vec![PassKey(2)]);
     let mut middle = pass(2, QueueClass::Compute, vec![]);
     middle.depends_on = table(vec![PassKey(1)]);
-    let declaration = compile_passes(vec![last, middle, pass(1, QueueClass::Compute, vec![])], &[], &[]);
-    assert_eq!(declaration.passes()[1].descriptor().depends_on, vec![crate::frame_graph::PassId(0)]);
-    assert_eq!(declaration.passes()[2].descriptor().depends_on, vec![crate::frame_graph::PassId(1)]);
+    let declaration = compile_passes(
+        vec![last, middle, pass(1, QueueClass::Compute, vec![])],
+        &[],
+        &[],
+    );
+    assert_eq!(
+        declaration.passes()[1].descriptor().depends_on,
+        vec![crate::frame_graph::PassId(0)]
+    );
+    assert_eq!(
+        declaration.passes()[2].descriptor().depends_on,
+        vec![crate::frame_graph::PassId(1)]
+    );
     let runtime = prepare(declaration, &[], &[3, 2, 1]).unwrap();
     assert!(runtime.plan().logical_barriers.is_empty());
     assert_eq!(runtime.plan().order, vec![0, 1, 2]);
