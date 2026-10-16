@@ -252,9 +252,24 @@ CPU/GPU 可运行时切换、可混合（刚体走 CPU、流体走 GPU）。
 
 ---
 
-## 16. 离线模式（架构级预留）
+## 16. 离线模式（最小真实切片已完成）
 
-将"离线模式"作为架构级预留能力：现在不实现完整功能，但在架构和数据格式上留好扩展点，避免日后返工。
+`prism_physics_core::SimulationDriver` 已完成最小但真实的 Offline/Playback
+driver 切片。该切片不是完整的资产管线或编辑器功能，而是可测试的运行时内核：
+
+- `Offline` 每次 `drive` 执行一个离线 frame，按 bounded `substeps` 调用
+  `PhysicsBackend::step`，并把结果记录为 `StateSnapshot`；`target_frames` 和
+  `substeps` 都有硬上限，达到目标后返回 `Complete`，不会继续求解。
+- `Playback(CacheHandle)` 支持注册 bounded、versioned 的 `DriverCache`，每次
+  `drive` 只应用下一帧快照，不调用 backend；world 的 slot/generation 不匹配时
+  返回 `CacheMismatch`，不会静默写入错误实体。
+- 原有 Realtime `drive(backend, world, dt) -> DriveOutcome::Stepped` API 保持兼容。
+- 既有 `PhysicsCache`/`Player` 继续负责软体粒子轨迹的量化、插值和回放；driver
+  cache 使用完整 world snapshot，避免把刚体状态错误地塞进软体 track 格式。
+
+当前切片的明确边界：尚未实现磁盘资产序列化/校验、流式加载、编辑器 Bake 按钮、
+软体 `PhysicsCache` 自动绑定到 world，以及完整的跨版本迁移。它们属于后续资产
+管线和编辑器集成，不应被当前 driver 的运行时验收冒充完成。
 
 ### 16.1 两种离线形态
 | 形态 | 用途 | 对标 |
@@ -271,13 +286,15 @@ enum DriveMode {
     Playback(CacheHandle),                                           // 只读回放，跳过求解
 }
 ```
-step() 内部按 DriveMode 分派。M1 只实现 Realtime，但枚举与分派点现在就留好。
+`SimulationDriver::drive` 按 `DriveMode` 分派：Realtime 保持单次 backend step；Offline
+和 Playback 已分别接入 bounded 执行与逐帧快照应用。后续 backend 若暴露 solver
+iterations，可再消费 `Offline::iterations`，当前 PhysicsBackend 合约只接收 `dt`。
 
 ② 状态可序列化 = 缓存基础（Layer 2）：统一 XPBD 状态本就是纯数据。要求所有物理状态组件实现 Reflect + Serialize——烘焙缓存、快照回滚、确定性回放三者共用地基，一次投入三处收益。缓存格式：
 - 关键帧 + 增量压缩（位置量化、变化阈值剔除）。纯经典压缩，不使用任何学习/神经方法。
 - 分轨道存储（每个可缓存实体一条 track），支持部分加载/流式。
 
-③ 缓存组件与资源（Layer 4）预留但暂不实现的占位：
+③ 缓存组件与资源（Layer 4）仍属于后续资产集成：
 - PhysicsCache { handle, mode: Record | Playback | Passthrough }
 - Bakeable（标记该实体参与烘焙）
 - 资源 Handle<PhysicsCacheAsset>（走 Bevy Asset 系统，可热重载/流式）
@@ -286,13 +303,13 @@ step() 内部按 DriveMode 分派。M1 只实现 Realtime，但枚举与分派�
 
 ### 16.3 数据流
 ```
-[编辑器/CLI]  Offline Sim ---> 写入 PhysicsCacheAsset(磁盘)
-                                     |
-[运行时] Playback 模式 <--- 加载 Cache      (零求解，按帧插值回放)
-[运行时] Record 模式  ---> 实时仿真同时录制新缓存
-[运行时] Passthrough  ---> 忽略缓存，纯实时（默认）
+[运行时] Offline driver ---> bounded StateSnapshot sequence (内存)
+                                  |
+[运行时] Playback driver <--- register DriverCache (逐帧、零求解)
+[后续]   编辑器/CLI     ---> PhysicsCacheAsset 磁盘资产与流式管线
 ```
-回放支持：时间缩放、循环、与实时物体的单向交互（缓存物体推动实时物体，自身不被反推，可配置）。
+软体 `Player` 仍支持时间缩放、循环和插值；本 driver 切片的 Playback 是离散逐帧
+快照应用，尚未加入时间插值或与实时物体的单向交互。
 
 ---
 

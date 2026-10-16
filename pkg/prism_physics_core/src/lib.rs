@@ -82,7 +82,11 @@ pub use command::{CommandQueue, PhysicsCommand};
 pub use config::WorldConfig;
 pub use constraint::{Constraint, ConstraintKind};
 pub use driver::fixed_step::{AdvanceReport, FixedStepPipeline};
-pub use driver::{CacheHandle, DriveMode, DriveOutcome, SimulationDriver};
+pub use driver::{
+    CacheFrame, CacheHandle, CacheRegistrationError, DriveMode, DriveOutcome, DriverCache,
+    SimulationDriver, DRIVER_CACHE_VERSION, MAX_DRIVER_CACHE_FRAMES, MAX_OFFLINE_SUBSTEPS,
+    MAX_REGISTERED_CACHES,
+};
 pub use dsl::{
     compile_constraint, compile_expr, eval as dsl_eval, parse_constraint, parse_expression,
     tokenize, BinOp, BuiltinFn, CompiledConstraint, ConstraintDecl, DslConstraint, DslError,
