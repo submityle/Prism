@@ -53,9 +53,9 @@ pub use heightfield_surface::{
 };
 pub use lod::{evaluate_lod, LodError, LodEvaluation, LodMetric};
 pub use lod_seam::{
-    HeightfieldLodSeamPlan, LodSeamCost, LodSeamEdgeMode, LodSeamError, LodSeamLimits,
-    LodSeamMorphVertex, LodSeamNeighbor, LodSeamTransitionEdge, LodSeamVertex,
-    HEIGHTFIELD_LOD_SEAM_VERSION,
+    HeightfieldLodSeamPlan, HeightfieldLodSeamState, LodSeamCost, LodSeamCoverage, LodSeamEdgeMode,
+    LodSeamError, LodSeamLimits, LodSeamMorphVertex, LodSeamNeighbor, LodSeamNeighborMetadata,
+    LodSeamTransitionEdge, LodSeamVertex, HEIGHTFIELD_LOD_SEAM_VERSION,
 };
 #[cfg(feature = "scatter")]
 pub use placement_deletion::{
