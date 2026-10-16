@@ -6,13 +6,15 @@
 //! templates and the authoritative frame graph.
 
 use super::{
-    AccessKind, FeatureCatalog, FeatureDefinition, FeatureId, FeatureVariant, FrameLag, PassKey,
-    PassTemplate, QueueClass, RenderDomain, RenderQualityTier, ResourceInput, ResourceKey,
-    ResourceLayout, ResourceScope, ResourceTemplate, ResourceUse, ServiceId, ServiceOutput,
-    ServiceSet, VariantId,
+    AccessKind, FeatureCatalog, FeatureDefinition, FeatureId, FeatureVariant, FrameLag,
+    PassDescriptorIdentity, PassKey, PassTemplate, QueueClass, RenderDomain, RenderQualityTier,
+    ResourceInput, ResourceKey, ResourceLayout, ResourceScope, ResourceTemplate, ResourceUse,
+    ServiceId, ServiceOutput, ServiceSet, ShaderBindingError, ShaderModuleBinding,
+    ShaderPackageBinding, VariantId,
 };
 use crate::backend::capability::CapabilitySet;
 use crate::frame_graph::ResourceLifetime;
+use crate::shader_package::{ArtifactDigest, ModuleIdentity, PermutationSpace, ShaderPackageId};
 use prism_render_driver::BufferUsages;
 
 pub const SPRAY_FEEDBACK_SERVICE: ServiceId = ServiceId(10);
@@ -79,6 +81,77 @@ pub const WATER_VARIANT_ID: VariantId = VariantId(0x5000);
 pub const LIT_VARIANT_ID: VariantId = VariantId(0x5002);
 pub const NPR_VARIANT_ID: VariantId = VariantId(0x5003);
 pub const CUSTOM_VARIANT_ID: VariantId = VariantId(0x5004);
+
+fn builtin_package_name(variant: VariantId) -> Option<&'static str> {
+    Some(match variant {
+        WATER_VARIANT_ID => "builtin.render_fabric.water",
+        VariantId(0x5001) => "builtin.render_fabric.volume",
+        LIT_VARIANT_ID => "builtin.render_fabric.lit",
+        NPR_VARIANT_ID => "builtin.render_fabric.npr",
+        CUSTOM_VARIANT_ID => "builtin.render_fabric.custom",
+        VariantId(0x5005) => "builtin.render_fabric.particle",
+        VariantId(0x5006) => "builtin.render_fabric.hair",
+        VariantId(0x5007) => "builtin.render_fabric.decal",
+        VariantId(0x6000) => "builtin.render_fabric.service.water.0",
+        VariantId(0x6001) => "builtin.render_fabric.service.water.1",
+        VariantId(0x6002) => "builtin.render_fabric.service.water.2",
+        VariantId(0x6003) => "builtin.render_fabric.service.water.3",
+        VariantId(0x6004) => "builtin.render_fabric.service.water.4",
+        VariantId(0x6005) => "builtin.render_fabric.service.water.5",
+        VariantId(0x6006) => "builtin.render_fabric.service.water.6",
+        VariantId(0x6007) => "builtin.render_fabric.service.water.7",
+        VariantId(0x6008) => "builtin.render_fabric.service.water.8",
+        VariantId(0x6010) => "builtin.render_fabric.service.volume.0",
+        VariantId(0x6011) => "builtin.render_fabric.service.volume.1",
+        VariantId(0x6012) => "builtin.render_fabric.service.volume.2",
+        VariantId(0x6013) => "builtin.render_fabric.service.volume.3",
+        VariantId(0x6014) => "builtin.render_fabric.service.volume.4",
+        VariantId(0x6015) => "builtin.render_fabric.service.volume.5",
+        VariantId(0x6016) => "builtin.render_fabric.service.volume.6",
+        VariantId(0x6020) => "builtin.render_fabric.service.spray_feedback",
+        _ => return None,
+    })
+}
+
+/// Builds the canonical package/module/pass identity for a built-in variant.
+/// The returned module has no driver-local `ModuleId`; the backend allocates
+/// that identity when it interns this declaration on a concrete device.
+pub(super) fn builtin_shader_package_binding(
+    variant: &FeatureVariant,
+) -> Result<ShaderPackageBinding, ShaderBindingError> {
+    let name =
+        builtin_package_name(variant.id).ok_or(ShaderBindingError::BuiltinVariantUnavailable {
+            variant: variant.id,
+        })?;
+    let package = ShaderPackageId::new(name);
+    let binding = ShaderPackageBinding {
+        package,
+        module: ShaderModuleBinding {
+            identity: ModuleIdentity {
+                package,
+                digest: ArtifactDigest::from_bytes(name.as_bytes()),
+                entry_point: "main".into(),
+                binding_layout_digest: ArtifactDigest::from_bytes(
+                    b"prism.render_fabric.builtin.layout.v1",
+                )
+                .0,
+            },
+            permutations: variant
+                .shader_permutation
+                .map(|binding| binding.space.clone())
+                .unwrap_or_else(|| PermutationSpace::new([])),
+            full_lobe_fallback: None,
+        },
+        permutation: variant.shader_permutation,
+        pass_descriptors: variant
+            .passes
+            .iter()
+            .map(PassDescriptorIdentity::from_template)
+            .collect(),
+    };
+    binding.validate_for(variant)?;
+    Ok(binding)
+}
 
 pub const WATER_SURFACE_RESOURCE: ResourceKey = ResourceKey::of(WATER_FEATURE_ID, 0);
 /// Compatibility name for the particle service's persistent foam feedback.
@@ -589,7 +662,10 @@ pub const fn volume_required_services() -> ServiceSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render_fabric::{FeatureSelection, RenderQualityTier};
+    use crate::render_fabric::{
+        FeatureSelection, PassDescriptorIdentity, RenderQualityTier, ShaderBindingCache,
+        ShaderBindingCacheStatus, ShaderBindingError,
+    };
 
     #[test]
     fn builtins_resolve_water_and_volume_service_closures() {
@@ -653,5 +729,133 @@ mod tests {
         assert_eq!(PARTICLE_GLOBAL_ILLUMINATION, WATER_SERVICE_IDS[1]);
         assert_eq!(PARTICLE_LIGHTING_CAPABILITIES.len(), 3);
         assert!(!PARTICLE_LIGHTING_CAPABILITIES.contains(PARTICLE_CLUSTERED_LIGHTS));
+    }
+
+    #[test]
+    fn selected_builtins_carry_the_complete_shader_package_identity() {
+        let catalog = builtin_catalog().expect("built-in catalog is valid");
+        let roots = builtin_roots(&catalog).expect("all built-in roots are valid");
+        let selection = FeatureSelection::resolve(
+            &catalog,
+            &roots,
+            CapabilitySet::EMPTY,
+            RenderQualityTier::Low,
+        )
+        .expect("built-in selection resolves");
+
+        for selected in selection.selected() {
+            let binding = selected
+                .bind_builtin_shader_package()
+                .expect("every built-in selected variant has a package binding");
+            assert_eq!(binding.feature_id(), selected.feature_id());
+            assert_eq!(binding.variant_id(), selected.variant_id());
+            assert_eq!(
+                binding.package(),
+                binding.module().identity.package,
+                "package/module identity must be paired"
+            );
+            assert_eq!(
+                binding.pass_descriptors().len(),
+                selected.passes().len(),
+                "package pass identity must cover every semantic pass"
+            );
+            assert_ne!(binding.identity_digest().0, [0; 32]);
+        }
+    }
+
+    #[test]
+    fn shader_binding_rejects_package_permutation_and_pass_mismatches() {
+        let catalog = builtin_catalog().expect("built-in catalog is valid");
+        let roots = builtin_roots(&catalog).expect("all built-in roots are valid");
+        let selection = FeatureSelection::resolve(
+            &catalog,
+            &roots,
+            CapabilitySet::EMPTY,
+            RenderQualityTier::Low,
+        )
+        .expect("built-in selection resolves");
+        let selected = selection
+            .feature(WATER_FEATURE_ID)
+            .expect("water is a root");
+        let binding = selected
+            .variant()
+            .builtin_shader_package()
+            .expect("water package exists");
+
+        let mut package_mismatch = binding.clone();
+        package_mismatch.package = ShaderPackageId::new("builtin.render_fabric.other");
+        assert!(matches!(
+            selected.bind_shader_package(package_mismatch),
+            Err(ShaderBindingError::PackageModuleMismatch { .. })
+        ));
+
+        let mut permutation_mismatch = binding.clone();
+        permutation_mismatch.module.permutations = PermutationSpace::new([2]);
+        assert!(matches!(
+            selected.bind_shader_package(permutation_mismatch),
+            Err(ShaderBindingError::ModulePermutationMismatch { .. })
+        ));
+
+        let mut pass_mismatch = binding;
+        pass_mismatch.pass_descriptors[0] = PassDescriptorIdentity {
+            key: PassKey(0xdead),
+            ..pass_mismatch.pass_descriptors[0].clone()
+        };
+        assert!(matches!(
+            selected.bind_shader_package(pass_mismatch),
+            Err(ShaderBindingError::PassDescriptorMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn shader_binding_cache_requires_explicit_invalidation_before_replacement() {
+        let catalog = builtin_catalog().expect("built-in catalog is valid");
+        let roots = builtin_roots(&catalog).expect("all built-in roots are valid");
+        let selection = FeatureSelection::resolve(
+            &catalog,
+            &roots,
+            CapabilitySet::EMPTY,
+            RenderQualityTier::Low,
+        )
+        .expect("built-in selection resolves");
+        let selected = selection
+            .feature(WATER_FEATURE_ID)
+            .expect("water is a root");
+        let first = selected
+            .variant()
+            .builtin_shader_package()
+            .expect("water package exists");
+        let mut cache = ShaderBindingCache::default();
+        assert_eq!(
+            cache.register(selected.variant(), first.clone()),
+            Ok(ShaderBindingCacheStatus::Inserted)
+        );
+        assert_eq!(
+            cache.register(selected.variant(), first.clone()),
+            Ok(ShaderBindingCacheStatus::Reused)
+        );
+
+        let replacement_package = ShaderPackageId::new("builtin.render_fabric.water.v2");
+        let mut replacement = first.clone();
+        replacement.package = replacement_package;
+        replacement.module.identity.package = replacement_package;
+        replacement.module.identity.digest = ArtifactDigest::from_bytes(b"water-v2");
+        assert!(matches!(
+            cache.register(selected.variant(), replacement.clone()),
+            Err(ShaderBindingError::CacheIdentityChanged { .. })
+        ));
+        assert!(matches!(
+            cache.invalidate(selected.variant_id(), &first),
+            Ok(())
+        ));
+        assert_eq!(
+            cache.register(selected.variant(), replacement),
+            Ok(ShaderBindingCacheStatus::Inserted)
+        );
+        assert!(matches!(
+            cache.invalidate(selected.variant_id(), &first),
+            Err(ShaderBindingError::CacheIdentityMismatch { .. })
+        ));
+        assert_eq!(cache.len(), 1);
     }
 }

@@ -6,7 +6,7 @@
 //! driver-local modules plus the immutable pass table consumed by both direct and
 //! bin queueing.
 
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::fmt;
 
 use prism_render_architecture::render_fabric::{
@@ -77,9 +77,8 @@ impl FeaturePassSet {
         registry: &mut SceneRegistry,
         material: &MaterialRecord,
     ) -> Result<u32, FeatureMappingError> {
-        registry.insert_material(material.clone());
         registry
-            .set_material_passes(material.handle, self.passes.clone())
+            .install_material_pass_set(material.clone(), self.passes.clone())
             .map_err(FeatureMappingError::PassSet)
     }
 }
@@ -154,13 +153,81 @@ impl std::error::Error for FeatureMappingError {}
 pub struct FeatureSelectionMapper<'a, D: RenderDevice + ?Sized> {
     device: &'a D,
     modules: &'a mut ResponseModuleCache,
+    cache: Option<&'a mut FeatureMappingCache>,
+}
+
+/// Render-world cache for validated feature-to-pass mappings.
+///
+/// The cache is deliberately separate from [`ResponseModuleCache`]: module
+/// residency is device state, while this cache is the immutable scene binding
+/// from one frozen selection and host package declaration to one pass set.
+#[derive(Clone, Debug, Default)]
+pub struct FeatureMappingCache {
+    entries: BTreeMap<Vec<u8>, FeaturePassSet>,
+    hits: u64,
+    misses: u64,
+}
+
+/// Mapping-cache counters useful to render diagnostics.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FeatureMappingCacheStats {
+    /// Number of scene mapping requests served by the cache.
+    pub hits: u64,
+    /// Number of scene mapping requests that required validation and residency.
+    pub misses: u64,
+}
+
+impl FeatureMappingCache {
+    /// Returns cache counters without mutating the cache.
+    #[must_use]
+    pub const fn stats(&self) -> FeatureMappingCacheStats {
+        FeatureMappingCacheStats {
+            hits: self.hits,
+            misses: self.misses,
+        }
+    }
+
+    /// Drops all mappings after a device/module-cache replacement.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Number of resident semantic mappings.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the cache has no resident mappings.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 impl<'a, D: RenderDevice + ?Sized> FeatureSelectionMapper<'a, D> {
     /// Creates a mapper using the device and module cache owned by the render app.
     #[must_use]
     pub fn new(device: &'a D, modules: &'a mut ResponseModuleCache) -> Self {
-        Self { device, modules }
+        Self {
+            device,
+            modules,
+            cache: None,
+        }
+    }
+
+    /// Creates a mapper backed by a render-world mapping cache.
+    #[must_use]
+    pub fn with_cache(
+        device: &'a D,
+        modules: &'a mut ResponseModuleCache,
+        cache: &'a mut FeatureMappingCache,
+    ) -> Self {
+        Self {
+            device,
+            modules,
+            cache: Some(cache),
+        }
     }
 
     /// Maps one selected feature to resident modules and pass descriptors.
@@ -257,6 +324,26 @@ impl<'a, D: RenderDevice + ?Sized> FeatureSelectionMapper<'a, D> {
                 })
                 .collect()
         };
+
+        // The semantic mapping depends on the selected variant and the
+        // relevant host declarations, not on the other features in the
+        // device-wide closure. Keep the hot key compact and injective; shader
+        // source descriptors are deliberately checked again by `intern` on a
+        // hit so an ABI/source drift cannot be hidden by this cache.
+        let cache_key = mapping_cache_key(selected, &ordered);
+        if let Some(cache) = self.cache.as_deref_mut() {
+            if let Some(cached) = cache.entries.get(&cache_key).cloned() {
+                for binding in &ordered {
+                    self.modules
+                        .intern(self.device, binding.module.clone())
+                        .map_err(FeatureMappingError::Module)?;
+                }
+                cache.hits = cache.hits.saturating_add(1);
+                return Ok(cached);
+            }
+            cache.misses = cache.misses.saturating_add(1);
+        }
+
         let mut passes = Vec::with_capacity(ordered.len());
         for binding in ordered {
             let permutation = resolve_permutation(selected, binding)?;
@@ -276,12 +363,91 @@ impl<'a, D: RenderDevice + ?Sized> FeatureSelectionMapper<'a, D> {
             });
         }
         PassDescriptorTable::validate(&passes).map_err(FeatureMappingError::PassSet)?;
-        Ok(FeaturePassSet {
+        let pass_set = FeaturePassSet {
             feature_id,
             variant_id: selected.variant_id(),
             passes,
-        })
+        };
+        if let Some(cache) = self.cache.as_deref_mut() {
+            cache.entries.insert(cache_key, pass_set.clone());
+        }
+        Ok(pass_set)
     }
+}
+
+fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
+    push_u64(bytes, value.len() as u64);
+    bytes.extend_from_slice(value);
+}
+
+fn mapping_cache_key(selected: &SelectedFeature, bindings: &[&FeaturePassBinding]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(192);
+    push_u32(&mut key, selected.feature_id().0);
+    push_u32(&mut key, selected.variant_id().0);
+    push_u64(&mut key, bindings.len() as u64);
+    for binding in bindings {
+        push_u32(&mut key, binding.feature_id.0);
+        push_u32(&mut key, binding.variant_id.0);
+        match binding.pass_key {
+            Some(pass) => {
+                key.push(1);
+                push_u32(&mut key, pass.0);
+            }
+            None => key.push(0),
+        }
+        key.push(binding.role as u8);
+        key.push(binding.module.execution_family as u8);
+        key.push(binding.render_phase.index() as u8);
+        key.push(binding.module.builtin as u8);
+        match binding.draw {
+            Some(draw) => {
+                key.push(1);
+                push_u32(&mut key, draw.0);
+            }
+            None => key.push(0),
+        }
+        key.push(binding.sort_class.get());
+        push_bytes(&mut key, binding.module.identity.package.as_str().as_bytes());
+        key.extend_from_slice(&binding.module.identity.digest.0);
+        push_bytes(&mut key, binding.module.identity.entry_point.as_bytes());
+        key.extend_from_slice(&binding.module.identity.binding_layout_digest);
+        push_u64(&mut key, binding.module.permutations.axis_count() as u64);
+        for axis in 0..binding.module.permutations.axis_count() {
+            push_u64(
+                &mut key,
+                binding
+                    .module
+                    .permutations
+                    .axis_options(axis)
+                    .expect("axis index is bounded") as u64,
+            );
+        }
+        match binding.module.full_lobe_fallback {
+            Some(index) => {
+                key.push(1);
+                push_u64(&mut key, index.get());
+            }
+            None => key.push(0),
+        }
+        match binding.permutation {
+            Some(permutation) => {
+                key.push(1);
+                for coordinate in permutation.key.coords() {
+                    push_u32(&mut key, *coordinate);
+                }
+            }
+            None => key.push(0),
+        }
+    }
+    key
 }
 
 fn resolve_permutation(

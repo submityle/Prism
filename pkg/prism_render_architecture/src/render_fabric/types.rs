@@ -1,8 +1,15 @@
+use alloc::vec::Vec;
+use core::fmt;
 use core::num::NonZeroU32;
+
+use super::selection::SelectedFeature;
 
 pub use crate::backend::capability::CapabilitySet;
 pub use crate::frame_graph::{AccessKind, QueueClass};
-use crate::shader_package::{PermutationKey, PermutationSpace};
+use crate::shader_package::{
+    ArtifactDigest, ModuleIdentity, PermutationError, PermutationIndex, PermutationKey,
+    PermutationSpace, ShaderPackageId,
+};
 
 /// Author-supplied, persistent semantic identity; never assigned by a catalog.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -224,6 +231,430 @@ pub struct PassTemplate {
 pub struct ShaderPermutationBinding {
     pub space: &'static PermutationSpace,
     pub key: &'static PermutationKey,
+}
+
+/// The pass identity exported by a Render Fabric variant's shader package.
+///
+/// `PassTemplate` is the semantic declaration consumed by the fabric compiler;
+/// this owned value is the package-side copy of the same identity. Keeping the
+/// copy explicit lets package loading reject a stale or incorrectly paired pass
+/// table before it reaches a driver-local cache.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PassDescriptorIdentity {
+    pub key: PassKey,
+    pub accesses: &'static [ResourceUse],
+    pub queue: QueueClass,
+    pub depends_on: &'static [PassKey],
+}
+
+impl PassDescriptorIdentity {
+    #[must_use]
+    pub const fn from_template(template: &'static PassTemplate) -> Self {
+        Self {
+            key: template.id,
+            accesses: template.accesses,
+            queue: template.queue,
+            depends_on: template.depends_on,
+        }
+    }
+
+    #[must_use]
+    pub fn matches_template(&self, template: &PassTemplate) -> bool {
+        self.key == template.id
+            && self.queue == template.queue
+            && self.accesses == template.accesses
+            && self.depends_on == template.depends_on
+    }
+}
+
+/// Driver-independent module declaration carried by a Render Fabric package
+/// binding. `ModuleId` is intentionally absent: it is allocated by the driver
+/// interner and must never become part of a portable feature selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShaderModuleBinding {
+    pub identity: ModuleIdentity,
+    pub permutations: PermutationSpace,
+    pub full_lobe_fallback: Option<PermutationIndex>,
+}
+
+/// Complete package-side identity for one selected feature variant.
+///
+/// This is the single bridge between semantic feature selection and executable
+/// shader declarations. The package, module declaration, permutation binding,
+/// and pass descriptor identities are validated together, so a caller cannot
+/// accidentally combine a key from one package with a module or pass table from
+/// another package.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShaderPackageBinding {
+    pub package: ShaderPackageId,
+    pub module: ShaderModuleBinding,
+    pub permutation: Option<ShaderPermutationBinding>,
+    pub pass_descriptors: Vec<PassDescriptorIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShaderBindingError {
+    PackageModuleMismatch {
+        package: ShaderPackageId,
+        module_package: ShaderPackageId,
+    },
+    PermutationBindingMismatch {
+        variant: VariantId,
+    },
+    Permutation(PermutationError),
+    ModulePermutationMismatch {
+        variant: VariantId,
+    },
+    PassDescriptorCountMismatch {
+        variant: VariantId,
+        expected: usize,
+        actual: usize,
+    },
+    PassDescriptorMismatch {
+        variant: VariantId,
+        pass: PassKey,
+    },
+    CacheIdentityChanged {
+        variant: VariantId,
+    },
+    CacheEntryMissing {
+        variant: VariantId,
+    },
+    CacheIdentityMismatch {
+        variant: VariantId,
+    },
+    BuiltinVariantUnavailable {
+        variant: VariantId,
+    },
+}
+
+impl fmt::Display for ShaderBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "render fabric shader binding error: {self:?}")
+    }
+}
+
+impl std::error::Error for ShaderBindingError {}
+
+impl ShaderPackageBinding {
+    /// Validates the complete package declaration against one semantic variant.
+    pub fn validate_for(&self, variant: &FeatureVariant) -> Result<(), ShaderBindingError> {
+        if self.package != self.module.identity.package {
+            return Err(ShaderBindingError::PackageModuleMismatch {
+                package: self.package,
+                module_package: self.module.identity.package,
+            });
+        }
+
+        if self.permutation != variant.shader_permutation {
+            return Err(ShaderBindingError::PermutationBindingMismatch {
+                variant: variant.id,
+            });
+        }
+
+        let expected_space = variant
+            .shader_permutation
+            .map(|binding| binding.space.clone())
+            .unwrap_or_default();
+        if self.module.permutations != expected_space {
+            return Err(ShaderBindingError::ModulePermutationMismatch {
+                variant: variant.id,
+            });
+        }
+        if let Some(permutation) = self.permutation {
+            permutation
+                .space
+                .checked_index_of(permutation.key)
+                .map_err(ShaderBindingError::Permutation)?;
+        }
+        if let Some(fallback) = self.module.full_lobe_fallback {
+            self.module
+                .permutations
+                .check_index(fallback.get())
+                .map_err(ShaderBindingError::Permutation)?;
+        }
+
+        if self.pass_descriptors.len() != variant.passes.len() {
+            return Err(ShaderBindingError::PassDescriptorCountMismatch {
+                variant: variant.id,
+                expected: variant.passes.len(),
+                actual: self.pass_descriptors.len(),
+            });
+        }
+        for (descriptor, template) in self.pass_descriptors.iter().zip(variant.passes) {
+            if !descriptor.matches_template(template) {
+                return Err(ShaderBindingError::PassDescriptorMismatch {
+                    variant: variant.id,
+                    pass: template.id,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the dense index after validating the package's selected key.
+    pub fn permutation_index(&self) -> Result<PermutationIndex, ShaderBindingError> {
+        match self.permutation {
+            Some(permutation) => permutation
+                .space
+                .checked_index_of(permutation.key)
+                .map_err(ShaderBindingError::Permutation),
+            None => PermutationSpace::new([])
+                .check_index(0)
+                .map_err(ShaderBindingError::Permutation),
+        }
+    }
+
+    /// Stable cold identity used by the package binding cache.
+    #[must_use]
+    pub fn identity_digest(&self) -> ArtifactDigest {
+        let mut bytes = Vec::new();
+        append_len_prefixed(&mut bytes, self.package.as_str().as_bytes());
+        append_len_prefixed(&mut bytes, self.module.identity.package.as_str().as_bytes());
+        append_len_prefixed(&mut bytes, self.module.identity.entry_point.as_bytes());
+        bytes.extend_from_slice(&self.module.identity.digest.0);
+        bytes.extend_from_slice(&self.module.identity.binding_layout_digest);
+        bytes.extend_from_slice(&(self.module.permutations.axis_count() as u32).to_le_bytes());
+        for axis in 0..self.module.permutations.axis_count() {
+            bytes.extend_from_slice(
+                &self
+                    .module
+                    .permutations
+                    .axis_options(axis)
+                    .expect("axis index is bounded by axis_count")
+                    .to_le_bytes(),
+            );
+        }
+        if let Some(permutation) = self.permutation {
+            bytes.push(1);
+            bytes.extend_from_slice(&(permutation.key.coords().len() as u32).to_le_bytes());
+            for coordinate in permutation.key.coords() {
+                bytes.extend_from_slice(&coordinate.to_le_bytes());
+            }
+        } else {
+            bytes.push(0);
+        }
+        if let Some(fallback) = self.module.full_lobe_fallback {
+            bytes.push(1);
+            bytes.extend_from_slice(&fallback.get().to_le_bytes());
+        } else {
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(&(self.pass_descriptors.len() as u32).to_le_bytes());
+        for descriptor in &self.pass_descriptors {
+            bytes.extend_from_slice(&descriptor.key.0.to_le_bytes());
+            bytes.push(queue_tag(descriptor.queue));
+            bytes.extend_from_slice(&(descriptor.accesses.len() as u32).to_le_bytes());
+            for access in descriptor.accesses {
+                match access.key.owner() {
+                    ResourceOwner::Engine => bytes.push(0),
+                    ResourceOwner::Feature(feature) => {
+                        bytes.push(1);
+                        bytes.extend_from_slice(&feature.0.to_le_bytes());
+                    }
+                }
+                bytes.extend_from_slice(&access.key.slot().to_le_bytes());
+                bytes.push(access_tag(access.access));
+                bytes.push(scope_tag(access.scope));
+                match access.frame_lag {
+                    None => bytes.push(0),
+                    Some(lag) => {
+                        bytes.push(1);
+                        bytes.extend_from_slice(&lag.frames().to_le_bytes());
+                    }
+                }
+                match access.input {
+                    ResourceInput::Automatic => bytes.push(0),
+                    ResourceInput::Initial => bytes.push(1),
+                    ResourceInput::ProducedBy(pass) => {
+                        bytes.push(2);
+                        bytes.extend_from_slice(&pass.0.to_le_bytes());
+                    }
+                }
+            }
+            bytes.extend_from_slice(&(descriptor.depends_on.len() as u32).to_le_bytes());
+            for dependency in descriptor.depends_on {
+                bytes.extend_from_slice(&dependency.0.to_le_bytes());
+            }
+        }
+        ArtifactDigest::from_bytes(&bytes)
+    }
+}
+
+fn append_len_prefixed(bytes: &mut Vec<u8>, value: &[u8]) {
+    bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(value);
+}
+
+const fn queue_tag(queue: QueueClass) -> u8 {
+    match queue {
+        QueueClass::Graphics => 0,
+        QueueClass::Compute => 1,
+        QueueClass::Transfer => 2,
+    }
+}
+
+const fn access_tag(access: AccessKind) -> u8 {
+    match access {
+        AccessKind::SampledRead => 0,
+        AccessKind::StorageRead => 1,
+        AccessKind::StorageWrite => 2,
+        AccessKind::ColorAttachment => 3,
+        AccessKind::DepthAttachment => 4,
+        AccessKind::IndirectRead => 5,
+        AccessKind::TransferRead => 6,
+        AccessKind::TransferWrite => 7,
+    }
+}
+
+const fn scope_tag(scope: ResourceScope) -> u8 {
+    match scope {
+        ResourceScope::Whole => 0,
+    }
+}
+
+impl FeatureVariant {
+    /// Returns the canonical package declaration for a built-in variant.
+    ///
+    /// User-defined variants must provide their own package declaration and
+    /// use [`ShaderPackageBinding::validate_for`] before registration.
+    pub fn builtin_shader_package(&self) -> Result<ShaderPackageBinding, ShaderBindingError> {
+        super::builtins::builtin_shader_package_binding(self)
+    }
+}
+
+impl SelectedFeature {
+    /// Completes the package binding for this already-selected variant.
+    ///
+    /// The returned value carries the selected feature/variant identity and the
+    /// validated package, module, permutation and pass descriptors together.
+    pub fn bind_shader_package(
+        &self,
+        binding: ShaderPackageBinding,
+    ) -> Result<SelectedFeatureShaderBinding, ShaderBindingError> {
+        binding.validate_for(self.variant())?;
+        Ok(SelectedFeatureShaderBinding {
+            feature: self.feature_id(),
+            variant: self.variant_id(),
+            binding,
+        })
+    }
+
+    /// Binds the canonical package declaration for a built-in variant.
+    pub fn bind_builtin_shader_package(
+        &self,
+    ) -> Result<SelectedFeatureShaderBinding, ShaderBindingError> {
+        self.bind_shader_package(self.variant().builtin_shader_package()?)
+    }
+}
+
+/// Result of binding one selected feature. It is immutable and owns the full
+/// package declaration, so consumers cannot later substitute only its key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectedFeatureShaderBinding {
+    feature: FeatureId,
+    variant: VariantId,
+    binding: ShaderPackageBinding,
+}
+
+impl SelectedFeatureShaderBinding {
+    pub const fn feature_id(&self) -> FeatureId {
+        self.feature
+    }
+
+    pub const fn variant_id(&self) -> VariantId {
+        self.variant
+    }
+
+    pub fn package(&self) -> ShaderPackageId {
+        self.binding.package
+    }
+
+    pub fn module(&self) -> &ShaderModuleBinding {
+        &self.binding.module
+    }
+
+    pub fn permutation(&self) -> Option<ShaderPermutationBinding> {
+        self.binding.permutation
+    }
+
+    pub fn permutation_index(&self) -> Result<PermutationIndex, ShaderBindingError> {
+        self.binding.permutation_index()
+    }
+
+    pub fn pass_descriptors(&self) -> &[PassDescriptorIdentity] {
+        &self.binding.pass_descriptors
+    }
+
+    pub fn identity_digest(&self) -> ArtifactDigest {
+        self.binding.identity_digest()
+    }
+
+    pub fn binding(&self) -> &ShaderPackageBinding {
+        &self.binding
+    }
+}
+
+/// Result of inserting or reusing one immutable variant binding in the cache.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShaderBindingCacheStatus {
+    Inserted,
+    Reused,
+}
+
+/// A small device/profile-local cache that refuses silent shader identity drift.
+/// A changed package/module/pass declaration must be explicitly invalidated
+/// before a new declaration can be admitted for the same semantic variant.
+#[derive(Clone, Debug, Default)]
+pub struct ShaderBindingCache {
+    entries: std::collections::BTreeMap<VariantId, ShaderPackageBinding>,
+}
+
+impl ShaderBindingCache {
+    pub fn register(
+        &mut self,
+        variant: &FeatureVariant,
+        binding: ShaderPackageBinding,
+    ) -> Result<ShaderBindingCacheStatus, ShaderBindingError> {
+        binding.validate_for(variant)?;
+        match self.entries.get(&variant.id) {
+            None => {
+                self.entries.insert(variant.id, binding);
+                Ok(ShaderBindingCacheStatus::Inserted)
+            }
+            Some(existing) if existing == &binding => Ok(ShaderBindingCacheStatus::Reused),
+            Some(_) => Err(ShaderBindingError::CacheIdentityChanged {
+                variant: variant.id,
+            }),
+        }
+    }
+
+    pub fn invalidate(
+        &mut self,
+        variant: VariantId,
+        expected: &ShaderPackageBinding,
+    ) -> Result<(), ShaderBindingError> {
+        let Some(existing) = self.entries.get(&variant) else {
+            return Err(ShaderBindingError::CacheEntryMissing { variant });
+        };
+        if existing != expected {
+            return Err(ShaderBindingError::CacheIdentityMismatch { variant });
+        }
+        self.entries.remove(&variant);
+        Ok(())
+    }
+
+    pub fn get(&self, variant: VariantId) -> Option<&ShaderPackageBinding> {
+        self.entries.get(&variant)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

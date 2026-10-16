@@ -1116,6 +1116,197 @@ fn different(a: [f32; 4], b: [f32; 4]) {
     );
 }
 
+/// Compare one complete production frame with the legacy two-stage Hybrid
+/// equation.  This is deliberately separate from `assert_region_output`: the
+/// latter proves the current local endpoint relation, while this oracle checks
+/// every response word, control word, motion texel, HDR export texel, and
+/// premultiplied color texel against an independently recomputed frame.
+fn assert_legacy_frame(
+    hybrid: &Output,
+    pbr: &Output,
+    npr: &Output,
+    case: &Case,
+    foam: impl Fn(usize) -> f32,
+    shallow: impl Fn(usize) -> f32,
+) {
+    for i in 0..PIXELS {
+        let foam = foam(i).clamp(0.0, 1.0);
+        let shallow = shallow(i).clamp(0.0, 1.0);
+        let region = foam.max(shallow);
+        let pbr_arm = pbr.composed[i];
+        let npr_arm = npr.composed[i];
+        let mut expected = [0.0_f32; 16];
+        let blended_alpha = pbr_arm[15] * (1.0 - region) + npr_arm[15] * region;
+        let motion_index = (i / EDGE as usize) * (ROW / 2) as usize + (i % EDGE as usize) * 2;
+        let motion = [
+            half(hybrid.motion[motion_index]),
+            half(hybrid.motion[motion_index + 1]),
+        ];
+        let reactive = foam
+            .max((motion[0] * motion[0] + motion[1] * motion[1]).sqrt() * 32.0)
+            .max(1.0 - blended_alpha.clamp(0.0, 1.0));
+        let overlay = (case.overlay * reactive.max(0.25)).clamp(0.0, 1.0);
+        for c in 0..16 {
+            let blended = pbr_arm[c] * (1.0 - region) + npr_arm[c] * region;
+            if c == 15 {
+                expected[c] = blended;
+            } else {
+                expected[c] = blended * (1.0 - overlay) + npr_arm[c] * overlay;
+            }
+        }
+        for c in 0..16 {
+            near(hybrid.composed[i][c], expected[c], 0.00003);
+        }
+        near(
+            half(hybrid.motion[motion_index]),
+            half(pbr.motion[motion_index]),
+            0.00001,
+        );
+        near(
+            half(hybrid.motion[motion_index + 1]),
+            half(pbr.motion[motion_index + 1]),
+            0.00001,
+        );
+        near(f32::from_bits(hybrid.controls[i][0]), overlay, 0.00003);
+        assert_eq!(
+            hybrid.controls[i][1], 31,
+            "legacy frame channel mask at pixel {i}"
+        );
+        near(f32::from_bits(hybrid.controls[i][2]), expected[15], 0.00003);
+        assert_eq!(
+            hybrid.controls[i][3], 0,
+            "legacy frame alpha rule at pixel {i}"
+        );
+        assert_eq!(hybrid.coverage[i], 1, "legacy frame coverage at pixel {i}");
+
+        let texel = (i / EDGE as usize) * (ROW / 2) as usize + (i % EDGE as usize) * 4;
+        for c in 0..4 {
+            let hdr_expected = if c == 3 { expected[15] } else { expected[c] };
+            near(half(hybrid.hdr[texel + c]), hdr_expected, 0.0015);
+            near(
+                half(hybrid.color[texel + c]),
+                hdr_expected + case.background[c] * (1.0 - expected[15]),
+                0.0015,
+            );
+        }
+    }
+}
+
+fn run_legacy_frame_case(case: Case, foam: impl Fn(usize) -> f32, shallow: impl Fn(usize) -> f32) {
+    let Some(gpu) = gpu() else { return };
+    let pbr = gpu.draw(&case, 0);
+    let npr = gpu.draw(&case, 1);
+    let hybrid = gpu.draw(&case, 2);
+    assert_legacy_frame(&hybrid, &pbr, &npr, &case, foam, shallow);
+}
+
+#[test]
+fn water_legacy_gpu_parity_depth_full_frame() {
+    run_legacy_frame_case(
+        Case {
+            shallow: 0.75,
+            ..Default::default()
+        },
+        |_| 0.0,
+        |_| 0.75,
+    );
+}
+
+#[test]
+fn water_legacy_gpu_parity_shore_full_frame() {
+    run_legacy_frame_case(
+        Case {
+            foam: 0.65,
+            overlay: 0.0,
+            whiten: 0.0,
+            foam_threshold: 2.0,
+            ..Default::default()
+        },
+        |_| 0.65,
+        |_| 0.0,
+    );
+}
+
+#[test]
+fn water_legacy_gpu_parity_foam_full_frame() {
+    run_legacy_frame_case(
+        Case {
+            foam: 0.8,
+            ..Default::default()
+        },
+        |_| 0.8,
+        |_| 0.0,
+    );
+}
+
+#[test]
+fn water_legacy_gpu_parity_caustics_full_frame() {
+    run_legacy_frame_case(
+        Case {
+            caustic_incident: 0.25,
+            caustic_enable: true,
+            ..Default::default()
+        },
+        |_| 0.0,
+        |_| 0.0,
+    );
+}
+
+#[test]
+fn water_legacy_gpu_parity_reflection_full_frame() {
+    run_legacy_frame_case(
+        Case {
+            normal: [0.95, 0.0, 0.3122499],
+            ssr_enable: true,
+            ..Default::default()
+        },
+        |_| 0.0,
+        |_| 0.0,
+    );
+}
+
+#[test]
+fn water_legacy_gpu_parity_transparency_overlay_full_frame() {
+    run_legacy_frame_case(
+        Case {
+            alpha: 0.65,
+            shallow: 0.2,
+            overlay: 0.7,
+            background: [0.125, 0.25, 0.5, 1.0],
+            ..Default::default()
+        },
+        |_| 0.0,
+        |_| 0.2,
+    );
+}
+
+#[test]
+fn water_legacy_gpu_parity_motion_vector_full_frame() {
+    run_legacy_frame_case(
+        Case {
+            previous_displacement: [-0.125, 0.25, 0.0, 0.0],
+            ..Default::default()
+        },
+        |_| 0.0,
+        |_| 0.0,
+    );
+}
+
+#[test]
+fn water_legacy_gpu_parity_reactive_mask_full_frame() {
+    run_legacy_frame_case(
+        Case {
+            alpha: 1.0,
+            shallow: 0.2,
+            overlay: 1.0,
+            foam: 0.5,
+            ..Default::default()
+        },
+        |_| 0.5,
+        |_| 0.2,
+    );
+}
+
 #[test]
 fn water_gpu_authored_shallow_mix_and_underwater_depth_output() {
     let Some(gpu) = gpu() else {

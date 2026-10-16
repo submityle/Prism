@@ -17,8 +17,9 @@ use alloc::collections::BTreeMap;
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::geometry::{GeometryPrimitiveKind, GeometryRecord};
 use prism_render_architecture::gpu_scene::{GeometryHandle, SceneMaterialHandle};
+use prism_render_architecture::render_fabric::{FeatureId, FeatureSelection};
 use prism_render_driver::{
-    BufferId, IndexFormat, PrimitiveTopology, TextureFormat, VertexBufferLayout,
+    BufferId, IndexFormat, PrimitiveTopology, RenderDevice, TextureFormat, VertexBufferLayout,
 };
 use prism_render_material::MaterialRecord;
 use prism_render_visibility::{DrawBinCandidate, DrawBinKey, GpuRenderWorkItem};
@@ -27,6 +28,11 @@ use crate::draw::DrawFunctionId;
 use crate::frame::RENDER_TARGET_FORMAT;
 use crate::mesh::RenderMesh;
 use crate::mesh_pipeline::MeshPipelineKey;
+use crate::feature_mapping::{
+    FeatureMappingCache, FeatureMappingCacheStats, FeatureMappingError, FeaturePassBinding,
+    FeatureSelectionMapper,
+};
+use crate::mesh_pipelines::ResponseModuleCache;
 use crate::pipeline_pass::{
     PassDescriptor, PassDescriptorClass, PassDescriptorTable, PassRole, PassSetError,
 };
@@ -133,6 +139,8 @@ pub struct SceneRegistry {
     materials: BTreeMap<SceneMaterialHandle, MaterialRecord>,
     material_passes: BTreeMap<SceneMaterialHandle, u32>,
     pass_descriptors: PassDescriptorTable,
+    feature_mapping_cache: FeatureMappingCache,
+    last_feature_mapping_error: Option<FeatureMappingError>,
     pub(crate) mesh_classes: BTreeMap<u32, MeshClass>,
     /// The mesh asset each geometry draws, when the scene named one (see
     /// [`mesh_source`](crate::mesh_source)).
@@ -172,6 +180,72 @@ impl SceneRegistry {
             .expect("valid spine pass");
         self.material_passes.insert(record.handle, index);
         self.materials.insert(record.handle, record);
+    }
+
+    /// Publishes a material and its pass set as one registry mutation.
+    ///
+    /// The pass table is validated and interned before either material map is
+    /// changed. This prevents a failed pass-table insertion from leaving a
+    /// newly submitted material on the white-spine fallback.
+    pub(crate) fn install_material_pass_set(
+        &mut self,
+        material: MaterialRecord,
+        passes: Vec<PassDescriptor>,
+    ) -> Result<u32, PassSetError> {
+        let index = self.pass_descriptors.intern(passes)?;
+        self.material_passes.insert(material.handle, index);
+        self.materials.insert(material.handle, material);
+        Ok(index)
+    }
+
+    /// Resolves a material's frozen feature selection into resident shader
+    /// modules and the immutable pass table consumed by both queue paths.
+    ///
+    /// This is the production scene-ingestion seam. The caller owns the
+    /// device-local selection and host bindings; this registry owns the
+    /// material-to-pass-set association. A failed mapping is retained for
+    /// diagnostics and does not publish a partially mapped material.
+    pub fn insert_material_with_feature_selection<D: RenderDevice + ?Sized>(
+        &mut self,
+        device: &D,
+        modules: &mut ResponseModuleCache,
+        material: MaterialRecord,
+        selection: &FeatureSelection,
+        feature_id: FeatureId,
+        bindings: &[FeaturePassBinding],
+    ) -> Result<u32, FeatureMappingError> {
+        let mut mapper = FeatureSelectionMapper::with_cache(
+            device,
+            modules,
+            &mut self.feature_mapping_cache,
+        );
+        let pass_set = match mapper.map_feature(selection, feature_id, bindings) {
+            Ok(pass_set) => pass_set,
+            Err(error) => {
+                self.last_feature_mapping_error = Some(error.clone());
+                return Err(error);
+            }
+        };
+        let result = pass_set.install(self, &material);
+        if let Err(error) = &result {
+            self.last_feature_mapping_error = Some(error.clone());
+        } else {
+            self.last_feature_mapping_error = None;
+        }
+        result
+    }
+
+    /// The last feature-to-pass mapping failure observed during scene
+    /// ingestion, if any.
+    #[must_use]
+    pub fn last_feature_mapping_error(&self) -> Option<&FeatureMappingError> {
+        self.last_feature_mapping_error.as_ref()
+    }
+
+    /// Mapping cache counters for frame and asset diagnostics.
+    #[must_use]
+    pub fn feature_mapping_cache_stats(&self) -> FeatureMappingCacheStats {
+        self.feature_mapping_cache.stats()
     }
 
     /// Binds an already resolved DriverLocal pass set. Both direct and bin

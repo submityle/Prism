@@ -114,7 +114,8 @@ pub use ecs_columns::{
     EcsResidentColumns, GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
 };
 pub use feature_mapping::{
-    FeatureMappingError, FeaturePassBinding, FeaturePassSet, FeatureSelectionMapper,
+    FeatureMappingCache, FeatureMappingCacheStats, FeatureMappingError, FeaturePassBinding,
+    FeaturePassSet, FeatureSelectionMapper,
 };
 pub use frame::{RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT};
 pub use image::GpuImage;
@@ -141,7 +142,7 @@ pub use pipeline_cache::{
     cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,
     PipelineBinaryCacheError, PipelineCache, PipelineCachePersistenceConfig,
     PipelineCachePersistenceError, PipelineCachePersistenceStatus, PipelineCompiler, PipelineKey,
-    PipelineKeyMappingError, PipelineLookupStatus, PipelineResolution,
+    PipelineCacheDiagnostics, PipelineKeyMappingError, PipelineLookupStatus, PipelineResolution,
     MAX_PERSISTED_PSO_CACHE_BYTES, PSO_CACHE_ABI_VERSION,
 };
 pub use pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
@@ -198,7 +199,8 @@ pub mod prelude {
         EcsResidentColumns, GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
     };
     pub use crate::feature_mapping::{
-        FeatureMappingError, FeaturePassBinding, FeaturePassSet, FeatureSelectionMapper,
+        FeatureMappingCache, FeatureMappingCacheStats, FeatureMappingError, FeaturePassBinding,
+        FeaturePassSet, FeatureSelectionMapper,
     };
     pub use crate::intent::{RenderIntent, RenderViewport};
     pub use crate::label::{Render, RenderApp, RenderStartup};
@@ -218,7 +220,8 @@ pub mod prelude {
         cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,
         PipelineBinaryCacheError, PipelineCache, PipelineCachePersistenceConfig,
         PipelineCachePersistenceError, PipelineCachePersistenceStatus, PipelineCompiler,
-        PipelineKey, PipelineKeyMappingError, PipelineLookupStatus, PipelineResolution,
+        PipelineCacheDiagnostics, PipelineKey, PipelineKeyMappingError, PipelineLookupStatus,
+        PipelineResolution,
         MAX_PERSISTED_PSO_CACHE_BYTES, PSO_CACHE_ABI_VERSION,
     };
     pub use crate::pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};

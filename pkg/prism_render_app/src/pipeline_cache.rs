@@ -231,6 +231,29 @@ pub enum PipelineLookupStatus {
     Miss,
 }
 
+/// A snapshot of the cache state relevant to a production PSO decision.
+///
+/// This keeps cache reuse and mapping failures observable without exposing the
+/// cache's internal content map or asking queue callers to infer a miss from the
+/// fallback pipeline id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PipelineCacheDiagnostics {
+    /// Content-cache lookup counters.
+    pub cache: CacheStats,
+    /// Number of exact specializations still compiling or waiting.
+    pub pending: usize,
+    /// Number of failed background specializations retained for retry.
+    pub failed: usize,
+    /// Number of persisted binaries waiting for a typed request.
+    pub pending_persisted: usize,
+    /// Most recent requested-key status, when a key has been queried.
+    pub last_lookup: Option<PipelineLookupStatus>,
+    /// Whether a typed/cold mapping error has been observed.
+    pub has_mapping_error: bool,
+    /// Whether a persisted binary import error has been observed.
+    pub has_binary_error: bool,
+}
+
 /// Errors from the app/RHI driver-owned pipeline-binary seam.
 ///
 /// The architecture crate supplies the validated wire model while the RHI
@@ -1027,6 +1050,20 @@ impl PipelineCache {
     #[must_use]
     pub fn stats(&mut self) -> CacheStats {
         self.cache.stats()
+    }
+
+    /// Returns a compact production diagnostic snapshot for this cache.
+    #[must_use]
+    pub fn diagnostics(&mut self, key: Option<&PipelineKey>) -> PipelineCacheDiagnostics {
+        PipelineCacheDiagnostics {
+            cache: self.cache.stats(),
+            pending: self.pending.len(),
+            failed: self.failed.len(),
+            pending_persisted: self.persisted.len(),
+            last_lookup: key.and_then(|key| self.last_lookup.get(key).copied()),
+            has_mapping_error: self.last_mapping_error.is_some(),
+            has_binary_error: self.last_binary_error.is_some(),
+        }
     }
 
     /// The number of specializations currently compiling in the background.
