@@ -4,9 +4,10 @@
 //! store deliberately provides no remote/distributed cache or build execution.
 //!
 //! [`BakeService`] is the narrow in-process `RuntimeDerived` scheduling
-//! adapter. It runs a caller-provided Bake Kernel with bounded admission and
-//! returns owned memory results; it is not the offline `BuildExecutor`, DDC,
-//! CAS, Manifest publication, or a remote build service.
+//! adapter. It runs a caller-provided or explicitly registered Bake Kernel
+//! with bounded admission and an optional bounded process-local runtime cache;
+//! it is not the offline `BuildExecutor`, DDC, CAS, Manifest publication, or a
+//! remote build service.
 
 extern crate alloc;
 
@@ -66,8 +67,10 @@ pub mod virtual_geometry_lod;
 pub mod virtual_geometry_payload;
 
 pub use bake::{
-    BakeDescriptor, BakeError, BakeHandle, BakeKernel, BakeRequest, BakeResult, BakeService,
-    BakeServiceConfigError, CancellationToken, InvalidRequest, KernelError, StableInputKey,
+    BakeDescriptor, BakeError, BakeHandle, BakeKernel, BakeKernelDispatch, BakeKernelRegistry,
+    BakeRequest, BakeResult, BakeService, BakeServiceConfigError, CancellationToken,
+    InvalidRequest, KernelDispatchError, KernelError, KernelRegistryError, RuntimeCacheConfig,
+    RuntimeCacheStats, StableInputKey,
 };
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcCapacity, DdcError, DdcEviction, DerivedDataCache, LocalDdc};
