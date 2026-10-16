@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use crate::archetype::ArchetypeId;
+use crate::archetype::{ArchetypeId, ColumnChangeCursor};
 use crate::change::Tick;
 use crate::change_index::{ChangeCursor, ChangeTracker};
 use crate::component::ComponentId;
@@ -116,6 +116,10 @@ pub struct QueryState<D: QueryData, F: QueryFilter = ()> {
     /// Last explicit dirty-window request. The change index is a forward-only
     /// cursor, so overlapping or rewound requests must use the live fallback.
     dirty_last_window: SpinLock<Option<(Tick, Tick)>>,
+    /// Cursor into the world's column-change journal. A forward window can use
+    /// this to discover only changed archetypes/chunks; gaps and rewound
+    /// windows deliberately fall back to the conservative column index.
+    dirty_column_cursor: SpinLock<Option<ColumnChangeCursor>>,
     /// The tick at which this query began retaining sparse change-index
     /// history. Windows that begin before this boundary need the conservative
     /// live-set fallback; later windows are fully covered by the index.
@@ -176,6 +180,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             dirty_sources,
             dirty_cursors,
             dirty_last_window: SpinLock::new(None),
+            dirty_column_cursor: SpinLock::new(None),
             dirty_activation_tick,
             _marker: PhantomData,
         }
@@ -207,6 +212,31 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     #[inline]
     pub(crate) fn filter_state(&self) -> &F::State {
         &self.filter_state
+    }
+
+    /// Resolved data state for incremental query consumers.
+    #[inline]
+    pub(crate) fn data_state(&self) -> &D::State {
+        &self.data_state
+    }
+
+    /// Last dirty-window request, used to decide whether a journal cursor can
+    /// safely advance or a historical fallback is required.
+    #[inline]
+    pub(crate) fn dirty_window(&self) -> Option<(Tick, Tick)> {
+        *self.dirty_last_window.lock()
+    }
+
+    /// Read the non-destructive table journal cursor.
+    #[inline]
+    pub(crate) fn dirty_column_cursor(&self) -> Option<ColumnChangeCursor> {
+        *self.dirty_column_cursor.lock()
+    }
+
+    /// Publish the latest table journal cursor after taking its snapshot.
+    #[inline]
+    pub(crate) fn set_dirty_column_cursor(&self, cursor: ColumnChangeCursor) {
+        *self.dirty_column_cursor.lock() = Some(cursor);
     }
 
     /// Collect sparse component writes/removals recorded since the caller's

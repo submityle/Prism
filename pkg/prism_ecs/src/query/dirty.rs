@@ -75,6 +75,12 @@ pub struct DirtyChunkStats {
     pub sparse_chunk_candidates: usize,
     /// Number of sparse writes/removals delivered from the exact change index.
     pub sparse_index_events: usize,
+    /// Number of matching table journal events consumed by the strict
+    /// incremental path.
+    pub journal_events: usize,
+    /// Whether this request had to use the conservative path because the
+    /// retained table journal could not establish a complete baseline.
+    pub journal_gap: bool,
 }
 
 /// Dirty row windows plus measurable traversal counters.
@@ -118,6 +124,118 @@ impl DirtyChunk {
 }
 
 impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
+    fn dirty_chunks_from_journal(
+        &self,
+        world: &World,
+        last_run: Tick,
+        this_run: Tick,
+        access_ids: &[crate::component::ComponentId],
+        sparse_chunks: &BTreeMap<ArchetypeId, Vec<usize>>,
+        report: &mut DirtyChunkReport,
+    ) -> bool {
+        // Journal events do not carry simulation ticks. They are therefore
+        // sound only for the normal forward window ending at the world's
+        // current tick; rewound/historical requests use the interval index.
+        let current = world.change_tick();
+        if this_run != current
+            || self
+                .dirty_window()
+                .is_some_and(|(_, previous)| previous.is_newer_than(last_run, current))
+        {
+            return false;
+        }
+
+        let changes = world
+            .archetypes()
+            .column_changes_since(self.dirty_column_cursor());
+        self.set_dirty_column_cursor(changes.cursor);
+        report.stats.journal_gap = changes.gap;
+        if changes.gap {
+            return false;
+        }
+
+        let mut candidates: BTreeMap<ArchetypeId, Vec<usize>> = BTreeMap::new();
+        for (archetype, rows) in sparse_chunks {
+            candidates
+                .entry(*archetype)
+                .or_default()
+                .extend(rows.iter().map(|row| {
+                    row / world
+                        .archetypes()
+                        .get(*archetype)
+                        .map_or(1, |a| a.table().rows_per_chunk())
+                }));
+        }
+        for change in changes.events {
+            if let Some(component) = change.component
+                && access_ids.binary_search(&component).is_err()
+            {
+                continue;
+            }
+            let Some(archetype) = world.archetypes().get(change.archetype) else {
+                continue;
+            };
+            if !D::matches(self.data_state(), archetype)
+                || !F::matches(self.filter_state(), archetype)
+            {
+                continue;
+            }
+            let Some(chunk) = change.chunk else {
+                continue;
+            };
+            if chunk >= archetype.table().chunk_count() {
+                continue;
+            }
+            candidates.entry(change.archetype).or_default().push(chunk);
+            report.stats.journal_events += 1;
+        }
+
+        for chunks in candidates.values_mut() {
+            chunks.sort_unstable();
+            chunks.dedup();
+        }
+
+        for (archetype_id, chunks) in candidates {
+            let Some(archetype) = world.archetypes().get(archetype_id) else {
+                continue;
+            };
+            report.stats.matched_archetypes += 1;
+            let table = archetype.table();
+            let filter_fetch = unsafe {
+                F::init_fetch(
+                    self.filter_state(),
+                    archetype,
+                    world.sparse_sets(),
+                    last_run,
+                    this_run,
+                )
+            };
+            let rpc = table.rows_per_chunk();
+            let len = table.len();
+            for chunk in chunks {
+                report.stats.merged_candidates += 1;
+                if !F::filter_chunk(filter_fetch, chunk) {
+                    report.stats.filter_rejected += 1;
+                    continue;
+                }
+                let start = chunk * rpc;
+                let end = ((chunk + 1) * rpc).min(len);
+                if start >= end {
+                    continue;
+                }
+                report.chunks.push(DirtyChunk {
+                    archetype: archetype_id,
+                    start,
+                    end,
+                });
+                report.stats.reported_chunks += 1;
+                report.stats.reported_rows += end - start;
+            }
+        }
+        self.remember_sparse_window(last_run, this_run);
+        true
+    }
+
     /// Collect the chunk windows this query touches whose change-version falls in
     /// the observer window `(last_run, this_run]` (design §7/§10).
     ///
@@ -151,13 +269,9 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         this_run: Tick,
     ) -> DirtyChunkReport {
         self.validate_world(world);
-        let archetypes = self.matched_archetypes(world);
         let mut report = DirtyChunkReport {
             chunks: Vec::new(),
-            stats: DirtyChunkStats {
-                matched_archetypes: archetypes.len(),
-                ..DirtyChunkStats::default()
-            },
+            stats: DirtyChunkStats::default(),
         };
 
         // Components whose chunk-version signals a change relevant to this
@@ -235,11 +349,25 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 }
             }
         }
-        self.remember_sparse_window(last_run, this_run);
         for rows in sparse_chunks.values_mut() {
             rows.sort_unstable();
             rows.dedup();
         }
+
+        if self.dirty_chunks_from_journal(
+            world,
+            last_run,
+            this_run,
+            &access_ids,
+            &sparse_chunks,
+            &mut report,
+        ) {
+            return report;
+        }
+
+        let archetypes = self.matched_archetypes(world);
+        report.stats.matched_archetypes = archetypes.len();
+        self.remember_sparse_window(last_run, this_run);
 
         for archetype_id in archetypes {
             let Some(archetype) = world.archetypes().get(archetype_id) else {

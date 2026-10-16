@@ -193,6 +193,35 @@ fn empty_window_uses_only_the_root_summary() {
 }
 
 #[test]
+fn forward_dirty_window_uses_column_journal_without_scanning_all_archetypes() {
+    let mut w = World::new();
+    let entities: Vec<Entity> = (0..10).map(|i| w.spawn(Big::new(i))).collect();
+    advance_frame(&mut w);
+
+    // The first request establishes the journal baseline. A new query has no
+    // cursor yet, so it must conservatively use the indexed fallback once.
+    let state = w.query::<&Big>();
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+    let baseline = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert!(baseline.stats.journal_gap);
+
+    // The next normal forward request is discovered from the retained table
+    // journal. It should not visit any column interval summaries.
+    let last_run = w.change_tick();
+    w.increment_change_tick();
+    let this_run = w.change_tick();
+    w.get_mut::<Big>(entities[9]).unwrap().tag += 1;
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert!(!report.stats.journal_gap);
+    assert!(report.stats.journal_events >= 1);
+    assert_eq!(report.stats.summaries_tested, 0);
+    assert_eq!(report.stats.column_candidates, 0);
+    assert_eq!(report.stats.matched_archetypes, 1);
+    assert_eq!(report.chunks.len(), 1);
+}
+
+#[test]
 fn dirty_chunks_follow_an_archetype_migration() {
     #[derive(Clone, Copy)]
     struct Tag;
