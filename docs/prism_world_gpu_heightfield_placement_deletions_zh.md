@@ -11,6 +11,7 @@
 - `aab96181b`：56-byte 完整键 placement deletion GPU 管线及端到端测试；
 - `a53b4fa76`：删除交付的资源、失败事务和测试边界加固；
 - `231a9643b`：同步 placement/deletion 验收文档。
+- `07fdaac3f`：补齐 admission、零容量和失败事务原子性测试。
 
 本文件只记录本切片的实现与验收边界；不把这些提交扩展解释为其他 World 模块或整个
 产品运行时的完成证明。
@@ -82,7 +83,7 @@ workgroup storage 和 dispatch 上限。零容量仍分配一个不可寻址物�
 - `cargo check --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --tests`：通过；
 - `cargo clippy --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --all-targets --no-deps -- -D warnings`：通过；
 - WGSL/Naga ABI 测试：8/8 通过；
-- Metal 真机 placement deletion：1/1 通过，设备为 Apple M2 IntegratedGpu。
+- Metal 真机 placement deletion：3/3 通过，设备为 Apple M2 IntegratedGpu。
 
 可复现命令：
 
@@ -90,13 +91,15 @@ workgroup storage 和 dispatch 上限。零容量仍分配一个不可寻址物�
 rustfmt --check pkg/prism_world_gpu/src/heightfield_placement_deletion.rs pkg/prism_world_gpu/tests/heightfield_placement_deletion.rs
 cargo check --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --tests
 cargo clippy --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --all-targets --no-deps -- -D warnings
-cargo test --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test wgsl_compile --no-fail-fast
-WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test heightfield_placement_deletion -- --nocapture --test-threads=1
+cargo test --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test wgsl_compile -- --nocapture
+CARGO_TARGET_DIR=/private/tmp/prism-world-heightfield-placement-deletion-gpu WGPU_BACKEND=metal PRISM_REQUIRE_GPU=1 cargo test --offline --manifest-path pkg/prism_world_gpu/Cargo.toml --features terrain_scatter --test heightfield_placement_deletion -- --nocapture --test-threads=1
 ```
 
 物理 GPU 测试要求真实 `IntegratedGpu` 或 `DiscreteGpu`，不会把无 adapter、软件 adapter
-或 CPU 路径静默当作通过。测试对拍 CPU placement key 集合，并覆盖精确删除、重复键去重、
-不存在键、空删除集合、全量删除、负坐标完整 i64 键、indirect count 和 compact 输出。
+或 CPU 路径静默当作通过。本轮 Metal 真机命令在当前工作站识别到 `Apple M2`，3 个测试全部
+通过。测试对拍 CPU placement key 集合，并覆盖精确删除、重复键去重、不存在键、空删除集合、
+全量删除、负坐标完整 i64 键、indirect count 和 compact 输出；另覆盖 admission 失败时旧请求、
+缓存和上传统计保持不变，以及零容量构造约束。
 
 ## 明确边界
 
