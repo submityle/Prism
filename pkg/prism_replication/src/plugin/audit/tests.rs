@@ -179,6 +179,45 @@ fn sequence_exhaustion_is_explicit_and_never_wraps() {
 }
 
 #[test]
+fn reseed_discards_all_branch_state_without_reusing_sequences() {
+    for baseline in [0, 1, 42] {
+        let mut audit = FrameHashAudit::new(4);
+        let original = history(4, 2);
+        audit.sync_history(&original, 0).unwrap();
+        let old = audit.local(1).unwrap();
+        audit.receive(old).unwrap();
+        audit.missing_local = 1;
+        audit.reset_branch(baseline);
+        assert!(audit.local_log().is_empty());
+        assert_eq!(audit.pending_len(), 0);
+        assert!(audit.remote(1).is_none());
+        let comparison = audit.comparison();
+        assert_eq!(comparison.missing_local, 0);
+        assert_eq!(comparison.pending_remote, 0);
+        assert!(!comparison.retained_window_matches());
+        assert_eq!(audit.sequence, old.sequence);
+        assert_eq!((audit.oldest, audit.next_tick), (baseline, baseline));
+        let mut replacement = SnapshotHistory::new(4);
+        replacement.seek(baseline);
+        replacement.capture(&World::new());
+        audit.sync_history(&replacement, baseline).unwrap();
+        assert!(audit.local(baseline).unwrap().sequence > old.sequence);
+    }
+}
+
+#[test]
+fn reseed_does_not_revive_an_exhausted_connection_sequence() {
+    let mut audit = FrameHashAudit::new(2);
+    audit.sequence = u64::MAX;
+    audit.reset_branch(0);
+    assert_eq!(
+        audit.sync_history(&history(2, 1), 0),
+        Err(FrameHashAuditError::SequenceExhausted)
+    );
+    assert_eq!(audit.comparison().missing_local, 1);
+}
+
+#[test]
 fn clone_only_component_values_are_not_claimed_as_hashed() {
     let mut world = World::new();
     let entity = world.spawn(Value(0));

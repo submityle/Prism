@@ -12,6 +12,7 @@ use prism_ecs::resource::Resource;
 use prism_ecs::system::ResMut;
 
 use crate::delta::{Record, Schema};
+use crate::frame::{FrameDecoder, FrameError};
 use crate::multiplex::{
     negotiate_protocol, ChannelMux, MuxSendError, MuxStats, NegotiatedProtocol, NetChannel,
     ProtocolError, QueueOutcome,
@@ -85,6 +86,23 @@ pub struct AuthorityUpdate<I> {
     pub(crate) _input: core::marker::PhantomData<fn() -> I>,
 }
 
+/// Authority frames held until the ECS bridge can commit them together with
+/// the World/history/input timeline.
+///
+/// Keeping the kind explicit is important here: a snapshot is a reseed
+/// transaction, not a delta that can be passed through `rebase_authority`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DeferredAuthority {
+    /// One or more framed authoritative deltas.
+    Delta(Vec<u8>),
+    /// A framed full snapshot that requires the driver's atomic reset API.
+    Snapshot(Vec<u8>),
+    /// Hashes following a staged snapshot must be admitted against its baseline,
+    /// not the abandoned World's tick window.
+    #[cfg(feature = "determinism")]
+    FrameHash(super::FrameHashUpdate),
+}
+
 /// The app-facing replication resource.
 pub struct Replication<S: ReplicationStrategy> {
     session: ClientSession<S::Input>,
@@ -98,9 +116,13 @@ pub struct Replication<S: ReplicationStrategy> {
     inbound_inputs: VecDeque<Vec<u8>>,
     inbound_bulk: VecDeque<Vec<u8>>,
     authority_updates: VecDeque<AuthorityUpdate<S::Input>>,
-    /// Raw authority deltas held until an ECS bridge has committed the World
+    /// Raw authority messages held until an ECS bridge has committed the World
     /// rollback. The record session is advanced only after that commit.
-    deferred_authority: VecDeque<Vec<u8>>,
+    deferred_authority: VecDeque<DeferredAuthority>,
+    /// A rejected record stream cannot accept more deltas. Keep its failed
+    /// message for diagnostics/retry, but allow a later snapshot through even
+    /// when the deferred queue is full.
+    deferred_resync_required: bool,
     #[cfg(feature = "determinism")]
     audit: super::FrameHashAudit,
     #[cfg(feature = "determinism")]
@@ -176,6 +198,7 @@ impl<S: ReplicationStrategy> Replication<S> {
             inbound_bulk: VecDeque::new(),
             authority_updates: VecDeque::new(),
             deferred_authority: VecDeque::new(),
+            deferred_resync_required: false,
             #[cfg(feature = "determinism")]
             audit: super::FrameHashAudit::new(capacity),
             #[cfg(feature = "determinism")]
@@ -228,16 +251,28 @@ impl<S: ReplicationStrategy> Replication<S> {
         }
 
         let mut applied = 0;
-        while self.inbound_events.len() < self.config.mux.reliable_queue.max(1) {
+        let event_queue_limit = self.config.mux.reliable_queue.max(1);
+        while self.inbound_events.len() < event_queue_limit
+            && (!defer_authority
+                || self.deferred_authority.len() < event_queue_limit
+                || self.deferred_resync_required)
+        {
+            // Do not pop another reliable event once deferred authority has
+            // reached its bounded hand-off queue. Leaving it in the mux keeps
+            // backpressure lossless and prevents an unbounded client-side
+            // staging queue across pump calls.
             let Some(bytes) = self.mux.recv(NetChannel::EventsReliable) else {
                 break;
             };
             match decode_event(&bytes) {
                 // A failed delta remains buffered. Do not grow that decoder
                 // indefinitely; only a subsequent ordered snapshot can resync it.
-                Ok(EventEnvelope::Delta(_)) if self.session.buffered() != 0 => {}
+                Ok(EventEnvelope::Delta(_))
+                    if (defer_authority && self.deferred_resync_required)
+                        || (!defer_authority && self.session.buffered() != 0) => {}
                 Ok(EventEnvelope::Delta(delta)) if defer_authority => {
-                    self.deferred_authority.push_back(delta.to_vec());
+                    self.deferred_authority
+                        .push_back(DeferredAuthority::Delta(delta.to_vec()));
                 }
                 Ok(EventEnvelope::Delta(delta)) => {
                     let mut updates = Vec::new();
@@ -265,15 +300,44 @@ impl<S: ReplicationStrategy> Replication<S> {
                     self.inbound_events.push_back(event.to_vec());
                 }
                 #[cfg(feature = "determinism")]
+                Ok(EventEnvelope::FrameHash(update))
+                    if defer_authority && self.deferred_reseed_pending() =>
+                {
+                    self.deferred_authority
+                        .push_back(DeferredAuthority::FrameHash(update));
+                }
+                #[cfg(feature = "determinism")]
                 Ok(EventEnvelope::FrameHash(update)) => {
                     if let Err(error) = self.audit.receive(update) {
                         self.last_audit_error.get_or_insert(error);
                     }
                 }
                 Ok(EventEnvelope::Snapshot(snapshot)) => {
-                    if let Err(error) = self.session.reseed(snapshot) {
-                        self.last_error = Some(error);
-                        break;
+                    if defer_authority {
+                        // Validate before superseding the queued prefix. A
+                        // full snapshot covers all earlier ordered deltas, but
+                        // a malformed snapshot must not discard them.
+                        if let Err(error) = self.reseeded_session(snapshot) {
+                            self.last_error = Some(error);
+                            break;
+                        }
+                        self.deferred_authority.clear();
+                        self.deferred_authority
+                            .push_back(DeferredAuthority::Snapshot(snapshot.to_vec()));
+                        self.deferred_resync_required = false;
+                    } else {
+                        match self.reseeded_session(snapshot) {
+                            Ok(session) => {
+                                #[cfg(feature = "determinism")]
+                                self.audit.reset_branch(u64::from(session.acked()));
+                                self.session = session;
+                                self.authority_updates.clear();
+                            }
+                            Err(error) => {
+                                self.last_error = Some(error);
+                                break;
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -314,13 +378,15 @@ impl<S: ReplicationStrategy> Replication<S> {
         applied
     }
 
-    /// Reconcile one deferred authority delta together with an ECS World.
+    /// Reconcile one deferred authority message together with an ECS World.
     ///
-    /// The client record session is cloned before applying the delta. If the
+    /// The client record session is cloned before applying the message. If the
     /// ECS bridge refuses the corresponding World transaction, the record
-    /// session and the raw wire delta are both left untouched, allowing a
+    /// session and the raw authority message are both left untouched, allowing a
     /// caller to surface the error or resync without creating a split-brain
     /// predicted state.
+    /// A validated incoming snapshot supersedes its queued authority prefix;
+    /// its replacement session is published only after an atomic driver reset.
     pub(crate) fn reconcile_deferred_ecs(
         &mut self,
         world: &mut prism_ecs::world::World,
@@ -329,39 +395,109 @@ impl<S: ReplicationStrategy> Replication<S> {
     where
         S: EcsReplicationStrategy + NetworkRollbackSimulation,
     {
-        let Some(delta) = self.deferred_authority.front().cloned() else {
+        let Some(authority) = self.deferred_authority.front().cloned() else {
             return Ok(false);
         };
-        let previous_session = self.session.clone();
-        let mut rollback_error = None;
-        let result = self.session.receive_with_observer(
-            &delta,
-            |record, input| self.strategy.simulate(record, input),
-            |revision, state| {
-                if rollback_error.is_some() {
-                    return;
-                }
-                let strategy = &self.strategy;
-                if let Err(error) = driver.rebase_authority(
-                    world,
-                    revision as u64,
-                    |world| strategy.apply_authority(world, state),
-                    |world, input| strategy.replay_fixed_tick(world, input),
-                ) {
-                    rollback_error = Some(error);
-                }
-            },
-        );
-        if let Some(error) = rollback_error {
-            self.session = previous_session;
-            return Err(super::ecs::DeferredEcsError::Rollback(error));
+
+        #[cfg(feature = "determinism")]
+        if let DeferredAuthority::FrameHash(update) = authority {
+            if let Err(error) = self.audit.receive(update) {
+                self.last_audit_error.get_or_insert(error);
+            }
+            self.deferred_authority.pop_front();
+            return Ok(true);
         }
-        if let Err(error) = result {
-            self.session = previous_session;
-            return Err(super::ecs::DeferredEcsError::Session(error));
+
+        let mut next_session = self.session.clone();
+        let strategy = &self.strategy;
+        match authority {
+            DeferredAuthority::Delta(delta) => {
+                let mut final_authority = None;
+                let result = next_session.receive_with_observer(
+                    &delta,
+                    |record, input| strategy.simulate(record, input),
+                    |revision, state| {
+                        // A message may contain multiple complete frames.
+                        // Finish all fallible record work before touching
+                        // the World, then rebase once on the final update.
+                        final_authority = Some((revision, state.clone()));
+                    },
+                );
+                if let Err(error) = result {
+                    self.deferred_resync_required = true;
+                    return Err(super::ecs::DeferredEcsError::Session(error));
+                }
+                if let Some((revision, state)) = final_authority {
+                    if let Err(error) = driver.rebase_authority(
+                        world,
+                        u64::from(revision),
+                        |world| strategy.apply_authority(world, &state),
+                        |world, input| strategy.replay_fixed_tick(world, input),
+                    ) {
+                        // An expired/missing input anchor cannot be repaired
+                        // by accepting more deltas. Permit a later snapshot
+                        // through even if this rejected head fills the queue.
+                        if matches!(error, prism_app::EcsRollbackError::UnavailableFrame { .. }) {
+                            self.deferred_resync_required = true;
+                        }
+                        return Err(super::ecs::DeferredEcsError::Rollback(error));
+                    }
+                }
+            }
+            DeferredAuthority::Snapshot(snapshot) => {
+                next_session = self
+                    .reseeded_session(&snapshot)
+                    .map_err(super::ecs::DeferredEcsError::Session)?;
+                let revision = next_session.acked();
+                let state = next_session
+                    .state()
+                    .ok_or(super::ecs::DeferredEcsError::Session(
+                        SessionError::NoBaseline,
+                    ))?;
+                driver
+                    .reset(world, u64::from(revision), |world| {
+                        strategy.apply_authority(world, state);
+                    })
+                    .map_err(super::ecs::DeferredEcsError::Rollback)?;
+                // Observers from the abandoned pre-snapshot branch must not
+                // leak out after a successful reseed.
+                self.authority_updates.clear();
+                #[cfg(feature = "determinism")]
+                self.audit.reset_branch(u64::from(revision));
+            }
+            #[cfg(feature = "determinism")]
+            DeferredAuthority::FrameHash(_) => {
+                unreachable!("hashes are handled before session clone")
+            }
         }
+        self.session = next_session;
+        self.deferred_resync_required = false;
         self.deferred_authority.pop_front();
         Ok(true)
+    }
+
+    /// Whether the next ECS reconciliation is a snapshot reset. The bridge
+    /// clears its not-yet-driven input queue only after that call succeeds.
+    pub(crate) fn deferred_reseed_pending(&self) -> bool {
+        matches!(
+            self.deferred_authority.front(),
+            Some(DeferredAuthority::Snapshot(_))
+        )
+    }
+
+    fn reseeded_session(&self, snapshot: &[u8]) -> Result<ClientSession<S::Input>, SessionError> {
+        // Session::reseed consumes the first framed snapshot. At the app seam
+        // the envelope must contain exactly one complete snapshot, with no
+        // second frame or trailing partial bytes silently discarded.
+        let mut decoder = FrameDecoder::new();
+        decoder.feed(snapshot);
+        decoder.next_frame()?.ok_or(FrameError::Truncated)?;
+        if decoder.buffered() != 0 {
+            return Err(SessionError::Frame(FrameError::Malformed));
+        }
+        let mut session = self.session.clone();
+        session.reseed(snapshot)?;
+        Ok(session)
     }
 
     fn drain_control(&mut self) {
@@ -870,6 +1006,10 @@ impl<S: ReplicationStrategy> Plugin for ReplicationPlugin<S> {
 fn pump_replication<S: ReplicationStrategy>(mut replication: ResMut<Replication<S>>) {
     replication.pump();
 }
+
+#[cfg(test)]
+#[path = "client_deferred_tests.rs"]
+mod deferred_tests;
 
 #[cfg(test)]
 mod tests {

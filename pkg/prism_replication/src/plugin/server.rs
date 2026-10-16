@@ -10,6 +10,7 @@ use prism_ecs::resource::Resource;
 use prism_ecs::system::ResMut;
 
 use crate::delta::{Record, Schema};
+use crate::event_log::{EventLogBackend, ReplayEventLog};
 use crate::multiplex::{
     negotiate_protocol, ChannelMux, MuxSendError, MuxStats, NegotiatedProtocol, NetChannel,
     ProtocolError, QueueOutcome,
@@ -17,10 +18,11 @@ use crate::multiplex::{
 use crate::session::{ServerSession, SessionError};
 use crate::transport::Transport;
 
+use super::durable::{self, AuthorityJournal, PreparedCommit, RestoredAuthority};
+use super::DurableRecoveryError;
 use super::{
-    decode_event, decode_rpc, decode_state, encode_accept, encode_delta, encode_event,
-    encode_reject, encode_rpc, encode_snapshot, encode_state, ConnectionState, EventEnvelope,
-    ReplicationConfig, RpcEnvelope,
+    decode_event, decode_rpc, decode_state, encode_accept, encode_event, encode_reject, encode_rpc,
+    encode_snapshot, encode_state, ConnectionState, EventEnvelope, ReplicationConfig, RpcEnvelope,
 };
 
 /// How the authority turns an inbound command into an authoritative change.
@@ -45,6 +47,10 @@ pub struct ServerReplication<S: ServerStrategy> {
     connection: ConnectionState,
     next_rpc_id: u64,
     pending_commands: VecDeque<Vec<u8>>,
+    journal: Option<Box<dyn AuthorityJournal>>,
+    next_journal_sequence: u64,
+    prepared: Option<PreparedCommit>,
+    last_durable_error: Option<DurableRecoveryError>,
     #[cfg(feature = "determinism")]
     audit: super::FrameHashAudit,
     #[cfg(feature = "determinism")]
@@ -124,6 +130,10 @@ impl<S: ServerStrategy> ServerReplication<S> {
             connection,
             next_rpc_id: 0,
             pending_commands: VecDeque::new(),
+            journal: None,
+            next_journal_sequence: 1,
+            prepared: None,
+            last_durable_error: None,
             #[cfg(feature = "determinism")]
             audit: super::FrameHashAudit::new(capacity),
             #[cfg(feature = "determinism")]
@@ -143,6 +153,77 @@ impl<S: ServerStrategy> ServerReplication<S> {
         })
     }
 
+    /// Open an exclusive authority journal, replay it, and resume from its last
+    /// durable revision. An empty journal receives the exact schema and seed.
+    ///
+    /// The backend must have one writer for its entire lifetime. Stable-storage
+    /// guarantees are those of its `sync` implementation (memory providers are
+    /// useful for testing but do not survive a process exit). A reconnecting
+    /// client must be reseeded with [`Self::seed`] before submitting new input;
+    /// transport queues and client command identities are not persisted.
+    /// Exactly-once applies to retained journal sequences and local candidate
+    /// retries, not resubmission of the same business command after reconnect.
+    /// Strategy side effects outside the candidate record are not transactional.
+    ///
+    /// # Errors
+    /// Invalid transport, seed/schema mismatch, corrupt or gapped journal, or a
+    /// provider failure. No recovered authority is exposed before a sync barrier.
+    pub fn new_durable<B>(
+        schema: Schema,
+        capacity: usize,
+        snapshot: &[u8],
+        strategy: S,
+        transport: Box<dyn Transport>,
+        log: ReplayEventLog<B>,
+    ) -> Result<Self, DurableRecoveryError>
+    where
+        B: EventLogBackend + Send + Sync + 'static,
+        B::Error: core::fmt::Debug,
+    {
+        Self::new_durable_with_config(
+            schema,
+            capacity,
+            snapshot,
+            strategy,
+            transport,
+            ReplicationConfig::for_capacity(capacity),
+            log,
+        )
+    }
+
+    /// [`Self::new_durable`] with explicit transport and handshake limits.
+    /// Transport/seed validation precedes any journal writes.
+    pub fn new_durable_with_config<B>(
+        schema: Schema,
+        capacity: usize,
+        snapshot: &[u8],
+        strategy: S,
+        transport: Box<dyn Transport>,
+        config: ReplicationConfig,
+        log: ReplayEventLog<B>,
+    ) -> Result<Self, DurableRecoveryError>
+    where
+        B: EventLogBackend + Send + Sync + 'static,
+        B::Error: core::fmt::Debug,
+    {
+        let mut server = Self::new_with_config(
+            schema.clone(),
+            capacity,
+            snapshot,
+            strategy,
+            transport,
+            config,
+        )?;
+        server.install_journal(durable::restore(&schema, capacity, snapshot, log)?);
+        Ok(server)
+    }
+
+    fn install_journal(&mut self, restored: RestoredAuthority) {
+        self.session = restored.session;
+        self.journal = Some(restored.journal);
+        self.next_journal_sequence = restored.next_sequence;
+    }
+
     /// One frame: tick the channel, decode + apply every inbound command, and
     /// broadcast the framed authoritative delta back to the peer. Returns how many
     /// commands advanced authority this frame. A rejected command is stored for
@@ -153,7 +234,11 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// delivery: if the outbound window is full the loop stops and leaves the rest
     /// of the commands queued in the channel (the peer's own send window applies
     /// backpressure), so a full window can never advance a revision the client is
-    /// never told about. A command that fails [`ServerStrategy::decode`] is counted
+    /// never told about. With a journal, the candidate is appended and synced
+    /// before enqueue/publication; ambiguous I/O failures retain that exact
+    /// candidate for idempotent retry, without re-running the strategy. A crash
+    /// after sync but before enqueue recovers the candidate and requires client
+    /// reseeding. A command that fails [`ServerStrategy::decode`] is counted
     /// in [`rejected`](Self::rejected) rather than applied.
     pub fn pump(&mut self) -> usize {
         self.last_error = None;
@@ -183,43 +268,71 @@ impl<S: ServerStrategy> ServerReplication<S> {
                     Some(MuxSendError::Backpressured(NetChannel::EventsReliable));
                 break;
             }
-            let Some(command) = self.strategy.decode(bytes) else {
-                self.pending_commands.pop_front();
-                self.rejected = self.rejected.saturating_add(1);
-                continue;
-            };
-
-            // Advance a clone first. Authority is committed only after the
-            // resulting delta has entered the reliable event queue.
-            let mut candidate = self.session.clone();
-            let mut wire = Vec::new();
-            if let Err(error) =
-                candidate.advance(|record| self.strategy.apply(record, command), &mut wire)
+            if self.prepared.is_none() {
+                let Some(command) = self.strategy.decode(bytes) else {
+                    self.pending_commands.pop_front();
+                    self.rejected = self.rejected.saturating_add(1);
+                    continue;
+                };
+                let mut candidate = self.session.clone();
+                let mut wire = Vec::new();
+                let revision = match candidate
+                    .advance(|record| self.strategy.apply(record, command), &mut wire)
+                {
+                    Ok(revision) => revision,
+                    Err(error) => {
+                        self.last_error = Some(error);
+                        break;
+                    }
+                };
+                self.prepared = Some(PreparedCommit {
+                    session: candidate,
+                    record: durable::delta_record(self.next_journal_sequence, revision, &wire),
+                    journal_attempted: false,
+                    synced: false,
+                });
+            }
+            let prepared = self.prepared.as_mut().expect("prepared above");
+            // Reject unrepresentable deltas before making them durable. Never
+            // discard a transaction that may already have reached stable storage.
+            if let Err(error) = self
+                .mux
+                .check_send(NetChannel::EventsReliable, prepared.record.payload.len())
             {
-                self.last_error = Some(error);
+                self.last_send_error = Some(error);
+                if matches!(error, MuxSendError::TooLarge { .. }) && !prepared.journal_attempted {
+                    self.prepared = None;
+                    self.pending_commands.pop_front();
+                    self.rejected = self.rejected.saturating_add(1);
+                    continue;
+                }
                 break;
             }
-            let delta = encode_delta(&wire);
-            match self.mux.send(NetChannel::EventsReliable, &delta) {
+            if let Some(journal) = self.journal.as_mut()
+                && !prepared.synced
+            {
+                prepared.journal_attempted = true;
+                if let Err(error) = journal.commit(&prepared.record, &self.session) {
+                    self.last_durable_error = Some(error);
+                    break;
+                }
+                prepared.synced = true;
+            }
+            match self
+                .mux
+                .send(NetChannel::EventsReliable, &prepared.record.payload)
+            {
                 Ok(_) => {
-                    self.session = candidate;
+                    let prepared = self.prepared.take().expect("queued prepared commit");
+                    self.session = prepared.session;
+                    self.next_journal_sequence += 1;
                     self.pending_commands.pop_front();
                     self.applied = self.applied.saturating_add(1);
                     advanced += 1;
                 }
-                Err(
-                    error @ (MuxSendError::Backpressured(_)
-                    | MuxSendError::ConnectionNotEstablished),
-                ) => {
+                Err(error) => {
                     self.last_send_error = Some(error);
                     break;
-                }
-                Err(error @ MuxSendError::TooLarge { .. }) => {
-                    // The command was never committed. Drop this unrepresentable
-                    // result so it cannot permanently block later commands.
-                    self.last_send_error = Some(error);
-                    self.pending_commands.pop_front();
-                    self.rejected = self.rejected.saturating_add(1);
                 }
             }
         }
@@ -384,6 +497,22 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// Take the error the last [`pump`](Self::pump) stopped on, clearing it.
     pub fn take_last_error(&mut self) -> Option<SessionError> {
         self.last_error.take()
+    }
+
+    /// Take the most recent append/replay/sync failure. The pending command and
+    /// candidate remain intact; a later pump retries the identical journal key.
+    pub fn take_durable_error(&mut self) -> Option<DurableRecoveryError> {
+        self.last_durable_error.take()
+    }
+
+    /// Next sequence after the last published authority journal record. `None`
+    /// means this server has no journal. A failed in-flight transaction may have
+    /// appended this sequence but is not published until sync and enqueue succeed.
+    #[must_use]
+    pub fn journal_cursor(&self) -> Option<crate::event_log::EventLogCursor> {
+        self.journal
+            .as_ref()
+            .map(|_| crate::event_log::EventLogCursor::new(self.next_journal_sequence))
     }
 
     /// Take the most recent handshake or envelope failure.
@@ -599,6 +728,7 @@ pub struct ReplicationServerPlugin<S: ServerStrategy> {
     strategy: Mutex<Option<S>>,
     transport: Mutex<Option<Box<dyn Transport>>>,
     config: ReplicationConfig,
+    restored: Mutex<Option<RestoredAuthority>>,
 }
 
 impl<S: ServerStrategy> ReplicationServerPlugin<S> {
@@ -619,6 +749,7 @@ impl<S: ServerStrategy> ReplicationServerPlugin<S> {
             strategy: Mutex::new(Some(strategy)),
             transport: Mutex::new(Some(transport)),
             config: ReplicationConfig::for_capacity(capacity),
+            restored: Mutex::new(None),
         }
     }
 
@@ -627,6 +758,34 @@ impl<S: ServerStrategy> ReplicationServerPlugin<S> {
     pub fn with_config(mut self, config: ReplicationConfig) -> Self {
         self.config = config;
         self
+    }
+
+    /// Recover an exclusive journal before installing the plugin. Errors are
+    /// returned to the caller, not deferred to the app's infallible build hook.
+    /// Uses the same durability and reconnect contract as
+    /// [`ServerReplication::new_durable`]. Configure a journal only once.
+    pub fn with_event_log<B>(self, log: ReplayEventLog<B>) -> Result<Self, DurableRecoveryError>
+    where
+        B: EventLogBackend + Send + Sync + 'static,
+        B::Error: core::fmt::Debug,
+    {
+        let mut restored = self
+            .restored
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if restored.is_some() {
+            return Err(DurableRecoveryError::InvalidJournal(
+                "journal already configured",
+            ));
+        }
+        *restored = Some(durable::restore(
+            &self.schema,
+            self.capacity,
+            &self.snapshot,
+            log,
+        )?);
+        drop(restored);
+        Ok(self)
     }
 }
 
@@ -644,7 +803,7 @@ impl<S: ServerStrategy> Plugin for ReplicationServerPlugin<S> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
             .expect("ReplicationServerPlugin::build ran twice");
-        let server = ServerReplication::<S>::new_with_config(
+        let mut server = ServerReplication::<S>::new_with_config(
             self.schema.clone(),
             self.capacity,
             &self.snapshot,
@@ -653,6 +812,14 @@ impl<S: ServerStrategy> Plugin for ReplicationServerPlugin<S> {
             self.config,
         )
         .expect("authority seed snapshot is malformed");
+        if let Some(restored) = self
+            .restored
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            server.install_journal(restored);
+        }
         app.insert_resource(server);
         app.add_systems(First, pump_server::<S>);
     }
@@ -662,6 +829,10 @@ impl<S: ServerStrategy> Plugin for ReplicationServerPlugin<S> {
 fn pump_server<S: ServerStrategy>(mut server: ResMut<ServerReplication<S>>) {
     server.pump();
 }
+
+#[cfg(test)]
+#[path = "durable_tests.rs"]
+mod durable_tests;
 
 #[cfg(test)]
 mod tests {
@@ -920,7 +1091,6 @@ mod tests {
                         std::env::var_os("PRISM_REQUIRE_NET").is_none(),
                         "required UDP bind failed: {error}"
                     );
-                    std::eprintln!("skipping replication UDP test: {error}");
                     None
                 }
             }

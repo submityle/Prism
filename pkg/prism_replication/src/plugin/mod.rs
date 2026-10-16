@@ -38,6 +38,7 @@ use crate::transport::Transport;
 #[cfg(feature = "determinism")]
 mod audit;
 mod client;
+mod durable;
 mod ecs;
 mod server;
 
@@ -54,6 +55,7 @@ pub use client::{
     AuthorityUpdate, EcsReplicationStrategy, NetworkRollbackSimulation, Replication,
     ReplicationPlugin, ReplicationStrategy,
 };
+pub use durable::{DurableLogOperation, DurableRecoveryError};
 pub use ecs::{EcsReplication, EcsReplicationError, EcsReplicationPlugin, NetworkRollbackDriver};
 pub use server::{ReplicationServerPlugin, ServerReplication, ServerStrategy};
 

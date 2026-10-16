@@ -115,10 +115,10 @@ fn recv_socket(socket: &UdpSocket) -> Option<Vec<u8>> {
 
 fn poll_until<T>(mut step: impl FnMut() -> Option<T>, done: impl Fn(&T) -> bool) -> T {
     for _ in 0..MAX_STEPS {
-        if let Some(value) = step() {
-            if done(&value) {
-                return value;
-            }
+        if let Some(value) = step()
+            && done(&value)
+        {
+            return value;
         }
         thread::sleep(POLL_SLEEP);
     }

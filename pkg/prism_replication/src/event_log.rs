@@ -24,9 +24,9 @@ pub const MAX_EVENT_LOG_BATCH: usize = 4_096;
 #[cfg(feature = "std")]
 const FILE_MAGIC: [u8; 4] = *b"PREL";
 #[cfg(feature = "std")]
-const FILE_VERSION: u8 = 1;
+const FILE_VERSION: u8 = 2;
 #[cfg(feature = "std")]
-const FILE_HEADER_LEN: usize = 8;
+const FILE_HEADER_LEN: usize = 20;
 #[cfg(feature = "std")]
 const FILE_RECORD_HEADER_LEN: usize = 8 + 16 + 4;
 #[cfg(feature = "std")]
@@ -139,6 +139,26 @@ pub trait EventLogBackend {
     /// Return the current end cursor.
     fn cursor(&self) -> EventLogCursor;
 
+    /// First retained sequence. Older cursors must fail, never skip silently.
+    fn start_cursor(&self) -> EventLogCursor {
+        EventLogCursor::default()
+    }
+
+    /// Remaining entry slots, if the provider exposes a fixed capacity.
+    fn remaining_capacity(&self) -> Option<usize> {
+        None
+    }
+
+    /// Atomically replace the retained stream with a caller-supplied checkpoint
+    /// at `cursor() - 1`, preserving the end cursor. The caller must encode all
+    /// state needed to recover the discarded prefix. Success includes a sync
+    /// barrier; failure may have installed the checkpoint, so reopen or retry the
+    /// *same* checkpoint before proceeding. `None` means unsupported, not success.
+    /// Idempotency keys before the checkpoint cease to be retained.
+    fn checkpoint(&mut self, _entry: &EventLogEntry) -> Option<Result<(), Self::Error>> {
+        None
+    }
+
     /// Replay at most `limit` entries from `cursor`.
     fn replay(&self, cursor: EventLogCursor, limit: usize) -> Result<EventLogBatch, Self::Error>;
 
@@ -178,6 +198,15 @@ pub enum EventLogError {
         /// Current end sequence.
         end: u64,
     },
+    /// The requested prefix has been replaced by a checkpoint.
+    CursorExpired {
+        /// Requested sequence.
+        cursor: u64,
+        /// First retained sequence.
+        start: u64,
+    },
+    /// A checkpoint does not replace the last retained sequence.
+    InvalidCheckpoint,
     /// The sequence space is exhausted.
     SequenceExhausted,
 }
@@ -198,6 +227,13 @@ impl fmt::Display for EventLogError {
             Self::CursorAhead { cursor, end } => {
                 write!(formatter, "event log cursor {cursor} is ahead of end {end}")
             }
+            Self::CursorExpired { cursor, start } => {
+                write!(
+                    formatter,
+                    "event log cursor {cursor} precedes retained start {start}"
+                )
+            }
+            Self::InvalidCheckpoint => formatter.write_str("invalid event log checkpoint"),
             Self::SequenceExhausted => formatter.write_str("event log sequence is exhausted"),
         }
     }
@@ -206,6 +242,7 @@ impl fmt::Display for EventLogError {
 /// In-memory provider used by deterministic tests and local authority harnesses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemoryEventLogBackend {
+    base_sequence: u64,
     entries: Vec<EventLogEntry>,
     keys: BTreeMap<u128, u64>,
     max_entries: usize,
@@ -217,6 +254,7 @@ impl MemoryEventLogBackend {
     #[must_use]
     pub fn new(max_entries: usize, max_payload: usize) -> Self {
         Self {
+            base_sequence: 0,
             entries: Vec::new(),
             keys: BTreeMap::new(),
             max_entries,
@@ -276,8 +314,10 @@ impl MemoryEventLogBackend {
                 max: self.max_payload,
             });
         }
-        let sequence =
-            u64::try_from(self.entries.len()).map_err(|_| EventLogError::SequenceExhausted)?;
+        let sequence = self.cursor().next_sequence;
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or(EventLogError::SequenceExhausted)?;
         self.entries.push(EventLogEntry {
             sequence,
             idempotency_key,
@@ -285,7 +325,7 @@ impl MemoryEventLogBackend {
         });
         self.keys.insert(idempotency_key, sequence);
         Ok(EventLogAppend {
-            next_cursor: EventLogCursor::new(sequence.saturating_add(1)),
+            next_cursor: EventLogCursor::new(next_sequence),
             inserted: true,
         })
     }
@@ -302,24 +342,41 @@ impl MemoryEventLogBackend {
             });
         }
         let end = self.cursor();
+        if cursor.next_sequence < self.base_sequence {
+            return Err(EventLogError::CursorExpired {
+                cursor: cursor.next_sequence,
+                start: self.base_sequence,
+            });
+        }
         if cursor > end {
             return Err(EventLogError::CursorAhead {
                 cursor: cursor.next_sequence,
                 end: end.next_sequence,
             });
         }
-        let start =
-            usize::try_from(cursor.next_sequence).map_err(|_| EventLogError::CursorAhead {
+        let start = usize::try_from(cursor.next_sequence - self.base_sequence).map_err(|_| {
+            EventLogError::CursorAhead {
                 cursor: cursor.next_sequence,
                 end: end.next_sequence,
-            })?;
+            }
+        })?;
         let stop = start.saturating_add(limit).min(self.entries.len());
         let entries = self.entries[start..stop].to_vec();
         Ok(EventLogBatch::new(
             entries,
-            EventLogCursor::new(stop as u64),
+            EventLogCursor::new(self.base_sequence + stop as u64),
             end,
         ))
+    }
+
+    fn checkpoint_index(&self, entry: &EventLogEntry) -> Result<Self, EventLogError> {
+        if self.is_empty() || entry.sequence.checked_add(1) != Some(self.cursor().next_sequence) {
+            return Err(EventLogError::InvalidCheckpoint);
+        }
+        let mut replacement = Self::new(self.max_entries, self.max_payload);
+        replacement.base_sequence = entry.sequence;
+        replacement.append_inner(entry.idempotency_key, &entry.payload)?;
+        Ok(replacement)
     }
 }
 
@@ -335,7 +392,22 @@ impl EventLogBackend for MemoryEventLogBackend {
     }
 
     fn cursor(&self) -> EventLogCursor {
-        EventLogCursor::new(self.entries.len() as u64)
+        EventLogCursor::new(self.base_sequence + self.entries.len() as u64)
+    }
+
+    fn start_cursor(&self) -> EventLogCursor {
+        EventLogCursor::new(self.base_sequence)
+    }
+
+    fn remaining_capacity(&self) -> Option<usize> {
+        Some(self.max_entries.saturating_sub(self.len()))
+    }
+
+    fn checkpoint(&mut self, entry: &EventLogEntry) -> Option<Result<(), Self::Error>> {
+        Some(
+            self.checkpoint_index(entry)
+                .map(|replacement| *self = replacement),
+        )
     }
 
     fn replay(&self, cursor: EventLogCursor, limit: usize) -> Result<EventLogBatch, Self::Error> {
@@ -364,7 +436,7 @@ pub enum FileEventLogError {
         /// Byte offset where validation failed.
         offset: u64,
     },
-    /// The provider was poisoned by a failed append and must be reopened.
+    /// A failed append or ambiguous checkpoint poisoned the provider; reopen it.
     Poisoned,
     /// The bounded in-memory index rejected an entry or replay request.
     Contract(EventLogError),
@@ -397,11 +469,37 @@ impl std::error::Error for FileEventLogError {}
 /// index. A malformed tail is rejected rather than silently discarded; a
 /// caller that wants valid-prefix recovery must perform that policy outside
 /// this minimal provider or use the world-persist journal for transactions.
+/// Loss of a whole-record-aligned suffix is indistinguishable from a shorter
+/// valid stream without an independently stored high-watermark. The checksum
+/// detects malformed bytes, not adversarial changes or complete record loss.
+/// Opening streams one record at a time: retained memory is bounded by
+/// `max_entries * max_payload` plus one bounded record, not by file size.
+/// A persistent sibling advisory lock excludes cooperating writers using the
+/// same path across rename; alternate hardlink/symlink names are not fenced.
+/// Checkpoint uses one bounded sibling staging file, sync, atomic rename, and
+/// directory sync. Filesystems must implement these operations faithfully; this
+/// is not protection from external writers, media loss, or malicious corruption.
 #[cfg(feature = "std")]
 pub struct FileEventLogBackend {
     file: std::fs::File,
+    path: std::path::PathBuf,
+    // Never unlink the lock: doing so would allow locking different inodes.
+    _writer_lock: EventLogWriterLock,
     index: MemoryEventLogBackend,
     poisoned: bool,
+}
+
+#[cfg(feature = "std")]
+struct EventLogWriterLock(std::fs::File);
+
+#[cfg(feature = "std")]
+impl Drop for EventLogWriterLock {
+    fn drop(&mut self) {
+        // Explicitly end this provider's exclusive ownership. On Unix a forked
+        // or duplicated descriptor can keep the open-file-description alive
+        // after File::drop, otherwise delaying release until that copy closes.
+        let _ = self.0.unlock();
+    }
 }
 
 #[cfg(feature = "std")]
@@ -412,28 +510,63 @@ impl FileEventLogBackend {
         max_entries: usize,
         max_payload: usize,
     ) -> Result<Self, FileEventLogError> {
-        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::io::{Seek, SeekFrom, Write};
 
-        let mut file = std::fs::OpenOptions::new()
+        let path = path.as_ref();
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let parent = parent.canonicalize().map_err(FileEventLogError::Io)?;
+        let name = path.file_name().ok_or_else(|| {
+            FileEventLogError::Io(std::io::Error::other("event log path has no filename"))
+        })?;
+        let path = parent.join(name);
+        let mut lock_name = name.to_os_string();
+        lock_name.push(".writer-lock");
+        let writer_lock = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(parent.join(lock_name))
+            .map_err(FileEventLogError::Io)?;
+        writer_lock
+            .try_lock()
+            .map_err(|error| FileEventLogError::Io(error.into()))?;
+        let writer_lock = EventLogWriterLock(writer_lock);
+        let (mut file, created) = match std::fs::OpenOptions::new()
+            .create_new(true)
             .read(true)
             .append(true)
-            .open(path)
-            .map_err(FileEventLogError::Io)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(FileEventLogError::Io)?;
+            .open(&path)
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .append(true)
+                    .open(&path)
+                    .map_err(FileEventLogError::Io)?,
+                false,
+            ),
+            Err(error) => return Err(FileEventLogError::Io(error)),
+        };
         let mut index = MemoryEventLogBackend::new(max_entries, max_payload);
-        if bytes.is_empty() {
-            file.write_all(&file_header())
+        // An existing zero-length file may be a truncated authority journal.
+        // Never silently turn loss of its header into a new empty authority.
+        if created {
+            file.write_all(&file_header(0))
                 .map_err(FileEventLogError::Io)?;
             file.flush().map_err(FileEventLogError::Io)?;
         } else {
-            parse_file(&bytes, &mut index)?;
+            parse_file(&mut file, &mut index)?;
         }
         file.seek(SeekFrom::End(0)).map_err(FileEventLogError::Io)?;
         Ok(Self {
             file,
+            path,
+            _writer_lock: writer_lock,
             index,
             poisoned: false,
         })
@@ -458,6 +591,103 @@ impl FileEventLogBackend {
             Ok(())
         }
     }
+
+    fn sync_parent(&self) -> Result<(), FileEventLogError> {
+        std::fs::File::open(self.path.parent().expect("absolute event log path"))
+            .and_then(|directory| directory.sync_all())
+            .map_err(FileEventLogError::Io)
+    }
+
+    fn replace_checkpoint(&mut self, entry: &EventLogEntry) -> Result<(), FileEventLogError> {
+        use std::io::Write;
+        self.ensure_healthy()?;
+        if entry.payload.len() > u32::MAX as usize {
+            return Err(FileEventLogError::Contract(
+                EventLogError::PayloadTooLarge {
+                    len: entry.payload.len(),
+                    max: u32::MAX as usize,
+                },
+            ));
+        }
+        let replacement = self
+            .index
+            .checkpoint_index(entry)
+            .map_err(FileEventLogError::Contract)?;
+        // One deterministic staging path bounds orphan disk usage after abrupt
+        // exits. It is never adopted on open; only the active path is authority.
+        let mut staging_name = self.path.as_os_str().to_os_string();
+        staging_name.push(".checkpoint");
+        let staging_path = std::path::PathBuf::from(staging_name);
+        let mut staging = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&staging_path)
+            .map_err(FileEventLogError::Io)?;
+        staging
+            .write_all(&file_header(entry.sequence))
+            .map_err(FileEventLogError::Io)?;
+        staging
+            .write_all(&encode_record(entry))
+            .map_err(FileEventLogError::Io)?;
+        #[cfg(test)]
+        checkpoint_test_point("checkpoint-written")?;
+        staging.sync_all().map_err(FileEventLogError::Io)?;
+        #[cfg(test)]
+        checkpoint_test_point("checkpoint-synced")?;
+        std::fs::rename(&staging_path, &self.path).map_err(FileEventLogError::Io)?;
+        // After rename, errors are ambiguous. Do not write the old unlinked inode
+        // or report successful capacity reclamation before directory durability.
+        self.poisoned = true;
+        self.file = staging;
+        self.index = replacement;
+        #[cfg(test)]
+        checkpoint_test_point("checkpoint-renamed")?;
+        self.sync_parent()?;
+        #[cfg(test)]
+        checkpoint_test_point("checkpoint-published")?;
+        self.poisoned = false;
+        Ok(())
+    }
+}
+
+// Test-only process fault injection: no production environment-variable hooks.
+#[cfg(all(test, feature = "std"))]
+std::thread_local! {
+    pub(crate) static CHECKPOINT_CRASH: core::cell::Cell<Option<&'static str>> = const {
+        core::cell::Cell::new(None)
+    };
+    static CHECKPOINT_ERROR: core::cell::Cell<Option<&'static str>> = const {
+        core::cell::Cell::new(None)
+    };
+}
+
+#[cfg(all(test, feature = "std"))]
+fn checkpoint_test_point(point: &'static str) -> Result<(), FileEventLogError> {
+    if CHECKPOINT_CRASH.with(|fault| fault.get() == Some(point)) {
+        process_crash_barrier();
+    }
+    if CHECKPOINT_ERROR.with(|fault| fault.get() == Some(point)) {
+        return Err(FileEventLogError::Io(std::io::Error::other(
+            "injected checkpoint failure",
+        )));
+    }
+    Ok(())
+}
+
+/// The parent kills the child only after observing this marker. No unwinding or
+/// file destructors run: the test exercises actual OS process termination.
+#[cfg(all(test, feature = "std"))]
+pub(crate) fn process_crash_barrier() -> ! {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "PRISM_DURABLE_CRASH_READY").unwrap();
+    stdout.flush().unwrap();
+    drop(stdout);
+    loop {
+        std::thread::park();
+    }
 }
 
 #[cfg(feature = "std")]
@@ -472,6 +702,14 @@ impl EventLogBackend for FileEventLogBackend {
         use std::io::Write;
 
         self.ensure_healthy()?;
+        if payload.len() > u32::MAX as usize {
+            return Err(FileEventLogError::Contract(
+                EventLogError::PayloadTooLarge {
+                    len: payload.len(),
+                    max: u32::MAX as usize,
+                },
+            ));
+        }
         let outcome = self
             .index
             .append_inner(idempotency_key, payload)
@@ -499,6 +737,18 @@ impl EventLogBackend for FileEventLogBackend {
         self.index.cursor()
     }
 
+    fn start_cursor(&self) -> EventLogCursor {
+        self.index.start_cursor()
+    }
+
+    fn remaining_capacity(&self) -> Option<usize> {
+        self.index.remaining_capacity()
+    }
+
+    fn checkpoint(&mut self, entry: &EventLogEntry) -> Option<Result<(), Self::Error>> {
+        Some(self.replace_checkpoint(entry))
+    }
+
     fn replay(&self, cursor: EventLogCursor, limit: usize) -> Result<EventLogBatch, Self::Error> {
         self.ensure_healthy()?;
         self.index
@@ -515,22 +765,20 @@ impl EventLogBackend for FileEventLogBackend {
 
     fn sync(&mut self) -> Result<(), Self::Error> {
         self.ensure_healthy()?;
-        self.file.sync_all().map_err(FileEventLogError::Io)
+        self.file.sync_all().map_err(FileEventLogError::Io)?;
+        self.sync_parent()
     }
 }
 
 #[cfg(feature = "std")]
-fn file_header() -> [u8; FILE_HEADER_LEN] {
-    [
-        FILE_MAGIC[0],
-        FILE_MAGIC[1],
-        FILE_MAGIC[2],
-        FILE_MAGIC[3],
-        FILE_VERSION,
-        0,
-        0,
-        0,
-    ]
+fn file_header(base: u64) -> [u8; FILE_HEADER_LEN] {
+    let mut bytes = [0; FILE_HEADER_LEN];
+    bytes[..4].copy_from_slice(&FILE_MAGIC);
+    bytes[4] = FILE_VERSION;
+    bytes[8..16].copy_from_slice(&base.to_le_bytes());
+    let hash = checksum(&bytes[..16]);
+    bytes[16..].copy_from_slice(&hash.to_le_bytes());
+    bytes
 }
 
 #[cfg(feature = "std")]
@@ -549,26 +797,60 @@ fn encode_record(entry: &EventLogEntry) -> Vec<u8> {
 }
 
 #[cfg(feature = "std")]
-fn parse_file(bytes: &[u8], index: &mut MemoryEventLogBackend) -> Result<(), FileEventLogError> {
-    if bytes.len() < FILE_HEADER_LEN || bytes[..FILE_HEADER_LEN] != file_header() {
+fn parse_file(
+    reader: &mut impl std::io::Read,
+    index: &mut MemoryEventLogBackend,
+) -> Result<(), FileEventLogError> {
+    use std::io::ErrorKind;
+
+    let mut header = [0; FILE_HEADER_LEN];
+    match reader.read_exact(&mut header[..8]) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
+            return Err(FileEventLogError::InvalidHeader);
+        }
+        Err(error) => return Err(FileEventLogError::Io(error)),
+    }
+    if header[..4] != FILE_MAGIC || header[5..8] != [0; 3] {
         return Err(FileEventLogError::InvalidHeader);
     }
-    let mut offset = FILE_HEADER_LEN;
-    while offset < bytes.len() {
-        if bytes.len().saturating_sub(offset) < FILE_RECORD_HEADER_LEN + FILE_RECORD_TRAILER_LEN {
-            return Err(FileEventLogError::Corrupt {
-                offset: offset as u64,
-            });
+    let mut offset = match header[4] {
+        1 => 8, // Existing PREL v1 files always start at zero.
+        FILE_VERSION => {
+            read_file_exact(reader, &mut header[8..], 8)?;
+            if checksum(&header[..16]) != u32::from_le_bytes(header[16..].try_into().unwrap()) {
+                return Err(FileEventLogError::InvalidHeader);
+            }
+            index.base_sequence = u64::from_le_bytes(header[8..16].try_into().unwrap());
+            FILE_HEADER_LEN as u64
         }
-        let sequence = read_u64(bytes, &mut offset).ok_or(FileEventLogError::Corrupt {
-            offset: offset as u64,
-        })?;
-        let idempotency_key = read_u128(bytes, &mut offset).ok_or(FileEventLogError::Corrupt {
-            offset: offset as u64,
-        })?;
-        let payload_len = read_u32(bytes, &mut offset).ok_or(FileEventLogError::Corrupt {
-            offset: offset as u64,
-        })? as usize;
+        _ => return Err(FileEventLogError::InvalidHeader),
+    };
+    loop {
+        let mut header = [0; FILE_RECORD_HEADER_LEN];
+        // EOF is valid only between records. Interrupted/short reads must not
+        // accidentally turn a truncated record into an accepted prefix.
+        loop {
+            match reader.read(&mut header[..1]) {
+                Ok(0) if index.base_sequence != 0 && index.is_empty() => {
+                    return Err(FileEventLogError::Corrupt { offset });
+                }
+                Ok(0) => return Ok(()),
+                Ok(_) => break,
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => return Err(FileEventLogError::Io(error)),
+            }
+        }
+        read_file_exact(reader, &mut header[1..], offset)?;
+        let mut position = 0;
+        let sequence = read_u64(&header, &mut position).expect("fixed record header");
+        let idempotency_key = read_u128(&header, &mut position).expect("fixed record header");
+        let payload_len = read_u32(&header, &mut position).expect("fixed record header") as usize;
+        // A duplicate physical record is corruption, not an idempotent append.
+        // Validate bounds before reading/allocating the declared payload.
+        if sequence != index.cursor().next_sequence || index.keys.contains_key(&idempotency_key) {
+            return Err(FileEventLogError::Corrupt { offset });
+        }
         if payload_len > index.max_payload {
             return Err(FileEventLogError::Contract(
                 EventLogError::PayloadTooLarge {
@@ -577,50 +859,57 @@ fn parse_file(bytes: &[u8], index: &mut MemoryEventLogBackend) -> Result<(), Fil
                 },
             ));
         }
-        let end = offset
-            .checked_add(payload_len)
-            .and_then(|value| value.checked_add(FILE_RECORD_TRAILER_LEN))
-            .ok_or(FileEventLogError::Corrupt {
-                offset: offset as u64,
-            })?;
-        let Some(record_bytes) = bytes.get(offset..end) else {
-            return Err(FileEventLogError::Corrupt {
-                offset: offset as u64,
-            });
-        };
-        let payload = &record_bytes[..payload_len];
-        let stored_checksum = u32::from_le_bytes(
-            record_bytes[payload_len..]
-                .try_into()
-                .expect("trailer length checked"),
-        );
-        let mut checksum_bytes = Vec::with_capacity(FILE_RECORD_HEADER_LEN + payload_len);
-        checksum_bytes.extend_from_slice(&sequence.to_le_bytes());
-        checksum_bytes.extend_from_slice(&idempotency_key.to_le_bytes());
-        checksum_bytes.extend_from_slice(&(payload_len as u32).to_le_bytes());
-        checksum_bytes.extend_from_slice(payload);
-        if checksum(&checksum_bytes) != stored_checksum {
-            return Err(FileEventLogError::Corrupt {
-                offset: offset as u64,
-            });
+        if index.len() >= index.max_entries {
+            return Err(FileEventLogError::Contract(
+                EventLogError::CapacityExceeded {
+                    limit: index.max_entries,
+                },
+            ));
         }
-        if sequence != index.cursor().next_sequence {
-            return Err(FileEventLogError::Corrupt {
-                offset: offset as u64,
-            });
+        let mut payload = alloc::vec![0; payload_len];
+        read_file_exact(reader, &mut payload, offset)?;
+        let mut trailer = [0; FILE_RECORD_TRAILER_LEN];
+        read_file_exact(reader, &mut trailer, offset)?;
+        if checksum_parts(&[&header, &payload]) != u32::from_le_bytes(trailer) {
+            return Err(FileEventLogError::Corrupt { offset });
         }
-        index
-            .append_inner(idempotency_key, payload)
+        let outcome = index
+            .append_inner(idempotency_key, &payload)
             .map_err(FileEventLogError::Contract)?;
-        offset = end;
+        if !outcome.inserted {
+            return Err(FileEventLogError::Corrupt { offset });
+        }
+        offset = offset
+            .checked_add((FILE_RECORD_HEADER_LEN + FILE_RECORD_TRAILER_LEN) as u64)
+            .and_then(|offset| offset.checked_add(payload_len as u64))
+            .ok_or(FileEventLogError::Corrupt { offset })?;
     }
-    Ok(())
+}
+
+#[cfg(feature = "std")]
+fn read_file_exact(
+    reader: &mut impl std::io::Read,
+    bytes: &mut [u8],
+    offset: u64,
+) -> Result<(), FileEventLogError> {
+    reader.read_exact(bytes).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+            FileEventLogError::Corrupt { offset }
+        } else {
+            FileEventLogError::Io(error)
+        }
+    })
 }
 
 #[cfg(feature = "std")]
 fn checksum(bytes: &[u8]) -> u32 {
+    checksum_parts(&[bytes])
+}
+
+#[cfg(feature = "std")]
+fn checksum_parts(parts: &[&[u8]]) -> u32 {
     let mut hash = 2_166_136_261_u32;
-    for byte in bytes {
+    for byte in parts.iter().flat_map(|part| part.iter()) {
         hash ^= u32::from(*byte);
         hash = hash.wrapping_mul(16_777_619);
     }
@@ -681,6 +970,31 @@ impl<B> ReplayEventLog<B> {
 }
 
 impl<B: EventLogBackend> ReplayEventLog<B> {
+    /// Replace the retained prefix with one typed checkpoint. See
+    /// [`EventLogBackend::checkpoint`] for durability and expired-key semantics.
+    pub fn checkpoint(
+        &mut self,
+        idempotency_key: u128,
+        record: ReplayRecord,
+    ) -> Option<Result<(), ReplayEventLogError<B::Error>>> {
+        let sequence = record.sequence;
+        let mut log = ReplayLog::new(1, self.max_payload);
+        if let Err(error) = log.append(record) {
+            return Some(Err(ReplayEventLogError::Replay(error)));
+        }
+        let payload = match log.encode() {
+            Ok(payload) => payload,
+            Err(error) => return Some(Err(ReplayEventLogError::Replay(error))),
+        };
+        self.backend
+            .checkpoint(&EventLogEntry {
+                sequence,
+                idempotency_key,
+                payload,
+            })
+            .map(|result| result.map_err(ReplayEventLogError::Backend))
+    }
+
     /// Append one replay record using an explicit idempotency key.
     pub fn append(
         &mut self,
@@ -814,6 +1128,402 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_preserves_end_expires_old_cursors_and_reclaims_capacity() {
+        let mut backend = MemoryEventLogBackend::new(3, 16);
+        for key in 0..3 {
+            backend.append(key, b"delta").unwrap();
+        }
+        let end = backend.cursor();
+        let checkpoint = EventLogEntry {
+            sequence: 2,
+            idempotency_key: 2,
+            payload: b"snapshot".to_vec(),
+        };
+        backend.checkpoint(&checkpoint).unwrap().unwrap();
+        assert_eq!(backend.cursor(), end);
+        assert_eq!(backend.start_cursor(), EventLogCursor::new(2));
+        assert_eq!(backend.remaining_capacity(), Some(2));
+        assert!(matches!(
+            backend.replay(EventLogCursor::new(1), 1),
+            Err(EventLogError::CursorExpired { .. })
+        ));
+        assert_eq!(
+            backend.replay(EventLogCursor::new(2), 1).unwrap().entries(),
+            &[checkpoint]
+        );
+        assert_eq!(
+            backend.append(3, b"next").unwrap().next_cursor,
+            EventLogCursor::new(4)
+        );
+        let before = backend.clone();
+        assert_eq!(
+            backend.checkpoint(&EventLogEntry {
+                sequence: 2,
+                idempotency_key: 2,
+                payload: Vec::new()
+            }),
+            Some(Err(EventLogError::InvalidCheckpoint))
+        );
+        assert_eq!(backend, before);
+    }
+
+    #[cfg(feature = "std")]
+    struct FileFixture(std::path::PathBuf);
+
+    #[cfg(feature = "std")]
+    impl FileFixture {
+        fn new() -> Self {
+            let directory = std::env::temp_dir().join(std::format!(
+                "prism-checkpoint-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            Self(directory)
+        }
+
+        fn path(&self) -> std::path::PathBuf {
+            self.0.join("journal")
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl Drop for FileFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn file_writer_ownership_ends_even_with_a_duplicated_lock_descriptor() {
+        let fixture = FileFixture::new();
+        let path = fixture.path();
+        let mut backend = FileEventLogBackend::open(&path, 2, 8).unwrap();
+        backend.append(1, b"first").unwrap();
+        backend.sync().unwrap();
+        // Model a descriptor inherited by a concurrently spawned process: it
+        // must not extend ownership beyond the provider's lifetime.
+        let inherited = backend._writer_lock.0.try_clone().unwrap();
+        assert!(matches!(
+            FileEventLogBackend::open(&path, 2, 8),
+            Err(FileEventLogError::Io(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        drop(backend);
+        let mut reopened = FileEventLogBackend::open(&path, 2, 8).unwrap();
+        drop(inherited);
+        assert!(matches!(
+            FileEventLogBackend::open(&path, 2, 8),
+            Err(FileEventLogError::Io(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        reopened.append(2, b"next").unwrap();
+        reopened.sync().unwrap();
+        drop(reopened);
+        let reopened = FileEventLogBackend::open(&path, 2, 8).unwrap();
+        assert_eq!(reopened.cursor(), EventLogCursor::new(2));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn file_checkpoint_failure_atomicity_requires_reopen_after_rename() {
+        for point in [
+            "checkpoint-written",
+            "checkpoint-synced",
+            "checkpoint-renamed",
+            "checkpoint-published",
+        ] {
+            let fixture = FileFixture::new();
+            let path = fixture.path();
+            let mut backend = FileEventLogBackend::open(&path, 2, 16).unwrap();
+            backend.append(0, b"seed").unwrap();
+            backend.append(1, b"delta").unwrap();
+            backend.sync().unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let before = backend.index.clone();
+            let checkpoint = EventLogEntry {
+                sequence: 1,
+                idempotency_key: 1,
+                payload: b"checkpoint".to_vec(),
+            };
+            CHECKPOINT_ERROR.with(|slot| slot.set(Some(point)));
+            let result = backend.checkpoint(&checkpoint).unwrap();
+            CHECKPOINT_ERROR.with(|slot| slot.set(None));
+            assert!(matches!(result, Err(FileEventLogError::Io(_))), "{point}");
+            if matches!(point, "checkpoint-written" | "checkpoint-synced") {
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(backend.index, before);
+                assert!(!backend.poisoned);
+                // Retry overwrites the stale staging file, never adopts it.
+                backend.checkpoint(&checkpoint).unwrap().unwrap();
+            } else {
+                assert!(backend.poisoned);
+                assert_eq!(backend.cursor(), EventLogCursor::new(2));
+                assert_eq!(backend.start_cursor(), EventLogCursor::new(1));
+                assert!(matches!(
+                    backend.append(2, b"next"),
+                    Err(FileEventLogError::Poisoned)
+                ));
+                assert!(matches!(
+                    backend.replay(EventLogCursor::new(1), 1),
+                    Err(FileEventLogError::Poisoned)
+                ));
+                assert!(matches!(backend.flush(), Err(FileEventLogError::Poisoned)));
+                assert!(matches!(backend.sync(), Err(FileEventLogError::Poisoned)));
+                assert!(matches!(
+                    backend.checkpoint(&checkpoint),
+                    Some(Err(FileEventLogError::Poisoned))
+                ));
+                drop(backend);
+                backend = FileEventLogBackend::open(&path, 2, 16).unwrap();
+                backend.checkpoint(&checkpoint).unwrap().unwrap();
+            }
+            assert_eq!(backend.cursor(), EventLogCursor::new(2));
+            assert_eq!(backend.remaining_capacity(), Some(1));
+            assert_eq!(
+                backend.replay(EventLogCursor::new(1), 1).unwrap().entries(),
+                &[checkpoint]
+            );
+            assert!(!backend.append(1, b"checkpoint").unwrap().inserted);
+            assert_eq!(
+                backend.append(2, b"next").unwrap().next_cursor,
+                EventLogCursor::new(3)
+            );
+            backend.sync().unwrap();
+            drop(backend);
+            let reopened = FileEventLogBackend::open(&path, 2, 16).unwrap();
+            assert_eq!(reopened.cursor(), EventLogCursor::new(3));
+            assert_eq!(reopened.start_cursor(), EventLogCursor::new(1));
+            assert_eq!(reopened.len(), 2);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn file_bounds_and_staging_open_failure_leave_active_file_unchanged() {
+        let fixture = FileFixture::new();
+        let path = fixture.path();
+        let mut backend = FileEventLogBackend::open(&path, 2, 8).unwrap();
+        backend.append(0, b"seed").unwrap();
+        backend.append(1, b"delta").unwrap();
+        backend.sync().unwrap();
+        let before = backend.index.clone();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut checkpoint = EventLogEntry {
+            sequence: 1,
+            idempotency_key: 1,
+            payload: b"snapshot".to_vec(),
+        };
+        assert!(matches!(
+            backend.append(2, b"next"),
+            Err(FileEventLogError::Contract(
+                EventLogError::CapacityExceeded { .. }
+            ))
+        ));
+        checkpoint.payload.push(0);
+        assert!(matches!(
+            backend.checkpoint(&checkpoint),
+            Some(Err(FileEventLogError::Contract(
+                EventLogError::PayloadTooLarge { .. }
+            )))
+        ));
+        checkpoint.payload.pop();
+        checkpoint.sequence = 0;
+        assert!(matches!(
+            backend.checkpoint(&checkpoint),
+            Some(Err(FileEventLogError::Contract(
+                EventLogError::InvalidCheckpoint
+            )))
+        ));
+        checkpoint.sequence = 1;
+        let staging = fixture.0.join("journal.checkpoint");
+        std::fs::create_dir(&staging).unwrap();
+        assert!(matches!(
+            backend.checkpoint(&checkpoint),
+            Some(Err(FileEventLogError::Io(_)))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(backend.index, before);
+        assert!(!backend.poisoned);
+        std::fs::remove_dir(staging).unwrap();
+        backend.checkpoint(&checkpoint).unwrap().unwrap();
+        backend.append(2, b"next").unwrap();
+        backend.sync().unwrap();
+        drop(backend);
+        let reopened = FileEventLogBackend::open(&path, 2, 8).unwrap();
+        assert_eq!(reopened.start_cursor(), EventLogCursor::new(1));
+        assert_eq!(reopened.cursor(), EventLogCursor::new(3));
+        assert_eq!(reopened.len(), 2);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn file_parser_rejects_duplicate_keys_truncations_bounds_and_bad_headers() {
+        use std::{
+            fs,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+        let directory = std::env::temp_dir().join(std::format!(
+            "prism-file-matrix-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("journal");
+        let first = EventLogEntry {
+            sequence: 0,
+            idempotency_key: 7,
+            payload: b"one".to_vec(),
+        };
+        let second = EventLogEntry {
+            sequence: 1,
+            idempotency_key: 8,
+            payload: b"two".to_vec(),
+        };
+        let mut bytes = file_header(0).to_vec();
+        bytes.extend_from_slice(&encode_record(&first));
+        bytes.extend_from_slice(&encode_record(&second));
+        // Only exact record boundaries are valid prefixes; all other truncations fail closed.
+        let boundary = FILE_HEADER_LEN + encode_record(&first).len();
+        for length in 0..bytes.len() {
+            if length == FILE_HEADER_LEN || length == boundary {
+                continue;
+            }
+            fs::write(&path, &bytes[..length]).unwrap();
+            assert!(
+                FileEventLogBackend::open(&path, 2, 8).is_err(),
+                "truncation {length}"
+            );
+        }
+        for duplicate in [
+            first.clone(),
+            EventLogEntry {
+                sequence: 1,
+                ..first.clone()
+            },
+        ] {
+            let mut duplicate_bytes = file_header(0).to_vec();
+            duplicate_bytes.extend_from_slice(&encode_record(&first));
+            duplicate_bytes.extend_from_slice(&encode_record(&duplicate));
+            fs::write(&path, duplicate_bytes).unwrap();
+            assert!(matches!(
+                FileEventLogBackend::open(&path, 3, 8),
+                Err(FileEventLogError::Corrupt { .. })
+            ));
+        }
+        fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            FileEventLogBackend::open(&path, 1, 8),
+            Err(FileEventLogError::Contract(
+                EventLogError::CapacityExceeded { .. }
+            ))
+        ));
+        assert!(matches!(
+            FileEventLogBackend::open(&path, 2, 2),
+            Err(FileEventLogError::Contract(
+                EventLogError::PayloadTooLarge { .. }
+            ))
+        ));
+        for offset in [
+            0,
+            4,
+            5,
+            8,
+            16,
+            FILE_HEADER_LEN + FILE_RECORD_HEADER_LEN,
+            bytes.len() - 1,
+        ] {
+            let mut corrupt = bytes.clone();
+            corrupt[offset] ^= 0x80;
+            fs::write(&path, corrupt).unwrap();
+            assert!(
+                FileEventLogBackend::open(&path, 2, 8).is_err(),
+                "corruption {offset}"
+            );
+        }
+        fs::write(&path, file_header(9)).unwrap();
+        assert!(
+            FileEventLogBackend::open(&path, 2, 8).is_err(),
+            "missing nonzero checkpoint"
+        );
+        // v1 remains readable, and a subsequent checkpoint upgrades it atomically.
+        let mut legacy = b"PREL\x01\0\0\0".to_vec();
+        legacy.extend_from_slice(&encode_record(&first));
+        legacy.extend_from_slice(&encode_record(&second));
+        fs::write(&path, legacy).unwrap();
+        {
+            let mut log = FileEventLogBackend::open(&path, 2, 8).unwrap();
+            assert!(
+                FileEventLogBackend::open(&path, 2, 8).is_err(),
+                "exclusive writer"
+            );
+            log.checkpoint(&second).unwrap().unwrap();
+            log.append(9, b"next").unwrap();
+            log.sync().unwrap();
+            assert!(
+                FileEventLogBackend::open(&path, 2, 8).is_err(),
+                "lock survives rename"
+            );
+        }
+        let log = FileEventLogBackend::open(&path, 2, 8).unwrap();
+        assert_eq!(log.start_cursor(), EventLogCursor::new(1));
+        assert_eq!(log.cursor(), EventLogCursor::new(3));
+        assert_eq!(
+            log.replay(EventLogCursor::new(1), 2).unwrap().entries()[1].payload,
+            b"next"
+        );
+        drop(log);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn streaming_parser_refuses_payload_and_capacity_before_reading_body() {
+        use std::io::Read;
+        struct GuardedReader {
+            bytes: std::io::Cursor<Vec<u8>>,
+            allowed: u64,
+        }
+        impl Read for GuardedReader {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                assert!(
+                    self.bytes.position() + out.len() as u64 <= self.allowed,
+                    "unbounded body read"
+                );
+                self.bytes.read(out)
+            }
+        }
+        let mut bytes = file_header(0).to_vec();
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&1u128.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        let mut reader = GuardedReader {
+            allowed: bytes.len() as u64,
+            bytes: std::io::Cursor::new(bytes),
+        };
+        assert!(matches!(
+            parse_file(&mut reader, &mut MemoryEventLogBackend::new(1, 8)),
+            Err(FileEventLogError::Contract(
+                EventLogError::PayloadTooLarge { .. }
+            ))
+        ));
+        reader.bytes.set_position(0);
+        assert!(matches!(
+            parse_file(&mut reader, &mut MemoryEventLogBackend::new(0, usize::MAX)),
+            Err(FileEventLogError::Contract(
+                EventLogError::CapacityExceeded { .. }
+            ))
+        ));
+    }
+
+    #[test]
     fn memory_backend_is_bounded_idempotent_and_cursor_replay_is_at_least_once_friendly() {
         let mut backend = MemoryEventLogBackend::new(2, 8);
         assert_eq!(
@@ -888,6 +1598,7 @@ mod tests {
             .replay(EventLogCursor::default(), 4)
             .expect("replay reopened backend");
         assert_eq!(batch.entries()[0].payload, b"durable");
+        drop(reopened);
         fs::OpenOptions::new()
             .append(true)
             .open(&path)

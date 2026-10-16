@@ -182,6 +182,19 @@ impl FrameHashAudit {
         self.pending.len()
     }
 
+    /// Abandon a timeline after a full snapshot has committed. An empty history
+    /// starts at `next_tick`; no old local, remote or unsent entry belongs to it,
+    /// even if the new baseline reuses the same tick numbers. Keep the outgoing
+    /// sequence monotonic for the lifetime of this connection.
+    pub fn reset_branch(&mut self, next_tick: u64) {
+        self.oldest = next_tick;
+        self.next_tick = next_tick;
+        self.missing_local = 0;
+        self.local.clear();
+        self.remote.clear();
+        self.pending.clear();
+    }
+
     /// Export the bounded local window in ECS replay's native comparison type.
     #[must_use]
     pub fn local_log(&self) -> FrameHashLog {

@@ -70,7 +70,8 @@ fn exchange_deferred(
 fn queue(world: &mut World, input: i64) {
     world
         .resource_mut::<EcsReplication<ClientStrategy>>()
-        .queue_input(input);
+        .queue_input(input)
+        .unwrap();
 }
 
 fn packet(tick: u64, hash: u64, sequence: u64) -> FrameHashUpdate {
@@ -85,6 +86,7 @@ fn ecs_capture_hashes_cross_real_envelopes_and_match_authoritative_history() {
     let (mut world, mut server, _) = pair(8, ReplicationConfig::for_capacity(8));
     queue(&mut world, 5);
     queue(&mut world, 1);
+    drive_ecs_input::<ClientStrategy>(&mut world);
     drive_ecs_input::<ClientStrategy>(&mut world);
 
     // An independent authority ECS uses the same schema, allocator and tick
@@ -128,6 +130,7 @@ fn authority_rollback_replaces_already_transmitted_audit_tick_and_clears_diverge
     let (mut world, mut server, entity) = pair(8, ReplicationConfig::for_capacity(8));
     queue(&mut world, 5);
     queue(&mut world, 1);
+    drive_ecs_input::<ClientStrategy>(&mut world);
     drive_ecs_input::<ClientStrategy>(&mut world);
     let before = world
         .resource::<EcsReplication<ClientStrategy>>()
@@ -195,8 +198,8 @@ fn network_audit_handles_out_of_order_duplicate_stale_conflicting_and_expired_pa
     let (mut world, mut server, _) = pair(4, ReplicationConfig::for_capacity(4));
     for input in [1, 1, 1] {
         queue(&mut world, input);
+        drive_ecs_input::<ClientStrategy>(&mut world);
     }
-    drive_ecs_input::<ClientStrategy>(&mut world);
     let hash = |tick| {
         world
             .resource::<SnapshotHistory>()
@@ -375,9 +378,10 @@ fn failed_authority_replay_discards_abandoned_audit_frames() {
     }
     {
         let bridge = world.resource_mut::<EcsReplication<FailingReplay>>();
-        bridge.queue_input(5);
-        bridge.queue_input(1);
+        bridge.queue_input(5).unwrap();
+        bridge.queue_input(1).unwrap();
     }
+    drive_ecs_input::<FailingReplay>(&mut world);
     drive_ecs_input::<FailingReplay>(&mut world);
     for _ in 0..16 {
         world
@@ -448,4 +452,60 @@ fn feature_wire_contract_rejects_a_non_auditing_peer() {
         server.connection_state(),
         ConnectionState::Rejected(ProtocolError::VersionMismatch { .. })
     ));
+}
+
+#[test]
+fn committed_reseed_clears_waiting_inputs_and_old_audit_but_failed_reset_preserves_them() {
+    let (mut world, mut server, entity) = pair(8, ReplicationConfig::for_capacity(8));
+    queue(&mut world, 5);
+    queue(&mut world, 1);
+    drive_ecs_input::<ClientStrategy>(&mut world);
+    drive_ecs_input::<ClientStrategy>(&mut world);
+    exchange_deferred(&mut world, &mut server, 16);
+    queue(&mut world, 77);
+    assert_eq!(server.seed().unwrap(), Some(2));
+    exchange_deferred(&mut world, &mut server, 16);
+    let history = world.remove_resource::<SnapshotHistory>().unwrap();
+    let before = world
+        .resource::<EcsReplication<ClientStrategy>>()
+        .replication
+        .frame_hash_audit()
+        .local(1)
+        .unwrap();
+    reconcile_ecs_replication::<ClientStrategy>(&mut world);
+    {
+        let bridge = world.resource_mut::<EcsReplication<ClientStrategy>>();
+        assert!(matches!(
+            bridge.take_last_error(),
+            Some(EcsReplicationError::Rollback(
+                EcsRollbackError::MissingHistory
+            ))
+        ));
+        assert_eq!(bridge.inputs.iter().copied().collect::<Vec<_>>(), [77]);
+        assert_eq!(bridge.replication.frame_hash_audit().local(1), Some(before));
+        assert!(bridge.replication.deferred_reseed_pending());
+    }
+    assert_eq!(world.get::<Counter>(entity).unwrap().0, 6);
+    world.insert_resource(history);
+    reconcile_ecs_replication::<ClientStrategy>(&mut world);
+    {
+        let bridge = world.resource::<EcsReplication<ClientStrategy>>();
+        assert!(bridge.inputs.is_empty());
+        assert!(bridge.rollback.inputs().is_empty());
+        assert!(bridge.replication.frame_hash_audit().local_log().is_empty());
+        assert_eq!(bridge.replication.frame_hash_audit().pending_len(), 0);
+    }
+    drive_ecs_input::<ClientStrategy>(&mut world);
+    assert_eq!(world.get::<Counter>(entity).unwrap().0, 6);
+    assert_eq!(world.resource::<SnapshotHistory>().next_frame(), 2);
+    queue(&mut world, 2);
+    drive_ecs_input::<ClientStrategy>(&mut world);
+    let after = world
+        .resource::<EcsReplication<ClientStrategy>>()
+        .replication
+        .frame_hash_audit()
+        .local(2)
+        .unwrap();
+    assert!(after.sequence > before.sequence);
+    assert_eq!(world.get::<Counter>(entity).unwrap().0, 8);
 }

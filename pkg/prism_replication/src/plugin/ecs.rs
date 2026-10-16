@@ -10,6 +10,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use std::sync::Mutex;
 
+use prism_app::rollback::SnapshotCaptureUndo;
 use prism_app::{
     BeforeFixedMainLoop, EcsRollbackError, First, FixedFirst, Plugin, SnapshotHistory,
 };
@@ -37,20 +38,32 @@ pub(crate) enum DeferredEcsError {
 /// Single-owner fixed-tick rollback coordinator for an ECS World.
 ///
 /// The World owns the snapshot ring through its [`SnapshotHistory`] resource;
-/// this driver owns only the input timeline. Reconciliation first runs a
-/// side-effecting-free validation pass against a transaction snapshot. Only
-/// after every replay tick can be snapshotted does it truncate/rebase the real
-/// history and commit the replay. Consequently a failed authority correction
-/// leaves the World, history cursor, and input timeline unchanged.
+/// this driver owns only a bounded input window. Reconciliation executes each
+/// callback once against a replacement history branch. A failed capture restores
+/// registered World state and the original history; external callback effects
+/// are not undoable and must be suppressed or journaled by the application.
 pub struct NetworkRollbackDriver<I> {
     inputs: Vec<I>,
+    input_start: u64,
+    pending: Option<PendingCommit<I>>,
+}
+
+struct PendingCommit<I> {
+    frame: u64,
+    undo: SnapshotCaptureUndo,
+    input_start: u64,
+    discarded: Vec<I>,
 }
 
 impl<I: Clone> NetworkRollbackDriver<I> {
     /// Create an empty fixed-tick coordinator.
     #[must_use]
     pub const fn new() -> Self {
-        Self { inputs: Vec::new() }
+        Self {
+            inputs: Vec::new(),
+            input_start: 0,
+            pending: None,
+        }
     }
 
     /// Inputs committed at each local pre-input frame.
@@ -59,20 +72,52 @@ impl<I: Clone> NetworkRollbackDriver<I> {
         &self.inputs
     }
 
+    /// Absolute pre-input frame represented by the first retained input.
+    #[must_use]
+    pub fn input_start(&self) -> u64 {
+        self.input_start
+    }
+
     /// Capture one pre-input World frame and append its input.
     pub fn commit(&mut self, world: &mut World, input: I) -> Result<u64, EcsRollbackError> {
         let mut history = world
             .remove_resource::<SnapshotHistory>()
             .ok_or(EcsRollbackError::MissingHistory)?;
-        let frame = match history.try_capture(world) {
-            Ok(frame) => frame,
-            Err(missing) => {
+        let current = history.next_frame();
+        if current != self.input_start + self.inputs.len() as u64 {
+            world.insert_resource(history);
+            return Err(EcsRollbackError::UnavailableFrame {
+                frame: current,
+                current,
+            });
+        }
+        let capture = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            history.try_capture_reversible(world)
+        }));
+        let (frame, undo) = match capture {
+            Ok(Ok(captured)) => captured,
+            Ok(Err(missing)) => {
                 world.insert_resource(history);
                 return Err(EcsRollbackError::MissingSnapshotComponents(missing));
             }
+            Err(payload) => {
+                world.insert_resource(history);
+                std::panic::resume_unwind(payload);
+            }
         };
+        let input_start = self.input_start;
+        let oldest = history.oldest_frame().unwrap_or(frame);
+        let discard = (oldest - self.input_start) as usize;
+        let discarded = self.inputs.drain(..discard).collect();
+        self.input_start = oldest;
+        self.inputs.push(input);
+        self.pending = Some(PendingCommit {
+            frame,
+            undo,
+            input_start,
+            discarded,
+        });
         world.insert_resource(history);
-        self.store_input(frame, input);
         Ok(frame)
     }
 
@@ -81,15 +126,27 @@ impl<I: Clone> NetworkRollbackDriver<I> {
     /// timeline transactional if a later prediction/send step unexpectedly
     /// refuses the input.
     pub fn abort_commit(&mut self, world: &mut World, frame: u64) -> bool {
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|pending| pending.frame != frame)
+        {
+            return false;
+        }
         let Some(mut history) = world.remove_resource::<SnapshotHistory>() else {
             return false;
         };
-        let valid = history.next_frame() == frame.saturating_add(1)
-            && history.contains(frame)
-            && history.rollback(world, frame);
+        let Some(before) = history.snapshot(frame) else {
+            world.insert_resource(history);
+            return false;
+        };
+        let pending = self.pending.take().expect("pending commit checked above");
+        let valid = history.undo_capture(pending.undo);
         if valid {
-            history.truncate_after(frame);
-            history.seek(frame);
+            world.restore(&before);
+            self.inputs.pop();
+            self.inputs.splice(..0, pending.discarded);
+            self.input_start = pending.input_start;
         }
         world.insert_resource(history);
         valid
@@ -107,7 +164,7 @@ impl<I: Clone> NetworkRollbackDriver<I> {
         if authority_frame == 0 {
             return Err(EcsRollbackError::InvalidAuthorityRevision);
         }
-        let Some(mut history) = world.remove_resource::<SnapshotHistory>() else {
+        let Some(history) = world.remove_resource::<SnapshotHistory>() else {
             return Err(EcsRollbackError::MissingHistory);
         };
         let current = history.next_frame();
@@ -119,7 +176,16 @@ impl<I: Clone> NetworkRollbackDriver<I> {
                 current,
             });
         }
-        let Some(replay_slice) = self.inputs.get(authority_frame as usize..current as usize) else {
+        let replay_slice = authority_frame
+            .checked_sub(self.input_start)
+            .and_then(|start| usize::try_from(start).ok())
+            .zip(
+                current
+                    .checked_sub(self.input_start)
+                    .and_then(|end| usize::try_from(end).ok()),
+            )
+            .and_then(|(start, end)| self.inputs.get(start..end));
+        let Some(replay_slice) = replay_slice else {
             world.insert_resource(history);
             return Err(EcsRollbackError::UnavailableFrame {
                 frame: authority_frame,
@@ -139,8 +205,9 @@ impl<I: Clone> NetworkRollbackDriver<I> {
             }
         };
 
-        // Validation pass: use the existing retained anchor, but do not mutate
-        // the real history ring. Every fixed tick must still be snapshottable.
+        // Keep the original ring intact until all callbacks and captures finish.
+        let mut branch = history.branch_through(anchor);
+        branch.seek(authority_frame);
         if !history.rollback(world, anchor) {
             world.insert_resource(history);
             return Err(EcsRollbackError::UnavailableFrame {
@@ -148,61 +215,93 @@ impl<I: Clone> NetworkRollbackDriver<I> {
                 current,
             });
         }
-        apply_authority(world);
-        if let Err(missing) = world.try_snapshot() {
-            world.restore(&before);
-            world.insert_resource(history);
-            return Err(EcsRollbackError::MissingSnapshotComponents(missing));
-        }
-        for input in &replay_inputs {
-            replay_fixed_tick(world, input);
-            if let Err(missing) = world.try_snapshot() {
+        world.insert_resource(branch);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply_authority(world);
+            for input in &replay_inputs {
+                let mut branch = world
+                    .remove_resource::<SnapshotHistory>()
+                    .ok_or(EcsRollbackError::MissingHistory)?;
+                let capture = branch.try_capture(world);
+                world.insert_resource(branch);
+                capture.map_err(EcsRollbackError::MissingSnapshotComponents)?;
+                replay_fixed_tick(world, input);
+            }
+            // The last replay does not have a following pre-input capture.
+            world
+                .try_snapshot()
+                .map_err(EcsRollbackError::MissingSnapshotComponents)?;
+            if world.get_resource::<SnapshotHistory>().is_none() {
+                return Err(EcsRollbackError::MissingHistory);
+            }
+            Ok(())
+        }));
+        match result {
+            Ok(Ok(())) => {
+                self.pending = None;
+                Ok(current)
+            }
+            Ok(Err(error)) => {
                 world.restore(&before);
+                world.insert_resource(history);
+                Err(error)
+            }
+            Err(payload) => {
+                world.restore(&before);
+                world.insert_resource(history);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    /// Atomically install a full authority baseline, abandoning old predictions.
+    /// The next local input is captured at `frame`, including nonzero resyncs.
+    pub fn reset(
+        &mut self,
+        world: &mut World,
+        frame: u64,
+        mut apply_authority: impl FnMut(&mut World),
+    ) -> Result<(), EcsRollbackError> {
+        let history = world
+            .remove_resource::<SnapshotHistory>()
+            .ok_or(EcsRollbackError::MissingHistory)?;
+        let before = match world.try_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(missing) => {
                 world.insert_resource(history);
                 return Err(EcsRollbackError::MissingSnapshotComponents(missing));
             }
-        }
-        world.restore(&before);
-
-        // Commit the already-validated branch. A capture cannot fail here
-        // unless user code violates the snapshot contract between the two
-        // passes; retain a fallible path rather than panicking in the driver.
-        if !history.rollback(world, anchor) {
-            world.insert_resource(history);
-            return Err(EcsRollbackError::UnavailableFrame {
-                frame: authority_frame,
-                current,
-            });
-        }
-        apply_authority(world);
-        history.truncate_after(anchor);
-        history.seek(authority_frame);
-        world.insert_resource(history);
-
-        for input in &replay_inputs {
-            let mut history = world
-                .remove_resource::<SnapshotHistory>()
-                .ok_or(EcsRollbackError::MissingHistory)?;
-            let capture = history.try_capture(world);
-            world.insert_resource(history);
-            if let Err(missing) = capture {
-                // The validation pass makes this unreachable for deterministic
-                // replay, but restoring the checkpoint keeps the failure
-                // contract explicit if the World changed between passes.
-                world.restore(&before);
-                return Err(EcsRollbackError::MissingSnapshotComponents(missing));
+        };
+        let mut branch = SnapshotHistory::new(history.capacity());
+        branch.seek(frame);
+        world.insert_resource(branch);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply_authority(world);
+            world
+                .try_snapshot()
+                .map_err(EcsRollbackError::MissingSnapshotComponents)?;
+            if world.get_resource::<SnapshotHistory>().is_none() {
+                return Err(EcsRollbackError::MissingHistory);
             }
-            replay_fixed_tick(world, input);
-        }
-        Ok(authority_frame + replay_inputs.len() as u64)
-    }
-
-    fn store_input(&mut self, frame: u64, input: I) {
-        let index = frame as usize;
-        if index < self.inputs.len() {
-            self.inputs[index] = input;
-        } else {
-            self.inputs.push(input);
+            Ok(())
+        }));
+        match result {
+            Ok(Ok(())) => {
+                self.inputs.clear();
+                self.input_start = frame;
+                self.pending = None;
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                world.restore(&before);
+                world.insert_resource(history);
+                Err(error)
+            }
+            Err(payload) => {
+                world.restore(&before);
+                world.insert_resource(history);
+                std::panic::resume_unwind(payload)
+            }
         }
     }
 }
@@ -216,6 +315,8 @@ impl<I: Clone> Default for NetworkRollbackDriver<I> {
 /// Errors observed while driving the ECS/network bridge.
 #[derive(Clone, Debug)]
 pub enum EcsReplicationError {
+    /// The bounded local input queue is full; the input was not admitted.
+    InputQueueFull,
     /// The ECS snapshot/input timeline could not advance.
     Rollback(EcsRollbackError),
     /// The record prediction could not advance.
@@ -228,10 +329,18 @@ pub enum EcsReplicationError {
 }
 
 /// An ECS-backed client replication resource.
+///
+/// Input callbacks finish before their command is queued. A callback panic or
+/// refused send restores the registered pre-input World snapshot and retains
+/// the input for retry. This does not undo external effects, unregistered
+/// resources, or later fixed-phase systems. Callbacks must not replace the
+/// World or mutate the bridge/history infrastructure; snapshot Clone/Drop glue
+/// must itself be unwind-safe.
 pub struct EcsReplication<S: EcsReplicationStrategy> {
     replication: Replication<S>,
     rollback: NetworkRollbackDriver<S::Input>,
     inputs: VecDeque<S::Input>,
+    input_capacity: usize,
     last_error: Option<EcsReplicationError>,
 }
 
@@ -251,6 +360,7 @@ impl<S: EcsReplicationStrategy> EcsReplication<S> {
             replication: Replication::new(schema, capacity, snapshot, strategy, transport)?,
             rollback: NetworkRollbackDriver::new(),
             inputs: VecDeque::new(),
+            input_capacity: capacity.max(1),
             last_error: None,
         })
     }
@@ -270,13 +380,20 @@ impl<S: EcsReplicationStrategy> EcsReplication<S> {
             )?,
             rollback: NetworkRollbackDriver::new(),
             inputs: VecDeque::new(),
+            input_capacity: capacity.max(1),
             last_error: None,
         })
     }
 
-    /// Queue one local input for the next fixed simulation step.
-    pub fn queue_input(&mut self, input: S::Input) {
+    /// Queue one local input for a fixed simulation step. Returns ownership of
+    /// the refused input when the rollback-sized queue is full.
+    pub fn queue_input(&mut self, input: S::Input) -> Result<(), S::Input> {
+        if self.inputs.len() >= self.input_capacity {
+            self.record_error(EcsReplicationError::InputQueueFull);
+            return Err(input);
+        }
         self.inputs.push_back(input);
+        Ok(())
     }
 
     /// Number of local inputs waiting for a fixed step.
@@ -408,11 +525,34 @@ fn pump_ecs_replication<S: EcsReplicationStrategy>(
     }
 }
 
-fn reconcile_ecs_replication<S: EcsReplicationStrategy>(world: &mut World) {
+/// Return the same bridge to its World before propagating a callback unwind.
+/// The inner transaction owns World/history recovery; this owns the resource.
+fn with_ecs_bridge<S: EcsReplicationStrategy>(
+    world: &mut World,
+    run: impl FnOnce(&mut World, &mut EcsReplication<S>),
+) {
     let Some(mut bridge) = world.remove_resource::<EcsReplication<S>>() else {
         return;
     };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(world, &mut bridge);
+    }));
+    world.insert_resource(bridge);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+fn reconcile_ecs_replication<S: EcsReplicationStrategy>(world: &mut World) {
+    with_ecs_bridge::<S>(world, reconcile_ecs_bridge::<S>);
+}
+
+fn reconcile_ecs_bridge<S: EcsReplicationStrategy>(
+    world: &mut World,
+    bridge: &mut EcsReplication<S>,
+) {
     loop {
+        let reseed = bridge.replication.deferred_reseed_pending();
         let result = bridge
             .replication
             .reconcile_deferred_ecs(world, &mut bridge.rollback);
@@ -430,66 +570,101 @@ fn reconcile_ecs_replication<S: EcsReplicationStrategy>(world: &mut World) {
         if !applied {
             break;
         }
-        // Reconcile even after partial replay failure: the abandoned tail must
-        // not keep advertising old hashes. The pre-input anchor is unchanged.
+        if reseed {
+            // These commands were queued on the old branch but never driven.
+            // A rejected reset must retain them; only a committed reset owns
+            // the right to discard both predicted and not-yet-driven inputs.
+            bridge.inputs.clear();
+        }
+        // Successful deltas retain their pre-input anchor; a full snapshot has
+        // already cleared the old audit branch and installed an empty history.
         #[cfg(feature = "determinism")]
         bridge.sync_audit(world, bridge.replication.acked() as u64);
     }
     #[cfg(feature = "determinism")]
     bridge.replication.flush_frame_hashes();
-    world.insert_resource(bridge);
 }
 
 fn drive_ecs_input<S: EcsReplicationStrategy>(world: &mut World) {
-    let Some(mut bridge) = world.remove_resource::<EcsReplication<S>>() else {
-        return;
-    };
-    while let Some(input) = bridge.inputs.pop_front() {
+    with_ecs_bridge::<S>(world, drive_ecs_bridge_input::<S>);
+}
+
+fn drive_ecs_bridge_input<S: EcsReplicationStrategy>(
+    world: &mut World,
+    bridge: &mut EcsReplication<S>,
+) {
+    // The remaining fixed phases run once after FixedFirst. Consuming several
+    // inputs here would make live simulation differ from per-input replay.
+    'input: {
+        // Keep the admitted input owned by the queue until the entire local
+        // transaction succeeds, including panicking encode/simulate callbacks.
+        let Some(input) = bridge.inputs.front().cloned() else {
+            break 'input;
+        };
         if let Err(error) = bridge.replication.check_prediction_capacity() {
             bridge.record_error(EcsReplicationError::Prediction(error));
-            bridge.inputs.push_front(input);
-            break;
+            break 'input;
         }
         if world.get_resource::<SnapshotHistory>().is_none() {
             bridge.record_error(EcsReplicationError::Rollback(
                 EcsRollbackError::MissingHistory,
             ));
-            bridge.inputs.push_front(input);
-            break;
+            break 'input;
         }
         if let Err(error) = bridge.replication.check_predicted_send(&input) {
             bridge.record_error(EcsReplicationError::Send(error));
-            bridge.inputs.push_front(input);
-            break;
+            break 'input;
         }
-        if let Err(error) = bridge.replication.predict(input.clone()) {
-            bridge.record_error(EcsReplicationError::Prediction(error));
-            bridge.inputs.push_front(input);
-            break;
-        }
-        let _frame = match bridge.rollback.commit(world, input.clone()) {
-            Ok(frame) => frame,
-            Err(error) => {
-                bridge.replication.cancel_last_prediction();
-                bridge.record_error(EcsReplicationError::Rollback(error));
-                bridge.inputs.push_front(input);
-                break;
+        let mut predicted = false;
+        let mut committed = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge
+                .replication
+                .predict(input.clone())
+                .map_err(EcsReplicationError::Prediction)?;
+            predicted = true;
+            let frame = bridge
+                .rollback
+                .commit(world, input.clone())
+                .map_err(EcsReplicationError::Rollback)?;
+            committed = Some(frame);
+            bridge.replication.apply_input_to_world(world, &input);
+            // All user encode/simulate/apply code runs before send publishes a
+            // command. Reliable send only admits to the mux queue, so a refused
+            // send has no remote effect and a retry cannot duplicate a command.
+            bridge
+                .replication
+                .send_predicted(&input)
+                .map_err(EcsReplicationError::Send)?;
+            Ok::<_, EcsReplicationError>(frame)
+        }));
+        let _frame = match result {
+            Ok(Ok(frame)) => frame,
+            failure => {
+                if predicted {
+                    bridge.replication.cancel_last_prediction();
+                }
+                if let Some(frame) = committed {
+                    assert!(
+                        bridge.rollback.abort_commit(world, frame),
+                        "input callback changed rollback infrastructure"
+                    );
+                }
+                match failure {
+                    Ok(Err(error)) => bridge.record_error(error),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                    Ok(Ok(_)) => unreachable!(),
+                }
+                break 'input;
             }
         };
-        if let Err(error) = bridge.replication.send_predicted(&input) {
-            bridge.replication.cancel_last_prediction();
-            bridge.rollback.abort_commit(world, _frame);
-            bridge.record_error(EcsReplicationError::Send(error));
-            bridge.inputs.push_front(input);
-            break;
-        }
+        bridge.rollback.pending = None;
+        bridge.inputs.pop_front();
         #[cfg(feature = "determinism")]
         bridge.sync_audit(world, _frame);
-        bridge.replication.apply_input_to_world(world, &input);
     }
     #[cfg(feature = "determinism")]
     bridge.replication.flush_frame_hashes();
-    world.insert_resource(bridge);
 }
 
 #[cfg(test)]
@@ -592,6 +767,8 @@ mod tests {
     #[cfg(feature = "determinism")]
     mod audit_tests;
 
+    mod panic_tests;
+
     #[test]
     fn ecs_bridge_reconciles_authority_and_replays_pending_inputs() {
         let (client_transport, server_transport) = InMemoryTransport::pair_secure();
@@ -636,8 +813,8 @@ mod tests {
             let bridge = client_app
                 .world_mut()
                 .resource_mut::<EcsReplication<ClientStrategy>>();
-            bridge.queue_input(5);
-            bridge.queue_input(1);
+            bridge.queue_input(5).unwrap();
+            bridge.queue_input(1).unwrap();
         }
 
         for _ in 0..24 {
@@ -725,8 +902,8 @@ mod tests {
             let bridge = client_app
                 .world_mut()
                 .resource_mut::<EcsReplication<ClientStrategy>>();
-            bridge.queue_input(5);
-            bridge.queue_input(1);
+            bridge.queue_input(5).unwrap();
+            bridge.queue_input(1).unwrap();
         }
         for _ in 0..24 {
             client_app.update();
@@ -783,7 +960,8 @@ mod tests {
         world.insert_resource(bridge);
         world
             .resource_mut::<EcsReplication<ClientStrategy>>()
-            .queue_input(5);
+            .queue_input(5)
+            .unwrap();
         drive_ecs_input::<ClientStrategy>(&mut world);
 
         {
@@ -904,5 +1082,227 @@ mod tests {
         assert!(spawned
             .get()
             .is_some_and(|entity| world.get::<Unregistered>(entity).is_none()));
+    }
+
+    #[test]
+    fn network_rebase_executes_callbacks_once_even_for_external_effects() {
+        let mut world = World::new();
+        let entity = world.spawn(Counter(0));
+        world.register_snapshot_component_hashable::<Counter>();
+        world.insert_resource(SnapshotHistory::new(4));
+        let mut driver = NetworkRollbackDriver::new();
+        for input in [1, 2, 3] {
+            driver.commit(&mut world, input).unwrap();
+            world.get_mut::<Counter>(entity).unwrap().0 += input;
+        }
+        let mut authority_calls = 0;
+        let mut replay_calls = Vec::new();
+        driver
+            .rebase_authority(
+                &mut world,
+                1,
+                |world| {
+                    authority_calls += 1;
+                    world.get_mut::<Counter>(entity).unwrap().0 = 10;
+                },
+                |world, input| {
+                    replay_calls.push(*input);
+                    world.get_mut::<Counter>(entity).unwrap().0 += *input;
+                },
+            )
+            .unwrap();
+        assert_eq!(authority_calls, 1);
+        assert_eq!(replay_calls, [2, 3]);
+        assert_eq!(world.get::<Counter>(entity).unwrap().0, 15);
+        assert_eq!(world.resource::<SnapshotHistory>().next_frame(), 3);
+    }
+
+    #[test]
+    fn aborted_capture_recovers_evicted_anchor_and_input_at_every_capacity() {
+        for capacity in [1, 2, 8] {
+            let mut world = World::new();
+            let entity = world.spawn(Counter(0));
+            world.register_snapshot_component_hashable::<Counter>();
+            world.insert_resource(SnapshotHistory::new(capacity));
+            let mut driver = NetworkRollbackDriver::new();
+            for input in 0..32 {
+                driver.commit(&mut world, input).unwrap();
+                world.get_mut::<Counter>(entity).unwrap().0 += input;
+                assert!(driver.inputs().len() <= capacity);
+            }
+            let before_inputs = driver.inputs().to_vec();
+            let before_start = driver.input_start();
+            let history = world.resource::<SnapshotHistory>();
+            let before_frame = history.next_frame();
+            let before_oldest = history.oldest_frame();
+            let hashes: Vec<_> = (before_oldest.unwrap()..before_frame)
+                .map(|frame| history.state_hash(frame))
+                .collect();
+            let before_value = world.get::<Counter>(entity).unwrap().0;
+            let frame = driver.commit(&mut world, 99).unwrap();
+            world.get_mut::<Counter>(entity).unwrap().0 = 999;
+            assert!(driver.abort_commit(&mut world, frame));
+            assert!(!driver.abort_commit(&mut world, frame));
+            let history = world.resource::<SnapshotHistory>();
+            assert_eq!(history.next_frame(), before_frame);
+            assert_eq!(history.oldest_frame(), before_oldest);
+            assert_eq!(
+                (before_oldest.unwrap()..before_frame)
+                    .map(|frame| history.state_hash(frame))
+                    .collect::<Vec<_>>(),
+                hashes
+            );
+            assert_eq!(driver.input_start(), before_start);
+            assert_eq!(driver.inputs(), before_inputs);
+            assert_eq!(world.get::<Counter>(entity).unwrap().0, before_value);
+            assert_eq!(driver.commit(&mut world, 7).unwrap(), frame);
+        }
+    }
+
+    #[test]
+    fn bounded_input_window_rebases_using_absolute_frames() {
+        let mut world = World::new();
+        let entity = world.spawn(Counter(0));
+        world.register_snapshot_component_hashable::<Counter>();
+        world.insert_resource(SnapshotHistory::new(3));
+        let mut driver = NetworkRollbackDriver::new();
+        for input in 0..100 {
+            driver.commit(&mut world, input).unwrap();
+        }
+        assert_eq!(driver.input_start(), 97);
+        assert_eq!(driver.inputs(), [97, 98, 99]);
+        let mut seen = Vec::new();
+        driver
+            .rebase_authority(
+                &mut world,
+                98,
+                |world| world.get_mut::<Counter>(entity).unwrap().0 = 1000,
+                |world, input| {
+                    seen.push(*input);
+                    world.get_mut::<Counter>(entity).unwrap().0 += input;
+                },
+            )
+            .unwrap();
+        assert_eq!(seen, [98, 99]);
+        assert_eq!(world.get::<Counter>(entity).unwrap().0, 1197);
+        assert_eq!(driver.commit(&mut world, 100).unwrap(), 100);
+        assert_eq!(driver.inputs(), [98, 99, 100]);
+    }
+
+    #[test]
+    fn authority_panic_restores_owned_state_and_history_before_unwinding() {
+        let mut world = World::new();
+        let entity = world.spawn(Counter(0));
+        world.register_snapshot_component_hashable::<Counter>();
+        world.insert_resource(SnapshotHistory::new(2));
+        let mut driver = NetworkRollbackDriver::new();
+        driver.commit(&mut world, 1).unwrap();
+        world.get_mut::<Counter>(entity).unwrap().0 = 1;
+        let before_hash = world.resource::<SnapshotHistory>().state_hash(0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = driver.rebase_authority(
+                &mut world,
+                1,
+                |world| {
+                    world.get_mut::<Counter>(entity).unwrap().0 = 900;
+                    panic!("authority callback failed");
+                },
+                |_, _| {},
+            );
+        }));
+        assert!(result.is_err());
+        assert_eq!(world.get::<Counter>(entity).unwrap().0, 1);
+        assert_eq!(
+            world.resource::<SnapshotHistory>().state_hash(0),
+            before_hash
+        );
+        assert_eq!(world.resource::<SnapshotHistory>().next_frame(), 1);
+        assert_eq!(driver.inputs(), [1]);
+    }
+
+    #[test]
+    fn reset_is_transactional_and_accepts_nonzero_baselines() {
+        struct Unregistered;
+        impl Component for Unregistered {}
+        let mut world = World::new();
+        let entity = world.spawn(Counter(0));
+        world.register_snapshot_component_hashable::<Counter>();
+        world.insert_resource(SnapshotHistory::new(2));
+        let mut driver = NetworkRollbackDriver::new();
+        driver.commit(&mut world, 1).unwrap();
+        assert!(matches!(
+            driver.reset(&mut world, 50, |world| {
+                world.spawn(Unregistered);
+            }),
+            Err(EcsRollbackError::MissingSnapshotComponents(_))
+        ));
+        assert_eq!(driver.inputs(), [1]);
+        assert_eq!(world.resource::<SnapshotHistory>().next_frame(), 1);
+        driver
+            .reset(&mut world, 50, |world| {
+                world.get_mut::<Counter>(entity).unwrap().0 = 200;
+            })
+            .unwrap();
+        assert!(driver.inputs().is_empty());
+        assert_eq!(driver.input_start(), 50);
+        assert!(world.resource::<SnapshotHistory>().is_empty());
+        assert_eq!(driver.commit(&mut world, 3).unwrap(), 50);
+        assert_eq!(driver.inputs(), [3]);
+    }
+
+    #[test]
+    fn input_queue_is_bounded_and_one_input_is_admitted_per_fixed_tick() {
+        let (client_transport, server_transport) = InMemoryTransport::pair_secure();
+        let mut world = World::new();
+        let entity = world.spawn(Counter(0));
+        world.register_snapshot_component_hashable::<Counter>();
+        world.insert_resource(SnapshotHistory::new(4));
+        let mut bridge = EcsReplication::new(
+            schema(),
+            4,
+            &seed(),
+            ClientStrategy { entity },
+            Box::new(client_transport),
+        )
+        .unwrap();
+        let mut server = super::super::ServerReplication::new(
+            schema(),
+            4,
+            &seed(),
+            AuthorityStrategy,
+            Box::new(server_transport),
+        )
+        .unwrap();
+        for _ in 0..12 {
+            bridge.replication.pump();
+            server.pump();
+        }
+        for input in [1, 2, 3, 4] {
+            bridge.queue_input(input).unwrap();
+        }
+        assert_eq!(bridge.queue_input(5), Err(5));
+        assert!(matches!(
+            bridge.take_last_error(),
+            Some(EcsReplicationError::InputQueueFull)
+        ));
+        world.insert_resource(bridge);
+        drive_ecs_input::<ClientStrategy>(&mut world);
+        assert_eq!(world.get::<Counter>(entity).unwrap().0, 1);
+        assert_eq!(world.resource::<SnapshotHistory>().next_frame(), 1);
+        assert_eq!(
+            world
+                .resource::<EcsReplication<ClientStrategy>>()
+                .queued_inputs(),
+            3
+        );
+        drive_ecs_input::<ClientStrategy>(&mut world);
+        assert_eq!(world.get::<Counter>(entity).unwrap().0, 3);
+        assert_eq!(world.resource::<SnapshotHistory>().next_frame(), 2);
+        assert_eq!(
+            world
+                .resource::<EcsReplication<ClientStrategy>>()
+                .queued_inputs(),
+            2
+        );
     }
 }
