@@ -9,6 +9,11 @@
 本轮没有可用硬件 adapter，首次完整构建还受到磁盘空间不足阻断，所以该 target
 目前只能标记为“待跨沙盒执行”，不能沿用旧的 shader-module gate 结果冒充输出通过。
 
+本轮同时补齐 RHI `Rgba32Uint` 的格式编号、wgpu 转换、Null 生命周期和硬件 readback
+测试入口。`prism_render_driver` 88 项、Null backend 3 项、wgpu backend 28 项通过；
+`tests/rgba32uint.rs` 的 2 个真实输出用例在当前主机因无 adapter 均明确 `SKIPPED`，
+因此尚未形成本机真实 GPU readback 证据，不能把 CPU/Null 结果当作硬件通过。
+
 ## 2026-10-15 水体 Hybrid 门禁增量
 
 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --test water_hybrid_golden` 在真实 Apple M2 Metal adapter 上完成 adapter/device 获取；当前水面 raster 使用 7 个 bind groups，本机 `max_bind_groups=8`，严格门禁输出明确 `PASS`。
