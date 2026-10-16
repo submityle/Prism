@@ -109,8 +109,8 @@ pub use config::RenderAppConfig;
 pub use device_loss::{DeviceLossSignal, DeviceRecoveryStatus};
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
 pub use ecs_columns::{
-    register_gpu_column, EcsColumnUploadError, EcsColumnUploadStats, EcsResidentColumns,
-    GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
+    register_gpu_column, EcsColumnDiscoveryStats, EcsColumnUploadError, EcsColumnUploadStats,
+    EcsResidentColumns, GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
 };
 pub use frame::{RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT};
 pub use image::GpuImage;
@@ -190,8 +190,8 @@ pub mod prelude {
     pub use crate::config::RenderAppConfig;
     pub use crate::draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
     pub use crate::ecs_columns::{
-        register_gpu_column, EcsColumnUploadError, EcsColumnUploadStats, EcsResidentColumns,
-        GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
+        register_gpu_column, EcsColumnDiscoveryStats, EcsColumnUploadError, EcsColumnUploadStats,
+        EcsResidentColumns, GpuColumnAppExt, GpuColumnSyncReport, ResidentEcsColumn,
     };
     pub use crate::intent::{RenderIntent, RenderViewport};
     pub use crate::label::{Render, RenderApp, RenderStartup};

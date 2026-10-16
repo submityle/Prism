@@ -21,13 +21,10 @@ use std::sync::Arc;
 
 use bytemuck::Pod;
 use prism_app::App;
-use prism_ecs::archetype::ArchetypeId;
+use prism_ecs::archetype::{ArchetypeId, ColumnChangeCursor};
 use prism_ecs::component::{Component, ComponentId, StorageType};
 use prism_ecs::entity::Entity;
-use prism_ecs::gpu_resident::{GpuResidentColumn, GpuUpload};
-use prism_ecs::query::QueryState;
 use prism_ecs::resource::Resource;
-use prism_ecs::storage::TARGET_CHUNK_BYTES;
 use prism_ecs::world::{World, WorldId};
 use prism_render_architecture::gpu_scene::SceneHandle;
 use prism_render_driver::{
@@ -385,6 +382,24 @@ pub struct EcsColumnUploadStats {
     pub allocations: usize,
 }
 
+/// Source-side work of the last successful sync, separate from upload bytes.
+/// Full baseline/restore/log-gap and allocation growth are intentionally NOT
+/// strict change-volume paths. Normal discovery costs O(events since cursor),
+/// with ordered sparse sets adding O(log affected archetypes/chunks) bookkeeping.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EcsColumnDiscoveryStats {
+    /// All source journal events read, including unrelated component writes.
+    pub events_read: usize,
+    /// Discovery table lookups/iteration visits; payload addressing is separate.
+    pub archetypes_visited: usize,
+    /// Indexed chunk candidates checked, including removed/empty candidates.
+    pub chunks_visited: usize,
+    /// Physical typed slices fetched for upload (never full-query iteration).
+    pub payload_chunks_read: usize,
+    /// Full registry rebuilds: first sync, reset, restore or retained-log gap.
+    pub full_rebuilds: usize,
+}
+
 struct OwnedBuffer {
     device: Arc<dyn RenderDevice + Send + Sync>,
     id: BufferId,
@@ -440,17 +455,9 @@ impl ResidentEcsColumn {
 }
 
 struct ColumnState {
-    resident: GpuResidentColumn,
-    chunks: Vec<ChunkState>,
-    buffer: Option<Arc<OwnedBuffer>>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct ChunkState {
-    incarnation: u64,
-    epoch: u64,
     rows: usize,
-    revision: u64,
+    capacity_blocks: usize,
+    buffer: Option<Arc<OwnedBuffer>>,
 }
 
 /// Mirrors one nominated component type, with one buffer per source archetype.
@@ -459,19 +466,21 @@ struct ChunkState {
 /// component-id keyed buffer would alias unrelated archetypes. The render world
 /// can own this cache while `sync` borrows the authoritative source world during
 /// extraction. [`register_gpu_column`] installs automatic plugin synchronization.
-/// GPU copies are dirty-only. Structural validation inspects one structural
-/// epoch, live row count, and column write revision per chunk, without scanning
-/// entity identities or repacking component bytes. A world archetype-generation
-/// change resets the cache before this per-chunk validation, so recreated
-/// physical blocks cannot inherit upload history.
+/// A non-destructive revision journal discovers writes AND structural edits
+/// without scanning clean archetypes/chunks. Independent cursors see same-tick
+/// writes. Structural events also invalidate recycled physical block addresses.
+/// Restore, reset and journal gaps rebuild a full baseline; growth uploads every
+/// live chunk of the affected newly allocated buffer.
 pub struct EcsResidentColumns<T: Component + Pod> {
     device: Arc<dyn RenderDevice + Send + Sync>,
     world_id: WorldId,
     world_generation: u64,
     component: ComponentId,
-    query: QueryState<(Entity, &'static T)>,
+    cursor: Option<ColumnChangeCursor>,
     columns: BTreeMap<ArchetypeId, ColumnState>,
     generation: u64,
+    discovery: EcsColumnDiscoveryStats,
+    marker: PhantomData<T>,
 }
 
 impl<T: Component + Pod> Resource for EcsResidentColumns<T> {}
@@ -483,16 +492,18 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
         world: &mut World,
     ) -> Result<Self, EcsColumnUploadError> {
         validate_layout::<T>()?;
-        let query = world.query::<(Entity, &T)>();
-        let component = world.components().id_of::<T>().expect("query registered T");
+        world.register_component::<T>();
+        let component = world.components().id_of::<T>().expect("registered T");
         Ok(Self {
             device,
             world_id: world.id(),
             world_generation: world.archetype_generation(),
             component,
-            query,
+            cursor: None,
             columns: BTreeMap::new(),
             generation: 0,
+            discovery: EcsColumnDiscoveryStats::default(),
+            marker: PhantomData,
         })
     }
 
@@ -502,7 +513,7 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
             .get(&archetype)
             .map(|column| ResidentEcsColumn {
                 buffer: column.buffer.clone(),
-                rows: column.resident.len(),
+                rows: column.rows,
                 stride: size_of::<T>(),
             })
     }
@@ -512,6 +523,13 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
     /// data. Previously exported views retain their own allocations.
     pub fn reset(&mut self) {
         self.columns.clear();
+        self.cursor = None;
+    }
+
+    /// Discovery and addressed-fetch operation counts for the last successful
+    /// sync. An idle successful frame reports all zeros, not merely zero uploads.
+    pub fn discovery_stats(&self) -> EcsColumnDiscoveryStats {
+        self.discovery
     }
 
     /// Reset after device replacement. Pass the replacement device's queue to
@@ -546,19 +564,59 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
             .capabilities()
             .limits
             .max_storage_buffer_binding_size;
-        // Validate all capacities before acknowledging any column's dirty bits.
-        for archetype in world.archetypes().iter() {
+        let changes =
+            world
+                .archetypes()
+                .column_changes_since(if replaced { None } else { self.cursor });
+        let mut discovery = EcsColumnDiscoveryStats {
+            events_read: changes.events.len(),
+            full_rebuilds: usize::from(changes.gap),
+            ..Default::default()
+        };
+        let mut affected: BTreeMap<ArchetypeId, BTreeSet<usize>> = BTreeMap::new();
+        if changes.gap {
+            for archetype in world.archetypes().iter() {
+                discovery.archetypes_visited += 1;
+                if archetype.table().column(self.component).is_some() {
+                    affected.insert(archetype.id(), BTreeSet::new());
+                }
+            }
+        } else {
+            for event in &changes.events {
+                if event.component.is_none() || event.component == Some(self.component) {
+                    let chunks = affected.entry(event.archetype).or_default();
+                    if let Some(chunk) = event.chunk {
+                        chunks.insert(chunk);
+                    }
+                }
+            }
+        }
+
+        // Validate ALL affected capacities before mutating state/acknowledging
+        // the cursor. An error is retryable without silently losing the delta.
+        let mut capacities = BTreeMap::new();
+        for &id in affected.keys() {
+            discovery.archetypes_visited += 1;
+            let Some(archetype) = world.archetypes().get(id) else {
+                continue;
+            };
             let table = archetype.table();
-            if table.column(self.component).is_none() || stride == 0 {
+            if table.column(self.component).is_none() {
                 continue;
             }
-            let required = table.len().div_ceil(table.rows_per_chunk());
+            // Prewarm can reserve arbitrarily many empty CPU blocks. Only live
+            // row windows need GPU capacity (or validation against its limit).
+            let required = if stride == 0 {
+                0
+            } else {
+                table.len().div_ceil(table.rows_per_chunk())
+            };
             let previous = if replaced {
                 0
             } else {
                 self.columns
-                    .get(&archetype.id())
-                    .map_or(0, |column| column.resident.gpu_capacity_blocks())
+                    .get(&id)
+                    .map_or(0, |column| column.capacity_blocks)
             };
             let capacity = if required > previous {
                 required
@@ -574,63 +632,37 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
             if bytes as u64 > limit {
                 return Err(EcsColumnUploadError::CapacityExceeded);
             }
+            capacities.insert(id, capacity);
         }
 
         if replaced {
             self.reset();
             self.world_generation = world.archetype_generation();
         }
-        let mut plans: BTreeMap<ArchetypeId, GpuUpload> = BTreeMap::new();
         let mut stats = EcsColumnUploadStats::default();
-        self.columns.retain(|id, _| {
-            world
-                .archetypes()
-                .get(*id)
-                .is_some_and(|archetype| archetype.table().column(self.component).is_some())
-        });
-        for archetype in world.archetypes().iter() {
-            let table = archetype.table();
-            let Some(column) = table.column(self.component) else {
+        for (id, chunks) in affected {
+            discovery.archetypes_visited += 1;
+            let Some(archetype) = world.archetypes().get(id) else {
                 continue;
             };
-            let state = self
-                .columns
-                .entry(archetype.id())
-                .or_insert_with(|| ColumnState {
-                    resident: GpuResidentColumn::new(stride, table.rows_per_chunk()),
-                    chunks: Vec::new(),
-                    buffer: None,
-                });
-            state.resident.truncate(table.len());
-            state.resident.ensure_len(table.len());
+            let table = archetype.table();
+            let Some(&capacity) = capacities.get(&id) else {
+                continue;
+            };
+            let initialize = changes.gap || !self.columns.contains_key(&id);
+            let state = self.columns.entry(id).or_insert_with(|| ColumnState {
+                rows: 0,
+                capacity_blocks: 0,
+                buffer: None,
+            });
+            state.rows = table.len();
             if stride == 0 {
                 continue; // markers have rows, but never allocate or upload
             }
-            for (chunk_index, chunk) in table.iter_chunks().enumerate() {
-                if chunk.rows == 0 {
-                    continue; // reserved physical blocks need not contain rows
-                }
-                let current = ChunkState {
-                    incarnation: chunk.incarnation,
-                    epoch: chunk.meta.structural_epoch(),
-                    rows: chunk.rows,
-                    revision: column.chunk_revision(chunk_index),
-                };
-                let changed = state.chunks.get(chunk_index) != Some(&current);
-                if changed {
-                    state.resident.mark_range(chunk.first_row, chunk.rows);
-                }
-                if chunk_index == state.chunks.len() {
-                    state.chunks.push(current);
-                } else if changed {
-                    state.chunks[chunk_index] = current;
-                }
-            }
-            state.chunks.truncate(table.chunk_count());
-            let plan = state.resident.take_upload_plan();
-            if let Some(allocation) = plan.reallocate {
+            let reallocate = capacity > state.capacity_blocks;
+            if reallocate {
                 self.generation += 1;
-                let capacity_bytes = allocation.capacity_bytes as u64;
+                let capacity_bytes = (capacity * table.rows_per_chunk() * stride) as u64;
                 let mut descriptor = BufferDescriptor::new(
                     capacity_bytes,
                     BufferUsages::STORAGE
@@ -651,46 +683,37 @@ impl<T: Component + Pod> EcsResidentColumns<T> {
                     generation: self.generation,
                 }));
                 stats.allocations += 1;
+                state.capacity_blocks = capacity;
             }
-            if !plan.spans.is_empty() {
-                plans.insert(archetype.id(), plan);
-            }
-        }
-
-        if !plans.is_empty() {
-            // K exceeds every nonzero component's physical chunk row count.
-            // Entity's first row identifies each slice without relying on query
-            // archetype ordering. `cast_slice` is safe because T is Pod.
-            for (entities, values) in self.query.simd_iter::<TARGET_CHUNK_BYTES>(world) {
-                let location = world
-                    .entities()
-                    .location(entities[0])
-                    .expect("live slice entity");
-                let Some(plan) = plans.get(&location.archetype_id) else {
+            // Explicit baseline/growth visits live windows directly, without
+            // materializing a dense set or traversing prewarmed empty blocks.
+            // The normal path only checks deduplicated journal candidates,
+            // including removed tails so their live row extent stays current.
+            let full = initialize || reallocate;
+            let live_chunks = if full {
+                table.len().div_ceil(table.rows_per_chunk())
+            } else {
+                0
+            };
+            for chunk_index in (0..live_chunks).chain(chunks.into_iter().filter(|_| !full)) {
+                discovery.chunks_visited += 1;
+                let Some(values) = world.column_chunk::<T>(id, chunk_index) else {
                     continue;
                 };
-                let start = location.row as usize * stride;
+                discovery.payload_chunks_read += 1;
                 let bytes = bytemuck::cast_slice(values);
-                let end = start + bytes.len();
-                let first = plan
-                    .spans
-                    .partition_point(|span| span.byte_offset + span.byte_len <= start);
-                for span in &plan.spans[first..] {
-                    if span.byte_offset >= end {
-                        break;
-                    }
-                    let from = start.max(span.byte_offset);
-                    let to = end.min(span.byte_offset + span.byte_len);
-                    let buffer = self.columns[&location.archetype_id]
-                        .buffer
-                        .as_ref()
-                        .expect("allocated upload");
-                    queue.write_buffer(buffer.id, from as u64, &bytes[from - start..to - start]);
-                    stats.upload_calls += 1;
-                    stats.uploaded_bytes += (to - from) as u64;
-                }
+                let buffer = state.buffer.as_ref().expect("allocated upload");
+                queue.write_buffer(
+                    buffer.id,
+                    (chunk_index * table.rows_per_chunk() * stride) as u64,
+                    bytes,
+                );
+                stats.upload_calls += 1;
+                stats.uploaded_bytes += bytes.len() as u64;
             }
         }
+        self.cursor = Some(changes.cursor);
+        self.discovery = discovery;
         Ok(stats)
     }
 }
