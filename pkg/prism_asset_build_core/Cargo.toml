@@ -17,6 +17,7 @@ prism_asset_container = { path = "../prism_asset_container" }
 prism_mesh = { path = "../prism_mesh" }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_driver = { path = "../prism_render_driver" }
+prism_tasks = { path = "../prism_tasks" }
 rustix = { version = "1.1.5", features = ["fs"] }
 tempfile = "3.27"
 

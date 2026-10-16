@@ -10,13 +10,14 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use prism_tasks::{Counter, TaskPool};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Mutex;
-use std::thread::{self, JoinHandle};
 
 const BAKE_KEY_PROTOCOL_VERSION: u32 = 1;
+const MAX_BAKE_WORKERS: usize = 64;
 
 /// Caller-supplied stable identity for the input represented by a bake request.
 ///
@@ -322,7 +323,6 @@ impl CancellationToken {
 pub struct BakeHandle {
     receiver: Receiver<Result<BakeResult, BakeError>>,
     control: Arc<JobControl>,
-    worker: Option<JoinHandle<()>>,
 }
 
 impl BakeHandle {
@@ -331,18 +331,11 @@ impl BakeHandle {
         self.control.request_cancel()
     }
 
-    /// Waits for the worker and returns the sole result message.
-    pub fn wait(mut self) -> Result<BakeResult, BakeError> {
-        let result = self
-            .receiver
+    /// Waits for the pool task and returns the sole result message.
+    pub fn wait(self) -> Result<BakeResult, BakeError> {
+        self.receiver
             .recv()
-            .unwrap_or(Err(BakeError::WorkerDisconnected));
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            return Err(BakeError::KernelPanicked);
-        }
-        result
+            .unwrap_or(Err(BakeError::WorkerDisconnected))
     }
 }
 
@@ -429,6 +422,7 @@ pub struct BakeService {
     max_in_flight: usize,
     in_flight: Arc<AtomicUsize>,
     kernel: Arc<dyn BakeKernel>,
+    pool: Arc<TaskPool>,
 }
 
 impl BakeService {
@@ -444,6 +438,9 @@ impl BakeService {
             max_in_flight,
             in_flight: Arc::new(AtomicUsize::new(0)),
             kernel,
+            pool: Arc::new(TaskPool::with_threads(
+                max_in_flight.clamp(1, MAX_BAKE_WORKERS),
+            )),
         })
     }
 
@@ -469,53 +466,48 @@ impl BakeService {
         let control = Arc::new(JobControl::new());
         let worker_control = Arc::clone(&control);
         let worker_kernel = Arc::clone(&self.kernel);
-        let worker = thread::Builder::new()
-            .name("prism-bake".to_owned())
-            .spawn(move || {
-                let _permit = permit;
-                let cancellation = CancellationToken {
-                    control: Arc::clone(&worker_control),
-                };
-                let outcome = if cancellation.is_cancelled() {
-                    Err(BakeError::Cancelled)
-                } else {
-                    match catch_unwind(AssertUnwindSafe(|| {
-                        worker_kernel.bake(&request, &cancellation)
-                    })) {
-                        Ok(Ok(output_bytes)) => {
-                            if cancellation.is_cancelled() {
-                                Err(BakeError::Cancelled)
-                            } else {
-                                let key = request.request_key();
-                                let descriptor = BakeDescriptor {
-                                    key,
-                                    kind: request.output_kind,
-                                    schema: request.output_schema,
-                                    content_hash: ContentHash::digest(&output_bytes),
-                                    byte_len: output_bytes.len() as u64,
-                                    alignment: request.output_alignment,
-                                };
-                                Ok(BakeResult {
-                                    key,
-                                    descriptor,
-                                    output_bytes,
-                                })
-                            }
+        let pool = Arc::clone(&self.pool);
+        let counter = Counter::new();
+        pool.spawn(&counter, move || {
+            let _permit = permit;
+            let cancellation = CancellationToken {
+                control: Arc::clone(&worker_control),
+            };
+            let outcome = if cancellation.is_cancelled() {
+                Err(BakeError::Cancelled)
+            } else {
+                match catch_unwind(AssertUnwindSafe(|| {
+                    worker_kernel.bake(&request, &cancellation)
+                })) {
+                    Ok(Ok(output_bytes)) => {
+                        if cancellation.is_cancelled() {
+                            Err(BakeError::Cancelled)
+                        } else {
+                            let key = request.request_key();
+                            let descriptor = BakeDescriptor {
+                                key,
+                                kind: request.output_kind,
+                                schema: request.output_schema,
+                                content_hash: ContentHash::digest(&output_bytes),
+                                byte_len: output_bytes.len() as u64,
+                                alignment: request.output_alignment,
+                            };
+                            Ok(BakeResult {
+                                key,
+                                descriptor,
+                                output_bytes,
+                            })
                         }
-                        Ok(Err(error)) => Err(BakeError::Kernel(error)),
-                        Err(_) => Err(BakeError::KernelPanicked),
                     }
-                };
-                if let Some(outcome) = worker_control.outcome(outcome) {
-                    let _ = sender.send(outcome);
+                    Ok(Err(error)) => Err(BakeError::Kernel(error)),
+                    Err(_) => Err(BakeError::KernelPanicked),
                 }
-            })
-            .map_err(|_| BakeError::WorkerStart)?;
-        Ok(BakeHandle {
-            receiver,
-            control,
-            worker: Some(worker),
-        })
+            };
+            if let Some(outcome) = worker_control.outcome(outcome) {
+                let _ = sender.send(outcome);
+            }
+        });
+        Ok(BakeHandle { receiver, control })
     }
 
     fn try_acquire(&self) -> Option<InFlightPermit> {
