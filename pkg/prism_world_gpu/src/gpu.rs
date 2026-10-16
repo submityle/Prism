@@ -26,6 +26,8 @@ pub(crate) const WORKGROUP_SIZE: u32 = 64;
 pub enum GpuAcquireError {
     /// The adapter request itself returned an error.
     Adapter(String),
+    /// An adapter existed, but it was not evidence of physical GPU hardware.
+    NonHardware(AdapterEvidence),
     /// An adapter existed but could not create a logical device.
     Device(String),
 }
@@ -34,6 +36,12 @@ impl std::fmt::Display for GpuAcquireError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Adapter(message) => write!(formatter, "adapter request failed: {message}"),
+            Self::NonHardware(evidence) => {
+                write!(
+                    formatter,
+                    "adapter is not physical-GPU evidence: {evidence:?}"
+                )
+            }
             Self::Device(message) => write!(formatter, "device request failed: {message}"),
         }
     }
@@ -58,6 +66,44 @@ pub struct AdapterEvidence {
     pub driver_info: String,
     /// Required features for this contract; empty means no optional feature is hidden.
     pub required_features: String,
+}
+
+impl AdapterEvidence {
+    /// Returns whether this evidence is sufficient for a physical-GPU claim.
+    ///
+    /// CPU, virtual and unknown adapter classes are intentionally rejected;
+    /// the world GPU parity paths must not silently turn software execution
+    /// into hardware evidence.
+    #[must_use]
+    pub fn is_hardware(&self) -> bool {
+        matches!(self.device_type.as_str(), "IntegratedGpu" | "DiscreteGpu")
+    }
+}
+
+#[cfg(test)]
+mod adapter_evidence_tests {
+    use super::*;
+
+    fn evidence(device_type: &str) -> AdapterEvidence {
+        AdapterEvidence {
+            backend: "Metal".into(),
+            device_type: device_type.into(),
+            vendor: 1,
+            device: "test adapter".into(),
+            driver: "test driver".into(),
+            driver_info: "test driver info".into(),
+            required_features: "Features(0x0)".into(),
+        }
+    }
+
+    #[test]
+    fn only_integrated_and_discrete_adapters_are_hardware_evidence() {
+        assert!(evidence("IntegratedGpu").is_hardware());
+        assert!(evidence("DiscreteGpu").is_hardware());
+        assert!(!evidence("Cpu").is_hardware());
+        assert!(!evidence("VirtualGpu").is_hardware());
+        assert!(!evidence("Other").is_hardware());
+    }
 }
 
 /// Resource and host wall-clock measurements for one real-device evaluation.
@@ -130,6 +176,19 @@ impl GpuContext {
             instance.request_adapter(&RequestAdapterOptions::default()),
         )
         .map_err(|error| GpuAcquireError::Adapter(error.to_string()))?;
+        let adapter_info = adapter.get_info();
+        let evidence = AdapterEvidence {
+            backend: format!("{:?}", adapter_info.backend),
+            device_type: format!("{:?}", adapter_info.device_type),
+            vendor: adapter_info.vendor,
+            device: adapter_info.name.clone(),
+            driver: adapter_info.driver.clone(),
+            driver_info: adapter_info.driver_info.clone(),
+            required_features: format!("{:?}", Features::empty()),
+        };
+        if !evidence.is_hardware() {
+            return Err(GpuAcquireError::NonHardware(evidence));
+        }
         let descriptor = DeviceDescriptor {
             label: Some("prism_world_gpu_device"),
             required_features: Features::empty(),
