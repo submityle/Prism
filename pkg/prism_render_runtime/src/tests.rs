@@ -770,10 +770,13 @@ fn pacer_bounds_frames_in_flight_and_drains() {
             rt.frames_in_flight()
         );
     }
-    assert_eq!(
-        rt.frames_in_flight(),
-        MAX_IN_FLIGHT,
-        "after more frames than the bound, the pipeline stays exactly full"
+    // A real backend may complete work before the next submission is made;
+    // the contract is an upper bound, not a requirement to keep the queue
+    // artificially full. The Null backend has deterministic exact-depth
+    // coverage in the retirement tests below.
+    assert!(
+        rt.frames_in_flight() <= MAX_IN_FLIGHT,
+        "the backend may retire early, but must never exceed the configured bound"
     );
 
     assert!(rt.wait_idle(), "wait_idle confirms every outstanding frame");

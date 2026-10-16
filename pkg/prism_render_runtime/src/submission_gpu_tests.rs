@@ -203,6 +203,24 @@ fn assert_backend_slots_retired(runtime: &WgpuRuntime, retired: [rhi::BufferId; 
     }
 }
 
+fn assert_backend_slot_retired(runtime: &WgpuRuntime, retired: rhi::BufferId) {
+    let replacement = runtime.device().create_buffer(&rhi::BufferDescriptor {
+        label: Some("retired-history-slot-probe".into()),
+        size: BUFFER_SIZE,
+        usage: rhi::BufferUsages::COPY_SRC | rhi::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    assert_eq!(replacement.index(), retired.index());
+    assert_eq!(
+        replacement.generation(),
+        retired
+            .generation()
+            .checked_add(1)
+            .expect("fresh device generation")
+    );
+    runtime.device().destroy_buffer(replacement);
+}
+
 fn history_consumer_graph(
     runtime: &WgpuRuntime,
     source: rhi::BufferId,
@@ -345,14 +363,12 @@ fn execute_prepared_owned_gpu_imports_completed_history_and_reads_it_back() {
         .iter()
         .find_map(|(_, lifetime, id)| (*lifetime == Lifetime::Persistent).then_some(*id))
         .expect("producer must retain a persistent history buffer");
-    eprintln!("producer buffers before wait: {:?}", producer.allocations().buffers());
 
     // The first frame must be complete before its persistent storage is used as
     // an imported history input. The producer owner is intentionally retained
     // and then passed explicitly to the consumer's completion owner.
     assert!(runtime.wait_idle());
     assert_eq!(runtime.completed_value(), producer_value);
-    eprintln!("producer buffers after wait: {:?}", producer.allocations().buffers());
     assert_payload(&runtime, history);
 
     let prepared = history_consumer_graph(&runtime, history, readback);
@@ -366,11 +382,11 @@ fn execute_prepared_owned_gpu_imports_completed_history_and_reads_it_back() {
     assert!(consumer.is_complete());
     assert_payload(&runtime, readback);
 
-    // The source owner is retained by the consumer until its actual completion,
-    // but imported buffers never become graph-owned allocations. Both external
-    // imports remain valid and are cleaned up only by this test.
+    // The source owner is retained by the consumer until its actual completion.
+    // Once the consumer completes, its retained producer is released and the
+    // graph-owned persistent history is retired; only external imports remain.
     drop(consumer);
-    assert_payload(&runtime, history);
+    assert_backend_slot_retired(&runtime, history);
     assert_payload(&runtime, upload);
     assert_payload(&runtime, readback);
     runtime.device().destroy_buffer(upload);
