@@ -29,6 +29,13 @@ single directly supplied kernel. Use `new_with_cache` for bounded caching and
 `new_with_registry` when unknown stable kernel IDs must be rejected. The
 registry is caller-owned and injected; there is no implicit global registry.
 
+`BakeService::submit_dirty` consumes a validated `BuildGraph` and `DirtySet`:
+it filters the graph's stable dependency order, requires a request for every
+selected job, and returns handles in that same order. It does not create a
+waiting queue, so the normal in-flight bound and `QueueFull` behavior remain
+visible to the caller. Duplicate request keys still share one kernel
+execution, and the existing cancellation and cache publication rules apply.
+
 `BakeService` is not the offline `BuildExecutor`, an unbounded job queue, a
 remote service, or a substitute for a Bake Kernel. Kernels are expected to be
 pure and deterministic for their declared inputs. Cancellation is cooperative:

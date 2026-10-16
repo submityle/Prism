@@ -6,6 +6,9 @@
 //! full service rejects immediately; it does not create an unbounded waiting
 //! queue.
 
+use crate::dirty::DirtySet;
+use crate::graph::{BuildError, BuildGraph};
+use crate::job::JobId;
 use crate::types::{ArtifactKey, ContentHash};
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -513,6 +516,57 @@ impl fmt::Display for BakeError {
 
 impl std::error::Error for BakeError {}
 
+/// Failure while selecting or submitting a dirty `RuntimeDerived` bake plan.
+#[derive(Debug)]
+pub enum DirtyBakeError {
+    /// The graph or dirty set could not produce a valid deterministic order.
+    Graph(BuildError),
+    /// A graph job in the dirty set has no corresponding bake request.
+    MissingRequest(JobId),
+    /// The request map names a job that is not present in the graph.
+    UnknownRequestJob(JobId),
+    /// One selected request was rejected by [`BakeService::submit`].
+    Bake {
+        /// The graph job whose request was rejected.
+        job: JobId,
+        /// The underlying single-request admission or execution error.
+        source: BakeError,
+    },
+}
+
+impl fmt::Display for DirtyBakeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Graph(error) => write!(formatter, "dirty bake graph failed: {error}"),
+            Self::MissingRequest(job) => {
+                write!(formatter, "dirty bake job {} has no request", job.0)
+            }
+            Self::UnknownRequestJob(job) => {
+                write!(formatter, "bake request names unknown job {}", job.0)
+            }
+            Self::Bake { job, source } => {
+                write!(formatter, "dirty bake job {} was rejected: {source}", job.0)
+            }
+        }
+    }
+}
+
+impl std::error::Error for DirtyBakeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Graph(error) => Some(error),
+            Self::Bake { source, .. } => Some(source),
+            Self::MissingRequest(_) | Self::UnknownRequestJob(_) => None,
+        }
+    }
+}
+
+impl From<BuildError> for DirtyBakeError {
+    fn from(value: BuildError) -> Self {
+        Self::Graph(value)
+    }
+}
+
 /// Descriptor for an owned, in-memory runtime-derived result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BakeDescriptor {
@@ -1019,6 +1073,50 @@ impl BakeService {
             key,
             jobs: Arc::clone(&self.jobs),
         })
+    }
+
+    /// Selects dirty graph jobs in deterministic dependency order and submits
+    /// their `RuntimeDerived` requests through this service.
+    ///
+    /// The returned vector preserves the graph order, independent of worker
+    /// completion order. The request map must contain exactly graph jobs (it
+    /// may omit unaffected jobs); every selected dirty job must have a request.
+    /// This method does not add a waiting queue: the service's normal bounded
+    /// admission and `QueueFull` behavior still applies.
+    pub fn submit_dirty(
+        &self,
+        graph: &BuildGraph,
+        dirty: &DirtySet,
+        requests: &BTreeMap<JobId, BakeRequest>,
+    ) -> Result<Vec<(JobId, BakeHandle)>, DirtyBakeError> {
+        let order = graph.dirty_execution_order(dirty)?;
+        for &job in requests.keys() {
+            if graph.job(job).is_none() {
+                return Err(DirtyBakeError::UnknownRequestJob(job));
+            }
+        }
+        for &job in &order {
+            let request = requests
+                .get(&job)
+                .ok_or(DirtyBakeError::MissingRequest(job))?;
+            request.validate().map_err(|source| DirtyBakeError::Bake {
+                job,
+                source: BakeError::InvalidRequest(source),
+            })?;
+        }
+
+        order
+            .into_iter()
+            .map(|job| {
+                let request = requests
+                    .get(&job)
+                    .expect("dirty bake requests were validated above")
+                    .clone();
+                self.submit(request)
+                    .map(|handle| (job, handle))
+                    .map_err(|source| DirtyBakeError::Bake { job, source })
+            })
+            .collect()
     }
 
     fn try_acquire(&self) -> Option<InFlightPermit> {

@@ -71,8 +71,8 @@ pub mod virtual_geometry_payload;
 pub use bake::{
     BakeDescriptor, BakeError, BakeHandle, BakeKernel, BakeKernelDispatch, BakeKernelRegistry,
     BakeRequest, BakeResult, BakeService, BakeServiceConfigError, CancellationToken,
-    InvalidRequest, KernelDispatchError, KernelError, KernelRegistryError, RuntimeCacheConfig,
-    RuntimeCacheStats, StableInputKey,
+    DirtyBakeError, InvalidRequest, KernelDispatchError, KernelError, KernelRegistryError,
+    RuntimeCacheConfig, RuntimeCacheStats, StableInputKey,
 };
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcCapacity, DdcError, DdcEviction, DerivedDataCache, LocalDdc};

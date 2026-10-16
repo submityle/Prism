@@ -12,6 +12,8 @@ pub enum BuildError {
     DuplicateJob(JobId),
     MissingDependency { job: JobId, dependency: JobId },
     Cycle { jobs: Vec<JobId> },
+    /// A dirty plan contains a job that is absent from this graph.
+    UnknownDirtyJob(JobId),
     ProcessorFailed { job: JobId, source: ProcessorError },
     InvalidConcurrency,
 }
@@ -26,6 +28,9 @@ impl fmt::Display for BuildError {
                 job.0, dependency.0
             ),
             Self::Cycle { jobs } => write!(f, "build graph contains a cycle involving {jobs:?}"),
+            Self::UnknownDirtyJob(id) => {
+                write!(f, "dirty set references unknown build job {}", id.0)
+            }
             Self::ProcessorFailed { job, source } => {
                 write!(f, "build job {} failed: {source}", job.0)
             }
@@ -99,6 +104,9 @@ impl BuildGraph {
         &self,
         dirty: &crate::dirty::DirtySet,
     ) -> Result<Vec<JobId>, BuildError> {
+        if let Some(id) = dirty.jobs().find(|id| self.job(*id).is_none()) {
+            return Err(BuildError::UnknownDirtyJob(id));
+        }
         Ok(self
             .execution_order()?
             .into_iter()
