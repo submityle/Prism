@@ -8,16 +8,16 @@
 
 `prism_render_scene` 是**一个编译单元**：把某个文件的 `RenderDevice` 换成 RHI trait，会立刻打断所有调用点的类型一致性。因此移植按「切片」推进，每片内部自洽、可独立编译与回归；片内不再用 bevy_render。
 
-### 1.1 已证实的硬约束（2026-10-12 勘察）
+### 1.1 设备接入与整体移植的区别（2026-10-16 复核）
 
-1. **不存在「小步可编译」的切法**：crate 是单个编译单元，任何设备/资源类型变更都会打断全 crate 的类型一致；shader 侧的 `bevy_render::maths` / `bevy_render::utils` 也依赖生产着色器系统，无法单独抽走。
-2. **换 RHI 等于换宿主**：它的渲染世界是 `bevy_ecs + bevy_app + bevy_render::{RenderApp, ExtractSchedule, Render, RenderSystems}` 模型；换 RHI 必须同时换成 `prism_app/prism_ecs` 的 render sub-app（+ `prism_asset` 等）。这是整机架构 port，不是「换依赖行」。
-3. **桥接过渡不通**：bevy 的 `RenderQueue` / `RenderAdapter` 是私有字段（只有 `RenderDevice::wgpu_device()` 暴露 device，queue/adapter 没有），拿不到 wgpu 队列复用同一设备；另开 Prism 设备则是**双设备**，跨设备资源不可用，中途必错。
+1. **资源类型替换必须协调消费者**：crate 是单个编译单元，直接替换通用设备/资源类型会影响所有调用点；但新增同宿主设备的桥接层可独立编译，不需要先替换全部着色器与 ECS 宿主。
+2. **整体脱离 Bevy 不等于接入 RHI**：当前渲染世界仍是 `bevy_ecs + bevy_app + bevy_render::{RenderApp, ExtractSchedule, Render, RenderSystems}`。在该宿主内录制 RHI 命令与最终替换整个宿主是不同工作，不能把整体 port 当成桥接的先决条件。
+3. **同设备桥接可行**：`RenderQueue` / `RenderAdapter` 虽然包装私有字段，却通过 `wgpu_wrapper!` 实现原生 `Deref`；配合 `RenderDevice::wgpu_device()` 可 clone 宿主原始三元组。`WgpuDevice::adopt` 保留宿主 callback，`WgpuQueue::encode` 只录制，由宿主提交。独立创建的 `PrismGpu` 不能替代该三元组，跨设备资源仍不可交换。实现与 20 项严格硬件测试见 `wgpu_native_interop_implementation_zh.md`。
 
 4. **只删 `bevy_render` 一行做不到（2026-10-12 复核）**：`prism_render_scene` 还依赖 `bevy_pbr` 与 `bevy_core_pipeline`，而这两个 crate **自身直接依赖 `bevy_render`**（`crates/bevy_pbr/Cargo.toml:61`、`crates/bevy_core_pipeline/Cargo.toml:32`）。因此即便把 crate 里的 `bevy_render::*` 全部改掉、删掉那行依赖，`bevy_render` 仍会经 `bevy_pbr`/`bevy_core_pipeline` 传递进来。
    **推论**：要让 pkg 不再依赖 `bevy_render`，必须同时替换 `bevy_pbr`（PBR 管线）与 `bevy_core_pipeline`（核心 pass），也就是要先把它们的功能落到 Prism 侧（其余 `bevy_mesh/image/camera/light/material/color/asset` 同理，只是它们不直接拉 `bevy_render`）。这已经是「prism_render_scene 整体脱 Bevy」的范围。
 
-**推论**：只能整机 port。工作模式二选一——
+**整体脱离 Bevy 的工作模式**（不限制同设备桥接的增量接入）：
 
 - **A 就地 port**：`prism_render_scene` 红若干轮，期间 `--workspace` 构建不可用，port 完成才转绿。
 - **B 隔离 port**：独立 worktree/分支里 port，主工作区始终可编译，完成后合回（推荐）。

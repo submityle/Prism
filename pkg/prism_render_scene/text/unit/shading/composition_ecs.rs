@@ -33,12 +33,21 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue, RenderDevice)> {
     eprintln!("resident ECS adapter: {:?}", adapter.get_info());
     let limits = adapter.limits();
     let hdr_usage = adapter
-        .get_texture_format_features(wgpu::TextureFormat::Rgba16Float)
+        .get_texture_format_features(SCENE_COLOR_FORMAT)
         .allowed_usages;
     let visibility_usage = adapter
-        .get_texture_format_features(wgpu::TextureFormat::Rgba32Uint)
+        .get_texture_format_features(VISIBILITY_ID_FORMAT)
         .allowed_usages;
-    if let Some(error) = capability_error(limits, hdr_usage, visibility_usage) {
+    let motion_usage = adapter
+        .get_texture_format_features(super::super::resources::MOTION_VECTOR_FORMAT)
+        .allowed_usages;
+    if let Some(error) = capability_error(
+        adapter.features(),
+        limits,
+        hdr_usage,
+        visibility_usage,
+        motion_usage,
+    ) {
         assert!(
             std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
             "PRISM_REQUIRE_GPU set: resident ECS capability gate failed: {error}"
@@ -46,7 +55,14 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue, RenderDevice)> {
         eprintln!("resident ECS GPU skipped: {error}");
         return None;
     }
-    let (device, queue) = match block_on(adapter.request_device(&Default::default())) {
+    // prepare_visibility_buffers allocates the production Rg16Float storage
+    // texture as well as the composition targets. Match Bevy's format feature
+    // request; default WebGPU features alone do not admit that storage format.
+    let descriptor = wgpu::DeviceDescriptor {
+        required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+        ..Default::default()
+    };
+    let (device, queue) = match block_on(adapter.request_device(&descriptor)) {
         Ok(device_queue) => device_queue,
         Err(error) => {
             assert!(
@@ -61,12 +77,17 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue, RenderDevice)> {
 }
 
 fn capability_error(
-    limits: wgpu::Limits,
-    hdr_usage: wgpu::TextureUsages,
-    visibility_usage: wgpu::TextureUsages,
+    features: wgpu::Features,
+    limits: Limits,
+    hdr_usage: TextureUsages,
+    visibility_usage: TextureUsages,
+    motion_usage: TextureUsages,
 ) -> Option<String> {
-    let required_visibility =
-        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT;
+    let required_visibility = TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
+    let required_storage = TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
+    if !features.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
+        return Some("Rg16Float storage needs TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES".into());
+    }
     if limits.max_compute_invocations_per_workgroup < 64
         || limits.max_compute_workgroup_size_x < 64
         || limits.max_compute_workgroup_size_y < 8
@@ -75,9 +96,9 @@ fn capability_error(
             "resident ECS composition needs compute workgroup 64x1 and HDR bridge 8x8; adapter limits are {limits:?}"
         ));
     }
-    if !hdr_usage.contains(wgpu::TextureUsages::STORAGE_BINDING) {
+    if !hdr_usage.contains(required_storage) {
         return Some(format!(
-            "Rgba16Float lacks STORAGE_BINDING; allowed usages are {hdr_usage:?}"
+            "Rgba16Float lacks TEXTURE_BINDING|STORAGE_BINDING; allowed usages are {hdr_usage:?}"
         ));
     }
     if !visibility_usage.contains(required_visibility) {
@@ -85,20 +106,63 @@ fn capability_error(
             "Rgba32Uint lacks TEXTURE_BINDING|RENDER_ATTACHMENT; allowed usages are {visibility_usage:?}"
         ));
     }
+    if !motion_usage.contains(required_storage | TextureUsages::RENDER_ATTACHMENT) {
+        return Some(format!(
+            "Rg16Float lacks TEXTURE_BINDING|STORAGE_BINDING|RENDER_ATTACHMENT; allowed usages are {motion_usage:?}"
+        ));
+    }
     None
 }
 
 #[test]
 fn resident_ecs_capability_gate_rejects_undersized_workgroups() {
-    let mut limits = wgpu::Limits::default();
+    let mut limits = Limits::default();
     limits.max_compute_workgroup_size_x = 63;
     let error = capability_error(
+        wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
         limits,
-        wgpu::TextureUsages::STORAGE_BINDING,
-        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
+        TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
+        TextureUsages::TEXTURE_BINDING
+            | TextureUsages::STORAGE_BINDING
+            | TextureUsages::RENDER_ATTACHMENT,
     )
     .expect("workgroup x=63 must be rejected before device use");
     assert!(error.contains("workgroup"));
+}
+
+#[test]
+fn resident_ecs_capability_gate_requires_motion_storage_feature_and_usage() {
+    let storage = TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
+    let visibility = TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
+    let feature = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+    let missing_feature = capability_error(
+        wgpu::Features::empty(),
+        Limits::default(),
+        storage,
+        visibility,
+        storage | TextureUsages::RENDER_ATTACHMENT,
+    )
+    .unwrap();
+    assert!(missing_feature.contains("TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES"));
+    let missing_usage = capability_error(
+        feature,
+        Limits::default(),
+        storage,
+        visibility,
+        TextureUsages::TEXTURE_BINDING,
+    )
+    .unwrap();
+    assert!(missing_usage.contains("Rg16Float lacks"));
+    assert!(capability_error(feature, Limits::default(), storage, visibility, storage).is_some());
+    assert!(capability_error(
+        feature,
+        Limits::default(),
+        storage,
+        visibility,
+        storage | TextureUsages::RENDER_ATTACHMENT,
+    )
+    .is_none());
 }
 
 fn camera(size: UVec2) -> ExtractedCamera {

@@ -381,6 +381,17 @@ impl DeviceInner {
 ///
 /// Clone is cheap — it shares the same underlying device and resource tables —
 /// which lets the device and its [`crate::queue::WgpuQueue`] co-own the state.
+///
+/// The native resource getters clone the exact handles stored in these tables;
+/// they do not create/import resources, change callbacks, or submit work. Pass
+/// IDs minted by this device (or a clone sharing its tables). IDs are table-local:
+/// an ID from another adoption can alias a live slot and is not an ownership
+/// certificate. Removed/stale IDs panic instead of resolving a recycled slot.
+/// A returned handle owns a native reference independently of its RHI slot;
+/// dropping it does not release that slot. Conversely, RHI `destroy_*` removes
+/// the slot without explicitly destroying retained native clones. Callers must
+/// not explicitly destroy an exported buffer/texture while RHI or host work
+/// still uses it, and must retain frame allocations until host completion.
 #[derive(Clone)]
 pub struct WgpuDevice {
     /// The shared device state.
@@ -388,6 +399,50 @@ pub struct WgpuDevice {
 }
 
 impl WgpuDevice {
+    /// Adopts an existing host-owned wgpu device/queue without requesting a
+    /// device or replacing either of the host's error/loss callbacks.
+    ///
+    /// Pass clones of the adapter, device, and queue from the host's original
+    /// device request. Capabilities come from the device's *enabled* features
+    /// and limits, not the adapter's potentially larger feature set. The host
+    /// keeps submission ownership by using [`crate::WgpuQueue::encode`] and
+    /// submitting its returned native command buffer itself.
+    ///
+    /// # Identity and resource boundary
+    ///
+    /// wgpu 30 exposes no safe device-owner query for a queue, buffer, or
+    /// texture. This constructor therefore does not certify the supplied
+    /// adapter/queue pairing and does not import any native resources. In
+    /// particular, native `Device` equality alone is not a cross-instance
+    /// proof: the native backend compares IDs local to its wgpu Global.
+    /// Callers must supply the original host tuple; arbitrary native resource
+    /// registration is deliberately not exposed through this API.
+    ///
+    /// Each adoption creates a fresh RHI resource table. IDs cannot cross
+    /// adoptions, including two adoptions of the same native device. Dropping
+    /// the returned pair releases its handles; it does not call native
+    /// `Device::destroy` or submit work. The host owns device-loss handling and
+    /// recovery: retire old work and create a fresh bridge/resource table for
+    /// the replacement device. [`RenderDevice::take_device_lost`] is not fed
+    /// by a callback on this path; the host must observe its own callback.
+    #[must_use]
+    pub fn adopt(
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> (Self, crate::WgpuQueue) {
+        let caps = rhi::DeviceCapabilities {
+            backend: convert::backend_from_wgpu(device.adapter_info().backend),
+            features: convert::features_from_wgpu(device.features()),
+            limits: convert::limits_from_wgpu(&device.limits()),
+        };
+        // Do not use from_parts: that owned-device path installs Prism's
+        // device-lost callback and would replace the host's callback.
+        let inner = Arc::new(DeviceInner::new(adapter, device, caps));
+        let queue = crate::WgpuQueue::from_parts(queue, Arc::clone(&inner));
+        (Self { inner }, queue)
+    }
+
     /// Wraps a ready wgpu device and its reported capabilities.
     #[must_use]
     pub(crate) fn from_parts(
@@ -412,11 +467,86 @@ impl WgpuDevice {
         &self.inner.device
     }
 
-    /// Borrows a live buffer by its RHI id for backend-specific readback or
-    /// interop tests.
+    /// Clones the native buffer stored for a live, table-local RHI id.
+    /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
     #[must_use]
     pub fn wgpu_buffer(&self, id: rhi::BufferId) -> wgpu::Buffer {
         self.inner.resolve_buffer(id)
+    }
+
+    /// Clones the native texture stored for a live, table-local RHI id.
+    /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
+    #[must_use]
+    pub fn wgpu_texture(&self, id: rhi::TextureId) -> wgpu::Texture {
+        self.inner.resolve_texture(id)
+    }
+
+    /// Clones the native view stored for a live, table-local RHI id.
+    /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
+    #[must_use]
+    pub fn wgpu_texture_view(&self, id: rhi::TextureViewId) -> wgpu::TextureView {
+        self.inner.resolve_texture_view(id)
+    }
+
+    /// Clones the native sampler stored for a live, table-local RHI id.
+    /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
+    #[must_use]
+    pub fn wgpu_sampler(&self, id: rhi::SamplerId) -> wgpu::Sampler {
+        lock(&self.inner.samplers)
+            .get(convert::convert_id(id))
+            .expect("stale SamplerId in native getter")
+            .clone()
+    }
+
+    /// Clones the native shader module stored for a live, table-local RHI id.
+    /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
+    #[must_use]
+    pub fn wgpu_shader_module(&self, id: rhi::ShaderModuleId) -> wgpu::ShaderModule {
+        lock(&self.inner.shaders)
+            .get(convert::convert_id(id))
+            .expect("stale ShaderModuleId in native getter")
+            .clone()
+    }
+
+    /// Clones the native bind-group layout stored for a live, table-local RHI id.
+    /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
+    #[must_use]
+    pub fn wgpu_bind_group_layout(&self, id: rhi::BindGroupLayoutId) -> wgpu::BindGroupLayout {
+        lock(&self.inner.bind_group_layouts)
+            .get(convert::convert_id(id))
+            .expect("stale BindGroupLayoutId in native getter")
+            .clone()
+    }
+
+    /// Clones the native bind group stored for a live, table-local RHI id.
+    /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
+    #[must_use]
+    pub fn wgpu_bind_group(&self, id: rhi::BindGroupId) -> wgpu::BindGroup {
+        self.inner.resolve_bind_group(id)
+    }
+
+    /// Clones the native pipeline layout stored for a live, table-local RHI id.
+    /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
+    #[must_use]
+    pub fn wgpu_pipeline_layout(&self, id: rhi::PipelineLayoutId) -> wgpu::PipelineLayout {
+        lock(&self.inner.pipeline_layouts)
+            .get(convert::convert_id(id))
+            .expect("stale PipelineLayoutId in native getter")
+            .clone()
+    }
+
+    /// Clones the native render pipeline stored for a live, table-local RHI id.
+    /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
+    #[must_use]
+    pub fn wgpu_render_pipeline(&self, id: rhi::RenderPipelineId) -> wgpu::RenderPipeline {
+        self.inner.resolve_render_pipeline(id)
+    }
+
+    /// Clones the native compute pipeline stored for a live, table-local RHI id.
+    /// Panics for a removed/stale id; see [`Self`]'s native handle contract.
+    #[must_use]
+    pub fn wgpu_compute_pipeline(&self, id: rhi::ComputePipelineId) -> wgpu::ComputePipeline {
+        self.inner.resolve_compute_pipeline(id)
     }
 
     /// Borrows the adapter the device was created from, e.g. to query a

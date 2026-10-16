@@ -15,7 +15,10 @@
 //!
 //! Device loss (a driver reset or crash, or an explicit `destroy`) is reported
 //! through [`RenderDevice::take_device_lost`](prism_render_driver::RenderDevice::take_device_lost);
-//! see [`DeviceLostReason`].
+//! see [`DeviceLostReason`]. This applies to devices created by this backend.
+//! [`WgpuDevice::adopt`] instead preserves the host's loss callback and leaves
+//! recovery to the host. [`WgpuQueue::encode`] supports record-only native
+//! handoff without transferring submission ownership to Prism.
 
 extern crate alloc;
 

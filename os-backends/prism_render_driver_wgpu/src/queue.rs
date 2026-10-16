@@ -116,8 +116,24 @@ impl WgpuQueue {
         &self.queue
     }
 
-    /// Encodes one backend-agnostic command buffer into a wgpu command buffer.
-    fn encode(&self, command_buffer: &rhi::CommandBuffer) -> wgpu::CommandBuffer {
+    /// Encodes one RHI command buffer on this bridge's device without
+    /// submitting it or performing queue uploads, polling, or completion waits.
+    ///
+    /// This is the same replay implementation used by [`Self::submit_tracked`],
+    /// not a separate executor. The returned native command buffer can be
+    /// included in the host's own submission alongside its other work. The
+    /// host must submit to the queue originally requested with this device;
+    /// this method does not validate an external queue's device ownership.
+    ///
+    /// RHI IDs must belong to this bridge's resource table. Retain the frame's
+    /// graph allocations until the host confirms completion of the submission
+    /// containing these commands; encoding is not a retirement boundary.
+    /// Host-side queue uploads/order and synchronization remain the host's
+    /// responsibility. This method neither recompiles a graph nor interprets
+    /// graph queue-sync metadata. Stale IDs panic, and native validation errors
+    /// follow the device's existing error scopes/handler, just as in submit.
+    #[must_use]
+    pub fn encode(&self, command_buffer: &rhi::CommandBuffer) -> wgpu::CommandBuffer {
         let mut encoder =
             self.inner
                 .device
