@@ -42,7 +42,7 @@
 | Artifact 身份、确定性 DAG 规划与处理器执行 | 已实现（本地核心切片） | `prism_asset_build_core/src/hash.rs`、`graph.rs`；测试 `recipe_key_is_deterministic_and_all_declared_inputs_matter`、`topological_order_is_stable_across_insertion_orders`、`reports_missing_dependencies`、`reports_cycles_with_stable_job_ids`、`executes_real_transforms_and_preserves_declared_input_order` | 完整导入插件协议、字段级失效分析、超大图/百万资产规模证据未完成 |
 | DAG wave 并行 | 已实现（BuildGraph 层） | `graph.rs`；`parallel_execution_matches_serial_outputs`、`parallel_execution_reports_smallest_failed_job_in_wave`、`parallel_execution_rejects_zero_concurrency`、`parallel_execution_with_limit_matches_serial_outputs` | 该 API 只执行 DAG processor，不负责 DDC/CAS/Revision 发布 |
 | BuildExecutor 并行执行 | 已实现（本地 ready-wave 切片） | `executor.rs` 的 `execute_parallel` / `execute_parallel_with_limit`；`tests/parallel_executor.rs` 的 7 项专项测试覆盖混合 DAG 串并行 Manifest/CAS/descriptor 等价、两种处理器放行顺序、真实并发峰值限流、重开 DDC 命中、损坏 CAS 选择性重建、错误/panic 不发布、按 JobId 选错及零并发无副作用；`executor/wave_results.rs` 对三个结果的全部六种完成顺序排列独立验证按 JobId 归约 | 不代表跨进程/远程调度、十万节点内存有界或大规模吞吐/延迟达标；处理器放行顺序不等同于线程实际完成顺序 |
-| RuntimeDerived 进程内 BakeService | 已实现（独立本地调度切片） | `pkg/prism_asset_build_core/src/bake.rs`；`tests/bake.rs` 的 8 项测试覆盖 `max_in_flight` 拒绝、确定性 key/descriptor、取消发布竞态、kernel error/panic、RAII gate 恢复、并发峰值和无外部发布副作用；`40519e9eb` | 当前是有界 `prism_tasks::TaskPool` + owned memory result，不接入 dirty-set、runtime cache、通用 Bake Kernel registry、CAS/DDC/Manifest 或完整 RuntimeDerived 消费链 |
+| RuntimeDerived 进程内 BakeService | 已实现（独立本地调度切片） | `pkg/prism_asset_build_core/src/bake.rs`；`tests/bake.rs` 的 15 项测试覆盖有界 admission、确定性 key/descriptor、取消发布竞态、kernel error/panic、RAII gate 恢复、并发峰值、成功结果缓存、entry/byte 容量、确定性驱逐、失败/取消不污染缓存、kernel registry 和重复请求合并；`7a8b26eed` | 当前是有界 `prism_tasks::TaskPool` + owned memory result，仍不接入 dirty-set、ECS/渲染/编辑器消费、CAS/DDC/Manifest 或完整 RuntimeDerived 消费链 |
 | 双跑确定性发布门禁 | 已实现（本机同进程切片） | `executor/determinism.rs`、`BuildExecutor::execute_verified_with_limit`；`tests/determinism_gate.rs` 的 7 项测试证明冷/持久 warm DDC 均逐节点执行两次、不记 cache hit、相同有序依赖、串并行等价、差异位置/长度/hash 诊断、第二次错误/panic 拒绝且不发布、失败候选不提前落 CAS/DDC；`prism_asset_build_cli/tests/determinism.rs` 对 `build/import --verify-determinism` 各有冷/普通 warm/强制 warm 完整命令回归 | 不隔离处理器外部状态；不证明跨进程/跨机器/跨工具链可复现，也不把历史 DDC 内容当作本次对照。成功节点可留下有效缓存，不承诺全图缓存回滚 |
 | 本地 CAS、DDC 与 BuildExecutor 缓存校验 | 部分实现 | `cas.rs`、`ddc.rs`、`executor.rs`；`detects_corruption_on_read`、`persists_and_restores_across_multiple_opens`、`ddc_hit_skips_processor_and_publishes_next_revision`、`corrupt_cas_blob_is_rebuilt_instead_of_returned_as_a_hit`、DDC 容量驱逐回归测试；非 Unix cfg 测试证明缺少等价锁后端时返回 `DdcError::CoordinationUnavailable` | 分层 DDC/L0–L3、隐式 recency policy、远端 CAS、Windows 原生等价文件锁后端和跨机器协调未完成 |
 | Artifact 与 Manifest 字节预算 | 已实现（质量门切片） | `validation.rs`；`max_artifact_bytes`、`max_total_manifest_bytes`、唯一 `ContentHash` 确定性计数、CAS 实际字节复核；默认策略保持兼容，单 artifact/总预算在预读阶段拒绝 | 尚未覆盖压缩后/平台 Cook 后预算、跨包聚合预算和远程发布服务 |
@@ -489,6 +489,8 @@ begin_output
 第三方格式解析默认建议 Worker Process，避免恶意/损坏资产破坏编辑器主进程。插件必须声明许可证、工具链指纹、目标架构与可用平台。
 
 ### 6.6 Bake Kernel 与两种调度
+
+状态补记（2026-10-16）：`7a8b26eed` 已补齐 BakeService 的 caller-owned stable kernel registry、成功结果的有界 process-local runtime cache、重复请求合并和确定性容量驱逐。当前仍未接入 dirty-set、ECS/渲染/编辑器消费、CAS/DDC/Manifest 或完整 RuntimeDerived 消费链。
 
 算法与调度分离，是“源资产烘焙”与“场景派生烘焙”收敛为一条线的关键：
 
