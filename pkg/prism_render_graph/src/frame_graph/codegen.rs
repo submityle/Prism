@@ -205,17 +205,13 @@ pub fn declare_passes(
             {
                 return Err(CodegenError::ConflictingResource(resource.name.into()));
             }
-            if let Some(existing) = graph
-                .resources()
-                .iter()
-                .find(|descriptor| descriptor.name == resource.name)
-            {
-                if existing.lifetime != resource.lifetime
-                    || existing.size != resource.size
-                    || existing.alignment != resource.alignment
-                {
-                    return Err(CodegenError::ConflictingResource(resource.name.into()));
-                }
+            if graph.resources().iter().any(|descriptor| {
+                descriptor.name == resource.name
+                    && (descriptor.lifetime != resource.lifetime
+                        || descriptor.size != resource.size
+                        || descriptor.alignment != resource.alignment)
+            }) {
+                return Err(CodegenError::ConflictingResource(resource.name.into()));
             }
         }
         for access in declaration.accesses {
@@ -412,11 +408,11 @@ mod tests {
         assert_eq!(generated[0].id, PassId(0));
         assert_eq!(generated[1].id, PassId(1));
         let compiled = graph.compile().unwrap();
-        assert_eq!(compiled.order, [0, 1]);
+        assert_eq!(compiled.order, [1, 0]);
         assert_eq!(compiled.declared_pass_count, 2);
         assert_eq!(compiled.logical_barriers.len(), 1);
         let barrier = compiled.logical_barriers[0];
-        assert_eq!((barrier.source, barrier.destination), (0, 1));
+        assert_eq!((barrier.source, barrier.destination), (1, 0));
         assert!(barrier.queue_transfer);
         assert_eq!(compiled.queue_batches[1].waits_for, [0]);
         assert_eq!(compiled.alias.heap_size, 0);

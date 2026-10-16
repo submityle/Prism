@@ -384,7 +384,21 @@ impl RenderGraph {
         })
     }
 
-    fn try_add_pass_with_dependencies<Setup, Exec>(
+    /// Declares a pass with explicit control prerequisites in addition to SSA
+    /// resource dependencies. Returns its stable executable pass-table index.
+    ///
+    /// Dependencies must name already-added passes in this executable graph,
+    /// not startup declaration [`PassId`](crate::frame_graph::PassId) values
+    /// or scheduled positions. Forward/self references are rejected before
+    /// `setup` runs. Explicit edges order surviving passes; callers must also
+    /// keep control-only work alive using the appropriate [`PassFlags`].
+    ///
+    /// # Errors
+    /// Returns [`CompileError::Capacity`] or [`CompileError::InvalidDependency`]
+    /// before invoking `setup` on rejected admission. Once admitted, setup
+    /// handles its own checked builder errors; resource/blackboard mutations
+    /// made during setup are not rolled back by this method.
+    pub fn try_add_pass_with_dependencies<Setup, Exec>(
         &mut self,
         name: impl Into<String>,
         kind: PassKind,
@@ -397,6 +411,7 @@ impl RenderGraph {
         Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
         GraphLimits::next_id("passes", self.passes.len(), self.limits.passes)?;
+        GraphLimits::check_count("dependencies", dependencies.len(), self.limits.passes)?;
         let pass_id = self.passes.len();
         for &dependency in &dependencies {
             if dependency >= pass_id {
@@ -430,19 +445,41 @@ impl RenderGraph {
     /// Lowers a startup declaration frontend into this graph's authoritative
     /// SSA compiler. The declaration records remain backend-neutral; all
     /// scheduling, hazards, lifetimes, aliasing and barriers are derived by
-    /// [`Self::compile`] after lowering.
+    /// [`Self::compile`] after lowering. Optional input versions parallel the
+    /// original pass/access table; writes always use the checked builder's
+    /// version allocator regardless of their input version.
     pub(crate) fn compile_declarations(
         resources: &[crate::frame_graph::ResourceDescriptor],
         passes: &[crate::frame_graph::PassDescriptor],
         limits: GraphLimits,
+        inputs: Option<&[Vec<u32>]>,
     ) -> Result<ExecutionPlan, CompileError> {
+        use crate::access::{BufferUse, TextureUse};
         use crate::compile::kernel;
         use crate::frame_graph::{AccessKind, QueueClass, ResourceLifetime};
         use crate::resource::{BufferResource, Lifetime, TextureResource};
-        use prism_render_driver::{BufferUsages, TextureFormat, TextureUsages};
+        use prism_render_driver::{BufferUsages, SubresourceRange, TextureFormat, TextureUsages};
 
         GraphLimits::check_count("resources", resources.len(), limits.resources)?;
         GraphLimits::check_count("passes", passes.len(), limits.passes)?;
+        if let Some(inputs) = inputs {
+            if inputs.len() != passes.len() {
+                return Err(CompileError::InvalidInputShape {
+                    pass: None,
+                    expected: passes.len(),
+                    actual: inputs.len(),
+                });
+            }
+            for (pass_index, pass) in passes.iter().enumerate() {
+                if inputs[pass_index].len() != pass.accesses.len() {
+                    return Err(CompileError::InvalidInputShape {
+                        pass: Some(crate::frame_graph::PassId(pass_index as u32)),
+                        expected: pass.accesses.len(),
+                        actual: inputs[pass_index].len(),
+                    });
+                }
+            }
+        }
         for (pass_index, pass) in passes.iter().enumerate() {
             GraphLimits::check_count("accesses", pass.accesses.len(), limits.accesses_per_pass)?;
             for access in &pass.accesses {
@@ -478,20 +515,6 @@ impl RenderGraph {
             &names,
         )?
         .order;
-
-        // The topology frontend uses the infallible setup helpers below for
-        // its bounded startup declarations. Validate every SSA write first so
-        // a configured version cap is reported as a compile error rather than
-        // becoming a panic halfway through lowering.
-        let mut versions = vec![0; resources.len()];
-        for &pass_index in &declaration_order {
-            for access in &passes[pass_index].accesses {
-                if access.kind.writes() {
-                    versions[access.resource.0 as usize] =
-                        limits.next_version(versions[access.resource.0 as usize])?;
-                }
-            }
-        }
 
         let mut graph = Self::with_limits(Extent3d::new_2d(1, 1), limits);
 
@@ -601,62 +624,71 @@ impl RenderGraph {
                 flags = flags.union(PassFlags::ASYNC_COMPUTE);
             }
             let accesses = pass.accesses.clone();
+            let mut setup_result: Result<(), CompileError> = Ok(());
             graph.add_topology_pass(pass.name.clone(), kind, flags, dependencies, |builder| {
-                for access in accesses {
-                    let index = access.resource.0 as usize;
-                    let current = handles[index];
-                    handles[index] = match (current, access.kind) {
-                        (Handle::Texture(handle), AccessKind::SampledRead) => {
-                            Handle::Texture(builder.sample(handle))
+                // Checked builder accesses are the write-version authority in
+                // both modes. A failure only mutates this disposable local
+                // graph; it is returned before any plan can escape.
+                setup_result = (|| {
+                    for (access_index, access) in accesses.into_iter().enumerate() {
+                        let index = access.resource.0 as usize;
+                        let input = inputs.map(|inputs| inputs[original_index][access_index]);
+                        let next = match handles[index] {
+                            Handle::Texture(handle) => {
+                                let usage = match access.kind {
+                                    AccessKind::SampledRead => TextureUse::Sampled,
+                                    AccessKind::StorageRead | AccessKind::IndirectRead => TextureUse::StorageRead,
+                                    AccessKind::StorageWrite => TextureUse::StorageWrite,
+                                    AccessKind::ColorAttachment => TextureUse::ColorAttachment,
+                                    AccessKind::DepthAttachment => TextureUse::DepthAttachment,
+                                    AccessKind::TransferRead => TextureUse::CopySrc,
+                                    AccessKind::TransferWrite => TextureUse::CopyDst,
+                                };
+                                let handle = TextureHandle::new(handle.resource(), input.unwrap_or(handle.version()));
+                                Handle::Texture(builder.try_access_texture(handle, usage, SubresourceRange::all())?)
+                            }
+                            Handle::Buffer(handle) => {
+                                let usage = match access.kind {
+                                    AccessKind::SampledRead | AccessKind::StorageRead => BufferUse::StorageRead,
+                                    AccessKind::StorageWrite => BufferUse::StorageWrite,
+                                    AccessKind::IndirectRead => BufferUse::Indirect,
+                                    AccessKind::TransferRead => BufferUse::CopySrc,
+                                    AccessKind::TransferWrite => BufferUse::CopyDst,
+                                    AccessKind::ColorAttachment | AccessKind::DepthAttachment => unreachable!("attachment declarations are lowered as textures"),
+                                };
+                                let handle = BufferHandle::new(handle.resource(), input.unwrap_or(handle.version()));
+                                Handle::Buffer(builder.try_use_buffer(handle, usage)?)
+                            }
+                        };
+                        // Retaining an older read input must not roll the
+                        // resource's latest handle backwards for later uses.
+                        if access.kind.writes() {
+                            handles[index] = next;
                         }
-                        (Handle::Texture(handle), AccessKind::StorageRead) => {
-                            Handle::Texture(builder.read_storage_texture(handle))
-                        }
-                        (Handle::Texture(handle), AccessKind::StorageWrite) => {
-                            Handle::Texture(builder.write_storage_texture(handle))
-                        }
-                        (Handle::Texture(handle), AccessKind::ColorAttachment) => {
-                            Handle::Texture(builder.color_attachment(handle))
-                        }
-                        (Handle::Texture(handle), AccessKind::DepthAttachment) => {
-                            Handle::Texture(builder.depth_attachment(handle))
-                        }
-                        (Handle::Texture(handle), AccessKind::IndirectRead) => {
-                            Handle::Texture(builder.read_storage_texture(handle))
-                        }
-                        (Handle::Texture(handle), AccessKind::TransferRead) => {
-                            Handle::Texture(builder.copy_src_texture(handle))
-                        }
-                        (Handle::Texture(handle), AccessKind::TransferWrite) => {
-                            Handle::Texture(builder.copy_dst_texture(handle))
-                        }
-                        (Handle::Buffer(handle), AccessKind::SampledRead) => {
-                            Handle::Buffer(builder.read_storage_buffer(handle))
-                        }
-                        (Handle::Buffer(handle), AccessKind::StorageRead) => {
-                            Handle::Buffer(builder.read_storage_buffer(handle))
-                        }
-                        (Handle::Buffer(handle), AccessKind::StorageWrite) => {
-                            Handle::Buffer(builder.write_storage_buffer(handle))
-                        }
-                        (Handle::Buffer(handle), AccessKind::IndirectRead) => {
-                            Handle::Buffer(builder.read_indirect(handle))
-                        }
-                        (Handle::Buffer(handle), AccessKind::TransferRead) => {
-                            Handle::Buffer(builder.copy_src_buffer(handle))
-                        }
-                        (Handle::Buffer(handle), AccessKind::TransferWrite) => {
-                            Handle::Buffer(builder.copy_dst_buffer(handle))
-                        }
-                        (Handle::Buffer(_), AccessKind::ColorAttachment)
-                        | (Handle::Buffer(_), AccessKind::DepthAttachment) => {
-                            unreachable!("attachment declarations are lowered as textures")
-                        }
-                    };
-                }
+                    }
+                    Ok(())
+                })();
             })?;
+            setup_result?;
         }
 
+        // Setup must visit prerequisites first to admit SSA input versions,
+        // but its temporary pass indices are not declaration PassIds. Restore
+        // the original table (and dependency IDs) before the authoritative
+        // compiler derives any pass-indexed or scheduled-position metadata.
+        // Access records carry resource versions, not pass indices, so they
+        // move unchanged. This is a linear permutation, not another scheduler.
+        let mut original_passes: Vec<Option<PassNode>> = (0..passes.len()).map(|_| None).collect();
+        for (mut pass, &original_index) in graph.passes.drain(..).zip(&declaration_order) {
+            for dependency in &mut pass.dependencies {
+                *dependency = declaration_order[*dependency];
+            }
+            original_passes[original_index] = Some(pass);
+        }
+        graph.passes = original_passes
+            .into_iter()
+            .map(|pass| pass.expect("every declaration is lowered exactly once"))
+            .collect();
         graph.compile()
     }
 

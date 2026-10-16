@@ -323,13 +323,12 @@ pub fn builtin_energy_policy(kind: Kind, uid: &str) -> EnergyPolicy {
         return EnergyPolicy::None;
     }
     match uid {
-        UID_LOBE_EMISSION => EnergyPolicy::Independent,
+        UID_LOBE_EMISSION | UID_LOBE_MEASURED_BRDF => EnergyPolicy::Independent,
         UID_LOBE_FACE => EnergyPolicy::None,
         // The measured lobe adds a *tabulated* response: the data carries its own
         // energy, so it is not a re-shaping of the analytic specular budget the
         // way glint is. The parity gate compares this against the schema's
         // field-level column, so it cannot drift.
-        UID_LOBE_MEASURED_BRDF => EnergyPolicy::Independent,
         _ => EnergyPolicy::Coupled,
     }
 }

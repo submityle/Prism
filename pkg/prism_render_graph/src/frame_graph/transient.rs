@@ -17,11 +17,12 @@
 //! the reuse is lifetime-safe. Executable `RenderGraph` plans use
 //! [`crate::AliasPlan`] as their authoritative alias product.
 
+#[cfg(test)]
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use super::{ResourceDescriptor, ResourceId, ResourceLifetime};
+use super::ResourceId;
 
 /// A byte region within the transient heap assigned to a single resource.
 ///
@@ -79,65 +80,6 @@ pub struct AliasOverlap {
 }
 
 impl TransientAllocation {
-    pub(crate) fn from_intervals(
-        resources: &[ResourceDescriptor],
-        intervals: &[Option<(usize, usize)>],
-    ) -> Result<Self, super::CompileError> {
-        let requests: Vec<_> = resources
-            .iter()
-            .zip(intervals)
-            .map(|(r, life)| {
-                (r.lifetime == ResourceLifetime::Transient)
-                    .then_some(*life)
-                    .flatten()
-                    .map(|(first, last)| crate::compile::kernel::AllocationRequest {
-                        size: r.size,
-                        alignment: r.alignment.max(1),
-                        first,
-                        last,
-                    })
-            })
-            .collect();
-        let (slots, cursor) = crate::compile::kernel::allocate(&requests)?;
-        let regions: Vec<_> = slots
-            .iter()
-            .zip(resources)
-            .map(|(slot, r)| {
-                slot.map(|s| TransientRegion {
-                    offset: s.offset,
-                    size: s.size,
-                    alignment: r.alignment.max(1),
-                })
-            })
-            .collect();
-        let lifetimes = intervals
-            .iter()
-            .zip(&requests)
-            .map(|(life, request)| {
-                request.and_then(|_| life.map(|(first, last)| first as u32..last as u32 + 1))
-            })
-            .collect();
-        let individual_bytes = requests.iter().flatten().try_fold(0_u64, |sum, r| {
-            sum.checked_add(r.size)
-                .ok_or(crate::plan::CompileError::MemoryOverflow)
-        })?;
-        let alias_groups = group_by_offset(&regions);
-
-        let plan = Self {
-            heap_bytes: cursor,
-            regions,
-            lifetimes,
-            alias_groups,
-            individual_bytes,
-        };
-        debug_assert!(
-            plan.validate_alias_safety().is_ok(),
-            "transient alias plan aliased overlapping lifetimes: {:?}",
-            plan.validate_alias_safety()
-        );
-        Ok(plan)
-    }
-
     /// Total heap size the backend must allocate for all transient resources.
     pub fn heap_bytes(&self) -> u64 {
         self.heap_bytes
@@ -276,6 +218,7 @@ impl TransientAllocation {
 /// with `size == 0` therefore pile every such resource onto offset 0 without it
 /// being a real alias, and grouping them there would raise a spurious
 /// [`AliasOverlap`] between resources whose lifetimes legitimately coincide.
+#[cfg(test)]
 fn group_by_offset(regions: &[Option<TransientRegion>]) -> Vec<Vec<ResourceId>> {
     let mut by_offset: BTreeMap<u64, Vec<ResourceId>> = BTreeMap::new();
     for (index, region) in regions.iter().enumerate() {
