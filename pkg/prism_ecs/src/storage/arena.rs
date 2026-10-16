@@ -18,13 +18,15 @@
 //!
 //! # NUMA
 //!
-//! Placement is **first-touch**: a chunk block is physically backed by the
-//! memory node of whichever thread first writes it, which is the classic
-//! default NUMA policy and keeps an archetype's hot chunks local to the worker
-//! that streams them in. Forcing a *specific* node (`mbind`/`set_mempolicy`) is
-//! not something `prism_platform` exposes yet; this module says so rather than
-//! pretending to bind, and a future explicit-placement backend can slot in
-//! behind [`ChunkArena`] without touching the table.
+//! The default [`ChunkArena::new`] path is deliberately **first-touch**: a
+//! chunk block is physically backed by the memory node of whichever thread
+//! first writes it. This is a valid portable default, but it is not evidence
+//! that a particular node was selected. With the `vm` feature, callers that
+//! already have a worker/node placement can use [`ChunkArena::new_on_node`]
+//! to request an explicit node policy. The returned diagnostic records
+//! whether the platform bound the mapping, used an explicit ordinary-memory
+//! fallback, or has not allocated the first segment yet. No path claims node
+//! locality from a request alone.
 
 use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 #[cfg(feature = "vm")]
@@ -35,7 +37,60 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 #[cfg(feature = "vm")]
-use prism_platform::vm::{Protection, Reservation};
+use prism_platform::vm::{
+    NumaAllocation, NumaAllocationError, NumaPlacement, Protection, Reservation,
+};
+
+/// Placement evidence for an ECS chunk arena.
+///
+/// `FirstTouch` and `Global` are policies, not hardware proofs. `Bound` is
+/// reported only after the platform accepted a node-memory policy for a
+/// segment. `Fallback` is explicit ordinary memory and must not be counted as
+/// NUMA-local. `Mixed` means different segments did not produce the same
+/// result, so callers must not treat the arena as uniformly node-bound.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChunkArenaPlacement {
+    /// The non-VM allocator is used; no node policy was requested.
+    Global,
+    /// VM reservation with first-touch placement.
+    FirstTouch,
+    /// An explicit node request has not allocated its first segment yet.
+    #[allow(dead_code)]
+    #[cfg(feature = "vm")]
+    Requested { node: u16 },
+    /// The OS accepted the requested node policy for all observed segments.
+    #[cfg(feature = "vm")]
+    Bound { node: u16 },
+    /// At least one segment used explicit ordinary-memory fallback.
+    #[cfg(feature = "vm")]
+    Fallback {
+        requested_node: u16,
+        reason: NumaAllocationError,
+    },
+    /// Segment placement evidence disagreed; locality is not uniform.
+    #[cfg(feature = "vm")]
+    Mixed { requested_node: u16 },
+}
+
+impl ChunkArenaPlacement {
+    /// Returns true only for an arena whose observed segments are all bound to
+    /// the requested node.
+    #[allow(dead_code)]
+    #[cfg(feature = "vm")]
+    #[must_use]
+    pub(crate) const fn is_node_bound(self) -> bool {
+        matches!(self, Self::Bound { .. })
+    }
+
+    /// The non-VM allocator has no node-local placement evidence.
+    #[allow(dead_code)]
+    #[cfg(not(feature = "vm"))]
+    #[must_use]
+    pub(crate) const fn is_node_bound(self) -> bool {
+        false
+    }
+}
 
 /// Bytes reserved per VM segment (rounded up to the page/large-page size).
 #[cfg(feature = "vm")]
@@ -71,7 +126,9 @@ unsafe impl Sync for ChunkArena {}
 
 #[cfg(feature = "vm")]
 struct Segment {
-    reservation: Reservation,
+    #[allow(dead_code)]
+    storage: SegmentStorage,
+    base: NonNull<u8>,
     /// Index of the next never-handed-out block slot.
     bump: usize,
     /// Number of block slots in this segment.
@@ -80,6 +137,12 @@ struct Segment {
     free: Vec<NonNull<u8>>,
     /// Position in `VmArena::available`, or `None` when full.
     available: Option<usize>,
+}
+
+#[cfg(feature = "vm")]
+enum SegmentStorage {
+    Reservation(Reservation),
+    Numa(NumaAllocation),
 }
 
 #[cfg(feature = "vm")]
@@ -98,7 +161,7 @@ impl Segment {
                 // A huge-page base need not meet a component's still larger
                 // alignment. Drop an unsuitable mapping and use aligned VM.
                 if reservation.as_mut_ptr().addr().is_multiple_of(align) {
-                    return Some(Self::new(reservation, stride));
+                    return Some(Self::new(SegmentStorage::Reservation(reservation), stride));
                 }
             }
         }
@@ -108,14 +171,48 @@ impl Segment {
         reservation
             .commit(0, reservation.len(), Protection::ReadWrite)
             .ok()?;
-        Some(Self::new(reservation, stride))
+        Some(Self::new(SegmentStorage::Reservation(reservation), stride))
     }
 
-    fn new(reservation: Reservation, stride: usize) -> Self {
-        let slots = reservation.len() / stride;
+    /// Reserve a segment through the platform NUMA contract. Explicit node
+    /// requests intentionally use `NumaAllocation` rather than pretending
+    /// that a plain VM reservation is node-bound. The platform may return an
+    /// explicit ordinary-memory fallback when policy binding is unavailable.
+    fn reserve_on_node(
+        stride: usize,
+        align: usize,
+        node: u16,
+    ) -> Result<(Segment, NumaPlacement), NumaAllocationError> {
+        let page = prism_platform::vm::page_size().max(1);
+        if align > page {
+            return Err(NumaAllocationError::InvalidArgument);
+        }
+        let bytes = round_up(SEGMENT_BYTES.max(stride), page)
+            .ok_or(NumaAllocationError::InvalidArgument)?;
+        let allocation = NumaAllocation::on_node_or_fallback(bytes, page.max(align), node)?;
+        let placement = allocation.placement();
+        Ok((
+            Self::new(SegmentStorage::Numa(allocation), stride),
+            placement,
+        ))
+    }
+
+    fn new(mut storage: SegmentStorage, stride: usize) -> Self {
+        let (base, len) = match &mut storage {
+            SegmentStorage::Reservation(reservation) => (
+                NonNull::new(reservation.as_mut_ptr()).expect("VM reservation has a base"),
+                reservation.len(),
+            ),
+            SegmentStorage::Numa(allocation) => (
+                NonNull::new(allocation.as_mut_ptr()).expect("NUMA allocation has a base"),
+                allocation.len(),
+            ),
+        };
+        let slots = len / stride;
         debug_assert!(slots > 0);
         Self {
-            reservation,
+            storage,
+            base,
             bump: 0,
             slots,
             live: 0,
@@ -126,9 +223,9 @@ impl Segment {
 
     /// Base pointer of block slot `slot`.
     fn slot_ptr(&self, stride: usize, slot: usize) -> NonNull<u8> {
-        // SAFETY: `slot < slots` and the reservation holds `slots * stride`
-        // bytes, so the offset stays in the committed region.
-        unsafe { NonNull::new_unchecked(self.reservation.as_mut_ptr().add(slot * stride)) }
+        // SAFETY: `slot < slots` and the segment holds `slots * stride` bytes,
+        // so the offset stays inside the owned mapping/allocation.
+        unsafe { NonNull::new_unchecked(self.base.as_ptr().add(slot * stride)) }
     }
 }
 
@@ -141,15 +238,61 @@ struct VmArena {
     segments: BTreeMap<usize, Segment>,
     available: Vec<usize>,
     empty: Option<usize>,
+    requested_node: Option<u16>,
+    placement: Option<NumaPlacement>,
+    mixed: bool,
 }
 
 #[cfg(feature = "vm")]
 impl VmArena {
+    fn first_touch() -> Self {
+        Self {
+            segments: BTreeMap::new(),
+            available: Vec::new(),
+            empty: None,
+            requested_node: None,
+            placement: None,
+            mixed: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn on_node(node: u16) -> Self {
+        Self {
+            segments: BTreeMap::new(),
+            available: Vec::new(),
+            empty: None,
+            requested_node: Some(node),
+            placement: None,
+            mixed: false,
+        }
+    }
+
     fn alloc(&mut self, stride: usize, layout: Layout) -> NonNull<u8> {
         if self.available.is_empty() {
-            let mut segment = Segment::reserve(stride, layout.align())
-                .unwrap_or_else(|| handle_alloc_error(layout));
-            let base = segment.reservation.as_mut_ptr().addr();
+            let (mut segment, placement): (Segment, Option<NumaPlacement>) = if let Some(node) =
+                self.requested_node
+            {
+                let (segment, placement) = Segment::reserve_on_node(stride, layout.align(), node)
+                    .unwrap_or_else(|_| handle_alloc_error(layout));
+                (segment, Some(placement))
+            } else {
+                // The first-touch path does not have a node-policy result. Its
+                // diagnostic remains `FirstTouch` at the arena level.
+                (
+                    Segment::reserve(stride, layout.align())
+                        .unwrap_or_else(|| handle_alloc_error(layout)),
+                    None,
+                )
+            };
+            if let Some(placement) = placement {
+                match self.placement {
+                    None => self.placement = Some(placement),
+                    Some(previous) if previous == placement => {}
+                    Some(_) => self.mixed = true,
+                }
+            }
+            let base = segment.base.as_ptr().addr();
             segment.available = Some(0);
             self.segments.insert(base, segment);
             self.available.push(base);
@@ -170,6 +313,10 @@ impl VmArena {
             segment.available = None;
         }
         ptr
+    }
+
+    fn placement(&self) -> Option<NumaPlacement> {
+        self.placement
     }
 
     /// Caller has ended all accesses to this arena's live block.
@@ -223,7 +370,7 @@ impl ChunkArena {
         let stride = layout.pad_to_align().size();
         #[cfg(feature = "vm")]
         let backend = if prism_platform::vm::virtual_memory_supported() {
-            Backend::Vm(VmArena::default())
+            Backend::Vm(VmArena::first_touch())
         } else {
             Backend::Global
         };
@@ -233,6 +380,72 @@ impl ChunkArena {
             layout,
             stride,
             backend,
+        }
+    }
+
+    /// Build an arena whose VM segments request a specific NUMA node.
+    ///
+    /// This constructor is intentionally separate from [`Self::new`]: the
+    /// table's default remains portable first-touch placement, while a
+    /// placement-aware caller must opt in with a worker/node decision already
+    /// made by its scheduler. The first allocation is lazy; before it, the
+    /// diagnostic is [`ChunkArenaPlacement::Requested`].
+    #[cfg(feature = "vm")]
+    #[allow(dead_code)]
+    pub(crate) fn new_on_node(
+        block_layout: Layout,
+        node: u16,
+    ) -> Result<Self, NumaAllocationError> {
+        if !prism_platform::vm::virtual_memory_supported() {
+            return Err(NumaAllocationError::Unsupported);
+        }
+        let alignment = block_layout.align().max(64);
+        if alignment > prism_platform::vm::page_size() {
+            return Err(NumaAllocationError::InvalidArgument);
+        }
+        let layout = Layout::from_size_align(block_layout.size().max(1), alignment)
+            .map_err(|_| NumaAllocationError::InvalidArgument)?;
+        let stride = layout.pad_to_align().size();
+        Ok(Self {
+            layout,
+            stride,
+            backend: Backend::Vm(VmArena::on_node(node)),
+        })
+    }
+
+    /// Placement evidence for this arena.
+    #[allow(dead_code)]
+    #[must_use]
+    pub(crate) fn placement(&self) -> ChunkArenaPlacement {
+        match &self.backend {
+            Backend::Global => ChunkArenaPlacement::Global,
+            #[cfg(feature = "vm")]
+            Backend::Vm(vm) => {
+                let Some(node) = vm.requested_node else {
+                    return ChunkArenaPlacement::FirstTouch;
+                };
+                if vm.mixed {
+                    return ChunkArenaPlacement::Mixed {
+                        requested_node: node,
+                    };
+                }
+                match vm.placement() {
+                    None => ChunkArenaPlacement::Requested { node },
+                    Some(NumaPlacement::Bound { node: bound }) if bound == node => {
+                        ChunkArenaPlacement::Bound { node }
+                    }
+                    Some(NumaPlacement::Fallback {
+                        requested_node,
+                        reason,
+                    }) => ChunkArenaPlacement::Fallback {
+                        requested_node,
+                        reason,
+                    },
+                    Some(_) => ChunkArenaPlacement::Mixed {
+                        requested_node: node,
+                    },
+                }
+            }
         }
     }
 
@@ -525,5 +738,56 @@ mod tests {
             assert_eq!(block.as_ptr().read(), 42);
             arena.free(block);
         }
+    }
+
+    #[test]
+    fn default_arena_reports_policy_without_fabricating_node_locality() {
+        let arena = arena_for(4096, 64);
+        let placement = arena.placement();
+        #[cfg(feature = "vm")]
+        assert_eq!(placement, ChunkArenaPlacement::FirstTouch);
+        #[cfg(not(feature = "vm"))]
+        assert_eq!(placement, ChunkArenaPlacement::Global);
+        assert!(!placement.is_node_bound());
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn explicit_node_arena_exposes_binding_or_explicit_fallback() {
+        let layout = Layout::from_size_align(4096, 64).unwrap();
+        let Ok(mut arena) = ChunkArena::new_on_node(layout, 0) else {
+            // A target without a VM mapping backend has no safe explicit-node
+            // path; the constructor must reject it instead of falling back to
+            // the unrelated global arena.
+            return;
+        };
+        assert_eq!(
+            arena.placement(),
+            ChunkArenaPlacement::Requested { node: 0 }
+        );
+        let block = arena.alloc();
+        match arena.placement() {
+            ChunkArenaPlacement::Bound { node } => assert_eq!(node, 0),
+            ChunkArenaPlacement::Fallback { requested_node, .. } => assert_eq!(requested_node, 0),
+            other => panic!("unexpected explicit-node placement: {other:?}"),
+        }
+        let placement = arena.placement();
+        assert!(
+            !placement.is_node_bound()
+                || matches!(placement, ChunkArenaPlacement::Bound { node: 0 })
+        );
+        // SAFETY: `block` is the only live allocation from this arena.
+        unsafe { arena.free(block) };
+    }
+
+    #[cfg(feature = "vm")]
+    #[test]
+    fn explicit_node_arena_rejects_alignment_that_cannot_be_node_bound() {
+        let page = prism_platform::vm::page_size();
+        let layout = Layout::from_size_align(4096, page * 2).unwrap();
+        assert!(matches!(
+            ChunkArena::new_on_node(layout, 0),
+            Err(NumaAllocationError::InvalidArgument)
+        ));
     }
 }
