@@ -17,7 +17,7 @@
 - 关键依赖: `prism_math`（glam SIMD）、`prism_tasks`（work-stealing + fiber 作业图，`std`/`multi_thread`）、`prism_reflect`（可选，序列化/反射/脚本桥）
 - 明确约束: 核心 `no_std + alloc`；`std` / `multi_thread` / `serialize` / `reflect` / `trace` / `determinism` / `simd` / `partition` 为 feature；**不依赖任何 `bevy_*` crate**
 
-> **现状核查口径（2026-10-16，`main` @ `cb3a45e7b`）**：本文同时保留完整设计目标与当前实现边界。「已实现」与「已验证」分开记录；提交历史中的测试入口或历史验收记录不等于本次重跑，也不等于跨机、NAT、真实 GPU 或性能目标完成。本次已重跑并通过 `prism_ecs` 的 `query::dirty_tests`（20 项），并提交了 column-journal 前向脏查询切片；其余并行开发中的安全修复、渲染/NUMA/GPU 改动仍须主流程统一验证。§17.1 与历史修复段落中的数值/通过次数仍是既有记录。
+> **现状核查口径（2026-10-16，当前 checkout HEAD @ `190a5a264`）**：本文同时保留完整设计目标与当前实现边界。「已实现」与「已验证」分开记录；提交历史中的测试入口或历史验收记录不等于本次重跑，也不等于跨机、NAT、真实 GPU 或性能目标完成。本轮主流程已重跑并通过 `prism_ecs` 默认 feature 单元测试（860 项）与 `--all-features` 单元测试（1209 项），并确认 `prism_world_runtime` 当前 lib 单元测试 94 项通过；GPU feature 全链路仍受 Data Layers 的 feature-gated 编译错误阻断。当前工作树含并行开发中的未提交改动，渲染/NUMA/GPU 改动仍须按文件归属统一验证。§17.1 与历史修复段落中的数值/通过次数仍是既有记录。
 
 > **本次 main 历史同步依据**：UDP/ACK/rebind：`39bd3806a`、`0bf59f55a`、`d6000586b`、`c7201323e`；NUMA acceptance：`9390b7a5e`、`07a3d5b9c`；audio/source-route 与 event-log：`ea2ed8026`、`cd03b14c7`、`3e503dd38`；GPU resident/wgpu gate 与 benchmark：`22aebe26b`、`a288cf12e`、`c7201323e`、`3a8120874`、`0e7e67259`；CPU SDF clipmap planner：`7e99fa30f`、`90ff7a89a`。
 
@@ -686,7 +686,7 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 | 范围 | 已实现 | 已验证或已有验收入口 | 仍未验证/不可宣称 |
 |---|---|---|---|
-| ECS dirty query | 前向窗口 column journal；历史/缺口/重放保守 fallback；SparseSet 变化合并 | `cargo test -p prism_ecs --lib query::dirty_tests --offline`：20 项通过（`cb3a45e7b`） | query 全链路严格 `O(change)`、并发写屏障/回绕、所有 feature 组合与大规模性能 |
+| ECS dirty query | 前向窗口 column journal；历史/缺口/重放保守 fallback；SparseSet 变化合并 | `query::dirty_tests`：20 项通过；`cargo test -p prism_ecs --lib --offline`：860 项通过；`cargo test -p prism_ecs --all-features --lib --offline`：1209 项通过 | query 全链路严格 `O(change)`、并发写屏障/回绕、所有 feature 组合与大规模性能 |
 | UDP / ACK / rebind | 有限可靠 UDP、ACK 重传、候选端点与稳定 peer rebind | 真实 loopback fault-proxy 测试覆盖 data/ACK 丢包、顺序/exactly-once 与旧 socket 关闭后的 rebind | 跨进程/跨机、公网、NAT/ICE/relay、生产迁移与本轮重跑结果 |
 | NUMA / affinity | OS topology/affinity readback、worker outcome、显式 arena placement/fallback 语义；策略层拓扑模型 | `numa_acceptance` 入口；arena 默认测试 5 项、`vm` 测试 12 项、`--no-default-features` check 已通过；默认 acceptance 缺能力时 `SKIPPED`，`PRISM_REQUIRE_NUMA=1` 严格失败 | 当前机器 Linux strict pass、ECS node-local pages 的真实物理证明、拓扑感知调度收益与 NUMA 性能 |
 | audio / event-log | audio source-route/scene adapter/full-chain；bounded memory/file event-log 与 replay bridge | 既有局部 unit/integration/full-chain 入口 | 真实设备回调、完整应用/旧资产/editor 联合流程、durable plugin recovery、跨进程/跨机持久化 |
