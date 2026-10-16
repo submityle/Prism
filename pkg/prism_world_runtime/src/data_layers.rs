@@ -6,7 +6,7 @@
 //! an activated cell has the deterministic intersection of the runtime-enabled
 //! layers and the layers declared by its manifest.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::fmt;
 use core::task::{Context, Poll};
@@ -420,6 +420,7 @@ struct ResidentLayeredCell {
 struct LayeredHostAdapter<'a, H: LayeredSceneHost> {
     host: &'a mut H,
     resident: &'a mut BTreeMap<SectorId, ResidentLayeredCell>,
+    pre_evicted: &'a BTreeSet<SectorId>,
 }
 
 impl<H: LayeredSceneHost> SceneHost for LayeredHostAdapter<'_, H> {
@@ -438,6 +439,9 @@ impl<H: LayeredSceneHost> SceneHost for LayeredHostAdapter<'_, H> {
     }
 
     fn evict_cell(&mut self, sector: SectorId) -> Result<(), Self::Error> {
+        if self.pre_evicted.contains(&sector) {
+            return Ok(());
+        }
         self.host.evict_cell(sector)?;
         self.resident.remove(&sector);
         Ok(())
@@ -525,6 +529,7 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
             .collect();
 
         let mut evictions = Vec::new();
+        let mut pre_evicted = BTreeSet::new();
         let mut admitted_loaded = Vec::new();
         self.resident.clear();
         for cell in loaded {
@@ -534,6 +539,7 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
                 .is_none_or(|manifest| manifest.stream_admission(&self.data_layers).0);
             if !streamable {
                 let outcome = if host.evict_cell(cell.manifest.sector).is_ok() {
+                    pre_evicted.insert(cell.manifest.sector);
                     self.resident.remove(&cell.manifest.sector);
                     LayeredEvictionOutcome::Evicted
                 } else {
@@ -543,6 +549,7 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
                             active_layers: cell.active_layers.clone(),
                         },
                     );
+                    admitted_loaded.push(LoadedCell::new(cell.manifest));
                     LayeredEvictionOutcome::Failed
                 };
                 evictions.push(LayeredEvictionReport {
@@ -568,6 +575,7 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
             let mut adapter = LayeredHostAdapter {
                 host,
                 resident: &mut self.resident,
+                pre_evicted: &pre_evicted,
             };
             self.cells.plan_frame(
                 demands,
@@ -581,6 +589,7 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
             let mut adapter = LayeredHostAdapter {
                 host,
                 resident: &mut self.resident,
+                pre_evicted: &BTreeSet::new(),
             };
             reconcile(&self.desired, &mut adapter)
         };
@@ -606,6 +615,7 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
             let mut adapter = LayeredHostAdapter {
                 host,
                 resident: &mut self.resident,
+                pre_evicted: &BTreeSet::new(),
             };
             match self.cells.poll_io_with_context(cx, &mut adapter) {
                 Poll::Pending => return Poll::Pending,
@@ -617,6 +627,7 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
             let mut adapter = LayeredHostAdapter {
                 host,
                 resident: &mut self.resident,
+                pre_evicted: &BTreeSet::new(),
             };
             reconcile(&self.desired, &mut adapter)
         };
@@ -657,6 +668,7 @@ impl<P: crate::ChunkProvider> LayeredCellFrameCoordinator<crate::IoRuntime<P>> {
             let mut adapter = LayeredHostAdapter {
                 host,
                 resident: &mut self.resident,
+                pre_evicted: &BTreeSet::new(),
             };
             self.cells.poll_io(&mut adapter)
         };
@@ -664,6 +676,7 @@ impl<P: crate::ChunkProvider> LayeredCellFrameCoordinator<crate::IoRuntime<P>> {
             let mut adapter = LayeredHostAdapter {
                 host,
                 resident: &mut self.resident,
+                pre_evicted: &BTreeSet::new(),
             };
             reconcile(&self.desired, &mut adapter)
         };
@@ -952,11 +965,8 @@ mod tests {
     #[test]
     fn any_unloaded_declared_layer_blocks_streaming_until_all_are_loaded() {
         let cell = manifest(4, 1);
-        let layered = LayeredCellManifest::new(
-            cell,
-            &[DataLayerId::new(1), DataLayerId::new(2)],
-        )
-        .unwrap();
+        let layered =
+            LayeredCellManifest::new(cell, &[DataLayerId::new(1), DataLayerId::new(2)]).unwrap();
         let mut coordinator = coordinator(&[cell], 2);
         coordinator
             .data_layers_mut()
@@ -1006,11 +1016,8 @@ mod tests {
     #[test]
     fn loaded_layers_stream_without_activation_and_activation_is_selective() {
         let cell = manifest(5, 1);
-        let layered = LayeredCellManifest::new(
-            cell,
-            &[DataLayerId::new(1), DataLayerId::new(2)],
-        )
-        .unwrap();
+        let layered =
+            LayeredCellManifest::new(cell, &[DataLayerId::new(1), DataLayerId::new(2)]).unwrap();
         let mut coordinator = coordinator(&[cell], 2);
         coordinator
             .data_layers_mut()
@@ -1065,12 +1072,9 @@ mod tests {
         let cell = manifest(6, 1);
         let layered = LayeredCellManifest::new(cell, &[DataLayerId::new(8)]).unwrap();
         let mut coordinator = coordinator(&[cell], 1);
-        let loaded = [LayeredLoadedCell::new(
-            cell,
-            &[DataLayerId::new(8)],
-            &[DataLayerId::new(8)],
-        )
-        .unwrap()];
+        let loaded = [
+            LayeredLoadedCell::new(cell, &[DataLayerId::new(8)], &[DataLayerId::new(8)]).unwrap(),
+        ];
         let mut host = Host {
             fail_evictions: true,
             ..Host::default()
@@ -1097,9 +1101,10 @@ mod tests {
             .data_layers_mut()
             .set_state(DataLayerId::new(8), DataLayerState::Loaded)
             .unwrap();
+        let demand = DemandSource::new(cell.sector, 0, 1, 1).unwrap();
         let report = coordinator
             .plan_frame(
-                &[],
+                &[demand],
                 &[layered],
                 &loaded,
                 StreamBudget {
