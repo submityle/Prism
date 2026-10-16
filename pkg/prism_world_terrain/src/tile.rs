@@ -237,6 +237,88 @@ impl TileKey {
         }
     }
 
+    /// Returns the neighbor and corresponding edge index for one boundary
+    /// sample. `sample_side` is the number of samples on the edge; it is
+    /// separate from the number of quadtree tiles along a face.
+    pub fn neighbor_edge_index(
+        self,
+        edge: TileEdge,
+        sample_side: u32,
+        index: u32,
+    ) -> Option<(Self, TileEdge, u32)> {
+        let tile_side = self.side_len();
+        if sample_side == 0 || index >= sample_side {
+            return None;
+        }
+        match edge {
+            TileEdge::West if self.x > 0 => Some((
+                Self {
+                    x: self.x - 1,
+                    ..self
+                },
+                TileEdge::East,
+                index,
+            )),
+            TileEdge::East if self.x + 1 < tile_side => Some((
+                Self {
+                    x: self.x + 1,
+                    ..self
+                },
+                TileEdge::West,
+                index,
+            )),
+            TileEdge::South if self.y > 0 => Some((
+                Self {
+                    y: self.y - 1,
+                    ..self
+                },
+                TileEdge::North,
+                index,
+            )),
+            TileEdge::North if self.y + 1 < tile_side => Some((
+                Self {
+                    y: self.y + 1,
+                    ..self
+                },
+                TileEdge::South,
+                index,
+            )),
+            _ => {
+                let transform = edge_transform(self.face, edge);
+                let tile_index = match edge {
+                    TileEdge::West | TileEdge::East => self.y,
+                    TileEdge::South | TileEdge::North => self.x,
+                };
+                let neighbor_tile_index = if transform.reversed {
+                    tile_side - 1 - tile_index
+                } else {
+                    tile_index
+                };
+                let sample_index = if transform.reversed {
+                    sample_side - 1 - index
+                } else {
+                    index
+                };
+                let (x, y) = match transform.edge {
+                    TileEdge::West => (0, neighbor_tile_index),
+                    TileEdge::East => (tile_side - 1, neighbor_tile_index),
+                    TileEdge::South => (neighbor_tile_index, 0),
+                    TileEdge::North => (neighbor_tile_index, tile_side - 1),
+                };
+                Some((
+                    Self {
+                        face: transform.face,
+                        level: self.level,
+                        x,
+                        y,
+                    },
+                    transform.edge,
+                    sample_index,
+                ))
+            }
+        }
+    }
+
     /// Returns the inclusive face-UV bounds of this tile.
     pub fn bounds(self) -> (FaceUv, FaceUv) {
         let side = self.side_len() as f32;

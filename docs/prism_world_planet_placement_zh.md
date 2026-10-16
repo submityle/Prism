@@ -16,6 +16,11 @@
 region 或 candidate work 计数。键数量、Vec 实际容量字节和非法版本在发布前检查，失败
 不返回部分删除结果。
 
+另外提供 `validate_planet_heightfield_edge`：在发布相邻 tile 或提交行星 mesh 前，按
+`TileKey::neighbor_edge_index` 的精确跨面方向映射，对整条共享边的解码毫米高度做有界
+对拍。它能 fail-closed 拒绝跨 tile 高度断裂、错误 tile、分辨率不一致和超预算输入；这
+是连续性门禁，不冒充跨 tile 法线平滑或混合 LOD seam stitch。
+
 入口：
 
 ```rust
@@ -52,6 +57,7 @@ cargo clippy --offline -p prism_world_terrain --no-default-features \
 ## 未包含边界
 
 - 没有 GPU dispatch、GPU indirect draw、renderer graph 或 ECS decoder 接线。
-- 没有行星跨 tile 高度连续性修复、跨 LOD seam stitch 或跨 tile 法线平滑；这些仍由 mesh/seam 消费者负责。
+- 已有共享边高度连续性门禁，但没有自动修复断裂、跨 LOD seam stitch 或跨 tile 法线平滑；
+  这些仍由 mesh/seam 消费者负责。
 - 没有风、交互、数据层、runtime 持久化删除 codec、网络复制或编辑器 authoring 接线。
 - 没有跨硬件 GPU 性能、产品帧时、功耗或 UE 对比结论。

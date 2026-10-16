@@ -20,6 +20,7 @@ mod lod;
 mod lod_seam;
 #[cfg(feature = "scatter")]
 mod placement_deletion;
+mod planet_boundary;
 mod planet_mesh;
 mod planet_placement;
 mod planet_placement_deletion;
@@ -65,6 +66,7 @@ pub use placement_deletion::{
     HeightfieldPlacementDeletionBudget, HeightfieldPlacementDeletionError,
     HeightfieldPlacementDeletionSet, HEIGHTFIELD_PLACEMENT_DELETION_VERSION,
 };
+pub use planet_boundary::{validate_planet_heightfield_edge, PlanetHeightfieldBoundaryError};
 pub use planet_mesh::{PlanetHeightfieldMesh, PlanetMeshConfig};
 pub use planet_placement::{
     estimate_planet_placement_work, place_on_planet_heightfield, PlanetPlacementBudget,
@@ -156,6 +158,28 @@ mod tests {
                     .expect("valid edge tile");
                     let (neighbor, back_edge) = tile.neighbor_with_edge(edge);
                     assert_eq!(neighbor.neighbor(back_edge), tile);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tile_sample_edge_mapping_is_reciprocal_for_cross_faces_and_local_edges() {
+        for face in CubeFace::ALL {
+            for edge in TileEdge::ALL {
+                let tile = TileKey::new(face, 3, 2, 5).unwrap();
+                for sample_side in [2, 5, 9] {
+                    for index in 0..sample_side {
+                        let (neighbor, neighbor_edge, neighbor_index) = tile
+                            .neighbor_edge_index(edge, sample_side, index)
+                            .expect("valid edge sample");
+                        let (back, back_edge, back_index) = neighbor
+                            .neighbor_edge_index(neighbor_edge, sample_side, neighbor_index)
+                            .expect("reciprocal edge sample");
+                        assert_eq!(back, tile);
+                        assert_eq!(back_edge, edge);
+                        assert_eq!(back_index, index);
+                    }
                 }
             }
         }
