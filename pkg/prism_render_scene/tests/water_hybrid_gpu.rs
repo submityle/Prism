@@ -485,6 +485,7 @@ fn copy_texture(
 struct Case {
     foam: f32,
     vertex_foam: Option<[f32; 3]>,
+    surface_uvs: Option<[[f32; 4]; 3]>,
     shallow: f32,
     overlay: f32,
     alpha: f32,
@@ -493,10 +494,12 @@ struct Case {
     camera_z: f32,
     normal: [f32; 3],
     previous_displacement: [f32; 4],
+    previous_vertex_displacement: Option<[[f32; 4]; 3]>,
     previous_clip: [[f32; 4]; 4],
     background: [f32; 4],
     caustic_incident: f32,
     caustic_enable: bool,
+    caustic_offsets: Option<[[f32; 2]; PIXELS]>,
     volume_enable: bool,
     surface_light: Option<[f32; PIXELS]>,
     ssr_enable: bool,
@@ -508,6 +511,7 @@ impl Default for Case {
         Self {
             foam: 0.0,
             vertex_foam: None,
+            surface_uvs: None,
             shallow: 0.0,
             overlay: 0.0,
             alpha: 0.4,
@@ -516,10 +520,12 @@ impl Default for Case {
             camera_z: 2.0,
             normal: [0.0, 0.0, 1.0],
             previous_displacement: [0.0; 4],
+            previous_vertex_displacement: None,
             previous_clip: IDENTITY,
             background: [0.0; 4],
             caustic_incident: 0.0,
             caustic_enable: false,
+            caustic_offsets: None,
             volume_enable: false,
             surface_light: None,
             ssr_enable: false,
@@ -660,9 +666,19 @@ impl Gpu {
             ],
             false,
         );
-        let uvs = upload(d, &[[0.5_f32, 0.5, 0.0, 0.0]; 3], false);
+        let uvs = upload(
+            d,
+            &case.surface_uvs.unwrap_or([[0.5_f32, 0.5, 0.0, 0.0]; 3]),
+            false,
+        );
         let displacement = upload(d, &[[0.0_f32; 4]; 3], false);
-        let previous = upload(d, &[case.previous_displacement; 3], false);
+        let previous = upload(
+            d,
+            &case
+                .previous_vertex_displacement
+                .unwrap_or([case.previous_displacement; 3]),
+            false,
+        );
         let normals = upload(
             d,
             &case
@@ -741,7 +757,7 @@ impl Gpu {
             d,
             q,
             wgpu::TextureFormat::Rg32Float,
-            &[[0.0_f32; 2]; PIXELS],
+            &case.caustic_offsets.unwrap_or([[0.0_f32; 2]; PIXELS]),
         );
         let offsets_view = offsets.create_view(&Default::default());
         let photons = upload(d, &[0_u32; PIXELS], false);
@@ -1375,6 +1391,82 @@ fn water_gpu_caustics_compute_texture_reaches_surface_and_hdr() {
 }
 
 #[test]
+fn water_gpu_spatial_caustics_offsets_reach_surface_and_resident_hdr() {
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    let case = Case {
+        caustic_incident: 0.25,
+        caustic_enable: true,
+        // Production VS interpolates u across the framebuffer. A constant v
+        // isolates the horizontal texture pattern without CPU water shading.
+        surface_uvs: Some([
+            [0.0, 0.5, 0.0, 0.0],
+            [2.0, 0.5, 0.0, 0.0],
+            [0.0, 0.5, 0.0, 0.0],
+        ]),
+        caustic_offsets: Some(core::array::from_fn(|i| {
+            let x = i % EDGE as usize;
+            [-0.5 * x.min(EDGE as usize - 1 - x) as f32, 0.0]
+        })),
+        ..Default::default()
+    };
+    let patterned = gpu.draw(&case, 2);
+    let flat_case = Case {
+        caustic_offsets: None,
+        ..case.clone()
+    };
+    let flat = gpu.draw(&flat_case, 2);
+    let disabled = gpu.draw(
+        &Case {
+            caustic_enable: false,
+            ..case
+        },
+        2,
+    );
+    let flat_disabled = gpu.draw(
+        &Case {
+            caustic_enable: false,
+            ..flat_case
+        },
+        2,
+    );
+    for i in 0..PIXELS {
+        let x = i % EDGE as usize;
+        let texel = (i / EDGE as usize) * (ROW / 4) as usize + x;
+        let irradiance = patterned.caustics[texel];
+        assert!(irradiance.is_finite() && irradiance > 0.0);
+        // The production finite-difference kernel must focus the decreasing
+        // offset field and spread the increasing one. The output itself is
+        // GPU-computed: no host Jacobian or caustics implementation is used.
+        if x < EDGE as usize / 2 {
+            assert!(irradiance > flat.caustics[texel], "focused texel {i}");
+        } else {
+            assert!(irradiance < flat.caustics[texel], "spread texel {i}");
+        }
+        near(disabled.caustics[texel], irradiance, 0.0);
+        for c in 0..3 {
+            if x < EDGE as usize / 2 {
+                assert!(patterned.composed[i][c] > flat.composed[i][c]);
+            } else {
+                assert!(patterned.composed[i][c] < flat.composed[i][c]);
+            }
+        }
+        // Disabling only the raster consumer leaves the computed texture
+        // intact but removes its spatial effect from every resident response.
+        for c in 0..16 {
+            near(
+                disabled.composed[i][c],
+                flat_disabled.composed[i][c],
+                0.00002,
+            );
+        }
+    }
+    // draw() also checks every pixel of the real blended MRT and HDR export
+    // against these resident results, so texture generation alone cannot pass.
+}
+
+#[test]
 fn water_gpu_reflection_ssr_hit_miss_and_disable_affect_output() {
     let Some(gpu) = gpu() else {
         return;
@@ -1625,5 +1717,74 @@ fn water_gpu_reactive_foam_motion_transparency_drive_resident_overlay() {
         [right[0], right[1], right[2], right[15]],
         [right[0], right[1], right[2], right[15]],
         1.0,
+    );
+}
+
+#[test]
+fn water_gpu_spatial_motion_drives_per_pixel_reactive_overlay_output() {
+    let Some(gpu) = gpu() else {
+        return;
+    };
+    let case = Case {
+        alpha: 1.0,
+        shallow: 0.2,
+        overlay: 1.0,
+        // Only the right vertex moved in the previous frame. The production
+        // VS and interpolator turn this into a spatial motion field, not a
+        // uniform authored control or a separately evaluated test shader.
+        previous_vertex_displacement: Some([[0.0; 4], [-0.125, 0.0, 0.0, 0.0], [0.0; 4]]),
+        ..Default::default()
+    };
+    let hybrid = gpu.draw(&case, 2);
+    let pbr = gpu.draw(&case, 0);
+    let npr = gpu.draw(&case, 1);
+    let disabled = gpu.draw(
+        &Case {
+            overlay: 0.0,
+            ..case
+        },
+        2,
+    );
+    assert_region_output(&hybrid, &pbr, &npr, |_| 0.2);
+    assert_region_output(&disabled, &pbr, &npr, |_| 0.2);
+    let mut radiance_delta = 0.0;
+    for i in 0..PIXELS {
+        let x = i % EDGE as usize;
+        let motion_index = (i / EDGE as usize) * (ROW / 2) as usize + x * 2;
+        let expected_motion = (x as f32 + 0.5) / (EDGE * 32) as f32;
+        let expected_overlay = ((x as f32 + 0.5) / EDGE as f32).max(0.25);
+        near(half(hybrid.motion[motion_index]), expected_motion, 0.00001);
+        near(half(hybrid.motion[motion_index + 1]), 0.0, 0.00001);
+        near(
+            f32::from_bits(hybrid.controls[i][0]),
+            expected_overlay,
+            0.00002,
+        );
+        near(f32::from_bits(disabled.controls[i][0]), 0.0, 0.0);
+        for c in 0..2 {
+            near(
+                half(disabled.motion[motion_index + c]),
+                half(hybrid.motion[motion_index + c]),
+                0.0,
+            );
+        }
+        for c in 0..16 {
+            // Independent production PBR/NPR draws are the endpoints. Test
+            // the final output as well as the recorded mask, so a plausible
+            // ABI signal without a real composition effect cannot pass.
+            let stylized_weight = 0.2 + 0.8 * expected_overlay;
+            near(
+                hybrid.composed[i][c],
+                pbr.composed[i][c] * (1.0 - stylized_weight) + npr.composed[i][c] * stylized_weight,
+                0.00002,
+            );
+            if c < 3 {
+                radiance_delta += (hybrid.composed[i][c] - disabled.composed[i][c]).abs();
+            }
+        }
+    }
+    assert!(
+        radiance_delta > 0.0001,
+        "reactive overlay changes actual RGB"
     );
 }

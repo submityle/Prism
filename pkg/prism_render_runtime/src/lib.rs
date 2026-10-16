@@ -40,7 +40,9 @@ use prism_render_driver::{
     RenderDevice, RequestAdapterOptions, Surface, SurfaceConfig, SurfaceError, TextureState,
     TextureUsages,
 };
-use prism_render_graph::{CompileError, ImportedTexture, RenderGraph, TextureDesc, TextureHandle};
+use prism_render_graph::{
+    CompileError, ImportedTexture, PreparedGraph, RenderGraph, TextureDesc, TextureHandle,
+};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 mod frame_pacing;
@@ -72,6 +74,12 @@ pub enum SubmissionError {
     /// This device generation has exhausted its strictly increasing values.
     /// No allocation, recording, pacing wait, or submission was performed.
     CompletionValueExhausted,
+    /// A retained import owner was created by another device or generation.
+    /// Rejected before pacing, allocation, recording, or submission.
+    ForeignImportOwner {
+        /// Zero-based position in the caller-provided imported-owner slice.
+        index: usize,
+    },
 }
 
 impl From<CompileError> for SubmissionError {
@@ -89,6 +97,12 @@ impl fmt::Display for SubmissionError {
             }
             Self::CompletionValueExhausted => {
                 f.write_str("device generation completion values are exhausted")
+            }
+            Self::ForeignImportOwner { index } => {
+                write!(
+                    f,
+                    "import owner {index} belongs to another device or generation"
+                )
             }
         }
     }
@@ -146,6 +160,11 @@ pub enum FrameError {
     CompletionUnconfirmed,
     /// This device generation has no remaining completion values.
     CompletionValueExhausted,
+    /// An import owner belongs to another device or generation.
+    ForeignImportOwner {
+        /// Zero-based position in the caller-provided imported-owner slice.
+        index: usize,
+    },
 }
 
 impl fmt::Display for FrameError {
@@ -159,6 +178,12 @@ impl fmt::Display for FrameError {
             }
             Self::CompletionValueExhausted => {
                 f.write_str("device generation completion values are exhausted")
+            }
+            Self::ForeignImportOwner { index } => {
+                write!(
+                    f,
+                    "import owner {index} belongs to another device or generation"
+                )
             }
         }
     }
@@ -685,6 +710,9 @@ impl<I: Instance + 'static> RenderRuntime<I> {
                 SubmissionError::Compile(error) => FrameError::Compile(error),
                 SubmissionError::CompletionUnconfirmed => FrameError::CompletionUnconfirmed,
                 SubmissionError::CompletionValueExhausted => FrameError::CompletionValueExhausted,
+                SubmissionError::ForeignImportOwner { index } => {
+                    FrameError::ForeignImportOwner { index }
+                }
             });
         }
 
@@ -786,6 +814,36 @@ impl<I: Instance + 'static> RenderRuntime<I> {
         // Compile before touching the pacer, then record directly. No fake
         // queue, intercepted submission, command-buffer clone, or recompile.
         let prepared = graph.prepare()?;
+        self.execute_prepared_owned(prepared, &[])
+    }
+
+    /// Submits an already-validated graph without recompiling its execution plan.
+    ///
+    /// `imports` must contain the creating submission owner for every imported
+    /// graph-owned resource. The consumer retains these owners until its actual
+    /// completion callback, so callers may drop their history handles immediately
+    /// after successful submission. Imports owned outside this runtime remain the
+    /// caller's responsibility; listing an owner does not discover or validate
+    /// the native IDs embedded in arbitrary external imports.
+    ///
+    /// Every listed owner must belong to this exact device and generation. A
+    /// mismatch, failed pacing wait, or exhausted completion value returns before
+    /// resources are realized or recorder callbacks run. Completed consumers do
+    /// not retain an unbounded chain of earlier history owners.
+    pub fn execute_prepared_owned(
+        &self,
+        prepared: PreparedGraph,
+        imports: &[FrameSubmission<I::Device>],
+    ) -> Result<FrameSubmission<I::Device>, SubmissionError>
+    where
+        I::Queue: FrameSync,
+        I::Device: Send + Sync + 'static,
+    {
+        for (index, owner) in imports.iter().enumerate() {
+            if !owner.belongs_to(&self.device, self.device_generation) {
+                return Err(SubmissionError::ForeignImportOwner { index });
+            }
+        }
 
         // Serialize pacing, recording, value assignment and actual submission:
         // completion values must follow queue order even for concurrent callers.
@@ -813,6 +871,7 @@ impl<I: Instance + 'static> RenderRuntime<I> {
             self.device_generation,
             Arc::clone(&self.device),
             allocations,
+            imports.to_vec(),
         );
         let token = self.queue.submit_tracked(core::slice::from_ref(&commands));
         pacer.record(token);

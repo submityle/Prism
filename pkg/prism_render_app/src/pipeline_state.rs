@@ -8,6 +8,17 @@ use prism_render_architecture::shader_package::PipelineStateHash;
 use prism_render_driver as rhi;
 
 macro_rules! state_enum {
+    ($name:ident, $source:ident, {$($variant:ident = $tag:literal),+ $(,)?}, roundtrip) => {
+        state_enum!($name, $source, {$($variant = $tag),+});
+
+        impl From<$name> for rhi::$source {
+            fn from(value: $name) -> Self {
+                match value {
+                    $($name::$variant => Self::$variant,)+
+                }
+            }
+        }
+    };
     ($name:ident, $source:ident, {$($variant:ident = $tag:literal),+ $(,)?}) => {
         #[doc = concat!("Stable identity tags for RHI `", stringify!($source), "`.")]
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -33,7 +44,8 @@ state_enum!(AttachmentFormat, TextureFormat, {
     Rgba8UnormSrgb = 9, Bgra8Unorm = 10, Bgra8UnormSrgb = 11,
     Rgb10a2Unorm = 12, Rg11b10Float = 13, Rgba16Float = 14,
     Rgba32Float = 15, Depth32Float = 16, Depth24PlusStencil8 = 17,
-});
+    Rgba32Uint = 18,
+}, roundtrip);
 state_enum!(AttributeFormat, VertexFormat, {
     Float32 = 0, Float32x2 = 1, Float32x3 = 2, Float32x4 = 3,
     Float16x2 = 4, Float16x4 = 5, Uint32 = 6, Uint32x2 = 7,

@@ -9,13 +9,22 @@ use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+use prism_render_architecture::render_fabric::{
+    AccessKind, CapabilitySet, DeviceFabric, FeatureCatalog, FeatureDefinition, FeatureId,
+    FeatureKind, FeatureVariant, FrameResourceBinding, FrozenRoots, GraphLimits, PassKey,
+    PassTemplate, PhysicalResource, QueueClass, RenderDomain, RenderQualityTier, ResourceInput,
+    ResourceKey, ResourceLayout, ResourceLifetime, ResourceTemplate, ResourceUse, RuntimeImport,
+    RuntimePassBinding, RuntimeResourceHandle, ServiceSet, VariantId,
+};
 use prism_render_driver as rhi;
 use prism_render_driver_null::{NullAdapter, NullDevice, NullInstance, NullQueue, NullSurface};
-use prism_render_graph::{BufferDesc, CompileError, Lifetime, PassFlags, RenderGraph, TextureDesc};
+use prism_render_graph::{
+    BufferDesc, CompileError, ImportedBuffer, Lifetime, PassFlags, RenderGraph, TextureDesc,
+};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use rhi::{FrameSync, Instance, RenderDevice, RenderQueue};
 
-use crate::{RenderRuntime, SubmissionError};
+use crate::{FrameSubmission, RenderRuntime, SubmissionError};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -421,6 +430,480 @@ fn frame(calls: &Arc<AtomicUsize>) -> RenderGraph {
         }
     });
     graph
+}
+
+#[test]
+fn fabric_compile_prepare_and_runtime_submission_share_one_frozen_selection() {
+    const FEATURE: FeatureId = FeatureId(930);
+    const VARIANT: VariantId = VariantId(930);
+    const PASS: PassKey = PassKey(930);
+    const SOURCE: ResourceKey = ResourceKey::of(FEATURE, 0);
+    const TARGET: ResourceKey = ResourceKey::of(FEATURE, 1);
+    const FRAME: u64 = 7;
+
+    let accesses: &'static [ResourceUse] = Box::leak(
+        vec![
+            ResourceUse {
+                input: ResourceInput::Initial,
+                key: SOURCE,
+                access: AccessKind::TransferRead,
+                scope: prism_render_architecture::render_fabric::ResourceScope::Whole,
+                frame_lag: None,
+            },
+            ResourceUse {
+                input: ResourceInput::Automatic,
+                key: TARGET,
+                access: AccessKind::TransferWrite,
+                scope: prism_render_architecture::render_fabric::ResourceScope::Whole,
+                frame_lag: None,
+            },
+        ]
+        .into_boxed_slice(),
+    );
+    let passes: &'static [PassTemplate] = Box::leak(
+        vec![PassTemplate {
+            id: PASS,
+            accesses,
+            queue: QueueClass::Transfer,
+            depends_on: &[],
+        }]
+        .into_boxed_slice(),
+    );
+    let variants: &'static [FeatureVariant] = Box::leak(
+        vec![FeatureVariant {
+            id: VARIANT,
+            rank: 0,
+            min_quality: RenderQualityTier::Low,
+            required_caps: CapabilitySet::EMPTY,
+            requires_services_extra: ServiceSet::EMPTY,
+            passes,
+            shader_permutation: None,
+        }]
+        .into_boxed_slice(),
+    );
+    let resources: &'static [ResourceKey] = Box::leak(vec![SOURCE, TARGET].into_boxed_slice());
+    let definitions: &'static [FeatureDefinition] = Box::leak(
+        vec![FeatureDefinition {
+            id: FEATURE,
+            kind: FeatureKind::Subsystem,
+            domain: Some(RenderDomain::Surface),
+            requires_services: ServiceSet::EMPTY,
+            variants,
+        }]
+        .into_boxed_slice(),
+    );
+    let catalog = FeatureCatalog::new(definitions, resources).unwrap();
+    let roots = FrozenRoots::from_build_profile(&catalog, &[FEATURE], &[]).unwrap();
+    let fabric = DeviceFabric::new(
+        catalog,
+        roots,
+        CapabilitySet::WEBGPU_BASELINE,
+        RenderQualityTier::Low,
+    )
+    .unwrap();
+    assert_eq!(
+        fabric.selection().feature(FEATURE).unwrap().variant_id(),
+        VARIANT
+    );
+
+    let (runtime, instance) = runtime(4);
+    let source_graph = {
+        let mut graph = runtime.new_graph();
+        graph.add_compute_pass("fabric source", PassFlags::SIDE_EFFECT, |builder| {
+            let source = builder.create_persistent_buffer(
+                "fabric source buffer",
+                BufferDesc::new(
+                    64,
+                    rhi::BufferUsages::COPY_SRC | rhi::BufferUsages::COPY_DST,
+                ),
+            );
+            builder.write_storage_buffer(source);
+            move |commands| commands.dispatch(1, 1, 1)
+        });
+        graph
+    };
+    let producer = runtime.execute_owned(source_graph).unwrap();
+    let source_id = producer
+        .allocations()
+        .buffers()
+        .iter()
+        .find_map(|(_, lifetime, id)| (*lifetime == Lifetime::Persistent).then_some(*id))
+        .expect("producer must publish a persistent source buffer");
+    instance.device(0).queue.complete_through(1);
+
+    let buffer_layout = ResourceLayout::Buffer {
+        bytes: 64,
+        usage: rhi::BufferUsages::COPY_SRC | rhi::BufferUsages::COPY_DST,
+    };
+    let source_template = ResourceTemplate {
+        key: SOURCE,
+        lifetime: ResourceLifetime::Imported,
+        layout: buffer_layout,
+        alignment: 16,
+    };
+    let target_template = ResourceTemplate {
+        key: TARGET,
+        lifetime: ResourceLifetime::Transient,
+        layout: buffer_layout,
+        alignment: 16,
+    };
+    let declaration = fabric
+        .compile(
+            &[source_template, target_template],
+            FRAME,
+            &[FrameResourceBinding {
+                key: SOURCE,
+                frame: FRAME,
+                version: 1,
+                physical: PhysicalResource::Buffer {
+                    id: source_id,
+                    offset: 0,
+                },
+                layout: buffer_layout,
+                alignment: 16,
+            }],
+            &[],
+            GraphLimits::default(),
+        )
+        .unwrap();
+    let source_resource = declaration.resource_id(SOURCE, FRAME).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorder_calls = Arc::clone(&calls);
+    let runtime_graph = declaration
+        .prepare_runtime(
+            rhi::Extent3d::new_2d(1, 1),
+            &[RuntimeImport::Buffer {
+                resource: source_resource,
+                imported: ImportedBuffer {
+                    buffer: source_id,
+                    entry_state: rhi::BufferState::initial(),
+                },
+            }],
+            vec![RuntimePassBinding::new(PASS, move |context| {
+                let RuntimeResourceHandle::Buffer { handle: source, .. } =
+                    context.accesses()[0].handle
+                else {
+                    panic!("source access must lower as a buffer");
+                };
+                let RuntimeResourceHandle::Buffer { handle: target, .. } =
+                    context.accesses()[1].handle
+                else {
+                    panic!("target access must lower as a buffer");
+                };
+                recorder_calls.fetch_add(1, Ordering::SeqCst);
+                context
+                    .commands()
+                    .copy_buffer_to_buffer(source, 0, target, 0, 64);
+            })],
+        )
+        .unwrap();
+    let owner = runtime
+        .execute_prepared_owned(
+            runtime_graph.into_prepared(),
+            core::slice::from_ref(&producer),
+        )
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    drop(producer);
+    instance.device(0).queue.complete_through(2);
+    assert!(owner.is_complete());
+    assert_eq!(runtime.frames_in_flight(), 0);
+    drop(owner);
+    instance.device(0).device.assert_counts(2, 2);
+}
+
+fn history_frame(
+    calls: &Arc<AtomicUsize>,
+    owner: &FrameSubmission<RetirementDevice>,
+) -> RenderGraph {
+    let mut graph = frame(calls);
+    let buffer = owner
+        .allocations()
+        .buffers()
+        .iter()
+        .find_map(|(_, lifetime, id)| (*lifetime == Lifetime::Persistent).then_some(*id))
+        .expect("producer has a persistent buffer");
+    let imported = graph.import_buffer(
+        "previous submission history",
+        BufferDesc::new(256, rhi::BufferUsages::STORAGE),
+        ImportedBuffer {
+            buffer,
+            entry_state: rhi::BufferState::initial(),
+        },
+    );
+    let calls = Arc::clone(calls);
+    graph.add_compute_pass("consume history", PassFlags::SIDE_EFFECT, move |b| {
+        b.read_storage_buffer(imported);
+        move |ctx| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(ctx.buffer(imported), buffer);
+            ctx.dispatch(1, 1, 1);
+        }
+    });
+    graph
+}
+
+#[test]
+fn prepared_submission_realizes_and_records_the_validated_plan_exactly_once() {
+    let (runtime, instance) = runtime(2);
+    let inspector = instance.device(0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let prepared = frame(&calls).prepare().unwrap();
+    inspector.device.assert_counts(0, 0);
+    inspector.queue.assert_submissions(0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let owner = runtime.execute_prepared_owned(prepared, &[]).unwrap();
+    inspector.device.assert_counts(FRAME_ALLOCATIONS, 0);
+    inspector.queue.assert_submissions(1);
+    assert_eq!(calls.load(Ordering::SeqCst), FRAME_RECORDINGS);
+    drop(owner);
+    inspector.queue.complete_through(1);
+    inspector
+        .device
+        .assert_counts(FRAME_ALLOCATIONS, FRAME_ALLOCATIONS);
+}
+
+#[test]
+fn consumer_retains_completed_history_until_its_own_actual_completion() {
+    let (runtime, instance) = runtime(3);
+    let inspector = instance.device(0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let source = runtime.execute_owned(frame(&calls)).unwrap();
+    inspector.queue.complete_through(1);
+    assert!(source.is_complete());
+    let consumer = runtime
+        .execute_prepared_owned(
+            history_frame(&calls, &source).prepare().unwrap(),
+            core::slice::from_ref(&source),
+        )
+        .unwrap();
+    assert_eq!(consumer.allocations().buffers().len(), 2);
+    drop(source);
+    inspector.device.assert_counts(2 * FRAME_ALLOCATIONS, 0);
+    assert!(!consumer.is_complete());
+    inspector.queue.complete_through(2);
+    assert!(consumer.is_complete());
+    // Keeping the completed consumer does not pin its now-unused predecessor.
+    inspector
+        .device
+        .assert_counts(2 * FRAME_ALLOCATIONS, FRAME_ALLOCATIONS);
+    drop(consumer);
+    inspector
+        .device
+        .assert_counts(2 * FRAME_ALLOCATIONS, 2 * FRAME_ALLOCATIONS);
+    assert_eq!(calls.load(Ordering::SeqCst), 2 * FRAME_RECORDINGS + 1);
+}
+
+#[test]
+fn shared_history_and_duplicate_import_owners_retire_after_the_last_consumer() {
+    let (runtime, instance) = runtime(4);
+    let inspector = instance.device(0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let source = runtime.execute_owned(frame(&calls)).unwrap();
+    inspector.queue.complete_through(1);
+    let first = runtime
+        .execute_prepared_owned(
+            history_frame(&calls, &source).prepare().unwrap(),
+            &[source.clone(), source.clone()],
+        )
+        .unwrap();
+    let second = runtime
+        .execute_prepared_owned(
+            history_frame(&calls, &source).prepare().unwrap(),
+            core::slice::from_ref(&source),
+        )
+        .unwrap();
+    drop(source);
+    drop(first);
+    inspector.queue.complete_through(2);
+    inspector
+        .device
+        .assert_counts(3 * FRAME_ALLOCATIONS, FRAME_ALLOCATIONS);
+    inspector.queue.complete_through(3);
+    inspector
+        .device
+        .assert_counts(3 * FRAME_ALLOCATIONS, 2 * FRAME_ALLOCATIONS);
+    drop(second);
+    inspector
+        .device
+        .assert_counts(3 * FRAME_ALLOCATIONS, 3 * FRAME_ALLOCATIONS);
+}
+
+#[test]
+fn completed_history_chain_does_not_pin_all_preceding_frames() {
+    let (runtime, instance) = runtime(2);
+    let inspector = instance.device(0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut source = runtime.execute_owned(frame(&calls)).unwrap();
+    inspector.queue.complete_through(1);
+    for value in 2..=33 {
+        let next = runtime
+            .execute_prepared_owned(
+                history_frame(&calls, &source).prepare().unwrap(),
+                core::slice::from_ref(&source),
+            )
+            .unwrap();
+        drop(source);
+        inspector.device.assert_counts(
+            value as usize * FRAME_ALLOCATIONS,
+            (value as usize - 2) * FRAME_ALLOCATIONS,
+        );
+        inspector.queue.complete_through(value);
+        inspector.device.assert_counts(
+            value as usize * FRAME_ALLOCATIONS,
+            (value as usize - 1) * FRAME_ALLOCATIONS,
+        );
+        source = next;
+    }
+    drop(source);
+    inspector
+        .device
+        .assert_counts(33 * FRAME_ALLOCATIONS, 33 * FRAME_ALLOCATIONS);
+}
+
+#[test]
+fn foreign_device_owner_is_rejected_before_pacing_or_recording() {
+    let (producer_runtime, producer_instance) = runtime(1);
+    let (consumer_runtime, consumer_instance) = runtime(1);
+    let producer = producer_instance.device(0);
+    let consumer = consumer_instance.device(0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let source = producer_runtime.execute_owned(frame(&calls)).unwrap();
+    let own = consumer_runtime.execute_owned(frame(&calls)).unwrap();
+    assert_eq!(source.device_generation(), own.device_generation());
+    consumer.queue.set_wait_results(false, false);
+    let prepared = history_frame(&calls, &source).prepare().unwrap();
+    assert!(matches!(
+        consumer_runtime.execute_prepared_owned(prepared, &[own.clone(), source.clone()]),
+        Err(SubmissionError::ForeignImportOwner { index: 1 })
+    ));
+    consumer.device.assert_counts(FRAME_ALLOCATIONS, 0);
+    producer.device.assert_counts(FRAME_ALLOCATIONS, 0);
+    assert!(lock(&consumer.queue.0).waits.is_empty());
+    assert_eq!(consumer_runtime.frames_in_flight(), 1);
+    assert_eq!(consumer_runtime.next_completion_value(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2 * FRAME_RECORDINGS);
+    consumer.queue.assert_submissions(1);
+    producer.queue.assert_submissions(1);
+    consumer.queue.set_wait_results(true, true);
+}
+
+#[test]
+fn recovered_device_rejects_old_history_before_realization() {
+    let (mut runtime, instance) = runtime(1);
+    let old = instance.device(0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let source = runtime.execute_owned(frame(&calls)).unwrap();
+    assert_eq!(runtime.recover_device().unwrap().generation, 1);
+    let new = instance.device(1);
+    assert!(matches!(
+        runtime.execute_prepared_owned(
+            history_frame(&calls, &source).prepare().unwrap(),
+            core::slice::from_ref(&source),
+        ),
+        Err(SubmissionError::ForeignImportOwner { index: 0 })
+    ));
+    new.device.assert_counts(0, 0);
+    new.queue.assert_submissions(0);
+    assert!(lock(&new.queue.0).waits.is_empty());
+    assert_eq!(runtime.frames_in_flight(), 0);
+    assert_eq!(runtime.next_completion_value(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), FRAME_RECORDINGS);
+    drop(source);
+    old.device
+        .assert_counts(FRAME_ALLOCATIONS, FRAME_ALLOCATIONS);
+}
+
+#[test]
+fn prepared_rejection_preserves_history_and_has_no_allocation_recording_or_submission() {
+    let (runtime, instance) = runtime(1);
+    let inspector = instance.device(0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let source = runtime.execute_owned(frame(&calls)).unwrap();
+    inspector.queue.set_wait_results(false, false);
+    assert!(matches!(
+        runtime.execute_prepared_owned(
+            history_frame(&calls, &source).prepare().unwrap(),
+            core::slice::from_ref(&source),
+        ),
+        Err(SubmissionError::CompletionUnconfirmed)
+    ));
+    assert_eq!(lock(&inspector.queue.0).waits, vec![1]);
+    assert_eq!(runtime.next_completion_value(), 2);
+    runtime.submitted_value.store(u64::MAX, Ordering::Release);
+    assert!(matches!(
+        runtime.execute_prepared_owned(
+            history_frame(&calls, &source).prepare().unwrap(),
+            core::slice::from_ref(&source),
+        ),
+        Err(SubmissionError::CompletionValueExhausted)
+    ));
+    assert_eq!(lock(&inspector.queue.0).waits, vec![1]);
+    assert_eq!(runtime.frames_in_flight(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), FRAME_RECORDINGS);
+    inspector.device.assert_counts(FRAME_ALLOCATIONS, 0);
+    inspector.queue.assert_submissions(1);
+    inspector.queue.complete_through(1);
+    assert!(source.is_complete());
+    drop(source);
+    inspector
+        .device
+        .assert_counts(FRAME_ALLOCATIONS, FRAME_ALLOCATIONS);
+    inspector.queue.set_wait_results(true, true);
+}
+
+#[test]
+fn discarded_consumer_callback_cannot_destroy_completed_import_or_leak_device_arc() {
+    let (runtime, instance) = runtime(3);
+    let inspector = instance.device(0);
+    let weak_device = Arc::downgrade(&runtime.device);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let source = runtime.execute_owned(frame(&calls)).unwrap();
+    inspector.queue.complete_through(1);
+    let consumer = runtime
+        .execute_prepared_owned(
+            history_frame(&calls, &source).prepare().unwrap(),
+            core::slice::from_ref(&source),
+        )
+        .unwrap();
+    drop(source);
+    drop(consumer);
+    inspector.queue.discard_callbacks();
+    // A completed producer can still be in use by an unconfirmed consumer.
+    inspector.device.assert_counts(2 * FRAME_ALLOCATIONS, 0);
+    drop(runtime);
+    assert!(weak_device.upgrade().is_none());
+    inspector.device.assert_counts(2 * FRAME_ALLOCATIONS, 0);
+}
+
+#[test]
+fn discarded_multilevel_history_callbacks_do_not_destroy_or_leak_owner_arcs() {
+    let (runtime, instance) = runtime(4);
+    let inspector = instance.device(0);
+    let weak_device = Arc::downgrade(&runtime.device);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first = runtime.execute_owned(frame(&calls)).unwrap();
+    let second = runtime
+        .execute_prepared_owned(
+            history_frame(&calls, &first).prepare().unwrap(),
+            core::slice::from_ref(&first),
+        )
+        .unwrap();
+    let third = runtime
+        .execute_prepared_owned(
+            history_frame(&calls, &second).prepare().unwrap(),
+            core::slice::from_ref(&second),
+        )
+        .unwrap();
+    drop(first);
+    drop(second);
+    drop(third);
+    inspector.queue.discard_callbacks();
+    inspector.device.assert_counts(3 * FRAME_ALLOCATIONS, 0);
+    assert_eq!(runtime.completed_value(), 0);
+    drop(runtime);
+    assert!(weak_device.upgrade().is_none());
+    inspector.device.assert_counts(3 * FRAME_ALLOCATIONS, 0);
 }
 
 #[test]

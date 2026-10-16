@@ -176,6 +176,15 @@ impl RuntimeFeatureGraph {
         &self.declaration
     }
 
+    /// Transfers the exact verified plan to the existing graph submitter.
+    /// This consumes the Fabric wrapper without recompiling, realizing resources,
+    /// or recording commands. Completion and imported-resource ownership remain
+    /// the submitter's responsibility.
+    #[must_use]
+    pub fn into_prepared(self) -> PreparedGraph {
+        self.graph
+    }
+
     /// Realizes and records with the exact plan verified during preparation.
     /// No recompilation or submission occurs. The external frame owner submits
     /// the commands on the creating device and retains the returned allocation

@@ -509,9 +509,16 @@ mod tests {
                 storage | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             ),
             (SCENE_COLOR_FORMAT, storage | wgpu::TextureUsages::COPY_DST),
-            (MOTION_VECTOR_FORMAT, storage | wgpu::TextureUsages::RENDER_ATTACHMENT),
+            (
+                MOTION_VECTOR_FORMAT,
+                storage | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            ),
         ] {
-            if !adapter.get_texture_format_features(format).allowed_usages.contains(usage) {
+            if !adapter
+                .get_texture_format_features(format)
+                .allowed_usages
+                .contains(usage)
+            {
                 return skip(&format!("{format:?} lacks production usages {usage:?}"));
             }
         }
@@ -566,9 +573,15 @@ mod tests {
 
     fn attachments(buffer: &ViewVisibilityBuffer) -> [&VisibilityTexture; 9] {
         [
-            &buffer.ids, &buffer.metadata, &buffer.scene_color,
-            &buffer.ssr_env_specular, &buffer.ssr_spec_weight, &buffer.motion_vectors,
-            &buffer.ssgi_ambient, &buffer.ssgi_albedo, &buffer.world_restir_direct,
+            &buffer.ids,
+            &buffer.metadata,
+            &buffer.scene_color,
+            &buffer.ssr_env_specular,
+            &buffer.ssr_spec_weight,
+            &buffer.motion_vectors,
+            &buffer.ssgi_ambient,
+            &buffer.ssgi_albedo,
+            &buffer.world_restir_direct,
         ]
     }
 
@@ -580,9 +593,15 @@ mod tests {
 
     fn assert_same_table(buffer: &ViewVisibilityBuffer, table: &Arc<WgpuDevice>) {
         let formats = [
-            VISIBILITY_ID_FORMAT, VISIBILITY_ID_FORMAT, SCENE_COLOR_FORMAT,
-            SCENE_COLOR_FORMAT, SCENE_COLOR_FORMAT, MOTION_VECTOR_FORMAT,
-            SCENE_COLOR_FORMAT, SCENE_COLOR_FORMAT, SCENE_COLOR_FORMAT,
+            VISIBILITY_ID_FORMAT,
+            VISIBILITY_ID_FORMAT,
+            SCENE_COLOR_FORMAT,
+            SCENE_COLOR_FORMAT,
+            SCENE_COLOR_FORMAT,
+            MOTION_VECTOR_FORMAT,
+            SCENE_COLOR_FORMAT,
+            SCENE_COLOR_FORMAT,
+            SCENE_COLOR_FORMAT,
         ];
         let ids = owner_ids(buffer);
         for (index, owner) in attachments(buffer).into_iter().enumerate() {
@@ -610,10 +629,22 @@ mod tests {
             assert_eq!(owner.texture.texture().usage(), usage);
         }
         // The actual raster/feedback accessors must expose these exact objects.
-        assert_eq!(buffer.attachments().0.id(), buffer.ids.default_view.view().id());
-        assert_eq!(buffer.attachments().1.id(), buffer.metadata.default_view.view().id());
-        assert_eq!(buffer.feedback_sources().0.id(), buffer.ids.texture.texture().id());
-        assert_eq!(buffer.feedback_sources().1.id(), buffer.metadata.texture.texture().id());
+        assert_eq!(
+            buffer.attachments().0.id(),
+            buffer.ids.default_view.view().id()
+        );
+        assert_eq!(
+            buffer.attachments().1.id(),
+            buffer.metadata.default_view.view().id()
+        );
+        assert_eq!(
+            buffer.feedback_sources().0.id(),
+            buffer.ids.texture.texture().id()
+        );
+        assert_eq!(
+            buffer.feedback_sources().1.id(),
+            buffer.metadata.texture.texture().id()
+        );
     }
 
     fn assert_retired(table: &WgpuDevice, ids: OwnerIds) {
@@ -680,7 +711,10 @@ mod tests {
         // Every admission failure removes both texture AND view entries.
         for invalid in [None, Some(UVec2::new(0, 3)), Some(UVec2::new(3, 0))] {
             let ids = owner_ids(world.get(first).unwrap());
-            world.get_mut::<ExtractedCamera>(first).unwrap().physical_viewport_size = invalid;
+            world
+                .get_mut::<ExtractedCamera>(first)
+                .unwrap()
+                .physical_viewport_size = invalid;
             prepare(&mut world);
             assert!(world.get::<ViewVisibilityBuffer>(first).is_none());
             assert_retired(&replacement, ids);
@@ -697,7 +731,8 @@ mod tests {
         prepare(&mut world);
         let ids = owner_ids(world.get(first).unwrap());
         let other = owner_ids(world.get(second).unwrap());
-        world.resource_mut::<super::super::runtime::PrismShadingSettings>()
+        world
+            .resource_mut::<super::super::runtime::PrismShadingSettings>()
             .enable_visibility_buffer = false;
         prepare(&mut world);
         assert!(world.get::<ViewVisibilityBuffer>(first).is_none());
@@ -705,7 +740,8 @@ mod tests {
         assert_retired(&replacement, ids);
         assert_retired(&replacement, other);
 
-        world.resource_mut::<super::super::runtime::PrismShadingSettings>()
+        world
+            .resource_mut::<super::super::runtime::PrismShadingSettings>()
             .enable_visibility_buffer = true;
         prepare(&mut world);
         let ids = owner_ids(world.get(first).unwrap());
@@ -742,12 +778,21 @@ mod tests {
     fn visibility_integer_targets_preserve_channel_order_and_all_u32_bits() {
         let pixel = integer_pixel();
         let targets = pixel.targets();
-        assert_eq!(targets.ids, [0x0100_0001, 0x8000_0001, u32::MAX, 0xdead_beef]);
+        assert_eq!(
+            targets.ids,
+            [0x0100_0001, 0x8000_0001, u32::MAX, 0xdead_beef]
+        );
         // GPU metadata.z is coverage/selector flags, NOT the preceding CPU
         // field barycentrics_unorm16. A raw cast of VisibilityPixel is wrong.
-        assert_eq!(targets.metadata, [0x8100_0001, 0xffff_fffe, 0xc000_00a5, 0x1234_abcd]);
+        assert_eq!(
+            targets.metadata,
+            [0x8100_0001, 0xffff_fffe, 0xc000_00a5, 0x1234_abcd]
+        );
         assert_eq!(VisibilityPixel::from_targets(targets), pixel);
-        assert_eq!(VisibilityPixel::from_targets(VisibilityPixel::INVALID.targets()), VisibilityPixel::INVALID);
+        assert_eq!(
+            VisibilityPixel::from_targets(VisibilityPixel::INVALID.targets()),
+            VisibilityPixel::INVALID
+        );
     }
 
     #[test]
@@ -759,7 +804,10 @@ mod tests {
         let table = Arc::clone(world.resource::<SceneRhi>().device());
         let owner = world.get::<ViewVisibilityBuffer>(entity).unwrap();
         let ids = owner_ids(owner);
-        let textures = [owner.feedback_sources().0.clone(), owner.feedback_sources().1.clone()];
+        let textures = [
+            owner.feedback_sources().0.clone(),
+            owner.feedback_sources().1.clone(),
+        ];
         let views = [owner.attachments().0.clone(), owner.attachments().1.clone()];
         world.despawn(entity);
         assert_retired(&table, ids);
@@ -770,7 +818,10 @@ mod tests {
         let expected = integer_pixel();
         let targets = expected.targets();
         let colors = [targets.ids, targets.metadata].map(|[r, g, b, a]| wgpu::Color {
-            r: f64::from(r), g: f64::from(g), b: f64::from(b), a: f64::from(a),
+            r: f64::from(r),
+            g: f64::from(g),
+            b: f64::from(b),
+            a: f64::from(a),
         });
         let color_attachments = std::array::from_fn::<_, 2, _>(|index| {
             Some(wgpu::RenderPassColorAttachment {
@@ -783,12 +834,15 @@ mod tests {
                 },
             })
         });
-        let staging = host.device.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("retired visibility u32 readback"),
-            size: 512,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let staging = host
+            .device
+            .wgpu_device()
+            .create_buffer(&wgpu::BufferDescriptor {
+                label: Some("retired visibility u32 readback"),
+                size: 512,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
         let mut encoder = host.device.create_command_encoder(&Default::default());
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -807,20 +861,36 @@ mod tests {
                         rows_per_image: Some(1),
                     },
                 },
-                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
             );
         }
         host.queue.submit([encoder.finish()]);
         let (send, receive) = std::sync::mpsc::sync_channel(1);
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |result| send.send(result).unwrap());
-        host.device.wgpu_device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                send.send(result).unwrap()
+            });
+        host.device
+            .wgpu_device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         receive.recv().unwrap().unwrap();
         let bytes = staging.slice(..).get_mapped_range().unwrap();
-        let channels = |offset| std::array::from_fn(|channel| {
-            let start = offset + channel * 4;
-            u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap())
-        });
-        let actual = VisibilityPixelTargets { ids: channels(0), metadata: channels(256) };
+        let channels = |offset| {
+            std::array::from_fn(|channel| {
+                let start = offset + channel * 4;
+                u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap())
+            })
+        };
+        let actual = VisibilityPixelTargets {
+            ids: channels(0),
+            metadata: channels(256),
+        };
         assert_eq!(actual, targets);
         assert_eq!(VisibilityPixel::from_targets(actual), expected);
         drop(bytes);

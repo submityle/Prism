@@ -4,13 +4,16 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 use prism_render_driver::RenderDevice;
 use prism_render_graph::GraphAllocations;
+use std::sync::Mutex;
 
 /// A submitted frame's physical resources, retained through real completion.
 ///
 /// Retain this handle while publishing graph-created persistent resources into
-/// later frames, and until all those later uses complete. Imported resources
-/// are not owned here. Without an external handle, the completion callback
-/// releases graph-owned resources when this submission completes.
+/// later frames. Pass the creating owners to
+/// [`RenderRuntime::execute_prepared_owned`](crate::RenderRuntime::execute_prepared_owned)
+/// so each consumer retains them through its own completion. External native
+/// imports are not owned here. Without an external handle, the completion
+/// callback releases graph-owned resources when this submission completes.
 ///
 /// A handle belongs to its creating device generation, even after runtime
 /// recovery; its resource IDs must never be imported into a replacement device.
@@ -36,6 +39,7 @@ impl<D: RenderDevice> FrameSubmission<D> {
         generation: u64,
         device: Arc<D>,
         allocations: GraphAllocations,
+        imports: Vec<Self>,
     ) -> Self {
         Self {
             value,
@@ -44,6 +48,8 @@ impl<D: RenderDevice> FrameSubmission<D> {
                 device,
                 allocations: Some(allocations),
                 complete: AtomicBool::new(false),
+                retirement_safe: AtomicBool::new(true),
+                imports: Mutex::new(imports),
             }),
         }
     }
@@ -75,6 +81,20 @@ impl<D: RenderDevice> FrameSubmission<D> {
 
     pub(crate) fn mark_complete(&self) {
         self.resources.complete.store(true, Ordering::Release);
+        // Release dependencies on completion, not on this owner's final drop:
+        // retaining a completed history frame must not pin every older frame.
+        let imports = core::mem::take(
+            &mut *self
+                .resources
+                .imports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        drop(imports);
+    }
+
+    pub(crate) fn belongs_to(&self, device: &Arc<D>, generation: u64) -> bool {
+        self.generation == generation && Arc::ptr_eq(&self.resources.device, device)
     }
 }
 
@@ -82,6 +102,10 @@ struct SubmissionResources<D: RenderDevice> {
     device: Arc<D>,
     allocations: Option<GraphAllocations>,
     complete: AtomicBool,
+    // Monotonic: an abandoned, unconfirmed consumer forbids destroying its
+    // imports even if their own producing submission has already completed.
+    retirement_safe: AtomicBool,
+    imports: Mutex<Vec<FrameSubmission<D>>>,
 }
 
 impl<D: RenderDevice> Drop for SubmissionResources<D> {
@@ -90,7 +114,23 @@ impl<D: RenderDevice> Drop for SubmissionResources<D> {
         // Dropping that closure is not evidence of completion. In that case
         // leave the native objects to the creating device's teardown instead
         // of issuing destroys against possibly in-flight work.
-        if self.complete.load(Ordering::Acquire) {
+        let complete = self.complete.load(Ordering::Acquire);
+        if !complete {
+            for owner in self
+                .imports
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+            {
+                owner
+                    .resources
+                    .retirement_safe
+                    .store(false, Ordering::Release);
+            }
+        }
+        // Do not leak owners or device Arcs on this path. An unsafe allocation
+        // remains in its creating device's table until device teardown instead.
+        if complete && self.retirement_safe.load(Ordering::Acquire) {
             if let Some(allocations) = self.allocations.take() {
                 allocations.release(&*self.device);
             }

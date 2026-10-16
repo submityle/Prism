@@ -348,6 +348,148 @@ fn mutations() -> Vec<(&'static str, rhi::RenderPipelineDescriptor)> {
 }
 
 #[test]
+fn attachment_formats_roundtrip_without_changing_existing_wire_tags() {
+    use rhi::TextureFormat as F;
+    use AttachmentFormat as A;
+
+    let formats = [
+        (F::R8Unorm, A::R8Unorm),
+        (F::R8Uint, A::R8Uint),
+        (F::R16Float, A::R16Float),
+        (F::R32Float, A::R32Float),
+        (F::R32Uint, A::R32Uint),
+        (F::Rg8Unorm, A::Rg8Unorm),
+        (F::Rg16Float, A::Rg16Float),
+        (F::Rg32Float, A::Rg32Float),
+        (F::Rgba8Unorm, A::Rgba8Unorm),
+        (F::Rgba8UnormSrgb, A::Rgba8UnormSrgb),
+        (F::Bgra8Unorm, A::Bgra8Unorm),
+        (F::Bgra8UnormSrgb, A::Bgra8UnormSrgb),
+        (F::Rgb10a2Unorm, A::Rgb10a2Unorm),
+        (F::Rg11b10Float, A::Rg11b10Float),
+        (F::Rgba16Float, A::Rgba16Float),
+        (F::Rgba32Float, A::Rgba32Float),
+        (F::Depth32Float, A::Depth32Float),
+        (F::Depth24PlusStencil8, A::Depth24PlusStencil8),
+        (F::Rgba32Uint, A::Rgba32Uint),
+    ];
+    for (tag, (format, identity)) in formats.into_iter().enumerate() {
+        assert_eq!(A::from(format), identity);
+        assert_eq!(identity as u64, tag as u64);
+        assert_eq!(rhi::TextureFormat::from(identity), format);
+        assert_eq!(A::from(rhi::TextureFormat::from(identity)), identity);
+    }
+}
+
+#[test]
+fn rgba32uint_targets_preserve_exact_canonical_identity_and_roundtrip() {
+    let mut descriptor = descriptor();
+    descriptor.vertex.buffers.clear();
+    descriptor.primitive = rhi::PrimitiveState {
+        cull_mode: None,
+        ..Default::default()
+    };
+    descriptor.depth_stencil = None;
+    descriptor.fragment.as_mut().unwrap().targets = vec![
+        Some(rhi::ColorTargetState::opaque(
+            rhi::TextureFormat::Rgba32Uint
+        ));
+        2
+    ];
+    let state = PipelineState::from_descriptor(&descriptor);
+    // Independent schema-v1 wire words: no vertex/depth data, TriangleList,
+    // no strip/cull, Ccw/Fill, single sample, two opaque unsigned vec4 targets.
+    // Tag 18 is appended; neither v1 nor any old format tag is renumbered.
+    let words = [
+        1,
+        0, // version, vertex buffer count
+        3,
+        0,
+        0,
+        0,
+        0,
+        0, // rasterizer
+        0, // no depth/stencil
+        1,
+        u64::MAX,
+        0, // multisample
+        1,
+        2, // fragment present, target count
+        1,
+        18,
+        0,
+        15, // IDs: present, Rgba32Uint, no blend, RGBA writes
+        1,
+        18,
+        0,
+        15, // metadata
+    ];
+    let expected: Vec<u8> = b"PSTATE"
+        .iter()
+        .copied()
+        .chain(words.into_iter().flat_map(u64::to_le_bytes))
+        .collect();
+    assert_eq!(state.canonical_bytes(), expected);
+    let expected_hash = expected
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    assert_eq!(state.to_hash().0, expected_hash);
+
+    let targets: Vec<_> = state
+        .color_targets
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|target| {
+            target.as_ref().map(|target| {
+                assert_eq!(target.blend, None, "integer outputs must stay opaque");
+                let write_mask = rhi::ColorWrites::from_bits_truncate(target.write_mask);
+                assert_eq!(write_mask.bits(), target.write_mask);
+                rhi::ColorTargetState {
+                    format: target.format.into(),
+                    blend: None,
+                    write_mask,
+                }
+            })
+        })
+        .collect();
+    assert_eq!(targets, descriptor.fragment.as_ref().unwrap().targets);
+    let mut rebuilt = descriptor.clone();
+    rebuilt.fragment.as_mut().unwrap().targets = targets;
+    let rebuilt = PipelineState::from_descriptor(&rebuilt);
+    assert_eq!(rebuilt, state);
+    assert_eq!(rebuilt.canonical_bytes(), expected);
+    assert_eq!(rebuilt.to_hash(), state.to_hash());
+
+    // Same footprint does not mean the same integer/float shader contract.
+    let mut float = descriptor.clone();
+    for target in float
+        .fragment
+        .as_mut()
+        .unwrap()
+        .targets
+        .iter_mut()
+        .flatten()
+    {
+        target.format = rhi::TextureFormat::Rgba32Float;
+    }
+    let float = PipelineState::from_descriptor(&float);
+    assert_ne!(float, state);
+    assert_ne!(float.canonical_bytes(), expected);
+    assert_ne!(float.to_hash(), state.to_hash());
+
+    descriptor.fragment.as_mut().unwrap().targets[1]
+        .as_mut()
+        .unwrap()
+        .write_mask = rhi::ColorWrites::RED;
+    let masked = PipelineState::from_descriptor(&descriptor);
+    assert_ne!(masked.canonical_bytes(), expected);
+    assert_ne!(masked.to_hash(), state.to_hash());
+}
+
+#[test]
 fn canonical_state_bytes_match_hash_and_cover_every_fixed_function_field() {
     fn hash_bytes(bytes: &[u8]) -> u64 {
         bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {

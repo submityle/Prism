@@ -453,7 +453,8 @@ fn read_hdr(@builtin(global_invocation_id) id: vec3<u32>) {
 
 /// Exercises the production allocator, without TextureCache, across all view
 /// admission transitions. Native IDs alone must never hide a different table.
-/// Integer attachments stay native because RHI does not expose Rgba32Uint.
+/// All nine attachments, including the two Rgba32Uint integer targets, retain
+/// leases in the same host-device RHI table.
 #[test]
 fn visibility_rhi_owners_reuse_isolate_resize_and_retire() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
