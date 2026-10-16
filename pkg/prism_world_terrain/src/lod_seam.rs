@@ -59,6 +59,12 @@ impl LodSeamCoverage {
             None
         }
     }
+
+    /// Returns whether this edge has no valid covered segment.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.start >= self.end
+    }
 }
 
 /// A neighbor declaration for one directed edge of a tile.

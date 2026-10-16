@@ -21,6 +21,7 @@ mod lod_seam;
 #[cfg(feature = "scatter")]
 mod placement_deletion;
 mod planet_mesh;
+mod planet_placement;
 mod rebake;
 mod representation;
 #[cfg(feature = "scatter")]
@@ -64,6 +65,11 @@ pub use placement_deletion::{
     HeightfieldPlacementDeletionSet, HEIGHTFIELD_PLACEMENT_DELETION_VERSION,
 };
 pub use planet_mesh::{PlanetHeightfieldMesh, PlanetMeshConfig};
+pub use planet_placement::{
+    estimate_planet_placement_work, place_on_planet_heightfield, PlanetPlacementBudget,
+    PlanetPlacementConfig, PlanetPlacementError, PlanetPlacementKey, PlanetPlacementOutput,
+    PlanetPlacementPoint, PlanetPlacementRegion, PLANET_PLACEMENT_VERSION,
+};
 pub use rebake::{
     DirtyRegion, RebakeBudget, RebakeError, RebakePlan, RebakePlanner, RebakeRequest, RebakeTask,
 };
