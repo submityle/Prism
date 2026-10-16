@@ -82,8 +82,36 @@ impl BuildGraph {
         self.jobs.is_empty()
     }
 
+    /// Computes the deterministic transitive successor closure for changed
+    /// jobs. The graph remains immutable; the returned set is a plan-only
+    /// value that can be passed to an incremental executor or diagnostics.
+    pub fn dirty_set(
+        &self,
+        direct_changes: impl IntoIterator<Item = JobId>,
+    ) -> Result<crate::dirty::DirtySet, crate::dirty::DirtySetError> {
+        crate::dirty::DirtySet::from_graph(self, direct_changes)
+    }
+
+    /// Filters the stable full-graph topological order to an already computed
+    /// dirty set. This preserves dependency order while excluding unaffected
+    /// jobs from an incremental execution plan.
+    pub fn dirty_execution_order(
+        &self,
+        dirty: &crate::dirty::DirtySet,
+    ) -> Result<Vec<JobId>, BuildError> {
+        Ok(self
+            .execution_order()?
+            .into_iter()
+            .filter(|job| dirty.contains(*job))
+            .collect())
+    }
+
     pub(crate) fn job(&self, id: JobId) -> Option<&BuildJob> {
         self.jobs.get(&id)
+    }
+
+    pub(crate) fn jobs(&self) -> impl Iterator<Item = (&JobId, &BuildJob)> {
+        self.jobs.iter()
     }
 
     /// Return the stable topological order, or a deterministic graph error.

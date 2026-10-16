@@ -19,6 +19,8 @@ pub mod bake;
 pub mod cas;
 /// Persistent local derived-data descriptor index.
 pub mod ddc;
+/// Deterministic changed-job propagation for incremental build planning.
+pub mod dirty;
 /// Executes a build graph through DDC/CAS into transactional publication.
 pub mod executor;
 /// Deterministic dependency graph and serial processor execution.
@@ -74,6 +76,7 @@ pub use bake::{
 };
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcCapacity, DdcError, DdcEviction, DerivedDataCache, LocalDdc};
+pub use dirty::{DirtySet, DirtySetError};
 pub use executor::{
     ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor, DeterminismDifference,
 };
