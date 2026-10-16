@@ -6,12 +6,17 @@ use bevy_ecs::{schedule::ScheduleLabel, system::RunSystemOnce};
 use bevy_platform::future::block_on;
 use bevy_render::{
     camera::ExtractedCamera,
-    renderer::{CurrentView, PendingCommandBuffers},
-    texture::TextureCache,
+    renderer::{CurrentView, PendingCommandBuffers, RenderAdapter, RenderQueue},
 };
 use bevy_tasks::{ComputeTaskPool, TaskPool};
+use core::ops::Deref;
 
-fn device() -> Option<(wgpu::Device, wgpu::Queue, RenderDevice)> {
+fn device() -> Option<(
+    wgpu::Device,
+    wgpu::Queue,
+    RenderDevice,
+    crate::gpu::rhi::SceneRhi,
+)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::METAL | wgpu::Backends::VULKAN | wgpu::Backends::DX12,
         flags: Default::default(),
@@ -31,6 +36,19 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue, RenderDevice)> {
         }
     };
     eprintln!("resident ECS adapter: {:?}", adapter.get_info());
+    let physical = matches!(
+        adapter.get_info().device_type,
+        wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::DiscreteGpu
+    );
+    if !physical {
+        assert!(
+            std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+            "required physical GPU, got {:?}",
+            adapter.get_info()
+        );
+        eprintln!("resident ECS GPU skipped: not a physical adapter");
+        return None;
+    }
     let limits = adapter.limits();
     let hdr_usage = adapter
         .get_texture_format_features(SCENE_COLOR_FORMAT)
@@ -73,7 +91,13 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue, RenderDevice)> {
             return None;
         }
     };
-    Some((device.clone(), queue, RenderDevice::from(device)))
+    let render_device = RenderDevice::from(device.clone());
+    let bridge = crate::gpu::rhi::SceneRhi::from_bevy(
+        &RenderAdapter::new(adapter),
+        &render_device,
+        &RenderQueue::new(queue.clone()),
+    );
+    Some((device, queue, render_device, bridge))
 }
 
 fn capability_error(
@@ -186,7 +210,7 @@ fn camera(size: UVec2) -> ExtractedCamera {
 /// frames, and invalidate the old bind group when a view/response is resized.
 #[test]
 fn resident_composition_ecs_prepares_executes_and_invalidates_targets() {
-    let Some((device, queue, render_device)) = device() else {
+    let Some((device, queue, render_device, bridge)) = device() else {
         return;
     };
     ComputeTaskPool::get_or_init(TaskPool::new);
@@ -201,13 +225,22 @@ fn resident_composition_ecs_prepares_executes_and_invalidates_targets() {
         frame_index: 9,
         ..Default::default()
     });
-    world.init_resource::<TextureCache>();
+    world.insert_resource(bridge);
     world.init_resource::<PendingCommandBuffers>();
     let view = world.spawn((camera(size), responses)).id();
     world.insert_resource(CurrentView(view));
     world
         .run_system_once(super::super::resources::prepare_visibility_buffers)
         .unwrap();
+    let visibility = world.get::<ViewVisibilityBuffer>(view).unwrap();
+    assert_eq!(
+        world
+            .resource::<crate::gpu::rhi::SceneRhi>()
+            .device()
+            .wgpu_texture(visibility.scene_color_rhi().id()),
+        *visibility.scene_color_texture().deref(),
+        "composition must consume the RHI allocation, not a mirror"
+    );
     world
         .run_system_once(prepare_response_composition_targets)
         .unwrap();
@@ -416,4 +449,162 @@ fn read_hdr(@builtin(global_invocation_id) id: vec3<u32>) {
         .publish(8);
     world.run_system_once(response_composition_pass).unwrap();
     assert!(world.resource::<PendingCommandBuffers>().is_empty());
+}
+
+/// Exercises the production allocator, without TextureCache, across all view
+/// admission transitions. Native IDs alone must never hide a different table.
+/// Integer attachments stay native because RHI does not expose Rgba32Uint.
+#[test]
+fn visibility_rhi_owners_reuse_isolate_resize_and_retire() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::Arc;
+
+    let Some((_device, _queue, render_device, bridge)) = device() else {
+        return;
+    };
+    let table = Arc::clone(bridge.device());
+    let size = UVec2::new(3, 2);
+    let mut world = World::new();
+    world.insert_resource(render_device);
+    world.insert_resource(bridge);
+    world.insert_resource(PrismShadingSettings {
+        enable_visibility_buffer: true,
+        ..Default::default()
+    });
+    let first = world.spawn(camera(size)).id();
+    let second = world.spawn(camera(size)).id();
+    let prepare = |world: &mut World| {
+        world
+            .run_system_once(super::super::resources::prepare_visibility_buffers)
+            .unwrap();
+    };
+    prepare(&mut world);
+    let first_owner = world.get::<ViewVisibilityBuffer>(first).unwrap();
+    let original = first_owner.scene_color_rhi().id();
+    let native = first_owner.scene_color_texture().clone();
+    let original_ids = first_owner.feedback_sources().0.id();
+    assert_eq!(
+        first_owner.feedback_sources().0.format(),
+        VISIBILITY_ID_FORMAT
+    );
+    assert_ne!(
+        original_ids,
+        world
+            .get::<ViewVisibilityBuffer>(second)
+            .unwrap()
+            .feedback_sources()
+            .0
+            .id()
+    );
+    let other = world
+        .get::<ViewVisibilityBuffer>(second)
+        .unwrap()
+        .scene_color_rhi()
+        .id();
+    assert_ne!(
+        original, other,
+        "equal view extents must not alias live owners"
+    );
+    assert_eq!(table.wgpu_texture(original), *native.deref());
+    prepare(&mut world);
+    assert_eq!(
+        world
+            .get::<ViewVisibilityBuffer>(first)
+            .unwrap()
+            .feedback_sources()
+            .0
+            .id(),
+        original_ids
+    );
+    assert_eq!(
+        world
+            .get::<ViewVisibilityBuffer>(first)
+            .unwrap()
+            .scene_color_rhi()
+            .id(),
+        original
+    );
+
+    world.entity_mut(first).insert(camera(UVec2::new(5, 3)));
+    prepare(&mut world);
+    let resized = world.get::<ViewVisibilityBuffer>(first).unwrap();
+    assert_ne!(resized.scene_color_rhi().id(), original);
+    assert_ne!(resized.feedback_sources().0.id(), original_ids);
+    assert_eq!(
+        resized.feedback_sources().0.size(),
+        resized.scene_color_texture().size()
+    );
+    assert_eq!(
+        resized.scene_color_texture().size(),
+        wgpu::Extent3d {
+            width: 5,
+            height: 3,
+            depth_or_array_layers: 1
+        }
+    );
+    assert_eq!(
+        world
+            .get::<ViewVisibilityBuffer>(second)
+            .unwrap()
+            .scene_color_rhi()
+            .id(),
+        other
+    );
+    assert!(catch_unwind(AssertUnwindSafe(|| table.wgpu_texture(original))).is_err());
+    // Table retirement does not explicitly destroy host-native clones.
+    let _old_view = native.create_view(&Default::default());
+
+    for invalid_size in [None, Some(UVec2::new(0, 3)), Some(UVec2::new(3, 0))] {
+        let mut invalid_camera = camera(size);
+        invalid_camera.physical_viewport_size = invalid_size;
+        world.entity_mut(first).insert(invalid_camera);
+        prepare(&mut world);
+        assert!(world.get::<ViewVisibilityBuffer>(first).is_none());
+        world.entity_mut(first).insert(camera(size));
+        prepare(&mut world);
+        assert!(world.get::<ViewVisibilityBuffer>(first).is_some());
+    }
+
+    world
+        .entity_mut(first)
+        .insert(bevy_render::view::Msaa::Sample4);
+    prepare(&mut world);
+    assert!(world.get::<ViewVisibilityBuffer>(first).is_none());
+    world.entity_mut(first).insert(bevy_render::view::Msaa::Off);
+    prepare(&mut world);
+    assert!(world.get::<ViewVisibilityBuffer>(first).is_some());
+    world
+        .resource_mut::<PrismShadingSettings>()
+        .enable_visibility_buffer = false;
+    prepare(&mut world);
+    assert!(world.get::<ViewVisibilityBuffer>(first).is_none());
+    assert!(world.get::<ViewVisibilityBuffer>(second).is_none());
+    world
+        .resource_mut::<PrismShadingSettings>()
+        .enable_visibility_buffer = true;
+    prepare(&mut world);
+
+    // A replacement host/table invalidates resources even at the same extent.
+    let old_native = world
+        .get::<ViewVisibilityBuffer>(first)
+        .unwrap()
+        .scene_color_texture()
+        .id();
+    let Some((_new_device, _new_queue, replacement_device, replacement)) = device() else {
+        panic!("physical adapter disappeared during host replacement test");
+    };
+    world.insert_resource(replacement_device);
+    world.insert_resource(replacement);
+    prepare(&mut world);
+    let replaced = world.get::<ViewVisibilityBuffer>(first).unwrap();
+    assert_ne!(replaced.scene_color_texture().id(), old_native);
+    assert!(Arc::ptr_eq(
+        replaced.scene_color_rhi().device(),
+        world.resource::<crate::gpu::rhi::SceneRhi>().device()
+    ));
+    assert!(!Arc::ptr_eq(replaced.scene_color_rhi().device(), &table));
+    let retired = replaced.scene_color_rhi().id();
+    let new_table = Arc::clone(replaced.scene_color_rhi().device());
+    world.despawn(first);
+    assert!(catch_unwind(AssertUnwindSafe(|| new_table.wgpu_texture(retired))).is_err());
 }

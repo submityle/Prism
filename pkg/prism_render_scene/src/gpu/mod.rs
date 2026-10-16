@@ -7,6 +7,7 @@
 mod context;
 pub(crate) mod fabric;
 mod plugin;
+pub(crate) mod rhi;
 
 pub use context::{PrismGpu, PrismGpuInitError};
 pub use plugin::PrismGpuPlugin;

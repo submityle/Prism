@@ -169,6 +169,18 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         CompositionPlane::WaterCoverage.graph_name(),
         ResourceLifetime::Imported,
     );
+    // These exports are written by shading_resolve, then sampled by the SSR
+    // or spec-GI composite. They are not outputs of the SSR trace group.
+    let env_specular = resource(
+        &mut graph,
+        "post_ssr_env_specular",
+        ResourceLifetime::Transient,
+    );
+    let spec_weight = resource(
+        &mut graph,
+        "post_ssr_spec_weight",
+        ResourceLifetime::Transient,
+    );
     let resolve = graph.add_pass(PassDescriptor {
         name: "shading_resolve".into(),
         queue: QueueClass::Compute,
@@ -185,6 +197,8 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
             access(shade_atlas, AccessKind::SampledRead),
             access(left, AccessKind::StorageWrite),
             access(scene_color, AccessKind::StorageWrite),
+            access(env_specular, AccessKind::StorageWrite),
+            access(spec_weight, AccessKind::StorageWrite),
         ],
         depends_on: vec![shade],
     });
@@ -280,6 +294,120 @@ fn access(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prism_render_graph::{ExecutionPlan, LogicalResource};
+
+    fn assert_specular_raw(
+        graph: &GpuFrameGraphBuilder,
+        compiled: &ExecutionPlan,
+        resource_name: &str,
+        producer: &str,
+        consumer: &str,
+    ) {
+        let pass_index = |name: &str| {
+            graph
+                .passes()
+                .iter()
+                .position(|pass| pass.name == name)
+                .unwrap()
+        };
+        let source = pass_index(producer);
+        let destination = pass_index(consumer);
+        let resource_index = graph
+            .resources()
+            .iter()
+            .position(|resource| resource.name == resource_name)
+            .unwrap();
+        let (texture, local_index) = logical_resource_index(graph, resource_index);
+        assert!(
+            compiled.logical_barriers.iter().any(|barrier| {
+                let matches_resource = match (texture, barrier.resource) {
+                    (true, LogicalResource::Texture(id)) | (false, LogicalResource::Buffer(id)) => {
+                        id.get() as usize == local_index
+                    }
+                    _ => false,
+                };
+                if !matches_resource
+                    || barrier.source != source
+                    || barrier.destination != destination
+                {
+                    return false;
+                }
+                let before = compiled.accesses[source][barrier.before];
+                let after = compiled.accesses[destination][barrier.after];
+                before.output_version == Some(after.input_version)
+                    && after.input_version > 0
+                    && after.output_version.is_none()
+            }),
+            "missing current-frame RAW: {producer} -> {consumer} on {resource_name}"
+        );
+    }
+
+    #[test]
+    fn specular_pipeline_graph_orders_current_frame_producers_and_consumers() {
+        let graph = shading_frame_graph();
+        let compiled = graph.compile().unwrap();
+        let positions = [
+            "shading_resolve",
+            "water_surface_raster",
+            COMPOSITION_PASS_NAME,
+            "post_ssr",
+            "post_spec_denoise",
+            "post_ssgi",
+            "post_taa",
+        ]
+        .map(|name| {
+            let index = graph
+                .passes()
+                .iter()
+                .position(|pass| pass.name == name)
+                .unwrap();
+            compiled.position_by_pass[index].expect("production pass must be live")
+        });
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{positions:?}"
+        );
+    }
+
+    #[test]
+    fn specular_pipeline_graph_tracks_real_raw_provenance() {
+        let graph = shading_frame_graph();
+        let compiled = graph.compile().unwrap();
+        for name in [
+            "post_ssr_depth",
+            "post_ssr_normal_roughness",
+            "post_ssr_trace",
+            "post_ssr_hit_distance",
+            "post_ssr_color_mips",
+        ] {
+            assert_specular_raw(&graph, &compiled, name, "post_ssr", "post_spec_denoise");
+        }
+        for name in ["post_ssr_env_specular", "post_ssr_spec_weight"] {
+            assert_specular_raw(&graph, &compiled, name, "shading_resolve", "post_ssr");
+        }
+        assert_specular_raw(
+            &graph,
+            &compiled,
+            "post_ssr_env_specular",
+            "shading_resolve",
+            "post_spec_denoise",
+        );
+        // SSGI must snapshot the specular fold, not the pre-fold colour pyramid.
+        assert_specular_raw(
+            &graph,
+            &compiled,
+            "hdr_scene_color",
+            "post_spec_denoise",
+            "post_ssgi",
+        );
+        assert_specular_raw(
+            &graph,
+            &compiled,
+            "hdr_scene_color",
+            "post_ssgi",
+            "post_taa",
+        );
+    }
 
     #[test]
     fn declared_pass_count_matches_runtime_assertion() {

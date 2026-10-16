@@ -20,12 +20,9 @@
 //!
 //! The log2 window, percentile trim, EV clamp/compensation, adaptation speeds
 //! and the wall-clock frame delta travel in the [`GpuExposureResolveConfig`]
-//! immediate block. The delta is measured on the CPU with a
-//! [`std::time::Instant`] kept in a [`Local`] because the render world exposes
-//! no frame clock to this pass. It runs after the histogram build and before
-//! the main pass so the multiplier is ready when the composite consumes it.
-
-use std::time::Instant;
+//! immediate block. The delta comes from a once-per-render-frame snapshot
+//! shared by all views. It runs after the histogram build and before the main
+//! pass so the multiplier is ready when the composite consumes it.
 
 use bevy_asset::{load_embedded_asset, Handle};
 use bevy_ecs::prelude::*;
@@ -45,16 +42,19 @@ use prism_render_shading::{
     AutoExposureSettings, EyeAdaptation, HistogramPercentiles, HistogramRange,
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::super::runtime::PrismShadingSettings;
 use super::abi::GpuExposureResolveConfig;
-use super::resources::ViewExposureBuffers;
+use super::frame::ExposurePassPair;
+use super::histogram::{ExposureHistogramPipeline, ViewExposureHistogramBindGroup};
+use super::resources::{ExposureFrameTime, ViewExposureBuffers};
 
 /// Compute pipeline and its owned group-0 layout for the exposure resolve.
 #[derive(Resource)]
 pub(crate) struct ExposureAveragePipeline {
     /// `resolve_exposure` compute entry point, specialized against the group-0
     /// layout and the 48-byte [`GpuExposureResolveConfig`] immediate block.
-    resolve: CachedComputePipelineId,
+    pub(super) resolve: CachedComputePipelineId,
     /// group 0: the histogram (reduced then zeroed) + the persistent exposure
     /// state (read/write), both read-write storage buffers.
     layout: BindGroupLayout,
@@ -141,35 +141,40 @@ pub(crate) fn prepare_exposure_average_bind_groups(
 /// view.
 ///
 /// Runs after the histogram build (which fills the bins) and before the main
-/// pass (so the multiplier is ready for the composite). The wall-clock delta is
-/// measured across invocations with a [`Local`] [`Instant`]; the first frame
-/// falls back to a 60 fps step so adaptation still integrates. Gated on
-/// `enable_exposure`.
+/// pass (so the multiplier is ready for the composite). Every view reads the
+/// same prepared frame delta, including the first frame's 60 fps fallback.
+/// Both pipelines and both per-view bind groups must be ready before either
+/// exposure pass can record.
 pub(crate) fn exposure_average_pass(
     settings: Res<PrismShadingSettings>,
-    mut last: Local<Option<Instant>>,
-    view: ViewQuery<&ViewExposureAverageBindGroup>,
+    frame_time: Res<ExposureFrameTime>,
+    view: ViewQuery<(
+        &ViewVisibilityBuffer,
+        Option<&ViewExposureHistogramBindGroup>,
+        Option<&ViewExposureAverageBindGroup>,
+    )>,
     pipeline: Res<ExposureAveragePipeline>,
+    histogram_pipeline: Res<ExposureHistogramPipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,
 ) {
     if !settings.enable_exposure {
-        // Keep the clock fresh so a re-enable does not integrate a huge delta.
-        *last = Some(Instant::now());
         return;
     }
-    let group = view.into_inner();
-
-    let Some(resolve) = cache.get_compute_pipeline(pipeline.resolve) else {
+    let (visibility, histogram_group, group) = view.into_inner();
+    let pair = ExposurePassPair {
+        histogram: cache
+            .get_compute_pipeline(histogram_pipeline.build)
+            .zip(histogram_group),
+        average: cache.get_compute_pipeline(pipeline.resolve).zip(group),
+    };
+    let Some((resolve, group)) = pair.average(
+        settings.enable_exposure,
+        [visibility.size.x, visibility.size.y],
+    ) else {
         return;
     };
-
-    let now = Instant::now();
-    let delta_seconds = match *last {
-        Some(previous) => now.duration_since(previous).as_secs_f32().clamp(0.0, 1.0),
-        None => 1.0 / 60.0,
-    };
-    *last = Some(now);
+    let delta_seconds = frame_time.delta_seconds();
 
     let config = GpuExposureResolveConfig::new(
         HistogramRange {

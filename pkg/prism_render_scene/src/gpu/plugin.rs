@@ -1,6 +1,7 @@
 //! [`PrismGpuPlugin`]: creates the Prism RHI GPU context for the render world.
 
 use bevy_app::{App, Plugin};
+use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{RenderApp, RenderStartup};
 
 use crate::gpu::context::PrismGpu;
@@ -22,7 +23,10 @@ impl Plugin for PrismGpuPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app.add_systems(RenderStartup, super::fabric::init_scene_fabric);
+        render_app.add_systems(
+            RenderStartup,
+            (super::rhi::init_scene_rhi, super::fabric::init_scene_fabric).chain(),
+        );
         if let Ok(context) = PrismGpu::new() {
             render_app.insert_resource(context);
         }

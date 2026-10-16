@@ -44,6 +44,8 @@ use prism_render_shading::HistogramRange;
 use super::super::resources::ViewVisibilityBuffer;
 use super::super::runtime::PrismShadingSettings;
 use super::abi::{GpuExposureHistogramConfig, EXPOSURE_HISTOGRAM_WORKGROUP_SIZE};
+use super::average::{ExposureAveragePipeline, ViewExposureAverageBindGroup};
+use super::frame::ExposurePassPair;
 use super::resources::ViewExposureBuffers;
 
 /// Compute pipeline and its owned group-0 layout for the histogram build.
@@ -51,7 +53,7 @@ use super::resources::ViewExposureBuffers;
 pub(crate) struct ExposureHistogramPipeline {
     /// `build_histogram` compute entry point, specialized against the group-0
     /// layout and the 16-byte [`GpuExposureHistogramConfig`] immediate block.
-    build: CachedComputePipelineId,
+    pub(super) build: CachedComputePipelineId,
     /// group 0: the resolved HDR `scene_color` read + the write-accumulated
     /// histogram storage buffer.
     layout: BindGroupLayout,
@@ -141,27 +143,34 @@ pub(crate) fn prepare_exposure_histogram_bind_groups(
 /// Runs after the SSGI/SSR composite fills `scene_color` with the final
 /// radiance and before the resolve pass reduces the histogram. Dispatches one
 /// workgroup per 8x8 pixel tile; the shader's coverage guard drops the ragged
-/// edge. Gated on `enable_exposure`.
+/// edge. Both pipelines and both per-view bind groups must be ready, so a
+/// histogram is never accumulated without its same-frame resolve/clear.
 pub(crate) fn exposure_histogram_pass(
     settings: Res<PrismShadingSettings>,
-    view: ViewQuery<(&ViewVisibilityBuffer, &ViewExposureHistogramBindGroup)>,
+    view: ViewQuery<(
+        &ViewVisibilityBuffer,
+        Option<&ViewExposureHistogramBindGroup>,
+        Option<&ViewExposureAverageBindGroup>,
+    )>,
     pipeline: Res<ExposureHistogramPipeline>,
+    average_pipeline: Res<ExposureAveragePipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,
 ) {
     if !settings.enable_exposure {
         return;
     }
-    let (visibility, group) = view.into_inner();
-
-    let Some(build) = cache.get_compute_pipeline(pipeline.build) else {
+    let (visibility, group, average_group) = view.into_inner();
+    let size = visibility.size;
+    let pair = ExposurePassPair {
+        histogram: cache.get_compute_pipeline(pipeline.build).zip(group),
+        average: cache
+            .get_compute_pipeline(average_pipeline.resolve)
+            .zip(average_group),
+    };
+    let Some((build, group)) = pair.histogram(settings.enable_exposure, [size.x, size.y]) else {
         return;
     };
-
-    let size = visibility.size;
-    if size.x == 0 || size.y == 0 {
-        return;
-    }
 
     let config = GpuExposureHistogramConfig::from_view(
         HistogramRange {

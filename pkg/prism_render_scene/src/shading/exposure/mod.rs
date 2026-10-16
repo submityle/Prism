@@ -21,6 +21,7 @@
 
 mod abi;
 mod average;
+mod frame;
 mod histogram;
 mod resources;
 

@@ -29,9 +29,12 @@ pub(crate) enum PostExecutorKind {
     SsgiTrace,
     SsgiDenoise,
     SsgiComposite,
+    SpecGiReuse,
+    SpecGiSpatial,
     SpecDenoiseReproject,
     SpecDenoiseHistoryClamp,
     SpecDenoiseSpatial,
+    SpecGiComposite,
     TaaResolve,
     Posterize,
     Outline,
@@ -69,9 +72,12 @@ impl PostExecutorKind {
             Self::SsgiTrace => "ssgi_trace_pass",
             Self::SsgiDenoise => "ssgi_denoise_pass",
             Self::SsgiComposite => "ssgi_composite_pass",
+            Self::SpecGiReuse => "spec_gi_reuse_pass",
+            Self::SpecGiSpatial => "spec_gi_spatial_pass",
             Self::SpecDenoiseReproject => "spec_denoise_reproject_pass",
             Self::SpecDenoiseHistoryClamp => "spec_denoise_history_clamp_pass",
             Self::SpecDenoiseSpatial => "spec_denoise_spatial_pass",
+            Self::SpecGiComposite => "spec_gi_composite_pass",
             Self::TaaResolve => "taa_resolve_pass",
             Self::Posterize => "posterize_pass",
             Self::Outline => "outline_pass",
@@ -236,6 +242,12 @@ const POST_RESOURCES: &[ResourceDeclaration] = &[
         alignment: 16,
     },
     ResourceDeclaration {
+        name: "post_ssgi_base",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
         name: "post_ssgi_output",
         lifetime: ResourceLifetime::Transient,
         size: 0,
@@ -243,6 +255,30 @@ const POST_RESOURCES: &[ResourceDeclaration] = &[
     },
     ResourceDeclaration {
         name: "post_ssgi_denoised",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_spec_gi_reservoir_prior",
+        lifetime: ResourceLifetime::Persistent,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_spec_gi_reservoir_current",
+        lifetime: ResourceLifetime::Persistent,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_spec_gi_resolved",
+        lifetime: ResourceLifetime::Transient,
+        size: 0,
+        alignment: 16,
+    },
+    ResourceDeclaration {
+        name: "post_spec_filtered",
         lifetime: ResourceLifetime::Transient,
         size: 0,
         alignment: 16,
@@ -500,11 +536,11 @@ const ACCESS_SSR: &[AccessDeclaration] = &[
     },
     AccessDeclaration {
         resource: "post_ssr_env_specular",
-        kind: AccessKind::StorageWrite,
+        kind: AccessKind::SampledRead,
     },
     AccessDeclaration {
         resource: "post_ssr_spec_weight",
-        kind: AccessKind::StorageWrite,
+        kind: AccessKind::SampledRead,
     },
     AccessDeclaration {
         resource: "hdr_scene_color",
@@ -512,6 +548,19 @@ const ACCESS_SSR: &[AccessDeclaration] = &[
     },
 ];
 const ACCESS_SSGI: &[AccessDeclaration] = &[
+    // The composite snapshots the specular-composited scene before its fold.
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssgi_base",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_ssgi_base",
+        kind: AccessKind::SampledRead,
+    },
     AccessDeclaration {
         resource: "post_ssr_hzb",
         kind: AccessKind::SampledRead,
@@ -550,16 +599,51 @@ const ACCESS_SSGI: &[AccessDeclaration] = &[
     },
 ];
 const ACCESS_SPEC_DENOISE: &[AccessDeclaration] = &[
+    // One executable group owns reuse, optional spatial reuse, denoising and
+    // the specular fold. The prior/current names are frame-relative roles of
+    // the real ping-pong buffers, not additional GPU allocations.
+    AccessDeclaration {
+        resource: "post_ssr_depth",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_normal_roughness",
+        kind: AccessKind::SampledRead,
+    },
     AccessDeclaration {
         resource: "post_ssr_trace",
         kind: AccessKind::SampledRead,
     },
     AccessDeclaration {
-        resource: "post_ssr_resolved",
+        resource: "post_ssr_color_mips",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_ssr_env_specular",
         kind: AccessKind::SampledRead,
     },
     AccessDeclaration {
         resource: "post_ssr_hit_distance",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_spec_gi_reservoir_prior",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_spec_gi_reservoir_current",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_spec_gi_reservoir_current",
+        kind: AccessKind::StorageRead,
+    },
+    AccessDeclaration {
+        resource: "post_spec_gi_resolved",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_spec_gi_resolved",
         kind: AccessKind::SampledRead,
     },
     AccessDeclaration {
@@ -585,6 +669,18 @@ const ACCESS_SPEC_DENOISE: &[AccessDeclaration] = &[
     AccessDeclaration {
         resource: "post_spec_denoised",
         kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "post_spec_filtered",
+        kind: AccessKind::StorageWrite,
+    },
+    AccessDeclaration {
+        resource: "post_spec_filtered",
+        kind: AccessKind::SampledRead,
+    },
+    AccessDeclaration {
+        resource: "hdr_scene_color",
+        kind: AccessKind::StorageWrite,
     },
 ];
 const ACCESS_TAA: &[AccessDeclaration] = &[
@@ -728,9 +824,9 @@ pub(crate) const POST_PROCESS_DECLARATIONS: &[PassSkeletonDeclaration] = post_pa
     ("post_dof", 0x03, "post_bloom", ACCESS_DOF),
     ("post_motion_blur", 0x04, "post_dof", ACCESS_MOTION_BLUR),
     ("post_ssr", 0x05, "post_motion_blur", ACCESS_SSR),
-    ("post_ssgi", 0x06, "post_ssr", ACCESS_SSGI),
-    ("post_spec_denoise", 0x07, "post_ssgi", ACCESS_SPEC_DENOISE),
-    ("post_taa", 0x08, "post_spec_denoise", ACCESS_TAA),
+    ("post_spec_denoise", 0x07, "post_ssr", ACCESS_SPEC_DENOISE),
+    ("post_ssgi", 0x06, "post_spec_denoise", ACCESS_SSGI),
+    ("post_taa", 0x08, "post_ssgi", ACCESS_TAA),
     ("post_posterize", 0x09, "post_taa", ACCESS_SIMPLE),
     ("post_outline", 0x0a, "post_posterize", ACCESS_OUTLINE),
     ("post_hatching", 0x0b, "post_outline", ACCESS_SIMPLE),
@@ -786,9 +882,12 @@ const EXEC_SSGI: &[PostExecutorKind] = &[
     PostExecutorKind::SsgiComposite,
 ];
 const EXEC_SPEC_DENOISE: &[PostExecutorKind] = &[
+    PostExecutorKind::SpecGiReuse,
+    PostExecutorKind::SpecGiSpatial,
     PostExecutorKind::SpecDenoiseReproject,
     PostExecutorKind::SpecDenoiseHistoryClamp,
     PostExecutorKind::SpecDenoiseSpatial,
+    PostExecutorKind::SpecGiComposite,
 ];
 const EXEC_TAA: &[PostExecutorKind] = &[PostExecutorKind::TaaResolve];
 
@@ -844,6 +943,13 @@ const REG_SSGI: &[&str] = &[
     "prepare_ssgi_composite_bind_groups",
 ];
 const REG_SPEC_DENOISE: &[&str] = &[
+    "init_spec_gi_reuse_pipeline",
+    "init_spec_gi_spatial_pipeline",
+    "init_spec_gi_composite_pipeline",
+    "prepare_spec_gi_reuse_resources",
+    "prepare_spec_gi_reuse_bind_groups",
+    "prepare_spec_gi_spatial_bind_groups",
+    "prepare_spec_gi_composite_bind_groups",
     "init_spec_denoise_spatial_pipeline",
     "init_spec_denoise_reproject_pipeline",
     "init_spec_denoise_history_clamp_pipeline",
@@ -967,16 +1073,16 @@ pub(crate) const POST_EXECUTION_BINDINGS: &[PostExecutionBinding] = &[
         executors: EXEC_SSR,
     },
     PostExecutionBinding {
-        module: "ssgi",
-        declaration: "post_ssgi",
-        registration_markers: REG_SSGI,
-        executors: EXEC_SSGI,
-    },
-    PostExecutionBinding {
         module: "spec_denoise",
         declaration: "post_spec_denoise",
         registration_markers: REG_SPEC_DENOISE,
         executors: EXEC_SPEC_DENOISE,
+    },
+    PostExecutionBinding {
+        module: "ssgi",
+        declaration: "post_ssgi",
+        registration_markers: REG_SSGI,
+        executors: EXEC_SSGI,
     },
     PostExecutionBinding {
         module: "taa",
@@ -1149,6 +1255,92 @@ pub(crate) fn validate_post_execution_bindings(graph: &GpuFrameGraphBuilder) -> 
             "post graph suffix mismatch: {graph_suffix:?} != {declarations:?}"
         ));
     }
+    validate_specular_resource_contract(graph)
+}
+
+/// Check the real cross-group inputs as well as executor coverage. In
+/// particular, a plausible pass order cannot compensate for a missing input
+/// declaration or for attributing resolve's exports to an SSR writer.
+fn validate_specular_resource_contract(graph: &GpuFrameGraphBuilder) -> Result<(), String> {
+    let require = |pass_name: &str, resource_name: &str, kind: AccessKind| {
+        let resource = graph
+            .resources()
+            .iter()
+            .position(|resource| resource.name == resource_name);
+        let present = graph.passes().iter().any(|pass| {
+            pass.name == pass_name
+                && pass.accesses.iter().any(|access| {
+                    Some(access.resource.0 as usize) == resource && access.kind == kind
+                })
+        });
+        if present {
+            Ok(())
+        } else {
+            Err(format!(
+                "specular resource contract: {pass_name} requires {kind:?} of {resource_name}"
+            ))
+        }
+    };
+    for name in [
+        "post_ssr_depth",
+        "post_ssr_normal_roughness",
+        "post_ssr_trace",
+        "post_ssr_hit_distance",
+        "post_ssr_color_mips",
+    ] {
+        require("post_ssr", name, AccessKind::StorageWrite)?;
+        require("post_spec_denoise", name, AccessKind::SampledRead)?;
+    }
+    for name in ["post_ssr_env_specular", "post_ssr_spec_weight"] {
+        require("shading_resolve", name, AccessKind::StorageWrite)?;
+        require("post_ssr", name, AccessKind::SampledRead)?;
+        let resource = graph
+            .resources()
+            .iter()
+            .position(|resource| resource.name == name)
+            .expect("required resource was checked above");
+        if let Some(writer) = graph.passes().iter().find(|pass| {
+            pass.name != "shading_resolve"
+                && pass
+                    .accesses
+                    .iter()
+                    .any(|access| access.resource.0 as usize == resource && access.kind.writes())
+        }) {
+            return Err(format!(
+                "specular resource contract: {} falsely writes resolve export {name}",
+                writer.name
+            ));
+        }
+    }
+    require(
+        "post_spec_denoise",
+        "post_ssr_env_specular",
+        AccessKind::SampledRead,
+    )?;
+    require(
+        "post_spec_denoise",
+        "hdr_scene_color",
+        AccessKind::StorageWrite,
+    )?;
+    require("post_ssgi", "hdr_scene_color", AccessKind::SampledRead)?;
+    for (previous, next) in [
+        ("post_ssr", "post_spec_denoise"),
+        ("post_spec_denoise", "post_ssgi"),
+        ("post_ssgi", "post_taa"),
+    ] {
+        let previous_id = graph.passes().iter().position(|pass| pass.name == previous);
+        if !graph.passes().iter().any(|pass| {
+            pass.name == next
+                && pass
+                    .depends_on
+                    .iter()
+                    .any(|id| Some(id.0 as usize) == previous_id)
+        }) {
+            return Err(format!(
+                "specular resource contract: {next} must depend on {previous}"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1162,7 +1354,113 @@ pub(crate) fn append_post_process_passes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prism_render_graph::frame_graph::{PassDescriptor, ResourceAccess};
     use std::collections::BTreeSet;
+
+    fn rewrite_production_passes(
+        mut edit: impl FnMut(&mut PassDescriptor),
+    ) -> GpuFrameGraphBuilder {
+        let production = crate::shading::graph::shading_frame_graph();
+        let mut graph = GpuFrameGraphBuilder::default();
+        for resource in production.resources() {
+            graph.add_resource(resource.clone());
+        }
+        for pass in production.passes() {
+            let mut pass = pass.clone();
+            edit(&mut pass);
+            graph.add_pass(pass);
+        }
+        graph
+    }
+
+    #[test]
+    fn specular_resource_contract_rejects_missing_current_frame_inputs() {
+        let production = crate::shading::graph::shading_frame_graph();
+        for name in [
+            "post_ssr_depth",
+            "post_ssr_normal_roughness",
+            "post_ssr_trace",
+            "post_ssr_hit_distance",
+            "post_ssr_color_mips",
+            "post_ssr_env_specular",
+        ] {
+            let index = production
+                .resources()
+                .iter()
+                .position(|r| r.name == name)
+                .unwrap();
+            let graph = rewrite_production_passes(|pass| {
+                if pass.name == "post_spec_denoise" {
+                    pass.accesses
+                        .retain(|access| access.resource.0 as usize != index);
+                }
+            });
+            let error = validate_post_execution_bindings(&graph).unwrap_err();
+            assert!(
+                error.contains("post_spec_denoise") && error.contains(name),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn specular_resource_contract_rejects_false_or_missing_resolve_writers() {
+        let production = crate::shading::graph::shading_frame_graph();
+        for name in ["post_ssr_env_specular", "post_ssr_spec_weight"] {
+            let index = production
+                .resources()
+                .iter()
+                .position(|r| r.name == name)
+                .unwrap();
+            let missing = rewrite_production_passes(|pass| {
+                if pass.name == "shading_resolve" {
+                    pass.accesses
+                        .retain(|access| access.resource.0 as usize != index);
+                }
+            });
+            let error = validate_post_execution_bindings(&missing).unwrap_err();
+            assert!(
+                error.contains("shading_resolve") && error.contains(name),
+                "{error}"
+            );
+
+            let false_writer = rewrite_production_passes(|pass| {
+                if pass.name == "post_ssr" {
+                    let resource = pass
+                        .accesses
+                        .iter()
+                        .find(|access| access.resource.0 as usize == index)
+                        .unwrap()
+                        .resource;
+                    pass.accesses.push(ResourceAccess {
+                        resource,
+                        kind: AccessKind::StorageWrite,
+                    });
+                }
+            });
+            let error = validate_post_execution_bindings(&false_writer).unwrap_err();
+            assert!(
+                error.contains("falsely writes") && error.contains(name),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn specular_resource_contract_rejects_missing_producer_order() {
+        for next in ["post_spec_denoise", "post_ssgi", "post_taa"] {
+            let graph = rewrite_production_passes(|pass| {
+                if pass.name == next {
+                    pass.depends_on.clear();
+                }
+            });
+            let error = validate_post_execution_bindings(&graph).unwrap_err();
+            assert!(
+                error.contains(next) && error.contains("must depend on"),
+                "{error}"
+            );
+        }
+    }
 
     #[test]
     fn every_shared_post_pass_is_generated_from_one_table() {
@@ -1312,6 +1610,19 @@ mod tests {
             resource("post_spec_history").lifetime,
             ResourceLifetime::Persistent
         );
+        for name in [
+            "post_spec_gi_reservoir_prior",
+            "post_spec_gi_reservoir_current",
+        ] {
+            assert_eq!(resource(name).lifetime, ResourceLifetime::Persistent);
+        }
+        for name in [
+            "post_spec_gi_resolved",
+            "post_spec_filtered",
+            "post_ssgi_base",
+        ] {
+            assert_eq!(resource(name).lifetime, ResourceLifetime::Transient);
+        }
         assert_eq!(
             resource("post_ssr_trace").lifetime,
             ResourceLifetime::Transient

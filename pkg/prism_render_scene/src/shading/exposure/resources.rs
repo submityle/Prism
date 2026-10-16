@@ -5,8 +5,9 @@
 //!
 //! 1. `histogram` — a 64-bin log-luminance histogram the build pass fills with
 //!    `atomicAdd` and the resolve pass reduces then zeroes for the next frame.
-//!    It is transient (rebuilt every frame) so it only has to be zero on
-//!    creation, which `wgpu` guarantees.
+//!    Its contents are per-frame, but the allocation persists. Paired dispatch
+//!    admission ensures every build is followed by a resolve that clears it;
+//!    `wgpu` guarantees the initial zero contents on creation.
 //! 2. `state` — the [`GpuExposureState`] the resolve pass integrates across
 //!    frames (the smoothed adapted luminance + the exposure multiplier the
 //!    composite applies). It is **persistent**: created once, never re-created,
@@ -20,6 +21,8 @@
 //! Only the build/resolve passes and their bind groups are gated, so a disabled
 //! frame leaves the state parked at its last value.
 
+use std::time::Instant;
+
 use bevy_ecs::prelude::*;
 use bevy_render::{
     camera::ExtractedCamera,
@@ -29,6 +32,19 @@ use bevy_render::{
 
 use super::super::resources::ViewVisibilityBuffer;
 use super::abi::{GpuExposureState, EXPOSURE_BIN_COUNT};
+use super::frame::{ExposureFrameClock, ExposureFrameSnapshot};
+
+/// Prepared once per render frame, then read without mutation by every view.
+#[derive(Resource)]
+pub(crate) struct ExposureFrameTime {
+    snapshot: ExposureFrameSnapshot,
+}
+
+impl ExposureFrameTime {
+    pub fn delta_seconds(&self) -> f32 {
+        self.snapshot.delta_seconds()
+    }
+}
 
 /// The two persistent exposure buffers for one view. Present on every view that
 /// carries a [`ViewVisibilityBuffer`]; created once and never rebuilt so the
@@ -57,8 +73,9 @@ impl ViewExposureBuffers {
     }
 }
 
-/// Creates [`ViewExposureBuffers`] once for every view that has a resident
-/// [`ViewVisibilityBuffer`], and never touches them again.
+/// Publishes the render-frame time snapshot and creates [`ViewExposureBuffers`]
+/// once for every view with a resident [`ViewVisibilityBuffer`]. Existing GPU
+/// buffers are never touched here.
 ///
 /// Intentionally ungated on `enable_exposure`: the composite unconditionally
 /// binds the state buffer, so it must exist whenever the composite runs (i.e.
@@ -70,12 +87,20 @@ impl ViewExposureBuffers {
 /// resize — a stale histogram size is impossible since it is fixed at 64 bins.
 pub(crate) fn prepare_exposure_buffers(
     mut commands: Commands,
+    mut clock: Local<ExposureFrameClock>,
     device: Res<RenderDevice>,
     views: Query<
         (Entity, &ExtractedCamera),
         (With<ViewVisibilityBuffer>, Without<ViewExposureBuffers>),
     >,
 ) {
+    // This existing PrepareResources system runs once per render frame, not
+    // once per view. Publish even when exposure is disabled or this query is
+    // empty. Deferred commands are applied before PrepareBindGroups/Render.
+    commands.insert_resource(ExposureFrameTime {
+        snapshot: clock.advance(Instant::now()),
+    });
+
     for (entity, camera) in &views {
         // A view without a known viewport never dispatched the visibility path,
         // so there is nothing to meter yet; wait until it has an extent.
@@ -108,5 +133,21 @@ mod tests {
     #[test]
     fn histogram_buffer_is_one_u32_per_bin() {
         assert_eq!(u64::from(EXPOSURE_BIN_COUNT) * size_of::<u32>() as u64, 256);
+    }
+
+    #[test]
+    fn all_views_read_the_same_render_world_time_resource() {
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let mut clock = ExposureFrameClock::default();
+        clock.advance(start);
+        let mut world = World::new();
+        world.insert_resource(ExposureFrameTime {
+            snapshot: clock.advance(start + Duration::from_millis(16)),
+        });
+        let views = [world.spawn_empty().id(), world.spawn_empty().id()];
+        let deltas = views.map(|_| world.resource::<ExposureFrameTime>().delta_seconds());
+        assert_eq!(deltas, [0.016, 0.016]);
     }
 }

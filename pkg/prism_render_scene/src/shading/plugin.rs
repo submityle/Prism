@@ -2,6 +2,7 @@ use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_core_pipeline::schedule::camera_driver;
 use bevy_ecs::{
+    prelude::{Commands, Res},
     schedule::IntoScheduleConfigs,
     system::{BoxedSystem, IntoSystem},
 };
@@ -13,6 +14,12 @@ use bevy_render::{
     renderer::{RenderGraph, RenderGraphSystems},
     ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
+use prism_render_architecture::render_fabric::{
+    DeviceFabric, CUSTOM_FEATURE_ID, CUSTOM_VARIANT_ID, LIT_FEATURE_ID, LIT_VARIANT_ID,
+    NPR_FEATURE_ID, NPR_VARIANT_ID, WATER_FEATURE_ID, WATER_VARIANT_ID,
+};
+
+use crate::gpu::fabric::SceneFabric;
 
 use super::{
     ao::{
@@ -68,7 +75,8 @@ use super::{
     },
     execution::{
         run_shading_post_driver, run_shading_pre_resolve_driver, run_shading_resolve_driver,
-        run_shading_response_driver, ShadingExecutionPlan, ShadingPassBinding,
+        run_shading_response_driver, ExternalExecutionSite, SelectedVariantRequirement,
+        ShadingExecutionPlan, ShadingExecutorBinding, ShadingExternalExecutors, ShadingPassBinding,
     },
     exposure::{
         exposure_average_pass, exposure_histogram_pass, init_exposure_average_pipeline,
@@ -288,11 +296,14 @@ fn boxed_post_executor(kind: PostExecutorKind) -> BoxedSystem {
         PostExecutorKind::SsgiTrace => boxed_shading_system(ssgi_trace_pass),
         PostExecutorKind::SsgiDenoise => boxed_shading_system(ssgi_denoise_pass),
         PostExecutorKind::SsgiComposite => boxed_shading_system(ssgi_composite_pass),
+        PostExecutorKind::SpecGiReuse => boxed_shading_system(spec_gi_reuse_pass),
+        PostExecutorKind::SpecGiSpatial => boxed_shading_system(spec_gi_spatial_pass),
         PostExecutorKind::SpecDenoiseReproject => boxed_shading_system(spec_denoise_reproject_pass),
         PostExecutorKind::SpecDenoiseHistoryClamp => {
             boxed_shading_system(spec_denoise_history_clamp_pass)
         }
         PostExecutorKind::SpecDenoiseSpatial => boxed_shading_system(spec_denoise_spatial_pass),
+        PostExecutorKind::SpecGiComposite => boxed_shading_system(spec_gi_composite_pass),
         PostExecutorKind::TaaResolve => boxed_shading_system(taa_resolve_pass),
         PostExecutorKind::Posterize => boxed_shading_system(posterize_pass),
         PostExecutorKind::Outline => boxed_shading_system(outline_pass),
@@ -316,43 +327,69 @@ fn shading_execution_bindings() -> Vec<ShadingPassBinding> {
     let mut bindings = vec![
         ShadingPassBinding {
             declaration: "visibility_raster",
-            executor_group: "visibility_raster",
-            executors: vec![boxed_shading_system(visibility_raster_pass)],
+            requires: &[],
+            executor: ShadingExecutorBinding::Systems {
+                group: "visibility_raster",
+                systems: vec![boxed_shading_system(visibility_raster_pass)],
+            },
         },
         ShadingPassBinding {
             declaration: "material_classification_count",
-            executor_group: "material_classification",
-            executors: vec![boxed_shading_system(dispatch_material_classification)],
+            requires: &[],
+            executor: ShadingExecutorBinding::Systems {
+                group: "material_classification",
+                systems: vec![boxed_shading_system(dispatch_material_classification)],
+            },
         },
         ShadingPassBinding {
             declaration: "material_classification_prefix",
-            executor_group: "material_classification",
-            executors: Vec::new(),
+            requires: &[],
+            executor: ShadingExecutorBinding::GroupMember {
+                group: "material_classification",
+                owner: "material_classification_count",
+            },
         },
         ShadingPassBinding {
             declaration: "material_classification_scatter",
-            executor_group: "material_classification",
-            executors: Vec::new(),
+            requires: &[],
+            executor: ShadingExecutorBinding::GroupMember {
+                group: "material_classification",
+                owner: "material_classification_count",
+            },
         },
         ShadingPassBinding {
             declaration: "texel_space_shade_cache",
-            executor_group: "texel_space_shade_cache",
-            executors: vec![boxed_shading_system(shade_dispatch_pass)],
+            requires: &[],
+            executor: ShadingExecutorBinding::Systems {
+                group: "texel_space_shade_cache",
+                systems: vec![boxed_shading_system(shade_dispatch_pass)],
+            },
         },
         ShadingPassBinding {
             declaration: "shading_resolve",
-            executor_group: "shading_resolve",
-            executors: vec![boxed_shading_system(dispatch_shading_resolve)],
+            requires: &[],
+            executor: ShadingExecutorBinding::Systems {
+                group: "shading_resolve",
+                systems: vec![boxed_shading_system(dispatch_shading_resolve)],
+            },
         },
         ShadingPassBinding {
             declaration: "water_surface_raster",
-            executor_group: "water_surface_raster",
-            executors: Vec::new(),
+            requires: &[SelectedVariantRequirement {
+                feature: WATER_FEATURE_ID,
+                variant: WATER_VARIANT_ID,
+            }],
+            executor: ShadingExecutorBinding::ExternalSchedule {
+                site: ExternalExecutionSite::WaterSurface,
+            },
         },
         ShadingPassBinding {
             declaration: "response_composition",
-            executor_group: "response_composition",
-            executors: vec![boxed_shading_system(response_composition_pass)],
+            requires: &[],
+            executor: ShadingExecutorBinding::Systems {
+                group: "response_composition",
+                systems: vec![boxed_shading_system(response_composition_pass)],
+            },
         },
     ];
 
@@ -364,8 +401,11 @@ fn shading_execution_bindings() -> Vec<ShadingPassBinding> {
             .collect();
         bindings.push(ShadingPassBinding {
             declaration: binding.declaration,
-            executor_group: binding.declaration,
-            executors,
+            requires: &[],
+            executor: ShadingExecutorBinding::Systems {
+                group: binding.declaration,
+                systems: executors,
+            },
         });
     }
     bindings
@@ -389,19 +429,38 @@ fn validate_post_execution_registration(
             ));
         };
         registered_post_bindings += 1;
-        if actual.executor_group != expected.declaration {
+        let ShadingExecutorBinding::Systems { group, systems } = &actual.executor else {
+            return Err(format!(
+                "post module {} requires its own Systems executor",
+                expected.module
+            ));
+        };
+        if *group != expected.declaration {
             return Err(format!(
                 "post module {} uses executor group {} instead of {}",
-                expected.module, actual.executor_group, expected.declaration
+                expected.module, group, expected.declaration
             ));
         }
-        if actual.executors.len() != expected.executors.len() {
+        if systems.len() != expected.executors.len() {
             return Err(format!(
                 "post module {} executor count {} != inventory count {}",
                 expected.module,
-                actual.executors.len(),
+                systems.len(),
                 expected.executors.len()
             ));
+        }
+        for (index, (system, kind)) in systems.iter().zip(expected.executors).enumerate() {
+            let expected_system = boxed_post_executor(*kind);
+            // Debug names may be disabled; validate executable identity even
+            // in builds where every system has the same placeholder name.
+            if system.system_type() != expected_system.system_type() {
+                return Err(format!(
+                    "post module {} executor {index} is {} instead of {}",
+                    expected.module,
+                    system.name(),
+                    expected_system.name(),
+                ));
+            }
         }
     }
     if registered_post_bindings != POST_EXECUTION_BINDINGS.len() {
@@ -412,6 +471,63 @@ fn validate_post_execution_registration(
         ));
     }
     Ok(())
+}
+
+/// The shared resolve supports these implementations, but only responses in
+/// the frozen build profile are admitted. Do not expand roots or reselect a
+/// fallback when a new catalog implementation has no production executor.
+fn validate_shading_response_selection(fabric: &DeviceFabric) -> Result<(), String> {
+    for &feature in fabric.selection().roots().responses() {
+        let expected = match feature {
+            LIT_FEATURE_ID => LIT_VARIANT_ID,
+            NPR_FEATURE_ID => NPR_VARIANT_ID,
+            CUSTOM_FEATURE_ID => CUSTOM_VARIANT_ID,
+            _ => {
+                return Err(format!(
+                    "no shading response executor for frozen root {feature:?}"
+                ))
+            }
+        };
+        let selected = fabric.admit(feature).map_err(|error| error.to_string())?;
+        if selected.variant_id() != expected {
+            return Err(format!(
+                "shading response root {feature:?} requires variant {expected:?}, but frozen selection chose {:?}",
+                selected.variant_id()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn build_shading_execution(
+    fabric: &DeviceFabric,
+    external: &ShadingExternalExecutors,
+) -> Result<(ShadingFrameGraph, ShadingExecutionPlan), String> {
+    validate_shading_response_selection(fabric)?;
+    let graph = shading_frame_graph();
+    let compiled = graph.compile().map_err(|error| error.to_string())?;
+    let bindings = shading_execution_bindings();
+    validate_post_execution_registration(&graph, &bindings)?;
+    let execution =
+        ShadingExecutionPlan::new(fabric, external, &graph, compiled.clone(), bindings)?;
+    Ok((
+        ShadingFrameGraph {
+            compiled,
+            post_execution_bindings: POST_EXECUTION_BINDINGS,
+        },
+        execution,
+    ))
+}
+
+fn init_shading_execution(
+    mut commands: Commands,
+    fabric: Res<SceneFabric>,
+    external: Res<ShadingExternalExecutors>,
+) {
+    let (graph, execution) = build_shading_execution(&fabric.0, &external)
+        .expect("Prism shading executors must satisfy the device's frozen feature selection");
+    commands.insert_resource(graph);
+    commands.insert_resource(execution);
 }
 
 use super::texel_cache::{
@@ -522,20 +638,15 @@ impl Plugin for PrismShadingPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        let frame_graph = shading_frame_graph();
-        let compiled_graph = frame_graph
-            .compile()
-            .expect("Prism shading frame graph must be valid");
-        let execution_bindings = shading_execution_bindings();
-        validate_post_execution_registration(&frame_graph, &execution_bindings)
-            .expect("Prism post-process inventory and registration must be complete");
-        let execution_plan =
-            ShadingExecutionPlan::new(&frame_graph, compiled_graph.clone(), execution_bindings)
-                .expect("Prism shading execution ledger must cover the compiled graph");
         // The pass is installed once, irrespective of scene/split contents.
         // These constraints express actual resource dependencies, independent
         // of the tuple grouping used by the older stages below.
         render_app
+            .init_resource::<ShadingExternalExecutors>()
+            .add_systems(
+                RenderStartup,
+                init_shading_execution.after(crate::gpu::fabric::init_scene_fabric),
+            )
             .add_systems(RenderStartup, init_response_composition)
             .add_systems(
                 Render,
@@ -645,11 +756,6 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismLightRoutingSettings>()
             .init_resource::<PrismAreaLightSettings>()
             .init_resource::<ExtractedAreaLights>()
-            .insert_resource(ShadingFrameGraph {
-                compiled: compiled_graph,
-                post_execution_bindings: POST_EXECUTION_BINDINGS,
-            })
-            .insert_resource(execution_plan)
             .add_render_command::<Visibility3d, DrawVisibilityRaster>()
             .add_render_command::<TransparentOit3d, DrawTransparentOit>()
             .add_systems(RenderStartup, detect_shading_capabilities)
@@ -1481,53 +1587,9 @@ impl Plugin for PrismShadingPlugin {
                     light_routing_cull_pass.before(run_shading_resolve_driver),
                 ),
                 (
-                    // Glossy-specular ReSTIR reuse: reconstructs each
-                    // pixel's glossy point off the SSR prepass depth +
-                    // repacked `normal_roughness`, streams the SSR trace's
-                    // raw screen-space candidate radiance into a reservoir
-                    // and temporally merges the same-pixel prior, writing
-                    // the resolved specular + confidence target the denoise
-                    // / energy-conserving composite consume. Orders after
-                    // the SSR trace + repack that fill its inputs; no-op
-                    // unless `enable_spec_gi` and the SSR/visibility gate
-                    // held in resource prep.
-                    spec_gi_reuse_pass
-                        .after(run_shading_resolve_driver)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    // Glossy-specular ReSTIR composite (UE option C): folds
-                    // the reuse pass's resolved specular back over scene_color,
-                    // substituting the screen-space glossy reflection for the
-                    // IBL specular under reservoir confidence (falling back to
-                    // IBL on a miss). Owns the specular slot whenever
-                    // `enable_spec_gi` holds; `ssr_composite_pass` early-returns
-                    // under the same gate so `env_specular` is swapped exactly
-                    // once. Reads the colour-pyramid base copy (built by
-                    // `ssr_color_mips_pass`) and the resolved reuse target, so
-                    // it orders after both; the SSR composite ordering keeps the
-                    // two mutually-exclusive scene_color writers serialised.
-                    // Nested with the composite to keep this Core3d tuple
-                    // within Bevy's 20-element limit. The spatial denoiser runs
-                    // between the reuse resolve it filters and the composite that
-                    // consumes its filtered output: one screen-space dispatch
-                    // (ReBLUR-style anisotropic, contact-hardened, edge-aware
-                    // specular blur). No-op unless `enable_spec_gi` + the
-                    // SSR/visibility gate held in resource prep.
-                    (
-                        // Spatial reuse: pools a frame-jittered disc of neighbour
-                        // reservoirs from the completed post-temporal table onto
-                        // each pixel's GGX lobe and overwrites the resolved target
-                        // with the lower-variance estimate (reservoir history left
-                        // pure). Runs after the reuse resolve it refines and before
-                        // the denoise/composite that consume the pooled resolve.
-                        spec_gi_spatial_pass
-                            .after(spec_gi_reuse_pass)
-                            .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                        spec_gi_composite_pass
-                            .after(spec_gi_reuse_pass)
-                            .after(spec_gi_spatial_pass)
-                            .after(run_shading_resolve_driver)
-                            .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    ),
+                    // Screen-space spec-GI reuse, denoising and composite are
+                    // owned by the post driver, after SSR fills their current-
+                    // frame inputs and before SSGI snapshots scene_color.
                     // World-space GI gathers screen probes off the fully
                     // resolve-fed scene_color, then its own composite
                     // folds the indirect diffuse back in (energy-conserving
@@ -1676,12 +1738,137 @@ impl Plugin for PrismShadingPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_app::SubApp;
+    use bevy_ecs::schedule::Schedule;
+    use prism_render_architecture::render_fabric::{
+        builtin_catalog, builtin_roots, CapabilitySet, FeatureCatalog, FeatureDefinition,
+        FeatureId, FeatureVariant, FrozenRoots, RenderQualityTier, ServiceSet, VariantId,
+    };
+
+    fn build_profile_fabric(
+        subsystems: &'static [FeatureId],
+        responses: &'static [FeatureId],
+    ) -> DeviceFabric {
+        let catalog = builtin_catalog().unwrap();
+        let roots = FrozenRoots::from_build_profile(&catalog, subsystems, responses).unwrap();
+        DeviceFabric::new(
+            catalog,
+            roots,
+            CapabilitySet::WEBGPU_BASELINE,
+            RenderQualityTier::High,
+        )
+        .unwrap()
+    }
+
+    fn full_fabric() -> DeviceFabric {
+        let catalog = builtin_catalog().unwrap();
+        let roots = builtin_roots(&catalog).unwrap();
+        DeviceFabric::new(
+            catalog,
+            roots,
+            CapabilitySet::WEBGPU_BASELINE,
+            RenderQualityTier::High,
+        )
+        .unwrap()
+    }
+
+    fn render_app_with_water() -> SubApp {
+        let mut render_app = SubApp::new();
+        crate::water::plugin::install_water_surface_executor(&mut render_app);
+        render_app
+    }
 
     #[test]
     fn production_post_registration_covers_the_repository_inventory() {
         let graph = shading_frame_graph();
         let bindings = shading_execution_bindings();
         validate_post_execution_registration(&graph, &bindings).unwrap();
+    }
+
+    fn specular_systems(bindings: &mut [ShadingPassBinding]) -> &mut Vec<BoxedSystem> {
+        let binding = bindings
+            .iter_mut()
+            .find(|binding| binding.declaration == "post_spec_denoise")
+            .unwrap();
+        let ShadingExecutorBinding::Systems { systems, .. } = &mut binding.executor else {
+            panic!("specular pipeline must own its executable systems");
+        };
+        systems
+    }
+
+    #[test]
+    fn specular_pipeline_registration_uses_real_executors_once_in_order() {
+        let graph = shading_frame_graph();
+        let mut bindings = shading_execution_bindings();
+        validate_post_execution_registration(&graph, &bindings).unwrap();
+        // Construct the expected functions directly, independently of the
+        // inventory and boxed_post_executor's kind-to-system mapping.
+        let expected = vec![
+            boxed_shading_system(spec_gi_reuse_pass),
+            boxed_shading_system(spec_gi_spatial_pass),
+            boxed_shading_system(spec_denoise_reproject_pass),
+            boxed_shading_system(spec_denoise_history_clamp_pass),
+            boxed_shading_system(spec_denoise_spatial_pass),
+            boxed_shading_system(spec_gi_composite_pass),
+        ];
+        let actual_types = specular_systems(&mut bindings)
+            .iter()
+            .map(|system| system.system_type())
+            .collect::<Vec<_>>();
+        let expected_types = expected
+            .iter()
+            .map(|system| system.system_type())
+            .collect::<Vec<_>>();
+        assert_eq!(actual_types, expected_types);
+        for expected_system in &expected {
+            let count: usize = bindings
+                .iter()
+                .map(|binding| match &binding.executor {
+                    ShadingExecutorBinding::Systems { systems, .. } => systems
+                        .iter()
+                        .filter(|system| system.system_type() == expected_system.system_type())
+                        .count(),
+                    _ => 0,
+                })
+                .sum();
+            assert_eq!(
+                count,
+                1,
+                "{} must execute exactly once",
+                expected_system.name()
+            );
+        }
+    }
+
+    #[test]
+    fn specular_pipeline_registration_rejects_missing_reuse() {
+        let graph = shading_frame_graph();
+        let mut bindings = shading_execution_bindings();
+        specular_systems(&mut bindings).remove(0);
+        let error = validate_post_execution_registration(&graph, &bindings).unwrap_err();
+        assert!(
+            error.contains("spec_denoise") && error.contains("executor count"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn specular_pipeline_registration_rejects_reordered_duplicate_or_wrong_executors() {
+        let graph = shading_frame_graph();
+        for mutation in 0..3 {
+            let mut bindings = shading_execution_bindings();
+            let systems = specular_systems(&mut bindings);
+            match mutation {
+                0 => systems.swap(0, 1),
+                1 => systems[1] = boxed_shading_system(spec_gi_reuse_pass),
+                _ => systems[0] = boxed_shading_system(ssr_trace_pass),
+            }
+            let error = validate_post_execution_registration(&graph, &bindings).unwrap_err();
+            assert!(
+                error.contains("spec_denoise") && error.contains("instead of"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -1691,5 +1878,220 @@ mod tests {
         bindings.retain(|binding| binding.declaration != "post_bloom");
         let error = validate_post_execution_registration(&graph, &bindings).unwrap_err();
         assert!(error.contains("bloom"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn production_execution_uses_frozen_selection_and_the_same_compiled_graph() {
+        let fabric = full_fabric();
+        let snapshot = fabric.selection().clone();
+        let render_app = render_app_with_water();
+        let external = render_app.world().resource::<ShadingExternalExecutors>();
+        let (graph, execution) = build_shading_execution(&fabric, external).unwrap();
+        assert_eq!(graph.compiled, *execution.compiled());
+        assert_eq!(graph.compiled.declared_pass_count, 31);
+        assert!(execution.is_alive("water_surface_raster"));
+        assert!(execution.is_alive("response_composition"));
+        assert_eq!(fabric.selection(), &snapshot);
+        assert!(render_app
+            .get_schedule(bevy_core_pipeline::Core3d)
+            .is_some());
+    }
+
+    #[test]
+    fn production_execution_does_not_enable_unreferenced_responses() {
+        let fabric = build_profile_fabric(&[WATER_FEATURE_ID], &[LIT_FEATURE_ID]);
+        let snapshot = fabric.selection().clone();
+        let render_app = render_app_with_water();
+        build_shading_execution(
+            &fabric,
+            render_app.world().resource::<ShadingExternalExecutors>(),
+        )
+        .unwrap();
+        assert_eq!(fabric.selection().roots().responses(), &[LIT_FEATURE_ID]);
+        assert!(fabric.admit(NPR_FEATURE_ID).is_err());
+        assert!(fabric.admit(CUSTOM_FEATURE_ID).is_err());
+        assert_eq!(fabric.selection(), &snapshot);
+    }
+
+    #[test]
+    fn production_execution_rejects_uninstalled_water_executor() {
+        let result = build_shading_execution(&full_fabric(), &ShadingExternalExecutors::default());
+        let error = result.err().expect("missing draw must fail admission");
+        assert!(
+            error.contains("unregistered external executor WaterSurface"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn production_execution_cannot_expand_the_water_root() {
+        let fabric = build_profile_fabric(&[], &[LIT_FEATURE_ID]);
+        let snapshot = fabric.selection().clone();
+        let render_app = render_app_with_water();
+        let result = build_shading_execution(
+            &fabric,
+            render_app.world().resource::<ShadingExternalExecutors>(),
+        );
+        let error = result
+            .err()
+            .expect("registered topology needs explicit water root");
+        assert!(error.contains("OutsideFrozenRoots"), "{error}");
+        assert_eq!(fabric.selection(), &snapshot);
+    }
+
+    fn response_only_fabric(feature: FeatureId, variant: VariantId) -> DeviceFabric {
+        let variants = Box::leak(Box::new([FeatureVariant {
+            id: variant,
+            rank: 0,
+            min_quality: RenderQualityTier::Low,
+            required_caps: CapabilitySet::EMPTY,
+            requires_services_extra: ServiceSet::EMPTY,
+            passes: &[],
+            shader_permutation: None,
+        }]));
+        let definitions = Box::leak(Box::new([FeatureDefinition::response(
+            feature,
+            ServiceSet::EMPTY,
+            variants,
+        )]));
+        let catalog = FeatureCatalog::new(definitions, &[]).unwrap();
+        let roots =
+            FrozenRoots::from_build_profile(&catalog, &[], Box::leak(Box::new([feature]))).unwrap();
+        DeviceFabric::new(
+            catalog,
+            roots,
+            CapabilitySet::WEBGPU_BASELINE,
+            RenderQualityTier::High,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn production_response_executor_rejects_unsupported_selected_variant() {
+        let fabric = response_only_fabric(LIT_FEATURE_ID, VariantId(0xf001));
+        let snapshot = fabric.selection().clone();
+        let error = validate_shading_response_selection(&fabric).unwrap_err();
+        assert!(error.contains("requires variant"), "{error}");
+        assert_eq!(fabric.selection(), &snapshot);
+    }
+
+    #[test]
+    fn production_response_executor_rejects_unknown_response_root() {
+        let fabric = response_only_fabric(FeatureId(0xf002), VariantId(0xf003));
+        let error = validate_shading_response_selection(&fabric).unwrap_err();
+        assert!(error.contains("no shading response executor"), "{error}");
+    }
+
+    #[test]
+    fn shading_startup_consumes_deferred_fabric_and_preserves_registered_executors() {
+        fn insert_fabric(mut commands: Commands) {
+            commands.insert_resource(SceneFabric(full_fabric()));
+        }
+        let mut render_app = render_app_with_water();
+        // Plugin build order must not reset a previously installed external site.
+        render_app.init_resource::<ShadingExternalExecutors>();
+        let mut startup = Schedule::default();
+        startup.add_systems((insert_fabric, init_shading_execution.after(insert_fabric)));
+        startup.run(render_app.world_mut());
+        let world = render_app.world();
+        assert!(world
+            .resource::<ShadingExternalExecutors>()
+            .contains(ExternalExecutionSite::WaterSurface));
+        assert_eq!(
+            world.resource::<ShadingFrameGraph>().compiled,
+            *world.resource::<ShadingExecutionPlan>().compiled(),
+        );
+    }
+
+    #[test]
+    fn hardware_scene_startup_freezes_the_owning_device_and_admits_real_executors() {
+        use bevy_render::renderer::RenderDevice;
+        use prism_render_architecture::backend::capability::Capability;
+        use prism_render_driver_wgpu::{require_hardware_gpu, WgpuInstance};
+
+        let instance = WgpuInstance::new();
+        let adapter = instance.enumerate_adapters().into_iter().find(|adapter| {
+            matches!(
+                adapter.get_info().device_type,
+                wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+            )
+        });
+        let Some(adapter) = adapter else {
+            assert!(
+                !require_hardware_gpu(),
+                "PRISM_REQUIRE_GPU=1 but scene startup has no physical GPU"
+            );
+            eprintln!("SKIP hardware scene startup: no physical GPU adapter");
+            return;
+        };
+        let info = adapter.get_info();
+        let (device, _queue) = instance
+            .create_device(&adapter)
+            .expect("physical GPU must create the scene's owning device");
+        eprintln!(
+            "scene startup GPU: name={:?} backend={:?} type={:?} vendor={:#x} device={:#x}",
+            info.name, info.backend, info.device_type, info.vendor, info.device
+        );
+        let render_device = RenderDevice::from(device.wgpu_device().clone());
+        let features = render_device.features();
+        let mut render_app = render_app_with_water();
+        render_app.insert_resource(render_device);
+        render_app.init_resource::<ShadingExternalExecutors>();
+        let mut startup = Schedule::default();
+        startup.add_systems((
+            crate::gpu::fabric::init_scene_fabric,
+            init_shading_execution.after(crate::gpu::fabric::init_scene_fabric),
+        ));
+        startup.run(render_app.world_mut());
+
+        let world = render_app.world();
+        let fabric = &world.resource::<SceneFabric>().0;
+        let selection = fabric.selection();
+        assert!(selection
+            .device_caps()
+            .contains_all(CapabilitySet::WEBGPU_BASELINE));
+        for (feature, capability) in [
+            (
+                wgpu::Features::MULTI_DRAW_INDIRECT_COUNT,
+                Capability::IndirectDrawCount,
+            ),
+            (
+                wgpu::Features::EXPERIMENTAL_MESH_SHADER,
+                Capability::MeshShading,
+            ),
+            (wgpu::Features::EXPERIMENTAL_RAY_QUERY, Capability::RayQuery),
+            (
+                wgpu::Features::EXPERIMENTAL_RAY_TRACING_PIPELINES,
+                Capability::RayTracingPipeline,
+            ),
+            (
+                wgpu::Features::TEXTURE_BINDING_ARRAY
+                    | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+                Capability::BindlessDescriptors,
+            ),
+        ] {
+            assert_eq!(
+                selection.device_caps().contains(capability),
+                features.contains(feature),
+                "scene capability {capability:?} must describe its actual device"
+            );
+        }
+        assert_eq!(
+            selection.roots(),
+            &builtin_roots(&builtin_catalog().unwrap()).unwrap()
+        );
+        assert_eq!(selection.quality(), RenderQualityTier::High);
+        assert!(world
+            .resource::<ShadingExternalExecutors>()
+            .contains(ExternalExecutionSite::WaterSurface));
+        let graph = world.resource::<ShadingFrameGraph>();
+        let execution = world.resource::<ShadingExecutionPlan>();
+        assert_eq!(graph.compiled, *execution.compiled());
+        assert_eq!(graph.compiled.declared_pass_count, 31);
+        assert!(execution.is_alive("water_surface_raster"));
+        assert!(execution.is_alive("response_composition"));
+        let snapshot = selection.clone();
+        build_shading_execution(fabric, world.resource::<ShadingExternalExecutors>()).unwrap();
+        assert_eq!(fabric.selection(), &snapshot);
     }
 }

@@ -35,7 +35,7 @@
 //! shaders still validate, so this plugin is the real, load-bearing wiring for
 //! the device-side solver rather than a placeholder.
 
-use bevy_app::{App, Plugin};
+use bevy_app::{App, Plugin, SubApp};
 use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::render_resource::SpecializedRenderPipelines;
@@ -59,6 +59,25 @@ use super::surface_vsm::init_water_vsm_fallback;
 use super::surface_world_space_gi::init_water_world_space_gi_fallback;
 use super::{surface_draw::draw_water_surface, WaterSurfaceSystems};
 use crate::lighting::LightBindGroup;
+use crate::shading::{ExternalExecutionSite, ShadingExternalExecutors};
+
+/// Register admission and install the real draw together. A ledger entry alone
+/// must never make a missing Core3d executor look installed.
+pub(crate) fn install_water_surface_executor(render_app: &mut SubApp) {
+    render_app.init_resource::<ShadingExternalExecutors>();
+    render_app
+        .world_mut()
+        .resource_mut::<ShadingExternalExecutors>()
+        .register(ExternalExecutionSite::WaterSurface)
+        .expect("water surface executor must be installed once");
+    render_app.add_systems(
+        bevy_core_pipeline::Core3d,
+        draw_water_surface
+            .in_set(WaterSurfaceSystems::Draw)
+            .after(bevy_core_pipeline::Core3dSystems::MainPass)
+            .before(bevy_core_pipeline::Core3dSystems::PostProcess),
+    );
+}
 
 /// Installs the `GPU` water compute subsystem into an app.
 ///
@@ -175,16 +194,8 @@ impl Plugin for WaterPlugin {
             .add_systems(
                 bevy_core_pipeline::Core3d,
                 dispatch_water.before(bevy_core_pipeline::Core3dSystems::MainPass),
-            )
-            // Rasterize the displaced surface *after* the shading composite (so
-            // the opaque radiance it refracts is present in `scene_color`) and
-            // before Bevy's post-process, matching the composite -> OIT order.
-            .add_systems(
-                bevy_core_pipeline::Core3d,
-                draw_water_surface
-                    .in_set(WaterSurfaceSystems::Draw)
-                    .after(bevy_core_pipeline::Core3dSystems::MainPass)
-                    .before(bevy_core_pipeline::Core3dSystems::PostProcess),
             );
+        // Rasterize after opaque HDR export and before post processing.
+        install_water_surface_executor(render_app);
     }
 }
