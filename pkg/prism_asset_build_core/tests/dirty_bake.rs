@@ -135,7 +135,15 @@ fn duplicate_dirty_requests_share_execution_and_cached_results_are_stable() {
     assert_eq!(first_results, second_results);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(service.cache_stats().entries, 1);
-    assert_eq!(service.cache_stats().hits, 2);
+    // The first duplicate may arrive after the shared kernel has already
+    // published, in which case it is a cache hit rather than a live-job
+    // subscription. The two requests in the second submission are always
+    // hits; the first submission contributes zero or one more depending on
+    // scheduler timing.
+    assert!(
+        (2..=3).contains(&service.cache_stats().hits),
+        "cache hits should account for both second-pass requests"
+    );
 }
 
 #[test]

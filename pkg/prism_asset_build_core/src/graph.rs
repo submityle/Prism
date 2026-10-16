@@ -10,11 +10,19 @@ pub type BuildOutputs = BTreeMap<JobId, Vec<u8>>;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BuildError {
     DuplicateJob(JobId),
-    MissingDependency { job: JobId, dependency: JobId },
-    Cycle { jobs: Vec<JobId> },
+    MissingDependency {
+        job: JobId,
+        dependency: JobId,
+    },
+    Cycle {
+        jobs: Vec<JobId>,
+    },
     /// A dirty plan contains a job that is absent from this graph.
     UnknownDirtyJob(JobId),
-    ProcessorFailed { job: JobId, source: ProcessorError },
+    ProcessorFailed {
+        job: JobId,
+        source: ProcessorError,
+    },
     InvalidConcurrency,
 }
 
