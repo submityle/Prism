@@ -57,3 +57,8 @@ crypto = ["std", "dep:ring"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "udp_acceptance"
+path = "tests/udp_acceptance.rs"
+required-features = ["std"]
