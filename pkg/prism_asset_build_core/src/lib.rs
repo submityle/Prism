@@ -2,11 +2,18 @@
 //!
 //! Artifact keys describe build semantics; content hashes describe bytes. The
 //! store deliberately provides no remote/distributed cache or build execution.
+//!
+//! [`BakeService`] is the narrow in-process `RuntimeDerived` scheduling
+//! adapter. It runs a caller-provided Bake Kernel with bounded admission and
+//! returns owned memory results; it is not the offline `BuildExecutor`, DDC,
+//! CAS, Manifest publication, or a remote build service.
 
 extern crate alloc;
 
 mod journal;
 
+/// Bounded in-process RuntimeDerived bake scheduling with owned results.
+pub mod bake;
 /// Immutable, content-addressed artifact byte storage.
 pub mod cas;
 /// Persistent local derived-data descriptor index.
@@ -58,6 +65,10 @@ pub mod virtual_geometry_lod;
 /// Versioned cluster-local position quantization payload codec.
 pub mod virtual_geometry_payload;
 
+pub use bake::{
+    BakeDescriptor, BakeError, BakeHandle, BakeKernel, BakeRequest, BakeResult, BakeService,
+    BakeServiceConfigError, CancellationToken, InvalidRequest, KernelError, StableInputKey,
+};
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcCapacity, DdcError, DdcEviction, DerivedDataCache, LocalDdc};
 pub use executor::{
