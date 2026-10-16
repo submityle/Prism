@@ -9,8 +9,8 @@ use std::{
 
 use prism_world_gpu::{
     GpuContext, GpuHeightfieldPlacement, GpuHeightfieldPlacementDeletionCapacity,
-    GpuHeightfieldPlacementDeletionWorkBudget, GpuHeightfieldPlacementDeletions,
-    GpuHeightfieldPlacementWorkBudget,
+    GpuHeightfieldPlacementDeletionError, GpuHeightfieldPlacementDeletionWorkBudget,
+    GpuHeightfieldPlacementDeletions, GpuHeightfieldPlacementWorkBudget,
 };
 use prism_world_residency::{
     ScatterDensityField, ScatterFieldBuildBudget, ScatterFieldConfig, ScatterFieldSample,
@@ -239,6 +239,45 @@ fn submit_read(
     keys_from_compact(&bytes, n, c)
 }
 
+fn deletion_set(
+    keys: Vec<HeightfieldPlacementKey>,
+    max_keys: usize,
+) -> HeightfieldPlacementDeletionSet {
+    HeightfieldPlacementDeletionSet::new(
+        keys,
+        HeightfieldPlacementDeletionBudget {
+            max_keys,
+            max_key_bytes: max_keys * std::mem::size_of::<HeightfieldPlacementKey>(),
+        },
+    )
+    .unwrap()
+}
+
+fn gpu(
+    context: &GpuContext,
+    placement_capacity: usize,
+    deletion_capacity: usize,
+) -> GpuHeightfieldPlacementDeletions {
+    GpuHeightfieldPlacementDeletions::new(
+        context,
+        GpuHeightfieldPlacement::new(context, placement_capacity, 0, 16, 3, u64::MAX).unwrap(),
+        GpuHeightfieldPlacementDeletionCapacity {
+            max_keys: deletion_capacity,
+            max_buffer_bytes: u64::MAX,
+            max_scratch_bytes: deletion_capacity * 56,
+        },
+    )
+    .unwrap()
+}
+
+fn deletion_budget(n: usize, d: usize) -> GpuHeightfieldPlacementDeletionWorkBudget {
+    GpuHeightfieldPlacementDeletionWorkBudget {
+        max_input_slots: n as u64,
+        max_keys: d,
+        max_key_comparisons: n as u64 * u64::from(usize::BITS - d.leading_zeros()),
+    }
+}
+
 #[test]
 fn physical_gpu_filters_exact_full_placement_keys_and_preserves_upstream_records() {
     let context = context();
@@ -325,4 +364,165 @@ fn physical_gpu_filters_exact_full_placement_keys_and_preserves_upstream_records
         );
         assert_eq!(gpu.cache_key().unwrap().deletions, *deletions);
     }
+}
+
+#[test]
+fn admission_is_atomic_and_encode_requires_an_uploaded_request() {
+    let context = context();
+    let c = config();
+    let r = region();
+    let f = field();
+    let s = surface();
+    let selection = filters();
+    let (placement_budget, cpu_budget, n) = budgets(c, r, &f);
+    let cpu = scatter_on_heightfield(c, r, &f, &s, selection, cpu_budget).unwrap();
+    assert!(cpu.points.len() > 2);
+
+    let mut gpu = gpu(&context, n, 1);
+    let mut encoder = context.device().create_command_encoder(&Default::default());
+    assert_eq!(
+        gpu.encode(&mut encoder),
+        Err(GpuHeightfieldPlacementDeletionError::RequestNotUploaded)
+    );
+
+    let valid = deletion_set(vec![cpu.points[0].key], n);
+    gpu.write_request(
+        c,
+        r,
+        &f,
+        &s,
+        selection,
+        placement_budget,
+        &valid,
+        deletion_budget(n, 1),
+    )
+    .unwrap();
+    let before = submit_read(&context, &gpu, n, c);
+    let before_cache = gpu.cache_key().cloned();
+    let before_stats = gpu.upload_stats();
+
+    let too_many = deletion_set(vec![cpu.points[0].key, cpu.points[1].key], n);
+    let cases = [
+        (
+            valid.clone(),
+            GpuHeightfieldPlacementDeletionWorkBudget {
+                max_input_slots: (n - 1) as u64,
+                ..deletion_budget(n, 1)
+            },
+            GpuHeightfieldPlacementDeletionError::InputBudgetExceeded {
+                required: n as u64,
+                limit: (n - 1) as u64,
+            },
+        ),
+        (
+            valid.clone(),
+            GpuHeightfieldPlacementDeletionWorkBudget {
+                max_keys: 0,
+                ..deletion_budget(n, 1)
+            },
+            GpuHeightfieldPlacementDeletionError::KeyBudgetExceeded {
+                required: 1,
+                limit: 0,
+            },
+        ),
+        (
+            valid.clone(),
+            GpuHeightfieldPlacementDeletionWorkBudget {
+                max_key_comparisons: (n - 1) as u64,
+                ..deletion_budget(n, 1)
+            },
+            GpuHeightfieldPlacementDeletionError::ComparisonBudgetExceeded {
+                required: n as u64,
+                limit: (n - 1) as u64,
+            },
+        ),
+        (
+            too_many,
+            deletion_budget(n, 2),
+            GpuHeightfieldPlacementDeletionError::KeyCapacityExceeded {
+                required: 2,
+                capacity: 1,
+            },
+        ),
+    ];
+
+    for (deletions, budget, expected) in cases {
+        assert_eq!(
+            gpu.validate_request(
+                c,
+                r,
+                &f,
+                &s,
+                selection,
+                placement_budget,
+                &deletions,
+                budget,
+            ),
+            Err(expected.clone())
+        );
+        assert_eq!(
+            gpu.write_request(
+                c,
+                r,
+                &f,
+                &s,
+                selection,
+                placement_budget,
+                &deletions,
+                budget,
+            ),
+            Err(expected)
+        );
+        assert_eq!(gpu.cache_key(), before_cache.as_ref());
+        assert_eq!(gpu.upload_stats(), before_stats);
+        assert_eq!(submit_read(&context, &gpu, n, c), before);
+    }
+}
+
+#[test]
+fn constructor_enforces_scratch_budget_and_zero_capacity_is_valid() {
+    let context = context();
+    let c = config();
+    let f = field();
+    let s = surface();
+    let placement = GpuHeightfieldPlacement::new(&context, 1, 0, 16, 3, u64::MAX).unwrap();
+    assert!(matches!(
+        GpuHeightfieldPlacementDeletions::new(
+            &context,
+            placement,
+            GpuHeightfieldPlacementDeletionCapacity {
+                max_keys: 2,
+                max_buffer_bytes: u64::MAX,
+                max_scratch_bytes: 2 * 56 - 1,
+            },
+        ),
+        Err(
+            GpuHeightfieldPlacementDeletionError::ScratchBudgetExceeded {
+                required: 112,
+                limit: 111,
+            },
+        )
+    ));
+
+    let zero_region = HeightfieldPlacementRegion::new([0, 0], [0, 0]).unwrap();
+    let (zero_placement_budget, zero_budget, zero_n) = budgets(c, zero_region, &f);
+    assert_eq!(zero_n, 0);
+    let mut zero = gpu(&context, 0, 0);
+    let empty = deletion_set(Vec::new(), 0);
+    let selection = filters();
+    zero.write_request(
+        c,
+        zero_region,
+        &f,
+        &s,
+        selection,
+        zero_placement_budget,
+        &empty,
+        deletion_budget(0, 0),
+    )
+    .unwrap();
+    assert_eq!(zero.candidate_count(), 0);
+    assert_eq!(zero.deletions(), Some(&empty));
+    assert_eq!(zero_budget.max_output_points, 0);
+    let _ = submit_read(&context, &zero, 0, c);
 }
