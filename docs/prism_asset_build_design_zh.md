@@ -496,7 +496,7 @@ begin_output
 
 - **Bake Kernel**：`prism_bake_*` crate，纯算法核心——无 I/O、无调度、无全局状态；输入为 IR/结构化参数，输出为字节或结构化产物。必须存在 CPU 金标准，GPU 实现（若有）与之逐元素对拍（范式见 `pkg/prism_micromap_gpu/tests/gpu_parity.rs`）。
 - **离线调度**：本系统的 `Processor` 包一层 Kernel，负责 `analyze` 声明输入与键材料、选择 `ArtifactKind`、经 `ArtifactWriter` 流式写入并提交事务。
-- **进程内调度**：目标形态是编辑器/运行时的 `BakeService`（由 `prism_tasks` 承载）以 dirty-set 驱动同一个 Kernel，产物进本地 runtime cache，不写 CAS/DDC（见 `prism_asset_design_zh.md` §13.2）。当前仓库已交付 `prism_asset_build_core::BakeService` 的独立本地切片：它以有界 `prism_tasks::TaskPool` 执行 caller-supplied Kernel，最多使用 64 个 worker，提供有界 in-flight、确定性 request key、协作取消、panic/error 隔离、RAII 配额释放和 owned result descriptor；当前不接入 dirty-set、runtime cache 或外部发布。
+- **进程内调度**：目标形态是编辑器/运行时的 `BakeService`（由 `prism_tasks` 承载）以 dirty-set 驱动同一个 Kernel，产物进本地 runtime cache，不写 CAS/DDC（见 `prism_asset_design_zh.md` §13.2）。当前仓库已交付 `prism_asset_build_core::BakeService` 的独立本地切片：它以有界 `prism_tasks::TaskPool` 执行 caller-supplied Kernel，最多使用 64 个 worker，提供有界 in-flight、确定性 request key、协作取消、panic/error 隔离、RAII 配额释放、owned result descriptor、caller-owned kernel registry、有界 runtime cache、重复请求合并和确定性驱逐；当前不接入 dirty-set、ECS/渲染/编辑器消费或外部发布。
 
 禁止在 Kernel 之外复制算法：任何“编辑器专用”或“运行时专用”的第二实现，都属于 §2.5 所禁止的行为不一致链，也是 `docs/prism_derived_data_contract_zh.md` 中 `OfflineShipped` 与 `RuntimeDerived` 必须指出同一内核的原因。
 
