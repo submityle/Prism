@@ -370,7 +370,7 @@ fn relation_edge_snapshot_covers_typed_raw_and_replaced_registry_edges() {
 
     world.add_relation::<ChildOf>(child, a);
     let stats = propagate_transforms(&mut world).unwrap();
-    assert_eq!((stats.membership_scans, stats.relation_checks), (0, 4));
+    assert_eq!((stats.membership_scans, stats.relation_checks), (0, 1));
     assert_eq!((stats.recomputed, stats.written), (2, 2));
     assert_eq!(position(&world, leaf).x, 13.0);
     let saved = world.relations().clone();
@@ -380,17 +380,17 @@ fn relation_edge_snapshot_covers_typed_raw_and_replaced_registry_edges() {
         .index_mut()
         .add(relation, child, b, true);
     let stats = propagate_transforms(&mut world).unwrap();
-    assert_eq!((stats.membership_scans, stats.relation_checks), (0, 4));
+    assert_eq!((stats.membership_scans, stats.relation_checks), (0, 1));
     assert_eq!(position(&world, leaf).x, 23.0);
 
     *world.relations_mut() = saved;
     propagate_transforms(&mut world).unwrap();
     assert_eq!(position(&world, leaf).x, 13.0);
-    // Replacing the registry must invalidate topology even without mutation
-    // counters; the canonical edge snapshot detects its changed contents.
+    // Registry replacement publishes the net changed sources, including
+    // deleted buckets, rather than invalidating every Transform source.
     *world.relations_mut() = Default::default();
     let stats = propagate_transforms(&mut world).unwrap();
-    assert_eq!(stats.relation_checks, 4);
+    assert_eq!(stats.relation_checks, 2);
     assert_eq!(position(&world, child).x, 1.0);
     assert_eq!(position(&world, leaf).x, 2.0);
     assert_eq!(propagate_transforms(&mut world).unwrap().relation_checks, 0);

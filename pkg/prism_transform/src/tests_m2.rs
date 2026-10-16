@@ -7,6 +7,25 @@ use crate::hierarchy::NodeId;
 use crate::{Transform, TransformGraph};
 use prism_math::{vec3, Affine3, Quat, Vec3};
 
+#[test]
+fn preparation_visits_dirty_entries_not_all_forest_nodes() {
+    let mut g = TransformGraph::new();
+    let mut last = None;
+    for _ in 0..8192 {
+        last = Some(g.spawn_root(Transform::IDENTITY));
+    }
+    g.propagate_incremental();
+    assert_eq!(g.propagate_incremental(), DirtyStats::default());
+    let leaf = last.unwrap();
+    g.set_local(leaf, Transform::from_xyz(1.0, 0.0, 0.0));
+    g.set_local(leaf, Transform::from_xyz(2.0, 0.0, 0.0));
+    let stats = g.propagate_incremental();
+    assert_eq!(stats.dirty_nodes_examined, 1);
+    assert_eq!(stats.ancestor_checks, 0);
+    assert_eq!(stats.recomputed, 1);
+    assert_eq!(g.propagate_incremental(), DirtyStats::default());
+}
+
 // ---- helpers ---------------------------------------------------------------
 
 fn v_approx(a: Vec3, b: Vec3, eps: f32) -> bool {
@@ -127,7 +146,9 @@ fn static_scene_recomputes_nothing() {
         second,
         DirtyStats {
             recomputed: 0,
-            dirty_roots: 0
+            dirty_roots: 0,
+            dirty_nodes_examined: 0,
+            ancestor_checks: 0,
         }
     );
 

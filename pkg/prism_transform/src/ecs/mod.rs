@@ -8,10 +8,10 @@
 //! `world.flush_changed_observers()` before draining.
 //!
 //! Locals remain authoritative. Lifecycle observers track membership and column
-//! chunk summaries limit local-value reads to changed rows. An index-owned
-//! identity/revision invalidates cached canonical `ChildOf` edges; only an
-//! invalidation collects and sorts edges, including after raw edits or restore.
-//! Static frames check chunk summaries and the relation version without querying
+//! chunk summaries limit local-value reads to changed rows. A bounded,
+//! per-kind relation journal identifies sources whose `ChildOf` targets need
+//! rereading. History gaps and restore explicitly rebuild the parent baseline.
+//! Static frames check chunk summaries and seek the bounded relation journal without querying
 //! membership or per-entity parents, rebuilding dense buffers, composing matrices
 //! or writing globals. Snapshot restore invalidates both the
 //! propagation cache and spatial baseline reconciliation through the world's
@@ -56,10 +56,24 @@ fn registration_id(world: &World) -> Option<ObserverId> {
 }
 
 pub(super) struct PropagationSignals {
-    pub(super) membership_dirty: bool,
+    generation: u64,
+    pub(super) membership: BTreeSet<prism_ecs::entity::Entity>,
     pub(super) globals: BTreeSet<prism_ecs::entity::Entity>,
 }
 impl Resource for PropagationSignals {}
+
+impl PropagationSignals {
+    // Restore does not fire lifecycle observers or restore this infrastructure
+    // resource. Separate old-timeline events from edits made after restore,
+    // even when several restores occur before the next propagation pass.
+    fn rebase(&mut self, generation: u64) {
+        if self.generation != generation {
+            self.membership.clear();
+            self.globals.clear();
+            self.generation = generation;
+        }
+    }
+}
 
 /// Install the propagation cache and spatial bus subscribers once per world.
 ///
@@ -83,7 +97,8 @@ pub fn install(world: &mut World) {
     world.insert_resource(state);
     world.insert_resource(spatial);
     world.insert_resource(PropagationSignals {
-        membership_dirty: true,
+        generation: world.archetype_generation(),
+        membership: BTreeSet::new(),
         globals: BTreeSet::new(),
     });
 
@@ -104,17 +119,18 @@ pub fn install(world: &mut World) {
     }));
     for event in [LifecycleEvent::Add, LifecycleEvent::Remove] {
         observers.push(world.observe::<Transform, _>(event, |ctx| {
-            ctx.world
-                .resource_mut::<PropagationSignals>()
-                .membership_dirty = true;
+            let generation = ctx.world.archetype_generation();
+            let signals = ctx.world.resource_mut::<PropagationSignals>();
+            signals.rebase(generation);
+            signals.membership.insert(ctx.entity);
         }));
     }
     for event in [LifecycleEvent::Insert, LifecycleEvent::Remove] {
         observers.push(world.observe::<GlobalTransform, _>(event, |ctx| {
-            ctx.world
-                .resource_mut::<PropagationSignals>()
-                .globals
-                .insert(ctx.entity);
+            let generation = ctx.world.archetype_generation();
+            let signals = ctx.world.resource_mut::<PropagationSignals>();
+            signals.rebase(generation);
+            signals.globals.insert(ctx.entity);
             ctx.world
                 .resource_mut::<spatial::SpatialState>()
                 .pending

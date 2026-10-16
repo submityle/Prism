@@ -25,8 +25,7 @@
 //! [`GlobalTransform`] is still valid and can seed the sweep.
 //!
 //! ## Near-zero static cost
-//! When nothing changed, the pass performs a single cheap scan of the
-//! change-tick state, finds no dirty roots, and performs **zero** world-matrix
+//! When nothing changed, the pass reads an empty dirty list and performs **zero** world-matrix
 //! compositions. [`DirtyStats::recomputed`] reports exactly how many world
 //! transforms were (re)written, so a static scene can be asserted to cost
 //! nothing.
@@ -60,6 +59,10 @@ pub struct DirtyStats {
     /// Number of dirty roots swept this pass (changed nodes with no changed
     /// ancestor).
     pub dirty_roots: usize,
+    /// Dirty entries examined while preparing roots (not all forest nodes).
+    pub dirty_nodes_examined: usize,
+    /// Ancestor links examined while eliminating redundant dirty roots.
+    pub ancestor_checks: usize,
 }
 
 /// Incremental, dirty-subtree world-transform propagator.
@@ -71,8 +74,6 @@ pub struct DirtyStats {
 /// [`crate::TransformGraph::propagate_incremental`].
 #[derive(Clone, Debug, Default)]
 pub struct DirtyPropagator {
-    /// `marked[i]` is `true` when node `i`'s local changed since the last pass.
-    marked: Vec<bool>,
     /// The dirty roots collected for the current pass.
     roots: Vec<NodeId>,
     /// Explicit DFS stack used to sweep a dirty root's subtree.
@@ -89,7 +90,6 @@ impl DirtyPropagator {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            marked: Vec::new(),
             roots: Vec::new(),
             stack: Vec::new(),
             swept: Vec::new(),
@@ -109,9 +109,8 @@ impl DirtyPropagator {
     /// # Errors
     /// - [`HierarchyError::LengthMismatch`] if `locals`, `globals`, or `ticks`
     ///   do not all have exactly one slot per node.
-    /// - [`HierarchyError::Cycle`] if the hierarchy is not a forest (an
-    ///   ancestor walk would otherwise not terminate). This is detected
-    ///   defensively via [`Hierarchy::validate`] only when there is work to do.
+    /// The hierarchy's constructors and topology edits enforce acyclicity;
+    /// propagation need not revalidate the entire forest on each local edit.
     pub fn propagate(
         &mut self,
         hierarchy: &Hierarchy,
@@ -126,36 +125,19 @@ impl DirtyPropagator {
         // A fresh pass records a fresh swept set; a static frame leaves it empty.
         self.swept.clear();
 
-        // Cheap dirty-set scan. For a static scene every slot is clean and we
-        // return here having done no world-matrix work at all.
-        self.marked.clear();
-        self.marked.resize(n, false);
-        let mut any_marked = false;
-        for i in 0..n {
-            if ticks.is_changed(NodeId::new(i as u32)) {
-                self.marked[i] = true;
-                any_marked = true;
-            }
-        }
-        if !any_marked {
+        if ticks.changed_nodes().is_empty() {
             return Ok(DirtyStats::default());
         }
 
-        // A cycle would make the ancestor walk below loop forever; validate
-        // defensively now that we know there is work to do.
-        hierarchy.validate()?;
-
         // Collect minimal dirty roots: a marked node with no marked ancestor.
         self.roots.clear();
-        for i in 0..n {
-            if !self.marked[i] {
-                continue;
-            }
-            let node = NodeId::new(i as u32);
+        let mut ancestor_checks = 0;
+        for &node in ticks.changed_nodes() {
             let mut cursor = hierarchy.parent(node);
             let mut has_marked_ancestor = false;
             while let Some(parent) = cursor {
-                if self.marked[parent.index()] {
+                ancestor_checks += 1;
+                if ticks.is_changed(parent) {
                     has_marked_ancestor = true;
                     break;
                 }
@@ -165,6 +147,8 @@ impl DirtyPropagator {
                 self.roots.push(node);
             }
         }
+        // Edit order must not affect the order of independent subtree sweeps.
+        self.roots.sort_unstable_by_key(|node| node.index());
 
         // Sweep each dirty root's subtree in parent-before-child order. A node
         // is written before any of its children are visited, so each child
@@ -194,6 +178,8 @@ impl DirtyPropagator {
         Ok(DirtyStats {
             recomputed,
             dirty_roots,
+            dirty_nodes_examined: ticks.changed_nodes().len(),
+            ancestor_checks,
         })
     }
 

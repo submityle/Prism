@@ -108,242 +108,322 @@ impl PropagationState {
             *self = Self::new(world);
         }
         if restored {
+            // Never apply abandoned-timeline removals/publications to a snapshot.
             self.pending_removals.clear();
+            self.pending_publications.clear();
         }
         let rebuild = restored || self.needs_rebuild;
-        let signals = world.resource::<super::PropagationSignals>();
-        let membership_dirty = signals.membership_dirty || rebuild;
         let mut stats = EcsPropagationStats::default();
-        let relation_version = world.relations().index().version();
-        let relation_dirty = self.relation_version != Some(relation_version);
-        // The relation index exposes a version but not a mutation journal.
-        // Refresh the parent cache through the authoritative per-source query
-        // on invalidation. This is deterministic and avoids traversing and
-        // sorting unrelated relation kinds. The committed cache is replaced
-        // only after hierarchy validation succeeds, so errors remain retryable.
-        if relation_dirty {
-            stats.relation_scans = 1;
-        }
-        let new_entities = if membership_dirty {
+        let signals = world.resource_mut::<super::PropagationSignals>();
+        signals.rebase(generation);
+        let members = signals.membership.clone();
+        let global_signals = signals.globals.clone();
+        let index = world.relations().index();
+        let cursor = index.change_cursor();
+        let child_of = world
+            .components()
+            .id_of::<ChildOf>()
+            .expect("installed ChildOf");
+        let delta = if rebuild {
+            None
+        } else {
+            self.relation_cursor
+                .and_then(|last| index.changed_sources_since(child_of, last))
+        };
+        let fallback = delta.is_none();
+        stats.relation_fallbacks = usize::from(fallback && !rebuild);
+
+        // Only initial discovery/restore/panic recovery queries full membership.
+        let baseline = if rebuild {
             stats.membership_scans = 1;
-            let mut entities = self.query.iter(world).collect::<Vec<_>>();
-            entities.sort_unstable();
-            Some(entities)
+            let current = self.query.iter(world).collect::<BTreeSet<_>>();
+            stats.membership_baseline_entities = current.len();
+            Some(current)
         } else {
             None
         };
-        let entities = new_entities.as_ref().unwrap_or(&self.entities);
-        let new_indices = new_entities.as_ref().map(|entities| {
-            entities
-                .iter()
-                .enumerate()
-                .map(|(i, &entity)| (entity, NodeId::new(i as u32)))
-                .collect::<BTreeMap<_, _>>()
-        });
-        let indices = new_indices.as_ref().unwrap_or(&self.indices);
-        let new_parents = if membership_dirty || relation_dirty {
-            let mut parents = Vec::with_capacity(entities.len());
-            for &entity in entities {
-                stats.relation_checks += 1;
-                let targets = world.relation_targets::<ChildOf>(entity);
-                if targets.len() > 1 {
-                    return Err(TransformEcsError::MultipleParents(entity));
+        let mut added = BTreeSet::new();
+        let mut removed = BTreeSet::new();
+        if let Some(current) = &baseline {
+            added.extend(current.iter().copied());
+            removed.extend(self.nodes.keys().filter(|e| !current.contains(e)).copied());
+        } else {
+            for &entity in &members {
+                stats.membership_entities += 1;
+                match (
+                    world.has::<Transform>(entity),
+                    self.nodes.contains_key(&entity),
+                ) {
+                    (true, false) => {
+                        added.insert(entity);
+                    }
+                    (false, true) => {
+                        removed.insert(entity);
+                    }
+                    _ => {}
                 }
-                parents.push(
-                    targets
-                        .first()
-                        .and_then(|parent| indices.get(parent).copied()),
-                );
             }
-            Some(parents)
-        } else {
-            None
+        }
+        // A restored member can lose its local before this cache has adopted
+        // it. Only current-generation lifecycle events establish ownership;
+        // neither old cache nodes nor old-timeline events may delete standalone
+        // globals from a snapshot. Handle add/remove within one pass too.
+        let lifecycle_removals: BTreeSet<_> = members
+            .iter()
+            .copied()
+            .filter(|entity| !world.has::<Transform>(*entity))
+            .collect();
+        let is_member = |entity: &Entity| {
+            if let Some(current) = &baseline {
+                current.contains(entity)
+            } else {
+                added.contains(entity)
+                    || (self.nodes.contains_key(entity) && !removed.contains(entity))
+            }
         };
-        let parents = new_parents.as_ref().unwrap_or(&self.parents);
-        let topology_changed = new_entities
-            .as_ref()
-            .is_some_and(|entities| entities != &self.entities)
-            || new_parents
-                .as_ref()
-                .is_some_and(|parents| parents != &self.parents);
-        // A failed topology check must retain the previous cache, edges and
-        // lifecycle signals so fixing the relation and retrying is sufficient.
-        let hierarchy = if topology_changed {
-            Some(Hierarchy::from_parents(parents).map_err(TransformEcsError::Hierarchy)?)
-        } else {
-            None
-        };
-        let locals_changed = changed_entities(
+        let mut sources = BTreeSet::new();
+        if rebuild || fallback {
+            sources.extend(self.nodes.keys().copied().filter(&is_member));
+            sources.extend(added.iter().copied());
+        } else if let Some(delta) = delta {
+            stats.relation_journal_entries = delta.entries_examined;
+            stats.relation_journal_lookups = delta.lookup_steps;
+            sources.extend(delta.sources);
+        }
+        if !rebuild {
+            for &entity in &members {
+                sources.insert(entity);
+                // Membership of the parent changes effective edges without
+                // changing ChildOf. Read both the live reverse index and old
+                // children (despawn may already have removed the live edges).
+                let dependents = world.relation_sources::<ChildOf>(entity);
+                stats.relation_dependents_examined += dependents.len();
+                sources.extend(dependents.iter().copied());
+                if let Some(node) = self.nodes.get(&entity) {
+                    stats.relation_dependents_examined += node.children.len();
+                    sources.extend(node.children.iter().copied());
+                }
+            }
+        }
+        stats.relation_source_candidates = sources.len();
+        let mut parents = BTreeMap::new();
+        for entity in sources {
+            if !is_member(&entity) {
+                continue;
+            }
+            stats.relation_checks += 1;
+            let targets = world.relation_targets::<ChildOf>(entity);
+            if targets.len() > 1 {
+                return Err(TransformEcsError::MultipleParents(entity));
+            }
+            let parent = targets.first().copied().filter(&is_member);
+            if rebuild || added.contains(&entity) || self.nodes[&entity].parent != parent {
+                parents.insert(entity, parent);
+            }
+        }
+        stats.relation_scans = usize::from(rebuild || fallback || stats.relation_checks != 0);
+
+        // Validate the FINAL batch overlay, not sequential reparent operations
+        // (a valid edge reversal can transiently look cyclic). Existing cached
+        // edges are already proven acyclic; only changed chains need walking.
+        let mut validated = BTreeSet::new();
+        for &entity in parents.keys() {
+            let mut path = BTreeSet::new();
+            let mut next = Some(entity);
+            while let Some(node) = next {
+                if validated.contains(&node) {
+                    break;
+                }
+                stats.topology_checks += 1;
+                if !path.insert(node) {
+                    return Err(TransformEcsError::Hierarchy(HierarchyError::Cycle));
+                }
+                next = parents
+                    .get(&node)
+                    .copied()
+                    .unwrap_or_else(|| self.nodes.get(&node).and_then(|n| n.parent));
+            }
+            validated.extend(path);
+        }
+
+        let mut locals_changed = changed_entities(
             &self.transform_changes,
             world,
             self.last_run,
             now,
             &mut stats,
         );
+        locals_changed.extend(members.iter().copied());
+        locals_changed.extend(added.iter().copied());
         let mut globals_changed =
             changed_entities(&self.globals_query, world, self.last_run, now, &mut stats);
-        globals_changed.extend(signals.globals.iter().copied());
+        globals_changed.extend(global_signals);
+
+        // No fallible hierarchy operation or user callback before this commit.
         let signals = world.resource_mut::<super::PropagationSignals>();
-        signals.membership_dirty = false;
+        signals.membership.clear();
         signals.globals.clear();
         self.last_run = now;
-        self.relation_version = Some(relation_version);
+        self.relation_cursor = Some(cursor);
         self.generation = generation;
         self.needs_rebuild = false;
-        let mut removed = Vec::new();
-        let mut dirty = false;
-        if topology_changed || rebuild {
-            let mut ticks = ChangeTicks::new();
-            let mut locals = Vec::with_capacity(entities.len());
-            let mut globals = Vec::with_capacity(entities.len());
-            let mut marked = Vec::new();
-            for (i, &entity) in entities.iter().enumerate() {
-                ticks.push();
-                let old = self.indices.get(&entity).map(|node| node.index());
-                let local = if rebuild || old.is_none() || locals_changed.contains(&entity) {
-                    stats.local_reads += 1;
-                    *world.get::<Transform>(entity).expect("queried local")
-                } else {
-                    match old {
-                        Some(index) => self.locals[index],
-                        None => unreachable!("cached transform index missing"),
-                    }
-                };
-                let cached = old.map(|j| self.globals[j]);
-                let current = world.get::<GlobalTransform>(entity).copied();
-                let old_parent = old
-                    .and_then(|j| self.parents[j])
-                    .map(|parent| self.entities[parent.index()]);
-                let new_parent = parents[i].map(|parent| entities[parent.index()]);
-                if rebuild
-                    || old.is_none_or(|j| self.locals[j] != local)
-                    || old_parent != new_parent
-                    || current != cached
-                {
-                    marked.push(NodeId::new(i as u32));
-                }
-                locals.push(local);
-                globals.push(cached.unwrap_or(GlobalTransform::IDENTITY));
-            }
-            ticks.end_pass();
-            dirty = !marked.is_empty();
-            for node in marked {
-                ticks.mark(node);
-            }
-            // A restored standalone global is authoritative snapshot data,
-            // even if the abandoned timeline temporarily gave it a local.
-            // Only ordinary lifecycle removals discard managed globals.
+        self.pending_removals.extend(lifecycle_removals);
+        let mut dirty = BTreeSet::new();
+        if rebuild {
             if !restored {
-                removed.extend(
-                    self.entities
-                        .iter()
-                        .filter(|e| !indices.contains_key(e))
-                        .copied(),
-                );
+                self.pending_removals.extend(removed.iter().copied());
             }
-            self.locals = locals;
-            self.globals = globals;
-            self.ticks = ticks;
+            self.nodes.clear();
         } else {
-            // Stable topology: touch only signalled rows. In particular our own
-            // GlobalTransform publications and net-noop writes do not trigger
-            // a full dense-buffer rebuild on the following call.
-            self.ticks.end_pass();
-            for entity in locals_changed {
-                if let Some(&node) = self.indices.get(&entity) {
-                    stats.local_reads += 1;
-                    let local = *world.get::<Transform>(entity).expect("cached local");
-                    if self.locals[node.index()] != local {
-                        self.locals[node.index()] = local;
-                        self.ticks.mark(node);
-                        dirty = true;
-                    }
-                }
-            }
-            for entity in globals_changed {
-                if let Some(&node) = self.indices.get(&entity)
-                    && world.get::<GlobalTransform>(entity) != Some(&self.globals[node.index()])
+            // Detach the complete batch before attaching new edges.
+            for &entity in parents.keys().chain(removed.iter()) {
+                if let Some(parent) = self.nodes.get(&entity).and_then(|n| n.parent)
+                    && let Some(node) = self.nodes.get_mut(&parent)
                 {
-                    self.ticks.mark(node);
-                    dirty = true;
+                    node.children.remove(&entity);
+                }
+            }
+            for &entity in &removed {
+                self.nodes.remove(&entity);
+                self.pending_publications.remove(&entity);
+                self.pending_removals.insert(entity);
+            }
+        }
+        for &entity in &added {
+            stats.local_reads += 1;
+            self.nodes.insert(
+                entity,
+                CachedNode {
+                    parent: None,
+                    children: BTreeSet::new(),
+                    local: *world.get::<Transform>(entity).expect("current member"),
+                    global: GlobalTransform::IDENTITY,
+                },
+            );
+            self.pending_removals.remove(&entity);
+            dirty.insert(entity);
+        }
+        for (&entity, &parent) in &parents {
+            self.nodes.get_mut(&entity).expect("current child").parent = parent;
+            if let Some(parent) = parent {
+                self.nodes
+                    .get_mut(&parent)
+                    .expect("current parent")
+                    .children
+                    .insert(entity);
+            }
+            dirty.insert(entity);
+        }
+        for entity in locals_changed {
+            if added.contains(&entity) {
+                continue;
+            }
+            if let Some(node) = self.nodes.get_mut(&entity) {
+                stats.local_reads += 1;
+                let local = *world.get::<Transform>(entity).expect("current local");
+                if node.local != local {
+                    node.local = local;
+                    dirty.insert(entity);
                 }
             }
         }
-        if let Some(entities) = new_entities {
-            self.entities = entities;
+        for entity in globals_changed {
+            if let Some(node) = self.nodes.get(&entity)
+                && world.get::<GlobalTransform>(entity) != Some(&node.global)
+            {
+                dirty.insert(entity);
+            }
         }
-        if let Some(indices) = new_indices {
-            self.indices = indices;
+
+        // No full forest scan/validation or dense reindexing on local edits.
+        // Preparation depends on the dirty set and its ancestor paths.
+        stats.dirty_nodes_examined = dirty.len();
+        let mut roots = Vec::new();
+        for &entity in &dirty {
+            let mut parent = self.nodes[&entity].parent;
+            let mut covered = false;
+            while let Some(ancestor) = parent {
+                stats.ancestor_checks += 1;
+                if dirty.contains(&ancestor) {
+                    covered = true;
+                    break;
+                }
+                parent = self.nodes[&ancestor].parent;
+            }
+            if !covered {
+                roots.push(entity);
+            }
         }
-        if let Some(parents) = new_parents {
-            self.parents = parents;
+        let mut stack = Vec::new();
+        for root in roots {
+            stack.push(root);
+            while let Some(entity) = stack.pop() {
+                let node = &self.nodes[&entity];
+                let global = match node.parent {
+                    Some(parent) => self.nodes[&parent].global.mul_transform(&node.local),
+                    None => GlobalTransform::from_transform(&node.local),
+                };
+                let node = self.nodes.get_mut(&entity).expect("dirty subtree");
+                node.global = global;
+                stack.extend(node.children.iter().rev().copied());
+                self.pending_publications.insert(entity);
+                stats.recomputed += 1;
+            }
         }
-        if let Some(hierarchy) = hierarchy {
-            self.hierarchy = hierarchy;
-        }
-        self.pending_removals.extend(removed);
-        if !dirty && self.pending_removals.is_empty() {
-            world.increment_change_tick();
-            return Ok(stats);
-        }
-        let mut publish = if dirty {
-            stats.recomputed = self
-                .propagator
-                .propagate(
-                    &self.hierarchy,
-                    &self.ticks,
-                    &self.locals,
-                    &mut self.globals,
-                )
-                .map_err(TransformEcsError::Hierarchy)?
-                .recomputed;
-            self.propagator.recomputed_nodes().to_vec()
-        } else {
-            Vec::new()
-        };
-        publish.sort_unstable_by_key(|node| node.index());
-        // Every publication must be newer than consumers' last flush, including
-        // two manual propagation calls with no intervening scheduled system.
+
+        // Advancing before and after callbacks preserves the observer window.
         world.increment_change_tick();
         while let Some(&entity) = self.pending_removals.first() {
-            if world.has::<GlobalTransform>(entity) {
+            stats.publications_examined += 1;
+            if !world.has::<Transform>(entity) && world.has::<GlobalTransform>(entity) {
                 world.remove::<GlobalTransform>(entity);
                 stats.removed += 1;
             }
-            // Remove observers run before deletion and may unwind. Keep this
-            // entity queued until the removal returns so retry cannot miss it.
+            // Removal observers run before deletion and may unwind.
             self.pending_removals.remove(&entity);
-            if world.id() != self.world_id
-                || world.archetype_generation() != generation
-                || super::registration_id(world) != Some(registration)
-            {
+            if self.interrupted(world, registration, generation, cursor) {
                 return Ok(stats);
             }
         }
-        for node in publish {
-            let i = node.index();
-            let entity = self.entities[i];
-            if world.get::<GlobalTransform>(entity) != Some(&self.globals[i]) {
-                // Equality is checked before acquiring Mut, so unchanged caches
-                // never acquire a changed tick or notify downstream observers.
-                if let Some(mut global) = world.get_mut::<GlobalTransform>(entity) {
-                    *global = self.globals[i];
-                } else {
-                    world.insert(entity, self.globals[i]);
+        while let Some(&entity) = self.pending_publications.first() {
+            stats.publications_examined += 1;
+            // A preceding callback may have removed/despawned another member.
+            if world.has::<Transform>(entity) {
+                let global = self.nodes[&entity].global;
+                if world.get::<GlobalTransform>(entity) != Some(&global) {
+                    if let Some(mut current) = world.get_mut::<GlobalTransform>(entity) {
+                        *current = global;
+                    } else {
+                        world.insert(entity, global);
+                    }
+                    stats.written += 1;
                 }
-                stats.written += 1;
             }
-            if world.id() != self.world_id
-                || world.archetype_generation() != generation
-                || super::registration_id(world) != Some(registration)
-            {
+            // Retain unfinished work across normal callback interruption/panic.
+            self.pending_publications.remove(&entity);
+            if self.interrupted(world, registration, generation, cursor) {
                 return Ok(stats);
             }
         }
-        // Publication lifecycle callbacks can write locals at the publication
-        // tick. Keep that tick newer than last_run, and arm subsequent callers.
         world.increment_change_tick();
         Ok(stats)
+    }
+
+    fn interrupted(
+        &self,
+        world: &World,
+        registration: ObserverId,
+        generation: u64,
+        cursor: RelationChangeCursor,
+    ) -> bool {
+        world.id() != self.world_id
+            || world.archetype_generation() != generation
+            || super::registration_id(world) != Some(registration)
+            || world.relations().index().change_cursor() != cursor
+            || !world
+                .resource::<super::PropagationSignals>()
+                .membership
+                .is_empty()
     }
 }
 
@@ -359,11 +439,14 @@ pub enum TransformEcsError {
 /// Actual work performed by one ECS propagation step.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EcsPropagationStats {
-    /// Full membership queries (zero unless lifecycle or restore invalidated it).
+    /// Full membership queries (initialization, restore or panic recovery only).
     pub membership_scans: usize,
-    /// Relation-cache refreshes after the global relation index version changes.
-    /// Each refresh checks the current transform sources (`O(V)`); stable
-    /// frames are zero. The cache never traverses unrelated relation edges.
+    /// Entities returned by full membership discovery, zero on delta passes.
+    pub membership_baseline_entities: usize,
+    /// Specific lifecycle-signalled entities checked for membership.
+    pub membership_entities: usize,
+    /// Passes that inspect parent targets. Ordinary passes visit only sources
+    /// in the ChildOf journal or affected by parent membership changes.
     pub relation_scans: usize,
     /// Global relation-index edges visited by propagation. Kept as an explicit
     /// zero-valued guard so a regression to an all-edge walk is observable.
@@ -374,6 +457,24 @@ pub struct EcsPropagationStats {
     /// Entities whose `ChildOf` targets were inspected after topology invalidation.
     /// Separate from relation-index traversals, counted by `relation_scans`.
     pub relation_checks: usize,
+    /// Relevant source journal entries consumed (before deduplication).
+    pub relation_journal_entries: usize,
+    /// Binary-search comparisons used to locate relevant journal entries.
+    pub relation_journal_lookups: usize,
+    /// Unique journal/membership candidates, including non-transform sources.
+    pub relation_source_candidates: usize,
+    /// Live reverse-index and cached-child entries read for membership deltas.
+    /// Entries seen by both indexes are counted twice, before deduplication.
+    pub relation_dependents_examined: usize,
+    /// Full parent baseline refreshes caused by a gap/identity mismatch.
+    /// Initial discovery/restore/panic rebuilds are counted by membership_scans.
+    pub relation_fallbacks: usize,
+    /// Ancestor nodes visited when validating changed topology chains.
+    pub topology_checks: usize,
+    /// Dirty entries examined when preparing subtree roots.
+    pub dirty_nodes_examined: usize,
+    /// Ancestor links visited when suppressing redundant dirty roots.
+    pub ancestor_checks: usize,
     /// Hierarchical dirty-chunk summary nodes tested by transform change scans.
     pub change_chunk_summaries: usize,
     /// Conservative dirty chunks returned by transform change scans.
@@ -388,6 +489,8 @@ pub struct EcsPropagationStats {
     pub written: usize,
     /// Globals removed after their authoritative local disappeared.
     pub removed: usize,
+    /// Pending removal/publication items visited, including equality no-ops.
+    pub publications_examined: usize,
 }
 
 /// Reconcile the ECS hierarchy and propagate only dirty transform subtrees.

@@ -81,6 +81,9 @@ impl Drop for RelationsMut<'_> {
             self.world
                 .move_relation_pairs(source, &staged.fragmenting_pairs(source));
         }
+        staged
+            .index_mut()
+            .inherit_changes_from(self.world.relations.index());
         self.world.relations = staged;
     }
 }

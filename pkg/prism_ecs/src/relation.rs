@@ -22,6 +22,7 @@
 //! implemented against the standard library's `alloc` collections and contains
 //! no `unsafe`.
 
+use alloc::collections::{BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -458,6 +459,69 @@ impl RelationIndexVersion {
     }
 }
 
+/// Maximum retained source changes per relation kind. Unrelated kinds cannot
+/// evict one another's history. Memory is bounded by registered/used kinds
+/// times this capacity, not by the number of mutations or readers.
+pub const RELATION_CHANGE_CAPACITY: usize = 1024;
+
+/// Reader position in an index's source-change history. Cloning an index or
+/// exhausting its history sequence invalidates old cursors; consumers must
+/// rebuild when [`RelationIndex::changed_sources_since`] returns `None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelationChangeCursor(RelationIndexVersion);
+
+/// Conservative source delta: reread these sources' authoritative targets.
+#[derive(Debug)]
+pub struct RelationChanges {
+    /// Full generational handles; repeated mutations may repeat a source.
+    pub sources: Vec<Entity>,
+    /// Retained entries visited (only this kind, strictly after the cursor).
+    pub entries_examined: usize,
+    /// Binary-search comparisons used to seek past retained older entries.
+    /// Separate from delivered entries so clean-reader discovery is measurable.
+    pub lookup_steps: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct KindChanges {
+    floor: u64,
+    entries: VecDeque<(u64, Entity)>,
+}
+
+#[derive(Clone, Debug)]
+struct RelationJournal {
+    cursor: RelationChangeCursor,
+    kinds: HashMap<ComponentId, KindChanges>,
+}
+
+impl Default for RelationJournal {
+    fn default() -> Self {
+        Self {
+            cursor: RelationChangeCursor(RelationIndexVersion::fresh()),
+            kinds: HashMap::default(),
+        }
+    }
+}
+
+impl RelationJournal {
+    fn begin(&mut self) {
+        if let Some(next) = self.cursor.0.revision.checked_add(1) {
+            self.cursor.0.revision = next;
+        } else {
+            *self = Self::default();
+        }
+    }
+
+    fn record(&mut self, relation: ComponentId, source: Entity) {
+        let kind = self.kinds.entry(relation).or_default();
+        if kind.entries.len() == RELATION_CHANGE_CAPACITY {
+            let (revision, _) = kind.entries.pop_front().expect("full journal");
+            kind.floor = revision;
+        }
+        kind.entries.push_back((self.cursor.0.revision, source));
+    }
+}
+
 /// The bidirectional index for all relations (design §11).
 ///
 /// Maintains two mirrored adjacency maps so both directions are O(1) to query:
@@ -474,7 +538,12 @@ pub struct RelationIndex {
     forward: HashMap<AdjacencyKey, Adjacency>,
     /// `(relation, target) -> (target, [source...])`.
     reverse: HashMap<AdjacencyKey, Adjacency>,
+    // Enumerate only an entity's incident kinds during cascade/despawn. Full
+    // generational keys keep recycled slots independent, just like adjacency.
+    outgoing: HashMap<Entity, BTreeSet<ComponentId>>,
+    incoming: HashMap<Entity, BTreeSet<ComponentId>>,
     version: RelationIndexVersion,
+    journal: RelationJournal,
 }
 
 impl Default for RelationIndex {
@@ -482,7 +551,10 @@ impl Default for RelationIndex {
         Self {
             forward: HashMap::default(),
             reverse: HashMap::default(),
+            outgoing: HashMap::default(),
+            incoming: HashMap::default(),
             version: RelationIndexVersion::fresh(),
+            journal: RelationJournal::default(),
         }
     }
 }
@@ -492,7 +564,10 @@ impl Clone for RelationIndex {
         Self {
             forward: self.forward.clone(),
             reverse: self.reverse.clone(),
+            outgoing: self.outgoing.clone(),
+            incoming: self.incoming.clone(),
             version: RelationIndexVersion::fresh(),
+            journal: RelationJournal::default(),
         }
     }
 }
@@ -518,8 +593,12 @@ fn reverse_key(relation: ComponentId, target: Entity) -> AdjacencyKey {
 /// Push `edge` into `edges` only if an identical edge is not already present,
 /// keeping the removal/panic lists free of duplicates.
 #[inline]
-fn push_unique(edges: &mut Vec<CascadeEdge>, edge: CascadeEdge) {
-    if !edges.contains(&edge) {
+fn push_unique(
+    edges: &mut Vec<CascadeEdge>,
+    seen: &mut BTreeSet<(ComponentId, Entity, Entity)>,
+    edge: CascadeEdge,
+) {
+    if seen.insert((edge.relation, edge.source, edge.target)) {
         edges.push(edge);
     }
 }
@@ -540,6 +619,76 @@ impl RelationIndex {
         self.version
     }
 
+    /// Current position, captured before invoking any mutation callbacks.
+    pub fn change_cursor(&self) -> RelationChangeCursor {
+        self.journal.cursor
+    }
+
+    /// Source changes of one kind since `cursor`, or `None` on a history gap,
+    /// clone/replacement or future cursor. Empty deltas do not visit any edges.
+    /// Lookup seeks into the bounded kind log before visiting recent entries.
+    pub fn changed_sources_since(
+        &self,
+        relation: ComponentId,
+        cursor: RelationChangeCursor,
+    ) -> Option<RelationChanges> {
+        let current = self.journal.cursor.0;
+        if cursor.0.identity != current.identity || cursor.0.revision > current.revision {
+            return None;
+        }
+        let Some(kind) = self.journal.kinds.get(&relation) else {
+            return Some(RelationChanges {
+                sources: Vec::new(),
+                entries_examined: 0,
+                lookup_steps: 0,
+            });
+        };
+        if cursor.0.revision < kind.floor {
+            return None;
+        }
+        let mut lookup_steps = 0;
+        let start = kind.entries.partition_point(|(rev, _)| {
+            lookup_steps += 1;
+            *rev <= cursor.0.revision
+        });
+        let sources = kind
+            .entries
+            .iter()
+            .skip(start)
+            .map(|(_, source)| *source)
+            .collect();
+        Some(RelationChanges {
+            sources,
+            entries_examined: kind.entries.len() - start,
+            lookup_steps,
+        })
+    }
+
+    /// Raw staged edits may replace/clone the entire registry. Reconcile the
+    /// final adjacency against the live graph and inherit its reader lineage,
+    /// rather than treating a fresh clone identity as an all-source mutation.
+    /// This bulk-publication path is O(old + new buckets + retained history).
+    pub(crate) fn inherit_changes_from(&mut self, previous: &Self) {
+        self.journal = previous.journal.clone();
+        let mut changed = Vec::new();
+        for (key, (source, targets)) in &previous.forward {
+            if self.targets(key.relation().component_id(), *source) != targets.as_slice() {
+                changed.push((key.relation().component_id(), *source));
+            }
+        }
+        for (key, (source, _)) in &self.forward {
+            if !previous.forward.contains_key(key) {
+                changed.push((key.relation().component_id(), *source));
+            }
+        }
+        if !changed.is_empty() {
+            self.journal.begin();
+            for (relation, source) in changed {
+                self.journal.record(relation, source);
+            }
+        }
+    }
+
     fn mark_changed(&mut self) {
         // Obtain a fresh identity before touching adjacency on exhaustion, so
         // even a caught allocation-counter panic leaves the old graph intact.
@@ -550,6 +699,7 @@ impl RelationIndex {
             },
             None => RelationIndexVersion::fresh(),
         };
+        self.journal.begin();
     }
 
     /// Remove all edges, retaining relation-kind metadata in the registry.
@@ -557,8 +707,13 @@ impl RelationIndex {
     pub fn clear(&mut self) {
         if !self.is_empty() {
             self.mark_changed();
+            for (key, (source, _)) in &self.forward {
+                self.journal.record(key.relation().component_id(), *source);
+            }
             self.forward.clear();
             self.reverse.clear();
+            self.outgoing.clear();
+            self.incoming.clear();
         }
     }
 
@@ -626,6 +781,7 @@ impl RelationIndex {
             return None;
         }
         self.mark_changed();
+        self.journal.record(relation, source);
         if exclusive && let Some((_, existing)) = self.forward.get(&fkey) {
             let olds: Vec<Entity> = existing.clone();
             evicted = olds.first().copied();
@@ -645,6 +801,8 @@ impl RelationIndex {
             .or_insert_with(|| (target, Vec::new()))
             .1
             .push(source);
+        self.outgoing.entry(source).or_default().insert(relation);
+        self.incoming.entry(target).or_default().insert(relation);
 
         evicted
     }
@@ -656,6 +814,7 @@ impl RelationIndex {
             return false;
         }
         self.mark_changed();
+        self.journal.record(relation, source);
         let removed = self.remove_from_forward(relation, source, target);
         if removed {
             self.remove_from_reverse(relation, source, target);
@@ -671,23 +830,28 @@ impl RelationIndex {
 
         // Edges where `entity` is the source.
         let fkeys: Vec<AdjacencyKey> = self
-            .forward
-            .iter()
-            .filter(|(_, (anchor, _))| *anchor == entity)
-            .map(|(key, _)| *key)
+            .outgoing
+            .get(&entity)
+            .into_iter()
+            .flatten()
+            .map(|&relation| forward_key(relation, entity))
             .collect();
         let rkeys: Vec<AdjacencyKey> = self
-            .reverse
-            .iter()
-            .filter(|(_, (anchor, _))| *anchor == entity)
-            .map(|(key, _)| *key)
+            .incoming
+            .get(&entity)
+            .into_iter()
+            .flatten()
+            .map(|&relation| reverse_key(relation, entity))
             .collect();
         if !fkeys.is_empty() || !rkeys.is_empty() {
             self.mark_changed();
         }
+        self.outgoing.remove(&entity);
+        self.incoming.remove(&entity);
         for fkey in fkeys {
             if let Some((_, targets)) = self.forward.remove(&fkey) {
                 let relation = fkey.relation().component_id();
+                self.journal.record(relation, entity);
                 for target in targets {
                     affected.push(CascadeEdge {
                         relation,
@@ -704,6 +868,7 @@ impl RelationIndex {
             if let Some((_, sources)) = self.reverse.remove(&rkey) {
                 let relation = rkey.relation().component_id();
                 for source in sources {
+                    self.journal.record(relation, source);
                     affected.push(CascadeEdge {
                         relation,
                         source,
@@ -736,28 +901,24 @@ impl RelationIndex {
     }
 
     /// The outgoing edges of `entity` as `(relation, target)` pairs.
+    /// Visits only this entity's incident kinds and edges, not global buckets.
     pub fn outgoing_edges(&self, entity: Entity) -> Vec<(ComponentId, Entity)> {
         let mut out = Vec::new();
-        for (key, (anchor, targets)) in self.forward.iter() {
-            if *anchor == entity {
-                let relation = key.relation().component_id();
-                for &target in targets {
-                    out.push((relation, target));
-                }
+        for &relation in self.outgoing.get(&entity).into_iter().flatten() {
+            for &target in self.targets(relation, entity) {
+                out.push((relation, target));
             }
         }
         out
     }
 
     /// The incoming edges of `entity` as `(relation, source)` pairs.
+    /// Visits only this entity's incident kinds and edges, not global buckets.
     pub fn incoming_edges(&self, entity: Entity) -> Vec<(ComponentId, Entity)> {
         let mut out = Vec::new();
-        for (key, (anchor, sources)) in self.reverse.iter() {
-            if *anchor == entity {
-                let relation = key.relation().component_id();
-                for &source in sources {
-                    out.push((relation, source));
-                }
+        for &relation in self.incoming.get(&entity).into_iter().flatten() {
+            for &source in self.sources(relation, entity) {
+                out.push((relation, source));
             }
         }
         out
@@ -839,6 +1000,12 @@ impl RelationIndex {
         targets.remove(pos);
         if targets.is_empty() {
             self.forward.remove(&fkey);
+            if let Some(kinds) = self.outgoing.get_mut(&source) {
+                kinds.remove(&relation);
+                if kinds.is_empty() {
+                    self.outgoing.remove(&source);
+                }
+            }
         }
         true
     }
@@ -861,6 +1028,12 @@ impl RelationIndex {
         sources.remove(pos);
         if sources.is_empty() {
             self.reverse.remove(&rkey);
+            if let Some(kinds) = self.incoming.get_mut(&target) {
+                kinds.remove(&relation);
+                if kinds.is_empty() {
+                    self.incoming.remove(&target);
+                }
+            }
         }
         true
     }
@@ -1020,10 +1193,12 @@ impl Relations {
     /// [`CascadePlan::deletions`].
     pub fn plan_cascade(&self, root: Entity) -> CascadePlan {
         let mut plan = CascadePlan::default();
-        let mut visited: Vec<Entity> = Vec::new();
+        let mut visited = BTreeSet::new();
+        let mut removals_seen = BTreeSet::new();
+        let mut panics_seen = BTreeSet::new();
         let mut queue: Vec<Entity> = Vec::new();
 
-        visited.push(root);
+        visited.insert(root);
         queue.push(root);
 
         while let Some(entity) = queue.pop() {
@@ -1031,6 +1206,7 @@ impl Relations {
             for (relation, target) in self.index.outgoing_edges(entity) {
                 push_unique(
                     &mut plan.removals,
+                    &mut removals_seen,
                     CascadeEdge {
                         relation,
                         source: entity,
@@ -1052,16 +1228,17 @@ impl Relations {
                     target: entity,
                 };
                 match policy {
-                    CleanupPolicy::Remove => push_unique(&mut plan.removals, edge),
+                    CleanupPolicy::Remove => {
+                        push_unique(&mut plan.removals, &mut removals_seen, edge)
+                    }
                     CleanupPolicy::Delete => {
-                        push_unique(&mut plan.removals, edge);
-                        if !visited.contains(&source) {
-                            visited.push(source);
+                        push_unique(&mut plan.removals, &mut removals_seen, edge);
+                        if visited.insert(source) {
                             queue.push(source);
                             plan.deletions.push(source);
                         }
                     }
-                    CleanupPolicy::Panic => push_unique(&mut plan.panics, edge),
+                    CleanupPolicy::Panic => push_unique(&mut plan.panics, &mut panics_seen, edge),
                 }
             }
         }
@@ -1083,6 +1260,289 @@ mod tests {
 
     fn rel(index: u32) -> ComponentId {
         ComponentId::new(index)
+    }
+
+    fn assert_endpoint_indexes(idx: &RelationIndex) {
+        let mut outgoing = HashMap::<Entity, BTreeSet<ComponentId>>::default();
+        let mut incoming = HashMap::<Entity, BTreeSet<ComponentId>>::default();
+        for (relation, source, target) in idx.iter_edges() {
+            outgoing.entry(source).or_default().insert(relation);
+            incoming.entry(target).or_default().insert(relation);
+            assert!(idx.sources(relation, target).contains(&source));
+        }
+        assert_eq!(idx.outgoing, outgoing);
+        assert_eq!(idx.incoming, incoming);
+        for (&entity, kinds) in &outgoing {
+            let expected: BTreeSet<_> = kinds
+                .iter()
+                .flat_map(|&r| {
+                    idx.targets(r, entity)
+                        .iter()
+                        .map(move |&target| (r, target))
+                })
+                .collect();
+            assert_eq!(
+                idx.outgoing_edges(entity)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                expected
+            );
+        }
+        for (&entity, kinds) in &incoming {
+            let expected: BTreeSet<_> = kinds
+                .iter()
+                .flat_map(|&r| {
+                    idx.sources(r, entity)
+                        .iter()
+                        .map(move |&source| (r, source))
+                })
+                .collect();
+            assert_eq!(
+                idx.incoming_edges(entity)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                expected
+            );
+        }
+        assert_eq!(
+            idx.forward.values().map(|(_, v)| v.len()).sum::<usize>(),
+            idx.reverse.values().map(|(_, v)| v.len()).sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn endpoint_indexes_match_adjacency_after_mixed_mutations() {
+        let mut idx = RelationIndex::new();
+        let mut expected = BTreeSet::new();
+        let mut random = 0xa70d_98bf_13cc_49e1_u64;
+        let mut next = || {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            random
+        };
+        for step in 0..1024 {
+            // Adjacent test handles share a slot but not its generation.
+            let source = next() as u32 % 24;
+            let source = ent(source / 2, source % 2 + 1);
+            let target = next() as u32 % 24;
+            let target = ent(target / 2, target % 2 + 1);
+            let r = rel(next() as u32 % 4);
+            match next() % 8 {
+                0..=2 => {
+                    idx.add(r, source, target, false);
+                    expected.insert((r, source, target));
+                }
+                3 => {
+                    idx.add(r, source, target, true);
+                    expected.retain(|&(kind, s, _)| kind != r || s != source);
+                    expected.insert((r, source, target));
+                }
+                4 => {
+                    assert_eq!(
+                        idx.remove(r, source, target),
+                        expected.remove(&(r, source, target))
+                    );
+                }
+                5 => {
+                    let removed = idx.remove_all_for_entity(source);
+                    let before = expected.len();
+                    expected.retain(|&(_, s, t)| s != source && t != source);
+                    assert_eq!(removed.len(), before - expected.len());
+                }
+                6 => idx = idx.clone(),
+                _ if step % 31 == 0 => {
+                    idx.clear();
+                    expected.clear();
+                }
+                _ => {}
+            }
+            assert_eq!(
+                idx.iter_edges().collect::<BTreeSet<_>>(),
+                expected,
+                "step {step}"
+            );
+            assert_endpoint_indexes(&idx);
+        }
+        idx.clear();
+        assert_endpoint_indexes(&idx);
+        assert!(idx.outgoing.is_empty() && idx.incoming.is_empty());
+    }
+
+    #[test]
+    fn endpoint_lookup_and_removal_ignore_large_unrelated_graph() {
+        for size in [64, 8192] {
+            let mut idx = RelationIndex::new();
+            let (r, a, b, reused) = (rel(1), ent(0, 1), ent(1, 1), ent(0, 2));
+            for i in 10..size + 10 {
+                idx.add(rel(2), ent(i, 1), ent(i + size, 1), true);
+            }
+            idx.add(r, a, a, false);
+            idx.add(r, a, b, false);
+            idx.add(r, b, a, false);
+            idx.add(rel(3), reused, b, false);
+            assert_eq!(idx.outgoing[&a].len(), 1);
+            assert_eq!(idx.incoming[&a].len(), 1);
+            assert_eq!(idx.outgoing_edges(a), [(r, a), (r, b)]);
+            assert_eq!(idx.incoming_edges(a), [(r, a), (r, b)]);
+            let cursor = idx.change_cursor();
+            assert_eq!(idx.remove_all_for_entity(a).len(), 3);
+            assert_eq!(idx.edge_count(), size as usize + 1);
+            assert_eq!(idx.targets(rel(3), reused), [b]);
+            assert!(idx.outgoing_edges(a).is_empty());
+            assert!(idx.incoming_edges(a).is_empty());
+            assert_eq!(
+                idx.changed_sources_since(r, cursor)
+                    .unwrap()
+                    .sources
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                [a, b].into_iter().collect()
+            );
+            assert_endpoint_indexes(&idx);
+        }
+    }
+
+    #[test]
+    fn source_journal_exact_capacity_boundary_and_independent_readers() {
+        let mut idx = RelationIndex::new();
+        let (r, target) = (rel(1), ent(0, 1));
+        let slow = idx.change_cursor();
+        idx.add(r, ent(1, 1), target, true);
+        let fast = idx.change_cursor();
+        for i in 2..=RELATION_CHANGE_CAPACITY {
+            idx.add(r, ent(i as u32, 1), target, true);
+        }
+        let delta = idx.changed_sources_since(r, slow).unwrap();
+        assert_eq!(delta.entries_examined, RELATION_CHANGE_CAPACITY);
+        assert_eq!(delta.sources.first(), Some(&ent(1, 1)));
+        assert!(delta.lookup_steps <= 12);
+        let current = idx.change_cursor();
+        assert!(idx
+            .changed_sources_since(r, current)
+            .unwrap()
+            .sources
+            .is_empty());
+        // Reading does not consume another reader's retained history.
+        assert_eq!(
+            idx.changed_sources_since(r, fast).unwrap().sources.len(),
+            RELATION_CHANGE_CAPACITY - 1
+        );
+        idx.add(r, ent(RELATION_CHANGE_CAPACITY as u32 + 1, 1), target, true);
+        assert!(idx.changed_sources_since(r, slow).is_none());
+        assert_eq!(
+            idx.changed_sources_since(r, fast).unwrap().sources.len(),
+            RELATION_CHANGE_CAPACITY
+        );
+        assert_eq!(
+            idx.changed_sources_since(r, current).unwrap().sources,
+            [ent(RELATION_CHANGE_CAPACITY as u32 + 1, 1)]
+        );
+    }
+
+    #[test]
+    fn source_journal_is_bounded_per_kind_and_noops_do_not_advance() {
+        let mut idx = RelationIndex::new();
+        let (r, unrelated, a, b) = (rel(1), rel(2), ent(1, 1), ent(2, 1));
+        let initial = idx.change_cursor();
+        idx.clear();
+        idx.remove(r, a, b);
+        assert_eq!(idx.change_cursor(), initial);
+        idx.add(r, a, b, true);
+        let baseline = idx.change_cursor();
+        idx.add(r, a, b, true);
+        assert_eq!(idx.change_cursor(), baseline);
+        for i in 0..RELATION_CHANGE_CAPACITY + 7 {
+            idx.add(unrelated, a, ent(10 + i as u32, 1), true);
+        }
+        assert!(idx.changed_sources_since(unrelated, baseline).is_none());
+        let delta = idx.changed_sources_since(r, baseline).unwrap();
+        assert_eq!(delta.entries_examined, 0);
+        assert!(delta.sources.is_empty());
+        assert_eq!(
+            idx.journal.kinds[&unrelated].entries.len(),
+            RELATION_CHANGE_CAPACITY
+        );
+        assert_eq!(idx.changed_sources_since(r, initial).unwrap().sources, [a]);
+        idx.clear();
+        assert_eq!(idx.changed_sources_since(r, baseline).unwrap().sources, [a]);
+        assert!(idx
+            .changed_sources_since(r, idx.change_cursor())
+            .unwrap()
+            .sources
+            .is_empty());
+    }
+
+    #[test]
+    fn source_journal_covers_incoming_removals_and_full_generations() {
+        let mut idx = RelationIndex::new();
+        let (r, a, b, next_a) = (rel(1), ent(1, 1), ent(2, 1), ent(1, 2));
+        idx.add(r, a, a, false);
+        idx.add(r, a, b, false);
+        idx.add(r, b, a, false);
+        idx.add(r, next_a, a, false);
+        let cursor = idx.change_cursor();
+        idx.remove_all_for_entity(a);
+        let sources = idx.changed_sources_since(r, cursor).unwrap().sources;
+        assert_eq!(
+            sources.into_iter().collect::<BTreeSet<_>>(),
+            [a, b, next_a].into_iter().collect()
+        );
+        assert!(idx.is_empty());
+    }
+
+    #[test]
+    fn source_journal_raw_publication_inherits_only_net_source_changes() {
+        let mut idx = RelationIndex::new();
+        let (r, a, b, c) = (rel(1), ent(1, 1), ent(2, 1), ent(3, 1));
+        idx.add(r, a, b, true);
+        let cursor = idx.change_cursor();
+        let mut staged = idx.clone();
+        assert!(staged.changed_sources_since(r, cursor).is_none());
+        staged.inherit_changes_from(&idx);
+        assert_eq!(staged.change_cursor(), cursor);
+        staged.add(r, a, c, true);
+        staged.inherit_changes_from(&idx);
+        assert_eq!(
+            staged.changed_sources_since(r, cursor).unwrap().sources,
+            [a]
+        );
+        let mut empty = RelationIndex::new();
+        empty.inherit_changes_from(&staged);
+        assert_eq!(
+            empty
+                .changed_sources_since(r, staged.change_cursor())
+                .unwrap()
+                .sources,
+            [a]
+        );
+    }
+
+    #[test]
+    fn source_journal_batch_gap_and_sequence_exhaustion_are_explicit() {
+        let mut idx = RelationIndex::new();
+        let (r, target) = (rel(1), ent(0, 1));
+        for i in 1..=RELATION_CHANGE_CAPACITY + 1 {
+            idx.add(r, ent(i as u32, 1), target, true);
+        }
+        let before_clear = idx.change_cursor();
+        idx.clear(); // One batch with more sources than the log can hold.
+        assert!(idx.changed_sources_since(r, before_clear).is_none());
+        assert!(idx
+            .changed_sources_since(r, idx.change_cursor())
+            .unwrap()
+            .sources
+            .is_empty());
+        idx.journal.cursor.0.revision = u64::MAX;
+        let exhausted = idx.change_cursor();
+        idx.add(r, ent(1, 1), target, true);
+        assert!(idx.changed_sources_since(r, exhausted).is_none());
+        let current = idx.change_cursor();
+        idx.add(r, ent(2, 1), target, true);
+        assert_eq!(
+            idx.changed_sources_since(r, current).unwrap().sources,
+            [ent(2, 1)]
+        );
     }
 
     #[test]
@@ -1442,6 +1902,43 @@ mod tests {
         let plan = relations.plan_cascade(a);
         // b is pulled in once; a (root) is never listed; termination guaranteed.
         assert_eq!(plan.deletions, alloc::vec![b]);
+    }
+
+    #[test]
+    fn plan_cascade_deduplicates_diamond_and_cycle_without_reordering() {
+        let mut relations = Relations::new();
+        let r = rel(1);
+        relations.register(
+            r,
+            RelationKind::new().with_on_delete_target(CleanupPolicy::Delete),
+        );
+        let (root, a, b, shared) = (ent(1, 1), ent(2, 1), ent(3, 1), ent(4, 1));
+        for (source, target) in [
+            (a, root),
+            (b, root),
+            (shared, a),
+            (shared, b),
+            (root, shared),
+        ] {
+            relations.add(r, source, target);
+        }
+        let plan = relations.plan_cascade(root);
+        // Preserve first encounter / ordered adjacency, not set iteration order.
+        assert_eq!(plan.deletions, alloc::vec![a, b, shared]);
+        assert_eq!(
+            plan.removals
+                .iter()
+                .map(|edge| (edge.source, edge.target))
+                .collect::<Vec<_>>(),
+            alloc::vec![
+                (root, shared),
+                (a, root),
+                (b, root),
+                (shared, b),
+                (shared, a)
+            ]
+        );
+        assert!(plan.panics.is_empty());
     }
 
     #[test]

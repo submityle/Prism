@@ -47,6 +47,7 @@ impl Tick {
 #[derive(Clone, Debug)]
 pub struct ChangeTicks {
     changed: Vec<Tick>,
+    dirty: Vec<NodeId>,
     current: Tick,
     last_pass: Tick,
 }
@@ -66,6 +67,7 @@ impl ChangeTicks {
     pub const fn new() -> Self {
         Self {
             changed: Vec::new(),
+            dirty: Vec::new(),
             current: Tick(1),
             last_pass: Tick::ZERO,
         }
@@ -99,6 +101,7 @@ impl ChangeTicks {
     /// so the next pass computes its world transform.
     #[inline]
     pub fn push(&mut self) {
+        self.dirty.push(NodeId::new(self.changed.len() as u32));
         self.changed.push(self.current);
     }
 
@@ -108,7 +111,17 @@ impl ChangeTicks {
     /// Panics if `node` is out of bounds.
     #[inline]
     pub fn mark(&mut self, node: NodeId) {
+        if !self.is_changed(node) {
+            self.dirty.push(node);
+        }
         self.changed[node.index()] = self.current;
+    }
+
+    /// Unique nodes changed since the last completed pass, in edit order.
+    /// Reading this list does not scan the dense timestamp array.
+    #[inline]
+    pub fn changed_nodes(&self) -> &[NodeId] {
+        &self.dirty
     }
 
     /// The tick at which `node`'s local last changed.
@@ -134,6 +147,7 @@ impl ChangeTicks {
     /// are stamped strictly after this pass and are therefore detected.
     #[inline]
     pub fn end_pass(&mut self) {
+        self.dirty.clear();
         self.last_pass = self.current;
         self.current = Tick(self.current.0 + 1);
     }
