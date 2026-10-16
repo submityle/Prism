@@ -46,6 +46,14 @@ pub(crate) fn ack_packet(seq: u64) -> Vec<u8> {
     packet
 }
 
+/// Encode a cumulative ACK plus a 64-bit SACK mask. `next` is the receiver's
+/// next missing sequence number; bit `n` acknowledges `next + n`.
+pub(crate) fn sack_ack_packet(next: u64, sack: u64) -> Vec<u8> {
+    let mut packet = ack_packet(next);
+    packet.extend_from_slice(&sack.to_le_bytes());
+    packet
+}
+
 /// Decode a packet header, or `None` when it is too short to be one (a truncated
 /// or hostile datagram is ignored, never a panic).
 pub(crate) fn decode(packet: &[u8]) -> Option<(u8, u64, &[u8])> {
@@ -168,12 +176,20 @@ impl<D: Transport> ReliableChannel<D> {
                 KIND_DATA => {
                     let (delivered, ack) = self.receiver.receive(seq, payload.to_vec());
                     self.inbound.extend(delivered);
-                    if let Some(ack) = ack {
-                        self.datagram.send(&ack_packet(ack));
+                    if ack.is_some() {
+                        let (next, sack) = self.receiver.ack_state();
+                        self.datagram.send(&sack_ack_packet(next, sack));
                     }
                 }
                 KIND_ACK => {
-                    self.sender.ack(seq, now);
+                    if payload.len() == 8 {
+                        let sack = u64::from_le_bytes(payload.try_into().expect("eight bytes"));
+                        self.sender.ack_state(seq, sack, now);
+                    } else if payload.is_empty() {
+                        // Accept the pre-SACK packet form for peers and tests
+                        // that still send a single exact ACK.
+                        self.sender.ack(seq, now);
+                    }
                 }
                 _ => {}
             }
@@ -279,6 +295,23 @@ mod tests {
 
         assert_eq!(got, vec![b"payload".to_vec()], "recovered exactly once");
         assert_eq!(a.unacked(), 0, "the retransmitted message was acknowledged");
+    }
+
+    #[test]
+    fn out_of_order_delivery_emits_a_selective_ack() {
+        let mut receiver = ReliableReceiver::new(8);
+        let mut channel: ReliableChannel<MockTransport> =
+            ReliableChannel::new(MockTransport::default(), 2, 8);
+        let (_, _) = receiver.receive(2, b"two".to_vec());
+        let (next, sack) = receiver.ack_state();
+        assert_eq!(next, 0);
+        assert_eq!(sack, 1 << 2);
+        channel.datagram.send(&sack_ack_packet(next, sack));
+        let packet = channel.datagram.outbox.pop().expect("SACK queued");
+        let (kind, seq, payload) = decode(&packet).expect("valid SACK");
+        assert_eq!(kind, KIND_ACK);
+        assert_eq!(seq, 0);
+        assert_eq!(u64::from_le_bytes(payload.try_into().unwrap()), 1 << 2);
     }
 
     /// A duplicate delivery (e.g. an ACK was lost so the sender resent) is not

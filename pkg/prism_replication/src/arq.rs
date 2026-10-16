@@ -9,11 +9,12 @@
 //! sockets, no clocks — so it is driven deterministically by a tick counter and
 //! tested against the lossy [`LoopbackLink`](crate::transport::LoopbackLink).
 //!
-//! This is a bounded go-back-N / stop-and-go ARQ (retransmit-on-timeout), not a
-//! sliding window with selective repeat: the design's congestion / flow-control
-//! work layers on top. The sender admits at most `window` unacknowledged messages
+//! The sender admits at most `window` unacknowledged messages
 //! at once ([`ReliableSender::send`] refuses beyond that, for backpressure), so a
-//! peer that never acknowledges cannot grow memory without bound. Sequence
+//! peer that never acknowledges cannot grow memory without bound. Cumulative
+//! ACKs and a bounded 64-bit selective-ack mask retire packets that arrived
+//! out of order; three repeated gap observations trigger fast retransmission
+//! before the timeout. Sequence
 //! numbers are `u64` — the same width as [`crate::sequence::DeliveryWindow`] — so
 //! a session would have to send 2^64 messages to alias one, which is unreachable.
 
@@ -41,6 +42,8 @@ struct Outgoing {
     first_sent: u64,
     last_sent: u64,
     retransmitted: bool,
+    gap_reports: u8,
+    fast_retransmit: bool,
 }
 
 impl ReliableSender {
@@ -108,14 +111,17 @@ impl ReliableSender {
                 first_sent: now,
                 last_sent: now,
                 retransmitted: false,
+                gap_reports: 0,
+                fast_retransmit: false,
             });
         }
         let rto = u64::from(self.rto);
         let mut resend = Vec::new();
         for message in &mut self.in_flight {
-            if now.saturating_sub(message.last_sent) >= rto {
+            if message.fast_retransmit || now.saturating_sub(message.last_sent) >= rto {
                 message.last_sent = now;
                 message.retransmitted = true;
+                message.fast_retransmit = false;
                 resend.push((message.seq, message.payload.clone()));
             }
         }
@@ -133,21 +139,67 @@ impl ReliableSender {
         };
         let message = self.in_flight.remove(index).expect("index from position");
         if !message.retransmitted {
-            let sample = now
-                .saturating_sub(message.first_sent)
-                .min(u64::from(u32::MAX)) as u32;
-            // `srtt = (7 * srtt + sample) / 8`, computed in `u64` so the
-            // intermediate `7 * srtt` cannot saturate (it would bias the estimate
-            // once `srtt > u32::MAX / 7`).
-            let smoothed = match self.srtt {
-                Some(previous) => ((u64::from(previous) * 7 + u64::from(sample)) / 8)
-                    .min(u64::from(u32::MAX)) as u32,
-                None => sample,
-            };
-            self.srtt = Some(smoothed);
-            self.rto = smoothed.saturating_mul(2).max(self.min_rto);
+            self.sample_rtt(&message, now);
         }
         true
+    }
+
+    /// Apply a cumulative ACK plus a 64-bit SACK mask.
+    ///
+    /// `next` is the receiver's next missing sequence number. Every sequence
+    /// below it is cumulatively acknowledged; bit `n` in `sack` acknowledges
+    /// `next + n`. Missing packets below the highest SACKed packet accumulate
+    /// duplicate-gap reports and are scheduled for fast retransmission after
+    /// three observations, without waiting for the RTO.
+    pub fn ack_state(&mut self, next: u64, sack: u64, now: u64) -> Vec<u64> {
+        let highest_sacked = if sack == 0 {
+            None
+        } else {
+            next.checked_add(63 - u64::from(sack.leading_zeros()))
+        };
+        let mut retired = Vec::new();
+        let mut retained = VecDeque::with_capacity(self.in_flight.len());
+        while let Some(mut message) = self.in_flight.pop_front() {
+            let cumulatively_acked = message.seq < next;
+            let selectively_acked = message
+                .seq
+                .checked_sub(next)
+                .filter(|distance| *distance < 64)
+                .is_some_and(|distance| sack & (1u64 << distance) != 0);
+            if cumulatively_acked || selectively_acked {
+                if !message.retransmitted {
+                    self.sample_rtt(&message, now);
+                }
+                retired.push(message.seq);
+            } else {
+                if highest_sacked.is_some_and(|highest| message.seq < highest) {
+                    message.gap_reports = message.gap_reports.saturating_add(1);
+                    if message.gap_reports >= 3 {
+                        message.fast_retransmit = true;
+                    }
+                }
+                retained.push_back(message);
+            }
+        }
+        self.in_flight = retained;
+        retired
+    }
+
+    fn sample_rtt(&mut self, message: &Outgoing, now: u64) {
+        let sample = now
+            .saturating_sub(message.first_sent)
+            .min(u64::from(u32::MAX)) as u32;
+        // `srtt = (7 * srtt + sample) / 8`, computed in `u64` so the
+        // intermediate `7 * srtt` cannot saturate (it would bias the estimate
+        // once `srtt > u32::MAX / 7`).
+        let smoothed = match self.srtt {
+            Some(previous) => {
+                ((u64::from(previous) * 7 + u64::from(sample)) / 8).min(u64::from(u32::MAX)) as u32
+            }
+            None => sample,
+        };
+        self.srtt = Some(smoothed);
+        self.rto = smoothed.saturating_mul(2).max(self.min_rto);
     }
 }
 
@@ -170,6 +222,14 @@ impl ReliableReceiver {
     #[must_use]
     pub fn next(&self) -> u64 {
         self.window.next()
+    }
+
+    /// Return the cumulative cursor and SACK mask for the current receive
+    /// window. The mask is useful after an out-of-order packet so the sender
+    /// can retransmit only the missing gap instead of waiting for its timeout.
+    #[must_use]
+    pub fn ack_state(&self) -> (u64, u64) {
+        (self.window.next(), self.window.selective_ack_mask())
     }
 
     /// Receive one packet: the payloads newly deliverable (in order) and the
@@ -353,5 +413,29 @@ mod tests {
         );
         assert_eq!(sender.unacked(), 0, "all acknowledged");
         assert!(link.dropped() > 0, "the link really dropped packets");
+    }
+
+    #[test]
+    fn selective_ack_retires_out_of_order_packets_and_fast_retransmits_the_gap() {
+        let mut sender = ReliableSender::new(100, 8);
+        for payload in [b"0", b"1", b"2", b"3", b"4"] {
+            assert!(sender.send(payload.to_vec()).is_some());
+        }
+        let mut first = Vec::new();
+        sender.tick(0, &mut first);
+        assert_eq!(first.len(), 5);
+
+        // Three later packets arrived while 0 and 1 were missing. Their SACK
+        // reports trigger fast retransmission before the long RTO expires.
+        assert_eq!(sender.ack_state(0, 1 << 2, 1), vec![2]);
+        assert_eq!(sender.ack_state(0, (1 << 2) | (1 << 3), 2), vec![3]);
+        assert_eq!(
+            sender.ack_state(0, (1 << 2) | (1 << 3) | (1 << 4), 3),
+            vec![4]
+        );
+        let mut resend = Vec::new();
+        sender.tick(3, &mut resend);
+        assert_eq!(resend, vec![(0, b"0".to_vec()), (1, b"1".to_vec())]);
+        assert_eq!(sender.unacked(), 2);
     }
 }

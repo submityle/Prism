@@ -114,6 +114,23 @@ impl<T> DeliveryWindow<T> {
         self.buffered.len()
     }
 
+    /// Return a 64-bit selective-acknowledgement mask for buffered items.
+    ///
+    /// Bit zero describes `next`; bit `n` describes `next + n`. Items below
+    /// `next` have already been delivered and are represented by the
+    /// cumulative cursor rather than by this mask.
+    #[must_use]
+    pub fn selective_ack_mask(&self) -> u64 {
+        let mut mask = 0;
+        for &seq in self.buffered.keys() {
+            let distance = seq.saturating_sub(self.next);
+            if distance < 64 {
+                mask |= 1u64 << distance;
+            }
+        }
+        mask
+    }
+
     /// Offer `item` tagged `seq` to the window.
     ///
     /// Returns [`Delivery::Advanced`] with the newly deliverable run when `seq`

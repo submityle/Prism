@@ -203,7 +203,7 @@ prism_net_diag      诊断: 计数器、带宽剖析、丢包/延迟注入、网
   ch_bulk              大块传输(初始世界基线、资产句柄) —— 可靠、低优先、可抢占
 ```
 
-- **可靠 UDP ARQ**：当前实现为有界 go-back-N/超时重传、逐包 ACK 与 RTT 自适应 RTO；可靠通道独立窗口，互不队头阻塞。`UdpMultiPeer` 负责有界多 Peer 地址 demux，并新增了一个可验证的本地 endpoint rebind 切片：`UdpPeerId` 与当前 `SocketAddr` 解耦，`UdpPeerTransport::request_rebind -> commit_rebind/cancel_rebind` 形成显式两阶段状态机，保留上层 transport 对象、排队数据和绑定代数；候选地址独占、peer/队列容量、未知地址丢弃和 stale ticket 均有边界测试。该 API 只执行经调用方授权后的本地映射迁移，调用方必须在 authenticated control plane/path validation 后再 commit；它不提供 NAT/ICE/relay、地址所有权证明、QUIC/WebTransport 连接迁移或跨机生产验收。完整 SACK/快速重传仍是后续生产化缺口。
+- **可靠 UDP ARQ**：当前实现为有界可靠窗口、累计 ACK + 64 位 SACK、三次缺口观测快速重传与 RTT 自适应 RTO；可靠通道独立窗口，互不队头阻塞。旧的精确 ACK 仍可解码，以便兼容已有本地测试/对端。`UdpMultiPeer` 负责有界多 Peer 地址 demux，并新增了一个可验证的本地 endpoint rebind 切片：`UdpPeerId` 与当前 `SocketAddr` 解耦，`UdpPeerTransport::request_rebind -> commit_rebind/cancel_rebind` 形成显式两阶段状态机，保留上层 transport 对象、排队数据和绑定代数；候选地址独占、peer/队列容量、未知地址丢弃和 stale ticket 均有边界测试。该 API 只执行经调用方授权后的本地映射迁移，调用方必须在 authenticated control plane/path validation 后再 commit；它不提供 NAT/ICE/relay、地址所有权证明、QUIC/WebTransport 连接迁移或跨机生产验收。
 - **拥塞控制**：`ChannelMux` 内置一个确定性的 BBR-shaped 近似控制器：对未重传 ACK 采样 RTT/交付率，平滑调整可靠字节窗口；RTO 重传立即做乘性减小，并同步降低瞬时态发送预算。它是可验证的复制层机制，不等同于完整 BBR 实现，也不替代公网链路验收。
 - **QUIC/WebTransport**（feature `transport_quic`）：设计上复用成熟的 0-RTT 重连、连接迁移（切网不断线）、内建 TLS，面向浏览器端与 NAT 复杂环境；当前仓库仍无该 feature 的协议栈实现，不能把 UDP rebind 切片当作 QUIC/WebTransport 等价物。未来语义上把上述 channel 映射到 QUIC stream（可靠）与 datagram（不可靠）。
 - **NAT 穿透**：ICE/打洞 + 中继回退（§16），`listen_server` 房主优先直连、失败走中继。

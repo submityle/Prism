@@ -683,15 +683,31 @@ impl<D: Transport> ChannelMux<D> {
             self.stats.datagrams_received = self.stats.datagrams_received.saturating_add(1);
             self.telemetry.record_received(channel, packet.len());
             if kind == KIND_ACK {
-                if channel.is_reliable()
-                    && self.reliable_lane_mut(channel).sender.ack(seq, now)
-                    && let Some(flight) = self.flights.remove(&(channel, seq))
-                {
-                    self.congestion.acknowledged(
-                        flight.bytes,
-                        now.saturating_sub(flight.first_sent),
-                        flight.transmissions == 1,
-                    );
+                if channel.is_reliable() {
+                    let retired = if payload.len() == 8 {
+                        let sack = u64::from_le_bytes(payload.try_into().expect("eight bytes"));
+                        self.reliable_lane_mut(channel)
+                            .sender
+                            .ack_state(seq, sack, now)
+                    } else if payload.is_empty() {
+                        let retired = self.reliable_lane_mut(channel).sender.ack(seq, now);
+                        if retired {
+                            alloc::vec![seq]
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    for retired_seq in retired {
+                        if let Some(flight) = self.flights.remove(&(channel, retired_seq)) {
+                            self.congestion.acknowledged(
+                                flight.bytes,
+                                now.saturating_sub(flight.first_sent),
+                                flight.transmissions == 1,
+                            );
+                        }
+                    }
                 }
                 continue;
             }
@@ -720,11 +736,11 @@ impl<D: Transport> ChannelMux<D> {
                     let (delivered, ack) = lane.receiver.receive(seq, payload.to_vec());
                     let delivered_count = delivered.len();
                     lane.inbound.extend(delivered);
-                    (delivered_count, ack)
+                    (delivered_count, ack.map(|_| lane.receiver.ack_state()))
                 };
                 self.telemetry.record_delivered(channel, delivered_count);
-                if let Some(ack) = ack {
-                    let packet = encode_packet(KIND_ACK, channel, ack, &[]);
+                if let Some((next, sack)) = ack {
+                    let packet = encode_packet(KIND_ACK, channel, next, &sack.to_le_bytes());
                     self.datagram.send(&packet);
                     self.stats.datagrams_sent = self.stats.datagrams_sent.saturating_add(1);
                     self.telemetry
@@ -901,7 +917,9 @@ fn decode_packet(packet: &[u8]) -> Option<(u8, NetChannel, u64, &[u8])> {
     let kind = header[1];
     let channel = NetChannel::from_wire(header[2])?;
     if !matches!(kind, KIND_DATA | KIND_ACK)
-        || (kind == KIND_ACK && (!channel.is_reliable() || packet.len() != HEADER_LEN))
+        || (kind == KIND_ACK
+            && (!channel.is_reliable()
+                || (packet.len() != HEADER_LEN && packet.len() != HEADER_LEN + 8)))
     {
         return None;
     }
@@ -1090,6 +1108,47 @@ mod tests {
         a.datagram.inbox.extend(b.datagram.outbox.drain(..));
         a.tick_at(4);
         assert_eq!(a.bytes_in_flight(), 0);
+    }
+
+    #[test]
+    fn selective_ack_triggers_fast_retransmit_before_rto() {
+        let config = MuxConfig {
+            min_rto: 100,
+            reliable_window: 8,
+            initial_cwnd_bytes: 4_096,
+            max_cwnd_bytes: 4_096,
+            ..MuxConfig::default()
+        };
+        let mut a = ChannelMux::new(MockTransport::default(), config);
+        let mut b = ChannelMux::new(MockTransport::default(), config);
+        for byte in 0..5u8 {
+            a.send(NetChannel::EventsReliable, &[byte]).unwrap();
+        }
+
+        a.tick_at(1);
+        // Drop the first two data packets but deliver three later packets so
+        // the receiver emits three SACK states describing the same gap.
+        while let Some(packet) = a.datagram.outbox.pop_front() {
+            let (_, channel, seq, _) = decode_packet(&packet).unwrap();
+            if channel == NetChannel::EventsReliable && seq >= 2 {
+                b.datagram.inbox.push_back(packet);
+            }
+        }
+        b.tick_at(1);
+        a.datagram.inbox.extend(b.datagram.outbox.drain(..));
+        a.tick_at(2);
+
+        let retransmitted: Vec<u64> = a
+            .datagram
+            .outbox
+            .drain(..)
+            .filter_map(|packet| {
+                let (kind, channel, seq, _) = decode_packet(&packet)?;
+                (kind == KIND_DATA && channel == NetChannel::EventsReliable).then_some(seq)
+            })
+            .collect();
+        assert_eq!(retransmitted, vec![0, 1]);
+        assert_eq!(a.stats().retransmissions, 2);
     }
 
     #[test]
