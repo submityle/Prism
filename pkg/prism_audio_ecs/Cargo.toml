@@ -17,5 +17,9 @@ prism_audio_assets = { path = "../prism_audio_assets" }
 prism_scene = { path = "../prism_scene", default-features = false }
 libm = "0.2"
 
+[dev-dependencies]
+prism_asset = { path = "../prism_asset" }
+prism_scene = { path = "../prism_scene", features = ["materialize"] }
+
 [lints]
 workspace = true

@@ -12,12 +12,20 @@ use alloc::vec::Vec;
 use prism_audio_assets::asset::AudioAssetHandle;
 use prism_audio_assets::bank::{BankId, EntryId};
 use prism_audio_core::voice::VoiceGroup;
-use prism_ecs::prelude::{Entity, Resource, World};
+use prism_ecs::prelude::{Component, Entity, Resource, World};
 use prism_scene::AudioSourceNode;
 
 use crate::playback::PlaybackSettings;
 use crate::player::AudioPlayer;
 use crate::volume::Volume;
+
+/// Marks playback controls that were materialized from a scene descriptor.
+///
+/// The marker is deliberately separate from [`AudioPlayer`]: a scene may be
+/// despawned while an application-owned player on another entity is still
+/// alive. Only controls carrying this marker are reclaimed by the adapter.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+struct SceneAudioBinding;
 
 #[derive(Resource, Default)]
 struct SceneAudioMaterializationState {
@@ -36,6 +44,30 @@ pub fn materialize_scene_audio_sources(world: &mut World) {
         .iter(world)
         .map(|(entity, source)| (entity, *source))
         .collect();
+
+    // Scene instances can disappear through despawn, partition eviction, or a
+    // structural override. Reconcile the previous descriptor set before
+    // materializing the current one so the old route is removed on this frame
+    // rather than leaving an orphaned player alive indefinitely.
+    let current: BTreeMap<_, _> = sources.iter().copied().collect();
+    let stale: Vec<_> = world
+        .resource::<SceneAudioMaterializationState>()
+        .descriptors
+        .iter()
+        .filter_map(|(&entity, _)| (!current.contains_key(&entity)).then_some(entity))
+        .collect();
+    for entity in stale {
+        world
+            .resource_mut::<SceneAudioMaterializationState>()
+            .descriptors
+            .remove(&entity);
+        if world.remove::<SceneAudioBinding>(entity) {
+            world.remove::<AudioPlayer>(entity);
+            world.remove::<PlaybackSettings>(entity);
+            world.remove::<crate::emitter::AudioEmitter>(entity);
+            world.remove::<crate::player_systems::DerivedEmitter>(entity);
+        }
+    }
 
     for (entity, source) in sources {
         let changed = world
@@ -61,6 +93,7 @@ pub fn materialize_scene_audio_sources(world: &mut World) {
             .non_spatial()
             .with_volume(Volume::Linear(source.gain()));
 
+        world.insert(entity, SceneAudioBinding);
         if world.get::<AudioPlayer>(entity).is_some() {
             {
                 let mut player = world.get_mut::<AudioPlayer>(entity).expect("player");
