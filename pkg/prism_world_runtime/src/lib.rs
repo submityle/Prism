@@ -26,6 +26,13 @@ pub use cell_world::{
 };
 mod world_partition_capability;
 pub use world_partition_capability::{WorldPartitionCapability, WorldPartitionCapabilityError};
+mod data_layers;
+pub use data_layers::{
+    DataLayerConfigError, DataLayerId, DataLayerState, LayeredCellFrameCoordinator,
+    LayeredCellManifest, LayeredCellState, LayeredCoordinatorError, LayeredEvictionOutcome,
+    LayeredEvictionReport, LayeredFrameReport, LayeredLoadedCell, LayeredPollReport,
+    LayeredSceneHost, RuntimeDataLayers,
+};
 #[cfg(feature = "placement")]
 mod placement_persist;
 #[cfg(feature = "placement")]

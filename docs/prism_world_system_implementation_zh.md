@@ -22,6 +22,7 @@
 - `prism_world_stream`：`i64` 毫米坐标、负坐标 `div_euclid/rem_euclid`、sector/Morton locality、cell manifest、需求集、预测预取、优先级、预算、迟滞驱逐和可回放 frame trace。当前 scheduler 还记录已提交的 `scene_key/content_version/derived_hash`；同一 sector 的 manifest revision 变化会重新进入既有 load admission，而不会被“按 sector 已驻留”短路。
 - `prism_world_residency`：A/B/C 三档状态、物化预算、确定性 promotion/demotion、HLOD 连续 alpha/dither、QoS governor、稀疏 SDF brick 和 PCG 图求值/脏传播/cache key。
 - `prism_world_runtime` 的 cell reload 缺口已补齐：`CellFrameCoordinator` 用 manifest revision 识别 replacement，仍复用既有 `SceneHost::load_cell` 边界，成功后提交新 manifest；header、provider、取消、背压或 host 失败时恢复旧 manifest 的 resident 状态。该片只覆盖 cell payload replacement，不冒充 `prism_scene::SceneReloadPlan` 的模板级增量 ECS 传播，也不提供 host 内部原子回滚。
+- `prism_world_runtime` 新增 engine-neutral `RuntimeDataLayers` 与 `LayeredCellFrameCoordinator`：在既有 `CellFrameCoordinator`/`SceneHost` 之上显式区分 unloaded、loaded、activated，按稳定 `DataLayerId` 排序并取 cell 声明层与 runtime-enabled 层的确定性交集；layer-set host 调用成功后才提交本地状态，失败保留旧状态，可在驻留 eviction 后重新加载并重新激活。该 slice 不解析 layer payload，不修改 terrain、GPU、ECS partition 或 render。
 - `prism_world`：组合 policy core 的 `WorldRuntime`，并提供 feature-gated `SceneEcsHost`；cell 加载通过真实 `prism_scene::spawn_typed_plan`/`SceneSpawn::attach_instance`，卸载通过 `prism_scene::despawn_instance`，驻留升降级通过 typed provider 回调，不直接写第二份 scene 真相。
 - `SceneEcsHost` 的 ownership registry 已覆盖真实 ECS despawn hook panic：token/binding 在 despawn 成功返回前保持可见；shutdown 逐 cell 提交，失败 cell 与待处理 cell 可由兼容 provider 接手后重试。`WorldRuntime::apply_scene_plan` 只在同一应用内跳过已成功卸载目标的后续 tier action，仍是 fail-fast、非事务接口。
 
@@ -237,6 +238,7 @@ release两组完整记录共864次dispatch逐全键/位置对CPU，10k/100k候�
 - 这些 crate 已加入根 workspace，均有可运行算法和单测；它们是 world 接缝的 engine-neutral 实现，不宣称已经完成整个 renderer/physics/network transport 端到端产品。
 - `SparseSdfBrickGrid` 已支持负坐标采样、跨 mip dirty propagation、删除后的父 mip 失效，以及 brick/region 的保守 i16 min/max 查询；查询返回 `None` 时表示稀疏数据未知，不能当作空场。
 - `CpuSdfClipmap` 已补齐固定容量、确定性排序和事务式中心滚动：每个 mip 保持固定 X/Z 方形覆盖，负坐标使用 floor 除法，更新只返回新进入的 brick，坐标/容量/分配失败不会提交半成品布局。它是 SDF clipmap 的 CPU 布局与 residency 输入契约，不包含 GPU 纹理分配、SDF 采样、上传或 renderer graph 接线；这些仍需独立实现和真机验收。
+- M7 GPU SDF brick lookup 已补齐：`GpuSdfLookup` 以固定容量上传 `BrickCoord` 排序的完整键、元数据和两枚 `i16`/`u32` packed samples，shader 用负坐标 floor division + binary search 做 `O(log B)` lookup，并以显式 `Value/Unknown` 结果区分缺 brick；上传、query、设备 binding 和 buffer budget 均在 queue write 前预检。WGSL ABI 5/5、residency 109/109、GPU crate strict no-deps Clippy 通过；跨沙盒 Apple M2/Metal 两项真实 parity 通过，证明 pipeline/dispatch/packed 解包/readback。该 slice 仍不等于 renderer、physics、GI、nav 或 runtime clipmap eviction 接线。
 - terrain 在最大 quadtree 层级返回显式 `NoChildren`，LOD 非有限值和高度乘法溢出有确定性错误/饱和行为；simulation 的 tick、hydrology 和 delta codec 增加回绕/溢出、canonical record、输入大小和记录数限制；network merge 以 `TransactionId -> PersistentId` 索引去重，避免按对象桶线性扫描。
 
 ## 当前验证
@@ -312,7 +314,7 @@ CPU release 基准为确定性平面、16 次预热、每项 128 次测量；下
 - M3：资产包解压、真正零解析的 mmap schema 视图、GPU 直传和产品级吞吐仍需实现或独立运行时验证；本批仅新增可选 mmap-backed container range source，保留受验证索引解析。共享动态优先级已接入但不提供抢占或跨队列无饥饿保证。任务池 Future/共享取消、固定 worker 及宿主原生 reactor → pollable coordinator → manifest/payload → `SceneHost` 已有真实文件端到端证据，同步兼容路径仍独立保留。离线缓存文件基准记录于 `prism_world_async_runtime_zh.md` 与 `prism_world_native_io_zh.md`，不能代替冷盘、资产包或产品负载验收。
 - M4 散布：GPU placement deletion、行星/曲率/数据层/跨散布层规则、风与交互、逐键并发删除协议、索引增量编辑、蓝噪声目标、产品 proxy renderer 接线及大规模产品散布性能验收；已有内容中立有界 CPU/GPU 源散布、CPU/GPU 作者密度/种类场及各自可选刷子空间/有序索引、真实heightfield的CPU/GPU高度/离地带/坡度精确稳定过滤、独立身份的CPU二维精确贴地放置及其PPLD完整键持久删除、CPU/GPU二维贴地放置 kernel、CPU源/作者场/地形及GPU完整键删除与CPU持久文件恢复、独立 resident 密度 coverage/dither 与真实消费测试，不等于完整产品散布链路。
 - M6：多表示产品接线、Dual Contouring/Transvoxel 与混合 LOD 接缝、行星跨 tile 法线/增量投影及实际 renderer graph 接入；本批等分辨率 marching-tetrahedra 已通过 no-default 59 项和 `mesh` feature 62 项 CPU 回归，但其性能、LOD 接缝和产品接线仍未验收。既有 heightfield 原子局部重烘、cube-sphere 全量投影、Q16.16 SDF 数据烘焙、native Mesh、离屏真实 GPU 绘制和 terrain-to-world-stream manifest 接缝不构成这些缺口的完成证据。
-- M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；simulation-to-world persistence 接缝已完成。
+- M7：SDF 与渲染/物理/GI 的多消费者真实运行时接入，以及大规模实时调度；CPU sparse grid、clipmap layout 与 GPU brick lookup contract 已交付，产品多消费者接线仍独立验收；simulation-to-world persistence 接缝已完成。
 - M8：真实加密传输、多人 session、跨 sector handoff 的网络系统端到端一致性验证；engine-neutral session/authority/handoff seam 已完成。
 - GPU proxy 已有 Apple M2/Metal parity、驻留 compact/真实间接绘制、sector/coordinator/宿主生命周期及限定 release P50/P95/P99 证据；物理显存峰值、多厂商/后端、完整产品性能与产品 scene/ECS decoder/renderer graph 集成仍未验收。
 

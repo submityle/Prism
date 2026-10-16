@@ -49,6 +49,7 @@ impl WorldPartitionCapability {
                 | Self::CellReload
                 | Self::CellEviction
                 | Self::TraceReplay
+                | Self::DataLayers
                 | Self::CrossCellReferences
         )
     }
@@ -109,6 +110,7 @@ mod tests {
             WorldPartitionCapability::CellReload,
             WorldPartitionCapability::CellEviction,
             WorldPartitionCapability::TraceReplay,
+            WorldPartitionCapability::DataLayers,
             WorldPartitionCapability::CrossCellReferences,
         ] {
             assert!(capability.is_supported());
@@ -118,7 +120,7 @@ mod tests {
 
     #[test]
     fn broader_world_partition_capabilities_fail_with_the_exact_variant() {
-        let capability = WorldPartitionCapability::DataLayers;
+        let capability = WorldPartitionCapability::HierarchicalLod;
         let error = capability
             .require()
             .expect_err("capability is not implemented");
