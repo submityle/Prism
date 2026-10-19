@@ -18,6 +18,7 @@ members = [
   "pkg/prism_utils",
   "pkg/prism_reflect_macros",
   "pkg/prism_reflect",
+  "pkg/prism_settings",
   "pkg/prism_time",
   "pkg/prism_tasks",
   "pkg/prism_transform",

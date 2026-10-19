@@ -1,0 +1,26 @@
+[package]
+name = "prism_settings"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic no_std settings schema, registry, resolver, and inspection core for Prism."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# M0 core is a first-class Prism workspace member. I/O, UI, and editor crates
+# remain separate so the hot resolver path stays no_std + alloc.
+
+[features]
+default = ["std"]
+std = []
+
+[[bench]]
+name = "resolution"
+harness = false
+required-features = ["std"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"
