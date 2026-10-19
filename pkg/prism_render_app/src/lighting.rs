@@ -163,9 +163,11 @@ pub struct LightingSurfaceInput {
 }
 
 /// One deterministic indirect-light candidate for the initial GI reservoir.
-/// The host supplies the trace result and its sampling densities; the render
-/// backend performs the same RIS selection and geometric contribution math as
-/// the CPU oracle.
+/// `source_pdf` and `target_pdf` are densities with respect to the same surface-
+/// area measure. `target_pdf` is the non-normalized luminance of the Lambertian
+/// contribution at the owning surface, including `albedo / PI`, geometry, and
+/// visibility. Misses remain proposals with positive `source_pdf` and zero
+/// `target_pdf`, so the RIS denominator counts every attempted sample.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct LightingGiCandidateInput {
@@ -237,7 +239,6 @@ pub struct LightingTraceSceneInput {
     /// Maximum world-space ray distance.
     pub ray_tmax: f32,
 }
-
 
 impl LightingSceneInputs {
     /// Creates inputs from the host's configured scene estimate.
@@ -459,13 +460,13 @@ pub(crate) fn evaluate_deterministic_gi(
     const MAX_CANDIDATES: usize = 4;
     let primary_normal = normalize_or(surface.normal, [0.0, 1.0, 0.0]);
     let mut weight_sum = 0.0;
-    let mut sample_count = 0_u32;
+    let proposal_count = candidates.len().min(MAX_CANDIDATES) as u32;
     let mut selected = None;
     for candidate in candidates.iter().take(MAX_CANDIDATES) {
         if !candidate.source_pdf.is_finite()
             || candidate.source_pdf <= 0.0
             || !candidate.target_pdf.is_finite()
-            || candidate.target_pdf <= 0.0
+            || candidate.target_pdf < 0.0
         {
             continue;
         }
@@ -474,7 +475,9 @@ pub(crate) fn evaluate_deterministic_gi(
             continue;
         }
         weight_sum += weight;
-        sample_count = sample_count.saturating_add(1);
+        if candidate.target_pdf == 0.0 {
+            continue;
+        }
         let u = candidate.selection_u01.clamp(0.0, 1.0);
         if u * weight_sum < weight {
             selected = Some(*candidate);
@@ -483,7 +486,7 @@ pub(crate) fn evaluate_deterministic_gi(
     let Some(candidate) = selected else {
         return [0.0; 3];
     };
-    if sample_count == 0 || weight_sum <= 0.0 || candidate.target_pdf <= 0.0 {
+    if proposal_count == 0 || weight_sum <= 0.0 || candidate.target_pdf <= 0.0 {
         return [0.0; 3];
     }
     let to_sample = sub(candidate.position, surface.position);
@@ -496,9 +499,9 @@ pub(crate) fn evaluate_deterministic_gi(
     let sample_normal = normalize_or(candidate.normal, [0.0, 1.0, 0.0]);
     let cosine_primary = dot(primary_normal, direction).max(0.0);
     let cosine_secondary = dot(sample_normal, scale(direction, -1.0)).max(0.0);
-    let geometry = cosine_primary * cosine_secondary / distance_squared;
+    let geometry = cosine_primary * cosine_secondary / (core::f32::consts::PI * distance_squared);
     let visibility = candidate.visibility.clamp(0.0, 1.0);
-    let reservoir_weight = weight_sum / (sample_count as f32 * candidate.target_pdf);
+    let reservoir_weight = weight_sum / (proposal_count as f32 * candidate.target_pdf);
     scale(
         mul(surface.albedo, candidate.radiance),
         geometry * visibility * reservoir_weight,

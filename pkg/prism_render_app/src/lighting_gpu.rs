@@ -215,7 +215,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let primary_normal = normalize_or(surface.normal.xyz, vec3<f32>(0.0, 1.0, 0.0));
     let candidate_count = min(surface.candidate_range.y, 4u);
     var weight_sum = 0.0;
-    var sample_count = 0u;
     var selected_position = vec3<f32>(0.0);
     var selected_normal = vec3<f32>(0.0, 1.0, 0.0);
     var selected_radiance = vec3<f32>(0.0);
@@ -232,7 +231,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             continue;
         }
         weight_sum = weight_sum + weight;
-        sample_count = sample_count + 1u;
+        if (candidate.normal_target_pdf.w == 0.0) {
+            continue;
+        }
         if (candidate.radiance_selection_u01.w * weight_sum < weight) {
             selected_position = candidate.position_source_pdf.xyz;
             selected_normal = candidate.normal_target_pdf.xyz;
@@ -241,7 +242,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             selected_visibility = candidate.visibility_padding.x;
         }
     }
-    if (sample_count == 0u || weight_sum <= 0.0 || selected_target_pdf <= 0.0) {
+    if (candidate_count == 0u || weight_sum <= 0.0 || selected_target_pdf <= 0.0) {
         output[id.x] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         return;
     }
@@ -255,9 +256,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let sample_normal = normalize_or(selected_normal, vec3<f32>(0.0, 1.0, 0.0));
     let cosine_primary = max(dot(primary_normal, direction), 0.0);
     let cosine_secondary = max(dot(sample_normal, -direction), 0.0);
-    let geometry = cosine_primary * cosine_secondary / distance_squared;
+    let geometry = cosine_primary * cosine_secondary / (3.141592653589793 * distance_squared);
     let visibility = clamp(selected_visibility, 0.0, 1.0);
-    let reservoir_weight = weight_sum / (f32(sample_count) * selected_target_pdf);
+    let reservoir_weight = weight_sum / (f32(candidate_count) * selected_target_pdf);
     let result = surface.albedo.xyz * selected_radiance * geometry * visibility * reservoir_weight;
     output[id.x] = vec4<f32>(result, 1.0);
 }

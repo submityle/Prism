@@ -19,7 +19,7 @@ const MAX_STACK: usize = 64;
 const MAX_NODE_COUNT: usize = 1_000_000;
 const MAX_TRIANGLE_COUNT: usize = 2_000_000;
 const MAX_RAY_COUNT: usize = 1_000_000;
-const RAY_WORDS: usize = 8;
+const RAY_WORDS: usize = 12;
 const HIT_WORDS: usize = 8;
 /// Host GI trace work is explicitly bounded to 64 rays for each of 1024
 /// extracted surfaces. The GI candidate builder is a separate future stage.
@@ -39,6 +39,8 @@ pub struct TraceRay {
     pub direction: [f32; 3],
     /// Inclusive upper ray parameter.
     pub t_max: f32,
+    /// Solid-angle density of the sampled direction.
+    pub direction_pdf: f32,
 }
 
 /// Stable result. A miss has `hit == false`, `primitive == u32::MAX`, and zero
@@ -49,6 +51,8 @@ pub struct TraceHit {
     pub hit: bool,
     /// Stable primitive identifier, or `u32::MAX` for a miss.
     pub primitive: u32,
+    /// Packed triangle record index, or `u32::MAX` for a miss.
+    pub triangle_index: u32,
     /// Ray parameter of the nearest hit; zero for a miss.
     pub t: f32,
     /// First barycentric coordinate; zero for a miss.
@@ -61,6 +65,7 @@ impl TraceHit {
     const MISS: Self = Self {
         hit: false,
         primitive: u32::MAX,
+        triangle_index: u32::MAX,
         t: 0.0,
         u: 0.0,
         v: 0.0,
@@ -313,6 +318,7 @@ impl LightingTraceState {
                 t_min: ray.tmin,
                 direction: ray.direction.to_array(),
                 t_max: ray.tmax,
+                direction_pdf: ray.pdf,
             }));
         let output = self.output.as_ref().expect("output allocated above");
         let recorder = self
@@ -857,6 +863,10 @@ impl LightingTraceGpu {
                 ray.direction[1].to_bits(),
                 ray.direction[2].to_bits(),
                 ray.t_max.to_bits(),
+                ray.direction_pdf.to_bits(),
+                0,
+                0,
+                0,
             ]);
         }
         Ok(())
@@ -951,6 +961,8 @@ fn validate_rays(rays: &[TraceRay]) -> Result<(), TraceGpuError> {
             .all(|v| v.is_finite())
             || !r.t_min.is_finite()
             || !r.t_max.is_finite()
+            || !r.direction_pdf.is_finite()
+            || r.direction_pdf <= 0.0
             || r.t_min < 0.0
             || r.t_max < r.t_min
             || dot(r.direction, r.direction) <= 1.0e-20
@@ -981,6 +993,7 @@ fn trace_one(scene: &BorrowedPackedTraceScene<'_>, ray: TraceRay) -> TraceHit {
                         hit = TraceHit {
                             hit: true,
                             primitive: scene.triangles[tri * TRIANGLE_WORDS + 9],
+                            triangle_index: tri as u32,
                             t,
                             u,
                             v,
@@ -1107,9 +1120,9 @@ fn tri_hit(b:u32,o:vec3<f32>,d:vec3<f32>,tmin:f32,tmax:f32)->vec3<f32>{
  let a=vec3at(b);let e1=vec3at(b+3u)-a;let e2=vec3at(b+6u)-a;let p=cross(d,e2);let det=dot(e1,p);if(abs(det)<=1.0e-8){return vec3<f32>(-1.0);}let inv=1.0/det;let tv=o-a;let u=dot(tv,p)*inv;if(u<0.0||u>1.0){return vec3<f32>(-1.0);}let q=cross(tv,e1);let v=dot(d,q)*inv;if(v<0.0||u+v>1.0){return vec3<f32>(-1.0);}let t=dot(e2,q)*inv;if(t<tmin||t>tmax){return vec3<f32>(-1.0);}return vec3<f32>(t,u,v);
 }
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid:vec3<u32>){let ri=gid.x;if(ri>=arrayLength(&rays)/8u){return;}let rb=ri*8u;let o=vec3<f32>(f(rays[rb]),f(rays[rb+1u]),f(rays[rb+2u]));let tmin=f(rays[rb+3u]);let d=vec3<f32>(f(rays[rb+4u]),f(rays[rb+5u]),f(rays[rb+6u]));var closest=f(rays[rb+7u]);var best_id=0xffffffffu;var bu=0.0;var bv=0.0;var node=0u;var stack:array<u32,64>;var sp=0u;var steps=0u;
- loop{if(steps>=arrayLength(&nodes)/12u*2u+1u){let hb=ri*8u;hits[hb]=2u;hits[hb+1u]=0xffffffffu;hits[hb+2u]=0u;hits[hb+3u]=0u;hits[hb+4u]=0u;return;}steps++;let nb=node*12u;if(slab(nb,o,d,tmin,closest)){let count=nodes[nb+8u];if(count>0u){let start=nodes[nb+6u];for(var i=0u;i<count;i++){let tb=(start+i)*12u;let h=tri_hit(tb,o,d,tmin,closest);if(h.x>=0.0){closest=h.x;best_id=triangles[tb+9u];bu=h.y;bv=h.z;}}if(sp==0u){break;}sp--;node=stack[sp];}else{let left=node+1u;let right=nodes[nb+7u];let axis=nodes[nb+9u];var near=left;var far=right;if(d[axis]<0.0){near=right;far=left;}if(sp>=64u){let hb=ri*8u;hits[hb]=2u;hits[hb+1u]=0xffffffffu;hits[hb+2u]=0u;hits[hb+3u]=0u;hits[hb+4u]=0u;return;}stack[sp]=far;sp++;node=near;}}else{if(sp==0u){break;}sp--;node=stack[sp];}}
- let hb=ri*8u;if(best_id==0xffffffffu){hits[hb]=0u;hits[hb+1u]=0xffffffffu;hits[hb+2u]=0u;hits[hb+3u]=0u;hits[hb+4u]=0u;}else{hits[hb]=1u;hits[hb+1u]=best_id;hits[hb+2u]=bitcast<u32>(closest);hits[hb+3u]=bitcast<u32>(bu);hits[hb+4u]=bitcast<u32>(bv);}hits[hb+5u]=0u;hits[hb+6u]=0u;hits[hb+7u]=0u;
+fn main(@builtin(global_invocation_id) gid:vec3<u32>){let ri=gid.x;if(ri>=arrayLength(&rays)/12u){return;}let rb=ri*12u;let o=vec3<f32>(f(rays[rb]),f(rays[rb+1u]),f(rays[rb+2u]));let tmin=f(rays[rb+3u]);let d=vec3<f32>(f(rays[rb+4u]),f(rays[rb+5u]),f(rays[rb+6u]));var closest=f(rays[rb+7u]);var best_id=0xffffffffu;var best_triangle=0xffffffffu;var bu=0.0;var bv=0.0;var node=0u;var stack:array<u32,64>;var sp=0u;var steps=0u;
+ loop{if(steps>=arrayLength(&nodes)/12u*2u+1u){let hb=ri*8u;hits[hb]=2u;hits[hb+1u]=0xffffffffu;hits[hb+2u]=0u;hits[hb+3u]=0u;hits[hb+4u]=0u;hits[hb+5u]=0xffffffffu;return;}steps++;let nb=node*12u;if(slab(nb,o,d,tmin,closest)){let count=nodes[nb+8u];if(count>0u){let start=nodes[nb+6u];for(var i=0u;i<count;i++){let ti=start+i;let tb=ti*12u;let h=tri_hit(tb,o,d,tmin,closest);if(h.x>=0.0){closest=h.x;best_id=triangles[tb+9u];best_triangle=ti;bu=h.y;bv=h.z;}}if(sp==0u){break;}sp--;node=stack[sp];}else{let left=node+1u;let right=nodes[nb+7u];let axis=nodes[nb+9u];var near=left;var far=right;if(d[axis]<0.0){near=right;far=left;}if(sp>=64u){let hb=ri*8u;hits[hb]=2u;hits[hb+1u]=0xffffffffu;hits[hb+2u]=0u;hits[hb+3u]=0u;hits[hb+4u]=0u;hits[hb+5u]=0xffffffffu;return;}stack[sp]=far;sp++;node=near;}}else{if(sp==0u){break;}sp--;node=stack[sp];}}
+ let hb=ri*8u;if(best_id==0xffffffffu){hits[hb]=0u;hits[hb+1u]=0xffffffffu;hits[hb+2u]=0u;hits[hb+3u]=0u;hits[hb+4u]=0u;hits[hb+5u]=0xffffffffu;}else{hits[hb]=1u;hits[hb+1u]=best_id;hits[hb+2u]=bitcast<u32>(closest);hits[hb+3u]=bitcast<u32>(bu);hits[hb+4u]=bitcast<u32>(bv);hits[hb+5u]=best_triangle;}hits[hb+6u]=0u;hits[hb+7u]=0u;
 }
 "#;
 
@@ -1156,6 +1169,7 @@ mod tests {
                 t_min: 0.0,
                 direction: [0.0, 0.0, -1.0],
                 t_max: 10.0,
+                direction_pdf: 1.0 / core::f32::consts::PI,
             })
             .collect();
         (PackedTraceScene::from(&packed), rays)
@@ -1600,7 +1614,8 @@ mod tests {
                     offset + 2
                 );
             }
-            assert_eq!(&words[b + 5..b + 8], &[0, 0, 0], "ray {i} padding");
+            assert_eq!(words[b + 5], hit.triangle_index, "ray {i} triangle index");
+            assert_eq!(&words[b + 6..b + 8], &[0, 0], "ray {i} padding");
         }
         recorded.release(device.as_ref());
         drop(recorder);

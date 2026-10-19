@@ -2066,10 +2066,40 @@ fn deterministic_gi_oracle_selects_valid_reservoir_sample() {
         visibility: 0.75,
         ..LightingGiCandidateInput::default()
     };
-    assert_eq!(
-        evaluate_deterministic_gi(surface, &[candidate]),
-        [0.1875, 0.1875, 1.5]
-    );
+    let result = evaluate_deterministic_gi(surface, &[candidate]);
+    let expected = [0.1875, 0.1875, 1.5].map(|value| value / core::f32::consts::PI);
+    for (actual, expected) in result.into_iter().zip(expected) {
+        assert!((actual - expected).abs() < 1.0e-6);
+    }
+}
+
+#[test]
+fn deterministic_gi_ris_counts_zero_contribution_proposals_in_normalization() {
+    let surface = LightingSurfaceInput {
+        position: [0.0, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        ..LightingSurfaceInput::default()
+    };
+    let contributing = LightingGiCandidateInput {
+        position: [0.0, 2.0, 0.0],
+        source_pdf: 1.0,
+        normal: [0.0, -1.0, 0.0],
+        target_pdf: 2.0,
+        radiance: [1.0; 3],
+        selection_u01: 0.0,
+        visibility: 1.0,
+        ..LightingGiCandidateInput::default()
+    };
+    let miss = LightingGiCandidateInput {
+        source_pdf: 0.25,
+        target_pdf: 0.0,
+        ..LightingGiCandidateInput::default()
+    };
+    let one_proposal = evaluate_deterministic_gi(surface, &[contributing]);
+    let two_proposals = evaluate_deterministic_gi(surface, &[contributing, miss]);
+    for (one, two) in one_proposal.into_iter().zip(two_proposals) {
+        assert!((two * 2.0 - one).abs() < 1.0e-6);
+    }
 }
 
 #[test]
@@ -2821,6 +2851,7 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         t_min: 0.0,
         direction: [0.0, 0.0, -1.0],
         t_max: 10.0,
+        direction_pdf: 1.0 / core::f32::consts::PI,
     }];
     let output = runtime.device().create_buffer(&BufferDescriptor::new(
         32,
