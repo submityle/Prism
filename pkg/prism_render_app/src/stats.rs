@@ -10,7 +10,7 @@ use crate::intent::RenderViewport;
 /// many frames were recorded and submitted, how many failed, how many passes
 /// each frame declared, and the viewport of the most recent one. Tests and
 /// diagnostics read it through [`App::get_sub_app`](prism_app::App::get_sub_app).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Resource)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Resource)]
 pub struct RenderFrameStats {
     /// Frames whose graph compiled, recorded, and submitted successfully.
     pub frames_submitted: u64,
@@ -42,6 +42,8 @@ pub struct RenderFrameStats {
     pub lighting_gpu_passes_recorded: u64,
     /// The viewport of the most recently recorded frame, empty or not.
     pub last_viewport: RenderViewport,
+    /// The receipt for the most recently attempted frame graph execution.
+    pub(crate) execution_trace: crate::systems::FrameExecutionTrace,
 }
 
 impl RenderFrameStats {

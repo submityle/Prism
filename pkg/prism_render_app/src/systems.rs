@@ -2,6 +2,7 @@
 
 use prism_ecs::prelude::{Res, ResMut};
 use prism_ecs::world::World;
+use prism_render_architecture::lighting::contract::JournalSnapshot;
 use prism_render_driver::{FrameSync, Instance};
 
 use crate::frame;
@@ -14,6 +15,82 @@ use crate::runtime_resource::RenderRuntimeResource;
 use crate::startup::ensure_render_startup;
 use crate::stats::RenderFrameStats;
 use crate::target::RenderTarget;
+
+/// The host-side receipt for the frame pipeline.
+///
+/// This is diagnostic state, not a second execution path. It binds the
+/// extracted scene record and lighting journal to the same frame that the
+/// graph or presentation driver consumes, making a stale cross-frame input
+/// observable without adding a control switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FrameExecutionTrace {
+    pub frame_index: u64,
+    pub journal_snapshot: JournalSnapshot,
+    pub visibility_work_items: u64,
+    pub gi_candidates: u64,
+    pub graph: Option<frame::FrameGraphStages>,
+    pub outcome: FrameExecutionOutcome,
+}
+
+impl Default for FrameExecutionTrace {
+    fn default() -> Self {
+        Self {
+            frame_index: 0,
+            journal_snapshot: JournalSnapshot::default(),
+            visibility_work_items: 0,
+            gi_candidates: 0,
+            graph: None,
+            outcome: FrameExecutionOutcome::NotRun,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameExecutionOutcome {
+    NotRun,
+    Skipped,
+    Submitted,
+    Presented,
+    Failed,
+    Mixed,
+}
+
+impl FrameExecutionTrace {
+    fn begin(
+        &mut self,
+        record: &RenderRecord,
+        visibility_work_items: u64,
+        inputs: &crate::ExtractedLightingInputs,
+    ) {
+        self.frame_index = record.frame_index;
+        self.journal_snapshot = inputs.journal_snapshot;
+        self.visibility_work_items = visibility_work_items;
+        self.gi_candidates = inputs.gi_candidates.len() as u64;
+        self.graph = None;
+        self.outcome = FrameExecutionOutcome::NotRun;
+    }
+
+    fn assert_input_parity(&self, record: &RenderRecord, inputs: &crate::ExtractedLightingInputs) {
+        assert_eq!(
+            self.frame_index, record.frame_index,
+            "scene and lighting inputs must belong to the extracted frame"
+        );
+        assert_eq!(
+            self.journal_snapshot, inputs.journal_snapshot,
+            "lighting journal must be the snapshot consumed by this frame"
+        );
+    }
+}
+
+fn classify_window_outcome(submitted: u64, skipped: u64, failed: u64) -> FrameExecutionOutcome {
+    match (submitted != 0, skipped != 0, failed != 0) {
+        (true, false, false) => FrameExecutionOutcome::Presented,
+        (false, true, false) => FrameExecutionOutcome::Skipped,
+        (false, false, true) => FrameExecutionOutcome::Failed,
+        (false, false, false) => FrameExecutionOutcome::NotRun,
+        _ => FrameExecutionOutcome::Mixed,
+    }
+}
 
 /// The one-way extract step: publish the main world's render intent.
 ///
@@ -125,23 +202,37 @@ pub(crate) fn execute_frame<I>(
     I::Queue: Send + Sync + FrameSync + 'static,
     I::Surface: Send + Sync + 'static,
 {
+    stats
+        .execution_trace
+        .begin(&record, queues.len() as u64, &inputs);
+    stats.execution_trace.assert_input_parity(&record, &inputs);
     let runtime = runtime.runtime();
     lighting_gpu.prepare(&plan.plan, &inputs, runtime.queue());
+    let lighting_pass = lighting_gpu.pass(&plan.plan);
+    let submitted_before = stats.frames_submitted;
+    let skipped_before = stats.frames_skipped;
+    let failed_before = stats.frames_failed;
     if windows.drive(
         runtime,
         &requests,
         &overrides,
         &queues,
         &functions,
-        lighting_gpu.pass(&plan.plan),
+        lighting_pass,
         &mut stats,
     ) {
+        stats.execution_trace.outcome = classify_window_outcome(
+            stats.frames_submitted.saturating_sub(submitted_before),
+            stats.frames_skipped.saturating_sub(skipped_before),
+            stats.frames_failed.saturating_sub(failed_before),
+        );
         return;
     }
     let viewport = record.viewport;
     stats.last_viewport = viewport;
     if viewport.is_empty() {
         stats.frames_skipped += 1;
+        stats.execution_trace.outcome = FrameExecutionOutcome::Skipped;
         return;
     }
 
@@ -153,12 +244,23 @@ pub(crate) fn execute_frame<I>(
         target.resize(runtime.device(), viewport);
     }
 
-    let lighting_pass = lighting_gpu.pass(&plan.plan);
     let graph = frame::target_graph(&target, &queues, &functions, lighting_pass);
+    let stages = *graph
+        .blackboard()
+        .get::<frame::FrameGraphStages>()
+        .expect("the host frame graph must publish its stage receipt");
+    stages.assert_contract();
+    assert_eq!(
+        stages.gi_recipes,
+        u32::from(lighting_pass.is_some_and(|pass| pass.run_gi)),
+        "GI graph admission must match the selected lighting pass"
+    );
+    stats.execution_trace.graph = Some(stages);
     let passes = graph.pass_count() as u64;
     let draws = queues.len() as u64;
     match runtime.execute_tracked(graph) {
         Ok(_) => {
+            stats.execution_trace.outcome = FrameExecutionOutcome::Submitted;
             stats.frames_submitted += 1;
             stats.passes_declared += passes;
             stats.draws_recorded += draws;
@@ -170,6 +272,7 @@ pub(crate) fn execute_frame<I>(
             // leave it at that. The minimal clear graph cannot cycle today, so
             // this is defensive rather than expected.
             stats.frames_failed += 1;
+            stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
         }
     }
 }

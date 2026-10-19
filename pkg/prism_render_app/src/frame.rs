@@ -16,6 +16,76 @@ use crate::queue::RenderQueues;
 use crate::sets::RenderPhase;
 use crate::target::RenderTarget;
 
+/// The host-visible stages represented by one frame graph.
+///
+/// This is deliberately a receipt, not a control flag. It records the
+/// engine-neutral scene/visibility submission, the trace-result boundary, the
+/// admitted GI recipe, composite, and the texture that presentation consumes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FrameGraphStages {
+    pub scene_passes: u32,
+    pub trace_submissions: u32,
+    pub direct_recipes: u32,
+    pub gi_recipes: u32,
+    pub composite_passes: u32,
+    pub present_passes: u32,
+    pub lighting_dispatches: u32,
+    pub present_source: prism_render_graph::TextureHandle,
+}
+
+impl FrameGraphStages {
+    fn for_graph(
+        queues: &RenderQueues,
+        lighting: Option<LightingGpuPass>,
+        present_source: prism_render_graph::TextureHandle,
+    ) -> Self {
+        let scene_passes = 1 + RenderPhase::ORDER
+            .into_iter()
+            .filter(|phase| !queues.phase(*phase).is_empty())
+            .count() as u32;
+        let trace_submissions = lighting.is_some_and(|pass| pass.run_gi) as u32;
+        let direct_recipes = lighting.is_some_and(|pass| pass.run_direct) as u32;
+        let gi_recipes = trace_submissions;
+        let lighting_dispatches = lighting.map_or(0, |pass| {
+            u32::from(pass.run_direct) + u32::from(pass.run_gi) + 1
+        });
+        Self {
+            scene_passes,
+            trace_submissions,
+            direct_recipes,
+            gi_recipes,
+            composite_passes: u32::from(lighting.is_some()),
+            present_passes: 0,
+            lighting_dispatches,
+            present_source,
+        }
+    }
+
+    pub(crate) fn assert_contract(self) {
+        assert!(
+            self.scene_passes >= 1,
+            "a frame must clear its scene target"
+        );
+        assert_eq!(
+            self.trace_submissions, self.gi_recipes,
+            "every GI recipe must consume one trace-result submission"
+        );
+        assert!(
+            self.composite_passes <= 1,
+            "a frame has at most one lighting composite"
+        );
+        assert!(
+            self.present_passes <= 1,
+            "a frame has at most one presentation"
+        );
+        assert_eq!(
+            self.lighting_dispatches,
+            self.direct_recipes + self.gi_recipes + self.composite_passes,
+            "lighting dispatch accounting must match admitted recipes"
+        );
+    }
+}
+
 /// The texel format of the render sub-app's offscreen frame target.
 ///
 /// `Rgba8Unorm` is the portable baseline every backend can render to and read
@@ -129,7 +199,68 @@ pub(crate) fn target_graph_output(
         },
     );
 
+    // Scene ownership is first in the host chain: clear the target, then
+    // rasterize the visibility-derived queues. Lighting consumes that scene
+    // result after the raster work has been declared, so graph order and the
+    // host receipt agree even when a phase is empty.
+    graph.add_raster_pass(
+        "prism-render-app-clear",
+        PassFlags::SIDE_EFFECT,
+        |builder| {
+            color = builder.color_attachment(color);
+            depth = builder.depth_attachment(depth);
+            |_ctx| {}
+        },
+    );
+
+    for phase in RenderPhase::ORDER {
+        if queues.phase(phase).is_empty() {
+            continue;
+        }
+        let mut vertex_reads = Vec::new();
+        let mut index_reads = Vec::new();
+        let mut indirect_reads = Vec::new();
+        for item in queues.phase(phase) {
+            for buffer in &item.vertices {
+                if let Some(handle) = imported.get(buffer) {
+                    vertex_reads.push(*handle);
+                }
+            }
+            if let Some((indices, _)) = item.indices
+                && let Some(handle) = imported.get(&indices)
+            {
+                index_reads.push(*handle);
+            }
+            if let Some(args) = item.indirect {
+                indirect_reads.push(args.args);
+            }
+        }
+        graph.add_raster_pass(
+            format!("prism-render-app-{phase:?}"),
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                color = builder.color_attachment(color);
+                depth = builder.depth_attachment(depth);
+                for handle in &vertex_reads {
+                    let _ = builder.read_vertex(*handle);
+                }
+                for handle in &index_reads {
+                    let _ = builder.read_index(*handle);
+                }
+                for handle in &indirect_reads {
+                    let _ = builder.read_indirect(*handle);
+                }
+                let queues = queues.clone();
+                let functions = functions.clone();
+                move |ctx| queues.record(phase, ctx, &functions)
+            },
+        );
+    }
+
     let Some(lighting) = lighting else {
+        let stages = FrameGraphStages::for_graph(queues, None, color);
+        stages.assert_contract();
+        graph.blackboard_mut().set(stages);
         return (graph, color);
     };
 
@@ -241,67 +372,8 @@ pub(crate) fn target_graph_output(
         },
     );
 
-    // The clear runs first and is never culled: the frame overwrites whatever the
-    // previous frame left in the target.
-    graph.add_raster_pass(
-        "prism-render-app-clear",
-        PassFlags::SIDE_EFFECT,
-        |builder| {
-            color = builder.color_attachment(color);
-            depth = builder.depth_attachment(depth);
-            |_ctx| {}
-        },
-    );
-
-    for phase in RenderPhase::ORDER {
-        if queues.phase(phase).is_empty() {
-            continue;
-        }
-        // Resolve this phase's declarations before building the pass, so the
-        // setup closure captures handles rather than the import table.
-        let mut vertex_reads = Vec::new();
-        let mut index_reads = Vec::new();
-        let mut indirect_reads = Vec::new();
-        for item in queues.phase(phase) {
-            for buffer in &item.vertices {
-                if let Some(handle) = imported.get(buffer) {
-                    vertex_reads.push(*handle);
-                }
-            }
-            if let Some((indices, _)) = item.indices
-                && let Some(handle) = imported.get(&indices)
-            {
-                index_reads.push(*handle);
-            }
-            if let Some(args) = item.indirect {
-                indirect_reads.push(args.args);
-            }
-        }
-        graph.add_raster_pass(
-            format!("prism-render-app-{phase:?}"),
-            PassFlags::SIDE_EFFECT,
-            |builder| {
-                color = builder.color_attachment(color);
-                depth = builder.depth_attachment(depth);
-                for handle in &vertex_reads {
-                    let _ = builder.read_vertex(*handle);
-                }
-                for handle in &index_reads {
-                    let _ = builder.read_index(*handle);
-                }
-                for handle in &indirect_reads {
-                    let _ = builder.read_indirect(*handle);
-                }
-                // A pass closure outlives this borrow, so it owns what it needs:
-                // a cheap clone of the queue and of the draw-function registry
-                // (shared functions, cloned handles). Recording then goes through
-                // the one `RenderQueues::record` path, exactly as a standalone
-                // pass does.
-                let queues = queues.clone();
-                let functions = functions.clone();
-                move |ctx| queues.record(phase, ctx, &functions)
-            },
-        );
-    }
+    let stages = FrameGraphStages::for_graph(queues, Some(lighting), color);
+    stages.assert_contract();
+    graph.blackboard_mut().set(stages);
     (graph, color)
 }

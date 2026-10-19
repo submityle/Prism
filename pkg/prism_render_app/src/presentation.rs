@@ -618,6 +618,14 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         let (mut graph, color) =
             crate::frame::target_graph_output(&gpu.target, queues, functions, lighting);
         gpu.present.append(&mut graph, color, image);
+        let mut stages = *graph
+            .blackboard()
+            .get::<crate::frame::FrameGraphStages>()
+            .expect("the host frame graph must publish its stage receipt");
+        stages.present_passes = 1;
+        stages.assert_contract();
+        graph.blackboard_mut().set(stages);
+        stats.execution_trace.graph = Some(stages);
         let passes = graph.pass_count() as u64;
         gpu.lifetime.in_flight.fetch_add(1, Ordering::AcqRel);
         let submission = match runtime.execute_tracked(graph) {
