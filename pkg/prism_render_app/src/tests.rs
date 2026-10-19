@@ -42,6 +42,9 @@ use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
+use prism_render_architecture::lighting::contract::{
+    FrameResourceBudget, PlanCaps, Rejection, SceneStats, Tier,
+};
 use prism_render_architecture::shader_package::{
     ArtifactDigest, ExecutionFamily, ModuleId, ModuleIdentity, PermutationIndex, PermutationSpace,
     PersistedPsoCache, PipelineStateHash, PsoCacheKey, ShaderPackageId,
@@ -1984,6 +1987,52 @@ fn render_schedule_runs_each_frame_and_submits_a_frame() {
         stats.lighting_recipes_rejected,
         plan.plan.rejected.len() as u64
     );
+}
+
+#[test]
+fn lighting_plan_uses_host_caps_scene_stats_and_budget() {
+    let config = RenderAppConfig::new(EXTENT)
+        .with_lighting_scene_stats(SceneStats {
+            lights: 256,
+            punctual_max: 8,
+            npr_materials: 3,
+            proxy_page_ratio: 0.5,
+            triangle_density: 4.0,
+        })
+        .with_lighting_budget(FrameResourceBudget {
+            gpu_ms: 1.0,
+            bandwidth: 8 * 1024 * 1024,
+            resident_bytes: 16 * 1024 * 1024,
+            io_ops: 16,
+            shading_rate_budget: 0.5,
+        })
+        .with_lighting_caps(PlanCaps {
+            ray_tracing: false,
+            virtual_shadow: false,
+            offline: false,
+            deterministic_npr: true,
+        })
+        .with_lighting_tier(Tier::Preview);
+    let mut app = app_on_null_backend(config);
+    app.update();
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let state = render
+        .world
+        .get_resource::<LightingPlanState>()
+        .expect("lighting plan state");
+    assert_eq!(state.scene_stats.lights, 256);
+    assert_eq!(state.plan.tier, Tier::Preview);
+    assert!(state
+        .plan
+        .rejected
+        .iter()
+        .any(|rejection| matches!(rejection, Rejection::Budget(_))));
+    assert!(state
+        .plan
+        .rejected
+        .iter()
+        .any(|rejection| matches!(rejection, Rejection::Unsupported(_))));
+    assert!(state.plan.explain().contains("tier=Preview"));
 }
 
 /// The render sub-app owns the GPU state; the main world never sees it.

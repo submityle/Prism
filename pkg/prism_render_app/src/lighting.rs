@@ -2,9 +2,10 @@
 
 use prism_ecs::prelude::{Res, ResMut, Resource};
 use prism_render_architecture::lighting::contract::{
-    BudgetCompiler, FrameResourceBudget, LightingPlan, PlanCaps, SceneStats, Tier,
+    BudgetCompiler, LightingPlan, PlanCaps, SceneStats, Tier,
 };
 
+use crate::config::RenderAppConfig;
 use crate::record::RenderRecord;
 use crate::stats::RenderFrameStats;
 
@@ -17,30 +18,36 @@ pub struct LightingPlanState {
     pub compiled_frame: u64,
     /// Number of successful plan compilations in this render world.
     pub compile_count: u64,
+    /// Scene statistics retained for deterministic recompilation.
+    pub scene_stats: SceneStats,
+    /// Capability policy retained for deterministic recompilation.
+    pub caps: PlanCaps,
+    /// Quality tier retained for deterministic recompilation.
+    pub tier: Tier,
 }
 
 impl Default for LightingPlanState {
     fn default() -> Self {
+        Self::from_config(RenderAppConfig::DEFAULT)
+    }
+}
+
+impl LightingPlanState {
+    /// Builds a render-world plan state from host configuration.
+    #[must_use]
+    pub fn from_config(config: RenderAppConfig) -> Self {
         Self {
             plan: BudgetCompiler::compile(
-                SceneStats::default(),
-                FrameResourceBudget {
-                    gpu_ms: 16.666,
-                    bandwidth: 512 * 1024 * 1024,
-                    resident_bytes: 512 * 1024 * 1024,
-                    io_ops: 4096,
-                    shading_rate_budget: 1.0,
-                },
-                PlanCaps {
-                    ray_tracing: false,
-                    virtual_shadow: false,
-                    offline: false,
-                    deterministic_npr: false,
-                },
-                Tier::Balanced,
+                config.lighting_scene_stats,
+                config.lighting_budget,
+                config.lighting_caps,
+                config.lighting_tier,
             ),
             compiled_frame: 0,
             compile_count: 0,
+            scene_stats: config.lighting_scene_stats,
+            caps: config.lighting_caps,
+            tier: config.lighting_tier,
         }
     }
 }
@@ -54,17 +61,8 @@ pub(crate) fn compile_lighting_plan(
     if state.compiled_frame == record.frame_index {
         return;
     }
-    state.plan = BudgetCompiler::compile(
-        SceneStats::default(),
-        state.plan.budget,
-        PlanCaps {
-            ray_tracing: false,
-            virtual_shadow: false,
-            offline: false,
-            deterministic_npr: false,
-        },
-        state.plan.tier,
-    );
+    state.plan =
+        BudgetCompiler::compile(state.scene_stats, state.plan.budget, state.caps, state.tier);
     state.compiled_frame = record.frame_index;
     state.compile_count = state.compile_count.saturating_add(1);
     stats.lighting_plan_compiles = state.compile_count;

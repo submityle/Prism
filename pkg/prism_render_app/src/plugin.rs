@@ -321,7 +321,7 @@ where
         render.world.insert_resource(RenderFrameStats::default());
         render
             .world
-            .insert_resource(crate::LightingPlanState::default());
+            .insert_resource(crate::LightingPlanState::from_config(config));
         render.world.insert_resource(RenderViews::new());
         render.world.insert_resource(TextureCache::new());
         render.world.insert_resource(RenderQueues::new());
