@@ -7,6 +7,7 @@ pub mod debug;
 pub mod metrics;
 pub mod ocio;
 pub mod radiance_cascades;
+pub mod raygen;
 pub mod recipe_backend;
 pub mod regir;
 pub mod regir_resolve;
