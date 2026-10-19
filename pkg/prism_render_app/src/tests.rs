@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use crate::config::RenderAppConfig;
 use crate::intent::{RenderIntent, RenderViewport};
 use crate::label::{Render, RenderApp};
-use crate::lighting::LightingPlanState;
+use crate::lighting::{ExtractedLightingInputs, LightingPlanState, LightingSceneInputs};
 use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
@@ -43,7 +43,7 @@ use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
 use prism_render_architecture::lighting::contract::{
-    FrameResourceBudget, PlanCaps, Rejection, SceneStats, Tier,
+    ChangeFields, FrameResourceBudget, PlanCaps, Rejection, SceneStats, Tier,
 };
 use prism_render_architecture::shader_package::{
     ArtifactDigest, ExecutionFamily, ModuleId, ModuleIdentity, PermutationIndex, PermutationSpace,
@@ -2033,6 +2033,40 @@ fn lighting_plan_uses_host_caps_scene_stats_and_budget() {
         .iter()
         .any(|rejection| matches!(rejection, Rejection::Unsupported(_))));
     assert!(state.plan.explain().contains("tier=Preview"));
+}
+
+#[test]
+fn lighting_inputs_extract_stats_and_field_epochs_into_the_render_world() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    app.world_mut()
+        .insert_resource(LightingSceneInputs::with_stats(SceneStats {
+            lights: 12,
+            punctual_max: 4,
+            ..SceneStats::default()
+        }));
+    app.world_mut()
+        .resource_mut::<LightingSceneInputs>()
+        .mark_changed(1, ChangeFields::LIGHTING);
+
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let extracted = render.world.resource::<ExtractedLightingInputs>();
+    assert_eq!(extracted.stats.lights, 12);
+    assert_eq!(extracted.journal_snapshot.sequence, 1);
+    assert_eq!(extracted.journal_snapshot.epoch.lighting, 1);
+
+    let state = render.world.resource::<LightingPlanState>();
+    assert_eq!(state.scene_stats.lights, 12);
+    assert_eq!(state.journal_snapshot, extracted.journal_snapshot);
+    assert_eq!(state.executions.len(), state.plan.recipes.len());
+    assert_eq!(state.explain, state.plan.explain());
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.lighting_cache_invalidations, 1);
+    assert_eq!(
+        stats.lighting_executions_planned,
+        state.executions.len() as u64
+    );
 }
 
 /// The render sub-app owns the GPU state; the main world never sees it.

@@ -321,6 +321,9 @@ where
         render.world.insert_resource(RenderFrameStats::default());
         render
             .world
+            .insert_resource(crate::ExtractedLightingInputs::default());
+        render
+            .world
             .insert_resource(crate::LightingPlanState::from_config(config));
         render.world.insert_resource(RenderViews::new());
         render.world.insert_resource(TextureCache::new());
@@ -420,7 +423,12 @@ where
         // record, then one step per render-asset family), and replacing it here
         // would drop a family registered by another plugin.
         app.insert_resource(RenderIntent::from_extent(config.extent));
+        app.insert_resource(crate::LightingSceneInputs {
+            stats: config.lighting_scene_stats,
+            journal: prism_render_architecture::lighting::contract::ChangeJournal::new(),
+        });
         app.add_extract(RenderApp, extract_render_record);
+        app.add_extract(RenderApp, crate::lighting::extract_lighting_inputs);
         app.init_resource::<crate::PublishedTransforms>();
         app.add_systems(Last, crate::transforms::publish_transforms);
         app.add_extract(RenderApp, crate::transforms::extract_transforms);

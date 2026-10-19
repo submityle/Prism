@@ -412,6 +412,25 @@ pub enum RecipeId {
     PathTracedOffline,
 }
 
+/// The resource domain a recipe contributes to in the frame graph.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RecipeDomain {
+    Direct,
+    Shadow,
+    Indirect,
+    Reflection,
+    Offline,
+}
+
+/// The stable execution declaration emitted for an admitted recipe.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RecipeExecution {
+    pub recipe: RecipeId,
+    pub domain: RecipeDomain,
+    pub cache_effect: CacheEffect,
+    pub exec_policy: ExecPolicy,
+}
+
 impl RecipeId {
     pub const ALL: [Self; 13] = [
         Self::DirectStochasticRt,
@@ -428,6 +447,55 @@ impl RecipeId {
         Self::RadianceCascades,
         Self::PathTracedOffline,
     ];
+
+    #[must_use]
+    pub const fn domain(self) -> RecipeDomain {
+        match self {
+            Self::DirectStochasticRt | Self::SpecializedDeterministic => RecipeDomain::Direct,
+            Self::DirectStochasticVsm | Self::DirectDeterministicCsm => RecipeDomain::Shadow,
+            Self::DdgiProbes
+            | Self::ScreenProbeGi
+            | Self::SurfaceCacheSurfel
+            | Self::WorldRestir
+            | Self::SparseSdfGi
+            | Self::RadianceCascades => RecipeDomain::Indirect,
+            Self::SsgiScreenSpace | Self::SpecularRestir => RecipeDomain::Reflection,
+            Self::PathTracedOffline => RecipeDomain::Offline,
+        }
+    }
+
+    #[must_use]
+    pub const fn execution(self, pass: u32, budget_ms: f32) -> RecipeExecution {
+        let async_policy = match self {
+            Self::PathTracedOffline | Self::DdgiProbes | Self::SurfaceCacheSurfel => {
+                AsyncPolicy::Split
+            }
+            Self::WorldRestir | Self::SpecularRestir | Self::RadianceCascades => AsyncPolicy::Join,
+            _ => AsyncPolicy::Inline,
+        };
+        RecipeExecution {
+            recipe: self,
+            domain: self.domain(),
+            cache_effect: CacheEffect {
+                pass,
+                destroys: match self.domain() {
+                    RecipeDomain::Shadow => 1 << 0,
+                    RecipeDomain::Indirect => 1 << 1,
+                    RecipeDomain::Reflection => 1 << 2,
+                    RecipeDomain::Offline => 1 << 3,
+                    RecipeDomain::Direct => 0,
+                },
+                preserves: 1 << 4,
+            },
+            exec_policy: ExecPolicy {
+                pass,
+                async_policy,
+                persistent: !matches!(self, Self::DirectDeterministicCsm),
+                shading_rate: 1.0,
+                budget_ms,
+            },
+        }
+    }
 
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -453,19 +521,29 @@ impl RecipeId {
     #[must_use]
     pub const fn cost(self) -> RecipeCost {
         match self {
-            Self::DirectStochasticRt => RecipeCost::new(2.4, 48 * 1024 * 1024, 0),
-            Self::DirectStochasticVsm => RecipeCost::new(1.6, 64 * 1024 * 1024, 128),
-            Self::DirectDeterministicCsm => RecipeCost::new(2.1, 32 * 1024 * 1024, 64),
-            Self::SpecializedDeterministic => RecipeCost::new(1.0, 8 * 1024 * 1024, 0),
-            Self::DdgiProbes => RecipeCost::new(2.2, 96 * 1024 * 1024, 512),
-            Self::ScreenProbeGi => RecipeCost::new(1.2, 32 * 1024 * 1024, 256),
-            Self::SurfaceCacheSurfel => RecipeCost::new(1.8, 80 * 1024 * 1024, 256),
-            Self::WorldRestir => RecipeCost::new(1.7, 64 * 1024 * 1024, 128),
-            Self::SsgiScreenSpace => RecipeCost::new(0.8, 16 * 1024 * 1024, 0),
-            Self::SpecularRestir => RecipeCost::new(2.0, 64 * 1024 * 1024, 128),
-            Self::SparseSdfGi => RecipeCost::new(1.4, 48 * 1024 * 1024, 384),
-            Self::RadianceCascades => RecipeCost::new(1.1, 40 * 1024 * 1024, 320),
-            Self::PathTracedOffline => RecipeCost::new(20.0, 512 * 1024 * 1024, 0),
+            Self::DirectStochasticRt => RecipeCost::new(2.4, 24 * 1024 * 1024, 48 * 1024 * 1024, 0),
+            Self::DirectStochasticVsm => {
+                RecipeCost::new(1.6, 32 * 1024 * 1024, 64 * 1024 * 1024, 128)
+            }
+            Self::DirectDeterministicCsm => {
+                RecipeCost::new(2.1, 16 * 1024 * 1024, 32 * 1024 * 1024, 64)
+            }
+            Self::SpecializedDeterministic => {
+                RecipeCost::new(1.0, 8 * 1024 * 1024, 8 * 1024 * 1024, 0)
+            }
+            Self::DdgiProbes => RecipeCost::new(2.2, 48 * 1024 * 1024, 96 * 1024 * 1024, 512),
+            Self::ScreenProbeGi => RecipeCost::new(1.2, 32 * 1024 * 1024, 32 * 1024 * 1024, 256),
+            Self::SurfaceCacheSurfel => {
+                RecipeCost::new(1.8, 64 * 1024 * 1024, 80 * 1024 * 1024, 256)
+            }
+            Self::WorldRestir => RecipeCost::new(1.7, 48 * 1024 * 1024, 64 * 1024 * 1024, 128),
+            Self::SsgiScreenSpace => RecipeCost::new(0.8, 24 * 1024 * 1024, 16 * 1024 * 1024, 0),
+            Self::SpecularRestir => RecipeCost::new(2.0, 48 * 1024 * 1024, 64 * 1024 * 1024, 128),
+            Self::SparseSdfGi => RecipeCost::new(1.4, 32 * 1024 * 1024, 48 * 1024 * 1024, 384),
+            Self::RadianceCascades => RecipeCost::new(1.1, 32 * 1024 * 1024, 40 * 1024 * 1024, 320),
+            Self::PathTracedOffline => {
+                RecipeCost::new(20.0, 128 * 1024 * 1024, 512 * 1024 * 1024, 0)
+            }
         }
     }
 }
@@ -474,14 +552,16 @@ impl RecipeId {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RecipeCost {
     pub gpu_ms: f32,
+    pub bandwidth: u64,
     pub resident_bytes: u64,
     pub io_ops: u32,
 }
 
 impl RecipeCost {
-    const fn new(gpu_ms: f32, resident_bytes: u64, io_ops: u32) -> Self {
+    const fn new(gpu_ms: f32, bandwidth: u64, resident_bytes: u64, io_ops: u32) -> Self {
         Self {
             gpu_ms,
+            bandwidth,
             resident_bytes,
             io_ops,
         }
@@ -599,6 +679,10 @@ impl BudgetCompiler {
                 .iter()
                 .map(|selected| selected.cost().resident_bytes)
                 .sum::<u64>();
+            let used_bandwidth = recipes
+                .iter()
+                .map(|selected| selected.cost().bandwidth)
+                .sum::<u64>();
             let used_io_ops = recipes
                 .iter()
                 .map(|selected| selected.cost().io_ops)
@@ -606,6 +690,7 @@ impl BudgetCompiler {
             let cost = recipe.cost();
             if used_gpu_ms + cost.gpu_ms > budget.gpu_ms.max(0.1)
                 || used_resident_bytes.saturating_add(cost.resident_bytes) > budget.resident_bytes
+                || used_bandwidth.saturating_add(cost.bandwidth) > budget.bandwidth
                 || used_io_ops.saturating_add(cost.io_ops) > budget.io_ops
             {
                 rejected.push(Rejection::Budget(recipe));
@@ -627,6 +712,15 @@ impl BudgetCompiler {
 }
 
 impl LightingPlan {
+    #[must_use]
+    pub fn executions(&self) -> Vec<RecipeExecution> {
+        self.recipes
+            .iter()
+            .enumerate()
+            .map(|(index, recipe)| recipe.execution(index as u32, recipe.cost().gpu_ms))
+            .collect()
+    }
+
     #[must_use]
     pub fn explain(&self) -> String {
         let selected = self
@@ -776,6 +870,32 @@ mod tests {
         assert!(plan.recipes.contains(&RecipeId::SpecializedDeterministic));
         assert!(plan.explain().contains("unsupported:DirectStochasticRT"));
         assert!(plan.explain().contains("determinism:WorldRestir"));
+    }
+
+    #[test]
+    fn planner_admits_only_within_bandwidth_budget() {
+        let plan = BudgetCompiler::compile(
+            SceneStats::default(),
+            FrameResourceBudget {
+                gpu_ms: 100.0,
+                bandwidth: 1,
+                resident_bytes: u64::MAX,
+                io_ops: u32::MAX,
+                shading_rate_budget: 1.0,
+            },
+            PlanCaps {
+                ray_tracing: false,
+                virtual_shadow: false,
+                offline: false,
+                deterministic_npr: false,
+            },
+            Tier::Balanced,
+        );
+        assert_eq!(plan.recipes, vec![RecipeId::SpecializedDeterministic]);
+        assert!(plan
+            .rejected
+            .iter()
+            .any(|rejection| matches!(rejection, Rejection::Budget(RecipeId::SsgiScreenSpace))));
     }
 
     struct MockBackend {

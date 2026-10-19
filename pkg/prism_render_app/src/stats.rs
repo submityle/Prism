@@ -34,6 +34,10 @@ pub struct RenderFrameStats {
     pub lighting_recipes_selected: u64,
     /// Number of recipes rejected by the most recent plan with a reason.
     pub lighting_recipes_rejected: u64,
+    /// Number of recipe execution declarations admitted by the plan.
+    pub lighting_executions_planned: u64,
+    /// Number of cache invalidation effects observed by the latest plan.
+    pub lighting_cache_invalidations: u64,
     /// The viewport of the most recently recorded frame, empty or not.
     pub last_viewport: RenderViewport,
 }

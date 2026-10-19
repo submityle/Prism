@@ -17,13 +17,13 @@
 | `FieldEpoch` / `ChangeJournal` / checkpoint | `pkg/prism_render_architecture/src/lighting/contract.rs` | 字段级 WAL 记录、单调 epoch、显式快照 |
 | `TraceQuery` / `RayBackend` / `TraceSubmission` | 同上 | 槽位稳定映射、generation、deadline、`Stale`/`Expired`/取消状态 |
 | `Contrib` / `BlendOperator` | 同上 | target 校验，bias 与 variance 分列，禁止有 bias 的无偏混合 |
-| 13 个 recipe 白名单与成本表 | 同上 | `BudgetCompiler` 按能力、确定性和 GPU/驻留/IO 预算准入并生成拒绝原因 |
+| 13 个 recipe 白名单与成本表 | 同上 | `BudgetCompiler` 按能力、确定性和 GPU/带宽/驻留/IO 预算准入并生成拒绝原因 |
 | `CacheEffect` / `ExecPolicy` | 同上 | 缓存失效与执行策略不再混入图资源声明 |
-| render-world 计划入口 | `pkg/prism_render_app/src/lighting.rs`、`plugin.rs`、`stats.rs` | 每个抽取帧编译一次，统计选中/拒绝数量，`explain()` 可追溯 |
-| 计划输入配置 | `pkg/prism_render_app/src/config.rs` | host 可注入 `SceneStats`、`FrameResourceBudget`、`PlanCaps`、`Tier`，不再依赖硬编码默认能力 |
+| render-world 计划入口 | `pkg/prism_render_app/src/lighting.rs`、`plugin.rs`、`stats.rs` | 每个抽取帧编译一次，统计选中/拒绝数量，`explain()` 可追溯；保留字段 epoch 与失效计数 |
+| 计划输入配置与抽取 | `pkg/prism_render_app/src/config.rs`、`lighting.rs`、`plugin.rs` | host 可注入 `SceneStats`、`FrameResourceBudget`、`PlanCaps`、`Tier`，并通过 `LightingSceneInputs`/`ChangeJournal` 跨主世界→render-world 传递快照 |
 | wgpu 外部 buffer 注册 | `os-backends/prism_render_driver_wgpu/src/device.rs` | 修复 `DeviceInner` 自身字段的错误访问，恢复后端编译路径 |
 
-本节只记录已经存在的调用链，不把设计目标或未实测的帧预算写成性能结论。GPU 端 recipe 的具体 shader/pass 必须继续通过同一 `LightingPlan` 准入，不能在子系统内新增旁路开关。
+本节只记录已经存在的调用链，不把设计目标或未实测的帧预算写成性能结论。当前新宿主已经完成计划编译、输入抽取与字段 epoch 观察，但**尚未把 recipe 伪装成 GPU pass**：`prism_render_graph` 的图内持久资源在 realization 后才取得真实句柄，而现有 RHI 没有通用的图内 bind-group 构建与 readback 闭环。因此 lighting/GI shader/pass 执行仍是未完成边界，不能宣称 GPU recipe 已接入或 H1–H4 / S1–S6 已通过。GPU 端 recipe 的具体 shader/pass 接入后必须继续通过同一 `LightingPlan` 准入，不能在子系统内新增旁路开关。
 
 ---
 
