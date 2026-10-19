@@ -46,6 +46,8 @@ pub struct RenderFrameStats {
     pub lighting_debug_rejections: u64,
     /// Frames for which the selected lighting plan recorded a real GPU pass.
     pub lighting_gpu_passes_recorded: u64,
+    /// Trace compute dispatches recorded into host frame graphs.
+    pub trace_gpu_dispatches_recorded: u64,
     /// The viewport of the most recently recorded frame, empty or not.
     pub last_viewport: RenderViewport,
     /// The receipt for the most recently attempted frame graph execution.

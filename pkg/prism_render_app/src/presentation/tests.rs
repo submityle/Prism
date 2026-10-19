@@ -68,6 +68,7 @@ fn null_surface_presents_and_releases_window_resources() {
         &queues,
         &functions,
         None,
+        None,
         &mut stats,
     ));
     assert_eq!(targets.len(), 1);

@@ -8,6 +8,8 @@ use prism_render_architecture::lighting::contract::{
     RejectionExplanation, SceneStats, Tier,
 };
 use prism_render_architecture::lighting::{DebugMeta, DebugView};
+use prism_render_architecture::ray_scene::GpuBvhBuffers;
+use std::sync::Arc;
 
 use crate::config::RenderAppConfig;
 use crate::record::RenderRecord;
@@ -219,6 +221,24 @@ pub struct LightingSceneInputs {
     pub surfaces: Vec<LightingSurfaceInput>,
 }
 
+/// Optional host-owned packed scene used by the software-BVH GI trace pass.
+/// Surface IDs are stable identities aligned one-to-one with `surfaces` in
+/// [`LightingSceneInputs`]; malformed alignment is rejected by host preparation.
+#[derive(Clone, Debug, Resource)]
+pub struct LightingTraceSceneInput {
+    /// Packed BVH in the architecture crate's frozen GPU ABI.
+    pub bvh: Arc<GpuBvhBuffers>,
+    /// Stable identities for the current lighting surfaces, in matching order.
+    pub surface_ids: Vec<u64>,
+    /// Deterministic cosine rays generated for each surface each frame.
+    pub rays_per_surface: u32,
+    /// Positive world-space normal offset for generated rays.
+    pub ray_epsilon: f32,
+    /// Maximum world-space ray distance.
+    pub ray_tmax: f32,
+}
+
+
 impl LightingSceneInputs {
     /// Creates inputs from the host's configured scene estimate.
     #[must_use]
@@ -265,6 +285,8 @@ pub struct ExtractedLightingInputs {
     /// Per-surface GI candidates, aligned with `surfaces` when present.
     pub gi_candidates: Vec<Vec<LightingGiCandidateInput>>,
     pub surfaces: Vec<LightingSurfaceInput>,
+    /// Optional packed scene used to generate and trace this frame's GI rays.
+    pub trace_scene: Option<LightingTraceSceneInput>,
 }
 
 impl Default for LightingPlanState {
@@ -314,6 +336,7 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
         punctuals: inputs.punctuals,
         gi_candidates: inputs.gi_candidates,
         surfaces: inputs.surfaces,
+        trace_scene: main.get_resource::<LightingTraceSceneInput>().cloned(),
     });
 }
 

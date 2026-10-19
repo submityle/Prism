@@ -130,7 +130,10 @@ pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
 pub use lighting::{
     ExtractedLightingInputs, LightingDirectionalInput, LightingGiCandidateInput, LightingPlanState,
-    LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
+    LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput, LightingTraceSceneInput,
+};
+pub use lighting_trace_gpu::{
+    LightingTraceState, TracePreparationError, TracePreparationStatus, MAX_HOST_TRACE_RAYS,
 };
 pub use material::{
     BindlessSlot, FallbackTextures, MaterialBindingLayout, MaterialParameterBuffers,
@@ -221,6 +224,7 @@ pub mod prelude {
     pub use crate::lighting::{
         ExtractedLightingInputs, LightingDirectionalInput, LightingGiCandidateInput,
         LightingPlanState, LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
+        LightingTraceSceneInput,
     };
     pub use crate::material::{
         BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,

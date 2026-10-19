@@ -16,6 +16,7 @@ prism_material_pcm = { path = "../prism_material_pcm" }
 # (no render/physics double-implementation of the same solver math).
 prism_physics_core = { path = "../prism_physics_core" }
 glam = { version = "0.33.2", default-features = false }
+prism_math = { path = "../prism_math" }
 # POD GPU records are bit-cast to raw bytes and to atomic word arrays; the
 # atomic-POD records module re-exports this for its generated code.
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }

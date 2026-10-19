@@ -6,6 +6,10 @@
 
 use std::sync::Arc;
 
+use prism_ecs::prelude::Resource;
+use prism_render_architecture::lighting::raygen::{
+    append_surface_gi_rays, GiRay, SurfaceRayGenInput,
+};
 use prism_render_architecture::ray_scene::{GpuBvhBuffers, NODE_WORDS, TRIANGLE_WORDS};
 use prism_render_driver as rhi;
 use rhi::{RenderDevice, RenderQueue};
@@ -17,6 +21,12 @@ const MAX_TRIANGLE_COUNT: usize = 2_000_000;
 const MAX_RAY_COUNT: usize = 1_000_000;
 const RAY_WORDS: usize = 8;
 const HIT_WORDS: usize = 8;
+/// Host GI trace work is explicitly bounded to 64 rays for each of 1024
+/// extracted surfaces. The GI candidate builder is a separate future stage.
+pub const MAX_HOST_TRACE_RAYS: usize = 65_536;
+/// Bound matching the architecture lighting surface budget and sample policy.
+pub const MAX_HOST_TRACE_RAYS_PER_SURFACE: u32 = 64;
+const HOST_TRACE_OUTPUT_BYTES: u64 = (MAX_HOST_TRACE_RAYS * HIT_WORDS * 4) as u64;
 
 /// Input ray, with a closed lower and upper parameter interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,6 +102,246 @@ pub enum TraceGpuError {
     TraversalFault(usize),
 }
 
+/// Host-side validation outcome for preparing the optional frame trace pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TracePreparationError {
+    /// No trace scene was supplied by the host.
+    NoScene,
+    /// The current frame has no surfaces to trace.
+    NoSurfaces,
+    /// Stable IDs are not one-to-one with the extracted surfaces.
+    SurfaceIdCountMismatch { surfaces: usize, ids: usize },
+    /// Per-surface samples are zero or exceed the bounded frame capacity.
+    RayCapacity,
+    /// Two surfaces claim the same stable identity.
+    DuplicateSurfaceId(u64),
+    /// Scene validation or GPU preparation rejected the packed input.
+    Trace(TraceGpuError),
+    /// Architecture ray generation rejected a surface or allocation.
+    RayGeneration(prism_render_architecture::lighting::raygen::RayGenError),
+}
+
+/// Observable status of the latest host trace preparation attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TracePreparationStatus {
+    /// The trace feature is not configured by the host.
+    Disabled,
+    /// No eligible surface batch was available.
+    NoSurfaces,
+    /// Input validation or device preparation failed.
+    Failed(TracePreparationError),
+    /// Trace dispatch was prepared; hits remain an intermediate output.
+    Prepared { rays: u32, frame_index: u64 },
+}
+
+/// Render-world owner for trace resources and the most recent preparation result.
+#[derive(Resource, Default)]
+pub struct LightingTraceState {
+    generation: Option<u64>,
+    gpu: Option<LightingTraceGpu>,
+    output: Option<TraceOutputBuffer>,
+    status: TracePreparationStatus,
+    validated_scene: Option<Arc<GpuBvhBuffers>>,
+    surface_id_scratch: Vec<u64>,
+    ray_scratch: Vec<TraceRay>,
+    raygen_scratch: Vec<GiRay>,
+}
+
+impl Default for TracePreparationStatus {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+impl LightingTraceState {
+    /// Latest trace preparation status, suitable for diagnostics and tests.
+    pub const fn status(&self) -> TracePreparationStatus {
+        self.status
+    }
+
+    /// Prepares a deterministic per-surface trace batch for this frame.
+    pub fn prepare(
+        &mut self,
+        input: Option<&crate::LightingTraceSceneInput>,
+        surfaces: &[crate::LightingSurfaceInput],
+        frame_index: u64,
+        device_generation: u64,
+        device: Arc<dyn RenderDevice + Send + Sync>,
+        queue: &dyn RenderQueue,
+    ) -> Option<TraceGraphRecorder> {
+        let Some(input) = input else {
+            self.status = TracePreparationStatus::Disabled;
+            return None;
+        };
+        if surfaces.is_empty() {
+            self.status = TracePreparationStatus::NoSurfaces;
+            return None;
+        }
+        if input.surface_ids.len() != surfaces.len() {
+            self.status =
+                TracePreparationStatus::Failed(TracePreparationError::SurfaceIdCountMismatch {
+                    surfaces: surfaces.len(),
+                    ids: input.surface_ids.len(),
+                });
+            return None;
+        }
+        let ray_count = surfaces.len().checked_mul(input.rays_per_surface as usize);
+        if input.rays_per_surface == 0
+            || input.rays_per_surface > MAX_HOST_TRACE_RAYS_PER_SURFACE
+            || ray_count.is_none_or(|n| n > MAX_HOST_TRACE_RAYS)
+        {
+            self.status = TracePreparationStatus::Failed(TracePreparationError::RayCapacity);
+            return None;
+        }
+        let ray_count = ray_count.expect("checked above");
+        if ray_count == 0 {
+            self.status = TracePreparationStatus::NoSurfaces;
+            return None;
+        }
+        self.surface_id_scratch.clear();
+        if self.surface_id_scratch.capacity() < input.surface_ids.len()
+            && self
+                .surface_id_scratch
+                .try_reserve_exact(input.surface_ids.len())
+                .is_err()
+        {
+            self.status = TracePreparationStatus::Failed(TracePreparationError::RayCapacity);
+            return None;
+        }
+        self.surface_id_scratch
+            .extend_from_slice(&input.surface_ids);
+        self.surface_id_scratch.sort_unstable();
+        if let Some(pair) = self
+            .surface_id_scratch
+            .windows(2)
+            .find(|pair| pair[0] == pair[1])
+        {
+            let id = pair[0];
+            self.status =
+                TracePreparationStatus::Failed(TracePreparationError::DuplicateSurfaceId(id));
+            return None;
+        }
+        if self.generation != Some(device_generation) {
+            self.gpu = None;
+            self.output = None;
+            self.generation = Some(device_generation);
+        }
+        if self.gpu.is_none() {
+            self.gpu = Some(LightingTraceGpu::new(Arc::clone(&device)));
+        }
+        if self.output.is_none() {
+            let limit = device.capabilities().limits.max_storage_buffer_binding_size;
+            if HOST_TRACE_OUTPUT_BYTES > limit {
+                self.status = TracePreparationStatus::Failed(TracePreparationError::Trace(
+                    TraceGpuError::StorageBindingLimit,
+                ));
+                return None;
+            }
+            let id = device.create_buffer(&rhi::BufferDescriptor::new(
+                HOST_TRACE_OUTPUT_BYTES,
+                rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_SRC,
+            ));
+            self.output = Some(TraceOutputBuffer {
+                id,
+                capacity_bytes: HOST_TRACE_OUTPUT_BYTES,
+                device: Arc::clone(&device),
+            });
+        }
+
+        if self.ray_scratch.capacity() < ray_count
+            && self
+                .ray_scratch
+                .try_reserve_exact(ray_count - self.ray_scratch.len())
+                .is_err()
+        {
+            self.status = TracePreparationStatus::Failed(TracePreparationError::RayCapacity);
+            return None;
+        }
+        if self.raygen_scratch.capacity() < ray_count
+            && self
+                .raygen_scratch
+                .try_reserve_exact(ray_count - self.raygen_scratch.len())
+                .is_err()
+        {
+            self.status = TracePreparationStatus::Failed(TracePreparationError::RayCapacity);
+            return None;
+        }
+        self.ray_scratch.clear();
+        self.raygen_scratch.clear();
+        let scene = BorrowedPackedTraceScene::from(input.bvh.as_ref());
+        if self
+            .validated_scene
+            .as_ref()
+            .is_none_or(|scene| !Arc::ptr_eq(scene, &input.bvh))
+        {
+            if let Err(error) = scene.validate() {
+                self.status = TracePreparationStatus::Failed(TracePreparationError::Trace(error));
+                return None;
+            }
+            self.validated_scene = Some(Arc::clone(&input.bvh));
+        }
+        for (surface, &stable_id) in surfaces.iter().zip(&input.surface_ids) {
+            if let Err(error) = append_surface_gi_rays(
+                SurfaceRayGenInput {
+                    position: prism_math::Vec3::new(
+                        surface.position[0],
+                        surface.position[1],
+                        surface.position[2],
+                    ),
+                    normal: prism_math::Vec3::new(
+                        surface.normal[0],
+                        surface.normal[1],
+                        surface.normal[2],
+                    ),
+                    surface_stable_id: stable_id,
+                    frame_index,
+                    sample_index: 0,
+                    ray_count: input.rays_per_surface,
+                    epsilon: input.ray_epsilon,
+                    tmax: input.ray_tmax,
+                },
+                &mut self.raygen_scratch,
+            ) {
+                self.status =
+                    TracePreparationStatus::Failed(TracePreparationError::RayGeneration(error));
+                return None;
+            }
+        }
+        self.ray_scratch
+            .extend(self.raygen_scratch.iter().map(|ray| TraceRay {
+                origin: ray.origin.to_array(),
+                t_min: ray.tmin,
+                direction: ray.direction.to_array(),
+                t_max: ray.tmax,
+            }));
+        let output = self.output.as_ref().expect("output allocated above");
+        let recorder = self
+            .gpu
+            .as_mut()
+            .expect("GPU pass created above")
+            .prepare_graph(
+                queue,
+                &scene,
+                &self.ray_scratch,
+                output.id,
+                output.capacity_bytes,
+            );
+        match recorder {
+            Ok(recorder) => {
+                self.status = TracePreparationStatus::Prepared {
+                    rays: ray_count as u32,
+                    frame_index,
+                };
+                Some(recorder)
+            }
+            Err(error) => {
+                self.status = TracePreparationStatus::Failed(TracePreparationError::Trace(error));
+                None
+            }
+        }
+    }
+}
+
 /// Validated packed scene. Words use the architecture crate's frozen ABI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackedTraceScene {
@@ -110,84 +360,143 @@ impl From<&GpuBvhBuffers> for PackedTraceScene {
     }
 }
 
+/// Borrowed packed geometry view; validation and upload do not clone the BVH.
+#[derive(Clone, Copy, Debug)]
+pub struct BorrowedPackedTraceScene<'a> {
+    /// Flat node ABI words.
+    pub nodes: &'a [u32],
+    /// Flat triangle ABI words.
+    pub triangles: &'a [u32],
+}
+
+impl<'a> From<&'a GpuBvhBuffers> for BorrowedPackedTraceScene<'a> {
+    fn from(value: &'a GpuBvhBuffers) -> Self {
+        Self {
+            nodes: &value.nodes,
+            triangles: &value.triangles,
+        }
+    }
+}
+
+impl<'a> From<&'a PackedTraceScene> for BorrowedPackedTraceScene<'a> {
+    fn from(value: &'a PackedTraceScene) -> Self {
+        Self {
+            nodes: &value.nodes,
+            triangles: &value.triangles,
+        }
+    }
+}
+
+trait PackedSceneWords {
+    fn nodes(&self) -> &[u32];
+    fn triangles(&self) -> &[u32];
+}
+
+impl PackedSceneWords for PackedTraceScene {
+    fn nodes(&self) -> &[u32] {
+        &self.nodes
+    }
+    fn triangles(&self) -> &[u32] {
+        &self.triangles
+    }
+}
+
+impl PackedSceneWords for BorrowedPackedTraceScene<'_> {
+    fn nodes(&self) -> &[u32] {
+        self.nodes
+    }
+    fn triangles(&self) -> &[u32] {
+        self.triangles
+    }
+}
+
 impl PackedTraceScene {
     /// Checks ABI lengths, finite ordered bounds, leaf ranges, triangle data,
     /// reachability, cycles, and the exact maximum traversal stack occupancy.
     pub fn validate(&self) -> Result<(), TraceGpuError> {
-        if self.nodes.is_empty() || self.triangles.is_empty() {
-            return Err(TraceGpuError::EmptyGeometry);
-        }
-        if self.nodes.len() % NODE_WORDS != 0 || self.triangles.len() % TRIANGLE_WORDS != 0 {
-            return Err(TraceGpuError::MalformedPackedLength);
-        }
-        let node_count = self.nodes.len() / NODE_WORDS;
-        let triangle_count = self.triangles.len() / TRIANGLE_WORDS;
-        if node_count > MAX_NODE_COUNT || triangle_count > MAX_TRIANGLE_COUNT {
-            return Err(TraceGpuError::GeometryLimit);
-        }
-        for n in 0..node_count {
-            let b = n * NODE_WORDS;
-            for a in 0..3 {
-                let lo = f32::from_bits(self.nodes[b + a]);
-                let hi = f32::from_bits(self.nodes[b + 3 + a]);
-                if !lo.is_finite() || !hi.is_finite() || lo > hi {
-                    return Err(TraceGpuError::InvalidNode(n));
-                }
-            }
-            let count = self.nodes[b + 8];
-            if count == 0 {
-                let second = self.nodes[b + 7] as usize;
-                if second <= n + 1
-                    || second >= node_count
-                    || self.nodes[b + 9] > 2
-                    || n + 1 >= node_count
-                {
-                    return Err(TraceGpuError::InvalidNode(n));
-                }
-            } else {
-                let start = self.nodes[b + 6] as usize;
-                if start
-                    .checked_add(count as usize)
-                    .is_none_or(|end| end > triangle_count)
-                {
-                    return Err(TraceGpuError::InvalidNode(n));
-                }
+        validate_packed_scene(self)
+    }
+}
+
+impl BorrowedPackedTraceScene<'_> {
+    /// Validates the packed ABI without copying either backing array.
+    pub fn validate(&self) -> Result<(), TraceGpuError> {
+        validate_packed_scene(self)
+    }
+}
+
+fn validate_packed_scene(scene: &impl PackedSceneWords) -> Result<(), TraceGpuError> {
+    let nodes = scene.nodes();
+    let triangles = scene.triangles();
+    if nodes.is_empty() || triangles.is_empty() {
+        return Err(TraceGpuError::EmptyGeometry);
+    }
+    if nodes.len() % NODE_WORDS != 0 || triangles.len() % TRIANGLE_WORDS != 0 {
+        return Err(TraceGpuError::MalformedPackedLength);
+    }
+    let node_count = nodes.len() / NODE_WORDS;
+    let triangle_count = triangles.len() / TRIANGLE_WORDS;
+    if node_count > MAX_NODE_COUNT || triangle_count > MAX_TRIANGLE_COUNT {
+        return Err(TraceGpuError::GeometryLimit);
+    }
+    for n in 0..node_count {
+        let b = n * NODE_WORDS;
+        for a in 0..3 {
+            let lo = f32::from_bits(nodes[b + a]);
+            let hi = f32::from_bits(nodes[b + 3 + a]);
+            if !lo.is_finite() || !hi.is_finite() || lo > hi {
+                return Err(TraceGpuError::InvalidNode(n));
             }
         }
-        for t in 0..triangle_count {
-            let b = t * TRIANGLE_WORDS;
-            let v = (0..9).all(|i| f32::from_bits(self.triangles[b + i]).is_finite());
-            let a = vec3(&self.triangles, b);
-            let e1 = sub(vec3(&self.triangles, b + 3), a);
-            let e2 = sub(vec3(&self.triangles, b + 6), a);
-            if !v || dot(cross(e1, e2), cross(e1, e2)) <= 1.0e-20 {
-                return Err(TraceGpuError::InvalidTriangle(t));
+        let count = nodes[b + 8];
+        if count == 0 {
+            let second = nodes[b + 7] as usize;
+            if second <= n + 1 || second >= node_count || nodes[b + 9] > 2 || n + 1 >= node_count {
+                return Err(TraceGpuError::InvalidNode(n));
+            }
+        } else {
+            let start = nodes[b + 6] as usize;
+            if start
+                .checked_add(count as usize)
+                .is_none_or(|end| end > triangle_count)
+            {
+                return Err(TraceGpuError::InvalidNode(n));
             }
         }
-        let mut seen = vec![false; node_count];
-        let mut stack = vec![(0usize, 0usize)];
-        let mut max_stack = 0;
-        while let Some((n, depth)) = stack.pop() {
-            if n >= node_count || seen[n] {
-                return Err(TraceGpuError::InvalidTree);
-            }
-            seen[n] = true;
-            max_stack = max_stack.max(depth);
-            let b = n * NODE_WORDS;
-            if self.nodes[b + 8] == 0 {
-                max_stack = max_stack.max(depth + 1);
-                stack.push((self.nodes[b + 7] as usize, depth + 1));
-                stack.push((n + 1, depth + 1));
-            }
+    }
+    for t in 0..triangle_count {
+        let b = t * TRIANGLE_WORDS;
+        let v = (0..9).all(|i| f32::from_bits(triangles[b + i]).is_finite());
+        let a = vec3(triangles, b);
+        let e1 = sub(vec3(triangles, b + 3), a);
+        let e2 = sub(vec3(triangles, b + 6), a);
+        if !v || dot(cross(e1, e2), cross(e1, e2)) <= 1.0e-20 {
+            return Err(TraceGpuError::InvalidTriangle(t));
         }
-        if seen.iter().any(|v| !v) {
+    }
+    let mut seen = vec![false; node_count];
+    let mut stack = vec![(0usize, 0usize)];
+    let mut max_stack = 0;
+    while let Some((n, depth)) = stack.pop() {
+        if n >= node_count || seen[n] {
             return Err(TraceGpuError::InvalidTree);
         }
-        if max_stack > MAX_STACK {
-            return Err(TraceGpuError::StackDepthExceeded);
+        seen[n] = true;
+        max_stack = max_stack.max(depth);
+        let b = n * NODE_WORDS;
+        if nodes[b + 8] == 0 {
+            max_stack = max_stack.max(depth + 1);
+            stack.push((nodes[b + 7] as usize, depth + 1));
+            stack.push((n + 1, depth + 1));
         }
-        Ok(())
     }
+    if seen.iter().any(|v| !v) {
+        return Err(TraceGpuError::InvalidTree);
+    }
+    if max_stack > MAX_STACK {
+        return Err(TraceGpuError::StackDepthExceeded);
+    }
+    Ok(())
 }
 
 /// CPU oracle over the exact packed input accepted by the GPU component.
@@ -197,7 +506,8 @@ pub fn trace_reference(
 ) -> Result<Vec<TraceHit>, TraceGpuError> {
     scene.validate()?;
     validate_rays(rays)?;
-    Ok(rays.iter().map(|ray| trace_one(scene, *ray)).collect())
+    let borrowed = BorrowedPackedTraceScene::from(scene);
+    Ok(rays.iter().map(|ray| trace_one(&borrowed, *ray)).collect())
 }
 
 /// Real resident upload-buffer capacities owned by a trace pass.
@@ -213,6 +523,9 @@ pub struct TraceBufferCapacityStats {
     pub retired_buffers: usize,
     /// Number of upload-buffer allocations performed by this pass.
     pub allocations: u64,
+    /// Number of times the packed BVH node and triangle data was uploaded.
+    /// A stable scene should increment this once for the lifetime of the pass.
+    pub scene_uploads: u64,
 }
 
 /// A buffer that the render graph must import before recording a trace pass.
@@ -280,6 +593,18 @@ struct ResidentBuffer {
     capacity_bytes: u64,
 }
 
+struct TraceOutputBuffer {
+    id: rhi::BufferId,
+    capacity_bytes: u64,
+    device: Arc<dyn RenderDevice + Send + Sync>,
+}
+
+impl Drop for TraceOutputBuffer {
+    fn drop(&mut self) {
+        self.device.destroy_buffer(self.id);
+    }
+}
+
 /// Owned compute pipeline and capacity-managed upload buffers.
 ///
 /// A pass is device-affine: use only the queue belonging to the device passed
@@ -298,9 +623,12 @@ pub struct LightingTraceGpu {
     triangles: Option<ResidentBuffer>,
     rays: Option<ResidentBuffer>,
     retired_buffers: Vec<rhi::BufferId>,
-    graph_bind_groups: Vec<rhi::BindGroupId>,
+    graph_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 4])>,
+    retired_bind_groups: Vec<rhi::BindGroupId>,
     packed_rays: Vec<u32>,
+    uploaded_scene_identity: Option<(usize, usize, usize, usize)>,
     allocations: u64,
+    scene_uploads: u64,
 }
 
 impl LightingTraceGpu {
@@ -344,9 +672,12 @@ impl LightingTraceGpu {
             triangles: None,
             rays: None,
             retired_buffers: Vec::new(),
-            graph_bind_groups: Vec::new(),
+            graph_bind_group: None,
+            retired_bind_groups: Vec::new(),
             packed_rays: Vec::new(),
+            uploaded_scene_identity: None,
             allocations: 0,
+            scene_uploads: 0,
         }
     }
 
@@ -358,6 +689,7 @@ impl LightingTraceGpu {
             rays_bytes: self.rays.map_or(0, |buffer| buffer.capacity_bytes),
             retired_buffers: self.retired_buffers.len(),
             allocations: self.allocations,
+            scene_uploads: self.scene_uploads,
         }
     }
 
@@ -372,7 +704,7 @@ impl LightingTraceGpu {
     pub fn prepare_graph(
         &mut self,
         queue: &dyn RenderQueue,
-        scene: &PackedTraceScene,
+        scene: &BorrowedPackedTraceScene<'_>,
         rays: &[TraceRay],
         output: rhi::BufferId,
         output_size_bytes: u64,
@@ -424,28 +756,43 @@ impl LightingTraceGpu {
             sizes[2],
             limit,
         );
-        queue.write_buffer(node_buffer, 0, bytemuck::cast_slice(&scene.nodes));
-        queue.write_buffer(triangle_buffer, 0, bytemuck::cast_slice(&scene.triangles));
+        let scene_identity = (
+            scene.nodes.as_ptr() as usize,
+            scene.nodes.len(),
+            scene.triangles.as_ptr() as usize,
+            scene.triangles.len(),
+        );
+        if self.uploaded_scene_identity != Some(scene_identity) {
+            queue.write_buffer(node_buffer, 0, bytemuck::cast_slice(scene.nodes));
+            queue.write_buffer(triangle_buffer, 0, bytemuck::cast_slice(scene.triangles));
+            self.uploaded_scene_identity = Some(scene_identity);
+            self.scene_uploads = self.scene_uploads.saturating_add(1);
+        }
         self.pack_rays(rays, sizes[2])?;
         queue.write_buffer(ray_buffer, 0, bytemuck::cast_slice(&self.packed_rays));
-        let group = self.device.create_bind_group(&rhi::BindGroupDescriptor {
-            label: Some("lighting-trace-gpu-graph-resources".into()),
-            layout: Some(self.layout),
-            entries: [node_buffer, triangle_buffer, ray_buffer, output]
-                .into_iter()
-                .zip(sizes)
-                .enumerate()
-                .map(|(binding, (buffer, size))| rhi::BindGroupEntry {
-                    binding: binding as u32,
-                    resource: rhi::BindingResource::Buffer {
-                        buffer,
-                        offset: 0,
-                        size: Some(size),
-                    },
-                })
-                .collect(),
-        });
-        self.graph_bind_groups.push(group);
+        let buffers = [node_buffer, triangle_buffer, ray_buffer, output];
+        let binding_sizes = [
+            self.nodes.expect("node buffer was ensured").capacity_bytes,
+            self.triangles
+                .expect("triangle buffer was ensured")
+                .capacity_bytes,
+            self.rays.expect("ray buffer was ensured").capacity_bytes,
+            output_size_bytes,
+        ];
+        let group = if let Some((group, previous_buffers)) = self.graph_bind_group {
+            if previous_buffers == buffers {
+                group
+            } else {
+                self.retired_bind_groups.push(group);
+                let group = self.create_graph_bind_group(buffers, binding_sizes);
+                self.graph_bind_group = Some((group, buffers));
+                group
+            }
+        } else {
+            let group = self.create_graph_bind_group(buffers, binding_sizes);
+            self.graph_bind_group = Some((group, buffers));
+            group
+        };
         Ok(TraceGraphRecorder {
             nodes: TraceGraphBuffer {
                 id: node_buffer,
@@ -466,6 +813,30 @@ impl LightingTraceGpu {
             pipeline: self.pipeline,
             bind_group: group,
             workgroups,
+        })
+    }
+
+    fn create_graph_bind_group(
+        &self,
+        buffers: [rhi::BufferId; 4],
+        sizes: [u64; 4],
+    ) -> rhi::BindGroupId {
+        self.device.create_bind_group(&rhi::BindGroupDescriptor {
+            label: Some("lighting-trace-gpu-graph-resources".into()),
+            layout: Some(self.layout),
+            entries: buffers
+                .into_iter()
+                .zip(sizes)
+                .enumerate()
+                .map(|(binding, (buffer, size))| rhi::BindGroupEntry {
+                    binding: binding as u32,
+                    resource: rhi::BindingResource::Buffer {
+                        buffer,
+                        offset: 0,
+                        size: Some(size),
+                    },
+                })
+                .collect(),
         })
     }
 
@@ -494,7 +865,10 @@ impl LightingTraceGpu {
 
 impl Drop for LightingTraceGpu {
     fn drop(&mut self) {
-        for bind_group in self.graph_bind_groups.drain(..) {
+        if let Some((bind_group, _)) = self.graph_bind_group.take() {
+            self.device.destroy_bind_group(bind_group);
+        }
+        for bind_group in self.retired_bind_groups.drain(..) {
             self.device.destroy_bind_group(bind_group);
         }
         for buffer in [self.nodes, self.triangles, self.rays]
@@ -587,7 +961,7 @@ fn validate_rays(rays: &[TraceRay]) -> Result<(), TraceGpuError> {
     Ok(())
 }
 
-fn trace_one(scene: &PackedTraceScene, ray: TraceRay) -> TraceHit {
+fn trace_one(scene: &BorrowedPackedTraceScene<'_>, ray: TraceRay) -> TraceHit {
     let mut stack = [0u32; MAX_STACK];
     let mut sp = 0usize;
     let mut node = 0usize;
@@ -788,6 +1162,186 @@ mod tests {
     }
 
     #[test]
+    fn host_trace_preparation_generates_bounded_rays_and_rejects_duplicate_surface_ids() {
+        use prism_render_architecture::ray_scene::{Bvh, Triangle};
+
+        let instance = prism_render_driver_null::NullInstance::new();
+        let adapter = instance
+            .request_adapter(&rhi::RequestAdapterOptions::default())
+            .unwrap();
+        let (device, queue) = instance
+            .create_device(&adapter, &rhi::DeviceDescriptor::default())
+            .unwrap();
+        let device = Arc::new(device);
+        let trace_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+        let bvh = Bvh::build(&[Triangle::new(
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [0.0, 1.0, -1.0],
+            7,
+        )]);
+        let input = crate::LightingTraceSceneInput {
+            bvh: Arc::new(GpuBvhBuffers::from_bvh(&bvh)),
+            surface_ids: vec![42],
+            rays_per_surface: 2,
+            ray_epsilon: 0.001,
+            ray_tmax: 10.0,
+        };
+        let surfaces = [crate::LightingSurfaceInput::default()];
+        let mut state = LightingTraceState::default();
+        let recorder = state.prepare(
+            Some(&input),
+            &surfaces,
+            3,
+            1,
+            Arc::clone(&trace_device),
+            &queue,
+        );
+        assert!(recorder.is_some());
+        assert_eq!(
+            state.status(),
+            TracePreparationStatus::Prepared {
+                rays: 2,
+                frame_index: 3
+            }
+        );
+        let surface_id_capacity = state.surface_id_scratch.capacity();
+        assert!(state
+            .prepare(
+                Some(&input),
+                &surfaces,
+                4,
+                1,
+                Arc::clone(&trace_device),
+                &queue,
+            )
+            .is_some());
+        assert_eq!(state.surface_id_scratch.capacity(), surface_id_capacity);
+
+        let duplicate_ids = crate::LightingTraceSceneInput {
+            surface_ids: vec![42, 42],
+            ..input
+        };
+        let two_surfaces = [
+            crate::LightingSurfaceInput::default(),
+            crate::LightingSurfaceInput::default(),
+        ];
+        assert!(state
+            .prepare(
+                Some(&duplicate_ids),
+                &two_surfaces,
+                4,
+                1,
+                trace_device,
+                &queue,
+            )
+            .is_none());
+        assert_eq!(
+            state.status(),
+            TracePreparationStatus::Failed(TracePreparationError::DuplicateSurfaceId(42))
+        );
+    }
+
+    #[test]
+    fn stable_arc_bvh_uploads_once_replacement_reuploads_and_device_generation_rebuilds() {
+        use prism_render_architecture::ray_scene::{Bvh, Triangle};
+
+        let instance = prism_render_driver_null::NullInstance::new();
+        let adapter = instance
+            .request_adapter(&rhi::RequestAdapterOptions::default())
+            .unwrap();
+        let (device, queue) = instance
+            .create_device(&adapter, &rhi::DeviceDescriptor::default())
+            .unwrap();
+        let device = Arc::new(device);
+        let trace_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+        let make_scene = |z: f32| {
+            let bvh = Bvh::build(&[Triangle::new(
+                [-1.0, -1.0, z],
+                [1.0, -1.0, z],
+                [0.0, 1.0, z],
+                7,
+            )]);
+            crate::LightingTraceSceneInput {
+                bvh: Arc::new(GpuBvhBuffers::from_bvh(&bvh)),
+                surface_ids: vec![42],
+                rays_per_surface: 1,
+                ray_epsilon: 0.001,
+                ray_tmax: 10.0,
+            }
+        };
+        let surface = [crate::LightingSurfaceInput::default()];
+        let first_scene = make_scene(-1.0);
+        let mut state = LightingTraceState::default();
+
+        for frame_index in 0..3 {
+            assert!(state
+                .prepare(
+                    Some(&first_scene),
+                    &surface,
+                    frame_index,
+                    1,
+                    Arc::clone(&trace_device),
+                    &queue,
+                )
+                .is_some());
+        }
+        assert_eq!(
+            state
+                .gpu
+                .as_ref()
+                .unwrap()
+                .buffer_capacity_stats()
+                .scene_uploads,
+            1,
+            "the same retained Arc scene must not be uploaded again each frame"
+        );
+
+        let replacement_scene = make_scene(-2.0);
+        assert!(state
+            .prepare(
+                Some(&replacement_scene),
+                &surface,
+                3,
+                1,
+                Arc::clone(&trace_device),
+                &queue,
+            )
+            .is_some());
+        assert_eq!(
+            state
+                .gpu
+                .as_ref()
+                .unwrap()
+                .buffer_capacity_stats()
+                .scene_uploads,
+            2,
+            "a different Arc with different BVH contents must be uploaded"
+        );
+
+        assert!(state
+            .prepare(
+                Some(&replacement_scene),
+                &surface,
+                4,
+                2,
+                trace_device,
+                &queue,
+            )
+            .is_some());
+        assert_eq!(
+            state
+                .gpu
+                .as_ref()
+                .unwrap()
+                .buffer_capacity_stats()
+                .scene_uploads,
+            1,
+            "device-generation replacement creates fresh buffers and uploads the scene once"
+        );
+    }
+
+    #[test]
     fn packed_reference_reports_stable_nearest_hits_and_misses() {
         let (scene, rays) = fixture();
         let node_count = scene.nodes.len() / NODE_WORDS;
@@ -868,6 +1422,7 @@ mod tests {
         let device = Arc::new(device);
         let trace_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
         let (scene, rays) = fixture();
+        let borrowed_scene = BorrowedPackedTraceScene::from(&scene);
         let required = (rays.len() * HIT_WORDS * 4) as u64;
         let output = device.create_buffer(&BufferDescriptor::new(
             required,
@@ -875,11 +1430,11 @@ mod tests {
         ));
         let mut trace = LightingTraceGpu::new(trace_device);
         assert!(matches!(
-            trace.prepare_graph(&queue, &scene, &rays, output, required - 1),
+            trace.prepare_graph(&queue, &borrowed_scene, &rays, output, required - 1),
             Err(TraceGpuError::OutputBufferTooSmall)
         ));
         let recorder = trace
-            .prepare_graph(&queue, &scene, &rays, output, required)
+            .prepare_graph(&queue, &borrowed_scene, &rays, output, required)
             .unwrap();
         let mut graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
         let nodes = graph.import_buffer(
@@ -956,6 +1511,7 @@ mod tests {
         let device = Arc::new(device);
         let trace_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
         let (scene, rays) = fixture();
+        let borrowed_scene = BorrowedPackedTraceScene::from(&scene);
         let expected = trace_reference(&scene, &rays).unwrap();
         let node_count = scene.nodes.len() / NODE_WORDS;
         assert!(node_count >= 7, "fixture must contain internal BVH nodes");
@@ -971,7 +1527,7 @@ mod tests {
         let recorder = pass
             .prepare_graph(
                 &queue,
-                &scene,
+                &borrowed_scene,
                 &rays,
                 output,
                 (rays.len() * HIT_WORDS * 4) as u64,

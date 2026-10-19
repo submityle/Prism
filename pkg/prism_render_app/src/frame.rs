@@ -13,6 +13,7 @@ use prism_render_graph::{
 use crate::display_transform_gpu::{DisplayTransformGpuError, OffscreenDisplayTransform};
 use crate::draw::DrawFunctions;
 use crate::lighting_gpu::{LightingGpuPass, OUTPUT_BYTES};
+use crate::lighting_trace_gpu::TraceGraphRecorder;
 use crate::queue::RenderQueues;
 use crate::sets::RenderPhase;
 use crate::target::RenderTarget;
@@ -25,7 +26,8 @@ use crate::target::RenderTarget;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FrameGraphStages {
     pub scene_passes: u32,
-    pub trace_submissions: u32,
+    /// Actual trace compute passes recorded in this graph (not lighting recipes).
+    pub trace_dispatches: u32,
     pub direct_recipes: u32,
     pub gi_recipes: u32,
     pub composite_passes: u32,
@@ -39,21 +41,22 @@ impl FrameGraphStages {
     fn for_graph(
         queues: &RenderQueues,
         lighting: Option<LightingGpuPass>,
+        trace: Option<TraceGraphRecorder>,
         present_source: prism_render_graph::TextureHandle,
     ) -> Self {
         let scene_passes = 1 + RenderPhase::ORDER
             .into_iter()
             .filter(|phase| !queues.phase(*phase).is_empty())
             .count() as u32;
-        let trace_submissions = lighting.is_some_and(|pass| pass.run_gi) as u32;
+        let trace_dispatches = u32::from(trace.is_some());
         let direct_recipes = lighting.is_some_and(|pass| pass.run_direct) as u32;
-        let gi_recipes = trace_submissions;
+        let gi_recipes = lighting.is_some_and(|pass| pass.run_gi) as u32;
         let lighting_dispatches = lighting.map_or(0, |pass| {
             u32::from(pass.run_direct) + u32::from(pass.run_gi) + 1
         });
         Self {
             scene_passes,
-            trace_submissions,
+            trace_dispatches,
             direct_recipes,
             gi_recipes,
             composite_passes: u32::from(lighting.is_some()),
@@ -68,9 +71,9 @@ impl FrameGraphStages {
             self.scene_passes >= 1,
             "a frame must clear its scene target"
         );
-        assert_eq!(
-            self.trace_submissions, self.gi_recipes,
-            "every GI recipe must consume one trace-result submission"
+        assert!(
+            self.trace_dispatches <= 1,
+            "a frame has at most one trace dispatch"
         );
         assert!(
             self.composite_passes <= 1,
@@ -129,15 +132,28 @@ pub(crate) fn target_graph(
     functions: &DrawFunctions,
     lighting: Option<LightingGpuPass>,
 ) -> RenderGraph {
-    target_graph_output(target, queues, functions, lighting).0
+    target_graph_with_trace(target, queues, functions, lighting, None)
 }
 
-/// The color handle lets the presentation pass consume this exact frame.
-pub(crate) fn target_graph_output(
+/// Builds a frame graph with an optional software-BVH trace recorder.
+pub(crate) fn target_graph_with_trace(
     target: &RenderTarget,
     queues: &RenderQueues,
     functions: &DrawFunctions,
     lighting: Option<LightingGpuPass>,
+    trace: Option<TraceGraphRecorder>,
+) -> RenderGraph {
+    target_graph_output_with_trace(target, queues, functions, lighting, trace).0
+}
+
+/// The color handle lets the presentation pass consume this exact frame.
+/// The trace-aware graph constructor used by the host composition path.
+pub(crate) fn target_graph_output_with_trace(
+    target: &RenderTarget,
+    queues: &RenderQueues,
+    functions: &DrawFunctions,
+    lighting: Option<LightingGpuPass>,
+    trace: Option<TraceGraphRecorder>,
 ) -> (RenderGraph, prism_render_graph::TextureHandle) {
     let mut graph = RenderGraph::new(target.viewport().extent());
     let mut color = graph.import_texture(
@@ -259,8 +275,59 @@ pub(crate) fn target_graph_output(
         );
     }
 
+    let mut trace_hits = None;
+    if let Some(trace) = trace {
+        let nodes = graph.import_buffer(
+            "prism-lighting-trace-nodes",
+            BufferDesc::new(trace.nodes.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: trace.nodes.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let triangles = graph.import_buffer(
+            "prism-lighting-trace-triangles",
+            BufferDesc::new(trace.triangles.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: trace.triangles.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let rays = graph.import_buffer(
+            "prism-lighting-trace-rays",
+            BufferDesc::new(trace.rays.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: trace.rays.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let mut hits = graph.import_buffer(
+            "prism-lighting-trace-hits",
+            BufferDesc::new(trace.hits.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: trace.hits.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        graph.add_compute_pass(
+            "prism-lighting-trace-dispatch",
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                // The read creates an explicit scene-raster -> trace dependency;
+                // the current BVH kernel does not sample the raster color itself.
+                let _scene_raster_boundary = builder.sample(color);
+                let _nodes = builder.read_storage_buffer(nodes);
+                let _triangles = builder.read_storage_buffer(triangles);
+                let _rays = builder.read_storage_buffer(rays);
+                hits = builder.write_storage_buffer(hits);
+                move |context| trace.record_graph(context)
+            },
+        );
+        trace_hits = Some(hits);
+    }
+
     let Some(lighting) = lighting else {
-        let stages = FrameGraphStages::for_graph(queues, None, color);
+        let stages = FrameGraphStages::for_graph(queues, None, trace, color);
         stages.assert_contract();
         graph.blackboard_mut().set(stages);
         return (graph, color);
@@ -358,6 +425,11 @@ pub(crate) fn target_graph_output(
                 let _params = builder.read_uniform(params);
                 let _candidates = builder.read_storage_buffer(candidates);
                 let _surfaces = builder.read_storage_buffer(surfaces);
+                if let Some(hits) = trace_hits {
+                    // This declared dependency orders trace before GI composition;
+                    // the current GI shader still consumes host-built candidates.
+                    let _trace_results = builder.read_storage_buffer(hits);
+                }
                 move |context| {
                     context
                         .set_compute_pipeline(lighting.gi_pipeline)
@@ -384,7 +456,7 @@ pub(crate) fn target_graph_output(
         },
     );
 
-    let stages = FrameGraphStages::for_graph(queues, Some(lighting), color);
+    let stages = FrameGraphStages::for_graph(queues, Some(lighting), trace, color);
     stages.assert_contract();
     graph.blackboard_mut().set(stages);
     (graph, color)
@@ -401,7 +473,23 @@ pub(crate) fn target_graph_with_display_transform(
     transform: &OffscreenDisplayTransform,
     queue: &dyn prism_render_driver::RenderQueue,
 ) -> Result<RenderGraph, DisplayTransformGpuError> {
-    let (mut graph, source) = target_graph_output(target, queues, functions, lighting);
+    target_graph_with_display_transform_and_trace(
+        target, queues, functions, lighting, None, transform, queue,
+    )
+}
+
+/// Trace-aware display-transform graph constructor for render-host composition.
+pub(crate) fn target_graph_with_display_transform_and_trace(
+    target: &RenderTarget,
+    queues: &RenderQueues,
+    functions: &DrawFunctions,
+    lighting: Option<LightingGpuPass>,
+    trace: Option<TraceGraphRecorder>,
+    transform: &OffscreenDisplayTransform,
+    queue: &dyn prism_render_driver::RenderQueue,
+) -> Result<RenderGraph, DisplayTransformGpuError> {
+    let (mut graph, source) =
+        target_graph_output_with_trace(target, queues, functions, lighting, trace);
     let output = transform.append(&mut graph, queue, source)?;
     let mut stages = *graph
         .blackboard()

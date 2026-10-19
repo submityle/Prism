@@ -30,6 +30,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::display_transform_gpu::DisplayTransformGpu;
 use crate::lighting_gpu::LightingGpuPass;
+use crate::lighting_trace_gpu::TraceGraphRecorder;
 use crate::{
     DrawFunctions, RenderApp, RenderFrameStats, RenderQueues, RenderTarget, RenderViewport,
 };
@@ -406,6 +407,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         queues: &RenderQueues,
         functions: &DrawFunctions,
         lighting: Option<LightingGpuPass>,
+        trace: Option<TraceGraphRecorder>,
         stats: &mut RenderFrameStats,
     ) -> bool
     where
@@ -473,6 +475,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 overrides.0.get(&id).unwrap_or(queues),
                 functions,
                 lighting,
+                trace,
                 stats,
             );
             let status = match result {
@@ -499,6 +502,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         queues: &RenderQueues,
         functions: &DrawFunctions,
         lighting: Option<LightingGpuPass>,
+        trace: Option<TraceGraphRecorder>,
         stats: &mut RenderFrameStats,
     ) -> Result<Option<u64>, WindowRenderError>
     where
@@ -640,8 +644,13 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             gpu.needs_reconfigure = true;
             return Err(WindowRenderError::Surface(SurfaceError::Outdated));
         }
-        let (mut graph, color) =
-            crate::frame::target_graph_output(&gpu.target, queues, functions, lighting);
+        let (mut graph, color) = crate::frame::target_graph_output_with_trace(
+            &gpu.target,
+            queues,
+            functions,
+            lighting,
+            trace,
+        );
         let transformed = gpu
             .display_transform
             .append(&mut graph, runtime.queue(), &OcioConfig::srgb(), color)
@@ -671,6 +680,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         if let Some(lighting) = lighting {
             stats.lighting_gpu_passes_recorded += lighting.pass_count();
         }
+        stats.trace_gpu_dispatches_recorded += u64::from(trace.is_some());
         let target = PresentationTarget {
             id: id.0,
             generation: gpu.generation,

@@ -34,19 +34,25 @@ impl Controls {
 struct TestDevice {
     inner: NullDevice,
     loss: Arc<Mutex<Option<rhi::DeviceLostReason>>>,
+    live_by_kind: Arc<Mutex<[isize; 10]>>,
 }
 
 macro_rules! create {
-    ($($method:ident($descriptor:ty) -> $id:ty;)*) => {$ (
+    ($($method:ident($descriptor:ty) -> $id:ty, $kind:expr;)*) => {$ (
         fn $method(&self, descriptor: &$descriptor) -> $id {
-            self.inner.$method(descriptor)
+            let id = self.inner.$method(descriptor);
+            self.live_by_kind.lock().unwrap()[$kind] += 1;
+            id
         }
     )*};
 }
 
 macro_rules! destroy {
-    ($($method:ident($id:ty);)*) => {$ (
-        fn $method(&self, id: $id) { self.inner.$method(id); }
+    ($($method:ident($id:ty, $kind:expr);)*) => {$ (
+        fn $method(&self, id: $id) {
+            self.inner.$method(id);
+            self.live_by_kind.lock().unwrap()[$kind] -= 1;
+        }
     )*};
 }
 
@@ -55,37 +61,39 @@ impl RenderDevice for TestDevice {
         self.inner.capabilities()
     }
     create! {
-        create_buffer(rhi::BufferDescriptor) -> rhi::BufferId;
-        create_texture(rhi::TextureDescriptor) -> rhi::TextureId;
-        create_sampler(rhi::SamplerDescriptor) -> rhi::SamplerId;
-        create_shader_module(rhi::ShaderModuleDescriptor) -> rhi::ShaderModuleId;
-        create_bind_group_layout(rhi::BindGroupLayoutDescriptor) -> rhi::BindGroupLayoutId;
-        create_bind_group(rhi::BindGroupDescriptor) -> rhi::BindGroupId;
-        create_pipeline_layout(rhi::PipelineLayoutDescriptor) -> rhi::PipelineLayoutId;
-        create_render_pipeline(rhi::RenderPipelineDescriptor) -> rhi::RenderPipelineId;
-        create_compute_pipeline(rhi::ComputePipelineDescriptor) -> rhi::ComputePipelineId;
+        create_buffer(rhi::BufferDescriptor) -> rhi::BufferId, 0;
+        create_texture(rhi::TextureDescriptor) -> rhi::TextureId, 1;
+        create_sampler(rhi::SamplerDescriptor) -> rhi::SamplerId, 3;
+        create_shader_module(rhi::ShaderModuleDescriptor) -> rhi::ShaderModuleId, 4;
+        create_bind_group_layout(rhi::BindGroupLayoutDescriptor) -> rhi::BindGroupLayoutId, 5;
+        create_bind_group(rhi::BindGroupDescriptor) -> rhi::BindGroupId, 6;
+        create_pipeline_layout(rhi::PipelineLayoutDescriptor) -> rhi::PipelineLayoutId, 7;
+        create_render_pipeline(rhi::RenderPipelineDescriptor) -> rhi::RenderPipelineId, 8;
+        create_compute_pipeline(rhi::ComputePipelineDescriptor) -> rhi::ComputePipelineId, 9;
     }
     fn create_texture_view(
         &self,
         texture: rhi::TextureId,
         descriptor: &rhi::TextureViewDescriptor,
     ) -> rhi::TextureViewId {
-        self.inner.create_texture_view(texture, descriptor)
+        let id = self.inner.create_texture_view(texture, descriptor);
+        self.live_by_kind.lock().unwrap()[2] += 1;
+        id
     }
     fn take_device_lost(&self) -> Option<rhi::DeviceLostReason> {
         self.loss.lock().unwrap().take()
     }
     destroy! {
-        destroy_buffer(rhi::BufferId);
-        destroy_texture(rhi::TextureId);
-        destroy_texture_view(rhi::TextureViewId);
-        destroy_sampler(rhi::SamplerId);
-        destroy_shader_module(rhi::ShaderModuleId);
-        destroy_bind_group_layout(rhi::BindGroupLayoutId);
-        destroy_bind_group(rhi::BindGroupId);
-        destroy_pipeline_layout(rhi::PipelineLayoutId);
-        destroy_render_pipeline(rhi::RenderPipelineId);
-        destroy_compute_pipeline(rhi::ComputePipelineId);
+        destroy_buffer(rhi::BufferId, 0);
+        destroy_texture(rhi::TextureId, 1);
+        destroy_texture_view(rhi::TextureViewId, 2);
+        destroy_sampler(rhi::SamplerId, 3);
+        destroy_shader_module(rhi::ShaderModuleId, 4);
+        destroy_bind_group_layout(rhi::BindGroupLayoutId, 5);
+        destroy_bind_group(rhi::BindGroupId, 6);
+        destroy_pipeline_layout(rhi::PipelineLayoutId, 7);
+        destroy_render_pipeline(rhi::RenderPipelineId, 8);
+        destroy_compute_pipeline(rhi::ComputePipelineId, 9);
     }
 }
 
@@ -163,7 +171,14 @@ impl Instance for TestInstance {
         let loss = Arc::new(Mutex::new(None));
         *self.0.loss.lock().unwrap() = Some(loss.clone());
         self.0.created.fetch_add(1, Ordering::SeqCst);
-        Ok((TestDevice { inner, loss }, TestQueue::default()))
+        Ok((
+            TestDevice {
+                inner,
+                loss,
+                live_by_kind: Arc::new(Mutex::new([0; 10])),
+            },
+            TestQueue::default(),
+        ))
     }
     fn create_surface<W>(
         &self,
@@ -241,6 +256,7 @@ fn recovery_replays_resources_rebuilds_startup_and_resumes_frames() {
         .unwrap();
     app.update();
     let old_device = runtime(&app).device_handle();
+    let old_kind_counts = *old_device.live_by_kind.lock().unwrap();
     let old_count = old_device.inner.live_resource_count();
     let old_replay = replay.current();
     let before = app
@@ -281,16 +297,42 @@ fn recovery_replays_resources_rebuilds_startup_and_resumes_frames() {
         render.resource::<RenderFrameStats>().frames_submitted,
         before
     );
-    // Recovery must rebuild the complete current resource graph, including the
-    // direct, GI, and composite lighting pipelines, without changing its live
-    // resource cardinality. This deliberately follows the pre-loss snapshot
-    // instead of freezing a count from an older lighting bundle layout.
+    // The just-replaced device has rebuilt replay-owned render resources, but
+    // the first resumed frame has not yet lazily prepared its offscreen OCIO
+    // transform. That transform owns exactly one buffer, texture, view, shader,
+    // bind-group layout, bind group, pipeline layout, and compute pipeline.
+    // Keep the per-kind delta explicit so a different missing resource cannot
+    // be hidden by weakening the total-cardinality invariant.
+    let recovered_kind_counts = *runtime(&app).device_handle().live_by_kind.lock().unwrap();
+    assert_eq!(
+        recovered_kind_counts,
+        [
+            old_kind_counts[0] - 1,
+            old_kind_counts[1] - 1,
+            old_kind_counts[2] - 1,
+            old_kind_counts[3],
+            old_kind_counts[4] - 1,
+            old_kind_counts[5] - 1,
+            old_kind_counts[6] - 1,
+            old_kind_counts[7] - 1,
+            old_kind_counts[8],
+            old_kind_counts[9] - 1,
+        ],
+        "only the lazily rebuilt offscreen display-transform resource set may be absent before the first resumed frame; before={old_kind_counts:?}, after={recovered_kind_counts:?}"
+    );
+    app.update();
+    assert!(!app.world().resource::<DeviceRecoveryStatus>().recovering);
+    // The resumed frame prepares the OCIO transform against generation 1;
+    // after that lazy work, every resource class must match the pre-loss graph.
+    assert_eq!(
+        *runtime(&app).device_handle().live_by_kind.lock().unwrap(),
+        old_kind_counts,
+        "resource kinds [buffers, textures, views, samplers, shaders, layouts, bind groups, pipeline layouts, render pipelines, compute pipelines]"
+    );
     assert_eq!(
         runtime(&app).device().inner.live_resource_count(),
         old_count
     );
-    app.update();
-    assert!(!app.world().resource::<DeviceRecoveryStatus>().recovering);
     assert_eq!(
         app.world()
             .resource::<DeviceRecoveryStatus>()

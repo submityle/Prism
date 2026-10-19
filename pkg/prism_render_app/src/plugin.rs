@@ -333,6 +333,9 @@ where
         render
             .world
             .insert_resource(crate::ExtractedLightingInputs::default());
+        render
+            .world
+            .insert_resource(crate::lighting_trace_gpu::LightingTraceState::default());
         let lighting_plan = crate::LightingPlanState::from_config(config);
         let lighting_debug = crate::lighting::LightingDebugViewState::from_plan(&lighting_plan);
         render.world.insert_resource(lighting_plan);

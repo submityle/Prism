@@ -62,6 +62,12 @@ pub(crate) struct OffscreenFrameTargets<'w> {
     output: ResMut<'w, crate::display_transform_gpu::OffscreenFrameOutput>,
 }
 
+#[derive(SystemParam)]
+pub(crate) struct FrameExecutionResources<'w> {
+    trace_gpu: ResMut<'w, crate::lighting_trace_gpu::LightingTraceState>,
+    stats: ResMut<'w, RenderFrameStats>,
+}
+
 impl FrameExecutionTrace {
     fn begin(
         &mut self,
@@ -202,7 +208,7 @@ pub(crate) fn execute_frame<I>(
     inputs: Res<crate::ExtractedLightingInputs>,
     lighting_gpu: Res<LightingGpuState<I>>,
     mut offscreen: OffscreenFrameTargets,
-    mut stats: ResMut<RenderFrameStats>,
+    execution: FrameExecutionResources,
     requests: Res<crate::WindowRenderRequests<I>>,
     overrides: Res<crate::WindowRenderQueues>,
     mut windows: ResMut<crate::WindowRenderTargets<I>>,
@@ -213,6 +219,8 @@ pub(crate) fn execute_frame<I>(
     I::Queue: Send + Sync + FrameSync + 'static,
     I::Surface: Send + Sync + 'static,
 {
+    let mut trace_gpu = execution.trace_gpu;
+    let mut stats = execution.stats;
     stats
         .execution_trace
         .begin(&record, queues.len() as u64, &inputs);
@@ -220,6 +228,16 @@ pub(crate) fn execute_frame<I>(
     let runtime = runtime.runtime();
     lighting_gpu.prepare(&plan.plan, &inputs, runtime.queue());
     let lighting_pass = lighting_gpu.pass(&plan.plan);
+    let trace_device: std::sync::Arc<dyn prism_render_driver::RenderDevice + Send + Sync> =
+        runtime.device_handle();
+    let trace = trace_gpu.prepare(
+        inputs.trace_scene.as_ref(),
+        &inputs.surfaces,
+        record.frame_index,
+        runtime.device_generation(),
+        trace_device,
+        runtime.queue(),
+    );
     let submitted_before = stats.frames_submitted;
     let skipped_before = stats.frames_skipped;
     let failed_before = stats.frames_failed;
@@ -230,6 +248,7 @@ pub(crate) fn execute_frame<I>(
         &queues,
         &functions,
         lighting_pass,
+        trace,
         &mut stats,
     ) {
         stats.execution_trace.outcome = classify_window_outcome(
@@ -284,11 +303,12 @@ pub(crate) fn execute_frame<I>(
         stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
         return;
     }
-    let graph = match frame::target_graph_with_display_transform(
+    let graph = match frame::target_graph_with_display_transform_and_trace(
         &offscreen.target,
         &queues,
         &functions,
         lighting_pass,
+        trace,
         &offscreen.display,
         runtime.queue(),
     ) {
@@ -331,6 +351,7 @@ pub(crate) fn execute_frame<I>(
             stats.passes_declared += passes;
             stats.draws_recorded += draws;
             stats.lighting_gpu_passes_recorded += lighting_pass.map_or(0, |pass| pass.pass_count());
+            stats.trace_gpu_dispatches_recorded += u64::from(trace.is_some());
         }
         Err(_) => {
             // A compile failure is the only error `execute` can return; the

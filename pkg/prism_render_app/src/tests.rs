@@ -2790,6 +2790,103 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
 }
 
 #[test]
+fn frame_graph_records_optional_trace_between_scene_and_gi() {
+    use crate::lighting_trace_gpu::{LightingTraceGpu, PackedTraceScene, TraceRay};
+    use prism_render_architecture::lighting::contract::RecipeId;
+    use prism_render_architecture::ray_scene::{Bvh, Triangle};
+    use prism_render_driver::{BufferDescriptor, BufferUsages, Pass};
+
+    let extent = Extent3d::new_2d(4, 4);
+    let mut runtime = RenderRuntime::headless(NullInstance::new(), extent)
+        .expect("the null runtime always comes up");
+    let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
+    let plan = LightingPlan {
+        tier: Tier::Balanced,
+        recipes: vec![RecipeId::WorldRestir],
+        partition: Default::default(),
+        budget: FrameResourceBudget::default(),
+        rejected: Vec::new(),
+    };
+    let mut extracted = ExtractedLightingInputs::default();
+    extracted.surfaces = vec![LightingSurfaceInput::default()];
+    lighting.prepare(&plan, &extracted, runtime.queue());
+
+    let triangle = Triangle::new([-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 1.0, -1.0], 0);
+    let bvh = Bvh::build(&[triangle]);
+    let scene = PackedTraceScene::from(
+        &prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&bvh),
+    );
+    let rays = [TraceRay {
+        origin: [0.0, 0.0, 0.0],
+        t_min: 0.0,
+        direction: [0.0, 0.0, -1.0],
+        t_max: 10.0,
+    }];
+    let output = runtime.device().create_buffer(&BufferDescriptor::new(
+        32,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    ));
+    let mut trace = LightingTraceGpu::new(runtime.device_handle());
+    let borrowed_scene = crate::lighting_trace_gpu::BorrowedPackedTraceScene::from(&scene);
+    let recorder = trace
+        .prepare_graph(runtime.queue(), &borrowed_scene, &rays, output, 32)
+        .expect("trace inputs prepare without submitting a command buffer");
+    let target = RenderTarget::new(runtime.device(), extent);
+    let queues = RenderQueues::new();
+    let functions = DrawFunctions::new();
+
+    let absent = crate::frame::target_graph(&target, &queues, &functions, lighting.pass(&plan));
+    assert_eq!(
+        absent
+            .blackboard()
+            .get::<crate::frame::FrameGraphStages>()
+            .unwrap()
+            .trace_dispatches,
+        0
+    );
+
+    let graph = crate::frame::target_graph_with_trace(
+        &target,
+        &queues,
+        &functions,
+        lighting.pass(&plan),
+        Some(recorder),
+    );
+    let stages = *graph
+        .blackboard()
+        .get::<crate::frame::FrameGraphStages>()
+        .expect("trace-aware graph publishes stage receipt");
+    stages.assert_contract();
+    assert_eq!(stages.trace_dispatches, 1);
+    assert_eq!(stages.gi_recipes, 1);
+
+    let capture = CapturingQueue::default();
+    graph
+        .execute(runtime.device(), &capture)
+        .expect("trace and GI compose on the null graph")
+        .release(runtime.device());
+    let labels = capture
+        .take()
+        .into_iter()
+        .flat_map(|buffer| buffer.passes)
+        .filter_map(|pass| match pass {
+            Pass::Render { descriptor, .. } => descriptor.label,
+            Pass::Compute { label, .. } => label,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels,
+        [
+            "prism-render-app-clear",
+            "prism-lighting-trace-dispatch",
+            "prism-lighting-gi-dispatch",
+            "prism-lighting-composite",
+        ]
+    );
+}
+
+#[test]
 fn offscreen_frame_graph_runs_shared_display_transform_before_terminal_output() {
     use prism_render_architecture::lighting::ocio::{
         OcioDisplayGamut, OcioToneMapping, OcioTransferFunction,
@@ -3982,8 +4079,8 @@ fn the_frame_records_the_queued_draws() {
         .expect("the submitted frame publishes its graph receipt");
     assert_eq!(
         stats.passes_declared,
-        u64::from(stages.scene_passes + stages.lighting_dispatches + 1),
-        "the frame graph includes the display transform in addition to scene and lighting"
+        u64::from(stages.scene_passes + stages.trace_dispatches + stages.lighting_dispatches + 1),
+        "the frame graph includes trace and display-transform passes in addition to scene and lighting"
     );
     assert!(
         render.world.resource::<RenderQueues>().is_empty(),
