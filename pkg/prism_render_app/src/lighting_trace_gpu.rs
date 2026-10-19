@@ -535,22 +535,38 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){let ri=gid.x;if(ri>=arrayL
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_render_architecture::ray_scene::{Bvh, Triangle};
+    use prism_render_architecture::ray_scene::{Bvh, BvhBuildConfig, Triangle};
     use prism_render_driver::{BufferDescriptor, BufferUsages};
     use prism_render_driver_wgpu::{require_hardware_gpu, HardwareDeviceError, WgpuInstance};
 
     fn fixture() -> (PackedTraceScene, Vec<TraceRay>) {
-        let tris = [
-            Triangle::new([-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0], 17),
-            Triangle::new([3.0, -1.0, 0.0], [5.0, -1.0, 0.0], [4.0, 1.0, 0.0], 29),
-        ];
-        let packed =
-            prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&Bvh::build(&tris));
+        // The production builder defaults to four primitives per leaf, so the
+        // fixture explicitly forces a tree. These slanted triangles have
+        // overlapping Z bounds across the split branches, and the center ray
+        // intersects every triangle. Thus traversal must consider both
+        // children while retaining the nearest result (primitive 17).
+        let tris: Vec<_> = (0..8)
+            .map(|i| {
+                let z = -(i as f32);
+                Triangle::new(
+                    [-1.0, -1.0, z - 5.0],
+                    [1.0, -1.0, z - 5.0],
+                    [0.0, 1.0, z + 1.0],
+                    if i == 0 { 17 } else { 29 + i as u32 },
+                )
+            })
+            .collect();
+        let bvh = Bvh::build_with(
+            &tris,
+            BvhBuildConfig {
+                max_leaf_primitives: 1,
+                ..BvhBuildConfig::default()
+            },
+        );
+        let packed = prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&bvh);
         let rays = (0..65)
             .map(|i| TraceRay {
-                origin: if i == 64 {
-                    [4.0, 0.0, 2.0]
-                } else if i == 63 {
+                origin: if i == 63 {
                     [10.0, 0.0, 2.0]
                 } else {
                     [0.0, 0.0, 2.0]
@@ -566,22 +582,28 @@ mod tests {
     #[test]
     fn packed_reference_reports_stable_nearest_hits_and_misses() {
         let (scene, rays) = fixture();
+        let node_count = scene.nodes.len() / NODE_WORDS;
+        assert!(node_count >= 7, "fixture must contain internal BVH nodes");
+        assert!(
+            (0..node_count).any(|node| scene.nodes[node * NODE_WORDS + 8] == 0),
+            "fixture must exercise internal-node traversal"
+        );
         let result = trace_reference(&scene, &rays).unwrap();
         assert_eq!(result.len(), 65);
         assert!(result[..63]
             .iter()
-            .all(|h| h.hit && h.primitive == 17 && h.t == 2.0));
+            .all(|h| h.hit && h.primitive == 17 && h.t == 4.0));
         assert!(
             !result[63].hit,
             "misses remain explicit in the stable ray slot"
         );
-        assert!(result[64].hit && result[64].primitive == 29);
+        assert!(result[64].hit && result[64].primitive == 17 && result[64].t == 4.0);
     }
 
     #[test]
     fn malformed_packed_ranges_and_rays_are_rejected() {
         let (mut scene, _rays) = fixture();
-        scene.nodes[6] = u32::MAX;
+        scene.nodes[7] = u32::MAX;
         assert_eq!(scene.validate(), Err(TraceGpuError::InvalidNode(0)));
         let (scene, mut rays) = fixture();
         rays[0].direction = [0.0; 3];
@@ -618,6 +640,12 @@ mod tests {
         let device: Arc<dyn RenderDevice + Send + Sync> = Arc::new(device);
         let (scene, rays) = fixture();
         let expected = trace_reference(&scene, &rays).unwrap();
+        let node_count = scene.nodes.len() / NODE_WORDS;
+        assert!(node_count >= 7, "fixture must contain internal BVH nodes");
+        assert!(
+            (0..node_count).any(|node| scene.nodes[node * NODE_WORDS + 8] == 0),
+            "fixture must exercise internal-node traversal"
+        );
         let output = device.create_buffer(&BufferDescriptor::new(
             (rays.len() * HIT_WORDS * 4) as u64,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
@@ -631,11 +659,15 @@ mod tests {
             let b = i * HIT_WORDS;
             assert_eq!(words[b], u32::from(hit.hit), "ray {i} hit flag");
             assert_eq!(words[b + 1], hit.primitive, "ray {i} primitive");
-            if hit.hit {
-                assert!((f32::from_bits(words[b + 2]) - hit.t).abs() < 1e-5);
-                assert!((f32::from_bits(words[b + 3]) - hit.u).abs() < 1e-5);
-                assert!((f32::from_bits(words[b + 4]) - hit.v).abs() < 1e-5);
+            let expected_tuv = [hit.t, hit.u, hit.v];
+            for (offset, expected_value) in expected_tuv.into_iter().enumerate() {
+                assert!(
+                    (f32::from_bits(words[b + 2 + offset]) - expected_value).abs() < 1e-5,
+                    "ray {i} t/u/v word {}",
+                    offset + 2
+                );
             }
+            assert_eq!(&words[b + 5..b + 8], &[0, 0, 0], "ray {i} padding");
         }
         device.destroy_buffer(output);
     }
