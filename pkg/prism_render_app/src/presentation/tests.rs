@@ -75,6 +75,11 @@ fn null_surface_presents_and_releases_window_resources() {
         targets.status(id),
         Some(WindowFrameStatus::Presented { .. })
     ));
+    let receipt = stats
+        .execution_trace
+        .graph
+        .expect("presented frame publishes graph receipt");
+    assert_eq!(receipt.present_passes, 1);
     assert!(runtime.wait_idle());
     assert!(targets.release(&runtime));
     assert!(targets.is_empty());
@@ -90,12 +95,20 @@ fn hardware_present_pipeline_constructs_when_adapter_is_available() {
     let lifetime = WindowLifetime::new();
     let pipeline = PresentPipeline::new(
         runtime.device_handle(),
-        &target,
+        target.view(),
         TextureFormat::Rgba8Unorm,
         Arc::clone(&lifetime.in_flight),
         Arc::clone(&lifetime.destroy_allowed),
     );
+    let srgb_pipeline = PresentPipeline::new(
+        runtime.device_handle(),
+        target.view(),
+        TextureFormat::Rgba8UnormSrgb,
+        Arc::clone(&lifetime.in_flight),
+        Arc::clone(&lifetime.destroy_allowed),
+    );
     drop(pipeline);
+    drop(srgb_pipeline);
     target.destroy(runtime.device());
 }
 

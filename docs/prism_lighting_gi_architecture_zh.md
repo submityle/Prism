@@ -40,7 +40,7 @@
 - `lighting/cache.rs`、`resolve.rs`、`replay.rs` 已接入架构模块树：有界 reservoir/sample cache、软/硬失效、temporal/spatial reuse、raw/accumulated/post variance、三档 denoise/resolve、multi-surface/multi-view BRDF resolve、WAL/checkpoint/snapshot/restore 和 device-generation replay 均已有 CPU reference 与边界测试。
 - `lighting/virtual.rs` 已接入架构模块树：cell 到 shadow/GI/cache page 绑定、请求合并与优先级、有界驻留/淘汰、epoch 失效、显式 fallback 和设备恢复 snapshot/restore 已有 CPU reference 与边界测试；尚未连接真实 GPU page pool/streaming IO。
 - `lighting/metrics.rs` 已接入架构模块树：H1–H4 × S1–S6、P50/P95/P99/P99.9、GPU/CPU 时间、带宽、驻留、IO fault、variance、bias、temporal instability、PSNR、能量误差与 N/A 规则可生成确定性报告；验收门槛由实测计划提供，未校准的数值不预设为通过。
-- `lighting/ocio.rs` 已接入架构模块树：ACES、AgX、linear+sRGB、曝光、白平衡、gamut、transfer function、版本化序列化、digest、配置校验和 CPU reference transform 均已完成；`prism_render_app/src/display_transform_gpu.rs` 已提供注册后的真实 WGSL compute 执行器，并覆盖 36 组 tone mapping × gamut × transfer 组合的 GPU/CPU parity；该独立执行器尚未接入宿主最终显示 graph/present 链。
+- `lighting/ocio.rs` 已接入架构模块树：ACES、AgX、linear+sRGB、曝光、白平衡、gamut、transfer function、版本化序列化、digest、配置校验和 CPU reference transform 均已完成。`prism_render_app/src/display_transform_gpu.rs` 现以 8×8 WGSL compute pass 采样帧目标 `Rgba8Unorm` 线性颜色纹理，写入持久 `Rgba8Unorm` 显示编码纹理；窗口路径中该 pass 与 surface present 同属一帧 RenderGraph/队列提交，present 明确消费变换后的纹理。窗口目标 resize/device generation 生命周期会重建对应 transform 和 present 资源。真实 GPU texture readback 覆盖 36 组 tone mapping × gamut × transfer 并与 CPU oracle 对拍，null surface graph/present 路径通过。编码边界：帧目标 UNORM 数值是线性场景值；OCIO 输出是配置传递函数编码值；当前窗口默认 sRGB 配置遇到 sRGB attachment 时由 present shader 先 sRGB decode、再由 attachment 硬件编码一次，非 sRGB attachment 直接写入已编码值，避免 double encode。未完成：独立 offscreen/headless 帧执行目前仍输出线性帧目标，尚未将 OCIO transform 纳入该路径；窗口侧 profile 尚不可配置，也未完成显示器色彩管理/真实 swapchain 像素 readback 验收。
 - `prism_render_architecture` lighting 相关测试当前为 236 个全部通过；该结果证明架构契约与 CPU reference 闭合，不等同于完整渲染效果或 GPU 性能验收。
 - `WorldRestir` 的当前 GPU 实例已是真实单跳 deterministic RIS 初始 reservoir，并与 CPU oracle 使用同一计算语义：每 surface 最多重用 4 个 host-provided candidates、source/target PDF 权重、稳定选择随机数、双侧 cosine、距离平方衰减、visibility、albedo/radiance 调制和 GI composite；candidate storage 按 surface-range 元数据紧凑打包并上传，每 surface 独立，避免为稀疏候选固定上传完整二维槽位。多 surface（含跨 workgroup、不同 surface 使用不同 radiance candidate）已通过真实 GPU buffer readback 与 CPU oracle 数值对拍。当前仍未从 per-surface GPU trace 结果生成 candidates。
 - 持久 GPU bundle、uniform/storage buffers、bind group、direct/GI/composite compute pipeline、render graph resource declaration、batch dispatch 和 device-loss replay 已闭合；每帧会清零完整输出容量，空 surface batch 不生成 lighting compute pass。
@@ -51,7 +51,7 @@
 - 其余 11 个 recipe 尚未接入真实 GPU 执行：RIS/MegaLights 直接光、阴影槽位、随机直接光、DDGI/brick GI、screen probe/ReSTIR、sparse SDF GI、path-traced offline 等仍是架构契约或旧实现资产，不得按“已完成”计。
 - 当前 direct recipe 已支持最多 1024 个独立 surface sample 的 GPU batch，但仍不是完整屏幕/视图 lighting resolve；尚未接入完整材质 BRDF、可见性场景查询、阴影、反射、透明、后处理和多视图输出。
 - 当前 GI GPU 路径仍消费 host-provided、按 surface 分组的 candidates，属于单跳 deterministic 初始 reservoir；虽已有独立 packed-BVH GPU trace kernel，尚未把它接入 `LightingPlan`、宿主 RenderGraph 和 per-surface GI candidate 生成。架构层的 `RayScheduler`、cache、temporal/spatial reuse、resolve、denoise、variance、virtual residency 和 replay CPU reference 仍未绑定到完整 GPU graph、场景 BVH 更新输入及 multi-bounce 执行链。
-- DebugMeta、结构化 EXPLAIN 拒绝原因、shader variant gate、DebugView 消费链和 plugin sync 均已落地；OCIO 配置契约与独立 GPU transform parity 已完成，但执行器接入最终显示 graph/present 链及完整 P8 收敛验收仍未完成。
+- DebugMeta、结构化 EXPLAIN 拒绝原因、shader variant gate、DebugView 消费链和 plugin sync 均已落地；OCIO 配置契约、texture graph transform、窗口 present 消费链及 GPU parity 已完成当前切片，但 offscreen/headless transform、窗口 profile 配置和完整 P8 收敛验收仍未完成。
 - 需要继续完成 cache/page pool/virtual streaming 的真实 GPU 资源驻留、packed-BVH trace kernel 的 LightingPlan/graph/scene 输入接线与 per-surface candidate 生成、GPU shadow pass、multi-view resolve 的宿主与 GPU graph 接线、完整 BRDF/材质/可见性/反射/透明/后处理链，以及 raw/accumulated/post variance、bias、denoise 的实测标定。metrics 契约虽已具备，H/S 矩阵仍没有完整硬件实测数据。
 - P7a 的新宿主 GI 路径目前只完成初始 reservoir compute/readback 子切片；场景到 trace 到 GI 到 present 的宿主闭环、与旧 `prism_render_scene` parity 以及 H1–H4 × S1–S6 的最终性能和画质矩阵均未完成，因此 P7a 整体验收未完成。
 
@@ -1302,7 +1302,7 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 | 虚拟资源客户端与页池设计（已声明未实现） | `docs/prism_rendering_architecture_zh.md` §8 |
 | 四前端唯一执行路径 | `docs/prism_material_pipeline_refactor_zh.md`（步骤 4：缓存命中 → `IncomingRadiance`；未命中 → 屏幕空间直接积分） |
 | bevy 轨移植切片 | `docs/prism_render_scene_rhi_port_zh.md`（S1–S8） |
-| 新宿主已有 direct + multi-surface initial-GI GPU compute slice 与独立 OCIO GPU transform parity；剩余 11 个 recipe、per-surface trace 和最终 present graph 尚未接入 | `pkg/prism_render_app/src/lighting_gpu.rs`、`pkg/prism_render_app/src/display_transform_gpu.rs`、`pkg/prism_render_app/src/frame.rs` |
+| 新宿主已有 direct + multi-surface initial-GI GPU compute slice；OCIO texture transform 已进入 window RenderGraph 并由 present 消费，但 offscreen/headless transform 尚未接入；剩余 11 个 recipe 与 per-surface trace 尚未闭合 | `pkg/prism_render_app/src/lighting_gpu.rs`、`pkg/prism_render_app/src/display_transform_gpu.rs`、`pkg/prism_render_app/src/presentation.rs`、`pkg/prism_render_app/src/frame.rs` |
 
 ---
 

@@ -9,8 +9,6 @@ use std::sync::{
     Arc,
 };
 
-use crate::RenderTarget;
-
 pub(super) struct PresentPipeline<D: RenderDevice> {
     device: Arc<D>,
     shader: Option<ShaderModuleId>,
@@ -25,7 +23,7 @@ pub(super) struct PresentPipeline<D: RenderDevice> {
 impl<D: RenderDevice> PresentPipeline<D> {
     pub(super) fn new(
         device: Arc<D>,
-        target: &RenderTarget,
+        source_view: TextureViewId,
         format: TextureFormat,
         in_flight: Arc<AtomicUsize>,
         destroy_allowed: Arc<AtomicBool>,
@@ -43,8 +41,18 @@ impl<D: RenderDevice> PresentPipeline<D> {
             destroy_allowed,
         };
         let device = &*owned.device;
-        let shader = device
-            .create_shader_module(&ShaderModuleDescriptor::wgsl(include_str!("present.wgsl")));
+        let shader_source = include_str!("present.wgsl").replace(
+            "const TARGET_SRGB: bool = false;",
+            if format.is_srgb() {
+                "const TARGET_SRGB: bool = true;"
+            } else {
+                "const TARGET_SRGB: bool = false;"
+            },
+        );
+        let shader = device.create_shader_module(&ShaderModuleDescriptor {
+            label: Some("window present conversion".into()),
+            source: ShaderSource::Wgsl(std::borrow::Cow::Owned(shader_source)),
+        });
         owned.shader = Some(shader);
         let bindings = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("window present texture".into()),
@@ -89,7 +97,7 @@ impl<D: RenderDevice> PresentPipeline<D> {
             layout: Some(bindings),
             entries: vec![BindGroupEntry {
                 binding: 0,
-                resource: BindingResource::TextureView(target.view()),
+                resource: BindingResource::TextureView(source_view),
             }],
         });
         owned.group = Some(group);

@@ -30,6 +30,7 @@ pub(crate) struct FrameGraphStages {
     pub composite_passes: u32,
     pub present_passes: u32,
     pub lighting_dispatches: u32,
+    /// Graph texture consumed by the final present pass (OCIO output for windows).
     pub present_source: prism_render_graph::TextureHandle,
 }
 

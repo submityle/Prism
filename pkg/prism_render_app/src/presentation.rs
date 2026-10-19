@@ -19,6 +19,7 @@ use prism_app::presentation::{
 use prism_app::{App, Plugin};
 use prism_ecs::prelude::Resource;
 use prism_ecs::world::World;
+use prism_render_architecture::lighting::ocio::OcioConfig;
 use prism_render_driver::{
     CompositeAlphaMode, FrameSync, Instance, PresentMode, RenderDevice, Surface, SurfaceConfig,
     SurfaceError, TextureFormat,
@@ -27,6 +28,7 @@ use prism_render_runtime::RenderRuntime;
 pub use prism_window::WindowId;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+use crate::display_transform_gpu::DisplayTransformGpu;
 use crate::lighting_gpu::LightingGpuPass;
 use crate::{
     DrawFunctions, RenderApp, RenderFrameStats, RenderQueues, RenderTarget, RenderViewport,
@@ -226,6 +228,7 @@ struct WindowGpu<I: Instance + 'static> {
     config: SurfaceConfig,
     present: PresentPipeline<I::Device>,
     target: OwnedTarget<I::Device>,
+    display_transform: DisplayTransformGpu,
     lifetime: Arc<WindowLifetime>,
     needs_reconfigure: bool,
     lost: bool,
@@ -532,9 +535,18 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 RenderTarget::new(&*device, request.viewport.extent()),
                 Arc::clone(&lifetime),
             );
+            let display_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+            let display_transform = DisplayTransformGpu::new(
+                display_device,
+                target.view(),
+                request.viewport.extent(),
+                Arc::clone(&lifetime.in_flight),
+                Arc::clone(&lifetime.destroy_allowed),
+            )
+            .map_err(|error| WindowRenderError::Graph(format!("display transform: {error:?}")))?;
             let present = PresentPipeline::new(
                 Arc::clone(&device),
-                &target,
+                display_transform.output_view(),
                 config.format,
                 Arc::clone(&lifetime.in_flight),
                 Arc::clone(&lifetime.destroy_allowed),
@@ -549,6 +561,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                     surface,
                     config,
                     target,
+                    display_transform,
                     present,
                     lifetime: Arc::clone(&lifetime),
                     needs_reconfigure: false,
@@ -581,15 +594,27 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                     RenderTarget::new(&*device, request.viewport.extent()),
                     Arc::clone(&lifetime),
                 );
+                let display_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+                let display_transform = DisplayTransformGpu::new(
+                    display_device,
+                    target.view(),
+                    request.viewport.extent(),
+                    Arc::clone(&lifetime.in_flight),
+                    Arc::clone(&lifetime.destroy_allowed),
+                )
+                .map_err(|error| {
+                    WindowRenderError::Graph(format!("display transform: {error:?}"))
+                })?;
                 let present = PresentPipeline::new(
                     Arc::clone(&device),
-                    &target,
+                    display_transform.output_view(),
                     config.format,
                     Arc::clone(&lifetime.in_flight),
                     Arc::clone(&lifetime.destroy_allowed),
                 );
                 gpu.present = present;
                 gpu.target = target;
+                gpu.display_transform = display_transform;
                 gpu.lifetime = lifetime;
             }
             gpu.config = config;
@@ -617,11 +642,16 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         }
         let (mut graph, color) =
             crate::frame::target_graph_output(&gpu.target, queues, functions, lighting);
-        gpu.present.append(&mut graph, color, image);
+        let transformed = gpu
+            .display_transform
+            .append(&mut graph, runtime.queue(), &OcioConfig::srgb(), color)
+            .map_err(|error| WindowRenderError::Graph(format!("display transform: {error:?}")))?;
+        gpu.present.append(&mut graph, transformed, image);
         let mut stages = *graph
             .blackboard()
             .get::<crate::frame::FrameGraphStages>()
             .expect("the host frame graph must publish its stage receipt");
+        stages.present_source = transformed;
         stages.present_passes = 1;
         stages.assert_contract();
         graph.blackboard_mut().set(stages);
