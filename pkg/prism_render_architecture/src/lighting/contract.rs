@@ -9,6 +9,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use super::debug::DebugMeta;
+
 /// Monotonic epochs for fields that independently invalidate lighting work.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FieldEpoch {
@@ -645,6 +647,93 @@ pub enum Rejection {
     Unavailable(RecipeId),
     Budget(RecipeId),
     Determinism(RecipeId),
+    VariantGate {
+        recipe: RecipeId,
+        selected_variants: u32,
+        max_per_recipe: u32,
+        max_total: u32,
+    },
+}
+
+/// The machine-readable reason a recipe was omitted from a compiled plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RejectionCode {
+    Unsupported,
+    Unavailable,
+    Budget,
+    Determinism,
+    VariantGate,
+}
+
+/// Structured explanation for one rejected recipe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RejectionExplanation {
+    pub recipe: RecipeId,
+    pub code: RejectionCode,
+    pub detail: &'static str,
+    pub requested_variants: u32,
+    pub variant_gate: Option<VariantGateEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VariantGateEvidence {
+    pub selected_variants: u32,
+    pub max_per_recipe: u32,
+    pub max_total: u32,
+}
+
+impl Rejection {
+    #[must_use]
+    pub const fn explanation(self) -> RejectionExplanation {
+        let (recipe, code, detail, variant_gate) = match self {
+            Self::Unsupported(recipe) => (recipe, RejectionCode::Unsupported, "capability", None),
+            Self::Unavailable(recipe) => (recipe, RejectionCode::Unavailable, "backend", None),
+            Self::Budget(recipe) => (recipe, RejectionCode::Budget, "resource_budget", None),
+            Self::Determinism(recipe) => (recipe, RejectionCode::Determinism, "determinism", None),
+            Self::VariantGate {
+                recipe,
+                selected_variants,
+                max_per_recipe,
+                max_total,
+            } => (
+                recipe,
+                RejectionCode::VariantGate,
+                "variant_gate",
+                Some(VariantGateEvidence {
+                    selected_variants,
+                    max_per_recipe,
+                    max_total,
+                }),
+            ),
+        };
+        RejectionExplanation {
+            recipe,
+            code,
+            detail,
+            requested_variants: recipe.variant_count(),
+            variant_gate,
+        }
+    }
+}
+
+/// Admission limits for compiled shader variants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VariantGate {
+    pub max_per_recipe: u32,
+    pub max_total: u32,
+}
+
+impl VariantGate {
+    pub const DEFAULT: Self = Self {
+        max_per_recipe: 4,
+        max_total: 8,
+    };
+
+    #[must_use]
+    pub const fn admits(self, recipe: RecipeId, selected_variants: u32) -> bool {
+        recipe.variant_count() <= self.max_per_recipe
+            && selected_variants.saturating_add(recipe.variant_count()) <= self.max_total
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -669,6 +758,17 @@ impl BudgetCompiler {
         caps: PlanCaps,
         tier: Tier,
     ) -> LightingPlan {
+        Self::compile_with_variant_gate(stats, budget, caps, tier, VariantGate::DEFAULT)
+    }
+
+    #[must_use]
+    pub fn compile_with_variant_gate(
+        stats: SceneStats,
+        budget: FrameResourceBudget,
+        caps: PlanCaps,
+        tier: Tier,
+        variant_gate: VariantGate,
+    ) -> LightingPlan {
         let partition = BudgetPartition {
             direct_ms: budget.gpu_ms * 0.30,
             indirect_ms: budget.gpu_ms * 0.36,
@@ -677,6 +777,7 @@ impl BudgetCompiler {
         };
         let mut recipes: Vec<RecipeId> = Vec::new();
         let mut rejected = Vec::new();
+        let mut selected_variants = 0;
         for recipe in RecipeId::ALL {
             let unsupported = match recipe {
                 RecipeId::DirectStochasticRt | RecipeId::SpecularRestir => !caps.ray_tracing,
@@ -689,13 +790,28 @@ impl BudgetCompiler {
                 continue;
             }
             if caps.deterministic_npr
-                && matches!(recipe, RecipeId::WorldRestir | RecipeId::SpecularRestir)
+                && matches!(
+                    recipe,
+                    RecipeId::DirectStochasticRt
+                        | RecipeId::DirectStochasticVsm
+                        | RecipeId::WorldRestir
+                        | RecipeId::SpecularRestir
+                )
             {
                 rejected.push(Rejection::Determinism(recipe));
                 continue;
             }
             if !recipe.has_execution_backend() {
                 rejected.push(Rejection::Unavailable(recipe));
+                continue;
+            }
+            if !variant_gate.admits(recipe, selected_variants) {
+                rejected.push(Rejection::VariantGate {
+                    recipe,
+                    selected_variants,
+                    max_per_recipe: variant_gate.max_per_recipe,
+                    max_total: variant_gate.max_total,
+                });
                 continue;
             }
             if stats.lights > stats.punctual_max.saturating_mul(8)
@@ -730,6 +846,7 @@ impl BudgetCompiler {
                 continue;
             }
             recipes.push(recipe);
+            selected_variants = selected_variants.saturating_add(recipe.variant_count());
         }
         if recipes.is_empty() {
             recipes.push(RecipeId::SpecializedDeterministic);
@@ -770,6 +887,7 @@ impl LightingPlan {
                 Rejection::Unavailable(recipe) => format_name("unavailable", *recipe),
                 Rejection::Budget(recipe) => format_name("budget", *recipe),
                 Rejection::Determinism(recipe) => format_name("determinism", *recipe),
+                Rejection::VariantGate { recipe, .. } => format_name("variant_gate", *recipe),
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -777,6 +895,27 @@ impl LightingPlan {
             "tier={:?}; gpu_ms={:.3}; selected=[{}]; rejected=[{}]",
             self.tier, self.budget.gpu_ms, selected, rejected
         )
+    }
+
+    /// Returns deterministic, machine-readable explanations for every
+    /// rejected recipe. The plan remains the source of truth; this method does
+    /// not recompile or infer additional GPU capability.
+    #[must_use]
+    pub fn rejection_explanations(&self) -> Vec<RejectionExplanation> {
+        self.rejected
+            .iter()
+            .map(|rejection| rejection.explanation())
+            .collect()
+    }
+
+    /// Returns the display metadata for every selected recipe in plan order.
+    #[must_use]
+    pub fn debug_metadata(&self) -> Vec<(RecipeId, DebugMeta)> {
+        self.recipes
+            .iter()
+            .copied()
+            .map(|recipe| (recipe, recipe.debug_meta()))
+            .collect()
     }
 }
 
@@ -978,6 +1117,74 @@ mod tests {
             .rejected
             .iter()
             .any(|rejection| matches!(rejection, Rejection::Determinism(RecipeId::WorldRestir))));
+    }
+
+    #[test]
+    fn variant_gate_rejects_recipe_with_structured_evidence() {
+        let plan = BudgetCompiler::compile_with_variant_gate(
+            SceneStats::default(),
+            FrameResourceBudget {
+                gpu_ms: 16.666,
+                bandwidth: 512 * 1024 * 1024,
+                resident_bytes: 512 * 1024 * 1024,
+                io_ops: 4096,
+                shading_rate_budget: 1.0,
+            },
+            PlanCaps {
+                ray_tracing: false,
+                virtual_shadow: false,
+                offline: false,
+                deterministic_npr: false,
+            },
+            Tier::Balanced,
+            VariantGate {
+                max_per_recipe: 4,
+                max_total: 2,
+            },
+        );
+        let explanation = plan
+            .rejection_explanations()
+            .into_iter()
+            .find(|item| item.code == RejectionCode::VariantGate)
+            .expect("the second admitted recipe must hit the total variant gate");
+        assert_eq!(explanation.recipe, RecipeId::WorldRestir);
+        assert_eq!(explanation.requested_variants, 2);
+        assert_eq!(
+            explanation.variant_gate,
+            Some(VariantGateEvidence {
+                selected_variants: 1,
+                max_per_recipe: 4,
+                max_total: 2,
+            })
+        );
+        assert!(plan.explain().contains("variant_gate:WorldRestir"));
+    }
+
+    #[test]
+    fn selected_recipe_debug_metadata_is_queryable_without_recompilation() {
+        let plan = BudgetCompiler::compile(
+            SceneStats::default(),
+            FrameResourceBudget {
+                gpu_ms: 16.666,
+                bandwidth: 512 * 1024 * 1024,
+                resident_bytes: 512 * 1024 * 1024,
+                io_ops: 4096,
+                shading_rate_budget: 1.0,
+            },
+            PlanCaps {
+                ray_tracing: false,
+                virtual_shadow: false,
+                offline: false,
+                deterministic_npr: false,
+            },
+            Tier::Balanced,
+        );
+        let metadata = plan.debug_metadata();
+        assert_eq!(metadata.len(), plan.recipes.len());
+        assert!(metadata.iter().any(|(recipe, meta)| {
+            *recipe == RecipeId::SpecializedDeterministic
+                && meta.channel == super::super::debug::ChannelSemantics::Radiance
+        }));
     }
 
     struct MockBackend {

@@ -2,7 +2,9 @@
 
 pub mod contract;
 pub mod culling;
+pub mod debug;
 pub mod radiance_cascades;
+pub mod recipe_backend;
 pub mod regir;
 pub mod regir_resolve;
 pub mod restir_di;
@@ -11,6 +13,8 @@ pub mod restir_gi_resolve;
 pub mod restir_spatial;
 pub mod restir_temporal;
 pub mod stochastic;
+
+pub use debug::{ChannelSemantics, DebugMeta, DebugView, Scale};
 
 use crate::ray_scene::TraceBackend;
 

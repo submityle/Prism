@@ -326,9 +326,10 @@ where
         render
             .world
             .insert_resource(crate::ExtractedLightingInputs::default());
-        render
-            .world
-            .insert_resource(crate::LightingPlanState::from_config(config));
+        let lighting_plan = crate::LightingPlanState::from_config(config);
+        let lighting_debug = crate::lighting::LightingDebugViewState::from_plan(&lighting_plan);
+        render.world.insert_resource(lighting_plan);
+        render.world.insert_resource(lighting_debug);
         render.world.insert_resource(lighting_gpu);
         render.world.insert_resource(RenderViews::new());
         render.world.insert_resource(TextureCache::new());
@@ -391,7 +392,12 @@ where
             // Materialize the view family before the record stage consumes it.
             schedule.add_systems(build_view_family.in_set(RenderSystems::CreateViews));
             schedule.add_systems(
-                crate::lighting::compile_lighting_plan.in_set(RenderSystems::PrepareViews),
+                (
+                    crate::lighting::compile_lighting_plan,
+                    crate::lighting::sync_lighting_debug_view,
+                )
+                    .chain()
+                    .in_set(RenderSystems::PrepareViews),
             );
             // The visible set becomes this frame's queue before anything records.
             // Materials register/retire → the ABI buffers, before anything binds them.

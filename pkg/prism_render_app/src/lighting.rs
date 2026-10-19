@@ -4,9 +4,10 @@ use bytemuck::{Pod, Zeroable};
 use prism_ecs::prelude::{Res, ResMut, Resource};
 use prism_ecs::world::World;
 use prism_render_architecture::lighting::contract::{
-    BudgetCompiler, ChangeFields, ChangeJournal, LightingPlan, PlanCaps, RecipeExecution,
-    SceneStats, Tier,
+    BudgetCompiler, ChangeFields, ChangeJournal, LightingPlan, PlanCaps, RecipeExecution, RecipeId,
+    RejectionExplanation, SceneStats, Tier,
 };
+use prism_render_architecture::lighting::{DebugMeta, DebugView};
 
 use crate::config::RenderAppConfig;
 use crate::record::RenderRecord;
@@ -33,6 +34,68 @@ pub struct LightingPlanState {
     pub explain: String,
     /// Last extracted scene-change checkpoint used by this plan.
     pub journal_snapshot: prism_render_architecture::lighting::contract::JournalSnapshot,
+}
+
+/// Render-world debug snapshot consumed by diagnostic views.
+///
+/// The metadata, view registrations, rejection explanations, and EXPLAIN text
+/// are published as one snapshot so consumers cannot observe mixed-frame data.
+#[derive(Clone, Debug, Default, PartialEq, Resource)]
+pub struct LightingDebugViewState {
+    /// Frame for which this diagnostic snapshot was compiled.
+    pub compiled_frame: u64,
+    /// Plan compilation count paired with [`compiled_frame`].
+    pub plan_compile_count: u64,
+    /// Selected recipes and their contract-driven display metadata.
+    pub selected_recipes: Vec<LightingDebugRecipe>,
+    /// Structured reasons for every recipe rejected by the plan.
+    pub rejection_explanations: Vec<RejectionExplanation>,
+    /// The planner explanation retained for consumers without recompilation.
+    pub explain: String,
+}
+
+/// One selected recipe exposed to the DebugView consumer chain.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightingDebugRecipe {
+    /// Recipe identity from the lighting contract.
+    pub recipe: RecipeId,
+    /// Display semantics declared by the recipe contract.
+    pub meta: DebugMeta,
+    /// Related views registered by the recipe metadata.
+    pub views: Vec<DebugView>,
+}
+
+impl LightingDebugViewState {
+    /// Creates a debug snapshot immediately consistent with a plan.
+    #[must_use]
+    pub fn from_plan(state: &LightingPlanState) -> Self {
+        let mut snapshot = Self::default();
+        snapshot.update_from_plan(state);
+        snapshot
+    }
+
+    /// Replaces the snapshot from one compiled plan without recompiling it.
+    ///
+    /// Returns whether the paired frame/compile identity changed.
+    pub(crate) fn update_from_plan(&mut self, state: &LightingPlanState) -> bool {
+        let changed = self.compiled_frame != state.compiled_frame
+            || self.plan_compile_count != state.compile_count;
+        self.compiled_frame = state.compiled_frame;
+        self.plan_compile_count = state.compile_count;
+        self.selected_recipes = state
+            .plan
+            .debug_metadata()
+            .into_iter()
+            .map(|(recipe, meta)| LightingDebugRecipe {
+                recipe,
+                meta,
+                views: meta.combine_with.to_vec(),
+            })
+            .collect();
+        self.rejection_explanations = state.plan.rejection_explanations();
+        self.explain.clone_from(&state.explain);
+        changed
+    }
 }
 
 /// One analytic directional light consumed by the deterministic direct-light
@@ -276,6 +339,19 @@ pub(crate) fn compile_lighting_plan(
     stats.lighting_executions_planned = state.executions.len() as u64;
     stats.lighting_cache_invalidations =
         changed_epoch_fields(previous_epoch, state.journal_snapshot.epoch) as u64;
+}
+
+/// Synchronizes plan diagnostics after compilation and before queue/execution.
+pub(crate) fn sync_lighting_debug_view(
+    plan: Res<LightingPlanState>,
+    mut debug: ResMut<LightingDebugViewState>,
+    mut stats: ResMut<RenderFrameStats>,
+) {
+    if debug.update_from_plan(&plan) {
+        stats.lighting_debug_updates = stats.lighting_debug_updates.saturating_add(1);
+        stats.lighting_debug_selected_recipes = debug.selected_recipes.len() as u64;
+        stats.lighting_debug_rejections = debug.rejection_explanations.len() as u64;
+    }
 }
 
 fn changed_epoch_fields(

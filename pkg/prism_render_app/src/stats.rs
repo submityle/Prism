@@ -38,6 +38,12 @@ pub struct RenderFrameStats {
     pub lighting_executions_planned: u64,
     /// Number of cache invalidation effects observed by the latest plan.
     pub lighting_cache_invalidations: u64,
+    /// Number of plan-to-DebugView snapshot synchronizations.
+    pub lighting_debug_updates: u64,
+    /// Number of selected recipes in the latest DebugView snapshot.
+    pub lighting_debug_selected_recipes: u64,
+    /// Number of structured rejection explanations in the latest DebugView snapshot.
+    pub lighting_debug_rejections: u64,
     /// Frames for which the selected lighting plan recorded a real GPU pass.
     pub lighting_gpu_passes_recorded: u64,
     /// The viewport of the most recently recorded frame, empty or not.

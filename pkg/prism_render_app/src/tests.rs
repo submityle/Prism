@@ -20,8 +20,8 @@ use crate::intent::{RenderIntent, RenderViewport};
 use crate::label::{Render, RenderApp};
 use crate::lighting::{
     evaluate_deterministic_direct, evaluate_deterministic_gi, ExtractedLightingInputs,
-    LightingDirectionalInput, LightingGiCandidateInput, LightingPlanState, LightingPunctualInput,
-    LightingSceneInputs, LightingSurfaceInput,
+    LightingDebugViewState, LightingDirectionalInput, LightingGiCandidateInput, LightingPlanState,
+    LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
 };
 use crate::lighting_gpu::LightingGpuState;
 use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};
@@ -48,8 +48,10 @@ use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
 use prism_render_architecture::lighting::contract::{
-    ChangeFields, FrameResourceBudget, LightingPlan, PlanCaps, Rejection, SceneStats, Tier,
+    ChangeFields, FrameResourceBudget, LightingPlan, PlanCaps, RecipeId, Rejection, SceneStats,
+    Tier,
 };
+use prism_render_architecture::lighting::DebugView;
 use prism_render_architecture::shader_package::{
     ArtifactDigest, ExecutionFamily, ModuleId, ModuleIdentity, PermutationIndex, PermutationSpace,
     PersistedPsoCache, PipelineStateHash, PsoCacheKey, ShaderPackageId,
@@ -2128,6 +2130,83 @@ fn lighting_inputs_extract_stats_and_field_epochs_into_the_render_world() {
         stats.lighting_executions_planned,
         state.executions.len() as u64
     );
+}
+
+#[test]
+fn lighting_debug_view_snapshot_consumes_selected_metadata_and_rejections() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let plan = render.world.resource::<LightingPlanState>();
+    let debug = render.world.resource::<LightingDebugViewState>();
+    assert_eq!(debug.compiled_frame, plan.compiled_frame);
+    assert_eq!(debug.plan_compile_count, plan.compile_count);
+    assert_eq!(debug.explain, plan.explain);
+    assert_eq!(
+        debug.rejection_explanations,
+        plan.plan.rejection_explanations()
+    );
+    assert_eq!(debug.selected_recipes.len(), plan.plan.recipes.len());
+    let direct = debug
+        .selected_recipes
+        .iter()
+        .find(|entry| entry.recipe == RecipeId::SpecializedDeterministic)
+        .expect("the default plan selects the deterministic direct recipe");
+    assert_eq!(direct.meta, direct.recipe.debug_meta());
+    assert!(direct.views.contains(&DebugView::Visibility));
+    assert!(direct.views.contains(&DebugView::BudgetUsage));
+
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.lighting_debug_updates, 1);
+    assert_eq!(
+        stats.lighting_debug_selected_recipes,
+        debug.selected_recipes.len() as u64
+    );
+    assert_eq!(
+        stats.lighting_debug_rejections,
+        debug.rejection_explanations.len() as u64
+    );
+}
+
+#[test]
+fn lighting_debug_view_resynchronizes_as_the_plan_changes() {
+    let config = RenderAppConfig::new(EXTENT).with_lighting_caps(PlanCaps {
+        ray_tracing: true,
+        virtual_shadow: true,
+        offline: true,
+        deterministic_npr: false,
+    });
+    let mut app = app_on_null_backend(config);
+    app.update();
+
+    app.world_mut()
+        .insert_resource(LightingSceneInputs::with_stats(SceneStats {
+            lights: 4096,
+            punctual_max: 1,
+            ..SceneStats::default()
+        }));
+    app.world_mut()
+        .resource_mut::<LightingSceneInputs>()
+        .mark_changed(2, ChangeFields::LIGHTING);
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let plan = render.world.resource::<LightingPlanState>();
+    let debug = render.world.resource::<LightingDebugViewState>();
+    assert_eq!(debug.compiled_frame, plan.compiled_frame);
+    assert_eq!(debug.plan_compile_count, plan.compile_count);
+    assert_eq!(debug.selected_recipes.len(), plan.plan.recipes.len());
+    assert_eq!(
+        debug.rejection_explanations,
+        plan.plan.rejection_explanations()
+    );
+    assert!(debug
+        .rejection_explanations
+        .iter()
+        .any(|rejection| rejection.recipe == RecipeId::DirectDeterministicCsm));
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.lighting_debug_updates, 2);
 }
 
 #[test]
