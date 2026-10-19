@@ -19,7 +19,10 @@ use crate::lighting::{
 const MAX_DIRECTIONALS: usize = 1024;
 const MAX_PUNCTUALS: usize = 1024;
 const MAX_GI_CANDIDATES: usize = 1024;
-const OUTPUT_BYTES: u64 = 16;
+pub(crate) const MAX_LIGHTING_SURFACES: usize = 1024;
+const WORKGROUP_SIZE: u32 = 64;
+pub(crate) const OUTPUT_BYTES: u64 =
+    (MAX_LIGHTING_SURFACES * core::mem::size_of::<[f32; 4]>()) as u64;
 const DIRECTIONAL_BYTES: u64 =
     (MAX_DIRECTIONALS * core::mem::size_of::<LightingDirectionalInput>()) as u64;
 const PUNCTUAL_BYTES: u64 = (MAX_PUNCTUALS * core::mem::size_of::<LightingPunctualInput>()) as u64;
@@ -28,12 +31,21 @@ const GI_CANDIDATE_BYTES: u64 =
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct GpuLightingParams {
+struct GpuLightingSurface {
     position: [f32; 4],
     normal: [f32; 4],
     albedo: [f32; 4],
     ambient: [f32; 4],
+}
+
+const SURFACE_BYTES: u64 =
+    (MAX_LIGHTING_SURFACES * core::mem::size_of::<GpuLightingSurface>()) as u64;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuLightingParams {
     counts: [u32; 4],
+    flags: [u32; 4],
 }
 
 const PARAM_BYTES: u64 = core::mem::size_of::<GpuLightingParams>() as u64;
@@ -55,11 +67,15 @@ struct PunctualLight {
 };
 
 struct Params {
+    counts: vec4<u32>,
+    flags: vec4<u32>,
+};
+
+struct Surface {
     position: vec4<f32>,
     normal: vec4<f32>,
     albedo: vec4<f32>,
     ambient: vec4<f32>,
-    counts: vec4<u32>,
 };
 
 @group(0) @binding(0)
@@ -70,6 +86,8 @@ var<uniform> params: Params;
 var<storage, read> directionals: array<DirectionalLight, 1024>;
 @group(0) @binding(3)
 var<storage, read> punctuals: array<PunctualLight, 1024>;
+@group(0) @binding(4)
+var<storage, read> surfaces: array<Surface, 1024>;
 
 fn normalize_or(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     let length_squared = dot(value, value);
@@ -110,31 +128,32 @@ fn punctual_attenuation(light: PunctualLight, position: vec3<f32>) -> f32 {
     return attenuation * clamp(light.visibility_padding.x, 0.0, 1.0);
 }
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= arrayLength(&output)) {
+    if (id.x >= params.counts.x || id.x >= arrayLength(&output)) {
         return;
     }
-    let normal = normalize_or(params.normal.xyz, vec3<f32>(0.0, 1.0, 0.0));
-    var radiance = params.albedo.xyz * params.ambient.xyz;
-    let directional_count = min(params.counts.x, 1024u);
-    let punctual_count = min(params.counts.y, 1024u);
+    let surface = surfaces[id.x];
+    let normal = normalize_or(surface.normal.xyz, vec3<f32>(0.0, 1.0, 0.0));
+    var radiance = surface.albedo.xyz * surface.ambient.xyz;
+    let directional_count = min(params.counts.y, 1024u);
+    let punctual_count = min(params.counts.z, 1024u);
     for (var index = 0u; index < directional_count; index = index + 1u) {
         let light = directionals[index];
         let direction = normalize_or(light.direction_to_light, vec3<f32>(0.0, 1.0, 0.0));
         let cosine = max(dot(normal, direction), 0.0) * clamp(light.visibility, 0.0, 1.0);
-        radiance = radiance + params.albedo.xyz * light.illuminance * cosine;
+        radiance = radiance + surface.albedo.xyz * light.illuminance * cosine;
     }
     for (var index = 0u; index < punctual_count; index = index + 1u) {
         let light = punctuals[index];
-        let to_light = light.position_range.xyz - params.position.xyz;
+        let to_light = light.position_range.xyz - surface.position.xyz;
         let distance_squared = dot(to_light, to_light);
         if (distance_squared > 0.0) {
             let direction = to_light * inverseSqrt(distance_squared);
             let cosine = max(dot(normal, direction), 0.0);
-            let attenuation = punctual_attenuation(light, params.position.xyz);
+            let attenuation = punctual_attenuation(light, surface.position.xyz);
             radiance = radiance
-                + params.albedo.xyz * light.intensity_spot_scale.xyz * (cosine * attenuation);
+                + surface.albedo.xyz * light.intensity_spot_scale.xyz * (cosine * attenuation);
         }
     }
     output[id.x] = vec4<f32>(radiance, 1.0);
@@ -150,11 +169,15 @@ struct GiCandidate {
 };
 
 struct Params {
+    counts: vec4<u32>,
+    flags: vec4<u32>,
+};
+
+struct Surface {
     position: vec4<f32>,
     normal: vec4<f32>,
     albedo: vec4<f32>,
     ambient: vec4<f32>,
-    counts: vec4<u32>,
 };
 
 @group(0) @binding(0)
@@ -163,6 +186,8 @@ var<storage, read_write> output: array<vec4<f32>>;
 var<uniform> params: Params;
 @group(0) @binding(2)
 var<storage, read> candidates: array<GiCandidate, 1024>;
+@group(0) @binding(3)
+var<storage, read> surfaces: array<Surface, 1024>;
 
 fn normalize_or(value: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     let length_squared = dot(value, value);
@@ -177,13 +202,14 @@ fn finite(value: f32) -> bool {
     return exponent != 0xffu;
 }
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= arrayLength(&output)) {
+    if (id.x >= params.counts.x || id.x >= arrayLength(&output)) {
         return;
     }
-    let primary_normal = normalize_or(params.normal.xyz, vec3<f32>(0.0, 1.0, 0.0));
-    let candidate_count = min(params.counts.z, 4u);
+    let surface = surfaces[id.x];
+    let primary_normal = normalize_or(surface.normal.xyz, vec3<f32>(0.0, 1.0, 0.0));
+    let candidate_count = min(params.counts.w, 4u);
     var weight_sum = 0.0;
     var sample_count = 0u;
     var selected_position = vec3<f32>(0.0);
@@ -215,7 +241,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         output[id.x] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         return;
     }
-    let to_sample = selected_position - params.position.xyz;
+    let to_sample = selected_position - surface.position.xyz;
     let distance_squared = dot(to_sample, to_sample);
     if (!finite(distance_squared) || distance_squared <= 1.0e-8) {
         output[id.x] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
@@ -228,18 +254,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let geometry = cosine_primary * cosine_secondary / distance_squared;
     let visibility = clamp(selected_visibility, 0.0, 1.0);
     let reservoir_weight = weight_sum / (f32(sample_count) * selected_target_pdf);
-    let result = params.albedo.xyz * selected_radiance * geometry * visibility * reservoir_weight;
+    let result = surface.albedo.xyz * selected_radiance * geometry * visibility * reservoir_weight;
     output[id.x] = vec4<f32>(result, 1.0);
 }
 "#;
 
 const COMPOSITE_SHADER: &str = r#"
 struct Params {
-    position: vec4<f32>,
-    normal: vec4<f32>,
-    albedo: vec4<f32>,
-    ambient: vec4<f32>,
     counts: vec4<u32>,
+    flags: vec4<u32>,
 };
 
 @group(0) @binding(0)
@@ -251,16 +274,16 @@ var<storage, read> gi: array<vec4<f32>>;
 @group(0) @binding(3)
 var<uniform> params: Params;
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= arrayLength(&output)) {
+    if (id.x >= params.counts.x || id.x >= arrayLength(&output)) {
         return;
     }
     var value = vec3<f32>(0.0);
-    if (params.counts.w == 1u || params.counts.w == 3u) {
+    if (params.flags.x == 1u || params.flags.x == 3u) {
         value = value + direct[id.x].xyz;
     }
-    if (params.counts.w == 2u || params.counts.w == 3u) {
+    if (params.flags.x == 2u || params.flags.x == 3u) {
         value = value + gi[id.x].xyz;
     }
     output[id.x] = vec4<f32>(value, 1.0);
@@ -283,6 +306,8 @@ pub struct LightingGpuBundle {
     pub punctuals: prism_render_driver::BufferId,
     /// GI candidate storage buffer.
     pub candidates: prism_render_driver::BufferId,
+    /// Packed, shader-aligned surface sample storage buffer.
+    pub surfaces: prism_render_driver::BufferId,
     /// Direct-light pipeline and bind group.
     pub direct_pipeline: prism_render_driver::ComputePipelineId,
     pub direct_bind_group: prism_render_driver::BindGroupId,
@@ -312,6 +337,7 @@ pub(crate) struct LightingGpuPass {
     pub composite_bind_group: prism_render_driver::BindGroupId,
     pub run_direct: bool,
     pub run_gi: bool,
+    pub workgroups: u32,
 }
 
 impl LightingGpuPass {
@@ -327,6 +353,7 @@ where
     I: prism_render_driver::Instance + 'static,
 {
     bundle: ReplayHandle<LightingGpuBundle>,
+    surface_count: core::sync::atomic::AtomicU32,
     marker: core::marker::PhantomData<fn() -> I>,
 }
 
@@ -343,6 +370,7 @@ where
         })?;
         Ok(Self {
             bundle,
+            surface_count: core::sync::atomic::AtomicU32::new(0),
             marker: core::marker::PhantomData,
         })
     }
@@ -350,6 +378,9 @@ where
     /// Uploads the current immutable lighting snapshot before dispatch.
     pub fn prepare(&self, plan: &LightingPlan, inputs: &ExtractedLightingInputs, queue: &I::Queue) {
         let bundle = self.bundle.current();
+        let surface_count = inputs.surfaces.len().min(MAX_LIGHTING_SURFACES);
+        self.surface_count
+            .store(surface_count as u32, core::sync::atomic::Ordering::Release);
         let directional_count = inputs.directionals.len().min(MAX_DIRECTIONALS);
         let punctual_count = inputs.punctuals.len().min(MAX_PUNCTUALS);
         let candidate_count = inputs.gi_candidates.len().min(MAX_GI_CANDIDATES);
@@ -361,38 +392,35 @@ where
             execution_flags |= 2;
         }
         let params = GpuLightingParams {
-            position: [
-                inputs.surface.position[0],
-                inputs.surface.position[1],
-                inputs.surface.position[2],
-                0.0,
-            ],
-            normal: [
-                inputs.surface.normal[0],
-                inputs.surface.normal[1],
-                inputs.surface.normal[2],
-                0.0,
-            ],
-            albedo: [
-                inputs.surface.albedo[0],
-                inputs.surface.albedo[1],
-                inputs.surface.albedo[2],
-                0.0,
-            ],
-            ambient: [
-                inputs.surface.ambient[0],
-                inputs.surface.ambient[1],
-                inputs.surface.ambient[2],
-                0.0,
-            ],
             counts: [
+                surface_count as u32,
                 directional_count as u32,
                 punctual_count as u32,
                 candidate_count as u32,
-                execution_flags,
             ],
+            flags: [execution_flags, 0, 0, 0],
         };
         queue.write_buffer(bundle.params, 0, bytes_of(&params));
+        let packed_surfaces = inputs.surfaces[..surface_count]
+            .iter()
+            .map(|surface| GpuLightingSurface {
+                position: [
+                    surface.position[0],
+                    surface.position[1],
+                    surface.position[2],
+                    0.0,
+                ],
+                normal: [surface.normal[0], surface.normal[1], surface.normal[2], 0.0],
+                albedo: [surface.albedo[0], surface.albedo[1], surface.albedo[2], 0.0],
+                ambient: [
+                    surface.ambient[0],
+                    surface.ambient[1],
+                    surface.ambient[2],
+                    0.0,
+                ],
+            })
+            .collect::<Vec<_>>();
+        queue.write_buffer(bundle.surfaces, 0, cast_slice(&packed_surfaces));
         queue.write_buffer(
             bundle.directionals,
             0,
@@ -408,12 +436,9 @@ where
             0,
             cast_slice(&inputs.gi_candidates[..candidate_count]),
         );
-        if execution_flags & 1 == 0 {
-            queue.write_buffer(bundle.direct_output, 0, &ZERO_OUTPUT);
-        }
-        if execution_flags & 2 == 0 {
-            queue.write_buffer(bundle.gi_output, 0, &ZERO_OUTPUT);
-        }
+        queue.write_buffer(bundle.output, 0, &ZERO_OUTPUT);
+        queue.write_buffer(bundle.direct_output, 0, &ZERO_OUTPUT);
+        queue.write_buffer(bundle.gi_output, 0, &ZERO_OUTPUT);
     }
 
     /// Returns only the kernels admitted by the current plan.
@@ -422,6 +447,12 @@ where
         let run_direct = plan.recipes.contains(&RecipeId::SpecializedDeterministic);
         let run_gi = plan.recipes.contains(&RecipeId::WorldRestir);
         if !run_direct && !run_gi {
+            return None;
+        }
+        let surface_count = self
+            .surface_count
+            .load(core::sync::atomic::Ordering::Acquire);
+        if surface_count == 0 {
             return None;
         }
         let bundle = self.bundle.current();
@@ -441,6 +472,7 @@ where
             composite_bind_group: bundle.composite_bind_group,
             run_direct,
             run_gi,
+            workgroups: surface_count.div_ceil(WORKGROUP_SIZE),
         })
     }
 
@@ -510,19 +542,19 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
     let output = device.create_buffer(&BufferDescriptor {
         label: Some("lighting-final-output".into()),
         size: OUTPUT_BYTES,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let direct_output = device.create_buffer(&BufferDescriptor {
         label: Some("lighting-direct-output".into()),
         size: OUTPUT_BYTES,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let gi_output = device.create_buffer(&BufferDescriptor {
         label: Some("lighting-gi-output".into()),
         size: OUTPUT_BYTES,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let params = device.create_buffer(&BufferDescriptor {
@@ -549,6 +581,12 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let surfaces = device.create_buffer(&BufferDescriptor {
+        label: Some("lighting-surfaces".into()),
+        size: SURFACE_BYTES,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
     let direct_shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(DIRECT_SHADER));
     let direct_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -558,6 +596,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
             uniform_layout(1),
             storage_layout(2, DIRECTIONAL_BYTES, true),
             storage_layout(3, PUNCTUAL_BYTES, true),
+            storage_layout(4, SURFACE_BYTES, true),
         ],
     });
     let direct_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -579,6 +618,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
             buffer_binding(1, params, PARAM_BYTES),
             buffer_binding(2, directionals, DIRECTIONAL_BYTES),
             buffer_binding(3, punctuals, PUNCTUAL_BYTES),
+            buffer_binding(4, surfaces, SURFACE_BYTES),
         ],
     });
 
@@ -589,6 +629,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
             storage_layout(0, OUTPUT_BYTES, false),
             uniform_layout(1),
             storage_layout(2, GI_CANDIDATE_BYTES, true),
+            storage_layout(3, SURFACE_BYTES, true),
         ],
     });
     let gi_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -609,6 +650,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
             buffer_binding(0, gi_output, OUTPUT_BYTES),
             buffer_binding(1, params, PARAM_BYTES),
             buffer_binding(2, candidates, GI_CANDIDATE_BYTES),
+            buffer_binding(3, surfaces, SURFACE_BYTES),
         ],
     });
 
@@ -653,6 +695,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
         directionals,
         punctuals,
         candidates,
+        surfaces,
         direct_pipeline,
         direct_bind_group,
         gi_pipeline,

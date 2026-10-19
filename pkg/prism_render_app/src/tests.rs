@@ -2380,16 +2380,37 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         visibility: 0.75,
         ..LightingGiCandidateInput::default()
     }];
-    let expected_direct = evaluate_deterministic_direct(surface, &directionals, &punctuals);
-    let expected_gi = evaluate_deterministic_gi(surface, &gi_candidates);
-    let expected = [
-        expected_direct[0] + expected_gi[0],
-        expected_direct[1] + expected_gi[1],
-        expected_direct[2] + expected_gi[2],
-    ];
+    let surface2 = LightingSurfaceInput {
+        position: [1.0, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        albedo: [0.25, 0.5, 0.75],
+        ambient: [2.0, 1.0, 0.5],
+    };
+    let mut surfaces = vec![surface, surface2];
+    surfaces.extend((0..63).map(|index| LightingSurfaceInput {
+        position: [index as f32 * 0.02, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        albedo: [0.1 + (index % 9) as f32 * 0.1, 0.6, 0.3],
+        ambient: [0.0; 3],
+    }));
+    let expected_direct = surfaces
+        .iter()
+        .copied()
+        .map(|sample| evaluate_deterministic_direct(sample, &directionals, &punctuals))
+        .collect::<Vec<_>>();
+    let expected_gi = surfaces
+        .iter()
+        .copied()
+        .map(|sample| evaluate_deterministic_gi(sample, &gi_candidates))
+        .collect::<Vec<_>>();
+    let expected_composite = expected_direct
+        .iter()
+        .zip(&expected_gi)
+        .map(|(direct, gi)| [direct[0] + gi[0], direct[1] + gi[1], direct[2] + gi[2]])
+        .collect::<Vec<_>>();
     {
         let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
-        inputs.surface = surface;
+        inputs.surfaces = surfaces.clone();
         inputs.directionals = directionals;
         inputs.punctuals = punctuals;
         inputs.gi_candidates = gi_candidates;
@@ -2467,7 +2488,7 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         runtime
             .runtime()
             .queue()
-            .read_buffer(buffer, 16)
+            .read_buffer(buffer, crate::lighting_gpu::OUTPUT_BYTES)
             .chunks_exact(4)
             .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized output")))
             .collect::<Vec<_>>()
@@ -2475,30 +2496,54 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     let direct_values = read_output(lighting.direct_output_buffer());
     let gi_values = read_output(lighting.gi_output_buffer());
     let composite_values = read_output(lighting.output_buffer());
-    assert_eq!(direct_values.len(), 4);
-    assert_eq!(gi_values.len(), 4);
-    assert_eq!(composite_values.len(), 4);
-    for (actual, expected) in direct_values[..3].iter().zip(expected_direct) {
-        assert!(
-            (actual - expected).abs() < 1.0e-4,
-            "GPU direct/CPU mismatch: {actual} vs {expected}"
+    assert_eq!(
+        direct_values.len(),
+        crate::lighting_gpu::MAX_LIGHTING_SURFACES * 4
+    );
+    assert_eq!(gi_values.len(), direct_values.len());
+    assert_eq!(composite_values.len(), direct_values.len());
+    for surface_index in 0..surfaces.len() {
+        let base = surface_index * 4;
+        for channel in 0..3 {
+            assert!(
+                (direct_values[base + channel] - expected_direct[surface_index][channel]).abs()
+                    < 1.0e-4,
+                "GPU direct surface {surface_index} channel {channel}: {} vs {}",
+                direct_values[base + channel],
+                expected_direct[surface_index][channel]
+            );
+            assert!(
+                (composite_values[base + channel] - expected_composite[surface_index][channel])
+                    .abs()
+                    < 1.0e-4,
+                "GPU composite surface {surface_index} channel {channel}: {} vs {}",
+                composite_values[base + channel],
+                expected_composite[surface_index][channel]
+            );
+        }
+        assert_eq!(direct_values[base + 3], 1.0);
+        assert_eq!(gi_values[base + 3], 1.0);
+        assert_eq!(composite_values[base + 3], 1.0);
+        for channel in 0..3 {
+            assert!(
+                (gi_values[base + channel] - expected_gi[surface_index][channel]).abs() < 1.0e-4,
+                "GPU GI surface {surface_index} channel {channel}: {} vs {}",
+                gi_values[base + channel],
+                expected_gi[surface_index][channel]
+            );
+        }
+    }
+    for tail in (surfaces.len() * 4)..direct_values.len() {
+        assert_eq!(
+            direct_values[tail], 0.0,
+            "direct tail is deterministically clear"
+        );
+        assert_eq!(gi_values[tail], 0.0, "GI tail is deterministically clear");
+        assert_eq!(
+            composite_values[tail], 0.0,
+            "composite tail is deterministically clear"
         );
     }
-    assert_eq!(direct_values[3], 1.0);
-    for (actual, expected) in gi_values[..3].iter().zip(expected_gi) {
-        assert!(
-            (actual - expected).abs() < 1.0e-4,
-            "GPU GI/CPU mismatch: {actual} vs {expected}"
-        );
-    }
-    assert_eq!(gi_values[3], 1.0);
-    for (actual, expected) in composite_values[..3].iter().zip(expected) {
-        assert!(
-            (actual - expected).abs() < 1.0e-4,
-            "GPU composite/CPU mismatch: {actual} vs {expected}"
-        );
-    }
-    assert_eq!(composite_values[3], 1.0);
     assert_eq!(
         render
             .world
@@ -2685,7 +2730,9 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
         },
         Tier::Balanced,
     );
-    lighting.prepare(&plan, &ExtractedLightingInputs::default(), runtime.queue());
+    let mut extracted = ExtractedLightingInputs::default();
+    extracted.surfaces = vec![LightingSurfaceInput::default()];
+    lighting.prepare(&plan, &extracted, runtime.queue());
 
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
@@ -2747,7 +2794,9 @@ fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
         budget: FrameResourceBudget::default(),
         rejected: Vec::new(),
     };
-    lighting.prepare(&plan, &ExtractedLightingInputs::default(), runtime.queue());
+    let mut extracted = ExtractedLightingInputs::default();
+    extracted.surfaces = vec![LightingSurfaceInput::default()];
+    lighting.prepare(&plan, &extracted, runtime.queue());
 
     let target = RenderTarget::new(runtime.device(), extent);
     let graph = crate::frame::target_graph(
@@ -2804,6 +2853,48 @@ fn lighting_graph_has_no_compute_pass_without_an_admitted_backend() {
     graph
         .execute(runtime.device(), &capture)
         .expect("the graph without lighting records on the null backend")
+        .release(runtime.device());
+    assert!(!capture
+        .take()
+        .into_iter()
+        .flat_map(|buffer| buffer.passes)
+        .any(|pass| matches!(pass, Pass::Compute { .. })));
+}
+
+#[test]
+fn lighting_empty_surface_batch_clears_outputs_without_dispatching() {
+    use prism_render_architecture::lighting::contract::RecipeId;
+    use prism_render_driver::Pass;
+
+    let extent = Extent3d::new_2d(4, 4);
+    let mut runtime = RenderRuntime::headless(NullInstance::new(), extent)
+        .expect("the null runtime always comes up");
+    let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
+    let plan = LightingPlan {
+        tier: Tier::Balanced,
+        recipes: vec![RecipeId::SpecializedDeterministic, RecipeId::WorldRestir],
+        partition: Default::default(),
+        budget: FrameResourceBudget::default(),
+        rejected: Vec::new(),
+    };
+    let extracted = ExtractedLightingInputs::default();
+    lighting.prepare(&plan, &extracted, runtime.queue());
+    assert!(
+        lighting.pass(&plan).is_none(),
+        "empty batches have no lighting pass"
+    );
+
+    let target = RenderTarget::new(runtime.device(), extent);
+    let graph = crate::frame::target_graph(
+        &target,
+        &RenderQueues::new(),
+        &DrawFunctions::new(),
+        lighting.pass(&plan),
+    );
+    let capture = CapturingQueue::default();
+    graph
+        .execute(runtime.device(), &capture)
+        .expect("the empty-batch graph records")
         .release(runtime.device());
     assert!(!capture
         .take()

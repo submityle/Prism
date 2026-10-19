@@ -4,6 +4,7 @@ pub mod cache;
 pub mod contract;
 pub mod culling;
 pub mod debug;
+pub mod metrics;
 pub mod ocio;
 pub mod radiance_cascades;
 pub mod recipe_backend;
@@ -19,6 +20,7 @@ pub mod restir_temporal;
 pub mod shadow;
 pub mod stochastic;
 pub mod trace;
+pub mod r#virtual;
 
 pub use debug::{ChannelSemantics, DebugMeta, DebugView, Scale};
 

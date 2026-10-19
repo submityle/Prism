@@ -11,7 +11,7 @@ use prism_render_graph::{
 };
 
 use crate::draw::DrawFunctions;
-use crate::lighting_gpu::LightingGpuPass;
+use crate::lighting_gpu::{LightingGpuPass, OUTPUT_BYTES};
 use crate::queue::RenderQueues;
 use crate::sets::RenderPhase;
 use crate::target::RenderTarget;
@@ -266,7 +266,7 @@ pub(crate) fn target_graph_output(
 
     let output = graph.import_buffer(
         "prism-lighting-final-output",
-        BufferDesc::new(16, BufferUsages::STORAGE | BufferUsages::COPY_SRC),
+        BufferDesc::new(OUTPUT_BYTES, BufferUsages::STORAGE | BufferUsages::COPY_SRC),
         ImportedBuffer {
             buffer: lighting.output,
             entry_state: BufferState::initial(),
@@ -274,7 +274,7 @@ pub(crate) fn target_graph_output(
     );
     let mut direct_output = graph.import_buffer(
         "prism-lighting-direct-output",
-        BufferDesc::new(16, BufferUsages::STORAGE),
+        BufferDesc::new(OUTPUT_BYTES, BufferUsages::STORAGE),
         ImportedBuffer {
             buffer: lighting.direct_output,
             entry_state: BufferState::initial(),
@@ -282,7 +282,7 @@ pub(crate) fn target_graph_output(
     );
     let mut gi_output = graph.import_buffer(
         "prism-lighting-gi-output",
-        BufferDesc::new(16, BufferUsages::STORAGE),
+        BufferDesc::new(OUTPUT_BYTES, BufferUsages::STORAGE),
         ImportedBuffer {
             buffer: lighting.gi_output,
             entry_state: BufferState::initial(),
@@ -290,7 +290,7 @@ pub(crate) fn target_graph_output(
     );
     let params = graph.import_buffer(
         "prism-lighting-plan-params",
-        BufferDesc::new(80, BufferUsages::UNIFORM),
+        BufferDesc::new(32, BufferUsages::UNIFORM),
         ImportedBuffer {
             buffer: lighting.params,
             entry_state: BufferState::initial(),
@@ -333,7 +333,7 @@ pub(crate) fn target_graph_output(
                     context
                         .set_compute_pipeline(lighting.direct_pipeline)
                         .set_compute_bind_group(0, lighting.direct_bind_group, Vec::new())
-                        .dispatch(1, 1, 1);
+                        .dispatch(lighting.workgroups, 1, 1);
                 }
             },
         );
@@ -350,7 +350,7 @@ pub(crate) fn target_graph_output(
                     context
                         .set_compute_pipeline(lighting.gi_pipeline)
                         .set_compute_bind_group(0, lighting.gi_bind_group, Vec::new())
-                        .dispatch(1, 1, 1);
+                        .dispatch(lighting.workgroups, 1, 1);
                 }
             },
         );
@@ -367,7 +367,7 @@ pub(crate) fn target_graph_output(
                 context
                     .set_compute_pipeline(lighting.composite_pipeline)
                     .set_compute_bind_group(0, lighting.composite_bind_group, Vec::new())
-                    .dispatch(1, 1, 1);
+                    .dispatch(lighting.workgroups, 1, 1);
             }
         },
     );

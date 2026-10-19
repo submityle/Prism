@@ -440,7 +440,7 @@ where
             directionals: Vec::new(),
             punctuals: Vec::new(),
             gi_candidates: Vec::new(),
-            surface: crate::lighting::LightingSurfaceInput::default(),
+            surfaces: vec![crate::lighting::LightingSurfaceInput::default()],
         });
         app.add_extract(RenderApp, extract_render_record);
         app.add_extract(RenderApp, crate::lighting::extract_lighting_inputs);

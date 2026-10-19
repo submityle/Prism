@@ -204,7 +204,7 @@ impl Default for LightingSurfaceInput {
 }
 
 /// Main-world lighting inputs. The host publishes the actual analytic lights,
-/// one surface sample for the compute slice, and appends invalidation fields;
+/// a deterministic batch of surface samples, and appends invalidation fields;
 /// extraction copies only this immutable snapshot into the render world.
 #[derive(Clone, Debug, Resource)]
 #[allow(missing_docs)]
@@ -214,7 +214,7 @@ pub struct LightingSceneInputs {
     pub directionals: Vec<LightingDirectionalInput>,
     pub punctuals: Vec<LightingPunctualInput>,
     pub gi_candidates: Vec<LightingGiCandidateInput>,
-    pub surface: LightingSurfaceInput,
+    pub surfaces: Vec<LightingSurfaceInput>,
 }
 
 impl LightingSceneInputs {
@@ -227,7 +227,7 @@ impl LightingSceneInputs {
             directionals: Vec::new(),
             punctuals: Vec::new(),
             gi_candidates: Vec::new(),
-            surface: LightingSurfaceInput::default(),
+            surfaces: vec![LightingSurfaceInput::default()],
         }
     }
 }
@@ -240,7 +240,7 @@ impl Default for LightingSceneInputs {
             directionals: Vec::new(),
             punctuals: Vec::new(),
             gi_candidates: Vec::new(),
-            surface: LightingSurfaceInput::default(),
+            surfaces: vec![LightingSurfaceInput::default()],
         }
     }
 }
@@ -261,7 +261,7 @@ pub struct ExtractedLightingInputs {
     pub directionals: Vec<LightingDirectionalInput>,
     pub punctuals: Vec<LightingPunctualInput>,
     pub gi_candidates: Vec<LightingGiCandidateInput>,
-    pub surface: LightingSurfaceInput,
+    pub surfaces: Vec<LightingSurfaceInput>,
 }
 
 impl Default for LightingPlanState {
@@ -310,7 +310,7 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
         directionals: inputs.directionals,
         punctuals: inputs.punctuals,
         gi_candidates: inputs.gi_candidates,
-        surface: inputs.surface,
+        surfaces: inputs.surfaces,
     });
 }
 
