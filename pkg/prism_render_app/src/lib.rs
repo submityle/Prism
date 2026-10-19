@@ -73,6 +73,7 @@ mod intent;
 mod label;
 mod lighting;
 mod lighting_gpu;
+pub mod lighting_trace_gpu;
 mod material;
 mod mesh;
 mod mesh_draw;

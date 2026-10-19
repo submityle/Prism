@@ -35,6 +35,7 @@
 - `SpecializedDeterministic` 的当前 GPU 实例已是真实 Lambert direct-light recipe：ambient、方向光漫反射、点光 inverse-square、range window、spot cone、visibility、albedo modulation 和 HDR radiance 输出。
 - `lighting/recipe_backend.rs` 已补充 DirectStochasticRT 与 DirectStochasticVSM 的确定性 CPU RIS/VSM twin、shadow-slot 校验和 bitwise 稳定性测试；它们尚未接入新宿主的真实 GPU graph，因此仍不计入当前 `LightingPlan` 的 GPU 准入。
 - `lighting/trace.rs` 已接入架构模块树：`SwBvhBackend`、稳定 BVH、异步 submit/poll/cancel、部分结果、deadline、generation、device-loss 和 slot 重叠回收均有确定性行为测试；这完成的是 CPU trace backend 与调度契约，不是硬件 RayQuery 或完整 GPU trace graph。
+- `prism_render_app/src/lighting_trace_gpu.rs` 已加入独立 GPU 软件 BVH trace 执行器：消费架构 crate 冻结的 packed node/triangle ABI，验证输入边界与 BVH 可达性，WGSL bounded-stack 遍历输出稳定 hit/miss 槽位，CPU oracle 对拍 65 条 ray（跨 workgroup 且含 miss）已在强制物理 GPU readback 下通过；目前尚未接入 LightingPlan、RenderGraph/宿主 trace scheduler、per-surface candidate 生成，也未做大场景性能标定。
 - `lighting/shadow.rs` 已接入架构模块树：shadow slot 选择、VSM 页请求合并、优先级、预算裁剪、物理页分配/驱逐、caster epoch 失效和 RayTrace/VSM/Cascade fallback 均已实现并测试；尚未成为宿主真实阴影 pass。
 - `lighting/cache.rs`、`resolve.rs`、`replay.rs` 已接入架构模块树：有界 reservoir/sample cache、软/硬失效、temporal/spatial reuse、raw/accumulated/post variance、三档 denoise/resolve、multi-surface/multi-view BRDF resolve、WAL/checkpoint/snapshot/restore 和 device-generation replay 均已有 CPU reference 与边界测试。
 - `lighting/virtual.rs` 已接入架构模块树：cell 到 shadow/GI/cache page 绑定、请求合并与优先级、有界驻留/淘汰、epoch 失效、显式 fallback 和设备恢复 snapshot/restore 已有 CPU reference 与边界测试；尚未连接真实 GPU page pool/streaming IO。
@@ -49,10 +50,10 @@
 
 - 其余 11 个 recipe 尚未接入真实 GPU 执行：RIS/MegaLights 直接光、阴影槽位、随机直接光、DDGI/brick GI、screen probe/ReSTIR、sparse SDF GI、path-traced offline 等仍是架构契约或旧实现资产，不得按“已完成”计。
 - 当前 direct recipe 已支持最多 1024 个独立 surface sample 的 GPU batch，但仍不是完整屏幕/视图 lighting resolve；尚未接入完整材质 BRDF、可见性场景查询、阴影、反射、透明、后处理和多视图输出。
-- 当前 GI GPU 路径仍是所有 surface 共用 host-provided trace candidates 的单跳 deterministic 初始 reservoir；虽然架构层已经具备 `RayScheduler`/SW-BVH、cache、temporal/spatial reuse、resolve、denoise、variance、virtual residency 和 replay CPU reference，但这些模块尚未绑定到新宿主的完整 GPU graph、场景 BVH 输入和多 bounce 执行链。
+- 当前 GI GPU 路径仍是所有 surface 共用 host-provided trace candidates 的单跳 deterministic 初始 reservoir；虽已有独立 packed-BVH GPU trace kernel，尚未把它接入 `LightingPlan`、宿主 RenderGraph 和 per-surface GI candidate 生成。架构层的 `RayScheduler`、cache、temporal/spatial reuse、resolve、denoise、variance、virtual residency 和 replay CPU reference 仍未绑定到完整 GPU graph、场景 BVH 更新输入及 multi-bounce 执行链。
 - DebugMeta、结构化 EXPLAIN 拒绝原因、shader variant gate、DebugView 消费链和 plugin sync 均已落地；OCIO 配置契约与独立 GPU transform parity 已完成，但执行器接入最终显示 graph/present 链及完整 P8 收敛验收仍未完成。
-- 需要继续完成 cache/page pool/virtual streaming 的真实 GPU 资源驻留、per-surface GPU trace/candidate 生成、GPU shadow pass、multi-view resolve 的宿主与 GPU graph 接线、完整 BRDF/材质/可见性/反射/透明/后处理链，以及 raw/accumulated/post variance、bias、denoise 的实测标定。metrics 契约虽已具备，H/S 矩阵仍没有完整硬件实测数据。
-- P7a 的新宿主 GI 端到端垂直切片已完成；旧 `prism_render_scene` parity 以及 H1–H4 × S1–S6 的最终性能和画质矩阵仍未完成。
+- 需要继续完成 cache/page pool/virtual streaming 的真实 GPU 资源驻留、packed-BVH trace kernel 的 LightingPlan/graph/scene 输入接线与 per-surface candidate 生成、GPU shadow pass、multi-view resolve 的宿主与 GPU graph 接线、完整 BRDF/材质/可见性/反射/透明/后处理链，以及 raw/accumulated/post variance、bias、denoise 的实测标定。metrics 契约虽已具备，H/S 矩阵仍没有完整硬件实测数据。
+- P7a 的新宿主 GI 路径目前只完成初始 reservoir compute/readback 子切片；场景到 trace 到 GI 到 present 的宿主闭环、与旧 `prism_render_scene` parity 以及 H1–H4 × S1–S6 的最终性能和画质矩阵均未完成，因此 P7a 整体验收未完成。
 
 因此当前结论是：**架构契约、计划入口、结构化诊断契约、确定性 direct-light 与初始 GI 多-surface GPU/CPU 对拍已完成；完整 lighting/GI 重构尚未完成。** 后续实现必须继续沿用同一 `LightingPlan` 和新输入契约，不保留旧 API，也不能在子系统内新增旁路开关。
 
