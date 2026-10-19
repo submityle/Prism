@@ -35,10 +35,21 @@ pub enum SceneClass {
     S4,
     S5,
     S6,
+    /// Specular-reflection scene: roughness sweep, planar mirror, water, and
+    /// fallback behavior when ray tracing is unavailable.
+    S7,
 }
 
 impl SceneClass {
-    pub const ALL: [Self; 6] = [Self::S1, Self::S2, Self::S3, Self::S4, Self::S5, Self::S6];
+    pub const ALL: [Self; 7] = [
+        Self::S1,
+        Self::S2,
+        Self::S3,
+        Self::S4,
+        Self::S5,
+        Self::S6,
+        Self::S7,
+    ];
 
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -48,6 +59,7 @@ impl SceneClass {
             Self::S4 => "S4",
             Self::S5 => "S5",
             Self::S6 => "S6",
+            Self::S7 => "S7",
         }
     }
 }
@@ -68,6 +80,10 @@ pub enum Metric {
     TemporalInstability,
     Psnr,
     EnergyError,
+    SpecularFluxRatioError,
+    SpecularFallbackMonotonicity,
+    SsrSeamLuminanceJump,
+    FlipError,
     HitchFrameMs,
     DisplayableOutput,
 }
@@ -87,6 +103,10 @@ impl Metric {
             Self::TemporalInstability => "temporal_instability",
             Self::Psnr => "psnr_db",
             Self::EnergyError => "energy_error",
+            Self::SpecularFluxRatioError => "specular_flux_ratio_error",
+            Self::SpecularFallbackMonotonicity => "specular_fallback_monotonicity",
+            Self::SsrSeamLuminanceJump => "ssr_seam_luminance_jump",
+            Self::FlipError => "flip_error",
             Self::HitchFrameMs => "hitch_frame_ms",
             Self::DisplayableOutput => "displayable_output",
         }
@@ -225,12 +245,13 @@ impl GateRule {
         if !self.threshold.is_finite() {
             return Err(PlanError::NonFiniteThreshold(self.case));
         }
-        if self.case.metric == Metric::DisplayableOutput
-            && !matches!(
-                self.statistic,
-                Statistic::Min | Statistic::P50 | Statistic::Mean
-            )
-        {
+        if matches!(
+            self.case.metric,
+            Metric::DisplayableOutput | Metric::SpecularFallbackMonotonicity
+        ) && !matches!(
+            self.statistic,
+            Statistic::Min | Statistic::P50 | Statistic::Mean
+        ) {
             return Err(PlanError::InvalidBooleanStatistic(self.case));
         }
         Ok(())
@@ -555,8 +576,147 @@ mod tests {
         );
         assert_eq!(
             SceneClass::ALL.map(SceneClass::as_str),
-            ["S1", "S2", "S3", "S4", "S5", "S6"]
+            ["S1", "S2", "S3", "S4", "S5", "S6", "S7"]
         );
+    }
+
+    #[test]
+    fn s7_specular_metrics_have_stable_serialization_names() {
+        assert_eq!(
+            [
+                Metric::SpecularFluxRatioError,
+                Metric::SpecularFallbackMonotonicity,
+                Metric::SsrSeamLuminanceJump,
+                Metric::FlipError,
+            ]
+            .map(Metric::as_str),
+            [
+                "specular_flux_ratio_error",
+                "specular_fallback_monotonicity",
+                "ssr_seam_luminance_jump",
+                "flip_error",
+            ]
+        );
+    }
+
+    #[test]
+    fn s7_acceptance_report_covers_specular_energy_fallback_seam_and_quality() {
+        let s7_case = |hardware, metric| Case {
+            hardware,
+            scene: SceneClass::S7,
+            metric,
+        };
+        // These values are synthetic fixtures for exercising report behavior;
+        // thresholds are test-local and are not architecture acceptance targets.
+        let cases = [
+            s7_case(HardwareClass::H1, Metric::SpecularFluxRatioError),
+            s7_case(HardwareClass::H1, Metric::SpecularFallbackMonotonicity),
+            s7_case(HardwareClass::H2, Metric::SsrSeamLuminanceJump),
+            s7_case(HardwareClass::H3, Metric::FlipError),
+        ];
+        let plan = AcceptancePlan {
+            rules: vec![
+                GateRule {
+                    case: cases[0],
+                    statistic: Statistic::Max,
+                    comparison: Comparison::AtMost,
+                    threshold: 0.01,
+                },
+                GateRule {
+                    case: cases[1],
+                    statistic: Statistic::Min,
+                    comparison: Comparison::AtLeast,
+                    threshold: 1.0,
+                },
+                GateRule {
+                    case: cases[2],
+                    statistic: Statistic::P95,
+                    comparison: Comparison::AtMost,
+                    threshold: 0.2,
+                },
+                GateRule {
+                    case: cases[3],
+                    statistic: Statistic::P50,
+                    comparison: Comparison::AtMost,
+                    threshold: 0.05,
+                },
+            ],
+            not_applicable: vec![],
+        };
+        let measurements = [
+            Measurement {
+                case: cases[0],
+                samples: vec![0.002, 0.004, 0.003],
+            },
+            Measurement {
+                case: cases[1],
+                samples: vec![1.0, 1.0, 1.0],
+            },
+            Measurement {
+                case: cases[2],
+                samples: vec![0.08, 0.12, 0.15],
+            },
+            Measurement {
+                case: cases[3],
+                samples: vec![0.02, 0.03, 0.04],
+            },
+        ];
+        let report = plan.evaluate(&measurements).unwrap();
+
+        assert_eq!(report.status, OverallStatus::Pass);
+        assert_eq!((report.pass_count, report.fail_count), (4, 0));
+        for case in cases {
+            assert!(report.summary.contains(&format!(
+                "{} S7 {} PASS",
+                case.hardware.as_str(),
+                case.metric.as_str()
+            )));
+        }
+        assert_eq!(report.digest, digest128(report.summary.as_bytes()));
+        assert_eq!(
+            plan.evaluate(&measurements).unwrap().summary,
+            report.summary
+        );
+    }
+
+    #[test]
+    fn s7_fallback_monotonicity_is_a_boolean_gate_and_does_not_hide_h1_failure() {
+        let c = Case {
+            hardware: HardwareClass::H1,
+            scene: SceneClass::S7,
+            metric: Metric::SpecularFallbackMonotonicity,
+        };
+        assert_eq!(
+            GateRule {
+                case: c,
+                statistic: Statistic::P95,
+                comparison: Comparison::AtLeast,
+                threshold: 1.0,
+            }
+            .validate(),
+            Err(PlanError::InvalidBooleanStatistic(c))
+        );
+
+        let plan = AcceptancePlan {
+            rules: vec![GateRule {
+                case: c,
+                statistic: Statistic::Min,
+                comparison: Comparison::AtLeast,
+                threshold: 1.0,
+            }],
+            not_applicable: vec![],
+        };
+        let report = plan
+            .evaluate(&[Measurement {
+                case: c,
+                samples: vec![1.0, 0.0, 1.0],
+            }])
+            .unwrap();
+        assert_eq!(report.status, OverallStatus::Fail);
+        assert_eq!(report.fail_count, 1);
+        assert!(report
+            .summary
+            .contains("H1 S7 specular_fallback_monotonicity FAIL"));
     }
 
     #[test]
