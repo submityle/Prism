@@ -97,6 +97,38 @@ pub struct LightingSurfaceInput {
     pub ambient: [f32; 3],
 }
 
+/// One deterministic indirect-light candidate for the initial GI reservoir.
+/// The host supplies the trace result and its sampling densities; the render
+/// backend performs the same RIS selection and geometric contribution math as
+/// the CPU oracle.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct LightingGiCandidateInput {
+    pub position: [f32; 3],
+    pub source_pdf: f32,
+    pub normal: [f32; 3],
+    pub target_pdf: f32,
+    pub radiance: [f32; 3],
+    pub selection_u01: f32,
+    pub visibility: f32,
+    pub _padding: [f32; 3],
+}
+
+impl Default for LightingGiCandidateInput {
+    fn default() -> Self {
+        Self {
+            position: [0.0, 1.0, 0.0],
+            source_pdf: 1.0,
+            normal: [0.0, 1.0, 0.0],
+            target_pdf: 0.0,
+            radiance: [0.0; 3],
+            selection_u01: 0.5,
+            visibility: 1.0,
+            _padding: [0.0; 3],
+        }
+    }
+}
+
 impl Default for LightingSurfaceInput {
     fn default() -> Self {
         Self {
@@ -118,6 +150,7 @@ pub struct LightingSceneInputs {
     pub journal: ChangeJournal,
     pub directionals: Vec<LightingDirectionalInput>,
     pub punctuals: Vec<LightingPunctualInput>,
+    pub gi_candidates: Vec<LightingGiCandidateInput>,
     pub surface: LightingSurfaceInput,
 }
 
@@ -130,6 +163,7 @@ impl LightingSceneInputs {
             journal: ChangeJournal::new(),
             directionals: Vec::new(),
             punctuals: Vec::new(),
+            gi_candidates: Vec::new(),
             surface: LightingSurfaceInput::default(),
         }
     }
@@ -142,6 +176,7 @@ impl Default for LightingSceneInputs {
             journal: ChangeJournal::new(),
             directionals: Vec::new(),
             punctuals: Vec::new(),
+            gi_candidates: Vec::new(),
             surface: LightingSurfaceInput::default(),
         }
     }
@@ -162,6 +197,7 @@ pub struct ExtractedLightingInputs {
     pub journal_snapshot: prism_render_architecture::lighting::contract::JournalSnapshot,
     pub directionals: Vec<LightingDirectionalInput>,
     pub punctuals: Vec<LightingPunctualInput>,
+    pub gi_candidates: Vec<LightingGiCandidateInput>,
     pub surface: LightingSurfaceInput,
 }
 
@@ -210,6 +246,7 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
         journal_snapshot: inputs.journal.snapshot(),
         directionals: inputs.directionals,
         punctuals: inputs.punctuals,
+        gi_candidates: inputs.gi_candidates,
         surface: inputs.surface,
     });
 }
@@ -306,6 +343,64 @@ pub(crate) fn evaluate_deterministic_direct(
         );
     }
     radiance
+}
+
+/// Evaluates the deterministic initial GI reservoir used by the GPU twin.
+/// This is a bounded one-bounce estimator: temporal/spatial reuse and scene
+/// traversal remain separate contracts, while the selected sample and its RIS
+/// normalization are fully executable and parity-testable here.
+#[must_use]
+pub(crate) fn evaluate_deterministic_gi(
+    surface: LightingSurfaceInput,
+    candidates: &[LightingGiCandidateInput],
+) -> [f32; 3] {
+    const MAX_CANDIDATES: usize = 4;
+    let primary_normal = normalize_or(surface.normal, [0.0, 1.0, 0.0]);
+    let mut weight_sum = 0.0;
+    let mut sample_count = 0_u32;
+    let mut selected = None;
+    for candidate in candidates.iter().take(MAX_CANDIDATES) {
+        if !candidate.source_pdf.is_finite()
+            || candidate.source_pdf <= 0.0
+            || !candidate.target_pdf.is_finite()
+            || candidate.target_pdf <= 0.0
+        {
+            continue;
+        }
+        let weight = candidate.target_pdf / candidate.source_pdf;
+        if !weight.is_finite() || weight <= 0.0 {
+            continue;
+        }
+        weight_sum += weight;
+        sample_count = sample_count.saturating_add(1);
+        let u = candidate.selection_u01.clamp(0.0, 1.0);
+        if u * weight_sum < weight {
+            selected = Some(*candidate);
+        }
+    }
+    let Some(candidate) = selected else {
+        return [0.0; 3];
+    };
+    if sample_count == 0 || weight_sum <= 0.0 || candidate.target_pdf <= 0.0 {
+        return [0.0; 3];
+    }
+    let to_sample = sub(candidate.position, surface.position);
+    let distance_squared = dot(to_sample, to_sample);
+    if !distance_squared.is_finite() || distance_squared <= 1.0e-8 {
+        return [0.0; 3];
+    }
+    let distance = distance_squared.sqrt();
+    let direction = scale(to_sample, distance.recip());
+    let sample_normal = normalize_or(candidate.normal, [0.0, 1.0, 0.0]);
+    let cosine_primary = dot(primary_normal, direction).max(0.0);
+    let cosine_secondary = dot(sample_normal, scale(direction, -1.0)).max(0.0);
+    let geometry = cosine_primary * cosine_secondary / distance_squared;
+    let visibility = candidate.visibility.clamp(0.0, 1.0);
+    let reservoir_weight = weight_sum / (sample_count as f32 * candidate.target_pdf);
+    scale(
+        mul(surface.albedo, candidate.radiance),
+        geometry * visibility * reservoir_weight,
+    )
 }
 
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {

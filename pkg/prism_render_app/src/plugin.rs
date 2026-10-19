@@ -433,6 +433,7 @@ where
             journal: prism_render_architecture::lighting::contract::ChangeJournal::new(),
             directionals: Vec::new(),
             punctuals: Vec::new(),
+            gi_candidates: Vec::new(),
             surface: crate::lighting::LightingSurfaceInput::default(),
         });
         app.add_extract(RenderApp, extract_render_record);

@@ -428,7 +428,10 @@ mod tests {
         drop(imported);
         assert!(catch_unwind(AssertUnwindSafe(|| device.wgpu_buffer(id))).is_err());
         host.queue.write_buffer(&native, 0, &[9, 8, 7, 6]);
-        assert_eq!(&read_buffer(&host, &Buffer::from(native))[..4], &[9, 8, 7, 6]);
+        assert_eq!(
+            &read_buffer(&host, &Buffer::from(native))[..4],
+            &[9, 8, 7, 6]
+        );
     }
 
     #[test]

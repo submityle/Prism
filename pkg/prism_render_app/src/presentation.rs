@@ -630,8 +630,8 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         stats.frames_submitted += 1;
         stats.passes_declared += passes;
         stats.draws_recorded += queues.len() as u64;
-        if lighting.is_some() {
-            stats.lighting_gpu_passes_recorded += 1;
+        if let Some(lighting) = lighting {
+            stats.lighting_gpu_passes_recorded += lighting.pass_count();
         }
         let target = PresentationTarget {
             id: id.0,

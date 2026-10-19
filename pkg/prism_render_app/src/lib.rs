@@ -124,8 +124,8 @@ pub use image::GpuImage;
 pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
 pub use lighting::{
-    ExtractedLightingInputs, LightingDirectionalInput, LightingPlanState, LightingPunctualInput,
-    LightingSceneInputs, LightingSurfaceInput,
+    ExtractedLightingInputs, LightingDirectionalInput, LightingGiCandidateInput, LightingPlanState,
+    LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
 };
 pub use material::{
     BindlessSlot, FallbackTextures, MaterialBindingLayout, MaterialParameterBuffers,
@@ -211,8 +211,8 @@ pub mod prelude {
     pub use crate::intent::{RenderIntent, RenderViewport};
     pub use crate::label::{Render, RenderApp, RenderStartup};
     pub use crate::lighting::{
-        ExtractedLightingInputs, LightingDirectionalInput, LightingPlanState,
-        LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
+        ExtractedLightingInputs, LightingDirectionalInput, LightingGiCandidateInput,
+        LightingPlanState, LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
     };
     pub use crate::material::{
         BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,

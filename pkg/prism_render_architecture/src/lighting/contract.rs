@@ -489,7 +489,7 @@ impl RecipeId {
     /// remains closed until its GPU/CPU twin and graph pass are registered.
     #[must_use]
     pub const fn has_execution_backend(self) -> bool {
-        matches!(self, Self::SpecializedDeterministic)
+        matches!(self, Self::SpecializedDeterministic | Self::WorldRestir)
     }
 
     #[must_use]
@@ -931,6 +931,53 @@ mod tests {
             rejection,
             Rejection::Unavailable(RecipeId::SsgiScreenSpace)
         )));
+    }
+
+    #[test]
+    fn planner_admits_world_restir_when_backend_and_budget_are_available() {
+        let plan = BudgetCompiler::compile(
+            SceneStats::default(),
+            FrameResourceBudget {
+                gpu_ms: 16.666,
+                bandwidth: 512 * 1024 * 1024,
+                resident_bytes: 512 * 1024 * 1024,
+                io_ops: 4096,
+                shading_rate_budget: 1.0,
+            },
+            PlanCaps {
+                ray_tracing: false,
+                virtual_shadow: false,
+                offline: false,
+                deterministic_npr: false,
+            },
+            Tier::Balanced,
+        );
+        assert!(plan.recipes.contains(&RecipeId::SpecializedDeterministic));
+        assert!(plan.recipes.contains(&RecipeId::WorldRestir));
+        assert!(!plan
+            .rejected
+            .iter()
+            .any(|rejection| matches!(rejection, Rejection::Unavailable(RecipeId::WorldRestir))));
+    }
+
+    #[test]
+    fn planner_rejects_world_restir_for_deterministic_npr() {
+        let plan = BudgetCompiler::compile(
+            SceneStats::default(),
+            FrameResourceBudget::default(),
+            PlanCaps {
+                ray_tracing: false,
+                virtual_shadow: false,
+                offline: false,
+                deterministic_npr: true,
+            },
+            Tier::Balanced,
+        );
+        assert!(!plan.recipes.contains(&RecipeId::WorldRestir));
+        assert!(plan
+            .rejected
+            .iter()
+            .any(|rejection| matches!(rejection, Rejection::Determinism(RecipeId::WorldRestir))));
     }
 
     struct MockBackend {

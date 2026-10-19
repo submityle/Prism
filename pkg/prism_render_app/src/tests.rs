@@ -19,8 +19,9 @@ use crate::config::RenderAppConfig;
 use crate::intent::{RenderIntent, RenderViewport};
 use crate::label::{Render, RenderApp};
 use crate::lighting::{
-    evaluate_deterministic_direct, ExtractedLightingInputs, LightingDirectionalInput,
-    LightingPlanState, LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
+    evaluate_deterministic_direct, evaluate_deterministic_gi, ExtractedLightingInputs,
+    LightingDirectionalInput, LightingGiCandidateInput, LightingPlanState, LightingPunctualInput,
+    LightingSceneInputs, LightingSurfaceInput,
 };
 use crate::lighting_gpu::LightingGpuState;
 use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};
@@ -47,7 +48,7 @@ use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
 use prism_render_architecture::lighting::contract::{
-    ChangeFields, FrameResourceBudget, PlanCaps, Rejection, SceneStats, Tier,
+    ChangeFields, FrameResourceBudget, LightingPlan, PlanCaps, Rejection, SceneStats, Tier,
 };
 use prism_render_architecture::shader_package::{
     ArtifactDigest, ExecutionFamily, ModuleId, ModuleIdentity, PermutationIndex, PermutationSpace,
@@ -1964,8 +1965,8 @@ fn render_schedule_runs_each_frame_and_submits_a_frame() {
     );
     assert_eq!(
         stats.passes_declared,
-        FRAMES * 2,
-        "each recorded frame declares one lighting compute pass and one clear pass"
+        FRAMES * 4,
+        "each recorded frame declares three lighting compute passes and one clear pass"
     );
     assert_eq!(stats.last_viewport, RenderViewport::from_extent(EXTENT));
 
@@ -2015,7 +2016,7 @@ fn lighting_plan_uses_host_caps_scene_stats_and_budget() {
             ray_tracing: false,
             virtual_shadow: false,
             offline: false,
-            deterministic_npr: true,
+            deterministic_npr: false,
         })
         .with_lighting_tier(Tier::Preview);
     let mut app = app_on_null_backend(config);
@@ -2043,6 +2044,52 @@ fn lighting_plan_uses_host_caps_scene_stats_and_budget() {
         .iter()
         .any(|rejection| matches!(rejection, Rejection::Unavailable(_))));
     assert!(state.plan.explain().contains("tier=Preview"));
+}
+
+#[test]
+fn deterministic_gi_oracle_selects_valid_reservoir_sample() {
+    let surface = LightingSurfaceInput {
+        position: [0.0, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        albedo: [0.5, 0.25, 1.0],
+        ..LightingSurfaceInput::default()
+    };
+    let candidate = LightingGiCandidateInput {
+        position: [0.0, 2.0, 0.0],
+        source_pdf: 1.0,
+        normal: [0.0, -1.0, 0.0],
+        target_pdf: 1.0,
+        radiance: [2.0, 4.0, 8.0],
+        selection_u01: 0.25,
+        visibility: 0.75,
+        ..LightingGiCandidateInput::default()
+    };
+    assert_eq!(
+        evaluate_deterministic_gi(surface, &[candidate]),
+        [0.1875, 0.1875, 1.5]
+    );
+}
+
+#[test]
+fn deterministic_gi_oracle_ignores_invalid_and_backfacing_candidates() {
+    let surface = LightingSurfaceInput::default();
+    let invalid = LightingGiCandidateInput {
+        source_pdf: 0.0,
+        target_pdf: 1.0,
+        ..LightingGiCandidateInput::default()
+    };
+    let backfacing = LightingGiCandidateInput {
+        position: [0.0, 2.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        source_pdf: 1.0,
+        target_pdf: 1.0,
+        radiance: [10.0; 3],
+        ..LightingGiCandidateInput::default()
+    };
+    assert_eq!(
+        evaluate_deterministic_gi(surface, &[invalid, backfacing]),
+        [0.0; 3]
+    );
 }
 
 #[test]
@@ -2244,12 +2291,29 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         intensity: [4.0, 8.0, 16.0],
         ..LightingPunctualInput::default()
     }];
-    let expected = evaluate_deterministic_direct(surface, &directionals, &punctuals);
+    let gi_candidates = vec![LightingGiCandidateInput {
+        position: [0.0, 2.0, 0.0],
+        normal: [0.0, -1.0, 0.0],
+        source_pdf: 1.0,
+        target_pdf: 1.0,
+        radiance: [2.0, 4.0, 8.0],
+        selection_u01: 0.25,
+        visibility: 0.75,
+        ..LightingGiCandidateInput::default()
+    }];
+    let expected_direct = evaluate_deterministic_direct(surface, &directionals, &punctuals);
+    let expected_gi = evaluate_deterministic_gi(surface, &gi_candidates);
+    let expected = [
+        expected_direct[0] + expected_gi[0],
+        expected_direct[1] + expected_gi[1],
+        expected_direct[2] + expected_gi[2],
+    ];
     {
         let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
         inputs.surface = surface;
         inputs.directionals = directionals;
         inputs.punctuals = punctuals;
+        inputs.gi_candidates = gi_candidates;
     }
 
     // Pre-fill the offscreen target with opaque white, then prove the upload
@@ -2341,7 +2405,7 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
             .world
             .resource::<RenderFrameStats>()
             .lighting_gpu_passes_recorded,
-        1
+        3
     );
 }
 
@@ -2507,7 +2571,13 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
     let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
     let plan = BudgetCompiler::compile(
         SceneStats::default(),
-        FrameResourceBudget::default(),
+        FrameResourceBudget {
+            gpu_ms: 16.666,
+            bandwidth: 512 * 1024 * 1024,
+            resident_bytes: 512 * 1024 * 1024,
+            io_ops: 4096,
+            shading_rate_budget: 1.0,
+        },
         PlanCaps {
             ray_tracing: false,
             virtual_shadow: false,
@@ -2521,34 +2591,126 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
     let functions = DrawFunctions::new();
-    let graph = crate::frame::target_graph(&target, &queues, &functions, Some(lighting.pass()));
+    let graph = crate::frame::target_graph(&target, &queues, &functions, lighting.pass(&plan));
     let capture = CapturingQueue::default();
     graph
         .execute(runtime.device(), &capture)
         .expect("the lighting graph records on the null backend")
         .release(runtime.device());
 
-    let compute = capture
+    let compute_labels = capture
         .take()
         .into_iter()
         .flat_map(|buffer| buffer.passes)
-        .find_map(|pass| match pass {
-            Pass::Compute { commands, .. } => Some(commands),
+        .filter_map(|pass| match pass {
+            Pass::Compute { label, commands } => Some((label, commands)),
             _ => None,
         })
-        .expect("the lighting graph contains a compute pass");
-    assert!(matches!(
-        compute.first(),
-        Some(ComputeCommand::SetPipeline(_))
-    ));
-    assert!(matches!(
-        compute.get(1),
-        Some(ComputeCommand::SetBindGroup { index: 0, .. })
-    ));
-    assert!(matches!(
-        compute.get(2),
-        Some(ComputeCommand::Dispatch { x: 1, y: 1, z: 1 })
-    ));
+        .map(|(label, commands)| {
+            assert!(matches!(
+                commands.first(),
+                Some(ComputeCommand::SetPipeline(_))
+            ));
+            assert!(matches!(
+                commands.get(1),
+                Some(ComputeCommand::SetBindGroup { index: 0, .. })
+            ));
+            assert!(matches!(
+                commands.get(2),
+                Some(ComputeCommand::Dispatch { x: 1, y: 1, z: 1 })
+            ));
+            label.expect("lighting compute passes are labeled")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        compute_labels,
+        [
+            "prism-lighting-direct-dispatch",
+            "prism-lighting-gi-dispatch",
+            "prism-lighting-composite",
+        ]
+    );
+}
+
+#[test]
+fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
+    use prism_render_architecture::lighting::contract::RecipeId;
+    use prism_render_driver::Pass;
+
+    let extent = Extent3d::new_2d(4, 4);
+    let mut runtime = RenderRuntime::headless(NullInstance::new(), extent)
+        .expect("the null runtime always comes up");
+    let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
+    let plan = LightingPlan {
+        tier: Tier::Balanced,
+        recipes: vec![RecipeId::WorldRestir],
+        partition: Default::default(),
+        budget: FrameResourceBudget::default(),
+        rejected: Vec::new(),
+    };
+    lighting.prepare(&plan, &ExtractedLightingInputs::default(), runtime.queue());
+
+    let target = RenderTarget::new(runtime.device(), extent);
+    let graph = crate::frame::target_graph(
+        &target,
+        &RenderQueues::new(),
+        &DrawFunctions::new(),
+        lighting.pass(&plan),
+    );
+    let capture = CapturingQueue::default();
+    graph
+        .execute(runtime.device(), &capture)
+        .expect("the GI-only lighting graph records on the null backend")
+        .release(runtime.device());
+    let labels = capture
+        .take()
+        .into_iter()
+        .flat_map(|buffer| buffer.passes)
+        .filter_map(|pass| match pass {
+            Pass::Compute { label, .. } => label,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels,
+        ["prism-lighting-gi-dispatch", "prism-lighting-composite",]
+    );
+}
+
+#[test]
+fn lighting_graph_has_no_compute_pass_without_an_admitted_backend() {
+    use prism_render_driver::Pass;
+
+    let extent = Extent3d::new_2d(4, 4);
+    let mut runtime = RenderRuntime::headless(NullInstance::new(), extent)
+        .expect("the null runtime always comes up");
+    let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
+    let plan = LightingPlan {
+        tier: Tier::Balanced,
+        recipes: Vec::new(),
+        partition: Default::default(),
+        budget: FrameResourceBudget::default(),
+        rejected: Vec::new(),
+    };
+    lighting.prepare(&plan, &ExtractedLightingInputs::default(), runtime.queue());
+
+    let target = RenderTarget::new(runtime.device(), extent);
+    let graph = crate::frame::target_graph(
+        &target,
+        &RenderQueues::new(),
+        &DrawFunctions::new(),
+        lighting.pass(&plan),
+    );
+    let capture = CapturingQueue::default();
+    graph
+        .execute(runtime.device(), &capture)
+        .expect("the graph without lighting records on the null backend")
+        .release(runtime.device());
+    assert!(!capture
+        .take()
+        .into_iter()
+        .flat_map(|buffer| buffer.passes)
+        .any(|pass| matches!(pass, Pass::Compute { .. })));
 }
 
 /// `mesh_bin_draw` records a GPU-driven bin draw: bind the pipeline and

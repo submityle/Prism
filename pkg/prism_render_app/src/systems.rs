@@ -133,7 +133,7 @@ pub(crate) fn execute_frame<I>(
         &overrides,
         &queues,
         &functions,
-        Some(lighting_gpu.pass()),
+        lighting_gpu.pass(&plan.plan),
         &mut stats,
     ) {
         return;
@@ -153,7 +153,8 @@ pub(crate) fn execute_frame<I>(
         target.resize(runtime.device(), viewport);
     }
 
-    let graph = frame::target_graph(&target, &queues, &functions, Some(lighting_gpu.pass()));
+    let lighting_pass = lighting_gpu.pass(&plan.plan);
+    let graph = frame::target_graph(&target, &queues, &functions, lighting_pass);
     let passes = graph.pass_count() as u64;
     let draws = queues.len() as u64;
     match runtime.execute_tracked(graph) {
@@ -161,7 +162,7 @@ pub(crate) fn execute_frame<I>(
             stats.frames_submitted += 1;
             stats.passes_declared += passes;
             stats.draws_recorded += draws;
-            stats.lighting_gpu_passes_recorded += 1;
+            stats.lighting_gpu_passes_recorded += lighting_pass.map_or(0, |pass| pass.pass_count());
         }
         Err(_) => {
             // A compile failure is the only error `execute` can return; the

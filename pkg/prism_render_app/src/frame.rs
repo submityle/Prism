@@ -134,10 +134,26 @@ pub(crate) fn target_graph_output(
     };
 
     let output = graph.import_buffer(
-        "prism-lighting-plan-output",
+        "prism-lighting-final-output",
         BufferDesc::new(16, BufferUsages::STORAGE | BufferUsages::COPY_SRC),
         ImportedBuffer {
             buffer: lighting.output,
+            entry_state: BufferState::initial(),
+        },
+    );
+    let mut direct_output = graph.import_buffer(
+        "prism-lighting-direct-output",
+        BufferDesc::new(16, BufferUsages::STORAGE),
+        ImportedBuffer {
+            buffer: lighting.direct_output,
+            entry_state: BufferState::initial(),
+        },
+    );
+    let mut gi_output = graph.import_buffer(
+        "prism-lighting-gi-output",
+        BufferDesc::new(16, BufferUsages::STORAGE),
+        ImportedBuffer {
+            buffer: lighting.gi_output,
             entry_state: BufferState::initial(),
         },
     );
@@ -165,18 +181,61 @@ pub(crate) fn target_graph_output(
             entry_state: BufferState::initial(),
         },
     );
+    let candidates = graph.import_buffer(
+        "prism-lighting-gi-candidates",
+        BufferDesc::new(0, BufferUsages::STORAGE),
+        ImportedBuffer {
+            buffer: lighting.candidates,
+            entry_state: BufferState::initial(),
+        },
+    );
+    if lighting.run_direct {
+        graph.add_compute_pass(
+            "prism-lighting-direct-dispatch",
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                direct_output = builder.write_storage_buffer(direct_output);
+                let _params = builder.read_uniform(params);
+                let _directionals = builder.read_storage_buffer(directionals);
+                let _punctuals = builder.read_storage_buffer(punctuals);
+                move |context| {
+                    context
+                        .set_compute_pipeline(lighting.direct_pipeline)
+                        .set_compute_bind_group(0, lighting.direct_bind_group, Vec::new())
+                        .dispatch(1, 1, 1);
+                }
+            },
+        );
+    }
+    if lighting.run_gi {
+        graph.add_compute_pass(
+            "prism-lighting-gi-dispatch",
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                gi_output = builder.write_storage_buffer(gi_output);
+                let _params = builder.read_uniform(params);
+                let _candidates = builder.read_storage_buffer(candidates);
+                move |context| {
+                    context
+                        .set_compute_pipeline(lighting.gi_pipeline)
+                        .set_compute_bind_group(0, lighting.gi_bind_group, Vec::new())
+                        .dispatch(1, 1, 1);
+                }
+            },
+        );
+    }
     graph.add_compute_pass(
-        "prism-lighting-plan-dispatch",
+        "prism-lighting-composite",
         PassFlags::SIDE_EFFECT,
         |builder| {
             let _output = builder.write_storage_buffer(output);
+            let _direct_output = builder.read_storage_buffer(direct_output);
+            let _gi_output = builder.read_storage_buffer(gi_output);
             let _params = builder.read_uniform(params);
-            let _directionals = builder.read_storage_buffer(directionals);
-            let _punctuals = builder.read_storage_buffer(punctuals);
             move |context| {
                 context
-                    .set_compute_pipeline(lighting.pipeline)
-                    .set_compute_bind_group(0, lighting.bind_group, Vec::new())
+                    .set_compute_pipeline(lighting.composite_pipeline)
+                    .set_compute_bind_group(0, lighting.composite_bind_group, Vec::new())
                     .dispatch(1, 1, 1);
             }
         },
