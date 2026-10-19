@@ -14,7 +14,7 @@
 >
 > 本文是设计与实施规格；文中“已落地”只指明确列出的代码与验证证据，未完成里程碑不得按目标描述推断为已实施；不含任何 AI/ML 内容。
 
-- 版本: v1.5（v1.4 补操作级 journal 与恢复协议；v1.5 明确未发布 API 全量替换）
+- 版本: v1.6（v1.5 明确未发布 API 全量替换；v1.6 落地首个 I/O/迁移垂直切片）
 - 基线: `main@e248f12ec`（写作时）
 - 状态: 实施中；M0 核心已落地并通过当前门禁，M0.5–M5 必须逐阶段完成后才算系统交付；完成度以代码、测试、运行行为与质量门禁共同证明
 - 适用: 运行时 / 编辑器 / 机器级 / 构建管线
@@ -26,7 +26,7 @@
 - 新增 §9.2.6 操作级 journal：`ApplyOp`、每 op 状态/补偿账本/`effect_handle`、恢复决策树与崩溃示例。
 - §9.2.5 applier 契约改为 `apply_op/probe/compensate` 操作级接口。
 - 全量替换未发布的 `prism_app::settings/cvar` API；不提供旧类型别名、行为兼容 facade 或旧文本格式承诺。
-- 当前实现：`pkg/prism_settings` 已提供 no_std + alloc 的 Value/Def/Registry/Resolver/Snapshot/Inspect/Diff 核心；10k 定义、9 层解析基准在当前参考机 p50 约 4.05 ms、p95 约 4.32 ms、p99 约 4.64 ms。持久化、事务应用、编辑器和 `prism_app` 集成仍按后续里程碑推进，未完成部分不得宣称已交付。
+- 当前实现：`pkg/prism_settings` 已提供 no_std + alloc 的 Value/Def/Registry/Resolver/Snapshot/Inspect/Diff 核心；`pkg/prism_settings_io` 已提供版本化 TOML、未知键保留、Rename/Drop/Convert 迁移、原子写、备份轮转和主文件/备份恢复。10k 定义、9 层解析基准在当前参考机 p50 约 4.05 ms、p95 约 4.32 ms、p99 约 4.64 ms。事务 journal、applier、编辑器和 `prism_app` 集成仍按后续里程碑推进，未完成部分不得宣称已交付。
 - §9.2.3 明确 fsync 边界；§9.2.4 补 `CompensationUnknown`；不变量 19–20、§21 崩溃注入矩阵、§22 M3 验收同步。
 - v1.3 的四点修复保留。
 

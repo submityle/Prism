@@ -1,0 +1,21 @@
+[package]
+name = "prism_settings_io"
+version = "0.1.0"
+edition = "2024"
+description = "Versioned deterministic settings document and migration IO for Prism."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_settings = { path = "../prism_settings", default-features = false, features = ["std"] }
+toml = "1.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"
