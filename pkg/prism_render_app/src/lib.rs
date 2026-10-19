@@ -123,7 +123,10 @@ pub use frame::{RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT};
 pub use image::GpuImage;
 pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
-pub use lighting::{ExtractedLightingInputs, LightingPlanState, LightingSceneInputs};
+pub use lighting::{
+    ExtractedLightingInputs, LightingDirectionalInput, LightingPlanState, LightingPunctualInput,
+    LightingSceneInputs, LightingSurfaceInput,
+};
 pub use material::{
     BindlessSlot, FallbackTextures, MaterialBindingLayout, MaterialParameterBuffers,
     MaterialSyncReport, MaterialTextureSlots, MaterialUploadStats, ParameterHeap, RenderMaterials,
@@ -207,7 +210,10 @@ pub mod prelude {
     };
     pub use crate::intent::{RenderIntent, RenderViewport};
     pub use crate::label::{Render, RenderApp, RenderStartup};
-    pub use crate::lighting::{ExtractedLightingInputs, LightingPlanState, LightingSceneInputs};
+    pub use crate::lighting::{
+        ExtractedLightingInputs, LightingDirectionalInput, LightingPlanState,
+        LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
+    };
     pub use crate::material::{
         BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,
         ParameterHeap, RenderMaterials, TextureFallback, TextureHeapStats, TextureRequest,

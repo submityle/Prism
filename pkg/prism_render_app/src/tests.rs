@@ -2037,6 +2037,11 @@ fn lighting_plan_uses_host_caps_scene_stats_and_budget() {
         .rejected
         .iter()
         .any(|rejection| matches!(rejection, Rejection::Unsupported(_))));
+    assert!(state
+        .plan
+        .rejected
+        .iter()
+        .any(|rejection| matches!(rejection, Rejection::Unavailable(_))));
     assert!(state.plan.explain().contains("tier=Preview"));
 }
 

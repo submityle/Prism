@@ -484,6 +484,14 @@ impl RecipeId {
         }
     }
 
+    /// Whether the current render host has a real execution path for this
+    /// recipe. A recipe stays in the architectural whitelist while admission
+    /// remains closed until its GPU/CPU twin and graph pass are registered.
+    #[must_use]
+    pub const fn has_execution_backend(self) -> bool {
+        matches!(self, Self::SpecializedDeterministic)
+    }
+
     #[must_use]
     pub const fn execution(self, pass: u32, budget_ms: f32) -> RecipeExecution {
         let async_policy = match self {
@@ -634,6 +642,7 @@ pub struct PlanCaps {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Rejection {
     Unsupported(RecipeId),
+    Unavailable(RecipeId),
     Budget(RecipeId),
     Determinism(RecipeId),
 }
@@ -683,6 +692,10 @@ impl BudgetCompiler {
                 && matches!(recipe, RecipeId::WorldRestir | RecipeId::SpecularRestir)
             {
                 rejected.push(Rejection::Determinism(recipe));
+                continue;
+            }
+            if !recipe.has_execution_backend() {
+                rejected.push(Rejection::Unavailable(recipe));
                 continue;
             }
             if stats.lights > stats.punctual_max.saturating_mul(8)
@@ -754,6 +767,7 @@ impl LightingPlan {
             .iter()
             .map(|item| match item {
                 Rejection::Unsupported(recipe) => format_name("unsupported", *recipe),
+                Rejection::Unavailable(recipe) => format_name("unavailable", *recipe),
                 Rejection::Budget(recipe) => format_name("budget", *recipe),
                 Rejection::Determinism(recipe) => format_name("determinism", *recipe),
             })
@@ -889,6 +903,7 @@ mod tests {
         );
         assert!(plan.recipes.contains(&RecipeId::SpecializedDeterministic));
         assert!(plan.explain().contains("unsupported:DirectStochasticRT"));
+        assert!(plan.explain().contains("unavailable:DdgiProbes"));
         assert!(plan.explain().contains("determinism:WorldRestir"));
     }
 
@@ -912,10 +927,10 @@ mod tests {
             Tier::Balanced,
         );
         assert_eq!(plan.recipes, vec![RecipeId::SpecializedDeterministic]);
-        assert!(plan
-            .rejected
-            .iter()
-            .any(|rejection| matches!(rejection, Rejection::Budget(RecipeId::SsgiScreenSpace))));
+        assert!(plan.rejected.iter().any(|rejection| matches!(
+            rejection,
+            Rejection::Unavailable(RecipeId::SsgiScreenSpace)
+        )));
     }
 
     struct MockBackend {

@@ -20,6 +20,7 @@
 | 13 个 recipe 白名单与成本表 | 同上 | `BudgetCompiler` 按能力、确定性和 GPU/带宽/驻留/IO 预算准入并生成拒绝原因 |
 | `CacheEffect` / `ExecPolicy` | 同上 | 缓存失效与执行策略不再混入图资源声明 |
 | render-world 计划入口 | `pkg/prism_render_app/src/lighting.rs`、`plugin.rs`、`stats.rs` | 每个抽取帧编译一次，统计选中/拒绝数量，`explain()` 可追溯；保留字段 epoch 与失效计数 |
+| 未实现 recipe 准入门禁 | `pkg/prism_render_architecture/src/lighting/contract.rs` | 只有已注册真实执行后端的 recipe 才能进入 `LightingPlan`；其余 recipe 以 `unavailable:<recipe>` 明确拒绝，不再出现“计划选中但没有执行”的假闭环 |
 | 计划输入配置与抽取 | `pkg/prism_render_app/src/config.rs`、`lighting.rs`、`plugin.rs` | host 可注入 `SceneStats`、`FrameResourceBudget`、`PlanCaps`、`Tier`，并通过 `LightingSceneInputs`/`ChangeJournal` 跨主世界→render-world 传递快照 |
 | wgpu 外部 buffer 注册 | `os-backends/prism_render_driver_wgpu/src/device.rs` | 修复 `DeviceInner` 自身字段的错误访问，恢复后端编译路径 |
 | GPU 执行闭环 | `pkg/prism_render_app/src/lighting_gpu.rs`、`frame.rs`、`systems.rs` | `LightingPlan` 驱动确定性 direct-light recipe；上传 surface、方向光、点/聚光灯和计数；graph 声明 storage/uniform 读写并记录真实 compute pipeline、bind group、dispatch；设备重建通过 replay 重新创建 bundle；Metal/wgpu readback 与 CPU oracle 对拍 |
@@ -29,6 +30,7 @@
 #### 已完成
 
 - `FieldEpoch`、`ChangeJournal`、checkpoint、`TraceQuery`、`TraceSubmission`、`Contrib`、`BlendOperator`、13 个 recipe 白名单和 `BudgetCompiler` 已落成并接入新宿主的计划编译链。
+- `BudgetCompiler` 已增加真实执行后端准入门禁；当前只有 `SpecializedDeterministic` 会被选入执行计划，其余 recipe 会保留在白名单并以 `unavailable` 记录拒绝原因。
 - `LightingSceneInputs` 已改为真实输入契约：surface sample、directional lights、point/spot lights；抽取到 render-world 后参与 GPU 上传。
 - `SpecializedDeterministic` 的当前 GPU 实例已是真实 Lambert direct-light recipe：ambient、方向光漫反射、点光 inverse-square、range window、spot cone、visibility、albedo modulation 和 HDR radiance 输出。
 - 持久 GPU bundle、uniform/storage buffers、bind group、compute pipeline、render graph resource declaration、dispatch 和 device-loss replay 已闭合。
