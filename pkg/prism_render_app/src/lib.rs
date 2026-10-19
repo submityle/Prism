@@ -63,6 +63,7 @@ extern crate alloc;
 mod bin_queue;
 mod config;
 mod device_loss;
+pub mod display_transform_gpu;
 mod draw;
 mod ecs_columns;
 mod feature_mapping;
@@ -110,6 +111,7 @@ mod tests;
 pub use bin_queue::{bin_indirect_args, BinQueueOutcome};
 pub use config::RenderAppConfig;
 pub use device_loss::{DeviceLossSignal, DeviceRecoveryStatus};
+pub use display_transform_gpu::{DisplayTransformGpu, DisplayTransformGpuError};
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
 pub use ecs_columns::{
     register_gpu_column, EcsColumnDiscoveryStats, EcsColumnUploadError, EcsColumnUploadStats,

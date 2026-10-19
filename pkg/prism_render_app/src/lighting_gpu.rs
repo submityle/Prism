@@ -292,7 +292,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
 /// The GPU objects used by one lighting execution bundle.
 pub struct LightingGpuBundle {
-    /// Final HDR radiance output for the surface sample.
+    /// Final HDR radiance output for the surface samples.
     pub output: prism_render_driver::BufferId,
     /// Direct-light intermediate output.
     pub direct_output: prism_render_driver::BufferId,
@@ -329,6 +329,7 @@ pub(crate) struct LightingGpuPass {
     pub directionals: prism_render_driver::BufferId,
     pub punctuals: prism_render_driver::BufferId,
     pub candidates: prism_render_driver::BufferId,
+    pub surfaces: prism_render_driver::BufferId,
     pub direct_pipeline: prism_render_driver::ComputePipelineId,
     pub direct_bind_group: prism_render_driver::BindGroupId,
     pub gi_pipeline: prism_render_driver::ComputePipelineId,
@@ -464,6 +465,7 @@ where
             directionals: bundle.directionals,
             punctuals: bundle.punctuals,
             candidates: bundle.candidates,
+            surfaces: bundle.surfaces,
             direct_pipeline: bundle.direct_pipeline,
             direct_bind_group: bundle.direct_bind_group,
             gi_pipeline: bundle.gi_pipeline,

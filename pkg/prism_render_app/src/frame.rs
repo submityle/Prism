@@ -320,6 +320,14 @@ pub(crate) fn target_graph_output(
             entry_state: BufferState::initial(),
         },
     );
+    let surfaces = graph.import_buffer(
+        "prism-lighting-surfaces",
+        BufferDesc::new(0, BufferUsages::STORAGE),
+        ImportedBuffer {
+            buffer: lighting.surfaces,
+            entry_state: BufferState::initial(),
+        },
+    );
     if lighting.run_direct {
         graph.add_compute_pass(
             "prism-lighting-direct-dispatch",
@@ -329,6 +337,7 @@ pub(crate) fn target_graph_output(
                 let _params = builder.read_uniform(params);
                 let _directionals = builder.read_storage_buffer(directionals);
                 let _punctuals = builder.read_storage_buffer(punctuals);
+                let _surfaces = builder.read_storage_buffer(surfaces);
                 move |context| {
                     context
                         .set_compute_pipeline(lighting.direct_pipeline)
@@ -346,6 +355,7 @@ pub(crate) fn target_graph_output(
                 gi_output = builder.write_storage_buffer(gi_output);
                 let _params = builder.read_uniform(params);
                 let _candidates = builder.read_storage_buffer(candidates);
+                let _surfaces = builder.read_storage_buffer(surfaces);
                 move |context| {
                     context
                         .set_compute_pipeline(lighting.gi_pipeline)
