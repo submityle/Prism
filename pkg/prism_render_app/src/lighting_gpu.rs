@@ -449,6 +449,18 @@ where
     pub fn output_buffer(&self) -> prism_render_driver::BufferId {
         self.bundle.current().output
     }
+
+    /// Returns the direct-light intermediate buffer for diagnostics and readback tests.
+    #[must_use]
+    pub fn direct_output_buffer(&self) -> prism_render_driver::BufferId {
+        self.bundle.current().direct_output
+    }
+
+    /// Returns the initial GI intermediate buffer for diagnostics and readback tests.
+    #[must_use]
+    pub fn gi_output_buffer(&self) -> prism_render_driver::BufferId {
+        self.bundle.current().gi_output
+    }
 }
 
 impl<I> Resource for LightingGpuState<I> where I: prism_render_driver::Instance + 'static {}
@@ -504,13 +516,13 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
     let direct_output = device.create_buffer(&BufferDescriptor {
         label: Some("lighting-direct-output".into()),
         size: OUTPUT_BYTES,
-        usage: BufferUsages::STORAGE,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     let gi_output = device.create_buffer(&BufferDescriptor {
         label: Some("lighting-gi-output".into()),
         size: OUTPUT_BYTES,
-        usage: BufferUsages::STORAGE,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     let params = device.create_buffer(&BufferDescriptor {

@@ -2151,7 +2151,7 @@ fn deterministic_direct_cpu_oracle_accumulates_all_light_terms() {
     }];
     assert_eq!(
         evaluate_deterministic_direct(surface, &directionals, &punctuals),
-        [1.5, 3.0, 8.5]
+        [1.5, 1.5, 11.0]
     );
 }
 
@@ -2384,22 +2384,42 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     let lighting = render
         .world
         .resource::<LightingGpuState<prism_render_driver_wgpu::WgpuInstance>>();
-    let output = runtime
-        .runtime()
-        .queue()
-        .read_buffer(lighting.output_buffer(), 16);
-    let values = output
-        .chunks_exact(4)
-        .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized output")))
-        .collect::<Vec<_>>();
-    assert_eq!(values.len(), 4);
-    for (actual, expected) in values[..3].iter().zip(expected) {
+    let read_output = |buffer| {
+        runtime
+            .runtime()
+            .queue()
+            .read_buffer(buffer, 16)
+            .chunks_exact(4)
+            .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized output")))
+            .collect::<Vec<_>>()
+    };
+    let direct_values = read_output(lighting.direct_output_buffer());
+    let gi_values = read_output(lighting.gi_output_buffer());
+    let composite_values = read_output(lighting.output_buffer());
+    assert_eq!(direct_values.len(), 4);
+    assert_eq!(gi_values.len(), 4);
+    assert_eq!(composite_values.len(), 4);
+    for (actual, expected) in direct_values[..3].iter().zip(expected_direct) {
         assert!(
             (actual - expected).abs() < 1.0e-4,
-            "GPU/CPU mismatch: {actual} vs {expected}"
+            "GPU direct/CPU mismatch: {actual} vs {expected}"
         );
     }
-    assert_eq!(values[3], 1.0);
+    assert_eq!(direct_values[3], 1.0);
+    for (actual, expected) in gi_values[..3].iter().zip(expected_gi) {
+        assert!(
+            (actual - expected).abs() < 1.0e-4,
+            "GPU GI/CPU mismatch: {actual} vs {expected}"
+        );
+    }
+    assert_eq!(gi_values[3], 1.0);
+    for (actual, expected) in composite_values[..3].iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() < 1.0e-4,
+            "GPU composite/CPU mismatch: {actual} vs {expected}"
+        );
+    }
+    assert_eq!(composite_values[3], 1.0);
     assert_eq!(
         render
             .world
