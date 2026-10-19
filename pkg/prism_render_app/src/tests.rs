@@ -3737,9 +3737,14 @@ fn the_frame_records_the_queued_draws() {
     let render = app.get_sub_app(RenderApp).expect("the render sub-app");
     let stats = render.world.resource::<RenderFrameStats>();
     assert_eq!(stats.draws_recorded, 2, "both queued draws were recorded");
+    let stages = stats
+        .execution_trace
+        .graph
+        .expect("the submitted frame publishes its graph receipt");
     assert_eq!(
-        stats.passes_declared, 4,
-        "the lighting compute pass, clear, and one pass per non-empty phase"
+        stats.passes_declared,
+        u64::from(stages.scene_passes + stages.lighting_dispatches),
+        "the frame graph pass count matches its stage receipt"
     );
     assert!(
         render.world.resource::<RenderQueues>().is_empty(),

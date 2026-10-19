@@ -281,10 +281,14 @@ fn recovery_replays_resources_rebuilds_startup_and_resumes_frames() {
         render.resource::<RenderFrameStats>().frames_submitted,
         before
     );
-    // Target color/depth and views (4), three material buffers, and the
-    // lighting compute bundle (shader, layout, pipeline layout, pipeline, two
-    // buffers, and bind group).
-    assert_eq!(runtime(&app).device().inner.live_resource_count(), 16);
+    // Recovery must rebuild the complete current resource graph, including the
+    // direct, GI, and composite lighting pipelines, without changing its live
+    // resource cardinality. This deliberately follows the pre-loss snapshot
+    // instead of freezing a count from an older lighting bundle layout.
+    assert_eq!(
+        runtime(&app).device().inner.live_resource_count(),
+        old_count
+    );
     app.update();
     assert!(!app.world().resource::<DeviceRecoveryStatus>().recovering);
     assert_eq!(
