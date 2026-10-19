@@ -226,7 +226,7 @@ pub(crate) fn execute_frame<I>(
         .begin(&record, queues.len() as u64, &inputs);
     stats.execution_trace.assert_input_parity(&record, &inputs);
     let runtime = runtime.runtime();
-    lighting_gpu.prepare(&plan.plan, &inputs, runtime.queue());
+    lighting_gpu.prepare(&plan.plan, &inputs, record.frame_index, runtime.queue());
     let lighting_pass = lighting_gpu.pass(&plan.plan);
     let trace_device: std::sync::Arc<dyn prism_render_driver::RenderDevice + Send + Sync> =
         runtime.device_handle();
@@ -237,6 +237,9 @@ pub(crate) fn execute_frame<I>(
         runtime.device_generation(),
         trace_device,
         runtime.queue(),
+        lighting_pass
+            .filter(|pass| pass.run_gi)
+            .map(crate::lighting_gpu::LightingGpuPass::gi_candidate_target),
     );
     let submitted_before = stats.frames_submitted;
     let skipped_before = stats.frames_skipped;

@@ -163,9 +163,9 @@ pub struct LightingSurfaceInput {
 }
 
 /// One deterministic indirect-light candidate for the initial GI reservoir.
-/// `source_pdf` and `target_pdf` are densities with respect to the same surface-
-/// area measure. `target_pdf` is the non-normalized luminance of the Lambertian
-/// contribution at the owning surface, including `albedo / PI`, geometry, and
+/// `source_pdf` and `target_pdf` use solid-angle measure. `target_pdf` is the
+/// non-normalized luminance of the Lambertian directional integrand at the
+/// owning surface, including `albedo / PI`, the incident cosine, and
 /// visibility. Misses remain proposals with positive `source_pdf` and zero
 /// `target_pdf`, so the RIS denominator counts every attempted sample.
 #[repr(C)]
@@ -234,10 +234,13 @@ pub struct LightingTraceSceneInput {
     pub surface_ids: Vec<u64>,
     /// Deterministic cosine rays generated for each surface each frame.
     pub rays_per_surface: u32,
-    /// Positive world-space normal offset for generated rays.
+    /// Positive minimum trace distance used for self-intersection rejection.
     pub ray_epsilon: f32,
     /// Maximum world-space ray distance.
     pub ray_tmax: f32,
+    /// Per-packed-triangle outgoing radiance for trace-hit GI evaluation.
+    /// Its length must equal the packed triangle count.
+    pub outgoing_radiance: Vec<[f32; 3]>,
 }
 
 impl LightingSceneInputs {
@@ -494,17 +497,13 @@ pub(crate) fn evaluate_deterministic_gi(
     if !distance_squared.is_finite() || distance_squared <= 1.0e-8 {
         return [0.0; 3];
     }
-    let distance = distance_squared.sqrt();
-    let direction = scale(to_sample, distance.recip());
-    let sample_normal = normalize_or(candidate.normal, [0.0, 1.0, 0.0]);
+    let direction = scale(to_sample, distance_squared.sqrt().recip());
     let cosine_primary = dot(primary_normal, direction).max(0.0);
-    let cosine_secondary = dot(sample_normal, scale(direction, -1.0)).max(0.0);
-    let geometry = cosine_primary * cosine_secondary / (core::f32::consts::PI * distance_squared);
     let visibility = candidate.visibility.clamp(0.0, 1.0);
     let reservoir_weight = weight_sum / (proposal_count as f32 * candidate.target_pdf);
     scale(
         mul(surface.albedo, candidate.radiance),
-        geometry * visibility * reservoir_weight,
+        cosine_primary / core::f32::consts::PI * visibility * reservoir_weight,
     )
 }
 

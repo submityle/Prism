@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use crate::lighting::{LightingGiCandidateInput, LightingSurfaceInput};
+use crate::lighting_gpu::LightingGiCandidateTarget;
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::lighting::raygen::{
     append_surface_gi_rays, GiRay, SurfaceRayGenInput,
@@ -41,6 +43,8 @@ pub struct TraceRay {
     pub t_max: f32,
     /// Solid-angle density of the sampled direction.
     pub direction_pdf: f32,
+    /// Deterministic reservoir-selection variate, shared by CPU and GPU paths.
+    pub selection_u01: f32,
 }
 
 /// Stable result. A miss has `hit == false`, `primitive == u32::MAX`, and zero
@@ -70,6 +74,232 @@ impl TraceHit {
         u: 0.0,
         v: 0.0,
     };
+}
+
+/// Invalid input to [`build_gi_candidates_reference`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GiCandidateReferenceError {
+    /// A surface batch is empty or ray count is not divisible by surface count.
+    InvalidBatchShape,
+    /// A surface position, normal, or albedo is non-finite or outside its domain.
+    InvalidSurface(usize),
+    /// A ray is invalid, including a non-positive/non-finite direction PDF.
+    InvalidRay(usize),
+    /// The hit record is internally inconsistent or contains invalid values.
+    InvalidHit(usize),
+    /// A hit refers to a triangle outside the packed scene or disagrees with its primitive.
+    InvalidTriangleIndex(usize),
+    /// The outgoing-radiance table does not cover every packed triangle.
+    RadianceCountMismatch { expected: usize, actual: usize },
+    /// Outgoing radiance contains a negative or non-finite channel.
+    InvalidRadiance(usize),
+    /// The packed BVH failed validation.
+    InvalidScene(TraceGpuError),
+}
+
+/// Builds one solid-angle-measure RIS proposal batch per surface from trace results.
+///
+/// Rays and hits are surface-major: all rays for surface 0, then surface 1, etc.
+/// The per-surface batch length is the proposal count `N`; misses and zero-target
+/// hits remain present, preserving the estimator denominator. `outgoing_radiance`
+/// is indexed by packed triangle record index. The target is the luminance of
+/// `albedo * Le * max(n_primary·direction, 0) / π` (Lambert integrand in solid
+/// angle); `source_pdf` is exactly the sampled direction density.
+pub fn build_gi_candidates_reference(
+    scene: &PackedTraceScene,
+    rays: &[TraceRay],
+    hits: &[TraceHit],
+    surfaces: &[LightingSurfaceInput],
+    stable_surface_ids: &[u64],
+    frame_index: u64,
+    outgoing_radiance: &[[f32; 3]],
+) -> Result<Vec<Vec<LightingGiCandidateInput>>, GiCandidateReferenceError> {
+    scene
+        .validate()
+        .map_err(GiCandidateReferenceError::InvalidScene)?;
+    let triangle_count = scene.triangles.len() / TRIANGLE_WORDS;
+    if outgoing_radiance.len() != triangle_count {
+        return Err(GiCandidateReferenceError::RadianceCountMismatch {
+            expected: triangle_count,
+            actual: outgoing_radiance.len(),
+        });
+    }
+    if surfaces.is_empty()
+        || surfaces.len() != stable_surface_ids.len()
+        || rays.is_empty()
+        || rays.len() != hits.len()
+        || rays.len() % surfaces.len() != 0
+    {
+        return Err(GiCandidateReferenceError::InvalidBatchShape);
+    }
+    let samples_per_surface = rays.len() / surfaces.len();
+    let pi = core::f32::consts::PI;
+    for (index, surface) in surfaces.iter().enumerate() {
+        if !surface.position.into_iter().all(f32::is_finite)
+            || !surface.normal.into_iter().all(f32::is_finite)
+            || !surface
+                .albedo
+                .into_iter()
+                .all(|v| v.is_finite() && v >= 0.0)
+            || dot(surface.normal, surface.normal) <= 1.0e-20
+        {
+            return Err(GiCandidateReferenceError::InvalidSurface(index));
+        }
+    }
+    for (index, radiance) in outgoing_radiance.iter().enumerate() {
+        if !radiance.into_iter().all(|v| v.is_finite() && *v >= 0.0) {
+            return Err(GiCandidateReferenceError::InvalidRadiance(index));
+        }
+    }
+
+    let mut result = Vec::with_capacity(surfaces.len());
+    for (surface_index, (surface, &stable_id)) in
+        surfaces.iter().zip(stable_surface_ids).enumerate()
+    {
+        let mut batch = Vec::with_capacity(samples_per_surface);
+        for local_ray_index in 0..samples_per_surface {
+            let ray_index = surface_index * samples_per_surface + local_ray_index;
+            let ray = rays[ray_index];
+            let hit = hits[ray_index];
+            let direction_length_squared = dot(ray.direction, ray.direction);
+            if !ray.origin.into_iter().all(f32::is_finite)
+                || !ray.direction.into_iter().all(f32::is_finite)
+                || !ray.t_min.is_finite()
+                || !ray.t_max.is_finite()
+                || ray.t_min < 0.0
+                || ray.t_max < ray.t_min
+                || !direction_length_squared.is_finite()
+                || direction_length_squared <= 1.0e-20
+                || !ray.direction_pdf.is_finite()
+                || ray.direction_pdf <= 0.0
+                || !ray.selection_u01.is_finite()
+                || !(0.0..1.0).contains(&ray.selection_u01)
+            {
+                return Err(GiCandidateReferenceError::InvalidRay(ray_index));
+            }
+            let dir = normalize(ray.direction);
+            let mut candidate = LightingGiCandidateInput {
+                position: [0.0; 3],
+                source_pdf: ray.direction_pdf,
+                normal: [0.0, 1.0, 0.0],
+                target_pdf: 0.0,
+                radiance: [0.0; 3],
+                selection_u01: selection_hash(frame_index, stable_id, local_ray_index as u64),
+                visibility: 0.0,
+                _padding: [0.0; 3],
+            };
+            if hit.hit {
+                if !hit.t.is_finite()
+                    || hit.t < ray.t_min
+                    || hit.t > ray.t_max
+                    || !hit.u.is_finite()
+                    || !hit.v.is_finite()
+                    || hit.u < 0.0
+                    || hit.v < 0.0
+                    || hit.u + hit.v > 1.0 + 1.0e-5
+                {
+                    return Err(GiCandidateReferenceError::InvalidHit(ray_index));
+                }
+                if hit.triangle_index as usize >= triangle_count {
+                    return Err(GiCandidateReferenceError::InvalidTriangleIndex(ray_index));
+                }
+                let triangle = hit.triangle_index as usize;
+                let base = triangle * TRIANGLE_WORDS;
+                if scene.triangles[base + 9] != hit.primitive {
+                    return Err(GiCandidateReferenceError::InvalidTriangleIndex(ray_index));
+                }
+                let a = vec3(&scene.triangles, base);
+                let b = vec3(&scene.triangles, base + 3);
+                let c = vec3(&scene.triangles, base + 6);
+                let unnormalized_normal = cross(sub(b, a), sub(c, a));
+                let normal_length_squared = dot(unnormalized_normal, unnormalized_normal);
+                if !normal_length_squared.is_finite() || normal_length_squared <= 1.0e-20 {
+                    return Err(GiCandidateReferenceError::InvalidTriangleIndex(ray_index));
+                }
+                let geometric_normal = normalize(unnormalized_normal);
+                let position = add(ray.origin, mul(ray.direction, hit.t));
+                if !position.into_iter().all(f32::is_finite) {
+                    return Err(GiCandidateReferenceError::InvalidHit(ray_index));
+                }
+                let barycentric_position = add(
+                    add(mul(a, 1.0 - hit.u - hit.v), mul(b, hit.u)),
+                    mul(c, hit.v),
+                );
+                let scale = position
+                    .into_iter()
+                    .chain(barycentric_position)
+                    .map(f32::abs)
+                    .fold(1.0_f32, f32::max);
+                let delta = sub(position, barycentric_position);
+                if dot(delta, delta) > (1.0e-4 * scale).powi(2) {
+                    return Err(GiCandidateReferenceError::InvalidHit(ray_index));
+                }
+                candidate.position = position;
+                candidate.normal = geometric_normal;
+                let radiance = outgoing_radiance[triangle];
+                candidate.radiance = radiance;
+                candidate.visibility = 1.0;
+                let primary_normal = normalize(surface.normal);
+                let cos_primary = dot(primary_normal, dir).max(0.0);
+                if cos_primary > 0.0 {
+                    let contribution = [
+                        surface.albedo[0] * radiance[0] * cos_primary / pi,
+                        surface.albedo[1] * radiance[1] * cos_primary / pi,
+                        surface.albedo[2] * radiance[2] * cos_primary / pi,
+                    ];
+                    let target = luminance(contribution);
+                    if !target.is_finite() {
+                        return Err(GiCandidateReferenceError::InvalidRadiance(triangle));
+                    }
+                    candidate.target_pdf = target;
+                }
+            } else if hit.primitive != u32::MAX
+                || hit.triangle_index != u32::MAX
+                || hit.t != 0.0
+                || hit.u != 0.0
+                || hit.v != 0.0
+            {
+                return Err(GiCandidateReferenceError::InvalidHit(ray_index));
+            }
+            batch.push(candidate);
+        }
+        result.push(batch);
+    }
+    Ok(result)
+}
+
+fn unit_vector(v: [f32; 3]) -> bool {
+    let length_squared = dot(v, v);
+    length_squared.is_finite() && (length_squared - 1.0).abs() <= 1.0e-3
+}
+
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let inv_len = dot(v, v).sqrt().recip();
+    mul(v, inv_len)
+}
+
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn mul(v: [f32; 3], s: f32) -> [f32; 3] {
+    [v[0] * s, v[1] * s, v[2] * s]
+}
+
+fn luminance(rgb: [f32; 3]) -> f32 {
+    rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722
+}
+
+fn selection_hash(frame: u64, surface: u64, ray: u64) -> f32 {
+    fn mix(mut x: u64) -> u64 {
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+        x ^ (x >> 31)
+    }
+    let bits = mix(frame
+        ^ mix(surface.wrapping_add(0x9e3779b97f4a7c15))
+        ^ mix(ray.wrapping_add(0xd1b54a32d192ed03)));
+    (bits >> 40) as f32 * (1.0 / 16_777_216.0)
 }
 
 /// Explicit limits and malformed-input errors for this bounded slice.
@@ -103,6 +333,12 @@ pub enum TraceGpuError {
     DispatchLimit,
     /// The caller-provided hit buffer is smaller than the packed hit output.
     OutputBufferTooSmall,
+    /// A candidate-build storage binding exceeds the device limit.
+    CandidateStorageBindingLimit,
+    /// A candidate-build buffer cannot cover this frame's indexed accesses.
+    CandidateBufferTooSmall,
+    /// Trace ray count does not match the candidate surface-major batch shape.
+    CandidateBatchShape,
     /// The GPU detected a traversal safety-bound violation.
     TraversalFault(usize),
 }
@@ -120,6 +356,12 @@ pub enum TracePreparationError {
     RayCapacity,
     /// Two surfaces claim the same stable identity.
     DuplicateSurfaceId(u64),
+    /// The outgoing-radiance table must have exactly one entry per packed triangle.
+    RadianceCountMismatch { triangles: usize, radiance: usize },
+    /// The radiance table exceeds the bounded resident GPU allocation.
+    RadianceCapacity,
+    /// An outgoing-radiance value is negative or non-finite.
+    InvalidRadiance(usize),
     /// Scene validation or GPU preparation rejected the packed input.
     Trace(TraceGpuError),
     /// Architecture ray generation rejected a surface or allocation.
@@ -173,11 +415,33 @@ impl LightingTraceState {
         device_generation: u64,
         device: Arc<dyn RenderDevice + Send + Sync>,
         queue: &dyn RenderQueue,
+        candidate_target: Option<LightingGiCandidateTarget>,
     ) -> Option<TraceGraphRecorder> {
         let Some(input) = input else {
             self.status = TracePreparationStatus::Disabled;
             return None;
         };
+        let triangle_count = input.bvh.triangles.len() / TRIANGLE_WORDS;
+        if input.outgoing_radiance.len() != triangle_count {
+            self.status =
+                TracePreparationStatus::Failed(TracePreparationError::RadianceCountMismatch {
+                    triangles: triangle_count,
+                    radiance: input.outgoing_radiance.len(),
+                });
+            return None;
+        }
+        if input.outgoing_radiance.len() > MAX_TRIANGLE_COUNT {
+            self.status = TracePreparationStatus::Failed(TracePreparationError::RadianceCapacity);
+            return None;
+        }
+        if let Some((index, _)) = input.outgoing_radiance.iter().enumerate().find(|(_, rgb)| {
+            rgb.iter()
+                .any(|channel| !channel.is_finite() || *channel < 0.0)
+        }) {
+            self.status =
+                TracePreparationStatus::Failed(TracePreparationError::InvalidRadiance(index));
+            return None;
+        }
         if surfaces.is_empty() {
             self.status = TracePreparationStatus::NoSurfaces;
             return None;
@@ -312,14 +576,22 @@ impl LightingTraceState {
                 return None;
             }
         }
-        self.ray_scratch
-            .extend(self.raygen_scratch.iter().map(|ray| TraceRay {
-                origin: ray.origin.to_array(),
-                t_min: ray.tmin,
-                direction: ray.direction.to_array(),
-                t_max: ray.tmax,
-                direction_pdf: ray.pdf,
-            }));
+        for (surface_index, rays) in self
+            .raygen_scratch
+            .chunks(input.rays_per_surface as usize)
+            .enumerate()
+        {
+            let stable_id = input.surface_ids[surface_index];
+            self.ray_scratch
+                .extend(rays.iter().enumerate().map(|(sample_index, ray)| TraceRay {
+                    origin: ray.origin.to_array(),
+                    t_min: ray.tmin,
+                    direction: ray.direction.to_array(),
+                    t_max: ray.tmax,
+                    direction_pdf: ray.pdf,
+                    selection_u01: selection_hash(frame_index, stable_id, sample_index as u64),
+                }));
+        }
         let output = self.output.as_ref().expect("output allocated above");
         let recorder = self
             .gpu
@@ -331,6 +603,7 @@ impl LightingTraceState {
                 &self.ray_scratch,
                 output.id,
                 output.capacity_bytes,
+                candidate_target,
             );
         match recorder {
             Ok(recorder) => {
@@ -558,9 +831,20 @@ pub struct TraceGraphRecorder {
     pub triangles: TraceGraphBuffer,
     pub rays: TraceGraphBuffer,
     pub hits: TraceGraphBuffer,
+    /// Candidate buffer written by the post-trace candidate-build dispatch.
+    pub candidates: Option<TraceGraphBuffer>,
+    /// Radiance buffer consumed by candidate build.
+    pub radiance: Option<TraceGraphBuffer>,
+    /// Surface buffer consumed by candidate build.
+    pub surfaces: Option<TraceGraphBuffer>,
+    /// Lighting parameters consumed by candidate build.
+    pub params: Option<TraceGraphBuffer>,
     pipeline: rhi::ComputePipelineId,
     bind_group: rhi::BindGroupId,
     workgroups: u32,
+    candidate_pipeline: Option<rhi::ComputePipelineId>,
+    candidate_bind_group: Option<rhi::BindGroupId>,
+    candidate_workgroups: u32,
 }
 
 impl TraceGraphRecorder {
@@ -590,6 +874,18 @@ impl TraceGraphRecorder {
             .set_compute_pipeline(self.pipeline)
             .set_compute_bind_group(0, self.bind_group, vec![])
             .dispatch(self.workgroups, 1, 1);
+    }
+
+    /// Records the candidate-build dispatch after trace hits are available.
+    pub fn record_candidate_graph(&self, context: &mut prism_render_graph::ExecuteContext<'_>) {
+        if let (Some(pipeline), Some(bind_group)) =
+            (self.candidate_pipeline, self.candidate_bind_group)
+        {
+            context
+                .set_compute_pipeline(pipeline)
+                .set_compute_bind_group(0, bind_group, vec![])
+                .dispatch(self.candidate_workgroups, 1, 1);
+        }
     }
 }
 
@@ -625,12 +921,18 @@ pub struct LightingTraceGpu {
     pipeline_layout: rhi::PipelineLayoutId,
     shader: rhi::ShaderModuleId,
     pipeline: rhi::ComputePipelineId,
+    candidate_layout: rhi::BindGroupLayoutId,
+    candidate_pipeline_layout: rhi::PipelineLayoutId,
+    candidate_shader: rhi::ShaderModuleId,
+    candidate_pipeline: rhi::ComputePipelineId,
     nodes: Option<ResidentBuffer>,
     triangles: Option<ResidentBuffer>,
     rays: Option<ResidentBuffer>,
     retired_buffers: Vec<rhi::BufferId>,
     graph_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 4])>,
     retired_bind_groups: Vec<rhi::BindGroupId>,
+    candidate_bind_group: Option<(rhi::BindGroupId, [rhi::BufferId; 7])>,
+    retired_candidate_bind_groups: Vec<rhi::BindGroupId>,
     packed_rays: Vec<u32>,
     uploaded_scene_identity: Option<(usize, usize, usize, usize)>,
     allocations: u64,
@@ -668,18 +970,63 @@ impl LightingTraceGpu {
             module: shader,
             entry_point: "main".into(),
         });
+        let candidate_layout = device.create_bind_group_layout(&rhi::BindGroupLayoutDescriptor {
+            label: Some("lighting-gi-candidate-build-layout".into()),
+            entries: (0..7)
+                .map(|binding| rhi::BindGroupLayoutEntry {
+                    binding,
+                    visibility: rhi::ShaderStages::COMPUTE,
+                    ty: if binding == 5 {
+                        rhi::BindingType::Buffer {
+                            ty: rhi::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: Some(32),
+                        }
+                    } else {
+                        rhi::BindingType::Buffer {
+                            ty: rhi::BufferBindingType::Storage {
+                                read_only: binding != 6,
+                            },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        }
+                    },
+                    count: None,
+                })
+                .collect(),
+        });
+        let candidate_pipeline_layout =
+            device.create_pipeline_layout(&rhi::PipelineLayoutDescriptor {
+                label: Some("lighting-gi-candidate-build-pipeline-layout".into()),
+                bind_group_layouts: vec![candidate_layout],
+                push_constant_ranges: vec![],
+            });
+        let candidate_shader =
+            device.create_shader_module(&rhi::ShaderModuleDescriptor::wgsl(CANDIDATE_WGSL));
+        let candidate_pipeline = device.create_compute_pipeline(&rhi::ComputePipelineDescriptor {
+            label: Some("lighting-gi-candidate-build".into()),
+            layout: Some(candidate_pipeline_layout),
+            module: candidate_shader,
+            entry_point: "main".into(),
+        });
         Self {
             device,
             layout,
             pipeline_layout,
             shader,
             pipeline,
+            candidate_layout,
+            candidate_pipeline_layout,
+            candidate_shader,
+            candidate_pipeline,
             nodes: None,
             triangles: None,
             rays: None,
             retired_buffers: Vec::new(),
             graph_bind_group: None,
             retired_bind_groups: Vec::new(),
+            candidate_bind_group: None,
+            retired_candidate_bind_groups: Vec::new(),
             packed_rays: Vec::new(),
             uploaded_scene_identity: None,
             allocations: 0,
@@ -714,6 +1061,7 @@ impl LightingTraceGpu {
         rays: &[TraceRay],
         output: rhi::BufferId,
         output_size_bytes: u64,
+        candidate_target: Option<LightingGiCandidateTarget>,
     ) -> Result<TraceGraphRecorder, TraceGpuError> {
         scene.validate()?;
         validate_rays(rays)?;
@@ -731,6 +1079,43 @@ impl LightingTraceGpu {
         let limit = caps.limits.max_storage_buffer_binding_size;
         if sizes.iter().any(|size| *size > limit) {
             return Err(TraceGpuError::StorageBindingLimit);
+        }
+        if let Some(target) = candidate_target {
+            let expected_ray_count = (target.surface_count as usize)
+                .checked_mul(target.rays_per_surface as usize)
+                .ok_or(TraceGpuError::BufferSizeOverflow)?;
+            if target.surface_count == 0
+                || target.rays_per_surface == 0
+                || target.rays_per_surface > MAX_HOST_TRACE_RAYS_PER_SURFACE
+                || expected_ray_count != rays.len()
+            {
+                return Err(TraceGpuError::CandidateBatchShape);
+            }
+            let candidate_bytes =
+                byte_size(rays.len(), core::mem::size_of::<LightingGiCandidateInput>())?;
+            let radiance_bytes = byte_size(scene.triangles.len() / TRIANGLE_WORDS, 16)?;
+            let surface_bytes = byte_size(target.surface_count as usize, 80)?;
+            let candidate_binding_sizes = [
+                sizes[2],
+                sizes[3],
+                sizes[1],
+                target.radiance_size_bytes,
+                target.surfaces_size_bytes,
+                target.candidates_size_bytes,
+            ];
+            if candidate_binding_sizes.iter().any(|size| *size > limit) {
+                return Err(TraceGpuError::CandidateStorageBindingLimit);
+            }
+            if target.candidates_size_bytes < candidate_bytes
+                || target.radiance_size_bytes < radiance_bytes
+                || target.surfaces_size_bytes < surface_bytes
+                || target.params_size_bytes < 32
+            {
+                return Err(TraceGpuError::CandidateBufferTooSmall);
+            }
+            if target.params_size_bytes > caps.limits.max_uniform_buffer_binding_size {
+                return Err(TraceGpuError::CandidateStorageBindingLimit);
+            }
         }
         let workgroups = u32::try_from(rays.len())
             .map_err(|_| TraceGpuError::DispatchLimit)?
@@ -799,6 +1184,47 @@ impl LightingTraceGpu {
             self.graph_bind_group = Some((group, buffers));
             group
         };
+        let candidate = if let Some(target) = candidate_target {
+            let candidate_buffers = [
+                ray_buffer,
+                output,
+                triangle_buffer,
+                target.radiance,
+                target.surfaces,
+                target.params,
+                target.candidates,
+            ];
+            let candidate_sizes = [
+                self.rays.expect("ray buffer was ensured").capacity_bytes,
+                output_size_bytes,
+                self.triangles
+                    .expect("triangle buffer was ensured")
+                    .capacity_bytes,
+                target.radiance_size_bytes,
+                target.surfaces_size_bytes,
+                target.params_size_bytes,
+                target.candidates_size_bytes,
+            ];
+            let group = if let Some((group, previous)) = self.candidate_bind_group {
+                if previous == candidate_buffers {
+                    group
+                } else {
+                    self.retired_candidate_bind_groups.push(group);
+                    let group =
+                        self.create_candidate_bind_group(candidate_buffers, candidate_sizes);
+                    self.candidate_bind_group = Some((group, candidate_buffers));
+                    group
+                }
+            } else {
+                let group = self.create_candidate_bind_group(candidate_buffers, candidate_sizes);
+                self.candidate_bind_group = Some((group, candidate_buffers));
+                group
+            };
+            Some((group, candidate_buffers))
+        } else {
+            None
+        };
+        let candidate_enabled = candidate.is_some();
         Ok(TraceGraphRecorder {
             nodes: TraceGraphBuffer {
                 id: node_buffer,
@@ -819,6 +1245,49 @@ impl LightingTraceGpu {
             pipeline: self.pipeline,
             bind_group: group,
             workgroups,
+            candidates: candidate_target.map(|target| TraceGraphBuffer {
+                id: target.candidates,
+                size_bytes: target.candidates_size_bytes,
+            }),
+            radiance: candidate_target.map(|target| TraceGraphBuffer {
+                id: target.radiance,
+                size_bytes: target.radiance_size_bytes,
+            }),
+            surfaces: candidate_target.map(|target| TraceGraphBuffer {
+                id: target.surfaces,
+                size_bytes: target.surfaces_size_bytes,
+            }),
+            params: candidate_target.map(|target| TraceGraphBuffer {
+                id: target.params,
+                size_bytes: target.params_size_bytes,
+            }),
+            candidate_pipeline: candidate_enabled.then_some(self.candidate_pipeline),
+            candidate_bind_group: candidate.map(|(group, _)| group),
+            candidate_workgroups: workgroups,
+        })
+    }
+
+    fn create_candidate_bind_group(
+        &self,
+        buffers: [rhi::BufferId; 7],
+        sizes: [u64; 7],
+    ) -> rhi::BindGroupId {
+        self.device.create_bind_group(&rhi::BindGroupDescriptor {
+            label: Some("lighting-gi-candidate-build-bind-group".into()),
+            layout: Some(self.candidate_layout),
+            entries: buffers
+                .into_iter()
+                .zip(sizes)
+                .enumerate()
+                .map(|(binding, (buffer, size))| rhi::BindGroupEntry {
+                    binding: binding as u32,
+                    resource: rhi::BindingResource::Buffer {
+                        buffer,
+                        offset: 0,
+                        size: Some(size),
+                    },
+                })
+                .collect(),
         })
     }
 
@@ -864,7 +1333,7 @@ impl LightingTraceGpu {
                 ray.direction[2].to_bits(),
                 ray.t_max.to_bits(),
                 ray.direction_pdf.to_bits(),
-                0,
+                ray.selection_u01.to_bits(),
                 0,
                 0,
             ]);
@@ -881,6 +1350,12 @@ impl Drop for LightingTraceGpu {
         for bind_group in self.retired_bind_groups.drain(..) {
             self.device.destroy_bind_group(bind_group);
         }
+        if let Some((bind_group, _)) = self.candidate_bind_group.take() {
+            self.device.destroy_bind_group(bind_group);
+        }
+        for bind_group in self.retired_candidate_bind_groups.drain(..) {
+            self.device.destroy_bind_group(bind_group);
+        }
         for buffer in [self.nodes, self.triangles, self.rays]
             .into_iter()
             .flatten()
@@ -891,9 +1366,14 @@ impl Drop for LightingTraceGpu {
             self.device.destroy_buffer(buffer);
         }
         self.device.destroy_compute_pipeline(self.pipeline);
+        self.device
+            .destroy_compute_pipeline(self.candidate_pipeline);
         self.device.destroy_shader_module(self.shader);
         self.device.destroy_pipeline_layout(self.pipeline_layout);
+        self.device
+            .destroy_pipeline_layout(self.candidate_pipeline_layout);
         self.device.destroy_bind_group_layout(self.layout);
+        self.device.destroy_bind_group_layout(self.candidate_layout);
     }
 }
 
@@ -963,6 +1443,8 @@ fn validate_rays(rays: &[TraceRay]) -> Result<(), TraceGpuError> {
             || !r.t_max.is_finite()
             || !r.direction_pdf.is_finite()
             || r.direction_pdf <= 0.0
+            || !r.selection_u01.is_finite()
+            || !(0.0..1.0).contains(&r.selection_u01)
             || r.t_min < 0.0
             || r.t_max < r.t_min
             || dot(r.direction, r.direction) <= 1.0e-20
@@ -1126,13 +1608,230 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){let ri=gid.x;if(ri>=arrayL
 }
 "#;
 
+const CANDIDATE_WGSL: &str = r#"
+struct Params { counts: vec4<u32>, flags: vec4<u32> }
+struct Surface { position: vec4<f32>, normal: vec4<f32>, albedo: vec4<f32>, ambient: vec4<f32>, candidate_range: vec4<u32> }
+struct Candidate { position_source_pdf: vec4<f32>, normal_target_pdf: vec4<f32>, radiance_selection_u01: vec4<f32>, visibility_padding: vec4<f32> }
+@group(0) @binding(0) var<storage, read> rays: array<u32>;
+@group(0) @binding(1) var<storage, read> hits: array<u32>;
+@group(0) @binding(2) var<storage, read> triangles: array<u32>;
+@group(0) @binding(3) var<storage, read> outgoing: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> surfaces: array<Surface>;
+@group(0) @binding(5) var<uniform> params: Params;
+@group(0) @binding(6) var<storage, read_write> candidates: array<Candidate>;
+fn f(w:u32)->f32{return bitcast<f32>(w);}
+fn finite(x:f32)->bool{return ((bitcast<u32>(x)>>23u)&255u)!=255u;}
+fn finite3(v:vec3<f32>)->bool{return finite(v.x)&&finite(v.y)&&finite(v.z);}
+fn safe_normalize(v:vec3<f32>)->vec3<f32>{let n=dot(v,v);if(n>1.0e-20&&finite(n)){return v*inverseSqrt(n);}return vec3<f32>(0.0,1.0,0.0);}
+fn luminance(v:vec3<f32>)->f32{return dot(v,vec3<f32>(0.2126,0.7152,0.0722));}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid:vec3<u32>){
+ let ri=gid.x; let rays_per_surface=params.counts.w; if(rays_per_surface==0u||ri>=arrayLength(&rays)/12u){return;}
+ let si=ri/rays_per_surface; let local=ri%rays_per_surface; if(si>=params.counts.x||local>=64u){return;}
+ let surface=surfaces[si]; let rb=ri*12u; let hb=ri*8u; let base=surface.candidate_range.x+local; if(base>=arrayLength(&candidates)){return;}
+ var c:Candidate; c.position_source_pdf=vec4<f32>(0.0,0.0,0.0,f(rays[rb+8u])); c.normal_target_pdf=vec4<f32>(0.0,1.0,0.0,0.0); c.radiance_selection_u01=vec4<f32>(0.0,0.0,0.0,0.0); c.visibility_padding=vec4<f32>(0.0);
+ c.radiance_selection_u01.w=f(rays[rb+9u]);
+ if(!finite(c.radiance_selection_u01.w)||c.radiance_selection_u01.w<0.0||c.radiance_selection_u01.w>=1.0){return;}
+ let hit_state=hits[hb]; if(hit_state==2u){c.visibility_padding.x=-1.0;candidates[base]=c;return;} if(hit_state==0u){candidates[base]=c;return;} if(hit_state!=1u){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
+ let tri=hits[hb+5u]; if(tri>=params.flags.w||tri>=arrayLength(&outgoing)||tri>=(arrayLength(&triangles)/12u)){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let tc=tri*12u;
+ if(triangles[tc+9u]!=hits[hb+1u]){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
+ let o=vec3<f32>(f(rays[rb]),f(rays[rb+1u]),f(rays[rb+2u])); let d=vec3<f32>(f(rays[rb+4u]),f(rays[rb+5u]),f(rays[rb+6u])); let t=f(hits[hb+2u]); let u=f(hits[hb+3u]); let v=f(hits[hb+4u]);
+ if(!finite(t)||!finite(u)||!finite(v)||t<f(rays[rb+3u])||t>f(rays[rb+7u])||u<0.0||v<0.0||u+v>1.00001){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
+ let p=o+d*t; let a=vec3<f32>(f(triangles[tc]),f(triangles[tc+1u]),f(triangles[tc+2u])); let b=vec3<f32>(f(triangles[tc+3u]),f(triangles[tc+4u]),f(triangles[tc+5u])); let cc=vec3<f32>(f(triangles[tc+6u]),f(triangles[tc+7u]),f(triangles[tc+8u])); let cr=cross(b-a,cc-a); if(!finite3(cr)||dot(cr,cr)<=1.0e-20){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let n=normalize(cr); let wi=safe_normalize(d); let cos_primary=max(dot(safe_normalize(surface.normal.xyz),wi),0.0); let le=outgoing[tri].xyz; if(!finite3(le)||any(le<vec3<f32>(0.0))){c.visibility_padding.x=-1.0;candidates[base]=c;return;} let target_density=luminance(surface.albedo.xyz*le*(cos_primary/3.141592653589793)); if(!finite(target_density)||target_density<0.0){c.visibility_padding.x=-1.0;candidates[base]=c;return;}
+ c.position_source_pdf=vec4<f32>(p,f(rays[rb+8u])); c.normal_target_pdf=vec4<f32>(n,target_density); c.radiance_selection_u01=vec4<f32>(le,c.radiance_selection_u01.w); c.visibility_padding=vec4<f32>(1.0,0.0,0.0,0.0); candidates[base]=c;
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use prism_render_architecture::ray_scene::{Bvh, BvhBuildConfig, Triangle};
     use prism_render_driver::{BufferDescriptor, BufferState, BufferUsages, Instance as _};
     use prism_render_driver_wgpu::{require_hardware_gpu, HardwareDeviceError, WgpuInstance};
-    use prism_render_graph::{BufferDesc, ImportedBuffer, PassFlags, RenderGraph};
+    use prism_render_graph::{BufferDesc, ImportedBuffer, PassFlags, PassKind, RenderGraph};
+
+    fn candidate_fixture() -> (PackedTraceScene, TraceRay, TraceHit) {
+        use prism_render_architecture::ray_scene::{Bvh, Triangle};
+        let bvh = Bvh::build(&[Triangle::new(
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [0.0, 1.0, -1.0],
+            19,
+        )]);
+        let packed = PackedTraceScene::from(&GpuBvhBuffers::from_bvh(&bvh));
+        let ray = TraceRay {
+            origin: [0.0, 0.0, 0.0],
+            t_min: 0.0,
+            direction: [0.0, 0.0, -1.0],
+            t_max: 10.0,
+            direction_pdf: 0.25,
+            selection_u01: 0.5,
+        };
+        let hit = TraceHit {
+            hit: true,
+            primitive: 19,
+            triangle_index: 0,
+            t: 1.0,
+            u: 0.25,
+            v: 0.5,
+        };
+        (packed, ray, hit)
+    }
+
+    fn candidate_inputs() -> (Vec<LightingSurfaceInput>, Vec<u64>, Vec<[f32; 3]>) {
+        (
+            vec![LightingSurfaceInput {
+                position: [0.0; 3],
+                normal: [0.0, 0.0, -1.0],
+                albedo: [0.8, 0.5, 0.25],
+                ambient: [0.0; 3],
+            }],
+            vec![42],
+            vec![[4.0, 2.0, 1.0]],
+        )
+    }
+
+    #[test]
+    fn gi_candidate_reference_hit_uses_solid_angle_lambert_integrand_and_geometric_normal() {
+        let (scene, ray, hit) = candidate_fixture();
+        let (surfaces, ids, radiance) = candidate_inputs();
+        let batches =
+            build_gi_candidates_reference(&scene, &[ray], &[hit], &surfaces, &ids, 7, &radiance)
+                .unwrap();
+        let candidate = batches[0][0];
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(candidate.source_pdf, 0.25);
+        assert_eq!(candidate.position, [0.0, 0.0, -1.0]);
+        assert_eq!(candidate.normal, [0.0, 0.0, 1.0]);
+        assert_eq!(candidate.radiance, radiance[0]);
+        let expected =
+            (0.8 * 4.0 * 0.2126 + 0.5 * 2.0 * 0.7152 + 0.25 * 1.0 * 0.0722) / core::f32::consts::PI;
+        assert!((candidate.target_pdf - expected).abs() < 1.0e-6);
+        assert_eq!(candidate.visibility, 1.0);
+    }
+
+    #[test]
+    fn gi_candidate_reference_miss_remains_a_zero_target_proposal() {
+        let (scene, ray, _) = candidate_fixture();
+        let (surfaces, ids, radiance) = candidate_inputs();
+        let batches = build_gi_candidates_reference(
+            &scene,
+            &[ray],
+            &[TraceHit::MISS],
+            &surfaces,
+            &ids,
+            7,
+            &radiance,
+        )
+        .unwrap();
+        assert_eq!(batches[0].len(), 1, "N includes missed proposals");
+        assert_eq!(batches[0][0].source_pdf, ray.direction_pdf);
+        assert_eq!(batches[0][0].target_pdf, 0.0);
+        assert_eq!(batches[0][0].visibility, 0.0);
+    }
+
+    #[test]
+    fn gi_candidate_reference_zero_contribution_hit_remains_in_the_proposal_batch() {
+        let (scene, ray, hit) = candidate_fixture();
+        let (mut surfaces, ids, radiance) = candidate_inputs();
+        surfaces[0].albedo = [0.0; 3];
+        let batches =
+            build_gi_candidates_reference(&scene, &[ray], &[hit], &surfaces, &ids, 7, &radiance)
+                .unwrap();
+        assert_eq!(batches[0].len(), 1, "N includes zero-contribution hits");
+        assert_eq!(batches[0][0].source_pdf, ray.direction_pdf);
+        assert_eq!(batches[0][0].target_pdf, 0.0);
+        assert_eq!(batches[0][0].radiance, radiance[0]);
+    }
+
+    #[test]
+    fn gi_candidate_reference_hash_is_deterministic_and_keyed_by_frame_surface_ray() {
+        let (scene, ray, hit) = candidate_fixture();
+        let (surfaces, ids, radiance) = candidate_inputs();
+        let run = |frame| {
+            build_gi_candidates_reference(&scene, &[ray], &[hit], &surfaces, &ids, frame, &radiance)
+                .unwrap()[0][0]
+                .selection_u01
+        };
+        let a = run(7);
+        assert_eq!(a, run(7));
+        assert!((0.0..1.0).contains(&a));
+        assert_ne!(a, run(8));
+        let other_surface =
+            build_gi_candidates_reference(&scene, &[ray], &[hit], &surfaces, &[43], 7, &radiance)
+                .unwrap()[0][0]
+                .selection_u01;
+        assert_ne!(a, other_surface);
+        let mut second_ray = ray;
+        second_ray.origin[0] = -0.2;
+        let mut second_hit = hit;
+        second_hit.u = 0.15;
+        let ray_indexed = build_gi_candidates_reference(
+            &scene,
+            &[ray, second_ray],
+            &[hit, second_hit],
+            &surfaces,
+            &ids,
+            7,
+            &radiance,
+        )
+        .unwrap();
+        assert_ne!(
+            ray_indexed[0][0].selection_u01,
+            ray_indexed[0][1].selection_u01
+        );
+    }
+
+    #[test]
+    fn gi_candidate_reference_rejects_malformed_batches_pdf_indices_and_radiance() {
+        let (scene, ray, hit) = candidate_fixture();
+        let (surfaces, ids, radiance) = candidate_inputs();
+        assert_eq!(
+            build_gi_candidates_reference(&scene, &[], &[], &surfaces, &ids, 0, &radiance),
+            Err(GiCandidateReferenceError::InvalidBatchShape)
+        );
+        let mut bad_ray = ray;
+        bad_ray.direction_pdf = f32::NAN;
+        assert_eq!(
+            build_gi_candidates_reference(
+                &scene,
+                &[bad_ray],
+                &[hit],
+                &surfaces,
+                &ids,
+                0,
+                &radiance
+            ),
+            Err(GiCandidateReferenceError::InvalidRay(0))
+        );
+        let mut bad_hit = hit;
+        bad_hit.triangle_index = 3;
+        assert_eq!(
+            build_gi_candidates_reference(
+                &scene,
+                &[ray],
+                &[bad_hit],
+                &surfaces,
+                &ids,
+                0,
+                &radiance
+            ),
+            Err(GiCandidateReferenceError::InvalidTriangleIndex(0))
+        );
+        assert_eq!(
+            build_gi_candidates_reference(
+                &scene,
+                &[ray],
+                &[hit],
+                &surfaces,
+                &ids,
+                0,
+                &[[f32::INFINITY, 0.0, 0.0]]
+            ),
+            Err(GiCandidateReferenceError::InvalidRadiance(0))
+        );
+    }
 
     fn fixture() -> (PackedTraceScene, Vec<TraceRay>) {
         // The production builder defaults to four primitives per leaf, so the
@@ -1170,6 +1869,7 @@ mod tests {
                 direction: [0.0, 0.0, -1.0],
                 t_max: 10.0,
                 direction_pdf: 1.0 / core::f32::consts::PI,
+                selection_u01: 0.5,
             })
             .collect();
         (PackedTraceScene::from(&packed), rays)
@@ -1200,9 +1900,32 @@ mod tests {
             rays_per_surface: 2,
             ray_epsilon: 0.001,
             ray_tmax: 10.0,
+            outgoing_radiance: vec![[1.0, 1.0, 1.0]],
         };
         let surfaces = [crate::LightingSurfaceInput::default()];
         let mut state = LightingTraceState::default();
+        let bad_radiance = crate::LightingTraceSceneInput {
+            outgoing_radiance: Vec::new(),
+            ..input.clone()
+        };
+        assert!(state
+            .prepare(
+                Some(&bad_radiance),
+                &surfaces,
+                3,
+                1,
+                Arc::clone(&trace_device),
+                &queue,
+                None,
+            )
+            .is_none());
+        assert_eq!(
+            state.status(),
+            TracePreparationStatus::Failed(TracePreparationError::RadianceCountMismatch {
+                triangles: 1,
+                radiance: 0,
+            })
+        );
         let recorder = state.prepare(
             Some(&input),
             &surfaces,
@@ -1210,6 +1933,7 @@ mod tests {
             1,
             Arc::clone(&trace_device),
             &queue,
+            None,
         );
         assert!(recorder.is_some());
         assert_eq!(
@@ -1228,6 +1952,7 @@ mod tests {
                 1,
                 Arc::clone(&trace_device),
                 &queue,
+                None,
             )
             .is_some());
         assert_eq!(state.surface_id_scratch.capacity(), surface_id_capacity);
@@ -1248,6 +1973,7 @@ mod tests {
                 1,
                 trace_device,
                 &queue,
+                None,
             )
             .is_none());
         assert_eq!(
@@ -1282,6 +2008,7 @@ mod tests {
                 rays_per_surface: 1,
                 ray_epsilon: 0.001,
                 ray_tmax: 10.0,
+                outgoing_radiance: vec![[1.0, 1.0, 1.0]],
             }
         };
         let surface = [crate::LightingSurfaceInput::default()];
@@ -1297,6 +2024,7 @@ mod tests {
                     1,
                     Arc::clone(&trace_device),
                     &queue,
+                    None,
                 )
                 .is_some());
         }
@@ -1320,6 +2048,7 @@ mod tests {
                 1,
                 Arc::clone(&trace_device),
                 &queue,
+                None,
             )
             .is_some());
         assert_eq!(
@@ -1341,6 +2070,7 @@ mod tests {
                 2,
                 trace_device,
                 &queue,
+                None,
             )
             .is_some());
         assert_eq!(
@@ -1444,11 +2174,11 @@ mod tests {
         ));
         let mut trace = LightingTraceGpu::new(trace_device);
         assert!(matches!(
-            trace.prepare_graph(&queue, &borrowed_scene, &rays, output, required - 1),
+            trace.prepare_graph(&queue, &borrowed_scene, &rays, output, required - 1, None),
             Err(TraceGpuError::OutputBufferTooSmall)
         ));
         let recorder = trace
-            .prepare_graph(&queue, &borrowed_scene, &rays, output, required)
+            .prepare_graph(&queue, &borrowed_scene, &rays, output, required, None)
             .unwrap();
         let mut graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
         let nodes = graph.import_buffer(
@@ -1484,7 +2214,7 @@ mod tests {
             },
         );
         let graph_recorder = recorder;
-        graph.add_compute_pass("trace", PassFlags::SIDE_EFFECT, move |builder| {
+        graph.add_compute_pass("trace", PassFlags::SIDE_EFFECT, |builder| {
             builder.read_storage_buffer(nodes);
             builder.read_storage_buffer(triangles);
             builder.read_storage_buffer(ray_buffer);
@@ -1496,6 +2226,296 @@ mod tests {
         drop(recorder);
         drop(trace);
         device.destroy_buffer(output);
+    }
+
+    #[test]
+    fn hardware_candidate_build_matches_cpu_reference_for_hit_and_miss() {
+        let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
+            Ok(pair) => pair,
+            Err(HardwareDeviceError::NoAdapter) => {
+                assert!(
+                    !require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1 but no physical adapter was found"
+                );
+                eprintln!("SKIPPED candidate GPU parity: no adapter");
+                return;
+            }
+            Err(HardwareDeviceError::NonHardware(evidence)) => {
+                assert!(
+                    !require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1 requires physical GPU: {evidence}"
+                );
+                eprintln!("SKIPPED candidate GPU parity: {evidence}");
+                return;
+            }
+            Err(HardwareDeviceError::Device(error)) => {
+                panic!("hardware GPU device creation failed: {error}")
+            }
+        };
+        let device = Arc::new(device);
+        let trace_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+        let bvh = Bvh::build(&[Triangle::new(
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [0.0, 1.0, -1.0],
+            19,
+        )]);
+        let scene = PackedTraceScene::from(&GpuBvhBuffers::from_bvh(&bvh));
+        let stable_id = 42_u64;
+        let frame_index = 7_u64;
+        let rays = [
+            TraceRay {
+                origin: [0.0, 0.0, 0.0],
+                t_min: 0.001,
+                direction: [0.0, 0.0, -1.0],
+                t_max: 10.0,
+                direction_pdf: 1.0 / core::f32::consts::PI,
+                selection_u01: selection_hash(frame_index, stable_id, 0),
+            },
+            TraceRay {
+                origin: [10.0, 0.0, 0.0],
+                t_min: 0.001,
+                direction: [0.0, 0.0, -1.0],
+                t_max: 10.0,
+                direction_pdf: 1.0 / core::f32::consts::PI,
+                selection_u01: selection_hash(frame_index, stable_id, 1),
+            },
+        ];
+        let surfaces = [LightingSurfaceInput {
+            position: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, -1.0],
+            albedo: [0.8, 0.5, 0.25],
+            ambient: [0.0; 3],
+        }];
+        let outgoing = [[4.0, 2.0, 1.0]];
+        let cpu_hits = trace_reference(&scene, &rays).unwrap();
+        let expected = build_gi_candidates_reference(
+            &scene,
+            &rays,
+            &cpu_hits,
+            &surfaces,
+            &[stable_id],
+            frame_index,
+            &outgoing,
+        )
+        .unwrap();
+        let make_buffer = |size, usage| device.create_buffer(&BufferDescriptor::new(size, usage));
+        let hits = make_buffer(
+            2 * HIT_WORDS as u64 * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
+        let radiance = make_buffer(16, BufferUsages::STORAGE | BufferUsages::COPY_DST);
+        let gpu_surfaces = make_buffer(80, BufferUsages::STORAGE | BufferUsages::COPY_DST);
+        let params = make_buffer(32, BufferUsages::UNIFORM | BufferUsages::COPY_DST);
+        let candidates = make_buffer(
+            2 * core::mem::size_of::<LightingGiCandidateInput>() as u64,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
+        queue.write_buffer(
+            radiance,
+            0,
+            bytemuck::cast_slice(&[[4.0_f32, 2.0, 1.0, 0.0]]),
+        );
+        let packed_surface = [
+            [0.0_f32, 0.0, 0.0, 0.0],
+            [0.0_f32, 0.0, -1.0, 0.0],
+            [0.8_f32, 0.5, 0.25, 0.0],
+            [0.0_f32; 4],
+        ];
+        let mut surface_words = bytemuck::cast_slice::<[f32; 4], u32>(&packed_surface).to_vec();
+        surface_words.extend([0, 2, stable_id as u32, (stable_id >> 32) as u32]);
+        queue.write_buffer(gpu_surfaces, 0, bytemuck::cast_slice(&surface_words));
+        let params_words = [
+            1_u32,
+            0,
+            0,
+            2,
+            0,
+            frame_index as u32,
+            (frame_index >> 32) as u32,
+            1,
+        ];
+        queue.write_buffer(params, 0, bytemuck::cast_slice(&params_words));
+        let target = LightingGiCandidateTarget {
+            candidates,
+            candidates_size_bytes: 2 * core::mem::size_of::<LightingGiCandidateInput>() as u64,
+            surface_count: 1,
+            rays_per_surface: 2,
+            surfaces: gpu_surfaces,
+            surfaces_size_bytes: 80,
+            params,
+            params_size_bytes: 32,
+            radiance,
+            radiance_size_bytes: 16,
+        };
+        let mut pass = LightingTraceGpu::new(trace_device);
+        let undersized_target = LightingGiCandidateTarget {
+            candidates_size_bytes: 0,
+            ..target
+        };
+        assert!(matches!(
+            pass.prepare_graph(
+                &queue,
+                &BorrowedPackedTraceScene::from(&scene),
+                &rays,
+                hits,
+                2 * HIT_WORDS as u64 * 4,
+                Some(undersized_target),
+            ),
+            Err(TraceGpuError::CandidateBufferTooSmall)
+        ));
+        let recorder = pass
+            .prepare_graph(
+                &queue,
+                &BorrowedPackedTraceScene::from(&scene),
+                &rays,
+                hits,
+                2 * HIT_WORDS as u64 * 4,
+                Some(target),
+            )
+            .unwrap();
+        let mut graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
+        let nodes = graph.import_buffer(
+            "trace-nodes",
+            BufferDesc::new(recorder.nodes.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: recorder.nodes.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let triangles = graph.import_buffer(
+            "trace-triangles",
+            BufferDesc::new(recorder.triangles.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: recorder.triangles.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let ray_buffer = graph.import_buffer(
+            "trace-rays",
+            BufferDesc::new(recorder.rays.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: recorder.rays.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let mut hit_buffer = graph.import_buffer(
+            "trace-hits",
+            BufferDesc::new(recorder.hits.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: recorder.hits.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let mut candidate_buffer = graph.import_buffer(
+            "gi-candidates",
+            BufferDesc::new(
+                target.candidates_size_bytes,
+                BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            ),
+            ImportedBuffer {
+                buffer: candidates,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let radiance_buffer = graph.import_buffer(
+            "gi-radiance",
+            BufferDesc::new(16, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: radiance,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let surface_buffer = graph.import_buffer(
+            "gi-surfaces",
+            BufferDesc::new(80, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: gpu_surfaces,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let params_buffer = graph.import_buffer(
+            "gi-params",
+            BufferDesc::new(32, BufferUsages::UNIFORM),
+            ImportedBuffer {
+                buffer: params,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let trace_recorder = recorder;
+        let trace_pass = graph
+            .try_add_pass_with_dependencies(
+                "trace",
+                PassKind::Compute,
+                PassFlags::SIDE_EFFECT,
+                Vec::new(),
+                |builder| {
+                    builder.read_storage_buffer(nodes);
+                    builder.read_storage_buffer(triangles);
+                    builder.read_storage_buffer(ray_buffer);
+                    hit_buffer = builder.write_storage_buffer(hit_buffer);
+                    move |context| trace_recorder.record_graph(context)
+                },
+            )
+            .expect("trace pass fits the parity graph");
+        let trace_hit_output = hit_buffer;
+        graph
+            .try_add_pass_with_dependencies(
+                "candidate-build",
+                PassKind::Compute,
+                PassFlags::SIDE_EFFECT,
+                vec![trace_pass],
+                |builder| {
+                    builder.read_storage_buffer(ray_buffer);
+                    builder.read_storage_buffer(trace_hit_output);
+                    builder.read_storage_buffer(triangles);
+                    builder.read_storage_buffer(radiance_buffer);
+                    builder.read_storage_buffer(surface_buffer);
+                    builder.read_uniform(params_buffer);
+                    candidate_buffer = builder.write_storage_buffer(candidate_buffer);
+                    move |context| recorder.record_candidate_graph(context)
+                },
+            )
+            .expect("candidate pass fits the parity graph");
+        let recorded = graph.execute(device.as_ref(), &queue).unwrap();
+        let hit_bytes = queue.read_buffer(hits, 2 * HIT_WORDS as u64 * 4);
+        let hit_words: &[u32] = bytemuck::try_cast_slice(&hit_bytes).unwrap();
+        assert_eq!(hit_words[0], 1, "first candidate ray must hit");
+        assert_eq!(hit_words[HIT_WORDS], 0, "second candidate ray must miss");
+        let bytes = queue.read_buffer(candidates, target.candidates_size_bytes);
+        let actual: &[LightingGiCandidateInput] = bytemuck::try_cast_slice(&bytes).unwrap();
+        for (candidate_index, (actual, expected)) in actual.iter().zip(&expected[0]).enumerate() {
+            let float_fields = actual
+                .position
+                .into_iter()
+                .chain([actual.source_pdf])
+                .chain(actual.normal)
+                .chain([actual.target_pdf])
+                .chain(actual.radiance)
+                .chain([actual.selection_u01, actual.visibility]);
+            let expected_fields = expected
+                .position
+                .into_iter()
+                .chain([expected.source_pdf])
+                .chain(expected.normal)
+                .chain([expected.target_pdf])
+                .chain(expected.radiance)
+                .chain([expected.selection_u01, expected.visibility]);
+            for (actual, expected) in float_fields.zip(expected_fields) {
+                assert!(
+                    (actual - expected).abs() <= 2.0e-5,
+                    "candidate {candidate_index}: {actual} != {expected}; gpu={:?}, cpu={:?}",
+                    actual,
+                    expected
+                );
+            }
+        }
+        recorded.release(device.as_ref());
+        drop(recorder);
+        drop(pass);
+        for buffer in [hits, radiance, gpu_surfaces, params, candidates] {
+            device.destroy_buffer(buffer);
+        }
     }
 
     #[test]
@@ -1545,6 +2565,7 @@ mod tests {
                 &rays,
                 output,
                 (rays.len() * HIT_WORDS * 4) as u64,
+                None,
             )
             .unwrap();
         assert_eq!(

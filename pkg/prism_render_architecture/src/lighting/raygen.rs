@@ -25,7 +25,7 @@ pub struct SurfaceRayGenInput {
     pub sample_index: u64,
     /// Number of rays to generate; must be non-zero.
     pub ray_count: u32,
-    /// Positive origin offset along the normalized surface normal.
+    /// Positive minimum ray distance used to reject self-intersections.
     pub epsilon: f32,
     /// Positive maximum ray distance; must exceed `epsilon`.
     pub tmax: f32,
@@ -34,11 +34,11 @@ pub struct SurfaceRayGenInput {
 /// A normalized cosine-weighted hemisphere ray and its solid-angle PDF.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GiRay {
-    /// Offset world-space origin.
+    /// World-space shading point used as the sampling and PDF reference.
     pub origin: Vec3,
     /// Unit direction in the surface's positive-normal hemisphere.
     pub direction: Vec3,
-    /// Minimum trace distance. The origin is already offset, so this is zero.
+    /// Minimum trace distance used for robust self-intersection rejection.
     pub tmin: f32,
     /// Maximum trace distance from `origin`.
     pub tmax: f32,
@@ -55,8 +55,6 @@ pub enum RayGenError {
     NonFiniteNormal,
     /// Normal has zero or numerically unusable length.
     DegenerateNormal,
-    /// Applying the normal offset overflowed the world-space origin.
-    OriginOverflow,
     /// A ray batch must contain at least one ray.
     ZeroRayCount,
     /// Epsilon must be finite and strictly positive.
@@ -112,10 +110,7 @@ pub fn append_surface_gi_rays(
         return Err(RayGenError::DegenerateNormal);
     }
     let normal = input_normal / normal_len_sq.sqrt();
-    let origin = position + normal * input.epsilon;
-    if !origin.is_finite() {
-        return Err(RayGenError::OriginOverflow);
-    }
+    let origin = position;
     let (tangent, bitangent) = orthonormal_basis(normal);
 
     rays.try_reserve(input.ray_count as usize)
@@ -140,7 +135,7 @@ pub fn append_surface_gi_rays(
         rays.push(GiRay {
             origin,
             direction,
-            tmin: 0.0,
+            tmin: input.epsilon,
             tmax: input.tmax,
             pdf,
         });
@@ -211,7 +206,7 @@ mod tests {
             assert!(ray.direction.dot(n) >= 0.0);
             assert_eq!(
                 ray.origin,
-                Vec3::new(value.position.x, value.position.y, value.position.z) + n * value.epsilon
+                Vec3::new(value.position.x, value.position.y, value.position.z)
             );
         }
     }
@@ -224,7 +219,7 @@ mod tests {
             let expected = ray.direction.dot(n).max(0.0) / PI;
             assert!((ray.pdf - expected).abs() <= f32::EPSILON);
             assert!((0.0..=1.0 / PI).contains(&ray.pdf));
-            assert_eq!(ray.tmin, 0.0);
+            assert_eq!(ray.tmin, value.epsilon);
             assert_eq!(ray.tmax, value.tmax);
         }
     }
@@ -302,15 +297,6 @@ mod tests {
         assert_eq!(
             generate_surface_gi_rays(value),
             Err(RayGenError::DegenerateNormal)
-        );
-        value = input();
-        value.position.x = f32::MAX;
-        value.normal = PrismVec3::X;
-        value.epsilon = f32::MAX * 0.5;
-        value.tmax = f32::MAX;
-        assert_eq!(
-            generate_surface_gi_rays(value),
-            Err(RayGenError::OriginOverflow)
         );
         value = input();
         value.ray_count = 0;

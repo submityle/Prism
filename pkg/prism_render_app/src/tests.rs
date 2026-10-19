@@ -2067,7 +2067,7 @@ fn deterministic_gi_oracle_selects_valid_reservoir_sample() {
         ..LightingGiCandidateInput::default()
     };
     let result = evaluate_deterministic_gi(surface, &[candidate]);
-    let expected = [0.1875, 0.1875, 1.5].map(|value| value / core::f32::consts::PI);
+    let expected = [0.75, 0.75, 6.0].map(|value| value / core::f32::consts::PI);
     for (actual, expected) in result.into_iter().zip(expected) {
         assert!((actual - expected).abs() < 1.0e-6);
     }
@@ -2103,23 +2103,26 @@ fn deterministic_gi_ris_counts_zero_contribution_proposals_in_normalization() {
 }
 
 #[test]
-fn deterministic_gi_oracle_ignores_invalid_and_backfacing_candidates() {
+fn deterministic_gi_oracle_ignores_invalid_and_primary_backfacing_candidates() {
     let surface = LightingSurfaceInput::default();
     let invalid = LightingGiCandidateInput {
         source_pdf: 0.0,
         target_pdf: 1.0,
         ..LightingGiCandidateInput::default()
     };
-    let backfacing = LightingGiCandidateInput {
-        position: [0.0, 2.0, 0.0],
-        normal: [0.0, 1.0, 0.0],
+    // With the solid-angle measure the candidate normal is not part of the
+    // Lambert directional integrand. A sample is rejected here only because
+    // its direction is behind the owning surface normal.
+    let primary_backfacing = LightingGiCandidateInput {
+        position: [0.0, -2.0, 0.0],
+        normal: [0.0, -1.0, 0.0],
         source_pdf: 1.0,
         target_pdf: 1.0,
         radiance: [10.0; 3],
         ..LightingGiCandidateInput::default()
     };
     assert_eq!(
-        evaluate_deterministic_gi(surface, &[invalid, backfacing]),
+        evaluate_deterministic_gi(surface, &[invalid, primary_backfacing]),
         [0.0; 3]
     );
 }
@@ -2773,7 +2776,7 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
     );
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
-    lighting.prepare(&plan, &extracted, runtime.queue());
+    lighting.prepare(&plan, &extracted, 0, runtime.queue());
 
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
@@ -2821,6 +2824,7 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
 
 #[test]
 fn frame_graph_records_optional_trace_between_scene_and_gi() {
+    use crate::lighting::LightingTraceSceneInput;
     use crate::lighting_trace_gpu::{LightingTraceGpu, PackedTraceScene, TraceRay};
     use prism_render_architecture::lighting::contract::RecipeId;
     use prism_render_architecture::ray_scene::{Bvh, Triangle};
@@ -2839,19 +2843,30 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
     };
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
-    lighting.prepare(&plan, &extracted, runtime.queue());
 
     let triangle = Triangle::new([-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 1.0, -1.0], 0);
     let bvh = Bvh::build(&[triangle]);
     let scene = PackedTraceScene::from(
         &prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&bvh),
     );
+    extracted.trace_scene = Some(LightingTraceSceneInput {
+        bvh: std::sync::Arc::new(
+            prism_render_architecture::ray_scene::GpuBvhBuffers::from_bvh(&bvh),
+        ),
+        surface_ids: vec![1],
+        rays_per_surface: 1,
+        ray_epsilon: 0.001,
+        ray_tmax: 10.0,
+        outgoing_radiance: vec![[1.0, 1.0, 1.0]],
+    });
+    lighting.prepare(&plan, &extracted, 0, runtime.queue());
     let rays = [TraceRay {
         origin: [0.0, 0.0, 0.0],
         t_min: 0.0,
         direction: [0.0, 0.0, -1.0],
         t_max: 10.0,
         direction_pdf: 1.0 / core::f32::consts::PI,
+        selection_u01: 0.5,
     }];
     let output = runtime.device().create_buffer(&BufferDescriptor::new(
         32,
@@ -2859,8 +2874,16 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
     ));
     let mut trace = LightingTraceGpu::new(runtime.device_handle());
     let borrowed_scene = crate::lighting_trace_gpu::BorrowedPackedTraceScene::from(&scene);
+    let lighting_pass = lighting.pass(&plan).expect("the GI recipe has a surface");
     let recorder = trace
-        .prepare_graph(runtime.queue(), &borrowed_scene, &rays, output, 32)
+        .prepare_graph(
+            runtime.queue(),
+            &borrowed_scene,
+            &rays,
+            output,
+            32,
+            Some(lighting_pass.gi_candidate_target()),
+        )
         .expect("trace inputs prepare without submitting a command buffer");
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();
@@ -2880,7 +2903,7 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         &target,
         &queues,
         &functions,
-        lighting.pass(&plan),
+        Some(lighting_pass),
         Some(recorder),
     );
     let stages = *graph
@@ -2889,6 +2912,7 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         .expect("trace-aware graph publishes stage receipt");
     stages.assert_contract();
     assert_eq!(stages.trace_dispatches, 1);
+    assert_eq!(stages.candidate_build_dispatches, 1);
     assert_eq!(stages.gi_recipes, 1);
 
     let capture = CapturingQueue::default();
@@ -2911,6 +2935,7 @@ fn frame_graph_records_optional_trace_between_scene_and_gi() {
         [
             "prism-render-app-clear",
             "prism-lighting-trace-dispatch",
+            "prism-lighting-gi-candidate-build",
             "prism-lighting-gi-dispatch",
             "prism-lighting-composite",
         ]
@@ -2993,7 +3018,7 @@ fn lighting_graph_skips_direct_when_only_world_restir_is_admitted() {
     };
     let mut extracted = ExtractedLightingInputs::default();
     extracted.surfaces = vec![LightingSurfaceInput::default()];
-    lighting.prepare(&plan, &extracted, runtime.queue());
+    lighting.prepare(&plan, &extracted, 0, runtime.queue());
 
     let target = RenderTarget::new(runtime.device(), extent);
     let graph = crate::frame::target_graph(
@@ -3037,7 +3062,12 @@ fn lighting_graph_has_no_compute_pass_without_an_admitted_backend() {
         budget: FrameResourceBudget::default(),
         rejected: Vec::new(),
     };
-    lighting.prepare(&plan, &ExtractedLightingInputs::default(), runtime.queue());
+    lighting.prepare(
+        &plan,
+        &ExtractedLightingInputs::default(),
+        0,
+        runtime.queue(),
+    );
 
     let target = RenderTarget::new(runtime.device(), extent);
     let graph = crate::frame::target_graph(
@@ -3075,7 +3105,7 @@ fn lighting_empty_surface_batch_clears_outputs_without_dispatching() {
         rejected: Vec::new(),
     };
     let extracted = ExtractedLightingInputs::default();
-    lighting.prepare(&plan, &extracted, runtime.queue());
+    lighting.prepare(&plan, &extracted, 0, runtime.queue());
     assert!(
         lighting.pass(&plan).is_none(),
         "empty batches have no lighting pass"

@@ -18,7 +18,7 @@ use crate::lighting::{
 
 const MAX_DIRECTIONALS: usize = 1024;
 const MAX_PUNCTUALS: usize = 1024;
-const GI_CANDIDATES_PER_SURFACE: usize = 4;
+pub(crate) const GI_CANDIDATES_PER_SURFACE: usize = 64;
 pub(crate) const MAX_LIGHTING_SURFACES: usize = 1024;
 const WORKGROUP_SIZE: u32 = 64;
 pub(crate) const OUTPUT_BYTES: u64 =
@@ -29,6 +29,8 @@ const PUNCTUAL_BYTES: u64 = (MAX_PUNCTUALS * core::mem::size_of::<LightingPunctu
 const GI_CANDIDATE_BYTES: u64 = (MAX_LIGHTING_SURFACES
     * GI_CANDIDATES_PER_SURFACE
     * core::mem::size_of::<LightingGiCandidateInput>()) as u64;
+pub(crate) const GI_CANDIDATE_BUFFER_BYTES: u64 = GI_CANDIDATE_BYTES;
+pub(crate) const TRACE_RADIANCE_BYTES: u64 = (2_000_000 * core::mem::size_of::<[f32; 4]>()) as u64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -42,6 +44,23 @@ struct GpuLightingSurface {
 
 const SURFACE_BYTES: u64 =
     (MAX_LIGHTING_SURFACES * core::mem::size_of::<GpuLightingSurface>()) as u64;
+pub(crate) const LIGHTING_SURFACE_BUFFER_BYTES: u64 = SURFACE_BYTES;
+pub(crate) const LIGHTING_PARAMS_BYTES: u64 = PARAM_BYTES;
+
+/// Persistent lighting buffers shared by trace candidate-build and GI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LightingGiCandidateTarget {
+    pub candidates: prism_render_driver::BufferId,
+    pub candidates_size_bytes: u64,
+    pub surface_count: u32,
+    pub rays_per_surface: u32,
+    pub surfaces: prism_render_driver::BufferId,
+    pub surfaces_size_bytes: u64,
+    pub params: prism_render_driver::BufferId,
+    pub params_size_bytes: u64,
+    pub radiance: prism_render_driver::BufferId,
+    pub radiance_size_bytes: u64,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -189,7 +208,7 @@ var<storage, read_write> output: array<vec4<f32>>;
 @group(0) @binding(1)
 var<uniform> params: Params;
 @group(0) @binding(2)
-var<storage, read> candidates: array<GiCandidate, 4096>;
+var<storage, read> candidates: array<GiCandidate>;
 @group(0) @binding(3)
 var<storage, read> surfaces: array<Surface, 1024>;
 
@@ -213,10 +232,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let surface = surfaces[id.x];
     let primary_normal = normalize_or(surface.normal.xyz, vec3<f32>(0.0, 1.0, 0.0));
-    let candidate_count = min(surface.candidate_range.y, 4u);
+    let candidate_count = min(surface.candidate_range.y, 64u);
     var weight_sum = 0.0;
     var selected_position = vec3<f32>(0.0);
-    var selected_normal = vec3<f32>(0.0, 1.0, 0.0);
     var selected_radiance = vec3<f32>(0.0);
     var selected_target_pdf = 0.0;
     var selected_visibility = 0.0;
@@ -236,7 +254,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         if (candidate.radiance_selection_u01.w * weight_sum < weight) {
             selected_position = candidate.position_source_pdf.xyz;
-            selected_normal = candidate.normal_target_pdf.xyz;
             selected_radiance = candidate.radiance_selection_u01.xyz;
             selected_target_pdf = candidate.normal_target_pdf.w;
             selected_visibility = candidate.visibility_padding.x;
@@ -253,13 +270,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let direction = to_sample * inverseSqrt(distance_squared);
-    let sample_normal = normalize_or(selected_normal, vec3<f32>(0.0, 1.0, 0.0));
     let cosine_primary = max(dot(primary_normal, direction), 0.0);
-    let cosine_secondary = max(dot(sample_normal, -direction), 0.0);
-    let geometry = cosine_primary * cosine_secondary / (3.141592653589793 * distance_squared);
     let visibility = clamp(selected_visibility, 0.0, 1.0);
     let reservoir_weight = weight_sum / (f32(candidate_count) * selected_target_pdf);
-    let result = surface.albedo.xyz * selected_radiance * geometry * visibility * reservoir_weight;
+    let result = surface.albedo.xyz * selected_radiance * (cosine_primary / 3.141592653589793)
+        * visibility * reservoir_weight;
     output[id.x] = vec4<f32>(result, 1.0);
 }
 "#;
@@ -313,6 +328,8 @@ pub struct LightingGpuBundle {
     pub candidates: prism_render_driver::BufferId,
     /// Packed, shader-aligned surface sample storage buffer.
     pub surfaces: prism_render_driver::BufferId,
+    /// Per-packed-triangle outgoing radiance used by trace candidate build.
+    pub radiance: prism_render_driver::BufferId,
     /// Direct-light pipeline and bind group.
     pub direct_pipeline: prism_render_driver::ComputePipelineId,
     pub direct_bind_group: prism_render_driver::BindGroupId,
@@ -335,6 +352,7 @@ pub(crate) struct LightingGpuPass {
     pub punctuals: prism_render_driver::BufferId,
     pub candidates: prism_render_driver::BufferId,
     pub surfaces: prism_render_driver::BufferId,
+    pub radiance: prism_render_driver::BufferId,
     pub direct_pipeline: prism_render_driver::ComputePipelineId,
     pub direct_bind_group: prism_render_driver::BindGroupId,
     pub gi_pipeline: prism_render_driver::ComputePipelineId,
@@ -343,6 +361,8 @@ pub(crate) struct LightingGpuPass {
     pub composite_bind_group: prism_render_driver::BindGroupId,
     pub run_direct: bool,
     pub run_gi: bool,
+    pub candidate_surface_count: u32,
+    pub candidate_rays_per_surface: u32,
     pub workgroups: u32,
 }
 
@@ -350,6 +370,22 @@ impl LightingGpuPass {
     #[must_use]
     pub(crate) const fn pass_count(self) -> u64 {
         (self.run_direct as u64) + (self.run_gi as u64) + 1
+    }
+
+    /// Returns the persistent buffers shared by trace candidate-build and GI.
+    pub(crate) const fn gi_candidate_target(self) -> LightingGiCandidateTarget {
+        LightingGiCandidateTarget {
+            candidates: self.candidates,
+            candidates_size_bytes: GI_CANDIDATE_BUFFER_BYTES,
+            surface_count: self.candidate_surface_count,
+            rays_per_surface: self.candidate_rays_per_surface,
+            surfaces: self.surfaces,
+            surfaces_size_bytes: LIGHTING_SURFACE_BUFFER_BYTES,
+            params: self.params,
+            params_size_bytes: LIGHTING_PARAMS_BYTES,
+            radiance: self.radiance,
+            radiance_size_bytes: TRACE_RADIANCE_BYTES,
+        }
     }
 }
 
@@ -360,6 +396,7 @@ where
 {
     bundle: ReplayHandle<LightingGpuBundle>,
     surface_count: core::sync::atomic::AtomicU32,
+    candidate_rays_per_surface: core::sync::atomic::AtomicU32,
     marker: core::marker::PhantomData<fn() -> I>,
 }
 
@@ -377,16 +414,30 @@ where
         Ok(Self {
             bundle,
             surface_count: core::sync::atomic::AtomicU32::new(0),
+            candidate_rays_per_surface: core::sync::atomic::AtomicU32::new(0),
             marker: core::marker::PhantomData,
         })
     }
 
     /// Uploads the current immutable lighting snapshot before dispatch.
-    pub fn prepare(&self, plan: &LightingPlan, inputs: &ExtractedLightingInputs, queue: &I::Queue) {
+    pub fn prepare(
+        &self,
+        plan: &LightingPlan,
+        inputs: &ExtractedLightingInputs,
+        frame_index: u64,
+        queue: &I::Queue,
+    ) {
         let bundle = self.bundle.current();
         let surface_count = inputs.surfaces.len().min(MAX_LIGHTING_SURFACES);
         self.surface_count
             .store(surface_count as u32, core::sync::atomic::Ordering::Release);
+        let candidate_rays_per_surface = inputs.trace_scene.as_ref().map_or(0, |trace| {
+            trace.rays_per_surface.min(GI_CANDIDATES_PER_SURFACE as u32)
+        });
+        self.candidate_rays_per_surface.store(
+            candidate_rays_per_surface,
+            core::sync::atomic::Ordering::Release,
+        );
         let directional_count = inputs.directionals.len().min(MAX_DIRECTIONALS);
         let punctual_count = inputs.punctuals.len().min(MAX_PUNCTUALS);
         let mut execution_flags = 0_u32;
@@ -401,9 +452,17 @@ where
                 surface_count as u32,
                 directional_count as u32,
                 punctual_count as u32,
-                0,
+                candidate_rays_per_surface,
             ],
-            flags: [execution_flags, 0, 0, 0],
+            flags: [
+                execution_flags,
+                frame_index as u32,
+                (frame_index >> 32) as u32,
+                inputs
+                    .trace_scene
+                    .as_ref()
+                    .map_or(0, |trace| trace.bvh.triangles.len().div_ceil(12) as u32),
+            ],
         };
         queue.write_buffer(bundle.params, 0, bytes_of(&params));
         let mut packed_candidates =
@@ -412,11 +471,22 @@ where
             .iter()
             .enumerate()
             .map(|(surface_index, surface)| {
-                let candidate_start = packed_candidates.len();
-                if let Some(candidates) = inputs.gi_candidates.get(surface_index) {
-                    let count = candidates.len().min(GI_CANDIDATES_PER_SURFACE);
-                    packed_candidates.extend_from_slice(&candidates[..count]);
+                let candidate_start = surface_index * GI_CANDIDATES_PER_SURFACE;
+                if inputs.trace_scene.is_none() {
+                    if let Some(candidates) = inputs.gi_candidates.get(surface_index) {
+                        let count = candidates.len().min(GI_CANDIDATES_PER_SURFACE);
+                        packed_candidates.extend_from_slice(&candidates[..count]);
+                    }
                 }
+                packed_candidates.resize(
+                    candidate_start + GI_CANDIDATES_PER_SURFACE,
+                    LightingGiCandidateInput::default(),
+                );
+                let stable_id = inputs
+                    .trace_scene
+                    .as_ref()
+                    .and_then(|trace| trace.surface_ids.get(surface_index).copied())
+                    .unwrap_or(0);
                 GpuLightingSurface {
                     position: [
                         surface.position[0],
@@ -434,9 +504,18 @@ where
                     ],
                     candidate_range: [
                         candidate_start as u32,
-                        (packed_candidates.len() - candidate_start) as u32,
-                        0,
-                        0,
+                        if inputs.trace_scene.is_some() {
+                            candidate_rays_per_surface
+                        } else {
+                            inputs
+                                .gi_candidates
+                                .get(surface_index)
+                                .map_or(0, |candidates| {
+                                    candidates.len().min(GI_CANDIDATES_PER_SURFACE) as u32
+                                })
+                        },
+                        stable_id as u32,
+                        (stable_id >> 32) as u32,
                     ],
                 }
             })
@@ -453,6 +532,16 @@ where
             cast_slice(&inputs.punctuals[..punctual_count]),
         );
         queue.write_buffer(bundle.candidates, 0, cast_slice(&packed_candidates));
+        if let Some(trace) = inputs.trace_scene.as_ref() {
+            if trace.outgoing_radiance.len() <= TRACE_RADIANCE_BYTES as usize / 16 {
+                let packed_radiance = trace
+                    .outgoing_radiance
+                    .iter()
+                    .map(|rgb| [rgb[0], rgb[1], rgb[2], 0.0])
+                    .collect::<Vec<_>>();
+                queue.write_buffer(bundle.radiance, 0, cast_slice(&packed_radiance));
+            }
+        }
         queue.write_buffer(bundle.output, 0, &ZERO_OUTPUT);
         queue.write_buffer(bundle.direct_output, 0, &ZERO_OUTPUT);
         queue.write_buffer(bundle.gi_output, 0, &ZERO_OUTPUT);
@@ -482,6 +571,7 @@ where
             punctuals: bundle.punctuals,
             candidates: bundle.candidates,
             surfaces: bundle.surfaces,
+            radiance: bundle.radiance,
             direct_pipeline: bundle.direct_pipeline,
             direct_bind_group: bundle.direct_bind_group,
             gi_pipeline: bundle.gi_pipeline,
@@ -490,6 +580,10 @@ where
             composite_bind_group: bundle.composite_bind_group,
             run_direct,
             run_gi,
+            candidate_surface_count: surface_count as u32,
+            candidate_rays_per_surface: self
+                .candidate_rays_per_surface
+                .load(core::sync::atomic::Ordering::Acquire),
             workgroups: surface_count.div_ceil(WORKGROUP_SIZE),
         })
     }
@@ -605,6 +699,12 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let radiance = device.create_buffer(&BufferDescriptor {
+        label: Some("lighting-trace-radiance".into()),
+        size: TRACE_RADIANCE_BYTES,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
     let direct_shader = device.create_shader_module(&ShaderModuleDescriptor::wgsl(DIRECT_SHADER));
     let direct_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -714,6 +814,7 @@ fn build_bundle<D: prism_render_driver::RenderDevice>(device: &D) -> LightingGpu
         punctuals,
         candidates,
         surfaces,
+        radiance,
         direct_pipeline,
         direct_bind_group,
         gi_pipeline,

@@ -28,6 +28,8 @@ pub(crate) struct FrameGraphStages {
     pub scene_passes: u32,
     /// Actual trace compute passes recorded in this graph (not lighting recipes).
     pub trace_dispatches: u32,
+    /// Candidate-build compute passes consuming the trace output.
+    pub candidate_build_dispatches: u32,
     pub direct_recipes: u32,
     pub gi_recipes: u32,
     pub composite_passes: u32,
@@ -49,6 +51,10 @@ impl FrameGraphStages {
             .filter(|phase| !queues.phase(*phase).is_empty())
             .count() as u32;
         let trace_dispatches = u32::from(trace.is_some());
+        let candidate_build_dispatches = u32::from(
+            trace.is_some_and(|trace| trace.candidates.is_some())
+                && lighting.is_some_and(|pass| pass.run_gi),
+        );
         let direct_recipes = lighting.is_some_and(|pass| pass.run_direct) as u32;
         let gi_recipes = lighting.is_some_and(|pass| pass.run_gi) as u32;
         let lighting_dispatches = lighting.map_or(0, |pass| {
@@ -57,6 +63,7 @@ impl FrameGraphStages {
         Self {
             scene_passes,
             trace_dispatches,
+            candidate_build_dispatches,
             direct_recipes,
             gi_recipes,
             composite_passes: u32::from(lighting.is_some()),
@@ -74,6 +81,14 @@ impl FrameGraphStages {
         assert!(
             self.trace_dispatches <= 1,
             "a frame has at most one trace dispatch"
+        );
+        assert!(
+            self.candidate_build_dispatches <= self.trace_dispatches,
+            "candidate construction requires a trace dispatch"
+        );
+        assert!(
+            self.candidate_build_dispatches <= self.gi_recipes,
+            "candidate construction requires an admitted GI recipe"
         );
         assert!(
             self.composite_passes <= 1,
@@ -276,6 +291,8 @@ pub(crate) fn target_graph_output_with_trace(
     }
 
     let mut trace_hits = None;
+    let mut trace_inputs = None;
+    let mut trace_pass_dependency = None;
     if let Some(trace) = trace {
         let nodes = graph.import_buffer(
             "prism-lighting-trace-nodes",
@@ -309,21 +326,27 @@ pub(crate) fn target_graph_output_with_trace(
                 entry_state: BufferState::initial(),
             },
         );
-        graph.add_compute_pass(
-            "prism-lighting-trace-dispatch",
-            PassFlags::SIDE_EFFECT,
-            |builder| {
-                // The read creates an explicit scene-raster -> trace dependency;
-                // the current BVH kernel does not sample the raster color itself.
-                let _scene_raster_boundary = builder.sample(color);
-                let _nodes = builder.read_storage_buffer(nodes);
-                let _triangles = builder.read_storage_buffer(triangles);
-                let _rays = builder.read_storage_buffer(rays);
-                hits = builder.write_storage_buffer(hits);
-                move |context| trace.record_graph(context)
-            },
-        );
+        let trace_pass = graph
+            .try_add_pass_with_dependencies(
+                "prism-lighting-trace-dispatch",
+                prism_render_graph::pass::PassKind::Compute,
+                PassFlags::SIDE_EFFECT,
+                Vec::new(),
+                |builder| {
+                    // The read creates an explicit scene-raster -> trace dependency;
+                    // the current BVH kernel does not sample the raster color itself.
+                    let _scene_raster_boundary = builder.sample(color);
+                    let _nodes = builder.read_storage_buffer(nodes);
+                    let _triangles = builder.read_storage_buffer(triangles);
+                    let _rays = builder.read_storage_buffer(rays);
+                    hits = builder.write_storage_buffer(hits);
+                    move |context| trace.record_graph(context)
+                },
+            )
+            .expect("trace pass fits the host frame graph");
+        trace_pass_dependency = Some(trace_pass);
         trace_hits = Some(hits);
+        trace_inputs = Some((triangles, rays));
     }
 
     let Some(lighting) = lighting else {
@@ -381,9 +404,12 @@ pub(crate) fn target_graph_output_with_trace(
             entry_state: BufferState::initial(),
         },
     );
-    let candidates = graph.import_buffer(
+    let mut candidates = graph.import_buffer(
         "prism-lighting-gi-candidates",
-        BufferDesc::new(0, BufferUsages::STORAGE),
+        BufferDesc::new(
+            crate::lighting_gpu::GI_CANDIDATE_BUFFER_BYTES,
+            BufferUsages::STORAGE,
+        ),
         ImportedBuffer {
             buffer: lighting.candidates,
             entry_state: BufferState::initial(),
@@ -391,12 +417,59 @@ pub(crate) fn target_graph_output_with_trace(
     );
     let surfaces = graph.import_buffer(
         "prism-lighting-surfaces",
-        BufferDesc::new(0, BufferUsages::STORAGE),
+        BufferDesc::new(
+            crate::lighting_gpu::LIGHTING_SURFACE_BUFFER_BYTES,
+            BufferUsages::STORAGE,
+        ),
         ImportedBuffer {
             buffer: lighting.surfaces,
             entry_state: BufferState::initial(),
         },
     );
+    if let (Some(trace), Some(hits), Some((trace_triangles, trace_rays)), true) =
+        (trace, trace_hits, trace_inputs, lighting.run_gi)
+        && let (
+            Some(candidate_output),
+            Some(radiance),
+            Some(candidate_surfaces),
+            Some(candidate_params),
+        ) = (
+            trace.candidates,
+            trace.radiance,
+            trace.surfaces,
+            trace.params,
+        )
+    {
+        let radiance = graph.import_buffer(
+            "prism-lighting-trace-radiance",
+            BufferDesc::new(radiance.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: radiance.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        assert_eq!(candidate_output.id, lighting.candidates);
+        assert_eq!(candidate_surfaces.id, lighting.surfaces);
+        assert_eq!(candidate_params.id, lighting.params);
+        graph
+            .try_add_pass_with_dependencies(
+                "prism-lighting-gi-candidate-build",
+                prism_render_graph::pass::PassKind::Compute,
+                PassFlags::SIDE_EFFECT,
+                trace_pass_dependency.into_iter().collect(),
+                |builder| {
+                    let _rays = builder.read_storage_buffer(trace_rays);
+                    let _hits = builder.read_storage_buffer(hits);
+                    let _triangles = builder.read_storage_buffer(trace_triangles);
+                    let _radiance = builder.read_storage_buffer(radiance);
+                    let _surfaces = builder.read_storage_buffer(surfaces);
+                    let _params = builder.read_uniform(params);
+                    candidates = builder.write_storage_buffer(candidates);
+                    move |context| trace.record_candidate_graph(context)
+                },
+            )
+            .expect("GI candidate pass fits the host frame graph");
+    }
     if lighting.run_direct {
         graph.add_compute_pass(
             "prism-lighting-direct-dispatch",
@@ -425,11 +498,7 @@ pub(crate) fn target_graph_output_with_trace(
                 let _params = builder.read_uniform(params);
                 let _candidates = builder.read_storage_buffer(candidates);
                 let _surfaces = builder.read_storage_buffer(surfaces);
-                if let Some(hits) = trace_hits {
-                    // This declared dependency orders trace before GI composition;
-                    // the current GI shader still consumes host-built candidates.
-                    let _trace_results = builder.read_storage_buffer(hits);
-                }
+                let _candidates = builder.read_storage_buffer(candidates);
                 move |context| {
                     context
                         .set_compute_pipeline(lighting.gi_pipeline)
