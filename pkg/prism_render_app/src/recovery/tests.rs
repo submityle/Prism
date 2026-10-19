@@ -281,8 +281,10 @@ fn recovery_replays_resources_rebuilds_startup_and_resumes_frames() {
         render.resource::<RenderFrameStats>().frames_submitted,
         before
     );
-    // Target color/depth and views (4), three material buffers, shader, replay.
-    assert_eq!(runtime(&app).device().inner.live_resource_count(), 9);
+    // Target color/depth and views (4), three material buffers, and the
+    // lighting compute bundle (shader, layout, pipeline layout, pipeline, two
+    // buffers, and bind group).
+    assert_eq!(runtime(&app).device().inner.live_resource_count(), 16);
     app.update();
     assert!(!app.world().resource::<DeviceRecoveryStatus>().recovering);
     assert_eq!(
@@ -291,7 +293,7 @@ fn recovery_replays_resources_rebuilds_startup_and_resumes_frames() {
             .last_report
             .unwrap()
             .replayed_resources,
-        1
+        2
     );
     let mut restored = EventCursor::<DeviceRestored>::new();
     assert_eq!(

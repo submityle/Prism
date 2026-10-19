@@ -464,6 +464,26 @@ impl RecipeId {
         }
     }
 
+    /// Stable compact identifier used by GPU diagnostics and telemetry.
+    #[must_use]
+    pub const fn ordinal(self) -> u32 {
+        match self {
+            Self::DirectStochasticRt => 0,
+            Self::DirectStochasticVsm => 1,
+            Self::DirectDeterministicCsm => 2,
+            Self::SpecializedDeterministic => 3,
+            Self::DdgiProbes => 4,
+            Self::ScreenProbeGi => 5,
+            Self::SurfaceCacheSurfel => 6,
+            Self::WorldRestir => 7,
+            Self::SsgiScreenSpace => 8,
+            Self::SpecularRestir => 9,
+            Self::SparseSdfGi => 10,
+            Self::RadianceCascades => 11,
+            Self::PathTracedOffline => 12,
+        }
+    }
+
     #[must_use]
     pub const fn execution(self, pass: u32, budget_ms: f32) -> RecipeExecution {
         let async_policy = match self {

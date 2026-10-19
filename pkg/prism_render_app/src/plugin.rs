@@ -280,7 +280,7 @@ where
 {
     fn build(&self, app: &mut App) {
         let config = self.config;
-        let runtime = RenderRuntime::with_frames_in_flight(
+        let mut runtime = RenderRuntime::with_frames_in_flight(
             self.take_instance(),
             config.extent,
             config.max_frames_in_flight,
@@ -288,6 +288,10 @@ where
         .unwrap_or_else(|error| {
             panic!("PrismRenderPlugin: render backend bring-up failed: {error}")
         });
+        let lighting_gpu =
+            crate::lighting_gpu::LightingGpuState::new(&mut runtime).unwrap_or_else(|error| {
+                panic!("PrismRenderPlugin: lighting GPU setup failed: {error}")
+            });
 
         // Device-loss bridge (design §12/§24.3): one queue, cloned into both the
         // render world (which owns the GPU runtime) and the main world (which
@@ -325,6 +329,7 @@ where
         render
             .world
             .insert_resource(crate::LightingPlanState::from_config(config));
+        render.world.insert_resource(lighting_gpu);
         render.world.insert_resource(RenderViews::new());
         render.world.insert_resource(TextureCache::new());
         render.world.insert_resource(RenderQueues::new());

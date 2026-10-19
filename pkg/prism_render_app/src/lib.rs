@@ -71,6 +71,7 @@ mod image;
 mod intent;
 mod label;
 mod lighting;
+mod lighting_gpu;
 mod material;
 mod mesh;
 mod mesh_draw;

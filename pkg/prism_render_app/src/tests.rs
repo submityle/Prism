@@ -19,6 +19,7 @@ use crate::config::RenderAppConfig;
 use crate::intent::{RenderIntent, RenderViewport};
 use crate::label::{Render, RenderApp};
 use crate::lighting::{ExtractedLightingInputs, LightingPlanState, LightingSceneInputs};
+use crate::lighting_gpu::LightingGpuState;
 use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
@@ -1959,8 +1960,9 @@ fn render_schedule_runs_each_frame_and_submits_a_frame() {
         "every frame had a non-empty viewport"
     );
     assert_eq!(
-        stats.passes_declared, FRAMES,
-        "each recorded frame declares exactly one pass"
+        stats.passes_declared,
+        FRAMES * 2,
+        "each recorded frame declares one lighting compute pass and one clear pass"
     );
     assert_eq!(stats.last_viewport, RenderViewport::from_extent(EXTENT));
 
@@ -2253,6 +2255,31 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         pixels.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]),
         "the frame's clear pass overwrote the white target with opaque black"
     );
+
+    let plan = render.world.resource::<LightingPlanState>();
+    let lighting = render
+        .world
+        .resource::<LightingGpuState<prism_render_driver_wgpu::WgpuInstance>>();
+    let output = runtime
+        .runtime()
+        .queue()
+        .read_buffer(lighting.output_buffer(), 16);
+    let values = output
+        .chunks_exact(4)
+        .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized output")))
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 4);
+    assert_eq!(values[0], plan.plan.recipes[0].ordinal() as f32);
+    assert_eq!(values[1], 0.0, "the initial plan has no invalidation epoch");
+    assert_eq!(values[2], plan.scene_stats.lights as f32);
+    assert_eq!(values[3], plan.plan.recipes.len() as f32);
+    assert_eq!(
+        render
+            .world
+            .resource::<RenderFrameStats>()
+            .lighting_gpu_passes_recorded,
+        1
+    );
 }
 
 /// A `RenderQueue` that captures submitted command buffers instead of issuing
@@ -2399,6 +2426,71 @@ fn mesh_draw_records_into_a_graph_pass() {
         matches!(commands.get(3), Some(RenderCommand::DrawIndexed { .. })),
         "one indexed draw is issued"
     );
+}
+
+/// The lighting plan is recorded as a real compute pass rather than only
+/// incrementing a frame statistic: the pass binds its pipeline and resources
+/// before dispatching one workgroup.
+#[test]
+fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
+    use prism_render_architecture::lighting::contract::{
+        BudgetCompiler, FrameResourceBudget, PlanCaps, Tier,
+    };
+    use prism_render_driver::{ComputeCommand, Pass};
+
+    let extent = Extent3d::new_2d(4, 4);
+    let mut runtime = RenderRuntime::headless(NullInstance::new(), extent)
+        .expect("the null runtime always comes up");
+    let lighting = LightingGpuState::new(&mut runtime).expect("lighting GPU bundle");
+    let plan = BudgetCompiler::compile(
+        SceneStats::default(),
+        FrameResourceBudget::default(),
+        PlanCaps {
+            ray_tracing: false,
+            virtual_shadow: false,
+            offline: false,
+            deterministic_npr: false,
+        },
+        Tier::Balanced,
+    );
+    lighting.prepare(
+        &plan,
+        Default::default(),
+        runtime.queue(),
+        SceneStats::default(),
+    );
+
+    let target = RenderTarget::new(runtime.device(), extent);
+    let queues = RenderQueues::new();
+    let functions = DrawFunctions::new();
+    let graph = crate::frame::target_graph(&target, &queues, &functions, Some(lighting.pass()));
+    let capture = CapturingQueue::default();
+    graph
+        .execute(runtime.device(), &capture)
+        .expect("the lighting graph records on the null backend")
+        .release(runtime.device());
+
+    let compute = capture
+        .take()
+        .into_iter()
+        .flat_map(|buffer| buffer.passes)
+        .find_map(|pass| match pass {
+            Pass::Compute { commands, .. } => Some(commands),
+            _ => None,
+        })
+        .expect("the lighting graph contains a compute pass");
+    assert!(matches!(
+        compute.first(),
+        Some(ComputeCommand::SetPipeline(_))
+    ));
+    assert!(matches!(
+        compute.get(1),
+        Some(ComputeCommand::SetBindGroup { index: 0, .. })
+    ));
+    assert!(matches!(
+        compute.get(2),
+        Some(ComputeCommand::Dispatch { x: 1, y: 1, z: 1 })
+    ));
 }
 
 /// `mesh_bin_draw` records a GPU-driven bin draw: bind the pipeline and
@@ -3406,8 +3498,8 @@ fn the_frame_records_the_queued_draws() {
     let stats = render.world.resource::<RenderFrameStats>();
     assert_eq!(stats.draws_recorded, 2, "both queued draws were recorded");
     assert_eq!(
-        stats.passes_declared, 3,
-        "the clear plus one pass per non-empty phase"
+        stats.passes_declared, 4,
+        "the lighting compute pass, clear, and one pass per non-empty phase"
     );
     assert!(
         render.world.resource::<RenderQueues>().is_empty(),

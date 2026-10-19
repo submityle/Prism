@@ -67,6 +67,7 @@ fn null_surface_presents_and_releases_window_resources() {
         &WindowRenderQueues::default(),
         &queues,
         &functions,
+        None,
         &mut stats,
     ));
     assert_eq!(targets.len(), 1);

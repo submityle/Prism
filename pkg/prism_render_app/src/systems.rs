@@ -7,6 +7,8 @@ use prism_render_driver::{FrameSync, Instance};
 use crate::frame;
 use crate::intent::RenderIntent;
 use crate::label::Render;
+use crate::lighting::LightingPlanState;
+use crate::lighting_gpu::LightingGpuState;
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::startup::ensure_render_startup;
@@ -108,6 +110,8 @@ pub(crate) fn execute_frame<I>(
     queues: Res<crate::RenderQueues>,
     functions: Res<crate::DrawFunctions>,
     runtime: Res<RenderRuntimeResource<I>>,
+    plan: Res<LightingPlanState>,
+    lighting_gpu: Res<LightingGpuState<I>>,
     mut target: ResMut<RenderTarget>,
     mut stats: ResMut<RenderFrameStats>,
     requests: Res<crate::WindowRenderRequests<I>>,
@@ -120,12 +124,20 @@ pub(crate) fn execute_frame<I>(
     I::Queue: Send + Sync + FrameSync + 'static,
     I::Surface: Send + Sync + 'static,
 {
+    let runtime = runtime.runtime();
+    lighting_gpu.prepare(
+        &plan.plan,
+        plan.journal_snapshot.epoch,
+        runtime.queue(),
+        plan.scene_stats,
+    );
     if windows.drive(
-        runtime.runtime(),
+        runtime,
         &requests,
         &overrides,
         &queues,
         &functions,
+        Some(lighting_gpu.pass()),
         &mut stats,
     ) {
         return;
@@ -137,7 +149,6 @@ pub(crate) fn execute_frame<I>(
         return;
     }
 
-    let runtime = runtime.runtime();
     // The main world may have resized the frame; reallocate the target to match.
     // Drain in-flight frames first, since an outstanding frame may still read the
     // texture being replaced.
@@ -146,7 +157,7 @@ pub(crate) fn execute_frame<I>(
         target.resize(runtime.device(), viewport);
     }
 
-    let graph = frame::target_graph(&target, &queues, &functions);
+    let graph = frame::target_graph(&target, &queues, &functions, Some(lighting_gpu.pass()));
     let passes = graph.pass_count() as u64;
     let draws = queues.len() as u64;
     match runtime.execute_tracked(graph) {
@@ -154,6 +165,7 @@ pub(crate) fn execute_frame<I>(
             stats.frames_submitted += 1;
             stats.passes_declared += passes;
             stats.draws_recorded += draws;
+            stats.lighting_gpu_passes_recorded += 1;
         }
         Err(_) => {
             // A compile failure is the only error `execute` can return; the

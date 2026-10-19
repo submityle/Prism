@@ -11,6 +11,7 @@ use prism_render_graph::{
 };
 
 use crate::draw::DrawFunctions;
+use crate::lighting_gpu::LightingGpuPass;
 use crate::queue::RenderQueues;
 use crate::sets::RenderPhase;
 use crate::target::RenderTarget;
@@ -54,8 +55,9 @@ pub(crate) fn target_graph(
     target: &RenderTarget,
     queues: &RenderQueues,
     functions: &DrawFunctions,
+    lighting: Option<LightingGpuPass>,
 ) -> RenderGraph {
-    target_graph_output(target, queues, functions).0
+    target_graph_output(target, queues, functions, lighting).0
 }
 
 /// The color handle lets the presentation pass consume this exact frame.
@@ -63,6 +65,7 @@ pub(crate) fn target_graph_output(
     target: &RenderTarget,
     queues: &RenderQueues,
     functions: &DrawFunctions,
+    lighting: Option<LightingGpuPass>,
 ) -> (RenderGraph, prism_render_graph::TextureHandle) {
     let mut graph = RenderGraph::new(target.viewport().extent());
     let mut color = graph.import_texture(
@@ -123,6 +126,41 @@ pub(crate) fn target_graph_output(
             exit_state: TextureState::depth_write(),
             mip_levels: 1,
             array_layers: 1,
+        },
+    );
+
+    let Some(lighting) = lighting else {
+        return (graph, color);
+    };
+
+    let output = graph.import_buffer(
+        "prism-lighting-plan-output",
+        BufferDesc::new(16, BufferUsages::STORAGE | BufferUsages::COPY_SRC),
+        ImportedBuffer {
+            buffer: lighting.output,
+            entry_state: BufferState::initial(),
+        },
+    );
+    let params = graph.import_buffer(
+        "prism-lighting-plan-params",
+        BufferDesc::new(16, BufferUsages::UNIFORM),
+        ImportedBuffer {
+            buffer: lighting.params,
+            entry_state: BufferState::initial(),
+        },
+    );
+    graph.add_compute_pass(
+        "prism-lighting-plan-dispatch",
+        PassFlags::SIDE_EFFECT,
+        |builder| {
+            let _output = builder.write_storage_buffer(output);
+            let _params = builder.read_uniform(params);
+            move |context| {
+                context
+                    .set_compute_pipeline(lighting.pipeline)
+                    .set_compute_bind_group(0, lighting.bind_group, Vec::new())
+                    .dispatch(1, 1, 1);
+            }
         },
     );
 

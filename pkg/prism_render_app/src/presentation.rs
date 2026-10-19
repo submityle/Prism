@@ -27,6 +27,7 @@ use prism_render_runtime::RenderRuntime;
 pub use prism_window::WindowId;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+use crate::lighting_gpu::LightingGpuPass;
 use crate::{
     DrawFunctions, RenderApp, RenderFrameStats, RenderQueues, RenderTarget, RenderViewport,
 };
@@ -401,6 +402,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         overrides: &WindowRenderQueues,
         queues: &RenderQueues,
         functions: &DrawFunctions,
+        lighting: Option<LightingGpuPass>,
         stats: &mut RenderFrameStats,
     ) -> bool
     where
@@ -467,6 +469,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
                 runtime,
                 overrides.0.get(&id).unwrap_or(queues),
                 functions,
+                lighting,
                 stats,
             );
             let status = match result {
@@ -492,6 +495,7 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         runtime: &RenderRuntime<I>,
         queues: &RenderQueues,
         functions: &DrawFunctions,
+        lighting: Option<LightingGpuPass>,
         stats: &mut RenderFrameStats,
     ) -> Result<Option<u64>, WindowRenderError>
     where
@@ -611,7 +615,8 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
             gpu.needs_reconfigure = true;
             return Err(WindowRenderError::Surface(SurfaceError::Outdated));
         }
-        let (mut graph, color) = crate::frame::target_graph_output(&gpu.target, queues, functions);
+        let (mut graph, color) =
+            crate::frame::target_graph_output(&gpu.target, queues, functions, lighting);
         gpu.present.append(&mut graph, color, image);
         let passes = graph.pass_count() as u64;
         gpu.lifetime.in_flight.fetch_add(1, Ordering::AcqRel);
@@ -625,6 +630,9 @@ impl<I: Instance + 'static> WindowRenderTargets<I> {
         stats.frames_submitted += 1;
         stats.passes_declared += passes;
         stats.draws_recorded += queues.len() as u64;
+        if lighting.is_some() {
+            stats.lighting_gpu_passes_recorded += 1;
+        }
         let target = PresentationTarget {
             id: id.0,
             generation: gpu.generation,
