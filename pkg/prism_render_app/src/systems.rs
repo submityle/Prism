@@ -65,7 +65,11 @@ impl FrameExecutionTrace {
         self.frame_index = record.frame_index;
         self.journal_snapshot = inputs.journal_snapshot;
         self.visibility_work_items = visibility_work_items;
-        self.gi_candidates = inputs.gi_candidates.len() as u64;
+        self.gi_candidates = inputs
+            .gi_candidates
+            .iter()
+            .map(|batch| batch.len() as u64)
+            .sum();
         self.graph = None;
         self.outcome = FrameExecutionOutcome::NotRun;
     }

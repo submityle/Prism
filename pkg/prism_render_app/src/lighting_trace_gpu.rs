@@ -82,6 +82,8 @@ pub enum TraceGpuError {
     EmptyRays,
     /// A storage binding exceeds the device's declared limit.
     StorageBindingLimit,
+    /// A packed input byte size cannot be represented without overflow.
+    BufferSizeOverflow,
     /// The dispatch exceeds the device's workgroup limit.
     DispatchLimit,
     /// The GPU detected a traversal safety-bound violation.
@@ -196,14 +198,47 @@ pub fn trace_reference(
     Ok(rays.iter().map(|ray| trace_one(scene, *ray)).collect())
 }
 
-/// Owned compute pipeline. Inputs and outputs are per-dispatch buffers supplied
-/// by the caller; the scene ABI remains stable and explicit.
+/// Real resident upload-buffer capacities owned by a trace pass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TraceBufferCapacityStats {
+    /// Capacity of the packed node upload buffer, in bytes.
+    pub nodes_bytes: u64,
+    /// Capacity of the packed triangle upload buffer, in bytes.
+    pub triangles_bytes: u64,
+    /// Capacity of the packed ray upload buffer, in bytes.
+    pub rays_bytes: u64,
+    /// Number of buffers retained after capacity growth until this pass drops.
+    pub retired_buffers: usize,
+    /// Number of upload-buffer allocations performed by this pass.
+    pub allocations: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ResidentBuffer {
+    id: rhi::BufferId,
+    capacity_bytes: u64,
+}
+
+/// Owned compute pipeline and capacity-managed upload buffers.
+///
+/// A pass is device-affine: use only the queue belonging to the device passed
+/// to [`Self::new`]. Calls require exclusive mutable access and are intended
+/// for sequential render-thread dispatches. Grown-out buffers remain resident
+/// until this pass is dropped because the RHI exposes ordered submissions but
+/// no completion token for safe earlier retirement. Dropping the pass releases
+/// every resident and retired allocation through that same device.
 pub struct LightingTraceGpu {
     device: Arc<dyn RenderDevice + Send + Sync>,
     layout: rhi::BindGroupLayoutId,
     pipeline_layout: rhi::PipelineLayoutId,
     shader: rhi::ShaderModuleId,
     pipeline: rhi::ComputePipelineId,
+    nodes: Option<ResidentBuffer>,
+    triangles: Option<ResidentBuffer>,
+    rays: Option<ResidentBuffer>,
+    retired_buffers: Vec<rhi::BufferId>,
+    packed_rays: Vec<u32>,
+    allocations: u64,
 }
 
 impl LightingTraceGpu {
@@ -243,6 +278,23 @@ impl LightingTraceGpu {
             pipeline_layout,
             shader,
             pipeline,
+            nodes: None,
+            triangles: None,
+            rays: None,
+            retired_buffers: Vec::new(),
+            packed_rays: Vec::new(),
+            allocations: 0,
+        }
+    }
+
+    /// Reports the actual resident upload capacities and allocation count.
+    pub fn buffer_capacity_stats(&self) -> TraceBufferCapacityStats {
+        TraceBufferCapacityStats {
+            nodes_bytes: self.nodes.map_or(0, |buffer| buffer.capacity_bytes),
+            triangles_bytes: self.triangles.map_or(0, |buffer| buffer.capacity_bytes),
+            rays_bytes: self.rays.map_or(0, |buffer| buffer.capacity_bytes),
+            retired_buffers: self.retired_buffers.len(),
+            allocations: self.allocations,
         }
     }
 
@@ -250,7 +302,7 @@ impl LightingTraceGpu {
     /// leaves result readback to the caller through its backend's readback API.
     /// `output` must have STORAGE | COPY_SRC and enough space for 8 words/ray.
     pub fn encode_and_submit(
-        &self,
+        &mut self,
         queue: &dyn RenderQueue,
         scene: &PackedTraceScene,
         rays: &[TraceRay],
@@ -262,13 +314,13 @@ impl LightingTraceGpu {
             return Err(TraceGpuError::EmptyRays);
         }
         let sizes = [
-            scene.nodes.len() * 4,
-            scene.triangles.len() * 4,
-            rays.len() * RAY_WORDS * 4,
-            rays.len() * HIT_WORDS * 4,
+            byte_size(scene.nodes.len(), 4)?,
+            byte_size(scene.triangles.len(), 4)?,
+            byte_size(rays.len(), RAY_WORDS * 4)?,
+            byte_size(rays.len(), HIT_WORDS * 4)?,
         ];
         let caps = self.device.capabilities();
-        let limit = caps.limits.max_storage_buffer_binding_size as usize;
+        let limit = caps.limits.max_storage_buffer_binding_size;
         if sizes.iter().any(|size| *size > limit) {
             return Err(TraceGpuError::StorageBindingLimit);
         }
@@ -276,40 +328,55 @@ impl LightingTraceGpu {
         if groups > caps.limits.max_compute_workgroups_per_dimension {
             return Err(TraceGpuError::DispatchLimit);
         }
-        let nodes = self.device.create_buffer(&rhi::BufferDescriptor::new(
-            sizes[0] as u64,
-            rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
-        ));
-        let triangles = self.device.create_buffer(&rhi::BufferDescriptor::new(
-            sizes[1] as u64,
-            rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
-        ));
-        let ray_buffer = self.device.create_buffer(&rhi::BufferDescriptor::new(
-            sizes[2] as u64,
-            rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
-        ));
-        queue.write_buffer(nodes, 0, bytemuck::cast_slice(&scene.nodes));
-        queue.write_buffer(triangles, 0, bytemuck::cast_slice(&scene.triangles));
-        let packed_rays: Vec<u32> = rays
-            .iter()
-            .flat_map(|r| {
-                [
-                    r.origin[0].to_bits(),
-                    r.origin[1].to_bits(),
-                    r.origin[2].to_bits(),
-                    r.t_min.to_bits(),
-                    r.direction[0].to_bits(),
-                    r.direction[1].to_bits(),
-                    r.direction[2].to_bits(),
-                    r.t_max.to_bits(),
-                ]
-            })
-            .collect();
-        queue.write_buffer(ray_buffer, 0, bytemuck::cast_slice(&packed_rays));
+        let node_buffer = ensure_resident_buffer(
+            &*self.device,
+            &mut self.nodes,
+            &mut self.retired_buffers,
+            &mut self.allocations,
+            sizes[0],
+            limit,
+        );
+        let triangle_buffer = ensure_resident_buffer(
+            &*self.device,
+            &mut self.triangles,
+            &mut self.retired_buffers,
+            &mut self.allocations,
+            sizes[1],
+            limit,
+        );
+        let ray_buffer = ensure_resident_buffer(
+            &*self.device,
+            &mut self.rays,
+            &mut self.retired_buffers,
+            &mut self.allocations,
+            sizes[2],
+            limit,
+        );
+        queue.write_buffer(node_buffer, 0, bytemuck::cast_slice(&scene.nodes));
+        queue.write_buffer(triangle_buffer, 0, bytemuck::cast_slice(&scene.triangles));
+        self.packed_rays.clear();
+        let packed_ray_count =
+            usize::try_from(sizes[2] / 4).map_err(|_| TraceGpuError::BufferSizeOverflow)?;
+        if self.packed_rays.capacity() < packed_ray_count {
+            self.packed_rays.reserve(packed_ray_count);
+        }
+        for ray in rays {
+            self.packed_rays.extend([
+                ray.origin[0].to_bits(),
+                ray.origin[1].to_bits(),
+                ray.origin[2].to_bits(),
+                ray.t_min.to_bits(),
+                ray.direction[0].to_bits(),
+                ray.direction[1].to_bits(),
+                ray.direction[2].to_bits(),
+                ray.t_max.to_bits(),
+            ]);
+        }
+        queue.write_buffer(ray_buffer, 0, bytemuck::cast_slice(&self.packed_rays));
         let group = self.device.create_bind_group(&rhi::BindGroupDescriptor {
             label: Some("lighting-trace-gpu-resources".into()),
             layout: Some(self.layout),
-            entries: [nodes, triangles, ray_buffer, output]
+            entries: [node_buffer, triangle_buffer, ray_buffer, output]
                 .into_iter()
                 .zip(sizes)
                 .enumerate()
@@ -342,20 +409,70 @@ impl LightingTraceGpu {
         );
         queue.submit(&[encoder.finish()]);
         self.device.destroy_bind_group(group);
-        self.device.destroy_buffer(nodes);
-        self.device.destroy_buffer(triangles);
-        self.device.destroy_buffer(ray_buffer);
         Ok(())
     }
 }
 
 impl Drop for LightingTraceGpu {
     fn drop(&mut self) {
+        for buffer in [self.nodes, self.triangles, self.rays]
+            .into_iter()
+            .flatten()
+        {
+            self.device.destroy_buffer(buffer.id);
+        }
+        for buffer in self.retired_buffers.drain(..) {
+            self.device.destroy_buffer(buffer);
+        }
         self.device.destroy_compute_pipeline(self.pipeline);
         self.device.destroy_shader_module(self.shader);
         self.device.destroy_pipeline_layout(self.pipeline_layout);
         self.device.destroy_bind_group_layout(self.layout);
     }
+}
+
+fn byte_size(count: usize, stride: usize) -> Result<u64, TraceGpuError> {
+    let bytes = count
+        .checked_mul(stride)
+        .ok_or(TraceGpuError::BufferSizeOverflow)?;
+    u64::try_from(bytes).map_err(|_| TraceGpuError::BufferSizeOverflow)
+}
+
+fn grown_capacity(current: u64, required: u64, limit: u64) -> u64 {
+    let base = current.max(required).max(4);
+    let rounded = base.checked_next_power_of_two().unwrap_or(base);
+    if rounded <= limit {
+        rounded
+    } else {
+        required
+    }
+}
+
+fn ensure_resident_buffer(
+    device: &dyn RenderDevice,
+    slot: &mut Option<ResidentBuffer>,
+    retired_buffers: &mut Vec<rhi::BufferId>,
+    allocations: &mut u64,
+    required_bytes: u64,
+    binding_limit: u64,
+) -> rhi::BufferId {
+    if let Some(buffer) = slot.filter(|buffer| buffer.capacity_bytes >= required_bytes) {
+        return buffer.id;
+    }
+    let capacity_bytes = grown_capacity(
+        slot.map_or(0, |buffer| buffer.capacity_bytes),
+        required_bytes,
+        binding_limit,
+    );
+    let id = device.create_buffer(&rhi::BufferDescriptor::new(
+        capacity_bytes,
+        rhi::BufferUsages::STORAGE | rhi::BufferUsages::COPY_DST,
+    ));
+    if let Some(previous) = slot.replace(ResidentBuffer { id, capacity_bytes }) {
+        retired_buffers.push(previous.id);
+    }
+    *allocations = (*allocations).saturating_add(1);
+    id
 }
 
 fn validate_rays(rays: &[TraceRay]) -> Result<(), TraceGpuError> {
@@ -614,6 +731,24 @@ mod tests {
     }
 
     #[test]
+    fn resident_capacity_growth_is_geometric_bounded_and_never_shrinks() {
+        assert_eq!(grown_capacity(0, 12, 1024), 16);
+        assert_eq!(grown_capacity(16, 16, 1024), 16);
+        assert_eq!(grown_capacity(16, 17, 1024), 32);
+        assert_eq!(grown_capacity(64, 32, 1024), 64);
+        assert_eq!(grown_capacity(0, 65, 100), 65);
+    }
+
+    #[test]
+    fn upload_byte_size_rejects_integer_overflow() {
+        assert_eq!(
+            byte_size(usize::MAX, 4),
+            Err(TraceGpuError::BufferSizeOverflow)
+        );
+        assert_eq!(byte_size(16, 4), Ok(64));
+    }
+
+    #[test]
     fn hardware_wgsl_traversal_matches_cpu_across_workgroups() {
         let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
             Ok(pair) => pair,
@@ -650,7 +785,7 @@ mod tests {
             (rays.len() * HIT_WORDS * 4) as u64,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         ));
-        let pass = LightingTraceGpu::new(Arc::clone(&device));
+        let mut pass = LightingTraceGpu::new(Arc::clone(&device));
         pass.encode_and_submit(&queue, &scene, &rays, output)
             .unwrap();
         let bytes = queue.read_buffer(output, (rays.len() * HIT_WORDS * 4) as u64);

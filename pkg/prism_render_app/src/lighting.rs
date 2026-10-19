@@ -213,7 +213,9 @@ pub struct LightingSceneInputs {
     pub journal: ChangeJournal,
     pub directionals: Vec<LightingDirectionalInput>,
     pub punctuals: Vec<LightingPunctualInput>,
-    pub gi_candidates: Vec<LightingGiCandidateInput>,
+    /// Per-surface GI candidates. Each surface owns its own ordered RIS batch;
+    /// candidates are never implicitly broadcast across unrelated surfaces.
+    pub gi_candidates: Vec<Vec<LightingGiCandidateInput>>,
     pub surfaces: Vec<LightingSurfaceInput>,
 }
 
@@ -260,7 +262,8 @@ pub struct ExtractedLightingInputs {
     pub journal_snapshot: prism_render_architecture::lighting::contract::JournalSnapshot,
     pub directionals: Vec<LightingDirectionalInput>,
     pub punctuals: Vec<LightingPunctualInput>,
-    pub gi_candidates: Vec<LightingGiCandidateInput>,
+    /// Per-surface GI candidates, aligned with `surfaces` when present.
+    pub gi_candidates: Vec<Vec<LightingGiCandidateInput>>,
     pub surfaces: Vec<LightingSurfaceInput>,
 }
 

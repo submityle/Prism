@@ -18,7 +18,7 @@ use crate::lighting::{
 
 const MAX_DIRECTIONALS: usize = 1024;
 const MAX_PUNCTUALS: usize = 1024;
-const MAX_GI_CANDIDATES: usize = 1024;
+const GI_CANDIDATES_PER_SURFACE: usize = 4;
 pub(crate) const MAX_LIGHTING_SURFACES: usize = 1024;
 const WORKGROUP_SIZE: u32 = 64;
 pub(crate) const OUTPUT_BYTES: u64 =
@@ -26,8 +26,9 @@ pub(crate) const OUTPUT_BYTES: u64 =
 const DIRECTIONAL_BYTES: u64 =
     (MAX_DIRECTIONALS * core::mem::size_of::<LightingDirectionalInput>()) as u64;
 const PUNCTUAL_BYTES: u64 = (MAX_PUNCTUALS * core::mem::size_of::<LightingPunctualInput>()) as u64;
-const GI_CANDIDATE_BYTES: u64 =
-    (MAX_GI_CANDIDATES * core::mem::size_of::<LightingGiCandidateInput>()) as u64;
+const GI_CANDIDATE_BYTES: u64 = (MAX_LIGHTING_SURFACES
+    * GI_CANDIDATES_PER_SURFACE
+    * core::mem::size_of::<LightingGiCandidateInput>()) as u64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -36,6 +37,7 @@ struct GpuLightingSurface {
     normal: [f32; 4],
     albedo: [f32; 4],
     ambient: [f32; 4],
+    candidate_range: [u32; 4],
 }
 
 const SURFACE_BYTES: u64 =
@@ -76,6 +78,7 @@ struct Surface {
     normal: vec4<f32>,
     albedo: vec4<f32>,
     ambient: vec4<f32>,
+    _candidate_range: vec4<u32>,
 };
 
 @group(0) @binding(0)
@@ -178,6 +181,7 @@ struct Surface {
     normal: vec4<f32>,
     albedo: vec4<f32>,
     ambient: vec4<f32>,
+    candidate_range: vec4<u32>,
 };
 
 @group(0) @binding(0)
@@ -185,7 +189,7 @@ var<storage, read_write> output: array<vec4<f32>>;
 @group(0) @binding(1)
 var<uniform> params: Params;
 @group(0) @binding(2)
-var<storage, read> candidates: array<GiCandidate, 1024>;
+var<storage, read> candidates: array<GiCandidate, 4096>;
 @group(0) @binding(3)
 var<storage, read> surfaces: array<Surface, 1024>;
 
@@ -209,7 +213,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let surface = surfaces[id.x];
     let primary_normal = normalize_or(surface.normal.xyz, vec3<f32>(0.0, 1.0, 0.0));
-    let candidate_count = min(params.counts.w, 4u);
+    let candidate_count = min(surface.candidate_range.y, 4u);
     var weight_sum = 0.0;
     var sample_count = 0u;
     var selected_position = vec3<f32>(0.0);
@@ -218,7 +222,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var selected_target_pdf = 0.0;
     var selected_visibility = 0.0;
     for (var index = 0u; index < candidate_count; index = index + 1u) {
-        let candidate = candidates[index];
+        let candidate = candidates[surface.candidate_range.x + index];
         if (!finite(candidate.position_source_pdf.w) || candidate.position_source_pdf.w <= 0.0 ||
             !finite(candidate.normal_target_pdf.w) || candidate.normal_target_pdf.w <= 0.0) {
             continue;
@@ -384,7 +388,6 @@ where
             .store(surface_count as u32, core::sync::atomic::Ordering::Release);
         let directional_count = inputs.directionals.len().min(MAX_DIRECTIONALS);
         let punctual_count = inputs.punctuals.len().min(MAX_PUNCTUALS);
-        let candidate_count = inputs.gi_candidates.len().min(MAX_GI_CANDIDATES);
         let mut execution_flags = 0_u32;
         if plan.recipes.contains(&RecipeId::SpecializedDeterministic) {
             execution_flags |= 1;
@@ -397,28 +400,44 @@ where
                 surface_count as u32,
                 directional_count as u32,
                 punctual_count as u32,
-                candidate_count as u32,
+                0,
             ],
             flags: [execution_flags, 0, 0, 0],
         };
         queue.write_buffer(bundle.params, 0, bytes_of(&params));
+        let mut packed_candidates =
+            Vec::with_capacity(surface_count.saturating_mul(GI_CANDIDATES_PER_SURFACE));
         let packed_surfaces = inputs.surfaces[..surface_count]
             .iter()
-            .map(|surface| GpuLightingSurface {
-                position: [
-                    surface.position[0],
-                    surface.position[1],
-                    surface.position[2],
-                    0.0,
-                ],
-                normal: [surface.normal[0], surface.normal[1], surface.normal[2], 0.0],
-                albedo: [surface.albedo[0], surface.albedo[1], surface.albedo[2], 0.0],
-                ambient: [
-                    surface.ambient[0],
-                    surface.ambient[1],
-                    surface.ambient[2],
-                    0.0,
-                ],
+            .enumerate()
+            .map(|(surface_index, surface)| {
+                let candidate_start = packed_candidates.len();
+                if let Some(candidates) = inputs.gi_candidates.get(surface_index) {
+                    let count = candidates.len().min(GI_CANDIDATES_PER_SURFACE);
+                    packed_candidates.extend_from_slice(&candidates[..count]);
+                }
+                GpuLightingSurface {
+                    position: [
+                        surface.position[0],
+                        surface.position[1],
+                        surface.position[2],
+                        0.0,
+                    ],
+                    normal: [surface.normal[0], surface.normal[1], surface.normal[2], 0.0],
+                    albedo: [surface.albedo[0], surface.albedo[1], surface.albedo[2], 0.0],
+                    ambient: [
+                        surface.ambient[0],
+                        surface.ambient[1],
+                        surface.ambient[2],
+                        0.0,
+                    ],
+                    candidate_range: [
+                        candidate_start as u32,
+                        (packed_candidates.len() - candidate_start) as u32,
+                        0,
+                        0,
+                    ],
+                }
             })
             .collect::<Vec<_>>();
         queue.write_buffer(bundle.surfaces, 0, cast_slice(&packed_surfaces));
@@ -432,11 +451,7 @@ where
             0,
             cast_slice(&inputs.punctuals[..punctual_count]),
         );
-        queue.write_buffer(
-            bundle.candidates,
-            0,
-            cast_slice(&inputs.gi_candidates[..candidate_count]),
-        );
+        queue.write_buffer(bundle.candidates, 0, cast_slice(&packed_candidates));
         queue.write_buffer(bundle.output, 0, &ZERO_OUTPUT);
         queue.write_buffer(bundle.direct_output, 0, &ZERO_OUTPUT);
         queue.write_buffer(bundle.gi_output, 0, &ZERO_OUTPUT);

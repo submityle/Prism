@@ -2393,6 +2393,16 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         albedo: [0.1 + (index % 9) as f32 * 0.1, 0.6, 0.3],
         ambient: [0.0; 3],
     }));
+    let gi_candidates_per_surface = surfaces
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let mut candidate = gi_candidates[0];
+            let scale = 1.0 + index as f32 * 0.01;
+            candidate.radiance = [2.0 * scale, 4.0 * scale, 8.0 * scale];
+            vec![candidate]
+        })
+        .collect::<Vec<_>>();
     let expected_direct = surfaces
         .iter()
         .copied()
@@ -2401,7 +2411,8 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     let expected_gi = surfaces
         .iter()
         .copied()
-        .map(|sample| evaluate_deterministic_gi(sample, &gi_candidates))
+        .zip(&gi_candidates_per_surface)
+        .map(|(sample, candidates)| evaluate_deterministic_gi(sample, candidates))
         .collect::<Vec<_>>();
     let expected_composite = expected_direct
         .iter()
@@ -2413,7 +2424,7 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         inputs.surfaces = surfaces.clone();
         inputs.directionals = directionals;
         inputs.punctuals = punctuals;
-        inputs.gi_candidates = gi_candidates;
+        inputs.gi_candidates = gi_candidates_per_surface;
     }
 
     // Pre-fill the offscreen target with opaque white, then prove the upload
