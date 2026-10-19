@@ -514,7 +514,7 @@ impl RayBackend for SwBvhBackend {
             } else {
                 BackendRuntimeError::Ok
             },
-            resident_bytes: (self.nodes.len() * core::mem::size_of::<BvhNode>()) as u64,
+            resident_bytes: (self.nodes.len() * size_of::<BvhNode>()) as u64,
         }
     }
 

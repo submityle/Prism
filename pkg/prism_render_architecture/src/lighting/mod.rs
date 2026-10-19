@@ -1,18 +1,24 @@
 //! Unified lighting, GI, reflection, and stochastic-light contracts.
 
+pub mod cache;
 pub mod contract;
 pub mod culling;
 pub mod debug;
+pub mod ocio;
 pub mod radiance_cascades;
 pub mod recipe_backend;
 pub mod regir;
 pub mod regir_resolve;
+pub mod replay;
+pub mod resolve;
 pub mod restir_di;
 pub mod restir_gi;
 pub mod restir_gi_resolve;
 pub mod restir_spatial;
 pub mod restir_temporal;
+pub mod shadow;
 pub mod stochastic;
+pub mod trace;
 
 pub use debug::{ChannelSemantics, DebugMeta, DebugView, Scale};
 
