@@ -1,10 +1,10 @@
-# Prism 光照与 GI 架构演进方案（v2.5 · 提案）
+# Prism 光照与 GI 架构演进方案（v2.6 · 提案）
 
 > 状态：架构基线 + 确定性 direct-light 与初始 GI reservoir GPU 垂直切片已实施；文中所有帧预算、带宽、周期数仍为**设计目标**，非实测。
-> 修订：v2.2 修正 v2.1 的 8 处问题（1 处误差模型错误、1 处混合统计前提缺失、2 处契约设计缺陷、4 处未定义或低估的验收），逐条见 §0.5；v2.3 修正 v2.2 的 6 处（误差不等式方向、variance 的测量阶段、Conservative 权重的粒度、submission/输出的状态机、S1 与决策 #4 的矛盾、P7 的范围蔓延），逐条见 §0.6；v2.4 修正 v2.3 的 4 处（上置信乘子的形式、Conservative 的标量与向量不一致、QP 成本的未验证假设、验收矩阵缺分位与规则自相矛盾），逐条见 §0.7；v2.5 修正 v2.4 的 4 处（Trace 契约未闭合、α 边界的伪精确断言、退路 ③ 与单权重混合矛盾、验收矩阵的 H/S 未成列），逐条见 §0.8。**本文的工期与验收仍是待验证的假设，不是承诺。**
+> 修订：v2.2 修正 v2.1 的 8 处问题（1 处误差模型错误、1 处混合统计前提缺失、2 处契约设计缺陷、4 处未定义或低估的验收），逐条见 §0.5；v2.3 修正 v2.2 的 6 处（误差不等式方向、variance 的测量阶段、Conservative 权重的粒度、submission/输出的状态机、S1 与决策 #4 的矛盾、P7 的范围蔓延），逐条见 §0.6；v2.4 修正 v2.3 的 4 处（上置信乘子的形式、Conservative 的标量与向量不一致、QP 成本的未验证假设、验收矩阵缺分位与规则自相矛盾），逐条见 §0.7；v2.5 修正 v2.4 的 4 处（Trace 契约未闭合、α 边界的伪精确断言、退路 ③ 与单权重混合矛盾、验收矩阵的 H/S 未成列），逐条见 §0.8。v2.6 补全**镜面反射**这条被压成一行的纵切：recipe 从 13 扩到 16（新增 `SpecularScreenSpace` / `ProbeSplitSum` / `PlanarReflection`）、新增 §5.3.3 镜面信号契约、§18.2 新增 S7 场景类与 4 条镜面门槛、§17 新增 2 项待拍板决策，逐条见 §0.10；并做了一轮**维护性自检**，拆掉本轮自己引入的 3 个回归（§0.11）。**本文的工期与验收仍是待验证的假设，不是承诺。**
 > 基线：`main`（2026-10-19）；当前环境已验证 null backend graph 记录、真实 wgpu adapter 的 shader/pipeline 创建、一帧 dispatch 录制、GPU buffer readback 与 CPU oracle 对拍。本文不把设计目标、完整物理 recipe 或最终画质验收写成已完成事实。
 > 范围：`pkg/` 内光照、阴影、全局光照、虚拟流送、增量更新的**架构**演进；不含 `crates/bevy_*` 旧栈改造，也不含具体 GI 算法推导。
-> 与既有文档的关系：**不是** GI 算法设计（那是 `prism_gi_lumen_design_zh.md` v4 的职责），而是让 13 个光照/GI 技术能共存、可预算、可维护、可扩展的**架构层**方案。
+> 与既有文档的关系：**不是** GI 算法设计（那是 `prism_gi_lumen_design_zh.md` v4 的职责），而是让 16 个光照/GI/反射技术能共存、可预算、可维护、可扩展的**架构层**方案。
 > 关联文档：`prism_gi_lumen_design_zh.md`（GI 子系统设计 v4）、`prism_rendering_architecture_zh.md`（总架构与分档表）、`prism_material_pipeline_refactor_zh.md`（四前端唯一执行路径）、`prism_render_scene_rhi_port_zh.md`（bevy 轨移植切片）、`prism_derived_data_contract_zh.md`（B1 / E1 派生数据登记）。
 > 数值路线：**纯经典数值**（蒙特卡洛 / reservoir 重采样 / SH / SDF 步进 / 时空降噪），不含任何 AI / ML / 神经网络路径。
 
@@ -17,7 +17,7 @@
 | `FieldEpoch` / `ChangeJournal` / checkpoint | `pkg/prism_render_architecture/src/lighting/contract.rs` | 字段级 WAL 记录、单调 epoch、显式快照 |
 | `TraceQuery` / `RayBackend` / `TraceSubmission` | 同上 | 槽位稳定映射、generation、deadline、`Stale`/`Expired`/取消状态 |
 | `Contrib` / `BlendOperator` | 同上 | target 校验，bias 与 variance 分列，禁止有 bias 的无偏混合 |
-| 13 个 recipe 白名单与成本表 | 同上 | `BudgetCompiler` 按能力、确定性和 GPU/带宽/驻留/IO 预算准入并生成拒绝原因 |
+| 16 个 recipe 白名单与成本表（当前 13 条已注册，3 条镜面 recipe 待实现） | 同上 | `BudgetCompiler` 按能力、确定性和 GPU/带宽/驻留/IO 预算准入并生成拒绝原因 |
 | `CacheEffect` / `ExecPolicy` | 同上 | 缓存失效与执行策略不再混入图资源声明 |
 | render-world 计划入口 | `pkg/prism_render_app/src/lighting.rs`、`plugin.rs`、`stats.rs` | 每个抽取帧编译一次，统计选中/拒绝数量，`explain()` 可追溯；保留字段 epoch 与失效计数 |
 | 未实现 recipe 准入门禁 | `pkg/prism_render_architecture/src/lighting/contract.rs` | 只有已注册真实执行后端的 recipe 才能进入 `LightingPlan`；其余 recipe 以 `unavailable:<recipe>` 明确拒绝，不再出现“计划选中但没有执行”的假闭环 |
@@ -29,18 +29,18 @@
 
 #### 已完成
 
-- `FieldEpoch`、`ChangeJournal`、checkpoint、`TraceQuery`、`TraceSubmission`、`Contrib`、`BlendOperator`、13 个 recipe 白名单和 `BudgetCompiler` 已落成并接入新宿主的计划编译链。
+- `FieldEpoch`、`ChangeJournal`、checkpoint、`TraceQuery`、`TraceSubmission`、`Contrib`、`BlendOperator`、recipe 白名单（13 条；v2.6 扩到 16 条，其中 3 条镜面 recipe 尚未实现）和 `BudgetCompiler` 已落成并接入新宿主的计划编译链。
 - `BudgetCompiler` 已增加真实执行后端准入门禁；当前只有 `SpecializedDeterministic` 与初始 `WorldRestir` backend 会被选入执行计划，其余 recipe 会保留在白名单并以 `unavailable` 记录拒绝原因；deterministic NPR 下 `WorldRestir` 明确以 `determinism` 拒绝。
 - `LightingSceneInputs` 已改为真实输入契约：surface batch、directional lights、point/spot lights、按 surface 对齐的 GI candidate batches；抽取到 render-world 后参与 GPU 上传。新 API 不保留单 surface 兼容入口。
 - `SpecializedDeterministic` 的当前 GPU 实例已是真实 Lambert direct-light recipe：ambient、方向光漫反射、点光 inverse-square、range window、spot cone、visibility、albedo modulation 和 HDR radiance 输出。
 - `lighting/recipe_backend.rs` 已补充 DirectStochasticRT 与 DirectStochasticVSM 的确定性 CPU RIS/VSM twin、shadow-slot 校验和 bitwise 稳定性测试；它们尚未接入新宿主的真实 GPU graph，因此仍不计入当前 `LightingPlan` 的 GPU 准入。
 - `lighting/trace.rs` 已接入架构模块树：`SwBvhBackend`、稳定 BVH、异步 submit/poll/cancel、部分结果、deadline、generation、device-loss 和 slot 重叠回收均有确定性行为测试；这完成的是 CPU trace backend 与调度契约，不是硬件 RayQuery 或完整 GPU trace graph。
-- `prism_render_app/src/lighting_trace_gpu.rs` 已加入独立 GPU 软件 BVH trace 执行器：消费架构 crate 冻结的 packed node/triangle ABI，验证输入边界与 BVH 可达性，WGSL bounded-stack 遍历输出稳定 hit/miss 槽位；8-triangle 多层 BVH 的 65-ray（跨 workgroup、双分支命中、nearest-hit、miss）CPU oracle 对拍已在强制物理 GPU readback 下通过。目前尚未接入 `LightingPlan`、RenderGraph/宿主 trace scheduler、per-surface candidate 生成，也未做大场景性能标定。
+- `prism_render_app/src/lighting_trace_gpu.rs` 已加入独立 GPU 软件 BVH trace 执行器：消费架构 crate 冻结的 packed node/triangle ABI，验证输入边界与 BVH 可达性，WGSL bounded-stack 遍历输出稳定 hit/miss 槽位；8-triangle 多层 BVH 的 65-ray（跨 workgroup、双分支命中、nearest-hit、miss）通过 CPU oracle 对拍。旧 `encode_and_submit` 旁路已删除；新 `prepare_graph` 只准备持久输入和 graph recorder，由调用方在 RenderGraph 中声明节点/三角形/ray 读取与 hit 写入，并在同一 graph 提交中 dispatch。null graph 与物理 GPU graph-recorded parity 均已通过。当前仍未接入 `LightingPlan`、宿主 GI graph/trace scheduler 或 per-surface candidate 生成，也未做大场景性能标定。
 - `lighting/shadow.rs` 已接入架构模块树：shadow slot 选择、VSM 页请求合并、优先级、预算裁剪、物理页分配/驱逐、caster epoch 失效和 RayTrace/VSM/Cascade fallback 均已实现并测试；尚未成为宿主真实阴影 pass。
 - `lighting/cache.rs`、`resolve.rs`、`replay.rs` 已接入架构模块树：有界 reservoir/sample cache、软/硬失效、temporal/spatial reuse、raw/accumulated/post variance、三档 denoise/resolve、multi-surface/multi-view BRDF resolve、WAL/checkpoint/snapshot/restore 和 device-generation replay 均已有 CPU reference 与边界测试。
 - `lighting/virtual.rs` 已接入架构模块树：cell 到 shadow/GI/cache page 绑定、请求合并与优先级、有界驻留/淘汰、epoch 失效、显式 fallback 和设备恢复 snapshot/restore 已有 CPU reference 与边界测试；尚未连接真实 GPU page pool/streaming IO。
-- `lighting/metrics.rs` 已接入架构模块树：H1–H4 × S1–S6、P50/P95/P99/P99.9、GPU/CPU 时间、带宽、驻留、IO fault、variance、bias、temporal instability、PSNR、能量误差与 N/A 规则可生成确定性报告；验收门槛由实测计划提供，未校准的数值不预设为通过。
-- `lighting/ocio.rs` 已接入架构模块树：ACES、AgX、linear+sRGB、曝光、白平衡、gamut、transfer function、版本化序列化、digest、配置校验和 CPU reference transform 均已完成。`prism_render_app/src/display_transform_gpu.rs` 现以 8×8 WGSL compute pass 采样帧目标 `Rgba8Unorm` 线性颜色纹理，写入持久 `Rgba8Unorm` 显示编码纹理；窗口路径中该 pass 与 surface present 同属一帧 RenderGraph/队列提交，present 明确消费变换后的纹理。窗口目标 resize/device generation 生命周期会重建对应 transform 和 present 资源。真实 GPU texture readback 覆盖 36 组 tone mapping × gamut × transfer 并与 CPU oracle 对拍，null surface graph/present 路径通过。编码边界：帧目标 UNORM 数值是线性场景值；OCIO 输出是配置传递函数编码值；当前窗口默认 sRGB 配置遇到 sRGB attachment 时由 present shader 先 sRGB decode、再由 attachment 硬件编码一次，非 sRGB attachment 直接写入已编码值，避免 double encode。未完成：独立 offscreen/headless 帧执行目前仍输出线性帧目标，尚未将 OCIO transform 纳入该路径；窗口侧 profile 尚不可配置，也未完成显示器色彩管理/真实 swapchain 像素 readback 验收。
+- `lighting/metrics.rs` 已接入架构模块树：H1–H4 × S1–S7、P50/P95/P99/P99.9、GPU/CPU 时间、带宽、驻留、IO fault、variance、bias、temporal instability、PSNR、能量误差与 N/A 规则可生成确定性报告；S7 已登记镜面通量误差、fallback 单调性、SSR seam 与 FLIP 指标，并有稳定序列化名和报告门禁测试。测试样本与阈值仅验证报告逻辑，不是实测结果或架构验收门槛；H/S 矩阵仍需硬件实测校准。
+- `lighting/ocio.rs` 已接入架构模块树：ACES、AgX、linear+sRGB、曝光、白平衡、gamut、transfer function、版本化序列化、digest、配置校验和 CPU reference transform 均已完成。`RenderAppConfig.display_transform` 是窗口与 offscreen/headless 共用的配置来源；8×8 WGSL compute pass 采样线性 `Rgba8Unorm` 帧目标并写入持久 display-encoded `Rgba8Unorm` 纹理。窗口 transform 与 surface present 在同一 RenderGraph/队列提交，present 消费变换纹理；headless/offscreen transform 也已加入宿主帧图，并随场景图通过同一次 `execute_tracked` 提交。公开 `OffscreenFrameOutput` 发布最近一次成功提交的终端纹理、extent、frame index、submission 与 device generation，供离线消费者安排后续 GPU 使用或 readback；resize 会先等待 GPU idle，设备代际替换会使旧输出失效并重建 transform 资源。现有真实 GPU texture readback 的 36 组 tone mapping × gamut × transfer CPU oracle 对拍已通过。新增 offscreen 物理 GPU parity 已通过：先执行实际宿主 graph，再向 seeded target 写入多组非零线性 RGB/alpha 值，并在独立的相同 transform graph 中与 CPU reference 对拍；这验证了宿主 graph 可执行及同一 transform 的非零像素数值，但不表示非零样本直接经过了完整 scene host graph。编码边界：帧目标 UNORM 数值是线性场景值；OCIO 输出按配置 transfer function 编码；sRGB attachment 的 present shader 先 decode、再由 attachment 硬件 encode 一次，非 sRGB attachment 直接写入已编码值。未完成：真实 swapchain 像素 readback、显示器色彩管理，以及跨多设备/多窗口的显示配置策略验收。
 - `prism_render_architecture` lighting 相关测试当前为 236 个全部通过；该结果证明架构契约与 CPU reference 闭合，不等同于完整渲染效果或 GPU 性能验收。
 - `WorldRestir` 的当前 GPU 实例已是真实单跳 deterministic RIS 初始 reservoir，并与 CPU oracle 使用同一计算语义：每 surface 最多重用 4 个 host-provided candidates、source/target PDF 权重、稳定选择随机数、双侧 cosine、距离平方衰减、visibility、albedo/radiance 调制和 GI composite；candidate storage 按 surface-range 元数据紧凑打包并上传，每 surface 独立，避免为稀疏候选固定上传完整二维槽位。多 surface（含跨 workgroup、不同 surface 使用不同 radiance candidate）已通过真实 GPU buffer readback 与 CPU oracle 数值对拍。当前仍未从 per-surface GPU trace 结果生成 candidates。
 - 持久 GPU bundle、uniform/storage buffers、bind group、direct/GI/composite compute pipeline、render graph resource declaration、batch dispatch 和 device-loss replay 已闭合；每帧会清零完整输出容量，空 surface batch 不生成 lighting compute pass。
@@ -48,12 +48,12 @@
 
 #### 未完成
 
-- 其余 11 个 recipe 尚未接入真实 GPU 执行：RIS/MegaLights 直接光、阴影槽位、随机直接光、DDGI/brick GI、screen probe/ReSTIR、sparse SDF GI、path-traced offline 等仍是架构契约或旧实现资产，不得按“已完成”计。
-- 当前 direct recipe 已支持最多 1024 个独立 surface sample 的 GPU batch，但仍不是完整屏幕/视图 lighting resolve；尚未接入完整材质 BRDF、可见性场景查询、阴影、反射、透明、后处理和多视图输出。
-- 当前 GI GPU 路径仍消费 host-provided、按 surface 分组的 candidates，属于单跳 deterministic 初始 reservoir；虽已有独立 packed-BVH GPU trace kernel，尚未把它接入 `LightingPlan`、宿主 RenderGraph 和 per-surface GI candidate 生成。架构层的 `RayScheduler`、cache、temporal/spatial reuse、resolve、denoise、variance、virtual residency 和 replay CPU reference 仍未绑定到完整 GPU graph、场景 BVH 更新输入及 multi-bounce 执行链。
-- DebugMeta、结构化 EXPLAIN 拒绝原因、shader variant gate、DebugView 消费链和 plugin sync 均已落地；OCIO 配置契约、texture graph transform、窗口 present 消费链及 GPU parity 已完成当前切片，但 offscreen/headless transform、窗口 profile 配置和完整 P8 收敛验收仍未完成。
+- 其余 14 个 recipe 尚未接入真实 GPU 执行：RIS/MegaLights 直接光、阴影槽位、随机直接光、DDGI/brick GI、screen probe/ReSTIR、sparse SDF GI、path-traced offline，以及 v2.6 新增的 4 条镜面 recipe（`SpecularRestir` / `SpecularScreenSpace` / `ProbeSplitSum` / `PlanarReflection`）等仍是架构契约或旧实现资产，不得按“已完成”计。
+- 当前 direct recipe 已支持最多 1024 个独立 surface sample 的 GPU batch，但仍不是完整屏幕/视图 lighting resolve；尚未接入完整材质 BRDF、可见性场景查询、阴影、反射、透明、后处理和多视图输出；其中**镜面反射的缺口最大**——v2.6 定义的 4 条 specular recipe（`SpecularRestir` / `SpecularScreenSpace` / `ProbeSplitSum` / `PlanarReflection`）没有一条接上 GPU 执行，`post_ssr_trace` 与 `spec_gi_*.wesl` 资产既未转正也未纳入 `LightingPlan`。
+- 当前 GI GPU 路径仍消费 host-provided、按 surface 分组的 candidates，属于单跳 deterministic 初始 reservoir。独立 packed-BVH kernel 现有 RenderGraph recorder 和 graph parity，但尚未接入 `LightingPlan`、宿主 GI graph/trace scheduler 或 per-surface candidate-build pass；CPU 侧也新增了按 surface stable ID/frame/sample 可复现的余弦加权 GI ray 生成器，但还未连到 app trace 输入。架构层的 `RayScheduler`、cache、temporal/spatial reuse、resolve、denoise、variance、virtual residency 和 replay CPU reference 仍未绑定到完整 GPU graph、场景 BVH 更新输入及 multi-bounce 执行链。
+- DebugMeta、结构化 EXPLAIN 拒绝原因、shader variant gate、DebugView 消费链和 plugin sync 均已落地；OCIO 配置契约、共享配置入口、window/offscreen texture graph transform、公开 offscreen 输出帧契约及窗口 present 消费链已实现。null backend graph 与公开输出契约测试覆盖宿主接线；非零像素物理 GPU offscreen parity 已通过，覆盖实际宿主 graph 执行和 seeded target 上相同 transform graph 的非零值 CPU 对拍两段，但非零值未直接注入完整 scene host graph。完整 P8 收敛验收、真实 swapchain readback 与显示器色彩管理仍未完成。
 - 需要继续完成 cache/page pool/virtual streaming 的真实 GPU 资源驻留、packed-BVH trace kernel 的 LightingPlan/graph/scene 输入接线与 per-surface candidate 生成、GPU shadow pass、multi-view resolve 的宿主与 GPU graph 接线、完整 BRDF/材质/可见性/反射/透明/后处理链，以及 raw/accumulated/post variance、bias、denoise 的实测标定。metrics 契约虽已具备，H/S 矩阵仍没有完整硬件实测数据。
-- P7a 的新宿主 GI 路径目前只完成初始 reservoir compute/readback 子切片；场景到 trace 到 GI 到 present 的宿主闭环、与旧 `prism_render_scene` parity 以及 H1–H4 × S1–S6 的最终性能和画质矩阵均未完成，因此 P7a 整体验收未完成。
+- P7a 的新宿主 GI 路径目前完成初始 reservoir compute/readback、独立 graph-recorded BVH trace parity、以及 CPU per-surface ray-generation oracle 子切片；这些仍未组成场景输入 → trace scheduler → GPU candidate build → GI → composite → present 的单条宿主链。与冻结的 `prism_render_scene` parity 以及 H1–H4 × S1–S7 最终性能和画质矩阵也未完成，因此 P7a 整体验收未完成。
 
 因此当前结论是：**架构契约、计划入口、结构化诊断契约、确定性 direct-light 与初始 GI 多-surface GPU/CPU 对拍已完成；完整 lighting/GI 重构尚未完成。** 后续实现必须继续沿用同一 `LightingPlan` 和新输入契约，不保留旧 API，也不能在子系统内新增旁路开关。
 
@@ -90,7 +90,7 @@
 
 ### 0.1 一句话
 
-把当前「N 个子系统各自发射线、各自存缓存、各自 24 个 `enabled: false` 开关」的形态，收敛为 **一条执行路径 + 三条纵切链 + 七个契约 + 十三个 recipe**：技术继续增加，但耦合面不再增加。
+把当前「N 个子系统各自发射线、各自存缓存、各自 24 个 `enabled: false` 开关」的形态，收敛为 **一条执行路径 + 三条纵切链 + 七个契约 + 十六个 recipe**：技术继续增加，但耦合面不再增加。
 
 ### 0.2 规模
 
@@ -98,7 +98,7 @@
 |---|---|
 | 主线阶段 | **P0–P8（9 阶段，P7 拆为 P7a/P7b）+ 3 个前置 spike**；不承诺单点工期（见 §15） |
 | 烘焙轨道 | 并行，不占主线 |
-| recipe 数 | **13**（4 直接光 + 9 间接光） |
+| recipe 数 | **16**（4 直接光 + 8 漫反射间接光 + 4 镜面反射）；其中 13 条已在白名单，3 条镜面 recipe 于 v2.6 新增、待实现 |
 | 契约数 | **7**（v2.2 硬上限 1000 行；v2.1 的 900 行在拆出 `CacheEffect` / `ExecPolicy` 与补全 backend 生命周期后不再现实） |
 | 不变量 | **7**（全部进 CI） |
 | 补丁数 | **26** |
@@ -115,6 +115,7 @@
 | v2.3 | 修正 6 处：`MSE ≈ …` 改为**上界**并给成立条件、variance 按采样/时域/降噪三级分别测量、Conservative 权重的粒度与求解、submission↔output 的稳定映射与状态机、S1 spike 与决策 #4 解耦（允许 mock backend）、P7 拆为「GI 垂直切片边界」与「全仓迁移（范围外）」（逐条见 §0.6） |
 | v2.4 | 修正 4 处：上置信乘子改 `c_{1−α}(n) = (n−1)/χ²_α(n−1)`（原 `(1+κ)(1−α)` 在 α 大时反而缩小，不是上界）、Conservative 的标量/向量不一致（明确 A 逐通道 / B 单权重 + 逐通道和 两方案，权重用闭式 + 主动集而非通用 QP）、QP 成本从"可忽略"改为**待 spike 实测**、验收矩阵补齐 `类别` + `分位` 两列并与 §18.5 规则 2 自洽（逐条见 §0.7） |
 | **v2.5（本文）** | 修正 4 处：`TraceSubmission` 补全 `slot_base`/`n`/`generation`/`deadline_frame` 且 `submit` 收 `deadline_frame`、`poll` 收 `generation`+`frame`，新增 `Stale` 终态（10 态）；`c < 1` 的边界改为"只采用 `α ≤ 0.1`"不再给伪精确阈值；退路 ③ 改为单权重 `w_i ∝ 1/Σ_c v_{c,i}`（A 的逐通道解只用于报告）；§18.3 增显式 `H`/`S` 两列 + 两条读表规则（`N/A ≠ pass`、组合剪枝），§18.4 声明 `N/A` 为有效声明（逐条见 §0.8） |
+| **v2.6（本文）** | 补全镜面反射：`SpecularRestir` 从「间接光 9 条里的一行」拆为**独立的镜面族 4 条**（+ `SpecularScreenSpace` / `ProbeSplitSum` / `PlanarReflection`），间接光表 9→8；新增 §5.3.3 镜面信号契约（降级链 / 重投影域 / 半分辨率接缝责任 / 能量项）；§18.2 新增 S7 场景类、§18.3 新增 4 条镜面门槛；§6.4 驱逐顺序接入镜面降级链；§16 新增 R33/R34；§17 新增决策 #16/#17（逐条见 §0.10）；另做维护性自检，把 4 条镜面 recipe 收敛到 **1 个 backend**、降级链收敛到 **1 处真值源**（§0.11） |
 
 ### 0.4 补丁索引（26 条，一条不缺）
 
@@ -162,7 +163,7 @@
 | 7 | 串行 35.5 周 / 并行后 ~30 周 | 不可靠 | 覆盖 trace、虚拟流送、DDGI 页化、降噪、增量、离线路径、host 迁移、crate 归档，**没有团队规模、同类系统历史速度、代码量校准**。改为「3 个前置 spike + P0–P8 阶段」，**不承诺单点工期**（§15） |
 | 8 | 「256 灯斜率 ≈0」「hitch = 0」「thrash = 0」 | 不可度量 | 改为 **硬件类 × 场景类 × P50/P95/P99** 的验收矩阵；禁用绝对零门槛，hitch/thrash 改为统计上限（§18） |
 
-**这 8 条对方案本身的影响**：架构骨架（一执行路径 + 三链 + 七契约 + 13 recipe）不变；变的是**误差如何记账**、**契约如何切分**、**什么算通过**。第 7、8 条性质最重——一个没有可信工期与可执行门槛的方案，不能被当作工程计划审查。
+**这 8 条对方案本身的影响**：架构骨架（一执行路径 + 三链 + 七契约 + recipe 白名单）不变；变的是**误差如何记账**、**契约如何切分**、**什么算通过**。第 7、8 条性质最重——一个没有可信工期与可执行门槛的方案，不能被当作工程计划审查。
 
 ### 0.6 v2.2 → v2.3 勘误（6 条）
 
@@ -186,7 +187,7 @@
 | 3 | 「逐像素 QP 在 ALU 上可忽略」 | **未验证的性能假设** | 改为闭式 `w* = M⁻¹1/(1ᵀM⁻¹1)` + 主动集截断（n≤4，≤2 次重归一），给纸面成本 100–200 ALU/px 但标为**待 spike 实测**（目标 ≤0.15ms@1080p）；**禁止**在主 composite 路径放通用 QP 迭代求解器；给三条退路（查表 / 固定 2 次迭代 / 退 `w∝1/v`）（§5.4.1） |
 | 4 | §18.3 只写阈值不写分位，而 §18.5 规则 2 说"缺分位视为未定义" | **文档自相矛盾** | §18.3 增 `类别`（分布型/布尔型/确定性标量）与 `分位` 两列，13 行逐行补齐；§18.5 重写为 6 条，其中规则 3 规定"类别决定分位要求"，布尔型 100% 降为其特例，消除旧规则 2 与 3 的冲突（§18.3、§18.5） |
 
-**这 4 条的性质与前两轮不同**：§0.5、§0.6 修的是**概念**（bias≠variance、不等式方向），§0.7 修的是**形式**——公式写反、维度对不上、假设未验、两节互相打架。骨架与 13 recipe 不变；变的是"公式能不能算、算出来是不是界、门槛能不能被机器判定"。
+**这 4 条的性质与前两轮不同**：§0.5、§0.6 修的是**概念**（bias≠variance、不等式方向），§0.7 修的是**形式**——公式写反、维度对不上、假设未验、两节互相打架。骨架与 recipe 白名单不变；变的是"公式能不能算、算出来是不是界、门槛能不能被机器判定"。
 
 仍不解决的三处（已知，不假装解决）：
 
@@ -204,6 +205,30 @@
 | 4 | §18.3 的 `H`/`S` 只藏在"门槛形式"文字里 | **规则与表格不一致**：规则 2 要求四列齐全，表里只有两列 | §18.3 增显式 `H`、`S` 两列（共 7 列），13 行逐行填；新增两条读表规则——**`N/A ≠ pass`**（不适用必须报 `N/A` 并列原因，如 H1 的混合偏置行）与**组合剪枝**（`H × S` 是剪枝结果，其余组合报 `uncovered` 并进 ADR）；§18.4 声明其 `H = S = N/A` 是有效声明（§18.3、§18.4） |
 
 **这一轮的性质又变了**：§0.5/§0.6 修概念，§0.7 修形式，§0.8 修的是**闭合性**——契约的输入是否完整（缺一个入参，状态机就有不可达转移）、断言的适用域是否精确（给一个不成立的"精确边界"比不给更糟）、退路是否与主路径同一语义、规则与表格是否描述同一件事。
+
+### 0.10 v2.5 → v2.6 勘误（5 条）
+
+| # | v2.5 的问题 | 性质 | v2.6 修正 |
+|---|---|---|---|
+| 1 | 「反射」全文只有 7 个孤立词元（`TraceKind::Specular` 一个变体、`SpecularRestir` 一行 recipe、§8.3 一行降噪参数、§5.4.1 一个"是否近似纯镜面"系数、§11.2 一个示例、§0.9 一句"尚未接入"、附录 A 两处资产名），没有任何一节承担它 | **覆盖假象**（写了，但不构成可验收单元） | 镜面从"标签"升为**独立族**：§5.3 拆出 4 条 recipe + §5.3.3 信号契约；漫反射表 9→8 行（`SpecularRestir` 迁出），总数 13→16 |
+| 2 | 白名单里没有任何一条负责镜面的 **fallback**，而 `SpecularRestir` 在 H1（无 RT）上整条不可用 ⇒ **镜面在 H1 上没有 recipe** | **可执行性缺口**（比 §18.3 已承认的"H1 混合偏置无定义"更严重） | 新增 `ProbeSplitSum`（split-sum 环境探针）作为 fallback 终点并进白名单；§5.3.3 规定降级链 `RT → SSR → probe → ambient` 单调且可解释 |
+| 3 | 镜面的重投影域（沿反射向量的虚拟相机）与漫反射（surface 重投影）不同，§8.3 只写"重连移位校验"未定义域；半分辨率上采样接缝也无契约 | **契约缺失**（history valid 判据无从实现） | §5.3.3 显式定义重投影域、半分辨率接缝责任与能量项；§8.3 的 Specular 行改为引用该契约，不再自带参数 |
+| 4 | 镜面能量是 Fresnel + 多次散射项，与 §18.3 的"全白单灯通量"不是同一个量；§18.3 的 S6 专项（半透明 / 毛发 / 水）不含镜面 ⇒ **镜面能量守恒无人验收** | **验收缺口** | §18.2 新增 **S7 镜面反射**（粗糙度阶梯 × 平面镜 × 水面 × 无 RT 档 fallback）；§18.3 新增镜面能量守恒、降级单调性、SSR 接缝、画质覆盖 4 条 |
+| 5 | 反射资产（`post_ssr_trace`、`post_spec_gi_reservoir_prior`、`spec_gi_*.wesl`）在 §3.4 的「净删 / 转正」两个名单里**都不在**；§17 的 15 项决策里 **0 项**涉及反射 | **资产悬空 + 决策盲区**（白名单一旦冻结就再拆不开） | §3.4 新增镜面转正行；§16 新增 R33（无 RT 档镜面塌陷）与 R34（半分辨率接缝被当降噪误差）；§17 新增 #16（specular 首期是否含 SSR）与 #17（`PlanarReflection` 是否进首期） |
+
+**这一轮的性质是「补层」而不是「纠错」**：§0.5–§0.8 修的都是已经写下的内容，v2.6 修的是**从来没被写下的那一层**——一个拥有独立 fallback 链、独立重投影域、独立能量项的信号，此前只占一行表格。判据也很朴素：**一条技术若不能在 §5.3、§8.3、§18.3、§17 四处同时找到自己的行，它就没有被这份文档覆盖。**
+
+### 0.11 v2.6 自身的维护性自检（3 条）
+
+补一层新信号，最容易在「易维护 / 易拓展」上倒退。自查后发现 v2.6 初稿确实引入了 3 个回归，已当场拆掉，对应约束写进 §12 / §13 / §18.4。
+
+| # | v2.6 初稿的回归 | 为什么会发生 | 约束（已写入） |
+|---|---|---|---|
+| 1 | 4 条镜面 recipe 各自需要一个 `RecipeBackend` 实现 | 把「4 条不同的降级级」当成「4 种不同的算法」——它们在算子代数里只是同一个 Rep 的 `(target, sampler, estimator)` 取了不同值 | **只允许一个 `SpecularRep`**：前三条共用，`PlanarReflection` 除外（决策 #17 已排除首期）。新增第 5 条镜面 recipe = 白名单 1 行 + 1 个参数组合，**0 个新 backend、0 处 if/else**（§5.3.2 末段、§13 新行、§18.4 新行） |
+| 2 | 降级链 `RT → SSR → probe → ambient` 若同时写死在 `DEFAULT_FALLBACKS`（补丁 1）、EXPLAIN 文案、§8.3 表、§18.3 门槛里，就是 4 处真相源 | 链是「跨契约的秩序」，天然倾向于在每个引用点重述一遍 | **链的顺序只在 `lighting::constants::SPECULAR_FALLBACK` 定义一次**，其余四处只引用不复制；新增一条链必须同时登记 §18.3（否则该链没有 `H`/`S` 验收，等于没验收）。§12 新增「降级链登记」行 |
+| 3 | `PlanarReflection` 会新增一个独立镜像渲染 pass | 它是镜面族里唯一**不共享既有 kernel** 的：新 RT + 新带宽项 + 新 variant | 不进首期（决策 #17）；将来单独立项时必须同时过 §12「shader variant 只许降」与 §8「预算新增」两道门，而不是当作一条 recipe 悄悄接进来 |
+
+**自检判据**：新增一条 recipe，若「白名单行 + 参数取值」之外还要改第三处代码，它就不满足 §18.4「新 GI 技术改动文件数 ≤3」；若它还需要一个新的 `RecipeBackend` 实现，就不满足 §13「0 处 if/else」。v2.6 两条都成立——把 4 条 recipe 压成 1 个 backend 的理由不是"代码少写"，而是**多写的那三份会各自演化**。
 
 ---
 
@@ -295,7 +320,7 @@
 | `prism_render_trace` | TraceQuery + RayScheduler + 3 后端 + 执行模型 | 新 | ~8K |
 | `prism_render_virtual` | 页池 + 页表 + feedback + 预算 + `RepProvider` + cell | 新（吃 5 个死 crate） | ~12K |
 | `prism_render_cache` | Reservoir + SampleCache + 统一时空重建 | 新 | ~5K |
-| `prism_render_gi` | 算子 + 13 recipe + BlendOperator + 阴影槽位 | 新 | ~16K |
+| `prism_render_gi` | 算子 + 16 recipe（含 4 镜面）+ 镜面信号契约 + BlendOperator + 阴影槽位 | 新 | ~18K |
 | `prism_render_debug` | DebugView（自动注册）+ EXPLAIN + 报告 | **新** | ~4K |
 | `prism_render_shading` | 响应函数 + 后处理（GI 迁出，−40%） | 已有，收缩 | — |
 | `prism_render_host` | host + shim（现 `prism_render_app` 演进） | 已有，演进 | — |
@@ -316,6 +341,7 @@
 | **降格** | VSM 页表 | 从"第三条阴影主线"→ `DirectStochasticVSM` 的实现细节（**不删**） |
 | 归档 | 39 个零引用 crate（渲染侧 10 个） | 141 → ~101 |
 | **转正** | `radiance_cascades_gpu` / `ray_reorder_gpu` / `virtual_geometry_gpu` 等 | 12,229 行死资产变底座 |
+| **转正** | 镜面资产：`post_ssr_trace`（`post_graph.rs:215`）/ `post_spec_gi_reservoir_prior`（`:263`）/ `spec_gi_*.wesl` | 4 条 specular recipe 的底座；此前在「净删」与「转正」两个名单里都不在（§0.10 第 5 条） |
 
 ---
 
@@ -589,7 +615,11 @@ pub trait Reconstruct { fn apply(&self, raw: &[Contrib]) -> Vec3; }
 | `DirectDeterministicCSM` | 解析 | 逐灯解析 + PSSM/PCSS | 无 | 现状主路径 |
 | `SpecializedDeterministic` | 专用 | hair / water / translucency / NPR | 各自 | 已有但分散 |
 
-### 5.3 间接光（9）
+### 5.3 间接光与镜面（12：8 漫反射 + 4 镜面）
+
+> v2.5 及以前，镜面只有 `SpecularRestir` 一行，混在 9 条漫反射 recipe 里。**这两族不能共表**：它们的 fallback 终点、重投影域、降噪历史长度、能量公式都不同（§5.3.3）。v2.6 拆成两个表。
+
+### 5.3.1 漫反射间接光（8）
 
 | recipe | Rep | Sampler | Estimator | 状态 |
 |---|---|---|---|---|
@@ -598,12 +628,37 @@ pub trait Reconstruct { fn apply(&self, raw: &[Contrib]) -> Vec3; }
 | `SurfaceCacheSurfel` | surfel | 相机对齐 | EMA confidence | 已有 |
 | `WorldRestir` | 空间哈希 | SHARC 分箱 | RIS / GRIS | 已有 |
 | `SsgiScreenSpace` | HZB | 余弦加权 | 1-spp | 已有 |
-| `SpecularRestir` | 方向 | GGX lobe | ReSTIR + 重连移位 | 已有 |
 | `SparseSdfGi` | **稀疏 SDF brick** | 锥追 | 确定性积分 | **新**（Medium/Low） |
 | `RadianceCascades` | 级联 | 确定性扇形 | 无历史依赖 | 死资产转正 |
 | `PathTracedOffline` | 完整 BVH | 自适应 | 累积 | **长期质量锚** |
 
 **关键结构性质**：`SparseSdfGi` 与 `RadianceCascades` 是**无历史依赖**的确定性 GI。它们同时承担三个角色：增量软失效的兜底、NPR 场景唯一可用的 GI、回放/对拍的确定性来源。这条性质**任何单一技术都不具备，只有矩阵能表达**。
+
+### 5.3.2 镜面反射（4，v2.6 新增）
+
+| recipe | Rep | Sampler | Estimator | 状态 |
+|---|---|---|---|---|
+| `SpecularRestir` | 方向 | GGX lobe | ReSTIR + 重连移位 | 已有（此前在间接光表里） |
+| `SpecularScreenSpace` | G-buffer + HZB | GGX lobe | 屏幕 march（`post_ssr_trace`） | 资产已有，未接入 plan |
+| `ProbeSplitSum` | prefiltered env cube（mip = roughness）+ DFG LUT | GGX 的确定性等价 | split-sum | 实现已有，**未进白名单** |
+| `PlanarReflection` | 平面镜像相机 | 确定性 | 一次镜像渲染 | 无 |
+
+**这 4 条不是并列选项，是一条单调降级链**：`RT（SpecularRestir） → SSR（SpecularScreenSpace） → probe（ProbeSplitSum） → ambient`。每一级只在前一级不可用时被选中；选择必须可由 EXPLAIN 解释（§6.8）。**H1（无 RT）档只有后两级可用**，这是 §18.3 与 R33 的直接来源。
+
+**共享核心（§0.11 第 1 条）**：除 `PlanarReflection` 外，前三条共用**一个** `SpecularRep` backend、同一套 `TraceQuery` / `ReservoirCore` 与同一组 `BackendCaps`，差异只在 `(target, sampler, estimator)` 三元——`SpecularRestir` 是 GGX lobe + ReSTIR，`SpecularScreenSpace` 只是把 Rep 换成 G-buffer + HZB 的确定性 march，`ProbeSplitSum` 把它换成 mip 选择 + DFG LUT。**「4 条 recipe」不等于「4 个实现」**；新增第 5 条镜面 recipe 只加白名单一行（§13、§18.4）。
+
+### 5.3.3 镜面信号契约（v2.6 新增）
+
+镜面与漫反射共用三条纵切链（预算 / 增量 / 追踪），但**信号契约不能共用**。以下四项必须显式约定，否则每个实现会各自解释：
+
+| 项 | 约定 | 为什么不能沿用漫反射 |
+|---|---|---|
+| **降级链** | `RT → SSR → probe → ambient`，单调；降档只许沿链后退，不许跨级（无 RT 且无 SSR ⇒ 直接 probe），且每步写 EXPLAIN 原因 | 漫反射终点是 SH L2 / irradiance probe；镜面终点是 split-sum prefiltered env。两条 fallback 的 eviction / promotion 语义不同，§7.3 的三级失效只覆盖了漫反射 |
+| **重投影域** | 反射向量域：以命中点（或无限远方向）为锚，用 `prev_view · cur_view⁻¹` 变换反射方向再查 history；surface 重投影**仅**用于未命中/屏外 fallback 分支 | 镜面命中点在屏外时表面没动、反射内容却变了；沿用 surface 重投影会把移动光源的反射糊成静态 |
+| **分辨率与接缝** | 半分辨率 trace + 深度引导上采样；**接缝责任在 upsampler**——命中/未命中边界必须按法线-深度连续性过滤，不许交给降噪收尾 | 漫反射全分辨率、16–32 帧长历史；镜面 4–8 帧短历史，接缝先于噪声出现（R34） |
+| **能量项** | Fresnel + 多次散射（`brdf.wesl` 的 `multiscatter_direct`）；验收是对高 spp 参考的**通量比**，不是"σ→0 逼近白" | 漫反射靠 albedo 能量守恒；镜面 Fresnel 随视角变化，用同一把尺会把掠射角误差当噪声 |
+
+> 这四行是 §18.3 镜面门槛、§8.3 Specular 降噪行、§6.4 驱逐顺序的**唯一共同引用点**。任何 recipe 自带一套参数而不引用本节，即视为契约破坏。
 
 ### 5.4 BlendOperator（含混合前提）
 
@@ -722,7 +777,7 @@ c_k      = c_sample + P_vis · c_trace + c_reconstruct
 ### 6.4 每链 limits + 驱逐顺序 + 准入（K8s QoS 式）
 
 - 每链有 `requests`（保证）/ `limits`（上限）。
-- 超预算时按**固定顺序驱逐**：先降 spec 采样 → 再降 GI 采样 → 最后降 `DdgiProbes` 页精度。
+- 超预算时按**固定顺序驱逐**：先降 spec 采样 → 再沿 §5.3.3 的降级链退 spec 的 Rep 档（`RT → SSR → probe`）→ 再降 GI 采样 → 最后降 `DdgiProbes` 页精度。
 - **准入控制**：新页请求在 IO 窗满时被拒绝 / 排队，而不是拖慢全局。
 - 驱逐必须可预测，不允许抖动：页至少驻留 N 帧。
 
@@ -817,9 +872,11 @@ RayQuery 路径上 compaction + reorder 通常能拿回 **15–30%** 的空转�
 |---|---|---|---|
 | Direct（随机直接光） | 4–8 帧 + 重投影校验 | RELAX 式 | 15–25% |
 | GI（漫反射） | 16–32 帧 + 方差衰减 | RELAX 长历史 | 15–25% |
-| Specular | 4–8 帧 + 重连移位校验 | SIGMA 式半分辨率 | 15–25% |
+| Specular | 4–8 帧 + **反射向量域**重投影（§5.3.3） | SIGMA 式半分辨率 + 深度引导上采样 | 15–25% |
 
 **每信号独立实例 + 独立 validation 策略**。一个万能降噪吃三种信号是这个行业最常见的失败点。
+
+> 镜面行的三处参数（重投影域、半分辨率接缝责任、能量项）**不在本表定义**，一律引用 §5.3.3——本表只给历史长度与 ALU 预算。
 
 ### 8.4 可伸缩性矩阵
 
@@ -828,7 +885,7 @@ RayQuery 路径上 compaction + reorder 通常能拿回 **15–30%** 的空转�
 | Ultra | 全部 + 2 bounce | 8–16 | 100% | 全驻留 |
 | High | 全 stochastic + 1 bounce | 4–8 | 100% | 页级 |
 | Medium | 4 个（+VSM 阴影） | 2–4 | 75% | 页级 + 代理 |
-| Low / 移动 | `CascadeMap` + `SparseSdfGi` / `ScreenProbe` | 1 | 50% | 代理为主 |
+| Low / 移动 | `CascadeMap` + `SparseSdfGi` / `ScreenProbe`；**镜面固定 `ProbeSplitSum`**（无 RT 档） | 1 | 50% | 代理为主 |
 
 移动端按**可持续 ms（热预算）**而非峰值 ms 设预算。
 
@@ -1022,6 +1079,8 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 | 测试金字塔 | L1 算子 / L2 接口（≤300 对拍）/ L3 帧 / L4 序列（增量 / 流送 / 别名） |
 | **shader variant 门禁** | variant 数量进 CI，只许降不许升（无 ADR 不得例外） |
 | **契约膨胀防护** | `PassDecl` / `CacheEffect` / `ExecPolicy` 三者物理分离；任一结构体不得同时承载"图依赖 + 缓存效果 + 执行预算"（v2.1 缺陷 5） |
+| **镜面参数唯一源** | 镜面族的降级链 / 重投影域 / 半分辨率接缝 / 能量项只在 §5.3.3 定义；任何 recipe 自带 `enable_*`、`roughness_cutoff`、`history_len` 视为契约破坏（延续 §5.4.1「参数唯一源」原则） |
+| **降级链登记** | 每条降级链（漫反射 / 镜面 / 阴影）的顺序只在 `constants` 定义一次；EXPLAIN、§8.3、§18.3 只引用不复制。新增一条链 = 同时登记 §18.3，否则该链无验收 |
 | shader 覆盖 | 每个 WESL 必须被 oracle 覆盖，或显式标注"视觉专有" |
 | ADR 制度 | 设计讨论不进主文档 |
 
@@ -1034,6 +1093,7 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 | 新 GI 技术 | 注册式 recipe（不 fork） | 0 处 if/else |
 | 新追踪后端 | `RayBackend` + `BackendCaps` | 0 个调用点改动 |
 | 新页客户端 | `VirtualResourceClient`（`prism_rendering_architecture_zh.md` §8） | 复用池 / 表 / 预算 |
+| 新镜面 recipe | 同一 `SpecularRep` 的 `(target, sampler, estimator)` 参数组合；planar 除外（新 pass，须 ADR） | 白名单 +1 行、0 个新 `RecipeBackend`、0 处 if/else |
 | 新材质响应 | `render_callback` 表项 | 不产生新 PSO |
 | 引擎外插件 | `RenderFeaturePlugin`：**delegate（能力）/ index（场景索引）/ sync（增量同步）三段** | 不改 graph 编译器 |
 | 幂等性 | 新增 recipe 不得改变既有 recipe 数值 | 回归断言 |
@@ -1127,7 +1187,7 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 
 | spike | 要回答的问题 | 通过标准 | 不通过则 |
 |---|---|---|---|
-| **S1 契约可行性** | 7 个契约能否在 ≤1000 行内覆盖 13 个 recipe；**只验契约形状，不验后端物理** | 3 个异构 recipe（`DdgiProbes` / `SsgiScreenSpace` / `DirectStochasticRT`）接入时**不改契约**；后端用 `MockBackend` + `SwBvhBackend`（**不要求 RayQuery**，决策 #4 不阻塞本 spike）；两者通过 §4.1 的同一组行为测试 | 契约定型推迟，后续阶段不能开工 |
+| **S1 契约可行性** | 7 个契约能否在 ≤1000 行内覆盖 16 个 recipe；**只验契约形状，不验后端物理** | 3 个异构 recipe（`DdgiProbes` / `SsgiScreenSpace` / `DirectStochasticRT`）接入时**不改契约**；后端用 `MockBackend` + `SwBvhBackend`（**不要求 RayQuery**，决策 #4 不阻塞本 spike）；两者通过 §4.1 的同一组行为测试 | 契约定型推迟，后续阶段不能开工 |
 | **S2 增量正确性** | 红绿传播在**动态依赖图**上是否可维护 | 一组变更序列下，增量结果 == 全失效结果（确定性路径 bit-exact；随机路径 PSNR + 能量双门槛） | 退回粗粒度 epoch，放弃细粒度增量 |
 | **S3 混合统计** | `Unbiased` + `Conservative` 双模式能否同时给「无偏」与「有界」 | flux 测试与高 spp 收敛测试**同时**通过 | 放弃统一 Blend，改为按载体分区合成 |
 
@@ -1141,7 +1201,7 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 | **P3 追踪与阴影槽位** | 至少 2 个真实后端（`SwBvhBackend` + 其一）行为一致；阴影槽位 2–3 个；灯数成本曲线**可测**（RayQuery 是否进首期见决策 #4，不阻塞本阶段） | P1 | **高** |
 | **P4 虚拟流送** | 页池 + cell 绑定 + `RepProvider`；任何时刻出图 | P1 | **高**（可与 P3 并行） |
 | **P5 缓存与增量** | S2 通过；降噪三档；WAL / 快照 / 回放 | P3, P4 | **高** |
-| **P6 算子化** | 13 recipe + Blend（S3 通过）+ 分区预算 + 摊销 | P5 | 中 |
+| **P6 算子化** | 16 recipe（含 4 镜面）+ 镜面信号契约 + Blend（S3 通过）+ 分区预算 + 摊销 | P5 | 中 |
 | **P7a GI 垂直切片**（范围内） | GI 路径上的 crate（`abi` / `trace` / `cache` / `virtual` / `gi` / `graph` / `driver` / `host` / `debug`）无 `bevy_*`；一条端到端链路（场景 → trace → GI recipe → composite → present）在新宿主上跑通，并与冻结的 `prism_render_scene` 输出做 parity；边界外子系统（water / hair / cloth / particle / NPR / postfx）**保持冻结** | P6 | 中 |
 | **P7b 全仓迁移**（**范围外**，单独立项） | 141 → ~101 的归档、全仓脱 bevy、其余子系统迁移 | — | 不承诺，可能永不做 |
 | **P8 收敛项** | EXPLAIN / variant 门禁 / plugin sync / OCIO 配置层 | P7a | **低**（可整段砍） |
@@ -1174,10 +1234,12 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 | | **R30 降噪掩盖 bias**（症状：用 "variance 下降" 证明降噪有效，实际把重影/模糊糊进去了；缓：只认 `MSE_post` / FLIP / ghost / blur 四项，§9.5） |
 | | **R31 方差估计在重尾下失效**（症状：firefly 让 `s²` 系统性低估、`c_{1−α}` 也救不回来，界看着成立实际被违反；缓：先 firefly 抑制再估方差、验收报"理论界 / 实测界"松紧比、必要时改用 bootstrap 分位，§9.4） |
 | | **R32 权重求解超预算**（症状：`c` 与 QP 闭式的实测成本吃掉 composite 预算，或为省成本退化成 `w∝1/v` 又把 bias 权重丢掉；缓：S2 起就接 pass 级 GPU timestamp 对照，超预算按查表 → 固定 2 次迭代 → 退单权重 `1/Σᶜv` 三级退路，§5.4.1） |
+| | **R33 无 RT 档的镜面塌陷**（症状：H1 上 `SpecularRestir` / `SpecularScreenSpace` 全不可用，只剩 `ProbeSplitSum`，粗糙度 0.0–0.2 的锐利反射消失且无 EXPLAIN 记录；缓：§5.3.3 要求降级链单调且可解释，§18.3 新增"降级单调性"布尔门槛，S7 必测 H1） |
+| | **R34 半分辨率接缝被当降噪误差**（症状：SSR 命中/未命中边界的跳变被计入 `MSE_post`，靠调大降噪半径"解决"，实际是 upsampler 责任缺失；缓：§5.3.3 把接缝责任显式划给 upsampler，§18.3 单列 seam 门槛，禁止用降噪验收替代） |
 
 ---
 
-## 17. 决策清单（14 项，待拍板）
+## 17. 决策清单（17 项，待拍板）
 
 | # | 决策 | 建议 | 状态 |
 |---|---|---|---|
@@ -1196,6 +1258,8 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 | 13 | 垂直切片边界 | 只覆盖 GI 路径（P7a）；其余子系统冻结，全仓迁移另立项（P7b，范围外） | 待定 |
 | 14 | 置信水平 `α` 与 `c_{1−α}(n)` 的落点 | `α = 0.05`；`c` 按 `n_eff` 分档**构建期打表**，shader 只查表插值（不在热路径算 χ²） | 待定 |
 | 15 | 权重求解的预算与退路阈值 | 目标 ≤0.15ms@1080p；超则查表 → 固定 2 次迭代 → 退单权重 `w_i ∝ 1/Σ_c v_{c,i}`（三级退路，§5.4.1） | 待定 |
+| 16 | specular 首期是否含屏幕空间 SSR | **含**——H1 无 RT，`ProbeSplitSum` 单靠 split-sum 覆盖不了镜面/水面的锐利反射；`post_ssr_trace` 资产已存在，接入成本低于新写 | 待定 |
+| 17 | `PlanarReflection` 是否进首期 | **不进**——水面/镜子用 `SpecularScreenSpace` + probe 兜底；planar 作为 R3 确定性路径的后续项（规避 R33）；维护性理由见 §0.11 第 3 条 | 待定 |
 
 ---
 
@@ -1222,6 +1286,7 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 | S4 | 大世界流送（页 fault 密集） | hitch、thrash、任何时刻出图 |
 | S5 | 重 NPR / 三渲二 | 确定性、阶跃保真、逐帧稳定 |
 | S6 | 半透明 / 毛发 / 水 | 专用确定性路径不被随机化污染 |
+| **S7** | 镜面反射：粗糙度阶梯 0.0 / 0.1 / 0.3 / 0.6 / 0.9 + 平面镜 + 水面 + 无 RT 档 fallback | 降级链单调性、SSR 接缝、Fresnel 能量 |
 
 ### 18.3 性能与效果门槛（H / S / 类别 / 分位 四列显式）
 
@@ -1229,12 +1294,15 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 
 | 维度 | 指标 | H | S | 类别 | 分位 | 门槛形式 |
 |---|---|---|---|---|---|---|
-| 性能 | 帧时间 | H1–H4 | S1–S6 | 分布型 | `P50` / `P95` / `P99` | `P50 ≤ B`，`P95 ≤ 1.10·B`，`P99 ≤ 1.25·B`（B = 该 H 档预算） |
+| 性能 | 帧时间 | H1–H4 | S1–S7 | 分布型 | `P50` / `P95` / `P99` | `P50 ≤ B`，`P95 ≤ 1.10·B`，`P99 ≤ 1.25·B`（B = 该 H 档预算） |
 | 性能 | 灯数成本斜率 | H1–H4 | S3 | 分布型 | `P50`（另报 `P95`） | `(t256@P50 − t8@P50) / t8@P50 ≤ 阈值(H)`；H1/H2 允许更高 |
 | 性能 | hitch | H1–H4 | S4（含 S3） | 分布型 | `P99.9` + `max` | 10 分钟内 `P99.9 ≤ 2·B`、`max ≤ 4·B`、`> 4·B` 帧数 = 0 |
 | 流送 | thrash | H1–H4 | S4 | 分布型 | `P95`（10 分钟窗口 fault 率） | `P95 ≤ 阈值(H)`；连续 fault 提权后必须收敛 |
 | 效果 | 能量守恒 | H1–H4 | S1（+S6 专项） | 确定性标量 | `max`（S1 场景集） | 全白单灯通量误差 `max ≤ 0.5%`，**且** `Unbiased` 模式对高 spp 参考无系统偏差 |
-| 效果 | 画质 | H1–H4 | S1, S2 | 分布型 | `P50` / `P95` | FLIP：`P50 ≤ f1`、`P95 ≤ f2`（`f1/f2` 每 H 档单列） |
+| 效果 | 镜面能量守恒 | H1–H4 | S7 | 确定性标量 | 粗糙度阶梯每档的 `max` | 对高 spp 参考的**通量比**误差 `max ≤ 0.5%`（与 S1 同尺度）；H1 只对 `ProbeSplitSum` 单独验收，**不因缺 RT 而报 `N/A`** |
+| 效果 | 镜面降级单调性 | H1–H4 | S7 | 布尔型 | `100%` | 沿 §5.3.3 降级链后退时输出单调，且每步在 EXPLAIN 给出降级原因；任何跨级跳变即判失败 |
+| 效果 | SSR 接缝 seam | H2–H4 | S7 | 分布型 | `P95`（命中/未命中边界像素集） | 边界两侧亮度跳变 `P95 ≤ 阈值(H)`；**不得**用 `MSE_post` 或降噪验收替代 |
+| 效果 | 画质 | H1–H4 | S1, S2, S7 | 分布型 | `P50` / `P95` | FLIP：`P50 ≤ f1`、`P95 ≤ f2`（`f1/f2` 每 H 档单列） |
 | 效果 | 混合偏置紧度 | H2–H4 | S2 | 分布型 | `P95`（另报 `P50`） | `bias_bound` 预测 / 实测偏差的 `P95 ≤ 2×`。**H1 不适用**：无 traced 贡献 ⇒ `bias_bound ≡ 0`，该行在 H1 上无定义而非"通过" |
 | 精度 | 增量等价 | H1–H4 | S1, S2 | 确定性标量 | 最差帧（`min` PSNR） | 确定性路径 bit-exact；随机路径 `min PSNR ≥ X` 且能量差 ≤ Y |
 | 精度 | 任何时刻出图 | H1–H4 | S4 | 布尔型 | `100%` | 100% 帧有可显示输出，无空洞/黑块 |
@@ -1258,6 +1326,8 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 | | 布尔开关数 | 不增长 | CI grep | 全程 |
 | | shader variant 数 | 不增长 | CI | P8 |
 | 易拓展 | 新后端改动点 | 1 组 trait / 0 调用点 | 实测接入 | P3 |
+| 易开发 | 新 recipe 接入 | 白名单 1 行 + 1 个参数组合；0 个新 backend 实现 | 实测接入 | P6 |
+| 易维护 | 降级链真值源 | 1 处（`constants`），其余引用 | CI grep（禁复制链序列） | P6 |
 | 易维护 | 实现份数 | 1 + oracle | 审计 | P7a |
 | | 对拍数 | ≤300 | CI | P2 |
 | | 零引用 crate | 0 | CI | P0（记账动作，非迁移） |
@@ -1290,6 +1360,7 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 | OpenPBR über 直接光 golden | `pkg/prism_render_shading/src/lighting.rs`（`SurfaceSample:24`、`evaluate_principled_direct:368`、`linear_furnace_response:923`） |
 | 声明式 pass 图 | `pkg/prism_render_scene/src/shading/graph.rs:80`（`visibility_raster`）、`:133`（`texel_space_shade_cache`）、`:185`（`shading_resolve`） |
 | 后处理 pass 声明 | `pkg/prism_render_scene/src/shading/post_graph.rs:215`（`post_ssr_trace`）、`:245`（`post_ssgi_base`）、`:263`（`post_spec_gi_reservoir_prior`） |
+| 镜面反射资产（v2.6 处置：转正） | `post_graph.rs:215`（`post_ssr_trace`）、`:263`（`post_spec_gi_reservoir_prior`）、`spec_gi_*.wesl`；此前既不在 §3.4 净删名单也不在转正名单（§0.10 第 5 条） |
 | 光照模块只做输入、数学在 golden/shader | `pkg/prism_render_scene/src/lighting/mod.rs:1-15` |
 | 环境探针 → SH 投影 | `pkg/prism_render_scene/src/lighting/probe.rs:1-16`（`project_image_to_sh:85`、`EnvironmentProbeCache:96`） |
 | 光照 ABI 的 WESL 孪生 | `pkg/prism_render_scene/src/shaders/lighting.wesl`（`sample_punctual_light:139`、`sh_irradiance:208`、`env_brdf_approx:219`） |
@@ -1302,7 +1373,7 @@ UE 靠 cvars + 人肉排查，Prism 靠结构化诊断——这是最便宜、�
 | 虚拟资源客户端与页池设计（已声明未实现） | `docs/prism_rendering_architecture_zh.md` §8 |
 | 四前端唯一执行路径 | `docs/prism_material_pipeline_refactor_zh.md`（步骤 4：缓存命中 → `IncomingRadiance`；未命中 → 屏幕空间直接积分） |
 | bevy 轨移植切片 | `docs/prism_render_scene_rhi_port_zh.md`（S1–S8） |
-| 新宿主已有 direct + multi-surface initial-GI GPU compute slice；OCIO texture transform 已进入 window RenderGraph 并由 present 消费，但 offscreen/headless transform 尚未接入；剩余 11 个 recipe 与 per-surface trace 尚未闭合 | `pkg/prism_render_app/src/lighting_gpu.rs`、`pkg/prism_render_app/src/display_transform_gpu.rs`、`pkg/prism_render_app/src/presentation.rs`、`pkg/prism_render_app/src/frame.rs` |
+| 新宿主已有 direct + multi-surface initial-GI GPU compute slice；OCIO 已进入 window 与 offscreen/headless RenderGraph，headless 终端输出通过 `OffscreenFrameOutput` 发布；offscreen 物理 GPU parity 已通过（宿主 graph 执行后，以 seeded target 对相同 transform graph 的多组非零 RGB/alpha 做 CPU 对拍，非零值未直接注入完整 scene host graph）；剩余 14 个 recipe 与 per-surface trace 尚未闭合 | `pkg/prism_render_app/src/lighting_gpu.rs`、`pkg/prism_render_app/src/display_transform_gpu.rs`、`pkg/prism_render_app/src/presentation.rs`、`pkg/prism_render_app/src/frame.rs`、`pkg/prism_render_app/src/systems.rs` |
 
 ---
 
