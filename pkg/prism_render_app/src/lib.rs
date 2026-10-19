@@ -70,6 +70,7 @@ mod frame;
 mod image;
 mod intent;
 mod label;
+mod lighting;
 mod material;
 mod mesh;
 mod mesh_draw;
@@ -121,6 +122,7 @@ pub use frame::{RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT};
 pub use image::GpuImage;
 pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
+pub use lighting::LightingPlanState;
 pub use material::{
     BindlessSlot, FallbackTextures, MaterialBindingLayout, MaterialParameterBuffers,
     MaterialSyncReport, MaterialTextureSlots, MaterialUploadStats, ParameterHeap, RenderMaterials,
@@ -140,10 +142,10 @@ pub use mesh_pipelines::{
 };
 pub use pipeline_cache::{
     cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,
-    PipelineBinaryCacheError, PipelineCache, PipelineCachePersistenceConfig,
-    PipelineCachePersistenceError, PipelineCachePersistenceStatus, PipelineCompiler, PipelineKey,
-    PipelineCacheDiagnostics, PipelineKeyMappingError, PipelineLookupStatus, PipelineResolution,
-    MAX_PERSISTED_PSO_CACHE_BYTES, PSO_CACHE_ABI_VERSION,
+    PipelineBinaryCacheError, PipelineCache, PipelineCacheDiagnostics,
+    PipelineCachePersistenceConfig, PipelineCachePersistenceError, PipelineCachePersistenceStatus,
+    PipelineCompiler, PipelineKey, PipelineKeyMappingError, PipelineLookupStatus,
+    PipelineResolution, MAX_PERSISTED_PSO_CACHE_BYTES, PSO_CACHE_ABI_VERSION,
 };
 pub use pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
 pub use plugin::{save_persisted_pso_cache, PrismRenderPlugin};
@@ -218,11 +220,11 @@ pub mod prelude {
     };
     pub use crate::pipeline_cache::{
         cold_key_from_pipeline_key, hash_vertex_layouts, pso_device_fingerprint,
-        PipelineBinaryCacheError, PipelineCache, PipelineCachePersistenceConfig,
-        PipelineCachePersistenceError, PipelineCachePersistenceStatus, PipelineCompiler,
-        PipelineCacheDiagnostics, PipelineKey, PipelineKeyMappingError, PipelineLookupStatus,
-        PipelineResolution,
-        MAX_PERSISTED_PSO_CACHE_BYTES, PSO_CACHE_ABI_VERSION,
+        PipelineBinaryCacheError, PipelineCache, PipelineCacheDiagnostics,
+        PipelineCachePersistenceConfig, PipelineCachePersistenceError,
+        PipelineCachePersistenceStatus, PipelineCompiler, PipelineKey, PipelineKeyMappingError,
+        PipelineLookupStatus, PipelineResolution, MAX_PERSISTED_PSO_CACHE_BYTES,
+        PSO_CACHE_ABI_VERSION,
     };
     pub use crate::pipeline_pass::{PassDescriptor, PassDescriptorClass, PassRole, PassSetError};
     pub use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};

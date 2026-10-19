@@ -311,7 +311,7 @@ impl DeviceInner {
     /// no longer used. This is deliberately separate from `create_buffer`:
     /// releasing the registration never destroys the host-owned native buffer.
     pub fn register_buffer(&self, buffer: &wgpu::Buffer) -> rhi::BufferId {
-        let id = lock(&self.inner.buffers).insert(StoredBuffer {
+        let id = lock(&self.buffers).insert(StoredBuffer {
             buffer: buffer.clone(),
         });
         convert::convert_id(id)
@@ -322,7 +322,7 @@ impl DeviceInner {
     /// The ID is table-local and becomes stale immediately. The native buffer
     /// remains alive through the host's handle and any command-buffer refs.
     pub fn release_buffer(&self, id: rhi::BufferId) {
-        lock(&self.inner.buffers).remove(convert::convert_id(id));
+        lock(&self.buffers).remove(convert::convert_id(id));
     }
 
     /// Registers an externally-created texture (e.g. a swapchain image) into the

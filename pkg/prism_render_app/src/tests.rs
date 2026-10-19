@@ -18,6 +18,7 @@ use std::collections::BTreeSet;
 use crate::config::RenderAppConfig;
 use crate::intent::{RenderIntent, RenderViewport};
 use crate::label::{Render, RenderApp};
+use crate::lighting::LightingPlanState;
 use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
@@ -1969,6 +1970,20 @@ fn render_schedule_runs_each_frame_and_submits_a_frame() {
         "the extract ran once per frame and advanced the record"
     );
     assert_eq!(record.viewport, RenderViewport::from_extent(EXTENT));
+    let plan = render
+        .world
+        .get_resource::<LightingPlanState>()
+        .expect("the render world owns the unified lighting plan");
+    assert_eq!(plan.compile_count, FRAMES);
+    assert_eq!(stats.lighting_plan_compiles, FRAMES);
+    assert_eq!(
+        stats.lighting_recipes_selected,
+        plan.plan.recipes.len() as u64
+    );
+    assert_eq!(
+        stats.lighting_recipes_rejected,
+        plan.plan.rejected.len() as u64
+    );
 }
 
 /// The render sub-app owns the GPU state; the main world never sees it.

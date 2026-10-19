@@ -28,6 +28,12 @@ pub struct RenderFrameStats {
     pub draws_queued: u64,
     /// The total number of queued draws recorded across every recorded frame.
     pub draws_recorded: u64,
+    /// Number of frames whose unified lighting/GI plan was compiled.
+    pub lighting_plan_compiles: u64,
+    /// Number of recipes admitted by the most recent plan.
+    pub lighting_recipes_selected: u64,
+    /// Number of recipes rejected by the most recent plan with a reason.
+    pub lighting_recipes_rejected: u64,
     /// The viewport of the most recently recorded frame, empty or not.
     pub last_viewport: RenderViewport,
 }
