@@ -2,7 +2,7 @@
 
 > 状态：架构基线（契约层与计划入口已实施）；文中所有帧预算、带宽、周期数仍为**设计目标**，非实测。
 > 修订：v2.2 修正 v2.1 的 8 处问题（1 处误差模型错误、1 处混合统计前提缺失、2 处契约设计缺陷、4 处未定义或低估的验收），逐条见 §0.5；v2.3 修正 v2.2 的 6 处（误差不等式方向、variance 的测量阶段、Conservative 权重的粒度、submission/输出的状态机、S1 与决策 #4 的矛盾、P7 的范围蔓延），逐条见 §0.6；v2.4 修正 v2.3 的 4 处（上置信乘子的形式、Conservative 的标量与向量不一致、QP 成本的未验证假设、验收矩阵缺分位与规则自相矛盾），逐条见 §0.7；v2.5 修正 v2.4 的 4 处（Trace 契约未闭合、α 边界的伪精确断言、退路 ③ 与单权重混合矛盾、验收矩阵的 H/S 未成列），逐条见 §0.8。**本文的工期与验收仍是待验证的假设，不是承诺。**
-> 基线：`main @ b3bc688d2`（2026-10-19），并包含本轮未提交的 GPU 执行闭环改动；已在 Apple M2 Metal 跨沙盒验证最小 compute 路径。本文仍不把设计目标、完整物理 recipe 或最终画质验收写成已完成事实。
+> 基线：`main @ c9b44c6ed`（2026-10-19）；已在 Apple M2 Metal 跨沙盒验证最小 compute 路径。本文仍不把设计目标、完整物理 recipe 或最终画质验收写成已完成事实。
 > 范围：`pkg/` 内光照、阴影、全局光照、虚拟流送、增量更新的**架构**演进；不含 `crates/bevy_*` 旧栈改造，也不含具体 GI 算法推导。
 > 与既有文档的关系：**不是** GI 算法设计（那是 `prism_gi_lumen_design_zh.md` v4 的职责），而是让 13 个光照/GI 技术能共存、可预算、可维护、可扩展的**架构层**方案。
 > 关联文档：`prism_gi_lumen_design_zh.md`（GI 子系统设计 v4）、`prism_rendering_architecture_zh.md`（总架构与分档表）、`prism_material_pipeline_refactor_zh.md`（四前端唯一执行路径）、`prism_render_scene_rhi_port_zh.md`（bevy 轨移植切片）、`prism_derived_data_contract_zh.md`（B1 / E1 派生数据登记）。
