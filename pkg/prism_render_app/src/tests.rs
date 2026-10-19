@@ -18,7 +18,10 @@ use std::collections::BTreeSet;
 use crate::config::RenderAppConfig;
 use crate::intent::{RenderIntent, RenderViewport};
 use crate::label::{Render, RenderApp};
-use crate::lighting::{ExtractedLightingInputs, LightingPlanState, LightingSceneInputs};
+use crate::lighting::{
+    evaluate_deterministic_direct, ExtractedLightingInputs, LightingDirectionalInput,
+    LightingPlanState, LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
+};
 use crate::lighting_gpu::LightingGpuState;
 use crate::plugin::{save_persisted_pso_cache, PrismRenderPlugin};
 use crate::record::RenderRecord;
@@ -2040,12 +2043,14 @@ fn lighting_plan_uses_host_caps_scene_stats_and_budget() {
 #[test]
 fn lighting_inputs_extract_stats_and_field_epochs_into_the_render_world() {
     let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
-    app.world_mut()
-        .insert_resource(LightingSceneInputs::with_stats(SceneStats {
-            lights: 12,
-            punctual_max: 4,
-            ..SceneStats::default()
-        }));
+    let mut inputs = LightingSceneInputs::with_stats(SceneStats {
+        lights: 12,
+        punctual_max: 4,
+        ..SceneStats::default()
+    });
+    inputs.directionals = vec![LightingDirectionalInput::default(); 2];
+    inputs.punctuals = vec![LightingPunctualInput::default(); 10];
+    app.world_mut().insert_resource(inputs);
     app.world_mut()
         .resource_mut::<LightingSceneInputs>()
         .mark_changed(1, ChangeFields::LIGHTING);
@@ -2055,6 +2060,8 @@ fn lighting_inputs_extract_stats_and_field_epochs_into_the_render_world() {
     let render = app.get_sub_app(RenderApp).expect("render sub-app");
     let extracted = render.world.resource::<ExtractedLightingInputs>();
     assert_eq!(extracted.stats.lights, 12);
+    assert_eq!(extracted.directionals.len(), 2);
+    assert_eq!(extracted.punctuals.len(), 10);
     assert_eq!(extracted.journal_snapshot.sequence, 1);
     assert_eq!(extracted.journal_snapshot.epoch.lighting, 1);
 
@@ -2068,6 +2075,31 @@ fn lighting_inputs_extract_stats_and_field_epochs_into_the_render_world() {
     assert_eq!(
         stats.lighting_executions_planned,
         state.executions.len() as u64
+    );
+}
+
+#[test]
+fn deterministic_direct_cpu_oracle_accumulates_all_light_terms() {
+    let surface = LightingSurfaceInput {
+        position: [0.0, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        albedo: [0.5, 0.25, 1.0],
+        ambient: [1.0, 2.0, 3.0],
+    };
+    let directionals = [LightingDirectionalInput {
+        direction_to_light: [0.0, 1.0, 0.0],
+        visibility: 0.5,
+        illuminance: [2.0, 4.0, 8.0],
+        _padding: 0.0,
+    }];
+    let punctuals = [LightingPunctualInput {
+        position: [0.0, 2.0, 0.0],
+        intensity: [4.0, 8.0, 16.0],
+        ..LightingPunctualInput::default()
+    }];
+    assert_eq!(
+        evaluate_deterministic_direct(surface, &directionals, &punctuals),
+        [1.5, 3.0, 8.5]
     );
 }
 
@@ -2190,6 +2222,30 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         prism_render_driver_wgpu::WgpuInstance::new(),
         RenderAppConfig::new(extent),
     ));
+    let surface = LightingSurfaceInput {
+        position: [0.0, 0.0, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        albedo: [0.5, 0.25, 1.0],
+        ambient: [1.0, 2.0, 3.0],
+    };
+    let directionals = vec![LightingDirectionalInput {
+        direction_to_light: [0.0, 1.0, 0.0],
+        visibility: 0.5,
+        illuminance: [2.0, 4.0, 8.0],
+        _padding: 0.0,
+    }];
+    let punctuals = vec![LightingPunctualInput {
+        position: [0.0, 2.0, 0.0],
+        intensity: [4.0, 8.0, 16.0],
+        ..LightingPunctualInput::default()
+    }];
+    let expected = evaluate_deterministic_direct(surface, &directionals, &punctuals);
+    {
+        let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
+        inputs.surface = surface;
+        inputs.directionals = directionals;
+        inputs.punctuals = punctuals;
+    }
 
     // Pre-fill the offscreen target with opaque white, then prove the upload
     // landed before any frame is rendered.
@@ -2256,7 +2312,6 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         "the frame's clear pass overwrote the white target with opaque black"
     );
 
-    let plan = render.world.resource::<LightingPlanState>();
     let lighting = render
         .world
         .resource::<LightingGpuState<prism_render_driver_wgpu::WgpuInstance>>();
@@ -2269,10 +2324,13 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("f32-sized output")))
         .collect::<Vec<_>>();
     assert_eq!(values.len(), 4);
-    assert_eq!(values[0], plan.plan.recipes[0].ordinal() as f32);
-    assert_eq!(values[1], 0.0, "the initial plan has no invalidation epoch");
-    assert_eq!(values[2], plan.scene_stats.lights as f32);
-    assert_eq!(values[3], plan.plan.recipes.len() as f32);
+    for (actual, expected) in values[..3].iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() < 1.0e-4,
+            "GPU/CPU mismatch: {actual} vs {expected}"
+        );
+    }
+    assert_eq!(values[3], 1.0);
     assert_eq!(
         render
             .world
@@ -2453,12 +2511,7 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
         },
         Tier::Balanced,
     );
-    lighting.prepare(
-        &plan,
-        Default::default(),
-        runtime.queue(),
-        SceneStats::default(),
-    );
+    lighting.prepare(&plan, &ExtractedLightingInputs::default(), runtime.queue());
 
     let target = RenderTarget::new(runtime.device(), extent);
     let queues = RenderQueues::new();

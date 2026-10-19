@@ -111,6 +111,7 @@ pub(crate) fn execute_frame<I>(
     functions: Res<crate::DrawFunctions>,
     runtime: Res<RenderRuntimeResource<I>>,
     plan: Res<LightingPlanState>,
+    inputs: Res<crate::ExtractedLightingInputs>,
     lighting_gpu: Res<LightingGpuState<I>>,
     mut target: ResMut<RenderTarget>,
     mut stats: ResMut<RenderFrameStats>,
@@ -125,12 +126,7 @@ pub(crate) fn execute_frame<I>(
     I::Surface: Send + Sync + 'static,
 {
     let runtime = runtime.runtime();
-    lighting_gpu.prepare(
-        &plan.plan,
-        plan.journal_snapshot.epoch,
-        runtime.queue(),
-        plan.scene_stats,
-    );
+    lighting_gpu.prepare(&plan.plan, &inputs, runtime.queue());
     if windows.drive(
         runtime,
         &requests,

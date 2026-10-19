@@ -143,9 +143,25 @@ pub(crate) fn target_graph_output(
     );
     let params = graph.import_buffer(
         "prism-lighting-plan-params",
-        BufferDesc::new(16, BufferUsages::UNIFORM),
+        BufferDesc::new(80, BufferUsages::UNIFORM),
         ImportedBuffer {
             buffer: lighting.params,
+            entry_state: BufferState::initial(),
+        },
+    );
+    let directionals = graph.import_buffer(
+        "prism-lighting-directionals",
+        BufferDesc::new(0, BufferUsages::STORAGE),
+        ImportedBuffer {
+            buffer: lighting.directionals,
+            entry_state: BufferState::initial(),
+        },
+    );
+    let punctuals = graph.import_buffer(
+        "prism-lighting-punctuals",
+        BufferDesc::new(0, BufferUsages::STORAGE),
+        ImportedBuffer {
+            buffer: lighting.punctuals,
             entry_state: BufferState::initial(),
         },
     );
@@ -155,6 +171,8 @@ pub(crate) fn target_graph_output(
         |builder| {
             let _output = builder.write_storage_buffer(output);
             let _params = builder.read_uniform(params);
+            let _directionals = builder.read_storage_buffer(directionals);
+            let _punctuals = builder.read_storage_buffer(punctuals);
             move |context| {
                 context
                     .set_compute_pipeline(lighting.pipeline)

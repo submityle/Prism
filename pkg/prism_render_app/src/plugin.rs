@@ -431,6 +431,9 @@ where
         app.insert_resource(crate::LightingSceneInputs {
             stats: config.lighting_scene_stats,
             journal: prism_render_architecture::lighting::contract::ChangeJournal::new(),
+            directionals: Vec::new(),
+            punctuals: Vec::new(),
+            surface: crate::lighting::LightingSurfaceInput::default(),
         });
         app.add_extract(RenderApp, extract_render_record);
         app.add_extract(RenderApp, crate::lighting::extract_lighting_inputs);

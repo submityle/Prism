@@ -1,8 +1,8 @@
 # Prism 光照与 GI 架构演进方案（v2.5 · 提案）
 
-> 状态：架构基线（契约层与计划入口已实施）；文中所有帧预算、带宽、周期数仍为**设计目标**，非实测。
+> 状态：架构基线 + 确定性 direct-light GPU 垂直切片已实施；文中所有帧预算、带宽、周期数仍为**设计目标**，非实测。
 > 修订：v2.2 修正 v2.1 的 8 处问题（1 处误差模型错误、1 处混合统计前提缺失、2 处契约设计缺陷、4 处未定义或低估的验收），逐条见 §0.5；v2.3 修正 v2.2 的 6 处（误差不等式方向、variance 的测量阶段、Conservative 权重的粒度、submission/输出的状态机、S1 与决策 #4 的矛盾、P7 的范围蔓延），逐条见 §0.6；v2.4 修正 v2.3 的 4 处（上置信乘子的形式、Conservative 的标量与向量不一致、QP 成本的未验证假设、验收矩阵缺分位与规则自相矛盾），逐条见 §0.7；v2.5 修正 v2.4 的 4 处（Trace 契约未闭合、α 边界的伪精确断言、退路 ③ 与单权重混合矛盾、验收矩阵的 H/S 未成列），逐条见 §0.8。**本文的工期与验收仍是待验证的假设，不是承诺。**
-> 基线：`main @ c9b44c6ed`（2026-10-19）；已在 Apple M2 Metal 跨沙盒验证最小 compute 路径。本文仍不把设计目标、完整物理 recipe 或最终画质验收写成已完成事实。
+> 基线：`main`（2026-10-19）；已在 Apple M2 Metal 跨沙盒验证确定性 direct-light compute 路径。本文仍不把设计目标、完整物理 recipe 或最终画质验收写成已完成事实。
 > 范围：`pkg/` 内光照、阴影、全局光照、虚拟流送、增量更新的**架构**演进；不含 `crates/bevy_*` 旧栈改造，也不含具体 GI 算法推导。
 > 与既有文档的关系：**不是** GI 算法设计（那是 `prism_gi_lumen_design_zh.md` v4 的职责），而是让 13 个光照/GI 技术能共存、可预算、可维护、可扩展的**架构层**方案。
 > 关联文档：`prism_gi_lumen_design_zh.md`（GI 子系统设计 v4）、`prism_rendering_architecture_zh.md`（总架构与分档表）、`prism_material_pipeline_refactor_zh.md`（四前端唯一执行路径）、`prism_render_scene_rhi_port_zh.md`（bevy 轨移植切片）、`prism_derived_data_contract_zh.md`（B1 / E1 派生数据登记）。
@@ -22,9 +22,26 @@
 | render-world 计划入口 | `pkg/prism_render_app/src/lighting.rs`、`plugin.rs`、`stats.rs` | 每个抽取帧编译一次，统计选中/拒绝数量，`explain()` 可追溯；保留字段 epoch 与失效计数 |
 | 计划输入配置与抽取 | `pkg/prism_render_app/src/config.rs`、`lighting.rs`、`plugin.rs` | host 可注入 `SceneStats`、`FrameResourceBudget`、`PlanCaps`、`Tier`，并通过 `LightingSceneInputs`/`ChangeJournal` 跨主世界→render-world 传递快照 |
 | wgpu 外部 buffer 注册 | `os-backends/prism_render_driver_wgpu/src/device.rs` | 修复 `DeviceInner` 自身字段的错误访问，恢复后端编译路径 |
-| GPU 执行闭环 | `pkg/prism_render_app/src/lighting_gpu.rs`、`frame.rs`、`presentation.rs` | `LightingPlan` 选择 recipe 后更新持久 params buffer；graph 声明 storage/uniform 访问并记录真实 compute pipeline、bind group、dispatch；设备重建通过 replay 重新创建 bundle；wgpu 测试 readback 验证 recipe、epoch、灯数和 recipe 数量 |
+| GPU 执行闭环 | `pkg/prism_render_app/src/lighting_gpu.rs`、`frame.rs`、`systems.rs` | `LightingPlan` 驱动确定性 direct-light recipe；上传 surface、方向光、点/聚光灯和计数；graph 声明 storage/uniform 读写并记录真实 compute pipeline、bind group、dispatch；设备重建通过 replay 重新创建 bundle；Metal/wgpu readback 与 CPU oracle 对拍 |
 
-本节只记录已经存在的调用链，不把设计目标或未实测的帧预算写成性能结论。当前新宿主已经完成计划编译、输入抽取、字段 epoch 观察，以及一个真实的 backend-agnostic compute 执行闭环：`LightingPlan` 的选定结果进入持久参数 buffer，render graph 声明资源状态并记录 pipeline、bind group 与 dispatch，设备重建由 replay 重新建立资源，硬件测试从 output buffer readback 复核结果。这个 kernel 是确定性的执行/遥测 vertical slice，用来闭合生命周期和验证准入路径，**不等同于 13 个 recipe 的完整物理 lighting/GI 实现**，也不代表 H1–H4 / S1–S6 已通过。后续完整 recipe 必须继续通过同一 `LightingPlan` 准入，不能在子系统内新增旁路开关。
+本节只记录已经存在的调用链，不把设计目标或未实测的帧预算写成性能结论。
+
+#### 已完成
+
+- `FieldEpoch`、`ChangeJournal`、checkpoint、`TraceQuery`、`TraceSubmission`、`Contrib`、`BlendOperator`、13 个 recipe 白名单和 `BudgetCompiler` 已落成并接入新宿主的计划编译链。
+- `LightingSceneInputs` 已改为真实输入契约：surface sample、directional lights、point/spot lights；抽取到 render-world 后参与 GPU 上传。
+- `SpecializedDeterministic` 的当前 GPU 实例已是真实 Lambert direct-light recipe：ambient、方向光漫反射、点光 inverse-square、range window、spot cone、visibility、albedo modulation 和 HDR radiance 输出。
+- 持久 GPU bundle、uniform/storage buffers、bind group、compute pipeline、render graph resource declaration、dispatch 和 device-loss replay 已闭合。
+- CPU oracle 与 GPU readback 已对拍；null backend graph 测试和 Apple M2 Metal readback 测试通过。
+
+#### 未完成
+
+- 其余 12 个 recipe 尚未接入真实 GPU 执行：RIS/MegaLights、阴影槽位、随机直接光、DDGI/brick GI、screen probe/ReSTIR、sparse SDF GI、path-traced offline 等仍是架构契约或旧实现资产，不得按“已完成”计。
+- 当前 direct recipe 仍是单 surface sample 验证路径，不是完整屏幕/视图 lighting resolve；尚未接入完整材质 BRDF、可见性场景查询、阴影、反射、透明、后处理和多视图输出。
+- GI 的统一 `RayScheduler` 真实后端、cache/page pool/virtual streaming、时空重建与 denoise、bias/variance 实测标定、增量回放等仍未达到 P3–P6 验收。
+- P7a 的 GI 端到端垂直切片、旧 `prism_render_scene` parity、DebugView/EXPLAIN/variant gate、P8 收敛项以及 H1–H4 × S1–S6 的最终性能和画质矩阵均未完成。
+
+因此当前结论是：**架构契约与计划入口已完成；确定性 direct-light GPU 垂直切片已完成；完整 lighting/GI 重构尚未完成。** 后续实现必须继续沿用同一 `LightingPlan` 和新输入契约，不保留旧 API，也不能在子系统内新增旁路开关。
 
 ---
 
