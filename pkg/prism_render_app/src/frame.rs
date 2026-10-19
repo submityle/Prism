@@ -10,6 +10,7 @@ use prism_render_graph::{
     BufferDesc, BufferHandle, ImportedBuffer, ImportedTexture, PassFlags, RenderGraph, TextureDesc,
 };
 
+use crate::display_transform_gpu::{DisplayTransformGpuError, OffscreenDisplayTransform};
 use crate::draw::DrawFunctions;
 use crate::lighting_gpu::{LightingGpuPass, OUTPUT_BYTES};
 use crate::queue::RenderQueues;
@@ -387,4 +388,27 @@ pub(crate) fn target_graph_output(
     stages.assert_contract();
     graph.blackboard_mut().set(stages);
     (graph, color)
+}
+
+/// Builds the headless host frame and appends its display transform to the same
+/// graph. The source remains the persistent linear frame target; the returned
+/// display texture is the graph's terminal output for readback/offline hosts.
+pub(crate) fn target_graph_with_display_transform(
+    target: &RenderTarget,
+    queues: &RenderQueues,
+    functions: &DrawFunctions,
+    lighting: Option<LightingGpuPass>,
+    transform: &OffscreenDisplayTransform,
+    queue: &dyn prism_render_driver::RenderQueue,
+) -> Result<RenderGraph, DisplayTransformGpuError> {
+    let (mut graph, source) = target_graph_output(target, queues, functions, lighting);
+    let output = transform.append(&mut graph, queue, source)?;
+    let mut stages = *graph
+        .blackboard()
+        .get::<FrameGraphStages>()
+        .expect("the host frame graph must publish its stage receipt");
+    stages.present_source = output;
+    stages.assert_contract();
+    graph.blackboard_mut().set(stages);
+    Ok(graph)
 }

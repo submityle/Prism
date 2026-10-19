@@ -5,10 +5,11 @@ use std::sync::{
     Arc,
 };
 
+use prism_ecs::prelude::Resource;
 use prism_render_architecture::lighting::ocio::{OcioConfig, OcioConfigError};
 use prism_render_driver as rhi;
 use prism_render_graph::{ImportedTexture, PassFlags, RenderGraph, TextureDesc, TextureHandle};
-use rhi::{Extent3d, RenderDevice, RenderQueue, TextureViewId};
+use rhi::{Extent3d, RenderDevice, RenderQueue, TextureId, TextureViewId};
 
 const WORKGROUP_EDGE: u32 = 8;
 const PARAM_BYTES: u64 = 48;
@@ -39,7 +40,7 @@ pub struct DisplayTransformGpu {
     pipeline: rhi::ComputePipelineId,
     params: rhi::BufferId,
     bind_group: rhi::BindGroupId,
-    output: rhi::TextureId,
+    output: TextureId,
     output_view: TextureViewId,
     extent: Extent3d,
     in_flight: Arc<AtomicUsize>,
@@ -175,7 +176,10 @@ impl DisplayTransformGpu {
                 texture: self.output,
                 default_view: self.output_view,
                 entry_state: rhi::TextureState::initial(),
-                exit_state: rhi::TextureState::shader_read(rhi::PipelineStages::FRAGMENT_SHADER),
+                // The headless host exposes this terminal image for readback;
+                // window presentation adds a graph read that transitions it to
+                // fragment access before the graph's final copy-source state.
+                exit_state: rhi::TextureState::copy_src(),
                 mip_levels: 1,
                 array_layers: 1,
             },
@@ -206,8 +210,187 @@ impl DisplayTransformGpu {
     }
 
     /// Texture containing the latest encoded output, suitable for graph readback.
-    pub fn output_texture(&self) -> rhi::TextureId {
+    pub fn output_texture(&self) -> TextureId {
         self.output
+    }
+
+    fn abandon_device_generation(&self) {
+        self.destroy_allowed.store(false, Ordering::Release);
+    }
+}
+
+/// Render-world owner for the headless frame's display transform.
+///
+/// The offscreen product uses the same canonical sRGB configuration as window
+/// presentation. The transform is tied to the current frame target and device
+/// generation; the host rebuilds it after a resize or device recovery.
+#[derive(Resource)]
+pub(crate) struct OffscreenDisplayTransform {
+    config: OcioConfig,
+    transform: Option<DisplayTransformGpu>,
+    extent: Option<Extent3d>,
+    device_generation: Option<u64>,
+}
+
+/// Latest submitted headless/offscreen display-space frame.
+///
+/// The texture is owned by the render device and remains valid until the next
+/// target resize, device-generation replacement, or render-app shutdown. A
+/// consumer can use the published submission id to coordinate readback with
+/// its host; the render queue itself preserves ordering for subsequent work.
+#[derive(Resource, Default)]
+pub struct OffscreenFrameOutput {
+    latest: Option<OffscreenOutputFrame>,
+}
+
+/// Stable metadata for one submitted offscreen frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OffscreenOutputFrame {
+    texture: TextureId,
+    extent: Extent3d,
+    frame_index: u64,
+    submission: u64,
+    device_generation: u64,
+}
+
+impl OffscreenOutputFrame {
+    pub(crate) const fn new(
+        texture: TextureId,
+        extent: Extent3d,
+        frame_index: u64,
+        submission: u64,
+        device_generation: u64,
+    ) -> Self {
+        Self {
+            texture,
+            extent,
+            frame_index,
+            submission,
+            device_generation,
+        }
+    }
+
+    /// Display-encoded output texture for this frame.
+    #[must_use]
+    pub const fn texture(self) -> TextureId {
+        self.texture
+    }
+
+    /// Physical pixel extent of the output texture.
+    #[must_use]
+    pub const fn extent(self) -> Extent3d {
+        self.extent
+    }
+
+    /// Extracted frame index that produced this output.
+    #[must_use]
+    pub const fn frame_index(self) -> u64 {
+        self.frame_index
+    }
+
+    /// Runtime submission sequence for ordering downstream work/readback.
+    #[must_use]
+    pub const fn submission(self) -> u64 {
+        self.submission
+    }
+
+    /// Device generation owning [`Self::texture`].
+    #[must_use]
+    pub const fn device_generation(self) -> u64 {
+        self.device_generation
+    }
+}
+
+impl OffscreenFrameOutput {
+    /// Most recently submitted transformed frame, if one has been produced.
+    #[must_use]
+    pub const fn latest(&self) -> Option<OffscreenOutputFrame> {
+        self.latest
+    }
+
+    pub(crate) fn publish(&mut self, frame: OffscreenOutputFrame) {
+        self.latest = Some(frame);
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.latest = None;
+    }
+}
+
+impl Default for OffscreenDisplayTransform {
+    fn default() -> Self {
+        Self::new(OcioConfig::srgb())
+    }
+}
+
+impl OffscreenDisplayTransform {
+    pub(crate) fn new(config: OcioConfig) -> Self {
+        Self {
+            config,
+            transform: None,
+            extent: None,
+            device_generation: None,
+        }
+    }
+
+    pub(crate) fn ensure(
+        &mut self,
+        device: Arc<dyn RenderDevice + Send + Sync>,
+        source_view: TextureViewId,
+        extent: Extent3d,
+        device_generation: u64,
+    ) -> Result<(), DisplayTransformGpuError> {
+        let current = self.transform.is_some()
+            && self.extent == Some(extent)
+            && self.device_generation == Some(device_generation);
+        if current {
+            return Ok(());
+        }
+        if self
+            .device_generation
+            .is_some_and(|generation| generation != device_generation)
+        {
+            if let Some(previous) = &self.transform {
+                previous.abandon_device_generation();
+            }
+        }
+        self.transform = None;
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let destroy_allowed = Arc::new(AtomicBool::new(true));
+        self.transform = Some(DisplayTransformGpu::new(
+            device,
+            source_view,
+            extent,
+            in_flight,
+            destroy_allowed,
+        )?);
+        self.extent = Some(extent);
+        self.device_generation = Some(device_generation);
+        Ok(())
+    }
+
+    pub(crate) fn append(
+        &self,
+        graph: &mut RenderGraph,
+        queue: &dyn RenderQueue,
+        source: TextureHandle,
+    ) -> Result<TextureHandle, DisplayTransformGpuError> {
+        self.transform
+            .as_ref()
+            .expect("offscreen display transform is prepared before graph construction")
+            .append(graph, queue, &self.config, source)
+    }
+
+    pub(crate) fn output_texture(&self) -> Option<TextureId> {
+        self.transform
+            .as_ref()
+            .map(DisplayTransformGpu::output_texture)
+    }
+
+    pub(crate) fn allow_destruction(&self, allowed: bool) {
+        if let Some(transform) = &self.transform {
+            transform.destroy_allowed.store(allowed, Ordering::Release);
+        }
     }
 }
 
@@ -531,5 +714,156 @@ mod tests {
         }
         device.destroy_texture_view(input_view);
         device.destroy_texture(input);
+    }
+
+    #[test]
+    fn physical_gpu_offscreen_host_graph_transforms_and_reads_back_frame() {
+        let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
+            Ok(device_and_queue) => device_and_queue,
+            Err(HardwareDeviceError::NoAdapter) => {
+                assert!(
+                    !require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1 but no physical GPU adapter was found"
+                );
+                eprintln!("SKIPPED offscreen OCIO graph: no adapter");
+                return;
+            }
+            Err(HardwareDeviceError::NonHardware(evidence)) => {
+                assert!(
+                    !require_hardware_gpu(),
+                    "PRISM_REQUIRE_GPU=1 requires a physical GPU; observed {evidence}"
+                );
+                eprintln!("SKIPPED offscreen OCIO graph: non-hardware adapter: {evidence}");
+                return;
+            }
+            Err(HardwareDeviceError::Device(error)) => {
+                panic!("physical GPU was found but device creation failed: {error}");
+            }
+        };
+        let device = Arc::new(device);
+        let device_dyn: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+        let extent = Extent3d::new_2d(5, 3);
+        let target = crate::target::RenderTarget::new(&*device, extent);
+        let mut display = OffscreenDisplayTransform::default();
+        display
+            .ensure(device_dyn, target.view(), extent, 0)
+            .expect("valid offscreen display transform");
+        let queues = crate::queue::RenderQueues::new();
+        let functions = crate::draw::canonical::registry();
+        let mut graph = crate::frame::target_graph_with_display_transform(
+            &target, &queues, &functions, None, &display, &queue,
+        )
+        .expect("offscreen transform pass is appended to the host frame graph");
+        let stages = *graph
+            .blackboard()
+            .get::<crate::frame::FrameGraphStages>()
+            .expect("offscreen graph publishes its stage receipt");
+        assert_eq!(
+            stages.present_passes, 0,
+            "headless graph has no window present"
+        );
+        assert_eq!(graph.pass_count(), 2, "clear then display transform");
+        graph
+            .execute(&*device, &queue)
+            .expect("offscreen host graph executes");
+
+        // The host graph's clear pass is part of the frame. Seed the persistent
+        // target after that submission, then exercise the same transform over
+        // representative non-zero linear values.
+        let pixels: [[u8; 4]; 15] = [
+            [0, 0, 0, 0],
+            [16, 32, 64, 32],
+            [32, 64, 128, 64],
+            [64, 128, 192, 96],
+            [128, 192, 255, 128],
+            [8, 80, 160, 160],
+            [24, 96, 200, 192],
+            [48, 112, 224, 224],
+            [80, 144, 240, 255],
+            [255, 128, 32, 16],
+            [200, 100, 50, 48],
+            [160, 80, 40, 80],
+            [120, 60, 30, 112],
+            [80, 40, 20, 176],
+            [40, 20, 10, 240],
+        ];
+        queue.write_texture(
+            TextureWrite {
+                texture: target.texture(),
+                mip_level: 0,
+                origin: [0, 0, 0],
+                size: extent,
+            },
+            bytemuck::cast_slice(&pixels),
+            ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(extent.width * 4),
+                rows_per_image: Some(extent.height),
+            },
+        );
+        let mut parity_graph = RenderGraph::new(extent);
+        let source_handle = parity_graph.import_texture(
+            "offscreen-parity-source",
+            TextureDesc::color(rhi::TextureFormat::Rgba8Unorm)
+                .with_usage(TextureUsages::TEXTURE_BINDING),
+            ImportedTexture {
+                texture: target.texture(),
+                default_view: target.view(),
+                entry_state: rhi::TextureState::initial(),
+                exit_state: rhi::TextureState::shader_read(rhi::PipelineStages::COMPUTE_SHADER),
+                mip_levels: 1,
+                array_layers: 1,
+            },
+        );
+        display
+            .append(&mut parity_graph, &queue, source_handle)
+            .expect("the offscreen transform accepts seeded linear pixels");
+        parity_graph
+            .execute(&*device, &queue)
+            .expect("the seeded offscreen transform graph executes");
+
+        let source = queue.read_texture_rgba8(target.texture(), extent.width, extent.height);
+        let mut frame_output = OffscreenFrameOutput::default();
+        frame_output.publish(OffscreenOutputFrame::new(
+            display.output_texture().expect("prepared output texture"),
+            extent,
+            17,
+            1,
+            0,
+        ));
+        let frame = frame_output.latest().expect("public frame receipt exists");
+        assert_eq!(frame.extent(), extent);
+        assert_eq!(frame.frame_index(), 17);
+        assert_eq!(frame.device_generation(), 0);
+        let output = queue.read_texture_rgba8(frame.texture(), extent.width, extent.height);
+        let config = OcioConfig::srgb();
+        assert_eq!(
+            source.as_slice(),
+            bytemuck::cast_slice::<[u8; 4], u8>(&pixels)
+        );
+        for (index, (source, actual)) in source
+            .chunks_exact(4)
+            .zip(output.chunks_exact(4))
+            .enumerate()
+        {
+            let linear = [
+                f32::from(source[0]) / 255.0,
+                f32::from(source[1]) / 255.0,
+                f32::from(source[2]) / 255.0,
+            ];
+            let expected = config
+                .reference_transform(linear)
+                .expect("finite frame target input");
+            for channel in 0..3 {
+                let actual = f32::from(actual[channel]) / 255.0;
+                assert!(
+                    (actual - expected[channel]).abs() <= 0.012,
+                    "pixel={index} channel={channel}: GPU={actual} CPU={}",
+                    expected[channel]
+                );
+            }
+            assert_eq!(actual[3], source[3], "alpha must pass through");
+        }
+        target.destroy(&*device);
     }
 }

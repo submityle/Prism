@@ -1,6 +1,6 @@
 //! The systems that bridge the main world and the render sub-app.
 
-use prism_ecs::prelude::{Res, ResMut};
+use prism_ecs::prelude::{Res, ResMut, SystemParam};
 use prism_ecs::world::World;
 use prism_render_architecture::lighting::contract::JournalSnapshot;
 use prism_render_driver::{FrameSync, Instance};
@@ -53,6 +53,13 @@ pub(crate) enum FrameExecutionOutcome {
     Presented,
     Failed,
     Mixed,
+}
+
+#[derive(SystemParam)]
+pub(crate) struct OffscreenFrameTargets<'w> {
+    target: ResMut<'w, RenderTarget>,
+    display: ResMut<'w, crate::display_transform_gpu::OffscreenDisplayTransform>,
+    output: ResMut<'w, crate::display_transform_gpu::OffscreenFrameOutput>,
 }
 
 impl FrameExecutionTrace {
@@ -194,7 +201,7 @@ pub(crate) fn execute_frame<I>(
     plan: Res<LightingPlanState>,
     inputs: Res<crate::ExtractedLightingInputs>,
     lighting_gpu: Res<LightingGpuState<I>>,
-    mut target: ResMut<RenderTarget>,
+    mut offscreen: OffscreenFrameTargets,
     mut stats: ResMut<RenderFrameStats>,
     requests: Res<crate::WindowRenderRequests<I>>,
     overrides: Res<crate::WindowRenderQueues>,
@@ -243,12 +250,55 @@ pub(crate) fn execute_frame<I>(
     // The main world may have resized the frame; reallocate the target to match.
     // Drain in-flight frames first, since an outstanding frame may still read the
     // texture being replaced.
-    if target.viewport() != viewport {
-        let _ = runtime.wait_idle();
-        target.resize(runtime.device(), viewport);
+    if offscreen.target.viewport() != viewport {
+        if !runtime.wait_idle() {
+            stats.frames_failed += 1;
+            stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+            return;
+        }
+        offscreen.output.invalidate();
+        offscreen.target.resize(runtime.device(), viewport);
     }
 
-    let graph = frame::target_graph(&target, &queues, &functions, lighting_pass);
+    if offscreen
+        .output
+        .latest()
+        .is_some_and(|frame| frame.device_generation() != runtime.device_generation())
+    {
+        offscreen.output.invalidate();
+    }
+
+    let display_device: std::sync::Arc<dyn prism_render_driver::RenderDevice + Send + Sync> =
+        runtime.device_handle();
+    if offscreen
+        .display
+        .ensure(
+            display_device,
+            offscreen.target.view(),
+            offscreen.target.viewport().extent(),
+            runtime.device_generation(),
+        )
+        .is_err()
+    {
+        stats.frames_failed += 1;
+        stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+        return;
+    }
+    let graph = match frame::target_graph_with_display_transform(
+        &offscreen.target,
+        &queues,
+        &functions,
+        lighting_pass,
+        &offscreen.display,
+        runtime.queue(),
+    ) {
+        Ok(graph) => graph,
+        Err(_) => {
+            stats.frames_failed += 1;
+            stats.execution_trace.outcome = FrameExecutionOutcome::Failed;
+            return;
+        }
+    };
     let stages = *graph
         .blackboard()
         .get::<frame::FrameGraphStages>()
@@ -263,7 +313,19 @@ pub(crate) fn execute_frame<I>(
     let passes = graph.pass_count() as u64;
     let draws = queues.len() as u64;
     match runtime.execute_tracked(graph) {
-        Ok(_) => {
+        Ok(submission) => {
+            offscreen
+                .output
+                .publish(crate::display_transform_gpu::OffscreenOutputFrame::new(
+                    offscreen
+                        .display
+                        .output_texture()
+                        .expect("the display transform was prepared before graph construction"),
+                    viewport.extent(),
+                    record.frame_index,
+                    submission,
+                    runtime.device_generation(),
+                ));
             stats.execution_trace.outcome = FrameExecutionOutcome::Submitted;
             stats.frames_submitted += 1;
             stats.passes_declared += passes;

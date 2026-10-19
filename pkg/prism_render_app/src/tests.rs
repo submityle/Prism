@@ -1967,8 +1967,8 @@ fn render_schedule_runs_each_frame_and_submits_a_frame() {
     );
     assert_eq!(
         stats.passes_declared,
-        FRAMES * 4,
-        "each recorded frame declares three lighting compute passes and one clear pass"
+        FRAMES * 5,
+        "each recorded frame declares three lighting passes, one clear, and one OCIO pass"
     );
     assert_eq!(stats.last_viewport, RenderViewport::from_extent(EXTENT));
 
@@ -2787,6 +2787,64 @@ fn lighting_plan_records_compute_pipeline_bind_group_and_dispatch() {
             "prism-lighting-composite",
         ]
     );
+}
+
+#[test]
+fn offscreen_frame_graph_runs_shared_display_transform_before_terminal_output() {
+    use prism_render_architecture::lighting::ocio::{
+        OcioDisplayGamut, OcioToneMapping, OcioTransferFunction,
+    };
+    use prism_render_driver::Pass;
+
+    let extent = Extent3d::new_2d(8, 4);
+    let mut runtime = RenderRuntime::headless(NullInstance::new(), extent)
+        .expect("the null runtime always comes up");
+    let target = RenderTarget::new(runtime.device(), extent);
+    let config = prism_render_architecture::lighting::ocio::OcioConfig {
+        tone_mapping: OcioToneMapping::Aces,
+        display_gamut: OcioDisplayGamut::DisplayP3,
+        transfer_function: OcioTransferFunction::Gamma22,
+        ..Default::default()
+    };
+    let mut transform = crate::display_transform_gpu::OffscreenDisplayTransform::new(config);
+    transform
+        .ensure(
+            runtime.device_handle(),
+            target.view(),
+            extent,
+            runtime.device_generation(),
+        )
+        .expect("the display transform resources are prepared");
+    let graph = crate::frame::target_graph_with_display_transform(
+        &target,
+        &RenderQueues::new(),
+        &DrawFunctions::new(),
+        None,
+        &transform,
+        runtime.queue(),
+    )
+    .expect("the configured transform appends to the host graph");
+    let stages = *graph
+        .blackboard()
+        .get::<crate::frame::FrameGraphStages>()
+        .expect("the host frame graph publishes its stages");
+    stages.assert_contract();
+    assert!(transform.output_texture().is_some());
+    let capture = CapturingQueue::default();
+    graph
+        .execute(runtime.device(), &capture)
+        .expect("the offscreen transform graph records on the null backend")
+        .release(runtime.device());
+    let labels = capture
+        .take()
+        .into_iter()
+        .flat_map(|buffer| buffer.passes)
+        .filter_map(|pass| match pass {
+            Pass::Compute { label, .. } => label,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(labels, ["ocio-display-transform"]);
 }
 
 #[test]
@@ -3924,8 +3982,8 @@ fn the_frame_records_the_queued_draws() {
         .expect("the submitted frame publishes its graph receipt");
     assert_eq!(
         stats.passes_declared,
-        u64::from(stages.scene_passes + stages.lighting_dispatches),
-        "the frame graph pass count matches its stage receipt"
+        u64::from(stages.scene_passes + stages.lighting_dispatches + 1),
+        "the frame graph includes the display transform in addition to scene and lighting"
     );
     assert!(
         render.world.resource::<RenderQueues>().is_empty(),

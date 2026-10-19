@@ -3,6 +3,7 @@
 use prism_render_architecture::lighting::contract::{
     FrameResourceBudget, PlanCaps, SceneStats, Tier,
 };
+use prism_render_architecture::lighting::ocio::OcioConfig;
 use prism_render_driver::Extent3d;
 use prism_render_runtime::DEFAULT_FRAMES_IN_FLIGHT;
 
@@ -44,6 +45,8 @@ pub struct RenderAppConfig {
     pub lighting_caps: PlanCaps,
     /// Initial lighting/GI quality tier.
     pub lighting_tier: Tier,
+    /// Display transform shared by window presentation and offscreen output.
+    pub display_transform: OcioConfig,
 }
 
 impl RenderAppConfig {
@@ -75,6 +78,7 @@ impl RenderAppConfig {
             deterministic_npr: false,
         },
         lighting_tier: Tier::Balanced,
+        display_transform: OcioConfig::srgb(),
     };
 
     /// A configuration for `extent`, keeping the default frames-in-flight bound.
@@ -90,6 +94,7 @@ impl RenderAppConfig {
             lighting_budget: Self::DEFAULT.lighting_budget,
             lighting_caps: Self::DEFAULT.lighting_caps,
             lighting_tier: Self::DEFAULT.lighting_tier,
+            display_transform: Self::DEFAULT.display_transform,
         }
     }
 
@@ -148,6 +153,13 @@ impl RenderAppConfig {
     #[must_use]
     pub const fn with_lighting_tier(mut self, tier: Tier) -> Self {
         self.lighting_tier = tier;
+        self
+    }
+
+    /// Sets the display transform shared by every output path.
+    #[must_use]
+    pub const fn with_display_transform(mut self, transform: OcioConfig) -> Self {
+        self.display_transform = transform;
         self
     }
 }

@@ -321,6 +321,13 @@ where
             .world
             .insert_resource(RenderRuntimeResource::new(runtime));
         render.world.insert_resource(target);
+        // Both output paths consume the configuration copied from RenderAppConfig.
+        render.world.insert_resource(
+            crate::display_transform_gpu::OffscreenDisplayTransform::new(config.display_transform),
+        );
+        render
+            .world
+            .insert_resource(crate::display_transform_gpu::OffscreenFrameOutput::default());
         render.world.insert_resource(RenderRecord::default());
         render.world.insert_resource(RenderFrameStats::default());
         render
@@ -491,6 +498,12 @@ where
                 .get_resource::<RenderRuntimeResource<I>>()
                 .is_some_and(|runtime| runtime.runtime().wait_idle())
         };
+        if let Some(display) = render
+            .world
+            .get_resource::<crate::display_transform_gpu::OffscreenDisplayTransform>()
+        {
+            display.allow_destruction(idle && !recovering && !device_lost);
+        }
         persist_pso_cache_after_idle::<I>(&mut render.world, idle);
         if render
             .world

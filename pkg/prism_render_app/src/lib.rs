@@ -112,7 +112,9 @@ mod tests;
 pub use bin_queue::{bin_indirect_args, BinQueueOutcome};
 pub use config::RenderAppConfig;
 pub use device_loss::{DeviceLossSignal, DeviceRecoveryStatus};
-pub use display_transform_gpu::{DisplayTransformGpu, DisplayTransformGpuError};
+pub use display_transform_gpu::{
+    DisplayTransformGpu, DisplayTransformGpuError, OffscreenFrameOutput, OffscreenOutputFrame,
+};
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
 pub use ecs_columns::{
     register_gpu_column, EcsColumnDiscoveryStats, EcsColumnUploadError, EcsColumnUploadStats,
@@ -202,6 +204,9 @@ pub use views::{RenderView, RenderViews};
 pub mod prelude {
     pub use crate::bin_queue::{bin_indirect_args, BinQueueOutcome};
     pub use crate::config::RenderAppConfig;
+    pub use crate::display_transform_gpu::{
+        DisplayTransformGpu, DisplayTransformGpuError, OffscreenFrameOutput, OffscreenOutputFrame,
+    };
     pub use crate::draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
     pub use crate::ecs_columns::{
         register_gpu_column, EcsColumnDiscoveryStats, EcsColumnUploadError, EcsColumnUploadStats,

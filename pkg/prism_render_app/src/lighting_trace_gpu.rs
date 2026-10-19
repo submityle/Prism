@@ -86,6 +86,8 @@ pub enum TraceGpuError {
     BufferSizeOverflow,
     /// The dispatch exceeds the device's workgroup limit.
     DispatchLimit,
+    /// The caller-provided hit buffer is smaller than the packed hit output.
+    OutputBufferTooSmall,
     /// The GPU detected a traversal safety-bound violation.
     TraversalFault(usize),
 }
@@ -213,6 +215,65 @@ pub struct TraceBufferCapacityStats {
     pub allocations: u64,
 }
 
+/// A buffer that the render graph must import before recording a trace pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TraceGraphBuffer {
+    /// Backend buffer identity.
+    pub id: rhi::BufferId,
+    /// Minimum byte range used by this trace dispatch.
+    pub size_bytes: u64,
+}
+
+/// Persistent input resources and dispatch recorder for one graph trace pass.
+///
+/// The originating pass retains every graph bind group until it is dropped,
+/// and retired input buffers are retained for the same period. Keep the pass
+/// alive through graph execution and queue submission. The graph must import
+/// `nodes`, `triangles`, and `rays` as
+/// storage reads and `hits` as a storage write. The prepared input buffers are
+/// not replaced while this recorder exists because preparation requires a
+/// mutable borrow of the pass.
+#[derive(Clone, Copy)]
+pub struct TraceGraphRecorder {
+    pub nodes: TraceGraphBuffer,
+    pub triangles: TraceGraphBuffer,
+    pub rays: TraceGraphBuffer,
+    pub hits: TraceGraphBuffer,
+    pipeline: rhi::ComputePipelineId,
+    bind_group: rhi::BindGroupId,
+    workgroups: u32,
+}
+
+impl TraceGraphRecorder {
+    /// Appends the traversal to a caller-owned encoder; never submits it.
+    pub fn record(&self, encoder: &mut rhi::CommandEncoder) {
+        encoder.push_compute_pass(
+            Some("lighting-software-bvh-trace".into()),
+            vec![
+                rhi::ComputeCommand::SetPipeline(self.pipeline),
+                rhi::ComputeCommand::SetBindGroup {
+                    index: 0,
+                    bind_group: self.bind_group,
+                    dynamic_offsets: vec![],
+                },
+                rhi::ComputeCommand::Dispatch {
+                    x: self.workgroups,
+                    y: 1,
+                    z: 1,
+                },
+            ],
+        );
+    }
+
+    /// Records this dispatch into the render graph's compute execute context.
+    pub fn record_graph(&self, context: &mut prism_render_graph::ExecuteContext<'_>) {
+        context
+            .set_compute_pipeline(self.pipeline)
+            .set_compute_bind_group(0, self.bind_group, vec![])
+            .dispatch(self.workgroups, 1, 1);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ResidentBuffer {
     id: rhi::BufferId,
@@ -237,6 +298,7 @@ pub struct LightingTraceGpu {
     triangles: Option<ResidentBuffer>,
     rays: Option<ResidentBuffer>,
     retired_buffers: Vec<rhi::BufferId>,
+    graph_bind_groups: Vec<rhi::BindGroupId>,
     packed_rays: Vec<u32>,
     allocations: u64,
 }
@@ -282,6 +344,7 @@ impl LightingTraceGpu {
             triangles: None,
             rays: None,
             retired_buffers: Vec::new(),
+            graph_bind_groups: Vec::new(),
             packed_rays: Vec::new(),
             allocations: 0,
         }
@@ -298,16 +361,22 @@ impl LightingTraceGpu {
         }
     }
 
-    /// Uploads the explicit scene/ray batch, executes the WGSL traversal, then
-    /// leaves result readback to the caller through its backend's readback API.
-    /// `output` must have STORAGE | COPY_SRC and enough space for 8 words/ray.
-    pub fn encode_and_submit(
+    /// Uploads scene and ray inputs into persistent capacity-managed buffers,
+    /// then prepares a recorder for insertion into a caller-owned graph pass.
+    ///
+    /// No command buffer is created and the queue is never submitted here.
+    /// `output` must have storage usage and at least `rays.len() * 32` bytes.
+    /// Keep `self` alive through graph execution and submission. Bind groups
+    /// are retained until `self` is dropped; the returned recorder is a small
+    /// copyable command description suitable for a `'static` graph closure.
+    pub fn prepare_graph(
         &mut self,
         queue: &dyn RenderQueue,
         scene: &PackedTraceScene,
         rays: &[TraceRay],
         output: rhi::BufferId,
-    ) -> Result<(), TraceGpuError> {
+        output_size_bytes: u64,
+    ) -> Result<TraceGraphRecorder, TraceGpuError> {
         scene.validate()?;
         validate_rays(rays)?;
         if rays.is_empty() {
@@ -319,13 +388,16 @@ impl LightingTraceGpu {
             byte_size(rays.len(), RAY_WORDS * 4)?,
             byte_size(rays.len(), HIT_WORDS * 4)?,
         ];
+        validate_output_size(output_size_bytes, sizes[3])?;
         let caps = self.device.capabilities();
         let limit = caps.limits.max_storage_buffer_binding_size;
         if sizes.iter().any(|size| *size > limit) {
             return Err(TraceGpuError::StorageBindingLimit);
         }
-        let groups = (rays.len() as u32).div_ceil(WORKGROUP_SIZE);
-        if groups > caps.limits.max_compute_workgroups_per_dimension {
+        let workgroups = u32::try_from(rays.len())
+            .map_err(|_| TraceGpuError::DispatchLimit)?
+            .div_ceil(WORKGROUP_SIZE);
+        if workgroups > caps.limits.max_compute_workgroups_per_dimension {
             return Err(TraceGpuError::DispatchLimit);
         }
         let node_buffer = ensure_resident_buffer(
@@ -354,11 +426,55 @@ impl LightingTraceGpu {
         );
         queue.write_buffer(node_buffer, 0, bytemuck::cast_slice(&scene.nodes));
         queue.write_buffer(triangle_buffer, 0, bytemuck::cast_slice(&scene.triangles));
+        self.pack_rays(rays, sizes[2])?;
+        queue.write_buffer(ray_buffer, 0, bytemuck::cast_slice(&self.packed_rays));
+        let group = self.device.create_bind_group(&rhi::BindGroupDescriptor {
+            label: Some("lighting-trace-gpu-graph-resources".into()),
+            layout: Some(self.layout),
+            entries: [node_buffer, triangle_buffer, ray_buffer, output]
+                .into_iter()
+                .zip(sizes)
+                .enumerate()
+                .map(|(binding, (buffer, size))| rhi::BindGroupEntry {
+                    binding: binding as u32,
+                    resource: rhi::BindingResource::Buffer {
+                        buffer,
+                        offset: 0,
+                        size: Some(size),
+                    },
+                })
+                .collect(),
+        });
+        self.graph_bind_groups.push(group);
+        Ok(TraceGraphRecorder {
+            nodes: TraceGraphBuffer {
+                id: node_buffer,
+                size_bytes: sizes[0],
+            },
+            triangles: TraceGraphBuffer {
+                id: triangle_buffer,
+                size_bytes: sizes[1],
+            },
+            rays: TraceGraphBuffer {
+                id: ray_buffer,
+                size_bytes: sizes[2],
+            },
+            hits: TraceGraphBuffer {
+                id: output,
+                size_bytes: sizes[3],
+            },
+            pipeline: self.pipeline,
+            bind_group: group,
+            workgroups,
+        })
+    }
+
+    fn pack_rays(&mut self, rays: &[TraceRay], byte_count: u64) -> Result<(), TraceGpuError> {
         self.packed_rays.clear();
-        let packed_ray_count =
-            usize::try_from(sizes[2] / 4).map_err(|_| TraceGpuError::BufferSizeOverflow)?;
-        if self.packed_rays.capacity() < packed_ray_count {
-            self.packed_rays.reserve(packed_ray_count);
+        let word_count =
+            usize::try_from(byte_count / 4).map_err(|_| TraceGpuError::BufferSizeOverflow)?;
+        if self.packed_rays.capacity() < word_count {
+            self.packed_rays.reserve(word_count);
         }
         for ray in rays {
             self.packed_rays.extend([
@@ -372,49 +488,15 @@ impl LightingTraceGpu {
                 ray.t_max.to_bits(),
             ]);
         }
-        queue.write_buffer(ray_buffer, 0, bytemuck::cast_slice(&self.packed_rays));
-        let group = self.device.create_bind_group(&rhi::BindGroupDescriptor {
-            label: Some("lighting-trace-gpu-resources".into()),
-            layout: Some(self.layout),
-            entries: [node_buffer, triangle_buffer, ray_buffer, output]
-                .into_iter()
-                .zip(sizes)
-                .enumerate()
-                .map(|(binding, (buffer, size))| rhi::BindGroupEntry {
-                    binding: binding as u32,
-                    resource: rhi::BindingResource::Buffer {
-                        buffer,
-                        offset: 0,
-                        size: Some(size as u64),
-                    },
-                })
-                .collect(),
-        });
-        let mut encoder = rhi::CommandEncoder::labeled("lighting-software-bvh-trace");
-        encoder.push_compute_pass(
-            Some("lighting-software-bvh-trace".into()),
-            vec![
-                rhi::ComputeCommand::SetPipeline(self.pipeline),
-                rhi::ComputeCommand::SetBindGroup {
-                    index: 0,
-                    bind_group: group,
-                    dynamic_offsets: vec![],
-                },
-                rhi::ComputeCommand::Dispatch {
-                    x: groups,
-                    y: 1,
-                    z: 1,
-                },
-            ],
-        );
-        queue.submit(&[encoder.finish()]);
-        self.device.destroy_bind_group(group);
         Ok(())
     }
 }
 
 impl Drop for LightingTraceGpu {
     fn drop(&mut self) {
+        for bind_group in self.graph_bind_groups.drain(..) {
+            self.device.destroy_bind_group(bind_group);
+        }
         for buffer in [self.nodes, self.triangles, self.rays]
             .into_iter()
             .flatten()
@@ -436,6 +518,14 @@ fn byte_size(count: usize, stride: usize) -> Result<u64, TraceGpuError> {
         .checked_mul(stride)
         .ok_or(TraceGpuError::BufferSizeOverflow)?;
     u64::try_from(bytes).map_err(|_| TraceGpuError::BufferSizeOverflow)
+}
+
+fn validate_output_size(output_size: u64, required_size: u64) -> Result<(), TraceGpuError> {
+    if output_size < required_size {
+        Err(TraceGpuError::OutputBufferTooSmall)
+    } else {
+        Ok(())
+    }
 }
 
 fn grown_capacity(current: u64, required: u64, limit: u64) -> u64 {
@@ -653,8 +743,9 @@ fn main(@builtin(global_invocation_id) gid:vec3<u32>){let ri=gid.x;if(ri>=arrayL
 mod tests {
     use super::*;
     use prism_render_architecture::ray_scene::{Bvh, BvhBuildConfig, Triangle};
-    use prism_render_driver::{BufferDescriptor, BufferUsages};
+    use prism_render_driver::{BufferDescriptor, BufferState, BufferUsages, Instance as _};
     use prism_render_driver_wgpu::{require_hardware_gpu, HardwareDeviceError, WgpuInstance};
+    use prism_render_graph::{BufferDesc, ImportedBuffer, PassFlags, RenderGraph};
 
     fn fixture() -> (PackedTraceScene, Vec<TraceRay>) {
         // The production builder defaults to four primitives per leaf, so the
@@ -749,6 +840,96 @@ mod tests {
     }
 
     #[test]
+    fn graph_output_range_must_hold_every_packed_hit() {
+        assert_eq!(
+            validate_output_size(255, 256),
+            Err(TraceGpuError::OutputBufferTooSmall)
+        );
+        assert_eq!(validate_output_size(256, 256), Ok(()));
+        assert_eq!(validate_output_size(512, 256), Ok(()));
+    }
+
+    #[test]
+    fn graph_dispatch_count_rounds_up_without_empty_dispatches() {
+        assert_eq!(1_u32.div_ceil(WORKGROUP_SIZE), 1);
+        assert_eq!(64_u32.div_ceil(WORKGROUP_SIZE), 1);
+        assert_eq!(65_u32.div_ceil(WORKGROUP_SIZE), 2);
+    }
+
+    #[test]
+    fn graph_prepare_rejects_short_output_and_records_on_null_graph() {
+        let instance = prism_render_driver_null::NullInstance::new();
+        let adapter = instance
+            .request_adapter(&rhi::RequestAdapterOptions::default())
+            .unwrap();
+        let (device, queue) = instance
+            .create_device(&adapter, &rhi::DeviceDescriptor::default())
+            .unwrap();
+        let device = Arc::new(device);
+        let trace_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
+        let (scene, rays) = fixture();
+        let required = (rays.len() * HIT_WORDS * 4) as u64;
+        let output = device.create_buffer(&BufferDescriptor::new(
+            required,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        ));
+        let mut trace = LightingTraceGpu::new(trace_device);
+        assert!(matches!(
+            trace.prepare_graph(&queue, &scene, &rays, output, required - 1),
+            Err(TraceGpuError::OutputBufferTooSmall)
+        ));
+        let recorder = trace
+            .prepare_graph(&queue, &scene, &rays, output, required)
+            .unwrap();
+        let mut graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
+        let nodes = graph.import_buffer(
+            "trace-nodes",
+            BufferDesc::new(recorder.nodes.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: recorder.nodes.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let triangles = graph.import_buffer(
+            "trace-triangles",
+            BufferDesc::new(recorder.triangles.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: recorder.triangles.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let ray_buffer = graph.import_buffer(
+            "trace-rays",
+            BufferDesc::new(recorder.rays.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: recorder.rays.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let hits = graph.import_buffer(
+            "trace-hits",
+            BufferDesc::new(required, BufferUsages::STORAGE | BufferUsages::COPY_SRC),
+            ImportedBuffer {
+                buffer: output,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let graph_recorder = recorder;
+        graph.add_compute_pass("trace", PassFlags::SIDE_EFFECT, move |builder| {
+            builder.read_storage_buffer(nodes);
+            builder.read_storage_buffer(triangles);
+            builder.read_storage_buffer(ray_buffer);
+            builder.write_storage_buffer(hits);
+            move |context| graph_recorder.record_graph(context)
+        });
+        let recorded = graph.execute(device.as_ref(), &queue).unwrap();
+        recorded.release(device.as_ref());
+        drop(recorder);
+        drop(trace);
+        device.destroy_buffer(output);
+    }
+
+    #[test]
     fn hardware_wgsl_traversal_matches_cpu_across_workgroups() {
         let (device, queue) = match WgpuInstance::new().request_default_hardware_device() {
             Ok(pair) => pair,
@@ -772,7 +953,8 @@ mod tests {
                 panic!("hardware GPU device creation failed: {e}")
             }
         };
-        let device: Arc<dyn RenderDevice + Send + Sync> = Arc::new(device);
+        let device = Arc::new(device);
+        let trace_device: Arc<dyn RenderDevice + Send + Sync> = device.clone();
         let (scene, rays) = fixture();
         let expected = trace_reference(&scene, &rays).unwrap();
         let node_count = scene.nodes.len() / NODE_WORDS;
@@ -785,9 +967,69 @@ mod tests {
             (rays.len() * HIT_WORDS * 4) as u64,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         ));
-        let mut pass = LightingTraceGpu::new(Arc::clone(&device));
-        pass.encode_and_submit(&queue, &scene, &rays, output)
+        let mut pass = LightingTraceGpu::new(trace_device);
+        let recorder = pass
+            .prepare_graph(
+                &queue,
+                &scene,
+                &rays,
+                output,
+                (rays.len() * HIT_WORDS * 4) as u64,
+            )
             .unwrap();
+        assert_eq!(
+            recorder.hits.size_bytes,
+            (rays.len() * HIT_WORDS * 4) as u64
+        );
+        let mut graph = RenderGraph::new(rhi::Extent3d::new_2d(1, 1));
+        let nodes = graph.import_buffer(
+            "trace-nodes",
+            BufferDesc::new(recorder.nodes.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: recorder.nodes.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let triangles = graph.import_buffer(
+            "trace-triangles",
+            BufferDesc::new(recorder.triangles.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: recorder.triangles.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let ray_buffer = graph.import_buffer(
+            "trace-rays",
+            BufferDesc::new(recorder.rays.size_bytes, BufferUsages::STORAGE),
+            ImportedBuffer {
+                buffer: recorder.rays.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let hits = graph.import_buffer(
+            "trace-hits",
+            BufferDesc::new(
+                recorder.hits.size_bytes,
+                BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            ),
+            ImportedBuffer {
+                buffer: recorder.hits.id,
+                entry_state: BufferState::initial(),
+            },
+        );
+        let graph_recorder = recorder;
+        graph.add_compute_pass(
+            "software-bvh-trace",
+            PassFlags::SIDE_EFFECT,
+            move |builder| {
+                builder.read_storage_buffer(nodes);
+                builder.read_storage_buffer(triangles);
+                builder.read_storage_buffer(ray_buffer);
+                builder.write_storage_buffer(hits);
+                move |context| graph_recorder.record_graph(context)
+            },
+        );
+        let recorded = graph.execute(device.as_ref(), &queue).unwrap();
         let bytes = queue.read_buffer(output, (rays.len() * HIT_WORDS * 4) as u64);
         let words: &[u32] = bytemuck::try_cast_slice(&bytes).unwrap();
         for (i, hit) in expected.iter().enumerate() {
@@ -804,6 +1046,9 @@ mod tests {
             }
             assert_eq!(&words[b + 5..b + 8], &[0, 0, 0], "ray {i} padding");
         }
+        recorded.release(device.as_ref());
+        drop(recorder);
+        drop(pass);
         device.destroy_buffer(output);
     }
 }
