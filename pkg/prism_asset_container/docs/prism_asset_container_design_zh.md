@@ -8,10 +8,11 @@
 
 ## 1. 容器与预算契约
 
-v1 记录独立 payload；v2 以独立 Chunk Table 保存 Raw/Deflate Chunk，目录
-保存 Chunk 内原始偏移。挂载校验规范目录、长度、偏移、零填充与原始内容哈希。
-Deflate 仍是整单元解码，不是 block 随机访问。Raw-only 批次按物理范围合并；
-压缩批次按单元去重解码，混合批次的 Raw 请求分别读取，结果保持调用方顺序。
+v1 记录独立 payload；v2 以独立 Chunk Table 保存 Raw/Deflate/BlockDeflate Chunk，目录
+保存 Chunk 内原始偏移。BlockDeflate 使用独立 `PRBLKDF2` header/index 和逐 block
+Raw/raw-DEFLATE，可按逻辑范围只读取命中 block；挂载校验目录、长度、偏移、零填充、
+block hash 与完整原始内容哈希。整 Chunk Deflate 仍是完整单元解码。Raw-only 批次按
+物理范围合并；压缩批次按单元或命中 block 去重解码，结果保持调用方顺序。
 
 `ContainerReadLimits` 在分配/解码前限制：文件长度、编码元数据总字节、
 entry/chunk 数量、单元 stored/raw 长度、展开比例、输出字节，以及一次挂载
@@ -32,8 +33,8 @@ entry/chunk 数量、单元 stored/raw 长度、展开比例、输出字节，�
 
 挂载需要读取和验证完整内容，并非懒校验远程挂载。range source 在 reader
 生命周期内必须不可变；`read_all` 再校验 payload hash，局部读取不认证发布者。
-block-level 压缩索引、加密、远程发行、DirectStorage/GPU 解码是 PLANNED，
-不得以本切片的通过替代这些目标的验收。
+GPU Huffman/GDeflate、加密、远程发行和 DirectStorage 形态队列仍是 PLANNED；
+BlockDeflate 的 CPU block 索引/范围读取已交付，但不得以本切片的通过替代这些目标的验收。
 
 ## 3. 多维质量评估
 
@@ -50,6 +51,7 @@ block-level 压缩索引、加密、远程发行、DirectStorage/GPU 解码是 P
 
 ## 4. 验证
 
-2026-10-20：`cargo test -p prism_asset_container --all-features` 通过
-75 项原有测试和 `text/integration/read_budget.rs` 的 10 项预算/批次回归。
+2026-10-20：`cargo test -p prism_asset_container --all-targets --all-features` 通过
+75 项单元测试、`text/integration/block_format.rs` 的 8 项 BlockDeflate 回归和
+`text/integration/read_budget.rs` 的 10 项预算/批次回归。
 并发测试通过通道握手验证预留重叠，不使用耗时推断并发。

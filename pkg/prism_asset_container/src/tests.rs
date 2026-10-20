@@ -1,7 +1,8 @@
+use alloc::sync::Arc;
 use prism_asset::{AssetReader, StableGuid};
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -964,7 +965,6 @@ fn planned_layout_is_consumed_and_round_trips_in_version_one() {
     let reader = ContainerReader::new(bytes).unwrap();
     let first_entry = reader.entry(first).unwrap();
     let second_entry = reader.entry(second).unwrap();
-    assert_eq!(first_entry.offset % 1, 0);
     assert_eq!(second_entry.offset % 4, 0);
     assert_eq!(first_entry.offset, second_entry.offset + 8);
     assert_eq!(reader.read_all(first).unwrap(), b"one");
@@ -2303,6 +2303,70 @@ fn runtime_package_install_policy_rejects_before_publishing_overlay() {
     .unwrap_err();
     assert!(matches!(error, crate::InstallError::Policy { guid, .. } if guid == package_guid));
     assert_eq!(overlay.read_all(existing_guid).unwrap(), b"existing");
+    assert!(!overlay.contains(package_guid));
+}
+
+#[test]
+fn runtime_install_policy_can_reject_block_deflate_codec() {
+    let package_guid = guid("package.block-policy");
+    let mut writer = ContainerWriter::new();
+    writer.add_aligned(package_guid, vec![7; 512], 1).unwrap();
+    let plan = ChunkPlanner::new(ChunkPolicy {
+        max_chunk_size: 1024,
+        chunk_alignment: 64,
+        max_chunks: 1,
+    })
+    .plan([ChunkInput {
+        guid: package_guid,
+        size: 512,
+        alignment: 1,
+        dependencies: vec![],
+        priority: 0,
+    }])
+    .unwrap();
+    let package_bytes = writer
+        .finish_with_chunk_compression(&plan, 64, Codec::BlockDeflate)
+        .unwrap();
+
+    let mut overlay = OverlaySet::new();
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert_with_metadata(
+            ManifestRoute {
+                guid: package_guid,
+                container_name: "package-block-policy".into(),
+                priority: 5,
+                container_guid: package_guid,
+            },
+            ManifestMetadata {
+                codec: Codec::BlockDeflate,
+                ..ManifestMetadata::default()
+            },
+        )
+        .unwrap();
+    manifest
+        .bind_container("package-block-policy", identity(&package_bytes))
+        .unwrap();
+
+    let error = crate::install_runtime_package_with_policy(
+        &mut overlay,
+        &manifest,
+        [InstallMount::new(
+            "package-block-policy",
+            5,
+            ContainerReader::new(package_bytes).unwrap(),
+        )],
+        std::iter::empty::<InstallTombstones>(),
+        RuntimeInstallPolicy {
+            allowed_codecs: (1 << Codec::Raw as u8) | (1 << Codec::Deflate as u8),
+            ..RuntimeInstallPolicy::permissive()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::InstallError::Policy { guid, .. } if guid == package_guid
+    ));
     assert!(!overlay.contains(package_guid));
 }
 

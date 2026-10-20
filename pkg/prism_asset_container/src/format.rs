@@ -23,6 +23,12 @@ pub enum Codec {
     Raw = 0,
     /// Stored bytes are a deterministic raw-DEFLATE stream.
     Deflate = 1,
+    /// Stored bytes are a version-2 block-addressed raw-DEFLATE payload.
+    ///
+    /// This codec is valid only for the v2 chunk-table layout. Each block is
+    /// independently addressable, so range reads need not decode the whole
+    /// chunk.
+    BlockDeflate = 2,
 }
 
 impl Codec {
@@ -30,6 +36,7 @@ impl Codec {
         match value {
             0 => Ok(Self::Raw),
             1 => Ok(Self::Deflate),
+            2 => Ok(Self::BlockDeflate),
             other => Err(ContainerError::UnsupportedCodec(other)),
         }
     }

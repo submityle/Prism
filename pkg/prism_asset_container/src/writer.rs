@@ -391,7 +391,7 @@ impl ContainerWriter {
         if chunk_alignment == 0 || !chunk_alignment.is_power_of_two() {
             return Err(ContainerError::InvalidAlignment);
         }
-        if !matches!(codec, Codec::Raw | Codec::Deflate) {
+        if !matches!(codec, Codec::Raw | Codec::Deflate | Codec::BlockDeflate) {
             return Err(ContainerError::UnsupportedCodec(codec as u8));
         }
         if self.entries.values().any(|entry| entry.codec != Codec::Raw)
@@ -509,6 +509,23 @@ impl ContainerWriter {
             raw_chunks.push((raw, stored));
         }
 
+        for ((chunk, (_, stored)), next_chunk) in plan
+            .chunks
+            .iter()
+            .zip(raw_chunks.iter())
+            .zip(plan.chunks.iter().skip(1))
+        {
+            let stored_end = chunk
+                .offset
+                .checked_add(
+                    u64::try_from(stored.len()).map_err(|_| ContainerError::IntegerOverflow)?,
+                )
+                .ok_or(ContainerError::IntegerOverflow)?;
+            if stored_end > next_chunk.offset {
+                return Err(ContainerError::InvalidDirectory);
+            }
+        }
+
         let mut directory = Vec::with_capacity(directory_len);
         for (guid, entry) in &self.entries {
             let (chunk_id, placement) = placements
@@ -623,6 +640,7 @@ fn encode_chunk(raw: &[u8], codec: Codec) -> Result<Vec<u8>, ContainerError> {
                 .finish()
                 .map_err(|_| ContainerError::CompressionFailed)
         }
+        Codec::BlockDeflate => crate::block::encode(raw),
     }
 }
 

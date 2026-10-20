@@ -164,7 +164,7 @@ impl<A: Asset> Assets<A> {
 
     /// Atomically changes hard limits, evicting only idle LRU entries as needed.
     ///
-    /// Pinned, KeepAlive and externally owned reservations cannot be evicted.
+    /// Pinned, `KeepAlive` and externally owned reservations cannot be evicted.
     /// Failure preserves all entries and the previous budget. Returned removals
     /// release cache references, not externally owned payloads. Run the normal
     /// reclaim point to destroy abandoned payload slots.
@@ -235,7 +235,7 @@ impl<A: Asset> Assets<A> {
         Some(handle)
     }
 
-    /// Explicitly updates recency and restarts an idle KeepAlive window.
+    /// Explicitly updates recency and restarts an idle `KeepAlive` window.
     ///
     /// Immutable `get` deliberately does not mutate recency. This control-plane
     /// operation requires a live handle from this arena, not an unchecked id.
@@ -495,8 +495,8 @@ impl<A: Asset> Assets<A> {
     ///
     /// Use once per reclaim frame **instead of** `collect_releases` when cache
     /// diagnostics are needed. Existing `collect_releases` also advances policies,
-    /// preserving old callers. KeepAlive age is counted without a wrapping global
-    /// timestamp, so even a u32::MAX window cannot expire prematurely on overflow.
+    /// preserving old callers. `KeepAlive` age is counted without a wrapping global
+    /// timestamp, so even a `u32::MAX` window cannot expire prematurely on overflow.
     /// `Unused` is emitted on first observed cache-only ownership, never faked as
     /// `Removed`; the normal grace window is measured from that first observation.
     pub fn collect_retained(&mut self) -> RetainCollection {

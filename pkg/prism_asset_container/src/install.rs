@@ -47,7 +47,9 @@ impl Default for RuntimeInstallPolicy {
             available_capabilities: u64::MAX,
             max_initial_residency: u8::MAX,
             max_streaming_level: u8::MAX,
-            allowed_codecs: (1 << Codec::Raw as u8) | (1 << Codec::Deflate as u8),
+            allowed_codecs: (1 << Codec::Raw as u8)
+                | (1 << Codec::Deflate as u8)
+                | (1 << Codec::BlockDeflate as u8),
         }
     }
 }
@@ -61,7 +63,9 @@ impl RuntimeInstallPolicy {
             available_capabilities: u64::MAX,
             max_initial_residency: u8::MAX,
             max_streaming_level: u8::MAX,
-            allowed_codecs: (1 << Codec::Raw as u8) | (1 << Codec::Deflate as u8),
+            allowed_codecs: (1 << Codec::Raw as u8)
+                | (1 << Codec::Deflate as u8)
+                | (1 << Codec::BlockDeflate as u8),
         }
     }
 

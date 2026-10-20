@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+pub mod block;
 mod budget;
 mod chunk;
 mod format;

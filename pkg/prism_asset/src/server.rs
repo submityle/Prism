@@ -260,6 +260,10 @@ impl AssetServer {
     /// their source is loaded, but their emitted type is checked at load time.
     /// Catalog entries follow the server's existing path-reclamation lifecycle;
     /// this is not a persistent external manifest installation API.
+    #[expect(
+        clippy::result_large_err,
+        reason = "structured soft-load diagnostics preserve path and type context"
+    )]
     pub fn register_soft_path<A: Asset>(
         &self,
         path: impl Into<AssetPath>,
@@ -285,10 +289,18 @@ impl AssetServer {
 
     /// Resolves and validates a soft reference without allocating a live asset
     /// or invoking a source reader. Unlike `load_soft`, refusal is a typed error.
+    #[expect(
+        clippy::result_large_err,
+        reason = "structured soft-load diagnostics preserve path and type context"
+    )]
     pub fn resolve_soft<A: Asset>(&self, soft: &SoftHandle<A>) -> Result<AssetPath, SoftLoadError> {
         self.lock().resolve_soft(soft)
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "batch diagnostics retain the failing input index and full error"
+    )]
     pub(crate) fn resolve_soft_batch<A: Asset>(
         &self,
         soft: &[SoftHandle<A>],
@@ -1225,6 +1237,10 @@ impl Default for AssetServer {
 }
 
 impl AssetServerInner {
+    #[expect(
+        clippy::result_large_err,
+        reason = "structured soft-load diagnostics preserve path and type context"
+    )]
     fn validate_soft_path(
         &self,
         path: &AssetPath,
@@ -1258,6 +1274,10 @@ impl AssetServerInner {
         Ok(())
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "structured soft-load diagnostics preserve path and type context"
+    )]
     fn resolve_soft<A: Asset>(&self, soft: &SoftHandle<A>) -> Result<AssetPath, SoftLoadError> {
         if soft.is_null() {
             return Err(SoftLoadError::Null);

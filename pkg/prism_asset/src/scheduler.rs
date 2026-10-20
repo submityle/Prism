@@ -550,6 +550,10 @@ impl LoadScheduler {
     /// distinct-root budgets include duplicates/resident work as documented by
     /// [`SoftLoadBudget`]; scheduler capacity charges only new distinct flights.
     /// Dependencies retain the scheduler's separate bounded queue policy.
+    #[expect(
+        clippy::result_large_err,
+        reason = "structured soft-load diagnostics are part of the scheduler contract"
+    )]
     pub fn schedule_soft_batch<A: Asset>(
         &self,
         soft: &[SoftHandle<A>],

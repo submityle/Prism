@@ -313,6 +313,10 @@ impl RuntimeManifest {
     /// Binding validates every route before returning. The returned reader also
     /// validates the selected route before each read, so an unmount or remount
     /// cannot silently redirect a logical asset to a different container.
+    #[expect(
+        clippy::result_large_err,
+        reason = "manifest binding errors retain complete route and identity diagnostics"
+    )]
     pub fn bind<'manifest, 'overlay>(
         &'manifest self,
         overlays: &'overlay OverlaySet,

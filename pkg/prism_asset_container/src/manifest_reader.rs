@@ -189,6 +189,10 @@ impl ManifestRangeRequest {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "manifest errors retain complete route and container identity diagnostics"
+)]
 impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
     /// Validates every route against the current overlay before creating a reader.
     pub fn bind(
@@ -256,9 +260,7 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
         requests: &[ManifestRangeRequest],
         policy: RangeBatchPolicy,
     ) -> Result<Vec<Vec<u8>>, ManifestReadError> {
-        policy
-            .validate()
-            .map_err(|error| ManifestReadError::Container(error))?;
+        policy.validate().map_err(ManifestReadError::Container)?;
 
         struct Group<'a> {
             name: String,

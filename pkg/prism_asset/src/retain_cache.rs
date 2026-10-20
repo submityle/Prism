@@ -1,7 +1,7 @@
 //! Bounded, arena-owned retention reservations (design §6.4).
 //!
 //! Admission pre-charges every retained value, even while externally owned.
-//! Pinned and KeepAlive reservations cannot be evicted by memory pressure;
+//! Pinned and `KeepAlive` reservations cannot be evicted by memory pressure;
 //! only idle LRU reservations can. An impossible admission/shrink is atomic.
 //! Byte charges describe caller-declared payload residency, not GPU pages,
 //! allocator overhead, or all externally owned assets in the arena.
@@ -91,7 +91,7 @@ impl core::error::Error for RetainError {}
 pub enum RetainRemovalReason {
     /// An idle LRU entry made room for an admission or a smaller budget.
     Budget,
-    /// A KeepAlive window expired.
+    /// A `KeepAlive` window expired.
     Expired,
     /// Explicit unpin/release or Immediate policy.
     Explicit,

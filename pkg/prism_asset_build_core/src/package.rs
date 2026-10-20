@@ -600,6 +600,14 @@ fn package_runtime_impl(
                 prism_asset_container::Codec::Deflate => {
                     writer.add_deflate_aligned(mapping.guid, payload, descriptor.alignment)
                 }
+                prism_asset_container::Codec::BlockDeflate => {
+                    return Err(PackageError::Container {
+                        name: mapping.container_name.clone(),
+                        source: ContainerError::CodecNotSupportedForLayout(
+                            prism_asset_container::Codec::BlockDeflate,
+                        ),
+                    });
+                }
             }
         }
         .map_err(|source| PackageError::Container {
@@ -1036,6 +1044,40 @@ mod tests {
             assert_eq!(
                 package.runtime_manifest.metadata(guid).unwrap().codec,
                 Codec::Deflate
+            );
+        }
+    }
+
+    #[test]
+    fn package_runtime_can_emit_independently_block_compressed_chunks() {
+        let (manifest, cas, mut mappings) = manifest_and_cas();
+        mappings[1].container_name = mappings[0].container_name.clone();
+        let package = package_runtime_with_options(
+            PackageRequest {
+                manifest: &manifest,
+                cas: &cas,
+                mappings,
+            },
+            PackageOptions {
+                chunk_policy: ChunkPolicy {
+                    max_chunk_size: 64,
+                    chunk_alignment: 64,
+                    max_chunks: 2,
+                },
+                codec: Codec::Raw,
+                chunk_codec: Some(Codec::BlockDeflate),
+            },
+        )
+        .unwrap();
+        let container = package.container_bytes("z.container").unwrap();
+        let reader = ContainerReader::new(container.to_vec()).unwrap();
+        assert_eq!(reader.info().version, CHUNK_FORMAT_VERSION);
+        for guid in [StableGuid::from_u128(101), StableGuid::from_u128(202)] {
+            assert_eq!(reader.entry(guid).unwrap().codec, Codec::BlockDeflate);
+            assert!(!reader.read_all(guid).unwrap().is_empty());
+            assert_eq!(
+                package.runtime_manifest.metadata(guid).unwrap().codec,
+                Codec::BlockDeflate
             );
         }
     }

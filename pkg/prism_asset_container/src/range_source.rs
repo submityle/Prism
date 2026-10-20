@@ -1,7 +1,7 @@
+use alloc::sync::Arc;
 use core::fmt;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
 
 #[cfg(feature = "mmap")]
 use memmap2::{Mmap, MmapOptions};
@@ -52,6 +52,11 @@ impl std::error::Error for RangeSourceError {}
 pub trait RangeSource: Send + Sync + fmt::Debug {
     /// Returns the immutable source length in bytes.
     fn len(&self) -> u64;
+
+    /// Returns whether the immutable source contains no bytes.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     /// Reads one source range into `out`.
     fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError>;
@@ -213,7 +218,13 @@ impl MmapRangeSource {
         // concurrently mutated. The public source contract already requires
         // immutable bytes for every mounted reader, and the mapping is
         // read-only, so this is the single audited unsafe boundary.
-        #[allow(unsafe_code)]
+        #[expect(
+            unsafe_code,
+            reason = "read-only mmap is the single audited OS mapping boundary"
+        )]
+        // SAFETY: the public source contract requires the file to remain
+        // immutable for the lifetime of the mapping, and the mapping is
+        // read-only.
         let map = unsafe { MmapOptions::new().len(map_len).map(&file) }
             .map_err(|error| RangeSourceError::Io(error.to_string()))?;
         Ok(Self {

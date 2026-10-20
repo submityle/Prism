@@ -70,7 +70,7 @@ impl ContainerReader {
 
     /// Mounts and strictly validates a container through a seekable/range
     /// source. The source length must exactly match the header's `total_len`.
-    /// Header, ToC, padding, and every raw payload are verified at mount time
+    /// Header, `ToC`, padding, and every raw payload are verified at mount time
     /// in bounded chunks; the source is then used for all payload reads. The
     /// caller must ensure source contents remain immutable for this reader's
     /// lifetime; range reads cannot re-verify a whole-payload digest without
@@ -176,6 +176,13 @@ impl ContainerReader {
                 .get(&entry.chunk_id)
                 .copied()
                 .ok_or(ContainerError::InvalidDirectory)?;
+            if chunk.codec == Codec::BlockDeflate {
+                let raw_offset = entry
+                    .raw_offset
+                    .checked_add(offset)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                return self.read_block_chunk_range(chunk, raw_offset, out);
+            }
             if chunk.codec == Codec::Deflate {
                 let decoded = self.decode_chunk(chunk)?;
                 let start = usize::try_from(entry.raw_offset)
@@ -273,7 +280,7 @@ impl ContainerReader {
         if requests.iter().any(|request| {
             self.entries
                 .get(&request.guid)
-                .is_some_and(|entry| entry.codec == Codec::Deflate)
+                .is_some_and(|entry| matches!(entry.codec, Codec::Deflate | Codec::BlockDeflate))
         }) {
             let mut outputs = Vec::with_capacity(requests.len());
             let mut compressed = Vec::new();
@@ -420,14 +427,61 @@ impl ContainerReader {
         }
     }
 
+    fn with_source<T>(
+        &self,
+        f: impl FnOnce(&dyn crate::RangeSource) -> Result<T, ContainerError>,
+    ) -> Result<T, ContainerError> {
+        match &self.backing {
+            Backing::Memory(bytes) => {
+                let source = crate::MemoryRangeSource::new(bytes.clone());
+                f(&source)
+            }
+            Backing::Range(source) => f(source.as_ref()),
+        }
+    }
+
     fn decode_chunk(&self, chunk: ChunkInfo) -> Result<ReadBuffer, ContainerError> {
         self.budget.limits().unit(chunk.stored_len, chunk.raw_len)?;
+        if chunk.codec == Codec::BlockDeflate {
+            return self.with_source(|source| {
+                let index = crate::block::parse_index(
+                    source,
+                    chunk.offset,
+                    chunk.stored_len,
+                    0,
+                    &self.budget,
+                )?;
+                if index.raw_len() != chunk.raw_len {
+                    return Err(ContainerError::InvalidDirectory);
+                }
+                let mut decoded = self.budget.buffer(chunk.raw_len)?;
+                index.decode_range(source, 0, &mut decoded, &self.budget)?;
+                Ok(decoded)
+            });
+        }
         let mut stored = self.budget.buffer(chunk.stored_len)?;
         self.read_physical_range(chunk.offset, &mut stored)?;
         match chunk.codec {
             Codec::Raw => Ok(stored),
             Codec::Deflate => decode_deflate(&stored, chunk.raw_len, &self.budget),
+            Codec::BlockDeflate => Err(ContainerError::InvalidDirectory),
         }
+    }
+
+    fn read_block_chunk_range(
+        &self,
+        chunk: ChunkInfo,
+        raw_offset: u64,
+        out: &mut [u8],
+    ) -> Result<(), ContainerError> {
+        self.with_source(|source| {
+            let index =
+                crate::block::parse_index(source, chunk.offset, chunk.stored_len, 0, &self.budget)?;
+            if index.raw_len() != chunk.raw_len {
+                return Err(ContainerError::InvalidDirectory);
+            }
+            index.decode_range(source, raw_offset, out, &self.budget)
+        })
     }
 
     fn decode_entry(&self, entry: EntryInfo) -> Result<ReadBuffer, ContainerError> {
@@ -532,11 +586,11 @@ fn parse_source(
     if prefix[0..8] != MAGIC {
         return Err(ContainerError::BadMagic);
     }
-    return match read_u16(&prefix, 8)? {
+    match read_u16(&prefix, 8)? {
         FORMAT_VERSION => parse_v1(source, budget),
         CHUNK_FORMAT_VERSION => parse_v2(source, budget),
         version => Err(ContainerError::UnsupportedVersion(version)),
-    };
+    }
 }
 
 fn parse_v1(
@@ -616,6 +670,9 @@ fn parse_v1(
         let stored_len = read_u64(record, 24)?;
         let raw_len = read_u64(record, 32)?;
         let codec = Codec::decode(record[40])?;
+        if codec == Codec::BlockDeflate {
+            return Err(ContainerError::CodecNotSupportedForLayout(codec));
+        }
         if record[41..44].iter().any(|v| *v != 0) {
             return Err(ContainerError::InvalidDirectory);
         }
@@ -921,8 +978,11 @@ fn parse_v2(
             return Err(ContainerError::InvalidDirectory);
         }
         let members = &grouped[begin..position];
-        let decoded = if chunk.codec == Codec::Deflate {
-            let decoded = decode_chunk_source(source, chunk, budget)?;
+        let decoded = if matches!(chunk.codec, Codec::Deflate | Codec::BlockDeflate) {
+            let metadata_bytes = dir_len
+                .checked_add(table_len)
+                .ok_or(ContainerError::IntegerOverflow)?;
+            let decoded = decode_chunk_source(source, chunk, metadata_bytes, budget)?;
             if blake3::hash(&decoded).as_bytes() != &chunk.hash {
                 return Err(ContainerError::HashMismatch);
             }
@@ -1001,14 +1061,31 @@ fn parse_v2(
 fn decode_chunk_source(
     source: &dyn crate::RangeSource,
     chunk: ChunkInfo,
+    existing_metadata_bytes: u64,
     budget: &ContainerReadBudget,
 ) -> Result<ReadBuffer, ContainerError> {
     budget.limits().unit(chunk.stored_len, chunk.raw_len)?;
+    if chunk.codec == Codec::BlockDeflate {
+        let index = crate::block::parse_index(
+            source,
+            chunk.offset,
+            chunk.stored_len,
+            existing_metadata_bytes,
+            budget,
+        )?;
+        if index.raw_len() != chunk.raw_len {
+            return Err(ContainerError::InvalidDirectory);
+        }
+        let mut decoded = budget.buffer(chunk.raw_len)?;
+        index.decode_range(source, 0, &mut decoded, budget)?;
+        return Ok(decoded);
+    }
     let mut stored = budget.buffer(chunk.stored_len)?;
     read_from_source(source, chunk.offset, &mut stored)?;
     match chunk.codec {
         Codec::Raw => Ok(stored),
         Codec::Deflate => decode_deflate(&stored, chunk.raw_len, budget),
+        Codec::BlockDeflate => Err(ContainerError::InvalidDirectory),
     }
 }
 

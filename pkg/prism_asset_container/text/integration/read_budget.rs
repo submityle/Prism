@@ -1,7 +1,10 @@
 //! Admission must bound untrusted work before I/O and release all reservations.
 
+use alloc::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Mutex};
+
+extern crate alloc;
 use std::time::Duration;
 
 use prism_asset::StableGuid;

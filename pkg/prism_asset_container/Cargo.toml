@@ -23,3 +23,7 @@ workspace = true
 [[test]]
 name = "read_budget"
 path = "text/integration/read_budget.rs"
+
+[[test]]
+name = "block_format"
+path = "text/integration/block_format.rs"

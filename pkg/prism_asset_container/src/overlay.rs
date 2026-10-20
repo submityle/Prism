@@ -179,6 +179,10 @@ impl OverlaySet {
     }
 
     /// Binds a runtime manifest to this set of mounted containers.
+    #[expect(
+        clippy::result_large_err,
+        reason = "manifest binding errors retain complete route and identity diagnostics"
+    )]
     pub fn bind_manifest<'manifest, 'overlay>(
         &'overlay self,
         manifest: &'manifest RuntimeManifest,
