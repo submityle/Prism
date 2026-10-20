@@ -31,6 +31,76 @@ enum Backing {
     Range(Arc<dyn crate::RangeSource>),
 }
 
+#[derive(Clone, Debug)]
+enum DirectoryIndex {
+    Parsed {
+        entries: BTreeMap<StableGuid, EntryInfo>,
+        chunks: BTreeMap<u32, ChunkInfo>,
+    },
+    #[cfg(feature = "mmap")]
+    Mmap(MmapV2DirectoryView),
+}
+
+enum GuidIter<'a> {
+    Parsed(core::iter::Copied<alloc::collections::btree_map::Keys<'a, StableGuid, EntryInfo>>),
+    #[cfg(feature = "mmap")]
+    Mmap(mmap_view::MmapGuidIter<'a>),
+}
+
+impl Iterator for GuidIter<'_> {
+    type Item = StableGuid;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Parsed(iter) => iter.next(),
+            #[cfg(feature = "mmap")]
+            Self::Mmap(iter) => iter.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Parsed(iter) => iter.size_hint(),
+            #[cfg(feature = "mmap")]
+            Self::Mmap(iter) => iter.size_hint(),
+        }
+    }
+}
+
+impl DirectoryIndex {
+    fn contains(&self, guid: StableGuid) -> bool {
+        match self {
+            Self::Parsed { entries, .. } => entries.contains_key(&guid),
+            #[cfg(feature = "mmap")]
+            Self::Mmap(view) => view.contains(guid),
+        }
+    }
+
+    fn entry(&self, guid: StableGuid) -> Option<EntryInfo> {
+        match self {
+            Self::Parsed { entries, .. } => entries.get(&guid).copied(),
+            #[cfg(feature = "mmap")]
+            Self::Mmap(view) => view.entry(guid),
+        }
+    }
+
+    fn chunk(&self, id: u32) -> Option<ChunkInfo> {
+        match self {
+            Self::Parsed { chunks, .. } => chunks.get(&id).copied(),
+            #[cfg(feature = "mmap")]
+            Self::Mmap(view) => view.chunk(id),
+        }
+    }
+
+    fn guids(&self) -> GuidIter<'_> {
+        match self {
+            Self::Parsed { entries, .. } => GuidIter::Parsed(entries.keys().copied()),
+            #[cfg(feature = "mmap")]
+            Self::Mmap(view) => GuidIter::Mmap(view.guid_iter()),
+        }
+    }
+}
+
 /// Normalizes a source's per-call cap once, before parsing or retaining it.
 /// This also covers block-index/decoder reads that bypass `read_from_source`.
 #[derive(Debug)]
@@ -69,8 +139,7 @@ impl crate::RangeSource for BoundedSource {
 pub struct ContainerReader {
     backing: Backing,
     info: ContainerInfo,
-    entries: BTreeMap<StableGuid, EntryInfo>,
-    chunks: BTreeMap<u32, ChunkInfo>,
+    directory: DirectoryIndex,
     budget: ContainerReadBudget,
     block_decode_backend: Arc<dyn crate::block::BlockDecodeBackend>,
 }
@@ -80,8 +149,7 @@ impl core::fmt::Debug for ContainerReader {
         f.debug_struct("ContainerReader")
             .field("backing", &self.backing)
             .field("info", &self.info)
-            .field("entries", &self.entries)
-            .field("chunks", &self.chunks)
+            .field("directory", &self.directory)
             .field("budget", &self.budget)
             .finish_non_exhaustive()
     }
@@ -125,8 +193,10 @@ impl ContainerReader {
         Ok(Self {
             backing: Backing::Memory(bytes),
             info: parsed.info,
-            entries: parsed.entries,
-            chunks: parsed.chunks,
+            directory: DirectoryIndex::Parsed {
+                entries: parsed.entries,
+                chunks: parsed.chunks,
+            },
             budget,
             block_decode_backend,
         })
@@ -207,8 +277,10 @@ impl ContainerReader {
         Ok(Self {
             backing: Backing::Range(source),
             info: parsed.info,
-            entries: parsed.entries,
-            chunks: parsed.chunks,
+            directory: DirectoryIndex::Parsed {
+                entries: parsed.entries,
+                chunks: parsed.chunks,
+            },
             budget,
             block_decode_backend,
         })
@@ -236,9 +308,42 @@ impl ContainerReader {
     /// Mounts a read-only memory-mapped local container file.
     #[cfg(feature = "mmap")]
     pub fn from_mmap_file(path: impl AsRef<std::path::Path>) -> Result<Self, ContainerError> {
-        let source = crate::MmapRangeSource::open(path)
-            .map_err(|error| ContainerError::Source(error.to_string()))?;
-        Self::from_range_source(Arc::new(source))
+        Self::from_mmap_file_with_budget(path, ContainerReadBudget::default())
+    }
+
+    /// Mounts a read-only memory-mapped file under a caller-owned shared
+    /// budget. Version-2 files retain a mapped directory/table view instead of
+    /// materializing per-entry and per-chunk tree indexes; other supported
+    /// versions use the standard validated range-backed index.
+    #[cfg(feature = "mmap")]
+    pub fn from_mmap_file_with_budget(
+        path: impl AsRef<std::path::Path>,
+        budget: ContainerReadBudget,
+    ) -> Result<Self, ContainerError> {
+        let source = Arc::new(
+            crate::MmapRangeSource::open(path)
+                .map_err(|error| ContainerError::Source(error.to_string()))?,
+        );
+        let version = source
+            .mapped_bytes()
+            .get(8..10)
+            .and_then(|bytes| read_u16(bytes, 0).ok());
+        if version == Some(CHUNK_FORMAT_VERSION) {
+            let view = MmapV2DirectoryView::from_source(Arc::clone(&source), budget.clone())?;
+            return Ok(Self {
+                backing: Backing::Range(source),
+                info: view.info(),
+                directory: DirectoryIndex::Mmap(view),
+                budget,
+                block_decode_backend: Arc::new(crate::block::CpuBlockDecodeBackend),
+            });
+        }
+        let source: Arc<dyn crate::RangeSource> = source;
+        Self::from_range_source_with_budget_and_block_decode_backend(
+            source,
+            budget,
+            Arc::new(crate::block::CpuBlockDecodeBackend),
+        )
     }
 
     #[must_use]
@@ -249,23 +354,23 @@ impl ContainerReader {
     #[must_use]
     /// Returns whether this container contains the specified asset.
     pub fn contains(&self, guid: StableGuid) -> bool {
-        self.entries.contains_key(&guid)
+        self.directory.contains(guid)
     }
     #[must_use]
     /// Returns validated TOC metadata for an asset, if present.
     pub fn entry(&self, guid: StableGuid) -> Option<EntryInfo> {
-        self.entries.get(&guid).copied()
+        self.directory.entry(guid)
     }
 
     /// Returns validated metadata for one independently stored chunk.
     #[must_use]
     pub fn chunk(&self, id: u32) -> Option<ChunkInfo> {
-        self.chunks.get(&id).copied()
+        self.directory.chunk(id)
     }
 
     /// GUIDs in canonical on-disk order.
     pub fn guids(&self) -> impl Iterator<Item = StableGuid> + '_ {
-        self.entries.keys().copied()
+        self.directory.guids()
     }
 
     /// Reads a byte range from a decoded payload. Raw payloads use direct
@@ -278,8 +383,8 @@ impl ContainerReader {
         out: &mut [u8],
     ) -> Result<(), ContainerError> {
         let entry = self
-            .entries
-            .get(&guid)
+            .directory
+            .entry(guid)
             .ok_or(ContainerError::MissingAsset(guid))?;
         let len = u64::try_from(out.len()).map_err(|_| ContainerError::IntegerOverflow)?;
         let end = offset
@@ -295,9 +400,8 @@ impl ContainerReader {
         }
         if self.info.version == CHUNK_FORMAT_VERSION {
             let chunk = self
-                .chunks
-                .get(&entry.chunk_id)
-                .copied()
+                .directory
+                .chunk(entry.chunk_id)
                 .ok_or(ContainerError::InvalidDirectory)?;
             if chunk.codec == Codec::BlockDeflate {
                 let raw_offset = entry
@@ -332,7 +436,7 @@ impl ContainerReader {
             return self.read_physical_range(physical_offset, out);
         }
         if entry.codec == Codec::Deflate {
-            let decoded = self.decode_entry(*entry)?;
+            let decoded = self.decode_entry(entry)?;
             let start = usize::try_from(offset).map_err(|_| ContainerError::IntegerOverflow)?;
             let finish = start
                 .checked_add(out.len())
@@ -401,8 +505,8 @@ impl ContainerReader {
         let _outputs_reservation = self.budget.reserve(total)?;
 
         if requests.iter().any(|request| {
-            self.entries
-                .get(&request.guid)
+            self.directory
+                .entry(request.guid)
                 .is_some_and(|entry| matches!(entry.codec, Codec::Deflate | Codec::BlockDeflate))
         }) {
             let mut outputs = Vec::with_capacity(requests.len());
@@ -412,7 +516,10 @@ impl ContainerReader {
                 if request.len == 0 {
                     continue;
                 }
-                let entry = self.entries[&request.guid];
+                let entry = self
+                    .directory
+                    .entry(request.guid)
+                    .ok_or(ContainerError::MissingAsset(request.guid))?;
                 if entry.codec == Codec::Deflate {
                     let key = if self.info.version == CHUNK_FORMAT_VERSION {
                         (entry.chunk_id, None)
@@ -427,16 +534,27 @@ impl ContainerReader {
             compressed.sort_unstable();
             let mut position = 0;
             while let Some(&(key, first)) = compressed.get(position) {
-                let entry = self.entries[&requests[first].guid];
+                let first_request = requests[first];
+                let entry = self
+                    .directory
+                    .entry(first_request.guid)
+                    .ok_or(ContainerError::MissingAsset(first_request.guid))?;
                 let decoded = if self.info.version == CHUNK_FORMAT_VERSION {
-                    self.decode_chunk(self.chunks[&entry.chunk_id])?
+                    let chunk = self
+                        .directory
+                        .chunk(entry.chunk_id)
+                        .ok_or(ContainerError::InvalidDirectory)?;
+                    self.decode_chunk(chunk)?
                 } else {
                     self.decode_entry(entry)?
                 };
                 while position < compressed.len() && compressed[position].0 == key {
                     let index = compressed[position].1;
                     let request = requests[index];
-                    let entry = self.entries[&request.guid];
+                    let entry = self
+                        .directory
+                        .entry(request.guid)
+                        .ok_or(ContainerError::MissingAsset(request.guid))?;
                     let start = usize::try_from(
                         entry
                             .raw_offset
@@ -463,7 +581,10 @@ impl ContainerReader {
             let len = self.validate_range_request(request)?;
             outputs.push(zeroed(len as u64)?);
             if len != 0 {
-                let entry = self.entries[&request.guid];
+                let entry = self
+                    .directory
+                    .entry(request.guid)
+                    .ok_or(ContainerError::MissingAsset(request.guid))?;
                 let base = entry
                     .offset
                     .checked_add(if self.info.version == CHUNK_FORMAT_VERSION {
@@ -522,8 +643,8 @@ impl ContainerReader {
         request: RangeRequest,
     ) -> Result<usize, ContainerError> {
         let entry = self
-            .entries
-            .get(&request.guid)
+            .directory
+            .entry(request.guid)
             .ok_or(ContainerError::MissingAsset(request.guid))?;
         let end = request
             .offset
@@ -647,8 +768,8 @@ impl ContainerReader {
     /// Reads and verifies the complete raw payload.
     pub fn read_all(&self, guid: StableGuid) -> Result<Vec<u8>, ContainerError> {
         let entry = self
-            .entries
-            .get(&guid)
+            .directory
+            .entry(guid)
             .ok_or(ContainerError::MissingAsset(guid))?;
         let limits = self.budget.limits();
         limits.check("output bytes", entry.raw_len, limits.max_output_bytes)?;

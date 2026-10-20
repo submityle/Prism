@@ -26,6 +26,8 @@ default = ["std"]
 placement = ["dep:prism_world_terrain"]
 std = ["prism_world_io/std", "prism_world_persist/std"]
 asset_container = ["std", "dep:prism_asset", "dep:prism_asset_container"]
+# Uses the validated mmap-backed v2 container index in World cell providers.
+asset_container_mmap = ["asset_container", "prism_asset_container/mmap"]
 tasks = ["std", "dep:prism_tasks", "prism_world_io/tasks"]
 # Host-owned native reactor and IO workers; no default feature expansion.
 reactor = ["tasks", "prism_world_io/reactor"]

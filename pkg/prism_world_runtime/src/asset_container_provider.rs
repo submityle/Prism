@@ -449,8 +449,7 @@ impl AssetContainerCellProvider {
         requests.try_reserve_exact(range_count_usize).map_err(|_| {
             AssetContainerProviderError::AllocationFailed {
                 requested_bytes: range_count_usize
-                    .checked_mul(core::mem::size_of::<ManifestRangeRequest>())
-                    .unwrap_or(usize::MAX),
+                    .saturating_mul(core::mem::size_of::<ManifestRangeRequest>()),
             }
         })?;
         let mut offset = 0_u64;

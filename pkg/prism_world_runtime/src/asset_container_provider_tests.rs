@@ -1,9 +1,13 @@
 use super::*;
 
 use alloc::sync::Arc;
+#[cfg(feature = "asset_container_mmap")]
+use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use prism_asset::StableGuid;
+#[cfg(feature = "asset_container_mmap")]
+use prism_asset_container::{ChunkInput, ChunkPlanner, ChunkPolicy, Codec};
 use prism_asset_container::{
     ContainerReader, ContainerWriter, ManifestReadError, MemoryRangeSource, OverlaySet,
     RangeSource, RangeSourceError, RuntimeManifest,
@@ -49,6 +53,70 @@ fn mounted(
     overlays.mount("world", 7, reader);
     let manifest = overlays.runtime_manifest().expect("runtime manifest");
     (manifest, overlays, cell)
+}
+
+#[cfg(feature = "asset_container_mmap")]
+fn mmap_container_path() -> std::path::PathBuf {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    std::env::temp_dir().join(format!(
+        "prism-world-cell-mmap-{}-{}.prism",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+#[cfg(feature = "asset_container_mmap")]
+#[test]
+fn mmap_v2_container_reader_streams_a_cell_through_manifest_and_world_provider() {
+    let expected_manifest = cell_manifest(0xA11C_E001, CELL_HEADER_SIZE + 27);
+    let mut expected_cell = ManifestHeader::from_manifest(expected_manifest).encode();
+    expected_cell.extend_from_slice(b"mmap-backed world cell data");
+    let guid = StableGuid::from_u128(expected_manifest.scene_key);
+    let policy = ChunkPolicy {
+        max_chunk_size: expected_cell.len() as u64,
+        chunk_alignment: 64,
+        max_chunks: 1,
+    };
+    let plan = ChunkPlanner::new(policy)
+        .plan([ChunkInput {
+            guid,
+            size: expected_cell.len() as u64,
+            alignment: 1,
+            dependencies: vec![],
+            priority: 0,
+        }])
+        .expect("valid cell chunk plan");
+    let mut writer = ContainerWriter::new();
+    writer
+        .add(guid, expected_cell.clone())
+        .expect("cell payload");
+    let bytes = writer
+        .finish_with_chunk_compression(&plan, policy.chunk_alignment, Codec::Raw)
+        .expect("v2 container");
+
+    let path = mmap_container_path();
+    std::fs::write(&path, bytes).expect("write test container");
+    let reader = ContainerReader::from_mmap_file(&path).expect("mmap reader");
+    assert_eq!(
+        reader.info().version,
+        prism_asset_container::CHUNK_FORMAT_VERSION
+    );
+    let mut overlays = OverlaySet::new();
+    overlays.mount("mmap-world", 1, reader);
+    let manifest = overlays.runtime_manifest().expect("runtime manifest");
+    let provider = AssetContainerCellProvider::with_max_io_bytes(
+        manifest,
+        overlays,
+        expected_cell.len() as u64,
+    )
+    .expect("bounded provider");
+    let request = CellReadRequest::new(expected_manifest, 0);
+    assert_eq!(
+        provider.read_cell(&request, CancellationToken::new(false)),
+        Ok(expected_cell)
+    );
+    drop(provider);
+    std::fs::remove_file(path).expect("remove test container");
 }
 
 #[derive(Debug)]
@@ -100,7 +168,7 @@ fn plans_nonzero_ranges_and_reassembles_in_declaration_order() {
         cell_manifest(0x1357, CELL_HEADER_SIZE + b"range assembly payload".len());
     let (runtime_manifest, overlays, expected) =
         mounted(expected_manifest, b"range assembly payload", false);
-    let limits = AssetContainerProviderLimits::with_ranges(expected.len() as u64, 7, 10, 32, 0);
+    let limits = AssetContainerProviderLimits::with_ranges(expected.len() as u64, 7, 11, 32, 0);
     let provider = AssetContainerCellProvider::with_limits(runtime_manifest, overlays, limits)
         .expect("range limits");
     let request = CellReadRequest::new(expected_manifest, 0);
@@ -127,7 +195,7 @@ fn range_assembly_handles_deflate_entries_and_checksum() {
     );
     let (runtime_manifest, overlays, expected) =
         mounted(expected_manifest, b"deflate range payload for cell", true);
-    let limits = AssetContainerProviderLimits::with_ranges(expected.len() as u64, 5, 16, 16, 0);
+    let limits = AssetContainerProviderLimits::with_ranges(expected.len() as u64, 5, 17, 16, 0);
     let provider = AssetContainerCellProvider::with_limits(runtime_manifest, overlays, limits)
         .expect("range limits");
     let request =

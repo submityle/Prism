@@ -808,17 +808,25 @@ fn mmap_v2_directory_view_matches_reader_for_all_chunk_codecs_without_tree_mater
         let path = temporary_container_path("mmap-v2-view");
         fs::write(&path, &bytes).unwrap();
         let view = MmapV2DirectoryView::open(&path).unwrap();
+        let mapped_reader = ContainerReader::from_mmap_file(&path).unwrap();
 
         assert_eq!(view.info(), expected.info());
+        assert_eq!(mapped_reader.info(), expected.info());
         assert_eq!(
             view.guids().collect::<Vec<_>>(),
             expected.guids().collect::<Vec<_>>()
         );
         for (id, _, _) in &entries {
             assert_eq!(view.entry(*id), expected.entry(*id));
+            assert_eq!(mapped_reader.entry(*id), expected.entry(*id));
+            assert_eq!(
+                mapped_reader.read_all(*id).unwrap(),
+                expected.read_all(*id).unwrap()
+            );
         }
         for chunk_id in 0..expected.info().chunk_count {
             assert_eq!(view.chunk(chunk_id), expected.chunk(chunk_id));
+            assert_eq!(mapped_reader.chunk(chunk_id), expected.chunk(chunk_id));
         }
         assert!(!view.contains(guid("mapped/missing.asset")));
         assert_eq!(view.chunk(expected.info().chunk_count), None);
@@ -862,11 +870,17 @@ fn mmap_v2_directory_view_rejects_payload_tampering_and_non_v2_layouts() {
     fs::remove_file(path).unwrap();
 
     let path = temporary_container_path("mmap-v1-view");
-    fs::write(&path, build(&[("mapped/v1.asset", b"legacy")])).unwrap();
+    let v1_bytes = build(&[("mapped/v1.asset", b"legacy")]);
+    fs::write(&path, &v1_bytes).unwrap();
     assert!(matches!(
         MmapV2DirectoryView::open(&path),
         Err(ContainerError::UnsupportedVersion(FORMAT_VERSION))
     ));
+    let v1_reader = ContainerReader::from_mmap_file(&path).unwrap();
+    assert_eq!(
+        v1_reader.read_all(guid("mapped/v1.asset")).unwrap(),
+        b"legacy"
+    );
     fs::remove_file(path).unwrap();
 }
 
@@ -904,6 +918,14 @@ fn mmap_v2_directory_view_charges_validation_scratch_and_releases_it_on_failure(
     let budget = crate::ContainerReadBudget::new(limits);
     assert!(matches!(
         MmapV2DirectoryView::open_with_budget(&path, budget.clone()),
+        Err(ContainerError::ResourceLimit {
+            resource: "in-flight bytes",
+            ..
+        })
+    ));
+    assert_eq!(budget.in_flight_bytes(), 0);
+    assert!(matches!(
+        ContainerReader::from_mmap_file_with_budget(&path, budget.clone()),
         Err(ContainerError::ResourceLimit {
             resource: "in-flight bytes",
             ..

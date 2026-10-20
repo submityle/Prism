@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::mem::size_of;
 use core::ops::Range;
+use core::slice::ChunksExact;
 
 use prism_asset::StableGuid;
 
@@ -29,6 +30,26 @@ pub struct MmapV2DirectoryView {
     table_offset: usize,
     chunk_count: usize,
 }
+
+pub(crate) struct MmapGuidIter<'a> {
+    records: ChunksExact<'a, u8>,
+}
+
+impl Iterator for MmapGuidIter<'_> {
+    type Item = StableGuid;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.records
+            .next()
+            .map(|record| read_guid(record).expect("validated fixed-width GUID record"))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.records.size_hint()
+    }
+}
+
+impl ExactSizeIterator for MmapGuidIter<'_> {}
 
 impl fmt::Debug for MmapV2DirectoryView {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -495,10 +516,15 @@ impl MmapV2DirectoryView {
 
     /// Iterates GUIDs in canonical on-disk order without allocating.
     pub fn guids(&self) -> impl ExactSizeIterator<Item = StableGuid> + '_ {
-        self.source.mapped_bytes()
-            [self.directory_offset..self.directory_offset + self.entry_count * CHUNK_RECORD_SIZE]
-            .chunks_exact(CHUNK_RECORD_SIZE)
-            .map(|record| read_guid(record).expect("validated fixed-width GUID record"))
+        self.guid_iter()
+    }
+
+    pub(crate) fn guid_iter(&self) -> MmapGuidIter<'_> {
+        MmapGuidIter {
+            records: self.source.mapped_bytes()[self.directory_offset
+                ..self.directory_offset + self.entry_count * CHUNK_RECORD_SIZE]
+                .chunks_exact(CHUNK_RECORD_SIZE),
+        }
     }
 
     fn decode_entry_record(&self, record: &[u8]) -> Option<EntryInfo> {

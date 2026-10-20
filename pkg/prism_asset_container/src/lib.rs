@@ -13,7 +13,8 @@
 //! applications provide an immutable-version-aware HTTP/object-store adapter,
 //! while this crate enforces exact identity, offset, length, and request-bound
 //! checks before bytes reach the validated reader. The
-//! optional `mmap` feature adds a read-only local-file [`MmapRangeSource`]
+//! optional `mmap` feature adds a read-only local-file [`MmapRangeSource`]; v2
+//! [`ContainerReader`] instances retain a direct mapped directory/table index
 //! without changing the validated container ABI or the default positional-I/O
 //! path.
 
