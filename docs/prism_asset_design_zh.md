@@ -51,6 +51,7 @@ range-backed reader 的严格 budget/布局校验；GPU 解压、远程/GPU 交�
 2026-10-20 的容器回归另证明：v2 writer 会在每个 chunk 编码完成后重新计算物理位置，压缩膨胀不会破坏 RAW 计划的逻辑放置和对齐；编码后的 raw/stored 物理范围均不重叠，伪造 Chunk Table 物理重叠会被 memory reader 与 range reader 以 `OutOfBounds` 拒绝。RAW、Deflate、BlockDeflate 和混合对齐组合均覆盖，恶意 RAW plan 仍会被 writer 拒绝。
 
 `prism_gdeflate_gpu` 现已接入 GDF1 raw-DEFLATE tile 的 stored/fixed/dynamic/mixed 全 GPU 解码路径，统一 decoder 在 GPU 拒绝或完整性失败时回退 CPU golden，并输出明确 `DecodeReport`；2026-10-20 默认模式回归为 39 项通过，硬件相关用例在本机无可用 adapter 时显式 skip。`PRISM_REQUIRE_GPU=1` 已验证会在无 adapter 环境明确失败，当前没有真实 GPU 适配器证据；BlockDeflate 容器直解、GPU 常驻/批处理和 GPU feedback/page-table 接线仍未完成。
+随后 hardened 回归移除了未发出的旧 decoder 路径枚举与错误变体，限制不可信输出预分配，并将 GPU submission/readback/map/poll 失败改为结构化错误和有界等待；隔离 checkout 的 `cargo check -p prism_gdeflate_gpu --locked` 已通过。主树后续 check 被并发 `prism_render_architecture` 缺失函数阻断，不能据此宣称完整 workspace 已全绿。
 
 本轮异步调度切片补充了直接 `path#label` 请求，以及 reload 候选对新普通依赖和 sibling 新 label 的递归读取/解码/原子提交：调度器复用源资产的锁外读取、解码、依赖等待和原子 labeled 提交，成功返回精确子资产句柄；源资产已驻留时走同一解析路径，未知 label 终态失败但不污染已成功的源 revision。`AssetLoader::read_plan` 现可声明 `Whole` 或受限的物理 range 列表；同步 `AssetServer`、初次异步加载和异步 reload 都会先校验 metadata/范围/预算/短读，再按声明顺序拼接为一个连续输入交给既有 `load(&[u8], ...)`。这不是通用部分格式解码或完整 EDL；GPU 上传仍按下文状态单独验收。
 

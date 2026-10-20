@@ -41,6 +41,10 @@ BlockDeflate 以及混合对齐组合均覆盖，恶意 RAW plan 仍会被 write
 `DecodeReport`；2026-10-20 默认模式回归为 39 项通过，硬件相关用例在本机无可用 adapter
 时显式 skip。`PRISM_REQUIRE_GPU=1` 已验证会在无 adapter 环境明确失败，当前没有真实 GPU
 适配器证据；BlockDeflate 容器直解、GPU 常驻/批处理和 GPU feedback/page-table 接线仍未完成。
+随后 hardened 回归移除了未发出的旧 decoder 路径枚举与错误变体，限制不可信输出预分配，并将
+GPU submission/readback/map/poll 失败改为结构化错误和有界等待；隔离 checkout 的
+`cargo check -p prism_gdeflate_gpu --locked` 已通过。主树后续 check 被并发
+`prism_render_architecture` 缺失函数阻断，不能据此宣称完整 workspace 已全绿。
 
 当前仓库已交付一个可验证的 M0 垂直切片，但距离本文定义的 AAA 构建系统仍有明确缺口：
 
