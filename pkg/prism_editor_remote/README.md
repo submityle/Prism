@@ -3,19 +3,33 @@
 `prism_editor_remote` is a transport-neutral synchronization boundary between
 an editor and a runtime. It defines stable request/response envelopes,
 endpoint capabilities, typed values, snapshots, incremental component/property
-changes, revision checks, conflict errors, an in-memory reference endpoint, and
-a deterministic binary codec.
+changes, revision checks, conflict errors, an in-memory reference endpoint, a
+deterministic binary codec, and a bounded JSON-RPC 2.0 adapter.
 
-The crate does not implement BRP, JSON-RPC, sockets, HTTP, or a particular
-runtime. A future adapter can map a transport frame to
-`RequestEnvelope`/`ResponseEnvelope`, forward it to an `Endpoint`, and map the
-response back. This keeps transport policy and runtime ownership outside the
-protocol core.
+The JSON-RPC adapter is runtime-neutral and uses BRP-style method names:
+`prism/initialize`, `prism/describe`, `prism/world/readSnapshot`,
+`prism/world/readChanges`, `prism/world/applyChanges`,
+`prism/world/subscribe`, and `prism/world/unsubscribe`. It implements strict
+JSON-RPC 2.0 request/response/notification shapes, deterministic encoding,
+bounded parsing, capability negotiation, request correlation, and contiguous
+incremental notifications. `publish_changes` accepts a target explicitly
+because `ChangeSet` remains reusable across transport-neutral stores.
+
+The crate does not depend on a particular socket, HTTP stack, renderer, ECS,
+or engine. Transport code only needs to decode a frame, call
+`JsonRpcServer::handle_bytes`, and write the returned frames.
 
 The binary codec is deliberately JSON-free. It uses little-endian integers,
 length-prefixed strings/byte arrays, sorted map keys, and explicit enum tags.
 `CodecLimits` bounds frame size, collection size, string size, byte-array size,
 and value nesting depth before allocating untrusted data.
+
+`PieSession` starts from a cloned editor snapshot. Runtime changes are applied
+only to the private runtime copy and recorded in deterministic order. Stopping
+with `Rollback` discards the commit set; stopping with `Commit` returns an
+explicit, revision-checked `ChangeSet`. The session never mutates its edit
+baseline implicitly, and `PieStopResult::apply_commit` is the only explicit
+editor mutation path.
 
 Run the crate tests with:
 
