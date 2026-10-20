@@ -92,6 +92,28 @@ an identical refresh retains cached pages. Validation requires inspecting the
 complete input, but unchanged snapshots do not rebuild derived indexes, metadata
 edits retain the tree, and reverse references apply only edge differences.
 
+## Validation gates
+
+`validation::ValidationRegistry` combines built-in missing-reference, cycle and
+VCS-conflict checks with host-contributed `AssetValidationRule` callbacks. Rules
+receive a borrowed catalog, the exact asset and Save/Commit/Cook operation.
+Rule count, asset count, edges, callback invocations, finding emissions (including
+duplicates), retained diagnostics and message/identifier bytes have explicit
+bounds. Sink failures are latched even when a callback ignores the returned error.
+Callbacks are trusted host code; their internal allocation and execution time
+are not sandboxed by these bounds.
+
+Error/warning totals cover all findings before display truncation. A bounded
+report cannot hide a blocking error. Incomplete dependency traversal or failed
+callbacks cannot authorize an operation. `ValidationReceipt::authorize` checks
+the exact catalog snapshot, contribution set and operation before producing a
+borrowed `ValidatedCatalog`; strict policy can also deny warnings. Effective
+mutations revoke receipts, including divergent clones with equal generations.
+Unchanged catalog observations retain receipts. Rules must keep their
+configuration immutable while registered and re-register after policy changes.
+External-state checks and asynchronous destination publication need their own
+revision fence. This API supplies the gate; operation adapters must consume it.
+
 ## Verification
 
 The crate's tests cover deterministic ordering, cursor invalidation, tree
@@ -101,10 +123,12 @@ transitions. Additional regressions cover 257-folder filtered pagination with
 changing page sizes and cache eviction, exact path identity, file/folder prefix
 collisions, atomic VCS publication, bounded diagnostics, and 400 mixed edits
 checked against an independent reverse-reference reconstruction. On 2026-10-20,
-18 original catalog tests, 28 real filesystem tests and 4 source-publication
-tests passed. Publication tests cover path swaps/removals, every snapshot bound,
+18 original catalog tests, 28 real filesystem tests, 4 source-publication and
+6 validation tests passed. Publication tests cover path swaps/removals, every snapshot bound,
 bounded iterator consumption, stale refresh refusal, resolver failure and real
-file rename with host-owned stable identity. This does not verify importer,
+file rename with host-owned stable identity. Validation tests cover hidden errors,
+incomplete checks, operation policy, zero display capacity, stale snapshot/rule
+receipts, ignored sink errors and work budgets before callbacks. This does not verify importer,
 thumbnail production or the content UI. Run:
 
 ```text

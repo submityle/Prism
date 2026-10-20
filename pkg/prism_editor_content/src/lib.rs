@@ -12,12 +12,14 @@ extern crate alloc;
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
 use core::{fmt, ops::Bound};
 
 pub mod filesystem;
 mod source;
+pub mod validation;
 
 /// Stable content identity supplied by an asset system or importer.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
@@ -495,6 +497,9 @@ pub struct ContentDiagnostic {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiagnosticReport {
     diagnostics: Vec<ContentDiagnostic>,
+    errors: usize,
+    warnings: usize,
+    complete: bool,
     /// Whether the configured diagnostic limit omitted additional findings.
     pub truncated: bool,
 }
@@ -509,9 +514,25 @@ impl DiagnosticReport {
     /// Returns whether at least one error finding exists.
     #[must_use]
     pub fn has_errors(&self) -> bool {
-        self.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+        self.errors != 0
+    }
+
+    /// Number of error findings before the display list was truncated.
+    #[must_use]
+    pub const fn error_count(&self) -> usize {
+        self.errors
+    }
+
+    /// Number of warning findings before display truncation.
+    #[must_use]
+    pub const fn warning_count(&self) -> usize {
+        self.warnings
+    }
+
+    /// Whether every built-in check completed within its traversal bounds.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.complete
     }
 }
 
@@ -837,6 +858,7 @@ struct NormalizedFilter {
 pub struct ContentCatalog {
     limits: ContentLimits,
     generation: u64,
+    snapshot_identity: Arc<()>,
     assets: BTreeMap<AssetId, AssetRecord>,
     paths: BTreeMap<String, AssetId>,
     reverse_dependencies: BTreeMap<AssetId, BTreeSet<AssetId>>,
@@ -869,6 +891,7 @@ impl ContentCatalog {
         Ok(Self {
             limits,
             generation: 0,
+            snapshot_identity: Arc::new(()),
             assets: BTreeMap::new(),
             paths: BTreeMap::new(),
             reverse_dependencies: BTreeMap::new(),
@@ -1412,11 +1435,23 @@ impl ContentCatalog {
     /// Validates dependency graph and VCS conflict state in deterministic order.
     #[must_use]
     pub fn validate(&self) -> DiagnosticReport {
+        self.validate_with_diagnostic_limit(self.limits.max_diagnostics)
+    }
+
+    fn validate_with_diagnostic_limit(&self, max_diagnostics: usize) -> DiagnosticReport {
         let mut diagnostics = BTreeSet::new();
         let mut truncated = false;
+        let mut errors = 0usize;
+        let mut warnings = 0usize;
         let mut retain = |diagnostic: ContentDiagnostic| {
+            if diagnostic.severity == DiagnosticSeverity::Error {
+                errors = errors.saturating_add(1);
+            }
+            if diagnostic.severity == DiagnosticSeverity::Warning {
+                warnings = warnings.saturating_add(1);
+            }
             diagnostics.insert(diagnostic);
-            if diagnostics.len() > self.limits.max_diagnostics {
+            if diagnostics.len() > max_diagnostics {
                 diagnostics.pop_last();
                 truncated = true;
             }
@@ -1471,6 +1506,9 @@ impl ContentCatalog {
         }
         DiagnosticReport {
             diagnostics: diagnostics.into_iter().collect(),
+            errors,
+            warnings,
+            complete: !depth_exceeded,
             truncated,
         }
     }
@@ -1762,6 +1800,7 @@ impl ContentCatalog {
 
     fn changed(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.snapshot_identity = Arc::new(());
         self.asset_cache.clear();
         self.tree_cache.clear();
     }

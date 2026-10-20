@@ -20,7 +20,7 @@
 | `prism_editor_graph` | 稳定图身份、类型/基数校验、分组/索引维护、确定性拓扑与评估回调 | 材质/VFX 等具体节点 UI 和编译器适配 | 10 |
 | `prism_editor_timeline` | 整数 tick、稳定轨道/关键帧、插值、维度校验、有序事件与采样 | 序列器 UI 和具体运行时播放适配 | 3 |
 | `prism_editor_profiler` | 有界 frame/span、帧图/关键路径、内存预算告警、可视日志投影 | Tracy/GPU/真实运行时采集和分析界面 | 9 |
-| `prism_editor_content` | 目录/子树索引、末项续查分页、有界缓存与诊断、增量反向依赖、真实异步文件扫描、带代际围栏的原子源目录发布、原子 VCS 元数据和导入导出任务状态 | 缩略图生产、实际 importer/exporter/Cook/VCS provider 和内容 UI | 50（目录/扫描/发布） |
+| `prism_editor_content` | 目录/子树索引、末项续查分页、有界缓存与诊断、增量反向依赖、真实异步文件扫描、原子源目录发布、可贡献校验规则与精确快照门禁、原子 VCS 元数据和导入导出任务状态 | 缩略图生产、实际 importer/exporter/Cook/VCS provider 和原生内容流程 | 56（目录/扫描/发布/校验） |
 | `prism_editor_domains` | 域/能力/贡献/Profile、版本约束、依赖启停、确定性冲突诊断 | 材质/VFX/动画/地形/音频/物理的具体编辑器 | 13 |
 | `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
@@ -60,6 +60,14 @@
 `replace_from_filesystem` 用宿主 manifest/sidecar 解析稳定资产身份，不以路径哈希冒充重命名稳定 ID。扫描开始前捕获 generation，完成时拒绝覆盖更新的编辑；解析失败、非法/重复记录、前缀冲突或预算失败均保持旧目录。`replace_assets` 同样支持其他源适配器的完整候选，接受路径互换/删除，保留缺失依赖诊断和按路径的 VCS 观察。候选记录、路径长度/深度、边/标签数量和逻辑字节分别受限；只在有效变化时推进一次 generation，无变化不重建派生索引，路径不变保留树，反向引用按边差分更新。
 
 2026-10-20 执行 `cargo test --offline -p prism_editor_content --all-targets`：10 项单元、8 项目录回归、28 项真实文件扫描及 4 项原子发布测试。`cargo clippy --offline -p prism_editor_content --all-targets --all-features --no-deps -- -D warnings` 使用同一独立 target 验证。回归覆盖过滤分页/缓存淘汰、400 次混合修改的反向引用比对、所有扫描/发布预算、真实重命名保留宿主身份、代际过期和失败不部分发布。这里只验证源发现/目录数据，不把任务状态模型计作实际 importer/exporter/Cook 执行。
+
+### 内容校验与操作授权
+
+`validation::ValidationRegistry` 按稳定规则 ID 执行宿主贡献，检查前先限制资产、依赖边及规则调用数；诊断输出分别限制发射次数（含重复）、保留行数、消息和标识字节。回调只能为当前资产输出诊断；忽略 sink 错误也不能获得通过结果。宿主回调是可信代码，回调内部耗时和分配不属于这套预算的隔离保证。
+
+`DiagnosticReport` 与 `ValidationReceipt` 的错误/警告计数独立于显示截断，隐藏错误仍然阻止操作。依赖深度未完成、规则执行失败均不能授权。`authorize` 在生成借用的 `ValidatedCatalog` 前核对精确目录快照、规则集合及 Save/Commit/Cook 操作；有效目录修改和规则变动撤销旧 receipt，相同 generation 的独立目录或分叉 clone 不能互用授权。无变化观察保留 receipt；严格策略另可拒绝警告。注册期间规则配置须保持不变，配置改变后重新注册；外部状态与异步输出发布还须由适配器检查其修订。此模块提供门禁能力，不能据此声称所有保存/提交/构建入口已接入。
+
+2026-10-20 新增 6 项实际校验回归，连同此前 50 项目录/扫描/发布测试全部通过。覆盖显示截断隐藏错误、零显示容量、操作策略、未完成检查、回调错误与被忽略的 sink 错误、重复诊断预算、同代际分叉快照以及规则变更。
 
 ### 大世界执行数据层
 
