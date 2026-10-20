@@ -1,15 +1,18 @@
-use std::collections::BTreeMap;
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use core::fmt;
 
 /// Stable identity for an open editor document.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct DocumentId(u128);
 
 impl DocumentId {
+    /// Creates an identifier from its persisted numeric representation.
     #[must_use]
     pub const fn from_raw(raw: u128) -> Self {
         Self(raw)
     }
 
+    /// Returns the persisted numeric representation.
     #[must_use]
     pub const fn raw(self) -> u128 {
         self.0
@@ -21,21 +24,27 @@ impl DocumentId {
 pub struct LayerId(u128);
 
 impl LayerId {
+    /// Creates an identifier from its persisted numeric representation.
     #[must_use]
     pub const fn from_raw(raw: u128) -> Self {
         Self(raw)
     }
 
+    /// Returns the persisted numeric representation.
     #[must_use]
     pub const fn raw(self) -> u128 {
         self.0
     }
 }
 
+/// Semantic kind of a document layer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LayerKind {
+    /// Authoritative base content.
     Base,
+    /// User or tool override content.
     Override,
+    /// Runtime-observed content that is not editable by default.
     Runtime,
 }
 
@@ -50,6 +59,7 @@ pub struct DocumentLayer {
 }
 
 impl DocumentLayer {
+    /// Creates a visible layer, editable unless it is a runtime layer.
     #[must_use]
     pub fn new(id: LayerId, name: impl Into<String>, kind: LayerKind) -> Self {
         Self {
@@ -61,35 +71,42 @@ impl DocumentLayer {
         }
     }
 
+    /// Returns the layer identity.
     #[must_use]
     pub const fn id(&self) -> LayerId {
         self.id
     }
 
+    /// Returns the display name of the layer.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the semantic layer kind.
     #[must_use]
     pub const fn kind(&self) -> LayerKind {
         self.kind
     }
 
+    /// Returns whether the layer is visible.
     #[must_use]
     pub const fn is_visible(&self) -> bool {
         self.visible
     }
 
+    /// Changes the layer visibility.
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
     }
 
+    /// Returns whether commands may edit the layer.
     #[must_use]
     pub const fn is_editable(&self) -> bool {
         self.editable
     }
 
+    /// Changes whether commands may edit the layer.
     pub fn set_editable(&mut self, editable: bool) {
         self.editable = editable;
     }
@@ -106,6 +123,7 @@ pub struct DocumentState {
 }
 
 impl DocumentState {
+    /// Creates an empty document with revision zero and no dirty changes.
     #[must_use]
     pub fn new(id: DocumentId) -> Self {
         Self {
@@ -117,31 +135,37 @@ impl DocumentState {
         }
     }
 
+    /// Returns the document identity.
     #[must_use]
     pub const fn id(&self) -> DocumentId {
         self.id
     }
 
+    /// Returns layers in insertion order.
     #[must_use]
     pub fn layers(&self) -> &[DocumentLayer] {
         &self.layers
     }
 
+    /// Returns the currently active layer, if any.
     #[must_use]
     pub const fn active_layer(&self) -> Option<LayerId> {
         self.active_layer
     }
 
+    /// Returns the monotonically increasing document revision.
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
     }
 
+    /// Returns whether the document has unsaved changes.
     #[must_use]
     pub const fn is_dirty(&self) -> bool {
         self.dirty
     }
 
+    /// Adds a layer while enforcing uniqueness and the base-layer-first rule.
     pub fn add_layer(&mut self, layer: DocumentLayer) -> Result<(), DocumentError> {
         if self.layers.iter().any(|entry| entry.id == layer.id) {
             return Err(DocumentError::DuplicateLayer(layer.id));
@@ -157,6 +181,7 @@ impl DocumentState {
         Ok(())
     }
 
+    /// Removes a non-base layer and returns its previous value.
     pub fn remove_layer(&mut self, id: LayerId) -> Result<DocumentLayer, DocumentError> {
         let index = self
             .layers
@@ -174,6 +199,7 @@ impl DocumentState {
         Ok(removed)
     }
 
+    /// Selects an existing layer as active.
     pub fn set_active_layer(&mut self, id: LayerId) -> Result<(), DocumentError> {
         if !self.layers.iter().any(|layer| layer.id == id) {
             return Err(DocumentError::MissingLayer(id));
@@ -183,10 +209,12 @@ impl DocumentState {
         Ok(())
     }
 
+    /// Clears the dirty flag without changing the revision.
     pub fn mark_saved(&mut self) {
         self.dirty = false;
     }
 
+    /// Marks the document dirty and advances its revision.
     pub fn mark_dirty(&mut self) {
         self.touch();
     }
@@ -197,15 +225,20 @@ impl DocumentState {
     }
 }
 
+/// Failure produced by an invalid document or layer operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DocumentError {
+    /// A layer with the same identity is already present.
     DuplicateLayer(LayerId),
+    /// The first layer must be a base layer.
     FirstLayerMustBeBase,
+    /// The requested layer does not exist.
     MissingLayer(LayerId),
+    /// The base layer is required and cannot be removed.
     CannotRemoveBase,
 }
 
-impl std::fmt::Display for DocumentError {
+impl fmt::Display for DocumentError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DuplicateLayer(id) => write!(formatter, "layer {} already exists", id.raw()),
@@ -218,7 +251,7 @@ impl std::fmt::Display for DocumentError {
     }
 }
 
-impl std::error::Error for DocumentError {}
+impl core::error::Error for DocumentError {}
 
 /// A deterministic metadata index useful to adapters that need stable names.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -227,10 +260,12 @@ pub struct DocumentMetadata {
 }
 
 impl DocumentMetadata {
+    /// Inserts or replaces a string value for `key`.
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.values.insert(key.into(), value.into());
     }
 
+    /// Returns the value associated with `key`, if present.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&str> {
         self.values.get(key).map(String::as_str)

@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
 mod command;
 mod contribution;
 mod document;
