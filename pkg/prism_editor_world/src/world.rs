@@ -12,6 +12,9 @@ use super::{
 };
 use super::{CellIoProvider, CellSaveRequest, HlodPlanner};
 
+mod actors;
+pub use actors::{PendingActorLoad, PendingActorSave};
+
 /// Bounds applied to editor-world metadata and resident payloads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EditorWorldLimits {
@@ -281,6 +284,8 @@ pub struct EditorWorldData {
     limits: EditorWorldLimits,
     locks: CellLockRegistry,
     payloads: BTreeMap<CellKey, Vec<u8>>,
+    resident_tokens: BTreeMap<CellKey, TransitionToken>,
+    actor_payloads: BTreeMap<StableGuid, std::sync::Arc<[u8]>>,
     persisted_revisions: BTreeMap<CellKey, u64>,
     ofpa: OfpaCatalog,
     hlod: HlodPlanner,
@@ -297,6 +302,8 @@ impl EditorWorldData {
             limits,
             locks: CellLockRegistry::new(),
             payloads: BTreeMap::new(),
+            resident_tokens: BTreeMap::new(),
+            actor_payloads: BTreeMap::new(),
             persisted_revisions: BTreeMap::new(),
             ofpa: OfpaCatalog::new(limits.max_actors()),
             hlod: HlodPlanner::new(limits.max_hlod_layers(), limits.max_hlod_clusters()),
@@ -522,6 +529,8 @@ impl EditorWorldData {
             .into());
         }
         self.model.complete_load(token)?;
+        self.resident_tokens
+            .insert(CellKey::new(token.cell()), token);
         let key = CellKey::new(token.cell());
         if let Some(revision) = revision {
             let record = self
@@ -548,7 +557,13 @@ impl EditorWorldData {
     /// Completes a clean unload and drops its resident payload.
     pub fn complete_unload(&mut self, token: TransitionToken) -> Result<(), EditorWorldDataError> {
         self.model.complete_unload(token)?;
+        self.resident_tokens.remove(&CellKey::new(token.cell()));
         self.payloads.remove(&CellKey::new(token.cell()));
+        self.actor_payloads.retain(|actor, _| {
+            !self
+                .ofpa
+                .contains_in_cell(*actor, CellKey::new(token.cell()))
+        });
         Ok(())
     }
 
@@ -655,18 +670,6 @@ impl EditorWorldData {
     #[must_use]
     pub fn plan_ofpa(&self) -> OfpaPlan {
         self.ofpa.plan()
-    }
-
-    /// Commits an OFPA actor write.
-    pub fn commit_ofpa(
-        &mut self,
-        operation: &super::OfpaOperation,
-        lock: &CellLockToken,
-        now: u64,
-    ) -> Result<(), EditorWorldDataError> {
-        self.require_lock(operation.identity().cell(), lock, now)?;
-        self.ofpa.commit(operation)?;
-        Ok(())
     }
 
     /// Returns a mutable HLOD declaration/planner boundary.

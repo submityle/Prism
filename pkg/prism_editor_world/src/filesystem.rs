@@ -21,8 +21,14 @@ use crate::{
 mod codec;
 mod worker;
 
-use codec::{read_cell, write_cell, HEADER_BYTES};
+use codec::{read_cell, read_envelope, write_envelope, EnvelopeIdentity, HEADER_BYTES};
 use worker::{start, Cancellation};
+
+mod actor;
+pub use actor::{
+    ActorIoFuture, ActorIoLimits, ActorRevisionBase, ActorSaveReceipt, ActorSaveRequest,
+    ActorSnapshot, FileActorIoProvider,
+};
 
 /// Filesystem operation and payload bounds, also applied outside a driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +97,9 @@ pub enum FileCellIoError {
     },
     /// Work was abandoned before its publication fence.
     Cancelled,
+    /// The cooperative deadline expired before publication. Kernel I/O cannot
+    /// be interrupted; a commit already inside the fence completes normally.
+    TimedOut,
     /// I/O failed before rename; the previous cell remains authoritative.
     Io {
         /// Operation that failed.
@@ -118,6 +127,7 @@ impl fmt::Display for FileCellIoError {
                 "cell revision {requested} conflicts with durable revision {current:?}"
             ),
             Self::Cancelled => f.write_str("cell I/O cancelled"),
+            Self::TimedOut => f.write_str("storage operation deadline expired"),
             Self::Io { operation, source } => write!(f, "{operation}: {source}"),
             Self::CommitUncertain(source) => {
                 write!(f, "cell replaced but directory sync failed: {source}")
@@ -316,33 +326,7 @@ impl Shared {
         if !root_meta.is_dir() {
             return Err(FileCellIoError::UnsafePath(self.root.clone()));
         }
-        let path = self.root.join("cells");
-        if create {
-            match fs::create_dir(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(io_error("create cells directory", e)),
-            }
-        }
-        if !fs::symlink_metadata(&path)
-            .map_err(|e| io_error("inspect cells directory", e))?
-            .is_dir()
-        {
-            return Err(FileCellIoError::UnsafePath(path));
-        }
-        if create {
-            // Every writer persists the cells entry, including when another
-            // process created it but crashed before syncing the world root.
-            File::open(&self.root)
-                .and_then(|file| file.sync_all())
-                .map_err(|e| io_error("sync world directory", e))?;
-        }
-        let handle = File::open(&path).map_err(|e| io_error("open cells directory", e))?;
-        // Fail before staging on platforms/filesystems without directory sync.
-        handle
-            .sync_all()
-            .map_err(|e| io_error("sync cells directory", e))?;
-        Ok(Directory { path, handle })
+        Directory::child(&self.root, "cells", create)
     }
 
     fn save(
@@ -354,12 +338,35 @@ impl Shared {
         cancel.check()?;
         let directory = self.directory(true)?;
         let _guard = directory.acquire(request.file(), true)?;
-        cancel.check()?;
         let path = directory.cell_path(request.file());
-        let previous = match open_regular(&path) {
-            Ok(mut file) => Some(read_cell(
+        self.replace(
+            &directory,
+            &path,
+            path.with_extension("prismcell.pending"),
+            SaveEnvelope {
+                identity: &EnvelopeIdentity::cell(request.file()),
+                revision: request.revision(),
+                base: request.base_revision().map(Some),
+                payload,
+            },
+            cancel,
+        )
+    }
+
+    fn replace(
+        &self,
+        directory: &Directory,
+        path: &Path,
+        stage: PathBuf,
+        incoming: SaveEnvelope<'_>,
+        cancel: &Cancellation,
+    ) -> Result<(), FileCellIoError> {
+        cancel.check()?;
+        let payload = incoming.payload;
+        let previous = match open_regular(path) {
+            Ok(mut file) => Some(read_envelope(
                 &mut file,
-                request.file(),
+                incoming.identity,
                 self.limits.max_payload_bytes,
                 Some(payload),
                 cancel,
@@ -372,35 +379,31 @@ impl Shared {
         let current = previous.as_ref().map(|read| read.revision);
         let identical = previous
             .as_ref()
-            .is_some_and(|read| read.revision == request.revision() && read.equal);
+            .is_some_and(|read| read.revision == incoming.revision && read.equal);
         if identical {
-            // Also retries a previous post-rename directory sync failure.
+            let _fence = cancel.commit_guard()?;
             directory
                 .handle
                 .sync_all()
                 .map_err(FileCellIoError::CommitUncertain)?;
             return Ok(());
         }
-        if current.is_some_and(|revision| request.revision() <= revision)
-            || request
-                .base_revision()
-                .is_some_and(|base| current != Some(base))
+        if current.is_some_and(|revision| incoming.revision <= revision)
+            || incoming.base.is_some_and(|base| current != base)
         {
             return Err(FileCellIoError::RevisionConflict {
-                requested: request.revision(),
+                requested: incoming.revision,
                 current,
             });
         }
-        // One deterministic staging name per cell is safe under its OS lock.
-        // A crash orphan can be discarded; only the final name is authoritative.
-        let stage = path.with_extension("prismcell.pending");
+        // Only this exact stage may be reclaimed while holding the file's OS lock.
         match fs::symlink_metadata(&stage) {
             Ok(meta) if meta.is_file() => {
                 fs::remove_file(&stage).map_err(|e| io_error("remove orphan stage", e))?;
             }
             Ok(_) => return Err(FileCellIoError::UnsafePath(stage)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_error("inspect cell stage", e)),
+            Err(e) => return Err(io_error("inspect storage stage", e)),
         }
         let mut temporary = Temporary {
             path: stage,
@@ -410,19 +413,23 @@ impl Shared {
             .write(true)
             .create_new(true)
             .open(&temporary.path)
-            .map_err(|e| io_error("create cell stage", e))?;
+            .map_err(|e| io_error("create storage stage", e))?;
         temporary.owned = true;
-        write_cell(&mut file, request, payload, cancel)?;
+        write_envelope(
+            &mut file,
+            incoming.identity,
+            incoming.revision,
+            payload,
+            cancel,
+        )?;
         file.sync_all()
-            .map_err(|e| io_error("sync cell stage", e))?;
+            .map_err(|e| io_error("sync storage stage", e))?;
         drop(file);
         #[cfg(test)]
         self.checkpoint(TestPhase::Staged)
             .map_err(|e| io_error("staged checkpoint", e))?;
-        // Drop/cancel shares this fence: no rename can occur after cancellation
-        // returns. Cancellation may wait for an already-started commit fsync.
         let _fence = cancel.commit_guard()?;
-        fs::rename(&temporary.path, &path).map_err(|e| io_error("replace cell", e))?;
+        fs::rename(&temporary.path, path).map_err(|e| io_error("replace storage file", e))?;
         temporary.owned = false;
         #[cfg(test)]
         self.checkpoint(TestPhase::Renamed)
@@ -443,12 +450,50 @@ impl Shared {
     }
 }
 
+struct SaveEnvelope<'a> {
+    identity: &'a EnvelopeIdentity,
+    revision: u64,
+    // None preserves the cell API's legacy monotonic-only mode. Actors always
+    // supply Some(None) for create-only or Some(Some(base)) for compare-and-save.
+    base: Option<Option<u64>>,
+    payload: &'a [u8],
+}
+
 struct Directory {
     path: PathBuf,
     handle: File,
 }
 
 impl Directory {
+    fn child(parent: &Path, name: &str, create: bool) -> Result<Self, FileCellIoError> {
+        let path = parent.join(name);
+        if create {
+            match fs::create_dir(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(io_error("create cells directory", e)),
+            }
+        }
+        if !fs::symlink_metadata(&path)
+            .map_err(|e| io_error("inspect cells directory", e))?
+            .is_dir()
+        {
+            return Err(FileCellIoError::UnsafePath(path));
+        }
+        if create {
+            // Every writer persists the cells entry, including when another
+            // process created it but crashed before syncing the world root.
+            File::open(parent)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| io_error("sync world directory", e))?;
+        }
+        let handle = File::open(&path).map_err(|e| io_error("open cells directory", e))?;
+        // Fail before staging on platforms/filesystems without directory sync.
+        handle
+            .sync_all()
+            .map_err(|e| io_error("sync cells directory", e))?;
+        Ok(Directory { path, handle })
+    }
     fn cell_path(&self, file: &CellFileIdentity) -> PathBuf {
         FileCellStore::new(&self.path).cell_path(file.coord())
     }
@@ -459,21 +504,25 @@ impl Directory {
         exclusive: bool,
     ) -> Result<File, FileCellIoError> {
         let path = self.cell_path(identity).with_extension("prismcell.lock");
+        self.acquire_path(&path, exclusive)
+    }
+
+    fn acquire_path(&self, path: &Path, exclusive: bool) -> Result<File, FileCellIoError> {
         // Never truncate or unlink a lock: every cooperating process must lock
         // the same inode, including readers and after a process crash.
         let file = match OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
-            .open(&path)
+            .open(path)
         {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                check_regular(&path)?;
+                check_regular(path)?;
                 OpenOptions::new()
                     .read(true)
                     .write(true)
-                    .open(&path)
+                    .open(path)
                     .map_err(|e| io_error("open cell lock", e))?
             }
             Err(e) => return Err(io_error("create cell lock", e)),

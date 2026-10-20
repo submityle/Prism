@@ -7,6 +7,7 @@ use std::{
     },
     task::{Context, Poll, Waker},
     thread,
+    time::Instant,
 };
 
 use super::{io_error, lock, FileCellIoError, Shared};
@@ -15,12 +16,18 @@ use super::{io_error, lock, FileCellIoError, Shared};
 pub(super) struct Cancellation {
     cancelled: AtomicBool,
     commit: Mutex<()>,
+    deadline: Option<Instant>,
 }
 
 impl Cancellation {
     pub(super) fn check(&self) -> Result<(), FileCellIoError> {
         if self.cancelled.load(Ordering::Acquire) {
             Err(FileCellIoError::Cancelled)
+        } else if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            Err(FileCellIoError::TimedOut)
         } else {
             Ok(())
         }
@@ -47,6 +54,8 @@ struct Job<T> {
     shared: Arc<Shared>,
     cancel: Cancellation,
     state: Mutex<ResultState<T>>,
+    // Drop the stored result before releasing its byte reservation.
+    _retained: Option<Arc<dyn Send + Sync>>,
 }
 
 impl<T> Drop for Job<T> {
@@ -88,6 +97,23 @@ pub(super) fn start<T: Send + 'static>(
     shared: Arc<Shared>,
     operation: impl FnOnce(&Cancellation) -> Result<T, FileCellIoError> + Send + 'static,
 ) -> Result<Pin<Box<dyn Future<Output = Result<T, FileCellIoError>> + Send>>, FileCellIoError> {
+    start_until(shared, None, operation)
+}
+
+pub(super) fn start_until<T: Send + 'static>(
+    shared: Arc<Shared>,
+    deadline: Option<Instant>,
+    operation: impl FnOnce(&Cancellation) -> Result<T, FileCellIoError> + Send + 'static,
+) -> Result<Pin<Box<dyn Future<Output = Result<T, FileCellIoError>> + Send>>, FileCellIoError> {
+    start_retained(shared, deadline, None, operation)
+}
+
+pub(super) fn start_retained<T: Send + 'static>(
+    shared: Arc<Shared>,
+    deadline: Option<Instant>,
+    retained: Option<Arc<dyn Send + Sync>>,
+    operation: impl FnOnce(&Cancellation) -> Result<T, FileCellIoError> + Send + 'static,
+) -> Result<Pin<Box<dyn Future<Output = Result<T, FileCellIoError>> + Send>>, FileCellIoError> {
     shared
         .operations
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -95,8 +121,12 @@ pub(super) fn start<T: Send + 'static>(
         })
         .map_err(|_| FileCellIoError::Capacity)?;
     let job = Arc::new(Job {
+        _retained: retained,
         shared,
-        cancel: Cancellation::default(),
+        cancel: Cancellation {
+            deadline,
+            ..Cancellation::default()
+        },
         state: Mutex::new(ResultState {
             result: None,
             waker: None,

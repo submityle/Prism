@@ -18,6 +18,14 @@ pub struct ActorFileIdentity {
 }
 
 impl ActorFileIdentity {
+    /// Creates a numeric path identity; all signed i32 coordinates are valid.
+    pub fn new(actor: StableGuid, cell: CellCoord) -> Result<Self, OfpaError> {
+        if actor.is_nil() {
+            return Err(OfpaError::NilActor);
+        }
+        Ok(Self::derive(actor, cell))
+    }
+
     fn derive(actor: StableGuid, cell: CellCoord) -> Self {
         Self {
             actor,
@@ -57,9 +65,15 @@ pub struct ActorRecord {
     identity: ActorFileIdentity,
     revision: u64,
     dirty: bool,
+    persisted: Option<u64>,
 }
 
 impl ActorRecord {
+    /// Last acknowledged durable revision; None means create-only.
+    pub const fn persisted_revision(&self) -> Option<u64> {
+        self.persisted
+    }
+
     /// Stable file identity.
     #[must_use]
     pub const fn identity(&self) -> &ActorFileIdentity {
@@ -217,6 +231,7 @@ impl OfpaCatalog {
                 identity: ActorFileIdentity::derive(actor, cell),
                 revision: 0,
                 dirty: false,
+                persisted: None,
             },
         );
         self.bump_epoch();
@@ -272,7 +287,8 @@ impl OfpaCatalog {
         }
     }
 
-    /// Commits one actor write if its planned revision is still current.
+    /// Acknowledges external metadata only, without claiming any disk I/O.
+    /// The world facade instead requires an actual actor save receipt.
     pub fn commit(&mut self, operation: &OfpaOperation) -> Result<(), OfpaError> {
         let actor = operation.identity.actor();
         let record = self
@@ -307,6 +323,42 @@ impl OfpaCatalog {
         self.actors
             .get(&actor)
             .is_some_and(|record| CellKey::new(record.identity.cell()) == cell)
+    }
+
+    pub(crate) fn note_persisted(
+        &mut self,
+        actor: StableGuid,
+        revision: u64,
+    ) -> Result<(), OfpaError> {
+        let record = self
+            .actors
+            .get_mut(&actor)
+            .ok_or(OfpaError::UnknownActor(actor))?;
+        record.persisted = Some(record.persisted.map_or(revision, |old| old.max(revision)));
+        Ok(())
+    }
+
+    pub(crate) fn restore(&mut self, actor: StableGuid, revision: u64) -> Result<(), OfpaError> {
+        let record = self
+            .actors
+            .get_mut(&actor)
+            .ok_or(OfpaError::UnknownActor(actor))?;
+        record.revision = revision;
+        record.persisted = Some(revision);
+        record.dirty = false;
+        self.bump_epoch();
+        Ok(())
+    }
+
+    pub(crate) fn operation(&self, actor: StableGuid) -> Result<OfpaOperation, OfpaError> {
+        let record = self
+            .actors
+            .get(&actor)
+            .ok_or(OfpaError::UnknownActor(actor))?;
+        Ok(OfpaOperation {
+            identity: record.identity.clone(),
+            revision: record.revision,
+        })
     }
 
     fn bump_epoch(&mut self) {

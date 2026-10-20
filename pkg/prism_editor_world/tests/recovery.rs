@@ -338,23 +338,15 @@ fn hierarchical_edit_policy_and_actor_commits_preserve_cell_dirtiness() {
     world
         .mark_actor_dirty(actor, &lock, 2)
         .expect("new actor edit");
-    assert!(matches!(
-        world.commit_ofpa(&plan.operations()[0], &lock, 2),
-        Err(EditorWorldDataError::Ofpa(OfpaError::StaleRevision { .. }))
-    ));
-    let plan = world.plan_ofpa();
-    world
-        .commit_ofpa(&plan.operations()[0], &lock, 2)
-        .expect("persist current actor");
-    assert!(world.plan_ofpa().operations().is_empty());
+    assert!(world.plan_ofpa().operations()[0].revision() > plan.operations()[0].revision());
     assert!(world.model().cell(coord()).expect("cell").is_dirty());
     let pending = world
         .prepare_save(coord(), &lock, 2)
         .expect("current cell snapshot");
-    world
-        .commit_save(&pending, 2)
-        .expect("persist cell manifest");
-    assert!(!world.model().cell(coord()).expect("cell").is_dirty());
+    assert_eq!(
+        world.commit_save(&pending, 2),
+        Err(EditorWorldDataError::DirtyActors(coord()))
+    );
 }
 
 #[test]

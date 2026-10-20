@@ -13,10 +13,10 @@ use prism_ecs::partition::cell::CellCoord;
 use super::*;
 use crate::{EditorWorld, IoBudget, IoCompletion, WorldIoDriver};
 
-struct Temp(PathBuf);
+pub(super) struct Temp(pub(super) PathBuf);
 
 impl Temp {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         loop {
             let path = std::env::temp_dir().join(format!(
@@ -50,7 +50,7 @@ impl Wake for Notify {
     }
 }
 
-fn run<T>(mut future: Pin<Box<dyn Future<Output = T> + Send>>) -> T {
+pub(super) fn run<T>(mut future: Pin<Box<dyn Future<Output = T> + Send>>) -> T {
     let waker = Waker::from(Arc::new(Notify(thread::current())));
     let mut cx = Context::from_waker(&waker);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -63,7 +63,7 @@ fn run<T>(mut future: Pin<Box<dyn Future<Output = T> + Send>>) -> T {
     }
 }
 
-fn idle(provider: &FileCellIoProvider) {
+pub(super) fn idle(provider: &FileCellIoProvider) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while provider.outstanding_operations() != 0 {
         assert!(Instant::now() < deadline, "worker did not release capacity");

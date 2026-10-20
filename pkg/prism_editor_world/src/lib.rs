@@ -5,7 +5,8 @@
 //! identity, and failure-safe residency transitions. A plan can be adapted to
 //! [`prism_ecs`] / [`prism_scene`] partition contracts, but this crate never
 //! creates entities or assumes a renderer exists. Opaque asynchronous storage
-//! is supplied through [`CellIoProvider`], including [`FileCellIoProvider`].
+//! is supplied through [`CellIoProvider`], including [`FileCellIoProvider`],
+//! and bounded OFPA actor storage through [`FileActorIoProvider`].
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -29,7 +30,10 @@ mod locks;
 mod ofpa;
 mod world;
 
-pub use filesystem::{FileCellIoError, FileCellIoLimits, FileCellIoProvider};
+pub use filesystem::{
+    ActorIoFuture, ActorIoLimits, ActorRevisionBase, ActorSaveReceipt, ActorSaveRequest,
+    ActorSnapshot, FileActorIoProvider, FileCellIoError, FileCellIoLimits, FileCellIoProvider,
+};
 pub use hlod::{
     HlodCluster, HlodError, HlodLayer, HlodPlan, HlodPlanOperation, HlodPlanner, HlodView,
 };
@@ -42,7 +46,7 @@ pub use locks::{CellLockError, CellLockRecord, CellLockRegistry, CellLockToken};
 pub use ofpa::{ActorFileIdentity, ActorRecord, OfpaCatalog, OfpaError, OfpaOperation, OfpaPlan};
 pub use world::{
     CellPayloadError, EditorWorldData, EditorWorldDataError, EditorWorldLimits, LoadSubmitError,
-    PendingCellSave, VisibilityPlan,
+    PendingActorLoad, PendingActorSave, PendingCellSave, VisibilityPlan,
 };
 
 /// A total-order wrapper around the ECS cell coordinate.

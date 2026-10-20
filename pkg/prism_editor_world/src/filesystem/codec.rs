@@ -4,7 +4,9 @@ use std::{
 };
 
 use super::{io_error, Cancellation, FileCellIoError};
-use crate::{CellFileIdentity, CellSaveRequest};
+use crate::CellCoord;
+use crate::CellFileIdentity;
+use prism_asset::StableGuid;
 
 pub(super) const HEADER_BYTES: usize = 64;
 const MAGIC: &[u8; 8] = b"PEWCELL\0";
@@ -12,7 +14,7 @@ const VERSION: u32 = 1;
 const CHUNK_BYTES: usize = 64 * 1024;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 
-fn fold(mut hash: u64, bytes: &[u8]) -> u64 {
+pub(crate) fn fold(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
     }
@@ -25,6 +27,23 @@ pub(super) struct ReadCell {
     pub equal: bool,
 }
 
+/// Shared envelope shape; callers select a distinct format magic and identity.
+pub(crate) struct EnvelopeIdentity {
+    pub magic: [u8; 8],
+    pub coord: CellCoord,
+    pub guid: StableGuid,
+}
+
+impl EnvelopeIdentity {
+    pub(super) fn cell(file: &CellFileIdentity) -> Self {
+        Self {
+            magic: *MAGIC,
+            coord: file.coord(),
+            guid: file.stable_id(),
+        }
+    }
+}
+
 pub(super) fn read_cell(
     file: &mut File,
     identity: &CellFileIdentity,
@@ -32,6 +51,26 @@ pub(super) fn read_cell(
     compare: Option<&[u8]>,
     cancel: &Cancellation,
 ) -> Result<ReadCell, FileCellIoError> {
+    read_envelope(
+        file,
+        &EnvelopeIdentity::cell(identity),
+        limit,
+        compare,
+        cancel,
+    )
+}
+
+pub(super) fn read_envelope(
+    file: &mut File,
+    identity: &EnvelopeIdentity,
+    limit: usize,
+    compare: Option<&[u8]>,
+    cancel: &Cancellation,
+) -> Result<ReadCell, FileCellIoError> {
+    cancel.check()?;
+    if identity.guid.is_nil() {
+        return Err(FileCellIoError::InvalidRequest);
+    }
     let size = file
         .metadata()
         .map_err(|e| io_error("cell length", e))?
@@ -48,19 +87,19 @@ pub(super) fn read_cell(
     let mut header = [0; HEADER_BYTES];
     file.read_exact(&mut header)
         .map_err(|e| io_error("read cell header", e))?;
-    if &header[..8] != MAGIC {
+    if header[..8] != identity.magic {
         return Err(FileCellIoError::Corrupt("magic"));
     }
     if header[8..12] != VERSION.to_le_bytes() {
         return Err(FileCellIoError::Corrupt("unsupported version"));
     }
-    let coord = identity.coord();
+    let coord = identity.coord;
     for (index, axis) in [coord.x, coord.y, coord.z].into_iter().enumerate() {
         if header[12 + index * 4..16 + index * 4] != axis.to_le_bytes() {
             return Err(FileCellIoError::Corrupt("coordinate mismatch"));
         }
     }
-    if header[24..40] != identity.stable_id().to_u128().to_le_bytes() {
+    if header[24..40] != identity.guid.to_u128().to_le_bytes() {
         return Err(FileCellIoError::Corrupt("stable identity mismatch"));
     }
     let revision = u64::from_le_bytes(header[40..48].try_into().expect("fixed header range"));
@@ -119,21 +158,26 @@ pub(super) fn read_cell(
     })
 }
 
-pub(super) fn write_cell(
+pub(super) fn write_envelope(
     file: &mut File,
-    request: &CellSaveRequest,
+    identity: &EnvelopeIdentity,
+    revision: u64,
     payload: &[u8],
     cancel: &Cancellation,
 ) -> Result<(), FileCellIoError> {
+    cancel.check()?;
+    if identity.guid.is_nil() {
+        return Err(FileCellIoError::InvalidRequest);
+    }
     let mut header = [0; HEADER_BYTES];
-    header[..8].copy_from_slice(MAGIC);
+    header[..8].copy_from_slice(&identity.magic);
     header[8..12].copy_from_slice(&VERSION.to_le_bytes());
-    let coord = request.cell();
+    let coord = identity.coord;
     for (index, axis) in [coord.x, coord.y, coord.z].into_iter().enumerate() {
         header[12 + index * 4..16 + index * 4].copy_from_slice(&axis.to_le_bytes());
     }
-    header[24..40].copy_from_slice(&request.file().stable_id().to_u128().to_le_bytes());
-    header[40..48].copy_from_slice(&request.revision().to_le_bytes());
+    header[24..40].copy_from_slice(&identity.guid.to_u128().to_le_bytes());
+    header[40..48].copy_from_slice(&revision.to_le_bytes());
     header[48..56].copy_from_slice(&(payload.len() as u64).to_le_bytes());
     let mut checksum = fold(FNV_OFFSET, &header[..56]);
     for chunk in payload.chunks(CHUNK_BYTES) {
