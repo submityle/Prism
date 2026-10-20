@@ -2762,6 +2762,69 @@ fn canonical_light_scene_insert_update_remove_are_extracted_with_freshness() {
 }
 
 #[test]
+fn replacing_light_scene_lineage_with_matching_epochs_refreshes_derived_lights() {
+    use prism_render_architecture::lighting::{
+        LightClass, LightClassification, LightEmission, LightGeometry, LightMobility, LightRecord,
+        LightScene, LightUnit,
+    };
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    app.world_mut()
+        .insert_resource(crate::LightingLightScene::default());
+    let make_scene = |intensity| {
+        let mut scene = LightScene::new();
+        scene
+            .insert(
+                LightRecord::new(
+                    LightClassification {
+                        class: LightClass::Point,
+                        mobility: LightMobility::Dynamic,
+                    },
+                    LightEmission::new([1.0; 3], intensity, LightUnit::Candela),
+                    LightGeometry::Point {
+                        position: [0.0, 2.0, 0.0],
+                        radius: 0.1,
+                        range: 8.0,
+                    },
+                ),
+                1,
+            )
+            .expect("insert light");
+        scene
+    };
+    let first_scene = make_scene(2.0);
+    let first_identity = first_scene.identity();
+    app.world_mut()
+        .resource_mut::<crate::LightingLightScene>()
+        .scene = first_scene;
+    app.update();
+
+    let replacement = make_scene(7.0);
+    assert_ne!(replacement.identity(), first_identity);
+    assert_eq!(replacement.sequence(), 1);
+    assert_eq!(replacement.scene_epoch(), 1);
+    app.world_mut()
+        .resource_mut::<crate::LightingLightScene>()
+        .scene = replacement;
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let extracted = render.world.resource::<ExtractedLightingInputs>();
+    assert_eq!(extracted.light_scene_sequence, 1);
+    assert_eq!(extracted.light_scene_epoch, 1);
+    assert_ne!(extracted.light_scene_identity, first_identity);
+    assert_eq!(extracted.punctuals[0].intensity, [7.0; 3]);
+    let state = render.world.resource::<LightingPlanState>();
+    assert_eq!(state.light_scene_identity, extracted.light_scene_identity);
+    assert_eq!(
+        render
+            .world
+            .resource::<RenderFrameStats>()
+            .lighting_cache_invalidations,
+        1
+    );
+}
+
+#[test]
 fn unsupported_canonical_light_rejects_the_whole_native_snapshot_explicitly() {
     use prism_render_architecture::lighting::{
         LightClass, LightClassification, LightEmission, LightGeometry, LightMobility, LightRecord,

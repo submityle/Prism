@@ -668,9 +668,10 @@ Render target 必须支持 HDR scene-linear 中间结果；`Rgba8Unorm` 不能�
 |---|---|---|
 | 唯一 CPU LightScene | `prism_render_architecture::lighting::LightScene`；generation-safe scene lineage、delta、checkpoint/replay | 有契约测试；需要和各 adapter 统一验证 |
 | 原生宿主适配 | `prism_render_app::LightingLightScene` → directional/point/spot ABI；对不支持的 class/unit/layer/flags/capacity 明确拒绝 | 转换测试覆盖创建/更新/删除、单位、方向符号和聚光角；仓库测试待跑 |
-| ECS 场景渲染上传 | 现有 Bevy `ExtractedLights` 仍是独立入口；`LightGpuBuffers` 已按 ABI 值比较、合并脏区间并仅写入变化范围，扩容全量重传 | 绑定组按 GPU buffer identity 缓存；真实 device 上传测试待接通 |
+| 旧 ECS 场景渲染上传（非目标路径） | Bevy `ExtractedLights` / `LightGpuBuffers` 属于待移除的废弃接线，不作为 Prism 光照系统能力或验收结果 | 由原生 `prism_render_app::LightingLightScene` 与 Prism RHI 路径替代；旧模块仍待删除 |
 | stable GPU light slots | `IncrementalLightTable<T>` 提供稳定 slot、generation、retirement fence、dirty range/full rebuild policy、upload receipt | 有 10 个单元测试；尚未连接 scene adapter 到真实 buffer/queue lifecycle |
 | 原生 direct-light buffer 增量上传 | `LightingGpuState::prepare` 缓存方向光与点/聚光 ABI 内容；未变化时零次上传，稀疏变化合并成 byte-range 写入，密集变化使用整段写入；资源 bundle replay 后强制全量重传 | 上传规划单测已加入；当前 workspace 物理拓扑编译错误阻止 package 测试运行，真实设备上传量与 GPU 时间未测 |
+| 原生 light scene 提取缓存 | scene lineage identity + sequence + epoch 三元组识别快照；未变化帧复用 render-world 已派生的光源数组，避免克隆整个 CPU `LightScene` 和重复转换；scene 被替换但序号/epoch 碰巧相同仍会刷新，并触发缓存失效 | 已加入同 epoch 不同 scene lineage 的回归测试；当前测试构建被 workspace 物理模块编译问题阻断 |
 | 原生光源适配错误闸门 | canonical `LightScene` 无法无损映射到当前 direct-light ABI 时，`execute_frame` 在任何 lighting GPU 上传/图录制前拒绝该帧；`RenderFrameStats::lighting_input_error` 保留结构化原因 | 已扩展 Rect light 拒绝集成测试，验证不提交帧且能读取错误；测试受 workspace 编译错误影响，尚未执行通过 |
 | 实际 HDR/present 闭环 | 当前宿主光照仍未证明进入最终 scene-linear HDR texture 并被 present/readback | 未完成；不宣称生产照明闭环 |
 

@@ -49,6 +49,8 @@ pub struct LightingPlanState {
     pub journal_snapshot: prism_render_architecture::lighting::contract::JournalSnapshot,
     /// Canonical light-scene cursor paired with the compiled plan.
     pub light_scene_sequence: u64,
+    /// Canonical scene lineage paired with the compiled plan.
+    pub light_scene_identity: u64,
     /// Canonical light-scene epoch paired with the compiled plan.
     pub light_scene_epoch: u64,
 }
@@ -700,6 +702,8 @@ pub struct ExtractedLightingInputs {
     pub punctuals: Vec<LightingPunctualInput>,
     /// Canonical scene sequence represented by this extracted snapshot.
     pub light_scene_sequence: u64,
+    /// Canonical scene lineage represented by this extracted snapshot.
+    pub light_scene_identity: u64,
     /// Canonical scene epoch represented by this extracted snapshot.
     pub light_scene_epoch: u64,
     /// Explicit all-or-nothing native conversion failure, if any.
@@ -865,6 +869,7 @@ impl LightingPlanState {
             tier: config.lighting_tier,
             journal_snapshot: Default::default(),
             light_scene_sequence: 0,
+            light_scene_identity: 0,
             light_scene_epoch: 0,
         }
     }
@@ -884,29 +889,66 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
     }
     let light_scene = main
         .get_resource::<crate::lighting_scene::LightingLightScene>()
-        .expect("canonical light scene was initialized")
-        .clone();
-    let derived = crate::lighting_scene::derive_native_lights(&light_scene.scene);
-    let (directionals, punctuals, light_scene_error) = match derived {
-        Ok(native) => (native.directionals, native.punctuals, None),
-        Err(error) => (Vec::new(), Vec::new(), Some(error)),
-    };
+        .expect("canonical light scene was initialized");
+    let light_scene_sequence = light_scene.scene.sequence();
+    let light_scene_identity = light_scene.scene.identity();
+    let light_scene_epoch = light_scene.scene.scene_epoch();
+    let light_count = light_scene.scene.len();
+    let native_changed = render
+        .get_resource::<ExtractedLightingInputs>()
+        .is_none_or(|previous| {
+            previous.light_scene_identity != light_scene_identity
+                || previous.light_scene_sequence != light_scene_sequence
+                || previous.light_scene_epoch != light_scene_epoch
+        });
     let mut stats = inputs.stats;
-    if !light_scene.scene.is_empty() {
-        stats.lights = u32::try_from(light_scene.scene.len()).unwrap_or(u32::MAX);
+    if light_count != 0 {
+        stats.lights = u32::try_from(light_count).unwrap_or(u32::MAX);
     }
-    render.insert_resource(ExtractedLightingInputs {
-        stats,
-        journal_snapshot: inputs.journal.snapshot(),
-        directionals,
-        punctuals,
-        light_scene_sequence: light_scene.scene.sequence(),
-        light_scene_epoch: light_scene.scene.scene_epoch(),
-        light_scene_error,
-        gi_candidates: inputs.gi_candidates,
-        surfaces: inputs.surfaces,
-        trace_scene: main.get_resource::<LightingTraceSceneInput>().cloned(),
-    });
+    let trace_scene = main.get_resource::<LightingTraceSceneInput>().cloned();
+    if let Some(extracted) = render.get_resource_mut::<ExtractedLightingInputs>() {
+        extracted.stats = stats;
+        extracted.journal_snapshot = inputs.journal.snapshot();
+        if native_changed {
+            match crate::lighting_scene::derive_native_lights(&light_scene.scene) {
+                Ok(native) => {
+                    extracted.directionals = native.directionals;
+                    extracted.punctuals = native.punctuals;
+                    extracted.light_scene_error = None;
+                }
+                Err(error) => {
+                    extracted.directionals.clear();
+                    extracted.punctuals.clear();
+                    extracted.light_scene_error = Some(error);
+                }
+            }
+            extracted.light_scene_sequence = light_scene_sequence;
+            extracted.light_scene_identity = light_scene_identity;
+            extracted.light_scene_epoch = light_scene_epoch;
+        }
+        extracted.gi_candidates = inputs.gi_candidates;
+        extracted.surfaces = inputs.surfaces;
+        extracted.trace_scene = trace_scene;
+    } else {
+        let (directionals, punctuals, light_scene_error) =
+            match crate::lighting_scene::derive_native_lights(&light_scene.scene) {
+                Ok(native) => (native.directionals, native.punctuals, None),
+                Err(error) => (Vec::new(), Vec::new(), Some(error)),
+            };
+        render.insert_resource(ExtractedLightingInputs {
+            stats,
+            journal_snapshot: inputs.journal.snapshot(),
+            directionals,
+            punctuals,
+            light_scene_sequence,
+            light_scene_identity,
+            light_scene_epoch,
+            light_scene_error,
+            gi_candidates: inputs.gi_candidates,
+            surfaces: inputs.surfaces,
+            trace_scene,
+        });
+    }
 }
 
 /// Compiles the single plan once for each extracted frame.
@@ -928,9 +970,11 @@ pub(crate) fn compile_lighting_plan<I>(
     }
     let previous_epoch = state.journal_snapshot.epoch;
     let previous_light_scene_epoch = state.light_scene_epoch;
+    let previous_light_scene_identity = state.light_scene_identity;
     state.scene_stats = inputs.stats;
     state.journal_snapshot = inputs.journal_snapshot;
     state.light_scene_sequence = inputs.light_scene_sequence;
+    state.light_scene_identity = inputs.light_scene_identity;
     state.light_scene_epoch = inputs.light_scene_epoch;
     let availability = inputs.candidate_availability(runtime.runtime().device().capabilities());
     state.plan = BudgetCompiler::compile(
@@ -949,7 +993,9 @@ pub(crate) fn compile_lighting_plan<I>(
     stats.lighting_recipes_rejected = state.plan.rejected.len() as u64;
     stats.lighting_executions_planned = state.executions.len() as u64;
     let journal_invalidations = changed_epoch_fields(previous_epoch, state.journal_snapshot.epoch);
-    let scene_invalidated_without_journal = previous_light_scene_epoch != state.light_scene_epoch
+    let scene_invalidated_without_journal = (previous_light_scene_identity
+        != state.light_scene_identity
+        || previous_light_scene_epoch != state.light_scene_epoch)
         && previous_epoch.lighting == state.journal_snapshot.epoch.lighting;
     stats.lighting_cache_invalidations =
         u64::from(journal_invalidations + u32::from(scene_invalidated_without_journal));
