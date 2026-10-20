@@ -96,7 +96,7 @@ impl CompiledAttributeBinding {
     /// always return zero. The result is an index into the attribute's planned
     /// region, not a bind-group slot.
     #[must_use]
-    pub const fn physical_copy(self, frame_index: u64) -> u32 {
+    pub const fn physical_copy(&self, frame_index: u64) -> u32 {
         match self.role {
             AttributeBufferRole::Single => 0,
             AttributeBufferRole::Previous => 1 - (frame_index as u32 & 1),
@@ -558,9 +558,9 @@ fn resolve_attribute_identifiers(source: &str, layout: &AttributeLayoutPlan) -> 
         let previous = format!("{base}_previous");
         let current = format!("{base}_current");
         let (resolved_previous, resolved_current, resolved_base) = if planned.copies == 2 {
-            (previous.clone(), current.clone(), current)
+            (previous.clone(), current.clone(), current.clone())
         } else {
-            (base.clone(), base.clone(), base)
+            (base.clone(), base.clone(), base.clone())
         };
         replacements.push((previous, resolved_previous));
         replacements.push((current, resolved_current));
