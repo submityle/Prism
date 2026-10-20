@@ -1,4 +1,14 @@
-//! Bounded collection-member filtering using the catalog's public query policy.
+//! Project collection persistence and bounded catalog filtering.
+//!
+//! Explicit host I/O, never called by a Loom build. Project roots must remain
+//! trusted and stable during an operation. Invalid loads preserve current state.
+
+mod storage;
+
+pub use storage::{
+    CollectionLoadReport, CollectionSaveReport, CollectionStorageError, CollectionStore,
+    MissingCollectionMember, MAX_COLLECTION_FILE_BYTES,
+};
 
 use prism_editor_content::{AssetRecord, ContentCatalog, TreeQuery};
 
