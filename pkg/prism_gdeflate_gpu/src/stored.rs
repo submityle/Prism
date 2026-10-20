@@ -71,6 +71,8 @@ pub enum StoredPlanError {
     DeviceLimitExceeded,
     /// A validated range cannot be represented as a non-wrapping `u32` range.
     RangeOverflow,
+    /// Submission polling or result mapping failed.
+    Readback(buffer::ReadbackError),
 }
 
 impl StoredBlockPlan {
@@ -354,8 +356,9 @@ impl GpuStoredGDeflate {
         }
         let stage = buffer::staging(device, "prism_gdeflate_stored_stage", output_bytes as u64);
         buffer::copy(&mut encoder, &output, &stage, output_bytes as u64);
-        ctx.queue().submit([encoder.finish()]);
-        let mut result = buffer::read_back::<u32>(ctx, &stage);
+        let submission = ctx.queue().submit([encoder.finish()]);
+        let mut result = buffer::read_back::<u32>(ctx, &stage, submission)
+            .map_err(StoredPlanError::Readback)?;
         result.truncate(output_words_usize);
         let bytes = bytemuck::cast_slice::<u32, u8>(&result);
         Ok(bytes[..plan.output_size()].to_vec())

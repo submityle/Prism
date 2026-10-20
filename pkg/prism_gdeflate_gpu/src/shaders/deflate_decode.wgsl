@@ -266,12 +266,17 @@ fn write_byte(offset: u32, value: u32) {
 
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) invocation: vec3<u32>) {
-    if (invocation.x != 0u) {
+    if (invocation.x != 0u || arrayLength(&status) < 2u) {
         return;
     }
     status[0] = STATUS_PARAMETERS;
     status[1] = 0u;
-    if (params.rounds == 0u || params.source_words != params.rounds * 32u ||
+    // Division/checks precede multiplication so even corrupt uniforms cannot
+    // wrap the reader bounds. Normal host requests already enforce these.
+    if (params.rounds == 0u || params.source_words > 0x3fffffffu ||
+        params.source_words % 32u != 0u || params.rounds != params.source_words / 32u ||
+        params.source_words != arrayLength(&source) || params.output_bytes > 65536u ||
+        (params.output_bytes + 3u) / 4u > arrayLength(&output) ||
         params.compressed_bytes == 0u || params.compressed_bytes > params.source_words * 4u) {
         return;
     }

@@ -57,6 +57,12 @@ pub enum FixedDecodeError {
     InvalidInput,
     /// A buffer or binding would exceed the selected adapter's limits.
     DeviceLimitExceeded,
+    /// The pipeline belongs to a different logical device than the request.
+    DeviceMismatch,
+    /// Device resource creation, validation, or submission failed.
+    DeviceResource,
+    /// Polling, mapping, or copying the submitted result failed.
+    Readback(buffer::ReadbackError),
     /// A reserved block type, or a non-fixed block in the fixed-only API.
     UnsupportedBlockType,
     /// The GPU detected a truncated stream, invalid tree, or invalid symbol.
@@ -77,6 +83,9 @@ impl fmt::Display for FixedDecodeError {
             Self::DeviceLimitExceeded => {
                 write!(formatter, "GPU DEFLATE tile exceeds device limits")
             }
+            Self::DeviceMismatch => write!(formatter, "GPU DEFLATE pipeline device mismatch"),
+            Self::DeviceResource => write!(formatter, "GPU DEFLATE device resource failure"),
+            Self::Readback(error) => write!(formatter, "{error}"),
             Self::UnsupportedBlockType => write!(formatter, "unsupported DEFLATE block type"),
             Self::MalformedStream => write!(formatter, "malformed DEFLATE tile"),
             Self::OutputSizeMismatch => {
@@ -93,6 +102,7 @@ impl std::error::Error for FixedDecodeError {}
 
 /// Compiled fixed-Huffman `GDeflate` tile decoder.
 pub struct GpuFixedGDeflate {
+    device: wgpu::Device,
     pipeline: ComputePipeline,
     layout: wgpu::BindGroupLayout,
     fixed_only: bool,
@@ -134,6 +144,7 @@ impl GpuFixedGDeflate {
             cache: None,
         });
         Self {
+            device: device.clone(),
             pipeline,
             layout,
             fixed_only,
@@ -153,6 +164,9 @@ impl GpuFixedGDeflate {
         compressed_size: usize,
         expected_output_size: usize,
     ) -> Result<Vec<u8>, FixedDecodeError> {
+        if ctx.device() != &self.device {
+            return Err(FixedDecodeError::DeviceMismatch);
+        }
         if expected_output_size > 1 << 16 {
             return Err(FixedDecodeError::InvalidInput);
         }
@@ -181,6 +195,12 @@ impl GpuFixedGDeflate {
             u32::try_from(expected_output_size).map_err(|_| FixedDecodeError::InvalidInput)?;
 
         let device = ctx.device();
+        // Capture failures rather than allowing wgpu's uncaptured-error handler
+        // to panic. Scopes are thread-local in this native, std-enabled backend.
+        let allocation_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal_scope = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let result = (|| {
         let params = buffer::uniform(
             device,
             "prism_gdeflate_deflate_params",
@@ -196,12 +216,17 @@ impl GpuFixedGDeflate {
         let source = buffer::storage_read(
             device,
             "prism_gdeflate_deflate_source",
-            &to_words_le(interleaved),
+            &to_words_le(interleaved)?,
         );
         let output =
             buffer::storage_rw_zeroed(device, "prism_gdeflate_deflate_output", output_bytes as u64);
-        let status =
-            buffer::storage_rw_zeroed(device, "prism_gdeflate_deflate_status", STATUS_BYTES);
+        // Fail closed even if the kernel never executes (notably empty output
+        // after device loss); zero initialization would look like STATUS_OK.
+        let status = buffer::storage_rw_init(
+            device,
+            "prism_gdeflate_deflate_status",
+            &[STATUS_PARAMETERS, 0u32],
+        );
         let bind = device.create_bind_group(&BindGroupDescriptor {
             label: Some("prism_gdeflate_deflate_decode_bind"),
             layout: &self.layout,
@@ -245,9 +270,10 @@ impl GpuFixedGDeflate {
         }
         buffer::copy(&mut encoder, &output, &output_stage, output_bytes as u64);
         buffer::copy(&mut encoder, &status, &status_stage, STATUS_BYTES);
-        ctx.queue().submit([encoder.finish()]);
+        let submission = ctx.queue().submit([encoder.finish()]);
 
-        let status_values = buffer::read_back::<u32>(ctx, &status_stage);
+        let status_values = buffer::read_back::<u32>(ctx, &status_stage, submission.clone())
+            .map_err(FixedDecodeError::Readback)?;
         let code = *status_values
             .first()
             .ok_or(FixedDecodeError::MalformedStream)?;
@@ -260,9 +286,25 @@ impl GpuFixedGDeflate {
         if written != output_bytes_u32 {
             return Err(FixedDecodeError::OutputSizeMismatch);
         }
-        let output_words = buffer::read_back::<u32>(ctx, &output_stage);
-        let output = bytemuck::cast_slice::<u32, u8>(&output_words);
-        Ok(output[..expected_output_size].to_vec())
+        let output_words = buffer::read_back::<u32>(ctx, &output_stage, submission)
+            .map_err(FixedDecodeError::Readback)?;
+        let mut output = Vec::new();
+        output.try_reserve_exact(expected_output_size)
+            .map_err(|_| FixedDecodeError::Readback(buffer::ReadbackError::Allocation))?;
+        for word in output_words {
+            let bytes = word.to_le_bytes();
+            let count = (expected_output_size - output.len()).min(WORD);
+            output.extend_from_slice(&bytes[..count]);
+        }
+        Ok(output)
+        })();
+        let validation_error = crate::context::block_on(validation_scope.pop());
+        let internal_error = crate::context::block_on(internal_scope.pop());
+        let allocation_error = crate::context::block_on(allocation_scope.pop());
+        if validation_error.is_some() || internal_error.is_some() || allocation_error.is_some() {
+            return Err(FixedDecodeError::DeviceResource);
+        }
+        result
     }
 }
 
@@ -274,6 +316,7 @@ fn validate_input(
         || interleaved.len() % GROUP != 0
         || compressed_size == 0
         || compressed_size > interleaved.len()
+        || interleaved.len() > u32::MAX as usize
     {
         return Err(FixedDecodeError::InvalidInput);
     }
@@ -285,11 +328,13 @@ fn validate_input(
     Ok((source_words, rounds))
 }
 
-fn to_words_le(bytes: &[u8]) -> Vec<u32> {
-    bytes
-        .chunks_exact(WORD)
-        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
+fn to_words_le(bytes: &[u8]) -> Result<Vec<u32>, FixedDecodeError> {
+    let mut words = Vec::new();
+    words.try_reserve_exact(bytes.len() / WORD)
+        .map_err(|_| FixedDecodeError::Readback(buffer::ReadbackError::Allocation))?;
+    words.extend(bytes.chunks_exact(WORD)
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])));
+    Ok(words)
 }
 
 fn status_error(code: u32) -> FixedDecodeError {

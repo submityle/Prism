@@ -14,8 +14,8 @@
 //! Huffman trees, and LZ77 references across block boundaries. Host code parses
 //! Prism's GDF1 framing and verifies tile checksums; no CPU inflate is used on
 //! the successful GPU path. GPU rejection retries the CPU golden codec with
-//! explicit fallback telemetry. Legacy de-interleave, stored-plan, and strict
-//! fixed-only APIs remain available separately.
+//! explicit fallback telemetry. Independent de-interleave, stored-plan, and
+//! strict fixed-only algorithms are also available for direct composition.
 //!
 //! Tiles are bounded to 64 KiB and decoded serially by one invocation each.
 //! This synchronous implementation reads each tile back before submitting

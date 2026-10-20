@@ -47,6 +47,8 @@ pub enum DeinterleaveError {
     InvalidInput,
     /// The request exceeds a limit reported by the selected adapter.
     DeviceLimitExceeded,
+    /// Submission polling or result mapping failed.
+    Readback(buffer::ReadbackError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -226,9 +228,10 @@ impl GpuDeinterleave {
             job.output_bytes,
         );
         buffer::copy(&mut enc, &job.output, &stage, job.output_bytes);
-        ctx.queue().submit([enc.finish()]);
+        let submission = ctx.queue().submit([enc.finish()]);
 
-        let mut out_words = buffer::read_back::<u32>(ctx, &stage);
+        let mut out_words = buffer::read_back::<u32>(ctx, &stage, submission)
+            .map_err(DeinterleaveError::Readback)?;
         out_words.truncate(interleaved.len() / WORD);
         Ok(from_words_le(&out_words))
     }
