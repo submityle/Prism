@@ -48,12 +48,13 @@
 //! Counts describe *live bindings on the archetype graph*: a shared component
 //! that is registered but never bound to any archetype has no batch key and is
 //! not reported (mirroring [`component_distribution`]'s used-only policy). An
-//! archetype that still exists after its entities despawned contributes an
-//! [`empty`](SharedComponentBatchReport::empty_batch_key_count) batch key
-//! (archetype present, zero fan-out). Everything is read-only and deterministic
-//! (design §14): batch keys are sorted by `(component id, value id)` and
-//! component entries by component id, independent of archetype creation or
-//! hashing order.
+//! live archetype that still exists after its entities despawned contributes
+//! an [`empty`](SharedComponentBatchReport::empty_batch_key_count) batch key
+//! (archetype present, zero fan-out). Permanently evicted tombstones release
+//! their bindings and are therefore excluded. Everything is read-only and
+//! deterministic (design §14): batch keys are sorted by `(component id, value
+//! id)` and component entries by component id, independent of archetype
+//! creation or hashing order.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -464,6 +465,23 @@ mod tests {
         let key = &report.batch_keys()[0];
         assert_eq!(key.archetype_count, 2);
         assert_eq!(key.entity_count, 2);
+    }
+
+    #[test]
+    fn evicted_tombstone_is_not_reported_as_a_live_batch_key() {
+        let mut world = World::new();
+        let entity = world.spawn((Position(1), BatchKey(42)));
+        let archetype_id = world.entities().location(entity).unwrap().archetype_id;
+        let before = SharedComponentBatchReport::capture(&world);
+        assert_eq!(before.batch_key_count(), 1);
+        assert_eq!(before.batch_keys()[0].entity_count, 1);
+
+        assert!(world.despawn(entity));
+        let tombstone = world.archetypes().get(archetype_id).unwrap();
+        assert!(tombstone.is_evicted());
+        let after = SharedComponentBatchReport::capture(&world);
+        assert!(after.is_empty());
+        assert_eq!(after.batch_key_count(), 0);
     }
 
     #[test]

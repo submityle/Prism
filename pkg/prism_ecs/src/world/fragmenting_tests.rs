@@ -107,6 +107,42 @@ fn fragmenting_pairs_split_and_merge_real_archetypes() {
 }
 
 #[test]
+fn shared_value_eviction_releases_fragmenting_relation_identity_without_id_reuse() {
+    let mut world = World::new();
+    world.register_relation::<Link>(fragmenting());
+    let (source, target) = (world.spawn(Batch(9)), world.spawn(()));
+    world.add_relation::<Link>(source, target);
+
+    let evicted_id = archetype(&world, source);
+    let relation_id = world.components().id_of::<Link>().unwrap();
+    let before = world.archetypes().get(evicted_id).unwrap();
+    assert_eq!(before.relation_pairs(), &[(relation_id, target)]);
+    assert!(!before.is_evicted());
+
+    assert!(world.despawn(source));
+    let tombstone = world.archetypes().get(evicted_id).unwrap();
+    assert!(tombstone.is_evicted());
+    assert!(tombstone.components().is_empty());
+    assert!(tombstone.shared_bindings().is_empty());
+    assert!(tombstone.relation_pairs().is_empty());
+
+    let replacement = world.spawn(Batch(9));
+    let replacement_id = archetype(&world, replacement);
+    assert_ne!(
+        replacement_id, evicted_id,
+        "stable tombstone IDs are not reused"
+    );
+    assert!(world.archetypes().get(evicted_id).unwrap().is_evicted());
+    assert!(!world.archetypes().get(replacement_id).unwrap().is_evicted());
+    assert!(world
+        .archetypes()
+        .get(replacement_id)
+        .unwrap()
+        .relation_pairs()
+        .is_empty());
+}
+
+#[test]
 fn nonfragmenting_edges_never_move_rows_or_create_archetypes() {
     let mut world = World::new();
     let source = world.spawn(Value(1));

@@ -143,6 +143,9 @@ impl ComponentDistributionReport {
         let mut total_memberships = 0;
 
         for archetype in &report.archetypes {
+            if archetype.evicted {
+                continue;
+            }
             let occ = &archetype.occupancy;
             let populated = occ.live_rows > 0;
             for &component in &archetype.components {

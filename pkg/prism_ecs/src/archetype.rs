@@ -393,15 +393,16 @@ pub type RelationPair = (ComponentId, Entity);
 /// One archetype: a (non-shared) component set plus the table storing its
 /// entities, together with the shared-component value bindings that split it
 /// from otherwise-identical archetypes (design §6), and fragmenting relation
-/// pairs (design §11).
+/// pairs (design §11). Permanently evicted stable-ID entries retain only their
+/// ID, empty metadata/storage, and eviction marker.
 pub struct Archetype {
     id: ArchetypeId,
     components: ComponentSet,
     shared: Box<[SharedBinding]>,
     pairs: Box<[RelationPair]>,
     /// Evicted stable-ID tombstones replace their backing table with an empty
-    /// shell, releasing column/chunk allocations while retaining the accessor
-    /// contract for existing ArchetypeId holders.
+    /// shell and release component/relation/shared-key allocations. The slot
+    /// remains addressable to preserve stable ArchetypeIds.
     table: Table,
     evicted: bool,
 }
@@ -413,7 +414,10 @@ impl Archetype {
         self.id
     }
 
-    /// The exact set of component ids every entity here has.
+    /// The exact set of component ids every entity in a live archetype has.
+    /// Permanently evicted archetypes release this metadata and return the
+    /// empty set; use [`Archetype::is_evicted`] to distinguish that tombstone
+    /// from the live empty archetype.
     #[inline]
     pub fn components(&self) -> &ComponentSet {
         &self.components
@@ -458,8 +462,10 @@ impl Archetype {
         &self.shared
     }
 
-    /// Fragmenting relation pairs shared by every entity in this archetype.
-    /// Sorted and duplicate-free; pairs are identity, not component columns.
+    /// Fragmenting relation pairs shared by every entity in this live
+    /// archetype. Sorted and duplicate-free; pairs are identity, not component
+    /// columns. Evicted tombstones release this metadata and return an empty
+    /// slice.
     #[inline]
     pub fn relation_pairs(&self) -> &[RelationPair] {
         &self.pairs
@@ -479,8 +485,13 @@ impl Archetype {
 
     /// Whether this stable-id tombstone was permanently evicted from lookup
     /// indexes after its last shared-value reference was released.
+    ///
+    /// Evicted archetypes remain addressable through [`Archetypes::get`] and
+    /// [`Archetypes::iter`] to preserve stable IDs, but their component,
+    /// shared-binding, relation-pair, and table storage metadata is released.
+    /// This distinguishes an evicted tombstone from a live empty archetype.
     #[inline]
-    pub(crate) fn is_evicted(&self) -> bool {
+    pub fn is_evicted(&self) -> bool {
         self.evicted
     }
 
@@ -502,14 +513,16 @@ impl Archetype {
         self.table.reserve(additional);
     }
 
-    /// Drop storage and shared-value handles after permanent eviction. The
-    /// stable ID and lightweight match identity remain for published query
-    /// snapshots; evicted IDs are excluded before any table access.
+    /// Drop storage and all archetype identity metadata after permanent
+    /// eviction. The stable ID remains addressable, while evicted IDs are
+    /// excluded before any table access or query matching.
     fn release_evicted_storage(&mut self) {
         debug_assert!(self.evicted);
         debug_assert!(self.is_empty());
         self.table = Table::new(core::iter::empty());
+        self.components = ComponentSet::default();
         self.shared = Box::default();
+        self.pairs = Box::default();
     }
 }
 
@@ -808,7 +821,8 @@ impl Archetypes {
         this
     }
 
-    /// Number of archetypes.
+    /// Number of addressable stable-ID slots, including permanently evicted
+    /// tombstones.
     #[inline]
     pub fn len(&self) -> usize {
         self.archetypes.len()
@@ -820,7 +834,7 @@ impl Archetypes {
         self.archetypes.is_empty()
     }
 
-    /// Borrow an archetype by id.
+    /// Borrow an archetype by id, including a permanently evicted tombstone.
     #[inline]
     pub fn get(&self, id: ArchetypeId) -> Option<&Archetype> {
         self.archetypes.get(id.0 as usize)
@@ -853,7 +867,9 @@ impl Archetypes {
         }
     }
 
-    /// All archetypes, in id order.
+    /// All stable-ID slots in id order, including permanently evicted
+    /// tombstones. Use [`Archetype::is_evicted`] to distinguish tombstones
+    /// from live empty archetypes.
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &Archetype> {
         self.archetypes.iter()

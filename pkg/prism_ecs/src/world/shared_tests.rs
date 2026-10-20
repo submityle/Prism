@@ -611,9 +611,11 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
                         && arch.table().entities().is_empty()
                         && arch.table().chunk_count() == 0
                         && arch.table().column(position).is_none()
+                        && arch.components().is_empty()
                         && arch.shared_bindings().is_empty()
+                        && arch.relation_pairs().is_empty()
                 }),
-                "the tombstone remains addressable so ArchetypeIds stay stable"
+                "the compact tombstone remains addressable without retaining key metadata"
             );
             assert!(
                 pre_eviction_snapshot.contains(&id),

@@ -191,6 +191,9 @@ impl MemoryFootprintReport {
         let mut total_wasted_bytes = 0;
 
         for a in &report.archetypes {
+            if a.evicted {
+                continue;
+            }
             // Row width = sum of component element sizes. An id missing from the
             // registry contributes zero rather than aborting the report.
             let bytes_per_row: usize = a

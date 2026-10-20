@@ -67,12 +67,18 @@ impl OccupancyStats {
     }
 }
 
-/// Per-archetype snapshot: identity, component set, and chunk occupancy.
+/// Per stable-ID slot snapshot: live archetype identity (or an explicitly
+/// marked evicted tombstone) and chunk occupancy.
 #[derive(Debug, Clone)]
 pub struct ArchetypeReport {
     /// The archetype's stable id.
     pub id: ArchetypeId,
-    /// Component ids that make up this archetype's identity.
+    /// Whether this stable-ID slot is a permanently evicted tombstone.
+    /// Tombstones remain in reports for ID continuity, but their released
+    /// component identity is intentionally empty.
+    pub evicted: bool,
+    /// Component ids that make up a live archetype's identity. Empty for an
+    /// evicted tombstone because its identity metadata has been reclaimed.
     pub components: Vec<ComponentId>,
     /// Chunk occupancy for the archetype's Table storage.
     pub occupancy: OccupancyStats,
@@ -87,25 +93,34 @@ pub struct ArchetypeReport {
 pub struct WorldReport {
     /// Number of live entities in the world.
     pub entity_count: u32,
-    /// Number of archetypes (including the empty archetype).
+    /// Number of addressable archetype slots, including the empty archetype
+    /// and permanently evicted tombstones.
     pub archetype_count: usize,
+    /// Number of live archetypes, including the live empty archetype but
+    /// excluding permanently evicted tombstones.
+    pub live_archetype_count: usize,
     /// Number of registered component types.
     pub component_count: usize,
     /// The world's current change tick at capture time.
     pub change_tick: Tick,
-    /// One report per archetype, in native archetype order.
+    /// One report per stable-ID slot, in native archetype order; tombstones
+    /// are retained and marked by [`ArchetypeReport::evicted`].
     pub archetypes: Vec<ArchetypeReport>,
 }
 
 impl WorldReport {
     /// Capture a structural snapshot of `world`.
     ///
-    /// Read-only: walks the archetype table once and records chunk geometry and
-    /// live-row counts. Does not touch component values.
+    /// Read-only: walks the archetype table once and records chunk geometry,
+    /// live-row counts, and tombstone state. Evicted slots remain in the list
+    /// for stable-ID continuity and have empty component identity. Does not
+    /// touch component values.
     pub fn capture(world: &World) -> Self {
         let archetypes = world.archetypes();
         let mut reports = Vec::with_capacity(archetypes.len());
+        let mut live_archetype_count = 0;
         for archetype in archetypes.iter() {
+            live_archetype_count += usize::from(!archetype.is_evicted());
             let table = archetype.table();
             let occupancy = OccupancyStats {
                 chunk_count: table.chunk_count(),
@@ -114,6 +129,7 @@ impl WorldReport {
             };
             reports.push(ArchetypeReport {
                 id: archetype.id(),
+                evicted: archetype.is_evicted(),
                 components: archetype.components().ids().to_vec(),
                 occupancy,
             });
@@ -121,6 +137,7 @@ impl WorldReport {
         Self {
             entity_count: world.entity_count(),
             archetype_count: archetypes.len(),
+            live_archetype_count,
             component_count: world.components().len(),
             change_tick: world.change_tick(),
             archetypes: reports,
@@ -168,7 +185,7 @@ impl WorldReport {
     pub fn non_empty_archetypes(&self) -> usize {
         self.archetypes
             .iter()
-            .filter(|a| a.occupancy.live_rows > 0)
+            .filter(|a| !a.evicted && a.occupancy.live_rows > 0)
             .count()
     }
 }
@@ -185,6 +202,14 @@ mod tests {
     #[derive(Debug, PartialEq)]
     struct Velocity(f32, f32);
     impl Component for Velocity {}
+    #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+    struct Batch(u32);
+    impl Component for Batch {
+        const STORAGE: crate::component::StorageType = crate::component::StorageType::Shared;
+        fn install_storage_glue(components: &mut crate::component::Components, id: ComponentId) {
+            components.set_shared_box(id, crate::component::shared_box_of::<Self>());
+        }
+    }
 
     #[test]
     fn empty_world_report() {
@@ -238,5 +263,25 @@ mod tests {
         assert_eq!(report.entity_count, 2);
         assert_eq!(report.total_live_rows(), 2);
         assert_eq!(report.non_empty_archetypes(), 2);
+    }
+
+    #[test]
+    fn report_marks_evicted_slots_and_separates_live_archetype_count() {
+        let mut world = World::new();
+        let entity = world.spawn((Position(1.0, 1.0), Batch(17)));
+        let evicted_id = world.entities().location(entity).unwrap().archetype_id;
+        assert!(world.despawn(entity));
+
+        let report = WorldReport::capture(&world);
+        assert_eq!(report.archetype_count, report.archetypes.len());
+        assert_eq!(report.live_archetype_count + 1, report.archetype_count);
+        let tombstone = report
+            .archetypes
+            .iter()
+            .find(|item| item.id == evicted_id)
+            .unwrap();
+        assert!(tombstone.evicted);
+        assert!(tombstone.components.is_empty());
+        assert_eq!(tombstone.occupancy.live_rows, 0);
     }
 }

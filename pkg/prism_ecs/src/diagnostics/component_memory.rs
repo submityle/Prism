@@ -150,6 +150,9 @@ impl ComponentMemoryReport {
         let mut acc: HashMap<ComponentId, Acc> = HashMap::new();
 
         for archetype in &report.archetypes {
+            if archetype.evicted {
+                continue;
+            }
             let occ = &archetype.occupancy;
             let capacity = occ.chunk_count * occ.rows_per_chunk;
             // An archetype with no allocated chunks reserves no column bytes.

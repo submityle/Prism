@@ -148,6 +148,9 @@ impl ArchetypeFragmentationReport {
         let mut reclaimable_chunks = 0;
 
         for a in &report.archetypes {
+            if a.evicted {
+                continue;
+            }
             let occ = &a.occupancy;
             total_live_rows += occ.live_rows;
             if occ.live_rows > 0 {
