@@ -6,6 +6,7 @@
 
 mod context;
 pub(crate) mod fabric;
+pub(crate) mod fabric_history;
 mod plugin;
 pub(crate) mod rhi;
 
