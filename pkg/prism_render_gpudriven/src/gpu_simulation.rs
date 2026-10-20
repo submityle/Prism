@@ -20,11 +20,14 @@ use rhi::{
     BufferBindingType, BufferDescriptor, BufferId, BufferUsages, CommandBuffer, CommandEncoder,
     ComputeCommand, ComputePipelineDescriptor, ComputePipelineId, PipelineLayoutDescriptor,
     PipelineLayoutId, RenderDevice, RenderQueue, ShaderModuleDescriptor, ShaderModuleId,
-    ShaderStages,
+    ShaderStages, PipelineStages,
 };
 
 use crate::gpu::{bind_buffer, buffer_entry};
 use crate::readback::ReadBuffer;
+use prism_render_graph::{
+    BufferDesc, BufferHandle, CompileError, ImportedBuffer, PassFlags, RenderGraph,
+};
 
 /// Workgroup width shared by every particle simulation kernel.
 pub const SIMULATION_WORKGROUP_SIZE: u32 = 64;
@@ -251,6 +254,19 @@ pub struct GpuSimulationOutput {
     pub control: [u32; CONTROL_WORDS as usize],
 }
 
+/// SSA handles published by one GPU-authoritative simulation frame.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuSimulationGraphOutputs {
+    /// Particle pool after spawn and simulation.
+    pub particles: BufferHandle,
+    /// Compacted live pool indices.
+    pub active_indices: BufferHandle,
+    /// Event records grouped by event channel.
+    pub compact_events: BufferHandle,
+    /// Counters including live and event counts.
+    pub control: BufferHandle,
+}
+
 /// The 32-byte event ABI shared with `EventScatterBuffer`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuEventRecord {
@@ -446,16 +462,32 @@ impl GpuSimulationStage {
         }
     }
 
-    /// Uploads the pool, force field, colliders and frame parameters.
-    pub fn upload(
+    /// Initializes the persistent GPU particle pool once after creation or
+    /// device recovery. Subsequent frames must not call this method: the
+    /// simulation kernels own the pool between frames.
+    pub fn initialize_particles(&self, queue: &impl RenderQueue, particles: &[GpuParticle]) {
+        assert!(particles.len() <= self.capacity as usize);
+        let mut particle_bytes = vec![0; self.capacity as usize * GPU_PARTICLE_STRIDE as usize];
+        for (index, particle) in particles.iter().enumerate() {
+            encode_particle(
+                &mut particle_bytes[index * GPU_PARTICLE_STRIDE as usize
+                    ..(index + 1) * GPU_PARTICLE_STRIDE as usize],
+                *particle,
+            );
+        }
+        queue.write_buffer(self.particles, 0, &particle_bytes);
+    }
+
+    /// Uploads only the per-frame simulation inputs. The particle pool is
+    /// intentionally omitted so GPU-authoritative state remains resident
+    /// across frames and is never advanced by a competing CPU snapshot path.
+    pub fn upload_inputs(
         &self,
         queue: &impl RenderQueue,
-        particles: &[GpuParticle],
         forces: &[ForceEntry],
         colliders: &[Collider],
         params: GpuSimulationParams,
     ) {
-        assert!(particles.len() <= self.capacity as usize);
         assert!(
             forces.len() <= MAX_FORCE_ENTRIES as usize,
             "too many force entries for GPU ABI"
@@ -464,11 +496,6 @@ impl GpuSimulationStage {
             colliders.len() <= MAX_COLLIDERS as usize,
             "too many colliders for GPU ABI"
         );
-        let mut particle_bytes = vec![0; self.capacity as usize * GPU_PARTICLE_STRIDE as usize];
-        for (index, particle) in particles.iter().enumerate() {
-            encode_particle(&mut particle_bytes[index * 48..index * 48 + 48], *particle);
-        }
-        queue.write_buffer(self.particles, 0, &particle_bytes);
         let force_bytes = encode_force_buffer(forces);
         queue.write_buffer(self.forces, 0, &force_bytes);
         let collider_bytes = encode_collider_buffer(colliders);
@@ -529,6 +556,199 @@ impl GpuSimulationStage {
             );
         }
         encoder.finish()
+    }
+
+    /// Appends the complete GPU-authoritative simulation to an existing frame
+    /// graph. The five passes are deliberately declared with SSA buffer
+    /// versions so the graph compiler owns the reset → spawn → simulate →
+    /// compact → event-scatter ordering and the corresponding barriers.
+    pub fn append_to_graph(
+        &self,
+        graph: &mut RenderGraph,
+    ) -> Result<GpuSimulationGraphOutputs, CompileError> {
+        let params = import_buffer(
+            graph,
+            "particle-simulation-params",
+            self.params,
+            PARAMS_BYTES,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            rhi::BufferState::copy_dst(),
+        );
+        let particles = import_buffer(
+            graph,
+            "particle-simulation-particles",
+            self.particles,
+            u64::from(self.capacity) * GPU_PARTICLE_STRIDE,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            rhi::BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let forces = import_buffer(
+            graph,
+            "particle-simulation-forces",
+            self.forces,
+            u64::from(MAX_FORCE_ENTRIES) * GPU_FORCE_STRIDE,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            rhi::BufferState::storage_read(PipelineStages::COMPUTE_SHADER),
+        );
+        let colliders = import_buffer(
+            graph,
+            "particle-simulation-colliders",
+            self.colliders,
+            u64::from(MAX_COLLIDERS) * GPU_COLLIDER_STRIDE,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            rhi::BufferState::storage_read(PipelineStages::COMPUTE_SHADER),
+        );
+        let control = import_buffer(
+            graph,
+            "particle-simulation-control",
+            self.control,
+            u64::from(CONTROL_WORDS) * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            rhi::BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let source_events = import_buffer(
+            graph,
+            "particle-simulation-source-events",
+            self.source_events,
+            u64::from(self.event_capacity) * GPU_EVENT_STRIDE,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            rhi::BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let compact_events = import_buffer(
+            graph,
+            "particle-simulation-compact-events",
+            self.compact_events,
+            u64::from(self.channel_capacity)
+                * u64::from(EVENT_CHANNEL_COUNT)
+                * GPU_EVENT_STRIDE,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            rhi::BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let event_cursors = import_buffer(
+            graph,
+            "particle-simulation-event-cursors",
+            self.event_cursors,
+            u64::from(EVENT_CHANNEL_COUNT) * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            rhi::BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+        let channel_offsets = import_buffer(
+            graph,
+            "particle-simulation-channel-offsets",
+            self.channel_offsets,
+            u64::from(EVENT_CHANNEL_COUNT) * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            rhi::BufferState::storage_read(PipelineStages::COMPUTE_SHADER),
+        );
+        let active_indices = import_buffer(
+            graph,
+            "particle-simulation-active-indices",
+            self.active_indices,
+            u64::from(self.capacity) * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            rhi::BufferState::storage_write(PipelineStages::COMPUTE_SHADER),
+        );
+
+        let bind_group = self.bind_group;
+        let reset_pipeline = self.pipeline(GpuSimulationStageKind::Reset);
+        let mut control_after_reset = control;
+        let mut cursors_after_reset = event_cursors;
+        graph.try_add_compute_pass("particle-simulation-reset", PassFlags::SIDE_EFFECT, |builder| {
+            control_after_reset = builder.write_storage_buffer(control);
+            cursors_after_reset = builder.write_storage_buffer(event_cursors);
+            move |ctx| {
+                ctx.set_compute_pipeline(reset_pipeline)
+                    .set_compute_bind_group(0, bind_group, Vec::new())
+                    .dispatch(1, 1, 1);
+            }
+        })?;
+
+        let dispatch_groups = self.capacity.div_ceil(SIMULATION_WORKGROUP_SIZE);
+        let spawn_pipeline = self.pipeline(GpuSimulationStageKind::Spawn);
+        let mut particles_after_spawn = particles;
+        let mut control_after_spawn = control_after_reset;
+        let mut source_after_spawn = source_events;
+        graph.try_add_compute_pass("particle-simulation-spawn", PassFlags::SIDE_EFFECT, |builder| {
+            builder.read_uniform(params);
+            builder.read_storage_buffer(forces);
+            builder.read_storage_buffer(colliders);
+            particles_after_spawn = builder.write_storage_buffer(particles);
+            control_after_spawn = builder.write_storage_buffer(control_after_reset);
+            source_after_spawn = builder.write_storage_buffer(source_events);
+            move |ctx| {
+                ctx.set_compute_pipeline(spawn_pipeline)
+                    .set_compute_bind_group(0, bind_group, Vec::new())
+                    .dispatch(dispatch_groups, 1, 1);
+            }
+        })?;
+
+        let simulate_pipeline = self.pipeline(GpuSimulationStageKind::Simulate);
+        let mut particles_after_simulate = particles_after_spawn;
+        let mut control_after_simulate = control_after_spawn;
+        let mut source_after_simulate = source_after_spawn;
+        graph.try_add_compute_pass(
+            "particle-simulation-simulate",
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                builder.read_uniform(params);
+                builder.read_storage_buffer(forces);
+                builder.read_storage_buffer(colliders);
+                particles_after_simulate = builder.write_storage_buffer(particles_after_spawn);
+                control_after_simulate = builder.write_storage_buffer(control_after_spawn);
+                source_after_simulate = builder.write_storage_buffer(source_after_spawn);
+                move |ctx| {
+                    ctx.set_compute_pipeline(simulate_pipeline)
+                        .set_compute_bind_group(0, bind_group, Vec::new())
+                        .dispatch(dispatch_groups, 1, 1);
+                }
+            },
+        )?;
+
+        let compact_pipeline = self.pipeline(GpuSimulationStageKind::Compact);
+        let mut control_after_compact = control_after_simulate;
+        let mut active_after_compact = active_indices;
+        graph.try_add_compute_pass(
+            "particle-simulation-compact",
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                builder.read_storage_buffer(particles_after_simulate);
+                active_after_compact = builder.write_storage_buffer(active_indices);
+                control_after_compact = builder.write_storage_buffer(control_after_simulate);
+                move |ctx| {
+                    ctx.set_compute_pipeline(compact_pipeline)
+                        .set_compute_bind_group(0, bind_group, Vec::new())
+                        .dispatch(dispatch_groups, 1, 1);
+                }
+            },
+        )?;
+
+        let scatter_pipeline = self.pipeline(GpuSimulationStageKind::EventScatter);
+        let event_groups = self.event_capacity.div_ceil(SIMULATION_WORKGROUP_SIZE);
+        graph.try_add_compute_pass(
+            "particle-simulation-event-scatter",
+            PassFlags::SIDE_EFFECT,
+            |builder| {
+                builder.read_uniform(params);
+                builder.read_storage_buffer(source_after_simulate);
+                builder.read_storage_buffer(channel_offsets);
+                builder.read_storage_buffer(control_after_compact);
+                builder.read_storage_buffer(cursors_after_reset);
+                builder.write_storage_buffer(compact_events);
+                builder.write_storage_buffer(cursors_after_reset);
+                builder.write_storage_buffer(control_after_compact);
+                move |ctx| {
+                    ctx.set_compute_pipeline(scatter_pipeline)
+                        .set_compute_bind_group(0, bind_group, Vec::new())
+                        .dispatch(event_groups, 1, 1);
+                }
+            },
+        )?;
+        Ok(GpuSimulationGraphOutputs {
+            particles: particles_after_simulate,
+            active_indices: active_after_compact,
+            compact_events,
+            control: control_after_compact,
+        })
     }
 
     /// Submits and reads the GPU-authored state for verification.
@@ -624,6 +844,21 @@ impl GpuSimulationStage {
         device.destroy_bind_group_layout(self.bind_group_layout);
         device.destroy_shader_module(self.shader);
     }
+}
+
+fn import_buffer(
+    graph: &mut RenderGraph,
+    name: &str,
+    buffer: BufferId,
+    size: u64,
+    usage: BufferUsages,
+    entry_state: rhi::BufferState,
+) -> BufferHandle {
+    graph.import_buffer(
+        name,
+        BufferDesc::new(size, usage),
+        ImportedBuffer { buffer, entry_state },
+    )
 }
 
 fn pipeline_force_kind(force: Force) -> u32 {

@@ -5,7 +5,32 @@ use prism_render_architecture::particle::{
     sort_cull::Plane,
     IterationDomain, Vec3,
 };
+use prism_render_driver::Instance as _;
 use prism_render_driver_wgpu::{require_hardware_gpu, HardwareDeviceError, WgpuInstance};
+
+#[test]
+fn null_rhi_records_gpu_simulation_in_authoritative_stage_order() {
+    let instance = prism_render_driver_null::NullInstance::new();
+    let adapter = instance
+        .request_adapter(&Default::default())
+        .expect("null adapter");
+    let (device, _queue) = instance
+        .create_device(&adapter, &Default::default())
+        .expect("null device");
+    let stage = GpuSimulationStage::new(&device, 128, 64);
+    let mut graph = prism_render_graph::RenderGraph::new(
+        prism_render_driver::Extent3d::new_2d(1, 1),
+    );
+    let outputs = stage
+        .append_to_graph(&mut graph)
+        .expect("simulation graph admission");
+    assert!(outputs.particles.version() > 0);
+    let plan = graph.compile().expect("simulation graph compiles");
+    assert_eq!(plan.order, [0, 1, 2, 3, 4]);
+    assert_eq!(plan.declared_pass_count, 5);
+    assert!(plan.barrier_count() >= 4);
+    stage.destroy(&device);
+}
 
 #[test]
 fn force_abi_preserves_order_and_exact_record_stride() {
@@ -165,9 +190,9 @@ fn physical_gpu_executes_force_lifetime_collision_spawn_and_event_compaction() {
         normal: Vec3::new(0.0, 1.0, 0.0),
         d: 0.0,
     })];
-    stage.upload(
+    stage.initialize_particles(&queue, &pool);
+    stage.upload_inputs(
         &queue,
-        &pool,
         &forces,
         &colliders,
         GpuSimulationParams {

@@ -81,6 +81,13 @@ pub mod scene_draw;
 pub use camera::{FrameUniform, OrthoCamera};
 pub use cull::{CullOutput, CullParams, CullStage};
 pub use draw::{DrawStage, INDICES_PER_INSTANCE};
+pub use gpu_simulation::{
+    gpu_stage_dispatch_plan, GpuEventRecord, GpuParticle, GpuSimulationOutput,
+    GpuSimulationGraphOutputs, GpuSimulationParams, GpuSimulationStage, GpuSimulationStageKind,
+    GpuStageDispatch,
+    CONTROL_WORDS, EVENT_CHANNEL_COUNT, GPU_COLLIDER_STRIDE, GPU_EVENT_STRIDE,
+    GPU_FORCE_STRIDE, GPU_PARTICLE_STRIDE, SIMULATION_WORKGROUP_SIZE,
+};
 pub use ember::{
     AttributeUploadError, CompiledGraphGpuBinding, CompiledGraphGpuError,
     CompiledGraphGpuExternalKind, CompiledGraphGpuExternalResource, CompiledGraphGpuExternalUpdate,
