@@ -26,6 +26,11 @@ pub use cell_world::{
 };
 mod world_partition_capability;
 pub use world_partition_capability::{WorldPartitionCapability, WorldPartitionCapabilityError};
+mod hlod_runtime;
+pub use hlod_runtime::{
+    HlodDistanceRequest, HlodRuntime, HlodRuntimeError, HlodSelection, HlodSelectionBudget,
+    HlodSelectionPlan, HLOD_RUNTIME_SELECTION_VERSION,
+};
 mod data_layers;
 pub use data_layers::{
     DataLayerConfigError, DataLayerId, DataLayerState, LayeredCellFrameCoordinator,
