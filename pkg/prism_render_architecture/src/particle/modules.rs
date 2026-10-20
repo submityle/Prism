@@ -258,6 +258,122 @@ impl ResourceDecl {
     }
 }
 
+/// Host-side value type used by the typed particle parameter ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParameterType {
+    /// IEEE-754 32-bit floating-point scalar.
+    F32,
+    /// Unsigned 32-bit integer scalar.
+    U32,
+    /// Two-lane floating-point vector.
+    Vec2,
+    /// Three-lane floating-point vector (16-byte uniform alignment).
+    Vec3,
+    /// Four-lane floating-point vector.
+    Vec4,
+}
+
+impl ParameterType {
+    /// WGSL spelling for this parameter type.
+    #[must_use]
+    pub const fn wgsl(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::U32 => "u32",
+            Self::Vec2 => "vec2<f32>",
+            Self::Vec3 => "vec3<f32>",
+            Self::Vec4 => "vec4<f32>",
+        }
+    }
+
+    /// Required WGSL uniform alignment.
+    #[must_use]
+    pub const fn alignment(self) -> u32 {
+        match self {
+            Self::F32 | Self::U32 => 4,
+            Self::Vec2 => 8,
+            Self::Vec3 | Self::Vec4 => 16,
+        }
+    }
+
+    /// Payload byte count, excluding padding before the next field.
+    #[must_use]
+    pub const fn size(self) -> u32 {
+        match self {
+            Self::F32 | Self::U32 => 4,
+            Self::Vec2 => 8,
+            Self::Vec3 => 12,
+            Self::Vec4 => 16,
+        }
+    }
+}
+
+/// Typed parameter default. Integer and float lanes are kept distinct so an
+/// authored `u32` cannot silently be reinterpreted as a float.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ParameterValue {
+    /// One floating-point value.
+    F32(f32),
+    /// One unsigned integer value.
+    U32(u32),
+    /// Two floating-point values.
+    Vec2([f32; 2]),
+    /// Three floating-point values.
+    Vec3([f32; 3]),
+    /// Four floating-point values.
+    Vec4([f32; 4]),
+}
+
+impl ParameterValue {
+    /// Type carried by this value.
+    #[must_use]
+    pub const fn parameter_type(self) -> ParameterType {
+        match self {
+            Self::F32(_) => ParameterType::F32,
+            Self::U32(_) => ParameterType::U32,
+            Self::Vec2(_) => ParameterType::Vec2,
+            Self::Vec3(_) => ParameterType::Vec3,
+            Self::Vec4(_) => ParameterType::Vec4,
+        }
+    }
+}
+
+/// One named field in a module or data-interface parameter block.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParameterField {
+    /// Stable WGSL member identifier.
+    pub name: &'static str,
+    /// Exact host/WGSL value type.
+    pub ty: ParameterType,
+    /// Default value used for a newly created parameter asset.
+    pub default: ParameterValue,
+}
+
+impl ParameterField {
+    /// Declares a field and its default. The compiler rejects mismatched types.
+    #[must_use]
+    pub const fn new(name: &'static str, ty: ParameterType, default: ParameterValue) -> Self {
+        Self { name, ty, default }
+    }
+}
+
+/// Typed schema attached to one uniform resource binding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParameterBlockDecl {
+    /// Resource name used by the WGSL binding and runtime binding table.
+    pub resource: &'static str,
+    /// Ordered fields; order is ABI-significant.
+    pub fields: &'static [ParameterField],
+}
+
+impl ParameterBlockDecl {
+    /// Creates a typed schema for one uniform binding.
+    #[must_use]
+    pub const fn new(resource: &'static str, fields: &'static [ParameterField]) -> Self {
+        Self { resource, fields }
+    }
+}
+
 /// The minimal `WESL` code-generation context a plugin emits into (design §8.1).
 ///
 /// It is deliberately not a shader compiler: it only accumulates inline source
@@ -402,6 +518,10 @@ pub trait EmberModule {
     }
     /// The `GPU` resources this module binds.
     fn resources(&self) -> &[ResourceDecl];
+    /// Typed schemas for every uniform in [`EmberModule::resources`].
+    fn parameter_blocks(&self) -> &[ParameterBlockDecl] {
+        &[]
+    }
     /// Emits this module's inline `WESL` fragment and binding declarations.
     fn emit_wesl(&self, ctx: &mut CodegenCtx);
 
@@ -414,6 +534,10 @@ pub trait EmberModule {
 pub trait DataInterface {
     /// The `GPU` resources this interface binds.
     fn bindings(&self) -> &[ResourceDecl];
+    /// Typed schemas for uniform bindings exposed by this interface.
+    fn parameter_blocks(&self) -> &[ParameterBlockDecl] {
+        &[]
+    }
     /// Emits the `sample_*` function declarations and binding declarations this
     /// interface provides into a [`CodegenCtx`].
     fn emit_wesl_functions(&self, ctx: &mut CodegenCtx);
@@ -498,6 +622,33 @@ const R_EMITTER_VELOCITY: &[ResourceDecl] = &[ResourceDecl::uniform("emitter_vel
 const R_LIFETIME_PARAMS: &[ResourceDecl] = &[ResourceDecl::uniform("lifetime_params", 2, 0)];
 const R_CONSTRAINT_PARAMS: &[ResourceDecl] = &[ResourceDecl::uniform("constraint_params", 2, 0)];
 const R_EVENT_OUTPUT: &[ResourceDecl] = &[ResourceDecl::storage_rw("event_output", 2, 0)];
+
+const PARAM_VEC4: &[ParameterField] = &[ParameterField::new(
+    "value",
+    ParameterType::Vec4,
+    ParameterValue::Vec4([0.0; 4]),
+)];
+macro_rules! parameter_schema {
+    ($symbol:ident, $resource:literal) => {
+        const $symbol: &[ParameterBlockDecl] = &[ParameterBlockDecl::new($resource, PARAM_VEC4)];
+    };
+}
+parameter_schema!(P_GRAVITY, "gravity");
+parameter_schema!(P_DRAG, "drag");
+parameter_schema!(P_VORTEX, "vortex");
+parameter_schema!(P_POINT_ATTRACTOR, "point_attractor");
+parameter_schema!(P_LINE_ATTRACTOR, "line_attractor");
+parameter_schema!(P_CURL_NOISE, "curl_noise");
+parameter_schema!(P_WIND, "wind");
+parameter_schema!(P_COLLISION_PLANE, "collision_plane");
+parameter_schema!(P_BOUNCE, "bounce_params");
+parameter_schema!(P_RANDOM_RANGE, "random_range");
+parameter_schema!(P_SPAWN_RATE, "spawn_rate");
+parameter_schema!(P_SPAWN_BURST, "spawn_burst");
+parameter_schema!(P_SPAWN_SHAPE, "spawn_shape");
+parameter_schema!(P_EMITTER_VELOCITY, "emitter_velocity");
+parameter_schema!(P_LIFETIME, "lifetime_params");
+parameter_schema!(P_CONSTRAINT, "constraint_params");
 
 /// The first-ship built-in module library (design §8.2).
 ///
@@ -1069,6 +1220,36 @@ impl EmberModule for BuiltinModule {
         self.meta().resources
     }
 
+    fn parameter_blocks(&self) -> &[ParameterBlockDecl] {
+        match self {
+            Self::SpawnRate => P_SPAWN_RATE,
+            Self::SpawnBurst => P_SPAWN_BURST,
+            Self::SpawnPoint
+            | Self::SpawnSphere
+            | Self::SpawnBox
+            | Self::SpawnCone
+            | Self::SpawnMeshSurface
+            | Self::SpawnSkeleton
+            | Self::SpawnSdfSurface => P_SPAWN_SHAPE,
+            Self::SetLifetime => P_LIFETIME,
+            Self::RandomRange => P_RANDOM_RANGE,
+            Self::InheritVelocity => P_EMITTER_VELOCITY,
+            Self::Gravity => P_GRAVITY,
+            Self::Drag => P_DRAG,
+            Self::Vortex => P_VORTEX,
+            Self::PointAttractor => P_POINT_ATTRACTOR,
+            Self::LineAttractor => P_LINE_ATTRACTOR,
+            Self::CurlNoise => P_CURL_NOISE,
+            Self::Wind => P_WIND,
+            Self::CollisionPlane => P_COLLISION_PLANE,
+            Self::CollisionBounce => P_BOUNCE,
+            Self::DistanceConstraint | Self::BendConstraint | Self::VolumeConstraint => {
+                P_CONSTRAINT
+            }
+            _ => &[],
+        }
+    }
+
     fn emit_wesl(&self, ctx: &mut CodegenCtx) {
         let meta = self.meta();
         for &decl in meta.resources {
@@ -1182,10 +1363,10 @@ fn builtin_kernel_source(module: BuiltinModule) -> String {
             "    ember_attr_velocity[index] *= max(0.0, bounce_params.x);\n    ember_attr_velocity[index] = vec3<f32>(ember_attr_velocity[index].xy, -ember_attr_velocity[index].z);"
         }
         BuiltinModule::DistanceConstraint => {
-            "    let radius = length(ember_attr_position[index]);\n    let target = max(constraint_params.x, 0.0);\n    let correction = (radius - target) * clamp(constraint_params.y, 0.0, 1.0);\n    if (radius > 0.00001) { ember_attr_position[index] -= normalize(ember_attr_position[index]) * correction; }"
+            "    let radius = length(ember_attr_position[index]);\n    let target_radius = max(constraint_params.x, 0.0);\n    let correction = (radius - target_radius) * clamp(constraint_params.y, 0.0, 1.0);\n    if (radius > 0.00001) { ember_attr_position[index] -= normalize(ember_attr_position[index]) * correction; }"
         }
         BuiltinModule::BendConstraint => {
-            "    let target = normalize(constraint_params.xyz + vec3<f32>(0.00001));\n    let length_before = length(ember_attr_position[index]);\n    let blend = clamp(constraint_params.w, 0.0, 1.0);\n    ember_attr_position[index] = mix(ember_attr_position[index], target * length_before, blend);"
+            "    let target_direction = normalize(constraint_params.xyz + vec3<f32>(0.00001));\n    let length_before = length(ember_attr_position[index]);\n    let blend = clamp(constraint_params.w, 0.0, 1.0);\n    ember_attr_position[index] = mix(ember_attr_position[index], target_direction * length_before, blend);"
         }
         BuiltinModule::VolumeConstraint => {
             "    let radius = max(length(ember_attr_position[index]), 0.00001);\n    let target_radius = max(constraint_params.x, 0.00001);\n    let scale = mix(1.0, target_radius / radius, clamp(constraint_params.y, 0.0, 1.0));\n    ember_attr_position[index] *= scale;"
@@ -1349,6 +1530,9 @@ const B_GLOBAL: &[ResourceDecl] = &[ResourceDecl::uniform("globals", 3, 0)];
 const B_USER_PARAM: &[ResourceDecl] = &[ResourceDecl::uniform("user_params", 3, 0)];
 const B_GRID: &[ResourceDecl] = &[ResourceDecl::buffer("interaction_grid", 3, 0)];
 const B_NEIGHBOR: &[ResourceDecl] = &[ResourceDecl::buffer("neighbor_list", 3, 0)];
+parameter_schema!(P_CAMERA, "camera");
+parameter_schema!(P_GLOBALS, "globals");
+parameter_schema!(P_USER_PARAMS, "user_params");
 
 const F_MESH: &[&str] = &[
     "sample_mesh_position",
@@ -1601,6 +1785,15 @@ impl BuiltinDataInterface {
 impl DataInterface for BuiltinDataInterface {
     fn bindings(&self) -> &[ResourceDecl] {
         self.meta().bindings
+    }
+
+    fn parameter_blocks(&self) -> &[ParameterBlockDecl] {
+        match self {
+            Self::SampleCamera => P_CAMERA,
+            Self::SampleGlobal => P_GLOBALS,
+            Self::SampleUserParam => P_USER_PARAMS,
+            _ => &[],
+        }
     }
 
     fn emit_wesl_functions(&self, ctx: &mut CodegenCtx) {
@@ -1932,7 +2125,7 @@ mod tests {
         assert_eq!(module.resources().len(), 1);
 
         let interface: &dyn DataInterface = &BuiltinDataInterface::SampleMesh;
-        assert_eq!(interface.bindings().len(), 2);
+        assert_eq!(interface.bindings().len(), 3);
     }
 
     #[test]

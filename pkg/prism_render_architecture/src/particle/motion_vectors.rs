@@ -60,6 +60,79 @@ pub const EPS_W: f32 = 1e-6;
 /// motion vector, so [`encode_motion_snorm16`] guards against it.
 pub const EPS_RANGE: f32 = 1e-12;
 
+/// GPU-facing motion-vector pixel ABI: two signed normalized 16-bit UV
+/// components. This is exactly four bytes and matches the compact target
+/// format used by renderer prepasses and OIT resolve.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GpuMotionVector {
+    /// Horizontal normalized displacement.
+    pub x: i16,
+    /// Vertical normalized displacement.
+    pub y: i16,
+}
+
+/// Checked dimensions and byte count for a motion-vector render target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MotionVectorTargetLayout {
+    /// Target width in pixels.
+    pub width: u32,
+    /// Target height in pixels.
+    pub height: u32,
+    /// Row stride in bytes, aligned to the requested row alignment.
+    pub row_stride: u64,
+    /// Total target allocation size.
+    pub total_bytes: u64,
+}
+
+/// Motion-vector target layout validation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MotionVectorLayoutError {
+    /// Empty targets are invalid.
+    ZeroExtent,
+    /// Row alignment must be a nonzero power of two.
+    InvalidAlignment,
+    /// Integer arithmetic overflowed.
+    SizeOverflow,
+    /// The allocation exceeds the device limit.
+    ExceedsDeviceLimit,
+}
+
+/// Computes a checked, row-aligned target layout for the four-byte pixel ABI.
+pub fn motion_vector_target_layout(
+    width: u32,
+    height: u32,
+    row_alignment: u32,
+    max_buffer_bytes: u64,
+) -> Result<MotionVectorTargetLayout, MotionVectorLayoutError> {
+    if width == 0 || height == 0 {
+        return Err(MotionVectorLayoutError::ZeroExtent);
+    }
+    if row_alignment == 0 || !row_alignment.is_power_of_two() {
+        return Err(MotionVectorLayoutError::InvalidAlignment);
+    }
+    let raw_stride = u64::from(width)
+        .checked_mul(core::mem::size_of::<GpuMotionVector>() as u64)
+        .ok_or(MotionVectorLayoutError::SizeOverflow)?;
+    let alignment = u64::from(row_alignment);
+    let row_stride = raw_stride
+        .checked_add(alignment - 1)
+        .ok_or(MotionVectorLayoutError::SizeOverflow)?
+        & !(alignment - 1);
+    let total_bytes = row_stride
+        .checked_mul(u64::from(height))
+        .ok_or(MotionVectorLayoutError::SizeOverflow)?;
+    if total_bytes > max_buffer_bytes {
+        return Err(MotionVectorLayoutError::ExceedsDeviceLimit);
+    }
+    Ok(MotionVectorTargetLayout {
+        width,
+        height,
+        row_stride,
+        total_bytes,
+    })
+}
+
 /// A hand-rolled two-component vector used for screen-space (`UV`) quantities.
 ///
 /// The shared [`Vec3`] is three-dimensional; motion vectors live in the
@@ -196,7 +269,12 @@ impl ClipPos {
     /// point is at or behind the camera plane (see [`ClipPos::is_visible`]).
     #[must_use]
     pub fn to_ndc(self) -> Option<Vec3> {
-        if !self.is_visible() {
+        if !self.x.is_finite()
+            || !self.y.is_finite()
+            || !self.z.is_finite()
+            || !self.w.is_finite()
+            || !self.is_visible()
+        {
             return None;
         }
         let inv_w = 1.0 / self.w;
@@ -333,7 +411,12 @@ pub fn screen_motion_vector(
     cur_world: Vec3,
     prev: PrevParticleState,
 ) -> Option<ScreenMotionVector> {
-    if !prev.valid {
+    if !prev.valid
+        || !camera.cur_jitter.x.is_finite()
+        || !camera.cur_jitter.y.is_finite()
+        || !camera.prev_jitter.x.is_finite()
+        || !camera.prev_jitter.y.is_finite()
+    {
         return None;
     }
     let cur_ndc = camera.cur_view_proj.transform_point(cur_world).to_ndc()?;
@@ -512,7 +595,11 @@ pub struct EncodedMotionVectorSnorm16 {
 /// by zero.
 #[must_use]
 pub fn encode_motion_snorm16(mv: ScreenMotionVector, max_uv: f32) -> EncodedMotionVectorSnorm16 {
-    if max_uv <= EPS_RANGE {
+    if !max_uv.is_finite()
+        || max_uv <= EPS_RANGE
+        || !mv.uv_delta.x.is_finite()
+        || !mv.uv_delta.y.is_finite()
+    {
         return EncodedMotionVectorSnorm16 { x: 0, y: 0 };
     }
     let inv = 1.0 / max_uv;
@@ -527,6 +614,9 @@ pub fn encode_motion_snorm16(mv: ScreenMotionVector, max_uv: f32) -> EncodedMoti
 /// [`encode_motion_snorm16`] up to the `snorm16` quantization step.
 #[must_use]
 pub fn decode_motion_snorm16(enc: EncodedMotionVectorSnorm16, max_uv: f32) -> ScreenMotionVector {
+    if !max_uv.is_finite() {
+        return ScreenMotionVector::ZERO;
+    }
     ScreenMotionVector {
         uv_delta: Vec2::new(
             snorm16_decode(enc.x) * max_uv,
@@ -594,6 +684,43 @@ pub fn renderer_writes_motion_vectors(kind: RendererKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_motion_vector_abi_and_target_layout_are_checked() {
+        assert_eq!(core::mem::size_of::<GpuMotionVector>(), 4);
+        let layout =
+            motion_vector_target_layout(1919, 1080, 256, 16 * 1024 * 1024).expect("target fits");
+        assert_eq!(layout.row_stride, 7680);
+        assert_eq!(layout.total_bytes, 7680 * 1080);
+        assert_eq!(
+            motion_vector_target_layout(0, 1, 256, u64::MAX),
+            Err(MotionVectorLayoutError::ZeroExtent)
+        );
+        assert_eq!(
+            motion_vector_target_layout(32, 16, 3, u64::MAX),
+            Err(MotionVectorLayoutError::InvalidAlignment)
+        );
+        assert_eq!(
+            motion_vector_target_layout(32, 16, 256, 1024),
+            Err(MotionVectorLayoutError::ExceedsDeviceLimit)
+        );
+    }
+
+    #[test]
+    fn motion_pack_handles_degenerate_and_saturated_ranges() {
+        let mv = ScreenMotionVector {
+            uv_delta: Vec2::new(2.0, -0.5),
+        };
+        assert_eq!(
+            encode_motion_snorm16(mv, 0.0),
+            EncodedMotionVectorSnorm16::default()
+        );
+        let encoded = encode_motion_snorm16(mv, 1.0);
+        assert_eq!(encoded.x, i16::MAX);
+        assert!(encoded.y < 0);
+        let decoded = decode_motion_snorm16(encoded, 1.0);
+        assert!(decoded.uv_delta.x <= 1.0 && decoded.uv_delta.x > 0.99);
+    }
 
     /// Absolute-tolerance comparison, since bare `f32` equality is forbidden.
     fn approx(a: f32, b: f32, eps: f32) -> bool {

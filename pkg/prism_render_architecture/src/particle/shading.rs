@@ -71,6 +71,7 @@ pub enum ParticleRenderPhase {
 pub fn render_phase_for(blend: BlendMode) -> ParticleRenderPhase {
     match blend {
         BlendMode::Opaque => ParticleRenderPhase::Opaque,
+        BlendMode::AlphaMask => ParticleRenderPhase::AlphaMask,
         BlendMode::Additive | BlendMode::Premultiplied | BlendMode::AlphaBlend => {
             ParticleRenderPhase::Transparent
         }
@@ -248,6 +249,105 @@ pub fn resolve_oit_route(decision: SortDecision) -> OitRoute {
     }
 }
 
+/// GPU ABI for one per-pixel linked-list transparency node. The reserved word
+/// fixes the stride at 32 bytes and leaves room for deterministic flags.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OitFragmentNode {
+    /// Packed RGB/RGBA contribution in target-defined encoding (two words).
+    pub packed_color: [u32; 2],
+    /// Linear depth used for ordering and nearest-fragment motion arbitration.
+    pub depth: f32,
+    /// Fragment opacity.
+    pub alpha: f32,
+    /// Motion-vector UV delta in signed normalized 16-bit channels.
+    pub motion: [i16; 2],
+    /// Next-node index; `u32::MAX` terminates a pixel list.
+    pub next: u32,
+    /// Zero in ABI v1.
+    pub flags: u32,
+    /// Zero in ABI v1; fixes a 32-byte storage-array stride.
+    pub reserved: u32,
+}
+
+/// OIT target allocation sizes derived from view extent and method.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OitResourceLayout {
+    /// Number of view pixels.
+    pub pixel_count: u64,
+    /// Accumulation / moment target bytes or linked-list head bytes.
+    pub per_pixel_bytes: u64,
+    /// Linked-list node capacity; zero for bounded per-pixel accumulators.
+    pub node_capacity: u64,
+    /// Linked-list storage bytes; zero for bounded per-pixel accumulators.
+    pub node_bytes: u64,
+    /// Sum of storage-buffer allocations (textures excluded when backend-owned).
+    pub storage_bytes: u64,
+}
+
+/// Invalid OIT resource request rejected before allocating GPU targets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OitLayoutError {
+    /// View dimensions must be nonzero.
+    ZeroExtent,
+    /// Linked-list mode requires a nonzero bounded node capacity.
+    ZeroNodeCapacity,
+    /// Byte-count arithmetic overflowed.
+    SizeOverflow,
+    /// A single requested resource exceeds the device allocation limit.
+    ExceedsDeviceLimit,
+}
+
+/// Computes checked OIT storage requirements. Fast weighted blending reserves
+/// 20 bytes/pixel, moment mode 32 bytes/pixel, and exact reference mode uses an
+/// 8-byte/pixel head/overflow pair plus the caller-bounded node pool. These are
+/// explicit logical ABI costs; render-target format conversion remains a
+/// backend responsibility.
+pub fn oit_resource_layout(
+    method: super::oit::OitMethod,
+    width: u32,
+    height: u32,
+    node_capacity: u64,
+    max_buffer_bytes: u64,
+) -> Result<OitResourceLayout, OitLayoutError> {
+    if width == 0 || height == 0 {
+        return Err(OitLayoutError::ZeroExtent);
+    }
+    let pixel_count = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or(OitLayoutError::SizeOverflow)?;
+    let (per_pixel_bytes, nodes) = match method {
+        super::oit::OitMethod::WeightedBlended => (20_u64, 0),
+        super::oit::OitMethod::MomentBased => (32_u64, 0),
+        super::oit::OitMethod::PerPixelLinkedList => {
+            if node_capacity == 0 {
+                return Err(OitLayoutError::ZeroNodeCapacity);
+            }
+            (8_u64, node_capacity)
+        }
+        super::oit::OitMethod::None | super::oit::OitMethod::Additive => (0_u64, 0),
+    };
+    let head_bytes = pixel_count
+        .checked_mul(per_pixel_bytes)
+        .ok_or(OitLayoutError::SizeOverflow)?;
+    let node_bytes = nodes
+        .checked_mul(core::mem::size_of::<OitFragmentNode>() as u64)
+        .ok_or(OitLayoutError::SizeOverflow)?;
+    let storage_bytes = head_bytes
+        .checked_add(node_bytes)
+        .ok_or(OitLayoutError::SizeOverflow)?;
+    if head_bytes > max_buffer_bytes || node_bytes > max_buffer_bytes {
+        return Err(OitLayoutError::ExceedsDeviceLimit);
+    }
+    Ok(OitResourceLayout {
+        pixel_count,
+        per_pixel_bytes,
+        node_capacity: nodes,
+        node_bytes,
+        storage_bytes,
+    })
+}
+
 /// Inputs to the motion-vector requirement decision (design §21).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotionVectorInput {
@@ -294,7 +394,7 @@ pub fn motion_vector_request(input: MotionVectorInput) -> MotionVectorRequest {
     let temporally_unstable =
         input.flipbook_rate > 0.0 && input.flipbook_rate >= input.flipbook_unstable_rate;
     let transparent_bias = match input.blend {
-        BlendMode::Opaque => 0.0,
+        BlendMode::Opaque | BlendMode::AlphaMask => 0.0,
         BlendMode::Additive | BlendMode::Premultiplied | BlendMode::AlphaBlend => 0.5,
     };
     let reactive_mask = if temporally_unstable {
@@ -513,10 +613,50 @@ mod tests {
     }
 
     #[test]
+    fn oit_gpu_layouts_are_bounded_and_match_record_stride() {
+        assert_eq!(core::mem::size_of::<OitFragmentNode>(), 32);
+        let linked = oit_resource_layout(
+            super::super::oit::OitMethod::PerPixelLinkedList,
+            1920,
+            1080,
+            1_000_000,
+            64 * 1024 * 1024,
+        )
+        .expect("bounded node pool fits");
+        assert_eq!(linked.per_pixel_bytes, 8);
+        assert_eq!(linked.node_bytes, 32_000_000);
+        assert_eq!(linked.storage_bytes, 8 * 1920 * 1080 + 32_000_000);
+        assert_eq!(
+            oit_resource_layout(
+                super::super::oit::OitMethod::PerPixelLinkedList,
+                1,
+                1,
+                0,
+                1024
+            ),
+            Err(OitLayoutError::ZeroNodeCapacity)
+        );
+        assert_eq!(
+            oit_resource_layout(
+                super::super::oit::OitMethod::MomentBased,
+                1920,
+                1080,
+                0,
+                1024
+            ),
+            Err(OitLayoutError::ExceedsDeviceLimit)
+        );
+    }
+
+    #[test]
     fn render_phase_maps_blends() {
         assert_eq!(
             render_phase_for(BlendMode::Opaque),
             ParticleRenderPhase::Opaque
+        );
+        assert_eq!(
+            render_phase_for(BlendMode::AlphaMask),
+            ParticleRenderPhase::AlphaMask
         );
         assert_eq!(
             render_phase_for(BlendMode::Additive),

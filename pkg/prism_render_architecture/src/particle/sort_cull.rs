@@ -17,6 +17,126 @@
 
 use super::{SortStrategy, Vec3};
 
+/// GPU-visible sort item ABI. `depth_key` is the sortable quantized depth;
+/// `particle_index` is the stable payload used to gather SoA attributes. The
+/// explicit reserved word keeps the record 8-byte aligned for storage-buffer
+/// implementations while remaining exactly 8 bytes on CPU and GPU.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GpuSortItem {
+    /// Stable original pool slot.
+    pub particle_index: u32,
+    /// Quantized depth key, already oriented for the requested order.
+    pub depth_key: u16,
+    /// Must be zero; reserved for deterministic tie-break policy evolution.
+    pub reserved: u16,
+}
+
+/// GPU cull input ABI. This is 32 bytes and uses scalar fields rather than
+/// backend-specific vector alignment, making offsets portable across WGSL
+/// storage layouts and host uploads.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuCullSphere {
+    /// World-space center.
+    pub center: [f32; 3],
+    /// Non-negative sphere radius.
+    pub radius: f32,
+    /// Original pool slot, preserved in the compacted visible list.
+    pub particle_index: u32,
+    /// Reserved flags, required to be zero in ABI v1.
+    pub flags: u32,
+    /// Reserved words keep 16-byte array stride.
+    pub reserved: [u32; 2],
+}
+
+/// Checked upper-bound resource layout for sort/cull passes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SortCullBufferLayout {
+    /// Capacity of source and destination key arrays.
+    pub capacity: u32,
+    /// Number of radix histogram bins per workgroup.
+    pub radix_bins: u32,
+    /// Workgroup width used to compute histogram count.
+    pub workgroup_size: u32,
+    /// Bytes in one input or output item array.
+    pub item_bytes: u64,
+    /// Bytes in one radix histogram scratch allocation.
+    pub histogram_bytes: u64,
+    /// Bytes for compacted visible indices.
+    pub visible_index_bytes: u64,
+}
+
+/// Layout validation failure, reported before GPU allocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SortCullLayoutError {
+    /// Zero capacity cannot describe a dispatchable buffer.
+    ZeroCapacity,
+    /// Workgroup width or radix bin count must be nonzero and radix bins must
+    /// be a power of two.
+    InvalidRadixConfiguration,
+    /// Byte arithmetic overflowed the host/GPU addressable range.
+    SizeOverflow,
+    /// Allocation exceeds the device's per-buffer limit.
+    ExceedsDeviceLimit,
+}
+
+/// Derives checked storage requirements for stable sort and cull compaction.
+/// The histogram scratch bound assumes one histogram per workgroup and one
+/// 32-bit counter per bin; callers may reuse it between radix digit passes.
+pub fn sort_cull_buffer_layout(
+    capacity: u32,
+    radix_bins: u32,
+    workgroup_size: u32,
+    max_buffer_bytes: u64,
+) -> Result<SortCullBufferLayout, SortCullLayoutError> {
+    if capacity == 0 {
+        return Err(SortCullLayoutError::ZeroCapacity);
+    }
+    if radix_bins == 0 || !radix_bins.is_power_of_two() || workgroup_size == 0 {
+        return Err(SortCullLayoutError::InvalidRadixConfiguration);
+    }
+    let capacity = u64::from(capacity);
+    let groups = capacity
+        .checked_add(u64::from(workgroup_size) - 1)
+        .ok_or(SortCullLayoutError::SizeOverflow)?
+        / u64::from(workgroup_size);
+    let item_bytes = capacity
+        .checked_mul(core::mem::size_of::<GpuSortItem>() as u64)
+        .ok_or(SortCullLayoutError::SizeOverflow)?;
+    let histogram_bytes = groups
+        .checked_mul(u64::from(radix_bins))
+        .and_then(|v| v.checked_mul(core::mem::size_of::<u32>() as u64))
+        .ok_or(SortCullLayoutError::SizeOverflow)?;
+    let visible_index_bytes = capacity
+        .checked_mul(core::mem::size_of::<u32>() as u64)
+        .ok_or(SortCullLayoutError::SizeOverflow)?;
+    if item_bytes > max_buffer_bytes
+        || histogram_bytes > max_buffer_bytes
+        || visible_index_bytes > max_buffer_bytes
+    {
+        return Err(SortCullLayoutError::ExceedsDeviceLimit);
+    }
+    Ok(SortCullBufferLayout {
+        capacity: capacity as u32,
+        radix_bins,
+        workgroup_size,
+        item_bytes,
+        histogram_bytes,
+        visible_index_bytes,
+    })
+}
+
+/// Rejects non-finite or negative bounds before culling or GPU upload.
+#[must_use]
+pub fn valid_cull_sphere(center: Vec3, radius: f32) -> bool {
+    center.x.is_finite()
+        && center.y.is_finite()
+        && center.z.is_finite()
+        && radius.is_finite()
+        && radius >= 0.0
+}
+
 /// Quantizes a view-space depth to a 16-bit sort key.
 ///
 /// `depth` is clamped to `[near, far]` and mapped linearly to `0..=65535`; a
@@ -54,6 +174,8 @@ pub fn sort_key(depth: f32, near: f32, far: f32, back_to_front: bool) -> u16 {
 pub enum BlendMode {
     /// Opaque: depth-tested, order-independent.
     Opaque,
+    /// Alpha-tested cutout: depth-tested and order-independent.
+    AlphaMask,
     /// Additive: commutative, order-independent.
     Additive,
     /// Premultiplied alpha over an additive-safe pipeline: order-independent.
@@ -232,6 +354,22 @@ impl Frustum {
         Self { planes }
     }
 
+    /// Verifies finite plane coefficients and approximately unit-length
+    /// normals. Construction remains cheap; validation is performed once at
+    /// the frame boundary before the frustum is uploaded or used for culling.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        self.planes.iter().all(|plane| {
+            let n = plane.normal;
+            let len2 = n.length_squared();
+            n.x.is_finite()
+                && n.y.is_finite()
+                && n.z.is_finite()
+                && plane.d.is_finite()
+                && (len2 - 1.0).abs() <= 1e-3
+        })
+    }
+
     /// Returns `true` when the sphere is not fully outside any plane.
     ///
     /// A sphere is culled only when it lies entirely beyond one plane
@@ -260,6 +398,8 @@ pub enum CullReason {
     BeyondDistance,
     /// Reported occluded by the `HZB` depth pyramid.
     HzbOccluded,
+    /// Invalid/non-finite sphere data; rejected before GPU upload.
+    InvalidBounds,
 }
 
 /// The result of a cull test.
@@ -304,6 +444,14 @@ pub fn cull_sphere(
     radius: f32,
     max_distance: f32,
 ) -> CullDecision {
+    if !valid_cull_sphere(center, radius)
+        || !frustum.is_valid()
+        || !camera_position.x.is_finite()
+        || !camera_position.y.is_finite()
+        || !camera_position.z.is_finite()
+    {
+        return CullDecision::culled(CullReason::InvalidBounds);
+    }
     if max_distance > 0.0 {
         let cull_at = max_distance + radius;
         if camera_position.distance_squared(center) > cull_at * cull_at {
@@ -394,6 +542,44 @@ pub fn update_sleep(state: SleepState, significance: f32, params: SleepParams) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_sort_and_cull_abis_have_stable_sizes_and_checked_capacity() {
+        assert_eq!(core::mem::size_of::<GpuSortItem>(), 8);
+        assert_eq!(core::mem::size_of::<GpuCullSphere>(), 32);
+        let layout = sort_cull_buffer_layout(1025, 256, 128, 1 << 20).expect("fits");
+        assert_eq!(layout.item_bytes, 1025 * 8);
+        assert_eq!(layout.visible_index_bytes, 1025 * 4);
+        assert_eq!(layout.histogram_bytes, 9 * 256 * 4);
+        assert_eq!(
+            sort_cull_buffer_layout(0, 256, 128, 1 << 20),
+            Err(SortCullLayoutError::ZeroCapacity)
+        );
+        assert_eq!(
+            sort_cull_buffer_layout(1, 255, 128, 1 << 20),
+            Err(SortCullLayoutError::InvalidRadixConfiguration)
+        );
+        assert_eq!(
+            sort_cull_buffer_layout(4096, 256, 128, 1024),
+            Err(SortCullLayoutError::ExceedsDeviceLimit)
+        );
+    }
+
+    #[test]
+    fn invalid_spheres_are_rejected_before_frustum_or_hzb() {
+        let frustum = Frustum::new([Plane::new(Vec3::new(1.0, 0.0, 0.0), 1.0); 6]);
+        for (center, radius) in [
+            (Vec3::ZERO, -1.0),
+            (Vec3::new(f32::NAN, 0.0, 0.0), 1.0),
+            (Vec3::ZERO, f32::INFINITY),
+        ] {
+            let result = cull_sphere(frustum, Vec3::ZERO, center, radius, 100.0);
+            assert_eq!(result, CullDecision::culled(CullReason::InvalidBounds));
+            assert_eq!(apply_hzb(result, true), result);
+        }
+        assert!(!valid_cull_sphere(Vec3::ZERO, -0.01));
+        assert!(valid_cull_sphere(Vec3::ZERO, 0.0));
+    }
 
     #[test]
     fn depth_quantization_spans_the_range_and_clamps() {

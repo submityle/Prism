@@ -17,7 +17,10 @@ use alloc::vec::Vec;
 
 use super::attributes::{AttributeAccess, AttributeFormat, AttributeLayoutPlan, AttributeSemantic};
 use super::graph::{self, CompileError as GraphError, GraphIr};
-use super::modules::{DataInterface, EmberModule, ResourceAccess, ResourceDecl, ResourceKind};
+use super::modules::{
+    DataInterface, EmberModule, ParameterBlockDecl, ParameterType, ParameterValue, ResourceAccess,
+    ResourceDecl, ResourceKind,
+};
 use super::IterationDomain;
 
 /// The fixed workgroup width in the generated compute-entry ABI.
@@ -52,10 +55,124 @@ pub struct CompiledGraph {
     pub dispatches: Vec<CompiledDispatch>,
     /// The globally merged module resource declarations used by the module.
     pub bindings: Vec<ResourceDecl>,
+    /// Typed, host-shareable uniform parameter layouts in binding order.
+    pub parameter_blocks: Vec<CompiledParameterBlock>,
     /// The live, deterministic SoA allocation plan derived from the graph.
     pub attribute_layout: AttributeLayoutPlan,
     /// WGSL storage bindings for live graph attributes, in binding order.
     pub attribute_bindings: Vec<CompiledAttributeBinding>,
+}
+
+/// One parameter member's verified host/WGSL layout.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompiledParameterField {
+    /// WGSL struct member name.
+    pub name: String,
+    /// Exact WGSL/host scalar or vector type.
+    pub ty: ParameterType,
+    /// Byte offset from the start of the uniform block.
+    pub offset: u32,
+    /// Default payload bytes for this field (without inter-field padding).
+    pub default_bytes: Vec<u8>,
+}
+
+/// Runtime upload contract for one typed uniform resource.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompiledParameterBlock {
+    /// Resource binding name.
+    pub resource: String,
+    /// Bind-group and binding slots after deterministic allocation.
+    pub group: u32,
+    /// Binding slot after deterministic allocation.
+    pub binding: u32,
+    /// Ordered field layouts.
+    pub fields: Vec<CompiledParameterField>,
+    /// Struct size rounded to the WGSL uniform-struct alignment.
+    pub size: u32,
+    /// Default payload suitable for initial GPU upload.
+    pub default_bytes: Vec<u8>,
+}
+
+impl CompiledParameterBlock {
+    /// Encodes named runtime values into the verified ABI layout.
+    ///
+    /// Values must contain exactly one entry for each declared field. The
+    /// returned byte vector is zero-padded, deterministic, and little-endian.
+    pub fn encode(
+        &self,
+        values: &[(&str, ParameterValue)],
+    ) -> Result<Vec<u8>, ParameterEncodeError> {
+        let mut output = alloc::vec![0u8; self.size as usize];
+        for field in &self.fields {
+            let Some((_, value)) = values.iter().find(|(name, _)| *name == field.name) else {
+                return Err(ParameterEncodeError::MissingField {
+                    name: field.name.clone(),
+                });
+            };
+            if value.parameter_type() != field.ty {
+                return Err(ParameterEncodeError::TypeMismatch {
+                    name: field.name.clone(),
+                    expected: field.ty,
+                    actual: value.parameter_type(),
+                });
+            }
+            let start = field.offset as usize;
+            encode_parameter_value(*value, &mut output[start..start + field.ty.size() as usize]);
+        }
+        for (name, _) in values {
+            if !self.fields.iter().any(|field| field.name == *name) {
+                return Err(ParameterEncodeError::UnknownField {
+                    name: String::from(*name),
+                });
+            }
+        }
+        if values.len() != self.fields.len() {
+            return Err(ParameterEncodeError::FieldCount {
+                expected: self.fields.len(),
+                actual: values.len(),
+            });
+        }
+        Ok(output)
+    }
+}
+
+/// A host parameter payload did not match its compiled schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ParameterEncodeError {
+    /// The input did not provide exactly the schema's number of values.
+    FieldCount { expected: usize, actual: usize },
+    /// A declared field is absent.
+    MissingField { name: String },
+    /// A field's value has a different scalar/vector type than declared.
+    TypeMismatch {
+        name: String,
+        expected: ParameterType,
+        actual: ParameterType,
+    },
+    /// An extra value was supplied.
+    UnknownField { name: String },
+}
+
+fn encode_parameter_value(value: ParameterValue, output: &mut [u8]) {
+    fn write_f32(output: &mut [u8], index: usize, value: f32) {
+        output[index * 4..index * 4 + 4].copy_from_slice(&value.to_bits().to_le_bytes());
+    }
+    match value {
+        ParameterValue::F32(value) => write_f32(output, 0, value),
+        ParameterValue::U32(value) => output[..4].copy_from_slice(&value.to_le_bytes()),
+        ParameterValue::Vec2(values) => values
+            .iter()
+            .enumerate()
+            .for_each(|(i, v)| write_f32(output, i, *v)),
+        ParameterValue::Vec3(values) => values
+            .iter()
+            .enumerate()
+            .for_each(|(i, v)| write_f32(output, i, *v)),
+        ParameterValue::Vec4(values) => values
+            .iter()
+            .enumerate()
+            .for_each(|(i, v)| write_f32(output, i, *v)),
+    }
 }
 
 /// Which physical buffer copy backs a graph attribute binding.
@@ -194,6 +311,13 @@ pub enum CompileError {
     },
     /// A module's `resources()` and `CodegenCtx` binding declarations disagree.
     ModuleBindingMismatch { module: usize, name: String },
+    /// A uniform does not have exactly one typed schema, or a schema does not
+    /// refer to a declared uniform resource.
+    ParameterSchemaMismatch { resource: String },
+    /// A parameter field name is not a legal WGSL identifier.
+    InvalidParameterIdentifier { resource: String, field: String },
+    /// A field default does not match the declared value type.
+    ParameterDefaultTypeMismatch { resource: String, field: String },
     /// A data interface's `bindings()` and `CodegenCtx` declarations disagree.
     DataInterfaceBindingMismatch { interface: usize, name: String },
     /// Different declarations use one binding name.
@@ -264,6 +388,7 @@ pub fn compile_with_data_interfaces(
     stage_fragments.resize_with(graph_ir.stages.len(), Vec::new);
     let mut bindings = Vec::new();
     let mut functions = Vec::new();
+    let mut parameter_schemas = Vec::new();
     let attribute_layout = graph::plan_layout(graph_ir);
     let attribute_bindings =
         build_attribute_bindings(&attribute_layout, &graph::live_usages(graph_ir))?;
@@ -289,8 +414,10 @@ pub fn compile_with_data_interfaces(
             }
             merge_module_binding(&mut bindings, *declared)?;
         }
+        parameter_schemas.extend_from_slice(interface.parameter_blocks());
         for function in context.functions() {
-            merge_function(&mut functions, function)?;
+            let resolved = resolve_parameter_identifiers(function, &parameter_schemas);
+            merge_function(&mut functions, &resolved)?;
         }
     }
 
@@ -364,18 +491,31 @@ pub fn compile_with_data_interfaces(
             }
             merge_module_binding(&mut bindings, *declared_binding)?;
         }
+        parameter_schemas.extend_from_slice(assignment.module.parameter_blocks());
 
         for function in context.functions() {
             let resolved = resolve_attribute_identifiers(function, &attribute_layout);
+            let resolved = resolve_parameter_identifiers(&resolved, &parameter_schemas);
             merge_function(&mut functions, &resolved)?;
         }
 
-        stage_fragments[assignment.stage_index].extend(
-            context
-                .fragments()
-                .iter()
-                .map(|fragment| resolve_attribute_identifiers(fragment, &attribute_layout)),
-        );
+        stage_fragments[assignment.stage_index].extend(context.fragments().iter().map(
+            |fragment| {
+                let resolved = resolve_attribute_identifiers(fragment, &attribute_layout);
+                resolve_parameter_identifiers(&resolved, &parameter_schemas)
+            },
+        ));
+    }
+
+    // Resolve shorthand after collecting the complete module/interface schema
+    // set so output meaning does not depend on encounter order.
+    for function in &mut functions {
+        *function = resolve_parameter_identifiers(function, &parameter_schemas);
+    }
+    for fragments in &mut stage_fragments {
+        for fragment in fragments {
+            *fragment = resolve_parameter_identifiers(fragment, &parameter_schemas);
+        }
     }
 
     if !graph_ir.stages.is_empty() {
@@ -383,13 +523,19 @@ pub fn compile_with_data_interfaces(
     }
 
     validate_attribute_bindings(&bindings, &attribute_bindings)?;
+    let parameter_blocks = compile_parameter_blocks(&bindings, &parameter_schemas)?;
 
     let mut source = String::from("// Generated by Prism Ember graph compiler.\n");
     for binding in &attribute_bindings {
         emit_attribute_binding(&mut source, binding);
     }
     for binding in &bindings {
-        emit_binding(&mut source, *binding)?;
+        if binding.kind != ResourceKind::Uniform {
+            emit_binding(&mut source, *binding)?;
+        }
+    }
+    for block in &parameter_blocks {
+        emit_parameter_block(&mut source, block);
     }
     for binding in &bindings {
         if binding.kind == ResourceKind::Curve {
@@ -440,6 +586,7 @@ pub fn compile_with_data_interfaces(
         entry_points,
         dispatches,
         bindings,
+        parameter_blocks,
         attribute_layout,
         attribute_bindings,
     })
@@ -616,6 +763,208 @@ fn validate_attribute_bindings(
         }
     }
     Ok(())
+}
+
+fn compile_parameter_blocks(
+    bindings: &[ResourceDecl],
+    schemas: &[ParameterBlockDecl],
+) -> Result<Vec<CompiledParameterBlock>, CompileError> {
+    let mut output = Vec::new();
+    for schema in schemas {
+        if let Some(existing) = output
+            .iter()
+            .find(|existing: &&CompiledParameterBlock| existing.resource == schema.resource)
+        {
+            let same_schema = existing.fields.len() == schema.fields.len()
+                && existing
+                    .fields
+                    .iter()
+                    .zip(schema.fields)
+                    .all(|(compiled, declared)| {
+                        compiled.name == declared.name
+                            && compiled.ty == declared.ty
+                            && compiled.default_bytes == parameter_value_bytes(declared.default)
+                    });
+            if !same_schema {
+                return Err(CompileError::ParameterSchemaMismatch {
+                    resource: String::from(schema.resource),
+                });
+            }
+            continue;
+        }
+        let Some(binding) = bindings
+            .iter()
+            .find(|binding| binding.name == schema.resource)
+        else {
+            return Err(CompileError::ParameterSchemaMismatch {
+                resource: String::from(schema.resource),
+            });
+        };
+        if binding.kind != ResourceKind::Uniform || schema.fields.is_empty() {
+            return Err(CompileError::ParameterSchemaMismatch {
+                resource: String::from(schema.resource),
+            });
+        }
+        let mut fields = Vec::with_capacity(schema.fields.len());
+        let mut offset = 0u32;
+        let mut block_alignment = 16u32;
+        let mut default_bytes = Vec::new();
+        for field in schema.fields {
+            if !is_wgsl_identifier(field.name) {
+                return Err(CompileError::InvalidParameterIdentifier {
+                    resource: String::from(schema.resource),
+                    field: String::from(field.name),
+                });
+            }
+            if field.default.parameter_type() != field.ty {
+                return Err(CompileError::ParameterDefaultTypeMismatch {
+                    resource: String::from(schema.resource),
+                    field: String::from(field.name),
+                });
+            }
+            if fields
+                .iter()
+                .any(|previous: &CompiledParameterField| previous.name == field.name)
+            {
+                return Err(CompileError::ParameterSchemaMismatch {
+                    resource: String::from(schema.resource),
+                });
+            }
+            let alignment = field.ty.alignment();
+            block_alignment = block_alignment.max(alignment);
+            offset = align_up(offset, alignment).ok_or_else(|| {
+                CompileError::ParameterSchemaMismatch {
+                    resource: String::from(schema.resource),
+                }
+            })?;
+            let bytes = parameter_value_bytes(field.default);
+            let start = offset as usize;
+            if default_bytes.len() < start + bytes.len() {
+                default_bytes.resize(start + bytes.len(), 0);
+            }
+            default_bytes[start..start + bytes.len()].copy_from_slice(&bytes);
+            fields.push(CompiledParameterField {
+                name: String::from(field.name),
+                ty: field.ty,
+                offset,
+                default_bytes: bytes,
+            });
+            offset = offset.checked_add(field.ty.size()).ok_or_else(|| {
+                CompileError::ParameterSchemaMismatch {
+                    resource: String::from(schema.resource),
+                }
+            })?;
+        }
+        let size = align_up(offset, block_alignment).ok_or_else(|| {
+            CompileError::ParameterSchemaMismatch {
+                resource: String::from(schema.resource),
+            }
+        })?;
+        default_bytes.resize(size as usize, 0);
+        let resource = String::from(schema.resource);
+        output.push(CompiledParameterBlock {
+            resource,
+            group: binding.group,
+            binding: binding.binding,
+            fields,
+            size,
+            default_bytes,
+        });
+    }
+    for binding in bindings {
+        if binding.kind == ResourceKind::Uniform
+            && !output.iter().any(|block| block.resource == binding.name)
+        {
+            return Err(CompileError::ParameterSchemaMismatch {
+                resource: String::from(binding.name),
+            });
+        }
+    }
+    output.sort_by_key(|block| {
+        bindings
+            .iter()
+            .position(|binding| binding.name == block.resource)
+            .unwrap_or(usize::MAX)
+    });
+    Ok(output)
+}
+
+fn align_up(value: u32, alignment: u32) -> Option<u32> {
+    value
+        .checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+}
+
+fn parameter_value_bytes(value: ParameterValue) -> Vec<u8> {
+    let size = value.parameter_type().size() as usize;
+    let mut bytes = alloc::vec![0u8; size];
+    encode_parameter_value(value, &mut bytes);
+    bytes
+}
+
+/// Lowers shorthand references for one-field blocks; multi-field schemas use
+/// explicit `resource.field` access in their generated source.
+fn resolve_parameter_identifiers(source: &str, schemas: &[ParameterBlockDecl]) -> String {
+    let mut output = String::with_capacity(source.len());
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            let identifier = &source[start..index];
+            if bytes.get(index) == Some(&b'.') {
+                let member_start = index + 1;
+                let member_end = member_start
+                    + bytes[member_start..]
+                        .iter()
+                        .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+                        .unwrap_or(bytes.len() - member_start);
+                let member = &source[member_start..member_end];
+                if let Some(schema) = schemas.iter().find(|schema| {
+                    schema.resource == identifier
+                        && schema.fields.len() == 1
+                        && !schema.fields.iter().any(|field| field.name == member)
+                }) {
+                    output.push_str(identifier);
+                    output.push('.');
+                    output.push_str(schema.fields[0].name);
+                } else {
+                    output.push_str(identifier);
+                }
+            } else if let Some(schema) = schemas
+                .iter()
+                .find(|schema| schema.resource == identifier && schema.fields.len() == 1)
+            {
+                output.push_str(identifier);
+                output.push('.');
+                output.push_str(schema.fields[0].name);
+            } else {
+                output.push_str(identifier);
+            }
+        } else {
+            let ch = source[index..].chars().next().expect("valid source index");
+            output.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+    output
+}
+
+fn emit_parameter_block(source: &mut String, block: &CompiledParameterBlock) {
+    source.push_str(&format!("\nstruct ember_params_{} {{\n", block.resource));
+    for field in &block.fields {
+        source.push_str(&format!("    {}: {},\n", field.name, field.ty.wgsl()));
+    }
+    source.push_str(&format!(
+        "}}\n@group({}) @binding({}) var<uniform> {}: ember_params_{};\n",
+        block.group, block.binding, block.resource, block.resource
+    ));
 }
 
 fn emit_attribute_binding(source: &mut String, binding: &CompiledAttributeBinding) {
@@ -919,6 +1268,22 @@ mod tests {
         fragments: Vec<&'static str>,
     }
 
+    const TEST_PARAMS: &[ParameterBlockDecl] = &[ParameterBlockDecl::new(
+        "params",
+        &[
+            super::super::modules::ParameterField::new(
+                "weight",
+                ParameterType::F32,
+                ParameterValue::F32(0.5),
+            ),
+            super::super::modules::ParameterField::new(
+                "direction",
+                ParameterType::Vec3,
+                ParameterValue::Vec3([1.0, 2.0, 3.0]),
+            ),
+        ],
+    )];
+
     impl EmberModule for SnippetModule {
         fn stage(&self) -> StageKind {
             self.stage
@@ -930,6 +1295,18 @@ mod tests {
 
         fn resources(&self) -> &[ResourceDecl] {
             &self.resources
+        }
+
+        fn parameter_blocks(&self) -> &[ParameterBlockDecl] {
+            if self
+                .resources
+                .iter()
+                .any(|resource| resource.name == "params")
+            {
+                TEST_PARAMS
+            } else {
+                &[]
+            }
         }
 
         fn emit_wesl(&self, context: &mut CodegenCtx) {
@@ -1225,7 +1602,7 @@ mod tests {
         .unwrap();
         assert!(compiled
             .source
-            .contains("ember_attr_velocity_current[index] = emitter_velocity.xyz + ember_attr_velocity_previous[index]"));
+            .contains("ember_attr_velocity_current[index] = emitter_velocity.value.xyz + ember_attr_velocity_previous[index]"));
         assert!(compiled
             .source
             .contains("var<storage, read> ember_attr_velocity_previous"));
@@ -1475,7 +1852,7 @@ mod tests {
                 ResourceDecl::texture3d("volume", 2, 4),
             ],
             fragments: vec![
-                "let value: f32 = params.x + f32(indices[particle_index]) + curve_lut[0].x;",
+                "let value: f32 = params.weight + params.direction.x + f32(indices[particle_index]) + curve_lut[0].x;",
             ],
         };
         let compiled = compile(
@@ -1490,9 +1867,10 @@ mod tests {
         assert!(compiled.source.contains(
             "@group(1) @binding(0) var<storage, read> ember_dispatch_counts: array<u32>"
         ));
+        assert!(compiled.source.contains("struct ember_params_params {"));
         assert!(compiled
             .source
-            .contains("@group(2) @binding(0) var<uniform> params: vec4<f32>"));
+            .contains("@group(2) @binding(0) var<uniform> params: ember_params_params;"));
         assert!(compiled
             .source
             .contains("var<storage, read> indices: array<u32>"));
@@ -1506,6 +1884,146 @@ mod tests {
             .contains("fn ember_sample_curve_lut(age: f32) -> vec4<f32>"));
         assert!(compiled.source.contains("arrayLength(&curve_lut)"));
         assert!(compiled.source.contains("ember_dispatch_counts[0u]"));
+        validate_wgsl(&compiled.source).unwrap();
+    }
+
+    #[test]
+    fn parameter_block_layout_defaults_and_runtime_encoding_match_wgsl_abi() {
+        let module = SnippetModule {
+            stage: StageKind::Update,
+            resources: alloc::vec![ResourceDecl::uniform("params", 2, 0)],
+            fragments: Vec::new(),
+        };
+        let compiled = compile(
+            &graph(),
+            &[StageModule {
+                stage_index: 0,
+                module: &module,
+            }],
+        )
+        .unwrap();
+        let block = &compiled.parameter_blocks[0];
+        assert_eq!(block.size, 32);
+        assert_eq!(block.fields[0].offset, 0);
+        assert_eq!(block.fields[1].offset, 16);
+        assert_eq!(block.default_bytes.len(), 32);
+        assert_eq!(block.default_bytes[0..4], 0.5f32.to_bits().to_le_bytes());
+        assert!(block.default_bytes[4..16].iter().all(|byte| *byte == 0));
+        assert_eq!(block.default_bytes[16..20], 1.0f32.to_bits().to_le_bytes());
+        assert_eq!(block.default_bytes[20..24], 2.0f32.to_bits().to_le_bytes());
+        assert_eq!(block.default_bytes[24..28], 3.0f32.to_bits().to_le_bytes());
+        assert!(block.default_bytes[28..32].iter().all(|byte| *byte == 0));
+
+        let encoded = block
+            .encode(&[
+                ("weight", ParameterValue::F32(1.5)),
+                ("direction", ParameterValue::Vec3([4.0, 5.0, 6.0])),
+            ])
+            .unwrap();
+        assert_eq!(encoded[0..4], 1.5f32.to_bits().to_le_bytes());
+        assert!(encoded[4..16].iter().all(|byte| *byte == 0));
+        assert_eq!(encoded[16..20], 4.0f32.to_bits().to_le_bytes());
+        assert_eq!(encoded[20..24], 5.0f32.to_bits().to_le_bytes());
+        assert_eq!(encoded[24..28], 6.0f32.to_bits().to_le_bytes());
+        assert!(encoded[28..32].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn one_field_parameter_lowering_preserves_vector_swizzles() {
+        static FIELDS: &[super::super::modules::ParameterField] =
+            &[super::super::modules::ParameterField::new(
+                "value",
+                ParameterType::Vec4,
+                ParameterValue::Vec4([0.0; 4]),
+            )];
+        let schemas = [ParameterBlockDecl::new("params", FIELDS)];
+
+        assert_eq!(
+            resolve_parameter_identifiers("params.xyz + params.y + params.value.x", &schemas,),
+            "params.value.xyz + params.value.y + params.value.x"
+        );
+    }
+
+    #[test]
+    fn parameter_block_encoding_rejects_missing_extra_and_mistyped_values() {
+        let module = SnippetModule {
+            stage: StageKind::Update,
+            resources: alloc::vec![ResourceDecl::uniform("params", 2, 0)],
+            fragments: Vec::new(),
+        };
+        let compiled = compile(
+            &graph(),
+            &[StageModule {
+                stage_index: 0,
+                module: &module,
+            }],
+        )
+        .unwrap();
+        let block = &compiled.parameter_blocks[0];
+        assert_eq!(
+            block.encode(&[("weight", ParameterValue::F32(1.0))]),
+            Err(ParameterEncodeError::MissingField {
+                name: String::from("direction"),
+            })
+        );
+        assert_eq!(
+            block.encode(&[
+                ("weight", ParameterValue::F32(1.0)),
+                ("direction", ParameterValue::Vec3([0.0; 3])),
+                ("extra", ParameterValue::U32(9)),
+            ]),
+            Err(ParameterEncodeError::UnknownField {
+                name: String::from("extra"),
+            })
+        );
+        assert_eq!(
+            block.encode(&[
+                ("weight", ParameterValue::U32(1)),
+                ("direction", ParameterValue::Vec3([0.0; 3])),
+            ]),
+            Err(ParameterEncodeError::TypeMismatch {
+                name: String::from("weight"),
+                expected: ParameterType::F32,
+                actual: ParameterType::U32,
+            })
+        );
+    }
+
+    #[test]
+    fn compatible_uniform_schemas_are_shared_across_modules() {
+        let first = SnippetModule {
+            stage: StageKind::Update,
+            resources: alloc::vec![ResourceDecl::uniform("params", 2, 0)],
+            fragments: Vec::new(),
+        };
+        let second = SnippetModule {
+            stage: StageKind::Update,
+            resources: alloc::vec![ResourceDecl::uniform("params", 2, 0)],
+            fragments: Vec::new(),
+        };
+        let compiled = compile(
+            &graph(),
+            &[
+                StageModule {
+                    stage_index: 0,
+                    module: &first,
+                },
+                StageModule {
+                    stage_index: 0,
+                    module: &second,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(compiled.parameter_blocks.len(), 1);
+        assert_eq!(
+            compiled
+                .bindings
+                .iter()
+                .filter(|item| item.name == "params")
+                .count(),
+            1
+        );
         validate_wgsl(&compiled.source).unwrap();
     }
 

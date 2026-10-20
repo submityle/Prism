@@ -117,7 +117,8 @@ impl ParticleBlend {
     #[must_use]
     const fn sort_blend(self) -> sort_cull::BlendMode {
         match self {
-            ParticleBlend::Opaque | ParticleBlend::AlphaMask => sort_cull::BlendMode::Opaque,
+            ParticleBlend::Opaque => sort_cull::BlendMode::Opaque,
+            ParticleBlend::AlphaMask => sort_cull::BlendMode::AlphaMask,
             ParticleBlend::Additive => sort_cull::BlendMode::Additive,
             ParticleBlend::Premultiplied => sort_cull::BlendMode::Premultiplied,
             ParticleBlend::AlphaBlend => sort_cull::BlendMode::AlphaBlend,
@@ -171,6 +172,171 @@ pub struct RenderRouting {
     pub phase: RenderPhase,
     /// The sort strategy applied before compositing.
     pub sort: SortStrategy,
+}
+
+/// Validated, unified CPU-side plan consumed by renderer extraction and GPU
+/// resource preparation. The plan carries resolved shader services and the
+/// buffer ABI requirements alongside phase/sort routing, so callers do not
+/// recompute partially overlapping decisions in separate systems.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RendererPlan {
+    /// Geometry family selected for this emitter.
+    pub kind: RendererKind,
+    /// Concrete render phase, absent for light-only emitters.
+    pub phase: Option<RenderPhase>,
+    /// Blend/sort/OIT decision for geometry draws.
+    pub routing: Option<RenderRouting>,
+    /// Fully resolved shading specialization; absent for lights.
+    pub shading: Option<super::shading::ShadingProgram>,
+    /// Per-particle GPU record/resource requirements.
+    pub resources: RendererResourcePlan,
+}
+
+/// Stable resource requirements derived from renderer kind and shading
+/// footprint. Byte counts are per particle, excluding shared view/material
+/// resources and renderer-specific mesh assets.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RendererResourcePlan {
+    /// Current position/size/rotation/colour record is supplied by the graph
+    /// attribute ABI and is not duplicated here.
+    pub writes_particle_motion: bool,
+    /// Whether an additional previous-position stream is required.
+    pub previous_position: bool,
+    /// Whether a 4-byte packed screen-space motion-vector output is required.
+    pub motion_vector: bool,
+    /// Whether renderer output contributes to the shared OIT targets.
+    pub oit: bool,
+    /// Whether per-particle shading material parameters are read.
+    pub material_params: bool,
+    /// Whether renderer-specific light/decal/volume auxiliary resources apply.
+    pub auxiliary_resources: AuxiliaryResources,
+}
+
+/// Renderer-owned resource classes needed by extraction/prepare.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AuxiliaryResources {
+    /// Cluster-light append records (Light renderer).
+    pub clustered_light_records: bool,
+    /// Decal projection/material records.
+    pub decal_records: bool,
+    /// Volume density and deep-opacity resources.
+    pub volume_resources: bool,
+    /// Mesh vertex/index asset bindings.
+    pub mesh_geometry: bool,
+    /// Ribbon segment/indirect-vertex output.
+    pub ribbon_geometry: bool,
+    /// Beam segment/indirect-vertex output.
+    pub beam_geometry: bool,
+}
+
+/// Invalid renderer-plan input. Validation happens before any GPU allocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RendererPlanError {
+    /// Light-only emitters do not accept opaque depth-writing blend modes.
+    InvalidLightBlend,
+    /// A renderer needs a non-zero dispatch threshold for a meaningful
+    /// radix/bitonic decision.
+    ZeroRadixThreshold,
+    /// Hybrid model weight is non-finite or outside `[0, 1]`.
+    InvalidHybridWeight,
+    /// A volumetric renderer must use an alpha-composited phase.
+    OpaqueVolume,
+}
+
+/// Builds the complete per-emitter renderer plan, rejecting configurations
+/// that would otherwise silently allocate unusable or semantically invalid
+/// GPU resources.
+pub fn resolve_renderer_plan(
+    input: RoutingInput,
+    caps: crate::render_fabric::ServiceSet,
+    quality: super::lod::ParticleQuality,
+) -> Result<RendererPlan, RendererPlanError> {
+    if input.radix_min_count == 0 {
+        return Err(RendererPlanError::ZeroRadixThreshold);
+    }
+    if let EmberShadingModel::Hybrid { weight, .. } = input.shading {
+        if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
+            return Err(RendererPlanError::InvalidHybridWeight);
+        }
+    }
+    if input.kind == RendererKind::Light {
+        if matches!(
+            input.blend,
+            ParticleBlend::Opaque | ParticleBlend::AlphaMask
+        ) {
+            return Err(RendererPlanError::InvalidLightBlend);
+        }
+        return Ok(RendererPlan {
+            kind: input.kind,
+            phase: None,
+            routing: None,
+            shading: None,
+            resources: RendererResourcePlan {
+                auxiliary_resources: AuxiliaryResources {
+                    clustered_light_records: true,
+                    ..AuxiliaryResources::default()
+                },
+                ..RendererResourcePlan::default()
+            },
+        });
+    }
+    if input.kind == RendererKind::Volume
+        && matches!(
+            input.blend,
+            ParticleBlend::Opaque | ParticleBlend::AlphaMask
+        )
+    {
+        return Err(RendererPlanError::OpaqueVolume);
+    }
+    let routing = resolve_routing(input).ok_or(RendererPlanError::InvalidLightBlend)?;
+    let shading = super::shading::resolve_shading_program(super::shading::ShadingProgramInput {
+        model: input.shading,
+        blend: input.blend.sort_blend(),
+        caps,
+        volumetric: input.kind == RendererKind::Volume,
+        quality,
+    });
+    let auxiliary_resources = match input.kind {
+        RendererKind::Sprite => AuxiliaryResources::default(),
+        RendererKind::Mesh => AuxiliaryResources {
+            mesh_geometry: true,
+            ..AuxiliaryResources::default()
+        },
+        RendererKind::Ribbon => AuxiliaryResources {
+            ribbon_geometry: true,
+            ..AuxiliaryResources::default()
+        },
+        RendererKind::Beam => AuxiliaryResources {
+            beam_geometry: true,
+            ..AuxiliaryResources::default()
+        },
+        RendererKind::Light => AuxiliaryResources::default(),
+        RendererKind::Decal => AuxiliaryResources {
+            decal_records: true,
+            ..AuxiliaryResources::default()
+        },
+        RendererKind::Volume => AuxiliaryResources {
+            volume_resources: true,
+            ..AuxiliaryResources::default()
+        },
+    };
+    let phase = Some(routing.phase);
+    Ok(RendererPlan {
+        kind: input.kind,
+        phase,
+        routing: Some(routing),
+        shading: Some(shading),
+        resources: RendererResourcePlan {
+            writes_particle_motion: super::motion_vectors::renderer_writes_motion_vectors(
+                input.kind,
+            ),
+            previous_position: super::motion_vectors::renderer_writes_motion_vectors(input.kind),
+            motion_vector: super::motion_vectors::renderer_writes_motion_vectors(input.kind),
+            oit: routing.sort == SortStrategy::SharedOit,
+            material_params: shading.footprint.material_params || shading.footprint.custom_params,
+            auxiliary_resources,
+        },
+    })
 }
 
 /// Resolves the [`RenderPhase`] for a `(kind, blend)` pair (design §15).
@@ -891,6 +1057,85 @@ mod tests {
             resolve_routing(routing(RendererKind::Light, ParticleBlend::Additive, true)),
             None
         );
+    }
+
+    #[test]
+    fn unified_plan_binds_existing_routing_shading_and_resource_contracts() {
+        let input = RoutingInput {
+            kind: RendererKind::Ribbon,
+            shading: EmberShadingModel::Hybrid {
+                base: ShadingBasis::Pbr,
+                overlay: ShadingBasis::Npr,
+                weight: 0.35,
+            },
+            blend: ParticleBlend::AlphaBlend,
+            visible_count: 8192,
+            radix_min_count: 1024,
+            prefer_shared_oit: true,
+        };
+        let plan = resolve_renderer_plan(
+            input,
+            crate::render_fabric::PARTICLE_LIGHTING_CAPABILITIES,
+            crate::particle::lod::ParticleQuality::High,
+        )
+        .expect("valid hybrid ribbon plan");
+        assert_eq!(plan.phase, Some(RenderPhase::Transparent3d));
+        assert_eq!(
+            plan.routing.expect("geometry route").sort,
+            SortStrategy::SharedOit
+        );
+        assert!(plan.resources.oit);
+        assert!(plan.resources.previous_position);
+        assert!(plan.resources.motion_vector);
+        assert!(plan.resources.material_params);
+        assert!(plan.resources.auxiliary_resources.ribbon_geometry);
+        let program = plan.shading.expect("shading specialization");
+        assert!(program.footprint.ramp_lut && program.footprint.tangent);
+    }
+
+    #[test]
+    fn renderer_plan_validates_specialization_and_preserves_light_contract() {
+        let base = routing(RendererKind::Sprite, ParticleBlend::AlphaBlend, false);
+        assert_eq!(
+            resolve_renderer_plan(
+                RoutingInput {
+                    radix_min_count: 0,
+                    ..base
+                },
+                crate::render_fabric::PARTICLE_LIGHTING_CAPABILITIES,
+                crate::particle::lod::ParticleQuality::Low
+            ),
+            Err(RendererPlanError::ZeroRadixThreshold)
+        );
+        let invalid_hybrid = RoutingInput {
+            shading: EmberShadingModel::Hybrid {
+                base: ShadingBasis::Pbr,
+                overlay: ShadingBasis::Npr,
+                weight: f32::NAN,
+            },
+            ..base
+        };
+        assert_eq!(
+            resolve_renderer_plan(
+                invalid_hybrid,
+                crate::render_fabric::PARTICLE_LIGHTING_CAPABILITIES,
+                crate::particle::lod::ParticleQuality::Low
+            ),
+            Err(RendererPlanError::InvalidHybridWeight)
+        );
+        let light = resolve_renderer_plan(
+            RoutingInput {
+                kind: RendererKind::Light,
+                ..routing(RendererKind::Light, ParticleBlend::Additive, false)
+            },
+            crate::render_fabric::PARTICLE_LIGHTING_CAPABILITIES,
+            crate::particle::lod::ParticleQuality::Medium,
+        )
+        .expect("light-only plan");
+        assert_eq!(light.phase, None);
+        assert_eq!(light.shading, None);
+        assert!(light.resources.auxiliary_resources.clustered_light_records);
+        assert!(!light.resources.motion_vector);
     }
 
     // --- billboard basis ------------------------------------------------
