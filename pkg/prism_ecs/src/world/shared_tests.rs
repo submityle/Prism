@@ -607,6 +607,40 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
 }
 
 #[test]
+fn non_tail_shared_eviction_preserves_later_component_and_binding_postings() {
+    let mut w = World::new();
+    let older = w.spawn((Position(1), BatchKey(1), Layer(9)));
+    let newer = w.spawn((Position(2), BatchKey(2), Layer(9)));
+    let older_archetype = archetype_of(&w, older);
+    let newer_archetype = archetype_of(&w, newer);
+    assert!(older_archetype < newer_archetype);
+
+    let position = cid::<Position>(&w);
+    let batch_key = cid::<BatchKey>(&w);
+    let layer = cid::<Layer>(&w);
+    let older_batch = shared_sid(&w, older, batch_key);
+    let newer_batch = shared_sid(&w, newer, batch_key);
+    let shared_layer = shared_sid(&w, older, layer);
+    assert_eq!(shared_layer, shared_sid(&w, newer, layer));
+
+    assert!(w.despawn(older));
+    assert_eq!(w.archetypes.with_component(position), &[newer_archetype]);
+    assert!(w
+        .archetypes
+        .with_shared_binding(batch_key, older_batch)
+        .is_empty());
+    assert_eq!(
+        w.archetypes.with_shared_binding(batch_key, newer_batch),
+        &[newer_archetype]
+    );
+    assert_eq!(
+        w.archetypes.with_shared_binding(layer, shared_layer),
+        &[newer_archetype],
+        "non-suffix cleanup must retain later archetypes bound to the same value"
+    );
+}
+
+#[test]
 fn unrelated_shared_evictions_preserve_warmed_query_snapshot() {
     let mut w = World::new();
     w.spawn((Velocity(-1),));

@@ -537,6 +537,23 @@ impl ArchetypeKey {
     }
 }
 
+/// Remove a sorted batch from a sorted posting. Fresh archetypes receive
+/// monotonically increasing IDs, so transient churn commonly removes a suffix
+/// and can be handled without scanning the older live entries. Arbitrary
+/// non-suffix eviction retains the conservative linear filter.
+fn remove_posting_ids(posting: &mut Vec<ArchetypeId>, removed: &[ArchetypeId]) {
+    if removed.is_empty() {
+        return;
+    }
+    if let Some(start) = posting.len().checked_sub(removed.len())
+        && posting.get(start..) == Some(removed)
+    {
+        posting.truncate(start);
+    } else {
+        posting.retain(|id| removed.binary_search(id).is_err());
+    }
+}
+
 /// The per-world registry of archetypes.
 pub struct Archetypes {
     archetypes: Vec<Archetype>,
@@ -792,24 +809,38 @@ impl Archetypes {
         }
         eviction_log.extend_from_slice(&evicted);
 
-        let mut affected_components = Vec::new();
-        let mut affected_bindings = Vec::new();
+        let mut component_evictions = Vec::new();
+        let mut binding_evictions = Vec::new();
         for &id in &evicted {
             let arch = &archetypes[id.index() as usize];
-            affected_components.extend_from_slice(arch.components.ids());
-            affected_bindings.extend(
+            component_evictions.extend(
+                arch.components
+                    .ids()
+                    .iter()
+                    .map(|&component| (component, id)),
+            );
+            binding_evictions.extend(
                 arch.shared
                     .iter()
-                    .map(|&(component, value, _)| (component, value)),
+                    .map(|&(component, value, _)| ((component, value), id)),
             );
         }
-        affected_components.sort_unstable();
-        affected_components.dedup();
-        affected_bindings.sort_unstable();
-        affected_bindings.dedup();
-        for component in affected_components {
+        component_evictions.sort_unstable();
+        binding_evictions.sort_unstable();
+        binding_evictions.dedup();
+
+        let mut removed_ids = Vec::new();
+        let mut index = 0;
+        while index < component_evictions.len() {
+            let component = component_evictions[index].0;
+            let end = component_evictions[index..]
+                .iter()
+                .position(|&(candidate, _)| candidate != component)
+                .map_or(component_evictions.len(), |offset| index + offset);
+            removed_ids.clear();
+            removed_ids.extend(component_evictions[index..end].iter().map(|&(_, id)| id));
             let remove_entry = if let Some(postings) = by_component.get_mut(&component) {
-                postings.retain(|id| evicted.binary_search(id).is_err());
+                remove_posting_ids(postings, &removed_ids);
                 postings.is_empty()
             } else {
                 false
@@ -817,10 +848,20 @@ impl Archetypes {
             if remove_entry {
                 by_component.remove(&component);
             }
+            index = end;
         }
-        for binding in affected_bindings {
+
+        index = 0;
+        while index < binding_evictions.len() {
+            let binding = binding_evictions[index].0;
+            let end = binding_evictions[index..]
+                .iter()
+                .position(|&(candidate, _)| candidate != binding)
+                .map_or(binding_evictions.len(), |offset| index + offset);
+            removed_ids.clear();
+            removed_ids.extend(binding_evictions[index..end].iter().map(|&(_, id)| id));
             let remove_entry = if let Some(postings) = by_shared_binding.get_mut(&binding) {
-                postings.retain(|id| evicted.binary_search(id).is_err());
+                remove_posting_ids(postings, &removed_ids);
                 postings.is_empty()
             } else {
                 false
@@ -828,6 +869,7 @@ impl Archetypes {
             if remove_entry {
                 by_shared_binding.remove(&binding);
             }
+            index = end;
         }
     }
 
