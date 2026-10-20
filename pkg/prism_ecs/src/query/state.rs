@@ -378,10 +378,26 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             } else if cache.eviction_checked < evicted_ids.len() {
                 // Unrelated shared-value churn should not scan/copy this query's
                 // whole matched-id snapshot. Probe only newly evicted IDs first;
-                // compact iff one actually belongs to the cached match set.
-                let affected = evicted_ids[cache.eviction_checked..]
-                    .iter()
-                    .any(|id| cache.ids.binary_search(id).is_ok());
+                // compact iff one actually belongs to the cached match set. A
+                // cache may have slept through a large eviction backlog, so
+                // choose the cheaper of E binary probes and an M-id tombstone
+                // check rather than making refresh cost grow with all E events.
+                let pending_evictions = &evicted_ids[cache.eviction_checked..];
+                let affected = if pending_evictions.len().saturating_mul(
+                    usize::BITS as usize - cache.ids.len().max(1).leading_zeros() as usize,
+                ) <= cache.ids.len()
+                {
+                    pending_evictions
+                        .iter()
+                        .any(|id| cache.ids.binary_search(id).is_ok())
+                } else {
+                    cache.ids.iter().any(|id| {
+                        world
+                            .archetypes()
+                            .get(*id)
+                            .is_some_and(|archetype| archetype.is_evicted())
+                    })
+                };
                 if affected {
                     Arc::make_mut(&mut cache.ids).retain(|id| {
                         world

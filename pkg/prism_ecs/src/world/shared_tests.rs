@@ -580,19 +580,42 @@ fn unrelated_shared_evictions_preserve_warmed_query_snapshot() {
 
     for value in 0..64_i32 {
         let transient = w.spawn((Position(value), BatchKey(value as u32)));
-        // Settle the newly-created archetype before its shared value is evicted,
-        // so the next refresh measures only eviction-cache handling.
-        let before_eviction = state.matched_archetypes(&w);
-        assert!(Arc::ptr_eq(&initial, &before_eviction));
-
+        // Leave the query untouched so it observes a backlog of unrelated
+        // eviction events, not just one event per refresh.
         assert!(w.despawn(transient));
-        let after_eviction = state.matched_archetypes(&w);
-        assert!(
-            Arc::ptr_eq(&initial, &after_eviction),
-            "evictions outside this query's match set must not scan/copy its cached IDs"
-        );
-        assert_eq!(state.iter(&w).count(), 1);
     }
+
+    let after_eviction_backlog = state.matched_archetypes(&w);
+    assert!(
+        Arc::ptr_eq(&initial, &after_eviction_backlog),
+        "unrelated eviction backlog must not scan/copy this query's cached IDs"
+    );
+    assert_eq!(state.iter(&w).count(), 1);
+}
+
+#[test]
+fn matching_shared_eviction_compacts_large_warmed_query_snapshot() {
+    let mut w = World::new();
+    let entities: Vec<_> = (0..16_i32)
+        .map(|value| w.spawn((Position(value), BatchKey(value as u32))))
+        .collect();
+    let state = w.query::<&Position>();
+    let before = state.matched_archetypes(&w);
+    assert_eq!(before.len(), entities.len());
+
+    let evicted_entity = *entities.last().expect("nonempty fixture");
+    let evicted_id = archetype_of(&w, evicted_entity);
+    assert!(w.despawn(evicted_entity));
+
+    let after = state.matched_archetypes(&w);
+    assert!(!Arc::ptr_eq(&before, &after));
+    assert_eq!(after.len(), entities.len() - 1);
+    assert!(!after.contains(&evicted_id));
+    assert!(
+        before.contains(&evicted_id),
+        "published Arc remains immutable"
+    );
+    assert_eq!(state.iter(&w).count(), entities.len() - 1);
 }
 
 #[test]
