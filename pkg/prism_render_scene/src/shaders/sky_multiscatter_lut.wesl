@@ -38,7 +38,7 @@ fn sphere_distance(o: vec3<f32>, d: vec3<f32>, r: f32) -> f32 {
   let b = dot(o, d); let c = dot(o, o) - r * r; let disc = b * b - c;
   if (disc < 0.0) { return 0.0; }
   let s = sqrt(disc); let t0 = -b - s; let t1 = -b + s;
-  if (t1 > EPSILON) { return t1; } if (t0 > EPSILON) { return t0; } return 0.0;
+  if (t0 > EPSILON) { return t0; } if (t1 > EPSILON) { return t1; } return 0.0;
 }
 fn boundary(o: vec3<f32>, d: vec3<f32>) -> f32 {
   let top = sphere_distance(o, d, TOP); let ground = sphere_distance(o, d, BOTTOM);
@@ -63,8 +63,8 @@ fn total(f: f32) -> f32 { let x = clamp(f, 0.0, MAX_FRACTION); return max(1.0 / 
 @compute @workgroup_size(8, 8, 1)
 fn sky_multiscatter_lut(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x >= params.width || gid.y >= params.height) { return; }
-  let altitude_value = (f32(gid.x) + 0.5) / f32(params.width) * THICKNESS;
-  let sun_cos = (f32(gid.y) + 0.5) / f32(params.height) * 2.0 - 1.0;
+  let sun_cos = (f32(gid.x) + 0.5) / f32(params.width) * 2.0 - 1.0;
+  let altitude_value = (f32(gid.y) + 0.5) / f32(params.height) * THICKNESS;
   let s = sqrt(max(1.0 - sun_cos * sun_cos, 0.0)); let sun = normalize(vec3<f32>(s, sun_cos, 0.0));
   let point = vec3<f32>(0.0, BOTTOM + altitude_value, 0.0); let n = max(params.dir_samples, 1u); let steps = max(params.march_samples, 1u);
   var l2 = vec3<f32>(0.0); var f = vec3<f32>(0.0);
