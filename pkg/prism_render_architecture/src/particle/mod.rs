@@ -87,6 +87,7 @@ pub mod collision;
 pub mod color_grade_lut;
 pub mod color_gradient;
 pub mod color_temperature;
+pub mod compiler;
 pub mod compression;
 pub mod conservative_raster;
 pub mod constraints;
