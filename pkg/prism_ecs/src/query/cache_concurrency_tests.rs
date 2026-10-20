@@ -27,6 +27,11 @@ impl Component for Pos {}
 struct Vel(i32);
 impl Component for Vel {}
 
+/// A non-query component used to create an unmatched archetype.
+#[derive(Debug, PartialEq, Clone, Copy)]
+struct Tag;
+impl Component for Tag {}
+
 /// The state must stay `Send + Sync` (the `SystemParam::State` bound) now that
 /// the match cache is spin-locked rather than wrapped in an `UnsafeCell`.
 #[test]
@@ -80,4 +85,32 @@ fn concurrent_iteration_fills_the_match_cache_without_a_race() {
             assert_eq!(handle.join().expect("worker did not panic"), expected);
         }
     });
+}
+
+#[test]
+fn stable_match_cache_reuses_immutable_snapshot_and_publishes_on_match_growth() {
+    let mut world = World::new();
+    let first = world.spawn(Pos(1));
+    let state = world.query::<&Pos>();
+
+    let initial = state.matched_archetypes(&world);
+    let stable = state.matched_archetypes(&world);
+    assert!(Arc::ptr_eq(&initial, &stable));
+
+    // Adding an archetype that cannot match Pos updates the scan cursor but
+    // leaves the immutable match snapshot shared with existing iterators.
+    world.spawn(Vel(2));
+    let after_unmatched = state.matched_archetypes(&world);
+    assert!(Arc::ptr_eq(&initial, &after_unmatched));
+
+    // A newly matching archetype publishes a fresh snapshot. The old snapshot
+    // remains valid and unchanged for iterators that already retained it.
+    let second = world.spawn((Pos(3), Tag));
+    let after_match = state.matched_archetypes(&world);
+    assert!(!Arc::ptr_eq(&initial, &after_match));
+    assert_eq!(initial.len(), 1);
+    assert_eq!(after_match.len(), 2);
+    assert_eq!(state.iter(&world).map(|pos| pos.0).sum::<i32>(), 4);
+    assert!(world.entities().contains(first));
+    assert!(world.entities().contains(second));
 }

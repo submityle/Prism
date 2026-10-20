@@ -348,11 +348,12 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     ///
     /// Brings the incremental cache up to date under its spin lock (testing only
     /// archetypes created since the previous refresh, and rebuilding from
-    /// scratch when the world's structural generation changed) and returns a
-    /// copy of the matched-id list, which the iterator drivers take ownership
-    /// of. The copy is `O(matched)`, while the full `D::matches`/`F::matches`
-    /// scan it replaces was `O(total archetypes)`.
-    pub(crate) fn matched_archetypes(&self, world: &World) -> Vec<ArchetypeId> {
+    /// scratch when the world's structural generation changed) and returns an
+    /// immutable shared snapshot. Reusing a stable cache is O(1); it neither
+    /// re-tests archetypes nor copies the matched-id list. A new snapshot is
+    /// allocated only when the cache gains matching archetypes or its
+    /// structural generation is replaced.
+    pub(crate) fn matched_archetypes(&self, world: &World) -> Arc<Vec<ArchetypeId>> {
         // Snapshot the scan cursor under the lock (applying any structural
         // generation reset), then release it *before* calling `D::matches` /
         // `F::matches`: those are user-implementable, so holding the cache lock
@@ -365,7 +366,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             // bumps the structural generation; the cached ids then name freed
             // or renumbered archetypes, so drop them and re-scan from scratch.
             if cache.generation != generation {
-                cache.ids.clear();
+                cache.ids = Arc::new(Vec::new());
                 cache.checked = 0;
                 cache.generation = generation;
             }
@@ -392,7 +393,9 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // its (identical, deterministic) result and drop ours.
         let mut cache = self.matched.lock();
         if cache.generation == generation && cache.checked == checked {
-            cache.ids.extend(appended);
+            if !appended.is_empty() {
+                Arc::make_mut(&mut cache.ids).extend(appended);
+            }
             cache.checked = total;
         }
         cache.ids.clone()

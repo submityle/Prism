@@ -21,6 +21,7 @@
 //! (`&mut A` with `&A`, `&mut A` twice) are rejected up front when the
 //! [`QueryState`](crate::query::QueryState) builds its [`Access`](crate::query::Access).
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -51,7 +52,7 @@ pub struct QueryIter<'w, 's, D: QueryData, F: QueryFilter = ()> {
     /// [`Changed`](crate::query::Changed) acceptance.
     filter_state: &'s F::State,
     /// Ids of the archetypes this query matches, computed once at creation.
-    archetypes: Vec<ArchetypeId>,
+    archetypes: Arc<Vec<ArchetypeId>>,
     /// Index into `archetypes` of the archetype currently being walked.
     arch_cursor: usize,
     /// Next row to yield within the current archetype.
@@ -93,7 +94,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
         world: *mut World,
         data_state: &'s D::State,
         filter_state: &'s F::State,
-        archetypes: Vec<ArchetypeId>,
+        archetypes: Arc<Vec<ArchetypeId>>,
         last_run: Tick,
         this_run: Tick,
     ) -> Self {

@@ -156,16 +156,17 @@ impl World {
 
     /// The current structural generation (design §10 / §14).
     ///
-    /// Bumped only when the archetype registry is wholesale replaced (snapshot
-    /// restore). A [`QueryState`](crate::query::QueryState) match cache is valid
-    /// only for the generation it was built against; a mismatch makes it rebuild.
+    /// Bumped whenever archetype identity/schema changes invalidate archetype-id
+    /// keyed caches (currently snapshot restore and dynamic component layout
+    /// replacement). A [`QueryState`](crate::query::QueryState) match cache is
+    /// valid only for the generation it was built against; a mismatch makes it rebuild.
     #[inline]
     pub fn archetype_generation(&self) -> u64 {
         self.archetype_generation
     }
 
     /// Advance the structural generation, invalidating archetype-id-keyed
-    /// caches (called by snapshot `restore` after replacing the registry).
+    /// caches (called by snapshot `restore` and dynamic layout replacement).
     #[inline]
     pub(crate) fn bump_archetype_generation(&mut self) -> crate::change_index::ChangeCursor {
         self.archetype_generation = self.archetype_generation.wrapping_add(1);

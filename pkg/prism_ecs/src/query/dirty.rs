@@ -369,7 +369,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         report.stats.matched_archetypes = archetypes.len();
         self.remember_sparse_window(last_run, this_run);
 
-        for archetype_id in archetypes {
+        for &archetype_id in archetypes.iter() {
             let Some(archetype) = world.archetypes().get(archetype_id) else {
                 continue;
             };

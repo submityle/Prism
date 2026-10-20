@@ -17,7 +17,7 @@
 - 关键依赖: `prism_math`（glam SIMD）、`prism_tasks`（work-stealing + fiber 作业图，`std`/`multi_thread`）、`prism_reflect`（可选，序列化/反射/脚本桥）
 - 明确约束: 核心 `no_std + alloc`；`std` / `multi_thread` / `serialize` / `reflect` / `trace` / `determinism` / `simd` / `partition` 为 feature；**不依赖任何 `bevy_*` crate**
 
-> **现状核查口径（2026-10-16，当前 checkout HEAD @ `a1e33a798`；后续 terrain 增量切片已提交为 `c3e0de176`）**：本文同时保留完整设计目标与当前实现边界。「已实现」与「已验证」分开记录；提交历史中的测试入口或历史验收记录不等于本次重跑，也不等于跨机、NAT、真实 GPU 或性能目标完成。本轮已重跑并通过 `prism_ecs` 默认 feature 单元测试（860 项）与 `--all-features` 单元测试（1209 项）、`prism_world_runtime --lib`（97 项）以及 `prism_world_gpu --features gpu --lib`（112 项）。后续已提交 shader package binding、planetary placement deletion、水体 parity 与 planetary heightfield 增量投影切片；它们仍不等于真实 adapter、上传/同步收益或端到端 GPU 性能已验证。当前工作树包含未提交的渲染映射、Scene Fabric 与恢复链路改动；`.idea/`、`.mnemon/`、`docs/refactoring-dev/` 为未跟踪且不属于交付内容。§17.1 与历史修复段落中的数值/通过次数仍是既有记录。
+> **现状核查口径（2026-10-20；当前工作树含其他未提交改动）**：本文同时保留完整设计目标与当前实现边界。「已实现」与「已验证」分开记录；提交历史中的测试入口或历史验收记录不等于本次重跑，也不等于跨机、NAT、真实 GPU 或性能目标完成。本轮仅针对查询缓存变更重跑并通过 `prism_ecs --lib`（默认 feature 861 项、`--all-features` 1210 项）；不代表其他 crate、GPU、跨机或性能目标通过。当前工作树还包含并行中的渲染、设置与世界系统改动，未并入本轮交付。§17.1 与历史修复段落中的数值/通过次数仍是既有记录。
 
 > **本次 main 历史同步依据**：UDP/ACK/rebind：`39bd3806a`、`0bf59f55a`、`d6000586b`、`c7201323e`；NUMA acceptance：`9390b7a5e`、`07a3d5b9c`；audio/source-route 与 event-log：`ea2ed8026`、`cd03b14c7`、`3e503dd38`；GPU resident/wgpu gate 与 benchmark：`22aebe26`、`a288cf12e`、`c7201323e`、`3a8120874`、`0e7e67259`；CPU SDF clipmap planner：`7e99fa30f`、`90ff7a89a`；shader package binding 与水体 parity：`a1e33a798`；heightfield/planetary placement 与 deletion：`13428ef38`、`2afc018fb`。
 
@@ -198,7 +198,7 @@ Query<&A, Or<(Changed<B>, Added<C>)>>
 Query<Relations<ChildOf>>                 // §11
 ```
 
-- **archetype 匹配缓存**：首次构建匹配列表；archetype 新增时增量更新，杜绝每帧全表扫描。
+- **archetype 匹配缓存**：首次构建匹配列表；archetype 新增时增量更新，杜绝每帧全表扫描。迭代器持有不可变 COW `Arc<Vec<ArchetypeId>>` 快照：缓存稳定时获取快照为 O(1)，不再每次复制全部匹配 ID；无 reader 持有快照时，新增匹配 archetype 复用 `Vec` 摊还扩容，避免每次增长都复制整份 ID 列表；存在 reader 时 `Arc::make_mut` 会复制以保留旧快照不可变。restore 或动态布局重载后的结构世代变化会重建缓存。
 - **查询健全性（world 身份 + 结构世代 + 缓存同步）**：`QueryState` 记录构造时的 [`WorldId`]，**所有**安全入口——`iter`/`iter_mut`/`get`/`get_mut`/`single`/`single_mut`/`get_many`/`get_many_mut`/`iter_many` 与并行入口 `par_for_each(_mut)`/`par_chunks(_mut)`——先校验传入 `World` 的身份，跨 World 复用**立即 panic**而非把另一世界的 dense 列错误重解释为本查询的类型（设计 §7/§20）。系统层同样绑定：`FunctionSystem::initialize` 记录 `WorldId`，`run`/`run_unsafe`/`apply_deferred` 校验，杜绝「在 A 上 initialize、在 B 上 run」的跨 World 复用（`system/function.rs`）。archetype 注册表被**整体替换**（snapshot `restore`）时递增 `World::archetype_generation`，使所有匹配缓存失效重建，杜绝陈旧 `ArchetypeId` 指向已释放/重编号列的隐患（设计 §10/§14）。匹配缓存由自旋锁保护（`query/matched.rs`），`QueryState` 的 `Send + Sync` 由锁保证而非不安全的 `UnsafeCell` 约定——多线程共享同一 `&QueryState` 并发 `iter` 不再有数据竞争（并发回归测试见 `query/cache_concurrency_tests.rs`）；匹配扫描**不在持锁期间**调用用户可实现的 `D::matches`/`F::matches`（避免重入死锁，且中途 panic 不会留下半更新缓存），结果在短临界区内原子提交。`&mut Query` 的 `IntoIterator` 绑定到 `&mut` 借用生命周期 `'i`（而非 world 生存期 `'w`），安全代码无法同时取得两个别名可变迭代器（compile-fail 守护见 `system/query_param.rs`）。
 - **`Has<T>` 在场探针**：yield `bool`——实体是否持有 `T`，不排除任何 archetype、不读组件值、**不注册任何 access**（故可与同组件 `&mut T` 共存，`Query<(&mut T, Has<T>)>` 可靠无别名冲突）。统一覆盖 table / sparse / shared 三态存储（§6）；是 `Option<&T>` 的只测在场版（后者借值，前者只报在场）。
 - **`AnyOf<(..)>` 并集查询**：元组 `(A, B)` 的 `||` 对偶——archetype **至少一个**元素在场即匹配，yield 各元素的 `Option`，且仅当该行真有某元素在场才迭代（永不迭代全 `None` 行）。元素可为 `&T`/`&mut T`/`Ref<T>`，统一覆盖 table/sparse/shared；注册元素访问的**并集**（与 `Option<&T>` 同样保守），故仍与写同组件的项冲突、自冲突集（如 `AnyOf<(&mut T, &T)>`）被访问检查拒绝。用于「同一职责但以不同类型存储的组件」。
@@ -686,7 +686,7 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 | 范围 | 已实现 | 已验证或已有验收入口 | 仍未验证/不可宣称 |
 |---|---|---|---|
-| ECS dirty query | 前向窗口 column journal；历史/缺口/重放保守 fallback；SparseSet 变化合并 | `query::dirty_tests`：20 项通过；`cargo test -p prism_ecs --lib --offline`：860 项通过；`cargo test -p prism_ecs --all-features --lib --offline`：1209 项通过 | query 全链路严格 `O(change)`、并发写屏障/回绕、所有 feature 组合与大规模性能 |
+| ECS dirty query / archetype cache | 前向窗口 column journal；历史/缺口/重放保守 fallback；SparseSet 变化合并；匹配缓存用 COW `Arc<Vec<_>>` 共享稳定快照 | cache 并发/快照 3 项，restore generation 失效回归；`cargo test -p prism_ecs --lib --offline`：861 项；`cargo test -p prism_ecs --all-features --lib --offline`：1210 项 | query 全链路严格 `O(change)`、并发写屏障/回绕、所有 feature 组合与大规模性能；reader 持有快照时扩容仍会复制缓存 |
 | UDP / ACK / rebind | 有限可靠 UDP、ACK 重传、候选端点与稳定 peer rebind | 真实 loopback fault-proxy 测试覆盖 data/ACK 丢包、顺序/exactly-once 与旧 socket 关闭后的 rebind | 跨进程/跨机、公网、NAT/ICE/relay、生产迁移与本轮重跑结果 |
 | NUMA / affinity | OS topology/affinity readback、worker outcome、显式 arena placement/fallback 语义；策略层拓扑模型 | `numa_acceptance` 入口；arena 默认测试 5 项、`vm` 测试 12 项、`--no-default-features` check 已通过；默认 acceptance 缺能力时 `SKIPPED`，`PRISM_REQUIRE_NUMA=1` 严格失败 | 当前机器 Linux strict pass、ECS node-local pages 的真实物理证明、拓扑感知调度收益与 NUMA 性能 |
 | audio / event-log | audio source-route/scene adapter/full-chain；bounded memory/file event-log 与 replay bridge | 既有局部 unit/integration/full-chain 入口 | 真实设备回调、完整应用/旧资产/editor 联合流程、durable plugin recovery、跨进程/跨机持久化 |

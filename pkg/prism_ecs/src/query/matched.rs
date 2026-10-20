@@ -9,6 +9,7 @@
 //! makes the refresh a critical section instead: readers serialize briefly on a
 //! single `AtomicBool`, so `&self` refresh is race-free with no `std` dependency.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
@@ -25,8 +26,11 @@ use crate::archetype::ArchetypeId;
 /// cache records how many archetypes have been examined (`checked`), the ids
 /// that matched (`ids`), and the `generation` they were computed against.
 pub(crate) struct MatchedArchetypes {
-    /// Ids of every archetype matched so far, in ascending id order.
-    pub(crate) ids: Vec<ArchetypeId>,
+    /// Immutable, shareable ids of every archetype matched so far, in
+    /// ascending id order. Query iterators retain this snapshot without
+    /// copying the full list on every iteration; a new allocation is published
+    /// only when the structural generation changes or matching ids are added.
+    pub(crate) ids: Arc<Vec<ArchetypeId>>,
     /// Number of the world's archetypes already tested. Archetypes with index
     /// `< checked` have a settled (permanent) match decision.
     pub(crate) checked: usize,
@@ -39,7 +43,7 @@ impl MatchedArchetypes {
     /// An empty cache stamped with the world's structural `generation`.
     pub(crate) fn new(generation: u64) -> Self {
         Self {
-            ids: Vec::new(),
+            ids: Arc::new(Vec::new()),
             checked: 0,
             generation,
         }

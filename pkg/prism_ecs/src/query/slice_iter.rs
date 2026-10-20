@@ -28,6 +28,7 @@
 //! [`ColumnSliceData`] (table-backed or `Entity`). Both are checked once, up
 //! front, with a clear panic; there is no silent fallback to a slow path.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -52,7 +53,7 @@ pub struct QuerySliceIter<'w, 's, D: ColumnSliceData, F: ArchetypalFilter> {
     /// Resolved component ids for the data terms, borrowed from the state.
     data_state: &'s D::State,
     /// Archetypes this query matches, computed once at creation.
-    archetypes: Vec<ArchetypeId>,
+    archetypes: Arc<Vec<ArchetypeId>>,
     /// Index of the archetype being walked (`archetypes[arch_cursor - 1]`).
     arch_cursor: usize,
     /// Next row of the current archetype to hand out.
@@ -78,7 +79,7 @@ impl<'w, 's, D: ColumnSliceData, F: ArchetypalFilter> QuerySliceIter<'w, 's, D, 
     pub(crate) unsafe fn new(
         world: *mut World,
         data_state: &'s D::State,
-        archetypes: Vec<ArchetypeId>,
+        archetypes: Arc<Vec<ArchetypeId>>,
         chunk: usize,
         this_run: Tick,
     ) -> Self {

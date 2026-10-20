@@ -11,6 +11,7 @@
 //!   archetype registry; a state whose match cache was populated before the
 //!   restore must rebuild it rather than trust stale archetype ids.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::component::Component;
@@ -61,6 +62,8 @@ fn query_state_cache_is_invalidated_by_snapshot_restore() {
     let state = w.query::<&Pos>();
     // Populate the match cache against the pre-snapshot archetype list.
     assert_eq!(state.iter(&w).count(), 1);
+    let pre_restore_snapshot = state.matched_archetypes(&w);
+    assert_eq!(pre_restore_snapshot.len(), 1);
 
     let snap = w.snapshot();
 
@@ -78,6 +81,10 @@ fn query_state_cache_is_invalidated_by_snapshot_restore() {
     // stale archetype-id list.
     let values: Vec<i32> = state.iter(&w).map(|p| p.0).collect();
     assert_eq!(values, [1]);
+    let post_restore_snapshot = state.matched_archetypes(&w);
+    assert!(!Arc::ptr_eq(&pre_restore_snapshot, &post_restore_snapshot));
+    assert_eq!(pre_restore_snapshot.len(), 1);
+    assert_eq!(post_restore_snapshot.len(), 1);
 }
 
 /// The parallel entry points must run the same world-identity guard as the
