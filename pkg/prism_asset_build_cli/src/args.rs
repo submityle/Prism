@@ -19,6 +19,7 @@ pub enum Command {
     Plan(Plan),
     EditablePlan(EditablePlan),
     EditableBuild(EditableBuild),
+    EditableDiff(EditableDiff),
     Import(Import),
     Build(Build),
     Package(Package),
@@ -37,6 +38,7 @@ impl Command {
             Self::Plan(_) => "plan",
             Self::EditablePlan(_) => "editable-plan",
             Self::EditableBuild(_) => "editable-build",
+            Self::EditableDiff(_) => "editable-diff",
             Self::Import(_) => "import",
             Self::Build(_) => "build",
             Self::Package(_) => "package",
@@ -127,6 +129,21 @@ pub struct EditableBuild {
     /// bypass DDC and compare two fresh executions per job before publication
     #[argh(switch)]
     pub verify_determinism: bool,
+}
+
+/// Compare two saved .prism snapshots without opening a workspace or store.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "editable-diff")]
+pub struct EditableDiff {
+    /// saved .prism snapshot before the edit
+    #[argh(option)]
+    pub before: PathBuf,
+    /// saved .prism snapshot after the edit
+    #[argh(option)]
+    pub after: PathBuf,
+    /// per-file encoded byte budget, positive and at most 8388608 (default)
+    #[argh(option)]
+    pub max_input_bytes: Option<u64>,
 }
 
 /// Import a PNG and publish its canonical RGBA8 artifact.

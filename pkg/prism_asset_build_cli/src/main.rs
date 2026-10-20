@@ -8,6 +8,7 @@ mod args;
 mod cache;
 mod commands;
 mod editable;
+mod editable_diff;
 mod error;
 mod mapping;
 mod output;
@@ -101,6 +102,7 @@ fn command_hint(arguments: &[OsString]) -> Option<&'static str> {
         "plan" => Some("plan"),
         "editable-plan" => Some("editable-plan"),
         "editable-build" => Some("editable-build"),
+        "editable-diff" => Some("editable-diff"),
         "import" => Some("import"),
         "build" => Some("build"),
         "package" => Some("package"),

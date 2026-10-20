@@ -32,6 +32,8 @@ pub mod editable_build;
 pub mod editable_diff;
 /// Importer namespace and persistent-key based subasset identities.
 pub mod editable_identity;
+/// Stable-ID three-way merge planning and explicit conflict resolution.
+pub mod editable_merge;
 /// Canonical typed settings, validation, and explicit schema migrations.
 pub mod editable_settings;
 /// Executes a build graph through DDC/CAS into transactional publication.
@@ -120,6 +122,10 @@ pub use editable_diff::{
 pub use editable_identity::{
     build_editable_subasset_directory, derive_editable_subasset_id, EditableSubAssetIdentityError,
     EditableSubAssetInput,
+};
+pub use editable_merge::{
+    plan_editable_merge, EditableMergeConflict, EditableMergeError, EditableMergePath,
+    EditableMergePlan, EditableMergeSide, EditableMergeValue,
 };
 pub use editable_settings::{
     canonical_settings_path, DecodedEditableSettings, EditableSettings, EditableSettingsCodec,

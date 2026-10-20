@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 png = "0.18.1"
+tempfile = "3.27"
 
 [lints]
 workspace = true

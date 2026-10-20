@@ -13,6 +13,9 @@ pub fn run(command: Command) -> Result<CommandResult, CommandError> {
         Command::EditableBuild(command) => {
             crate::editable::build(command).map(CommandResult::EditableBuild)
         }
+        Command::EditableDiff(command) => {
+            crate::editable_diff::run(command).map(CommandResult::EditableDiff)
+        }
         Command::Import(command) => pipeline::publish(
             command.source,
             command.logical_path,

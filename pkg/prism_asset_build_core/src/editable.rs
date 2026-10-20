@@ -16,6 +16,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAGIC: &[u8] = b"PRISM-EDITABLE\0";
+// Fixed tags, identities, counts and four required byte/string length prefixes.
+// Shared with borrowed merge preflight so it need not allocate a second projection.
+pub(crate) const EDITABLE_FIXED_ENCODED_BYTES: usize =
+    MAGIC.len() + 4 + 16 + 16 + 4 + 32 + 1 + 4 + 4 + 4 + 1 + 4 * 4;
 /// The canonical `.prism` editable-package schema.
 pub const EDITABLE_ASSET_SCHEMA: u32 = 2;
 /// Maximum accepted encoded package size.
@@ -27,12 +31,12 @@ const MAX_SOURCE_URI_BYTES: usize = 4096;
 const MAX_SOURCE_FORMAT_BYTES: usize = 256;
 const MAX_EMBEDDED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_EXTERNAL_SOURCE_BYTES: usize = 32 * 1024 * 1024;
-const MAX_SUBASSETS: usize = 65_536;
+pub(crate) const MAX_SUBASSETS: usize = 65_536;
 const MAX_SUBASSET_NAME_BYTES: usize = 4096;
-const MAX_DEPENDENCIES: usize = 65_536;
+pub(crate) const MAX_DEPENDENCIES: usize = 65_536;
 const MAX_AUTHORING_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
-const MAX_SUBASSET_REFERENCES: usize = 65_536;
+pub(crate) const MAX_SUBASSET_REFERENCES: usize = 65_536;
 const MAX_WORKSPACE_PACKAGES: usize = 65_536;
 const MAX_WORKSPACE_TRANSACTION_RECORDS: usize = 2 * MAX_WORKSPACE_PACKAGES;
 // Counts include unrelated entries and directories (including the root). The
@@ -1125,14 +1129,14 @@ impl EditableAsset {
     // Mirrors the canonical encoder, including every length prefix and option
     // tag. Saturation also makes this safe for unvalidated caller-owned fields.
     fn encoded_len(&self) -> usize {
-        let mut length = MAGIC.len() + 4 + 16 + 16 + 4 + 32 + 1 + 4 + 4 + 4 + 1;
+        let mut length = EDITABLE_FIXED_ENCODED_BYTES;
         for bytes in [
             self.canonical_settings.len(),
             self.source.uri.len(),
             self.source.format.len(),
             self.authoring_payload.len(),
         ] {
-            length = length.saturating_add(4).saturating_add(bytes);
+            length = length.saturating_add(bytes);
         }
         if let Some(bytes) = &self.source.embedded_source {
             length = length.saturating_add(4).saturating_add(bytes.len());

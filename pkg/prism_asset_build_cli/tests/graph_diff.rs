@@ -8,29 +8,26 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const JOURNAL_HEADER: usize = b"PRISM-TXN-JNL\0\x02".len();
 const FRAME: usize = 8 + 99 + 32;
 
 struct Fixture {
+    _directory: tempfile::TempDir,
     root: PathBuf,
     store: PathBuf,
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "prism-query-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("prism-query-")
+            .tempdir()
+            .unwrap();
+        let root = directory.path().to_path_buf();
         Self {
             store: root.join("store"),
             root,
+            _directory: directory,
         }
     }
     fn publish(
@@ -89,12 +86,6 @@ impl Fixture {
         self.store.join("transactions/journal.bin")
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
 fn entry(
     asset: u128,
     key: u8,
