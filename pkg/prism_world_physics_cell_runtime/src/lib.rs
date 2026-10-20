@@ -266,18 +266,17 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
                 decoded: decoded.sector(),
             });
         }
-        // The height samples are the only deep clone. Its cost is capped by the
-        // explicit aggregate residency budget; the two global ownership indexes
-        // are validated in place and committed as a per-cell delta after the
-        // downstream host succeeds.
-        let mut residency = self.residency.clone();
         let old_tiles = self
             .cell_tiles
             .get(&manifest.sector)
             .map(Vec::as_slice)
             .unwrap_or_default();
+
+        // Validate against committed residency before evicting old tiles from
+        // the staged copy. Otherwise a same-cell reload could erase the only
+        // revision floor before checking that its replacement is newer.
         for &tile in old_tiles {
-            if residency.evict(tile).is_none()
+            if self.residency.snapshot(tile).is_none()
                 || self.tile_owners.get(&tile).copied() != Some(manifest.sector)
             {
                 return Err(PhysicsCellHostError::ResidencyInvariant {
@@ -286,10 +285,6 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
                 });
             }
         }
-        let mut next_tiles = Vec::new();
-        next_tiles
-            .try_reserve(decoded.heightfields().len())
-            .map_err(|_| PhysicsCellHostError::AllocationFailed)?;
         for input in decoded.heightfields() {
             if let Some(&owner) = self.tile_owners.get(&input.tile()) {
                 if owner != manifest.sector {
@@ -304,18 +299,44 @@ impl<'a, H: SceneHost, D: TerrainCellDecoder> PhysicsCellHost<'a, H, D> {
                         tile: input.tile(),
                     });
                 }
-                if let Some(current) = self.residency.snapshot(input.tile()) {
-                    let incoming = input.heightfield().revision();
-                    if incoming <= current.revision() {
-                        return Err(PhysicsCellHostError::Physics(
-                            HeightfieldBridgeError::StaleRevision {
-                                current: current.revision(),
-                                incoming,
-                            },
-                        ));
-                    }
+                let current = self.residency.snapshot(input.tile()).ok_or(
+                    PhysicsCellHostError::ResidencyInvariant {
+                        sector: manifest.sector,
+                        tile: input.tile(),
+                    },
+                )?;
+                let incoming = input.heightfield().revision();
+                if incoming <= current.revision() {
+                    return Err(PhysicsCellHostError::Physics(
+                        HeightfieldBridgeError::StaleRevision {
+                            current: current.revision(),
+                            incoming,
+                        },
+                    ));
                 }
             }
+        }
+
+        let mut next_tiles = Vec::new();
+        next_tiles
+            .try_reserve(decoded.heightfields().len())
+            .map_err(|_| PhysicsCellHostError::AllocationFailed)?;
+
+        // The height samples are the only deep clone. Its cost is capped by the
+        // explicit aggregate residency budget; the two global ownership indexes
+        // are validated in place and committed as a per-cell delta after the
+        // downstream host succeeds.
+        let mut residency = self.residency.clone();
+        for &tile in old_tiles {
+            if residency.evict(tile).is_none() {
+                return Err(PhysicsCellHostError::ResidencyInvariant {
+                    sector: manifest.sector,
+                    tile,
+                });
+            }
+        }
+
+        for input in decoded.heightfields() {
             residency
                 .publish(input.heightfield(), input.embedding())
                 .map_err(PhysicsCellHostError::Physics)?;
@@ -578,6 +599,7 @@ mod tests {
         let mut adapter = adapter(&mut host, decoder);
         adapter.load_cell(&manifest(0), b"revision-10").unwrap();
         assert_eq!(adapter.residency().snapshot(tile).unwrap().revision(), 10);
+        let old_snapshot = adapter.residency().snapshot(tile).unwrap().clone();
 
         adapter.decoder_mut().snapshot =
             TerrainCellSnapshot::new(sector, vec![terrain_revision(tile, 9)]).unwrap();
@@ -591,7 +613,21 @@ mod tests {
             ))
         ));
         assert_eq!(adapter.host.loads, 1);
-        assert_eq!(adapter.residency().snapshot(tile).unwrap().revision(), 10);
+        assert_eq!(adapter.residency().snapshot(tile), Some(&old_snapshot));
+
+        adapter.decoder_mut().snapshot =
+            TerrainCellSnapshot::new(sector, vec![terrain_revision(tile, 10)]).unwrap();
+        assert!(matches!(
+            adapter.load_cell(&manifest(0), b"revision-10-equal"),
+            Err(PhysicsCellHostError::Physics(
+                HeightfieldBridgeError::StaleRevision {
+                    current: 10,
+                    incoming: 10,
+                }
+            ))
+        ));
+        assert_eq!(adapter.host.loads, 1);
+        assert_eq!(adapter.residency().snapshot(tile), Some(&old_snapshot));
     }
 
     #[test]
