@@ -14,7 +14,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use core::fmt;
+use core::{fmt, ops::Bound};
 
 /// Stable content identity supplied by an asset system or importer.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
@@ -274,6 +274,7 @@ pub struct AssetCursor {
     generation: u64,
     fingerprint: u64,
     offset: usize,
+    after: AssetId,
 }
 
 impl AssetCursor {
@@ -285,17 +286,18 @@ impl AssetCursor {
 }
 
 /// Cursor for an immediate-child asset-tree query.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeCursor {
     generation: u64,
     fingerprint: u64,
     offset: usize,
+    after: String,
 }
 
 impl TreeCursor {
     /// Returns the number of matching children skipped by this cursor.
     #[must_use]
-    pub const fn offset(self) -> usize {
+    pub const fn offset(&self) -> usize {
         self.offset
     }
 }
@@ -871,7 +873,6 @@ impl ContentCatalog {
                 .insert(record.id);
         }
         self.assets.insert(record.id, record);
-        self.rebuild_reverse_index();
         self.changed();
         Ok(())
     }
@@ -885,15 +886,28 @@ impl ContentCatalog {
             .cloned()
             .ok_or(ContentError::UnknownAsset(record.id))?;
         self.check_path_available(&record.path, Some(record.id))?;
-        self.remove_tree_path(&old.path);
-        self.paths.remove(&old.path);
-        if let Some(status) = self.vcs.remove(&old.path) {
-            self.vcs.entry(record.path.clone()).or_insert(status);
+        if old == record {
+            return Ok(());
         }
-        self.paths.insert(record.path.clone(), record.id);
-        self.add_tree_path(&record.path, record.id);
+        if old.path != record.path {
+            self.remove_tree_path(&old.path);
+            self.paths.remove(&old.path);
+            if let Some(status) = self.vcs.remove(&old.path) {
+                self.vcs.entry(record.path.clone()).or_insert(status);
+            }
+            self.paths.insert(record.path.clone(), record.id);
+            self.add_tree_path(&record.path, record.id);
+        }
+        for dependency in old.dependencies.difference(&record.dependencies) {
+            self.remove_reverse_edge(*dependency, record.id);
+        }
+        for dependency in record.dependencies.difference(&old.dependencies) {
+            self.reverse_dependencies
+                .entry(*dependency)
+                .or_default()
+                .insert(record.id);
+        }
         self.assets.insert(record.id, record);
-        self.rebuild_reverse_index();
         self.changed();
         Ok(())
     }
@@ -907,7 +921,9 @@ impl ContentCatalog {
         self.paths.remove(&record.path);
         self.remove_tree_path(&record.path);
         self.vcs.remove(&record.path);
-        self.rebuild_reverse_index();
+        for dependency in &record.dependencies {
+            self.remove_reverse_edge(*dependency, id);
+        }
         self.changed();
         Ok(record)
     }
@@ -950,29 +966,52 @@ impl ContentCatalog {
                 page.last_used = last_used;
             }
             self.cache_hits = self.cache_hits.saturating_add(1);
+            let next = cached.has_more.then(|| AssetCursor {
+                generation: self.generation,
+                fingerprint,
+                offset: offset.saturating_add(limit),
+                after: *cached
+                    .items
+                    .last()
+                    .expect("nonempty page with continuation"),
+            });
             return Ok(AssetPage {
                 items: cached.items,
-                next: cached.has_more.then_some(AssetCursor {
-                    generation: self.generation,
-                    fingerprint,
-                    offset: offset.saturating_add(limit),
-                }),
+                next,
                 cache: CacheStatus::Hit,
             });
         }
         self.cache_misses = self.cache_misses.saturating_add(1);
-        let mut skipped = 0;
         let mut items = Vec::with_capacity(limit);
         let mut has_more = false;
-        for (path, id) in &self.paths {
+        let prefix = filter.root.as_ref().map(|root| format!("{root}/"));
+        let lower = if let Some(cursor) = cursor {
+            Bound::Excluded(
+                self.assets
+                    .get(&cursor.after)
+                    .ok_or(ContentError::InvalidCursor)?
+                    .path
+                    .clone(),
+            )
+        } else if let Some(root) = &filter.root {
+            Bound::Included(if self.paths.contains_key(root) {
+                root.clone()
+            } else {
+                prefix.clone().expect("root has prefix")
+            })
+        } else {
+            Bound::Unbounded
+        };
+        for (path, id) in self.paths.range((lower, Bound::Unbounded)) {
+            if prefix.as_ref().is_some_and(|prefix| {
+                !path.starts_with(prefix) && filter.root.as_ref() != Some(path)
+            }) {
+                break;
+            }
             let Some(asset) = self.assets.get(id) else {
                 continue;
             };
             if !filter.matches(self, path, asset) {
-                continue;
-            }
-            if skipped < offset {
-                skipped += 1;
                 continue;
             }
             if items.len() == limit {
@@ -982,13 +1021,15 @@ impl ContentCatalog {
             items.push(*id);
         }
         self.cache_asset_page(key, items.clone(), has_more);
+        let next = has_more.then(|| AssetCursor {
+            generation: self.generation,
+            fingerprint,
+            offset: offset.saturating_add(limit),
+            after: *items.last().expect("nonempty page with continuation"),
+        });
         Ok(AssetPage {
             items,
-            next: has_more.then_some(AssetCursor {
-                generation: self.generation,
-                fingerprint,
-                offset: offset.saturating_add(limit),
-            }),
+            next,
             cache: CacheStatus::Miss,
         })
     }
@@ -1014,7 +1055,7 @@ impl ContentCatalog {
             vcs: query.vcs,
         })?;
         let fingerprint = tree_fingerprint(&root, &filter);
-        let offset = self.validate_tree_cursor(cursor, fingerprint)?;
+        let offset = self.validate_tree_cursor(cursor.as_ref(), fingerprint)?;
         let limit = self.validate_page(request)?;
         let key = CacheKey {
             kind: 1,
@@ -1028,22 +1069,32 @@ impl ContentCatalog {
                 page.last_used = last_used;
             }
             self.cache_hits = self.cache_hits.saturating_add(1);
+            let next = cached.has_more.then(|| TreeCursor {
+                generation: self.generation,
+                fingerprint,
+                offset: offset.saturating_add(limit),
+                after: cached
+                    .items
+                    .last()
+                    .expect("nonempty page with continuation")
+                    .name
+                    .clone(),
+            });
             return Ok(TreePage {
                 items: cached.items,
-                next: cached.has_more.then_some(TreeCursor {
-                    generation: self.generation,
-                    fingerprint,
-                    offset: offset.saturating_add(limit),
-                }),
+                next,
                 cache: CacheStatus::Hit,
             });
         }
         self.cache_misses = self.cache_misses.saturating_add(1);
-        let children = self.tree_children.get(&root).cloned().unwrap_or_default();
-        let mut skipped = 0;
+        let children = self
+            .tree_children
+            .get(&root)
+            .expect("tree root validated before querying immutable child index");
         let mut items = Vec::with_capacity(limit);
         let mut has_more = false;
-        for (name, child) in children {
+        let lower = cursor.map_or(Bound::Unbounded, |cursor| Bound::Excluded(cursor.after));
+        for (name, child) in children.range((lower, Bound::Unbounded)) {
             let matches = match child.asset {
                 Some(id) => self
                     .assets
@@ -1054,17 +1105,13 @@ impl ContentCatalog {
             if !matches {
                 continue;
             }
-            if skipped < offset {
-                skipped += 1;
-                continue;
-            }
             if items.len() == limit {
                 has_more = true;
                 break;
             }
             items.push(TreeEntry {
                 path: child.path.clone(),
-                name,
+                name: name.clone(),
                 kind: child
                     .asset
                     .map_or(TreeEntryKind::Folder, |_| TreeEntryKind::Asset),
@@ -1076,13 +1123,19 @@ impl ContentCatalog {
             });
         }
         self.cache_tree_page(key, items.clone(), has_more);
+        let next = has_more.then(|| TreeCursor {
+            generation: self.generation,
+            fingerprint,
+            offset: offset.saturating_add(limit),
+            after: items
+                .last()
+                .expect("nonempty page with continuation")
+                .name
+                .clone(),
+        });
         Ok(TreePage {
             items,
-            next: has_more.then_some(TreeCursor {
-                generation: self.generation,
-                fingerprint,
-                offset: offset.saturating_add(limit),
-            }),
+            next,
             cache: CacheStatus::Miss,
         })
     }
@@ -1123,9 +1176,13 @@ impl ContentCatalog {
             .assets
             .get_mut(&asset)
             .ok_or(ContentError::UnknownAsset(asset))?;
-        record.dependencies.insert(dependency);
-        self.rebuild_reverse_index();
-        self.changed();
+        if record.dependencies.insert(dependency) {
+            self.reverse_dependencies
+                .entry(dependency)
+                .or_default()
+                .insert(asset);
+            self.changed();
+        }
         Ok(())
     }
 
@@ -1141,7 +1198,7 @@ impl ContentCatalog {
             .ok_or(ContentError::UnknownAsset(asset))?;
         let removed = record.dependencies.remove(&dependency);
         if removed {
-            self.rebuild_reverse_index();
+            self.remove_reverse_edge(dependency, asset);
             self.changed();
         }
         Ok(removed)
@@ -1175,11 +1232,19 @@ impl ContentCatalog {
     /// Validates dependency graph and VCS conflict state in deterministic order.
     #[must_use]
     pub fn validate(&self) -> DiagnosticReport {
-        let mut diagnostics = Vec::new();
+        let mut diagnostics = BTreeSet::new();
+        let mut truncated = false;
+        let mut retain = |diagnostic: ContentDiagnostic| {
+            diagnostics.insert(diagnostic);
+            if diagnostics.len() > self.limits.max_diagnostics {
+                diagnostics.pop_last();
+                truncated = true;
+            }
+        };
         for record in self.assets.values() {
             for dependency in &record.dependencies {
                 if !self.assets.contains_key(dependency) {
-                    diagnostics.push(ContentDiagnostic {
+                    retain(ContentDiagnostic {
                         severity: DiagnosticSeverity::Error,
                         code: DiagnosticCode::MissingDependency,
                         asset: Some(record.id),
@@ -1193,7 +1258,7 @@ impl ContentCatalog {
                 .get(&record.path)
                 .is_some_and(|status| status.state == VcsState::Conflicted)
             {
-                diagnostics.push(ContentDiagnostic {
+                retain(ContentDiagnostic {
                     severity: DiagnosticSeverity::Error,
                     code: DiagnosticCode::VersionControlConflict,
                     asset: Some(record.id),
@@ -1204,7 +1269,7 @@ impl ContentCatalog {
         }
         let (cycle, depth_exceeded) = self.find_dependency_cycle();
         if depth_exceeded {
-            diagnostics.push(ContentDiagnostic {
+            retain(ContentDiagnostic {
                 severity: DiagnosticSeverity::Warning,
                 code: DiagnosticCode::DependencyDepthExceeded,
                 asset: None,
@@ -1213,7 +1278,7 @@ impl ContentCatalog {
             });
         }
         if let Some(assets) = cycle {
-            diagnostics.push(ContentDiagnostic {
+            retain(ContentDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 code: DiagnosticCode::DependencyCycle,
                 asset: assets.first().copied(),
@@ -1224,11 +1289,8 @@ impl ContentCatalog {
                 message: format_cycle_message(&assets),
             });
         }
-        diagnostics.sort();
-        let truncated = diagnostics.len() > self.limits.max_diagnostics;
-        diagnostics.truncate(self.limits.max_diagnostics);
         DiagnosticReport {
-            diagnostics,
+            diagnostics: diagnostics.into_iter().collect(),
             truncated,
         }
     }
@@ -1240,9 +1302,34 @@ impl ContentCatalog {
         status: VcsRecord,
     ) -> Result<(), ContentError> {
         let path = canonical_path(path.into())?;
-        self.vcs.insert(path, status);
-        self.changed();
+        if self.vcs.get(&path) != Some(&status) {
+            self.vcs.insert(path, status);
+            self.changed();
+        }
         Ok(())
+    }
+
+    /// Atomically replaces a complete provider status snapshot. Duplicate or
+    /// invalid paths reject the snapshot without changing metadata or cursors.
+    /// Returns whether the effective snapshot changed. An unchanged snapshot
+    /// preserves the catalog generation and cached pages.
+    pub fn replace_vcs_statuses(
+        &mut self,
+        statuses: impl IntoIterator<Item = (String, VcsRecord)>,
+    ) -> Result<bool, ContentError> {
+        let mut candidate = BTreeMap::new();
+        for (path, status) in statuses {
+            let path = canonical_path(path)?;
+            if candidate.insert(path.clone(), status).is_some() {
+                return Err(ContentError::DuplicatePath(path));
+            }
+        }
+        if self.vcs == candidate {
+            return Ok(false);
+        }
+        self.vcs = candidate;
+        self.changed();
+        Ok(true)
     }
 
     /// Returns VCS metadata for an asset, defaulting to unknown.
@@ -1253,14 +1340,11 @@ impl ContentCatalog {
             .map(|asset| self.vcs.get(&asset.path).cloned().unwrap_or_default())
     }
 
-    fn rebuild_reverse_index(&mut self) {
-        self.reverse_dependencies.clear();
-        for record in self.assets.values() {
-            for dependency in &record.dependencies {
-                self.reverse_dependencies
-                    .entry(*dependency)
-                    .or_default()
-                    .insert(record.id);
+    fn remove_reverse_edge(&mut self, dependency: AssetId, asset: AssetId) {
+        if let Some(dependents) = self.reverse_dependencies.get_mut(&dependency) {
+            dependents.remove(&asset);
+            if dependents.is_empty() {
+                self.reverse_dependencies.remove(&dependency);
             }
         }
     }
@@ -1286,7 +1370,7 @@ impl ContentCatalog {
 
     fn validate_tree_cursor(
         &self,
-        cursor: Option<TreeCursor>,
+        cursor: Option<&TreeCursor>,
         fingerprint: u64,
     ) -> Result<usize, ContentError> {
         let Some(cursor) = cursor else { return Ok(0) };
@@ -1323,7 +1407,7 @@ impl ContentCatalog {
             }
         }
         let prefix = format!("{path}/");
-        for (descendant, id) in self.paths.range(path.to_string()..) {
+        for (descendant, id) in self.paths.range(prefix.clone()..) {
             if !descendant.starts_with(&prefix) {
                 break;
             }
@@ -1710,12 +1794,13 @@ fn tree_fingerprint(root: &str, filter: &NormalizedFilter) -> u64 {
 }
 
 fn canonical_path(path: String) -> Result<String, ContentError> {
-    let path = path.replace('\\', "/");
-    let path = path.trim().trim_matches('/').to_string();
     if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.contains('\0')
         || path
             .split('/')
-            .any(|part| part.trim().is_empty() || part == "." || part == "..")
+            .any(|part| part.is_empty() || part == "." || part == "..")
     {
         return Err(ContentError::InvalidPath(path));
     }
@@ -1723,7 +1808,7 @@ fn canonical_path(path: String) -> Result<String, ContentError> {
 }
 
 fn canonical_root(path: String) -> Result<String, ContentError> {
-    if path.trim().is_empty() {
+    if path.is_empty() {
         Ok(String::new())
     } else {
         canonical_path(path)

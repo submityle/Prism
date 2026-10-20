@@ -20,7 +20,7 @@
 | `prism_editor_graph` | 稳定图身份、类型/基数校验、分组/索引维护、确定性拓扑与评估回调 | 材质/VFX 等具体节点 UI 和编译器适配 | 10 |
 | `prism_editor_timeline` | 整数 tick、稳定轨道/关键帧、插值、维度校验、有序事件与采样 | 序列器 UI 和具体运行时播放适配 | 3 |
 | `prism_editor_profiler` | 有界 frame/span、帧图/关键路径、内存预算告警、可视日志投影 | Tracy/GPU/真实运行时采集和分析界面 | 9 |
-| `prism_editor_content` | 目录索引、分页/游标、过滤、有界缓存、依赖/反向引用、VCS 元数据、导入导出任务状态 | 文件扫描、缩略图生产、实际 importer/exporter/Cook/VCS provider 和内容 UI | 10 |
+| `prism_editor_content` | 目录/子树索引、按末项续查的分页、过滤、有界缓存与诊断、增量反向依赖、精确路径、原子 VCS 快照、导入导出任务状态 | 文件扫描、缩略图生产、实际 importer/exporter/Cook/VCS provider 和内容 UI | 17（本次目录回归） |
 | `prism_editor_domains` | 域/能力/贡献/Profile、版本约束、依赖启停、确定性冲突诊断 | 材质/VFX/动画/地形/音频/物理的具体编辑器 | 13 |
 | `prism_editor_remote` | 有界 JSON-RPC/二进制 codec、增量副本、PIE、TCP、受控子进程 stdio/TCP 桥及取消/重启/超时 | Prism 引擎专属 adapter 和生产场景运行时接线 | 41 |
 | `prism_editor_collab` | 有界因果副本/LWW/tombstone、Presence/租约软锁、TCP 接纳顺序/广播/重连/历史重放/能力拒绝 | 身份认证/TLS、产品级权限/部署和 UI 到命令栈协同接线 | 20 |
@@ -46,6 +46,14 @@
 框选限制扫描像素数、唯一 ID 数、读回字节数和并发请求。二维 dispatch 支持超出单维 workgroup 上限的矩形，并检查填充 lane 的 32 位索引溢出；4096 ID 容量对应 131,080 字节读回，与框选面积无关。新 GPU buffer 的零初始化避免 CPU 另建、映射和复制整张表。超出容量时整个请求报错，不截断选区。2026-10-20 的真实 GPU 回归包含 16 个刻意同桶的四字 ID、跨工作组重复像素、重复运行顺序一致及容量 16/15/0 的成功/拒绝。焦点、框选可视化 overlay 和原生 Gizmo 绘制/变换回写仍需宿主适配。
 
 本次增量验证命令为 `PRISM_REQUIRE_GPU=1 cargo test --offline -p prism_editor_viewport --all-features -- --nocapture`（37 项通过、无跳过，Apple M2/Metal），以及 `cargo clippy --offline -p prism_editor_viewport --all-targets --all-features --no-deps -- -D warnings`、包级 fmt 与定向 diff 检查。沙盒内无法枚举 Metal adapter 的失败未计入 GPU 覆盖；上述成功测试在授权的沙盒外执行。
+
+### 内容目录与增量维护
+
+`ContentCatalog` 的依赖编辑仅更新新增/移除的反向边；只有路径变动才更新树与路径索引。相同记录、重复依赖边与相同 VCS 观察不会推进 generation 或使游标/缓存失效。资产和树分页从前页末项继续查找，子树第一页从前缀开始，避免深分页重复扫描全部前页；树查询借用索引，不复制整个目录。过滤仍需检查未匹配候选及目录后代，不能据此宣称所有查询成本恒定。
+
+路径保留 UTF-8 空格、换行和 Unicode 身份；绝对路径、反斜杠、NUL、空分量及点/父目录分量显式拒绝。文件/目录前缀冲突在修改索引前检查。`replace_vcs_statuses` 校验完整候选后一次性替换，清除过期状态，非法/重复路径不会部分发布。诊断收集过程按 `max_diagnostics` 保留确定性排序前缀，不先分配全量错误列表。
+
+2026-10-20 执行 `cargo test --offline -p prism_editor_content --all-targets`，10 项单元测试和 7 项集成测试通过；`cargo clippy --offline -p prism_editor_content --all-targets --all-features --no-deps -- -D warnings` 通过。集成回归包含 257 个分支的过滤分页、变化页大小/缓存命中与淘汰、400 次混合修改的独立反向引用比对、精确路径与原子快照拒绝。这里只验证目录数据层，不把任务状态模型计作实际 importer/exporter/Cook 执行。
 
 ### 大世界执行数据层
 
