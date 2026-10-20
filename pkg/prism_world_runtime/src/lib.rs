@@ -972,6 +972,7 @@ struct PendingLoad {
     manifest: CellManifest,
     previous: Option<CellManifest>,
     operation: TraceOp,
+    cancel_requested: bool,
 }
 
 /// Coordinates stream policy, bounded IO, manifest validation, and scene host calls.
@@ -1056,6 +1057,7 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                         old.scene_key != manifest.scene_key
                             || old.content_version != manifest.content_version
                             || old.derived_hash != manifest.derived_hash
+                            || old.data_layers != manifest.data_layers
                     }) {
                         TraceOp::Reload
                     } else {
@@ -1072,6 +1074,7 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                                     manifest: *manifest,
                                     previous,
                                     operation,
+                                    cancel_requested: false,
                                 },
                             );
                             self.trace.push(TraceEvent::LoadSubmitted {
@@ -1171,13 +1174,24 @@ impl<I: CellIo> CellFrameCoordinator<I> {
         match completion {
             IoCompletion::Completed {
                 request_id,
-                request: _,
+                request,
                 bytes,
             } => {
                 let pending = self.pending.remove(&request_id);
                 let Some(pending) = pending else {
                     return;
                 };
+                if pending.cancel_requested {
+                    self.restore_stream_state(pending.manifest.sector, pending.previous);
+                    self.record_failure(
+                        pending.frame,
+                        request.sector(),
+                        pending.operation,
+                        FailureStage::Cancelled,
+                        "IO request cancelled before a late completion was consumed",
+                    );
+                    return;
+                }
                 let previous = pending.previous;
                 let operation = pending.operation;
                 match validate_header(pending.manifest, &bytes) {
@@ -1238,6 +1252,20 @@ impl<I: CellIo> CellFrameCoordinator<I> {
                 error,
             } => {
                 let pending = self.pending.remove(&request_id);
+                if let Some(pending) = pending.as_ref().filter(|pending| pending.cancel_requested) {
+                    let frame = pending.frame;
+                    let previous = pending.previous;
+                    let operation = pending.operation;
+                    self.restore_stream_state(request.sector(), previous);
+                    self.record_failure(
+                        frame,
+                        request.sector(),
+                        operation,
+                        FailureStage::Cancelled,
+                        "IO request cancelled before a late failure was consumed",
+                    );
+                    return;
+                }
                 let (frame, previous, operation) = pending
                     .map_or((self.frame, None, TraceOp::Load), |pending| {
                         (pending.frame, pending.previous, pending.operation)
@@ -1256,15 +1284,20 @@ impl<I: CellIo> CellFrameCoordinator<I> {
 
     /// Cancels the pending request for `sector`, if any.
     pub fn cancel_sector(&mut self, sector: SectorId) -> bool {
-        let Some(request_id) = self
+        let Some((request_id, pending)) = self
             .pending
-            .iter()
+            .iter_mut()
             .find(|(_, pending)| pending.manifest.sector == sector)
-            .map(|(request_id, _)| *request_id)
         else {
             return false;
         };
-        self.io.cancel(request_id)
+        if pending.cancel_requested {
+            return false;
+        }
+        pending.cancel_requested = true;
+        let request_id = *request_id;
+        let _ = self.io.cancel(request_id);
+        true
     }
 
     /// Returns the observable trace.

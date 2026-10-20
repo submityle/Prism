@@ -978,6 +978,49 @@ mod tests {
     }
 
     #[test]
+    fn layer_unavailability_evicts_and_layer_revision_reloads() {
+        let sector = SectorId::new(0, 0, 0, 0);
+        let bounds = AabbI64::new(GlobalPos::new(0, 0, 0), GlobalPos::new(1, 1, 1)).unwrap();
+        let old = CellManifest {
+            sector,
+            bounds,
+            scene_key: 1,
+            content_version: 1,
+            derived_hash: 2,
+            io_bytes: 8,
+            data_layers: DataLayerMask::from_bits(1 << 1),
+        };
+        let mut scheduler = StreamScheduler::new();
+        scheduler.mark_resident_manifest(old);
+        let spatial_demand = DemandSource::new(sector, 0, 1, 10).unwrap();
+        let unavailable = scheduler.plan(
+            &[spatial_demand],
+            &[old],
+            StreamBudget {
+                io_bytes: 8,
+                max_actions: 1,
+            },
+        );
+        assert_eq!(unavailable.actions, vec![StreamAction::Unload(sector)]);
+
+        scheduler.mark_resident_manifest(old);
+        let revised = CellManifest {
+            data_layers: DataLayerMask::from_bits(1 << 2),
+            ..old
+        };
+        let available = DataLayerMask::from_bits((1 << 1) | (1 << 2));
+        let reload = scheduler.plan(
+            &[spatial_demand.with_data_layers(available)],
+            &[revised],
+            StreamBudget {
+                io_bytes: 8,
+                max_actions: 1,
+            },
+        );
+        assert!(matches!(reload.actions.as_slice(), [StreamAction::Load(_)]));
+    }
+
+    #[test]
     fn scheduler_is_budgeted_hysteretic_and_deterministic() {
         let center = SectorId::new(0, 0, 0, 0);
         let demand = DemandSource::new(center, 1, 2, 10).unwrap();

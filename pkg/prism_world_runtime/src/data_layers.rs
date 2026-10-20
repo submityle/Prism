@@ -227,18 +227,19 @@ impl RuntimeDataLayers {
                 });
             }
         }
-        let mut next_states = self.states.clone();
         if state == DataLayerState::Unloaded {
-            next_states.remove(&layer);
+            self.states.remove(&layer);
         } else {
-            next_states.insert(layer, state);
+            self.states.insert(layer, state);
         }
-        let next_enabled = next_states
-            .iter()
-            .filter_map(|(layer, state)| (*state == DataLayerState::Activated).then_some(*layer))
-            .collect();
-        self.states = next_states;
-        self.enabled = next_enabled;
+        match (self.enabled.binary_search(&layer), state) {
+            (Ok(_), DataLayerState::Activated) => {}
+            (Ok(index), _) => {
+                self.enabled.remove(index);
+            }
+            (Err(index), DataLayerState::Activated) => self.enabled.insert(index, layer),
+            (Err(_), _) => {}
+        }
         Ok(())
     }
 
@@ -279,12 +280,7 @@ impl LayeredCellManifest {
         layers: &[DataLayerId],
     ) -> Result<Self, DataLayerConfigError> {
         let canonical = canonical_layers(layers)?;
-        let stream_layers = canonical
-            .iter()
-            .copied()
-            .map(|layer| prism_world_stream::DataLayerId::new(layer.0))
-            .collect::<Vec<_>>();
-        let mask = DataLayerMask::from_layers(&stream_layers).map_err(|error| match error {
+        let mask = DataLayerMask::from_layers(&canonical).map_err(|error| match error {
             DataLayerMaskError::OutOfRange { layer } | DataLayerMaskError::Duplicate { layer } => {
                 DataLayerConfigError::UnsupportedLayer { layer }
             }
@@ -339,12 +335,7 @@ impl LayeredLoadedCell {
         active_layers: &[DataLayerId],
     ) -> Result<Self, DataLayerConfigError> {
         let declared = canonical_layers(declared_layers)?;
-        let stream_layers = declared
-            .iter()
-            .copied()
-            .map(|layer| prism_world_stream::DataLayerId::new(layer.0))
-            .collect::<Vec<_>>();
-        let declared_mask = DataLayerMask::from_layers(&stream_layers)
+        let declared_mask = DataLayerMask::from_layers(&declared)
             .map_err(|_| DataLayerConfigError::ManifestLayerMismatch)?;
         if manifest.data_layers != DataLayerMask::EMPTY && manifest.data_layers != declared_mask {
             return Err(DataLayerConfigError::ManifestLayerMismatch);
@@ -578,6 +569,13 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
         validate_unique_manifests(manifests)?;
         validate_unique_loaded(loaded)?;
 
+        let available_layers = self.data_layers.available_mask();
+        for cell in manifests {
+            if !cell.manifest.data_layers.is_subset_of(available_layers) {
+                self.cells.cancel_sector(cell.manifest.sector);
+            }
+        }
+
         self.desired = manifests
             .iter()
             .filter_map(|cell| {
@@ -702,6 +700,18 @@ impl<I: CellIo> LayeredCellFrameCoordinator<I> {
     #[must_use]
     pub fn trace(&self) -> &crate::Trace {
         self.cells.trace()
+    }
+
+    /// Cancels a pending cell request while retaining backend capacity until
+    /// its terminal completion is consumed.
+    pub fn cancel_sector(&mut self, sector: SectorId) -> bool {
+        self.cells.cancel_sector(sector)
+    }
+
+    /// Returns accepted requests whose terminal completion is not consumed.
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        self.cells.in_flight()
     }
 }
 
@@ -1326,5 +1336,75 @@ mod tests {
             })
         );
         assert!(layers.states().next().is_none());
+    }
+
+    #[test]
+    fn unloading_layer_cancels_in_flight_cell_until_terminal_is_consumed() {
+        let cell = manifest(8, 1);
+        let layer = DataLayerId::new(6);
+        let layered = LayeredCellManifest::new(cell, &[layer]).unwrap();
+        let mut coordinator = coordinator(core::slice::from_ref(&layered), 1);
+        coordinator
+            .data_layers_mut()
+            .set_state(layer, DataLayerState::Loaded)
+            .unwrap();
+        let demand = DemandSource::new(cell.sector, 0, 1, 1).unwrap();
+        let mut host = Host::default();
+
+        let submitted = coordinator
+            .plan_frame(
+                &[demand],
+                core::slice::from_ref(&layered),
+                &[],
+                StreamBudget {
+                    io_bytes: 1,
+                    max_actions: 1,
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(submitted.streaming.submitted, 1);
+        assert_eq!(coordinator.in_flight(), 1);
+
+        coordinator
+            .data_layers_mut()
+            .set_state(layer, DataLayerState::Unloaded)
+            .unwrap();
+        coordinator
+            .plan_frame(
+                &[demand],
+                core::slice::from_ref(&layered),
+                &[],
+                StreamBudget {
+                    io_bytes: 1,
+                    max_actions: 1,
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(coordinator.in_flight(), 1);
+        assert!(coordinator.poll_io(&mut host).io_progressed);
+        assert_eq!(coordinator.in_flight(), 0);
+        assert!(host.loaded.is_empty());
+
+        coordinator
+            .data_layers_mut()
+            .set_state(layer, DataLayerState::Loaded)
+            .unwrap();
+        let readmitted = coordinator
+            .plan_frame(
+                &[demand],
+                &[layered],
+                &[],
+                StreamBudget {
+                    io_bytes: 1,
+                    max_actions: 1,
+                },
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(readmitted.streaming.submitted, 1);
+        assert!(coordinator.poll_io(&mut host).io_progressed);
+        assert_eq!(host.loaded, vec![cell.sector]);
     }
 }
