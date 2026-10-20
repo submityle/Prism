@@ -1090,3 +1090,80 @@ fn acknowledge_ui_marks_saved_without_dropping_text_or_ime_draft() {
     ));
     assert!(ui.controller().is_dirty());
 }
+
+#[cfg(feature = "desktop")]
+#[test]
+fn native_document_save_runs_content_gate_before_real_io_and_revalidates() {
+    use prism_editor_app::{DesktopDocumentSession, DesktopScene};
+    use prism_editor_content::{
+        validation::{
+            AssetValidationRule, ValidationContext, ValidationLimits, ValidationPolicy,
+            ValidationRegistry, ValidationSink,
+        },
+        AssetId, AssetKind, AssetRecord, ContentCatalog, DiagnosticSeverity,
+    };
+    struct Reject;
+    impl AssetValidationRule for Reject {
+        fn id(&self) -> &str {
+            "host.reject"
+        }
+        fn validate(
+            &self,
+            _: &ValidationContext<'_>,
+            _: &AssetRecord,
+            sink: &mut ValidationSink<'_>,
+        ) -> Result<(), String> {
+            sink.emit(DiagnosticSeverity::Error, "source", "invalid host source")
+                .map_err(|error| error.to_string())
+        }
+    }
+    let temp = Temp::new();
+    let mut ui = EditorDesktopUi::new(controller()).unwrap();
+    edit(ui.controller_mut(), 42);
+    let mut content = ContentCatalog::new();
+    content
+        .insert(
+            AssetRecord::new(
+                AssetId::from_raw(1),
+                "actual.source",
+                AssetKind::new("host").unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    ui.mount_content_browser(content).unwrap();
+    let mut rules = ValidationRegistry::new(ValidationLimits::default());
+    rules.register(Arc::new(Reject)).unwrap();
+    ui.mount_content_validation(rules, ValidationPolicy::default());
+    let mut session =
+        DesktopDocumentSession::new(temp.adapter(), catalog(), ControllerLimits::default());
+    assert!(matches!(session.save(&mut ui), Err(DocumentError::Ui(_))));
+    assert!(!session.is_busy());
+    assert!(session.last_request().is_none());
+    assert!(
+        !temp.file().exists(),
+        "rejected validation must not submit filesystem work"
+    );
+    assert!(ui.controller().is_dirty());
+    assert_eq!(ui.content_validation_receipt().unwrap().error_count(), 1);
+
+    ui.mount_content_validation(
+        ValidationRegistry::new(ValidationLimits::default()),
+        ValidationPolicy::default(),
+    );
+    session.save(&mut ui).unwrap();
+    let mut scene = DesktopScene::new(Vec::new()).unwrap();
+    let waker = Waker::from(Arc::new(Notify(thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while session.is_busy() {
+        assert!(Instant::now() < deadline, "native validated save deadline");
+        let _ = session.poll(&mut cx, &mut ui, &mut scene).unwrap();
+        thread::yield_now();
+    }
+    assert!(temp.file().exists());
+    assert!(!ui.controller().is_dirty());
+    let mut reopened = EditorController::new();
+    open(&mut temp.adapter(), &mut reopened);
+    assert_eq!(snapshot(&reopened, &items()[0]).count, 42);
+}

@@ -39,6 +39,8 @@ mod desktop;
 #[cfg(feature = "desktop")]
 mod desktop_document;
 #[cfg(feature = "desktop")]
+mod desktop_images;
+#[cfg(feature = "desktop")]
 mod desktop_scene;
 mod desktop_ui;
 mod document;
@@ -56,13 +58,18 @@ pub use desktop::{
 #[cfg(feature = "desktop")]
 pub use desktop_document::DesktopDocumentSession;
 #[cfg(feature = "desktop")]
+pub use desktop_images::DesktopContentImages;
+#[cfg(feature = "desktop")]
 pub use desktop_scene::{
     DesktopScene, DesktopSceneDocument, DesktopSceneObject, DesktopSceneStatus,
     SceneDocumentAdapter,
 };
 #[cfg(feature = "desktop")]
 pub use desktop_scene::{GizmoFrame, SceneTransformAdapter};
-pub use desktop_ui::{DesktopKey, DesktopUiError, EditorDesktopUi};
+pub use desktop_ui::{
+    ContentGitPhase, ContentGitStatus, ContentThumbnailSource, DesktopContentImage, DesktopKey,
+    DesktopUiError, EditorDesktopUi,
+};
 pub use document::{
     DecodedDocument, DocumentCodec, DocumentError, DocumentFileAdapter, DocumentIoEvent,
     DocumentLimits, DocumentLoadReceipt, DocumentSaveReceipt, DocumentSchemaCatalog,

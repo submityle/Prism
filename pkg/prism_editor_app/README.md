@@ -124,7 +124,7 @@ revision; unchanged frames keep the retained draw list and GPU uploads. Browser
 queries and asset selection are available through `content_browser()` and remain
 independent of document object selection, dirty state and Undo/Redo history.
 
-The dock uses actual layout rectangles for row/button hits and four text inputs,
+The dock uses actual layout rectangles for row/button hits and browser text inputs,
 including IME composition, Enter/Tab commits and Escape cancellation. Nested
 favorite/pin controls update the real catalog. A catalog publication invalidates
 old browser clicks and text drafts; an Inspector draft survives that publication.
@@ -133,10 +133,71 @@ focus conservatively fences close/reload and Gizmo capture until committed or
 cancelled. Resize adjusts the bounded page size; navigation buttons reach rows
 outside the current page. Input and drawing share the dock clip bounds.
 
-Mounting supplies no source scan, Git worker, thumbnail or pipeline by itself;
-those services publish into the application-owned catalog. No sample assets are
-inserted into the native catalog. The offscreen browser integration exercises
-real GPU text changes after publication and verifies idle frames add no uploads.
+Mounting the dock supplies an application-owned catalog. Source producers remain
+explicit host bindings; the app does not infer project files or revisions.
+The offscreen browser integration exercises real GPU text changes after
+publication and verifies idle frames add no uploads.
+
+Thumbnail hosts install a shared bounded decoder and a pure
+`ContentThumbnailSource` through `mount_content_thumbnails`. A source key contains
+the asset, absolute path, authoritative source revision and requested size.
+`invalidate_content_thumbnails` revokes old exposed images even when catalog
+metadata is unchanged; the host must wake the native loop. Completion polling
+builds the real keyed image nodes, and the app maps their reconciled layout to
+the same dock clip used for input and text drawing. Native image ancestors are
+fully opaque. Grid paging and dock wheel scrolling keep long controls/cards
+reachable; resizing preserves the host's preferred column count.
+
+`DesktopContentImages` uses the viewport's `ImageRenderer` on the native GPU.
+It uploads only new visible source keys (or replaced CPU publications), releases
+removed keys before allocating replacements, converts coordinates to physical
+pixels, and encodes into the acquired surface texture after Loom. It introduces
+no intermediate attachment or production readback. Unchanged frames retain
+textures and geometry. Suspension recreates GPU residency from retained CPU
+page pixels. Image preparation errors clear old preparation/residency.
+
+`mount_content_git(provider, absolute_worktree_root)` mounts the real asynchronous
+Git provider and a native refresh button/status. One active request and one latest
+intent share the provider's capacity. Refresh, cancel and catalog/root replacement
+revoke the old epoch; cancelled ready/running requests are drained before the
+next starts. Publication requires the exact launch catalog token and current
+binding, preserves previous metadata on failure, and never edits document history.
+Shared-capacity Busy is visible and retried on wakes. The public status retains
+the provider's exact bounded diagnostics independently of its display preview.
+
+`mount_content_validation` installs trusted bounded host rules and policy.
+Validate shows real receipt counts. `DesktopDocumentSession::save` reruns Save
+validation, authorizes the exact catalog/rule/operation/policy snapshots and holds
+the immutable authorization while preparing actual filesystem work. Errors,
+incomplete receipts and denied warnings prevent submission; success does not
+clear dirty state until the existing persistence acknowledgement. Hosts can
+borrow `validated_content(Commit/Cook)` while preparing their own operations;
+the app does not yet provide a Git commit or cooking product workflow. Later
+asynchronous publication still needs its destination/source revision fence.
+
+At explicit project initialization, `mount_content_collections(CollectionStore)`
+loads Newton's bounded atomic collection file into a controller candidate before
+publication. Startup load is synchronous and must run outside rendering; failures
+preserve the prior controller/binding and never trigger automatic overwrite.
+Accepted collection mutations schedule one background writer plus one latest
+snapshot. UI builds perform no filesystem work. Pending or failed writes fence
+close, document replacement and project/catalog replacement, preserving local
+metadata without changing the document dirty flag/history. A failed write exposes
+Retry collections; corrupt/unsupported files require explicit host recovery first.
+A successful rename with a directory durability warning is reported as published.
+Project replacement waits for the previous writer rather than discarding it.
+
+The concrete CLI example accepts `--png <path> --revision <u128>` for one explicit
+PNG binding, and `--project <existing-root>` for collection storage and Git status.
+No sample source is inserted unless requested. `DesktopReport.content_image_frames`
+counts actual presented native frames containing decoded resident images.
+
+`tests/content_images.rs` exercises actual PNG decoding, keyed grid layout and
+GPU pixels, replacement without a catalog-generation change, DPI, partial clipping,
+idle upload counts, renderer reconstruction on the same device and image removal.
+It does not simulate a physical device loss. Git tests use real temporary
+repositories/processes; collection tests use actual metadata files; the native
+document gate test rejects I/O then saves and reloads the real reflected model.
 
 Verification from the repository root:
 
@@ -149,13 +210,20 @@ PRISM_REQUIRE_GPU=1 cargo test -p prism_editor_app --features desktop --test giz
 cargo run -p prism_editor_app --features desktop --example native_gizmo -- --frames 3
 ```
 
-2026-10-20 verification: required-GPU `--all-features --all-targets` passed
-85 tests on Apple M2/Metal, including three Gizmo offscreen integration tests and
-one native content dock GPU integration test; default-feature `--all-targets`
-passed 62 tests. Scoped all-feature/all-target
-Clippy with `--no-deps -- -D warnings` passed. Native smoke initialized an
-Apple M2/Metal device but presented zero frames and reached its 15-second bound.
-The desktop automation service confirmed the Mac was locked and could not
-unlock it; this was confirmed again after the content dock integration. Native
-presentation and OS input validation therefore remain
-unverified; unlock the desktop before repeating the bounded smoke command.
+2026-10-21 verification: required-GPU `--all-features --all-targets` passed
+94 tests on Apple M2/Metal: 55 library tests, 2 content-image tests, 15 controller
+tests, 18 document tests and 4 Gizmo/dock tests. These include actual PNG pixel
+readback, three Gizmo GPU integrations, the dock GPU integration, real Git
+repositories, collection click/text/Enter followed by file persistence, failure
+recovery, and rejected then successful validated save/reload. Default-feature
+`--all-targets` passed 68 tests. Scoped all-feature/all-target Clippy with
+`--no-deps -- -D warnings` passed; normal/build/dev dependency inspection found
+no Bevy packages. No workspace build was run.
+
+The bounded native smoke with an explicit PNG decoded its source and initialized
+Apple M2/Metal, but returned `TimeLimit` after 15 seconds: 0 presented frames,
+0 content-image frames and 0 native input events. The desktop automation service
+again confirmed that the Mac was locked and automatic unlock failed. Native
+presentation and OS input therefore remain unverified; unlock the desktop before
+repeating the bounded smoke with `--png <absolute-path> --revision <u128>`.
+Offscreen GPU pixel evidence does not establish native presentation.

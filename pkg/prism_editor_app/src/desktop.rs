@@ -225,6 +225,9 @@ impl std::error::Error for DesktopError {}
 pub struct DesktopReport {
     /// Successfully submitted and presented frames.
     pub presented_frames: u64,
+    /// Presented native targets that encoded at least one decoded content image.
+    /// Pixel correctness is verified separately by offscreen readback tests.
+    pub content_image_frames: u64,
     /// Non-synthetic native input events received (not a claim of manual QA).
     pub native_input_events: u64,
     /// Device/surface initializations, including resume.
@@ -359,6 +362,7 @@ struct Native {
     gpu: DesktopGpu,
     config: wgpu::SurfaceConfiguration,
     presenter: GpuPresenter,
+    images: crate::DesktopContentImages,
     scaled_draw: DrawList,
     prepared: bool,
     scale: f32,
@@ -481,6 +485,8 @@ impl<R: DesktopRenderer> DesktopHost<R> {
             format: config.format,
         };
         self.renderer.initialize(&gpu)?;
+        let images =
+            crate::DesktopContentImages::new(&gpu).map_err(|e| DesktopError::Gpu(e.to_string()))?;
         let scale = checked_scale(window.scale_factor())?;
         self.ui
             .resize(size.width as f32 / scale, size.height as f32 / scale)
@@ -492,6 +498,7 @@ impl<R: DesktopRenderer> DesktopHost<R> {
             gpu,
             config,
             presenter,
+            images,
             scaled_draw: DrawList::new(),
             prepared: false,
             scale,
@@ -574,6 +581,14 @@ impl<R: DesktopRenderer> DesktopHost<R> {
                     native.config.height,
                 )
                 .map_err(|e| DesktopError::Gpu(e.to_string()))?;
+            native
+                .images
+                .prepare(
+                    self.ui.content_images(),
+                    native.scale,
+                    [native.config.width, native.config.height],
+                )
+                .map_err(|e| DesktopError::Gpu(e.to_string()))?;
             native.prepared = true;
         }
         let (texture, suboptimal) = match native.surface.get_current_texture() {
@@ -631,10 +646,17 @@ impl<R: DesktopRenderer> DesktopHost<R> {
             self.renderer
                 .encode(&native.gpu, &mut self.ui, &mut encoder, &view, bounds)?;
         }
+        native
+            .images
+            .encode(&mut encoder, &texture.texture)
+            .map_err(|e| DesktopError::Gpu(e.to_string()))?;
         native.gpu.queue.submit([encoder.finish()]);
         window.pre_present_notify();
         native.gpu.queue.present(texture);
         self.report.presented_frames += 1;
+        if native.images.usage().0 > 0 {
+            self.report.content_image_frames += 1;
+        }
         self.redraw = false;
         self.consecutive_retries = 0;
         self.retry_at = None;
@@ -691,7 +713,7 @@ impl<R: DesktopRenderer> DesktopHost<R> {
             return;
         };
         let result = if save {
-            document.save(&self.ui).map(|_| true)
+            document.save(&mut self.ui).map(|_| true)
         } else {
             document.load(&self.ui).map(|_| true)
         };
@@ -819,6 +841,7 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
         match event {
             WindowEvent::CloseRequested => {
                 let blocked = self.renderer.gesture_active()
+                    || self.ui.has_uncommitted_edit()
                     || self.document.as_ref().is_some_and(|document| {
                         self.ui.controller().is_dirty()
                             || self.ui.has_uncommitted_edit()
@@ -1138,6 +1161,9 @@ impl<R: DesktopRenderer> ApplicationHandler<DesktopWake> for DesktopHost<R> {
                 return;
             }
         }
+        self.pending |= self.ui.content_thumbnails_pending();
+        self.pending |= self.ui.content_git_pending();
+        self.pending |= self.ui.content_collections_pending();
         self.sync_text_input();
         let now = Instant::now();
         if self.redraw

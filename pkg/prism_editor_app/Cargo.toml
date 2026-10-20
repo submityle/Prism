@@ -34,5 +34,8 @@ futures-lite = { version = "2", optional = true }
 default = []
 desktop = ["dep:winit", "dep:wgpu", "dep:futures-lite", "dep:prism_math", "prism_ui_render_backend/gpu"]
 
+[dev-dependencies]
+png = "0.18.1"
+
 [lints]
 workspace = true

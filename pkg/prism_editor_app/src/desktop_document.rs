@@ -51,7 +51,24 @@ impl DesktopDocumentSession {
     }
 
     /// Starts a bounded save without clearing the UI dirty state.
-    pub fn save(&mut self, ui: &EditorDesktopUi) -> Result<IoRequestId, DocumentError> {
+    pub fn save(&mut self, ui: &mut EditorDesktopUi) -> Result<IoRequestId, DocumentError> {
+        if ui.has_uncommitted_edit() {
+            return Err(DocumentError::Busy);
+        }
+        if ui.content_catalog().is_some() {
+            use prism_editor_content::validation::ValidationOperation;
+            ui.validate_content(ValidationOperation::Save)
+                .map_err(DocumentError::Ui)?;
+            // Hold both exact content/rule snapshots across save preparation.
+            let _authorized = ui
+                .validated_content(ValidationOperation::Save)
+                .map_err(|error| {
+                    DocumentError::Ui(crate::DesktopUiError::Validation(error.to_string()))
+                })?;
+            let request = self.adapter.submit_save(ui.controller(), &self.catalog)?;
+            self.last_request = Some(request);
+            return Ok(request);
+        }
         let request = self.adapter.submit_save(ui.controller(), &self.catalog)?;
         self.last_request = Some(request);
         Ok(request)

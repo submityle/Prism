@@ -27,8 +27,13 @@ const STATUS_HEIGHT: f32 = 28.0;
 const PANEL_HEADER: f32 = 30.0;
 const MAX_DIMENSION: f32 = 32_768.0;
 
+mod collections;
 mod content;
+mod git;
+mod validation;
 use content::NativeContent;
+pub use content::{ContentThumbnailSource, DesktopContentImage};
+pub use git::{ContentGitPhase, ContentGitStatus};
 #[cfg(test)]
 mod content_tests;
 
@@ -60,6 +65,10 @@ pub enum DesktopUiError {
     Build(UiBuildError),
     /// The independent content browser rejected its event or catalog.
     Content(ContentBrowserError),
+    /// Host thumbnail keys were invalid or exceeded a page budget.
+    Thumbnail(prism_editor_content::thumbnail::ThumbnailError),
+    /// Content rules or preparation gate rejected the requested operation.
+    Validation(String),
     /// Dimensions must be finite and in 0..=32768 logical pixels.
     InvalidSize,
     /// Pointer coordinates must be finite.
@@ -79,6 +88,8 @@ impl fmt::Display for DesktopUiError {
             Self::Action(e) => e.fmt(f),
             Self::Build(e) => e.fmt(f),
             Self::Content(e) => e.fmt(f),
+            Self::Thumbnail(e) => e.fmt(f),
+            Self::Validation(e) => f.write_str(e),
             Self::InvalidSize => f.write_str("UI dimensions must be finite and within 0..=32768"),
             Self::InvalidPointer => f.write_str("pointer coordinates must be finite"),
             Self::TextLimit => f.write_str("field text/composition exceeds the 4096-byte budget"),
@@ -112,6 +123,11 @@ impl From<UiBuildError> for DesktopUiError {
 impl From<ContentBrowserError> for DesktopUiError {
     fn from(e: ContentBrowserError) -> Self {
         Self::Content(e)
+    }
+}
+impl From<prism_editor_content::thumbnail::ThumbnailError> for DesktopUiError {
+    fn from(e: prism_editor_content::thumbnail::ThumbnailError) -> Self {
+        Self::Thumbnail(e)
     }
 }
 
@@ -151,6 +167,9 @@ pub struct EditorDesktopUi {
     error: Option<String>,
     outliner_start: usize,
     content: Option<NativeContent>,
+    git: git::NativeGit,
+    collections: collections::NativeCollections,
+    validation: validation::NativeValidation,
 }
 
 impl EditorDesktopUi {
@@ -174,6 +193,9 @@ impl EditorDesktopUi {
             error: None,
             outliner_start: 0,
             content: None,
+            git: git::NativeGit::default(),
+            collections: collections::NativeCollections::default(),
+            validation: validation::NativeValidation::default(),
         };
         result.refresh()?;
         Ok(result)
@@ -271,10 +293,11 @@ impl EditorDesktopUi {
     /// Returns true while a field focus owns an uncommitted draft or `IME`
     /// composition. This is intentionally conservative: unchanged focused
     /// values still block close/reload, and clipping/minimization does not
-    /// make the draft safe to discard.
+    /// make the draft safe to discard. Pending or failed collection writes
+    /// also retain this fence until their exact snapshot is published.
     #[must_use]
     pub fn has_uncommitted_edit(&self) -> bool {
-        self.focus.is_some() || self.controller.has_active_edit()
+        self.focus.is_some() || self.controller.has_active_edit() || self.collections.fenced()
     }
 
     /// Stores a bounded, visible error. Call `refresh` before presenting it.
@@ -296,8 +319,27 @@ impl EditorDesktopUi {
     /// Reconciles after controller revision, catalog generation or local input changes.
     /// Returns false on an idle frame without rebuilding the retained tree.
     pub fn refresh(&mut self) -> Result<bool, DesktopUiError> {
+        if self.collections.poll() {
+            self.invalidated = true;
+        }
+        if self
+            .git
+            .poll(self.content.as_mut().map(|content| &mut content.catalog))
+        {
+            self.invalidated = true;
+        }
+        if self.content.as_mut().is_some_and(NativeContent::poll) {
+            self.invalidated = true;
+        }
         let revision = self.controller.revision();
         let content_changed = self.content.as_ref().is_some_and(NativeContent::changed);
+        if self
+            .content
+            .as_ref()
+            .is_some_and(|content| self.validation.stale(&content.catalog))
+        {
+            self.validation.message = "Content changed; validate again".into();
+        }
         if !self.invalidated && !content_changed && self.rendered_revision == Some(revision) {
             return Ok(false);
         }
@@ -325,7 +367,7 @@ impl EditorDesktopUi {
         }
         let content_height = self.content_height();
         if let Some(content) = &mut self.content {
-            content.rebuild(content_height)?;
+            content.rebuild(content_height, self.size.width)?;
         }
         let total = self.visible_outliner_count();
         let count = self.visible_rows();
@@ -360,6 +402,14 @@ impl EditorDesktopUi {
         let mut viewport = Rect::new(Point::ZERO, Size::ZERO);
         let mut input_rect = None;
         let mut hits = Vec::new();
+        let mut images = Vec::new();
+        let image_bindings: BTreeMap<_, _> = self
+            .content
+            .as_ref()
+            .into_iter()
+            .flat_map(|content| content.view.images())
+            .map(|image| (image.visual_key.as_str(), image))
+            .collect();
         let content_bindings: BTreeMap<_, _> = self
             .content
             .as_ref()
@@ -374,6 +424,15 @@ impl EditorDesktopUi {
                 let clip = scope
                     .and_then(|key| scopes.get(key))
                     .map_or(window, |(_, rect)| *rect);
+                if let Some(image) = image_bindings.get(key.as_str()) {
+                    images.push(DesktopContentImage {
+                        request: image.request.clone(),
+                        image: image.image.clone(),
+                        rect: *rect,
+                        clip,
+                        opacity: 1.0,
+                    });
+                }
                 if self
                     .focus
                     .as_ref()
@@ -407,9 +466,39 @@ impl EditorDesktopUi {
                         content: true,
                     });
                 }
+                if matches!(
+                    key.as_str(),
+                    "content:git:refresh" | "content:validate" | "content:collections:retry"
+                ) {
+                    hits.push(Hit {
+                        target: key.clone(),
+                        trigger: UiTrigger::Activate,
+                        rect: intersection(clip, *rect),
+                        content: true,
+                    });
+                }
             }
         }
         let list = clipped_draw_list(self.ui.backend(), &scopes, window)?;
+        if let Some(content) = &mut self.content {
+            content.images = images;
+            let dock = scopes
+                .get("editor.browser")
+                .map_or(0.0, |(_, r)| r.size.height);
+            content.scroll_max = semantics
+                .iter()
+                .zip(&geometry)
+                .find_map(|((el, _), (_, r))| {
+                    matches!(el.explicit_key(), Some(Key::Str(key)) if key == "content:browser")
+                        .then_some((r.size.height - dock).max(0.0))
+                })
+                .unwrap_or(0.0);
+            if content.scroll > content.scroll_max {
+                content.scroll = content.scroll_max;
+                self.invalidated = true;
+                return self.refresh();
+            }
+        }
         self.hits = hits;
         self.bindings = bindings;
         self.viewport = viewport;
@@ -642,6 +731,27 @@ impl EditorDesktopUi {
             return self.reject(DesktopUiError::InvalidPointer);
         }
         let refreshed = self.refresh()?;
+        let browser_height = self.content_height();
+        let browser_top = self.size.height - STATUS_HEIGHT - browser_height;
+        if let Some(content) = &mut self.content
+            && contains(
+                Rect::new(
+                    Point::new(0.0, browser_top),
+                    Size::new(self.size.width, browser_height),
+                ),
+                x,
+                y,
+            )
+        {
+            let next = (content.scroll + delta_rows as f32 * 32.0).clamp(0.0, content.scroll_max);
+            if next != content.scroll {
+                content.scroll = next;
+                self.invalidated = true;
+                self.refresh()?;
+                return Ok(true);
+            }
+            return Ok(refreshed);
+        }
         if !contains(self.outliner_rect, x, y) {
             return Ok(refreshed);
         }
@@ -784,7 +894,7 @@ impl EditorDesktopUi {
         } else {
             "Saved"
         };
-        let toolbar = Element::box_()
+        let mut toolbar = Element::box_()
             .key_str("editor.toolbar")
             .class("desktop-toolbar")
             .child(
@@ -800,6 +910,35 @@ impl EditorDesktopUi {
                     .child(Element::text("Redo")),
             )
             .child(Element::text(dirty).class("desktop-dirty"));
+        if self.git.mounted() {
+            toolbar = toolbar
+                .child(
+                    Element::box_()
+                        .key_str("content:git:refresh")
+                        .class("desktop-button")
+                        .child(Element::text("Git refresh")),
+                )
+                .child(
+                    Element::text(self.git.status.message.chars().take(88).collect::<String>())
+                        .key_str("content:git:status"),
+                );
+        }
+        if self.content.is_some() {
+            toolbar = toolbar.child(
+                Element::box_()
+                    .key_str("content:validate")
+                    .class("desktop-button")
+                    .child(Element::text("Validate")),
+            );
+        }
+        if self.collections.failed() {
+            toolbar = toolbar.child(
+                Element::box_()
+                    .key_str("content:collections:retry")
+                    .class("desktop-button")
+                    .child(Element::text("Retry collections")),
+            );
+        }
         let left = (self.size.width * 0.23).min(280.0);
         let right = (self.size.width * 0.30).min(380.0);
         let height =
@@ -834,7 +973,13 @@ impl EditorDesktopUi {
         let status = self
             .error
             .as_deref()
-            .unwrap_or("Enter: commit   Esc: cancel   Tab: next field");
+            .unwrap_or(if self.collections.fenced() {
+                &self.collections.message
+            } else if self.content.is_some() {
+                &self.validation.message
+            } else {
+                "Enter: commit   Esc: cancel   Tab: next field"
+            });
         let chars = (self.size.width / 7.0).max(0.0) as usize;
         let status: String = status
             .chars()
@@ -862,7 +1007,14 @@ impl EditorDesktopUi {
                     .key_str("editor.browser")
                     .class("desktop-browser")
                     .style(StyleProp::Height, StyleValue::px(self.content_height()))
-                    .child(browser.view.element().clone()),
+                    .child(
+                        browser
+                            .view
+                            .element()
+                            .clone()
+                            .style(StyleProp::FlexShrink, StyleValue::number(0.0))
+                            .style(StyleProp::MarginTop, StyleValue::px(-browser.scroll)),
+                    ),
             );
         }
         let element = element.child(status);
@@ -1144,7 +1296,7 @@ fn stylesheet() -> StyleSheet {
             .with(P::MinWidth, V::px(180.0))
             .with(P::BackgroundColor, bg(24, 26, 31)),
     );
-    sheet.insert(Class::new("prism-editor-content__asset").with(P::Height, V::px(28.0)));
+    sheet.insert(Class::new("prism-editor-content__asset").with(P::MinHeight, V::px(28.0)));
     sheet.insert(column("prism-editor-inspector__heading").with(P::MinHeight, V::px(22.0)));
     sheet.insert(
         Class::new("prism-editor-inspector__type").with(P::Display, V::Keyword(Keyword::None)),
