@@ -19,3 +19,16 @@ workspace = true
 [[test]]
 name = "sdf_sampling_lifecycle"
 path = "text/integration/sdf_sampling_lifecycle.rs"
+
+[[test]]
+name = "sdf_cell_codec"
+path = "text/unit/sdf_cell_codec.rs"
+
+[[test]]
+name = "sdf_cell_file_runtime"
+path = "text/integration/sdf_cell_file_runtime.rs"
+
+[[bench]]
+name = "sdf_cell_codec"
+path = "text/integration/sdf_cell_codec_bench.rs"
+harness = false

@@ -14,6 +14,7 @@ extern crate alloc;
 
 mod codec;
 mod sdf;
+mod sdf_codec;
 
 pub use codec::{
     TerrainCellCodec, TerrainCellCodecError, TerrainCellCodecLimits, TERRAIN_CELL_CODEC_VERSION,
@@ -21,6 +22,10 @@ pub use codec::{
 pub use sdf::{
     SdfCellDecoder, SdfCellSnapshot, SdfPhysicsCellHost, SdfPhysicsCellHostError,
     SdfResidencyBudget,
+};
+pub use sdf_codec::{
+    SdfCellCodec, SdfCellCodecError, SdfCellCodecLimits, SdfCellCodecResource,
+    SDF_CELL_CODEC_VERSION,
 };
 
 use alloc::collections::BTreeMap;

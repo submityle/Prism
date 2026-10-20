@@ -276,6 +276,8 @@ release两组完整记录共864次dispatch逐全键/位置对CPU，10k/100k候�
 
 ## 当前验证
 
+SDF cell 已增加正式 PSDC v1 派生缓存编解码器：完整 sector/brick identity、物理尺度、revision 和量化样本保真；独立 payload/brick/sample/逻辑字节预算与 CRC、规范排序、保留位检查在样本构造前完成。真实 archive 文件经 FileCellProvider、coordinator、SdfPhysicsCellHost 到连续距离/梯度查询的接缝已有专项测试，包含失败保留旧快照及同一 coordinator 修复后重试。2026-10-21 bridge/cell 的 lib 与测试目标共 57 项通过（含 codec 11 项、文件集成 2 项），API rustdoc 严格检查通过；既有 Clippy 阻断及定向诊断结果如实保留。Apple M2 优化基准中，1024 个 brick/524288 个样本的 encode/decode P50 分别为 2.911/2.849 ms，仅衡量 CPU 编解码。格式、完整分位数、资源边界及验证记录见 `prism_world_physics_sdf_runtime_zh.md`；该接缝不代表 SDF solver、渲染或 GI 产品消费者已经完成。
+
 2026-10-21 独立 target 定向复验：`cargo test -p prism_world_runtime --lib --offline` 108 项、`cargo test -p prism_world_gpu --features gpu --lib --offline` 123 项全部通过。跨沙盒 `WGPU_BACKEND=metal cargo test -p prism_world_gpu --features terrain_scatter --offline --test heightfield_placement --test heightfield_placement_deletion -- --nocapture --test-threads=1` 在 Apple M2 / Metal / IntegratedGpu 上分别通过 10 和 3 项，无忽略，实际执行 placement/deletion shader、完整键过滤及 indirect draw 回归；这不验证上述 renderer 产品接线或行星 placement。连续 SDF 查询的 bridge/cell 全目标回归共 44 项通过，解析距离/梯度、失败原子性与查询微基准结果见 `prism_world_physics_sdf_runtime_zh.md`。
 
 本轮 scene/world streaming 切片的定向验证：`rustfmt --edition 2024 --check pkg/prism_world_stream/src/lib.rs pkg/prism_world_runtime/src/lib.rs`，以及 `cargo test --offline -p prism_world_stream -p prism_world_runtime --lib --no-fail-fast`；结果为 `prism_world_stream` 5 项、`prism_world_runtime` 79 项通过。新增回归覆盖 manifest revision 触发 replacement、成功提交新 cell，以及坏 header 后旧 resident 状态可重试。工作树的全量 `cargo fmt --all -- --check` 仍会报告其他并行改动文件，本轮没有格式化或修改这些非目标包。
