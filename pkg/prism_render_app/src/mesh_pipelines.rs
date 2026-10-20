@@ -4,16 +4,12 @@
 //! and target state (the renderer's, injected through
 //! [`MeshPipelineProvider`]) and the device (the module must exist before a
 //! descriptor can name it). This module is the render-world resource that holds
-//! the provider, plus the spine's default provider.
+//! the provider and its device-rebuild recipe.
 //!
-//! # The spine's default is a stand-in, on purpose
-//!
-//! [`SpineMeshPipeline`] is a flat-shaded pass-through: it draws geometry where
-//! its vertices say, in one colour, with no lighting. It exists so the render
-//! spine is runnable and testable on its own — a frame that queues a mesh draws
-//! it — and it is **replaced** by installing a real provider
-//! ([`MeshPipelines::new`]) once the material system's shading is ported onto
-//! this spine. It is not a rendering model, and nothing keys off it.
+//! The production constructor is [`MeshPipelines::forward_lit`]. The explicit
+//! legacy [`MeshPipelines::spine`] constructor remains available only for
+//! callers that deliberately request that provider; it is never selected by
+//! forward-lit construction or recovery.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -34,6 +30,14 @@ use prism_render_driver::{
 
 use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider};
 
+#[path = "forward_lit.rs"]
+mod forward_lit;
+
+pub use forward_lit::{
+    ForwardLitBindingContract, ForwardLitBindingRejection, ForwardLitFrame, ForwardLitMaterial,
+    ForwardLitProvider, ForwardLitRejection, ForwardLitResourceSet,
+};
+
 /// The pipeline provider every queued mesh draw specializes through.
 #[derive(Resource)]
 pub struct MeshPipelines {
@@ -43,6 +47,7 @@ pub struct MeshPipelines {
 }
 
 enum MeshPipelineRecovery {
+    ForwardLit,
     Spine {
         color_format: TextureFormat,
     },
@@ -409,6 +414,20 @@ impl MeshPipelines {
         }
     }
 
+    /// Builds the production opaque forward-lit provider.
+    ///
+    /// The provider declares the complete group-0 ABI. Draw recording remains
+    /// fail-closed until the caller supplies all frame, light, and material
+    /// buffers required by that ABI.
+    #[must_use]
+    pub fn forward_lit(device: &dyn RenderDevice) -> Self {
+        Self {
+            provider: build_forward_lit_provider(device),
+            response_modules: ResponseModuleCache::new(),
+            recovery: MeshPipelineRecovery::ForwardLit,
+        }
+    }
+
     /// The wrapped provider.
     #[must_use]
     pub fn provider(&self) -> &(dyn MeshPipelineProvider + Send + Sync) {
@@ -428,14 +447,19 @@ impl MeshPipelines {
 
     /// Rebuilds the provider and its resident shader modules on `device`.
     ///
-    /// The built-in spine carries a complete recipe. A custom provider created
-    /// with [`Self::new`] is rejected instead of being silently replaced by the
-    /// spine, so recovery remains observable and the app stays paused.
+    /// The forward-lit and spine providers each carry an explicit built-in
+    /// recipe. A custom provider created with [`Self::new`] is rejected instead
+    /// of being silently replaced by either built-in provider, so recovery
+    /// remains observable and the app stays paused.
     pub(crate) fn recover(
         &mut self,
         device: &dyn RenderDevice,
     ) -> Result<(), MeshPipelineRecoveryError> {
         match &mut self.recovery {
+            MeshPipelineRecovery::ForwardLit => {
+                self.provider = build_forward_lit_provider(device);
+                Ok(())
+            }
             MeshPipelineRecovery::Spine { color_format } => {
                 Self::rebuild_response_modules(&mut self.response_modules, device);
                 self.provider = match self.response_modules.get(ModuleId::SPINE) {
@@ -466,7 +490,9 @@ impl MeshPipelines {
 
     pub(crate) fn check_recovery(&self) -> Result<(), MeshPipelineRecoveryError> {
         match &self.recovery {
-            MeshPipelineRecovery::Spine { .. } | MeshPipelineRecovery::Custom { .. } => Ok(()),
+            MeshPipelineRecovery::ForwardLit
+            | MeshPipelineRecovery::Spine { .. }
+            | MeshPipelineRecovery::Custom { .. } => Ok(()),
             MeshPipelineRecovery::Unavailable => Err(MeshPipelineRecoveryError::CustomProvider),
         }
     }
@@ -483,11 +509,27 @@ impl MeshPipelines {
         }
     }
 
+    #[cfg(test)]
+    fn recovery_kind(&self) -> &'static str {
+        match &self.recovery {
+            MeshPipelineRecovery::ForwardLit => "forward-lit",
+            MeshPipelineRecovery::Spine { .. } => "spine",
+            MeshPipelineRecovery::Custom { .. } => "custom",
+            MeshPipelineRecovery::Unavailable => "unavailable",
+        }
+    }
+
     fn rebuild_response_modules(cache: &mut ResponseModuleCache, device: &dyn RenderDevice) {
         for module in cache.modules.values_mut() {
             module.shader_module = device.create_shader_module(&module.descriptor);
         }
     }
+}
+
+fn build_forward_lit_provider(
+    device: &dyn RenderDevice,
+) -> Box<dyn MeshPipelineProvider + Send + Sync> {
+    Box::new(ForwardLitProvider::new(device))
 }
 
 impl MeshPipelineProvider for MeshPipelines {
@@ -500,6 +542,97 @@ impl MeshPipelineProvider for MeshPipelines {
         variant: &MeshPipelineKey,
     ) -> Option<RenderPipelineDescriptor> {
         self.provider.transformed_descriptor(variant)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
+    use prism_render_driver::{
+        DeviceDescriptor, Instance, PrimitiveTopology, RenderDevice, RequestAdapterOptions,
+    };
+    use prism_render_driver_null::NullInstance;
+
+    fn device() -> prism_render_driver_null::NullDevice {
+        let instance = NullInstance::new();
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions::default())
+            .expect("null adapter");
+        instance
+            .create_device(&adapter, &DeviceDescriptor::default())
+            .expect("null device")
+            .0
+    }
+
+    fn forward_lit_variant() -> MeshPipelineKey {
+        MeshPipelineKey {
+            execution_family: ExecutionFamily::FusedBuiltin,
+            response_module_id: ModuleId::SPINE,
+            permutation_index: PermutationIndex::ZERO,
+            fallback_permutation: None,
+            color_format: Some(TextureFormat::Rgba16Float),
+            depth_format: Some(TextureFormat::Depth32Float),
+            sample_count: 1,
+            topology: PrimitiveTopology::TriangleList,
+        }
+    }
+
+    #[test]
+    fn forward_lit_is_the_explicit_production_recipe() {
+        let device = device();
+        let pipelines = MeshPipelines::forward_lit(&device);
+        assert_eq!(pipelines.recovery_kind(), "forward-lit");
+
+        let descriptor = pipelines.descriptor(&forward_lit_variant());
+        assert!(descriptor.layout.is_some());
+        assert_eq!(descriptor.vertex.entry_point, "vs");
+        assert_eq!(
+            descriptor
+                .fragment
+                .as_ref()
+                .expect("forward-lit fragment")
+                .targets,
+            vec![Some(ColorTargetState::opaque(TextureFormat::Rgba16Float))]
+        );
+    }
+
+    #[test]
+    fn forward_lit_recovery_recreates_shader_and_layouts_on_the_replacement_device() {
+        let old_device = device();
+        let mut pipelines = MeshPipelines::forward_lit(&old_device);
+        assert_eq!(old_device.live_resource_count(), 3);
+
+        let replacement = device();
+        assert_eq!(replacement.live_resource_count(), 0);
+
+        pipelines.begin_recovery();
+        pipelines
+            .recover(&replacement)
+            .expect("forward-lit recovery recipe");
+
+        let recovered = pipelines.descriptor(&forward_lit_variant());
+        assert_eq!(pipelines.recovery_kind(), "forward-lit");
+        assert_eq!(replacement.live_resource_count(), 3);
+        assert_eq!(recovered.vertex.entry_point, "vs");
+        assert_eq!(
+            recovered
+                .fragment
+                .as_ref()
+                .expect("recovered forward-lit fragment")
+                .targets,
+            vec![Some(ColorTargetState::opaque(TextureFormat::Rgba16Float))]
+        );
+    }
+
+    #[test]
+    fn forward_lit_default_has_no_binding_fallback() {
+        let device = device();
+        let provider = ForwardLitProvider::new(&device);
+        assert_eq!(
+            provider.bind_group_descriptor(ForwardLitResourceSet::default()),
+            Err(ForwardLitBindingRejection::MissingFrame)
+        );
     }
 }
 

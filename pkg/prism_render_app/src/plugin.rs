@@ -301,9 +301,10 @@ where
 
         // The GPU state the render world owns for the app's lifetime.
         let target = RenderTarget::new(runtime.device(), config.extent);
-        // The spine's default mesh pipelines are built against the device, so
-        // they are created before the runtime moves into the render world.
-        let mesh_pipelines = MeshPipelines::spine(runtime.device(), crate::RENDER_TARGET_FORMAT);
+        // The production forward-lit provider owns a device-rebuild recipe,
+        // so its shader and pipeline layouts are recreated by the recovery
+        // boundary when this device is replaced.
+        let mesh_pipelines = MeshPipelines::forward_lit(runtime.device());
         // The material ABI buffers are created against the device too, so they are
         // built here as well.
         let material_buffers = MaterialParameterBuffers::new(
@@ -500,12 +501,11 @@ where
         app.add_systems(Last, crate::transforms::publish_transforms);
         app.add_extract(RenderApp, crate::transforms::extract_transforms);
         crate::ecs_columns::install_gpu_column_extraction::<I>(app);
-        // The spine's frame draws meshes, so the plugin owns that family: its
-        // extract, its prepared table, and its prepare stage. Registering it
-        // again elsewhere is a no-op.
+        // The forward-lit mesh frame owns this family: its extract, prepared
+        // table, and prepare stage. Registering it again elsewhere is a no-op.
         crate::render_asset::register_render_assets::<I, crate::RenderMesh>(app);
-        // Images reach the GPU the same way: the spine owns the family so a
-        // material can bind a texture without the app wiring a second pipeline.
+        // Images reach the GPU through the same render-asset boundary; material
+        // providers can bind them without installing a second mesh pipeline.
         crate::render_asset::register_render_assets::<I, crate::GpuImage>(app);
         crate::presentation::install::<I>(app);
     }
@@ -631,6 +631,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider};
+    use prism_render_architecture::shader_package::{ExecutionFamily, ModuleId, PermutationIndex};
+    use prism_render_driver::{ColorTargetState, PrimitiveTopology, TextureFormat};
+    use prism_render_driver_null::NullInstance;
 
     #[test]
     fn pso_save_rejection_prioritizes_recovery_then_loss_then_idle() {
@@ -647,5 +651,35 @@ mod tests {
             Some(PipelineCachePersistenceError::NotIdle)
         );
         assert_eq!(pso_save_rejection(false, true, false), None);
+    }
+
+    #[test]
+    fn plugin_installs_forward_lit_as_the_default_mesh_provider() {
+        let mut app = App::new();
+        app.add_plugins(PrismRenderPlugin::new(NullInstance::new()));
+
+        let render = app.get_sub_app(RenderApp).expect("render sub-app");
+        let pipelines = render.world.resource::<MeshPipelines>();
+        let descriptor = pipelines.descriptor(&MeshPipelineKey {
+            execution_family: ExecutionFamily::FusedBuiltin,
+            response_module_id: ModuleId::SPINE,
+            permutation_index: PermutationIndex::ZERO,
+            fallback_permutation: None,
+            color_format: Some(TextureFormat::Rgba16Float),
+            depth_format: Some(crate::RENDER_DEPTH_FORMAT),
+            sample_count: 1,
+            topology: PrimitiveTopology::TriangleList,
+        });
+
+        assert_eq!(descriptor.vertex.entry_point, "vs");
+        assert!(descriptor.layout.is_some());
+        assert_eq!(
+            descriptor
+                .fragment
+                .as_ref()
+                .expect("forward-lit fragment")
+                .targets,
+            vec![Some(ColorTargetState::opaque(TextureFormat::Rgba16Float))]
+        );
     }
 }
