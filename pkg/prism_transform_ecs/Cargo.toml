@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+prism_app = { path = "../prism_app", default-features = false }
 prism_transform = { path = "../prism_transform", default-features = false, features = ["ecs"] }
 prism_ecs = { path = "../prism_ecs", default-features = false }
 prism_math = { path = "../prism_math", default-features = false }
@@ -16,7 +17,7 @@ prism_replication = { path = "../prism_replication", default-features = false, o
 
 [features]
 default = []
-std = ["prism_transform/std", "prism_math/std"]
+std = ["prism_app/std", "prism_transform/std", "prism_math/std"]
 # The existing geometry crate requires std. The transform core does not.
 bvh = ["std", "dep:prism_physics_geometry", "prism_physics_geometry/std"]
 grid = ["dep:prism_replication"]

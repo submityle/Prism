@@ -1,10 +1,14 @@
-//! Concrete incremental consumers for transform ECS spatial notifications.
+//! App assembly and concrete incremental consumers for transform ECS spatial
+//! notifications.
 //!
-//! Run `prism_transform::ecs::transform_system` after local/relationship writers,
-//! flush the ECS changed-observer bus (also done at schedule completion), then
-//! call [`sync_spatial_indexes`]. One drain fans out to every installed backend;
-//! do not independently drain the transform spatial stream while these adapters
-//! own it. The returned commands remain available to additional consumers.
+//! [`TransformSpatialPlugin`] is the production entry point. It installs the
+//! transform observer integration and compiled spatial backends, then fixes the
+//! `PostUpdate` order to transform propagation, changed-observer flush, and
+//! spatial synchronization. [`TransformSpatialSystems`] exposes ordering anchors
+//! for host writers and downstream consumers. Manual hosts may instead call
+//! [`sync_spatial_indexes`] after propagation and an observer flush. One drain
+//! fans out to every installed backend; do not independently drain the transform
+//! spatial stream while these adapters own it.
 //!
 //! `bvh` uses the existing physics `DynamicBvh`; `grid` uses replication's
 //! existing XZ `AoiGrid`. The latter indexes the centre of each committed world
@@ -40,6 +44,11 @@ pub use bvh::BvhIndex;
 mod grid;
 #[cfg(feature = "grid")]
 pub use grid::GridIndex;
+mod plugin;
+pub use plugin::{
+    flush_transform_observers, sync_spatial_indexes_system, SpatialIndexFrame,
+    TransformSpatialConfig, TransformSpatialPlugin, TransformSpatialSystems,
+};
 
 /// World-owned consumers and their last successfully applied spatial baseline.
 #[derive(Default)]
