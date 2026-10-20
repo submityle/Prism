@@ -90,6 +90,8 @@ members = [
   "pkg/prism_world",
   # Engine-neutral world proxy visibility contract and optional wgpu compute twin.
   "pkg/prism_world_gpu",
+  # World terrain snapshot adapter for the physics heightfield consumer.
+  "pkg/prism_world_physics_bridge",
   "pkg/prism_world_io",
   "pkg/prism_world_network",
   "pkg/prism_world_sim",
