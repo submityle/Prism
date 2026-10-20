@@ -317,6 +317,10 @@ impl ChangeTracker {
 mod revision_tests {
     use super::*;
 
+    fn entity(index: u32) -> Entity {
+        Entity::from_bits((1_u64 << 32) | u64::from(index)).unwrap()
+    }
+
     #[test]
     fn saturated_revision_never_aliases_a_clean_baseline() {
         let tracker = ChangeTracker::new();
@@ -326,5 +330,33 @@ mod revision_tests {
         assert_eq!(tracker.revision(), None);
         tracker.reset();
         assert_eq!(tracker.revision(), None);
+    }
+
+    #[test]
+    fn collect_delivers_indexed_batches_across_tick_wrap() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let mut cursor = tracker.activate(component);
+        let batches = [
+            (Tick::new(u32::MAX - 1), alloc::vec![entity(1)]),
+            (Tick::MAX, alloc::vec![entity(2)]),
+            (Tick::ZERO, alloc::vec![entity(3), entity(4)]),
+            (Tick::new(1), alloc::vec![entity(5)]),
+        ];
+        let mut last_run = Tick::new(u32::MAX - 2);
+
+        for (tick, expected) in batches {
+            for &changed_entity in &expected {
+                tracker.record(component, changed_entity, tick);
+            }
+
+            let mut collected = Vec::new();
+            let stats = tracker.collect(component, &mut cursor, last_run, tick, &mut collected);
+
+            assert_eq!(collected, expected, "incorrect indexed batch at {tick:?}");
+            assert_eq!(stats.batches, 1);
+            assert_eq!(stats.events, expected.len());
+            last_run = tick;
+        }
     }
 }

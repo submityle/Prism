@@ -604,6 +604,72 @@ fn sparse_dirty_fallback_is_empty_for_a_clean_window() {
 }
 
 #[test]
+fn sparse_dirty_fallback_matches_tick_oracle_across_wrap() {
+    let mut w = World::new();
+    let entities: Vec<Entity> = (0..8).map(|i| w.spawn(SparseDirty(i))).collect();
+    let state = w.query::<&SparseDirty>();
+    let component = w.components().id_of::<SparseDirty>().unwrap();
+    let ticks = [
+        Tick::new(u32::MAX - 1),
+        Tick::MAX,
+        Tick::ZERO,
+        Tick::new(1),
+        Tick::new(Tick::MAX_CHANGE_AGE),
+        Tick::new(u32::MAX - 3),
+        Tick::new(2),
+        Tick::new(3),
+    ];
+    for (&entity, tick) in entities.iter().zip(ticks) {
+        // SAFETY: the test is single-threaded and no component borrow is live.
+        let changed_tick = unsafe {
+            w.sparse_sets()
+                .get(component)
+                .unwrap()
+                .changed_tick_ptr(entity)
+        }
+        .unwrap();
+        // SAFETY: the pointer came from the live sparse row above, which this
+        // test exclusively owns while installing synthetic boundary ticks.
+        unsafe { *changed_tick = tick };
+    }
+
+    let last_run = Tick::new(u32::MAX - 2);
+    let this_run = Tick::new(1);
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+
+    // This synthetic historical window does not end at World's current tick,
+    // so it must use the live-set fallback rather than claim to test the sparse
+    // change index. Compare each reported row window against the exact tick
+    // oracle while allowing chunk-granularity false positives within a window.
+    assert_eq!(report.stats.sparse_index_events, 0);
+    assert_eq!(report.stats.sparse_fallback_scans, 1);
+    assert_eq!(report.stats.sparse_entities_checked, entities.len());
+    let changed_rows: Vec<_> = entities
+        .iter()
+        .filter_map(|&entity| {
+            let changed = w
+                .sparse_sets()
+                .get(component)
+                .unwrap()
+                .changed_tick(entity)
+                .unwrap();
+            changed
+                .is_newer_than(last_run, this_run)
+                .then(|| w.entities().location(entity).unwrap().row as usize)
+        })
+        .collect();
+    assert!(!changed_rows.is_empty());
+    for &row in &changed_rows {
+        assert!(row_is_covered(&report.chunks, row), "changed row {row}");
+    }
+    for chunk in &report.chunks {
+        assert!(changed_rows
+            .iter()
+            .any(|&row| row >= chunk.start && row < chunk.end));
+    }
+}
+
+#[test]
 fn sparse_membership_filters_feed_dirty_candidates_across_archetypes() {
     let mut w = World::new();
     let plain = [w.spawn(Big::new(0)), w.spawn(Big::new(1))];
