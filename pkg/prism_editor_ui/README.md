@@ -13,6 +13,8 @@ The crate provides builders for:
 - bounded, keyed Outliner and Console panel trees;
 - a paged content folder/list panel with search, kind/tag/VCS filters,
   favorites, pins, and bounded multiselection;
+- bounded dependency/dependent navigation and paged validation receipts with
+  explicit run and locate actions;
 - reflection projection rows with field paths and editability hints;
 - dock workspace chrome backed by `prism_editor_dock` contributions;
 - a renderer-neutral viewport host with camera/settings readouts;
@@ -83,3 +85,28 @@ and displayed bindings, route clicks/modifiers and committed text, and request
 redraw after actions or catalog publications. A host stylesheet may refine
 the supplied inline layout. See `docs/prism_editor_content_ui_zh.md` for the
 integration boundary and verified behavior.
+
+`ContentDiagnosticsController` provides a separate E7 panel without extending
+`EditorAction`. Call `apply(&catalog, &registry, ContentDiagnosticsAction::Focus(
+Some(asset_id)))` when host selection changes, then `build(&catalog, &registry)`
+to obtain `BoundContentDiagnostics`. Mount/reconcile `element()` and forward
+its `bindings()` through `handle_event(&catalog, &registry, &view, key, &event)`.
+All bound controls accept `Activate`; disabled rows have no binding. After a
+dependency or finding locate action, `selected_asset()` is the host's navigation
+result. The host remains responsible for synchronizing other panels and opening
+asset editors. Views belong to their originating controller; rebuild after each
+accepted action or catalog/registry publication.
+
+Outgoing/incoming lists use the catalog's bounded transitive closures, sort by
+stable asset ID, and materialize at most `MAX_VISIBLE_ROWS` per list (64 by
+default). Traversal failures are visible; missing targets are labeled and cannot
+be opened. Back history holds at most 64 asset identities. A catalog generation
+change resets dependency paging; a removed focus remains visibly missing.
+Only explicit `RunValidation(Save/Commit/Cook)` invokes the real registry. One
+immutable `ValidationReceipt` is retained with its error/warning counts,
+completeness, truncation and freshness. Stale reports remain readable with locate
+disabled. `receipt()` exposes the actual result; the application must still use
+its authorization API immediately before preparing an operation. No operation,
+filesystem worker, graph canvas, renderer or GPU resource is owned by this UI.
+See `docs/prism_editor_content_diagnostics_ui_zh.md` for the additive native API
+boundary and RecordingBackend verification.

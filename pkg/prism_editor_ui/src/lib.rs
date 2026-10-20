@@ -12,6 +12,8 @@ mod chrome;
 mod command;
 mod console;
 mod content;
+mod content_diagnostics;
+mod content_diagnostics_view;
 mod content_view;
 mod dock;
 mod inspector;
@@ -36,6 +38,11 @@ pub use content::{
     ContentBrowserAction, ContentBrowserController, ContentBrowserError, MAX_CONTENT_PAGE_HISTORY,
     MAX_CONTENT_SELECTION,
 };
+pub use content_diagnostics::{
+    ContentDiagnosticsAction, ContentDiagnosticsController, ContentDiagnosticsError,
+    DependencyDirection, MAX_DEPENDENCY_NAVIGATION_HISTORY,
+};
+pub use content_diagnostics_view::BoundContentDiagnostics;
 pub use content_view::BoundContentBrowser;
 pub use dock::{dock_workspace, DockWorkspaceProps};
 pub use inspector::{inspector_view, inspector_view_bound, InspectorViewProps};
