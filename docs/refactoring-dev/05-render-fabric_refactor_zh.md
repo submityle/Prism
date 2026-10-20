@@ -88,6 +88,8 @@
 
 **v18（2026-10-20，spray history completion 接线与性能收敛）**：后续实现已超出 v17 的 access seam：spray adapter 现在把精确的上一帧 binding 通过 `SceneFabricHistory` 入队，并仅在 `validate_import` 认可已完成 publication 时使用；否则清零 lag-one 输入。per-instance owner 单调且不复用，feedback allocation 持有 RHI lease；resize/removal 将旧 buffers/leases 留存到 RenderQueue completion 驱动的 retirement 水位越过对应前缀。`RenderFabricFrame` 每帧重建复用 item-vector 容量；spray removal scan 复用 scratch vectors，并用排序后的实体 key 做 `O((live + resident) log live)` 查询，避免每个驻留对象重复扫描全部实体。新增代码仅有 rustfmt 与 diff whitespace 检查，Cargo 编译/测试仍待锁释放后确认；这些仍是 water/spray 局部接线，不代表 TAA history 或全场景 recorder 闭环。Composition 当前声明的 accesses 均为当帧资源，无 `FrameLag`，因此不要求伪造 composition history publication。
 
+**v19（2026-10-20，TAA history 的真实持久资源与完成门控接线）**：TAA history 不再由 system-local Bevy texture cache 单独表达。`taa/resources.rs` 通过 `SceneRhi` 分配真实双槽 `rgba16float` persistent texture，并为每个 retained view 建立新的 `FabricHistoryOwner`；`ViewTaa` 保存本帧写槽的 exact `FrameResourceBinding`。`taa/dispatch.rs` 只有在真实 resolve dispatch 编码后才 enqueue producer，Finish 阶段仍由宿主 RenderQueue completion hook 发布；下一帧只验证精确的 `(resource, frame, version, physical, layout)` 上一帧 binding，缺失 publication 时显式关闭 history。resize、removal、disable 和 device-table replacement 都通过新的 owner 与 retirement watermark 保留旧 lease 至完成。新增单测覆盖 completion 前后导入、多帧发布、缺失 history、slot/physical identity、owner retirement 与 replacement 隔离；本轮只完成 rustfmt/diff whitespace 检查，尚无当前工作树 Cargo 编译、真实 bind-group/queue completion 或 GPU 运行证据。TAA 仍是独立窄切片，尚未进入统一全场景 recorder。
+
 **v6 针对第四轮三条发现的修订**：
 
 | # | 发现 | 落点 |
@@ -1254,14 +1256,16 @@ particle spray ──?──────▶ water foam
 
 ### 15.2 本轮检查与历史运行记录的边界
 
-- **2026-10-20 先前完整运行记录**：`cargo test -p prism_render_architecture --lib render_fabric`：**134 passed，0 failed，0 ignored，11347 filtered out**。包含 payload 当前帧/domain 访问、role 判重、response plane 声明，以及 completed-history 精确导入、publication 顺序和退休水位的回归测试；不是全仓、真实 GPU 或完整 32 门禁通过记录。本轮复跑未到达测试执行阶段：共享依赖编译被并发 `prism_physics_core` 工作树错误阻断（包括缺失 `index` 模块、跨 crate 私有模块访问及 tearing API 不匹配），因此没有新的通过记录。当前工作树对 `prism_render_scene` 的完整编译同样受 physics 修改阻断，不能把本轮源码改动写成已编译通过。
+- **2026-10-20 architecture 定向运行记录**：`cargo test -p prism_render_architecture --lib render_fabric -- --nocapture`：**136 passed，0 failed**；`cargo test -p prism_render_architecture --lib shader_package -- --nocapture`：**95 passed，0 failed**。这是本轮已完成的 contract/compiler/runtime 与 shader-package 定向测试，不是 scene 生产链或完整 32-gate GPU 通过记录。历史 `134/0` 是较早计数，不应覆盖本轮 136 项结果。
 - **同设备资源桥的实际 GPU 运行**：`PRISM_REQUIRE_GPU=1 cargo test -p prism_render_scene --lib gpu::rhi::tests -- --nocapture`：沙盒内因无 adapter 失败；随后沙盒外 Apple M2 / Metal **13 passed，0 failed，0 ignored，1834 filtered out**，无 GPU skip。验证 exact host handles、buffer/texture/view 的非 owning table lease、table-local ID/slot reuse、worker/drop、真实 host submission/completion；1 项为 Send/Sync 静态断言，其余使用硬件。资源桥具备导入能力不等于 Fabric 已使用真实场景 imports/recorders。
 - **原生导入后端回归**：沙盒外 `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_driver_wgpu --lib native_ -- --nocapture`：**4 passed，0 failed，0 ignored，27 filtered out**。覆盖公开导入 API、buffer 与 texture/view 独立 lease／过期 ID／槽位复用，以及 `rgba32uint` 原生格式与整数绑定；该筛选结果不代表整个后端测试集通过。
 - **历史记录**：前版本文记录 2026-10-16 Apple M2 Metal 的 Water Hybrid `17/17`、Resident Composition `3/3`；当前记录仅作为历史证据，不替代本轮结果或完整验收。
 - **2026-10-20 水体复跑**：沙盒外 Apple M2 / Metal 上，`water_hybrid_golden` **19/19**，`water_hybrid_gpu` **19/19**；其中 GPU target 包含 10 项当前生产输出、8 项冻结 legacy full-frame parity 和 1 项比较器测试。冻结 closure 使用 commit `41a31ceef24e59ab7f8dda076b2b4c7f5e11f6ec`，容差为 FP32 `3e-5 + 3e-5*abs(reference)`、FP16 `2e-6 + 2e-3*abs(reference)`。
 - **GPU 口径**：上述结果证明 16×16 水体 fixture 的 production WESL 与冻结旧 shader closure 输出一致；不证明完整 Scene/Fabric/TAA 帧、所有设备或全场景 Fabric compile/runtime 生产闭环。独立 TAA reactive MRT 的当前接线与 shader/layout 定向测试另有记录，但尚无完整场景 parity 证据。
 - **ABI/cache 与 selection mapping 复跑**：S5 material target **4/4**，app `pipeline_cache::worker_tests` **27/27**；结合 architecture target 的先前完整记录，已覆盖冻结 selection 到真实 package/permutation/PSO identity/cache/warm set 的生产消费 seam 与 stale binding 拒绝。未关闭的是完整 Scene/Fabric 每帧装配、真实 driver binary 和跨适配器覆盖。
-- **本轮 Render Fabric 测试侧验收**：`cargo test -p prism_render_architecture --test render_fabric_acceptance -- --nocapture` 为 **3 passed，0 failed**；`cargo test -p prism_render_architecture --lib render_fabric -- --nocapture --test-threads=1` 的上一次完整运行报告 **134 passed，0 failed**。前者验证 32-gate ledger、完整 built-in fanout 和 gate 23 的 `partial` 标记；后者覆盖 contract/compiler/runtime fixture。水体 compute 与 resident composition 另有真实局部 `DeviceFabric::compile → prepare_runtime → record/submit` 调用，但这些测试与局部切片都不等于全场景生产闭环。
+- **Render Fabric 测试侧验收**：`cargo test -p prism_render_architecture --test render_fabric_acceptance -- --nocapture` 为既有记录 **3 passed，0 failed**；前者验证 32-gate ledger、完整 built-in fanout 和 gate 23 的 `partial` 标记；`render_fabric` 当前已知定向运行结果为 **136 passed，0 failed**，覆盖 contract/compiler/runtime fixture。水体 compute 与 resident composition 另有真实局部 `DeviceFabric::compile → prepare_runtime → record/submit` 调用，但这些测试与局部切片都不等于全场景生产闭环。
+- **当前工作树 scene crate 全量单测复验（2026-10-20）**：清理仓库 `target` 后，`CARGO_INCREMENTAL=0 cargo --config profile.test.debug=0 test -p prism_render_scene --lib --jobs 1 -- --nocapture` **1909 passed，0 failed，0 ignored**，完整编译并运行当前 `prism_render_scene` lib-test target。此前“依赖产物缺失、scene builder 未编译”的失败记录已被此结果取代；它证明 crate 级编译和单测，不等于 Fabric 全场景 `compile → prepare_runtime → import → record/submit`、GPU payload 或跨适配器 parity 已完成。
+- **域帧 builder 进展及验证边界**：`fabric_domains.rs` 已从真实 `HairGroup`、`VolumetricPlan`、`DecalProjector` 构建排序稳定的 CPU `ValuePayload` descriptor；Particle CPU snapshot 项可并入 `RenderFabricFrame`。这些不是 GPU resource bindings，也尚未由统一 recorder 消费。Particle app 的 `ParticleSnapshot` 尚未桥接到 `ParticleFabricInput`。新增 scene builder 与合帧代码已随上述完整 lib target 编译；是否具备独立覆盖仍需逐项核对，且全域 payload 与 recorder 消费仍缺。
 - **跨适配器验收**：默认 `cargo test -p prism_render_scene --test cross_adapter_acceptance -- --nocapture` 在沙盒外发现 1 个 physical adapter（`Apple M2 / Metal / IntegratedGpu`）并输出 `SKIP_UNVERIFIED` 后结束；`PRISM_REQUIRE_GPU=1` 同命令以“需要至少两个 distinct physical adapters”失败。该失败是严格门禁的预期结果，不是通过，也不把单 adapter probe 写成跨 adapter parity。
 - **已实现子项**：七值 class、旧符号/入口移除、CPU/WESL 公式统一与 overlay 消费已有当前源码证据。这些真实完成项应保留，不回退为未实现；同样不能扩大为 S4b/S5 全部要求完成。
 
@@ -1270,10 +1274,35 @@ particle spray ──?──────▶ water foam
 以下是原始目标的证据缺口，不是取消或缩减目标；生产接线仍在实施，其他代理的进行中变更不提前记为完成：
 
 1. **全场景同一选择的生产调用闭环**：水体 compute 与 resident response composition 已各自有窄切片使用 `SceneFabric`/`CompositionFabric` 的 `DeviceFabric::compile` → `CompiledFeatureGraph::prepare_runtime`，并把真实 command buffer 交给宿主；仍需把 TAA/history、全域 payload 与其他域接入同一选择、真实 imports / pass recorders 和既有 RenderGraph。两个局部 recorder 不能证明全场景链路。
-2. **全域帧数据与资源生命周期**：各域 `FrameRenderItem` / payload 的真实提取与绑定、版本/barrier 消费，以及有 temporal 语义资源的 `FrameLag` history 分配、发布和导入。Surface `RenderFabricFrame` 已从 committed scene 提取并由 visibility 消费；当前仅覆盖 Surface bounds payload，且新增接线尚未 Cargo 验证。water solver 仍导入本帧 surface/foam；spray feedback 已另行接入 per-instance exact lag-1 bindings、completion-validated import/publication enqueue、缺失历史显式清零，以及 resize/removal 后的 completion-gated retirement，并持有旧 buffer/RHI lease 至安全回收。该 water/spray 接线是局部 adapter，不是统一全域 recorder；TAA/history 与其他 temporal domain 尚未消费统一的全场景 history lifecycle。Composition 当前无 `FrameLag` accesses，不要求引入无消费者的 temporal publication。单 command buffer auto-sync 不替代这些责任或原生多队列 fence 契约。
-3. **G3/G4、全量扇出及 32 门禁**：测试侧 ledger 和 built-in fanout 本轮有 `3/3` acceptance 记录；Render Fabric contract/runtime 只有先前 `134/134` 完整记录，本次复跑被并发 `prism_physics_core` 编译错误阻断。仍缺 7 组全域装配范围、NPR 不降级、全部静态 roots 的真实生产消费者及完整 32 门禁的端到端运行结果。catalog/fixture 覆盖不是高级特性质量或生产帧验收。
+2. **全域帧数据与资源生命周期**：各域 `FrameRenderItem` / payload 的真实提取与绑定、版本/barrier 消费，以及有 temporal 语义资源的 `FrameLag` history 分配、发布和导入。Surface `RenderFabricFrame` 已从 committed scene 提取并由 visibility 消费；Particle 另有 `ParticleFabricFrame`，当前只产生 CPU `ValuePayload`，没有 resident GPU resource stream，且应用侧 snapshot 尚未接入。Hair/Volume/Decal 现有 CPU descriptor builders 尚未并入共享生产帧或 recorder。上述 Surface/Particle/domain-builder 代码已随 2026-10-20 当前工作树 `prism_render_scene --lib` 全量编译并通过 1909 项单测；这不证明 GPU resource payload 或共享 recorder 消费。water solver 仍导入本帧 surface/foam；spray feedback 已另行接入 per-instance exact lag-1 bindings、completion-validated import/publication enqueue、缺失历史显式清零，以及 resize/removal 后的 completion-gated retirement，并持有旧 buffer/RHI lease 至安全回收。该 water/spray 接线是局部 adapter，不是统一全域 recorder；TAA/history 与其他 temporal domain 尚未消费统一的全场景 history lifecycle。Composition 当前无 `FrameLag` accesses，不要求引入无消费者的 temporal publication。单 command buffer auto-sync 不替代这些责任或原生多队列 fence 契约。
+3. **G3/G4、全量扇出及 32 门禁**：测试侧 ledger 和 built-in fanout 有 `3/3` acceptance 记录；Render Fabric contract/runtime 定向运行记录为 `136/136`，shader-package 定向运行记录为 `95/95`；当前工作树 `prism_render_scene --lib` 全量单测为 **1909/1909**。仍缺 7 组全域装配范围、NPR 不降级、全部静态 roots 的真实生产消费者及完整 32 门禁的端到端运行结果。catalog/fixture 覆盖和 crate 单测不等于高级特性质量或生产帧验收。
 4. **完整水体行为等价与护栏时序**：冻结旧 shader closure 的八项 GPU 输出已通过；独立 TAA reactive MRT 已有当前生产接线与 shader/layout 定向测试，但完整 Scene/Fabric/TAA 帧 parity 与旧入口删除前护栏的历史运行记录仍缺失。
 5. **ABI 与管线消费**：S5 ABI bump、package/cache stale rejection，以及冻结 `FeatureSelection → shader package / PermutationSpace → PipelineKey / PsoCacheKey / warm set` 的生产消费 seam 已有当前源码与先前完整运行记录（见 03）；仍缺的是该 mapping 在完整 Scene/Fabric 每帧装配、真实 driver binary 与跨适配器范围内的端到端覆盖，而不是重新选择或另建第二套 identity。
 6. **跨适配器 GPU 证据**：本机只有一个 Apple M2/Metal physical adapter；`SKIP_UNVERIFIED` 与严格失败语义已固定，但第二个 physical adapter 上的 probe、water/Scene/TAA full-frame replay 和跨 adapter parity 仍未验证。
 
 **结论**：本文保留已实现子项及所有原始要求、37 条禁止和 32 项门禁。2026-10-20 的 payload/history contract、S5 ABI/cache、冻结水体 GPU parity、水体 compute 窄 Fabric adapter，以及 resident composition 的局部 Fabric recorder 只关闭相应契约/局部生产缺口；统一 history publication、全域 fanout、全域编译接线、跨适配器和**完整 Render Fabric 生产闭环仍未闭合**。此前“仅改本文、不构建、不提交”的说明仅描述当时的文档审计，不适用于当前实施与验证记录。
+
+### 15.4 最终收口验收矩阵 / 未完成项（2026-10-20 文档审计）
+
+本节矩阵记录原审计截点（当时未运行 Cargo/GPU）；其后的当前工作树复验见 §15.2，`prism_render_scene --lib` 为 **1909 passed / 0 failed**。该 crate 级运行证据不改变全场景 Render Fabric `E` 列仍未闭环的结论，也不计作 GPU parity。
+
+| 收口条款 | S 源码 | D 测试定义 | R 本次 | H / G 已有证据 | E 全场景闭环 |
+|---|---|---|---|---|---|
+| S1：catalog、唯一 provider、硬闭包、active roots、payload/history contract | 类型、选择、payload、history lifecycle 与校验实现存在 | `render_fabric` 单测、compile/runtime fixture、32-gate ledger 已定义 | 无；scene 新增链路未编译 | `render_fabric` 136 项、acceptance 3 项为已知运行记录；gate 23 明确 `partial` | 否；fixture/CPU compiler 不等于生产帧 |
+| S4：水体与 resident Composition 局部生产切片 | water compute、spray、composition 各有窄 recorder；真实 imports/command buffer 接线存在 | water/composition GPU harness 与 runtime gate 已定义 | 无 | 水体 Apple M2/Metal `19/19`；RHI bridge 13 项；均为限定范围 | 否；三条路径尚未合并为统一全场景 recorder |
+| 帧 producer 与域扇出 | Surface bounds producer、Particle CPU `ValuePayload` producer 存在；Hair/Volume/Decal 有 CPU descriptor builders，但尚未接入共享生产帧/recorder；Particle app snapshot 未桥接且无 GPU resource binding | 域 identity、payload 校验、pipeline/selection fixture 有定义 | 新增 scene builders 尚未编译/测试 | 无四域生产扇出的运行记录 | 否；S6 未完成 |
+| TAA/history | 真实双槽、exact `(resource, frame, version, physical, layout)`、completion publication/retirement 源码存在 | history 单测、TAA ABI/shader gate 已定义 | 无 | 既有 TAA 6/56 定向结果；没有 TAA 真实 bind-group/queue completion GPU 结果 | 否；仍是独立窄切片 |
+| S4b/S5：水体等价、旧入口收口、ABI/cache | 当前入口/class/公式/overlay/selection-to-PSO seam 存在 | 8 项 legacy parity、legacy gate、ABI/cache gate 已定义 | 无 | 单 adapter 水体 `19/19`、旧符号静态 gate 与历史记录；不能证明删除前时序 | 否；完整 Scene/Fabric/TAA parity 未证 |
+| S6、32 gate、跨适配器与性能 | 32-gate fixture、strict/skip adapter probe、部分 fanout contract 存在 | acceptance/adapter gate 已定义；全系统性能验收尚无完整门禁证据 | 无 | 单 adapter；少于两个 adapter 时 `SKIP_UNVERIFIED`，不计通过 | 否；无第二 physical adapter、无全场景 P50/P95/P99 |
+
+仍未验证的证据清单如下：
+
+1. 当前工作树对 `prism_render_scene`、`prism_render_architecture` Render Fabric 和相关集成目标的重新编译及定向测试；
+2. TAA 真实 bind-group、队列 completion、resize/removal/device-table replacement 的 GPU 运行，以及完整 Scene/TAA 图像 parity；
+3. 统一 `SceneFabric` 下跨 Surface、Particle、Volume、Hair、Decal、response root 的 `compile → prepare_runtime → import → record/submit` 生产调用；
+4. Particle 的 GPU `ResourcePayload`/geometry 消费，以及 Volume/Hair/Decal 的 producer、payload、resource binding、recorder、visibility/geometry 消费；
+5. 当前工作树完整 32 gate 的端到端运行、gate 23 从 `partial` 到闭合的证据，以及 S2/S4/S5 历史先后顺序的可追溯护栏记录；
+6. 第二个 distinct physical adapter 上的 probe、water/Scene/TAA replay 与 parity；
+7. 全场景输出 parity、显存/资源峰值、队列等待、吞吐和 P50/P95/P99 性能数据。
+
+因此，当前可写成“源码契约和若干局部生产切片已存在，部分历史/单适配器证据已记录”；不可写成“Render Fabric 或整个重构系统已完成”。
