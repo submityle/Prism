@@ -23,7 +23,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::archetype::ArchetypeId;
+use crate::archetype::{ArchetypeId, ARCHETYPE_EVICTION_LOG_CAPACITY};
 use crate::component::{Component, ComponentId, Components, StorageType};
 use crate::entity::Entity;
 use crate::query::{Added, Changed, With, Without};
@@ -626,6 +626,51 @@ fn evicted_shared_archetypes_reclaim_table_component_postings() {
         assert!(!compacted.contains(&second_archetype));
         assert_eq!(state.iter(&w).count(), 1, "cached tombstones yield no rows");
     }
+}
+
+#[test]
+fn bounded_eviction_log_recovers_a_lagging_query_cache() {
+    let mut w = World::new();
+    let anchor = w.spawn((Position(-1), BatchKey(u32::MAX)));
+    let state = w.query::<(Entity, &Position)>();
+    let anchor_archetype = archetype_of(&w, anchor);
+    let churn = ARCHETYPE_EVICTION_LOG_CAPACITY + 17;
+    let mut entities = Vec::with_capacity(churn);
+    for value in 0..churn {
+        let entity = w.spawn((Position(value as i32), BatchKey(value as u32)));
+        entities.push(entity);
+    }
+
+    let old_snapshot = state.matched_archetypes(&w);
+    assert_eq!(old_snapshot.len(), churn + 1);
+    assert!(old_snapshot.contains(&anchor_archetype));
+    let first_cursor = w.archetypes.eviction_cursor();
+    for entity in entities {
+        assert!(w.despawn(entity));
+    }
+
+    let final_cursor = w.archetypes.eviction_cursor();
+    assert_eq!(final_cursor - first_cursor, churn);
+    assert!(
+        w.archetypes.evictions_since(first_cursor).is_none(),
+        "a cursor older than the retained suffix must report a gap"
+    );
+    assert_eq!(
+        w.archetypes
+            .evictions_since(final_cursor - ARCHETYPE_EVICTION_LOG_CAPACITY)
+            .unwrap()
+            .len(),
+        ARCHETYPE_EVICTION_LOG_CAPACITY
+    );
+
+    let refreshed = state.matched_archetypes(&w);
+    assert_eq!(refreshed.as_slice(), &[anchor_archetype]);
+    assert_eq!(
+        old_snapshot.len(),
+        churn + 1,
+        "published immutable snapshots remain valid across gap recovery"
+    );
+    assert_eq!(state.iter(&w).count(), 1);
 }
 
 #[test]

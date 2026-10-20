@@ -27,6 +27,9 @@ use crate::storage::{SharedValue, SharedValueId, Table};
 
 /// Maximum retained write/structural events. Lagging readers explicitly rebuild.
 pub const COLUMN_CHANGE_LOG_CAPACITY: usize = 8192;
+/// Maximum retained permanent-archetype-eviction IDs. Lagging query caches
+/// conservatively filter their own cached IDs against tombstone state.
+pub(crate) const ARCHETYPE_EVICTION_LOG_CAPACITY: usize = 4096;
 static NEXT_COLUMN_LOG: AtomicU64 = AtomicU64::new(1);
 
 /// Independent extraction position, unrelated to simulation/change ticks.
@@ -776,10 +779,14 @@ pub struct Archetypes {
     /// `(component, value)` pair, including currently live archetypes.
     by_shared_binding: HashMap<(ComponentId, SharedValueId), ArchetypePosting>,
     column_journal: Arc<ColumnJournal>,
-    /// Append-only eviction IDs let query caches skip full snapshot compaction
-    /// when churn is unrelated to their matched archetypes. This is bounded by
-    /// the retained archetype tombstones, which already preserve stable IDs.
-    evicted_ids: Vec<ArchetypeId>,
+    /// Recent eviction IDs let query caches skip full snapshot compaction when
+    /// churn is unrelated to their matches. Old entries are discarded at a
+    /// fixed bound; lagging query caches then conservatively inspect their own
+    /// matched IDs against tombstone state.
+    evicted_ids: VecDeque<ArchetypeId>,
+    /// Absolute number of evictions, used to distinguish a retained suffix
+    /// from a query cursor that fell behind the bounded log.
+    eviction_count: usize,
 }
 
 impl Archetypes {
@@ -792,7 +799,8 @@ impl Archetypes {
             by_component: HashMap::default(),
             by_shared_binding: HashMap::default(),
             column_journal: Arc::new(ColumnJournal::new()),
-            evicted_ids: Vec::new(),
+            evicted_ids: VecDeque::new(),
+            eviction_count: 0,
         };
         let empty = ComponentSet::default();
         let id = this.insert(empty, &[], &[], &Components::new());
@@ -873,10 +881,22 @@ impl Archetypes {
         self.by_shared_binding.get(&(component, value))
     }
 
-    /// Permanently evicted archetype IDs, in eviction order.
+    /// Current absolute eviction cursor.
     #[inline]
-    pub(crate) fn evicted_ids(&self) -> &[ArchetypeId] {
-        &self.evicted_ids
+    pub(crate) fn eviction_cursor(&self) -> usize {
+        self.eviction_count
+    }
+
+    /// Retained evictions since `cursor`, or `None` when the cursor predates
+    /// the bounded log and the caller must conservatively inspect its cache.
+    #[inline]
+    pub(crate) fn evictions_since(
+        &self,
+        cursor: usize,
+    ) -> Option<core::iter::Skip<alloc::collections::vec_deque::Iter<'_, ArchetypeId>>> {
+        let retained_start = self.eviction_count - self.evicted_ids.len();
+        (cursor >= retained_start && cursor <= self.eviction_count)
+            .then(|| self.evicted_ids.iter().skip(cursor - retained_start))
     }
 
     /// Discover writes/structural edits in O(retained events since cursor), not
@@ -986,6 +1006,7 @@ impl Archetypes {
             by_component,
             by_shared_binding,
             evicted_ids: eviction_log,
+            eviction_count,
             ..
         } = self;
         let mut evicted: Vec<ArchetypeId> = by_shared_binding
@@ -1010,7 +1031,25 @@ impl Archetypes {
             debug_assert_eq!(removed, Some(id));
             archetypes[id.index() as usize].evicted = true;
         }
-        eviction_log.extend_from_slice(&evicted);
+        *eviction_count = eviction_count
+            .checked_add(evicted.len())
+            .expect("eviction count cannot exceed the archetype registry length");
+        let overflow = eviction_log.len().saturating_sub(
+            ARCHETYPE_EVICTION_LOG_CAPACITY - evicted.len().min(ARCHETYPE_EVICTION_LOG_CAPACITY),
+        );
+        if evicted.len() >= ARCHETYPE_EVICTION_LOG_CAPACITY {
+            eviction_log.clear();
+            eviction_log.extend(
+                evicted[evicted.len() - ARCHETYPE_EVICTION_LOG_CAPACITY..]
+                    .iter()
+                    .copied(),
+            );
+        } else {
+            for _ in 0..overflow {
+                eviction_log.pop_front();
+            }
+            eviction_log.extend(evicted.iter().copied());
+        }
 
         let mut component_evictions = Vec::new();
         let mut binding_evictions = Vec::new();

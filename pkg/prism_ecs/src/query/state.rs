@@ -177,7 +177,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             access,
             matched: SpinLock::new(MatchedArchetypes::new(
                 world.archetype_generation(),
-                world.archetypes().evicted_ids().len(),
+                world.archetypes().eviction_cursor(),
             )),
             dirty_tracker,
             dirty_sources,
@@ -367,7 +367,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // across them risks a re-entrant deadlock, and a panic mid-scan would
         // otherwise leave a half-updated cache that duplicates ids on retry.
         let generation = world.archetype_generation();
-        let evicted_ids = world.archetypes().evicted_ids();
+        let eviction_cursor = world.archetypes().eviction_cursor();
         let checked = {
             let mut cache = self.matched.lock();
             // A wholesale archetype-registry replacement (snapshot restore)
@@ -377,22 +377,29 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 cache.ids = Arc::new(Vec::new());
                 cache.checked = 0;
                 cache.generation = generation;
-                cache.eviction_checked = evicted_ids.len();
-            } else if cache.eviction_checked < evicted_ids.len() {
+                cache.eviction_checked = eviction_cursor;
+            } else if cache.eviction_checked != eviction_cursor {
                 // Unrelated shared-value churn should not scan/copy this query's
                 // whole matched-id snapshot. Probe only newly evicted IDs first;
                 // compact iff one actually belongs to the cached match set. A
-                // cache may have slept through a large eviction backlog, so
-                // choose the cheaper of E binary probes and an M-id tombstone
-                // check rather than making refresh cost grow with all E events.
-                let pending_evictions = &evicted_ids[cache.eviction_checked..];
-                let affected = if pending_evictions.len().saturating_mul(
-                    usize::BITS as usize - cache.ids.len().max(1).leading_zeros() as usize,
-                ) <= cache.ids.len()
-                {
-                    pending_evictions
-                        .iter()
-                        .any(|id| cache.ids.binary_search(id).is_ok())
+                // bounded log can report that this cache fell behind; in that
+                // case scan only its own matched IDs against registry tombstones.
+                let pending_evictions = world.archetypes().evictions_since(cache.eviction_checked);
+                let affected = if let Some(mut pending_evictions) = pending_evictions {
+                    let pending_count = pending_evictions.len();
+                    if pending_count.saturating_mul(
+                        usize::BITS as usize - cache.ids.len().max(1).leading_zeros() as usize,
+                    ) <= cache.ids.len()
+                    {
+                        pending_evictions.any(|id| cache.ids.binary_search(id).is_ok())
+                    } else {
+                        cache.ids.iter().any(|id| {
+                            world
+                                .archetypes()
+                                .get(*id)
+                                .is_some_and(|archetype| archetype.is_evicted())
+                        })
+                    }
                 } else {
                     cache.ids.iter().any(|id| {
                         world
@@ -409,7 +416,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                             .is_some_and(|archetype| !archetype.is_evicted())
                     });
                 }
-                cache.eviction_checked = evicted_ids.len();
+                cache.eviction_checked = eviction_cursor;
             }
             cache.checked
         };
@@ -436,7 +443,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // its (identical, deterministic) result and drop ours.
         let mut cache = self.matched.lock();
         if cache.generation == generation
-            && cache.eviction_checked == evicted_ids.len()
+            && cache.eviction_checked == eviction_cursor
             && cache.checked == checked
         {
             if !appended.is_empty() {
