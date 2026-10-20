@@ -451,67 +451,86 @@ fn scale_shared_binding_eviction_non_tail() {
     }
 }
 
-/// The design's headline claim is that the incremental path costs in proportion
-/// to what *changed*, not to world size. This measures both halves on 1M rows:
-/// the coarse `dirty_chunks` pass against a per-row `Changed<T>` scan, with the
-/// touched rows clustered (the case the chunk layer is built for) and scattered
-/// (the case where chunk granularity cannot help).
+/// Compare the normal forward-journal path against a per-row Changed<T> scan on
+/// 1M rows, with touched rows clustered and scattered. Each sample uses a fresh
+/// World so retained journal history from earlier samples cannot force the
+/// bounded-log fallback. TOUCHED stays below the per-world journal capacity.
 #[test]
 #[ignore = "allocates 1M entities twice; run explicitly with --release --ignored"]
 fn scale_dirty_chunks_vs_changed_scan_1m() {
     use prism_ecs::entity::Entity;
 
-    const TOUCHED: usize = 10_000; // 1% of the world
+    const TOUCHED: usize = 4_000; // 0.4% of the world; below journal capacity
+    const SAMPLES: usize = 9;
 
-    fn run_scenario(clustered: bool) -> (Duration, Duration, usize, usize) {
-        let mut world = World::new();
-        let entities: Vec<Entity> =
-            world.spawn_batch((0..ENTITIES).map(|i| (Pos(i as f32, 0.0, 0.0), Vel(1.0, 2.0, 3.0))));
-
-        // Baseline the change window, then touch the selected rows.
-        let last_run = world.change_tick();
-        world.set_last_change_tick(last_run);
-        world.increment_change_tick();
-        let stride = ENTITIES / TOUCHED;
-        for k in 0..TOUCHED {
-            let index = if clustered { k } else { k * stride };
-            world.get_mut::<Vel>(entities[index]).expect("live").0 += 1.0;
-        }
-        let this_run = world.change_tick();
-
-        // Per-row change-detection scan: visits every matched row.
-        let changed = world.query_filtered::<&Vel, Changed<Vel>>();
-        world.set_last_change_tick(last_run);
-        let scan_start = Instant::now();
-        let changed_rows = changed.iter(&world).count();
-        let scan = scan_start.elapsed();
-
-        // Coarse chunk-granular pass: touches one version per chunk window.
-        let any = world.query::<&Vel>();
-        let dirty_start = Instant::now();
-        let dirty_rows: usize = any
-            .dirty_chunks(&world, last_run, this_run)
-            .iter()
-            .map(|chunk| chunk.len())
-            .sum();
-        let dirty = dirty_start.elapsed();
-
-        let chunks = world
-            .archetypes()
-            .iter()
-            .map(|a| a.table().chunk_count())
-            .sum::<usize>();
-        assert!(chunks > 0);
-        (scan, dirty, changed_rows, dirty_rows)
+    fn summarize(samples: &[Duration]) -> (Duration, Duration, Duration) {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        (
+            sorted[sorted.len() / 2],
+            sorted[0],
+            sorted[sorted.len() - 1],
+        )
     }
 
-    for (label, clustered) in [("clustered", true), ("scattered", false)] {
-        let (scan, dirty, changed_rows, dirty_rows) = run_scenario(clustered);
+    fn run_scenario(clustered: bool) {
+        let stride = ENTITIES / TOUCHED;
+        let mut scan_samples = Vec::with_capacity(SAMPLES);
+        let mut dirty_samples = Vec::with_capacity(SAMPLES);
+        let mut changed_rows = 0;
+        let mut dirty_rows = 0;
+        for _ in 0..SAMPLES {
+            let mut world = World::new();
+            let entities: Vec<Entity> = world
+                .spawn_batch((0..ENTITIES).map(|i| (Pos(i as f32, 0.0, 0.0), Vel(1.0, 2.0, 3.0))));
+
+            // Build both states and establish the dirty journal cursor before
+            // any measured writes. This makes the measured pass exercise the
+            // forward journal path rather than query-activation fallback.
+            let any = world.query::<&Vel>();
+            let changed = world.query_filtered::<&Vel, Changed<Vel>>();
+            let last_run = world.change_tick();
+            assert!(any
+                .dirty_chunks_with_stats(&world, last_run, last_run)
+                .chunks
+                .is_empty());
+
+            world.set_last_change_tick(last_run);
+            world.increment_change_tick();
+            for k in 0..TOUCHED {
+                let index = if clustered { k } else { k * stride };
+                world.get_mut::<Vel>(entities[index]).expect("live").0 += 1.0;
+            }
+            let this_run = world.change_tick();
+
+            // Per-row change-detection scan: visits every matched row.
+            let scan_start = Instant::now();
+            changed_rows = changed.iter(&world).count();
+            scan_samples.push(scan_start.elapsed());
+
+            // Coarse chunk-granular pass. Assert that this is a complete
+            // forward journal sample, not a fallback or a missed write.
+            let dirty_start = Instant::now();
+            let report = any.dirty_chunks_with_stats(&world, last_run, this_run);
+            dirty_samples.push(dirty_start.elapsed());
+            assert!(!report.stats.journal_gap);
+            assert_eq!(report.stats.journal_events, TOUCHED);
+            dirty_rows = report.chunks.iter().map(|chunk| chunk.len()).sum();
+            assert_eq!(changed_rows, TOUCHED);
+            assert!(dirty_rows >= changed_rows);
+        }
+
+        let (scan_median, scan_min, scan_max) = summarize(&scan_samples);
+        let (dirty_median, dirty_min, dirty_max) = summarize(&dirty_samples);
+        let label = if clustered { "clustered" } else { "scattered" };
         println!(
-            "{label:>9}: Changed<T> scan {scan:?} ({changed_rows} rows) | dirty_chunks {dirty:?} ({dirty_rows} rows covered) | {:.1}x",
-            scan.as_secs_f64() / dirty.as_secs_f64(),
+            "{label:>9}: Changed<T> median {scan_median:?} ({changed_rows} rows; {scan_min:?}..{scan_max:?}) | dirty journal median {dirty_median:?} ({dirty_rows} rows covered; {dirty_min:?}..{dirty_max:?}; {SAMPLES} samples) | {:.1}x",
+            scan_median.as_secs_f64() / dirty_median.as_secs_f64(),
         );
     }
+
+    run_scenario(true);
+    run_scenario(false);
 }
 
 /// The `simd` feature ships bulk column kernels against a scalar ground truth;

@@ -339,9 +339,8 @@ fn dirty_fallback_window_is_retryable_after_filter_panic() {
     world.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
     let fallback_this_run = world.change_tick();
 
-    // Rewind the lower bound across the previous request. Dirty queries must
-    // use the conservative tick-index fallback rather than consume a forward
-    // journal window.
+    // Rewind the lower bound across the previous request. The retained sparse
+    // event history must make this window replayable without scanning the set.
     PANIC_NEXT_CHUNK_FILTER.with(|panic_next| panic_next.set(true));
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state.dirty_chunks_with_stats(&world, initial_tick, fallback_this_run)
@@ -350,7 +349,9 @@ fn dirty_fallback_window_is_retryable_after_filter_panic() {
 
     let retry = state.dirty_chunks_with_stats(&world, initial_tick, fallback_this_run);
     assert_eq!(retry.chunks.len(), 1);
-    assert!(retry.stats.sparse_fallback_scans > 0);
+    assert_eq!(retry.stats.sparse_fallback_scans, 0);
+    assert_eq!(retry.stats.sparse_replay_sources, 1);
+    assert_eq!(retry.stats.sparse_index_events, 2);
 }
 
 #[test]
@@ -873,7 +874,7 @@ fn sparse_dirty_query_falls_back_for_window_entirely_before_activation() {
 }
 
 #[test]
-fn sparse_dirty_query_rewinds_to_live_fallback_after_index_consumption() {
+fn sparse_dirty_query_replays_overlapping_window_without_live_set_scan() {
     let mut w = World::new();
     let entity = w.spawn(SparseDirty(1));
     let state = w.query::<&SparseDirty>();
@@ -887,10 +888,106 @@ fn sparse_dirty_query_rewinds_to_live_fallback_after_index_consumption() {
     assert_eq!(first.stats.sparse_fallback_scans, 0);
 
     let repeated = state.dirty_chunks_with_stats(&w, last_run, this_run);
-    assert_eq!(repeated.stats.sparse_index_events, 0);
-    assert_eq!(repeated.stats.sparse_fallback_scans, 1);
-    assert_eq!(repeated.stats.sparse_entities_checked, 1);
+    assert_eq!(repeated.stats.sparse_replay_sources, 1);
+    assert_eq!(repeated.stats.sparse_index_batches_scanned, 1);
+    assert_eq!(repeated.stats.sparse_index_events, 1);
+    assert_eq!(repeated.stats.sparse_fallback_scans, 0);
+    assert_eq!(repeated.stats.sparse_entities_checked, 0);
     assert_eq!(repeated.chunks, first.chunks);
+}
+
+#[test]
+fn sparse_retained_replay_matches_historical_tick_oracle() {
+    let mut w = World::new();
+    let entities: Vec<_> = (0..8)
+        .map(|i| w.spawn((Big::new(i), SparseDirty(i as u32))))
+        .collect();
+    let state = w.query::<&SparseDirty>();
+    let component = w.components().id_of::<SparseDirty>().unwrap();
+    let activation = w.change_tick();
+    assert!(state
+        .dirty_chunks_with_stats(&w, activation, activation)
+        .chunks
+        .is_empty());
+
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    w.get_mut::<SparseDirty>(entities[0]).unwrap().0 += 10;
+    let this_run = w.change_tick();
+    let first = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(first.stats.sparse_index_events, 1);
+
+    // Advance the world and create a later event which must not leak into the
+    // historical replay of the first window.
+    advance_frame(&mut w);
+    w.get_mut::<SparseDirty>(entities[7]).unwrap().0 += 10;
+    let replay = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(replay.stats.sparse_replay_sources, 1);
+    assert_eq!(replay.stats.sparse_fallback_scans, 0);
+    assert_eq!(replay.stats.sparse_index_events, 1);
+    assert_eq!(replay.stats.sparse_entities_checked, 0);
+
+    let changed_rows: Vec<_> = entities
+        .iter()
+        .filter_map(|&entity| {
+            let changed = w
+                .sparse_sets()
+                .get(component)
+                .unwrap()
+                .changed_tick(entity)
+                .unwrap();
+            changed
+                .is_newer_than(last_run, this_run)
+                .then(|| w.entities().location(entity).unwrap().row as usize)
+        })
+        .collect();
+    assert_eq!(changed_rows.len(), 1);
+    for &row in &changed_rows {
+        assert!(row_is_covered(&replay.chunks, row));
+    }
+    for chunk in &replay.chunks {
+        assert!(changed_rows
+            .iter()
+            .any(|&row| row >= chunk.start && row < chunk.end));
+    }
+}
+
+#[test]
+fn sparse_replay_gap_rebaselines_transactionally_for_next_forward_window() {
+    let mut w = World::new();
+    let entity = w.spawn((Big::new(0), SparseDirty(0)));
+    let state = w.query::<&SparseDirty>();
+    let activation = w.change_tick();
+    assert!(state
+        .dirty_chunks_with_stats(&w, activation, activation)
+        .chunks
+        .is_empty());
+
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    w.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
+    let this_run = w.change_tick();
+    let first = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(first.stats.sparse_index_events, 1);
+
+    // A restore changes the tracker epoch and invalidates activation history.
+    // The replay must fall back, then transactionally publish a current cursor.
+    w.change_tracker.reset();
+    let recovered = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert_eq!(recovered.stats.sparse_index_gaps, 1);
+    assert_eq!(recovered.stats.sparse_fallback_scans, 1);
+    assert_eq!(recovered.stats.reported_chunks, 1);
+
+    advance_frame(&mut w);
+    let next_last = w.last_change_tick();
+    w.get_mut::<SparseDirty>(entity).unwrap().0 += 1;
+    let next = state.dirty_chunks_with_stats(&w, next_last, w.change_tick());
+    assert_eq!(next.stats.sparse_index_gaps, 0);
+    assert_eq!(next.stats.sparse_fallback_scans, 0);
+    assert_eq!(next.stats.sparse_index_events, 1);
+    assert_eq!(next.stats.sparse_index_batches_scanned, 1);
+    assert_eq!(next.stats.reported_chunks, 1);
+    assert!(next.stats.reported_rows > 0);
 }
 
 #[test]
@@ -909,6 +1006,7 @@ fn sparse_dirty_fallback_is_empty_for_a_clean_window() {
     assert_eq!(report.stats.sparse_entities_checked, 5);
     assert_eq!(report.stats.sparse_fallback_scans, 1);
     assert_eq!(report.stats.sparse_index_events, 0);
+    assert_eq!(report.stats.sparse_replay_sources, 0);
     assert_eq!(report.stats.sparse_chunk_candidates, 0);
 }
 

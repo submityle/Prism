@@ -118,6 +118,8 @@ pub(crate) struct ChangeCursor {
 /// can verify that delivery is proportional to indexed changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChangeIndexStats {
+    /// Retained tick batches examined, including batches outside the window.
+    pub(crate) batches_scanned: usize,
     pub(crate) batches: usize,
     pub(crate) events: usize,
     pub(crate) gap: bool,
@@ -255,6 +257,28 @@ impl ChangeTracker {
         }
     }
 
+    /// Snapshot the current end of each active component log under one tracker
+    /// lock. Callers keep this value private until their conservative recovery
+    /// report succeeds, then commit it as the new forward baseline.
+    pub(crate) fn rebaseline(&self, components: &[ComponentId]) -> Vec<ChangeCursor> {
+        let state = self.state.lock();
+        components
+            .iter()
+            .map(|component| {
+                let log = state
+                    .logs
+                    .get(component.index() as usize)
+                    .and_then(Option::as_ref)
+                    .expect("active change-index component has a log");
+                ChangeCursor {
+                    epoch: state.epoch,
+                    next_batch: log.base_batch.saturating_add(log.batches.len()),
+                    loss_revision: log.loss_revision,
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn deactivate(&self, component: ComponentId) {
         let mut state = self.state.lock();
         let index = component.index() as usize;
@@ -364,6 +388,7 @@ impl ChangeTracker {
             ..ChangeIndexStats::default()
         };
         for batch in log.batches.iter().skip(start) {
+            stats.batches_scanned += 1;
             cursor.next_batch += 1;
             if batch.tick.is_newer_than(last_run, this_run) {
                 stats.batches += 1;
@@ -372,6 +397,56 @@ impl ChangeTracker {
             }
         }
         cursor.loss_revision = log.loss_revision;
+        stats
+    }
+
+    /// Replay a retained historical window from the cursor captured when the
+    /// consumer activated. This does not advance that cursor. It is complete
+    /// only while the activation epoch/loss revision still match and none of
+    /// the batches present at activation have been evicted.
+    pub(crate) fn replay_since(
+        &self,
+        component: ComponentId,
+        activation: ChangeCursor,
+        last_run: Tick,
+        this_run: Tick,
+        out: &mut Vec<Entity>,
+    ) -> ChangeIndexStats {
+        let state = self.state.lock();
+        let Some(Some(log)) = state.logs.get(component.index() as usize) else {
+            return ChangeIndexStats {
+                gap: true,
+                ..ChangeIndexStats::default()
+            };
+        };
+        if activation.epoch != state.epoch
+            || activation.loss_revision != log.loss_revision
+            || log.loss_saturated
+            || activation.next_batch < log.base_batch
+        {
+            return ChangeIndexStats {
+                gap: true,
+                ..ChangeIndexStats::default()
+            };
+        }
+
+        let start = activation.next_batch - log.base_batch;
+        if start > log.batches.len() {
+            return ChangeIndexStats {
+                gap: true,
+                ..ChangeIndexStats::default()
+            };
+        }
+
+        let mut stats = ChangeIndexStats::default();
+        for batch in log.batches.iter().skip(start) {
+            stats.batches_scanned += 1;
+            if batch.tick.is_newer_than(last_run, this_run) {
+                stats.batches += 1;
+                stats.events += batch.entities.len();
+                out.extend_from_slice(&batch.entities);
+            }
+        }
         stats
     }
 
@@ -447,9 +522,93 @@ mod revision_tests {
 
             assert_eq!(collected, expected, "incorrect indexed batch at {tick:?}");
             assert_eq!(stats.batches, 1);
+            assert_eq!(stats.batches_scanned, (collected.len() > 0) as usize);
             assert_eq!(stats.events, expected.len());
             last_run = tick;
         }
+    }
+
+    #[test]
+    fn replay_reads_only_post_activation_events_without_advancing_cursor() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let _initial = tracker.activate(component);
+        tracker.record(component, entity(1), Tick::new(1));
+        let activation = tracker.activate(component);
+        tracker.record(component, entity(2), Tick::new(2));
+        tracker.record(component, entity(3), Tick::new(3));
+
+        let mut out = Vec::new();
+        let stats =
+            tracker.replay_since(component, activation, Tick::new(1), Tick::new(2), &mut out);
+        assert!(!stats.gap);
+        assert_eq!(stats.batches_scanned, 2);
+        assert_eq!(stats.batches, 1);
+        assert_eq!(stats.events, 1);
+        assert_eq!(out, [entity(2)]);
+
+        // Replaying is repeatable; it never mutates a caller's forward cursor.
+        let mut repeated = Vec::new();
+        let repeated_stats = tracker.replay_since(
+            component,
+            activation,
+            Tick::new(1),
+            Tick::new(2),
+            &mut repeated,
+        );
+        assert_eq!(repeated, out);
+        assert_eq!(repeated_stats.batches_scanned, stats.batches_scanned);
+    }
+
+    #[test]
+    fn replay_handles_tick_wrap_and_rejects_eviction_or_epoch_change() {
+        let tracker = ChangeTracker::new();
+        let component = ComponentId::new(0);
+        let _initial = tracker.activate(component);
+        tracker.record(component, entity(1), Tick::new(u32::MAX - 1));
+        let activation = tracker.activate(component);
+        tracker.record(component, entity(2), Tick::MAX);
+        tracker.record(component, entity(3), Tick::ZERO);
+
+        let mut out = Vec::new();
+        let stats = tracker.replay_since(
+            component,
+            activation,
+            Tick::new(u32::MAX - 1),
+            Tick::ZERO,
+            &mut out,
+        );
+        assert!(!stats.gap);
+        assert_eq!(out, [entity(2), entity(3)]);
+
+        for tick in 1..=(MAX_RETAINED_BATCHES as u32 + 1) {
+            tracker.record(component, entity(tick + 10), Tick::new(tick));
+        }
+        let mut after_eviction = Vec::new();
+        let evicted = tracker.replay_since(
+            component,
+            activation,
+            Tick::ZERO,
+            Tick::new(MAX_RETAINED_BATCHES as u32 + 1),
+            &mut after_eviction,
+        );
+        assert!(evicted.gap);
+        assert!(
+            after_eviction.is_empty(),
+            "a partial replay must not escape"
+        );
+
+        tracker.reset();
+        let mut after_reset = Vec::new();
+        let reset = tracker.replay_since(
+            component,
+            activation,
+            Tick::ZERO,
+            Tick::new(1),
+            &mut after_reset,
+        );
+        assert!(reset.gap, "pre-reset activation must not cross the epoch");
+        assert!(after_reset.is_empty());
     }
 
     #[test]

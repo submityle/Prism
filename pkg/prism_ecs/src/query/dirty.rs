@@ -82,6 +82,12 @@ pub struct DirtyChunkStats {
     pub sparse_chunk_candidates: usize,
     /// Number of sparse writes/removals delivered from the exact change index.
     pub sparse_index_events: usize,
+    /// Tick batches inspected by the forward sparse cursor or retained-history
+    /// replay, including batches outside the requested tick window.
+    pub sparse_index_batches_scanned: usize,
+    /// Number of component logs queried through the non-advancing retained
+    /// history replay path.
+    pub sparse_replay_sources: usize,
     /// Number of source logs that reported lost retained history and forced a
     /// conservative all-matched-chunk fallback.
     pub sparse_index_gaps: usize,
@@ -496,17 +502,32 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         let mut sparse_chunks: BTreeMap<ArchetypeId, Vec<usize>> = BTreeMap::new();
         let mut sparse_cursors = self.snapshot_dirty_cursors();
         let mut sparse_fallback = self.sparse_fallback_needed(world, last_run, this_run);
+        let sparse_replay =
+            !sparse_fallback && self.sparse_replay_needed(world, last_run, this_run);
         let mut indexed_entities = Vec::new();
         if !sparse_fallback {
-            if self.collect_sparse_changes(
-                last_run,
-                this_run,
-                &mut sparse_cursors,
-                &mut indexed_entities,
-            ) {
+            let index_stats = if sparse_replay {
+                report.stats.sparse_replay_sources = self.dirty_sparse_source_count();
+                self.replay_sparse_changes(last_run, this_run, &mut indexed_entities)
+            } else {
+                self.collect_sparse_changes(
+                    last_run,
+                    this_run,
+                    &mut sparse_cursors,
+                    &mut indexed_entities,
+                )
+            };
+            report.stats.sparse_index_batches_scanned = index_stats.batches_scanned;
+            if index_stats.gap {
                 sparse_fallback = true;
                 report.stats.sparse_index_gaps = 1;
                 indexed_entities.clear();
+                if sparse_replay {
+                    // Capture a fresh forward boundary before the conservative
+                    // scan. Keep it local: a filter/consumer panic must leave
+                    // the old committed cursor intact so the request retries.
+                    sparse_cursors = self.rebaseline_dirty_cursors();
+                }
             }
         }
         report.stats.sparse_index_events = indexed_entities.len();

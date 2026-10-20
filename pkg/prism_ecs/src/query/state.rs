@@ -14,7 +14,7 @@ use core::marker::PhantomData;
 
 use crate::archetype::{ArchetypeId, ColumnChangeCursor};
 use crate::change::Tick;
-use crate::change_index::{ChangeCursor, ChangeTracker};
+use crate::change_index::{ChangeCursor, ChangeIndexStats, ChangeTracker};
 use crate::component::ComponentId;
 use crate::entity::Entity;
 use crate::query::access::Access;
@@ -112,13 +112,16 @@ pub struct QueryState<D: QueryData, F: QueryFilter = ()> {
     /// per-query cursors make collection proportional to new batches.
     dirty_tracker: Option<Arc<ChangeTracker>>,
     dirty_sources: Vec<ComponentId>,
+    /// Immutable per-query baseline used to prove retained history still
+    /// covers a replayed overlapping/historical window.
+    dirty_activation_cursors: Vec<ChangeCursor>,
     dirty_cursors: SpinLock<Vec<ChangeCursor>>,
     /// Serialize dirty-window cursor transactions. The scan can invoke a
     /// user-provided `QueryFilter::filter_chunk`; its cursor updates are only
     /// published after that scan completes successfully.
     dirty_pass: SpinLock<()>,
     /// Last explicit dirty-window request. The change index is a forward-only
-    /// cursor, so overlapping or rewound requests must use the live fallback.
+    /// cursor, so overlapping or rewound requests replay retained history.
     dirty_last_window: SpinLock<Option<(Tick, Tick)>>,
     /// Cursor into the world's column-change journal. A forward window can use
     /// this to discover only changed archetypes/chunks; gaps and rewound
@@ -163,17 +166,16 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         } else {
             Some(Arc::clone(&world.change_tracker))
         };
-        let dirty_cursors = SpinLock::new(
-            dirty_sources
-                .iter()
-                .map(|id| {
-                    dirty_tracker
-                        .as_ref()
-                        .expect("sparse dirty sources have a tracker")
-                        .activate(*id)
-                })
-                .collect(),
-        );
+        let dirty_activation_cursors: Vec<_> = dirty_sources
+            .iter()
+            .map(|id| {
+                dirty_tracker
+                    .as_ref()
+                    .expect("sparse dirty sources have a tracker")
+                    .activate(*id)
+            })
+            .collect();
+        let dirty_cursors = SpinLock::new(dirty_activation_cursors.clone());
         Self {
             world_id,
             data_state,
@@ -185,6 +187,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             )),
             dirty_tracker,
             dirty_sources,
+            dirty_activation_cursors,
             dirty_cursors,
             dirty_pass: SpinLock::new(()),
             dirty_last_window: SpinLock::new(None),
@@ -258,6 +261,20 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         *self.dirty_cursors.lock() = cursors;
     }
 
+    #[inline]
+    pub(crate) fn dirty_sparse_source_count(&self) -> usize {
+        self.dirty_sources.len()
+    }
+
+    /// Prepare a new forward baseline after a retained-history gap. The caller
+    /// must keep this snapshot local until its conservative report completes,
+    /// then publish it with `commit_dirty_cursors`.
+    pub(crate) fn rebaseline_dirty_cursors(&self) -> Vec<ChangeCursor> {
+        self.dirty_tracker
+            .as_ref()
+            .map_or_else(Vec::new, |tracker| tracker.rebaseline(&self.dirty_sources))
+    }
+
     pub(crate) fn lock_dirty_pass(&self) -> impl Drop + '_ {
         self.dirty_pass.lock()
     }
@@ -268,24 +285,57 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         this_run: Tick,
         cursors: &mut [ChangeCursor],
         out: &mut Vec<Entity>,
-    ) -> bool {
+    ) -> ChangeIndexStats {
         let Some(tracker) = &self.dirty_tracker else {
-            return false;
+            return ChangeIndexStats::default();
         };
         debug_assert_eq!(cursors.len(), self.dirty_sources.len());
-        let mut gap = false;
+        let mut total = ChangeIndexStats::default();
         for (index, &component) in self.dirty_sources.iter().enumerate() {
             let stats = tracker.collect(component, &mut cursors[index], last_run, this_run, out);
-            gap |= stats.gap;
+            total.batches_scanned += stats.batches_scanned;
+            total.batches += stats.batches;
+            total.events += stats.events;
+            total.gap |= stats.gap;
         }
-        gap
+        total
     }
 
-    /// Whether the exact sparse change index may be missing writes because the
-    /// requested window predates activation or overlaps a previous request.
-    /// The comparison uses the world's current tick rather than `this_run`:
-    /// callers may inspect an older window whose upper bound is before query
-    /// activation, and that window still needs the conservative fallback.
+    /// Replay from the activation baselines without advancing the forward
+    /// cursors. A single source gap invalidates the whole sparse candidate set.
+    pub(crate) fn replay_sparse_changes(
+        &self,
+        last_run: Tick,
+        this_run: Tick,
+        out: &mut Vec<Entity>,
+    ) -> ChangeIndexStats {
+        let Some(tracker) = &self.dirty_tracker else {
+            return ChangeIndexStats::default();
+        };
+        debug_assert_eq!(
+            self.dirty_sources.len(),
+            self.dirty_activation_cursors.len()
+        );
+        let mut total = ChangeIndexStats::default();
+        for (index, &component) in self.dirty_sources.iter().enumerate() {
+            let stats = tracker.replay_since(
+                component,
+                self.dirty_activation_cursors[index],
+                last_run,
+                this_run,
+                out,
+            );
+            total.batches_scanned += stats.batches_scanned;
+            total.batches += stats.batches;
+            total.events += stats.events;
+            total.gap |= stats.gap;
+        }
+        total
+    }
+
+    /// Whether the requested window predates query activation. The comparison
+    /// uses the world's current tick so historical upper bounds do not make an
+    /// activation-after-window request look valid.
     #[inline]
     pub(crate) fn sparse_fallback_needed(
         &self,
@@ -297,9 +347,27 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         if self.dirty_activation_tick.is_newer_than(last_run, now) {
             return true;
         }
-        self.dirty_last_window
+        false
+    }
+
+    /// Historical/overlapping windows cannot consume the forward cursor and
+    /// may use the retained activation history if its proof succeeds.
+    #[inline]
+    pub(crate) fn sparse_replay_needed(
+        &self,
+        world: &World,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> bool {
+        let now = world.change_tick();
+        let historical = this_run != now;
+        let overlapping = self
+            .dirty_last_window
             .lock()
-            .is_some_and(|(_, previous_this)| previous_this.is_newer_than(last_run, now))
+            .is_some_and(|(_, previous_this)| previous_this.is_newer_than(last_run, now));
+        let valid_age = last_run.age_since(this_run) <= Tick::MAX_CHANGE_AGE
+            && this_run.age_since(now) <= Tick::MAX_CHANGE_AGE;
+        (historical || overlapping) && valid_age
     }
 
     #[inline]
