@@ -11,7 +11,7 @@ use crate::{GpuMaterialTexture, MaterialFeatureFlags, MaterialRecord};
 /// ABI semantic tag for the baked face-shadow signed-distance-field map.
 ///
 /// This is the single source of truth mirrored by every consumer:
-/// `TextureSemantic::FaceShadowSdf` (the Bevy bridge enum), `SEMANTIC_FACE_SDF`
+/// the material texture semantic for face shadow, `SEMANTIC_FACE_SDF`
 /// in both `material_sample.wesl` and `shading_resolve.wesl`. A face material's
 /// SDF row carries this in [`GpuMaterialTexture::semantic`] so the toon
 /// integrator can find it by scanning the material's texture rows.
@@ -23,7 +23,7 @@ pub const FACE_SHADOW_SDF_SEMANTIC: u32 = 8;
 /// tag, exactly like the face-shadow SDF row above: the lobe finds it by
 /// scanning the material's own texture list, so the ABI needs no slot index
 /// (which would go stale whenever the bindless heap is repacked). Mirrored by
-/// `TextureSemantic::MeasuredBrdf` (the Bevy bridge enum), `SEMANTIC_MEASURED_BRDF`
+/// the material texture semantic for measured BRDF, `SEMANTIC_MEASURED_BRDF`
 /// in `measured_lobe.wesl` and the shading-side texture semantics.
 ///
 /// The table's atlas layout is part of the contract: width = `theta_h`

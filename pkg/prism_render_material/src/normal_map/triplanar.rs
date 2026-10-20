@@ -32,7 +32,7 @@
 //! * Akenine-Moller et al., *Real-Time Rendering* 4th ed., Section 20.5.1
 //!   (triplanar / UV-less projection).
 
-use bevy_math::ops;
+use prism_math::ops;
 
 /// Triplanar blend weights `normalize_L1(|n|^sharpness)` for a geometric normal.
 ///

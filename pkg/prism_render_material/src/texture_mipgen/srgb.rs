@@ -16,7 +16,7 @@
 //! * IEC 61966-2-1:1999 (sRGB), the standard piecewise EOTF / OETF.
 
 /// Decode one sRGB-encoded `u8` channel to a scene-linear `f32` in `[0, 1]`.
-use bevy_math::ops;
+use prism_math::ops;
 
 #[must_use]
 pub fn srgb_to_linear(encoded: u8) -> f32 {

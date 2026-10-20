@@ -150,7 +150,7 @@ pub fn unsharp_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     const WRAPS: [WrapMode; 3] = [
         WrapMode::ClampToEdge,

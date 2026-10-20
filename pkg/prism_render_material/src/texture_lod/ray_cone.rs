@@ -19,7 +19,7 @@
 
 /// Maximum spread half-angle (radians) a cone may accumulate; prevents a long
 /// chain of rough bounces from driving `spread_angle` to a nonsensical value.
-use bevy_math::ops;
+use prism_math::ops;
 
 const MAX_SPREAD_ANGLE: f32 = core::f32::consts::FRAC_PI_2;
 

@@ -184,7 +184,7 @@ pub fn extension_ids(lobe_mask: LobeMask) -> Vec<&'static str> {
         .collect()
 }
 
-#[cfg(all(test, not(feature = "bevy")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use prism_material_pcm::negotiate::negotiate;

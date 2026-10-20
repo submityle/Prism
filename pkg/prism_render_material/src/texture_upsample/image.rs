@@ -36,7 +36,7 @@
 
 use alloc::vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use super::guided::{nearest_upsample, wrap_index};
 use crate::{linear_to_srgb, srgb_to_linear, ColorSpace, Rgba8Image, WrapMode};

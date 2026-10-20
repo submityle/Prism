@@ -35,7 +35,7 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::{linear_to_srgb, srgb_to_linear, ColorSpace, Rgba8Image};
 

@@ -19,7 +19,7 @@
 //! The reconstruction `R * diag(lambda1, lambda2) * R^T` returns the original
 //! covariance exactly, which is the primary anti-fake oracle (the decomposition
 //! is a genuine factorisation, not a stub). Everything is deterministic analytic
-//! `f32` arithmetic routed through `bevy_math::ops` for libm determinism (no
+//! `f32` arithmetic routed through `prism_math::ops` for libm determinism (no
 //! AI/ML), so a CPU golden matches a GPU twin to floating-point tolerance.
 //!
 //! # References
@@ -29,7 +29,7 @@
 //!   Antialiasing", HPG 2016.
 //! * Akenine-Moller et al., *Real-Time Rendering* 4th ed., Section 9.13.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 /// Principal-axis decomposition of a symmetric slope covariance.
 ///

@@ -67,7 +67,7 @@ pub fn stereographic_decode(p: [f32; 2]) -> [f32; 3] {
 mod tests {
     use super::{stereographic_decode, stereographic_encode};
     use alloc::vec::Vec;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     fn unit(v: [f32; 3]) -> [f32; 3] {
         let inv = 1.0 / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();

@@ -17,7 +17,7 @@
 //! # References
 //! Ray Tracing Gems 2019, ch. 20, eq. "`Delta_i`" (triangle LOD constant).
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use super::math::{cross3, length3, sub3, uv_double_area};
 

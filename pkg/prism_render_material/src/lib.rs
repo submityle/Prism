@@ -6,8 +6,6 @@ extern crate alloc;
 
 mod authoring;
 pub mod bake;
-#[cfg(feature = "bevy")]
-mod bevy_bridge;
 pub mod capability;
 pub mod execution;
 mod handle;
@@ -42,11 +40,6 @@ pub use authoring::{FACE_SHADOW_SDF_SEMANTIC, ILLUMINATION_MASK_SEMANTIC, MEASUR
 pub use bake::{
     bake_layer_stack, sanitize_weight, ConstantMask, LayerParams, LayerStack, LayerWeights,
     MaskSource, PageBake, TexelCoord,
-};
-#[cfg(feature = "bevy")]
-pub use bevy_bridge::{
-    import_openpbr_surface, import_standard_material, StandardMaterialTextureResolver,
-    TextureSemantic,
 };
 pub use execution::{
     ExecutionTable, MaskSourceResolver, MaterialExecutionBinding, MaterialExecutionError,

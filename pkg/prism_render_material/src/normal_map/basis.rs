@@ -18,7 +18,7 @@
 //! normal (the primary anti-fake oracle), the transforms preserve length, and
 //! the signed basis determinant equals the stored handedness. Everything is
 //! deterministic analytic `f32` arithmetic with the one square root routed
-//! through `bevy_math::ops` (no AI/ML), so a CPU golden matches a GPU twin to
+//! through `prism_math::ops` (no AI/ML), so a CPU golden matches a GPU twin to
 //! floating-point tolerance.
 //!
 //! # References
@@ -28,7 +28,7 @@
 //!   (2001) -- Gram-Schmidt orthonormalization and the handedness sign.
 //! * Akenine-Moller et al., *Real-Time Rendering* 4th ed., Section 6.8.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 #[inline]
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {

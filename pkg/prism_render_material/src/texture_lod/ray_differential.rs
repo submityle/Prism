@@ -20,8 +20,6 @@
 //! "MIP-Map Level Selection for Texture Mapping", 1998; OpenGL/Vulkan
 //! `textureGrad` LOD definition.
 
-use bevy_math::ops::FloatPow;
-
 use super::mip::{mip_from_isotropic_footprint, AnisotropicMip};
 
 /// UV partial derivatives with respect to screen x/y, in UV units per pixel.
@@ -47,8 +45,12 @@ impl RayDifferential {
     fn axis_lengths_texels(self, tex_width: u32, tex_height: u32) -> (f32, f32) {
         let w = tex_width as f32;
         let h = tex_height as f32;
-        let lx = ((self.d_dx[0] * w).squared() + (self.d_dx[1] * h).squared()).sqrt();
-        let ly = ((self.d_dy[0] * w).squared() + (self.d_dy[1] * h).squared()).sqrt();
+        let dx = self.d_dx[0] * w;
+        let dy = self.d_dx[1] * h;
+        let lx = (dx * dx + dy * dy).sqrt();
+        let dx = self.d_dy[0] * w;
+        let dy = self.d_dy[1] * h;
+        let ly = (dx * dx + dy * dy).sqrt();
         (lx, ly)
     }
 

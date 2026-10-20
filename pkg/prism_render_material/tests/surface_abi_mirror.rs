@@ -58,27 +58,43 @@ fn wesl_fields(source: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn word_width(ty: &str) -> u32 {
+fn rust_storage_type(ty: &str) -> &'static str {
     match ty {
-        "f32" | "[f32; 1]" => 1,
-        "[f32; 4]" | "vec4<f32>" => 4,
-        other => panic!("unsupported surface ABI type {other:?}"),
+        "f32" => "f32",
+        "[f32; 4]" => "vec4f",
+        other => panic!("unsupported Rust surface ABI type {other:?}"),
     }
 }
 
-fn schema_surface_fields() -> BTreeMap<String, u32> {
+fn wesl_storage_type(ty: &str) -> &'static str {
+    match ty {
+        "f32" => "f32",
+        "vec4<f32>" => "vec4f",
+        other => panic!("unsupported WESL surface ABI type {other:?}"),
+    }
+}
+
+fn storage_words(ty: &str) -> u32 {
+    match ty {
+        "f32" | "f16" => 1,
+        "vec4f" => 4,
+        other => panic!("unsupported schema surface ABI type {other:?}"),
+    }
+}
+
+fn schema_surface_fields() -> BTreeMap<String, &'static str> {
     let schema = surface_schema();
     schema
         .core
         .fields
         .iter()
         .filter(|field| field.ty != FieldType::Pad)
-        .map(|field| (field.surface_field().to_string(), field.ty.words()))
+        .map(|field| (field.surface_field().to_string(), field.ty.as_str()))
         .chain(schema.canonical_lobes().into_iter().flat_map(|lobe| {
             lobe.fields
                 .iter()
                 .filter(|field| field.ty != FieldType::Pad)
-                .map(|field| (field.surface_field().to_string(), field.ty.words()))
+                .map(|field| (field.surface_field().to_string(), field.ty.as_str()))
         }))
         .collect()
 }
@@ -103,9 +119,9 @@ fn rust_and_wesl_surface_mirrors_match_in_order_and_type() {
             "surface field {index} was reordered or renamed"
         );
         assert_eq!(
-            word_width(rust_ty),
-            word_width(wesl_ty),
-            "surface field {rust_name} changed scalar/vector width"
+            rust_storage_type(rust_ty),
+            wesl_storage_type(wesl_ty),
+            "surface field {rust_name} changed its exact scalar/vector storage type"
         );
     }
 }
@@ -116,11 +132,11 @@ fn surface_mirrors_cover_exactly_the_schema_fields_and_bytes() {
     let rust = rust_fields(include_str!("../src/record.rs"));
     let actual = rust
         .iter()
-        .map(|(name, ty)| (name.clone(), word_width(ty)))
+        .map(|(name, ty)| (name.clone(), rust_storage_type(ty)))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(actual, schema, "fat surface mirror is not schema-complete");
 
-    let words = schema.values().copied().sum::<u32>() as usize;
+    let words = schema.values().map(|ty| storage_words(ty)).sum::<u32>() as usize;
     assert_eq!(
         size_of::<GpuSurfaceParameters>(),
         words * size_of::<u32>(),

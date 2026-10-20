@@ -168,7 +168,29 @@ fn dynamic_channel_header_words_follow_schema_order() {
 }
 
 #[test]
-fn abi7_execution_binding_is_five_dense_words_with_full_permutation_width() {
+fn abi8_execution_binding_replaces_legacy_specialization_packing() {
+    let rust = rust_fields(include_str!("../src/record.rs"));
+    let execution_fields = rust
+        .iter()
+        .filter(|(name, _)| name.starts_with("execution_"))
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        execution_fields,
+        [
+            "execution_plan_index",
+            "execution_program_index",
+            "execution_package_index",
+            "execution_permutation_low",
+            "execution_permutation_high",
+        ]
+    );
+    assert!(
+        rust.iter()
+            .all(|(name, _)| !name.contains("specialization")),
+        "legacy SpecializationId words must not re-enter the material ABI"
+    );
+
     let header = prism_render_material::GpuMaterialHeader {
         execution_plan_index: 7,
         execution_program_index: 11,
@@ -190,4 +212,65 @@ fn abi7_execution_binding_is_five_dense_words_with_full_permutation_width() {
         std::mem::size_of::<prism_render_material::GpuMaterialHeader>(),
         29 * std::mem::size_of::<u32>()
     );
+
+    let unbound = prism_render_material::fallback_material_header(0);
+    assert_eq!(
+        unbound.execution_binding_words(),
+        [prism_render_material::GpuMaterialHeader::EXECUTION_BINDING_SENTINEL; 5]
+    );
+    assert!(!unbound.has_execution_binding());
+    assert!(header.has_execution_binding());
+}
+
+#[test]
+fn material_classification_consumes_execution_identity_not_surface_payload() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../prism_render_scene/src/shaders/material_classification.wesl");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+
+    for required in [
+        "header.execution_plan_index",
+        "header.execution_program_index",
+        "header.execution_package_index",
+        "header.execution_permutation_low",
+        "header.execution_permutation_high",
+        "execution_plans",
+        "execution_programs",
+        "execution_packages",
+        "response_buckets",
+        "visibility_metadata",
+    ] {
+        assert!(
+            source.contains(required),
+            "classification lost `{required}`"
+        );
+    }
+    for forbidden in [
+        "PrismSurfaceParameters",
+        "material_unpack",
+        "parameter_heap",
+        "header.parameter_offset",
+        "header.parameter_size",
+        "header.closure_mask",
+        "header.lobe_mask",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "classification must not derive work identity from Surface payload via `{forbidden}`"
+        );
+    }
+
+    let region_bit = prism_render_material::MaterialFeatureFlags::REGION_ILLUMINATION
+        .0
+        .trailing_zeros();
+    let blend_bit = prism_render_material::MaterialFeatureFlags::ILLUMINATION_BLEND
+        .0
+        .trailing_zeros();
+    assert!(source.contains(&format!(
+        "const FEATURE_REGION_ILLUMINATION: u32 = 1u << {region_bit}u;"
+    )));
+    assert!(source.contains(&format!(
+        "const FEATURE_ILLUMINATION_BLEND: u32 = 1u << {blend_bit}u;"
+    )));
 }

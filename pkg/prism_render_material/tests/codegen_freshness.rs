@@ -59,20 +59,54 @@ fn generated_field_directory_covers_exactly_non_padding_schema_fields() {
         .fields
         .iter()
         .filter(|field| field.ty != FieldType::Pad)
-        .map(|field| (None, field.name.as_str()))
+        .map(|field| {
+            (
+                None,
+                field.name.as_str(),
+                field.surface_field(),
+                field.ty.as_str(),
+                field
+                    .consumed_by
+                    .iter()
+                    .map(|step| step.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        })
         .chain(schema.canonical_lobes().into_iter().flat_map(|lobe| {
             lobe.fields
                 .iter()
                 .filter(|field| field.ty != FieldType::Pad)
-                .map(move |field| (Some(lobe.id.as_str()), field.name.as_str()))
+                .map(move |field| {
+                    (
+                        Some(lobe.id.as_str()),
+                        field.name.as_str(),
+                        field.surface_field(),
+                        field.ty.as_str(),
+                        field
+                            .consumed_by
+                            .iter()
+                            .map(|step| step.as_str())
+                            .collect::<Vec<_>>(),
+                    )
+                })
         }))
         .collect::<Vec<_>>();
     let actual = SURFACE_FIELDS
         .iter()
-        .map(|field| (field.lobe, field.name))
+        .map(|field| {
+            (
+                field.lobe,
+                field.name,
+                field.surface_field,
+                field.storage_type,
+                field.consumed_by.to_vec(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
-    assert!(actual.iter().all(|(_, name)| !name.starts_with("_pad")));
+    assert!(actual
+        .iter()
+        .all(|(_, name, _, _, _)| !name.starts_with("_pad")));
 }
 
 #[test]
@@ -194,12 +228,15 @@ fn generated_layout_exports_schema_versions_and_field_metadata() {
 
     let fresh = emit_rust_layout(&schema);
     for generated_fact in [
-        "pub const SURFACE_SCHEMA_VERSION: u32 = 2;",
+        "pub const SURFACE_SCHEMA_VERSION: u32 = 3;",
         "pub const SURFACE_ABI_VERSION: u32 = 8;",
         "pub mask_bits: u32,",
+        "pub surface_field: &'static str,",
+        "pub storage_type: &'static str,",
         "pub pack_slot: u32,",
         "pub words: u32,",
         "pub bit_region: &'static str,",
+        "pub consumed_by: &'static [&'static str],",
     ] {
         assert!(
             fresh.contains(generated_fact),

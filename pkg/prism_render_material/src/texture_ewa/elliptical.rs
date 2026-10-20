@@ -52,7 +52,7 @@
 //! * Greene & Heckbert, "Creating Raster Omnimax Images ... the Elliptical
 //!   Weighted Average Filter" (1986).
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::{linear_to_srgb, srgb_to_linear, ColorSpace, Rgba8Image, WrapMode};
 

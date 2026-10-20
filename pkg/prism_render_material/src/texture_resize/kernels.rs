@@ -13,7 +13,7 @@
 
 use core::f32::consts::PI;
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use crate::texture_filter::mn_kernel;
 

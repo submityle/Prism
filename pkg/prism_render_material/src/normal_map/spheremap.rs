@@ -21,7 +21,7 @@
 //! unit normal off the `-Z` pole (round-trip error below float tolerance), which
 //! is the primary anti-fake oracle. The `unorm` helpers only remap the disk from
 //! `[-2, 2]` to `[0, 1]` for texel storage. Everything is deterministic analytic
-//! `f32` arithmetic with the square roots routed through `bevy_math::ops` (no
+//! `f32` arithmetic with the square roots routed through `prism_math::ops` (no
 //! AI/ML), so a CPU golden matches a GPU twin to floating-point tolerance.
 //!
 //! # References
@@ -30,7 +30,7 @@
 //! * Snyder, *Map Projections: A Working Manual*, USGS (1987) -- the Lambert
 //!   azimuthal equal-area projection.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 /// Encode a full-sphere unit normal into its signed Lambert azimuthal disk
 /// coordinate `p` (components in `[-2, 2]`, `|p| <= 2`).
@@ -90,7 +90,7 @@ mod tests {
         spheremap_decode, spheremap_decode_unorm, spheremap_encode, spheremap_encode_unorm,
     };
     use alloc::vec::Vec;
-    use bevy_math::ops;
+    use prism_math::ops;
 
     fn unit(v: [f32; 3]) -> [f32; 3] {
         let inv = 1.0 / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();

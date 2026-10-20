@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 
 use super::box_filter::{ColorSpace, Rgba8Image};
 use super::resample_core::downsample_2x;
-use bevy_math::ops;
+use prism_math::ops;
 
 /// A separable Gaussian reduction filter.
 ///

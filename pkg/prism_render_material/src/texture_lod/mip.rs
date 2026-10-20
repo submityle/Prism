@@ -18,7 +18,7 @@
 //! Ray Tracing Gems 2019, ch. 20 (ray-cone LOD equation); Ewins et al. 1998
 //! (log2 footprint-to-LOD mapping).
 
-use bevy_math::ops;
+use prism_math::ops;
 
 use super::triangle::TriangleLodConstant;
 

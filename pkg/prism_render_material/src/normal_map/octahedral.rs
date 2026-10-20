@@ -23,7 +23,7 @@
 //! `z >= 0` unit normal (round-trip error below float tolerance), which is the
 //! primary anti-fake oracle. The `unorm` helpers only remap `[-1, 1] <-> [0, 1]`
 //! for texel storage. Everything is deterministic analytic `f32` arithmetic with
-//! transcendentals routed through `bevy_math::ops` (no AI/ML), so a CPU golden
+//! transcendentals routed through `prism_math::ops` (no AI/ML), so a CPU golden
 //! matches a GPU twin to floating-point tolerance.
 //!
 //! # References
@@ -31,7 +31,7 @@
 //!   Vectors", JCGT 2014 (the hemi-octahedral listing).
 //! * Meyer et al., "On Floating-Point Normal Vectors", EGSR 2010.
 
-use bevy_math::ops;
+use prism_math::ops;
 
 /// Encode a `z >= 0` unit normal into a signed hemi-octahedral `(ex, ey)` pair
 /// in `[-1, 1]^2`.

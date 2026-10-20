@@ -23,7 +23,7 @@
 //! unit normal off the poles (round-trip error below float tolerance), the
 //! primary anti-fake oracle. Because the output already lives in `[0, 1]^2`
 //! there is no separate `unorm` storage form. Everything is deterministic
-//! `f32` arithmetic routed through [`bevy_math::ops`] for libm determinism (no
+//! `f32` arithmetic routed through [`prism_math::ops`] for libm determinism (no
 //! AI/ML), so a CPU golden matches a GPU twin to floating-point tolerance.
 //!
 //! # References
@@ -31,7 +31,7 @@
 //! * Snyder, *Map Projections: A Working Manual*, USGS (1987) -- the
 //!   equirectangular (plate carree) projection.
 
-use bevy_math::ops;
+use prism_math::ops;
 use core::f32::consts::{PI, TAU};
 
 /// Encode a full-sphere unit normal to its equirectangular panel coordinate
@@ -71,7 +71,7 @@ pub fn equirect_decode(uv: [f32; 2]) -> [f32; 3] {
 mod tests {
     use super::{equirect_decode, equirect_encode};
     use alloc::vec::Vec;
-    use bevy_math::ops;
+    use prism_math::ops;
     use core::f32::consts::TAU;
 
     fn sphere_samples() -> Vec<[f32; 3]> {

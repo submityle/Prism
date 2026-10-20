@@ -211,6 +211,13 @@ fn generated_surface_fields_match_schema_layout_metadata() {
             (
                 None,
                 field.name.as_str(),
+                field.surface_field(),
+                field.ty.as_str(),
+                field
+                    .consumed_by
+                    .iter()
+                    .map(|step| step.as_str())
+                    .collect::<Vec<_>>(),
                 field.pack_slot,
                 field.ty.words(),
                 field.bit_region.as_str(),
@@ -224,6 +231,13 @@ fn generated_surface_fields_match_schema_layout_metadata() {
                     (
                         Some(lobe.id.as_str()),
                         field.name.as_str(),
+                        field.surface_field(),
+                        field.ty.as_str(),
+                        field
+                            .consumed_by
+                            .iter()
+                            .map(|step| step.as_str())
+                            .collect::<Vec<_>>(),
                         field.pack_slot,
                         field.ty.words(),
                         field.bit_region.as_str(),
@@ -237,6 +251,9 @@ fn generated_surface_fields_match_schema_layout_metadata() {
             (
                 field.lobe,
                 field.name,
+                field.surface_field,
+                field.storage_type,
+                field.consumed_by.to_vec(),
                 field.pack_slot,
                 field.words,
                 field.bit_region,

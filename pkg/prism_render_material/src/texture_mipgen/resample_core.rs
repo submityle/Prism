@@ -25,7 +25,7 @@ use core::f32::consts::PI;
 
 use super::box_filter::{ColorSpace, Rgba8Image};
 use super::srgb::{linear_to_srgb, srgb_to_linear};
-use bevy_math::ops;
+use prism_math::ops;
 
 /// Normalised sinc, `sin(pi x) / (pi x)` with the removable singularity at 0.
 #[must_use]
