@@ -252,6 +252,44 @@ fn repeated_writes_deduplicate_dirty_chunk_candidates_before_sorting() {
     assert_eq!(report.chunks.len(), 1);
 }
 
+#[cfg(feature = "multi_thread")]
+#[test]
+fn parallel_query_writes_reach_attached_column_journal_without_losing_chunks() {
+    use prism_tasks::TaskPool;
+
+    const ENTITIES: usize = 512;
+    let mut w = World::new();
+    for i in 0..ENTITIES {
+        w.spawn(Big::new(i as u64));
+    }
+    advance_frame(&mut w);
+
+    // Establish the query's journal baseline after the structural spawn batch.
+    let state = w.query::<&mut Big>();
+    let baseline = state.dirty_chunks_with_stats(&w, w.last_change_tick(), w.change_tick());
+    assert!(baseline.stats.journal_gap);
+
+    advance_frame(&mut w);
+    let last_run = w.last_change_tick();
+    let this_run = w.change_tick();
+    let pool = TaskPool::with_threads(4);
+    state.par_for_each_mut(&mut w, &pool, 3, |mut value| {
+        value.tag += 1;
+    });
+
+    // `Table` attached each physical column's ChunkChange cells to the shared
+    // archetype journal. This verifies the real parallel write path, not only
+    // the journal and chunk-summary primitives in isolation.
+    let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
+    assert!(!report.stats.journal_gap);
+    assert_eq!(report.stats.journal_events, ENTITIES);
+    assert_eq!(report.chunks.len(), ENTITIES.div_ceil(4));
+    assert_eq!(
+        report.chunks.iter().map(|chunk| chunk.len()).sum::<usize>(),
+        ENTITIES
+    );
+}
+
 #[test]
 fn dirty_chunks_follow_an_archetype_migration() {
     #[derive(Clone, Copy)]
