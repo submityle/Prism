@@ -143,3 +143,15 @@ bin 路径位于 `pkg/prism_render_app/src/bin_queue.rs`：
 - `5ad60f878 test(render): name refactor acceptance gates`：将关键重构验收固定为命名测试。
 
 本篇结论：当前 shader package 的身份、typed render state、interned package handle、冻结 FeatureSelection 到 package/permutation/PSO identity 的映射闭环、有界编译队列、冷热缓存映射、DriverLocal 边界和 direct/bin/split pass set 已由源码与已标注的运行记录形成对应证据；后续变更必须保持上述语义分层，并继续把完整 Scene/Fabric 接线与跨适配器证据作为独立验收项。
+
+## 8. 最终收口验收矩阵 / 未完成项（2026-10-20 文档审计）
+
+`S`=源码事实，`D`=测试定义，`R`=本轮运行通过，`H`=已有历史/先前记录，`G`=GPU 证据，`E`=全场景闭环。本轮 `prism_render_scene --lib` 为 1909/1909；architecture acceptance、driver binary 和跨适配器 GPU 仍未由此覆盖。
+
+| 条款 | S | D | R | H / G | E |
+|---|---|---|---|---|---|
+| typed `PipelineKey`、完整 `PipelineState`、cold key 与 package handle | 当前四分量身份、typed state、hash/canonical 边界存在 | state/cache/worker gate 已定义 | scene lib 1909/1909；architecture/package tests 未复跑 | app worker 与 architecture 的已有记录 | 否；尚未由全场景帧消费证明 |
+| Frozen FeatureSelection → permutation → PSO/cache/warm set | 冻结选择、checked dense index、stale binding rejection 和生产 seam 存在 | selector、mapping、cache worker gate 已定义 | scene lib 1909/1909；architecture 定向记录 95/136 是先前结果 | app worker `27/0` 为既有记录 | 否；不含完整 Scene/Fabric 每帧装配 |
+| direct/bin/split、fallback、异步队列与 DriverLocal | 代码和测试夹具存在 | pass/cache/queue gate 已定义 | 无 | 仅有历史运行记录；无本次复核 | 否；真实 driver binary 与跨 adapter 未覆盖 |
+
+仍未验证：architecture package/acceptance 的本轮重跑；完整 Scene/Fabric 每帧由冻结选择生成并消费真实 PSO 的端到端路径；真实 driver binary、跨适配器 cache/PSO 行为；完整水体/Scene/TAA GPU replay；以及编译队列、显存、缓存命中率和 P50/P95/P99 性能数据。`scene lib 1909/1909` 以及先前 `shader_package 95/0`、`render_fabric 136/0` 都不能替代全场景闭环。

@@ -111,7 +111,7 @@ GPU header + dense execution binding
 - execution binding：`pkg/prism_render_material/src/execution.rs`；
 - authoring IR 与 closure lowering：`pkg/prism_render_material/src/ir.rs`。
 
-本轮 `cargo test -p prism_render_material --tests` 通过：单元测试 `878 passed; 0 failed`；`codegen_freshness` 11 项、`material_header_abi` 3 项、`pcm_parity` 7 项、`schema_parity` 9 项、`shading_plan` 33 项、`surface_abi_mirror` 2 项均通过。
+历史运行记录（非本轮复跑）：`cargo test -p prism_render_material --tests` 曾有单元测试 `878 passed; 0 failed`；`codegen_freshness` 11 项、`material_header_abi` 3 项、`pcm_parity` 7 项、`schema_parity` 9 项、`shading_plan` 33 项、`surface_abi_mirror` 2 项均通过。本轮另验证 `prism_render_scene --lib` 1909/1909 与 `prism_render_material::handle::tests` 6/6；未复跑上述 codegen/integration 套件。
 
 ## 8. Git 历史锚点
 
@@ -120,3 +120,15 @@ GPU header + dense execution binding
 - `8400fe972 feat: complete runtime and render refactoring implementation`：将 header、执行绑定和材质运行路径接入整体实现。
 
 当前文档不再把手写 `SpecializationId` 位布局或 illumination 轴当作 ABI 现状；它们只作为历史背景，不是当前数据来源。
+
+## 9. 最终收口验收矩阵 / 未完成项（2026-10-20 文档审计）
+
+本节区分源码、测试定义和实跑证据。`S`=源码事实，`D`=测试定义，`R`=本轮运行通过，`H`=已有运行记录，`G`=GPU 证据，`E`=全场景闭环。本轮 `prism_render_scene --lib` 为 1909/1909，material allocator 定向测试为 6/6；未运行完整 `prism_render_material` integration/codegen freshness 套件或真实 GPU 验收。
+
+| 条款 | S 源码完成 | D 测试定义 | R | H / G | E 全场景闭环 |
+|---|---|---|---|---|---|
+| schema/codegen/layout/header/mirror | schema 真源、生成 Rust/WESL、header 与 dense binding 已存在 | freshness、mirror、slot/word、lobe-mask 和 ABI gate 已定义 | scene lib 1909/1909；allocator 6/6；codegen freshness 未运行 | 有 `prism_render_material` 历史 `878/0` 记录；无专门跨适配器 ABI GPU 证据 | 否；未证明完整 Scene/Fabric 消费 |
+| identity 分层与 OpenPBR boundary | `closure_mask`、`active_lobes`、execution binding 分层及导入边界存在 | fixed-point、activation、layout 和 stale-binding gate 已定义 | scene lib 1909/1909 | 先前 material/shading 单元与集成记录仍单独保留 | 否；未证明所有材质在完整帧中消费同一 ABI |
+| ABI 变更后的 package/cache/driver 影响 | 由 03 的 typed identity、ABI fingerprint 和 stale rejection 接线承载 | cache invalidation / pipeline worker gate 已定义 | 无 | 相关历史记录与单 adapter 水体 GPU 记录不等于全域 driver binary 验证 | 否 |
+
+仍未验证：完整 `prism_render_material` package/integration 与生成物 freshness；跨适配器 ABI/shader 消费；Surface ABI 在统一 Scene/Fabric 每帧提取、绑定、barrier 和真实 recorder 中的端到端使用；以及完整帧图像 parity、资源/性能数据。`prism_render_scene --lib` 通过不等于这些 package 级和全场景验收已完成。

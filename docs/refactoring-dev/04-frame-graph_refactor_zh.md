@@ -127,7 +127,7 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 | 23 项 post inventory、声明/binding/executor 对齐和插件 registration | `pkg/prism_render_scene/src/shading/post_graph.rs`、`pkg/prism_render_scene/src/shading/plugin.rs` |
 | shading crate 历史运行记录 | `cargo test -p prism_render_scene --lib shading`：844 passed，0 failed；不是本轮复跑结果 |
 
-跨适配器行为单独由 `pkg/prism_render_scene/tests/cross_adapter_acceptance.rs` 验收：它枚举 distinct physical adapters，并在每个 adapter 上执行 storage compute、submit、copy-to-staging 和 map/readback。默认 profile 在少于两个 adapter 时输出 `SKIP_UNVERIFIED`；`PRISM_REQUIRE_GPU=1` 将同一条件提升为失败。2026-10-20 沙盒外只发现 `Apple M2 / Metal / IntegratedGpu` 一个 adapter，故严格门禁失败。该测试证明 adapter-local submission/readback，不证明 31-pass frame graph、Scene imports、TAA history 或 water full-frame parity 已跨 adapter 通过。
+跨适配器行为单独由 `pkg/prism_render_scene/tests/cross_adapter_acceptance.rs` 验收：它枚举 distinct physical adapters，并在每个 adapter 上执行 storage compute、submit、copy-to-staging 和 map/readback。默认 profile 在少于两个 adapter 时输出 `SKIP_UNVERIFIED`；`PRISM_REQUIRE_GPU=1` 将同一条件提升为失败。2026-10-20 沙盒外只发现 `Apple M2 / Metal / IntegratedGpu` 一个 adapter，故严格门禁失败。该测试证明 adapter-local submission/readback，不证明 31-pass frame graph、Scene imports、TAA exact history publication 或 water full-frame parity 已跨 adapter 通过；TAA history 本轮仅完成源码接线，尚待 Cargo/GPU 验证。
 
 ## 7. 历史依据
 
@@ -136,3 +136,16 @@ response planes + coverage ──▶ response_composition ──▶ HDR
 - `5ad60f878 test(render): name refactor acceptance gates`：固定 graph pass count、visibility 和分类验收的命名测试。
 
 本篇结论：当前 frame graph 已由统一 `prism_render_graph` 编译器承载；shading graph 以 8 个主链 pass、23 个生成式后处理 pass 和 resident composition 组成固定拓扑，资源访问、执行 ledger 与测试共同构成验收契约。
+
+## 8. 最终收口验收矩阵 / 未完成项（2026-10-20 文档审计）
+
+`S`=源码实现，`D`=测试定义，`R`=本轮运行通过，`H`=已有运行记录，`G`=实际 GPU 证据，`E`=全场景闭环。本轮 `prism_render_scene --lib` 为 1909/1909；`prism_render_graph` package tests、真实 GPU 与 full-frame replay 未由此覆盖。
+
+| 条款 | S | D | R | H / G | E |
+|---|---|---|---|---|---|
+| graph compiler、SSA version、hazard、barrier、alias、lifetime | 当前统一编译器与资源依赖实现存在 | compiler/codegen/graph gate 已定义 | scene lib 1909/1909；graph package suite 未运行 | shading `844/0` 等为历史记录 | 否；没有 full-frame 复核 |
+| 31-pass shading topology（8 主链 + 23 post） | pass inventory、composition 固定位置和 runtime assertion 存在 | pass-count、order、resource/barrier gate 已定义 | scene lib 1909/1909 | 既有记录只证明相应历史工作树 | 否；未证明完整 Scene/Fabric/TAA 执行 |
+| resident Composition 与 imported resources | 生产 recorder、imports 和 HDR barrier 接线存在 | integration/GPU harness 定义存在 | scene lib 1909/1909；integration/GPU harness 未运行 | 水体/组合单 adapter 记录不等于整图 GPU 证据 | 否 |
+| TAA/history 与跨 adapter | TAA history 源码接线存在；跨 adapter strict/skip probe 存在 | history/adapter gate 已定义 | 无 | 单 Apple M2/Metal；第二 adapter 未验证 | 否；无 exact history full-frame parity |
+
+仍未验证：`prism_render_graph` package/integration suites；修订后的 resident composition GPU harness；全 31 pass 在真实 Scene imports、barrier、record/submit 上的完整运行；TAA completion-gated history 的真实 GPU 行为；第二 physical adapter；以及全帧图像 parity、资源峰值和 P50/P95/P99 性能数据。库内 1909 项通过及编译器/测试定义的存在不等于生产闭环完成。
