@@ -12,8 +12,11 @@ default = []
 gpu = ["dep:wgpu"]
 gpu-tests = ["gpu", "wgpu/wgsl"]
 render-graph = ["dep:prism_render_architecture", "dep:prism_render_graph"]
+runtime-preview = ["gpu", "render-graph", "dep:prism_render_driver", "dep:prism_render_driver_wgpu"]
 
 [dependencies]
+prism_render_driver = { path = "../prism_render_driver", optional = true }
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu", optional = true }
 prism_render_architecture = { path = "../prism_render_architecture", optional = true }
 prism_render_graph = { path = "../prism_render_graph", optional = true }
 wgpu = { version = "30", default-features = false, features = ["std", "metal", "vulkan", "dx12"], optional = true }
@@ -28,6 +31,10 @@ required-features = ["gpu-tests"]
 [[test]]
 name = "gpu_texture_preview"
 required-features = ["gpu-tests", "render-graph"]
+
+[[test]]
+name = "runtime_texture_preview"
+required-features = ["runtime-preview", "gpu-tests"]
 
 [lints]
 [lints.rust]

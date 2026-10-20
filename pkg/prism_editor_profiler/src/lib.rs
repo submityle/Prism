@@ -19,6 +19,8 @@ pub mod gpu;
 pub mod gpu_preview;
 pub mod graph_capture;
 pub mod memory;
+#[cfg(feature = "runtime-preview")]
+pub mod runtime_preview;
 pub mod visual_log;
 
 pub use frame::{Frame, FrameId, FrameStore, Span, SpanId, SpanNode, SpanTree};

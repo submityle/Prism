@@ -522,6 +522,17 @@ impl TexturePreviewProducer {
         &mut self,
         handle: CaptureHandle,
     ) -> Result<wgpu::SubmissionIndex, TexturePreviewError> {
+        self.submit_ordered(handle, [], [])
+    }
+    /// Submit native work before and after the exact texture copy in one ordered
+    /// queue submission. All command buffers must belong to this device.
+    /// No command buffer is cloned and no completion wait occurs.
+    pub fn submit_ordered(
+        &mut self,
+        handle: CaptureHandle,
+        before: impl IntoIterator<Item = wgpu::CommandBuffer>,
+        after: impl IntoIterator<Item = wgpu::CommandBuffer>,
+    ) -> Result<wgpu::SubmissionIndex, TexturePreviewError> {
         let queue = self.queue.clone();
         let slot = self.slot_mut(handle)?;
         if !matches!(slot, Slot::Recording(r) if r.copy.is_some()) {
@@ -531,7 +542,7 @@ impl TexturePreviewProducer {
             unreachable!();
         };
         let copy = r.copy.expect("validated copy");
-        let submission = queue.submit([r.encoder.finish()]);
+        let submission = queue.submit(before.into_iter().chain([r.encoder.finish()]).chain(after));
         let (sender, receiver) = mpsc::sync_channel(1);
         copy.buffer
             .slice(..)
