@@ -107,8 +107,40 @@ pub struct DirtyChunkReport {
 
 #[derive(Default)]
 struct DirtyChunkCandidates {
-    chunks: HashSet<usize>,
+    chunks: Vec<usize>,
+    chunk_index: Option<HashSet<usize>>,
     journal_events: usize,
+}
+
+impl DirtyChunkCandidates {
+    // Most dirty windows contain only a few chunks. Keep that common path
+    // allocation-light, then promote to an indexed set for high-cardinality
+    // updates where repeated linear membership checks would dominate.
+    const INLINE_CHUNKS: usize = 8;
+
+    fn insert_chunk(&mut self, chunk: usize) {
+        if let Some(index) = &mut self.chunk_index {
+            if index.insert(chunk) {
+                self.chunks.push(chunk);
+            }
+            return;
+        }
+
+        if self.chunks.contains(&chunk) {
+            return;
+        }
+        if self.chunks.len() < Self::INLINE_CHUNKS {
+            self.chunks.push(chunk);
+            return;
+        }
+
+        let mut index = HashSet::with_capacity(self.chunks.len() * 2);
+        index.extend(self.chunks.iter().copied());
+        if index.insert(chunk) {
+            self.chunks.push(chunk);
+        }
+        self.chunk_index = Some(index);
+    }
 }
 
 /// Visit the sorted unique union of sorted chunk sources using a min-heap.
@@ -238,7 +270,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             let candidate = candidates.entry(*archetype).or_default();
             for &row in rows {
                 report.stats.candidate_chunk_marks += 1;
-                candidate.chunks.insert(row / rows_per_chunk);
+                candidate.insert_chunk(row / rows_per_chunk);
             }
         }
         for change in changes.events {
@@ -258,7 +290,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             }
             let candidate = candidates.entry(change.archetype).or_default();
             report.stats.candidate_chunk_marks += 1;
-            candidate.chunks.insert(chunk);
+            candidate.insert_chunk(chunk);
             candidate.journal_events += 1;
         }
 
@@ -286,10 +318,9 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             };
             let rpc = table.rows_per_chunk();
             let len = table.len();
-            // Hash iteration is normalized before publishing results, keeping
-            // output deterministic while deduplicating repeated writes in
-            // expected O(1) per event instead of sorting every duplicate.
-            let mut chunks: Vec<_> = candidate.chunks.into_iter().collect();
+            // Only unique chunks reach this sort. Hash-set iteration is not
+            // observable; the published output remains deterministic.
+            let mut chunks = candidate.chunks;
             chunks.sort_unstable();
             for chunk in chunks {
                 report.stats.merged_candidates += 1;
