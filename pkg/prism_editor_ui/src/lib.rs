@@ -11,6 +11,8 @@ mod action;
 mod chrome;
 mod command;
 mod console;
+mod content;
+mod content_view;
 mod dock;
 mod inspector;
 mod outliner;
@@ -30,6 +32,11 @@ pub use command::{
     CommandPaletteProps,
 };
 pub use console::{console_panel, ConsolePanelProps};
+pub use content::{
+    ContentBrowserAction, ContentBrowserController, ContentBrowserError, MAX_CONTENT_PAGE_HISTORY,
+    MAX_CONTENT_SELECTION,
+};
+pub use content_view::BoundContentBrowser;
 pub use dock::{dock_workspace, DockWorkspaceProps};
 pub use inspector::{inspector_view, inspector_view_bound, InspectorViewProps};
 pub use outliner::{outliner_panel, outliner_panel_bound, OutlinerViewProps};

@@ -11,6 +11,8 @@ The crate provides builders for:
 - shell chrome with menu, toolbar, and status contributions;
 - a scored command palette backed by `prism_editor_shell::CommandIndex`;
 - bounded, keyed Outliner and Console panel trees;
+- a paged content folder/list panel with search, kind/tag/VCS filters,
+  favorites, pins, and bounded multiselection;
 - reflection projection rows with field paths and editability hints;
 - dock workspace chrome backed by `prism_editor_dock` contributions;
 - a renderer-neutral viewport host with camera/settings readouts;
@@ -49,3 +51,35 @@ This crate does not add a renderer, input device dispatcher, reflection
 mutation policy, or engine runtime adapter. Those policies remain owned by
 the application and existing Prism crates; this crate only assembles current
 state and translates semantic UI events into actions.
+
+Content browsing uses a separate `ContentBrowserAction` contract and does not
+extend `EditorAction`. `ContentBrowserController::build(&mut catalog)` returns
+`BoundContentBrowser`; mount or reconcile `view.element()` in Loom and use
+`view.bindings()` for semantic hit targets. Pass the displayed view, target key
+and `UiEvent` to `controller.handle_event(&mut catalog, &view, key, &event)`,
+then rebuild and reconcile. Search/kind/tag/VCS inputs accept text `Commit`
+events, asset rows accept `Select`, and buttons accept `Activate`. Disabled
+controls have no binding. `dispatch` returns an owned action without writing;
+`apply` supports explicit host commands. `handle_event` additionally rejects
+views from an earlier controller revision or catalog generation.
+
+The controller owns query, bounded cursor history and selection only. It
+borrows the host's catalog for `tree_page` queries and favorite/pinned updates,
+preserving all other record fields. Each page contains at most
+`min(page_size, MAX_VISIBLE_ROWS, catalog.limits().max_page_size)` rows; the
+default request is 64. Selection is capped at 4096 assets and previous-page
+history at 64 cursors. `Extend` replaces selection with the current page's
+inclusive anchor range; an anchor on another page falls back to the target.
+Selection survives navigation/filtering but deleted IDs are pruned on refresh.
+Catalog generation changes restart paging and a removed open folder falls
+back to root. Home also restarts the current folder traversal at root while
+retaining filters. Search normalization and filtering are the catalog's own
+semantics (ASCII case folding); kinds match exactly.
+
+The UI renders a real list without thumbnail signals. It owns no filesystem
+or Git worker, texture cache, GPU resource, persistence service or native
+window. The native app still needs to mount this panel, keep its controller
+and displayed bindings, route clicks/modifiers and committed text, and request
+redraw after actions or catalog publications. A host stylesheet may refine
+the supplied inline layout. See `docs/prism_editor_content_ui_zh.md` for the
+integration boundary and verified behavior.
