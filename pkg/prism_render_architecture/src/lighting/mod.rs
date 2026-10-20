@@ -18,12 +18,19 @@ pub mod restir_gi;
 pub mod restir_gi_resolve;
 pub mod restir_spatial;
 pub mod restir_temporal;
+pub mod scene;
 pub mod shadow;
 pub mod stochastic;
 pub mod trace;
 pub mod r#virtual;
 
 pub use debug::{ChannelSemantics, DebugMeta, DebugView, Scale};
+pub use scene::{
+    GenerationSafeLightHandle, LightChange, LightClass, LightClassification, LightEmission,
+    LightFieldEpochs, LightFieldMask, LightFlags, LightGeometry, LightMobility, LightPatch,
+    LightRecord, LightScene, LightSceneCheckpoint, LightSceneHandle, LightUnit, LightVisibility,
+    SceneApplyReport, SceneDelta, SceneError, SceneOperation,
+};
 
 use crate::ray_scene::TraceBackend;
 

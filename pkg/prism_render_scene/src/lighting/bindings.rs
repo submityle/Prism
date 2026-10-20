@@ -34,7 +34,6 @@ pub struct LightBindGroup {
     /// The most recently prepared bind group, if the buffers have uploaded.
     pub bind_group: Option<BindGroup>,
     buffer_ids: Option<[BufferId; 3]>,
-    buffer_version: u32,
 }
 
 impl FromWorld for LightBindGroup {
@@ -63,7 +62,6 @@ impl FromWorld for LightBindGroup {
             layout_descriptor,
             bind_group: None,
             buffer_ids: None,
-            buffer_version: 0,
         }
     }
 }
@@ -74,8 +72,7 @@ impl LightBindGroup {
             return;
         };
         let ids = [directionals.id(), punctuals.id(), environment.id()];
-        let version = buffers.version();
-        if self.buffer_ids == Some(ids) && self.buffer_version == version {
+        if self.buffer_ids == Some(ids) {
             return;
         }
         self.bind_group = Some(device.create_bind_group(
@@ -88,6 +85,5 @@ impl LightBindGroup {
             )),
         ));
         self.buffer_ids = Some(ids);
-        self.buffer_version = version;
     }
 }

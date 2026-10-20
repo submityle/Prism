@@ -3,6 +3,7 @@
 use bytemuck::{Pod, Zeroable};
 use prism_ecs::prelude::{Res, ResMut, Resource};
 use prism_ecs::world::World;
+use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::lighting::contract::{
     BudgetCompiler, ChangeFields, ChangeJournal, GiCandidateAvailability, GiCandidateRejection,
     LightingPlan, PlanCaps, RecipeExecution, RecipeId, RejectionExplanation, SceneStats, Tier,
@@ -10,6 +11,15 @@ use prism_render_architecture::lighting::contract::{
 use prism_render_architecture::lighting::{DebugMeta, DebugView};
 use prism_render_architecture::ray_scene::GpuBvhBuffers;
 use prism_render_driver::RenderDevice;
+use prism_render_material::{
+    BuiltinProgram, DynamicChannels, MaterialDomain, MaterialExecutionBinding,
+    MaterialExecutionTables, MaterialRecord, MaterialRenderClass, ProgramRef, RenderDomain,
+    ShadingPlan,
+};
+use prism_render_shading::{
+    classify_material_header_with_execution, evaluate_unlit_response,
+    surface_sample_from_parameters, ClassificationError,
+};
 use std::sync::Arc;
 
 use crate::config::RenderAppConfig;
@@ -37,6 +47,10 @@ pub struct LightingPlanState {
     pub explain: String,
     /// Last extracted scene-change checkpoint used by this plan.
     pub journal_snapshot: prism_render_architecture::lighting::contract::JournalSnapshot,
+    /// Canonical light-scene cursor paired with the compiled plan.
+    pub light_scene_sequence: u64,
+    /// Canonical light-scene epoch paired with the compiled plan.
+    pub light_scene_epoch: u64,
 }
 
 /// Render-world debug snapshot consumed by diagnostic views.
@@ -208,16 +222,14 @@ impl Default for LightingSurfaceInput {
     }
 }
 
-/// Main-world lighting inputs. The host publishes the actual analytic lights,
-/// a deterministic batch of surface samples, and appends invalidation fields;
-/// extraction copies only this immutable snapshot into the render world.
+/// Non-light main-world inputs: budget metadata, invalidation records, surface
+/// samples, and GI proposals. Analytic lights are owned only by
+/// [`crate::lighting_scene::LightingLightScene`].
 #[derive(Clone, Debug, Resource)]
 #[allow(missing_docs)]
 pub struct LightingSceneInputs {
     pub stats: SceneStats,
     pub journal: ChangeJournal,
-    pub directionals: Vec<LightingDirectionalInput>,
-    pub punctuals: Vec<LightingPunctualInput>,
     /// Per-surface GI candidates. Each surface owns its own ordered RIS batch;
     /// candidates are never implicitly broadcast across unrelated surfaces.
     pub gi_candidates: Vec<Vec<LightingGiCandidateInput>>,
@@ -235,6 +247,118 @@ pub struct LightingTriangleRadiance {
     pub primitive_id: u32,
     /// Linear, non-negative outgoing RGB radiance.
     pub rgb: [f32; 3],
+}
+
+/// Binds one stable BVH primitive to the existing authoritative material
+/// record and its verified execution identity.
+///
+/// This is an association only: material parameters remain owned by
+/// [`MaterialRecord`] and are never copied into a second material model.
+#[derive(Clone, Copy, Debug)]
+pub struct LightingTriangleMaterial<'a> {
+    /// Stable primitive ID stored in the packed BVH triangle.
+    pub primitive_id: u32,
+    /// Authoritative material record published by the material registry.
+    pub material: &'a MaterialRecord,
+    /// Verified plan/program/package/permutation binding for this material.
+    pub execution: MaterialExecutionBinding,
+    /// Runtime channels paired with the record at this material epoch.
+    pub dynamic: DynamicChannels,
+}
+
+/// Version and execution proof retained after authoritative material
+/// evaluation has produced triangle radiance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LightingMaterialProof {
+    /// Stable primitive whose radiance was evaluated.
+    pub primitive_id: u32,
+    /// Generational material identity used for the evaluation.
+    pub material_handle: GenerationalHandle,
+    /// Published record revision used for the evaluation.
+    pub material_revision: u32,
+    /// Registry snapshot epoch covering record, dynamic and execution state.
+    pub material_epoch: u64,
+    /// Exact verified execution words copied into the GPU material header.
+    pub execution_binding: [u32; 5],
+}
+
+/// A material cannot enter the triangle-radiance cache unless its response is
+/// exactly evaluable from the data carried by the current packed hit ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LightingMaterialTraceError {
+    /// A material handle uses the reserved invalid index.
+    InvalidMaterialHandle {
+        /// Primitive associated with the invalid material handle.
+        primitive_id: u32,
+    },
+    /// Only ordinary surface-domain material records are accepted.
+    UnsupportedMaterialDomain {
+        /// Primitive associated with the unsupported material domain.
+        primitive_id: u32,
+        /// Authored material domain.
+        domain: MaterialDomain,
+    },
+    /// The current trace slice has no non-surface object-domain evaluator.
+    UnsupportedRenderDomain {
+        /// Primitive associated with the unsupported render domain.
+        primitive_id: u32,
+        /// Runtime render domain.
+        domain: RenderDomain,
+    },
+    /// Blended, masked and transmissive classes need hit-time coverage/state.
+    UnsupportedRenderClass {
+        /// Primitive associated with the unsupported render class.
+        primitive_id: u32,
+        /// Runtime render class.
+        render_class: MaterialRenderClass,
+    },
+    /// Texture-backed responses need hit UVs and a texture sampling context.
+    TexturedMaterial {
+        /// Primitive associated with the textured material.
+        primitive_id: u32,
+        /// Number of bound texture rows.
+        textures: usize,
+    },
+    /// Runtime channels need hit-time coordinates or response evaluation.
+    DynamicMaterial {
+        /// Primitive associated with the dynamic material.
+        primitive_id: u32,
+    },
+    /// The header did not resolve through the verified execution tables.
+    Classification {
+        /// Primitive whose header failed verified classification.
+        primitive_id: u32,
+        /// Verified-classification failure.
+        error: ClassificationError,
+    },
+    /// The bound dense execution plan was not a single-program plan.
+    UnsupportedExecutionPlan {
+        /// Primitive associated with the unsupported plan shape.
+        primitive_id: u32,
+    },
+    /// Authoring and verified execution identities disagree.
+    PlanExecutionMismatch {
+        /// Primitive whose authoring and verified identities disagree.
+        primitive_id: u32,
+        /// Program selected by the authored response plan.
+        authored: ProgramRef,
+        /// Program selected by the verified execution tables.
+        verified: ProgramRef,
+    },
+    /// The packed hit ABI can currently evaluate only builtin Unlit exactly.
+    UnsupportedProgram {
+        /// Primitive associated with the unsupported response program.
+        primitive_id: u32,
+        /// Verified response program.
+        program: ProgramRef,
+    },
+    /// Authoritative evaluation produced a negative or non-finite value.
+    InvalidRadiance {
+        /// Primitive whose evaluated radiance was invalid.
+        primitive_id: u32,
+    },
+    /// Primitive coverage or the packed BVH itself is invalid.
+    Trace(crate::lighting_trace_gpu::TracePreparationError),
 }
 
 /// Optional host-owned packed scene used by the software-BVH GI trace pass.
@@ -260,6 +384,9 @@ pub struct LightingTraceSceneInput {
     pub outgoing_radiance: Arc<[LightingTriangleRadiance]>,
     /// Monotonic content revision for the outgoing-radiance table.
     pub radiance_revision: u64,
+    /// Material identity/version proofs for radiance built through the
+    /// authoritative material path. Host-authored radiance has no proofs.
+    pub material_proofs: Arc<[LightingMaterialProof]>,
     packed_radiance: Arc<std::sync::Mutex<Option<PackedRadianceCache>>>,
 }
 
@@ -293,8 +420,138 @@ impl LightingTraceSceneInput {
             ray_tmax,
             outgoing_radiance,
             radiance_revision,
+            material_proofs: Arc::from([]),
             packed_radiance: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Builds the exact material subset that the current triangle-only hit ABI
+    /// can evaluate without inventing UVs, instance identity, lighting or a
+    /// second response implementation.
+    pub fn from_untextured_unlit_materials(
+        bvh: Arc<GpuBvhBuffers>,
+        surface_ids: Vec<u64>,
+        rays_per_surface: u32,
+        ray_epsilon: f32,
+        ray_tmax: f32,
+        material_epoch: u64,
+        execution_tables: &MaterialExecutionTables,
+        materials: &[LightingTriangleMaterial<'_>],
+    ) -> Result<Self, LightingMaterialTraceError> {
+        let mut radiance = Vec::with_capacity(materials.len());
+        let mut proofs = Vec::with_capacity(materials.len());
+        for binding in materials {
+            let primitive_id = binding.primitive_id;
+            let material = binding.material;
+            if !material.handle.is_valid() {
+                return Err(LightingMaterialTraceError::InvalidMaterialHandle { primitive_id });
+            }
+            if material.domain != MaterialDomain::Surface {
+                return Err(LightingMaterialTraceError::UnsupportedMaterialDomain {
+                    primitive_id,
+                    domain: material.domain,
+                });
+            }
+            if material.render_domain != RenderDomain::Surface {
+                return Err(LightingMaterialTraceError::UnsupportedRenderDomain {
+                    primitive_id,
+                    domain: material.render_domain,
+                });
+            }
+            if !matches!(
+                material.render_class,
+                MaterialRenderClass::Opaque | MaterialRenderClass::OpaqueTwoSided
+            ) {
+                return Err(LightingMaterialTraceError::UnsupportedRenderClass {
+                    primitive_id,
+                    render_class: material.render_class,
+                });
+            }
+            if !material.textures.is_empty() {
+                return Err(LightingMaterialTraceError::TexturedMaterial {
+                    primitive_id,
+                    textures: material.textures.len(),
+                });
+            }
+            if !binding.dynamic.is_inert() {
+                return Err(LightingMaterialTraceError::DynamicMaterial { primitive_id });
+            }
+
+            let mut header =
+                material.header_with_execution(0, 0, material_epoch, Some(binding.execution));
+            let [wetness, snow, damage, dissolve] = binding.dynamic.to_words();
+            header.dynamic_wetness = wetness;
+            header.dynamic_snow = snow;
+            header.dynamic_damage = damage;
+            header.dynamic_dissolve = dissolve;
+            let verified =
+                classify_material_header_with_execution(&header, execution_tables, u32::MAX)
+                    .map_err(|error| LightingMaterialTraceError::Classification {
+                        primitive_id,
+                        error,
+                    })?;
+            let (left, right, _) = execution_tables
+                .plan_endpoints(binding.execution.shading_plan_index)
+                .map_err(|_| LightingMaterialTraceError::Classification {
+                    primitive_id,
+                    error: ClassificationError::InvalidExecutionBinding,
+                })?;
+            if right.is_some() {
+                return Err(LightingMaterialTraceError::UnsupportedExecutionPlan { primitive_id });
+            }
+            let authored = match material.response_plan {
+                ShadingPlan::Single { program } => program,
+                ShadingPlan::MaskBlend { .. } => {
+                    return Err(LightingMaterialTraceError::UnsupportedExecutionPlan {
+                        primitive_id,
+                    });
+                }
+            };
+            if authored != left || authored != verified {
+                return Err(LightingMaterialTraceError::PlanExecutionMismatch {
+                    primitive_id,
+                    authored,
+                    verified,
+                });
+            }
+            if verified != ProgramRef::Builtin(BuiltinProgram::Unlit) {
+                return Err(LightingMaterialTraceError::UnsupportedProgram {
+                    primitive_id,
+                    program: verified,
+                });
+            }
+
+            let rgb = evaluate_unlit_response(surface_sample_from_parameters(&material.surface));
+            if rgb
+                .iter()
+                .any(|channel| !channel.is_finite() || *channel < 0.0)
+            {
+                return Err(LightingMaterialTraceError::InvalidRadiance { primitive_id });
+            }
+            radiance.push(LightingTriangleRadiance { primitive_id, rgb });
+            proofs.push(LightingMaterialProof {
+                primitive_id,
+                material_handle: material.handle,
+                material_revision: material.revision,
+                material_epoch,
+                execution_binding: binding.execution.to_words(),
+            });
+        }
+
+        let mut input = Self::new(
+            bvh,
+            surface_ids,
+            rays_per_surface,
+            ray_epsilon,
+            ray_tmax,
+            Arc::from(radiance),
+            material_epoch,
+        );
+        input.material_proofs = Arc::from(proofs);
+        input
+            .build_packed_outgoing_radiance()
+            .map_err(LightingMaterialTraceError::Trace)?;
+        Ok(input)
     }
 
     /// Produces GPU upload order matching packed BVH triangle indices.
@@ -409,8 +666,6 @@ impl LightingSceneInputs {
         Self {
             stats,
             journal: ChangeJournal::new(),
-            directionals: Vec::new(),
-            punctuals: Vec::new(),
             gi_candidates: Vec::new(),
             surfaces: vec![LightingSurfaceInput::default()],
         }
@@ -422,8 +677,6 @@ impl Default for LightingSceneInputs {
         Self {
             stats: SceneStats::default(),
             journal: ChangeJournal::new(),
-            directionals: Vec::new(),
-            punctuals: Vec::new(),
             gi_candidates: Vec::new(),
             surfaces: vec![LightingSurfaceInput::default()],
         }
@@ -445,6 +698,12 @@ pub struct ExtractedLightingInputs {
     pub journal_snapshot: prism_render_architecture::lighting::contract::JournalSnapshot,
     pub directionals: Vec<LightingDirectionalInput>,
     pub punctuals: Vec<LightingPunctualInput>,
+    /// Canonical scene sequence represented by this extracted snapshot.
+    pub light_scene_sequence: u64,
+    /// Canonical scene epoch represented by this extracted snapshot.
+    pub light_scene_epoch: u64,
+    /// Explicit all-or-nothing native conversion failure, if any.
+    pub light_scene_error: Option<crate::lighting_scene::LightingSceneExtractError>,
     /// Per-surface GI candidates, aligned with `surfaces` when present.
     pub gi_candidates: Vec<Vec<LightingGiCandidateInput>>,
     pub surfaces: Vec<LightingSurfaceInput>,
@@ -605,6 +864,8 @@ impl LightingPlanState {
             caps: config.lighting_caps,
             tier: config.lighting_tier,
             journal_snapshot: Default::default(),
+            light_scene_sequence: 0,
+            light_scene_epoch: 0,
         }
     }
 }
@@ -615,15 +876,33 @@ pub(crate) fn extract_lighting_inputs(main: &mut World, render: &mut World) {
         .get_resource::<LightingSceneInputs>()
         .cloned()
         .unwrap_or_default();
+    if main
+        .get_resource::<crate::lighting_scene::LightingLightScene>()
+        .is_none()
+    {
+        main.insert_resource(crate::lighting_scene::LightingLightScene::default());
+    }
+    let light_scene = main
+        .get_resource::<crate::lighting_scene::LightingLightScene>()
+        .expect("canonical light scene was initialized")
+        .clone();
+    let derived = crate::lighting_scene::derive_native_lights(&light_scene.scene);
+    let (directionals, punctuals, light_scene_error) = match derived {
+        Ok(native) => (native.directionals, native.punctuals, None),
+        Err(error) => (Vec::new(), Vec::new(), Some(error)),
+    };
     let mut stats = inputs.stats;
-    if !inputs.directionals.is_empty() || !inputs.punctuals.is_empty() {
-        stats.lights = (inputs.directionals.len() + inputs.punctuals.len()) as u32;
+    if !light_scene.scene.is_empty() {
+        stats.lights = u32::try_from(light_scene.scene.len()).unwrap_or(u32::MAX);
     }
     render.insert_resource(ExtractedLightingInputs {
         stats,
         journal_snapshot: inputs.journal.snapshot(),
-        directionals: inputs.directionals,
-        punctuals: inputs.punctuals,
+        directionals,
+        punctuals,
+        light_scene_sequence: light_scene.scene.sequence(),
+        light_scene_epoch: light_scene.scene.scene_epoch(),
+        light_scene_error,
         gi_candidates: inputs.gi_candidates,
         surfaces: inputs.surfaces,
         trace_scene: main.get_resource::<LightingTraceSceneInput>().cloned(),
@@ -648,8 +927,11 @@ pub(crate) fn compile_lighting_plan<I>(
         return;
     }
     let previous_epoch = state.journal_snapshot.epoch;
+    let previous_light_scene_epoch = state.light_scene_epoch;
     state.scene_stats = inputs.stats;
     state.journal_snapshot = inputs.journal_snapshot;
+    state.light_scene_sequence = inputs.light_scene_sequence;
+    state.light_scene_epoch = inputs.light_scene_epoch;
     let availability = inputs.candidate_availability(runtime.runtime().device().capabilities());
     state.plan = BudgetCompiler::compile(
         state.scene_stats,
@@ -666,8 +948,11 @@ pub(crate) fn compile_lighting_plan<I>(
     stats.lighting_recipes_selected = state.plan.recipes.len() as u64;
     stats.lighting_recipes_rejected = state.plan.rejected.len() as u64;
     stats.lighting_executions_planned = state.executions.len() as u64;
+    let journal_invalidations = changed_epoch_fields(previous_epoch, state.journal_snapshot.epoch);
+    let scene_invalidated_without_journal = previous_light_scene_epoch != state.light_scene_epoch
+        && previous_epoch.lighting == state.journal_snapshot.epoch.lighting;
     stats.lighting_cache_invalidations =
-        changed_epoch_fields(previous_epoch, state.journal_snapshot.epoch) as u64;
+        u64::from(journal_invalidations + u32::from(scene_invalidated_without_journal));
 }
 
 /// Synchronizes plan diagnostics after compilation and before queue/execution.
@@ -838,7 +1123,456 @@ fn normalize_or(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod radiance_tests {
     use super::*;
-    use prism_render_architecture::ray_scene::{Bvh, Triangle, TRIANGLE_WORDS};
+    use prism_render_architecture::{
+        abi::{AbiHash, AbiVersion},
+        ray_scene::{Bvh, Triangle, TRIANGLE_WORDS},
+        shader_package::{
+            ArtifactDigest, ManifestExpectation, ModuleId, PermutationSpace, ShaderPackageId,
+            ShaderPackageManifest, ShaderPackageRegistry, ShaderPackageVariantManifest,
+        },
+    };
+    use prism_render_material::{
+        fallback_material_record, ChannelMask, CompiledEntry, ExecutionFamily, GpuMaterialTexture,
+    };
+
+    fn execution_fixture(
+        program: ProgramRef,
+    ) -> (MaterialExecutionTables, MaterialExecutionBinding) {
+        let manifest = ShaderPackageManifest {
+            id: ShaderPackageId::new("lighting-material-trace-test"),
+            source_revision: "rev-1".into(),
+            entry_point: "main".into(),
+            abi_version: AbiVersion::from_parts(1, 0),
+            abi_hash: AbiHash::from_bytes(b"lighting-material-trace-test"),
+            variants: ShaderPackageVariantManifest::from_digests(
+                &PermutationSpace::new([2]),
+                [ArtifactDigest([1; 32]), ArtifactDigest([2; 32])],
+            )
+            .unwrap(),
+        };
+        let binary = vec![
+            0x07230203,
+            0x00010000,
+            0,
+            5,
+            0,
+            (2 << 16) | 17,
+            1,
+            (3 << 16) | 14,
+            0,
+            1,
+            (5 << 16) | 15,
+            5,
+            3,
+            0x6e69616d,
+            0,
+            (6 << 16) | 16,
+            3,
+            17,
+            1,
+            1,
+            1,
+            (2 << 16) | 19,
+            1,
+            (3 << 16) | 33,
+            2,
+            1,
+            (5 << 16) | 54,
+            1,
+            3,
+            0,
+            2,
+            (2 << 16) | 248,
+            4,
+            (1 << 16) | 253,
+            (1 << 16) | 56,
+        ];
+        let entry = CompiledEntry::from_spirv(manifest.clone(), binary).unwrap();
+        let mut packages = ShaderPackageRegistry::new();
+        packages
+            .register_verified(entry.artifact().clone())
+            .unwrap();
+        packages
+            .validate(
+                &manifest.id,
+                &ManifestExpectation::new(manifest.abi_version, manifest.abi_hash),
+            )
+            .unwrap();
+
+        let mut tables = MaterialExecutionTables::new();
+        let package = tables.register_package(&entry, &packages).unwrap();
+        let response = tables
+            .register_program(
+                program,
+                &entry,
+                package,
+                ModuleId(7),
+                PermutationSpace::try_new([2]).unwrap(),
+            )
+            .unwrap();
+        let family = match program {
+            ProgramRef::Builtin(BuiltinProgram::Lit) => ExecutionFamily::FusedBuiltin,
+            ProgramRef::Builtin(BuiltinProgram::Npr | BuiltinProgram::Unlit) => {
+                ExecutionFamily::SplitResponse
+            }
+            ProgramRef::Registered(_) => ExecutionFamily::SplitResponse,
+        };
+        let plan = tables
+            .register_plan(
+                ShadingPlan::Single { program },
+                response,
+                None,
+                family,
+                ChannelMask::default(),
+            )
+            .unwrap();
+        let binding = tables
+            .bind_raw(plan.get(), response.get(), package.get(), 1)
+            .unwrap();
+        (tables, binding)
+    }
+
+    fn material(
+        index: u32,
+        generation: u32,
+        revision: u32,
+        program: BuiltinProgram,
+        base_color: [f32; 3],
+        emission_color: [f32; 3],
+        emission_luminance: f32,
+    ) -> MaterialRecord {
+        let mut record = fallback_material_record(
+            GenerationalHandle::new(index, generation),
+            u64::from(revision),
+        );
+        record.response_plan = ShadingPlan::single_builtin(program);
+        record.surface.base_color = [base_color[0], base_color[1], base_color[2], 1.0];
+        record.surface.emission_color =
+            [emission_color[0], emission_color[1], emission_color[2], 1.0];
+        record.surface.emission_luminance = emission_luminance;
+        record
+    }
+
+    fn one_triangle_bvh() -> Arc<GpuBvhBuffers> {
+        Arc::new(GpuBvhBuffers::from_bvh(&Bvh::build(&[Triangle::new(
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [0.0, 1.0, -1.0],
+            19,
+        )])))
+    }
+
+    fn build_one<'a>(
+        tables: &MaterialExecutionTables,
+        binding: MaterialExecutionBinding,
+        record: &'a MaterialRecord,
+        dynamic: DynamicChannels,
+    ) -> Result<LightingTraceSceneInput, LightingMaterialTraceError> {
+        LightingTraceSceneInput::from_untextured_unlit_materials(
+            one_triangle_bvh(),
+            vec![1],
+            1,
+            0.001,
+            10.0,
+            41,
+            tables,
+            &[LightingTriangleMaterial {
+                primitive_id: 19,
+                material: record,
+                execution: binding,
+                dynamic,
+            }],
+        )
+    }
+
+    #[test]
+    fn authoritative_unlit_materials_feed_trace_and_candidate_radiance() {
+        let bvh = Arc::new(GpuBvhBuffers::from_bvh(&Bvh::build(&[
+            Triangle::new(
+                [-2.0, -1.0, -1.0],
+                [-1.0, -1.0, -1.0],
+                [-1.5, 1.0, -1.0],
+                73,
+            ),
+            Triangle::new([1.0, -1.0, -1.0], [2.0, -1.0, -1.0], [1.5, 1.0, -1.0], 11),
+        ])));
+        let (tables, binding) = execution_fixture(ProgramRef::Builtin(BuiltinProgram::Unlit));
+        let material_11 = material(
+            7,
+            3,
+            9,
+            BuiltinProgram::Unlit,
+            [0.2, 0.4, 0.6],
+            [0.1, 0.2, 0.3],
+            2.0,
+        );
+        let material_73 = material(
+            8,
+            4,
+            12,
+            BuiltinProgram::Unlit,
+            [0.7, 0.3, 0.1],
+            [0.4, 0.2, 0.1],
+            0.5,
+        );
+        let input = LightingTraceSceneInput::from_untextured_unlit_materials(
+            Arc::clone(&bvh),
+            vec![101, 102],
+            1,
+            0.001,
+            10.0,
+            41,
+            &tables,
+            &[
+                LightingTriangleMaterial {
+                    primitive_id: 11,
+                    material: &material_11,
+                    execution: binding,
+                    dynamic: DynamicChannels::NONE,
+                },
+                LightingTriangleMaterial {
+                    primitive_id: 73,
+                    material: &material_73,
+                    execution: binding,
+                    dynamic: DynamicChannels::NONE,
+                },
+            ],
+        )
+        .unwrap();
+
+        let expected_11 =
+            evaluate_unlit_response(surface_sample_from_parameters(&material_11.surface));
+        let expected_73 =
+            evaluate_unlit_response(surface_sample_from_parameters(&material_73.surface));
+        assert_eq!(input.radiance_revision, 41);
+        assert_eq!(input.outgoing_radiance[0].rgb, expected_11);
+        assert_eq!(input.outgoing_radiance[1].rgb, expected_73);
+        assert_eq!(
+            input.material_proofs,
+            Arc::from([
+                LightingMaterialProof {
+                    primitive_id: 11,
+                    material_handle: material_11.handle,
+                    material_revision: 9,
+                    material_epoch: 41,
+                    execution_binding: binding.to_words(),
+                },
+                LightingMaterialProof {
+                    primitive_id: 73,
+                    material_handle: material_73.handle,
+                    material_revision: 12,
+                    material_epoch: 41,
+                    execution_binding: binding.to_words(),
+                },
+            ])
+        );
+
+        let packed_ids = bvh
+            .triangles
+            .chunks_exact(TRIANGLE_WORDS)
+            .map(|triangle| triangle[9])
+            .collect::<Vec<_>>();
+        assert_ne!(packed_ids, [11, 73], "fixture must exercise BVH reordering");
+        let packed_radiance = input.packed_outgoing_radiance().unwrap();
+        for (primitive_id, radiance) in packed_ids.iter().zip(packed_radiance.iter()) {
+            let expected = if *primitive_id == 11 {
+                expected_11
+            } else {
+                expected_73
+            };
+            assert_eq!(&radiance[..3], &expected);
+        }
+
+        let scene = crate::lighting_trace_gpu::PackedTraceScene::from(bvh.as_ref());
+        let rays = [
+            crate::lighting_trace_gpu::TraceRay {
+                origin: [-1.5, 0.0, 0.0],
+                t_min: 0.001,
+                direction: [0.0, 0.0, -1.0],
+                t_max: 10.0,
+                direction_pdf: 0.25,
+                selection_u01: 0.25,
+            },
+            crate::lighting_trace_gpu::TraceRay {
+                origin: [1.5, 0.0, 0.0],
+                t_min: 0.001,
+                direction: [0.0, 0.0, -1.0],
+                t_max: 10.0,
+                direction_pdf: 0.25,
+                selection_u01: 0.75,
+            },
+        ];
+        let hits = crate::lighting_trace_gpu::trace_reference(&scene, &rays).unwrap();
+        assert_eq!(hits[0].primitive, 73);
+        assert_eq!(hits[1].primitive, 11);
+        let surfaces = [
+            LightingSurfaceInput {
+                position: rays[0].origin,
+                normal: [0.0, 0.0, -1.0],
+                albedo: [1.0; 3],
+                ambient: [0.0; 3],
+            },
+            LightingSurfaceInput {
+                position: rays[1].origin,
+                normal: [0.0, 0.0, -1.0],
+                albedo: [1.0; 3],
+                ambient: [0.0; 3],
+            },
+        ];
+        let packed_rgb = packed_radiance
+            .iter()
+            .map(|entry| [entry[0], entry[1], entry[2]])
+            .collect::<Vec<_>>();
+        let candidates = crate::lighting_trace_gpu::build_gi_candidates_reference(
+            &scene,
+            &rays,
+            &hits,
+            &surfaces,
+            &input.surface_ids,
+            7,
+            &packed_rgb,
+        )
+        .unwrap();
+        assert_eq!(candidates[0][0].radiance, expected_73);
+        assert_eq!(candidates[1][0].radiance, expected_11);
+        assert!(candidates.iter().all(|batch| batch[0].target_pdf > 0.0));
+
+        let newer = LightingTraceSceneInput::from_untextured_unlit_materials(
+            bvh,
+            vec![101, 102],
+            1,
+            0.001,
+            10.0,
+            42,
+            &tables,
+            &[
+                LightingTriangleMaterial {
+                    primitive_id: 11,
+                    material: &material_11,
+                    execution: binding,
+                    dynamic: DynamicChannels::NONE,
+                },
+                LightingTriangleMaterial {
+                    primitive_id: 73,
+                    material: &material_73,
+                    execution: binding,
+                    dynamic: DynamicChannels::NONE,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(newer.radiance_revision, 42);
+        assert!(newer
+            .material_proofs
+            .iter()
+            .all(|proof| proof.material_epoch == 42));
+        assert!(!Arc::ptr_eq(
+            &packed_radiance,
+            &newer.packed_outgoing_radiance().unwrap()
+        ));
+    }
+
+    #[test]
+    fn authoritative_material_path_rejects_inputs_the_hit_abi_cannot_evaluate() {
+        let unlit = ProgramRef::Builtin(BuiltinProgram::Unlit);
+        let (unlit_tables, unlit_binding) = execution_fixture(unlit);
+        let base = material(
+            7,
+            3,
+            9,
+            BuiltinProgram::Unlit,
+            [0.2, 0.4, 0.6],
+            [0.0; 3],
+            0.0,
+        );
+
+        let mut textured = base.clone();
+        textured
+            .textures
+            .push(GpuMaterialTexture::non_virtual(4, 2, 1, 0));
+        assert_eq!(
+            build_one(
+                &unlit_tables,
+                unlit_binding,
+                &textured,
+                DynamicChannels::NONE,
+            )
+            .unwrap_err(),
+            LightingMaterialTraceError::TexturedMaterial {
+                primitive_id: 19,
+                textures: 1,
+            }
+        );
+        assert_eq!(
+            build_one(
+                &unlit_tables,
+                unlit_binding,
+                &base,
+                DynamicChannels {
+                    wetness: 0.5,
+                    ..DynamicChannels::NONE
+                },
+            )
+            .unwrap_err(),
+            LightingMaterialTraceError::DynamicMaterial { primitive_id: 19 }
+        );
+
+        let lit = ProgramRef::Builtin(BuiltinProgram::Lit);
+        let (lit_tables, lit_binding) = execution_fixture(lit);
+        let lit_material = material(8, 4, 10, BuiltinProgram::Lit, [0.3; 3], [0.0; 3], 0.0);
+        assert_eq!(
+            build_one(
+                &lit_tables,
+                lit_binding,
+                &lit_material,
+                DynamicChannels::NONE,
+            )
+            .unwrap_err(),
+            LightingMaterialTraceError::UnsupportedProgram {
+                primitive_id: 19,
+                program: lit,
+            }
+        );
+        assert_eq!(
+            build_one(&lit_tables, lit_binding, &base, DynamicChannels::NONE,).unwrap_err(),
+            LightingMaterialTraceError::PlanExecutionMismatch {
+                primitive_id: 19,
+                authored: unlit,
+                verified: lit,
+            }
+        );
+
+        let mut invalid = base.clone();
+        invalid.surface.base_color[0] = -1.0;
+        assert_eq!(
+            build_one(
+                &unlit_tables,
+                unlit_binding,
+                &invalid,
+                DynamicChannels::NONE,
+            )
+            .unwrap_err(),
+            LightingMaterialTraceError::InvalidRadiance { primitive_id: 19 }
+        );
+
+        let mut blended = base.clone();
+        blended.response_plan = ShadingPlan::MaskBlend {
+            left: unlit,
+            right: ProgramRef::Builtin(BuiltinProgram::Npr),
+            mask: prism_render_material::ResponseMaskSource::RegionMask,
+            domain: prism_render_material::BlendDomain::FullRadiance,
+        };
+        assert_eq!(
+            build_one(
+                &unlit_tables,
+                unlit_binding,
+                &blended,
+                DynamicChannels::NONE,
+            )
+            .unwrap_err(),
+            LightingMaterialTraceError::UnsupportedExecutionPlan { primitive_id: 19 }
+        );
+    }
 
     #[test]
     fn radiance_table_is_reordered_by_stable_primitive_id() {

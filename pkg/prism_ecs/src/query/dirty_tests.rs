@@ -211,10 +211,13 @@ fn forward_dirty_window_uses_column_journal_without_scanning_all_archetypes() {
     let last_run = w.change_tick();
     w.increment_change_tick();
     let this_run = w.change_tick();
-    w.get_mut::<Big>(entities[9]).unwrap().tag += 1;
+    for _ in 0..3 {
+        w.get_mut::<Big>(entities[9]).unwrap().tag += 1;
+    }
     let report = state.dirty_chunks_with_stats(&w, last_run, this_run);
     assert!(!report.stats.journal_gap);
-    assert!(report.stats.journal_events >= 1);
+    assert_eq!(report.stats.journal_events, 3);
+    assert_eq!(report.stats.candidate_archetype_checks, 1);
     assert_eq!(report.stats.summaries_tested, 0);
     assert_eq!(report.stats.column_candidates, 0);
     assert_eq!(report.stats.matched_archetypes, 1);

@@ -12,6 +12,7 @@ mod bindings;
 mod buffers;
 mod cluster;
 mod extract;
+mod incremental;
 mod plugin;
 mod probe;
 mod stylized_config;
@@ -30,6 +31,10 @@ pub use cluster::{
     ClusterViewFit, ExtractedClusterView, GpuClusterGrid,
 };
 pub use extract::ExtractedLights;
+pub use incremental::{
+    DirtyRange, IncrementalLightTable, LightGpuPayload, LightSlotHandle, SlotRetirement,
+    UploadPlan, UploadPolicy, UploadStats,
+};
 pub use plugin::PrismLightingPlugin;
 pub use probe::{cubemap_faces_from_image, project_image_to_sh, EnvironmentProbeCache};
 pub use stylized_config::StylizedLighting;

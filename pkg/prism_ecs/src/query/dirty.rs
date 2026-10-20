@@ -78,6 +78,9 @@ pub struct DirtyChunkStats {
     /// Number of matching table journal events consumed by the strict
     /// incremental path.
     pub journal_events: usize,
+    /// Number of distinct candidate archetypes checked against query data and
+    /// filters after journal and sparse-index candidates are grouped.
+    pub candidate_archetype_checks: usize,
     /// Whether this request had to use the conservative path because the
     /// retained table journal could not establish a complete baseline.
     pub journal_gap: bool,
@@ -90,6 +93,12 @@ pub struct DirtyChunkReport {
     pub chunks: Vec<DirtyChunk>,
     /// Metadata work and output volume for this pass.
     pub stats: DirtyChunkStats,
+}
+
+#[derive(Default)]
+struct DirtyChunkCandidates {
+    chunks: Vec<usize>,
+    journal_events: usize,
 }
 
 /// A contiguous window of rows in one archetype whose chunk-version indicates a
@@ -154,11 +163,12 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             return false;
         }
 
-        let mut candidates: BTreeMap<ArchetypeId, Vec<usize>> = BTreeMap::new();
+        let mut candidates: BTreeMap<ArchetypeId, DirtyChunkCandidates> = BTreeMap::new();
         for (archetype, rows) in sparse_chunks {
             candidates
                 .entry(*archetype)
                 .or_default()
+                .chunks
                 .extend(rows.iter().map(|row| {
                     row / world
                         .archetypes()
@@ -175,31 +185,34 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             let Some(archetype) = world.archetypes().get(change.archetype) else {
                 continue;
             };
-            if !D::matches(self.data_state(), archetype)
-                || !F::matches(self.filter_state(), archetype)
-            {
-                continue;
-            }
             let Some(chunk) = change.chunk else {
                 continue;
             };
             if chunk >= archetype.table().chunk_count() {
                 continue;
             }
-            candidates.entry(change.archetype).or_default().push(chunk);
-            report.stats.journal_events += 1;
+            let candidate = candidates.entry(change.archetype).or_default();
+            candidate.chunks.push(chunk);
+            candidate.journal_events += 1;
         }
 
-        for chunks in candidates.values_mut() {
-            chunks.sort_unstable();
-            chunks.dedup();
+        for candidate in candidates.values_mut() {
+            candidate.chunks.sort_unstable();
+            candidate.chunks.dedup();
         }
 
-        for (archetype_id, chunks) in candidates {
+        for (archetype_id, candidate) in candidates {
             let Some(archetype) = world.archetypes().get(archetype_id) else {
                 continue;
             };
+            report.stats.candidate_archetype_checks += 1;
+            if !D::matches(self.data_state(), archetype)
+                || !F::matches(self.filter_state(), archetype)
+            {
+                continue;
+            }
             report.stats.matched_archetypes += 1;
+            report.stats.journal_events += candidate.journal_events;
             let table = archetype.table();
             let filter_fetch = unsafe {
                 F::init_fetch(
@@ -212,7 +225,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             };
             let rpc = table.rows_per_chunk();
             let len = table.len();
-            for chunk in chunks {
+            for chunk in candidate.chunks {
                 report.stats.merged_candidates += 1;
                 if !F::filter_chunk(filter_fetch, chunk) {
                     report.stats.filter_rejected += 1;

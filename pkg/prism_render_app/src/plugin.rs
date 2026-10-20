@@ -447,8 +447,6 @@ where
         app.insert_resource(crate::LightingSceneInputs {
             stats: config.lighting_scene_stats,
             journal: prism_render_architecture::lighting::contract::ChangeJournal::new(),
-            directionals: Vec::new(),
-            punctuals: Vec::new(),
             gi_candidates: Vec::new(),
             surfaces: vec![crate::lighting::LightingSurfaceInput::default()],
         });

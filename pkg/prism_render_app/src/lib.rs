@@ -73,6 +73,7 @@ mod intent;
 mod label;
 mod lighting;
 mod lighting_gpu;
+pub mod lighting_scene;
 pub mod lighting_trace_gpu;
 mod material;
 mod mesh;
@@ -129,10 +130,12 @@ pub use image::GpuImage;
 pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
 pub use lighting::{
-    ExtractedLightingInputs, LightingDirectionalInput, LightingGiCandidateInput, LightingPlanState,
-    LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput, LightingTraceSceneInput,
+    ExtractedLightingInputs, LightingDirectionalInput, LightingGiCandidateInput,
+    LightingMaterialProof, LightingMaterialTraceError, LightingPlanState, LightingPunctualInput,
+    LightingSceneInputs, LightingSurfaceInput, LightingTraceSceneInput, LightingTriangleMaterial,
     LightingTriangleRadiance,
 };
+pub use lighting_scene::{LightingLightScene, LightingSceneExtractError, NativeLights};
 pub use lighting_trace_gpu::{
     LightingTraceState, TracePreparationError, TracePreparationStatus, MAX_HOST_TRACE_RAYS,
 };
@@ -224,8 +227,9 @@ pub mod prelude {
     pub use crate::label::{Render, RenderApp, RenderStartup};
     pub use crate::lighting::{
         ExtractedLightingInputs, LightingDirectionalInput, LightingGiCandidateInput,
-        LightingPlanState, LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput,
-        LightingTraceSceneInput, LightingTriangleRadiance,
+        LightingMaterialProof, LightingMaterialTraceError, LightingPlanState,
+        LightingPunctualInput, LightingSceneInputs, LightingSurfaceInput, LightingTraceSceneInput,
+        LightingTriangleMaterial, LightingTriangleRadiance,
     };
     pub use crate::material::{
         BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,

@@ -2592,14 +2592,59 @@ fn deterministic_gi_oracle_ignores_invalid_and_primary_backfacing_candidates() {
 #[test]
 fn lighting_inputs_extract_stats_and_field_epochs_into_the_render_world() {
     let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    app.world_mut()
+        .insert_resource(crate::LightingLightScene::default());
     let mut inputs = LightingSceneInputs::with_stats(SceneStats {
         lights: 12,
         punctual_max: 4,
         ..SceneStats::default()
     });
-    inputs.directionals = vec![LightingDirectionalInput::default(); 2];
-    inputs.punctuals = vec![LightingPunctualInput::default(); 10];
     app.world_mut().insert_resource(inputs);
+    {
+        use prism_render_architecture::lighting::{
+            LightClass, LightClassification, LightEmission, LightGeometry, LightMobility,
+            LightRecord, LightUnit,
+        };
+        let mut scene = app.world_mut().resource_mut::<crate::LightingLightScene>();
+        for _ in 0..2 {
+            scene
+                .scene
+                .insert(
+                    LightRecord::new(
+                        LightClassification {
+                            class: LightClass::Directional,
+                            mobility: LightMobility::Static,
+                        },
+                        LightEmission::new([1.0; 3], 1.0, LightUnit::Lux),
+                        LightGeometry::Directional {
+                            direction: [0.0, -1.0, 0.0],
+                        },
+                    ),
+                    1,
+                )
+                .expect("insert directional");
+        }
+        for index in 0..10 {
+            scene
+                .scene
+                .insert(
+                    LightRecord::new(
+                        LightClassification {
+                            class: LightClass::Point,
+                            mobility: LightMobility::Dynamic,
+                        },
+                        LightEmission::new([1.0; 3], 1.0, LightUnit::Candela),
+                        LightGeometry::Point {
+                            position: [index as f32, 1.0, 0.0],
+                            radius: 0.1,
+                            range: 10.0,
+                        },
+                    ),
+                    1,
+                )
+                .expect("insert point");
+        }
+    }
     app.world_mut()
         .resource_mut::<LightingSceneInputs>()
         .mark_changed(1, ChangeFields::LIGHTING);
@@ -2611,6 +2656,9 @@ fn lighting_inputs_extract_stats_and_field_epochs_into_the_render_world() {
     assert_eq!(extracted.stats.lights, 12);
     assert_eq!(extracted.directionals.len(), 2);
     assert_eq!(extracted.punctuals.len(), 10);
+    assert_eq!(extracted.light_scene_sequence, 12);
+    assert_eq!(extracted.light_scene_epoch, 12);
+    assert_eq!(extracted.light_scene_error, None);
     assert_eq!(extracted.journal_snapshot.sequence, 1);
     assert_eq!(extracted.journal_snapshot.epoch.lighting, 1);
 
@@ -2625,6 +2673,155 @@ fn lighting_inputs_extract_stats_and_field_epochs_into_the_render_world() {
         stats.lighting_executions_planned,
         state.executions.len() as u64
     );
+}
+
+#[test]
+fn canonical_light_scene_insert_update_remove_are_extracted_with_freshness() {
+    use prism_render_architecture::lighting::{
+        LightClass, LightClassification, LightEmission, LightGeometry, LightMobility, LightPatch,
+        LightRecord, LightUnit,
+    };
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    app.world_mut()
+        .insert_resource(crate::LightingLightScene::default());
+    let (handle, _) = app
+        .world_mut()
+        .resource_mut::<crate::LightingLightScene>()
+        .scene
+        .insert(
+            LightRecord::new(
+                LightClassification {
+                    class: LightClass::Point,
+                    mobility: LightMobility::Dynamic,
+                },
+                LightEmission::new([1.0; 3], 2.0, LightUnit::Candela),
+                LightGeometry::Point {
+                    position: [0.0, 2.0, 0.0],
+                    radius: 0.1,
+                    range: 8.0,
+                },
+            ),
+            1,
+        )
+        .expect("insert");
+    app.update();
+    {
+        let render = app.get_sub_app(RenderApp).expect("render sub-app");
+        let extracted = render.world.resource::<ExtractedLightingInputs>();
+        assert_eq!(extracted.light_scene_sequence, 1);
+        assert_eq!(extracted.punctuals.len(), 1);
+        assert_eq!(extracted.punctuals[0].intensity, [2.0; 3]);
+        assert_eq!(extracted.light_scene_error, None);
+        let state = render.world.resource::<LightingPlanState>();
+        assert_eq!(state.light_scene_sequence, extracted.light_scene_sequence);
+        assert_eq!(state.light_scene_epoch, extracted.light_scene_epoch);
+    }
+
+    app.world_mut()
+        .resource_mut::<crate::LightingLightScene>()
+        .scene
+        .update(
+            handle,
+            LightPatch::new().with_emission(LightEmission::new([0.5; 3], 4.0, LightUnit::Candela)),
+            2,
+        )
+        .expect("update");
+    app.update();
+    {
+        let render = app.get_sub_app(RenderApp).expect("render sub-app");
+        let extracted = render.world.resource::<ExtractedLightingInputs>();
+        assert_eq!(extracted.light_scene_sequence, 2);
+        assert_eq!(extracted.punctuals[0].intensity, [2.0; 3]);
+        assert_eq!(
+            render
+                .world
+                .resource::<RenderFrameStats>()
+                .lighting_cache_invalidations,
+            1
+        );
+    }
+
+    app.world_mut()
+        .resource_mut::<crate::LightingLightScene>()
+        .scene
+        .remove(handle, 3)
+        .expect("remove");
+    app.update();
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let extracted = render.world.resource::<ExtractedLightingInputs>();
+    assert_eq!(extracted.light_scene_sequence, 3);
+    assert_eq!(extracted.light_scene_epoch, 3);
+    assert!(extracted.punctuals.is_empty());
+    assert_eq!(
+        render
+            .world
+            .resource::<RenderFrameStats>()
+            .lighting_cache_invalidations,
+        1
+    );
+}
+
+#[test]
+fn unsupported_canonical_light_rejects_the_whole_native_snapshot_explicitly() {
+    use prism_render_architecture::lighting::{
+        LightClass, LightClassification, LightEmission, LightGeometry, LightMobility, LightRecord,
+        LightUnit,
+    };
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    app.world_mut()
+        .insert_resource(crate::LightingLightScene::default());
+    {
+        let mut scene = app.world_mut().resource_mut::<crate::LightingLightScene>();
+        scene
+            .scene
+            .insert(
+                LightRecord::new(
+                    LightClassification {
+                        class: LightClass::Directional,
+                        mobility: LightMobility::Static,
+                    },
+                    LightEmission::new([1.0; 3], 1.0, LightUnit::Lux),
+                    LightGeometry::Directional {
+                        direction: [0.0, -1.0, 0.0],
+                    },
+                ),
+                1,
+            )
+            .expect("supported directional");
+        scene
+            .scene
+            .insert(
+                LightRecord::new(
+                    LightClassification {
+                        class: LightClass::Rect,
+                        mobility: LightMobility::Static,
+                    },
+                    LightEmission::new([1.0; 3], 1.0, LightUnit::Nits),
+                    LightGeometry::Rect {
+                        position: [0.0; 3],
+                        direction: [0.0, -1.0, 0.0],
+                        right: [1.0, 0.0, 0.0],
+                        up: [0.0, 0.0, 1.0],
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                ),
+                1,
+            )
+            .expect("valid but unsupported rect light");
+    }
+    app.update();
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let extracted = render.world.resource::<ExtractedLightingInputs>();
+    assert!(matches!(
+        extracted.light_scene_error,
+        Some(crate::LightingSceneExtractError::UnsupportedClass {
+            class: LightClass::Rect,
+            ..
+        })
+    ));
+    assert!(extracted.directionals.is_empty());
+    assert!(extracted.punctuals.is_empty());
 }
 
 #[test]
@@ -2848,6 +3045,8 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         prism_render_driver_wgpu::WgpuInstance::new(),
         RenderAppConfig::new(extent),
     ));
+    app.world_mut()
+        .insert_resource(crate::LightingLightScene::default());
     let surface = LightingSurfaceInput {
         position: [0.0, 0.0, 0.0],
         normal: [0.0, 1.0, 0.0],
@@ -2856,7 +3055,7 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     };
     let directionals = vec![LightingDirectionalInput {
         direction_to_light: [0.0, 1.0, 0.0],
-        visibility: 0.5,
+        visibility: 1.0,
         illuminance: [2.0, 4.0, 8.0],
         _padding: 0.0,
     }];
@@ -2915,11 +3114,50 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
         .map(|(direct, gi)| [direct[0] + gi[0], direct[1] + gi[1], direct[2] + gi[2]])
         .collect::<Vec<_>>();
     {
-        let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
-        inputs.surfaces = surfaces.clone();
-        inputs.directionals = directionals;
-        inputs.punctuals = punctuals;
-        inputs.gi_candidates = gi_candidates_per_surface;
+        use prism_render_architecture::lighting::{
+            LightClass, LightClassification, LightEmission, LightGeometry, LightMobility,
+            LightRecord, LightUnit,
+        };
+        {
+            let inputs = app.world_mut().resource_mut::<LightingSceneInputs>();
+            inputs.surfaces = surfaces.clone();
+            inputs.gi_candidates = gi_candidates_per_surface;
+        }
+        let mut lights = app.world_mut().resource_mut::<crate::LightingLightScene>();
+        lights
+            .scene
+            .insert(
+                LightRecord::new(
+                    LightClassification {
+                        class: LightClass::Directional,
+                        mobility: LightMobility::Static,
+                    },
+                    LightEmission::new([2.0, 4.0, 8.0], 1.0, LightUnit::Lux),
+                    LightGeometry::Directional {
+                        direction: [0.0, -1.0, 0.0],
+                    },
+                ),
+                1,
+            )
+            .expect("insert directional");
+        lights
+            .scene
+            .insert(
+                LightRecord::new(
+                    LightClassification {
+                        class: LightClass::Point,
+                        mobility: LightMobility::Dynamic,
+                    },
+                    LightEmission::new([4.0, 8.0, 16.0], 1.0, LightUnit::Candela),
+                    LightGeometry::Point {
+                        position: [0.0, 2.0, 0.0],
+                        radius: 0.0,
+                        range: 0.0,
+                    },
+                ),
+                1,
+            )
+            .expect("insert point");
     }
 
     // Pre-fill the offscreen target with opaque white, then prove the upload
