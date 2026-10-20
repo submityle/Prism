@@ -11,6 +11,11 @@ use prism_world_residency::{SdfQueryConsumer, SparseSdfBrickGrid, SparseSdfQuery
 
 mod sampling;
 pub use sampling::SdfDistanceGradient;
+mod rebake;
+pub use rebake::{
+    SdfRebakeError, SdfRebakeLimits, SdfRebakePoint, SdfRebakeRegion, SdfRebakeReport,
+    SdfRebakeResource,
+};
 
 /// Logical bytes represented by the fixed SDF snapshot header.
 pub const WORLD_SDF_HEADER_BYTES: usize = 48;
@@ -297,6 +302,13 @@ impl SdfPhysicsSnapshot {
     #[must_use]
     pub const fn source(&self) -> &WorldSdfSnapshot {
         &self.source
+    }
+
+    /// Transfers the source snapshot without copying brick samples, for example
+    /// after eviction to encode a rebuilt derived cache or admit another consumer.
+    #[must_use]
+    pub fn into_source(self) -> WorldSdfSnapshot {
+        self.source
     }
 
     /// Queries quantized distance at a world-space millimetre position.

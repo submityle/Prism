@@ -23,3 +23,12 @@ path = "text/unit/sdf_sampling.rs"
 name = "sdf_sampling"
 path = "text/integration/sdf_sampling_bench.rs"
 harness = false
+
+[[test]]
+name = "sdf_rebake"
+path = "text/unit/sdf_rebake.rs"
+
+[[bench]]
+name = "sdf_rebake"
+path = "text/integration/sdf_rebake_bench.rs"
+harness = false

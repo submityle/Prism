@@ -14,7 +14,8 @@ mod sdf;
 
 pub use sdf::{
     SdfBounds, SdfBridgeError, SdfDistanceGradient, SdfPhysicsBridgeBudget, SdfPhysicsSnapshot,
-    SdfQueryResult, WorldSdfPhysicsBridge, WorldSdfSnapshot, WorldSdfTransform,
+    SdfQueryResult, SdfRebakeError, SdfRebakeLimits, SdfRebakePoint, SdfRebakeRegion,
+    SdfRebakeReport, SdfRebakeResource, WorldSdfPhysicsBridge, WorldSdfSnapshot, WorldSdfTransform,
     WORLD_SDF_BRICK_METADATA_BYTES, WORLD_SDF_HEADER_BYTES, WORLD_SDF_SAMPLE_BYTES,
 };
 

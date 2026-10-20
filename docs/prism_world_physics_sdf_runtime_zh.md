@@ -69,6 +69,31 @@ Record 的 0/4/8 偏移分别为 i32 X/Y/Z，12 为 u8 mip，13–15 必须为�
 | 健壮性 | 缺角点失败封闭、检查坐标和尺度溢出，宿主失败保留旧发布 |
 | 安全 | 无 unsafe，借用不可变快照，角点索引由已验证 brick 尺寸界定 |
 
+## 局部编辑原子重烘（设计 §17.3，SHIPPED）
+
+`WorldSdfPhysicsBridge::rebake_region` 接收某个 mip 上的 inclusive 体素编辑区、严格更新的 source revision、独立工作预算和有符号 i16 场求值闭包。它按每级覆盖矩形一次性推导受影响 brick 与所有更粗父 mip，不重复枚举父键，不枚举或复制整张驻留 grid。调用者须把对象影响半径与采样 halo 纳入编辑区，并确保闭包读取同一版本的完整合成场；该入口不规定对象 CSG、几何作者规则或滤波方式。
+
+重烘先检查所有 mip 的坐标、物理间距及 i128 世界位置端点，再检查工作 brick/sample/scratch 限额、更新后的完整驻留 brick/sample/逻辑字节预算，最后为全部替换 brick fallible 分配样本缓冲。所有这些步骤成功后才调用求值器。求值按 mip 递增、brick z/y/x、brick 内 z/y/x（x-fastest）执行，每个目标 brick 只采样一次。`SdfRebakePoint` 提供完整 brick key、i64 体素位置、精确 i128 世界毫米位置、该 mip 间距与统一距离量化尺度，避免巨大原点或负坐标的 float 舍入。
+
+全部采样成功后才替换/插入目标 brick，并同时更新 revision 与逻辑字节；旧样本在求值期间仍完整保留。未受影响 brick 的样本 allocation 保持原址。闭包返回错误或 unwind 均保留旧快照，可用同一 revision 重试；不回滚求值器自身的外部副作用。现有 grid 已有 dirty invalidation 时拒绝操作，避免误清与本次编辑无关的待处理失效。commit 不调用求值器，现有 BTreeMap 节点分配仍使用 infallible allocator，不承诺从进程级 OOM 恢复。
+
+设受影响总 brick 数为 K、总样本数为 S、驻留 brick 数为 B、mip 数为 M：预检为 `O(M + K log B)`，重烘/提交为 `O(S + K log(B + K))`；scratch 为 `K × size_of::<Replacement>() + 2S` 逻辑字节，尺寸随目标 ABI 而定。它不包含驻留数据、树节点、allocator 元数据或 source 自有内存；不是 RSS/VRAM 上限。每个受影响 brick 都完整重新求值，尚未做 brick 内稀疏样本编辑或已知空场压缩。
+
+重烘成功后可从 `evict()` 的 `Some` 结果取得 snapshot，再调用 `into_source()` 转移所有权至 `SdfCellSnapshot`，无需复制样本，再交给 PSDC codec 和既有 cell host 的聚合预算/宿主提交。真实文件集成测试覆盖本地求值失败后重试、编码、archive offset/分块读取、下游拒绝后旧查询与 usage 保留，以及成功重载后的新梯度/距离。该同步 worker API 本身不调度任务、不更新 cell host 内部聚合统计，也不执行 GPU 上传；相机 clipmap 滚动、对象自动脏传播和多消费者作业调度仍需独立运行时接线。
+
+### 局部重烘多维质量评估
+
+| 维度 | 当前实现与取舍 |
+|---|---|
+| 性能 | 成本随受影响 brick/sample 增长，无全 grid clone/扫描；worker 阶段有受预算限制的分配，查询仍保持零分配 |
+| 效果 | 父 mip 重新采样完整场，精确整数位置与固定物理单位；不推断未提供的几何影响范围或滤波策略 |
+| 易用性 | 单个闭包与报告，错误保留失败 brick/voxel 和 source error；rustdoc 示例可执行 |
+| 易维护性 | 独立 rebake 模块，复用原稀疏 grid 和 physics 快照，不修改 residency/terrain/solver |
+| 易拓展性 | 场求值由调用者提供，可复用不同对象合成与存储；不绑定项目物理或 gameplay 规则 |
+| 易迭代性 | 增量公开 API，原 publish/query/codec 格式保持兼容，源快照可零样本复制转移 |
+| 健壮性 | 独立 voxel/parent oracle、每个采样序号失败注入、panic、精确预算与溢出检查；未做 allocator OOM 注入 |
+| 安全 | 无 unsafe，独占借用保证提交期间无并发读写，失败不破坏已发布数据；外部求值副作用由调用者负责 |
+
 ## 验证边界
 
 应至少运行：
@@ -77,9 +102,12 @@ Record 的 0/4/8 偏移分别为 i32 X/Y/Z，12 为 u8 mip，13–15 必须为�
 cargo test -p prism_world_physics_bridge --lib --offline
 cargo test -p prism_world_physics_cell_runtime --lib --offline
 cargo test -p prism_world_physics_bridge --test sdf_sampling --offline
+cargo test -p prism_world_physics_bridge --test sdf_rebake --offline
+cargo test -p prism_world_physics_bridge --doc --offline
 cargo test -p prism_world_physics_cell_runtime --test sdf_sampling_lifecycle --offline
 cargo test -p prism_world_physics_cell_runtime --test sdf_cell_codec --test sdf_cell_file_runtime --offline
 cargo bench -p prism_world_physics_bridge --bench sdf_sampling --offline
+cargo bench -p prism_world_physics_bridge --bench sdf_rebake --offline
 cargo bench -p prism_world_physics_cell_runtime --bench sdf_cell_codec --offline
 ```
 
@@ -114,3 +142,21 @@ Apple M2、默认优化 bench profile、debug=0、incremental=0、offline、单�
 | 1024 / 524288 | 1065092 / 1065008 | 2910917 / 3265916 / 3979833 | 2849292 / 3216333 / 4171625 |
 
 这只衡量 CPU 派生缓存编解码成本，不包含 coordinator/宿主 staging 的其他开销，不是冷盘、RSS 峰值、GPU 或产品帧预算验收。重载必须为输入 frame、旧/候选快照及索引同时驻留预留实际内存。
+
+### 2026-10-21 局部重烘验证与基准
+
+独立 target `/private/tmp/prism-world-sdf-rebake-20261021.bHIZVI`，offline、单编译任务、dev/test debug=0、incremental=0；bridge/cell 联合 `--lib --tests` 共 71 项通过（bridge lib 11、连续采样 10、重烘 13、cell lib 22、codec 11、文件集成 3、生命周期 1），0 失败、0 忽略。独立 voxel/parent oracle 覆盖负坐标、非零起始 mip 与非二次幂 brick；专项包含全部采样序号失败注入、unwind 恢复、六项工作/驻留预算、edge=1/32、revision=u64::MAX、完整 brick 坐标溢出预检。复审发现并修复了中间乘积溢出但原点抵消后最终 i128 世界位置合法的误拒绝，新增 i128::MAX/MIN 端点回归。
+
+`cargo test -j 1 -p prism_world_physics_bridge --doc --offline` 的 1 项可执行示例通过；`cargo rustdoc -j 1 -p prism_world_physics_bridge --lib --offline -- -D warnings` 通过。严格 Clippy 复验仍被前节记录的 4 处 bridge 既有告警阻断；新增测试的两处 `needless_range_loop` 已修复。bridge lib/rebake test/bench 及 cell lib/真实文件集成，以 `-D warnings -A clippy::collapsible_if -A clippy::std_instead_of_alloc` 定向诊断通过；这不是严格门禁通过，未增加源码 allow。改动 Rust 的定向 rustfmt 与 diff whitespace 检查通过。
+
+Apple M2、`aarch64-apple-darwin`、rustc 1.96.1、默认优化 bench profile、bench debug=0、incremental=0。每例先逐样本验证完整目标数据，再执行 8 次预热与 128 次测量，nearest-rank 分位数；计时包括 API 的预检、staging 分配、确定性整数场求值、替换/提交及旧样本与 staging 销毁，排除初始建图、校验、输出及最终快照销毁。起始 edge=8，3 个 mip；初次更新已分配所需父 brick，计时期间都是 replacement（inserted=0）。
+
+| 起始 mip0 驻留 brick | 编辑覆盖 | 重烘 brick / 样本 | Scratch / 最终快照逻辑字节 | P50 / P95 / P99（ns） |
+|---:|---|---:|---:|---:|
+| 64 | 单格及父级 | 3 / 1536 | 3192 / 68688 | 31208 / 35541 / 35625 |
+| 4096 | 单格及父级 | 3 / 1536 | 3192 / 4261968 | 31208 / 32500 / 35625 |
+| 32768 | 单格及父级 | 3 / 1536 | 3192 / 34080848 | 31208 / 33000 / 35834 |
+| 64 | 完整 X 行及父级 | 112 / 57344 | 119168 / 116528 | 1163125 / 1175750 / 1182541 |
+| 4096 | 完整 X 行及父级 | 7168 / 3670016 | 7626752 / 7454768 | 75524291 / 79003667 / 80703875 |
+
+本负载下固定局部编辑的 P50 均约 31.2 µs；大范围重烘随求值数量增长，最大案例约 75.5 ms，不能放入实时帧热路径。结果包含刻意便宜的量化场回调，不代表真实几何求值、job 调度、GPU、RSS/VRAM、多硬件或产品帧时。实现依赖树查找仍有对数驻留规模项，不能从这三个测量点声称严格 O(1)。

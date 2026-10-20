@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use prism_world_physics_bridge::{
-    SdfDistanceGradient, SdfPhysicsBridgeBudget, SdfQueryResult, WorldSdfSnapshot,
-    WorldSdfTransform,
+    SdfDistanceGradient, SdfPhysicsBridgeBudget, SdfQueryResult, SdfRebakeLimits, SdfRebakeRegion,
+    WorldSdfPhysicsBridge, WorldSdfSnapshot, WorldSdfTransform,
 };
 use prism_world_physics_cell_runtime::{
     SdfCellCodec, SdfCellCodecLimits, SdfCellSnapshot, SdfPhysicsCellHost, SdfResidencyBudget,
@@ -158,6 +158,67 @@ fn assert_value(host: &SdfPhysicsCellHost<'_, Host, SdfCellCodec>, distance: f64
             gradient: [0.1, 0.2, 0.4]
         }))
     );
+}
+
+/// A local rebuilt source survives canonical encoding, real file IO and host reload.
+#[test]
+fn locally_rebaked_cache_reloads_into_cell_queries() {
+    let reject = Arc::new(AtomicBool::new(false));
+    let loads = Arc::new(AtomicU64::new(0));
+    let mut downstream = Host {
+        reject: Arc::clone(&reject),
+        loads: Arc::clone(&loads),
+    };
+    let budget = SdfPhysicsBridgeBudget::new(1, 8, 80).unwrap();
+    let mut host = SdfPhysicsCellHost::new(
+        &mut downstream,
+        codec(),
+        budget,
+        SdfResidencyBudget::new(1, 1, 8, 80),
+    );
+    let initial = source(1, 0);
+    let payload = codec().encode(&initial).unwrap();
+    let old = manifest(1, &payload);
+    load_file(&mut host, old, &payload, None);
+    assert_value(&host, 42.5);
+    let usage = host.resident_usage();
+
+    let mut builder = WorldSdfPhysicsBridge::new(budget);
+    builder.publish(initial.snapshot().clone()).unwrap();
+    let edit = SdfRebakeRegion {
+        min_voxel: [1; 3],
+        max_voxel: [1; 3],
+        mip: 0,
+    };
+    let limits = SdfRebakeLimits {
+        max_bricks: 1,
+        max_samples: 8,
+        max_scratch_bytes: 1024,
+    };
+    assert!(builder
+        .rebake_region(edit, 2, limits, |_| Err::<i16, _>("source unavailable"))
+        .is_err());
+    assert_eq!(builder.current().unwrap().revision(), 1);
+    builder
+        .rebake_region(edit, 2, limits, |point| {
+            let [x, y, z] = point.voxel;
+            Ok::<_, &'static str>(i16::try_from(x + 2 * y + 4 * z + 7).unwrap())
+        })
+        .unwrap();
+    let rebuilt = SdfCellSnapshot::new(old.sector, builder.evict().unwrap().into_source());
+    let payload = codec().encode(&rebuilt).unwrap();
+    let new = manifest(2, &payload);
+
+    reject.store(true, Ordering::Relaxed);
+    load_file(&mut host, new, &payload, Some(old));
+    assert_value(&host, 42.5);
+    assert_eq!(host.resident_usage(), usage);
+    reject.store(false, Ordering::Relaxed);
+    load_file(&mut host, new, &payload, Some(old));
+    assert_value(&host, 112.5);
+    assert_eq!(host.resident(new.sector).unwrap().revision(), 2);
+    assert_eq!(host.resident_usage(), usage);
+    assert!(builder.current().is_none());
 }
 
 /// CRC, stale revision and downstream rejection preserve the last committed field.
