@@ -629,12 +629,14 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 | CPU emitter runtime | `pkg/prism_render_architecture/src/particle/runtime.rs` | 已实现固定容量池、rate/burst、确定性采样、积分/力场、寿命回收及溢出计数；本轮无法完成 crate 测试编译，不能据此确认当前测试状态 |
 | `.ember` 二进制资产 | `pkg/prism_render_architecture/src/particle/authoring.rs` | 已实现版本化 little-endian codec、输入校验、迁移模型与 round-trip/损坏输入测试；RON API 已移除 |
 | GPU 仿真与间接绘制切片 | `pkg/prism_render_gpudriven/src/particle.rs` 与 `shaders/particle*.wgsl` | Prism RHI/RenderGraph 上的 pool update、spawn、活跃索引、indirect args 与 quad 绘制；构造前校验设备缓冲/纹理/dispatch 限制，上传校验数值与记录；仅代表最小竖切片，不代表全功能 Ember |
-| Graph → WGSL 编译器基础 | `pkg/prism_render_architecture/src/particle/compiler.rs` | 校验 GraphIr、稳定拓扑序、资源 ABI 冲突及生成 WGSL，并生成 stage iteration dispatch 计划；显式模块片段可使用按需生成的归一化年龄曲线 LUT 采样函数。内置 kernel 函数实现、DataInterface 代码生成、属性语义 lowering 与 pipeline-cache 生产接线尚未完成，因此不能标记 M2 完成 |
+| Graph → WGSL 编译器基础 | `pkg/prism_render_architecture/src/particle/compiler.rs` | 校验 GraphIr、稳定拓扑序、模块属性需求与资源 ABI，生成 WGSL、活跃 SoA 布局计划、由运行时计数缓冲控制的 stage dispatch 与迭代计划及曲线 LUT 采样函数；属性缓冲 WGSL 读写 lowering、内置 kernel 函数体、DataInterface 可执行代码生成与 pipeline-cache/RenderGraph 生产接线尚未完成，因此不能标记 M2 完成 |
 | 合同/算法模块 | `pkg/prism_render_architecture/src/particle/` | 包含池、发射、模拟、事件、排序/剔除、着色/OIT 等 CPU 合同；纯合同或单算法模块不等于 GPU 生产接线 |
 | ECS/App 生命周期与完整渲染集成 | Prism 粒子运行时/渲染 crate | 尚未形成完整端到端接线；需以实际代码和集成验收逐项完成，不能由本设计文档推定已完成 |
 | 图编译、完整渲染器矩阵、高级求解器及场景服务集成 | 对应 compiler/render/solver 模块 | 本轮 GPU 竖切片未覆盖；当前无可声称完成或已测的实现证据 |
 
 验证记录（2026-10-20）：`cargo test -p prism_render_gpudriven --lib particle` 的 5 项测试通过；其中 `gpu_particle_vertical_slice_matches_reference_and_draws_indirectly` 在 Apple M2/Metal 物理 GPU 上通过，验证 pool 更新、活跃索引、indirect 参数、CPU reference 对比及实际绘制。设备资源上限与 simulation 参数校验也有定向测试。该结果仅覆盖此竖切片。当前 `cargo test -p prism_render_architecture --lib particle::runtime` 未能编译：共享工作树中的 `prism_physics_core/src/world.rs` 存在缺失函数/方法及 `BodyHandle: Ord` 错误，因此本轮 CPU runtime 与 verification tests 尚未运行；这不是粒子代码的编译诊断。此前的 CPU 测试记录不替代当前验证。结构化帧预算断言只是设计约束，不是 GPU 毫秒测量。
+
+后续验证记录（2026-10-20）：本轮 `cargo check -p prism_render_architecture --lib` 未到达粒子 crate，因共享工作树中未提交的 `pkg/prism_material_pcm/src/builtin.rs` 在 `builtin_author_node` 使用 `binary_search_by_key` 时触发 Rust E0521 生命周期错误而失败。该依赖文件属于并行改动，本轮未修改；compiler/module 改动仅完成 `rustfmt` 与 `git diff --check`，需在依赖编译恢复后重跑 crate 检查和定向测试。不得将此失败归因于 Ember 编译器，也不得将静态检查视为测试通过。
 
 ---
 
@@ -644,7 +646,7 @@ prism_particle_tools  (可选) 图编辑器 / 预览(含着色预览) / 性能 H
 |---|---|---|
 | M0 骨架 | crate 布局、Asset/Component、CPU 简单求解器、Sprite Unlit 渲染 | CPU reference runtime 已有；ECS/App 与完整 sprite demo 未通过验收 |
 | M1 GPU 核心 | SoA 缓冲池、free-list、spawn/update compute、indirect draw | 已有小型 RHI pool/simulate/spawn/indirect draw slice；百万粒子无回读目标未验证 |
-| M2 图编译 | 图→IR→WESL codegen、按需分配、曲线 LUT | 已有 GraphIr→WGSL 编译器基础、host dispatch 计划及曲线 LUT WGSL 采样 helper；内置 kernel 实现、DataInterface 代码生成、完整属性 lowering/接线及当前 checkout 测试验收未完成 |
+| M2 图编译 | 图→IR→WESL codegen、按需分配、曲线 LUT | 已有 GraphIr→WGSL 编译器基础、活跃 SoA 布局计划、模块属性需求校验、运行时 dispatch-count ABI/host 计划及曲线 LUT WGSL 采样 helper；属性缓冲 shader lowering、内置 kernel 函数体、DataInterface 可执行代码生成、pipeline-cache/RenderGraph 接线及当前 checkout 测试验收未完成 |
 | M3 力/碰撞 | 力场库、curl noise、depth/SDF 碰撞、事件系统 | 烟火/瀑布/碎片 demo |
 | M4 渲染器 | Mesh/Ribbon/Beam/Light、GPU 排序、软粒子、motion vector | 完整特效场景 + TAA 无拖影 |
 | M5 PBR 着色 | 共享 PBR closure 接入、聚类受光、软粒子折射、共享 OIT | 物理受光火星/水花 demo |

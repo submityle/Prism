@@ -903,7 +903,17 @@ impl EmberModule for BuiltinModule {
             let _ = ctx.declare_binding(decl);
         }
         let mut call = String::from(meta.kernel);
-        call.push_str("(particle_index);");
+        let index = match meta.stage.default_domain() {
+            IterationDomain::PerParticle => "particle_index",
+            IterationDomain::PerNeighborCell
+            | IterationDomain::PerGridVoxel
+            | IterationDomain::PerConstraint
+            | IterationDomain::PerEvent
+            | IterationDomain::Custom(_) => "invocation_index",
+        };
+        call.push('(');
+        call.push_str(index);
+        call.push_str(");");
         ctx.push_fragment(call);
     }
 }
@@ -1443,6 +1453,26 @@ mod tests {
         assert_eq!(ctx.fragment_count(), 1);
         assert_eq!(ctx.binding_count(), 0);
         assert_eq!(ctx.fragments()[0], "set_position(particle_index);");
+    }
+
+    #[test]
+    fn constraint_and_event_modules_use_the_invocation_index() {
+        for module in [
+            BuiltinModule::DistanceConstraint,
+            BuiltinModule::BendConstraint,
+            BuiltinModule::VolumeConstraint,
+            BuiltinModule::EmitOnDeath,
+            BuiltinModule::EmitOnCollision,
+            BuiltinModule::EmitOnSpawn,
+            BuiltinModule::EmitOnCondition,
+        ] {
+            let mut context = CodegenCtx::new();
+            module.emit_wesl(&mut context);
+            assert_eq!(
+                context.fragments()[0],
+                alloc::format!("{}(invocation_index);", module.kernel_name())
+            );
+        }
     }
 
     #[test]
